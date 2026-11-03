@@ -244,6 +244,15 @@ class CompareTests(unittest.TestCase):
         self.assertEqual((partial["verdict"], partial["counts"]["no_verdict"], partial["counts"]["skipped"]),
                          ("pass", 0, 2))
 
+    def test_a_title_the_old_run_never_judged_is_not_compared_even_when_missing_now(self) -> None:
+        old, new = self.snapshots({"a.iso": built(0, "HEADLESS_UNAVAILABLE"), "b.iso": built(400),
+                                   "c.iso": {"outcome": "BUILT", "failure_class": None}},
+                                  {"b.iso": built(400), "c.iso": {"outcome": "PENDING"}})
+        result = library_regress.compare(old, new)
+        self.assertEqual([row["source_key"] for row in result["not_compared"]], ["a.iso", "c.iso"])
+        self.assertEqual(result["no_verdict"], [])
+        self.assertEqual(result["verdict"], "pass")
+
     def test_a_title_the_old_run_could_not_judge_is_listed_and_does_not_fail(self) -> None:
         old, new = self.snapshots({"a.iso": built(0, "HEADLESS_UNAVAILABLE"), "b.iso": built(400)},
                                   {"a.iso": built(400), "b.iso": built(400)})
@@ -410,6 +419,31 @@ class SlotTests(unittest.TestCase):
         self.assertEqual(lock, self.slots / "mine.lock")
         self.assertIn("library-regress pid=", lock.read_text(encoding="utf-8"))  # type: ignore[union-attr]
 
+    def test_our_lock_left_by_a_process_that_is_gone_is_reclaimed(self) -> None:
+        stale = self.slots / "mine.lock"
+        stale.write_text("library-regress pid=424242 start=2026-11-03T00:00:00Z\n", encoding="utf-8")
+        (self.slots / "other.lock").write_text("library-regress pid=424243\n", encoding="utf-8")
+        alive: list[int] = []
+
+        def gone(pid: int) -> bool:
+            alive.append(pid)
+            return False
+
+        lock = library_regress.acquire_slot(self.slots, "mine.lock", 3, pid_alive=gone, log=lambda _text: None,
+                                            max_wait_seconds=0, sleep=lambda _seconds: None)
+        self.assertEqual(lock, stale)
+        self.assertIn(f"pid={library_regress.os.getpid()} ", stale.read_text(encoding="utf-8"))
+        self.assertEqual(alive, [424242])  # only our own lock name is ever checked
+        self.assertTrue((self.slots / "other.lock").exists())
+
+    def test_our_lock_held_by_a_live_process_is_kept(self) -> None:
+        held = self.slots / "mine.lock"
+        held.write_text("library-regress pid=424242\n", encoding="utf-8")
+        lock = library_regress.acquire_slot(self.slots, "mine.lock", 3, pid_alive=lambda _pid: True,
+                                            log=lambda _text: None, max_wait_seconds=0, sleep=lambda _seconds: None)
+        self.assertIsNone(lock)
+        self.assertEqual(held.read_text(encoding="utf-8"), "library-regress pid=424242\n")
+
     def test_a_quiet_lock_holds_the_run(self) -> None:
         (self.slots / "recomp-perf.lock").write_text("x", encoding="utf-8")
         held: list[float] = []
@@ -480,6 +514,15 @@ class FastRunTests(unittest.TestCase):
         self.assertIn("down 2", out.getvalue())
         snapshot = json.loads((self.store / "snapshots" / state["last_snapshot"]).read_text(encoding="utf-8"))
         self.assertEqual(snapshot["mode"], "fast")
+
+    def test_a_fast_run_with_no_verdict_does_not_advance_the_rotation(self) -> None:
+        _calls, run = self.fake_library_build(frames=400, drop=1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = library_regress.run_fast(self.args(), run=run, log=lambda _text: None)
+        self.assertEqual(code, library_regress.EXIT_NO_VERDICT)
+        state_path = self.store / "fast-state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {"cursor": 0}
+        self.assertEqual(state["cursor"], 0)
 
     def test_a_selected_title_the_fast_run_did_not_end_is_no_verdict(self) -> None:
         for options in ({"drop": 1}, {"pending": 1}):

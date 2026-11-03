@@ -363,6 +363,11 @@ def compare(old: dict[str, Any], new: dict[str, Any], *, keys: Iterable[str] | N
                                          "title": (after or {}).get("title"), "old": None,
                                          "new": after, "reason": "not in the old run"})
             continue
+        if before["end"] in NO_VERDICT_ENDS:
+            row = _row(key, before, after, untested_titles.get(key))
+            row["reason"] = f"old run: {before.get('stop') or before['end']}"
+            rows["not_compared"].append(row)
+            continue
         if after is None:
             if partial:
                 skipped += 1
@@ -376,10 +381,6 @@ def compare(old: dict[str, Any], new: dict[str, Any], *, keys: Iterable[str] | N
         if after["end"] in NO_VERDICT_ENDS:
             row["reason"] = after.get("stop") or after["end"]
             rows["no_verdict"].append(row)
-            continue
-        if before["end"] in NO_VERDICT_ENDS:
-            row["reason"] = f"old run: {before.get('stop') or before['end']}"
-            rows["not_compared"].append(row)
             continue
         old_score, new_score = _score(before, ceiling, like), _score(after, ceiling, like)
         if new_score < old_score:
@@ -542,17 +543,55 @@ def select_fast(baseline: dict[str, Any], *, budget_seconds: int, jobs: int,
             "estimated_seconds": round(max(lanes))}
 
 
+def _pid_alive(pid: int) -> bool:
+    """Whether a process exists, without a signal: os.kill(pid, 0) on Windows ends the process."""
+    if pid <= 0:
+        return False
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    import ctypes
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return bool(kernel32.GetLastError() == 5)  # access denied: it exists
+    code = ctypes.c_ulong()
+    ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+    kernel32.CloseHandle(handle)
+    return bool(ok) and code.value == 259  # STILL_ACTIVE
+
+
+def _clear_stale_lock(lock: Path, pid_alive: Callable[[int], bool], log: Callable[[str], None]) -> None:
+    """Remove our own lock file when the process named in it is gone (a killed fast run)."""
+    try:
+        text = lock.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    match = re.search(r"\bpid=(\d+)", text)
+    if match and not pid_alive(int(match.group(1))):
+        lock.unlink(missing_ok=True)
+        log(f"reclaimed {lock.name}: process {match.group(1)} is gone")
+
+
 def _lock_count(slot_dir: Path) -> int:
     return len(list(slot_dir.glob("*.lock")))
 
 
 def acquire_slot(slot_dir: Path, name: str, max_slots: int, *, quiet_globs: Iterable[str] = (),
                  sleep: Callable[[float], None] = time.sleep, log: Callable[[str], None] = print,
-                 max_wait_seconds: float | None = None, poll_seconds: float = 30.0) -> Path | None:
+                 max_wait_seconds: float | None = None, poll_seconds: float = 30.0,
+                 pid_alive: Callable[[int], bool] = _pid_alive) -> Path | None:
     """Hold one title slot: a lock file of our own, created only while fewer than ``max_slots``
-    lock files exist and none matches ``quiet_globs`` (a timing run that wants the machine)."""
+    lock files exist and none matches ``quiet_globs`` (a timing run that wants the machine).
+    Our own lock left by a process that is gone is reclaimed first; other jobs' locks never are."""
     slot_dir.mkdir(parents=True, exist_ok=True)
     lock = slot_dir / name
+    _clear_stale_lock(lock, pid_alive, log)
     waited = 0.0
     told = False
     while max_wait_seconds is None or waited <= max_wait_seconds:
@@ -635,8 +674,10 @@ def run_fast(args: argparse.Namespace, *,
         result["commit_ranges"] = commit_ranges(result, args.repo, run=run)
     _write_json(run_dir / "comparison.json", result)
     sys.stdout.write(render_comparison(result))
-    state.update(cursor=choice["next_cursor"], runs=int(state.get("runs", 0)) + 1, last_run=run_id,
-                 last_snapshot=path.name)
+    if result["verdict"] != "no_verdict":
+        state["cursor"] = choice["next_cursor"]  # a run without a verdict tries the same titles again
+    state.update(runs=int(state.get("runs", 0)) + 1, last_run=run_id, last_snapshot=path.name,
+                 last_verdict=result["verdict"])
     _write_json(state_path, state)
     if not args.keep_scratch:
         shutil.rmtree(scratch, ignore_errors=True)
