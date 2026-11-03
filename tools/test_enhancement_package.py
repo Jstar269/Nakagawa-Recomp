@@ -48,6 +48,7 @@ from enhancement_package import (
     VALID_CATEGORIES,
     EnhancementPackageError,
     _gpr_written,
+    _validate_data_files,
     _validate_site_extras,
     compute_stock_words_digest,
     draft_package_declaration,
@@ -1408,6 +1409,77 @@ class TestEnhancementDataTransforms(unittest.TestCase):
             self.assertIn(why, str(ctx.exception))
         with self.assertRaisesRegex(EnhancementPackageError, "does not match its sha256"):
             transform_data_file(self._csv_entry(csv, [{"column": "A", "transform": "count_x2"}]), csv + b"x")
+
+    def test_csv_cells_by_column_index(self) -> None:
+        # A Shift-JIS header no ASCII name can match; its bytes never include ',' or '\n'.
+        csv = b"Key,\x92\x6c,\x94\xf5\x8d\x6c\r\nx,20,a\r\ny,0.05,b\r\n"
+        entry = self._csv_entry(csv, [{"column_index": 1, "transform": "count_x2", "rows": [0]},
+                                      {"column_index": 1, "transform": "step_x0.5", "rows": [1]}])
+        self.assertEqual(transform_data_file(entry, csv),
+                         b"Key,\x92\x6c,\x94\xf5\x8d\x6c\r\nx,40,a\r\ny,0.025,b\r\n")
+        entry["cells"] = [{"column_index": 1, "transform": "count_x2"},
+                          {"column_index": 1, "transform": "step_x0.5", "rows": [1]}]
+        with self.assertRaisesRegex(EnhancementPackageError, "line 3, column 1 is rescaled twice"):
+            transform_data_file(entry, csv)
+        entry["cells"] = [{"column_index": 2, "transform": "count_x2", "rows": [0]}]
+        with self.assertRaisesRegex(EnhancementPackageError, "line 2, column 2: .*not a plain decimal"):
+            transform_data_file(entry, csv)
+        entry["cells"] = [{"column_index": 3, "transform": "count_x2"}]
+        with self.assertRaisesRegex(EnhancementPackageError, "has no column 3"):
+            transform_data_file(entry, csv)
+        entry["cells"] = [{"column": "Key", "transform": "count_x2"},
+                          {"column_index": 0, "transform": "count_x2"}]
+        with self.assertRaisesRegex(EnhancementPackageError, "rescaled twice"):
+            transform_data_file(entry, csv)
+
+    def test_csv_cell_type(self) -> None:
+        # The title reads every value in a column by its own type: an f32 written
+        # without a decimal point halves exactly, which an integer cannot.
+        csv = b"Key,V\nx,5\ny,0.5\nz,2000000000\n"
+        cases: list[tuple[dict[str, Any], bytes | str]] = [
+            ({"column": "V", "transform": "step_x0.5", "rows": [0]}, "integer cell 5 has no exact rescale"),
+            ({"column": "V", "type": "f32", "transform": "step_x0.5", "rows": [0]}, b"x,2.5"),
+            ({"column": "V", "type": "f32", "transform": "count_x2", "rows": [0]}, b"x,10.0"),
+            ({"column": "V", "type": "s32", "transform": "count_x2", "rows": [0]}, b"x,10"),
+            ({"column": "V", "type": "s32", "transform": "count_x2", "rows": [1]}, "s32 cell b'0.5' has a fractional"),
+            ({"column": "V", "type": "s32", "transform": "count_x2", "rows": [2]}, "out of range"),
+            ({"column": "V", "type": "u32", "transform": "count_x2", "rows": [2]}, b"z,4000000000"),
+        ]
+        for cell, want in cases:
+            with self.subTest(cell=cell):
+                if isinstance(want, bytes):
+                    self.assertIn(want, transform_data_file(self._csv_entry(csv, [cell]), csv).split(b"\n"))
+                else:
+                    with self.assertRaisesRegex(EnhancementPackageError, want):
+                        transform_data_file(self._csv_entry(csv, [cell]), csv)
+        with self.assertRaisesRegex(EnhancementPackageError, "Unknown data type 'f64'"):
+            _validate_data_files([self._csv_entry(csv, [{"column": "V", "type": "f64", "transform": "count_x2"}])])
+
+        pkg = {
+            "schema_version": 1, "id": "synth.data", "display_name": "Synthetic data", "version": "1.0.0",
+            "category": "timing_frame_presentation", "target_title_id": "synthetic-allegrex-v1",
+            "game_version": "1.00", "executable_sha256": "a" * 64, "capabilities": ["count_x2"],
+            "rng_policy": {"mode": "subtick_30hz", "reason": "Every roll stays on alternate updates."},
+            "sites": [{"id": "S1", "function": "f", "insn_offset": 0,
+                       "stock_digest": "b" * 64, "transform": "count_x2"}],
+            "data_files": [self._csv_entry(csv, [{"column_index": 1, "transform": "count_x2"}])],
+        }
+        validate_package(pkg)
+        for cell, why in (
+            ({"transform": "count_x2"}, "column or column_index"),
+            ({"column": "A", "column_index": 1, "transform": "count_x2"}, "column or column_index"),
+            ({"column_index": 256, "transform": "count_x2"}, r"must be an integer in \[0, 255\]"),
+            ({"column_index": True, "transform": "count_x2"}, "must be an integer"),
+            ({"column_index": 1, "transform": "step_x0.5", "rows": [0]}, "rescaled twice in the same row"),
+        ):
+            bad = copy.deepcopy(pkg)
+            bad["data_files"][0]["cells"].append(cell)
+            with self.subTest(cell=cell), self.assertRaisesRegex(EnhancementPackageError, why):
+                validate_package(bad)
+        disjoint = copy.deepcopy(pkg)
+        disjoint["data_files"][0]["cells"] = [{"column_index": 1, "transform": "count_x2", "rows": [0]},
+                                              {"column_index": 1, "transform": "step_x0.5", "rows": [1]}]
+        validate_package(disjoint)
 
     def test_find_data_file_matches_path_without_case_and_digest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
