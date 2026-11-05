@@ -86,6 +86,7 @@ EBOOT.BIN.dec*
 !/third_party/xbrz/
 !/third_party/fidelityfx_sdk/
 !/third_party/rcheevos/
+!/third_party/anime4k/
 
 # Runtime state, logs, captures, and reports
 /logs/

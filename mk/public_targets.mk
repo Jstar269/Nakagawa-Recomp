@@ -153,6 +153,7 @@ PUBLIC_TARGETS := \
 	fsr3-fg-pass-mutants \
 	ace-smooth-selftest \
 	fsr1-selftest \
+	anime4k-selftest \
 	ace-ui-selftest \
 	motion-match-selftest \
 	osk-overlay-paint-selftest \
@@ -350,6 +351,7 @@ HELP_DESCRIPTION_fsr3-fg-pass-selftest := run FSR 3 frame generation's passes on
 HELP_DESCRIPTION_fsr3-fg-pass-mutants := run the FSR 3 frame generation pass mutation campaign on a Vulkan device (each defect must fail its cell)
 HELP_DESCRIPTION_ace-smooth-selftest := run Ace Mode's in-between frames selftest on a headless Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_fsr1-selftest := run the FSR 1 presentation upscaler selftest on a headless Vulkan device (SKIPs without one)
+HELP_DESCRIPTION_anime4k-selftest := run the Anime4K movie upscaler selftest on a headless Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_ace-ui-selftest := run Ace Mode's in-game UI selftest (layout, then a headless Vulkan render; SKIPs the GPU leg without Vulkan)
 HELP_DESCRIPTION_motion-match-selftest := run the draw matcher's selftest for render-state motion (synthetic PRIM lists; pure C)
 HELP_DESCRIPTION_osk-overlay-paint-selftest := run the in-window keyboard painter's exact-pixel selftest

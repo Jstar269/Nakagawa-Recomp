@@ -164,6 +164,7 @@ RT_SRCS    := src/rt/recomp.c \
               src/rt/gpu_sdl3vk/ace_smooth.c \
               src/rt/gpu_sdl3vk/ace_hud.c \
               src/rt/gpu_sdl3vk/fsr1_pass.c \
+              src/rt/gpu_sdl3vk/anime4k_pass.c \
               src/core/nk_shared_helpers.c \
               src/core/nk_input_profile.c \
               src/core/nk_font.c \
