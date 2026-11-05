@@ -839,6 +839,17 @@ is then not tried again. The launcher turns it off for an authentic session, and
 is stamped as enhanced (`ACE_MODE: present upscale fsr1`), which `boot_gate.py` reads. The picture
 gate and the library sweep set it `off` for their own runs.
 
+### Movie upscaler (`SR_MOVIE_UPSCALE`)
+
+`SR_MOVIE_UPSCALE` gives frames the CPU presents, which are decoded movies (and every frame when the
+software GE draws), their own upscaler: `fsr1` scales them with FSR 1, and `anime4k` first doubles
+them once or twice with Anime4K's CNN x2 (M) network, which suits the flat colours and dark lines
+of animated and pre-rendered movies, then takes them to the window's size with FSR 1. `off`, the
+default, leaves them to `SR_PRESENT_UPSCALE`. Like that key it is presentation only: the decoded
+movie, the guest's frame, guest VRAM and captures are unchanged (`display_smoke/generate.py
+anime4k`). A 480x272 movie frame costs 0.31 ms through two Anime4K stages and 0.74 ms with FSR 1 to
+3811x2160 on an RTX 3080 (`anime4k-selftest`).
+
 Runtime logs are written under `logs/`. Use `SR_DEBUG=0xFF` for all categories or consult [DEBUGGING.md](DEBUGGING.md) for targeted logging.
 On Windows, runtime output redirected to a file or pipe is buffered: a line reaches the log within 50 ms,
 and everything is written when the game exits, aborts or writes a crash report. A process killed from
