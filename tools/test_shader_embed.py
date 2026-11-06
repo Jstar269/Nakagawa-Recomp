@@ -255,6 +255,71 @@ int main(int argc, char **argv) {
 """
 
 
+# SPIR-V opcodes and operands the destination-read checks read (SPIR-V 1.0 with
+# SPV_EXT_fragment_shader_interlock).
+SPV_OP_CAPABILITY, SPV_OP_EXECUTION_MODE, SPV_OP_DECORATE, SPV_OP_VARIABLE = 17, 16, 71, 59
+SPV_OP_BEGIN_INTERLOCK, SPV_OP_END_INTERLOCK = 5364, 5365
+SPV_CAP_PIXEL_INTERLOCK = 5378
+SPV_MODE_EARLY_FRAGMENT_TESTS, SPV_MODE_PIXEL_ORDERED, SPV_MODE_PIXEL_UNORDERED = 9, 5366, 5367
+SPV_DECORATION_COHERENT = 23
+
+
+def spirv_instructions(embedded: str) -> list[tuple[int, tuple[int, ...]]]:
+    """(opcode, operands) of every instruction of a checked-in embedding."""
+    data = shader_embed.parse_embedding((shader_embed.GPU_DIR / embedded).read_text(encoding="ascii"))
+    words = struct.unpack(f"<{len(data) // 4}I", data)
+    out = []
+    i = 5                                    # after the header
+    while i < len(words):
+        count = words[i] >> 16
+        if count == 0:
+            raise ValueError(f"{embedded}: zero-length instruction at word {i}")
+        out.append((words[i] & 0xFFFF, tuple(words[i + 1:i + count])))
+        i += count
+    return out
+
+
+class DstReadVariantTests(unittest.TestCase):
+    """psp.frag's ordered destination-read variant (#2109) and the default module beside it."""
+
+    # The default module of the base the variant was added to: an #ifdef must not change it.
+    DEFAULT_FRAG_SPIRV_SHA256 = "4c4b160805e64c10fcd49f53a31d40523cd71606ea2ebd1070da26973c16dc6e"
+
+    def manifest_entry(self, embedded: str) -> dict:
+        manifest = shader_embed.load_manifest(shader_embed.MANIFEST)
+        entries = [e for e in manifest["shaders"] if e.get("embedded") == embedded]
+        self.assertEqual(len(entries), 1, embedded)
+        return entries[0]
+
+    def test_default_module_is_unchanged(self) -> None:
+        entry = self.manifest_entry("psp_frag.inc")
+        self.assertEqual(entry["spirv_sha256"], self.DEFAULT_FRAG_SPIRV_SHA256)
+        self.assertNotIn("defines", entry)
+        ops = {op for op, _ in spirv_instructions("psp_frag.inc")}
+        self.assertFalse(ops & {SPV_OP_BEGIN_INTERLOCK, SPV_OP_END_INTERLOCK})
+
+    def test_variant_is_ordered_early_and_coherent(self) -> None:
+        entry = self.manifest_entry("psp_frag_rmw.inc")
+        self.assertEqual(entry["source"], "shaders/psp.frag")
+        self.assertEqual(entry["defines"], ["SR_DST_INTERLOCK"])
+        ins = spirv_instructions("psp_frag_rmw.inc")
+        ops = [op for op, _ in ins]
+        self.assertEqual(ops.count(SPV_OP_BEGIN_INTERLOCK), 1)
+        self.assertEqual(ops.count(SPV_OP_END_INTERLOCK), 1)
+        self.assertLess(ops.index(SPV_OP_BEGIN_INTERLOCK), ops.index(SPV_OP_END_INTERLOCK))
+        self.assertIn((SPV_OP_CAPABILITY, (SPV_CAP_PIXEL_INTERLOCK,)), ins)
+        modes = {operands[1] for op, operands in ins if op == SPV_OP_EXECUTION_MODE}
+        self.assertIn(SPV_MODE_PIXEL_ORDERED, modes)
+        self.assertIn(SPV_MODE_EARLY_FRAGMENT_TESTS, modes)
+        self.assertNotIn(SPV_MODE_PIXEL_UNORDERED, modes)
+        # The one storage image (the target) is Coherent: a store is visible to the next critical
+        # section's load without the Vulkan memory model.
+        coherent = {operands[0] for op, operands in ins
+                    if op == SPV_OP_DECORATE and operands[1] == SPV_DECORATION_COHERENT}
+        variables = {operands[1] for op, operands in ins if op == SPV_OP_VARIABLE}
+        self.assertEqual(len(coherent & variables), 1)
+
+
 class GePowfSharedTextTests(unittest.TestCase):
     def test_ge_c_and_the_tnl_shader_carry_one_text(self) -> None:
         ge_blocks = _pow_blocks(GE_C.read_text(encoding="utf-8"))

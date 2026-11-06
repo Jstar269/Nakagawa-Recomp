@@ -1024,6 +1024,10 @@ jobs:
           export VK_ICD_FILENAMES="$lvp_icd"
           vulkaninfo --summary | tee "$RUNNER_TEMP/vulkan-summary.txt"
           grep -qi llvmpipe "$RUNNER_TEMP/vulkan-summary.txt"
+          # The destination-read paths (#2109), reported and not yet required: the interlock leg
+          # of gpu-coherence-selftest prints a SKIP line where these are missing.
+          vulkaninfo 2>/dev/null | grep -E "fragmentShaderPixelInterlock|fragmentStoresAndAtomics|rasterizationOrderColorAttachmentAccess" || \
+            echo "no destination-read feature reported"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
             make CC=gcc gpu-capture-selftest
 

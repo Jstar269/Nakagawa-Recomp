@@ -110,8 +110,9 @@ static int set_env(const char *name, const char *value) {
  * SR_GPU_TWIN_REF (a file the twin cases write in a twin-off run and compare against in a
  * twin-on run). The twin is an Ace Mode feature, so `--twin` also turns Ace Mode on (with no
  * Ace item of its own), unless `--authentic` keeps it off to show that an authentic run
- * ignores the switch. Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe does
- * not accept. */
+ * ignores the switch. `--dst-read snapshot|interlock` sets SR_GPU_DST_READ (#2109), which sdl3vk_init
+ * reads before it makes the device. Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe
+ * does not accept. */
 int main(int argc, char **argv) {
     int twin_arg = 0, authentic = 0;
     for (int i = 1; i < argc; i++) {
@@ -123,7 +124,8 @@ int main(int argc, char **argv) {
                          : strcmp(argv[i], "--tex-scale") == 0 ? "SR_TEX_SCALE"
                          : strcmp(argv[i], "--gpu-timestamps") == 0 ? "SR_GPU_TIMESTAMPS"
                          : strcmp(argv[i], "--twin") == 0 ? "SR_GPU_TWIN_COLOR"
-                         : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF" : NULL;
+                         : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF"
+                         : strcmp(argv[i], "--dst-read") == 0 ? "SR_GPU_DST_READ" : NULL;
         if (!name || i + 1 >= argc || !set_env(name, argv[++i])) {
             fprintf(stderr, "usage: gpu_coherence_selftest [--scale N] [--case scaled-upload|mip-lod]\n");
             return 2;
