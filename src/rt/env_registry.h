@@ -105,6 +105,7 @@
     X("SR_GE_CPU_PROFILE", "flag-nonzero", "off", "ge.c", "Enables CPU-side GE profiling counters; SR_GPU_CPU_PROFILE also enables it.") \
     X("SR_GE_ENQUEUE_TRACE", "flag-presence", "off", "hle_route.c", "Enables tracing of GE list enqueue calls in the route code.") \
     X("SR_GE_ENQUEUE_TRACE_WINDOWS", "list", "unset: trace off", "hle_ge.c", "Comma-separated FIRST-LAST ranges of GE enqueue ordinals to trace; an invalid value disables the trace.") \
+    X("SR_GE_PATCH_TESS", "string", "off", "ge.c,ge_patch_tess_selftest.c", "Finer Bezier and spline patches (#2053): off, 2, 3 or 4 multiplies triangle patch division; Ace Mode only; another value is refused.") \
     X("SR_GE_PRIM_CALIBRATION", "flag-nonzero", "off", "ge.c", "Enables primitive-profile calibration when primitive profiling is on.") \
     X("SR_GE_PRIM_PROFILE", "flag-nonzero", "off", "ge.c", "Enables the GE primitive profile, which also reads SR_GE_PRIM_CALIBRATION.") \
     X("SR_GE_PRIM_PROFILE_STRIDE", "number", "512", "ge.c", "Sampling stride for the GE primitive CPU profile.") \

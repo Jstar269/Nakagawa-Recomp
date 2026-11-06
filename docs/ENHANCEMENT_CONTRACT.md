@@ -316,8 +316,9 @@ With `SR_ACE=off` (the default: players opt in) every Ace branch sits behind one
 device is created with no features, every sampler and the texture descriptor pool are as before, the presenter
 registers no UI pass, and the observation counters do not run. Nothing is printed, except one `TEX_SCALE: off`
 line when the environment asks for texture scaling or the smart 2D filter, which names the request and does not obey
-it (section 10.10), and one `TWIN: off` or `TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes
-nothing else (section 10.11). `gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its
+it (section 10.10), one `TWIN: off` or `TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes
+nothing else (section 10.11), and one `PATCH_TESS: off` or `PATCH_TESS: refused` line when `SR_GE_PATCH_TESS` asks
+for finer patches (section 10.13). `gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its
 image hash.
 
 ### 10.3. What Ace Changes, and What It Never Changes
@@ -647,6 +648,50 @@ at `s_twin`).
 - **Stamps.** `TWIN: on (colour=full|native, scale=<n>x)` at start, and `TWIN: exit (ops=, copies=, reseeds=,
   authentic_presents=, alloc_failures=)` at exit. Section 10.4 applies: the run is an Ace run, refused as evidence.
 
+### 10.13. Finer Bezier and Spline Patches
+
+The GE draws Bezier and spline patches by cutting them into triangles at the division the game sets with
+`PATCHDIVISION` (#2053). Games keep it low, so curved surfaces show facets, the more so above 1x. This feature
+multiplies that division on the host for every game, with no per-title data. It is guest-visible (section 11.1) and is
+not admitted under section 11.2: section 11.3.5 is its entry and says what the guest can observe; this section says
+how it draws. The code is `draw_patch` and `ge_patch_tess_init` in `src/rt/ge.c`, which both renderers share, so the
+software renderer and the Vulkan renderer draw the same finer triangles.
+
+- **Setting.** `SR_GE_PATCH_TESS=off|2|3|4`, the factor, read once when the runtime starts. It takes effect only in
+  Ace Mode: in an authentic run it stays off whatever the environment says, and a request prints one
+  `PATCH_TESS: off (finer Bezier and spline patches need Ace Mode)` line. Another value prints
+  `PATCH_TESS: refused (...)` and leaves it off. There is no launch-line key, library setting or per-title setting
+  yet: they come with the launch-line pull request that follows #2074 (section 11.3.5).
+- **How.** The guest's U and V division are first capped as the PSP's are (at most 65535 vertices a draw), then each
+  is multiplied by the factor F. Every vertex of the PSP's grid is still evaluated at bit-identical parameters, so a
+  patch's edges and corners, the only vertices neighbouring patches share, are the PSP's, and neighbouring patches
+  meet as they do at 1x. Positions, vertex colours, texture coordinates and normals are evaluated on the same Bezier
+  or B-spline surface: factor F on a guest division d draws, byte for byte, what the PSP draws for the division d x F.
+- **Only triangle patches.** A line or point patch (`PATCHPRIMITIVE` 1 or 2) keeps the PSP's division: a finer
+  wireframe or point grid is a denser picture, not a smoother surface.
+- **Cap.** While the finer grid would have more than 262144 vertices, F drops along a divisor chain (4, 2, 1 or
+  3, 1), so every edge vertex of a lowered draw's grid lies on its neighbours' finer grid. The cap is per draw: where
+  a lowered draw meets a neighbour drawn at the full factor, the neighbour's extra edge vertices lie on the curve and
+  the lowered draw's edge between them is straight, which can leave a crack up to a pixel or so wide. The PSP's own
+  cap does the same for neighbours whose divisions differ. Each lowered draw is counted.
+- **Guest memory and timing.** The vertex and index data in guest memory, the GE state the game reads back and the
+  GE timing model are unchanged: the model charges a patch by its control points, not by its triangles. The extra
+  triangles cost host time only. What a present commits to guest VRAM does change, which makes the feature
+  guest-visible (section 11.3.5).
+- **Stamps.** `PATCH_TESS: on (factor=<F>, at most 262144 vertices a patch draw)` at start, followed by the line
+  section 11.3.5 describes. Section 10.4 applies: the run is an Ace run.
+- **Tests.** `ge-patch-tess-selftest` runs the production `ge.c` software renderer:
+  - the settings and their Ace gate;
+  - factor F on a division d against the PSP's own division d x F, for a Bezier and a four-patch spline surface with
+    a colour per control point, at factors 2 to 4, and against division d to show it is finer;
+  - F x F times the quads;
+  - factor 1 against the default run;
+  - two Bezier patches that share a curved edge, and a four-patch spline, with no background pixel between their
+    outer edges at factors 1 to 4, and a control that draws the two halves at factors 4 and 1 and requires the check
+    to find the crack;
+  - line and point patches unchanged;
+  - the vertex cap and its divisor chain.
+
 ## 11. Guest-Visible Items
 
 Sections 10.3, 10.6, 10.8 and 10.11 describe host-only features: what the guest reads, in its registers, memory and timing, is the
@@ -899,3 +944,28 @@ observe.
 - **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run both stay off whatever the environment says.
 - **Nothing worse (section 11.2, item 4):** not shown. *Hot Shots Tennis* and *LittleBigPlanet* keep smart 2D off
   (section 10.10), and neither feature may be on by default before the runs item 4 lists exist.
+
+#### 11.3.5. Finer Bezier and Spline Patches (Not Yet Admitted)
+
+The feature of section 10.13 (#2053). How it draws is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
+  so a frame with a finer patch is the frame the guest keeps. The feature stays outside section 11.2 until the
+  requirements below exist. Until then it is reachable only through an environment variable, for development.
+- **Key.** None yet. `SR_GE_PATCH_TESS` is an environment variable, not a key on the launch line (section 10.1), and
+  has no library or per-title setting. Those come in the launch-line pull request that follows the Ace settings work
+  (#2074), and only then is the feature admitted.
+- **Never silent.** A run with it on prints, after its `PATCH_TESS: on` line, one line naming the feature as
+  guest-visible, on through the environment and not admitted under section 11.2.
+- **What it changes:** the pixels of every triangle patch the game draws, in the frame a present commits: the curved
+  surface is drawn with F x F times the triangles.
+- **VRAM bytes:** differ in those frames, at the pixels where the finer surface differs from the PSP's facets.
+- **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them, and
+  for a render-to-texture pass that draws patches.
+- **Timing:** the guest timing model (VBLANK schedule, GE timing, media clocks) is unchanged: the GE model charges a
+  patch by its control points. The finer triangles are host work on the GE thread, the thread the guest runs on, so a
+  guest frame with many patches can take longer in host time. Not measured on a title.
+- **I/O speed:** unchanged.
+- **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run it stays off whatever the environment says.
+- **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
+  exist.

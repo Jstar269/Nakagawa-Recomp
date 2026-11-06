@@ -5974,6 +5974,154 @@ static int wide_frames(const WideBufs *B) {
     return ok_all;
 }
 
+/* ---- finer Bezier and spline patches (#2053): both renderers -------------------------------
+ * draw_patch (ge.c) tessellates for both renderers, so the Vulkan backend receives the same
+ * finer triangles as the software rasterizer. Through-mode patches with a colour per control
+ * point (a curved Bezier patch, a four-patch open spline, and two Bezier patches that share a
+ * curved edge) at factors 1 and 4: at render scale 1 the two renderers must cover the same
+ * pixels and agree within one step per channel (the gouraud bound of the wide-fill case), and
+ * on each renderer factor 4 must draw a different picture from factor 1. Above scale 1 a
+ * readback is each pixel's top-left device sample, so only the second check runs there. */
+#define PTESS_LIST 0x002E0000u
+#define PTESS_VTX  0x002E8000u
+#define PTESS_FB   0x04000000u
+
+static uint32_t s_ptess_vc;
+
+static void ptess_vtx(uint32_t color, float x, float y) {
+    uint8_t *d = (uint8_t *)SR_HOST(s_ptess_vc);
+    const float pos[3] = { x, y, 0.0f };
+    memcpy(d, &color, 4);
+    memcpy(d + 4, pos, 12);
+    s_ptess_vc += 16u;
+}
+
+static uint32_t ptess_build(void) {
+    TnlpList L = { (uint32_t *)SR_HOST(PTESS_LIST), 0 };
+    const uint32_t through = (7u << 2) | (3u << 7) | (1u << 23);
+    s_ptess_vc = PTESS_VTX;
+    TNLP_W(&L, 0x10, 0);
+    TNLP_W(&L, 0x9C, PTESS_FB & 0x00FFFFFFu);
+    TNLP_W(&L, 0x9D, 512u | ((PTESS_FB & 0xFF000000u) >> 8));
+    TNLP_W(&L, 0xD2, 3);
+    TNLP_W(&L, 0x15, 0);
+    TNLP_W(&L, 0x16, ((FB_H - 1u) << 10) | 479u);
+    TNLP_W(&L, 0xD4, 0);
+    TNLP_W(&L, 0xD5, ((FB_H - 1u) << 10) | 479u);
+    TNLP_W(&L, 0xD6, 0);
+    TNLP_W(&L, 0xD7, 0xFFFF);
+    for (uint32_t cmd = 0x17; cmd <= 0x28; cmd++) TNLP_W(&L, cmd, 0);   /* every unit off */
+    TNLP_W(&L, 0x50, 1);                                                /* gouraud */
+    TNLP_W(&L, 0xE8, 0);
+    TNLP_W(&L, 0xE9, 0);
+    TNLP_W(&L, 0x12, through);
+    TNLP_W(&L, 0x37, 0);                                                /* triangle patches */
+
+    static const float bulge[4] = { 0.0f, 50.0f, -35.0f, 10.0f };
+    uint32_t at = s_ptess_vc;                                           /* curved Bezier patch */
+    for (int v = 0; v < 4; v++)
+        for (int u = 0; u < 4; u++)
+            ptess_vtx(0xFF000000u | (uint32_t)(40 + 60 * u) << 16 | (uint32_t)(30 + 70 * v) << 8 | (uint32_t)(200 - 20 * (u + v)),
+                      20.0f + 45.0f * (float)u + (u == 1 || u == 2 ? bulge[v] : 0.0f),
+                      20.0f + 40.0f * (float)v + (v == 1 || v == 2 ? bulge[u] * 0.5f : 0.0f));
+    TNLP_W(&L, 0x36, (1u << 8) | 2u);
+    TNLP_W(&L, 0x01, at);
+    TNLP_W(&L, 0x05, 0x0404u);
+
+    at = s_ptess_vc;                                                    /* four-patch open spline */
+    for (int v = 0; v < 4; v++)
+        for (int u = 0; u < 7; u++)
+            ptess_vtx(0xFF000000u | (uint32_t)(30 * u) << 16 | (uint32_t)(60 * v) << 8 | 0x80u,
+                      220.0f + 38.0f * (float)u, 20.0f + 40.0f * (float)v + ((u & 1) ? 25.0f : -15.0f));
+    TNLP_W(&L, 0x36, (1u << 8) | 2u);
+    TNLP_W(&L, 0x01, at);
+    TNLP_W(&L, 0x06, 0x0407u | (3u << 16) | (3u << 18));
+
+    static const float edge[4] = { 200.0f, 245.0f, 155.0f, 200.0f };   /* two patches, one curved edge */
+    static const float lx[3] = { 100.0f, 115.0f, 130.0f }, rx[3] = { 265.0f, 285.0f, 300.0f };
+    TNLP_W(&L, 0x36, (3u << 8) | 1u);
+    for (int side = 0; side < 2; side++) {
+        at = s_ptess_vc;
+        for (int v = 0; v < 4; v++) {
+            const float y = 180.0f + 28.0f * (float)v;
+            const uint32_t c = 0xFF000000u | (uint32_t)(60 * v) << 8 | (side ? 0xC0u : 0x40u);
+            if (side) ptess_vtx(c, edge[v], y);
+            for (int u = 0; u < 3; u++) ptess_vtx(c, side ? rx[u] : lx[u], y);
+            if (!side) ptess_vtx(c, edge[v], y);
+        }
+        TNLP_W(&L, 0x01, at);
+        TNLP_W(&L, 0x05, 0x0404u);
+    }
+    TNLP_W(&L, 0x0F, 0);
+    TNLP_W(&L, 0x0C, 0);
+    return PTESS_LIST;
+}
+
+static int ptess_frame(int gpu, uint32_t *out) {
+    const size_t bytes = (size_t)512 * FB_H * 4u;
+    memset(SR_HOST(PTESS_FB), 0, bytes);
+    sr_gpu_vram_dirty(PTESS_FB, (uint32_t)bytes);
+    ge_set_gpu_hooks(gpu ? &k_hooks : NULL);
+    ge_run_list(ptess_build(), 0);
+    ge_set_gpu_hooks(&k_hooks);
+    int ok = 1;
+    if (gpu) {
+        GeGpuFbDescriptor desc = { .addr = PTESS_FB, .format = 3, .stride = 512, .width = 480, .height = FB_H };
+        ok = gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
+    }
+    memcpy(out, SR_HOST(PTESS_FB), bytes);
+    return ok;
+}
+
+static int coherence_run_patch_tess(void) {
+    const size_t px = (size_t)512 * FB_H;
+    uint32_t *buf = (uint32_t *)malloc(px * 4u * 4u);
+    if (!buf) return 0;
+    uint32_t *sw[2] = { buf, buf + px }, *gpu[2] = { buf + 2 * px, buf + 3 * px };
+    static const int factors[2] = { 1, 4 };
+    int ok = 1;
+    size_t near_px[2] = { 0, 0 }, drawn[2] = { 0, 0 };
+    for (int i = 0; i < 2 && ok; i++) {
+        ge_patch_tess_set(factors[i]);
+        coherence_reset_targets();
+        ok = ptess_frame(0, sw[i]) && ptess_frame(1, gpu[i]);
+        if (!ok) {
+            fprintf(stderr, "gpu coherence selftest [patch-tess]: factor %d: GPU readback failed\n", factors[i]);
+            break;
+        }
+        for (size_t p = 0; s_scale == 1 && p < px; p++) {
+            if ((p % 512u) >= 480u) continue;
+            const uint32_t a = sw[i][p], b = gpu[i][p];
+            if (a) drawn[i]++;
+            if (a == b) continue;
+            if ((a == 0u) != (b == 0u) || !wide_near(a, b)) {
+                fprintf(stderr, "gpu coherence selftest [patch-tess]: factor %d: pixel (%zu,%zu) gpu=%08x "
+                                "software=%08x\n", factors[i], p % 512u, p / 512u, b, a);
+                ok = 0;
+                break;
+            }
+            near_px[i]++;
+        }
+    }
+    ge_patch_tess_set(1);
+    if (ok && (memcmp(sw[0], sw[1], px * 4u) == 0 || memcmp(gpu[0], gpu[1], px * 4u) == 0)) {
+        fprintf(stderr, "gpu coherence selftest [patch-tess]: factor 4 drew the factor 1 picture (software %s, "
+                        "gpu %s)\n", memcmp(sw[0], sw[1], px * 4u) ? "differs" : "same",
+                memcmp(gpu[0], gpu[1], px * 4u) ? "differs" : "same");
+        ok = 0;
+    }
+    coherence_reset_targets();
+    free(buf);
+    if (ok && s_scale == 1)
+        printf("gpu coherence selftest: PASS %-22s factors 1 and 4: same coverage (%zu and %zu pixels), "
+               "%zu and %zu pixels one step apart; factor 4 differs from 1 on both\n", "patch-tess",
+               drawn[0], drawn[1], near_px[0], near_px[1]);
+    else if (ok)
+        printf("gpu coherence selftest: PASS %-22s scale %d: factor 4 differs from 1 on both renderers (the "
+               "software comparison needs scale 1)\n", "patch-tess", s_scale);
+    return ok;
+}
+
 static int coherence_run_wide_fill(void) {
     const size_t px = (size_t)512 * FB_H, vw = WIDE_VRAM_SIZE / 4u;
     uint32_t *buf = (uint32_t *)malloc((vw * 4u + px * 2u) * 4u);
@@ -6998,6 +7146,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "undrawn-rows") == 0) return coherence_run_undrawn_rows();
         if (strcmp(only, "depth-alias-no-zwrite") == 0) return coherence_run_depth_alias_no_zwrite();
         if (strcmp(only, "wide-fill") == 0) return coherence_run_wide_fill();
+        if (strcmp(only, "patch-tess") == 0) return coherence_run_patch_tess();
         if (strcmp(only, "gpu-timestamps") == 0) return coherence_run_gpu_timestamps();
         if (strcmp(only, "gpu-timestamps-off") == 0) return coherence_run_gpu_timestamps_off();
         if (strcmp(only, "submit-batch") == 0) return coherence_run_submit_batch();   /* the snapbar mutants */
@@ -7074,6 +7223,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_readback_rows()) ok = 0;
     if (!coherence_run_stacked_targets()) ok = 0;
     if (!coherence_run_wide_fill()) ok = 0;
+    if (!coherence_run_patch_tess()) ok = 0;
     /* Last: they free every depth surface the cases above share (the twin cases too). */
     if (!coherence_run_depth_evict_newer()) ok = 0;
     if (!coherence_run_depth_zbp_switch()) ok = 0;

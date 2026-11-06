@@ -124,6 +124,7 @@ PUBLIC_TARGETS := \
 	fp-convert-selftest \
 	ge-float24-selftest \
 	ge-cpu-profile-validate-selftest \
+	ge-patch-tess-selftest \
 	ge-flight-overhead \
 	vfpu-tables-selftest \
 	watchpoints-file-selftest \
@@ -300,6 +301,7 @@ HELP_DESCRIPTION_asset-index-selftest := run the asset-index selftest
 HELP_DESCRIPTION_fp-convert-selftest := run the FPU conversion selftest
 HELP_DESCRIPTION_ge-float24-selftest := run the GE float24/row-sum/reciprocal reference selftest
 HELP_DESCRIPTION_ge-cpu-profile-validate-selftest := run the GE CPU-profile validator selftest on the production GE object
+HELP_DESCRIPTION_ge-patch-tess-selftest := run the finer Bezier and spline patch selftest on the production GE object (no GPU)
 HELP_DESCRIPTION_ge-flight-overhead := measure the disarmed flight recorder cost on the GE draw path (recorder linked vs absent; no game data)
 HELP_DESCRIPTION_vfpu-tables-selftest := run the VFPU table-loader selftest
 HELP_DESCRIPTION_watchpoints-file-selftest := run the watchpoints-file selftest

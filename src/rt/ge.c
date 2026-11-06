@@ -5060,6 +5060,59 @@ static void ge_note_mip_draw(void) {
             (int)(ge.tex_lod_bias * 16.0f));
 }
 
+/* ---- finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.13) ----------------
+ *
+ * An Ace Mode feature: draw_patch multiplies the guest's U and V division of a triangle patch by
+ * an integer factor F after the PSP's own vertex cap has set them, so every vertex of the PSP's
+ * grid is still evaluated at bit-identical parameters ((k*F)/(n*F) rounds as k/n does), and the
+ * patch edges and corners, the only vertices neighbouring patches share, are the PSP's. Line and
+ * point patches keep the PSP's division (a finer wireframe or point grid is not a smoother
+ * surface). While the finer grid would pass GE_PATCH_TESS_MAX_VERTS, F drops along a divisor
+ * chain (4, 2, 1 or 3, 1), so a draw the cap lowers still has every edge vertex of its coarser
+ * grid on its finer neighbours' edges. The finer side's extra edge vertices can still leave a
+ * crack against a lowered neighbour, which is why such a draw is counted (s_patch_capped).
+ * The guest timing model charges a patch by its control points (ge_time_prim_begin), so it does
+ * not change; the extra triangles cost host time only. Off (F = 1) is the PSP's path exactly. */
+#define GE_PATCH_TESS_MAX 4
+#define GE_PATCH_TESS_MAX_VERTS 262144u
+static int s_patch_tess = 1;
+static unsigned long long s_patch_quads, s_patch_capped;
+
+int ge_patch_tess_set(int factor) {
+    s_patch_tess = factor >= 1 && factor <= GE_PATCH_TESS_MAX ? factor : 1;
+    return s_patch_tess;
+}
+
+void ge_patch_tess_counts(unsigned long long *quads, unsigned long long *capped) {
+    if (quads) *quads = s_patch_quads;
+    if (capped) *capped = s_patch_capped;
+}
+
+int ge_patch_tess_init(int enhanced) {
+    const char *v = getenv("SR_GE_PATCH_TESS");
+    int f = 1;
+    s_patch_tess = 1;
+    if (v && v[0] && strcmp(v, "off") != 0) {
+        if (v[1] != '\0' || v[0] < '2' || v[0] > '0' + GE_PATCH_TESS_MAX) {
+            fprintf(stderr, "PATCH_TESS: refused (SR_GE_PATCH_TESS=%s: the values are off, 2, 3 and 4)\n", v);
+            return 1;
+        }
+        f = v[0] - '0';
+    }
+    if (f == 1) return 1;
+    if (!enhanced) {
+        /* Authentic: a request is named, not obeyed. */
+        fprintf(stderr, "PATCH_TESS: off (finer Bezier and spline patches need Ace Mode)\n");
+        return 1;
+    }
+    s_patch_tess = f;
+    fprintf(stderr, "PATCH_TESS: on (factor=%d, at most %u vertices a patch draw)\n", f, GE_PATCH_TESS_MAX_VERTS);
+    fprintf(stderr, "PATCH_TESS: guest-visible, on through SR_GE_PATCH_TESS and not admitted under contract "
+                    "section 11.2 (each present commits the frame to guest VRAM; see the contract's \"Finer "
+                    "Bezier and Spline Patches\" entry)\n");
+    return f;
+}
+
 static void draw_patch(uint32_t op,int spline){
     int nu=(int)(op&255),nv=(int)((op>>8)&255);
     VFmt vf;decode_vtype(ge.vtype,&vf);int idxfmt=(int)((ge.vtype>>11)&3),count=nu*nv;
@@ -5077,6 +5130,16 @@ static void draw_patch(uint32_t op,int spline){
         if(tv>1)tv--;
     }
     int prim=(int)(ge.patch_primitive&3),typeu=(int)((op>>16)&3),typev=(int)((op>>18)&3);
+    /* #2053: the host factor, on the PSP's capped division, for triangle patches only. */
+    if(s_patch_tess>1&&prim==0){
+        int f=s_patch_tess;
+        for(;f>1;f=(f&1)?1:f/2){uint64_t fu=(uint64_t)tu*(uint64_t)f,fv=(uint64_t)tv*(uint64_t)f;
+            uint64_t n=spline?((uint64_t)pu*fu+1u)*((uint64_t)pv*fv+1u):(fu+1u)*(fv+1u)*(uint64_t)pu*(uint64_t)pv;
+            if(n<=GE_PATCH_TESS_MAX_VERTS)break;}
+        if(f<s_patch_tess)s_patch_capped++;
+        tu*=f;tv*=f;
+    }
+    s_patch_quads+=(unsigned long long)pu*(unsigned long long)pv*(unsigned long long)tu*(unsigned long long)tv;
     for(int py=0;py<pv;py++)for(int px=0;px<pu;px++){
         int base=(spline?py:py*3)*nu+(spline?px:px*3);
         for(int y=0;y<tv;y++)for(int x=0;x<tu;x++){

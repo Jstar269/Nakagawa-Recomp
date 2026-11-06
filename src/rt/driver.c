@@ -28,6 +28,7 @@
 #include "flight_recorder.h"
 #include "prx_loader.h"
 #include "ace.h"
+#include "ge_shared.h"
 #include "videorec.h"
 
 #include <errno.h>
@@ -558,6 +559,7 @@ int main(int argc, char **argv) {
             ace_confirm(ACE_FEATURE_SAS);
         (void)atexit(ace_finish);
     }
+    (void)ge_patch_tess_init(g_ace_on);   /* finer patches (#2053): Ace only; an authentic request is named */
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--expect-u32", 12) != 0) continue;

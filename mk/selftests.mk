@@ -289,6 +289,23 @@ ge-cpu-profile-validate-selftest: $(RT_GE_O)
 
 native-core-tests: ge-cpu-profile-validate-selftest
 
+# ge-patch-tess-selftest - finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.13)
+# on the production GE object's software renderer: the SR_GE_PATCH_TESS settings and their Ace
+# gate; factor F on a guest division d draws byte for byte what the PSP draws at division d*F;
+# F*F times the quads; factor 1 is the default path; no background pixel between neighbouring
+# patches at every factor, and a crack the check finds when the two are drawn at different
+# factors; line and point patches keep the PSP's division; the vertex cap lowers the factor
+# along its divisor chain. No game input.
+GE_PATCH_TESS_SELFTEST := $(BUILD_DIR)/ge_patch_tess_selftest$(EXE_EXT)
+
+ge-patch-tess-selftest: $(RT_GE_O)
+	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_PATCH_TESS_SELFTEST) \
+		tests/native/ge_patch_tess_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
+		src/rt/flight_recorder.c src/rt/perf.c -lm
+	$(GE_PATCH_TESS_SELFTEST)
+
+native-core-tests: ge-patch-tess-selftest
+
 # ge-flight-overhead -- cost of the disarmed flight recorder on the GE paths (#320): the
 # ge-cpu-profile-validate-selftest harness's --bench mode on the production ge.c, built once
 # with the recorder linked (SR_FLIGHT unset) and once with -USR_FLIGHT_RECORDER_LINKED, run

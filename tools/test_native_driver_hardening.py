@@ -180,6 +180,8 @@ int sr_host_data_prepare(void) {{
 size_t sr_host_data_entry_count(void) {{ return 0; }}
 /* No SAS mixer in this harness: Ace Mode's sas=sinc is refused (driver.c never confirms it). */
 int sr_hle_sas_set_band_limited(int on) {{ (void)on; return 0; }}
+/* No GE in this harness: finer patches (#2053) stay at the PSP's division. */
+int ge_patch_tess_init(int enhanced) {{ (void)enhanced; return 1; }}
 
 static void check_all_or_nothing_on_exit(void) {{
     if (g_check_all_or_nothing) {{

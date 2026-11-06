@@ -466,6 +466,15 @@ const uint32_t *ge_wide_canvas(uint32_t fb_addr, int *fmt);
  * backend declined, since the last reset. */
 void      ge_tnl_set_enabled(int on);
 void      ge_tnl_counts(unsigned long long *taken, unsigned long long *cpu, int reset);
+/* Finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.13): a host factor on the
+ * guest's PATCHDIVISION for triangle patches, from SR_GE_PATCH_TESS=off|2|3|4, taken only when
+ * `enhanced` (the run's Ace switch) is set. ge_patch_tess_init prints the run's start line and
+ * returns the factor in use (1: the PSP's division); ge_patch_tess_set is the selftest seam
+ * (1..4, anything else is 1). The counts are since the run started: patch quads drawn, and
+ * draws whose factor was lowered to stay within the vertex cap. */
+int       ge_patch_tess_init(int enhanced);
+int       ge_patch_tess_set(int factor);
+void      ge_patch_tess_counts(unsigned long long *quads, unsigned long long *capped);
 /* The specular and powered-diffuse power light_vertex uses: 0 (the default) the C library's
  * powf, 1 ge_powf, the integer power psp_tnl.vert repeats bit for bit, which also lets the GPU
  * T&L take those lights. The selftest seams give ge_powf and its 64 x 64-bit high product
