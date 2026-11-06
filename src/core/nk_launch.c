@@ -1487,6 +1487,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_ace_report[NK_MAX_PATH + 16];
     char env_ui_root[NK_MAX_PATH + 16];
     char env_launcher_display[96];
+    char env_nickname[sizeof(session->config.nickname) + 16];
     char sep = nk_platform_path_separator();
 
     if (session->config.fps_cap == -1) {
@@ -1626,6 +1627,9 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     snprintf(env_user_data_root, sizeof(env_user_data_root), "SR_USER_DATA_ROOT=%s",
              session->user_data_root);
     envp[env_count++] = env_user_data_root;
+    /* The console nickname (#2197), always exported so an inherited value cannot name it. */
+    snprintf(env_nickname, sizeof(env_nickname), "SR_NICKNAME=%s", session->config.nickname);
+    envp[env_count++] = env_nickname;
     /* What the pause overlay shows and draws with, beside the game's name (SR_GAME_TITLE
      * below): the disc ID and the player's folder for the UI fonts. Always exported, so an
      * empty value masks an inherited one instead of naming another game. */

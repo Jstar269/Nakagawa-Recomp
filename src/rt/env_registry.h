@@ -155,6 +155,7 @@
     X("SR_MSGLOG", "flag-presence", "off", "hle_kernel_sync.c", "When set, logs message pipe creation and calls to stderr.") \
     X("SR_NAN_TRAP_CONTEXT", "flag-nonzero", "off", "debug.c", "Dumps scheduler CPU state and guest memory context when a NaN trap fires.") \
     X("SR_NAN_TRAP_LIMIT", "number", "SR_NAN_TRAP_DEFAULT_LIMIT", "debug.c", "Limit for the NaN trap, accepted from 0 to 1000000; invalid values are rejected.") \
+    X("SR_NICKNAME", "string", "unset: the neutral Player", "hle.c", "Console nickname from the player, served as /CONFIG/SYSTEM/owner_name if valid (1 to 127 bytes of UTF-8, no control characters), else Player and a log line.") \
     X("SR_NIDLOG", "flag-presence", "off", "debug.h,hle.c", "Logs each HLE call by NID; read once per process.") \
     X("SR_NO2DZ", "flag-presence", "off", "ge.c", "When set, disables the depth test for through-mode (2D) primitives.") \
     X("SR_NOATEST", "flag-presence", "off", "ge.c", "Skips the GE alpha test so every fragment passes.") \

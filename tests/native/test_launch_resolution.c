@@ -137,6 +137,29 @@ static void copy_executable(const char *source_path, const char *destination_pat
     assert(fclose(source) == 0);
 }
 
+/* SR_NICKNAME as the runtime reads it, UTF-8 (sr_utf8_env_alloc): through the wide environment
+ * on Windows, where the narrow getenv() yields active-code-page bytes. NULL when it is unset. */
+static const char *probe_env_utf8(const char *name, char *out, size_t cap) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide_name[64];
+    WCHAR wide_value[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, name, -1, wide_name, 64) <= 0) return NULL;
+    SetLastError(0); /* an empty value also answers 0, without ERROR_ENVVAR_NOT_FOUND */
+    DWORD n = GetEnvironmentVariableW(wide_name, wide_value, 1024);
+    if (n == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) return NULL;
+    if (n >= 1024) return NULL;
+    wide_value[n] = 0;
+    if (WideCharToMultiByte(CP_UTF8, 0, wide_value, -1, out, (int)cap, NULL, NULL) <= 0)
+        return NULL;
+    return out;
+#else
+    const char *value = getenv(name);
+    if (!value) return NULL;
+    snprintf(out, cap, "%s", value);
+    return out;
+#endif
+}
+
 static int write_launch_environment_probe(void) {
     const char *report_path = getenv("NK_LAUNCH_TEST_REPORT_FILE");
     if (!report_path || !*report_path) return 2;
@@ -167,6 +190,8 @@ static int write_launch_environment_probe(void) {
     const char *ace_report = getenv("SR_ACE_REPORT");
     const char *host_time_zone = getenv("SR_HOST_TIME_ZONE");
     const char *code_capture = getenv("SR_CODE_CAPTURE");
+    char nickname_utf8[512];
+    const char *nickname = probe_env_utf8("SR_NICKNAME", nickname_utf8, sizeof(nickname_utf8));
     int ok = fprintf(f,
                      "PSP_ISO=%s\n"
                      "NK_LAUNCH_TEST_UNRELATED=%s\n"
@@ -191,7 +216,8 @@ static int write_launch_environment_probe(void) {
                      "SR_ACE=%s\n"
                      "SR_ACE_REPORT=%s\n"
                      "SR_HOST_TIME_ZONE=%s\n"
-                     "SR_CODE_CAPTURE=%s\n",
+                     "SR_CODE_CAPTURE=%s\n"
+                     "SR_NICKNAME=%s\n",
                      iso ? iso : "<unset>",
                      unrelated ? unrelated : "<unset>",
                      fps ? fps : "<unset>",
@@ -215,7 +241,8 @@ static int write_launch_environment_probe(void) {
                      ace ? ace : "<unset>",
                      ace_report ? ace_report : "<unset>",
                      host_time_zone ? host_time_zone : "<unset>",
-                     code_capture ? code_capture : "<unset>") >= 0;
+                     code_capture ? code_capture : "<unset>",
+                     nickname ? nickname : "<unset>") >= 0;
     if (fclose(f) != 0) ok = 0;
     /* Subtest 21 sets NK_LAUNCH_TEST_HOLD so the probe stays alive long
      * enough for nk_launch_stop to have a running child to stop. */
@@ -392,6 +419,11 @@ static void test_no_iso_child_environment(const char *test_executable,
     bool had_reduce_motion;
     char *old_reduce_motion = capture_environment_value("SR_REDUCE_MOTION", &had_reduce_motion);
     set_environment_value("SR_REDUCE_MOTION", "on");
+    /* Nor an inherited nickname (#2197): the session's, empty here, masks it, and the runtime
+       then serves the neutral default. */
+    bool had_nickname;
+    char *old_nickname = capture_environment_value("SR_NICKNAME", &had_nickname);
+    set_environment_value("SR_NICKNAME", "poisoned-parent-nickname");
     /* Nor an inherited Ace Mode line (src/rt/ace.h): a session the player did not resolve on
        is authentic, "off", and exports no report path (A1). */
     /* Nor an inherited presentation upscaler (#1273): an authentic session runs it off. */
@@ -577,6 +609,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_EXPERIMENTAL_60HZ=0\n") != NULL);
     assert(strstr(observed, "SR_DEVELOPER_MODE=0\n") != NULL);
     assert(strstr(observed, "SR_REDUCE_MOTION=system\n") != NULL);
+    assert(strstr(observed, "SR_NICKNAME=\n") != NULL);
+    assert(strstr(observed, "poisoned-parent-nickname") == NULL);
     assert(strcmp(session.config.ace_spec, "off") == 0);   /* prepare_session's default */
     assert(strstr(observed, "SR_ACE=off\n") != NULL);
     assert(strstr(observed, "SR_ACE_REPORT=\n") != NULL);   /* the parent's path is masked */
@@ -616,6 +650,9 @@ static void test_no_iso_child_environment(const char *test_executable,
              "fixture-60hz");
     session.config.developer_mode = true;
     session.config.reduce_motion = NK_REDUCE_MOTION_OFF;
+    /* The nickname the player chose reaches the child as SR_NICKNAME (#2197). */
+    snprintf(session.config.nickname, sizeof(session.config.nickname), "%s",
+             "Kaz \xE3\x83\x8A");
     /* An Ace Mode session exports its line and, with it, the report path. */
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
              "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off");
@@ -643,6 +680,7 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_EXPERIMENTAL_60HZ=1\n") != NULL);
     assert(strstr(observed, "SR_DEVELOPER_MODE=1\n") != NULL);
     assert(strstr(observed, "SR_REDUCE_MOTION=off\n") != NULL);
+    assert(strstr(observed, "SR_NICKNAME=Kaz \xE3\x83\x8A\n") != NULL);
     assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off\n") != NULL);
     /* An enhanced session follows the setting. */
     assert(strstr(observed, "SR_PRESENT_UPSCALE=fsr1\n") != NULL);
@@ -706,6 +744,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     free(old_reduce_motion);
     free(old_60hz);
     restore_environment_value("SR_DEVELOPER_MODE", old_developer, had_developer);
+    restore_environment_value("SR_NICKNAME", old_nickname, had_nickname);
+    free(old_nickname);
     free(old_developer);
     restore_environment_value("SR_LAUNCHER_DISPLAY_BOUNDS", old_launcher_display,
                               had_launcher_display);

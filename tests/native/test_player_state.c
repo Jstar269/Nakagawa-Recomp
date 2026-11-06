@@ -8097,6 +8097,16 @@ int main(int argc, char **argv) {
         player_app_apply_settings_to_session(&applied, &cfg);
         assert(cfg.reduce_motion == NK_REDUCE_MOTION_SYSTEM);
         assert(cfg.gui_mode == true);   /* untouched by the mapping */
+        /* The nickname reaches the session whole, and its copy always ends in a NUL (#2197). */
+        snprintf(applied.nickname, sizeof(applied.nickname), "%s", "Kaz \xE3\x83\x8A");
+        memset(cfg.nickname, 'x', sizeof(cfg.nickname));
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(strcmp(cfg.nickname, "Kaz \xE3\x83\x8A") == 0);
+        memset(applied.nickname, 'n', sizeof(applied.nickname) - 1u);
+        applied.nickname[sizeof(applied.nickname) - 1u] = '\0';
+        memset(cfg.nickname, 'x', sizeof(cfg.nickname));
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(strlen(cfg.nickname) == NK_NICKNAME_MAX_BYTES);
         /* NULL arguments are safe no-ops. */
         player_app_apply_settings_to_session(NULL, &cfg);
         player_app_apply_settings_to_session(&applied, NULL);
