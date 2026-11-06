@@ -34,6 +34,7 @@ typedef struct Console {
     NkAdhocLoopNet *net;
     unsigned index;
     int logged_in;
+    int lost; /* its event queue overflowed: the lobby removes it */
     uint8_t mac[NK_RELAY_MAC_LEN];
     char nickname[NK_RELAY_NICKNAME_LEN];
     char product[NK_RELAY_PRODUCT_LEN + 1u];
@@ -54,8 +55,13 @@ static Console *as_console(NkAdhocTransport *t) { return (Console *)t; }
 static const Console *as_const_console(const NkAdhocTransport *t) { return (const Console *)t; }
 
 static void push_event(Console *c, const NkLobbyEvent *ev) {
+    if (!c->logged_in || c->lost) {
+        if (c->lost) c->ev_dropped++;
+        return;
+    }
     if (c->ev_count == NK_NET_EVENT_QUEUE) {
         c->ev_dropped++;
+        c->lost = 1; /* removed from the lobby once the current call ends (reap_lost) */
         return;
     }
     c->events[(c->ev_head + c->ev_count) % NK_NET_EVENT_QUEUE] = *ev;
@@ -108,6 +114,29 @@ static void free_queue(Socket *s) {
     s->head = s->count = 0;
 }
 
+static void close_sockets(Console *c) {
+    for (unsigned i = 0; i < NK_NET_PDP_SOCKETS; i++) {
+        free_queue(&c->sockets[i]);
+        c->sockets[i].used = 0;
+    }
+}
+
+/* Removes every console whose event queue overflowed during the call that just ran. Telling its
+ * group may overflow another console in turn, so this repeats until none is left. */
+static void reap_lost(NkAdhocLoopNet *net) {
+    for (int again = 1; again;) {
+        again = 0;
+        for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
+            Console *c = &net->consoles[i];
+            if (!c->logged_in || !c->lost) continue;
+            leave_group(c);
+            close_sockets(c);
+            c->logged_in = 0;
+            again = 1;
+        }
+    }
+}
+
 static int lo_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], const char *nickname,
                     const char *product) {
     Console *c = as_console(t);
@@ -124,6 +153,8 @@ static int lo_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], co
     memcpy(c->product, product, NK_RELAY_PRODUCT_LEN);
     c->product[NK_RELAY_PRODUCT_LEN] = '\0';
     c->group = -1;
+    c->ev_head = c->ev_count = 0;
+    c->lost = 0;
     c->logged_in = 1;
     return NK_NET_OK;
 }
@@ -132,12 +163,10 @@ static int lo_logout(NkAdhocTransport *t) {
     Console *c = as_console(t);
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
     leave_group(c);
-    for (unsigned i = 0; i < NK_NET_PDP_SOCKETS; i++) {
-        free_queue(&c->sockets[i]);
-        c->sockets[i].used = 0;
-    }
+    close_sockets(c);
     c->ev_head = c->ev_count = 0;
     c->logged_in = 0;
+    reap_lost(c->net);
     return NK_NET_OK;
 }
 
@@ -179,6 +208,7 @@ static int lo_connect(NkAdhocTransport *t, const uint8_t group[NK_RELAY_GROUP_LE
     memcpy(ack.mac, net->groups[g].leader, NK_RELAY_MAC_LEN);
     push_event(c, &ack);
     c->group = g;
+    reap_lost(net);
     return NK_NET_OK;
 }
 
@@ -186,6 +216,7 @@ static int lo_disconnect(NkAdhocTransport *t) {
     Console *c = as_console(t);
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
     leave_group(c);
+    reap_lost(c->net);
     return NK_NET_OK;
 }
 
@@ -216,6 +247,7 @@ static int lo_scan(NkAdhocTransport *t) {
     memset(&done, 0, sizeof done);
     done.kind = NK_LOBBY_SCAN_COMPLETE;
     push_event(c, &done);
+    reap_lost(c->net);
     return NK_NET_OK;
 }
 

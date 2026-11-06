@@ -232,14 +232,30 @@ static void test_pdp(void) {
     nk_loopnet_destroy(net);
 }
 
+/* A console that stops taking its events is removed from the lobby, as the relay server removes
+ * a client whose queue is full: its group is told, its sockets close, and the drop is counted. */
 static void test_event_overflow(void) {
     NkAdhocLoopNet *net = nk_loopnet_create();
-    NkAdhocTransport *a = nk_loopnet_console(net, 0);
-    NkLobbyEvent ev[1];
+    NkAdhocTransport *a = nk_loopnet_console(net, 0), *b = nk_loopnet_console(net, 1);
+    NkLobbyEvent ev[NK_NET_EVENT_QUEUE];
     login(a, k_a, "Alpha", k_game);
-    for (unsigned i = 0; i < NK_NET_EVENT_QUEUE + 2u; i++) a->ops->scan(a);
-    CHECK(a->ops->events_dropped(a) == 2u, "events past the queue are counted, not lost silently");
-    CHECK(take(a, ev, 1) == 1 && take(a, NULL, 1) == 0, "take is bounded by the caller");
+    login(b, k_b, "Bravo", k_game);
+    a->ops->connect(a, k_g1);
+    b->ops->connect(b, k_g1);
+    take(b, ev, NK_NET_EVENT_QUEUE);
+    int sa = a->ops->pdp_open(a, 0x1000);
+    /* A holds CONNECT_BSSID and CONNECT(B); each scan adds SCAN and SCAN_COMPLETE. */
+    unsigned scans = 0;
+    while (a->ops->scan(a) == NK_NET_OK && scans < NK_NET_EVENT_QUEUE) scans++;
+    CHECK(scans == NK_NET_EVENT_QUEUE / 2u - 1u + 1u, "the scan that overflows still answers OK (%u)", scans);
+    CHECK(a->ops->events_dropped(a) >= 1u, "the overflow is counted");
+    CHECK(a->ops->scan(a) == NK_NET_NOT_LOGGED_IN, "then the lobby has removed A");
+    CHECK(a->ops->pdp_send(a, sa, k_b, 0x1000, "x", 1) == NK_NET_NO_SOCKET, "and closed its sockets");
+    size_t n = take(b, ev, NK_NET_EVENT_QUEUE);
+    CHECK(n == 1 && ev[0].kind == NK_LOBBY_DISCONNECT && ev[0].peer_id == 1u, "B hears A go");
+    CHECK(take(a, ev, 1) == 1 && take(a, NULL, 1) == 0, "A still takes what it was sent; take is bounded");
+    CHECK(login(a, k_a, "Alpha", k_game) == NK_NET_OK, "and may log in again");
+    CHECK(take(a, ev, NK_NET_EVENT_QUEUE) == 0, "with an empty queue");
     nk_loopnet_destroy(net);
 }
 

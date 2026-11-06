@@ -27,7 +27,16 @@
  *   - the leader is the group's creator and stays so; an empty group is removed;
  *   - a scan lists every group of the product in name order, then SCAN_COMPLETE;
  *   - leaving tells each remaining member (DISCONNECT with the leaver's id), and the leaver
- *     nothing.
+ *     nothing;
+ *   - a console whose event queue is full is removed from the lobby, as the server removes a client
+ *     it cannot send to: it leaves its group (the members are told), its sockets close, the event
+ *     is counted in events_dropped, and its lobby and socket calls then answer NK_NET_NOT_LOGGED_IN.
+ *     The events it was already sent stay for it to take.
+ * Two server rules have no counterpart here. The server keys a group by channel and name, but every
+ * client of the protocol version Nakagawa speaks (adhocctl v1) is on its one default channel
+ * (client.cpp V1_PROTOCOL_DEFAULT_CHANNEL), so the name alone decides. The server's crosslinks,
+ * which let some product codes share groups, are not modelled: a game meets only consoles running
+ * its own product code.
  * Datagrams follow UDP: one to a MAC or port nobody holds in the sender's group is dropped and
  * the send still succeeds; a full receive queue drops the datagram and counts it. Broadcast is
  * the caller's to fan out over the peer list, as PPSSPP does, so a group-address destination is
