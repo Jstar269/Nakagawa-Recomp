@@ -3838,7 +3838,19 @@ static int submit_batch_same(const char *what, uint32_t cap, const uint32_t *gpu
     return 1;
 }
 
+static int coherence_run_submit_batch_snapshot(void);
+
+/* The case measures how snapshot copies are batched and what barriers they record, so it runs on
+ * the snapshot path on every device: an interlock op (#2109) takes no snapshot copy. */
 static int coherence_run_submit_batch(void) {
+    const int interlock = s_dst_interlock;
+    s_dst_interlock = 0;
+    int ok = coherence_run_submit_batch_snapshot();
+    s_dst_interlock = interlock;
+    return ok;
+}
+
+static int coherence_run_submit_batch_snapshot(void) {
     const SubmitBatchShape sh = { 48u, 8u, 2u, 24u, 6u, 8u, 24u };
     const size_t bytes = (size_t)FB_W * FB_H * 4u;
     uint32_t *ref_a = (uint32_t *)malloc(bytes), *ref_b = (uint32_t *)malloc(bytes);
