@@ -302,7 +302,7 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 ### 10.1. The Launch Line
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
-`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off`. `tier` (`enhanced` or `ace`) only names the
+`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;twin=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. Every other key is
 required, in any order, each once; a value for a feature this build does not carry (`wide=fill`, `smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
@@ -501,7 +501,7 @@ help text says so.
 
 ```json
 "enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "smooth": "off",
-            "sas": "off"},
+            "sas": "off", "twin": "off"},
 "title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}}
 ```
 
@@ -633,13 +633,19 @@ at `s_twin`).
   - I/O speed: unchanged. The twin performs no guest I/O.
 - **Default.** Off. It stays off by default until section 11.2 item 4's "nothing worse" runs pass: picture-gate or
   route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the same
-  run with it off. When the Ace launch line carries its key (`twin`, below), the key follows section 11.2 item 2.
-- **Setting.** `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity
-  self-tests use), read when the renderer starts. Unset, empty, `0` and `off` are off. Any other value prints
-  `TWIN: refused (...)` and leaves it off. It takes effect only in Ace Mode: in an authentic run it stays off whatever
-  the environment says, and a request prints one `TWIN: off (the host twin needs Ace Mode)` line. Until the Ace
-  launch line carries its key (`twin`, beside `tex`, `s2d` and `glyphs`, with the per-title switches of section
-  10.5, after #2074), the variable is the only way to turn it on, and it is off by default.
+  run with it off. The launch line carries its key (`twin`, below), which follows section 11.2 item 2: a library
+  switch and a per-title switch, each off by default.
+- **Setting.** The launch line's `twin=off|on` (section 10.1), a required key: `twin=on` asks for full colour. The
+  player writes it from the part "Full 32-bit colour" (`"twin"`, `on` or `off`) on the library's Settings > Enhanced
+  page and on each title's own page (sections 10.5 and 10.9); it is off unless the player turns it on.
+  `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity self-tests
+  use), read when the renderer starts, stays as the developer override and wins whenever it is set: unset or empty
+  leaves the choice to the launch line, `0` and `off` are off, and any other value prints `TWIN: refused (...)` and
+  leaves it off. The twin takes effect only in Ace Mode: in an authentic run it stays off whatever the environment
+  says, and a request prints one `TWIN: off (the host twin needs Ace Mode)` line. When the key asked for it and it
+  does not come up (the `TWIN: unavailable` and `TWIN: off for the rest of the run` cases below), the run names
+  `twin` unavailable on stderr and in the report; a twin that ran is confirmed, so a run where the renderer never
+  started it is reported as not run (section 10.4).
 - **Cost.** Each render op is drawn twice at the render scale, and the twins use as much GPU memory as the targets.
 - **Fail-closed.** A GPU without nearest blits of RGBA8 and D16 prints `TWIN: unavailable (...)` and runs without it.
   If any twin allocation fails during the run, one `TWIN: off for the rest of the run (...)` line is printed, every

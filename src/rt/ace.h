@@ -8,7 +8,7 @@
  * value can never opt a launch in:
  *
  *     SR_ACE=off
- *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off
+ *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;twin=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
  * line without it is an Enhanced run. Every other key is required in v1, in any order, each
@@ -58,6 +58,7 @@ typedef struct {
     int smooth;      /* AceSmooth */
     int tier;        /* AceTier */
     int sas;         /* AceSas: SAS voices mix through a band-limited resampler (host-only) */
+    int twin;        /* full 32-bit colour: 16-bit games drawn on a host twin, no dither (host-only) */
 } AceConfig;
 
 typedef enum {
@@ -68,6 +69,7 @@ typedef enum {
     ACE_FEATURE_WIDE,
     ACE_FEATURE_SMOOTH,
     ACE_FEATURE_SAS,
+    ACE_FEATURE_TWIN,
     ACE_FEATURE_COUNT
 } AceFeature;
 

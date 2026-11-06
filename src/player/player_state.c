@@ -1449,6 +1449,9 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"sas", "Clean pitched sound",
      "Resamples pitched sound effects without aliasing. Changes the samples the game mixes.",
      2, k_part_switch_values, k_part_switch_labels, k_part_sas_words, 0},
+    {"twin", "Full 32-bit colour",
+     "Shows 16-bit games in full colour, without dither. Uses more graphics memory.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
