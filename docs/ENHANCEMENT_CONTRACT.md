@@ -709,6 +709,18 @@ top-left device pixel of each guest pixel, so the guest reads what the device dr
   - A sprite that samples a render target at device resolution (a screen copy) is clamped the same way, so the copy's
     one-pixel border shows the guest-pixel sample instead of the upscaled detail.
 
+Render targets keep the render scale when a later draw reads them as textures, when the read is one the renderer can
+bind directly: the same pixel format as the target, not swizzled, no mip levels, the target's own buffer width and a
+pixel-aligned address. Then the draw samples the target's image at the render scale, on the PSP's sample lattice in
+guest texels: linear filtering, in sixteenths of a guest texel, blends the device texels there, so an effect drawn
+into a smaller buffer and sampled back with linear filtering (a bloom or glow pass) keeps its detail (`rtt-scale` in
+`gpu-coherence-selftest`). Nearest filtering takes each guest texel's centre, as the PSP does, so it shows one
+device texel per guest texel.
+Every other read of a render target, including a read in another format, a swizzled or mipmapped read, another
+buffer width and depth read as a texture, decodes the target from guest memory at 1x. That is the GE's own picture
+of it, so such an effect shows 1x detail at any render scale; it never shows a picture the PSP would not draw. The
+cases and the debug switch are listed in `src/rt/gpu_sdl3vk/README.md` (#2052).
+
 At 1x the readback is the PSP's value.
 
 ### 11.2. What an Item Must Have
