@@ -217,11 +217,6 @@ class NkCoreTests(unittest.TestCase):
                         f"{path.relative_to(repo_root)}:{line}: {literal!r}"
                     )
 
-        renderer = (repo_root / "src" / "player" / "ui_renderer.c").read_text(
-            encoding="utf-8"
-        )
-        self.assertNotIn("draw_issue_links", renderer)
-        self.assertNotRegex(renderer, r'"#%[0-9]*[du]"')
         self.assertEqual(failures, [])
 
         summary = nk_cli._bringup_human_summary(

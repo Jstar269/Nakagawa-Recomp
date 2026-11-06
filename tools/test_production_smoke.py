@@ -3764,23 +3764,28 @@ class TestProductStatusCopy(unittest.TestCase):
     def _source(self, relative: str) -> str:
         return (ROOT / relative).read_text(encoding="utf-8")
 
-    def test_about_screen_carries_the_licence_and_no_endorsement_notice(self):
-        ui = self._source("src/player/ui_renderer.c")
-        start = ui.index("static void render_prerequisite_about(")
-        about = ui[start:ui.index("\n}\n", start)]
-        self.assertIn("GPL-3.0-or-later; see LICENSE and NOTICE.md", about)
-        self.assertIn("Not affiliated with or endorsed by Sony Interactive Entertainment", about)
+    def _c_text(self, relative: str) -> str:
+        """A C source with adjacent string literals joined, as the compiler joins them."""
+        return re.sub(r'"\s*\n\s*"', "", self._source(relative))
 
-    def test_wizard_names_the_package_builder_and_the_open_boundaries(self):
-        ui = self._source("src/player/ui_renderer.c")
-        self.assertIn("Nakagawa decrypts your own disc on this PC; it never downloads games "
-                      "or touches firmware. ", ui)
-        self.assertIn("It builds runtime packages from the library.", ui)
-        self.assertNotIn("key file", ui)
-        self.assertIn("packages from the library. Verify also lists font and audio status.", ui)
-        self.assertNotIn("or create runtime packages", ui)
-        self.assertNotIn("draw_issue_links", ui)
-        self.assertEqual(ui.count("Build the runtime package from the library."), 3)
+    def test_about_screen_carries_the_licence_and_no_endorsement_notice(self):
+        # The launcher's notices page (Settings > Third-party notices) and its About page.
+        notices = self._c_text("src/player/ui/scr_settings.c")
+        self.assertIn("Nakagawa Recomp is free software (GPL-3.0-or-later; see LICENSE and "
+                      "NOTICE.md). Not affiliated with or endorsed by Sony Interactive "
+                      "Entertainment; PlayStation and PSP are its trademarks.", notices)
+        about = self._c_text("src/player/ui/scr_about.c")
+        self.assertIn("Not affiliated with or endorsed by Sony Interactive Entertainment. "
+                      "PSP is a trademark of its owner. No game data is included.", about)
+
+    def test_wizard_states_the_open_boundaries(self):
+        wizard = self._c_text("src/player/ui/scr_wizard.c")
+        self.assertIn("Your games stay on this PC. Nakagawa never uploads anything, and "
+                      "downloads only the build tools you approve. It decrypts your own disc "
+                      "here and never touches firmware.", wizard)
+        self.assertNotIn("key file", wizard)
+        self.assertNotIn("or create runtime packages", wizard)
+        self.assertNotIn("draw_issue_links", wizard)
 
     def test_library_checklist_points_at_the_library_package_builder(self):
         inspect = self._source("tools/nk_core/iso_inspect.py")

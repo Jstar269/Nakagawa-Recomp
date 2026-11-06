@@ -201,7 +201,7 @@ static const PlayerUiPrereqItem k_prereqs[] = {
 };
 
 typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CONSENT,
-               FLOW_PROGRESS, FLOW_ERROR, FLOW_WIZ_WELCOME, FLOW_WIZ_CHOOSE,
+               FLOW_PROGRESS, FLOW_ERROR, FLOW_ERROR_LONG, FLOW_WIZ_WELCOME, FLOW_WIZ_CHOOSE,
                FLOW_WIZ_BAD_DISC, FLOW_WIZ_CHOSEN,
                FLOW_WIZ_COPYING, FLOW_WIZ_VERIFY, FLOW_WIZ_EXPERIMENTAL, FLOW_WIZ_FONTS,
                FLOW_WIZ_READY, FLOW_WIZ_STAGED, FLOW_WIZ_OPTIONS, FLOW_WIZ_OPTIONS_ON, FLOW_WIZ_BLOCKED,
@@ -971,6 +971,27 @@ static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
         error.details = "Synthetic details: a source-owned fixture error, shown as data.";
         error.log_path = "C:/synthetic/logs/build.log";
         error.recovery_label = "BACK TO LIBRARY";
+        error.logical_width = g_flow_width;
+        error.logical_height = g_flow_height;
+        return player_ui_screen_error(ui, &error);
+    }
+    if (which == FLOW_ERROR_LONG) {
+        /* A message of about 600 characters, more than four lines on the card
+           (#2071 moved this case here from the old renderer's tests). */
+        static const char long_message[] =
+            "Build setup could not continue because a required file was missing. "
+            "Check the message, follow the suggested recovery steps, and try again. "
+            "If the application files are incomplete, reinstall the app and keep "
+            "its folder together. Return to the library after correcting the issue. "
+            "This final sentence confirms the full message remains visible beyond "
+            "the old four-line limit. Keep every recovery step on this card so the "
+            "player can read the complete instruction before leaving this screen.";
+        PlayerUiErrorModel error;
+        memset(&error, 0, sizeof(error));
+        error.badge = "Problem";
+        error.title = "Synthetic Long Error";
+        error.message = long_message;
+        error.recovery_label = "Back to library";
         error.logical_width = g_flow_width;
         error.logical_height = g_flow_height;
         return player_ui_screen_error(ui, &error);
@@ -2961,7 +2982,7 @@ static bool developer_log_op_is(PlayerUiAction action, PlayerUiDeveloperLogOp op
 }
 
 /* Controller settings and the developer log in the next UI. Every control
-   returns the op main.c runs with the existing renderer's handlers, and each
+   returns the op main.c runs with the player's handlers, and each
    page fits the 960 x 540 minimum window with no text over other text. */
 static void test_controller_and_developer_log_pages(void) {
     static char dump[CASE_DUMP_CAP];
@@ -3261,6 +3282,9 @@ static void test_every_screen_fits_the_window(void) {
                                      sizeof(dump)),
                       message);
             }
+            /* A long error message is wrapped, never cut: its last sentence shows. */
+            CHECK(flow_case_shows(FLOW_ERROR_LONG, sizes[s].w, sizes[s].h, "screen."),
+                  "a long error message keeps its last sentence in the window");
         }
     }
     g_flow_text_size_pct = 100;
