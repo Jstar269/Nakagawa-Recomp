@@ -77,6 +77,16 @@ int sr_hle_memstick_free_bytes(uint64_t *free_bytes) { *free_bytes = 0x40000000u
  * 2001-09-09 01:46:40 UTC and UTC here. */
 uint64_t sr_savedata_guest_rtc_tick(void) { return 62135596800000000ull + 1000000000ull * 1000000ull; }
 int32_t sr_savedata_console_offset_minutes(void) { return 0; }
+/* src/rt/sched.c supplies the preemption timer's flag and its edge inside a long call (#1296).
+ * The stub stands for the stronger thread that edge runs: it notes, the first time, what the
+ * SAVE had published by then, and keeps that thread due again when g_pp_rearm is set. */
+atomic_int_least32_t sr_preempt_due;
+static int g_pp_calls, g_pp_rearm, g_pp_first_probe = -1;
+static int (*g_pp_probe)(void);
+void sched_preempt_point(void) {
+    atomic_store_explicit(&sr_preempt_due, g_pp_rearm, memory_order_relaxed);
+    if (g_pp_calls++ == 0 && g_pp_probe) g_pp_first_probe = g_pp_probe();
+}
 
 #ifdef ORDER_INSTRUMENTED
 static int g_write_open_count;
@@ -814,6 +824,50 @@ static void check_atomic_cases(const char *base) {
 #endif
 }
 
+/* #1296: a SAVE is one HLE call that makes about one durable host write per member and per
+ * journal step, so a thread that came due during it waited for the whole SAVE. It now runs
+ * between those writes, before the SAVE publishes. */
+#if defined(SR_CD_BACKEND_POSIX_AT)
+static char g_pp_path[600];
+static int pp_published(void) {   /* 1 when the data file already holds the second SAVE's bytes */
+    char content[64];
+    return read_file(g_pp_path, content, sizeof(content)) && !strcmp(content, "SECOND-SAVE");
+}
+#endif
+
+static void check_preempt_cases(const char *base) {
+#if defined(SR_CD_BACKEND_POSIX_AT)
+    char root[512];
+    snprintf(root, sizeof(root), "%s/preempt", base);
+    snprintf(g_pp_path, sizeof(g_pp_path), "%s/PSP/SAVEDATA/ULUS99999SLOT00/DATA.BIN", root);
+    CHECK(run_save(root, "DATA.BIN", "FIRST-SAVE") == 0, "the first SAVE must succeed");
+    CHECK(g_pp_calls == 0, "with no thread due a SAVE hands the CPU to nobody (%d)", g_pp_calls);
+
+    /* A stronger thread is due as the SAVE begins: it runs inside the call, before the data
+     * file is published, not once the whole SAVE has returned. */
+    g_pp_probe = pp_published;
+    atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
+    CHECK(run_save(root, "DATA.BIN", "SECOND-SAVE") == 0, "a SAVE with a thread due must succeed");
+    CHECK(g_pp_calls == 1, "the due thread must run once inside the SAVE, ran %d times", g_pp_calls);
+    CHECK(g_pp_first_probe == 0, "the due thread must run before the SAVE publishes its data file");
+    CHECK(pp_published(), "the SAVE must still publish its bytes");
+
+    /* A thread due again after every step: one point before each member's staging write, one
+     * before the journal and one before each member is published (2 members: data, PARAM.SFO). */
+    g_pp_calls = 0;
+    g_pp_probe = NULL;
+    g_pp_rearm = 1;
+    atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
+    CHECK(run_save(root, "DATA.BIN", "THIRD-SAVE") == 0, "a SAVE with a thread always due must succeed");
+    g_pp_rearm = 0;
+    atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
+    CHECK(g_pp_calls == 5, "a two-member SAVE must hand the CPU over at 5 points, did at %d", g_pp_calls);
+#else
+    (void)base;
+    printf("SKIP: preemption savedata cases require the POSIX descriptor backend\n");
+#endif
+}
+
 #if defined(INJECT_INSTRUMENTED)
 #define BLOBS 0x08b00000u
 #define SAVE_MEMBERS 6
@@ -1055,6 +1109,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "open") && argc == 3) check_open_cases(argv[2]);
     else if (!strcmp(argv[1], "order") && argc == 3) check_write_order_cases(argv[2]);
     else if (!strcmp(argv[1], "atomic") && argc == 3) check_atomic_cases(argv[2]);
+    else if (!strcmp(argv[1], "preempt") && argc == 3) check_preempt_cases(argv[2]);
     else if (!strcmp(argv[1], "inject") && argc == 3) check_inject_cases(argv[2]);
     else if (!strcmp(argv[1], "getsize")) check_getsize_cases();
     else if (!strcmp(argv[1], "unsupported")) check_unsupported_host();
@@ -1178,6 +1233,16 @@ class TestSavedataSecurityProduction(unittest.TestCase):
             self.assertIsNotNone(run, "atomic-save selftest timed out")
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertIn("security_selftest: OK", run.stdout)
+
+    @unittest.skipIf(os.name == "nt", "the preemption SAVE harness runs in the WSL POSIX lane")
+    def test_a_thread_due_during_a_save_runs_before_the_save_publishes(self):
+        with scratch_dir.TemporaryDirectory(prefix="savedata_preempt_") as tmp:
+            exe = _build(tmp)
+            run = _run(exe, "preempt", tmp)
+            self.assertIsNotNone(run, "preemption SAVE selftest timed out")
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("security_selftest: OK", run.stdout)
+            self.assertNotIn("SKIP", run.stdout)
 
     @unittest.skipIf(os.name == "nt", "failure injection runs in the WSL POSIX lane")
     def test_every_failed_save_operation_keeps_the_previous_save(self):
