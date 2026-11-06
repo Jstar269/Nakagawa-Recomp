@@ -45,12 +45,39 @@ from nk_core import (
 )
 
 _ISSUE_REFERENCE_RE = re.compile(r"#[0-9]+")
-_ISSUE_FORMAT_RE = re.compile(r"#%[-+ 0#]*[0-9]*(?:h|hh|l|ll|z|j|t)?[di]")
+# Any conversion after "#" formats an issue number into user-facing text.
+_ISSUE_FORMAT_RE = re.compile(r"#%")
+# The known-issue link is the one issue number the player shows. It comes from
+# the code table k_known_causes through player_known_issue_for_boundary
+# (player_state.c), and only these literals format it: the error screen's
+# sentence and link, and the problem report's line. Matched by file and exact
+# literal, so neither another file nor another wording is let through.
+_KNOWN_ISSUE_LITERALS = frozenset({
+    ("src/player/ui/scr_error.c", '"This is a known issue (#%u)."'),
+    ("src/player/ui/scr_error.c", '"View issue #%u on GitHub"'),
+    ("src/player/player_state.c", '"#%u"'),
+})
 # Character literals are tokens too: an unmatched '"' would otherwise open a
 # phantom string that swallows the code after it.
 _C_TOKEN_RE = re.compile(
     r"""//[^\r\n]*|/\*.*?\*/|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\])*\"""", re.DOTALL
 )
+
+
+def _issue_number_literal_failures(rel_path: str, source: str) -> list[str]:
+    """Each C string literal in source that shows an issue number, as path:line: literal."""
+    failures: list[str] = []
+    # The old renderer drew issue links from a code table; nothing draws them now.
+    if "draw_issue_links" in source:
+        failures.append(f"{rel_path}: draw_issue_links")
+    for match in _C_TOKEN_RE.finditer(source):
+        token = match.group()
+        if not token.startswith('"') or (rel_path, token) in _KNOWN_ISSUE_LITERALS:
+            continue
+        if _ISSUE_REFERENCE_RE.search(token) or _ISSUE_FORMAT_RE.search(token):
+            line = source.count("\n", 0, match.start()) + 1
+            failures.append(f"{rel_path}:{line}: {token}")
+    return failures
 
 
 def _python_non_docstring_literals(path: Path) -> list[tuple[int, str]]:
@@ -188,6 +215,31 @@ class NkCoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def test_issue_number_guard_allows_only_the_known_issue_literals(self) -> None:
+        """The exception is the three known-issue literals, not a conversion letter."""
+        for rel, literal in sorted(_KNOWN_ISSUE_LITERALS):
+            with self.subTest(allowed=(rel, literal)):
+                self.assertEqual(_issue_number_literal_failures(rel, f"x = {literal};"), [])
+        rejected = [
+            ("src/player/ui/scr_error.c", '"see #%u"'),
+            ("src/player/ui/scr_error.c", '"#%lu"'),
+            ("src/player/ui/scr_error.c", '"#%x"'),
+            ("src/player/ui/scr_error.c", '"#%s"'),
+            ("src/player/ui/scr_error.c", '"#%d"'),
+            ("src/player/ui/scr_error.c", '"Issue #7"'),
+            ("src/player/ui/scr_library.c", '"This is a known issue (#%u)."'),
+            ("src/player/main.c", '"#%u"'),
+        ]
+        for rel, literal in rejected:
+            with self.subTest(rejected=(rel, literal)):
+                self.assertEqual(
+                    len(_issue_number_literal_failures(rel, f"x = {literal};")), 1
+                )
+        self.assertEqual(
+            _issue_number_literal_failures("src/player/x.c", "draw_issue_links();"),
+            ["src/player/x.c: draw_issue_links"],
+        )
+
     def test_user_facing_text_does_not_cite_issue_numbers(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         failures: list[str] = []
@@ -201,19 +253,9 @@ class NkCoreTests(unittest.TestCase):
         ]
         for path in c_paths:
             source = path.read_text(encoding="utf-8")
-            # The old renderer drew issue links from a code table; nothing draws them now.
-            if "draw_issue_links" in source:
-                failures.append(f"{path.relative_to(repo_root)}: draw_issue_links")
-            for match in _C_TOKEN_RE.finditer(source):
-                token = match.group()
-                if not token.startswith('"'):
-                    continue
-                # An issue number formatted from a signed value ("#%d") is a code
-                # table's number shown to the user. The known-issue link is the one
-                # issue number the launcher shows, from a title's data, as "#%u".
-                if _ISSUE_REFERENCE_RE.search(token) or _ISSUE_FORMAT_RE.search(token):
-                    line = source.count("\n", 0, match.start()) + 1
-                    failures.append(f"{path.relative_to(repo_root)}:{line}: {token}")
+            failures.extend(
+                _issue_number_literal_failures(path.relative_to(repo_root).as_posix(), source)
+            )
 
         python_paths = [
             repo_root / "tools" / "nk_cli.py",

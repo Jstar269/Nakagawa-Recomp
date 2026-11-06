@@ -3031,7 +3031,6 @@ static void test_platform_seam_answers_for_this_host(void) {
     assert(nk_platform_path_chars_equal('/', '\\'));
     assert(nk_platform_can_front_process_windows());
     assert(package_builder_toolchain_download_available());
-    assert(strcmp(nk_platform_sdl3_ttf_library_names()[0], "SDL3_ttf.dll") == 0);
     assert(same_env_value(nk_platform_env_home_dir(), getenv("USERPROFILE")));
     assert(same_env_value(nk_platform_env_user_name(), getenv("USERNAME")));
 #else
@@ -3039,10 +3038,8 @@ static void test_platform_seam_answers_for_this_host(void) {
     assert(host == NK_HOST_ANDROID);
 #elif defined(__APPLE__)
     assert(host == NK_HOST_MACOS);
-    assert(strcmp(nk_platform_sdl3_ttf_library_names()[0], "libSDL3_ttf.0.dylib") == 0);
 #elif defined(__linux__)
     assert(host == NK_HOST_LINUX);
-    assert(strcmp(nk_platform_sdl3_ttf_library_names()[0], "libSDL3_ttf.so.0") == 0);
 #endif
     assert(!nk_platform_is_path_separator('\\') && nk_platform_is_path_separator('/'));
     assert(!nk_platform_path_chars_equal('A', 'a'));

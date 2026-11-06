@@ -586,8 +586,12 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
             for (char *q = next_expect; *q; q++) if (*q == ' ') *q = '_';
         }
         /* The check that holds the build back, as the title page's sentence
-           comes from it: its code and the validator's own words. */
-        const PlayerPreflightCheck *blocker = selected != NULL
+           comes from it: its code and the validator's own words. Reported only
+           where the page shows a blocker, so "none" matches a page with none. */
+        const PlayerPreflightCheck *blocker =
+            selected != NULL && model != NULL &&
+                    model->build_preflight_message != NULL &&
+                    model->build_preflight_message[0]
             ? player_app_package_build_preflight_blocker(app, app->selected_game_index)
             : NULL;
         if (blocker != NULL) {

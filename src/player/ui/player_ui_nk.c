@@ -118,7 +118,9 @@ struct PlayerUiNk {
     char status_text[PLAYER_UI_TITLE_CAP][256];
     char library_page_label[64];
     char flow_title[NK_MAX_TITLE_LEN + NK_MAX_DISC_ID_LEN + 16];
-    bool build_built; /* the build screen's model: the package is written */
+    /* The build screen's model on this frame: 1 the package is written, 0 it is
+       building, -1 the frame drew no build screen. */
+    int build_built;
     PlayerUiPrereqItem prereq_items[PLAYER_UI_PREREQ_CAP];
     char version_line[64];
     char data_root_line[NK_MAX_PATH + 48]; /* About: which data folder is in use */
@@ -1349,7 +1351,7 @@ static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
         }
         model.title_line = player->flow_title;
         model.built = build->is_complete && !build->is_failed;
-        player->build_built = model.built;
+        player->build_built = model.built ? 1 : 0;
         switch (build->current_stage) {
             case PACKAGE_BUILD_STAGE_EXTRACT: model.stage = 1; break;
             case PACKAGE_BUILD_STAGE_COMPILE: model.stage = 2; break;
@@ -1590,7 +1592,7 @@ int player_ui_nk_test_route(const PlayerUiNk *player) {
 }
 
 int player_ui_nk_test_build_built(const PlayerUiNk *player) {
-    return player != NULL && player->build_built ? 1 : 0;
+    return player != NULL ? player->build_built : -1;
 }
 
 unsigned player_ui_nk_test_focus(const PlayerUiNk *player) {
@@ -2759,6 +2761,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         window == NULL) {
         return false;
     }
+    player->build_built = -1;
     if (!SDL_GetRenderOutputSize(renderer, &pixel_w, &pixel_h) ||
         pixel_w <= 0 || pixel_h <= 0) {
         return false;

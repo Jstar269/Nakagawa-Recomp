@@ -3,9 +3,10 @@
 
 /* SDL3_ttf text backend for nk_ui (lane C3b).
 
-   SDL3_ttf is loaded at run time (SDL_LoadObject), as the player does today, so
-   this file needs the SDL3_ttf headers to compile but no import library: a host
-   without the shared library gets a failed nk_ui_ttf_create and falls back.
+   SDL3_ttf is loaded at run time (SDL_LoadObject), so this file needs the
+   SDL3_ttf headers to compile but no import library: on a host without the
+   shared library nk_ui_ttf_create fails and the caller decides. The player's
+   launcher cannot start without it: the player says so and exits with code 4.
    Shaping goes through a custom TTF_TextEngine whose CreateText callback copies
    the draw operations SDL3_ttf computed with HarfBuzz (clusters, kerning and
    per-glyph font fallback); rasterising uses TTF_GetGlyphImageForIndex.

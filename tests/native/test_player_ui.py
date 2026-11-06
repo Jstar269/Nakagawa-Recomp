@@ -4046,6 +4046,11 @@ class NativePlayerUiTests(unittest.TestCase):
                             "CANCEL BUILD is not focused while the build runs")
         self.assertEqual(frames[1]["package_cancelled"], "0",
                          "a stray Enter does not cancel the build")
+        # The build screen was drawn on that frame (-1 when it was not), and it
+        # shows the build running.
+        self.assertEqual(frames[0]["view"], "building_package")
+        self.assertNotEqual(frames[0]["next_build_built"], "-1",
+                            "the build screen was drawn")
         self.assertEqual(frames[0]["next_build_built"], "0",
                          "a running build is not shown as built")
         self.assertEqual(frames[1]["view"], "building_package")
