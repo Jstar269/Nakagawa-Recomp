@@ -419,8 +419,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     bool had_reduce_motion;
     char *old_reduce_motion = capture_environment_value("SR_REDUCE_MOTION", &had_reduce_motion);
     set_environment_value("SR_REDUCE_MOTION", "on");
-    /* Nor an inherited nickname (#2197): the session's, empty here, masks it, and the runtime
-       then serves the neutral default. */
+    /* Nor an inherited nickname (#2197): the session's, the neutral "Player" that
+       nk_launch_prepare_session gives a launch the player did not configure, masks it. */
     bool had_nickname;
     char *old_nickname = capture_environment_value("SR_NICKNAME", &had_nickname);
     set_environment_value("SR_NICKNAME", "poisoned-parent-nickname");
@@ -609,7 +609,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_EXPERIMENTAL_60HZ=0\n") != NULL);
     assert(strstr(observed, "SR_DEVELOPER_MODE=0\n") != NULL);
     assert(strstr(observed, "SR_REDUCE_MOTION=system\n") != NULL);
-    assert(strstr(observed, "SR_NICKNAME=\n") != NULL);
+    assert(strcmp(session.config.nickname, NK_NICKNAME_DEFAULT) == 0);
+    assert(strstr(observed, "SR_NICKNAME=Player\n") != NULL);
     assert(strstr(observed, "poisoned-parent-nickname") == NULL);
     assert(strcmp(session.config.ace_spec, "off") == 0);   /* prepare_session's default */
     assert(strstr(observed, "SR_ACE=off\n") != NULL);

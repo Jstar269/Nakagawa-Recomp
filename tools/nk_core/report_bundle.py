@@ -309,7 +309,10 @@ def _read_allowed(path: Path, limit: int, plan: BundlePlan, label: str,
     return BundleEntry(label, text.encode("utf-8"), note)
 
 
-_SENSITIVE_KEY = re.compile(r"(token|secret|password|passwd|credential|api[_-]?key|private)", re.I)
+# A key naming a secret, or the console nickname the user chose (#2197), which can be a real
+# name or handle. "nickname$" leaves "nickname_asked", a plain flag, as it is.
+_SENSITIVE_KEY = re.compile(
+    r"(token|secret|password|passwd|credential|api[_-]?key|private|nickname$)", re.I)
 
 
 def _scrub_json(value: object) -> object:

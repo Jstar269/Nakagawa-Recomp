@@ -2208,22 +2208,21 @@ class NativePlayerUiTests(unittest.TestCase):
     def test_next_ui_first_launch_nickname_prompt(self) -> None:
         """#2197: the first launch asks for a nickname once. Skip (Esc) keeps the neutral
         "Player" and is remembered, so the next start does not ask; a typed nickname is
-        saved. Failing-before: there was no prompt and settings.json had no nickname."""
-        prompt = {"NK_UI_TEST_NICKNAME_PROMPT": "1"}
-        skip = self.next_ui_run("library", ("WAIT_MS=300", "KEY_ESCAPE", "WAIT_MS=200"),
-                                env_extra=prompt)
+        saved. --view=nickname-prompt is the one view that shows it. Failing-before: there was
+        no prompt and settings.json had no nickname."""
+        skip = self.next_ui_run("nickname-prompt", ("WAIT_MS=300", "KEY_ESCAPE", "WAIT_MS=200"))
         self.assertIn(self.NICKNAME_SAVE, self.focus_trail(skip), "the prompt opens on Save")
         self.assertNotIn("QUIT_DIALOG", str(skip["stdout"]), "Esc is Skip, not quit")
         settings = skip["settings"]
         assert isinstance(settings, dict)
         self.assertEqual(settings.get("nickname"), "Player")
         self.assertIs(settings.get("nickname_asked"), True)
-        again = self.next_ui_run("library", ("WAIT_MS=300",), env_extra=prompt,
-                                 settings=settings)
+        again = self.next_ui_run("nickname-prompt", ("WAIT_MS=300",), settings=settings)
         self.assertNotIn(self.NICKNAME_SAVE, self.focus_trail(again), "it is asked only once")
         typed = self.next_ui_run(
-            "library", ("WAIT_MS=300", "TEXT=Ren 7", "KEY_RETURN", "WAIT_MS=200"),
-            env_extra=prompt)
+            "nickname-prompt", ("WAIT_MS=300", "TEXT=Ren 7", "KEY_RETURN", "WAIT_MS=200"))
+        self.assertNotIn(self.NICKNAME_SAVE, self.focus_trail(self.next_ui_run(
+            "library", ("WAIT_MS=300",))), "any other view keeps the prompt down")
         saved = typed["settings"]
         assert isinstance(saved, dict)
         self.assertEqual(saved.get("nickname"), "Ren 7")
@@ -2249,6 +2248,70 @@ class NativePlayerUiTests(unittest.TestCase):
         settings = run["settings"]
         assert isinstance(settings, dict)
         self.assertEqual(settings.get("nickname"), "Kai", "Save kept it; the empty Save did not")
+        # Typing stops at the 32-byte cap: 33 letters save as 32.
+        capped = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100", "TEXT=" + "x" * 33,
+             "KEY_RETURN", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        saved = capped["settings"]
+        assert isinstance(saved, dict)
+        self.assertEqual(saved.get("nickname"), "x" * 32, "the editor keeps the first 32 bytes")
+
+    def bare_screenshot(self, view: str,
+                        settings: dict[str, object] | None) -> tuple[bytes, object]:
+        """A bare ``--screenshot=<bmp> --view=<view>`` run, as tools/capture_native_screenshots.py
+        starts the player: no --ui-test-* option, on a throwaway data root that has a
+        settings.json only when one is given. Its pixels, and the settings it left behind."""
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            localappdata = scratch / "localappdata"
+            runtime_root = scratch / "runtime"
+            localappdata.mkdir()
+            runtime_root.mkdir()
+            config = (localappdata / "Nakagawa" / "config" if os.name == "nt"
+                      else scratch / "config" / "nakagawa-recomp")
+            if settings is not None:
+                config.mkdir(parents=True)
+                (config / "settings.json").write_text(
+                    json.dumps({"schema_version": 2, **settings}), encoding="utf-8")
+            env = os.environ.copy()
+            env.update({
+                "SDL_VIDEODRIVER": "dummy", "SDL_RENDER_DRIVER": "software",
+                "APPDATA": str(scratch), "LOCALAPPDATA": str(localappdata),
+                "USERPROFILE": str(scratch), "HOME": str(scratch),
+                "XDG_CONFIG_HOME": str(scratch / "config"), "XDG_DATA_HOME": str(scratch / "data"),
+                "XDG_CACHE_HOME": str(scratch / "cache"),
+            })
+            bmp = scratch / "shot.bmp"
+            completed = subprocess.run(
+                [str(PLAYER_EXE), f"--screenshot={bmp}", f"--view={view}",
+                 f"--runtime-root={runtime_root}", "--width=1280", "--height=720"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=120, check=False)
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertTrue(bmp.is_file(), completed.stdout)
+            saved_path = config / "settings.json"
+            saved = (json.loads(saved_path.read_text(encoding="utf-8"))
+                     if saved_path.is_file() else None)
+            return read_bmp(bmp)[3], saved
+
+    def test_bare_screenshot_view_never_shows_the_nickname_prompt(self) -> None:
+        """#2197 review B1: a bare --screenshot --view run on a fresh data root captures the page
+        it names, never the first-launch nickname prompt over it, and records no answer;
+        --view=nickname-prompt is the one view that shows it. Failing-before: the prompt
+        opened over every such run, so a fresh root's frame differed from an answered one's."""
+        answered = {"nickname_asked": True}
+        prompt_fresh, _ = self.bare_screenshot("nickname-prompt", None)
+        prompt_answered, _ = self.bare_screenshot("nickname-prompt", answered)
+        if prompt_fresh == prompt_answered:
+            self.skipTest("the next UI could not draw the prompt here (no UI fonts)")
+        for view in ("settings", "library"):
+            with self.subTest(view=view):
+                fresh, saved = self.bare_screenshot(view, None)
+                reference, _ = self.bare_screenshot(view, answered)
+                self.assertEqual(fresh, reference, "the fresh root's frame shows the prompt")
+                self.assertFalse(isinstance(saved, dict) and saved.get("nickname_asked") is True,
+                                 "holding the prompt down is not saved as an answer")
 
     def test_next_ui_settings_changes_are_saved_and_done_returns(self) -> None:
         """#1302: Settings in the next UI runs the same handlers and saves each change."""

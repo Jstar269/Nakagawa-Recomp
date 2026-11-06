@@ -184,10 +184,11 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
                     NK_UI_TYPE_TITLE, theme->paper);
     nk_ui_text_role(ui, FLOW_ID_LEAD,
                     model->first_launch
-                        ? "Games show it as your PSP's nickname. Type a nickname or user name, "
-                          "or skip to keep \"" NK_NICKNAME_DEFAULT "\". You can change it in "
-                          "Settings."
-                        : "Games show it as your PSP's nickname, from the next time a game starts.",
+                        ? "Games show it as your PSP's nickname. Type up to 32 letters (about "
+                          "10 Japanese characters), or skip to keep \"" NK_NICKNAME_DEFAULT "\". "
+                          "You can change it in Settings."
+                        : "Games show it as your PSP's nickname, from the next time a game "
+                          "starts. Up to 32 letters (about 10 Japanese characters).",
                     NK_UI_TYPE_BODY_S, theme->muted);
     {
         NkUiLayout field = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(),
@@ -220,7 +221,8 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
     }
     if (model->refused) {
         nk_ui_text_role(ui, FLOW_ID_NICKNAME_NOTE,
-                        "A nickname is 1 to 127 bytes of text, with no control characters.",
+                        "A nickname is 1 to 32 bytes of text (32 letters, fewer if they are "
+                        "accented or Japanese), with no control characters.",
                         NK_UI_TYPE_BODY_S, theme->warning);
     }
     {

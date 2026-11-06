@@ -7441,15 +7441,18 @@ static void test_player_nickname(void) {
     };
     char sep = nk_platform_path_separator();
     char cache_root[512], root[700], path[800], text[400];
-    char long_ok[NK_NICKNAME_MAX_BYTES + 1], long_bad[NK_NICKNAME_MAX_BYTES + 2];
+    char long_ok[33], long_bad[34], straddle[34];
     PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     char *saved;
     assert(app && back);
-    memset(long_ok, 'n', NK_NICKNAME_MAX_BYTES);
-    long_ok[NK_NICKNAME_MAX_BYTES] = '\0';
-    memset(long_bad, 'n', NK_NICKNAME_MAX_BYTES + 1);
-    long_bad[NK_NICKNAME_MAX_BYTES + 1] = '\0';
+    /* The 32-byte cap, one byte past it, and a two-byte character that ends past it. */
+    memset(long_ok, 'n', 32u);
+    long_ok[32] = '\0';
+    memset(long_bad, 'n', 33u);
+    long_bad[33] = '\0';
+    memset(straddle, 'n', 31u);
+    memcpy(straddle + 31, "\xC3\xA9", 3u);
     assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
     snprintf(root, sizeof(root), "%s%cnickname_probe", cache_root, sep);
     assert(nk_platform_mkdir_p(root));
@@ -7490,7 +7493,7 @@ static void test_player_nickname(void) {
     assert(!player_app_nickname_prompt_visible(back));
     assert(strcmp(back->settings.nickname, "Player") == 0);
 
-    /* Settings: a new nickname is saved at once and a reload reads it back, 127 bytes too. */
+    /* Settings: a new nickname is saved at once and a reload reads it back, 32 bytes too. */
     assert(player_app_set_nickname(back, "Ren\xC3\xA9 7"));
     player_app_init(app);
     assert(player_app_load_settings(app, path) == NK_OK);
@@ -7502,6 +7505,7 @@ static void test_player_nickname(void) {
 
     /* A refused value changes nothing: the old nickname stays, in memory and on disk. */
     assert(!player_app_set_nickname(back, long_bad));
+    assert(!player_app_set_nickname(back, straddle));
     assert(!player_app_set_nickname(back, NULL));
     for (size_t i = 0u; i < sizeof(refused) / sizeof(refused[0]); i++) {
         assert(!player_app_set_nickname(back, refused[i]));

@@ -1105,6 +1105,7 @@ NkResult nk_launch_prepare_session(
     session->config.master_volume = 100;
     snprintf(session->config.ace_spec, sizeof(session->config.ace_spec), "off");
     session->config.ace_report_path[0] = '\0';
+    snprintf(session->config.nickname, sizeof(session->config.nickname), "%s", NK_NICKNAME_DEFAULT);
 
     NkRuntimePackageInfo package_info;
     char package_error[1024] = "";

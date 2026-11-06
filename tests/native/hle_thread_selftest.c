@@ -7352,22 +7352,22 @@ static unsigned sysreg_count_word(const char *text, const char *word) {
 }
 
 /* #2197: the nickname default is SR_NICKNAME, the nickname the user chose in the player, when it
- * is 1 to 127 bytes of UTF-8 with no control character; otherwise the neutral "Player" is served
- * and stderr names SR_NICKNAME once. The default is a modeled value, so its read names no
+ * is 1 to 32 bytes of UTF-8 with no control character; otherwise the neutral "Player" is served
+ * and stderr names SR_NICKNAME once, saying whether it is missing, empty or invalid. The default is a modeled value, so its read names no
  * placeholder, and it is never recorded in the overlay: the next run serves the next SR_NICKNAME.
  * Malformed UTF-8 cannot pass through the Windows environment, so test_nk_nickname covers it. */
 static void test_sysparam_nickname_from_launcher(void) {
-    char long_ok[128], long_bad[129], log[1024];
+    char long_ok[33], long_bad[34], log[1024];
     const char *const refused[] = { long_bad, "a\x01" "b", "tab\tname" };
     uint32_t r = 0u, reg, xmb;
     FILE *capture = NULL;
     int saved_fd = -1, capturing;
     char *text;
 
-    memset(long_ok, 'n', 127u);
-    long_ok[127] = '\0';
-    memset(long_bad, 'n', 128u);
-    long_bad[128] = '\0';
+    memset(long_ok, 'n', 32u);
+    long_ok[32] = '\0';
+    memset(long_bad, 'n', 33u);
+    long_bad[33] = '\0';
     reset_fixture();
     sr_hle_init();
     sysreg_scratch_clean();
@@ -7400,7 +7400,7 @@ static void test_sysparam_nickname_from_launcher(void) {
     sysreg_restart();
     expect(sysparam_string(1u, SYSPARAM_STR_OUT, 0x80u) == 0u &&
                sysreg_guest_str_is(SYSPARAM_STR_OUT, long_ok),
-           "the next run serves the next SR_NICKNAME, here 127 bytes, all the 0x80-byte read holds");
+           "the next run serves the next SR_NICKNAME, here 32 bytes, the longest the player keeps");
 
     /* Missing or invalid: "Player", and one line naming SR_NICKNAME. */
     hle_test_setenv("SR_NICKNAME", NULL);
@@ -7425,8 +7425,27 @@ static void test_sysparam_nickname_from_launcher(void) {
         snprintf(what, sizeof(what), "invalid SR_NICKNAME case %u serves \"Player\"", (unsigned)i);
         expect(r == 0u && sysreg_guest_str_is(SYSPARAM_STR_OUT, "Player"), what);
         snprintf(what, sizeof(what), "invalid SR_NICKNAME case %u is named on stderr", (unsigned)i);
-        expect(capturing && strstr(log, "SR_NICKNAME is not 1 to 127 bytes of UTF-8") != NULL, what);
+        expect(capturing && strstr(log, "SR_NICKNAME is not 1 to 32 bytes of UTF-8") != NULL &&
+                   !strstr(log, "is empty") && !strstr(log, "is not set"), what);
     }
+
+    /* Present but empty (a launcher that names no nickname): "Player" too, and the line says
+       empty, not invalid. hle_test_setenv unsets an empty value, so it is set directly. */
+#ifdef _WIN32
+    expect(SetEnvironmentVariableW(L"SR_NICKNAME", L"") != 0, "SR_NICKNAME is set to an empty value");
+#else
+    expect(setenv("SR_NICKNAME", "", 1) == 0, "SR_NICKNAME is set to an empty value");
+#endif
+    sysreg_restart();
+    log[0] = '\0';
+    capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    r = sysparam_string(1u, SYSPARAM_STR_OUT, 0x80u);
+    if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+    expect(r == 0u && sysreg_guest_str_is(SYSPARAM_STR_OUT, "Player"),
+           "an empty SR_NICKNAME serves \"Player\"");
+    expect(capturing && strstr(log, "SR_NICKNAME is empty") != NULL && !strstr(log, "is not 1 to") &&
+               sysreg_count_word(log, "SR_NICKNAME") == 1u,
+           "an empty SR_NICKNAME is named once as empty, not as invalid");
 
     hle_test_setenv("SR_NICKNAME", NULL);
     sysreg_scratch_clean();

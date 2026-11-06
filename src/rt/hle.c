@@ -1383,7 +1383,8 @@ void flash0_font_sources(Flash0Sources *out);
 /* The default of /CONFIG/SYSTEM/owner_name, the console nickname (#2197): SR_NICKNAME, the
  * nickname the user chose in the player, when it passes nk_nickname_valid, else the neutral
  * NK_NICKNAME_DEFAULT. It is never taken from the operating system or its user name. Read once per
- * process; a missing or invalid SR_NICKNAME is named on stderr that once. */
+ * process; a missing, empty or invalid SR_NICKNAME is named on stderr that once, each in its own
+ * words, and "Player" is served. */
 static char s_sreg_owner_name[NK_NICKNAME_MAX_BYTES + 1u];
 static int s_sreg_owner_name_ready;
 
@@ -1397,12 +1398,18 @@ static const char *sreg_owner_name_default(void) {
     if (read && present && nk_nickname_valid(env)) {
         memcpy(s_sreg_owner_name, env, strlen(env) + 1u);
     } else {
+        char why[96];
         memcpy(s_sreg_owner_name, NK_NICKNAME_DEFAULT, sizeof(NK_NICKNAME_DEFAULT));
+        if (read && !present) {
+            snprintf(why, sizeof(why), "is not set");
+        } else if (read && env != NULL && env[0] == '\0') {
+            snprintf(why, sizeof(why), "is empty");
+        } else {
+            snprintf(why, sizeof(why), "is not 1 to %u bytes of UTF-8 without control characters",
+                     (unsigned)NK_NICKNAME_MAX_BYTES);
+        }
         fprintf(stderr, "sceReg: SR_NICKNAME %s; the nickname (/CONFIG/SYSTEM/owner_name) is the "
-                        "neutral default \"%s\"\n",
-                read && !present ? "is not set"
-                                 : "is not 1 to 127 bytes of UTF-8 without control characters",
-                NK_NICKNAME_DEFAULT);
+                        "neutral default \"%s\"\n", why, NK_NICKNAME_DEFAULT);
     }
     free(env);
     return s_sreg_owner_name;

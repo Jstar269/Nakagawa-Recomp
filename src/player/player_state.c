@@ -10829,7 +10829,8 @@ bool player_app_rebuild_card(const PlayerApp *app, const GameRecord *game,
 }
 
 bool player_app_nickname_prompt_visible(const PlayerApp *app) {
-    return app && !app->settings.nickname_asked && !app->settings_newer_schema;
+    return app && !app->settings.nickname_asked && !app->settings_newer_schema &&
+           !app->nickname_prompt_held;
 }
 
 bool player_app_nickname_prompt_answer(PlayerApp *app, const char *nickname) {

@@ -4383,6 +4383,10 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
             player_app_set_view(app, VIEW_LIBRARY);
         } else if (strcmp(test_view, "library") == 0) {
             player_app_set_view(app, VIEW_LIBRARY);
+        } else if (strcmp(test_view, "nickname-prompt") == 0) {
+            /* The library under the first-launch nickname prompt (#2197), which shows
+               while the settings have not answered it. */
+            player_app_set_view(app, VIEW_LIBRARY);
         } else if (strcmp(test_view, "experimental-library") == 0) {
             /* In-memory synthetic card for rendered UI regression; it is never
                admitted to the user's persistent library. */
@@ -5630,7 +5634,14 @@ int main(int argc, char *argv[]) {
         player_apply_test_view(&run.app, run.test_view);
         player_ui_test_prepare_app(&run.ui_test, &run.app);
         player_ui_test_apply_motion(&run.ui_test, &run.app);
-        player_ui_test_apply_nickname_prompt(&run.ui_test, &run.app);
+        /* A --screenshot, --view or scripted run shows the page it names
+           (tools/capture_native_screenshots.py), so the first-launch nickname prompt
+           (#2197) stays down for it, in memory only; --view=nickname-prompt asks for it. */
+        if ((run.screenshot_path != NULL || run.test_view != NULL ||
+             player_ui_test_active(&run.ui_test)) &&
+            !(run.test_view != NULL && strcmp(run.test_view, "nickname-prompt") == 0)) {
+            run.app.nickname_prompt_held = true;
+        }
         run.app.window_width = run.override_w;
         run.app.window_height = run.override_h;
         code = player_command_line_launch(&run);

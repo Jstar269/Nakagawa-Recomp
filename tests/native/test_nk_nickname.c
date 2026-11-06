@@ -2,8 +2,9 @@
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
 /* The console nickname rule (#2197, src/core/nk_nickname.h) that the player's Nickname setting and
- * the runtime's SR_NICKNAME share: the neutral default, the 127-byte cap of the PSP's 128-byte
- * fields, and the refusal of an empty value, a control character and malformed UTF-8. */
+ * the runtime's SR_NICKNAME share: the neutral default, the 32-byte cap (PPSSPP's Nickname
+ * limit, counted in UTF-8 bytes), and the refusal of an empty value, a control character and
+ * malformed UTF-8. */
 
 #include "nk_nickname.h"
 
@@ -38,19 +39,35 @@ static void test_default(void) {
 
 static void test_length(void) {
     char text[300];
-    CHECK(NK_NICKNAME_MAX_BYTES == 127u, "the cap is 127 bytes, a 128-byte field less its NUL");
+    CHECK(NK_NICKNAME_MAX_BYTES == 32u, "the cap is 32 bytes, PPSSPP's Nickname limit");
     CHECK(nk_nickname_valid("A"), "one byte is enough");
-    CHECK(nk_nickname_valid(repeat(text, sizeof(text), 'n', 127u, "")), "127 bytes are kept");
-    CHECK(!nk_nickname_valid(repeat(text, sizeof(text), 'n', 128u, "")), "128 bytes are refused");
+    CHECK(nk_nickname_valid(repeat(text, sizeof(text), 'n', 31u, "")), "31 bytes are kept");
+    CHECK(nk_nickname_valid(repeat(text, sizeof(text), 'n', 32u, "")), "32 bytes are kept");
+    CHECK(!nk_nickname_valid(repeat(text, sizeof(text), 'n', 33u, "")), "33 bytes are refused");
+    CHECK(!nk_nickname_valid(repeat(text, sizeof(text), 'n', 127u, "")),
+          "127 bytes, what a 128-byte field holds, are refused");
     CHECK(!nk_nickname_valid(repeat(text, sizeof(text), 'n', 200u, "")), "200 bytes are refused");
-    /* The cap counts bytes, not characters: a two-byte character that ends at byte 127 fits,
-       one that ends at byte 128 does not. */
-    CHECK(nk_nickname_valid(repeat(text, sizeof(text), 'n', 125u, "\xC3\xA9")),
-          "125 bytes and a two-byte character (127 bytes) are kept");
-    CHECK(!nk_nickname_valid(repeat(text, sizeof(text), 'n', 126u, "\xC3\xA9")),
-          "126 bytes and a two-byte character (128 bytes) are refused");
-    CHECK(!nk_nickname_valid(repeat(text, sizeof(text), 'n', 124u, "\xF0\x9F\x8E\xAE")),
-          "124 bytes and a four-byte character (128 bytes) are refused");
+    /* The cap counts bytes, not characters: a character that ends at byte 32 fits, one that
+       ends past it does not, and is refused whole. */
+    CHECK(nk_nickname_valid(repeat(text, sizeof(text), 'n', 30u, "\xC3\xA9")),
+          "30 bytes and a two-byte character (32 bytes) are kept");
+    CHECK(!nk_nickname_valid(repeat(text, sizeof(text), 'n', 31u, "\xC3\xA9")),
+          "31 bytes and a two-byte character (33 bytes) are refused");
+    CHECK(nk_nickname_valid(repeat(text, sizeof(text), 'n', 28u, "\xF0\x9F\x8E\xAE")),
+          "28 bytes and a four-byte character (32 bytes) are kept");
+    CHECK(!nk_nickname_valid(repeat(text, sizeof(text), 'n', 30u, "\xF0\x9F\x8E\xAE")),
+          "30 bytes and a four-byte character (34 bytes) are refused");
+    /* Ten three-byte Japanese characters (30 bytes) fit; eleven (33 bytes) do not. */
+    CHECK(nk_nickname_valid(repeat(text, sizeof(text), 'n', 0u,
+                                   "\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82"
+                                   "\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82"
+                                   "\xE3\x81\x82\xE3\x81\x82")),
+          "ten Japanese characters (30 bytes) are kept");
+    CHECK(!nk_nickname_valid(repeat(text, sizeof(text), 'n', 0u,
+                                    "\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82"
+                                    "\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82"
+                                    "\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82")),
+          "eleven Japanese characters (33 bytes) are refused");
 }
 
 static void test_empty_and_null(void) {

@@ -925,6 +925,10 @@ struct PlayerApp {
      * session runs on the defaults, and settings_notice says so on every
      * Settings page (player_app_load_settings). */
     bool settings_newer_schema;
+    /* This run keeps the first-launch nickname prompt down (#2197): a --screenshot, --view
+       or scripted run shows the page it names. Memory only: nickname_asked and settings.json
+       are left as they are. */
+    bool nickname_prompt_held;
     /* Why the library shows no saved games although library.json exists (a newer
      * player wrote it), or an empty string. Shown on the Library screen. */
     char library_notice[192];

@@ -15,12 +15,21 @@
 
 #define NK_NICKNAME_DEFAULT "Player"
 
-/* At most 127 bytes before the NUL: what the PSP's 128-byte nickname fields hold (PSPSDK
- * pspnet_adhocctl.h `char nickname[128]`, and the measured 0x80-byte
- * sceUtilityGetSystemParamString read, docs/HARDWARE_ORACLE.md PSP-HLE-SYSPARAM-001). The limit
- * of the PSP's own System Settings entry is UNMEASURED; once it is measured, this cap can drop
- * to it. */
-#define NK_NICKNAME_MAX_BYTES 127u
+/* At most 32 bytes before the NUL, counted in UTF-8 bytes, not characters.
+ *
+ * The PSP's 128-byte nickname fields hold more (PSPSDK pspnet_adhocctl.h `char nickname[128]`,
+ * and the measured 0x80-byte sceUtilityGetSystemParamString read, docs/HARDWARE_ORACLE.md
+ * PSP-HLE-SYSPARAM-001). The cap on what a user enters is lower: 32 bytes, the limit PPSSPP has
+ * shipped for its Nickname editor (PPSSPP 3bc60270eae3, UI/Settings/NetworkingPage.cpp:102, a
+ * maxLen of 32 that Common/UI/View.cpp:1527 enforces in UTF-8 bytes). A game that reads the
+ * nickname into a buffer too small for it and its NUL gets 0x80110102 and nothing written
+ * (src/rt/hle_utility.c, as measured), so a short nickname makes that far less likely.
+ *
+ * The limit of the PSP's own System Settings entry is UNMEASURED: no public source gives it, and
+ * pspautotests (70e72391, tests/utility/systemparam) measures only buffer sizes. A measurement on
+ * a PSP is still wanted. The PSP stores the nickname as UTF-8, so 32 bytes hold about 10
+ * Japanese characters. */
+#define NK_NICKNAME_MAX_BYTES 32u
 
 /* True when `nickname` is 1 to NK_NICKNAME_MAX_BYTES bytes of well-formed UTF-8 (no overlong
  * form, no surrogate, nothing past U+10FFFF) with no control character: C0 (U+0000 to U+001F),

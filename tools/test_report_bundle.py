@@ -160,7 +160,8 @@ class Fixture:
         (self.logs / "developer-log.txt").write_text(f"[player] {home}{BS}x\n", encoding="utf-8")
         (self.logs / "player-output.txt").write_text("player output\n", encoding="utf-8")
         (self.config / "settings.json").write_text(json.dumps(
-            {"library_dir": f"{home}\\Games", "update_token": "SECRET-TOKEN-VALUE", "volume": 7}), encoding="utf-8")
+            {"library_dir": f"{home}\\Games", "update_token": "SECRET-TOKEN-VALUE", "volume": 7,
+             "nickname": "Synthetic Nickname 7", "nickname_asked": True}), encoding="utf-8")
         # Planted files that must never appear: beside the allow-list, so a "walk and filter"
         # implementation would take them.
         (self.logs / "save-DATA.sav").write_bytes(b"SAVE-MARKER" + bytes(64))
@@ -246,6 +247,11 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(settings["library_dir"], "~\\Games")
             self.assertEqual(settings["update_token"], "<removed>")
             self.assertEqual(settings["volume"], 7)
+            # The nickname (#2197) can be a real name: it is removed, the flag beside it kept.
+            self.assertEqual(settings["nickname"], "<removed>")
+            self.assertIs(settings["nickname_asked"], True)
+            for info in archive.infolist():
+                self.assertNotIn(b"synthetic nickname 7", archive.read(info).lower(), info.filename)
 
     def test_flight_recorder_summary_has_sizes_not_contents(self) -> None:
         plan = build(self.fx.inputs())

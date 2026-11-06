@@ -156,7 +156,7 @@ ed25519-verify-selftest:
 	$(call ED25519_VERIFY_SELFTEST_CMD)
 
 # The console nickname rule (#2197, src/core/nk_nickname.h) that the player's Nickname setting
-# and the runtime's SR_NICKNAME share: the default, the 127-byte cap and the refused values.
+# and the runtime's SR_NICKNAME share: the default, the 32-byte cap and the refused values.
 define NK_NICKNAME_SELFTEST_CMD
 	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/core tests/native/test_nk_nickname.c \
 		-o $(BUILD_ROOT)/test_nk_nickname$(EXE_EXT)
