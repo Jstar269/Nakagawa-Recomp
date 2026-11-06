@@ -1455,6 +1455,7 @@ void hle_register_ge_handlers(void);
 void hle_register_mp3_handlers(void);
 void hle_register_atrac_handlers(void);
 void hle_register_sas_handlers(void);
+void hle_register_videocodec_handlers(void);
 void hle_register_utility_module_handlers(void);
 void hle_register_exit_game_handler(void);
 void hle_register_devkit_version_handler(void);

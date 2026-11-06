@@ -2235,6 +2235,91 @@ HANDLER_METADATA = {
         ],
         "limitation": "the positive peek contract with the button word inverted, from the public pspctrl.h description; no hardware cell measures the negative variants, and the positive-peek limitations apply (#341)",
     },
+    # sceVideocodec and sceMpegbase: the Media Engine video boundary under a disc mpeg.prx (#286).
+    "h_VideocodecOpen": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_context_words",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; writes context +0 = 0x05100601 and returns 0 (JPCSP returns its ME driver's result, not modelled); codec type 0 only, other types refused",
+    },
+    "h_VideocodecInit": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_context_words",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; writes +12 = +20 + 8 only",
+    },
+    "h_VideocodecGetEDRAM": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_context_words",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; allocates ((+24) + 63) | 0x3F bytes of a host 2 MiB ME RAM model, low-first, 64-byte aligned, first 0x10000 reserved; addresses are not PSP-measured",
+    },
+    "h_VideocodecReleaseEDRAM": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_teardown",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; clears +20 and +92 and frees the host ME RAM allocation",
+    },
+    "h_VideocodecSetMemory": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_context_words",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; accepts the call and writes nothing, as JPCSP does; the meaning of words +64..+76 is not modelled",
+    },
+    "h_VideocodecStop": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_teardown",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; drops the host decoder (the next decode starts a new one); whether the PSP drains pending pictures is not measured",
+    },
+    "h_VideocodecDelete": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_teardown",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; frees the decoder, ME memory and pictures and closes the context; returns at once (JPCSP notes about 40 ms on a PSP)",
+    },
+    "h_VideocodecDecode": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_decode",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; type 0 (AVC) only; synchronous host H.264 decode; buffer2, YUV struct, ME info blocks, buffer3 and SEI words are JPCSP's; the PSP's banded picture layout is not written (pictures stay host 4:2:0 planes keyed by the buffer-0 ME address); fails closed without an H.264 backend",
+    },
+    "h_MpegBaseCscInit": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_csc",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; records the default row width only; the coefficient table the PSP writes is not reproduced (conversion is the measured sr_h264_psp_rgb)",
+    },
+    "h_MpegBaseCscAvc": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_csc",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; converts only pictures this boundary decoded, found by their eight published band addresses, at the full picture size; 16-bit pixel modes and alpha follow sceMpegAvcCsc and are not measured",
+    },
+    "h_MpegBasePESpacketCopy": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_packet_copy",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; checks the whole packet list (sources, ME destinations, lengths, cycles) before copying; refusal codes other than the zero-length one are project-chosen",
+    },
+    "h_Mpegbase_0530BE4E": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_csc",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; mode mapping 0=8888, 1=5650, 2=5551, 3=4444 from JPCSP; unknown modes return -1",
+    },
 }
 
 # handler name -> status mapping. Preserved for direct consumers and gate checks.
@@ -2510,6 +2595,7 @@ SUBSYSTEMS = frozenset({
     "system",
     "umd",
     "utility",
+    "videocodec",
 })
 
 SUBSYSTEM_BY_PREFIX = {
@@ -2537,6 +2623,10 @@ SUBSYSTEM_BY_PREFIX = {
     # --- video and stream demux ---
     "sceMpeg": "mpeg",
     "scePsmf": "mpeg",
+    # --- the Media Engine video boundary under a disc mpeg.prx (#286) ---
+    "sceMpegBase": "videocodec",
+    "sceMpegbase": "videocodec",
+    "sceVideocodec": "videocodec",
     # --- network (fail-closed stubs) ---
     "sceHttp": "network",
     "sceNet": "network",

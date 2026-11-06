@@ -3960,6 +3960,7 @@ void sr_hle_init(void) {
     hle_register_atrac_handlers();
     hle_register_mp3_handlers();
     hle_register_sas_handlers();
+    hle_register_videocodec_handlers();
 #endif
 #ifndef SR_MPEG_MEDIA_SELFTEST
     /* Opt-in GE completion timing: the hooks report nothing unless SR_GE_TIMING=1. */

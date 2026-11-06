@@ -66,6 +66,7 @@ RUNTIME_HLE_SOURCES: tuple[str, ...] = (
     "src/rt/hle_system.c",
     "src/rt/hle_umd.c",
     "src/rt/hle_utility.c",
+    "src/rt/hle_videocodec.c",
 )
 
 #: Headers private to the runtime HLE files. :func:`text` includes them by default, so a
