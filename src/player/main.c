@@ -6,9 +6,8 @@
  *
  * main() reads the command line, loads the user's library and settings
  * (player_state.c), opens the SDL3 window and runs the event loop. Each frame
- * draws the active screen: the library and title screens come from the new UI
- * in src/player/ui/, every other screen from ui_renderer.c (all of them with
- * --ui=legacy). Slow work runs on its own thread so the window stays
+ * draws the active screen with the nk_ui launcher in src/player/ui/, which
+ * draws every view. Slow work runs on its own thread so the window stays
  * responsive:
  *   - staging copies a disc's files into the user's per-title folder
  *     (setup_staging.c, src/core/nk_iso.c);
@@ -26,7 +25,6 @@
 #include "player_state.h"
 #include "package_builder.h"
 #include "iso_reader.h"
-#include "ui_renderer.h"
 #include "ui/player_ui_nk.h"
 #include "nk_title_manifest.h"
 #include "nk_ui_widgets.h"
@@ -627,14 +625,13 @@ static const SDL_Event *player_back_as_escape(const PlayerApp *app, const Player
     return escape;
 }
 
-static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
-                                     PlayerUiNk *next_ui,
+static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
                                      SDL_Window *window, bool *running,
                                      bool *close_request_handled_in_batch,
                                      const SDL_Event *event) {
     SDL_Event escape;
     bool use_next_ui = player_ui_nk_view_active(next_ui, app);
-    if (!app || !input || !running || !event) return false;
+    if (!app || !running || !event) return false;
     event = player_back_as_escape(app, next_ui, event, &escape);
 
     switch (event->type) {
@@ -647,10 +644,8 @@ static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
         }
         return true;
     case SDL_EVENT_WINDOW_RESIZED:
-        if (!app->logical_ui) {
-            app->window_width = event->window.data1;
-            app->window_height = event->window.data2;
-        }
+        app->window_width = event->window.data1;
+        app->window_height = event->window.data2;
         if (!(SDL_GetWindowFlags(window) &
               (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED |
                SDL_WINDOW_MINIMIZED))) {
@@ -675,23 +670,11 @@ static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
             (SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED) != 0;
         return true;
     case SDL_EVENT_MOUSE_MOTION:
-        if (use_next_ui) return player_ui_nk_handle_event(next_ui, event);
-        input->mouse_x = (int)event->motion.x;
-        input->mouse_y = (int)event->motion.y;
-        return true;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        if (use_next_ui) return player_ui_nk_handle_event(next_ui, event);
-        if (event->button.button == SDL_BUTTON_LEFT) {
-            input->mouse_down = true;
-            input->mouse_clicked = true;
-        }
-        return true;
     case SDL_EVENT_MOUSE_BUTTON_UP:
-        if (use_next_ui) return player_ui_nk_handle_event(next_ui, event);
-        if (event->button.button == SDL_BUTTON_LEFT) input->mouse_down = false;
-        return true;
     case SDL_EVENT_WINDOW_MOUSE_LEAVE:
-        /* The launcher's hover ends with the pointer off the window. */
+        /* The pointer is the launcher's; its hover ends with the pointer off
+           the window. */
         return use_next_ui && player_ui_nk_handle_event(next_ui, event);
     case SDL_EVENT_KEY_DOWN:
         if (app->active_view == VIEW_CONTROLLER_SETTINGS &&
@@ -777,45 +760,6 @@ static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
             } else {
                 if (player_confirm_quit(window, app)) *running = false;
             }
-        } else if (event->key.key == SDLK_O && !app->wizard.is_extracting) {
-            trigger_file_picker(window, app);
-        } else if (event->key.key == SDLK_S && app->active_view != VIEW_INSPECTING) {
-            if (app->active_view == VIEW_SETTINGS) {
-                player_app_set_view(app, VIEW_LIBRARY);
-            } else {
-                player_app_set_view(app, VIEW_SETTINGS);
-            }
-        } else if (event->key.key == SDLK_TAB) {
-            int count = ui_focus_count(app);
-            player_app_move_focus(app, (event->key.mod & SDL_KMOD_SHIFT) ? -1 : 1,
-                                  count);
-        } else if (event->key.key == SDLK_RETURN || event->key.key == SDLK_KP_ENTER ||
-                   event->key.key == SDLK_SPACE) {
-            /* Held-key auto-repeat must not re-fire actions: the first PLAY
-               press swaps the button to STOP, so a repeat would stop the game. */
-            if (!event->key.repeat) input->activate_pressed = true;
-        } else if (player_view_is_library(app->active_view)) {
-            if (event->key.key == SDLK_LEFT) {
-                player_app_move_selection(app, -1);
-            } else if (event->key.key == SDLK_RIGHT) {
-                player_app_move_selection(app, 1);
-            } else if (event->key.key == SDLK_UP) {
-                player_app_move_focus(app, -1, ui_focus_count(app));
-            } else if (event->key.key == SDLK_DOWN) {
-                player_app_move_focus(app, 1, ui_focus_count(app));
-            } else if (event->key.key == SDLK_HOME) {
-                app->selected_game_index = app->game_count > 0 ? 0 : -1;
-            } else if (event->key.key == SDLK_END) {
-                app->selected_game_index = app->game_count - 1;
-            } else if (event->key.key == SDLK_PAGEUP) {
-                player_app_move_selection(app, -player_app_visible_library_cards(app));
-            } else if (event->key.key == SDLK_PAGEDOWN) {
-                player_app_move_selection(app, player_app_visible_library_cards(app));
-            }
-        } else if (event->key.key == SDLK_LEFT || event->key.key == SDLK_UP) {
-            player_app_move_focus(app, -1, ui_focus_count(app));
-        } else if (event->key.key == SDLK_RIGHT || event->key.key == SDLK_DOWN) {
-            player_app_move_focus(app, 1, ui_focus_count(app));
         }
         return true;
     case SDL_EVENT_KEY_UP:
@@ -826,13 +770,9 @@ static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
         if (use_next_ui) return player_ui_nk_handle_event(next_ui, event);
         return false;
     case SDL_EVENT_MOUSE_WHEEL:
-        if (use_next_ui) return player_ui_nk_handle_event(next_ui, event);
-        if (player_view_is_library(app->active_view) && event->wheel.y != 0.0f) {
-            player_app_move_selection(app, event->wheel.y > 0.0f ? -1 : 1);
-        }
-        return true;
+        return use_next_ui && player_ui_nk_handle_event(next_ui, event);
     case SDL_EVENT_GAMEPAD_AXIS_MOTION:
-        /* A trigger waiting to be bound is the binding in both launchers. */
+        /* A trigger is the binding of a control waiting to be bound. */
         if (use_next_ui && !(app->active_view == VIEW_CONTROLLER_SETTINGS &&
                              input_settings_is_capturing(&app->input_settings))) {
             return player_ui_nk_handle_event(next_ui, event);
@@ -866,8 +806,7 @@ static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
             player_app_set_view(app, VIEW_SETTINGS);
             return true;
         }
-        /* While a control waits to be bound, the next press is its binding, in
-           both launchers. */
+        /* While a control waits to be bound, the next press is its binding. */
         if (app->active_view == VIEW_CONTROLLER_SETTINGS &&
             input_settings_is_capturing(&app->input_settings)) {
             NkBindingSource src = {NK_BINDING_NONE, 0, 0};
@@ -885,36 +824,8 @@ static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
                              !player_view_is_library(app->active_view))) {
             return player_ui_nk_handle_event(next_ui, event);
         }
-        if (player_view_is_library(app->active_view)) {
-            switch (event->gbutton.button) {
-            case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
-                player_app_move_selection(app, -1);
-                break;
-            case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:
-                player_app_move_selection(app, 1);
-                break;
-            case SDL_GAMEPAD_BUTTON_DPAD_UP:
-                player_app_move_focus(app, -1, ui_focus_count(app));
-                break;
-            case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
-                player_app_move_focus(app, 1, ui_focus_count(app));
-                break;
-            case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:
-                player_app_move_selection(app, -player_app_visible_library_cards(app));
-                break;
-            case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER:
-                player_app_move_selection(app, player_app_visible_library_cards(app));
-                break;
-            case SDL_GAMEPAD_BUTTON_SOUTH:
-                input->activate_pressed = true;
-                break;
-            case SDL_GAMEPAD_BUTTON_START:
-                player_app_set_view(app, VIEW_SETTINGS);
-                break;
-            default:
-                break;
-            }
-        } else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST) {
+        if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST &&
+            !player_view_is_library(app->active_view)) {
             if (app->active_view == VIEW_SETUP_WIZARD) {
                 player_app_wizard_back(app);
             } else if (app->active_view == VIEW_CONTROLLER_SETTINGS) {
@@ -946,21 +857,6 @@ static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
                 player_app_set_view(app, VIEW_LIBRARY);
             } else {
                 player_app_set_view(app, VIEW_LIBRARY);
-            }
-        } else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) {
-            input->activate_pressed = true;
-        } else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_LEFT ||
-                   event->gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_UP) {
-            player_app_move_focus(app, -1, ui_focus_count(app));
-        } else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT ||
-                   event->gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_DOWN) {
-            player_app_move_focus(app, 1, ui_focus_count(app));
-        } else if (event->gbutton.button == SDL_GAMEPAD_BUTTON_START) {
-            if (app->active_view == VIEW_SETTINGS ||
-                app->active_view == VIEW_CONTROLLER_SETTINGS) {
-                player_app_set_view(app, VIEW_LIBRARY);
-            } else {
-                player_app_set_view(app, VIEW_SETTINGS);
             }
         }
         return true;
@@ -1039,8 +935,7 @@ static void player_ui_open_inspected_input_folder(PlayerApp *app) {
     (void)player_app_request_open_folder(app, folder);
 }
 
-/* The setup wizard's controls: the same handlers the existing renderer's
-   wizard buttons call (render_setup_wizard in ui_renderer.c). */
+/* The setup wizard's controls. */
 static void player_ui_wizard_apply(PlayerApp *app, PlayerUiWizardOp op) {
     switch (op) {
         case PLAYER_UI_WIZARD_CHECK_AGAIN:
@@ -1188,8 +1083,7 @@ static void player_ui_copy_error_details(PlayerApp *app) {
     }
 }
 
-/* The game-found card's controls: the same handlers the existing renderer's
-   buttons call. */
+/* The game-found card's controls. */
 static void player_ui_disc_apply(PlayerApp *app, PlayerUiDiscOp op) {
     switch (op) {
         case PLAYER_UI_DISC_ADD:
@@ -1698,8 +1592,7 @@ static void player_report_shutdown(void) {
     s_report_job = NULL;
 }
 
-/* The Settings controls: the same handlers the existing renderer's Settings
-   buttons call. Each change is saved as it is made. */
+/* The Settings controls. Each change is saved as it is made. */
 static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size_t arg) {
     switch (op) {
         case PLAYER_UI_SETTINGS_CHECK_UPDATES:
@@ -1852,8 +1745,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
     }
 }
 
-/* The controller settings controls: the same input_settings handlers the
-   existing renderer's controller buttons call. */
+/* The controller settings controls, through input_settings. */
 static void player_ui_controller_apply(PlayerApp *app, PlayerUiControllerOp op,
                                        size_t control) {
     InputSettingsState *input = &app->input_settings;
@@ -1932,7 +1824,7 @@ static void player_ui_controller_apply(PlayerApp *app, PlayerUiControllerOp op,
     }
 }
 
-/* The developer log controls, as the existing renderer's log buttons. */
+/* The developer log controls. */
 static void player_ui_developer_log_apply(PlayerApp *app, PlayerUiDeveloperLogOp op) {
     static char clip[PLAYER_DEV_LOG_LINES * PLAYER_DEV_LOG_LINE_MAX + 1];
     switch (op) {
@@ -2068,8 +1960,7 @@ static void player_ui_nk_apply_action(PlayerApp *app,
         player_app_set_view(app, VIEW_SETTINGS);
         return;
     }
-    /* The build, build tool download and error screens: the same handlers
-       the existing renderer's buttons call. */
+    /* The build, build tool download and error screens. */
     if (action->kind == PLAYER_UI_ACTION_CANCEL_BUILD) {
         player_app_cancel_package_build(app);
         player_app_set_view(app, VIEW_LIBRARY);
@@ -2177,83 +2068,16 @@ static void player_ui_nk_apply_action(PlayerApp *app,
     }
 }
 
-/* The screens ui_renderer.c draws are laid out on a PlayerUiCanvas and drawn
-   with a render scale straight into the output's pixels, so text, icons and
-   card edges are rasterised at the size they are shown (#1129). SDL's logical
-   presentation stays off: it stretched a fixed 1280x720 canvas to the window.
-   An interactive launcher refits to the window every frame; a capture draws
-   its fixed --width x --height layout at --render-scale. */
-static bool s_ui_canvas_from_window = false;
-static PlayerUiCanvas s_ui_capture_canvas = {
-    PLAYER_UI_DESIGN_WIDTH, PLAYER_UI_DESIGN_HEIGHT, 1.0f
-};
-
-static void player_fit_ui_canvas(PlayerApp *app, SDL_Renderer *renderer) {
-    PlayerUiCanvas canvas = s_ui_capture_canvas;
-    if (s_ui_canvas_from_window) {
-        int pixel_width = 0;
-        int pixel_height = 0;
-        /* A failed fit (a minimized window has no pixels) keeps the last
-           canvas, so layout and hit-testing still agree with the screen. */
-        if (!SDL_GetRenderOutputSize(renderer, &pixel_width, &pixel_height) ||
-            !player_ui_canvas_fit(pixel_width, pixel_height, &canvas)) {
-            return;
-        }
-    }
-    if (!SDL_SetRenderScale(renderer, canvas.scale, canvas.scale)) return;
-    app->window_width = canvas.width;
-    app->window_height = canvas.height;
-    app->dpi_scale = canvas.scale;
-}
-
-/* With the next UI on, the launcher switches presentation with the renderer
-   that draws the frame: nk_ui lays out at the window's real size, and the
-   screens still drawn by ui_renderer.c (setup wizard, settings, build progress,
-   dialogs) use the fitted canvas above. */
-static bool s_switch_presentation = false;
-static int s_presentation = -1; /* 0 fitted canvas, 1 native */
-
-static void player_use_presentation(PlayerApp *app, SDL_Window *window,
-                                    bool native) {
-    int want = native ? 1 : 0;
-    if (!s_switch_presentation || s_presentation == want) return;
-    if (native) {
-        int w = 0;
-        int h = 0;
-        if (SDL_GetWindowSize(window, &w, &h) && w > 0 && h > 0) {
-            app->window_width = w;
-            app->window_height = h;
-        }
-        app->logical_ui = false;
-    } else {
-        /* player_fit_ui_canvas sets the sizes before the frame is drawn. */
-        app->logical_ui = true;
-    }
-    s_presentation = want;
-}
-
+/* nk_ui draws the frame at the window's real size, from the output's pixels. */
 static void player_render_active_ui(PlayerUiNk *next_ui, PlayerApp *app,
-                                    SDL_Renderer *renderer, SDL_Window *window,
-                                    UiInput *input) {
+                                    SDL_Renderer *renderer, SDL_Window *window) {
     PlayerUiAction action;
-    bool next = player_ui_nk_view_active(next_ui, app);
-    player_use_presentation(app, window, next);
-    /* nk_ui sizes itself from the output's pixels; the canvas scale of the
-       screens below must not apply to it. */
-    if (next) (void)SDL_SetRenderScale(renderer, 1.0f, 1.0f);
-    if (next && player_ui_nk_render(next_ui, app, renderer, window, &action)) {
+    if (player_ui_nk_view_active(next_ui, app) &&
+        player_ui_nk_render(next_ui, app, renderer, window, &action)) {
         player_ui_nk_apply_action(app, &action);
-#ifdef NK_PLAYER_UI_REGRESSION_TEST
-    } else if (next_ui == NULL) {
-        /* --ui=legacy, the regression build only. */
-        player_use_presentation(app, window, false);
-        player_fit_ui_canvas(app, renderer);
-        ui_render_frame(renderer, app, input);
-#endif
     } else {
         /* The launcher draws every view (player_ui_nk_draws_view); a frame it
-           could not draw is cleared, never handed to another renderer. */
-        (void)input;
+           could not draw is cleared. */
         (void)SDL_SetRenderDrawColor(renderer, 11u, 15u, 20u, 255u);
         (void)SDL_RenderClear(renderer);
     }
@@ -2483,8 +2307,8 @@ static void player_package_status_queue_all(PlayerApp *app,
    launcher shows, then one a build or staging asked for. A title off screen
    waits until it is shown: a full check hashes the disc's executable and
    modules, and checking every title of a large library at every start read
-   every disc. Without the launcher (the regression build's old renderer) any
-   queued title goes, in library order. */
+   every disc. While no launcher view is drawn, any queued title goes, in
+   library order. */
 static int player_package_status_pick(const PlayerApp *app, const PlayerUiNk *next_ui,
                                       const bool requested[MAX_LIBRARY_GAMES],
                                       const bool force_requested[MAX_LIBRARY_GAMES]) {
@@ -3881,10 +3705,6 @@ typedef struct PlayerRun {
        file, instead of the documented empty-library prompt. */
     bool populate_sample;
     bool force_empty;
-    /* The nk_ui launcher is the only launcher. The regression-test build keeps
-       the old renderer behind --ui=legacy for the tests that still pin it;
-       the shipped player has no way to reach it. */
-    bool ui_next_requested;
     /* The initial disc image: a converted PSN package or an expanded compressed image. */
     char converted_iso_path[NK_MAX_PATH];
     char expanded_iso_path[NK_MAX_PATH];
@@ -3901,7 +3721,6 @@ typedef struct PlayerRun {
     SDL_Window *window;
     SDL_Renderer *renderer;
     PlayerUiNk *next_ui;
-    UiInput input;
     int capture_pixel_width;
     int capture_pixel_height;
     bool window_frame_measured;
@@ -3946,7 +3765,6 @@ static void player_run_init(PlayerRun *run) {
     run->override_w = 1280;
     run->override_h = 720;
     run->capture_render_scale = 1.0f;
-    run->ui_next_requested = true;
 }
 
 /* Reads the command line (and --help), then checks it. */
@@ -3966,10 +3784,6 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--experimental-60hz") == 0) {
             player_app_set_experimental_60hz_session(app, true);
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
-        } else if (strcmp(argv[i], "--ui=next") == 0) {
-            run->ui_next_requested = true;
-        } else if (strcmp(argv[i], "--ui=legacy") == 0) {
-            run->ui_next_requested = false;
         } else if (player_ui_test_parse_arg(&run->ui_test, argv[i])) {
             /* A --ui-test-* option, taken by the harness. */
 #endif
@@ -4536,10 +4350,6 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
             player_app_set_error(app, "SOURCE_NOT_FOUND", "Game file not found",
                                  "Nakagawa could not locate the source ISO file on disk.",
                                  "Locate game ISO", VIEW_LIBRARY);
-        } else if (strcmp(test_view, "focus") == 0) {
-            /* set_view resets focus, so the focused card is chosen after it. */
-            player_app_set_view(app, VIEW_LIBRARY);
-            app->focus_index = 1;
         } else if (strcmp(test_view, "wizard") == 0 || strcmp(test_view, "wizard1") == 0) {
             player_app_start_setup_wizard(app);
         } else if (strcmp(test_view, "wizard2") == 0) {
@@ -4841,46 +4651,34 @@ static int player_open_window(PlayerRun *run) {
         SDL_Quit();
         return 1;
     }
-    if (run->ui_next_requested) {
-        char ui_error[256] = "";
-        run->next_ui = player_ui_nk_create(run->renderer, run->window, app,
-                                      ui_error, sizeof(ui_error));
-        player_ui_test_set_next_ui(run->next_ui);
-        if (run->next_ui == NULL) {
-            /* There is no other launcher to fall back to: say why, once, and
-               stop. A build without the launcher's support needs building
-               again; a missing file needs installing again. */
-            char message[1024];
-            player_launcher_unavailable_message(ui_error,
-                                                !player_ui_nk_built_with_launcher(),
-                                                message, sizeof(message));
-            fprintf(stderr, "[PLAYER] LAUNCHER_UNAVAILABLE: %s\n", message);
-            if (run->interactive_window) {
-                SDL_HideWindow(run->window);
-                (void)SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-                                               "Nakagawa Recomp can't start", message, NULL);
-            }
-            SDL_DestroyRenderer(run->renderer);
-            SDL_DestroyWindow(run->window);
-            SDL_Quit();
-            return 4;
+    char ui_error[256] = "";
+    run->next_ui = player_ui_nk_create(run->renderer, run->window, app,
+                                  ui_error, sizeof(ui_error));
+    player_ui_test_set_next_ui(run->next_ui);
+    if (run->next_ui == NULL) {
+        /* There is no other launcher to fall back to: say why, once, and
+           stop. A build without the launcher's support needs building
+           again; a missing file needs installing again. */
+        char message[1024];
+        player_launcher_unavailable_message(ui_error,
+                                            !player_ui_nk_built_with_launcher(),
+                                            message, sizeof(message));
+        fprintf(stderr, "[PLAYER] LAUNCHER_UNAVAILABLE: %s\n", message);
+        if (run->interactive_window) {
+            SDL_HideWindow(run->window);
+            (void)SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                                           "Nakagawa Recomp can't start", message, NULL);
         }
+        SDL_DestroyRenderer(run->renderer);
+        SDL_DestroyWindow(run->window);
+        SDL_Quit();
+        return 4;
     }
     player_ui_test_report_startup(&run->ui_test, run->next_ui);
-    s_switch_presentation = run->interactive_window && run->next_ui != NULL;
-    s_ui_canvas_from_window = run->interactive_window;
-    /* A capture lays out --width x --height units, as before, and draws each
-       as --render-scale pixels; a window at the scale player_ui_canvas_fit
-       picks for it shows the same picture. */
-    s_ui_capture_canvas.width = run->override_w;
-    s_ui_capture_canvas.height = run->override_h;
-    s_ui_capture_canvas.scale = run->capture_render_scale;
+    /* A capture draws --width x --height at --render-scale pixels each. */
     run->capture_pixel_width = (int)(run->override_w * run->capture_render_scale + 0.5f);
     run->capture_pixel_height = (int)(run->override_h * run->capture_render_scale + 0.5f);
-    if (run->interactive_window && run->next_ui == NULL) {
-        app->logical_ui = true;
-        player_fit_ui_canvas(app, run->renderer);
-    } else if (run->interactive_window) {
+    if (run->interactive_window) {
         int actual_width = run->startup_window.width;
         int actual_height = run->startup_window.height;
         if (!SDL_GetWindowSize(run->window, &actual_width, &actual_height)) {
@@ -4895,7 +4693,6 @@ static int player_open_window(PlayerRun *run) {
     if (!player_ui_test_create_target(&run->ui_test, run->renderer, run->capture_pixel_width,
                                       run->capture_pixel_height)) {
         player_ui_nk_destroy(run->next_ui);
-        ui_font_shutdown();
         SDL_DestroyRenderer(run->renderer);
         SDL_DestroyWindow(run->window);
         SDL_Quit();
@@ -4914,8 +4711,8 @@ static int player_capture_screenshot(PlayerRun *run) {
         if (target) {
             SDL_SetRenderTarget(run->renderer, target);
         }
-        player_render_active_ui(run->next_ui, app, run->renderer, run->window, &run->input);
-        if (ui_capture_screenshot(run->renderer, run->screenshot_path)) {
+        player_render_active_ui(run->next_ui, app, run->renderer, run->window);
+        if (player_host_save_screenshot(run->renderer, run->screenshot_path)) {
             printf("[PLAYER] Screenshot saved to %s (%dx%d pixels, %dx%d layout)\n", run->screenshot_path,
                    run->capture_pixel_width, run->capture_pixel_height,
                    app->window_width, app->window_height);
@@ -4941,7 +4738,6 @@ static int player_capture_screenshot(PlayerRun *run) {
         }
 
         player_ui_nk_destroy(run->next_ui);
-        ui_font_shutdown();
         SDL_DestroyRenderer(run->renderer);
         SDL_DestroyWindow(run->window);
         SDL_Quit();
@@ -5006,7 +4802,7 @@ static void player_loop_start(PlayerRun *run) {
        process-exit monitoring alive while the user is idle; staging progress
        and normal input still wake the loop immediately. */
     player_ui_test_begin_first_frame(&run->ui_test);
-    player_render_active_ui(run->next_ui, app, run->renderer, run->window, &run->input);
+    player_render_active_ui(run->next_ui, app, run->renderer, run->window);
     if (run->interactive_window && run->have_usable_bounds && !run->window_frame_measured) {
         run->window_frame_measured = player_refit_to_actual_frame(
             run->window, run->requested_window, run->usable_bounds,
@@ -5030,11 +4826,9 @@ static void player_frame_begin(PlayerRun *run) {
         &run->build_check_session_generation,
         &run->build_check_cache_generation,
         &run->build_check_pending);
-    ui_renderer_recover_lost_art_handoffs();
     if (player_ui_test_active(&run->ui_test)) {
-        player_ui_test_step_script(&run->ui_test, app, run->renderer, &run->running,
-                                   run->package_status_job != NULL ||
-                                       ui_renderer_art_pending());
+        player_ui_test_step_script(&run->ui_test, app, &run->running,
+                                   run->package_status_job != NULL);
     }
     uint64_t now_tick = SDL_GetTicks();
     uint32_t delta_ms = (uint32_t)(now_tick >= run->last_tick ? (now_tick - run->last_tick) : 0);
@@ -5045,9 +4839,6 @@ static void player_frame_begin(PlayerRun *run) {
     /* The Controls page has no Save step: a binding, a reset or a stick setting
        changed last frame is written to the input profile now (#1299). */
     (void)input_settings_save_if_dirty(&app->input_settings);
-
-    run->input.mouse_clicked = false;
-    run->input.activate_pressed = false;
 }
 
 /* Waits for and dispatches the frame's input and worker events. */
@@ -5063,19 +4854,6 @@ static void player_frame_events(PlayerRun *run) {
                     ? (Sint32)player_ui_nk_wait_ms(run->next_ui, 50u) : 50);
     if (event_available) {
         do {
-            if (app->logical_ui &&
-                (event.type == SDL_EVENT_MOUSE_MOTION ||
-                 event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                 event.type == SDL_EVENT_MOUSE_BUTTON_UP ||
-                 event.type == SDL_EVENT_MOUSE_WHEEL ||
-                 event.type == SDL_EVENT_FINGER_MOTION ||
-                 event.type == SDL_EVENT_FINGER_DOWN ||
-                 event.type == SDL_EVENT_FINGER_UP ||
-                 event.type == SDL_EVENT_PEN_MOTION ||
-                 event.type == SDL_EVENT_PEN_DOWN ||
-                 event.type == SDL_EVENT_PEN_UP)) {
-                SDL_ConvertEventToRenderCoordinates(run->renderer, &event);
-            }
             /* A pad arriving or leaving updates the player's state first: the
                launcher also takes these events for its prompts, and a consumed
                event left Settings and the wizard saying "keyboard and mouse"
@@ -5104,14 +4882,11 @@ static void player_frame_events(PlayerRun *run) {
                     printf("[PLAYER] Gamepad disconnected\n");
                 }
             }
-            if (!player_dispatch_ui_event(app, &run->input, run->next_ui, run->window, &run->running,
+            if (!player_dispatch_ui_event(app, run->next_ui, run->window, &run->running,
                                           &close_request_handled_in_batch,
                                           &event)) {
                 switch (event.type) {
                 case SDL_EVENT_USER:
-                    if (ui_renderer_handle_async_event(run->renderer, &event)) {
-                        break;
-                    }
                     if (run->package_status_job &&
                         event.user.data1 == run->package_status_job &&
                         event.user.code == PLAYER_PACKAGE_STATUS_EVENT_CODE) {
@@ -5275,10 +5050,6 @@ static void player_frame_requests(PlayerRun *run) {
             /* The state helper has already opened the actionable error card. */
         }
     }
-
-    /* Clamp keyboard/gamepad focus before rendering so activation can
-     * never target a control the current view no longer draws. */
-    player_app_move_focus(app, 0, ui_focus_count(app));
 
     bool build_check_identity_changed = run->build_check_pending &&
         (!run->build_check_disc_id[0] ||
@@ -5458,7 +5229,7 @@ static void player_frame_game_session(PlayerRun *run) {
 static void player_frame_render(PlayerRun *run) {
     PlayerApp *app = &run->app;
     player_ui_test_begin_frame(&run->ui_test);
-    player_render_active_ui(run->next_ui, app, run->renderer, run->window, &run->input);
+    player_render_active_ui(run->next_ui, app, run->renderer, run->window);
     /* Consume renderer requests in the same frame that created them. A
        later event batch may change the selected title before the next
        loop iteration, which must not redirect this retry. */
@@ -5579,7 +5350,6 @@ static int player_shutdown(PlayerRun *run) {
     }
     player_ui_test_destroy_target(&run->ui_test, run->renderer);
     player_ui_nk_destroy(run->next_ui);
-    ui_font_shutdown();
     SDL_DestroyRenderer(run->renderer);
     SDL_DestroyWindow(run->window);
     if (app->factory_reset_done) {

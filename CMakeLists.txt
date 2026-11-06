@@ -613,7 +613,6 @@ if(BUILD_PLAYER)
         src/player/input_settings.c
         src/player/iso_reader.c
         src/player/setup_staging.c
-        src/player/ui_renderer.c
         src/player/package_builder.c
         src/core/nk_disc_chd.c
         src/player/update_check.c

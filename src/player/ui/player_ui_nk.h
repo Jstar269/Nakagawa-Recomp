@@ -509,7 +509,7 @@ typedef enum {
 } PlayerUiSettingsPage;
 
 /* What a Settings control asks for (PLAYER_UI_ACTION_SETTINGS). main.c runs the
-   same player_state handlers the existing renderer's Settings buttons call. */
+   player_state handler for each. */
 typedef enum {
     PLAYER_UI_SETTINGS_NONE = 0,
     PLAYER_UI_SETTINGS_CYCLE_RESOLUTION,
@@ -720,8 +720,7 @@ typedef enum {
 } PlayerUiControllerPage;
 
 /* What a controller settings control asks for (PLAYER_UI_ACTION_CONTROLLER).
-   main.c runs the same input_settings handlers the existing renderer's
-   controller buttons call. */
+   main.c runs the input_settings handler for each. */
 typedef enum {
     PLAYER_UI_CONTROLLER_NONE = 0,
     PLAYER_UI_CONTROLLER_REBIND,             /* wait for a press for .title_index, or stop */

@@ -937,7 +937,6 @@ struct PlayerApp {
     int window_width;
     int window_height;
     float dpi_scale;
-    bool logical_ui;
     bool enable_focus_handoff;
     bool child_window_ready;
     /* Start watch for the running launch (#1290): the first running check was
@@ -1244,7 +1243,7 @@ void player_app_set_library_write_error(PlayerApp *app);
    user can paste it into a browser, and returns to the view it was raised
    from (the library when raised from a card). */
 void player_app_set_link_open_error(PlayerApp *app, const char *url, const char *reason);
-/* The error card's words, shared by both launchers. The badge is a plain word
+/* The error card's words. The badge is a plain word
    for the kind of problem; an unknown code gets "Problem", never the code. */
 const char *player_error_badge(const ErrorState *error);
 /* The card title for a picked file refused at a named format boundary
