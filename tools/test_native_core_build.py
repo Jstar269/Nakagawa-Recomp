@@ -93,6 +93,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/test_input_profile",
     "build/test_nk_sig",
     "build/test_nk_adhoc_relay",
+    "build/test_nk_adhoc_net",
     "build/test_portable_mode",
 )
 _PROCESS_TEST = "build/test_win32_process" if os.name == "nt" else "build/test_posix_process"

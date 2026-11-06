@@ -119,8 +119,9 @@ The plan below is the later in-player report, once online mode ships.
 
 Status: design approved by the owner on 2026-11-06
 ([#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)). The relay's wire format is built
-(`src/core/nk_adhoc_relay.c`, tested by `relay-codec-selftest`). Nothing connects yet: the PSP ad hoc services are
-still named refusals.
+(`src/core/nk_adhoc_relay.c`, tested by `relay-codec-selftest`), and so are the transport seam and its in-process
+medium (`src/core/nk_adhoc_net.c`, tested by `adhoc-net-selftest`). Nothing connects yet: the PSP ad hoc services
+are still named refusals.
 
 A separate switch, **Online play**, lets games use the PSP's ad hoc multiplayer over the internet. It is not part of
 online mode: online mode lets the launcher talk to one host, while online play lets game code reach other consoles,
@@ -150,9 +151,11 @@ so it is its own explicit choice with its own sentence in Settings. It is off by
     HLE (`AGENTS.md`, section 6). They become real state machines in `src/rt/hle_network.c`. Their PSP-visible
     results come from the public PSP recordings in pspautotests (`tests/net/adhoc`) and from measurements on the
     project's PSP. A call stays a named refusal until its sequence is measured.
-  - **Transport:** the services talk to their peers through one small transport interface. "None" is a console
-    alone, the default with Online play off. A two-console loopback inside one process is for tests and is labelled
-    a simulation. The relay is the third transport.
+  - **Transport:** the services talk to their peers through one small transport interface
+    (`src/core/nk_adhoc_net.h`): the lobby and PDP sockets now, PTP streams later. Its first implementation is an
+    in-process medium that follows the relay server's lobby rules. One console alone on it is a PSP with no peers
+    in range, the default with Online play off. Two to four consoles on it are a simulation for tests, labelled
+    as such. The relay is the second implementation.
   - **The relay client** is one module in the game process (`src/core/nk_adhoc_relay*`), because a game's
     datagrams cannot wait for a trip through the launcher. The player starts a game with the server only when the
     user turned Online play on. That module is the only runtime file the egress allowlist test lets use the network.

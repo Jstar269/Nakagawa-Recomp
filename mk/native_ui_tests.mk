@@ -165,6 +165,21 @@ define RELAY_CODEC_SELFTEST_CMD
 	$(BUILD_ROOT_RUN)/test_nk_adhoc_relay$(EXE_EXT)
 endef
 
+# The ad hoc transport seam and its in-process medium (src/core/nk_adhoc_net.c, #1139 phase 2): a
+# console alone and simulated consoles in one process, under the relay server's lobby rules. No
+# socket and no network.
+ADHOC_NET_SELFTEST_SRCS := src/core/nk_adhoc_net.c src/core/nk_adhoc_relay.c tests/native/test_nk_adhoc_net.c
+define ADHOC_NET_SELFTEST_CMD
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/core $(ADHOC_NET_SELFTEST_SRCS) \
+		-o $(BUILD_ROOT)/test_nk_adhoc_net$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_adhoc_net$(EXE_EXT)
+endef
+
+.PHONY: adhoc-net-selftest
+adhoc-net-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call ADHOC_NET_SELFTEST_CMD)
+
 .PHONY: relay-codec-selftest
 relay-codec-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
@@ -455,6 +470,7 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest native-core-objects-cor
 	$(BUILD_ROOT_RUN)/test_input_profile$(EXE_EXT)
 	$(call ED25519_VERIFY_SELFTEST_CMD)
 	$(call RELAY_CODEC_SELFTEST_CMD)
+	$(call ADHOC_NET_SELFTEST_CMD)
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_portable_mode.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_portable_mode$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_portable_mode$(EXE_EXT)

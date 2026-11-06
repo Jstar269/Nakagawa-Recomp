@@ -97,6 +97,7 @@ PUBLIC_TARGETS := \
 	clay-layout-selftest \
 	ed25519-verify-selftest \
 	relay-codec-selftest \
+	adhoc-net-selftest \
 	nk-ui-core-selftest \
 	nk-ui-player-screens-selftest \
 	nk-ui-player-screens-capture \
@@ -272,6 +273,7 @@ HELP_DESCRIPTION_heap-selftest := run the heap and allocator selftest
 HELP_DESCRIPTION_profiler-selftest := run the profiler selftest
 HELP_DESCRIPTION_gui-present-selftest := run the host present pacing selftest
 HELP_DESCRIPTION_clay-layout-selftest := build and run the vendored Clay layout selftest
+HELP_DESCRIPTION_adhoc-net-selftest := check the ad hoc transport seam on simulated consoles in one process, with no network
 HELP_DESCRIPTION_relay-codec-selftest := check the ad hoc relay's lobby and relay packets byte by byte, with no network
 HELP_DESCRIPTION_ed25519-verify-selftest := check nk_ed25519_verify (vendored Monocypher) against the RFC 8032 vectors and nk_minisign_verify against real minisign output
 HELP_DESCRIPTION_nk-ui-player-screens-selftest := build and run nk_ui Library, Title detail and router snapshots
