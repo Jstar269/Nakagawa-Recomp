@@ -688,6 +688,52 @@ int sdl3vk_pick_surface_format(int query, int count, const int *formats) {
     return 0;
 }
 
+/* ---- the picked device, for the render status (#2151) -------------------------------------- */
+
+static Sdl3VkDevice s_device;
+
+int sdl3vk_device_type(int vk_type) {
+    switch (vk_type) {
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return SDL3VK_DEVICE_DISCRETE;
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return SDL3VK_DEVICE_INTEGRATED;
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return SDL3VK_DEVICE_VIRTUAL;
+    case VK_PHYSICAL_DEVICE_TYPE_CPU: return SDL3VK_DEVICE_CPU;
+    case VK_PHYSICAL_DEVICE_TYPE_OTHER: return SDL3VK_DEVICE_OTHER;
+    default: return SDL3VK_DEVICE_UNKNOWN;
+    }
+}
+
+/* Records the picked device's name and kind, and whether another enumerated device is a discrete
+ * GPU with a graphics queue that can present to this window: one the person could choose. */
+static void note_device(const VkPhysicalDeviceProperties *picked, const VkPhysicalDevice *devs,
+                        uint32_t nd, VkSurfaceKHR surf) {
+    memset(&s_device, 0, sizeof(s_device));
+    snprintf(s_device.name, sizeof(s_device.name), "%s", picked->deviceName);
+    s_device.type = sdl3vk_device_type((int)picked->deviceType);
+    if (picked->deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return;
+    for (uint32_t d = 0; d < nd && !s_device.alt_discrete; d++) {
+        VkPhysicalDeviceProperties pp;
+        vkGetPhysicalDeviceProperties(devs[d], &pp);
+        if (pp.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) continue;
+        VkQueueFamilyProperties qf[16]; uint32_t nq = 16;
+        vkGetPhysicalDeviceQueueFamilyProperties(devs[d], &nq, qf);
+        for (uint32_t q = 0; q < nq; q++) {
+            VkBool32 can_present = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR(devs[d], q, surf, &can_present);
+            if ((qf[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) && can_present) {
+                s_device.alt_discrete = 1;
+                break;
+            }
+        }
+    }
+}
+
+int sdl3vk_device(Sdl3VkDevice *out) {
+    if (!s_dev || !out) return 0;
+    *out = s_device;
+    return 1;
+}
+
 /* ---- init --------------------------------------------------------------------------- */
 
 /* Init fault seam for the lifecycle selftest (#1377): armed at step N (1-based), the Nth
@@ -901,6 +947,7 @@ int sdl3vk_init(const char *title) {
         VkPhysicalDeviceProperties pp;
         vkGetPhysicalDeviceProperties(s_pdev, &pp);
         fprintf(stderr, "sdl3vk: using %s\n", pp.deviceName);
+        note_device(&pp, devs, nd, s_surf);
         s_max_image_dim = pp.limits.maxImageDimension2D;
     }
     {
