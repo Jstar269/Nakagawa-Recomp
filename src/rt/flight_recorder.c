@@ -217,7 +217,10 @@ static uint64_t s_flight_recorded;
 static uint64_t s_flight_last_sequence;
 static uint32_t s_flight_last_kind;
 static int s_flight_init_state;
-static char s_flight_ace[96];          /* Ace Mode's line for an enhanced run, else empty */
+/* Ace Mode's line for an enhanced run, else empty. 192 is ACE_SPEC_MAX (src/rt/ace.h), the
+ * parser's limit, so any line the runtime accepts is kept whole; the bundle schema's maxLength
+ * is 191. tools/test_flight_diff.py holds the three together. */
+static char s_flight_ace[192];
 static char s_flight_upscale[16];      /* SR_PRESENT_UPSCALE's mode when the window is upscaled */
 static int s_flight_exit_registered;
 static int s_flight_dumped;

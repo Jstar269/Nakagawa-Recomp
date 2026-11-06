@@ -359,6 +359,42 @@ class ComparabilityContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 flight_diff.validate_bundle(broken)
 
+    def test_ace_line_limit_is_the_parsers_limit(self):
+        # The bundle keeps any line the runtime accepts (#2050): ace_parse refuses a
+        # line of ACE_SPEC_MAX characters or more, flight_recorder.c stores the line
+        # in a buffer of ACE_SPEC_MAX bytes, so the schema's maxLength is ACE_SPEC_MAX - 1.
+        header = (ROOT / "src" / "rt" / "ace.h").read_text(encoding="utf-8")
+        match = re.search(r"^#define ACE_SPEC_MAX (\d+)\b", header, re.MULTILINE)
+        self.assertIsNotNone(match, "ACE_SPEC_MAX not found in src/rt/ace.h")
+        spec_max = int(match.group(1))
+        schema = json.loads(
+            (ROOT / "assets" / "flight_recorder_schema.json").read_text(encoding="utf-8"))
+        ace_schema = schema["properties"]["runtime"]["properties"]["enhancements"][
+            "properties"]["ace"]
+        self.assertEqual(ace_schema["maxLength"], spec_max - 1)
+        recorder = (ROOT / "src" / "rt" / "flight_recorder.c").read_text(encoding="utf-8")
+        self.assertIn(f"static char s_flight_ace[{spec_max}];", recorder)
+
+        _, candidate = self._comparable_pair()
+
+        def bundle_with(line):
+            ace = copy.deepcopy(candidate)
+            ace["runtime"]["enhancements"] = {"ace": line}
+            return ace
+
+        # The longest line ace_format writes today, then a line padded to the limit
+        # with a later key whose name carries a digit.
+        longest_now = ("v1;tier=enhanced;af=16;text=off;readout=off;notice=off;wide=fill;"
+                       "smooth=match;sas=sinc;twin=off")
+        flight_diff.validate_bundle(bundle_with(longest_now))
+        pad = spec_max - 1 - len(longest_now) - len(";s2d=")
+        self.assertGreater(pad, 0)
+        at_limit = longest_now + ";s2d=" + "a" * pad
+        self.assertEqual(len(at_limit), spec_max - 1)
+        flight_diff.validate_bundle(bundle_with(at_limit))
+        with self.assertRaises(ValueError):
+            flight_diff.validate_bundle(bundle_with(at_limit + "a"))
+
     def test_incomparability_reasons_are_cumulative(self):
         baseline, candidate = self._comparable_pair()
         candidate["recorder"]["enabled_classes"] = ["sched", "hle", "prx"]

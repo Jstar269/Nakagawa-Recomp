@@ -151,6 +151,31 @@ static void cell_parse(void) {
     CHECK(ace_parse("v1;twin=on;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off",
                     &b, why, sizeof(why)) == 1 && b.on && b.twin == 1 && b.af == 0,
           "twin=on alone is a valid line (%s)", why);
+    /* The longest line ace_format writes fits in ACE_SPEC_MAX, the buffer the flight
+     * recorder keeps it in; the parser refuses a line of ACE_SPEC_MAX characters for its
+     * length and reads one of ACE_SPEC_MAX - 1 (the bundle schema's maxLength) on. */
+    {
+        AceConfig l = { 1, 16, 0, 0, 0, ACE_WIDE_FILL, ACE_SMOOTH_MATCH, ACE_TIER_ENHANCED,
+                        ACE_SAS_SINC, 0 };
+        static const char longest[] = "v1;tier=enhanced;af=16;text=off;readout=off;notice=off;"
+                                      "wide=fill;smooth=match;sas=sinc;twin=off";
+        char edge[ACE_SPEC_MAX + 1];
+        CHECK(ace_format(&l, line, sizeof(line)) && strcmp(line, longest) == 0 &&
+              strlen(line) < ACE_SPEC_MAX, "the longest line formats and fits (%s)", line);
+        CHECK(ace_format(&l, line, sizeof(longest) - 1) == 0,
+              "a buffer one short of the longest line is refused");
+        memset(edge, 'a', sizeof(edge));
+        memcpy(edge, longest, sizeof(longest) - 1);
+        memcpy(edge + sizeof(longest) - 1, ";s2d=", 5);
+        edge[ACE_SPEC_MAX] = '\0';
+        why[0] = '\0';
+        CHECK(ace_parse(edge, &b, why, sizeof(why)) == 0 && strcmp(why, "line too long") == 0,
+              "a line of ACE_SPEC_MAX characters is refused for its length (%s)", why);
+        edge[ACE_SPEC_MAX - 1] = '\0';
+        why[0] = '\0';
+        CHECK(ace_parse(edge, &b, why, sizeof(why)) == 0 && strcmp(why, "line too long") != 0,
+              "a line of ACE_SPEC_MAX - 1 characters passes the length check (%s)", why);
+    }
     a.on = 0;
     CHECK(ace_format(&a, line, sizeof(line)) && strcmp(line, "off") == 0, "off formats as off");
 }
