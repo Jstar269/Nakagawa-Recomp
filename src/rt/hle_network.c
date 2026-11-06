@@ -94,9 +94,16 @@ static uint32_t h_NetInit(CpuState *s) {
     return 0u;
 }
 
-/* sceNetTerm(void): frees the pool; 0 (measured after sceNetInit). */
+/* sceNetTerm(void): frees the pool; 0 (measured after sceNetInit). Every recording ends
+ * sceNetAdhocctl first (adhoc.h adhocShutdown; loopback.c, socketids.c, timing.c and term.c all
+ * call sceNetAdhocctlTerm before sceNetTerm), so sceNetTerm while sceNetAdhocctl is initialized
+ * is UNMEASURED and stops, leaving both libraries as they were. */
+static int adhocctl_inited(void);
 static uint32_t h_NetTerm(CpuState *s) {
     (void)s;
+    if (adhocctl_inited())
+        return hle_unmodelled_stop("sceNetTerm", "while sceNetAdhocctl is initialized (UNMEASURED: every "
+                                   "recording ends it first)");
     if (s_netlib.inited && s_netlib.pool_uid != NET_POOL_NONE) free_block(s_netlib.pool_uid);
     s_netlib.inited = 0;
     s_netlib.pool_uid = NET_POOL_NONE;
@@ -178,6 +185,8 @@ static struct {
     struct { int used; uint32_t fn, arg; } handlers[ADHOCCTL_HANDLERS];
 } s_adhocctl;
 
+static int adhocctl_inited(void) { return s_adhocctl.inited; }
+
 static int adhocctl_live(const char *name) {
     if (s_adhocctl.inited && s_adhocctl.dead) {
         hle_unmodelled_stop(name, "after the ad hoc control thread ended under a handler");
@@ -186,17 +195,22 @@ static int adhocctl_live(const char *name) {
     return 1;
 }
 
-/* A request already in flight: Create and Connect answer BUSY to Create, Scan and Disconnect
- * (ctlinit.expected:24, 29; abandon.expected:6, 12, 30). What a pending Scan or Disconnect
- * answers to a new request is UNMEASURED. Returns 1 when the call must answer `*out`. */
-static int adhocctl_pending(const char *name, uint32_t *out) {
+/* A request already in flight. BUSY is recorded only for these pairs: Scan and Create during a
+ * Create (ctlinit.expected:24, 29; a Create after a refused Disconnect, abandon.expected:30),
+ * and Disconnect during a Create or a Connect (abandon.expected:6, 12). Every other request
+ * while one is in flight is UNMEASURED and stops. Returns 1 when the call must answer `*out`. */
+static int adhocctl_pending(const char *name, int request, uint32_t *out) {
     if (s_adhocctl.request == ADHOCCTL_REQ_NONE) return 0;
-    if (s_adhocctl.request == ADHOCCTL_REQ_CREATE || s_adhocctl.request == ADHOCCTL_REQ_CONNECT) {
+    const int pending = s_adhocctl.request;
+    if ((pending == ADHOCCTL_REQ_CREATE &&
+         (request == ADHOCCTL_REQ_SCAN || request == ADHOCCTL_REQ_CREATE ||
+          request == ADHOCCTL_REQ_DISCONNECT)) ||
+        (pending == ADHOCCTL_REQ_CONNECT && request == ADHOCCTL_REQ_DISCONNECT)) {
         *out = ADHOCCTL_ERROR_BUSY;
         return 1;
     }
-    *out = hle_unmodelled_stop(name, "while a %s is in flight (UNMEASURED)",
-                               s_adhocctl.request == ADHOCCTL_REQ_SCAN ? "scan" : "disconnect");
+    static const char *const names[] = {"", "create", "connect", "scan", "disconnect"};
+    *out = hle_unmodelled_stop(name, "while a %s is in flight (UNMEASURED)", names[pending]);
     return 1;
 }
 
@@ -223,12 +237,18 @@ static void adhocctl_call_handlers(CpuState *s, uint32_t gen, uint32_t sp, uint3
         s->pc = fn;
         uint32_t fatal_target = 0u;
         if (hle_dispatch_guest_scoped(s, fn, "sceNetAdhocctl handler", &fatal_target)) {
-            fprintf(stderr, "sceNetAdhocctl: handler 0x%08x faulted (target 0x%08x); the ad hoc "
-                            "control thread ends\n", fn, fatal_target);
-            s->flow_kind = SR_FLOW_FATAL;
-            s->flow_target = fatal_target;
+            /* A fatal flow left on this thread's CpuState would be lost: the body returns,
+             * the thread exits, and the next thread's context replaces s_cpu, so a game
+             * waiting for what the handler should have done would wait forever. The run
+             * stops here instead, through dispatch_call's exit for a dispatch it cannot
+             * complete. */
+            fprintf(stderr, "SEMANTIC_BOUNDARY: sceNetAdhocctl handler 0x%08x (id %d, event %d) "
+                            "faulted at 0x%08x on the ad hoc control thread; the run stops here\n",
+                    fn, i, event, fatal_target);
             s_adhocctl.dead = 1;
-            return;
+            sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, fn, fatal_target, (uint32_t)event);
+            fflush(stderr);
+            exit(1);
         }
     }
 }
@@ -434,7 +454,7 @@ static uint32_t adhocctl_start(const char *name, int request, uint32_t group_add
     if (!adhocctl_live(name)) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     uint32_t busy;
-    if (adhocctl_pending(name, &busy)) return busy;
+    if (adhocctl_pending(name, request, &busy)) return busy;
     uint8_t group[8];
     if (named) {
         const int bad = adhocctl_check_group(name, group_addr, group);
@@ -490,7 +510,7 @@ static uint32_t h_NetAdhocctlDisconnect(CpuState *s) {
     if (!adhocctl_live("sceNetAdhocctlDisconnect")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     uint32_t busy;
-    if (adhocctl_pending("sceNetAdhocctlDisconnect", &busy)) return busy;
+    if (adhocctl_pending("sceNetAdhocctlDisconnect", ADHOCCTL_REQ_DISCONNECT, &busy)) return busy;
     s_adhocctl.request = ADHOCCTL_REQ_DISCONNECT;
     s_adhocctl.request_due = sched_vtime_us() + ADHOCCTL_DISCONNECT_US;
     sched_service_kick(s_adhocctl.thread_uid);
@@ -517,8 +537,11 @@ static uint32_t h_NetAdhocctlGetAdhocId(CpuState *s) {
  *        choice (Core/HLE/proAdhoc.cpp:128, 1488 at 3bc60270), and a setting of 1, 6 or 11 is used
  *        as it is (UNMEASURED).
  *   +4   char group[8]: the group's name.
- *   +12  char nickname[128]: the system nickname, NUL-padded ("set" on the recording console; the
- *        profile's nickname is the registry owner_name, empty unless set).
+ *   +12  char nickname[128]: the registry's /CONFIG/SYSTEM/owner_name, NUL-padded, exactly as the
+ *        registry holds it. KNOWN DIFFERENCE: adhocctl.expected:50 records "nickname set" on a
+ *        PSP, but Nakagawa's default profile has an empty nickname, so a default run answers 128
+ *        zero bytes. That is deliberate: personal keys, owner_name included, never hold a user's
+ *        data (hle_system.c, the registry model). No fallback nickname is invented here.
  *   +140 u8 bssid[6]: not the console's own MAC, and with the locally administered bit set and the
  *        group bit clear ("unexpected (low bits 2)"). Its value is otherwise UNMEASURED: the
  *        profile MAC with those two bits set that way, which differs from the MAC in that bit.
@@ -540,7 +563,7 @@ static uint32_t h_NetAdhocctlGetParameter(CpuState *s) {
     const uint32_t channel = (setting == 1u || setting == 6u || setting == 11u) ? setting : 11u;
     MEM_W32(A0, channel);
     for (uint32_t i = 0; i < 8u; i++) MEM_W8(A0 + 4u + i, s_adhocctl.group[i]);
-    uint8_t nickname[128] = {0};
+    uint8_t nickname[128] = {0};   /* the registry's value, or empty: see the KNOWN DIFFERENCE above */
     sreg_ensure_loaded();
     const int node = sreg_find_path("/CONFIG/SYSTEM/owner_name");
     if (node >= 0 && s_sreg_nodes[node].type == SREG_TYPE_STR) {
