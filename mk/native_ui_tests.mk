@@ -155,6 +155,21 @@ ed25519-verify-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call ED25519_VERIFY_SELFTEST_CMD)
 
+# The ad hoc relay's wire format (src/core/nk_adhoc_relay.c, #1139): every lobby and relay packet
+# byte by byte, the server's login rules, partial and refused input, and the port offset. No socket
+# and no network.
+RELAY_CODEC_SELFTEST_SRCS := src/core/nk_adhoc_relay.c tests/native/test_nk_adhoc_relay.c
+define RELAY_CODEC_SELFTEST_CMD
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/core $(RELAY_CODEC_SELFTEST_SRCS) \
+		-o $(BUILD_ROOT)/test_nk_adhoc_relay$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_adhoc_relay$(EXE_EXT)
+endef
+
+.PHONY: relay-codec-selftest
+relay-codec-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call RELAY_CODEC_SELFTEST_CMD)
+
 .PHONY: nk-ui-core-selftest
 nk-ui-core-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
@@ -439,6 +454,7 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest native-core-objects-cor
 		tests/native/test_input_profile.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_input_profile$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_input_profile$(EXE_EXT)
 	$(call ED25519_VERIFY_SELFTEST_CMD)
+	$(call RELAY_CODEC_SELFTEST_CMD)
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_portable_mode.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_portable_mode$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_portable_mode$(EXE_EXT)
