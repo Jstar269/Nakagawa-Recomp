@@ -46,8 +46,8 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **687** (dedicated **585**, fake_success **4**, controlled_unsupported **98**).
-Semantic handler census: **563** handlers across **27** API families, covering **592** handler-associated NID registrations.
+Registered NIDs: **687** (dedicated **598**, fake_success **4**, controlled_unsupported **85**).
+Semantic handler census: **576** handlers across **27** API families, covering **605** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
@@ -55,7 +55,7 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 | `partial` | 267 | 275 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 278 | 286 |
+| `unreviewed` | 291 | 299 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -74,7 +74,7 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 | `sceKernel` | 3 | 107 | 0 | 0 | 80 | 190 | 208 |
 | `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
-| `sceNet` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
+| `sceNet` | 0 | 5 | 0 | 0 | 13 | 18 | 18 |
 | `sceNp` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
 | `sceOpen` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `scePower` | 0 | 11 | 0 | 0 | 7 | 18 | 22 |
@@ -86,7 +86,7 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 | `sceUtility` | 0 | 10 | 0 | 0 | 27 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **267** | **1** | **3** | **278** | **563** | **592** |
+| **Total** | **14** | **267** | **1** | **3** | **291** | **576** | **605** |
 
 #### Complete Handlers (Evidence-Backed)
 
