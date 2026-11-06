@@ -1065,6 +1065,15 @@ void player_ui_test_apply_update_settings(PlayerApp *app) {
     if (getenv("NK_UI_TEST_CHECK_AT_START") != NULL) app->settings.check_updates_at_start = true;
 }
 
+void player_ui_test_apply_nickname_prompt(const PlayerUiTest *t, PlayerApp *app) {
+    /* Scripted runs start past the first-launch nickname prompt (#2197), so every
+       other test begins where it did; NK_UI_TEST_NICKNAME_PROMPT keeps the
+       settings' state, for the tests of the prompt itself. */
+    if (t->mode && getenv("NK_UI_TEST_NICKNAME_PROMPT") == NULL) {
+        app->settings.nickname_asked = true;
+    }
+}
+
 void player_ui_test_set_next_ui(const PlayerUiNk *next_ui) {
     g_ui_test_next_ui = next_ui;
 }

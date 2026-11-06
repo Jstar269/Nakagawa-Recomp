@@ -155,6 +155,7 @@ static inline bool player_ui_test_game_faked(const PlayerUiTest *t) {
 void player_ui_test_prepare_app(PlayerUiTest *t, PlayerApp *app);
 void player_ui_test_apply_motion(const PlayerUiTest *t, PlayerApp *app);
 void player_ui_test_apply_update_settings(PlayerApp *app);
+void player_ui_test_apply_nickname_prompt(const PlayerUiTest *t, PlayerApp *app);
 void player_ui_test_set_next_ui(const PlayerUiNk *next_ui);
 void player_ui_test_report_startup(const PlayerUiTest *t, const PlayerUiNk *next_ui);
 /* The scripted run draws into its own target; false when that cannot be made. */
@@ -232,6 +233,9 @@ static inline void player_ui_test_apply_motion(const PlayerUiTest *t, PlayerApp 
     (void)t; (void)app;
 }
 static inline void player_ui_test_apply_update_settings(PlayerApp *app) { (void)app; }
+static inline void player_ui_test_apply_nickname_prompt(const PlayerUiTest *t, PlayerApp *app) {
+    (void)t; (void)app;
+}
 static inline void player_ui_test_set_next_ui(const PlayerUiNk *next_ui) { (void)next_ui; }
 static inline void player_ui_test_report_startup(const PlayerUiTest *t,
                                                  const PlayerUiNk *next_ui) {

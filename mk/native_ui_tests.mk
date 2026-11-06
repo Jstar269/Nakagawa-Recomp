@@ -155,6 +155,19 @@ ed25519-verify-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call ED25519_VERIFY_SELFTEST_CMD)
 
+# The console nickname rule (#2197, src/core/nk_nickname.h) that the player's Nickname setting
+# and the runtime's SR_NICKNAME share: the default, the 127-byte cap and the refused values.
+define NK_NICKNAME_SELFTEST_CMD
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/core tests/native/test_nk_nickname.c \
+		-o $(BUILD_ROOT)/test_nk_nickname$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_nickname$(EXE_EXT)
+endef
+
+.PHONY: nk-nickname-selftest
+nk-nickname-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call NK_NICKNAME_SELFTEST_CMD)
+
 .PHONY: nk-ui-core-selftest
 nk-ui-core-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
@@ -404,6 +417,7 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest native-core-objects-cor
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_launch_resolution.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_launch_resolution$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_launch_resolution$(EXE_EXT)
+	$(call NK_NICKNAME_SELFTEST_CMD)
 	$(call PLAYER_STATE_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_player_state$(EXE_EXT)
 	$(call INPUT_SETTINGS_TEST_BIN_CMD)

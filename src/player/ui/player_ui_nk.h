@@ -6,6 +6,7 @@
 
 #include "nk_ui.h"
 #include "nk_ui_input.h"  /* NkUiPromptAction: the Controls page's binding glyphs */
+#include "../../core/nk_nickname.h" /* the nickname editor's default and cap (#2197) */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -142,9 +143,29 @@ typedef enum {
     PLAYER_UI_ACTION_DISC_VERIFY,       /* the library's disc check line; .primary carries
                                            the op (PlayerUiDiscVerifyOp) */
     PLAYER_UI_ACTION_OPEN_SAVES,        /* the title page's Saves (#1883) */
-    PLAYER_UI_ACTION_SAVES              /* a Saves dialog control; .primary carries the
+    PLAYER_UI_ACTION_SAVES,             /* a Saves dialog control; .primary carries the
                                            op (PlayerUiSavesOp) */
+    PLAYER_UI_ACTION_NICKNAME           /* a nickname editor control; .primary carries the
+                                           op (PlayerUiNicknameOp) */
 } PlayerUiActionKind;
+
+/* What a nickname editor control asks for (PLAYER_UI_ACTION_NICKNAME, #2197). */
+typedef enum {
+    PLAYER_UI_NICKNAME_NONE = 0,
+    PLAYER_UI_NICKNAME_SAVE,        /* save what is typed */
+    PLAYER_UI_NICKNAME_SKIP         /* the prompt's Skip, or Settings' Cancel; Back too */
+} PlayerUiNicknameOp;
+
+/* The nickname editor (#2197): the first-launch prompt (Save, Skip) or Settings >
+   Nickname (Save, Cancel). A keyboard types into it. */
+typedef struct {
+    bool first_launch;
+    const char *text;       /* what is typed */
+    const char *current;    /* the nickname in use, shown while nothing is typed */
+    bool refused;           /* the last Save was refused */
+    float logical_width;
+    float logical_height;
+} PlayerUiNicknameModel;
 
 /* What a Saves dialog control asks for (PLAYER_UI_ACTION_SAVES). Back is
    PLAYER_UI_ACTION_BACK. */
@@ -565,7 +586,8 @@ typedef enum {
     PLAYER_UI_SETTINGS_CREATE_REPORT,        /* write the bundle on this PC */
     PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER,
     PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER,     /* the folder holding the library, games and settings */
-    PLAYER_UI_SETTINGS_OPEN_LOGS             /* the folder holding the logs */
+    PLAYER_UI_SETTINGS_OPEN_LOGS,            /* the folder holding the logs */
+    PLAYER_UI_SETTINGS_EDIT_NICKNAME         /* the nickname editor (#2197) */
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
@@ -643,6 +665,7 @@ typedef struct {
     const char *controller_line;    /* "Keyboard ready" or the pad's name */
     const char *saves_folder;
     const char *notice;             /* a settings notice (a failed save), or NULL */
+    const char *nickname;           /* the console nickname games read (#2197) */
     /* Build tools and cache: builds share compiled system libraries (#1306) */
     bool share_system_libraries;
     /* Updates (VIEW_UPDATES): what the last step found, in words */
@@ -1021,6 +1044,9 @@ enum {
     PLAYER_UI_ID_REPORT_FOLDER = 0x4552u,
     PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER = 0x4553u, /* Settings: shows the data folder */
     PLAYER_UI_ID_SETTINGS_OPEN_LOGS = 0x4554u,        /* Settings: shows the logs folder */
+    PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
+    PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
+    PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
     PLAYER_UI_ID_CONTROLLER_DEADZONE_UP = 0x4622u,
@@ -1198,6 +1224,8 @@ PlayerUiAction player_ui_screen_disc(NkUi *ui, const PlayerUiDiscModel *model);
 PlayerUiAction player_ui_screen_settings(NkUi *ui, const PlayerUiSettingsModel *model);
 PlayerUiAction player_ui_screen_controller(NkUi *ui, const PlayerUiControllerModel *model);
 PlayerUiAction player_ui_screen_developer_log(NkUi *ui, const PlayerUiDeveloperLogModel *model);
+/* The nickname editor over any screen: Save, and Skip or Cancel, which Back also answers. */
+PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *model);
 
 /* The top bar every launcher screen draws: LIBRARY, ABOUT and SETTINGS tabs,
    focusable and switched with L / R. Returns the action for a tab the user
@@ -1251,6 +1279,8 @@ bool player_ui_nk_draws_view(int view);
 /* True while the library's find box is open on the library: what the keyboard
    types goes into it, so the host's letter shortcuts and Backspace-as-Back wait. */
 bool player_ui_nk_find_open(const PlayerUiNk *player);
+/* True while the nickname editor is open (#2197): the keyboard types into it in the same way. */
+bool player_ui_nk_nickname_open(const PlayerUiNk *player);
 /* True when the next UI shows the Library at the bottom of its stack (Esc
    there asks to quit, as in the existing UI). */
 bool player_ui_nk_at_library_root(const PlayerUiNk *player);

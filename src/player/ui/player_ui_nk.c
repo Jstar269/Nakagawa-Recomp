@@ -115,6 +115,15 @@ struct PlayerUiNk {
     bool find_text_input;
     /* The control the box focuses, on the first frame that lays it out. */
     NkUiId find_focus;
+    /* The nickname editor (#2197): open (the first-launch prompt, or Settings >
+       Nickname), what is typed, whether the last Save was refused, the Save
+       focus its first frame takes, and the control focus returns to after it. */
+    bool nickname_open;
+    bool nickname_first_launch;
+    bool nickname_refused;
+    bool nickname_focus_pending;
+    NkUiId nickname_return_focus;
+    char nickname_text[NK_NICKNAME_MAX_BYTES + 1u];
     char status_text[PLAYER_UI_TITLE_CAP][256];
     char library_page_label[64];
     char flow_title[NK_MAX_TITLE_LEN + NK_MAX_DISC_ID_LEN + 16];
@@ -956,6 +965,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.volume = app->settings.master_volume;
     model.ui_sounds = app->settings.ui_sounds;
     model.launcher_fullscreen = app->settings.launcher_fullscreen;
+    model.nickname = app->settings.nickname;
     player_ui_fill_enhanced(player, app, &model);
     if (app->settings.interface_size_pct > 0) {
         snprintf(player->settings_interface_size, sizeof(player->settings_interface_size), "%d%%",
@@ -1950,6 +1960,58 @@ static void player_ui_find_delete(PlayerUiNk *player) {
     player->library_page = 0u;
 }
 
+/* The nickname editor starts empty, showing the nickname in use until
+   something is typed, and opens on Save. */
+static void player_ui_nickname_open(PlayerUiNk *player, bool first_launch) {
+    player->nickname_open = true;
+    player->nickname_first_launch = first_launch;
+    player->nickname_refused = false;
+    player->nickname_focus_pending = true;
+    player->nickname_text[0] = '\0';
+}
+
+static void player_ui_nickname_close(PlayerUiNk *player) {
+    player->nickname_open = false;
+    player->nickname_refused = false;
+    player->nickname_text[0] = '\0';
+}
+
+/* Adds typed UTF-8 text, whole characters only, while they fit in
+   NK_NICKNAME_MAX_BYTES; ASCII control characters are not typed. Save checks
+   the whole rule (nk_nickname_valid). */
+static void player_ui_nickname_type(PlayerUiNk *player, const char *text) {
+    const unsigned char *bytes = (const unsigned char *)text;
+    size_t length = strlen(player->nickname_text);
+    for (size_t i = 0u; bytes[i] != 0u;) {
+        size_t n = 1u;
+        while (bytes[i + n] != 0u && (bytes[i + n] & 0xC0u) == 0x80u) ++n;
+        if (length + n > NK_NICKNAME_MAX_BYTES) break;
+        if (n > 1u || (bytes[i] >= 0x20u && bytes[i] != 0x7Fu)) {
+            memcpy(player->nickname_text + length, bytes + i, n);
+            length += n;
+            player->nickname_text[length] = '\0';
+        }
+        i += n;
+    }
+    player->nickname_refused = false;
+}
+
+/* Removes the last character, all of its UTF-8 bytes. */
+static void player_ui_nickname_delete(PlayerUiNk *player) {
+    size_t length = strlen(player->nickname_text);
+    while (length > 0u &&
+           ((unsigned char)player->nickname_text[length - 1u] & 0xC0u) == 0x80u) {
+        --length;
+    }
+    if (length > 0u) --length;
+    player->nickname_text[length] = '\0';
+    player->nickname_refused = false;
+}
+
+bool player_ui_nk_nickname_open(const PlayerUiNk *player) {
+    return player != NULL && player->ready && player->nickname_open;
+}
+
 bool player_ui_nk_find_open(const PlayerUiNk *player) {
     return player != NULL && player->ready && player->find_open &&
            nk_ui_router_current(player->router) == PLAYER_UI_ROUTE_LIBRARY;
@@ -1961,7 +2023,22 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     double now_s;
     if (player == NULL || !player->ready || event == NULL) return false;
     now_s = (double)SDL_GetTicksNS() / 1000000000.0;
-    if (player_ui_nk_find_open(player)) {
+    if (player->nickname_open) {
+        /* The nickname editor takes what is typed as the find box does, below;
+           Esc or the pad's B is its Skip or Cancel. */
+        if (event->type == SDL_EVENT_TEXT_INPUT && event->text.text != NULL) {
+            player_ui_nickname_type(player, event->text.text);
+            return true;
+        }
+        if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
+            bool control = (event->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) != 0;
+            if (event->key.key == SDLK_BACKSPACE) {
+                if (event->type == SDL_EVENT_KEY_DOWN) player_ui_nickname_delete(player);
+                return true;
+            }
+            if (!control && event->key.key >= 0x20u && event->key.key < 0x7Fu) return true;
+        }
+    } else if (player_ui_nk_find_open(player)) {
         /* The box takes what is typed: SDL's text input brings the characters,
            Backspace deletes one, and a printable key is not also a shortcut
            (D, Q, E). Esc or the pad's B clears and closes it, below. */
@@ -2009,7 +2086,10 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
                    !translated[i].repeat && player->pending_sound < 0) {
             player->pending_sound = PLAYER_UI_SOUND_CONFIRM;
         }
-        if (translated[i].type == NK_UI_EV_BACK && player_ui_nk_find_open(player)) {
+        if (translated[i].type == NK_UI_EV_BACK && player->nickname_open) {
+            /* The editor answers Back itself (Skip or Cancel); the routes stay. */
+            if (translated[i].down) nk_ui_push_event(player->ui, &translated[i]);
+        } else if (translated[i].type == NK_UI_EV_BACK && player_ui_nk_find_open(player)) {
             if (translated[i].down) player_ui_find_close(player);
         } else if (translated[i].type == NK_UI_EV_BACK) {
             nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
@@ -2759,10 +2839,10 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         return false;
     }
     (void)SDL_GetWindowSize(window, &window_w, &window_h);
-    if (player_ui_nk_find_open(player) != player->find_text_input) {
-        /* SDL's text input is on while the find box is open, so typing (and an
-           input method's text) reaches it; off otherwise. */
-        player->find_text_input = player_ui_nk_find_open(player);
+    if ((player_ui_nk_find_open(player) || player->nickname_open) != player->find_text_input) {
+        /* SDL's text input is on while the find box or the nickname editor is
+           open, so typing (and an input method's text) reaches it; off otherwise. */
+        player->find_text_input = player_ui_nk_find_open(player) || player->nickname_open;
         if (player->find_text_input) {
             (void)SDL_StartTextInput(window);
         } else {
@@ -2862,8 +2942,51 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             route = nk_ui_router_current(player->router);
         }
     }
-    if (player_ui_nk_flow_view(app->active_view)) {
+    /* The nickname editor (#2197) draws over every screen while it is open: the
+       first-launch prompt until it is answered, or Settings > Nickname. */
+    if (!player->nickname_open && player_app_nickname_prompt_visible(app)) {
+        player->nickname_return_focus = nk_ui_focused(player->ui);
+        player_ui_nickname_open(player, true);
+    } else if (!player->nickname_open && player->nickname_return_focus != 0u) {
+        nk_ui_focus(player->ui, player->nickname_return_focus);
+        player->nickname_return_focus = 0u;
+    }
+    if (player->nickname_open) {
+        PlayerUiNicknameModel model;
+        memset(&model, 0, sizeof(model));
+        if (player->nickname_focus_pending) {
+            nk_ui_focus(player->ui, PLAYER_UI_ID_NICKNAME_SAVE);
+            player->nickname_focus_pending = false;
+        }
+        model.first_launch = player->nickname_first_launch;
+        model.text = player->nickname_text;
+        model.current = app->settings.nickname;
+        model.refused = player->nickname_refused;
+        model.logical_width = scale.logical_w;
+        model.logical_height = scale.logical_h;
+        action = player_ui_screen_nickname(player->ui, &model);
+        if (action.kind == PLAYER_UI_ACTION_NICKNAME) {
+            /* Skip keeps the nickname; a Save the rule refuses keeps the editor
+               open, with the old nickname, and says why. */
+            bool save = (unsigned)action.primary == PLAYER_UI_NICKNAME_SAVE;
+            bool done = player->nickname_first_launch
+                ? player_app_nickname_prompt_answer(app, save ? player->nickname_text : NULL)
+                : !save || player_app_set_nickname(app, player->nickname_text);
+            if (done) {
+                player_ui_nickname_close(player);
+            } else {
+                player->nickname_refused = true;
+            }
+            action.kind = PLAYER_UI_ACTION_NONE;
+        }
+    } else if (player_ui_nk_flow_view(app->active_view)) {
         action = player_ui_render_flow(player, app, scale, now_s);
+        if (action.kind == PLAYER_UI_ACTION_SETTINGS &&
+            (unsigned)action.primary == PLAYER_UI_SETTINGS_EDIT_NICKNAME) {
+            player->nickname_return_focus = PLAYER_UI_ID_SETTINGS_NICKNAME;
+            player_ui_nickname_open(player, false);
+            action.kind = PLAYER_UI_ACTION_NONE;
+        }
         if ((player_ui_settings_view(app->active_view) ||
              app->active_view == VIEW_CONTROLLER_SETTINGS) &&
             (action.kind == PLAYER_UI_ACTION_OPEN_LIBRARY ||

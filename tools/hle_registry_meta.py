@@ -1888,8 +1888,9 @@ HANDLER_METADATA = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (PSP-HLE-SYSPARAM-001: string-id-1-len-0x80, string-id-1-len-0x04)",
             "tests/native/hle_thread_selftest.c:test_sysparam_nickname_string",
+            "tests/native/hle_thread_selftest.c:test_sysparam_nickname_from_launcher",
         ],
-        "limitation": "the nickname (id 1) copy with its NUL and the short-buffer 0x80110102 refusal that writes nothing are measured; other string ids, a null buffer and len <= 0 return 0x80110103 without a measurement, and the nickname is the registry value (empty by default), not the console's",
+        "limitation": "the nickname (id 1) copy with its NUL and the short-buffer 0x80110102 refusal that writes nothing are measured; other string ids, a null buffer and len <= 0 return 0x80110103 without a measurement; the nickname is the registry value, by default the user-chosen SR_NICKNAME or the neutral \"Player\" (never derived from the OS), not the console's; the 127-byte cap follows the 128-byte fields, and the PSP's own System Settings entry limit is unmeasured",
     },
     "h_CtrlReadLatch": {
         "status": "partial",

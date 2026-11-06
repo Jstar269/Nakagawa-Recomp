@@ -1074,9 +1074,10 @@ Semantic handler census: **563** handlers across **27** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-SYSPARAM-001: int-id-2..int-id-9, int-unknown-0, int-unknown-10, int-unknown-64)
   - Evidence: tests/native/hle_thread_selftest.c:test_sysreg_virtual_registry
 - **`h_GetSystemParamString`** (`sceUtility`): `sceUtilityGetSystemParamString` (0x34b78343)
-  - Limitation: the nickname (id 1) copy with its NUL and the short-buffer 0x80110102 refusal that writes nothing are measured; other string ids, a null buffer and len <= 0 return 0x80110103 without a measurement, and the nickname is the registry value (empty by default), not the console's
+  - Limitation: the nickname (id 1) copy with its NUL and the short-buffer 0x80110102 refusal that writes nothing are measured; other string ids, a null buffer and len <= 0 return 0x80110103 without a measurement; the nickname is the registry value, by default the user-chosen SR_NICKNAME or the neutral "Player" (never derived from the OS), not the console's; the 127-byte cap follows the 128-byte fields, and the PSP's own System Settings entry limit is unmeasured
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-SYSPARAM-001: string-id-1-len-0x80, string-id-1-len-0x04)
   - Evidence: tests/native/hle_thread_selftest.c:test_sysparam_nickname_string
+  - Evidence: tests/native/hle_thread_selftest.c:test_sysparam_nickname_from_launcher
 - **`h_HtmlViewerStatus`** (`sceUtility`): `sceUtilityHtmlViewerGetStatus` (0xbda7d894)
   - Limitation: always WRONG_TYPE: the runtime has no HTML viewer dialog, and its InitStart import is not registered
   - Evidence: tests/native/hle_thread_selftest.c:test_imports_20261102_measured_contracts

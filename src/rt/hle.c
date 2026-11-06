@@ -34,6 +34,7 @@
 
 #include "hle_internal.h"
 #include "nid_names.h"   /* sr_nid_name(): names unknown NIDs in the trap below */
+#include "nk_nickname.h" /* the owner_name default: SR_NICKNAME or the neutral one */
 #define SR_EVIDENCE_NO_VFPU /* this file reads the NID table only */
 #include "hle_evidence.h" /* generated: NIDs with no recorded evidence (docs/HLE_COVERAGE.md) */
 int sr_thread_has_pending_callbacks(uint32_t thread_uid);
@@ -1379,8 +1380,53 @@ int sreg_find_path(const char *path) {
  * key stays a named refusal. An index with no usable served font has no INFO<n> category. */
 void flash0_font_sources(Flash0Sources *out);
 
-/* Build the defaults: the measured tree, then the system-param-backed and measured values. Every
- * other value key keeps its neutral placeholder (INT 0, an empty string, or zero bytes). */
+/* The default of /CONFIG/SYSTEM/owner_name, the console nickname (#2197): SR_NICKNAME, the
+ * nickname the user chose in the player, when it passes nk_nickname_valid, else the neutral
+ * NK_NICKNAME_DEFAULT. It is never taken from the operating system or its user name. Read once per
+ * process; a missing or invalid SR_NICKNAME is named on stderr that once. */
+static char s_sreg_owner_name[NK_NICKNAME_MAX_BYTES + 1u];
+static int s_sreg_owner_name_ready;
+
+static const char *sreg_owner_name_default(void) {
+    char *env = NULL;
+    int present = 0;
+    int read;
+    if (s_sreg_owner_name_ready) return s_sreg_owner_name;
+    s_sreg_owner_name_ready = 1;
+    read = sr_utf8_env_alloc(L"SR_NICKNAME", &env, &present);
+    if (read && present && nk_nickname_valid(env)) {
+        memcpy(s_sreg_owner_name, env, strlen(env) + 1u);
+    } else {
+        memcpy(s_sreg_owner_name, NK_NICKNAME_DEFAULT, sizeof(NK_NICKNAME_DEFAULT));
+        fprintf(stderr, "sceReg: SR_NICKNAME %s; the nickname (/CONFIG/SYSTEM/owner_name) is the "
+                        "neutral default \"%s\"\n",
+                read && !present ? "is not set"
+                                 : "is not 1 to 127 bytes of UTF-8 without control characters",
+                NK_NICKNAME_DEFAULT);
+    }
+    free(env);
+    return s_sreg_owner_name;
+}
+
+/* owner_name holds the nickname default, a modeled value rather than a placeholder. */
+static void sreg_seed_owner_name(void) {
+    int node = sreg_find_path("/CONFIG/SYSTEM/owner_name");
+    const char *nickname = sreg_owner_name_default();
+    uint32_t size = (uint32_t)strlen(nickname) + 1u;
+    uint8_t *value;
+    if (node < 0 || s_sreg_nodes[node].type != SREG_TYPE_STR) return;
+    value = (uint8_t *)malloc(size);
+    if (!value) return; /* it keeps the empty-string placeholder, named on its first read */
+    memcpy(value, nickname, size);
+    free(s_sreg_nodes[node].value);
+    s_sreg_nodes[node].value = value;
+    s_sreg_nodes[node].size = size;
+    s_sreg_nodes[node].flags &= (uint8_t)~SREG_NODE_PLACEHOLDER;
+}
+
+/* Build the defaults: the measured tree, then the system-param-backed and measured values, and
+ * the nickname. Every other value key keeps its neutral placeholder (INT 0, an empty string, or
+ * zero bytes). */
 static void sreg_build_defaults(void) {
     uint32_t err = 0;
     (void)sreg_walk("/CONFIG", 1, SREG_NODE_DEFAULT, &err, NULL);
@@ -1412,6 +1458,7 @@ static void sreg_build_defaults(void) {
         s_sreg_nodes[node].flags &= (uint8_t)~SREG_NODE_PLACEHOLDER;
         sreg_put_le32(s_sreg_nodes[node].value, s_sreg_measured_ints[i].value);
     }
+    sreg_seed_owner_name();
     sreg_build_font_registry();
 }
 
@@ -1424,6 +1471,13 @@ static int sreg_is_default_value(const SregNode *n) {
         if (n->type == SREG_TYPE_INT && n->size == 4u &&
             sreg_find_path(s_sreg_measured_ints[i].path) == (int)(n - s_sreg_nodes))
             return sreg_get_le32(n->value) == s_sreg_measured_ints[i].value;
+    }
+    if (n->type == SREG_TYPE_STR &&
+        sreg_find_path("/CONFIG/SYSTEM/owner_name") == (int)(n - s_sreg_nodes)) {
+        /* This process's nickname default, so the player's choice is never frozen into the
+           overlay: a later SR_NICKNAME is what the next run serves. */
+        const char *nickname = sreg_owner_name_default();
+        return n->size == strlen(nickname) + 1u && memcmp(n->value, nickname, n->size) == 0;
     }
     if (n->type == SREG_TYPE_STR && n->size != 1u) return 0; /* the default is the empty string */
     for (uint32_t i = 0; i < n->size; i++)
@@ -1907,6 +1961,7 @@ void sr_hle_test_sysreg_reset(void) {
     memset(s_sreg_cat, 0, sizeof(s_sreg_cat));
     s_sreg_loaded = 0;
     s_sreg_corrupt_on_disk = 0;
+    s_sreg_owner_name_ready = 0; /* a new process reads SR_NICKNAME again */
 }
 #endif
 

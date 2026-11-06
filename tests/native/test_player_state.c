@@ -7430,6 +7430,117 @@ static void test_enhanced_package_variants(void) {
     printf("[PLAYER_STATE_TEST] enhanced and authentic package variants validate apart PASS\n");
 }
 
+/* The console nickname (#2197): "Player" until the user chooses one, and never the PC's user
+ * name; the first-launch prompt shows until it is answered, and Skip keeps "Player" and is not
+ * asked again after a reload; Settings saves a new nickname that a reload reads back; and a
+ * value the rule refuses (128 bytes, empty, a control character, malformed UTF-8) changes
+ * nothing, in Settings, in the prompt and in a hand-edited settings file. */
+static void test_player_nickname(void) {
+    static const char *const refused[] = {
+        "", "a\x01" "b", "tab\tname", "del\x7F", "c1 \xC2\x85", "\xC3\x28", "\xED\xA0\x80",
+    };
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800], text[400];
+    char long_ok[NK_NICKNAME_MAX_BYTES + 1], long_bad[NK_NICKNAME_MAX_BYTES + 2];
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    char *saved;
+    assert(app && back);
+    memset(long_ok, 'n', NK_NICKNAME_MAX_BYTES);
+    long_ok[NK_NICKNAME_MAX_BYTES] = '\0';
+    memset(long_bad, 'n', NK_NICKNAME_MAX_BYTES + 1);
+    long_bad[NK_NICKNAME_MAX_BYTES + 1] = '\0';
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cnickname_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+
+    /* The default is "Player", whatever the PC's user name is. */
+    {
+        const char *names[] = {"USERNAME", "USER"};
+        for (size_t i = 0u; i < 2u; i++) {
+            const char *was = getenv(names[i]);
+            char kept[256];
+            snprintf(kept, sizeof(kept), "%s", was ? was : "");
+            nk_ps_set_env(names[i], "nk-os-user-name");
+            player_app_settings_init_default(&app->settings);
+            assert(strcmp(app->settings.nickname, "Player") == 0);
+            assert(!app->settings.nickname_asked);
+            nk_ps_set_env(names[i], was ? kept : NULL);
+        }
+    }
+
+    /* A settings file without the keys (an older player's) asks once. */
+    write_text_file(path, "{\"schema_version\": 2}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    assert(player_app_nickname_prompt_visible(app));
+
+    /* Skip keeps "Player", and the prompt does not come back after a reload. */
+    assert(player_app_nickname_prompt_answer(app, NULL));
+    assert(!player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    saved = read_text_file(path);
+    assert(saved && strstr(saved, "\"nickname\": \"Player\"") != NULL &&
+           strstr(saved, "\"nickname_asked\": true") != NULL);
+    free(saved);
+    player_app_init(back);
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(!player_app_nickname_prompt_visible(back));
+    assert(strcmp(back->settings.nickname, "Player") == 0);
+
+    /* Settings: a new nickname is saved at once and a reload reads it back, 127 bytes too. */
+    assert(player_app_set_nickname(back, "Ren\xC3\xA9 7"));
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Ren\xC3\xA9 7") == 0);
+    assert(player_app_set_nickname(app, long_ok));
+    player_app_init(back);
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(strcmp(back->settings.nickname, long_ok) == 0);
+
+    /* A refused value changes nothing: the old nickname stays, in memory and on disk. */
+    assert(!player_app_set_nickname(back, long_bad));
+    assert(!player_app_set_nickname(back, NULL));
+    for (size_t i = 0u; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        assert(!player_app_set_nickname(back, refused[i]));
+        assert(strcmp(back->settings.nickname, long_ok) == 0);
+    }
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, long_ok) == 0);
+
+    /* The prompt refuses the same values and stays up; a valid answer closes it. */
+    app->settings.nickname_asked = false;
+    assert(!player_app_nickname_prompt_answer(app, long_bad));
+    assert(!player_app_nickname_prompt_answer(app, "a\x01" "b"));
+    assert(player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, long_ok) == 0);
+    assert(player_app_nickname_prompt_answer(app, "Tester"));
+    assert(!player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, "Tester") == 0);
+
+    /* A hand-edited nickname the rule refuses is dropped for the default, not cut short. */
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"\\u0001x\", \"nickname_asked\": true}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0 && app->settings.nickname_asked);
+    snprintf(text, sizeof(text), "{\"schema_version\": 2, \"nickname\": \"%s\"}", long_bad);
+    write_text_file(path, text);
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"\"}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+
+    nk_remove_utf8(path);
+    free(app);
+    free(back);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -7552,6 +7663,7 @@ int main(int argc, char **argv) {
     test_play_mode_settings_mapping();
     test_play_mode_smooth_motion();
     test_play_mode_sas_settings();
+    test_player_nickname();
     test_play_mode_line_parses_in_runtime();
     test_play_mode_title_page();
     /* Saves a library file under the cache root, so it runs only once that

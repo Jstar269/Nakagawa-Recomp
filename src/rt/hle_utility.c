@@ -27,8 +27,9 @@ static uint32_t h_GetSystemParamInt(CpuState *s) {
 
 /* sceUtilityGetSystemParamString(int id, char *str, int len) (PSPSDK psputility_sysparam.h): 0 on
  * success, PSP_SYSTEMPARAM_RETVAL_FAIL (0x80110103) on failure. The nickname is id 1 and reads the
- * registry's /CONFIG/SYSTEM/owner_name value, so it is the neutral empty string unless a game
- * wrote one; no user name is modelled or invented. len is the buffer length. Measured on the
+ * registry's /CONFIG/SYSTEM/owner_name value (#2197): the nickname the user chose in the player
+ * (SR_NICKNAME), or a value a game wrote there. The default is the neutral "Player", and the
+ * nickname is never derived from the operating system. len is the buffer length. Measured on the
  * PSP-3000 oracle (2026-10-10, hle-sysparam): a buffer that cannot hold the string and its NUL
  * fails with 0x80110102 and writes nothing; a large enough buffer receives the string and its NUL
  * and the call returns 0. Other string ids, a null buffer and len <= 0 fail with 0x80110103. */

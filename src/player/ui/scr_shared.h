@@ -108,6 +108,9 @@ static inline uint32_t note_rgba(const NkUiTheme *theme, PlayerUiNoteKind kind) 
 #define FLOW_ID_REPORT_ROW FLOW_ID(0x000099u)
 #define FLOW_ID_PROMPTS FLOW_ID(0x0000A0u)
 #define FLOW_ID_WAVES FLOW_ID(0x0000B0u)
+#define FLOW_ID_NICKNAME_FIELD FLOW_ID(0x000300u)  /* the nickname editor's box (#2197) */
+#define FLOW_ID_NICKNAME_TEXT FLOW_ID(0x000301u)
+#define FLOW_ID_NICKNAME_NOTE FLOW_ID(0x000302u)   /* why Save was refused */
 
 #define FLOW_MARK_DIAMOND "\xE2\x97\x86"
 #define FLOW_MARK_DOT "\xE2\x97\x8F"

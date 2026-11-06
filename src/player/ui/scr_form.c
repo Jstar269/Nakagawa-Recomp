@@ -4,7 +4,9 @@
 /* The rows and boxes the setup wizard and Settings share: a dark inset panel, a
    setting's "Name: value" button with the sentence beside it, and the check
    columns. They draw with the setup wizard's ids (the WIZARD screen byte in
-   nk_ui.h), so the panel keeps its id wherever it is used. */
+   nk_ui.h), so the panel keeps its id wherever it is used. The nickname editor
+   that the first launch and Settings share (#2197) is a one-card flow page
+   with the FLOW screen's ids. */
 
 #include "player_ui_nk.h"
 #include "nk_ui_widgets.h"
@@ -150,6 +152,100 @@ bool scr_wizard_switch(NkUi *ui, NkUiId id, NkUiId text_id, const char *name,
                           const char *sentence, bool on, float width,
                           const WizardColumn *column) {
     return scr_wizard_value(ui, id, text_id, name, on ? "On" : "Off", sentence, on, width, column);
+}
+
+/* The nickname editor (#2197): the box with what is typed (the nickname in use,
+   dimmed, while nothing is), why the last Save was refused, then Save and Skip
+   (first launch) or Cancel (Settings). Save holds focus first. A keyboard
+   types into the box (player_ui_nk.c); Back is Skip or Cancel. */
+PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *model) {
+    static const NkUiPromptItem prompts_first[] = {
+        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
+        {NK_UI_PROMPT_ACT_BACK, "Skip"}
+    };
+    static const NkUiPromptItem prompts_settings[] = {
+        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
+        {NK_UI_PROMPT_ACT_BACK, "Cancel"}
+    };
+    const NkUiTheme *theme;
+    PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
+    const char *typed;
+    float inner;
+    if (ui == NULL || model == NULL) return result;
+    theme = nk_ui_theme(ui);
+    typed = safe_text(model->text, "");
+    inner = scr_flow_begin(ui, model->logical_width > 80.0f ? model->logical_width : 1280.0f,
+                           model->logical_height > 80.0f ? model->logical_height : 800.0f,
+                           640.0f);
+    if (inner <= 0.0f) return result;
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Nickname", theme->info);
+    nk_ui_text_role(ui, FLOW_ID_TITLE,
+                    model->first_launch ? "Choose a nickname" : "Change your nickname",
+                    NK_UI_TYPE_TITLE, theme->paper);
+    nk_ui_text_role(ui, FLOW_ID_LEAD,
+                    model->first_launch
+                        ? "Games show it as your PSP's nickname. Type a nickname or user name, "
+                          "or skip to keep \"" NK_NICKNAME_DEFAULT "\". You can change it in "
+                          "Settings."
+                        : "Games show it as your PSP's nickname, from the next time a game starts.",
+                    NK_UI_TYPE_BODY_S, theme->muted);
+    {
+        NkUiLayout field = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(),
+                                       sizing_fixed(NK_UI_CONTROL_HEIGHT), 0.0f);
+        NkUiStyle style;
+        memset(&style, 0, sizeof(style));
+        style.fill_rgba = theme->surface_high;
+        style.border_rgba = theme->line_strong;
+        style.border_width = NK_UI_BORDER_HAIRLINE;
+        style.corner_radius = NK_UI_RADIUS_CONTROL;
+        field.align_y = NK_UI_ALIGN_CENTER;
+        field.padding_left = NK_UI_SPACE_4;
+        field.padding_right = NK_UI_SPACE_4;
+        if (nk_ui_begin_container(ui, FLOW_ID_NICKNAME_FIELD, &field, &style)) {
+            char shown[NK_NICKNAME_MAX_BYTES + 2u];
+            NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY,
+                                            typed[0] != '\0' ? theme->paper : theme->muted);
+            text.wrap = false;
+            if (typed[0] != '\0') {
+                (void)snprintf(shown, sizeof(shown), "%s|", typed);
+            } else {
+                (void)snprintf(shown, sizeof(shown), "%s",
+                               safe_text(model->current, NK_NICKNAME_DEFAULT));
+            }
+            nk_ui_text(ui, FLOW_ID_NICKNAME_TEXT,
+                       nk_ui_text_clamp(ui, shown, &text, inner - 2.0f * NK_UI_SPACE_4, 1),
+                       &text);
+            nk_ui_end_container(ui);
+        }
+    }
+    if (model->refused) {
+        nk_ui_text_role(ui, FLOW_ID_NICKNAME_NOTE,
+                        "A nickname is 1 to 127 bytes of text, with no control characters.",
+                        NK_UI_TYPE_BODY_S, theme->warning);
+    }
+    {
+        NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                     NK_UI_SPACE_3);
+        row.padding_top = NK_UI_SPACE_1;
+        if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
+            if (nk_ui_button(ui, PLAYER_UI_ID_NICKNAME_SAVE, "Save", NK_UI_BUTTON_PRIMARY)) {
+                result = action(PLAYER_UI_ACTION_NICKNAME, 0u,
+                                (PlayerUiPrimaryAction)PLAYER_UI_NICKNAME_SAVE);
+            }
+            if (nk_ui_button(ui, PLAYER_UI_ID_NICKNAME_SKIP,
+                             model->first_launch ? "Skip" : "Cancel", NK_UI_BUTTON_NOT_DEFAULT)) {
+                result = action(PLAYER_UI_ACTION_NICKNAME, 0u,
+                                (PlayerUiPrimaryAction)PLAYER_UI_NICKNAME_SKIP);
+            }
+            nk_ui_end_container(ui);
+        }
+    }
+    if (result.kind == PLAYER_UI_ACTION_NONE && nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {
+        result = action(PLAYER_UI_ACTION_NICKNAME, 0u,
+                        (PlayerUiPrimaryAction)PLAYER_UI_NICKNAME_SKIP);
+    }
+    scr_flow_end(ui, "", model->first_launch ? prompts_first : prompts_settings, 3u);
+    return result;
 }
 
 WizardColumn scr_online_developer_column(NkUi *ui, bool online_on, bool developer, float width) {

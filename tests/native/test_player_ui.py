@@ -2200,6 +2200,56 @@ class NativePlayerUiTests(unittest.TestCase):
                 trail.append(frame["next_focus"])
         return trail
 
+    # The nickname editor's Save and Skip (or Cancel), and Settings > Nickname (#2197).
+    NICKNAME_SAVE = str(0x4560)
+    NICKNAME_SKIP = str(0x4561)
+    SETTINGS_NICKNAME = str(0x4562)
+
+    def test_next_ui_first_launch_nickname_prompt(self) -> None:
+        """#2197: the first launch asks for a nickname once. Skip (Esc) keeps the neutral
+        "Player" and is remembered, so the next start does not ask; a typed nickname is
+        saved. Failing-before: there was no prompt and settings.json had no nickname."""
+        prompt = {"NK_UI_TEST_NICKNAME_PROMPT": "1"}
+        skip = self.next_ui_run("library", ("WAIT_MS=300", "KEY_ESCAPE", "WAIT_MS=200"),
+                                env_extra=prompt)
+        self.assertIn(self.NICKNAME_SAVE, self.focus_trail(skip), "the prompt opens on Save")
+        self.assertNotIn("QUIT_DIALOG", str(skip["stdout"]), "Esc is Skip, not quit")
+        settings = skip["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Player")
+        self.assertIs(settings.get("nickname_asked"), True)
+        again = self.next_ui_run("library", ("WAIT_MS=300",), env_extra=prompt,
+                                 settings=settings)
+        self.assertNotIn(self.NICKNAME_SAVE, self.focus_trail(again), "it is asked only once")
+        typed = self.next_ui_run(
+            "library", ("WAIT_MS=300", "TEXT=Ren 7", "KEY_RETURN", "WAIT_MS=200"),
+            env_extra=prompt)
+        saved = typed["settings"]
+        assert isinstance(saved, dict)
+        self.assertEqual(saved.get("nickname"), "Ren 7")
+        self.assertIs(saved.get("nickname_asked"), True)
+
+    def test_next_ui_settings_edits_the_nickname(self) -> None:
+        """#2197: Settings > Online and developer > Nickname opens the editor. Save keeps
+        what was typed; an empty Save is refused and leaves the nickname as it was; Cancel
+        returns to the row. Failing-before: the page had no Nickname row."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100", "TEXT=Kai", "KEY_RETURN",
+             "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100",
+             "KEY_ESCAPE", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        trail = self.focus_trail(run)
+        self.assertEqual(trail[:3], [self.SETTINGS_FOCUS["developer"], self.SETTINGS_NICKNAME,
+                                     self.NICKNAME_SAVE], trail)
+        self.assertEqual(trail[-1], self.SETTINGS_NICKNAME, "Cancel returns to the row")
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[-1]["view"], "online_settings", "the editor keeps the page")
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Kai", "Save kept it; the empty Save did not")
+
     def test_next_ui_settings_changes_are_saved_and_done_returns(self) -> None:
         """#1302: Settings in the next UI runs the same handlers and saves each change."""
         focus = self.SETTINGS_FOCUS

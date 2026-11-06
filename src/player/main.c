@@ -604,11 +604,13 @@ static bool s_pad_select_held;
 /* Backspace and the mouse's back button (X1) are Back: each is taken as Esc,
    so every view goes back the same way. A key the Controls page is waiting
    for keeps its own name, so Backspace can still be mapped, and so does
-   Backspace in the library's find box, where it deletes. */
+   Backspace in the library's find box and the nickname editor, where it
+   deletes. */
 static const SDL_Event *player_back_as_escape(const PlayerApp *app, const PlayerUiNk *next_ui,
                                               const SDL_Event *event, SDL_Event *escape) {
     bool backspace = (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) &&
                      event->key.key == SDLK_BACKSPACE && !player_ui_nk_find_open(next_ui) &&
+                     !player_ui_nk_nickname_open(next_ui) &&
                      !(app->active_view == VIEW_CONTROLLER_SETTINGS &&
                        app->input_settings.device == INPUT_DEVICE_KEYBOARD &&
                        input_settings_is_capturing(&app->input_settings));
@@ -721,9 +723,10 @@ static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
              ((event->key.key == SDLK_RETURN || event->key.key == SDLK_KP_ENTER) &&
               (event->key.mod & SDL_KMOD_ALT)))) {
             player_app_toggle_launcher_fullscreen(app);
-        } else if (use_next_ui && player_ui_nk_find_open(next_ui)) {
-            /* The library's find box takes the keyboard: letters are typed, and
-               Esc clears the box instead of asking to quit. */
+        } else if (use_next_ui && (player_ui_nk_find_open(next_ui) ||
+                                   player_ui_nk_nickname_open(next_ui))) {
+            /* The library's find box and the nickname editor take the keyboard:
+               letters are typed, and Esc closes them instead of asking to quit. */
             return player_ui_nk_handle_event(next_ui, event);
         } else if (use_next_ui && !event->key.repeat && event->key.key == SDLK_O &&
                    !app->wizard.is_extracting) {
@@ -881,8 +884,9 @@ static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
             input_settings_feed_capture_source(&app->input_settings, src);
             return true;
         }
-        if (use_next_ui && !(event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST &&
-                             !player_view_is_library(app->active_view))) {
+        if (use_next_ui && (player_ui_nk_nickname_open(next_ui) ||
+                            !(event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST &&
+                              !player_view_is_library(app->active_view)))) {
             return player_ui_nk_handle_event(next_ui, event);
         }
         if (player_view_is_library(app->active_view)) {
@@ -5626,6 +5630,7 @@ int main(int argc, char *argv[]) {
         player_apply_test_view(&run.app, run.test_view);
         player_ui_test_prepare_app(&run.ui_test, &run.app);
         player_ui_test_apply_motion(&run.ui_test, &run.app);
+        player_ui_test_apply_nickname_prompt(&run.ui_test, &run.app);
         run.app.window_width = run.override_w;
         run.app.window_height = run.override_h;
         code = player_command_line_launch(&run);
