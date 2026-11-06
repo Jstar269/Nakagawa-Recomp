@@ -853,7 +853,8 @@ static void check_preempt_cases(const char *base) {
     CHECK(pp_published(), "the SAVE must still publish its bytes");
 
     /* A thread due again after every step: one point before each member's staging write, one
-     * before the journal and one before each member is published (2 members: data, PARAM.SFO). */
+     * before the journal, one before each member is published (2 members: data, PARAM.SFO), one
+     * before the commit and one before the cleanup. */
     g_pp_calls = 0;
     g_pp_probe = NULL;
     g_pp_rearm = 1;
@@ -861,7 +862,7 @@ static void check_preempt_cases(const char *base) {
     CHECK(run_save(root, "DATA.BIN", "THIRD-SAVE") == 0, "a SAVE with a thread always due must succeed");
     g_pp_rearm = 0;
     atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
-    CHECK(g_pp_calls == 5, "a two-member SAVE must hand the CPU over at 5 points, did at %d", g_pp_calls);
+    CHECK(g_pp_calls == 7, "a two-member SAVE must hand the CPU over at 7 points, did at %d", g_pp_calls);
 #else
     (void)base;
     printf("SKIP: preemption savedata cases require the POSIX descriptor backend\n");
