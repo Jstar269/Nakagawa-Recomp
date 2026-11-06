@@ -442,7 +442,7 @@ class RegistrationSubsystemTests(unittest.TestCase):
 
     def test_the_longest_prefix_decides(self) -> None:
         self.assertEqual(hle_manifest.subsystem_for("sceAudioChReserve"), "audio")
-        self.assertEqual(hle_manifest.subsystem_for("sceAudiocodecDecode"), "audio_codec")
+        self.assertEqual(hle_manifest.subsystem_for("sceAudiocodecDecode"), "videocodec")
         self.assertEqual(hle_manifest.subsystem_for("sceKernelPowerLock"), "power")
         self.assertEqual(hle_manifest.subsystem_for("sceKernelLockLwMutexCB"), "kernel_sync")
         self.assertEqual(hle_manifest.subsystem_for("_sceKernelLockLwMutex"), "kernel_sync")
@@ -1397,19 +1397,15 @@ static uint32_t h_SynthReal(CpuState *s) {
                 "0x50647530": ("sceNetFreeThreadinfo", "0x80010086"),
                 "0xcc393e48": ("sceNetGetMallocStat", "0x80010086"),
                 "0xf7d13214": ("sceNetAdhocDiscoverStop", "0x80010086"),
-                "0x29681260": ("sceAudiocodecReleaseEDRAM", "0x80010086"),
                 "0x011f03c1": ("sceRtcGetAccumulativeTime", "0x80020002"),
                 "0x191cdeff": ("sceSslEnd", "0x80010086"),
                 "0x5963991b": ("sceNetApctlDelHandler", "0x80010086"),
                 "0xf9d8eb63": ("sceHttpsEnd", "0x80010086"),
-                "0x3a20a200": ("sceAudiocodecGetEDRAM", "0x80010086"),
                 "0x3eaba285": ("sceHttpAddExtraHeader", "0x80010086"),
-                "0x5b37eb1d": ("sceAudiocodecInit", "0x80010086"),
                 "0x438a385a": ("sceGeSaveContext", "0x80020002"),
                 "0x0bf608fb": ("sceGeRestoreContext", "0x80020002"),
                 "0x08d98894": ("sceNpDrmEdataSetupKey", "0x80020002"),
                 "0xf9275d98": ("sceKernelLoadModuleBufferUsbWlan", "0x80020002"),
-                "0x70a703f8": ("sceAudiocodecDecode", "0x80010086"),
                 "0x72189c48": ("sceImposeSetUMDPopup", "0x80010086"),
                 "0x7ed59bc4": ("sceDisplaySetHoldMode", "0x80020002"),
                 "0x8c943191": ("sceImposeGetBatteryIconStatus", "0x80010086"),

@@ -2320,6 +2320,42 @@ HANDLER_METADATA = {
         ],
         "limitation": "synthetic context words from JPCSP pending W-LLE-1; mode mapping 0=8888, 1=5650, 2=5551, 3=4444 from JPCSP; unknown modes return -1",
     },
+    # sceAudiocodec: the Media Engine audio half under a disc mpeg.prx (#286), in hle_videocodec.c.
+    "h_AudiocodecCheckNeedMem": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_audiocodec",
+        ],
+        "limitation": "codec 0x1000 (ATRAC3plus) only; the wrapper checks follow uofw; the ATRAC3plus words (+16 = 0x7BC0, +52 = 44100, +60 = 2, +64 = 0x2E8) are JPCSP's and synthetic pending W-LLE-1",
+    },
+    "h_AudiocodecGetEDRAM": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_audiocodec",
+        ],
+        "limitation": "codec 0x1000 only; allocates ((+16) + 0x3F) | 0x3F bytes of the host ME RAM model as uofw does; the addresses are not PSP-measured",
+    },
+    "h_AudiocodecReleaseEDRAM": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_audiocodec",
+        ],
+        "limitation": "frees only allocations of the host ME RAM model; clears +104 and +12 and drops the host decoder as JPCSP does",
+    },
+    "h_AudiocodecInit": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_audiocodec",
+        ],
+        "limitation": "codec 0x1000 only; refuses a work area without EDRAM (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)",
+    },
+    "h_AudiocodecDecode": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_audiocodec",
+        ],
+        "limitation": "codec 0x1000 only, PSMF frames with the 0x0FD0 header only; mono or stereo input into a mono or stereo 16-bit block (no downmix); synchronous decode; the +28 and +36 words and the refusal code are synthetic pending W-LLE-1",
+    },
 }
 
 # handler name -> status mapping. Preserved for direct consumers and gate checks.
@@ -2605,7 +2641,6 @@ SUBSYSTEM_BY_PREFIX = {
     "sceVaudio": "audio",
     # --- compressed-audio decoders ---
     "sceAtrac": "audio_codec",
-    "sceAudiocodec": "audio_codec",
     "sceMp3": "audio_codec",
     # --- CPU caches and DMA copies ---
     "sceDmac": "cache_dma",
@@ -2627,6 +2662,8 @@ SUBSYSTEM_BY_PREFIX = {
     "sceMpegBase": "videocodec",
     "sceMpegbase": "videocodec",
     "sceVideocodec": "videocodec",
+    # sceAudiocodec is the Media Engine's audio codec, served beside the video one (#286).
+    "sceAudiocodec": "videocodec",
     # --- network (fail-closed stubs) ---
     "sceHttp": "network",
     "sceNet": "network",

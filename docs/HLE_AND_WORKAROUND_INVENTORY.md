@@ -46,13 +46,13 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **687** (dedicated **585**, fake_success **4**, controlled_unsupported **98**).
-Semantic handler census: **563** handlers across **27** API families, covering **592** handler-associated NID registrations.
+Registered NIDs: **700** (dedicated **602**, fake_success **4**, controlled_unsupported **94**).
+Semantic handler census: **580** handlers across **30** API families, covering **609** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 267 | 275 |
+| `partial` | 284 | 292 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
 | `unreviewed` | 278 | 286 |
@@ -63,6 +63,7 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 | `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
 | `sceAtrac` | 0 | 0 | 0 | 0 | 32 | 32 | 33 |
 | `sceAudio` | 0 | 11 | 0 | 0 | 5 | 16 | 17 |
+| `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 10 | 0 | 0 | 2 | 12 | 12 |
 | `sceDisplay` | 1 | 8 | 0 | 0 | 7 | 16 | 16 |
 | `sceDmac` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
@@ -73,7 +74,8 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 | `sceIo` | 2 | 27 | 0 | 0 | 5 | 34 | 34 |
 | `sceKernel` | 3 | 107 | 0 | 0 | 80 | 190 | 208 |
 | `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
-| `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
+| `sceMpeg` | 0 | 15 | 0 | 2 | 26 | 43 | 43 |
+| `sceMpegbase` | 0 | 1 | 0 | 0 | 0 | 1 | 1 |
 | `sceNet` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceNp` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
 | `sceOpen` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
@@ -85,8 +87,9 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 | `sceUmd` | 0 | 6 | 1 | 0 | 7 | 14 | 14 |
 | `sceUtility` | 0 | 10 | 0 | 0 | 27 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
+| `sceVideocodec` | 0 | 8 | 0 | 0 | 0 | 8 | 8 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **267** | **1** | **3** | **278** | **563** | **592** |
+| **Total** | **14** | **284** | **1** | **3** | **278** | **580** | **609** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -206,6 +209,21 @@ Semantic handler census: **563** handlers across **27** API families, covering *
   - Limitation: the returns for an unreserved slot, a held slot (0x80268002, including Output2 holding it), sample counts 0 (0x80000104), 65 and 4096 (accepted), 48000 Hz (accepted) and channel counts 1 (0x80000104) and 4 (0x80000003) are measured (PSP-HLE-AUDIO-SRC-001); the upper sample-count bound reuses the Output2 range 17..4111, channel counts other than 1, 2 and 4 take the code measured for 4, and rates other than 44100 and 48000 are refused with that same code and a message, all unmeasured (#339)
 - **`h_AudioSRCOutputBlocking`** (`sceAudio`): `sceAudioSRCOutputBlocking` (0xe0727056)
   - Limitation: returns 0x80260008 with nothing reserved and the reserved sample count after a reserve (0x400), both measured (PSP-HLE-AUDIO-SRC-001); the volume bound 0xFFFFF (shared with Output2, from PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp) and the NULL or unreadable buffer result, which follows the regular output, are both unmeasured; the host mixer runs at 44100 Hz, so a 48000 Hz block passes through a band-limited converter and keeps its source-rate pacing (#339)
+- **`h_AudiocodecCheckNeedMem`** (`sceAudiocodec`): `sceAudiocodecCheckNeedMem` (0x9d3f790c)
+  - Limitation: codec 0x1000 (ATRAC3plus) only; the wrapper checks follow uofw; the ATRAC3plus words (+16 = 0x7BC0, +52 = 44100, +60 = 2, +64 = 0x2E8) are JPCSP's and synthetic pending W-LLE-1
+  - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
+- **`h_AudiocodecDecode`** (`sceAudiocodec`): `sceAudiocodecDecode` (0x70a703f8)
+  - Limitation: codec 0x1000 only, PSMF frames with the 0x0FD0 header only; mono or stereo input into a mono or stereo 16-bit block (no downmix); synchronous decode; the +28 and +36 words and the refusal code are synthetic pending W-LLE-1
+  - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
+- **`h_AudiocodecGetEDRAM`** (`sceAudiocodec`): `sceAudiocodecGetEDRAM` (0x3a20a200)
+  - Limitation: codec 0x1000 only; allocates ((+16) + 0x3F) | 0x3F bytes of the host ME RAM model as uofw does; the addresses are not PSP-measured
+  - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
+- **`h_AudiocodecInit`** (`sceAudiocodec`): `sceAudiocodecInit` (0x5b37eb1d)
+  - Limitation: codec 0x1000 only; refuses a work area without EDRAM (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)
+  - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
+- **`h_AudiocodecReleaseEDRAM`** (`sceAudiocodec`): `sceAudiocodecReleaseEDRAM` (0x29681260)
+  - Limitation: frees only allocations of the host ME RAM model; clears +104 and +12 and drops the host decoder as JPCSP does
+  - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
 - **`h_CtrlGetSamplingCycle`** (`sceCtrl`): `sceCtrlGetSamplingCycle` (0x02baad91)
   - Limitation: reports the cycle retained by sceCtrlSetSamplingCycle; PSPAutotests leaves the NULL out-pointer call out as crashing a PSP, so the ILLEGAL_ADDR refusal used here instead is the runtime's fail-closed choice, not a measured code
   - Evidence: tests/native/hle_thread_selftest.c:test_ctrl_sampling_mode_cycle_matrix
@@ -877,6 +895,15 @@ Semantic handler census: **563** handlers across **27** API families, covering *
   - Limitation: the sizes and refusals MEASURED for modes 0-4 and -1 (PSP-MPEG-001); a mode-3 size wider than 480, which does not follow 1.5 w h on the PSP, is refused as not modeled (#302)
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode
+- **`h_MpegBaseCscAvc`** (`sceMpeg`): `sceMpegBaseCscAvc` (0x91929a21)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; converts only pictures this boundary decoded, found by their eight published band addresses, at the full picture size; 16-bit pixel modes and alpha follow sceMpegAvcCsc and are not measured
+  - Evidence: tests/native/videocodec_selftest.c:test_csc
+- **`h_MpegBaseCscInit`** (`sceMpeg`): `sceMpegBaseCscInit` (0x492b5e4b)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; records the default row width only; the coefficient table the PSP writes is not reproduced (conversion is the measured sr_h264_psp_rgb)
+  - Evidence: tests/native/videocodec_selftest.c:test_csc
+- **`h_MpegBasePESpacketCopy`** (`sceMpeg`): `sceMpegBasePESpacketCopy` (0xbea18f91)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; checks the whole packet list (sources, ME destinations, lengths, cycles) before copying; refusal codes other than the zero-length one are project-chosen
+  - Evidence: tests/native/videocodec_selftest.c:test_packet_copy
 - **`h_MpegChangeGetAuMode`** (`sceMpeg`): `sceMpegChangeGetAuMode` (0x9dcfb7ea)
   - Limitation: decode mode is validated and retained; skip mode fails closed because its queue/timestamp effect is not measured (#302)
 - **`h_MpegGetAtracAu`** (`sceMpeg`): `sceMpegGetAtracAu` (0xe1ce83a7)
@@ -887,6 +914,9 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 - **`h_MpegQueryUserdataEsSize`** (`sceMpeg`): `sceMpegQueryUserdataEsSize` (0xc45c99cc)
   - Limitation: writes the 0xA0000 ES and output sizes PPSSPP c9e2afb6 uses and refuses a bad handle or pointer with -1; neither is measured on a PSP (#302)
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_userdata_imports
+- **`h_Mpegbase_0530BE4E`** (`sceMpegbase`): `sceMpegbase_0530BE4E` (0x0530be4e)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; mode mapping 0=8888, 1=5650, 2=5551, 3=4444 from JPCSP; unknown modes return -1
+  - Evidence: tests/native/videocodec_selftest.c:test_csc
 - **`h_NetAdhocctlGetParameter`** (`sceNet`): `sceNetAdhocctlGetParameter` (0xded9d28e)
   - Limitation: always NOT_INITIALIZED (0x80410b08), writing nothing, because sceNetAdhocctlInit stays refused with no network; GetParameter's own pre-init code is UNMEASURED and follows the measured calls; with the WLAN switch off PPSSPP answers DISCONNECTED (0x80410b09) instead (UNMEASURED)
   - Evidence: tests/native/hle_thread_selftest.c:test_net_core_without_network
@@ -1120,6 +1150,30 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 - **`h_VaudioOutputBlocking`** (`sceVaudio`): `sceVaudioOutputBlocking` (0x8986295e)
   - Limitation: the SRC blocking output for a Vaudio reservation: returns the reserved sample count, 0x80260008 with no Vaudio reservation, and 0x8026000b above volume 0xFFFFF, a project choice by analogy with the Output2 and SRC bound because this model plays Vaudio through the SRC output (the public reference checks no Vaudio volume); unmeasured on a PSP (#1986)
   - Evidence: tests/native/hle_thread_selftest.c:test_vaudio_plays_through_the_src_slot
+- **`h_VideocodecDecode`** (`sceVideocodec`): `sceVideocodecDecode` (0xdba273fa)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; type 0 (AVC) only; synchronous host H.264 decode; buffer2, YUV struct, ME info blocks, buffer3 and SEI words are JPCSP's; the PSP's banded picture layout is not written (pictures stay host 4:2:0 planes keyed by the buffer-0 ME address); fails closed without an H.264 backend
+  - Evidence: tests/native/videocodec_selftest.c:test_decode
+- **`h_VideocodecDelete`** (`sceVideocodec`): `sceVideocodecDelete` (0x307e6e1c)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; frees the decoder, ME memory and pictures and closes the context; returns at once (JPCSP notes about 40 ms on a PSP)
+  - Evidence: tests/native/videocodec_selftest.c:test_teardown
+- **`h_VideocodecGetEDRAM`** (`sceVideocodec`): `sceVideocodecGetEDRAM` (0x2d31f5b1)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; allocates ((+24) + 63) | 0x3F bytes of a host 2 MiB ME RAM model, low-first, 64-byte aligned, first 0x10000 reserved; addresses are not PSP-measured
+  - Evidence: tests/native/videocodec_selftest.c:test_context_words
+- **`h_VideocodecInit`** (`sceVideocodec`): `sceVideocodecInit` (0x17099f0a)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; writes +12 = +20 + 8 only
+  - Evidence: tests/native/videocodec_selftest.c:test_context_words
+- **`h_VideocodecOpen`** (`sceVideocodec`): `sceVideocodecOpen` (0xc01ec829)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; writes context +0 = 0x05100601 and returns 0 (JPCSP returns its ME driver's result, not modelled); codec type 0 only, other types refused
+  - Evidence: tests/native/videocodec_selftest.c:test_context_words
+- **`h_VideocodecReleaseEDRAM`** (`sceVideocodec`): `sceVideocodecReleaseEDRAM` (0x4f160bf4)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; clears +20 and +92 and frees the host ME RAM allocation
+  - Evidence: tests/native/videocodec_selftest.c:test_teardown
+- **`h_VideocodecSetMemory`** (`sceVideocodec`): `sceVideocodecSetMemory` (0x745a7b7a)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; accepts the call and writes nothing, as JPCSP does; the meaning of words +64..+76 is not modelled
+  - Evidence: tests/native/videocodec_selftest.c:test_context_words
+- **`h_VideocodecStop`** (`sceVideocodec`): `sceVideocodecStop` (0xa2f0564e)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; drops the host decoder (the next decode starts a new one); whether the PSP drains pending pictures is not measured
+  - Evidence: tests/native/videocodec_selftest.c:test_teardown
 
 #### Compatibility Handlers (Named Limitations)
 

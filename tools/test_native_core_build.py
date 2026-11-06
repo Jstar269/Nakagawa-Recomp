@@ -73,6 +73,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     # translation from tools/code_capture.py, the binding that takes the call (#1933).
     "build/mygame/code_capture_selftest_capture build/mygame/code-capture-selftest",
     "build/mygame/code_capture_selftest_bound build/mygame/code-capture-selftest",
+    "build/mygame/videocodec_selftest",
     "build/test_pgf_public",
     "build/test_core_catalog",
     "build/test_parsers_hostile",

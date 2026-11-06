@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 the Nakagawa Recomp authors
 //
-// The Media Engine video boundary a disc mpeg.prx calls when it runs as LLE (#286):
-// sceVideocodec and sceMpegbase in src/rt/hle_videocodec.c. Standalone host executable, no game
+// The Media Engine boundary a disc mpeg.prx calls when it runs as LLE (#286): sceVideocodec,
+// sceMpegbase and sceAudiocodec in src/rt/hle_videocodec.c. Standalone host executable, no game
 // inputs:
 //
 //   mingw32-make --no-print-directory videocodec-selftest
@@ -26,6 +26,10 @@
 //
 // Failing-before evidence: on the base tree src/rt/hle_videocodec.c and the videocodec-selftest
 // target do not exist, so this file does not build.
+//
+// The ATRAC3plus cases build PSMF audio frames around synthetic bodies (the terminator frame of
+// tests/native/atrac3p_bridge_selftest.c, and the first xorshift-generated mono body that decodes
+// to sound) and compare each block with a reference decode of the same frame by a separate decoder.
 //
 // Expected stderr noise: one ME_BOUNDARY_REFUSED line per deliberate refusal.
 
@@ -138,6 +142,11 @@ static uint32_t call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32
 #define NID_CSCAVC      0x91929A21u
 #define NID_PESCOPY     0xBEA18F91u
 #define NID_PIXELMODE   0x0530BE4Eu
+#define NID_AC_NEEDMEM  0x9D3F790Cu
+#define NID_AC_INIT     0x5B37EB1Du
+#define NID_AC_DECODE   0x70A703F8u
+#define NID_AC_GETEDRAM 0x3A20A200u
+#define NID_AC_RELEASE  0x29681260u
 
 /* ---- guest layout ------------------------------------------------------------------------ */
 
@@ -348,9 +357,12 @@ static void test_registration(void) {
         { NID_RELEASE, "sceVideocodecReleaseEDRAM" }, { NID_SETMEMORY, "sceVideocodecSetMemory" },
         { NID_CSCINIT, "sceMpegBaseCscInit" }, { NID_CSCAVC, "sceMpegBaseCscAvc" },
         { NID_PESCOPY, "sceMpegBasePESpacketCopy" }, { NID_PIXELMODE, "sceMpegbase_0530BE4E" },
+        { NID_AC_NEEDMEM, "sceAudiocodecCheckNeedMem" }, { NID_AC_INIT, "sceAudiocodecInit" },
+        { NID_AC_DECODE, "sceAudiocodecDecode" }, { NID_AC_GETEDRAM, "sceAudiocodecGetEDRAM" },
+        { NID_AC_RELEASE, "sceAudiocodecReleaseEDRAM" },
     };
     hle_register_videocodec_handlers();
-    CHECK(s_reg_count == 12 && s_reg_duplicates == 0, "registration: exactly the 12 boundary NIDs, once each");
+    CHECK(s_reg_count == 17 && s_reg_duplicates == 0, "registration: exactly the 17 boundary NIDs, once each");
     for (size_t k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
         int found = 0;
         for (int i = 0; i < s_reg_count; i++)
@@ -644,6 +656,157 @@ static void test_teardown(void) {
               "delete: the decoded picture can no longer be converted");
 }
 
+/* ---- sceAudiocodec: the ATRAC3plus half --------------------------------------------------- */
+
+#define G_AC       0x08900800u   /* 108-byte work area */
+#define G_AC2      0x08900880u   /* a second work area that is never initialised */
+#define G_AIN      0x08940000u   /* one PSMF audio frame */
+#define G_AOUT     0x08942000u   /* one 0x2000-byte block, then a guard */
+#define AC_CODEC   0x1000u
+
+/* A PSMF audio frame: the 8-byte 0x0FD0 header (channel id in bits 2-4 of byte 2, size code in
+ * byte 3; data = code * 8 + 8 bytes), then the body, zero-padded. Returns the data size. */
+static uint32_t put_audio_frame(uint32_t at, int channels, const uint8_t *body, uint32_t body_len) {
+    const uint8_t code = 1u;
+    const uint32_t data = (uint32_t)code * 8u + 8u;
+    uint8_t *p = host(at);
+    memset(p, 0, 8u + data);
+    p[0] = 0x0Fu; p[1] = 0xD0u; p[2] = (uint8_t)(channels << 2); p[3] = code;
+    memcpy(p + 8, body, body_len);
+    return data;
+}
+
+/* The block a separate decoder makes from the same frame, as interleaved stereo bytes. */
+static int reference_block(int channels, const uint8_t *frame, uint32_t data, uint8_t *out) {
+    Atrac3pBridge *ref = NULL;
+    static int16_t pcm[2 * 2048];
+    int samples = 0;
+    if (atrac3p_bridge_create(channels, (int)data, &ref) != 0 || !ref) return 0;
+    const int ok = atrac3p_bridge_decode(ref, frame, (int)data, pcm, &samples) == 0 && samples == 2048;
+    atrac3p_bridge_destroy(ref);
+    if (!ok) return 0;
+    for (int i = 0; i < 2048; i++)
+        for (int ch = 0; ch < 2; ch++) {
+            const uint16_t v = (uint16_t)pcm[channels == 1 ? i : i * 2 + ch];
+            out[(i * 2 + ch) * 2] = (uint8_t)v;
+            out[(i * 2 + ch) * 2 + 1] = (uint8_t)(v >> 8);
+        }
+    return 1;
+}
+
+/* A 16-byte mono frame body that a fresh decoder turns into a block that is not silence, so
+ * the mono-to-stereo duplication is visible. The candidates are xorshift32 bytes from a fixed
+ * seed with the frame's first byte kept to the mono channel-unit form of the bridge
+ * selftest's fixture (start bit 0, unit id 0); the first that decodes without error to a
+ * block with a non-zero sample is used. Deterministic: the same body every run. */
+static int find_loud_mono_body(uint8_t body[16]) {
+    uint32_t state = 0x2545F491u;
+    for (unsigned candidate = 0; candidate < 20000u; candidate++) {
+        for (int i = 0; i < 16; i++) {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            body[i] = (uint8_t)state;
+        }
+        body[0] = (uint8_t)(body[0] & 0x1Fu);
+        Atrac3pBridge *b = NULL;
+        static int16_t pcm[2 * 2048];
+        int samples = 0;
+        if (atrac3p_bridge_create(1, 16, &b) != 0 || !b) return 0;
+        const int ok = atrac3p_bridge_decode(b, body, 16, pcm, &samples) == 0 && samples == 2048;
+        atrac3p_bridge_destroy(b);
+        if (!ok) continue;
+        for (int i = 0; i < 2048; i++)
+            if (pcm[i] != 0) return 1;
+    }
+    return 0;
+}
+
+static void ac_set_io(uint32_t w56, uint32_t w72) {
+    MEM_W32(G_AC + 24u, G_AIN);
+    MEM_W32(G_AC + 32u, G_AOUT);
+    MEM_W32(G_AC + 56u, w56);
+    MEM_W32(G_AC + 72u, w72);
+    memset(host(G_AOUT), 0xAA, 0x2000u + 64u);
+}
+
+static void test_audiocodec(void) {
+    static const uint8_t k_terminator[] = { 0x60 };
+    static uint8_t expect[0x2000];
+    memset(host(G_AC), 0, 0x100u);
+
+    CHECK(call(NID_AC_NEEDMEM, G_AC, 0x0FFFu, 0, 0) == AC_ERR_NOT_SUPPORTED &&
+              call(NID_AC_NEEDMEM, G_AC, 0x1006u, 0, 0) == AC_ERR_NOT_SUPPORTED,
+          "audiocodec: a codec type outside 0x1000-0x1005 is refused as not supported");
+    CHECK(call(NID_AC_NEEDMEM, G_AC, 0x1001u, 0, 0) == AC_ERR_NOT_SUPPORTED && MEM_R32(G_AC) == 0u,
+          "audiocodec: a codec other than ATRAC3plus is refused and the work area is untouched");
+    CHECK(call(NID_AC_NEEDMEM, 0u, AC_CODEC, 0, 0) == AC_ERR_NOT_RAM &&
+              call(NID_AC_NEEDMEM, G_AC + 2u, AC_CODEC, 0, 0) == AC_ERR_NOT_RAM,
+          "audiocodec: a null or unaligned work area is refused");
+
+    CHECK(call(NID_AC_NEEDMEM, G_AC, AC_CODEC, 0, 0) == 0u && MEM_R32(G_AC) == 0x05100601u &&
+              MEM_R32(G_AC + 16u) == 0x7BC0u && MEM_R32(G_AC + 52u) == 44100u &&
+              MEM_R32(G_AC + 60u) == 2u && MEM_R32(G_AC + 64u) == 0x2E8u,
+          "checkneedmem: the ATRAC3plus work-area words");
+    CHECK(call(NID_AC_INIT, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && !ac_find(G_AC),
+          "init: a work area without EDRAM is refused");
+
+    const int allocs = s_me_alloc_count;
+    CHECK(call(NID_AC_GETEDRAM, G_AC, AC_CODEC, 0, 0) == 0u && s_me_alloc_count == allocs + 1,
+          "getedram: one ME allocation");
+    const uint32_t raw = MEM_R32(G_AC + 104u), edram = MEM_R32(G_AC + 12u);
+    CHECK(raw >= ME_RAM_RESERVED_LOW && raw < ME_RAM_SIZE && edram == ((raw + 0x3Fu) & ~0x3Fu) &&
+              edram + 0x7BC0u <= ME_RAM_SIZE,
+          "getedram: +104 holds the raw ME address and +12 the 64-byte-aligned one");
+
+    CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME, "decode: before init it is refused");
+    CHECK(call(NID_AC_DECODE, G_AC2, AC_CODEC, 0, 0) == AC_ERR_ME,
+          "decode: a work area the runtime never initialised is refused");
+    MEM_W32(G_AC + 8u, 0x1234u);
+    CHECK(call(NID_AC_INIT, G_AC, AC_CODEC, 0, 0) == 0u && ac_find(G_AC) && MEM_R32(G_AC + 8u) == 0u,
+          "init: the work area becomes a context and its error word is cleared");
+
+    /* A mono frame into a stereo block (+56 = 1, +72 = 2: uofw's 0x2000-byte rule). */
+    uint8_t loud[16];
+    CHECK(find_loud_mono_body(loud), "decode: a mono fixture frame that decodes to sound exists");
+    uint32_t data = put_audio_frame(G_AIN, 1, loud, sizeof(loud));
+    ac_set_io(1u, 2u);
+    CHECK(reference_block(1, host(G_AIN + 8u), data, expect), "decode: the reference decoder takes the mono frame");
+    CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == 0u, "decode: a mono ATRAC3plus frame decodes");
+    CHECK(memcmp(host(G_AOUT), expect, 0x2000u) == 0,
+          "decode: the mono block is the reference decode, duplicated into both channels");
+    CHECK(!bytes_are(G_AOUT, 0x2000u, 0x00u), "decode: the mono fixture block is not silence");
+    CHECK(bytes_are(G_AOUT + 0x2000u, 64u, 0xAAu), "decode: nothing is written past the block");
+    CHECK(MEM_R32(G_AC + 36u) == 0x2000u && MEM_R32(G_AC + 28u) == data,
+          "decode: +36 is the block size and +28 the frame size");
+
+    /* A stereo terminator frame: a block of silence over a filled buffer. */
+    data = put_audio_frame(G_AIN, 2, k_terminator, sizeof(k_terminator));
+    ac_set_io(2u, 2u);
+    CHECK(reference_block(2, host(G_AIN + 8u), data, expect), "decode: the reference decoder takes the stereo frame");
+    CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == 0u && memcmp(host(G_AOUT), expect, 0x2000u) == 0 &&
+              bytes_are(G_AOUT, 0x2000u, 0x00u) && MEM_R32(G_AC + 36u) == 0x2000u,
+          "decode: a stereo frame writes the reference block");
+
+    /* Refusals leave the output untouched. */
+    ac_set_io(0u, 1u);
+    CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && bytes_are(G_AOUT, 0x2000u, 0xAAu),
+          "decode: a stereo frame into a mono block (downmix) is refused");
+    ac_set_io(0u, 0u);
+    CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && bytes_are(G_AOUT, 0x2000u, 0xAAu),
+          "decode: an output size of zero is refused");
+    ac_set_io(2u, 2u);
+    host(G_AIN)[1] = 0x00u;
+    CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && bytes_are(G_AOUT, 0x2000u, 0xAAu),
+          "decode: input without the 0x0FD0 frame header is refused");
+
+    CHECK(call(NID_AC_RELEASE, G_AC, 0, 0, 0) == 0u && MEM_R32(G_AC + 104u) == 0u && MEM_R32(G_AC + 12u) == 0u &&
+              s_me_alloc_count == allocs && !ac_find(G_AC),
+          "releaseedram: the ME memory and the decoder go and the words are cleared");
+    CHECK(call(NID_AC_RELEASE, G_AC, 0, 0, 0) == AC_ERR_EDRAM_NOT_HELD,
+          "releaseedram: a second release is refused");
+}
+
 int main(void) {
     sr_mem_init();
     test_registration();
@@ -653,6 +816,7 @@ int main(void) {
     test_decode();
     test_csc();
     test_teardown();
+    test_audiocodec();
     if (failures) {
         fprintf(stderr, "videocodec selftest: FAILED (%d of %d checks)\n", failures, checks);
         return 1;

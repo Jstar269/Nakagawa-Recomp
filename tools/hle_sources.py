@@ -69,6 +69,12 @@ RUNTIME_HLE_SOURCES: tuple[str, ...] = (
     "src/rt/hle_videocodec.c",
 )
 
+#: Runtime HLE files written as new files, not split from ``src/rt/hle.c``: each carries the
+#: licence header of its own lineage instead of hle.c's (its record in src/rt/PROVENANCE.md).
+OWN_LINEAGE_SOURCES: tuple[str, ...] = (
+    "src/rt/hle_videocodec.c",   # JPCSP and uofw derived, #286
+)
+
 #: Headers private to the runtime HLE files. :func:`text` includes them by default, so a
 #: whole-source scan also covers declarations and inline helpers kept there.
 HLE_PRIVATE_HEADERS: tuple[str, ...] = (

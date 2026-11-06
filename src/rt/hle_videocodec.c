@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later AND MIT
 // Copyright (C) 2026 the Nakagawa Recomp authors
 // Derived from JPCSP (https://github.com/jpcsp/jpcsp) revision 00ac4d6daedd89c0492093ae83fb0d3d819af414,
 // GPL-3.0-or-later: src/jpcsp/HLE/modules/sceVideocodec.java, src/jpcsp/HLE/modules/sceMpegbase.java,
@@ -16,9 +16,29 @@
 //   Public License for more details.
 //   You should have received a copy of the GNU General Public License along with Jpcsp.  If not,
 //   see <http://www.gnu.org/licenses/>.
+//
+// The sceAudiocodec wrapper checks (argument and codec-range checks, the EDRAM allocation and
+// release words and their error codes, the output-size rule) are adapted from uofw
+// (https://github.com/uofw/uofw) revision 28306bb5bd4fcdcc0c1d469bf1f3bdb885dde3e9,
+// src/kd/avcodec/audiocodec.c, under the MIT licence:
+//   Copyright (c) 2011, 2012 The uOFW team
+//   Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+//   and associated documentation files (the "Software"), to deal in the Software without
+//   restriction, including without limitation the rights to use, copy, modify, merge, publish,
+//   distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+//   Software is furnished to do so, subject to the following conditions:
+//   The above copyright notice and this permission notice shall be included in all copies or
+//   substantial portions of the Software.
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+//   BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+//   NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+//   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+// The ATRAC3plus work-area words sceAudiocodecCheckNeedMem fills are JPCSP's
+// (src/jpcsp/HLE/modules/sceMeAudio.java and sceAudiocodec.java at the JPCSP revision above).
 
-/* The Media Engine (ME) video boundary under a game's own disc mpeg.prx (#286): sceVideocodec
- * (8 calls) and sceMpegbase (4 calls). When mpeg.prx runs as LLE, these are the calls below it
+/* The Media Engine (ME) boundary under a game's own disc mpeg.prx (#286): sceVideocodec
+ * (8 calls), sceMpegbase (4 calls) and sceAudiocodec (5 calls). When mpeg.prx runs as LLE, these are the calls below it
  * that reach the ME, whose code is firmware the project never carries. Each handler is HLE over
  * a host model:
  *   - ME RAM is a host buffer at ME address 0 with a low-first allocator. The guest sees ME
@@ -40,10 +60,16 @@
  * open, ME addresses outside ME RAM, zero-length packets, a CSC of a picture never decoded and a
  * build without an H.264 backend are refused with a named error and one diagnostic line.
  *
+ *   - sceAudiocodec decodes the movie's ATRAC3plus frames with the project's ATRAC3plus decoder
+ *     (atrac3p_bridge.h), by the same frame rules sceMpegAtracDecode uses in mpeg.c. Its EDRAM
+ *     comes from the same ME RAM model. Only codec 0x1000 (ATRAC3plus) is modelled: it is the
+ *     one a PSMF movie carries.
+ *
  * Nothing in production reaches these handlers yet: mpeg.prx is still host-served. The ownership
  * switch is a later slice (S3c). */
 
 #include "hle_internal.h"
+#include "atrac3p_bridge.h"
 
 /* ---- named results (all synthetic: the codes a PSP returns for these refusals are not measured;
  * W-LLE-1) ---- */
@@ -663,6 +689,217 @@ static uint32_t h_MpegBaseCscAvc(CpuState *s) {
     return 0u;
 }
 
+/* ---- sceAudiocodec (uofw audiocodec.c for the wrapper, JPCSP for the ME words) ---- */
+/* Each call takes (workArea, codecType). The work area words this boundary uses:
+ *   +0 version word, +8 error, +12 EDRAM address (64-byte aligned), +16 EDRAM bytes needed,
+ *   +24 input, +28 bytes read, +32 output, +36 bytes written, +52/+60/+64 ATRAC3plus words,
+ *   +56/+72 the input and output channel words of the output-size rule, +104 the raw EDRAM
+ *   allocation (uofw names it allocMem). */
+#define AC_CODEC_FIRST          0x1000u
+#define AC_CODEC_END            0x1006u     /* uofw: codec < 0x1000 || codec >= 0x1006 */
+#define AC_CODEC_AT3PLUS        0x1000u
+#define AC_WORK_BYTES           104u        /* uofw pspK1StaBufOk(info, 104) */
+#define AC_WORK_BYTES_EDRAM     108u        /* uofw GetEDRAM/ReleaseEDRAM check 108 bytes */
+/* uofw error codes. */
+#define AC_ERR_NOT_RAM          0x807F0002u
+#define AC_ERR_NOT_SUPPORTED    0x80000004u /* SCE_ERROR_NOT_SUPPORTED */
+#define AC_ERR_PRIV_REQUIRED    0x80000023u /* SCE_ERROR_PRIV_REQUIRED */
+#define AC_ERR_EDRAM            0x807F0003u
+#define AC_ERR_EDRAM_NOT_HELD   0x807F0004u
+/* synthetic: uofw maps an ME driver result of -1 to 0x807F00FF (g_retValues[3]); JPCSP's
+ * driver returns -1 for a decode it cannot run. Used for every ME-side refusal (W-LLE-1). */
+#define AC_ERR_ME               0x807F00FFu
+/* synthetic: JPCSP sceMeAudio_driver_81956A0B for ATRAC3plus (W-LLE-1 item 4). */
+#define AC_AT3P_NEEDED_MEM      0x7BC0u
+#define AC_AT3P_WORD52          44100u
+#define AC_AT3P_WORD60          2u
+#define AC_AT3P_WORD64          0x2E8u
+#define AC_FRAME_SAMPLES        2048u
+/* Host bookkeeping bound, not a PSP value. */
+#define AC_MAX_CONTEXTS         4
+
+typedef struct {
+    int used;
+    uint32_t work;        /* guest address of the work area */
+    Atrac3pBridge *at3p;  /* created at the first decode: the frame names its size and layout */
+    int align, channels;
+} AcContext;
+
+static AcContext s_ac[AC_MAX_CONTEXTS];
+static int16_t s_ac_pcm[2u * AC_FRAME_SAMPLES];
+
+static AcContext *ac_find(uint32_t work) {
+    for (int i = 0; i < AC_MAX_CONTEXTS; i++)
+        if (s_ac[i].used && s_ac[i].work == work) return &s_ac[i];
+    return NULL;
+}
+
+static void ac_drop(AcContext *c) {
+    atrac3p_bridge_destroy(c->at3p);
+    memset(c, 0, sizeof(*c));
+}
+
+/* The checks every sceAudiocodec call starts with (uofw): a work area in RAM, a codec in range,
+ * then, here, the one codec this boundary models. */
+static uint32_t ac_check(const char *call, uint32_t work, uint32_t codec, uint32_t bytes) {
+    if (!vc_guest_words(work, bytes))
+        return vc_refuse(call, "work area is not a writable guest span", AC_ERR_NOT_RAM);
+    if (codec < AC_CODEC_FIRST || codec >= AC_CODEC_END)
+        return vc_refuse(call, "codec type out of range", AC_ERR_NOT_SUPPORTED);
+    if (codec != AC_CODEC_AT3PLUS)
+        return vc_refuse(call, "codec type other than 0x1000 (ATRAC3plus) is not modelled", AC_ERR_NOT_SUPPORTED);
+    return 0u;
+}
+
+/* sceAudiocodecCheckNeedMem(workArea, codec) */
+static uint32_t h_AudiocodecCheckNeedMem(CpuState *s) {
+    const uint32_t work = A0;
+    const uint32_t r = ac_check("sceAudiocodecCheckNeedMem", work, A1, AC_WORK_BYTES);
+    if (r) return r;
+    MEM_W32(work, VC_OPEN_WORD0);              /* uofw: info->unk0 = 0x05100601 */
+    MEM_W32(work + 16u, AC_AT3P_NEEDED_MEM);
+    MEM_W32(work + 52u, AC_AT3P_WORD52);
+    MEM_W32(work + 60u, AC_AT3P_WORD60);
+    MEM_W32(work + 64u, AC_AT3P_WORD64);
+    return 0u;
+}
+
+/* sceAudiocodecGetEDRAM(workArea, codec): uofw allocates ((+16) + 0x3F) | 0x3F bytes of ME
+ * memory, keeps the raw address at +104 and publishes it 64-byte aligned at +12. */
+static uint32_t h_AudiocodecGetEDRAM(CpuState *s) {
+    static const char call[] = "sceAudiocodecGetEDRAM";
+    const uint32_t work = A0;
+    const uint32_t r = ac_check(call, work, A1, AC_WORK_BYTES_EDRAM);
+    if (r) return r;
+    uint32_t size;
+    uint32_t addr = 0u;
+    if (sr_size_add_ok(MEM_R32(work + 16u), 0x3Fu, &size)) addr = me_alloc(size | 0x3Fu);
+    if (!addr) {
+        MEM_W32(work + 104u, 0u);
+        MEM_W32(work + 12u, 0u);
+        return vc_refuse(call, "ME RAM cannot hold the requested size", AC_ERR_EDRAM);
+    }
+    MEM_W32(work + 104u, addr);
+    MEM_W32(work + 12u, (addr + 0x3Fu) & ~0x3Fu);
+    return 0u;
+}
+
+/* sceAudiocodecReleaseEDRAM(workArea): uofw frees +104 and clears +104 and +12; a work area that
+ * holds no ME allocation is refused. The host decoder for the work area goes too (JPCSP). */
+static uint32_t h_AudiocodecReleaseEDRAM(CpuState *s) {
+    static const char call[] = "sceAudiocodecReleaseEDRAM";
+    const uint32_t work = A0;
+    if (!vc_guest_words(work, AC_WORK_BYTES_EDRAM))
+        return vc_refuse(call, "work area is not a writable guest span", AC_ERR_PRIV_REQUIRED);
+    const uint32_t alloc = MEM_R32(work + 104u);
+    if (!alloc || (alloc & 0x1FFFFFFFu) > 0x3FFFFFu || !me_free(alloc))
+        return vc_refuse(call, "work area holds no ME allocation of this boundary", AC_ERR_EDRAM_NOT_HELD);
+    MEM_W32(work + 104u, 0u);
+    MEM_W32(work + 12u, 0u);
+    AcContext *c = ac_find(work);
+    if (c) ac_drop(c);
+    return 0u;
+}
+
+/* sceAudiocodecInit(workArea, codec): the work area becomes a decoding context. A context
+ * initialised again starts from a clean decoder (JPCSP releases the old one). */
+static uint32_t h_AudiocodecInit(CpuState *s) {
+    static const char call[] = "sceAudiocodecInit";
+    const uint32_t work = A0;
+    const uint32_t r = ac_check(call, work, A1, AC_WORK_BYTES);
+    if (r) return r;
+    if (!MEM_R32(work + 12u))
+        return vc_refuse(call, "work area holds no EDRAM (sceAudiocodecGetEDRAM first)", AC_ERR_ME);
+    AcContext *c = ac_find(work);
+    if (c) {
+        if (c->at3p) (void)atrac3p_bridge_reset(c->at3p);
+    } else {
+        for (int i = 0; i < AC_MAX_CONTEXTS && !c; i++)
+            if (!s_ac[i].used) c = &s_ac[i];
+        if (!c) return vc_refuse(call, "no free host context slot", AC_ERR_ME);
+        memset(c, 0, sizeof(*c));
+        c->used = 1;
+        c->work = work;
+    }
+    MEM_W32(work, VC_OPEN_WORD0);
+    MEM_W32(work + 8u, 0u);
+    return 0u;
+}
+
+/* sceAudiocodecDecode(workArea, codec): one ATRAC3plus frame from +24 to PCM at +32.
+ * The input is a PSMF audio frame: an 8-byte 0x0FD0 header whose bytes 2-3 name the size and
+ * channel layout, then the frame (the rule mpeg.c's sceMpegAtracDecode applies). The output size
+ * follows uofw's rule: 0x2000 when +56 is 1 and +72 is not, else +72 << 12. Mono input written to
+ * a stereo output is duplicated into both channels. Synchronous (synthetic timing: JPCSP delays
+ * the caller 2.3 ms; W-LLE-1). */
+static uint32_t h_AudiocodecDecode(CpuState *s) {
+    static const char call[] = "sceAudiocodecDecode";
+    const uint32_t work = A0;
+    const uint32_t r = ac_check(call, work, A1, AC_WORK_BYTES);
+    if (r) return r;
+    AcContext *c = ac_find(work);
+    if (!c) return vc_refuse(call, "work area the runtime did not initialise", AC_ERR_ME);
+    MEM_W32(work + 8u, 0u);
+    const uint32_t in = MEM_R32(work + 24u), out = MEM_R32(work + 32u);
+    const uint32_t w56 = MEM_R32(work + 56u), w72 = MEM_R32(work + 72u);
+    const uint32_t out_bytes = (w56 == 1u && w72 != 1u) ? 0x2000u : (w72 << 12);
+    if (out_bytes != 0x1000u && out_bytes != 0x2000u)
+        return vc_refuse(call, "output layout other than mono or stereo 16-bit is not modelled", AC_ERR_ME);
+    const int out_channels = (int)(out_bytes >> 12);
+    uint8_t hdr[8];
+    if (!sr_guest_copy_in(hdr, in, sizeof(hdr)))
+        return vc_refuse(call, "input is not a readable guest span", AC_ERR_PRIV_REQUIRED);
+    if (hdr[0] != 0x0Fu || hdr[1] != 0xD0u)
+        return vc_refuse(call, "input without the PSMF ATRAC3plus frame header is not modelled", AC_ERR_ME);
+    const uint32_t frame_bytes = (uint32_t)(((hdr[2] & 3u) << 8) | ((uint32_t)hdr[3] * 8u)) + 0x10u;
+    const int data = (int)(frame_bytes - 8u);
+    const int channels = (hdr[2] >> 2) & 7;
+    if (channels < 1 || channels > 2)
+        return vc_refuse(call, "the frame header names no mono or stereo layout", AC_ERR_ME);
+    if (channels > out_channels)
+        return vc_refuse(call, "a stereo frame into a mono output (downmix) is not modelled", AC_ERR_ME);
+    if (!sr_guest_span_readable(in, frame_bytes))
+        return vc_refuse(call, "input frame is not a readable guest span", AC_ERR_PRIV_REQUIRED);
+    if (!out || !sr_guest_span_writable(out, out_bytes))
+        return vc_refuse(call, "output is not a writable guest span", AC_ERR_PRIV_REQUIRED);
+    if (!c->at3p || c->align != data || c->channels != channels) {
+        atrac3p_bridge_destroy(c->at3p);
+        c->at3p = NULL;
+        if (atrac3p_bridge_create(channels, data, &c->at3p) != 0) {
+            c->at3p = NULL;
+            return vc_refuse(call, "no ATRAC3plus decoder for this frame size", AC_ERR_ME);
+        }
+        c->align = data;
+        c->channels = channels;
+    }
+    uint8_t *frame = (uint8_t *)malloc((size_t)data);
+    if (!frame) return vc_refuse(call, "no host memory for the frame", AC_ERR_ME);
+    int samples = 0;
+    const int ok = sr_guest_copy_in(frame, in + 8u, (uint32_t)data) &&
+                   atrac3p_bridge_decode(c->at3p, frame, data, s_ac_pcm, &samples) == 0 &&
+                   samples == (int)AC_FRAME_SAMPLES;
+    free(frame);
+    if (!ok) return vc_refuse(call, "the ATRAC3plus frame did not decode to one block", AC_ERR_ME);
+    if (channels == 1 && out_channels == 2)
+        for (int i = (int)AC_FRAME_SAMPLES - 1; i >= 0; i--) {
+            s_ac_pcm[i * 2] = s_ac_pcm[i];
+            s_ac_pcm[i * 2 + 1] = s_ac_pcm[i];
+        }
+    uint8_t *bytes = (uint8_t *)malloc(out_bytes);
+    if (!bytes) return vc_refuse(call, "no host memory for the block", AC_ERR_ME);
+    for (uint32_t i = 0; i < out_bytes / 2u; i++) {   /* PSP memory is little-endian */
+        bytes[i * 2u] = (uint8_t)((uint16_t)s_ac_pcm[i]);
+        bytes[i * 2u + 1u] = (uint8_t)((uint16_t)s_ac_pcm[i] >> 8);
+    }
+    (void)sr_guest_copy_out(out, bytes, out_bytes);
+    free(bytes);
+    /* synthetic (W-LLE-1): JPCSP writes the frame bytes its decoder read at +28 and the output
+     * size at +36; here +28 is the frame without its 8-byte header. */
+    MEM_W32(work + 28u, (uint32_t)data);
+    MEM_W32(work + 36u, out_bytes);
+    return 0u;
+}
+
 void hle_register_videocodec_handlers(void) {
     sr_hle_register(0xc01ec829u, "sceVideocodecOpen", h_VideocodecOpen);
     sr_hle_register(0x17099f0au, "sceVideocodecInit", h_VideocodecInit);
@@ -676,4 +913,9 @@ void hle_register_videocodec_handlers(void) {
     sr_hle_register(0x91929a21u, "sceMpegBaseCscAvc", h_MpegBaseCscAvc);
     sr_hle_register(0xbea18f91u, "sceMpegBasePESpacketCopy", h_MpegBasePESpacketCopy);
     sr_hle_register(0x0530be4eu, "sceMpegbase_0530BE4E", h_Mpegbase_0530BE4E);
+    sr_hle_register(0x9d3f790cu, "sceAudiocodecCheckNeedMem", h_AudiocodecCheckNeedMem);
+    sr_hle_register(0x5b37eb1du, "sceAudiocodecInit", h_AudiocodecInit);
+    sr_hle_register(0x70a703f8u, "sceAudiocodecDecode", h_AudiocodecDecode);
+    sr_hle_register(0x3a20a200u, "sceAudiocodecGetEDRAM", h_AudiocodecGetEDRAM);
+    sr_hle_register(0x29681260u, "sceAudiocodecReleaseEDRAM", h_AudiocodecReleaseEDRAM);
 }
