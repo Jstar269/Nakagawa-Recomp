@@ -80,7 +80,20 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
-  folder deletes no games or saves.
+  folder deletes no games or saves. Every host uses the same folder name and the same layout inside it:
+  `Nakagawa` with `config`, `data`, `cache`, `logs` and `saves` side by side. The folder sits in the host's
+  own per-user location: `%LOCALAPPDATA%\Nakagawa` on Windows, `$XDG_DATA_HOME/Nakagawa` (else
+  `~/.local/share/Nakagawa`) on Linux, `~/Library/Application Support/Nakagawa` on macOS, and the app's own
+  private folder on Android.
+- **If you used an earlier Linux or macOS build.** The first start of this version moves your old folders
+  into the new one, once: Linux's `nakagawa-recomp` data folder and its XDG config, cache and state folders,
+  or macOS's `NakagawaRecomp`, `Caches/NakagawaRecomp` and `Logs/NakagawaRecomp`. Nothing is copied or
+  deleted; each folder is renamed, and the paths your library stored for converted games are rewritten to
+  the new place (the old file is kept as `library.json.pre-migration`). If the new folder already holds data
+  as well as the old one, the player stops with `DATA_MIGRATION_BOTH_PRESENT`, names both folders and moves
+  nothing: keep the one you want in `Nakagawa` and move the other aside. If a move fails (a locked or
+  read-only folder, another disk), everything already moved is put back and the player stops with
+  `DATA_MIGRATION_FAILED`. Windows already used this layout, so a Windows profile has nothing to move.
 
 ## Wine and Proton
 
@@ -568,7 +581,7 @@ python tools/nk_cli.py fonts remove --all
 Available options:
 
 - `--choose <slot>=<file>`: Pick a file for a generic slot that several files name (`japanese`, `latin`, or `korean`). Named `ltn0.pgf` through `ltn15.pgf` files select their own Latin indices and need no choice.
-- `--user-data-root <path>`: Override the target per-user data directory (default: `%LOCALAPPDATA%`, then `%APPDATA%`, under `Nakagawa\data` on Windows; `~/Library/Application Support/NakagawaRecomp/data` on macOS; `$XDG_DATA_HOME/nakagawa-recomp` or `~/.local/share/nakagawa-recomp` on other POSIX systems).
+- `--user-data-root <path>`: Override the target per-user data directory (default: `%LOCALAPPDATA%`, then `%APPDATA%`, under `Nakagawa\data` on Windows; `~/Library/Application Support/Nakagawa/data` on macOS; `$XDG_DATA_HOME/Nakagawa/data` or `~/.local/share/Nakagawa/data` on other POSIX systems).
 - `--json`: Emit a machine-readable report of the outcome for each file, and of each slot's status.
 
 The import copies each accepted file into the per-user cache and writes `manifest.json` with `schema_version: 2` and an ISO 8601 UTC `import_time`. Generic files remain in `files`; indexed Latin files are listed in `latin_indices` with their index, size, SHA-256, user source, and reader version. The originals are not touched. Re-importing is idempotent, and entries not changed by the new run are retained:

@@ -190,6 +190,12 @@ bool nk_platform_get_app_data_dir(char *out_path, size_t max_len);
 /* Resolve the pre-canonical Windows profile location used by older builds.
  * Returns false on non-Windows hosts or when USERPROFILE is unavailable. */
 bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len);
+/* The older per-user folders of this host and where they go (#324), for nk_data_migrate_run: Linux's
+ * nakagawa-recomp with its XDG config, cache and state folders, macOS's NakagawaRecomp with its Caches
+ * and Logs. False, with the plan left empty, where there is nothing to move (Windows, Android) or the
+ * data base is unknown. Reads nothing from the disk. */
+struct NkDataMigrationPlan;
+bool nk_platform_user_data_plan(struct NkDataMigrationPlan *plan);
 
 /* The user's Desktop folder, where a first run's file pickers open. Windows:
  * FOLDERID_Desktop, which follows a Desktop the user or a sync tool moved.

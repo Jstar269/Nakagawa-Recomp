@@ -18,6 +18,7 @@
 #define _FILE_OFFSET_BITS 64
 
 #include "nk_platform.h"
+#include "nk_data_migrate.h"
 #include "nk_types.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -492,96 +493,61 @@ static bool resolve_rooted_path(const char *root, NkPathType type, char sep, cha
     return written > 0 && (size_t)written < max_len;
 }
 
+/* The default per-user root (#324): the same folder name and layout on every host. The root is
+   `Nakagawa` in the host's own per-user data base, and inside it config, data, cache, logs and saves
+   are five sibling folders, as on Windows (%LOCALAPPDATA%\Nakagawa). Linux keeps no XDG split:
+   XDG_CONFIG_HOME, XDG_CACHE_HOME and XDG_STATE_HOME are not read; XDG_DATA_HOME picks the base. An
+   explicit root (--user-data-root, portable mode) is the data folder itself, with config, cache,
+   logs and saves inside it (resolve_rooted_path above). */
+static bool posix_default_root(char *root, size_t max_len) {
+    int written = 0;
+#if defined(__ANDROID__)
+    /* No HOME or XDG folders on Android: the activity names the app's private folder in
+       NK_ANDROID_DATA_DIR, and that folder is the root. */
+    const char *android_root = getenv("NK_ANDROID_DATA_DIR");
+    if (!android_root || !android_root[0]) return false;
+    written = snprintf(root, max_len, "%s", android_root);
+#elif defined(__APPLE__)
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) return false;
+    written = snprintf(root, max_len, "%s/Library/Application Support/Nakagawa", home);
+#else
+    const char *home = getenv("HOME");
+    const char *xdg_data = getenv("XDG_DATA_HOME");
+    if (xdg_data && xdg_data[0]) {
+        written = snprintf(root, max_len, "%s/Nakagawa", xdg_data);
+    } else if (home && home[0]) {
+        written = snprintf(root, max_len, "%s/.local/share/Nakagawa", home);
+    } else {
+        return false;
+    }
+#endif
+    return written > 0 && (size_t)written < max_len;
+}
+
+/* The five folders of the default root. */
+static bool resolve_default_path(NkPathType type, char *out_path, size_t max_len) {
+    char root[NK_MAX_PATH];
+    if (!posix_default_root(root, sizeof(root))) return false;
+    const char *leaf = NULL;
+    switch (type) {
+        case NK_PATH_DATA:   leaf = "data"; break;
+        case NK_PATH_CONFIG: leaf = "config"; break;
+        case NK_PATH_CACHE:  leaf = "cache"; break;
+        case NK_PATH_LOGS:   leaf = "logs"; break;
+        case NK_PATH_SAVES:  leaf = "saves"; break;
+        default: return false;
+    }
+    int written = snprintf(out_path, max_len, "%s/%s", root, leaf);
+    return written > 0 && (size_t)written < max_len;
+}
+
 static bool resolve_posix_path(NkPathType type, char *out_path, size_t max_len) {
     if (!out_path || max_len == 0) return false;
     if (s_app_data_dir_override[0]) {
         return resolve_rooted_path(s_app_data_dir_override, type, '/', out_path, max_len);
     }
-
-#if defined(__ANDROID__)
-    /* No HOME or XDG folders on Android: the per-user folders are in the app's private files
-       folder, which the activity names in NK_ANDROID_DATA_DIR, laid out as an override is. */
-    const char *android_root = getenv("NK_ANDROID_DATA_DIR");
-    if (!android_root || !android_root[0]) return false;
-    return resolve_rooted_path(android_root, type, '/', out_path, max_len);
-#elif defined(__APPLE__)
-    const char *home = getenv("HOME");
-    if (!home) return false;
-    int written = 0;
-    switch (type) {
-        case NK_PATH_CONFIG:
-            written = snprintf(out_path, max_len, "%s/Library/Application Support/NakagawaRecomp/config", home);
-            break;
-        case NK_PATH_DATA:
-            written = snprintf(out_path, max_len, "%s/Library/Application Support/NakagawaRecomp/data", home);
-            break;
-        case NK_PATH_CACHE:
-            written = snprintf(out_path, max_len, "%s/Library/Caches/NakagawaRecomp", home);
-            break;
-        case NK_PATH_LOGS:
-            written = snprintf(out_path, max_len, "%s/Library/Logs/NakagawaRecomp", home);
-            break;
-        case NK_PATH_SAVES:
-            written = snprintf(out_path, max_len, "%s/Library/Application Support/NakagawaRecomp/saves", home);
-            break;
-        default:
-            written = snprintf(out_path, max_len, "%s/Library/Application Support/NakagawaRecomp", home);
-            break;
-    }
-#else
-    const char *home = getenv("HOME");
-    const char *env_val = NULL;
-    int written = 0;
-
-    switch (type) {
-        case NK_PATH_CONFIG:
-            env_val = getenv("XDG_CONFIG_HOME");
-            if (env_val && *env_val) {
-                written = snprintf(out_path, max_len, "%s/nakagawa-recomp", env_val);
-            } else if (home && *home) {
-                written = snprintf(out_path, max_len, "%s/.config/nakagawa-recomp", home);
-            }
-            break;
-        case NK_PATH_DATA:
-            env_val = getenv("XDG_DATA_HOME");
-            if (env_val && *env_val) {
-                written = snprintf(out_path, max_len, "%s/nakagawa-recomp", env_val);
-            } else if (home && *home) {
-                written = snprintf(out_path, max_len, "%s/.local/share/nakagawa-recomp", home);
-            }
-            break;
-        case NK_PATH_CACHE:
-            env_val = getenv("XDG_CACHE_HOME");
-            if (env_val && *env_val) {
-                written = snprintf(out_path, max_len, "%s/nakagawa-recomp", env_val);
-            } else if (home && *home) {
-                written = snprintf(out_path, max_len, "%s/.cache/nakagawa-recomp", home);
-            }
-            break;
-        case NK_PATH_LOGS:
-            env_val = getenv("XDG_STATE_HOME");
-            if (env_val && *env_val) {
-                written = snprintf(out_path, max_len, "%s/nakagawa-recomp/logs", env_val);
-            } else if (home && *home) {
-                written = snprintf(out_path, max_len, "%s/.local/state/nakagawa-recomp/logs", home);
-            }
-            break;
-        case NK_PATH_SAVES:
-            env_val = getenv("XDG_DATA_HOME");
-            if (env_val && *env_val) {
-                written = snprintf(out_path, max_len, "%s/nakagawa-recomp/saves", env_val);
-            } else if (home && *home) {
-                written = snprintf(out_path, max_len, "%s/.local/share/nakagawa-recomp/saves", home);
-            }
-            break;
-        default:
-            return false;
-    }
-#endif
-
-#if !defined(__ANDROID__)
-    return written > 0 && (size_t)written < max_len;
-#endif
+    return resolve_default_path(type, out_path, max_len);
 }
 
 bool nk_platform_get_path(NkPathType type, char *out_path, size_t max_len) {
@@ -622,6 +588,95 @@ bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len) {
     (void)out_path;
     (void)max_len;
     return false;
+}
+
+static bool plan_add_move(NkDataMigrationPlan *plan, const char *from, const char *to,
+                          bool after_previous) {
+    if (plan->move_count >= NK_MIGRATE_MAX_MOVES) return false;
+    NkMigrateMove *move = &plan->moves[plan->move_count];
+    int a = snprintf(move->from, sizeof(move->from), "%s", from);
+    int b = snprintf(move->to, sizeof(move->to), "%s", to);
+    if (a <= 0 || b <= 0 || (size_t)a >= sizeof(move->from) || (size_t)b >= sizeof(move->to)) return false;
+    move->after_previous = after_previous;
+    plan->move_count++;
+    return true;
+}
+
+/* The older folders and where they go (nk_data_migrate.h). Only the paths are worked out here; nothing
+   is read from the disk. Android has no earlier layout to move (it was never released). */
+bool nk_platform_user_data_plan(struct NkDataMigrationPlan *plan) {
+    if (!plan) return false;
+    memset(plan, 0, sizeof(*plan));
+#if defined(__ANDROID__)
+    return false;
+#else
+    char root[NK_MAX_PATH];
+    const char *home = getenv("HOME");
+    if (!posix_default_root(root, sizeof(root))) return false;
+    bool ok = true;
+#if defined(__APPLE__)
+    char support[NK_MAX_PATH], old_root[NK_MAX_PATH], caches[NK_MAX_PATH], logs[NK_MAX_PATH];
+    char to_cache[NK_MAX_PATH], to_logs[NK_MAX_PATH];
+    ok = snprintf(support, sizeof(support), "%s/Library/Application Support", home) < (int)sizeof(support) &&
+         snprintf(old_root, sizeof(old_root), "%s/NakagawaRecomp", support) < (int)sizeof(old_root) &&
+         snprintf(caches, sizeof(caches), "%s/Library/Caches/NakagawaRecomp", home) < (int)sizeof(caches) &&
+         snprintf(logs, sizeof(logs), "%s/Library/Logs/NakagawaRecomp", home) < (int)sizeof(logs) &&
+         snprintf(to_cache, sizeof(to_cache), "%s/cache", root) < (int)sizeof(to_cache) &&
+         snprintf(to_logs, sizeof(to_logs), "%s/logs", root) < (int)sizeof(to_logs);
+    /* The old root already had config, data and saves beside each other: the whole folder is renamed. */
+    ok = ok && plan_add_move(plan, old_root, root, false) &&
+         plan_add_move(plan, caches, to_cache, false) && plan_add_move(plan, logs, to_logs, false);
+    if (ok) {
+        ok = snprintf(plan->remap_from, sizeof(plan->remap_from), "%s/data", old_root) <
+                 (int)sizeof(plan->remap_from) &&
+             snprintf(plan->remap_to, sizeof(plan->remap_to), "%s/data", root) <
+                 (int)sizeof(plan->remap_to) &&
+             snprintf(plan->library_file, sizeof(plan->library_file), "%s/data/library.json", root) <
+                 (int)sizeof(plan->library_file);
+    }
+#else
+    const char *xdg_data = getenv("XDG_DATA_HOME");
+    const char *xdg_config = getenv("XDG_CONFIG_HOME");
+    const char *xdg_cache = getenv("XDG_CACHE_HOME");
+    const char *xdg_state = getenv("XDG_STATE_HOME");
+    char old_data[NK_MAX_PATH], old_config[NK_MAX_PATH], old_cache[NK_MAX_PATH], old_logs[NK_MAX_PATH];
+    char to_data[NK_MAX_PATH], to_data_saves[NK_MAX_PATH], to_saves[NK_MAX_PATH];
+    char to_config[NK_MAX_PATH], to_cache[NK_MAX_PATH], to_logs[NK_MAX_PATH];
+    bool have_home = home && home[0];
+    #define NK_SNP(dst, ...) (snprintf(dst, sizeof(dst), __VA_ARGS__) < (int)sizeof(dst))
+    if (xdg_data && xdg_data[0]) ok = NK_SNP(old_data, "%s/nakagawa-recomp", xdg_data);
+    else ok = have_home && NK_SNP(old_data, "%s/.local/share/nakagawa-recomp", home);
+    if (ok) {
+        if (xdg_config && xdg_config[0]) ok = NK_SNP(old_config, "%s/nakagawa-recomp", xdg_config);
+        else ok = have_home && NK_SNP(old_config, "%s/.config/nakagawa-recomp", home);
+    }
+    if (ok) {
+        if (xdg_cache && xdg_cache[0]) ok = NK_SNP(old_cache, "%s/nakagawa-recomp", xdg_cache);
+        else ok = have_home && NK_SNP(old_cache, "%s/.cache/nakagawa-recomp", home);
+    }
+    if (ok) {
+        if (xdg_state && xdg_state[0]) ok = NK_SNP(old_logs, "%s/nakagawa-recomp/logs", xdg_state);
+        else ok = have_home && NK_SNP(old_logs, "%s/.local/state/nakagawa-recomp/logs", home);
+    }
+    ok = ok && NK_SNP(to_data, "%s/data", root) && NK_SNP(to_data_saves, "%s/data/saves", root) &&
+         NK_SNP(to_saves, "%s/saves", root) && NK_SNP(to_config, "%s/config", root) &&
+         NK_SNP(to_cache, "%s/cache", root) && NK_SNP(to_logs, "%s/logs", root);
+    /* The old data folder becomes root/data; the saves it held (Linux kept them in data/saves) move
+       up to root/saves. Config, cache and logs came from the XDG folders. */
+    ok = ok && plan_add_move(plan, old_data, to_data, false) &&
+         plan_add_move(plan, to_data_saves, to_saves, true) &&
+         plan_add_move(plan, old_config, to_config, false) &&
+         plan_add_move(plan, old_cache, to_cache, false) && plan_add_move(plan, old_logs, to_logs, false);
+    if (ok) {
+        ok = NK_SNP(plan->remap_from, "%s", old_data) && NK_SNP(plan->remap_to, "%s", to_data) &&
+             NK_SNP(plan->library_file, "%s/data/library.json", root);
+    }
+    #undef NK_SNP
+#endif
+    if (ok) ok = snprintf(plan->new_root, sizeof(plan->new_root), "%s", root) < (int)sizeof(plan->new_root);
+    if (!ok) memset(plan, 0, sizeof(*plan));
+    return ok;
+#endif
 }
 
 bool nk_platform_get_desktop_dir(char *out_path, size_t max_len) {

@@ -93,6 +93,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/test_input_profile",
     "build/test_nk_sig",
     "build/test_portable_mode",
+    "build/test_data_migrate",
 )
 _PROCESS_TEST = "build/test_win32_process" if os.name == "nt" else "build/test_posix_process"
 EXPECTED_RUNS = _RUNS_BEFORE_PROCESS_TEST + (_PROCESS_TEST,)

@@ -158,7 +158,7 @@ class TestPrerequisiteFetcher(unittest.TestCase):
             "HOME": str(home),
             "USERPROFILE": str(home),
         }
-        expected = _MockPosixPath(str(home)) / "Library" / "Application Support" / "NakagawaRecomp" / "data"
+        expected = _MockPosixPath(str(home)) / "Library" / "Application Support" / "Nakagawa" / "data"
         with patch.dict(os.environ, environment, clear=True), \
              patch.object(os, "name", "posix"), \
              patch.object(sys, "platform", "darwin"), \

@@ -45,6 +45,7 @@
 #include "setup_staging.h"
 #include "player_ui_test.h"
 #include "nk_platform.h"
+#include "nk_data_migrate.h"
 #include "nk_portable.h"
 #include "nk_json.h"
 #include "player_host.h"
@@ -3595,6 +3596,24 @@ static bool player_apply_user_data_root(int argc, char *argv[]) {
                                            "Nakagawa Recomp can't start in portable mode",
                                            portable.message, NULL);
             return false;
+        }
+        /* One data folder name on every host (#324): a Linux or macOS profile from before
+           the rename is moved into place once, before anything reads it. Only the default
+           per-user root migrates; portable mode and --user-data-root name their own folder. */
+        if (portable.state == NK_PORTABLE_ABSENT) {
+            NkDataMigration migration;
+            nk_data_migrate_host(&migration);
+            if (migration.status == NK_MIGRATE_REFUSED || migration.status == NK_MIGRATE_FAILED) {
+                fprintf(stderr, "[PLAYER] %s\n", migration.message);
+                (void)SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                                               "Nakagawa Recomp can't move your data folder",
+                                               migration.message, NULL);
+                return false;
+            }
+            if (migration.status == NK_MIGRATE_DONE) {
+                printf("[PLAYER] Moved your data into the Nakagawa folder (%zu folder(s)).\n",
+                       migration.moved);
+            }
         }
     }
     for (int i = 1; i < argc; i++) {

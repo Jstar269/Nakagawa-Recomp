@@ -816,6 +816,14 @@ bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len) {
     return written > 0 && (size_t)written < max_len;
 }
 
+/* Windows has always used %LOCALAPPDATA%\Nakagawa with config, data, cache, logs and saves beside each
+   other, which is the unified layout, so there is nothing to move. (The pre-canonical USERPROFILE
+   location is reported by the player, not moved: nk_platform_get_legacy_app_data_dir.) */
+bool nk_platform_user_data_plan(struct NkDataMigrationPlan *plan) {
+    (void)plan;
+    return false;
+}
+
 /* Helper to escape arguments for Windows command line according to Microsoft CRT rules */
 static void append_escaped_arg(char *buf, size_t buf_len, const char *arg) {
     if (!buf || buf_len == 0 || !arg) return;

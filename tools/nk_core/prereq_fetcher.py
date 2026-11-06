@@ -43,15 +43,15 @@ def default_data_root() -> Path:
         return Path(base) / "Nakagawa" / "data"
     if sys.platform == "darwin":
         try:
-            return Path.home() / "Library" / "Application Support" / "NakagawaRecomp" / "data"
+            return Path.home() / "Library" / "Application Support" / "Nakagawa" / "data"
         except RuntimeError as exc:
             raise PrerequisiteFetchError(
                 "DATA_DIR_UNAVAILABLE: set HOME to locate per-user data."
             ) from exc
     if os.name == "posix" and os.environ.get("XDG_DATA_HOME"):
-        return Path(os.environ["XDG_DATA_HOME"]) / "nakagawa-recomp"
+        return Path(os.environ["XDG_DATA_HOME"]) / "Nakagawa" / "data"
     try:
-        return Path.home() / ".local" / "share" / "nakagawa-recomp"
+        return Path.home() / ".local" / "share" / "Nakagawa" / "data"
     except RuntimeError as exc:
         raise PrerequisiteFetchError(
             "DATA_DIR_UNAVAILABLE: set XDG_DATA_HOME or HOME to locate per-user data."
