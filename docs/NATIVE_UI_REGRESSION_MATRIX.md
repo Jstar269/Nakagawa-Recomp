@@ -83,9 +83,12 @@ this document.
 
 Notes on what the table deliberately does not claim:
 
-- The old renderer and its `--ui=legacy` tests were removed in #2071: each of
-  its tests moved to the next UI or was removed in favour of the next-UI test
-  that covers it. The game-found card, Settings, the controller settings screen and the
+- The old renderer and its `--ui=legacy` tests were removed in #2071. Most of
+  its tests moved to the next UI or were removed in favour of the next-UI test
+  that covers it. Two behaviours have no next-UI counterpart, because the
+  launcher does not have them: the bitmap-font fallback (without SDL3_ttf the
+  player exits with code 4) and art that appears when a disc is mounted late
+  (the art loader does not retry). The game-found card, Settings, the controller settings screen and the
   developer log are next-UI screens
   (`test_next_ui_game_found_cards_use_plain_words_and_offer_add_honestly`,
   `test_next_ui_settings_changes_are_saved_and_done_returns`,

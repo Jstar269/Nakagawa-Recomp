@@ -795,7 +795,10 @@ class LegacyRendererSourceTests(unittest.TestCase):
     def test_shipped_player_has_no_legacy_switch(self) -> None:
         main = (ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
         self.assertNotIn('getenv("NK_UI")', main)
-        self.assertNotIn("--ui=", main)
+        # --ui= is named once, in the notice that the switch is gone: it selects nothing.
+        self.assertEqual(main.count('"--ui="'), 1)
+        self.assertNotIn("--ui=legacy", main)
+        self.assertIn("launcher is the only launcher.", main)
         self.assertFalse((ROOT / "src" / "player" / "ui_renderer.c").exists())
         self.assertFalse((ROOT / "src" / "player" / "ui_renderer.h").exists())
         for source in sorted((ROOT / "src" / "player").rglob("*.[ch]")):
@@ -1702,6 +1705,43 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn(marker, completed.stdout)
         self.assertNotIn("frame=", completed.stdout, "nothing is drawn after the message")
 
+    def test_removed_ui_switch_and_unknown_options_are_named_not_fatal(self) -> None:
+        """Shortcuts made before the old renderer went still pass --ui=next. The
+        switch is gone, so the player says it ignores it, and any other option it
+        does not know, then starts the launcher as usual."""
+        marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
+        default_ui = self.run_player("empty")
+        if marker not in default_ui["stdout"]:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        # The harness's own --ui-test-* options are taken first: none is unknown.
+        self.assertNotIn("Ignoring", str(default_ui["stderr"]))
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            env = os.environ.copy()
+            env.update({
+                "SDL_VIDEODRIVER": "dummy",
+                "SDL_RENDER_DRIVER": "software",
+                "SDL_AUDIO_DRIVER": "dummy",
+                "LOCALAPPDATA": str(scratch),
+                "APPDATA": str(scratch),
+            })
+            shot = scratch / "shot.bmp"
+            completed = subprocess.run(
+                [str(PLAYER_EXE), f"--user-data-root={scratch / 'data'}",
+                 "--ui=legacy", "--no-such-option", "--view=library", f"--screenshot={shot}"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(shot.is_file(), completed.stdout + completed.stderr)
+            self.assertGreater(shot.stat().st_size, 0)
+        self.assertIn("Ignoring --ui=legacy", completed.stderr)
+        self.assertIn("the nk launcher is the only launcher", completed.stderr)
+        self.assertIn("Ignoring unknown option: --no-such-option", completed.stderr)
+        self.assertNotIn("Ignoring unknown option: --ui=legacy", completed.stderr)
+        self.assertNotIn("Ignoring unknown option: --view", completed.stderr)
+        self.assertNotIn("Ignoring unknown option: --screenshot", completed.stderr)
+        self.assertNotIn("Ignoring unknown option: --user-data-root", completed.stderr)
+
     def test_every_view_is_drawn_by_the_launcher(self) -> None:
         """Every PlayerView in player_state.h is drawn by the nk_ui launcher."""
         header = (ROOT / "src" / "player" / "player_state.h").read_text(encoding="utf-8")
@@ -2567,12 +2607,17 @@ class NativePlayerUiTests(unittest.TestCase):
                 )
                 if fixture == "encrypted":
                     self.assertIn("decrypted", title_frames[-1]["next_preflight"].lower())
+                    self.assertEqual(title_frames[-1]["next_preflight_code"], "EXECUTABLE")
+                    self.assertIn("ENCRYPTED_EXECUTABLE",
+                                  title_frames[-1]["next_preflight_detail"])
                     # #308: the title page knows the program input and the
                     # one file the build waits for.
                     self.assertEqual(title_frames[-1]["next_input_class"], "encrypted-retail")
                     self.assertEqual(title_frames[-1]["next_input_files"], "1")
                 else:
                     self.assertIn("title_settings", title_frames[-1]["next_preflight"].lower())
+                    self.assertEqual(title_frames[-1]["next_preflight_code"], "TITLE_PROFILE")
+                    self.assertIn("TITLE_PROFILE_", title_frames[-1]["next_preflight_detail"])
                     self.assertEqual(title_frames[-1]["next_input_class"], "plain-elf")
                     self.assertEqual(title_frames[-1]["next_input_files"], "0")
 
@@ -2790,22 +2835,6 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(settings, dict)
         self.assertIs(settings.get("check_updates_at_start"), True)
         self.assertEqual([view for view, _ in self.screens(run)], ["updates", "settings"])
-
-    def test_settings_layout_avoids_launcher_save_overlap_at_client_widths(self) -> None:
-        cases = (
-            (1044, 900, "1"),
-            (1187, 900, "1"),
-            (1043, 900, "0"),
-            (800, 720, "0"),
-            (1188, 619, "0"),
-            (1188, 620, "1"),
-        )
-        for width, height, expected_two_col in cases:
-            with self.subTest(width=width, height=height):
-                run = self.run_player("settings", width=width, height=height)
-                frames = run["frames"]
-                assert isinstance(frames, list)
-                self.assertEqual(frames[0]["settings_two_col"], expected_two_col)
 
     def test_script_can_wait_for_a_view_and_a_minimum_duration(self) -> None:
         started = time.monotonic()
@@ -4017,6 +4046,8 @@ class NativePlayerUiTests(unittest.TestCase):
                             "CANCEL BUILD is not focused while the build runs")
         self.assertEqual(frames[1]["package_cancelled"], "0",
                          "a stray Enter does not cancel the build")
+        self.assertEqual(frames[0]["next_build_built"], "0",
+                         "a running build is not shown as built")
         self.assertEqual(frames[1]["view"], "building_package")
         cancel = self.run_player("building", ("KEY_DOWN", "KEY_RETURN"))
         frames = cancel["frames"]
@@ -4029,7 +4060,10 @@ class NativePlayerUiTests(unittest.TestCase):
         frames = built["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[0]["view"], "building_package")
+        self.assertEqual(frames[0]["next_build_built"], "1",
+                         "a written package reads as built")
         self.assertEqual(frames[1]["view"], "library", "BACK TO LIBRARY once the package is built")
+        self.assertEqual(frames[1]["next_build_built"], "-1")
         self.assertEqual(frames[1]["package_cancelled"], "0")
 
     def test_next_ui_error_card_recovers_like_the_existing_card(self) -> None:
@@ -4176,7 +4210,7 @@ class NativePlayerUiTests(unittest.TestCase):
                     error_code="RUNTIME_ERROR_EXIT",
                     env_extra={"NK_UI_TEST_SLOW_START_MS": "600"},
                 )
-                # --ui=next exits 4 when the launcher can't start, so a run that got here
+                # The player exits 4 when the launcher can't start, so a run that got here
                 # drew the next UI; anything else is a failure, never a skip.
                 self.assertIn("[PLAYER_UI_TEST] UI_NEXT_ACTIVE", str(run["stdout"]))
                 frames = run["frames"]

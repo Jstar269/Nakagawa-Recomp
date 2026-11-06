@@ -167,7 +167,6 @@ static void player_take_picked_disc_from(PlayerApp *app, const char *selected_pa
                          "Disc image inspected: %s (%s). Review the preflight checks below.",
                          res.title_name, res.disc_id);
             }
-            app->focus_index = 0;
         } else if (app->inspecting_game.is_experimental) {
             player_app_set_view(app, VIEW_EXPERIMENTAL_TITLE);
         } else if (res.is_supported) {
@@ -3850,6 +3849,13 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--wizard") == 0) {
             run->force_empty = true;
             run->test_view = "wizard";
+        } else if (strncmp(argv[i], "--ui=", 5) == 0) {
+            /* The launcher switch is gone with the old renderer, but shortcuts
+               installed before then still pass --ui=next: name it, carry on. */
+            fprintf(stderr, "[PLAYER] Ignoring %s: that switch was removed, and the nk "
+                            "launcher is the only launcher.\n", argv[i]);
+        } else {
+            fprintf(stderr, "[PLAYER] Ignoring unknown option: %s\n", argv[i]);
         }
     }
 
@@ -4620,10 +4626,6 @@ static int player_open_window(PlayerRun *run) {
        the minimum shrinks to the available client area rather than covering
        the taskbar or extending onto a monitor that is no longer connected. */
     SDL_SetWindowMinimumSize(run->window, minimum_width, minimum_height);
-    /* The window rectangle uses SDL's native screen units. Pixel density is
-       only for the high-density renderer/font backing store. */
-    app->dpi_scale = SDL_GetWindowPixelDensity(run->window);
-    if (app->dpi_scale < 1.0f) app->dpi_scale = 1.0f;
     run->window_frame_measured = !run->interactive_window;
     if (run->interactive_window && run->have_usable_bounds) {
         run->window_frame_measured = player_refit_to_actual_frame(

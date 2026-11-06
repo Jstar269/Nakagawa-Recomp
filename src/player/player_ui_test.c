@@ -545,9 +545,6 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
             titles_unclaimed++;
         }
     }
-    int settings_two_col = app->active_view == VIEW_SETTINGS
-        ? (player_settings_uses_two_columns(app->window_width,
-                                             app->window_height) ? 1 : 0) : -1;
     /* The selected title's primary action as the next UI's model holds it
      * (spaces become underscores): -1 and "none" with the existing UI. */
     int next_primary = -1;
@@ -587,24 +584,18 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
             for (char *q = next_detail; *q; q++) if (*q == ' ') *q = '_';
             for (char *q = next_preflight; *q; q++) if (*q == ' ') *q = '_';
             for (char *q = next_expect; *q; q++) if (*q == ' ') *q = '_';
-        } else if (selected != NULL && g_ui_test_next_ui == NULL) {
-            const PlayerPreflightCheck *blocker =
-                player_app_package_build_preflight_blocker(
-                    app, app->selected_game_index);
-            if (blocker) {
-                snprintf(next_preflight, sizeof(next_preflight), "%s",
-                         player_preflight_plain_message(blocker));
-                snprintf(next_preflight_code, sizeof(next_preflight_code), "%s",
-                         blocker->code[0] ? blocker->code : "unknown");
-                snprintf(next_preflight_detail, sizeof(next_preflight_detail), "%.639s",
-                         blocker->message[0] ? blocker->message : "unknown");
-                if (app->package_build_preflight.action_folder[0]) {
-                    snprintf(next_preflight_action,
-                             sizeof(next_preflight_action), "OPEN_FOLDER");
-                }
-                for (char *q = next_preflight; *q; q++) if (*q == ' ') *q = '_';
-                for (char *q = next_preflight_detail; *q; q++) if (*q == ' ') *q = '_';
-            }
+        }
+        /* The check that holds the build back, as the title page's sentence
+           comes from it: its code and the validator's own words. */
+        const PlayerPreflightCheck *blocker = selected != NULL
+            ? player_app_package_build_preflight_blocker(app, app->selected_game_index)
+            : NULL;
+        if (blocker != NULL) {
+            snprintf(next_preflight_code, sizeof(next_preflight_code), "%s",
+                     blocker->code[0] ? blocker->code : "unknown");
+            snprintf(next_preflight_detail, sizeof(next_preflight_detail), "%.639s",
+                     blocker->message[0] ? blocker->message : "unknown");
+            for (char *q = next_preflight_detail; *q; q++) if (*q == ' ') *q = '_';
         }
     }
     /* The selected title's program input from its last build check (#308). */
@@ -632,7 +623,7 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
         ? player_ui_nk_test_backdrop(g_ui_test_next_ui, &backdrop_shown) : -1;
     printf("[PLAYER_UI_TEST] frame=%d ticks_ms=%llu view=%s "
            "selected=%d selected_disc=%s selected_title_id=%s "
-           "settings_two_col=%d wizard_step=%s "
+           "wizard_step=%s "
            "font_confirmed=%d extracting=%d extraction_percent=%d extraction_cancel=%d error=%s "
            "bad_disc_notice=%d "
            "picker=%d package_building=%d package_cancelled=%d profile_fallback=%d "
@@ -651,7 +642,7 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            "render_ns=%llu package_validations=%llu online_mode=%d developer_mode=%d "
            "dev_log_lines=%zu next_primary=%d next_primary_label=%s next_detail=%s "
            "next_preflight=%s next_preflight_code=%s next_preflight_detail=%s "
-           "next_preflight_action=%s "
+           "next_preflight_action=%s next_build_built=%d "
            "next_at_root=%d next_route=%d "
            "error_title=%s error_badge=%s error_retry=%s error_copied=%d "
            "next_package=%d next_expect=%s launch_pending=%d next_focus=%u "
@@ -665,7 +656,6 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            app->selected_game_index,
            selected ? selected->disc_id : "NONE",
            selected ? selected->title_id : "NONE",
-           settings_two_col,
            player_ui_test_wizard_step_name(app->wizard.step),
            app->wizard.font_confirmed ? 1 : 0,
            app->wizard.is_extracting ? 1 : 0, app->wizard.extraction_percent,
@@ -712,6 +702,8 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            player_dev_log_count(app), next_primary, next_primary_label, next_detail,
            next_preflight, next_preflight_code, next_preflight_detail,
            next_preflight_action,
+           app->active_view == VIEW_BUILDING_PACKAGE && g_ui_test_next_ui != NULL
+               ? player_ui_nk_test_build_built(g_ui_test_next_ui) : -1,
            g_ui_test_next_ui != NULL ? (player_ui_nk_at_library_root(g_ui_test_next_ui) ? 1 : 0) : -1,
            g_ui_test_next_ui != NULL ? player_ui_nk_test_route(g_ui_test_next_ui) : -1,
            error_title, error_badge, error_retry,

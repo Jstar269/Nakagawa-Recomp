@@ -118,6 +118,7 @@ struct PlayerUiNk {
     char status_text[PLAYER_UI_TITLE_CAP][256];
     char library_page_label[64];
     char flow_title[NK_MAX_TITLE_LEN + NK_MAX_DISC_ID_LEN + 16];
+    bool build_built; /* the build screen's model: the package is written */
     PlayerUiPrereqItem prereq_items[PLAYER_UI_PREREQ_CAP];
     char version_line[64];
     char data_root_line[NK_MAX_PATH + 48]; /* About: which data folder is in use */
@@ -1348,6 +1349,7 @@ static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
         }
         model.title_line = player->flow_title;
         model.built = build->is_complete && !build->is_failed;
+        player->build_built = model.built;
         switch (build->current_stage) {
             case PACKAGE_BUILD_STAGE_EXTRACT: model.stage = 1; break;
             case PACKAGE_BUILD_STAGE_COMPILE: model.stage = 2; break;
@@ -1585,6 +1587,10 @@ const PlayerUiTitle *player_ui_nk_test_title(const PlayerUiNk *player, size_t in
 
 int player_ui_nk_test_route(const PlayerUiNk *player) {
     return player != NULL ? (int)nk_ui_router_current(player->router) : 0;
+}
+
+int player_ui_nk_test_build_built(const PlayerUiNk *player) {
+    return player != NULL && player->build_built ? 1 : 0;
 }
 
 unsigned player_ui_nk_test_focus(const PlayerUiNk *player) {

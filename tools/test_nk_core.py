@@ -45,6 +45,7 @@ from nk_core import (
 )
 
 _ISSUE_REFERENCE_RE = re.compile(r"#[0-9]+")
+_ISSUE_FORMAT_RE = re.compile(r"#%[-+ 0#]*[0-9]*(?:h|hh|l|ll|z|j|t)?[di]")
 # Character literals are tokens too: an unmatched '"' would otherwise open a
 # phantom string that swallows the code after it.
 _C_TOKEN_RE = re.compile(
@@ -192,15 +193,25 @@ class NkCoreTests(unittest.TestCase):
         failures: list[str] = []
         c_paths = [
             *sorted((repo_root / "src" / "player").glob("*.c")),
+            # The nk launcher draws every view (#2071): its screens are here.
+            *sorted((repo_root / "src" / "player" / "ui").glob("*.c")),
             repo_root / "src" / "core" / "nk_font.c",
             repo_root / "src" / "core" / "nk_launch.c",
             repo_root / "src" / "core" / "nk_title_manifest.c",
         ]
         for path in c_paths:
             source = path.read_text(encoding="utf-8")
+            # The old renderer drew issue links from a code table; nothing draws them now.
+            if "draw_issue_links" in source:
+                failures.append(f"{path.relative_to(repo_root)}: draw_issue_links")
             for match in _C_TOKEN_RE.finditer(source):
                 token = match.group()
-                if token.startswith('"') and _ISSUE_REFERENCE_RE.search(token):
+                if not token.startswith('"'):
+                    continue
+                # An issue number formatted from a signed value ("#%d") is a code
+                # table's number shown to the user. The known-issue link is the one
+                # issue number the launcher shows, from a title's data, as "#%u".
+                if _ISSUE_REFERENCE_RE.search(token) or _ISSUE_FORMAT_RE.search(token):
                     line = source.count("\n", 0, match.start()) + 1
                     failures.append(f"{path.relative_to(repo_root)}:{line}: {token}")
 
