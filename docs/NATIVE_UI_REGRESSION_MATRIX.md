@@ -45,7 +45,7 @@ this document.
 | ID | Capability | Status | Surface | Owning evidence |
 | --- | :--- | :---: | :--- | :--- |
 | `ISO_INSPECT_WORKS` | ISO9660 PVD and directory parsing from a raw disc image | **PASS** | native player, headless `nk_cli` | `tests/native/test_xb_parser.c`, `tools/test_nk_core.py` (`test_iso_inspection_success`) |
-| `ISO_ART_TERMINAL_OUTCOMES` | Per-image loaded, absent, failed, and unsupported outcomes with bounded recovery and joined worker shutdown | **PARTIAL** | native player | `tests/native/test_player_ui.py` runs the art workers in the old renderer, which only its regression build keeps (`--ui=legacy`); the default launcher (the next UI) shows an art placeholder and does not draw disc art yet |
+| `ISO_ART_TERMINAL_OUTCOMES` | Each disc's images are read once a session on a worker: a decoded image is shown, an absent, unreadable or undecodable one keeps the placeholder and is not read again, and destroying the loader waits for a read in flight | **PARTIAL** | native player | `tests/native/test_player_ui_art.c` (`test_art_loads_once_and_falls_back`, `test_art_slots_and_shutdown`), `tests/native/test_player_ui.py` (`test_next_ui_library_card_shows_the_disc_icon_once_read`). No process-level test drives every player exit path through the loader's teardown, and art that appears after the first read shows only at the next start |
 | `LAUNCHER_UI_DEFAULT` | The nk_ui launcher (`src/player/ui/`) is the only launcher: it draws every `PlayerView`, the shipped player has no switch to the old renderer, and a launcher that cannot start (UI fonts missing) gets a message box and exit code 4, never the old renderer | **PASS** | native player | `tests/native/test_player_ui.py` (`test_next_ui_is_the_only_launcher`, `test_every_view_is_drawn_by_the_launcher`, `LegacyRendererSourceTests`, `test_next_ui_mouse_and_keyboard_reach_the_add_card`) |
 | `TITLE_ID_DETECTION_WORKS` | `DISC_ID` / `TITLE` from `PARAM.SFO`, matched against the qualified title catalog | **PASS** | native player, headless `nk_cli` | `tools/test_nk_core.py` (`test_title_registry_matching_and_normalization`), `tests/native/test_launch_resolution.c` |
 | `PREPARED_FOLDER_VALIDATION_WORKS` | Transactional staging and validation of the game directory | **PASS** | native player | `tests/native/test_xb_parser.c`, `tests/native/test_launch_resolution.c` |
@@ -83,10 +83,9 @@ this document.
 
 Notes on what the table deliberately does not claim:
 
-- Since the next UI became the only launcher, the tests that pin the old
-  renderer's layout, hit boxes, art workers and package badges run with
-  `--ui=legacy`, which only the regression build accepts; `LEGACY_RENDERER_TESTS` in `tests/native/test_player_ui.py` lists
-  them. The game-found card, Settings, the controller settings screen and the
+- The old renderer and its `--ui=legacy` tests were removed in #2071: each of
+  its tests moved to the next UI or was removed in favour of the next-UI test
+  that covers it. The game-found card, Settings, the controller settings screen and the
   developer log are next-UI screens
   (`test_next_ui_game_found_cards_use_plain_words_and_offer_add_honestly`,
   `test_next_ui_settings_changes_are_saved_and_done_returns`,
@@ -145,10 +144,10 @@ path that does not exist.
 7. **PASS** **Automated tests:** `tools/test_nk_core.py` backs the Python gate
    `python -m unittest tools.test_nk_core`, and `native-core-tests` runs the `tests/native/`
    binaries (for example `tests/native/test_xb_parser.c`).
-8. **PARTIAL** **Typography:** the player loads a system UI font at run time through SDL3_ttf
-   (for example DejaVu Sans on Linux) and falls back to SDL3 debug text when that font is
-   unavailable or `NK_UI_NO_TTF=1` is set. `tests/native/test_player_ui.py` forces the
-   fallback and asserts its reason. The player ships no font of its own: the in-game PGF
-   fonts come from the user's own PSP import or the project `font/` folder
-   (`docs/SETUP.md`). No named test checks that no font ships, so that half stays PARTIAL.
-   Evidence: `src/player/ui_renderer.c`, `tests/native/test_player_ui.py`.
+8. **PARTIAL** **Typography:** the launcher draws its text through SDL3_ttf, loaded at run
+   time, with the UI fonts staged beside the player (`assets/fonts/ui`). Without them it has
+   no fallback: it says why in a message box and exits with code 4
+   (`test_next_ui_is_the_only_launcher`). The in-game PGF fonts come from the user's own
+   PSP import or the project `font/` folder (`docs/SETUP.md`). No named test checks that no
+   console font ships, so that half stays PARTIAL.
+   Evidence: `src/ui/nk_ui_ttf.c`, `tests/native/test_player_ui.py`.

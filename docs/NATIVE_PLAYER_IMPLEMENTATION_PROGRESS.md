@@ -2,7 +2,7 @@
 
 This page records how the native player was built, with dated sections. The launcher, Settings and the setup
 wizard now draw with the nk_ui library in `src/ui/` ([`PLAYER_UI_DESIGN.md`](PLAYER_UI_DESIGN.md)); the
-`ui_renderer.c` described below is the legacy renderer, due to be removed.
+`ui_renderer.c` described below was the first renderer, removed in #2071.
 
 ## 1. Executive Summary
 
@@ -23,7 +23,7 @@ $$\text{ORIGINAL\_GUEST\_EXECUTION} \succ \text{LLE/GENERIC PSP BEHAVIOR} \succ 
    - `setup_staging.c` / `setup_staging.h`: Native worker-facing staging boundary that keeps cancellation/progress separate from SDL and invokes the source-owned ISO/XB layers.
    - The optional local bridge discovers named plain support PRXs the user has already placed in a recognized local folder and stages them under `EXTRACTED/decrypted/`. The player decrypts a disc's encrypted executable and modules into the per-title folder (#1494); one it can't decrypt and with no user-supplied plain copy there fails closed as `ENCRYPTED_EXECUTABLE` or `ENCRYPTED_MODULE` with a named result
      ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)).
-   - `ui_renderer.c` / `ui_renderer.h`: the first SDL3 renderer (Dark Court palette, card layouts, scaled text, offscreen screenshots), now legacy.
+   - `ui_renderer.c` / `ui_renderer.h`: the first SDL3 renderer (Dark Court palette, card layouts, scaled text, offscreen screenshots), removed in #2071.
    - `main.c`: Interactive event loop with native file dialog (`SDL_ShowOpenFileDialog`), reactive SDL worker notifications, gamepad detection and d-pad/shoulder library navigation, arrow-key and scroll-wheel selection across the whole library, drag-and-drop ISO support, and a headless test driver. Demo fixtures are opt-in (`--demo`, or any `--view=` capture run) and are never written to the user's library file.
    - `nk_xb.c` / `nk_xb.h`: Project-authored bounded XB FST parser and native LZS/Huffman/nested tag-0 decoder; no `third_party/libxb` dependency.
    - `nk_iso_extract_game`: ISO directory-record walk that stages `EBOOT.BIN` and `USRDIR/xbdata` without shelling out or requiring Python.
@@ -183,9 +183,13 @@ plain executable plus a built package.
 
 ## 3b. The ISO art worker contract
 
+This section describes the old renderer's art workers, removed with it in #2071. The
+launcher's art loader (`src/player/ui/player_ui_art.c`) reads each disc's images once a
+session and never retries (`player_ui_art.h`); `tests/native/test_player_ui_art.c` covers it.
+
 The library card's `ICON0.PNG` icon and `PIC1.PNG` backdrop are read from the
 ISO on a worker thread, so a disc image is never parsed on the UI thread.
-`src/player/ui_renderer.c` keeps up to 64 cache entries keyed by ISO path, and each
+`src/player/ui_renderer.c` kept up to 64 cache entries keyed by ISO path, and each
 image carries its own attempt count and terminal result: loaded, absent, failed,
 or unsupported by a build without a PNG decoder.
 
