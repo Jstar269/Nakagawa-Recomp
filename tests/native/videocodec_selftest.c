@@ -759,6 +759,40 @@ static void test_audiocodec(void) {
               edram + 0x7BC0u <= ME_RAM_SIZE,
           "getedram: +104 holds the raw ME address and +12 the 64-byte-aligned one");
 
+    /* A second GetEDRAM for the same work area is refused and changes nothing: uofw would
+     * allocate again and orphan the first allocation (review S2). */
+    CHECK(call(NID_AC_GETEDRAM, G_AC, AC_CODEC, 0, 0) == AC_ERR_EDRAM && s_me_alloc_count == allocs + 1 &&
+              MEM_R32(G_AC + 104u) == raw && MEM_R32(G_AC + 12u) == edram,
+          "getedram: a second allocation for the same work area is refused");
+
+    /* Init takes only the EDRAM GetEDRAM published for this work area (review S2). */
+    memset(host(G_AC2), 0, 0x80u);
+    MEM_W32(G_AC2 + 12u, edram);
+    CHECK(call(NID_AC_INIT, G_AC2, AC_CODEC, 0, 0) == AC_ERR_ME && !ac_find(G_AC2),
+          "init: a forged +12 with no EDRAM of its own is refused");
+    MEM_W32(G_AC + 12u, edram + 0x40u);
+    CHECK(call(NID_AC_INIT, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && !ac_find(G_AC),
+          "init: a +12 other than the EDRAM GetEDRAM published is refused");
+    MEM_W32(G_AC + 12u, edram);
+
+    /* ReleaseEDRAM frees only the work area's own allocation (review S1): a +104 naming a video
+     * context's ME memory, or another work area's, is refused and nothing is freed. */
+    memset(host(G_CTX2), 0, 96u);
+    MEM_W32(G_CTX2 + 24u, 0x1000u);
+    CHECK(call(NID_OPEN, G_CTX2, 0u, 0, 0) == 0u && call(NID_GETEDRAM, G_CTX2, 0u, 0, 0) == 0u,
+          "releaseedram: a video context holds ME memory");
+    const uint32_t video_raw = MEM_R32(G_CTX2 + 92u);
+    const int held = s_me_alloc_count;
+    MEM_W32(G_AC2 + 104u, video_raw);
+    CHECK(call(NID_AC_RELEASE, G_AC2, 0, 0, 0) == AC_ERR_EDRAM_NOT_HELD && s_me_alloc_count == held,
+          "releaseedram: +104 naming a video context's ME memory is refused and nothing is freed");
+    MEM_W32(G_AC2 + 104u, raw);
+    CHECK(call(NID_AC_RELEASE, G_AC2, 0, 0, 0) == AC_ERR_EDRAM_NOT_HELD && s_me_alloc_count == held &&
+              MEM_R32(G_AC + 104u) == raw,
+          "releaseedram: +104 naming another work area's ME memory is refused and nothing is freed");
+    CHECK(call(NID_DELETE, G_CTX2, 0u, 0, 0) == 0u && s_me_alloc_count == held - 1 && !vc_find(G_CTX2),
+          "releaseedram: the video context still frees its own ME memory");
+
     CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME, "decode: before init it is refused");
     CHECK(call(NID_AC_DECODE, G_AC2, AC_CODEC, 0, 0) == AC_ERR_ME,
           "decode: a work area the runtime never initialised is refused");

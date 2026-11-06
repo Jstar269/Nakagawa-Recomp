@@ -65,8 +65,10 @@
  *     comes from the same ME RAM model. Only codec 0x1000 (ATRAC3plus) is modelled: it is the
  *     one a PSMF movie carries.
  *
- * Nothing in production reaches these handlers yet: mpeg.prx is still host-served. The ownership
- * switch is a later slice (S3c). */
+ * sceVideocodec and sceMpegbase are not reached in production yet: mpeg.prx is still host-served,
+ * and the ownership switch is a later slice (S3c). sceAudiocodec is live: its four calls that
+ * returned 0x80010086 before now reach these handlers in any title or module that imports
+ * them, and anything other than a PSMF ATRAC3plus frame is refused with a named line. */
 
 #include "hle_internal.h"
 #include "atrac3p_bridge.h"
@@ -105,7 +107,11 @@
 /* Host bookkeeping bound, not a PSP value: each open context holds at most two allocations. */
 #define ME_MAX_ALLOCS         32
 
-typedef struct { uint32_t addr, size; } MeAlloc;
+/* Each allocation records its owner, the guest address of the video context or audio work area
+ * it was made for: a call frees or uses only an allocation it owns, whatever address a
+ * guest-writable word names. */
+typedef enum { ME_OWNER_VIDEO = 1, ME_OWNER_AUDIO = 2 } MeOwnerKind;
+typedef struct { uint32_t addr, size, owner; MeOwnerKind kind; } MeAlloc;
 static uint8_t *s_me_ram;
 static MeAlloc s_me_allocs[ME_MAX_ALLOCS];   /* sorted by address */
 static int s_me_alloc_count;
@@ -115,8 +121,9 @@ static uint8_t *me_ram(void) {
     return s_me_ram;
 }
 
-/* Low-first allocation of `size` bytes rounded up to the alignment; 0 when nothing fits. */
-static uint32_t me_alloc(uint32_t size) {
+/* Low-first allocation of `size` bytes rounded up to the alignment, for `owner`; 0 when nothing
+ * fits. */
+static uint32_t me_alloc(uint32_t size, MeOwnerKind kind, uint32_t owner) {
     uint32_t rounded;
     if (!me_ram() || s_me_alloc_count >= ME_MAX_ALLOCS ||
         !sr_size_add_ok(size, ME_ALLOC_ALIGN - 1u, &rounded))
@@ -133,19 +140,31 @@ static uint32_t me_alloc(uint32_t size) {
     memmove(&s_me_allocs[at + 1], &s_me_allocs[at], (size_t)(s_me_alloc_count - at) * sizeof(MeAlloc));
     s_me_allocs[at].addr = cursor;
     s_me_allocs[at].size = rounded;
+    s_me_allocs[at].owner = owner;
+    s_me_allocs[at].kind = kind;
     s_me_alloc_count++;
     memset(s_me_ram + cursor, 0, rounded);
     return cursor;
 }
 
-static int me_free(uint32_t addr) {
+/* Frees the allocation at `addr` only when `owner` owns it; 0 otherwise. */
+static int me_free(uint32_t addr, MeOwnerKind kind, uint32_t owner) {
     for (int i = 0; i < s_me_alloc_count; i++) {
         if (s_me_allocs[i].addr != addr) continue;
+        if (s_me_allocs[i].kind != kind || s_me_allocs[i].owner != owner) return 0;
         memmove(&s_me_allocs[i], &s_me_allocs[i + 1], (size_t)(s_me_alloc_count - i - 1) * sizeof(MeAlloc));
         s_me_alloc_count--;
         return 1;
     }
     return 0;
+}
+
+/* The raw address of the one audio allocation a work area owns; 0 when it owns none. */
+static uint32_t me_audio_allocation(uint32_t work) {
+    for (int i = 0; i < s_me_alloc_count; i++)
+        if (s_me_allocs[i].kind == ME_OWNER_AUDIO && s_me_allocs[i].owner == work)
+            return s_me_allocs[i].addr;
+    return 0u;
 }
 
 /* An ME address range to its offset in the host ME RAM. JPCSP MEMemory shows the same RAM at
@@ -292,7 +311,7 @@ static uint32_t h_VideocodecGetEDRAM(CpuState *s) {
     if (!sr_size_add_ok(MEM_R32(c->ctx + 24u), 63u, &size))
         return vc_refuse("sceVideocodecGetEDRAM", "requested ME size overflows", VC_ERR_NO_ME_MEMORY);
     size |= 0x3Fu;
-    const uint32_t addr = me_alloc(size);
+    const uint32_t addr = me_alloc(size, ME_OWNER_VIDEO, c->ctx);
     if (!addr) return vc_refuse("sceVideocodecGetEDRAM", "ME RAM cannot hold the requested size", VC_ERR_NO_ME_MEMORY);
     c->edram = addr;
     MEM_W32(c->ctx + 20u, (addr + 63u) & ~63u);
@@ -307,7 +326,7 @@ static uint32_t h_VideocodecReleaseEDRAM(CpuState *s) {
     if (r) return r;
     MEM_W32(c->ctx + 20u, 0u);
     MEM_W32(c->ctx + 92u, 0u);
-    if (c->edram) (void)me_free(c->edram);
+    if (c->edram) (void)me_free(c->edram, ME_OWNER_VIDEO, c->ctx);
     c->edram = 0u;
     return 0u;
 }
@@ -347,8 +366,8 @@ static uint32_t h_VideocodecDelete(CpuState *s) {
     uint32_t r = vc_context_for("sceVideocodecDelete", A0, A1, 1, &c);
     if (r) return r;
     vc_stop_decoder(c);
-    if (c->band_base) (void)me_free(c->band_base);
-    if (c->edram) (void)me_free(c->edram);
+    if (c->band_base) (void)me_free(c->band_base, ME_OWNER_VIDEO, c->ctx);
+    if (c->edram) (void)me_free(c->edram, ME_OWNER_VIDEO, c->ctx);
     vc_release_pictures(c);
     memset(c, 0, sizeof(*c));
     c->h264 = -1;
@@ -368,7 +387,7 @@ static int vc_allocate_bands(VcContext *c, uint32_t w, uint32_t h) {
     const uint32_t size_c2 = vc_align512((w >> 5) * (h >> 1) * 8u);
     const uint32_t set_bytes = size_y1 + size_y2 + size_c1 + size_c2;
     const uint32_t step = set_bytes * VC_BAND_SETS;
-    const uint32_t base = me_alloc(256u + step * 2u);
+    const uint32_t base = me_alloc(256u + step * 2u, ME_OWNER_VIDEO, c->ctx);
     if (!base) return 0;
     uint32_t base1 = base + 256u;
     uint32_t base2 = base1 + (size_y1 + size_y2) * VC_BAND_SETS;
@@ -683,7 +702,10 @@ static uint32_t h_MpegBaseCscAvc(CpuState *s) {
                 out[col * 2u + 1u] = (uint8_t)(v16 >> 8);
             }
         }
-        (void)sr_guest_copy_out(span.first + row * span.row_pitch, out, span.row_bytes);
+        if (!sr_guest_copy_out(span.first + row * span.row_pitch, out, span.row_bytes)) {
+            free(out);
+            return vc_refuse(call, "a destination row could not be written", VC_ERR_GUEST_ADDRESS);
+        }
     }
     free(out);
     return 0u;
@@ -765,15 +787,22 @@ static uint32_t h_AudiocodecCheckNeedMem(CpuState *s) {
 }
 
 /* sceAudiocodecGetEDRAM(workArea, codec): uofw allocates ((+16) + 0x3F) | 0x3F bytes of ME
- * memory, keeps the raw address at +104 and publishes it 64-byte aligned at +12. */
+ * memory, keeps the raw address at +104 and publishes it 64-byte aligned at +12.
+ * A work area that already holds an allocation is refused. uofw does not check: it allocates
+ * again and overwrites +104, orphaning the first allocation, with no error of its own for
+ * this. Here the ME RAM is shared with every video context, so the leak would starve them;
+ * the refusal and its code are a synthetic choice (W-LLE-1), like sceVideocodecGetEDRAM's. */
 static uint32_t h_AudiocodecGetEDRAM(CpuState *s) {
     static const char call[] = "sceAudiocodecGetEDRAM";
     const uint32_t work = A0;
     const uint32_t r = ac_check(call, work, A1, AC_WORK_BYTES_EDRAM);
     if (r) return r;
+    if (me_audio_allocation(work))
+        return vc_refuse(call, "work area already holds its ME memory (sceAudiocodecReleaseEDRAM first)",
+                         AC_ERR_EDRAM);
     uint32_t size;
     uint32_t addr = 0u;
-    if (sr_size_add_ok(MEM_R32(work + 16u), 0x3Fu, &size)) addr = me_alloc(size | 0x3Fu);
+    if (sr_size_add_ok(MEM_R32(work + 16u), 0x3Fu, &size)) addr = me_alloc(size | 0x3Fu, ME_OWNER_AUDIO, work);
     if (!addr) {
         MEM_W32(work + 104u, 0u);
         MEM_W32(work + 12u, 0u);
@@ -785,15 +814,20 @@ static uint32_t h_AudiocodecGetEDRAM(CpuState *s) {
 }
 
 /* sceAudiocodecReleaseEDRAM(workArea): uofw frees +104 and clears +104 and +12; a work area that
- * holds no ME allocation is refused. The host decoder for the work area goes too (JPCSP). */
+ * holds no ME allocation is refused. +104 is guest-writable, so it must name the allocation
+ * this work area owns: any other address (another work area's, a video context's) is refused
+ * with the same code and nothing is freed. The host decoder for the work area goes too
+ * (JPCSP). */
 static uint32_t h_AudiocodecReleaseEDRAM(CpuState *s) {
     static const char call[] = "sceAudiocodecReleaseEDRAM";
     const uint32_t work = A0;
     if (!vc_guest_words(work, AC_WORK_BYTES_EDRAM))
         return vc_refuse(call, "work area is not a writable guest span", AC_ERR_PRIV_REQUIRED);
     const uint32_t alloc = MEM_R32(work + 104u);
-    if (!alloc || (alloc & 0x1FFFFFFFu) > 0x3FFFFFu || !me_free(alloc))
+    if (!alloc || (alloc & 0x1FFFFFFFu) > 0x3FFFFFu)
         return vc_refuse(call, "work area holds no ME allocation of this boundary", AC_ERR_EDRAM_NOT_HELD);
+    if (alloc != me_audio_allocation(work) || !me_free(alloc, ME_OWNER_AUDIO, work))
+        return vc_refuse(call, "+104 names ME memory this work area does not own", AC_ERR_EDRAM_NOT_HELD);
     MEM_W32(work + 104u, 0u);
     MEM_W32(work + 12u, 0u);
     AcContext *c = ac_find(work);
@@ -808,8 +842,11 @@ static uint32_t h_AudiocodecInit(CpuState *s) {
     const uint32_t work = A0;
     const uint32_t r = ac_check(call, work, A1, AC_WORK_BYTES);
     if (r) return r;
-    if (!MEM_R32(work + 12u))
+    const uint32_t held = me_audio_allocation(work);
+    if (!held)
         return vc_refuse(call, "work area holds no EDRAM (sceAudiocodecGetEDRAM first)", AC_ERR_ME);
+    if (MEM_R32(work + 12u) != ((held + 0x3Fu) & ~0x3Fu))
+        return vc_refuse(call, "+12 is not the EDRAM sceAudiocodecGetEDRAM published", AC_ERR_ME);
     AcContext *c = ac_find(work);
     if (c) {
         if (c->at3p) (void)atrac3p_bridge_reset(c->at3p);
@@ -851,6 +888,8 @@ static uint32_t h_AudiocodecDecode(CpuState *s) {
         return vc_refuse(call, "input is not a readable guest span", AC_ERR_PRIV_REQUIRED);
     if (hdr[0] != 0x0Fu || hdr[1] != 0xD0u)
         return vc_refuse(call, "input without the PSMF ATRAC3plus frame header is not modelled", AC_ERR_ME);
+    /* The same expression, precedence included, as mpeg.c's mpeg_audio_decode_frame
+     * (sceMpegAtracDecode): the two must agree. */
     const uint32_t frame_bytes = (uint32_t)(((hdr[2] & 3u) << 8) | ((uint32_t)hdr[3] * 8u)) + 0x10u;
     const int data = (int)(frame_bytes - 8u);
     const int channels = (hdr[2] >> 2) & 7;
@@ -891,8 +930,9 @@ static uint32_t h_AudiocodecDecode(CpuState *s) {
         bytes[i * 2u] = (uint8_t)((uint16_t)s_ac_pcm[i]);
         bytes[i * 2u + 1u] = (uint8_t)((uint16_t)s_ac_pcm[i] >> 8);
     }
-    (void)sr_guest_copy_out(out, bytes, out_bytes);
+    const int copied = sr_guest_copy_out(out, bytes, out_bytes);
     free(bytes);
+    if (!copied) return vc_refuse(call, "the output block could not be written", AC_ERR_PRIV_REQUIRED);
     /* synthetic (W-LLE-1): JPCSP writes the frame bytes its decoder read at +28 and the output
      * size at +36; here +28 is the frame without its 8-byte header. */
     MEM_W32(work + 28u, (uint32_t)data);
