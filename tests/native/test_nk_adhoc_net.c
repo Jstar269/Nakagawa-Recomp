@@ -247,7 +247,8 @@ static void test_event_overflow(void) {
     /* A holds CONNECT_BSSID and CONNECT(B); each scan adds SCAN and SCAN_COMPLETE. */
     unsigned scans = 0;
     while (a->ops->scan(a) == NK_NET_OK && scans < NK_NET_EVENT_QUEUE) scans++;
-    CHECK(scans == NK_NET_EVENT_QUEUE / 2u - 1u + 1u, "the scan that overflows still answers OK (%u)", scans);
+    CHECK(scans == NK_NET_EVENT_QUEUE / 2u - 1u, "31 scans fit; the one that overflows answers "
+          "NOT_LOGGED_IN (%u)", scans);
     CHECK(a->ops->events_dropped(a) >= 1u, "the overflow is counted");
     CHECK(a->ops->scan(a) == NK_NET_NOT_LOGGED_IN, "then the lobby has removed A");
     CHECK(a->ops->pdp_send(a, sa, k_b, 0x1000, "x", 1) == NK_NET_NO_SOCKET, "and closed its sockets");
@@ -256,6 +257,23 @@ static void test_event_overflow(void) {
     CHECK(take(a, ev, 1) == 1 && take(a, NULL, 1) == 0, "A still takes what it was sent; take is bounded");
     CHECK(login(a, k_a, "Alpha", k_game) == NK_NET_OK, "and may log in again");
     CHECK(take(a, ev, NK_NET_EVENT_QUEUE) == 0, "with an empty queue");
+
+    /* A connect whose own ack overflows: 32 scans of B's group fill A's queue exactly, then the
+     * CONNECT_BSSID of a new group has no room. The connect answers NOT_LOGGED_IN, the group it
+     * made goes with it, and A keeps the 64 events it holds. */
+    unsigned full = 0;
+    while (full < NK_NET_EVENT_QUEUE / 2u && a->ops->scan(a) == NK_NET_OK) full++;
+    CHECK(full == NK_NET_EVENT_QUEUE / 2u, "32 scans fill the queue without overflow (%u)", full);
+    const uint32_t dropped = a->ops->events_dropped(a);
+    CHECK(a->ops->connect(a, k_g2) == NK_NET_NOT_LOGGED_IN,
+          "a connect that overflows its own ack answers NOT_LOGGED_IN");
+    CHECK(a->ops->events_dropped(a) == dropped + 1u && a->ops->connect(a, k_g2) == NK_NET_NOT_LOGGED_IN,
+          "the dropped ack is counted, and the lobby has removed A");
+    CHECK(take(a, ev, NK_NET_EVENT_QUEUE) == NK_NET_EVENT_QUEUE && ev[0].kind == NK_LOBBY_SCAN,
+          "A still takes the 64 events it holds");
+    CHECK(b->ops->scan(b) == NK_NET_OK && take(b, ev, NK_NET_EVENT_QUEUE) == 2u &&
+              memcmp(ev[0].group, k_g1, 8) == 0 && ev[1].kind == NK_LOBBY_SCAN_COMPLETE,
+          "the group A's connect made is gone with A");
     nk_loopnet_destroy(net);
 }
 

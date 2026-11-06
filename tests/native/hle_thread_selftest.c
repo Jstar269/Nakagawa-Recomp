@@ -7808,6 +7808,12 @@ static void test_adhoc_named_refusals(void) {
  * MUTANT: BUSY for every request while a Create or Connect is in flight -- the Connect during a
  *   Create, and the Scan, Create and Connect during a Connect, answer BUSY instead of stopping.
  * MUTANT: leave a handler's fault as a flag on the library's thread -- the fault child runs on.
+ * MUTANT: the fault line in the old "sceNetAdhocctl handler" form -- the fault cell finds no
+ *   SEMANTIC_BOUNDARY line tools/nk_cli.py classifies.
+ * MUTANT: exit 1 on a handler's fault without the line, or without the flight-recorder fatal --
+ *   the fault cell fails; so does a child that exits 1 before it runs the fixture.
+ * MUTANT: check BUSY before the group name -- a Create with an invalid group during a Create
+ *   answers BUSY instead of stopping.
  * MUTANT: sceNetTerm with sceNetAdhocctl live returns 0 -- the sceNetTerm cell fails.
  * MUTANT (sched.c): a kick ends any delay of a service thread -- the handler's own guest delay is
  *   cut short.
@@ -8161,6 +8167,12 @@ static void adh_main_fn(CpuState *cpu) {
            adh(ADH_NID_CREATE, adh_name(6, "REJOIN"), 0u, 0u) == 0x80410b10u &&
            adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0x80410b10u,
            "adhocctl during a Create: Scan, Create and Disconnect answer BUSY (0x80410b10)");
+    /* Whether a PSP checks the group name or the request in flight first is UNMEASURED: an
+     * invalid name during a Create stops by name, not BUSY and not INVALID_ARG. */
+    const uint32_t bad_stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_CREATE, adh_name(7, "BAD-NAME"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == bad_stops + 1u,
+           "adhocctl: a Create with an invalid group during a Create is an UNMEASURED stop");
     adh_delay_until(cpu, t0 + ADH_CREATE_US + ADH_SLACK_US);
     expect(s_adh_events == n + 1u && ADH_AT(n).event == 1 && adh_state() == 1u &&
            adh(ADH_NID_GET_PARAM, ADH_PARAM, 0u, 0u) == 0u && MEM_R8(ADH_PARAM + 4u) == 'A',
@@ -8243,6 +8255,7 @@ static void adh_main_fn(CpuState *cpu) {
 }
 
 static int aot_spawn_self(const char *self, const char *mode);
+static int hle_scratch_root(char *out, size_t capacity);
 
 /* Every adhocctl fixture starts here: the default system profile (owner_name empty), user RAM
  * as a game has it, the libraries uninitialized, and the recording handler at ADH_HANDLER. */
@@ -8485,21 +8498,74 @@ static void adh_fault_fn(CpuState *cpu) {
     s_adh_done = 99;   /* the run went on past the handler's fault */
 }
 
+/* The child's stderr goes next to its flight-recorder bundle, whose absolute path the parent
+ * passes as SR_FLIGHT_OUTPUT: the child's working directory need not be the parent's. */
+static int adh_fault_log(char *log, size_t capacity, const char *bundle) {
+    const int n = bundle && bundle[0] ? snprintf(log, capacity, "%s.stderr", bundle) : -1;
+    return n > 0 && (size_t)n < capacity;
+}
+
+/* The bundle under HLE_BUILD_ROOT, made absolute, and the log beside it. */
+static int adh_fault_paths(char *log, char *bundle, size_t capacity) {
+    char root[MAX_PATH];
+    if (!hle_scratch_root(root, sizeof(root))) return 0;
+    const int b = snprintf(bundle, capacity, "%s/adhocctl_fault_child.json", root);
+    return b > 0 && (size_t)b < capacity && adh_fault_log(log, capacity, bundle);
+}
+
 static int run_adhocctl_handler_fault_child(void) {
+    char log[MAX_PATH];
+    if (!adh_fault_log(log, sizeof(log), getenv("SR_FLIGHT_OUTPUT")) || !freopen(log, "w", stderr)) return 96;
     (void)adh_fixture_begin();
+    sr_flight_test_reset(SR_FLIGHT_CLASS_FATAL, 8u);   /* SR_FLIGHT_OUTPUT is the parent's */
     adh_run(ADH_MAIN_ENTRY, adh_fault_fn);
     return s_adh_done ? s_adh_done : 98;
 }
 
+static size_t adh_read_file(const char *path, char *out, size_t capacity) {
+    FILE *f = fopen(path, "rb");
+    size_t n = 0;
+    if (f) {
+        n = fread(out, 1, capacity - 1u, f);
+        fclose(f);
+    }
+    out[n] = '\0';
+    return n;
+}
+
+/* The fault must stop the run the way dispatch_call stops one: status 1, the SEMANTIC_BOUNDARY
+ * line tools/nk_cli.py classifies, naming the handler, and a flight-recorder fatal for it.
+ * Status 1 alone would accept any other exit(1) in the child. */
 static void test_adhocctl_handler_fault_stops(const char *self) {
-    if (!self) {
-        expect(0, "adhocctl handler fault: the selftest knows its own path");
+    char log[MAX_PATH], bundle[MAX_PATH];
+    if (!self || !adh_fault_paths(log, bundle, sizeof(log))) {
+        expect(0, "adhocctl handler fault: the selftest knows its own path and its scratch root");
         return;
     }
+    remove(log);
+    remove(bundle);
+    hle_test_setenv("SR_FLIGHT_OUTPUT", bundle);
     const int status = aot_spawn_self(self, "--adhocctl-handler-fault-child");
-    char msg[160];
+    hle_test_setenv("SR_FLIGHT_OUTPUT", NULL);
+    static char text[16384];
+    char msg[200];
     snprintf(msg, sizeof(msg), "adhocctl: a handler's fault stops the run with status 1 (got %d)", status);
     expect(status == 1, msg);
+    char want[160];
+    snprintf(want, sizeof(want), "SEMANTIC_BOUNDARY: adhocctl-handler-fault; handler 0x%08x (id 0, event 1) ",
+             ADH_HANDLER);
+    (void)adh_read_file(log, text, sizeof(text));
+    const char *line = strstr(text, want);
+    expect(line != NULL && (line == text || line[-1] == '\n'),
+           "adhocctl: the fault prints the classified SEMANTIC_BOUNDARY line with the handler's address");
+    (void)adh_read_file(bundle, text, sizeof(text));
+    char event[160];
+    snprintf(event, sizeof(event), "\"class\": \"fatal\", \"kind\": %u, \"arg0\": %u, \"arg1\": %u, \"arg2\": 1",
+             (unsigned)SR_FLIGHT_KIND_FATAL_DISPATCH, (unsigned)ADH_HANDLER, (unsigned)ADH_HANDLER);
+    expect(strstr(text, "\"terminal\": {\"reason\": \"fatal\"") != NULL && strstr(text, event) != NULL,
+           "adhocctl: the fault leaves a flight-recorder fatal for the handler, event 1");
+    remove(log);
+    remove(bundle);
 }
 
 extern void sr_hle_test_volatile_mem_reset(void);

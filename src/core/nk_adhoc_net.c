@@ -209,7 +209,9 @@ static int lo_connect(NkAdhocTransport *t, const uint8_t group[NK_RELAY_GROUP_LE
     push_event(c, &ack);
     c->group = g;
     reap_lost(net);
-    return NK_NET_OK;
+    /* Its own ack can overflow its queue: then the lobby has just removed it, as the relay
+     * closes a client it cannot send to, and the call says so. Its queued events stay to take. */
+    return c->logged_in ? NK_NET_OK : NK_NET_NOT_LOGGED_IN;
 }
 
 static int lo_disconnect(NkAdhocTransport *t) {
@@ -248,7 +250,7 @@ static int lo_scan(NkAdhocTransport *t) {
     done.kind = NK_LOBBY_SCAN_COMPLETE;
     push_event(c, &done);
     reap_lost(c->net);
-    return NK_NET_OK;
+    return c->logged_in ? NK_NET_OK : NK_NET_NOT_LOGGED_IN;   /* removed by its own overflow */
 }
 
 static size_t lo_take_events(NkAdhocTransport *t, NkLobbyEvent *out, size_t max) {

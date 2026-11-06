@@ -170,7 +170,6 @@ static struct {
     int inited;
     int reinit_refused;      /* a second Init tore the library down (adhocctl.expected:85-87) */
     int term_after_refused;  /* and Term ran after that: what Init answers then is UNMEASURED */
-    int dead;                /* the thread ended under a handler: nothing more is delivered */
     int radio_used;          /* a Create, Connect or Scan has been asked for since Init */
     uint32_t gen;            /* the thread generation; a thread whose gen is old ends */
     uint32_t thread_uid;
@@ -187,18 +186,13 @@ static struct {
 
 static int adhocctl_inited(void) { return s_adhocctl.inited; }
 
-static int adhocctl_live(const char *name) {
-    if (s_adhocctl.inited && s_adhocctl.dead) {
-        hle_unmodelled_stop(name, "after the ad hoc control thread ended under a handler");
-        return 0;
-    }
-    return 1;
-}
-
-/* A request already in flight. BUSY is recorded only for these pairs: Scan and Create during a
- * Create (ctlinit.expected:24, 29; a Create after a refused Disconnect, abandon.expected:30),
- * and Disconnect during a Create or a Connect (abandon.expected:6, 12). Every other request
- * while one is in flight is UNMEASURED and stops. Returns 1 when the call must answer `*out`. */
+/* A request already in flight. BUSY is recorded only for these pairs, each with valid arguments:
+ * Scan and Create during a Create (ctlinit.expected:24, 29; a Create after a refused Disconnect,
+ * abandon.expected:30), and Disconnect during a Create or a Connect (abandon.expected:6, 12).
+ * Every other request while one is in flight is UNMEASURED and stops. Whether a PSP checks a
+ * request's arguments or its busy state first is UNMEASURED too: adhocctl_start checks the
+ * group name first, and an invalid name while a request is in flight stops by name instead of
+ * answering BUSY or INVALID_ARG. Returns 1 when the call must answer `*out`. */
 static int adhocctl_pending(const char *name, int request, uint32_t *out) {
     if (s_adhocctl.request == ADHOCCTL_REQ_NONE) return 0;
     const int pending = s_adhocctl.request;
@@ -225,7 +219,7 @@ static int adhocctl_query_settled(const char *name) {
 static void adhocctl_call_handlers(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp,
                                    int event, uint32_t error) {
     for (int i = 0; i < ADHOCCTL_HANDLERS; i++) {
-        if (s_adhocctl.gen != gen || s_adhocctl.dead) return;   /* Term or a fault in a handler */
+        if (s_adhocctl.gen != gen) return;   /* Term, Init or LoadExec under a handler */
         if (!s_adhocctl.handlers[i].used) continue;
         const uint32_t fn = s_adhocctl.handlers[i].fn;
         s->r[4] = (uint32_t)event;
@@ -240,12 +234,16 @@ static void adhocctl_call_handlers(CpuState *s, uint32_t gen, uint32_t sp, uint3
             /* A fatal flow left on this thread's CpuState would be lost: the body returns,
              * the thread exits, and the next thread's context replaces s_cpu, so a game
              * waiting for what the handler should have done would wait forever. The run
-             * stops here instead, through dispatch_call's exit for a dispatch it cannot
-             * complete. */
-            fprintf(stderr, "SEMANTIC_BOUNDARY: sceNetAdhocctl handler 0x%08x (id %d, event %d) "
-                            "faulted at 0x%08x on the ad hoc control thread; the run stops here\n",
+             * stops here instead, with dispatch_call's exit for a dispatch it cannot complete
+             * (recomp.c): the SEMANTIC_BOUNDARY line tools/nk_cli.py classifies, a flight-
+             * recorder fatal, and exit 1. Like those exits it does not run the finalisation an
+             * unsupported-import stop runs (trace close, compat report, videorec finish, perf
+             * shutdown, hle.c hle_unmodelled_stop): neither hle.c nor recomp.c exposes that
+             * sequence as a function, and this file does not copy it. */
+            fprintf(stderr, "SEMANTIC_BOUNDARY: adhocctl-handler-fault; handler 0x%08x (id %d, "
+                            "event %d) faulted at 0x%08x on the ad hoc control thread; the run "
+                            "stops here\n",
                     fn, i, event, fatal_target);
-            s_adhocctl.dead = 1;
             sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, fn, fatal_target, (uint32_t)event);
             fflush(stderr);
             exit(1);
@@ -259,7 +257,7 @@ static void adhocctl_call_handlers(CpuState *s, uint32_t gen, uint32_t sp, uint3
 static void adhocctl_thread_body(CpuState *s, void *arg) {
     const uint32_t gen = (uint32_t)(uintptr_t)arg;
     const uint32_t sp = s->r[29], gp = s->r[28];
-    while (s_adhocctl.gen == gen && !s_adhocctl.dead) {
+    while (s_adhocctl.gen == gen) {
         if (s_adhocctl.error_events) {
             /* adhocctl.expected:58-61: Create, Connect and Scan in a group each return 0 and each
              * gets event 0 with ALREADY_CONNECTED, within the 100 ms the test waits (UNMEASURED
@@ -296,7 +294,6 @@ static void adhocctl_teardown(void) {
     const uint32_t uid = s_adhocctl.thread_uid;
     s_adhocctl.gen++;
     s_adhocctl.inited = 0;
-    s_adhocctl.dead = 0;
     s_adhocctl.thread_uid = 0u;
     s_adhocctl.state = 0;
     s_adhocctl.request = ADHOCCTL_REQ_NONE;
@@ -349,7 +346,6 @@ static uint32_t h_NetAdhocctlInit(CpuState *s) {
     s_adhocctl.thread_uid = uid;
     for (uint32_t i = 0; i < 13u; i++) s_adhocctl.id[i] = MEM_R8(id + i);
     s_adhocctl.inited = 1;
-    s_adhocctl.dead = 0;
     s_adhocctl.state = 0;
     s_adhocctl.request = ADHOCCTL_REQ_NONE;
     s_adhocctl.error_events = 0u;
@@ -382,7 +378,6 @@ static uint32_t h_NetAdhocctlTerm(CpuState *s) {
  * handler again: adhocctl.expected:34-35), four in all (:36), NULL refused (:33). Which id a
  * freed slot gives back is UNMEASURED. */
 static uint32_t h_NetAdhocctlAddHandler(CpuState *s) {
-    if (!adhocctl_live("sceNetAdhocctlAddHandler")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     if (!A0) return ADHOCCTL_ERROR_INVALID_ARG;
     for (int i = 0; i < ADHOCCTL_HANDLERS; i++) {
@@ -398,7 +393,6 @@ static uint32_t h_NetAdhocctlAddHandler(CpuState *s) {
 /* sceNetAdhocctlDelHandler(int id): 0 for a registered id (adhocctl.expected:37), 0x80410b06 for
  * 100 and -1 (:38-39). An id in 0..3 that holds no handler is UNMEASURED. */
 static uint32_t h_NetAdhocctlDelHandler(CpuState *s) {
-    if (!adhocctl_live("sceNetAdhocctlDelHandler")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     const int32_t id = (int32_t)A0;
     if (id < 0 || id >= ADHOCCTL_HANDLERS) return ADHOCCTL_ERROR_INVALID_HANDLER_ID;
@@ -410,7 +404,6 @@ static uint32_t h_NetAdhocctlDelHandler(CpuState *s) {
 
 /* sceNetAdhocctlGetState(int *state): leaves *state alone before Init (adhocctl.expected:4). */
 static uint32_t h_NetAdhocctlGetState(CpuState *s) {
-    if (!adhocctl_live("sceNetAdhocctlGetState")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     if (!A0 || !sr_guest_span_writable(A0, 4u))
         return hle_unmodelled_stop("sceNetAdhocctlGetState", "with output 0x%08x (UNMEASURED)", A0);
@@ -451,16 +444,18 @@ static int adhocctl_check_group(const char *name, uint32_t addr, uint8_t out[8])
  * staying in the group (adhocctl.expected:58-62); otherwise the request starts and its event
  * follows. The order of the init, busy, name and state checks is UNMEASURED. */
 static uint32_t adhocctl_start(const char *name, int request, uint32_t group_addr, int named) {
-    if (!adhocctl_live(name)) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
-    uint32_t busy;
-    if (adhocctl_pending(name, request, &busy)) return busy;
     uint8_t group[8];
     if (named) {
         const int bad = adhocctl_check_group(name, group_addr, group);
         if (bad < 0) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
+        if (bad && s_adhocctl.request != ADHOCCTL_REQ_NONE)
+            return hle_unmodelled_stop(name, "with an invalid group name while a request is in flight "
+                                       "(UNMEASURED: which check comes first)");
         if (bad) return ADHOCCTL_ERROR_INVALID_ARG;
     }
+    uint32_t busy;
+    if (adhocctl_pending(name, request, &busy)) return busy;
     if (s_adhocctl.state == 1) {
         if (s_adhocctl.error_events >= ADHOCCTL_ERROR_EVENTS_MAX)
             return hle_unmodelled_stop(name, "with %u ALREADY_CONNECTED events undelivered",
@@ -507,7 +502,6 @@ static uint32_t h_NetAdhocctlScan(CpuState *s) {
  * 500 ms"; it uses the in-group time. BUSY while a Create or Connect is in flight (abandon.expected:6). */
 static uint32_t h_NetAdhocctlDisconnect(CpuState *s) {
     (void)s;
-    if (!adhocctl_live("sceNetAdhocctlDisconnect")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     uint32_t busy;
     if (adhocctl_pending("sceNetAdhocctlDisconnect", ADHOCCTL_REQ_DISCONNECT, &busy)) return busy;
@@ -521,7 +515,6 @@ static uint32_t h_NetAdhocctlDisconnect(CpuState *s) {
  * (adhocctl.expected:22 compares those 13 bytes); the padding after them is left as it was
  * (UNMEASURED). */
 static uint32_t h_NetAdhocctlGetAdhocId(CpuState *s) {
-    if (!adhocctl_live("sceNetAdhocctlGetAdhocId")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     if (!A0 || !sr_guest_span_writable(A0, 13u))
         return hle_unmodelled_stop("sceNetAdhocctlGetAdhocId", "with output 0x%08x (UNMEASURED)", A0);
@@ -547,7 +540,6 @@ static uint32_t h_NetAdhocctlGetAdhocId(CpuState *s) {
  *        profile MAC with those two bits set that way, which differs from the MAC in that bit.
  *   +146 padding: left as it was (UNMEASURED). */
 static uint32_t h_NetAdhocctlGetParameter(CpuState *s) {
-    if (!adhocctl_live("sceNetAdhocctlGetParameter")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     if (!adhocctl_query_settled("sceNetAdhocctlGetParameter")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (s_adhocctl.state != 1) return ADHOCCTL_ERROR_DISCONNECTED;
@@ -586,7 +578,6 @@ static uint32_t h_NetAdhocctlGetParameter(CpuState *s) {
  * (adhocctl.expected:52) and with a buffer (abandon.expected "Peer list: 00000000, 0 peers").
  * A buffer out of a group is UNMEASURED. */
 static uint32_t h_NetAdhocctlGetPeerList(CpuState *s) {
-    if (!adhocctl_live("sceNetAdhocctlGetPeerList")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     if (!adhocctl_query_settled("sceNetAdhocctlGetPeerList")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!A0 || !sr_guest_span_writable(A0, 4u) || (s_adhocctl.state != 1 && A1 != 0u))
@@ -600,7 +591,6 @@ static uint32_t h_NetAdhocctlGetPeerList(CpuState *s) {
  * with *size 0, in and out of a group and after a scan (adhocctl.expected:29, 55, 75;
  * ctlinit.expected:21), each with a NULL buffer. A buffer is UNMEASURED. */
 static uint32_t h_NetAdhocctlGetScanInfo(CpuState *s) {
-    if (!adhocctl_live("sceNetAdhocctlGetScanInfo")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     if (!adhocctl_query_settled("sceNetAdhocctlGetScanInfo")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!A0 || !sr_guest_span_writable(A0, 4u) || A1 != 0u)
@@ -614,7 +604,6 @@ static uint32_t h_NetAdhocctlGetScanInfo(CpuState *s) {
  * nobody is a peer, the console itself included: NO_ENTRY for its own MAC and another
  * (adhocctl.expected:53-54). Out of a group it is UNMEASURED. */
 static uint32_t h_NetAdhocctlGetPeerInfo(CpuState *s) {
-    if (!adhocctl_live("sceNetAdhocctlGetPeerInfo")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     if (!adhocctl_query_settled("sceNetAdhocctlGetPeerInfo")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (s_adhocctl.state != 1 || !A0 || !sr_guest_span_readable(A0, 6u))
@@ -632,7 +621,6 @@ static uint32_t h_NetAdhocctlGetPeerInfo(CpuState *s) {
  * (term.expected:26). After a scan or a group has ended, and while a request is in flight, the
  * answer is UNMEASURED. */
 static uint32_t h_NetGetLocalEtherAddr(CpuState *s) {
-    if (!adhocctl_live("sceNetGetLocalEtherAddr")) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     if (!s_adhocctl.inited || !s_adhocctl.radio_used) return SCE_NET_ERROR_LOCAL_ADDR_UNAVAILABLE;
     if (s_adhocctl.state != 1 || s_adhocctl.request != ADHOCCTL_REQ_NONE)
         return hle_unmodelled_stop("sceNetGetLocalEtherAddr", "after a scan or group request, out of "
