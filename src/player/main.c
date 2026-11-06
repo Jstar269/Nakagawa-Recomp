@@ -864,6 +864,12 @@ static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
             }
             return true;
         }
+        if (use_next_ui && player_ui_nk_nickname_open(next_ui)) {
+            /* The nickname editor (#2197) takes every press while it is open: its
+               keyboard's keys and shortcuts, B (Cancel) and Start (Done) too, which
+               the routes below would give to the page under it. */
+            return player_ui_nk_handle_event(next_ui, event);
+        }
         if (use_next_ui && event->gbutton.button == SDL_GAMEPAD_BUTTON_START &&
             player_view_is_library(app->active_view)) {
             player_app_set_view(app, VIEW_SETTINGS);
@@ -884,9 +890,8 @@ static bool player_dispatch_ui_event(PlayerApp *app, UiInput *input,
             input_settings_feed_capture_source(&app->input_settings, src);
             return true;
         }
-        if (use_next_ui && (player_ui_nk_nickname_open(next_ui) ||
-                            !(event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST &&
-                              !player_view_is_library(app->active_view)))) {
+        if (use_next_ui && !(event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST &&
+                             !player_view_is_library(app->active_view))) {
             return player_ui_nk_handle_event(next_ui, event);
         }
         if (player_view_is_library(app->active_view)) {

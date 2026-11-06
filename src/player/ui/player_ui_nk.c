@@ -116,14 +116,16 @@ struct PlayerUiNk {
     /* The control the box focuses, on the first frame that lays it out. */
     NkUiId find_focus;
     /* The nickname editor (#2197): open (the first-launch prompt, or Settings >
-       Nickname), what is typed, whether the last Save was refused, the Save
-       focus its first frame takes, and the control focus returns to after it. */
+       Nickname), what is typed and its on-screen keyboard, whether the last Done
+       was refused, the control the next frame focuses (0 for none), and the
+       control focus returns to after it. */
     bool nickname_open;
     bool nickname_first_launch;
     bool nickname_refused;
-    bool nickname_focus_pending;
+    NkUiId nickname_focus;
     NkUiId nickname_return_focus;
     char nickname_text[NK_NICKNAME_MAX_BYTES + 1u];
+    UiKeyboard nickname_keyboard;
     char status_text[PLAYER_UI_TITLE_CAP][256];
     char library_page_label[64];
     char flow_title[NK_MAX_TITLE_LEN + NK_MAX_DISC_ID_LEN + 16];
@@ -1604,6 +1606,13 @@ unsigned player_ui_nk_test_focus(const PlayerUiNk *player) {
     return player != NULL && player->ui != NULL ? (unsigned)nk_ui_focused(player->ui) : 0u;
 }
 
+const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, size_t cap) {
+    if (count != NULL && cap > 0u) count[0] = '\0';
+    if (player == NULL || !player->nickname_open) return NULL;
+    if (count != NULL) (void)ui_keyboard_count_text(&player->nickname_keyboard, count, cap);
+    return player->nickname_text;
+}
+
 int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown) {
     if (shown != NULL) *shown = false;
     if (player == NULL || player->backdrop_index == SIZE_MAX) return -1;
@@ -1961,13 +1970,16 @@ static void player_ui_find_delete(PlayerUiNk *player) {
 }
 
 /* The nickname editor starts empty, showing the nickname in use until
-   something is typed, and opens on Save. */
+   something is typed, and opens on its keyboard's first letter. Its keyboard
+   takes only what nk_nickname_valid would, up to NK_NICKNAME_MAX_BYTES. */
 static void player_ui_nickname_open(PlayerUiNk *player, bool first_launch) {
     player->nickname_open = true;
     player->nickname_first_launch = first_launch;
     player->nickname_refused = false;
-    player->nickname_focus_pending = true;
+    player->nickname_focus = PLAYER_UI_ID_NICKNAME_KEY_BASE + UI_KEYBOARD_KEY_DEFAULT;
     player->nickname_text[0] = '\0';
+    ui_keyboard_init(&player->nickname_keyboard, player->nickname_text,
+                     NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts, NULL);
 }
 
 static void player_ui_nickname_close(PlayerUiNk *player) {
@@ -1976,35 +1988,19 @@ static void player_ui_nickname_close(PlayerUiNk *player) {
     player->nickname_text[0] = '\0';
 }
 
-/* Adds typed UTF-8 text, whole characters only, while they fit in
-   NK_NICKNAME_MAX_BYTES; ASCII control characters are not typed. Save checks
-   the whole rule (nk_nickname_valid). */
+/* A physical keyboard types through the on-screen keyboard's rules (its filter
+   and the 32-byte cap), and moves the focus to Done, so Enter after typing saves.
+   Done still checks the whole rule (nk_nickname_valid). */
 static void player_ui_nickname_type(PlayerUiNk *player, const char *text) {
-    const unsigned char *bytes = (const unsigned char *)text;
-    size_t length = strlen(player->nickname_text);
-    for (size_t i = 0u; bytes[i] != 0u;) {
-        size_t n = 1u;
-        while (bytes[i + n] != 0u && (bytes[i + n] & 0xC0u) == 0x80u) ++n;
-        if (length + n > NK_NICKNAME_MAX_BYTES) break;
-        if (n > 1u || (bytes[i] >= 0x20u && bytes[i] != 0x7Fu)) {
-            memcpy(player->nickname_text + length, bytes + i, n);
-            length += n;
-            player->nickname_text[length] = '\0';
-        }
-        i += n;
-    }
+    (void)ui_keyboard_type(&player->nickname_keyboard, text);
+    player->nickname_focus = PLAYER_UI_ID_NICKNAME_SAVE;
     player->nickname_refused = false;
 }
 
 /* Removes the last character, all of its UTF-8 bytes. */
 static void player_ui_nickname_delete(PlayerUiNk *player) {
-    size_t length = strlen(player->nickname_text);
-    while (length > 0u &&
-           ((unsigned char)player->nickname_text[length - 1u] & 0xC0u) == 0x80u) {
-        --length;
-    }
-    if (length > 0u) --length;
-    player->nickname_text[length] = '\0';
+    (void)ui_keyboard_delete(&player->nickname_keyboard);
+    player->nickname_focus = PLAYER_UI_ID_NICKNAME_SAVE;
     player->nickname_refused = false;
 }
 
@@ -2954,18 +2950,22 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     if (player->nickname_open) {
         PlayerUiNicknameModel model;
         memset(&model, 0, sizeof(model));
-        if (player->nickname_focus_pending) {
-            nk_ui_focus(player->ui, PLAYER_UI_ID_NICKNAME_SAVE);
-            player->nickname_focus_pending = false;
+        if (player->nickname_focus != 0u) {
+            nk_ui_focus(player->ui, player->nickname_focus);
+            player->nickname_focus = 0u;
         }
         model.first_launch = player->nickname_first_launch;
-        model.text = player->nickname_text;
+        model.keyboard = &player->nickname_keyboard;
         model.current = app->settings.nickname;
         model.refused = player->nickname_refused;
         model.logical_width = scale.logical_w;
         model.logical_height = scale.logical_h;
         action = player_ui_screen_nickname(player->ui, &model);
-        if (action.kind == PLAYER_UI_ACTION_NICKNAME) {
+        if (action.kind == PLAYER_UI_ACTION_NICKNAME &&
+            (unsigned)action.primary == PLAYER_UI_NICKNAME_EDITED) {
+            player->nickname_refused = false;
+            action.kind = PLAYER_UI_ACTION_NONE;
+        } else if (action.kind == PLAYER_UI_ACTION_NICKNAME) {
             /* Skip keeps the nickname; a Save the rule refuses keeps the editor
                open, with the old nickname, and says why. */
             bool save = (unsigned)action.primary == PLAYER_UI_NICKNAME_SAVE;

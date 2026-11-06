@@ -819,6 +819,21 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            !app->drop_notice[0] ? "none"
                : strstr(app->drop_notice, "being set up") ? "busy" : "summary");
 
+    if (g_ui_test_next_ui != NULL) {
+        /* The nickname editor (#2197) while it is open: what it holds, in hex so a
+           space or any byte reads back exactly, and the count it shows. */
+        char count[32];
+        const char *nickname = player_ui_nk_test_nickname(g_ui_test_next_ui, count,
+                                                          sizeof(count));
+        if (nickname != NULL) {
+            printf("[PLAYER_UI_TEST] nickname_editor frame=%d text_hex=", frame_number);
+            for (size_t i = 0; nickname[i] != '\0'; i++) {
+                printf("%02x", (unsigned)(unsigned char)nickname[i]);
+            }
+            printf(" count=%s\n", count);
+        }
+    }
+
     static bool consent_items_reported = false;
     if (app->active_view == VIEW_PREREQ_CONSENT && !consent_items_reported) {
         printf("[PLAYER_UI_TEST] consent items=%zu total_bytes=%llu ids=",

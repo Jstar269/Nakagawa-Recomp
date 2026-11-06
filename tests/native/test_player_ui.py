@@ -2211,17 +2211,18 @@ class NativePlayerUiTests(unittest.TestCase):
         saved. --view=nickname-prompt is the one view that shows it. Failing-before: there was
         no prompt and settings.json had no nickname."""
         skip = self.next_ui_run("nickname-prompt", ("WAIT_MS=300", "KEY_ESCAPE", "WAIT_MS=200"))
-        self.assertIn(self.NICKNAME_SAVE, self.focus_trail(skip), "the prompt opens on Save")
+        self.assertIn(self.NICKNAME_KEY_Q, self.focus_trail(skip),
+                      "the prompt opens on its keyboard's first letter")
         self.assertNotIn("QUIT_DIALOG", str(skip["stdout"]), "Esc is Skip, not quit")
         settings = skip["settings"]
         assert isinstance(settings, dict)
         self.assertEqual(settings.get("nickname"), "Player")
         self.assertIs(settings.get("nickname_asked"), True)
         again = self.next_ui_run("nickname-prompt", ("WAIT_MS=300",), settings=settings)
-        self.assertNotIn(self.NICKNAME_SAVE, self.focus_trail(again), "it is asked only once")
+        self.assertNotIn(self.NICKNAME_KEY_Q, self.focus_trail(again), "it is asked only once")
         typed = self.next_ui_run(
             "nickname-prompt", ("WAIT_MS=300", "TEXT=Ren 7", "KEY_RETURN", "WAIT_MS=200"))
-        self.assertNotIn(self.NICKNAME_SAVE, self.focus_trail(self.next_ui_run(
+        self.assertNotIn(self.NICKNAME_KEY_Q, self.focus_trail(self.next_ui_run(
             "library", ("WAIT_MS=300",))), "any other view keeps the prompt down")
         saved = typed["settings"]
         assert isinstance(saved, dict)
@@ -2229,18 +2230,19 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIs(saved.get("nickname_asked"), True)
 
     def test_next_ui_settings_edits_the_nickname(self) -> None:
-        """#2197: Settings > Online and developer > Nickname opens the editor. Save keeps
-        what was typed; an empty Save is refused and leaves the nickname as it was; Cancel
-        returns to the row. Failing-before: the page had no Nickname row."""
+        """#2197: Settings > Online and developer > Nickname opens the editor on its keyboard.
+        Typing on a physical keyboard moves focus to Done, so Enter saves what was typed; an
+        empty Done (Backspace on nothing, then Enter) is refused and leaves the nickname as it
+        was; Cancel returns to the row. Failing-before: the page had no Nickname row."""
         run = self.next_ui_run(
             "online-settings",
             ("WAIT_MS=100", "KEY_DOWN", "KEY_RETURN", "WAIT_MS=100", "TEXT=Kai", "KEY_RETURN",
-             "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100",
-             "KEY_ESCAPE", "WAIT_MS=100"),
+             "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100", "KEY_BACKSPACE", "KEY_RETURN",
+             "WAIT_MS=100", "KEY_ESCAPE", "WAIT_MS=100"),
             settings={"nickname": "Old name", "nickname_asked": True})
         trail = self.focus_trail(run)
-        self.assertEqual(trail[:3], [self.SETTINGS_FOCUS["developer"], self.SETTINGS_NICKNAME,
-                                     self.NICKNAME_SAVE], trail)
+        self.assertEqual(trail[:4], [self.SETTINGS_FOCUS["developer"], self.SETTINGS_NICKNAME,
+                                     self.NICKNAME_KEY_Q, self.NICKNAME_SAVE], trail)
         self.assertEqual(trail[-1], self.SETTINGS_NICKNAME, "Cancel returns to the row")
         frames = run["frames"]
         assert isinstance(frames, list)
@@ -2257,6 +2259,110 @@ class NativePlayerUiTests(unittest.TestCase):
         saved = capped["settings"]
         assert isinstance(saved, dict)
         self.assertEqual(saved.get("nickname"), "x" * 32, "the editor keeps the first 32 bytes")
+
+    # The nickname editor's on-screen keyboard (#2197): its first letter, q, is where it opens.
+    NICKNAME_KEY_BASE = 0x4570
+    NICKNAME_KEY_Q = str(0x4570 + 10)
+
+    @staticmethod
+    def nickname_states(run: dict[str, object]) -> list[tuple[str, str]]:
+        """What the nickname editor held while it was open, frame by frame, and the count it
+        showed, with repeats collapsed."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        states: list[tuple[str, str]] = []
+        for text_hex, count in re.findall(
+                r"^\[PLAYER_UI_TEST\] nickname_editor frame=\d+ text_hex=([0-9a-f]*) count=(.*?)\r?$",
+                stdout, re.M):
+            state = (bytes.fromhex(text_hex).decode("utf-8"), count)
+            if not states or states[-1] != state:
+                states.append(state)
+        return states
+
+    def test_next_ui_nickname_keyboard_types_with_a_controller(self) -> None:
+        """#2197: the first-launch prompt's on-screen keyboard types a nickname with a
+        controller alone: the d-pad moves, A types the focused key, L is Shift, Start is Done,
+        and the setting holds what was typed. The count follows the text. Failing-before: the
+        editor had no keys, so a controller could only skip or save the nickname in use."""
+        right7 = ("PAD_DPAD_RIGHT",) * 7
+        left7 = ("PAD_DPAD_LEFT",) * 7
+        run = self.next_ui_run(
+            "nickname-prompt",
+            ("WAIT_MS=300", "PAD_LEFT_SHOULDER", "PAD_DPAD_DOWN") + right7 +
+            ("PAD_SOUTH", "PAD_LEFT_SHOULDER") + left7 + ("PAD_SOUTH", "PAD_DPAD_UP") + right7 +
+            ("PAD_SOUTH", "WAIT_MS=100", "PAD_START", "WAIT_MS=200"))
+        trail = self.focus_trail(run)
+        shown = [focus for focus in trail if focus != "0"]
+        self.assertEqual(shown[0] if shown else None, self.NICKNAME_KEY_Q,
+                         "the keyboard opens on its first letter")
+        states = self.nickname_states(run)
+        self.assertEqual([text for text, _ in states], ["", "K", "Ka", "Kai"], states)
+        self.assertEqual(states[-1][1], "3 / 32 bytes", "the count follows the text")
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Kai", "Done saved what the keys typed")
+        self.assertIs(settings.get("nickname_asked"), True)
+
+    def test_next_ui_nickname_keyboard_cancel_keeps_the_nickname(self) -> None:
+        """#2197: Settings > Nickname: keys typed with a controller, then Cancel (B, or the
+        keyboard's own Cancel key) leaves the nickname as it was before the editor opened, and
+        focus returns to the row. Failing-before: the editor had no keys to type with."""
+        old = {"nickname": "Old name", "nickname_asked": True}
+        open_editor = ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100")
+        typed = ("PAD_SOUTH", "PAD_DPAD_RIGHT", "PAD_SOUTH")
+        back = self.next_ui_run("online-settings",
+                                open_editor + typed + ("PAD_EAST", "WAIT_MS=100"),
+                                settings=dict(old))
+        key = self.next_ui_run(
+            "online-settings",
+            open_editor + typed + ("PAD_DPAD_LEFT",) + ("PAD_DPAD_DOWN",) * 4 +
+            ("PAD_DPAD_RIGHT",) * 3 + ("PAD_SOUTH", "WAIT_MS=100"),
+            settings=dict(old))
+        for name, run in (("B", back), ("the Cancel key", key)):
+            states = self.nickname_states(run)
+            self.assertIn(("qw", "2 / 32 bytes"), states, f"{name}: the keys typed qw")
+            # Cancel saves nothing; a settings.json the run did write keeps the nickname too.
+            saved = run["settings"]
+            nickname = saved.get("nickname") if isinstance(saved, dict) else old["nickname"]
+            self.assertEqual(nickname, "Old name",
+                             f"{name}: Cancel keeps the nickname from before the editor opened")
+            self.assertEqual(self.focus_trail(run)[-1], self.SETTINGS_NICKNAME,
+                             f"{name}: focus returns to the row")
+        self.assertIn(self.NICKNAME_SKIP, self.focus_trail(key), "the Cancel key was pressed")
+
+    def test_next_ui_nickname_keyboard_stops_at_32_bytes(self) -> None:
+        """#2197: pressing a key past the 32-byte cap types nothing: 33 presses of q leave 32
+        bytes, the count reads 32 / 32 bytes, and Done saves those 32. Failing-before: the
+        editor had no keys."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100") + ("PAD_SOUTH",) * 33 +
+            ("WAIT_MS=100", "PAD_START", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        states = self.nickname_states(run)
+        self.assertEqual(states[-1], ("q" * 32, "32 / 32 bytes"), states[-3:])
+        self.assertTrue(all(len(text.encode("utf-8")) <= 32 for text, _ in states), states[-3:])
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "q" * 32)
+
+    def test_next_ui_nickname_keyboard_refuses_what_the_rule_refuses(self) -> None:
+        """#2197: what is typed goes through the keyboard's filter, nk_nickname_valid's rule:
+        a control character (C0, DEL) leaves the text and its count as they were, and what the
+        rule takes is still typed. Failing-before: the editor showed no count and kept no
+        filtered text the test could read."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100", "TEXT=Ab",
+             "WAIT_MS=50", "TEXT=\x01", "WAIT_MS=50", "TEXT=\x7f", "WAIT_MS=50", "TEXT=\x1b",
+             "WAIT_MS=50", "TEXT=c", "WAIT_MS=50", "KEY_RETURN", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        states = self.nickname_states(run)
+        self.assertEqual(states, [("", "0 / 32 bytes"), ("Ab", "2 / 32 bytes"),
+                                  ("Abc", "3 / 32 bytes")], states)
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("nickname"), "Abc")
 
     def bare_screenshot(self, view: str,
                         settings: dict[str, object] | None) -> tuple[bytes, object]:
@@ -2299,12 +2405,23 @@ class NativePlayerUiTests(unittest.TestCase):
         """#2197 review B1: a bare --screenshot --view run on a fresh data root captures the page
         it names, never the first-launch nickname prompt over it, and records no answer;
         --view=nickname-prompt is the one view that shows it. Failing-before: the prompt
-        opened over every such run, so a fresh root's frame differed from an answered one's."""
+        opened over every such run, so a fresh root's frame differed from an answered one's.
+
+        Review N1: whether the next UI runs here is the font-independent UI_NEXT_ACTIVE marker,
+        as the other next-UI tests read it, never the frames themselves. On hosted CI (the
+        Linux player UI job installs SDL3_ttf, and the repository ships open fonts) a missing
+        marker fails instead of skipping, and with the next UI running, a prompt view that
+        draws the same frame as the answered one is a failure."""
+        marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
+        if marker not in str(self.run_player("empty")["stdout"]):
+            if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"):
+                self.fail("the next UI did not start on this CI host (no UI_NEXT_ACTIVE "
+                          "marker), so the nickname prompt could not be checked")
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
         answered = {"nickname_asked": True}
         prompt_fresh, _ = self.bare_screenshot("nickname-prompt", None)
         prompt_answered, _ = self.bare_screenshot("nickname-prompt", answered)
-        if prompt_fresh == prompt_answered:
-            self.skipTest("the next UI could not draw the prompt here (no UI fonts)")
+        self.assertTrue(prompt_fresh != prompt_answered, "the prompt view drew no prompt")
         for view in ("settings", "library"):
             with self.subTest(view=view):
                 fresh, saved = self.bare_screenshot(view, None)

@@ -6,11 +6,12 @@
    columns. They draw with the setup wizard's ids (the WIZARD screen byte in
    nk_ui.h), so the panel keeps its id wherever it is used. The nickname editor
    that the first launch and Settings share (#2197) is a one-card flow page
-   with the FLOW screen's ids. */
+   with the FLOW screen's ids, and the on-screen keyboard (ui_keyboard.h). */
 
 #include "player_ui_nk.h"
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
+#include "ui_keyboard.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -154,26 +155,49 @@ bool scr_wizard_switch(NkUi *ui, NkUiId id, NkUiId text_id, const char *name,
     return scr_wizard_value(ui, id, text_id, name, on ? "On" : "Off", sentence, on, width, column);
 }
 
+bool player_ui_nickname_accepts(uint32_t codepoint, void *user) {
+    /* One character is a valid nickname exactly when the rule takes it anywhere in
+       one: nk_nickname_valid checks each character alone, then the length. */
+    char bytes[5];
+    (void)user;
+    return ui_keyboard_utf8(codepoint, bytes) > 0u && nk_nickname_valid(bytes);
+}
+
 /* The nickname editor (#2197): the box with what is typed (the nickname in use,
-   dimmed, while nothing is), why the last Save was refused, then Save and Skip
-   (first launch) or Cancel (Settings). Save holds focus first. A keyboard
-   types into the box (player_ui_nk.c); Back is Skip or Cancel. */
+   dimmed, while nothing is), how many of the 32 bytes it uses, why the last Done
+   was refused, then the on-screen keyboard with Done and Skip (first launch) or
+   Cancel (Settings). A physical keyboard also types into the box
+   (player_ui_nk.c); Back is Skip or Cancel. */
 PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *model) {
     static const NkUiPromptItem prompts_first[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
+        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Type"},
+        {NK_UI_PROMPT_ACT_OPTIONS, "Delete"}, {NK_UI_PROMPT_ACT_MENU, "Done"},
         {NK_UI_PROMPT_ACT_BACK, "Skip"}
     };
     static const NkUiPromptItem prompts_settings[] = {
-        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
+        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Type"},
+        {NK_UI_PROMPT_ACT_OPTIONS, "Delete"}, {NK_UI_PROMPT_ACT_MENU, "Done"},
         {NK_UI_PROMPT_ACT_BACK, "Cancel"}
     };
     const NkUiTheme *theme;
     PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
+    char scratch[NK_NICKNAME_MAX_BYTES + 1u];
+    UiKeyboard empty;
+    UiKeyboard *keyboard;
+    UiKeyboardView view;
     const char *typed;
     float inner;
     if (ui == NULL || model == NULL) return result;
+    keyboard = model->keyboard;
+    if (keyboard == NULL || keyboard->text == NULL) {
+        /* Nothing to type into: the keys show, and what they type is dropped. */
+        scratch[0] = '\0';
+        ui_keyboard_init(&empty, scratch, NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts,
+                         NULL);
+        keyboard = &empty;
+    }
     theme = nk_ui_theme(ui);
-    typed = safe_text(model->text, "");
+    typed = keyboard->text;
     inner = scr_flow_begin(ui, model->logical_width > 80.0f ? model->logical_width : 1280.0f,
                            model->logical_height > 80.0f ? model->logical_height : 800.0f,
                            640.0f);
@@ -219,34 +243,46 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
             nk_ui_end_container(ui);
         }
     }
+    {
+        /* The count, in the warning colour once the text is full. */
+        char count[32];
+        bool full = strlen(typed) >= keyboard->cap;
+        (void)ui_keyboard_count_text(keyboard, count, sizeof(count));
+        nk_ui_text_role(ui, FLOW_ID_NICKNAME_COUNT, count, NK_UI_TYPE_CAPTION,
+                        full ? theme->warning : theme->muted);
+    }
     if (model->refused) {
         nk_ui_text_role(ui, FLOW_ID_NICKNAME_NOTE,
                         "A nickname is 1 to 32 bytes of text (32 letters, fewer if they are "
                         "accented or Japanese), with no control characters.",
                         NK_UI_TYPE_BODY_S, theme->warning);
     }
-    {
-        NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
-                                     NK_UI_SPACE_3);
-        row.padding_top = NK_UI_SPACE_1;
-        if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
-            if (nk_ui_button(ui, PLAYER_UI_ID_NICKNAME_SAVE, "Save", NK_UI_BUTTON_PRIMARY)) {
-                result = action(PLAYER_UI_ACTION_NICKNAME, 0u,
-                                (PlayerUiPrimaryAction)PLAYER_UI_NICKNAME_SAVE);
-            }
-            if (nk_ui_button(ui, PLAYER_UI_ID_NICKNAME_SKIP,
-                             model->first_launch ? "Skip" : "Cancel", NK_UI_BUTTON_NOT_DEFAULT)) {
-                result = action(PLAYER_UI_ACTION_NICKNAME, 0u,
-                                (PlayerUiPrimaryAction)PLAYER_UI_NICKNAME_SKIP);
-            }
-            nk_ui_end_container(ui);
-        }
-    }
-    if (result.kind == PLAYER_UI_ACTION_NONE && nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {
+    memset(&view, 0, sizeof(view));
+    view.key_base = PLAYER_UI_ID_NICKNAME_KEY_BASE;
+    view.part_base = FLOW_ID_NICKNAME_KEYS;
+    view.done_id = PLAYER_UI_ID_NICKNAME_SAVE;
+    view.cancel_id = PLAYER_UI_ID_NICKNAME_SKIP;
+    view.done_label = "Done";
+    view.cancel_label = model->first_launch ? "Skip" : "Cancel";
+    switch (ui_keyboard_draw(ui, keyboard, &view)) {
+    case UI_KEYBOARD_DONE:
+        result = action(PLAYER_UI_ACTION_NICKNAME, 0u,
+                        (PlayerUiPrimaryAction)PLAYER_UI_NICKNAME_SAVE);
+        break;
+    case UI_KEYBOARD_CANCEL:
         result = action(PLAYER_UI_ACTION_NICKNAME, 0u,
                         (PlayerUiPrimaryAction)PLAYER_UI_NICKNAME_SKIP);
+        break;
+    case UI_KEYBOARD_EDITED:
+        result = action(PLAYER_UI_ACTION_NICKNAME, 0u,
+                        (PlayerUiPrimaryAction)PLAYER_UI_NICKNAME_EDITED);
+        break;
+    case UI_KEYBOARD_NONE:
+    default:
+        break;
     }
-    scr_flow_end(ui, "", model->first_launch ? prompts_first : prompts_settings, 3u);
+    scr_flow_end(ui, "", model->first_launch ? prompts_first : prompts_settings,
+                 sizeof(prompts_first) / sizeof(prompts_first[0]));
     return result;
 }
 
