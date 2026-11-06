@@ -608,23 +608,40 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
 
 ### 10.11. Full 32-Bit Colour (the Host Twin)
 
-The game's 16-bit render targets are presented in full 32-bit colour without dither (#2050), in the Vulkan GE renderer.
+The game's 16-bit render targets are presented in full 32-bit colour without dither (#2050), in both GE renderers.
 It is a presentation-only change (section 2.2): it changes only the image the host shows, never what the guest
 draws, reads or waits for. The code is the host twin in `src/rt/gpu_sdl3vk/ge_gpu.c` (its header and the comment
-at `s_twin`).
+at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_twin_mode`) for the software renderer.
 
 - **How.** Every render target and depth buffer gets a host-only twin at the user's render scale. Every write to the
   authentic image reaches its twin, in order: each render op is drawn a second time into the twin without dither or
   the 16-bit colour snap, and uploads, CPU-write patches, depth uploads, block transfers and destination snapshots
   are repeated on it. Twin passes sample twins, so a render-to-texture chain stays full colour. The presenter shows
   a twin only while it holds every write its image took; otherwise it shows the authentic image and re-seeds the twin.
+- **The software renderer.** The same switch turns on a twin in `ge.c`, decided on the renderer's first colour write
+  and inert while the Vulkan renderer draws. It keeps one host slot per 2-byte unit of the 2 MiB of VRAM (an 8888
+  pixel uses the slot of its first unit; 9 MiB of host memory): the twin's 8-bit colour, and a witness, the exact
+  value the authentic write left in VRAM. Each colour write is computed a second time from the same source colour,
+  with the same blend and logic op but no dither and no 16-bit colour snap, against the twin's colour where the slot
+  is valid and against the authentic pixel where it is not. A slot is valid only while VRAM still holds its witness
+  in the same format, so a write the twin does not take (a CPU store, DMA, the fast clear path) shows, and is
+  blended against, its authentic value from that pixel on. The twin's alpha is the alpha the authentic write left
+  (the stencil, in the target's format, as the Vulkan twin snaps it); a stencil-only write updates it, and a write
+  mask over colour bits leaves the pixel authentic. Block transfers within VRAM copy the slots with the bytes. The
+  CPU presenter shows the slots (`ge_twin_present_row`), each pixel without a valid slot as it converts it today.
+  `gpu-coherence-selftest` twin-soft checks it on twin-scene's list: guest VRAM equals the twin-off run byte for
+  byte, the shown gradients are smooth, and T1 and T3 are within one step per colour channel of the Vulkan twin.
+- **Render-to-texture in the software renderer.** Its texture fetches read guest VRAM, so a target drawn from a
+  render target's texture takes that texture's 16-bit texels into its twin: twin-scene's T2 shows T1's dithered
+  5551 texels in the software renderer, and T1's full colour twin in the Vulkan renderer. Its own blends and its
+  presentation are still full colour.
 - **Guest memory.** The authentic chain keeps the user's render scale, and nothing reads a twin back. Guest VRAM,
   every readback, every block transfer into RAM and the frame each present commits to guest VRAM are the twin-off
   run's at the same scale, byte for byte (`gpu-coherence-selftest` twin-scene, at scales 1, 2 and 4). Present-source
   captures follow the shown image, so they hold the twin's picture; `SR_GPU_TWIN_CAPTURE=authentic` shows and
   captures the authentic image instead.
 - **What the guest can observe (section 11.1).** Each of the four items is unchanged:
-  - VRAM bytes and other guest memory: unchanged, byte for byte (twin-scene, above).
+  - VRAM bytes and other guest memory: unchanged, byte for byte (twin-scene and twin-soft, above).
   - Readbacks: unchanged. GE and display readbacks, block transfers into RAM and the committed frame read the
     authentic image, as with the twin off (twin-scene).
   - Timing the guest can measure: unchanged. The guest timing model (VBLANK schedule, GE timing, media clocks) does
@@ -639,19 +656,24 @@ at `s_twin`).
   player writes it from the part "Full 32-bit colour" (`"twin"`, `on` or `off`) on the library's Settings > Enhanced
   page and on each title's own page (sections 10.5 and 10.9); it is off unless the player turns it on.
   `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity self-tests
-  use), read when the renderer starts, stays as the developer override and wins whenever it is set: unset or empty
-  leaves the choice to the launch line, `0` and `off` are off, and any other value prints `TWIN: refused (...)` and
-  leaves it off. The twin takes effect only in Ace Mode: in an authentic run it stays off whatever the environment
-  says, and a request prints one `TWIN: off (the host twin needs Ace Mode)` line. When the key asked for it and it
-  does not come up (the `TWIN: unavailable` and `TWIN: off for the rest of the run` cases below), the run names
-  `twin` unavailable on stderr and in the report; a twin that ran is confirmed, so a run where the renderer never
-  started it is reported as not run (section 10.4).
+  use), read when the renderer starts (the software renderer: at its first colour write), stays as the developer
+  override and wins whenever it is set: unset or empty leaves the choice to the launch line, `0` and `off` are off,
+  and any other value prints `TWIN: refused (...)` and leaves it off. The twin takes effect only in Ace Mode: in an
+  authentic run it stays off whatever the environment says, and a request prints one `TWIN: off (the host twin
+  needs Ace Mode)` line. When the key asked for it and it does not come up (the `TWIN: unavailable` and `TWIN: off
+  for the rest of the run` cases below), the run names `twin` unavailable on stderr and in the report; a twin that
+  ran is confirmed, so a run where the renderer never started it is reported as not run (section 10.4).
 - **Cost.** Each render op is drawn twice at the render scale, and the twins use as much GPU memory as the targets.
+  In the software renderer each colour write is computed twice, and the slots take 9 MiB of host memory.
 - **Fail-closed.** A GPU without nearest blits of RGBA8 and D16 prints `TWIN: unavailable (...)` and runs without it.
   If any twin allocation fails during the run, one `TWIN: off for the rest of the run (...)` line is printed, every
-  twin is freed, and the run continues exactly as a twin-off run at the user's scale (`twin-alloc-fail`).
+  twin is freed, and the run continues exactly as a twin-off run at the user's scale (`twin-alloc-fail`). A software
+  renderer that cannot allocate its slots prints `TWIN: unavailable (the software renderer could not allocate its
+  twin)` and runs without it.
 - **Stamps.** `TWIN: on (colour=full|native, scale=<n>x)` at start, and `TWIN: exit (ops=, copies=, reseeds=,
-  authentic_presents=, alloc_failures=)` at exit. Section 10.4 applies: the run is an Ace run, refused as evidence.
+  authentic_presents=, alloc_failures=)` at exit; the software renderer's are `TWIN: on (software renderer,
+  colour=full|native)` and `TWIN: exit (software renderer, pixels=, units_copied=)`. Section 10.4 applies: the run
+  is an Ace run, refused as evidence.
 
 ## 11. Guest-Visible Items
 

@@ -105,8 +105,8 @@
  *    and the twin records the count it mirrors (tgen). A twin that is behind is re-seeded
  *    from the authentic image before its next pass, and the presenter shows the authentic
  *    image until it is. Nothing reads a twin back, so nothing the guest reads changes
- *    (gpu-coherence-selftest twin-*). The software backend has no twin and shows the
- *    authentic image. Off (the default), no twin is made and every path is the one above.
+ *    (gpu-coherence-selftest twin-*). The software renderer has a twin of its own (ge.c,
+ *    s_twin_mode). Off (the default), no twin is made and every path is the one above.
  */
 #include "ge_gpu.h"
 #include "sdl3vk.h"

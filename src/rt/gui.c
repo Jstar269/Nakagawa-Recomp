@@ -923,6 +923,16 @@ uint32_t gui_pad_pulses_take(void) {
  * offscreen sink converts too, so this is not behind a presenter #if. */
 static void convert_fb_pixels(uint32_t fbaddr, int fmt, uint32_t stride) {
     for (int y = 0; y < PSP_H; y++) {
+        /* Enhanced 32-bit colour (#2050): the software renderer's host twin gives the row when
+         * it is on (RGBA8); off, and always under the Vulkan renderer, it returns 0. */
+        uint32_t *row = s_px + y * PSP_W;
+        if (ge_twin_present_row(fbaddr, fmt, stride, y, row, PSP_W)) {
+            for (int x = 0; x < PSP_W; x++) {
+                const uint32_t c = row[x];
+                row[x] = ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu);
+            }
+            continue;
+        }
         for (int x = 0; x < PSP_W; x++) {
             uint32_t i = (uint32_t)(y * (int)stride + x);
             int rr, gg, bb;

@@ -7161,6 +7161,209 @@ static int coherence_run_twin_sync(void) {
     return ok;
 }
 
+/* twin-soft (`--twin 1` or `--twin native`, scale 1): the software renderer's host twin (ge.c,
+ * ge_twin_*, #2050) on twin-scene's list with no GPU hooks, run with the twin off, then on in the
+ * run's colour (ge_twin_set_mode), then off again. Checks:
+ *   - guest VRAM of T1, T2 and T3 with the twin on equals the twin-off runs byte for byte, and with
+ *     the twin off ge_twin_present_row shows nothing (the CPU presenter converts VRAM as before);
+ *   - full colour: T1's shown rows are smooth (every row rises and takes far more than the 5551
+ *     lattice's 32 red levels; the blended half too), T3's shown rows 0..135 are T1's (the block
+ *     transfer copied the slots), and T1 and T3 agree with the Vulkan twin's shown images
+ *     (twin-scene's run) within one step per colour channel (wide_near). The presenters show red,
+ *     green and blue, so alpha is not compared. T2 shows T1's 16-bit texels, on the 5551 lattice:
+ *     software texture fetches read VRAM (the render-to-texture difference of contract 10.11);
+ *   - native colour: every shown row equals the CPU presenter's conversion of guest VRAM;
+ *   - witness: a CPU store into a twinned pixel of T1 makes that pixel show its authentic value,
+ *     while the pixel beside it keeps the twin's colour. */
+typedef struct { uint8_t *vram[3]; uint32_t *shown[3]; int presented; } TwinSoftRun;
+
+static void twin_soft_free(TwinSoftRun *r) {
+    for (int i = 0; i < 3; i++) { free(r->vram[i]); free(r->shown[i]); }
+    memset(r, 0, sizeof(*r));
+}
+
+/* The presenter's view of a raw pixel (gui.c convert_fb_pixels), red in the low byte, no alpha. */
+static uint32_t twin_soft_cpu_shown(uint32_t p, uint32_t fmt) {
+    uint32_t r, g, b;
+    if (fmt == 3u) { r = p & 0xFFu; g = (p >> 8) & 0xFFu; b = (p >> 16) & 0xFFu; }
+    else if (fmt == 1u) { r = (p & 0x1Fu) << 3; g = ((p >> 5) & 0x1Fu) << 3; b = ((p >> 10) & 0x1Fu) << 3; }
+    else if (fmt == 2u) { r = (p & 0xFu) << 4; g = ((p >> 4) & 0xFu) << 4; b = ((p >> 8) & 0xFu) << 4; }
+    else { r = (p & 0x1Fu) << 3; g = ((p >> 5) & 0x3Fu) << 2; b = ((p >> 11) & 0x1Fu) << 3; }
+    return r | (g << 8) | (b << 16);
+}
+
+static int twin_soft_run(TwinSoftRun *r) {
+    coherence_reset_targets();
+    coherence_reset_depths();
+    for (int i = 0; i < 3; i++)
+        memset(SR_HOST(0x04000000u | k_twin_fba[i]), 0, 512u * FB_H * (k_twin_fmt[i] == 3u ? 4u : 2u));
+    ge_set_gpu_hooks(NULL);
+    int ok = ge_run_list(twin_list(), 0) == 0;
+    r->presented = 0;
+    for (int i = 0; ok && i < 3; i++) {
+        const uint32_t bytes = 512u * FB_H * (k_twin_fmt[i] == 3u ? 4u : 2u);
+        r->vram[i] = (uint8_t *)malloc(bytes);
+        r->shown[i] = (uint32_t *)calloc((size_t)FB_W * FB_H, 4u);
+        if (!r->vram[i] || !r->shown[i]) { ok = 0; break; }
+        memcpy(r->vram[i], SR_HOST(0x04000000u | k_twin_fba[i]), bytes);
+        for (uint32_t y = 0; y < FB_H; y++)
+            r->presented += ge_twin_present_row(0x04000000u | k_twin_fba[i], (int)k_twin_fmt[i], 512u, (int)y,
+                                                r->shown[i] + (size_t)y * FB_W, DRAW_W);
+    }
+    ge_set_gpu_hooks(&k_hooks);
+    return ok;
+}
+
+static int coherence_run_twin_soft(void) {
+    const char *name = "twin-soft";
+    if (!s_twin || s_scale != 1) {
+        fprintf(stderr, "gpu coherence selftest [%s]: needs --twin 1 or --twin native at scale 1\n", name);
+        return 0;
+    }
+    const int mode = s_twin_color ? 1 : 2;
+    int ok = 1;
+    /* the Vulkan twin's shown images of the same list (full colour only) */
+    TwinRun vk = {0};
+    if (mode == 1 && !twin_run_scene(&vk)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the Vulkan twin-scene run did not run\n", name);
+        ok = 0;
+    }
+    TwinSoftRun off = {0}, on = {0}, off2 = {0};
+    if (ok && ge_twin_set_mode(0) != 0) ok = 0;
+    if (ok && !twin_soft_run(&off)) ok = 0;
+    if (ok && ge_twin_set_mode(mode) != mode) {
+        fprintf(stderr, "gpu coherence selftest [%s]: the software twin could not be turned on\n", name);
+        ok = 0;
+    }
+    if (ok && !twin_soft_run(&on)) ok = 0;
+    if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: a software run did not run\n", name);
+    if (ok && (off.presented != 0 || on.presented != 3 * FB_H)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL rows shown from the twin: %d with it off (want 0), "
+                "%d with it on (want %d)\n", name, off.presented, on.presented, 3 * FB_H);
+        ok = 0;
+    }
+    for (int i = 0; ok && i < 3; i++) {
+        if (memcmp(off.vram[i], on.vram[i], 512u * FB_H * (k_twin_fmt[i] == 3u ? 4u : 2u)) != 0) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL guest VRAM of target %d differs from the "
+                    "twin-off software run\n", name, i + 1);
+            ok = 0;
+        }
+    }
+    int distinct = 0, odistinct = 0, worst = 0;
+    if (ok && mode == 1) {
+        int mono, lattice, omono, olattice;
+        twin_gradient_stats(on.shown[0], 1, 0, 136, &mono, &distinct, &lattice);
+        if (!mono || lattice || distinct < 160) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the software twin's gradient is not full colour "
+                    "(monotonic=%d lattice=%d red levels=%d)\n", name, mono, lattice, distinct);
+            ok = 0;
+        }
+        twin_gradient_stats(on.shown[0], 1, 136, FB_H, &omono, &odistinct, &olattice);
+        if (!omono || olattice || odistinct < 120) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the software twin's blended gradient is not full "
+                    "colour (monotonic=%d lattice=%d red levels=%d)\n", name, omono, olattice, odistinct);
+            ok = 0;
+        }
+        if (!twin_rows_equal(on.shown[2], on.shown[0], 1, 0, 136)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL T3's shown rows are not T1's (the block transfer "
+                    "did not copy the twin)\n", name);
+            ok = 0;
+        }
+        int smono, sdistinct, slattice;
+        twin_gradient_stats(on.shown[1], 1, 0, 136, &smono, &sdistinct, &slattice);
+        if (!slattice) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL T2 is off the 5551 lattice (red levels=%d): the "
+                    "software texture fetch no longer reads T1's 16-bit texels; update contract 10.11\n",
+                    name, sdistinct);
+            ok = 0;
+        }
+        for (int k = 0; k < 2; k++) {
+            const int i = k ? 2 : 0;
+            size_t far = 0, fx = 0, fy = 0;
+            for (uint32_t y = 0; y < FB_H; y++)
+                for (uint32_t x = 0; x < DRAW_W; x++) {
+                    const uint32_t a = on.shown[i][(size_t)y * FB_W + x] & 0x00FFFFFFu;
+                    const uint32_t b = vk.shown[i][(size_t)y * FB_W + x] & 0x00FFFFFFu;
+                    for (int sh = 0; sh < 24; sh += 8) {
+                        const int d = abs((int)((a >> sh) & 0xFFu) - (int)((b >> sh) & 0xFFu));
+                        if (d > worst) worst = d;
+                    }
+                    if (!wide_near(a, b) && far++ == 0) { fx = x; fy = y; }
+                }
+            if (far) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL T%d's software twin differs from the Vulkan "
+                        "twin by more than one step in %zu pixels, first (%zu,%zu): software 0x%06x, Vulkan "
+                        "0x%06x\n", name, i + 1, far, fx, fy,
+                        on.shown[i][fy * FB_W + fx] & 0x00FFFFFFu, vk.shown[i][fy * FB_W + fx] & 0x00FFFFFFu);
+                ok = 0;
+            }
+        }
+    }
+    if (ok && mode == 2) {
+        for (int i = 0; ok && i < 3; i++) {
+            for (uint32_t y = 0; ok && y < FB_H; y++)
+                for (uint32_t x = 0; x < DRAW_W; x++) {
+                    uint32_t p;
+                    if (k_twin_fmt[i] == 3u) memcpy(&p, on.vram[i] + ((size_t)y * 512u + x) * 4u, 4u);
+                    else { uint16_t h; memcpy(&h, on.vram[i] + ((size_t)y * 512u + x) * 2u, 2u); p = h; }
+                    if ((on.shown[i][(size_t)y * FB_W + x] & 0x00FFFFFFu) != twin_soft_cpu_shown(p, k_twin_fmt[i])) {
+                        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the native software twin of target %d "
+                                "differs from the CPU presenter's image at (%u,%u)\n", name, i + 1, x, y);
+                        ok = 0;
+                        break;
+                    }
+                }
+        }
+    }
+    /* witness: a CPU store the twin does not take, into a pixel it holds */
+    if (ok) {
+        const uint32_t px = 100u, py = 40u, addr = 0x04000000u | (TWIN_T1 + (py * 512u + px) * 2u);
+        uint32_t before[DRAW_W], after[DRAW_W];
+        ge_set_gpu_hooks(NULL);
+        const int b_ok = ge_twin_present_row(0x04000000u | TWIN_T1, 1, 512u, (int)py, before, DRAW_W);
+        const uint16_t raw = sr_r16(addr), stored = (uint16_t)(raw ^ 0x0015u);
+        sr_w16(addr, stored);
+        const int a_ok = ge_twin_present_row(0x04000000u | TWIN_T1, 1, 512u, (int)py, after, DRAW_W);
+        ge_set_gpu_hooks(&k_hooks);
+        const uint32_t want = twin_soft_cpu_shown(stored, 1u);
+        if (!b_ok || !a_ok || (after[px] & 0x00FFFFFFu) != want ||
+            (after[px + 1] & 0x00FFFFFFu) != (before[px + 1] & 0x00FFFFFFu)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL witness: after a CPU store of 0x%04x at (%u,%u) the "
+                    "pixel shows 0x%06x (want its authentic 0x%06x; before the store 0x%06x), its neighbour "
+                    "0x%06x (before 0x%06x)\n", name, stored, px, py, after[px] & 0x00FFFFFFu, want,
+                    before[px] & 0x00FFFFFFu, after[px + 1] & 0x00FFFFFFu, before[px + 1] & 0x00FFFFFFu);
+            ok = 0;
+        }
+    }
+    /* off again: nothing is shown from the twin, and VRAM is the twin-off run's */
+    if (ok && (ge_twin_set_mode(0) != 0 || !twin_soft_run(&off2) || off2.presented != 0)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL with the twin turned off again, %d rows were shown "
+                "from it\n", name, off2.presented);
+        ok = 0;
+    }
+    for (int i = 0; ok && i < 3; i++)
+        if (memcmp(off.vram[i], off2.vram[i], 512u * FB_H * (k_twin_fmt[i] == 3u ? 4u : 2u)) != 0) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL guest VRAM of target %d changed between the "
+                    "twin-off runs\n", name, i + 1);
+            ok = 0;
+        }
+    if (ok && mode == 1)
+        printf("gpu coherence selftest: PASS %s software twin colour full: guest VRAM equals the twin-off run; "
+               "shown gradient %d red levels, blended %d; T3 holds T1's twin rows; T1 and T3 within %d of the "
+               "Vulkan twin per channel (bound 1); T2 shows T1's 16-bit texels; a CPU store shows the "
+               "authentic pixel; off shows nothing from the twin\n", name, distinct, odistinct, worst);
+    if (ok && mode == 2)
+        printf("gpu coherence selftest: PASS %s software twin colour native: guest VRAM equals the twin-off run; "
+               "the shown images equal the CPU presenter's; a CPU store shows the authentic pixel; off shows "
+               "nothing from the twin\n", name);
+    ge_twin_set_mode(-1);
+    twin_soft_free(&off); twin_soft_free(&on); twin_soft_free(&off2);
+    twin_run_free(&vk);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    return ok;
+}
+
 static int coherence_selftest_cases(void) {
     /* SR_GPU_COHERENCE_CASE=scaled-upload (the harness's --case) runs that case alone, as the
      * recipe does at render scales 2 and 4: the other fixtures expect 1x pixels (a filtered sample
@@ -7187,6 +7390,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "twin-gate") == 0) return coherence_run_twin_gate();
         if (strcmp(only, "twin-alloc-fail") == 0) return coherence_run_twin_alloc_fail();
         if (strcmp(only, "twin-drain-fail") == 0) return coherence_run_twin_drain_fail();
+        if (strcmp(only, "twin-soft") == 0) return coherence_run_twin_soft();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
     }
