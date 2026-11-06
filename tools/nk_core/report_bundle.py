@@ -531,7 +531,14 @@ def build_plan(inputs: ReportInputs, identity: Identity, project_root: Path,
             scrubbed = json.dumps(_scrub_json(json.loads(entry.data.decode("utf-8"))), indent=2, sort_keys=True)
             entry = BundleEntry(entry.arcname, (scrubbed + "\n").encode("utf-8"), entry.note)
         except ValueError:
-            pass  # not valid JSON: it stays as redacted text, which is how it reads for a person
+            # Not valid JSON, so its keys cannot be found to redact: it could carry the nickname
+            # (#2197) or a token as plain text. It is left out, and a note in its place says why.
+            reason = "is not valid JSON, so it was left out: it could hold the nickname or a token"
+            plan.skipped.append((entry.arcname, reason))
+            note = (f"{path.name} {reason}, which the report removes only from a file it can read "
+                    "as JSON.\n")
+            plan.entries.append(BundleEntry(f"{entry.arcname}.left-out.txt", note.encode("utf-8")))
+            continue
         plan.entries.append(entry)
 
     recorder = inputs.flight_recorder

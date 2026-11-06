@@ -285,6 +285,25 @@ class BundleTests(unittest.TestCase):
         self.assertIn("logs/game-TEST00002-last.txt", names)
         self.assertEqual(plan.archive_name, "20261102T123044Z-launcher.zip")
 
+    def test_settings_that_are_not_json_are_left_out(self) -> None:
+        # A settings file that does not parse cannot have its keys redacted, so neither the
+        # nickname (#2197) nor a token may ride along as plain text: a note stands in for it.
+        (self.fx.config / "settings.json").write_text(
+            '{"nickname": "Synthetic Nickname 7", "update_token": "SECRET-TOKEN-VALUE", "volume": 7,',
+            encoding="utf-8")
+        plan = build(self.fx.inputs())
+        reason = "is not valid JSON, so it was left out: it could hold the nickname or a token"
+        self.assertIn(("settings/settings.json", reason), plan.skipped)
+        with self.written(plan) as archive:
+            names = set(archive.namelist())
+            self.assertNotIn("settings/settings.json", names)
+            self.assertIn("settings/settings.json.left-out.txt", names)
+            self.assertIn(b"left out", archive.read("settings/settings.json.left-out.txt"))
+            for info in archive.infolist():
+                data = archive.read(info).lower()
+                self.assertNotIn(b"synthetic nickname 7", data, info.filename)
+                self.assertNotIn(b"secret-token-value", data, info.filename)
+
     def test_a_binary_renamed_to_a_log_is_skipped(self) -> None:
         (self.fx.logs / "game-TEST00001-prev.txt").write_bytes(b"~PSP\x00\x00" + bytes(range(256)))
         plan = build(self.fx.inputs())
