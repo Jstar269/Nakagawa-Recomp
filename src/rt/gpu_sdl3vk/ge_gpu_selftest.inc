@@ -6360,7 +6360,12 @@ static int coherence_run_depth_evict_overlap(void) {
  *
  * twin-sync (`--twin native`, scale 1): a write the twin does not take (wgen bumped by hand) makes
  * the next present show the authentic image and re-seed the twin once; the present after it
- * shows the twin again, equal to the image. */
+ * shows the twin again, equal to the image. Two sub-cells then run a GPU block transfer from T1 to
+ * T3 with T3's twin behind (a mirrored write must not bring it in step: twin_note_write's `in_step`)
+ * and with T1's twin behind (the twins must not repeat the copy: hook_xfer's `src->tgen == src->wgen`).
+ *
+ * twin-drain-fail: as twin-alloc-fail with the drain of twin_off_for_run failing too
+ * (s_twin_inject_drain_fail): the twin goes off and nothing is freed. */
 
 #define TWIN_T1 0x00100000u                /* 5551, 512 x 272 x 2 bytes */
 #define TWIN_T2 0x00150000u                /* 8888 */
@@ -6936,6 +6941,173 @@ static int coherence_run_twin_alloc_fail(void) {
     return ok;
 }
 
+/* twin-drain-fail (`--twin 1|native`, a twin-off reference at the same scale): as twin-alloc-fail,
+ * but twin_off_for_run's drain also fails (s_twin_inject_drain_fail: the device may be lost, work
+ * in flight). Then the twin must go off for the run and be shown nowhere, record no further twin
+ * pass, and free NOTHING at that point (the twin pool, the twin snapshot and every twin already made
+ * stay for gegpu_shutdown, which waits for the device first), and the scene must still equal the
+ * twin-off run exactly. The cell frees the leftovers itself between steps, as shutdown would. */
+static int coherence_run_twin_drain_fail(void) {
+    const char *name = "twin-drain-fail";
+    if (s_twin_unavailable) {
+        printf("gpu coherence selftest: SKIP %s: this device refused the twin\n", name);
+        return 1;
+    }
+    TwinRef ref;
+    const char *ref_path = getenv("SR_GPU_TWIN_REF");
+    if (!s_twin || !ref_path || !twin_ref_read(ref_path, &ref) || ref.scale != s_scale) {
+        fprintf(stderr, "gpu coherence selftest [%s]: needs --twin 1|native and a twin-off reference at "
+                "scale %d\n", name, s_scale);
+        return 0;
+    }
+    const int color = s_twin_color;
+    int ok = 1;
+    for (int n = 1; ok && n <= 5; n++) {
+        coherence_reset_targets();
+        coherence_reset_depths();
+        if (!s_twin) {
+            twin_release();                     /* what shutdown does for the previous step's leftovers */
+            if (!twin_init(color)) {
+                fprintf(stderr, "gpu coherence selftest [%s]: the twin could not be made again\n", name);
+                return 0;
+            }
+        }
+        const unsigned long fail0 = s_cnt_twin_alloc_fail;
+        s_twin_inject_fail = n;
+        s_twin_inject_drain_fail = 1;
+        TwinRun run = {0};
+        int ran = twin_run_scene(&run);
+        const int reached = s_twin_inject_fail == 0;
+        s_twin_inject_fail = 0;
+        s_twin_inject_drain_fail = 0;
+        if (!ran || !reached) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: %s\n", name, n,
+                    !ran ? "the scene did not run" : "the scene never made that many twin allocations");
+            ok = 0;
+        } else if (s_twin || s_twin_color || s_cnt_twin_alloc_fail != fail0 + 1) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: twin %s, failures counted %lu (want "
+                    "off, 1)\n", name, n, s_twin ? "still on" : "off", s_cnt_twin_alloc_fail - fail0);
+            ok = 0;
+        } else {
+            /* nothing freed: the pool and the snapshot, and (after the first allocation) T1's twin */
+            Target *t1 = target_find_by_fba(TWIN_T1);
+            if (s_dpool_twin == VK_NULL_HANDLE || s_tsnapimg == VK_NULL_HANDLE ||
+                (n >= 2 && (!t1 || t1->timg == VK_NULL_HANDLE))) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: the twins were freed after a "
+                        "failed drain (pool %s, snapshot %s, T1's twin %s): the GPU may still be using "
+                        "them\n", name, n, s_dpool_twin ? "kept" : "freed", s_tsnapimg ? "kept" : "freed",
+                        t1 && t1->timg ? "kept" : "freed");
+                ok = 0;
+            }
+            for (int i = 0; i < 3; i++) {
+                Target *t = target_find_by_fba(k_twin_fba[i]);
+                if (t && t->tshow) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: target %d still shows a twin\n",
+                            name, n, i + 1);
+                    ok = 0;
+                }
+                if (run.shown_scale[i] != s_scale || run.ref.vram[i] != ref.vram[i] ||
+                    run.ref.shown[i] != ref.shown[i]) {
+                    fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: target %d (shown at %dx) differs "
+                            "from the twin-off run at %dx (%s)\n", name, n, i + 1, run.shown_scale[i], s_scale,
+                            run.ref.vram[i] != ref.vram[i] ? "guest VRAM" : "the shown image");
+                    ok = 0;
+                }
+            }
+            /* the scene again, over the targets that kept their twins: no twin pass, no twin copy */
+            const unsigned long ops0 = s_cnt_twin_ops, copies0 = s_cnt_twin_copies;
+            if (ok && (ge_run_list(twin_list(), 0) != 0 || (s_nbatch && !submit_pending()))) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: the scene did not run again\n",
+                        name, n);
+                ok = 0;
+            } else if (ok && (s_cnt_twin_ops != ops0 || s_cnt_twin_copies != copies0)) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL step %d: twin passes +%lu, twin copies +%lu "
+                        "after the twin went off (want 0, 0)\n", name, n, s_cnt_twin_ops - ops0,
+                        s_cnt_twin_copies - copies0);
+                ok = 0;
+            }
+        }
+        twin_run_free(&run);
+    }
+    coherence_reset_targets();
+    coherence_reset_depths();
+    twin_release();                             /* the leftovers of the last step */
+    if (ok)
+        printf("gpu coherence selftest: PASS %s 5 steps colour %s scale=%d: the twin went off, nothing was "
+               "freed, no twin pass ran after it and the scene equals the twin-off run\n", name,
+               color ? "full" : "native", s_scale);
+    return ok;
+}
+
+/* twin-sync's block-transfer sub-cells: a transfer from T1 to T3 (a one-command list through ge.c
+ * and hook_xfer) while one of the two twins is behind its image (wgen bumped by hand). Both leave
+ * the destination's twin behind, so the next present re-seeds it:
+ *   dst_behind = 1: the source is in step, so the twins repeat the copy (twin_copy), but a copy
+ *     over a twin that was already behind does not bring it in step (the `in_step` guard of
+ *     twin_note_write): rows the copy does not cover are still missing from it.
+ *   dst_behind = 0: the source's twin is behind, so the copy must NOT be repeated on the twins
+ *     (hook_xfer's `src->tgen == src->wgen`): it would copy stale rows, and the destination's twin,
+ *     which was in step, would then be marked in step. */
+static int coherence_twin_sync_xfer(const char *name, int dst_behind) {
+    const char *what = dst_behind ? "a transfer over a twin behind its image"
+                                  : "a transfer from a twin behind its image";
+    TwinRun run = {0};
+    int ok = twin_run_scene(&run);
+    twin_run_free(&run);
+    Target *t1 = ok ? target_find_by_fba(TWIN_T1) : NULL, *t3 = ok ? target_find_by_fba(TWIN_T3) : NULL;
+    if (!t1 || !t3 || !t1->timg || !t3->timg || t1->tgen != t1->wgen || t3->tgen != t3->wgen) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: no twins in step to start from\n", name, what);
+        return 0;
+    }
+    Target *lag = dst_behind ? t3 : t1;
+    lag->wgen++;                                /* a write the twin did not take */
+    s_twin_lag_cause = "twin-sync's simulated write";
+    uint32_t *dl = (uint32_t *)SR_HOST(TWIN_LIST);
+    int p = 0;
+    #define TWIN_XF(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    TWIN_XF(0xB2, TWIN_T1); TWIN_XF(0xB3, 512u | (0x04u << 16));
+    TWIN_XF(0xB4, TWIN_T3); TWIN_XF(0xB5, 512u | (0x04u << 16));
+    TWIN_XF(0xEB, 0); TWIN_XF(0xEC, 0);
+    TWIN_XF(0xEE, 479u | (135u << 10));        /* 480 x 136 */
+    TWIN_XF(0xEA, 0);                           /* 16-bit */
+    TWIN_XF(0x0F, 0); TWIN_XF(0x0C, 0);
+    #undef TWIN_XF
+    const unsigned long xfer0 = s_cnt_xferblit, copies0 = s_cnt_twin_copies;
+    ge_set_gpu_hooks(&k_hooks);
+    if (ge_run_list(TWIN_LIST, 0) != 0 || (s_nbatch && !submit_pending())) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the transfer list did not run\n", name, what);
+        ok = 0;
+    } else if (s_cnt_xferblit != xfer0 + 1) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: hook_xfer did not take the transfer\n", name, what);
+        ok = 0;
+    } else if (s_cnt_twin_copies != copies0 + (dst_behind ? 1u : 0u)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the twins repeated the copy %lu times (want %u)\n",
+                name, what, s_cnt_twin_copies - copies0, dst_behind ? 1u : 0u);
+        ok = 0;
+    } else if (t3->tgen == t3->wgen) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the destination's twin is marked in step "
+                "(%s)\n", name, what, dst_behind ? "the in_step guard of twin_note_write: a write that did "
+                "not cover a twin behind its image brought it in step" :
+                "hook_xfer's src->tgen == src->wgen: the copy was repeated from a twin behind its image");
+        ok = 0;
+    }
+    /* a present re-seeds each twin that is behind and shows the authentic image; then all is in step */
+    for (int i = 0; ok && i < 2; i++) {
+        Target *t = i ? t1 : t3;
+        if (t->tgen == t->wgen) continue;
+        if (!target_prepare_present(t) || t->tshow || t->tgen != t->wgen) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL %s: the present did not re-seed the twin of "
+                    "target 0x%06x\n", name, what, t->fba);
+            ok = 0;
+        }
+        t->tshow = 0;
+    }
+    if (!ok) {                                  /* keep the identity check of the next reset quiet */
+        t1->tgen = t1->wgen; t3->tgen = t3->wgen;
+    }
+    return ok;
+}
+
 /* Fail-closed sync: see the section comment. */
 static int coherence_run_twin_sync(void) {
     const char *name = "twin-sync";
@@ -6970,6 +7142,10 @@ static int coherence_run_twin_sync(void) {
         twin_identity_check(name);
         if (s_twin_identity_failures != failures0) ok = 0;
     }
+    /* the block-transfer sub-cells: the `in_step` guard of twin_note_write and hook_xfer's
+     * `src->tgen == src->wgen` (each alone is pinned here; see coherence_twin_sync_xfer) */
+    if (ok && !coherence_twin_sync_xfer(name, 1)) ok = 0;
+    if (ok && !coherence_twin_sync_xfer(name, 0)) ok = 0;
     if (s_nbatch) (void)submit_pending();
     (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
     readback_poll();
@@ -6978,7 +7154,8 @@ static int coherence_run_twin_sync(void) {
     /* this case's re-seed is expected: take it out of the suite's no-re-seed count */
     s_cnt_twin_reseed = reseed0;
     if (ok) printf("gpu coherence selftest: PASS %s a twin behind its image showed the authentic image, "
-                   "was re-seeded once, then shown again\n", name);
+                   "was re-seeded once, then shown again; a block transfer over or from a twin behind "
+                   "its image left the destination's twin behind\n", name);
     coherence_reset_targets();
     coherence_reset_depths();
     return ok;
@@ -7009,6 +7186,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "twin-sync") == 0) return coherence_run_twin_sync();
         if (strcmp(only, "twin-gate") == 0) return coherence_run_twin_gate();
         if (strcmp(only, "twin-alloc-fail") == 0) return coherence_run_twin_alloc_fail();
+        if (strcmp(only, "twin-drain-fail") == 0) return coherence_run_twin_drain_fail();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
     }

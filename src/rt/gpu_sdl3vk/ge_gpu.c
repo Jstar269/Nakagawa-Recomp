@@ -631,6 +631,7 @@ static int s_twin_unavailable = 0;         /* asked for and allowed, but this GP
 static int s_twin_from_key = 0;            /* the request is the launch line's twin=on, not SR_GPU_TWIN_COLOR */
 #ifdef SR_GPU_COHERENCE_SELFTEST
 static int s_twin_inject_fail = 0;         /* the selftest: fail the Nth twin allocation from now */
+static int s_twin_inject_drain_fail = 0;   /* the selftest: twin_off_for_run's drain reports a failure */
 #endif
 
 /* SR_GPU_TWIN_COLOR: unset, empty, "0" or "off" is 0 (off); "1" is 1 (full colour); "native" is 2
@@ -2823,7 +2824,11 @@ static void twin_off_for_run(const char *what) {
         snprintf(why, sizeof(why), "%s could not be allocated", what);
         ace_feature_unavailable(ACE_FEATURE_TWIN, why);
     }
-    if (!cmd_drain(GEGPU_BOUNDARY_LIFETIME)) {
+    int drained = cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    if (s_twin_inject_drain_fail) drained = 0;   /* the drain ran; the selftest says it failed */
+#endif
+    if (!drained) {
         /* Work may still be in flight (a lost device): record no more twin passes and show no
          * twin, but free nothing here; gegpu_shutdown waits for the device before it frees the
          * twins and their pool. */
