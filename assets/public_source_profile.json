@@ -613,8 +613,6 @@
     "src/player/ui/scr_wizard.c",
     "src/player/ui/ui_router.c",
     "src/player/ui_clip.h",
-    "src/player/ui_renderer.c",
-    "src/player/ui_renderer.h",
     "src/player/update_check.c",
     "src/player/update_check.h",
     "src/psp_companion/Makefile",
