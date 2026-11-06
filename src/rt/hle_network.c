@@ -440,11 +440,27 @@ static int adhocctl_check_group(const char *name, uint32_t addr, uint8_t out[8])
     return 0;
 }
 
+/* The library's own thread is gone while the library is initialized: the guest terminated or
+ * deleted it by uid (sceKernelTerminateThread, DeleteThread, TerminateDeleteThread). Nothing
+ * would answer a request then, so a call that queues one for the thread stops by name. What a
+ * PSP's library does after losing its thread is UNMEASURED. Returns 1 when the call must answer
+ * `*out`. */
+static int adhocctl_thread_lost(const char *name, uint32_t *out) {
+    const uint32_t uid = s_adhocctl.thread_uid;
+    SrThreadRunStatus status;
+    if (uid && sched_thread_run_status(uid, &status) == 0 && !sched_is_dormant(uid)) return 0;
+    *out = hle_unmodelled_stop(name, "after the guest ended the ad hoc control thread 0x%x "
+                               "(UNMEASURED)", uid);
+    return 1;
+}
+
 /* Create, Connect and Scan: in a group each answers 0 and later gets event 0 ALREADY_CONNECTED,
  * staying in the group (adhocctl.expected:58-62); otherwise the request starts and its event
  * follows. The order of the init, busy, name and state checks is UNMEASURED. */
 static uint32_t adhocctl_start(const char *name, int request, uint32_t group_addr, int named) {
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
+    uint32_t lost;
+    if (adhocctl_thread_lost(name, &lost)) return lost;
     uint8_t group[8];
     if (named) {
         const int bad = adhocctl_check_group(name, group_addr, group);
@@ -504,6 +520,7 @@ static uint32_t h_NetAdhocctlDisconnect(CpuState *s) {
     (void)s;
     if (!s_adhocctl.inited) return SCE_NET_ADHOCCTL_ERROR_NOT_INITIALIZED;
     uint32_t busy;
+    if (adhocctl_thread_lost("sceNetAdhocctlDisconnect", &busy)) return busy;
     if (adhocctl_pending("sceNetAdhocctlDisconnect", ADHOCCTL_REQ_DISCONNECT, &busy)) return busy;
     s_adhocctl.request = ADHOCCTL_REQ_DISCONNECT;
     s_adhocctl.request_due = sched_vtime_us() + ADHOCCTL_DISCONNECT_US;

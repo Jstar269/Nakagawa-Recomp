@@ -13,7 +13,11 @@
  * PTP streams join this interface in a later slice.
  *
  * Every transport answers with the same results and the same lobby events (NkLobbyEvent, the
- * relay's own decoded form), so the HLE layer maps them to PSP codes once.
+ * relay's own decoded form), so the HLE layer maps them to PSP codes once. NkNetResult codes are
+ * this project's own: none is a recorded PSP answer. Where a result has no relay counterpart
+ * either, its NkNetResult entry says so, and the HLE layer must map that case to a PSP-visible
+ * result by name, as a decision that is measured or marked UNMEASURED, before it relies on this
+ * seam for it.
  *
  * This file also holds the first transport: an in-process medium (NkAdhocLoopNet) that up to
  * NK_LOOPNET_CONSOLES consoles share. One console alone on it is a PSP with no peers in range, the
@@ -31,7 +35,10 @@
  *   - a console whose event queue is full is removed from the lobby, as the server removes a client
  *     it cannot send to: it leaves its group (the members are told), its sockets close, the event
  *     is counted in events_dropped, and its lobby and socket calls then answer NK_NET_NOT_LOGGED_IN.
- *     The events it was already sent stay for it to take.
+ *     The call whose own events overflowed the queue (a scan, or a connect's ack) answers
+ *     NK_NET_NOT_LOGGED_IN too. That answer is this project's choice: the server only closes the
+ *     client, and no PSP recording or relay rule gives a result for the call that caused it. The
+ *     events it was already sent stay for it to take.
  * Two server rules have no counterpart here. The server keys a group by channel and name, but every
  * client of the protocol version Nakagawa speaks (adhocctl v1) is on its one default channel
  * (client.cpp V1_PROTOCOL_DEFAULT_CHANNEL), so the name alone decides. The server's crosslinks,
@@ -51,7 +58,9 @@ typedef enum NkNetResult {
     NK_NET_OK = 0,
     NK_NET_AGAIN = -1,          /* nothing has arrived yet */
     NK_NET_BAD_ARG = -2,
-    NK_NET_NOT_LOGGED_IN = -3,
+    NK_NET_NOT_LOGGED_IN = -3,  /* also the call that got its caller removed (a full event queue):
+                                 * the project's choice, with no PSP or relay counterpart; the HLE
+                                 * layer maps it by name, measured or UNMEASURED, before using it */
     NK_NET_NOT_IN_GROUP = -4,
     NK_NET_PORT_IN_USE = -5,
     NK_NET_TOO_BIG = -6,        /* a datagram over NK_RELAY_PDP_MAX */

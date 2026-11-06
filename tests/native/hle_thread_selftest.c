@@ -7814,6 +7814,8 @@ static void test_adhoc_named_refusals(void) {
  *   the fault cell fails; so does a child that exits 1 before it runs the fixture.
  * MUTANT: check BUSY before the group name -- a Create with an invalid group during a Create
  *   answers BUSY instead of stopping.
+ * MUTANT: no check that the library's thread is alive -- a Create after the guest ended that
+ *   thread answers 0 and nothing ever answers it.
  * MUTANT: sceNetTerm with sceNetAdhocctl live returns 0 -- the sceNetTerm cell fails.
  * MUTANT (sched.c): a kick ends any delay of a service thread -- the handler's own guest delay is
  *   cut short.
@@ -8447,6 +8449,44 @@ static void test_adhocctl_teardown(void) {
     loaded_end = adh_fixture_begin();
     adh_run(ADH_MAIN_ENTRY, adh_teardown_fn);
     expect(s_adh_done == 1, "adhocctl teardown: the fixture ran to its end");
+    adh_fixture_end(loaded_end);
+}
+
+/* The guest ends the library's thread by uid while the library is initialized. */
+static void adh_lost_thread_fn(CpuState *cpu) {
+    /* The guest ends the library's thread by uid while the library is initialized: nothing
+     * would answer a request, so each request stops by name (UNMEASURED), first with the thread
+     * terminated (dormant), then with it deleted. Term and sceNetTerm still answer 0. */
+    const uint32_t nid_delete_thread = 0x9fa03cd3u;   /* sceKernelDeleteThread */
+    expect(adh_startup(), "adhocctl lost thread: sceNetInit, Init and AddHandler answer 0");
+    const uint32_t lib = sr_hle_test_adhocctl_thread();
+    cpu->r[4] = lib;
+    expect(lib != 0u && sr_syscall(cpu, NID_SCE_KERNEL_TERMINATE_THREAD) == 0u && sched_is_dormant(lib),
+           "adhocctl: the guest terminates the library's thread by uid");
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_CREATE, adh_name(4, "GONE"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == stops + 1u && adh_state() == 0u,
+           "adhocctl: a Create after the guest terminated the library's thread is an UNMEASURED stop");
+    cpu->r[4] = lib;
+    expect(sr_syscall(cpu, nid_delete_thread) == 0u && tcb_by_uid(lib) == NULL,
+           "adhocctl: the guest deletes the library's thread");
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == ADH_STOPPED && adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == ADH_STOPPED &&
+           adh(ADH_NID_CONNECT, adh_name(4, "GONE"), 0u, 0u) == ADH_STOPPED &&
+           sr_hle_test_unmodelled_stops() == stops + 3u,
+           "adhocctl: Scan, Disconnect and Connect after the guest deleted the library's thread are "
+           "UNMEASURED stops");
+    stops = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && adh(ADH_NID_NET_TERM, 0u, 0u, 0u) == 0u &&
+           sr_hle_test_unmodelled_stops() == stops,
+           "adhocctl with its thread gone: Term 0 and sceNetTerm 0");
+    s_adh_done = 1;
+}
+
+static void test_adhocctl_lost_thread(void) {
+    const uint32_t loaded_end = adh_fixture_begin();
+    adh_run(ADH_MAIN_ENTRY, adh_lost_thread_fn);
+    expect(s_adh_done == 1, "adhocctl lost thread: the fixture ran to its end");
     adh_fixture_end(loaded_end);
 }
 
@@ -48923,6 +48963,7 @@ static int hle_selftest_main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--adhocctl") == 0) {
         test_adhocctl_lone_console();
         test_adhocctl_teardown();
+        test_adhocctl_lost_thread();
         test_adhocctl_nickname_from_profile();
         test_adhocctl_handler_fault_stops(argv[0]);
         fprintf(stderr, "adhocctl: %d checks, %d failures\n", s_checks, s_failures);
@@ -49060,6 +49101,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_adhoc_named_refusals();
     test_adhocctl_lone_console();
     test_adhocctl_teardown();
+    test_adhocctl_lost_thread();
     test_adhocctl_nickname_from_profile();
     test_adhocctl_handler_fault_stops(argc > 0 ? argv[0] : NULL);
     test_unregistered_batch_profiler_refer_null();
