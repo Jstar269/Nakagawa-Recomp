@@ -554,7 +554,7 @@ values are starting points, to be tuned by measurement on real titles. They live
 | LOW | 1x (480x272) | Sharp | On | the row's | |
 | MEDIUM | 2x | Sharp | On | the row's | |
 | HIGH | 4x | Sharp | On | the row's | |
-| ULTRA | 4x | Sharp | On | the row's | the FSR 1 upscaler, which Settings can't set until #2122: the row reads ULTRA (NO UPSCALER) and the notice line says so |
+| ULTRA | 4x | Sharp | On | the row's | does not turn on Sharper enlarging (the FSR 1 upscaler, #2122); the notice line says so |
 | HANDHELD | 2x | Sharp | On | On | |
 
 A preset never changes frame pacing, the play mode, an Enhanced part or the launch line.

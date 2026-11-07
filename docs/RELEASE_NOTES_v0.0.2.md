@@ -12,7 +12,7 @@ you own, translates it into C, links it with a native C runtime, and runs the re
 SDL3 and Vulkan. The player decrypts the game's program files from your own disc image, on your PC, the way the
 PPSSPP emulator does.
 
-v0.0.2 is the second public build. It adds three play modes for every game, a launcher that handles large libraries,
+v0.0.2 is the second public build. It adds two play modes for every game, Authentic and Enhanced, a launcher that handles large libraries,
 save backups, compressed disc images and portable mode, and it runs Hot Shots Tennis with no title-specific
 compatibility patches. Most of the work is in accuracy: the kernel, file, save-data, graphics and sound behaviour
 games rely on now follows measurements from a real PSP in many more places. As before, when a game needs something
@@ -20,27 +20,28 @@ Nakagawa doesn't support, it stops and says what is missing.
 
 ## What's new
 
-### Play modes: Authentic, Enhanced and Ace
+### Play modes: Authentic and Enhanced
 
-- **Three play modes per game** ([#2055](https://github.com/Jstar269/nakagawa-recomp/issues/2055), [#2074](https://github.com/Jstar269/nakagawa-recomp/pull/2074)). **Authentic** plays the game as released and is the default.
-  **Enhanced** adds host-side improvements that work for any game. **Ace** is Enhanced plus improvements made for
-  one game, and is offered only for a game that has its own enhancement package. Settings has a library-wide play
-  mode, and each game's page can choose its own. A badge on a game's card names the mode while Enhanced or Ace is in
+- **Two play modes per game** ([#2055](https://github.com/Jstar269/nakagawa-recomp/issues/2055), [#2074](https://github.com/Jstar269/nakagawa-recomp/pull/2074)). **Authentic** plays the game as released and is the default.
+  **Enhanced** adds host-side improvements that work for any game. A third mode, Ace, exists only for a game that has
+  an enhancement package, and no game in this release has one, so no game offers Ace. Settings has a library-wide play
+  mode, and each game's page can choose its own. A badge on a game's card names the mode while Enhanced is in
   effect.
 - **Enhanced parts** (Settings > Enhanced, or **ENHANCED OPTIONS** on a game's page). Each one can be turned off for
   the whole library or for a single game. In Authentic none of them runs.
   - **Texture filtering**, 2x to 16x, which keeps slanted surfaces sharp; **Crisp system text**, which draws the
     on-screen keyboard at your screen's resolution; a **Speed readout**; and a **Game badge** that names the mode for
     a few seconds when a game starts ([#1797](https://github.com/Jstar269/nakagawa-recomp/pull/1797)).
-  - **Smooth motion** shows a game that draws 30 frames per second at 60 by making the frames in between from the
-    two latest real frames. The game itself is untouched. It adds about 17 ms of delay ([#1939](https://github.com/Jstar269/nakagawa-recomp/pull/1939)).
+  - **Smooth motion** shows a game that holds a steady 30 frames per second at up to 60 (54.8 measured on Hot Shots
+    Tennis) by making the frames in between from the two latest real frames. A game that does not hold 30 is shown as
+    it is. The game itself is untouched. It adds about 17 ms of delay ([#1939](https://github.com/Jstar269/nakagawa-recomp/pull/1939)).
   - **Widescreen** shows more of the 3D scene at the sides and keeps the HUD in shape. Some objects appear late at
     the edges, and Smooth motion turns it off ([#2067](https://github.com/Jstar269/nakagawa-recomp/pull/2067), [#2174](https://github.com/Jstar269/nakagawa-recomp/pull/2174)).
-  - **Sharper enlarging** enlarges the picture with AMD FidelityFX Super Resolution 1 ([#2082](https://github.com/Jstar269/nakagawa-recomp/pull/2082), [#2175](https://github.com/Jstar269/nakagawa-recomp/pull/2175)).
+  - **Sharper enlarging** enlarges the picture with AMD FidelityFX Super Resolution 1 ([#2082](https://github.com/Jstar269/nakagawa-recomp/pull/2082), [#2175](https://github.com/Jstar269/nakagawa-recomp/pull/2175)). It does not enlarge movie frames the game draws through the GPU ([#2111](https://github.com/Jstar269/nakagawa-recomp/issues/2111)).
   - **Clean pitched sound** resamples pitched sound effects without aliasing. It changes the samples the game
     receives, so it is off by default ([#2078](https://github.com/Jstar269/nakagawa-recomp/pull/2078)).
 - **Graphics presets** (Low, Medium, High, Ultra and Handheld) set the resolution, scaling, VSync and fullscreen
-  rows (and, for Handheld, game fullscreen) in one choice for Enhanced and Ace sessions. Authentic sessions always use the rows as you set them
+  rows (and, for Handheld, game fullscreen) in one choice for Enhanced sessions. Authentic sessions always use the rows as you set them
   ([#2180](https://github.com/Jstar269/nakagawa-recomp/pull/2180)).
 
 ### Player and launcher
@@ -50,7 +51,8 @@ Nakagawa doesn't support, it stops and says what is missing.
 - **Compressed disc images.** Besides a plain `.iso`, the player takes a `.cso`, `.zso` or `.chd` image. It expands
   the image once, when you add it, into a plain `.iso` in its data folder ([#1634](https://github.com/Jstar269/nakagawa-recomp/pull/1634)).
 - **Disc checks.** The player hashes each disc it adds. If you import a Redump PSP datafile
-  (`python tools/nk_cli.py redump-import <file>`), it tells a retail dump from a modified image, and a fan
+  (`python tools/nk_cli.py redump-import <file>`), a disc that matches is marked Verified retail. One that does not
+  is marked Modified when a verified copy with the same disc ID is in your library, and Unknown otherwise. A fan
   translation no longer replaces the record of the retail disc it shares a disc ID with ([#1789](https://github.com/Jstar269/nakagawa-recomp/pull/1789)).
 - **Homebrew.** An unencrypted homebrew `EBOOT.PBP` can be added the way a PSN package is. Kernel-mode homebrew,
   encrypted executables and packages that hold no program are refused by name ([#2170](https://github.com/Jstar269/nakagawa-recomp/pull/2170)).
@@ -93,10 +95,10 @@ Nakagawa doesn't support, it stops and says what is missing.
   `python tools/compat_overrides.py --debt-census` now lists no active patch for it; v0.0.1 had 11. General fixes
   replaced the display, sync and frame-latch assists, the scheduler stand-ins, the archive-reader patch and the
   hand-written stubs ([#1516](https://github.com/Jstar269/nakagawa-recomp/pull/1516), [#1511](https://github.com/Jstar269/nakagawa-recomp/pull/1511), [#1580](https://github.com/Jstar269/nakagawa-recomp/pull/1580), [#1903](https://github.com/Jstar269/nakagawa-recomp/pull/1903), [#2041](https://github.com/Jstar269/nakagawa-recomp/pull/2041), [#2093](https://github.com/Jstar269/nakagawa-recomp/pull/2093)).
-- **Movies play.** Movie frames that pass through a VRAM mirror are drawn, so the in-game movies no longer show
+- **Movies play.** Movie frames that pass through a VRAM mirror are drawn, so the opening movie in Cinema no longer shows
   black ([#1049](https://github.com/Jstar269/nakagawa-recomp/issues/1049), [#1602](https://github.com/Jstar269/nakagawa-recomp/pull/1602)).
-- **Speed.** On the reference PC named below, a full match runs at 29.5 of the game's own 30 frames per second and
-  the menus at 29.2 to 29.8 ([#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)).
+- **Speed.** On the reference PC named below, with builds of main from 2026-10-27, a full match ran at about 29.5 of
+  the game's own 30 frames per second and the menus at 29.2 to 29.6 ([#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)).
 - **End of a match.** A stop at the end of a match is fixed: a freed heap block keeps its bytes until it is handed
   out again, as on a PSP ([#2038](https://github.com/Jstar269/nakagawa-recomp/pull/2038)).
 
@@ -121,7 +123,8 @@ Nakagawa doesn't support, it stops and says what is missing.
   save is refused by name ([#1387](https://github.com/Jstar269/nakagawa-recomp/issues/1387), [#1790](https://github.com/Jstar269/nakagawa-recomp/pull/1790)). The game is told the real free space and the shortfall, and
   `GETSIZE` on a missing save answers as a PSP does ([#1638](https://github.com/Jstar269/nakagawa-recomp/pull/1638), [#1898](https://github.com/Jstar269/nakagawa-recomp/pull/1898)). Older parameter versions and the status
   after shutdown follow the PSP ([#1662](https://github.com/Jstar269/nakagawa-recomp/pull/1662)).
-- **Utility dialogs.** Parameter versions are checked, and a dialog's status follows its completion
+- **Utility dialogs.** Parameter sizes are checked for the on-screen keyboard, network configuration, game-data install and game-sharing
+  dialogs, and a dialog's status follows its completion
   ([#1610](https://github.com/Jstar269/nakagawa-recomp/pull/1610), [#1950](https://github.com/Jstar269/nakagawa-recomp/pull/1950), [#1959](https://github.com/Jstar269/nakagawa-recomp/pull/1959)).
 - **Fonts.** A game that loads `libfont` from its own disc runs it as guest code ([#1645](https://github.com/Jstar269/nakagawa-recomp/pull/1645)). The project's open
   stand-in fonts cover the PSP's Latin set with one face per Latin style, Japanese CP932 with both JIS kanji levels,
@@ -153,19 +156,19 @@ Nakagawa doesn't support, it stops and says what is missing.
   same pipelines again ([#2189](https://github.com/Jstar269/nakagawa-recomp/pull/2189)).
 - **Speed.** At higher resolutions only the area that changed is copied ([#1641](https://github.com/Jstar269/nakagawa-recomp/pull/1641)); colour targets are drawn in
   place, about 4x faster per pixel ([#1623](https://github.com/Jstar269/nakagawa-recomp/pull/1623)); texture scans are skipped for memory no texture reads ([#1620](https://github.com/Jstar269/nakagawa-recomp/pull/1620)).
-- **Sound.** SAS envelopes follow the game's rates and curves ([#2059](https://github.com/Jstar269/nakagawa-recomp/pull/2059)); SAS voice volumes, defaults and mix gain
-  match the PSP ([#2158](https://github.com/Jstar269/nakagawa-recomp/pull/2158)); re-initialising SAS starts it fresh ([#1619](https://github.com/Jstar269/nakagawa-recomp/pull/1619)); ATRAC3 decode timing follows a PSP
-  measurement ([#1600](https://github.com/Jstar269/nakagawa-recomp/pull/1600)); and output volumes up to `0xFFFFF` are accepted and clamped by the mixer ([#1993](https://github.com/Jstar269/nakagawa-recomp/pull/1993)).
+- **Sound.** SAS envelopes follow the game's rates and curves ([#2059](https://github.com/Jstar269/nakagawa-recomp/pull/2059)); SAS voice volumes accept signed values, voices start at full volume and mix gain follows PPSSPP's; at the Hot Shots
+  Tennis title logo the level now lands within about 0.5 dB of a PSP-3000 capture, though not sample for sample ([#2158](https://github.com/Jstar269/nakagawa-recomp/pull/2158)); re-initialising SAS starts it fresh ([#1619](https://github.com/Jstar269/nakagawa-recomp/pull/1619)); ATRAC3 decode timing follows a PSP
+  measurement ([#1600](https://github.com/Jstar269/nakagawa-recomp/pull/1600)); and output volumes up to `0xFFFFF` are accepted and clamped by the mixer, a limit the project chose and did not measure on a PSP ([#1993](https://github.com/Jstar269/nakagawa-recomp/pull/1993)).
 - **Movies.** A title's own PSMF player keeps time, waits for the display, reloads and plays Vaudio
   ([#1930](https://github.com/Jstar269/nakagawa-recomp/pull/1930)); the YCbCr decoder and the stream ends follow the PSP more closely ([#2020](https://github.com/Jstar269/nakagawa-recomp/pull/2020), [#2039](https://github.com/Jstar269/nakagawa-recomp/pull/2039), [#2065](https://github.com/Jstar269/nakagawa-recomp/pull/2065)).
 
 ### Packaging and verification
 
-- The packaging recipe is laid out so two runs from one commit give the same bytes, and
+- The packaging recipe is laid out so two runs from the same attested bundle, unsigned, give the same bytes, and
   `tools/package_repro_check.py` compares two packages and names every difference ([#1781](https://github.com/Jstar269/nakagawa-recomp/pull/1781)).
 - The player and the title programs carry Windows version information ([#2008](https://github.com/Jstar269/nakagawa-recomp/pull/2008)).
-- `BUILD PACKAGE` compiles generated code at one measured optimisation level in bounded compile units, so no
-  compiler process runs away with memory ([#1730](https://github.com/Jstar269/nakagawa-recomp/issues/1730), [#1786](https://github.com/Jstar269/nakagawa-recomp/pull/1786)).
+- `BUILD PACKAGE` compiles generated code at one measured optimisation level in bounded compile units, so compiler memory stays
+  bounded (the title whose compile reached 18.7 GB now stays under 500 MB) ([#1730](https://github.com/Jstar269/nakagawa-recomp/issues/1730), [#1786](https://github.com/Jstar269/nakagawa-recomp/pull/1786)).
 
 ### For developers
 
@@ -176,8 +179,6 @@ Nakagawa doesn't support, it stops and says what is missing.
 - Real-PSP instruction-trace comparison ([#1653](https://github.com/Jstar269/nakagawa-recomp/pull/1653)), a one-command PSP probe matrix runner ([#1671](https://github.com/Jstar269/nakagawa-recomp/pull/1671)), a tool that
   finds the first draw where the Vulkan renderer departs from the software one ([#2169](https://github.com/Jstar269/nakagawa-recomp/pull/2169)), and scripted PPSSPP
   reference captures with a graded comparison ([#2176](https://github.com/Jstar269/nakagawa-recomp/pull/2176)).
-- Per-title 60 FPS game logic packages: `tools/enhancement_package.py` drafts and checks one, `BUILD PACKAGE`
-  builds it, and the player runs it as Ace, marked Experimental ([#1684](https://github.com/Jstar269/nakagawa-recomp/pull/1684), [#1699](https://github.com/Jstar269/nakagawa-recomp/pull/1699), [#1919](https://github.com/Jstar269/nakagawa-recomp/pull/1919)).
 - A deterministic guest clock for scripted runs ([#2089](https://github.com/Jstar269/nakagawa-recomp/pull/2089)), recording a run as video and audio on one guest
   timeline ([#2080](https://github.com/Jstar269/nakagawa-recomp/pull/2080)), the flight recorder's trigger modes, watch class and thread snapshot ([#1622](https://github.com/Jstar269/nakagawa-recomp/pull/1622), [#1664](https://github.com/Jstar269/nakagawa-recomp/pull/1664)),
   and one machine-readable failure-code list ([#1683](https://github.com/Jstar269/nakagawa-recomp/pull/1683)).
@@ -222,8 +223,8 @@ They create their synthetic inputs under the ignored `build/` folder.
   also ships, in `src/core/nk_psp_builtin_keys.c`. Nakagawa never downloads games or game data. You supply your own
   disc image of a game you own, or the `EBOOT.PBP` of a PSN release of a UMD game you own.
 - **Few network connections, all yours to choose.** The player connects only when you choose to: the build-tool
-  download, which the ZIP doesn't need because the tools are in it, and Check for updates. Enhanced and Ace run on
-  your PC and make no connection ([`SETUP.md`](SETUP.md#network-use)).
+  download, which the ZIP doesn't need because the tools are in it, and Check for updates. Enhanced runs on
+  your PC and makes no connection ([`SETUP.md`](SETUP.md#network-use)).
 - **Not a finished emulator.** Hot Shots Tennis is the one game rated **Playable**;
   [`COMPATIBILITY.md`](COMPATIBILITY.md) lists how far each tested game gets. A valid PSP disc with no title file
   is imported as **Experimental**. PGD-protected content, PSP minis, games tied to the PSP that bought them and PSOne
@@ -249,8 +250,6 @@ choose **More info** and then **Run anyway**, check that the download is the one
    ```powershell
    (Get-FileHash .\nakagawa-recomp-0.0.2-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
    ```
-
-   The result must be `<FILL AT FREEZE: ZIP SHA-256>`.
 
 2. After extracting, open PowerShell in the extracted folder (the one with `bin\` in it).
    `SHA256SUMS.txt` there lists the SHA-256 of every file in the package.
@@ -285,8 +284,7 @@ If any check fails, don't run the file; report it as described under [How to rep
 ### Source of the bundled build tools
 
 The source of the build tools in `prereqs/` is published next to the ZIP as
-`nakagawa-recomp-0.0.2-prerequisite-sources.zip`, with its own `.sha256` (`<FILL AT FREEZE: source archive
-SHA-256>`): the MSYS2 source package of each MSYS2 package, the CPython source release, and the source releases of
+`nakagawa-recomp-0.0.2-prerequisite-sources.zip`, with its own `.sha256`: the MSYS2 source package of each MSYS2 package, the CPython source release, and the source releases of
 the libraries built into the CPython runtime (OpenSSL, libffi, SQLite and others). The Microsoft C runtime that comes
 with CPython has no public source; its redistribution terms are in `prereqs/notices`. `prereqs/notices/SOURCES.txt`
 in the ZIP names each file of the source archive with its SHA-256, and `prereqs/notices` holds every bundled
@@ -317,9 +315,8 @@ SSD recommended). Building a game is the heavy part. The measured numbers are in
 **Reference PC:** the speeds in these notes were measured on Windows 11 with an AMD Ryzen 9 5900X and an NVIDIA
 GeForce RTX 3080.
 
-**Download size:** the ZIP is `<FILL AT FREEZE: ZIP size>`. The build tools in its `prereqs/` unpack to
-`<FILL AT FREEZE: file_count>` files and `<FILL AT FREEZE: unpacked size>`. Their source is a separate
-`<FILL AT FREEZE: source archive size>` download next to the ZIP; see
+**Download size:** the build tools in the ZIP's `prereqs/` unpack to 7,305 files and 699 MB. Their source is a
+separate 531 MB download next to the ZIP; see
 [Source of the bundled build tools](#source-of-the-bundled-build-tools).
 
 ## Updating from v0.0.1
@@ -335,15 +332,19 @@ GeForce RTX 3080.
 ## Known issues
 
 - **Some sound effects drop out in Hot Shots Tennis while it loads** ([#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)).
-- **Hot Shots Tennis's sound effects are louder than on a PSP at the title logo**, and clip much more often there
-  ([#2135](https://github.com/Jstar269/nakagawa-recomp/issues/2135)).
-- **Hot Shots Tennis's in-game text doesn't look exactly as on a PSP**, even with your own PSP's fonts imported
+- **Hot Shots Tennis's title-logo sound effects match a PSP's level only approximately.** The level is within about
+  0.5 dB of a PSP-3000 capture, but the waveform is not the same ([#2135](https://github.com/Jstar269/nakagawa-recomp/issues/2135)).
+- **Hot Shots Tennis's in-game text uses the project's stand-in fonts unless you import your PSP's**, and the
+  stand-ins don't look exactly like the PSP's. Text drawn from your own PSP's fonts has not been compared with a PSP
   ([#1300](https://github.com/Jstar269/nakagawa-recomp/issues/1300)).
 - **The software renderer clips every draw to 480x272.** A PSP draws up to 512 pixels wide, so an effect a game
   draws into a wider off-screen image can come out with stale columns at the right when the software renderer is in
   use ([#2193](https://github.com/Jstar269/nakagawa-recomp/issues/2193)). The player doesn't say when drawing falls back to the software renderer ([#2151](https://github.com/Jstar269/nakagawa-recomp/issues/2151)).
 - **Overlapping see-through layers can blend wrongly on the GPU.** When several overlapping translucent shapes are
   drawn in one batch, each blends with the picture as it was before the batch ([#2109](https://github.com/Jstar269/nakagawa-recomp/issues/2109)).
+- **Effects a game samples as textures don't scale with the resolution setting.** Bloom, blur and similar effects a
+  game draws into small off-screen images stay at the PSP's resolution, so they can look soft next to a sharp scene
+  ([#2052](https://github.com/Jstar269/nakagawa-recomp/issues/2052)).
 - **Movie timing.** The number of decoded movie pictures and the audio offset are not fully matched to a PSP
   ([#279](https://github.com/Jstar269/nakagawa-recomp/issues/279)).
 - **Most other games stop early.** Each one names the missing piece; typical causes are unsupported system calls
@@ -370,7 +371,7 @@ When you report a problem:
 1. Say which step in [`SMOKE_TEST.md`](SMOKE_TEST.md) failed and what the error card said. **Copy details** on
    the card puts a short report on the clipboard, including the error code (for example `ISO_CORRUPT`).
 2. Settings > **Problem report** writes the logs and settings a report needs into one ZIP on your PC
-   ([`SETUP.md`](SETUP.md#local-problem-report-nk_clipy-report)). The logs are in `%LOCALAPPDATA%\Nakagawa\logs`.
+   ([`SETUP.md`](SETUP.md#local-problem-report-nk_clipy-report)). The logs are in `%LOCALAPPDATA%\Nakagawa\logs` (the `logs` folder under `data` in portable mode).
 3. Read every file before you attach it, to make sure it contains nothing private: no disc images, no game files,
    no decryption keys, and no personal paths you don't want to share.
 

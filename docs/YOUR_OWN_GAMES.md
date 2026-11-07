@@ -239,8 +239,8 @@ them yourself sets the preset back to **Custom**, which uses your settings every
 | Ultra | 4x | Sharp | On | your setting |
 | Handheld | 2x | Sharp | On | On |
 
-Ultra is also meant to turn on the FSR 1 upscaler, which Settings can't set yet
-([#2122](https://github.com/Jstar269/nakagawa-recomp/issues/2122)), so its row reads **Ultra (no upscaler)**.
+Ultra does not turn on Sharper enlarging, the FSR 1 upscaler
+([#2122](https://github.com/Jstar269/nakagawa-recomp/issues/2122)); its note says so.
 
 ## Keep it to your own games
 
