@@ -11301,6 +11301,59 @@ static void mpy_not_called(int emulated, const char *step, int rc, const char *w
     mpy_rc(emulated, step, rc, extra);
 }
 
+/* #302: on a PSP the second sceMpegAvcDecodeYCbCr of mode 3 never returned (boot 145, 2026-11-07: the first
+   call returned 0, the second blocked until the runner was contained). Every decode of modes 2 and 3 therefore
+   runs in a helper thread that main waits for with a timeout. A call still running at the deadline is recorded
+   (result 0x800201a8, the kernel's wait-timeout code, and blocked=1) and sets s_mpy_blocked: the library is
+   then in an unknown state, so no later MPEG call is made (no stop, CSC, free, unregist, delete, ringbuffer
+   destruct, finish or module unload) and the case parks. The stuck thread is left alone. */
+#define MPY_DECODE_DEADLINE_US 3000000u
+#define MPY_WAIT_TIMEOUT 0x800201a8
+typedef struct {
+    SceMpeg *mpeg;
+    SceMpegAu *au;
+    void **ptr;
+    SceInt32 *init;
+    volatile int rc;
+    volatile int done;
+} MpyDecodeArgs;
+static volatile int s_mpy_blocked;
+
+static int mpy_decode_thread(SceSize args, void *argp) {
+    MpyDecodeArgs *a = *(MpyDecodeArgs **)argp;
+    (void)args;
+    a->rc = sceMpegAvcDecodeYCbCr(a->mpeg, a->au, a->ptr, a->init);
+    a->done = 1;
+    return 0;
+}
+
+/* Returns the decode's result, or MPY_WAIT_TIMEOUT with s_mpy_blocked set when it did not return in time. */
+static int mpy_decode_bounded(SceMpeg *mpeg, SceMpegAu *au, void **ptr, SceInt32 *init) {
+    static MpyDecodeArgs a;
+    a.mpeg = mpeg;
+    a.au = au;
+    a.ptr = ptr;
+    a.init = init;
+    a.rc = -1;
+    a.done = 0;
+    const SceUID thid = sceKernelCreateThread("mpy-decode", mpy_decode_thread, 0x20, 0x10000, 0, NULL);
+    if (thid < 0) return thid;
+    MpyDecodeArgs *arg = &a;
+    if (sceKernelStartThread(thid, sizeof(arg), &arg) < 0) {
+        (void)sceKernelDeleteThread(thid);
+        return -1;
+    }
+    SceUInt timeout = MPY_DECODE_DEADLINE_US;
+    const int wait = sceKernelWaitThreadEnd(thid, &timeout);
+    if (!a.done) {
+        s_mpy_blocked = 1;
+        (void)wait;
+        return MPY_WAIT_TIMEOUT;
+    }
+    (void)sceKernelDeleteThread(thid);
+    return a.rc;
+}
+
 /* One YCbCr mode beyond mode 1 (#302), with the fresh ringbuffer and stream supplied by
    mpy_ycbcr_mode_fresh: size query at the stream's geometry, InitYCbCr, decode calls up to the first picture
    (the decoder runs one unit behind, so the second call yields it), the buffer from its header through the
@@ -11354,10 +11407,10 @@ static void mpy_ycbcr_mode(int emulated, SceMpeg *mpeg, SceMpegStream *stream, S
             }
             (void)snprintf(step, sizeof(step), "m%d-decode%d", (int)mode, calls);
             probe_step(emulated, "mpeg-ycbcr", step);
-            last_rc = sceMpegAvcDecodeYCbCr(mpeg, &s_mpy_au, &ptr, &init);
-            (void)snprintf(extra, sizeof(extra), "init=%d pts=0x%08x%08x au_size=%u", (int)init,
+            last_rc = mpy_decode_bounded(mpeg, &s_mpy_au, &ptr, &init);
+            (void)snprintf(extra, sizeof(extra), "init=%d pts=0x%08x%08x au_size=%u blocked=%d", (int)init,
                            (unsigned int)s_mpy_au.iPtsMSB, (unsigned int)s_mpy_au.iPts,
-                           (unsigned int)s_mpy_au.iAuSize);
+                           (unsigned int)s_mpy_au.iAuSize, (int)s_mpy_blocked);
             mpy_rc(emulated, step, last_rc, extra);
             calls++;
             if (last_rc != 0) break;
@@ -11365,7 +11418,7 @@ static void mpy_ycbcr_mode(int emulated, SceMpeg *mpeg, SceMpegStream *stream, S
         sceKernelDcacheWritebackInvalidateAll();
         if (last_rc != 0) {
             carried = last_rc;
-            why = calls ? "decode-refused" : "no-access-unit";
+            why = s_mpy_blocked ? "decode-blocked" : calls ? "decode-refused" : "no-access-unit";
         } else if (init == 0) {
             carried = -1;
             why = "no-picture";
@@ -11396,7 +11449,7 @@ static void mpy_ycbcr_mode(int emulated, SceMpeg *mpeg, SceMpegStream *stream, S
     }
 
     (void)snprintf(step, sizeof(step), "m%d-decode-stop", (int)mode);
-    if (init_ok) {
+    if (init_ok && !s_mpy_blocked) {
         SceInt32 status = -1;
         probe_step(emulated, "mpeg-ycbcr", step);
         rc = sceMpegAvcDecodeStopYCbCr(mpeg, &ptr, &status);
@@ -11477,6 +11530,11 @@ static void mpy_ycbcr_mode_fresh(int emulated, SceInt32 mode, SceInt32 pic_w, Sc
     mpy_ycbcr_mode(emulated, &mpeg, stream, mode, pic_w, pic_h);
 
 cleanup:
+    if (s_mpy_blocked) {
+        /* A decode did not return: the library's state is unknown, so no call below is made. */
+        probe_step(emulated, "mpeg-ycbcr", "teardown-skipped-after-blocked-decode");
+        return;
+    }
     if (es) {
         (void)snprintf(step, sizeof(step), "m%d-stream-free-es", (int)mode);
         probe_step(emulated, "mpeg-ycbcr", step);
@@ -11769,10 +11827,11 @@ ring_destruct:
     }
     /* Each added mode uses a fresh ringbuffer and MPEG context, with its cursor reset to the PSMF offset. */
     if (fresh_sizes_ready && fresh_mode_ready) {
-        for (SceInt32 ycbcr_mode = 2; ycbcr_mode <= 3; ycbcr_mode++)
+        for (SceInt32 ycbcr_mode = 2; ycbcr_mode <= 3 && !s_mpy_blocked; ycbcr_mode++)
             mpy_ycbcr_mode_fresh(emulated, ycbcr_mode, fresh_pic_w, fresh_pic_h, fresh_ring_size,
                                  fresh_mpeg_size);
     }
+    if (s_mpy_blocked) goto park;   /* no sceMpegFinish or module unload while a decode is stuck */
 finish:
     probe_step(emulated, "mpeg-ycbcr", "finish");
     sceMpegFinish();
