@@ -1297,8 +1297,14 @@ def guest_owns_entry_sp(elf, start, insns, labels):
     return bool(guest_sp_exits(elf, start, insns, labels))
 
 
-def emit_host_return(resumable, comment=None, stack_census=False):
-    """The single host-exit policy for callable and live-frame resume entries."""
+def emit_host_return(resumable, comment=None, stack_census=False, sp_kept=False):
+    """The single host-exit policy for callable and live-frame resume entries.
+
+    ``sp_kept`` is a guest-owned exit of a body that checks its $sp loads (_sp_load_check):
+    the drain that ran it learns whether one of them left the frame (sr_tail_note_exit).
+    """
+    if sp_kept and not stack_census:
+        return "sr_tail_note_exit(_sp_kept); return;"
     if resumable:
         return "return;"
     if stack_census:
@@ -1338,19 +1344,12 @@ def _sp_load_check(line, indent="    "):
 
     As the interpreter decides it (sp_load_leaves_frame): a load that leaves $sp between
     where it was and the body's entry $sp frees only the body's own space, an alloca free.
-    Any other one moves to another frame, a longjmp or a context switch, and the body's
-    tail transfers then owe no restore.
+    Any other one moves to another frame, a longjmp or a context switch: the body's tail
+    transfers then owe no restore and release the restores recorded before them in the
+    chain, and its returns say so to the drain (sr_tail_note_exit).
     """
     return (f"{indent}{{ uint32_t _sp_load = s->r[29];\n{line}\n"
-            f"{indent}  if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = 0u; }}")
-
-
-def _is_tail_exit(elf, addr, insns, continuations):
-    """True when the body leaves through ``addr``, an exit of _sp_exit_walk, by a TAIL record."""
-    if addr not in insns:
-        return addr in set(continuations.values())
-    w = read32(elf, addr)
-    return w is not None and not (w >> 26 == 0 and w & 0x3F == 0x08 and rs(w) == 31)
+            f"{indent}  if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = SR_TAIL_RELEASES; }}")
 
 
 def emit_code_pointer_check(target_expr, transfer_pc):
@@ -1405,8 +1404,10 @@ def emit_host_stack_check(entry_expr):
     return f"    SR_HOST_STACK_CHECK({entry_expr});"
 
 
-def emit_host_fallthrough(resumable, stack_census=False):
+def emit_host_fallthrough(resumable, stack_census=False, sp_kept=False):
     """Natural C fallthrough follows the same entry contract without a fake guest return."""
+    if sp_kept and not stack_census:
+        return "sr_tail_note_exit(_sp_kept); /* guest fall-through: guest owns SP */"
     if resumable:
         return "/* resume fall-through: guest owns SP */"
     if stack_census:
@@ -4157,8 +4158,9 @@ class _BodyContext:
     maps a control instruction to the word its inline delay slot lets control jump over, and
     ``resumable`` is the final answer, after a body that loads ``$sp`` has claimed every exit,
     and ``guest_exits`` are the exits of a body that claimed only some (#1935).
-    ``sp_kept`` is a body whose guest-owned TAIL exits record the entry $sp while every
-    $sp load it ran stayed in its frame, and ``sp_checks`` are those loads (_sp_load_check).
+    ``sp_kept`` is a body whose guest-owned exits tell the drain whether a $sp load it ran
+    left its frame (a TAIL by its record, a return by sr_tail_note_exit), and ``sp_checks``
+    are those loads (_sp_load_check).
     """
     elf: object
     ranges: object
@@ -4611,12 +4613,12 @@ def _emit_jr(ctx, out, addr, w, ds, dsw):
             out.extend(delay_slot_lines(ds, dsw, addr,
                                         resumable=resumable,
                                         indent="      ", options=ctx.options))
-        out.append(f"      {emit_host_return(resumable or addr in guest_exits, stack_census=stack_census)} }}")
+        out.append(f"      {emit_host_return(resumable or addr in guest_exits, stack_census=stack_census, sp_kept=ctx.sp_kept and addr in guest_exits)} }}")
     elif ds_is_syscall and dsw is not None and not lle_cpu:
         out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
         # JR with syscall in delay slot. This is not reachable for current eboot stubs (handled by is_stub),
         # but if reached in general code, route it via the correct raw-syscall mechanism with PC.
-        out.append(f"    sr_raw_syscall(s, 0x{(dsw >> 6) & 0xFFFFF:x}u, {G(ds)}); {emit_host_return(resumable or addr in guest_exits, stack_census=stack_census)}")
+        out.append(f"    sr_raw_syscall(s, 0x{(dsw >> 6) & 0xFFFFF:x}u, {G(ds)}); {emit_host_return(resumable or addr in guest_exits, stack_census=stack_census, sp_kept=ctx.sp_kept and addr in guest_exits)}")
     elif ds_is_syscall and dsw is not None:
         # LLE: the delay-slot syscall raises with BD set (spec 3.4).
         out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
@@ -4865,12 +4867,13 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
     # An exit that a load of $sp reaches leaves $sp to the guest, as a resume body's do.
     guest_exits, exits, foreign_loads = (frozenset(), frozenset(), frozenset()) if resumable \
         else _sp_exit_walk(elf, start, insns, labels)
-    # Whether a $sp load left the frame is known only when it runs (#1935): a body whose
-    # guest-owned exit is a TAIL keeps its entry $sp and checks each such load, so the
-    # record owes the restore exactly when every load it ran was an alloca free. The census
-    # records no restore at a TAIL, so it keeps the static verdict.
-    sp_kept = not stack_census and any(
-        _is_tail_exit(elf, addr, insns, continuations) for addr in guest_exits)
+    # Whether a $sp load left the frame is known only when it runs (#1935): a body with
+    # guest-owned exits keeps its entry $sp and checks each such load. A TAIL record owes the
+    # restore exactly when every load it ran was an alloca free, and releases the restores
+    # recorded before it in the chain when one left the frame; a return says the same to the
+    # drain (sr_tail_note_exit). The census records no restore at a TAIL, so it keeps the
+    # static verdict.
+    sp_kept = not stack_census and bool(guest_exits)
     if guest_exits:
         GUEST_SP_ENTRIES.add(start)
         if guest_exits == exits:
@@ -4953,7 +4956,10 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
                 out.insert(1, declaration)
             PROMOTION_STATS["functions"] += 1
         falls_as_guest = any(addr not in insns for addr in guest_exits)
-        out.append(f"    {emit_host_fallthrough(resumable or falls_as_guest, stack_census=stack_census)}")
+        # A continuation is a TAIL, recorded in its block; only falling off the body returns.
+        falls_off_as_guest = any(addr not in insns and addr not in continuations.values()
+                                 for addr in guest_exits)
+        out.append(f"    {emit_host_fallthrough(resumable or falls_as_guest, stack_census=stack_census, sp_kept=ctx.sp_kept and falls_off_as_guest)}")
         out.append("}")
         out.append("")
         if any(BODY_CALL_DRAIN in line for line in out):

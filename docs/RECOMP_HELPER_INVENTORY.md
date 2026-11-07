@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **466** (declared in `recomp.h`: 394)
-- reach class: emitter-reached 82, production-runtime-only 348, selftest-only 0, address-only 8, none 28
-- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 427
+- helpers: **467** (declared in `recomp.h`: 395)
+- reach class: emitter-reached 83, production-runtime-only 348, selftest-only 0, address-only 8, none 28
+- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 428
 
 ## Helpers
 
@@ -448,6 +448,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_tail_drain` | `rt/guest_interp.c` | yes | emitter-reached (via `SR_TAIL_DRAIN`) | `rt/guest_interp.c`: project_authored_attested |
 | `sr_tail_drain_segment` | `rt/guest_interp.c` | yes | production-runtime-only | `rt/guest_interp.c`: project_authored_attested |
 | `sr_tail_fatal` | `rt/guest_interp.c` | yes | production-runtime-only | `rt/guest_interp.c`: project_authored_attested |
+| `sr_tail_note_exit` | `rt/recomp.h` | yes | emitter-reached (direct) | `rt/recomp.h`: upstream_derived |
 | `sr_tail_record` | `rt/recomp.h` | yes | emitter-reached (direct) | `rt/recomp.h`: upstream_derived |
 | `sr_thread_dispatch_callbacks` | `rt/hle.c` | yes | production-runtime-only | `rt/hle.c`: upstream_derived |
 | `sr_thread_has_pending_callbacks` | `rt/hle.c` | yes | production-runtime-only | `rt/hle.c`: upstream_derived |

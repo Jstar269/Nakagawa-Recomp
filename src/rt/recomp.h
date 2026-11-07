@@ -1731,6 +1731,13 @@ int sr_aot_return_boundary_capture_return(CpuState *s, uint32_t target, const ui
  * gives back a frame the chain handed on live, so it only raises SP: a chain that ends
  * above it left through a longjmp or an unwind, and the guest's SP stands (#1935).
  *
+ * A body whose $sp load left its frame, a context switch or a longjmp, has moved the guest
+ * out of every frame the chain entered before it, so its record releases the restores
+ * recorded before it (SR_TAIL_RELEASES), and a later body's restore is again the first. A
+ * body that ends that way by returning, with no record, says so in `released`
+ * (sr_tail_note_exit) for the drain that ran it; every other invoker clears it, since the
+ * body's caller is then native code that goes on in its own frame (#1935).
+ *
  * A transfer to a computed target is one dispatch (dispatch_tail_step). The direct transfers
  * that follow it used to nest inside that dispatch, so the step drains them itself
  * (sr_tail_drain_segment): exception and ERET flow they raise is handled by the step's own
@@ -1742,8 +1749,14 @@ typedef struct {
     uint32_t target;        /* guest target address */
     uint32_t restore_sp;    /* the recording body's entry SP, when it owes the restore */
     uint8_t pending;
-    uint8_t has_restore;
+    uint8_t has_restore;    /* SR_TAIL_OWES and SR_TAIL_RELEASES */
+    uint8_t released;       /* the body just run returned out of its frame (no record) */
 } SrTailTransfer;
+/* The recording body owes `restore_sp` once the chain completes. */
+#define SR_TAIL_OWES 1u
+/* The recording body loaded $sp out of its frame: the restores recorded before it are void.
+ * A drain segment passes on both bits for its part of the chain, the release first. */
+#define SR_TAIL_RELEASES 2u
 extern SrTailTransfer sr_tail_transfer;    /* defined in guest_interp.c */
 /* Fatal, named stop for a broken protocol (double record, leaked slot, foreign state). */
 void sr_tail_fatal(const char *what, uint32_t target);
@@ -1763,17 +1776,25 @@ static inline void sr_tail_record(CpuState *s, uint32_t target, RecompFn fn,
     sr_tail_transfer.state = s;
     sr_tail_transfer.target = target;
     sr_tail_transfer.restore_sp = restore_sp;
-    sr_tail_transfer.has_restore = owes_restore ? 1u : 0u;
+    sr_tail_transfer.has_restore =
+        (uint8_t)(owes_restore & (SR_TAIL_OWES | SR_TAIL_RELEASES));
     sr_tail_transfer.pending = 1u;
 }
+/* A guest exit that returns with no record: `verdict` is the body's _sp_kept (#1935). */
+static inline void sr_tail_note_exit(uint32_t verdict) {
+    if (verdict & SR_TAIL_RELEASES) sr_tail_transfer.released = 1u;
+}
+/* A direct CALL completes the callee's chain; a release at its end is the callee's own. */
 #define SR_TAIL_DRAIN(s) do { \
     if (__builtin_expect(sr_tail_transfer.pending != 0u, 0)) sr_tail_drain(s); \
+    sr_tail_transfer.released = 0u; \
 } while (0)
 /* Invoke a native body and complete its tail chain (runtime direct calls). */
 static inline void sr_call_body(RecompFn fn, CpuState *s) {
     if (sr_aot_return_boundary_begin(s, 0u, s->pc, 0u)) return;
     fn(s);
     if (sr_tail_transfer.pending) sr_tail_drain(s);
+    sr_tail_transfer.released = 0u;
     if (sr_aot_return_boundary_end(s)) return;
 }
 /* A recorded transfer must never survive to a yield, syscall or new dispatch. */

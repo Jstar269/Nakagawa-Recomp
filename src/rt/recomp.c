@@ -2645,6 +2645,11 @@ static void dispatch_call_aot(RecompFn fn, CpuState *s, uint32_t target,
         if (drain == SR_DRAIN_CHAIN) sr_tail_drain(s);
         else sr_tail_drain_segment(s);
     }
+    /* A chain that ended out of its frame (sr_tail_note_exit) tells the enclosing drain of a
+     * computed step, and an interpreted caller's continuation, which owe no restore then. A
+     * whole chain's other callers go on in their own frames (#1935). */
+    if (drain == SR_DRAIN_CHAIN && !(call_boundary != NULL && call_boundary->continuation))
+        sr_tail_transfer.released = 0u;
     if (owns_return_boundary) (void)sr_aot_return_boundary_end(s);
     sr_exec_leave(exec_previous);
     if (sr_perf_enabled) sr_perf_aot_end();
