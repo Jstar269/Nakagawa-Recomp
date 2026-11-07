@@ -1405,7 +1405,8 @@ static const char *sreg_owner_name_default(void) {
         } else if (read && env != NULL && env[0] == '\0') {
             snprintf(why, sizeof(why), "is empty");
         } else {
-            snprintf(why, sizeof(why), "is not 1 to %u bytes of UTF-8 without control characters",
+            snprintf(why, sizeof(why), "is not 1 to %u bytes of UTF-8 without control characters, "
+                     "or is only spaces",
                      (unsigned)NK_NICKNAME_MAX_BYTES);
         }
         fprintf(stderr, "sceReg: SR_NICKNAME %s; the nickname (/CONFIG/SYSTEM/owner_name) is the "

@@ -1982,6 +1982,19 @@ static void player_ui_nickname_open(PlayerUiNk *player, bool first_launch) {
                      NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts, NULL);
 }
 
+/* What Done saves: the typed text without the spaces (U+0020) before and after
+   it, so "  Kai " is "Kai" and a nickname of spaces alone is empty, which
+   nk_nickname_valid refuses. The typed text itself is left as it is. */
+static const char *player_ui_nickname_trimmed(const char *text, char *out, size_t cap) {
+    size_t start = 0u, end = strlen(text);
+    while (start < end && text[start] == ' ') start++;
+    while (end > start && text[end - 1u] == ' ') end--;
+    if (end - start >= cap) end = start + cap - 1u;
+    memcpy(out, text + start, end - start);
+    out[end - start] = '\0';
+    return out;
+}
+
 static void player_ui_nickname_close(PlayerUiNk *player) {
     player->nickname_open = false;
     player->nickname_refused = false;
@@ -2968,10 +2981,13 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         } else if (action.kind == PLAYER_UI_ACTION_NICKNAME) {
             /* Skip keeps the nickname; a Save the rule refuses keeps the editor
                open, with the old nickname, and says why. */
+            char trimmed[NK_NICKNAME_MAX_BYTES + 1u];
             bool save = (unsigned)action.primary == PLAYER_UI_NICKNAME_SAVE;
+            const char *chosen = player_ui_nickname_trimmed(player->nickname_text, trimmed,
+                                                            sizeof(trimmed));
             bool done = player->nickname_first_launch
-                ? player_app_nickname_prompt_answer(app, save ? player->nickname_text : NULL)
-                : !save || player_app_set_nickname(app, player->nickname_text);
+                ? player_app_nickname_prompt_answer(app, save ? chosen : NULL)
+                : !save || player_app_set_nickname(app, chosen);
             if (done) {
                 player_ui_nickname_close(player);
             } else {

@@ -5621,6 +5621,23 @@ static void test_nickname_keyboard(void) {
     CHECK(nk_ui_focused(ui) == q && find_command(draw, q, NK_UI_DRAW_TEXT, theme->muted) != NULL &&
               nickname_dump_has(ui, &model, "\"32 / 32 bytes\""),
           "a full text dims the keys, keeps the focus where it was, and reads 32 / 32 bytes");
+    {
+        /* #2197 review: colour is not the only cue. A key that cannot type also loses its
+           outline (w here, not focused, so no focus ring either), and keeps its size: its
+           label sits where it does once the key can type again. */
+        const NkUiDrawCmd *label = find_command(draw, key + 11u, NK_UI_DRAW_TEXT, theme->muted);
+        int dimmed[4] = {0, 0, 0, 0};
+        bool outlined = find_command(draw, key + 11u, NK_UI_DRAW_BORDER, 0u) != NULL;
+        if (label != NULL) memcpy(dimmed, label->bounds, sizeof(dimmed));
+        CHECK(label != NULL && !outlined, "a key that cannot type is drawn without its outline");
+        typed[31] = '\0';
+        (void)nickname_frame(ui, &model, &draw);
+        label = find_command(draw, key + 11u, NK_UI_DRAW_TEXT, 0u);
+        CHECK(label != NULL && label->rgba_pm != theme->muted &&
+                  find_command(draw, key + 11u, NK_UI_DRAW_BORDER, 0u) != NULL &&
+                  memcmp(label->bounds, dimmed, sizeof(dimmed)) == 0,
+              "a key that can type again has its outline back, in the same place and size");
+    }
     (void)snprintf(typed, sizeof(typed), "%s", "abcdefghijklmnopqrstuvwxyz01234");
     CHECK(!ui_keyboard_type(&keyboard, "\xC3\xA9") && strlen(typed) == 31u,
           "a 2-byte character does not fit in the last byte");

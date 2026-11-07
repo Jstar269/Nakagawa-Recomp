@@ -2364,6 +2364,57 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(settings, dict)
         self.assertEqual(settings.get("nickname"), "Abc")
 
+    def test_next_ui_nickname_done_trims_spaces_and_refuses_only_spaces(self) -> None:
+        """#2197 review: Done saves the typed text without the spaces around it, and a nickname
+        of spaces alone is refused (nk_nickname_valid, the runtime's rule too), so the editor
+        stays open and the nickname is kept. Typed both on a physical keyboard and with the
+        on-screen Space key (Y). Failing-before: "   " passed the rule and was saved, and
+        "  Kai  " was saved with its spaces."""
+        old = {"nickname": "Old name", "nickname_asked": True}
+        open_editor = ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100")
+        trimmed = self.next_ui_run(
+            "online-settings", open_editor + ("TEXT=  Kai  ", "KEY_RETURN", "WAIT_MS=100"),
+            settings=dict(old))
+        self.assertIn(("  Kai  ", "7 / 32 bytes"), self.nickname_states(trimmed))
+        saved = trimmed["settings"]
+        assert isinstance(saved, dict)
+        self.assertEqual(saved.get("nickname"), "Kai", "Done trims the spaces around the name")
+        self.assertEqual(self.focus_trail(trimmed)[-1], self.SETTINGS_NICKNAME,
+                         "the trimmed name was saved and the editor closed")
+        for name, typed in (("a physical keyboard", ("TEXT=   ", "KEY_RETURN")),
+                            ("the Space key", ("PAD_NORTH",) * 3 + ("PAD_START",))):
+            with self.subTest(typed=name):
+                run = self.next_ui_run("online-settings",
+                                       open_editor + typed + ("WAIT_MS=200",),
+                                       settings=dict(old))
+                states = self.nickname_states(run)
+                self.assertIn(("   ", "3 / 32 bytes"), states, f"{name}: three spaces were typed")
+                saved = run["settings"]
+                nickname = saved.get("nickname") if isinstance(saved, dict) else old["nickname"]
+                self.assertEqual(nickname, "Old name", f"{name}: spaces alone are not saved")
+                self.assertEqual(states[-1], ("   ", "3 / 32 bytes"),
+                                 f"{name}: the refused Done keeps the editor open as it was")
+                self.assertNotEqual(self.focus_trail(run)[-1], self.SETTINGS_NICKNAME,
+                                    f"{name}: the editor did not close")
+
+    def test_next_ui_nickname_physical_tab_moves_focus_and_is_not_shift(self) -> None:
+        """#2197 review N3: a physical Tab is the toolkit's focus cycle (NK_UI_EV_CYCLE) in the
+        nickname editor as everywhere, not Shift: L and R (NK_UI_EV_TAB) are Shift, and the Q
+        and E keys that also mean TAB elsewhere type their letters here. Tab moves focus off q,
+        and A then types a lowercase letter."""
+        run = self.next_ui_run(
+            "online-settings",
+            ("WAIT_MS=100", "PAD_DPAD_DOWN", "PAD_SOUTH", "WAIT_MS=100", "KEY_TAB", "WAIT_MS=50",
+             "PAD_SOUTH", "WAIT_MS=50", "TEXT=qe", "WAIT_MS=100"),
+            settings={"nickname": "Old name", "nickname_asked": True})
+        trail = self.focus_trail(run)
+        at_q = trail.index(self.NICKNAME_KEY_Q)
+        self.assertEqual(trail[at_q + 1:at_q + 2], [str(0x4570 + 11)],
+                         f"Tab moves focus from q to the next key, w: {trail}")
+        states = self.nickname_states(run)
+        self.assertEqual([text for text, _ in states], ["", "w", "wqe"],
+                         f"Tab did not turn Shift on, and q and e typed letters: {states}")
+
     def bare_screenshot(self, view: str,
                         settings: dict[str, object] | None) -> tuple[bytes, object]:
         """A bare ``--screenshot=<bmp> --view=<view>`` run, as tools/capture_native_screenshots.py
@@ -2411,20 +2462,27 @@ class NativePlayerUiTests(unittest.TestCase):
         as the other next-UI tests read it, never the frames themselves. On hosted CI (the
         Linux player UI job installs SDL3_ttf, and the repository ships open fonts) a missing
         marker fails instead of skipping, and with the next UI running, a prompt view that
-        draws the same frame as the answered one is a failure."""
+        draws the same frame as the answered one is a failure.
+
+        Review S1: both roots turn Reduce motion on (``reduce_motion_choice``), which holds every
+        animation and transition still, so the frame a run captures does not depend on how far
+        a busy host let its clock run before the capture. The fresh root is still one that has
+        not answered the prompt: a settings.json without ``nickname_asked`` reads as not asked,
+        as a missing file does."""
         marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
         if marker not in str(self.run_player("empty")["stdout"]):
             if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"):
                 self.fail("the next UI did not start on this CI host (no UI_NEXT_ACTIVE "
                           "marker), so the nickname prompt could not be checked")
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
-        answered = {"nickname_asked": True}
-        prompt_fresh, _ = self.bare_screenshot("nickname-prompt", None)
+        fresh_root = {"reduce_motion_choice": "on"}
+        answered = {**fresh_root, "nickname_asked": True}
+        prompt_fresh, _ = self.bare_screenshot("nickname-prompt", fresh_root)
         prompt_answered, _ = self.bare_screenshot("nickname-prompt", answered)
         self.assertTrue(prompt_fresh != prompt_answered, "the prompt view drew no prompt")
         for view in ("settings", "library"):
             with self.subTest(view=view):
-                fresh, saved = self.bare_screenshot(view, None)
+                fresh, saved = self.bare_screenshot(view, fresh_root)
                 reference, _ = self.bare_screenshot(view, answered)
                 self.assertEqual(fresh, reference, "the fresh root's frame shows the prompt")
                 self.assertFalse(isinstance(saved, dict) and saved.get("nickname_asked") is True,

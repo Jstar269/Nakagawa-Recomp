@@ -7358,7 +7358,7 @@ static unsigned sysreg_count_word(const char *text, const char *word) {
  * Malformed UTF-8 cannot pass through the Windows environment, so test_nk_nickname covers it. */
 static void test_sysparam_nickname_from_launcher(void) {
     char long_ok[33], long_bad[34], log[1024];
-    const char *const refused[] = { long_bad, "a\x01" "b", "tab\tname" };
+    const char *const refused[] = { long_bad, "a\x01" "b", "tab\tname", "   " };
     uint32_t r = 0u, reg, xmb;
     FILE *capture = NULL;
     int saved_fd = -1, capturing;

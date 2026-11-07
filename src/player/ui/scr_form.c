@@ -156,11 +156,14 @@ bool scr_wizard_switch(NkUi *ui, NkUiId id, NkUiId text_id, const char *name,
 }
 
 bool player_ui_nickname_accepts(uint32_t codepoint, void *user) {
-    /* One character is a valid nickname exactly when the rule takes it anywhere in
-       one: nk_nickname_valid checks each character alone, then the length. */
-    char bytes[5];
+    /* The rule takes a character anywhere in a nickname exactly when it takes it
+       after a letter: nk_nickname_valid checks each character alone, then the
+       length, and refuses a name made only of spaces. The letter is what lets a
+       space through here; Done checks the whole name. */
+    char bytes[6] = {'x'};
     (void)user;
-    return ui_keyboard_utf8(codepoint, bytes) > 0u && nk_nickname_valid(bytes);
+    return codepoint != 0u && ui_keyboard_utf8(codepoint, bytes + 1) > 0u &&
+           nk_nickname_valid(bytes);
 }
 
 /* The nickname editor (#2197): the box with what is typed (the nickname in use,
@@ -254,7 +257,7 @@ PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *
     if (model->refused) {
         nk_ui_text_role(ui, FLOW_ID_NICKNAME_NOTE,
                         "A nickname is 1 to 32 bytes of text (32 letters, fewer if they are "
-                        "accented or Japanese), with no control characters.",
+                        "accented or Japanese), with no control characters and not only spaces.",
                         NK_UI_TYPE_BODY_S, theme->warning);
     }
     memset(&view, 0, sizeof(view));

@@ -88,6 +88,25 @@ static void test_control_characters(void) {
     CHECK(nk_nickname_valid("nb\xC2\xA0sp"), "U+00A0, just past the C1 block, is kept");
 }
 
+/* #2197 review: a nickname made only of spaces shows as no name, so the rule refuses it, for
+ * the player and the runtime alike. Spaces in or around a name are kept (the editor trims the
+ * ones around it on Done), and the cap still counts them. */
+static void test_spaces(void) {
+    char text[64];
+    CHECK(!nk_nickname_valid(" "), "one space is refused");
+    CHECK(!nk_nickname_valid("   "), "three spaces are refused");
+    CHECK(!nk_nickname_valid(repeat(text, sizeof(text), ' ', 32u, "")),
+          "32 spaces, at the cap, are refused");
+    CHECK(nk_nickname_valid(" Kai "), "spaces around a name are kept by the rule");
+    CHECK(nk_nickname_valid(repeat(text, sizeof(text), ' ', 31u, "k")),
+          "31 spaces and a letter are a name");
+    CHECK(!nk_nickname_valid(repeat(text, sizeof(text), ' ', 32u, "k")),
+          "32 spaces and a letter pass the cap and are refused");
+    CHECK(nk_nickname_valid("  \xC3\xA9"), "spaces and a two-byte letter are a name");
+    CHECK(nk_nickname_valid("\xC2\xA0"), "U+00A0 alone is not U+0020 and is kept");
+    CHECK(!nk_nickname_valid("  \x01"), "spaces and a control character are refused");
+}
+
 static void test_utf8(void) {
     static const char *const refused[] = {
         "\x80", "a\xBF", "\xC3", "ab\xE3\x81", "\xC0\xAF", "\xC1\xBF", "\xE0\x80\xAF",
@@ -112,6 +131,7 @@ int main(void) {
     test_length();
     test_empty_and_null();
     test_control_characters();
+    test_spaces();
     test_utf8();
     if (g_failures != 0) {
         fprintf(stderr, "test_nk_nickname: %d of %d checks failed\n", g_failures, g_checks);

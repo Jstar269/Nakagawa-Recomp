@@ -183,7 +183,10 @@ static bool character_key(NkUi *ui, NkUiId id, const char *label, bool usable) {
     layout.align_x = NK_UI_ALIGN_CENTER;
     layout.align_y = NK_UI_ALIGN_CENTER;
     memset(&style, 0, sizeof(style));
-    style.border_width = NK_UI_BORDER_HAIRLINE;
+    /* A key that cannot type now (the cap, or the filter) loses its outline as well as
+       its label colour, so colour is not the only cue: its shape changes too. The
+       outline is drawn inside the key, so the key keeps its size. */
+    style.border_width = usable ? NK_UI_BORDER_HAIRLINE : 0.0f;
     style.corner_radius = NK_UI_RADIUS_CONTROL;
     style.border_rgba = theme->line_strong;
     focused = nk_ui_button_focused(ui, id);

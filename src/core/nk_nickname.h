@@ -33,10 +33,13 @@
 
 /* True when `nickname` is 1 to NK_NICKNAME_MAX_BYTES bytes of well-formed UTF-8 (no overlong
  * form, no surrogate, nothing past U+10FFFF) with no control character: C0 (U+0000 to U+001F),
- * DEL (U+007F) or C1 (U+0080 to U+009F). */
+ * DEL (U+007F) or C1 (U+0080 to U+009F), and with at least one character that is not a space
+ * (U+0020): a nickname made only of spaces shows as no name at all, so it is refused. Spaces
+ * around or inside a name are kept; the player's editor trims the ones around it on Done. */
 static inline bool nk_nickname_valid(const char *nickname) {
     const unsigned char *s = (const unsigned char *)nickname;
     size_t i = 0u;
+    bool named = false; /* a character other than U+0020 was seen */
     if (s == NULL || s[0] == 0u) return false;
     while (s[i] != 0u) {
         unsigned char lead = s[i];
@@ -45,6 +48,7 @@ static inline bool nk_nickname_valid(const char *nickname) {
         unsigned long min;
         if (lead < 0x80u) {
             if (lead < 0x20u || lead == 0x7Fu) return false;
+            if (lead != 0x20u) named = true;
             i++;
             if (i > NK_NICKNAME_MAX_BYTES) return false;
             continue;
@@ -70,10 +74,11 @@ static inline bool nk_nickname_valid(const char *nickname) {
         }
         if (cp < min || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return false;
         if (cp <= 0x9Fu) return false; /* C1 controls */
+        named = true;
         i += 1u + extra;
         if (i > NK_NICKNAME_MAX_BYTES) return false;
     }
-    return true;
+    return named;
 }
 
 #endif /* NK_NICKNAME_H */

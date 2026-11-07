@@ -1233,7 +1233,8 @@ PlayerUiAction player_ui_screen_developer_log(NkUi *ui, const PlayerUiDeveloperL
    Back also answers. */
 PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *model);
 /* The nickname editor's character filter (UiKeyboardFilter): a character
-   nk_nickname_valid takes, so no control character is ever typed. */
+   nk_nickname_valid takes inside a nickname, so no control character is ever
+   typed. A space is typed; a nickname of spaces alone is refused on Done. */
 bool player_ui_nickname_accepts(uint32_t codepoint, void *user);
 
 /* The top bar every launcher screen draws: LIBRARY, ABOUT and SETTINGS tabs,

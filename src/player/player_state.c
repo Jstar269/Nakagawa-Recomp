@@ -10837,7 +10837,8 @@ bool player_app_nickname_prompt_answer(PlayerApp *app, const char *nickname) {
     if (!app) return false;
     if (nickname && !nk_nickname_valid(nickname)) {
         player_dev_log_add(app, "settings", "the nickname was refused: it is not 1 to %u bytes "
-                           "of UTF-8 without control characters", NK_NICKNAME_MAX_BYTES);
+                           "of UTF-8 without control characters, or is only spaces",
+                           NK_NICKNAME_MAX_BYTES);
         return false;
     }
     if (nickname) snprintf(app->settings.nickname, sizeof(app->settings.nickname), "%s", nickname);
@@ -10851,7 +10852,8 @@ bool player_app_set_nickname(PlayerApp *app, const char *nickname) {
     if (!app) return false;
     if (!nk_nickname_valid(nickname)) {
         player_dev_log_add(app, "settings", "the nickname was refused: it is not 1 to %u bytes "
-                           "of UTF-8 without control characters", NK_NICKNAME_MAX_BYTES);
+                           "of UTF-8 without control characters, or is only spaces",
+                           NK_NICKNAME_MAX_BYTES);
         return false;
     }
     snprintf(app->settings.nickname, sizeof(app->settings.nickname), "%s", nickname);
