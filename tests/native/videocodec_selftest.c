@@ -839,6 +839,19 @@ static void test_audiocodec(void) {
           "releaseedram: the ME memory and the decoder go and the words are cleared");
     CHECK(call(NID_AC_RELEASE, G_AC, 0, 0, 0) == AC_ERR_EDRAM_NOT_HELD,
           "releaseedram: a second release is refused");
+
+    /* A work area recycled without a release (the title clears or reuses it, so +104 no longer
+     * names its allocation) is not wedged: GetEDRAM frees the stale allocation and makes a new
+     * one, and the new one releases (delta review S-new-1). */
+    CHECK(call(NID_AC_NEEDMEM, G_AC, AC_CODEC, 0, 0) == 0u && call(NID_AC_GETEDRAM, G_AC, AC_CODEC, 0, 0) == 0u &&
+              call(NID_AC_INIT, G_AC, AC_CODEC, 0, 0) == 0u && s_me_alloc_count == allocs + 1,
+          "recycle: a work area holds EDRAM and a decoder");
+    memset(host(G_AC), 0, AC_WORK_BYTES_EDRAM);
+    CHECK(call(NID_AC_NEEDMEM, G_AC, AC_CODEC, 0, 0) == 0u && call(NID_AC_GETEDRAM, G_AC, AC_CODEC, 0, 0) == 0u &&
+              s_me_alloc_count == allocs + 1 && MEM_R32(G_AC + 104u) != 0u && !ac_find(G_AC),
+          "recycle: GetEDRAM on the cleared work area frees the stale allocation and makes a new one");
+    CHECK(call(NID_AC_RELEASE, G_AC, 0, 0, 0) == 0u && s_me_alloc_count == allocs,
+          "recycle: the new allocation releases");
 }
 
 int main(void) {

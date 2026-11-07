@@ -788,18 +788,28 @@ static uint32_t h_AudiocodecCheckNeedMem(CpuState *s) {
 
 /* sceAudiocodecGetEDRAM(workArea, codec): uofw allocates ((+16) + 0x3F) | 0x3F bytes of ME
  * memory, keeps the raw address at +104 and publishes it 64-byte aligned at +12.
- * A work area that already holds an allocation is refused. uofw does not check: it allocates
- * again and overwrites +104, orphaning the first allocation, with no error of its own for
- * this. Here the ME RAM is shared with every video context, so the leak would starve them;
- * the refusal and its code are a synthetic choice (W-LLE-1), like sceVideocodecGetEDRAM's. */
+ * uofw does not check for an earlier allocation: it allocates again and overwrites +104,
+ * orphaning the first, with no error of its own. Here the ME RAM is shared with every video
+ * context, so the orphan would starve them:
+ *   - a work area whose +104 still names the allocation it owns is refused (0x807F0003, a
+ *     synthetic choice like sceVideocodecGetEDRAM's: W-LLE-1);
+ *   - a work area that owns an allocation +104 no longer names was recycled without a release
+ *     (cleared or reused by the title): that stale allocation and its host decoder go, and a
+ *     new allocation is made, as on the PSP. */
 static uint32_t h_AudiocodecGetEDRAM(CpuState *s) {
     static const char call[] = "sceAudiocodecGetEDRAM";
     const uint32_t work = A0;
     const uint32_t r = ac_check(call, work, A1, AC_WORK_BYTES_EDRAM);
     if (r) return r;
-    if (me_audio_allocation(work))
-        return vc_refuse(call, "work area already holds its ME memory (sceAudiocodecReleaseEDRAM first)",
-                         AC_ERR_EDRAM);
+    const uint32_t held = me_audio_allocation(work);
+    if (held) {
+        if (MEM_R32(work + 104u) == held)
+            return vc_refuse(call, "work area already holds its ME memory (sceAudiocodecReleaseEDRAM first)",
+                             AC_ERR_EDRAM);
+        (void)me_free(held, ME_OWNER_AUDIO, work);
+        AcContext *stale = ac_find(work);
+        if (stale) ac_drop(stale);
+    }
     uint32_t size;
     uint32_t addr = 0u;
     if (sr_size_add_ok(MEM_R32(work + 16u), 0x3Fu, &size)) addr = me_alloc(size | 0x3Fu, ME_OWNER_AUDIO, work);

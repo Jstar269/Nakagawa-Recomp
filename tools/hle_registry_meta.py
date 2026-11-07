@@ -2333,21 +2333,21 @@ HANDLER_METADATA = {
         "evidence": [
             "tests/native/videocodec_selftest.c:test_audiocodec",
         ],
-        "limitation": "codec 0x1000 only; allocates ((+16) + 0x3F) | 0x3F bytes of the host ME RAM model as uofw does; the addresses are not PSP-measured",
+        "limitation": "codec 0x1000 only; allocates ((+16) + 0x3F) | 0x3F bytes of the host ME RAM model, owned by the work area, as uofw sizes it; a work area whose +104 still names its allocation is refused with 0x807F0003 (uofw allocates again and orphans the first; the refusal is synthetic pending W-LLE-1); one whose +104 no longer names it (recycled without a release) gets a new allocation and the stale one is freed; the addresses are not PSP-measured",
     },
     "h_AudiocodecReleaseEDRAM": {
         "status": "partial",
         "evidence": [
             "tests/native/videocodec_selftest.c:test_audiocodec",
         ],
-        "limitation": "frees only allocations of the host ME RAM model; clears +104 and +12 and drops the host decoder as JPCSP does",
+        "limitation": "frees only the host ME RAM allocation the work area owns: a +104 naming any other allocation (another work area's, a video context's) is refused with 0x807F0004 and nothing is freed; clears +104 and +12 and drops the host decoder as JPCSP does",
     },
     "h_AudiocodecInit": {
         "status": "partial",
         "evidence": [
             "tests/native/videocodec_selftest.c:test_audiocodec",
         ],
-        "limitation": "codec 0x1000 only; refuses a work area without EDRAM (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)",
+        "limitation": "codec 0x1000 only; refuses a work area that owns no EDRAM, or whose +12 is not the EDRAM sceAudiocodecGetEDRAM published for it (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)",
     },
     "h_AudiocodecDecode": {
         "status": "partial",

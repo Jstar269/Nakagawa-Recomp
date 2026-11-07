@@ -216,13 +216,13 @@ Semantic handler census: **580** handlers across **30** API families, covering *
   - Limitation: codec 0x1000 only, PSMF frames with the 0x0FD0 header only; mono or stereo input into a mono or stereo 16-bit block (no downmix); synchronous decode; the +28 and +36 words and the refusal code are synthetic pending W-LLE-1
   - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
 - **`h_AudiocodecGetEDRAM`** (`sceAudiocodec`): `sceAudiocodecGetEDRAM` (0x3a20a200)
-  - Limitation: codec 0x1000 only; allocates ((+16) + 0x3F) | 0x3F bytes of the host ME RAM model as uofw does; the addresses are not PSP-measured
+  - Limitation: codec 0x1000 only; allocates ((+16) + 0x3F) | 0x3F bytes of the host ME RAM model, owned by the work area, as uofw sizes it; a work area whose +104 still names its allocation is refused with 0x807F0003 (uofw allocates again and orphans the first; the refusal is synthetic pending W-LLE-1); one whose +104 no longer names it (recycled without a release) gets a new allocation and the stale one is freed; the addresses are not PSP-measured
   - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
 - **`h_AudiocodecInit`** (`sceAudiocodec`): `sceAudiocodecInit` (0x5b37eb1d)
-  - Limitation: codec 0x1000 only; refuses a work area without EDRAM (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)
+  - Limitation: codec 0x1000 only; refuses a work area that owns no EDRAM, or whose +12 is not the EDRAM sceAudiocodecGetEDRAM published for it (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)
   - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
 - **`h_AudiocodecReleaseEDRAM`** (`sceAudiocodec`): `sceAudiocodecReleaseEDRAM` (0x29681260)
-  - Limitation: frees only allocations of the host ME RAM model; clears +104 and +12 and drops the host decoder as JPCSP does
+  - Limitation: frees only the host ME RAM allocation the work area owns: a +104 naming any other allocation (another work area's, a video context's) is refused with 0x807F0004 and nothing is freed; clears +104 and +12 and drops the host decoder as JPCSP does
   - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
 - **`h_CtrlGetSamplingCycle`** (`sceCtrl`): `sceCtrlGetSamplingCycle` (0x02baad91)
   - Limitation: reports the cycle retained by sceCtrlSetSamplingCycle; PSPAutotests leaves the NULL out-pointer call out as crashing a PSP, so the ILLEGAL_ADDR refusal used here instead is the runtime's fail-closed choice, not a measured code
