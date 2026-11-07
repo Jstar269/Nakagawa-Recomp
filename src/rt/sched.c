@@ -3333,8 +3333,23 @@ static void sched_preempt_timer_arm(void) {
     SDL_UnlockMutex(s_preempt_timer_mutex);
 }
 
+/* The two host threads that keep guest time (#1296): the scheduler's, which runs every guest
+ * thread and sleeps until the next deadline when none is ready, and the preemption timer's. At
+ * normal priority a busy host keeps either one from its core after its sleep ends: with every
+ * core busy, a 1-16 ms SDL_DelayPrecise on the reference PC ended a median 20 ms and up to 52 ms
+ * late, against under 1 ms at high priority or on an idle host. Each late wake makes the guest
+ * thread due then late, and the priority-16 sound threads of Hot Shots Tennis let the host queue
+ * run dry. Each thread raises itself once; a host that refuses keeps normal priority and says so. */
+static void sched_host_thread_raise(const char *which) {
+    if (SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH)) return;
+    fprintf(stderr, "sched: the host refused high priority for the %s thread; on a busy host a timed "
+                    "wake can come late\n", which);
+    fflush(stderr);
+}
+
 static int SDLCALL sched_preempt_timer_main(void *unused) {
     (void)unused;
+    sched_host_thread_raise("preemption timer");
     SDL_LockMutex(s_preempt_timer_mutex);
     for (;;) {
         const uint64_t at = s_preempt_timer_at_ns;
@@ -3368,6 +3383,7 @@ static int SDLCALL sched_preempt_timer_main(void *unused) {
 void sched_preempt_timer_start(void) {
     pace_setup();
     if (!s_pace_on || s_preempt_timer_mode != SCHED_PREEMPT_TIMER_OFF) return;
+    sched_host_thread_raise("scheduler");   /* the driver calls this on the scheduler's thread */
     s_preempt_timer_mutex = SDL_CreateMutex();
     s_preempt_timer_cond = SDL_CreateCondition();
     SDL_Thread *thread = s_preempt_timer_mutex && s_preempt_timer_cond

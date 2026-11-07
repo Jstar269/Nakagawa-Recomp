@@ -1820,6 +1820,17 @@ static void save_blob(SaveMember *m, unsigned *n, const char *name, uint32_t fd)
     (*n)++;
 }
 
+/* The preemption timer's edge inside a SAVE (#1296). A SAVE makes one durable host write per
+ * member, then journals, publishes, commits and cleans up, each step about 2 ms on an SSD: a Hot
+ * Shots Tennis save ran its caller for 32 ms in one call while the game's priority-16 sound
+ * threads were due. Between those steps the call hands the CPU over (sched_preempt_point), as a
+ * GE list does between commands. Meanwhile the savedata slot stays busy (another start is
+ * refused, and the status reads running) and the save directory stays locked; as on the PSP,
+ * where a utility thread does this work, the caller's own threads keep running. */
+static void savedata_preempt_point(void) {
+    if (atomic_load_explicit(&sr_preempt_due, memory_order_relaxed)) sched_preempt_point();
+}
+
 /* SAVE (and AUTOSAVE, LISTSAVE, MAKEDATA, WRITEDATA): one transaction over the members (see
  * "the SAVE transaction"). keep_previous: an automatically confirmed list overwrite keeps the
  * version it replaces under K names (resolve_save). */
@@ -1905,6 +1916,7 @@ static uint32_t do_save(uint32_t param, const char *game, const char *save, int 
     char sn[40], pn[40];
     /* 2. Stage every member. */
     for (unsigned i = 0; ok && i < n; i++) {
+        savedata_preempt_point();
         ok = stage_name(sn, sizeof(sn), i) &&
              sd_write_new(&d, sn, mem[i].data, mem[i].size, when, &nospace);
         rec.s[i].new_size = mem[i].size;
@@ -1923,20 +1935,24 @@ static uint32_t do_save(uint32_t param, const char *game, const char *save, int 
     }
     /* 4-6. Journal, publish, commit. */
     if (ok) {
+        savedata_preempt_point();
         uint8_t b[SD_RECORD_MAX];
         const uint32_t len = sd_record_encode(&rec, b);
         ok = sd_write_new(&d, SAVEDATA_JOURNAL_NAME, b, len, when, &nospace) && sd_flush_dir(&d);
     }
     for (unsigned i = 0; ok && i < n; i++) {
+        savedata_preempt_point();
         ok = stage_name(sn, sizeof(sn), i) && prev_name(pn, sizeof(pn), rec.s[i].name) &&
              (!rec.s[i].prev || sd_rename(&d, rec.s[i].name, pn, 0)) &&
              sd_rename(&d, sn, rec.s[i].name, 0);
     }
+    savedata_preempt_point();
     if (ok) ok = sd_flush_dir(&d);
     if (ok) committed = sd_rename(&d, SAVEDATA_JOURNAL_NAME, SAVEDATA_COMMIT_NAME, 0);
     if (committed && !sd_flush_dir(&d))
         fprintf(stderr, "savedata: SAVE %s committed, but the host could not confirm it is on disk\n", dir);
     /* 7. Clean up, or undo, from what is on disk. */
+    savedata_preempt_point();
     const int r = sd_recover(&d, 0);
     sd_dir_close(&d);
     if (committed || r == SD_RECOVER_COMMITTED) {
