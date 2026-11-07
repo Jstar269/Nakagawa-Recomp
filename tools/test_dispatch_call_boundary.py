@@ -485,6 +485,7 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
                              tail_called_from_alloca: bool = False,
                              tail_called_plainly: bool = False,
                              through_a_piece: bool = False,
+                             called_from_a_piece: bool = False,
                              eret_into: str | None = None) -> tuple[int, ...]:
     """setjmp in F, longjmp from G called by F: F's setjmp returns again, v0 = 0x107.
 
@@ -499,7 +500,9 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
     ``tail_called_from_alloca``, G calls H, which frees an alloca, releases its frame and
     tail-calls longjmp. With ``tail_called_plainly``, H has a frame and no alloca, and
     tail-calls longjmp the same way. With ``through_a_piece``, H lowers $sp and hands its
-    live frame to P with `j`; P, an entry of its own, tail-calls longjmp. With ``eret_into``,
+    live frame to P with `j`; P, an entry of its own, tail-calls longjmp. With
+    ``called_from_a_piece``, P calls longjmp instead: P's call site clears longjmp's note
+    that it left its frame, and H's chain ends above H's record. With ``eret_into``,
     H lowers $sp and executes `break`; the handler at _ERET_VECTOR(...) steps EPC past it and
     erets into M, the rest of H and an entry of its own. M releases H's frame and returns
     ("returns": G returns normally, v0 = 0xee0) or tail-calls longjmp ("longjmp").
@@ -528,6 +531,12 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
         _jal(longjmp + 4 * (len(saves) + 8)), _NOP,          # never run: makes P an entry
     ] if through_a_piece else [
         _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # H
+        _j(longjmp + 4 * (len(saves) + 8)), _NOP,            # j P
+        _jal(longjmp), _NOP,                                 # P: never returns
+        _lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _jal(longjmp + 4 * (len(saves) + 8)), _NOP,          # never run: makes P an entry
+    ] if called_from_a_piece else [
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # H
         _BREAK,
         *({"returns": [_lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20)],   # M
            "longjmp": [_j(longjmp), _NOP, _NOP]}[eret_into]),
@@ -545,7 +554,7 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
         _lw(_RA, 0x3C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x40),
         _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1044 G
         _jal(h if tail_called_from_alloca or tail_called_plainly or through_a_piece
-             or eret_into else longjmp),                     # 0x104c
+             or called_from_a_piece or eret_into else longjmp),  # 0x104c
         _addiu(_A1, 0, 7),
         _lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20),
         _sw(_SP, 0, _A0), _sw(_RA, 4, _A0),                  # 0x1060 setjmp
@@ -1932,8 +1941,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
             "TS1-an-interpreted-tail-step-owes-no-restore",
             _switch_then_a_sibcall_into_a_guest_sp_body(), (0,),
             {"guest_interp.c": (
-                "sr_tail_record(s, pc, next_fn, tail_entry_sp, loaded_sp ? 0u : 1u);",
-                "sr_tail_record(s, pc, next_fn, 0u, 0u);")},
+                "loaded_sp ? SR_TAIL_RELEASES : SR_TAIL_OWES);",
+                "0u); (void)tail_entry_sp;")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP - 0x60,
             codegen_args=("--omit-aot=0x00001024",),
         )
@@ -2141,7 +2150,10 @@ class GeneratedCallDepthTests(unittest.TestCase):
         self.assertGreater(fields.get("unwinds", 0), 0, output)
         body = generated[generated.index("void f_00001070(CpuState *s) {"):]
         body = body[:body.index("\n}")]
-        self.assertNotIn("_sp_entry", body, "longjmp's exits restore its entry $sp")
+        # longjmp checks its $sp load (#1935) and tells the drain that it left its frame,
+        # but no exit restores its entry $sp over the one it loaded.
+        self.assertNotIn("s->r[29] = _sp_entry", body, "longjmp's exits restore its entry $sp")
+        self.assertIn("sr_tail_note_exit(_sp_kept); return;", body)
 
     def test_switch_case_chaining_to_a_loaded_sp_leaves_the_callers_sp(self):
         # Each case is an entry entered at the alloca-lowered $sp. Before: CASE owed that
@@ -2371,25 +2383,23 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # H releases its frame and tail-calls longjmp, after freeing an alloca or with a
         # plain frame. The plain H records its entry $sp, and longjmp ends the chain above
         # it. Before (#1935): the drain lowered $sp to that record, and the run stopped.
-        released_tail_records = {"guest_interp.c": (
-            "    if (chain_restores && s->r[29] < chain_sp) s->r[29] = chain_sp;",
-            "    if (chain_restores) s->r[29] = chain_sp;")}
+        # Since #1949's limit 2, longjmp's checked load also releases H's record. A piece of
+        # H that calls longjmp ("piece") leaves H's chain by unwinding to F's live frame.
         for name, words in (
                 ("alloca", _longjmp_into_live_frame(tail_called_from_alloca=True)),
-                ("plain", _longjmp_into_live_frame(tail_called_plainly=True))):
+                ("plain", _longjmp_into_live_frame(tail_called_plainly=True)),
+                ("piece", _longjmp_into_live_frame(called_from_a_piece=True))):
             with self.subTest(name):
                 _generated, results = self._probe(words, (0,))
                 rc, output, fields = results[0]
                 self.assertEqual(rc, 0, output)
                 self.assertEqual(fields.get("v0"), 0x107, output)
                 self.assertEqual(fields.get("v1"), _PROBE_SP, output)
-        # R1: the drain lowers $sp to its restore too.
-        self._assert_mutant_fails(
-            "R1-the-drain-lowers-sp", _longjmp_into_live_frame(tail_called_plainly=True),
-            (0,), released_tail_records,
-            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107
-            or r[0][2].get("v1") != _PROBE_SP,
-        )
+        # R1 (the drain lowers $sp to its restore too) no longer changes these chains: the
+        # release voids H's record in "plain" and "alloca", and in "piece" the unwind leaves
+        # past the drain's end. Generated code and the interpreter reach the raise-only rule
+        # with $sp above a restore only after an upward $sp load, which now releases it; the
+        # rule stays for exits that check no load (the stack census, the LLVM backend).
 
     def test_a_longjmp_through_an_interpreted_callees_piece_reaches_the_setjmp_frame(self):
         # G calls H, which lowers $sp and hands its live frame to the native piece P, and P
@@ -2398,10 +2408,12 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # dispatch_call, nothing checked the piece's return, and the interpreter wrote H's
         # entry $sp back and handed back as if H had returned: G returned, v0 = 0xee0.
         words = _longjmp_into_live_frame(through_a_piece=True)
+        calls = _longjmp_into_live_frame(called_from_a_piece=True)
         omit_h = ("--omit-aot=0x00001080",)
-        for codegen_args in ((), omit_h):
-            with self.subTest(interpreted=bool(codegen_args)):
-                generated, results = self._probe(words, (0,), codegen_args=codegen_args)
+        for shape, codegen_args in (("tail", ()), ("tail", omit_h), ("call", omit_h)):
+            with self.subTest(shape=shape, interpreted=bool(codegen_args)):
+                generated, results = self._probe(words if shape == "tail" else calls, (0,),
+                                                 codegen_args=codegen_args)
                 rc, output, fields = results[0]
                 self.assertEqual(rc, 0, output)
                 self.assertEqual(fields.get("v0"), 0x107, output)
@@ -2417,11 +2429,13 @@ class GeneratedCallDepthTests(unittest.TestCase):
             lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107,
             codegen_args=omit_h,
         )
-        # N2: the handoff writes H's entry $sp back over the $sp longjmp loaded.
+        # N2: the handoff writes H's entry $sp back over the $sp longjmp loaded. P's tail
+        # call into longjmp releases H's restore too, so the shape is P calling longjmp,
+        # whose note of leaving its frame stays at P's call site.
         self._assert_mutant_fails(
-            "N2-the-handoff-restores-after-a-return-elsewhere", words, (0,),
-            {"guest_interp.c": ("if (owes && !returned_elsewhere) s->r[29] = entry_sp;",
-                                "if (owes) s->r[29] = entry_sp;")},
+            "N2-the-handoff-restores-after-a-return-elsewhere", calls, (0,),
+            {"guest_interp.c": ("if (owes && !returned_elsewhere && !released) s->r[29] = entry_sp;",
+                                "if (owes && !released) s->r[29] = entry_sp;")},
             lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107
             or r[0][2].get("v1") != _PROBE_SP,
             codegen_args=omit_h,
@@ -2530,14 +2544,10 @@ class GeneratedCallDepthTests(unittest.TestCase):
                 body = generated[generated.index("void f_00001010(CpuState *s) {"):]
                 body = body[:body.index("\n}")]
                 self.assertIn("_sp_entry, 1u", body, "F records its entry $sp at the switch")
-        # P1: a $sp load on one path takes the restore from every exit of the body.
-        self._assert_mutant_fails(
-            "P1-the-verdict-is-per-body", _switch_chain_with_another_way_out(other="foreign"),
-            (0,),
-            {"codegen.py": ("        GUEST_SP_ENTRIES.add(start)\n        if guest_exits == exits:",
-                            "        guest_exits = exits\n        if True:")},
-            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
-        )
+        # P1 (a $sp load on one path takes the restore from every exit of the body) no
+        # longer changes this chain: since #1949's limit 2 every body with guest-owned exits
+        # checks its loads when they run, so the switch's record owes F's entry $sp whatever
+        # the static walk claims, as long as the load on the other path never ran.
 
     def test_scoped_arrays_with_a_sibcall_keep_the_callers_sp(self):
         # The shape of real code again, with an error path that releases the frame and
@@ -2570,8 +2580,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # I1: the interpreter's handoff owes nothing.
         self._assert_mutant_fails(
             "I1-interpreted-handoff-owes-nothing", _alloca_tail_end(), (0,),
-            {"guest_interp.c": ("            if (owes && !returned_elsewhere) s->r[29] = entry_sp;",
-                                "            (void)entry_sp; (void)returned_elsewhere;")},
+            {"guest_interp.c": ("            if (owes && !returned_elsewhere && !released) s->r[29] = entry_sp;",
+                                "            (void)entry_sp; (void)returned_elsewhere; (void)released;")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
             codegen_args=interpreted_f,
         )
@@ -2598,8 +2608,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # The last recorded restore wins instead of the first: the caller sees C2's SP.
         self._assert_mutant_fails(
             "T1-last-restore-wins", _three_body_chain(), (0,),
-            {"guest_interp.c": ("if (next.has_restore && !chain_restores) {",
-                                "if (next.has_restore) {")},
+            {"guest_interp.c": ("if ((next.has_restore & SR_TAIL_OWES) && !chain_restores) {",
+                                "if (next.has_restore & SR_TAIL_OWES) {")},
             lambda r: r[0][0] == 0 and r[0][2].get("v1") != _PROBE_SP,
         )
         # The owner's SP is restored at the TAIL site, before the target runs in its frame.
@@ -2656,10 +2666,11 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # F runs in H's frame instead of the live one.
         self._assert_mutant_fails(
             "T6-segment-restores-early", _segment_chain(), (0,),
-            {"guest_interp.c": ("                sr_tail_transfer.has_restore = 1u;\n"
-                                "            }\n            return;",
-                                "                sr_tail_transfer.has_restore = 1u;\n"
-                                "            }\n            if (chain_restores) s->r[29] = chain_sp;\n"
+            {"guest_interp.c": ("                    sr_tail_transfer.has_restore |= SR_TAIL_RELEASES;\n"
+                                "                }\n            }\n            return;",
+                                "                    sr_tail_transfer.has_restore |= SR_TAIL_RELEASES;\n"
+                                "                }\n            }\n"
+                                "            if (chain_restores) s->r[29] = chain_sp;\n"
                                 "            return;")},
             lambda r: r[0][0] == 0 and r[0][2].get("v0") != _PROBE_SP - 32,
         )
