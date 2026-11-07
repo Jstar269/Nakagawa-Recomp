@@ -116,6 +116,9 @@ static VkSemaphore    s_swap_sem_done[8];
 
 static int      s_renderer_terminal = 0;
 static int      s_denorm_preserve_f32 = 0;   /* see sdl3vk_init: VK_KHR_shader_float_controls */
+static int      s_dst_read = SDL3VK_DST_READ_SNAPSHOT;   /* see sdl3vk_init: SR_GPU_DST_READ */
+static uint32_t s_dev_extensions = 0;        /* what vkCreateDevice was given (sdl3vk_get_vk) */
+static int      s_dev_features = 0, s_dev_features2 = 0;
 /* A quit request (window close, SDL_EVENT_QUIT, ESC) is sticky. Two call sites drain
  * the SDL event queue -- gui_pump's sdl3vk_poll() and every present -- and only the
  * former exits the process. When a present consumed the quit (the common case: it
@@ -850,11 +853,53 @@ int sdl3vk_init(const char *title) {
         VkExtensionProperties *xs = NULL;
         if (vkEnumerateDeviceExtensionProperties(s_pdev, NULL, &nx, NULL) == VK_SUCCESS && nx)
             xs = (VkExtensionProperties *)calloc(nx, sizeof(*xs));
-        int have = 0;
+        int have = 0, have_interlock = 0;
         if (xs && vkEnumerateDeviceExtensionProperties(s_pdev, NULL, &nx, xs) == VK_SUCCESS)
-            for (uint32_t i = 0; i < nx; i++)
+            for (uint32_t i = 0; i < nx; i++) {
                 if (strcmp(xs[i].extensionName, VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME) == 0) have = 1;
+                if (strcmp(xs[i].extensionName, VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME) == 0)
+                    have_interlock = 1;
+            }
         free(xs);
+        /* The destination-read path (#2109, sdl3vk.h). A forced path the device lacks is refused
+         * with its reason, and the snapshot runs; so does the ROAA path, which has no code yet. */
+        s_dst_read = SDL3VK_DST_READ_SNAPSHOT;
+        const char *dst_env = getenv("SR_GPU_DST_READ");
+        int dst_want = sdl3vk_parse_dst_read(dst_env);
+        if (dst_want == -1) {
+            fprintf(stderr, "sdl3vk: unknown SR_GPU_DST_READ '%s' (snapshot, interlock or roaa); "
+                            "using the default order\n", dst_env);
+            dst_want = -2;
+        }
+        if (dst_want == SDL3VK_DST_READ_ROAA) {
+            fprintf(stderr, "sdl3vk: SR_GPU_DST_READ=roaa refused (the rasterization-order path has "
+                            "no code yet); destination reads use the snapshot\n");
+            dst_want = SDL3VK_DST_READ_SNAPSHOT;
+        }
+        if (dst_want != SDL3VK_DST_READ_SNAPSHOT) {
+            const char *why = NULL;
+            if (!have_interlock) {
+                why = "no VK_EXT_fragment_shader_interlock";
+            } else {
+                VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT il = {
+                    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT };
+                VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                                 .pNext = &il };
+                VkFormatProperties fp;
+                vkGetPhysicalDeviceFeatures2(s_pdev, &f2);
+                vkGetPhysicalDeviceFormatProperties(s_pdev, VK_FORMAT_R8G8B8A8_UNORM, &fp);
+                if (!il.fragmentShaderPixelInterlock) why = "no fragmentShaderPixelInterlock";
+                else if (!f2.features.fragmentStoresAndAtomics) why = "no fragmentStoresAndAtomics";
+                else if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+                    why = "no RGBA8 storage image";
+            }
+            if (!why) s_dst_read = SDL3VK_DST_READ_INTERLOCK;
+            else if (dst_want == SDL3VK_DST_READ_INTERLOCK)
+                fprintf(stderr, "sdl3vk: SR_GPU_DST_READ=interlock refused (%s); destination reads use "
+                                "the snapshot\n", why);
+        }
+        fprintf(stderr, "sdl3vk: destination reads: %s\n",
+                s_dst_read == SDL3VK_DST_READ_INTERLOCK ? "interlock" : "snapshot");
         if (have) {
             VkPhysicalDeviceFloatControlsPropertiesKHR fc = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES_KHR };
@@ -864,12 +909,15 @@ int sdl3vk_init(const char *title) {
             s_denorm_preserve_f32 = fc.shaderDenormPreserveFloat32 == VK_TRUE;
         }
     }
-    const char *dev_ext[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                              VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME };
+    const char *dev_ext[3] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    uint32_t dev_ext_n = 1u;
+    if (s_denorm_preserve_f32) dev_ext[dev_ext_n++] = VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME;
+    if (s_dst_read == SDL3VK_DST_READ_INTERLOCK)
+        dev_ext[dev_ext_n++] = VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME;
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = s_denorm_preserve_f32 ? 2u : 1u;
+    dci.enabledExtensionCount = dev_ext_n;
     dci.ppEnabledExtensionNames = dev_ext;
     /* Ace Mode's texture filtering (ace.h) is the only device feature the player ever asks
      * for, and only in an Ace run that wants it: an authentic run creates the device with no
@@ -892,6 +940,22 @@ int sdl3vk_init(const char *title) {
             ace_set_af_effective(0, "this GPU has no anisotropic filtering");
         }
     }
+    /* The interlock path's features go in one VkPhysicalDeviceFeatures2 chain with Ace's. The
+     * snapshot path keeps the form above: pEnabledFeatures or nothing, and no chain. */
+    VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT il_on = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT };
+    VkPhysicalDeviceFeatures2 f2_on = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    if (s_dst_read == SDL3VK_DST_READ_INTERLOCK) {
+        il_on.fragmentShaderPixelInterlock = VK_TRUE;
+        f2_on.features = ace_features;
+        f2_on.features.fragmentStoresAndAtomics = VK_TRUE;
+        f2_on.pNext = &il_on;
+        dci.pNext = &f2_on;
+        dci.pEnabledFeatures = NULL;
+    }
+    s_dev_extensions = dci.enabledExtensionCount;
+    s_dev_features = dci.pEnabledFeatures != NULL;
+    s_dev_features2 = dci.pNext != NULL;
     INIT_VK(vkCreateDevice(s_pdev, &dci, NULL, &s_dev));
     vkGetDeviceQueue(s_dev, s_qfam, 0, &s_queue);
 
@@ -1481,6 +1545,10 @@ int sdl3vk_get_vk(Sdl3VkInfo *out) {
     out->queue_family = s_qfam;
     out->denorm_preserve_f32 = s_denorm_preserve_f32;
     out->get_instance_proc_addr = (void *)vkGetInstanceProcAddr;
+    out->dst_read = s_dst_read;
+    out->device_extensions = s_dev_extensions;
+    out->device_features = s_dev_features;
+    out->device_features2 = s_dev_features2;
     return 1;
 }
 
@@ -1869,6 +1937,14 @@ int sdl3vk_parse_present_scaling(const char *value) {
     if (!value || !value[0] || strcmp(value, "sharp") == 0) return SDL3VK_SCALING_SHARP;
     if (strcmp(value, "integer") == 0) return SDL3VK_SCALING_INTEGER;
     if (strcmp(value, "bilinear") == 0) return SDL3VK_SCALING_BILINEAR;
+    return -1;
+}
+
+int sdl3vk_parse_dst_read(const char *value) {
+    if (!value || !value[0]) return -2;
+    if (strcmp(value, "snapshot") == 0) return SDL3VK_DST_READ_SNAPSHOT;
+    if (strcmp(value, "interlock") == 0) return SDL3VK_DST_READ_INTERLOCK;
+    if (strcmp(value, "roaa") == 0) return SDL3VK_DST_READ_ROAA;
     return -1;
 }
 

@@ -187,6 +187,11 @@ static const uint32_t k_vert_spv[] =
 static const uint32_t k_frag_spv[] =
 #include "psp_frag.inc"
 ;
+/* psp.frag built with -DSR_DST_INTERLOCK: the ordered destination-read variant (#2109). Made into
+ * a module only on the interlock path. */
+static const uint32_t k_frag_rmw_spv[] =
+#include "psp_frag_rmw.inc"
+;
 static const uint32_t k_tnl_vert_spv[] =
 #include "psp_tnl_vert.inc"
 ;
@@ -335,6 +340,10 @@ typedef struct Target {
     VkDescriptorSet set[TEX_FILTER_VARIANTS]; /* sampled by TFLT min/mag pair for RTT + blit src */
     DepthEnt *dep;
     VkFramebuffer fb;                      /* for (this color, this->dep) */
+    /* The interlock path (#2109, s_dst_interlock only): the image as set 2 of the RMW pipelines
+     * (a storage image in GENERAL), and a depth-only framebuffer for (this->dep). */
+    VkDescriptorSet rmw_set;
+    VkFramebuffer fb_rmw;
     int gpu_valid;                         /* GPU contents are the truth (newer than VRAM) */
     uint64_t lru;
     uint64_t render_gen;                   /* bumped per submit that rendered into this */
@@ -360,6 +369,23 @@ typedef struct Target {
     uint32_t tseed;
     int tshow;                             /* the coming present shows the twin */
 } Target;
+
+/* Ordered destination reads (#2109). On the interlock path (sdl3vk.h SDL3VK_DST_READ_INTERLOCK)
+ * a render op whose destination-reading batches may all test depth early (op_rmw) records those
+ * batches with the RMW variant of psp.frag: each fragment loads the target, blends and stores it
+ * inside a pixel-ordered interlock, so the primitives of one batch see each other's stores. Its
+ * other batches keep the fixed-function pass, and the op takes no snapshot copy. None of these
+ * objects exists on the snapshot path. */
+static int s_dst_interlock = 0;
+static VkShaderModule s_fs_rmw = VK_NULL_HANDLE;
+static VkRenderPass s_rp_rmw = VK_NULL_HANDLE;            /* depth-only: the D16 attachment */
+static VkDescriptorSetLayout s_rmw_dlayout = VK_NULL_HANDLE;
+static VkPipelineLayout s_playout_rmw = VK_NULL_HANDLE;
+static VkDescriptorPool s_dpool_rmw = VK_NULL_HANDLE;
+static PipeEnt *s_rmw_pipes = NULL;
+static int s_rmw_pipe_n = 0, s_rmw_pipe_cap = 0;
+static unsigned long long s_cnt_rmw_ops = 0, s_cnt_rmw_batches = 0, s_cnt_rmw_breaks = 0;
+static VkImageUsageFlags s_target_usage = 0;              /* the last colour target's usage */
 
 static void target_note_drawn(Target *t, int y0, int y1) {
     if (y0 >= y1) return;
@@ -923,6 +949,15 @@ static void to_layout(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspec
  * from the barriers' destination access. */
 #ifndef SR_GPU_SNAPBAR_MUTANT
 #define SR_GPU_SNAPBAR_MUTANT 0
+#endif
+
+/* SR_GPU_DSTREAD_MUTANT (gpu-dst-read-mutants only; never in a product build) breaks one property
+ * of the interlock path (#2109): 1 merges every channel from the loaded destination (the store has
+ * no effect), 2 swaps the source and destination blend factors of the RMW batches, 3 lets an op
+ * holding a batch the rmwzfb rule refuses take the interlock, 4 gives every colour target
+ * STORAGE_BIT on the snapshot path too. */
+#ifndef SR_GPU_DSTREAD_MUTANT
+#define SR_GPU_DSTREAD_MUTANT 0
 #endif
 
 #ifdef SR_GPU_COHERENCE_SELFTEST
@@ -1806,14 +1841,23 @@ static void pcache_close(int save) {
 
 /* ---- pipelines ------------------------------------------------------------------------ */
 
-static VkPipeline pipe_create(const PipeKey *k) {
+/* `rmw`: the RMW variant (#2109): psp_frag_rmw with the write mask as its specialization
+ * constant, no colour attachment, the depth-only pass and the storage-image set 2. */
+static VkPipeline pipe_create(const PipeKey *k, int rmw) {
     uint64_t profile_started = cpu_profile_now();
     VkPipelineShaderStageCreateInfo st[2] = {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
     };
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   st[0].module = k->tnl ? s_vs_tnl : s_vs; st[0].pName = "main";
-    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = s_fs; st[1].pName = "main";
+    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = rmw ? s_fs_rmw : s_fs; st[1].pName = "main";
+    int32_t rmw_cmask = (int32_t)k->cmask;
+#if SR_GPU_DSTREAD_MUTANT == 1
+    rmw_cmask = 0;
+#endif
+    VkSpecializationMapEntry rmw_entry = { 0, 0, sizeof(int32_t) };
+    VkSpecializationInfo rmw_spec = { 1, &rmw_entry, sizeof(int32_t), &rmw_cmask };
+    if (rmw) st[1].pSpecializationInfo = &rmw_spec;
 
     VkVertexInputBindingDescription bind = { 0, sizeof(GpuVert), VK_VERTEX_INPUT_RATE_VERTEX };
     VkVertexInputAttributeDescription at[5] = {
@@ -1873,7 +1917,7 @@ static VkPipeline pipe_create(const PipeKey *k) {
     ba.alphaBlendOp = VK_BLEND_OP_ADD;
     ba.colorWriteMask = k->cmask;
     VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-    cb.attachmentCount = 1; cb.pAttachments = &ba;
+    cb.attachmentCount = rmw ? 0u : 1u; cb.pAttachments = rmw ? NULL : &ba;
 
     VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
                              VK_DYNAMIC_STATE_BLEND_CONSTANTS };
@@ -1886,7 +1930,7 @@ static VkPipeline pipe_create(const PipeKey *k) {
     pci.pViewportState = &vp; pci.pRasterizationState = &rs;
     pci.pMultisampleState = &ms; pci.pDepthStencilState = &ds;
     pci.pColorBlendState = &cb; pci.pDynamicState = &dn;
-    pci.layout = s_playout; pci.renderPass = s_rp;
+    pci.layout = rmw ? s_playout_rmw : s_playout; pci.renderPass = rmw ? s_rp_rmw : s_rp;
 
     VkPipeline p = VK_NULL_HANDLE;
     uint64_t perf_started = sr_perf_now_ns();
@@ -1936,9 +1980,26 @@ static VkPipeline pipe_get(const PipeKey *k) {
         s_pipes = grown;
         s_pipe_cap = cap;
     }
-    VkPipeline p = pipe_create(k);
+    VkPipeline p = pipe_create(k, 0);
     if (!p) return VK_NULL_HANDLE;
     s_pipes[s_pipe_n].key = *k; s_pipes[s_pipe_n].pipe = p; s_pipe_n++;
+    return p;
+}
+
+/* The RMW pipelines (#2109): their own cache under the same key. */
+static VkPipeline pipe_get_rmw(const PipeKey *k) {
+    for (int i = 0; i < s_rmw_pipe_n; i++)
+        if (!memcmp(&s_rmw_pipes[i].key, k, sizeof(*k))) return s_rmw_pipes[i].pipe;
+    if (s_rmw_pipe_n == s_rmw_pipe_cap) {
+        int cap = s_rmw_pipe_cap ? s_rmw_pipe_cap * 2 : 16;
+        PipeEnt *grown = (PipeEnt *)realloc(s_rmw_pipes, (size_t)cap * sizeof(*grown));
+        if (!grown) return VK_NULL_HANDLE;
+        s_rmw_pipes = grown;
+        s_rmw_pipe_cap = cap;
+    }
+    VkPipeline p = pipe_create(k, 1);
+    if (!p) return VK_NULL_HANDLE;
+    s_rmw_pipes[s_rmw_pipe_n].key = *k; s_rmw_pipes[s_rmw_pipe_n].pipe = p; s_rmw_pipe_n++;
     return p;
 }
 
@@ -1982,6 +2043,21 @@ static VkDescriptorSet make_dst_descriptor(VkImageView view, VkDescriptorPool po
     VkWriteDescriptorSet wr = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     wr.dstSet = set; wr.dstBinding = 0; wr.descriptorCount = 1;
     wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo = &dii;
+    vkUpdateDescriptorSets(s_dev, 1, &wr, 0, NULL);
+    return set;
+}
+
+/* A target's RMW set 2 (#2109): its own image as a storage image in GENERAL. */
+static VkDescriptorSet make_rmw_descriptor(VkImageView view) {
+    VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    dai.descriptorPool = s_dpool_rmw; dai.descriptorSetCount = 1; dai.pSetLayouts = &s_rmw_dlayout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(s_dev, &dai, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
+    VkDescriptorImageInfo dii = { VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet wr = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    wr.dstSet = set; wr.dstBinding = 0; wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     wr.pImageInfo = &dii;
     vkUpdateDescriptorSets(s_dev, 1, &wr, 0, NULL);
     return set;
@@ -2117,6 +2193,43 @@ static int batch_reads_dst(const Batch *b) {
     return (((uint32_t)b->pc.cfg[0] >> 8) & (F_SHBLEND | F_STENCIL)) != 0;
 }
 
+/* The rmwzfb rule (#2109): the RMW variant tests depth before the shader runs, so a destination-
+ * reading batch whose shader may kill a fragment that the depth test already wrote cannot take
+ * it: with depth writes on, the alpha test (anything but ALWAYS), the transform-mode depth range
+ * when it is narrower than 0-65535, or a stencil-fail KEEP that can run. A batch that also blends
+ * in fixed function (a stencil state with a native blend) has no colour attachment to blend into
+ * there. An op holding such a batch keeps the snapshot path. */
+static int rmw_refuses(const Batch *b) {
+#if SR_GPU_DSTREAD_MUTANT == 3
+    (void)b;
+    return 0;
+#else
+    const uint32_t flags = (uint32_t)b->pc.cfg[0] >> 8;
+    if (b->key.blend_on) return 1;
+    if (!b->key.zwrite) return 0;
+    if (((uint32_t)b->pc.cfg[1] & 7u) != 1u) return 1;
+    if ((flags & F_PERSP) && (b->pc.cfg[2] > 0 || b->pc.cfg[3] < 65535)) return 1;
+    if ((flags & F_STENCIL) && ((uint32_t)b->pc.bl[3] & 7u) == 0u && ((uint32_t)b->pc.bl[2] & 7u) != 1u)
+        return 1;
+    return 0;
+#endif
+}
+
+/* Does the op [0, n) of `arr` into `t` take the interlock? It must read the destination, every
+ * batch that does must pass the rmwzfb rule, and the target must have its RMW objects (a target in
+ * s_tgts; a wing canvas has none). The host twin keeps the snapshot path: its pass reads the twin
+ * snapshot, and its targets have no storage set. */
+static int op_rmw(const Target *t, const Batch *arr, uint32_t n) {
+    if (!s_dst_interlock || s_twin || !t->rmw_set || !t->fb_rmw) return 0;
+    int reads = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!batch_reads_dst(&arr[i])) continue;
+        if (rmw_refuses(&arr[i])) return 0;
+        reads = 1;
+    }
+    return reads;
+}
+
 /* Copy target `t` into the snapshot image in the open command buffer: the one copy recipe of
  * snapshot_refresh and submit_pending.
  *
@@ -2242,12 +2355,70 @@ typedef struct {
     const Batch *arr;
     uint32_t b0, b1, v0, tv0, p0, param_base, ntverts;
     VkDeviceSize vertex_offset, tvertex_offset;
+    /* rmw_op: an interlock op, recorded by record_rmw_range as runs of one kind; rmw: this run
+     * holds destination-reading batches, recorded in the depth-only pass with the RMW variant. */
+    int rmw_op, rmw;
 } RangeRec;
+
+static void record_range(Target *t, const RangeRec *r, int twin);
+
+/* The dependency between two passes of an interlock op: depth and colour written by one (as an
+ * attachment or a storage image) before the next tests, loads or stores them. The colour layout
+ * changes in record_range (to_layout). */
+static void rmw_break(void) {
+    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    mb.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                       VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                       VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(s_cmd,
+                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         0, 1, &mb, 0, NULL, 0, NULL);
+    s_cnt_rmw_breaks++;
+}
+
+/* An interlock op: runs of fixed-function batches in today's pass and runs of destination-reading
+ * batches in the depth-only pass with the colour image in GENERAL, a dependency at every break.
+ * Color ends SHADER_READ_ONLY, as after record_range. */
+static void record_rmw_range(Target *t, const RangeRec *r) {
+    const Batch *arr = r->arr;
+#if SR_GPU_DSTREAD_MUTANT == 2
+    static Batch mutant[MAX_BATCH];
+    memcpy(mutant + r->b0, arr + r->b0, (size_t)(r->b1 - r->b0) * sizeof(Batch));
+    for (uint32_t i = r->b0; i < r->b1; i++) {
+        if (!batch_reads_dst(&mutant[i])) continue;
+        uint32_t bl = (uint32_t)mutant[i].pc.bl[0];
+        mutant[i].pc.bl[0] = (int32_t)((bl & ~0xFFFFu) | ((bl & 0xFFu) << 8) | ((bl >> 8) & 0xFFu));
+    }
+    arr = mutant;
+#endif
+    for (uint32_t i = r->b0; i < r->b1;) {
+        const int rmw = batch_reads_dst(&arr[i]);
+        uint32_t j = i + 1u;
+        while (j < r->b1 && batch_reads_dst(&arr[j]) == rmw) j++;
+        rmw_break();
+        RangeRec run = *r;
+        run.arr = arr; run.b0 = i; run.b1 = j; run.rmw_op = 0; run.rmw = rmw;
+        record_range(t, &run, 0);
+        /* the fixed-function pass's final colour layout; the depth-only pass leaves it alone */
+        t->layout = rmw ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (rmw) s_cnt_rmw_batches += j - i;
+        i = j;
+    }
+    to_layout(s_cmd, t->img, VK_IMAGE_ASPECT_COLOR_BIT, &t->layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
 
 /* Record batches [r->b0, r->b1) as one render pass into `t`'s image, or (twin) into its host
  * twin with the twin's picture options, descriptor sets and snapshot. Color ends
  * SHADER_READ_ONLY (the render pass's final layout). */
 static void record_range(Target *t, const RangeRec *r, int twin) {
+    if (!twin && r->rmw_op) { record_rmw_range(t, r); return; }
+    const int rmw = !twin && r->rmw;
+    VkPipelineLayout playout = rmw ? s_playout_rmw : s_playout;
     if (twin) {
         to_layout(s_cmd, t->timg, VK_IMAGE_ASPECT_COLOR_BIT, &t->tlayout,
                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -2255,7 +2426,7 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     } else {
         to_layout(s_cmd, t->img, VK_IMAGE_ASPECT_COLOR_BIT, &t->layout,
-                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                  rmw ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         to_layout(s_cmd, t->dep->img, VK_IMAGE_ASPECT_DEPTH_BIT, &t->dep->layout,
                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     }
@@ -2264,7 +2435,8 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
     const int scale = twin ? s_tscale : s_scale;
     const uint32_t cw = (uint32_t)(FB_W * scale), ch = (uint32_t)(FB_H * scale);
     VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-    rbi.renderPass = s_rp; rbi.framebuffer = twin ? t->tfb : t->fb;
+    rbi.renderPass = rmw ? s_rp_rmw : s_rp;
+    rbi.framebuffer = twin ? t->tfb : rmw ? t->fb_rmw : t->fb;
     rbi.renderArea.extent.width = cw; rbi.renderArea.extent.height = ch;
     vkCmdBeginRenderPass(s_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -2276,17 +2448,18 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
     const uint32_t param_base = r->param_base;
     int bound_tnl = -1;
     if (r->ntverts)
-        vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_playout, 1, 1,
+        vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 1, 1,
                                 &s_cmd_slot->tset, 0, NULL);
-    /* set 2: the destination snapshot (the twin's pass reads the twin snapshot) */
-    vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_playout, 2, 1,
-                            twin ? &s_tdst_set : &s_dst_set, 0, NULL);
+    /* set 2: the destination snapshot (the twin's pass reads the twin snapshot; an RMW run, the
+     * target itself) */
+    vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 2, 1,
+                            twin ? &s_tdst_set : rmw ? &t->rmw_set : &s_dst_set, 0, NULL);
 
     VkPipeline cur = VK_NULL_HANDLE;
     VkDescriptorSet cur_set = VK_NULL_HANDLE;
     for (uint32_t i = b0; i < b1; i++) {
         const Batch *b = &r->arr[i];
-        VkPipeline p = pipe_get(&b->key);
+        VkPipeline p = rmw ? pipe_get_rmw(&b->key) : pipe_get(&b->key);
         if (!p) {
             /* Not expected once the cache grows; say so rather than dropping silently. */
             static int pipe_drop_reported = 0;
@@ -2313,11 +2486,11 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
         vkCmdSetBlendConstants(s_cmd, b->bconst);
         PushPC tpc;
         if (twin) twin_pc(b, &tpc);
-        vkCmdPushConstants(s_cmd, s_playout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(b->pc),
+        vkCmdPushConstants(s_cmd, playout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(b->pc),
                            twin ? &tpc : &b->pc);
         VkDescriptorSet dset = twin ? twin_dset(b) : b->dset;
         uint64_t bind_started = cpu_profile_now();
-        vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_playout, 0, 1, &dset, 0, NULL);
+        vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 0, 1, &dset, 0, NULL);
         if (s_cpu_profile) {
             cpu_profile_add(GEGPU_CPU_BIND_RECORD, bind_started);
             s_cpu_profile_stats.descriptor_binds++;
@@ -2339,7 +2512,7 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
 }
 
 /* Record batches [b0, b1) as one render op into `t`. Leaves the color image SHADER_READ_ONLY. */
-static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1) {
+static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, int rmw_op) {
     /* Captured vertices and T&L references are two arrays; batches of each kind are in
      * order within it. */
     uint32_t v0 = UINT32_MAX, v1 = 0, tv0 = UINT32_MAX, tv1 = 0;
@@ -2386,7 +2559,8 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1) {
 
     VkDeviceSize vertex_offset = (VkDeviceSize)vertex_base * sizeof(GpuVert);
     VkDeviceSize tvertex_offset = (VkDeviceSize)tvertex_base * sizeof(GeTnlVtx);
-    RangeRec rr = { arr, b0, b1, v0, tv0, p0, param_base, ntverts, vertex_offset, tvertex_offset };
+    RangeRec rr = { arr, b0, b1, v0, tv0, p0, param_base, ntverts, vertex_offset, tvertex_offset,
+                    rmw_op, 0 };
     /* The host twin's pass draws on the twin's copy of what this op starts from: a twin that
      * is behind (some write did not reach it) is first re-seeded from the authentic image. */
     int twin_pass = s_twin && t->tfb && t->dep && t->dep->timg;
@@ -2468,6 +2642,24 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1) {
  * built held; every other shader-blend batch reads the snapshot unchanged, because nothing drawn
  * since its copy touches the pixels it reads. Leaves the color image SHADER_READ_ONLY. */
 static int submit_list(Target *t, const Batch *arr, uint32_t n) {
+    if (n && op_rmw(t, arr, n)) {
+        /* An interlock op (#2109): the whole list in one recording, no snapshot copy. */
+        SnapRect drawn = batch_rect(&arr[0]);
+        for (uint32_t j = 1; j < n; j++) {
+            SnapRect box = batch_rect(&arr[j]);
+            snap_rect_union(&drawn, &box);
+        }
+        const int tracked = s_snap_src == t && s_snap_tracked && s_snap_dirty_gen == t->render_gen;
+        int ok = submit_range(t, arr, 0, n, 1);
+        target_note_drawn(t, drawn.y0, drawn.y1);
+        if (ok && tracked) {
+            snap_rect_union(&s_snap_dirty, &drawn);
+            s_snap_dirty_gen = t->render_gen;
+            s_snap_srcgen = snap_rect_empty(&s_snap_dirty) ? t->render_gen : 0;
+        }
+        s_cnt_rmw_ops++;
+        return ok;
+    }
     int ok = 1;
     uint32_t i = 0;
     while (ok && i < n) {
@@ -2490,7 +2682,7 @@ static int submit_list(Target *t, const Batch *arr, uint32_t n) {
             snap_rect_union(&drawn, &box);
         }
         const int tracked = s_snap_src == t && s_snap_tracked && s_snap_dirty_gen == t->render_gen;
-        ok = submit_range(t, arr, i, j);
+        ok = submit_range(t, arr, i, j, 0);
         target_note_drawn(t, drawn.y0, drawn.y1);
         if (ok && tracked) {
             /* Outside what this op drew, the snapshot still holds the target. */
@@ -3196,6 +3388,8 @@ static void target_destroy(Target *t) {
     if (s_snap_src == t) s_snap_src = NULL;
     if (s_tsnap_src == t) s_tsnap_src = NULL;
     if (t->fb) vkDestroyFramebuffer(s_dev, t->fb, NULL);
+    if (t->fb_rmw) vkDestroyFramebuffer(s_dev, t->fb_rmw, NULL);
+    if (t->rmw_set) vkFreeDescriptorSets(s_dev, s_dpool_rmw, 1, &t->rmw_set);
     for (unsigned i = 0; i < TEX_FILTER_VARIANTS; i++)
         if (t->set[i]) vkFreeDescriptorSets(s_dev, s_dpool_fix, 1, &t->set[i]);
     if (t->view) vkDestroyImageView(s_dev, t->view, NULL);
@@ -3253,9 +3447,11 @@ static Target *target_color_acquire(uint32_t fba, uint32_t stride, uint32_t fmt,
         memset(t, 0, sizeof(*t));
         t->fba = fba; t->stride = stride; t->fmt = fmt; t->used = 1;
         t->layout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (!make_image(SCL_W, SCL_H, VK_FORMAT_R8G8B8A8_UNORM,
-                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        /* STORAGE_BIT only on the interlock path (#2109): the RMW batches store into the image. */
+        s_target_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                         VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                         (s_dst_interlock || SR_GPU_DSTREAD_MUTANT == 4 ? VK_IMAGE_USAGE_STORAGE_BIT : 0u);
+        if (!make_image(SCL_W, SCL_H, VK_FORMAT_R8G8B8A8_UNORM, s_target_usage,
                         &t->img, &t->mem)) { target_destroy(t); return NULL; }
         if (!make_view(t->img, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, &t->view)) {
             target_destroy(t); return NULL;
@@ -3264,6 +3460,8 @@ static Target *target_color_acquire(uint32_t fba, uint32_t stride, uint32_t fmt,
             t->set[i] = make_descriptor(t->view, s_smp[i], s_dpool_fix);
             if (!t->set[i]) { target_destroy(t); return NULL; }
         }
+        /* without its storage set the target's ops keep the snapshot path (op_rmw) */
+        if (s_dst_interlock) t->rmw_set = make_rmw_descriptor(t->view);
         /* a twin that cannot be made turns the twin off for the run */
         if (s_twin && !twin_target_make(t)) { twin_target_free(t); twin_off_for_run("a target's twin"); }
     }
@@ -3461,7 +3659,8 @@ static Target *target_acquire(void) {
             if (!cmd_drain(GEGPU_BOUNDARY_LIFETIME)) return NULL;
             if (t->fb) vkDestroyFramebuffer(s_dev, t->fb, NULL);
             if (t->tfb) vkDestroyFramebuffer(s_dev, t->tfb, NULL);
-            t->fb = t->tfb = VK_NULL_HANDLE;
+            if (t->fb_rmw) vkDestroyFramebuffer(s_dev, t->fb_rmw, NULL);
+            t->fb = t->tfb = t->fb_rmw = VK_NULL_HANDLE;
         }
         VkImageView views[2] = { t->view, d->view };
         VkFramebufferCreateInfo fbc = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
@@ -3469,6 +3668,13 @@ static Target *target_acquire(void) {
         fbc.width = SCL_W; fbc.height = SCL_H; fbc.layers = 1;
         if (vkCreateFramebuffer(s_dev, &fbc, NULL, &t->fb) != VK_SUCCESS) return NULL;
         t->dep = d;
+        /* The interlock path's depth-only pass (#2109). Without it the target's ops keep the
+         * snapshot path (op_rmw). */
+        if (s_dst_interlock) {
+            VkFramebufferCreateInfo zfc = fbc;
+            zfc.renderPass = s_rp_rmw; zfc.attachmentCount = 1; zfc.pAttachments = &d->view;
+            if (vkCreateFramebuffer(s_dev, &zfc, NULL, &t->fb_rmw) != VK_SUCCESS) t->fb_rmw = VK_NULL_HANDLE;
+        }
         /* The twin's (colour, depth) pair, for the twin's pass. Without it the twin goes off for
          * the run: the authentic chain never depends on the twin. */
         if (s_twin && t->timg && d->timg) {
@@ -6698,6 +6904,18 @@ int gegpu_init(void) {
     rpc.attachmentCount = 2; rpc.pAttachments = at;
     rpc.subpassCount = 1; rpc.pSubpasses = &sub;
     VKC(vkCreateRenderPass(s_dev, &rpc, NULL, &s_rp));
+    /* The interlock path (#2109, sdl3vk.h): the depth-only pass of the RMW runs, the same D16
+     * attachment and no colour. The snapshot path creates nothing here. */
+    s_dst_interlock = vi.dst_read == SDL3VK_DST_READ_INTERLOCK;
+    if (s_dst_interlock) {
+        VkAttachmentReference zref0 = { 0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription zsub = sub;
+        zsub.colorAttachmentCount = 0; zsub.pColorAttachments = NULL;
+        zsub.pDepthStencilAttachment = &zref0;
+        VkRenderPassCreateInfo zrpc = rpc;
+        zrpc.attachmentCount = 1; zrpc.pAttachments = &at[1]; zrpc.pSubpasses = &zsub;
+        VKC(vkCreateRenderPass(s_dev, &zrpc, NULL, &s_rp_rmw));
+    }
 
     /* the transfer staging buffer must hold one full SCALED color image */
     VkDeviceSize xfer_bytes = (VkDeviceSize)SCL_W * SCL_H * 4u;
@@ -6769,12 +6987,33 @@ int gegpu_init(void) {
     plc.setLayoutCount = 3; plc.pSetLayouts = set_layouts;
     plc.pushConstantRangeCount = 1; plc.pPushConstantRanges = &pcr;
     VKC(vkCreatePipelineLayout(s_dev, &plc, NULL, &s_playout));
+    if (s_dst_interlock) {
+        /* RMW set 2: the target as a storage image, one set per target slot */
+        VkDescriptorSetLayoutBinding rb = {0};
+        rb.binding = 0; rb.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        rb.descriptorCount = 1; rb.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo rlc = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        rlc.bindingCount = 1; rlc.pBindings = &rb;
+        VKC(vkCreateDescriptorSetLayout(s_dev, &rlc, NULL, &s_rmw_dlayout));
+        VkDescriptorSetLayout rmw_layouts[3] = { s_dlayout, s_tnl_dlayout, s_rmw_dlayout };
+        plc.pSetLayouts = rmw_layouts;
+        VKC(vkCreatePipelineLayout(s_dev, &plc, NULL, &s_playout_rmw));
+        VkDescriptorPoolSize rps = { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, MAX_TGT };
+        VkDescriptorPoolCreateInfo rpci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        rpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        rpci.maxSets = MAX_TGT; rpci.poolSizeCount = 1; rpci.pPoolSizes = &rps;
+        VKC(vkCreateDescriptorPool(s_dev, &rpci, NULL, &s_dpool_rmw));
+    }
 
     VkShaderModuleCreateInfo smc = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
     smc.codeSize = sizeof(k_vert_spv); smc.pCode = k_vert_spv;
     VKC(vkCreateShaderModule(s_dev, &smc, NULL, &s_vs));
     smc.codeSize = sizeof(k_frag_spv); smc.pCode = k_frag_spv;
     VKC(vkCreateShaderModule(s_dev, &smc, NULL, &s_fs));
+    if (s_dst_interlock) {
+        smc.codeSize = sizeof(k_frag_rmw_spv); smc.pCode = k_frag_rmw_spv;
+        VKC(vkCreateShaderModule(s_dev, &smc, NULL, &s_fs_rmw));
+    }
     /* psp_tnl.vert declares DenormPreserve (it must keep fp32 subnormals to match ge.c bit for
      * bit), which a device may run only with VK_KHR_shader_float_controls and
      * shaderDenormPreserveFloat32. Without them there is no T&L stage: hook_tnl_prim declines
@@ -6947,6 +7186,13 @@ void gegpu_shutdown(void) {
     free(s_pipes);
     s_pipes = NULL;
     s_pipe_cap = 0;
+    for (int i = 0; i < s_rmw_pipe_n; i++)
+        if (s_rmw_pipes[i].pipe) vkDestroyPipeline(s_dev, s_rmw_pipes[i].pipe, NULL);
+    free(s_rmw_pipes);
+    s_rmw_pipes = NULL;
+    s_rmw_pipe_n = s_rmw_pipe_cap = 0;
+    if (s_fs_rmw) vkDestroyShaderModule(s_dev, s_fs_rmw, NULL);
+    s_fs_rmw = VK_NULL_HANDLE;
 
     if (s_white_set) vkFreeDescriptorSets(s_dev, s_dpool_fix, 1, &s_white_set);
     for (unsigned i = 0; i < TEX_FILTER_VARIANTS; i++)
@@ -7014,6 +7260,13 @@ void gegpu_shutdown(void) {
     if (s_dlayout) vkDestroyDescriptorSetLayout(s_dev, s_dlayout, NULL);
     if (s_dst_dlayout) vkDestroyDescriptorSetLayout(s_dev, s_dst_dlayout, NULL);
     s_dst_dlayout = VK_NULL_HANDLE;
+    if (s_playout_rmw) vkDestroyPipelineLayout(s_dev, s_playout_rmw, NULL);
+    if (s_rp_rmw) vkDestroyRenderPass(s_dev, s_rp_rmw, NULL);
+    if (s_rmw_dlayout) vkDestroyDescriptorSetLayout(s_dev, s_rmw_dlayout, NULL);
+    if (s_dpool_rmw) vkDestroyDescriptorPool(s_dev, s_dpool_rmw, NULL);
+    s_playout_rmw = VK_NULL_HANDLE; s_rp_rmw = VK_NULL_HANDLE;
+    s_rmw_dlayout = VK_NULL_HANDLE; s_dpool_rmw = VK_NULL_HANDLE;
+    s_dst_interlock = 0;
     if (s_pool) vkDestroyCommandPool(s_dev, s_pool, NULL);
 
     s_cmd = VK_NULL_HANDLE;

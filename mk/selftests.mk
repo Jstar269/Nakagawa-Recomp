@@ -925,12 +925,17 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	@rc=0; $(GPU_COHERENCE_BIN) --twin 1 --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-coherence-selftest twin gpu-timestamps (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-coherence-selftest twin gpu-timestamps (exit $$rc)"; exit $$rc; fi
+	$(GPU_COHERENCE_BIN) --dst-read snapshot --case dst-read
+	$(GPU_COHERENCE_BIN) --dst-read snapshot --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --dst-read interlock --case dst-read
+	$(GPU_COHERENCE_BIN) --dst-read interlock --scale 4 --case dst-read
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_test', ignore_errors=True)"
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-reject
 	@$(MAKE) --no-print-directory gpu-coherence-selftest-snapbar-mutants
 	@$(MAKE) --no-print-directory gpu-coherence-pcache-mutant
+	@$(MAKE) --no-print-directory gpu-dst-read-mutants
 	@$(MAKE) --no-print-directory ge-first-bad-draw-selftest GE_FBD_SKIP_STATUS=0
 
 # gpu-coherence-pcache-mutant - pipeline-cache-cold must kill SR_PCACHE_SELFTEST_NULL_MUTANT, a
@@ -1007,6 +1012,34 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 	if ! grep -Fq 'FAIL want "present 2 ' $$log; then \
 		cat $$log; echo "vram-view-identity-selftest: the mutant failed for another reason" >&2; exit 1; fi; \
 	echo "vram-view-identity-selftest: the writing-viewer mutant is caught at the next presented frame"
+
+# gpu-dst-read-mutants — the dst-read cells must kill each SR_GPU_DSTREAD_MUTANT in ge_gpu.c (#2109):
+# 1 merges every channel from the loaded destination, so the RMW store has no effect
+# (dst-read-order), 2 swaps the RMW batches' source and destination blend factors (dst-read-order),
+# 3 lets an op the rmwzfb rule refuses take the interlock, so an alpha-rejected fragment writes depth
+# (dst-read-depth), and 4 gives colour targets STORAGE_BIT on the snapshot path (dst-read-pins).
+# Mutants 1 to 3 run on the interlock path, 4 on the snapshot path. Each builds its own binary and
+# must fail with its own message. Exit 77 (no Vulkan device, or a device without the interlock for
+# 1 to 3) is a SKIP of that mutant.
+gpu-dst-read-mutants: shader-verify $(RT_GE_O)
+	@for m in 1 2 3 4; do \
+		case $$m in \
+			1) args="--dst-read interlock --case dst-read-order"; kill="the RMW store had no effect";; \
+			2) args="--dst-read interlock --case dst-read-order"; kill="differs from ge.c in [0-9]+ pixels";; \
+			3) args="--dst-read interlock --case dst-read-depth"; kill="depth differs from ge.c in [1-9]";; \
+			*) args="--dst-read snapshot --case dst-read-pins"; kill="the snapshot path made interlock state";; \
+		esac; \
+		bin=$(BUILD_DIR)/gpu_coherence_dstread_mutant$$m.exe; \
+		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_DSTREAD_MUTANT=$$m -ffunction-sections -fdata-sections \
+			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -Wl,--gc-sections -o $$bin \
+			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
+			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
+		$$bin $$args > $$bin.log 2>&1; result=$$?; \
+		if test $$result -eq 77; then echo "dst-read mutant $$m: SKIP (no Vulkan device, or no interlock)"; continue; fi; \
+		if test $$result -eq 0; then cat $$bin.log; echo "dst-read mutant $$m unexpectedly passed" >&2; exit 1; fi; \
+		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "dst-read mutant $$m failed for another reason" >&2; exit 1; fi; \
+		echo "gpu-dst-read-mutants: mutant $$m killed ($$kill)"; \
+	done
 
 # gpu-snapsync-selftest — production-path regression for the explicit guest-VRAM
 # snapshot boundary. It proves ordinary presentation remains async, then verifies

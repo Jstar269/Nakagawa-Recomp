@@ -808,6 +808,7 @@
     "src/rt/gpu_sdl3vk/pipeline_cache.h",
     "src/rt/gpu_sdl3vk/pipeline_cache_selftest.c",
     "src/rt/gpu_sdl3vk/psp_frag.inc",
+    "src/rt/gpu_sdl3vk/psp_frag_rmw.inc",
     "src/rt/gpu_sdl3vk/psp_tnl_vert.inc",
     "src/rt/gpu_sdl3vk/psp_vert.inc",
     "src/rt/gpu_sdl3vk/sdl3vk.c",
