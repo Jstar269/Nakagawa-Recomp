@@ -1820,15 +1820,71 @@ static void save_blob(SaveMember *m, unsigned *n, const char *name, uint32_t fd)
     (*n)++;
 }
 
+/* The savedata operation in flight (#1296). A SAVE hands the CPU over between its durable steps
+ * (savedata_preempt_point), so another guest thread can run while one operation holds the root
+ * lock and an open save directory. That thread may shut the dialog down and start another
+ * operation, or end the thread that is saving; neither may reach this one's lock or directory.
+ * Written and read only on the runtime thread, like the rest of this file. */
+static struct {
+    int active;            /* sr_savedata_execute_sized is running */
+    uint32_t owner;        /* its guest thread (sched_current_uid) */
+    int lock;              /* its savedata_lock result */
+    int parked;            /* the owner gave the CPU away at a SAVE point and has not resumed */
+    SavedataDir *dir;      /* while parked: the SAVE's open directory */
+    uint8_t *sfo;          /* while parked: the SAVE's PARAM.SFO bytes, until they are freed */
+    uint64_t stop_deadline_us;   /* a stop waits for a parked SAVE until then; 0 = no stop yet */
+} s_sd_flight;
+
 /* The preemption timer's edge inside a SAVE (#1296). A SAVE makes one durable host write per
  * member, then journals, publishes, commits and cleans up, each step about 2 ms on an SSD: a Hot
  * Shots Tennis save ran its caller for 32 ms in one call while the game's priority-16 sound
  * threads were due. Between those steps the call hands the CPU over (sched_preempt_point), as a
- * GE list does between commands. Meanwhile the savedata slot stays busy (another start is
- * refused, and the status reads running) and the save directory stays locked; as on the PSP,
- * where a utility thread does this work, the caller's own threads keep running. */
-static void savedata_preempt_point(void) {
-    if (atomic_load_explicit(&sr_preempt_due, memory_order_relaxed)) sched_preempt_point();
+ * GE list does between commands; only a strictly stronger thread runs. As on the PSP, where a
+ * utility thread does this work, the caller's threads keep running meanwhile; another savedata
+ * operation is refused until this one ends (sr_savedata_execute_sized), and the save directory
+ * stays locked against other processes. Once the run is stopping the SAVE keeps the CPU and
+ * finishes. */
+static void savedata_preempt_point(SavedataDir *d, uint8_t *sfo) {
+    if (!atomic_load_explicit(&sr_preempt_due, memory_order_relaxed)) return;
+    if (sr_sched_stop_requested && sr_sched_stop_requested()) return;
+    s_sd_flight.dir = d;
+    s_sd_flight.sfo = sfo;
+    s_sd_flight.parked = 1;
+    sched_preempt_point();
+    s_sd_flight.parked = 0;
+    s_sd_flight.dir = NULL;
+    s_sd_flight.sfo = NULL;
+    s_sd_flight.stop_deadline_us = 0;
+}
+
+/* A guest thread ends, or the guest world is retired, while its SAVE is parked: its host
+ * coroutine is destroyed and the SAVE never resumes (sr_hle_release_thread_resources). Close
+ * what the SAVE holds so the next operation takes the lock afresh. Whatever the SAVE had
+ * already written stays on disk; the next savedata call on that save recovers it from the
+ * journal, rolling it back or finishing it, as after a crash. */
+void sr_savedata_release_thread(uint32_t thread_uid) {
+    if (!s_sd_flight.active || !s_sd_flight.parked || s_sd_flight.owner != thread_uid) return;
+    fprintf(stderr, "savedata: guest thread 0x%" PRIx32 " ended inside a SAVE; the next savedata "
+            "call recovers that save from its journal\n", thread_uid);
+    if (s_sd_flight.dir) sd_dir_close(s_sd_flight.dir);
+    free(s_sd_flight.sfo);
+    savedata_unlock(s_sd_flight.lock);
+    memset(&s_sd_flight, 0, sizeof(s_sd_flight));
+}
+
+/* The driver's stop check (#1296): a stop that comes while a SAVE is parked waits for the SAVE
+ * to resume and finish (it does not hand the CPU over again once a stop is due), so the stop
+ * still lands between savedata calls. SR_SAVEDATA_STOP_WINDOW_US of guest time bounds the
+ * wait, for a guest whose stronger threads never let the saving thread run again; a stop past
+ * it leaves the SAVE to the journal. The window is a host policy, like the quit window
+ * (SR_EXIT_REQUEST_WINDOW_US in hle.c), and has the same length. Returns 1 while the stop
+ * should wait. */
+#define SR_SAVEDATA_STOP_WINDOW_US 5000000u
+int sr_savedata_stop_deferred(uint64_t now_us) {
+    if (!s_sd_flight.parked) return 0;
+    if (!s_sd_flight.stop_deadline_us)
+        s_sd_flight.stop_deadline_us = now_us + SR_SAVEDATA_STOP_WINDOW_US;
+    return now_us < s_sd_flight.stop_deadline_us;
 }
 
 /* SAVE (and AUTOSAVE, LISTSAVE, MAKEDATA, WRITEDATA): one transaction over the members (see
@@ -1916,7 +1972,7 @@ static uint32_t do_save(uint32_t param, const char *game, const char *save, int 
     char sn[40], pn[40];
     /* 2. Stage every member. */
     for (unsigned i = 0; ok && i < n; i++) {
-        savedata_preempt_point();
+        savedata_preempt_point(&d, sfo);
         ok = stage_name(sn, sizeof(sn), i) &&
              sd_write_new(&d, sn, mem[i].data, mem[i].size, when, &nospace);
         rec.s[i].new_size = mem[i].size;
@@ -1935,24 +1991,24 @@ static uint32_t do_save(uint32_t param, const char *game, const char *save, int 
     }
     /* 4-6. Journal, publish, commit. */
     if (ok) {
-        savedata_preempt_point();
+        savedata_preempt_point(&d, NULL);
         uint8_t b[SD_RECORD_MAX];
         const uint32_t len = sd_record_encode(&rec, b);
         ok = sd_write_new(&d, SAVEDATA_JOURNAL_NAME, b, len, when, &nospace) && sd_flush_dir(&d);
     }
     for (unsigned i = 0; ok && i < n; i++) {
-        savedata_preempt_point();
+        savedata_preempt_point(&d, NULL);
         ok = stage_name(sn, sizeof(sn), i) && prev_name(pn, sizeof(pn), rec.s[i].name) &&
              (!rec.s[i].prev || sd_rename(&d, rec.s[i].name, pn, 0)) &&
              sd_rename(&d, sn, rec.s[i].name, 0);
     }
-    savedata_preempt_point();
+    savedata_preempt_point(&d, NULL);
     if (ok) ok = sd_flush_dir(&d);
     if (ok) committed = sd_rename(&d, SAVEDATA_JOURNAL_NAME, SAVEDATA_COMMIT_NAME, 0);
     if (committed && !sd_flush_dir(&d))
         fprintf(stderr, "savedata: SAVE %s committed, but the host could not confirm it is on disk\n", dir);
     /* 7. Clean up, or undo, from what is on disk. */
-    savedata_preempt_point();
+    savedata_preempt_point(&d, NULL);
     const int r = sd_recover(&d, 0);
     sd_dir_close(&d);
     if (committed || r == SD_RECOVER_COMMITTED) {
@@ -2842,12 +2898,23 @@ uint32_t sr_savedata_execute_sized(uint32_t param, uint32_t size) {
     const int writes = mode == SD_AUTOSAVE || mode == SD_SAVE || mode == SD_LISTSAVE ||
                        mode == SD_MAKEDATA || mode == SD_MAKEDATASECURE ||
                        mode == SD_WRITEDATA || mode == SD_WRITEDATASECURE;
+    /* One operation at a time: a SAVE parked at a preemption point (savedata_preempt_point)
+     * still owns the lock and its directory, and a thread that runs meanwhile cannot share them. */
+    if (s_sd_flight.active) {
+        fprintf(stderr, "savedata: mode=%" PRIu32 " refused: guest thread 0x%" PRIx32 " is still "
+                "inside a savedata operation\n", mode, s_sd_flight.owner);
+        return savedata_access_error(mode);
+    }
     const int lock = savedata_lock(writes);
     if (lock == SD_LOCK_BUSY) return savedata_access_error(mode);
+    s_sd_flight.active = 1;
+    s_sd_flight.owner = sched_current_uid();
+    s_sd_flight.lock = lock;
     uint32_t r = resolve_save(param, size, mode, game, save, 21, &choice);
     if (sdlog()) fprintf(stderr, "savedata: mode=%" PRIu32 " game='%s' save='%s'\n", mode, game, save);
     if (!r) r = choice.cancel ? SAVEDATA_DIALOG_RESULT_CANCEL
                               : savedata_dispatch(param, size, mode, game, save, &choice);
+    memset(&s_sd_flight, 0, sizeof(s_sd_flight));
     savedata_unlock(lock);
     return r;
 }

@@ -2346,8 +2346,10 @@ static uint64_t s_quit_stop_deadline_us;
  * running inside that window, so a quit does not cut off a save in progress (the pause
  * overlay's Quit is refused for the same reason). Returns 1 once the run should end; the window
  * bounds the wait, so a guest that never finishes cannot hold the player open. The stop lands
- * only between guest slices, never inside the sceUtilitySavedataUpdate call that writes the
- * save (sr_savedata_execute_sized runs within it), so no write is cut off halfway. */
+ * only between guest slices. A SAVE that hands the CPU over at one of its preemption points
+ * (#1296) is parked inside the sceUtilitySavedataUpdate call that writes it; the driver holds
+ * every stop until that SAVE has finished (sr_savedata_stop_deferred, bounded by its own
+ * window), so no write is cut off halfway. */
 int sr_exit_request_stop_due(void) {
     if (!s_quit_stop_armed) {
         s_quit_stop_armed = 1;
@@ -2644,9 +2646,12 @@ static void mbx_remove_thread_waiters(uint32_t thread_uid);
 static void io_cwd_release_thread(uint32_t thread_uid);
 
 
+void sr_savedata_release_thread(uint32_t thread_uid);   /* savedata.c: a SAVE it left parked */
+
 void sr_hle_release_thread_resources(uint32_t thread_uid) {
     sr_mutex_release_thread(thread_uid);
     if (thread_uid) {
+        sr_savedata_release_thread(thread_uid);
         io_cwd_release_thread(thread_uid);
         mbx_remove_thread_waiters(thread_uid);
 

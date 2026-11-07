@@ -3339,11 +3339,17 @@ static void sched_preempt_timer_arm(void) {
  * core busy, a 1-16 ms SDL_DelayPrecise on the reference PC ended a median 20 ms and up to 52 ms
  * late, against under 1 ms at high priority or on an idle host. Each late wake makes the guest
  * thread due then late, and the priority-16 sound threads of Hot Shots Tennis let the host queue
- * run dry. Each thread raises itself once; a host that refuses keeps normal priority and says so. */
+ * run dry. Each thread raises itself once. What HIGH means depends on the host: on Windows a
+ * thread priority within the process's class, which needs no privilege; on Linux nice -10,
+ * which an ordinary session refuses ("setpriority() failed" on Ubuntu 24.04 with RLIMIT_NICE 0
+ * and no rtkit), and which threads the raised thread creates later inherit. A host that
+ * refuses keeps normal priority, and the first refusal is reported once, with its cause. */
 static void sched_host_thread_raise(const char *which) {
+    static atomic_flag s_said = ATOMIC_FLAG_INIT;
     if (SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH)) return;
-    fprintf(stderr, "sched: the host refused high priority for the %s thread; on a busy host a timed "
-                    "wake can come late\n", which);
+    if (atomic_flag_test_and_set(&s_said)) return;
+    fprintf(stderr, "sched: the host refused high priority for the %s thread (%s); on a busy host "
+                    "a timed wake can come late\n", which, SDL_GetError());
     fflush(stderr);
 }
 
