@@ -17,6 +17,10 @@ The cross-thread BUSY result is modelled from the PSP-3000 measurement (#303):
 BUSY is returned only by a Try made while another thread's transfer is pending,
 and the blocking form waits through a scheduler block, never a sleep or a spin.
 The executable proof is ``test_dmac_active_transfer_across_threads``.
+
+The last classes are the mutation campaign (``make dmac-mutants``): the executable
+selftest is proven load-bearing by building it against copies of ``hle_cache_dma.c``
+with one defect each, every one of which must fail the assertion it names.
 """
 
 from pathlib import Path

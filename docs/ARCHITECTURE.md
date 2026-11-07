@@ -669,8 +669,15 @@ that starts a channel transfer stays blocked in the call for the transfer's meas
 and destination differ modulo 16); meanwhile another thread's `sceDmacTryMemcpy` returns BUSY
 (`0x80000021`) and its blocking `sceDmacMemcpy` queues, and queued callers get the channel in
 arrival order. A body of at most 0x100 bytes whose source and destination share their phase
-modulo 16 bypasses the channel. All of this was measured on a PSP-3000 (#303, `PSP-DMAC-001` and
-`PSP-DMAC-002`); the unmeasured choices are listed above `h_DmacMemcpy` in `src/rt/hle.c`.
+modulo 16 bypasses the channel. A copy into VRAM tells the GPU about every byte it writes: one dirty
+notification covers the whole destination range, whatever the size (the selftest pins this for
+RAM-to-VRAM copies of `0xC001`, `0x10000` and `0x100000` bytes; other directions are pinned at 64
+bytes). A VRAM-source copy that crosses the end of VRAM goes through a 4 KiB bounce buffer and
+dirties its destination one piece at a time instead. All of this was measured on a PSP-3000 (#303,
+`PSP-DMAC-001` and `PSP-DMAC-002`); the unmeasured choices are listed above the DMAC handlers in
+`src/rt/hle_cache_dma.c`. `make dmac-mutants` shows the selftest is load-bearing: it builds
+`hle-thread-selftest` against copies of that file with one defect each (a `0xC000` ceiling, a clamped
+dirty range, a wrong BUSY copy, ...) and requires every one to fail the assertion it names.
 
 ### Scheduler / coroutines
 

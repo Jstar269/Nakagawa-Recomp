@@ -933,6 +933,9 @@ on Windows. The full local suite builds the native fixtures and takes over an ho
 Windows. Make-based tests need a POSIX `sh` on `PATH` (MSYS2 `usr/bin` or Git for Windows
 `bin`).
 
+`make dmac-mutants` is also left to local runs: it builds `hle-thread-selftest` against each mutated copy
+of `src/rt/hle_cache_dma.c`, one selftest build per mutant (`NK_DMAC_MUTANTS_ONLY=<part of a name>` runs one).
+
 ## Coverage
 
 Python coverage is reported as XML and C coverage is collected from raw gcov data
