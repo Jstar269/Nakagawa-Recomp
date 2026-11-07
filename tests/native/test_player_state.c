@@ -7539,6 +7539,19 @@ static void test_player_nickname(void) {
     player_app_init(app);
     assert(player_app_load_settings(app, path) == NK_OK);
     assert(strcmp(app->settings.nickname, "Player") == 0);
+    /* Only spaces is no name (nk_nickname_valid): it degrades to the default too. */
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"   \", \"nickname_asked\": true}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0 && app->settings.nickname_asked);
+
+    /* A true first run, with no settings.json at all: "Player", and the prompt asks. */
+    nk_remove_utf8(path);
+    player_app_init(app);
+    (void)player_app_load_settings(app, path);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    assert(!app->settings.nickname_asked);
+    assert(player_app_nickname_prompt_visible(app));
 
     nk_remove_utf8(path);
     free(app);
