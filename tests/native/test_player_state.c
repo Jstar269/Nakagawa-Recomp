@@ -7893,11 +7893,8 @@ static void test_graphics_presets(void) {
             assert(strstr(note, row->label) != NULL &&
                    strstr(note, " is used in Enhanced and Ace") != NULL &&
                    strstr(note, "Authentic uses your own display settings.") != NULL);
-            assert(warns == row->upscaler);
+            assert(!warns);
             assert((strstr(note, "FSR 1") != NULL) == row->upscaler);
-            if (row->upscaler) {
-                assert(strcmp(player_app_graphics_preset_label(app), "Ultra (no upscaler)") == 0);
-            }
 
             /* Authentic: the session's config and launch line equal Custom's with the same
                rows, under every preset. */
@@ -7924,8 +7921,10 @@ static void test_graphics_presets(void) {
             assert(config.vsync == row->vsync);
             assert(config.fullscreen == (row->fullscreen >= 0 ? row->fullscreen != 0 : fs != 0));
             assert(config.fps_cap == custom_config.fps_cap &&
-                   config.master_volume == custom_config.master_volume &&
-                   config.present_upscale == custom_config.present_upscale);
+                   config.master_volume == custom_config.master_volume);
+            /* Ultra turns the FSR 1 upscaler on (#2122); every other preset leaves the part's. */
+            assert(config.present_upscale == (row->upscaler ? NK_PRESENT_UPSCALE_FSR1
+                                                            : custom_config.present_upscale));
             assert(custom_config.resolution_scale == custom.resolution_scale &&
                    custom_config.present_scaling == NK_PRESENT_SCALING_BILINEAR &&
                    !custom_config.vsync);
@@ -7936,7 +7935,7 @@ static void test_graphics_presets(void) {
        goes with it. */
     player_app_settings_init_default(&app->settings);
     player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
-    assert(player_app_graphics_preset_note(app, note, sizeof(note), &warns) && warns);
+    assert(player_app_graphics_preset_note(app, note, sizeof(note), &warns) && !warns);
     player_app_cycle_resolution_scale(app, 1);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
     assert(strcmp(player_app_graphics_preset_label(app), "Custom") == 0);
@@ -8003,8 +8002,8 @@ static void test_graphics_presets(void) {
     assert(player_app_load_settings(back, path) == NK_OK);
     assert(player_app_graphics_preset(back) == PLAYER_PRESET_ULTRA);
     assert(back->settings.resolution_scale == 1);
-    assert(strcmp(player_app_graphics_preset_label(back), "Ultra (no upscaler)") == 0);
-    assert(player_app_graphics_preset_note(back, note, sizeof(note), &warns) && warns &&
+    assert(strcmp(player_app_graphics_preset_label(back), "Ultra") == 0);
+    assert(player_app_graphics_preset_note(back, note, sizeof(note), &warns) && !warns &&
            strstr(note, "FSR 1") != NULL);
 
     /* The rows a file holds are kept as they are beside its preset. */
@@ -13098,12 +13097,13 @@ int main(int argc, char **argv) {
                     } else {
                         snprintf(expected, sizeof(expected),
                                  "SR_RESOLUTION_SCALE=%d;SR_PRESENT_SCALING=%s;SR_VSYNC=%d;"
-                                 "SR_FULLSCREEN=%d;SR_PRESENT_UPSCALE=off",
+                                 "SR_FULLSCREEN=%d;SR_PRESENT_UPSCALE=%s",
                                  row->resolution_scale,
                                  row->present_scaling == NK_PRESENT_SCALING_SHARP ? "sharp"
                                      : row->present_scaling == NK_PRESENT_SCALING_INTEGER
                                          ? "integer" : "bilinear",
-                                 row->vsync ? 1 : 0, row->fullscreen > 0 ? 1 : 0);
+                                 row->vsync ? 1 : 0, row->fullscreen > 0 ? 1 : 0,
+                                 row->upscaler ? "fsr1" : "off");
                     }
                     if (strcmp(report.display, expected) != 0) {
                         fprintf(stderr, "preset %s, %s: launched %s, expected %s\n", row->word,

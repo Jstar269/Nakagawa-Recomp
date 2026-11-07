@@ -2276,12 +2276,12 @@ class NativePlayerUiTests(unittest.TestCase):
                       "Up returns to Resolution")
         lines = self.preset_lines(run)
         self.assertEqual([line["value"] for line in lines],
-                         ["Custom", "Low", "Medium", "High", "Ultra (no upscaler)", "Custom"],
+                         ["Custom", "Low", "Medium", "High", "Ultra", "Custom"],
                          run["stdout"])
         ultra = lines[4]
-        self.assertEqual(ultra["warns"], "1", "Ultra's note names what it could not set")
+        self.assertEqual(ultra["warns"], "0", "every Ultra value is set")
         self.assertIn("Ultra is used in Enhanced and Ace", ultra["note"])
-        self.assertIn("without its FSR 1 upscaler", ultra["note"])
+        self.assertIn("with the FSR 1 upscaler", ultra["note"])
         self.assertIn("Authentic uses your own display settings", ultra["note"])
         self.assertEqual(lines[3]["warns"], "0")
         self.assertNotIn("FSR 1", lines[3]["note"])

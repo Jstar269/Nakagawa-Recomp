@@ -2467,8 +2467,8 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
 
 /* The graphics presets (#2150), one row each. Starting values, to be tuned by
    measurement on real titles: Low draws at the PSP's own 480x272, Medium and Handheld
-   at 2x, High and Ultra at 4x (the GPU renderer's largest scale). Ultra adds the FSR 1
-   upscaler, which Settings cannot set until #2122, so its row and note say so. Handheld
+   at 2x, High and Ultra at 4x (the GPU renderer's largest scale). Ultra also turns on the
+   FSR 1 upscaler (the "Sharper enlarging" part, #2122) for Enhanced and Ace. Handheld
    keeps a battery-friendly 2x and starts games fullscreen. No row touches frame pacing,
    the play mode or an Enhanced part, and only Enhanced and Ace sessions use a row
    (player_session_apply_graphics_preset). docs/PLAYER_UI_DESIGN.md lists the same values. */
@@ -2478,7 +2478,7 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
                               -1, false},
     [PLAYER_PRESET_HIGH] = {"high", "High", "High", 4, NK_PRESENT_SCALING_SHARP, true, -1,
                             false},
-    [PLAYER_PRESET_ULTRA] = {"ultra", "Ultra", "Ultra (no upscaler)", 4,
+    [PLAYER_PRESET_ULTRA] = {"ultra", "Ultra", "Ultra", 4,
                              NK_PRESENT_SCALING_SHARP, true, -1, true},
     [PLAYER_PRESET_HANDHELD] = {"handheld", "Handheld", "Handheld", 2,
                                 NK_PRESENT_SCALING_SHARP, true, 1, false},
@@ -2508,16 +2508,13 @@ bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!row) return false;
-    /* A value the preset asks for that Settings cannot set is named, never shown as set. One
-       line, so the page still fits 960 x 540 (test_player_screens.c). */
+    /* One line, so the page still fits 960 x 540 (test_player_screens.c). */
     int n = snprintf(out, cap, "%s is used in Enhanced and Ace%s. Authentic uses your own display "
-                     "settings.", row->label,
-                     row->upscaler ? ", without its FSR 1 upscaler for now" : "");
+                     "settings.", row->label, row->upscaler ? ", with the FSR 1 upscaler" : "");
     if (n <= 0 || (size_t)n >= cap) {
         out[0] = '\0';
         return false;
     }
-    if (warns) *warns = row->upscaler;
     return true;
 }
 
@@ -2556,6 +2553,7 @@ void player_session_apply_graphics_preset(const PlayerSettings *settings, bool e
     config->present_scaling = row->present_scaling;
     config->vsync = row->vsync;
     if (row->fullscreen >= 0) config->fullscreen = row->fullscreen != 0;
+    if (row->upscaler) config->present_upscale = NK_PRESENT_UPSCALE_FSR1;
 }
 
 const char *player_present_scaling_label(int scaling) {
