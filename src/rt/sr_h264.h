@@ -65,9 +65,14 @@ typedef struct {
     int stride;
     SrH264PixelFormat native_format;
     SrH264PixelFormat delivered_format;
-    /* Optional backend-reported output-frame PTS in normalized 90 kHz units. This describes
-     * decoded-frame timing, not proof that the source access unit carried a PTS; consumers that
-     * need source provenance must retain the producer's AU metadata. */
+    /* The time of the access unit this picture was decoded from (its SrH264AccessUnit.pts, 90
+     * kHz), carried through the decoder's reordering.  A backend that can return pictures out of
+     * submit order must report it (has_pts = 1) for every picture whose unit had a time, because
+     * the consumer otherwise knows only submit order; the Media Foundation and FFmpeg backends
+     * both do.  has_pts = 0 (pts = -1) means the backend cannot name the picture's unit, and the
+     * consumer falls back to its own submit-order bookkeeping.  The time may be one the player
+     * extrapolated, so it is not proof that the source packet carried a PTS; consumers that need
+     * source provenance must retain the producer's AU metadata. */
     int64_t pts;
     int has_pts;
 } SrH264FrameInfo;
@@ -85,8 +90,9 @@ typedef struct {
     /* One complete H.264 access unit in Annex-B form, beginning with a 3- or 4-byte start code. */
     const uint8_t *data;
     uint32_t size;
-    int64_t pts;       /* optional source PTS normalized by the host-neutral producer to 90 kHz */
-    int has_pts;       /* exactly 0 or 1; zero means the AU's presentation time is unknown */
+    int64_t pts;       /* 90 kHz time of the unit: a source PTS the producer normalized, or a
+                        * time the player extrapolated for a unit whose packet carried none */
+    int has_pts;       /* exactly 0 or 1; zero means the unit has no time at all */
 } SrH264AccessUnit;
 
 typedef struct SrH264Backend {

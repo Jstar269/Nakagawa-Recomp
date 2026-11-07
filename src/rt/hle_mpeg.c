@@ -139,10 +139,13 @@ uint32_t sr_hle_test_psmf_summary_count(void) { return s_psmf_summary_count; }
  * submitted to the decoder and the last audio block staged for delivery -- while vts/ats
  * are the two presentation points a guest actually receives (the displaypts written into
  * the getter's video struct, and the pts of the audio block copied to the guest).  avgap
- * is therefore the A/V separation measured at comparable presentation points, and vlead
- * the video pipeline lead (submitted minus delivered, in ticks) -- both on the same
- * 90 kHz timeline, which is what separates queue/interleave distance from synchronization
- * error in a run.  -1 means the pair has not been measured yet.  vlost is the number of
+ * is therefore the A/V separation measured at comparable presentation points.  vlead is the
+ * time of the last submitted access unit minus the last displaypts, on the same 90 kHz
+ * timeline: when the decoder returns pictures in submit order it is the video pipeline lead
+ * (submitted minus delivered, in ticks); when it reorders, the submitted end is a display time
+ * taken in decode order, so vlead differs from that lead by up to the stream's reorder depth in
+ * picture steps.  Together they separate queue/interleave distance from synchronization error
+ * in a run.  -1 means the pair has not been measured yet.  vlost is the number of
  * presentation times the ring was forced to discard; the submit gate in psmf_video_pump()
  * keeps it at zero, so vlost > 0 on a run means that rule was violated. */
 static int psmf_format_summary(char *line, size_t line_size, unsigned vbl,
@@ -449,8 +452,10 @@ static uint32_t psmf_video_submit_limit(int producer_eof) {
  * actually displayed -- a vpts/vts divergence with no stream-side explanation (#279).
  * With it, normal submitted-minus-delivered lead is bounded by PSMF_OUT_PTS_RING. At EOF,
  * the bounded producer/player tail may use the extra PSMF_OUT_PTS_EOS_TAIL entries so all
- * compressed input reaches the backend before EOS closes it. Every submitted picture's time
- * survives to its own getter call, and a guest that stops pulling throttles normal demux. */
+ * compressed input reaches the backend before EOS closes it. No submitted time is displaced
+ * before a getter call pops it, and a guest that stops pulling throttles normal demux.  The
+ * time the guest is handed is the decoder's own time for the picture when the backend reports
+ * one, and the ring head only when it does not (psmf_video_take). */
 static void psmf_video_pump(SrPsmfPlayer *p) {
     if (!p) return;
     SrPsmfQueue *q = &p->q[PSMF_TRACK_VIDEO][PSMF_Q_AU];
