@@ -1826,15 +1826,21 @@ class TestEnhancementDataTransforms(unittest.TestCase):
     def test_csv_cell_type(self) -> None:
         # The title reads every value in a column by its own type: an f32 written
         # without a decimal point halves exactly, which an integer cannot.
-        csv = b"Key,V\nx,5\ny,0.5\nz,2000000000\n"
+        csv = (b"Key,V\nx,5\ny,0.5\nz,2000000000\nw,-1\nv,300\nbig," + b"9" * 50
+               + b"\nmax,340282346638528859811704183484516925440\n")
         cases: list[tuple[dict[str, Any], bytes | str]] = [
             ({"column": "V", "transform": "step_x0.5", "rows": [0]}, "integer cell 5 has no exact rescale"),
             ({"column": "V", "type": "f32", "transform": "step_x0.5", "rows": [0]}, b"x,2.5"),
             ({"column": "V", "type": "f32", "transform": "count_x2", "rows": [0]}, b"x,10.0"),
             ({"column": "V", "type": "s32", "transform": "count_x2", "rows": [0]}, b"x,10"),
-            ({"column": "V", "type": "s32", "transform": "count_x2", "rows": [1]}, "s32 cell b'0.5' has a fractional"),
+            ({"column": "V", "type": "s32", "transform": "count_x2", "rows": [1]}, "s32 cell 0.5 has a fractional"),
             ({"column": "V", "type": "s32", "transform": "count_x2", "rows": [2]}, "out of range"),
             ({"column": "V", "type": "u32", "transform": "count_x2", "rows": [2]}, b"z,4000000000"),
+            ({"column": "V", "type": "u8", "transform": "count_x2", "rows": [3]}, "u8 cell -1 is out of range"),
+            # The stock value must fit the type too, not only the rescaled result.
+            ({"column": "V", "type": "u8", "transform": "step_x0.5", "rows": [4]}, "u8 cell 300 is out of range"),
+            ({"column": "V", "type": "f32", "transform": "count_x2", "rows": [5]}, "outside the float32 range"),
+            ({"column": "V", "type": "f32", "transform": "count_x2", "rows": [6]}, "outside the float32 range"),
         ]
         for cell, want in cases:
             with self.subTest(cell=cell):

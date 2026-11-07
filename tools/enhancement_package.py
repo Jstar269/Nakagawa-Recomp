@@ -2120,8 +2120,13 @@ def _rescale_csv_number(transform: str, text: bytes, ctype: str | None = None) -
     sign, whole, frac = m.group(1), m.group(2), m.group(3)
     if ctype != "f32" and (ctype is not None or frac is None):
         if frac is not None:
-            raise ValueError(f"{ctype} cell {text!r} has a fractional part")
+            raise ValueError(f"{ctype} cell {text.decode('ascii')} has a fractional part")
         value = int(sign + whole)
+        if ctype is not None:
+            try:
+                struct.pack(DATA_TYPES[ctype][1], value)
+            except struct.error:
+                raise ValueError(f"{ctype} cell {value} is out of range for its type") from None
         if transform not in ("count_x2", "step_x0.5", "probability_per_update_x0.5", "accel_x0.25"):
             raise ValueError(f"{transform} needs a decimal cell, not the integer {value}")
         scaled = _scale_value(transform, value)
@@ -2135,8 +2140,11 @@ def _rescale_csv_number(transform: str, text: bytes, ctype: str | None = None) -
         return str(int(scaled)).encode("ascii")
     # A decimal cell is read into a float: rescale that float and write the shortest
     # decimal that reads back to the same float.
-    value = struct.unpack("<f", struct.pack("<f", float(text.decode("ascii"))))[0]
-    scaled = struct.unpack("<f", struct.pack("<f", _scale_value(transform, value)))[0]
+    try:
+        value = struct.unpack("<f", struct.pack("<f", float(text.decode("ascii"))))[0]
+        scaled = struct.unpack("<f", struct.pack("<f", _scale_value(transform, value)))[0]
+    except OverflowError:
+        raise ValueError(f"cell {text.decode('ascii')} or its rescale is outside the float32 range") from None
     for digits in range(1, 18):
         rendered = f"{scaled:.{digits}f}"
         if struct.unpack("<f", struct.pack("<f", float(rendered)))[0] == scaled:
