@@ -53,8 +53,8 @@ of 2026-11-02, whole history, hosted runners):
 
 GitHub's free plan runs about 20 jobs at once for this repository. A full `CI` run (a workflow
 change, a manual run, the nightly schedule, a merge group) used to need 23 jobs, so a second
-pull request's run waited for runners while the first ran. The same checks now run in 14
-jobs. Nothing was dropped and no command changed; jobs were merged and their steps run one
+pull request's run waited for runners while the first ran. The same checks then ran in 14
+jobs; the Android launcher build (`android_build`), added later, makes 15. Nothing was dropped and no command changed; jobs were merged and their steps run one
 after another. Three things differ in when or how a step runs, and none of them skips a step
 where it ran before:
 
@@ -77,6 +77,7 @@ The jobs:
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
 | `python_tools` | 6 shards, 4.2-18.2 min | 3 shards, about 16.5 min each |
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 3 groups of parts, about 10-13 min each |
+| `android_build` ("Android launcher build") | not present | 1 job, added later |
 | `ci_required` | 1 job | unchanged |
 
 - **Hygiene.** The check keeps its name, which the ruleset and the
@@ -534,7 +535,7 @@ or a compiler that is not the pinned one, fails it. Then `ge-first-bad-draw-self
 (`SR_GE_FBD_MUTANT`) must each be named as that draw, in linear and bisect mode. A second generated
 capture holds one PRIM of two overlapping translucent sprites on a 16-bit target, and the tool must
 find exactly its overlap as the first bad draw: the known shader-blend batch-order difference
-(#2109), which that fix turns into `NO_DIFFERENCE`. Four more generated captures check that the
+(#2109, open). Four more generated captures check that the
 tool fails closed: a 512-wide scissor (ge.c rasterizes inside 480x272), 33 targets or a stride of
 1088 are `INCOMPLETE`, and a capture with no draw is `NO_DRAWS`. The same step then runs
 `vram-view-identity-selftest` (#314): the GE decoders the pause menu's VRAM viewer calls, run at
@@ -558,7 +559,7 @@ suite as four parallel shards (`PLAYER_UI_SHARDS`, `NAKAGAWA_PLAYER_UI_SHARD`) t
 every test exactly once; each test already uses its own temporary data roots. The CMake player is configured with CMake's default, unoptimized build type, so
 the gate covers only that configuration: an optimized Release configuration fails under the global
 `-Werror` on existing truncation warnings in `src/core/nk_launch.c`, a separate defect, and this
-job does not claim that configuration builds. Consumer ISO compatibility remains in the works
+job does not claim that configuration builds. Consumer ISO compatibility on Linux is not supported
 (#306); these checks do not establish PSP hardware acceptance or interactive desktop presentation.
 
 ### GCC 16 canary
