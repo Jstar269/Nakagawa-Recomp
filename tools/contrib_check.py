@@ -49,8 +49,8 @@ try:
     from . import ci_paths  # noqa: E402
     from .vulkan_sdk import VulkanSdkError, discover_vulkan_sdk  # noqa: E402
 except ImportError:  # pragma: no cover - direct script execution
-    import ci_paths  # noqa: E402
-    from vulkan_sdk import VulkanSdkError, discover_vulkan_sdk  # noqa: E402
+    import ci_paths  # noqa: E402  # type: ignore[no-redef]
+    from vulkan_sdk import VulkanSdkError, discover_vulkan_sdk  # noqa: E402  # type: ignore[no-redef]
 
 #: Findings the publication audit raises only because the generated controls
 #: have not been regenerated yet.  The ledger is maintained outside the

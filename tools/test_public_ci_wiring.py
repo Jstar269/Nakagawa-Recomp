@@ -139,6 +139,11 @@ class PublicCiWiringTests(unittest.TestCase):
             self.assertEqual(mypy_baseline.main(["--scope", "issue-1391"]), 0)
         self.assertEqual(tuple(run.call_args.args[0][-len(expected):]), expected)
 
+    def test_mypy_ratchet_stays_below_the_import_fallback_cleanup(self) -> None:
+        """#1391: try/except import fallbacks are typed, so the ratchet sits at or below 260."""
+        baseline = json.loads((ROOT / "tools" / "mypy_baseline.json").read_text(encoding="utf-8"))
+        self.assertLessEqual(baseline["total_errors"], 260)
+
     def test_mypy_clean_scope_rejects_any_reported_error(self) -> None:
         diagnostic = "tools/hle_manifest.py:7: error: invalid fixture [misc]\n"
         completed = subprocess.CompletedProcess([], 1, stdout=diagnostic, stderr="")
