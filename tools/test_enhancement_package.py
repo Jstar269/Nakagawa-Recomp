@@ -1846,7 +1846,7 @@ class TestEnhancementDataTransforms(unittest.TestCase):
         with self.assertRaisesRegex(EnhancementPackageError, "Unknown data type 'f64'"):
             _validate_data_files([self._csv_entry(csv, [{"column": "V", "type": "f64", "transform": "count_x2"}])])
 
-        pkg = {
+        pkg: dict[str, Any] = {
             "schema_version": 1, "id": "synth.data", "display_name": "Synthetic data", "version": "1.0.0",
             "category": "timing_frame_presentation", "target_title_id": "synthetic-allegrex-v1",
             "game_version": "1.00", "executable_sha256": "a" * 64, "capabilities": ["count_x2"],
