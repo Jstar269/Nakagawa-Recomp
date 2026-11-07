@@ -276,7 +276,7 @@ def load_public_safe_profile() -> tuple[dict, Path]:
     try:
         from . import public_candidate  # package import
     except ImportError:
-        import public_candidate  # direct script execution  # type: ignore[no-redef]
+        import public_candidate  # type: ignore[no-redef]  # direct script execution
 
     profile_path = ROOT / "assets" / "public_source_profile.json"
     profile = public_candidate.load_profile(profile_path)

@@ -18,10 +18,8 @@
     "tools/analysis_ir.py": 4,
     "tools/audit_public_issue_links.py": 2,
     "tools/build_graph_snapshot.py": 1,
-    "tools/build_public_export.py": 1,
     "tools/ci_paths.py": 9,
     "tools/ci_trust_verdict.py": 4,
-    "tools/contrib_check.py": 3,
     "tools/ge_replay_metrics.py": 1,
     "tools/library_build.py": 7,
     "tools/nidseq.py": 1,
@@ -36,7 +34,7 @@
     "tools/progress_tracker.py": 1,
     "tools/provenance_attest_verify.py": 3,
     "tools/provenance_ledger.py": 11,
-    "tools/provenance_record_gap.py": 5,
+    "tools/provenance_record_gap.py": 2,
     "tools/psp_oracle/insn_trace.py": 1,
     "tools/psp_oracle/user_mode_imports.py": 2,
     "tools/psp_oracle/verify_vfpu_addr.py": 1,
@@ -113,5 +111,5 @@
   "platform": "linux",
   "python_version": "3.15",
   "schema_version": 1,
-  "total_errors": 253
+  "total_errors": 246
 }
