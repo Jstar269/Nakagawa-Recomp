@@ -14,9 +14,9 @@
 #include <stdint.h>
 
 #ifndef SR_EVIDENCE_NO_NIDS
-#define SR_HLE_UNVERIFIED_NID_COUNT 158u
+#define SR_HLE_UNVERIFIED_NID_COUNT 162u
 /* Sorted ascending for binary search. */
-static const uint32_t sr_hle_unverified_nids[158] = {
+static const uint32_t sr_hle_unverified_nids[162] = {
     0x00061e74u,
     0x0282a3bdu,
     0x03d9526fu,
@@ -42,12 +42,14 @@ static const uint32_t sr_hle_unverified_nids[158] = {
     0x2255551eu,
     0x231fc6b7u,
     0x267a6dd2u,
+    0x26927d19u,
     0x29681260u,
     0x2a2a1e07u,
     0x2beb1569u,
     0x2c8e6ab3u,
     0x2d0e4e0au,
     0x2d31f5b1u,
+    0x304882e1u,
     0x307e6e1cu,
     0x31327f19u,
     0x3278ab0cu,
@@ -71,6 +73,7 @@ static const uint32_t sr_hle_unverified_nids[158] = {
     0x5b37eb1du,
     0x5e3d4b79u,
     0x5e7f79c9u,
+    0x627b7d42u,
     0x63f2889cu,
     0x6402490bu,
     0x644395e2u,
@@ -89,6 +92,7 @@ static const uint32_t sr_hle_unverified_nids[158] = {
     0x787d04d5u,
     0x7945ecdau,
     0x79d1c3fau,
+    0x7ac0321au,
     0x7cff8cf3u,
     0x7ed59bc4u,
     0x7f27bb5eu,

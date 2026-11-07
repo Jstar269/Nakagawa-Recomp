@@ -130,6 +130,14 @@ static uint32_t call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32
     return sr_syscall(&cpu, nid);
 }
 
+/* A five-argument call: the fifth arrives in t0 (MIPS EABI). */
+static uint32_t call5(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2; cpu.r[7] = a3; cpu.r[8] = a4;
+    return sr_syscall(&cpu, nid);
+}
+
 #define NID_OPEN        0xC01EC829u
 #define NID_INIT        0x17099F0Au
 #define NID_DECODE      0xDBA273FAu
@@ -142,6 +150,10 @@ static uint32_t call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32
 #define NID_CSCAVC      0x91929A21u
 #define NID_PESCOPY     0xBEA18F91u
 #define NID_PIXELMODE   0x0530BE4Eu
+#define NID_GETVERSION  0x26927D19u
+#define NID_GETSEI      0x627B7D42u
+#define NID_CSCRANGE    0x304882E1u
+#define NID_YCRCBCOPY   0x7AC0321Au
 #define NID_AC_NEEDMEM  0x9D3F790Cu
 #define NID_AC_INIT     0x5B37EB1Du
 #define NID_AC_DECODE   0x70A703F8u
@@ -357,12 +369,14 @@ static void test_registration(void) {
         { NID_RELEASE, "sceVideocodecReleaseEDRAM" }, { NID_SETMEMORY, "sceVideocodecSetMemory" },
         { NID_CSCINIT, "sceMpegBaseCscInit" }, { NID_CSCAVC, "sceMpegBaseCscAvc" },
         { NID_PESCOPY, "sceMpegBasePESpacketCopy" }, { NID_PIXELMODE, "sceMpegbase_0530BE4E" },
+        { NID_GETVERSION, "sceVideocodecGetVersion" }, { NID_GETSEI, "sceVideocodecGetSEI" },
+        { NID_CSCRANGE, "sceMpegBaseCscAvcRange" }, { NID_YCRCBCOPY, "sceMpegBaseYCrCbCopy" },
         { NID_AC_NEEDMEM, "sceAudiocodecCheckNeedMem" }, { NID_AC_INIT, "sceAudiocodecInit" },
         { NID_AC_DECODE, "sceAudiocodecDecode" }, { NID_AC_GETEDRAM, "sceAudiocodecGetEDRAM" },
         { NID_AC_RELEASE, "sceAudiocodecReleaseEDRAM" },
     };
     hle_register_videocodec_handlers();
-    CHECK(s_reg_count == 17 && s_reg_duplicates == 0, "registration: exactly the 17 boundary NIDs, once each");
+    CHECK(s_reg_count == 21 && s_reg_duplicates == 0, "registration: exactly the 21 boundary NIDs, once each");
     for (size_t k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
         int found = 0;
         for (int i = 0; i < s_reg_count; i++)
@@ -406,6 +420,28 @@ static void test_context_words(void) {
     memcpy(before, host(G_CTX), 96u);
     CHECK(call(NID_SETMEMORY, G_CTX, 0u, 0, 0) == 0u && memcmp(before, host(G_CTX), 96u) == 0,
           "setmemory: accepted and no context word changes");
+}
+
+/* sceVideocodecGetVersion and sceVideocodecGetSEI: the words JPCSP writes (synthetic, W-LLE-1). */
+static void test_version_sei(void) {
+    uint8_t before[96];
+    memcpy(before, host(G_CTX), 96u);
+    CHECK(call(NID_GETVERSION, G_CTX2, 0u, 0, 0) == VC_ERR_NOT_OPEN, "getversion: an unopened context is refused");
+    CHECK(call(NID_GETVERSION, G_CTX, 1u, 0, 0) == VC_ERR_TYPE && memcmp(before, host(G_CTX), 96u) == 0,
+          "getversion: codec type 1 is refused and the context is untouched");
+    CHECK(call(NID_GETVERSION, G_CTX, 0u, 0, 0) == 0u && MEM_R32(G_CTX + 4u) == 0x78u,
+          "getversion: context +4 is 0x78 (JPCSP, synthetic)");
+    before[4] = 0x78u; before[5] = 0u; before[6] = 0u; before[7] = 0u;
+    CHECK(memcmp(before, host(G_CTX), 96u) == 0, "getversion: no other context word changes");
+
+    MEM_W32(G_CTX + 80u, 0u);
+    CHECK(call(NID_GETSEI, G_CTX, 0u, 0, 0) == VC_ERR_GUEST_ADDRESS, "getsei: a context with no SEI block is refused");
+    memset(host(G_SEI), 0xA5, 36u);
+    MEM_W32(G_CTX + 80u, G_SEI);
+    CHECK(call(NID_GETSEI, G_CTX2, 0u, 0, 0) == VC_ERR_NOT_OPEN, "getsei: an unopened context is refused");
+    CHECK(call(NID_GETSEI, G_CTX, 0u, 0, 0) == 0u && MEM_R32(G_SEI + 28u) == 0u &&
+              bytes_are(G_SEI, 28u, 0xA5u) && bytes_are(G_SEI + 32u, 4u, 0xA5u),
+          "getsei: SEI block +28 is cleared and nothing else changes");
 }
 
 static void test_packet_copy(void) {
@@ -493,10 +529,15 @@ static const char *const k_decode_cases[] = {
     "CscAvc writes the measured 5650 conversion pixel for pixel",
     "CscAvc refuses a struct whose size differs from the picture",
     "Delete makes the decoded picture unconvertible",
+    "YCrCbCopy copies each half of a decoded picture into guest buffers",
+    "YCrCbCopy keeps the two halves of two pictures apart",
+    "CscAvcRange converts only the requested rectangle",
+    "A copy outlives the context that decoded it",
 };
 
 static int s_have_picture;
 static int s_last_picture;
+static int s_pictures;
 
 static void check_decode_words(const VcContext *c, int picture) {
     const uint32_t slot = (uint32_t)picture % 3u, base = c->band_base, step = (1024u + 1024u + 512u + 512u) * 4u;
@@ -568,6 +609,7 @@ static void test_decode(void) {
             pictures, FIX_PICTURES);
     CHECK(pictures >= 1, "decode: the synchronous decode delivers a picture");
     s_have_picture = pictures >= 1;
+    s_pictures = pictures;
 }
 
 static void expected_rgb(int picture, uint32_t x, uint32_t y, uint8_t *r, uint8_t *g, uint8_t *b) {
@@ -641,6 +683,138 @@ static void test_csc(void) {
     put_csc(FIX_H / 16u, FIX_W / 16u);
 }
 
+/* ---- sceMpegBaseYCrCbCopy and sceMpegBaseCscAvcRange -------------------------------------- */
+#define G_DCSC     0x08900740u   /* destination CSC struct (48 bytes) */
+#define G_SCSC2    0x08900780u   /* a second source CSC struct */
+#define G_YCC      0x08930000u   /* eight guest band buffers, 0x400 bytes each */
+
+static void put_dst_csc(uint32_t at, uint32_t first) {
+    MEM_W32(at, FIX_H / 16u);
+    MEM_W32(at + 4u, FIX_W / 16u);
+    MEM_W32(at + 8u, 0u);
+    MEM_W32(at + 12u, 0u);
+    MEM_W32(at + 16u, first);
+    for (uint32_t i = 1; i < 8u; i++) MEM_W32(at + 16u + i * 4u, G_YCC + i * 0x400u);
+}
+
+/* The 8888 pixel of a copy whose half A came from picture `a` and half B from picture `b`. */
+static void expected_mixed_rgb(int a, int b, uint32_t x, uint32_t y, uint8_t *r, uint8_t *g, uint8_t *bl) {
+    static uint8_t ya[FIX_W * FIX_H], cba[(FIX_W / 2) * (FIX_H / 2)], cra[(FIX_W / 2) * (FIX_H / 2)];
+    static uint8_t yb[FIX_W * FIX_H], cbb[(FIX_W / 2) * (FIX_H / 2)], crb[(FIX_W / 2) * (FIX_H / 2)];
+    static int ca = -1, cb = -1;
+    if (ca != a) { expected_planes(a, ya, cba, cra); ca = a; }
+    if (cb != b) { expected_planes(b, yb, cbb, crb); cb = b; }
+    const uint32_t ci = (y / 2u) * (FIX_W / 2u) + x / 2u;
+    const int chroma_a = ((x / 2u) % 16u) < 8u;
+    sr_h264_psp_rgb((y % 2u) == 0u ? ya[y * FIX_W + x] : yb[y * FIX_W + x],
+                    chroma_a ? cba[ci] : cbb[ci], chroma_a ? cra[ci] : crb[ci], r, g, bl);
+}
+
+static int rgb_matches(int a, int b, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, uint32_t stride) {
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            uint8_t r, g, bl;
+            expected_mixed_rgb(a, b, x0 + x, y0 + y, &r, &g, &bl);
+            const uint8_t *px = host(G_RGB + (y * stride + x) * 4u);
+            if (px[0] != r || px[1] != g || px[2] != bl || px[3] != 0u) return 0;
+        }
+    return 1;
+}
+
+static void test_copy_range(void) {
+    const uint32_t dest_bytes = FIX_H * RGB_STRIDE * 4u;
+    if (!s_have_picture) return;   /* the SKIP lines were printed by test_decode */
+    const int picture = s_last_picture;
+    CHECK(call(NID_PIXELMODE, 0u, 0, 0, 0) == 0u, "ycrcbcopy: CSC back in 8888");
+    put_csc(FIX_H / 16u, FIX_W / 16u);   /* the source: the last decoded picture's ME bands */
+    put_dst_csc(G_DCSC, G_YCC);
+
+    CHECK(call(NID_CSCAVC, G_RGB, 0u, RGB_STRIDE, G_DCSC) == VC_ERR_NO_PICTURE,
+          "ycrcbcopy: guest buffers nothing was copied into hold no picture");
+    CHECK(call(NID_YCRCBCOPY, G_DCSC, G_CSC, 4u, 0) == VC_ERR_STATE, "ycrcbcopy: an unknown flag bit is refused");
+    MEM_W32(G_DCSC + 16u, 0u);
+    CHECK(call(NID_YCRCBCOPY, G_DCSC, G_CSC, 1u, 0) == VC_ERR_GUEST_ADDRESS,
+          "ycrcbcopy: a null destination buffer is refused");
+    MEM_W32(G_DCSC + 16u, G_YCC);
+    MEM_W32(G_SCSC2, FIX_H / 16u);
+    MEM_W32(G_SCSC2 + 4u, FIX_W / 16u);
+    for (uint32_t i = 0; i < 8u; i++) MEM_W32(G_SCSC2 + 16u + i * 4u, 0x12340u + i * 0x100u);
+    CHECK(call(NID_YCRCBCOPY, G_DCSC, G_SCSC2, 3u, 0) == VC_ERR_NO_PICTURE,
+          "ycrcbcopy: a source that holds no decoded picture is refused");
+    MEM_W32(G_CSC + 4u, FIX_W / 16u + 1u);
+    CHECK(call(NID_YCRCBCOPY, G_DCSC, G_CSC, 3u, 0) == VC_ERR_CSC_GEOMETRY,
+          "ycrcbcopy: a source struct whose size differs from the picture is refused");
+    MEM_W32(G_CSC + 4u, FIX_W / 16u);
+    CHECK(call(NID_YCRCBCOPY, G_DCSC, G_CSC, 0u, 0) == 0u &&
+              call(NID_CSCAVC, G_RGB, 0u, RGB_STRIDE, G_DCSC) == VC_ERR_NO_PICTURE,
+          "ycrcbcopy: flags 0 copies nothing");
+
+    CHECK(call(NID_YCRCBCOPY, G_DCSC, G_CSC, 1u, 0) == 0u, "ycrcbcopy: half A copies");
+    CHECK(call(NID_CSCAVC, G_RGB, 0u, RGB_STRIDE, G_DCSC) == VC_ERR_NO_PICTURE,
+          "ycrcbcopy: a copy with one half is not converted");
+    CHECK(call(NID_YCRCBCOPY, G_DCSC, G_CSC, 2u, 0) == 0u, "ycrcbcopy: half B copies");
+    memset(host(G_RGB), 0xA5, dest_bytes);
+    CHECK(call(NID_CSCAVC, G_RGB, 0u, RGB_STRIDE, G_DCSC) == 0u &&
+              rgb_matches(picture, picture, 0u, 0u, FIX_W, FIX_H, RGB_STRIDE),
+          "ycrcbcopy: both halves convert to the source picture pixel for pixel");
+
+    /* Two pictures: half A from one, half B from another, so each half lands exactly where the
+     * band split puts it. */
+    const VcContext *c = vc_find(G_CTX);
+    if (c && s_pictures >= 2) {
+        const int other = s_last_picture - 1;
+        const uint32_t other_slot = (uint32_t)other % 3u;
+        MEM_W32(G_SCSC2, FIX_H / 16u);
+        MEM_W32(G_SCSC2 + 4u, FIX_W / 16u);
+        for (uint32_t i = 0; i < 8u; i++) MEM_W32(G_SCSC2 + 16u + i * 4u, c->bands[other_slot][i]);
+        put_dst_csc(G_DCSC, G_YCC + 16u);   /* a second record */
+        CHECK(call(NID_YCRCBCOPY, G_DCSC, G_CSC, 1u, 0) == 0u && call(NID_YCRCBCOPY, G_DCSC, G_SCSC2, 2u, 0) == 0u,
+              "ycrcbcopy: halves from two decoded pictures copy");
+        memset(host(G_RGB), 0xA5, dest_bytes);
+        CHECK(call(NID_CSCAVC, G_RGB, 0u, RGB_STRIDE, G_DCSC) == 0u &&
+                  rgb_matches(picture, other, 0u, 0u, FIX_W, FIX_H, RGB_STRIDE),
+              "ycrcbcopy: even luma rows and left chroma halves are half A's, the rest half B's");
+        put_dst_csc(G_DCSC, G_YCC);
+    } else {
+        skip("YCrCbCopy keeps the two halves of two pictures apart");
+    }
+
+    /* CscAvcRange: the rectangle (16, 16) 32 x 32 lands at the destination's top-left. */
+    MEM_W32(G_PKT, 1u); MEM_W32(G_PKT + 4u, 1u); MEM_W32(G_PKT + 8u, 2u); MEM_W32(G_PKT + 12u, 2u);
+    memset(host(G_RGB), 0xA5, dest_bytes);
+    CHECK(call5(NID_CSCRANGE, G_RGB, 0u, G_PKT, RGB_STRIDE, G_CSC) == 0u, "cscavcrange: a rectangle converts");
+    int margin = 1;
+    for (uint32_t y = 0; y < FIX_H; y++)
+        if (!bytes_are(G_RGB + (y * RGB_STRIDE + (y < 32u ? 32u : 0u)) * 4u, (RGB_STRIDE - (y < 32u ? 32u : 0u)) * 4u, 0xA5u))
+            margin = 0;
+    CHECK(rgb_matches(picture, picture, 16u, 16u, 32u, 32u, RGB_STRIDE),
+          "cscavcrange: every pixel is the picture's pixel at the rectangle's offset");
+    CHECK(margin, "cscavcrange: nothing outside the rectangle's rows and columns is written");
+    CHECK(call5(NID_CSCRANGE, G_RGB, 0u, G_PKT, RGB_STRIDE, G_DCSC) == 0u &&
+              rgb_matches(picture, picture, 16u, 16u, 32u, 32u, RGB_STRIDE),
+          "cscavcrange: a copy converts as its source does");
+    MEM_W32(G_PKT, 3u);
+    memset(host(G_RGB), 0xA5, dest_bytes);
+    CHECK(call5(NID_CSCRANGE, G_RGB, 0u, G_PKT, RGB_STRIDE, G_CSC) == VC_ERR_CSC_GEOMETRY &&
+              bytes_are(G_RGB, dest_bytes, 0xA5u),
+          "cscavcrange: a rectangle leaving the picture is refused and writes nothing");
+    MEM_W32(G_PKT, 0u); MEM_W32(G_PKT + 8u, 0u);
+    CHECK(call5(NID_CSCRANGE, G_RGB, 0u, G_PKT, RGB_STRIDE, G_CSC) == VC_ERR_CSC_GEOMETRY,
+          "cscavcrange: an empty rectangle is refused");
+    CHECK(call5(NID_CSCRANGE, G_RGB, 0u, 0x12u, RGB_STRIDE, G_CSC) == VC_ERR_GUEST_ADDRESS,
+          "cscavcrange: an unreadable range is refused");
+
+    /* The record table is bounded: eight more destination sets push the oldest out. */
+    for (uint32_t k = 1; k <= 8u; k++) {
+        put_dst_csc(G_DCSC, G_YCC + 0x100u + k * 16u);
+        CHECK(call(NID_YCRCBCOPY, G_DCSC, G_CSC, 3u, 0) == 0u, "ycrcbcopy: another destination set copies");
+    }
+    put_dst_csc(G_DCSC, G_YCC);
+    CHECK(call(NID_CSCAVC, G_RGB, 0u, RGB_STRIDE, G_DCSC) == VC_ERR_NO_PICTURE,
+          "ycrcbcopy: the oldest copy left the full table and is refused by name");
+    put_dst_csc(G_DCSC, G_YCC + 0x100u + 8u * 16u);
+}
+
 static void test_teardown(void) {
     CHECK(call(NID_STOP, G_CTX, 0u, 0, 0) == 0u && vc_find(G_CTX) && vc_find(G_CTX)->h264 < 0,
           "stop: the host decoder is released");
@@ -651,9 +825,14 @@ static void test_teardown(void) {
     CHECK(call(NID_DELETE, G_CTX, 0u, 0, 0) == 0u && s_me_alloc_count == 0 && !vc_find(G_CTX),
           "delete: the band buffers go and the context closes");
     CHECK(call(NID_INIT, G_CTX, 0u, 0, 0) == VC_ERR_NOT_OPEN, "delete: a deleted context is refused");
-    if (s_have_picture)
+    if (s_have_picture) {
         CHECK(call(NID_CSCAVC, G_RGB, 0u, RGB_STRIDE, G_CSC) == VC_ERR_NO_PICTURE,
               "delete: the decoded picture can no longer be converted");
+        memset(host(G_RGB), 0xA5, FIX_H * RGB_STRIDE * 4u);
+        CHECK(call(NID_CSCAVC, G_RGB, 0u, RGB_STRIDE, G_DCSC) == 0u &&
+                  rgb_matches(s_last_picture, s_last_picture, 0u, 0u, FIX_W, FIX_H, RGB_STRIDE),
+              "delete: a copy in guest buffers still converts");
+    }
 }
 
 /* ---- sceAudiocodec: the ATRAC3plus half --------------------------------------------------- */
@@ -858,10 +1037,12 @@ int main(void) {
     sr_mem_init();
     test_registration();
     test_context_words();
+    test_version_sei();
     test_packet_copy();
     test_decode_refusals();
     test_decode();
     test_csc();
+    test_copy_range();
     test_teardown();
     test_audiocodec();
     if (failures) {

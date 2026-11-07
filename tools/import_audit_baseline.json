@@ -629,6 +629,12 @@
     "name": "__sceSasRevParam",
     "status": "unreviewed"
   },
+  "0x26927d19": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecGetVersion",
+    "name": "sceVideocodecGetVersion",
+    "status": "partial"
+  },
   "0x26d25a5d": {
     "classification": "dedicated",
     "handler": "h_RtcTickAddMicroseconds",
@@ -797,6 +803,12 @@
     "handler": "h_UnloadModule_Trace",
     "name": "sceKernelUnloadModule",
     "status": "unreviewed"
+  },
+  "0x304882e1": {
+    "classification": "dedicated",
+    "handler": "h_MpegBaseCscAvcRange",
+    "name": "sceMpegBaseCscAvcRange",
+    "status": "partial"
   },
   "0x307e6e1c": {
     "classification": "dedicated",
@@ -1723,6 +1735,12 @@
     "name": "sceKernelTryAllocateFpl",
     "status": "partial"
   },
+  "0x627b7d42": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecGetSEI",
+    "name": "sceVideocodecGetSEI",
+    "status": "partial"
+  },
   "0x627e6f3a": {
     "classification": "dedicated",
     "handler": "h_ReferSystemStatus",
@@ -2118,6 +2136,12 @@
     "handler": "h_AtracSetDataAndGetID",
     "name": "sceAtracSetDataAndGetID",
     "status": "unreviewed"
+  },
+  "0x7ac0321a": {
+    "classification": "dedicated",
+    "handler": "h_MpegBaseYCrCbCopy",
+    "name": "sceMpegBaseYCrCbCopy",
+    "status": "partial"
   },
   "0x7c0dc2a0": {
     "classification": "dedicated",

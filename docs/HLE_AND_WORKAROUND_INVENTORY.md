@@ -46,13 +46,13 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **703** (dedicated **605**, fake_success **4**, controlled_unsupported **94**).
-Semantic handler census: **580** handlers across **30** API families, covering **612** handler-associated NID registrations.
+Registered NIDs: **707** (dedicated **609**, fake_success **4**, controlled_unsupported **94**).
+Semantic handler census: **584** handlers across **30** API families, covering **616** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 341 | 352 |
+| `partial` | 345 | 356 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
 | `unreviewed` | 221 | 229 |
@@ -74,7 +74,7 @@ Semantic handler census: **580** handlers across **30** API families, covering *
 | `sceIo` | 2 | 28 | 0 | 0 | 4 | 34 | 34 |
 | `sceKernel` | 3 | 142 | 0 | 0 | 44 | 189 | 209 |
 | `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
-| `sceMpeg` | 0 | 15 | 0 | 2 | 26 | 43 | 43 |
+| `sceMpeg` | 0 | 17 | 0 | 2 | 26 | 45 | 45 |
 | `sceMpegbase` | 0 | 1 | 0 | 0 | 0 | 1 | 1 |
 | `sceNet` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceNp` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
@@ -87,9 +87,9 @@ Semantic handler census: **580** handlers across **30** API families, covering *
 | `sceUmd` | 0 | 11 | 1 | 0 | 2 | 14 | 14 |
 | `sceUtility` | 0 | 10 | 0 | 0 | 27 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
-| `sceVideocodec` | 0 | 8 | 0 | 0 | 0 | 8 | 8 |
+| `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **341** | **1** | **3** | **221** | **580** | **612** |
+| **Total** | **14** | **345** | **1** | **3** | **221** | **584** | **616** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -1086,14 +1086,20 @@ Semantic handler census: **580** handlers across **30** API families, covering *
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode
 - **`h_MpegBaseCscAvc`** (`sceMpeg`): `sceMpegBaseCscAvc` (0x91929a21)
-  - Limitation: synthetic context words from JPCSP pending W-LLE-1; converts only pictures this boundary decoded, found by their eight published band addresses, at the full picture size; 16-bit pixel modes and alpha follow sceMpegAvcCsc and are not measured
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; converts only pictures this boundary decoded (found by their eight published band addresses) or copied with sceMpegBaseYCrCbCopy (found by the eight guest addresses), at the full picture size; 16-bit pixel modes and alpha follow sceMpegAvcCsc and are not measured
   - Evidence: tests/native/videocodec_selftest.c:test_csc
+- **`h_MpegBaseCscAvcRange`** (`sceMpeg`): `sceMpegBaseCscAvcRange` (0x304882e1)
+  - Limitation: synthetic layout from JPCSP pending W-LLE-1; the range words are 16-pixel units and the rectangle's top-left lands at the destination, as JPCSP writes it; otherwise the CscAvc limitations apply
+  - Evidence: tests/native/videocodec_selftest.c:test_copy_range
 - **`h_MpegBaseCscInit`** (`sceMpeg`): `sceMpegBaseCscInit` (0x492b5e4b)
   - Limitation: synthetic context words from JPCSP pending W-LLE-1; records the default row width only; the coefficient table the PSP writes is not reproduced (conversion is the measured sr_h264_psp_rgb)
   - Evidence: tests/native/videocodec_selftest.c:test_csc
 - **`h_MpegBasePESpacketCopy`** (`sceMpeg`): `sceMpegBasePESpacketCopy` (0xbea18f91)
   - Limitation: synthetic context words from JPCSP pending W-LLE-1; checks the whole packet list (sources, ME destinations, lengths, cycles) before copying; refusal codes other than the zero-length one are project-chosen
   - Evidence: tests/native/videocodec_selftest.c:test_packet_copy
+- **`h_MpegBaseYCrCbCopy`** (`sceMpeg`): `sceMpegBaseYCrCbCopy` (0x7ac0321a)
+  - Limitation: synthetic band split from JPCSP pending W-LLE-1; the guest buffers' bytes are not written (the copy is a host picture keyed by the eight guest addresses, converted by CscAvc); flags bits 0 and 1 copy the two halves, other bits are refused; at most 8 destination sets are remembered, the oldest dropped first
+  - Evidence: tests/native/videocodec_selftest.c:test_copy_range
 - **`h_MpegChangeGetAuMode`** (`sceMpeg`): `sceMpegChangeGetAuMode` (0x9dcfb7ea)
   - Limitation: decode mode is validated and retained; skip mode fails closed because its queue/timestamp effect is not measured (#302)
 - **`h_MpegGetAtracAu`** (`sceMpeg`): `sceMpegGetAtracAu` (0xe1ce83a7)
@@ -1408,6 +1414,12 @@ Semantic handler census: **580** handlers across **30** API families, covering *
 - **`h_VideocodecGetEDRAM`** (`sceVideocodec`): `sceVideocodecGetEDRAM` (0x2d31f5b1)
   - Limitation: synthetic context words from JPCSP pending W-LLE-1; allocates ((+24) + 63) | 0x3F bytes of a host 2 MiB ME RAM model, low-first, 64-byte aligned, first 0x10000 reserved; addresses are not PSP-measured
   - Evidence: tests/native/videocodec_selftest.c:test_context_words
+- **`h_VideocodecGetSEI`** (`sceVideocodec`): `sceVideocodecGetSEI` (0x627b7d42)
+  - Limitation: synthetic word from JPCSP pending W-LLE-1; clears word +28 of the SEI block named by context +80 and nothing else; a context without a writable SEI block is refused
+  - Evidence: tests/native/videocodec_selftest.c:test_version_sei
+- **`h_VideocodecGetVersion`** (`sceVideocodec`): `sceVideocodecGetVersion` (0x26927d19)
+  - Limitation: synthetic context word from JPCSP pending W-LLE-1 (JPCSP cites its own JpcspTrace record); writes context +4 = 0x78 and returns 0; codec type 0 only
+  - Evidence: tests/native/videocodec_selftest.c:test_version_sei
 - **`h_VideocodecInit`** (`sceVideocodec`): `sceVideocodecInit` (0x17099f0a)
   - Limitation: synthetic context words from JPCSP pending W-LLE-1; writes +12 = +20 + 8 only
   - Evidence: tests/native/videocodec_selftest.c:test_context_words

@@ -2328,7 +2328,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "tests/native/videocodec_selftest.c:test_csc",
         ],
-        "limitation": "synthetic context words from JPCSP pending W-LLE-1; converts only pictures this boundary decoded, found by their eight published band addresses, at the full picture size; 16-bit pixel modes and alpha follow sceMpegAvcCsc and are not measured",
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; converts only pictures this boundary decoded (found by their eight published band addresses) or copied with sceMpegBaseYCrCbCopy (found by the eight guest addresses), at the full picture size; 16-bit pixel modes and alpha follow sceMpegAvcCsc and are not measured",
     },
     "h_MpegBasePESpacketCopy": {
         "status": "partial",
@@ -2343,6 +2343,34 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/videocodec_selftest.c:test_csc",
         ],
         "limitation": "synthetic context words from JPCSP pending W-LLE-1; mode mapping 0=8888, 1=5650, 2=5551, 3=4444 from JPCSP; unknown modes return -1",
+    },
+    "h_VideocodecGetVersion": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_version_sei",
+        ],
+        "limitation": "synthetic context word from JPCSP pending W-LLE-1 (JPCSP cites its own JpcspTrace record); writes context +4 = 0x78 and returns 0; codec type 0 only",
+    },
+    "h_VideocodecGetSEI": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_version_sei",
+        ],
+        "limitation": "synthetic word from JPCSP pending W-LLE-1; clears word +28 of the SEI block named by context +80 and nothing else; a context without a writable SEI block is refused",
+    },
+    "h_MpegBaseCscAvcRange": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_copy_range",
+        ],
+        "limitation": "synthetic layout from JPCSP pending W-LLE-1; the range words are 16-pixel units and the rectangle's top-left lands at the destination, as JPCSP writes it; otherwise the CscAvc limitations apply",
+    },
+    "h_MpegBaseYCrCbCopy": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_copy_range",
+        ],
+        "limitation": "synthetic band split from JPCSP pending W-LLE-1; the guest buffers' bytes are not written (the copy is a host picture keyed by the eight guest addresses, converted by CscAvc); flags bits 0 and 1 copy the two halves, other bits are refused; at most 8 destination sets are remembered, the oldest dropped first",
     },
     # sceAudiocodec: the Media Engine audio half under a disc mpeg.prx (#286), in hle_videocodec.c.
     "h_AudiocodecCheckNeedMem": {

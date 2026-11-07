@@ -349,6 +349,33 @@ static uint32_t h_VideocodecSetMemory(CpuState *s) {
     return vc_context_for("sceVideocodecSetMemory", A0, A1, 1, &c);
 }
 
+/* synthetic: JPCSP sceVideocodecGetVersion writes this at context +4, citing its own JpcspTrace
+ * record of a PSP; W-LLE-1 measures it. */
+#define VC_VERSION_WORD       0x78u
+
+/* sceVideocodecGetVersion(ctx, type): context +4 = the version word; nothing else changes. */
+static uint32_t h_VideocodecGetVersion(CpuState *s) {
+    VcContext *c;
+    uint32_t r = vc_context_for("sceVideocodecGetVersion", A0, A1, 1, &c);
+    if (r) return r;
+    MEM_W32(c->ctx + 4u, VC_VERSION_WORD);
+    return 0u;
+}
+
+/* sceVideocodecGetSEI(ctx, type): word +28 of the SEI block named by context +80 is cleared, as
+ * JPCSP does (synthetic: W-LLE-1). A context with no writable SEI block is refused. */
+static uint32_t h_VideocodecGetSEI(CpuState *s) {
+    static const char call[] = "sceVideocodecGetSEI";
+    VcContext *c;
+    uint32_t r = vc_context_for(call, A0, A1, 1, &c);
+    if (r) return r;
+    const uint32_t sei = MEM_R32(c->ctx + 80u);
+    if (!vc_guest_words(sei, VC_SEI_BYTES))
+        return vc_refuse(call, "the SEI block at context +80 is not a writable guest span", VC_ERR_GUEST_ADDRESS);
+    MEM_W32(sei + 28u, 0u);
+    return 0u;
+}
+
 /* sceVideocodecStop(ctx, type): JPCSP drops its decoder; the next decode starts a new one. The
  * pictures already decoded stay convertible. (synthetic: W-LLE-1) */
 static uint32_t h_VideocodecStop(CpuState *s) {
@@ -638,8 +665,8 @@ static uint32_t h_MpegBasePESpacketCopy(CpuState *s) {
     return 0u;
 }
 
-/* The picture whose eight published band addresses are `buffers`. */
-static const VcPicture *vc_picture_for(const uint32_t buffers[8]) {
+/* The decoded picture whose eight published ME band addresses are `buffers`. */
+static const VcPicture *vc_decoded_picture_for(const uint32_t buffers[8]) {
     for (int i = 0; i < VC_MAX_CONTEXTS; i++) {
         const VcContext *c = &s_vc[i];
         if (!c->used) continue;
@@ -654,38 +681,175 @@ static const VcPicture *vc_picture_for(const uint32_t buffers[8]) {
     return NULL;
 }
 
-/* sceMpegBaseCscAvc(bufferRGB, unused, bufferWidth, cscStruct). The 48-byte SceMp4AvcCscStruct is
- * { height in 16-pixel units, width in 16-pixel units, mode0, mode1, buffer0..7 }; mode0 and mode1
- * are unused (as in JPCSP), and so is the second argument. */
-static uint32_t h_MpegBaseCscAvc(CpuState *s) {
-    static const char call[] = "sceMpegBaseCscAvc";
-    const uint32_t dest = A0, csc = A3;
-    uint32_t buffer_width = A2 ? A2 : s_csc_default_width;
-    if ((csc & 3u) || !sr_guest_span_readable(csc, 48u))
-        return vc_refuse(call, "CSC struct is not a readable guest span", VC_ERR_GUEST_ADDRESS);
-    const uint32_t h16 = MEM_R32(csc), w16 = MEM_R32(csc + 4u);
-    uint32_t buffers[8];
+/* sceMpegBaseYCrCbCopy copies a decoded picture's bands out of ME RAM into eight guest buffers.
+ * As for the decode, the bands' bytes are not written (see the file comment): the copy is a
+ * second host picture keyed by the eight guest addresses, so a CscAvc of those buffers converts
+ * it. The two halves of the copy (flags bit 0 and bit 1) are kept apart, exactly as the bands
+ * split the picture in JPCSP's layout: bit 0 is the even luma rows and the left eight columns of
+ * every 16-column chroma group, bit 1 the odd rows and the right eight. A copy converts only once
+ * both halves have arrived. The record table is host bookkeeping, not a PSP value: when it is
+ * full, the oldest record is dropped, and a later CscAvc of its buffers is refused by name. */
+#define VC_COPY_SLOTS         8
+#define VC_COPY_HALF_A        1u
+#define VC_COPY_HALF_B        2u
+typedef struct {
+    uint32_t buffers[8];   /* the guest addresses; buffers[0] == 0 = empty */
+    uint32_t halves;       /* VC_COPY_HALF_A | VC_COPY_HALF_B once complete */
+    uint32_t age;
+    VcPicture picture;     /* key = buffers[0] */
+} VcCopy;
+static VcCopy s_vc_copies[VC_COPY_SLOTS];
+static uint32_t s_vc_copy_clock;
+
+static int vc_copy_matches(const VcCopy *k, const uint32_t buffers[8]) {
+    return k->buffers[0] != 0u && memcmp(k->buffers, buffers, sizeof(k->buffers)) == 0;
+}
+
+/* The complete copy whose eight guest buffers are `buffers`. */
+static const VcPicture *vc_copied_picture_for(const uint32_t buffers[8]) {
+    for (int i = 0; i < VC_COPY_SLOTS; i++)
+        if (vc_copy_matches(&s_vc_copies[i], buffers))
+            return s_vc_copies[i].halves == (VC_COPY_HALF_A | VC_COPY_HALF_B) ? &s_vc_copies[i].picture : NULL;
+    return NULL;
+}
+
+/* The picture a CscAvc converts: a decoded picture by its ME bands, else a complete copy. */
+static const VcPicture *vc_picture_for(const uint32_t buffers[8]) {
+    const VcPicture *p = vc_decoded_picture_for(buffers);
+    return p ? p : vc_copied_picture_for(buffers);
+}
+
+/* The copy record for `buffers`, made ready for a w x h picture: the existing record for these
+ * buffers (emptied when its size differs), else a free one, else the oldest. NULL when no host
+ * memory is left. */
+static VcCopy *vc_copy_record(const uint32_t buffers[8], uint32_t w, uint32_t h) {
+    VcCopy *k = NULL;
+    for (int i = 0; i < VC_COPY_SLOTS && !k; i++)
+        if (vc_copy_matches(&s_vc_copies[i], buffers)) k = &s_vc_copies[i];
+    for (int i = 0; i < VC_COPY_SLOTS && !k; i++)
+        if (!s_vc_copies[i].buffers[0]) k = &s_vc_copies[i];
+    if (!k) {
+        k = &s_vc_copies[0];
+        for (int i = 1; i < VC_COPY_SLOTS; i++)
+            if (s_vc_copies[i].age < k->age) k = &s_vc_copies[i];
+        k->buffers[0] = 0u;   /* evicted: rebuilt below */
+    }
+    VcPicture *p = &k->picture;
+    if (!vc_copy_matches(k, buffers) || p->width != w || p->height != h || !p->y) {
+        const size_t luma = (size_t)w * h, chroma = (size_t)(w / 2u) * (h / 2u);
+        free(p->y); free(p->cb); free(p->cr);
+        memset(k, 0, sizeof(*k));
+        p->y = (uint8_t *)calloc(luma, 1u);
+        p->cb = (uint8_t *)calloc(chroma, 1u);
+        p->cr = (uint8_t *)calloc(chroma, 1u);
+        if (!p->y || !p->cb || !p->cr) {
+            free(p->y); free(p->cb); free(p->cr);
+            memset(k, 0, sizeof(*k));
+            return NULL;
+        }
+        p->width = w;
+        p->height = h;
+        memcpy(k->buffers, buffers, sizeof(k->buffers));
+        p->key = buffers[0];
+    }
+    k->age = ++s_vc_copy_clock;
+    return k;
+}
+
+/* Copy half `half` (VC_COPY_HALF_A or _B) of picture `src` into `dst` (same size). */
+static void vc_copy_half(VcPicture *dst, const VcPicture *src, uint32_t half) {
+    const uint32_t w = src->width, h = src->height, cw = w / 2u, ch = h / 2u;
+    const uint32_t first_row = half == VC_COPY_HALF_A ? 0u : 1u;
+    const uint32_t first_col = half == VC_COPY_HALF_A ? 0u : 8u;
+    for (uint32_t row = first_row; row < h; row += 2u)
+        memcpy(dst->y + (size_t)row * w, src->y + (size_t)row * w, w);
+    for (uint32_t row = 0; row < ch; row++)
+        for (uint32_t col = first_col; col < cw; col += 16u) {
+            const uint32_t n = cw - col < 8u ? cw - col : 8u;
+            const size_t at = (size_t)row * cw + col;
+            memcpy(dst->cb + at, src->cb + at, n);
+            memcpy(dst->cr + at, src->cr + at, n);
+        }
+}
+
+/* Read the 48-byte SceMp4AvcCscStruct { height in 16-pixel units, width in 16-pixel units,
+ * mode0, mode1, buffer0..7 } at `csc`. */
+static int vc_read_csc_struct(uint32_t csc, uint32_t *h16, uint32_t *w16, uint32_t buffers[8]) {
+    if ((csc & 3u) || !sr_guest_span_readable(csc, 48u)) return 0;
+    *h16 = MEM_R32(csc);
+    *w16 = MEM_R32(csc + 4u);
     for (uint32_t i = 0; i < 8u; i++) buffers[i] = MEM_R32(csc + 16u + i * 4u);
+    return 1;
+}
+
+/* sceMpegBaseYCrCbCopy(dst, src, flags): src names a decoded picture by its ME bands, dst the
+ * eight guest buffers it is copied into. JPCSP sizes the copy from the src struct's geometry
+ * and ignores the dst struct's. Flags 0 copies nothing. */
+static uint32_t h_MpegBaseYCrCbCopy(CpuState *s) {
+    static const char call[] = "sceMpegBaseYCrCbCopy";
+    const uint32_t flags = A2;
+    uint32_t dh16, dw16, sh16, sw16, dst[8], src[8];
+    if (!vc_read_csc_struct(A0, &dh16, &dw16, dst) || !vc_read_csc_struct(A1, &sh16, &sw16, src))
+        return vc_refuse(call, "a CSC struct is not a readable guest span", VC_ERR_GUEST_ADDRESS);
+    if (flags & ~(VC_COPY_HALF_A | VC_COPY_HALF_B))
+        return vc_refuse(call, "flags other than bits 0 and 1 are not modelled", VC_ERR_STATE);
+    const VcPicture *p = vc_decoded_picture_for(src);
+    if (!p) return vc_refuse(call, "copy of a picture this boundary never decoded", VC_ERR_NO_PICTURE);
+    if (sw16 > 0xFFFu || sh16 > 0xFFFu || (sw16 << 4) != p->width || (sh16 << 4) != p->height)
+        return vc_refuse(call, "source struct size differs from the decoded picture", VC_ERR_CSC_GEOMETRY);
+    /* JPCSP's copy sizes, in bytes per band. */
+    const uint32_t w = p->width, h = p->height;
+    const uint32_t size1 = ((w + 16u) >> 5) * (h >> 1) * 16u, size2 = (w >> 5) * (h >> 1) * 16u;
+    const uint32_t bytes[8] = { size1, size2, size1, size2, size1 >> 1, size2 >> 1, size1 >> 1, size2 >> 1 };
+    for (uint32_t i = 0; i < 8u; i++) {
+        const uint32_t half = (i & 2u) ? VC_COPY_HALF_B : VC_COPY_HALF_A;
+        if ((flags & half) && bytes[i] && (!dst[i] || !sr_guest_span_writable_any_view(dst[i], bytes[i])))
+            return vc_refuse(call, "a destination buffer is not a writable guest span", VC_ERR_GUEST_ADDRESS);
+    }
+    if (!flags) return 0u;
+    VcCopy *k = vc_copy_record(dst, w, h);
+    if (!k) return vc_refuse(call, "no host memory for the copied picture", VC_ERR_DECODE);
+    if (flags & VC_COPY_HALF_A) vc_copy_half(&k->picture, p, VC_COPY_HALF_A);
+    if (flags & VC_COPY_HALF_B) vc_copy_half(&k->picture, p, VC_COPY_HALF_B);
+    k->halves |= flags;
+    return 0u;
+}
+
+/* Convert the rectangle (rx16, ry16, rw16, rh16), in 16-pixel units, of the picture the CSC
+ * struct at `csc` names into `dest`, whose first row is the rectangle's top row; rows are
+ * `buffer_width` pixels apart (0 takes CscInit's default). `whole` converts the whole picture. */
+static uint32_t vc_csc(const char *call, uint32_t dest, uint32_t buffer_width, uint32_t csc,
+                       int whole, uint32_t rx16, uint32_t ry16, uint32_t rw16, uint32_t rh16) {
+    uint32_t h16, w16, buffers[8];
+    if (!buffer_width) buffer_width = s_csc_default_width;
+    if (!vc_read_csc_struct(csc, &h16, &w16, buffers))
+        return vc_refuse(call, "CSC struct is not a readable guest span", VC_ERR_GUEST_ADDRESS);
     const VcPicture *p = vc_picture_for(buffers);
     if (!p) return vc_refuse(call, "CSC of a picture this boundary never decoded", VC_ERR_NO_PICTURE);
     if (w16 > 0xFFFu || h16 > 0xFFFu || (w16 << 4) != p->width || (h16 << 4) != p->height)
         return vc_refuse(call, "CSC struct size differs from the decoded picture", VC_ERR_CSC_GEOMETRY);
-    if (buffer_width < p->width)
-        return vc_refuse(call, "row width narrower than the picture", VC_ERR_CSC_GEOMETRY);
+    if (whole) { rx16 = 0u; ry16 = 0u; rw16 = w16; rh16 = h16; }
+    if (!rw16 || !rh16 || rx16 > w16 || rw16 > w16 - rx16 || ry16 > h16 || rh16 > h16 - ry16)
+        return vc_refuse(call, "range is empty or leaves the picture", VC_ERR_CSC_GEOMETRY);
+    const uint32_t rx = rx16 << 4, ry = ry16 << 4, rw = rw16 << 4, rh = rh16 << 4;
+    if (buffer_width < rw)
+        return vc_refuse(call, "row width narrower than the converted rectangle", VC_ERR_CSC_GEOMETRY);
     const int mode = s_csc_pixel_mode;
     const uint32_t bpp = mode == VC_PIXEL_8888 ? 4u : 2u;
     SrGuestRectSpan span;
-    if (!dest || !sr_guest_rect_geometry(dest, 0u, 0u, buffer_width, p->width, p->height, bpp, &span) ||
+    if (!dest || !sr_guest_rect_geometry(dest, 0u, 0u, buffer_width, rw, rh, bpp, &span) ||
         !sr_guest_span_writable_any_view(span.first, span.total_bytes))
         return vc_refuse(call, "destination rectangle is outside guest memory", VC_ERR_GUEST_ADDRESS);
     uint8_t *out = (uint8_t *)malloc(span.row_bytes);
     if (!out) return vc_refuse(call, "no host scratch row", VC_ERR_CSC_GEOMETRY);
     const uint32_t cw = p->width / 2u;
-    for (uint32_t row = 0; row < p->height; row++) {
-        for (uint32_t col = 0; col < p->width; col++) {
-            const size_t c_at = (size_t)(row >> 1) * cw + (col >> 1);
+    for (uint32_t row = 0; row < rh; row++) {
+        const uint32_t y = ry + row;
+        for (uint32_t col = 0; col < rw; col++) {
+            const uint32_t x = rx + col;
+            const size_t c_at = (size_t)(y >> 1) * cw + (x >> 1);
             uint8_t r, g, b;
-            sr_h264_psp_rgb(p->y[(size_t)row * p->width + col], p->cb[c_at], p->cr[c_at], &r, &g, &b);
+            sr_h264_psp_rgb(p->y[(size_t)y * p->width + x], p->cb[c_at], p->cr[c_at], &r, &g, &b);
             uint16_t v16;
             switch (mode) {
                 case VC_PIXEL_5650: v16 = (uint16_t)((r >> 3) | ((g >> 2) << 5) | ((b >> 3) << 11)); break;
@@ -710,6 +874,24 @@ static uint32_t h_MpegBaseCscAvc(CpuState *s) {
     }
     free(out);
     return 0u;
+}
+
+/* sceMpegBaseCscAvc(bufferRGB, unused, bufferWidth, cscStruct). mode0 and mode1 in the struct are
+ * unused (as in JPCSP), and so is the second argument. */
+static uint32_t h_MpegBaseCscAvc(CpuState *s) {
+    return vc_csc("sceMpegBaseCscAvc", A0, A2, A3, 1, 0u, 0u, 0u, 0u);
+}
+
+/* sceMpegBaseCscAvcRange(bufferRGB, unused, range, bufferWidth, cscStruct): range is four words
+ * { x, y, width, height } in 16-pixel units, and the rectangle's top-left pixel lands at
+ * bufferRGB (JPCSP hleMpegBaseCscAvcRange). The fifth argument arrives in t0. */
+static uint32_t h_MpegBaseCscAvcRange(CpuState *s) {
+    static const char call[] = "sceMpegBaseCscAvcRange";
+    const uint32_t range = A2;
+    if ((range & 3u) || !sr_guest_span_readable(range, 16u))
+        return vc_refuse(call, "range is not a readable guest span", VC_ERR_GUEST_ADDRESS);
+    return vc_csc(call, A0, A3, stack_arg(s, 0), 0, MEM_R32(range), MEM_R32(range + 4u),
+                  MEM_R32(range + 8u), MEM_R32(range + 12u));
 }
 
 /* ---- sceAudiocodec (uofw audiocodec.c for the wrapper, JPCSP for the ME words) ---- */
@@ -960,10 +1142,14 @@ void hle_register_videocodec_handlers(void) {
     sr_hle_register(0x2d31f5b1u, "sceVideocodecGetEDRAM", h_VideocodecGetEDRAM);
     sr_hle_register(0x4f160bf4u, "sceVideocodecReleaseEDRAM", h_VideocodecReleaseEDRAM);
     sr_hle_register(0x745a7b7au, "sceVideocodecSetMemory", h_VideocodecSetMemory);
+    sr_hle_register(0x26927d19u, "sceVideocodecGetVersion", h_VideocodecGetVersion);
+    sr_hle_register(0x627b7d42u, "sceVideocodecGetSEI", h_VideocodecGetSEI);
     sr_hle_register(0x492b5e4bu, "sceMpegBaseCscInit", h_MpegBaseCscInit);
     sr_hle_register(0x91929a21u, "sceMpegBaseCscAvc", h_MpegBaseCscAvc);
     sr_hle_register(0xbea18f91u, "sceMpegBasePESpacketCopy", h_MpegBasePESpacketCopy);
     sr_hle_register(0x0530be4eu, "sceMpegbase_0530BE4E", h_Mpegbase_0530BE4E);
+    sr_hle_register(0x304882e1u, "sceMpegBaseCscAvcRange", h_MpegBaseCscAvcRange);
+    sr_hle_register(0x7ac0321au, "sceMpegBaseYCrCbCopy", h_MpegBaseYCrCbCopy);
     sr_hle_register(0x9d3f790cu, "sceAudiocodecCheckNeedMem", h_AudiocodecCheckNeedMem);
     sr_hle_register(0x5b37eb1du, "sceAudiocodecInit", h_AudiocodecInit);
     sr_hle_register(0x70a703f8u, "sceAudiocodecDecode", h_AudiocodecDecode);
