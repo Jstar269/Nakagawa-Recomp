@@ -1105,13 +1105,16 @@ def _changed_files_from_git(event_name: str, event: Mapping[str, object]) -> lis
     return _parse_changed_paths(result.stdout)
 
 
-#: Python shards for a change whose only build-system edit is a recipe-only Makefile
-#: edit. The Makefile-coupled subset (tools/ci_test_shards.py --select makefile) is
-#: about nine tenths of the suite by measured weight, because most heavy modules run
-#: make, so it keeps four runners, two fewer than the full suite's six. Six full shards keep a
-#: shard well inside the 30-minute job limit on the busy self-hosted pool (2026-11-02).
-PYTHON_SHARDS_FULL = 6
-PYTHON_SHARDS_MAKEFILE = 4
+#: Python shards for the full suite and for a change whose only build-system edit is a
+#: recipe-only Makefile edit. Three full shards keep a whole CI run near 14 jobs, inside
+#: the free plan's 20 concurrent jobs (docs/CI.md, "Jobs per run"); each plans to about
+#: 16 hosted minutes by run 42270920833's weights, and test_production_smoke alone takes
+#: about 12.5, so more shards would shorten the job little. The Makefile-coupled subset
+#: (tools/ci_test_shards.py --select makefile) is about nine tenths of the suite by
+#: measured weight, because most heavy modules run make, so it keeps the same three
+#: runners and saves the unrelated modules rather than a runner.
+PYTHON_SHARDS_FULL = 3
+PYTHON_SHARDS_MAKEFILE = 3
 
 
 _MAKEFILE_INCLUDE_RE = re.compile(r"^[ \t]*include[ \t]+(mk/[A-Za-z0-9_./-]+\.mk)[ \t]*$")
@@ -1248,11 +1251,18 @@ def classify(
     run_windows = run_native
     # A normal main push is already covered by its PR. Workflow changes are
     # exceptional: validate the new workflow itself on the default branch too.
-    # Draft pull requests are not a separate validation mode: they get the
-    # same path-applicable gates as ready pull requests, so progress does not
-    # require a manual ready-for-review transition or workflow dispatch.
+    # A Draft pull request runs only the quick jobs (classification, hygiene and
+    # security, the public export audit and CI required), whatever its paths: the
+    # substantive gates run when it is marked Ready (``ready_for_review``) and on
+    # every later push while it is not a Draft (docs/CI.md, "Draft pull requests").
+    # The run flags above still describe what the paths would route, and
+    # tools/ci_required.py never reports a Draft's run green (DRAFT_LIGHT_CI).
+    # Only a pull_request event can be a Draft, so no other event is narrowed.
+    draft_pull_request = event_name == "pull_request" and draft
     is_main_push = event_name == "push" and os.environ.get("GITHUB_REF") == "refs/heads/main"
-    allow_substantive = event_name in FULL_MATRIX_EVENTS or (not is_main_push or workflow_ci)
+    allow_substantive = not draft_pull_request and (
+        event_name in FULL_MATRIX_EVENTS or not is_main_push or workflow_ci
+    )
     run_main_smoke = is_main_push or event_name in FULL_MATRIX_EVENTS
     # #735: only a run of main's own code on main -- a push, the nightly schedule or
     # a manual dispatch of main -- may save the persisted Windows compiler cache.
@@ -1284,7 +1294,7 @@ def classify(
         "run_main_smoke": str(run_main_smoke).lower(),
         "save_compiler_cache": str(save_compiler_cache).lower(),
         "allow_substantive": str(allow_substantive).lower(),
-        "draft": str(draft).lower(),
+        "draft": str(draft_pull_request).lower(),
     }
 
 

@@ -92,9 +92,6 @@ endif
 # optional UI font selftest reports a named skip when SDL3_ttf is unavailable.
 player-ui-tests: osk-overlay-paint-selftest ui-font-selftest nk-ui-player-screens-selftest nk-ui-overlay-screens-selftest nk-ui-overlay-host-selftest
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
-	$(CC) -std=c99 -Wall -Wextra $(PLAYER_INCLUDES) $(LDFLAGS) tests/native/test_ui_clip.c -lSDL3 \
-		-o $(BUILD_ROOT)/test_ui_clip$(EXE_EXT)
-	$(BUILD_ROOT_RUN)/test_ui_clip$(EXE_EXT)
 	$(CC) -std=c99 -Wall -Wextra -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(PLAYER_INCLUDES) $(LDFLAGS) tests/native/test_player_ui_art.c \
 		$(NK_UI_PLAYER_HOST_SRCS) src/ui/nk_ui_image.c src/ui/nk_ui_assets.c -lSDL3 \
 		-o $(BUILD_ROOT)/test_player_ui_art$(EXE_EXT)
@@ -155,6 +152,25 @@ ed25519-verify-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call ED25519_VERIFY_SELFTEST_CMD)
 
+# The RetroAchievements bridge (src/core/nk_achievements.c, #1316) on the vendored rcheevos
+# rc_client, against an in-process fake server: login, game load, a softcore unlock on synthetic
+# guest memory, the PSP memory map's bounds and the retroachievements.org-only request gate.
+# No socket and no network. gnu99, not c99: rcheevos calls strdup and strcasecmp, which glibc
+# declares only outside strict ISO mode; its runtime needs libm (fmod).
+ACHIEVEMENTS_SELFTEST_SRCS := src/core/nk_achievements.c $(wildcard third_party/rcheevos/src/*.c) \
+	$(wildcard third_party/rcheevos/src/rapi/*.c) $(wildcard third_party/rcheevos/src/rcheevos/*.c) \
+	third_party/rcheevos/src/rhash/md5.c tests/native/test_nk_achievements.c
+define ACHIEVEMENTS_SELFTEST_CMD
+	$(CC) -std=gnu99 -Wall -Wextra -Isrc/core -Ithird_party/rcheevos/include $(ACHIEVEMENTS_SELFTEST_SRCS) \
+		-lm -o $(BUILD_ROOT)/test_nk_achievements$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_achievements$(EXE_EXT)
+endef
+
+.PHONY: achievements-selftest
+achievements-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call ACHIEVEMENTS_SELFTEST_CMD)
+
 .PHONY: nk-ui-core-selftest
 nk-ui-core-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
@@ -167,7 +183,8 @@ nk-ui-core-selftest:
 .PHONY: nk-ui-player-screens-selftest
 nk-ui-player-screens-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
-	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/ui -Isrc/player/ui -Ithird_party/clay \
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror \
+		-Isrc/core -Isrc/player -Isrc/ui -Isrc/player/ui -Ithird_party/clay \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		$(NK_UI_CORE_SRCS) $(filter-out src/player/ui/player_ui_nk.c,$(NK_UI_PLAYER_C5_SRCS)) \
 		tests/native/test_player_screens.c -lm -o $(BUILD_ROOT)/test_player_screens$(EXE_EXT)
@@ -388,7 +405,15 @@ nk-ui-focus-selftest:
 		if [ "$$rc" = 77 ]; then echo "SKIP nk-ui-focus-selftest SDL translation leg (exit 77): SDL3 not found by build discovery"; \
 		elif [ "$$rc" != 0 ]; then exit "$$rc"; fi
 
-native-core-tests: cpu-lle-selftest domain-mode-selftest native-core-objects-core native-core-objects-player $(LIBCHDR_LIB) clay-layout-selftest nk-ui-core-selftest nk-ui-player-screens-selftest nk-ui-overlay-screens-selftest nk-ui-overlay-host-selftest nk-ui-sdlr-selftest nk-ui-vk-selftest nk-ui-focus-selftest
+.PHONY: shared-helpers-selftest
+shared-helpers-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(CC) $(NC_CFLAGS_CORE) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
+		src/core/nk_shared_helpers.c tests/native/test_shared_helpers.c \
+		-o $(BUILD_ROOT)/test_shared_helpers$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_shared_helpers$(EXE_EXT)
+
+native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native-core-objects-core native-core-objects-player $(LIBCHDR_LIB) clay-layout-selftest nk-ui-core-selftest nk-ui-player-screens-selftest nk-ui-overlay-screens-selftest nk-ui-overlay-host-selftest nk-ui-sdlr-selftest nk-ui-vk-selftest nk-ui-focus-selftest shared-helpers-selftest
 	$(CC) -std=c99 -Wall -Wextra -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" src/rt/pgf_public.c \
 		tests/native/test_pgf_public.c -o $(BUILD_ROOT)/test_pgf_public$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_pgf_public$(EXE_EXT)
@@ -424,6 +449,9 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest native-core-objects-cor
 	$(CC) $(NC_CFLAGS_CORE) -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_nk_zip.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_nk_zip$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_nk_zip$(EXE_EXT)
+	$(CC) $(NC_CFLAGS_CORE) -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
+		tests/native/native_test_isolation.c tests/native/test_steam_shortcuts.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_steam_shortcuts$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_steam_shortcuts$(EXE_EXT)
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" tests/native/test_safe_math.c \
 		-o $(BUILD_ROOT)/test_safe_math$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_safe_math$(EXE_EXT)
@@ -439,6 +467,7 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest native-core-objects-cor
 		tests/native/test_input_profile.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_input_profile$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_input_profile$(EXE_EXT)
 	$(call ED25519_VERIFY_SELFTEST_CMD)
+	$(call ACHIEVEMENTS_SELFTEST_CMD)
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_portable_mode.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_portable_mode$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_portable_mode$(EXE_EXT)

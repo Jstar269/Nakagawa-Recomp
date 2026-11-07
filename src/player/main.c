@@ -43,6 +43,7 @@
 #include "setup_staging.h"
 #include "player_ui_test.h"
 #include "nk_platform.h"
+#include "nk_shared_helpers.h"
 #include "nk_portable.h"
 #include "nk_json.h"
 #include "player_host.h"
@@ -1671,6 +1672,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_VSYNC: player_app_toggle_vsync(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_FULLSCREEN: player_app_toggle_fullscreen(app); break;
         case PLAYER_UI_SETTINGS_CYCLE_SCALING: player_app_cycle_present_scaling(app, 1); break;
+        case PLAYER_UI_SETTINGS_CYCLE_PRESET: player_app_cycle_graphics_preset(app, 1); break;
         case PLAYER_UI_SETTINGS_VOLUME_DOWN: player_app_adjust_volume(app, -5); break;
         case PLAYER_UI_SETTINGS_VOLUME_UP: player_app_adjust_volume(app, 5); break;
         case PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS: player_app_toggle_ui_sounds(app); break;
@@ -2554,11 +2556,8 @@ static void player_package_status_recover_lost_handoff(
 
 static bool copy_bounded_text(char *destination, size_t destination_size,
                               const char *source) {
-    if (!destination || destination_size == 0 || !source) return false;
-    size_t length = strlen(source);
-    if (length >= destination_size) return false;
-    memcpy(destination, source, length + 1);
-    return true;
+    return nk_shared_text_copy(destination, destination_size, source,
+                               NK_SHARED_TEXT_COPY_REQUIRE_FIT);
 }
 
 typedef struct {
@@ -4657,6 +4656,10 @@ static int player_open_window(PlayerRun *run) {
     run->next_ui = player_ui_nk_create(run->renderer, run->window, app,
                                   ui_error, sizeof(ui_error));
     player_ui_test_set_next_ui(run->next_ui);
+    /* A capture is a still picture: drawn at a held time, the waves and
+       sweeps come out the same on every run (#2124), at the phase nk_ui
+       holds them at for Reduce motion. */
+    if (run->screenshot_path != NULL) player_ui_nk_hold_clock(run->next_ui, NK_UI_STILL_TIME_S);
     if (run->next_ui == NULL) {
         /* There is no other launcher to fall back to: say why, once, and
            stop. A build without the launcher's support needs building
@@ -4713,6 +4716,7 @@ static int player_capture_screenshot(PlayerRun *run) {
         if (target) {
             SDL_SetRenderTarget(run->renderer, target);
         }
+        player_ui_test_delay_screenshot();
         player_render_active_ui(run->next_ui, app, run->renderer, run->window);
         if (player_host_save_screenshot(run->renderer, run->screenshot_path)) {
             printf("[PLAYER] Screenshot saved to %s (%dx%d pixels, %dx%d layout)\n", run->screenshot_path,

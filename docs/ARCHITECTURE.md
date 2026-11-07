@@ -605,7 +605,10 @@ enclosing drain.
 
 A callable body's entry-SP restore travels with its transfer, and each drain applies the first
 one recorded in its chain: the value the nested returns used to leave. A computed target still
-runs at the live SP.
+runs at the live SP. An interpreted body entered by a computed step leaves the same way
+(`sr_guest_interp_run_tail_step`): its handoff to native code is a recorded transfer, with the
+entry-SP restore a native body entered there would record, so both tiers give the chain the same
+restore (#1935).
 
 The slot is never live across a yield, syscall, dispatch entry or unwind; each of those refuses a
 live transfer with a named `TAIL_TRANSFER_FAULT`.
@@ -625,7 +628,7 @@ refuses a body whose slot label has no owned successor. `cosim-selftest` covers 
 taken, used to carry the body into the other entry's code and translate a copy of it. In a large
 branch-connected region every entry then holds a copy of the whole region (one title: 6,539
 entries in a region of 1.33 million instructions). A body whose walk exceeds
-`OPTIONS.region_split_threshold` instructions (`tools/codegen.py`, `--region-split-threshold=N|off`)
+`CodegenOptions.region_split_threshold` instructions (`tools/codegen.py`, `--region-split-threshold=N|off`)
 instead stops at every other entry. A conditional branch into one records a TAIL transfer to that
 entry's own body after the delay slot (annulled on the not-taken path of a branch-likely), and a
 not-taken successor that is one is a continuation, exactly as straight-line fall-through is. A
