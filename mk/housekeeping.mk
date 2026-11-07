@@ -51,7 +51,7 @@ project-latin-15-font:
 define PROJECT_FONT_RULE
 project-$(1)-font: $(PROJECT_FONT_GENERATED_DIR)/$(2)
 
-$(PROJECT_FONT_GENERATED_DIR)/$(2): $(3) $(4) $(5) tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md
+$(PROJECT_FONT_GENERATED_DIR)/$(2): $(3) $(4) $(5) tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md mk/housekeeping.mk
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(PROJECT_FONT_GENERATED_DIR_PY)').mkdir(parents=True, exist_ok=True)"
 	"$(PYTHON)" tools/ttf2pgf.py "$$@" "$(3)" --pin "$(4)" $(6) $(8) --font-name "$(7)" --font-type "$(9)" --manifest "$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2)).json"
 	"$(PYTHON)" -c "import shutil; shutil.copyfile('$(5)', '$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2))-OFL.txt')"
@@ -67,7 +67,7 @@ PROJECT_LATIN_STRIKE_ARGS := --ppem 20 --embolden-x 4 --embolden-advance 4 --nom
 PROJECT_LATIN_SMALL_STRIKE_ARGS := --ppem 13 --embolden-x 2 --embolden-advance 2 --nominal-size 448 --resolution 8192 --header-ascender 576 --header-descender -131
 # Per index: source face, PGF style, then that face's spacing (--tracking, eighths of a pixel), where
 # measured its digit advance (26.6 px), and its horizontal-stroke weight (--embolden-y, eighths of a
-# pixel). The weight puts each sans-serif face's ink per letter within 3 % of the console face's (#1300);
+# pixel). The weight puts each sans-serif face's ink per letter within 4 % of the console face's (#1300);
 # the serif faces keep none, because they already carry more ink than the console's.
 PROJECT_LATIN_0_FACE := LiberationSans-Regular
 PROJECT_LATIN_1_FACE := LiberationSerif-Regular
