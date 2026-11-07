@@ -308,6 +308,7 @@ class PowerRegistrationOwnershipTests(unittest.TestCase):
         0xB4432BC8, 0x8EFB3FA2, 0x843FBF43,                                      # charging status, battery life time, CPU clock setter (PSP-3000 6.61, 2026-10-24)
         0xB8D7B3FB,                                                              # scePowerSetBusClockFrequency (pspautotests power/freq.expected)
         0x469989AD, 0xA85880D0,                                                  # scePowerSetClockFrequency630 (PPSSPP c9e2afb6), WLAN coexistence clock (#307)
+        0x23C31FFE, 0xFA97A599, 0xB3EDD801,                                      # scePowerVolatileMem Lock/TryLock/Unlock aliases (pspautotests power/volatile, #341)
     })
 
     def test_power_registrations_are_owned_by_hle_power_c(self) -> None:
@@ -741,7 +742,10 @@ class LiveManifestTests(unittest.TestCase):
                 self.assertEqual(registration["handler"], handler)
                 self.assertEqual(registration["classification"], "dedicated")
                 self.assertEqual(registration["status"], "partial")
-        self.assertIn("project choice", meta.HANDLER_LIMITATIONS["h_UmdUnRegisterUMDCallBack"])
+        # #341: the unregister codes now follow pspautotests tests/umd/register.expected.
+        self.assertTrue(any(
+            "tests/umd/register.expected" in item for item in meta.HANDLER_EVIDENCE["h_UmdUnRegisterUMDCallBack"]
+        ))
 
     def test_findings_and_waivers_are_in_exact_balance(self) -> None:
         findings = [{**f, "nid": int(f["nid"], 16)} for f in self.manifest["findings"]]
@@ -774,9 +778,13 @@ class LiveManifestTests(unittest.TestCase):
                 self.assertEqual(registration["classification"], "dedicated")
                 self.assertEqual(registration["status"], "partial")
                 self.assertTrue(meta.HANDLER_EVIDENCE[handler])
-                self.assertTrue(
-                    all("HARDWARE_ORACLE.md" in item for item in meta.HANDLER_EVIDENCE[handler])
-                )
+                evidence = meta.HANDLER_EVIDENCE[handler]
+                self.assertTrue(any("HARDWARE_ORACLE.md" in item for item in evidence))
+                # A later #341 batch may add the PSPAutotests cell and the selftest that pins it.
+                self.assertTrue(all(
+                    "HARDWARE_ORACLE.md" in item or item.startswith(("PSPAutotests ", "tests/native/"))
+                    for item in evidence
+                ))
                 self.assertTrue(meta.HANDLER_LIMITATIONS[handler])
 
     def test_route_a_kernel_object_batch_three_has_evidence_and_named_limits(self) -> None:
@@ -828,21 +836,21 @@ class LiveManifestTests(unittest.TestCase):
                 self.assertEqual(registration["classification"], "dedicated")
                 self.assertEqual(registration["status"], "partial")
                 self.assertTrue(meta.HANDLER_EVIDENCE[handler])
-                self.assertTrue(
-                    all("HARDWARE_ORACLE.md" in item for item in meta.HANDLER_EVIDENCE[handler])
-                )
+                evidence = meta.HANDLER_EVIDENCE[handler]
+                self.assertTrue(any("HARDWARE_ORACLE.md" in item for item in evidence))
+                # A later #341 batch may add the PSPAutotests cell and the selftest that pins it.
+                self.assertTrue(all(
+                    "HARDWARE_ORACLE.md" in item or item.startswith(("PSPAutotests ", "tests/native/"))
+                    for item in evidence
+                ))
                 self.assertTrue(meta.HANDLER_LIMITATIONS[handler])
                 if handler == "h_ExitDeleteThread":
                     self.assertIn("PSP-TEARDOWN-001", meta.HANDLER_LIMITATIONS[handler])
                 if handler == "h_TryAllocateVpl":
                     self.assertIn("unmeasured", meta.HANDLER_LIMITATIONS[handler])
-        for nid, handler in {
-            0x446D8DE6: "h_CreateThread",
-            0xF475845D: "h_StartThread",
-        }.items():
-            with self.subTest(nid=f"0x{nid:08x}", excluded_handler=handler):
-                self.assertEqual(self.regs[nid]["handler"], handler)
-                self.assertEqual(self.regs[nid]["status"], "unreviewed")
+        # CreateThread and StartThread left this exclusion in the profile-zero #341 batch: the
+        # PSPAutotests create/start cells measure their own contracts (see
+        # test_profile_zero_batch_graduates_with_cited_cells).
 
     def test_route_a_kernel_sync_batch_five_has_evidence_and_named_limits(self) -> None:
         expected = {
@@ -1061,14 +1069,42 @@ class LiveManifestTests(unittest.TestCase):
                 self.assertTrue(meta.HANDLER_LIMITATIONS[handler].strip())
                 self.assertNotIn(nid, meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
 
+    def test_profile_zero_batch_graduates_with_cited_cells(self) -> None:
+        # #341: seven profile-zero imports leave PROFILE_ZERO_UNREVIEWED_IMPORTS. Each cites a
+        # PSPAutotests cell recorded on a PSP (or, for GetThreadId, the cell that observes it)
+        # and a production-dispatch self-test, and names what stays unmeasured.
+        batch = {
+            0x446D8DE6: "h_CreateThread",
+            0xF475845D: "h_StartThread",
+            0x0E20F177: "h_DisplaySetMode",
+            0xE0D68148: "h_GeListUpdateStallAddr",
+            0xACE946E8: "h_IoGetstat",
+            0xE3EB004C: "h_IoDread",
+            0x293B45B8: "h_GetThreadIdSched",
+        }
+        for nid, handler in batch.items():
+            with self.subTest(handler=handler):
+                self.assertEqual(self.regs[nid]["handler"], handler)
+                self.assertEqual(self.regs[nid]["status"], "partial")
+                evidence = meta.HANDLER_EVIDENCE[handler]
+                self.assertTrue(any(e.startswith("PSPAutotests tests/") for e in evidence))
+                self.assertTrue(any(e.startswith("tests/native/hle_thread_selftest.c:test_") for e in evidence))
+                self.assertTrue(meta.HANDLER_LIMITATIONS[handler].strip())
+                self.assertNotIn(nid, meta.PROFILE_ZERO_UNREVIEWED_IMPORTS)
+        # What stays has a one-line reason on its own line in the source.
+        source = (hle_manifest.ROOT / "tools" / "hle_registry_meta.py").read_text(encoding="utf-8")
+        for nid, entry in meta.PROFILE_ZERO_UNREVIEWED_IMPORTS.items():
+            with self.subTest(remaining=entry["name"]):
+                line = next(l for l in source.splitlines() if f'0x{nid:08X}: {{"name"' in l)
+                self.assertRegex(line, r"# h_\w+: \S")
+
     def test_route_a_batches_eleven_and_twelve_leave_uncovered_contracts_unreviewed(self) -> None:
-        # The oracle cells use CreateThread/StartThread only as setup, the WritebackInvalidate
-        # range variant is not measured. None of them may ride along with the batches above.
+        # The WritebackInvalidate range variant is not measured. It may not ride along with the
+        # batches above.
         # AllocPartitionMemory left this list in the later #341 batch: its partition and type
         # refusals now follow partition.expected, and the NULL-name and placement divergences
         # are named in its partial limitation instead of keeping it unreviewed.
-        for nid, handler in ((0x446D8DE6, "h_CreateThread"), (0xF475845D, "h_StartThread"),
-                             (0x34B9FA9E, "h_DcacheWritebackInvalidateRange")):
+        for nid, handler in ((0x34B9FA9E, "h_DcacheWritebackInvalidateRange"),):
             with self.subTest(handler=handler):
                 self.assertEqual(self.regs[nid]["handler"], handler)
                 self.assertEqual(self.regs[nid]["status"], "unreviewed")
@@ -1150,8 +1186,11 @@ citations (PSP-B1-01, no-colon forms) need their own check.
 
         The split is the three public headers' prototype counts (22, 21 and 16). Network HLE
         stays fail-closed (AGENTS.md section 5): each one refuses with the runtime's documented
-        SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED, the sceNetInit code, not a measured result.
+        SCE_KERNEL_ERROR_ERRNO_FUNCTION_NOT_SUPPORTED (0x80010086), not a measured result. The one
+        exception is sceNetAdhocctlGetParameter, which answers as a PSP whose ad hoc control library
+        was never initialized (0x80410b08, h_NetAdhocctlGetParameter, #341); it still opens nothing.
         """
+        modelled = {"sceNetAdhocctlGetParameter": "h_NetAdhocctlGetParameter"}
         expected = pspsdk_adhoc_refusals()
         names = [name for name, _ in expected.values()]
         self.assertEqual(
@@ -1168,6 +1207,16 @@ citations (PSP-B1-01, no-colon forms) need their own check.
                 self.assertTrue(
                     nid in baseline, f"{nid} {name} is missing from tools/import_audit_baseline.json"
                 )
+                if name in modelled:
+                    self.assertEqual(
+                        {k: baseline[nid].get(k) for k in ("name", "classification", "handler")},
+                        {"name": name, "classification": "dedicated", "handler": modelled[name]},
+                    )
+                    reg = cast(dict[str, Any], self.regs.get(int(nid, 16)))
+                    self.assertEqual(
+                        (reg["handler"], reg["owner_file"]), (modelled[name], "src/rt/hle_network.c")
+                    )
+                    continue
                 self.assertEqual(
                     {k: baseline[nid].get(k) for k in ("name", "classification", "refusal_error", "status")},
                     {
@@ -1351,14 +1400,11 @@ static uint32_t h_SynthReal(CpuState *s) {
             {
                 "0x0282a3bd": ("sceHttpGetContentLength", "0x80010086"),
                 "0x03d9526f": ("sceHttpSetResolveRetry", "0x80010086"),
-                "0x0bf0a3ae": ("sceNetGetLocalEtherAddr", "0x80010086"),
                 "0x0c116e1b": ("sceAtracLowLevelDecode", "0x80630004"),
                 "0x1575d64b": ("sceAtracLowLevelInitDecoder", "0x80630004"),
                 "0x1f0fc3e3": ("sceHttpSetRecvTimeOut", "0x80010086"),
                 "0x2255551e": ("sceHttpGetNetworkPspError", "0x80010086"),
                 "0x231fc6b7": ("_sceAtracGetContextAddress", "0x80630003"),
-                # sceNetTerm: the cleanup a title runs after sceNetInit refused (offline).
-                "0x281928a9": ("sceNetTerm", "0x80010086"),
                 # The net stack's thread and pool bookkeeping and adhoc discovery stop (offline).
                 "0x50647530": ("sceNetFreeThreadinfo", "0x80010086"),
                 "0xcc393e48": ("sceNetGetMallocStat", "0x80010086"),
@@ -1367,7 +1413,6 @@ static uint32_t h_SynthReal(CpuState *s) {
                 "0x011f03c1": ("sceRtcGetAccumulativeTime", "0x80020002"),
                 "0x191cdeff": ("sceSslEnd", "0x80010086"),
                 "0x5963991b": ("sceNetApctlDelHandler", "0x80010086"),
-                "0x39af39a6": ("sceNetInit", "0x80010086"),
                 "0xf9d8eb63": ("sceHttpsEnd", "0x80010086"),
                 "0x3a20a200": ("sceAudiocodecGetEDRAM", "0x80010086"),
                 "0x3eaba285": ("sceHttpAddExtraHeader", "0x80010086"),
@@ -1389,7 +1434,10 @@ static uint32_t h_SynthReal(CpuState *s) {
                 "0x8ab81558": ("sceMp3StartEntry", "0x80010086"),
                 "0x732b042a": ("sceMp3EndEntry", "0x80010086"),
                 # The 59 public PSPSDK ad hoc entry points refuse under the offline network policy (#1139).
-                **pspsdk_adhoc_refusals(),
+                # sceNetAdhocctlGetParameter has its own handler (h_NetAdhocctlGetParameter):
+                # before sceNetAdhocctlInit it answers NOT_INITIALIZED, as a PSP does.
+                **{nid: entry for nid, entry in pspsdk_adhoc_refusals().items()
+                   if entry[0] != "sceNetAdhocctlGetParameter"},
             },
         )
         self.assertEqual(
@@ -1728,6 +1776,17 @@ class EvidenceTierTests(unittest.TestCase):
                         "tests": [{"id": "PSP-UNKNOWN-001", "hardware_evidence": evidence}],
                     })
 
+    def test_dmac_note_does_not_call_measured_tier_b_cells_unrun_or_uncited(self) -> None:
+        document = json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))
+        row = next(test for test in document["tests"] if test["id"] == "PSP-DMAC-001")
+        note = row["measurement_note"]
+        self.assertNotIn("Tier B owned-overrun controls are built but hardware NOT_RUN", note)
+        self.assertNotIn("B1-B4 subcells remain uncited", note)
+        self.assertIn("sixteen Tier B cells", note)
+        self.assertIn("2026-11-06 PSP-3000 runs", note)
+        self.assertIn("Tier E", note)
+        self.assertIn("measured Tier B cells", row["invariant"])
+
     @staticmethod
     def _measured_row(**overrides) -> dict:
         """A MEASURED row citing a committed section that really names its case."""
@@ -1861,16 +1920,18 @@ class EvidenceTierTests(unittest.TestCase):
                 "PSP-DISPLAY-002", "PSP-DISPLAY-003", "PSP-DISPLAY-004", "PSP-DMAC-001",
                 "PSP-DMAC-002",
                 "PSP-EXCEPTION-001", "PSP-FPU-001", "PSP-FPU-CC-001", "PSP-GE-001",
-                "PSP-GE-CONTROL-001", "PSP-GE-MIP-001", "PSP-GE-RASTER-001", "PSP-GE-SAMPLE-001",
-                "PSP-GE-SYNC-001", "PSP-GE-TIMING-001",
-                "PSP-HLE-AUDIO-SRC-001",
+                "PSP-GE-CONTROL-001", "PSP-GE-LIGHT-001", "PSP-GE-MIP-001", "PSP-GE-MIP-002",
+                "PSP-GE-OVERLAP-001", "PSP-GE-RASTER-001", "PSP-GE-RTT-001",
+                "PSP-GE-SAMPLE-001",
+                "PSP-GE-SYNC-001", "PSP-GE-TIMING-001", "PSP-GE-WEIGHT-001",
+                "PSP-HLE-AUDIO-REST-001", "PSP-HLE-AUDIO-SRC-001",
                 "PSP-HLE-CTRL-LATCH-001",
                 "PSP-HLE-GE-EDRAM-001", "PSP-HLE-HPRM-001", "PSP-HLE-INTR-001",
                 "PSP-HLE-KERNEL-STATUS-001",
                 "PSP-HLE-POWER-001", "PSP-HLE-POWER-002", "PSP-HLE-SAVEDATA-GETSIZE-001",
-                "PSP-HLE-SYSPARAM-001",
-                "PSP-HLE-TIMER-ORDER-001", "PSP-HLE-VTIMER-001", "PSP-HLE-VTIMER-002",
-                "PSP-HLE-VTIMER-003", "PSP-INTR-CAUSE-001", "PSP-IO-001", "PSP-IO-EOF-001", "PSP-KERNEL-001",
+                "PSP-HLE-STDIO-001", "PSP-HLE-SYSPARAM-001",
+                "PSP-HLE-TIMER-ORDER-001", "PSP-HLE-UTILITY-NONE-001", "PSP-HLE-VTIMER-001", "PSP-HLE-VTIMER-002",
+                "PSP-HLE-VTIMER-003", "PSP-INTR-CAUSE-001", "PSP-IO-001", "PSP-IO-EOF-001", "PSP-IO-EOF-002", "PSP-KERNEL-001",
                 "PSP-KERNEL-002", "PSP-KERNEL-MISC-001", "PSP-KERNEL-SEM-001", "PSP-KERNEL-STATUS-001",
                 "PSP-LLSC-001",
                 "PSP-MODULE-START-001", "PSP-MUTEX-001", "PSP-REGISTRY-001", "PSP-SMOKE-001", "PSP-SYSTEM-001",
@@ -2495,9 +2556,9 @@ class CensusTests(unittest.TestCase):
             self.assertIn("has no named limitation", str(ctx.exception))
 
     def test_new_partial_without_evidence_is_rejected(self) -> None:
-        self.assertNotIn("h_DisplayGetFrameBuf", meta.HANDLER_EVIDENCE)
-        with mock.patch.dict(meta.HANDLER_STATUS, {"h_DisplayGetFrameBuf": "partial"}), \
-                mock.patch.dict(meta.HANDLER_LIMITATIONS, {"h_DisplayGetFrameBuf": "a limit (#341)"}):
+        self.assertNotIn("h_AllocateFplCB", meta.HANDLER_EVIDENCE)
+        with mock.patch.dict(meta.HANDLER_STATUS, {"h_AllocateFplCB": "partial"}), \
+                mock.patch.dict(meta.HANDLER_LIMITATIONS, {"h_AllocateFplCB": "a limit (#341)"}):
             with self.assertRaises(ManifestError) as ctx:
                 hle_manifest.validate_meta(self.raw_regs)
         self.assertIn("cites no evidence", str(ctx.exception))

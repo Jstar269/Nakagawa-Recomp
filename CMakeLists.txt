@@ -19,6 +19,7 @@ endif()
 # Core Recompilation & Platform Library
 # -----------------------------------------------------------------------------
 set(CORE_SOURCES
+    src/core/nk_shared_helpers.c
     src/core/nk_font.c
     src/core/nk_pgf_host.c
     src/rt/pgf_public.c
@@ -43,8 +44,11 @@ set(CORE_SOURCES
     src/core/nk_psp_amctrl.c
     src/core/nk_psp_lzrc.c
     src/core/nk_psp_npumdimg.c
+    src/core/nk_pbp_homebrew.c
     src/core/nk_disc_expand.c
     src/core/nk_disc_verify.c
+    src/core/nk_zip.c
+    src/core/nk_steam_shortcuts.c
     src/core/generated/nk_title_catalog.c
 )
 
@@ -56,7 +60,7 @@ endif()
 
 add_library(nakagawa_core STATIC ${CORE_SOURCES})
 if(WIN32)
-    target_link_libraries(nakagawa_core PUBLIC shell32 ole32 uuid)
+    target_link_libraries(nakagawa_core PUBLIC shell32 ole32 uuid advapi32)
 endif()
 
 target_include_directories(nakagawa_core PUBLIC
@@ -128,6 +132,18 @@ add_executable(test_core_catalog
 target_link_libraries(test_core_catalog PRIVATE nakagawa_core)
 add_test(NAME core_catalog_test COMMAND test_core_catalog)
 
+add_executable(test_shared_helpers
+    src/core/nk_shared_helpers.c
+    tests/native/test_shared_helpers.c
+)
+target_include_directories(test_shared_helpers PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+)
+target_compile_definitions(test_shared_helpers PRIVATE
+    SR_SELFTEST_BUILD_ROOT="${CMAKE_CURRENT_BINARY_DIR}/build"
+)
+add_test(NAME shared_helpers_test COMMAND test_shared_helpers)
+
 add_executable(test_parsers_hostile
     tests/native/test_parsers_hostile.c
     tests/native/native_test_isolation.c
@@ -172,6 +188,20 @@ add_executable(test_disc_verify
 )
 target_link_libraries(test_disc_verify PRIVATE nakagawa_core)
 add_test(NAME disc_verify_test COMMAND test_disc_verify)
+
+add_executable(test_nk_zip
+    tests/native/test_nk_zip.c
+    tests/native/native_test_isolation.c
+)
+target_link_libraries(test_nk_zip PRIVATE nakagawa_core)
+add_test(NAME nk_zip_test COMMAND test_nk_zip)
+
+add_executable(test_steam_shortcuts
+    tests/native/test_steam_shortcuts.c
+    tests/native/native_test_isolation.c
+)
+target_link_libraries(test_steam_shortcuts PRIVATE nakagawa_core)
+add_test(NAME steam_shortcuts_test COMMAND test_steam_shortcuts)
 
 add_executable(test_xb_parser
     tests/native/test_xb_parser.c
@@ -334,6 +364,8 @@ add_executable(test_player_screens
     ${NK_UI_PLAYER_TITLE_SOURCES}
 )
 target_include_directories(test_player_screens PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ui
     ${CMAKE_CURRENT_SOURCE_DIR}/src/player/ui
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay
@@ -586,12 +618,12 @@ if(BUILD_PLAYER)
     endif()
 
     if(NOT SDL3_FOUND AND NK_BOOTSTRAP_SDL3)
-        message(STATUS "System SDL3 not found; bootstrapping pinned official release SDL3 3.4.18")
+        message(STATUS "System SDL3 not found; bootstrapping pinned official release SDL3 3.4.20")
         include(FetchContent)
         FetchContent_Declare(
             SDL3
-            URL "https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-3.4.18.tar.gz"
-            URL_HASH SHA256=9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3
+            URL "https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-3.4.20.tar.gz"
+            URL_HASH SHA256=f3bb06f55bed9557227a700af2ea62e49497ebdf58037732a731a5fb3ef8581f
         )
         set(SDL_TEST OFF CACHE BOOL "" FORCE)
         set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -694,8 +726,29 @@ if(BUILD_PLAYER)
         set_target_properties(nakagawa_player PROPERTIES WIN32_EXECUTABLE TRUE)
         # The app icon; SDL gives every window the executable's first icon group (see the
         # Makefile PLAYER_ICON_OBJ note). Other systems set it at run time instead.
+        # The VERSIONINFO that names the player in Task Manager comes from the same generated
+        # script the Makefile compiles (tools/make_app_icon.py); without Python the
+        # player keeps the icon alone and Windows shows its file name.
         enable_language(RC)
-        target_sources(nakagawa_player PRIVATE assets/brand/nakagawa.rc)
+        find_package(Python3 COMPONENTS Interpreter)
+        if(Python3_FOUND)
+            set(NK_PLAYER_RC "${CMAKE_CURRENT_BINARY_DIR}/nakagawa_icon.rc")
+            add_custom_command(
+                OUTPUT "${NK_PLAYER_RC}"
+                COMMAND "${Python3_EXECUTABLE}" tools/make_app_icon.py
+                        --version-rc "${NK_PLAYER_RC}" --original-filename nakagawa_player.exe --player
+                DEPENDS tools/make_app_icon.py src/player/ui/player_ui_nk.h
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                VERBATIM
+            )
+            set_source_files_properties("${NK_PLAYER_RC}" PROPERTIES OBJECT_DEPENDS
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/brand/nakagawa.rc;${CMAKE_CURRENT_SOURCE_DIR}/assets/brand/nakagawa.ico")
+            # The generated script includes nakagawa.rc, which names the icon beside it.
+            target_include_directories(nakagawa_player PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/assets/brand")
+            target_sources(nakagawa_player PRIVATE "${NK_PLAYER_RC}")
+        else()
+            target_sources(nakagawa_player PRIVATE assets/brand/nakagawa.rc)
+        endif()
         if(DEFINED ENV{VULKAN_SDK})
             target_include_directories(nakagawa_player PRIVATE
                 "$ENV{VULKAN_SDK}/Include"
@@ -763,6 +816,8 @@ set(NK_RUNTIME_SOURCES
     src/rt/perf.c
     src/rt/fbcap_policy.c
     src/rt/fbcap.c
+    src/rt/videorec.c
+    src/rt/replay_checkpoint.c
     src/rt/ge_capture.c
     src/rt/vfpu_interp.c
     src/rt/hle.c
@@ -817,11 +872,18 @@ set(NK_RUNTIME_SOURCES
     src/rt/driver.c
     src/rt/gpu_sdl3vk/sdl3vk.c
     src/rt/gpu_sdl3vk/ge_gpu.c
+    src/rt/gpu_sdl3vk/tex_scale.c
+    src/rt/texrepl.c
+    third_party/xbrz/xbrz.c
     src/rt/gpu_sdl3vk/ace_ui.c
+    src/rt/gpu_sdl3vk/ace_smooth.c
+    src/rt/gpu_sdl3vk/ace_hud.c
+    src/rt/gpu_sdl3vk/fsr1_pass.c
     src/core/nk_input_profile.c
     src/core/nk_font.c
     src/core/nk_json.c
     src/core/nk_platform_posix.c
+    src/core/nk_shared_helpers.c
 )
 set(NK_RUNTIME_GE_SOURCE src/rt/ge.c)
 set(NK_RUNTIME_ATRAC3P_SOURCES

@@ -199,6 +199,7 @@ typedef struct GeGpuReplayStats {
     unsigned long long snapshot_requests;
     unsigned long long snapshot_copies;
     unsigned long long snapshot_copy_px;   /* device pixels those copies moved */
+    unsigned long long snapshot_barriers;  /* pipeline-barrier commands those copies recorded */
     /* Primitives drawn by ge.c's software rasterizer inside the GPU path, and the
      * fallbacks that took a GPU-valid colour target back to guest VRAM (a synchronous
      * colour and depth readback each), by reason: GEGPU_FALLBACK_*. */
@@ -207,6 +208,9 @@ typedef struct GeGpuReplayStats {
     /* Stencil primitives that started a new batch because their box met the batch's
      * earlier primitives and the state reads what it writes (a snapshot copy between). */
     unsigned long long stencil_splits;
+    /* Stencil state builds that need no destination read (stencil_fixed_alpha in ge_gpu.c):
+     * the colour takes the fixed-function path and the stencil is a constant or kept. */
+    unsigned long long stencil_fixed;
     /* CPU writes into resident targets: each one noted, and the groups applied to an image
      * when the GE next used the target (one or more patch uploads per group). */
     unsigned long long cpu_write_notes;
@@ -244,8 +248,19 @@ typedef struct {
     unsigned tex_pool_sets;
 } GeGpuAceStats;
 void gegpu_ace_stats(GeGpuAceStats *out);
+
+/* Widescreen Fill (#1881): the wing canvas of display framebuffer `fb` (ge.c's 0x04xxxxxx form)
+ * as 512x272 RGBA8 words at guest resolution (the top-left device pixel of each guest pixel).
+ * 0 when the canvas does not exist. For selftests and the presenter's checks. */
+int  gegpu_wide_read(uint32_t fb, uint32_t *rgba);
+/* Wing primitives recorded, and wing primitives dropped (a state this backend draws in
+ * software, or no canvas). */
+void gegpu_wide_counts(unsigned long *drawn, unsigned long *dropped);
 int gegpu_snapshot_sync_selftest(void);
 int gegpu_ace_af_selftest(void);   /* 1 pass, 0 fail, 77 no anisotropic filtering */
+int gegpu_texscale_selftest(void); /* texture scaling and the smart 2D filter (tex_scale.h) */
+int gegpu_texrepl_only_prepare(const char *build_root); /* --repl-only: write the pack, set SR_TEX_REPLACE, before gegpu_init */
+int gegpu_texrepl_only_selftest(void); /* --repl-only: SR_TEX_REPLACE with no texture scaling */
 
 void gegpu_shutdown(void);
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
@@ -15,6 +16,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from makefile_text import read_makefile  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -86,6 +88,8 @@ class TestGateStubLink(unittest.TestCase):
                 "-I",
                 str(RT),
                 "-I",
+                str(ROOT / "src" / "core"),
+                "-I",
                 str(config_dir),
                 "-o",
                 str(driver),
@@ -108,7 +112,10 @@ class TestGateStubLink(unittest.TestCase):
                 str(RT / "stale_code.c"),
                 str(RT / "vfpu_tables.c"),
                 str(RT / "driver.c"),
+                str(ROOT / "src" / "core" / "nk_shared_helpers.c"),
                 str(RT / "ace.c"),
+                # driver.c reports how the run ended to the real run recorder.
+                str(RT / "videorec.c"),
                 str(RT / "title_config.c"),
                 str(GATE_STUB),
                 "-lm",
@@ -154,6 +161,8 @@ class TestGateStubLink(unittest.TestCase):
                 "-I",
                 str(RT),
                 "-I",
+                str(ROOT / "src" / "core"),
+                "-I",
                 str(config_dir),
                 "-o",
                 str(driver),
@@ -166,6 +175,7 @@ class TestGateStubLink(unittest.TestCase):
                 str(RT / "stale_code.c"),
                 str(RT / "vfpu_tables.c"),
                 str(RT / "driver.c"),
+                str(ROOT / "src" / "core" / "nk_shared_helpers.c"),
                 str(RT / "ace.c"),
                 str(GATE_STUB),
                 "-lm",
@@ -203,6 +213,8 @@ class TestGateStubLink(unittest.TestCase):
                 "-DSR_GATE_BUILD",
                 "-I",
                 str(RT),
+                "-I",
+                str(ROOT / "src" / "core"),
                 "-o",
                 str(driver),
                 str(generated),
@@ -214,6 +226,7 @@ class TestGateStubLink(unittest.TestCase):
                 str(RT / "stale_code.c"),
                 str(RT / "vfpu_tables.c"),
                 str(RT / "driver.c"),
+                str(ROOT / "src" / "core" / "nk_shared_helpers.c"),
                 str(RT / "ace.c"),
                 str(RT / "title_config.c"),
                 str(GATE_STUB),
@@ -247,7 +260,7 @@ def _ci_inline_sources(build_name: str) -> set[str]:
 
 def _make_target_sources(target: str) -> set[str]:
     """Literal source paths in the canonical Makefile target's recipe."""
-    lines = MAKEFILE.read_text(encoding="utf-8").splitlines()
+    lines = read_makefile(ROOT).splitlines()
     start = None
     for i, line in enumerate(lines):
         if re.match(rf"^{re.escape(target)}:(?:\s|$)", line):
@@ -290,6 +303,103 @@ class TestInlineCiSelftestLinkSync(unittest.TestCase):
             for name in variants:
                 with self.subTest(ci_build=name, make_target=target):
                     self.assertEqual(_ci_inline_sources(name), _make_target_sources(target))
+
+
+
+# A program that links the run recorder (it rides with the presenter, SDL3VK_SRCS) but no
+# scheduler: it registers the clock it was given (or none) and asks to record.
+_RECORDER_CLOCK_HARNESS = """\
+#include "videorec.h"
+#include <stdio.h>
+#include <string.h>
+
+static int paced_clock(void) { return 0; }
+static int deterministic_clock(void) { return 1; }
+
+int main(int argc, char **argv) {
+    if (argc != 2) return 2;
+    if (strcmp(argv[1], "paced") == 0) sr_videorec_set_clock(paced_clock);
+    else if (strcmp(argv[1], "deterministic") == 0) sr_videorec_set_clock(deterministic_clock);
+    else if (strcmp(argv[1], "none") != 0) return 2;
+    int active = sr_videorec_active();
+    printf("active=%d\\n", active);
+    fflush(stdout);
+    if (active) (void)sr_videorec_finish_status("the clock-seam harness ended the run", 0);
+    return 0;
+}
+"""
+
+
+@unittest.skipUnless(CC, "no C compiler on PATH")
+class TestRecorderClockSeam(unittest.TestCase):
+    """The recorder records only on the clock the runtime's main() hands it (#2080).
+
+    videorec.c links with the presenter, so programs that run no scheduler (the GPU
+    selftests, ge-replay) link it too. With no clock set, a requested recording is
+    refused for that reason; with one set, the recorder follows it. This builds the
+    real videorec.c, not its standalone-selftest variant.
+    """
+
+    _tmp: tempfile.TemporaryDirectory[str]
+    work: Path
+    exe: Path
+    build_error: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory(prefix="videorec_clock_seam_")
+        cls.work = Path(cls._tmp.name)
+        src = cls.work / "harness.c"
+        src.write_text(_RECORDER_CLOCK_HARNESS, encoding="ascii")
+        cls.exe = cls.work / ("harness.exe" if os.name == "nt" else "harness")
+        assert CC is not None
+        built = subprocess.run(
+            [CC, "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror", f"-I{RT}",
+             str(src), str(RT / "videorec.c"), "-o", str(cls.exe)],
+            capture_output=True, text=True,
+        )
+        cls.build_error = "" if built.returncode == 0 else built.stdout + built.stderr
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def _run(self, mode: str) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        self.assertEqual(self.build_error, "", self.build_error)
+        out = self.work / mode
+        env = dict(os.environ, SR_VIDEOREC_DIR=str(out), SR_VIDEOREC_CODEC="raw")
+        # The clock comes from the registered function, never from this key.
+        env["SR_DETERMINISTIC_CLOCK"] = "1"
+        result = subprocess.run([str(self.exe), mode], env=env, capture_output=True, text=True,
+                                timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = json.loads((out / "record.json").read_text(encoding="utf-8"))
+        return result, record
+
+    def _reason(self, record: dict[str, object]) -> str:
+        reason = record["reason"]
+        if not isinstance(reason, str):
+            self.fail(f"record.json's reason is not a string: {record!r}")
+        return reason
+
+    def test_no_clock_refuses_because_no_scheduler_runs(self) -> None:
+        result, record = self._run("none")
+        self.assertIn("active=0", result.stdout)
+        self.assertEqual(record["status"], "REFUSED")
+        self.assertIn("runs no scheduler", self._reason(record))
+        self.assertIn("VIDEOREC: not recording: this program runs no scheduler", result.stderr)
+
+    def test_a_paced_clock_refuses_for_the_clock(self) -> None:
+        result, record = self._run("paced")
+        self.assertIn("active=0", result.stdout)
+        self.assertEqual(record["status"], "REFUSED")
+        self.assertIn("SR_DETERMINISTIC_CLOCK=1", self._reason(record))
+        self.assertNotIn("runs no scheduler", self._reason(record))
+
+    def test_a_deterministic_clock_starts_the_recording(self) -> None:
+        result, record = self._run("deterministic")
+        self.assertIn("active=1", result.stdout)
+        self.assertNotEqual(record["status"], "REFUSED", record)
 
 
 if __name__ == "__main__":

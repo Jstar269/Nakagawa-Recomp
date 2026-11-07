@@ -165,6 +165,11 @@ void     sr_exec_idle(uint64_t started_ns);
 /* Only the game runtime (driver.c) arms the report, so native self-tests print nothing. */
 void     sr_exec_share_arm(void);
 void     sr_exec_share_report(void);
+/* Reports that must be printed however the process ends. sr_perf_shutdown() runs them first;
+ * it is reached at an ordinary exit and is called on every _Exit/_exit path of the runtime.
+ * Each report runs once, in registration order. A full list is a visible error, never a
+ * dropped report. */
+void     sr_at_process_end(void (*report)(void));
 
 void     sr_perf_init(void);
 
@@ -242,6 +247,15 @@ void     sr_perf_vblank_coalesced(void);
 void     sr_perf_vblank_service(uint32_t delivered);
 void     sr_perf_phase_report(int force);
 void     sr_perf_ge_submit(SrPerfGeReason reason);
+/* SR_GPU_TIMESTAMPS: GPU execution time from timestamp queries, credited when the work's fence has
+ * signalled, so a frame row holds the GPU work that finished during that frame. _requested() is the
+ * one switch test (SR_GPU_TIMESTAMPS set to a non-empty value other than 0) that the GE backend, the
+ * presenter and SR_PERF_FRAMES all use: with it off, no query pool exists and SR_PERF_FRAMES has no
+ * gpu_* columns. _on() is called once the queries exist; until then those columns stay empty. */
+int      sr_perf_gpu_timestamps_requested(void);
+void     sr_perf_gpu_timestamps_on(void);
+void     sr_perf_gpu_time(SrPerfGeReason reason, uint64_t ns);
+void     sr_perf_gpu_present_time(uint64_t ns);
 void     sr_perf_ge_wait(uint64_t started_ns, SrPerfGeReason reason);
 void     sr_perf_ge_event(SrPerfGeEvent event, uint64_t count);
 void     sr_perf_ge_frontend_profile_config(uint32_t stride, int calibration_enabled);

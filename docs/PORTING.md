@@ -118,7 +118,7 @@ pass `--extra-span=LO,HI` to `codegen.py` for a direct Make build.
 
 ## Step 2: Supply a plain (unencrypted) ELF
 
-The direct recompiler/codegen input must be a **plain** PSP ELF: a file that begins with the ELF magic bytes `7F 45 4C 46`; a `~PSP` or `~SCE` container is rejected at that boundary. The player decrypts the user's own disc into plain files first ([#295](https://github.com/Jstar269/nakagawa-recomp/issues/295)). In player and CLI disc workflows an encrypted executable or module without a plain copy fails closed as `ENCRYPTED_EXECUTABLE` or `ENCRYPTED_MODULE`. When a disc carries an unencrypted `BOOT.BIN`, the player and CLI select it automatically. For a direct Make/codegen route, supply a plain ELF such as an executable that you decrypted yourself.
+The direct recompiler/codegen input must be a **plain** PSP ELF: a file that begins with the ELF magic bytes `7F 45 4C 46`; a `~PSP` or `~SCE` container is rejected at that boundary. The player decrypts the user's own disc into plain files first ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)). In player and CLI disc workflows an encrypted executable or module without a plain copy fails closed as `ENCRYPTED_EXECUTABLE` or `ENCRYPTED_MODULE`. When a disc carries an unencrypted `BOOT.BIN`, the player and CLI select it automatically. For a direct Make/codegen route, supply a plain ELF such as an executable that you decrypted yourself.
 
 Keep the result in a Git-ignored private-input location such as `place_game_here/EBOOT.elf`, or pass its actual path to Make. Do not commit the decrypted game executable.
 
@@ -470,7 +470,7 @@ disjointness so it cannot drift silently. `GENERIC_PSP_SEMANTIC` — retired for
 Retired. `tools/codegen.py` previously replaced the translated body at
 `0x00046d14` with an immediate `s->pc = s->r[31]` return plus a
 scheduler-gated trace. Private executable analysis has proven `0x00046d14`
-is an interior basic-block loop header `L_00046d14` inside `f_000468c8_real`
+is an interior basic-block loop header `L_00046d14` inside `f_000468c8` (the wrapper that renamed it is retired, #363)
 — not a callable entry, resume/continuation, `jal` or tail target, and not
 present in the current codegen entry catalog — and is reached via
 fall-through and loop back-edges. A clean A/B build removing only the

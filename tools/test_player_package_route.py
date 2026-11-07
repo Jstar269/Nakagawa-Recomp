@@ -44,6 +44,7 @@ import sysconfig
 import tempfile
 import time
 from types import SimpleNamespace
+from typing import ClassVar
 import unittest
 from unittest.mock import patch
 
@@ -151,11 +152,11 @@ def synthetic_required_module() -> bytes:
     segment[4:11] = b"fixture"
     struct.pack_into("<I", segment, 32, BASE_VADDR + 64)
     struct.pack_into("<2I", segment, 64, 0x03E00008, 0)  # jr $ra; nop
-    return _elf(
+    return bytes(_elf(
         bytes(segment),
         BASE_VADDR,
         extra_sections=[(b".text", BASE_VADDR + 64, 8)],
-    )
+    ))
 
 
 class TestPackageRuntimeDependencies(unittest.TestCase):
@@ -285,6 +286,25 @@ class TestPackageRuntimeDependencies(unittest.TestCase):
             with patch.dict(os.environ, {"PATH": str(toolchain_bin)}):
                 env = nk_cli._runtime_build_environment()
             self.assertEqual(env["PATH"].split(os.pathsep, 1)[0], str(toolchain_bin))
+
+    @unittest.skipUnless(os.name == "nt", "Windows UCRT path precedence")
+    def test_runtime_build_uses_explicit_msys_path_when_gcc_is_not_on_path(self):
+        with tempfile.TemporaryDirectory(prefix="nk-explicit-msys-path-") as temporary:
+            toolchain_bin = Path(temporary) / "custom-ucrt64" / "bin"
+            toolchain_bin.mkdir(parents=True)
+            gcc = toolchain_bin / "gcc.exe"
+            gcc.write_bytes(b"synthetic executable path marker")
+
+            def which(name: str, path: str | None = None) -> str | None:
+                if name == "gcc" and path == str(toolchain_bin):
+                    return str(gcc)
+                return None
+
+            with patch.dict(os.environ, {"PATH": "", "MSYS_PATH": str(toolchain_bin)}, clear=True), \
+                    patch("nk_cli.shutil.which", side_effect=which):
+                path = nk_cli._runtime_build_environment()["PATH"].split(os.pathsep)
+
+            self.assertEqual(path[0], str(toolchain_bin))
 
     @unittest.skipUnless(os.name == "nt", "Windows embedded Python path")
     def test_runtime_build_exposes_its_interpreter_after_the_downloaded_toolchain(self):
@@ -530,6 +550,8 @@ class TestPackageDiskSpace(unittest.TestCase):
 
 
 class TestPlayerPackageRoute(unittest.TestCase):
+    binary_dir: ClassVar[Path]  # One scratch build root is assigned for the class.
+
     @classmethod
     def setUpClass(cls):
         # The route's player and test binaries are built into one scratch BUILD_ROOT for
@@ -1461,6 +1483,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
             log = run()
             reuse = re.search(r"^OBJECT_CACHE: reused (\d+) of (\d+) objects$", log, re.M)
             self.assertIsNotNone(reuse, log[-4000:])
+            assert reuse is not None
             compiled = re.search(r"^OBJECT_CACHE: compiling (.+)$", log, re.M)
             return int(reuse.group(1)), int(reuse.group(2)), (
                 compiled.group(1).split() if compiled else []

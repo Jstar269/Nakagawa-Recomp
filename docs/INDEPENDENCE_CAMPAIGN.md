@@ -180,7 +180,7 @@ Sizes are `wc -l` at base `6a4f359`, as above, and are not refreshed.
 | G6 | Reference interpreter `src/ref/*` (5 files) | sal063 | 1,650 | `microtest_gate.py`, `codegen_gate.py` (`oracle=interp` mode), funcdiff flows; **not** linked into any game executable | `src/ref/selftest.cpp`, gates (need PPSSPP traces → BLOCKED without; `oracle=interp` self-modes run) | Medium: differential oracle for the pipeline; partly superseded by source-owned cosimulation (AOT vs production interpreter) |
 | G7 | Analyzer + codegen `tools/analyze.py` (2,473) + `tools/analyze_cfg.py` (the canonical CFG report moved out of `analyze.py`, #1531) + `tools/codegen.py` (2,468) + `tools/codegen_hst_stubs.py` (the HST stub bodies split out of `codegen.py`, #1531) + gates/tooling slice (~1,395) | sal063 | ~6,336 | Makefile `pipeline`, all generated C, `codegen_gate.py`, cosim fixtures, title codegen plan | `test_analyze_*`, `test_codegen_*` (continuations, entry, fp_convert, madd/msub, vfpu_fallback, transfer timing…), `production-smoke`, `cosim-selftest` + `cosim-mutants`, `test_nid_name_proof.py` | Highest: the translation core is the "definitive static-recompilation platform" claim; codegen gates are LLE-touched (ABI v2 at base, flow metadata) |
 | G8 | CPU core runtime `src/rt/recomp.c` (2,364) + `src/rt/recomp.h` (827) | PPSSPP lineage (unaligned LWL/LWR/SWL/SWR, VFPU prefix/transcendentals) | 3,191 | Every generated translation unit, all of `src/rt`, `src/ref`, LLE `cpu_lle`/`domain_mode` layers | `test_dispatch_c.py`, `test_dispatch_call_boundary.py`, `test_dispatch_fatal_policy.py`, `dispatch-selftest`s, cosim four-channel comparison, `test_codegen_fp_convert.py` | Highest: load-bearing ABI; LLE PRs 1–3 already modify it — collision ground, not first-mover ground |
-| G9 | HLE core `src/rt/hle.c` and the files split from it (#307): `src/rt/hle_audio.c` `src/rt/hle_audio_codec.c` `src/rt/hle_cache_dma.c` `src/rt/hle_data.c` `src/rt/hle_display.c` `src/rt/hle_font.c` `src/rt/hle_ge.c` `src/rt/hle_host.c` `src/rt/hle_input.c` `src/rt/hle_internal.h` `src/rt/sce_kernel_errors.h` `src/rt/hle_io.c` `src/rt/hle_kernel_interrupt.c` `src/rt/hle_kernel_memory.c` `src/rt/hle_kernel_module.c` `src/rt/hle_kernel_sync.c` `src/rt/hle_kernel_thread.c` `src/rt/hle_kernel_time.c` `src/rt/hle_kernel_utils.c` `src/rt/hle_mpeg.c` `src/rt/hle_network.c` `src/rt/hle_npdrm.c` `src/rt/hle_route.c` `src/rt/hle_rtc.c` `src/rt/hle_system.c` `src/rt/hle_umd.c` `src/rt/hle_utility.c` | PPSSPP lineage (`sceKernel*`, `sceCtrl`, `sceFont`, `sceGe`, …) | 11,733 | Generated-code `sr_syscall` dispatch, all title boot paths, `hle-thread-selftest` | `hle-thread-selftest` (game-input-free NID-driven harness), `test_hle_*`, `test_compat_manifest.py` (live census), production-smoke (real NID dispatch) | Highest — but direction is *replacement*, not rewrite: per-domain LLE guest execution (PR 3 seam) shrinks this file module by module |
+| G9 | HLE core `src/rt/hle.c` and the files split from it (#307): `src/rt/hle_audio.c` `src/rt/hle_audio_codec.c` `src/rt/hle_cache_dma.c` `src/rt/hle_data.c` `src/rt/hle_display.c` `src/rt/hle_font.c` `src/rt/hle_ge.c` `src/rt/hle_host.c` `src/rt/hle_input.c` `src/rt/hle_internal.h` `src/rt/sce_kernel_errors.h` `src/rt/hle_io.c` `src/rt/hle_kernel_interrupt.c` `src/rt/hle_kernel_memory.c` `src/rt/hle_kernel_module.c` `src/rt/hle_kernel_sync.c` `src/rt/hle_kernel_thread.c` `src/rt/hle_kernel_time.c` `src/rt/hle_kernel_utils.c` `src/rt/hle_mpeg.c` `src/rt/hle_network.c` `src/rt/hle_npdrm.c` `src/rt/hle_route.c` `src/rt/hle_rtc.c` `src/rt/hle_system.c` `src/rt/hle_umd.c` `src/rt/hle_utility.c` `src/rt/sas_envelope.h` (SAS envelope, adapted from PPSSPP `3bc60270`, #1296) | PPSSPP lineage (`sceKernel*`, `sceCtrl`, `sceFont`, `sceGe`, …) | 11,733 | Generated-code `sr_syscall` dispatch, all title boot paths, `hle-thread-selftest` | `hle-thread-selftest` (game-input-free NID-driven harness), `test_hle_*`, `test_compat_manifest.py` (live census), production-smoke (real NID dispatch) | Highest — but direction is *replacement*, not rewrite: per-domain LLE guest execution (PR 3 seam) shrinks this file module by module |
 | G10 | Software GE rasterizer `src/rt/ge.c` (3,604) + `src/rt/ge_shared.h` (226) + `src/rt/ge_vram_cli.c` | PPSSPP (`GPU/Software/*`, `GPU/Common/VertexDecoder*`) | 3,830 | `gpu_sdl3vk` (consumes screen-space primitives via hooks), `ppmdiff.py` A/B, `ge_capture`/`ge_replay` | `ge_capture_selftest`, `gpu_capture/coherence-selftest`s, `test_ge_capture.py`, A/B snapshot agreement (local consistency only, never PSP truth) | Medium: host must present pixels regardless; software path is the comparison oracle, Vulkan path is the presentation path |
 | G11 | Vulkan backend `src/rt/gpu_sdl3vk/*` (sources + shaders + embeds) and the presenter-neutral capture service moved out of it, `src/rt/fbcap.c` + `src/rt/fbcap.h` | sal063 record, tier R (original-expression-over-derived-behaviour; see §1) | ~6,300 | Window/input/presentation ownership, `gui.c` forwarding, `SR_GPU_GE=1` runs | `gpu-coherence-selftest`, `gpu-capture-selftest`, `test_native_host_backends.py`, `test_shader_embed.py` | Medium: IS the hardware-domain boundary (submit/present stay host-side under LLE); pixel rules inherit G10's disposition |
 | G12 | Media `src/rt/mpeg.c` (623, PPSSPP `sceMpeg.cpp` port) + `src/rt/h264_mf.c` (497, sal063 MF glue) + `src/rt/savedata.c` (1,093, PPSSPP SavedataParam lineage) | PPSSPP / sal063 | 2,213 | `hle.c` sceMpeg/sceUtility/sceVideocodec handlers; `h264_null.c` is the project-authored null path | `test_mpeg_h264_bounds.py`, `test_savedata_security.py`, `test_savedata_spans.py`, `atrac3p-selftest`s (decoder side) | High for mpeg (LLE runs guest PSMF, host decodes at the `sceMpeg`/`sceVideocodec` boundary per fidelity §3.4); low for savedata (host-filesystem mapping is inherently host code) |
@@ -190,6 +190,8 @@ Sizes are `wc -l` at base `6a4f359`, as above, and are not refreshed.
 | G16 | Plain AT3 decoder subset `src/rt/atrac3p/libavcodec/atrac3.c` + `src/rt/atrac3p/libavcodec/atrac3data.h` + `src/rt/atrac3p/libavcodec/bytestream.h` | FFmpeg n4.4, LGPL-2.1-or-later (exact pin and file deltas in `src/rt/atrac3p/PROVENANCE.md`) | 1,360 | `hle.c` sceAtrac codecType `0x1001` bridge | `atrac3p-bridge-selftest`, `hle-thread-selftest` (synthetic RIFF/header and decode bookkeeping) | Low: host decoder at the explicit sceAtrac boundary; first-frame `fact` delay remains `NOT_MEASURED` pending a PSP measurement |
 | G17 | H.264 decoder subset `src/rt/h264_ffmpeg_sub/*` (208 byte-identical upstream files, authored configuration stand-ins and the `nk_h264_api` layer) | FFmpeg n4.4, LGPL-2.1-or-later (exact pin and blob manifest in `src/rt/h264_ffmpeg_sub/PROVENANCE.md`) | ~210 files | `src/rt/h264_ffmpeg.c` (`sr_h264` seam backend on Linux, later Android) | `psmf-media-selftest` (`H264_FFMPEG=1`, source-authored H.264 fixture) | Low: host decoder at the `sceMpeg`/`sceVideocodec` boundary; Media Foundation stays the Windows backend |
 | G18 | MP3 frame decoder `src/rt/minimp3/minimp3.h` + `src/rt/minimp3/LICENSE` (byte-identical upstream) | minimp3, CC0-1.0 (exact pin and blob manifest in `src/rt/minimp3/PROVENANCE.md`) | 1 header | `src/rt/mp3_bridge.c` (project-authored) for the `hle.c` sceMp3 handlers | `hle-thread-selftest`, `tools/test_mp3_tone_fixture.py` (synthetic tone fixture) | Low: host decoder at the `sceMp3` boundary |
+| G19 | Texture replacement `src/rt/texrepl.c` (quick hash, palette hash and pack lookup; added 2026-11-06, #1880) | PPSSPP (`GPU/Common/TextureDecoder.cpp`, `GPU/Common/TextureReplacer.cpp`, `GPU/Common/TextureCacheCommon.cpp`) at 3bc60270, derived-translated | 965 | Ace texture replacement (`tex_xs_offer` in `ge_gpu.c`) | `texrepl-selftest` (PPSSPP hash vectors), `gpu-texscale-selftest` replace cell | None: host-only lookup of user packs; must stay bit-compatible with PPSSPP packs |
+| G20 | FSR 3.1.6 host and passes `src/rt/fsr3_host.c` + `src/rt/fsr3_host.h` + `src/rt/fsr3_jitter.c` + `src/rt/fsr3_jitter.h` + `src/rt/gpu_sdl3vk/fsr3_pass.c` (upscaler) and `src/rt/fsr3_fg_host.c` + `src/rt/fsr3_fg_host.h` + `src/rt/gpu_sdl3vk/fsr3_fg_pass.c` (frame generation); added 2026-11-06, #2081 | AMD FidelityFX SDK v2.4.0 at 7539ae8b6, MIT, derived-translated from its C++ host and Vulkan backend (sources named in each file and in `third_party/fidelityfx_sdk/PROVENANCE.md`) | 3,857 | The imported FSR 3 HLSL passes (`third_party/fidelityfx_sdk/`) and their `fsr3*_comp.inc` embeddings | `fsr3-host-selftest` and `fsr3-fg-host-selftest` (records of AMD's unmodified code on synthetic inputs), `fsr3-mutants`, `fsr3-fg-mutants`, `fsr3-pass-selftest` | None: opt-in host presentation; must stay equivalent to AMD's host so the passes get the inputs they were designed for |
 
 ## 3. Third-party dependencies — keep, with reasons
 
@@ -199,12 +201,12 @@ notices, not derived code. None should be replaced by original code:
 | Dependency | Position | Verdict and why |
 | --- | --- | --- |
 | FFmpeg n4.4 ATRAC3+ subset (`src/rt/atrac3p/`, LGPL-2.1-or-later, byte-exact manifest) | Vendored decoder for ATRAC3plus audio | **Keep.** A working ATRAC3+ decoder is codec mathematics plus a maintained standard library; rewriting it gains no independence (the format is Sony's regardless) and loses a pinned, auditable, licence-clean implementation. The project wrapper (`atrac3p_bridge`) is already project-authored. A future move from vendoring to dynamic FFmpeg linkage is packaging hygiene, not an independence item. |
-| FFmpeg n4.4 H.264 decoder subset (`src/rt/h264_ffmpeg_sub/`, LGPL-2.1-or-later, byte-exact manifest) | Vendored portable H.264 decoder behind the `sr_h264` seam for Linux (later Android), decided by the maintainer on 2026-10-24 (#283) | **Keep.** H.264 decoding is standardized codec mathematics; a project rewrite would gain no independence and would lose a pinned, auditable, bit-exact implementation. Windows keeps the Media Foundation operating-system decoder; the backend glue `src/rt/h264_ffmpeg.c` and the API layer are project-authored. The inherited Media Foundation glue `src/rt/h264_mf.c` (G12) is a separate item and is not changed here. |
+| FFmpeg n4.4 H.264 decoder subset (`src/rt/h264_ffmpeg_sub/`, LGPL-2.1-or-later, byte-exact manifest) | Vendored portable H.264 decoder behind the `sr_h264` seam for Linux (later Android), decided by the maintainer on 2026-10-24 (#283) | **Keep.** H.264 decoding is standardized codec mathematics; a project rewrite would gain no independence and would lose a pinned, auditable, bit-exact implementation. Windows keeps the Media Foundation operating-system decoder; the backend glue `src/rt/h264_ffmpeg.c` and the API layer are project-authored. The inherited Media Foundation glue `src/rt/h264_mf.c` (G12) is a separate item with its own recorded disposition (§12). |
 | minimp3 (`src/rt/minimp3/`, CC0-1.0, byte-exact manifest) | Vendored MP3 frame decoder behind the project-authored `mp3_bridge` for the sceMp3 handlers, vendored under the maintainer rule of 2026-10-24 for public-domain code | **Keep.** MP3 decoding is standardized codec mathematics; a rewrite would gain no independence and lose a pinned, auditable implementation. The sceMp3 handlers in `hle.c` are derived-translated from PPSSPP and keep their own record. |
 | PSPSDK / PSPDEV headers and fixtures (BSD-family notices; `assets/upstream/`, `THIRD_PARTY_LICENSES/PSPSDK.txt`) | External ABI facts + local verification fixtures | **Keep.** Public ABI declarations are facts (names, numbers, layouts), not protectable expression; the tree already enforces identity by pin (`pspdev.lock.json`, `pspsdk_sync.py`). Replacing them would *remove* the independent anchor the clean-room specs cite. |
 | SDL3 (zlib) | Host window/input/audio abstraction | **Keep.** Host-platform abstraction is exactly what the portability rules require (`AGENTS.md`, `PLATFORM_PORTABILITY.md`); a project-owned OS layer per platform would be larger, worse-tested, and no more independent. The excluded `audio.c` SDL backend is still rewritten as original SDL3 API use (G2-adjacent audio item), which is not the same as replacing SDL. |
 | Vulkan loader/headers (Apache-2.0; SDK not redistributed) | Host GPU submission | **Keep**, same reason as SDL3. The independence-relevant code is what is *submitted* (GE semantics, G10/G11), not the submission API. |
-| Microsoft Media Foundation (OS component) | `h264_mf.c` decode path | **Keep** as the OS facility; the campaign item is only the thin glue file (G12), rewritten from Microsoft's public API documentation. |
+| Microsoft Media Foundation (OS component) | `h264_mf.c` decode path | **Keep** as the OS facility. The campaign item is only the thin glue file (G12), which is retained as inherited code under the re-scope rule (§12). |
 | System PGF tooling (`pgftool`, `ttf2pgfj.exe`) | Named in upstream font history | **Must not adopt.** `pgftool` has no licence file (terms UNKNOWN) and the converter binary is of unknown provenance (font-origins record §4). The project-owned converter (G4) is specified from the PGF format and metric targets, never from these tools. |
 
 ## 4. Target architecture per group
@@ -227,7 +229,7 @@ replacement by an LLE path that makes the component unnecessary ·
   relocation application are public-format facts; NID/import-table
   resolution cites PSPSDK structures and the project's NID corpus
   (`tools/nid_corpus.json`, IND-1). The built-in game decryption
-  (`src/core/nk_psp_*`, #295) is a separate derived-translated family
+  (`src/core/nk_psp_*`, #1494) is a separate derived-translated family
   (`src/core/PROVENANCE.md`); this campaign tracks loader provenance and
   rewrite scope only.
 - **G4 PGF → (a) + (a).** Both the publishable reader (against `pgf_api.h`,
@@ -285,8 +287,9 @@ replacement by an LLE path that makes the component unnecessary ·
 - **G12 media → split.** `mpeg.c` → (b): guest PSMF middleware runs as
   guest code; the host keeps only packet handoff at the
   `sceMpeg`/`sceVideocodec` boundary plus host decode (FFmpeg/MF), per
-  fidelity §3.4. `h264_mf.c` → (a) micro-rewrite from Microsoft's public
-  Media Foundation documentation (thin glue, small blast radius).
+  fidelity §3.4. `h264_mf.c` → retained as inherited code (§12); the earlier
+  plan of a micro-rewrite from Microsoft's public Media Foundation
+  documentation is superseded because no re-scope trigger applies.
   `savedata.c` → (a) rewrite from PSPSDK utility declarations and the
   observable memstick layout (host mapping is inherently host code).
 - **G13 host shell + fuzz harness → (a), anytime/parallel.** No PSP
@@ -327,10 +330,21 @@ replacement by an LLE path that makes the component unnecessary ·
   byte-identical under the 2026-10-24 public-domain rule; keep `mp3_bridge` and the sceMp3
   handlers as separate records. Validate decoding with the synthetic tone fixture; claim
   hardware-equivalent sceMp3 timing only after a PSP result.
+- **G19 texture replacement → evidence, not rewrite.** The hash and lookup must match PPSSPP's bit
+  for bit, because pack file names depend on them, so the derived code stays labelled `derived-translated`
+  with its upstream notice. Validate with the selftest's PPSSPP hash vectors and synthetic packs.
+- **G20 FSR 3 host and passes → evidence, not rewrite.** The C host is a translation of AMD's MIT
+  C++, kept labelled `derived-translated` with AMD's notice; the passes themselves stay byte-identical
+  imports (three recorded LOCAL DELTAs). Validate against the records of AMD's unmodified host code
+  and the pass selftest's cells.
 
 ## 5. Clean-room protocol for AI-agent work
 
-Binding on every (a) item. It implements `INDEPENDENCE_MODEL.md` Phases
+No item is required to follow this protocol. Under the Re-scope note above and `AGENTS.md`
+section 4, inherited code is replaced only when evidence shows it is wrong or an LLE path makes it
+unnecessary, and a replacement may vendor or adapt compatible source. The protocol stays as a
+reference for work that wants a "clean-room" label, which still needs a trusted record that
+supports it (`AGENTS.md` section 4). It implements `INDEPENDENCE_MODEL.md` Phases
 A–E with the AI-specific controls the model demands (upstream source in
 the authoring context must be recorded; paraphrase is derivation whoever
 typed it).
@@ -532,7 +546,7 @@ issue and rationale, ensuring the set of untriaged gaps can shrink but never
 grow; a new unlisted gap fails, and stale baseline entries whose gaps have been
 resolved fail closed until pruned. The gate is wired into `make check`,
 `make readiness`, `make provenance-record-gap-check`, pre-commit hooks, and
-hosted CI (`native_tools` and `main_smoke`).
+hosted CI (`native_tools` and the main smoke steps of `hygiene`).
 
 In addition, the proposed `LEDGER_DERIVED_ADMISSION` merge-gate posture
 extends this to trusted-ledger admission: the check loads the trusted ledger
@@ -599,3 +613,47 @@ that authority.
   resolving these.
 - LLE PR 4–9 contents beyond PR 6/PR 8 as named in PR 3 header comments:
   undetermined; §7 rules are written to survive any content.
+
+## 12. Recorded dispositions
+
+### `src/rt/h264_mf.c` (G12, #283)
+
+Facts, from the file header, the provenance records and this repository's history:
+
+- The header carries `SPDX-License-Identifier: GPL-2.0-or-later`, the psp-recomp authors' and the
+  Nakagawa Recomp authors' copyright lines, `Derived from sal063/PSP-recompilation-project
+  (GPL-2.0-or-later)` and a Nakagawa modification line dated 2026-08-10.
+- The public ledger classifies it `upstream_derived` under the record `media-decode-mediafoundation`
+  (tier S, GPL-2.0-or-later, `modified_or_translated`). `src/rt/PROVENANCE.md` lists it as inherited
+  from sal063 `da17b0e`, with no PPSSPP text, and records it as modified against sal063 base blob
+  `d24342a2ee7d` (+308/-129 lines, 409 to 588 lines).
+- Its first commit in this repository is the initial sanitized export (`bf21bdec2`, 2026-08-11,
+  497 lines). Later commits changed it for the `sr_h264` seam (#446), the backend-neutral
+  producer (#868), VRAM coherence (#1054) and the PSMF player and measured YCbCr conversion (#1782),
+  among others. At `799751438` the file has 617 lines. `git blame -w` attributes 355 of them to the
+  initial export and 262 to later commits. That counts the last commit to touch a line. It does not
+  say which lines still follow sal063.
+- The program-stream demux that the original header describes now lives in the common producer
+  (`src/rt/psmf_producer.c`). The file today is the Windows backend of the `sr_h264` seam: it queues
+  complete access units and drives the Windows H.264 decoder MFT.
+
+Disposition: **retained as inherited code.** `AGENTS.md` section 4 and the re-scope paragraph at the top
+of this document replace inherited code only when evidence shows it is wrong or an LLE path makes it
+unnecessary. Neither applies: the file passes the unchanged real-decoder fixture (`psmf-media-selftest`
+runs on the Media Foundation backend in the Windows CI job), and the host decode at the
+`sceMpeg`/`sceVideocodec` boundary stays host code under LLE (§4, G12). The earlier plan of a small
+rewrite from Microsoft's public Media Foundation documentation is withdrawn. The file keeps its
+sal063 derivation header, its `upstream_derived` ledger classification and its GPL-2.0-or-later
+notice. It is not called project-authored, independent or clean-room, and no trusted record supports
+those labels. Use of Media Foundation itself is the use of an operating-system component and is not
+a claim about the glue's origin. Reopen the disposition if a hardware or fixture result shows the
+glue is wrong, or if the Windows decode path moves behind an LLE route that makes it unnecessary.
+
+Not established (left for the maintainer):
+
+- Which of the retained lines are verbatim sal063 expression. The sal063 pin tree is not vendored
+  here (§11), so this repository cannot show it.
+- Where sal063 itself took the Media Foundation call sequence from. The header and the provenance
+  table name only sal063, and the table records the deeper lineage as unknown.
+- Confirmation of this disposition for the independence umbrella #355, which the #283 independence
+  addendum names as the home for a bounded retained disposition.

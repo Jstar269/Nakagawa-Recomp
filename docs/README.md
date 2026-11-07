@@ -32,6 +32,7 @@ Each row is something you are about to do. Find yours and read what it points to
 | Check title and subsystem compatibility | [`COMPATIBILITY.md`](COMPATIBILITY.md) |
 | Audit user-supplied parser limits and hostile-input evidence | [`PARSER_SAFETY_INVENTORY.json`](PARSER_SAFETY_INVENTORY.json) — per-boundary evidence for #319; an inventory is not issue completion |
 | Run the release smoke test on a build | [`SMOKE_TEST.md`](SMOKE_TEST.md) |
+| Compare GCC and Clang on the synthetic generated-C corpus | [`COMPILER_COMPARISON.md`](COMPILER_COMPARISON.md) |
 | Qualify a public title through the native player | [`TITLE_TESTING.md`](TITLE_TESTING.md) |
 | Find out what a failure code means, or add one | [`FAILURE_CODES.md`](FAILURE_CODES.md) — every code a report, tool or the player emits, by pipeline stage |
 | Find your way around the code for the first time | [`CODE_TOUR.md`](CODE_TOUR.md) — one game from disc image to a frame on screen, file by file |
@@ -58,13 +59,13 @@ Each row is something you are about to do. Find yours and read what it points to
 - [`SMOKE_TEST.md`](SMOKE_TEST.md) — numbered pass/fail release smoke test for the
   native player.
 - [`SHOWCASE.md`](SHOWCASE.md) — the source-owned showcase demos: sources, packaging,
-  player discovery, and their profile-zero acceptance status (#309).
+  player discovery, and their profile-zero acceptance status.
 - [`PSPDEV_LOCAL_VERIFICATION.md`](PSPDEV_LOCAL_VERIFICATION.md) — the pinned PSPDEV
   baseline and the local steps that check a toolchain against it.
 - [`CI.md`](CI.md) — path-gated hosted checks and their evidence limits.
 - [`PARSER_SAFETY_INVENTORY.json`](PARSER_SAFETY_INVENTORY.json) — machine-readable
   inventory of the runtime's and supported tools' parser boundaries, each with its resource limits,
-  regression and mutation status, sanitizer availability and open gaps (#319).
+  regression and mutation status, sanitizer availability and open gaps.
   `tools/test_parse_fuzz.py` checks its source anchors and claims; `schema_notes`
   records the schema history.
 - [`DEBUGGING.md`](DEBUGGING.md) — diagnostics and safe local troubleshooting.
@@ -79,12 +80,13 @@ Each row is something you are about to do. Find yours and read what it points to
   external-input gates.
 - [`LLVM_BACKEND.md`](LLVM_BACKEND.md) — the opt-in LLVM IR code generation backend (#330):
   structured IR, explicit MIPS semantics, verification, and the in-process stage.
+- [`COMPILER_COMPARISON.md`](COMPILER_COMPARISON.md) — GCC and Clang comparison
+  results on source-owned synthetic fixtures, with the correctness veto and measured build costs.
 - [`HARDWARE_ORACLE.md`](HARDWARE_ORACLE.md) — bounded proposal and limits;
   source-owned probes are not hardware acceptance without measured provenance.
 - [`research/PSP_THREADING_SEMANTICS.md`](research/PSP_THREADING_SEMANTICS.md) —
   frozen CreateThread and StartThread research, bounded evidence classes,
-  corrected 28/5 hardware-oracle design, and local Nakagawa/general Wiki draft
-  text; the CT/ST oracle campaign is completed (`HARDWARE_MEASURED`) while
+  corrected 28/5 hardware-oracle design, and two unpublished summary drafts; the CT/ST oracle campaign is completed (`HARDWARE_MEASURED`) while
   reused lifecycle/callback/ABI facts are separately measured.
 - [`AI_USAGE.md`](AI_USAGE.md) — factual AI-assistance and review boundaries, and how each
   tool reaches `AGENTS.md`.
@@ -125,7 +127,7 @@ a target and what isn't built yet.
   maintained records; each marks unbuilt behavior inline, so CURRENT does not mean
   the target pipeline exists.
 - [`PREVIEW_RELEASE.md`](PREVIEW_RELEASE.md) — scope, packaging and qualification
-  guide for the v0.0.1 release candidate. Creating a tag or release is a
+  guide for the v0.0.1 release. Creating a tag or release is a
   maintainer-only action (`AGENTS.md` section 3), and no agent may perform it.
 - [`RELEASE_NOTES_v0.0.1.md`](RELEASE_NOTES_v0.0.1.md) — the notes of the
   v0.0.1 release, kept as released.
@@ -139,7 +141,7 @@ kept for provenance, are not maintained, and are never current guidance:
 history lives in git, so nothing is deleted.
 
 - [`archive/IMPORT_AUDIT.md`](archive/IMPORT_AUDIT.md) — pre-republication
-  import-coverage/fake-success audit (tracker item #71); the method is current,
+  import-coverage/fake-success audit; the method is current,
   the snapshot example is superseded.
 - [`archive/ISSUE196_DIRECT_XB.md`](archive/ISSUE196_DIRECT_XB.md) — superseded
   direct-XB hypothesis with a scope banner; the measured comparison boundary is
@@ -233,6 +235,7 @@ Every substantial document carries one status.
 | `ENHANCEMENT_CONTRACT.md` | CURRENT | Enhancement contract, package validator, and declarative 60 Hz frame-rate rescale AOT epoch |
 | `STATIC_VERIFY.md` | CURRENT | Oracle-free verification and blocked external-input gates |
 | `LLVM_BACKEND.md` | CURRENT | Opt-in LLVM IR backend (#330): design, first-stage scope, verification and the in-process stage |
+| `COMPILER_COMPARISON.md` | CURRENT | GCC/Clang and default/lld experiment results; correctness veto governs performance reporting (#317) |
 | `HARDWARE_ORACLE.md` | CURRENT | Bounded proposal + measured-cells index; trace oracle unbuilt |
 | `HARDWARE_RUNNER_AUTONOMY.md` | CURRENT | Runner autonomy design; simulated-transport conformance suite and the one-command matrix; PSP-side framed runner unbuilt |
 | `PROVENANCE_MERGE_GATE.md` | CURRENT | Merge-path provenance control (observation mode) |
@@ -249,7 +252,7 @@ Every substantial document carries one status.
 | `TITLE_PROFILE_ARCHITECTURE.md` | CURRENT | No-hardcoded-title rule, enforced by `tools/test_generic_title_planning_proof.py` |
 | `NATIVE_UI_REGRESSION_MATRIX.md` | CURRENT | Authoritative capability disposition table plus the native slice functional checklist |
 | `NATIVE_PLAYER_IMPLEMENTATION_PROGRESS.md` | CURRENT | Native player implementation narrative and launch-path evidence; per-capability status is maintained in `NATIVE_UI_REGRESSION_MATRIX.md` |
-| `PREVIEW_RELEASE.md` | CURRENT | v0.0.1 release candidate scope and qualification guide; tags and releases are maintainer-only |
+| `PREVIEW_RELEASE.md` | CURRENT | v0.0.1 release scope and qualification guide; tags and releases are maintainer-only |
 | `RELEASE_NOTES_v0.0.1.md` | CURRENT | Notes of the v0.0.1 release, kept as released |
 | `RELEASE_SIGNING.md` | CURRENT | Update-signing key procedure (minisign, offline) and what the player checks before an update download |
 | `NATIVE_PLAYER_ARCHITECTURE.md` | CURRENT | Maintained native-shell architecture; the wizard's bounded ISO/XB staging exists and the player decrypts the user's own disc locally, while retail-disc hash validation and one-click play without the developer toolchain remain unbuilt and are marked inline |

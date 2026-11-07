@@ -48,6 +48,7 @@ from import_fixtures import SYSLIB_EXPORT, build_module_elf  # noqa: E402
 from nk_core import package_cache  # noqa: E402
 from nk_core.iso_inspect import PBP_BOUNDARY_CODES, runtime_registered_nids  # noqa: E402
 from nk_core.types import TitleProfile  # noqa: E402
+from makefile_text import read_makefile  # noqa: E402
 
 
 SPEC = importlib.util.spec_from_file_location("production_smoke_generator", GENERATOR_PATH)
@@ -297,8 +298,8 @@ class TestProductionSmoke(unittest.TestCase):
         # typed production dispatcher, targeting the omitted guest address with
         # the native continuation kept separate from $ra.
         self.assertIn(
-            f"dispatch_call(s, 0x{generator.HELPER:08x}u, "
-            f"0x{generator.ENTRY + 0x10:08x}u);",
+            f"if (dispatch_call_checked(s, 0x{generator.HELPER:08x}u, "
+            f"0x{generator.ENTRY + 0x10:08x}u)) return;",
             omitted_text,
         )
         self.assertNotIn(f"f_{generator.HELPER:08x}(", omitted_text)
@@ -490,6 +491,53 @@ class TestProductionSmoke(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
+    def test_verify_accepts_lld_link_map_input_sections(self):
+        with tempfile.TemporaryDirectory(prefix="nk_prod_smoke_lld_") as tmp_dir:
+            temp_root = Path(tmp_dir)
+            relative_dir = "sub_build"
+            build_dir = self._fabricated_aot_tree(temp_root, relative_dir)
+            map_path = build_dir / "production_smoke.map"
+            paths = map_path.read_text(encoding="utf-8").splitlines()
+            map_path.write_text(
+                "Address  Size     Align Out     In      Symbol\n"
+                + "\n".join(
+                    f"00001000 00000020 16 {path}:(.text)" for path in paths
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            cwd = os.getcwd()
+            try:
+                os.chdir(temp_root)
+                generator.verify(Path(relative_dir), mode="aot")
+            finally:
+                os.chdir(cwd)
+
+    def test_verify_lld_link_map_reports_an_omitted_object(self):
+        with tempfile.TemporaryDirectory(prefix="nk_prod_smoke_lld_missing_") as tmp_dir:
+            temp_root = Path(tmp_dir)
+            relative_dir = "sub_build"
+            build_dir = self._fabricated_aot_tree(temp_root, relative_dir)
+            map_path = build_dir / "production_smoke.map"
+            paths = map_path.read_text(encoding="utf-8").splitlines()
+            omitted_object = paths.pop(0).rsplit("/", 1)[-1]
+            retained_object = paths[0].rsplit("/", 1)[-1]
+            map_path.write_text(
+                "Address  Size     Align Out     In      Symbol\n"
+                + "\n".join(f"00001000 00000020 16 {path}:(.text)" for path in paths)
+                + "\n",
+                encoding="utf-8",
+            )
+            cwd = os.getcwd()
+            try:
+                os.chdir(temp_root)
+                with self.assertRaisesRegex(RuntimeError, "production link map omits") as raised:
+                    generator.verify(Path(relative_dir), mode="aot")
+            finally:
+                os.chdir(cwd)
+            self.assertIn(omitted_object, str(raised.exception))
+            self.assertNotIn(retained_object, str(raised.exception))
+
     def _assert_title_link_uses_response_file(self, makefile):
         """The title link reads its objects from a response file, never the command line.
 
@@ -508,7 +556,7 @@ class TestProductionSmoke(unittest.TestCase):
             self.assertNotIn(group, recipe, f"{group} is still passed on the link command line")
 
     def test_build_and_ci_route_use_the_production_targets(self):
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("production-smoke:", makefile)
         production_recipe = makefile.split("production-smoke:\n", 1)[1].split(
@@ -1620,11 +1668,17 @@ class TestPresenterContract(unittest.TestCase):
         )
         present = ge[ge.index("int gegpu_present("):ge.index("int gegpu_sync_guest_fb(")]
         # Only -1 from sdl3vk_present_image_ex is remapped; 0 (close) and 1 (shown) are returned
-        # unchanged. The mapping is the last statement, after the present call.
-        self.assertIn(
-            "int pr = sdl3vk_present_image_ex((void *)t->img, DRAW_W * s_scale, FB_H * s_scale);",
-            present,
-        )
+        # unchanged. The mapping is the last statement, after the present call. The image shown
+        # is the target's own, or its host twin at the twin's scale while the twin is in step (#2050).
+        # With widescreen Fill on, it is the composed picture (left wing, that image, right wing) at
+        # the same scale; only a frame actually shown marks its wings shown (#1881).
+        self.assertIn("VkImage shown = present_image(t);", present)
+        self.assertIn("int show_w = DRAW_W * present_scale(t), show_h = FB_H * present_scale(t);", present)
+        self.assertIn("VkImage wide = wide_compose(t, fbaddr, &show_w, &show_h);", present)
+        self.assertIn("int pr = sdl3vk_present_image_ex((void *)(wide ? wide : shown), show_w, show_h);", present)
+        self.assertIn("if (pr == GEGPU_PRESENT_SHOWN) ge_wide_shown(fbaddr);", present)
+        self.assertLess(present.index("wide_compose(t, fbaddr"), present.index("sdl3vk_present_image_ex("))
+        self.assertLess(present.index("sdl3vk_present_image_ex("), present.index("ge_wide_shown(fbaddr)"))
         self.assertIn("    if (pr == -1) return GEGPU_PRESENT_TARGET_FAILED;\n    return pr;\n}", present)
         # Only the two intended returns carry the code: the unprepared target and the failed present.
         self.assertEqual(present.count("GEGPU_PRESENT_TARGET_FAILED"), 2)
@@ -3443,6 +3497,203 @@ class TestSanitizedBringup(unittest.TestCase):
         )
 
 
+class TestBringupCaptureRounds(unittest.TestCase):
+    """The bring-up's code-capture rounds (#1933), on synthetic captures with the package build
+    and the launch faked: no game, PSP or network."""
+
+    CAPTURE_A = "code_capture_08a10000_0123456789abcdef.nkcap"
+    CAPTURE_B = "code_capture_08a20000_fedcba9876543210.nkcap"
+
+    setUp = TestSanitizedBringup.setUp
+
+    def _run(self, launches, *, capture_rounds=None, case_root=None):
+        """Run cmd_bringup with one entry of ``launches`` per launch: None runs to a presented
+        frame; ("wrote" | "already holds" | "names", NAME) stops at capture NAME, writing it to
+        the run's SR_CODE_CAPTURE folder unless it says "names" (a capture it did not write)."""
+        if case_root is None:
+            case_root = self.root / f"case-{len(list(self.root.iterdir()))}"
+        self.case_root = case_root
+        report_path = case_root / "bringup.json"
+        args = argparse.Namespace(
+            iso=str(self.iso), work_dir=str(case_root / "work"), report=str(report_path),
+            launch_timeout=1, instruction_trace=False,
+            private_sweep_import_report=str(case_root / "work" / "sweep-imports.json"),
+        )
+        if capture_rounds is not None:
+            args.capture_rounds = capture_rounds
+        self.build_user_args = []
+        self.launch_envs = []
+        pending = list(launches)
+
+        def fake_package_build(build_args, stage_observer=None):
+            self.build_user_args.append(os.environ.get("CODEGEN_USER_ARGS"))
+            stage_observer("codegen", "START", 0)
+            stage_observer("codegen", "PASS", 3)
+            build_args.aot_stage_result = {"status": "REUSED", "reason": "NONE"}
+            stage_observer("compile", "PASS", 3)
+            package_dir = build_args.user_data_root / "packages" / "ULUS99998"
+            package_dir.mkdir(parents=True, exist_ok=True)
+            (package_dir / "runtime.exe").write_bytes(b"synthetic runtime marker")
+            (package_dir / "runtime_image.bin").write_bytes(b"synthetic runtime image")
+            (package_dir / "package.json").write_text(json.dumps({
+                "executable": {"path": "runtime.exe"},
+                "runtime": {"run_entry": "0x08800100"},
+            }), encoding="utf-8")
+            stage_observer("build_package", "PASS", 2)
+            return 0
+
+        class FakeProcess:
+            def __init__(self, returncode, output):
+                self.returncode = returncode
+                self.output = output
+
+            def communicate(self, timeout=None):
+                return self.output, None
+
+            def kill(self):
+                self.returncode = -9
+
+        def fake_popen(command, **kwargs):
+            env = dict(kwargs.get("env", {}))
+            self.launch_envs.append(env)
+            Path(env["SR_FLIGHT_OUTPUT"]).write_text(json.dumps({
+                "recorder": {"dropped": 0},
+                "events": [{"class": "hle", "kind": 1, "arg0": 0x289D82FE}],
+            }), encoding="utf-8")
+            step = pending.pop(0)
+            if step is None:
+                return FakeProcess(0, (
+                    "BOOT_EVENT phase=window_ready backend=offscreen\n"
+                    "BOOT_EVENT phase=frame_present backend=offscreen frame=1\n"
+                    "HOST_PRESENT_SUBMITTED f=1 buf=0x04000000 fmt=3 stride=512\n"
+                ))
+            verb, name = step
+            if verb != "names":
+                (Path(env["SR_CODE_CAPTURE"]) / name).write_bytes(b"NKCODE01" + bytes(28))
+            target = name.split("_")[2]
+            return FakeProcess(1, (
+                f"DISPATCH_STOP reason=target-not-executable target=0x{target}\n"
+                f"  CODE_CAPTURE: {'wrote' if verb == 'names' else verb} {name} "
+                f"[0x{target},0x{target}) target=0x{target}; translate it with "
+                "tools/code_capture.py (#1933)\n"
+            ))
+
+        printed = []
+        completed = subprocess.CompletedProcess(["synthetic-codegen"], 0, "", "")
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(nk_cli.subprocess, "run", return_value=completed))
+            stack.enter_context(mock.patch.object(nk_cli.subprocess, "Popen", side_effect=fake_popen))
+            stack.enter_context(mock.patch.object(
+                nk_cli, "cmd_build_package", side_effect=fake_package_build
+            ))
+            stack.enter_context(mock.patch.dict(os.environ, {}, clear=False))
+            os.environ.pop("CODEGEN_USER_ARGS", None)
+            os.environ.pop("SR_CODE_CAPTURE", None)
+            stack.enter_context(mock.patch(
+                "builtins.print", side_effect=lambda *a, **_k: printed.append(" ".join(map(str, a)))
+            ))
+            status = nk_cli.cmd_bringup(args)
+            self.assertNotIn("CODEGEN_USER_ARGS", os.environ, "the rounds restore the variable")
+        self.assertEqual(pending, [], "every planned launch ran")
+        self.printed = "\n".join(printed)
+        self.capture_dir = case_root / "work" / "user-data" / "cache" / "bringup" / "ULUS99998" / "captures"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        nk_cli.validate_bringup_report(report)
+        return status, report
+
+    def _translated(self, build_index):
+        user_args = self.build_user_args[build_index] or ""
+        return sorted(token.removeprefix("--code-capture=") for token in user_args.split()
+                      if token.startswith("--code-capture="))
+
+    def test_a_run_without_a_capture_takes_one_round_unchanged(self):
+        status, report = self._run([None])
+        self.assertEqual(status, 0, report)
+        self.assertEqual(report["failure_class"], "NONE")
+        self.assertEqual(len(self.launch_envs), 1)
+        self.assertEqual(self.build_user_args, [None])
+        self.assertNotIn("code_capture", report)
+        self.assertNotIn("Code capture rounds", self.printed)
+        # The run is told the title's capture folder, beside its bring-up cache.
+        self.assertEqual(Path(self.launch_envs[0]["SR_CODE_CAPTURE"]), self.capture_dir)
+        self.assertTrue(self.capture_dir.is_dir())
+
+    def test_a_new_capture_is_translated_by_a_second_round(self):
+        status, report = self._run([("wrote", self.CAPTURE_A), None])
+        self.assertEqual(status, 0, report)
+        self.assertEqual(len(self.launch_envs), 2)
+        self.assertEqual(self._translated(0), [])
+        self.assertEqual(self._translated(1), [(self.capture_dir / self.CAPTURE_A).as_posix()])
+        self.assertEqual(report["failure_class"], "NONE")
+        capture = report["code_capture"]
+        self.assertEqual(capture["round_limit"], nk_cli.BRINGUP_CAPTURE_ROUNDS_DEFAULT)
+        self.assertEqual(capture["stop"], "NONE")
+        self.assertEqual([(row["round"], row["captures_translated"], row["outcome"])
+                          for row in capture["rounds"]],
+                         [(1, 0, "NEW_CAPTURE"), (2, 1, "NO_CAPTURE_STOP")])
+        self.assertNotEqual(capture["rounds"][0]["failure_class"], "NONE")
+        self.assertEqual(capture["rounds"][1]["failure_class"], "NONE")
+        self.assertIn("round 1: translated 0 capture(s); the run stopped at a new capture",
+                      self.printed)
+        self.assertIn("round 2: translated 1 capture(s); the run did not stop at a capture",
+                      self.printed)
+        # The public report names no capture: its name carries a guest address and a hash.
+        self.assertNotIn("code_capture_", json.dumps(report))
+
+    def test_a_capture_left_by_an_earlier_run_is_translated_in_the_first_round(self):
+        status, report = self._run([("wrote", self.CAPTURE_A), None])
+        self.assertEqual(status, 0, report)
+        # A second bring-up into the same data folder (or after a player run wrote the
+        # capture) translates it from the start and launches once.
+        status, report = self._run([None], case_root=self.case_root)
+        self.assertEqual(status, 0, report)
+        self.assertEqual(len(self.launch_envs), 1)
+        self.assertEqual(self._translated(0), [(self.capture_dir / self.CAPTURE_A).as_posix()])
+        self.assertEqual(report["code_capture"], {
+            "round_limit": nk_cli.BRINGUP_CAPTURE_ROUNDS_DEFAULT,
+            "stop": "NONE",
+            "rounds": [{"round": 1, "captures_translated": 1, "outcome": "NO_CAPTURE_STOP",
+                        "failure_class": "NONE"}],
+        })
+
+    def test_the_round_limit_is_a_named_non_zero_stop(self):
+        status, report = self._run([("wrote", self.CAPTURE_A), ("wrote", self.CAPTURE_B)],
+                                   capture_rounds=2)
+        self.assertEqual(status, 1)
+        self.assertEqual(len(self.launch_envs), 2)
+        self.assertEqual(report["code_capture"]["stop"], "BRINGUP_CAPTURE_BOUND")
+        self.assertEqual(report["code_capture"]["round_limit"], 2)
+        self.assertEqual([row["outcome"] for row in report["code_capture"]["rounds"]],
+                         ["NEW_CAPTURE", "NEW_CAPTURE"])
+        self.assertNotEqual(report["failure_class"], "NONE")
+        self.assertIn(f"BRINGUP_CAPTURE_BOUND: 2 rounds reached; last capture {self.CAPTURE_B}",
+                      self.printed)
+
+    def test_a_capture_its_own_build_translated_is_a_named_stop_not_a_loop(self):
+        status, report = self._run([("wrote", self.CAPTURE_A), ("already holds", self.CAPTURE_A)])
+        self.assertEqual(status, 1)
+        self.assertEqual(len(self.launch_envs), 2)
+        self.assertEqual(self._translated(1), [(self.capture_dir / self.CAPTURE_A).as_posix()])
+        self.assertEqual(report["code_capture"]["stop"], "BRINGUP_CAPTURE_NOT_BOUND")
+        self.assertEqual([row["outcome"] for row in report["code_capture"]["rounds"]],
+                         ["NEW_CAPTURE", "CAPTURE_ALREADY_TRANSLATED"])
+        self.assertIn(f"BRINGUP_CAPTURE_NOT_BOUND: round 2 stopped at {self.CAPTURE_A}, which "
+                      "its build translated; the translation did not bind", self.printed)
+
+    def test_a_capture_the_folder_does_not_hold_is_a_named_stop(self):
+        status, report = self._run([("names", self.CAPTURE_A)])
+        self.assertEqual(status, 1)
+        self.assertEqual(len(self.launch_envs), 1)
+        self.assertEqual(report["code_capture"]["stop"], "BRINGUP_CAPTURE_MISSING")
+        self.assertIn("BRINGUP_CAPTURE_MISSING: round 1 stopped at", self.printed)
+
+    def test_the_round_limit_option_is_checked(self):
+        self.assertEqual(nk_cli._capture_rounds_argument("3"), 3)
+        for value in ("0", str(nk_cli.BRINGUP_CAPTURE_ROUNDS_MAX + 1), "two"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                nk_cli._capture_rounds_argument(value)
+
+
 class TestBringupReportOpcodeNames(unittest.TestCase):
     """A bring-up report must always land, with schema-legal opcode keys.
 
@@ -3608,6 +3859,171 @@ class TestProductStatusCopy(unittest.TestCase):
             report_source,
         )
         self.assertNotIn("public font reader in the works (#349)", report_source)
+
+
+# The display-smoke VRAM capture check judges the capture run on its own trace (#2200).
+# generate.py vramdump runs the fixture twice: once for a reference first frame and once with
+# SR_VRAMDUMP asking for the first eight vblanks. Which vblank a run presents first moves with
+# machine load, so the second run cannot be required to present the vblank the first one did;
+# it must still prove that what it dumped was a presented frame.
+
+
+def _vramdump_output(presented, passed=(), failed=(), extra=""):
+    lines = [f"HOST_PRESENT_SUBMITTED f={vblank} buf=0x04000000 fmt=3 stride=512"
+             for vblank in presented]
+    lines += [f"VRAMDUMP vblank={vblank} PASS" for vblank in passed]
+    lines += [f"VRAMDUMP vblank={vblank} FAIL (see diagnostic above)" for vblank in failed]
+    return "\n".join(lines) + extra
+
+
+class DisplaySmokeFirstFrameSidecarTests(unittest.TestCase):
+    """first_frame_vram_sidecar proves the first presented vblank's own VRAM capture (#2200)."""
+
+    WIDTH, HEIGHT, STRIDE = 480, 272, display_generator.STRIDE
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.dir = Path(self._temp.name)
+        self.rgb = bytes((x * 7 + y * 3) & 0xFF for y in range(self.HEIGHT)
+                         for x in range(self.WIDTH) for _ in range(3))
+
+    def _write(self, vblank, *, rgb=None, stride=None, addr=None):
+        """vram_<vblank>.json + .bin holding ``rgb`` (the expected picture by default)."""
+        rgb = self.rgb if rgb is None else rgb
+        raw = bytearray(self.STRIDE * 4 * self.HEIGHT)
+        for y in range(self.HEIGHT):
+            for x in range(self.WIDTH):
+                at = (y * self.STRIDE + x) * 4
+                src = (y * self.WIDTH + x) * 3
+                raw[at:at + 3] = rgb[src:src + 3]
+                raw[at + 3] = 255
+        (self.dir / f"vram_{vblank}.bin").write_bytes(raw)
+        (self.dir / f"vram_{vblank}.json").write_text(json.dumps({
+            "display_framebuffer": {
+                "addr": addr or f"0x{display_generator.FRAMEBUFFER:08x}",
+                "stride": self.STRIDE if stride is None else stride,
+                "format_code": display_generator.PIXEL_FORMAT,
+            },
+            "vram": {"image_file": f"vram_{vblank}.bin"},
+        }), encoding="utf-8")
+
+    def _differing(self):
+        changed = bytearray(self.rgb)
+        changed[(100 * self.WIDTH + 200) * 3 + 1] ^= 0x40
+        return bytes(changed)
+
+    def check(self, first, passes):
+        return display_generator.first_frame_vram_sidecar(self.dir, first, passes, self.rgb)
+
+    def test_the_first_presented_vblanks_matching_sidecar_is_returned(self):
+        self._write(3)
+        self._write(5, rgb=self._differing())
+        self.assertEqual(self.check(3, 2), self.dir / "vram_3.json")
+
+    def test_another_vblanks_matching_sidecar_does_not_stand_in(self):
+        # The old check accepted any sidecar that matched; here only vblank 5 does.
+        self._write(3, rgb=self._differing())
+        self._write(5)
+        with self.assertRaisesRegex(RuntimeError, "first presented vblank 3 .*does not match"):
+            self.check(3, 2)
+
+    def test_one_differing_pixel_in_the_first_sidecar_is_refused(self):
+        self._write(2, rgb=self._differing())
+        with self.assertRaisesRegex(RuntimeError, "does not match the offscreen presented PPM at row 100"):
+            self.check(2, 1)
+
+    def test_a_sidecar_count_that_differs_from_the_reported_passes_is_refused(self):
+        self._write(2)
+        self._write(3)
+        with self.assertRaisesRegex(RuntimeError, "3 vblanks reported PASS but 2 VRAM sidecars"):
+            self.check(2, 3)
+        with self.assertRaisesRegex(RuntimeError, "1 vblanks reported PASS but 2 VRAM sidecars"):
+            self.check(2, 1)
+
+    def test_a_first_vblank_without_a_sidecar_is_refused(self):
+        self._write(4)
+        with self.assertRaisesRegex(RuntimeError, "first presented vblank 2 has no VRAM sidecar"):
+            self.check(2, 1)
+
+    def test_no_sidecars_is_refused(self):
+        with self.assertRaisesRegex(RuntimeError, "no selected vblank produced a VRAM sidecar"):
+            self.check(2, 0)
+
+    def test_the_display_framebuffer_metadata_must_match(self):
+        self._write(2, addr="0x04200000")
+        with self.assertRaisesRegex(RuntimeError, "metadata mismatch"):
+            self.check(2, 1)
+        self._write(2, stride=256)
+        with self.assertRaisesRegex(RuntimeError, "metadata mismatch"):
+            self.check(2, 1)
+
+
+class DisplaySmokeVramdumpCaptureTests(unittest.TestCase):
+    #: The capture run asks for the first eight vblanks whatever the baseline run did.
+    WINDOW = range(display_generator.VRAMDUMP_FIRST_VBLANK,
+                   display_generator.VRAMDUMP_FIRST_VBLANK + display_generator.VRAMDUMP_WINDOW)
+
+    def failure(self, output):
+        return display_generator.vramdump_capture_failure(output, self.WINDOW)
+
+    def test_a_capture_that_presents_from_the_first_vblank_passes(self):
+        self.assertIsNone(self.failure(_vramdump_output([1, 3, 5], passed=[1, 3, 5])))
+
+    def test_a_capture_run_whose_first_present_is_later_than_the_baselines_passes(self):
+        # The hosted failure: the baseline presented vblank 2 first and the old check demanded
+        # "VRAMDUMP vblank=2 PASS"; under load the capture run presented vblank 3 first and
+        # vblank 2 was never presented.
+        output = _vramdump_output([3, 5, 7], passed=[3, 5, 7])
+        self.assertNotIn("VRAMDUMP vblank=2 PASS", output)
+        self.assertIsNone(self.failure(output))
+
+    def test_a_first_frame_that_was_not_captured_is_refused(self):
+        # Later frames were dumped, but frame_first.ppm is the frame of vblank 3.
+        message = self.failure(_vramdump_output([3, 5], passed=[5]))
+        self.assertIn("first presented vblank 3 produced no VRAM capture", message)
+
+    def test_a_pass_for_a_vblank_that_was_not_presented_is_refused(self):
+        message = self.failure(_vramdump_output([3, 5], passed=[3, 4]))
+        self.assertIn("vblank 4", message)
+        self.assertIn("did not present", message)
+
+    def test_a_pass_outside_the_requested_window_is_refused(self):
+        message = self.failure(_vramdump_output([3, 12], passed=[3, 12]))
+        self.assertIn("vblank 12", message)
+        self.assertIn("not requested", message)
+
+    def test_a_reported_failure_is_refused_even_beside_a_pass(self):
+        message = self.failure(_vramdump_output([3, 5], passed=[3], failed=[5]))
+        self.assertIn("FAIL at vblank 5", message)
+
+    def test_presented_frames_with_no_capture_are_refused(self):
+        message = self.failure(_vramdump_output([3, 5]))
+        self.assertIn("no VRAM capture", message)
+
+    def test_a_run_whose_first_present_is_outside_the_window_is_refused(self):
+        message = self.failure(_vramdump_output([20, 22], passed=[]))
+        self.assertIn("is not in the requested window 1..8", message)
+
+    def test_a_run_that_presents_nothing_is_refused(self):
+        message = self.failure(_vramdump_output([]))
+        self.assertIn("first presented vblank", message)
+        self.assertIn("is not in the requested window 1..8", message)
+
+    def test_a_first_present_later_than_the_measured_bound_is_refused(self):
+        # Vblank 7 is inside the 1..8 window, but the fixture has only been seen to need 1 to 3.
+        late = display_generator.VRAMDUMP_FIRST_PRESENT_MAX + 3
+        message = self.failure(_vramdump_output([late, late + 1], passed=[late, late + 1]))
+        self.assertIn(f"first frame at vblank {late}", message)
+        edge = display_generator.VRAMDUMP_FIRST_PRESENT_MAX
+        self.assertIsNone(self.failure(_vramdump_output([edge], passed=[edge])))
+
+    def test_a_vblank_that_passes_twice_is_refused(self):
+        self.assertIn("twice", self.failure(_vramdump_output([3], passed=[3, 3])))
+
+    def test_the_window_is_the_runtimes_vramdump_limit(self):
+        limit = (ROOT / "src" / "rt" / "hle_internal.h").read_text(encoding="utf-8")
+        self.assertIn(f"#define SR_VRAMDUMP_MAX_VBLANKS {display_generator.VRAMDUMP_WINDOW}", limit)
 
 
 if __name__ == "__main__":

@@ -437,10 +437,10 @@ static inline int sr_guest_span_readable_current_at(uint32_t addr, uint32_t size
 
 /* Return the largest prefix of [addr, addr + size) that remains inside the
  * flat guest arena.  This is intentionally a prefix calculation, not a
- * validity predicate: the measured PSP DMAC path can complete a one-byte tail
- * request when the valid prefix ends at an allocation boundary.  Callers must
- * apply their own policy to larger or otherwise ambiguous overruns before
- * forming a host pointer. */
+ * validity predicate: a caller compares the prefix with the size it needs (the
+ * DMAC path refuses any span whose prefix is short) or bounds a scan with it.
+ * Callers must apply their own policy to an overrun before forming a host
+ * pointer. */
 static inline uint32_t sr_guest_span_prefix(uint32_t addr, uint32_t size) {
     if (size == 0u) return 0u;
     const uint32_t phys = (uint32_t)SR_PHYS(addr);
@@ -1126,6 +1126,41 @@ int sr_guest_format_host(CpuState *s, uint32_t fmt, uint32_t first_reg,
 void sr_vread(float *r, const CpuState *s, const uint8_t *idx, int n, uint32_t prefix);
 void sr_vwrite(CpuState *s, const uint8_t *idx, float *d, int n, uint32_t dprefix);
 
+/* VFPU lane arithmetic with the NaN result fixed by rule (issue #326). C leaves the NaN
+ * that a NaN-producing operation returns to the host: x86-64 SSE keeps the first NaN
+ * source, and an optimiser may swap the operands of a commutative + or *. So the
+ * generated code and sr_vfpu_interp, each compiled on its own, kept different NaNs when
+ * two met (the alias-edge sweep in tests/native/vfpu_interp_selftest.c, built at -O1 or
+ * -O2). Both lanes call these helpers for every lane operation of vadd, vsub, vmul, vdiv,
+ * vscl, vdot, vhdp, vcrs, vcrsp, vqmul, vmmul, vtfm and vmscl. The rule: the first NaN
+ * operand, quieted, else the invalid-operation NaN 0xFFC00000 (Inf - Inf, 0 * Inf, 0 / 0,
+ * Inf / Inf). That is what x86-64 SSE returns for the operands in source order, but it is a
+ * change for default builds too: even at -O0 (RECOMP_OPT, the Makefile default) GCC may
+ * evaluate a plain + or * with its operands swapped, as MSYS2 GCC 16.2 does for the old
+ * vadd and vmul lane loops, so NaN-with-NaN lanes of vadd, vmul, vcrsp and vqmul now keep
+ * the first source where they used to keep the second. Results without a NaN are unchanged.
+ * It is project semantics, not PSP evidence: the PSP's NaN word for these forms is
+ * unmeasured or contested. docs/HARDWARE_ORACLE.md PSP-GE-001 and the issue #40 fixture
+ * fixtures/vfpu_nan_payload/vfpu_nan_cases.h disagree, and the dot-product adder measured
+ * as PSP-VFPU-FUNNEL-001 (vfpu_dot_bits in vfpu_interp.c, used by vfad and vavg) returns
+ * the fixed 0x7F800001 for any NaN operand, which this rule for vdot does not follow.
+ * At -O0 GCC does not inline these static inline helpers, so an ad-hoc build makes one
+ * call per lane operation; package builds (-O1, PACKAGE_RECOMP_OPT) inline them. */
+static inline float sr_vf_nan(float a, float b) {
+    uint32_t u;
+    float r;
+    if (a != a) memcpy(&u, &a, 4);
+    else if (b != b) memcpy(&u, &b, 4);
+    else u = 0xffc00000u;
+    u |= 0x00400000u;
+    memcpy(&r, &u, 4);
+    return r;
+}
+static inline float sr_vf_add(float a, float b) { const float r = a + b; return r == r ? r : sr_vf_nan(a, b); }
+static inline float sr_vf_sub(float a, float b) { const float r = a - b; return r == r ? r : sr_vf_nan(a, b); }
+static inline float sr_vf_mul(float a, float b) { const float r = a * b; return r == r ? r : sr_vf_nan(a, b); }
+static inline float sr_vf_div(float a, float b) { const float r = a / b; return r == r ? r : sr_vf_nan(a, b); }
+
 /* VFPU transcendentals, exact ports of PPSSPP's table-based kernels (the PSP hardware does
  * not compute these with IEEE math). The lookup tables are loaded once from assets/vfpu/
  * (override the directory with PSP_VFPU_TABLES); the loader validates exact length, EOF,
@@ -1146,6 +1181,18 @@ float sr_vfpu_exp2(float x);
 #define SR_VFPU_COMPUTE 1
 #define SR_VFPU_STATE   2
 int sr_vfpu_interp(CpuState *s, uint32_t op);
+
+/* Unverified VFPU forms in the run log (#1877; patterns generated into hle_evidence.h from
+ * docs/HLE_COVERAGE.md). sr_vfpu_note_unverified is the interpreter floor's once-per-pattern
+ * line for an executed VFPU load or store and returns 1 when the word is in a pattern (the
+ * patterns for opcodes 0x34 and 0x3f can only come from translated code). Generated start-up
+ * code passes the first word codegen translated in each pattern to
+ * sr_vfpu_report_unverified_uses, which prints each pattern once. Both only log. */
+typedef struct { uint32_t word; uint32_t pc; } SrVfpuUse;
+extern FILE *sr_vfpu_evidence_log; /* a test seam: NULL logs to stderr */
+int  sr_vfpu_note_unverified(uint32_t word, uint32_t pc);
+void sr_vfpu_evidence_reset(void); /* a test seam: every pattern may be named again */
+void sr_vfpu_report_unverified_uses(const SrVfpuUse *uses, uint32_t count);
 
 /* ---- SR_NAN_TRAP: opt-in NaN/Inf origin diagnostic (issue #69) -------------
  *
@@ -1492,6 +1539,9 @@ RecompFn sr_module_code_lookup(uint32_t pc, int *in_bound_image);
 /* Fetch authority: -1 when no bound image owns pc, else 1/0 for whether one of the
  * owning image's executable spans covers pc's complete fetch slot. */
 int  sr_module_code_fetch_authority(uint32_t pc);
+/* 1 when a bound image covers pc and that image is the translation of code captures (#1933):
+ * tools/code_capture.py names each such image code_capture_<load>_<fnv1a64>. */
+int  sr_module_code_capture_covers(uint32_t pc);
 void sr_module_code_reset(void);   /* drop every registration and binding (fixtures) */
 /* Instruction-cache maintenance over guest [lo, hi): unbind each code overlay there whose
  * identifying bytes are no longer in memory, then bind each one whose bytes are. Returns
@@ -1536,6 +1586,13 @@ void sr_stack_census_report(void);
 void     dispatch(CpuState *s, uint32_t target);  /* TAIL/no native resume boundary */
 int      dispatch_call_try(CpuState *s, uint32_t target, uint32_t resume_pc);
 void     dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc);
+/* A generated linked call to a target with no direct body: dispatch_call inside the
+ * call's own return boundary, as a direct call has. Returns 1 when the caller must
+ * return without running its continuation (sr_aot_return_boundary_end). */
+int      dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc);
+/* Set only by the COSIM guest lane (domain_mode.c): its refused import unwinds through
+ * dispatch_call_checked and dispatch_call_continue instead of ending the run. */
+extern volatile int sr_dispatch_unwind_requested;
 
 /* A computed jr/jalr whose target register holds 0 is a null code pointer (#1375): report
  * it and stop the run. Generated code tests the latched target before the transfer's link
@@ -1634,6 +1691,17 @@ int sr_aot_return_boundary_scope_end(CpuState *s,
  * call's return: record it as SR_AOT_RETURN_CAPTURE would and return 1, so the interpreter
  * hands back to the native caller instead of running its continuation a second time. */
 int sr_aot_return_boundary_capture_resume(CpuState *s, uint32_t target);
+
+/* 1 when `target` is the resume PC of a live linked call of `s` above the floor whose callee
+ * entry $sp is at or below `sp`: an interpreted `jr $ra` there returns past the call the
+ * interpreter runs for, to that call's caller (#2016). */
+int sr_aot_return_boundary_encloses_resume(CpuState *s, uint32_t target, uint32_t sp);
+
+/* Record an interpreted `jr $ra` target on the innermost live linked call of `s`, as
+ * SR_AOT_RETURN_CAPTURE does for a native one, so that call's end check resolves it as it
+ * does for native code (#2016). With `resume_pc`, only on a call that resumes there. Returns 0
+ * when there is no such call. */
+int sr_aot_return_boundary_capture_return(CpuState *s, uint32_t target, const uint32_t *resume_pc);
 
 /* Generated `jr $ra` captures before its delay slot. Keep the hot transfer path
  * inline: one target store per return, with the linked-call comparison at the
@@ -1796,12 +1864,19 @@ double   ge_timing_run_clk(void);
  * every weighted draw recorded since the last check; a no-op unless the trace is armed. */
 void ge_transition_trace_check(const char *why, uint32_t vcount);
 extern uint32_t g_ge_stall_addr;
+/* SIGNAL list control (ge.c): how many SIGNAL CALLs the running list may nest (the numStacks
+ * its sceGeListEnQueue took), and the fault a SIGNAL JUMP, CALL or RET met in the last run,
+ * if any. A fault stops the list at that SIGNAL; ge_take_signal_fault names it once. */
+extern uint32_t g_ge_signal_stack_limit;
+int ge_take_signal_fault(char *detail, size_t size);
 /* Diagnostic counters the watchdog and statistics reports print (hle.c). The GE ones
  * are kept by ge.c, the MPEG ones by mpeg.c. */
 extern uint32_t g_frame_prims;
 extern unsigned long g_ge_list_sig, g_ge_prim_count;
 extern unsigned long g_list_writes, g_list_nonblack, g_list_clearpx;
 extern unsigned long g_ge_list_through_cmds, g_ge_list_transform_cmds;
+extern unsigned long g_ge_mip_draws;          /* draws with mip sampling enabled, every route, whole run (#1373) */
+extern unsigned long g_ge_mip_lines_printed;  /* "GE mip:" lines printed: 0 or 1 (#1373) */
 extern unsigned long g_ge_list_through_vertices, g_ge_list_transform_vertices;
 extern unsigned long g_ge_list_through_sprites, g_ge_list_transform_sprites;
 extern unsigned long g_ge_pixels;
@@ -1968,6 +2043,7 @@ void     gui_consume_button_pulses(void);          /* after one PSP VBLANK sampl
 uint32_t gui_pad_pulses_take(void);
 void     gui_analog(uint8_t *lx, uint8_t *ly);   /* live left-stick (0..255, 128=centre) */
 int      gui_pad_present(void);                  /* 1 when a game controller is connected */
+void     gui_ace_vblank(uint32_t vcount);        /* Ace Mode's smooth motion: a held frame's VBLANK */
 /* Returns 1 only when the selected presenter accepted the validated frame. */
 int      gui_present(uint32_t fbaddr, int fmt, uint32_t stride);
 void     gui_pump(void);                         /* service the window's pending events */
@@ -2061,6 +2137,11 @@ uint32_t sr_display_vcount(void);
 typedef uint32_t (*HleFn)(CpuState *s);
 void     sr_hle_register(uint32_t nid, const char *name, HleFn fn);
 void     sr_hle_init(void);     /* registers all built-in handlers (idempotent) */
+/* Ace Mode's sas=sinc (src/rt/ace.h, #2054): SAS VAG voices mix through a band-limited
+ * resampler. Host-only: voice state and timing are the authentic ones. 0 (the default) is
+ * authentic. Returns 1 when a SAS mixer took the switch; a link without one (the headless
+ * gate's stubs) returns 0, so the feature is never confirmed there. */
+int      sr_hle_sas_set_band_limited(int on);
 uint32_t sr_syscall(CpuState *s, uint32_t nid);
 typedef struct SrLoadExecRequest {
     char guest_path[256];
@@ -2148,6 +2229,9 @@ void sr_yield(CpuState *s);
  * force a premature slice expiry when the recomp-emitted yield cadence is too sparse to
  * keep the engine vblank callback chain alive (e.g. during a busy-wait on a guest latch). */
 int sr_vblank_quantum_due(void);
+/* True when guest time is deterministic (SR_DETERMINISTIC_CLOCK, #2037): a function of the guest's
+ * own work, never of the host clock. The RTC then starts at a fixed date. */
+int sched_clock_deterministic(void);
 /* f_00065c60 field-writer intercept: the container walker reads count from
  * r18+0x04 but f_0005a500's control block init puts count at r18+0x00 and
  * cursor at r18+0x04.  Since both functions are called directly (not via

@@ -25,22 +25,26 @@
     X("FUZZ_CONSTRAINT", "string", "unset (finite floats only)", "vfpu_fuzz.c", "The value allow_nan_inf makes the VFPU fuzzer also generate NaN and infinity operands.") \
     X("FUZZ_SEED", "number", "unset (seed from argv or built-in value)", "vfpu_fuzz.c", "Seeds the random generator of the VFPU fuzz test tool; parsed with strtoul base 0 and overrides the argument.") \
     X("FUZZ_TRIALS", "number", "200 (or first command-line argument)", "vfpu_fuzz.c", "Sets the number of random trials run by the VFPU fuzz test program.") \
+    X("NK_VIDEOREC_FAKE_FFMPEG", "string", "unset (the self-test sets it per case)", "videorec_selftest.c", "How the videorec self-test, run as a fake FFmpeg, ends: enc= and mux= each ok, slow:MS, fail, dead or crash.") \
+    X("PATH", "system", "set by the host", "videorec.c", "Searched, absolute entries only, for the FFmpeg executable a recording encodes with.") \
     X("PSP_ISO", "path", "unset: no ISO path from the environment", "iso_public.c", "Path of the disc image the public ISO reader opens when no image is given another way.") \
     X("PSP_VFPU_TABLES", "path", "assets/vfpu", "vfpu_tables.c", "Directory the runtime loads the VFPU lookup tables from instead of the default one.") \
     X("SCHED_DUMP", "flag-presence", "off", "sched.c", "Diagnostic switch read in sched.c that enables scheduler state dumping in the idle loop.") \
     X("SDL_VIDEODRIVER", "system", "unset (SDL picks the driver)", "gui.c", "Read with SDL_VIDEO_DRIVER to detect the offscreen driver for the headless presented-frames acceptance mode.") \
     X("SDL_VIDEO_DRIVER", "system", "unset", "gui.c", "Alias of SDL_VIDEODRIVER; a value of offscreen makes headless acceptance fail because a real presenter is required.") \
-    X("SR_ACE", "string", "off", "ace.c", "Spec string that turns on the optional image-quality enhancements (filtering, text, readout, notice, wide, smooth).") \
-    X("SR_ACE_REPORT", "path", "unset (no report written)", "ace.c", "Output path for the per-run Ace Mode JSON report.") \
+    X("SR_ACE", "string", "off", "ace.c", "Spec string that turns on the optional enhancements (filtering, text, readout, notice, wide, smooth, band-limited SAS resampling).") \
+    X("SR_ACE_REPORT", "path", "unset (no report written)", "ace.c", "Output path for the per-run Enhanced or Ace JSON report.") \
+    X("SR_ACE_SMOOTH_DEPTH", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the GE's depth for its in-betweens.") \
+    X("SR_ACE_SMOOTH_HUD", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the HUD mask of through-mode draws for its in-betweens.") \
     X("SR_ALLOC_GUARD", "flag-nonzero", "on (guard enabled when unset)", "hle.c", "Allocator guard stays on unless set with a value starting with 0, which disables it.") \
     X("SR_ALLOC_MAX", "number", "0xFFFFFFFF (no extra cap)", "hle.c", "Hexadecimal optional stricter cap on the size of a user-partition allocation request.") \
     X("SR_ALLOC_TRACE", "flag-presence", "off", "hle.c,recomp.c", "When set, prints a trace line for guest memory allocations and partition frees to stderr.") \
     X("SR_ARGLOG", "flag-presence", "off", "sched.c", "Logs a THREAD_ARG_COPY line to stderr when a started thread's argument block is copied.") \
     X("SR_ATRACLOG", "flag-presence", "off", "hle_audio_codec.c", "Enables ATRAC audio codec diagnostic logging.") \
-    X("SR_AUDIODUMP", "path", "unset or empty: no dump written", "audio_unavailable.c", "Writes the mixed audio sent to the host device as a 16-bit PCM WAV file at this path.") \
-    X("SR_AUDIOSTAT", "flag-presence", "off", "audio_unavailable.c,hle.c", "When set, enables audio statistics reporting.") \
-    X("SR_AUDIO_BACKEND", "string", "unset (normal audio backend)", "audio_unavailable.c,psmf_media_selftest.c", "Audio backend choice; null, none, 0 or off select the silent null backend.") \
-    X("SR_AUDIO_DISABLED", "string", "unset (audio enabled)", "audio_unavailable.c", "When set to exactly 1, host audio output is disabled and the null audio backend is used.") \
+    X("SR_AUDIODUMP", "path", "unset or empty: no dump written", "audio_sdl3.c", "Writes the mixed audio sent to the host device as a 16-bit PCM WAV file at this path.") \
+    X("SR_AUDIOSTAT", "flag-presence", "off", "audio_sdl3.c,hle.c", "When set, enables audio statistics reporting.") \
+    X("SR_AUDIO_BACKEND", "string", "unset (normal audio backend)", "audio_sdl3.c,psmf_media_selftest.c", "Audio backend choice; null, none, 0 or off select the silent null backend.") \
+    X("SR_AUDIO_DISABLED", "string", "unset (audio enabled)", "audio_sdl3.c", "When set to exactly 1, host audio output is disabled and the null audio backend is used.") \
     X("SR_BLOCKLOG", "flag-presence", "off", "debug.h,sched.c", "Logs each time the scheduler parks a thread in a delay or object wait; read once per process.") \
     X("SR_BOOT_EVENT_FILE", "path", "unset (no event file)", "driver.c,gui.c,hle.c,hle_kernel_module.c,recomp.c", "File to which boot progress events are appended in addition to stderr.") \
     X("SR_BOOT_PATH", "path", "unset (no boot argument seeded)", "driver.c,hle_kernel_module.c", "Guest boot path (under 4096 bytes) placed in the entry's argument block; a disc0: or umd0: path marks a title booted from the disc.") \
@@ -50,12 +54,15 @@
     X("SR_CALLCOUNT_ALL", "flag-presence", "off (top 18 NIDs listed)", "hle.c", "Makes the HLE call-count report list every distinct NID instead of the top 18.") \
     X("SR_CBLOG", "flag-presence", "off", "debug.h,hle.c,hle_kernel_module.c,hle_kernel_thread.c,hle_umd.c", "Logs kernel callback creation, notification and registration events and enables the misc debug class.") \
     X("SR_CBSNAP", "flag-presence", "off", "sched.c", "Diagnostic switch read in sched.c that enables callback snapshots at each delivered vblank.") \
+    X("SR_CODE_CAPTURE", "path", "unset (no capture written)", "recomp.c", "Folder to which a run stopped by a call into unowned RAM writes the code around the target, for tools/code_capture.py (#1933).") \
     X("SR_DATAROOT", "path", "unset", "hle_thread_selftest.c", "Extracted data root directory used to serve guest files from the host; the self-test saves and restores it.") \
     X("SR_DEBUG", "list", "unset (legacy per-subsystem variables decide)", "debug.h,hle.c", "Bitmask (strtoul, base 0) selecting debug log categories; 0x08 also enables GE display-list dumping.") \
     X("SR_DEBUG_THREAD_LOG", "flag-presence", "off", "hle_kernel_interrupt.c", "Diagnostic switch read in hle_kernel_interrupt.c for thread and interrupt logging.") \
     X("SR_DELAYLOG", "flag-presence", "off", "sched.c", "Logs scheduler thread-delay events; read once per process.") \
+    X("SR_DETERMINISTIC_CLOCK", "string", "empty (off)", "sched.c", "1 makes guest time follow the guest work, not the host clock; empty or 0 keeps the paced or turbo clock. 1 with SR_NOVBPACE=0 is rejected.") \
+    X("SR_DETERMINISTIC_SLICE_US", "number", "100", "sched.c", "Guest microseconds the deterministic clock charges per scheduler boundary; a value outside 1..100000 or not a number is rejected.") \
     X("SR_DEVELOPER_MODE", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c", "Marks a hand-started run as a developer run in the SDL3 Vulkan presenter.") \
-    X("SR_DISC_ID", "string", "unset", "gui.c", "Disc identifier string shown in the in-game pause overlay, set by the launcher.") \
+    X("SR_DISC_ID", "string", "unset", "gui.c,replay_checkpoint.c", "Disc identifier string shown in the in-game pause overlay, set by the launcher.") \
     X("SR_DISPLOG", "flag-presence", "off", "guest_interp.c,recomp.c", "Logs each guest dispatch with target, source pc and return address to stderr.") \
     X("SR_DLGLOG", "flag-presence", "off", "debug.h,hle_utility.c,savedata.c", "Prints diagnostic lines to stderr for utility dialogs and savedata dialog calls.") \
     X("SR_EXEC_SHARE_JSON", "path", "unset (no JSON written)", "perf.c", "File to which the execution-share profile is written as JSON at exit.") \
@@ -111,6 +118,7 @@
     X("SR_GPU_GE", "flag-nonzero", "off (software GE)", "gui.c", "Enables the GPU GE renderer when set to a non-empty value other than 0.") \
     X("SR_GPU_LOG", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "Enables verbose logging in the Vulkan GE backend and also turns on its statistics.") \
     X("SR_GPU_NORTT", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c", "When nonzero, changes how a texture sourced from a render target is bound in the GPU path.") \
+    X("SR_GPU_PIPELINE_CACHE", "string", "on", "gpu_sdl3vk/ge_gpu.c", "Vulkan GE pipeline cache in <data root>/cache/gegpu: unset, empty, 1 or on keeps it; 0 or off turns it off; another value is refused (no cache).") \
     X("SR_GPU_PRESENT_DBG", "flag-presence", "off (first 3 early exits still logged)", "gpu_sdl3vk/ge_gpu.c", "Logs every GPU present call and every early-exit decline to stderr.") \
     X("SR_GPU_READBACK_FULL", "flag-nonzero", "off (only the rows guest memory keeps are copied)", "gpu_sdl3vk/ge_gpu.c", "When enabled, a readback to guest memory copies the whole scaled target, the reference path for the narrowed copy.") \
     X("SR_GPU_SCALE", "number", "1 (falls back to SR_RESOLUTION_SCALE)", "gpu_sdl3vk/ge_gpu.c", "Internal render scale multiplier for the GPU GE renderer.") \
@@ -118,9 +126,14 @@
     X("SR_GPU_SUBMIT_BATCH", "number", "SUBMIT_BATCH_MAX", "gpu_sdl3vk/ge_gpu.c", "Number of GPU ops per submit batch; values outside 1 to the maximum are ignored.") \
     X("SR_GPU_SYNC_SUBMIT", "flag-nonzero", "off (asynchronous submit)", "gpu_sdl3vk/ge_gpu.c", "When enabled, GPU command submission is synchronous instead of asynchronous.") \
     X("SR_GPU_TEX_SHADOW_DISABLE", "flag-nonzero", "off (texture shadow enabled)", "gpu_sdl3vk/ge_gpu.c", "Disables the GPU texture shadow when set to a non-empty value other than 0.") \
+    X("SR_GPU_TIMESTAMPS", "flag-nonzero", "off", "gpu_sdl3vk/ge_gpu.c,gpu_sdl3vk/sdl3vk.c", "Times GE command buffers by op kind and the presentation blit with GPU timestamp queries (GEGPU_TS lines, SR_PERF_FRAMES gpu_* columns).") \
     X("SR_GPU_TNL", "string", "off", "ge.c", "Set to exactly 1 to hand eligible transform-mode triangles to the GPU backend for vertex transform.") \
+    X("SR_GPU_TWIN_CAPTURE", "string", "unset (captures follow the shown image)", "gpu_sdl3vk/ge_gpu.c", "Set to authentic to make the presenter show, and so capture, the authentic image while the host twin is on.") \
+    X("SR_GPU_TWIN_COLOR", "string", "off", "gpu_sdl3vk/ge_gpu.c", "Host twin (#2050), Ace Mode only: 1 presents full 32-bit colour without dither, native keeps authentic colour; other values but 0 and off are refused.") \
+    X("SR_GPU_TWIN_DUMP", "path", "unset (no dump)", "gpu_sdl3vk/ge_gpu_selftest.inc", "File prefix where the coherence self-test's twin-scene case writes each shown frame as raw RGBA.") \
+    X("SR_GPU_TWIN_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test's twin cases: a twin-off run writes it, a twin-on run at the same scale checks it.") \
     X("SR_GPU_XFER_RING_KB", "number", "built-in default ring size", "gpu_sdl3vk/ge_gpu.c", "Transfer ring size in KiB (0 disables, above 65536 ignored).") \
-    X("SR_HEADLESS", "flag-nonzero", "off", "audio_unavailable.c,gui.c,sched.c", "Marks the run headless: silent audio, headless presenter and no pause UI (audio check wants exactly 1).") \
+    X("SR_HEADLESS", "flag-nonzero", "off", "audio_sdl3.c,gui.c,sched.c", "Marks the run headless: silent audio, headless presenter and no pause UI (audio check wants exactly 1).") \
     X("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", "string", "unset (off)", "gui.c,sched.c", "Requests the headless presented-frames acceptance checkpoint; any non-empty value enables it.") \
     X("SR_HEAP_BASE", "number", "first page-aligned address after the loaded image", "hle.c", "Hexadecimal base address for the user heap partition.") \
     X("SR_HEAP_DIAG", "flag-presence", "off", "recomp.c", "When set, prints live heap blocks and rejected foreign frees to stderr.") \
@@ -134,7 +147,7 @@
     X("SR_IOLOG", "flag-presence", "off", "debug.h,hle_data.c,hle_io.c", "When set, logs file I/O operations to stderr and enables the file-system debug category.") \
     X("SR_LAUNCHER_DISPLAY_BOUNDS", "list", "unset (primary display)", "gpu_sdl3vk/sdl3vk.c,gui.c", "Display bounds as x,y,w,h used to open the launcher window on a chosen display.") \
     X("SR_LOOSE_CONTENT_ROOTS", "list", "unset (no loose content roots)", "hle_thread_selftest.c", "Serialized list of extra loose-content root directories bound alongside the primary root.") \
-    X("SR_MASTER_VOLUME", "number", "100", "audio_unavailable.c", "Master audio volume as a percentage, converted to a gain by the audio backend.") \
+    X("SR_MASTER_VOLUME", "number", "100", "audio_sdl3.c", "Master audio volume as a percentage, converted to a gain by the audio backend.") \
     X("SR_MEMSTICK", "path", "memstick", "hle_thread_selftest.c,vfs_path.h", "Host directory that serves as the guest ms0: memory stick root.") \
     X("SR_MISS_SEEDS", "path", "unset (no file written)", "perf.c", "File to which the run's distinct dispatch-miss targets are written at exit, one guest address per line, for tools/miss_seeds.py.") \
     X("SR_MODULE_DIR", "path", "place_game_here/EXTRACTED/decrypted", "hle_kernel_module.c,hle_thread_selftest.c", "Directory holding the decrypted guest modules the runtime loads.") \
@@ -167,18 +180,24 @@
     X("SR_PCSAMPLE", "flag-presence", "off", "sched.c", "When set, enables scheduler PC sampling.") \
     X("SR_PERF", "flag-nonzero", "off", "perf.c", "Enables runtime performance counters with stderr reporting; an explicit 0 also keeps CSV/JSON output off.") \
     X("SR_PERF_CSV", "path", "unset (no CSV)", "perf.c", "File the performance counters are written to as CSV; setting it enables perf collection.") \
+    X("SR_PERF_FRAMES", "path", "unset: no per-frame file", "perf.c", "File that gets one CSV row per new game frame: its host work, wall time and the cost by area; setting it enables perf collection.") \
     X("SR_PERF_JSON", "path", "unset: no JSON performance file", "perf.c", "File path to which the performance recorder writes its JSON report.") \
     X("SR_PIXWHO", "list", "unset", "ge.c", "Comma pair x,y selecting a pixel whose writers are reported.") \
     X("SR_PPM_DUMP", "path", "unset (no dump)", "driver.c", "Output file path for a 64x64 PPM dump of the framebuffer at exit.") \
     X("SR_PRESENT_SCALING", "string", "sharp", "gpu_sdl3vk/sdl3vk.c", "Present scaling mode: sharp, integer or bilinear; unknown values warn and use sharp.") \
     X("SR_PRESENT_TRACE", "flag-presence", "off", "gui.c,hle_display.c", "Emits a boot event for each presented frame on the offscreen sink and traces display presents.") \
+    X("SR_PRESENT_UPSCALE", "string", "off", "gui.c", "Presentation upscaler: off or fsr1 (AMD FSR 1 EASU + RCAS to the picture's place in the window; presentation only). Unknown values warn, stay off.") \
     X("SR_PROFILE", "flag-nonzero", "off", "recomp.c", "When set and not 0, enables hot-path profiling with a dump at exit.") \
     X("SR_PROFILE_DUMP_VBLANKS", "number", "0 (no periodic dump)", "hle_display.c", "Dumps the profile every N vertical blanks.") \
     X("SR_PSMF_MEDIA_DEBUG", "flag-presence", "off", "psmf_media_selftest.c", "Prints media chain counters in the PSMF media selftest.") \
     X("SR_PSMF_SELFTEST_DEBUG", "flag-presence", "off", "psmf_producer_selftest.c", "Makes the PSMF producer self-test print extra statistics lines to stderr.") \
     X("SR_QUIET", "flag-nonzero", "off", "driver.c", "When nonzero, redirects stdout and stderr to the null device.") \
     X("SR_REAL_MODULE_START", "string", "unset (module_start runs for libfont only)", "hle_kernel_module.c,hle_thread_selftest.c", "1 lets module_start run for any module, 0 for none; other values are ignored with a warning.") \
+    X("SR_RECORD", "path", "unset (no recording)", "replay_checkpoint.c", "Records the run (checkpoints, pad samples, keyboard answers) to this file for SR_REPLAY; needs SR_DETERMINISTIC_CLOCK=1.") \
     X("SR_REDUCE_MOTION", "string", "Automatic (system setting)", "gui.c,overlay/overlay_host.c", "Player's Reduce motion choice for the overlay, falling back to the platform preference.") \
+    X("SR_REPLAY", "path", "unset (no replay)", "replay_checkpoint.c", "Replays an SR_RECORD file in a fresh run, checking each checkpoint; prints one REPLAY_ verdict and goes live when used up.") \
+    X("SR_REPLAY_CHECKPOINTS", "path", "unset (no checkpoints)", "replay_checkpoint.c", "Writes digests of the threads, scheduler, VRAM and RAM every N vblanks to this file; tools/nkstate.py ckpt-diff names where two runs split.") \
+    X("SR_REPLAY_CHECKPOINT_EVERY", "number", "60", "replay_checkpoint.c", "Vblanks between checkpoints for SR_REPLAY_CHECKPOINTS and SR_RECORD, 1..100000; another value stops the run.") \
     X("SR_RESOLUTION_SCALE", "number", "1", "gpu_sdl3vk/ge_gpu.c", "Internal render scale for the Vulkan GE backend; SR_GPU_SCALE is read first as the other spelling.") \
     X("SR_ROUTE_LEARN", "flag-presence", "off", "hle_route.c", "When set, enables route learning mode in the input route code.") \
     X("SR_ROUTE_NO_EXIT", "flag-presence", "off (route failure exits the process)", "hle_route.c", "Keeps the process running instead of exiting after a route failure report.") \
@@ -188,6 +207,7 @@
     X("SR_SAMPLE_SPEC", "path", "unset (no state sampling)", "hle_route.c", "Path of a spec file listing guest state samples to take.") \
     X("SR_SASLOG", "flag-presence", "off", "hle_audio.c", "Enables SAS audio diagnostic logging.") \
     X("SR_SAVEDATA_LIST_SELECT", "string", "unset: the user picks from the list", "savedata.c", "Save name to choose automatically in the savedata list dialog; CANCEL cancels it.") \
+    X("SR_SMART_2D", "string", "off", "gpu_sdl3vk/tex_scale.c", "on samples nearest for a textured draw that maps one texel to one pixel (HUD, text) at a render scale above 1x; Ace Mode only.") \
     X("SR_STALE_DETECT", "flag-nonzero", "off", "stale_code.c", "When nonzero, enables stale translated-code detection.") \
     X("SR_STATLOG", "flag-presence", "off", "debug.h,hle_io.c", "Logs memory stick Getstat results to stderr.") \
     X("SR_STORE_CONTEXT_LIMIT", "number", "1", "debug.c", "Number of store-context entries kept, accepted from 1 to 1024.") \
@@ -202,6 +222,10 @@
     X("SR_TEST_GUEST_MODULE_LOAD", "string", "unset: the test returns immediately", "hle_thread_selftest.c", "Selects the mode of the guest-module-load binding self-test.") \
     X("SR_TEXDUMP", "flag-presence", "off", "ge.c", "When set, enables texture dumping.") \
     X("SR_TEXDUMP_AFTER", "number", "0", "ge.c", "First GE frame from which textures are dumped when SR_TEXDUMP is set.") \
+    X("SR_TEX_REPLACE", "path", "unset", "gpu_sdl3vk/ge_gpu.c", "Folder of a PPSSPP-layout texture replacement pack (textures.ini, hash-named PNGs) the Vulkan GE draws guest textures from; Ace only.") \
+    X("SR_TEX_REPLACE_BUDGET_MB", "number", "256", "gpu_sdl3vk/ge_gpu.c", "Host memory, in MiB, for the replacement pack's decoded images; past it the least recently used is dropped.") \
+    X("SR_TEX_SCALE", "string", "off", "gpu_sdl3vk/tex_scale.c", "off or 2-6: the xBRZ factor host copies of guest textures are scaled by in the Vulkan GE texture cache; Ace Mode only.") \
+    X("SR_TEX_SCALE_BUDGET_MB", "number", "512", "gpu_sdl3vk/tex_scale.c", "GPU memory, in MiB, the scaled texture copies may use; past it a texture is drawn unscaled.") \
     X("SR_THLOG", "flag-presence", "off", "debug.h,sched.c", "Enables scheduler and thread logging, including the sched debug class.") \
     X("SR_TRACE", "path", "logs/trace_window.txt", "flight_recorder.c", "Output file for the PC trace window; used only when SR_TRACE_PC is set.") \
     X("SR_TRACE_F", "list", "unset", "flight_recorder.c", "Comma list of frame indices (each below 128) that open the trace window.") \
@@ -210,7 +234,7 @@
     X("SR_TRACE_V", "list", "unset: no vblank indices", "flight_recorder.c", "Comma-separated vblank indices (below 128) in which the PC trace window records.") \
     X("SR_TRACK_LAST_WRITER", "flag-nonzero", "off", "debug.c", "When set and not 0, enables tracking of the last writer of memory words.") \
     X("SR_UI_ROOT", "path", "unset (overlay default)", "gui.c", "Root directory of the overlay UI pages and fonts.") \
-    X("SR_USER_DATA_ROOT", "path", "platform data directory", "hle_host.c", "Absolute directory used as the user data root; an invalid value is refused.") \
+    X("SR_USER_DATA_ROOT", "path", "platform data directory", "hle_host.c,gpu_sdl3vk/pipeline_cache.h", "Absolute directory used as the user data root; an invalid value is refused.") \
     X("SR_VALUE_WATCH_N", "string", "unset", "debug.c", "Value watch slot N (0..15), formatted 0xVALUE,label; reports when the watched value is seen.") \
     X("SR_VBLANK_Q_US", "number", "16000", "sched.c", "Vblank pacing quantum in microseconds.") \
     X("SR_VBLOG", "flag-presence", "off", "debug.h,sched.c", "Enables per-VBLANK scheduler logging.") \
@@ -224,6 +248,11 @@
     X("SR_VERIFY_REPORT", "path", "unset (no report written)", "verify.c", "Verify build only: path of the per-function calls and checks report.") \
     X("SR_VERIFY_STEPS", "number", "1000000", "verify.c", "Verify build only: reference-interpreter step limit for one checked call.") \
     X("SR_VIDEO", "string", "unset: the Vulkan presenter is used", "gui.c,osk_text_entry.c,sched.c", "Selects the presenter: gdi for the Win32 window, offscreen for headless, otherwise Vulkan.") \
+    X("SR_VIDEOREC_CODEC", "string", "ffv1", "videorec.c", "Encoder for a recording: ffv1, x264rgb, nvenc (all lossless) or raw (unencoded, no FFmpeg). Another value or an encoder that cannot run refuses the recording.") \
+    X("SR_VIDEOREC_DIR", "path", "unset (no recording)", "videorec.c", "Records each VBLANK's presented picture and the mixed audio, on one guest timeline, into this folder. Needs SR_DETERMINISTIC_CLOCK=1; refused without it.") \
+    X("SR_VIDEOREC_FFMPEG", "path", "unset (first absolute PATH entry holding ffmpeg)", "videorec.c", "Absolute path of the FFmpeg a recording encodes and muxes with; a path that is not absolute or not an executable file refuses the recording.") \
+    X("SR_VIDEOREC_SIZE", "string", "unset (the window's size at the first recorded present)", "videorec.c", "Output size of a recording as WxH (even numbers), independent of the window; the picture is scaled as the window scales it.") \
+    X("SR_VIDEOREC_START", "number", "0 (from the first presented picture)", "videorec.c", "VBLANK number a recording starts at; earlier pictures and sound are not recorded.") \
     X("SR_VRAMDUMP", "string", "unset (off)", "hle_display.c", "Selection of VRAM dumps to write; requires SR_VRAMDUMP_DIR to name an output directory.") \
     X("SR_VRAMDUMP_DIR", "path", "unset (VRAM dump refused)", "hle_display.c", "Existing output directory required when SR_VRAMDUMP selects VRAM dumps.") \
     X("SR_VSYNC", "number", "1 (vsync on)", "gpu_sdl3vk/sdl3vk.c", "Set to 0 to request presenting without vsync; unset or non-zero keeps vsync.") \
@@ -238,7 +267,7 @@
     X("SR_WATCH_N", "string", "unset", "debug.c", "Memory watch slot N (0..15), formatted 0xSTART,0xEND,label.") \
     X("SR_WINDOW_HIDDEN", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c", "When nonzero, the presenter creates a hidden window for headless routes.") \
     X("SR_YIELDLOG", "flag-presence", "off", "sched.c", "Logs the first 200 worker-thread yields to stderr.") \
-    X("TEMP", "system", "falls back to TMPDIR, then current dir or /tmp", "audio_unavailable.c,profiler_selftest.c", "Host temporary directory used for scratch files by the audio and profiler code.") \
-    X("TMPDIR", "system", "unset: falls back to the current directory", "audio_unavailable.c,profiler_selftest.c,vfs_contained_selftest.c", "Host temp directory (after TEMP) where self-tests place their scratch files.")
+    X("TEMP", "system", "falls back to TMPDIR, then current dir or /tmp", "audio_sdl3.c,profiler_selftest.c", "Host temporary directory used for scratch files by the audio and profiler code.") \
+    X("TMPDIR", "system", "unset: falls back to the current directory", "audio_sdl3.c,profiler_selftest.c,vfs_contained_selftest.c", "Host temp directory (after TEMP) where self-tests place their scratch files.")
 
 #endif /* NK_ENV_REGISTRY_H */

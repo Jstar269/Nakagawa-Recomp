@@ -36,6 +36,9 @@ if str(TOOLS) not in sys.path:
 import codegen
 from vfpu_synth_gen import generate_memory_cop2_corpus, generate_synthetic_corpus
 
+# A census record or row: JSON-shaped values read by key, so typed as Any, not object.
+Record = dict[str, Any]
+
 CENSUS_SCHEMA = 1
 TRACKING_ISSUE = 326
 ACCELERATED_FORMS: tuple[str, ...] = ()
@@ -95,10 +98,11 @@ def production_vfpu_opcodes() -> tuple[tuple[int, ...], tuple[int, ...]]:
     for op in range(64):
         called = False
 
-        def traced(addr, word, lle_cpu=False, delay_branch_pc=None):
+        def traced(addr, word, lle_cpu=None, delay_branch_pc=None, *, options=None):
             nonlocal called
             called = True
-            return original(addr, word, lle_cpu=lle_cpu, delay_branch_pc=delay_branch_pc)
+            return original(addr, word, lle_cpu=lle_cpu, delay_branch_pc=delay_branch_pc,
+                            options=options)
 
         codegen.vfpu_effect = traced
         try:
@@ -421,7 +425,7 @@ def _aot_structure(body: str) -> str:
     return " ".join(normalized.split())
 
 
-def _classify_aot(word: int, *, lle_cpu: bool = False) -> dict[str, object]:
+def _classify_aot(word: int, *, lle_cpu: bool = False) -> Record:
     routed, controls = production_vfpu_opcodes()
     op = word >> 26
     if op in controls:
@@ -458,10 +462,10 @@ def _classify_aot(word: int, *, lle_cpu: bool = False) -> dict[str, object]:
     }
 
 
-def classify_words(words: Iterable[int], *, lle_cpu: bool = False) -> list[dict[str, object]]:
+def classify_words(words: Iterable[int], *, lle_cpu: bool = False) -> list[Record]:
     ordered = tuple(sorted(set(words)))
     probe = _run_interpreter_probe(ordered)
-    records: list[dict[str, object]] = []
+    records: list[Record] = []
     for word in ordered:
         record = _classify_aot(word, lle_cpu=lle_cpu)
         record["aot_structure"] = _aot_structure(str(record["aot_emitted"]))
@@ -482,7 +486,7 @@ def classify_words(words: Iterable[int], *, lle_cpu: bool = False) -> list[dict[
     return records
 
 
-def agreement_status(record: dict[str, object]) -> str:
+def agreement_status(record: Record) -> str:
     aot = record["aot_disposition"]
     supported = bool(record["interpreter_supported"])
     if record["aot_source"] == "effect-direct-control":
@@ -496,7 +500,7 @@ def agreement_status(record: dict[str, object]) -> str:
     return "disagreement"
 
 
-def compatibility_disposition(record: dict[str, object]) -> str:
+def compatibility_disposition(record: Record) -> str:
     aot = record["aot_disposition"]
     supported = bool(record["interpreter_supported"])
     if record["aot_source"] == "effect-direct-control":
@@ -512,7 +516,7 @@ def compatibility_disposition(record: dict[str, object]) -> str:
     return "unsupported-encoding"
 
 
-def validate_agreement(records: Iterable[dict[str, object]]) -> dict[str, int]:
+def validate_agreement(records: Iterable[Record]) -> dict[str, int]:
     counts: Counter[str] = Counter()
     violations: list[str] = []
     for record in records:
@@ -553,11 +557,21 @@ def overlap_diff_words() -> frozenset[int]:
     return frozenset(word for word, _, _ in cases)
 
 
-def _differential_tests(record: dict[str, object], synthetic_words: set[int]) -> list[str]:
+def sweep_words() -> frozenset[int]:
+    """Words vfpu_interp_selftest runs through check_alias_edge_sweep (AOT body vs sr_vfpu_interp
+    over register-overlap instances, edge-value lanes and drawn S/T/D prefixes)."""
+    import vfpu_overlap_diff_gen
+
+    return cast("frozenset[int]", vfpu_overlap_diff_gen.sweep_words())
+
+
+def _differential_tests(record: Record, synthetic_words: set[int]) -> list[str]:
     word = int(record["word"])
     tests: list[str] = []
     if word in overlap_diff_words() and record["interpreter_supported"]:
         tests.append("vfpu-interp-selftest:check_overlap_diff")
+    if word in sweep_words() and record["interpreter_supported"]:
+        tests.append("vfpu-interp-selftest:check_alias_edge_sweep")
     if word in synthetic_words:
         tests.extend(
             [
@@ -577,10 +591,40 @@ def _differential_tests(record: dict[str, object], synthetic_words: set[int]) ->
         jump, sel = (word >> 21) & 0x1F, (word >> 16) & 0x1F
         if jump >= 24 or (jump, sel) in {(1, 2), (1, 3), (1, 19), (1, 24), (2, 5)}:
             tests.append("vfpu-interp-selftest:check_vfpu_forms_measured")
+    if record["interpreter_supported"]:
+        tests.extend(_measured_selftests(word, int(str(record["opcode"])), record["vector_size"]))
     return sorted(set(tests))
 
 
-def _hardware_evidence(record: dict[str, object], vector_size: int | None) -> list[dict[str, str]]:
+def _measured_selftests(word: int, op: int, size: object) -> list[str]:
+    """Selftests that pin a form's results to the words a PSP-3000 returned, by the forms and
+    widths each one runs in tests/native/vfpu_interp_selftest.c (issue #326). The oracle row
+    of each is named in tools/verification_ledger.py VFPU_MEASURED_SELFTESTS; the widths and
+    prefixes a check refuses as unmeasured are not credited."""
+    tests: list[str] = []
+    # vscmp.s / vsge.s / vslt.s on the 15 measured operand pairs, both lanes (PSP-VFPU-CMP-001).
+    if op == 0x1B and ((word >> 23) & 7) in {5, 6, 7} and size == 1:
+        tests.append("vfpu-interp-selftest:check_vfpu_compare_measured_words")
+    if op != 0x34:
+        return tests
+    jump, sel = (word >> 21) & 0x1F, (word >> 16) & 0x1F
+    # vfad (sel 6) and vavg (sel 7) at .p/.t/.q (PSP-VFPU-FUNNEL-001).
+    if jump == 2 and sel in {6, 7} and size in {2, 3, 4}:
+        tests.append("vfpu-interp-selftest:check_psp_measured_funnel")
+    # vsrt1-4 at .q (PSP-VFPU-SORT-001).
+    if jump == 2 and sel in {0, 1, 8, 9} and size == 4:
+        tests.append("vfpu-interp-selftest:check_psp_measured_sort")
+    # vrnds.s, vrndi/vrndf1/vrndf2 at .p/.t/.q, vf2h.p/.q and vc2i.s (PSP-VFPU-FORMS2-001).
+    if jump == 1 and ((sel in {0, 25} and size == 1) or (sel in {1, 2, 3} and size in {2, 3, 4})
+                      or (sel == 18 and size in {2, 4})):
+        tests.append("vfpu-interp-selftest:check_psp_measured_forms2")
+    # vrexp2.s over the 63 measured inputs, both lanes (PSP-VFPU-TRANSCENDENTAL-001).
+    if jump == 0 and sel == 28 and size == 1:
+        tests.append("vfpu-interp-selftest:check_vrexp2_measured_words")
+    return tests
+
+
+def _hardware_evidence(record: Record, vector_size: int | None) -> list[dict[str, str]]:
     word = int(record["word"])
     op = int(record["opcode"])
     evidence: list[dict[str, str]] = []
@@ -684,7 +728,7 @@ def _semantic_verification(disposition: str, differential: list[str], hardware: 
     return "none"
 
 
-def acceleration_verified(row: dict[str, object]) -> bool:
+def acceleration_verified(row: Record) -> bool:
     supported = row["compatibility_disposition"] in {
         "aot-direct",
         "aot-routes-to-sr-vfpu-interp",
@@ -695,23 +739,56 @@ def acceleration_verified(row: dict[str, object]) -> bool:
     return supported and has_differential and has_required_hardware
 
 
-def _make_rows(records: list[dict[str, object]]) -> list[dict[str, object]]:
+def row_key(record: Record) -> tuple[Any, ...]:
+    """The census row a classified word belongs to: one row per key."""
+    memory_variant = cast(int, record["word"]) & 3 if record["opcode"] in MEMORY_OPS else 0
+    return (
+        record["opcode"],
+        record["aot_disposition"],
+        record["aot_structure"],
+        record["aot_reason"],
+        record["interpreter_kind"],
+        record["vector_size"],
+        record["interpreter_return_line"],
+        memory_variant,
+    )
+
+
+def _form_hash(key: tuple[Any, ...]) -> str:
+    op, aot, structure, reason, kind, vector_size, _, memory_variant = key
+    identity = (op, aot, structure, reason, kind, vector_size, memory_variant)
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, ensure_ascii=True).encode("ascii")
+    ).hexdigest()
+
+
+def form_id_of(key: tuple[Any, ...], representative: int) -> str:
+    return f"vfpu-{cast(int, key[0]):02x}-{representative & 0xFFFFFF00:08x}-{_form_hash(key)[:12]}"
+
+
+@lru_cache(maxsize=1)
+def systematic_records() -> tuple[Record, ...]:
+    return tuple(classify_words(systematic_words()))
+
+
+@lru_cache(maxsize=1)
+def supported_direct_forms() -> tuple[tuple[str, tuple[Any, ...], tuple[int, ...]], ...]:
+    """(form id, row key, words) for every census row the AOT emits directly and the
+    interpreter supports: the forms whose generated body can disagree with sr_vfpu_interp."""
+    grouped: dict[tuple[Any, ...], list[int]] = defaultdict(list)
+    for record in systematic_records():
+        if compatibility_disposition(record) == "aot-direct":
+            grouped[row_key(record)].append(cast(int, record["word"]))
+    forms = [(form_id_of(key, min(words)), key, tuple(sorted(words))) for key, words in grouped.items()]
+    return tuple(sorted(forms, key=lambda form: form[0]))
+
+
+def _make_rows(records: list[Record]) -> list[Record]:
     synthetic_words = set(generate_synthetic_corpus()) | set(generate_memory_cop2_corpus())
-    grouped: dict[tuple[object, ...], list[dict[str, object]]] = defaultdict(list)
+    grouped: dict[tuple[Any, ...], list[Record]] = defaultdict(list)
     for record in records:
-        memory_variant = record["word"] & 3 if record["opcode"] in MEMORY_OPS else 0
-        key = (
-            record["opcode"],
-            record["aot_disposition"],
-            record["aot_structure"],
-            record["aot_reason"],
-            record["interpreter_kind"],
-            record["vector_size"],
-            record["interpreter_return_line"],
-            memory_variant,
-        )
-        grouped[key].append(record)
-    rows: list[dict[str, object]] = []
+        grouped[row_key(record)].append(record)
+    rows: list[Record] = []
     for key, group in grouped.items():
         op, _, _, reason, _, vector_size, return_line, _ = key
         dispositions = {compatibility_disposition(record) for record in group}
@@ -720,20 +797,9 @@ def _make_rows(records: list[dict[str, object]]) -> list[dict[str, object]]:
             raise CensusError(f"inconsistent census group for opcode 0x{op:02x}")
         disposition = next(iter(dispositions))
         representative = min(int(record["word"]) for record in group)
-        identity = (
-            op,
-            key[1],
-            key[2],
-            reason,
-            key[4],
-            vector_size,
-            key[7],
-        )
-        form_hash = hashlib.sha256(
-            json.dumps(identity, sort_keys=True, ensure_ascii=True).encode("ascii")
-        ).hexdigest()
+        form_hash = _form_hash(key)
         selector_word = representative & 0xFFFFFF00
-        form_id = f"vfpu-{op:02x}-{selector_word:08x}-{form_hash[:12]}"
+        form_id = form_id_of(key, representative)
         differential = sorted(
             {
                 test
@@ -753,7 +819,7 @@ def _make_rows(records: list[dict[str, object]]) -> list[dict[str, object]]:
             and disposition not in {"unsupported-encoding", "supported-opcode-form-unmodeled"}
         )
         evidence_tier = _evidence_tier(disposition, differential, hardware)
-        row: dict[str, object] = {
+        row: Record = {
             "form_id": form_id,
             "opcode": f"0x{op:02x}",
             "form_sha256": form_hash,
@@ -793,9 +859,9 @@ def _make_rows(records: list[dict[str, object]]) -> list[dict[str, object]]:
     return rows
 
 
-def build_census() -> dict[str, object]:
+def build_census() -> Record:
     words = systematic_words()
-    records = classify_words(words)
+    records = list(systematic_records())
     agreement = validate_agreement(records)
     rows = _make_rows(records)
     known_form_ids = {str(row["form_id"]) for row in rows}
@@ -913,7 +979,7 @@ def build_census() -> dict[str, object]:
     }
 
 
-def render_markdown(census: dict[str, object]) -> str:
+def render_markdown(census: Record) -> str:
     summary = census["summary"]
     typed_summary = cast("dict[str, Any]", summary)
     dispositions = summary["by_disposition"]
@@ -999,7 +1065,61 @@ def _load_encounter_words(path: Path) -> list[tuple[int, int]]:
     return sorted(counts.items())
 
 
-def build_encounter_report(path: Path) -> dict[str, object]:
+@lru_cache(maxsize=1)
+def _rows_by_key() -> dict[tuple[Any, ...], Record]:
+    representative: dict[tuple[Any, ...], int] = {}
+    for record in systematic_records():
+        key = row_key(record)
+        word = cast(int, record["word"])
+        representative[key] = min(word, representative.get(key, word))
+    rows = {str(row["form_id"]): row for row in cast(list, build_census()["rows"])}
+    return {key: rows[form_id_of(key, word)] for key, word in representative.items()}
+
+
+def form_disposition(record: Record) -> Record:
+    """The census form of a classified word and how its result is known.
+
+    ``psp`` is ``measured-cells`` only when a PSP oracle row checks results of this form (a
+    semantic hardware entry, or a selftest pinned to measured words); otherwise the PSP's
+    answer is ``unmeasured`` and an AOT/interpreter agreement is not a hardware claim."""
+    from verification_ledger import VFPU_MEASURED_SELFTESTS
+
+    row = _rows_by_key().get(row_key(record))
+    if row is None:
+        return {"form_id": None, "semantic_verification": "not-in-census", "psp": "unmeasured",
+                "psp_evidence": []}
+    evidence = {str(item["oracle_id"]) for item in cast(list, row["hardware_measured"])
+                if item["kind"] == "semantic"}
+    evidence |= {VFPU_MEASURED_SELFTESTS[test]["oracle_id"] for test in cast(list, row["differential_tests"])
+                 if test in VFPU_MEASURED_SELFTESTS}
+    return {
+        "form_id": row["form_id"],
+        "semantic_verification": row["semantic_verification"],
+        "psp": "measured-cells" if evidence else "unmeasured",
+        "psp_evidence": sorted(evidence),
+    }
+
+
+def _route_forms(entries: list[Record]) -> list[Record]:
+    """One disposition per census form the route emits, with its words and occurrences."""
+    forms: dict[str, Record] = {}
+    for entry in entries:
+        form_id = str(entry["form_id"]) if entry["form_id"] is not None else f"unknown:{entry['word']}"
+        form = forms.setdefault(form_id, {
+            "form_id": entry["form_id"],
+            "disposition": entry["disposition"],
+            "semantic_verification": entry["semantic_verification"],
+            "psp": entry["psp"],
+            "psp_evidence": entry["psp_evidence"],
+            "words": 0,
+            "emitted_occurrences": 0,
+        })
+        form["words"] = cast(int, form["words"]) + 1
+        form["emitted_occurrences"] = cast(int, form["emitted_occurrences"]) + cast(int, entry["emitted_occurrences"])
+    return [forms[key] for key in sorted(forms)]
+
+
+def build_encounter_report(path: Path) -> Record:
     counted = _load_encounter_words(path)
     records = classify_words(word for word, _ in counted)
     if any(record["aot_source"] is None for record in records):
@@ -1024,6 +1144,7 @@ def build_encounter_report(path: Path) -> dict[str, object]:
                     "unsupported-encoding",
                 } else None,
                 "differential_tests": _differential_tests(record, synthetic_words),
+                **form_disposition(record),
             }
         )
     return {
@@ -1167,7 +1288,7 @@ def _route_words(path: Path, route_args: list[str]) -> tuple[Counter[int], int, 
 
 def build_route_report(
     path: Path | str, route_args: Iterable[str] = ()
-) -> dict[str, object]:
+) -> Record:
     """Classify every VFPU word a route's AOT emits with the census decoders.
 
     A word fails the route when its census disposition is a named boundary:
@@ -1181,9 +1302,9 @@ def build_route_report(
     # VFPU memory forms are emitted; classify with the same setting so the report
     # describes the route that was scanned. A generated .c input carries no flags.
     lle_cpu = "--lle-cpu" in route_args
-    entries: list[dict[str, object]] = []
+    entries: list[Record] = []
     failures: list[str] = []
-    records: list[dict[str, object]] = []
+    records: list[Record] = []
     if counts:
         records = classify_words(tuple(sorted(counts)), lle_cpu=lle_cpu)
         if any(record["aot_source"] is None for record in records):
@@ -1205,6 +1326,7 @@ def build_route_report(
                 "reason": record["aot_reason"],
                 "status": "boundary" if boundary else "pass",
                 "tracking_issue": TRACKING_ISSUE if boundary else None,
+                **form_disposition(record),
             }
         )
         if boundary:
@@ -1223,6 +1345,7 @@ def build_route_report(
         "classification_lle_cpu": lle_cpu,
         "failures": failures,
         "entries": entries,
+        "forms": _route_forms(entries),
     }
 
 
@@ -1282,7 +1405,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.encodings is not None:
             sys.stdout.write(_canonical_json(build_encounter_report(args.encodings)))
             return 0
-        census = None
+        census: Record | None = None
         if args.json is not None or args.markdown is not None:
             census = build_census()
         if args.json is not None:
@@ -1290,7 +1413,7 @@ def main(argv: list[str] | None = None) -> int:
             args.json.write_text(_canonical_json(census), encoding="ascii", newline="\n")
         if args.markdown is not None:
             args.markdown.parent.mkdir(parents=True, exist_ok=True)
-            args.markdown.write_text(render_markdown(census), encoding="utf-8", newline="\n")
+            args.markdown.write_text(render_markdown(cast("Record", census)), encoding="utf-8", newline="\n")
         if args.format == "json":
             sys.stdout.write(_canonical_json(census if census is not None else build_census()))
         elif args.format == "text" or (args.json is None and args.markdown is None):

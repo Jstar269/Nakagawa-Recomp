@@ -308,9 +308,18 @@ static int ge_list_run(int slot, uint32_t pc, int resume, uint32_t *next_pc) {
         int stopped = 0;
         l->preempted = 0;
         g_ge_stall_addr = l->stall_addr;
+        g_ge_signal_stack_limit = l->signal_stacks;
         uint32_t next = ge_run_list_until(pc, resume, &sr_preempt_due, &stopped);
         g_ge_stall_addr = 0;
         if (ge_timing_on()) ge_timing_charge_run();
+        char fault[160];
+        if (ge_take_signal_fault(fault, sizeof(fault))) {
+            /* The list stopped at a SIGNAL JUMP, CALL or RET the GE driver refuses (ge.c
+             * ge_signal_end): the run stops by name, and the list stays at that SIGNAL. */
+            (void)hle_unmodelled_stop(hle_import_name(sr_last_nid), "%s", fault);
+            *next_pc = next;
+            return 1;
+        }
         if (!stopped) {
             *next_pc = next;
             return 1;
@@ -397,6 +406,14 @@ static uint32_t h_GeListEnQueue(CpuState *s) {
     uint32_t stall = A1;
     uint32_t cbid = A2;
     uint32_t cbarg = A3;
+    /* The SIGNAL CALL stack (ge.c ge_signal_end): 32 entries for a title compiled before SDK
+     * 2.00, none after, unless the optional SceGeListArgs (A3, size >= 16) names numStacks,
+     * which must be below 256 (uofw src/kd/ge/ge.c _sceGeListEnQueue, behaviour only). */
+    uint32_t signal_stacks = g_sdk_version > 0x01FFFFFFu ? 0u : 32u;
+    if (A3 != 0u && sr_guest_span_readable(A3, 16u) && MEM_R32(A3) >= 16u) {
+        signal_stacks = MEM_R32(A3 + 8u);
+        if (signal_stacks >= 256u) return 0x80000104u;   /* SCE_ERROR_INVALID_SIZE */
+    }
     int slot = ge_free_pop();
     uint32_t list_id = slot >= 0 ? ge_list_id(slot) : GE_ERROR_OUT_OF_MEMORY;
     SR_FLIGHT_RECORD_CLASS(SR_FLIGHT_CLASS_GE, SR_FLIGHT_KIND_GE_LIST_ENQUEUE,
@@ -417,6 +434,7 @@ static uint32_t h_GeListEnQueue(CpuState *s) {
     l->stall_addr = stall;
     l->cbid = cbid;
     l->cbarg = cbarg;
+    l->signal_stacks = signal_stacks;
     l->order = ++s_ge_list_order;
     s_ge_list_done_bits &= ~ge_slot_bit(slot);
 
@@ -470,7 +488,9 @@ static uint32_t h_GeListUpdateStallAddr(CpuState *s) {
         ge_enqueue_trace_result(s, "update_stall", list_id, "not_found", 0u, 0);
         if (ge_log_on())
             fprintf(stderr, "GE_UPDATE_STALL: list_id=0x%08x NOT FOUND or not stalled\n", list_id);
-        return 0;
+        /* PSPAutotests tests/gpu/ge/queue.expected (recorded on a PSP): an id that names no list
+         * (0, or one already dequeued) returns 0x80000100. */
+        return 0x80000100u; /* SCE_KERNEL_ERROR_INVALID_ID */
     }
 
     if (s_ge_lists[slot].executed) {

@@ -96,7 +96,7 @@ you are authorized to use.
 ## Encrypted PSP files
 
 The player decrypts the encrypted executable and modules of a disc the user owns, locally, with built-in game tables
-(`src/core/nk_psp_*`, [#295](https://github.com/Jstar269/nakagawa-recomp/issues/295)). It never reads a key file and
+(`src/core/nk_psp_*`, [#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)). It never reads a key file and
 never decrypts firmware: firmware containers are refused by name before any key is read. Every container is
 size-bounded, integrity-checked (CMAC, SHA-1 or ECDSA) before its payload is used, and each output is validated as
 ELF32/MIPS before it is kept; one it cannot decrypt is refused by name. Every file is treated as untrusted input by the bounds-checked, fuzzed parsers listed in
@@ -120,6 +120,7 @@ It fails when a file and algorithm pair is missing here or a row names a pair th
 | `tools/decompme_export.py` | SHA-1 | PSP NID derivation (`sha1(name)[0:4]`, little-endian) | Keep: the PSP defines it |
 | `tools/gen_nidnames.py` | SHA-1 | PSP NID derivation | Keep: the PSP defines it |
 | `tools/nid_name_proof.py` | SHA-1 | PSP NID derivation | Keep: the PSP defines it |
+| `tools/ppsspp_ref.py` | SHA-1 | WebSocket handshake check of `Sec-WebSocket-Accept` (RFC 6455 section 4.2.2) | Keep: the protocol defines it |
 | `tools/provenance_attest_verify.py` | SHA-1 | Git blob ID of a file a `PROVENANCE.md` row declares imported byte-identical, compared with the row's recorded blob ID (a SHA-256 column, where present, is checked too) | Keep: Git object identity |
 | `tools/verify_vfpu_provenance.py` | SHA-1 | Git blob ID of a VFPU table against the pinned upstream tree | Keep: Git object identity |
 | `tools/validate_assets.py` | MD5 | Reads legacy, unversioned local asset references; new ones are versioned SHA-256 | Keep: legacy compatibility only, not a security check |
@@ -127,22 +128,28 @@ It fails when a file and algorithm pair is missing here or a row names a pair th
 | `tools/make_app_icon.py` | CRC-32 | PNG chunk checksum | Keep: the format requires it |
 | `tools/nk_cli.py` | CRC-32 | PNG chunk checksum | Keep: the format requires it |
 | `tools/ppm2png.py` | CRC-32 | PNG chunk checksum | Keep: the format requires it |
+| `tools/ppsspp_ref.py` | CRC-32 | PNG chunk checksum | Keep: the format requires it |
 | `src/core/nk_psp_inflate.c` | CRC-32 | gzip member trailer of a decrypted PSP payload (RFC 1952) | Keep: the format requires it |
+| `src/core/nk_zip.c` | CRC-32 | ZIP entry checksum of save backups (store-only archives, APPNOTE 4.4.7), checked for every entry before a restore writes anything | Keep: the format requires it |
+| `src/core/nk_steam_shortcuts.c` | CRC-32 | The app ID Steam derives for a non-Steam shortcut (the CRC-32 of the quoted executable path and name, top bit set); an identifier in the user's own Steam library, not a security check | Keep: Steam defines it |
 | `src/core/nk_disc_verify.c` | CRC-32 | Disc verification: a whole disc image's CRC-32 and SHA-1 (the file's own FIPS 180-4 SHA-1, which the scan above does not detect), compared with the user's Redump list | Keep: Redump lists both; they identify a dump and are not a security check |
 | `src/core/nk_disc_verify.h` | CRC-32 | The disc-verification CRC-32 interface (`nk_crc32_update`) | Keep: Redump lists it; it identifies a dump and is not a security check |
 | `tools/nk_core/disc_verify.py` | SHA-1 | Disc verification: a whole disc image's SHA-1, the key into the user's Redump list | Keep: Redump lists it; it identifies a dump and is not a security check |
 | `tools/nk_core/disc_verify.py` | CRC-32 | Disc verification: a whole disc image's CRC-32, checked with the SHA-1 match | Keep: Redump lists it; it identifies a dump and is not a security check |
-| `tools/codegen.py` | FNV-64 | Staged module identity (`fnv1a64`), mirrored by `src/rt/guest_interp.c` | Candidate: SHA-256 only with a codegen and package identity bump |
-| `src/rt/guest_interp.c` | FNV-64 | Staged module identity (`sr_module_code_fnv1a64`), checked against the staged file | Candidate: SHA-256 only with a codegen and package identity bump |
+| `tools/codegen.py` | FNV-64 | Names shared units and symbols, and the digest of an overlay's leading bytes (`fnv1a64`), mirrored by `src/rt/guest_interp.c`; the staged module identity itself is SHA-256 (`file_sha256`) | Done in #1920: staged-module identity is SHA-256, `GENERATED_CODE_ABI_EPOCH` is 3, and `tools/test_package_cache.py` checks that older packages are refused. The FNV-64 that remains is not an identity check |
+| `src/rt/guest_interp.c` | FNV-64 | Digest of an overlay's leading bytes in guest memory (`sr_module_code_fnv1a64`), checked on instruction-cache invalidate; the staged file is identified by SHA-256 (`sr_module_code_sha256`) | Done in #1920: staged-module identity is SHA-256. The FNV-64 that remains says whether an overlay is present, not whose file it is |
 | `tools/codegen.py` | FNV-32 | Self-modifying-code block record (`stale_fnv1a`), mirrored by `src/rt/stale_code.c` | Keep: change detector |
 | `src/rt/stale_code.c` | FNV-32 | Self-modifying-code detection (`sr_stale_fnv1a`), checked per block | Keep: performance-critical change detector |
 | `tools/psp_oracle/insn_trace.py` | FNV-32 | Checks that the insn-trace probe ran the header's fixture words, against the probe's own FNV-1a report; the trace identity itself is SHA-256 | Keep: mirrors the on-device check |
 | `src/rt/mpeg.c` | FNV-64 | Names a decoded YCbCr picture by its plane bytes, so the `SR_MPEGAV` measurement gives a copy the player converts the picture's presentation time; computed only while `SR_MPEGAV` is on | Keep: measurement key, not integrity |
-| `src/rt/hle_audio.c` | FNV-64 | Matches an audio block a guest player outputs to the sceMpeg block it copied (`psmf_av_content`, `SR_MPEGAV` only) | Keep: measurement key, not integrity |
+| `src/rt/hle_mpeg.c` | FNV-64 | Matches an audio block a guest player outputs to the sceMpeg block it copied (`psmf_av_content`, `SR_MPEGAV` only) | Keep: measurement key, not integrity |
 | `src/rt/savedata.c` | FNV-64 | Content identity in a SAVE's transaction record: crash recovery deletes or restores a save file only when its size and FNV-1a 64 match the recorded previous or new content, and the record's own hash finds a torn record | Keep: matches a save's own files after a crash, not a security check |
 | `src/rt/ge.c` | FNV-32 | GE transition trace draw identity and watched-buffer hash | Keep: trace key, not integrity |
 | `src/rt/gpu_sdl3vk/ge_gpu.c` | FNV-64 | Texture cache key | Keep: cache key, not integrity |
+| `src/rt/gpu_sdl3vk/pipeline_cache.h` | FNV-64 | Damage check of the on-disk Vulkan pipeline cache's driver data (`nk_pcache_fnv1a64`), and the name of the embedded shader set it was made for; `ge_gpu.c` also uses it to tell whether the driver's data changed before saving | Keep: catches a truncated or damaged cache file in the user's own folder, not a security check; the driver validates the data it is given |
+| `src/rt/motion_match.c` | FNV-64 | Sort and lookup key of a PRIM's signature and key in the draw matcher (`sig_hash`, `key_hash`); every hash match is confirmed by comparing the fields themselves | Keep: hash-table key, not integrity |
 | `src/core/nk_xb.c` | FNV-32 | In-memory path table that finds duplicate paths while writing an XB archive | Keep: hash-table key |
+| `src/core/nk_platform_win32.c` | FNV-64 | Non-cryptographic hash of the data-folder path (`single_instance_hash`), used only to name the launcher's single-instance mutex and its owner page | Keep: a name, not integrity; a collision only makes two data folders share one launcher |
 | `tools/nk_core/iso_inspect.py` | FNV-32 | Disc-path suffix that keeps two disc modules with the same file name apart in the per-title module folder (`disc_module_qualified_name`), mirrored by `src/player/player_state.c` | Keep: file-name key, not integrity |
 | `src/player/player_state.c` | FNV-32 | Same disc-path suffix for the player's disc check (`player_module_qualified_name`), matching `tools/nk_core/iso_inspect.py` | Keep: file-name key, not integrity |
 | `src/player/player_ui_test.c` | FNV-64 | Rendered-frame hash printed by the player's UI test mode | Keep: test fingerprint |

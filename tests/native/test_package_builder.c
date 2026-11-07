@@ -106,7 +106,7 @@ static void test_compile_part_count(void) {
     PackageBuildSession session;
     package_builder_init_session(&session, "TEST00001", "Part Count");
 
-    const char *start = "{\"stage\": \"compile\", \"status\": \"START\", \"message\": \"Compiling package with AOT codegen...\"}";
+    const char *start = "{\"stage\": \"compile\", \"status\": \"START\", \"message\": \"Compiling the translated code\"}";
     assert(package_builder_parse_progress_line(start, strlen(start), &ev));
     assert(ev.parts_total == 0);
     package_builder_apply_event(&session, &ev);
@@ -146,7 +146,7 @@ static void test_compile_part_count(void) {
     assert(ev.parts_total == 0);
 
     /* Leaving the compile stage returns the bar to its own state. */
-    const char *package = "{\"stage\": \"package\", \"status\": \"START\", \"message\": \"Staging runtime assets\"}";
+    const char *package = "{\"stage\": \"package\", \"status\": \"START\", \"message\": \"Putting the package together and checking it\"}";
     assert(package_builder_parse_progress_line(package, strlen(package), &ev));
     package_builder_apply_event(&session, &ev);
     assert(package_builder_compile_fraction(&session) < 0.0f);
@@ -707,12 +707,12 @@ static void test_toolchain_preflight(void) {
     assert(strstr(msg, "gcc") != NULL);
     assert(strstr(msg, "PATH") != NULL);
 #if defined(_WIN32) || defined(_WIN64)
-    assert(strstr(msg, "pinned prerequisite consent card") != NULL);
+    assert(strstr(msg, "build tools download prompt") != NULL);
     assert(strstr(msg, "mingw-w64-ucrt-x86_64-gcc") != NULL);
 #else
     /* No download exists off Windows (#306): the card points at the system's
        packages and never at a consent card or an MSYS2 package. */
-    assert(strstr(msg, "pinned prerequisite consent card") == NULL);
+    assert(strstr(msg, "build tools download prompt") == NULL);
     assert(strstr(msg, "MSYS2") == NULL);
     assert(strstr(msg, "build-essential") != NULL);
     assert(strstr(msg, "downloads build tools only on Windows") != NULL);
@@ -792,13 +792,13 @@ static void test_pinned_prerequisite_manifest(void) {
     assert(package_builder_find_cli(NULL, cli_path, sizeof(cli_path)));
     assert(package_builder_load_prerequisites(cli_path, &list, error, sizeof(error)));
     assert(list.count == 35);
-    assert(list.total_bytes == UINT64_C(101848305));
+    assert(list.total_bytes == UINT64_C(101892265));
     assert(strcmp(list.items[0].id, "cpython-embed-amd64") == 0);
     assert(strcmp(list.items[0].host, "www.python.org") == 0);
-    assert(strcmp(list.items[0].version, "3.15.1") == 0);
+    assert(strcmp(list.items[0].version, "3.15.2") == 0);
     assert(strcmp(list.items[0].license, "PSF-2.0") == 0);
     assert(strcmp(list.items[0].sha256,
-                  "352e232f25b5120508f11a6dfc1bd9076d3e70c30977d552a63338838c2ae8fb") == 0);
+                  "d012f3aa29cf07436dae8aea1fec0fd195c2612a0b059b1f915ae0afb9ad1f62") == 0);
 }
 
 #if defined(_WIN32) || defined(_WIN64)

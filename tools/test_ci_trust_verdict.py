@@ -62,10 +62,10 @@ def _check(job: dict, suite: int, *, app: int = ctv.GITHUB_ACTIONS_APP_ID) -> di
 
 
 def _pull_request(*, head: str = HEAD, base: str = "main", fork: bool = False,
-                  labels: tuple[str, ...] = ()) -> dict:
+                  labels: tuple[str, ...] = (), draft: bool = False) -> dict:
     owner = "someone/nakagawa-recomp" if fork else "Jstar269/nakagawa-recomp"
     return {
-        "number": PR, "state": "open",
+        "number": PR, "state": "open", "draft": draft,
         "head": {"sha": head, "repo": {"full_name": owner}},
         "base": {"ref": base, "repo": {"full_name": "Jstar269/nakagawa-recomp"}},
         "labels": [{"name": name} for name in labels],
@@ -394,6 +394,110 @@ class CiToolApprovalCanaryTests(VerdictAssertions):
         self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
 
 
+LIGHT_JOBS = ["Classify change", "Hygiene and security", "CI required"]
+DRAFT_AT = "2026-10-28T10:20:00Z"
+READY_AT = "2026-10-28T10:40:00Z"
+
+
+class DraftLightCiTests(VerdictAssertions):
+    """A Draft runs only the quick CI jobs, so its head is never green (DRAFT_LIGHT_CI).
+
+    The verifier reads the draft state from the pull request itself, so the rule holds
+    whatever the candidate's CI reported. A pull request that is not a Draft is judged
+    exactly as before.
+    """
+
+    @staticmethod
+    def _draft() -> Scenario:
+        scenario = Scenario()
+        scenario.raw["pull_request"]["draft"] = True
+        return scenario
+
+    def test_a_draft_with_every_intended_job_green_is_a_failure_naming_the_reason(self) -> None:
+        verdict = self.assertVerdict(self._draft(), "failure", "DRAFT_LIGHT_CI")
+        self.assertEqual(verdict.description(), "1 finding(s): DRAFT_LIGHT_CI")
+        finding = next(item for item in verdict.findings if item.code == "DRAFT_LIGHT_CI")
+        self.assertEqual(finding.subject, f"#{PR}")
+        self.assertIn("Ready for review", finding.message)
+
+    def test_a_pull_request_that_is_not_a_draft_is_judged_as_before(self) -> None:
+        verdict = self.assertVerdict(Scenario(), "success")
+        self.assertEqual(verdict.findings, [])
+
+    def test_an_unreadable_draft_state_is_judged_as_a_draft(self) -> None:
+        for value in (None, "false", 0, "true"):
+            with self.subTest(value=value):
+                scenario = Scenario()
+                scenario.raw["pull_request"]["draft"] = value
+                self.assertVerdict(scenario, "failure", "DRAFT_LIGHT_CI")
+        scenario = Scenario()
+        del scenario.raw["pull_request"]["draft"]
+        self.assertVerdict(scenario, "failure", "DRAFT_LIGHT_CI")
+
+    def test_a_draft_behind_main_is_not_behind_only(self) -> None:
+        """The batch tool lands a verdict whose one code is CI_DEFINITION_BEHIND; a Draft's never is."""
+        behind = Scenario()
+        behind.change(CI, kind="behind")
+        self.assertEqual(self.assertVerdict(behind, "failure").description(), "1 finding(s): CI_DEFINITION_BEHIND")
+        draft = self._draft()
+        draft.change(CI, kind="behind")
+        verdict = self.assertVerdict(draft, "failure", "DRAFT_LIGHT_CI", "CI_DEFINITION_BEHIND")
+        self.assertEqual(verdict.description(), "2 finding(s): CI_DEFINITION_BEHIND, DRAFT_LIGHT_CI")
+        self.assertNotEqual(verdict.description().split(": ", 1)[-1], "CI_DEFINITION_BEHIND")
+
+    def test_an_approved_ci_change_does_not_waive_the_draft_rule(self) -> None:
+        scenario = self._draft()
+        scenario.change("tools/ci_paths.py")
+        scenario.label(at="2026-10-28T10:05:00Z")
+        verdict = self.assertVerdict(scenario, "failure", "DRAFT_LIGHT_CI")
+        self.assertEqual(sorted({item.code for item in verdict.findings if item.fatal}), ["DRAFT_LIGHT_CI"])
+
+    def test_ready_for_review_is_judged_on_the_full_run_it_starts(self) -> None:
+        # The Draft's light run failed CI required (DRAFT_LIGHT_CI); marking it Ready started the full run.
+        scenario = Scenario()
+        scenario.raw["workflow_runs"][0]["created_at"] = "2026-10-28T10:00:00Z"
+        scenario.job(1, "CI required").update(conclusion="failure")
+        full = scenario.add_run(6, CI, LIGHT_JOBS, created=READY_AT, status="in_progress", conclusion=None)
+        scenario.job(6, "CI required").update(status="in_progress", conclusion=None)
+        verdict = self.assertVerdict(scenario, "pending")
+        self.assertEqual(verdict.pending, ["CI required"])
+        full.update(status="completed", conclusion="success")
+        scenario.job(6, "CI required").update(status="completed", conclusion="success")
+        self.assertVerdict(scenario, "success")
+
+    def test_ready_for_review_cancelling_the_light_run_is_judged_on_the_full_run(self) -> None:
+        scenario = Scenario()
+        scenario.raw["workflow_runs"][0].update(conclusion="cancelled")
+        scenario.add_run(6, CI, LIGHT_JOBS, created=READY_AT)
+        self.assertVerdict(scenario, "success")
+
+    def test_converted_to_draft_turns_a_green_head_red(self) -> None:
+        # The full run passed while it was Ready; converting it back to a Draft started a light run.
+        scenario = self._draft()
+        scenario.add_run(6, CI, LIGHT_JOBS, created=DRAFT_AT)
+        scenario.job(6, "CI required").update(conclusion="failure")
+        self.assertVerdict(scenario, "failure", "DRAFT_LIGHT_CI", "JOB_FAILED")
+
+    def test_a_ready_head_whose_newest_ci_run_is_light_is_not_green(self) -> None:
+        """Defence in depth: the light run's own CI required fails, so it can never stand for a Ready head."""
+        scenario = Scenario()
+        scenario.add_run(6, CI, LIGHT_JOBS, created=DRAFT_AT)
+        scenario.job(6, "CI required").update(conclusion="failure")
+        self.assertVerdict(scenario, "failure", "JOB_FAILED")
+
+    def test_main_posts_the_draft_failure(self) -> None:
+        scenario = self._draft()
+        gh = FakeGitHub(scenario)
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()), \
+                mock.patch.object(ctv, "GitHub", return_value=gh), \
+                mock.patch.dict(os.environ, {"GITHUB_TOKEN": "token"}), mock.patch("sys.stdout"):
+            code = ctv.main(["--repository", gh.repository, "--post", "--pull-request", str(PR)])
+        self.assertEqual(code, 1)
+        self.assertEqual(gh.posts, [(f"statuses/{HEAD}", {
+            "state": "failure", "context": ctv.VERDICT_CONTEXT, "description": "1 finding(s): DRAFT_LIGHT_CI",
+        })])
+
+
 class ProtectedPathTests(unittest.TestCase):
     def test_tool_references_skip_comments_and_longer_paths(self) -> None:
         text = (
@@ -517,13 +621,35 @@ class WorkflowWiringTests(unittest.TestCase):
         for uses in re.findall(r"(?m)^\s*(?:- )?uses: (\S+)", self.text):
             self.assertRegex(uses, r"@[0-9a-f]{40}$")
 
-    def test_retriggers_name_every_producing_workflow_but_provenance(self) -> None:
+    def test_retriggers_only_on_ci_completion(self) -> None:
+        # CI finished last on all 181 heads whose three pull_request producers passed on
+        # 2026-11-04/05, so a verdict started by OSV-Scanner or Dependency Review only
+        # re-posted "pending" and held the head's concurrency group ahead of the run CI
+        # starts. When either finishes after CI (a re-run), the verdict stays pending, never
+        # success, until it is dispatched by hand, as for the provenance attestation.
         match = re.search(r"workflows: \[([^\]]*)\]", self.text)
         assert match is not None
         names = {name.strip().strip('"') for name in match.group(1).split(",")}
-        expected = {self._top_name(ROOT / producer.workflow) for producer in ctv.PRODUCERS
-                    if producer.events == ("pull_request",)}
-        self.assertEqual(names, expected)
+        ci = {self._top_name(ROOT / producer.workflow) for producer in ctv.PRODUCERS
+              if producer.workflow == ".github/workflows/ci.yml"}
+        self.assertEqual(ci, {"CI"})
+        self.assertEqual(names, ci)
+
+    def test_cancelled_first_attempt_starts_no_verdict(self) -> None:
+        # A first CI attempt is cancelled when a newer push supersedes it; its verdict would
+        # judge a stale head. The skip sits inside the workflow_run route only, so a re-run
+        # (attempt 2 or later) and the pull_request_target and dispatch routes still judge.
+        start = self.text.index("\n  verdict:\n")
+        condition = self.text[self.text.index("    if: >-\n", start):self.text.index("    runs-on:", start)]
+        skip = ("!(github.event.workflow_run.conclusion == 'cancelled' && "
+                "github.event.workflow_run.run_attempt == 1)")
+        self.assertEqual(condition.count(skip), 1)
+        route = re.search(r"\(github\.event_name == 'workflow_run' && "
+                          r"github\.event\.workflow_run\.event == 'pull_request' &&\s*"
+                          + re.escape(skip) + r"\)", condition)
+        self.assertIsNotNone(route, "the skip must be part of the workflow_run alternative")
+        self.assertIn("github.event_name == 'workflow_dispatch'", condition)
+        self.assertIn("github.event.pull_request.base.ref == github.event.repository.default_branch", condition)
 
     def test_does_not_name_the_provenance_context(self) -> None:
         # provenance_attest_verify.py refuses any other workflow naming its context.

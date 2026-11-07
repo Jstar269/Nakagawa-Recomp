@@ -11,6 +11,7 @@
  * 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "replay_checkpoint.h" /* SR_REPLAY_CHECKPOINTS (#2147) */
 
 #ifdef _WIN32
 uint64_t sr_host_monotonic_ms(void) { return GetTickCount64(); }
@@ -242,6 +243,8 @@ static void display_present_active(void) {
         (void)ace_flip(s_display_active.addr & 0x1FFFFFu, bytes, s_vcount,
                        sr_host_monotonic_ms() * 1000000ull);
     }
+    /* A recording counts the guest's own flips beside the picture (videorec.h). */
+    sr_videorec_guest_flip();
     display_present_frame();
     sr_capture_cancel();
     uint32_t brightest;
@@ -487,8 +490,8 @@ static const char *fbcap_arm_for_present(uint32_t vcount, const DisplayFrameStat
     s_fbcap_legacy[0] = '\0';
     if (sync != 0u) return NULL;
     /* SR_FBSNAP_WINDOWS alone selects FBSNAP (every present inside the windows), so the
-     * windows are parsed before the owner decision, which uses the same effective cadence
-     * as the gate below (sr_fbcap_snap_every). */
+     * windows are parsed before the capture-owner decision (sr_fbcap_owner()), which uses
+     * the same effective cadence as the gate below (sr_fbcap_snap_every). */
     fbcap_parse_windows_once();
     int fbsnap_every = sr_fbcap_snap_every(getenv("SR_FBSNAP"), s_fbsnap_win_n > 0);
     int owner = sr_fbcap_owner(sr_fbcap_env_on("SR_FBDUMP"), fbsnap_every > 0);
@@ -731,6 +734,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
                 fprintf(stderr, "SR_FBDUMP: no trustworthy framebuffer snapshot was written\n");
                 sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, 0u, 1u);
                 sr_compat_report();
+                (void)sr_videorec_finish_status("SR_FBDUMP found no trustworthy framebuffer", 1);
                 sr_perf_shutdown();
                 SR_VERIFY_REPORT_NOW();
                 _Exit(1);
@@ -740,6 +744,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
                 sr_flight_exit((uint32_t)capture_exit_status);
                 psmf_av_final("capture_exit");
                 sr_compat_report();
+                (void)sr_videorec_finish_status("SR_FBDUMP capture exit", capture_exit_status);
                 sr_perf_shutdown();
                 SR_VERIFY_REPORT_NOW();
                 _Exit(capture_exit_status);
@@ -824,9 +829,10 @@ static uint32_t h_DisplayWaitVblankStart(CpuState *s) {
  * vertical periods, then returns at the following VBLANK start. The CB form
  * also services the caller's callbacks in each period. */
 static uint32_t display_wait_vblank_start_periods(uint32_t periods, int callbacks) {
-    if (periods == 0u) {
+    if ((int32_t)periods <= 0) {
         /* The waits-matrix transcription records INVALID_VALUE (0x800001fe)
-         * for an invalid count before the blocking-context result. */
+         * for an invalid count before the blocking-context result; pspautotests
+         * tests/display/vblankmulti.expected adds -1 and 0x80000000: the count is a signed int. */
         return 0x800001feu;
     }
     if (!sched_wait_permitted()) return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
@@ -916,8 +922,7 @@ static uint32_t h_DisplayIsForeground(CpuState *s) {
  * 60000/1001 rational the scheduler uses for its display phase, evaluated as
  * float == 0x426fc29f bits (59.9400599f, PSP-3001/6.61-ARK measured anchor).
  * The previous h_ok registration returned 0 in $v0 but left $f0 stale, so a
- * guest reading the float received poisoned state (issue #80 display-clock
- * campaign). */
+ * guest reading the float received poisoned state (issue #80). */
 static uint32_t h_DisplayGetFramePerSec(CpuState *s) {
     (void)s;
     s->f[0] = 60000.0f / 1001.0f;
@@ -942,6 +947,10 @@ void sr_vblank_tick(void) {
         psmf_av_video_presented(s_display_active.addr, s_display_active.stride, s_display_active.fmt);
         display_present_active();
     }
+    if (g_ace_on) gui_ace_vblank(s_vcount);
+    /* SR_VIDEOREC_DIR (videorec.h): this VBLANK's video frame is the newest picture presented
+     * above, and the audio up to it is final. Host-side only; off, nothing is read. */
+    sr_videorec_vblank(s_vcount, sched_vtime_us());
     /* Periodic VCOUNT cadences are boundary crossings, not an exact modulus: a serviced
      * tick can step over a multiple or repeat one (see sr_vcount_window_crossed). */
     static uint32_t tick_log_window = 0;
@@ -964,6 +973,9 @@ void sr_vblank_tick(void) {
         sr_profile_dump();
     }
     ge_set_frame(s_vcount);
+    /* SR_REPLAY_CHECKPOINTS (replay_checkpoint.h): digests of the guest state at this VBLANK,
+     * before the controller sample is latched. Reads only; off, it returns at once. */
+    sr_replay_checkpoint_vblank(s_vcount);
 
     /* Issue #64: advance the state-qualified route before the controller sample is
      * latched, so a checkpoint observed on this vblank releases its press on this vblank
@@ -1029,6 +1041,7 @@ void sr_vblank_tick(void) {
               fprintf(stderr, "WATCHDOG: aborting after %u vblanks with no new frame (SR_WATCHDOG_EXIT=%d)\n", diff, wde);
               sr_flight_hang(diff, (uint32_t)wde);
               sr_compat_report();
+              (void)sr_videorec_finish_status("SR_WATCHDOG_EXIT", 1);
               sr_perf_shutdown();
               SR_VERIFY_REPORT_NOW();
               _Exit(1);
@@ -1096,6 +1109,8 @@ void sr_vblank_tick(void) {
             /* _Exit skips atexit, so the SR_AUDIODUMP file is closed here whether or not
              * SR_AUDIOSTAT is set; after the stats call above it is a no-op. */
             hle_exit_close_audio_dump();
+            /* The same for a video recording: its encoder is finished and the files muxed. */
+            (void)sr_videorec_finish_status("SR_EXIT_AT_VBLANK", 0);
             sr_dump_calls();
             fflush(stderr);
             fflush(stdout);
@@ -1109,6 +1124,8 @@ void sr_vblank_tick(void) {
             sr_perf_shutdown();
             SR_VERIFY_REPORT_NOW();
             hle_state_sample_close();
+            /* Ace Mode's exit stamp and report are an atexit hook too (a no-op when off). */
+            ace_finish();
             _Exit(0);
         }
     }
@@ -1130,11 +1147,17 @@ static uint32_t h_DisplayGetAccumulatedHcount(CpuState *s) {
     return sched_display_accumulated_hcount();
 }
 
-/* sceDisplaySetMode: the requested mode and size are logged and the call succeeds. The
- * runtime replays no title display-driver bring-up: a title initializes its own display
- * state through its own code (#363). */
+/* sceDisplaySetMode(mode, width, height). PSPAutotests tests/display/setmode.expected (recorded on a
+ * PSP): only mode 0 at 480x272 is accepted. Any other mode returns 0x80000107 (mode 1, 2, -1, and
+ * mode 1 at 720x480 or 720x503), and mode 0 at any other size returns 0x80000104 (0x0, 512x272,
+ * 960x544, 240x136); the accepted size is the one sceDisplayGetMode reports. The mode check wins
+ * when both are wrong (mode 1 at 720x480). The call does not wait for a vblank as the PSP does
+ * ("Vblank after set: 1"); the runtime replays no title display-driver bring-up: a title
+ * initializes its own display state through its own code (#363). */
 static uint32_t h_DisplaySetMode(CpuState *s) {
     uint32_t mode = s->r[4], width = s->r[5], height = s->r[6];
+    if (mode != 0u) return 0x80000107u;                  /* SCE_DISPLAY_ERROR_INVALID_MODE */
+    if (width != 480u || height != 272u) return 0x80000104u; /* SCE_DISPLAY_ERROR_INVALID_VALUE */
     fprintf(stderr, "DISPLAY_SET_MODE: mode=%u %ux%u (title %s)\n", mode, width, height,
             sr_title_config()->source_id);
     fflush(stderr);

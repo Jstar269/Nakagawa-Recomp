@@ -24,9 +24,9 @@
 > `VIEW_PREPARING` screen is still an honest unavailable state, reachable today
 > only as a captured view.
 
-## 1. Executive Vision: The Honest "Program + ISO" Contract
+## 1. Goal: the "Program + ISO" contract
 
-The ultimate productization goal of Nakagawa Recomp is to deliver a seamless, modern, zero-terminal gaming experience without sacrificing low-level emulation (LLE) correctness or provenance integrity:
+The player's goal is that a user goes from their own disc to a running game without a terminal, while keeping low-level emulation (LLE) correctness and provenance intact:
 
 ```text
 Download / Install Nakagawa Recomp
@@ -110,7 +110,7 @@ Not done yet:
 The diagram below is the target separation. The implemented public slice currently reaches
 title lookup, bounded ISO inspection and ISO/XB staging, library package build and
 validation, launch-session validation, and child-process lifecycle. The player decrypts
-a UMD disc's encrypted program files locally with built-in tables (#295); retail-disc hash
+a UMD disc's encrypted program files locally with built-in tables (#1494); retail-disc hash
 validation and overlay parity remain unbuilt.
 
 ```text
@@ -154,7 +154,7 @@ The flow below is the complete productization target, not a description of the c
 executable. Today the player opens a native SDL file picker, inspects a selected ISO, runs
 bounded ISO/XB staging for supported inputs, builds a runtime package from the library with
 live stage progress, and launches a validated package ([#487](https://github.com/Jstar269/nakagawa-recomp/pull/487)). The player decrypts the encrypted
-executable and modules of a UMD disc image you own, locally, when it checks the disc ([#295](https://github.com/Jstar269/nakagawa-recomp/issues/295)); retail-disc hash validation
+executable and modules of a UMD disc image you own, locally, when it checks the disc ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)); retail-disc hash validation
 and one-click play from an arbitrary ISO without the developer toolchain remain unbuilt
 ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)).
 
@@ -185,12 +185,12 @@ and one-click play from an arbitrary ISO without the developer toolchain remain 
      under those roots (for example `xbdata`) must be present, or the disc is
      refused with `[STAGE_DATA_FOLDER_MISSING]` before anything is promoted.
    - Native project-authored XB parsing validates FST spans, names, bounds, and nested LZS/Huffman payloads before writing members under the runtime-compatible `<archive>.xb.d/` directories.
-   - If present, named plain support PRXs that the user has already placed in a recognized local folder are copied into `EXTRACTED/decrypted/`. This staging step does not decrypt files; the disc check before it decrypts the encrypted `EBOOT.BIN` and modules that have no plain copy yet ([#295](https://github.com/Jstar269/nakagawa-recomp/issues/295)).
+   - If present, named plain support PRXs that the user has already placed in a recognized local folder are copied into `EXTRACTED/decrypted/`. This staging step does not decrypt files; the disc check before it decrypts the encrypted `EBOOT.BIN` and modules that have no plain copy yet ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)).
    - Atomic directory promotion occurs only after the worker completes; failed/cancelled staging is discarded.
    - The promoted root is registered with a persistent asset census and becomes
      the launch session's preferred `SR_DATAROOT`/`SR_MEMSTICK` source.
    - An encrypted `~PSP`/`~SCE` executable without a user-supplied `EBOOT.elf` stops as
-     `ENCRYPTED_EXECUTABLE` ([#295](https://github.com/Jstar269/nakagawa-recomp/issues/295)). Without a supported plain or decrypted
+     `ENCRYPTED_EXECUTABLE` ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)). Without a supported plain or decrypted
      executable, a missing recompiled child is reported instead of fabricated.
    - Every check classifies the disc's program input (`PlayerInputClass` in `src/player/player_state.h`): plain ELF,
      homebrew or project-made, user-supplied decrypted retail, encrypted retail still short of decrypted copies, or
@@ -265,14 +265,14 @@ The native player provides a dedicated Controller Settings screen (`VIEW_CONTROL
 - **Live Input Monitor**: A real-time visualizer panel displays active host button presses, numerical stick coordinates, and an interactive 2D deadzone box so users can immediately observe calibration effects.
 - **Safe Navigation & Defaults**: Keyboard Escape always backs out or cancels capture, preventing navigation lockouts. "RESET DEFAULTS" restores the baseline profile.
 - **Per-Title Mapping Choice**: the screen states which mapping it is editing, and a "USE GLOBAL MAPPING" / "USE THIS GAME MAPPING" control switches scope for the selected library disc ([#520](https://github.com/Jstar269/nakagawa-recomp/issues/520)). A disc's own mapping is seeded from the global one, so the first edit in that scope changes only what the user changed; choosing the global mapping again drops that disc's entry. The library card carries the same choice as a "MAPPING: GLOBAL" / "MAPPING: THIS GAME" button.
-- **Unified Atomic Persistence**: every change is saved as it is made: the whole profile document is written atomically (the global mapping plus the per-disc entries, profile schema 4) via a temporary file and rename to `<config>/input_profile.json`, shared with the runtime. An interrupted write leaves the previous file intact, and an invalid entry is refused before anything is written.
+- **Unified Atomic Persistence**: every change is saved as it is made: the whole profile document is written atomically (the global mapping plus the per-disc entries, profile schema 5) via a temporary file and rename to `<config>/input_profile.json`, shared with the runtime. An interrupted write leaves the previous file intact, and an invalid entry is refused before anything is written.
 - **Guided Stick & Trigger Calibration**: A multi-stage calibration wizard ("CALIBRATE STICK & TRIGGERS") guides the user through:
   1. *Resting state*: sampling resting analog stick and trigger axes for 1000 ms to establish neutral/center points.
   2. *Extremes state*: interactive live sampling where the user presses each trigger fully and rotates analog sticks in circles to capture maximum physical excursions.
   3. *Review & Accept*: visual summary of captured resting and extreme values with Accept or Cancel actions.
-  Values are stored in the unified `input_profile.json` (schema 4; schema 1 to 3 files still load) and applied during analog and trigger transform evaluations. Keyboard Escape or gamepad East button safely cancels at any point.
+  Values are stored in the unified `input_profile.json` (schema 5; schema 1 to 4 files still load) and applied during analog and trigger transform evaluations. Keyboard Escape or gamepad East button safely cancels at any point.
 - **In-game pause**: `Esc`, `F1` or the gamepad's `Guide` pauses a running game, and so does disconnecting its controller. The scheduler stops the guest ([issue #1171](https://github.com/Jstar269/nakagawa-recomp/issues/1171), the [Clocks section](ARCHITECTURE.md#clocks)); the window shows the last game frame under the scrim and holds all input, and a button held as the pause closes does not reach the game as a press. Focus loss and window minimization do not auto-pause in v0.0.1.
-- **Pause overlay** ([issue #1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159)): the runtime draws the pause menu (resume, settings, controls, quit to library) and the controller-disconnected dialog with nk_ui over the frozen frame (`src/rt/overlay/`, hosted by `src/rt/gui.c`). Game scaling and the performance HUD change for the rest of the run; the library's Settings keep what a game starts with. The controls page shows the mapping in force. Quitting is refused while the game is saving. The launcher passes the game's name, its disc ID and the player's folder (`SR_GAME_TITLE`, `SR_DISC_ID`, `SR_UI_ROOT`), where the runtime finds the UI fonts and SDL3_ttf; without them the pause shows the frozen frame alone.
+- **Pause overlay** ([issue #1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159)): the runtime draws the pause menu (resume, settings, controls, quit to library) and the controller-disconnected dialog with nk_ui over the frozen frame (`src/rt/overlay/`, hosted by `src/rt/gui.c`). Fullscreen, game scaling, frame pacing (PSP timing or no extra cap) and the performance HUD change for the rest of the run; the library's Settings keep what a game starts with. The controls page shows the mapping in force. Quitting is refused while the game is saving. The launcher passes the game's name, its disc ID and the player's folder (`SR_GAME_TITLE`, `SR_DISC_ID`, `SR_UI_ROOT`), where the runtime finds the UI fonts and SDL3_ttf; without them the pause shows the frozen frame alone.
 
 ---
 

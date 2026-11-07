@@ -23,7 +23,8 @@ import struct
 import re
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
+from typing import Any
 
 # The packaged Windows embeddable interpreter can omit this script's directory
 # from its fixed ``._pth`` search path. Restore it before importing local tools.
@@ -33,6 +34,7 @@ if _TOOLS_DIRECTORY not in sys.path:
 
 # Import the local analyzer
 import build_profile
+import code_capture
 from analyze import (
     analyze, Elf, in_ranges, exec_ranges, resolve_extra_spans, span_index,
     canonical_cfg_gate, canonical_cfg_json, canonical_cfg_report,
@@ -40,7 +42,7 @@ from analyze import (
     is_code_overlay, is_fixed_overlay, static_coverage, branch_kind, BRANCH_UNCOND,
     seeds_in_analysis, _gpr_writes,
 )
-from codegen_hst_stubs import HST_CUSTOM_STUBS, HST_GAME_LOOP_ADDR, HST_GAME_LOOP_WRAPPER
+from codegen_hst_stubs import HST_CUSTOM_STUBS
 from host_stubs import HST_SIMPLE_STUBS
 import codegen_llvm
 import compat_overrides
@@ -58,9 +60,9 @@ EMITTED_OWNERSHIP_SCHEMA_VERSION = 1
 class CodegenOptions:
     """The command-line switches that change the C a run emits.
 
-    ``main`` turns them on from the command line; the defaults reproduce the historical output
-    byte for byte.  The module holds one instance, ``OPTIONS``; emitters read it and tests set it
-    through ``options_scope``.  Each field comment is the contract of its switch.
+    ``_translate`` creates one instance for each invocation, turns options on from the command
+    line, and passes it to emitters. The defaults reproduce the historical output byte for byte.
+    Each field comment is the contract of its switch.
     """
 
     # LLE CPU mode (PR 2): when True, generated SYSCALL/BREAK raise guest
@@ -79,7 +81,7 @@ class CodegenOptions:
     # never off the seam return, because legitimate HLE errors are nonzero.
     lle_import_seam: bool = False
 
-    # Entry splitting (owner decision, 2026-10-29). A body normally owns every
+    # Entry splitting. A body normally owns every
     # instruction it reaches by a conditional branch, including another entry's code, so
     # each entry of a large branch-connected region translates its own copy of the region
     # (one title: 6,539 entries in a 1.33M-instruction region). A body whose walk would
@@ -132,25 +134,33 @@ class CodegenOptions:
     static_verify: bool = False
 
 
-OPTIONS = CodegenOptions()
-
 #: First address the PSP maps, the scratchpad; SR_PSP_UNMAPPED_END in src/rt/recomp.h.
 PSP_UNMAPPED_END = 0x00010000
 
 
 @contextlib.contextmanager
 def options_scope(**changes):
-    """Run with the named options changed, restoring every option on exit."""
-    saved = dataclasses.replace(OPTIONS)
+    """Create an isolated option object for in-process tests and helper callers."""
+    options = CodegenOptions()
     for field, value in changes.items():
-        if not hasattr(OPTIONS, field):
+        if not hasattr(options, field):
             raise AttributeError(f"unknown codegen option {field!r}")
-        setattr(OPTIONS, field, value)
-    try:
-        yield OPTIONS
-    finally:
-        for field in dataclasses.fields(saved):
-            setattr(OPTIONS, field.name, getattr(saved, field.name))
+        setattr(options, field, value)
+    yield options
+
+
+def _options_for_call(options=None, *, lle_cpu=None, lle_import_seam=None):
+    """Return an explicit option object, applying only legacy keyword overrides."""
+    if options is None:
+        options = CodegenOptions()
+    if not isinstance(options, CodegenOptions):
+        raise TypeError("options must be a CodegenOptions instance")
+    changes = {}
+    if lle_cpu is not None:
+        changes["lle_cpu"] = lle_cpu
+    if lle_import_seam is not None:
+        changes["lle_import_seam"] = lle_import_seam
+    return dataclasses.replace(options, **changes) if changes else options
 
 
 # The collector of one promoted line while it is translated (R and wr read it).
@@ -173,9 +183,15 @@ ENHANCEMENT_UPDATE_BOUNDARY: int | None = None
 ENHANCEMENT_DATA_PATCHES: list[tuple[str, bytes, bytes, str]] = []
 # Verified disc data files: (disc path, stock sha256, rewritten bytes, id).
 ENHANCEMENT_DATA_FILES: list[tuple[str, str, bytes, str]] = []
+# Sites that keep run-time state (stock_values, requires), numbered by the index their
+# rewrites carry: {"id", "pc", "float", "pairs", "requires"}.
+ENHANCEMENT_STORE_SITES: list[dict] = []
 # Callable entries whose body loads $sp (guest_owns_entry_sp): no exit restores their entry
 # $sp, so the stack census leaves them unwrapped, as it leaves resume bodies.
 GUEST_SP_ENTRIES: set[int] = set()
+# The $sp loads of the body emit_function is emitting that carry their run-time verdict
+# (_sp_load_check, #1935); delay_slot_lines reads it, so its many call sites stay as they are.
+_BODY_SP_CHECKS: set[int] = set()
 
 
 def _enhancement_rewrite(addr: int) -> dict | None:
@@ -188,8 +204,13 @@ def _enhancement_rewrite(addr: int) -> dict | None:
     site = ENHANCEMENT_SITES.get(addr)
     if site is None:
         return None
+    rewrite = site["rewrite"]
+    if not isinstance(rewrite, dict):
+        raise enhancement_package.EnhancementPackageError(
+            f"enhancement site at 0x{addr:08x} has a non-object rewrite"
+        )
     ENHANCEMENT_APPLIED.add(addr)
-    return site["rewrite"]
+    return rewrite
 
 
 def _refuse_argument_site_on_a_loop(entry: int) -> None:
@@ -215,25 +236,54 @@ def _enhancement_boundary(addr: int) -> bool:
 
 
 def _scaled_store_line(rw: dict, stock_line: str) -> str:
-    """A swc1 site that stores its FPR scaled: the store reads a scaled copy, and the
-    register is never written, so an access fault that leaves the statement early
-    (--lle-cpu) cannot leave it scaled."""
+    """A swc1 or sw site that stores its register scaled: the store reads a scaled copy, and
+    the register is never written, so an access fault that leaves the statement early
+    (--lle-cpu) cannot leave it scaled. With stock_values the copy comes from the site's
+    table, and a value outside it stops the run (nk_enh_store)."""
     r = rw["reg"]
-    stored = f"s->fi[{r}]"
+    stored = f"s->r[{r}]" if rw["kind"] == "scale_int_store" else f"s->fi[{r}]"
     stock = stock_line.strip()
     if stock.count(stored) != 1:
-        raise ValueError(f"scale_f_store: expected one read of {stored} in {stock!r}")
+        raise ValueError(f"{rw['kind']}: expected one read of {stored} in {stock!r}")
+    if "stock_values" in rw:
+        return (f"{{ uint32_t _nk_bits = nk_enh_store({rw['site_index']}u, {stored}); "
+                f"{stock.replace(stored, '_nk_bits')} }}")
     return (f"{{ float _nk_f = s->f[{r}] * {rw['factor']!r}f; uint32_t _nk_bits; "
             f"memcpy(&_nk_bits, &_nk_f, sizeof _nk_bits); "
             f"{stock.replace(stored, '_nk_bits')} }}")
 
 
-def _enhanced_line(rw: dict, stock_line: str, word_line: str | None) -> str:
+def _mapped_factor_stmt(mapping: str, cell: str, site_id: str, addr: int) -> str:
+    """Map a per-update factor just loaded into ``cell``. It is known only at run time:
+    inside (0, 1) it is mapped; outside it keeps its stock value, reported once per site.
+    Decay uses k / (1 + sqrt(1 - k)), equal to 1 - sqrt(1 - k) without its cancellation
+    for small k, in double and rounded once, as the lui path does; sqrtf is already exact."""
+    expr = {"decay": f"(float)((double){cell} / (1.0 + sqrt(1.0 - (double){cell})))",
+            "retention": f"sqrtf({cell})"}[mapping]
+    return (f"if ({cell} > 0.0f && {cell} < 1.0f) {{ {cell} = {expr}; }} "
+            f"else {{ static int nk_kept; "
+            f'nk_enhancement_factor_kept(&nk_kept, "{site_id}", 0x{addr:08x}u, {cell}); }}')
+
+
+def _enhanced_line(rw: dict, stock_line: str, word_line: str | None, site_id: str, addr: int) -> str:
     """Both forms of one rewritten site: the stock statement runs unless the
     experimental toggle is on at run time (nk_enhancement_on())."""
     kind = rw["kind"]
     if kind == "word":
+        if word_line is None:
+            raise ValueError("a word rewrite needs its emitted word line")
         enh = word_line
+    elif kind == "word_even":
+        # The doubled bound, then the counter's parity: an odd count reads as false.
+        if word_line is None:
+            raise ValueError("a word_even rewrite needs its emitted word line")
+        # Under slti a negative count is below the bound in stock and stays true here;
+        # under sltiu it is a large unsigned value, false in both forms.
+        odd = "(_nk_count & 1u)"
+        if (rw["word"] >> 26) == 0x0A:
+            odd = "(_nk_count & 1u) && (int32_t)_nk_count >= 0"
+        enh = (f"{{ uint32_t _nk_count = s->r[{rw['reg']}]; {word_line.strip()} "
+               f"if ({odd}) {{ s->r[{rw['rt']}] = 0u; }} }}")
     elif kind == "gate":
         enh = f"if (nk_enhancement_gate_30hz()) {{ {stock_line.strip()} }}"
     elif kind == "scale_int_reg":
@@ -242,7 +292,16 @@ def _enhanced_line(rw: dict, stock_line: str, word_line: str | None) -> str:
         enh = " ".join([stock_line.strip()] + [f"s->r[{r}] <<= 1;" for r in rw["regs"]])
     elif kind == "scale_f_reg":
         enh = f"{stock_line.strip()} s->f[{rw['reg']}] *= {rw['factor']!r}f;"
-    elif kind == "scale_f_store":
+    elif kind == "map_f_reg":
+        cell = f"s->f[{rw['reg']}]"
+        enh = f"{stock_line.strip()} {_mapped_factor_stmt(rw['map'], cell, site_id, addr)}"
+    elif kind == "scale_v_reg":
+        v = vreg_indices(rw["vreg"], 1)[0]
+        enh = f"{stock_line.strip()} s->v[{v}] *= {rw['factor']!r}f;"
+    elif kind == "map_v_reg":
+        v = vreg_indices(rw["vreg"], 1)[0]
+        enh = f"{stock_line.strip()} {_mapped_factor_stmt(rw['map'], f's->v[{v}]', site_id, addr)}"
+    elif kind in ("scale_f_store", "scale_int_store"):
         enh = _scaled_store_line(rw, stock_line)
     elif kind == "scale_f_addend":
         r = rw["reg"]
@@ -250,14 +309,19 @@ def _enhanced_line(rw: dict, stock_line: str, word_line: str | None) -> str:
                f"{stock_line.strip()} s->f[{r}] = _nk_keep; }}")
     else:
         raise ValueError(f"unknown enhancement rewrite kind {kind!r}")
+    if "requires" in rw:
+        # The rewrite waits until every required site has applied in this run.
+        enh = (f"if (nk_enh_ready({rw['site_index']}u)) {{ {enh.strip()} }} "
+               f"else {{ {stock_line.strip()} }}")
     return (f"    if (nk_enhancement_on()) {{ {enh.strip()} }}\n"
             f"    else {{ {stock_line.strip()} }}")
 
 
-def code_word_read(width, address):
+def code_word_read(width, address, options=None):
     """C read of a word of translated code. The body is reading its own instruction, which
     is not a guest data access, so it does not pass through the null-page guard."""
-    return f"sr_r{width}({address})" if OPTIONS.null_page_guard else f"MEM_R{width}({address})"
+    options = _options_for_call(options)
+    return f"sr_r{width}({address})" if options.null_page_guard else f"MEM_R{width}({address})"
 
 
 class RelocatedWord(int):
@@ -325,7 +389,7 @@ class AddressSpace:
                 return site
         return None
 
-    def instruction_word(self, addr, w):
+    def instruction_word(self, addr, w, options=None):
         """The word to emit for the instruction at ``addr``.
 
         A runtime module's relocated immediates and any image's variable-import
@@ -333,6 +397,7 @@ class AddressSpace:
         field the loader patches from the image. A relocation or reference the
         translation cannot express fails closed for the owning function.
         """
+        options = _options_for_call(options)
         if w is None:
             return w
         kind = self.patched.get(addr)
@@ -342,7 +407,7 @@ class AddressSpace:
             if (w >> 26) not in _RELOCATABLE_IMMEDIATE_OPS:
                 raise Unsupported(
                     f"variable-import {kind} reference on opcode 0x{w >> 26:02x} at 0x{addr:08x}")
-            return RelocatedWord(w, code_word_read(16, self.pc(addr)))
+            return RelocatedWord(w, code_word_read(16, self.pc(addr), options))
         if not self.runtime_module:
             return w
         site = self._site(addr)
@@ -354,7 +419,7 @@ class AddressSpace:
                 raise Unsupported(
                     f"{site.kind} relocation on opcode 0x{op:02x} at 0x{addr:08x}")
             # Little-endian: the immediate is the halfword at the word's address.
-            return RelocatedWord(w, code_word_read(16, self.pc(addr)))
+            return RelocatedWord(w, code_word_read(16, self.pc(addr), options))
         if site.kind == "jump26":
             if op not in (2, 3):
                 raise Unsupported(f"jump relocation on opcode 0x{op:02x} at 0x{addr:08x}")
@@ -400,7 +465,7 @@ def G(addr):
     return ADDRESS_SPACE.pc(addr)
 
 
-def enable_lle_import_seam():
+def enable_lle_import_seam(options):
     """Turn on the import seam and the PR 2 flow machinery it relies on.
 
     A seam stub that fails closed returns with flow metadata set; only
@@ -408,8 +473,8 @@ def enable_lle_import_seam():
     call and enables the runtime LLE lane. Without it an LLE miss would be
     ignored by the caller, so the seam implies --lle-cpu.
     """
-    OPTIONS.lle_import_seam = True
-    OPTIONS.lle_cpu = True
+    options.lle_import_seam = True
+    options.lle_cpu = True
 
 
 def is_eret(w):
@@ -417,7 +482,7 @@ def is_eret(w):
     return w == 0x42000018
 
 
-def import_stub_text(addr, lib, nid, lle_import_seam=False):
+def import_stub_text(addr, lib, nid, lle_import_seam=None, *, options=None):
     """Generated body for one import stub (spec section 4, PR 3).
 
     Default (False) emits the historical sr_syscall stub byte-for-byte.
@@ -426,8 +491,8 @@ def import_stub_text(addr, lib, nid, lle_import_seam=False):
     flow-propagation shape PR 2 emits for COP0/eret -- so an LLE miss
     never falls through as if the import had succeeded.
     """
-    if lle_import_seam is False:
-        lle_import_seam = OPTIONS.lle_import_seam
+    options = _options_for_call(options, lle_import_seam=lle_import_seam)
+    lle_import_seam = options.lle_import_seam
     symbol = ADDRESS_SPACE.symbol(addr)
     if lle_import_seam:
         return (f"void {symbol}(CpuState *s) {{  /* import: {lib} nid 0x{nid:08x} */\n"
@@ -632,8 +697,8 @@ def build_entry_catalog(analyzed, ranges, profile=None, elf=None):
                     f"OWNER DOES NOT COVER RESUME: declared owner "
                     f"0x{owner:08x} does not reach 0x{addr:08x}"
                 )
-            # Wiki doc 26 section 14: a shared tail reachable from owners with
-            # incompatible frame states cannot be given one host contract.
+            # A shared tail reachable from owners with incompatible frame states
+            # cannot be given one host contract.
             owners = entry_frame_balance.find_frame_owners(
                 elf, addr, ranges, callables
             )
@@ -920,15 +985,142 @@ def _enhancement_data_lines() -> list[str]:
     return out
 
 
+def _enhancement_store_lines() -> list[str]:
+    """The run-time half of store sites and ``requires``: one table row per site that keeps
+    state, the stock-value check of a store, and the gate of a dependent site."""
+    if not ENHANCEMENT_STORE_SITES:
+        return []
+    index = {row["id"]: i for i, row in enumerate(ENHANCEMENT_STORE_SITES)}
+    out = [
+        "/* Enhancement store sites. */",
+        "typedef struct {",
+        "    const char *id; uint32_t pc; int is_float;",
+        "    unsigned nstock; const uint32_t *stock; const uint32_t *scaled;",
+        "    unsigned nreq; const unsigned *req;",
+        "    uint32_t applied; int gated;",
+        "} NkEnhSite;",
+    ]
+    rows = []
+    for i, row in enumerate(ENHANCEMENT_STORE_SITES):
+        stock, scaled, req = "0", "0", "0"
+        if row["pairs"]:
+            stock, scaled = f"nk_enh_stock_{i}", f"nk_enh_scaled_{i}"
+            out.append(f"static const uint32_t {stock}[] = "
+                       f"{{{', '.join(f'0x{a:08x}u' for a, _b in row['pairs'])}}};")
+            out.append(f"static const uint32_t {scaled}[] = "
+                       f"{{{', '.join(f'0x{b:08x}u' for _a, b in row['pairs'])}}};")
+        if row["requires"]:
+            req = f"nk_enh_req_{i}"
+            out.append(f"static const unsigned {req}[] = "
+                       f"{{{', '.join(f'{index[name]}u' for name in row['requires'])}}};")
+        rows.append(f'    {{"{row["id"]}", 0x{row["pc"]:08x}u, {int(row["float"])}, {len(row["pairs"])}u, '
+                    f'{stock}, {scaled}, {len(row["requires"])}u, {req}, 0u, 0}},')
+    out += ["static NkEnhSite nk_enh_sites[] = {", *rows, "};"]
+    out += [
+        "static int nk_enh_stopped;",
+        "static void nk_enh_text(const NkEnhSite *e, uint32_t bits, char *out, size_t n) {",
+        "    if (e->is_float) { float f; memcpy(&f, &bits, sizeof f); snprintf(out, n, \"%.9g\", (double)f); }",
+        "    else snprintf(out, n, \"%d\", (int)(int32_t)bits);",
+        "}",
+        "uint32_t nk_enh_store(unsigned site, uint32_t bits) {",
+        "    NkEnhSite *e = &nk_enh_sites[site];",
+        "    char a[40], b[40];",
+        "    unsigned k;",
+        "    for (k = 0; k < e->nstock; k++) if (e->stock[k] == bits) break;",
+        "    if (k == e->nstock) {",
+        "        nk_enh_text(e, bits, a, sizeof a);",
+        '        fprintf(stderr, "ENHANCEMENT_DATA_MISMATCH: site %s at 0x%08x stores %s (0x%08x), '
+        "not one of the package's stock values; the run stops here\\n\", "
+        "e->id, (unsigned)e->pc, a, (unsigned)bits);",
+        "        nk_enh_stopped = 1;",
+        "        exit(1);",
+        "    }",
+        "    if (e->applied < 16u) {",
+        "        nk_enh_text(e, bits, a, sizeof a);",
+        "        nk_enh_text(e, e->scaled[k], b, sizeof b);",
+        '        fprintf(stderr, "ENHANCEMENT_DATA_APPLIED: site %s at 0x%08x: %s -> %s\\n", '
+        "e->id, (unsigned)e->pc, a, b);",
+        "    } else if (e->applied == 16u) {",
+        '        fprintf(stderr, "ENHANCEMENT_DATA_APPLIED: site %s: later applications are not logged\\n", e->id);',
+        "    }",
+        "    if (e->applied != 0xffffffffu) e->applied++;",
+        "    return e->scaled[k];",
+        "}",
+        "int nk_enh_ready(unsigned site) {",
+        "    NkEnhSite *e = &nk_enh_sites[site];",
+        "    unsigned k;",
+        "    for (k = 0; k < e->nreq; k++) {",
+        "        const NkEnhSite *r = &nk_enh_sites[e->req[k]];",
+        "        if (r->applied == 0u) {",
+        "            if (!e->gated) {",
+        "                e->gated = 1;",
+        '                fprintf(stderr, "ENHANCEMENT_SITE_GATED: site %s at 0x%08x runs stock: %s has not applied\\n", '
+        "e->id, (unsigned)e->pc, r->id);",
+        "            }",
+        "            return 0;",
+        "        }",
+        "    }",
+        "    return 1;",
+        "}",
+        "static void nk_enh_report_unreached(void) {",
+        "    static int reported;",
+        "    unsigned i;",
+        "    if (nk_enh_stopped || reported) return;",
+        "    reported = 1;",
+        "    for (i = 0; i < sizeof nk_enh_sites / sizeof nk_enh_sites[0]; i++) {",
+        "        const NkEnhSite *e = &nk_enh_sites[i];",
+        "        if (e->nstock > 0u && e->applied == 0u)",
+        '            fprintf(stderr, "ENHANCEMENT_DATA_SITE_NOT_REACHED: site %s at 0x%08x stored no value '
+        'in this run; whatever it should have rescaled stayed stock\\n", e->id, (unsigned)e->pc);',
+        "    }",
+        "}",
+        "/* With the toggle on, a store site that never runs is reported when the process ends:",
+        " * at an ordinary exit (atexit) and on the runtime's _Exit paths (sr_at_process_end). */",
+        "void sr_at_process_end(void (*report)(void));",
+        "void nk_enh_sites_start(void) {",
+        "    static int registered;",
+        "    if (nk_enhancement_on() && !registered) {",
+        "        registered = 1;",
+        "        (void)atexit(nk_enh_report_unreached);",
+        "        sr_at_process_end(nk_enh_report_unreached);",
+        "    }",
+        "}",
+        "/* End of enhancement store sites. */",
+        "",
+    ]
+    return out
+
+
+def _number_enhancement_store_sites() -> None:
+    """Number the resolved sites that keep run-time state; their rewrites carry the index."""
+    ENHANCEMENT_STORE_SITES.clear()
+    index: dict[str, int] = {}
+    for addr, site in sorted(ENHANCEMENT_SITES.items()):
+        rw = site["rewrite"]
+        if "stock_values" not in rw and "requires" not in rw:
+            continue
+        if site["id"] not in index:
+            index[site["id"]] = len(ENHANCEMENT_STORE_SITES)
+            ENHANCEMENT_STORE_SITES.append({
+                "id": site["id"], "pc": addr, "float": rw["kind"] == "scale_f_store",
+                "pairs": [tuple(pair) for pair in rw.get("stock_values", ())],
+                "requires": list(rw.get("requires", ())),
+            })
+            for note in enhancement_package.store_value_overlaps(site["id"], rw):
+                sys.stderr.write(f"warning: enhancement {note}\n")
+        rw["site_index"] = index[site["id"]]
+
+
 def write_funcs_header(path, emitted, resume_owners=None, runtime_modules=(), renames=None,
-                       enhancement=False):
+                       enhancement=False, options=None):
     """Write the shared generated declarations with the runtime ABI contract."""
+    options = _options_for_call(options)
     if resume_owners is None:
         resume_owners = {}
     renames = renames or {}
     with open(path, "w", encoding="ascii", newline="\n") as f:
         f.write("#ifndef RECOMP_FUNCS_H\n#define RECOMP_FUNCS_H\n")
-        if OPTIONS.null_page_guard:
+        if options.null_page_guard:
             f.write("#define SR_NULL_PAGE_GUARD 1\n")
         f.write('#include "recomp.h"\n\n')
         f.write("#ifndef SR_CPUSTATE_ABI_VERSION\n")
@@ -955,6 +1147,11 @@ def write_funcs_header(path, emitted, resume_owners=None, runtime_modules=(), re
             f.write("extern uint32_t nk_enhancement_updates;\n")
             f.write("static inline int nk_enhancement_gate_30hz(void) "
                     "{ return (nk_enhancement_updates & 1u) == 0u; }\n")
+            f.write("void nk_enhancement_factor_kept(int *reported, const char *site, uint32_t pc, "
+                    "float value);\n")
+            if ENHANCEMENT_STORE_SITES:
+                f.write("uint32_t nk_enh_store(unsigned site, uint32_t bits);\n")
+                f.write("int nk_enh_ready(unsigned site);\n")
         f.write("#endif\n")
 
 
@@ -1008,8 +1205,15 @@ def guest_sp_exits(elf, start, insns, labels):
     return _sp_exit_walk(elf, start, insns, labels)[0]
 
 
+def _loads_foreign_sp(w, regs, slots):
+    """True when ``w`` loads $sp from anything but the frame's own slot (_frame_step's test)."""
+    return (w is not None and w >> 26 == 0x23 and rt(w) == 29
+            and _OWN_SP not in _frame_step(w, {**regs, _OWN_SP: 0}, slots)[0])
+
+
 def _sp_exit_walk(elf, start, insns, labels):
-    """(the exits of a body that leave $sp as the guest set it, all of its exits).
+    """(the exits of a body that leave $sp as the guest set it, all of its exits, the
+    addresses of the $sp loads that made them the guest's).
 
     A callable body owes its caller the entry $sp, and its exits restore it (F3E). A load of
     $sp from memory is a longjmp or a context switch: it moves into the frame whose $sp it
@@ -1029,12 +1233,13 @@ def _sp_exit_walk(elf, start, insns, labels):
     entry $sp: registers, including copies of $sp, and memory in the frame. A call keeps the
     call-saved registers and the frame; a store through a register not known here is taken
     to miss the frame. An exit is the address of a transfer that leaves the body, or the
-    address outside the body it falls into.
+    address outside the body it falls into. Whether such a load really left the frame is
+    known only when it runs: emit_function checks each one there (_sp_load_check).
     """
     if not any((read32(elf, addr) or 0) >> 26 == 0x23 and rt(read32(elf, addr)) == 29
                for addr in insns):
-        return frozenset(), frozenset()
-    states, work, guest, exits = {}, [], set(), set()
+        return frozenset(), frozenset(), frozenset()
+    states, work, guest, exits, foreign = {}, [], set(), set(), set()
 
     def leave(addr, regs):
         exits.add(addr)
@@ -1062,9 +1267,13 @@ def _sp_exit_walk(elf, start, insns, labels):
         if w is None or is_eret(w):
             continue
         if not is_control(w):
+            if _loads_foreign_sp(w, regs, slots):
+                foreign.add(addr)
             reach(addr + 4, *_frame_step(w, regs, slots))
             continue
         slot = read32(elf, addr + 4)
+        if _loads_foreign_sp(slot, regs, slots):
+            foreign.add(addr + 4)
         after = _frame_step(slot, regs, slots) if slot is not None else (regs, slots)
         op, fn = w >> 26, w & 0x3F
         if op == 2:
@@ -1080,7 +1289,7 @@ def _sp_exit_walk(elf, start, insns, labels):
         else:
             reach(branch_target(addr, w), *after, exit_at=addr)
             reach(addr + 8, *((regs, slots) if is_likely(w) else after))
-    return frozenset(guest), frozenset(exits)
+    return frozenset(guest), frozenset(exits), frozenset(foreign)
 
 
 def guest_owns_entry_sp(elf, start, insns, labels):
@@ -1101,22 +1310,47 @@ def emit_host_return(resumable, comment=None, stack_census=False):
     return "s->r[29] = _sp_entry; return;"
 
 
-def emit_tail_transfer(target_expr, fn_symbol, resumable, stack_census=False, comment=None):
+def emit_tail_transfer(target_expr, fn_symbol, resumable, stack_census=False, comment=None,
+                       sp_kept=False):
     """A guest TAIL transfer (#855): record it and leave; the invoker drains it.
 
     The transfer never nests a native call, so a guest loop of tail transfers runs in
     constant host stack. A callable body still owes its entry-SP restore; it travels with
     the transfer and the drain applies it once the chain completes, exactly where the
     nested native return used to apply it. A resume body owes none, and under the stack
-    census the wrapper restores after its own drain. ``fn_symbol`` keeps a known target's
+    census the wrapper restores after its own drain. ``sp_kept`` is an exit of a body that
+    loads $sp: it owes the restore only while every $sp load it ran stayed in its frame
+    (``_sp_kept``, _sp_load_check). ``fn_symbol`` keeps a known target's
     direct call (no dispatcher entry); ``None`` keeps a computed or unknown target's
     dispatch, which also keeps that path's timeslice tick and guards.
     """
     fn = fn_symbol if fn_symbol else "NULL"
     suffix = f" /* {comment} */" if comment else ""
+    if sp_kept and not stack_census:
+        return f"sr_tail_record(s, {target_expr}, {fn}, _sp_entry, _sp_kept); return;{suffix}"
     if resumable or stack_census:
         return f"sr_tail_record(s, {target_expr}, {fn}, 0u, 0u); return;{suffix}"
     return f"sr_tail_record(s, {target_expr}, {fn}, _sp_entry, 1u); return;{suffix}"
+
+
+def _sp_load_check(line, indent="    "):
+    """``line``, a $sp load the frame walk does not own, and the run-time verdict on it (#1935).
+
+    As the interpreter decides it (sp_load_leaves_frame): a load that leaves $sp between
+    where it was and the body's entry $sp frees only the body's own space, an alloca free.
+    Any other one moves to another frame, a longjmp or a context switch, and the body's
+    tail transfers then owe no restore.
+    """
+    return (f"{indent}{{ uint32_t _sp_load = s->r[29];\n{line}\n"
+            f"{indent}  if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = 0u; }}")
+
+
+def _is_tail_exit(elf, addr, insns, continuations):
+    """True when the body leaves through ``addr``, an exit of _sp_exit_walk, by a TAIL record."""
+    if addr not in insns:
+        return addr in set(continuations.values())
+    w = read32(elf, addr)
+    return w is not None and not (w >> 26 == 0 and w & 0x3F == 0x08 and rs(w) == 31)
 
 
 def emit_code_pointer_check(target_expr, transfer_pc):
@@ -1138,12 +1372,13 @@ def emit_body_call(symbol):
     return f"{symbol}(s); {BODY_CALL_DRAIN}"
 
 
-def emit_decoded_jump_target(addr):
+def emit_decoded_jump_target(addr, options=None):
     """C expression for the target of the j/jal at ``addr``, decoded from the word in guest
     memory when the transfer runs: the delay slot's 256 MiB segment and the word's 26-bit
     index (AddressSpace.unrelocated_jump)."""
+    options = _options_for_call(options)
     return (f"((({G(addr)} + 4u) & 0xF0000000u) | "
-            f"(({code_word_read(32, G(addr))} & 0x03FFFFFFu) << 2))")
+            f"(({code_word_read(32, G(addr), options)} & 0x03FFFFFFu) << 2))")
 
 
 def emit_checked_body_call(symbol, call_pc):
@@ -1154,6 +1389,15 @@ def emit_checked_body_call(symbol, call_pc):
         f"{emit_body_call(symbol)} "
         "if (sr_aot_return_boundary_end(s)) return;"
     )
+
+
+def emit_checked_dispatch_call(target_expr, resume_expr):
+    """A guest CALL with no direct body, inside its own return boundary (#1935).
+
+    dispatch_call_checked returns 1 when the call returned elsewhere and the frames
+    between were abandoned, as emit_checked_body_call's end check does.
+    """
+    return f"if (dispatch_call_checked(s, {target_expr}, {resume_expr})) return;"
 
 
 def emit_host_stack_check(entry_expr):
@@ -1272,26 +1516,28 @@ def wr(i, expr):
     return f"s->r[{i}] = {expr};"
 
 
-def _nanf(pc, op, fd, out, ins):
+def _nanf(pc, op, fd, out, ins, options=None):
     """SR_NAN_TRAP check for one scalar FPU result. Empty unless --nan-trap.
 
     `ins` are the C expressions holding the operands the instruction consumed;
     the codegen samples them into locals before the store, so a destination that
     aliases a source still reports what was actually read.
     """
-    if not OPTIONS.nan_trap:
+    options = _options_for_call(options)
+    if not options.nan_trap:
         return ""
     return (f' SR_NAN_TRAP_F({G(pc)},"{op}",{fd}u,{out},'
             f'{",".join(ins)});')
 
 
-def _nanv(pc, op, vd, out, nout, a, na, b=None, nb=0):
+def _nanv(pc, op, vd, out, nout, a, na, b=None, nb=0, options=None):
     """SR_NAN_TRAP check for one VFPU lane result. Empty unless --nan-trap.
 
     `a`/`na` and `b`/`nb` are the source lane arrays; omitting `b` reports a
     one-source-vector form.
     """
-    if not OPTIONS.nan_trap:
+    options = _options_for_call(options)
+    if not options.nan_trap:
         return ""
     if b is None:
         # One source vector: the 7-argument form. SR_NAN_TRAP_V2 takes 9, and
@@ -1303,7 +1549,7 @@ def _nanv(pc, op, vd, out, nout, a, na, b=None, nb=0):
             f'{a},{na},{b},{nb});')
 
 
-def _nan_matrix(pc, op, vd, out_exprs, in_exprs, in_exprs2=()):
+def _nan_matrix(pc, op, vd, out_exprs, in_exprs, in_exprs2=(), options=None):
     """SR_NAN_TRAP check for a form whose operands are scattered v[] elements.
 
     The matrix forms (vmmul, vtfm) read and write raw physical registers instead
@@ -1313,19 +1559,21 @@ def _nan_matrix(pc, op, vd, out_exprs, in_exprs, in_exprs2=()):
     every consumed lane instead of the matrix alone. Only emitted under
     --nan-trap.
     """
-    if not OPTIONS.nan_trap:
+    options = _options_for_call(options)
+    if not options.nan_trap:
         return ""
     outs = " ".join(f"_ntout[{i}]={expr};" for i, expr in enumerate(out_exprs))
     ins = " ".join(f"_ntin[{i}]={expr};" for i, expr in enumerate(in_exprs))
     if not in_exprs2:
         return (f"{{ float _ntin[{len(in_exprs)}], _ntout[{len(out_exprs)}]; {ins} {outs} "
-                + _nanm(pc, op, vd, "_ntout", "_ntin", len(out_exprs), len(in_exprs))
+                + _nanm(pc, op, vd, "_ntout", "_ntin", len(out_exprs), len(in_exprs),
+                        options=options)
                 + "}")
     ins2 = " ".join(f"_ntin2[{i}]={expr};" for i, expr in enumerate(in_exprs2))
     return (f"{{ float _ntin[{len(in_exprs)}], _ntout[{len(out_exprs)}],"
             f" _ntin2[{len(in_exprs2)}]; {ins} {ins2} {outs} "
             + _nanm(pc, op, vd, "_ntout", "_ntin", len(out_exprs), len(in_exprs),
-                    "_ntin2", len(in_exprs2))
+                    "_ntin2", len(in_exprs2), options=options)
             + "}")
 
 
@@ -1339,7 +1587,7 @@ _BINOP_NAME = {(0x18, 0): "vadd.s", (0x18, 1): "vsub.s", (0x18, 7): "vdiv.s",
                (0x19, 0): "vmul.s"}
 
 
-def _nanm(pc, op, vd, outs, ins, nout, nin, ins2=None, nin2=0):
+def _nanm(pc, op, vd, outs, ins, nout, nin, ins2=None, nin2=0, options=None):
     """SR_NAN_TRAP check for a form whose operands are scattered v[] elements.
 
     The matrix forms (vmmul, vtfm) read and write raw physical registers instead
@@ -1347,7 +1595,8 @@ def _nanm(pc, op, vd, outs, ins, nout, nin, ins2=None, nin2=0):
     operand group (vtfm's vector) is passed as its own pair. Only emitted under
     --nan-trap.
     """
-    if not OPTIONS.nan_trap:
+    options = _options_for_call(options)
+    if not options.nan_trap:
         return ""
     if ins2 is None:
         return f' SR_NAN_TRAP_V({G(pc)},"{op}",{vd}u,{outs},{nout},{ins},{nin});'
@@ -1526,159 +1775,316 @@ def _ll_sc_stmt(addr, w, op, lle_cpu, delay_branch_pc):
             f"sr_end(s, _ea, _sc ? 4 : 0); }}"), SELF_TRACED, 0
 
 
-def effect(addr, w, lle_cpu=False, delay_branch_pc=None):
-    op = w >> 26
-    if op == 0x10:  # COP0 (spec 3.4)
-        cop_rs = (w >> 21) & 0x1F
-        cop_rt = (w >> 16) & 0x1F
-        cop_rd = (w >> 11) & 0x1F
-        sel = w & 0x7
-        if is_eret(w):
-            return f"(void)sr_cpu_eret(s, {G(addr)}); sr_end(s, 0u, 0); return;", None, 0  # eret
-        if cop_rs in (0x00, 0x04):
-            # MFC0/MTC0 carry the select in bits 2:0; bits 10:3 are defined
-            # zero. A nonzero reserved field is not a move (fail closed).
-            if (w & 0x000007F8) != 0:
-                raise Unsupported(f"COP0 reserved bits set at 0x{addr:08x}")
-            if cop_rs == 0x00:
-                return (f"s->in_delay_slot = 0u; if (sr_cp0_mfc0(s, {cop_rt}u, {cop_rd}u, {sel}u, {G(addr)}) < 0) "
-                        f"{{ sr_end(s, 0u, 0); return; }}"), None, 0  # mfc0
-            return (f"s->in_delay_slot = 0u; if (sr_cp0_mtc0(s, {cop_rt}u, {cop_rd}u, {sel}u, {G(addr)}) < 0) "
-                    f"{{ sr_end(s, 0u, 0); return; }}"), None, 0  # mtc0
+def _effect_cop0(addr, w, options, delay_branch_pc):
+    if is_eret(w):
+        return f"(void)sr_cpu_eret(s, {G(addr)}); sr_end(s, 0u, 0); return;", None, 0
+    cop_rs, cop_rt, cop_rd, sel = (w >> 21) & 0x1F, (w >> 16) & 0x1F, (w >> 11) & 0x1F, w & 7
+    handler = _COP0_MOVE_FORMS.get(cop_rs)
+    if handler is None:
         raise Unsupported(f"COP0 rs 0x{cop_rs:02x} at 0x{addr:08x}")
-    if op == 0:
-        fn = funct(w)
-        a, b, d, sh = rs(w), rt(w), rd(w), sa(w)
-        if fn == 0x00: return wr(d, f"({R(b)} << {sh})"), None, 0           # sll
-        if fn == 0x02:
-            # Allegrex: rs=1 makes SRL the rotate ROTR; any other rs value is reserved.
-            rs_field = rs(w)
-            if rs_field == 1:
-                if sh == 0: return wr(d, R(b)), None, 0                     # rotr by 0
-                return wr(d, f"(({R(b)} >> {sh}) | ({R(b)} << {32 - sh}))"), None, 0  # rotr
-            if rs_field != 0: raise Unsupported(f"SRL reserved rs field {rs_field} at 0x{addr:08x}")
-            return wr(d, f"({R(b)} >> {sh})"), None, 0                      # srl
-        if fn == 0x03: return wr(d, f"((uint32_t)((int32_t){R(b)} >> {sh}))"), None, 0  # sra
-        if fn == 0x04: return wr(d, f"({R(b)} << ({R(a)} & 31))"), None, 0  # sllv
-        if fn == 0x06:
-            # Allegrex: sa=1 makes SRLV the rotate ROTRV; any other sa value is reserved.
-            if sh == 1:
-                return wr(d, f"(({R(b)} >> ({R(a)} & 31)) | ({R(b)} << ((32u - ({R(a)} & 31)) & 31)))"), None, 0  # rotrv
-            if sh != 0: raise Unsupported(f"SRLV reserved sa field {sh} at 0x{addr:08x}")
-            return wr(d, f"({R(b)} >> ({R(a)} & 31))"), None, 0             # srlv
-        if fn == 0x07: return wr(d, f"((uint32_t)((int32_t){R(b)} >> ({R(a)} & 31)))"), None, 0  # srav
-        if fn == 0x0A: return f"if ({R(b)} == 0) {wr(d, R(a))}", None, 0    # movz
-        if fn == 0x0B: return f"if ({R(b)} != 0) {wr(d, R(a))}", None, 0    # movn
-        if fn == 0x0C:
-            code = (w >> 6) & 0xFFFFF
-            if lle_cpu:
-                return (f"if (sr_cpu_raise_exception(s, 8u, {G(addr)}, {G(addr)}, 0u, 0u, 0u) < 0) "
-                        f"{{ sr_end(s, 0u, 0); return; }} sr_end(s, 0u, 0); return;"), None, 0  # syscall (LLE)
-            return f"sr_raw_syscall(s, {code}u, {G(addr)}); return;", None, 0        # syscall
-        if fn == 0x0D:
-            code = (w >> 6) & 0xFFFFF
-            if lle_cpu:
-                return (f"if (sr_cpu_raise_exception(s, 9u, {G(addr)}, {G(addr)}, 0u, 0u, 0u) < 0) "
-                        f"{{ sr_end(s, 0u, 0); return; }} sr_end(s, 0u, 0); return;"), None, 0  # break (LLE)
-            return f"sr_break(s, {code}u, {G(addr)});", None, 0
-        if fn == 0x10: return wr(d, "s->hi"), None, 0                       # mfhi
-        if fn == 0x11: return f"s->hi = {R(a)};", None, 0                   # mthi
-        if fn == 0x12: return wr(d, "s->lo"), None, 0                       # mflo
-        if fn == 0x13: return f"s->lo = {R(a)};", None, 0                   # mtlo
-        if fn == 0x16: return wr(d, f"({R(a)} == 0 ? 32u : (uint32_t)__builtin_clz({R(a)}))"), None, 0  # clz
-        if fn == 0x17: return wr(d, f"({R(a)} == 0xFFFFFFFFu ? 32u : (uint32_t)__builtin_clz(~{R(a)}))"), None, 0  # clo
-        if fn == 0x18: return f"{{ int64_t _p = (int64_t)(int32_t){R(a)} * (int64_t)(int32_t){R(b)}; s->lo = (uint32_t)_p; s->hi = (uint32_t)(_p >> 32); }}", None, 0  # mult
-        if fn == 0x19: return f"{{ uint64_t _p = (uint64_t){R(a)} * (uint64_t){R(b)}; s->lo = (uint32_t)_p; s->hi = (uint32_t)(_p >> 32); }}", None, 0  # multu
-        if fn == 0x1A: return ("{ int32_t _a=(int32_t)%s, _b=(int32_t)%s; if (_a==(int32_t)0x80000000 && _b==-1){s->lo=0x80000000u;s->hi=0xFFFFFFFFu;} "
-                               "else if (_b!=0){s->lo=(uint32_t)(_a/_b);s->hi=(uint32_t)(_a%%_b);} else {s->lo=_a<0?1u:0xFFFFFFFFu;s->hi=(uint32_t)_a;} }") % (R(a), R(b)), None, 0  # div
-        if fn == 0x1B: return ("{ uint32_t _a=%s,_b=%s; if(_b!=0){s->lo=_a/_b;s->hi=_a%%_b;} else {s->lo=_a<=0xFFFFu?0xFFFFu:0xFFFFFFFFu;s->hi=_a;} }") % (R(a), R(b)), None, 0  # divu
-        # Allegrex multiply-accumulate: these are in the normal SPECIAL table (opcode 0),
-        # NOT in generic MIPS32 SPECIAL2 (opcode 0x1C). Verified against PPSSPP MIPSTables.cpp
-        # and the private HST ELF (0x0062001C at 0x00026BAC etc.).
-        if fn == 0x1C: return f"{{ uint64_t _acc=((uint64_t)s->hi<<32)|s->lo; uint64_t _prod=(uint64_t)((int64_t)(int32_t){R(a)}*(int64_t)(int32_t){R(b)}); _acc+=_prod; s->lo=(uint32_t)_acc; s->hi=(uint32_t)(_acc>>32);}}", None, 0  # madd
-        if fn == 0x1D: return f"{{ uint64_t _acc=((uint64_t)s->hi<<32)|s->lo; _acc+=(uint64_t){R(a)}*(uint64_t){R(b)}; s->lo=(uint32_t)_acc; s->hi=(uint32_t)(_acc>>32);}}", None, 0  # maddu
-        if fn == 0x20 or fn == 0x21: return wr(d, f"({R(a)} + {R(b)})"), None, 0  # add/addu
-        if fn == 0x22 or fn == 0x23: return wr(d, f"({R(a)} - {R(b)})"), None, 0  # sub/subu
-        if fn == 0x24: return wr(d, f"({R(a)} & {R(b)})"), None, 0          # and
-        if fn == 0x25: return wr(d, f"({R(a)} | {R(b)})"), None, 0          # or
-        if fn == 0x26: return wr(d, f"({R(a)} ^ {R(b)})"), None, 0          # xor
-        if fn == 0x27: return wr(d, f"(~({R(a)} | {R(b)}))"), None, 0       # nor
-        if fn == 0x2A: return wr(d, f"((int32_t){R(a)} < (int32_t){R(b)} ? 1u : 0u)"), None, 0  # slt
-        if fn == 0x2B: return wr(d, f"({R(a)} < {R(b)} ? 1u : 0u)"), None, 0  # sltu
-        if fn == 0x2C: return wr(d, f"({{int32_t _x=(int32_t){R(a)},_y=(int32_t){R(b)}; (uint32_t)(_x>_y?_x:_y);}})"), None, 0  # max
-        if fn == 0x2D: return wr(d, f"({{int32_t _x=(int32_t){R(a)},_y=(int32_t){R(b)}; (uint32_t)(_x<_y?_x:_y);}})"), None, 0  # min
-        if fn == 0x2E: return f"{{ uint64_t _acc=((uint64_t)s->hi<<32)|s->lo; uint64_t _prod=(uint64_t)((int64_t)(int32_t){R(a)}*(int64_t)(int32_t){R(b)}); _acc-=_prod; s->lo=(uint32_t)_acc; s->hi=(uint32_t)(_acc>>32);}}", None, 0  # msub
-        if fn == 0x2F: return f"{{ uint64_t _acc=((uint64_t)s->hi<<32)|s->lo; _acc-=(uint64_t){R(a)}*(uint64_t){R(b)}; s->lo=(uint32_t)_acc; s->hi=(uint32_t)(_acc>>32);}}", None, 0  # msubu
-        if fn == 0x0F:  # sync, stype 0 (full barrier). This runtime is single-hart and
-            # sequentially consistent, so the barrier orders nothing: no effect. Only the
-            # all-zero form is accepted; rs/rt/rd and nonzero stype stay fail-closed until measured.
-            if (w & 0x03FFFFC0) != 0:
-                raise Unsupported(f"SYNC with reserved or nonzero-stype bits at 0x{addr:08x}")
-            return "(void)0;", None, 0
+    if (w & 0x000007F8) != 0:
+        raise Unsupported(f"COP0 reserved bits set at 0x{addr:08x}")
+    return handler(addr, cop_rt, cop_rd, sel)
+
+
+def _effect_cop0_mfc0(addr, cop_rt, cop_rd, sel):
+    return (f"s->in_delay_slot = 0u; if (sr_cp0_mfc0(s, {cop_rt}u, {cop_rd}u, {sel}u, {G(addr)}) < 0) "
+            f"{{ sr_end(s, 0u, 0); return; }}"), None, 0
+
+
+def _effect_cop0_mtc0(addr, cop_rt, cop_rd, sel):
+    return (f"s->in_delay_slot = 0u; if (sr_cp0_mtc0(s, {cop_rt}u, {cop_rd}u, {sel}u, {G(addr)}) < 0) "
+            f"{{ sr_end(s, 0u, 0); return; }}"), None, 0
+
+
+_COP0_MOVE_FORMS = {0x00: _effect_cop0_mfc0, 0x04: _effect_cop0_mtc0}
+
+
+def _effect_srl_rotr(addr, w, options, delay_branch_pc):
+    rs_field = rs(w)
+    b, d, sh = rt(w), rd(w), sa(w)
+    if rs_field == 1:
+        if sh == 0:
+            return wr(d, R(b)), None, 0
+        return wr(d, f"(({R(b)} >> {sh}) | ({R(b)} << {32 - sh}))"), None, 0
+    if rs_field != 0:
+        raise Unsupported(f"SRL reserved rs field {rs_field} at 0x{addr:08x}")
+    return wr(d, f"({R(b)} >> {sh})"), None, 0
+
+
+def _effect_srlv_rotrv(addr, w, options, delay_branch_pc):
+    a, b, d, sh = rs(w), rt(w), rd(w), sa(w)
+    if sh == 1:
+        return wr(d, f"(({R(b)} >> ({R(a)} & 31)) | ({R(b)} << ((32u - ({R(a)} & 31)) & 31)))"), None, 0
+    if sh != 0:
+        raise Unsupported(f"SRLV reserved sa field {sh} at 0x{addr:08x}")
+    return wr(d, f"({R(b)} >> ({R(a)} & 31))"), None, 0
+
+
+def _effect_syscall(addr, w, options, delay_branch_pc):
+    code = (w >> 6) & 0xFFFFF
+    if options.lle_cpu:
+        return (f"if (sr_cpu_raise_exception(s, 8u, {G(addr)}, {G(addr)}, 0u, 0u, 0u) < 0) "
+                f"{{ sr_end(s, 0u, 0); return; }} sr_end(s, 0u, 0); return;"), None, 0
+    return f"sr_raw_syscall(s, {code}u, {G(addr)}); return;", None, 0
+
+
+def _effect_break(addr, w, options, delay_branch_pc):
+    code = (w >> 6) & 0xFFFFF
+    if options.lle_cpu:
+        return (f"if (sr_cpu_raise_exception(s, 9u, {G(addr)}, {G(addr)}, 0u, 0u, 0u) < 0) "
+                f"{{ sr_end(s, 0u, 0); return; }} sr_end(s, 0u, 0); return;"), None, 0
+    return f"sr_break(s, {code}u, {G(addr)});", None, 0
+
+
+def _effect_sync(addr, w, options, delay_branch_pc):
+    if (w & 0x03FFFFC0) != 0:
+        raise Unsupported(f"SYNC with reserved or nonzero-stype bits at 0x{addr:08x}")
+    return "(void)0;", None, 0
+
+
+def _effect_div(addr, w, options, delay_branch_pc):
+    a, b = rs(w), rt(w)
+    return ("{ int32_t _a=(int32_t)%s, _b=(int32_t)%s; if (_a==(int32_t)0x80000000 && _b==-1){s->lo=0x80000000u;s->hi=0xFFFFFFFFu;} "
+            "else if (_b!=0){s->lo=(uint32_t)(_a/_b);s->hi=(uint32_t)(_a%%_b);} else {s->lo=_a<0?1u:0xFFFFFFFFu;s->hi=(uint32_t)_a;} }") % (R(a), R(b)), None, 0
+
+
+def _effect_divu(addr, w, options, delay_branch_pc):
+    a, b = rs(w), rt(w)
+    return ("{ uint32_t _a=%s,_b=%s; if(_b!=0){s->lo=_a/_b;s->hi=_a%%_b;} else {s->lo=_a<=0xFFFFu?0xFFFFu:0xFFFFFFFFu;s->hi=_a;} }") % (R(a), R(b)), None, 0
+
+
+def _effect_special(addr, w, options, delay_branch_pc):
+    fn = funct(w)
+    handler = _SPECIAL_FORMS.get(fn)
+    if handler is None:
         raise Unsupported(f"SPECIAL funct 0x{fn:02x} at 0x{addr:08x}")
-    if op == 0x08 or op == 0x09: return wr(rt(w), f"({R(rs(w))} + {simm(w)})"), None, 0  # addi/addiu
-    if op == 0x0A: return wr(rt(w), f"((int32_t){R(rs(w))} < (int32_t){simm(w)} ? 1u : 0u)"), None, 0  # slti
-    if op == 0x0B: return wr(rt(w), f"({R(rs(w))} < {simm(w)} ? 1u : 0u)"), None, 0  # sltiu
-    if op == 0x0C: return wr(rt(w), f"({R(rs(w))} & {zimm(w)})"), None, 0  # andi
-    if op == 0x0D: return wr(rt(w), f"({R(rs(w))} | {zimm(w)})"), None, 0  # ori
-    if op == 0x0E: return wr(rt(w), f"({R(rs(w))} ^ {zimm(w)})"), None, 0  # xori
-    if op == 0x0F: return wr(rt(w), f"({zimm(w)} << 16)"), None, 0          # lui
-    if op == 0x1F:  # SPECIAL3
-        fn = funct(w)
-        if fn == 0x00:  # ext
-            pos, size = sa(w), ((w >> 11) & 0x1F) + 1
-            mask = 0xFFFFFFFF if size >= 32 else ((1 << size) - 1)
-            return wr(rt(w), f"(({R(rs(w))} >> {pos}) & 0x{mask:x}u)"), None, 0
-        if fn == 0x04:  # ins
-            pos, msb = sa(w), (w >> 11) & 0x1F
-            size = msb - pos + 1
-            if size <= 0:
-                # msb < lsb is UNPREDICTABLE (MIPS32 Release 2). Such a word is usually
-                # data the analyzer reached as code; the function becomes a fail-closed
-                # stub instead of the whole build stopping on a Python error.
-                raise Unsupported(f"INS with msb {msb} below lsb {pos} at 0x{addr:08x}")
-            mask = ((0xFFFFFFFF if size >= 32 else ((1 << size) - 1)) << pos) & 0xFFFFFFFF
-            return wr(rt(w), f"(({R(rt(w))} & ~0x{mask:x}u) | (({R(rs(w))} << {pos}) & 0x{mask:x}u))"), None, 0
-        if fn == 0x20:
-            sub = sa(w)
-            if sub == 0x02: return wr(rd(w), f"((({R(rt(w))} & 0x00FF00FFu) << 8) | (({R(rt(w))} >> 8) & 0x00FF00FFu))"), None, 0  # wsbh
-            if sub == 0x03: return wr(rd(w), f"((({R(rt(w))} & 0x000000FFu) << 24) | (({R(rt(w))} & 0x0000FF00u) << 8) | (({R(rt(w))} & 0x00FF0000u) >> 8) | (({R(rt(w))} & 0xFF000000u) >> 24))"), None, 0  # wsbw
-            if sub == 0x10: return wr(rd(w), f"((uint32_t)(int32_t)(int8_t){R(rt(w))})"), None, 0   # seb
-            if sub == 0x18: return wr(rd(w), f"((uint32_t)(int32_t)(int16_t){R(rt(w))})"), None, 0  # seh
-            if sub == 0x14: return wr(rd(w), f"sr_bitrev({R(rt(w))})"), None, 0                      # bitrev
+    return handler(addr, w, options, delay_branch_pc)
+
+
+# SPECIAL funct field -> one emitter for that instruction form.
+_SPECIAL_FORMS = {
+    0x00: lambda addr, w, options, branch: (wr(rd(w), f"({R(rt(w))} << {sa(w)})"), None, 0),  # sll
+    0x02: _effect_srl_rotr,  # srl / rotr
+    0x03: lambda addr, w, options, branch: (wr(rd(w), f"((uint32_t)((int32_t){R(rt(w))} >> {sa(w)}))"), None, 0),  # sra
+    0x04: lambda addr, w, options, branch: (wr(rd(w), f"({R(rt(w))} << ({R(rs(w))} & 31))"), None, 0),  # sllv
+    0x06: _effect_srlv_rotrv,  # srlv / rotrv
+    0x07: lambda addr, w, options, branch: (wr(rd(w), f"((uint32_t)((int32_t){R(rt(w))} >> ({R(rs(w))} & 31)))"), None, 0),  # srav
+    0x0A: lambda addr, w, options, branch: (f"if ({R(rt(w))} == 0) {wr(rd(w), R(rs(w)))}", None, 0),  # movz
+    0x0B: lambda addr, w, options, branch: (f"if ({R(rt(w))} != 0) {wr(rd(w), R(rs(w)))}", None, 0),  # movn
+    0x0C: _effect_syscall,
+    0x0D: _effect_break,
+    0x0F: _effect_sync,
+    0x10: lambda addr, w, options, branch: (wr(rd(w), "s->hi"), None, 0),  # mfhi
+    0x11: lambda addr, w, options, branch: (f"s->hi = {R(rs(w))};", None, 0),  # mthi
+    0x12: lambda addr, w, options, branch: (wr(rd(w), "s->lo"), None, 0),  # mflo
+    0x13: lambda addr, w, options, branch: (f"s->lo = {R(rs(w))};", None, 0),  # mtlo
+    0x16: lambda addr, w, options, branch: (wr(rd(w), f"({R(rs(w))} == 0 ? 32u : (uint32_t)__builtin_clz({R(rs(w))}))"), None, 0),  # clz
+    0x17: lambda addr, w, options, branch: (wr(rd(w), f"({R(rs(w))} == 0xFFFFFFFFu ? 32u : (uint32_t)__builtin_clz(~{R(rs(w))}))"), None, 0),  # clo
+    0x18: lambda addr, w, options, branch: (f"{{ int64_t _p = (int64_t)(int32_t){R(rs(w))} * (int64_t)(int32_t){R(rt(w))}; s->lo = (uint32_t)_p; s->hi = (uint32_t)(_p >> 32); }}", None, 0),  # mult
+    0x19: lambda addr, w, options, branch: (f"{{ uint64_t _p = (uint64_t){R(rs(w))} * (uint64_t){R(rt(w))}; s->lo = (uint32_t)_p; s->hi = (uint32_t)(_p >> 32); }}", None, 0),  # multu
+    0x1A: _effect_div,
+    0x1B: _effect_divu,
+    # Allegrex multiply-accumulate: these are in the normal SPECIAL table (opcode 0),
+    # NOT in generic MIPS32 SPECIAL2 (opcode 0x1C). Verified against PPSSPP MIPSTables.cpp
+    # and the private HST ELF (0x0062001C at 0x00026BAC etc.).
+    0x1C: lambda addr, w, options, branch: (f"{{ uint64_t _acc=((uint64_t)s->hi<<32)|s->lo; uint64_t _prod=(uint64_t)((int64_t)(int32_t){R(rs(w))}*(int64_t)(int32_t){R(rt(w))}); _acc+=_prod; s->lo=(uint32_t)_acc; s->hi=(uint32_t)(_acc>>32);}}", None, 0),  # madd
+    0x1D: lambda addr, w, options, branch: (f"{{ uint64_t _acc=((uint64_t)s->hi<<32)|s->lo; _acc+=(uint64_t){R(rs(w))}*(uint64_t){R(rt(w))}; s->lo=(uint32_t)_acc; s->hi=(uint32_t)(_acc>>32);}}", None, 0),  # maddu
+    0x20: lambda addr, w, options, branch: (wr(rd(w), f"({R(rs(w))} + {R(rt(w))})"), None, 0),  # add/addu
+    0x21: lambda addr, w, options, branch: (wr(rd(w), f"({R(rs(w))} + {R(rt(w))})"), None, 0),
+    0x22: lambda addr, w, options, branch: (wr(rd(w), f"({R(rs(w))} - {R(rt(w))})"), None, 0),  # sub/subu
+    0x23: lambda addr, w, options, branch: (wr(rd(w), f"({R(rs(w))} - {R(rt(w))})"), None, 0),
+    0x24: lambda addr, w, options, branch: (wr(rd(w), f"({R(rs(w))} & {R(rt(w))})"), None, 0),  # and
+    0x25: lambda addr, w, options, branch: (wr(rd(w), f"({R(rs(w))} | {R(rt(w))})"), None, 0),  # or
+    0x26: lambda addr, w, options, branch: (wr(rd(w), f"({R(rs(w))} ^ {R(rt(w))})"), None, 0),  # xor
+    0x27: lambda addr, w, options, branch: (wr(rd(w), f"(~({R(rs(w))} | {R(rt(w))}))"), None, 0),  # nor
+    0x2A: lambda addr, w, options, branch: (wr(rd(w), f"((int32_t){R(rs(w))} < (int32_t){R(rt(w))} ? 1u : 0u)"), None, 0),  # slt
+    0x2B: lambda addr, w, options, branch: (wr(rd(w), f"({R(rs(w))} < {R(rt(w))} ? 1u : 0u)"), None, 0),  # sltu
+    0x2C: lambda addr, w, options, branch: (wr(rd(w), f"({{int32_t _x=(int32_t){R(rs(w))},_y=(int32_t){R(rt(w))}; (uint32_t)(_x>_y?_x:_y);}})"), None, 0),  # max
+    0x2D: lambda addr, w, options, branch: (wr(rd(w), f"({{int32_t _x=(int32_t){R(rs(w))},_y=(int32_t){R(rt(w))}; (uint32_t)(_x<_y?_x:_y);}})"), None, 0),  # min
+    0x2E: lambda addr, w, options, branch: (f"{{ uint64_t _acc=((uint64_t)s->hi<<32)|s->lo; uint64_t _prod=(uint64_t)((int64_t)(int32_t){R(rs(w))}*(int64_t)(int32_t){R(rt(w))}); _acc-=_prod; s->lo=(uint32_t)_acc; s->hi=(uint32_t)(_acc>>32);}}", None, 0),  # msub
+    0x2F: lambda addr, w, options, branch: (f"{{ uint64_t _acc=((uint64_t)s->hi<<32)|s->lo; _acc-=(uint64_t){R(rs(w))}*(uint64_t){R(rt(w))}; s->lo=(uint32_t)_acc; s->hi=(uint32_t)(_acc>>32);}}", None, 0),  # msubu
+}
+
+
+def _effect_special3_ext(addr, w, options, delay_branch_pc):
+    pos, size = sa(w), ((w >> 11) & 0x1F) + 1
+    mask = 0xFFFFFFFF if size >= 32 else ((1 << size) - 1)
+    return wr(rt(w), f"(({R(rs(w))} >> {pos}) & 0x{mask:x}u)"), None, 0
+
+
+def _effect_special3_ins(addr, w, options, delay_branch_pc):
+    pos, msb = sa(w), (w >> 11) & 0x1F
+    size = msb - pos + 1
+    if size <= 0:
+        # msb < lsb is UNPREDICTABLE (MIPS32 Release 2). Such a word is usually data the
+        # analyzer reached as code; the function becomes a fail-closed stub.
+        raise Unsupported(f"INS with msb {msb} below lsb {pos} at 0x{addr:08x}")
+    mask = ((0xFFFFFFFF if size >= 32 else ((1 << size) - 1)) << pos) & 0xFFFFFFFF
+    return wr(rt(w), f"(({R(rt(w))} & ~0x{mask:x}u) | (({R(rs(w))} << {pos}) & 0x{mask:x}u))"), None, 0
+
+
+_SPECIAL3_SHUFFLE_FORMS = {
+    0x02: lambda w: wr(rd(w), f"((({R(rt(w))} & 0x00FF00FFu) << 8) | (({R(rt(w))} >> 8) & 0x00FF00FFu))"),  # wsbh
+    0x03: lambda w: wr(rd(w), f"((({R(rt(w))} & 0x000000FFu) << 24) | (({R(rt(w))} & 0x0000FF00u) << 8) | (({R(rt(w))} & 0x00FF0000u) >> 8) | (({R(rt(w))} & 0xFF000000u) >> 24))"),  # wsbw
+    0x10: lambda w: wr(rd(w), f"((uint32_t)(int32_t)(int8_t){R(rt(w))})"),  # seb
+    0x14: lambda w: wr(rd(w), f"sr_bitrev({R(rt(w))})"),  # bitrev
+    0x18: lambda w: wr(rd(w), f"((uint32_t)(int32_t)(int16_t){R(rt(w))})"),  # seh
+}
+
+
+def _effect_special3_shuffle(addr, w, options, delay_branch_pc):
+    handler = _SPECIAL3_SHUFFLE_FORMS.get(sa(w))
+    if handler is None:
+        raise Unsupported(f"SPECIAL3 funct 0x{funct(w):02x} at 0x{addr:08x}")
+    return handler(w), None, 0
+
+
+def _effect_special3(addr, w, options, delay_branch_pc):
+    fn = funct(w)
+    handler = _SPECIAL3_FORMS.get(fn)
+    if handler is None:
         raise Unsupported(f"SPECIAL3 funct 0x{fn:02x} at 0x{addr:08x}")
-    # Under the LLE gate every aligned load and store is address-checked first.
-    if lle_cpu and op in LLE_ACCESS:
+    return handler(addr, w, options, delay_branch_pc)
+
+
+_SPECIAL3_FORMS = {0x00: _effect_special3_ext, 0x04: _effect_special3_ins,
+                   0x20: _effect_special3_shuffle}
+
+
+def _effect_addi(addr, w, options, delay_branch_pc):
+    return wr(rt(w), f"({R(rs(w))} + {simm(w)})"), None, 0
+
+
+def _effect_slti(addr, w, options, delay_branch_pc):
+    return wr(rt(w), f"((int32_t){R(rs(w))} < (int32_t){simm(w)} ? 1u : 0u)"), None, 0
+
+
+def _effect_sltiu(addr, w, options, delay_branch_pc):
+    return wr(rt(w), f"({R(rs(w))} < {simm(w)} ? 1u : 0u)"), None, 0
+
+
+def _effect_andi(addr, w, options, delay_branch_pc):
+    return wr(rt(w), f"({R(rs(w))} & {zimm(w)})"), None, 0
+
+
+def _effect_ori(addr, w, options, delay_branch_pc):
+    return wr(rt(w), f"({R(rs(w))} | {zimm(w)})"), None, 0
+
+
+def _effect_xori(addr, w, options, delay_branch_pc):
+    return wr(rt(w), f"({R(rs(w))} ^ {zimm(w)})"), None, 0
+
+
+def _effect_lui(addr, w, options, delay_branch_pc):
+    return wr(rt(w), f"({zimm(w)} << 16)"), None, 0
+
+
+def _effect_load(addr, w, options, delay_branch_pc):
+    op, base, target = w >> 26, rs(w), rt(w)
+    address = f"{R(base)} + {simm(w)}"
+    access = _LOAD_EFFECT_FORMS[op]
+    return wr(target, access.format(address=address)), None, 0
+
+
+_LOAD_EFFECT_FORMS = {
+    0x20: "((uint32_t)(int32_t)(int8_t)MEM_R8({address}))",  # lb
+    0x21: "((uint32_t)(int32_t)(int16_t)MEM_R16({address}))",  # lh
+    0x23: "MEM_R32({address})",  # lw
+    0x24: "MEM_R8({address})",  # lbu
+    0x25: "MEM_R16({address})",  # lhu
+}
+
+
+def _effect_store(addr, w, options, delay_branch_pc):
+    op, base, target = w >> 26, rs(w), rt(w)
+    address = f"{R(base)} + {simm(w)}"
+    width = _STORE_WIDTHS[op]
+    if width == 1:
+        return f"MEM_W8_PC({address}, {R(target)}, {G(addr)});", f"({address})", width
+    if width == 2:
+        return f"MEM_W16_PC({address}, {R(target)}, {G(addr)});", f"({address})", width
+    return f"MEM_W32_PC({address}, {R(target)}, {G(addr)});", f"({address})", width
+
+
+_STORE_WIDTHS = {0x28: 1, 0x29: 2, 0x2B: 4}
+
+
+def _effect_unaligned_word(addr, w, options, delay_branch_pc):
+    op, base, target = w >> 26, rs(w), rt(w)
+    address = f"{R(base)} + {simm(w)}"
+    if op == 0x22:
+        return wr(target, f"sr_lwl({R(target)}, {address})"), None, 0
+    if op == 0x26:
+        return wr(target, f"sr_lwr({R(target)}, {address})"), None, 0
+    if op == 0x2A:
+        return f"sr_swl_pc({address}, {R(target)}, {G(addr)});", f"(({address}) & ~3u)", 4
+    return f"sr_swr_pc({address}, {R(target)}, {G(addr)});", f"(({address}) & ~3u)", 4
+
+
+def _effect_ll_sc(addr, w, options, delay_branch_pc):
+    return _ll_sc_stmt(addr, w, w >> 26, options.lle_cpu, delay_branch_pc)
+
+
+def _effect_lwc1(addr, w, options, delay_branch_pc):
+    return f"s->fi[{rt(w)}] = MEM_R32({R(rs(w))} + {simm(w)});", None, 0
+
+
+def _effect_swc1(addr, w, options, delay_branch_pc):
+    address = f"{R(rs(w))} + {simm(w)}"
+    return f"MEM_W32_PC({address}, s->fi[{rt(w)}], {G(addr)});", f"({address})", 4
+
+
+def _effect_fpu(addr, w, options, delay_branch_pc):
+    return fpu_effect(addr, w, options=options)
+
+
+def _effect_cache(addr, w, options, delay_branch_pc):
+    if options.stale_detect:
+        return f"sr_stale_note_cache_op((uint32_t)({R(rs(w))} + {simm(w)}));", None, 0
+    return "(void)0;", None, 0
+
+
+def _effect_vflush(addr, w, options, delay_branch_pc):
+    return f"if ((0x{w:08x}u & 0xFFFF0000u) != 0xFFFF0000u) {{ s->vfpuCtrl[0]=0xe4u; s->vfpuCtrl[1]=0xe4u; s->vfpuCtrl[2]=0u; }}", None, 0
+
+
+def _effect_vfpu(addr, w, options, delay_branch_pc):
+    # Resolve at call time: form_sweep and the VFPU coverage census wrap this public seam.
+    return vfpu_effect(addr, w, delay_branch_pc=delay_branch_pc, options=options)
+
+
+_EFFECT_OPCODE_FORMS = {
+    0x00: _effect_special,
+    0x08: _effect_addi, 0x09: _effect_addi,
+    0x0A: _effect_slti, 0x0B: _effect_sltiu, 0x0C: _effect_andi,
+    0x0D: _effect_ori, 0x0E: _effect_xori, 0x0F: _effect_lui,
+    0x10: _effect_cop0, 0x11: _effect_fpu, 0x1F: _effect_special3,
+    0x20: _effect_load, 0x21: _effect_load, 0x23: _effect_load,
+    0x24: _effect_load, 0x25: _effect_load,
+    0x28: _effect_store, 0x29: _effect_store, 0x2B: _effect_store,
+    0x22: _effect_unaligned_word, 0x26: _effect_unaligned_word,
+    0x2A: _effect_unaligned_word, 0x2E: _effect_unaligned_word,
+    0x30: _effect_ll_sc, 0x38: _effect_ll_sc,
+    0x31: _effect_lwc1, 0x39: _effect_swc1, 0x2F: _effect_cache,
+    0x3F: _effect_vflush,
+    0x35: _effect_vfpu, 0x36: _effect_vfpu, 0x3D: _effect_vfpu, 0x3E: _effect_vfpu,
+    0x32: _effect_vfpu, 0x3A: _effect_vfpu, 0x12: _effect_vfpu,
+    0x18: _effect_vfpu, 0x19: _effect_vfpu, 0x1B: _effect_vfpu,
+    0x37: _effect_vfpu, 0x34: _effect_vfpu, 0x3C: _effect_vfpu,
+}
+
+
+def effect(addr, w, lle_cpu=None, delay_branch_pc=None, *, options=None):
+    """Emit one non-control instruction through the opcode-form dispatch tables."""
+    options = _options_for_call(options, lle_cpu=lle_cpu)
+    op = w >> 26
+    if options.lle_cpu and op in LLE_ACCESS:
         return _lle_access_stmt(addr, w, op, delay_branch_pc)
-    # loads
-    if op == 0x20: return wr(rt(w), f"((uint32_t)(int32_t)(int8_t)MEM_R8({R(rs(w))} + {simm(w)}))"), None, 0   # lb
-    if op == 0x21: return wr(rt(w), f"((uint32_t)(int32_t)(int16_t)MEM_R16({R(rs(w))} + {simm(w)}))"), None, 0  # lh
-    if op == 0x23: return wr(rt(w), f"MEM_R32({R(rs(w))} + {simm(w)})"), None, 0   # lw
-    if op == 0x24: return wr(rt(w), f"MEM_R8({R(rs(w))} + {simm(w)})"), None, 0    # lbu
-    if op == 0x25: return wr(rt(w), f"MEM_R16({R(rs(w))} + {simm(w)})"), None, 0   # lhu
-    # stores
-    if op == 0x28: return f"MEM_W8_PC({R(rs(w))} + {simm(w)}, {R(rt(w))}, {G(addr)});", f"({R(rs(w))} + {simm(w)})", 1   # sb
-    if op == 0x29: return f"MEM_W16_PC({R(rs(w))} + {simm(w)}, {R(rt(w))}, {G(addr)});", f"({R(rs(w))} + {simm(w)})", 2  # sh
-    if op == 0x2B: return f"MEM_W32_PC({R(rs(w))} + {simm(w)}, {R(rt(w))}, {G(addr)});", f"({R(rs(w))} + {simm(w)})", 4  # sw
-    # Unaligned word access
-    if op == 0x22: return wr(rt(w), f"sr_lwl({R(rt(w))}, {R(rs(w))} + {simm(w)})"), None, 0   # lwl
-    if op == 0x26: return wr(rt(w), f"sr_lwr({R(rt(w))}, {R(rs(w))} + {simm(w)})"), None, 0   # lwr
-    if op == 0x2A: return f"sr_swl_pc({R(rs(w))} + {simm(w)}, {R(rt(w))}, {G(addr)});", f"(({R(rs(w))} + {simm(w)}) & ~3u)", 4  # swl
-    if op == 0x2E: return f"sr_swr_pc({R(rs(w))} + {simm(w)}, {R(rt(w))}, {G(addr)});", f"(({R(rs(w))} + {simm(w)}) & ~3u)", 4  # swr
-    if op in (0x30, 0x38): return _ll_sc_stmt(addr, w, op, lle_cpu, delay_branch_pc)  # ll / sc
-    if op == 0x31: return f"s->fi[{rt(w)}] = MEM_R32({R(rs(w))} + {simm(w)});", None, 0  # lwc1
-    if op == 0x39: return f"MEM_W32_PC({R(rs(w))} + {simm(w)}, s->fi[{rt(w)}], {G(addr)});", f"({R(rs(w))} + {simm(w)})", 4  # swc1
-    if op == 0x11: return fpu_effect(addr, w)
-    if op == 0x2f:
-        # cache (TD-27): a no-op in default static recompilation. Behind
-        # --stale-detect the invalidate becomes a stale-code check hook; the
-        # SR_STALE_DETECT runtime gate keeps it off the hot path when unset.
-        if OPTIONS.stale_detect:
-            return f"sr_stale_note_cache_op((uint32_t)({R(rs(w))} + {simm(w)}));", None, 0
-        return "(void)0;", None, 0  # cache (no-op in user space static recompilation)
-    if op == 0x3f: return f"if ((0x{w:08x}u & 0xFFFF0000u) != 0xFFFF0000u) {{ s->vfpuCtrl[0]=0xe4u; s->vfpuCtrl[1]=0xe4u; s->vfpuCtrl[2]=0u; }}", None, 0  # vflush
-    if op in (0x35, 0x36, 0x3d, 0x3e, 0x32, 0x3a, 0x12, 0x18, 0x19, 0x1b, 0x37, 0x34, 0x3c): return vfpu_effect(addr, w, lle_cpu=lle_cpu, delay_branch_pc=delay_branch_pc)
-    raise Unsupported(f"opcode 0x{op:02x} at 0x{addr:08x}")
+    handler = _EFFECT_OPCODE_FORMS.get(op)
+    if handler is None:
+        raise Unsupported(f"opcode 0x{op:02x} at 0x{addr:08x}")
+    return handler(addr, w, options, delay_branch_pc)
 
 def _arr(idx):
     return "(const uint8_t[]){" + ",".join(str(x) for x in idx) + "}"
@@ -1791,33 +2197,62 @@ def _vfpu_forms_stmt(addr, w, what, body):
 
 def _vfpu_forms_effect(addr, w, jump, sel, n):
     """The PSP-VFPU-FORMS-001 forms at their measured widths, or None."""
+    key = (jump, sel, n)
+    handler = _VFPU_SPECIAL_FORM_TABLE.get(key)
+    if handler is None and jump >= 24 and n == 1:
+        handler = _VFPU_SPECIAL_FORM_TABLE.get((jump, None, n))
+    return None if handler is None else handler(addr, w)
+
+
+def _vfpu_form_vwbn(addr, w):
+    d0 = vreg_indices(w & 0x7F, 1)[0]
+    s0 = vreg_indices((w >> 8) & 0x7F, 1)[0]
+    return _vfpu_forms_stmt(addr, w, "vwbn.s",
+                            f"s->vi[{d0}]=sr_vfpu_wbn(s->vi[{s0}],{(w >> 16) & 0xFF}u);")
+
+
+def _vfpu_form_vrndf(addr, w):
+    sel = (w >> 16) & 0x1F
+    d0 = vreg_indices(w & 0x7F, 1)[0]
+    return _vfpu_forms_stmt(addr, w, f"vrndf{sel - 1}.s",
+                            f"s->vi[{d0}]=sr_vfpu_rndf_step(&s->vfpuCtrl[8],{sel - 2});")
+
+
+def _vfpu_form_vh2f(addr, w):
+    n = vec_size(w)
     vd, vs = w & 0x7F, (w >> 8) & 0x7F
-    if jump >= 24 and n == 1:  # vwbn.s, exponent imm8 in bits 16-23
-        d0, s0 = vreg_indices(vd, 1)[0], vreg_indices(vs, 1)[0]
-        return _vfpu_forms_stmt(addr, w, "vwbn.s",
-                                f"s->vi[{d0}]=sr_vfpu_wbn(s->vi[{s0}],{(w >> 16) & 0xFF}u);")
-    if jump == 1 and sel in (2, 3) and n == 1:  # vrndf1.s / vrndf2.s
-        d0 = vreg_indices(vd, 1)[0]
-        return _vfpu_forms_stmt(addr, w, f"vrndf{sel - 1}.s",
-                                f"s->vi[{d0}]=sr_vfpu_rndf_step(&s->vfpuCtrl[8],{sel - 2});")
-    if jump == 1 and sel == 19 and n <= 2:  # vh2f.s/.p: low then high half, double width
-        si, di = vreg_indices(vs, n), vreg_indices(vd, 2 * n)
-        reads = " ".join(f"uint32_t _s{i}=s->vi[{si[i]}];" for i in range(n))
-        writes = " ".join(f"s->vi[{di[2 * i]}]=sr_vfpu_h2f(_s{i}&0xFFFFu); "
-                          f"s->vi[{di[2 * i + 1]}]=sr_vfpu_h2f(_s{i}>>16);" for i in range(n))
-        return _vfpu_forms_stmt(addr, w, f"vh2f.{'sp'[n - 1]}", f"{reads} {writes}")
-    if jump == 1 and sel == 24 and n == 1:  # vuc2i.s: four bytes, low first, to a quad
-        s0, di = vreg_indices(vs, 1)[0], vreg_indices(vd, 4)
-        writes = " ".join(f"s->vi[{di[i]}]=sr_vfpu_uc2i(_s>>{8 * i});" for i in range(4))
-        return _vfpu_forms_stmt(addr, w, "vuc2i.s", f"uint32_t _s=s->vi[{s0}]; {writes}")
-    if jump == 2 and sel == 5 and n <= 2:  # vsocp.s/.p: x -> (sat0(1 - x), sat0(x))
-        si, di = vreg_indices(vs, n), vreg_indices(vd, 2 * n)
-        reads = " ".join(f"_x[{i}]=s->vi[{si[i]}];" for i in range(n))
-        calc = " ".join(f"sr_vfpu_socp(_x[{i}],&_d[{2 * i}]);" for i in range(n))
-        writes = " ".join(f"s->vi[{di[i]}]=_d[{i}];" for i in range(2 * n))
-        return _vfpu_forms_stmt(addr, w, f"vsocp.{'sp'[n - 1]}",
-                                f"uint32_t _x[2],_d[4]; {reads} {calc} {writes}")
-    return None
+    si, di = vreg_indices(vs, n), vreg_indices(vd, 2 * n)
+    reads = " ".join(f"uint32_t _s{i}=s->vi[{si[i]}];" for i in range(n))
+    writes = " ".join(f"s->vi[{di[2 * i]}]=sr_vfpu_h2f(_s{i}&0xFFFFu); "
+                      f"s->vi[{di[2 * i + 1]}]=sr_vfpu_h2f(_s{i}>>16);" for i in range(n))
+    return _vfpu_forms_stmt(addr, w, f"vh2f.{'sp'[n - 1]}", f"{reads} {writes}")
+
+
+def _vfpu_form_vuc2i(addr, w):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    s0, di = vreg_indices(vs, 1)[0], vreg_indices(vd, 4)
+    writes = " ".join(f"s->vi[{di[i]}]=sr_vfpu_uc2i(_s>>{8 * i});" for i in range(4))
+    return _vfpu_forms_stmt(addr, w, "vuc2i.s", f"uint32_t _s=s->vi[{s0}]; {writes}")
+
+
+def _vfpu_form_vsocp(addr, w):
+    n = vec_size(w)
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    si, di = vreg_indices(vs, n), vreg_indices(vd, 2 * n)
+    reads = " ".join(f"_x[{i}]=s->vi[{si[i]}];" for i in range(n))
+    calc = " ".join(f"sr_vfpu_socp(_x[{i}],&_d[{2 * i}]);" for i in range(n))
+    writes = " ".join(f"s->vi[{di[i]}]=_d[{i}];" for i in range(2 * n))
+    return _vfpu_forms_stmt(addr, w, f"vsocp.{'sp'[n - 1]}",
+                            f"uint32_t _x[2],_d[4]; {reads} {calc} {writes}")
+
+
+_VFPU_SPECIAL_FORM_TABLE: dict[tuple[int, int | None, int], Any] = {
+    **{(jump, None, 1): _vfpu_form_vwbn for jump in range(24, 32)},
+    (1, 2, 1): _vfpu_form_vrndf, (1, 3, 1): _vfpu_form_vrndf,
+    (1, 19, 1): _vfpu_form_vh2f, (1, 19, 2): _vfpu_form_vh2f,
+    (1, 24, 1): _vfpu_form_vuc2i,
+    (2, 5, 1): _vfpu_form_vsocp, (2, 5, 2): _vfpu_form_vsocp,
+}
 
 
 # VFPU9 forms whose semantics follow the 2026-10-24 PSP-3000 measurement (issue
@@ -1838,585 +2273,974 @@ _VFPU9_INTERP_ROUTED = {
 }
 
 
-def vfpu_effect(addr, w, lle_cpu=False, delay_branch_pc=None):
-    # VFPU memory forms under --lle-cpu use the same sr_cpu_guard_access() call
-    # as _lle_access_stmt() (spec 3.3, runs PSP-A3-08..15): lv.s/sv.s width 4,
-    # lv.q/sv.q width 16, lvl/lvr/svl/svr width 0 (never guarded, like
-    # lwl/lwr/swl/swr). PSP-A3-12 (sv.s+2 AdES), PSP-A3-13 (sv.q+8 AdES),
-    # PSP-A3-14 (lv.q+4 in a delay slot: BD 1, EPC = branch) and PSP-A3-15
-    # (lvl.q at odd completes) confirm this guard; no VFPU alignment cell
-    # remains synthetic.
-    op = w >> 26
-    if op == 0x37:
-        regnum = (w >> 24) & 3
-        if regnum == 3:  # viim / vfim
-            vt = (w >> 16) & 0x7F
-            imm = w & 0xFFFF
-            if (w >> 23) & 1:
-                bits = _half_to_f32_bits(imm)
-            else:
-                iv = imm - 0x10000 if imm & 0x8000 else imm
-                bits = struct.unpack("<I", struct.pack("<f", float(iv)))[0]
-            i0 = vreg_indices(vt, 1)[0]
-            body = (f"uint32_t _bits=0x{bits:08x}u; float _d[1]; memcpy(_d,&_bits,4); "
-                    f"sr_vwrite(s,{_arr([i0])},_d,1,s->vfpuCtrl[2]);{_EAT}")
-            return "{ " + body + " }", None, 0
-        data = w & 0xFFFFF
-        if regnum == 2:
-            data &= 0xFFF
-        return f"s->vfpuCtrl[{regnum}] = 0x{data:x}u;", None, 0
-    if op == 0x34:
-        jump = (w >> 21) & 0x1F
-        rt_selector = (w >> 16) & 0x1F
-        if (jump, rt_selector) == (0x01, 0x01) and vec_size(w) == 1:
-            return _vrndi_single_stmt(addr, w), None, 0
-        forms = _vfpu_forms_effect(addr, w, jump, rt_selector, vec_size(w))
-        if forms is not None:
-            return forms, None, 0
-        routed = _VFPU7_INTERP_ROUTED.get(rt_selector) if jump == 0x01 else None
-        if routed is not None and vec_size(w) in routed[1]:
-            return _vfpu_interp_stmt(addr, w), None, 0
-        vd, vs = w & 0x7F, (w >> 8) & 0x7F
-        n = vec_size(w)
-        di = vreg_indices(vd, n)
-        if jump == 0x15: # vcmov
-            tf = (w >> 19) & 1
-            imm3 = (w >> 16) & 7
-            si = vreg_indices(vs, n)
-            rd_st = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
-                     f"sr_vread(_d,s,{_arr(di)},{n},s->vfpuCtrl[1]); ")
-            if imm3 < 6:
-                move = (f"if (((s->vfpuCtrl[3] >> {imm3}) & 1u) == {1 - tf}u) "
-                        f"{{ for(int _i=0;_i<{n};_i++) _d[_i]=_s[_i]; }} ")
-            elif imm3 == 6:
-                move = (f"for(int _i=0;_i<{n};_i++) "
-                        f"if (((s->vfpuCtrl[3] >> _i) & 1u) == {1 - tf}u) _d[_i]=_s[_i]; ")
-            else:
-                raise Unsupported(f"vcmov imm3 {imm3} at 0x{addr:08x}")
-            body = (rd_st + move
-                    + _nanv(addr, "vcmov.s", vd, "_d", n, "_s", n, "_d", n)
-                    + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-            return "{ " + body + " }", None, 0
-        if jump == 0x02:  # vocp
-            op9 = (w >> 16) & 0x1F
-            if op9 == 4:  # vocp: d = 1.0 - s
-                si = vreg_indices(vs, n)
-                body = (f"float _s[4],_t[4],_d[4]; "
-                        f"sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]|0xF0000u); "
-                        f"sr_vread(_t,s,{_arr(si)},{n},(s->vfpuCtrl[1]&~0xFFu)|0x55u|0xF000u); "
-                        f"for(int _i=0;_i<{n};_i++) _d[_i]=isnan(_s[_i])?fabsf(_s[_i]):_t[_i]+_s[_i]; "
-                        + _nanv(addr, "vocp.s", vd, "_d", n, "_s", n, "_t", n)
-                        + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-                return "{ " + body + " }", None, 0
-            routed = _VFPU9_INTERP_ROUTED.get(op9)
-            if routed is not None and n in routed[1]:
-                # Measured rules (forced vbfy prefixes, canonical NaN, denormal
-                # flush, sign-bit vsgn, vt4444 nibble packing) have one owner.
-                return _vfpu_interp_stmt(addr, w), None, 0
-            raise Unsupported(f"VFPU9 op 0x{op9:02x} at 0x{addr:08x}")
-        if jump == 0x03:  # vcst
-            val = _flit(_VFPU_CST[(w >> 16) & 0x1F])
-            body = (f"float _d[4]; for(int _i=0;_i<{n};_i++) _d[_i]={val}; "
-                    f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-            return "{ " + body + " }", None, 0
-        if jump == 1:
-            idx7 = (w >> 16) & 0x1F
-            if idx7 == 27: # vs2i
-                si = vreg_indices(vs, n)
-                oz_n = 2
-                sz_n = n
-                if sz_n in (4, 3):
-                    sz_n = 2
-                    oz_n = 4
-                elif sz_n == 2:
-                    oz_n = 4
-                num_src = sz_n
-                lines = [
-                    f"uint32_t _s[4], _d[4] = {{0}};",
-                    f"sr_vread((float*)_s, s, {_arr(si[:num_src])}, {num_src}, s->vfpuCtrl[0]);",
-                ]
-                for i in range(num_src):
-                    lines.append(f"_d[{i * 2}] = (_s[{i}] & 0xFFFFu) << 16;")
-                    lines.append(f"_d[{i * 2 + 1}] = _s[{i}] & 0xFFFF0000u;")
-                # Output is double-width (oz_n lanes): index the destination at oz_n,
-                # not a slice of the source-sized list -- di[:oz_n] under-filled the C
-                # compound literal when oz_n > n (vs2i.s/.p), making sr_vwrite read
-                # past it (UB). The first n entries are unchanged by this fix.
-                lines.append(f"sr_vwrite(s, {_arr(vreg_indices(vd, oz_n))}, (float*)_d, {oz_n}, s->vfpuCtrl[2]);{_EAT}")
-                return "{ " + " ".join(lines) + " }", None, 0
-            if idx7 in (28, 29, 30, 31): # vi2uc, vi2c, vi2us, vi2s
-                case = idx7 - 28
-                lines = [
-                    f"int32_t _s[4]; uint32_t _d[2] = {{0}};",
-                    f"sr_vread((float*)_s, s, {_arr(vreg_indices(vs, 4))}, 4, s->vfpuCtrl[0]);"
-                ]
-                if case == 0: # vi2uc
-                    for i in range(4):
-                        lines.append(f"{{ int32_t _v = _s[{i}]; if (_v < 0) _v = 0; _v >>= 23; _d[0] |= ((uint32_t)_v & 0xFFu) << {i * 8}; }}")
-                    oz_n = 1
-                elif case == 1: # vi2c
-                    for i in range(4):
-                        lines.append(f"{{ uint32_t _v = _s[{i}]; _d[0] |= ((_v >> 24) & 0xFFu) << {i * 8}; }}")
-                    oz_n = 1
-                elif case == 2: # vi2us
-                    lines.append(f"int _elems = ({n} + 1) / 2;")
-                    lines.append(f"for (int _i = 0; _i < _elems; _i++) {{")
-                    lines.append(f"    int32_t _low = _s[_i * 2];")
-                    lines.append(f"    int32_t _high = _s[_i * 2 + 1];")
-                    lines.append(f"    if (_low < 0) _low = 0;")
-                    lines.append(f"    if (_high < 0) _high = 0;")
-                    lines.append(f"    _low >>= 15; _high >>= 15;")
-                    lines.append(f"    _d[_i] = ((uint32_t)_low & 0xFFFFu) | (((uint32_t)_high & 0xFFFFu) << 16);")
-                    lines.append(f"}}")
-                    oz_n = 2 if n in (4, 3) else 1
-                elif case == 3: # vi2s
-                    lines.append(f"int _elems = ({n} + 1) / 2;")
-                    lines.append(f"for (int _i = 0; _i < _elems; _i++) {{")
-                    lines.append(f"    uint32_t _low = _s[_i * 2];")
-                    lines.append(f"    uint32_t _high = _s[_i * 2 + 1];")
-                    lines.append(f"    _low >>= 16; _high >>= 16;")
-                    lines.append(f"    _d[_i] = (_low & 0xFFFFu) | (_high << 16);")
-                    lines.append(f"}}")
-                    oz_n = 2 if n in (4, 3) else 1
-                # Destination is decoded at the packed size oz_n (PPSSPP GetVectorRegs
-                # with oz), which differs from slicing the n-sized list for oz_n == 1
-                # registers with the row bit set.
-                lines.append(f"sr_vwrite(s, {_arr(vreg_indices(vd, oz_n))}, (float*)_d, {oz_n}, s->vfpuCtrl[2]);{_EAT}")
-                return "{ " + " ".join(lines) + " }", None, 0
-            raise Unsupported(f"VFPU7 op 0x{idx7:02x} at 0x{addr:08x}")
-        if jump in (16, 17, 18, 19): # vf2i
-            si = vreg_indices(vs, n)
-            imm = (w >> 16) & 0x1F
-            lines = [
-                f"float _s[4]; uint32_t _d[4]; const uint8_t _di[{n}]={{{','.join(str(x) for x in di)}}};",
-                f"sr_vread(_s, s, {_arr(si)}, {n}, s->vfpuCtrl[0]);",
-                f"for (int _i = 0; _i < {n}; _i++)",
-                f"    _d[_i] = sr_vfpu_to_word(_s[_i], {jump - 16}u, {imm}u);"
-            ]
-            lines.append(
-                f"for (int _i = 0; _i < {n}; _i++) if (!((s->vfpuCtrl[2] >> (8 + _i)) & 1u)) s->vi[_di[_i]] = _d[_i];{_EAT}"
-            )
-            return "{ " + " ".join(lines) + " }", None, 0
-        if jump == 20: # vi2f
-            si = vreg_indices(vs, n)
-            imm = (w >> 16) & 0x1F
-            mult = 1.0 / float(1 << imm)
-            mult_str = f"{mult:.9g}"
-            if "." not in mult_str and "e" not in mult_str:
-                mult_str += ".0f"
-            else:
-                mult_str += "f"
-            lines = [
-                f"int32_t _s[4]; float _d[4];",
-                f"sr_vread((float*)_s, s, {_arr(si)}, {n}, s->vfpuCtrl[0]);",
-                f"for (int _i = 0; _i < {n}; _i++) _d[_i] = (float)_s[_i] * {mult_str};",
-                f"sr_vwrite(s, {_arr(di)}, _d, {n}, s->vfpuCtrl[2]);{_EAT}"
-            ]
-            return "{ " + " ".join(lines) + " }", None, 0
-        if jump != 0:
-            raise Unsupported(f"VFPU4 jump 0x{jump:02x} at 0x{addr:08x}")
-        optype = (w >> 16) & 0x1F
-        if optype in (0, 1, 2, 4, 5):
-            si = vreg_indices(vs, n)
-            per = {0: "_s[_i]", 1: "fabsf(_s[_i])", 2: "-_s[_i]",
-                   4: "(_s[_i]<=0.0f?0.0f:(_s[_i]>1.0f?1.0f:_s[_i]))",
-                   5: "(_s[_i]<-1.0f?-1.0f:(_s[_i]>1.0f?1.0f:_s[_i]))"}[optype]
-            body = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
-                    f"for(int _i=0;_i<{n};_i++) _d[_i]={per}; "
-                    + _nanv(addr, "vv2op.s", vd, "_d", n, "_s", n)
-                    + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-            return "{ " + body + " }", None, 0
-        # Optype 28 is vrexp2, which a PSP-3000 measured as exp2(-x) (PSP-VFPU-TRANSCENDENTAL-001,
-        # 2026-10-15), not a negated exp2. The other negated entries (25, 27, 29, 30, 31) are
-        # encodings no probe has covered; they keep the negation of the positive operation.
-        _TRANS = {16: "sr_vfpu_rcp(_s[_i])", 17: "sr_vfpu_rsqrt(_s[_i])",
-                  18: "sr_vfpu_sin(_s[_i])", 19: "sr_vfpu_cos(_s[_i])",
-                  20: "sr_vfpu_exp2(_s[_i])", 21: "sr_vfpu_log2(_s[_i])",
-                  22: "sr_vfpu_sqrt(_s[_i])", 23: "sr_vfpu_asin(_s[_i])",
-                  24: "-sr_vfpu_rcp(_s[_i])", 25: "-sr_vfpu_rsqrt(_s[_i])",
-                  26: "-sr_vfpu_sin(_s[_i])", 27: "-sr_vfpu_cos(_s[_i])",
-                  28: "sr_vfpu_exp2(-_s[_i])", 29: "-sr_vfpu_log2(_s[_i])",
-                  30: "-sr_vfpu_sqrt(_s[_i])", 31: "-sr_vfpu_asin(_s[_i])"}
-        if optype in _TRANS:
-            si = vreg_indices(vs, n)
-            body = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
-                    f"for(int _i=0;_i<{n};_i++) _d[_i]={_TRANS[optype]}; "
-                    + _nanv(addr, _TRANS_NAME[optype], vd, "_d", n, "_s", n)
-                    + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-            return "{ " + body + " }", None, 0
-        if optype in (6, 7):  # vzero / vone
-            val = "0.0f" if optype == 6 else "1.0f"
-            body = (f"float _d[4]; for(int _i=0;_i<{n};_i++) _d[_i]={val}; "
-                    f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-            return "{ " + body + " }", None, 0
-        if optype == 3:  # vidt
-            offmask = 3 if n >= 3 else 1
-            off = vd & offmask
-            vals = ",".join("1.0f" if i == off else "0.0f" for i in range(n))
-            body = (f"float _d[4]={{{vals}}}; sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-            return "{ " + body + " }", None, 0
+# vqmul.q and vcrsp.t lanes as (sign, S lane, T lane) terms, in source order. The emitted
+# lane is a left-to-right chain of sr_vf_* calls (src/rt/recomp.h), the same chain
+# sr_vfpu_interp evaluates, so both lanes return one NaN word (issue #326).
+_VQMUL_TERMS = (
+    ((1, 0, 3), (1, 1, 2), (-1, 2, 1), (1, 3, 0)),
+    ((-1, 0, 2), (1, 1, 3), (1, 2, 0), (1, 3, 1)),
+    ((1, 0, 1), (-1, 1, 0), (1, 2, 3), (1, 3, 2)),
+    ((-1, 0, 0), (-1, 1, 1), (-1, 2, 2), (1, 3, 3)),
+)
+_VCRSP_TERMS = (
+    ((1, 1, 2), (-1, 2, 1)),
+    ((1, 2, 0), (-1, 0, 2)),
+    ((1, 0, 1), (-1, 1, 0)),
+)
+
+
+def _vf_chain(terms):
+    sign, i, j = terms[0]
+    acc = f"sr_vf_mul({'-' if sign < 0 else ''}_s[{i}],_t[{j}])"
+    for sign, i, j in terms[1:]:
+        # Each helper is written as a call literal so tools/recomp_helper_inventory.py sees it.
+        call = "sr_vf_add(" if sign > 0 else "sr_vf_sub("
+        acc = f"{call}{acc},sr_vf_mul(_s[{i}],_t[{j}]))"
+    return acc
+
+
+# VFPU memory forms under --lle-cpu use the same sr_cpu_guard_access() call
+# as _lle_access_stmt() (spec 3.3, runs PSP-A3-08..15): lv.s/sv.s width 4,
+# lv.q/sv.q width 16, lvl/lvr/svl/svr width 0 (never guarded, like
+# lwl/lwr/swl/swr). PSP-A3-12 (sv.s+2 AdES), PSP-A3-13 (sv.q+8 AdES),
+# PSP-A3-14 (lv.q+4 in a delay slot: BD 1, EPC = branch) and PSP-A3-15
+# (lvl.q at odd completes) confirm this guard; no VFPU alignment cell
+# remains synthetic.
+# lvl.q/lvr.q/svl.q/svr.q: their left/right merge behavior lives in the
+# single-step interpreter so codegen cannot accidentally treat them as aligned lv.q.
+# MEASURED (PSP-A3-11): they bypass alignment guarding with width 0, exactly
+# like lwl/lwr/swl/swr, so lle_cpu leaves this emission unchanged.
+# lv.q / sv.q. Aligned accesses stay native; a dynamic alignment violation is
+# delegated to the same authoritative decoder as the explicit left/right forms.
+# MEASURED (PSP-A3-09/10): quads need 16-byte alignment with the load/store
+# code, so under --lle-cpu the same sr_cpu_guard_access() call as scalars
+# runs first (width 16); default emission below is unchanged.
+# lv.s / sv.s. MEASURED (PSP-A3-08): singles need 4-byte alignment (AdEL),
+# so under --lle-cpu the same sr_cpu_guard_access() call as scalars runs
+# first (width 4); default emission below is unchanged.
+# COP2 mfc2/mtc2
+# VFPU0 / VFPU1
+
+def vfpu_effect(addr, w, lle_cpu=None, delay_branch_pc=None, *, options=None):
+    """Dispatch one VFPU encoding through its opcode and form fields."""
+    options = _options_for_call(options, lle_cpu=lle_cpu)
+    op, sub = w >> 26, (w >> 23) & 7
+    if op == 0x3C:
+        selector = (sub, (w >> 21) & 0x1F if sub == 7 else None)
+    elif op in (0x18, 0x19):
+        selector = sub
+    else:
+        selector = None
+    handler = _VFPU_OPCODE_FORM_TABLE.get((op, selector))
+    if handler is None:
+        raise Unsupported(f"VFPU opcode 0x{op:02x} sub 0x{sub:x} at 0x{addr:08x}")
+    return handler(addr, w, options, delay_branch_pc)
+
+def _vfpu_control_immediate(addr, w, options, delay_branch_pc):
+    regnum = (w >> 24) & 3
+    return _VFPU37_REG_FORMS[regnum](addr, w, options, delay_branch_pc)
+
+
+def _vfpu37_control_register(addr, w, options, delay_branch_pc):
+    regnum = (w >> 24) & 3
+    data = w & 0xFFFFF
+    data &= _VFPU37_CONTROL_MASKS[regnum]
+    return f"s->vfpuCtrl[{regnum}] = 0x{data:x}u;", None, 0
+
+
+def _vfpu37_immediate_register(addr, w, options, delay_branch_pc):
+    vt = (w >> 16) & 0x7F
+    imm = w & 0xFFFF
+    if (w >> 23) & 1:
+        bits = _half_to_f32_bits(imm)
+    else:
+        iv = imm - 0x10000 if imm & 0x8000 else imm
+        bits = struct.unpack("<I", struct.pack("<f", float(iv)))[0]
+    i0 = vreg_indices(vt, 1)[0]
+    body = (f"uint32_t _bits=0x{bits:08x}u; float _d[1]; memcpy(_d,&_bits,4); "
+            f"sr_vwrite(s,{_arr([i0])},_d,1,s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+
+
+_VFPU37_REG_FORMS = {0: _vfpu37_control_register, 1: _vfpu37_control_register,
+                     2: _vfpu37_control_register, 3: _vfpu37_immediate_register}
+_VFPU37_CONTROL_MASKS = {0: 0xFFFFF, 1: 0xFFFFF, 2: 0xFFF}
+def _vfpu4_effect(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    # Preserve the decoder's fail-closed register-field validation before dispatch.
+    _ = vreg_indices(vd, n), vreg_indices(vs, n)
+    jump = (w >> 21) & 0x1F
+    rt_selector = (w >> 16) & 0x1F
+    prefix_form = _VFPU4_PREFIX_FORMS.get((jump, rt_selector, vec_size(w)))
+    if prefix_form is not None:
+        return prefix_form(addr, w, options, delay_branch_pc)
+    forms = _vfpu_forms_effect(addr, w, jump, rt_selector, vec_size(w))
+    if forms is not None:
+        return forms, None, 0
+    routed = _VFPU7_INTERP_ROUTED.get(rt_selector) if jump == 0x01 else None
+    if routed is not None and vec_size(w) in routed[1]:
+        return _vfpu_interp_stmt(addr, w), None, 0
+    handler = _VFPU4_JUMP_FORMS.get(jump)
+    if handler is None:
+        raise Unsupported(f"VFPU4 jump 0x{jump:02x} at 0x{addr:08x}")
+    return handler(addr, w, options, delay_branch_pc)
+
+
+def _vfpu4_vrndi_single(addr, w, options, delay_branch_pc):
+    return _vrndi_single_stmt(addr, w), None, 0
+
+
+_VFPU4_PREFIX_FORMS = {(0x01, 0x01, 1): _vfpu4_vrndi_single}
+
+# vcmov
+def _vfpu4_vcmov(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    di, si = vreg_indices(vd, n), vreg_indices(vs, n)
+    tf = (w >> 19) & 1
+    imm3 = (w >> 16) & 7
+    rd_st = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
+             f"sr_vread(_d,s,{_arr(di)},{n},s->vfpuCtrl[1]); ")
+    handler = _VFPU4_VCMOV_IMM_FORMS.get(imm3)
+    if handler is None:
+        raise Unsupported(f"vcmov imm3 {imm3} at 0x{addr:08x}")
+    move = handler(n, imm3, tf)
+    body = (rd_st + move
+            + _nanv(addr, "vcmov.s", vd, "_d", n, "_s", n, "_d", n,
+                    options=options)
+            + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+
+
+def _vfpu4_vcmov_control_bit(n, imm3, tf):
+    return (f"if (((s->vfpuCtrl[3] >> {imm3}) & 1u) == {1 - tf}u) "
+            f"{{ for(int _i=0;_i<{n};_i++) _d[_i]=_s[_i]; }} ")
+
+
+def _vfpu4_vcmov_lane_bits(n, imm3, tf):
+    return (f"for(int _i=0;_i<{n};_i++) "
+            f"if (((s->vfpuCtrl[3] >> _i) & 1u) == {1 - tf}u) _d[_i]=_s[_i]; ")
+
+
+_VFPU4_VCMOV_IMM_FORMS = {
+    0: _vfpu4_vcmov_control_bit, 1: _vfpu4_vcmov_control_bit,
+    2: _vfpu4_vcmov_control_bit, 3: _vfpu4_vcmov_control_bit,
+    4: _vfpu4_vcmov_control_bit, 5: _vfpu4_vcmov_control_bit,
+    6: _vfpu4_vcmov_lane_bits,
+}
+
+# vocp
+def _vfpu4_vocp(addr, w, options, delay_branch_pc):
+    n = vec_size(w)
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    _ = vreg_indices(vd, n), vreg_indices(vs, n)
+    op9 = (w >> 16) & 0x1F
+    handler = _VFPU4_VOCP_OP9_FORMS.get(op9)
+    if handler is not None:
+        return handler(addr, w, options, delay_branch_pc)
+    routed = _VFPU9_INTERP_ROUTED.get(op9)
+    if routed is not None and n in routed[1]:
+        # Measured rules (forced vbfy prefixes, canonical NaN, denormal
+        # flush, sign-bit vsgn, vt4444 nibble packing) have one owner.
+        return _vfpu_interp_stmt(addr, w), None, 0
+    raise Unsupported(f"VFPU9 op 0x{op9:02x} at 0x{addr:08x}")
+
+
+def _vfpu4_vocp_direct(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    si, di = vreg_indices(vs, n), vreg_indices(vd, n)
+    body = (f"float _s[4],_t[4],_d[4]; "
+            f"sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]|0xF0000u); "
+            f"sr_vread(_t,s,{_arr(si)},{n},(s->vfpuCtrl[1]&~0xFFu)|0x55u|0xF000u); "
+            f"for(int _i=0;_i<{n};_i++) _d[_i]=isnan(_s[_i])?fabsf(_s[_i]):_t[_i]+_s[_i]; "
+            + _nanv(addr, "vocp.s", vd, "_d", n, "_s", n, "_t", n,
+                    options=options)
+            + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+
+
+_VFPU4_VOCP_OP9_FORMS = {4: _vfpu4_vocp_direct}
+
+# vcst
+def _vfpu4_vcst(addr, w, options, delay_branch_pc):
+    vd = w & 0x7F
+    n = vec_size(w)
+    di = vreg_indices(vd, n)
+    _ = vreg_indices((w >> 8) & 0x7F, n)
+    val = _flit(_VFPU_CST[(w >> 16) & 0x1F])
+    body = (f"float _d[4]; for(int _i=0;_i<{n};_i++) _d[_i]={val}; "
+            f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+
+def _vfpu4_integer_conversion(addr, w, options, delay_branch_pc):
+    idx7 = (w >> 16) & 0x1F
+    handler = _VFPU4_INTEGER_CONVERSION_FORMS.get(idx7)
+    if handler is None:
+        raise Unsupported(f"VFPU7 op 0x{idx7:02x} at 0x{addr:08x}")
+    return handler(addr, w, options, delay_branch_pc)
+
+
+def _vfpu4_vs2i(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    si = vreg_indices(vs, n)
+    oz_n = 2
+    sz_n = n
+    if sz_n in (4, 3):
+        sz_n = 2
+        oz_n = 4
+    elif sz_n == 2:
+        oz_n = 4
+    num_src = sz_n
+    lines = [
+        f"uint32_t _s[4], _d[4] = {{0}};",
+        f"sr_vread((float*)_s, s, {_arr(si[:num_src])}, {num_src}, s->vfpuCtrl[0]);",
+    ]
+    for i in range(num_src):
+        lines.append(f"_d[{i * 2}] = (_s[{i}] & 0xFFFFu) << 16;")
+        lines.append(f"_d[{i * 2 + 1}] = _s[{i}] & 0xFFFF0000u;")
+    # Output is double-width (oz_n lanes): index the destination at oz_n, not a slice of
+    # the source-sized list, which under-filled the compound literal for vs2i.s/.p.
+    lines.append(f"sr_vwrite(s, {_arr(vreg_indices(vd, oz_n))}, (float*)_d, {oz_n}, s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + " ".join(lines) + " }", None, 0
+
+
+def _vfpu4_vi2uc(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    lines = ["int32_t _s[4]; uint32_t _d[2] = {0};",
+             f"sr_vread((float*)_s, s, {_arr(vreg_indices(vs, 4))}, 4, s->vfpuCtrl[0]);"]
+    for i in range(4):
+        lines.append(f"{{ int32_t _v = _s[{i}]; if (_v < 0) _v = 0; _v >>= 23; _d[0] |= ((uint32_t)_v & 0xFFu) << {i * 8}; }}")
+    lines.append(f"sr_vwrite(s, {_arr(vreg_indices(vd, 1))}, (float*)_d, 1, s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + " ".join(lines) + " }", None, 0
+
+
+def _vfpu4_vi2c(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    lines = ["int32_t _s[4]; uint32_t _d[2] = {0};",
+             f"sr_vread((float*)_s, s, {_arr(vreg_indices(vs, 4))}, 4, s->vfpuCtrl[0]);"]
+    for i in range(4):
+        lines.append(f"{{ uint32_t _v = _s[{i}]; _d[0] |= ((_v >> 24) & 0xFFu) << {i * 8}; }}")
+    lines.append(f"sr_vwrite(s, {_arr(vreg_indices(vd, 1))}, (float*)_d, 1, s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + " ".join(lines) + " }", None, 0
+
+
+def _vfpu4_vi2us(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    lines = ["int32_t _s[4]; uint32_t _d[2] = {0};",
+             f"sr_vread((float*)_s, s, {_arr(vreg_indices(vs, 4))}, 4, s->vfpuCtrl[0]);",
+             f"int _elems = ({n} + 1) / 2;",
+             "for (int _i = 0; _i < _elems; _i++) {",
+             "    int32_t _low = _s[_i * 2];",
+             "    int32_t _high = _s[_i * 2 + 1];",
+             "    if (_low < 0) _low = 0;",
+             "    if (_high < 0) _high = 0;",
+             "    _low >>= 15; _high >>= 15;",
+             "    _d[_i] = ((uint32_t)_low & 0xFFFFu) | (((uint32_t)_high & 0xFFFFu) << 16);",
+             "}"]
+    oz_n = 2 if n in (4, 3) else 1
+    lines.append(f"sr_vwrite(s, {_arr(vreg_indices(vd, oz_n))}, (float*)_d, {oz_n}, s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + " ".join(lines) + " }", None, 0
+
+
+def _vfpu4_vi2s(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    lines = ["int32_t _s[4]; uint32_t _d[2] = {0};",
+             f"sr_vread((float*)_s, s, {_arr(vreg_indices(vs, 4))}, 4, s->vfpuCtrl[0]);",
+             f"int _elems = ({n} + 1) / 2;",
+             "for (int _i = 0; _i < _elems; _i++) {",
+             "    uint32_t _low = _s[_i * 2];",
+             "    uint32_t _high = _s[_i * 2 + 1];",
+             "    _low >>= 16; _high >>= 16;",
+             "    _d[_i] = (_low & 0xFFFFu) | (_high << 16);",
+             "}"]
+    oz_n = 2 if n in (4, 3) else 1
+    lines.append(f"sr_vwrite(s, {_arr(vreg_indices(vd, oz_n))}, (float*)_d, {oz_n}, s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + " ".join(lines) + " }", None, 0
+
+
+_VFPU4_INTEGER_CONVERSION_FORMS = {
+    27: _vfpu4_vs2i, 28: _vfpu4_vi2uc, 29: _vfpu4_vi2c,
+    30: _vfpu4_vi2us, 31: _vfpu4_vi2s,
+}
+
+# vf2i
+def _vfpu4_vf2i(addr, w, options, delay_branch_pc):
+    jump = (w >> 21) & 0x1F
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    di, si = vreg_indices(vd, n), vreg_indices(vs, n)
+    imm = (w >> 16) & 0x1F
+    lines = [
+        f"float _s[4]; uint32_t _d[4]; const uint8_t _di[{n}]={{{','.join(str(x) for x in di)}}};",
+        f"sr_vread(_s, s, {_arr(si)}, {n}, s->vfpuCtrl[0]);",
+        f"for (int _i = 0; _i < {n}; _i++)",
+        f"    _d[_i] = sr_vfpu_to_word(_s[_i], {jump - 16}u, {imm}u);"
+    ]
+    lines.append(
+        f"for (int _i = 0; _i < {n}; _i++) if (!((s->vfpuCtrl[2] >> (8 + _i)) & 1u)) s->vi[_di[_i]] = _d[_i];{_EAT}"
+    )
+    return "{ " + " ".join(lines) + " }", None, 0
+
+# vi2f
+def _vfpu4_vi2f(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    di, si = vreg_indices(vd, n), vreg_indices(vs, n)
+    imm = (w >> 16) & 0x1F
+    mult = 1.0 / float(1 << imm)
+    mult_str = f"{mult:.9g}"
+    if "." not in mult_str and "e" not in mult_str:
+        mult_str += ".0f"
+    else:
+        mult_str += "f"
+    lines = [
+        f"int32_t _s[4]; float _d[4];",
+        f"sr_vread((float*)_s, s, {_arr(si)}, {n}, s->vfpuCtrl[0]);",
+        f"for (int _i = 0; _i < {n}; _i++) _d[_i] = (float)_s[_i] * {mult_str};",
+        f"sr_vwrite(s, {_arr(di)}, _d, {n}, s->vfpuCtrl[2]);{_EAT}"
+    ]
+    return "{ " + " ".join(lines) + " }", None, 0
+
+def _vfpu4_vv2op(addr, w, options, delay_branch_pc):
+    optype = (w >> 16) & 0x1F
+    handler = _VFPU4_VV2OP_FORMS.get(optype)
+    if handler is None:
         raise Unsupported(f"VV2Op optype {optype} at 0x{addr:08x}")
-    # lvl.q/lvr.q/svl.q/svr.q: their left/right merge behavior lives in the
-    # single-step interpreter so codegen cannot accidentally treat them as aligned lv.q.
-    # MEASURED (PSP-A3-11): they bypass alignment guarding with width 0, exactly
-    # like lwl/lwr/swl/swr, so lle_cpu leaves this emission unchanged.
-    if op == 0x35 or op == 0x3d:
-        base = f"({R(rs(w))} + {simm(w & 0xFFFFFFFC)})"
-        # Guest code pages are not guaranteed to remain mapped in the runtime image.
-        # Pass the instruction captured from the ELF directly instead of asking dispatch
-        # to reread it from MEM[pc] (which can be zero after loader/data overlays).
-        run = _vfpu_interp_stmt(addr, w)
-        return run, (base if op == 0x3d else None), (16 if op == 0x3d else 0)
-    # lv.q / sv.q. Aligned accesses stay native; a dynamic alignment violation is
-    # delegated to the same authoritative decoder as the explicit left/right forms.
-    # MEASURED (PSP-A3-09/10): quads need 16-byte alignment with the load/store
-    # code, so under --lle-cpu the same sr_cpu_guard_access() call as scalars
-    # runs first (width 16); default emission below is unchanged.
-    if op == 0x36 or op == 0x3e:
-        vt = ((w >> 16) & 0x1F) | ((w & 1) << 5)
-        idx = vreg_indices(vt, 4)
-        base = f"({R(rs(w))} + {simm(w & 0xFFFFFFFC)})"
-        if lle_cpu:
-            in_delay = 1 if delay_branch_pc is not None else 0
-            branch = G(delay_branch_pc) if delay_branch_pc is not None else "0u"
-            is_store = 1 if op == 0x3e else 0
-            guard = (f"if (sr_cpu_guard_access(s, _a, 16u, {is_store}, "
-                     f"{G(addr)}, {branch}, {in_delay}u)) {{ sr_end(s, 0u, 0); return; }} ")
-            if op == 0x36:  # lv.q
-                parts = " ".join(f"s->vi[{idx[i]}] = MEM_R32(_a + {i*4});" for i in range(4))
-                return (f"{{ uint32_t _a = {base}; {guard}if((_a&15u)==0 && sr_guest_span_readable(_a,16u)){{ {parts} }}else{{"
-                        f"{_vfpu_interp_stmt(addr, w)} }} }}"), None, 0
-            parts = " ".join(f"MEM_W32_PC(_a + {i*4}, s->vi[{idx[i]}], {G(addr)});" for i in range(4))
-            return (f"{{ uint32_t _a = {base}; {guard}if((_a&15u)==0 && sr_guest_span_writable(_a,16u)){{ {parts} }}else{{"
-                    f"{_vfpu_interp_stmt(addr, w)} }} }}"), base, 16  # sv.q
-        if op == 0x36:  # lv.q
-            # The whole 16-byte span must be readable before any destination
-            # lane commits. A straddling/wrapped aligned span falls back to the
-            # authoritative interpreter, which rejects it all-or-nothing.
-            parts = " ".join(f"s->vi[{idx[i]}] = MEM_R32(_a + {i*4});" for i in range(4))
-            return (f"{{ uint32_t _a = {base}; if((_a&15u)==0 && sr_guest_span_readable(_a,16u)){{ {parts} }}else{{"
-                    f"{_vfpu_interp_stmt(addr, w)} }} }}"), None, 0
+    return handler(addr, w, options, delay_branch_pc)
+
+
+def _vfpu4_vv2op_basic(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    di, si = vreg_indices(vd, n), vreg_indices(vs, n)
+    optype = (w >> 16) & 0x1F
+    per = {0: "_s[_i]", 1: "fabsf(_s[_i])", 2: "-_s[_i]",
+           4: "(_s[_i]<=0.0f?0.0f:(_s[_i]>1.0f?1.0f:_s[_i]))",
+           5: "(_s[_i]<-1.0f?-1.0f:(_s[_i]>1.0f?1.0f:_s[_i]))"}[optype]
+    body = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
+            f"for(int _i=0;_i<{n};_i++) _d[_i]={per}; "
+            + _nanv(addr, "vv2op.s", vd, "_d", n, "_s", n, options=options)
+            + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+
+
+def _vfpu4_vv2op_transcendental(addr, w, options, delay_branch_pc):
+    # Optype 28 is vrexp2, which a PSP-3000 measured as exp2(-x) (PSP-VFPU-TRANSCENDENTAL-001,
+    # 2026-10-15), not a negated exp2. The other negated entries (25, 27, 29, 30, 31) are
+    # encodings no probe has covered; they keep the negation of the positive operation.
+    trans = {16: "sr_vfpu_rcp(_s[_i])", 17: "sr_vfpu_rsqrt(_s[_i])",
+             18: "sr_vfpu_sin(_s[_i])", 19: "sr_vfpu_cos(_s[_i])",
+             20: "sr_vfpu_exp2(_s[_i])", 21: "sr_vfpu_log2(_s[_i])",
+             22: "sr_vfpu_sqrt(_s[_i])", 23: "sr_vfpu_asin(_s[_i])",
+             24: "-sr_vfpu_rcp(_s[_i])", 25: "-sr_vfpu_rsqrt(_s[_i])",
+             26: "-sr_vfpu_sin(_s[_i])", 27: "-sr_vfpu_cos(_s[_i])",
+             28: "sr_vfpu_exp2(-_s[_i])", 29: "-sr_vfpu_log2(_s[_i])",
+             30: "-sr_vfpu_sqrt(_s[_i])", 31: "-sr_vfpu_asin(_s[_i])"}
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    di, si = vreg_indices(vd, n), vreg_indices(vs, n)
+    optype = (w >> 16) & 0x1F
+    body = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
+            f"for(int _i=0;_i<{n};_i++) _d[_i]={trans[optype]}; "
+            + _nanv(addr, _TRANS_NAME[optype], vd, "_d", n, "_s", n,
+                    options=options)
+            + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+
+
+def _vfpu4_vv2op_constant(addr, w, options, delay_branch_pc):
+    vd = w & 0x7F
+    n = vec_size(w)
+    di = vreg_indices(vd, n)
+    optype = (w >> 16) & 0x1F
+    val = "0.0f" if optype == 6 else "1.0f"
+    body = (f"float _d[4]; for(int _i=0;_i<{n};_i++) _d[_i]={val}; "
+            f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+
+
+def _vfpu4_vv2op_identity(addr, w, options, delay_branch_pc):
+    vd = w & 0x7F
+    n = vec_size(w)
+    di = vreg_indices(vd, n)
+    offmask = 3 if n >= 3 else 1
+    off = vd & offmask
+    vals = ",".join("1.0f" if i == off else "0.0f" for i in range(n))
+    body = f"float _d[4]={{{vals}}}; sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}"
+    return "{ " + body + " }", None, 0
+
+
+_VFPU4_VV2OP_FORMS = {
+    0: _vfpu4_vv2op_basic, 1: _vfpu4_vv2op_basic, 2: _vfpu4_vv2op_basic,
+    4: _vfpu4_vv2op_basic, 5: _vfpu4_vv2op_basic,
+    16: _vfpu4_vv2op_transcendental, 17: _vfpu4_vv2op_transcendental,
+    18: _vfpu4_vv2op_transcendental, 19: _vfpu4_vv2op_transcendental,
+    20: _vfpu4_vv2op_transcendental, 21: _vfpu4_vv2op_transcendental,
+    22: _vfpu4_vv2op_transcendental, 23: _vfpu4_vv2op_transcendental,
+    24: _vfpu4_vv2op_transcendental, 25: _vfpu4_vv2op_transcendental,
+    26: _vfpu4_vv2op_transcendental, 27: _vfpu4_vv2op_transcendental,
+    28: _vfpu4_vv2op_transcendental, 29: _vfpu4_vv2op_transcendental,
+    30: _vfpu4_vv2op_transcendental, 31: _vfpu4_vv2op_transcendental,
+    6: _vfpu4_vv2op_constant, 7: _vfpu4_vv2op_constant,
+    3: _vfpu4_vv2op_identity,
+}
+
+_VFPU4_JUMP_FORMS = {
+    0x15: _vfpu4_vcmov,
+    0x02: _vfpu4_vocp,
+    0x03: _vfpu4_vcst,
+    0x01: _vfpu4_integer_conversion,
+    0x10: _vfpu4_vf2i,
+    0x11: _vfpu4_vf2i,
+    0x12: _vfpu4_vf2i,
+    0x13: _vfpu4_vf2i,
+    0x14: _vfpu4_vi2f,
+    0x00: _vfpu4_vv2op,
+}
+
+def _vfpu_left_right_effect(addr, w, options, delay_branch_pc):
+    op = w >> 26
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    _ = vreg_indices(vd, n), vreg_indices(vs, n)
+    base = f"({R(rs(w))} + {simm(w & 0xFFFFFFFC)})"
+    # Guest code pages are not guaranteed to remain mapped in the runtime image.
+    # Pass the instruction captured from the ELF directly instead of asking dispatch
+    # to reread it from MEM[pc] (which can be zero after loader/data overlays).
+    run = _vfpu_interp_stmt(addr, w)
+    return run, (base if op == 0x3d else None), (16 if op == 0x3d else 0)
+def _vfpu_quad_memory_effect(addr, w, options, delay_branch_pc):
+    op = w >> 26
+    handler = _VFPU_QUAD_MEMORY_FORMS.get(op)
+    if handler is None:
+        raise Unsupported(f"VFPU opcode 0x{op:02x} sub 0x{(w >> 23) & 7:x} at 0x{addr:08x}")
+    return handler(addr, w, options, delay_branch_pc)
+
+
+def _vfpu_lvq(addr, w, options, delay_branch_pc):
+    lle_cpu = options.lle_cpu
+    vt = ((w >> 16) & 0x1F) | ((w & 1) << 5)
+    idx = vreg_indices(vt, 4)
+    base = f"({R(rs(w))} + {simm(w & 0xFFFFFFFC)})"
+    if lle_cpu:
+        in_delay = 1 if delay_branch_pc is not None else 0
+        branch = G(delay_branch_pc) if delay_branch_pc is not None else "0u"
+        parts = " ".join(f"s->vi[{idx[i]}] = MEM_R32(_a + {i*4});" for i in range(4))
+        return (f"{{ uint32_t _a = {base}; if (sr_cpu_guard_access(s, _a, 16u, 0, "
+                f"{G(addr)}, {branch}, {in_delay}u)) {{ sr_end(s, 0u, 0); return; }} "
+                f"if((_a&15u)==0 && sr_guest_span_readable(_a,16u)){{ {parts} }}else{{"
+                f"{_vfpu_interp_stmt(addr, w)} }} }}"), None, 0
+    # The whole 16-byte span must be readable before any destination lane commits.
+    parts = " ".join(f"s->vi[{idx[i]}] = MEM_R32(_a + {i*4});" for i in range(4))
+    return (f"{{ uint32_t _a = {base}; if((_a&15u)==0 && sr_guest_span_readable(_a,16u)){{ {parts} }}else{{"
+            f"{_vfpu_interp_stmt(addr, w)} }} }}"), None, 0
+
+
+def _vfpu_svq(addr, w, options, delay_branch_pc):
+    lle_cpu = options.lle_cpu
+    vt = ((w >> 16) & 0x1F) | ((w & 1) << 5)
+    idx = vreg_indices(vt, 4)
+    base = f"({R(rs(w))} + {simm(w & 0xFFFFFFFC)})"
+    if lle_cpu:
+        in_delay = 1 if delay_branch_pc is not None else 0
+        branch = G(delay_branch_pc) if delay_branch_pc is not None else "0u"
         parts = " ".join(f"MEM_W32_PC(_a + {i*4}, s->vi[{idx[i]}], {G(addr)});" for i in range(4))
-        return (f"{{ uint32_t _a = {base}; if((_a&15u)==0 && sr_guest_span_writable(_a,16u)){{ {parts} }}else{{"
-                f"{_vfpu_interp_stmt(addr, w)} }} }}"), base, 16  # sv.q
-    # lv.s / sv.s. MEASURED (PSP-A3-08): singles need 4-byte alignment (AdEL),
-    # so under --lle-cpu the same sr_cpu_guard_access() call as scalars runs
-    # first (width 4); default emission below is unchanged.
-    if op == 0x32 or op == 0x3a:
-        vt = ((w >> 16) & 0x1F) | ((w & 3) << 5)
-        i0 = vreg_indices(vt, 1)[0]
-        off = (w & 0xFFFC)
-        off = off - 0x10000 if off & 0x8000 else off
-        addr_e = f"({R(rs(w))} + {off})"
-        if lle_cpu:
-            in_delay = 1 if delay_branch_pc is not None else 0
-            branch = G(delay_branch_pc) if delay_branch_pc is not None else "0u"
-            if op == 0x32:  # lv.s
-                return (f"{{ uint32_t _ea = {R(rs(w))} + {off}; "
-                        f"if (sr_cpu_guard_access(s, _ea, 4u, 0, {G(addr)}, {branch}, {in_delay}u)) "
-                        f"{{ sr_end(s, 0u, 0); return; }} s->vi[{i0}] = MEM_R32(_ea); }}"), None, 0
-            return (f"{{ uint32_t _ea = {R(rs(w))} + {off}; "
-                    f"if (sr_cpu_guard_access(s, _ea, 4u, 1, {G(addr)}, {branch}, {in_delay}u)) "
-                    f"{{ sr_end(s, 0u, 0); return; }} MEM_W32_PC(_ea, s->vi[{i0}], {G(addr)}); }}"), addr_e, 4  # sv.s
-        if op == 0x32:  # lv.s
-            return f"s->vi[{i0}] = MEM_R32({addr_e});", None, 0
-        return f"MEM_W32_PC({addr_e}, s->vi[{i0}], {G(addr)});", addr_e, 4  # sv.s
-    # COP2 mfc2/mtc2
-    if op == 0x12:
-        sub = (w >> 21) & 0x1F
-        imm = w & 0xFF
-        # mfv/mfvc into $zero has no architectural effect (MIPS discards r0 writes), whatever
-        # register is read; `mfvc $zero, 255` (0x486000ff) is a compiler VFPU-sync idiom. The
-        # interpreter completes it the same way, so both lanes agree (#326).
-        if sub == 3 and rt(w) == 0:
-            return "/* mfv/mfvc $zero: no architectural effect */", None, 0
-        if sub not in (3, 7) or imm >= 144:
-            raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
-        if imm < 128:
-            vidx = vreg_indices(imm, 1)[0]
-            src, dst = f"s->vi[{vidx}]", f"s->vi[{vidx}]"
-        else:
-            src = dst = f"s->vfpuCtrl[{imm - 128}]"
-        if sub == 3:    # mfv/mfvc
-            return wr(rt(w), src), None, 0
-        if sub == 7:    # mtv/mtvc
-            return f"{dst} = {R(rt(w))};", None, 0
-    # VFPU0 / VFPU1
+        return (f"{{ uint32_t _a = {base}; if (sr_cpu_guard_access(s, _a, 16u, 1, "
+                f"{G(addr)}, {branch}, {in_delay}u)) {{ sr_end(s, 0u, 0); return; }} "
+                f"if((_a&15u)==0 && sr_guest_span_writable(_a,16u)){{ {parts} }}else{{"
+                f"{_vfpu_interp_stmt(addr, w)} }} }}"), base, 16
+    parts = " ".join(f"MEM_W32_PC(_a + {i*4}, s->vi[{idx[i]}], {G(addr)});" for i in range(4))
+    return (f"{{ uint32_t _a = {base}; if((_a&15u)==0 && sr_guest_span_writable(_a,16u)){{ {parts} }}else{{"
+            f"{_vfpu_interp_stmt(addr, w)} }} }}"), base, 16  # sv.q
+
+
+_VFPU_QUAD_MEMORY_FORMS = {0x36: _vfpu_lvq, 0x3E: _vfpu_svq}
+
+
+def _vfpu_single_memory_effect(addr, w, options, delay_branch_pc):
+    op = w >> 26
+    handler = _VFPU_SINGLE_MEMORY_FORMS.get(op)
+    if handler is None:
+        raise Unsupported(f"VFPU opcode 0x{op:02x} sub 0x{(w >> 23) & 7:x} at 0x{addr:08x}")
+    return handler(addr, w, options, delay_branch_pc)
+
+
+def _vfpu_lvs(addr, w, options, delay_branch_pc):
+    lle_cpu = options.lle_cpu
+    vt = ((w >> 16) & 0x1F) | ((w & 3) << 5)
+    i0 = vreg_indices(vt, 1)[0]
+    off = (w & 0xFFFC)
+    off = off - 0x10000 if off & 0x8000 else off
+    addr_e = f"({R(rs(w))} + {off})"
+    if lle_cpu:
+        in_delay = 1 if delay_branch_pc is not None else 0
+        branch = G(delay_branch_pc) if delay_branch_pc is not None else "0u"
+        return (f"{{ uint32_t _ea = {R(rs(w))} + {off}; "
+                f"if (sr_cpu_guard_access(s, _ea, 4u, 0, {G(addr)}, {branch}, {in_delay}u)) "
+                f"{{ sr_end(s, 0u, 0); return; }} s->vi[{i0}] = MEM_R32(_ea); }}"), None, 0
+    return f"s->vi[{i0}] = MEM_R32({addr_e});", None, 0
+
+
+def _vfpu_svs(addr, w, options, delay_branch_pc):
+    lle_cpu = options.lle_cpu
+    vt = ((w >> 16) & 0x1F) | ((w & 3) << 5)
+    i0 = vreg_indices(vt, 1)[0]
+    off = (w & 0xFFFC)
+    off = off - 0x10000 if off & 0x8000 else off
+    addr_e = f"({R(rs(w))} + {off})"
+    if lle_cpu:
+        in_delay = 1 if delay_branch_pc is not None else 0
+        branch = G(delay_branch_pc) if delay_branch_pc is not None else "0u"
+        return (f"{{ uint32_t _ea = {R(rs(w))} + {off}; "
+                f"if (sr_cpu_guard_access(s, _ea, 4u, 1, {G(addr)}, {branch}, {in_delay}u)) "
+                f"{{ sr_end(s, 0u, 0); return; }} MEM_W32_PC(_ea, s->vi[{i0}], {G(addr)}); }}"), addr_e, 4
+    return f"MEM_W32_PC({addr_e}, s->vi[{i0}], {G(addr)});", addr_e, 4
+
+
+_VFPU_SINGLE_MEMORY_FORMS = {0x32: _vfpu_lvs, 0x3A: _vfpu_svs}
+def _vfpu_cop2_effect(addr, w, options, delay_branch_pc):
+    sub = (w >> 21) & 0x1F
+    imm = w & 0xFF
+    # mfv/mfvc into $zero has no architectural effect (MIPS discards r0 writes), whatever
+    # register is read; `mfvc $zero, 255` (0x486000ff) is a compiler VFPU-sync idiom. The
+    # interpreter completes it the same way, so both lanes agree (#326).
+    if sub == 3 and rt(w) == 0:
+        return "/* mfv/mfvc $zero: no architectural effect */", None, 0
+    if sub not in (3, 7) or imm >= 144:
+        raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
+    if imm < 128:
+        vidx = vreg_indices(imm, 1)[0]
+        src, dst = f"s->vi[{vidx}]", f"s->vi[{vidx}]"
+    else:
+        src = dst = f"s->vfpuCtrl[{imm - 128}]"
+    handler = _VFPU_COP2_MOVE_FORMS.get(sub)
+    if handler is None:
+        raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
+    return handler(w, src, dst)
+
+
+def _vfpu_cop2_mfv(w, src, dst):
+    return wr(rt(w), src), None, 0
+
+
+def _vfpu_cop2_mtv(w, src, dst):
+    return f"{dst} = {R(rt(w))};", None, 0
+
+
+_VFPU_COP2_MOVE_FORMS = {3: _vfpu_cop2_mfv, 7: _vfpu_cop2_mtv}
+
+def _vfpu3_effect(addr, w, options, delay_branch_pc):
+    sub = (w >> 23) & 7
+    handler = _VFPU3_FORM_TABLE.get(sub)
+    if handler is None:
+        raise Unsupported(f"VFPU3 sub {sub} at 0x{addr:08x}")
+    return handler(addr, w, options, delay_branch_pc)
+
+def _vfpu3_vcmp(addr, w, options, delay_branch_pc):
+    vd = w & 0x7F
+    vs, vt = (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    n = vec_size(w)
+    _ = vreg_indices(vd, n)
+    si = vreg_indices(vs, n)
+    ti = vreg_indices(vt, n)
+    cond = w & 0xF
+    _C = {0: "0", 1: "_x==_y", 2: "_x<_y", 3: "_x<=_y", 4: "1", 5: "_x!=_y",
+          6: "_x>=_y", 7: "_x>_y", 8: "_x==0.0f", 9: "isnan(_x)", 10: "isinf(_x)",
+          11: "(isnan(_x)||isinf(_x))", 12: "_x!=0.0f", 13: "!isnan(_x)",
+          14: "!isinf(_x)", 15: "!(isnan(_x)||isinf(_x))"}[cond]
+    body = (f"float _a[4],_b[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
+            f"sr_vread(_b,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
+            f"int _cc=0,_or=0,_and=1,_aff=(1<<4)|(1<<5); "
+            f"for(int _i=0;_i<{n};_i++){{ float _x=_a[_i],_y=_b[_i]; (void)_x; (void)_y; int _c=({_C}); "
+            f"_cc|=(_c<<_i);_or|=_c;_and&=_c;_aff|=1<<_i; }} "
+            f"s->vfpuCtrl[3]=(s->vfpuCtrl[3]&~_aff)|((_cc|(_or<<4)|(_and<<5))&_aff);{_EAT}")
+    return "{ " + body + " }", None, 0
+def _vfpu3_minmax(addr, w, options, delay_branch_pc):
     vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
     n = vec_size(w)
     sub = (w >> 23) & 7
     di, si = vreg_indices(vd, n), vreg_indices(vs, n)
-    if op == 0x1b:
-        ti = vreg_indices(vt, n)
-        if sub == 0:  # vcmp
-            cond = w & 0xF
-            _C = {0: "0", 1: "_x==_y", 2: "_x<_y", 3: "_x<=_y", 4: "1", 5: "_x!=_y",
-                  6: "_x>=_y", 7: "_x>_y", 8: "_x==0.0f", 9: "isnan(_x)", 10: "isinf(_x)",
-                  11: "(isnan(_x)||isinf(_x))", 12: "_x!=0.0f", 13: "!isnan(_x)",
-                  14: "!isinf(_x)", 15: "!(isnan(_x)||isinf(_x))"}[cond]
-            body = (f"float _a[4],_b[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
-                    f"sr_vread(_b,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-                    f"int _cc=0,_or=0,_and=1,_aff=(1<<4)|(1<<5); "
-                    f"for(int _i=0;_i<{n};_i++){{ float _x=_a[_i],_y=_b[_i]; (void)_x; (void)_y; int _c=({_C}); "
-                    f"_cc|=(_c<<_i);_or|=_c;_and&=_c;_aff|=1<<_i; }} "
-                    f"s->vfpuCtrl[3]=(s->vfpuCtrl[3]&~_aff)|((_cc|(_or<<4)|(_and<<5))&_aff);{_EAT}")
-            return "{ " + body + " }", None, 0
-        if sub in (2, 3):  # vmin / vmax
-            ismin = "1" if sub == 2 else "0"
-            body = (f"float _a[4],_b[4],_d[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
-                    f"sr_vread(_b,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-                    f"for(int _i=0;_i<{n};_i++){{ int _an=isnan(_a[_i])||isinf(_a[_i]),_bn=isnan(_b[_i])||isinf(_b[_i]); "
-                    f"if(_an||_bn){{ int32_t _ai,_bi,_r; memcpy(&_ai,&_a[_i],4); memcpy(&_bi,&_b[_i],4); "
-                    f"if({ismin}) _r=(_ai<0&&_bi<0)?(_bi<_ai?_ai:_bi):(_ai<_bi?_ai:_bi); "
-                    f"else _r=(_ai<0&&_bi<0)?(_ai<_bi?_ai:_bi):(_bi<_ai?_ai:_bi); memcpy(&_d[_i],&_r,4); }} "
-                    f"else _d[_i]={ismin}?(_a[_i]<_b[_i]?_a[_i]:_b[_i]):(_b[_i]<_a[_i]?_a[_i]:_b[_i]); }} "
-                    + _nanv(addr, "vmin.s" if ismin == "1" else "vmax.s", vd, "_d", n,
-                            "_a", n, "_b", n)
-                    + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-            return "{ " + body + " }", None, 0
-        if sub in (5, 6, 7):  # vscmp / vsge / vslt: compare lanes, write -1/0/1 or 1/0 as floats
-            # PSP VFPU3 (major 0x1B) by bits 25..23: 0 vcmp, 2 vmin, 3 vmax, 5 vscmp, 6 vsge, 7 vslt.
-            # These slots were decoded as vcmovt/vcmovf before 2026-10-10; the conditional moves
-            # are the VFPU4 vcmov (jump 0x15) handled above. The flagship's quaternion slerp uses
-            # vsge to build its sign term (2 * (dot >= 0) - 1), and the wrong decode multiplied its
-            # dot product by stale scratch lanes, which is the one-frame skinned-model corruption
-            # of issue #69. vsge and vslt treat a NaN operand as unordered and write 0.0 (a
-            # denormal operand of theirs is UNMEASURED and keeps the host float compare). vscmp
-            # compares raw words: a PSP-3000 orders each lane by sign and magnitude of the bit
-            # patterns after flushing a denormal to a zero of its sign, so +0 equals -0, NaN vs
-            # 1.5 writes +1.0, 1.5 vs NaN writes -1.0, -NaN vs 1.5 writes -1.0, NaNs order
-            # above infinity and by payload, and 0x00000001 vs 0 writes 0.0, at every width
-            # (PSP-VFPU-CMP-001, measured 2026-10-15; PSP-HLE-ISSUES-001, captured 2026-10-24,
-            # not acceptance-eligible). src/rt/vfpu_interp.c (vscmp_lane) is the twin.
-            name = {5: "vscmp.s", 6: "vsge.s", 7: "vslt.s"}[sub]
-            mag_a = "(int64_t)(_ab&0x7fffffffu)"
-            mag_b = "(int64_t)(_bb&0x7fffffffu)"
-            expr = {5: ("{ uint32_t _ab,_bb; memcpy(&_ab,&_a[_i],4); memcpy(&_bb,&_b[_i],4); "
-                        "if((_ab&0x7f800000u)==0u) _ab&=0x80000000u; "
-                        "if((_bb&0x7f800000u)==0u) _bb&=0x80000000u; "
-                        f"int64_t _ka=(_ab>>31)?-{mag_a}:{mag_a},_kb=(_bb>>31)?-{mag_b}:{mag_b}; "
-                        "_d[_i]=(_ka<_kb)?-1.0f:((_ka>_kb)?1.0f:0.0f); }"),
-                    6: "_d[_i]=(_a[_i]>=_b[_i])?1.0f:0.0f;",
-                    7: "_d[_i]=(_a[_i]<_b[_i])?1.0f:0.0f;"}[sub]
-            body = (f"float _a[4],_b[4],_d[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
-                    f"sr_vread(_b,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-                    f"for(int _i=0;_i<{n};_i++) {expr} "
-                    + _nanv(addr, name, vd, "_d", n, "_a", n, "_b", n)
-                    + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-            return "{ " + body + " }", None, 0
-        raise Unsupported(f"VFPU3 sub {sub} at 0x{addr:08x}")
-    if op == 0x3c and sub == 7 and ((w >> 21) & 0x1F) == 28:
-        which = (w >> 16) & 0xF
-        if which in (3, 6, 7):
-            side = n
-            writes = []
-            for j in range(side):
-                for i in range(side):
-                    if which == 3:    val = "1.0f" if i == j else "0.0f"
-                    elif which == 6:  val = "0.0f"
-                    else:             val = "1.0f"
-                    writes.append(f"s->v[{mreg_index(vd, side, j, i)}]={val};")
-            return "{ " + " ".join(writes) + _EAT + " }", None, 0
-        if which == 0:  # vmmov
-            side = n
-            writes = []
-            for row in range(side - 1):
-                for col in range(side):
-                    writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = s->v[{mreg_index(vs, side, col, row)}];")
-            last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
-            last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
-            writes.append(f"float _s[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
-            writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _s, {side}, s->vfpuCtrl[2]);")
-            return "{ " + " ".join(writes) + _EAT + " }", None, 0
-        if which <= 7:  # vmscl
-            scalar_vidx = vreg_indices(which & 7, 1)[0]
-            side = n
-            writes = []
-            writes.append(f"float _sc = s->v[{scalar_vidx}];")
-            for row in range(side - 1):
-                for col in range(side):
-                    writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = s->v[{mreg_index(vs, side, col, row)}] * _sc;")
-            last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
-            last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
-            writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
-            writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-            writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = _s[_i] * _t[_i];")
-            writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side))
-            writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
-            return "{ " + " ".join(writes) + _EAT + " }", None, 0
+    ti = vreg_indices(vt, n)
+    ismin = "1" if sub == 2 else "0"
+    body = (f"float _a[4],_b[4],_d[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
+            f"sr_vread(_b,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
+            f"for(int _i=0;_i<{n};_i++){{ int _an=isnan(_a[_i])||isinf(_a[_i]),_bn=isnan(_b[_i])||isinf(_b[_i]); "
+            f"if(_an||_bn){{ int32_t _ai,_bi,_r; memcpy(&_ai,&_a[_i],4); memcpy(&_bi,&_b[_i],4); "
+            f"if({ismin}) _r=(_ai<0&&_bi<0)?(_bi<_ai?_ai:_bi):(_ai<_bi?_ai:_bi); "
+            f"else _r=(_ai<0&&_bi<0)?(_ai<_bi?_ai:_bi):(_bi<_ai?_ai:_bi); memcpy(&_d[_i],&_r,4); }} "
+            f"else _d[_i]={ismin}?(_a[_i]<_b[_i]?_a[_i]:_b[_i]):(_b[_i]<_a[_i]?_a[_i]:_b[_i]); }} "
+            + _nanv(addr, "vmin.s" if ismin == "1" else "vmax.s", vd, "_d", n,
+                    "_a", n, "_b", n, options=options)
+            + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+def _vfpu3_sign_compare(addr, w, options, delay_branch_pc):
+    vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    n = vec_size(w)
+    sub = (w >> 23) & 7
+    di, si = vreg_indices(vd, n), vreg_indices(vs, n)
+    ti = vreg_indices(vt, n)
+    # PSP VFPU3 (major 0x1B) by bits 25..23: 0 vcmp, 2 vmin, 3 vmax, 5 vscmp, 6 vsge, 7 vslt.
+    # These slots were decoded as vcmovt/vcmovf before 2026-10-10; the conditional moves
+    # are the VFPU4 vcmov (jump 0x15) handled above. The flagship's quaternion slerp uses
+    # vsge to build its sign term (2 * (dot >= 0) - 1), and the wrong decode multiplied its
+    # dot product by stale scratch lanes, which is the one-frame skinned-model corruption
+    # of issue #69. vsge and vslt treat a NaN operand as unordered and write 0.0 (a
+    # denormal operand of theirs is UNMEASURED and keeps the host float compare). vscmp
+    # compares raw words: a PSP-3000 orders each lane by sign and magnitude of the bit
+    # patterns after flushing a denormal to a zero of its sign, so +0 equals -0, NaN vs
+    # 1.5 writes +1.0, 1.5 vs NaN writes -1.0, -NaN vs 1.5 writes -1.0, NaNs order
+    # above infinity and by payload, and 0x00000001 vs 0 writes 0.0, at every width
+    # (PSP-VFPU-CMP-001, measured 2026-10-15; PSP-HLE-ISSUES-001, captured 2026-10-24,
+    # not acceptance-eligible). src/rt/vfpu_interp.c (vscmp_lane) is the twin.
+    name = {5: "vscmp.s", 6: "vsge.s", 7: "vslt.s"}[sub]
+    mag_a = "(int64_t)(_ab&0x7fffffffu)"
+    mag_b = "(int64_t)(_bb&0x7fffffffu)"
+    expr = {5: ("{ uint32_t _ab,_bb; memcpy(&_ab,&_a[_i],4); memcpy(&_bb,&_b[_i],4); "
+                "if((_ab&0x7f800000u)==0u) _ab&=0x80000000u; "
+                "if((_bb&0x7f800000u)==0u) _bb&=0x80000000u; "
+                f"int64_t _ka=(_ab>>31)?-{mag_a}:{mag_a},_kb=(_bb>>31)?-{mag_b}:{mag_b}; "
+                "_d[_i]=(_ka<_kb)?-1.0f:((_ka>_kb)?1.0f:0.0f); }"),
+            6: "_d[_i]=(_a[_i]>=_b[_i])?1.0f:0.0f;",
+            7: "_d[_i]=(_a[_i]<_b[_i])?1.0f:0.0f;"}[sub]
+    body = (f"float _a[4],_b[4],_d[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
+            f"sr_vread(_b,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
+            f"for(int _i=0;_i<{n};_i++) {expr} "
+            + _nanv(addr, name, vd, "_d", n, "_a", n, "_b", n, options=options)
+            + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+_VFPU3_FORM_TABLE = {
+    0: _vfpu3_vcmp,
+    2: _vfpu3_minmax,
+    3: _vfpu3_minmax,
+    5: _vfpu3_sign_compare,
+    6: _vfpu3_sign_compare,
+    7: _vfpu3_sign_compare,
+}
+
+def _vfpu_matrix_control_effect(addr, w, options, delay_branch_pc):
+    which = (w >> 16) & 0xF
+    handler = _VFPU_MATRIX_CONTROL_FORMS.get(which)
+    if handler is None:
         raise Unsupported(f"VFPUMatrix1 which {which} at 0x{addr:08x}")
-    if op == 0x3c and sub == 5:
-        si, ti, di = vreg_indices(vs, n), vreg_indices(vt, n), vreg_indices(vd, n)
-        if n == 4:
-            body = (f"float _s[4],_t[4],_d[4]; sr_vread(_s,s,{_arr(si)},4,s->vfpuCtrl[0]); "
-                    f"sr_vread(_t,s,{_arr(ti)},4,s->vfpuCtrl[1]); "
-                    f"_d[0]=_s[0]*_t[3]+_s[1]*_t[2]-_s[2]*_t[1]+_s[3]*_t[0]; "
-                    f"_d[1]=-_s[0]*_t[2]+_s[1]*_t[3]+_s[2]*_t[0]+_s[3]*_t[1]; "
-                    f"_d[2]=_s[0]*_t[1]-_s[1]*_t[0]+_s[2]*_t[3]+_s[3]*_t[2]; "
-                    f"_d[3]=-_s[0]*_t[0]-_s[1]*_t[1]-_s[2]*_t[2]+_s[3]*_t[3]; "
-                    + _nanv(addr, "vqmul.q", vd, "_d", 4, "_s", 4, "_t", 4)
-                    + f"sr_vwrite(s,{_arr(di)},_d,4,s->vfpuCtrl[2]);{_EAT}")
-            return "{ " + body + " }", None, 0
-        if n == 3:
-            body = (f"float _s[4],_t[4],_d[4]; sr_vread(_s,s,{_arr(si)},3,s->vfpuCtrl[0]); "
-                    f"sr_vread(_t,s,{_arr(ti)},3,s->vfpuCtrl[1]); "
-                    f"_d[0]=_s[1]*_t[2]-_s[2]*_t[1]; _d[1]=_s[2]*_t[0]-_s[0]*_t[2]; _d[2]=_s[0]*_t[1]-_s[1]*_t[0]; "
-                    + _nanv(addr, "vcrsp.t", vd, "_d", 3, "_s", 3, "_t", 3)
-                    + f"sr_vwrite(s,{_arr(di)},_d,3,s->vfpuCtrl[2]);{_EAT}")
-            return "{ " + body + " }", None, 0
-        raise Unsupported(f"vcrsp/vqmul size {n} at 0x{addr:08x}")
-    if op == 0x3c and sub == 7 and ((w >> 21) & 0x1F) == 29:
-        di = vreg_indices(vd, n)
-        ang = vreg_indices(vs, 1)[0]
-        imm = (w >> 16) & 0x1F
-        neg = "-" if (imm & 0x10) else ""
-        sine_lane, cos_lane = (imm >> 2) & 3, imm & 3
-        lines = [f"float _a=s->v[{ang}]; float _si={neg}sr_vfpu_sin(_a),_co=sr_vfpu_cos(_a); float _d[4]={{0,0,0,0}};"]
-        if sine_lane == cos_lane:
-            for i in range(n):
-                lines.append(f"_d[{i}]=_si;")
-            lines.append(f"_d[{cos_lane}]=_co;")
-        else:
-            lines.append(f"_d[{sine_lane}]=_si; _d[{cos_lane}]=_co;")
-        if ((vd >> 2) & 7) == ((vs >> 2) & 7):
-            dnames=vreg_names(vd,n)
-            if vs in dnames:
-                lines.append(f"_d[{cos_lane}]=sr_vfpu_cos(_d[{dnames.index(vs)}]);")
-        # PSP ignores destination saturation and write-mask bits for the cosine lane.
-        dmask=(3<<cos_lane)|(1<<(8+cos_lane))
-        lines.append(_nanv(addr, "vrot", vd, "_d", n, "(&_a)", 1)
-                     + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]&~0x{dmask:x}u);{_EAT}")
-        return "{ " + " ".join(lines) + " }", None, 0
-    if (op == 0x18 and sub in (0, 1, 7)) or (op == 0x19 and sub == 0):
-        ti = vreg_indices(vt, n)
-        oper = {(0x18, 0): "+", (0x18, 1): "-", (0x18, 7): "/", (0x19, 0): "*"}[(op, sub)]
-        body = (f"float _s[4],_t[4],_d[4]; "
-                f"sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
-                f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-                f"for(int _i=0;_i<{n};_i++) _d[_i]=_s[_i]{oper}_t[_i]; "
-                + _nanv(addr, _BINOP_NAME[(op, sub)], vd, "_d", n, "_s", n, "_t", n)
-                + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-        return "{ " + body + " }", None, 0
-    if op == 0x19 and sub == 1:  # vdot
-        ti = vreg_indices(vt, n)
-        dst = vreg_indices(vd, 1)[0]
-        body = (f"float _s[4],_t[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
-                f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-                f"float _d=0.0f; for(int _i=0;_i<{n};_i++) _d+=_s[_i]*_t[_i]; "
-                f"float _dd[1]={{_d}};"
-                + _nanv(addr, "vdot.s", vd, "_dd", 1, "_s", n, "_t", n)
-                + f" sr_vwrite(s,{_arr([dst])},_dd,1,s->vfpuCtrl[2]);{_EAT}")
-        return "{ " + body + " }", None, 0
-    if op == 0x19 and sub == 4:  # vhdp
-        ti = vreg_indices(vt, n)
-        dst = vreg_indices(vd, 1)[0]
-        body = (f"float _s[4],_t[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
-                f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-                f"float _d=0.0f; for(int _i=0;_i<{n - 1};_i++) _d+=_s[_i]*_t[_i]; "
-                f"_d+=1.0f*_t[{n - 1}]; _d=isnan(_d)?fabsf(_d):_d; "
-                f"float _dd[1]={{_d}};"
-                + _nanv(addr, "vhdp.s", vd, "_dd", 1, "_s", n, "_t", n)
-                + f" sr_vwrite(s,{_arr([dst])},_dd,1,s->vfpuCtrl[2]);{_EAT}")
-        return "{ " + body + " }", None, 0
-    if op == 0x19 and sub == 5:  # vcrs
-        if n != 3:
-            raise Unsupported(f"vcrs size {n} at 0x{addr:08x}")
-        ti = vreg_indices(vt, n)
-        di = vreg_indices(vd, n)
-        ss, ts = (1, 2, 0, 3), (2, 0, 1, 3)
-        muls = " ".join(f"_d[{i}]=_s[{ss[i]}]*_t[{ts[i]}];" for i in range(n))
-        body = (f"float _s[4],_t[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
-                f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); {muls} "
-                + _nanv(addr, "vcrs.t", vd, "_d", n, "_s", n, "_t", n)
-                + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-        return "{ " + body + " }", None, 0
-    if op == 0x3c and sub == 0:  # vmmul
-        side = vec_size(w)
-        lines = []
-        for a in range(side):
-            for b in range(side):
-                # Accumulate into a local float with one += per term, exactly
-                # matching sr_vfpu_interp's vmmul loop shape. A single chained
-                # expression (0.0f+t0+t1+...) compiles to a different addss
-                # operand order at -O0, and x86-64 SSE selects the *first* NaN
-                # source on NaN+NaN, so the two paths can pick different NaN
-                # payloads for exotic inputs (issue #40). Same term order, so
-                # finite results are bit-identical.
-                lines.append(f"float _m{a}_{b}=0.0f;")
-                for c in range(side):
-                    lines.append(f"_m{a}_{b}+=s->v[{mreg_index(vs, side, b, c)}]*s->v[{mreg_index(vt, side, a, c)}];")
-        writes = " ".join(f"s->v[{mreg_index(vd, side, a, b)}]=_m{a}_{b};"
-                          for a in range(side) for b in range(side))
-        return "{ " + " ".join(lines) + " " + _nan_matrix(
-            addr, "vmmul", vd,
-            [f"_m{a}_{b}" for a in range(side) for b in range(side)],
-            [f"s->v[{mreg_index(vs, side, b, a)}]" for a in range(side) for b in range(side)]
-            + [f"s->v[{mreg_index(vt, side, a, b)}]" for a in range(side) for b in range(side)],
-        ) + " " + writes + _EAT + " }", None, 0
-    if op == 0x3c and sub in (1, 2, 3):  # vtfm
-        ins = sub
-        side = ins + 1
-        tn = min(n, ins + 1)
-        ti = vreg_indices(vt, side)
-        di = vreg_indices(vd, side)
-        lines = []
+    return handler(addr, w, options, delay_branch_pc)
+
+
+def _vfpu_matrix_identity(addr, w, options, delay_branch_pc):
+    vd = w & 0x7F
+    side = vec_size(w)
+    writes = []
+    for j in range(side):
         for i in range(side):
-            # Same accumulate-into-local shape as sr_vfpu_interp's vtfm (see the
-            # vmmul comment above for the NaN payload rationale, issue #40).
-            lines.append(f"float _v{i}=0.0f;")
-            for k in range(tn):
-                lines.append(f"_v{i}+=s->v[{mreg_index(vs, side, i, k)}]*s->v[{ti[k]}];")
-            if ins >= n:
-                lines.append(f"_v{i}+=s->v[{mreg_index(vs, side, i, ins)}];")
-        writes = " ".join(f"s->v[{di[i]}]=_v{i};" for i in range(side))
-        return "{ " + " ".join(lines) + " " + _nan_matrix(
-            addr, "vtfm", vd,
-            [f"_v{i}" for i in range(side)],
-            [f"s->v[{mreg_index(vs, side, i, k)}]" for i in range(side) for k in range(side)],
-            [f"s->v[{ti[k]}]" for k in range(tn)],
-        ) + " " + writes + _EAT + " }", None, 0
-    if op == 0x19 and sub == 2:  # vscl
-        scalar = vreg_indices(vt, 1)[0]
-        body = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
-                f"float _sc=s->v[{scalar}]; "
-                f"for(int _i=0;_i<{n};_i++) _d[_i]=_s[_i]*_sc; "
-                + _nanv(addr, "vscl.s", vd, "_d", n, "_s", n, "(&_sc)", 1)
-                + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
-        return "{ " + body + " }", None, 0
-    if op == 0x3c and sub == 4:  # vmscl
-        vt = (w >> 16) & 0x7F
-        scalar_vidx = vreg_indices(vt, 1)[0]
-        side = n
-        writes = []
-        writes.append(f"float _sc = s->v[{scalar_vidx}];")
-        for row in range(side - 1):
-            for col in range(side):
-                writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = s->v[{mreg_index(vs, side, col, row)}] * _sc;")
-        last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
-        last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
-        writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
-        writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-        writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = _s[_i] * _t[_i];")
-        writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side))
-        writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
-        return "{ " + " ".join(writes) + _EAT + " }", None, 0
+            val = "1.0f" if i == j else "0.0f"
+            writes.append(f"s->v[{mreg_index(vd, side, j, i)}]={val};")
+    return "{ " + " ".join(writes) + _EAT + " }", None, 0
 
-    raise Unsupported(f"VFPU opcode 0x{op:02x} sub 0x{sub:x} at 0x{addr:08x}")
 
-def _fpu_unary(addr, op, fdv, expr, src):
+def _vfpu_matrix_zero(addr, w, options, delay_branch_pc):
+    vd, side = w & 0x7F, vec_size(w)
+    writes = [f"s->v[{mreg_index(vd, side, j, i)}]=0.0f;"
+              for j in range(side) for i in range(side)]
+    return "{ " + " ".join(writes) + _EAT + " }", None, 0
+
+
+def _vfpu_matrix_one(addr, w, options, delay_branch_pc):
+    vd, side = w & 0x7F, vec_size(w)
+    writes = [f"s->v[{mreg_index(vd, side, j, i)}]=1.0f;"
+              for j in range(side) for i in range(side)]
+    return "{ " + " ".join(writes) + _EAT + " }", None, 0
+
+
+def _vfpu_matrix_move(addr, w, options, delay_branch_pc):
+    vd, vs, side = w & 0x7F, (w >> 8) & 0x7F, vec_size(w)
+    writes = []
+    for row in range(side - 1):
+        for col in range(side):
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = s->v[{mreg_index(vs, side, col, row)}];")
+    last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
+    last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
+    writes.append(f"float _s[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
+    writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _s, {side}, s->vfpuCtrl[2]);")
+    return "{ " + " ".join(writes) + _EAT + " }", None, 0
+
+
+def _vfpu_matrix_scale(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    which, side = (w >> 16) & 0xF, vec_size(w)
+    scalar_vidx = vreg_indices(which & 7, 1)[0]
+    writes = [f"float _sc = s->v[{scalar_vidx}];"]
+    for row in range(side - 1):
+        for col in range(side):
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+    last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
+    last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
+    writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
+    writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
+                        options=options))
+    writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
+    return "{ " + " ".join(writes) + _EAT + " }", None, 0
+
+
+_VFPU_MATRIX_CONTROL_FORMS = {
+    3: _vfpu_matrix_identity, 6: _vfpu_matrix_zero, 7: _vfpu_matrix_one,
+    0: _vfpu_matrix_move, 1: _vfpu_matrix_scale, 2: _vfpu_matrix_scale,
+    4: _vfpu_matrix_scale, 5: _vfpu_matrix_scale,
+}
+def _vfpu_cross_product_effect(addr, w, options, delay_branch_pc):
+    n = vec_size(w)
+    handler = _VFPU_CROSS_SIZE_FORMS.get(n)
+    if handler is None:
+        raise Unsupported(f"vcrsp/vqmul size {n} at 0x{addr:08x}")
+    return handler(addr, w, options, delay_branch_pc)
+
+
+def _vfpu_vqmul_quaternion(addr, w, options, delay_branch_pc):
+    vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    si, ti, di = vreg_indices(vs, 4), vreg_indices(vt, 4), vreg_indices(vd, 4)
+    body = (f"float _s[4],_t[4],_d[4]; sr_vread(_s,s,{_arr(si)},4,s->vfpuCtrl[0]); "
+            f"sr_vread(_t,s,{_arr(ti)},4,s->vfpuCtrl[1]); "
+            + "".join(f"_d[{lane}]={_vf_chain(terms)}; " for lane, terms in enumerate(_VQMUL_TERMS))
+            + _nanv(addr, "vqmul.q", vd, "_d", 4, "_s", 4, "_t", 4, options=options)
+            + f"sr_vwrite(s,{_arr(di)},_d,4,s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+
+
+def _vfpu_vcrsp_triple(addr, w, options, delay_branch_pc):
+    vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    si, ti, di = vreg_indices(vs, 3), vreg_indices(vt, 3), vreg_indices(vd, 3)
+    body = (f"float _s[4],_t[4],_d[4]; sr_vread(_s,s,{_arr(si)},3,s->vfpuCtrl[0]); "
+            f"sr_vread(_t,s,{_arr(ti)},3,s->vfpuCtrl[1]); "
+            + "".join(f"_d[{lane}]={_vf_chain(terms)}; " for lane, terms in enumerate(_VCRSP_TERMS))
+            + _nanv(addr, "vcrsp.t", vd, "_d", 3, "_s", 3, "_t", 3, options=options)
+            + f"sr_vwrite(s,{_arr(di)},_d,3,s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+
+
+_VFPU_CROSS_SIZE_FORMS = {4: _vfpu_vqmul_quaternion, 3: _vfpu_vcrsp_triple}
+def _vfpu_rotation_effect(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    _ = vreg_indices(vd, n), vreg_indices(vs, n)
+    di = vreg_indices(vd, n)
+    ang = vreg_indices(vs, 1)[0]
+    imm = (w >> 16) & 0x1F
+    neg = "-" if (imm & 0x10) else ""
+    sine_lane, cos_lane = (imm >> 2) & 3, imm & 3
+    lines = [f"float _a=s->v[{ang}]; float _si={neg}sr_vfpu_sin(_a),_co=sr_vfpu_cos(_a); float _d[4]={{0,0,0,0}};"]
+    if sine_lane == cos_lane:
+        for i in range(n):
+            lines.append(f"_d[{i}]=_si;")
+        lines.append(f"_d[{cos_lane}]=_co;")
+    else:
+        lines.append(f"_d[{sine_lane}]=_si; _d[{cos_lane}]=_co;")
+    if ((vd >> 2) & 7) == ((vs >> 2) & 7):
+        dnames=vreg_names(vd,n)
+        if vs in dnames:
+            lines.append(f"_d[{cos_lane}]=sr_vfpu_cos(_d[{dnames.index(vs)}]);")
+    # PSP ignores destination saturation and write-mask bits for the cosine lane.
+    dmask=(3<<cos_lane)|(1<<(8+cos_lane))
+    lines.append(_nanv(addr, "vrot", vd, "_d", n, "(&_a)", 1, options=options)
+                 + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]&~0x{dmask:x}u);{_EAT}")
+    return "{ " + " ".join(lines) + " }", None, 0
+def _vfpu_binary_arithmetic(addr, w, options, delay_branch_pc):
+    op = w >> 26
+    vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    n = vec_size(w)
+    sub = (w >> 23) & 7
+    di, si = vreg_indices(vd, n), vreg_indices(vs, n)
+    ti = vreg_indices(vt, n)
+    # Call literals, so tools/recomp_helper_inventory.py sees every helper the emitter writes.
+    call = {(0x18, 0): "sr_vf_add(", (0x18, 1): "sr_vf_sub(", (0x18, 7): "sr_vf_div(",
+            (0x19, 0): "sr_vf_mul("}[(op, sub)]
+    body = (f"float _s[4],_t[4],_d[4]; "
+            f"sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
+            f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
+            f"for(int _i=0;_i<{n};_i++) _d[_i]={call}_s[_i],_t[_i]); "
+            + _nanv(addr, _BINOP_NAME[(op, sub)], vd, "_d", n, "_s", n, "_t", n,
+                    options=options)
+            + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+def _vfpu_dot_effect(addr, w, options, delay_branch_pc):
+    vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    n = vec_size(w)
+    _ = vreg_indices(vd, n)
+    si = vreg_indices(vs, n)
+    ti = vreg_indices(vt, n)
+    dst = vreg_indices(vd, 1)[0]
+    body = (f"float _s[4],_t[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
+            f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
+            f"float _d=0.0f; for(int _i=0;_i<{n};_i++) _d=sr_vf_add(_d,sr_vf_mul(_s[_i],_t[_i])); "
+            f"float _dd[1]={{_d}};"
+            + _nanv(addr, "vdot.s", vd, "_dd", 1, "_s", n, "_t", n, options=options)
+            + f" sr_vwrite(s,{_arr([dst])},_dd,1,s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+def _vfpu_horizontal_dot_effect(addr, w, options, delay_branch_pc):
+    vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    n = vec_size(w)
+    _ = vreg_indices(vd, n)
+    si = vreg_indices(vs, n)
+    ti = vreg_indices(vt, n)
+    dst = vreg_indices(vd, 1)[0]
+    body = (f"float _s[4],_t[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
+            f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
+            f"float _d=0.0f; for(int _i=0;_i<{n - 1};_i++) _d=sr_vf_add(_d,sr_vf_mul(_s[_i],_t[_i])); "
+            f"_d=sr_vf_add(_d,sr_vf_mul(1.0f,_t[{n - 1}])); _d=isnan(_d)?fabsf(_d):_d; "
+            f"float _dd[1]={{_d}};"
+            + _nanv(addr, "vhdp.s", vd, "_dd", 1, "_s", n, "_t", n, options=options)
+            + f" sr_vwrite(s,{_arr([dst])},_dd,1,s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+def _vfpu_cross_effect(addr, w, options, delay_branch_pc):
+    vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    n = vec_size(w)
+    _ = vreg_indices(vd, n)
+    si = vreg_indices(vs, n)
+    if n != 3:
+        raise Unsupported(f"vcrs size {n} at 0x{addr:08x}")
+    ti = vreg_indices(vt, n)
+    di = vreg_indices(vd, n)
+    ss, ts = (1, 2, 0, 3), (2, 0, 1, 3)
+    muls = " ".join(f"_d[{i}]=sr_vf_mul(_s[{ss[i]}],_t[{ts[i]}]);" for i in range(n))
+    body = (f"float _s[4],_t[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
+            f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); {muls} "
+            + _nanv(addr, "vcrs.t", vd, "_d", n, "_s", n, "_t", n, options=options)
+            + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+def _vfpu_matrix_multiply_effect(addr, w, options, delay_branch_pc):
+    vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    n = vec_size(w)
+    _ = vreg_indices(vd, n), vreg_indices(vs, n)
+    side = vec_size(w)
+    lines = []
+    for a in range(side):
+        for b in range(side):
+            # Accumulate into a local float one term at a time, in the same
+            # term order as sr_vfpu_interp's vmmul loop, through the sr_vf_*
+            # helpers: x86-64 SSE keeps the *first* NaN source on NaN+NaN and
+            # an optimiser may swap the operands of a plain + or *, so the two
+            # paths could keep different NaN payloads for exotic inputs (issue
+            # #40 at -O0, issue #326 at -O1/-O2). Finite results are unchanged.
+            lines.append(f"float _m{a}_{b}=0.0f;")
+            for c in range(side):
+                lines.append(f"_m{a}_{b}=sr_vf_add(_m{a}_{b},sr_vf_mul(s->v[{mreg_index(vs, side, b, c)}],s->v[{mreg_index(vt, side, a, c)}]));")
+    writes = " ".join(f"s->v[{mreg_index(vd, side, a, b)}]=_m{a}_{b};"
+                      for a in range(side) for b in range(side))
+    return "{ " + " ".join(lines) + " " + _nan_matrix(
+        addr, "vmmul", vd,
+        [f"_m{a}_{b}" for a in range(side) for b in range(side)],
+        [f"s->v[{mreg_index(vs, side, b, a)}]" for a in range(side) for b in range(side)]
+        + [f"s->v[{mreg_index(vt, side, a, b)}]" for a in range(side) for b in range(side)],
+        options=options,
+    ) + " " + writes + _EAT + " }", None, 0
+def _vfpu_matrix_transform_effect(addr, w, options, delay_branch_pc):
+    vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    n = vec_size(w)
+    sub = (w >> 23) & 7
+    _ = vreg_indices(vd, n), vreg_indices(vs, n)
+    ins = sub
+    side = ins + 1
+    tn = min(n, ins + 1)
+    ti = vreg_indices(vt, side)
+    di = vreg_indices(vd, side)
+    lines = []
+    for i in range(side):
+        # Same accumulate-into-local shape as sr_vfpu_interp's vtfm (see the
+        # vmmul comment above for the NaN payload rationale, issue #40).
+        lines.append(f"float _v{i}=0.0f;")
+        for k in range(tn):
+            lines.append(f"_v{i}=sr_vf_add(_v{i},sr_vf_mul(s->v[{mreg_index(vs, side, i, k)}],s->v[{ti[k]}]));")
+        if ins >= n:
+            lines.append(f"_v{i}=sr_vf_add(_v{i},s->v[{mreg_index(vs, side, i, ins)}]);")
+    writes = " ".join(f"s->v[{di[i]}]=_v{i};" for i in range(side))
+    return "{ " + " ".join(lines) + " " + _nan_matrix(
+        addr, "vtfm", vd,
+        [f"_v{i}" for i in range(side)],
+        [f"s->v[{mreg_index(vs, side, i, k)}]" for i in range(side) for k in range(side)],
+        [f"s->v[{ti[k]}]" for k in range(tn)], options=options,
+    ) + " " + writes + _EAT + " }", None, 0
+def _vfpu_scale_effect(addr, w, options, delay_branch_pc):
+    vd, vs, vt = w & 0x7F, (w >> 8) & 0x7F, (w >> 16) & 0x7F
+    n = vec_size(w)
+    di, si = vreg_indices(vd, n), vreg_indices(vs, n)
+    scalar = vreg_indices(vt, 1)[0]
+    body = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
+            f"float _sc=s->v[{scalar}]; "
+            f"for(int _i=0;_i<{n};_i++) _d[_i]=sr_vf_mul(_s[_i],_sc); "
+            + _nanv(addr, "vscl.s", vd, "_d", n, "_s", n, "(&_sc)", 1, options=options)
+            + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
+    return "{ " + body + " }", None, 0
+def _vfpu_matrix_scale_effect(addr, w, options, delay_branch_pc):
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    n = vec_size(w)
+    _ = vreg_indices(vd, n), vreg_indices(vs, n)
+    vt = (w >> 16) & 0x7F
+    scalar_vidx = vreg_indices(vt, 1)[0]
+    side = n
+    writes = []
+    writes.append(f"float _sc = s->v[{scalar_vidx}];")
+    for row in range(side - 1):
+        for col in range(side):
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+    last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
+    last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
+    writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
+    writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
+                         options=options))
+    writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
+    return "{ " + " ".join(writes) + _EAT + " }", None, 0
+_VFPU_OPCODE_FORM_TABLE = {
+    (0x37, None): _vfpu_control_immediate,
+    (0x34, None): _vfpu4_effect,
+    (0x35, None): _vfpu_left_right_effect,
+    (0x3d, None): _vfpu_left_right_effect,
+    (0x36, None): _vfpu_quad_memory_effect,
+    (0x3e, None): _vfpu_quad_memory_effect,
+    (0x32, None): _vfpu_single_memory_effect,
+    (0x3a, None): _vfpu_single_memory_effect,
+    (0x12, None): _vfpu_cop2_effect,
+    (0x1b, None): _vfpu3_effect,
+    (0x3c, (7, 28)): _vfpu_matrix_control_effect,
+    (0x3c, (5, None)): _vfpu_cross_product_effect,
+    (0x3c, (7, 29)): _vfpu_rotation_effect,
+    (0x18, 0): _vfpu_binary_arithmetic,
+    (0x18, 1): _vfpu_binary_arithmetic,
+    (0x18, 7): _vfpu_binary_arithmetic,
+    (0x19, 0): _vfpu_binary_arithmetic,
+    (0x19, 1): _vfpu_dot_effect,
+    (0x19, 4): _vfpu_horizontal_dot_effect,
+    (0x19, 5): _vfpu_cross_effect,
+    (0x3c, (0, None)): _vfpu_matrix_multiply_effect,
+    (0x3c, (1, None)): _vfpu_matrix_transform_effect,
+    (0x3c, (2, None)): _vfpu_matrix_transform_effect,
+    (0x3c, (3, None)): _vfpu_matrix_transform_effect,
+    (0x19, 2): _vfpu_scale_effect,
+    (0x3c, (4, None)): _vfpu_matrix_scale_effect,
+}
+
+
+def _fpu_unary(addr, op, fdv, expr, src, options=None):
     """One scalar FPU result computed from a single source operand.
 
     Without --nan-trap this is the bare assignment the emitter has always
     produced. With it the operand is sampled into a local first, so the report
     names what the instruction read even when fd == fs.
     """
-    if not OPTIONS.nan_trap:
+    options = _options_for_call(options)
+    if not options.nan_trap:
         return f"{F(fdv)} = {expr};"
     return (f"{{ float _a = {src}; {F(fdv)} = {expr};"
-            + _nanf(addr, op, fdv, F(fdv), ["_a"]) + " }")
+            + _nanf(addr, op, fdv, F(fdv), ["_a"], options=options) + " }")
 
 
-def fpu_effect(addr, w):
+def fpu_effect(addr, w, options=None):
+    options = _options_for_call(options)
     fmt = rs(w); ft = rt(w); fs = rd(w); fdv = sa(w)
     if fmt == 0x00: return wr(rt(w), f"s->fi[{fs}]"), None, 0          # mfc1
     if fmt == 0x02: return wr(rt(w), f"({fs} == 31 ? s->fcr31 : ({fs} == 0 ? 0x00003351u : 0u))"), None, 0  # cfc1
@@ -2447,10 +3271,10 @@ def fpu_effect(addr, w):
         # still canonicalizes to 0x7fc00000.
         if fn == 0x00:
             stmt = f"{{ float _a={F(fs)},_b={F(ft)}; {F(fdv)} = sr_fpu_add_s(_a,_b,s->fcr31);"
-            return stmt + _nanf(addr, "add.s", fdv, F(fdv), ["_a", "_b"]) + " }", None, 0
+            return stmt + _nanf(addr, "add.s", fdv, F(fdv), ["_a", "_b"], options=options) + " }", None, 0
         if fn == 0x01:
             stmt = f"{{ float _a={F(fs)},_b={F(ft)}; {F(fdv)} = sr_fpu_sub_s(_a,_b,s->fcr31);"
-            return stmt + _nanf(addr, "sub.s", fdv, F(fdv), ["_a", "_b"]) + " }", None, 0
+            return stmt + _nanf(addr, "sub.s", fdv, F(fdv), ["_a", "_b"], options=options) + " }", None, 0
         if fn == 0x02:
             return (f"{{ const uint32_t _ab=s->fi[{fs}],_bb=s->fi[{ft}]; "
                     f"float _a={F(fs)},_b={F(ft)}; "
@@ -2458,15 +3282,15 @@ def fpu_effect(addr, w):
                     f"(((_bb & 0x7fffffffu) == 0x7f800000u && (_ab & 0x7fffffffu) == 0u))) "
                     f"s->fi[{fdv}]=0x7fc00000u; "
                     f"else {F(fdv)}=sr_fpu_mul_s(_a,_b,s->fcr31);"
-                    + _nanf(addr, "mul.s", fdv, F(fdv), ["_a", "_b"])
+                    + _nanf(addr, "mul.s", fdv, F(fdv), ["_a", "_b"], options=options)
                     + " }"), None, 0
         if fn == 0x03:
             stmt = f"{{ float _a={F(fs)},_b={F(ft)}; {F(fdv)} = sr_fpu_div_s(_a,_b,s->fcr31);"
-            return stmt + _nanf(addr, "div.s", fdv, F(fdv), ["_a", "_b"]) + " }", None, 0
-        if fn == 0x04: return _fpu_unary(addr, "sqrt.s", fdv, f"sqrtf({F(fs)})", F(fs)), None, 0
-        if fn == 0x05: return _fpu_unary(addr, "abs.s", fdv, f"fabsf({F(fs)})", F(fs)), None, 0
-        if fn == 0x06: return _fpu_unary(addr, "mov.s", fdv, F(fs), F(fs)), None, 0
-        if fn == 0x07: return _fpu_unary(addr, "neg.s", fdv, f"-{F(fs)}", F(fs)), None, 0
+            return stmt + _nanf(addr, "div.s", fdv, F(fdv), ["_a", "_b"], options=options) + " }", None, 0
+        if fn == 0x04: return _fpu_unary(addr, "sqrt.s", fdv, f"sqrtf({F(fs)})", F(fs), options), None, 0
+        if fn == 0x05: return _fpu_unary(addr, "abs.s", fdv, f"fabsf({F(fs)})", F(fs), options), None, 0
+        if fn == 0x06: return _fpu_unary(addr, "mov.s", fdv, F(fs), F(fs), options), None, 0
+        if fn == 0x07: return _fpu_unary(addr, "neg.s", fdv, f"-{F(fs)}", F(fs), options), None, 0
         if fn in (0x0C, 0x0D, 0x0E, 0x0F, 0x24):
             return f"s->fi[{fdv}] = sr_fpu_to_word({F(fs)}, 0x{fn:02x}u, s->fcr31);", None, 0
         if fn >= 0x30:
@@ -2563,7 +3387,7 @@ def stale_fnv1a(words):
 
 
 def stale_block_for_function(elf, addr, ranges, known, resume_owners=None,
-                             dispatch_boundaries=None):
+                             dispatch_boundaries=None, options=None):
     """Compact translation-time record for one emitted function.
 
     Returns (entry_word, nwords, digest) over the contiguous translated run
@@ -2572,13 +3396,14 @@ def stale_block_for_function(elf, addr, ranges, known, resume_owners=None,
     rather than hashing bytes the build did not translate into this body.
     Every hashed word is a translated PC, so a firing check always names
     bytes the build actually translated. Used only behind --stale-detect. """
+    options = _options_for_call(options)
     entry = read32(elf, addr)
     if entry is None:
         return None
     insns, _, _ = function_flow(
         elf, addr, ranges, known,
         resume_owners=resume_owners or {},
-        dispatch_boundaries=dispatch_boundaries or set())
+        dispatch_boundaries=dispatch_boundaries or set(), options=options)
     words = head_run_words(elf, addr, insns)
     if not words:
         return None
@@ -2629,20 +3454,21 @@ def continues_to_next_word(w):
 
 
 class _WalkBudgetExceeded(Exception):
-    """The unsplit walk of one entry passed OPTIONS.region_split_threshold instructions."""
+    """The unsplit walk of one entry passed its configured instruction budget."""
 
 
 def function_flow(elf, start, ranges, known, resume_owners=None,
-                  dispatch_boundaries=None):
+                  dispatch_boundaries=None, options=None):
     """Ownership of the body for the entry ``start``: (insns, labels, continuations).
 
-    Every caller gets the same answer for the same entry. The body is split at other
-    entries when OPTIONS.region_split_threshold says so (see its comment).
+    Every caller gets the same answer for the same entry and CodegenOptions object. The body
+    is split at other entries when its region-split threshold says so (see its field comment).
     """
+    options = _options_for_call(options)
     # One membership test per walked instruction: index the spans once (same answers as
     # in_ranges over the list), as analyze.trace_function does; both walks below share it.
     ranges = span_index(ranges)
-    threshold = OPTIONS.region_split_threshold
+    threshold = options.region_split_threshold
     if threshold is not None and threshold > 0:
         try:
             return _walk_body(elf, start, ranges, known, resume_owners,
@@ -2815,10 +3641,77 @@ def _walk_body(elf, start, ranges, known, resume_owners, dispatch_boundaries,
             pc = next_pc
     return insns, labels, continuations
 
-def _plain_line(addr, w, trace_w, lle_cpu=False, delay_branch_pc=None):
+# ---- Unverified VFPU forms in a title's translation (#1877) ------------------------------
+# tools/verification_ledger.py generates src/rt/hle_evidence.h, which holds the (mask, match)
+# word patterns of the VFPU forms with no recorded evidence. The build lists, per pattern, the
+# lowest-addressed word it translated; the generated start-up code passes the list to
+# sr_vfpu_report_unverified_uses, so the run log names the forms once and no check runs on the
+# hot path. Nothing here changes the translation of any instruction.
+EVIDENCE_HEADER = os.path.join(os.path.dirname(_TOOLS_DIRECTORY), "src", "rt", "hle_evidence.h")
+_VFPU_FORM_ROW_RE = re.compile(r'\{\s*0x([0-9a-fA-F]{8})u,\s*0x([0-9a-fA-F]{8})u,\s*"([^"]*)"\s*\}')
+_UNVERIFIED_VFPU_USES: dict[int, tuple[int, int]] = {}
+_UNVERIFIED_VFPU_COLLECTING = [False]
+# Opcodes that can hold an unverified form; the pattern scan runs only for these.
+_UNVERIFIED_VFPU_OPCODES = frozenset((0x32, 0x34, 0x36, 0x3a, 0x3e, 0x3f))
+
+
+def unverified_vfpu_patterns(header_path=None):
+    """The ``(mask, match, forms)`` rows of ``sr_vfpu_unverified_forms`` in the generated header."""
+    with open(header_path or EVIDENCE_HEADER, encoding="utf-8") as handle:
+        text = handle.read()
+    start = text.find("sr_vfpu_unverified_forms[")
+    end = text.find("};", start)
+    if start < 0 or end < 0:
+        raise ValueError(f"{header_path or EVIDENCE_HEADER}: no sr_vfpu_unverified_forms table")
+    return [(int(m.group(1), 16), int(m.group(2), 16), m.group(3))
+            for m in _VFPU_FORM_ROW_RE.finditer(text, start, end) if m.group(1) != "00000000"]
+
+
+def reset_unverified_vfpu_uses():
+    """Start collecting for one translation. Outside one (the VFPU census classifies words
+    through normal_line while it generates the table this reads) nothing is collected."""
+    _UNVERIFIED_VFPU_USES.clear()
+    _UNVERIFIED_VFPU_COLLECTING[0] = True
+
+
+def stop_collecting_unverified_vfpu_uses():
+    _UNVERIFIED_VFPU_COLLECTING[0] = False
+
+
+def note_unverified_vfpu(addr, w, patterns=None):
+    """Record ``w`` at ``addr`` when it is in an unverified VFPU pattern (the lowest address wins)."""
+    if patterns is None:
+        patterns = _unverified_patterns_cached()
+    for index, (mask, match, _forms) in enumerate(patterns):
+        if w & mask == match:
+            if index not in _UNVERIFIED_VFPU_USES or addr < _UNVERIFIED_VFPU_USES[index][0]:
+                _UNVERIFIED_VFPU_USES[index] = (addr, w)
+            return
+
+
+_PATTERNS_CACHE: list[list[tuple[int, int, str]]] = []
+
+
+def _unverified_patterns_cached():
+    if not _PATTERNS_CACHE:
+        _PATTERNS_CACHE.append(unverified_vfpu_patterns())
+    return _PATTERNS_CACHE[0]
+
+
+def unverified_vfpu_report_lines():
+    """Generated start-up lines that hand the collected words to the runtime, or none."""
+    uses = sorted(_UNVERIFIED_VFPU_USES.values())
+    if not uses:
+        return []
+    items = ", ".join(f"{{ 0x{w:08x}u, 0x{a:08x}u }}" for a, w in uses)
+    return [f"    sr_vfpu_report_unverified_uses((const SrVfpuUse[]){{ {items} }}, {len(uses)}u);"]
+
+
+def _plain_line(addr, w, trace_w, lle_cpu=None, delay_branch_pc=None, options=None):
+    options = _options_for_call(options, lle_cpu=lle_cpu)
     try:
-        eff, saddr, ssize = effect(addr, w, lle_cpu=lle_cpu,
-                                   delay_branch_pc=delay_branch_pc)
+        eff, saddr, ssize = effect(addr, w, delay_branch_pc=delay_branch_pc,
+                                   options=options)
     except Unsupported:
         # Keep the owning function translatable when the static emitter does not know a
         # VFPU form. Invoke the single-step interpreter with the ELF opcode literal;
@@ -2827,13 +3720,16 @@ def _plain_line(addr, w, trace_w, lle_cpu=False, delay_branch_pc=None):
             raise
         eff = _vfpu_interp_stmt(addr, w)
         saddr, ssize = None, 0
+    if _UNVERIFIED_VFPU_COLLECTING[0] and (w >> 26) in _UNVERIFIED_VFPU_OPCODES:
+        note_unverified_vfpu(addr, w)
     if saddr is SELF_TRACED:
         return f"    sr_begin(s, {G(addr)}, 0x{trace_w:08x}u); {eff}"
     return f"    sr_begin(s, {G(addr)}, 0x{trace_w:08x}u); {eff} sr_end(s, {saddr if saddr else '0u'}, {ssize});"
 
-def normal_line(addr, w, lle_cpu=False, delay_branch_pc=None):
-    line = _plain_line(addr, w, w, lle_cpu=lle_cpu,
-                       delay_branch_pc=delay_branch_pc)
+def normal_line(addr, w, lle_cpu=None, delay_branch_pc=None, options=None):
+    options = _options_for_call(options, lle_cpu=lle_cpu)
+    line = _plain_line(addr, w, w, delay_branch_pc=delay_branch_pc,
+                       options=options)
     if w is not None and _enhancement_boundary(addr):
         # One logic update begins here: count it before the stock statement runs.
         line = f"    if (nk_enhancement_on()) {{ nk_enhancement_updates++; }}\n{line}"
@@ -2841,11 +3737,11 @@ def normal_line(addr, w, lle_cpu=False, delay_branch_pc=None):
     if rw is None:
         return line
     word_line = None
-    if rw["kind"] == "word":
+    if rw["kind"] in ("word", "word_even"):
         # The trace hook keeps the stock word: guest memory still holds it.
-        word_line = _plain_line(addr, rw["word"], w, lle_cpu=lle_cpu,
-                                delay_branch_pc=delay_branch_pc)
-    return _enhanced_line(rw, line, word_line)
+        word_line = _plain_line(addr, rw["word"], w, delay_branch_pc=delay_branch_pc,
+                                options=options)
+    return _enhanced_line(rw, line, word_line, ENHANCEMENT_SITES[addr]["id"], addr)
 
 class _PromotedLine:
     """GPRs one instruction reads and writes while it is translated with promotion."""
@@ -2904,13 +3800,14 @@ class RegisterPromotion:
         self.in_span = False
         return lines
 
-    def try_line(self, addr, w, lle_cpu=False):
+    def try_line(self, addr, w, lle_cpu=None, options=None):
         """The promoted lines for one instruction, or None to emit it the legacy way."""
+        options = _options_for_call(options, lle_cpu=lle_cpu)
         global _PROMO_LINE
         collector = _PromotedLine()
         _PROMO_LINE = collector
         try:
-            text = _plain_line(addr, w, w, lle_cpu=lle_cpu)
+            text = _plain_line(addr, w, w, options=options)
         except Unsupported:
             text = None
         finally:
@@ -2962,8 +3859,8 @@ def _flow_return(resumable=False):
     """Leave the native body when a helper set flow metadata (spec 3.4)."""
     return "if (s->flow_kind != 0u) { return; }"
 
-def delay_slot_lines(ds, dsw, branch_pc, lle_cpu=False,
-                     resumable=False, indent="    "):
+def delay_slot_lines(ds, dsw, branch_pc, lle_cpu=None,
+                     resumable=False, indent="    ", options=None):
     """Emission for one branch delay slot (spec 3.4).
 
     Ordinary words emit exactly as before. A delay-slot SYSCALL/BREAK in LLE
@@ -2972,6 +3869,8 @@ def delay_slot_lines(ds, dsw, branch_pc, lle_cpu=False,
     reason. A control word in a delay slot is unpredictable on MIPS hardware
     and fails closed here, matching the interpreter. Returns a list of lines.
     """
+    options = _options_for_call(options, lle_cpu=lle_cpu)
+    lle_cpu = options.lle_cpu
     if dsw is None:
         raise Unsupported(f"unreadable delay slot at 0x{ds:08x}")
     if is_control(dsw):
@@ -2979,7 +3878,7 @@ def delay_slot_lines(ds, dsw, branch_pc, lle_cpu=False,
     dop, dfn = dsw >> 26, dsw & 0x3F
     if dop == 0 and dfn == 0x0C:  # syscall in delay slot
         if not lle_cpu:
-            return [normal_line(ds, dsw)]
+            return [normal_line(ds, dsw, options=options)]
         code = (dsw >> 6) & 0xFFFFF
         _ = code
         return [
@@ -2991,7 +3890,7 @@ def delay_slot_lines(ds, dsw, branch_pc, lle_cpu=False,
         ]
     if dop == 0 and dfn == 0x0D:  # break in delay slot
         if not lle_cpu:
-            return [normal_line(ds, dsw)]
+            return [normal_line(ds, dsw, options=options)]
         code = (dsw >> 6) & 0xFFFFF
         _ = code
         return [
@@ -3014,8 +3913,10 @@ def delay_slot_lines(ds, dsw, branch_pc, lle_cpu=False,
             f"{indent}sr_end(s, 0u, 0);",
             f"{indent}{_flow_return(resumable)}",
         ]
-    return [normal_line(ds, dsw, lle_cpu=lle_cpu,
-                        delay_branch_pc=branch_pc if lle_cpu else None)]
+    line = normal_line(ds, dsw, delay_branch_pc=branch_pc if lle_cpu else None,
+                       options=options)
+    # A $sp load the frame walk does not own carries its run-time verdict (#1935).
+    return [_sp_load_check(line, indent) if ds in _BODY_SP_CHECKS else line]
 
 # ---------------------------------------------------------------------------
 # Offline static verification trace simulation (--static-verify).
@@ -3052,6 +3953,7 @@ _SV_SPECIAL = {0x0006e9bc, 0x0006ea1c, 0x00108630, 0x0010433c}
 
 # GUEST_PATCHES -- reviewed, traceable per-guest instruction overrides.
 # Each entry carries a rationale + issue id so every hand-patch is auditable.
+# Patch kinds have different payload keys, so the audit reads their fields by kind.
 # kind:
 #   "cond"   : force the branch condition to `value` (always/never taken) and
 #              optionally inject `stmt`.
@@ -3059,7 +3961,7 @@ _SV_SPECIAL = {0x0006e9bc, 0x0006ea1c, 0x00108630, 0x0010433c}
 _GUEST_PATCH_KEYS: set[int] = set()
 # 0x0004cdc8 (forced host0 asset route) retired under #363 (2026-10-27): with the UMD block
 # device readable in sectors, the title's own archive reader serves every asset.
-GUEST_PATCHES = {
+GUEST_PATCHES: dict[int, dict[str, Any]] = {
 }
 # Static-verify exclusions: the four stand-alone specials plus every patched addr.
 _SV_SPECIAL |= _GUEST_PATCH_KEYS
@@ -3176,9 +4078,10 @@ def _sv_step(w, regs, written):
         for i in range(1, 32):
             regs[i] = None
 
-def sv_plan(elf, insns, labels, hst_profile=False):
+def sv_plan(elf, insns, labels, hst_profile=False, options=None):
     """Pre-compute {flush_addr: [(reg, expected_value), ...]} for one function."""
-    if not (insns and OPTIONS.static_verify):
+    options = _options_for_call(options)
+    if not (insns and options.static_verify):
         return {}
     if hst_profile and (insns & _SV_SPECIAL):
         return {}
@@ -3246,12 +4149,659 @@ static void sr_sv_check(CpuState *s, uint32_t pc, int reg, uint32_t expect) {
     }
 }"""
 
-def emitter_seed_check(elf, profile=None, omitted=(), stack_census=False):
+@dataclass(frozen=True)
+class _BodyContext:
+    """What the steps of one ``emit_function`` share once its flow is known; read only.
+
+    ``labels`` already carries the planned skip targets and the entry label, ``dup_slot_skips``
+    maps a control instruction to the word its inline delay slot lets control jump over, and
+    ``resumable`` is the final answer, after a body that loads ``$sp`` has claimed every exit,
+    and ``guest_exits`` are the exits of a body that claimed only some (#1935).
+    ``sp_kept`` is a body whose guest-owned TAIL exits record the entry $sp while every
+    $sp load it ran stayed in its frame, and ``sp_checks`` are those loads (_sp_load_check).
+    """
+    elf: object
+    ranges: object
+    known: object
+    resume_owners: dict
+    dispatch_boundaries: object
+    labels: set
+    continuations: dict
+    dup_slot_skips: dict
+    hst_profile: bool
+    lle_cpu: bool
+    resumable: bool
+    stack_census: bool
+    start: int
+    guest_exits: frozenset
+    sp_kept: bool = False
+    sp_checks: frozenset = frozenset()
+    options: CodegenOptions | None = None
+
+
+def _check_delay_slot_labels(elf, start, insns, labels, continuations, ranges):
+    """Refuse a label on a delay slot whose owner leaves the slot without an owned successor."""
+    for label in labels:
+        # A label on the delay slot of a transfer that never falls through runs the slot
+        # as an ordinary word; when that word goes on to the next one, the walk owns that
+        # path (_walk_body terminator_slots). Without it the label's C would fall into
+        # whatever block the address order puts next.
+        owner_word = read32(elf, label - 4) if label - 4 in insns else None
+        slot_word = read32(elf, label)
+        if (owner_word is not None and ends_straight_line(label - 4, owner_word)
+                and slot_word is not None and continues_to_next_word(slot_word)
+                and label + 4 not in insns and label not in continuations
+                and in_ranges(label + 4, ranges)):
+            raise AssertionError(
+                f"0x{start:08x}: label 0x{label:08x} on the delay slot of 0x{label - 4:08x} "
+                f"has no owned successor")
+
+
+def _dup_slot_skips(elf, insns, labels):
+    """Map each control instruction whose slot is also a label to the word after that slot."""
+    # A delay slot that is itself a branch target is emitted twice: inline at its
+    # owning control instruction (where it must execute as the slot) and again
+    # under its own label (so branches can land on it).  On fall-through past the
+    # owning instruction, control must NOT run the labelled duplicate: that would
+    # execute the slot twice for non-likely branches and jal/jalr, and would run
+    # an annulled slot for not-taken likely branches.  Plan a skip target at
+    # slot+4 for every such site and jump over the duplicate explicitly.
+    # (Observed in this image at f_00022d7c's tail byte-fill: the loop count in
+    # the shared slot was decremented twice per entry, underfilling by one byte
+    # or, for a tail count of exactly 1, wrapping to ~4GiB of writes.)
+    dup_slot_skips = {}
+    for _a in insns:
+        _w = read32(elf, _a)
+        if _w is None or not is_control(_w):
+            continue
+        _op, _fn = _w >> 26, _w & 0x3F
+        if _op == 2 or (_op == 0 and _fn == 0x08) or is_eret(_w):
+            continue  # j / jr / eret never fall through past their slot
+        _ds = _a + 4
+        if _ds in labels and _ds + 4 in insns:
+            dup_slot_skips[_a] = _ds + 4
+    return dup_slot_skips
+
+
+def _emit_hst_patch_site(hst_profile, addr, w, out, consumed):
+    """The ``--profile=hst`` sites that are not a plain word: a fused loop or an abort guard.
+
+    Returns True when the lines appended replace the word's own emission, False when the word
+    is still emitted normally after them. Every site tests ``hst_profile`` itself, so no
+    other profile can reach one (``test_codegen_profile_isolation`` checks the gates).
+    """
+    # LOOP_CAPS retired (F4, 2026-07-11): the table is empty and the emission block
+    # is gone. Every remaining capped loop was statically proven terminating and
+    # verified never-firing across the retained log corpus (docs/audit/F4_LOOPCAPS.md):
+    #   SCAN_CAP    0x000147e0  f_00014788: word-at-a-time strlen (0xfefefeff/0x80808080
+    #               stopword scan). Induction variable a0 increases by 4 every
+    #               iteration; MEM_R32 is bounds-checked, so the loop either finds a
+    #               NUL or traps -- no same-PC spin is possible. The 1024-iteration
+    #               cap silently corrupted strlen for any string >= 4 KiB.
+    #   RSRC_CAP    0x0001b688  f_0001b584: counted loop (s3++ vs callee-saved s0).
+    #               The guarded retry-starvation spin was an allocator-corruption
+    #               symptom. The structural fix is one retail newlib allocator
+    #               backed by its untouched UserSbrk partition block.
+    #   HASHFN_CAP  0x0001b73c  f_0001b73c: pure NUL-terminated string hash
+    #               (monotonic pointer walk) + divu by table size; terminates for
+    #               any terminated string. The cap counted *calls*, not iterations,
+    #               and forged r2=1 (phantom hash) on fire. Never fired.
+    #   RSRC2-6     0x0019357c/0x001935d0/0x00193620/0x00193678/0x001936cc
+    #               f_001934c8: five identical counted loops (s2++ vs u32 count
+    #               reloaded from a descriptor the body never writes). Bounded
+    #               unless callee-save discipline is broken -- which is exactly the
+    #               P0 recompiler chain a cap must not mask. Never fired.
+    #   SENT_CAP    0x001b9570  f_001b94f8: doubly-linked-list unlink-until-sentinel.
+    #               Terminates for any well-formed list; the known list-corruption
+    #               sources (WALKER_CAP truncation, LoadLayout runaway) are gone.
+    #               Never fired.
+    #   SCENELOOP   0x0006dc2c  f_0006dab0: begin/end iterator, r17 += 0x70 until
+    #               r17 == r16 (compiler-emitted `it != end` idiom, always aligned).
+    #               Never fired.
+    #   RESINIT_CAP 0x0005a608  f_0005a500: element-init loop, a2++ vs count in a
+    #               freshly-allocated, correctly-sized disjoint buffer. Bounded
+    #               unless the allocator aliases the descriptor (prevented by the
+    #               unified retail newlib/UserSbrk path). Never fired.
+    #   TABLEWALK/LOOKUP/STRLIST sentinels (0x00102908/0x00102734/0x0019668c): the
+    #               "dedicated blocks" the sentinels pointed at were never
+    #               implemented; the entries were dead configuration.
+    # Cooperative scheduling does not depend on any of this: codegen emits SR_YIELD
+    # on every backward branch and function entry, and the SR_YIELD macro yields on
+    # timeslice expiry, so even a genuinely stuck loop cannot starve other fibers --
+    # it is watchdog-diagnosable by its unique back-edge PC in the thread dump.
+    # If a spin reappears, root-cause it; do not re-cap.
+    #
+    # WALKER_CAP (0x0000095c, f_000008d8) REMOVED in F3: it was an absolute
+    # 2048-hit permanent sentinel on a bounded "apply callback to N elements"
+    # iterator, not a spin detector. A single legitimate table-init call
+    # (RSRC init, hst_recomp_0.c:147346-147360) needs r8=0xc005=49157 iterations
+    # in one call, so the cap tripped mid-init and permanently no-op'd the
+    # iterator, leaving dispatch tables half-populated. The historical allocator
+    # corruption it guarded is fixed at the retail newlib/UserSbrk boundary. See
+    # docs/audit/F3_LOOPCAPS.md.
+    # ARRAY_CAP (0x00100e98) and LISTWALK_CAP (0x0001038c) REMOVED in F3 (second
+    # round, 2026-07-09): both still fired on every boot after WALKER_CAP's removal.
+    # ARRAY_CAP force-broke a loop inside the 0x100xxx menu-layout/registration code
+    # region after an absolute 20000 same-PC iterations — the same "bounded init
+    # mistaken for a spin" failure mode as WALKER_CAP, and a direct candidate for
+    # why dispatch tables (0x3070c0 +0xc/+0x10) remain half-populated. LISTWALK_CAP
+    # broke f_0001034c's next-pointer chain walk on the theory the list could be
+    # circular/corrupt; the known corruption sources upstream (WALKER_CAP truncation,
+    # the LoadLayout runaway) are gone, so the guard's premise is stale. If either
+    # loop genuinely spins again, the watchdog thread-dump PC identifies it uniquely
+    # (0x00100e98 vs 0x0001038c) — root-cause that spin; do not re-cap (see
+    # docs/audit/F3_LOOPCAPS.md and docs/DESIGN_FONT_HLE.md F3 re-scope).
+
+    # MEMSET_FASTPATH: f_0006e9bc's post-alloc zero-fill loop (body 0x6ea28-0x6ea44,
+    # count/base reloaded at 0x6ea1c/0x6ea28). Confirmed by static trace of the lifted
+    # instructions: base (MEM[r16+8]) and count (MEM[r16+0]) are both read-only for the
+    # entire loop body -- nothing between 0x6ea1c and 0x6ea44 writes r16+0 or r16+8 --
+    # so `for (i=0;i<count;i++) base[i]=0` is a provably exact rewrite of the interpreted
+    # per-byte loop as one native pass. This function is called ~100x from the resource-
+    # table init loop at 0x6da44; under one-MIPS-
+    # instruction-per-dispatch interpretation the accumulated SR_YIELD/dispatch overhead
+    # per byte stalls the worker thread past the 1200-vblank watchdog before a second
+    # frame ever presents. Dead-code checked: r3/r4 are never read again after the loop
+    # (L_0006ea48's epilogue only restores r31/r17/r16 from the stack) and r2 (the
+    # function's implicit return value, set by the alloc call at 0x6ea18) is untouched
+    # by the loop, so skipping the interpreted instructions is transparent to the caller.
+    # MEM_W8/MEM_R32 are already bounds-checked (src/rt/recomp.h sr_inrange).  The
+    # fast path now rejects a non-contiguous/overflowing span before any host pointer
+    # is formed; the >1MB warning exists to flag malformed counts without attempting
+    # an unbounded scalar fallback.
+    if hst_profile and addr == 0x0006ea1c:
+        out.append(f"    sr_begin(s, 0x0006ea1cu, 0x{w:08x}u); s->r[3] = MEM_R32(s->r[16] + 0x00000000u); sr_end(s, 0u, 0);")
+        out.append(
+            "    { uint32_t _mf_cnt = s->r[3]; uint32_t _mf_base = MEM_R32(s->r[16] + 0x00000008u);\n"
+            "      if (_mf_cnt > 0x00100000u) fprintf(stderr, \"MEMSET_FASTPATH: large count=0x%x base=0x%x r16=0x%08x MEM[r16+0]=0x%08x MEM[r16+4]=0x%08x MEM[r16+8]=0x%08x ra=0x%08x\\n\", _mf_cnt, _mf_base, s->r[16], (s->r[16]<0x0c000000u?MEM_R32(s->r[16]):0xDEADu), (s->r[16]<0x0c000000u?MEM_R32(s->r[16]+4u):0xDEADu), (s->r[16]<0x0c000000u?MEM_R32(s->r[16]+8u):0xDEADu), s->r[31]);\n"
+            "      if (_mf_cnt > 0 && _mf_cnt < 0x04000000u && sr_guest_span_writable(_mf_base, _mf_cnt)) {\n"
+            "          if (g_sr_heap_watch) sr_heap_note_bulk_write(_mf_base, _mf_cnt, 0x0006ea1cu);\n"
+            "          memset(SR_HOST(SR_DATA_SPAN(_mf_base, _mf_cnt)), 0, _mf_cnt);\n"
+            "      } else {\n"
+            "          if (_mf_cnt) sr_oor(_mf_base, 0u, 1);\n"
+            "      }\n"
+            "      s->r[4] = _mf_cnt; s->r[3] = 0u; }"
+        )
+        for _skip in (0x0006ea20, 0x0006ea24, 0x0006ea28, 0x0006ea2c, 0x0006ea30,
+                      0x0006ea34, 0x0006ea38, 0x0006ea3c, 0x0006ea40, 0x0006ea44):
+            consumed.add(_skip)
+        return True
+
+    # ARRSHIFT_FASTPATH: f_001084b8's element-shift loop (setup 0x108630-0x108654,
+    # body 0x108658-0x108690). Confirmed by static trace of the lifted instructions:
+    # this is a reverse, element-by-element 8-byte block move -- the source pointer
+    # (r6) and dest pointer (r4) both start high and decrement by exactly 8 every
+    # iteration in lockstep, terminating when r6 reaches r5 (the fixed source base
+    # loaded once at 0x108634 and never written again in the loop). The trip count is
+    # exactly n = MEM[r19+4] (read once, at 0x108630, before anything in the loop body
+    # can touch r19+4). This is the classic "grow a packed array, shift n existing
+    # elements into the new buffer" pattern: the code immediately after the loop
+    # (0x108694-0x1086c8) swaps the struct's base/count/capacity fields at r19+0/+4/+8
+    # with the new ones staged on the stack and calls f_00108bf4 (frees the old
+    # buffer) -- realloc-and-shift. A reverse per-element copy over
+    # [src,src+n*8) <-> [dst-n*8,dst) is exactly what memmove() computes (memmove is
+    # correct for either overlap direction, a superset of what the hand-unrolled
+    # reverse loop covers for its one intended direction). Under one-MIPS-instruction-
+    # per-dispatch interpretation this loop was a historical bring-up blocker: the
+    # worker cycles between pc=0x0006517c (an unrelated inlined "r2=r5<<1" leaf called
+    # from elsewhere, just this loop's most recent PCSAMPLE neighbour) and this loop's
+    # own SR_YIELD checkpoint at pc=0x0010868c for the entire watchdog window without
+    # the loop ever finishing. Historical details are retained in the local archive.
+    # Two stack slots track the same trip progress in different units and both must
+    # land on the same final value as the interpreted loop would leave them: MEM[sp+
+    # 0x5c] (decrements by 1/iter) and MEM[sp+0x50] (increments by 1/iter, consumed by
+    # the caller as the new element count at 0x1086c0-0x1086c4). Registers r1-r6's
+    # loop-final values are dead: everything from 0x108694 onward reloads r2/r3 fresh
+    # from memory and overwrites r4/r5/r6 before any further read (confirmed by
+    # reading through to the f_00108bf4 call at 0x1086c8), so only the copied bytes
+    # and the two stack slots need to be reproduced. The r4==0 mid-loop edge case
+    # (dest pointer hits exactly address 0) is not special-cased in the fast path --
+    # it would require the dest range to span across address 0, which cannot happen
+    # for a legitimate guest-RAM pointer -- but the bounds-checked fallback below
+    # still reproduces it exactly if it ever did.
+    if hst_profile and addr == 0x00108630:
+        out.append(f"    sr_begin(s, 0x00108630u, 0x{w:08x}u); s->r[4] = MEM_R32(s->r[19] + 0x00000004u); sr_end(s, 0u, 0);")
+        out.append(
+            "    { uint32_t _as_n = s->r[4];\n"
+            "      uint32_t _as_src_base = MEM_R32(s->r[19] + 0x00000000u);\n"
+            "      uint32_t _as_sp5c0 = MEM_R32(s->r[29] + 0x0000005cu);\n"
+            "      uint32_t _as_sp500 = MEM_R32(s->r[29] + 0x00000050u);\n"
+            "      uint32_t _as_dst_base = MEM_R32(s->r[29] + 0x0000004cu);\n"
+            "      uint32_t _as_dst_hi = _as_dst_base + (_as_sp5c0 << 3);\n"
+            "      if (_as_n > 0x00100000u) fprintf(stderr, \"ARRSHIFT_FASTPATH: large n=0x%x src=0x%x dst_hi=0x%x at f_001084b8 (0x108630)\\n\", _as_n, _as_src_base, _as_dst_hi);\n"
+            "      if (_as_n > 0u) {\n"
+            "          uint32_t _as_dst_lo = _as_dst_hi - (_as_n << 3);\n"
+            "          uint64_t _as_nbytes = (uint64_t)_as_n << 3;\n"
+            "          if (_as_dst_lo < _as_dst_hi && _as_src_base < 0x0c000000u && _as_dst_lo < 0x0c000000u &&\n"
+            "              (uint64_t)_as_src_base + _as_nbytes <= 0x0c000000u && (uint64_t)_as_dst_lo + _as_nbytes <= 0x0c000000u) {\n"
+            "              if (g_sr_heap_watch) sr_heap_note_bulk_write(_as_dst_lo, (uint32_t)_as_nbytes, 0x00108630u);\n"
+            "              memmove(SR_HOST(SR_DATA_SPAN(_as_dst_lo, _as_nbytes)),\n"
+            "                      SR_HOST(SR_DATA_SPAN(_as_src_base, _as_nbytes)), (size_t)_as_nbytes);\n"
+            "          } else {\n"
+            "              for (uint32_t _as_i = 0; _as_i < _as_n; _as_i++) {\n"
+            "                  uint32_t _as_d = _as_dst_hi - 8u * (_as_i + 1u);\n"
+            "                  uint32_t _as_s = _as_src_base + (_as_n - 1u - _as_i) * 8u;\n"
+            "                  if (_as_d != 0u) {\n"
+            "                      MEM_W32(_as_d + 0u, MEM_R32(_as_s + 0u));\n"
+            "                      MEM_W32(_as_d + 4u, MEM_R32(_as_s + 4u));\n"
+            "                  }\n"
+            "              }\n"
+            "          }\n"
+            "      }\n"
+            "      MEM_W32(s->r[29] + 0x0000005cu, _as_sp5c0 - _as_n);\n"
+            "      MEM_W32(s->r[29] + 0x00000050u, _as_sp500 + _as_n);\n"
+            "      s->r[1] = 0u; s->r[5] = _as_src_base; s->r[6] = _as_src_base;\n"
+            "    }"
+        )
+        for _skip in (0x00108634, 0x00108638, 0x0010863c, 0x00108640, 0x00108644, 0x00108648,
+                      0x0010864c, 0x00108650, 0x00108654, 0x00108658, 0x0010865c, 0x00108660,
+                      0x00108664, 0x00108668, 0x0010866c, 0x00108670, 0x00108674, 0x00108678,
+                      0x0010867c, 0x00108680, 0x00108684, 0x00108688, 0x0010868c, 0x00108690):
+            consumed.add(_skip)
+        return True
+
+    # GUEST_ABORT: f_00000a1c is the game's own compiled abort() path -- its body
+    # (jal 0x000015ec, a diagnostic/handler-table walk, immediately followed by an
+    # unconditional self-branch at L_00000a24, with NO guard of any kind) is only
+    # ever reached indirectly: a raw jal/j word scan of the whole image confirms
+    # there is no static call site targeting this address, so it can only be
+    # entered via a function pointer / dispatch() (i.e. it is the registered
+    # abort/terminate handler). NOTE: this is address 0x00000a1c, not the adjacent
+    # 0x00000a14 -- analyze()'s static function-boundary detection recognizes BOTH
+    # as independent function starts (confirmed: both are in the `known` set with
+    # zero static jal/j callers), but they are different functions. f_00000a14 is a
+    # harmless stub whose very first instruction (`beq r0,r0`) unconditionally
+    # branches around this exact jal+loop body to a plain epilogue/return --
+    # verified to fire routinely and harmlessly during ordinary boot (regression-
+    # tested: a probe placed at 0x00000a14 false-positived on a known-good run that
+    # only reaches mode-select). f_00000a1c has no such guard: every entry
+    # unconditionally calls the diagnostic walk and then spins forever. Left alone,
+    # reaching it means the emulator silently spins forever on the guest's own
+    # infinite loop, presenting nothing, until an external timeout kills the
+    # process -- observed via both heap exhaustion and a missing character/stage
+    # asset validation failure, minutes apart in wall-clock terms. Fail fast
+    # instead, mirroring the existing unimplemented-HLE-NID convention in hle.c
+    # (search "_Exit(7)" there) with a distinct, reserved exit code so the two
+    # fatal classes are distinguishable from the process exit status alone.
+    if hst_profile and addr == 0x00000a1c:
+        out.append(
+            "    fprintf(stderr, \"GUEST_ABORT: game called abort() (f_00000a1c), "
+            "called from ra=0x%08x arg0=0x%08x -- terminating instead of silent infinite hang\\n\", "
+            "s->r[31], s->r[4]); fflush(stderr); _Exit(9);"
+        )
+    return False
+
+
+def _emit_non_control_word(ctx, out, addr, w, sv_points):
+    """One word that is not a control transfer, with its static checks and continuation edge."""
+    continuations = ctx.continuations
+    resumable = ctx.resumable
+    line = normal_line(addr, w, options=ctx.options)
+    out.append(_sp_load_check(line) if addr in ctx.sp_checks else line)
+    if _is_cop0_move(w):
+        # MFC0/MTC0 can raise (privilege/reserved encoding): propagate
+        # the resulting flow before any native continuation (spec 3.4).
+        out.append(f"    {_flow_return(resumable)}")
+    if addr in sv_points:
+        for _sv_r, _sv_v in sv_points[addr]:
+            out.append(f"    sr_sv_check(s, {G(addr)}, {_sv_r}, 0x{_sv_v:08x}u);")
+    if addr in continuations:
+        out.append(f"    goto _sr_cont_{continuations[addr]:08x};")
+
+
+def _emit_eret(out, addr, w):
+    """``eret`` has no delay slot; it leaves the native body (spec 3.4)."""
+    out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u);")
+    out.append(f"    (void)sr_cpu_eret(s, {G(addr)});")
+    out.append(f"    sr_end(s, 0u, 0);")
+    out.append(f"    return;")
+
+
+def _emit_slot_exit(ctx, out, addr, ran="slot already ran inline"):
+    """After a transfer whose delay slot ran inline: the continuation edge, else skip the slot's duplicate."""
+    continuations, dup_slot_skips = ctx.continuations, ctx.dup_slot_skips
+    if addr in continuations:
+        out.append(f"    goto _sr_cont_{continuations[addr]:08x};")
+    elif addr in dup_slot_skips:
+        out.append(f"    goto L_{dup_slot_skips[addr]:08x}; /* {ran}; skip its labelled duplicate */")
+
+
+def _emit_unrelocated_jal(ctx, out, addr, w, ds, dsw):
+    """``jal`` the loader leaves as linked."""
+    resumable = ctx.resumable
+    resume = G((addr + 8) & 0xFFFFFFFF)
+    out.append(f"    {{ uint32_t _t = {emit_decoded_jump_target(addr, ctx.options)};")
+    out.append(f"      sr_begin(s, {G(addr)}, {code_word_read(32, G(addr), ctx.options)}); s->r[31] = {resume}; sr_end(s, 0u, 0);")
+    out.extend(delay_slot_lines(ds, dsw, addr,
+                                resumable=resumable, indent="      ", options=ctx.options))
+    out.append(f"      {emit_checked_dispatch_call('_t', resume)} }}")
+    _emit_slot_exit(ctx, out, addr)
+
+
+def _emit_jal(ctx, out, addr, w, ds, dsw):
+    """``jal`` to a known entry, or a dispatched call."""
+    known, resume_owners = ctx.known, ctx.resume_owners
+    lle_cpu, resumable = ctx.lle_cpu, ctx.resumable
+    target = jump_target(addr, w)
+    _jal_rw = _enhancement_rewrite(addr)
+    out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); s->r[31] = {G((addr + 8) & 0xFFFFFFFF)}; sr_end(s, 0u, 0);")
+    out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,
+                                options=ctx.options))
+    if target in known or target in resume_owners:
+        _call_stmt = f"    {emit_checked_body_call(ADDRESS_SPACE.symbol(target, resume_owners), addr)}"
+        if lle_cpu:
+            _call_stmt += f"\n    {_flow_return(resumable)}"
+    else:
+        _call_stmt = "    " + emit_checked_dispatch_call(
+            G(target), G((addr + 8) & 0xFFFFFFFF))
+    if _jal_rw is not None:
+        # A gate on a call (gate_30hz, gate_30hz_hold or gate_30hz_alt; no other rewrite
+        # plans a call site): the delay slot above always runs; the call is gated while the
+        # toggle is on. A gate_30hz_hold call returns its float argument unchanged
+        # when skipped. A site with ``requires`` makes the call every update, as
+        # stock, until each required site has applied (section 9.6).
+        _held = ""
+        if "hold_f" in _jal_rw:
+            _held = f" else {{ s->fi[0] = s->fi[{_jal_rw['hold_f']}]; }}"
+        _ready = ""
+        if "requires" in _jal_rw:
+            _ready = f" || !nk_enh_ready({_jal_rw['site_index']}u)"
+        if "alternates" in _jal_rw:
+            # gate_30hz_alt (contract sections 9.2 and 9.5): the site keeps its own phase on
+            # the update count. It makes its alternates only in the update right after one in
+            # which it made the stock call, and a second visit in one update repeats that
+            # update's choice. On an alternate update each alternate is called in list order
+            # with $a0 as it was after the delay slot and $ra = site + 8.
+            _resume = (addr + 8) & 0xFFFFFFFF
+            _lines = [
+                "    { static uint32_t _nk_alt_last; static unsigned char _nk_alt_seen, _nk_alt_stock;",
+                "      uint32_t _nk_u = nk_enhancement_updates; int _nk_st;",
+                "      if (_nk_alt_seen && _nk_alt_last == _nk_u) _nk_st = _nk_alt_stock;",
+                "      else _nk_st = !(_nk_alt_seen && _nk_alt_last + 1u == _nk_u && _nk_alt_stock);",
+                f"      if (!nk_enhancement_on(){_ready}) _nk_st = 1;",
+                "      _nk_alt_seen = 1u; _nk_alt_last = _nk_u; _nk_alt_stock = (unsigned char)_nk_st;",
+                "      if (_nk_st) {",
+                _call_stmt,
+                "      } else { uint32_t _nk_a0 = s->r[4];",
+            ]
+            for _alt in _jal_rw["alternates"]:
+                _lines.append(f"    s->r[4] = _nk_a0; s->r[31] = {G(_resume)};")
+                if _alt in known or _alt in resume_owners:
+                    _lines += [
+                        "#ifdef SR_VERIFY",
+                        "    sr_verify_suppress_direct = 1;",
+                        "#endif",
+                        f"    {{ int _nk_b = sr_aot_return_boundary_begin(s, {G(_resume)}, {G(addr)}, 1u);",
+                        "#ifdef SR_VERIFY",
+                        "      sr_verify_suppress_direct = 0;",
+                        f"      if (!_nk_b) sr_verify_begin(s, {G(_alt)}, {G(addr)}, {G(_resume)});",
+                        "#endif",
+                        f"      if (_nk_b) return; {emit_body_call(ADDRESS_SPACE.symbol(_alt, resume_owners))} "
+                        "if (sr_aot_return_boundary_end(s)) return; }",
+                    ]
+                else:
+                    _lines.append("    " + emit_checked_dispatch_call(G(_alt), G(_resume)))
+                if lle_cpu:
+                    _lines.append(f"    {_flow_return(resumable)}")
+            _lines.append("    } }")
+            out.extend(_lines)
+        else:
+            out.append(
+                f"    if (!nk_enhancement_on(){_ready} || nk_enhancement_gate_30hz()) {{\n"
+                f"{_call_stmt}\n"
+                f"    }}{_held}"
+            )
+    else:
+        out.extend(_call_stmt.split("\n"))
+    _emit_slot_exit(ctx, out, addr)
+
+
+def _emit_jalr(ctx, out, addr, w, ds, dsw):
+    """``jalr rd, rs``: the target is read at the transfer, before the slot."""
+    resumable = ctx.resumable
+    stack_census = ctx.stack_census
+    guest_exits = ctx.guest_exits
+    d, a = rd(w), rs(w)
+    link = f"s->r[{d}] = {G((addr + 8) & 0xFFFFFFFF)}; " if d != 0 else ""
+    # The transfer target is read AT the transfer, before its delay slot
+    # runs. Reading it after the slot lets a slot that writes the target
+    # register redirect the call -- proven divergent against the
+    # production interpreter by the `jrslot` cosim cell.
+    out.append(f"    {{ uint32_t _t = {R(a)};")
+    out.append(f"      {emit_code_pointer_check('_t', addr)}")
+    out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); {link}sr_end(s, 0u, 0);")
+    out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,
+                                indent="      ", options=ctx.options))
+    if d != 0:
+        out.append(
+            f"      {emit_checked_dispatch_call('_t', G((addr + 8) & 0xFFFFFFFF))} }}"
+        )
+        _emit_slot_exit(ctx, out, addr)
+    else:
+        out.append(
+            f"      {emit_tail_transfer('_t', None, resumable or addr in guest_exits, stack_census, sp_kept=ctx.sp_kept and addr in guest_exits)} }}"
+        )
+
+
+def _emit_jr(ctx, out, addr, w, ds, dsw):
+    """``jr rs``: a return, a syscall bridge, or a computed tail call."""
+    lle_cpu, resumable = ctx.lle_cpu, ctx.resumable
+    stack_census = ctx.stack_census
+    guest_exits = ctx.guest_exits
+    ds_is_syscall = dsw is not None and (dsw >> 26) == 0 and (dsw & 0x3F) == 0x0C
+    a = rs(w)
+    if a == 31:
+        # Capture the architectural target at transfer, before a delay
+        # slot (or syscall bridge) can rewrite the live register.
+        out.append(f"    {{ uint32_t _sr_return_target = {R(a)};")
+        out.append(f"      SR_AOT_RETURN_CAPTURE(s, _sr_return_target);")
+        if ds_is_syscall and dsw is not None and not lle_cpu:
+            out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
+            # JR with syscall in delay slot. Route it through the raw
+            # syscall mechanism after latching the guest return target.
+            out.append(f"      sr_raw_syscall(s, 0x{(dsw >> 6) & 0xFFFFF:x}u, {G(ds)});")
+        elif ds_is_syscall and dsw is not None:
+            # LLE: the delay-slot syscall raises with BD set (spec 3.4).
+            out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
+            out.extend(delay_slot_lines(ds, dsw, addr,
+                                        resumable=resumable,
+                                        indent="      ", options=ctx.options))
+        else:
+            out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
+            out.extend(delay_slot_lines(ds, dsw, addr,
+                                        resumable=resumable,
+                                        indent="      ", options=ctx.options))
+        out.append(f"      {emit_host_return(resumable or addr in guest_exits, stack_census=stack_census)} }}")
+    elif ds_is_syscall and dsw is not None and not lle_cpu:
+        out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
+        # JR with syscall in delay slot. This is not reachable for current eboot stubs (handled by is_stub),
+        # but if reached in general code, route it via the correct raw-syscall mechanism with PC.
+        out.append(f"    sr_raw_syscall(s, 0x{(dsw >> 6) & 0xFFFFF:x}u, {G(ds)}); {emit_host_return(resumable or addr in guest_exits, stack_census=stack_census)}")
+    elif ds_is_syscall and dsw is not None:
+        # LLE: the delay-slot syscall raises with BD set (spec 3.4).
+        out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
+        out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,
+                                    options=ctx.options))
+    else:
+        # Computed return/tail-call: same contract as jalr above -- the
+        # target register is read at the transfer, not after the slot.
+        out.append(f"    {{ uint32_t _t = {R(a)};")
+        out.append(f"      {emit_code_pointer_check('_t', addr)}")
+        out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
+        out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,
+                                    indent="      ", options=ctx.options))
+        out.append(f"      {emit_tail_transfer('_t', None, resumable or addr in guest_exits, stack_census, sp_kept=ctx.sp_kept and addr in guest_exits)} }}")
+
+
+def _emit_unrelocated_j(ctx, out, addr, w, ds, dsw):
+    """``j`` the loader leaves as linked."""
+    resumable = ctx.resumable
+    stack_census = ctx.stack_census
+    guest_exits = ctx.guest_exits
+    out.append(f"    {{ uint32_t _t = {emit_decoded_jump_target(addr, ctx.options)};")
+    out.append(f"      sr_begin(s, {G(addr)}, {code_word_read(32, G(addr), ctx.options)}); sr_end(s, 0u, 0);")
+    out.extend(delay_slot_lines(ds, dsw, addr,
+                                resumable=resumable, indent="      ", options=ctx.options))
+    out.append(f"      {emit_tail_transfer('_t', None, resumable or addr in guest_exits, stack_census, sp_kept=ctx.sp_kept and addr in guest_exits)} }}")
+
+
+def _emit_j(ctx, out, addr, w, ds, dsw):
+    """``j``: a self-loop, a tail transfer or a jump inside the body."""
+    known, resume_owners, labels = ctx.known, ctx.resume_owners, ctx.labels
+    resumable = ctx.resumable
+    stack_census = ctx.stack_census
+    guest_exits = ctx.guest_exits
+    target = jump_target(addr, w)
+    out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
+    out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,
+                                options=ctx.options))
+    if target == ctx.start:
+        # A `j` to the entry is a tail edge, not a label, so the check on labels
+        # in emit_function misses it; it enters the entry again and would double again.
+        _refuse_argument_site_on_a_loop(ctx.start)
+    if target == addr:
+        # Self-loop (a spin wait): the native call below would recurse on the host
+        # stack once per iteration. Keep it a backward goto with the preemption point.
+        out.append(f"    SR_YIELD(s, {G(addr)}); goto L_{target:08x};")
+    elif (target in known or target in resume_owners) and not (
+        target in resume_owners and target in labels
+    ):
+        out.append(f"    {emit_tail_transfer(G(target), ADDRESS_SPACE.symbol(target, resume_owners), resumable or addr in guest_exits, stack_census, sp_kept=ctx.sp_kept and addr in guest_exits)}")
+    elif target in labels:
+        y = f"SR_YIELD(s, {G(addr)}); " if target <= addr else ""   # backward j: loop edge
+        out.append(f"    {y}goto L_{target:08x};")
+    else:
+        out.append(f"    {{ uint32_t _t = {G(target)}; {emit_tail_transfer('_t', None, resumable or addr in guest_exits, stack_census, sp_kept=ctx.sp_kept and addr in guest_exits)} }}")
+
+
+def _emit_conditional_branch(ctx, out, addr, w, ds, dsw):
+    """A conditional branch, a linked one (a call) included, with its delay slot."""
+    elf, ranges, known = ctx.elf, ctx.ranges, ctx.known
+    resume_owners, labels, hst_profile = ctx.resume_owners, ctx.labels, ctx.hst_profile
+    lle_cpu, resumable, stack_census = ctx.lle_cpu, ctx.resumable, ctx.stack_census
+    guest_exits = ctx.guest_exits
+    target = branch_target(addr, w)
+    y = f"SR_YIELD(s, {G(addr)}); " if target <= addr else ""
+    link = f"s->r[31] = {G((addr + 8) & 0xFFFFFFFF)}; " if is_link(w) else ""
+    cond = cond_expr(w)
+    inject_stmt = ""
+    if hst_profile and addr in GUEST_PATCHES:
+        p = GUEST_PATCHES[addr]
+        if p["kind"] == "cond":
+            cond = p["value"]
+            if p.get("stmt"):
+                inject_stmt += p["stmt"]
+        elif p["kind"] == "inject":
+            inject_stmt += p["stmt"]
+        inject_stmt += compat_fired_stmt("GUEST_PATCHES", addr)
+
+    out.append(f"    {{ uint32_t _c = {cond};{inject_stmt}")
+    out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); {link}sr_end(s, 0u, 0);")
+    _delay = delay_slot_lines(ds, dsw, addr, resumable=resumable,
+                              options=ctx.options)
+    _delay_inline = " ".join(line.strip() for line in _delay)
+    if is_linked_call(elf, addr, w, ranges):
+        # bltzal/bgezal (bal = bgezal $zero) to a callable is a CALL (#968), inside
+        # or outside this body: the taken path calls the target exactly as `jal`
+        # (known target) or `jalr rd` (dispatch with the resume PC) does, so the
+        # callee's `jr $ra` returns here and both paths continue at addr + 8.
+        # function_flow never labels the target for this site; another branch may
+        # still label it, so this test comes before the label test. The link and
+        # the delay slot above run once on either path; cond_expr refuses the
+        # branch-likely linked forms, so no annulled slot reaches this point.
+        if target in known or target in resume_owners:
+            call = emit_checked_body_call(
+                ADDRESS_SPACE.symbol(target, resume_owners), addr
+            )
+            if lle_cpu:
+                call += f" {_flow_return(resumable)}"
+        else:
+            call = emit_checked_dispatch_call(G(target), G((addr + 8) & 0xFFFFFFFF))
+        out.extend("   " + line for line in _delay)
+        out.append(f"      if (_c) {{ {call} }} }}")
+        _emit_slot_exit(ctx, out, addr)
+        return
+    if target in labels:
+        if is_likely(w):
+            out.append(f"      if (_c) {{ {_delay_inline} {y}goto L_{target:08x}; }} }}")
+        else:
+            out.extend("   " + line for line in _delay)
+            out.append(f"      if (_c) {{ {y}goto L_{target:08x}; }} }}")
+    elif in_ranges(target, ranges) and (target in known or target in resume_owners):
+        # A split body's edge into another entry (function_flow): the same TAIL
+        # transfer as `j` to that entry, after the delay slot (annulled on the
+        # not-taken path of a likely branch).
+        tail = emit_tail_transfer(G(target), ADDRESS_SPACE.symbol(target, resume_owners),
+                                  resumable or addr in guest_exits, stack_census,
+                                  sp_kept=ctx.sp_kept and addr in guest_exits)
+        if is_likely(w):
+            out.append(f"      if (_c) {{ {_delay_inline} {tail} }} }}")
+        else:
+            out.extend("   " + line for line in _delay)
+            out.append(f"      if (_c) {{ {tail} }} }}")
+    else:
+        if is_likely(w):
+            out.append(f"      if (_c) {{ {_delay_inline} {{ s->pc = {G(target)}; {emit_tail_transfer('s->pc', None, resumable or addr in guest_exits, stack_census, sp_kept=ctx.sp_kept and addr in guest_exits)} }} }} }}")
+        else:
+            out.extend("   " + line for line in _delay)
+            out.append(f"      if (_c) {{ {{ s->pc = {G(target)}; {emit_tail_transfer('s->pc', None, resumable or addr in guest_exits, stack_census, sp_kept=ctx.sp_kept and addr in guest_exits)} }} }} }}")
+    _emit_slot_exit(ctx, out, addr, "slot already ran inline (or was annulled)")
+
+
+def _emit_control_transfer(ctx, out, consumed, addr, w):
+    """The C for the control transfer at ``addr`` and its delay slot (consumed unless it is a label)."""
+    op, fn = w >> 26, w & 0x3F
+    ds = addr + 4
+    dsw = ADDRESS_SPACE.instruction_word(ds, read32(ctx.elf, ds), options=ctx.options)
+    if ds not in ctx.labels:
+        consumed.add(ds)
+    if op == 3 and ADDRESS_SPACE.unrelocated_jump(addr):
+        _emit_unrelocated_jal(ctx, out, addr, w, ds, dsw)
+    elif op == 3:
+        _emit_jal(ctx, out, addr, w, ds, dsw)
+    elif op == 0 and fn == 0x09:
+        _emit_jalr(ctx, out, addr, w, ds, dsw)
+    elif op == 0 and fn == 0x08:
+        _emit_jr(ctx, out, addr, w, ds, dsw)
+    elif op == 2 and ADDRESS_SPACE.unrelocated_jump(addr):
+        _emit_unrelocated_j(ctx, out, addr, w, ds, dsw)
+    elif op == 2:
+        _emit_j(ctx, out, addr, w, ds, dsw)
+    else:
+        _emit_conditional_branch(ctx, out, addr, w, ds, dsw)
+
+
+def _emit_continuation_blocks(ctx, out):
+    """The blocks that continue a body past a synthetic boundary, after the sorted words."""
+    resume_owners, dispatch_boundaries, continuations = ctx.resume_owners, ctx.dispatch_boundaries, ctx.continuations
+    resumable, stack_census = ctx.resumable, ctx.stack_census
+    guest_exits = ctx.guest_exits
+    # Do not let an unrelated natural end path fall into the first continuation
+    # block merely because the blocks live after the sorted instruction bodies.
+    out.append("    goto _sr_fallthrough_return;")
+    for target in sorted(set(continuations.values())):
+        out.append(f"  _sr_cont_{target:08x}: ;")
+        if dispatch_boundaries and target in dispatch_boundaries:
+            # An omitted address remains a guest execution boundary even when a
+            # separate discovery anchor reaches it by linear fall-through. There
+            # is no native symbol to call, and this edge is a tail-shaped transfer:
+            # dispatch the guest target and then leave the current native body.
+            out.append(
+                f"    {{ uint32_t _t = {G(target)}; "
+                f"{emit_tail_transfer('_t', None, resumable or target in guest_exits, stack_census, sp_kept=ctx.sp_kept and target in guest_exits)} }}"
+            )
+        else:
+            out.append(f"    {emit_tail_transfer(G(target), ADDRESS_SPACE.symbol(target, resume_owners), resumable or target in guest_exits, stack_census, 'synthetic boundary: the owning entry frame is restored after the chain', sp_kept=ctx.sp_kept and target in guest_exits)}")
+    out.append("  _sr_fallthrough_return: ;")
+
+
+def emitter_seed_check(elf, profile=None, omitted=(), stack_census=False, options=None):
     """A ``seed_check`` for ``analyze`` (miss seeds, #1848): what the primary image's emission loop
     in ``main`` does with an entry set. It maps each entry that loop would emit to None for a body
     or to why it would write an abort stub there, under the image's own address space, so
     ``analyze`` reports a seed from the emitter's result. An enhancement package does not enter
     into it: a rewrite replaces a word's text after the stock word is translated."""
+    options = _options_for_call(options)
     impmap = primary_import_map(elf)
     is_stub = import_stub_test(elf, impmap)
     space = AddressSpace(patched=variable_import_sites(elf)[1])
@@ -3283,7 +4833,8 @@ def emitter_seed_check(elf, profile=None, omitted=(), stack_census=False):
                 try:
                     emit_function(elf, address, ranges, known, resume_owners=resume_owners,
                                   resumable=catalog[address].resumable, profile=profile,
-                                  dispatch_boundaries=set(omitted), stack_census=stack_census)
+                                  dispatch_boundaries=set(omitted), stack_census=stack_census,
+                                  options=options)
                 except Unsupported as exc:
                     emission[address] = str(exc).replace('"', "'")
         finally:
@@ -3293,27 +4844,33 @@ def emitter_seed_check(elf, profile=None, omitted=(), stack_census=False):
 
 
 def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False,
-                  profile=None, dispatch_boundaries=None, lle_cpu=False,
-                  stack_census=False, flow=None):
+                  profile=None, dispatch_boundaries=None, lle_cpu=None,
+                  stack_census=False, flow=None, options=None):
     """The C body of the entry ``start``.
 
     ``flow`` is this entry's ``function_flow`` result over the same arguments when
     the caller already walked it (the walk is most of the cost); it is read, never
     changed.
     """
+    options = _options_for_call(options, lle_cpu=lle_cpu)
     hst_profile = profile == "hst"
-    if lle_cpu is False:
-        lle_cpu = OPTIONS.lle_cpu
+    lle_cpu = options.lle_cpu
     resume_owners = resume_owners or {}
     ranges = span_index(ranges)
     if flow is None:
         flow = function_flow(
             elf, start, ranges, known, resume_owners=resume_owners,
-            dispatch_boundaries=dispatch_boundaries)
+            dispatch_boundaries=dispatch_boundaries, options=options)
     insns, labels, continuations = flow
     # An exit that a load of $sp reaches leaves $sp to the guest, as a resume body's do.
-    guest_exits, exits = (frozenset(), frozenset()) if resumable else _sp_exit_walk(
-        elf, start, insns, labels)
+    guest_exits, exits, foreign_loads = (frozenset(), frozenset(), frozenset()) if resumable \
+        else _sp_exit_walk(elf, start, insns, labels)
+    # Whether a $sp load left the frame is known only when it runs (#1935): a body whose
+    # guest-owned exit is a TAIL keeps its entry $sp and checks each such load, so the
+    # record owes the restore exactly when every load it ran was an alloca free. The census
+    # records no restore at a TAIL, so it keeps the static verdict.
+    sp_kept = not stack_census and any(
+        _is_tail_exit(elf, addr, insns, continuations) for addr in guest_exits)
     if guest_exits:
         GUEST_SP_ENTRIES.add(start)
         if guest_exits == exits:
@@ -3323,46 +4880,13 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
             stack_census = False
     if start in labels:
         _refuse_argument_site_on_a_loop(start)
-    for label in labels:
-        # A label on the delay slot of a transfer that never falls through runs the slot
-        # as an ordinary word; when that word goes on to the next one, the walk owns that
-        # path (_walk_body terminator_slots). Without it the label's C would fall into
-        # whatever block the address order puts next.
-        owner_word = read32(elf, label - 4) if label - 4 in insns else None
-        slot_word = read32(elf, label)
-        if (owner_word is not None and ends_straight_line(label - 4, owner_word)
-                and slot_word is not None and continues_to_next_word(slot_word)
-                and label + 4 not in insns and label not in continuations
-                and in_ranges(label + 4, ranges)):
-            raise AssertionError(
-                f"0x{start:08x}: label 0x{label:08x} on the delay slot of 0x{label - 4:08x} "
-                f"has no owned successor")
+    _check_delay_slot_labels(elf, start, insns, labels, continuations, ranges)
     # Static verification asserts translation-time constants; a runtime module's
     # relocated immediates and link values are not constants, so it carries none.
     # A variable-import site's immediate is the linker's too, so its body carries none either.
     sv_points = ({} if ADDRESS_SPACE.runtime_module or not ADDRESS_SPACE.patched.keys().isdisjoint(insns)
-                 else sv_plan(elf, insns, labels, hst_profile=hst_profile))
-    # A delay slot that is itself a branch target is emitted twice: inline at its
-    # owning control instruction (where it must execute as the slot) and again
-    # under its own label (so branches can land on it).  On fall-through past the
-    # owning instruction, control must NOT run the labelled duplicate: that would
-    # execute the slot twice for non-likely branches and jal/jalr, and would run
-    # an annulled slot for not-taken likely branches.  Plan a skip target at
-    # slot+4 for every such site and jump over the duplicate explicitly.
-    # (Observed in this image at f_00022d7c's tail byte-fill: the loop count in
-    # the shared slot was decremented twice per entry, underfilling by one byte
-    # or, for a tail count of exactly 1, wrapping to ~4GiB of writes.)
-    dup_slot_skips = {}
-    for _a in insns:
-        _w = read32(elf, _a)
-        if _w is None or not is_control(_w):
-            continue
-        _op, _fn = _w >> 26, _w & 0x3F
-        if _op == 2 or (_op == 0 and _fn == 0x08) or is_eret(_w):
-            continue  # j / jr / eret never fall through past their slot
-        _ds = _a + 4
-        if _ds in labels and _ds + 4 in insns:
-            dup_slot_skips[_a] = _ds + 4
+                 else sv_plan(elf, insns, labels, hst_profile=hst_profile, options=options))
+    dup_slot_skips = _dup_slot_skips(elf, insns, labels)
     if dup_slot_skips:
         labels = set(labels) | set(dup_slot_skips.values())
     out = []
@@ -3370,507 +4894,78 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
     out.append(f"    SR_YIELD(s, {G(start)});")   # preemption point (no-op unless scheduler active)
     # Callable entries own an o32 frame contract. Resume entries begin with an
     # already-live owner frame, so the guest instructions alone own SP changes.
-    if not resumable:
+    if not resumable or sp_kept:
         out.append("    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;")
+    if sp_kept:
+        out.append("    uint32_t _sp_kept = 1u; (void)_sp_kept;")
     if insns and start != min(insns):
         labels = set(labels)
         labels.add(start)
         out.append(f"    goto L_{start:08x};")
-    consumed = set()
-    promo = RegisterPromotion() if OPTIONS.promote_registers else None
-    for addr in sorted(insns):
-        if addr in consumed:
-            continue
-        if addr in labels:
-            if promo is not None:
-                out.extend(promo.flush())
-            out.append(f"  L_{addr:08x}: ;")
-        w = ADDRESS_SPACE.instruction_word(addr, read32(elf, addr))
-        if w is None:
-            continue
-        op, fn = w >> 26, w & 0x3F
-        if promo is not None:
-            promoted = None
-            if (not is_control(w) and not _is_cop0_move(w) and addr not in sv_points
-                    and addr not in continuations and _enhancement_rewrite(addr) is None
-                    and not (hst_profile and addr in _HST_INLINE_SITES)):
-                promoted = promo.try_line(addr, w, lle_cpu=lle_cpu)
-            if promoted is not None:
-                out.extend(promoted)
+    ctx = _BodyContext(elf, ranges, known, resume_owners, dispatch_boundaries, labels, continuations,
+                       dup_slot_skips, hst_profile, lle_cpu, resumable, stack_census, start, guest_exits,
+                       sp_kept, foreign_loads if sp_kept else frozenset(), options=options)
+    _BODY_SP_CHECKS.clear()
+    _BODY_SP_CHECKS.update(ctx.sp_checks)
+    # Cleared however the body ends: an Unsupported raised mid-body must not leave its
+    # checks for delay_slot_lines' callers outside emit_function (form_sweep, tests).
+    try:
+        consumed = set()
+        promo = RegisterPromotion() if options.promote_registers else None
+        for addr in sorted(insns):
+            if addr in consumed:
                 continue
+            if addr in labels:
+                if promo is not None:
+                    out.extend(promo.flush())
+                out.append(f"  L_{addr:08x}: ;")
+            w = ADDRESS_SPACE.instruction_word(addr, read32(elf, addr), options=options)
+            if w is None:
+                continue
+            if promo is not None:
+                promoted = None
+                if (not is_control(w) and not _is_cop0_move(w) and addr not in sv_points
+                        and addr not in continuations and addr not in ctx.sp_checks
+                        and _enhancement_rewrite(addr) is None
+                        and not (hst_profile and addr in _HST_INLINE_SITES)):
+                    promoted = promo.try_line(addr, w, options=options)
+                if promoted is not None:
+                    out.extend(promoted)
+                    continue
+                out.extend(promo.flush())
+
+            if hst_profile and _emit_hst_patch_site(hst_profile, addr, w, out, consumed):
+                continue
+
+            if not is_control(w):
+                _emit_non_control_word(ctx, out, addr, w, sv_points)
+                continue
+            if is_eret(w):
+                _emit_eret(out, addr, w)
+                continue
+            _emit_control_transfer(ctx, out, consumed, addr, w)
+        if continuations:
+            _emit_continuation_blocks(ctx, out)
+        if promo is not None:
             out.extend(promo.flush())
-
-        # LOOP_CAPS retired (F4, 2026-07-11): the table is empty and the emission block
-        # is gone. Every remaining capped loop was statically proven terminating and
-        # verified never-firing across the retained log corpus (docs/audit/F4_LOOPCAPS.md):
-        #   SCAN_CAP    0x000147e0  f_00014788: word-at-a-time strlen (0xfefefeff/0x80808080
-        #               stopword scan). Induction variable a0 increases by 4 every
-        #               iteration; MEM_R32 is bounds-checked, so the loop either finds a
-        #               NUL or traps -- no same-PC spin is possible. The 1024-iteration
-        #               cap silently corrupted strlen for any string >= 4 KiB.
-        #   RSRC_CAP    0x0001b688  f_0001b584: counted loop (s3++ vs callee-saved s0).
-        #               The guarded retry-starvation spin was an allocator-corruption
-        #               symptom. The structural fix is one retail newlib allocator
-        #               backed by its untouched UserSbrk partition block.
-        #   HASHFN_CAP  0x0001b73c  f_0001b73c: pure NUL-terminated string hash
-        #               (monotonic pointer walk) + divu by table size; terminates for
-        #               any terminated string. The cap counted *calls*, not iterations,
-        #               and forged r2=1 (phantom hash) on fire. Never fired.
-        #   RSRC2-6     0x0019357c/0x001935d0/0x00193620/0x00193678/0x001936cc
-        #               f_001934c8: five identical counted loops (s2++ vs u32 count
-        #               reloaded from a descriptor the body never writes). Bounded
-        #               unless callee-save discipline is broken -- which is exactly the
-        #               P0 recompiler chain a cap must not mask. Never fired.
-        #   SENT_CAP    0x001b9570  f_001b94f8: doubly-linked-list unlink-until-sentinel.
-        #               Terminates for any well-formed list; the known list-corruption
-        #               sources (WALKER_CAP truncation, LoadLayout runaway) are gone.
-        #               Never fired.
-        #   SCENELOOP   0x0006dc2c  f_0006dab0: begin/end iterator, r17 += 0x70 until
-        #               r17 == r16 (compiler-emitted `it != end` idiom, always aligned).
-        #               Never fired.
-        #   RESINIT_CAP 0x0005a608  f_0005a500: element-init loop, a2++ vs count in a
-        #               freshly-allocated, correctly-sized disjoint buffer. Bounded
-        #               unless the allocator aliases the descriptor (prevented by the
-        #               unified retail newlib/UserSbrk path). Never fired.
-        #   TABLEWALK/LOOKUP/STRLIST sentinels (0x00102908/0x00102734/0x0019668c): the
-        #               "dedicated blocks" the sentinels pointed at were never
-        #               implemented; the entries were dead configuration.
-        # Cooperative scheduling does not depend on any of this: codegen emits SR_YIELD
-        # on every backward branch and function entry, and the SR_YIELD macro yields on
-        # timeslice expiry, so even a genuinely stuck loop cannot starve other fibers --
-        # it is watchdog-diagnosable by its unique back-edge PC in the thread dump.
-        # If a spin reappears, root-cause it; do not re-cap.
-        #
-        # WALKER_CAP (0x0000095c, f_000008d8) REMOVED in F3: it was an absolute
-        # 2048-hit permanent sentinel on a bounded "apply callback to N elements"
-        # iterator, not a spin detector. A single legitimate table-init call
-        # (RSRC init, hst_recomp_0.c:147346-147360) needs r8=0xc005=49157 iterations
-        # in one call, so the cap tripped mid-init and permanently no-op'd the
-        # iterator, leaving dispatch tables half-populated. The historical allocator
-        # corruption it guarded is fixed at the retail newlib/UserSbrk boundary. See
-        # docs/audit/F3_LOOPCAPS.md.
-        # ARRAY_CAP (0x00100e98) and LISTWALK_CAP (0x0001038c) REMOVED in F3 (second
-        # round, 2026-07-09): both still fired on every boot after WALKER_CAP's removal.
-        # ARRAY_CAP force-broke a loop inside the 0x100xxx menu-layout/registration code
-        # region after an absolute 20000 same-PC iterations — the same "bounded init
-        # mistaken for a spin" failure mode as WALKER_CAP, and a direct candidate for
-        # why dispatch tables (0x3070c0 +0xc/+0x10) remain half-populated. LISTWALK_CAP
-        # broke f_0001034c's next-pointer chain walk on the theory the list could be
-        # circular/corrupt; the known corruption sources upstream (WALKER_CAP truncation,
-        # the LoadLayout runaway) are gone, so the guard's premise is stale. If either
-        # loop genuinely spins again, the watchdog thread-dump PC identifies it uniquely
-        # (0x00100e98 vs 0x0001038c) — root-cause that spin; do not re-cap (see
-        # docs/audit/F3_LOOPCAPS.md and docs/DESIGN_FONT_HLE.md F3 re-scope).
-
-        # MEMSET_FASTPATH: f_0006e9bc's post-alloc zero-fill loop (body 0x6ea28-0x6ea44,
-        # count/base reloaded at 0x6ea1c/0x6ea28). Confirmed by static trace of the lifted
-        # instructions: base (MEM[r16+8]) and count (MEM[r16+0]) are both read-only for the
-        # entire loop body -- nothing between 0x6ea1c and 0x6ea44 writes r16+0 or r16+8 --
-        # so `for (i=0;i<count;i++) base[i]=0` is a provably exact rewrite of the interpreted
-        # per-byte loop as one native pass. This function is called ~100x from the resource-
-        # table init loop at 0x6da44; under one-MIPS-
-        # instruction-per-dispatch interpretation the accumulated SR_YIELD/dispatch overhead
-        # per byte stalls the worker thread past the 1200-vblank watchdog before a second
-        # frame ever presents. Dead-code checked: r3/r4 are never read again after the loop
-        # (L_0006ea48's epilogue only restores r31/r17/r16 from the stack) and r2 (the
-        # function's implicit return value, set by the alloc call at 0x6ea18) is untouched
-        # by the loop, so skipping the interpreted instructions is transparent to the caller.
-        # MEM_W8/MEM_R32 are already bounds-checked (src/rt/recomp.h sr_inrange).  The
-        # fast path now rejects a non-contiguous/overflowing span before any host pointer
-        # is formed; the >1MB warning exists to flag malformed counts without attempting
-        # an unbounded scalar fallback.
-        if hst_profile and addr == 0x0006ea1c:
-            out.append(f"    sr_begin(s, 0x0006ea1cu, 0x{w:08x}u); s->r[3] = MEM_R32(s->r[16] + 0x00000000u); sr_end(s, 0u, 0);")
-            out.append(
-                "    { uint32_t _mf_cnt = s->r[3]; uint32_t _mf_base = MEM_R32(s->r[16] + 0x00000008u);\n"
-                "      if (_mf_cnt > 0x00100000u) fprintf(stderr, \"MEMSET_FASTPATH: large count=0x%x base=0x%x r16=0x%08x MEM[r16+0]=0x%08x MEM[r16+4]=0x%08x MEM[r16+8]=0x%08x ra=0x%08x\\n\", _mf_cnt, _mf_base, s->r[16], (s->r[16]<0x0c000000u?MEM_R32(s->r[16]):0xDEADu), (s->r[16]<0x0c000000u?MEM_R32(s->r[16]+4u):0xDEADu), (s->r[16]<0x0c000000u?MEM_R32(s->r[16]+8u):0xDEADu), s->r[31]);\n"
-                "      if (_mf_cnt > 0 && _mf_cnt < 0x04000000u && sr_guest_span_writable(_mf_base, _mf_cnt)) {\n"
-                "          if (g_sr_heap_watch) sr_heap_note_bulk_write(_mf_base, _mf_cnt, 0x0006ea1cu);\n"
-                "          memset(SR_HOST(SR_DATA_SPAN(_mf_base, _mf_cnt)), 0, _mf_cnt);\n"
-                "      } else {\n"
-                "          if (_mf_cnt) sr_oor(_mf_base, 0u, 1);\n"
-                "      }\n"
-                "      s->r[4] = _mf_cnt; s->r[3] = 0u; }"
-            )
-            for _skip in (0x0006ea20, 0x0006ea24, 0x0006ea28, 0x0006ea2c, 0x0006ea30,
-                          0x0006ea34, 0x0006ea38, 0x0006ea3c, 0x0006ea40, 0x0006ea44):
-                consumed.add(_skip)
-            continue
-
-        # ARRSHIFT_FASTPATH: f_001084b8's element-shift loop (setup 0x108630-0x108654,
-        # body 0x108658-0x108690). Confirmed by static trace of the lifted instructions:
-        # this is a reverse, element-by-element 8-byte block move -- the source pointer
-        # (r6) and dest pointer (r4) both start high and decrement by exactly 8 every
-        # iteration in lockstep, terminating when r6 reaches r5 (the fixed source base
-        # loaded once at 0x108634 and never written again in the loop). The trip count is
-        # exactly n = MEM[r19+4] (read once, at 0x108630, before anything in the loop body
-        # can touch r19+4). This is the classic "grow a packed array, shift n existing
-        # elements into the new buffer" pattern: the code immediately after the loop
-        # (0x108694-0x1086c8) swaps the struct's base/count/capacity fields at r19+0/+4/+8
-        # with the new ones staged on the stack and calls f_00108bf4 (frees the old
-        # buffer) -- realloc-and-shift. A reverse per-element copy over
-        # [src,src+n*8) <-> [dst-n*8,dst) is exactly what memmove() computes (memmove is
-        # correct for either overlap direction, a superset of what the hand-unrolled
-        # reverse loop covers for its one intended direction). Under one-MIPS-instruction-
-        # per-dispatch interpretation this loop was a historical bring-up blocker: the
-        # worker cycles between pc=0x0006517c (an unrelated inlined "r2=r5<<1" leaf called
-        # from elsewhere, just this loop's most recent PCSAMPLE neighbour) and this loop's
-        # own SR_YIELD checkpoint at pc=0x0010868c for the entire watchdog window without
-        # the loop ever finishing. Historical details are retained in the local archive.
-        # Two stack slots track the same trip progress in different units and both must
-        # land on the same final value as the interpreted loop would leave them: MEM[sp+
-        # 0x5c] (decrements by 1/iter) and MEM[sp+0x50] (increments by 1/iter, consumed by
-        # the caller as the new element count at 0x1086c0-0x1086c4). Registers r1-r6's
-        # loop-final values are dead: everything from 0x108694 onward reloads r2/r3 fresh
-        # from memory and overwrites r4/r5/r6 before any further read (confirmed by
-        # reading through to the f_00108bf4 call at 0x1086c8), so only the copied bytes
-        # and the two stack slots need to be reproduced. The r4==0 mid-loop edge case
-        # (dest pointer hits exactly address 0) is not special-cased in the fast path --
-        # it would require the dest range to span across address 0, which cannot happen
-        # for a legitimate guest-RAM pointer -- but the bounds-checked fallback below
-        # still reproduces it exactly if it ever did.
-        if hst_profile and addr == 0x00108630:
-            out.append(f"    sr_begin(s, 0x00108630u, 0x{w:08x}u); s->r[4] = MEM_R32(s->r[19] + 0x00000004u); sr_end(s, 0u, 0);")
-            out.append(
-                "    { uint32_t _as_n = s->r[4];\n"
-                "      uint32_t _as_src_base = MEM_R32(s->r[19] + 0x00000000u);\n"
-                "      uint32_t _as_sp5c0 = MEM_R32(s->r[29] + 0x0000005cu);\n"
-                "      uint32_t _as_sp500 = MEM_R32(s->r[29] + 0x00000050u);\n"
-                "      uint32_t _as_dst_base = MEM_R32(s->r[29] + 0x0000004cu);\n"
-                "      uint32_t _as_dst_hi = _as_dst_base + (_as_sp5c0 << 3);\n"
-                "      if (_as_n > 0x00100000u) fprintf(stderr, \"ARRSHIFT_FASTPATH: large n=0x%x src=0x%x dst_hi=0x%x at f_001084b8 (0x108630)\\n\", _as_n, _as_src_base, _as_dst_hi);\n"
-                "      if (_as_n > 0u) {\n"
-                "          uint32_t _as_dst_lo = _as_dst_hi - (_as_n << 3);\n"
-                "          uint64_t _as_nbytes = (uint64_t)_as_n << 3;\n"
-                "          if (_as_dst_lo < _as_dst_hi && _as_src_base < 0x0c000000u && _as_dst_lo < 0x0c000000u &&\n"
-                "              (uint64_t)_as_src_base + _as_nbytes <= 0x0c000000u && (uint64_t)_as_dst_lo + _as_nbytes <= 0x0c000000u) {\n"
-                "              if (g_sr_heap_watch) sr_heap_note_bulk_write(_as_dst_lo, (uint32_t)_as_nbytes, 0x00108630u);\n"
-                "              memmove(SR_HOST(SR_DATA_SPAN(_as_dst_lo, _as_nbytes)),\n"
-                "                      SR_HOST(SR_DATA_SPAN(_as_src_base, _as_nbytes)), (size_t)_as_nbytes);\n"
-                "          } else {\n"
-                "              for (uint32_t _as_i = 0; _as_i < _as_n; _as_i++) {\n"
-                "                  uint32_t _as_d = _as_dst_hi - 8u * (_as_i + 1u);\n"
-                "                  uint32_t _as_s = _as_src_base + (_as_n - 1u - _as_i) * 8u;\n"
-                "                  if (_as_d != 0u) {\n"
-                "                      MEM_W32(_as_d + 0u, MEM_R32(_as_s + 0u));\n"
-                "                      MEM_W32(_as_d + 4u, MEM_R32(_as_s + 4u));\n"
-                "                  }\n"
-                "              }\n"
-                "          }\n"
-                "      }\n"
-                "      MEM_W32(s->r[29] + 0x0000005cu, _as_sp5c0 - _as_n);\n"
-                "      MEM_W32(s->r[29] + 0x00000050u, _as_sp500 + _as_n);\n"
-                "      s->r[1] = 0u; s->r[5] = _as_src_base; s->r[6] = _as_src_base;\n"
-                "    }"
-            )
-            for _skip in (0x00108634, 0x00108638, 0x0010863c, 0x00108640, 0x00108644, 0x00108648,
-                          0x0010864c, 0x00108650, 0x00108654, 0x00108658, 0x0010865c, 0x00108660,
-                          0x00108664, 0x00108668, 0x0010866c, 0x00108670, 0x00108674, 0x00108678,
-                          0x0010867c, 0x00108680, 0x00108684, 0x00108688, 0x0010868c, 0x00108690):
-                consumed.add(_skip)
-            continue
-
-        # GUEST_ABORT: f_00000a1c is the game's own compiled abort() path -- its body
-        # (jal 0x000015ec, a diagnostic/handler-table walk, immediately followed by an
-        # unconditional self-branch at L_00000a24, with NO guard of any kind) is only
-        # ever reached indirectly: a raw jal/j word scan of the whole image confirms
-        # there is no static call site targeting this address, so it can only be
-        # entered via a function pointer / dispatch() (i.e. it is the registered
-        # abort/terminate handler). NOTE: this is address 0x00000a1c, not the adjacent
-        # 0x00000a14 -- analyze()'s static function-boundary detection recognizes BOTH
-        # as independent function starts (confirmed: both are in the `known` set with
-        # zero static jal/j callers), but they are different functions. f_00000a14 is a
-        # harmless stub whose very first instruction (`beq r0,r0`) unconditionally
-        # branches around this exact jal+loop body to a plain epilogue/return --
-        # verified to fire routinely and harmlessly during ordinary boot (regression-
-        # tested: a probe placed at 0x00000a14 false-positived on a known-good run that
-        # only reaches mode-select). f_00000a1c has no such guard: every entry
-        # unconditionally calls the diagnostic walk and then spins forever. Left alone,
-        # reaching it means the emulator silently spins forever on the guest's own
-        # infinite loop, presenting nothing, until an external timeout kills the
-        # process -- observed via both heap exhaustion and a missing character/stage
-        # asset validation failure, minutes apart in wall-clock terms. Fail fast
-        # instead, mirroring the existing unimplemented-HLE-NID convention in hle.c
-        # (search "_Exit(7)" there) with a distinct, reserved exit code so the two
-        # fatal classes are distinguishable from the process exit status alone.
-        if hst_profile and addr == 0x00000a1c:
-            out.append(
-                "    fprintf(stderr, \"GUEST_ABORT: game called abort() (f_00000a1c), "
-                "called from ra=0x%08x arg0=0x%08x -- terminating instead of silent infinite hang\\n\", "
-                "s->r[31], s->r[4]); fflush(stderr); _Exit(9);"
-            )
-
-        if not is_control(w):
-            out.append(normal_line(addr, w, lle_cpu=lle_cpu))
-            if _is_cop0_move(w):
-                # MFC0/MTC0 can raise (privilege/reserved encoding): propagate
-                # the resulting flow before any native continuation (spec 3.4).
-                out.append(f"    {_flow_return(resumable)}")
-            if addr in sv_points:
-                for _sv_r, _sv_v in sv_points[addr]:
-                    out.append(f"    sr_sv_check(s, {G(addr)}, {_sv_r}, 0x{_sv_v:08x}u);")
-            if addr in continuations:
-                out.append(f"    goto _sr_cont_{continuations[addr]:08x};")
-            continue
-
-        if is_eret(w):  # eret: no delay slot; leave the native body (spec 3.4)
-            out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u);")
-            out.append(f"    (void)sr_cpu_eret(s, {G(addr)});")
-            out.append(f"    sr_end(s, 0u, 0);")
-            out.append(f"    return;")
-            continue
-
-        ds = addr + 4
-        dsw = ADDRESS_SPACE.instruction_word(ds, read32(elf, ds))
-        if ds not in labels:
-            consumed.add(ds)
-        ds_is_syscall = dsw is not None and (dsw >> 26) == 0 and (dsw & 0x3F) == 0x0C
-
-        if op == 3 and ADDRESS_SPACE.unrelocated_jump(addr):  # jal the loader leaves as linked
-            resume = G((addr + 8) & 0xFFFFFFFF)
-            out.append(f"    {{ uint32_t _t = {emit_decoded_jump_target(addr)};")
-            out.append(f"      sr_begin(s, {G(addr)}, {code_word_read(32, G(addr))}); s->r[31] = {resume}; sr_end(s, 0u, 0);")
-            out.extend(delay_slot_lines(ds, dsw, addr, lle_cpu=lle_cpu,
-                                        resumable=resumable, indent="      "))
-            out.append(f"      dispatch_call(s, _t, {resume}); }}")
-            if addr in continuations:
-                out.append(f"    goto _sr_cont_{continuations[addr]:08x};")
-            elif addr in dup_slot_skips:
-                out.append(f"    goto L_{dup_slot_skips[addr]:08x}; /* slot already ran inline; skip its labelled duplicate */")
-            continue
-        if op == 3:  # jal
-            target = jump_target(addr, w)
-            _jal_rw = _enhancement_rewrite(addr)
-            out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); s->r[31] = {G((addr + 8) & 0xFFFFFFFF)}; sr_end(s, 0u, 0);")
-            out.extend(delay_slot_lines(ds, dsw, addr, lle_cpu=lle_cpu, resumable=resumable))
-            if target in known or target in resume_owners:
-                _call_stmt = f"    {emit_checked_body_call(ADDRESS_SPACE.symbol(target, resume_owners), addr)}"
-                if lle_cpu:
-                    _call_stmt += f"\n    {_flow_return(resumable)}"
-            else:
-                _call_stmt = (
-                    f"    dispatch_call(s, {G(target)}, "
-                    f"{G((addr + 8) & 0xFFFFFFFF)});"
-                )
-            if _jal_rw is not None:
-                # gate_30hz on a call (the only rewrite a call site plans): the delay
-                # slot above always runs; the call is gated while the toggle is on.
-                out.append(
-                    f"    if (!nk_enhancement_on() || nk_enhancement_gate_30hz()) {{\n"
-                    f"{_call_stmt}\n"
-                    f"    }}"
-                )
-            else:
-                out.extend(_call_stmt.split("\n"))
-            if addr in continuations:
-                out.append(f"    goto _sr_cont_{continuations[addr]:08x};")
-            elif addr in dup_slot_skips:
-                out.append(f"    goto L_{dup_slot_skips[addr]:08x}; /* slot already ran inline; skip its labelled duplicate */")
-            continue
-        if op == 0 and fn == 0x09:  # jalr rd, rs
-            d, a = rd(w), rs(w)
-            link = f"s->r[{d}] = {G((addr + 8) & 0xFFFFFFFF)}; " if d != 0 else ""
-            # The transfer target is read AT the transfer, before its delay slot
-            # runs. Reading it after the slot lets a slot that writes the target
-            # register redirect the call -- proven divergent against the
-            # production interpreter by the `jrslot` cosim cell.
-            out.append(f"    {{ uint32_t _t = {R(a)};")
-            out.append(f"      {emit_code_pointer_check('_t', addr)}")
-            out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); {link}sr_end(s, 0u, 0);")
-            out.extend(delay_slot_lines(ds, dsw, addr, lle_cpu=lle_cpu, resumable=resumable,
-                                        indent="      "))
-            if d != 0:
-                out.append(
-                    f"      dispatch_call(s, _t, {G((addr + 8) & 0xFFFFFFFF)}); }}"
-                )
-                if addr in continuations:
-                    out.append(f"    goto _sr_cont_{continuations[addr]:08x};")
-                elif addr in dup_slot_skips:
-                    out.append(f"    goto L_{dup_slot_skips[addr]:08x}; /* slot already ran inline; skip its labelled duplicate */")
-            else:
-                out.append(
-                    f"      {emit_tail_transfer('_t', None, resumable or addr in guest_exits, stack_census)} }}"
-                )
-            continue
-        if op == 0 and fn == 0x08:  # jr rs
-            a = rs(w)
-            if a == 31:
-                # Capture the architectural target at transfer, before a delay
-                # slot (or syscall bridge) can rewrite the live register.
-                out.append(f"    {{ uint32_t _sr_return_target = {R(a)};")
-                out.append(f"      SR_AOT_RETURN_CAPTURE(s, _sr_return_target);")
-                if ds_is_syscall and dsw is not None and not lle_cpu:
-                    out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
-                    # JR with syscall in delay slot. Route it through the raw
-                    # syscall mechanism after latching the guest return target.
-                    out.append(f"      sr_raw_syscall(s, 0x{(dsw >> 6) & 0xFFFFF:x}u, {G(ds)});")
-                elif ds_is_syscall and dsw is not None:
-                    # LLE: the delay-slot syscall raises with BD set (spec 3.4).
-                    out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
-                    out.extend(delay_slot_lines(ds, dsw, addr,
-                                                lle_cpu=lle_cpu, resumable=resumable,
-                                                indent="      "))
-                else:
-                    out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
-                    out.extend(delay_slot_lines(ds, dsw, addr,
-                                                lle_cpu=lle_cpu, resumable=resumable,
-                                                indent="      "))
-                out.append(f"      {emit_host_return(resumable or addr in guest_exits, stack_census=stack_census)} }}")
-            elif ds_is_syscall and dsw is not None and not lle_cpu:
-                out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
-                # JR with syscall in delay slot. This is not reachable for current eboot stubs (handled by is_stub),
-                # but if reached in general code, route it via the correct raw-syscall mechanism with PC.
-                out.append(f"    sr_raw_syscall(s, 0x{(dsw >> 6) & 0xFFFFF:x}u, {G(ds)}); {emit_host_return(resumable or addr in guest_exits, stack_census=stack_census)}")
-            elif ds_is_syscall and dsw is not None:
-                # LLE: the delay-slot syscall raises with BD set (spec 3.4).
-                out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
-                out.extend(delay_slot_lines(ds, dsw, addr, lle_cpu=lle_cpu, resumable=resumable))
-            else:
-                # Computed return/tail-call: same contract as jalr above -- the
-                # target register is read at the transfer, not after the slot.
-                out.append(f"    {{ uint32_t _t = {R(a)};")
-                out.append(f"      {emit_code_pointer_check('_t', addr)}")
-                out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
-                out.extend(delay_slot_lines(ds, dsw, addr, lle_cpu=lle_cpu, resumable=resumable,
-                                            indent="      "))
-                out.append(f"      {emit_tail_transfer('_t', None, resumable or addr in guest_exits, stack_census)} }}")
-            continue
-        if op == 2 and ADDRESS_SPACE.unrelocated_jump(addr):  # j the loader leaves as linked
-            out.append(f"    {{ uint32_t _t = {emit_decoded_jump_target(addr)};")
-            out.append(f"      sr_begin(s, {G(addr)}, {code_word_read(32, G(addr))}); sr_end(s, 0u, 0);")
-            out.extend(delay_slot_lines(ds, dsw, addr, lle_cpu=lle_cpu,
-                                        resumable=resumable, indent="      "))
-            out.append(f"      {emit_tail_transfer('_t', None, resumable or addr in guest_exits, stack_census)} }}")
-            continue
-        if op == 2:  # j
-            target = jump_target(addr, w)
-            out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); sr_end(s, 0u, 0);")
-            out.extend(delay_slot_lines(ds, dsw, addr, lle_cpu=lle_cpu, resumable=resumable))
-            if target == start:
-                # A `j` to the entry is a tail edge, not a label, so the check on labels
-                # above misses it; it enters the entry again and would double again.
-                _refuse_argument_site_on_a_loop(start)
-            if target == addr:
-                # Self-loop (a spin wait): the native call below would recurse on the host
-                # stack once per iteration. Keep it a backward goto with the preemption point.
-                out.append(f"    SR_YIELD(s, {G(addr)}); goto L_{target:08x};")
-            elif (target in known or target in resume_owners) and not (
-                target in resume_owners and target in labels
-            ):
-                out.append(f"    {emit_tail_transfer(G(target), ADDRESS_SPACE.symbol(target, resume_owners), resumable or addr in guest_exits, stack_census)}")
-            elif target in labels:
-                y = f"SR_YIELD(s, {G(addr)}); " if target <= addr else ""   # backward j: loop edge
-                out.append(f"    {y}goto L_{target:08x};")
-            else:
-                out.append(f"    {{ uint32_t _t = {G(target)}; {emit_tail_transfer('_t', None, resumable or addr in guest_exits, stack_census)} }}")
-            continue
-        # conditional branch
-        target = branch_target(addr, w)
-        y = f"SR_YIELD(s, {G(addr)}); " if target <= addr else ""
-        link = f"s->r[31] = {G((addr + 8) & 0xFFFFFFFF)}; " if is_link(w) else ""
-        cond = cond_expr(w)
-        inject_stmt = ""
-        if hst_profile and addr in GUEST_PATCHES:
-            p = GUEST_PATCHES[addr]
-            if p["kind"] == "cond":
-                cond = p["value"]
-                if p.get("stmt"):
-                    inject_stmt += p["stmt"]
-            elif p["kind"] == "inject":
-                inject_stmt += p["stmt"]
-            inject_stmt += compat_fired_stmt("GUEST_PATCHES", addr)
-
-        out.append(f"    {{ uint32_t _c = {cond};{inject_stmt}")
-        out.append(f"      sr_begin(s, {G(addr)}, 0x{w:08x}u); {link}sr_end(s, 0u, 0);")
-        _delay = delay_slot_lines(ds, dsw, addr, lle_cpu=lle_cpu, resumable=resumable)
-        _delay_inline = " ".join(line.strip() for line in _delay)
-        if is_linked_call(elf, addr, w, ranges):
-            # bltzal/bgezal (bal = bgezal $zero) to a callable is a CALL (#968), inside
-            # or outside this body: the taken path calls the target exactly as `jal`
-            # (known target) or `jalr rd` (dispatch with the resume PC) does, so the
-            # callee's `jr $ra` returns here and both paths continue at addr + 8.
-            # function_flow never labels the target for this site; another branch may
-            # still label it, so this test comes before the label test. The link and
-            # the delay slot above run once on either path; cond_expr refuses the
-            # branch-likely linked forms, so no annulled slot reaches this point.
-            if target in known or target in resume_owners:
-                call = emit_checked_body_call(
-                    ADDRESS_SPACE.symbol(target, resume_owners), addr
-                )
-                if lle_cpu:
-                    call += f" {_flow_return(resumable)}"
-            else:
-                call = f"dispatch_call(s, {G(target)}, {G((addr + 8) & 0xFFFFFFFF)});"
-            out.extend("   " + line for line in _delay)
-            out.append(f"      if (_c) {{ {call} }} }}")
-            if addr in continuations:
-                out.append(f"    goto _sr_cont_{continuations[addr]:08x};")
-            elif addr in dup_slot_skips:
-                out.append(f"    goto L_{dup_slot_skips[addr]:08x}; /* slot already ran inline; skip its labelled duplicate */")
-            continue
-        if target in labels:
-            if is_likely(w):
-                out.append(f"      if (_c) {{ {_delay_inline} {y}goto L_{target:08x}; }} }}")
-            else:
-                out.extend("   " + line for line in _delay)
-                out.append(f"      if (_c) {{ {y}goto L_{target:08x}; }} }}")
-        elif in_ranges(target, ranges) and (target in known or target in resume_owners):
-            # A split body's edge into another entry (function_flow): the same TAIL
-            # transfer as `j` to that entry, after the delay slot (annulled on the
-            # not-taken path of a likely branch).
-            tail = emit_tail_transfer(G(target), ADDRESS_SPACE.symbol(target, resume_owners),
-                                      resumable or addr in guest_exits, stack_census)
-            if is_likely(w):
-                out.append(f"      if (_c) {{ {_delay_inline} {tail} }} }}")
-            else:
-                out.extend("   " + line for line in _delay)
-                out.append(f"      if (_c) {{ {tail} }} }}")
-        else:
-            if is_likely(w):
-                out.append(f"      if (_c) {{ {_delay_inline} {{ s->pc = {G(target)}; {emit_tail_transfer('s->pc', None, resumable or addr in guest_exits, stack_census)} }} }} }}")
-            else:
-                out.extend("   " + line for line in _delay)
-                out.append(f"      if (_c) {{ {{ s->pc = {G(target)}; {emit_tail_transfer('s->pc', None, resumable or addr in guest_exits, stack_census)} }} }} }}")
-        if addr in continuations:
-            out.append(f"    goto _sr_cont_{continuations[addr]:08x};")
-        elif addr in dup_slot_skips:
-            out.append(f"    goto L_{dup_slot_skips[addr]:08x}; /* slot already ran inline (or was annulled); skip its labelled duplicate */")
-    if continuations:
-        # Do not let an unrelated natural end path fall into the first continuation
-        # block merely because the blocks live after the sorted instruction bodies.
-        out.append("    goto _sr_fallthrough_return;")
-        for target in sorted(set(continuations.values())):
-            out.append(f"  _sr_cont_{target:08x}: ;")
-            if dispatch_boundaries and target in dispatch_boundaries:
-                # An omitted address remains a guest execution boundary even when a
-                # separate discovery anchor reaches it by linear fall-through. There
-                # is no native symbol to call, and this edge is a tail-shaped transfer:
-                # dispatch the guest target and then leave the current native body.
-                out.append(
-                    f"    {{ uint32_t _t = {G(target)}; "
-                    f"{emit_tail_transfer('_t', None, resumable or target in guest_exits, stack_census)} }}"
-                )
-            else:
-                out.append(f"    {emit_tail_transfer(G(target), ADDRESS_SPACE.symbol(target, resume_owners), resumable or target in guest_exits, stack_census, 'synthetic boundary: the owning entry frame is restored after the chain')}")
-        out.append("  _sr_fallthrough_return: ;")
-    if promo is not None:
-        out.extend(promo.flush())
-        declaration = promo.declaration()
-        if declaration is not None:
-            out.insert(1, declaration)
-        PROMOTION_STATS["functions"] += 1
-    falls_as_guest = any(addr not in insns for addr in guest_exits)
-    out.append(f"    {emit_host_fallthrough(resumable or falls_as_guest, stack_census=stack_census)}")
-    out.append("}")
-    out.append("")
-    if any(BODY_CALL_DRAIN in line for line in out):
-        # A direct CALL nests a native frame without entering the dispatcher, so the body
-        # applies the dispatcher's host-stack bound itself, before anything else (the
-        # dispatcher preflights before its own SR_YIELD). Every native recursion of
-        # generated code passes through a direct CALL or the dispatcher, so leaves and
-        # dispatch-only bodies stay unchecked. Keyed on the CALL's own drain, so every
-        # call form that uses emit_body_call is covered. See SR_HOST_STACK_CHECK in recomp.h.
-        out.insert(1, emit_host_stack_check(G(start)))
+            declaration = promo.declaration()
+            if declaration is not None:
+                out.insert(1, declaration)
+            PROMOTION_STATS["functions"] += 1
+        falls_as_guest = any(addr not in insns for addr in guest_exits)
+        out.append(f"    {emit_host_fallthrough(resumable or falls_as_guest, stack_census=stack_census)}")
+        out.append("}")
+        out.append("")
+        if any(BODY_CALL_DRAIN in line for line in out):
+            # A direct CALL nests a native frame without entering the dispatcher, so the body
+            # applies the dispatcher's host-stack bound itself, before anything else (the
+            # dispatcher preflights before its own SR_YIELD). Every native recursion of
+            # generated code passes through a direct CALL or the dispatcher, so leaves and
+            # dispatch-only bodies stay unchecked. Keyed on the CALL's own drain, so every
+            # call form that uses emit_body_call is covered. See SR_HOST_STACK_CHECK in recomp.h.
+            out.insert(1, emit_host_stack_check(G(start)))
+    finally:
+        _BODY_SP_CHECKS.clear()
     return out
 
 #: ``--extra-elf=<module>@runtime``: the module is placed by the runtime's guest
@@ -3898,10 +4993,10 @@ class RuntimeModuleTranslation:
     alignment: int = 1
     relocatable: bool = True
     unsupported_reason: str | None = None
-    texts: list = None
-    functions: list = None        # (link address, nwords)
-    spans: list = None            # (start, end) link space
-    stubbed: list = None          # (link address, reason)
+    texts: list[ModuleText] = dataclass_field(default_factory=list)
+    functions: list[tuple[int, int]] = dataclass_field(default_factory=list)  # (link address, nwords)
+    spans: list[tuple[int, int]] = dataclass_field(default_factory=list)      # (start, end) link space
+    stubbed: list[tuple[int, str]] = dataclass_field(default_factory=list)    # (link address, reason)
     # A code overlay (analyze.code_overlay_layout) is bound when guest memory holds these
     # leading bytes of the file (its header and text), not when the game loads a module.
     overlay_check_len: int = 0
@@ -4043,19 +5138,25 @@ def word_runs(addresses):
 
 
 def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, shared=False,
-                             entry_hints=None):
+                             entry_hints=None, data=None, name=None, entries=None,
+                             options=None):
     """Translate one runtime-placed module in its own link space.
 
     Returns a ``RuntimeModuleTranslation``; a module the build cannot translate
     position-independently still gets a descriptor carrying the reason, so the
     runtime names that boundary if, and only if, the game loads the module.
     Analyzer boundaries keep their existing fail-closed exit status (an int).
+    ``data`` and ``name`` stand for the file's bytes and name when it has none (a code
+    capture); ``entries``, when not None, are the analysis's only seeds (analyze).
     """
+    options = _options_for_call(options)
     global ADDRESS_SPACE
     import prx_reloc_model
-    with open(module_path, "rb") as source:
-        data = source.read()
-    name = os.path.basename(module_path)
+    if data is None:
+        with open(module_path, "rb") as source:
+            data = source.read()
+        name = os.path.basename(module_path)
+    module_path = module_path or name
     module = RuntimeModuleTranslation(
         index=index, name=name, file_size=len(data),
         file_sha256=hashlib.sha256(data).hexdigest(), file_fnv1a64=fnv1a64(data),
@@ -4102,7 +5203,7 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
         # A code overlay's entry points are held by the executable (entry_hints).
         analyzed, _ = analyze(elf, cfg_gate=cfg_gate,
                               entry_hints=entry_hints if overlay else None,
-                              mixed_code_data=fixed_overlay, report=discovery)
+                              mixed_code_data=fixed_overlay, report=discovery, entries=entries)
     except ImportTableError as exc:
         sys.stderr.write(f"codegen: {format_boundary(exc, module_path)}\n")
         return 1
@@ -4147,7 +5248,7 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
             if is_stub(a):
                 lib_nid = impmap.get(a)
                 if lib_nid is not None:
-                    text = import_stub_text(a, *lib_nid)
+                    text = import_stub_text(a, *lib_nid, options=options)
                 else:
                     text = (f"void {space.symbol(a)}(CpuState *s) {{  /* import stub without NID mapping */\n"
                             "    (void)s;\n"
@@ -4155,9 +5256,9 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
             else:
                 try:
                     # One walk serves the body and its translated-word count.
-                    flow = function_flow(elf, a, spans, known)
+                    flow = function_flow(elf, a, spans, known, options=options)
                     text = "\n".join(emit_function(elf, a, spans, known, profile=profile,
-                                                   flow=flow))
+                                                   flow=flow, options=options))
                     nwords = len(head_run_words(elf, a, flow[0]))
                     translated_words.update(flow[0])
                 except Unsupported as exc:
@@ -4200,6 +5301,44 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
         elf, ranges, known,
         translated={a for a, _ in module.functions} - module_stubbed,
         interpreted=module_stubbed)
+    return module
+
+
+def translate_code_capture(index, image, profile=None, cfg_gate=False, options=None):
+    """Translate code a game installed at run time (#1933) from the captures of it.
+
+    ``image`` is a ``code_capture.CaptureImage``: a window of guest memory and the addresses
+    runs called in it. It translates as an ELF type 0xFFA8 overlay at the window's address,
+    seeded only from those addresses, so its identity (overlay_check_spans) is the words its
+    code holds and nothing else in the window.
+
+    Its executable authority is exactly that identity: a bound translation lets the
+    interpreter run only words the runtime checked are the captured ones. Words the analysis
+    traced but did not translate (an untranslatable function, and whatever its trace ran
+    into) are neither identity nor authority, and nor is a function that has no translated
+    word. Its range is the extent of the identity, so a capture of other code nearby can be
+    bound beside it, and a call to anything outside the identity stops as target-not-executable
+    (outside the range, with a capture of its own). A target the translation does not give a
+    body is named here."""
+    options = _options_for_call(options)
+    import code_capture
+    module = translate_runtime_module(index, None, profile=profile, cfg_gate=cfg_gate,
+                                      data=code_capture.image_overlay_elf(image),
+                                      name=image.name, entries=image.targets, options=options)
+    if isinstance(module, int):
+        return module
+    identity = [tuple(span) for span in module.overlay_check_spans]
+    kept = [(fn, text) for fn, text in zip(module.functions, module.texts, strict=True)
+            if in_ranges(fn[0], identity)]
+    module.functions = [fn for fn, _ in kept]
+    module.texts = [text for _, text in kept]
+    module.spans = identity
+    if module.unsupported_reason is None and identity:
+        module.link_low, module.link_high = identity[0][0], identity[-1][1]
+    bodies = {a for a, _ in module.functions}
+    for target in sorted(image.targets - bodies):
+        sys.stderr.write(f"codegen: {image.name}: captured target 0x{target:08x} has no "
+                         "translation; a call to it stops as target-not-executable\n")
     return module
 
 
@@ -4493,13 +5632,14 @@ def shared_library_units(module):
     return [(f"{stem}_{n}.c", unit) for n, unit in enumerate(units)]
 
 
-def shared_library_source_text(module, texts):
+def shared_library_source_text(module, texts, options=None):
     """One translation unit of a shared module: some of its bodies, with every declaration.
 
     Nothing in it names the game, so the build of every game carrying this module writes
     the same bytes. The first comment names the module for the build log; comments do
     not reach the compiler.
     """
+    options = _options_for_call(options)
     shown = "".join(ch if ch.isalnum() or ch in "._-" else "?" for ch in module.name)
     lines = [
         "/* Generated by tools/codegen.py. Do not edit by hand. */",
@@ -4519,16 +5659,17 @@ def shared_library_source_text(module, texts):
     ]
     lines.extend(f"void {module.prefix}_{a:08x}(CpuState *s);" for a, _nwords in module.functions)
     lines.append("")
-    if OPTIONS.static_verify:
+    if options.static_verify:
         lines += [SR_SV_CHECK, ""]
     return "\n".join(lines) + "\n" + "\n\n".join(texts) + "\n"
 
 
-def write_shared_library_sources(out_dir, module_translations):
+def write_shared_library_sources(out_dir, module_translations, options=None):
     """Write each shared module's translation units and remove ones a previous run left.
 
     Returns the fallback_unit_row of each unit that compiles at BODY_FALLBACK_OPT.
     """
+    options = _options_for_call(options)
     written, fallbacks = set(), []
     for module in module_translations:
         if not module.shared or not module.texts:
@@ -4539,7 +5680,7 @@ def write_shared_library_sources(out_dir, module_translations):
             if row is not None:
                 fallbacks.append(row)
             with open(os.path.join(out_dir, name), "w", encoding="ascii", newline="\n") as f:
-                f.write(shared_library_source_text(module, texts))
+                f.write(shared_library_source_text(module, texts, options=options))
     for entry in os.listdir(out_dir):
         stem, suffix = os.path.splitext(entry)
         source = stem + ".c"
@@ -4641,7 +5782,7 @@ _USAGE = (
     "[--funcs-per-chunk=N] [--target-chunk-bytes=N] [--extra-span=LO,HI] "
     "[--extra-elf=ELF@BASE]... [--cfg-report=out.json] [--cfg-gate] "
     "[--stack-census] [--symbol-map=FILE] [--name-imports] [--backend=c|llvm] "
-    "[--miss-seeds=FILE]\n"
+    "[--miss-seeds=FILE] [--code-capture=PATH]...\n"
     "       codegen.py --env-elf <out.c> [--base=HEX] [...]\n"
 )
 
@@ -4653,7 +5794,7 @@ def _command_line_parser():
     splits them off and they never reach this parser.  Options are spelled ``--name=value`` or
     bare ``--name``.  Values stay strings here: ``main`` validates them in one place so each
     refusal keeps its exact message and exit status.  Abbreviations are off, and an unknown
-    ``--option`` is ignored (``parse_known_args``), as it has always been.  ``--help`` is not an
+    ``--option`` is an error (exit status 2, ``_translate``).  ``--help`` is not an
     option: ``_USAGE`` is printed when the positionals are missing.
     """
     parser = argparse.ArgumentParser(
@@ -4683,6 +5824,9 @@ def _command_line_parser():
     flag("--name-imports", "name each import stub after the function its NID imports")
     value("--backend", "c (default) or llvm (#330)")
     value("--miss-seeds", "a dispatch-miss seed list (tools/miss_seeds.py): extra function entries")
+    parser.add_argument("--code-capture", action="append", default=[], metavar="PATH",
+                        help="a code capture a run wrote (SR_CODE_CAPTURE), or a folder of them "
+                             "(tools/code_capture.py, #1933)")
     parser.add_argument("--omit-aot", action="append", default=[], metavar="ADDR[,ADDR...]",
                         help="leave these entries to the dispatcher instead of direct C calls")
     value("--enhancement-package", "enhancement package to apply")
@@ -4697,101 +5841,77 @@ def _command_line_parser():
     return parser
 
 
-def main(argv):
-    args = [a for a in argv[1:] if not a.startswith("--")]
-    cli, _unknown = _command_line_parser().parse_known_args(
-        [a for a in argv[1:] if a.startswith("--")])
+class _Refusal(Exception):
+    """A run the generator turns down: ``message`` goes to stderr and the process exits with ``status``."""
 
-    use_env_elf = cli.env_elf
-    use_env_extra = cli.env_extra_elfs
-    # The ELF is a positional only in the legacy form; with --env-elf the first
-    # positional is the output .c.  Supplying both is a conflict, not a
-    # precedence question: silently treating the ELF as the output path would
-    # overwrite the guest image with generated C.
-    expected = 1 if use_env_elf else 2
-    if len(args) < expected:
-        sys.stderr.write(_USAGE)
-        return 2
-    if use_env_elf and len(args) > 1:
-        sys.stderr.write(
-            "codegen: --env-elf takes exactly one positional (<out.c>); refusing to guess "
-            f"which of {args!r} is the output. Pass the ELF or --env-elf, not both.\n"
-        )
-        return 2
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
 
-    cli_elf = None if use_env_elf else args[0]
-    out_c = args[0] if use_env_elf else args[1]
-    try:
-        elf_path = build_profile.resolve_path(
-            "GAME_ELF", cli_value=cli_elf, use_env=use_env_elf,
-            cli_label="<elf> argument", flag="--env-elf",
-        )
-    except build_profile.BuildInputError as exc:
-        sys.stderr.write(f"codegen: {exc}\n")
-        return 2
 
-    base = int(cli.base, 16) if cli.base is not None else None
-    profile = cli.profile
-    funcs_per_chunk = 2000
-    chunk_target_bytes = 0
-    extra_span_arg = cli.extra_span
-    cfg_gate = cli.cfg_gate
-    stack_census = cli.stack_census
-    omit_aot = _OmitAot()
-    enhancement_pkg_path = cli.enhancement_package
-    enhancement_data_root = cli.enhancement_data_root
-    extra_elfs = []  # list of (elf_path, base_addr)
-    cli_extra_specs = cli.extra_elf  # raw "ELF@BASE" strings from --extra-elf=
-    cfg_report_path = cli.cfg_report
-    symbol_map_path = cli.symbol_map
-    name_imports = cli.name_imports  # name each import stub after its NID's function
-    backend = "c"
-    for option, given in (("--enhancement-data-root", enhancement_data_root),
-                          ("--enhancement-package", enhancement_pkg_path),
-                          ("--symbol-map", symbol_map_path),
+@dataclass(frozen=True)
+class _CheckedOptions:
+    """The command-line values that have a shape, once ``_validated_options`` has accepted them."""
+    backend: str
+    region_split_threshold_given: bool
+    region_split_threshold: object
+    funcs_per_chunk: int
+    chunk_target_bytes: int
+    omit_aot: object
+
+
+def _validated_options(cli):
+    """Check every option value that has a shape (a path, a number, a backend, addresses).
+
+    Each refusal keeps its exact message and exit status 2, in the order the options are checked.
+    Nothing is changed here: ``_apply_options`` sets the module options once all are accepted.
+    """
+    for option, given in (("--enhancement-data-root", cli.enhancement_data_root),
+                          ("--enhancement-package", cli.enhancement_package),
+                          ("--symbol-map", cli.symbol_map),
                           ("--miss-seeds", cli.miss_seeds),
-                          ("--cfg-report", cfg_report_path)):
+                          ("--cfg-report", cli.cfg_report)):
         if given == "":
-            sys.stderr.write(f"{option} requires a path\n")
-            return 2
+            raise _Refusal(2, f"{option} requires a path\n")
+    backend = "c"
     if cli.backend is not None:
         # #330: --backend=llvm lowers each function the LLVM backend supports to
         # LLVM IR (<g>_recomp_<n>.ll beside its C chunk) and keeps a C body, with
         # the recorded reason, for every other one. The default is C, unchanged.
         backend = cli.backend
         if backend not in ("c", "llvm"):
-            sys.stderr.write(f"--backend must be c or llvm, not {backend!r}\n")
-            return 2
+            raise _Refusal(2, f"--backend must be c or llvm, not {backend!r}\n")
     threshold_arg = cli.region_split_threshold
+    threshold = None
     if threshold_arg is not None:
         try:
             threshold = None if threshold_arg == "off" else int(threshold_arg, 10)
         except ValueError:
             threshold = -1
         if threshold is not None and threshold < 0:
-            sys.stderr.write(
-                f"invalid --region-split-threshold value: --region-split-threshold={threshold_arg}\n")
-            return 2
+            raise _Refusal(
+                2, f"invalid --region-split-threshold value: --region-split-threshold={threshold_arg}\n")
+    funcs_per_chunk = 2000
     if cli.funcs_per_chunk is not None:
         try:
             funcs_per_chunk = int(cli.funcs_per_chunk, 10)
         except ValueError:
-            sys.stderr.write(
-                f"invalid --funcs-per-chunk value: --funcs-per-chunk={cli.funcs_per_chunk}\n")
-            return 2
+            raise _Refusal(
+                2, f"invalid --funcs-per-chunk value: --funcs-per-chunk={cli.funcs_per_chunk}\n") from None
         if funcs_per_chunk < 1:
-            sys.stderr.write("--funcs-per-chunk must be at least 1\n")
-            return 2
+            raise _Refusal(2, "--funcs-per-chunk must be at least 1\n")
+    chunk_target_bytes = 0
     if cli.target_chunk_bytes is not None:
         try:
             chunk_target_bytes = int(cli.target_chunk_bytes, 10)
         except ValueError:
-            sys.stderr.write(
-                f"invalid --target-chunk-bytes value: --target-chunk-bytes={cli.target_chunk_bytes}\n")
-            return 2
+            raise _Refusal(
+                2, f"invalid --target-chunk-bytes value: --target-chunk-bytes={cli.target_chunk_bytes}\n"
+            ) from None
         if chunk_target_bytes < 1:
-            sys.stderr.write("--target-chunk-bytes must be at least 1\n")
-            return 2
+            raise _Refusal(2, "--target-chunk-bytes must be at least 1\n")
+    omit_aot = _OmitAot()
     for occurrence in cli.omit_aot:
         for part in occurrence.split(","):
             part = part.strip()
@@ -4800,186 +5920,190 @@ def main(argv):
             try:
                 omit_aot.addrs.add(int(part, 16))
             except ValueError:
-                sys.stderr.write(f"invalid --omit-aot address: --omit-aot={occurrence}\n")
-                return 2
+                raise _Refusal(2, f"invalid --omit-aot address: --omit-aot={occurrence}\n") from None
+    return _CheckedOptions(backend, threshold_arg is not None, threshold, funcs_per_chunk,
+                           chunk_target_bytes, omit_aot)
 
-    # The options are set only once every option has been accepted.
-    if cli.static_verify:
-        OPTIONS.static_verify = True
-    if cli.lle_cpu:
-        # LLE CPU mode (PR 2): SYSCALL/BREAK raise guest exceptions.
-        # Default (absent) preserves the HLE sr_raw_syscall/sr_break path.
-        OPTIONS.lle_cpu = True
-    if cli.lle_import_seam:
-        # LLE import seam (PR 3): import stubs route through
-        # sr_import_call instead of sr_syscall. Default (absent)
-        # preserves byte-identical HLE stubs.
-        enable_lle_import_seam()
-    if threshold_arg is not None:
-        OPTIONS.region_split_threshold = threshold
-    if cli.stale_detect:
-        # TD-27 stale-code detection: emit the compact translation-time
-        # record table and route `cache` through the check hook.
-        # Default (absent) preserves byte-identical output.
-        OPTIONS.stale_detect = True
-    if cli.promote_registers:
-        # #284: keep guest GPRs in C locals inside runs of simple
-        # instructions, written back at every boundary. Default (absent)
-        # leaves the generated C byte-identical.
-        OPTIONS.promote_registers = True
-    if cli.nan_trap:
-        # SR_NAN_TRAP: follow every FPU/VFPU result write with a check that
-        # names the instruction whose result went non-finite from all-finite
-        # operands. Default (absent) emits no check statement at all, so the
-        # generated C is byte-identical to a pre-trap build.
-        OPTIONS.nan_trap = True
 
-    if stack_census:
-        # The dynamic run is meaningful only after the static ownership floor
-        # accepts the same image.
-        cfg_gate = True
-
-    symbols = {}
-    if symbol_map_path is not None:
-        # Read before the analysis so a bad map fails in a second, not after it.
-        try:
-            symbols = load_symbol_map(symbol_map_path)
-        except (OSError, UnicodeDecodeError, SymbolMapError) as exc:
-            sys.stderr.write(f"codegen: symbol map: {exc}\n")
-            return 2
-
+def _extra_images(use_env_extra, cli_extra_specs):
+    """``(fixed-base extra ELFs as (path, base), runtime-placed module paths)`` from ``--extra-elf``."""
     try:
         extra_specs = build_profile.resolve_list(
             "GAME_EXTRA_ELFS_ENV", use_env=use_env_extra, cli_values=cli_extra_specs,
             flag="--env-extra-elfs",
         )
     except build_profile.BuildInputError as exc:
-        sys.stderr.write(f"codegen: {exc}\n")
-        return 2
+        raise _Refusal(2, f"codegen: {exc}\n") from None
+    extra_elfs = []  # list of (elf_path, base_addr)
     runtime_modules = []  # module paths placed by the runtime's guest allocator
     runtime_names = set()
     for spec in extra_specs:
         if "@" not in spec:
-            sys.stderr.write(f"invalid extra-elf format (want ELF@BASE or ELF@runtime): {spec}\n")
-            return 2
+            raise _Refusal(2, f"invalid extra-elf format (want ELF@BASE or ELF@runtime): {spec}\n")
         extra_path, base_str = spec.rsplit("@", 1)
         if base_str == RUNTIME_PLACEMENT:
             name = os.path.basename(extra_path)
             if not name or name.casefold() in runtime_names:
-                sys.stderr.write(f"runtime-placed module names must be distinct: {spec}\n")
-                return 2
+                raise _Refusal(2, f"runtime-placed module names must be distinct: {spec}\n")
             runtime_names.add(name.casefold())
             runtime_modules.append(extra_path)
             continue
         try:
             extra_elfs.append((extra_path, int(base_str, 16)))
         except ValueError:
-            sys.stderr.write(f"invalid extra-elf base address: {spec}\n")
-            return 2
+            raise _Refusal(2, f"invalid extra-elf base address: {spec}\n") from None
+    return extra_elfs, runtime_modules
+
+
+def _refuse_offset0_pointers(images):
+    """Refuse an image whose relocations take the address of module offset 0 (#1375).
+
+    ``images`` is a list of ``(path, base)``; a module placed at base 0 cannot tell such a pointer
+    from a null code pointer.
+    """
     import prx_reloc_model
-    for image_path, image_base in [(elf_path, base)] + extra_elfs:
+    for image_path, image_base in images:
         try:
             with open(image_path, "rb") as source:
                 image_data = source.read()
             offset0_sites = zero_based_offset0_pointers(image_data, image_base, image_path)
         except (OSError, prx_reloc_model.RelocationModelError) as exc:
-            sys.stderr.write(
-                f"codegen: {image_path}: cannot tell a pointer to module offset 0 from a "
-                f"null code pointer at base 0x{image_base or 0:08x} (#1375): {exc}\n")
-            return 2
+            raise _Refusal(
+                2, f"codegen: {image_path}: cannot tell a pointer to module offset 0 from a "
+                   f"null code pointer at base 0x{image_base or 0:08x} (#1375): {exc}\n") from None
         if offset0_sites:
             listed = ", ".join(f"{kind} at 0x{site:08x}" for site, kind in offset0_sites[:8])
             more = f" and {len(offset0_sites) - 8} more" if len(offset0_sites) > 8 else ""
-            sys.stderr.write(
-                f"codegen: {image_path}: relocations take the address of module offset 0 "
-                f"({listed}{more}), which a module placed at base 0 cannot tell from a null "
-                "code pointer (#1375); place it at a nonzero base\n")
-            return 2
-    elf = Elf(elf_path, base=base)
-    OPTIONS.null_page_guard = (
-        min(seg["vaddr"] for seg in elf.segments if seg["type"] == 1) < PSP_UNMAPPED_END)
-    try:
-        module_record = main_module_record(elf)
-    except MainModuleRecordError as exc:
-        # The image still translates; the runtime answers a module-info query for it with
-        # a named refusal instead of a guessed record.
-        sys.stderr.write(f"codegen: MAIN_MODULE_RECORD_REFUSED: {exc}\n")
-        module_record = None
-    # Only the primary image may carry an explicit extra executable span (its title's
-    # configuration, from --extra-span or the TITLE_EXTRA_SPANS seam). Every extra guest
-    # module below is rebased to its own load address and is analyzed with no extra
-    # span at all, so one module's title configuration can never reach another's.
-    extra_spans = resolve_extra_spans(extra_span_arg)
-    # Seeds from a run's dispatch misses (tools/miss_seeds.py, #1848) are extra entries for the
-    # primary image only. Without --miss-seeds the analysis call is exactly the one it always was.
-    seed_args = {}
-    if cli.miss_seeds is not None:
-        try:
-            seed_args = {"seeds": set(miss_seeds.read_seed_file(cli.miss_seeds).seeds),
-                         "report": {}}
-        except miss_seeds.SeedFileError as exc:
-            sys.stderr.write(f"codegen: {exc}\n")
-            return 2
-    try:
-        if seed_args:
-            seed_args["seed_check"] = emitter_seed_check(elf, profile, frozenset(omit_aot.addrs),
-                                                         stack_census)
-        analyzed, ranges = analyze(elf, extra_spans=extra_spans, cfg_gate=cfg_gate, **seed_args)
-    except ImportTableError as exc:
-        sys.stderr.write(f"codegen: {format_boundary(exc)}\n")
-        return 1
-    miss_seed_outcome = seed_args["report"]["miss_seeds"] if seed_args else None
-    if miss_seed_outcome is not None:
-        miss_seeds.report_outcome(miss_seed_outcome, prefix="CODEGEN_MISS_SEEDS")
-    if cfg_report_path is not None or cfg_gate:
-        # This opt-in gate audits the primary image. Extra modules have their own
-        # analyzer invocation below and remain a separate bring-up surface until
-        # their ownership roots have an equivalent source-owned contract.
-        report_entries, report_ranges = analyzed, ranges
-        if not cfg_gate:
-            # A report-only run describes gate-mode analysis but must not change
-            # the entry set that feeds code emission.
-            try:
-                report_entries, report_ranges = analyze(
-                    elf, extra_spans=extra_spans, cfg_gate=True,
-                    **({"seeds": seeds_in_analysis(miss_seed_outcome)} if seed_args else {}))
-            except ImportTableError as exc:
-                sys.stderr.write(f"codegen: {format_boundary(exc)}\n")
-                return 1
-        cfg_report = canonical_cfg_report(elf, ranges=report_ranges, entries=report_entries)
-        if cfg_report_path is not None:
-            parent = os.path.dirname(cfg_report_path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            with open(cfg_report_path, "w", encoding="ascii", newline="\n") as output:
-                output.write(canonical_cfg_json(cfg_report))
-            print("wrote CFG report:", cfg_report_path)
-        if cfg_gate:
-            cfg_findings = canonical_cfg_gate(cfg_report)
-            if cfg_findings:
-                for finding in cfg_findings:
-                    sys.stderr.write(
-                        f"CFG_GATE {finding['code']}: {finding['message']}\n"
-                    )
-                return 1
-            print(
-                "CFG_GATE PASS: "
-                f"{len(cfg_report['instructions'])} executable words, "
-                f"{len(cfg_report['entries'])} entries, "
-                f"{len(cfg_report['unowned_executable'])} unowned words recorded"
-            )
-    owned_exec_ranges = list(ranges)
-    catalog = build_entry_catalog(analyzed, ranges, profile=profile, elf=elf)
-    omitted = omit_aot.apply(catalog, elf.entry)
-    dispatch_boundaries = set(omit_aot.addrs)
-    if omitted:
-        for addr in sorted(omit_aot.addrs):
-            sys.stderr.write(f"CODEGEN_OMIT_AOT 0x{addr:08x} dispatch-fallback\n")
-    known = {addr for addr, info in catalog.items() if info.callable}
-    resume_owners = {
-        addr: info.owner for addr, info in catalog.items() if info.resumable
-    }
+            raise _Refusal(
+                2, f"codegen: {image_path}: relocations take the address of module offset 0 "
+                   f"({listed}{more}), which a module placed at base 0 cannot tell from a null "
+                   "code pointer (#1375); place it at a nonzero base\n")
 
+
+def _cfg_report_and_gate(elf, analyzed, ranges, extra_spans, cfg_report_path, cfg_gate,
+                         miss_seed_outcome=None):
+    """The canonical CFG report of the primary image, written when asked, and the opt-in ownership gate.
+
+    Returns the report, or None when neither ``--cfg-report`` nor ``--cfg-gate`` is on.
+    """
+    if cfg_report_path is None and not cfg_gate:
+        return None
+    # This opt-in gate audits the primary image. Extra modules have their own
+    # analyzer invocation and remain a separate bring-up surface until
+    # their ownership roots have an equivalent source-owned contract.
+    report_entries, report_ranges = analyzed, ranges
+    if not cfg_gate:
+        # A report-only run describes gate-mode analysis but must not change
+        # the entry set that feeds code emission.
+        try:
+            report_entries, report_ranges = analyze(
+                elf, extra_spans=extra_spans, cfg_gate=True,
+                **({"seeds": seeds_in_analysis(miss_seed_outcome)}
+                   if miss_seed_outcome is not None else {}))
+        except ImportTableError as exc:
+            raise _Refusal(1, f"codegen: {format_boundary(exc)}\n") from None
+    cfg_report = canonical_cfg_report(elf, ranges=report_ranges, entries=report_entries)
+    if cfg_report_path is not None:
+        parent = os.path.dirname(cfg_report_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(cfg_report_path, "w", encoding="ascii", newline="\n") as output:
+            output.write(canonical_cfg_json(cfg_report))
+        print("wrote CFG report:", cfg_report_path)
+    if cfg_gate:
+        cfg_findings = canonical_cfg_gate(cfg_report)
+        if cfg_findings:
+            raise _Refusal(1, "".join(
+                f"CFG_GATE {finding['code']}: {finding['message']}\n" for finding in cfg_findings))
+        print(
+            "CFG_GATE PASS: "
+            f"{len(cfg_report['instructions'])} executable words, "
+            f"{len(cfg_report['entries'])} entries, "
+            f"{len(cfg_report['unowned_executable'])} unowned words recorded"
+        )
+    return cfg_report
+
+
+def _refuse_unemitted_enhancement_sites():
+    """Fail closed when a verified package site was never rewritten by an emitted statement."""
+    if ENHANCEMENT_PKG_META is None:
+        return
+    missing = sorted(
+        site["id"] for addr, site in ENHANCEMENT_SITES.items()
+        if addr not in ENHANCEMENT_APPLIED
+    )
+    if (ENHANCEMENT_UPDATE_BOUNDARY is not None
+            and ENHANCEMENT_UPDATE_BOUNDARY not in ENHANCEMENT_APPLIED):
+        missing.append("update_boundary")
+    if missing:
+        # A verified site that no emitted statement rewrites (an unreached address, a
+        # stubbed function, a fused fast path) would leave the epoch stamp claiming
+        # it: refuse before anything is written.
+        raise _Refusal(
+            1, "codegen: enhancement package refused (fail-closed): "
+               f"{len(missing)} of {len(ENHANCEMENT_SITES)} sites were not emitted: "
+               + ", ".join(missing) + "\n")
+
+
+def _registrable_exec_spans(owned_exec_ranges):
+    """The analyzer's exact end-exclusive executable spans, deduplicated, for generated registration."""
+    # The analyzer, not mapped-RAM reachability, owns executable-byte authority.
+    # Preserve its exact end-exclusive ranges in generated registration. Exact
+    # duplicates can arise when an extra module describes the same span; removing
+    # those does not widen or merge ownership across a gap.
+    exec_spans = sorted(set((lo, hi) for lo, hi in owned_exec_ranges if hi > lo))
+    for lo, hi in exec_spans:
+        if lo < 0 or hi > 0xffffffff:
+            raise _Refusal(
+                2, f"codegen: executable span 0x{lo:x},0x{hi:x} cannot be "
+                   "represented by the runtime registry\n")
+    return exec_spans
+
+
+def _apply_options(cli, checked, options):
+    """Apply the accepted command-line switches to one translation's options object.
+
+    The options are set only once every option has been accepted. Each default (the switch absent)
+    reproduces the historical output byte for byte.
+    """
+    if cli.static_verify:
+        options.static_verify = True
+    if cli.lle_cpu:
+        # LLE CPU mode (PR 2): SYSCALL/BREAK raise guest exceptions.
+        # Default (absent) preserves the HLE sr_raw_syscall/sr_break path.
+        options.lle_cpu = True
+    if cli.lle_import_seam:
+        # LLE import seam (PR 3): import stubs route through
+        # sr_import_call instead of sr_syscall. Default (absent)
+        # preserves byte-identical HLE stubs.
+        enable_lle_import_seam(options)
+    if checked.region_split_threshold_given:
+        options.region_split_threshold = checked.region_split_threshold
+    if cli.stale_detect:
+        # TD-27 stale-code detection: emit the compact translation-time
+        # record table and route `cache` through the check hook.
+        # Default (absent) preserves byte-identical output.
+        options.stale_detect = True
+    if cli.promote_registers:
+        # #284: keep guest GPRs in C locals inside runs of simple
+        # instructions, written back at every boundary. Default (absent)
+        # leaves the generated C byte-identical.
+        options.promote_registers = True
+    if cli.nan_trap:
+        # SR_NAN_TRAP: follow every FPU/VFPU result write with a check that
+        # names the instruction whose result went non-finite from all-finite
+        # operands. Default (absent) emits no check statement at all, so the
+        # generated C is byte-identical to a pre-trap build.
+        options.nan_trap = True
+
+
+def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
+                              symbol_map_path):
+    """Load, verify and resolve the ``--enhancement-package`` into the ``ENHANCEMENT_*`` tables.
+
+    The tables are reset first, so a run without a package starts empty. A package that fails
+    verification refuses the run (fail closed).
+    """
     global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY
     ENHANCEMENT_SITES = {}
     ENHANCEMENT_PKG_META = None
@@ -4987,7 +6111,7 @@ def main(argv):
     ENHANCEMENT_APPLIED.clear()
     ENHANCEMENT_DATA_PATCHES.clear()
     ENHANCEMENT_DATA_FILES.clear()
-    GUEST_SP_ENTRIES.clear()
+    ENHANCEMENT_STORE_SITES.clear()
     if enhancement_pkg_path is not None:
         import hashlib
         from pathlib import Path
@@ -5031,6 +6155,7 @@ def main(argv):
                         f"site {site['id']}: only a jal call site can be rewritten among "
                         "control transfers (fail-closed refusal)"
                     )
+            _number_enhancement_store_sites()
             boundary = enhancement_package.verify_and_resolve_update_boundary(
                 pkg_validated,
                 symbol_to_addr=sym_map,
@@ -5089,10 +6214,437 @@ def main(argv):
                 "data_files_count": len(ENHANCEMENT_DATA_FILES),
             }
         except enhancement_package.EnhancementPackageError as exc:
+            raise _Refusal(1, f"codegen: enhancement package refused (fail-closed): {exc}\n") from None
+
+
+def _symbol_names(symbol_map_path, name_imports, symbols, import_nids, emitted, resume_owners, func_texts):
+    """``(renames, symbol_table)`` from ``--symbol-map`` and ``--name-imports``; both empty without them."""
+    # Names from --symbol-map and --name-imports are applied as each file is
+    # written, after the partition, so they change symbol spellings and nothing
+    # else. A map's name for an address wins over the stub's NID name.
+    renames = {}
+    symbol_table = []
+    if symbol_map_path is not None or name_imports:
+        names = import_stub_names(import_nids) if name_imports else {}
+        named_imports = sum(1 for a in names if a not in symbols)
+        names.update(symbols)
+        renames = symbol_map_renames(names, emitted, resume_owners)
+        collisions = symbol_map_collisions(renames, func_texts)
+        if collisions:
+            raise _Refusal(2, "codegen: symbol map: a name would spell a generator-owned symbol: "
+                           + ", ".join(collisions) + "\n")
+        emitted_set = set(emitted)
+        emitted_sorted = sorted(emitted_set)
+
+        def holds_an_entry(a, size):
+            i = bisect.bisect_left(emitted_sorted, a)
+            return i < len(emitted_sorted) and emitted_sorted[i] - a < size
+
+        # The runtime names an address inside a function from this table, so a
+        # function whose own start is not an entry is in it when an entry is inside.
+        symbol_table = sorted(
+            (a, name, size) for a, (name, size) in names.items()
+            if a in emitted_set or (size and holds_an_entry(a, size)))
+        if symbol_map_path is not None:
+            renamed = [int(symbol[2:], 16) for symbol in renames]
+            named_resumes = sum(1 for a in renamed
+                                if a in resume_owners and resume_owners[a] in names)
+            inside = sum(1 for a in renamed if a not in names
+                         and not (a in resume_owners and resume_owners[a] in names))
             sys.stderr.write(
-                f"codegen: enhancement package refused (fail-closed): {exc}\n"
-            )
-            return 1
+                f"symbol map: {sum(1 for a in symbols if a in emitted_set)} of {len(symbols)} "
+                f"function name(s) name an emitted entry; {named_resumes} resume bodies take "
+                f"their owner's name; {inside} entries inside a named function take its name\n")
+        if name_imports:
+            sys.stderr.write(
+                f"import names: {named_imports} of {len(import_nids)} import stubs named "
+                "from the NID corpus\n")
+    return renames, symbol_table
+
+
+def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resume_owners, dispatch_boundaries,
+                        *, stack_census, module_translations, symbol_table, module_record, main_var_imports,
+                        main_var_exports, main_func_exports, fixed_var_imports, exec_spans, stale_funcs,
+                        options=None):
+    """The lines of the main generated file: the registration of every chunk, module and span."""
+    options = _options_for_call(options)
+    # Main recomp.c
+    main_out = [
+        "/* Generated by tools/codegen.py. Do not edit by hand. */",
+        f'#include "{os.path.basename(base_name)}_funcs.h"',
+        "#include <math.h>",
+        "#include <stdlib.h>",
+        "#include <string.h>",
+        "#include <stdio.h>",
+        ""
+    ]
+    if ENHANCEMENT_PKG_META is not None:
+        main_out.append(
+            f"/* AOT Enhancement Epoch: {ENHANCEMENT_PKG_META['epoch']} "
+            f"id={ENHANCEMENT_PKG_META['id']} v={ENHANCEMENT_PKG_META['version']} "
+            f"sites={ENHANCEMENT_PKG_META['sites_count']} "
+            f"sha256={ENHANCEMENT_PKG_META['digest']} */"
+        )
+        main_out += [
+            "int nk_enhancement_on(void) {",
+            "    static int on = -1;",
+            "    if (on < 0) {",
+            '        const char *v = getenv("SR_EXPERIMENTAL_60HZ");',
+            "        on = (v && v[0] == '1' && v[1] == '\\0') ? 1 : 0;",
+            "    }",
+            "    return on;",
+            "}",
+            "uint32_t nk_enhancement_updates;",
+            "void nk_enhancement_factor_kept(int *reported, const char *site, uint32_t pc, float value) {",
+            "    if (*reported) return;",
+            "    *reported = 1;",
+            '    fprintf(stderr, "ENHANCEMENT_FACTOR_KEPT: site %s at 0x%08x loaded %.9g, outside (0, 1); "',
+            '            "it keeps its stock value\\n", site, (unsigned)pc, (double)value);',
+            "}",
+            "",
+        ]
+        main_out += _enhancement_store_lines()
+        main_out += _enhancement_data_lines()
+    census_entries = sorted({a for a in emitted if a not in resume_owners})
+    if stack_census:
+        census_values = census_entries or [0]
+        main_out.append(
+            "static const uint32_t sr_stack_census_expected_entries[] = {"
+            + ", ".join(f"0x{addr:08x}u" for addr in census_values)
+            + "};"
+        )
+        main_out.append("")
+    for i in range(num_files):
+        main_out.append(f"void sr_register_chunk_{i}(void);")
+    if module_translations:
+        main_out.append("")
+    for module in module_translations:
+        main_out.extend(runtime_module_descriptor_lines(module))
+    if symbol_table:
+        main_out.append("")
+        main_out.append("/* Guest function names from --symbol-map and --name-imports: "
+                        "names and addresses only. */")
+        main_out.append("static const SrGuestSymbol sr_guest_symbol_table[] = {")
+        for a, name, size in symbol_table:
+            main_out.append(f'    {{0x{a:08x}u, 0x{size:08x}u, "{name}"}},')
+        main_out.append("};")
+    if module_record is not None:
+        main_out.append("")
+        main_out.extend(main_module_record_lines(module_record))
+    if main_var_imports:
+        main_out.append("")
+        main_out.extend(var_import_table_lines("sr_main_var_imports", main_var_imports))
+    for index, (_name, imports_of) in enumerate(fixed_var_imports):
+        main_out.extend(var_import_table_lines(f"sr_x{index}_var_imports", imports_of))
+    if main_var_exports:
+        main_out.append("static const SrVarExportDecl sr_main_var_exports[] = {")
+        main_out.extend(f"    {{ {c_library_name(e.library)}, 0x{e.nid:08x}u, 0x{e.address:08x}u }},"
+                        for e in main_var_exports)
+        main_out.append("};")
+    if main_func_exports:
+        main_out.append("static const SrMainFuncExport sr_main_func_exports[] = {")
+        main_out.extend(f"    {{ 0x{nid:08x}u, 0x{address:08x}u }},"
+                        for nid, address in main_func_exports)
+        main_out.append("};")
+    main_out.append("\nvoid sr_register_all(void) {")
+    if module_record is not None:
+        main_out.append("    sr_main_module_register(&sr_main_module_record);")
+    if main_var_exports:
+        main_out.append(f"    sr_main_var_exports_register(sr_main_var_exports, "
+                        f"{len(main_var_exports)}u);")
+    if main_func_exports:
+        main_out.append(f"    sr_main_func_exports_register(sr_main_func_exports, "
+                        f"{len(main_func_exports)}u);")
+    if main_var_imports:
+        main_out.append(f"    sr_main_var_imports_register(sr_main_var_imports, "
+                        f"{len(main_var_imports)}u);")
+    for index, (name, imports_of) in enumerate(fixed_var_imports):
+        main_out.append(f"    sr_fixed_var_imports_register({c_string(name)}, "
+                        f"sr_x{index}_var_imports, {len(imports_of)}u);")
+    if symbol_table:
+        main_out.append(
+            f"    sr_guest_symbols_register(sr_guest_symbol_table, {len(symbol_table)}u);")
+    if options.lle_cpu:
+        main_out.append("    sr_cpu_lle_set_enabled(1);")
+    main_out.append("    sr_exec_span_reset();")
+    for module in module_translations:
+        main_out.append(f"    sr_module_code_register(&sr_m{module.index}_code);")
+    for lo, hi in exec_spans:
+        main_out.append(
+            f"    if (!sr_exec_span_register(0x{lo:08x}u, 0x{hi:08x}u)) {{"
+        )
+        main_out.append(
+            f'        fprintf(stderr, "sr_register_all: executable span '
+            f'0x{lo:08x},0x{hi:08x} rejected\\n");'
+        )
+        main_out.append("        exit(1);")
+        main_out.append("    }")
+    main_out.extend(unverified_vfpu_report_lines())
+    if stack_census:
+        main_out.append(
+            "    sr_stack_census_begin(sr_stack_census_expected_entries, "
+            f"{len(census_entries)}u);"
+        )
+    if options.stale_detect:
+        # TD-27 compact translation-time records (address + entry word +
+        # word count + FNV-1a per translated primary-image function). No raw
+        # code bodies are embedded; the runtime compares these against live
+        # guest bytes at cache-invalidate time behind SR_STALE_DETECT.
+        main_out.append("    sr_stale_reset();")
+        stale_records = 0
+        for a in stale_funcs:
+            rec = stale_block_for_function(
+                elf, a, ranges, known, resume_owners, dispatch_boundaries, options=options)
+            if rec is None:
+                sys.stderr.write(f"stale-detect: no record for 0x{a:08x} (unreadable entry)\n")
+                continue
+            entry_word, nwords, digest = rec
+            main_out.append(f"    sr_stale_register_word(0x{a:08x}u, 0x{entry_word:08x}u);")
+            main_out.append(f"    sr_stale_register_block(0x{a:08x}u, {nwords}u, 0x{digest:08x}u);")
+            stale_records += 1
+        main_out.append(
+            f'    fprintf(stderr, "sr_register_all: registered {stale_records} '
+            'stale-detect record(s)\\n");'
+        )
+    main_out.append(
+        f'    fprintf(stderr, "sr_register_all: registered {len(exec_spans)} '
+        'executable span(s)\\n");'
+    )
+    if ENHANCEMENT_PKG_META is not None:
+        main_out.append("    if (nk_enhancement_on()) nk_enhancement_apply_data();")
+        if ENHANCEMENT_STORE_SITES:
+            main_out.append("    nk_enh_sites_start();")
+    main_out.append(f'    fprintf(stderr, "sr_register_all: starting {len(emitted)} registrations\\n");')
+    for i in range(num_files):
+        main_out.append(f"    sr_register_chunk_{i}();")
+    main_out.append('    fprintf(stderr, "sr_register_all: completed\\n");\n}')
+    return main_out
+
+
+def _write_chunks(base_name, boundaries, renames, backend, llvm_lowered, llvm_fallbacks,
+                  options=None):
+    """Write each chunk's C (and LLVM IR) and the LLVM manifest; returns the manifest's path."""
+    options = _options_for_call(options)
+    for i, chunk in enumerate(boundaries):
+        parts = ["/* Generated by tools/codegen.py. Do not edit by hand. */\n",
+                 f'#include "{os.path.basename(base_name)}_funcs.h"\n#include <math.h>\n#include <string.h>\n#include <stdio.h>\n\n']
+        if options.static_verify:
+            parts.append(SR_SV_CHECK + "\n\n")
+        parts.append("\n\n".join(chunk) + "\n\n")
+        parts.append(f"void sr_register_chunk_{i}(void) {{\n")
+        for ft in chunk:
+            if isinstance(ft, ModuleText):
+                continue  # reached through its module descriptor, never at a fixed address
+            m = re.search(r'void ([fr])_([0-9a-fA-F]+)\(', ft)
+            if m:
+                prefix = m.group(1)
+                a_val = int(m.group(2), 16)
+                parts.append(f"    sr_register(0x{a_val:08x}u, {prefix}_{a_val:08x});\n")
+        parts.append("}\n")
+        with open(f"{base_name}_{i}.c", "w", encoding="ascii", newline="\n") as f:
+            f.write(rename_generated_entries("".join(parts), renames))
+        llvm_bodies = [ft for ft in chunk if isinstance(ft, codegen_llvm.LLVMBody)]
+        llvm_path = f"{base_name}_{i}.ll"
+        if llvm_bodies:
+            module = codegen_llvm.chunk_module(os.path.basename(llvm_path), llvm_bodies, renames)
+            with open(llvm_path, "w", encoding="ascii", newline="\n") as f:
+                f.write(module.render())
+        else:
+            for stale in (llvm_path, f"{base_name}_{i}_ll.o", f"{base_name}_{i}_ll.bc"):
+                if os.path.exists(stale):
+                    os.remove(stale)
+    llvm_manifest_path = f"{base_name}_llvm.json"
+    if backend == "llvm":
+        with open(llvm_manifest_path, "w", encoding="ascii", newline="\n") as f:
+            f.write(codegen_llvm.manifest(llvm_lowered, llvm_fallbacks))
+    elif os.path.exists(llvm_manifest_path):
+        os.remove(llvm_manifest_path)
+    return llvm_manifest_path
+
+
+def _write_unit_fallbacks(base_name, boundaries, renames, module_translations, options=None):
+    """The makefile naming the units that build at a lower optimisation level, and a line for each."""
+    options = _options_for_call(options)
+    unit_fallbacks = [
+        row for row in (fallback_unit_row(f"{os.path.basename(base_name)}_{i}", chunk, renames)
+                        for i, chunk in enumerate(boundaries))
+        if row is not None
+    ]
+    unit_fallbacks += write_shared_library_sources(os.path.dirname(base_name) or ".",
+                                                   module_translations, options=options)
+    write_unit_opt_makefile(f"{base_name}_opt.mk", unit_fallbacks)
+    for stem, symbol, weight in unit_fallbacks:
+        print(f"CODEGEN_OPT_FALLBACK unit={stem} body={symbol} bytes={weight} "
+              f"level={BODY_FALLBACK_OPT}")
+
+
+def _remove_stale_chunks(base_name, num_files):
+    """Delete the chunk files of an earlier, longer run."""
+    j = num_files
+    while True:
+        stale = [f"{base_name}_{j}{suffix}" for suffix in (".c", ".o", ".ll", "_ll.o", "_ll.bc")]
+        present = [path for path in stale if os.path.exists(path)]
+        if not present:
+            break
+        for path in present:
+            os.remove(path)
+        j += 1
+
+
+def _print_summary(out_c, base_name, num_files, funcs_per_chunk, chunk_target_bytes, emitted, resume_owners,
+                   stubbed, backend, llvm_lowered, llvm_fallbacks, llvm_manifest_path, options=None):
+    """The closing lines: what was written and which opt-in modes added statistics."""
+    options = _options_for_call(options)
+    resume_count = sum(1 for a in emitted if a in resume_owners)
+    if chunk_target_bytes > 0:
+        chunk_desc = f"{num_files} chunks (target {chunk_target_bytes} bytes, cap {funcs_per_chunk} functions)"
+    else:
+        chunk_desc = f"{num_files} chunks ({funcs_per_chunk} functions/chunk)"
+    print(f"wrote {out_c} and {chunk_desc}; "
+          f"{len(emitted) - resume_count} callable functions + {resume_count} resume entries, "
+          f"{len(stubbed)} fallbacks. "
+          f"Stub list: {base_name}_stubs.txt")
+    if backend == "llvm":
+        print(f"llvm backend: {len(llvm_lowered)} functions lowered to LLVM IR, "
+              f"{len(llvm_fallbacks)} kept in C (reasons: {llvm_manifest_path})")
+    if options.static_verify:
+        print(f"static-verify: {SV_STATS['checks']} register assertions "
+              f"across {SV_STATS['funcs']} functions")
+    if options.promote_registers:
+        print(promotion_summary())
+
+
+
+def _translate(argv):
+    """Run one translation: the options, the images, the emitted functions, then the files.
+
+    In order: validate and apply the options, resolve the extra images, analyse the primary
+    image (the CFG report and gate), load the enhancement package, emit every entry of the
+    primary image, the fixed-base extra modules and the runtime-placed modules, then write the
+    registration source, the chunks and the reports. A refusal is raised as ``_Refusal``;
+    ``main`` turns it into the message and exit status.
+    """
+    reset_unverified_vfpu_uses()
+    args = [a for a in argv[1:] if not a.startswith("--")]
+    try:
+        cli = _command_line_parser().parse_args([a for a in argv[1:] if a.startswith("--")])
+    except SystemExit as exc:  # argparse has printed the usage and the unknown option
+        raise _Refusal(exc.code, "") from None
+
+    use_env_elf = cli.env_elf
+    use_env_extra = cli.env_extra_elfs
+    # The ELF is a positional only in the legacy form; with --env-elf the first
+    # positional is the output .c.  Supplying both is a conflict, not a
+    # precedence question: silently treating the ELF as the output path would
+    # overwrite the guest image with generated C.
+    expected = 1 if use_env_elf else 2
+    if len(args) < expected:
+        sys.stderr.write(_USAGE)
+        return 2
+    if use_env_elf and len(args) > 1:
+        sys.stderr.write(
+            "codegen: --env-elf takes exactly one positional (<out.c>); refusing to guess "
+            f"which of {args!r} is the output. Pass the ELF or --env-elf, not both.\n"
+        )
+        return 2
+
+    cli_elf = None if use_env_elf else args[0]
+    out_c = args[0] if use_env_elf else args[1]
+    try:
+        elf_path = build_profile.resolve_path(
+            "GAME_ELF", cli_value=cli_elf, use_env=use_env_elf,
+            cli_label="<elf> argument", flag="--env-elf",
+        )
+    except build_profile.BuildInputError as exc:
+        sys.stderr.write(f"codegen: {exc}\n")
+        return 2
+
+    base = int(cli.base, 16) if cli.base is not None else None
+    profile = cli.profile
+    extra_span_arg = cli.extra_span
+    cfg_gate = cli.cfg_gate
+    stack_census = cli.stack_census
+    enhancement_pkg_path = cli.enhancement_package
+    enhancement_data_root = cli.enhancement_data_root
+    cli_extra_specs = cli.extra_elf  # raw "ELF@BASE" strings from --extra-elf=
+    cfg_report_path = cli.cfg_report
+    symbol_map_path = cli.symbol_map
+    name_imports = cli.name_imports  # name each import stub after its NID's function
+    checked = _validated_options(cli)
+    backend, funcs_per_chunk = checked.backend, checked.funcs_per_chunk
+    chunk_target_bytes, omit_aot = checked.chunk_target_bytes, checked.omit_aot
+    options = CodegenOptions()
+    _apply_options(cli, checked, options)
+
+    if stack_census:
+        # The dynamic run is meaningful only after the static ownership floor
+        # accepts the same image.
+        cfg_gate = True
+
+    symbols = {}
+    if symbol_map_path is not None:
+        # Read before the analysis so a bad map fails in a second, not after it.
+        try:
+            symbols = load_symbol_map(symbol_map_path)
+        except (OSError, UnicodeDecodeError, SymbolMapError) as exc:
+            sys.stderr.write(f"codegen: symbol map: {exc}\n")
+            return 2
+
+    extra_elfs, runtime_modules = _extra_images(use_env_extra, cli_extra_specs)
+    _refuse_offset0_pointers([(elf_path, base)] + extra_elfs)
+    elf = Elf(elf_path, base=base)
+    options.null_page_guard = (
+        min(seg["vaddr"] for seg in elf.segments if seg["type"] == 1) < PSP_UNMAPPED_END)
+    try:
+        module_record = main_module_record(elf)
+    except MainModuleRecordError as exc:
+        # The image still translates; the runtime answers a module-info query for it with
+        # a named refusal instead of a guessed record.
+        sys.stderr.write(f"codegen: MAIN_MODULE_RECORD_REFUSED: {exc}\n")
+        module_record = None
+    # Only the primary image may carry an explicit extra executable span (its title's
+    # configuration, from --extra-span or the TITLE_EXTRA_SPANS seam). Every extra guest
+    # module below is rebased to its own load address and is analyzed with no extra
+    # span at all, so one module's title configuration can never reach another's.
+    extra_spans = resolve_extra_spans(extra_span_arg)
+    # Seeds from a run's dispatch misses (tools/miss_seeds.py, #1848) are extra entries for the
+    # primary image only. Without --miss-seeds the analysis call is exactly the one it always was.
+    seed_args = {}
+    if cli.miss_seeds is not None:
+        try:
+            seed_args = {"seeds": set(miss_seeds.read_seed_file(cli.miss_seeds).seeds),
+                         "report": {}}
+        except miss_seeds.SeedFileError as exc:
+            sys.stderr.write(f"codegen: {exc}\n")
+            return 2
+    try:
+        if seed_args:
+            seed_args["seed_check"] = emitter_seed_check(elf, profile, frozenset(omit_aot.addrs),
+                                                         stack_census, options=options)
+        analyzed, ranges = analyze(elf, extra_spans=extra_spans, cfg_gate=cfg_gate, **seed_args)
+    except ImportTableError as exc:
+        sys.stderr.write(f"codegen: {format_boundary(exc)}\n")
+        return 1
+    miss_seed_outcome = seed_args["report"]["miss_seeds"] if seed_args else None
+    if miss_seed_outcome is not None:
+        miss_seeds.report_outcome(miss_seed_outcome, prefix="CODEGEN_MISS_SEEDS")
+    cfg_report = _cfg_report_and_gate(elf, analyzed, ranges, extra_spans, cfg_report_path, cfg_gate,
+                                      miss_seed_outcome)
+    owned_exec_ranges = list(ranges)
+    catalog = build_entry_catalog(analyzed, ranges, profile=profile, elf=elf)
+    omitted = omit_aot.apply(catalog, elf.entry)
+    dispatch_boundaries = set(omit_aot.addrs)
+    if omitted:
+        for addr in sorted(omit_aot.addrs):
+            sys.stderr.write(f"CODEGEN_OMIT_AOT 0x{addr:08x} dispatch-fallback\n")
+    known = {addr for addr, info in catalog.items() if info.callable}
+    resume_owners = {
+        addr: info.owner for addr, info in catalog.items() if info.resumable
+    }
+
+    GUEST_SP_ENTRIES.clear()
+    _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhancement_data_root,
+                              symbol_map_path)
 
     try:
         impmap = primary_import_map(elf)
@@ -5121,12 +6673,13 @@ def main(argv):
         """--backend=llvm: the function's LLVM body, else its C text with the reason."""
         if backend != "llvm":
             return text
-        if OPTIONS.null_page_guard:
+        if options.null_page_guard:
             llvm_fallbacks.append((a, "the LLVM backend has no null-page guard (#363)"))
             return text
         try:
             body = codegen_llvm.lower(sys.modules[__name__], image, a, image_ranges, image_known,
                                       c_text=text, stack_census=stack_census, profile=profile,
+                                      options=options,
                                       **kwargs)
         except codegen_llvm.LLVMUnsupported as exc:
             llvm_fallbacks.append((a, str(exc)))
@@ -5157,20 +6710,11 @@ def main(argv):
 }}"""
             func_texts.append(text); emitted.append(a); continue
 
-        if hst_profile and a == HST_GAME_LOOP_ADDR:
-            func_texts.append("\n".join(emit_function(
-                elf, a, ranges, known, resume_owners=resume_owners,
-                resumable=catalog[a].resumable, profile=profile,
-                dispatch_boundaries=dispatch_boundaries,
-                stack_census=stack_census)))
-            func_texts[-1] = func_texts[-1].replace("void f_000468c8(CpuState *s)", "void f_000468c8_real(CpuState *s)")
-            func_texts.append(HST_GAME_LOOP_WRAPPER); emitted.append(a); continue
-
         if is_stub(a):
             lib_nid = impmap.get(a)
             if lib_nid is not None:
                 lib, nid = lib_nid
-                text = import_stub_text(a, lib, nid)
+                text = import_stub_text(a, lib, nid, options=options)
                 import_nids[a] = nid
             else:
                 text = f"void f_{a:08x}(CpuState *s) {{  /* {NO_NID_IMPORT_STUB} */\n"
@@ -5184,11 +6728,11 @@ def main(argv):
                 elf, a, ranges, known, resume_owners=resume_owners,
                 resumable=catalog[a].resumable, profile=profile,
                 dispatch_boundaries=dispatch_boundaries,
-                stack_census=stack_census)), elf, a, ranges, known,
+                stack_census=stack_census, options=options)), elf, a, ranges, known,
                 resume_owners=resume_owners, resumable=catalog[a].resumable,
                 dispatch_boundaries=dispatch_boundaries))
             emitted.append(a)
-            if OPTIONS.stale_detect:
+            if options.stale_detect:
                 stale_funcs.append(a)
         except Unsupported as e:
             if applied_before is not None:
@@ -5300,7 +6844,7 @@ def main(argv):
                 lib_nid = extra_impmap.get(a)
                 if lib_nid is not None:
                     lib, nid = lib_nid
-                    text = import_stub_text(a, lib, nid)
+                    text = import_stub_text(a, lib, nid, options=options)
                     import_nids[a] = nid
                 else:
                     text = f"void f_{a:08x}(CpuState *s) {{  /* import stub -> HLE boundary */\n"
@@ -5311,7 +6855,8 @@ def main(argv):
             try:
                 func_texts.append(llvm_body("\n".join(emit_function(
                     extra_elf, a, extra_ranges, extra_known, profile=profile,
-                    stack_census=stack_census)), extra_elf, a, extra_ranges, extra_known))
+                    stack_census=stack_census, options=options)), extra_elf, a,
+                    extra_ranges, extra_known))
                 emitted.append(a)
             except Unsupported as e:
                 reason = str(e).replace('"', "'")
@@ -5342,16 +6887,30 @@ def main(argv):
             module_hashes.append(fnv1a64(source.read()))
     module_translations = []
     main_data_words = data_section_words(elf) if runtime_modules else set()
+    # Code the game installs at run time, from the captures runs wrote (#1933). Each image is
+    # bound only while guest memory holds the words its translation was made from.
+    try:
+        capture_images = code_capture.group_captures(code_capture.read_captures(cli.code_capture))
+    except code_capture.CaptureError as exc:
+        sys.stderr.write(f"codegen: {exc}\n")
+        return 2
     for index, module_path in enumerate(runtime_modules):
         shared = not stack_census and module_hashes.count(module_hashes[index]) == 1
         translated = translate_runtime_module(index, module_path, profile=profile,
                                               cfg_gate=cfg_gate, shared=shared,
-                                              entry_hints=main_data_words)
+                                              entry_hints=main_data_words, options=options)
         if isinstance(translated, int):
             return translated
         module_translations.append(translated)
         if not translated.shared:
             func_texts.extend(translated.texts)
+    for offset, image in enumerate(capture_images):
+        translated = translate_code_capture(len(runtime_modules) + offset, image,
+                                            profile=profile, cfg_gate=cfg_gate, options=options)
+        if isinstance(translated, int):
+            return translated
+        module_translations.append(translated)
+        func_texts.extend(translated.texts)
 
     if stack_census:
         try:
@@ -5369,67 +6928,10 @@ def main(argv):
     num_files = len(boundaries)
     base_name = os.path.splitext(out_c)[0]
 
-    if ENHANCEMENT_PKG_META is not None:
-        missing = sorted(
-            site["id"] for addr, site in ENHANCEMENT_SITES.items()
-            if addr not in ENHANCEMENT_APPLIED
-        )
-        if (ENHANCEMENT_UPDATE_BOUNDARY is not None
-                and ENHANCEMENT_UPDATE_BOUNDARY not in ENHANCEMENT_APPLIED):
-            missing.append("update_boundary")
-        if missing:
-            # A verified site that no emitted statement rewrites (an unreached address, a
-            # stubbed function, a fused fast path) would leave the epoch stamp claiming
-            # it: refuse before anything is written.
-            sys.stderr.write(
-                "codegen: enhancement package refused (fail-closed): "
-                f"{len(missing)} of {len(ENHANCEMENT_SITES)} sites were not emitted: "
-                + ", ".join(missing) + "\n"
-            )
-            return 1
+    _refuse_unemitted_enhancement_sites()
 
-    # Names from --symbol-map and --name-imports are applied as each file is
-    # written, after the partition, so they change symbol spellings and nothing
-    # else. A map's name for an address wins over the stub's NID name.
-    renames = {}
-    symbol_table = []
-    if symbol_map_path is not None or name_imports:
-        names = import_stub_names(import_nids) if name_imports else {}
-        named_imports = sum(1 for a in names if a not in symbols)
-        names.update(symbols)
-        renames = symbol_map_renames(names, emitted, resume_owners)
-        collisions = symbol_map_collisions(renames, func_texts)
-        if collisions:
-            sys.stderr.write(
-                "codegen: symbol map: a name would spell a generator-owned symbol: "
-                + ", ".join(collisions) + "\n")
-            return 2
-        emitted_set = set(emitted)
-        emitted_sorted = sorted(emitted_set)
-
-        def holds_an_entry(a, size):
-            i = bisect.bisect_left(emitted_sorted, a)
-            return i < len(emitted_sorted) and emitted_sorted[i] - a < size
-
-        # The runtime names an address inside a function from this table, so a
-        # function whose own start is not an entry is in it when an entry is inside.
-        symbol_table = sorted(
-            (a, name, size) for a, (name, size) in names.items()
-            if a in emitted_set or (size and holds_an_entry(a, size)))
-        if symbol_map_path is not None:
-            renamed = [int(symbol[2:], 16) for symbol in renames]
-            named_resumes = sum(1 for a in renamed
-                                if a in resume_owners and resume_owners[a] in names)
-            inside = sum(1 for a in renamed if a not in names
-                         and not (a in resume_owners and resume_owners[a] in names))
-            sys.stderr.write(
-                f"symbol map: {sum(1 for a in symbols if a in emitted_set)} of {len(symbols)} "
-                f"function name(s) name an emitted entry; {named_resumes} resume bodies take "
-                f"their owner's name; {inside} entries inside a named function take its name\n")
-        if name_imports:
-            sys.stderr.write(
-                f"import names: {named_imports} of {len(import_nids)} import stubs named "
-                "from the NID corpus\n")
+    renames, symbol_table = _symbol_names(symbol_map_path, name_imports, symbols, import_nids,
+                                          emitted, resume_owners, func_texts)
 
     # Write the codegen gap report
     with open(f"{base_name}_stubs.txt", "w", encoding="ascii", newline="\n") as f:
@@ -5447,161 +6949,16 @@ def main(argv):
     # Write the shared functions header
     funcs_h_path = f"{base_name}_funcs.h"
     write_funcs_header(funcs_h_path, emitted, resume_owners, module_translations, renames,
-                       enhancement=ENHANCEMENT_PKG_META is not None)
+                       enhancement=ENHANCEMENT_PKG_META is not None, options=options)
 
-    # The analyzer, not mapped-RAM reachability, owns executable-byte authority.
-    # Preserve its exact end-exclusive ranges in generated registration. Exact
-    # duplicates can arise when an extra module describes the same span; removing
-    # those does not widen or merge ownership across a gap.
-    exec_spans = sorted(set((lo, hi) for lo, hi in owned_exec_ranges if hi > lo))
-    for lo, hi in exec_spans:
-        if lo < 0 or hi > 0xffffffff:
-            sys.stderr.write(
-                f"codegen: executable span 0x{lo:x},0x{hi:x} cannot be "
-                "represented by the runtime registry\n"
-            )
-            return 2
+    exec_spans = _registrable_exec_spans(owned_exec_ranges)
 
-    # Main recomp.c
-    main_out = [
-        "/* Generated by tools/codegen.py. Do not edit by hand. */",
-        f'#include "{os.path.basename(base_name)}_funcs.h"',
-        "#include <math.h>",
-        "#include <stdlib.h>",
-        "#include <string.h>",
-        "#include <stdio.h>",
-        ""
-    ]
-    if ENHANCEMENT_PKG_META is not None:
-        main_out.append(
-            f"/* AOT Enhancement Epoch: {ENHANCEMENT_PKG_META['epoch']} "
-            f"id={ENHANCEMENT_PKG_META['id']} v={ENHANCEMENT_PKG_META['version']} "
-            f"sites={ENHANCEMENT_PKG_META['sites_count']} "
-            f"sha256={ENHANCEMENT_PKG_META['digest']} */"
-        )
-        main_out += [
-            "int nk_enhancement_on(void) {",
-            "    static int on = -1;",
-            "    if (on < 0) {",
-            '        const char *v = getenv("SR_EXPERIMENTAL_60HZ");',
-            "        on = (v && v[0] == '1' && v[1] == '\\0') ? 1 : 0;",
-            "    }",
-            "    return on;",
-            "}",
-            "uint32_t nk_enhancement_updates;",
-            "",
-        ]
-        main_out += _enhancement_data_lines()
-    census_entries = sorted({a for a in emitted if a not in resume_owners})
-    if stack_census:
-        census_values = census_entries or [0]
-        main_out.append(
-            "static const uint32_t sr_stack_census_expected_entries[] = {"
-            + ", ".join(f"0x{addr:08x}u" for addr in census_values)
-            + "};"
-        )
-        main_out.append("")
-    for i in range(num_files):
-        main_out.append(f"void sr_register_chunk_{i}(void);")
-    if module_translations:
-        main_out.append("")
-    for module in module_translations:
-        main_out.extend(runtime_module_descriptor_lines(module))
-    if symbol_table:
-        main_out.append("")
-        main_out.append("/* Guest function names from --symbol-map and --name-imports: "
-                        "names and addresses only. */")
-        main_out.append("static const SrGuestSymbol sr_guest_symbol_table[] = {")
-        for a, name, size in symbol_table:
-            main_out.append(f'    {{0x{a:08x}u, 0x{size:08x}u, "{name}"}},')
-        main_out.append("};")
-    if module_record is not None:
-        main_out.append("")
-        main_out.extend(main_module_record_lines(module_record))
-    if main_var_imports:
-        main_out.append("")
-        main_out.extend(var_import_table_lines("sr_main_var_imports", main_var_imports))
-    for index, (_name, imports_of) in enumerate(fixed_var_imports):
-        main_out.extend(var_import_table_lines(f"sr_x{index}_var_imports", imports_of))
-    if main_var_exports:
-        main_out.append("static const SrVarExportDecl sr_main_var_exports[] = {")
-        main_out.extend(f"    {{ {c_library_name(e.library)}, 0x{e.nid:08x}u, 0x{e.address:08x}u }},"
-                        for e in main_var_exports)
-        main_out.append("};")
-    if main_func_exports:
-        main_out.append("static const SrMainFuncExport sr_main_func_exports[] = {")
-        main_out.extend(f"    {{ 0x{nid:08x}u, 0x{address:08x}u }},"
-                        for nid, address in main_func_exports)
-        main_out.append("};")
-    main_out.append("\nvoid sr_register_all(void) {")
-    if module_record is not None:
-        main_out.append("    sr_main_module_register(&sr_main_module_record);")
-    if main_var_exports:
-        main_out.append(f"    sr_main_var_exports_register(sr_main_var_exports, "
-                        f"{len(main_var_exports)}u);")
-    if main_func_exports:
-        main_out.append(f"    sr_main_func_exports_register(sr_main_func_exports, "
-                        f"{len(main_func_exports)}u);")
-    if main_var_imports:
-        main_out.append(f"    sr_main_var_imports_register(sr_main_var_imports, "
-                        f"{len(main_var_imports)}u);")
-    for index, (name, imports_of) in enumerate(fixed_var_imports):
-        main_out.append(f"    sr_fixed_var_imports_register({c_string(name)}, "
-                        f"sr_x{index}_var_imports, {len(imports_of)}u);")
-    if symbol_table:
-        main_out.append(
-            f"    sr_guest_symbols_register(sr_guest_symbol_table, {len(symbol_table)}u);")
-    if OPTIONS.lle_cpu:
-        main_out.append("    sr_cpu_lle_set_enabled(1);")
-    main_out.append("    sr_exec_span_reset();")
-    for module in module_translations:
-        main_out.append(f"    sr_module_code_register(&sr_m{module.index}_code);")
-    for lo, hi in exec_spans:
-        main_out.append(
-            f"    if (!sr_exec_span_register(0x{lo:08x}u, 0x{hi:08x}u)) {{"
-        )
-        main_out.append(
-            f'        fprintf(stderr, "sr_register_all: executable span '
-            f'0x{lo:08x},0x{hi:08x} rejected\\n");'
-        )
-        main_out.append("        exit(1);")
-        main_out.append("    }")
-    if stack_census:
-        main_out.append(
-            "    sr_stack_census_begin(sr_stack_census_expected_entries, "
-            f"{len(census_entries)}u);"
-        )
-    if OPTIONS.stale_detect:
-        # TD-27 compact translation-time records (address + entry word +
-        # word count + FNV-1a per translated primary-image function). No raw
-        # code bodies are embedded; the runtime compares these against live
-        # guest bytes at cache-invalidate time behind SR_STALE_DETECT.
-        main_out.append("    sr_stale_reset();")
-        stale_records = 0
-        for a in stale_funcs:
-            rec = stale_block_for_function(
-                elf, a, ranges, known, resume_owners, dispatch_boundaries)
-            if rec is None:
-                sys.stderr.write(f"stale-detect: no record for 0x{a:08x} (unreadable entry)\n")
-                continue
-            entry_word, nwords, digest = rec
-            main_out.append(f"    sr_stale_register_word(0x{a:08x}u, 0x{entry_word:08x}u);")
-            main_out.append(f"    sr_stale_register_block(0x{a:08x}u, {nwords}u, 0x{digest:08x}u);")
-            stale_records += 1
-        main_out.append(
-            f'    fprintf(stderr, "sr_register_all: registered {stale_records} '
-            'stale-detect record(s)\\n");'
-        )
-    main_out.append(
-        f'    fprintf(stderr, "sr_register_all: registered {len(exec_spans)} '
-        'executable span(s)\\n");'
-    )
-    if ENHANCEMENT_PKG_META is not None:
-        main_out.append("    if (nk_enhancement_on()) nk_enhancement_apply_data();")
-    main_out.append(f'    fprintf(stderr, "sr_register_all: starting {len(emitted)} registrations\\n");')
-    for i in range(num_files):
-        main_out.append(f"    sr_register_chunk_{i}();")
-    main_out.append('    fprintf(stderr, "sr_register_all: completed\\n");\n}')
+    main_out = _registration_lines(
+        elf, ranges, known, base_name, num_files, emitted, resume_owners, dispatch_boundaries,
+        stack_census=stack_census, module_translations=module_translations, symbol_table=symbol_table,
+        module_record=module_record, main_var_imports=main_var_imports, main_var_exports=main_var_exports,
+        main_func_exports=main_func_exports, fixed_var_imports=fixed_var_imports,
+        exec_spans=exec_spans, stale_funcs=stale_funcs, options=options)
 
     if llvm_lowered:
         # The IR addresses CpuState fields by byte offset; this build's compiler checks them.
@@ -5611,52 +6968,10 @@ def main(argv):
     with open(out_c, "w", encoding="ascii", newline="\n") as f:
         f.write(rename_generated_entries("\n".join(main_out), renames))
 
-    for i, chunk in enumerate(boundaries):
-        parts = ["/* Generated by tools/codegen.py. Do not edit by hand. */\n",
-                 f'#include "{os.path.basename(base_name)}_funcs.h"\n#include <math.h>\n#include <string.h>\n#include <stdio.h>\n\n']
-        if OPTIONS.static_verify:
-            parts.append(SR_SV_CHECK + "\n\n")
-        parts.append("\n\n".join(chunk) + "\n\n")
-        parts.append(f"void sr_register_chunk_{i}(void) {{\n")
-        for ft in chunk:
-            if isinstance(ft, ModuleText):
-                continue  # reached through its module descriptor, never at a fixed address
-            m = re.search(r'void ([fr])_([0-9a-fA-F]+)\(', ft)
-            if m:
-                prefix = m.group(1)
-                a_val = int(m.group(2), 16)
-                parts.append(f"    sr_register(0x{a_val:08x}u, {prefix}_{a_val:08x});\n")
-        parts.append("}\n")
-        with open(f"{base_name}_{i}.c", "w", encoding="ascii", newline="\n") as f:
-            f.write(rename_generated_entries("".join(parts), renames))
-        llvm_bodies = [ft for ft in chunk if isinstance(ft, codegen_llvm.LLVMBody)]
-        llvm_path = f"{base_name}_{i}.ll"
-        if llvm_bodies:
-            module = codegen_llvm.chunk_module(os.path.basename(llvm_path), llvm_bodies, renames)
-            with open(llvm_path, "w", encoding="ascii", newline="\n") as f:
-                f.write(module.render())
-        else:
-            for stale in (llvm_path, f"{base_name}_{i}_ll.o", f"{base_name}_{i}_ll.bc"):
-                if os.path.exists(stale):
-                    os.remove(stale)
-    llvm_manifest_path = f"{base_name}_llvm.json"
-    if backend == "llvm":
-        with open(llvm_manifest_path, "w", encoding="ascii", newline="\n") as f:
-            f.write(codegen_llvm.manifest(llvm_lowered, llvm_fallbacks))
-    elif os.path.exists(llvm_manifest_path):
-        os.remove(llvm_manifest_path)
+    llvm_manifest_path = _write_chunks(base_name, boundaries, renames, backend, llvm_lowered,
+                                       llvm_fallbacks, options=options)
 
-    unit_fallbacks = [
-        row for row in (fallback_unit_row(f"{os.path.basename(base_name)}_{i}", chunk, renames)
-                        for i, chunk in enumerate(boundaries))
-        if row is not None
-    ]
-    unit_fallbacks += write_shared_library_sources(os.path.dirname(base_name) or ".",
-                                                   module_translations)
-    write_unit_opt_makefile(f"{base_name}_opt.mk", unit_fallbacks)
-    for stem, symbol, weight in unit_fallbacks:
-        print(f"CODEGEN_OPT_FALLBACK unit={stem} body={symbol} bytes={weight} "
-              f"level={BODY_FALLBACK_OPT}")
+    _write_unit_fallbacks(base_name, boundaries, renames, module_translations, options=options)
 
     if cfg_report_path is not None:
         cfg_report["emitted_ownership_map"] = build_emitted_ownership_map(
@@ -5668,35 +6983,22 @@ def main(argv):
         with open(cfg_report_path, "w", encoding="ascii", newline="\n") as output:
             output.write(canonical_cfg_json(cfg_report))
 
-    # Delete stale chunk files from previous runs
-    j = num_files
-    while True:
-        stale = [f"{base_name}_{j}{suffix}" for suffix in (".c", ".o", ".ll", "_ll.o", "_ll.bc")]
-        present = [path for path in stale if os.path.exists(path)]
-        if not present:
-            break
-        for path in present:
-            os.remove(path)
-        j += 1
+    _remove_stale_chunks(base_name, num_files)
 
-    resume_count = sum(1 for a in emitted if a in resume_owners)
-    if chunk_target_bytes > 0:
-        chunk_desc = f"{num_files} chunks (target {chunk_target_bytes} bytes, cap {funcs_per_chunk} functions)"
-    else:
-        chunk_desc = f"{num_files} chunks ({funcs_per_chunk} functions/chunk)"
-    print(f"wrote {out_c} and {chunk_desc}; "
-          f"{len(emitted) - resume_count} callable functions + {resume_count} resume entries, "
-          f"{len(stubbed)} fallbacks. "
-          f"Stub list: {base_name}_stubs.txt")
-    if backend == "llvm":
-        print(f"llvm backend: {len(llvm_lowered)} functions lowered to LLVM IR, "
-              f"{len(llvm_fallbacks)} kept in C (reasons: {llvm_manifest_path})")
-    if OPTIONS.static_verify:
-        print(f"static-verify: {SV_STATS['checks']} register assertions "
-              f"across {SV_STATS['funcs']} functions")
-    if OPTIONS.promote_registers:
-        print(promotion_summary())
+    _print_summary(out_c, base_name, num_files, funcs_per_chunk, chunk_target_bytes, emitted, resume_owners,
+                   stubbed, backend, llvm_lowered, llvm_fallbacks, llvm_manifest_path, options=options)
     return 0
+
+
+def main(argv):
+    try:
+        return _translate(argv)
+    except _Refusal as refusal:
+        sys.stderr.write(refusal.message)
+        return refusal.status
+    finally:
+        stop_collecting_unverified_vfpu_uses()
+
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))

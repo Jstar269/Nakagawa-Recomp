@@ -32,9 +32,9 @@ We aim to respond promptly and will remove material where appropriate.
   the files that say so in their headers are `src/rt/hle.c`, the files split from it (`hle_audio.c`, `hle_audio_codec.c`, `hle_cache_dma.c`, `hle_data.c`, `hle_display.c`, `hle_font.c`, `hle_ge.c`, `hle_host.c`, `hle_input.c`, `hle_internal.h`, `hle_io.c`, `hle_kernel_interrupt.c`, `hle_kernel_memory.c`, `hle_kernel_module.c`, `hle_kernel_sync.c`, `hle_kernel_thread.c`, `hle_kernel_time.c`, `hle_kernel_utils.c`, `hle_mpeg.c`, `hle_network.c`, `hle_npdrm.c`, `hle_route.c`, `hle_rtc.c`, `hle_system.c`, `hle_umd.c`, `hle_utility.c`), `sce_kernel_errors.h`, `hle_power.c/.h`,
   `ge.c`, `mpeg.c`, `recomp.c/.h`, `savedata.c`, `vfpu_interp.c` and `evf.h`. PPSSPP-origin data is retained only where the profile records
   its exact path, revision and notice. The per-file lineage, the pin status (the exact PPSSPP
-  revision of the inherited files is unknown) and the 61 GPL-2.0-or-later files under `src/` are
+  revision of the inherited files is unknown) and the GPL-2.0-or-later files under `src/` are
   listed in [`src/rt/PROVENANCE.md`](src/rt/PROVENANCE.md).
-- **PSP game decryption (issue #295)** — `src/core/nk_psp_*`. The KIRK engine
+- **PSP game decryption (PR #1494)** — `src/core/nk_psp_*`. The KIRK engine
   (`nk_psp_kirk.*`, GPL-3.0-or-later per its own notice), the AES and SHA-1 cores
   (`nk_psp_aes.*`, `nk_psp_sha1.*`, public-domain Rijndael and SHA-1 notices
   retained), KL4E/KL3E decompression (`nk_psp_kle.*`) and the `~PSP` container
@@ -119,10 +119,22 @@ We aim to respond promptly and will remove material where appropriate.
   deterministic converter `tools/ttf2pgf.py` for test fixtures only. The font
   is not packaged, generated PGFs stay in temporary or `build/` paths, and the
   output name is project-owned so the Reserved Font Name is never claimed.
-- **Gowun Dodum and M+ 1p font fixtures** — SIL Open Font License 1.1,
-  Copyright 2021 The Gowun Dodum Project Authors and Copyright 2016 The M+
-  Project Authors. Pinned with their licence texts in `fixtures/fonts/gowundodum/`
-  and `fixtures/fonts/mplus1p/`, for test fixtures only, on the same terms as Gudea.
+- **Stand-in PSP font sources (issues #313 and #2005)** — SIL Open Font License 1.1:
+  Liberation Sans and Liberation Serif 2.1.5 (Digitized data copyright (c) 2010
+  Google Corporation, with Reserved Font Names Arimo, Tinos and Cousine; Copyright
+  (c) 2012 Red Hat, Inc., with Reserved Font Name Liberation) in
+  `fixtures/fonts/liberation/`; Gowun Dodum (Copyright 2021 The Gowun Dodum Project
+  Authors) in `fixtures/fonts/gowundodum/`; and M+ 1p (Copyright 2016 The M+ Project
+  Authors) in `fixtures/fonts/mplus1p/`. Each is pinned with its licence text and a
+  `font-pin/v1` record. Unlike Gudea, these are build inputs: `tools/ttf2pgf.py`
+  converts them into the stand-in PSP fonts that a build puts in its `font/` folder
+  and the release ships (`font/README.md`). Liberation makes the Latin `nkltn*.pgf`
+  fonts and Gowun Dodum makes `nkkr.pgf`. `nkjpn.pgf` is made from Noto Sans JP (see
+  Project UI fonts below), with M+ 1p drawing the one character Noto Sans JP lacks
+  (U+2252). Each generated font is shipped with its conversion manifest and the licence
+  text of every font it draws from; `nkjpn-OFL.txt` carries both Noto Sans JP's and
+  M+ 1p's. The generated fonts carry project-owned names (`Nakagawa Open Latin`,
+  `Nakagawa Open Japanese`, `Nakagawa Open Korean`), so no Reserved Font Name is used.
 - **stb_image 2.30** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
   project uses it under the public-domain (Unlicense) alternative. The byte-identical
   header, upstream `LICENSE` and the pinned manifest are under `third_party/stb/`. It is
@@ -295,4 +307,6 @@ distributed under the SIL Open Font License 1.1. Each family's OFL text is besid
 files; only whitespace normalization was applied, with all license wording retained. Exact
 upstream revisions, file hashes, static weights, and license hashes are recorded in
 docs/provenance/FONT_ORIGINS.md and assets/fonts/ui/manifest.json. These are project UI
-assets, not game data.
+assets, not game data. The build also converts the Noto Sans JP file into the Japanese
+stand-in PSP font `nkjpn.pgf` (#2005); `fixtures/fonts/notosansjp/PIN.json` pins it for
+the converter, and its Reserved Font Name `Source` is not used.

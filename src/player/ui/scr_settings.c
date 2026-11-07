@@ -11,6 +11,7 @@
 #include "nk_ui_widgets.h"
 #include "scr_shared.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -70,6 +71,44 @@ static bool settings_row(NkUi *ui, uint32_t k, NkUiId button, const char *name,
     return pressed;
 }
 
+/* The game's frames come at 60 Hz (the PSP's 59.94 Hz): a display shows them evenly only when
+   its rate is a whole multiple of that. Half a hertz covers the 59.94 family and the rounding
+   displays report, and is far from the nearest uneven rate (75, 90, 144, 165). */
+#define REFRESH_TOLERANCE_HZ 0.5
+#define REFRESH_TITLE_HZ 60.0
+#define REFRESH_TITLE_NTSC_HZ (60000.0 / 1001.0)
+
+static bool refresh_is_multiple_of(double hz, double base) {
+    double n = floor(hz / base + 0.5);
+    return n >= 1.0 && fabs(hz - n * base) <= REFRESH_TOLERANCE_HZ;
+}
+
+PlayerUiRefreshAdvice player_ui_refresh_advice(double refresh_hz) {
+    if (!(refresh_hz > 0.0) || !isfinite(refresh_hz)) return PLAYER_UI_REFRESH_SILENT;
+    if (refresh_is_multiple_of(refresh_hz, REFRESH_TITLE_HZ) ||
+        refresh_is_multiple_of(refresh_hz, REFRESH_TITLE_NTSC_HZ)) {
+        return PLAYER_UI_REFRESH_SILENT;
+    }
+    return PLAYER_UI_REFRESH_ADVISORY;
+}
+
+void player_ui_refresh_advisory_text(double refresh_hz, char *out, size_t out_size) {
+    if (out == NULL || out_size == 0u) return;
+    out[0] = '\0';
+    if (player_ui_refresh_advice(refresh_hz) != PLAYER_UI_REFRESH_ADVISORY) return;
+    if (fabs(refresh_hz - floor(refresh_hz + 0.5)) < 0.005) {
+        (void)snprintf(out, out_size,
+                       "Your display runs at %.0f Hz, which is not a multiple of the game's 60 Hz. "
+                       "Motion can stutter slightly. For even motion, set it to 60, 120 or 180 Hz.",
+                       refresh_hz);
+    } else {
+        (void)snprintf(out, out_size,
+                       "Your display runs at %.2f Hz, which is not a multiple of the game's 60 Hz. "
+                       "Motion can stutter slightly. For even motion, set it to 60, 120 or 180 Hz.",
+                       refresh_hz);
+    }
+}
+
 static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float width,
                           float height, PlayerUiAction *result) {
     const NkUiTheme *theme = nk_ui_theme(ui);
@@ -85,8 +124,9 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
            design 190 px; at a larger text size the names wrap instead. */
         const char *values[] = {
             safe_text(model->resolution, "2x"), safe_text(model->pacing, "PSP timing"),
-            safe_text(model->scaling, "Sharp"), "Size, contrast, motion",
-            "Controller and keyboard", "Check for updates", "Off", "Filtering and more"
+            safe_text(model->scaling, "Sharp"), safe_text(model->preset, "Custom"),
+            "Size, contrast, motion",
+            "Controller and keyboard", "Check for updates", "Off", "Off: options"
         };
         float buttons = 190.0f;
         for (size_t i = 0u; i < sizeof(values) / sizeof(values[0]); ++i) {
@@ -102,20 +142,33 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
     {
         NkUiLayout head = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(),
                                       NK_UI_SPACE_1);
+        char advisory[192];
+        player_ui_refresh_advisory_text(model->display_refresh_hz, advisory, sizeof(advisory));
         if (nk_ui_begin_container(ui, SET_ID_HEAD, &head, NULL)) {
             /* The SETTINGS tab names the page, so a short window drops the
-               heading to keep every row on screen. */
-            if (height >= 680.0f) {
+               heading to keep every row on screen; the advisory line needs
+               that room sooner. */
+            if (height >= (advisory[0] != '\0' ? 780.0f : 680.0f)) {
                 nk_ui_text_role(ui, SET_ID_TEXT + 0u, "SETTINGS", NK_UI_TYPE_DISPLAY,
                                 theme->paper);
             }
+            /* A notice (a failed save) comes first, then the graphics preset's note
+               (#2150), then the page's own line. */
+            bool has_notice = model->notice != NULL && model->notice[0] != '\0';
+            bool has_preset = !has_notice && model->preset_notice != NULL &&
+                              model->preset_notice[0] != '\0';
             nk_ui_text_role(ui, SET_ID_TEXT + 1u,
-                            safe_text(model->notice,
-                                      "Changes are saved as you make them. Game settings apply "
-                                      "the next time a game starts."),
+                            has_notice ? model->notice
+                            : has_preset ? model->preset_notice
+                                         : "Changes are saved as you make them. Game settings "
+                                           "apply the next time a game starts.",
                             NK_UI_TYPE_BODY_S,
-                            model->notice != NULL && model->notice[0] != '\0'
+                            has_notice || (has_preset && model->preset_notice_warns)
                                 ? theme->warning : theme->muted);
+            if (advisory[0] != '\0') {
+                nk_ui_text_role(ui, SET_ID_TEXT + 2u, advisory, NK_UI_TYPE_BODY_S,
+                                theme->warning);
+            }
             nk_ui_end_container(ui);
         }
     }
@@ -144,14 +197,21 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                              safe_text(model->scaling, "Sharp"), false, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_SCALING);
             }
-            /* Ace Mode (src/rt/ace.h): the library's switch, and its page. */
-            if (settings_row(ui, 11u, PLAYER_UI_ID_SETTINGS_ACE, "Ace Mode",
-                             settings_on_off(model->ace_enabled), model->ace_enabled, name_width)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACE);
-            }
-            if (settings_row(ui, 12u, PLAYER_UI_ID_SETTINGS_ACE_OPEN, "Ace Mode options",
-                             "Filtering and more", false, name_width)) {
+            /* The play mode (#2055): one row that opens Settings > Enhanced, where the
+               library's default and each part are (#2007). */
+            if (settings_row(ui, 12u, PLAYER_UI_ID_SETTINGS_ACE_OPEN, "Play mode",
+                             model->enhanced_library_on ? "Enhanced: options"
+                                                        : "Authentic: options",
+                             model->enhanced_library_on, name_width)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_OPEN_ACE);
+            }
+            /* A graphics preset (#2150) stands in for the display rows above it in Enhanced
+               and Ace sessions; Authentic keeps those rows, and editing one makes the preset
+               Custom. Last on the card, so the rows above keep their places beside the
+               LAUNCHER AND SOUND rows. */
+            if (settings_row(ui, 13u, PLAYER_UI_ID_SETTINGS_PRESET, "Graphics preset",
+                             safe_text(model->preset, "Custom"), false, name_width)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PRESET);
             }
             nk_ui_end_container(ui);
         }
@@ -252,6 +312,9 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
             {PLAYER_UI_ID_SETTINGS_FONTS, "PSP fonts", 0u, PLAYER_UI_SETTINGS_OPEN_FONTS},
             {PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT, "Problem report", 0u,
              PLAYER_UI_SETTINGS_OPEN_PROBLEM_REPORT},
+            {PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER, "Open data folder", 0u,
+             PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER},
+            {PLAYER_UI_ID_SETTINGS_OPEN_LOGS, "Open logs", 0u, PLAYER_UI_SETTINGS_OPEN_LOGS},
             {PLAYER_UI_ID_SETTINGS_FACTORY_RESET, "Factory reset", NK_UI_BUTTON_DANGER,
              PLAYER_UI_SETTINGS_OPEN_FACTORY_RESET}
         };
@@ -285,10 +348,10 @@ static void settings_problem_report(NkUi *ui, const PlayerUiSettingsModel *model
     nk_ui_text_role(ui, FLOW_ID_TITLE, "Problem report", NK_UI_TYPE_TITLE, theme->paper);
     switch (step) {
         case PLAYER_UI_REPORT_PREVIEWING:
-            lead = "Listing what the report would hold...";
+            lead = "Listing what the report would hold…";
             break;
         case PLAYER_UI_REPORT_CREATING:
-            lead = "Writing the report. Checking the build tools can take a minute...";
+            lead = "Writing the report. Checking the build tools can take a minute…";
             break;
         case PLAYER_UI_REPORT_DONE:
             lead = "The report is written. Open the ZIP and look through it before you attach "
@@ -399,7 +462,7 @@ static void settings_shorten_words(const char *in, char *out, size_t cap, size_t
             size_t head = 12u;
             size_t tail = max_word - head - 3u;
             while (tail > 0u && ((unsigned char)in[word - tail] & 0xC0u) == 0x80u) --tail;
-            (void)snprintf(out + used, cap - used, "%.*s...%.*s", (int)head, in, (int)tail,
+            (void)snprintf(out + used, cap - used, "%.*s…%.*s", (int)head, in, (int)tail,
                            in + word - tail);
         } else {
             (void)snprintf(out + used, cap - used, "%.*s", (int)word, in);
@@ -430,7 +493,7 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
     nk_ui_text_role(ui, FLOW_ID_TITLE, "Updates", NK_UI_TYPE_TITLE, theme->paper);
     switch (step) {
         case PLAYER_UI_UPDATE_CHECKING:
-            (void)snprintf(lead, sizeof(lead), "Asking GitHub for the newest version...");
+            (void)snprintf(lead, sizeof(lead), "Asking GitHub for the newest version…");
             break;
         case PLAYER_UI_UPDATE_CURRENT:
             (void)snprintf(lead, sizeof(lead), "You have the newest version.");
@@ -441,14 +504,14 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
             lead_rgba = theme->ready;
             break;
         case PLAYER_UI_UPDATE_DOWNLOADING:
-            (void)snprintf(lead, sizeof(lead), "Downloading version %s...", version);
+            (void)snprintf(lead, sizeof(lead), "Downloading version %s…", version);
             break;
         case PLAYER_UI_UPDATE_DOWNLOADED:
             (void)snprintf(lead, sizeof(lead), "Version %s is downloaded and checked.", version);
             lead_rgba = theme->ready;
             break;
         case PLAYER_UI_UPDATE_INSTALLING:
-            (void)snprintf(lead, sizeof(lead), "Unpacking version %s...", version);
+            (void)snprintf(lead, sizeof(lead), "Unpacking version %s…", version);
             break;
         case PLAYER_UI_UPDATE_INSTALLED:
             (void)snprintf(lead, sizeof(lead), "Version %s is ready to start.", version);
@@ -692,7 +755,7 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
         };
         /* The four buttons line up on one column at every text size. */
         WizardColumn column = scr_wizard_column(ui, rows, sizeof(rows) / sizeof(rows[0]),
-                                            inner - 32.0f);
+                                                inner - 32.0f, false);
         if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE, SET_ID_TEXT + 0x300u,
                          rows[0].name, rows[0].value, rows[0].sentence, false, inner - 32.0f,
                          &column)) {
@@ -727,59 +790,58 @@ static void settings_accessibility(NkUi *ui, const PlayerUiSettingsModel *model,
     }
 }
 
-/* Settings > Ace Mode (src/rt/ace.h): the library's switch and each feature, a sentence beside
-   each that says what it does and what it costs. While the switch is off the feature rows are
-   dim and cannot be focused; their values are kept. Features this build does not carry
-   (ultrawide, smooth motion) have no row. */
+/* Settings > Enhanced (#2055; src/rt/ace.h): the play mode, then one row per Enhanced part, with a
+   sentence beside each that says what it does and what it costs. The library's page sets the
+   default; a title's page (opened from its Enhanced options) sets that game's choice, where a
+   part on Library default follows the library. While the mode is Authentic the part rows are
+   dim and cannot be focused; their values are kept. */
 static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inner,
                          PlayerUiAction *result) {
     const NkUiTheme *theme = nk_ui_theme(ui);
-    const bool off = !model->ace_enabled;
-    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
-    nk_ui_text_role(ui, FLOW_ID_TITLE, "Ace Mode", NK_UI_TYPE_TITLE, theme->paper);
-    nk_ui_text_role(ui, FLOW_ID_LEAD,
-                    "Modern touches for every game. The games themselves run as released. "
-                    "Each game's page can turn it on or off for that game alone.",
-                    NK_UI_TYPE_BODY_S, theme->muted);
+    const bool off = !model->enhanced_on;
+    char lead[320];
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, model->enhanced_title != NULL ? "Game" : "Settings",
+                     theme->accent_dark);
+    nk_ui_text_role(ui, FLOW_ID_TITLE, "Enhanced", NK_UI_TYPE_TITLE, theme->paper);
+    if (model->enhanced_title != NULL) {
+        (void)snprintf(lead, sizeof(lead),
+                       "For %s alone. Library follows Settings > Enhanced.",
+                       model->enhanced_title);
+    } else {
+        (void)snprintf(lead, sizeof(lead), "%s",
+                       "Enhanced adds modern touches that work for every game, such as sharper "
+                       "textures and crisp system text. The games themselves run as released.");
+    }
+    nk_ui_text_role(ui, FLOW_ID_LEAD, nk_ui_frame_text(ui, lead), NK_UI_TYPE_BODY_S,
+                    theme->muted);
     if (scr_wizard_box_begin(ui, 0u)) {
-        const WizardRow rows[] = {
-            {"Ace Mode", settings_on_off(model->ace_enabled),
-             "Turns all of these on or off together."},
-            {"Texture filtering", safe_text(model->ace_filtering, "16x"),
-             "Keeps slanted surfaces clear and steady. Save pictures a game takes keep the "
-             "filtering."},
-            {"Crisp system text", settings_on_off(model->ace_text),
-             "Draws the on-screen keyboard at your screen's resolution."},
-            {"Speed readout", settings_on_off(model->ace_readout),
-             "Shows the game's speed and frame rate in a corner, over the game's own HUD."},
-            {"Game badge", settings_on_off(model->ace_notice),
-             "Says Ace Mode is on for a few seconds when a game starts."}
-        };
-        WizardColumn column = scr_wizard_column(ui, rows, sizeof(rows) / sizeof(rows[0]), inner - 32.0f);
+        WizardRow rows[1 + PLAYER_UI_ENHANCED_ROWS];
+        int count = model->enhanced_row_count < PLAYER_UI_ENHANCED_ROWS
+            ? model->enhanced_row_count : PLAYER_UI_ENHANCED_ROWS;
+        if (count < 0) count = 0;
+        rows[0].name = "Play mode";
+        rows[0].value = safe_text(model->enhanced_mode, "Authentic");
+        rows[0].sentence = safe_text(model->enhanced_mode_sentence, "");
+        for (int i = 0; i < count; i++) {
+            rows[i + 1].name = safe_text(model->enhanced_rows[i].name, "");
+            rows[i + 1].value = safe_text(model->enhanced_rows[i].value, "Off");
+            rows[i + 1].sentence = safe_text(model->enhanced_rows[i].sentence, "");
+        }
+        WizardColumn column = scr_wizard_column(ui, rows, (size_t)count + 1u, inner - 32.0f,
+                                                true);
         if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, SET_ID_TEXT + 0x400u, rows[0].name,
-                         rows[0].value, rows[0].sentence, model->ace_enabled, inner - 32.0f,
-                         &column)) {
-            *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACE);
+                             rows[0].value, rows[0].sentence, model->enhanced_on, inner - 32.0f,
+                             &column)) {
+            *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE);
         }
-        if (scr_wizard_value_state(ui, PLAYER_UI_ID_SETTINGS_ACE_FILTERING, SET_ID_TEXT + 0x404u,
-                               rows[1].name, rows[1].value, rows[1].sentence,
-                               strcmp(rows[1].value, "Off") != 0, off, inner - 32.0f, &column)) {
-            *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ACE_FILTERING);
-        }
-        if (scr_wizard_value_state(ui, PLAYER_UI_ID_SETTINGS_ACE_TEXT, SET_ID_TEXT + 0x408u,
-                               rows[2].name, rows[2].value, rows[2].sentence, model->ace_text, off,
-                               inner - 32.0f, &column)) {
-            *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACE_TEXT);
-        }
-        if (scr_wizard_value_state(ui, PLAYER_UI_ID_SETTINGS_ACE_READOUT, SET_ID_TEXT + 0x40Cu,
-                               rows[3].name, rows[3].value, rows[3].sentence, model->ace_readout,
-                               off, inner - 32.0f, &column)) {
-            *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACE_READOUT);
-        }
-        if (scr_wizard_value_state(ui, PLAYER_UI_ID_SETTINGS_ACE_NOTICE, SET_ID_TEXT + 0x410u,
-                               rows[4].name, rows[4].value, rows[4].sentence, model->ace_notice,
-                               off, inner - 32.0f, &column)) {
-            *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACE_NOTICE);
+        for (int i = 0; i < count; i++) {
+            if (scr_wizard_value_state(ui, PLAYER_UI_ID_SETTINGS_ENHANCED_PART + (NkUiId)i,
+                                       SET_ID_TEXT + 0x404u + 4u * (NkUiId)i, rows[i + 1].name,
+                                       rows[i + 1].value, rows[i + 1].sentence,
+                                       model->enhanced_rows[i].on, off, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART);
+                result->title_index = (size_t)i;
+            }
         }
         nk_ui_end_container(ui);
     }
@@ -803,46 +865,27 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         {NK_UI_PROMPT_ACT_BACK, "Back to settings"}
     };
     const NkUiTheme *theme = nk_ui_theme(ui);
-    float inner = scr_flow_begin(ui, width, height, 760.0f);
+    float inner = scr_flow_begin_with_scroll(
+        ui, width, height, 760.0f, model->page == PLAYER_UI_SETTINGS_PAGE_ACE);
     if (inner <= 0.0f) return;
     switch (model->page) {
     case PLAYER_UI_SETTINGS_PAGE_ONLINE:
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Online and developer options", NK_UI_TYPE_TITLE,
                         theme->paper);
-        nk_ui_text_role(ui, FLOW_ID_LEAD,
-                        "News and reports aren't built yet, so online mode makes no "
-                        "connection. Your choice is kept for when they arrive.",
-                        NK_UI_TYPE_BODY_S, theme->warning);
+        /* Online mode has nothing to switch yet: one plain line says so rather
+           than a switch that does nothing (#2007). The stored setting stays. */
+        nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_NOT_BUILT_LINE, NK_UI_TYPE_BODY_S,
+                        theme->warning);
         if (scr_wizard_box_begin(ui, 0u)) {
             WizardColumn column = scr_online_developer_column(ui, model->online_mode,
-                                                          model->developer_mode, inner - 32.0f);
-            if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
-                              "Online mode", WIZARD_ONLINE_SENTENCE, model->online_mode,
-                              inner - 32.0f, &column)) {
+                                                              model->developer_mode,
+                                                              inner - 32.0f);
+            if (model->online_mode &&
+                scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
+                                  "Online mode", SCR_ONLINE_STORED_ON_SENTENCE, true,
+                                  inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ONLINE);
-            }
-            if (model->online_mode) {
-                NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
-                                             NK_UI_SPACE_3);
-                char label[48];
-                if (nk_ui_begin_container(ui, SET_ID_TEXT + 0x88u, &row, NULL)) {
-                    (void)snprintf(label, sizeof(label), "News: %s",
-                                   settings_on_off(model->online_news));
-                    if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_NEWS, label,
-                                     NK_UI_BUTTON_SMALL |
-                                         (model->online_news ? NK_UI_BUTTON_PRIMARY : 0u))) {
-                        *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_NEWS);
-                    }
-                    (void)snprintf(label, sizeof(label), "Reports: %s",
-                                   settings_on_off(model->online_reports));
-                    if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_REPORTS, label,
-                                     NK_UI_BUTTON_SMALL |
-                                         (model->online_reports ? NK_UI_BUTTON_PRIMARY : 0u))) {
-                        *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_REPORTS);
-                    }
-                    nk_ui_end_container(ui);
-                }
             }
             if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_DEVELOPER, SET_ID_TEXT + 0x90u,
                               "Developer mode", WIZARD_DEVELOPER_SENTENCE,
@@ -976,12 +1019,19 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Settings", theme->accent_dark);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "PSP fonts", NK_UI_TYPE_TITLE, theme->paper);
         nk_ui_text_role(ui, FLOW_ID_LEAD,
-                        "Optional. Games look right with your PSP's own fonts: connect your PSP "
-                        "by USB and choose Get fonts from my PSP, or copy the .pgf files from "
-                        "flash0:/font on your PSP to a folder on this PC (docs/SETUP.md, "
-                        "\"Copying the fonts from your PSP\") and choose them here. The import "
-                        "reads ltn0.pgf to ltn15.pgf, jpn0.pgf and kr0.pgf from that folder; "
-                        "until then similar fonts stand in.",
+                        /* #2005: what the stand-in fonts change, as font/README.md
+                           describes them (shapes, widths) and the converter's Latin set
+                           (tools/ttf2pgf.py, no Cyrillic). */
+                        "Optional. Without your PSP's own fonts, every game still runs and "
+                        "shows its text in open stand-in fonts. They look different: the "
+                        "letters are shaped differently, English lines come out a little wider "
+                        "or narrower, and a few characters such as Cyrillic letters are "
+                        "missing. For the PSP's own look, "
+                        "connect your PSP by USB and choose Get fonts from my PSP, or copy the "
+                        ".pgf files from flash0:/font on your PSP to a folder on this PC "
+                        "(docs/SETUP.md, \"Copying the fonts from your PSP\") and choose them "
+                        "here. The import reads ltn0.pgf to ltn15.pgf, jpn0.pgf and kr0.pgf "
+                        "from that folder.",
                         NK_UI_TYPE_BODY_S, theme->muted);
         if (model->font_summary != NULL && model->font_summary[0] != '\0') {
             nk_ui_text_role(ui, SET_ID_TEXT + 0xDDu, model->font_summary, NK_UI_TYPE_BODY_S,
@@ -1045,7 +1095,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         }
         break;
     case PLAYER_UI_SETTINGS_PAGE_FACTORY_RESET:
-        /* Owner, 2026-10-29: back to a first run, with the user data moved
+        /* Factory reset: back to a first run, with the user data moved
            aside (player_app_factory_reset), never deleted. */
         scr_flow_eyebrow(ui, FLOW_MARK_TRIANGLE, "Factory reset", theme->warning);
         nk_ui_text_role(ui, FLOW_ID_TITLE, "Reset Nakagawa Recomp to a first run?",

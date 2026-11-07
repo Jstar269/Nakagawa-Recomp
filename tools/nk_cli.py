@@ -11,6 +11,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 import contextlib
+import copy
 import errno
 import hashlib
 import io
@@ -62,7 +63,14 @@ from nk_core import (  # noqa: E402
     inspect_iso,
 )
 from nk_core import package_cache  # noqa: E402
-from nk_core.prep_engine import NativeTitleStager, SUPPORTED_ARCHIVE_FORMATS  # noqa: E402
+from nk_core.prep_engine import (  # noqa: E402
+    NativeTitleStager,
+    SUPPORTED_ARCHIVE_FORMATS,
+    identify_build_in,
+    known_bad_build_message,
+    unlisted_build_message,
+)
+from nk_core.iso_inspect import iso_executable_sha256  # noqa: E402
 from nk_core.title_registry import get_default_registry  # noqa: E402
 from nk_core.launcher import psp_boot_path as _psp_boot_path  # noqa: E402
 from nk_core import disc_expand_tool  # noqa: E402
@@ -669,7 +677,7 @@ def _discover_iso_module_candidates(iso_path: Path, selected: str) -> list[dict]
             raise PackageBuildError(
                 f"DISC_MODULE_CANDIDATE_LIMIT: ISO contains more than "
                 f"{MAX_GUEST_MODULES} guest-module candidates; larger "
-                "module sets are in the works."
+                "module sets aren't supported yet."
             )
 
     candidates.extend(_iso_embedded_module_candidates(iso_path, file_size, walked, selected_name))
@@ -677,7 +685,7 @@ def _discover_iso_module_candidates(iso_path: Path, selected: str) -> list[dict]
         raise PackageBuildError(
             f"DISC_MODULE_CANDIDATE_LIMIT: ISO contains more than "
             f"{MAX_GUEST_MODULES} guest-module candidates; larger "
-            "module sets are in the works."
+            "module sets aren't supported yet."
         )
 
     names: dict[str, str] = {}
@@ -1267,6 +1275,34 @@ def _load_library_entry(user_root: Path, disc_id: str, iso_path: Path | None = N
     return entry
 
 
+def _apply_executable_build(iso_path: Path, executable_name: str, manifest: dict, reporter) -> dict:
+    """Act on the executable build the disc holds against the manifest's ``disc.builds`` (#2140).
+
+    A title's ``runtime_bindings`` are addresses inside one exact executable. A build the
+    manifest marks ``known-bad`` stops the build with its reason. A build it does not list
+    is built without the title's bindings (``runtime_bindings`` and
+    ``required_runtime_bindings``), so another build's addresses are never applied to it,
+    and the reporter says so. A manifest with no ``builds`` list is not questioned.
+    """
+    builds = (manifest.get("disc") or {}).get("builds")
+    if not builds:
+        return manifest
+    build = identify_build_in(
+        builds, executable_name, iso_executable_sha256(iso_path, executable_name)
+    )
+    name = manifest.get("display_name", manifest.get("id", "this title"))
+    if build["status"] == "known-bad":
+        raise PackageBuildError(known_bad_build_message(name, build))
+    if build["bindings_applied"]:
+        return manifest
+    reporter.report("preflight", "WARN", unlisted_build_message(name, build))
+    unbound = {
+        key: value for key, value in manifest.items()
+        if key not in ("runtime_bindings", "required_runtime_bindings")
+    }
+    return dict(title_manifest.validate_manifest(unbound))
+
+
 def _load_entry_manifest(user_root: Path, entry: dict, disc_id: str, selected: str,
                          uses_decrypted_eboot: bool = False) -> tuple[Path, dict, str | None]:
     title_id = entry["title_id"]
@@ -1577,7 +1613,7 @@ def _module_spellings(name: str, disc_name: str | None) -> str:
 def _runtime_build_environment(*, instruction_trace: bool = False) -> dict[str, str]:
     env = os.environ.copy()
     if os.name == "nt":
-        ucrt_bin = Path("C:/msys64/ucrt64/bin")
+        ucrt_bin = Path(env.get("MSYS_PATH") or "C:/msys64/ucrt64/bin")
         if not shutil.which("gcc", path=env.get("PATH", "")) and ucrt_bin.is_dir():
             env["PATH"] = str(ucrt_bin) + os.pathsep + env.get("PATH", "")
         python_bin = str(Path(sys.executable).resolve().parent)
@@ -2485,7 +2521,7 @@ def _package_preflight(st):
         st.register_local_identity,
         st.reporter,
     )
-    reporter.report("preflight", "START", f"Inspecting library entry for {disc_id}...")
+    reporter.report("preflight", "START", f"Checking {disc_id} in your library")
     user_root = _user_data_root(args.user_data_root)
     entry = _load_library_entry(user_root, disc_id, getattr(args, "iso_path", None))
     iso_path = Path(entry["iso_path"]).expanduser()
@@ -2621,7 +2657,8 @@ def _package_preflight(st):
             "record names a different SFO revision. Review and register this revision explicitly "
             "with --register-local-compatibility-record."
         )
-    reporter.report("preflight", "PASS", "Library entry and manifest validated")
+    manifest = _apply_executable_build(iso_path, manifest_selected, manifest, reporter)
+    reporter.report("preflight", "PASS", "The game and its title file are in order")
     st.decrypted_eboot = decrypted_eboot
     st.entry = entry
     st.expected_hash = expected_hash
@@ -2657,7 +2694,7 @@ def _package_extract(st):
         st.user_root,
         st.uses_decrypted_eboot,
     )
-    reporter.report("extract", "START", "Extracting executable and guest modules...")
+    reporter.report("extract", "START", "Preparing the game's program files")
     cache_dir = _require_child(user_root, user_root / "cache" / "packages" / disc_id,
                                "Package cache")
     cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -2709,7 +2746,7 @@ def _package_extract(st):
         args.module_dir.expanduser().resolve() if args.module_dir else None,
         decrypted_module_dir(user_root, disc_id),
     )
-    reporter.report("extract", "PASS", "Executable and modules prepared")
+    reporter.report("extract", "PASS", "The game's program files are ready")
     st.actual_hash = actual_hash
     st.cache_dir = cache_dir
     st.cached_header = cached_header
@@ -2848,7 +2885,7 @@ def _package_cache_check(st):
             print("CACHE: unchanged key; AOT and native objects reused")
         reporter.log(f"PACKAGE_REUSED: {target_dir}")
         reporter.log("CACHE: unchanged key; AOT and native objects reused")
-        reporter.report("compile", "PASS", "Compilation skipped (reusing existing package)")
+        reporter.report("compile", "PASS", "Nothing to compile: the package is already built")
         reporter.report("package", "PASS", f"Package reused: {target_dir}")
         package_cache.write_local_title_input_identity(user_root, title_input_identity)
         _record_aot_stage_result(args, "NOT_RUN", "PACKAGE_CACHE_REUSED")
@@ -2877,8 +2914,8 @@ def _package_cache_check(st):
                 print("CACHE: content-addressed entry reused")
             reporter.log(f"PACKAGE: {target_dir}")
             reporter.log("CACHE: content-addressed entry reused")
-            reporter.report("compile", "PASS", "Compilation skipped (content-addressed entry reused)")
-            reporter.report("package", "PASS", f"Package promoted: {target_dir}")
+            reporter.report("compile", "PASS", "Nothing to compile: this code was built before")
+            reporter.report("package", "PASS", f"Package ready: {target_dir}")
             package_cache.write_local_title_input_identity(user_root, title_input_identity)
             _record_aot_stage_result(args, "NOT_RUN", "PACKAGE_CACHE_REUSED")
             _report_reused_package_stages(stage_observer)
@@ -2982,7 +3019,7 @@ def _package_codegen(st):
         # The codegen stage: the generation phase alone, through the same planner,
         # inputs and environment as the package build below. The package build then
         # compiles this output only if it passes the native-only reuse checks.
-        reporter.report("compile", "START", "Generating AOT code...")
+        reporter.report("compile", "START", "Translating the game's code")
         if stage_observer is not None:
             stage_observer("codegen", "START", 0)
         stage_command = planner_command(Path(aot_stage_dir)) + ["--aot-stage"]
@@ -3043,7 +3080,7 @@ def _package_compile(st):
         st.stage_observer,
         st.user_root,
     )
-    reporter.report("compile", "START", "Compiling package with AOT codegen...")
+    reporter.report("compile", "START", "Compiling the translated code")
     if stage_observer is not None:
         stage_observer("compile", "START", 0)
     log_command(command)
@@ -3144,8 +3181,8 @@ def _package_validate(st):
         st.stage_observer,
         st.title_input_identity,
     )
-    reporter.report("compile", "PASS", "Compilation completed successfully")
-    reporter.report("package", "START", "Staging runtime assets and validating package...")
+    reporter.report("compile", "PASS", "Compiling finished")
+    reporter.report("package", "START", "Putting the package together and checking it")
     if stage_observer is not None:
         stage_observer("build_package", "START", 0)
     package_started = time.perf_counter()
@@ -3268,7 +3305,7 @@ def _package_promote(st: Any) -> int:
         else:
             print("CACHE: AOT regenerated for changed cache key")
     reporter.log(f"PACKAGE: {target_dir}")
-    reporter.report("package", "PASS", f"Package verified and promoted to {target_dir}")
+    reporter.report("package", "PASS", f"Package checked and ready: {target_dir}")
     if stage_observer is not None:
         stage_observer(
             "build_package", "PASS",
@@ -3587,6 +3624,10 @@ BRINGUP_SCHEMA_PATH = ROOT / "assets" / "bringup_report.schema.json"
 # --launch-timeout against the same range.
 BRINGUP_LAUNCH_TIMEOUT_DEFAULT_SECONDS = 20
 BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS = 120
+# How many build-and-launch rounds one bring-up may take while its run keeps stopping at code
+# the game installed at run time (#1933, --capture-rounds). Round 1 is the first launch.
+BRINGUP_CAPTURE_ROUNDS_DEFAULT = 4
+BRINGUP_CAPTURE_ROUNDS_MAX = 16
 
 
 def _schema_at_pointer(schema: dict, pointer: str) -> dict:
@@ -4008,6 +4049,12 @@ def _write_private_sweep_import_report(
 
 
 def _bringup_human_summary(report: dict) -> str:
+    summary = _bringup_stage_summary(report)
+    capture_rounds = _bringup_capture_summary(report)
+    return f"{summary}\n{capture_rounds}" if capture_rounds else summary
+
+
+def _bringup_stage_summary(report: dict) -> str:
     uses_cfw_original = any(
         check.get("code") == "MODIFIED_DUMP_CFW_LOADER"
         and check.get("status") == "IN_PROGRESS"
@@ -4792,6 +4839,7 @@ class _Bringup:
     fail_stage: Any = None
     game_name: Any = None
     iso_path: Any = None
+    launch_output: Any = None
     manifest: Any = None
     metadata: Any = None
     module_dir: Any = None
@@ -5384,6 +5432,12 @@ def _bringup_launch(st):
         if not executable.is_file():
             raise PackageBuildError("The generated package executable is missing.")
         env = _bringup_child_environment(user_root)
+        # The title's code-capture folder (#1933): a call into code the game installed at run
+        # time writes a capture there, which the next round's build translates. Always this
+        # folder, so an inherited one cannot hide a capture from the rounds.
+        capture_dir = bringup_capture_dir(user_root, metadata.disc_id)
+        capture_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        env["SR_CODE_CAPTURE"] = str(capture_dir)
         # The package ships the guest modules it was compiled against in
         # <package>/modules; the runtime loads them from SR_MODULE_DIR, as a
         # player launch of the same package does. Without it the runtime falls
@@ -5476,6 +5530,7 @@ def _bringup_launch(st):
         )
         try:
             launch_output, _ = process.communicate(timeout=timeout)
+            st.launch_output = launch_output
             _write_bringup_launch_log(work_dir, launch_output)
             presentation_evidence_ok = _set_bringup_presentation(report, launch_output)
             report["runtime_imports"] = _runtime_import_rows(launch_output, unsupported_imports)
@@ -5568,6 +5623,7 @@ def _bringup_launch(st):
         except subprocess.TimeoutExpired:
             process.kill()
             launch_output, _ = process.communicate()
+            st.launch_output = launch_output
             _write_bringup_launch_log(work_dir, launch_output)
             _set_bringup_presentation(report, launch_output, stopped=True)
             report["exit_classification"] = "TIMED_OUT"
@@ -5587,6 +5643,174 @@ def _bringup_finish(st: Any) -> int:
     if not report_written:
         return 1
     return 0 if report["failure_class"] == "NONE" else 1
+
+
+def bringup_capture_dir(user_root: Path, disc_id: str) -> Path:
+    """The title's code-capture folder (#1933), beside its bring-up cache.
+
+    The player's launcher names the same folder to the runtime as SR_CODE_CAPTURE
+    (src/core/nk_launch.c launch_code_capture_dir), so a capture a player run wrote is
+    translated by the title's next bring-up. It is removed with the title's build cache.
+    """
+    return user_root / "cache" / "bringup" / disc_id.upper() / "captures"
+
+
+def _bringup_captures(folder: Path) -> list[Path]:
+    """The complete captures in ``folder``, by name (a ``.part`` file is still being written)."""
+    if not folder.is_dir():
+        return []
+    return sorted(path for path in folder.glob("code_capture_*.nkcap") if path.is_file())
+
+
+_CODE_CAPTURE_STOP_RE = re.compile(
+    r"CODE_CAPTURE: (?:wrote|already holds) (code_capture_[0-9a-f]{8}_[0-9a-f]{16}\.nkcap) "
+)
+
+
+def _bringup_capture_stop(launch_output: str | None) -> str | None:
+    """The capture the run stopped at (src/rt/recomp.c code_capture_note), or None."""
+    names = _CODE_CAPTURE_STOP_RE.findall(launch_output or "")
+    return names[-1] if names else None
+
+
+@contextlib.contextmanager
+def _bringup_codegen_captures(captures: list[Path]):
+    """Translate ``captures`` in the package build: each one is a ``--code-capture`` codegen
+    option in CODEGEN_USER_ARGS, the codegen argument route every package build reads and its
+    cache key names. Each file is named, not the folder, so the key changes with the set of
+    captures (a capture's name carries its target and a hash of its bytes) and a build of a
+    larger set is never served from the cache of a smaller one. A value the caller set is
+    kept, and it is restored afterwards."""
+    if not captures:
+        yield
+        return
+    previous = os.environ.get("CODEGEN_USER_ARGS")
+    added = " ".join(f"--code-capture={path.as_posix()}" for path in captures)
+    os.environ["CODEGEN_USER_ARGS"] = f"{previous} {added}" if previous else added
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("CODEGEN_USER_ARGS", None)
+        else:
+            os.environ["CODEGEN_USER_ARGS"] = previous
+
+
+_CAPTURE_OUTCOME_TEXT = {
+    "NO_CAPTURE_STOP": "did not stop at a capture",
+    "NEW_CAPTURE": "stopped at a new capture",
+    "CAPTURE_ALREADY_TRANSLATED": "stopped at a capture its build translated",
+    "CAPTURE_MISSING": "stopped at a capture the folder does not hold",
+}
+
+
+def _bringup_capture_summary(report: dict) -> str:
+    """The human lines for the report's code-capture rounds; empty when it has none."""
+    rounds = report.get("code_capture")
+    if not rounds:
+        return ""
+    lines = [f"Code capture rounds (at most {rounds['round_limit']}):"]
+    for entry in rounds["rounds"]:
+        lines.append(
+            f"  round {entry['round']}: translated {entry['captures_translated']} capture(s); "
+            f"the run {_CAPTURE_OUTCOME_TEXT[entry['outcome']]} ({entry['failure_class']})"
+        )
+    if rounds["stop"] != "NONE":
+        lines.append(f"  stopped: {rounds['stop']}")
+    return "\n".join(lines)
+
+
+def _bringup_capture_rounds(st: Any) -> int:
+    """Build and launch; while the run stops at a new code capture, build again with it (#1933).
+
+    A run that calls code the game installed at run time stops, and the runtime writes a capture
+    of that code to the title's capture folder. The next round's build translates every capture
+    in the folder, and the run goes on to the next such call or to the end. A title whose folder
+    holds no capture and whose run writes none takes one round, exactly as before: its report
+    has no ``code_capture`` field. The rounds are bounded by ``--capture-rounds``; a run that
+    still stops at a new capture in the last round is the named stop BRINGUP_CAPTURE_BOUND, and a
+    run that stops at a capture its own build translated is BRINGUP_CAPTURE_NOT_BOUND, since
+    another round would build the same thing. Either exits non-zero, never as success.
+    """
+    limit = getattr(st.args, "capture_rounds", BRINGUP_CAPTURE_ROUNDS_DEFAULT)
+    folder = bringup_capture_dir(st.user_root, st.metadata.disc_id)
+    # Every round starts from the report as analysis left it; earlier rounds are kept as rows.
+    analyzed_report = copy.deepcopy(st.report)
+    rounds: list[dict] = []
+    round_number = 0
+    while True:
+        round_number += 1
+        translated = _bringup_captures(folder)
+        if round_number > 1:
+            st.report = copy.deepcopy(analyzed_report)
+        if rounds or translated:
+            st.report["code_capture"] = {"round_limit": limit, "stop": "NONE", "rounds": rounds}
+        st.launch_output = None
+        with _bringup_codegen_captures(translated):
+            rc: int | None = _bringup_codegen(st)
+            if rc is None:
+                rc = _bringup_package(st)
+        if rc is not None:
+            return rc
+        rc = _bringup_launch(st)
+        if rc is not None:
+            return rc
+        stopped = _bringup_capture_stop(st.launch_output)
+        if stopped is None and "code_capture" not in st.report:
+            return _bringup_finish(st)
+        named_stop, message = "NONE", None
+        if stopped is None:
+            outcome = "NO_CAPTURE_STOP"
+        elif stopped in {path.name for path in translated}:
+            outcome = "CAPTURE_ALREADY_TRANSLATED"
+            named_stop = "BRINGUP_CAPTURE_NOT_BOUND"
+            message = (
+                f"{named_stop}: round {round_number} stopped at {stopped}, which its build "
+                "translated; the translation did not bind (guest memory did not hold the captured "
+                "words when the game called them), so another round would stop there again"
+            )
+        elif not (folder / stopped).is_file():
+            outcome = "CAPTURE_MISSING"
+            named_stop = "BRINGUP_CAPTURE_MISSING"
+            message = (
+                f"{named_stop}: round {round_number} stopped at {stopped}, which {folder} does "
+                "not hold, so no round can translate it"
+            )
+        else:
+            outcome = "NEW_CAPTURE"
+            if round_number >= limit:
+                named_stop = "BRINGUP_CAPTURE_BOUND"
+                message = (
+                    f"{named_stop}: {round_number} rounds reached; last capture {stopped} "
+                    "(raise --capture-rounds to translate it)"
+                )
+        rounds.append({
+            "round": round_number,
+            "captures_translated": len(translated),
+            "outcome": outcome,
+            "failure_class": st.report["failure_class"],
+        })
+        st.report["code_capture"] = {"round_limit": limit, "stop": named_stop, "rounds": rounds}
+        if outcome == "NEW_CAPTURE" and named_stop == "NONE":
+            continue
+        status = _bringup_finish(st)
+        if message is not None:
+            print(message)
+            return status or 1
+        return status
+
+
+def _capture_rounds_argument(value: str) -> int:
+    """``--capture-rounds``: 1..BRINGUP_CAPTURE_ROUNDS_MAX launches."""
+    try:
+        rounds = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    if not 1 <= rounds <= BRINGUP_CAPTURE_ROUNDS_MAX:
+        raise argparse.ArgumentTypeError(
+            f"must be 1..{BRINGUP_CAPTURE_ROUNDS_MAX}, not {rounds}"
+        )
+    return rounds
 
 
 def cmd_bringup(args: argparse.Namespace) -> int:
@@ -5630,16 +5854,7 @@ def cmd_bringup(args: argparse.Namespace) -> int:
     rc = _bringup_analyze(st)
     if rc is not None:
         return rc
-    rc = _bringup_codegen(st)
-    if rc is not None:
-        return rc
-    rc = _bringup_package(st)
-    if rc is not None:
-        return rc
-    rc = _bringup_launch(st)
-    if rc is not None:
-        return rc
-    return _bringup_finish(st)
+    return _bringup_capture_rounds(st)
 
 
 def _use_utf8_standard_streams() -> None:
@@ -5801,6 +6016,12 @@ def main() -> int:
                                 f"default {BRINGUP_LAUNCH_TIMEOUT_DEFAULT_SECONDS})")
     p_bringup.add_argument("--instruction-trace", action="store_true",
                            help="Write guest instruction trace under --work-dir")
+    p_bringup.add_argument("--capture-rounds", type=_capture_rounds_argument,
+                           default=BRINGUP_CAPTURE_ROUNDS_DEFAULT,
+                           help="Build-and-launch rounds while the run stops at code the game "
+                                "installed at run time, each translating the captures so far "
+                                f"(1..{BRINGUP_CAPTURE_ROUNDS_MAX}; "
+                                f"default {BRINGUP_CAPTURE_ROUNDS_DEFAULT})")
     p_bringup.add_argument("--private-sweep-import-report", type=Path, default=None,
                            help=argparse.SUPPRESS)
     p_bringup.add_argument("--sweep-progress-report", type=Path, default=None,

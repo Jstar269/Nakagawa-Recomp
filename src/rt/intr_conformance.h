@@ -444,22 +444,22 @@ static const IcProbe kIcMatrix[] = {
 /* ERRNO_INVALID_ARGUMENT beats both context restrictions (L296, L413): the type
  * mask is validated before anything else. */
 { "sceUmdWaitDriveStat", 0x8ef08fceu, "Invalid type", ICG_UMD, 0,
-  {0, 296, 413, 297}, {ICU, IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u)}, {IC_RET(0), IC_RET(0), IC_RET(0), IC_RET(0)},
+  {0, 296, 413, 297}, {ICU, IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u)}, {IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u)},
   {IC_PREC_NA, IC_PREC_PARAM, IC_PREC_PARAM, IC_PREC_PARAM}, IC_HW_IMMEDIATE},
 { "sceUmdWaitDriveStat", 0x8ef08fceu, "Valid type", ICG_UMD, 1,
-  {0, 298, 414, 299}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0), IC_RET(0), IC_RET(0), IC_RET(0)},
+  {0, 298, 414, 299}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0), CNW, IC_RET(0), CNW},
   {IC_PREC_NA, IC_PREC_CONTEXT, IC_PREC_CONTEXT, IC_PREC_CONTEXT}, IC_HW_WOULD_BLOCK},
 { "sceUmdWaitDriveStatWithTimer", 0x56202973u, "Invalid type", ICG_UMD, 0,
-  {0, 302, 415, 303}, {ICU, IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u)}, {IC_RET(0), IC_RET(0), IC_RET(0), IC_RET(0)},
+  {0, 302, 415, 303}, {ICU, IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u)}, {IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u)},
   {IC_PREC_NA, IC_PREC_PARAM, IC_PREC_PARAM, IC_PREC_PARAM}, IC_HW_IMMEDIATE},
 { "sceUmdWaitDriveStatWithTimer", 0x56202973u, "Valid type", ICG_UMD, 1,
-  {0, 304, 416, 305}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0), IC_RET(0), IC_RET(0), IC_RET(0)},
+  {0, 304, 416, 305}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0), CNW, IC_RET(0), CNW},
   {IC_PREC_NA, IC_PREC_CONTEXT, IC_PREC_CONTEXT, IC_PREC_CONTEXT}, IC_HW_WOULD_BLOCK},
 { "sceUmdWaitDriveStatCB", 0x4a9e5e29u, "Invalid type", ICG_UMD, 0,
-  {0, 308, 417, 309}, {ICU, IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u)}, {IC_RET(0), IC_RET(0), IC_RET(0), IC_RET(0)},
+  {0, 308, 417, 309}, {ICU, IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u)}, {IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u), IC_RET(0x80010016u)},
   {IC_PREC_NA, IC_PREC_PARAM, IC_PREC_PARAM, IC_PREC_PARAM}, IC_HW_IMMEDIATE},
 { "sceUmdWaitDriveStatCB", 0x4a9e5e29u, "Valid type", ICG_UMD, 1,
-  {0, 310, 418, 311}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0), IC_RET(0), IC_RET(0), IC_RET(0)},
+  {0, 310, 418, 311}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0), CNW, IC_RET(0), CNW},
   {IC_PREC_NA, IC_PREC_CONTEXT, IC_PREC_CONTEXT, IC_PREC_CONTEXT}, IC_HW_WOULD_BLOCK},
 
 /* ---- group J: controller ------------------------------------------------ */
@@ -807,9 +807,10 @@ static int ic_dispatch_intercept(uint32_t target) {
     return 1;
 }
 
-static uint64_t ic_run_in_interrupt(const IcProbe *p) {
-    if (!ic_arrange(p, &s_ic_probe_cpu)) return IC_SETUPFAIL;
-
+/* Call p->nid with s_ic_probe_cpu as its arguments from inside a VBLANK
+ * sub-interrupt handler. ic_run_in_interrupt() arranges the matrix fixture first;
+ * a test outside the matrix fills s_ic_probe_cpu itself and calls this. */
+static uint64_t ic_call_in_interrupt(const IcProbe *p) {
     CpuState ctl;
     memset(&ctl, 0, sizeof ctl);
     ctl.r[4] = 30u;                    /* PSP_VBLANK_INT */
@@ -842,6 +843,11 @@ static uint64_t ic_run_in_interrupt(const IcProbe *p) {
     ctl.r[4] = 30u; ctl.r[5] = 1u;
     (void)sr_syscall(&ctl, NID_IC_RELEASE_SUBINTR);
     return s_ic_intr_ran ? s_ic_intr_result : IC_SETUPFAIL;
+}
+
+static uint64_t ic_run_in_interrupt(const IcProbe *p) {
+    if (!ic_arrange(p, &s_ic_probe_cpu)) return IC_SETUPFAIL;
+    return ic_call_in_interrupt(p);
 }
 
 /* -------------------------------------------------------------------------

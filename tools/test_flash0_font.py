@@ -53,6 +53,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import pgf_writer  # noqa: E402
 import scratch_dir  # noqa: E402
 import hle_sources  # noqa: E402
+from makefile_text import read_makefile  # noqa: E402
 from nk_core import fonts  # noqa: E402
 
 SLOT_HEADER = ROOT / "src" / "core" / "nk_font_slots.h"
@@ -239,6 +240,9 @@ def write_latin_index_fixture(root: Path) -> dict[str, bytes]:
     project_small = synthetic_pgf(LATIN_PROJECT_CODES, "Nakagawa Project Latin Second", 3 * 64)
     (project / "nkltn.pgf").write_bytes(project_latin)
     (project / "nkltns.pgf").write_bytes(project_small)
+    # #2005: one per-style project face, the small serif bold (Latin index 13).
+    (project / "nkltn13.pgf").write_bytes(
+        synthetic_pgf(LATIN_PROJECT_CODES, "Nakagawa Project Latin Serif Bold", 3 * 64))
     payloads = {"nkltn.pgf": legacy, "ltn0.pgf": first, "ltn4.pgf": bold, "ltn8.pgf": ninth}
     for name, data in payloads.items():
         (cache / name).write_bytes(data)
@@ -436,7 +440,7 @@ class Flash0FontFixtureContractTests(unittest.TestCase):
                 self.assertEqual(status, CACHE_STATUS[case])
 
     def test_every_link_of_the_device_supplies_nk_font(self) -> None:
-        makefile = MAKEFILE.read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         logical = makefile.replace("\\\n", " ")
         recipes = [line for line in logical.splitlines()
                    if line.startswith("\t") and "src/rt/flash0_font.c" in line]
@@ -745,6 +749,7 @@ class Flash0FontDirRefusalNativeTests(unittest.TestCase):
         home = hle_sources.defining_file("flash0_font_sources")
         source.write_text(FONT_DIR_HARNESS_C.replace("@FLASH0_FONT_SOURCES_FILE@", home), encoding="utf-8")
         others = [str(ROOT / relative) for relative in hle_sources.RUNTIME_HLE_SOURCES if relative != home]
+        others.append(str(ROOT / "src" / "core" / "nk_shared_helpers.c"))
         cls.exe = cls.tmp / "harness"
         build = subprocess.run(
             [compiler, "-std=gnu11", "-w", f"-I{ROOT}", f"-I{ROOT / 'src' / 'rt'}",
@@ -961,6 +966,8 @@ class Flash0FontDeviceTests(unittest.TestCase):
                 latin_request_line(15, project_small, "project", "project"),
                 latin_request_line(1, project_latin, "project", "project"),
                 latin_request_line(9, project_small, "project", "project"),
+                latin_request_line(13, "nkltn13.pgf", "project", "project"),
+                latin_request_line(12, project_small, "project", "project"),
                 latin_request_line(14, project_small, "project", "project"),
             ])
             # The registry lines cover every font the game could ask for; this one, what it opened.

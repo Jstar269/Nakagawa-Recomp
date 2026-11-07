@@ -45,6 +45,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import hle_sources  # noqa: E402
+from makefile_text import read_makefile  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHED = (ROOT / "src" / "rt" / "sched.c").read_text(encoding="utf-8")
@@ -325,7 +326,7 @@ class LifecycleInstrumentationIsMandatoryTests(unittest.TestCase):
         self.assertIn("#error", selftest)
 
     def test_makefile_defines_it_for_that_target_only(self):
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         # Recipe lines only: a comment mentioning the macro compiles nothing.
         defines = [line for line in makefile.splitlines()
                    if line.startswith("\t") and "-DSR_CORO_LIFECYCLE_TEST" in line]
@@ -609,8 +610,8 @@ class SpecSeamCoverageTests(unittest.TestCase):
 
 
 class HostThreadCreatorAuditTests(unittest.TestCase):
-    """Only the documented OSK worker, diagnostic-stream drain, Android output pump and
-    preemption timer may create a native host thread (docs/ARCHITECTURE.md, "Runtime
+    """Only the documented OSK worker, diagnostic-stream drain, Android output pump,
+    texture-scaling workers and preemption timer may create a native host thread (docs/ARCHITECTURE.md, "Runtime
     host-thread audit")."""
 
     def test_native_thread_creators_are_allowlisted(self):
@@ -629,8 +630,8 @@ class HostThreadCreatorAuditTests(unittest.TestCase):
             if "selftest" not in Path(path).name.lower():
                 creators.append(path)
         self.assertEqual(
-            creators, ["src/core/nk_platform_posix.c", "src/rt/debug.c", "src/rt/osk_text_entry.c",
-                       "src/rt/sched.c"],
+            creators, ["src/core/nk_platform_posix.c", "src/rt/debug.c",
+                       "src/rt/gpu_sdl3vk/tex_scale.c", "src/rt/osk_text_entry.c", "src/rt/sched.c"],
             "native thread creation needs a documented owner and guest-state quiescence rule",
         )
 
@@ -655,7 +656,6 @@ class HostCallbackEntryAuditTests(unittest.TestCase):
         # The SR_AUDIODUMP postmix writer copies the device's mixed output into a host WAV
         # file; it reads no guest memory and writes no state the guest reads.
         ("src/rt/audio_sdl3.c", "SDL_SetAudioPostmixCallback"),
-        ("src/rt/audio_unavailable.c", "SDL_SetAudioPostmixCallback"),
     }
 
     def _registrations(self):

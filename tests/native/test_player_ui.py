@@ -699,6 +699,9 @@ def compute_effective_timeout(
       - WAIT_MS=<duration_ms>: waits for explicit millisecond duration.
       - WAIT_VIEW=<view_mask>,<timeout_ms>: waits up to timeout_ms for view match.
       - WAIT_PACKAGE_STATUS=<status>,<timeout_ms>: waits for package validation.
+      - WAIT_UPDATE=<phase>,<timeout_ms>: waits until the update phase is <phase>, by its
+        "update=" name (available, downloaded, installed, failed, idle, ...); the run fails,
+        naming the phase it last saw, when timeout_ms passes first.
       - WAIT_REPORT=<phase>,<timeout_ms>: waits for the Problem report phase number.
 
     When explicit_timeout is None, sums all wait event bounds and adds
@@ -719,7 +722,7 @@ def compute_effective_timeout(
                 effective += int(ev.split(",", 1)[1]) / 1000.0
             except ValueError:
                 pass
-        elif ev.startswith("WAIT_PACKAGE_STATUS=") and "," in ev:
+        elif ev.startswith(("WAIT_PACKAGE_STATUS=", "WAIT_UPDATE=")) and "," in ev:
             try:
                 effective += int(ev.rsplit(",", 1)[1]) / 1000.0
             except ValueError:
@@ -837,6 +840,32 @@ class PlayerUiIdSourceTests(unittest.TestCase):
         self.assertEqual(problems, [])
 
 
+class ErrorCodeSourceTests(unittest.TestCase):
+    """#2007: every code the player raises as a card has a badge, so none falls through to a
+    bare "Problem". The codes are read from the source, so a new one fails here until
+    player_error_badge (player_state.c) knows it."""
+
+    RAISERS = re.compile(
+        r"player_app_(?:set_error|set_error_with_details|prereq_fail)\(\s*&?\w+\s*,"
+        r"\s*\"([A-Z][A-Z0-9_]+)\"")
+
+    def test_every_literal_error_code_has_a_badge(self) -> None:
+        state = (ROOT / "src" / "player" / "player_state.c").read_text(encoding="utf-8")
+        table = state[state.index("k_error_badges[]"):state.index("const char *player_error_badge")]
+        codes_part, families_part = table.split("k_error_badge_families")
+        exact = set(re.findall(r'\{"([A-Z][A-Z0-9_]+)",\s*"', codes_part))
+        prefixes = re.findall(r'\{"([A-Z][A-Z0-9_]*_)",\s*"', families_part)
+        self.assertGreater(len(exact), 30)
+        codes: dict[str, str] = {}
+        for path in sorted((ROOT / "src" / "player").glob("*.c")):
+            for code in self.RAISERS.findall(path.read_text(encoding="utf-8")):
+                codes.setdefault(code, path.name)
+        self.assertGreater(len(codes), 20, codes)
+        missing = sorted(f"{code} ({path})" for code, path in codes.items()
+                         if code not in exact and not any(code.startswith(p) for p in prefixes))
+        self.assertEqual(missing, [], "codes raised as cards with no badge in player_error_badge")
+
+
 class LegacyRendererSourceTests(unittest.TestCase):
     """The shipped player never reaches the old renderer (owner, v0.0.1)."""
 
@@ -877,6 +906,9 @@ class LegacyRendererSourceTests(unittest.TestCase):
 
 UPDATE_RELEASES_URL = "https://api.github.com/repos/Jstar269/nakagawa-recomp/releases?per_page=10"
 UPDATE_DOWNLOAD_PREFIX = "https://github.com/Jstar269/nakagawa-recomp/releases/download/"
+# The most one update step (check, download, install) may take in a WAIT_UPDATE step. A
+# ceiling, not a sleep: the script moves on as soon as the phase is reached.
+UPDATE_STEP_TIMEOUT_MS = 60000
 
 # A TEST-ONLY minisign signer for the synthetic releases: Ed25519 (RFC 8032) in plain
 # Python, so no package is needed. Its key pair is derived from a fixed label at run
@@ -1119,6 +1151,8 @@ class NativePlayerUiTests(unittest.TestCase):
         settings: dict[str, object] | None = None,
         package_built_by: str | None = None,
         disc_list: str | None = None,
+        enhancement_packages: dict[str, str] | None = None,
+        expect_failure: bool = False,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             scratch = Path(tmp)
@@ -1143,6 +1177,14 @@ class NativePlayerUiTests(unittest.TestCase):
                 profile.write_text("{ definitely not a valid controller profile", encoding="utf-8")
             runtime_root = scratch / "runtime"
             runtime_root.mkdir()
+            for disc, title_id in (enhancement_packages or {}).items():
+                # A title's own enhancement package (docs/ENHANCEMENT_CONTRACT.md section 9.4):
+                # the player reads only its id and target title, so Ace is offered for it.
+                enhancements = runtime_root / "enhancements"
+                enhancements.mkdir(exist_ok=True)
+                (enhancements / f"{disc.lower()}-60hz.json").write_text(
+                    json.dumps({"id": "fixture-60hz", "target_title_id": title_id}),
+                    encoding="utf-8")
             tool_marker: Path | None = None
             if downloaded_tool_payload:
                 tool_marker = runtime_root / "prerequisites" / "synthetic-tool" / "marker.txt"
@@ -1419,6 +1461,12 @@ class NativePlayerUiTests(unittest.TestCase):
             wall_seconds = time.perf_counter() - started
             if os.environ.get(PLAYER_UI_ECHO_ENV) == "1":
                 sys.stderr.write(completed.stdout)
+            if expect_failure:
+                # A script the harness must stop: only the exit code and output count.
+                self.assertNotEqual(completed.returncode, 0,
+                                    completed.stdout + completed.stderr)
+                return {"stdout": completed.stdout, "stderr": completed.stderr,
+                        "returncode": completed.returncode}
             if completed.returncode != 0:
                 self.fail(
                     f"player returned {completed.returncode}\n"
@@ -1874,10 +1922,6 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(len(coverage), len(declared), (coverage, declared))
         self.assertEqual([name for _, name, nk in coverage if nk != "1"], [],
                          "views the launcher does not draw")
-        preparing = self.run_player("preparing", ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100"))
-        self.assertIn("[PLAYER_UI_TEST] UI_NEXT_ACTIVE", preparing["stdout"])
-        self.assertEqual(self.screens(preparing)[-1][0], "library",
-                         "Return to Library leaves the preparation card")
 
     def test_settings_psp_fonts_imports_and_removes(self) -> None:
         """Walkthrough blocker: the PSP font import is reachable from Settings."""
@@ -2147,15 +2191,16 @@ class NativePlayerUiTests(unittest.TestCase):
         "resolution": str(0x4501), "pacing": str(0x4502), "done": str(0x450C),
         "online": str(0x450D), "notices": str(0x450E), "remove_tools": str(0x450F),
         "build_cache": str(0x451A), "share_libraries": str(0x451B),
-        "online_mode": str(0x4511), "back": str(0x4517), "confirm_remove": str(0x4519),
+        "developer": str(0x4515), "back": str(0x4517), "confirm_remove": str(0x4519),
         "controller": str(0x450B), "scaling": str(0x4505),
         "launcher_fullscreen": str(0x450A), "accessibility": str(0x452C),
         "interface_size": str(0x452D), "high_contrast": str(0x452E),
         "reduce_motion": str(0x4509), "text_size": str(0x452F),
         "ace": str(0x4540), "ace_open": str(0x4541), "ace_mode": str(0x4542),
+        "preset": str(0x4510),
     }
-    # From Resolution, Down runs through the Game card's seven rows (the last two
-    # are Ace Mode and its options) to the button row, which it enters at
+    # From Resolution, Down runs through the Game card's seven rows (Play mode, which opens
+    # Settings > Enhanced, then Graphics preset, #2150) to the button row, which it enters at
     # Third-party notices.
     TO_SETTINGS_BUTTONS = ("KEY_DOWN",) * 7
 
@@ -2168,6 +2213,84 @@ class NativePlayerUiTests(unittest.TestCase):
             if not trail or trail[-1] != frame["next_focus"]:
                 trail.append(frame["next_focus"])
         return trail
+
+    @staticmethod
+    def preset_lines(run: dict[str, object]) -> list[dict[str, str]]:
+        """The graphics preset row and note the main Settings page drew, in order (#2150)."""
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        prefix = "[PLAYER_UI_TEST] next_ui_settings_preset "
+        lines = []
+        for line in stdout.splitlines():
+            if line.startswith(prefix):
+                value, warns, note = line[len(prefix):].split("|", 2)
+                lines.append({"value": value[len("value="):], "warns": warns[len("warns="):],
+                              "note": note[len("note="):]})
+        return lines
+
+    def test_next_ui_graphics_preset_writes_its_settings(self) -> None:
+        """#2150: the Game card's last row steps the graphics preset from Custom (a new
+        library) to Low, then Medium. A preset is an overlay for Enhanced and Ace sessions, so
+        the choice is saved and the rows keep their values, and the page's notice line says
+        where the preset applies."""
+        focus = self.SETTINGS_FOCUS
+        run = self.next_ui_run(
+            "settings",
+            ("WAIT_MS=100",) + ("KEY_DOWN",) * 6 +
+            ("KEY_RETURN", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100", "KEY_ESCAPE"),
+        )
+        self.assertIn(focus["preset"], self.focus_trail(run), "Down reaches Graphics preset")
+        lines = self.preset_lines(run)
+        self.assertEqual([line["value"] for line in lines], ["Custom", "Low", "Medium"],
+                         run["stdout"])
+        self.assertEqual((lines[0]["warns"], lines[0]["note"]), ("0", ""),
+                         "a new library starts on Custom, with the page's own line")
+        medium = lines[-1]
+        self.assertEqual(medium["warns"], "0")
+        self.assertEqual(medium["note"],
+                         "Medium is used in Enhanced and Ace. Authentic uses your own display "
+                         "settings.")
+        self.assertNotIn("FSR 1", medium["note"])
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("graphics_preset"), "medium", "two steps: Low, then Medium")
+        # The rows are the new library's own, not Medium's 2x: only sessions take a preset.
+        self.assertEqual(settings.get("resolution_scale"), 1, "the Resolution row is unchanged")
+        self.assertEqual(settings.get("present_scaling"), "sharp")
+        self.assertIs(settings.get("vsync"), True)
+        self.assertIs(settings.get("fullscreen"), False)
+
+    def test_next_ui_graphics_preset_ultra_note_and_custom_on_edit(self) -> None:
+        """#2150: Ultra's row and note say its upscaler is not set, in the warning colour;
+        editing a row the preset sets (Resolution) makes it Custom and the note goes."""
+        focus = self.SETTINGS_FOCUS
+        run = self.next_ui_run(
+            "settings",
+            ("WAIT_MS=100",) + ("KEY_DOWN",) * 6 +
+            ("KEY_RETURN", "WAIT_MS=100") * 4 + ("KEY_UP",) * 6 +
+            ("KEY_RETURN", "WAIT_MS=100", "KEY_ESCAPE"),
+        )
+        trail = self.focus_trail(run)
+        self.assertIn(focus["preset"], trail)
+        self.assertIn(focus["resolution"], trail[trail.index(focus["preset"]):],
+                      "Up returns to Resolution")
+        lines = self.preset_lines(run)
+        self.assertEqual([line["value"] for line in lines],
+                         ["Custom", "Low", "Medium", "High", "Ultra (no upscaler)", "Custom"],
+                         run["stdout"])
+        ultra = lines[4]
+        self.assertEqual(ultra["warns"], "1", "Ultra's note names what it could not set")
+        self.assertIn("Ultra is used in Enhanced and Ace", ultra["note"])
+        self.assertIn("without its FSR 1 upscaler", ultra["note"])
+        self.assertIn("Authentic uses your own display settings", ultra["note"])
+        self.assertEqual(lines[3]["warns"], "0")
+        self.assertNotIn("FSR 1", lines[3]["note"])
+        self.assertEqual((lines[-1]["warns"], lines[-1]["note"]), ("0", ""),
+                         "an edited row makes the preset Custom and its note goes")
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings.get("graphics_preset"), "custom")
+        self.assertEqual(settings.get("resolution_scale"), 2, "Resolution stepped from 1x to 2x")
 
     def test_next_ui_settings_changes_are_saved_and_done_returns(self) -> None:
         """#1302: Settings in the next UI runs the same handlers and saves each change."""
@@ -2198,40 +2321,49 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(self.screens(tabs), [("settings", "1"), ("library", "3")],
                          "the ABOUT tab on Settings closes it and opens About")
 
-    def test_next_ui_ace_mode_switch_is_saved_and_its_page_opens(self) -> None:
-        """Ace Mode (src/rt/ace.h): off by default; the Game card's row switches it for the
-        library and saves it, and Ace Mode options opens its page on its own switch."""
+    def test_next_ui_play_mode_is_saved_and_its_page_opens(self) -> None:
+        """The play modes (#2055): Authentic by default. Settings has one Play mode row
+        (#2007); it opens Settings > Enhanced, whose play mode row makes Enhanced the library's
+        default and saves it."""
         focus = self.SETTINGS_FOCUS
         run = self.next_ui_run(
             "settings",
-            ("WAIT_MS=100",) + ("KEY_DOWN",) * 5 + ("KEY_RETURN", "WAIT_MS=100", "KEY_ESCAPE"),
+            ("WAIT_MS=100",) + ("KEY_DOWN",) * 5 +
+            ("KEY_RETURN", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100", "KEY_ESCAPE"),
         )
-        self.assertIn(focus["ace"], self.focus_trail(run), "Down reaches the Ace Mode row")
+        self.assertIn(focus["ace_open"], self.focus_trail(run), "Down reaches the Play mode row")
+        self.assertNotIn(focus["ace"], self.focus_trail(run), "there is no second Play mode row")
+        self.assertEqual([view for view, _ in self.screens(run)],
+                         ["settings", "ace_settings", "settings"])
         settings = run["settings"]
         assert isinstance(settings, dict)
-        ace = settings.get("ace")
-        assert isinstance(ace, dict), settings
-        self.assertIs(ace.get("enabled"), True, "Ace Mode switched on and saved")
-        self.assertEqual(ace.get("af"), 16, "the features keep their defaults")
+        enhanced = settings.get("enhanced")
+        assert isinstance(enhanced, dict), settings
+        self.assertEqual(enhanced.get("default"), "enhanced",
+                         "Enhanced chosen on its page and saved")
+        self.assertEqual(enhanced.get("af"), "16", "the parts keep their defaults")
+        self.assertNotIn("ace", settings, "the development builds' key is not written")
         pad = self.next_ui_run(
             "settings",
-            ("WAIT_MS=100",) + ("PAD_DPAD_DOWN",) * 5 + ("PAD_SOUTH", "WAIT_MS=100", "PAD_EAST"),
+            ("WAIT_MS=100",) + ("PAD_DPAD_DOWN",) * 5 +
+            ("PAD_SOUTH", "WAIT_MS=100", "PAD_SOUTH", "WAIT_MS=100", "PAD_EAST"),
         )
         pad_settings = pad["settings"]
         assert isinstance(pad_settings, dict)
-        pad_ace = pad_settings.get("ace")
-        assert isinstance(pad_ace, dict), pad_settings
-        self.assertIs(pad_ace.get("enabled"), True, "a controller's d-pad and south do the same")
+        pad_enhanced = pad_settings.get("enhanced")
+        assert isinstance(pad_enhanced, dict), pad_settings
+        self.assertEqual(pad_enhanced.get("default"), "enhanced",
+                         "a controller's d-pad and south do the same")
         page = self.next_ui_run(
             "settings",
-            ("WAIT_MS=100",) + ("KEY_DOWN",) * 6 + ("KEY_RETURN", "WAIT_MS=100", "KEY_ESCAPE",
+            ("WAIT_MS=100",) + ("KEY_DOWN",) * 5 + ("KEY_RETURN", "WAIT_MS=100", "KEY_ESCAPE",
                                                      "WAIT_MS=100"),
         )
         self.assertEqual([view for view, _ in self.screens(page)],
                          ["settings", "ace_settings", "settings"])
         trail = self.focus_trail(page)
         self.assertEqual(trail[-2:], [focus["ace_mode"], focus["ace_open"]],
-                         "the page opens on its switch and Back focuses the row that opened it")
+                         "the page opens on its play mode and Back focuses the row that opened it")
 
     def test_a_dedicated_data_root_keeps_everything_out_of_the_default_profile(self) -> None:
         """--user-data-root=<folder> opens the player on a second profile, for example a
@@ -2317,11 +2449,13 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual([view for view, _ in self.screens(online)],
                          ["settings", "online_settings", "settings"])
         trail = self.focus_trail(online)
-        self.assertEqual(trail[-3:], [focus["online"], focus["online_mode"], focus["online"]],
-                         "the page opens on its first switch and Back focuses its button")
+        self.assertEqual(trail[-3:], [focus["online"], focus["developer"], focus["online"]],
+                         "the page opens on its one switch and Back focuses its button")
         frames = online["frames"]
         assert isinstance(frames, list)
-        self.assertEqual(frames[-1]["online_mode"], "1")
+        self.assertEqual(frames[-1]["developer_mode"], "1", "the page's switch is developer mode")
+        self.assertEqual(frames[-1]["online_mode"], "0",
+                         "online mode has no switch until the feature exists (#2007)")
 
         notices = self.next_ui_run(
             "settings", ("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS + ("KEY_RETURN", "WAIT_MS=100"),
@@ -2707,6 +2841,11 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[3]["focus"], "1")
         self.assertEqual(frames[4]["picker"], "1")
 
+    # CHECK FOR UPDATES, wait for the newer release, then Enter on its focused action
+    # (Download, or the release page when Download is not offered).
+    UPDATE_TO_DOWNLOAD = ("WAIT_MS=200", "KEY_RETURN",
+                          f"WAIT_UPDATE=available,{UPDATE_STEP_TIMEOUT_MS}", "KEY_RETURN")
+
     def update_run(self, view: str, events: tuple[str, ...], fixture: dict[str, bool] | None,
                    **kwargs: object) -> tuple[dict[str, object], list[dict[str, str]], list[str]]:
         """A next-UI run whose update answers come from a synthetic fixture (None:
@@ -2731,13 +2870,18 @@ class NativePlayerUiTests(unittest.TestCase):
         """Owner request 2026-10-28: CHECK FOR UPDATES asks GitHub once; Download and
         Install each need their own click; the checksum file's signature is checked,
         then the ZIP against that signed SHA-256, before Install is offered, and
-        Install unpacks into a new folder."""
+        Install unpacks into a new folder. Each step is waited for by its phase: a
+        fixed wait once ended before the install did on a busy runner (CI run
+        42312214991). The slow link (600 ms per download request, so the download
+        outlasts the 1.5 s the old script gave it) keeps the script honest."""
+        events = self.UPDATE_TO_DOWNLOAD
+        if sys.platform == "win32":
+            events += (f"WAIT_UPDATE=downloaded,{UPDATE_STEP_TIMEOUT_MS}", "KEY_RETURN",
+                       f"WAIT_UPDATE=installed,{UPDATE_STEP_TIMEOUT_MS}")
+        else:
+            events += ("WAIT_MS=500",)
         run, steps, requests = self.update_run(
-            "updates",
-            ("WAIT_MS=200", "KEY_RETURN", "WAIT_MS=800", "KEY_RETURN", "WAIT_MS=1500",
-             "KEY_RETURN", "WAIT_MS=5000"),
-            {},
-        )
+            "updates", events, {}, env_extra={"NK_UI_TEST_UPDATE_REQUEST_DELAY_MS": "600"})
         names = [step["update"] for step in steps]
         self.assertEqual(steps[0]["newest"], "v0.0.3")
         self.assertIn("available", names)
@@ -2828,7 +2972,8 @@ class NativePlayerUiTests(unittest.TestCase):
 
     def test_update_check_offline_shows_one_plain_card_and_no_retries(self) -> None:
         run, steps, requests = self.update_run(
-            "updates", ("WAIT_MS=200", "KEY_RETURN", "WAIT_MS=1500"), None)
+            "updates",
+            ("WAIT_MS=200", "KEY_RETURN", f"WAIT_UPDATE=failed,{UPDATE_STEP_TIMEOUT_MS}"), None)
         self.assertEqual([step["update"] for step in steps], ["failed"], steps)
         self.assertEqual(steps[0]["error"], "UPDATE_OFFLINE")
         self.assertEqual(requests, [UPDATE_RELEASES_URL], "one request, no retry")
@@ -2840,7 +2985,7 @@ class NativePlayerUiTests(unittest.TestCase):
         if sys.platform != "win32":
             self.skipTest("the update download runs on Windows only")
         _, steps, _ = self.update_run(
-            "updates", ("WAIT_MS=200", "KEY_RETURN", "WAIT_MS=800", "KEY_RETURN", "WAIT_MS=1500"),
+            "updates", self.UPDATE_TO_DOWNLOAD + (f"WAIT_UPDATE=failed,{UPDATE_STEP_TIMEOUT_MS}",),
             {"wrong_checksum": True})
         self.assertEqual(steps[-1]["update"], "failed", steps)
         self.assertEqual(steps[-1]["error"], "UPDATE_HASH_MISMATCH")
@@ -2852,7 +2997,7 @@ class NativePlayerUiTests(unittest.TestCase):
         if sys.platform != "win32":
             self.skipTest("the update download runs on Windows only")
         _, steps, requests = self.update_run(
-            "updates", ("WAIT_MS=200", "KEY_RETURN", "WAIT_MS=800", "KEY_RETURN", "WAIT_MS=1500"),
+            "updates", self.UPDATE_TO_DOWNLOAD + (f"WAIT_UPDATE=failed,{UPDATE_STEP_TIMEOUT_MS}",),
             {"bad_signature": True})
         self.assertEqual(steps[-1]["update"], "failed", steps)
         self.assertEqual(steps[-1]["error"], "UPDATE_SIGNATURE_INVALID")
@@ -2870,8 +3015,7 @@ class NativePlayerUiTests(unittest.TestCase):
         for fixture in ({"player_key": False}, {"signed": False}):
             with self.subTest(fixture=fixture):
                 run, steps, requests = self.update_run(
-                    "updates", ("WAIT_MS=200", "KEY_RETURN", "WAIT_MS=800", "KEY_RETURN",
-                                "WAIT_MS=500"), fixture)
+                    "updates", self.UPDATE_TO_DOWNLOAD + ("WAIT_MS=500",), fixture)
                 self.assertEqual([step["update"] for step in steps], ["available"], steps)
                 self.assertEqual(requests, [UPDATE_RELEASES_URL])
                 self.assertIn(
@@ -2883,12 +3027,29 @@ class NativePlayerUiTests(unittest.TestCase):
             self.skipTest("the update install runs on Windows only")
         _, steps, _ = self.update_run(
             "updates",
-            ("WAIT_MS=200", "KEY_RETURN", "WAIT_MS=800", "KEY_RETURN", "WAIT_MS=1500",
-             "KEY_RETURN", "WAIT_MS=5000"),
+            self.UPDATE_TO_DOWNLOAD + (f"WAIT_UPDATE=downloaded,{UPDATE_STEP_TIMEOUT_MS}",
+                                       "KEY_RETURN", f"WAIT_UPDATE=failed,{UPDATE_STEP_TIMEOUT_MS}"),
             {"missing_file": True})
         self.assertEqual(steps[-1]["update"], "failed", steps)
         self.assertEqual(steps[-1]["error"], "UPDATE_INSTALL_INCOMPLETE")
         self.assertEqual(steps[-1]["install"], "none")
+
+    def test_wait_update_fails_on_timeout_and_refuses_bad_steps(self) -> None:
+        """WAIT_UPDATE is a ceiling, never a pass: a phase that never comes fails the run
+        and names the phase it last saw, and a malformed step stops the script before
+        any wait starts."""
+        run = self.next_ui_run("library", ("WAIT_UPDATE=installed,300",),
+                               expect_failure=True, timeout=60)
+        self.assertIn("[PLAYER_UI_TEST] wait_update result=FAIL target=installed actual=idle",
+                      run["stderr"], run["stdout"])
+        self.assertNotIn("result=PASS", run["stdout"])
+        for step in ("WAIT_UPDATE=nonsense,1000", "WAIT_UPDATE=installed",
+                     "WAIT_UPDATE=,1000", "WAIT_UPDATE=installed,0",
+                     "WAIT_UPDATE=installed,-5", "WAIT_UPDATE=installed,4294967296"):
+            with self.subTest(step=step):
+                run = self.next_ui_run("library", (step,), expect_failure=True, timeout=60)
+                self.assertIn("Invalid synthetic event script", run["stderr"], run["stdout"])
+                self.assertNotIn("wait_update target=", run["stdout"])
 
     def test_update_check_at_start_is_off_by_default_and_quiet_when_offline(self) -> None:
         """No setting, no request: the player is offline by default (AGENTS.md section 5)."""
@@ -2899,16 +3060,19 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertIs(settings.get("check_updates_at_start"), False)
         # Turned on: one request at start, and a newer version is one quiet button.
         run, steps, requests = self.update_run(
-            "library", ("WAIT_MS=800",), {}, env_extra={"NK_UI_TEST_CHECK_AT_START": "1"})
+            "library", (f"WAIT_UPDATE=available,{UPDATE_STEP_TIMEOUT_MS}",), {},
+            env_extra={"NK_UI_TEST_CHECK_AT_START": "1"})
         self.assertEqual(requests, [UPDATE_RELEASES_URL])
         self.assertEqual([(step["update"], step["notice"]) for step in steps],
                          [("available", "1")], steps)
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["view"], "library", "the check never takes the screen")
-        # Offline at start: one request, and nothing on screen.
+        # Offline at start: one request, and nothing on screen. The check starts before
+        # the first frame, so the phase is checking until the failed check returns it to idle.
         run, steps, requests = self.update_run(
-            "library", ("WAIT_MS=1500",), None, env_extra={"NK_UI_TEST_CHECK_AT_START": "1"})
+            "library", (f"WAIT_UPDATE=idle,{UPDATE_STEP_TIMEOUT_MS}",), None,
+            env_extra={"NK_UI_TEST_CHECK_AT_START": "1"})
         self.assertEqual(requests, [UPDATE_RELEASES_URL])
         self.assertEqual(steps, [], "a failed check at start stays in the developer log")
 
@@ -3207,6 +3371,62 @@ class NativePlayerUiTests(unittest.TestCase):
         )
         self.assert_rebuild_started(frames, run["stdout"])
 
+    # A stand-in for tools/nk_cli.py that builds nothing: it records that it
+    # started, then writes a heartbeat until it is stopped or 8 s pass.
+    SLOW_BUILD_CLI = (
+        "import os, pathlib, time\n"
+        "witness = pathlib.Path(os.environ['NK_UI_TEST_BUILD_WITNESS'])\n"
+        "(witness / 'started').write_text(str(os.getpid()), encoding='utf-8')\n"
+        "deadline = time.monotonic() + 8.0\n"
+        "with open(witness / 'heartbeat', 'a', encoding='utf-8') as beat:\n"
+        "    while time.monotonic() < deadline:\n"
+        "        beat.write('.')\n"
+        "        beat.flush()\n"
+        "        time.sleep(0.05)\n"
+        "(witness / 'finished').write_text('outlived the player', encoding='utf-8')\n"
+    )
+
+    def test_closing_the_player_stops_a_running_package_build(self) -> None:
+        # The player used to exit with a package build still running. On Linux
+        # the build ran on as an orphan and kept writing into the data folder,
+        # which is how test_incompatible_card_offers_rebuild_package_in_the_
+        # legacy_renderer failed hosted CI with "Directory not empty" when its
+        # scratch folder was removed. A slow stand-in build makes that certain.
+        with tempfile.TemporaryDirectory(
+            prefix=".slow-build-", dir=ROOT, ignore_cleanup_errors=True
+        ) as tmp:
+            install_root = Path(tmp) / "install"
+            (install_root / "tools").mkdir(parents=True)
+            (install_root / "tools" / "nk_cli.py").write_text(self.SLOW_BUILD_CLI,
+                                                              encoding="utf-8")
+            witness = Path(tmp) / "witness"
+            witness.mkdir()
+            run = self.run_player(
+                "ready",
+                ("WAIT_PACKAGE_STATUS=INCOMPATIBLE,10000", "KEY_RETURN", "WAIT_MS=1500"),
+                incompatible_package=True,
+                wait_background=True,
+                ui_mode="legacy",
+                env_extra={
+                    "NK_INSTALL_ROOT": str(install_root),
+                    "NK_UI_TEST_BUILD_WITNESS": str(witness),
+                },
+            )
+            frames = run["frames"]
+            assert isinstance(frames, list)
+            if frames[-1]["view"] != "building_package":
+                self.skipTest("no build started: this host lacks the build tools")
+            self.assertTrue((witness / "started").exists(), run["stdout"])
+            heartbeat = witness / "heartbeat"
+            size_at_exit = heartbeat.stat().st_size
+            time.sleep(1.0)
+            self.assertEqual(heartbeat.stat().st_size, size_at_exit,
+                             "the package build kept running after the player closed")
+            self.assertFalse((witness / "finished").exists())
+            # Windows ended the build with the player's job object even before
+            # the fix; the player now stops it itself, and says so.
+            self.assertIn("[PLAYER] Closing: the package build was stopped.", run["stderr"])
+
     def test_incompatible_title_offers_rebuild_package_in_the_next_ui(self) -> None:
         shown = self.run_player(
             "ready", ("WAIT_MS=100",), incompatible_package=True, wait_background=True,
@@ -3496,9 +3716,22 @@ class NativePlayerUiTests(unittest.TestCase):
         )
 
     def test_worker_start_failure_automatically_retries_after_bounded_backoff(self) -> None:
+        """The first worker start fails; once the 5 s backoff expires the title is retried on
+        its own, and the retry's result replaces the failure.
+
+        Why the old fixed 6.2 s wait could miss: the backoff runs 5 s from the failure
+        (player_state.c), and only the periodic rescan (every 2 s with no check running,
+        main.c) starts a due retry. The retry therefore starts between 5 s and 7 s after the
+        failure, and its check then takes time of its own. A run that ended at 6.2 s saw
+        either no retry yet (hosted CI: attempts 1 at the last frame, 6.4 s) or a retry in
+        flight with its result not in (status 4, unknown, where 1 was expected). Both are
+        correct product behaviour inside the documented bound. The run now waits for the
+        event the contract is about, the retry's result (WAIT_PACKAGE_STATUS), with a
+        deadline well past the 7 s bound, and asserts on the frames: the failure was shown,
+        no retry started before the backoff, and the retry came."""
         run = self.run_player(
             "ready",
-            events=("WAIT_MS=6200",),
+            events=("WAIT_PACKAGE_STATUS=MISSING,20000",),
             wait_background=True,
             env_extra={
                 "NK_UI_TEST_FAIL_PACKAGE_STATUS_THREAD_CREATE_AT": "1"
@@ -3506,12 +3739,19 @@ class NativePlayerUiTests(unittest.TestCase):
         )
         frames = run["frames"]
         assert isinstance(frames, list)
+        self.assertIn("[PLAYER_UI_TEST] wait_package_status result=PASS", run["stdout"])
+        first_attempt = [frame for frame in frames
+                         if frame["package_status_thread_attempts"] == "1"]
+        self.assertTrue(first_attempt, run["stdout"])
         self.assertTrue(
-            any(frame["package_status_thread_attempts"] == "1" and
-                int(frame["ticks_ms"]) < 5000
-                for frame in frames),
+            any(frame["selected_package_check_failed"] == "1" for frame in first_attempt),
             run["stdout"],
         )
+        retried = [frame for frame in frames
+                   if int(frame["package_status_thread_attempts"]) >= 2]
+        self.assertTrue(retried, run["stdout"])
+        # The backoff is 5 s from the failure, which is no earlier than start.
+        self.assertGreaterEqual(int(retried[0]["ticks_ms"]), 5000, run["stdout"])
         self.assertGreaterEqual(
             int(frames[-1]["package_status_thread_attempts"]), 2,
             run["stdout"],
@@ -3888,7 +4128,7 @@ class NativePlayerUiTests(unittest.TestCase):
     def test_build_failure_card_dismisses_and_cancel_stays_away(self) -> None:
         """#1277: a finished build's outcome is shown once per session.
 
-        The failure card was re-opened on every frame, so Return to Library
+        The failure card was re-opened on every frame, so Back to library
         could not dismiss it, and a cancelled build pulled every later view
         back to the Library."""
         failed = self.run_player(
@@ -3935,7 +4175,7 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertLessEqual(retry_delay_ns, 2_500_000_000)
 
     def test_inspection_and_support_screens_render_and_return(self) -> None:
-        for view in ("inspecting", "supported", "experimental", "unsupported", "preparing"):
+        for view in ("inspecting", "supported", "experimental", "unsupported"):
             with self.subTest(view=view):
                 run = self.run_player(view, ("KEY_ESCAPE",))
                 frames = run["frames"]
@@ -3952,6 +4192,62 @@ class NativePlayerUiTests(unittest.TestCase):
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertTrue(has_amber_badge(run["bmp"], badge_rect(frames[-1])))
+
+    def test_several_dropped_files_open_one_disc_and_say_what_happened(self) -> None:
+        # The real SDL drop events through the player's event loop: two disc images and a text
+        # file. The first image opens, the other waits in the queue, and the library will say
+        # what was skipped (#2007).
+        run = self.run_player(
+            "library",
+            (
+                "DROP_BEGIN",
+                "DROP_FILE=Z:/dropped/first.iso",
+                "DROP_FILE=Z:/dropped/notes.txt",
+                "DROP_FILE=Z:/dropped/second.iso",
+                "DROP_COMPLETE",
+                "WAIT_MS=100",
+            ),
+        )
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[0]["drop_pending"], "0")
+        self.assertEqual(frames[-1]["drop_pending"], "1")
+        self.assertEqual(frames[-1]["drop_notice"], "summary")
+        self.assertEqual(frames[-1]["error"], "ISO_CORRUPT")  # the first image was looked at
+
+    def test_a_lone_dropped_file_opens_and_gets_no_summary(self) -> None:
+        run = self.run_player("library", ("DROP_FILE=Z:/dropped/only.iso", "WAIT_MS=100"))
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual(frames[-1]["error"], "ISO_CORRUPT")
+        self.assertEqual(frames[-1]["drop_pending"], "0")
+        self.assertEqual(frames[-1]["drop_notice"], "none")
+
+    def test_files_dropped_while_a_game_is_being_set_up_are_ignored(self) -> None:
+        # wizard-staging has a worker extracting. A lone file (no DROP_BEGIN, as SDL sends one
+        # file) and a bracketed batch are both ignored, as a dropped file always was then:
+        # nothing is queued to open later, and no error card opens over the setup.
+        for events in (
+            ("DROP_FILE=Z:/dropped/lone.iso", "WAIT_MS=100"),
+            (
+                "DROP_BEGIN",
+                "DROP_FILE=Z:/dropped/a.iso",
+                "DROP_FILE=Z:/dropped/b.iso",
+                "DROP_COMPLETE",
+                "WAIT_MS=100",
+            ),
+        ):
+            with self.subTest(events=events):
+                run = self.run_player("wizard-staging", events)
+                frames = run["frames"]
+                assert isinstance(frames, list)
+                for frame in frames:
+                    self.assertEqual(frame["view"], "wizard")
+                    self.assertEqual(frame["extracting"], "1")
+                    self.assertEqual(frame["error"], "NONE")
+                # The queue fills as a batch's files arrive and is emptied when it completes.
+                self.assertEqual(frames[-1]["drop_pending"], "0")
+                self.assertEqual(frames[-1]["drop_notice"], "none")
 
     def test_staging_and_package_build_cancellation_render_progress(self) -> None:
         staging = self.run_player("wizard-staging", ("KEY_ESCAPE",))
@@ -4173,8 +4469,8 @@ class NativePlayerUiTests(unittest.TestCase):
         image[18 * sector:18 * sector + len(root)] = root
         image[19 * sector:19 * sector + 16] = b"synthetic text\n\n"
         cases = (
-            ("source-owned-compressed.cso", cso, "DISC_IMAGE_INDEX_INVALID", "Damaged_Disc_Image"),
-            ("source-owned-data-disc.iso", bytes(image), "DISC_NOT_PSP", "Not_a_PSP_Disc_Image"),
+            ("source-owned-compressed.cso", cso, "DISC_IMAGE_INDEX_INVALID", "Damaged_disc_image"),
+            ("source-owned-data-disc.iso", bytes(image), "DISC_NOT_PSP", "Not_a_PSP_disc_image"),
         )
         for name, payload, code, title in cases:
             with self.subTest(code=code):
@@ -4344,33 +4640,34 @@ class NativePlayerUiTests(unittest.TestCase):
 
     # The next UI draws the setup wizard too, with the existing wizard's handlers.
     def test_next_ui_wizard_options_step_switches_and_skip(self) -> None:
-        # The switches sit above the buttons: Up from Continue reaches Developer
-        # mode, Up again Online mode.
+        # The one switch sits above the buttons: Up from Continue reaches Developer
+        # mode. Online mode has no switch until the feature exists (#2007).
         run = self.run_player(
             "wizard-options",
-            ("WAIT_MS=100", "KEY_UP", "KEY_UP", "KEY_RETURN", "KEY_DOWN", "KEY_RETURN"),
+            ("WAIT_MS=100", "KEY_UP", "KEY_RETURN", "WAIT_MS=100"),
             ui_mode="next",
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
         frames = run["frames"]
         assert isinstance(frames, list)
-        self.assertEqual(frames[-1]["online_mode"], "1")
+        self.assertEqual(frames[-1]["online_mode"], "0")
         self.assertEqual(frames[-1]["developer_mode"], "1")
         self.assertEqual(frames[-1]["wizard_step"], "online_options")
         skipped = self.run_player(
             "wizard-options",
-            # Down twice lands on the button row; Left twice reaches Continue
+            # Down lands on the button row; Left twice reaches Continue
             # whichever button it lands on, and Right is Skip.
-            ("WAIT_MS=100", "KEY_UP", "KEY_UP", "KEY_RETURN", "KEY_DOWN", "KEY_DOWN",
+            ("WAIT_MS=100", "KEY_UP", "KEY_RETURN", "KEY_DOWN",
              "KEY_LEFT", "KEY_LEFT", "KEY_RIGHT", "KEY_RETURN"),
             ui_mode="next",
         )
         frames = skipped["frames"]
         assert isinstance(frames, list)
-        self.assertIn("1", [frame["online_mode"] for frame in frames])
+        self.assertIn("1", [frame["developer_mode"] for frame in frames])
         self.assertEqual(frames[-1]["wizard_step"], "select_game")
-        self.assertEqual(frames[-1]["online_mode"], "0", "Skip turns online mode back off")
+        self.assertEqual(frames[-1]["online_mode"], "0", "Skip keeps online mode off")
+        self.assertEqual(frames[-1]["developer_mode"], "0", "Skip turns developer mode back off")
 
     def test_next_ui_wizard_runs_the_first_run_path(self) -> None:
         run = self.run_player("empty", ("KEY_RETURN", "KEY_RETURN", "KEY_RETURN", "KEY_RETURN"),
@@ -4463,11 +4760,11 @@ class NativePlayerUiTests(unittest.TestCase):
 
         Failing-before: "Child Process Terminated Early" and "Child Process Error
         Exit" were developer text, the stop card's badge fell back to the raw code
-        for the two exit cards, and Return to Library was the only action."""
+        for the two exit cards, and Back to library was the only action."""
         expected = {
-            "RUNTIME_SEMANTIC_BOUNDARY": ("Game_Stopped_Early", "Game_stopped"),
-            "RUNTIME_PREMATURE_EXIT": ("Game_Couldn't_Start", "Game_didn't_start"),
-            "RUNTIME_ERROR_EXIT": ("Game_Closed_Unexpectedly", "Game_closed"),
+            "RUNTIME_SEMANTIC_BOUNDARY": ("Game_stopped_early", "Game_stopped"),
+            "RUNTIME_PREMATURE_EXIT": ("Game_couldn't_start", "Game_didn't_start"),
+            "RUNTIME_ERROR_EXIT": ("Game_closed_unexpectedly", "Game_closed"),
         }
         for code, (title, badge) in expected.items():
             with self.subTest(code=code):
@@ -4495,7 +4792,7 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIsNotNone(report, stdout)
         assert report is not None
         self.assertEqual(report.group(1), "1", "the report did not reach the clipboard")
-        for field in ("Nakagawa Recomp v", "Problem: Game Stopped Early",
+        for field in ("Nakagawa Recomp v", "Problem: Game stopped early",
                       "Code: RUNTIME_SEMANTIC_BOUNDARY",
                       "Reason: Stopped at unsupported-import-scenetadhocinit",
                       "tracked in issue 308", "Last boot events:",
@@ -4570,7 +4867,7 @@ class NativePlayerUiTests(unittest.TestCase):
         """#1282: Restart game runs the same launch PLAY does for that game.
 
         The synthetic library game has no package, so the launch answers with
-        its own Game Not Ready card: the restart reached the launch path.
+        its own Game not ready card: the restart reached the launch path.
 
         Restart game goes back to the library and starts the launch on the
         launch worker (#1298), so the script waits for that launch's card, not
@@ -4578,24 +4875,28 @@ class NativePlayerUiTests(unittest.TestCase):
         longer than any fixed wait the script could guess: the old WAIT_MS=100
         ended on the stopped game's card whenever a slow runner took longer
         than that to reach the package check."""
-        run = self.run_player(
-            "library", ("WAIT_MS=50", "KEY_RIGHT", "KEY_RETURN", "WAIT_VIEW=error,10000"),
-            error_code="RUNTIME_ERROR_EXIT", ui_mode="next",
-            env_extra={"NK_UI_TEST_SLOW_START_MS": "600"},
-        )
-        # --ui=next exits 4 when the launcher can't start, so a run that got here
-        # drew the next UI; anything else is a failure, never a skip.
-        self.assertIn("[PLAYER_UI_TEST] UI_NEXT_ACTIVE", str(run["stdout"]))
-        frames = run["frames"]
-        assert isinstance(frames, list)
-        self.assertEqual(frames[0]["error"], "RUNTIME_ERROR_EXIT")
-        pending = [frame for frame in frames if frame["launch_pending"] == "1"]
-        self.assertTrue(pending, "Restart game started a launch")
-        self.assertEqual(pending[0]["view"], "library", "the restart left the stopped game's card")
-        self.assertEqual(frames[-1]["view"], "error", run["stdout"])
-        self.assertIn(frames[-1]["error"], ("RUNTIME_PACKAGE_NOT_READY",), run["stdout"])
-        self.assertEqual(frames[-1]["launch_pending"], "0")
-        self.assertNotEqual(frames[-1]["error_retry"], "Restart_game")
+        # Right-arrow and Tab both move from the primary button to Restart game: the
+        # directional move must not depend on how wide the button labels are.
+        for move_key in ("KEY_RIGHT", "KEY_TAB"):
+            with self.subTest(move_key=move_key):
+                run = self.run_player(
+                    "library", ("WAIT_MS=50", move_key, "KEY_RETURN", "WAIT_VIEW=error,10000"),
+                    error_code="RUNTIME_ERROR_EXIT", ui_mode="next",
+                    env_extra={"NK_UI_TEST_SLOW_START_MS": "600"},
+                )
+                # --ui=next exits 4 when the launcher can't start, so a run that got here
+                # drew the next UI; anything else is a failure, never a skip.
+                self.assertIn("[PLAYER_UI_TEST] UI_NEXT_ACTIVE", str(run["stdout"]))
+                frames = run["frames"]
+                assert isinstance(frames, list)
+                self.assertEqual(frames[0]["error"], "RUNTIME_ERROR_EXIT")
+                pending = [frame for frame in frames if frame["launch_pending"] == "1"]
+                self.assertTrue(pending, "Restart game started a launch")
+                self.assertEqual(pending[0]["view"], "library", "the restart left the stopped game's card")
+                self.assertEqual(frames[-1]["view"], "error", run["stdout"])
+                self.assertIn(frames[-1]["error"], ("RUNTIME_PACKAGE_NOT_READY",), run["stdout"])
+                self.assertEqual(frames[-1]["launch_pending"], "0")
+                self.assertNotEqual(frames[-1]["error_retry"], "Restart_game")
 
     # Enum values of PlayerUiPackageState (src/player/ui/player_ui_nk.h).
     PACKAGE_READY = "1"
@@ -4614,11 +4915,15 @@ class NativePlayerUiTests(unittest.TestCase):
         check, standing in for a retail package whose check hashes several
         hundred MB. Failing-before: the launch ran on the UI thread, so the
         frames stopped for the whole start and PLAY showed nothing until it
-        ended (about 20 s for the owner's Hot Shots Tennis package)."""
+        ended (about 20 s for the owner's Hot Shots Tennis package).
+
+        The test checks that frames keep coming through the whole start, not how
+        many come: a loaded runner draws fewer frames per second (#2155)."""
+        slow_start_ms = 1500
         run = self.run_player(
             "ready", (*self.PLAY_READY_TITLE, "KEY_RETURN", "WAIT_MS=2500"),
             post_build_ready=True, wait_background=True, ui_mode="next",
-            env_extra={"NK_UI_TEST_SLOW_START_MS": "1500"},
+            env_extra={"NK_UI_TEST_SLOW_START_MS": str(slow_start_ms)},
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
@@ -4633,15 +4938,29 @@ class NativePlayerUiTests(unittest.TestCase):
         # The frame that took the press drew the title before the launch began;
         # every later one shows it starting.
         for frame in pending[1:]:
-            self.assertEqual(frame["next_primary_label"], "disabled:STARTING...")
+            # The label ends in an ellipsis, which the harness decodes with the
+            # console code page, so compare the words only.
+            self.assertTrue(frame["next_primary_label"].startswith("disabled:STARTING"),
+                            frame["next_primary_label"])
             self.assertEqual(frame["next_package"], self.PACKAGE_STARTING)
         first = frames.index(pending[0])
         last = frames.index(pending[-1])
         ticks = [int(frame["ticks_ms"]) for frame in frames[first:last + 2]]
-        self.assertGreaterEqual(ticks[-1] - ticks[0], 1400, "the start took its 1.5 s")
-        self.assertGreaterEqual(len(pending), 10, "the launcher drew through the start")
+        start, end = ticks[0], ticks[-1]
+        self.assertGreaterEqual(end - start, slow_start_ms - 100, "the start took its 1.5 s")
+        # A launcher that stops drawing leaves one gap as long as the start; one
+        # that keeps drawing, however slowly, leaves none longer than half of it.
         gaps = [later - earlier for earlier, later in zip(ticks, ticks[1:], strict=False)]
-        self.assertLess(max(gaps), 500, f"a frame took {max(gaps)} ms during the start")
+        self.assertLess(max(gaps), slow_start_ms // 2,
+                        f"no frame for {max(gaps)} ms during the start; frame ticks {ticks}")
+        # And it drew in every third of the start, not only at its two ends.
+        pending_ticks = [int(frame["ticks_ms"]) for frame in pending]
+        third = (end - start) / 3
+        for part, name in enumerate(("first", "middle", "last")):
+            low, high = start + part * third, start + (part + 1) * third
+            self.assertTrue(any(low <= tick < high for tick in pending_ticks),
+                            f"no frame drawn in the {name} third of the start; "
+                            f"frame ticks {ticks}")
         # The synthetic package has no staged disc and no real program, so the
         # start ends with the launch's own card, as a synchronous launch did.
         outcome = frames[-1]
@@ -4846,9 +5165,11 @@ class NativePlayerUiTests(unittest.TestCase):
 
     # Remove from library is the title page's lowest control, beside Report a
     # problem: Down presses reach that row whichever action-row buttons are
-    # enabled (the ENHANCEMENTS card's left-aligned Ace Mode button leads Down to
-    # Report a problem), and Right ends on Remove.
-    DOWN_TO_REMOVE = ("KEY_DOWN", "WAIT_MS=80") * 6 + ("KEY_RIGHT", "WAIT_MS=80")
+    # enabled. Down lands on whichever of the two lies nearest the button above
+    # (the ENHANCEMENTS card's Play mode label is wide enough to lead to either),
+    # so Left settles on Report a problem and Right ends on Remove.
+    DOWN_TO_REMOVE = (("KEY_DOWN", "WAIT_MS=80") * 6 +
+                      ("KEY_LEFT", "WAIT_MS=80", "KEY_RIGHT", "WAIT_MS=80"))
 
     def remove_run(self, events: tuple[str, ...]) -> list[dict[str, str]]:
         run = self.run_player("library", events, ui_mode="next", wait_background=True)
@@ -4896,6 +5217,174 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(last["next_route"], "1")
         self.assertEqual(last["next_focus"], self.LIBRARY_ADD)
         self.assertEqual(last["selected_disc"], "TEST00005")
+
+    # The title page's ENHANCEMENTS card (player_ui_nk.h), as the frame records print them.
+    TITLE_PLAY_MODE = str(0x200A)
+    TITLE_PLAY_OPTIONS = str(0x200B)
+    ENHANCED_PAGE_PART = str(0x4543)  # Settings > Enhanced's first part row, texture filtering
+    OPEN_FIRST = ("WAIT_MS=300", FIRST_TILE, "MOUSE_DOWN", "MOUSE_UP", "WAIT_MS=300")
+    # From the title page's first focus, Down reaches the ENHANCEMENTS card's Play mode button;
+    # Right from there is Enhanced options.
+    DOWN_TO_PLAY_MODE = ("KEY_DOWN", "WAIT_MS=80")
+    TO_PLAY_OPTIONS = ("KEY_RIGHT", "WAIT_MS=80")
+    # A library default of Enhanced, every part named (a part the block leaves out is off).
+    LIBRARY_ENHANCED = {"enhanced": {"default": "enhanced", "af": "16", "text": "on",
+                                     "readout": "off", "notice": "on", "smooth": "off"}}
+
+    @staticmethod
+    def play_badges(run: dict[str, object], disc: str) -> list[tuple[str, str]]:
+        """Each (library badge, title's own choice) a run showed for `disc`, in order."""
+        return re.findall(r"next_ui_play_badge index=\d+ disc=" + re.escape(disc) +
+                          r" badge=(\S+) chosen=(.+)", str(run["stdout"]))
+
+    @staticmethod
+    def enhanced_pages(run: dict[str, object]) -> list[dict[str, str]]:
+        """Each Settings > Enhanced the run drew: whose page, its play mode and each row."""
+        pages = []
+        for line in str(run["stdout"]).splitlines():
+            if line.startswith("[PLAYER_UI_TEST] next_ui_enhanced_page "):
+                fields = line[len("[PLAYER_UI_TEST] next_ui_enhanced_page "):].split("|")
+                pages.append(dict(field.split("=", 1) for field in fields))
+        return pages
+
+    @staticmethod
+    def title_play(run: dict[str, object]) -> dict[str, object]:
+        settings = run["settings"]
+        assert isinstance(settings, dict), run["stdout"]
+        title_play = settings.get("title_play", {})
+        assert isinstance(title_play, dict)
+        return title_play
+
+    def test_next_ui_title_play_mode_button_steps_its_modes(self) -> None:
+        """#2055: the title page's Play mode button steps Library default, Authentic, Enhanced
+        and, only for a game with a package of its own, Ace; the choice is saved for that game
+        alone, and the library card's badge follows it."""
+        presses = ("KEY_RETURN", "WAIT_MS=120") * 4
+        run = self.next_ui_run(
+            "library", (*self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *presses),
+            wait_background=True)
+        self.assertIn(self.TITLE_PLAY_MODE, self.focus_trail(run), "Down reaches Play mode")
+        chosen = [mode for _, mode in self.play_badges(run, "TEST00005")]
+        self.assertEqual(chosen, ["Library default", "Authentic", "Enhanced", "Library default",
+                                  "Authentic"],
+                         "without a package of its own, Ace is skipped")
+        badges = [badge for badge, _ in self.play_badges(run, "TEST00005")]
+        self.assertEqual(badges, ["none", "none", "Enhanced", "none", "none"])
+        self.assertEqual(self.title_play(run), {"TEST00005": {"mode": "authentic"}},
+                         "the choice is saved for that game alone")
+        self.assertEqual(self.play_badges(run, "TEST00006"), [("none", "Library default")],
+                         "the other game keeps the library's default")
+
+        # A sample game never has a package (player_read_title_enhancement), so the packaged
+        # case is the "ready" fixture's TEST00006, opened with Enter.
+        packaged = self.next_ui_run(
+            "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
+                      *presses),
+            post_build_ready=True, wait_background=True,
+            enhancement_packages={"TEST00006": "display-smoke-v1"})
+        self.assertIn(self.TITLE_PLAY_MODE, self.focus_trail(packaged),
+                      [hex(int(focus)) for focus in self.focus_trail(packaged)])
+        steps = self.play_badges(packaged, "TEST00006")
+        self.assertEqual(steps, [("none", "Library default"), ("none", "Authentic"),
+                                 ("Enhanced", "Enhanced"), ("Ace", "Ace"),
+                                 ("none", "Library default")],
+                         "with its package, Ace follows Enhanced and the badge says Ace")
+        self.assertEqual(self.title_play(packaged), {}, "back to the library: nothing is kept")
+
+    def test_next_ui_title_enhanced_options_are_that_games_and_back_returns(self) -> None:
+        """#2055: Enhanced options opens Settings > Enhanced for that game: its rows show the
+        game's own values and change only them, and Escape returns to its title page with
+        Enhanced options focused."""
+        run = self.next_ui_run(
+            "library",
+            (*self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS,
+             "KEY_RETURN", "WAIT_MS=200", "KEY_DOWN", "WAIT_MS=80",
+             "KEY_RETURN", "WAIT_MS=120", "KEY_RETURN", "WAIT_MS=120",
+             "KEY_ESCAPE", "WAIT_MS=200"),
+            wait_background=True, settings=self.LIBRARY_ENHANCED)
+        trail = self.focus_trail(run)
+        self.assertIn(self.TITLE_PLAY_OPTIONS, trail, "Right reaches Enhanced options")
+        self.assertIn(self.ENHANCED_PAGE_PART, trail, "Down reaches the first part's row")
+        self.assertIn("ace_settings", [view for view, _ in self.screens(run)])
+        pages = self.enhanced_pages(run)
+        self.assertTrue(pages, run["stdout"])
+        self.assertEqual({page["title"] for page in pages}, {"TEST00005"},
+                         "the page is that game's")
+        self.assertEqual(pages[0]["af"], "Library (16x)", "a part follows the library first")
+        self.assertIn("Ace needs a package made for this game.", pages[0]["sentence"],
+                      "a game with no package of its own says why it has no Ace")
+        self.assertEqual(pages[-1]["af"], "8x", "the row shows the game's own value")
+        title_play = self.title_play(run)
+        self.assertEqual(title_play, {"TEST00005": {"mode": "library", "af": "8"}})
+        settings = run["settings"]
+        assert isinstance(settings, dict)
+        self.assertEqual(settings["enhanced"]["af"], "16", "the library's value is kept")
+        last = run["frames"][-1]  # type: ignore[index]
+        self.assertEqual((last["view"], last["next_route"]), ("library", "2"),
+                         "Escape returns to the title page, not Settings")
+        self.assertEqual(last["next_focus"], self.TITLE_PLAY_OPTIONS,
+                         "with Enhanced options focused")
+
+    def test_next_ui_enhanced_options_do_nothing_while_a_game_runs(self) -> None:
+        """#2055: while a game runs, the title page's Enhanced options and Play mode change
+        nothing (NK_UI_TEST_GAME_RUNNING fakes the running game)."""
+        run = self.next_ui_run(
+            "library",
+            (*self.OPEN_FIRST, *self.DOWN_TO_PLAY_MODE, "KEY_RETURN", "WAIT_MS=120",
+             *self.TO_PLAY_OPTIONS, "KEY_RETURN", "WAIT_MS=200", "CLOSE", "CLOSE"),
+            wait_background=True,
+            env_extra={"NK_UI_TEST_GAME_RUNNING": "TEST00006",
+                       "NK_UI_TEST_MESSAGEBOX_FAIL": "1"})
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertTrue(all(frame["game_running"] == "1" for frame in frames))
+        self.assertEqual({view for view, _ in self.screens(run)}, {"library"},
+                         "Enhanced options opens nothing while a game runs")
+        self.assertEqual([mode for _, mode in self.play_badges(run, "TEST00005")],
+                         ["Library default"], "Play mode changes nothing while a game runs")
+
+    def smooth_at_60_run(self, title: dict[str, str],
+                         to_options: tuple[str, ...]) -> tuple[list[str], dict[str, str]]:
+        """The packaged TEST00006 with smooth motion on in the library and `title` as its own
+        play choice: its title page's play lines, then its Settings > Enhanced page, which
+        `to_options` reaches from the title page's first focus."""
+        settings = {"enhanced": {**self.LIBRARY_ENHANCED["enhanced"], "smooth": "x2"},
+                    "title_play": {"TEST00006": title}}
+        run = self.next_ui_run(
+            "ready", ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *to_options,
+                      "KEY_RETURN", "WAIT_MS=300"),
+            post_build_ready=True, wait_background=True, settings=settings,
+            enhancement_packages={"TEST00006": "display-smoke-v1"})
+        trail = [hex(int(focus)) for focus in self.focus_trail(run)]
+        self.assertIn(hex(int(self.TITLE_PLAY_OPTIONS)), trail, trail)
+        lines = re.findall(r"next_ui_title_play_line disc=TEST00006 line=(.+)",
+                           str(run["stdout"]))
+        pages = self.enhanced_pages(run)
+        # The title page's arrows move by layout, so a path that stops on another control
+        # (Play mode steps the mode instead) shows here with the focus trail.
+        self.assertTrue(lines and pages, f"Enhanced options not opened; focus trail {trail}")
+        self.assertEqual(pages[-1]["title"], "TEST00006", run["stdout"])
+        return lines, pages[-1]
+
+    def test_next_ui_smooth_motion_says_why_it_is_off_at_60_fps(self) -> None:
+        """Contract 10.5 (#2085; #2074 delta review B1): a game launched with its 60 FPS game
+        logic runs with smooth motion off, and its launch line says smooth=off. Its title page
+        and its Settings > Enhanced page say so and why, instead of showing smooth motion on;
+        with that logic off, both show the choice as it is."""
+        # The "ready" fixture does not read the saved Ace's package at start, so PLAY is
+        # disabled and the title page opens on Saves; Down from there reaches Enhanced options,
+        # the control below it in the ENHANCEMENTS row.
+        lines, page = self.smooth_at_60_run({"mode": "ace"}, ("KEY_DOWN", "WAIT_MS=80"))
+        self.assertIn("Ace for this game: 60 FPS game logic", lines[-1])
+        self.assertIn("Smooth motion is off while it runs at 60 FPS", lines[-1])
+        self.assertEqual(page["smooth"], "Off (this game runs at 60 FPS)")
+
+        lines, page = self.smooth_at_60_run({"mode": "ace", "logic_60": "off"},
+                                            (*self.DOWN_TO_PLAY_MODE, *self.TO_PLAY_OPTIONS))
+        self.assertNotIn("60 FPS game logic", lines[-1])
+        self.assertIn("smooth motion", lines[-1], "smooth motion is among the parts on")
+        self.assertNotIn("Smooth motion is off", lines[-1])
+        self.assertEqual(page["smooth"], "Library (On)")
 
     def test_compatibility_records_carry_a_player_tier(self) -> None:
         """#1297: every title record maps to a player tier; Hot Shots Tennis is Playable.
@@ -4996,6 +5485,71 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(steps[stopped[0] - 1][0], self.STOP_ROUTE)
         self.assertEqual(steps[stopped[0]][0], "2")
 
+    def game_exit_steps(self, exit_code: int,
+                        before_exit: tuple[str, ...] = ()) -> list[tuple[str, str, str, str, str]]:
+        """Each change of (route, focus, running, view, error) while a game run from its
+        title page ends with `exit_code`, then Esc twice. `before_exit` runs on the page
+        first."""
+        run = self.run_player(
+            "ready",
+            ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=700",  # open the running game's title page
+             *before_exit,
+             f"GAME_EXIT={exit_code}", "WAIT_MS=300",  # the game ends on its own
+             "KEY_ESCAPE", "WAIT_MS=300", "KEY_ESCAPE", "WAIT_MS=300", "CLOSE"),
+            post_build_ready=True, wait_background=True, ui_mode="next",
+            env_extra={"NK_UI_TEST_GAME_RUNNING": "TEST00006"},
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assertIn(f"game_exit code={exit_code} result=PASS", str(run["stdout"]))
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        steps: list[tuple[str, str, str, str, str]] = []
+        for frame in frames:
+            step = (frame["next_route"], frame["next_focus"], frame["game_running"],
+                    frame["view"], frame["error"])
+            if not steps or steps[-1] != step:
+                steps.append(step)
+        return steps
+
+    def test_a_game_that_ends_returns_to_its_title_page(self) -> None:
+        """#2002: Quit to library ends the game cleanly, and the launcher is still on that
+        game's page, with its focus: the run never left the page, and the exit is reaped
+        without a view change (player_app_monitor_game_session). Focus is moved off the
+        page's first control before the exit, so a reset to it cannot pass as kept."""
+        steps = self.game_exit_steps(0, ("KEY_DOWN", "WAIT_MS=200"))
+        ended = [i for i, step in enumerate(steps) if step[2] == "0"]
+        self.assertTrue(ended, f"the game never ended: {steps}")
+        running = steps[ended[0] - 1]
+        after = steps[ended[0]]
+        opened = next(step for step in steps if step[0] == "2")
+        self.assertEqual(running[0], "2", f"the game was not run from its page: {steps}")
+        self.assertNotEqual(running[1], opened[1], f"Down did not move the focus: {steps}")
+        self.assertEqual(after[0], "2", f"the title page did not survive the exit: {steps}")
+        self.assertEqual(after[1], running[1], f"the page lost its focus: {steps}")
+        self.assertEqual(after[3], running[3], f"a clean exit changed the view: {steps}")
+        self.assertEqual(after[4], "NONE", f"a clean exit raised a card: {steps}")
+        # Esc then leaves the page for the library, and the second Esc stays there.
+        later = steps[ended[0] + 1:]
+        self.assertTrue(later, f"Esc did not leave the page: {steps}")
+        self.assertEqual(later[0][0], "1", f"Esc did not return to the library: {steps}")
+        self.assertEqual(later[-1][0], "1", f"the second Esc left the library: {steps}")
+        self.assertTrue(all(step[2] == "0" for step in later), steps)
+
+    def test_a_game_that_crashes_shows_its_card_over_its_title_page(self) -> None:
+        """#2002: a game that exits with an error shows its card, and leaving the card
+        lands on the same game's page."""
+        steps = self.game_exit_steps(3)
+        ended = [i for i, step in enumerate(steps) if step[2] == "0"]
+        self.assertTrue(ended, f"the game never ended: {steps}")
+        after = steps[ended[0]]
+        self.assertEqual(after[3], "error", f"a crash showed no card: {steps}")
+        self.assertEqual(after[4], "RUNTIME_ERROR_EXIT", f"the wrong card: {steps}")
+        self.assertEqual(after[0], "2", f"the title page went under the card: {steps}")
+        dismissed = [step for step in steps[ended[0]:] if step[3] != "error"]
+        self.assertTrue(dismissed, f"Esc did not leave the card: {steps}")
+        self.assertEqual(dismissed[0][0], "2", f"leaving the card left the page: {steps}")
+
     def test_preflight_refusal_is_not_a_build_failure(self) -> None:
         """#1286: a build refused at preflight never started, so its card is not
         "Package Build Failed" and its badge is not a code."""
@@ -5004,11 +5558,17 @@ class NativePlayerUiTests(unittest.TestCase):
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[0]["view"], "error")
-        self.assertEqual(frames[0]["error_title"], "Build_Not_Started")
+        self.assertEqual(frames[0]["error_title"], "Build_not_started")
         self.assertEqual(frames[0]["error_badge"], "Build_not_started")
         self.assertEqual(frames[0]["error_retry"], "Try_again")
-        # An unknown code still gets a plain badge.
-        other = self.run_player("library", ("WAIT_MS=50",), error_code="PYTHON_NOT_FOUND",
+        # Every code the player raises has its own badge (#2007)...
+        named = self.run_player("library", ("WAIT_MS=50",), error_code="PYTHON_NOT_FOUND",
+                                ui_mode="next")
+        named_frames = named["frames"]
+        assert isinstance(named_frames, list)
+        self.assertEqual(named_frames[0]["error_badge"], "Build_tools_needed")
+        # ...and a code it has never heard of still gets a plain badge.
+        other = self.run_player("library", ("WAIT_MS=50",), error_code="SOME_UNKNOWN_CODE",
                                 ui_mode="next")
         other_frames = other["frames"]
         assert isinstance(other_frames, list)
@@ -5345,7 +5905,7 @@ class FirstRunRouteTests(unittest.TestCase):
         self.assertTrue(frames, completed.stdout)
         self.assertEqual(frames[0]["view"], "error")
         self.assertEqual(frames[0]["error"], "EXPERIMENTAL_LAUNCH_UNAVAILABLE")
-        self.assertIn("in the works.", completed.stderr)
+        self.assertIn("isn't supported yet.", completed.stderr)
         self.assertNotIn("(#308)", completed.stderr)
         self.assertEqual(library_disc_ids(scratch), [])
 
@@ -5456,6 +6016,83 @@ class FirstRunRouteTests(unittest.TestCase):
         # No runtime is built in the scratch root, so the bounded launch refuses.
         self.assertEqual(completed.returncode, 3, completed.stdout + completed.stderr)
         self.assertIn("SAMPLE", completed.stderr)
+
+
+class ScreenshotDeterminismTests(unittest.TestCase):
+    """#2124: two --screenshot captures of one view from one build are the same bytes.
+
+    Failing-before: the launcher drew its one captured frame at the time since SDL
+    started, so the background waves (which step with that clock at 30 Hz) and any
+    progress sweep came out different from run to run. --screenshot now draws at a
+    held time.
+
+    The second capture of each view waits NK_UI_TEST_SCREENSHOT_DELAY_MS (a test-only
+    hook) before it draws, so the two runs are always at least seven wave steps apart
+    on the real clock. Without the held time, the test therefore fails every time,
+    not only when two runs happen to land in different steps.
+
+    Each run has its own data folder, as in the issue's repro. The Settings page
+    prints that folder's path ("Saves: ..."), so there the two captures may differ
+    only within one line of text."""
+
+    VIEWS = ("library", "settings", "developer-log", "accessibility-settings", "psp-fonts",
+             "updates", "wizard", "building", "empty")
+    DELAY_MS = "250"  # 7.5 steps of the waves' 30 Hz clock
+    TEXT_LINE_ROWS = 16
+
+    def capture(self, scratch: Path, view: str, run: int, delay_ms: str | None) -> bytes:
+        # Same-length folder names, so only the run number differs in the printed path.
+        data = scratch / f"data-{run}"
+        shutil.rmtree(data, ignore_errors=True)
+        profile = data / "profile"
+        for folder in (data / "appdata", data / "localappdata", profile):
+            folder.mkdir(parents=True)
+        env = os.environ.copy()
+        env.update({
+            "SDL_VIDEODRIVER": "dummy", "SDL_RENDER_DRIVER": "software", "SDL_AUDIODRIVER": "dummy",
+            "APPDATA": str(data / "appdata"), "LOCALAPPDATA": str(data / "localappdata"),
+            "USERPROFILE": str(profile), "HOME": str(profile),
+            "XDG_CONFIG_HOME": str(profile / "config"), "XDG_DATA_HOME": str(profile / "data"),
+            "XDG_CACHE_HOME": str(profile / "cache"),
+        })
+        env.pop("NK_UI_TEST_SCREENSHOT_DELAY_MS", None)
+        if delay_ms is not None:
+            env["NK_UI_TEST_SCREENSHOT_DELAY_MS"] = delay_ms
+        shot = scratch / f"{view}-{run}.bmp"
+        completed = subprocess.run(
+            [str(PLAYER_EXE), f"--view={view}", f"--screenshot={shot}", "--width=1280",
+             "--height=720", f"--user-data-root={data / 'user'}", f"--runtime-root={data / 'runtime'}"],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=120, check=False,
+        )
+        if "[PLAYER] Screenshot saved" not in completed.stdout:
+            if "UI_NEXT_ACTIVE" not in completed.stdout:
+                self.skipTest("the next UI could not start here (no UI fonts)")
+            self.fail(f"--view={view} saved no screenshot:\n{completed.stdout}\n{completed.stderr}")
+        return shot.read_bytes()
+
+    @staticmethod
+    def differing_rows(scratch: Path, view: str) -> list[int]:
+        width, height, bpp, a = read_bmp(scratch / f"{view}-1.bmp")
+        _, _, _, b = read_bmp(scratch / f"{view}-2.bmp")
+        stride = (width * (bpp // 8) + 3) & ~3
+        return [row for row in range(height)
+                if a[row * stride:(row + 1) * stride] != b[row * stride:(row + 1) * stride]]
+
+    def test_two_captures_of_each_view_are_the_same_bytes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix=".screenshot-twice-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            for view in self.VIEWS:
+                with self.subTest(view=view):
+                    first = self.capture(scratch, view, 1, None)
+                    second = self.capture(scratch, view, 2, self.DELAY_MS)
+                    if first == second:
+                        continue
+                    rows = self.differing_rows(scratch, view)
+                    if view == "settings" and rows and rows[-1] - rows[0] < self.TEXT_LINE_ROWS:
+                        continue  # only the printed data folder's path
+                    self.fail(f"--view={view}: the two captures differ in {len(rows)} rows "
+                              f"({rows[0]} to {rows[-1]})" if rows else
+                              f"--view={view}: the two captures differ")
 
 
 if __name__ == "__main__":

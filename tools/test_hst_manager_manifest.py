@@ -39,7 +39,7 @@ class HstManagerManifestTests(unittest.TestCase):
         shell = shutil.which("pwsh")
         make = shutil.which("mingw32-make") or shutil.which("make")
         if shell is None or make is None:
-            raise unittest.SkipTest("PowerShell 7.4+ (pwsh) and GNU Make are required")
+            raise unittest.SkipTest("PowerShell 7.6+ (pwsh) and GNU Make are required")
         cls.shell = shell
         cls.make = make
 
@@ -336,7 +336,7 @@ class HstManagerManifestTests(unittest.TestCase):
         self.assertEqual(self.records(), [])
 
     def require_hst_manifest(self) -> None:
-        # The HST manifest is public and tracked (owner decision 2026-10-27), so
+        # The HST manifest is public and tracked, so
         # these routes always run: a missing or untracked manifest is a failure,
         # never a skip, and an ignored local lookalike cannot stand in for it.
         self.assertTrue(

@@ -34,7 +34,7 @@ Where this page and the code disagree, the code is current and this page is upda
   that asks for consent (the build-tool download) says exactly what it fetches, from where, and how big it is.
 - **No console trade dress.** No PSP system icons, sounds or names, no XMB-style horizontal category bar. The
   waves, the palette and the seasonal arc are the project's own.
-- **No key-file UI anywhere.** The player decrypts the user's own disc with built-in tables (#295) and reads no key
+- **No key-file UI anywhere.** The player decrypts the user's own disc with built-in tables (#1494) and reads no key
   file. No screen, step, setting, dialog or path row asks for, finds or names a key file. A disc whose program
   is encrypted gets the plain note the host supplies ("Nakagawa decrypts this game's program from your own disc, on
   this PC"), and one it can't decrypt gets the named reason.
@@ -131,7 +131,7 @@ Labels, chips and eyebrows are drawn in caps (`nk_ui_caps`); the words stay sent
   default: the title page's PLAY or BUILD PACKAGE, the new card after ADD TO LIBRARY. Top-bar tabs
   (`NK_UI_BUTTON_NOT_DEFAULT`) and danger buttons never are; a screen whose only control is a danger button (CANCEL
   BUILD while a build runs) starts with nothing focused, and a move reaches it. PLAY or BUILD PACKAGE gets focus back
-  when it comes back on after STARTING... or a package check, unless the user moved meanwhile.
+  when it comes back on after STARTING… or a package check, unless the user moved meanwhile.
 
 ### Scrolling
 
@@ -380,8 +380,8 @@ still needs them. Main column: eyebrow LIBRARY › TITLE, the name in `TITLE_XL`
 pill and tag (YOUR DISC, BETA / UNOFFICIAL or the disc check's word, as on the card), then for a checked disc
 one `BODY_S` `muted` sentence on what the check found (for UNKNOWN DUMP: not shown to be retail, not modified,
 since Redump's PSP list names no disc IDs), one action row on the column's left edge with every button 52 px (the primary action, PLAY when
-the package is ready, STARTING... while the launch starts, STOP GAME while a game runs, then OPEN SAVE FOLDER and
-BACK), and the WHAT TO EXPECT card. Its eyebrow carries a player tier chip (PERFECT and PLAYABLE `ready`, IN-GAME
+the package is ready, STARTING… while the launch starts, STOP GAME while a game runs, then SAVES (the
+[Saves](#saves-built) dialog) and BACK), and the WHAT TO EXPECT card. Its eyebrow carries a player tier chip (PERFECT and PLAYABLE `ready`, IN-GAME
 and MENU `info`, TITLE SCREEN `warning`, WON'T BOOT `error`; no chip for a title no one has tried). Below it come
 one or two plain sentences on what to expect on this PC in `BODY_S` `paper`, then the known issues in `muted`
 when there are any. The tier comes from the title's own player record, or else from its `docs/COMPATIBILITY.md`
@@ -413,15 +413,52 @@ what Nakagawa built for the game, each item with its size: the built package, th
 bring-up), and the disc files Nakagawa copied. A `warning` FREES line gives the total. A `ready` line says the disc
 image on the user's PC is not touched. The game's saves are the copied disc's Memory Stick folder and its
 per-user save folder. They get their own box, unticked every time the dialog opens; under it, "Your saves stay." in
-`muted`, or in `error` once the box is ticked, "Your saves for this game will be deleted too." A game with nothing
-built and no saves says so. REMOVE (`DANGER`) removes the title, deletes those folders (and the saves only when
-ticked), and returns to the library. Focus lands on the tile that took the removed title's place, or on the add
+`muted`, or in `error` once the box is ticked, "Your saves for this game will be deleted too. A backup of them is
+kept first: Saves can restore it if you add the game again." REMOVE backs those folders up before it deletes
+anything, into the backup folder [Saves](#saves-built) lists, which a removal leaves alone; when a backup can't be
+written, nothing is removed and the error card says why. A game with nothing
+built and no saves says so. A second box, also unticked every time, reads "Also delete the decrypted files and disc
+copy (*size*)" (#2003): the decrypted files the disc check wrote (`titles/<DISC_ID>/decrypted`, the folder where a
+user may also put their own) and the disc image Nakagawa expanded or converted (`<user data>/discs/<DISC_ID>`).
+Under it, "They stay, so adding this game again is quicker." in `muted`, or in `error` once ticked, "They go too,
+with any decrypted files you added yourself. Your disc image stays." REMOVE (`DANGER`) removes the title, deletes
+those folders (the saves and the disc copy only when their boxes are ticked), and returns to the library. Focus lands on the tile that took the removed title's place, or on the add
 card when it was the last, and the page turns to it. The folders are found from the disc ID under the player's own
-roots, never from a path stored in the library. The disc image, the user's decrypted files and the shared
-manifests are never on the list. Those folders and saves are the disc ID's, so while another image with the same
-disc ID stays in the library (a retail disc beside its fan translation), the box is left out and the lead says
+roots, never from a path stored in the library. The disc image on the user's PC and the shared manifests are
+never on the list. Those folders and saves are the disc ID's, so while another image with the same
+disc ID stays in the library (a retail disc beside its fan translation), the boxes are left out and the lead says
 what Nakagawa built for it and its saves stay, because the other image uses them; only the record goes. Prompt bar:
 MOVE, SELECT, CANCEL.
+
+### Saves (built)
+
+SAVES on the title page opens a flow card, 640 px wide, over it (#1883). The eyebrow is SAVES with an
+`accent_dark` diamond, then the game's name in `TITLE` and one `BODY_S` `muted` line: "Its saves and game data take
+*size*. Backups are copies kept on this PC.", or, with nothing saved yet, "No saves yet. Add a save copies one in
+from a folder you pick." One row of buttons follows, wrapping at a larger text size: BACK UP SAVES (`PRIMARY`, off
+with no saves), ADD A SAVE, OPEN SAVE FOLDER (the folder the old title-page button opened) and BACK. A `BODY_S` line
+under them says what the last action did, in `ready` when it worked. A `LABEL_S` `muted` line counts the backups
+("BACKUPS 1-4 OF 9, NEWEST FIRST", or NO BACKUPS YET), then a box lists four at a time, each row its date and time in
+`paper`, what made it (Backed up, Before a restore, Before adding a save, Before a removal) and its size in `DATA`
+`muted`, and a small RESTORE button that is never the default focus. NEWER and OLDER under the box turn the page.
+
+RESTORE asks first, in the same card: "Restore the backup from *date*?" in `BODY` `paper`, "Your saves now are
+backed up first and kept, so you can go back to them." in `muted`, then CANCEL (first focus) and RESTORE
+(`PRIMARY`). ADD A SAVE opens the system's folder picker; the folder picked is a save's own folder, the one holding
+its `PARAM.SFO` inside a `SAVEDATA` folder, and it is copied into the game's `PSP/SAVEDATA`. A save of the same name
+already there asks "A save named *name* is already here. Replace it?" with CANCEL (first focus) and REPLACE
+(`DANGER`). Back answers a question with Cancel; with no question up, Back closes the card.
+
+Every change backs the saves up first. A restore checks the whole backup before it touches anything, writes it into
+a new folder beside the save folder, and only then renames the save folder to `<folder>-backup-<date>` and puts the
+new one in its place; any failure before that swap leaves the saves as they were, and a failed swap puts the old
+folder back. A failure shows the error card ("Your saves were not backed up", "Your saves were not restored" or "The
+save was not added") with the reason in plain words, and BACK returns to the card. While the game starts or runs, every
+button that changes the saves is off and a `warning` line says "Stop the game first: it uses its save folder while it
+runs." The save folder is `<saves>/<DISC_ID>`, the game's Memory Stick; backups are store-only ZIP files in
+`<user data>/titles/<DISC_ID>/save-backups`, named `<DISC_ID>-saves-<date>-<time>.zip` with a `-before-restore`,
+`-before-add` or `-before-remove` ending for the automatic ones. Nothing is uploaded and nothing is deleted
+automatically. Prompt bar: MOVE, SELECT, BACK.
 
 ### About (built)
 
@@ -484,15 +521,43 @@ sentence saying what it does and what Windows asks for now: INTERFACE SIZE (Auto
 CONTRAST and REDUCE MOTION (Automatic, On or Off; Automatic follows Windows' contrast themes and Animation effects,
 read every frame, so a change there applies at once). The four buttons share one column; at a larger text size it
 is as wide as the widest label, and the sentences go under the buttons when beside them one would be cut.
-ACE MODE (src/rt/ace.h) closes the GAME card: its ON / OFF button switches it for the library (off by default),
-and ACE MODE OPTIONS opens a dialog card in the same pattern: ACE MODE, TEXTURE FILTERING (16x, 8x, 4x, 2x, Off),
-CRISP SYSTEM TEXT, SPEED READOUT and GAME BADGE, each beside a sentence that says what it does and what it costs.
-While ACE MODE is off the feature rows are disabled (`dim`, not focusable) and keep their values. The title page's
-ENHANCEMENTS card shows ACE MODE for every game (LIBRARY DEFAULT, ON, AUTHENTIC; `PRIMARY` while in effect, never
-the default focus), one or two lines of what it turns on and the last session, and the 60 FPS switch beside it,
-which AUTHENTIC turns off. A library card where Ace is in effect carries an `ACE` badge at the art's top right. In
-game, the pause menu's caption names Ace's features and its Settings page has a live SPEED READOUT row; the launch
-notice (top right, 3 s, a cut with Reduce motion) and the readout (top left) are chips on the 16 px safe area.
+PLAY MODE closes the GAME card (the play modes, docs/ENHANCEMENT_CONTRACT.md section 10): its value is the library's
+default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), and it opens Settings > Enhanced, a
+dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
+FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; SMOOTH MOTION; CLEAN PITCHED SOUND,
+off by default), each beside a sentence
+that says what it does and what it costs. A new part is a new row with no change to the page. While the mode is
+Authentic the part rows are disabled (`dim`, not focusable) and keep their values. The title page's ENHANCEMENTS
+card shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable
+package; `PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the
+same page for that game alone (its play mode, and each part on LIBRARY (16X) or its own value; Done returns
+to the title page), one or two lines of what is on and the last session, and, while Ace is in effect, Ace's 60 FPS
+switch beside them. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
+art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live
+SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut with Reduce motion) and the readout
+(top left) are chips on the 16 px safe area.
+GRAPHICS PRESET is the GAME card's last row (#2150). It steps through LOW, MEDIUM, HIGH, ULTRA and HANDHELD.
+A preset is used only by Enhanced and Ace sessions, where its values take the place of the RESOLUTION, SCALING,
+VSYNC and GAME FULLSCREEN rows. Choosing one changes none of those rows, and an Authentic session always runs with
+them as the user set them, whatever the preset. The reason is that a render scale above 1x is not host-only: every
+present commits the frame to guest VRAM, so a game that copies its screen (a save picture) keeps the larger picture
+(`docs/ENHANCEMENT_CONTRACT.md` section 10.3, Pixels), and Authentic launch output must not change with a
+preset. Editing one of the rows a preset sets makes it CUSTOM, which means the rows apply in every session; GAME
+FULLSCREEN does so only under HANDHELD, the one preset that sets it. While a preset is chosen, the page's notice
+line says that it is used in Enhanced and Ace and that Authentic uses the rows. The settings file keeps the
+preset's name beside the rows, and a file without it, or with a name this build doesn't know, loads as CUSTOM. The
+values are starting points, to be tuned by measurement on real titles. They live in one table,
+`k_graphics_presets` in `src/player/player_state.c`:
+
+| Preset | Resolution | Scaling | VSync | Game fullscreen | Also |
+| --- | --- | --- | --- | --- | --- |
+| LOW | 1x (480x272) | Sharp | On | the row's | |
+| MEDIUM | 2x | Sharp | On | the row's | |
+| HIGH | 4x | Sharp | On | the row's | |
+| ULTRA | 4x | Sharp | On | the row's | the FSR 1 upscaler, which Settings can't set until #2122: the row reads ULTRA (NO UPSCALER) and the notice line says so |
+| HANDHELD | 2x | Sharp | On | On | |
+
+A preset never changes frame pacing, the play mode, an Enhanced part or the launch line.
 Left and Right move between the two cards along a row (`NK_UI_BUTTON_ROW`), so CONTROLLER SETTINGS is reached from
 SCALING. Every change is saved as it is made. Below a 680 px tall window the `SETTINGS` heading is left out (the tab names the
 page) so every row fits 960 x 540. The tabbed layout below is the target for a later pass:
@@ -525,7 +590,7 @@ while a button is awaited, or which controller is connected. Two cards side by s
 - BUTTONS: the eyebrow names the mapping being edited (`BUTTONS · GLOBAL MAPPING`, or the game's own in `ready`),
   then the 14 PSP controls in two columns of name and binding. The binding is a small button with the host button's
   name; the control the status line names is in `accent` (`error` when it was left with nothing); the control waiting
-  for a press shows `Press a button...` as the primary button. Choosing it again, or Esc, cancels the wait. Between the name and the button a 20 px prompt glyph
+  for a press shows `Press a button…` as the primary button. Choosing it again, or Esc, cancels the wait. Between the name and the button a 20 px prompt glyph
   (`nk_ui_prompt_glyph_in`, #1299) shows the binding as the device shown prints it, whatever device drives the page:
   the controller in the set of the pad last used or connected (the neutral position dots with none), its face
   buttons by position, the shoulders, Start and the D-pad as the prompt bar draws them, and any other input as a pill
@@ -542,7 +607,7 @@ give) is named in `error` so it can be bound next. Nothing a player does here ca
 buttons, which are fixed: the arrows, Enter and Esc, and the pad's D-pad, south and east buttons.
 
 With KEYBOARD (#1299) the rows show each control's keys by their names on a US keyboard (`KEYS · GLOBAL MAPPING`),
-the waiting control shows `Press a key...`, and the next key pressed is its key; Esc or a controller press stops the
+the waiting control shows `Press a key…`, and the next key pressed is its key; Esc or a controller press stops the
 wait. A key another control uses moves as a controller input does; a key that cannot be bound (Esc and the function
 keys, which the runtime keeps) is refused and the status line says why in `error`. The stick card is ANALOG STICK:
 the stick's four keys (UP, DOWN, LEFT, RIGHT; I, K, J and L by default) as rows like the buttons', where a held key
@@ -579,9 +644,9 @@ Built now: the setup wizard's four steps (Welcome, Options, Game, Verify) on the
 dialog card the build and error screens use. Copying the disc's files at Verify ends on the library card, where the
 game is built and played, and the PSP fonts are imported in Settings > PSP fonts, so the step chips name only those
 four steps. The older Fonts and Ready step states remain only for state-only callers and the old renderer.
-Options ("Online and developer options", [`ONLINE_FEATURES.md`](ONLINE_FEATURES.md)) comes right after Welcome because it needs no game: two switch rows (a
-220 px button reading "Online mode: On" or "Off", accent while on, with its sentence beside it), the note that news
-and reports aren't built yet, then CONTINUE (the default focus, so Enter never flips a switch), SKIP and BACK. A strip of step chips sits at the top (current: accent fill; done:
+Options ("Online and developer options", [`ONLINE_FEATURES.md`](ONLINE_FEATURES.md)) comes right after Welcome because it needs no game: one plain line that online features aren't built yet (the
+Online mode switch returns with them), one switch row (a 220 px button reading "Developer mode: On" or "Off",
+accent while on, with its sentence beside it), then CONTINUE (the default focus, so Enter never flips a switch), SKIP and BACK. A strip of step chips sits at the top (current: accent fill; done:
 `ready` edge and a check); each step has one primary action first, then Back and Cancel. Every control returns
 `PLAYER_UI_ACTION_WIZARD` with an op that `main.c` runs through the handlers the existing wizard calls. The Welcome
 step says the privacy promise once. The left rail below is the target layout for a later pass:
@@ -626,9 +691,13 @@ Drawn by the runtime over the frozen game frame under the `scrim` while the game
 - Menu (480 px card): `GAME PAUSED` eyebrow in `muted`, the game's name in `TITLE` (two lines at most, else
   "Paused"), the disc ID in `DATA` `muted`, then a full-width column of buttons: RESUME (primary, 52 px, the
   default focus), SETTINGS, CONTROLS, QUIT TO LIBRARY. Prompts: MOVE, SELECT, RESUME.
-- Settings (640 px): Settings rows as in C6. Game scaling is a segmented control (SHARP, INTEGER, SMOOTH; left and
-  right step it, Confirm cycles it), the performance HUD a toggle. A `FOOTNOTE` says the changes apply now and last
-  until the game closes; the player's Settings keep the saved values. BACK.
+- Settings (640 px, or 880 px with shorter rows when the window is under 720 px high): Settings rows as in C6, in
+  this order. Fullscreen is a toggle, shown only when the game window can change mode. Game scaling is a segmented
+  control (SHARP, INTEGER, SMOOTH; left and right step it, Confirm cycles it). Frame pacing is a segmented control
+  with the library's two choices (PSP TIMING, NO EXTRA CAP), shown only when one of them is in force, so a
+  developer's numeric `SR_FPS_CAP` gets no row. The performance HUD is a toggle, and Ace Mode's speed readout one
+  more in an Ace run that can draw it. A `FOOTNOTE` says the changes apply now and last until the game closes; the
+  player's Settings keep the saved values. BACK.
 - Controls (640 px, or 880 px in two side-by-side tables when the window is under 720 px high and there are more
   than six rows): a PSP / KEYBOARD / CONTROLLER header in `EYEBROW` and 38 px rows (34 px when split) with `line`
   dividers; an unbound control shows an em dash. The rows describe the mapping in force: the window's own key

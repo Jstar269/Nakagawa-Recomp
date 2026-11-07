@@ -206,6 +206,18 @@ else ifeq ($(CASE),hle-timer-order)
 CASE_ID = 103
 else ifeq ($(CASE),hle-savedata-getsize)
 CASE_ID = 104
+# 140: #1386's utility dialog calls at NONE (no InitStart is imported).
+else ifeq ($(CASE),hle-utility-none)
+CASE_ID = 140
+# 156: #341's standard handles, a write to each and a write after closing Stdout.
+else ifeq ($(CASE),hle-std-handles)
+CASE_ID = 156
+# 159: #279's audio channel rest length at each blocking-output return (1024, 2048, 4096).
+else ifeq ($(CASE),hle-audio-rest)
+CASE_ID = 159
+# 161: #1386's utility dialog status timing and wrong-state answers, in game context.
+else ifeq ($(CASE),hle-utility-dialogs)
+CASE_ID = 161
 # 106-108: the HLE issue cells (probe_hle_issues.c). 106 is the #356 model-getter and
 # #326 vrnd carry / vscmp batch; 107 the #325 interrupt and timer delivery cells; 108 the
 # #326 VFPU form words (vh2f, vuc2i, vsocp, vwbn, vrndf1/2).
@@ -227,6 +239,26 @@ CASE_ID = 123
 # and slope TEXLEVEL modes over a texture whose every level is one colour.
 else ifeq ($(CASE),ge-mip)
 CASE_ID = 126
+# 139: the GE lighting cells (probe_ge_sample.c, #1732): the 8-bit specular and
+# powered-diffuse colour per specular coefficient, one flat-shaded quad per pixel.
+else ifeq ($(CASE),ge-light)
+CASE_ID = 139
+# 153: the GE overlap cells (probe_ge_sample.c, #2109): overlapping translucent layers in
+# one PRIM and in one PRIM each, in 8888 and in 5650 with and without dithering.
+else ifeq ($(CASE),ge-overlap)
+CASE_ID = 153
+# 154: the GE multi-CLUT mip cells (probe_ge_sample.c, #2031): which CLUT entry each mip
+# level of an indexed texture reads, with TEXMODE bit 8 clear and set.
+else ifeq ($(CASE),ge-clut-mip)
+CASE_ID = 154
+# 157: the GE weighted-vertex cells (probe_ge_sample.c, #343): weight formats, the weight
+# count, the bone each slot selects and the weighted vertex layout.
+else ifeq ($(CASE),ge-weight)
+CASE_ID = 157
+# 158: the GE render-to-texture cells (probe_ge_sample.c, #343): what a texture fetch
+# reads of a framebuffer the GE just drew into, with and without TEXFLUSH and TEXSYNC.
+else ifeq ($(CASE),ge-rtt)
+CASE_ID = 158
 else ifeq ($(CASE),llsc-link)
 CASE_ID = 69
 else ifeq ($(CASE),fpu-cc)
@@ -275,6 +307,16 @@ else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
 CASE_ID = 117
+# 152: the #1296 SimpleADSR envelope heights per grain (probe.c, run_sas_adsr).
+else ifeq ($(CASE),sas-adsr)
+CASE_ID = 152
+# 155: the #2135/#2054 SAS volume, WithMix and pitch cells (probe.c, run_sas_mix).
+else ifeq ($(CASE),sas-mix)
+CASE_ID = 155
+# 160: the #286 Media Engine boundary words: sceVideocodec, sceMpegbase and sceAudiocodec
+# CheckNeedMem on synthetic input (probe.c, run_vcodec_words).
+else ifeq ($(CASE),vcodec-words)
+CASE_ID = 160
 # 118: the #303 DMAC transfer-time and busy-channel cells (probe_dmac_timing.c).
 else ifeq ($(CASE),dma-timing)
 CASE_ID = 118
@@ -304,6 +346,10 @@ CASE_ID = 127
 # (probe_kernel_semantics.c, its own probe-owned directory).
 else ifeq ($(CASE),io-seek-eof)
 CASE_ID = 136
+# 137: #1380's UMD cells: seeks and reads past the end of disc0: files and the raw umd0:
+# device, read-only (probe_kernel_semantics.c).
+else ifeq ($(CASE),io-umd-eof)
+CASE_ID = 137
 # 128: #1375 P1 plus non-invoking P2 registrations; 129/130 are separately guarded NULL invokes.
 else ifeq ($(CASE),null-code-registration)
 CASE_ID = 128
@@ -501,6 +547,18 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-savedata-getsize)
 TARGET = $(BUILD_DIR)/hle_savedata_getsize
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-utility-none)
+TARGET = $(BUILD_DIR)/hle_utility_none
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-std-handles)
+TARGET = $(BUILD_DIR)/hle_std_handles
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-audio-rest)
+TARGET = $(BUILD_DIR)/hle_audio_rest
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-utility-dialogs)
+TARGET = $(BUILD_DIR)/hle_utility_dialogs
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 # HLE issue cells: their own source, which installs and removes interrupt and timer
 # handlers (107) and reaches a kernel getter through the kernel bridge (106), so they
 # stay out of probe_hle_measure.c. Same ThreadManForUser block and module lifecycle.
@@ -539,6 +597,9 @@ OBJS = $(BUILD_DIR)/probe_kernel_semantics.o $(BUILD_DIR)/threadman_user_imports
 else ifeq ($(CASE),io-seek-eof)
 TARGET = $(BUILD_DIR)/io_seek_eof
 OBJS = $(BUILD_DIR)/probe_kernel_semantics.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),io-umd-eof)
+TARGET = $(BUILD_DIR)/io_umd_eof
+OBJS = $(BUILD_DIR)/probe_kernel_semantics.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),null-code-registration)
 TARGET = $(BUILD_DIR)/null_code_registration
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
@@ -565,6 +626,26 @@ OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE mip cells: the same source as the sample-point cells, case 126.
 else ifeq ($(CASE),ge-mip)
 TARGET = $(BUILD_DIR)/ge_mip
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE lighting cells: the same source as the sample-point cells, case 139.
+else ifeq ($(CASE),ge-light)
+TARGET = $(BUILD_DIR)/ge_light
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE overlap cells: the same source as the sample-point cells, case 153.
+else ifeq ($(CASE),ge-overlap)
+TARGET = $(BUILD_DIR)/ge_overlap
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE multi-CLUT mip cells: the same source as the sample-point cells, case 154.
+else ifeq ($(CASE),ge-clut-mip)
+TARGET = $(BUILD_DIR)/ge_clut_mip
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE weighted-vertex cells: the same source as the sample-point cells, case 157.
+else ifeq ($(CASE),ge-weight)
+TARGET = $(BUILD_DIR)/ge_weight
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE render-to-texture cells: the same source as the sample-point cells, case 158.
+else ifeq ($(CASE),ge-rtt)
+TARGET = $(BUILD_DIR)/ge_rtt
 OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The instruction trace: its own source, the single-step trampoline and the fixtures
 # header, with the same writer, ThreadManForUser block and module lifecycle as the HLE
@@ -613,8 +694,26 @@ endif
 ifeq ($(CASE),mpeg-ycbcr)
 LIBS += -lpsputility
 endif
+# #286: the Media Engine boundary probe carries its own sceVideocodec, sceMpegbase and sceAudiocodec
+# import blocks (probe.c; the PSPSDK libraries are not linked) and links only the utility stubs. The
+# gate pins each library to exactly the calls the case makes: eight videocodec, three mpegbase (no
+# PESpacketCopy, no YCrCb copy) and CheckNeedMem from the audio codec.
+ifeq ($(CASE),vcodec-words)
+LIBS += -lpsputility
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceVideocodec=0xC01EC829,0x2D31F5B1,0x17099F0A,0x745A7B7A,0xDBA273FA,0xA2F0564E,0x4F160BF4,0x307E6E1C
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceMpegbase=0x492B5E4B,0x91929A21,0x0530BE4E
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceAudiocodec=0x9D3F790C
+endif
 # #1595: the SAS re-init probe links the user-mode sceSasCore and utility stubs it calls.
 ifeq ($(CASE),sas-init)
+LIBS += -lpspsascore -lpsputility
+endif
+# #1296: the SimpleADSR envelope probe links the same stubs.
+ifeq ($(CASE),sas-adsr)
+LIBS += -lpspsascore -lpsputility
+endif
+# #2135, #2054: the SAS volume and pitch probe links the same stubs.
+ifeq ($(CASE),sas-mix)
 LIBS += -lpspsascore -lpsputility
 endif
 # Fake-success audit: the OSK calls live in libpsputility; the volatile-memory calls are in SuspendForUser.
@@ -684,6 +783,16 @@ USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager --forbid-library
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceSuspendForUser --forbid-library sceWlanDrv
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceOpenPSID --forbid-library KUBridge --forbid-library SystemCtrlForUser
 endif
+# io-umd-eof: read-only file calls and exactly the two UMD state reads (sceUmdCheckMedium and
+# sceUmdGetDriveStat), so a build that imported sceUmdActivate or any other UMD call fails the
+# gate; none of kernel-semantics' interrupt, controller, suspend or WLAN imports.
+ifeq ($(CASE),io-umd-eof)
+LIBS += -lpspumd
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUmdUser=0x46EBB729,0x6B4A146C
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager --forbid-library sceCtrl
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceSuspendForUser --forbid-library sceWlanDrv
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceOpenPSID --forbid-library KUBridge --forbid-library SystemCtrlForUser
+endif
 # memory-edge: partition-memory, file and DMAC calls only; none of the interrupt, controller,
 # suspend or WLAN imports, nothing from the kernel bridge, and no OpenPSID.
 ifeq ($(CASE),memory-edge)
@@ -710,6 +819,35 @@ USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
 endif
 ifeq ($(CASE),hle-savedata-getsize)
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C
+endif
+# hle-utility-none: GetStatus, Update and ShutdownStart of five dialogs and no InitStart, so no
+# dialog can be opened by this build.
+ifeq ($(CASE),hle-utility-none)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x8874DBE0,0xD4B95FFB,0x9790B33C,0x9A1C91D7,0x95FC253B,0x67AF3428,0x6332AA39,0x91E70E35,0xF88155F6,0xB57E95D9,0x4AECD179,0x32E32DCB,0x946963F3,0x7853182D,0xEFC6F80F
+endif
+# hle-utility-dialogs: the four calls of savedata, netconf, game sharing and the gamedata install
+# dialog, the message dialog's InitStart, and the net module load/unload pair (sceUtility); the
+# UMD presence check; and from each net library only its Init and Term call. No connect, create,
+# join or scan call can be linked: each net library is pinned to that pair, and the libraries
+# with no Init/Term use here (matching, resolver, HTTP, SSL, the registry) are forbidden.
+# sceNetInet also carries the four calls every PRX imports from the PSPSDK libc glue's socket
+# fallback (Close, Recv, Send, GetErrno, used only on a socket descriptor, which this case never
+# opens). Only the two ad hoc libraries are added here: build.mak appends -lpspnet and
+# -lpspnet_apctl, and psp-gcc's lib spec appends -lpspnet_inet after the libc group. Naming
+# -lpspnet_inet here too would pull InetInit/InetTerm in an earlier link pass than the glue's
+# four calls, split the sceNetInet stubs into two runs, and psp-fixup-imports refuses that
+# ("stubs out of order").
+ifeq ($(CASE),hle-utility-dialogs)
+LIBS += -lpspumd -lpspnet_adhocctl -lpspnet_adhoc
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C,0x2AD8E239,0x4DB1E739,0x6332AA39,0x91E70E35,0xF88155F6,0x24AC31EB,0xB57E95D9,0x4AECD179,0x32E32DCB,0xC492F751,0x946963F3,0x7853182D,0xEFC6F80F,0x1579A159,0x64D50C56
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUmdUser=0x46EBB729
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNet=0x39AF39A6,0x281928A9
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetInet=0x17943399,0xA9ED66B9,0x8D7284EA,0xCDA85C99,0x7AA671BC,0xFBABE411
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetApctl=0xE2F91F9B,0xB3EDD0EC
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhoc=0xE1D621D7,0xA62C6F57
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhocctl=0xE26F226E,0x9D689E13
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
 endif
 ifeq ($(CASE),cpu-timing)
 # The shared probe cleanup checks interrupt state; cpu-timing also calls the

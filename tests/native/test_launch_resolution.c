@@ -22,6 +22,7 @@
 #endif
 
 #include "nk_font.h"
+#include "nk_iso.h"
 #include "nk_launch.h"
 #include "nk_psp_keystore.h"
 #include "nk_platform.h"
@@ -149,6 +150,7 @@ static int write_launch_environment_probe(void) {
     const char *vsync = getenv("SR_VSYNC");
     const char *scale = getenv("SR_RESOLUTION_SCALE");
     const char *present_scaling = getenv("SR_PRESENT_SCALING");
+    const char *present_upscale = getenv("SR_PRESENT_UPSCALE");
     const char *fullscreen = getenv("SR_FULLSCREEN");
     const char *launcher_display = getenv("SR_LAUNCHER_DISPLAY_BOUNDS");
     const char *volume = getenv("SR_MASTER_VOLUME");
@@ -165,6 +167,7 @@ static int write_launch_environment_probe(void) {
     const char *ace = getenv("SR_ACE");
     const char *ace_report = getenv("SR_ACE_REPORT");
     const char *host_time_zone = getenv("SR_HOST_TIME_ZONE");
+    const char *code_capture = getenv("SR_CODE_CAPTURE");
     int ok = fprintf(f,
                      "PSP_ISO=%s\n"
                      "NK_LAUNCH_TEST_UNRELATED=%s\n"
@@ -172,6 +175,7 @@ static int write_launch_environment_probe(void) {
                      "SR_VSYNC=%s\n"
                      "SR_RESOLUTION_SCALE=%s\n"
                      "SR_PRESENT_SCALING=%s\n"
+                     "SR_PRESENT_UPSCALE=%s\n"
                      "SR_FULLSCREEN=%s\n"
                      "SR_LAUNCHER_DISPLAY_BOUNDS=%s\n"
                      "SR_MASTER_VOLUME=%s\n"
@@ -187,13 +191,15 @@ static int write_launch_environment_probe(void) {
                      "SR_REDUCE_MOTION=%s\n"
                      "SR_ACE=%s\n"
                      "SR_ACE_REPORT=%s\n"
-                     "SR_HOST_TIME_ZONE=%s\n",
+                     "SR_HOST_TIME_ZONE=%s\n"
+                     "SR_CODE_CAPTURE=%s\n",
                      iso ? iso : "<unset>",
                      unrelated ? unrelated : "<unset>",
                      fps ? fps : "<unset>",
                      vsync ? vsync : "<unset>",
                      scale ? scale : "<unset>",
                      present_scaling ? present_scaling : "<unset>",
+                     present_upscale ? present_upscale : "<unset>",
                      fullscreen ? fullscreen : "<unset>",
                      launcher_display ? launcher_display : "<unset>",
                      volume ? volume : "<unset>",
@@ -209,7 +215,8 @@ static int write_launch_environment_probe(void) {
                      reduce_motion ? reduce_motion : "<unset>",
                      ace ? ace : "<unset>",
                      ace_report ? ace_report : "<unset>",
-                     host_time_zone ? host_time_zone : "<unset>") >= 0;
+                     host_time_zone ? host_time_zone : "<unset>",
+                     code_capture ? code_capture : "<unset>") >= 0;
     if (fclose(f) != 0) ok = 0;
     /* Subtest 21 sets NK_LAUNCH_TEST_HOLD so the probe stays alive long
      * enough for nk_launch_stop to have a running child to stop. */
@@ -388,9 +395,13 @@ static void test_no_iso_child_environment(const char *test_executable,
     set_environment_value("SR_REDUCE_MOTION", "on");
     /* Nor an inherited Ace Mode line (src/rt/ace.h): a session the player did not resolve on
        is authentic, "off", and exports no report path (A1). */
+    /* Nor an inherited presentation upscaler (#1273): an authentic session runs it off. */
+    bool had_upscale;
+    char *old_upscale = capture_environment_value("SR_PRESENT_UPSCALE", &had_upscale);
+    set_environment_value("SR_PRESENT_UPSCALE", "fsr1");
     bool had_ace;
     char *old_ace = capture_environment_value("SR_ACE", &had_ace);
-    set_environment_value("SR_ACE", "v1;af=16;text=on;readout=on;notice=on;wide=off;smooth=off");
+    set_environment_value("SR_ACE", "v1;af=16;text=on;readout=on;notice=on;wide=off;smooth=off;sas=off");
     bool had_ace_report;
     char *old_ace_report = capture_environment_value("SR_ACE_REPORT", &had_ace_report);
     set_environment_value("SR_ACE_REPORT", "poisoned-parent-report.json");
@@ -402,6 +413,11 @@ static void test_no_iso_child_environment(const char *test_executable,
     char *old_launcher_display = capture_environment_value("SR_LAUNCHER_DISPLAY_BOUNDS",
                                                            &had_launcher_display);
     set_environment_value("SR_LAUNCHER_DISPLAY_BOUNDS", "7,7,7,7");
+    /* With no SR_CODE_CAPTURE of the user's, the launcher names the title's own capture folder
+       (#1933); the user's value is checked on the second launch below. */
+    bool had_code_capture;
+    char *old_code_capture = capture_environment_value("SR_CODE_CAPTURE", &had_code_capture);
+    restore_environment_value("SR_CODE_CAPTURE", NULL, false);
 
     /* The enhanced build launches or nothing does (docs/ENHANCEMENT_CONTRACT.md
        section 9): with no packages/<disc>-enhanced-<id>, neither the developer
@@ -442,10 +458,12 @@ static void test_no_iso_child_environment(const char *test_executable,
     /* Prepare defaults: a caller that never configures the session must not
        hand the runtime a muted or zeroed volume (#settings). */
     assert(session.config.master_volume == 100);
+    assert(session.config.present_upscale == NK_PRESENT_UPSCALE_OFF);
     /* Apply settings the way the player does (apply_settings_to_session)
        before spawning, so every setting reaches the child environment. */
     session.config.resolution_scale = 2;
     session.config.present_scaling = NK_PRESENT_SCALING_INTEGER;
+    session.config.present_upscale = NK_PRESENT_UPSCALE_FSR1;  /* the setting; authentic still exports off */
     session.config.fps_cap = 30;
     session.config.vsync = false;
     session.config.fullscreen = true;
@@ -511,6 +529,9 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_VSYNC=0\n") != NULL);
     assert(strstr(observed, "SR_RESOLUTION_SCALE=2\n") != NULL);
     assert(strstr(observed, "SR_PRESENT_SCALING=integer\n") != NULL);
+    /* Authentic: off, though the parent says fsr1 and the setting asks for it. */
+    assert(session.config.present_upscale == NK_PRESENT_UPSCALE_FSR1);
+    assert(strstr(observed, "SR_PRESENT_UPSCALE=off\n") != NULL);
     assert(strstr(observed, "SR_FULLSCREEN=1\n") != NULL);
     assert(strstr(observed, "SR_MASTER_VOLUME=55\n") != NULL);
     /* The launcher's display reaches the child, windowed or fullscreen, and the
@@ -574,6 +595,20 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(strstr(observed, expected_zone) != NULL);
         assert(strstr(observed, "poisoned-parent-zone") == NULL);
     }
+    /* The title's code-capture folder (#1933) under the per-user data directory, beside its
+       bring-up cache, where `nk_cli.py bringup` reads the captures on its next build. The runtime
+       does not create the folder, so the launcher has. */
+    {
+        char capture_dir[NK_MAX_PATH * 2 + 64];
+        char expected[NK_MAX_PATH * 2 + 96];
+        snprintf(capture_dir, sizeof(capture_dir), "%s%ccache%cbringup%cTEST00006%ccaptures",
+                 per_user_root, sep, sep, sep, sep);
+        snprintf(expected, sizeof(expected), "SR_CODE_CAPTURE=%s\n", capture_dir);
+        assert(strstr(observed, expected) != NULL);
+        assert(nk_platform_dir_exists(capture_dir));
+    }
+    /* A folder the user named is kept for the next launch. */
+    set_environment_value("SR_CODE_CAPTURE", "user-named-capture-folder");
 
     /* Diagnostic benchmark mode preserves SR_NOVBPACE in child environment */
     session.config.benchmark_mode = true;
@@ -584,7 +619,7 @@ static void test_no_iso_child_environment(const char *test_executable,
     session.config.reduce_motion = NK_REDUCE_MOTION_OFF;
     /* An Ace Mode session exports its line and, with it, the report path. */
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
-             "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off");
+             "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off");
     int ace_report_len = snprintf(session.config.ace_report_path,
                                   sizeof(session.config.ace_report_path),
                                   "%s%cace%cTEST00001.json", root, sep, sep);
@@ -609,7 +644,9 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_EXPERIMENTAL_60HZ=1\n") != NULL);
     assert(strstr(observed, "SR_DEVELOPER_MODE=1\n") != NULL);
     assert(strstr(observed, "SR_REDUCE_MOTION=off\n") != NULL);
-    assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off\n") != NULL);
+    assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off\n") != NULL);
+    /* An enhanced session follows the setting. */
+    assert(strstr(observed, "SR_PRESENT_UPSCALE=fsr1\n") != NULL);
     {
         char expected_report[1200];
         snprintf(expected_report, sizeof(expected_report), "SR_ACE_REPORT=%s\n",
@@ -618,19 +655,51 @@ static void test_no_iso_child_environment(const char *test_executable,
     }
     assert(strstr(observed, "SR_LAUNCHER_DISPLAY_BOUNDS=\n") != NULL);
     assert(strstr(observed, "7,7,7,7") == NULL);
+    assert(strstr(observed, "SR_CODE_CAPTURE=user-named-capture-folder\n") != NULL);
+    restore_environment_value("SR_CODE_CAPTURE", old_code_capture, had_code_capture);
+    free(old_code_capture);
     session.enhancement_package_id[0] = '\0';
     session.config.developer_mode = false;
     session.config.reduce_motion = NK_REDUCE_MOTION_SYSTEM;
-    /* The acceptance checkpoint is evidence: an Ace line refuses to launch it. */
+    /* The acceptance checkpoint is evidence: an Enhanced or Ace line refuses to launch it. */
     session.config.headless_accept_presented_frames = 3u;
     assert(nk_launch_start(&session) != NK_OK);
-    assert(strstr(session.last_error, "Ace Mode is on") != NULL);
+    assert(strstr(session.last_error, "Enhanced or Ace is on") != NULL);
     session.config.headless_accept_presented_frames = 0u;
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
     session.config.ace_report_path[0] = '\0';
 
+    /* Either an enhanced build or Ace Mode alone is enough to follow the upscale setting
+       (an enhancement package or Ace, not both): one launch with each. */
+    for (int only = 0; only < 2; only++) {
+        if (only == 0) {
+            snprintf(session.enhancement_package_id, sizeof(session.enhancement_package_id),
+                     "fixture-60hz");
+        } else {
+            snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
+                     "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off");
+        }
+        assert(nk_launch_start(&session) == NK_OK);
+        child_exit = nk_launch_wait(&session, -1);
+        nk_launch_stop(&session);
+        assert(child_exit == 0);
+        report = fopen(report_path, "rb");
+        assert(report != NULL);
+        observed_size = fread(observed, 1, sizeof(observed) - 1, report);
+        observed[observed_size] = '\0';
+        assert(!ferror(report));
+        assert(fclose(report) == 0);
+        assert(strstr(observed, only == 0 ? "SR_ACE=off\n"
+                                          : "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off\n") != NULL);
+        assert(strstr(observed, "SR_PRESENT_UPSCALE=fsr1\n") != NULL);
+        session.enhancement_package_id[0] = '\0';
+        snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
+    }
+
     restore_environment_value("SR_ACE", old_ace, had_ace);
     free(old_ace);
+    restore_environment_value("SR_PRESENT_UPSCALE", old_upscale, had_upscale);
+    free(old_upscale);
     restore_environment_value("SR_ACE_REPORT", old_ace_report, had_ace_report);
     free(old_ace_report);
     restore_environment_value("SR_EXPERIMENTAL_60HZ", old_60hz, had_60hz);
@@ -798,6 +867,205 @@ static void make_game(NkGameEntry *game, const char *iso_path) {
     snprintf(game->title_id, sizeof(game->title_id), "synthetic-allegrex-v1");
     snprintf(game->title_name, sizeof(game->title_name), "Launch Resolution Fixture");
     snprintf(game->iso_path, sizeof(game->iso_path), "%s", iso_path);
+}
+
+static void test_write_iso_both_endian32(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)value;
+    out[1] = (uint8_t)(value >> 8);
+    out[2] = (uint8_t)(value >> 16);
+    out[3] = (uint8_t)(value >> 24);
+    out[4] = (uint8_t)(value >> 24);
+    out[5] = (uint8_t)(value >> 16);
+    out[6] = (uint8_t)(value >> 8);
+    out[7] = (uint8_t)value;
+}
+
+static size_t test_write_iso_directory_record(uint8_t *out, const uint8_t *name,
+                                              size_t name_size, uint32_t lba,
+                                              uint32_t size, bool is_directory) {
+    size_t record_size = 33u + name_size;
+    if (record_size & 1u) record_size++;
+    assert(record_size <= UINT8_MAX);
+    memset(out, 0, record_size);
+    out[0] = (uint8_t)record_size;
+    test_write_iso_both_endian32(out + 2, lba);
+    test_write_iso_both_endian32(out + 10, size);
+    out[25] = is_directory ? 0x02u : 0u;
+    out[28] = 1u; /* volume sequence number, little-endian */
+    out[31] = 1u; /* volume sequence number, big-endian */
+    out[32] = (uint8_t)name_size;
+    memcpy(out + 33, name, name_size);
+    return record_size;
+}
+
+static size_t test_write_iso_directory(uint8_t *out, uint32_t lba,
+                                       uint32_t parent_lba,
+                                       const uint8_t *child_name,
+                                       size_t child_name_size,
+                                       uint32_t child_lba,
+                                       uint32_t child_size,
+                                       bool child_is_directory) {
+    static const uint8_t current_name = 0;
+    static const uint8_t parent_name = 1;
+    size_t used = 0;
+    used += test_write_iso_directory_record(out + used, &current_name, 1u,
+                                            lba, 2048u, true);
+    used += test_write_iso_directory_record(out + used, &parent_name, 1u,
+                                            parent_lba, 2048u, true);
+    used += test_write_iso_directory_record(out + used, child_name,
+                                            child_name_size, child_lba,
+                                            child_size, child_is_directory);
+    assert(used <= 2048u);
+    return used;
+}
+
+static void test_write_build_identity_iso(const char *path,
+                                          const uint8_t *executable,
+                                          size_t executable_size) {
+    enum { SECTOR_SIZE = 2048, PVD_LBA = 16, ROOT_LBA = 17,
+           GAME_LBA = 18, SYSDIR_LBA = 19, EBOOT_LBA = 20,
+           ISO_SECTORS = 21 };
+    static const uint8_t game_name[] = "PSP_GAME";
+    static const uint8_t sysdir_name[] = "SYSDIR";
+    static const uint8_t eboot_name[] = "EBOOT.BIN;1";
+    uint8_t image[ISO_SECTORS * SECTOR_SIZE] = { 0 };
+    uint8_t *pvd = image + PVD_LBA * SECTOR_SIZE;
+    assert(executable && executable_size > 0 && executable_size <= SECTOR_SIZE);
+    pvd[0] = 1u;
+    memcpy(pvd + 1, "CD001", 5);
+    pvd[6] = 1u;
+    test_write_iso_both_endian32(pvd + 158, ROOT_LBA);
+    test_write_iso_both_endian32(pvd + 166, SECTOR_SIZE);
+    test_write_iso_directory(image + ROOT_LBA * SECTOR_SIZE,
+                             ROOT_LBA, ROOT_LBA, game_name,
+                             sizeof(game_name) - 1u, GAME_LBA,
+                             SECTOR_SIZE, true);
+    test_write_iso_directory(image + GAME_LBA * SECTOR_SIZE,
+                             GAME_LBA, ROOT_LBA, sysdir_name,
+                             sizeof(sysdir_name) - 1u, SYSDIR_LBA,
+                             SECTOR_SIZE, true);
+    test_write_iso_directory(image + SYSDIR_LBA * SECTOR_SIZE,
+                             SYSDIR_LBA, GAME_LBA, eboot_name,
+                             sizeof(eboot_name) - 1u, EBOOT_LBA,
+                             (uint32_t)executable_size, false);
+    memcpy(image + EBOOT_LBA * SECTOR_SIZE, executable, executable_size);
+    write_bytes(path, image, sizeof(image));
+}
+
+static void test_sha256_hex(const uint8_t *bytes, size_t size, char out[65]) {
+    static const char hex[] = "0123456789abcdef";
+    NkSha256 ctx;
+    uint8_t digest[32];
+    nk_sha256_init(&ctx);
+    nk_sha256_update(&ctx, bytes, size);
+    nk_sha256_finish(&ctx, digest);
+    for (size_t i = 0; i < sizeof(digest); i++) {
+        out[i * 2u] = hex[digest[i] >> 4];
+        out[i * 2u + 1u] = hex[digest[i] & 0x0fu];
+    }
+    out[64] = '\0';
+}
+
+static void test_build_identity_run_entry(const char *base, char sep) {
+    static const char title_id[] = "build-identity-entry-v1";
+    static const char game_name[] = "build-identity-entry";
+    static const char disc_id[] = "TEST00077";
+    static const uint32_t executable_entry = 0x08802000u;
+    static const uint32_t fallback_entry = 0x08803000u;
+    static const uint8_t listed_executable[] = "synthetic-listed-executable";
+    static const uint8_t unlisted_executable[] = "synthetic-unlisted-executable";
+    char manifest_path[1000];
+    char listed_iso[1000];
+    char unlisted_iso[1000];
+    char runtime_dir[1100];
+    char runtime_path[1200];
+    char image_path[1200];
+    char build_root[1000];
+    char data_path[1100];
+    char memory_stick_path[1100];
+    char digest[65];
+    char manifest_json[4096];
+    char error[512] = "";
+    NkTitleEntrySnapshot snapshot = { 0 };
+    NkBuildIdentity identity;
+    NkGameEntry game;
+    NkLaunchSession session;
+    int written;
+
+    printf("[LAUNCH_TEST] Build identity selects the executable entry only for an unlisted build\n");
+    snprintf(manifest_path, sizeof(manifest_path), "%s%cbuild-identity-entry.json", base, sep);
+    snprintf(listed_iso, sizeof(listed_iso), "%s%cbuild-identity-listed.iso", base, sep);
+    snprintf(unlisted_iso, sizeof(unlisted_iso), "%s%cbuild-identity-unlisted.iso", base, sep);
+    snprintf(build_root, sizeof(build_root), "%s%cbuild", base, sep);
+    snprintf(runtime_dir, sizeof(runtime_dir), "%s%c%s", build_root, sep, game_name);
+    snprintf(runtime_path, sizeof(runtime_path), "%s%c%s", runtime_dir, sep, game_name);
+    snprintf(image_path, sizeof(image_path), "%s%c%s_image.bin", runtime_dir, sep, game_name);
+    snprintf(data_path, sizeof(data_path), "%s%cbuild-identity-data", base, sep);
+    snprintf(memory_stick_path, sizeof(memory_stick_path), "%s%cbuild-identity-ms", base, sep);
+    assert(strlen(listed_iso) < NK_MAX_PATH && strlen(unlisted_iso) < NK_MAX_PATH);
+
+    test_write_build_identity_iso(listed_iso, listed_executable, sizeof(listed_executable));
+    test_write_build_identity_iso(unlisted_iso, unlisted_executable, sizeof(unlisted_executable));
+    test_sha256_hex(listed_executable, sizeof(listed_executable), digest);
+    written = snprintf(manifest_json, sizeof(manifest_json),
+        "{\"schema_version\":1,\"id\":\"%s\",\"game_name\":\"%s\","
+        "\"display_name\":\"Build Identity Entry Fixture\",\"kind\":\"retail\","
+        "\"disc\":{\"id\":\"%s\",\"region\":\"NA\","
+        "\"revision_policy\":\"exact-disc-id\",\"builds\":["
+        "{\"executable_sha256\":\"%s\",\"status\":\"supported\","
+        "\"label\":\"Recorded fixture build\"}]},"
+        "\"executable\":{\"base\":\"0x08800000\",\"entry\":\"0x%08x\","
+        "\"bss_metadata_source\":\"none\",\"extra_executable_spans\":[]},"
+        "\"modules\":[],\"filesystem\":{\"data_root\":\"build-identity-data\","
+        "\"memory_stick_root\":\"build-identity-ms\","
+        "\"device_prefixes\":[\"host0:\"]},\"hle_profile\":\"standard\","
+        "\"feature_requirements\":[\"allegrex\"],\"verification_profile\":\"smoke\","
+        "\"runtime_bindings\":{\"schema_version\":1,\"fallback_entry\":\"0x%08x\"}}",
+        title_id, game_name, disc_id, digest, executable_entry, fallback_entry);
+    assert(written > 0 && (size_t)written < sizeof(manifest_json));
+    write_file(manifest_path, manifest_json);
+    if (!nk_title_manifest_load_overlay_ext(manifest_path, false, error, sizeof(error))) {
+        printf("[LAUNCH_TEST] build-identity manifest rejected: %s\n", error);
+        assert(!"build-identity fixture manifest must validate");
+    }
+
+    assert(nk_platform_mkdir_p(runtime_dir));
+    write_file(runtime_path, "runtime");
+    write_file(image_path, "image");
+    make_catalog_data_root(base, title_id);
+    assert(nk_title_catalog_find_by_id(title_id, &snapshot));
+    assert(snapshot.entry.executable_entry == executable_entry);
+    assert(snapshot.entry.run_entry == fallback_entry);
+    nk_title_catalog_snapshot_release(&snapshot);
+
+    assert(nk_title_manifest_identify_build(disc_id, listed_iso, "EBOOT.BIN", &identity));
+    assert(identity.status == NK_BUILD_SUPPORTED);
+    make_game(&game, listed_iso);
+    snprintf(game.disc_id, sizeof(game.disc_id), "%s", disc_id);
+    snprintf(game.title_id, sizeof(game.title_id), "%s", title_id);
+    snprintf(game.selected_executable, sizeof(game.selected_executable), "EBOOT.BIN");
+    assert(nk_launch_prepare_session(&session, &game, base) == NK_OK);
+    assert(session.entry_point == fallback_entry);
+
+    assert(nk_title_manifest_identify_build(disc_id, unlisted_iso, "EBOOT.BIN", &identity));
+    assert(identity.status == NK_BUILD_UNLISTED);
+    make_game(&game, unlisted_iso);
+    snprintf(game.disc_id, sizeof(game.disc_id), "%s", disc_id);
+    snprintf(game.title_id, sizeof(game.title_id), "%s", title_id);
+    snprintf(game.selected_executable, sizeof(game.selected_executable), "EBOOT.BIN");
+    assert(nk_launch_prepare_session(&session, &game, base) == NK_OK);
+    assert(session.entry_point == executable_entry);
+
+    nk_title_catalog_clear_overlay();
+    remove(manifest_path);
+    remove(listed_iso);
+    remove(unlisted_iso);
+    remove(runtime_path);
+    remove(image_path);
+    test_rmdir(data_path);
+    test_rmdir(memory_stick_path);
+    test_rmdir(runtime_dir);
+    test_rmdir(build_root);
 }
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -2473,6 +2741,7 @@ int main(int argc, char **argv) {
     test_keep_run_log(base, sep);
 
     test_launcher_display_choice();
+    test_build_identity_run_entry(base, sep);
 
     printf("[LAUNCH_TEST] ALL LAUNCH RESOLUTION TESTS PASSED!\n");
     native_test_assert_real_config_untouched();

@@ -24,6 +24,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from typing import Any
 import unittest
 from unittest import mock
 
@@ -35,6 +36,7 @@ import analyze  # noqa: E402
 import codegen  # noqa: E402
 import scratch_dir  # noqa: E402
 from nk_core import package_cache  # noqa: E402
+from makefile_text import read_makefile  # noqa: E402
 
 # A wholly synthetic span standing in for "some other title's configuration". It is
 # deliberately NOT any real title's address range: these tests prove isolation and
@@ -76,7 +78,7 @@ def write_elf(path: Path, *, load_addr: int = PRIMARY_BASE, words=(0x03E00008, 0
 def write_direct_call_chain_elf(path: Path, function_count: int) -> None:
     """Fabricate a source-owned ELF whose functions form one direct-call chain."""
     base = PRIMARY_BASE
-    words = []
+    words: list[int] = []
     for index in range(function_count):
         target = base + ((index + 1) % function_count) * 20
         words.extend((
@@ -424,11 +426,10 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         write_direct_call_chain_elf(chain_elf, function_count)
         image = analyze.Elf(str(chain_elf), base=0)
 
-        builtin_set = set
         tracked_calls = [None]
         scanned_entries = 0
 
-        class CountingSet(builtin_set):
+        class CountingSet(set[Any]):
             def __iter__(self):
                 nonlocal scanned_entries
                 if self is tracked_calls[0]:
@@ -534,7 +535,9 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         module = self.root / "zero-based-module.prx"
         write_zero_based_module(module)
         loaded = analyze.Elf(str(module), base=0)
-        covered, calls, found = set(), set(), set()
+        covered: set[int] = set()
+        calls: set[int] = set()
+        found: set[int] = set()
 
         analyze.trace_function(loaded, 0x00, analyze.exec_ranges(loaded), covered, calls, {0x00},
                                unrelocated=found)
@@ -735,6 +738,36 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
+    def test_analyze_cli_refuses_an_unknown_option_or_an_extra_positional(self) -> None:
+        # A mistyped option used to be dropped silently, so the run went ahead without it.
+        for extra in ("--cfg-reprot=report.json", "second.elf"):
+            with self.subTest(extra=extra):
+                proc = subprocess.run(
+                    [sys.executable, str(TOOLS / "analyze.py"), str(self.elf), "--base=0", "--quiet",
+                     extra],
+                    cwd=ROOT, env=self._clean_env(), capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+                self.assertIn(f"unrecognized arguments: {extra}", proc.stderr)
+
+    def test_codegen_cli_refuses_an_unknown_option_before_writing(self) -> None:
+        out_c = self.root / "refused.c"
+        proc = subprocess.run(
+            [sys.executable, str(TOOLS / "codegen.py"), str(self.elf), str(out_c),
+             "--base=0", "--profile=none", "--funcs-per-chunk=2000", "--lle-cpus"],
+            cwd=ROOT, env=self._clean_env(), capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("unrecognized arguments: --lle-cpus", proc.stderr)
+        self.assertFalse(out_c.exists())
+        # In process, main() returns the status instead of raising SystemExit.
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = codegen.main(["codegen.py", str(self.elf), str(out_c), "--base=0", "--lle-cpus"])
+        self.assertEqual(status, 2)
+        self.assertIn("unrecognized arguments: --lle-cpus", stderr.getvalue())
+        self.assertFalse(out_c.exists())
+
     def test_cfg_report_preserves_continuation_and_call_ownership(self) -> None:
         target = PRIMARY_BASE + 0x10
         tail_source = PRIMARY_BASE + 0x20
@@ -903,7 +936,8 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         # Before: the caller's trace absorbed 0x1030 and nothing made it an entry.
         image, functions, ranges = self._analyze_words("issue-968", self.ISSUE_968_WORDS)
         self.assertIn(0x1030, functions, "the callee must be an analyzer-owned entry")
-        covered, calls = set(), set()
+        covered: set[int] = set()
+        calls: set[int] = set()
         analyze.trace_function(image, 0x1010, ranges, covered, calls, set())
         self.assertNotIn(0x1030, covered, "the callee is not the caller's interior")
         self.assertIn(0x1030, calls)
@@ -915,7 +949,8 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         for caller, target in ((0x1018, 0x1024), (0x1034, 0x1048)):
             with self.subTest(target=hex(target)):
                 self.assertNotIn(target, functions)
-                covered, calls = set(), set()
+                covered: set[int] = set()
+                calls: set[int] = set()
                 analyze.trace_function(image, caller, ranges, covered, calls, set())
                 self.assertIn(target, covered)
                 self.assertNotIn(target, calls)
@@ -1221,11 +1256,12 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
             newline="\n",
         )
         exe = self.root / "analyzer_mutation_harness.exe"
+        assert CC is not None
         compiled = subprocess.run(
             [
                 CC, "-std=c11", "-O0", "-fno-strict-aliasing", "-Wall", "-Wextra",
                 "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
-                "-I", str(self.root), "-I", str(ROOT / "src" / "rt"),
+                "-I", str(self.root), "-I", str(ROOT / "src" / "rt"), "-I", str(ROOT / "tests" / "native"),
                 str(harness), str(out_c), str(out_dir / "mutant_0.c"),
                 str(ROOT / "src" / "rt" / "guest_interp.c"),
                 str(ROOT / "src" / "rt" / "perf.c"),
@@ -1862,7 +1898,7 @@ class MakefileSpanBindingTests(unittest.TestCase):
     """The direct-Make path must bind a span explicitly, not rely on a default."""
 
     def setUp(self) -> None:
-        self.makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.makefile = read_makefile(ROOT)
 
     def test_span_is_passed_as_an_argument_not_a_shell_environment_prefix(self) -> None:
         # `VAR=value cmd` needs a POSIX shell; Make falls back to cmd.exe on Windows
@@ -2127,7 +2163,7 @@ class ScriptEntryTests(unittest.TestCase):
 class SpanIndexMembershipTests(unittest.TestCase):
     """The trace's indexed membership answers exactly as the linear in_ranges scan."""
 
-    CASES = (
+    CASES: tuple[list[tuple[int, int]], ...] = (
         [],
         [(0, 0)],
         [(16, 16), (20, 12)],
@@ -2203,7 +2239,7 @@ class ElfLoadSpanTests(unittest.TestCase):
                     return image_bytes[off + vaddr - lo:off + vaddr - lo + n]
             return None
 
-        probes = set()
+        probes: set[int] = set()
         for _type, _off, lo, _filesz in headers:
             probes.update(range(lo - 8, lo + 0x48))
         for vaddr in sorted(probes):

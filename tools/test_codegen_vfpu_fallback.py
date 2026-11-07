@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -336,11 +337,12 @@ int main(void) {{
         # different addss operand order at -O0 than sr_vfpu_interp's loop, and
         # x86-64 SSE selects the *first* NaN source on NaN+NaN, so the two paths
         # kept different NaN payloads for exotic matrix inputs. The emission must
-        # stay an accumulate-into-local so the paths agree on any host.
+        # stay an accumulate-into-local, term by term through the sr_vf_* helpers
+        # (issue #326: an optimiser may swap the operands of a plain + or *).
         word=(0x3c<<26)|(0<<23)|(4<<16)|(2<<8)|(1<<15)  # vmmul 3x3, vs=1, vt=0, vd=0
         effect,_,_=codegen.vfpu_effect(0x5000,word)
         self.assertIn("float _m0_0=0.0f;",effect)
-        self.assertIn("_m0_0+=s->v[",effect)
+        self.assertIn("_m0_0=sr_vf_add(_m0_0,sr_vf_mul(s->v[",effect)
         self.assertNotRegex(effect, r"float _m[0-9]_[0-9]=0\.0f\+",
                             "chained vmmul expression reintroduces the NaN payload split")
 
@@ -348,7 +350,7 @@ int main(void) {{
         word=(0x3c<<26)|(1<<23)|(1<<16)|(2<<8)|0  # vtfm3 3-lane, ins=1
         effect,_,_=codegen.vfpu_effect(0x5100,word)
         self.assertIn("float _v0=0.0f;",effect)
-        self.assertIn("_v0+=s->v[",effect)
+        self.assertIn("_v0=sr_vf_add(_v0,sr_vf_mul(s->v[",effect)
         self.assertNotRegex(effect, r"float _v[0-9]=0\.0f\+",
                             "chained vtfm expression reintroduces the NaN payload split")
 
@@ -358,8 +360,8 @@ int main(void) {{
         word=(0x19<<26)|(4<<23)|(0<<16)|(1<<15)|(0x20<<8)|(0x20)  # vhdp.t 3-lane, vd=0x20, vs=0x20, vt=0x00
         effect,_,_=codegen.vfpu_effect(0x5200,word)
         self.assertIn("float _d=0.0f;",effect)
-        self.assertIn("for(int _i=0;_i<2;_i++) _d+=_s[_i]*_t[_i];",effect)
-        self.assertIn("_d+=1.0f*_t[2];",effect)
+        self.assertIn("for(int _i=0;_i<2;_i++) _d=sr_vf_add(_d,sr_vf_mul(_s[_i],_t[_i]));",effect)
+        self.assertIn("_d=sr_vf_add(_d,sr_vf_mul(1.0f,_t[2]));",effect)
         self.assertNotRegex(effect, r"float _d=0\.0f\+",
                             "chained vhdp expression reintroduces the NaN payload split")
 
@@ -369,8 +371,8 @@ int main(void) {{
         word=(0x3c<<26)|(4<<23)|(0<<16)|(1<<15)|(0x20<<8)|(0x20)  # vmscl.t 3x3, vd=0x20, vs=0x20, vt=0x00
         effect,_,_=codegen.vfpu_effect(0x5300,word)
         self.assertIn("float _sc = s->v[0];",effect)
-        self.assertIn("s->v[0] = s->v[0] * _sc;",effect)
-        self.assertNotIn("s->v[0] * s->v[0]",effect,
+        self.assertIn("s->v[0] = sr_vf_mul(s->v[0], _sc);",effect)
+        self.assertNotIn("sr_vf_mul(s->v[0], s->v[0])",effect,
                          "vmscl must not read the scalar fresh after it is overwritten")
 
     def test_vmscl_alias_snapshots_scalar_before_destructive_writes(self):
@@ -378,9 +380,109 @@ int main(void) {{
         word=(0x3c<<26)|(7<<23)|(1<<16)|(1<<15)|(0x20<<8)|(0x20)  # Matrix1 which=1, vd=0x20, vs=0x20
         effect,_,_=codegen.vfpu_effect(0x5400,word)
         self.assertIn("float _sc = s->v[4];",effect)
-        self.assertIn("s->v[0] = s->v[0] * _sc;",effect)
-        self.assertNotIn("s->v[0] * s->v[4]",effect,
+        self.assertIn("s->v[0] = sr_vf_mul(s->v[0], _sc);",effect)
+        self.assertNotIn("sr_vf_mul(s->v[0], s->v[4])",effect,
                          "vmscl alias must not read the scalar fresh after it is overwritten")
+
+    def test_lane_arithmetic_goes_through_the_nan_rule_helpers(self):
+        # Issue #326: C leaves the NaN a NaN-producing + - * / returns to the host, and an
+        # optimiser may swap the operands of + and *. The generated code and sr_vfpu_interp
+        # disagreed on NaN words at -O1/-O2 until every lane operation went through the
+        # sr_vf_* helpers in src/rt/recomp.h, so no form may emit a bare float operator.
+        words = {
+            "vadd.q": 0x60048800 | 0x8080, "vsub.t": 0x60848800 | 0x8000, "vdiv.p": 0x63848880,
+            "vmul.s": 0x64048800, "vdot.q": 0x64848880 | 0x8000, "vhdp.t": 0x66048800 | 0x8000,
+            "vscl.q": 0x65048880 | 0x8000, "vcrs.t": 0x66848800 | 0x8000,
+            "vcrsp.t": 0xF2848800 | 0x8000, "vqmul.q": 0xF2848880 | 0x8000,
+            "vmmul.t": 0xF0048800 | 0x8000, "vtfm2.t": 0xF0848800 | 0x8000,
+            "vmscl.t": 0xF2048800 | 0x8000, "vmscl alias": 0xF3818800 | 0x8000,
+        }
+        bare = re.compile(r"(\]|_sc|_d|_m\d_\d|_v\d)\s*[-+*/]=?\s*(-?_[st]\[|s->v\[|_sc|1\.0f)")
+        for name, word in words.items():
+            with self.subTest(form=name, word=f"0x{word:08x}"):
+                effect, _, _ = codegen.vfpu_effect(0x5500, word)
+                self.assertNotIn("sr_vfpu_interp", effect)
+                self.assertIn("sr_vf_", effect)
+                self.assertIsNone(bare.search(effect), effect)
+
+
+class UnverifiedVfpuFormReportTests(unittest.TestCase):
+    """#1877: the build lists the unverified VFPU forms a title translated; the runtime prints
+    each once at start-up. The patterns come from src/rt/hle_evidence.h (tools/verification_ledger.py)."""
+
+    LV_S_ZERO = (0x32 << 26)                  # lv.s S000, 0($zero): base $zero is unverified
+    LV_S_T5 = (0x32 << 26) | (13 << 21)       # lv.s S000, 0($t5): has evidence
+    SV_Q_ZERO = (0x3E << 26)                  # sv.q: base $zero is unverified
+
+    def setUp(self):
+        codegen.reset_unverified_vfpu_uses()
+        self.addCleanup(codegen.stop_collecting_unverified_vfpu_uses)
+
+    def test_the_generated_header_table_parses_and_is_not_empty(self):
+        text = (ROOT / "src" / "rt" / "hle_evidence.h").read_text(encoding="utf-8")
+        count = int(re.search(r"#define SR_VFPU_UNVERIFIED_FORM_COUNT (\d+)u", text).group(1))
+        patterns = codegen.unverified_vfpu_patterns()
+        self.assertGreater(count, 0)
+        self.assertEqual(len(patterns), count)
+        for mask, match, forms in patterns:
+            self.assertEqual(match & ~mask, 0)
+            self.assertRegex(forms, r"^[A-Za-z0-9./ ]+ \[vfpu-[0-9a-f]{2}-[^\]]+\]$")
+
+    def test_a_translated_unverified_form_is_listed_once_at_its_lowest_address(self):
+        codegen.normal_line(0x08804020, self.LV_S_ZERO)
+        codegen.normal_line(0x08804010, self.LV_S_ZERO)
+        codegen.normal_line(0x08804030, self.LV_S_T5)
+        lines = codegen.unverified_vfpu_report_lines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(
+            lines[0],
+            "    sr_vfpu_report_unverified_uses((const SrVfpuUse[]){ { 0x%08xu, 0x08804010u } }, 1u);"
+            % self.LV_S_ZERO,
+        )
+
+    def test_two_patterns_are_listed_in_address_order(self):
+        codegen.normal_line(0x08804040, self.SV_Q_ZERO)
+        codegen.normal_line(0x08804000, self.LV_S_ZERO)
+        line = codegen.unverified_vfpu_report_lines()[0]
+        self.assertIn("{ 0x%08xu, 0x08804000u }, { 0x%08xu, 0x08804040u } }, 2u);"
+                      % (self.LV_S_ZERO, self.SV_Q_ZERO), line)
+
+    def test_nothing_is_collected_outside_a_translation(self):
+        codegen.stop_collecting_unverified_vfpu_uses()
+        codegen.normal_line(0x08804000, self.LV_S_ZERO)
+        self.assertEqual(codegen.unverified_vfpu_report_lines(), [])
+
+    def test_forms_with_evidence_are_not_listed(self):
+        codegen.normal_line(0x08804000, self.LV_S_T5)
+        codegen.normal_line(0x08804004, 0x24020001)  # addiu v0, zero, 1
+        self.assertEqual(codegen.unverified_vfpu_report_lines(), [])
+
+    def test_codegen_registers_the_list_only_for_a_title_that_uses_a_form(self):
+        from test_codegen_runtime_modules import TEXT_VADDR, _elf, _text
+        import contextlib
+        import io
+        import tempfile
+
+        def build(words):
+            text = bytearray(_text())
+            self.assertLessEqual(4 * len(words) + 8, 0x40)  # below SceModuleInfo
+            for i, word in enumerate(words + [0x03E00008, 0]):  # then jr ra; nop
+                text[4 * i:4 * i + 4] = word.to_bytes(4, "little")
+            with tempfile.TemporaryDirectory() as tmp:
+                elf = Path(tmp) / "main.elf"
+                elf.write_bytes(_elf(bytes(text)))
+                out_c = Path(tmp) / "game_recomp.c"
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    status = codegen.main(["codegen.py", str(elf), str(out_c)])
+                self.assertEqual(status, 0, err.getvalue())
+                return out_c.read_text(encoding="ascii")
+
+        used = build([self.LV_S_ZERO, self.LV_S_ZERO, self.LV_S_T5])
+        self.assertEqual(used.count("sr_vfpu_report_unverified_uses("), 1)
+        self.assertIn("{ 0x%08xu, 0x%08xu } }, 1u);" % (self.LV_S_ZERO, TEXT_VADDR), used)
+        measured = build([self.LV_S_T5, self.LV_S_T5])
+        self.assertNotIn("sr_vfpu_report_unverified_uses", measured)
 
 
 if __name__ == "__main__":

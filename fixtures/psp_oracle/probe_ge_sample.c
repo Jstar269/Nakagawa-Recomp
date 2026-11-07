@@ -17,6 +17,17 @@
 //     framebuffer formats, dithering, pixel masks, logic operations, clear mode and fog.
 //     The cell table and list builder are the block shared with tests/native/hle_thread_selftest.c,
 //     which runs the same cells through the software GE and compares each window's digest.
+//   CASE=ge-light (PSP-GE-LIGHT-001, #1732): the 8-bit colour the GE's per-vertex lighting
+//     gives for a specular term (light component 1) and a powered-diffuse term (component 2)
+//     over ten specular coefficients, one flat-shaded transform-mode quad per pixel, so a
+//     host can compare candidate pow implementations with the hardware.
+//   CASE=ge-overlap (PSP-GE-OVERLAP-001, #2109): whether a blended primitive reads what an
+//     earlier primitive of the same PRIM command wrote. Overlapping translucent sprites and
+//     triangle pairs, in one PRIM and (the control) one PRIM each, over a 16x4 window in 8888
+//     and in 5650 with and without dithering.
+//   CASE=ge-clut-mip (PSP-GE-MIP-002, #2031): what TEXMODE bit 8 (multi-CLUT) does to the
+//     CLUT entry each mip level of a T4, T8 or T16 texture reads, with 8888 and 4444 CLUTs,
+//     a short CLUT load over a full one, and the CLUT start offset and index mask.
 //
 // ge-sample: each draw is one raw display list (no libpspgu) into a 64x32 8888 framebuffer
 // at VRAM offset 0x100000, cleared by the CPU through the uncached VRAM mirror before the list is
@@ -32,6 +43,15 @@
 // 16x4 window x 16..31, y 8..11 and queues its list; the depth cells also use a 4 KiB depth
 // block at VRAM offset 0x110000, written only by the GE. The window is read back raw (16-bit
 // formats zero-extended), one record per row (out0 = x 16 ... out15 = x 31).
+//
+// ge-light: per coefficient k, the 272 normals' z and y bits (seventeen `<k>-zN` and `<k>-yN`
+// records), then for family s (specular) and family d (powered diffuse) one draw into the
+// same 8 KiB block: a `<f>-<k>-draw` record and the 16x17 window x 16..31, y 8..24 read back
+// raw, one `<f>-<k>-rN` record per row. Sample i is the pixel (16 + i % 16, 8 + i / 16).
+//
+// ge-overlap: per shape and framebuffer format (`<shape>-<format>`), the ge-raster window and
+// record shape: a `-draw` record with the GE wait outcome and the window digest, then the
+// window x 16..31, y 8..11 read back raw, one `-rN` record per row.
 //
 // Record stream and log: the same writer, round trip and module lifecycle as
 // probe_hle_issues.c (copied byte for byte): NAKAGAWA_PSP_META, a NAKAGAWA_PSP_STEP
@@ -64,6 +84,11 @@ PSP_HEAP_SIZE_KB(64);
 #define GE_CASE_SAMPLE 109
 #define GE_CASE_RASTER 123
 #define GE_CASE_MIP 126
+#define GE_CASE_LIGHT 139
+#define GE_CASE_OVERLAP 153
+#define GE_CASE_CLUT_MIP 154
+#define GE_CASE_WEIGHT 157
+#define GE_CASE_RTT 158
 
 #if PSP_ORACLE_CASE == GE_CASE_SAMPLE
 #define HLE_CAMPAIGN_ID "ge-sample"
@@ -77,6 +102,26 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "ge-mip"
 #define HLE_TEST_ID "PSP-GE-MIP-001"
 #define HLE_LOG "host0:/ge_mip_log.txt"
+#elif PSP_ORACLE_CASE == GE_CASE_LIGHT
+#define HLE_CAMPAIGN_ID "ge-light"
+#define HLE_TEST_ID "PSP-GE-LIGHT-001"
+#define HLE_LOG "host0:/ge_light_log.txt"
+#elif PSP_ORACLE_CASE == GE_CASE_OVERLAP
+#define HLE_CAMPAIGN_ID "ge-overlap"
+#define HLE_TEST_ID "PSP-GE-OVERLAP-001"
+#define HLE_LOG "host0:/ge_overlap_log.txt"
+#elif PSP_ORACLE_CASE == GE_CASE_CLUT_MIP
+#define HLE_CAMPAIGN_ID "ge-clut-mip"
+#define HLE_TEST_ID "PSP-GE-MIP-002"
+#define HLE_LOG "host0:/ge_clut_mip_log.txt"
+#elif PSP_ORACLE_CASE == GE_CASE_WEIGHT
+#define HLE_CAMPAIGN_ID "ge-weight"
+#define HLE_TEST_ID "PSP-GE-WEIGHT-001"
+#define HLE_LOG "host0:/ge_weight_log.txt"
+#elif PSP_ORACLE_CASE == GE_CASE_RTT
+#define HLE_CAMPAIGN_ID "ge-rtt"
+#define HLE_TEST_ID "PSP-GE-RTT-001"
+#define HLE_LOG "host0:/ge_rtt_log.txt"
 #else
 #error probe_ge_sample.c has no case for this PSP_ORACLE_CASE
 #endif
@@ -1210,7 +1255,7 @@ struct gm_cell {
     float slope, u, v, w0, w1;
 };
 
-#define GM_CELL_COUNT 57u
+#define GM_CELL_COUNT 66u
 static const struct gm_cell gm_cells[GM_CELL_COUNT] = {
     {"c-b0", GM_K_SPRITE, 1u, 7u, 0x00, 0x004u, 0.0f, 16.0f, 4.0f, 0.0f, 0.0f},
     {"c-b1", GM_K_SPRITE, 1u, 7u, 0x10, 0x004u, 0.0f, 16.0f, 4.0f, 0.0f, 0.0f},
@@ -1269,6 +1314,18 @@ static const struct gm_cell gm_cells[GM_CELL_COUNT] = {
     {"sn-s1-w3", GM_K_QUAD, 2u, 7u, 0x00, 0x004u, 1.0f, 16.0f, 4.0f, 3.0f, 3.0f},
     {"s-s1-w1to8", GM_K_QUAD, 2u, 7u, 0x00, 0x006u, 1.0f, 16.0f, 4.0f, 1.0f, 8.0f},
     {"s-spr-s4", GM_K_SPRITE, 2u, 7u, 0x00, 0x006u, 4.0f, 16.0f, 4.0f, 0.0f, 0.0f},
+    /* Varying-w confirmation cells (#1373, 2026-11-03): the span rule's rho term (largest
+       gradient component or u-along-x and v-along-y only), mirrored ramps, a non-power-of-two
+       footprint, nearest-level rounding, a bias after the two logarithms and the slope mode. */
+    {"a-quad-v16-w1to8", GM_K_QUAD, 0u, 7u, 0x00, 0x006u, 0.0f, 16.0f, 16.0f, 1.0f, 8.0f},
+    {"a-quad-v16-w8to1", GM_K_QUAD, 0u, 7u, 0x00, 0x006u, 0.0f, 16.0f, 16.0f, 8.0f, 1.0f},
+    {"a-quad-v8-w1to8", GM_K_QUAD, 0u, 7u, 0x00, 0x006u, 0.0f, 8.0f, 8.0f, 1.0f, 8.0f},
+    {"a-quad-u48-w1to4", GM_K_QUAD, 0u, 7u, 0x00, 0x006u, 0.0f, 48.0f, 12.0f, 1.0f, 4.0f},
+    {"a-quad-w4to1", GM_K_QUAD, 0u, 7u, 0x00, 0x006u, 0.0f, 32.0f, 8.0f, 4.0f, 1.0f},
+    {"an-quad-w1to4", GM_K_QUAD, 0u, 7u, 0x00, 0x004u, 0.0f, 32.0f, 8.0f, 1.0f, 4.0f},
+    {"a-quad-w1to4-bm1f8", GM_K_QUAD, 0u, 7u, -24, 0x006u, 0.0f, 32.0f, 8.0f, 1.0f, 4.0f},
+    {"s-s1-w8to1", GM_K_QUAD, 2u, 7u, 0x00, 0x006u, 1.0f, 16.0f, 4.0f, 8.0f, 1.0f},
+    {"s-s3-w1to8", GM_K_QUAD, 2u, 7u, 0x00, 0x006u, 3.0f, 16.0f, 4.0f, 1.0f, 8.0f},
 };
 
 /* Level `level`'s side in texels, its buffer width (whole 16-byte rows: at least 4 texels)
@@ -1577,6 +1634,1698 @@ static int hle_run(void)
 }
 
 #endif /* GE_CASE_MIP */
+
+/* ------------------------------------------------------------------------- */
+
+#if PSP_ORACLE_CASE == GE_CASE_LIGHT
+
+#include <math.h>
+
+/* GE lighting cells (PSP-GE-LIGHT-001, #1732). Each draw is one display list of project-written
+ * command words (no game data): transform mode, world = view = identity, an orthographic
+ * projection (clip = vertex position, w = 1) and the ge-mip viewport (screen x = 32 + 32 X,
+ * y = 16 + 16 Y on a 64x32 8888 buffer). Sample i is a flat-shaded quad (two triangles, six
+ * vertices of type float normal | float position, all with the same normal) covering
+ * [x - 0.375, x + 0.625] x [y - 0.375, y + 0.625] for the pixel (x, y) = (16 + i % 16,
+ * 8 + i / 16): its pixel whether the GE samples at the integer or the half-integer point, and
+ * no neighbour. Every per-fragment unit, texturing, fog, dither, blending and culling is off,
+ * so the pixel is the lit vertex colour.
+ *
+ * One light, light 0, directional (type 0) with position (0, 0, 1): the Blinn half vector with
+ * the eye (0, 0, 1) is (0, 0, 2), so N.L and N.H are both the normal's z. MATERIALUPDATE 0,
+ * emissive, material ambient, scene ambient and the light's ambient colour 0; material and
+ * scene ambient alpha 0xff, light mode single colour.
+ *   family s (specular):        light component 1, light diffuse 0, light specular and
+ *                               material specular 0xffffff, material diffuse 0;
+ *   family d (powered diffuse): light component 2, light diffuse and material diffuse
+ *                               0xffffff, light and material specular 0.
+ * The specular coefficient k is the float's top 24 bits (exact for every k here).
+ *
+ * Normals: (0, y, z) in float. Samples 0..255 have z = powf((j + 0.5) / 256, 1 / k), so z^k
+ * spreads over 0..1; samples 256..271 have z = 1 - m 2^-24 for m = 0..15. y is
+ * sqrtf(max(0, 1 - z z)). Both are computed on the PSP CPU and recorded bit for bit, so the
+ * host needs no libm of its own to know the GE's input. */
+
+#define GL_FB_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
+#define GL_ZB_OFFSET 0x00110000u   /* depth buffer pointer; depth test and writes are off */
+#define GL_STRIDE 64u
+#define GL_ROWS 32u
+#define GL_WX 16u                  /* window x 16..31, y 8..24 */
+#define GL_WY 8u
+#define GL_WW 16u
+#define GL_WH 17u
+#define GL_N 272u                  /* samples: one per window pixel */
+#define GL_SPREAD 256u             /* samples 0..255 spread z^k over 0..1; 256..271 near 1 */
+#define GL_VTX_FLOATS 6u           /* nx, ny, nz, x, y, z */
+#define GL_VTX_PER_SAMPLE 6u
+#define GL_VTX_WORDS (GL_N * GL_VTX_PER_SAMPLE * GL_VTX_FLOATS)
+#define GL_LIST_WORDS 160u
+#define GL_WAIT_POLLS 5000u        /* 5000 x 100 us: a half-second bound per draw */
+#define GL_WAIT_POLL_US 100u
+
+struct gl_coef {
+    const char *name;
+    float k;
+};
+
+#define GL_COEF_COUNT 10u
+static const struct gl_coef gl_coefs[GL_COEF_COUNT] = {
+    {"k1", 1.0f}, {"k2", 2.0f}, {"k3p5", 3.5f}, {"k8", 8.0f}, {"k10", 10.0f},
+    {"k16", 16.0f}, {"k31", 31.0f}, {"k64", 64.0f}, {"k100", 100.0f}, {"k128", 128.0f},
+};
+
+/* Family s: light component 1, specular colours white. Family d: component 2, diffuse white. */
+struct gl_family {
+    const char *name;
+    uint32_t comp, light_diffuse, light_specular, mat_diffuse, mat_specular;
+};
+
+static const struct gl_family gl_families[2] = {
+    {"s", 1u, 0x000000u, 0xffffffu, 0x000000u, 0xffffffu},
+    {"d", 2u, 0xffffffu, 0x000000u, 0xffffffu, 0x000000u},
+};
+
+static float s_gl_vtx[GL_VTX_WORDS] __attribute__((aligned(64)));
+static uint32_t s_gl_list[GL_LIST_WORDS] __attribute__((aligned(64)));
+static uint32_t s_gl_ny[GL_N];
+static uint32_t s_gl_nz[GL_N];
+static uint32_t s_gl_win[GL_N];
+
+static uint32_t gl_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static float gl_bitsf(uint32_t u)
+{
+    float f;
+    memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+static uint32_t gl_phys(const void *p)
+{
+    return (uint32_t)(uintptr_t)p & 0x0fffffffu;
+}
+
+/* The uncached mirror of the 8 KiB colour block at VRAM offset GL_FB_OFFSET. */
+static volatile uint32_t *gl_fb(void)
+{
+    const uint32_t vram = (uint32_t)(uintptr_t)sceGeEdramGetAddr();
+    return (volatile uint32_t *)(uintptr_t)((vram | 0x40000000u) + GL_FB_OFFSET);
+}
+
+/* The 272 normals for coefficient k, as float bits. */
+static void gl_normals(float k)
+{
+    const float inv = 1.0f / k;
+    for (uint32_t i = 0; i < GL_N; i++) {
+        float z;
+        if (i < GL_SPREAD) {
+            z = powf(((float)i + 0.5f) / (float)GL_SPREAD, inv);
+            if (!(z <= 1.0f)) {
+                z = 1.0f;
+            }
+            if (z < 0.0f) {
+                z = 0.0f;
+            }
+        } else {
+            z = 1.0f - (float)(i - GL_SPREAD) * 0x1p-24f;
+        }
+        const float y = sqrtf(fmaxf(0.0f, 1.0f - z * z));
+        s_gl_nz[i] = gl_fbits(z);
+        s_gl_ny[i] = gl_fbits(y);
+    }
+}
+
+/* Every sample's six vertices: float normal (0, y, z), then float position (X, Y, 0) in clip
+   units of the viewport, x = 32 + 32 X and y = 16 + 16 Y. Every coordinate is a multiple of
+   1/8 pixel, so the clip values and their screen positions are exact. */
+static void gl_vertices(void)
+{
+    static const float corner[GL_VTX_PER_SAMPLE][2] = {
+        {-0.375f, -0.375f}, {0.625f, -0.375f}, {-0.375f, 0.625f},
+        {-0.375f, 0.625f}, {0.625f, -0.375f}, {0.625f, 0.625f},
+    };
+    float *v = s_gl_vtx;
+    for (uint32_t i = 0; i < GL_N; i++) {
+        const float px = (float)(GL_WX + i % GL_WW);
+        const float py = (float)(GL_WY + i / GL_WW);
+        const float ny = gl_bitsf(s_gl_ny[i]);
+        const float nz = gl_bitsf(s_gl_nz[i]);
+        for (uint32_t c = 0; c < GL_VTX_PER_SAMPLE; c++) {
+            *v++ = 0.0f;
+            *v++ = ny;
+            *v++ = nz;
+            *v++ = (px + corner[c][0] - 32.0f) / 32.0f;
+            *v++ = (py + corner[c][1] - 16.0f) / 16.0f;
+            *v++ = 0.0f;
+        }
+    }
+}
+
+/* The draw's display list for vertex words at `vtx` (physical address); returns the word count.
+   Every state the draw reads is set. */
+static uint32_t gl_list(const struct gl_family *f, float k, uint32_t vtx, uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    static const float ident43[12] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                      0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+    static const float proj[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                   0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    const uint32_t full = (GL_STRIDE - 1u) | ((GL_ROWS - 1u) << 10);
+    const uint32_t one = gl_fbits(1.0f) >> 8;
+    uint32_t n = 0;
+#define GL_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GL_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GL_W(0x9c, GL_FB_OFFSET);
+    GL_W(0x9d, GL_STRIDE);
+    GL_W(0xd2, 3u);             /* 8888 */
+    GL_W(0x9e, GL_ZB_OFFSET);
+    GL_W(0x9f, GL_STRIDE);
+    GL_W(0x15, 0);
+    GL_W(0x16, full);
+    GL_W(0xd4, 0);
+    GL_W(0xd5, full);
+    GL_W(0xd6, 0);
+    GL_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GL_W(off_units[i], 0);
+    }
+    GL_W(0x1e, 0);              /* texture off */
+    GL_W(0xc9, 0);              /* texture function MODULATE, RGB, no colour doubling */
+    GL_W(0x50, 0);              /* flat shading */
+    GL_W(0xd3, 0);              /* clear mode off */
+    GL_W(0xe7, 1);              /* depth writes off */
+    GL_W(0xe8, 0);
+    GL_W(0xe9, 0);
+    GL_W(0xdb, 0x00ff0001u);    /* alpha test ALWAYS */
+    GL_W(0xd8, 1);              /* colour test ALWAYS */
+    GL_W(0xd9, 0);
+    GL_W(0xda, 0);
+    GL_W(0xdc, 0x00ff0001u);    /* stencil test ALWAYS */
+    GL_W(0xdd, 0);              /* KEEP, KEEP, KEEP */
+    GL_W(0xde, 1);              /* depth test ALWAYS */
+    GL_W(0xdf, 0x32u);
+    GL_W(0xe0, 0);
+    GL_W(0xe1, 0);
+    GL_W(0xe6, 3);              /* logic op COPY */
+    GL_W(0xcf, 0);
+    GL_W(0xcd, 0);
+    GL_W(0xce, 0);
+    /* Material and scene. */
+    GL_W(0x51, 0);              /* normals not reversed */
+    GL_W(0x53, 0);              /* MATERIALUPDATE: every material colour from its register */
+    GL_W(0x54, 0);              /* emissive */
+    GL_W(0x55, 0);              /* material ambient */
+    GL_W(0x56, f->mat_diffuse);
+    GL_W(0x57, f->mat_specular);
+    GL_W(0x58, 0xffu);          /* material alpha */
+    GL_W(0x5b, gl_fbits(k) >> 8);
+    GL_W(0x5c, 0);              /* scene ambient colour */
+    GL_W(0x5d, 0xffu);          /* scene ambient alpha */
+    GL_W(0x5e, 0);              /* light mode: single colour */
+    /* Light 0: directional, position (0, 0, 1); lights 1-3 off. */
+    GL_W(0x5f, f->comp);
+    for (uint32_t i = 1; i < 4u; i++) {
+        GL_W(0x5f + i, 0);
+    }
+    GL_W(0x63, 0);
+    GL_W(0x64, 0);
+    GL_W(0x65, one);
+    GL_W(0x6f, 0);              /* direction, used only by spot lights */
+    GL_W(0x70, 0);
+    GL_W(0x71, one);
+    GL_W(0x7b, one);            /* attenuation 1, 0, 0, used only by point and spot lights */
+    GL_W(0x7c, 0);
+    GL_W(0x7d, 0);
+    GL_W(0x8f, 0);              /* light 0 ambient */
+    GL_W(0x90, f->light_diffuse);
+    GL_W(0x91, f->light_specular);
+    GL_W(0x18, 1);
+    GL_W(0x19, 0);
+    GL_W(0x1a, 0);
+    GL_W(0x1b, 0);
+    GL_W(0x17, 1);              /* lighting on */
+    /* Transform. */
+    GL_W(0x3a, 0);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GL_W(0x3b, gl_fbits(ident43[i]) >> 8);
+    }
+    GL_W(0x3c, 0);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GL_W(0x3d, gl_fbits(ident43[i]) >> 8);
+    }
+    GL_W(0x3e, 0);
+    for (uint32_t i = 0; i < 16u; i++) {
+        GL_W(0x3f, gl_fbits(proj[i]) >> 8);
+    }
+    GL_W(0x42, gl_fbits(32.0f) >> 8);   /* viewport: x = 32 + 32 X, y = 16 + 16 Y */
+    GL_W(0x43, gl_fbits(16.0f) >> 8);
+    GL_W(0x44, 0);
+    GL_W(0x45, gl_fbits(2048.0f) >> 8);
+    GL_W(0x46, gl_fbits(2048.0f) >> 8);
+    GL_W(0x47, gl_fbits(32768.0f) >> 8);
+    GL_W(0x4c, (2048u - 32u) << 4);
+    GL_W(0x4d, (2048u - 16u) << 4);
+    GL_W(0x12, 0x000001e0u);    /* transform, float normal, float position */
+    GL_W(0x01, vtx);
+    GL_W(0x04, (3u << 16) | (GL_N * GL_VTX_PER_SAMPLE));   /* triangles */
+    GL_W(0x0f, 0);
+    GL_W(0x0c, 0);
+#undef GL_W
+    return n;
+}
+
+/* One draw: clear the block, queue the list, wait (bounded), read the window back, then the
+   records: `<f>-<k>-draw` (the GE wait outcome, the list length, k and the light component) and
+   one `<f>-<k>-rN` record per window row. */
+static void gl_draw(const struct gl_family *f, const struct gl_coef *c)
+{
+    static char name[32];
+    static char row[48];
+    snprintf(name, sizeof(name), "%s-%s", f->name, c->name);
+    hle_step(name);
+    volatile uint32_t *fb = gl_fb();
+    for (unsigned i = 0; i < GL_STRIDE * GL_ROWS; i++) {
+        fb[i] = 0u;
+    }
+    __asm__ volatile("sync" ::: "memory");
+    const uint32_t words = gl_list(f, c->k, gl_phys(s_gl_vtx), s_gl_list);
+    sceKernelDcacheWritebackAll();
+    const uint32_t t0 = sceKernelGetSystemTimeLow();
+    const int qid = sceGeListEnQueue(s_gl_list, NULL, -1, NULL);
+    int list_state = qid;
+    int draw_state = -1;
+    int idle = 0;
+    for (unsigned i = 0; i < GL_WAIT_POLLS; i++) {
+        list_state = qid >= 0 ? sceGeListSync(qid, 1) : qid;
+        draw_state = sceGeDrawSync(1);
+        idle = draw_state == PSP_GE_LIST_DONE;
+        if (idle) {
+            break;
+        }
+        sceKernelDelayThread(GL_WAIT_POLL_US);
+    }
+    const uint32_t elapsed = sceKernelGetSystemTimeLow() - t0;
+    int reset_rc = 0;
+    if (!idle) {
+        PspGeBreakParam param;
+        memset(&param, 0, sizeof(param));
+        reset_rc = sceGeBreak(1, &param);
+        for (unsigned i = 0; i < GL_WAIT_POLLS; i++) {
+            if (sceGeDrawSync(1) == PSP_GE_LIST_DONE) {
+                break;
+            }
+            sceKernelDelayThread(GL_WAIT_POLL_US);
+        }
+    }
+    for (uint32_t i = 0; i < GL_N; i++) {
+        s_gl_win[i] = fb[(GL_WY + i / GL_WW) * GL_STRIDE + GL_WX + i % GL_WW];
+    }
+    const uint32_t draw[10] = {(uint32_t)qid, (uint32_t)list_state, (uint32_t)draw_state,
+                               elapsed, (uint32_t)idle, (uint32_t)reset_rc, words,
+                               gl_fbits(c->k), gl_fbits(c->k) >> 8, f->comp};
+    snprintf(row, sizeof(row), "%s-draw", name);
+    hle_record(row, qid < 0 ? "FAIL" : idle ? "PASS" : "TIMEOUT", (uint32_t)qid, draw, 10);
+    for (uint32_t y = 0; y < GL_WH; y++) {
+        snprintf(row, sizeof(row), "%s-r%u", name, (unsigned int)y);
+        hle_record(row, "PASS", y, &s_gl_win[y * GL_WW], GL_WW);
+    }
+}
+
+/* Per coefficient: the normals' z rows, their y rows, then the s and d draws. */
+static int hle_run(void)
+{
+    static char row[48];
+    for (uint32_t ci = 0; ci < GL_COEF_COUNT; ci++) {
+        const struct gl_coef *c = &gl_coefs[ci];
+        gl_normals(c->k);
+        gl_vertices();
+        for (uint32_t y = 0; y < GL_WH; y++) {
+            snprintf(row, sizeof(row), "%s-z%u", c->name, (unsigned int)y);
+            hle_record(row, "PASS", gl_fbits(c->k), &s_gl_nz[y * GL_WW], GL_WW);
+        }
+        for (uint32_t y = 0; y < GL_WH; y++) {
+            snprintf(row, sizeof(row), "%s-y%u", c->name, (unsigned int)y);
+            hle_record(row, "PASS", gl_fbits(c->k), &s_gl_ny[y * GL_WW], GL_WW);
+        }
+        for (uint32_t fi = 0; fi < 2u; fi++) {
+            gl_draw(&gl_families[fi], c);
+        }
+    }
+    return 1;
+}
+
+#endif /* GE_CASE_LIGHT */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == GE_CASE_OVERLAP
+
+/* ==== GE overlap cells (PSP-GE-OVERLAP-001, #2109) ====
+ * Whether a primitive that blends reads the colour an earlier primitive of the same PRIM
+ * command wrote, and what the GE stores when it does, in 8888 and in 5650 with and without
+ * dithering. Each cell is one display list of project-written command words (no game data)
+ * that draws through-mode, untextured, flat-coloured layers into the 16x4 window x 16..31,
+ * y 8..11 of a 64x32 colour buffer at VRAM offset GO_FB_OFFSET whose other pixels are 0 and
+ * whose window holds go_dst() before the list runs. Every per-fragment unit is off except
+ * blending (source alpha, one minus source alpha, add) and, on the `565d` cells, dithering
+ * with the PSP SDK's default matrix. Depth test and writes are off.
+ *
+ * Layers, in window x (every layer covers the window's four rows; x1 is exclusive):
+ *   A: x 0..10, ABGR 0xa0f808f8;   B: x 6..16, ABGR 0x601010f0;   C: x 3..13, ABGR 0x8080f010.
+ * A shape lists its layers in draw order. `-1p` draws them all with one PRIM command and
+ * `-np` with one PRIM per layer (the control: separate primitives, as a batch boundary
+ * would). `t` shapes draw each layer as a two-triangle quad instead of a sprite. The
+ * destination's red and blue are below 0x80 and its green at or above it; A and B have high
+ * red and low green, so both are far from it, and they differ in blue. Wherever two layers
+ * overlap, the in-order result, the result of every layer reading the pre-PRIM destination,
+ * and (for A and B) the result in the other order differ by at least three 5650 steps in some
+ * channel (tools/test_psp_oracle.py checks this), so the cells cannot pass by rounding alone.
+ * The result is the window's 64 pixels (5650 zero-extended). */
+
+#define GO_FB_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
+#define GO_ZB_OFFSET 0x00110000u   /* depth buffer pointer; depth test and writes are off */
+#define GO_STRIDE 64u
+#define GO_ROWS 32u
+#define GO_WX 16u                  /* window x 16..31, y 8..11 */
+#define GO_WY 8u
+#define GO_WW 16u
+#define GO_WH 4u
+#define GO_N 64u                   /* pixels in the window */
+#define GO_LIST_WORDS 192u
+#define GO_VTX_WORDS 96u           /* three triangle-pair layers: 18 vertices of 4 words */
+#define GO_Z 32768.0f
+
+/* x0, x1 (window x, x1 exclusive) and the ABGR colour of layers A, B and C. */
+struct go_layer {
+    uint8_t x0, x1;
+    uint32_t col;
+};
+static const struct go_layer go_layers[3] = {
+    {0u, 10u, 0xa0f808f8u},
+    {6u, 16u, 0x601010f0u},
+    {3u, 13u, 0x8080f010u},
+};
+
+/* layers: draw order, as letters A to C; split: one PRIM per layer instead of one PRIM;
+   tri: two-triangle quads instead of sprites. */
+struct go_shape {
+    const char *name;
+    const char *layers;
+    uint8_t split, tri;
+};
+#define GO_SHAPE_COUNT 10u
+static const struct go_shape go_shapes[GO_SHAPE_COUNT] = {
+    {"a", "A", 0u, 0u},
+    {"b", "B", 0u, 0u},
+    {"ab-1p", "AB", 0u, 0u},
+    {"ab-np", "AB", 1u, 0u},
+    {"ba-1p", "BA", 0u, 0u},
+    {"aa-1p", "AA", 0u, 0u},
+    {"abc-1p", "ABC", 0u, 0u},
+    {"abc-np", "ABC", 1u, 0u},
+    {"tab-1p", "AB", 0u, 1u},
+    {"tab-np", "AB", 1u, 1u},
+};
+
+/* psm: framebuffer format; dither: dithering on. */
+struct go_format {
+    const char *name;
+    uint8_t psm, dither;
+};
+#define GO_FORMAT_COUNT 3u
+static const struct go_format go_formats[GO_FORMAT_COUNT] = {
+    {"8888", 3u, 0u},
+    {"565d", 0u, 1u},
+    {"565", 0u, 0u},
+};
+
+/* A fixed integer hash of the window index. */
+static uint32_t go_hash(uint32_t i)
+{
+    uint32_t x = i * 0x9e3779b9u + 0x7f4a7c15u;
+    x ^= x >> 15;
+    x *= 0x2c1b3c6du;
+    x ^= x >> 12;
+    x *= 0x297a2d39u;
+    x ^= x >> 15;
+    return x;
+}
+
+/* Window pixel i before the draw: red and blue 0x00..0x7f, green 0x80..0xff, any alpha; in
+   5650 the top bits of each channel (red in bits 0-4, green 5-10, blue 11-15). */
+static uint32_t go_dst(uint32_t psm, uint32_t i)
+{
+    const uint32_t h = go_hash(i);
+    const uint32_t r = h & 0x7fu;
+    const uint32_t g = 0x80u | ((h >> 8) & 0x7fu);
+    const uint32_t b = (h >> 16) & 0x7fu;
+    if (psm == 3u) {
+        return r | (g << 8) | (b << 16) | (h & 0xff000000u);
+    }
+    return (r >> 3) | ((g >> 2) << 5) | ((b >> 3) << 11);
+}
+
+static uint32_t go_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+/* One through-mode vertex: 8888 colour; float x, y, z (vertex type 0x80019c). */
+static uint32_t go_vtx(uint32_t *out, uint32_t col, float x, float y)
+{
+    out[0] = col;
+    out[1] = go_fbits(x);
+    out[2] = go_fbits(y);
+    out[3] = go_fbits(GO_Z);
+    return 4u;
+}
+
+/* Layer l's vertices in screen pixels: a sprite (two corners) or two triangles that share the
+   diagonal; returns the word count. */
+static uint32_t go_layer_vertices(const struct go_layer *l, uint8_t tri, uint32_t *out)
+{
+    const float x0 = (float)(GO_WX + l->x0);
+    const float x1 = (float)(GO_WX + l->x1);
+    const float y0 = (float)GO_WY;
+    const float y1 = (float)(GO_WY + GO_WH);
+    uint32_t n = 0;
+    if (!tri) {
+        n += go_vtx(out + n, l->col, x0, y0);
+        n += go_vtx(out + n, l->col, x1, y1);
+        return n;
+    }
+    n += go_vtx(out + n, l->col, x0, y0);
+    n += go_vtx(out + n, l->col, x1, y0);
+    n += go_vtx(out + n, l->col, x0, y1);
+    n += go_vtx(out + n, l->col, x1, y0);
+    n += go_vtx(out + n, l->col, x1, y1);
+    n += go_vtx(out + n, l->col, x0, y1);
+    return n;
+}
+
+/* The shape's vertex words, layer after layer; returns the count. */
+static uint32_t go_vertices(const struct go_shape *s, uint32_t *out)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < 3u && s->layers[i] != '\0'; i++) {
+        n += go_layer_vertices(&go_layers[s->layers[i] - 'A'], s->tri, out + n);
+    }
+    return n;
+}
+
+/* The cell's display list for vertex words at `vtx` (physical address); returns the word
+   count. Every state the draw reads is set. */
+static uint32_t go_list(const struct go_shape *s, const struct go_format *f, uint32_t vtx,
+                        uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1eu, 0x1fu, 0x20u,
+                                          0x21u, 0x22u, 0x23u, 0x24u, 0x25u, 0x27u};
+    const uint32_t full = (GO_STRIDE - 1u) | ((GO_ROWS - 1u) << 10);
+    const uint32_t per_layer = s->tri ? 6u : 2u;
+    const uint32_t prim = s->tri ? 3u : 6u;
+    const uint32_t layers = (uint32_t)strlen(s->layers);
+    uint32_t n = 0;
+#define GO_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GO_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GO_W(0x9c, GO_FB_OFFSET);
+    GO_W(0x9d, GO_STRIDE);
+    GO_W(0xd2, f->psm);
+    GO_W(0x9e, GO_ZB_OFFSET);
+    GO_W(0x9f, GO_STRIDE);
+    GO_W(0x15, 0);
+    GO_W(0x16, full);
+    GO_W(0xd4, 0);
+    GO_W(0xd5, full);
+    GO_W(0x4c, 0);
+    GO_W(0x4d, 0);
+    GO_W(0xd6, 0);
+    GO_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GO_W(off_units[i], 0);
+    }
+    GO_W(0x28, 0);              /* logic op off */
+    GO_W(0x50, 0);              /* flat shading */
+    GO_W(0xd3, 0);              /* clear mode off */
+    GO_W(0xe7, 1);              /* depth writes off */
+    GO_W(0xe8, 0);
+    GO_W(0xe9, 0);
+    GO_W(0xdb, 0x00ff0001u);    /* alpha test ALWAYS */
+    GO_W(0xd8, 1);              /* colour test ALWAYS */
+    GO_W(0xd9, 0);
+    GO_W(0xda, 0);
+    GO_W(0xdc, 0x00ff0001u);    /* stencil test ALWAYS */
+    GO_W(0xdd, 0);              /* KEEP, KEEP, KEEP */
+    GO_W(0xde, 1);              /* depth test ALWAYS */
+    GO_W(0xe6, 3);              /* logic op COPY */
+    GO_W(0xe2, 0x1d0cu);        /* the PSP SDK default dither matrix */
+    GO_W(0xe3, 0xf3e2u);
+    GO_W(0xe4, 0x0c1du);
+    GO_W(0xe5, 0xe2f3u);
+    GO_W(0xdf, 0x32u);          /* source alpha, one minus source alpha, add */
+    GO_W(0xe0, 0);
+    GO_W(0xe1, 0);
+    GO_W(0x21, 1);              /* blending on */
+    GO_W(0x20, f->dither);
+    GO_W(0x12, 0x0080019cu);    /* through, 8888 colour, float position */
+    if (!s->split) {
+        GO_W(0x01, vtx);
+        GO_W(0x04, (prim << 16) | (per_layer * layers));
+    } else {
+        for (uint32_t i = 0; i < layers; i++) {
+            GO_W(0x01, vtx + i * per_layer * 16u);
+            GO_W(0x04, (prim << 16) | per_layer);
+        }
+    }
+    GO_W(0x0f, 0);
+    GO_W(0x0c, 0);
+#undef GO_W
+    return n;
+}
+
+/* FNV-1a 64 over the window's 64 result words, each little-endian. */
+static uint64_t go_digest(const uint32_t *px)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < GO_N; i++) {
+        for (uint32_t b = 0; b < 4u; b++) {
+            h ^= (px[i] >> (8u * b)) & 0xffu;
+            h *= 0x100000001b3ull;
+        }
+    }
+    return h;
+}
+/* ==== end of the GE overlap cells ==== */
+
+#define GO_WAIT_POLLS 5000u         /* 5000 x 100 us: a half-second bound per draw */
+#define GO_WAIT_POLL_US 100u
+
+static uint32_t s_go_list[GO_LIST_WORDS] __attribute__((aligned(64)));
+static uint32_t s_go_vtx[GO_VTX_WORDS] __attribute__((aligned(64)));
+static uint32_t s_go_win[GO_N];
+
+static uint32_t go_phys(const void *p)
+{
+    return (uint32_t)(uintptr_t)p & 0x0fffffffu;
+}
+
+/* The uncached mirror of the 8 KiB colour block at VRAM offset GO_FB_OFFSET. */
+static uintptr_t go_fb(void)
+{
+    const uint32_t vram = (uint32_t)(uintptr_t)sceGeEdramGetAddr();
+    return (uintptr_t)((vram | 0x40000000u) + GO_FB_OFFSET);
+}
+
+/* One cell: clear the block, write the window's destination pattern, queue the list, wait
+   (bounded), read the window back, then the records: `<cell>-draw` (the GE wait outcome, the
+   list length and the window digest) and one `<cell>-rN` record per window row. */
+static void go_draw(const struct go_shape *s, const struct go_format *f)
+{
+    static char name[32];
+    static char row[48];
+    snprintf(name, sizeof(name), "%s-%s", s->name, f->name);
+    hle_step(name);
+    volatile uint32_t *fb32 = (volatile uint32_t *)go_fb();
+    volatile uint16_t *fb16 = (volatile uint16_t *)go_fb();
+    for (unsigned i = 0; i < GO_STRIDE * GO_ROWS; i++) {
+        fb32[i] = 0u;
+    }
+    for (uint32_t i = 0; i < GO_N; i++) {
+        const uint32_t at = (GO_WY + i / GO_WW) * GO_STRIDE + GO_WX + i % GO_WW;
+        if (f->psm == 3u) {
+            fb32[at] = go_dst(f->psm, i);
+        } else {
+            fb16[at] = (uint16_t)go_dst(f->psm, i);
+        }
+    }
+    __asm__ volatile("sync" ::: "memory");
+    (void)go_vertices(s, s_go_vtx);
+    const uint32_t words = go_list(s, f, go_phys(s_go_vtx), s_go_list);
+    sceKernelDcacheWritebackAll();
+    const uint32_t t0 = sceKernelGetSystemTimeLow();
+    const int qid = sceGeListEnQueue(s_go_list, NULL, -1, NULL);
+    int list_state = qid;
+    int draw_state = -1;
+    int idle = 0;
+    for (unsigned i = 0; i < GO_WAIT_POLLS; i++) {
+        list_state = qid >= 0 ? sceGeListSync(qid, 1) : qid;
+        draw_state = sceGeDrawSync(1);
+        idle = draw_state == PSP_GE_LIST_DONE;
+        if (idle) {
+            break;
+        }
+        sceKernelDelayThread(GO_WAIT_POLL_US);
+    }
+    const uint32_t elapsed = sceKernelGetSystemTimeLow() - t0;
+    int reset_rc = 0;
+    if (!idle) {
+        PspGeBreakParam param;
+        memset(&param, 0, sizeof(param));
+        reset_rc = sceGeBreak(1, &param);
+        for (unsigned i = 0; i < GO_WAIT_POLLS; i++) {
+            if (sceGeDrawSync(1) == PSP_GE_LIST_DONE) {
+                break;
+            }
+            sceKernelDelayThread(GO_WAIT_POLL_US);
+        }
+    }
+    for (uint32_t i = 0; i < GO_N; i++) {
+        const uint32_t at = (GO_WY + i / GO_WW) * GO_STRIDE + GO_WX + i % GO_WW;
+        s_go_win[i] = f->psm == 3u ? fb32[at] : (uint32_t)fb16[at];
+    }
+    const uint64_t digest = go_digest(s_go_win);
+    const uint32_t draw[9] = {(uint32_t)qid, (uint32_t)list_state, (uint32_t)draw_state,
+                              elapsed, (uint32_t)idle, (uint32_t)reset_rc, words,
+                              (uint32_t)digest, (uint32_t)(digest >> 32)};
+    snprintf(row, sizeof(row), "%s-draw", name);
+    hle_record(row, qid < 0 ? "FAIL" : idle ? "PASS" : "TIMEOUT", (uint32_t)qid, draw, 9);
+    for (uint32_t y = 0; y < GO_WH; y++) {
+        snprintf(row, sizeof(row), "%s-r%u", name, (unsigned int)y);
+        hle_record(row, "PASS", y, &s_go_win[y * GO_WW], GO_WW);
+    }
+}
+
+static int hle_run(void)
+{
+    for (uint32_t si = 0; si < GO_SHAPE_COUNT; si++) {
+        for (uint32_t fi = 0; fi < GO_FORMAT_COUNT; fi++) {
+            go_draw(&go_shapes[si], &go_formats[fi]);
+        }
+    }
+    return 1;
+}
+
+#endif /* GE_CASE_OVERLAP */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == GE_CASE_CLUT_MIP
+
+/* ==== GE CLUT mip cells (PSP-GE-MIP-002, #2031) ====
+ * What TEXMODE bit 8 (sceGuTexMode's multi-CLUT argument) does to an indexed texture's mip
+ * levels. Each cell is one display list of project-written command words (no game data) in
+ * the ge-mip window: the 16x4 window x 16..31, y 8..11 of a 64x32 8888 colour buffer at VRAM
+ * offset GC_FB_OFFSET whose pixels are 0 before the list runs, one through-mode sprite with
+ * texture coordinates (0, 0) to (16, 4), REPLACE/RGBA, nearest filtering, clamped, and the
+ * level chosen by the constant TEXLEVEL mode (bias = level, as ge-mip's c-bN cells measured).
+ *
+ * The texture has four levels (64, 32, 16 and 8 texels a side). Level L's texel in column x
+ * holds the index gc_base(format) + 4 L + (x & 3), so a pixel names the level sampled even with
+ * the bit clear. CLUT entry k is a colour that names k and the table it came from: in an 8888
+ * CLUT, R = k & 0xff, G = k >> 8, B = 0x80 for the main table and 0x40 for the background
+ * table; in a 4444 CLUT, the raw entry is 0xf000 | k (main) or 0xf800 | k (background), so R,
+ * G and B's nibbles carry k's three nibbles and B's top bit the table. Each list first loads
+ * `bg_blocks` blocks of the background table, then `main_blocks` blocks of the main table, so
+ * an entry the main load did not reach shows the background colour.
+ *
+ * The cells vary: the bit (off, on); the index format (T4, T8, T16); the CLUT format (8888,
+ * 4444); a main load that covers only 16 entries over a full background load; the CLUT start
+ * offset (CLUTFORMAT bits 16-20) and index mask (bits 8-15); and three level-0 controls that
+ * read entries 256 and up with the bit clear, to see how much of a load the CLUT keeps. The
+ * result is the window's first row (the rows are equal: the index depends on x only). */
+
+#define GC_FB_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
+#define GC_ZB_OFFSET 0x00110000u   /* depth buffer pointer; depth test and writes are off */
+#define GC_STRIDE 64u
+#define GC_ROWS 32u
+#define GC_WX 16u                  /* window x 16..31, y 8..11 */
+#define GC_WY 8u
+#define GC_WW 16u
+#define GC_WH 4u
+#define GC_N 64u
+#define GC_LEVELS 4u
+#define GC_TEX_BYTES 12288u        /* T16: 64x64 + 32x32 + 16x16 + 8x8 texels of 2 bytes, padded */
+#define GC_TABLE_ENTRIES 1024u     /* 4096 bytes of 8888, 2048 of 4444: past the largest load */
+#define GC_LIST_WORDS 160u
+#define GC_VTX_WORDS 16u
+
+enum { GC_T4 = 4, GC_T8 = 5, GC_T16 = 6 };
+enum { GC_C4444 = 2, GC_C8888 = 3 };
+
+/* tex_format: TEXFORMAT's index format; clut_format: CLUTFORMAT bits 0-1; multi: TEXMODE bit
+   8; level: the constant level; bg_blocks, main_blocks: LOADCLUT counts (32-byte blocks);
+   csa: CLUTFORMAT bits 16-20; mask: CLUTFORMAT bits 8-15 (the shift is 0). */
+struct gc_cell {
+    const char *name;
+    uint8_t tex_format, clut_format, multi, level, bg_blocks, main_blocks, csa, mask;
+};
+
+#define GC_FAMILY(prefix, tf, cf, multi, bg, mainb, csa, mask)                         \
+    {prefix "-l0", tf, cf, multi, 0u, bg, mainb, csa, mask},                            \
+    {prefix "-l1", tf, cf, multi, 1u, bg, mainb, csa, mask},                            \
+    {prefix "-l2", tf, cf, multi, 2u, bg, mainb, csa, mask},                            \
+    {prefix "-l3", tf, cf, multi, 3u, bg, mainb, csa, mask}
+
+#define GC_CELL_COUNT 47u
+static const struct gc_cell gc_cells[GC_CELL_COUNT] = {
+    GC_FAMILY("t8-off", GC_T8, GC_C8888, 0u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t8-on", GC_T8, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t8-on-b40", GC_T8, GC_C8888, 1u, 0x40u, 0x40u, 0u, 0xffu),
+    GC_FAMILY("t4-off", GC_T4, GC_C8888, 0u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t4-on", GC_T4, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t4-on-small", GC_T4, GC_C8888, 1u, 0x20u, 0x02u, 0u, 0xffu),
+    GC_FAMILY("c16-t4-on", GC_T4, GC_C4444, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("c16-t8-on", GC_T8, GC_C4444, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t4-on-csa1", GC_T4, GC_C8888, 1u, 0x20u, 0x20u, 1u, 0xffu),
+    GC_FAMILY("t8-on-mask1f", GC_T8, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0x1fu),
+    GC_FAMILY("t16-on", GC_T16, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    {"cap32-csa16-b20", GC_T8, GC_C8888, 0u, 0u, 0x20u, 0x20u, 16u, 0xffu},
+    {"cap32-csa16-b40", GC_T8, GC_C8888, 0u, 0u, 0x40u, 0x40u, 16u, 0xffu},
+    {"cap16-csa16-b20", GC_T8, GC_C4444, 0u, 0u, 0x20u, 0x20u, 16u, 0xffu},
+};
+_Static_assert(sizeof(gc_cells) / sizeof(gc_cells[0]) == GC_CELL_COUNT, "GC_CELL_COUNT");
+
+static uint32_t gc_base(uint32_t tex_format)
+{
+    return tex_format == GC_T4 ? 0u : tex_format == GC_T8 ? 0x10u : 0x20u;
+}
+
+static uint32_t gc_side(uint32_t level)
+{
+    return 64u >> level;
+}
+
+/* Buffer width in texels: whole 16-byte rows. */
+static uint32_t gc_bufw(uint32_t tex_format, uint32_t level)
+{
+    const uint32_t min = tex_format == GC_T4 ? 32u : tex_format == GC_T8 ? 16u : 8u;
+    const uint32_t side = gc_side(level);
+    return side < min ? min : side;
+}
+
+/* Bytes of `texels` texels of `tex_format`. */
+static uint32_t gc_bytes(uint32_t tex_format, uint32_t texels)
+{
+    return tex_format == GC_T4 ? texels / 2u : tex_format == GC_T8 ? texels : texels * 2u;
+}
+
+static uint32_t gc_level_offset(uint32_t tex_format, uint32_t level)
+{
+    uint32_t off = 0;
+    for (uint32_t l = 0; l < level; l++) {
+        off += (gc_bytes(tex_format, gc_bufw(tex_format, l) * gc_side(l)) + 63u) & ~63u;
+    }
+    return off;
+}
+
+/* The texture block for `tex_format`: level L's texel (x, y) = gc_base + 4 L + (x & 3). */
+static void gc_texture(uint32_t tex_format, uint8_t *out)
+{
+    memset(out, 0, GC_TEX_BYTES);
+    for (uint32_t l = 0; l < GC_LEVELS; l++) {
+        uint8_t *base = out + gc_level_offset(tex_format, l);
+        const uint32_t bufw = gc_bufw(tex_format, l);
+        for (uint32_t y = 0; y < gc_side(l); y++) {
+            for (uint32_t x = 0; x < bufw; x++) {
+                const uint32_t index = gc_base(tex_format) + 4u * l + (x & 3u);
+                const uint32_t t = y * bufw + x;
+                if (tex_format == GC_T4) {
+                    base[t / 2u] |= (uint8_t)((index & 0xfu) << ((t & 1u) * 4u));
+                } else if (tex_format == GC_T8) {
+                    base[t] = (uint8_t)index;
+                } else {
+                    base[2u * t] = (uint8_t)index;
+                    base[2u * t + 1u] = (uint8_t)(index >> 8);
+                }
+            }
+        }
+    }
+}
+
+static uint32_t s_gc_main32[GC_TABLE_ENTRIES] __attribute__((aligned(64)));
+static uint32_t s_gc_bg32[GC_TABLE_ENTRIES] __attribute__((aligned(64)));
+static uint16_t s_gc_main16[2u * GC_TABLE_ENTRIES] __attribute__((aligned(64)));
+static uint16_t s_gc_bg16[2u * GC_TABLE_ENTRIES] __attribute__((aligned(64)));
+
+static void gc_tables(void)
+{
+    for (uint32_t k = 0; k < GC_TABLE_ENTRIES; k++) {
+        s_gc_main32[k] = 0xff800000u | ((k >> 8) << 8) | (k & 0xffu);
+        s_gc_bg32[k] = 0xff400000u | ((k >> 8) << 8) | (k & 0xffu);
+    }
+    for (uint32_t k = 0; k < 2u * GC_TABLE_ENTRIES; k++) {
+        s_gc_main16[k] = (uint16_t)(0xf000u | (k & 0x3ffu));
+        s_gc_bg16[k] = (uint16_t)(0xf800u | (k & 0x3ffu));
+    }
+}
+
+static uint32_t gc_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static uint32_t gc_phys(const void *p)
+{
+    return (uint32_t)(uintptr_t)p & 0x0fffffffu;
+}
+
+/* The cell's display list; returns the word count. Every state the draw reads is set. */
+static uint32_t gc_list(const struct gc_cell *c, uint32_t vtx, uint32_t tex, uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    const uint32_t full = (GC_STRIDE - 1u) | ((GC_ROWS - 1u) << 10);
+    const int c16 = c->clut_format == GC_C4444;
+    const uint32_t bg = gc_phys(c16 ? (const void *)s_gc_bg16 : (const void *)s_gc_bg32);
+    const uint32_t mn = gc_phys(c16 ? (const void *)s_gc_main16 : (const void *)s_gc_main32);
+    uint32_t n = 0;
+#define GC_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GC_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GC_W(0x9c, GC_FB_OFFSET);
+    GC_W(0x9d, GC_STRIDE);
+    GC_W(0xd2, 3u);
+    GC_W(0x9e, GC_ZB_OFFSET);
+    GC_W(0x9f, GC_STRIDE);
+    GC_W(0x15, 0);
+    GC_W(0x16, full);
+    GC_W(0xd4, 0);
+    GC_W(0xd5, full);
+    GC_W(0xd6, 0);
+    GC_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GC_W(off_units[i], 0);
+    }
+    GC_W(0x50, 0);              /* flat shading */
+    GC_W(0xd3, 0);              /* clear mode off */
+    GC_W(0xe7, 1);              /* depth writes off */
+    GC_W(0xe8, 0);
+    GC_W(0xe9, 0);
+    GC_W(0xdb, 0x00ff0001u);    /* alpha test ALWAYS */
+    GC_W(0xd8, 1);              /* colour test ALWAYS */
+    GC_W(0xd9, 0);
+    GC_W(0xda, 0);
+    GC_W(0xdc, 0x00ff0001u);    /* stencil test ALWAYS */
+    GC_W(0xdd, 0);
+    GC_W(0xde, 1);              /* depth test ALWAYS */
+    GC_W(0xdf, 0x32u);
+    GC_W(0xe0, 0);
+    GC_W(0xe1, 0);
+    GC_W(0xe6, 3);              /* logic op COPY */
+    GC_W(0xcf, 0);
+    GC_W(0xcd, 0);
+    GC_W(0xce, 0);
+    GC_W(0x55, 0xffffffu);
+    GC_W(0x58, 0xffu);
+    /* The background load, then the main load (CBP, CBPH, LOADCLUT). */
+    GC_W(0xb0, bg);
+    GC_W(0xb1, (bg >> 8) & 0x000f0000u);
+    GC_W(0xc4, c->bg_blocks);
+    GC_W(0xb0, mn);
+    GC_W(0xb1, (mn >> 8) & 0x000f0000u);
+    GC_W(0xc4, c->main_blocks);
+    GC_W(0xc5, ((uint32_t)c->csa << 16) | ((uint32_t)c->mask << 8) | c->clut_format);
+    GC_W(0x1e, 1);              /* texture on */
+    GC_W(0xc0, 0);              /* UV mapping */
+    GC_W(0xc2, (3u << 16) | ((uint32_t)c->multi << 8));
+    GC_W(0xc3, c->tex_format);
+    for (uint32_t l = 0; l < GC_LEVELS; l++) {
+        const uint32_t a = tex + gc_level_offset(c->tex_format, l);
+        const uint32_t log2 = 6u - l;
+        GC_W(0xa0 + l, a);
+        GC_W(0xa8 + l, ((a >> 8) & 0x000f0000u) | gc_bufw(c->tex_format, l));
+        GC_W(0xb8 + l, (log2 << 8) | log2);
+    }
+    GC_W(0xc6, 0x004u);         /* nearest, nearest level */
+    GC_W(0xc7, 0x101u);         /* clamp u and v */
+    GC_W(0xc8, ((uint32_t)c->level << 20) | 1u);   /* constant level, bias = level (4.4) */
+    GC_W(0xd0, 0);
+    GC_W(0xc9, 0x103u);         /* REPLACE, RGBA */
+    GC_W(0xca, 0);
+    GC_W(0xcb, 0);              /* texture flush */
+    GC_W(0x4c, 0);
+    GC_W(0x4d, 0);
+    GC_W(0x12, 0x00800183u);    /* through, float uv, float position */
+    GC_W(0x01, vtx);
+    GC_W(0x04, (6u << 16) | 2u);
+    GC_W(0x0f, 0);
+    GC_W(0x0c, 0);
+#undef GC_W
+    return n;
+}
+
+#define GC_WAIT_POLLS 5000u         /* 5000 x 100 us: a half-second bound per draw */
+#define GC_WAIT_POLL_US 100u
+
+static uint8_t s_gc_tex[GC_TEX_BYTES] __attribute__((aligned(64)));
+static uint32_t s_gc_list[GC_LIST_WORDS] __attribute__((aligned(64)));
+static uint32_t s_gc_vtx[GC_VTX_WORDS] __attribute__((aligned(64)));
+static uint32_t s_gc_win[GC_N];
+
+/* The uncached mirror of the 8 KiB colour block at VRAM offset GC_FB_OFFSET. */
+static volatile uint32_t *gc_fb(void)
+{
+    const uint32_t vram = (uint32_t)(uintptr_t)sceGeEdramGetAddr();
+    return (volatile uint32_t *)(uintptr_t)((vram | 0x40000000u) + GC_FB_OFFSET);
+}
+
+/* One cell: clear the block, queue the list, wait (bounded), read the window back, then the
+   records: `<cell>-draw` (the GE wait outcome and the window digest) and `<cell>-r0`, the
+   window's first row. */
+static void gc_draw(const struct gc_cell *c)
+{
+    static char row[64];
+    hle_step(c->name);
+    volatile uint32_t *fb = gc_fb();
+    for (unsigned i = 0; i < GC_STRIDE * GC_ROWS; i++) {
+        fb[i] = 0u;
+    }
+    __asm__ volatile("sync" ::: "memory");
+    const float x0 = (float)GC_WX, y0 = (float)GC_WY;
+    const float verts[10] = {0.0f, 0.0f, x0, y0, 0.0f,
+                             16.0f, 4.0f, x0 + (float)GC_WW, y0 + (float)GC_WH, 0.0f};
+    for (uint32_t i = 0; i < 10u; i++) {
+        s_gc_vtx[i] = gc_fbits(verts[i]);
+    }
+    gc_texture(c->tex_format, s_gc_tex);
+    const uint32_t words = gc_list(c, gc_phys(s_gc_vtx), gc_phys(s_gc_tex), s_gc_list);
+    sceKernelDcacheWritebackAll();
+    const uint32_t t0 = sceKernelGetSystemTimeLow();
+    const int qid = sceGeListEnQueue(s_gc_list, NULL, -1, NULL);
+    int list_state = qid;
+    int draw_state = -1;
+    int idle = 0;
+    for (unsigned i = 0; i < GC_WAIT_POLLS; i++) {
+        list_state = qid >= 0 ? sceGeListSync(qid, 1) : qid;
+        draw_state = sceGeDrawSync(1);
+        idle = draw_state == PSP_GE_LIST_DONE;
+        if (idle) {
+            break;
+        }
+        sceKernelDelayThread(GC_WAIT_POLL_US);
+    }
+    const uint32_t elapsed = sceKernelGetSystemTimeLow() - t0;
+    int reset_rc = 0;
+    if (!idle) {
+        PspGeBreakParam param;
+        memset(&param, 0, sizeof(param));
+        reset_rc = sceGeBreak(1, &param);
+        for (unsigned i = 0; i < GC_WAIT_POLLS; i++) {
+            if (sceGeDrawSync(1) == PSP_GE_LIST_DONE) {
+                break;
+            }
+            sceKernelDelayThread(GC_WAIT_POLL_US);
+        }
+    }
+    for (uint32_t i = 0; i < GC_N; i++) {
+        s_gc_win[i] = fb[(GC_WY + i / GC_WW) * GC_STRIDE + GC_WX + i % GC_WW];
+    }
+    uint64_t digest = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < GC_N; i++) {
+        for (uint32_t b = 0; b < 4u; b++) {
+            digest ^= (s_gc_win[i] >> (8u * b)) & 0xffu;
+            digest *= 0x100000001b3ull;
+        }
+    }
+    const uint32_t draw[9] = {(uint32_t)qid, (uint32_t)list_state, (uint32_t)draw_state,
+                              elapsed, (uint32_t)idle, (uint32_t)reset_rc, words,
+                              (uint32_t)digest, (uint32_t)(digest >> 32)};
+    snprintf(row, sizeof(row), "%s-draw", c->name);
+    hle_record(row, qid < 0 ? "FAIL" : idle ? "PASS" : "TIMEOUT", (uint32_t)qid, draw, 9);
+    snprintf(row, sizeof(row), "%s-r0", c->name);
+    hle_record(row, "PASS", 0, s_gc_win, GC_WW);
+}
+
+static int hle_run(void)
+{
+    gc_tables();
+    for (uint32_t i = 0; i < GC_CELL_COUNT; i++) {
+        gc_draw(&gc_cells[i]);
+    }
+    return 1;
+}
+
+#endif /* GE_CASE_CLUT_MIP */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == GE_CASE_WEIGHT
+
+/* ==== GE weighted-vertex cells (PSP-GE-WEIGHT-001, #343) ====
+ * What the GE does with vertex weights in transform mode: the scale of each weight format, the
+ * weight count field, which bone each weight slot selects, and where the components of a weighted
+ * vertex sit. Each cell is one display list of project-written command words (no game data):
+ * world = view = identity, the ge-light orthographic projection and viewport (screen x = 32 + 32 X,
+ * y = 16 + 16 Y on a 64x32 8888 buffer), lighting, texturing, fog, dither, blending, culling and
+ * every test off, flat shading, so a pixel is the vertex colour or 0.
+ *
+ * Sample s (0..15) is a quad (two triangles, six vertices) covering pixel (16 + s, 8) before
+ * skinning, with the ge-light corners. Vertex type: weights, 8888 colour, float position. Bone 0
+ * is the identity plus a y translation of t0 pixels and weight slot 0 holds 1.0 (u8 0x80, u16
+ * 0x8000, float 1.0), so slot 0 carries the quad. The target slot's bone is the zero matrix plus a
+ * translation of 16 pixels in y, so that slot moves the quad down by 16 w pixels, w being the
+ * weight the GE reads; every other bone is the zero matrix plus 64 pixels, off the window, and its
+ * slot holds 0. Read on the model u8 / 128, u16 / 32768, float as is, sample s lands on row
+ * 8 + s in every cell below except f32-neg (row 24 - s) and f32-c1 (row 8): any other row, or no
+ * pixel, measures a different scale, sign, slot order or vertex layout.
+ *
+ * The layout written is the PSPSDK one: weights first, then colour, then position, each
+ * component aligned to its own element size and the vertex to 4 bytes. The u8 and u16 cells
+ * with three and five weights put padding before the colour.
+ *
+ * Records per cell: `<cell>-draw` (10 words: the GE wait outcome as ge-light, the list length,
+ * the vertex type word, the vertex size, the weight count) and the window rows `<cell>-rN`
+ * (x 16..31, y 8..24). */
+
+#define GW_FB_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
+#define GW_ZB_OFFSET 0x00110000u   /* depth buffer pointer; depth test and writes are off */
+#define GW_STRIDE 64u
+#define GW_ROWS 32u
+#define GW_WX 16u                  /* window x 16..31, y 8..24 */
+#define GW_WY 8u
+#define GW_WW 16u
+#define GW_WH 17u
+#define GW_SAMPLES 16u
+#define GW_VTX_PER_SAMPLE 6u
+#define GW_VTX_COUNT (GW_SAMPLES * GW_VTX_PER_SAMPLE)
+#define GW_MAX_VTX_BYTES 48u       /* eight float weights, colour, float position */
+#define GW_BONES 8u
+#define GW_LIST_WORDS 224u
+#define GW_WAIT_POLLS 5000u        /* 5000 x 100 us: a half-second bound per draw */
+#define GW_WAIT_POLL_US 100u
+
+enum { GW_U8 = 1, GW_U16 = 2, GW_F32 = 3 };
+
+/* fmt: VTYPE bits 9-10; count: weights per vertex; target: the slot whose bone moves the quad
+   (0: none); base, step: the target weight of sample s is base + step s, raw for u8 and u16 and
+   in sixteenths for float; t0: bone 0's y translation in pixels. */
+struct gw_cell {
+    const char *name;
+    uint8_t fmt, count, target;
+    int32_t base, step, t0;
+};
+
+#define GW_CELL_COUNT 16u
+static const struct gw_cell gw_cells[GW_CELL_COUNT] = {
+    {"f32-w1", GW_F32, 2u, 1u, 0, 1, 0},
+    {"u8-w1", GW_U8, 2u, 1u, 0, 8, 0},
+    {"u16-w1", GW_U16, 2u, 1u, 0, 0x800, 0},
+    {"u8-hi", GW_U8, 2u, 1u, 0x80, 8, -16},
+    {"u16-hi", GW_U16, 2u, 1u, 0x8000, 0x800, -16},
+    {"f32-neg", GW_F32, 2u, 1u, 0, -1, 16},
+    {"f32-c1", GW_F32, 1u, 0u, 0, 0, 0},
+    {"f32-c3", GW_F32, 3u, 2u, 0, 1, 0},
+    {"f32-c4", GW_F32, 4u, 3u, 0, 1, 0},
+    {"f32-c5", GW_F32, 5u, 4u, 0, 1, 0},
+    {"f32-c6", GW_F32, 6u, 5u, 0, 1, 0},
+    {"f32-c7", GW_F32, 7u, 6u, 0, 1, 0},
+    {"f32-c8", GW_F32, 8u, 7u, 0, 1, 0},
+    {"u8-c3", GW_U8, 3u, 2u, 0, 8, 0},
+    {"u8-c5", GW_U8, 5u, 4u, 0, 8, 0},
+    {"u16-c3", GW_U16, 3u, 2u, 0, 0x800, 0},
+};
+
+static uint8_t s_gw_vtx[GW_VTX_COUNT * GW_MAX_VTX_BYTES] __attribute__((aligned(64)));
+static uint32_t s_gw_list[GW_LIST_WORDS] __attribute__((aligned(64)));
+static uint32_t s_gw_win[GW_WW * GW_WH];
+
+static uint32_t gw_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static uint32_t gw_phys(const void *p)
+{
+    return (uint32_t)(uintptr_t)p & 0x0fffffffu;
+}
+
+/* The uncached mirror of the 8 KiB colour block at VRAM offset GW_FB_OFFSET. */
+static volatile uint32_t *gw_fb(void)
+{
+    const uint32_t vram = (uint32_t)(uintptr_t)sceGeEdramGetAddr();
+    return (volatile uint32_t *)(uintptr_t)((vram | 0x40000000u) + GW_FB_OFFSET);
+}
+
+static uint32_t gw_weight_bytes(const struct gw_cell *c)
+{
+    return c->count * (c->fmt == GW_F32 ? 4u : c->fmt == GW_U16 ? 2u : 1u);
+}
+
+static uint32_t gw_colour_offset(const struct gw_cell *c)
+{
+    return (gw_weight_bytes(c) + 3u) & ~3u;
+}
+
+static uint32_t gw_vertex_size(const struct gw_cell *c)
+{
+    return gw_colour_offset(c) + 4u + 12u;
+}
+
+static void gw_put_weight(uint8_t *v, const struct gw_cell *c, uint32_t slot, int32_t raw)
+{
+    if (c->fmt == GW_F32) {
+        const uint32_t bits = gw_fbits((float)raw / 16.0f);
+        memcpy(v + 4u * slot, &bits, 4u);
+    } else if (c->fmt == GW_U16) {
+        const uint16_t half = (uint16_t)raw;
+        memcpy(v + 2u * slot, &half, 2u);
+    } else {
+        v[slot] = (uint8_t)raw;
+    }
+}
+
+/* Every sample's six vertices for cell c; returns the vertex size. */
+static uint32_t gw_vertices(const struct gw_cell *c)
+{
+    static const float corner[GW_VTX_PER_SAMPLE][2] = {
+        {-0.375f, -0.375f}, {0.625f, -0.375f}, {-0.375f, 0.625f},
+        {-0.375f, 0.625f}, {0.625f, -0.375f}, {0.625f, 0.625f},
+    };
+    const uint32_t size = gw_vertex_size(c);
+    const uint32_t coff = gw_colour_offset(c);
+    const int32_t one = c->fmt == GW_F32 ? 16 : c->fmt == GW_U16 ? 0x8000 : 0x80;
+    memset(s_gw_vtx, 0, sizeof(s_gw_vtx));
+    for (uint32_t s = 0; s < GW_SAMPLES; s++) {
+        const uint32_t colour = 0xff000000u | (0x30u << 16) | (0xc0u << 8) | (0x10u * s + 0x0fu);
+        const float px = (float)(GW_WX + s);
+        const float py = (float)GW_WY;
+        for (uint32_t k = 0; k < GW_VTX_PER_SAMPLE; k++) {
+            uint8_t *v = s_gw_vtx + (s * GW_VTX_PER_SAMPLE + k) * size;
+            gw_put_weight(v, c, 0u, one);
+            if (c->target != 0u) {
+                gw_put_weight(v, c, c->target, c->base + c->step * (int32_t)s);
+            }
+            memcpy(v + coff, &colour, 4u);
+            const float pos[3] = {(px + corner[k][0] - 32.0f) / 32.0f,
+                                  (py + corner[k][1] - 16.0f) / 16.0f, 0.0f};
+            memcpy(v + coff + 4u, pos, sizeof(pos));
+        }
+    }
+    return size;
+}
+
+/* The draw's display list for vertex words at `vtx` (physical address); returns the word count.
+   Every state the draw reads is set. */
+static uint32_t gw_list(const struct gw_cell *c, uint32_t vtx, uint32_t vtype, uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    static const float ident43[12] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                      0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+    static const float proj[16] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                   0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    const uint32_t full = (GW_STRIDE - 1u) | ((GW_ROWS - 1u) << 10);
+    uint32_t n = 0;
+#define GW_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GW_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GW_W(0x9c, GW_FB_OFFSET);
+    GW_W(0x9d, GW_STRIDE);
+    GW_W(0xd2, 3u);             /* 8888 */
+    GW_W(0x9e, GW_ZB_OFFSET);
+    GW_W(0x9f, GW_STRIDE);
+    GW_W(0x15, 0);
+    GW_W(0x16, full);
+    GW_W(0xd4, 0);
+    GW_W(0xd5, full);
+    GW_W(0xd6, 0);
+    GW_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GW_W(off_units[i], 0);  /* lighting, culling, texturing, fog, dither, blending, tests */
+    }
+    GW_W(0x1e, 0);              /* texture off */
+    GW_W(0xc9, 0);
+    GW_W(0x50, 0);              /* flat shading */
+    GW_W(0xd3, 0);              /* clear mode off */
+    GW_W(0xe7, 1);              /* depth writes off */
+    GW_W(0xe8, 0);
+    GW_W(0xe9, 0);
+    GW_W(0xdb, 0x00ff0001u);    /* alpha test ALWAYS */
+    GW_W(0xd8, 1);              /* colour test ALWAYS */
+    GW_W(0xd9, 0);
+    GW_W(0xda, 0);
+    GW_W(0xdc, 0x00ff0001u);    /* stencil test ALWAYS */
+    GW_W(0xdd, 0);              /* KEEP, KEEP, KEEP */
+    GW_W(0xde, 1);              /* depth test ALWAYS */
+    GW_W(0xdf, 0x32u);
+    GW_W(0xe0, 0);
+    GW_W(0xe1, 0);
+    GW_W(0xe6, 3);              /* logic op COPY */
+    GW_W(0xcf, 0);
+    GW_W(0xcd, 0);
+    GW_W(0xce, 0);
+    GW_W(0x53, 0);              /* MATERIALUPDATE: vertex colour is the only colour source */
+    GW_W(0x2c, gw_fbits(1.0f) >> 8);   /* morph weight 0; one morph target */
+    /* Bones: 0 is the identity plus t0 pixels in y; the target slot's bone is the zero matrix
+       plus 16 pixels (one clip unit); every other bone the zero matrix plus 64 pixels. */
+    GW_W(0x2a, 0);
+    for (uint32_t b = 0; b < GW_BONES; b++) {
+        float m[12] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 4.0f, 0.0f};
+        if (b == 0u) {
+            memcpy(m, ident43, sizeof(m));
+            m[10] = (float)c->t0 / 16.0f;
+        } else if (c->target != 0u && b == c->target) {
+            m[10] = 1.0f;
+        }
+        for (uint32_t i = 0; i < 12u; i++) {
+            GW_W(0x2b, gw_fbits(m[i]) >> 8);
+        }
+    }
+    GW_W(0x3a, 0);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GW_W(0x3b, gw_fbits(ident43[i]) >> 8);
+    }
+    GW_W(0x3c, 0);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GW_W(0x3d, gw_fbits(ident43[i]) >> 8);
+    }
+    GW_W(0x3e, 0);
+    for (uint32_t i = 0; i < 16u; i++) {
+        GW_W(0x3f, gw_fbits(proj[i]) >> 8);
+    }
+    GW_W(0x42, gw_fbits(32.0f) >> 8);   /* viewport: x = 32 + 32 X, y = 16 + 16 Y */
+    GW_W(0x43, gw_fbits(16.0f) >> 8);
+    GW_W(0x44, 0);
+    GW_W(0x45, gw_fbits(2048.0f) >> 8);
+    GW_W(0x46, gw_fbits(2048.0f) >> 8);
+    GW_W(0x47, gw_fbits(32768.0f) >> 8);
+    GW_W(0x4c, (2048u - 32u) << 4);
+    GW_W(0x4d, (2048u - 16u) << 4);
+    GW_W(0x12, vtype);
+    GW_W(0x01, vtx);
+    GW_W(0x04, (3u << 16) | GW_VTX_COUNT);   /* triangles */
+    GW_W(0x0f, 0);
+    GW_W(0x0c, 0);
+#undef GW_W
+    return n;
+}
+
+/* One cell: build the vertices, clear the block, queue the list, wait (bounded), read the
+   window back, then the `-draw` record and one `-rN` record per window row. */
+static void gw_draw(const struct gw_cell *c)
+{
+    static char row[48];
+    hle_step(c->name);
+    const uint32_t size = gw_vertices(c);
+    /* Transform mode: 8888 colour (bits 2-4 = 7), float position (bits 7-8 = 3), the weight
+       format in bits 9-10 and the weight count less one in bits 14-16. */
+    const uint32_t vtype = (7u << 2) | (3u << 7) | ((uint32_t)c->fmt << 9) |
+                           ((uint32_t)(c->count - 1u) << 14);
+    volatile uint32_t *fb = gw_fb();
+    for (unsigned i = 0; i < GW_STRIDE * GW_ROWS; i++) {
+        fb[i] = 0u;
+    }
+    __asm__ volatile("sync" ::: "memory");
+    const uint32_t words = gw_list(c, gw_phys(s_gw_vtx), vtype, s_gw_list);
+    sceKernelDcacheWritebackAll();
+    const uint32_t t0 = sceKernelGetSystemTimeLow();
+    const int qid = sceGeListEnQueue(s_gw_list, NULL, -1, NULL);
+    int list_state = qid;
+    int draw_state = -1;
+    int idle = 0;
+    for (unsigned i = 0; i < GW_WAIT_POLLS; i++) {
+        list_state = qid >= 0 ? sceGeListSync(qid, 1) : qid;
+        draw_state = sceGeDrawSync(1);
+        idle = draw_state == PSP_GE_LIST_DONE;
+        if (idle) {
+            break;
+        }
+        sceKernelDelayThread(GW_WAIT_POLL_US);
+    }
+    const uint32_t elapsed = sceKernelGetSystemTimeLow() - t0;
+    int reset_rc = 0;
+    if (!idle) {
+        PspGeBreakParam param;
+        memset(&param, 0, sizeof(param));
+        reset_rc = sceGeBreak(1, &param);
+        for (unsigned i = 0; i < GW_WAIT_POLLS; i++) {
+            if (sceGeDrawSync(1) == PSP_GE_LIST_DONE) {
+                break;
+            }
+            sceKernelDelayThread(GW_WAIT_POLL_US);
+        }
+    }
+    for (uint32_t i = 0; i < GW_WW * GW_WH; i++) {
+        s_gw_win[i] = fb[(GW_WY + i / GW_WW) * GW_STRIDE + GW_WX + i % GW_WW];
+    }
+    const uint32_t draw[10] = {(uint32_t)qid, (uint32_t)list_state, (uint32_t)draw_state,
+                               elapsed, (uint32_t)idle, (uint32_t)reset_rc, words, vtype, size,
+                               c->count};
+    snprintf(row, sizeof(row), "%s-draw", c->name);
+    hle_record(row, qid < 0 ? "FAIL" : idle ? "PASS" : "TIMEOUT", (uint32_t)qid, draw, 10);
+    for (uint32_t y = 0; y < GW_WH; y++) {
+        snprintf(row, sizeof(row), "%s-r%u", c->name, (unsigned int)y);
+        hle_record(row, "PASS", y, &s_gw_win[y * GW_WW], GW_WW);
+    }
+}
+
+static int hle_run(void)
+{
+    for (uint32_t i = 0; i < GW_CELL_COUNT; i++) {
+        gw_draw(&gw_cells[i]);
+    }
+    return 1;
+}
+
+#endif /* GE_CASE_WEIGHT */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == GE_CASE_RTT
+
+/* ==== GE render-to-texture cells (PSP-GE-RTT-001, #343) ====
+ * What a texture fetch sees of a framebuffer the GE has just drawn into: whether the GE
+ * rendering into a VRAM region makes a later fetch from that region read the new pixels, and
+ * what TEXFLUSH (0xcb) and TEXSYNC (0xcc) change about it. Each cell is one display list of
+ * project-written command words (no game data), in through mode, with blending and every test
+ * off, depth writes off, flat shading, so a pixel is the texel or the colour drawn.
+ *
+ * Layout. B is the colour buffer at VRAM offset GRT_B_OFFSET, 64x32 8888, stride 64. T is the
+ * render target and the texture at VRAM offset GRT_T_OFFSET, 64x16 texels, stride 64: the
+ * texture words point at the VRAM base plus that offset, size 64x16, format 8888 (3) or 5650 (0),
+ * REPLACE/RGBA, nearest filtering, clamped, TEXMODE 0, constant level 0. The CPU writes both
+ * through the uncached VRAM mirror. Before every cell it fills T's first 16x4 texels with the
+ * pattern P0 and clears B to 0, then `sync` and a data-cache write-back. P0 in 8888 is
+ * texel (x, y) = 0xff000000 | 0x11 << 16 | 16 y << 8 | 4 x; in 5650 it is the 16-bit value
+ * (x << 11) | (y << 5) | 0x1f.
+ *
+ * Operations (each cell's list is the shared state words, one TEXFLUSH, the operations in
+ * order, then FINISH and END):
+ *   RENDER      set the framebuffer pointer and stride to T, the drawing region and the scissor to
+ *               64x16 (and the pixel format to T's), one untextured flat sprite over x 0..16,
+ *               y 0..4 of colour C1 = 0xff2080e0 (ABGR), then the framebuffer, region, scissor and
+ *               format back to B (64x32, 8888).
+ *   SAMPLE(r)   one textured sprite into B over x 16..31, y r..r+4, texture coordinates (0, 0) to
+ *               (16, 4) read from T.
+ *   TEXFLUSH    command 0xcb, data 0.        TEXSYNC    command 0xcc, data 0.
+ * The cells: cpu = SAMPLE(8) (on the model B rows 8..11 read P0); flush = RENDER, TEXFLUSH,
+ * SAMPLE(8); noflush = RENDER, SAMPLE(8); warm-noflush = SAMPLE(8), RENDER, SAMPLE(16);
+ * warm-flush = SAMPLE(8), RENDER, TEXFLUSH, SAMPLE(16); warm-texsync = SAMPLE(8), RENDER,
+ * TEXSYNC, SAMPLE(16); warm-both = SAMPLE(8), RENDER, TEXSYNC, TEXFLUSH, SAMPLE(16); 565-flush
+ * and 565-warm-noflush are flush and warm-noflush with T a 5650 target (format word 0xd2 = 0
+ * while drawing into T, 3 for B) sampled as 5650.
+ *
+ * List words: the shared state words and the opening TEXFLUSH are 62, FINISH and END 2, RENDER
+ * 18, SAMPLE 4, TEXFLUSH or TEXSYNC 1; the longest cell (warm-both) is 92 words.
+ *
+ * Records per cell: `<cell>-draw` (10 words: the GE wait outcome as ge-weight, the list length,
+ * T's format word (0 = 8888, 1 = 5650), the number of SAMPLE operations and a bitmask of the
+ * operation kinds used, bit k set for kind k: 1 RENDER, 2 SAMPLE(8), 3 SAMPLE(16), 4 TEXFLUSH,
+ * 5 TEXSYNC), `<cell>-t0` (T's first row, x 0..15, read back by the CPU after the list: 8888
+ * words, or the 16-bit texels zero-extended for the 5650 cells) and the window rows
+ * `<cell>-rN` (B's x 16..31, y 8..19, N = 0..11). */
+
+#define GRT_B_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
+#define GRT_Z_OFFSET 0x00110000u   /* depth buffer pointer; depth test and writes are off */
+#define GRT_T_OFFSET 0x00120000u   /* render target and texture, stride 64, 16 rows */
+#define GRT_STRIDE 64u
+#define GRT_B_ROWS 32u
+#define GRT_T_ROWS 16u
+#define GRT_WX 16u                 /* window x 16..31, y 8..19 */
+#define GRT_WY 8u
+#define GRT_WW 16u
+#define GRT_WH 12u
+#define GRT_OPS 6u                 /* operation slots per cell; the list ends at the first GRT_END */
+#define GRT_VTX_SLOT 10u           /* words per operation slot: a textured sprite is 2 x 5 */
+#define GRT_VTX_WORDS (GRT_OPS * GRT_VTX_SLOT)
+/* 62 shared + 2 end + RENDER 18 + 2 SAMPLE 8 + 2 (TEXSYNC, TEXFLUSH) = 92 at most; room to spare. */
+#define GRT_LIST_WORDS 128u
+#define GRT_WAIT_POLLS 5000u       /* 5000 x 100 us: a half-second bound per draw */
+#define GRT_WAIT_POLL_US 100u
+#define GRT_C1 0xff2080e0u
+
+enum { GRT_END = 0, GRT_RENDER = 1, GRT_SAMPLE8 = 2, GRT_SAMPLE16 = 3, GRT_TEXFLUSH = 4,
+       GRT_TEXSYNC = 5 };
+
+/* t565: T is a 5650 target and texture; ops: the operations in order, GRT_END after the last. */
+struct grt_cell {
+    const char *name;
+    uint8_t t565;
+    uint8_t ops[GRT_OPS];
+};
+
+#define GRT_CELL_COUNT 9u
+static const struct grt_cell grt_cells[GRT_CELL_COUNT] = {
+    {"cpu", 0u, {GRT_SAMPLE8}},
+    {"flush", 0u, {GRT_RENDER, GRT_TEXFLUSH, GRT_SAMPLE8}},
+    {"noflush", 0u, {GRT_RENDER, GRT_SAMPLE8}},
+    {"warm-noflush", 0u, {GRT_SAMPLE8, GRT_RENDER, GRT_SAMPLE16}},
+    {"warm-flush", 0u, {GRT_SAMPLE8, GRT_RENDER, GRT_TEXFLUSH, GRT_SAMPLE16}},
+    {"warm-texsync", 0u, {GRT_SAMPLE8, GRT_RENDER, GRT_TEXSYNC, GRT_SAMPLE16}},
+    {"warm-both", 0u, {GRT_SAMPLE8, GRT_RENDER, GRT_TEXSYNC, GRT_TEXFLUSH, GRT_SAMPLE16}},
+    {"565-flush", 1u, {GRT_RENDER, GRT_TEXFLUSH, GRT_SAMPLE8}},
+    {"565-warm-noflush", 1u, {GRT_SAMPLE8, GRT_RENDER, GRT_SAMPLE16}},
+};
+_Static_assert(sizeof(grt_cells) / sizeof(grt_cells[0]) == GRT_CELL_COUNT, "GRT_CELL_COUNT");
+
+static uint32_t s_grt_vtx[GRT_VTX_WORDS] __attribute__((aligned(64)));
+static uint32_t s_grt_list[GRT_LIST_WORDS] __attribute__((aligned(64)));
+static uint32_t s_grt_win[GRT_WW * GRT_WH];
+static uint32_t s_grt_t0[GRT_WW];
+
+static uint32_t grt_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static uint32_t grt_phys(const void *p)
+{
+    return (uint32_t)(uintptr_t)p & 0x0fffffffu;
+}
+
+/* The uncached mirror of the VRAM block at `offset`. */
+static uintptr_t grt_mirror(uint32_t offset)
+{
+    const uint32_t vram = (uint32_t)(uintptr_t)sceGeEdramGetAddr();
+    return (uintptr_t)((vram | 0x40000000u) + offset);
+}
+
+/* T's physical address: the VRAM base plus GRT_T_OFFSET. */
+static uint32_t grt_tex_phys(void)
+{
+    return ((uint32_t)(uintptr_t)sceGeEdramGetAddr() & 0x0fffffffu) + GRT_T_OFFSET;
+}
+
+/* The pattern P0 in T's first 16x4 texels and zero in B, through the uncached mirror. */
+static void grt_prepare(const struct grt_cell *c)
+{
+    volatile uint32_t *b = (volatile uint32_t *)grt_mirror(GRT_B_OFFSET);
+    for (unsigned i = 0; i < GRT_STRIDE * GRT_B_ROWS; i++) {
+        b[i] = 0u;
+    }
+    volatile uint32_t *t32 = (volatile uint32_t *)grt_mirror(GRT_T_OFFSET);
+    volatile uint16_t *t16 = (volatile uint16_t *)grt_mirror(GRT_T_OFFSET);
+    for (uint32_t y = 0; y < 4u; y++) {
+        for (uint32_t x = 0; x < 16u; x++) {
+            if (c->t565) {
+                t16[y * GRT_STRIDE + x] = (uint16_t)((x << 11) | (y << 5) | 0x1fu);
+            } else {
+                t32[y * GRT_STRIDE + x] =
+                    0xff000000u | (0x11u << 16) | ((16u * y) << 8) | (4u * x);
+            }
+        }
+    }
+    __asm__ volatile("sync" ::: "memory");
+}
+
+/* Operation slot `slot`'s vertices: the flat sprite (colour, x, y, z; two vertices) over x 0..16,
+   y 0..4, or the textured sprite (u, v, x, y, z) into B over x 16..31, y row..row+4. */
+static void grt_vertices_render(uint32_t slot)
+{
+    uint32_t *v = s_grt_vtx + slot * GRT_VTX_SLOT;
+    v[0] = GRT_C1;
+    v[1] = grt_fbits(0.0f);
+    v[2] = grt_fbits(0.0f);
+    v[3] = grt_fbits(0.0f);
+    v[4] = GRT_C1;
+    v[5] = grt_fbits(16.0f);
+    v[6] = grt_fbits(4.0f);
+    v[7] = grt_fbits(0.0f);
+}
+
+static void grt_vertices_sample(uint32_t slot, uint32_t row)
+{
+    const float f[10] = {0.0f, 0.0f, (float)GRT_WX, (float)row, 0.0f,
+                         16.0f, 4.0f, (float)(GRT_WX + 16u), (float)(row + 4u), 0.0f};
+    uint32_t *v = s_grt_vtx + slot * GRT_VTX_SLOT;
+    for (uint32_t i = 0; i < 10u; i++) {
+        v[i] = grt_fbits(f[i]);
+    }
+}
+
+/* The cell's display list; returns the word count. Every state the draws read is set. */
+static uint32_t grt_list(const struct grt_cell *c, uint32_t vtx, uint32_t tex, uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    const uint32_t full_b = (GRT_STRIDE - 1u) | ((GRT_B_ROWS - 1u) << 10);
+    const uint32_t full_t = (GRT_STRIDE - 1u) | ((GRT_T_ROWS - 1u) << 10);
+    uint32_t n = 0;
+#define GRT_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GRT_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GRT_W(0x9c, GRT_B_OFFSET);
+    GRT_W(0x9d, GRT_STRIDE);
+    GRT_W(0xd2, 3u);            /* 8888 */
+    GRT_W(0x9e, GRT_Z_OFFSET);
+    GRT_W(0x9f, GRT_STRIDE);
+    GRT_W(0x15, 0);
+    GRT_W(0x16, full_b);
+    GRT_W(0xd4, 0);
+    GRT_W(0xd5, full_b);
+    GRT_W(0xd6, 0);
+    GRT_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GRT_W(off_units[i], 0); /* lighting, culling, texturing, fog, dither, blending, tests */
+    }
+    GRT_W(0x1e, 0);             /* texture off */
+    GRT_W(0x50, 0);             /* flat shading */
+    GRT_W(0xd3, 0);             /* clear mode off */
+    GRT_W(0xe7, 1);             /* depth writes off */
+    GRT_W(0xe8, 0);
+    GRT_W(0xe9, 0);
+    GRT_W(0xdb, 0x00ff0001u);   /* alpha test ALWAYS */
+    GRT_W(0xd8, 1);             /* colour test ALWAYS */
+    GRT_W(0xd9, 0);
+    GRT_W(0xda, 0);
+    GRT_W(0xdc, 0x00ff0001u);   /* stencil test ALWAYS */
+    GRT_W(0xdd, 0);             /* KEEP, KEEP, KEEP */
+    GRT_W(0xde, 1);             /* depth test ALWAYS */
+    GRT_W(0xdf, 0x32u);
+    GRT_W(0xe0, 0);
+    GRT_W(0xe1, 0);
+    GRT_W(0xe6, 3);             /* logic op COPY */
+    GRT_W(0xcf, 0);
+    GRT_W(0xcd, 0);
+    GRT_W(0xce, 0);
+    GRT_W(0x53, 0);             /* MATERIALUPDATE: vertex colour is the only colour source */
+    GRT_W(0x55, 0xffffffu);
+    GRT_W(0x58, 0xffu);
+    GRT_W(0xc0, 0);             /* UV mapping */
+    GRT_W(0xc2, 0);             /* TEXMODE 0 */
+    GRT_W(0xc3, c->t565 ? 0u : 3u);   /* texture format: 5650 or 8888 */
+    GRT_W(0xa0, tex);
+    GRT_W(0xa8, GRT_STRIDE | ((tex >> 24) << 16));
+    GRT_W(0xb8, (4u << 8) | 6u);      /* 64 x 16 */
+    GRT_W(0xc6, 0x004u);        /* nearest, nearest level */
+    GRT_W(0xc7, 0x101u);        /* clamp u and v */
+    GRT_W(0xc8, 1u);            /* constant level 0 */
+    GRT_W(0xd0, 0);
+    GRT_W(0xc9, 0x103u);        /* REPLACE, RGBA */
+    GRT_W(0xca, 0);
+    GRT_W(0x4c, 0);
+    GRT_W(0x4d, 0);
+    GRT_W(0xcb, 0);             /* texture flush: no list inherits texture-cache contents */
+    for (uint32_t i = 0; i < GRT_OPS && c->ops[i] != GRT_END; i++) {
+        const uint32_t op = c->ops[i];
+        const uint32_t v = vtx + 4u * GRT_VTX_SLOT * i;
+        if (op == GRT_RENDER) {
+            grt_vertices_render(i);
+            GRT_W(0x9c, GRT_T_OFFSET);
+            GRT_W(0x9d, GRT_STRIDE);
+            GRT_W(0xd2, c->t565 ? 0u : 3u);
+            GRT_W(0x15, 0);
+            GRT_W(0x16, full_t);
+            GRT_W(0xd4, 0);
+            GRT_W(0xd5, full_t);
+            GRT_W(0x1e, 0);
+            GRT_W(0x12, 0x0080019cu);   /* through, 8888 colour, float position */
+            GRT_W(0x01, v);
+            GRT_W(0x04, (6u << 16) | 2u);   /* sprite */
+            GRT_W(0x9c, GRT_B_OFFSET);
+            GRT_W(0x9d, GRT_STRIDE);
+            GRT_W(0xd2, 3u);
+            GRT_W(0x15, 0);
+            GRT_W(0x16, full_b);
+            GRT_W(0xd4, 0);
+            GRT_W(0xd5, full_b);
+        } else if (op == GRT_SAMPLE8 || op == GRT_SAMPLE16) {
+            grt_vertices_sample(i, op == GRT_SAMPLE8 ? 8u : 16u);
+            GRT_W(0x1e, 1);             /* texture on */
+            GRT_W(0x12, 0x00800183u);   /* through, float uv, float position */
+            GRT_W(0x01, v);
+            GRT_W(0x04, (6u << 16) | 2u);
+        } else if (op == GRT_TEXFLUSH) {
+            GRT_W(0xcb, 0);
+        } else if (op == GRT_TEXSYNC) {
+            GRT_W(0xcc, 0);
+        }
+    }
+    GRT_W(0x0f, 0);
+    GRT_W(0x0c, 0);
+#undef GRT_W
+    return n;
+}
+
+/* One cell: prepare T and B, build the list, queue it, wait (bounded), read T's first row and
+   the window back, then the `-draw`, `-t0` and `-rN` records. */
+static void grt_draw(const struct grt_cell *c)
+{
+    static char row[64];
+    hle_step(c->name);
+    grt_prepare(c);
+    const uint32_t words = grt_list(c, grt_phys(s_grt_vtx), grt_tex_phys(), s_grt_list);
+    uint32_t samples = 0;
+    uint32_t mask = 0;
+    for (uint32_t i = 0; i < GRT_OPS && c->ops[i] != GRT_END; i++) {
+        mask |= 1u << c->ops[i];
+        samples += c->ops[i] == GRT_SAMPLE8 || c->ops[i] == GRT_SAMPLE16;
+    }
+    sceKernelDcacheWritebackAll();
+    const uint32_t t0 = sceKernelGetSystemTimeLow();
+    const int qid = sceGeListEnQueue(s_grt_list, NULL, -1, NULL);
+    int list_state = qid;
+    int draw_state = -1;
+    int idle = 0;
+    for (unsigned i = 0; i < GRT_WAIT_POLLS; i++) {
+        list_state = qid >= 0 ? sceGeListSync(qid, 1) : qid;
+        draw_state = sceGeDrawSync(1);
+        idle = draw_state == PSP_GE_LIST_DONE;
+        if (idle) {
+            break;
+        }
+        sceKernelDelayThread(GRT_WAIT_POLL_US);
+    }
+    const uint32_t elapsed = sceKernelGetSystemTimeLow() - t0;
+    int reset_rc = 0;
+    if (!idle) {
+        PspGeBreakParam param;
+        memset(&param, 0, sizeof(param));
+        reset_rc = sceGeBreak(1, &param);
+        for (unsigned i = 0; i < GRT_WAIT_POLLS; i++) {
+            if (sceGeDrawSync(1) == PSP_GE_LIST_DONE) {
+                break;
+            }
+            sceKernelDelayThread(GRT_WAIT_POLL_US);
+        }
+    }
+    volatile uint32_t *b = (volatile uint32_t *)grt_mirror(GRT_B_OFFSET);
+    volatile uint32_t *t32 = (volatile uint32_t *)grt_mirror(GRT_T_OFFSET);
+    volatile uint16_t *t16 = (volatile uint16_t *)grt_mirror(GRT_T_OFFSET);
+    for (uint32_t i = 0; i < GRT_WW; i++) {
+        s_grt_t0[i] = c->t565 ? (uint32_t)t16[i] : t32[i];
+    }
+    for (uint32_t i = 0; i < GRT_WW * GRT_WH; i++) {
+        s_grt_win[i] = b[(GRT_WY + i / GRT_WW) * GRT_STRIDE + GRT_WX + i % GRT_WW];
+    }
+    const uint32_t draw[10] = {(uint32_t)qid, (uint32_t)list_state, (uint32_t)draw_state,
+                               elapsed, (uint32_t)idle, (uint32_t)reset_rc, words,
+                               (uint32_t)c->t565, samples, mask};
+    snprintf(row, sizeof(row), "%s-draw", c->name);
+    hle_record(row, qid < 0 ? "FAIL" : idle ? "PASS" : "TIMEOUT", (uint32_t)qid, draw, 10);
+    snprintf(row, sizeof(row), "%s-t0", c->name);
+    hle_record(row, "PASS", 0, s_grt_t0, GRT_WW);
+    for (uint32_t y = 0; y < GRT_WH; y++) {
+        snprintf(row, sizeof(row), "%s-r%u", c->name, (unsigned int)y);
+        hle_record(row, "PASS", y, &s_grt_win[y * GRT_WW], GRT_WW);
+    }
+}
+
+static int hle_run(void)
+{
+    for (uint32_t i = 0; i < GRT_CELL_COUNT; i++) {
+        grt_draw(&grt_cells[i]);
+    }
+    return 1;
+}
+
+#endif /* GE_CASE_RTT */
 
 /* ------------------------------------------------------------------------- */
 

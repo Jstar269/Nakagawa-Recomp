@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import fnmatch
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,7 @@ import tempfile
 import unittest
 from types import ModuleType
 from typing import ClassVar, TypedDict, cast
+from collections.abc import Mapping
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +29,9 @@ sys.path.insert(0, str(ROOT / "fixtures" / "showcase"))
 import ci_required  # noqa: E402
 import ci_paths  # noqa: E402
 import ci_test_shards  # noqa: E402
+import mypy_baseline  # noqa: E402
 import showcase as showcase_cli  # noqa: E402
+from makefile_text import read_makefile  # noqa: E402
 
 
 def _ci_job_blocks() -> dict[str, list[str]]:
@@ -111,15 +116,57 @@ def _cmake_sources_and_definitions() -> tuple[dict[str, set[str]], dict[str, set
 
 
 class PublicCiWiringTests(unittest.TestCase):
+    def test_mypy_clean_scope_is_explicit_and_uses_the_shared_pin(self) -> None:
+        expected = (
+            "tools/verify_vfpu_provenance.py",
+            "tools/hle_manifest.py",
+            "tools/psp_import_table.py",
+            "tools/import_audit_gate.py",
+            "tools/vfpu_fuzz_gen.py",
+            "tools/test_import_audit.py",
+            "tools/test_hle_manifest.py",
+            "tools/test_enhancement_package.py",
+            "tools/mypy_baseline.py",
+        )
+        self.assertEqual(mypy_baseline.MYPY_VERSION, "2.4.1")
+        self.assertEqual(mypy_baseline.CLEAN_SCOPE_FILES, expected)
+        with mock.patch.object(mypy_baseline, "_installed_mypy_version", return_value="2.4.1"), \
+                mock.patch.object(
+                    mypy_baseline.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+                ) as run:
+            self.assertEqual(mypy_baseline.main(["--scope", "issue-1391"]), 0)
+        self.assertEqual(tuple(run.call_args.args[0][-len(expected):]), expected)
+
+    def test_mypy_clean_scope_rejects_any_reported_error(self) -> None:
+        diagnostic = "tools/hle_manifest.py:7: error: invalid fixture [misc]\n"
+        completed = subprocess.CompletedProcess([], 1, stdout=diagnostic, stderr="")
+        with mock.patch.object(mypy_baseline, "_installed_mypy_version", return_value="2.4.1"), \
+                mock.patch.object(mypy_baseline.subprocess, "run", return_value=completed), \
+                contextlib.redirect_stderr(io.StringIO()) as captured:
+            result = mypy_baseline.main(["--scope", "issue-1391"])
+        self.assertEqual(result, 1)
+        self.assertIn(diagnostic.rstrip(), captured.getvalue())
+
     def test_python_tools_ci_enforces_mypy_baseline(self) -> None:
         python_tools = _ci_job_blocks()["python_tools"]
         step = _ci_step(python_tools, "Enforce tools mypy baseline")
         self.assertIsNotNone(step, "python_tools must enforce the tracked mypy baseline")
         assert step is not None
         text = "\n".join(step)
-        self.assertIn("mypy==2.1.0", text)
+        self.assertIn("mypy==2.4.1", text)
         self.assertIn("--require-hashes", text)
+        self.assertIn("python tools/mypy_baseline.py --scope issue-1391", text)
         self.assertIn("python tools/mypy_baseline.py", text)
+        config = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+        self.assertRegex(config, r"(?ms)- id: mypy-tools\n.*?entry: python tools/mypy_baseline\.py --scope issue-1391\n")
+        self.assertIn("files: ^tools/.*\\.py$", config)
+        hygiene = _ci_job_blocks()["hygiene"]
+        shared = _ci_step(hygiene, "Run shared all-files checks")
+        self.assertIsNotNone(shared)
+        assert shared is not None
+        self.assertIn("SKIP: mypy-tools", "\n".join(shared))
 
     def test_showcase_guest_build_uses_pspdev_compiler(self) -> None:
         demo = {"id": "synthetic-test", "folder": "ge_scene", "target": "fixture_app"}
@@ -137,7 +184,7 @@ class PublicCiWiringTests(unittest.TestCase):
         lock = json.loads((ROOT / "assets" / "upstream" / "pspdev.lock.json").read_text())
         evidence = json.loads((ROOT / "assets" / "upstream" / "pspdev.evidence.json").read_text())
         self.assertIn("Build pinned SDL3 for headless Linux runtime", ci)
-        self.assertIn("829a65d769d935c4852f8159e964312c0957260a", ci)
+        self.assertIn("f00dc919ca35b9756316e86c4777392de442f9b2", ci)
         self.assertIn("libvulkan-dev", ci)
         self.assertIn("SDL_UNIX_CONSOLE_BUILD=ON", ci)
         self.assertIn("pspdev.lock.json", ci)
@@ -166,7 +213,7 @@ class PublicCiWiringTests(unittest.TestCase):
             _ci_step_index(native_tools, step_name),
         )
 
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         self.assertIn("GE_FRONTEND_PROFILE ?= 0", makefile)
         self.assertIn("$(RT_GE_O): src/rt/ge.c", makefile)
         self.assertIn("$(CC) $(GE_CFLAGS)", makefile)
@@ -187,7 +234,9 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertIn("-name 'lvp_icd*.json'", text)
         self.assertIn('export VK_ICD_FILENAMES="$lvp_icd"', text)
         self.assertIn('xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11', text)
-        self.assertRegex(text, r"(?m)^\s+make CC=gcc gpu-coherence-selftest$")
+        # The VRAM viewer identity test (#314) needs the same device and window, so it runs in
+        # this step, after the coherence selftest.
+        self.assertRegex(text, r"(?m)^\s+make CC=gcc gpu-coherence-selftest vram-view-identity-selftest$")
         self.assertNotIn("continue-on-error", text)
         # Its only condition is the native_tools part that runs it; nothing can skip it there.
         self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
@@ -196,10 +245,60 @@ class PublicCiWiringTests(unittest.TestCase):
             _ci_step_index(native_tools, "Verify lavapipe and run GPU capture selftest"),
             _ci_step_index(native_tools, step_name),
         )
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         self.assertIn("gpu-coherence-selftest: $(GPU_COHERENCE_BIN)\n\t$(GPU_COHERENCE_BIN)\n", makefile)
         docs = (ROOT / "docs" / "CI.md").read_text(encoding="utf-8")
         self.assertIn("`gpu-coherence-selftest`", docs)
+
+    def test_fsr3_pass_selftest_runs_on_lavapipe_and_a_skip_fails(self) -> None:
+        """The FSR 3 passes run under the validation layer on lavapipe; a skip must not pass."""
+        native_tools = _ci_job_blocks()["native_tools"]
+        step = _ci_step(native_tools, "Run the FSR 3 pass selftest on lavapipe")
+        self.assertIsNotNone(step, "native_tools must run fsr3-pass-selftest")
+        assert step is not None
+        text = "\n".join(step)
+        self.assertIn("set -euo pipefail", text)
+        self.assertIn('export VK_ICD_FILENAMES="$lvp_icd"', text)
+        self.assertRegex(text, r"(?m)^\s+NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-pass-selftest$")
+        self.assertNotIn("continue-on-error", text)
+
+    def test_fsr3_fg_refusal_runs_on_lavapipe_and_a_skip_fails(self) -> None:
+        """Frame generation's device refusal (G-R) runs on lavapipe, which it refuses; a skip must not pass."""
+        native_tools = _ci_job_blocks()["native_tools"]
+        step = _ci_step(native_tools, "Run the FSR 3 frame generation refusal on lavapipe")
+        self.assertIsNotNone(step, "native_tools must run fsr3-fg-pass-selftest's G-R")
+        assert step is not None
+        text = "\n".join(step)
+        self.assertIn("set -euo pipefail", text)
+        self.assertIn('export VK_ICD_FILENAMES="$lvp_icd"', text)
+        self.assertRegex(
+            text, r'(?m)^\s+NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-fg-pass-selftest FSR3FG_PASS_ARGS="--cell G-R"$')
+        self.assertNotIn("continue-on-error", text)
+        self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
+                         ["if: matrix.part == 'translation'"])
+
+    def test_fsr3_shaders_are_reproduced_with_the_pinned_linux_dxc(self) -> None:
+        """The hosted job downloads the DXC release shader_embed.py pins, checks its SHA-256, and
+        runs the tool itself, so a SKIP (exit 77, any other DXC) fails the step."""
+        sys.path.insert(0, str(ROOT / "tools"))
+        import shader_embed
+        release = shader_embed.DXC_RELEASE
+        native_tools = _ci_job_blocks()["native_tools"]
+        step = _ci_step(native_tools, "Reproduce the FSR 3 shaders with the pinned DXC")
+        self.assertIsNotNone(step, "native_tools must reproduce the FSR 3 shaders")
+        assert step is not None
+        text = "\n".join(step)
+        self.assertIn("set -euo pipefail", text)
+        url = ("https://github.com/microsoft/DirectXShaderCompiler/releases/download/"
+               f"{release['tag']}/{release['linux_archive']}")
+        self.assertIn(url, text)
+        self.assertIn(f"printf '%s  %s\\n' {release['linux_sha256']} \"$archive\"", text)
+        self.assertIn("sha256sum --check --strict", text)
+        self.assertLess(text.index("sha256sum --check --strict"), text.index("tar -xzf"))
+        self.assertNotIn("make ", text, "make maps exit 77 to a SKIP line; the step must see it")
+        self.assertNotIn("continue-on-error", text)
+        self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
+                         ["if: matrix.part == 'translation'"])
 
     def test_ffmpeg_h264_media_selftest_is_wired_in_linux_ci(self) -> None:
         """The vendored H.264 subset must build and execute its real media fixture in CI.
@@ -253,7 +352,7 @@ class PublicCiWiringTests(unittest.TestCase):
         assert windows is not None
         self.assertIn("hle-thread-selftest", "\n".join(windows))
         # GNU ld has no --no-insert-timestamp: the link names the per-host reproducible flag.
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         start = makefile.index("\nhle-thread-selftest-build:")
         recipe = makefile[start:makefile.index("\nhle-thread-selftest:", start)]
         self.assertIn("$(REPRODUCIBLE_LINK_FLAG)", recipe)
@@ -336,12 +435,12 @@ class PublicCiWiringTests(unittest.TestCase):
             'XDG_STATE_HOME="$RUNNER_TEMP/player-smoke-state"',
         ):
             self.assertIn(assignment, invocation)
-        self.assertIn("SDL3_VERSION=3.4.18", native_tools)
-        self.assertIn("SDL3_COMMIT=829a65d769d935c4852f8159e964312c0957260a", native_tools)
+        self.assertIn("SDL3_VERSION=3.4.20", native_tools)
+        self.assertIn("SDL3_COMMIT=f00dc919ca35b9756316e86c4777392de442f9b2", native_tools)
 
         required_start = ci.index("  ci_required:\n")
         required_job = ci[required_start:]
-        self.assertIn("needs: [classify, hygiene, public_export, markdown, python_tools, native_tools,", required_job)
+        self.assertIn("needs: [classify, hygiene, public_export, python_tools, native_tools, android_build, windows_runtime]", required_job)
         self.assertIn("PUBLIC_EXPORT_RESULT: ${{ needs.public_export.result }}", required_job)
         self.assertIn("NATIVE_RESULT: ${{ needs.native_tools.result }}", required_job)
         self.assertIn("RUN_NATIVE: ${{ needs.classify.outputs.run_native }}", required_job)
@@ -365,7 +464,7 @@ class PublicCiWiringTests(unittest.TestCase):
         CMake target may compile a private backend. This test does not cover the guarded code
         itself: src/rt/driver.c and src/rt/gui.c are in no CMake target.
         """
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         block = _makefile_backend_block(makefile)
         self.assertIn("ifneq ($(PUBLIC_SAFE),1)\n$(error PUBLIC_SAFE=0 was retired", block)
         public_backends = set(re.findall(r"(?m)^\w+_BACKEND_SRC := (\S+)$", block))
@@ -441,7 +540,7 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertNotIn("GAME_ELF=tools/vfpu_words.txt", ci)
 
     def test_makefile_pregenerated_mode_does_not_require_game_elf(self) -> None:
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         self.assertIn("VFPU_FUZZ_PREGENERATED ?= 0", makefile)
         self.assertIn("ifeq ($(VFPU_FUZZ_PREGENERATED),1)", makefile)
         self.assertIn("VFPU_FUZZ_TITLE_OBJ :=", makefile)
@@ -487,7 +586,7 @@ class PublicCiWiringTests(unittest.TestCase):
 
     def test_provenance_record_gap_check_is_wired_in_ci_and_make(self) -> None:
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         precommit = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
 
         self.assertIn("python tools/provenance_record_gap.py --check", ci)
@@ -521,8 +620,8 @@ class PublicCiWiringTests(unittest.TestCase):
             "mingw32-make --no-print-directory CC=gcc VULKAN_SDK=/ucrt64 player-ui-regressions",
             windows_text,
         )
-        # Exactly one Windows matrix part runs the UI regressions.
-        self.assertIn("if: matrix.part == 'smoke'", windows_text)
+        # Exactly one Windows part runs the UI regressions.
+        self.assertIn("if: contains(matrix.parts, 'smoke')", windows_text)
 
         # The harness, not the workflow, makes the gate headless: it forces the
         # drivers for every player it spawns.
@@ -530,7 +629,7 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertIn('"SDL_VIDEODRIVER": "dummy"', harness)
         self.assertIn('"SDL_RENDER_DRIVER": "software"', harness)
 
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         self.assertIn("player-ui-regressions: $(PLAYER_UI_TEST_EXE)", makefile)
         docs = (ROOT / "docs" / "CI.md").read_text(encoding="utf-8")
         self.assertIn("player-ui-regressions", docs)
@@ -562,17 +661,19 @@ _WINDOWS_SERIAL_GATES = {
     "Build and run HLE thread selftest": "CC=gcc VULKAN_SDK=/ucrt64 hle-thread-selftest",
     "Build and run flash0 font device selftest": 'PYTHONPATH=tools "$py" -m unittest -v test_flash0_font',
     "Build and run the Media Foundation H.264 media selftest": "CC=gcc VULKAN_SDK=/ucrt64 psmf-media-selftest",
+    "Build and run the vendored FFmpeg H.264 media selftest on Windows":
+        "CC=gcc VULKAN_SDK=/ucrt64 H264_FFMPEG=1 psmf-media-selftest",
     "Build and run synthetic VFPU fuzzer (shard 0 of 2)": "VFPU_FUZZ_PREGENERATED=1 CC=gcc VULKAN_SDK=/ucrt64 -j4 vfpu_fuzz_build",
     "Build and run synthetic VFPU fuzzer (shard 1 of 2)": "VFPU_FUZZ_PREGENERATED=1 CC=gcc VULKAN_SDK=/ucrt64 -j4 vfpu_fuzz_build",
     "Prove the fuzz shards cover every case exactly once": 'NK_VFPU_FUZZ_BIN=build/windows-runtime/vfpu_fuzz.exe "$py" -m unittest -v test_public_ci_wiring.VfpuFuzzShardTests',
 }
-# Steps every part repeats: the toolchain setup, the compiler cache and the
+# Steps every matrix group runs once: the toolchain setup, the compiler cache and the
 # runtime-object compile gate.
 _WINDOWS_EVERY_PART = (
     "Check out repository",
-    "Set up Windows CPython 3.15.1",
+    "Set up Windows CPython 3.15.2",
     "Set up MSYS2 UCRT64",
-    "Pin the Windows Python toolchain (CPython 3.15.1)",
+    "Pin the Windows Python toolchain (CPython 3.15.2)",
     "Verify default and override compiler resolution",
     "Compute the persisted compiler cache key",
     "Restore the persisted compiler cache",
@@ -580,7 +681,7 @@ _WINDOWS_EVERY_PART = (
     "Compile Windows runtime objects through the default compiler path",
     "Report the compiler cache statistics",
 )
-# Steps every part runs only in a trusted run on main (#735): the compiler cache save.
+# Steps every group runs only in a trusted run on main (#735): the compiler cache save.
 _WINDOWS_MAIN_SAVE = (
     "Keep only this run's compiler cache entries for the main save",
     "Save the compiler cache from a main run",
@@ -591,21 +692,48 @@ _WINDOWS_MAIN_SAVE_CONDITION = (
 )
 
 
+#: The Windows parts each matrix group runs, one after another (docs/CI.md, "Jobs per
+#: run"). Parts in one group share the build tree; the fuzz shards, which used to run on
+#: separate runners, share build/windows-runtime, and each rebuilds and reruns there.
+_WINDOWS_GROUPS = {
+    "smoke-routes": ["smoke", "routes"],
+    "ladder-fuzz": ["ladder", "fuzz-0", "fuzz-1"],
+    "selftests": ["selftests"],
+}
+
+
+def _windows_matrix_entries(block: list[str]) -> dict[str, tuple[list[str], int]]:
+    """windows_runtime's ``include`` entries: group name -> (part list, timeout minutes)."""
+    text = "\n".join(block)
+    entries = re.findall(
+        r"(?m)^ {10}- group: ([A-Za-z0-9_-]+)\n {12}parts: \[([^\]]*)\]\n {12}timeout: (\d+)$", text
+    )
+    return {
+        name: ([part.strip() for part in parts.split(",")], int(timeout))
+        for name, parts, timeout in entries
+    }
+
+
+def _windows_matrix_groups(block: list[str]) -> dict[str, list[str]]:
+    """windows_runtime's ``include`` entries: each group name and its part list, in order."""
+    return {name: parts for name, (parts, _timeout) in _windows_matrix_entries(block).items()}
+
+
 class WindowsRuntimePartitionTests(unittest.TestCase):
-    """#694: splitting windows_runtime into parallel parts must not weaken it."""
+    """#694: splitting windows_runtime into parts, and grouping them, must not weaken it."""
 
     block: ClassVar[list[str]]
+    groups: ClassVar[dict[str, list[str]]]
     parts: ClassVar[list[str]]
     steps: ClassVar[dict[str, list[str] | None]]
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.block = _ci_job_blocks()["windows_runtime"]
-        text = "\n".join(cls.block)
-        matrix = re.search(r"(?m)^\s+part:\s*\[([^\]]*)\]\s*$", text)
-        if matrix is None:
-            raise AssertionError("windows_runtime must declare its matrix parts explicitly")
-        cls.parts = [part.strip() for part in matrix.group(1).split(",")]
+        cls.groups = _windows_matrix_groups(cls.block)
+        if not cls.groups:
+            raise AssertionError("windows_runtime must declare its matrix groups and parts explicitly")
+        cls.parts = [part for parts in cls.groups.values() for part in parts]
         step_indent = "      - name: "
         cls.steps = {
             line[len(step_indent):]: _ci_step(cls.block, line[len(step_indent):])
@@ -621,16 +749,50 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
             return None
         self.assertEqual(len(conditions), 1, name)
         match = re.fullmatch(
-            r"if: matrix\.part == '([A-Za-z0-9_-]+)'(?: && github\.event_name == 'schedule')?",
+            r"if: contains\(matrix\.parts, '([A-Za-z0-9_-]+)'\)(?: && github\.event_name == 'schedule')?",
             conditions[0],
         )
         self.assertIsNotNone(match, f"{name}: a part condition must name exactly one part")
         return _matched(match).group(1)
 
+    def test_every_part_is_in_exactly_one_group_and_the_groups_are_pinned(self) -> None:
+        self.assertEqual(self.groups, _WINDOWS_GROUPS)
+        self.assertEqual(sorted(self.parts), sorted({"smoke", "ladder", "routes", "selftests", "fuzz-0", "fuzz-1"}))
+        self.assertEqual(len(self.parts), len(set(self.parts)), "a part is in two groups")
+        text = "\n".join(self.block)
+        # Only the include list defines the jobs: no bare matrix axis adds a cross product.
+        self.assertIn("      matrix:\n        include:\n", text)
+        self.assertIn("    name: Windows runtime compile gate (${{ matrix.group }})", text)
+        self.assertNotIn("matrix.part ", text)
+        self.assertNotIn("matrix.part}", text)
+        # A group's limit is the sum of its parts' former 25-minute limits.
+        self.assertIn("    timeout-minutes: ${{ matrix.timeout }}", text)
+        for group, (parts, timeout) in _windows_matrix_entries(self.block).items():
+            with self.subTest(group=group):
+                self.assertEqual(timeout, 25 * len(parts))
+        self.assertIn("      fail-fast: false", text)
+
+    def test_grouped_fuzz_shards_rebuild_and_rerun_in_order(self) -> None:
+        # Both shard steps regenerate the cases header and run `vfpu_fuzz_build`, a phony
+        # target whose recipe links and runs the binary, so shard 1 runs after shard 0 in
+        # the same tree; the proof follows both and reads the binary they built.
+        order = [_ci_step_index(self.block, name) for name in (
+            "Build and run synthetic VFPU fuzzer (shard 0 of 2)",
+            "Build and run synthetic VFPU fuzzer (shard 1 of 2)",
+            "Prove the fuzz shards cover every case exactly once",
+        )]
+        self.assertEqual(order, sorted(order))
+        fuzz_rules = (ROOT / "mk" / "fuzz_verify.mk").read_text(encoding="utf-8")
+        self.assertRegex(fuzz_rules, r"(?m)^vfpu_fuzz_build: ")
+        self.assertRegex(fuzz_rules, r"(?m)^\t\$\(BUILD_DIR\)/vfpu_fuzz\.exe$")
+        targets = (ROOT / "mk" / "public_targets.mk").read_text(encoding="utf-8")
+        self.assertRegex(targets, r"(?m)^\tvfpu_fuzz_build \\$")
+        self.assertIn(".PHONY: $(PUBLIC_TARGETS) $(INTERNAL_TARGETS)", targets)
+
     def test_windows_runtime_pins_windows_cpython_315_for_tools_and_make(self) -> None:
-        setup = "\n".join(cast(list[str], self.steps["Set up Windows CPython 3.15.1"]))
-        self.assertIn('python-version: "3.15.1"', setup)
-        pin = "\n".join(cast(list[str], self.steps["Pin the Windows Python toolchain (CPython 3.15.1)"]))
+        setup = "\n".join(cast(list[str], self.steps["Set up Windows CPython 3.15.2"]))
+        self.assertIn('python-version: "3.15.2"', setup)
+        pin = "\n".join(cast(list[str], self.steps["Pin the Windows Python toolchain (CPython 3.15.2)"]))
         self.assertIn("shell: pwsh", pin)
         self.assertIn("steps.windows-cpython.outputs.python-path", pin)
         self.assertIn('"PYTHON=$pythonPath`n"', pin)
@@ -671,9 +833,41 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         self.assertIn("CC=gcc VULKAN_SDK=/ucrt64 psmf-media-selftest-csc-mutant", step)
         # The Windows build keeps Media Foundation as its decoder: the FFmpeg subset is off
         # there by default and the media selftest links the Media Foundation libraries.
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         self.assertIn("ifeq ($(OS),Windows_NT)\nH264_FFMPEG ?= 0\nelse\nH264_FFMPEG ?= 1\nendif", makefile)
         self.assertIn("ifeq ($(OS),Windows_NT)\nPSMF_MEDIA_LIBS := -lmfplat -lole32", makefile)
+
+    def test_ffmpeg_h264_subset_builds_and_decodes_on_windows(self) -> None:
+        """The vendored FFmpeg subset's _WIN32 branches compile, and the subset decodes there.
+
+        Linux CI never compiles those branches, so a header only they include (as
+        libavutil/file_open.c includes libavutil/wchar_filename.h) went missing unnoticed. The
+        Windows step builds the subset with H264_FFMPEG=1 in its own build directory, so the
+        Media Foundation objects of build/windows-runtime are not mixed with it, and fails on
+        any SKIP line as the Media Foundation step does.
+        """
+        name = "Build and run the vendored FFmpeg H.264 media selftest on Windows"
+        if name not in self.steps:
+            self.fail(f"windows_runtime has no {name!r} step")
+        self.assertEqual(self.part_of(name), "selftests")
+        step = "\n".join(cast(list[str], self.steps[name]))
+        self.assertIn("shell: msys2 {0}", step)
+        self.assertIn("set -euo pipefail", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertIn("BUILD_DIR=build/windows-h264-ffmpeg", step)
+        self.assertNotIn("BUILD_DIR=build/windows-runtime", step)
+        self.assertIn("H264_FFMPEG=1 psmf-media-selftest 2>&1 | tee \"$log\"", step)
+        self.assertIn("if grep -F 'SKIP:' \"$log\"; then", step)
+        self.assertRegex(step, r"(?m)^\s+exit 1$")
+        # The subset's one _WIN32-only include is carried, byte-identical at the pin.
+        header = ROOT / "src" / "rt" / "h264_ffmpeg_sub" / "libavutil" / "wchar_filename.h"
+        self.assertTrue(header.is_file(), "libavutil/wchar_filename.h is missing from the subset")
+        provenance = (ROOT / "src" / "rt" / "h264_ffmpeg_sub" / "PROVENANCE.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "| `libavutil/wchar_filename.h` | imported byte-identical | "
+            "`142d50e7c3c91b70ba70b254fb135d22d38b037f` |",
+            provenance,
+        )
 
     def test_every_serial_gate_runs_in_exactly_one_declared_part_with_its_command(self) -> None:
         self.assertEqual(len(self.parts), len(set(self.parts)))
@@ -689,7 +883,7 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         for name in self.steps:
             with self.subTest(step=name):
                 if name in _WINDOWS_EVERY_PART:
-                    self.assertIsNone(self.part_of(name), f"{name} must run in every part")
+                    self.assertIsNone(self.part_of(name), f"{name} must run in every group")
                 elif name in _WINDOWS_MAIN_SAVE:
                     step = " ".join(line.strip() for line in cast(list[str], self.steps[name]))
                     self.assertIn(_WINDOWS_MAIN_SAVE_CONDITION, step, f"{name} runs only on main")
@@ -757,9 +951,17 @@ _NATIVE_SERIAL_GATES = {
     "Run Linux native player UI tests headlessly":
         "run: SDL_VIDEODRIVER=dummy SDL_RENDER_DRIVER=software make CC=gcc player-ui-tests",
     "Verify lavapipe and run GPU capture selftest": "make CC=gcc gpu-capture-selftest",
-    "Run GPU coherence selftest on lavapipe": "make CC=gcc gpu-coherence-selftest",
+    "Run GPU coherence selftest on lavapipe": "make CC=gcc gpu-coherence-selftest vram-view-identity-selftest",
+    "Run GPU texture scaling selftest on lavapipe": "make CC=gcc gpu-texscale-selftest gpu-texscale-mutant",
+    "Run the FSR 3 pass selftest on lavapipe": "NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-pass-selftest",
+    "Run the FSR 3 frame generation refusal on lavapipe":
+        'NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-fg-pass-selftest FSR3FG_PASS_ARGS="--cell G-R"',
+    "Reproduce the FSR 3 shaders with the pinned DXC":
+        'python tools/shader_embed.py verify --shader-set fsr3 --recompile --dxc "$dxc_dir/bin/dxc"',
     "Configure, build, and test CMake Linux player": 'ctest --test-dir "$player_build" --output-on-failure',
     "Build and run the Linux showcase headlessly": "make CC=gcc showcase-linux",
+    "Build and run the profile-zero production route on Linux":
+        "run: make --no-print-directory CC=gcc profile-zero-e2e",
     "Smoke the CMake Linux player headlessly": '"$player_build/nakagawa_player" "--iso=$iso" --stage-only)',
     "Stage the installed Linux player and smoke the installed binary":
         'python tools/stage_install.py --dest "$install_dir"',
@@ -918,12 +1120,102 @@ class NativeToolsPartitionTests(unittest.TestCase):
         self.assertIn("NATIVE_RESULT: ${{ needs.native_tools.result }}", required)
 
 
+class AndroidBuildWiringTests(unittest.TestCase):
+    """#360: hosted CI builds the Android launcher APK with the toolchain the Gradle files pin."""
+
+    ci: str
+    job: str
+    gradle: str
+    wrapper: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        cls.job = "\n".join(_ci_job_blocks()["android_build"])
+        cls.gradle = (ROOT / "android" / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+        cls.wrapper = (
+            ROOT / "android" / "gradle" / "wrapper" / "gradle-wrapper.properties"
+        ).read_text(encoding="utf-8")
+
+    def _pinned(self) -> dict[str, str]:
+        compile_sdk = re.search(r"release\((\d+)\)\s*\{\s*minorApiLevel\s*=\s*(\d+)\s*\}", self.gradle)
+        ndk = re.search(r'ndkVersion\s*=\s*"([^"]+)"', self.gradle)
+        build_tools = re.search(r'buildToolsVersion\s*=\s*"([^"]+)"', self.gradle)
+        cmake = re.search(r'cmake\s*\{\s*path\s*=\s*file\("CMakeLists.txt"\)\s*version\s*=\s*"([^"]+)"',
+                          self.gradle)
+        gradle = re.search(r"gradle-([0-9.]+)-bin\.zip", self.wrapper)
+        for name, match in (("compileSdk", compile_sdk), ("ndkVersion", ndk),
+                            ("buildToolsVersion", build_tools), ("cmake version", cmake),
+                            ("Gradle distribution", gradle)):
+            self.assertIsNotNone(match, f"android Gradle files no longer declare {name}")
+        return {
+            "platform": f"android-{_matched(compile_sdk).group(1)}.{_matched(compile_sdk).group(2)}",
+            "ndk": _matched(ndk).group(1),
+            "build_tools": _matched(build_tools).group(1),
+            "cmake": _matched(cmake).group(1),
+            "gradle": _matched(gradle).group(1),
+        }
+
+    def test_job_installs_exactly_the_pinned_toolchain(self) -> None:
+        pinned = self._pinned()
+        self.assertIn(f'"platforms;{pinned["platform"]}"', self.job)
+        self.assertIn(f'"build-tools;{pinned["build_tools"]}"', self.job)
+        self.assertIn(f'"ndk;{pinned["ndk"]}"', self.job)
+        self.assertIn(f'"cmake;{pinned["cmake"]}"', self.job)
+        self.assertIn(f'test -d "$ANDROID_HOME/ndk/{pinned["ndk"]}"', self.job)
+        # Gradle comes from the wrapper properties and is checked against their digest.
+        self.assertIn("distributionSha256Sum", self.wrapper)
+        self.assertIn("properties=android/gradle/wrapper/gradle-wrapper.properties", self.job)
+        self.assertIn("sha256sum --check --strict", self.job)
+
+    def test_docs_name_the_same_toolchain(self) -> None:
+        pinned = self._pinned()
+        docs = (ROOT / "docs" / "ANDROID_DEVELOPMENT.md").read_text(encoding="utf-8")
+        for text in (f"`{pinned['platform']}`", f"build-tools {pinned['build_tools']}",
+                     f"CMake {pinned['cmake']}", f"NDK {pinned['ndk']}",
+                     f"Gradle {pinned['gradle']}"):
+            self.assertIn(text, docs)
+        self.assertIn("Android launcher build", docs)
+
+    def test_job_builds_and_checks_the_arm64_launcher(self) -> None:
+        self.assertIn("gradle --no-daemon -p android assembleDebug -Pnk.abis=arm64-v8a", self.job)
+        for library in ("libmain.so", "libSDL3.so", "libSDL3_ttf.so"):
+            self.assertIn(library, self.job)
+        self.assertIn("lib/arm64-v8a/$library", self.job)
+        self.assertIn("persist-credentials: false", self.job)
+        self.assertIn("contents: read", self.job)
+        self.assertIn("needs.classify.outputs.run_native == 'true'", self.job)
+
+    def test_job_keeps_the_apk_for_a_phone(self) -> None:
+        """The debug APK is kept as an artifact, so it can be installed on a phone without a PC
+        build (docs/ANDROID_DEVELOPMENT.md, "Test on a phone")."""
+        step = _ci_step(_ci_job_blocks()["android_build"],
+                        "Keep the debug APK for installing on a phone")
+        self.assertIsNotNone(step, "android_build must upload the debug APK")
+        assert step is not None
+        text = "\n".join(step)
+        self.assertRegex(text, r"uses: actions/upload-artifact@[0-9a-f]{40} # v\d")
+        self.assertIn("name: nakagawa-android-arm64-debug", text)
+        self.assertIn("path: android/app/build/outputs/apk/debug/app-debug.apk", text)
+        self.assertIn("if-no-files-found: error", text)
+        docs = (ROOT / "docs" / "ANDROID_DEVELOPMENT.md").read_text(encoding="utf-8")
+        self.assertIn("## Test on a phone", docs)
+        self.assertIn("`nakagawa-android-arm64-debug`", docs)
+
+    def test_ci_required_reads_the_android_build(self) -> None:
+        required_job = "\n".join(_ci_job_blocks()["ci_required"])
+        self.assertRegex(required_job, r"needs: \[[^\]]*\bandroid_build\b[^\]]*\]")
+        self.assertIn("ANDROID_RESULT: ${{ needs.android_build.result }}", required_job)
+        required = (ROOT / "tools" / "ci_required.py").read_text(encoding="utf-8")
+        self.assertIn('("android-build", "ANDROID_RESULT", "RUN_NATIVE")', required)
+
+
 class WindowsCompilerCacheTests(unittest.TestCase):
     """#735 item 2: Windows compiles go through a compiler cache that only main writes.
 
     ccache keys an entry on the compiler's contents, the command line and the contents of
     every header, so a hit is an identical compile. The cache is restored in every part
-    and saved only by a trusted run on main (owner decision of 2026-10-30): pull requests
+    and saved only by a trusted run on main: pull requests
     and merge groups read it and never write it (#373). CC must stay `gcc`, and the
     masquerading `gcc` must resolve into the UCRT64 toolchain, whose location the build's
     SDL3 toolchain check reads.
@@ -989,17 +1281,17 @@ class WindowsCompilerCacheTests(unittest.TestCase):
         self.assertIn("gcc -v 2>&1", self.key)
         key = " ".join(line.strip() for line in self.restore.splitlines())
         self.assertIn(
-            "key: >- windows-ccache-v1-${{ matrix.part }}-${{ steps.compiler-cache-key.outputs.toolchain }}-${{ "
+            "key: >- windows-ccache-v1-${{ matrix.group }}-${{ steps.compiler-cache-key.outputs.toolchain }}-${{ "
             "hashFiles('Makefile', 'mk/**') }}-${{ "
             "hashFiles('src/**', 'third_party/**', 'tests/native/**', 'fixtures/**', 'tools/**', 'assets/**') }}",
             key,
         )
-        # A fallback restore keeps the part and the toolchain: ccache still matches each
+        # A fallback restore keeps the group and the toolchain: ccache still matches each
         # object on its exact compile, so an older entry is only ever a miss, never wrong.
         self.assertIn(
-            "restore-keys: | windows-ccache-v1-${{ matrix.part }}-${{ steps.compiler-cache-key.outputs.toolchain }}-${{ "
+            "restore-keys: | windows-ccache-v1-${{ matrix.group }}-${{ steps.compiler-cache-key.outputs.toolchain }}-${{ "
             "hashFiles('Makefile', 'mk/**') }}- "
-            "windows-ccache-v1-${{ matrix.part }}-${{ steps.compiler-cache-key.outputs.toolchain }}-",
+            "windows-ccache-v1-${{ matrix.group }}-${{ steps.compiler-cache-key.outputs.toolchain }}-",
             key,
         )
 
@@ -1095,7 +1387,7 @@ class WindowsPlayerStageSmokeTests(unittest.TestCase):
 
     def test_step_runs_in_the_smoke_part_after_the_player_is_built(self) -> None:
         self.assertIsNotNone(self.step, f"windows_runtime no longer runs {self.STEP!r}")
-        self.assertIn("if: matrix.part == 'smoke'", self.text)
+        self.assertIn("if: contains(matrix.parts, 'smoke')", self.text)
         self.assertIn("shell: msys2 {0}", self.text)
         index = _ci_step_index(self.block, self.STEP)
         for earlier in ("Build and link the native player",
@@ -1192,7 +1484,7 @@ class PlayerUiShardTests(unittest.TestCase):
         self.assertEqual([test.id() for test in self.module._flatten(loaded)], self.shard_ids("1/4"))
 
     def test_the_makefile_runs_every_shard_of_one_count_side_by_side(self) -> None:
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         listed = re.search(r"(?m)^PLAYER_UI_SHARDS := (.+)$", makefile)
         self.assertIsNotNone(listed)
         assert listed is not None
@@ -1247,15 +1539,15 @@ class VfpuFuzzShardTests(unittest.TestCase):
                 lines = _ci_step(block, f"Build and run synthetic VFPU fuzzer (shard {index} of 2)")
                 self.assertIsNotNone(lines, f"no fuzz step for {part}")
                 text = "\n".join(cast(list[str], lines))
-                self.assertIn(f"if: matrix.part == '{part}'", text)
+                self.assertIn(f"if: contains(matrix.parts, '{part}')", text)
                 self.assertIn(f'FUZZ_CASE_SHARD: "{index}/2"', text)
         proof = _ci_step(block, "Prove the fuzz shards cover every case exactly once")
         self.assertIsNotNone(proof, "the shard proof step is missing")
-        self.assertIn("if: matrix.part == 'fuzz-0'", "\n".join(cast(list[str], proof)))
+        self.assertIn("if: contains(matrix.parts, 'fuzz-0')", "\n".join(cast(list[str], proof)))
 
     def test_ci_required_aggregates_every_windows_part(self) -> None:
         required = "\n".join(_ci_job_blocks()["ci_required"])
-        self.assertIn("needs: [classify, hygiene, public_export, markdown, python_tools, native_tools, windows_runtime, main_smoke]", required)
+        self.assertIn("needs: [classify, hygiene, public_export, python_tools, native_tools, android_build, windows_runtime]", required)
         self.assertIn("WINDOWS_RESULT: ${{ needs.windows_runtime.result }}", required)
         self.assertIn("RUN_WINDOWS: ${{ needs.classify.outputs.run_windows }}", required)
 
@@ -1388,10 +1680,66 @@ class PublicExportJobTests(unittest.TestCase):
     def _step_names(block: list[str]) -> list[str]:
         return [line.strip()[len("- name: "):] for line in block if line.strip().startswith("- name: ")]
 
+    # The steps of the former main_smoke and markdown jobs, now after hygiene's own, with
+    # each one's command and the condition its job had (docs/CI.md, "Jobs per run").
+    MAIN_SMOKE_STEPS = {
+        "Run compact import/publication smoke": "run: python tools/import_audit_gate.py",
+        "Run provenance record and disposition gap check": "run: python tools/provenance_record_gap.py --check",
+    }
+    MAIN_SMOKE_CONDITION = "if: ${{ needs.classify.outputs.run_main_smoke == 'true' }}"
+    MARKDOWN_STEPS = {
+        "Set up Node.js": 'node-version: "26.13.0"',
+        "Lint repository Markdown": "run: npx --yes markdownlint-cli2@0.24.0",
+    }
+    MARKDOWN_CONDITION = "if: ${{ !cancelled() && needs.classify.outputs.run_markdown == 'true' }}"
+    # The steps of the former profile_zero_fixture job, now after the export step.
+    PROFILE_ZERO_STEPS = (
+        "Install PSPDEV from the checked-in lock",
+        "Build the profile-zero fixture and check its pinned digests",
+        "Upload the verified fixture",
+        "Gate profile-zero imports on HLE review status",
+        "Build Nakagawa Font Copy",
+    )
+    PROFILE_ZERO_CONDITION = "if: ${{ env.BUILD_PROFILE_ZERO == 'true' }}"
+
+    def _conditions(self, block: list[str], name: str) -> list[str]:
+        step = _ci_step(block, name)
+        self.assertIsNotNone(step, f"step {name!r} is missing")
+        return [line.strip() for line in step or [] if line.strip().startswith("if:")]
+
     def test_hygiene_keeps_every_check_it_ran_before(self) -> None:
-        self.assertEqual(self._step_names(self.blocks["hygiene"]), list(self.HYGIENE_STEPS))
+        self.assertEqual(
+            self._step_names(self.blocks["hygiene"]),
+            [*self.HYGIENE_STEPS, *self.MAIN_SMOKE_STEPS, *self.MARKDOWN_STEPS],
+        )
         self.assertIn("pre-commit run --all-files --show-diff-on-failure",
                       "\n".join(self.blocks["hygiene"]))
+        # Hygiene's own checks stay unconditional on every event.
+        for name in self.HYGIENE_STEPS:
+            with self.subTest(step=name):
+                self.assertEqual(self._conditions(self.blocks["hygiene"], name), [])
+
+    def test_folded_main_smoke_and_markdown_steps_keep_their_commands_and_conditions(self) -> None:
+        hygiene = self.blocks["hygiene"]
+        for steps, condition in ((self.MAIN_SMOKE_STEPS, self.MAIN_SMOKE_CONDITION),
+                                 (self.MARKDOWN_STEPS, self.MARKDOWN_CONDITION)):
+            for name, command in steps.items():
+                with self.subTest(step=name):
+                    self.assertEqual(self._conditions(hygiene, name), [condition])
+                    self.assertIn(command, "\n".join(_ci_step(hygiene, name) or []))
+        # The main smoke waited for hygiene to pass: as later steps of the job it still
+        # does (default success()). Markdown never waited, so it runs unless cancelled.
+        self.assertNotIn("!cancelled()", self.MAIN_SMOKE_CONDITION)
+        # Node.js comes after pre-commit, so no hook environment can pick it up.
+        self.assertLess(_ci_step_index(hygiene, "Run shared all-files checks"),
+                        _ci_step_index(hygiene, "Set up Node.js"))
+        for job in ("markdown", "main_smoke", "profile_zero_fixture"):
+            with self.subTest(job=job):
+                self.assertNotIn(job, self.blocks, f"{job} is folded into another job")
+        # The ruleset and the Trusted CI verdict require this exact check name.
+        self.assertIn("    name: Hygiene and security", hygiene)
+        # The merged job's limit is the sum of the three former jobs' limits.
+        self.assertIn("    timeout-minutes: 35", hygiene)
 
     def test_betterleaks_history_scan_is_bounded_to_this_change(self) -> None:
         """A pull request is scanned only for the commits it adds; never with `git log --all`.
@@ -1434,7 +1782,7 @@ class PublicExportJobTests(unittest.TestCase):
         build_versions = versions(build_lock)
         package_versions = versions(lock)
         self.assertEqual(build_versions, {
-            "cython": "3.3.0",
+            "cython": "3.3.1",
             "setuptools": "84.2.1",
             "packaging": "26.3",
             "wheel": "0.48.0",
@@ -1443,15 +1791,15 @@ class PublicExportJobTests(unittest.TestCase):
         self.assertEqual(package_versions, {
             "cfgv": "3.5.0",
             "distlib": "0.4.4",
-            "filelock": "4.2.4",
+            "filelock": "4.2.9",
             "identify": "2.6.20",
-            "nodeenv": "1.11.0",
+            "nodeenv": "1.12.0",
             "packaging": "26.3",
-            "platformdirs": "4.13.5",
-            "pre-commit": "4.6.2",
+            "platformdirs": "4.14.5",
+            "pre-commit": "4.7.0",
             "pyyaml": "6.0.3",
-            "python-discovery": "1.6.4",
-            "virtualenv": "21.14.11",
+            "python-discovery": "1.9.4",
+            "virtualenv": "21.15.5",
         })
         self.assertEqual(lock.count("--hash=sha256:"), len(package_versions))
 
@@ -1477,28 +1825,46 @@ class PublicExportJobTests(unittest.TestCase):
         self.assertIn("PROVENANCE_UNVERIFIED", export)
         job = "\n".join(self.blocks["public_export"])
         self.assertIn("fetch-depth: 0", job)
-        self.assertIn('python-version: "3.15.1"', job)
+        self.assertIn('python-version: "3.15.2"', job)
 
     def test_public_export_job_is_ungated_by_path(self) -> None:
         block = self.blocks["public_export"]
         self.assertIn("    if: ${{ always() && needs.classify.result == 'success' }}", block)
         self.assertIn("    needs: classify", block)
-        text = "\n".join(block)
+        # Only the profile-zero steps, which carry the former profile_zero_fixture job's
+        # condition, may read a path output; the job and the export step read none.
+        env_start = block.index("    env:")
+        steps_start = block.index("    steps:")
+        self.assertEqual(
+            " ".join(line.strip() for line in block[env_start:steps_start]),
+            "env: BUILD_PROFILE_ZERO: >- ${{ needs.classify.outputs.allow_substantive == 'true' && "
+            "(needs.classify.outputs.run_python == 'true' || "
+            "needs.classify.outputs.run_windows == 'true') }}",
+        )
+        ungated = "\n".join(block[:env_start] + block[steps_start:])
         for gate in ("run_python", "run_native", "run_windows", "run_markdown", "run_main_smoke",
                      "docs_only", "allow_substantive"):
-            self.assertNotIn(gate, text, "public_export must not be path-gated on %s" % gate)
+            self.assertNotIn(gate, ungated, "public_export must not be path-gated on %s" % gate)
+        for name in self._step_names(block):
+            with self.subTest(step=name):
+                expected = [self.PROFILE_ZERO_CONDITION] if name in self.PROFILE_ZERO_STEPS else None
+                if expected is not None:
+                    self.assertEqual(self._conditions(block, name), expected)
+                else:
+                    self.assertNotIn(self.PROFILE_ZERO_CONDITION, self._conditions(block, name))
 
     def test_every_platform_gate_waits_for_the_export_result(self) -> None:
-        # main_smoke runs only on main pushes and is not a substantive gate: it keeps hygiene.
-        block = "\n".join(self.blocks["main_smoke"])
-        self.assertIn("needs: [classify, hygiene, public_export]", block)
-        self.assertIn("needs.public_export.result == 'success'", block)
+        # The main smoke runs only on main pushes and is not a substantive gate: it keeps
+        # hygiene, as later steps of the hygiene job.
+        hygiene = self.blocks["hygiene"]
+        for name in self.MAIN_SMOKE_STEPS:
+            with self.subTest(step=name):
+                self.assertLess(_ci_step_index(hygiene, "Run Betterleaks synthetic canaries"),
+                                _ci_step_index(hygiene, name))
         for job in ("python_tools", "native_tools", "windows_runtime"):
             with self.subTest(job=job):
                 block = "\n".join(self.blocks[job])
-                self.assertRegex(
-                    block, r"(?m)^    needs: \[classify, public_export(, profile_zero_fixture)?\]$"
-                )
+                self.assertRegex(block, r"(?m)^    needs: \[classify, public_export\]$")
                 needs_line = re.search(r"(?m)^    needs: (.+)$", block)
                 self.assertIsNotNone(needs_line, f"{job} declares no needs line")
                 self.assertNotIn("hygiene", _matched(needs_line).group(1))
@@ -1507,30 +1873,35 @@ class PublicExportJobTests(unittest.TestCase):
 
     def test_profile_zero_fixture_is_built_from_source_for_its_consumers(self) -> None:
         """#1100: the fixture is built and digest-checked in CI, never committed."""
-        fixture = "\n".join(self.blocks["profile_zero_fixture"])
+        block = self.blocks["public_export"]
+        names = self._step_names(block)
+        # The fixture steps follow the export step, so the export audits the clean
+        # checkout, and keep the order the separate job ran them in.
+        self.assertEqual(names[names.index(self.EXPORT_STEP) + 1:], list(self.PROFILE_ZERO_STEPS))
+        fixture = "\n".join(block)
         self.assertIn("sha256sum --check --strict SHA256SUMS", fixture)
         self.assertIn("name: profile-zero-fixture", fixture)
         self.assertIn("if-no-files-found: error", fixture)
         # #341: the verified guest's imports are gated on HLE review status.
-        gate = "\n".join(_ci_step(self.blocks["profile_zero_fixture"],
-                                  "Gate profile-zero imports on HLE review status") or [])
+        gate = "\n".join(_ci_step(block, "Gate profile-zero imports on HLE review status") or [])
         self.assertIn("--imports fixtures/profile_zero/prebuilt/profile_zero_guest.prx", gate)
         self.assertIn("--check-profile-zero-imports", gate)
         # The PSP font-copy app is built with the same locked PSPDEV, through its import gate.
-        app = "\n".join(_ci_step(self.blocks["profile_zero_fixture"],
-                                 "Build Nakagawa Font Copy") or [])
+        app = "\n".join(_ci_step(block, "Build Nakagawa Font Copy") or [])
         self.assertIn("make --no-print-directory -C src/psp_companion "
                       'BUILD_DIR="$RUNNER_TEMP/fontcopy"', app)
+        # The merged job's limit is the sum of the two former jobs' limits.
+        self.assertIn("    timeout-minutes: 30", block)
         for job in ("python_tools", "windows_runtime"):
             with self.subTest(job=job):
-                block = "\n".join(self.blocks[job])
-                self.assertIn("needs.profile_zero_fixture.result == 'success'", block)
-                self.assertIn("name: profile-zero-fixture", block)
-                self.assertIn("path: fixtures/profile_zero/prebuilt", block)
+                consumer = "\n".join(self.blocks[job])
+                self.assertIn("needs.public_export.result == 'success'", consumer)
+                self.assertIn("name: profile-zero-fixture", consumer)
+                self.assertIn("path: fixtures/profile_zero/prebuilt", consumer)
 
     def test_ci_required_still_requires_hygiene_and_export(self) -> None:
         required = "\n".join(self.blocks["ci_required"])
-        self.assertIn("needs: [classify, hygiene, public_export, markdown, python_tools, native_tools,", required)
+        self.assertIn("needs: [classify, hygiene, public_export, python_tools, native_tools, android_build, windows_runtime]", required)
         self.assertIn("HYGIENE_RESULT: ${{ needs.hygiene.result }}", required)
         self.assertIn("PUBLIC_EXPORT_RESULT: ${{ needs.public_export.result }}", required)
 
@@ -1771,10 +2142,10 @@ def _on_block(text: str) -> list[str]:
 #: outputs (tools/ci_paths.py, docs/CI.md "Self-hosted Linux runners").
 SELF_HOSTED_RUNS_ON = """${{ fromJSON(needs.classify.outputs.linux_runner || '"ubuntu-24.04"') }}"""
 SELF_HOSTED_RUNS_ON_2604 = """${{ fromJSON(needs.classify.outputs.linux_runner_2604 || '"ubuntu-26.04"') }}"""
-#: The jobs that read each: every Linux job of CI except classify, which decides.
+#: The jobs that read each: every Linux job of CI except classify, which decides, and
+#: linux_gcc16, a container job that needs Docker on a hosted runner.
 SELF_HOSTED_JOBS = frozenset({"native_tools", "python_tools"})
-SELF_HOSTED_JOBS_2604 = frozenset({"hygiene", "markdown", "public_export", "profile_zero_fixture", "main_smoke",
-                                   "ci_required"})
+SELF_HOSTED_JOBS_2604 = frozenset({"hygiene", "public_export", "ci_required"})
 #: Trusted CodeQL's analyses read the runner its prepare job chose (tools/ci_paths.py
 #: codeql_runner).
 CODEQL_RUNS_ON = """${{ fromJSON(needs.prepare.outputs.analyze_runner || '"ubuntu-26.04"') }}"""
@@ -1800,6 +2171,393 @@ def _workflow_job_blocks(name: str) -> dict[str, list[str]]:
         end = starts[position + 1] if position + 1 < len(starts) else len(lines)
         blocks[lines[first].strip().rstrip(":")] = lines[first:end]
     return blocks
+
+
+def _job_if(block: list[str]) -> str:
+    """A job's ``if:`` expression, folded ``>-`` continuation lines joined, ``${{ }}`` removed."""
+    for index, line in enumerate(block):
+        match = re.match(r"^ {4}if:\s*(.*)$", line)
+        if not match:
+            continue
+        parts = [match.group(1)]
+        if parts[0] == ">-":
+            parts = []
+            for continuation in block[index + 1:]:
+                if continuation.strip() and not continuation.startswith(" " * 5):
+                    break
+                parts.append(continuation.strip())
+        expression = " ".join(part for part in parts if part)
+        return _matched(re.fullmatch(r"\$\{\{(.*)\}\}", expression, re.S)).group(1).strip()
+    raise AssertionError("job has no if:")
+
+
+_EXPRESSION_TOKEN = re.compile(r"\s*(\|\||&&|==|!=|!|\(|\)|,|'(?:[^']|'')*'|\d+(?:\.\d+)?|[A-Za-z_][A-Za-z0-9_.-]*)")
+
+
+def _actions_eval(expression: str, context: Mapping[str, object]) -> bool:
+    """Evaluate the GitHub Actions expression subset the job guards use.
+
+    Supported: ``||``, ``&&``, ``!``, ``==``, ``!=``, parentheses, single-quoted strings, number literals,
+    context paths (a missing or null step reads as null), ``startsWith`` and ``always``.
+    As in Actions, ``!`` binds tighter than ``==`` and ``!=``, two strings compare without
+    case, operands of different types compare as numbers (null and '' are 0, a non-numeric
+    string is NaN), and ``startsWith`` reads null as the empty string.
+    """
+    tokens: list[str] = []
+    position = 0
+    while expression[position:].strip():
+        match = _EXPRESSION_TOKEN.match(expression, position)
+        if not match:
+            raise AssertionError(f"unsupported expression text at {expression[position:]!r}")
+        tokens.append(match.group(1))
+        position = match.end()
+    index = 0
+
+    def peek() -> str | None:
+        return tokens[index] if index < len(tokens) else None
+
+    def take(expected: str | None = None) -> str:
+        nonlocal index
+        token = tokens[index]
+        if expected is not None and token != expected:
+            raise AssertionError(f"expected {expected!r}, found {token!r}")
+        index += 1
+        return token
+
+    def truthy(value: object) -> bool:
+        return value not in (None, False, 0, "")
+
+    def lookup(path: str) -> object:
+        value: object = context
+        for part in path.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
+        return value
+
+    def number(value: object) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, bool):
+            return float(value)
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text:
+            return 0.0
+        try:
+            return float(text)
+        except ValueError:
+            return float("nan")
+
+    def equal(left: object, right: object) -> bool:
+        if isinstance(left, str) and isinstance(right, str):
+            return left.casefold() == right.casefold()
+        if type(left) is type(right):
+            return left == right
+        return number(left) == number(right)
+
+    def primary() -> object:
+        token = take()
+        if token == "(":
+            value = disjunction()
+            take(")")
+            return value
+        if token.startswith("'"):
+            return token[1:-1].replace("''", "'")
+        if token[0].isdigit():
+            return float(token)
+        if peek() == "(":
+            take("(")
+            arguments: list[object] = []
+            while peek() != ")":
+                arguments.append(disjunction())
+                if peek() == ",":
+                    take(",")
+            take(")")
+            if token == "always" and not arguments:
+                return True
+            if token == "cancelled" and not arguments:
+                return truthy(context.get("cancelled"))
+            if token == "startsWith" and len(arguments) == 2:
+                text, prefix = (str(value or "").casefold() for value in arguments)
+                return text.startswith(prefix)
+            raise AssertionError(f"unsupported function {token}")
+        return lookup(token)
+
+    def negation() -> object:
+        if peek() == "!":
+            take("!")
+            return not truthy(negation())
+        return primary()
+
+    def comparison() -> object:
+        left = negation()
+        if peek() in ("==", "!="):
+            operator = take()
+            right = negation()
+            return equal(left, right) == (operator == "==")
+        return left
+
+    def conjunction() -> object:
+        value = comparison()
+        while peek() == "&&":
+            take("&&")
+            right = comparison()
+            value = right if truthy(value) else value
+        return value
+
+    def disjunction() -> object:
+        value = conjunction()
+        while peek() == "||":
+            take("||")
+            right = conjunction()
+            value = value if truthy(value) else right
+        return value
+
+    result = disjunction()
+    if index != len(tokens):
+        raise AssertionError(f"unparsed expression tokens: {tokens[index:]}")
+    return truthy(result)
+
+
+#: This repository, as ``github.repository`` names it.
+THIS_REPOSITORY = "Jstar269/nakagawa-recomp"
+
+
+class ActionsExpressionEvaluatorTests(unittest.TestCase):
+    """The guard tests below are only as good as the evaluator's Actions semantics."""
+
+    def test_not_binds_tighter_than_equality(self) -> None:
+        context = {"github": {"value": "y"}}
+        # Actions reads (!'y') == 'x', that is false == 'x', which is false.
+        self.assertFalse(_actions_eval("!github.value == 'x'", context))
+        self.assertTrue(_actions_eval("!(github.value == 'x')", context))
+
+    def test_null_equals_the_empty_string_as_in_actions(self) -> None:
+        context = {"github": {"empty": ""}}
+        self.assertTrue(_actions_eval("github.missing == ''", context))
+        self.assertTrue(_actions_eval("github.missing == github.empty", context))
+        self.assertFalse(_actions_eval("github.missing == 'batch/'", context))
+        self.assertFalse(_actions_eval("github.missing != ''", context))
+
+    def test_a_number_literal_compares_as_a_number(self) -> None:
+        self.assertTrue(_actions_eval("run.attempt == 1", {"run": {"attempt": 1}}))
+        self.assertFalse(_actions_eval("run.attempt == 1", {"run": {"attempt": 2}}))
+        self.assertTrue(_actions_eval("run.attempt == 1", {"run": {"attempt": "1"}}))
+        self.assertFalse(_actions_eval("missing == 1", {}))
+
+    def test_strings_compare_without_case(self) -> None:
+        self.assertTrue(_actions_eval("github.repository == 'jstar269/NAKAGAWA-recomp'",
+                                      {"github": {"repository": THIS_REPOSITORY}}))
+
+
+class BatchOnlyCodeqlGuardTests(unittest.TestCase):
+    """Trusted CodeQL analyses a pull request wake only for this repository's batch/ heads.
+
+    Every other trigger (merge group, push to main, schedule, dispatch) still analyses. A
+    skipped prepare skips analyze and upload, so an unscanned head gets no "CodeQL" check
+    and no SARIF, never an empty-results pass (docs/CI.md, "Trusted CodeQL on pull requests").
+    """
+
+    PREPARE_IF = [
+        "    if: >-",
+        "      ${{ github.event_name != 'workflow_run' ||",
+        "          github.event.workflow_run.event == 'merge_group' ||",
+        "          (github.event.workflow_run.event == 'pull_request' &&",
+        "           github.event.workflow_run.head_repository.full_name == github.repository &&",
+        "           startsWith(github.event.workflow_run.head_branch, 'batch/')) }}",
+    ]
+
+    def setUp(self) -> None:
+        self.blocks = _workflow_job_blocks("codeql.yml")
+        self.prepare = _job_if(self.blocks["prepare"])
+
+    @staticmethod
+    def _wake(event: str, branch: str | None, head_repository: object) -> dict[str, object]:
+        return {"github": {
+            "event_name": "workflow_run",
+            "repository": THIS_REPOSITORY,
+            "event": {"workflow_run": {"event": event, "head_branch": branch,
+                                       "head_repository": head_repository}},
+        }}
+
+    def test_a_dispatched_run_is_titled_with_its_pull_request(self) -> None:
+        text = _workflow_text("codeql.yml")
+        header = text[:text.index("\non:\n")]
+        self.assertEqual(header.splitlines()[0], "name: Trusted CodeQL")
+        self.assertEqual(
+            [line for line in header.splitlines() if line.startswith("run-name:")],
+            ["run-name: \"${{ github.event_name == 'workflow_dispatch' && "
+             "format('Trusted CodeQL (PR #{0})', inputs.pull_request_number) || 'Trusted CodeQL' }}\""],
+        )
+        # The input the title names is the dispatch input prepare resolves.
+        self.assertIn("      pull_request_number:\n", text)
+
+    def test_prepare_guard_text_is_pinned(self) -> None:
+        self.assertEqual("\n".join(self.blocks["prepare"]).count("\n".join(self.PREPARE_IF)), 1)
+
+    def test_a_batch_head_of_this_repository_is_analysed(self) -> None:
+        for branch in ("batch/desk-20261105T000000Z", "batch/x"):
+            with self.subTest(branch=branch):
+                context = self._wake("pull_request", branch, {"full_name": THIS_REPOSITORY})
+                self.assertTrue(_actions_eval(self.prepare, context))
+
+    def test_other_pull_request_heads_leave_prepare_skipped(self) -> None:
+        cases = {
+            "fork batch branch": ("batch/desk-20261105T000000Z", {"full_name": "someone/nakagawa-recomp"}),
+            "same-repository non-batch branch": ("fix/codeql-20261105", {"full_name": THIS_REPOSITORY}),
+            "batch/ not at the start": ("fix/batch/x", {"full_name": THIS_REPOSITORY}),
+            "null head repository": ("batch/desk-20261105T000000Z", None),
+            "head repository without a name": ("batch/desk-20261105T000000Z", {}),
+            "null head branch": (None, {"full_name": THIS_REPOSITORY}),
+        }
+        for name, (branch, head_repository) in cases.items():
+            with self.subTest(case=name):
+                context = self._wake("pull_request", branch, head_repository)
+                self.assertFalse(_actions_eval(self.prepare, context))
+
+    def test_a_wake_of_any_other_event_leaves_prepare_skipped(self) -> None:
+        context = self._wake("push", "batch/x", {"full_name": THIS_REPOSITORY})
+        self.assertFalse(_actions_eval(self.prepare, context))
+
+    def test_merge_groups_pushes_schedules_and_dispatches_still_analyse(self) -> None:
+        merge_group = self._wake("merge_group", "gh-readonly-queue/main/pr-1-abc", {"full_name": THIS_REPOSITORY})
+        self.assertTrue(_actions_eval(self.prepare, merge_group))
+        for event_name in ("push", "schedule", "workflow_dispatch"):
+            with self.subTest(event=event_name):
+                context: dict[str, object] = {"github": {"event_name": event_name, "repository": THIS_REPOSITORY, "event": {}}}
+                self.assertTrue(_actions_eval(self.prepare, context))
+
+    def test_a_skipped_prepare_skips_analysis_and_upload(self) -> None:
+        self.assertIn("    needs: prepare", self.blocks["analyze"])
+        self.assertIn("    needs: [prepare, analyze]", self.blocks["upload"])
+        context = self._wake("pull_request", "fix/x", {"full_name": THIS_REPOSITORY})
+        context["needs"] = {"prepare": {"result": "skipped", "outputs": {}},
+                            "analyze": {"result": "skipped"}}
+        for job in ("analyze", "upload"):
+            with self.subTest(job=job):
+                self.assertFalse(_actions_eval(_job_if(self.blocks[job]), context))
+
+    def test_a_docs_only_head_still_uploads_and_a_cancelled_run_does_not(self) -> None:
+        # prepare decided there is nothing to analyse, so analyze is skipped. The upload job must
+        # still run (its explicit !cancelled() replaces the implicit success() that would skip a
+        # job needing a skipped job), and must not run once the workflow is cancelled.
+        context = self._wake("pull_request", "docs/x", {"full_name": THIS_REPOSITORY})
+        context["needs"] = {"prepare": {"result": "success", "outputs": {"scan": "false"}},
+                            "analyze": {"result": "skipped"}}
+        upload_if = _job_if(self.blocks["upload"])
+        self.assertTrue(upload_if.lstrip().startswith("!cancelled() &&"), upload_if)
+        self.assertTrue(_actions_eval(upload_if, context))
+        context["cancelled"] = True
+        self.assertFalse(_actions_eval(upload_if, context))
+
+
+class BatchOnlyCodeqlWakeTests(unittest.TestCase):
+    """The wake job runs only where codeql.yml would analyse; codeql.yml stays the authority."""
+
+    def setUp(self) -> None:
+        self.guard = _job_if(_workflow_job_blocks("codeql-wake.yml")["wake"])
+
+    @staticmethod
+    def _pull_request(branch: str, head_repository: object) -> dict[str, object]:
+        return {"github": {
+            "event_name": "pull_request",
+            "repository": THIS_REPOSITORY,
+            "head_ref": branch,
+            "event": {"pull_request": {"head": {"repo": head_repository}}},
+        }}
+
+    def test_merge_groups_and_batch_heads_wake(self) -> None:
+        merge_group = {"github": {"event_name": "merge_group", "repository": THIS_REPOSITORY, "event": {}}}
+        self.assertTrue(_actions_eval(self.guard, merge_group))
+        batch = self._pull_request("batch/desk-20261105T000000Z", {"full_name": THIS_REPOSITORY})
+        self.assertTrue(_actions_eval(self.guard, batch))
+
+    def test_other_pull_request_heads_do_not_wake(self) -> None:
+        cases = {
+            "fork batch branch": ("batch/desk-20261105T000000Z", {"full_name": "someone/nakagawa-recomp"}),
+            "same-repository non-batch branch": ("ci/codeql-batch-only-20261105", {"full_name": THIS_REPOSITORY}),
+            "null head repository": ("batch/desk-20261105T000000Z", None),
+        }
+        for name, (branch, head_repository) in cases.items():
+            with self.subTest(case=name):
+                self.assertFalse(_actions_eval(self.guard, self._pull_request(branch, head_repository)))
+
+
+class TrustedVerdictTriggerTests(unittest.TestCase):
+    """The verdict re-judges on a new head and on every label event, but not on ready_for_review.
+
+    A Draft/Ready transition starts a CI run (ci.yml lists ready_for_review and
+    converted_to_draft), and that run's completion re-judges the head, reading the draft
+    state then (DRAFT_LIGHT_CI). A pull_request_target run on the transition could only
+    judge the previous CI run. Every label event still re-judges, whatever the label: a
+    newer run in the head's concurrency group replaces a pending one, so a run that skipped
+    the verdict could leave a stale one standing.
+    """
+
+    NEEDS = {"approval": {"result": "skipped"}, "approval_record": {"result": "skipped"}}
+
+    def setUp(self) -> None:
+        self.text = _workflow_text("ci-trust-verdict.yml")
+        self.guard = _job_if(_workflow_job_blocks("ci-trust-verdict.yml")["verdict"])
+
+    def _target(self, action: str, label: str | None = None) -> dict[str, object]:
+        event: dict[str, object] = {
+            "action": action,
+            "pull_request": {"base": {"ref": "main"}},
+            "repository": {"default_branch": "main"},
+        }
+        if label is not None:
+            event["label"] = {"name": label}
+        return {"github": {"event_name": "pull_request_target", "event": event}, "needs": self.NEEDS}
+
+    def test_a_draft_transition_rejudges_through_ci_and_the_verifier_reads_draft_state(self) -> None:
+        self.assertIn(
+            "  pull_request_target:\n    types: [opened, synchronize, reopened, labeled, unlabeled]\n",
+            self.text,
+        )
+        self.assertNotIn("ready_for_review", _uncommented(self.text))
+        self.assertIn('  workflow_run:\n    workflows: ["CI"]\n    types: [completed]\n', self.text)
+        self.assertIn(
+            "    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]",
+            _on_block(_workflow_text("ci.yml")),
+        )
+        verifier = (ROOT / "tools" / "ci_trust_verdict.py").read_text(encoding="utf-8")
+        self.assertIn('"draft": pr.get("draft")', verifier)
+        self.assertIn('"DRAFT_LIGHT_CI"', verifier)
+
+    def test_new_heads_run_the_verdict(self) -> None:
+        for action in ("opened", "synchronize", "reopened"):
+            with self.subTest(action=action):
+                self.assertTrue(_actions_eval(self.guard, self._target(action)))
+
+    def test_a_labeled_or_unlabeled_event_with_any_label_name_runs_the_verdict(self) -> None:
+        self.assertNotIn("github.event.label.name", "\n".join(_workflow_job_blocks("ci-trust-verdict.yml")["verdict"]))
+        for action in ("labeled", "unlabeled"):
+            for label in ("ci-change-approved", "documentation", "batch"):
+                with self.subTest(action=action, label=label):
+                    self.assertTrue(_actions_eval(self.guard, self._target(action, label)))
+
+    def test_a_head_for_another_base_branch_is_not_judged(self) -> None:
+        context = self._target("synchronize")
+        event = cast(dict[str, object], cast(dict[str, object], context["github"])["event"])
+        event["pull_request"] = {"base": {"ref": "release"}}
+        self.assertFalse(_actions_eval(self.guard, context))
+
+    def test_workflow_run_and_dispatch_still_run_the_verdict(self) -> None:
+        workflow_run = {"github": {"event_name": "workflow_run", "event": {"workflow_run": {"event": "pull_request"}}},
+                        "needs": self.NEEDS}
+        self.assertTrue(_actions_eval(self.guard, workflow_run))
+        dispatch = {"github": {"event_name": "workflow_dispatch", "event": {}}, "needs": self.NEEDS}
+        self.assertTrue(_actions_eval(self.guard, dispatch))
+
+    def test_only_a_cancelled_first_ci_attempt_is_skipped(self) -> None:
+        for conclusion, attempt, runs in (("cancelled", 1, False), ("cancelled", 2, True),
+                                          ("success", 1, True), ("failure", 1, True)):
+            with self.subTest(conclusion=conclusion, attempt=attempt):
+                run = {"event": "pull_request", "conclusion": conclusion, "run_attempt": attempt}
+                context = {"github": {"event_name": "workflow_run", "event": {"workflow_run": run}},
+                           "needs": self.NEEDS}
+                self.assertEqual(_actions_eval(self.guard, context), runs)
 
 
 class SelfHostedRunnerWiringTests(unittest.TestCase):
@@ -1841,7 +2599,7 @@ class SelfHostedRunnerWiringTests(unittest.TestCase):
         self.assertEqual(ci.count("needs.classify.outputs.linux_runner_2604 "), len(SELF_HOSTED_JOBS_2604))
         # The classifier, which decides, and the Windows gates stay hosted.
         self.assertIn("    runs-on: ubuntu-26.04", "\n".join(blocks["classify"]))
-        self.assertIn("    runs-on: windows-2022", "\n".join(blocks["windows_runtime"]))
+        self.assertIn("    runs-on: windows-2025", "\n".join(blocks["windows_runtime"]))
         for job in SELF_HOSTED_JOBS | SELF_HOSTED_JOBS_2604:
             block = "\n".join(blocks[job])
             with self.subTest(job=job):
@@ -1912,6 +2670,104 @@ class SelfHostedRunnerWiringTests(unittest.TestCase):
                 self.assertIn(fact, section)
 
 
+class Gcc16CanaryWiringTests(unittest.TestCase):
+    """linux_gcc16 runs a released GCC 16 beside native_tools, fully pinned, and blocks nothing.
+
+    It stays out of ci_required's needs until it is promoted (docs/CI.md, "GCC 16 canary"), and
+    it has no continue-on-error, so a failure is red rather than reported green.
+    """
+
+    INSTALL_STEP = "Install GCC 16.2 and the native test dependencies from Fedora 45's GA repository"
+    #: An exact name-version-release from Fedora 45: the dist tag, optionally with a rebuild suffix.
+    PINNED = re.compile(r"^[A-Za-z0-9_+-]+-[0-9][A-Za-z0-9_.+]*-[0-9][A-Za-z0-9_.]*\.fc45(\.[0-9]+)?$")
+
+    def setUp(self) -> None:
+        self.blocks = _ci_job_blocks()
+        self.block = self.blocks["linux_gcc16"]
+        self.text = "\n".join(self.block)
+
+    def _install_packages(self) -> list[str]:
+        step = _ci_step(self.block, self.INSTALL_STEP)
+        self.assertIsNotNone(step, "linux_gcc16 lost its install step")
+        assert step is not None
+        command = " ".join(line.strip().rstrip("\\") for line in step)
+        self.assertIn("dnf -y --repo=fedora --setopt=install_weak_deps=False install ", command)
+        tail = command.split(" install ", 1)[1]
+        return tail.split(" ln -sf ", 1)[0].split()
+
+    def test_runs_in_a_digest_pinned_container_on_a_hosted_runner(self) -> None:
+        self.assertIn("    name: Linux GCC 16 canary", self.text)
+        self.assertIn("    runs-on: ubuntu-26.04", self.text)
+        self.assertRegex(self.text, r"(?m)^      image: fedora@sha256:[0-9a-f]{64} # fedora:45, ")
+        self.assertIn("    permissions:\n      contents: read\n    needs:", self.text)
+        self.assertNotIn("id-token", self.text)
+        self.assertNotIn("secrets.", self.text)
+
+    def test_the_container_has_an_init_that_reaps_orphans(self) -> None:
+        # Without it PID 1 is `tail -f /dev/null`, and a killed grandchild stays a zombie that
+        # test_posix_process's process-tree subtest still sees.
+        self.assertIn("      options: --init\n    permissions:", self.text)
+
+    def test_runs_when_native_tools_does(self) -> None:
+        self.assertIn("    needs: [classify, public_export]", self.text)
+        self.assertIn("needs.classify.outputs.allow_substantive == 'true'", self.text)
+        self.assertIn("needs.classify.outputs.run_native == 'true'", self.text)
+
+    def test_every_named_package_is_pinned_from_the_ga_repository_only(self) -> None:
+        packages = self._install_packages()
+        for name in ("gcc-16.2.1-", "libasan-16.2.1-", "libubsan-16.2.1-", "git-core-", "python3-",
+                     "mesa-vulkan-drivers-"):
+            with self.subTest(package=name):
+                self.assertTrue(any(p.startswith(name) for p in packages))
+        for package in packages:
+            with self.subTest(package=package):
+                self.assertRegex(package, self.PINNED)
+        self.assertNotIn("updates", self.text)
+        self.assertNotIn("--enablerepo", self.text)
+
+    def test_the_build_identity_comes_from_the_checked_out_revision(self) -> None:
+        # Root in the container cannot read the runner-owned checkout with git, so the display
+        # smoke's flight step gets its build identity from the job, as on windows_runtime.
+        self.assertIn("    env:\n      SR_SOURCE_COMMIT: ${{ github.sha }}\n    steps:", self.text)
+
+    def test_git_is_installed_before_the_checkout(self) -> None:
+        self.assertIn("git-core-", " ".join(self._install_packages()))
+        self.assertLess(_ci_step_index(self.block, self.INSTALL_STEP),
+                        _ci_step_index(self.block, "Check out repository"))
+
+    def test_runs_the_core_suite_and_the_headless_display_smoke(self) -> None:
+        for name, command in (
+            ("Run native core test suite with GCC 16.2", "run: make -j2 CC=gcc native-core-tests"),
+            ("Run the headless display smoke with GCC 16.2", "run: make -j2 CC=gcc display-smoke-run"),
+        ):
+            with self.subTest(step=name):
+                step = _ci_step(self.block, name)
+                self.assertIsNotNone(step)
+                assert step is not None
+                self.assertIn(command, "\n".join(step))
+
+    def test_is_not_required_and_never_reports_a_failure_green(self) -> None:
+        # Until it is promoted, ci_required neither needs nor reads it.
+        required = "\n".join(self.blocks["ci_required"])
+        needs = re.search(r"(?m)^    needs: \[(.*)\]$", required)
+        self.assertIsNotNone(needs)
+        assert needs is not None
+        self.assertNotIn("linux_gcc16", [job.strip() for job in needs.group(1).split(",")])
+        self.assertNotIn("linux_gcc16", required)
+        self.assertNotIn("linux_gcc16", (ROOT / "tools" / "ci_required.py").read_text(encoding="utf-8"))
+        self.assertNotIn("continue-on-error", self.text)
+
+    def test_docs_describe_the_canary_and_its_promotion(self) -> None:
+        section = _markdown_section((ROOT / "docs" / "CI.md").read_text(encoding="utf-8"),
+                                    "### GCC 16 canary")
+        for fact in ("`linux_gcc16`", "--repo=fedora", "`gcc-16.2.1-2.fc45.1`", "`--init`", "`SR_SOURCE_COMMIT`",
+                     "Not required",
+                     "no `continue-on-error`", "steps locally against the new digest", "from any event",
+                     "conclusion, with none failed by the container", "libavutil/mem.c:272"):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, section)
+
+
 class MergeQueueTriggerWiringTests(unittest.TestCase):
     """``merge_group`` is additive: it adds a trigger and changes no existing event's behaviour."""
 
@@ -1923,7 +2779,7 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
             _on_block(self.ci),
             [
                 "  pull_request:",
-                "    types: [opened, synchronize, reopened]",
+                "    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]",
                 "  push:",
                 "    branches: [main]",
                 "  schedule:",
@@ -1942,7 +2798,7 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
         self.assertIn("NK_TEST_TIER:", python_tools)
         self.assertIn("github.event_name == 'schedule'", python_tools)
         self.assertIn("github.event_name == 'workflow_dispatch'", python_tools)
-        for job in ("classify", "hygiene", "markdown", "windows_runtime", "main_smoke", "ci_required"):
+        for job in ("classify", "hygiene", "windows_runtime", "ci_required"):
             with self.subTest(job=job):
                 self.assertNotIn("github.event_name", "\n".join(blocks[job]))
         # native_tools names the event in exactly one place: the nightly repeat step (#1846).
@@ -1969,7 +2825,7 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
             )
             self.assertNotIn("github.event_name", "\n".join(cast(list[str], _ci_step(native_tools, single))))
         # The Makefile target is bounded by one variable and reports the failing iteration.
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         self.assertIn("SELFTEST_REPEAT ?= 20", makefile)
         start = makefile.index("\nselftest-repeat:")
         exes = makefile[makefile.index("SELFTEST_REPEAT_EXES ="):start]
@@ -2011,6 +2867,108 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
                           "action-gh-release", "upload-release"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, self.ci)
+
+
+class DraftLightCiWiringTests(unittest.TestCase):
+    """A Draft pull request runs only the quick CI jobs; every other event runs as before.
+
+    Each case runs the classifier on a real event payload, evaluates every ci.yml job's
+    ``if:`` against its outputs, then feeds the resulting job results to the
+    ``CI required`` aggregate, as the workflow does.
+    """
+
+    #: Paths that route every substantive gate, so only the Draft rule can skip one.
+    PATHS = ["src/rt/driver.c", "tools/codegen.py", "docs/CI.md"]
+    QUICK = frozenset({"hygiene", "public_export", "ci_required"})
+    HEAVY = frozenset({"python_tools", "native_tools", "linux_gcc16", "android_build", "windows_runtime"})
+    RESULT_KEYS = {
+        "hygiene": "HYGIENE_RESULT", "public_export": "PUBLIC_EXPORT_RESULT",
+        "python_tools": "PYTHON_RESULT", "native_tools": "NATIVE_RESULT", "android_build": "ANDROID_RESULT",
+        "windows_runtime": "WINDOWS_RESULT",
+    }
+
+    def _classify(self, event_name: str, event: Mapping[str, object], ref: str) -> dict[str, str]:
+        with tempfile.TemporaryDirectory() as scratch:
+            event_path = Path(scratch) / "event.json"
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            output = Path(scratch) / "github_output"
+            with mock.patch.dict(os.environ, {"GITHUB_REF": ref}), mock.patch("sys.stdout"):
+                self.assertEqual(ci_paths.main([
+                    "--event-name", event_name, "--event-path", str(event_path),
+                    "--github-output", str(output), "--files", *self.PATHS,
+                ]), 0)
+            return dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+
+    def _run(self, event_name: str, event: Mapping[str, object], ref: str = "refs/pull/7/merge"
+             ) -> tuple[set[str], dict[str, str], bool]:
+        outputs = self._classify(event_name, event, ref)
+        blocks = _workflow_job_blocks("ci.yml")
+        self.assertEqual(set(blocks) - {"classify"}, self.QUICK | self.HEAVY, "a ci.yml job is unclassified here")
+        needs: dict[str, object] = {"classify": {"result": "success", "outputs": outputs},
+                                    "public_export": {"result": "success"}}
+        context = {"github": {"event_name": event_name, "event": event}, "needs": needs}
+        ran = {job for job in self.QUICK | self.HEAVY if _actions_eval(_job_if(blocks[job]), context)}
+        environment = {key: ("success" if job in ran else "skipped") for job, key in self.RESULT_KEYS.items()}
+        environment["CLASSIFY_RESULT"] = "success"
+        for line in blocks["ci_required"]:
+            match = re.match(r"^\s+([A-Z_]+): \$\{\{ needs\.classify\.outputs\.([a-z_]+) \}\}$", line)
+            if match:
+                environment[match.group(1)] = outputs[match.group(2)]
+        self.assertEqual(environment["DRAFT"], outputs["draft"])
+        return ran, outputs, ci_required.evaluate_environment(environment)
+
+    @staticmethod
+    def _pull_request(action: str, draft: bool) -> dict[str, object]:
+        return {"action": action, "pull_request": {"number": 7, "draft": draft, "base": {"sha": "a" * 40}}}
+
+    def _profile_zero(self, outputs: dict[str, str]) -> bool:
+        block = "\n".join(_workflow_job_blocks("ci.yml")["public_export"])
+        expression = _matched(re.search(r"BUILD_PROFILE_ZERO: >-\s*\$\{\{(.*?)\}\}", block, re.S)).group(1)
+        return _actions_eval(expression, {"needs": {"classify": {"outputs": outputs}}})
+
+    def test_a_draft_runs_only_the_quick_jobs_and_is_never_green(self) -> None:
+        for action in ("opened", "synchronize", "reopened", "converted_to_draft"):
+            with self.subTest(action=action):
+                ran, outputs, green = self._run("pull_request", self._pull_request(action, True))
+                self.assertEqual(ran, set(self.QUICK))
+                self.assertFalse(self._profile_zero(outputs))
+                self.assertFalse(green, "a Draft's light run must never be green")
+
+    def test_ready_for_review_runs_the_full_matrix(self) -> None:
+        ran, outputs, green = self._run("pull_request", self._pull_request("ready_for_review", False))
+        self.assertEqual(ran, set(self.QUICK | self.HEAVY))
+        self.assertTrue(self._profile_zero(outputs))
+        self.assertTrue(green)
+
+    def test_a_push_to_a_pull_request_that_is_not_a_draft_runs_the_full_matrix(self) -> None:
+        for action in ("opened", "synchronize", "reopened"):
+            with self.subTest(action=action):
+                ran, _outputs, green = self._run("pull_request", self._pull_request(action, False))
+                self.assertEqual(ran, set(self.QUICK | self.HEAVY))
+                self.assertTrue(green)
+
+    def test_merge_group_schedule_and_dispatch_run_the_full_matrix(self) -> None:
+        group = {"merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40}}
+        for event_name, event in (("merge_group", group), ("schedule", {}), ("workflow_dispatch", {})):
+            with self.subTest(event=event_name):
+                ran, outputs, green = self._run(event_name, event, ref="refs/heads/main")
+                self.assertEqual(ran, set(self.QUICK | self.HEAVY))
+                self.assertEqual(outputs["run_main_smoke"], "true")
+                self.assertTrue(green)
+
+    def test_a_push_to_main_keeps_its_smoke_only_policy(self) -> None:
+        ran, outputs, green = self._run("push", {"before": "a" * 40}, ref="refs/heads/main")
+        self.assertEqual(ran, set(self.QUICK))
+        self.assertEqual(outputs["run_main_smoke"], "true")
+        self.assertTrue(green, "a main push skips the substantive jobs by policy and stays green")
+
+    def test_heavy_jobs_are_skipped_through_the_classifier_alone(self) -> None:
+        """One switch: every heavy job gates on allow_substantive, and none reads the draft flag itself."""
+        blocks = _workflow_job_blocks("ci.yml")
+        for job in sorted(self.HEAVY):
+            with self.subTest(job=job):
+                self.assertIn("needs.classify.outputs.allow_substantive == 'true'", _job_if(blocks[job]))
+                self.assertNotIn("draft", _job_if(blocks[job]))
 
 
 class MergeQueueDependencyReviewWiringTests(unittest.TestCase):
@@ -2110,6 +3068,9 @@ class MergeQueueCodeqlWiringTests(unittest.TestCase):
     def test_skipped_analysis_still_uploads_one_result_per_category_for_the_exact_head(self) -> None:
         upload_block = _workflow_job_blocks("codeql.yml")["upload"]
         upload = "\n".join(upload_block)
+        # A job that needs a skipped job is skipped under the implicit success(), so the skipped
+        # route needs an explicit status function, or no docs-only head ever gets a CodeQL result.
+        self.assertIn("${{ !cancelled() && needs.prepare.result == 'success' &&", upload)
         self.assertIn(
             "(needs.analyze.result == 'skipped' && needs.prepare.outputs.scan == 'false')",
             upload,
@@ -2129,7 +3090,6 @@ class MergeQueueCodeqlWiringTests(unittest.TestCase):
 
     def test_pull_request_route_text_is_unchanged(self) -> None:
         for fragment in (
-            "if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'merge_group' }}",
             'if (context.eventName === "workflow_run") {',
             'if (!run || run.event !== "pull_request") {',
             "const { data: matches } = await github.rest.pulls.list({",

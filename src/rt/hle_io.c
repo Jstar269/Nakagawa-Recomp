@@ -11,6 +11,7 @@
  * Extracted from hle.c on 2026-10-31 (#307). */
 
 #include "hle_internal.h"
+#include "../core/nk_shared_helpers.h"
 
 typedef struct HleDevctlRefusal {
     struct HleDevctlRefusal *next;
@@ -71,20 +72,8 @@ static void hle_note_devctl_refusal(const char *device, uint32_t command,
  * root resolution, the byte-path join and the directory-root resolution are
  * the same work on every host, so they are compiled once and shared. */
 char *sr_utf8_join_alloc(const char *left, const char *right, char separator) {
-    if (!left || !right) return NULL;
-    size_t a = strlen(left), b = strlen(right);
-    int need_separator = a > 0 && b > 0 && left[a - 1] != '/' && left[a - 1] != '\\';
-    size_t extra = b;
-    if (extra > SIZE_MAX - (size_t)need_separator - 1u) return NULL;
-    extra += (size_t)need_separator + 1u;
-    if (a > SIZE_MAX - extra) return NULL;
-    char *joined = (char *)malloc(a + extra);
-    if (!joined) return NULL;
-    memcpy(joined, left, a);
-    size_t at = a;
-    if (need_separator) joined[at++] = separator;
-    memcpy(joined + at, right, b + 1u);
-    return joined;
+    return nk_shared_path_join_alloc(left, right, separator,
+                                     NK_SHARED_PATH_JOIN_IF_BOTH_NONEMPTY, 0u);
 }
 
 static char *host_dir_path_alloc(const char *guest) {
@@ -150,10 +139,11 @@ static uint32_t hle_io_raw_umd_read(uint32_t fd, uint32_t dst, uint32_t sectors)
     if (sectors > UINT32_MAX / IO_UMD_SECTOR_BYTES ||
         !sr_guest_span_writable(dst, sectors * IO_UMD_SECTOR_BYTES))
         return 0x80010016u;
-    if (sectors > f->size - f->off)
-        return hle_io_raw_device_boundary(IO_RAW_BOUNDARY_READ_PAST_END,
-                                          "sceIoRead past the last disc sector",
-                                          f->guest_path, fd);
+    /* PSP-IO-EOF-002 (PSP-3000 6.61, 2026-11-04): a read that starts at the last sector and asks
+     * for two returns 1 and copies that one sector; the position is then one past the last
+     * sector, where a further read answers 0x80210002 and a SEEK_CUR 0 is refused. */
+    if (f->off >= f->size) return IO_UMD_READ_AT_END;
+    if (sectors > f->size - f->off) sectors = f->size - f->off;
     const uint32_t bytes = sectors * IO_UMD_SECTOR_BYTES;
     uint8_t tmp[4096];
     for (uint32_t done = 0; done < bytes;) {
@@ -304,6 +294,12 @@ static int data_loose_merge_dir(const char *key, SrVfsDirList *list, int *found_
     return result;
 }
 #endif /* _WIN32 */
+
+/* A path on a device the game unassigned keeps its NO_SUCH_DEVICE (io_guest_path); the
+ * handlers that answer one fixed code for every other unusable path answer that code. */
+static uint32_t io_path_error(uint32_t rc, uint32_t fallback) {
+    return rc == HLE_KERNEL_ERROR_NO_SUCH_DEVICE ? rc : fallback;
+}
 
 static uint32_t h_IoOpen(CpuState *s) {
     char path[512];
@@ -946,6 +942,12 @@ static uint32_t h_IoDread(CpuState *s) {
     DirFd *d = &s_dirfds[fd];
     if (!de) return 0x80010009u; /* preserve baseline behavior for null pointer */
     IsoDirEntry e;
+    /* A Memory Stick directory reports the FAT shape PSPAutotests tests/io/stat/stat.expected records
+     * on a PSP ("dread vs getstat": mode 0x21ff attr 0x0020 for a file, 0x11ff attr 0x0010 for a
+     * directory, equal to sceIoGetstat's). Every other device (disc0, flash0) keeps its 0x124 bits: no
+     * cell measures them. The device is the one the directory was opened on, not `backend`, which is 1
+     * for every merged-namespace listing. */
+    const int ms_shape = d->path && sr_ms0_classify(d->path, NULL) == SR_MS0_OWNED;
     if (d->backend == 0) {
         int r = iso_list(d->path, d->index, &e);
         if (r <= 0) return r < 0 ? 0x80010005u : 0;
@@ -963,7 +965,7 @@ static uint32_t h_IoDread(CpuState *s) {
         e.lba = ve->lba;
     }
     for (uint32_t i = 0; i < 0x15cu; i++) MEM_W8(de + i, 0);
-    MEM_W32(de + 0x00, (e.is_dir ? 0x1000u : 0x2000u) | 0x0124u);
+    MEM_W32(de + 0x00, (e.is_dir ? 0x1000u : 0x2000u) | (ms_shape ? 0x01ffu : 0x0124u));
     MEM_W32(de + 0x04, e.is_dir ? 0x0010u : 0x0020u);
     MEM_W32(de + 0x08, e.size); MEM_W32(de + 0x0c, 0);
     MEM_W32(de + 0x40, e.lba);
@@ -1075,6 +1077,8 @@ static uint32_t h_IoDevctl(CpuState *s) {
     uint32_t outdata = s->r[8], outlen = s->r[9];
     if (!A0 || !guest_cstr(A0, device, (int)sizeof(device)))
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    const uint32_t device_rc = hle_io_assign_path_check(device);
+    if (device_rc != 0u) return device_rc;
     const IoRawDevicePath raw_device = io_raw_device_path(device);
     uint32_t umd_sectors = 0u;
     /* Two UMD drive commands a title issues before reading the disc, served while a disc
@@ -1422,6 +1426,8 @@ static uint32_t h_IoCloseAsync(CpuState *s) {
 static uint32_t h_IoSync(CpuState *s) {
     char device[64];
     if (!guest_cstr(A0, device, sizeof(device))) return 0x80010016u;
+    const uint32_t device_rc = hle_io_assign_path_check(device);
+    if (device_rc != 0u) return device_rc;
     if (A1 != 0u) {
         fprintf(stderr,
                 "SEMANTIC_BOUNDARY: IO_SYNC_ARGUMENT: nonzero sceIoSync unk "
@@ -1497,9 +1503,10 @@ static uint32_t ms0_parent_contained_check(const char *hp, const wchar_t *canoni
 #ifdef _WIN32
 static uint32_t h_IoRename(CpuState *s) {
     char oldpath[256], newpath[256];
-    if (io_guest_path(A0, oldpath, sizeof(oldpath)) != 0u ||
-        io_guest_path(A1, newpath, sizeof(newpath)) != 0u)
-        return 0x80010016u;
+    uint32_t path_rc = io_guest_path(A0, oldpath, sizeof(oldpath));
+    if (path_rc == 0u) path_rc = io_guest_path(A1, newpath, sizeof(newpath));
+    if (path_rc != 0u)
+        return io_path_error(path_rc, 0x80010016u);
     if (sr_flash0_font_is_device_path(oldpath) || sr_flash0_font_is_device_path(newpath))
         return sr_flash0_font_refuse_write(sr_flash0_font_is_device_path(oldpath) ? oldpath : newpath,
                                            "rename");
@@ -1575,8 +1582,9 @@ static uint32_t h_IoRename(CpuState *s) {
 #ifdef _WIN32
 static uint32_t h_IoMkdir(CpuState *s) {
     char path[256];
-    if (io_guest_path(A0, path, sizeof(path)) != 0u)
-        return 0x80010016u;
+    uint32_t path_rc = io_guest_path(A0, path, sizeof(path));
+    if (path_rc != 0u)
+        return io_path_error(path_rc, 0x80010016u);
     if (sr_flash0_font_is_device_path(path)) return sr_flash0_font_refuse_write(path, "mkdir");
     char *hp = host_path_alloc(path);
     if (!hp) return 0x80010016u;
@@ -1616,9 +1624,10 @@ static uint32_t h_IoMkdir(CpuState *s) {
 static uint32_t h_IoRename(CpuState *s) {
     char old_guest[256], new_guest[256];
     char old_rel[SR_CD_REL_MAX], new_rel[SR_CD_REL_MAX];
-    if (io_guest_path(A0, old_guest, sizeof(old_guest)) != 0u ||
-        io_guest_path(A1, new_guest, sizeof(new_guest)) != 0u)
-        return ms0_posix_psp_error(SR_CD_INVALID_PATH);
+    uint32_t path_rc = io_guest_path(A0, old_guest, sizeof(old_guest));
+    if (path_rc == 0u) path_rc = io_guest_path(A1, new_guest, sizeof(new_guest));
+    if (path_rc != 0u)
+        return io_path_error(path_rc, ms0_posix_psp_error(SR_CD_INVALID_PATH));
     if (sr_flash0_font_is_device_path(old_guest) || sr_flash0_font_is_device_path(new_guest))
         return sr_flash0_font_refuse_write(
             sr_flash0_font_is_device_path(old_guest) ? old_guest : new_guest, "rename");
@@ -1638,8 +1647,9 @@ static uint32_t h_IoRename(CpuState *s) {
 
 static uint32_t h_IoMkdir(CpuState *s) {
     char guest[256], rel[SR_CD_REL_MAX];
-    if (io_guest_path(A0, guest, sizeof(guest)) != 0u)
-        return ms0_posix_psp_error(SR_CD_INVALID_PATH);
+    uint32_t path_rc = io_guest_path(A0, guest, sizeof(guest));
+    if (path_rc != 0u)
+        return io_path_error(path_rc, ms0_posix_psp_error(SR_CD_INVALID_PATH));
     if (sr_flash0_font_is_device_path(guest)) return sr_flash0_font_refuse_write(guest, "mkdir");
     sr_cd_status st = ms0_posix_guest_relpath(guest, rel, sizeof(rel));
     if (st != SR_CD_OK) return ms0_posix_psp_error(st);
@@ -1660,8 +1670,9 @@ static uint32_t h_IoMkdir(CpuState *s) {
 #ifdef _WIN32
 static uint32_t h_IoRemove(CpuState *s) {
     char path[256];
-    if (io_guest_path(A0, path, sizeof(path)) != 0u)
-        return 0x80010016u;
+    uint32_t path_rc = io_guest_path(A0, path, sizeof(path));
+    if (path_rc != 0u)
+        return io_path_error(path_rc, 0x80010016u);
     if (sr_flash0_font_is_device_path(path)) return sr_flash0_font_refuse_write(path, "remove");
     char *hp = host_path_alloc(path);
     if (!hp) return 0x80010016u;
@@ -1696,8 +1707,9 @@ static uint32_t h_IoRemove(CpuState *s) {
 #ifndef _WIN32
 static uint32_t h_IoRemove(CpuState *s) {
     char guest[256], rel[SR_CD_REL_MAX];
-    if (io_guest_path(A0, guest, sizeof(guest)) != 0u)
-        return ms0_posix_psp_error(SR_CD_INVALID_PATH);
+    uint32_t path_rc = io_guest_path(A0, guest, sizeof(guest));
+    if (path_rc != 0u)
+        return io_path_error(path_rc, ms0_posix_psp_error(SR_CD_INVALID_PATH));
     if (sr_flash0_font_is_device_path(guest)) return sr_flash0_font_refuse_write(guest, "remove");
     sr_cd_status st = ms0_posix_guest_relpath(guest, rel, sizeof(rel));
     if (st != SR_CD_OK) return ms0_posix_psp_error(st);
@@ -1870,8 +1882,9 @@ static uint32_t h_IoGetstat(CpuState *s) {
      * a raw "sce_lbn0x<LBN>" path. Omitting it made the game read garbage and fetch the wrong
      * sector (e.g. REGFILE.CDI at LBN 0x5f20 was read as 0x80). */
     char path[256];
-    if (io_guest_path(A0, path, sizeof(path)) != 0u)
-        return 0x80010016u;
+    uint32_t path_rc = io_guest_path(A0, path, sizeof(path));
+    if (path_rc != 0u)
+        return io_path_error(path_rc, 0x80010016u);
     if (io_raw_device_path(path) != IO_RAW_DEVICE_NONE)
         return hle_io_raw_device_boundary(IO_RAW_BOUNDARY_GETSTAT,
                                           "sceIoGetstat", path, UINT32_MAX);
@@ -1895,14 +1908,16 @@ static uint32_t h_IoGetstat(CpuState *s) {
                     if (getenv("SR_STATLOG"))
                         fprintf(stderr, "Getstat(%s) -> ms0 host size=0x%llx dir=%d\n",
                                 path, (unsigned long long)fsize, is_dir);
-                    for (int i = 0; i < 0x58; i++) MEM_W8(st + (uint32_t)i, 0);
-                    MEM_W32(st + 0, is_dir ? (0x1000u | 0x0124u) : (0x2000u | 0x0124u));
-                    MEM_W32(st + 4, is_dir ? 0x0010u : (0x0004u | 0x0001u));
+                    /* Memory Stick FAT shape, PSPAutotests tests/io/stat/stat.expected (recorded on a PSP): file mode
+                     * 0x21ff attr 0x0020, directory mode 0x11ff attr 0x0010; bytes [0..0x3f] are written and st_private
+                     * is left as the caller had it. */
+                    for (int i = 0; i < 0x40; i++) MEM_W8(st + (uint32_t)i, 0);
+                    MEM_W32(st + 0, is_dir ? 0x11ffu : 0x21ffu);
+                    MEM_W32(st + 4, is_dir ? 0x0010u : 0x0020u);
                     if (!is_dir) {
                         MEM_W32(st + 8, (uint32_t)fsize);
                         MEM_W32(st + 12, (uint32_t)(fsize >> 32));
                     }
-                    MEM_W32(st + 0x40, 0); /* st_private[0]: no LBN (host-backed) */
                     return 0;
                 }
                 free(wh);
@@ -1919,14 +1934,16 @@ static uint32_t h_IoGetstat(CpuState *s) {
                 if (getenv("SR_STATLOG"))
                     fprintf(stderr, "Getstat(%s) -> ms0 host size=0x%llx dir=%d\n",
                             path, (unsigned long long)fsize, is_dir);
-                for (int i = 0; i < 0x58; i++) MEM_W8(st + (uint32_t)i, 0);
-                MEM_W32(st + 0, is_dir ? (0x1000u | 0x0124u) : (0x2000u | 0x0124u));
-                MEM_W32(st + 4, is_dir ? 0x0010u : (0x0004u | 0x0001u));
+                /* Memory Stick FAT shape, PSPAutotests tests/io/stat/stat.expected (recorded on a PSP): file mode
+                 * 0x21ff attr 0x0020, directory mode 0x11ff attr 0x0010; bytes [0..0x3f] are written and st_private
+                 * is left as the caller had it. */
+                for (int i = 0; i < 0x40; i++) MEM_W8(st + (uint32_t)i, 0);
+                MEM_W32(st + 0, is_dir ? 0x11ffu : 0x21ffu);
+                MEM_W32(st + 4, is_dir ? 0x0010u : 0x0020u);
                 if (!is_dir) {
                     MEM_W32(st + 8, (uint32_t)fsize);
                     MEM_W32(st + 12, (uint32_t)(fsize >> 32));
                 }
-                MEM_W32(st + 0x40, 0); /* st_private[0]: no LBN (host-backed) */
                 return 0;
             }
 #endif
@@ -2004,6 +2021,243 @@ static uint32_t h_IoGetstat(CpuState *s) {
 uint32_t sr_hle_test_io_getstat(CpuState *s) { return h_IoGetstat(s); }
 #endif
 
+/* sceIoAssign / sceIoUnassign (IoFileMgrForUser 0xb2a628c1 / 0x6d08a871).
+ *
+ * On a PSP these edit iofilemgr's alias table: an alias name such as "ms0" names a
+ * filesystem device ("fatms0:") mounted on a block device ("msstor0p1:"). The checks
+ * follow uofw's iofilemgr.c (github.com/uofw/uofw 28306bb5, src/kd/iofilemgr/iofilemgr.c),
+ * read as a behaviour reference: user pointers with the kernel bit and a dynamic buffer
+ * whose address, end or size has it are SCE_ERROR_KERNEL_ILLEGAL_ADDR; a NULL alias, or a
+ * filesystem without a block device, is NO_SUCH_DEVICE; an alias name already in the table
+ * (compared case-insensitively) is ALIAS_USED; a name without a ':' within 31 characters is
+ * NO_SUCH_DEVICE; unassigning a name that is not in the table is NO_SUCH_DEVICE.
+ *
+ * The runtime has no driver layer to mount on, and its device namespace is fixed: the VFS
+ * serves "ms0:" and "fatms0:" as the Memory Stick's FAT filesystem and "disc0:" as the UMD's
+ * ISO filesystem from boot. The table starts with the two boot aliases (ms0 and disc0). An
+ * assign is honoured only for the one mount the VFS serves under a name that is not already
+ * an alias: "fatms0:" on "msstor0p1:" through "fatms0:" read/write, with no mount argument,
+ * which is what WipEout Pure's Memory Stick insert handler asks for. Any other assign, and
+ * unassigning a boot alias the VFS keeps serving, would need the VFS to change what a device
+ * name means; those stop at a named SEMANTIC_BOUNDARY with 0x80010086, never a success.
+ *
+ * Unassigning the game-made alias unmounts it, as uofw's sceIoUnassign does (df_umount): from
+ * then until the next assign, every path on "fatms0:" that a sceIo call resolves
+ * (io_guest_path), and the device name given to sceIoDevctl or sceIoSync, fails with
+ * NO_SUCH_DEVICE and a log line. On a PSP the name then falls through to the fatms driver,
+ * whose own answer for an unmounted unit is not measured; NO_SUCH_DEVICE is iofilemgr's
+ * answer for a device name that resolves to nothing. Also not measured, and left as they
+ * are here: what the driver returns when a game mounts its unit again, whether the unmount
+ * takes "ms0:" (which shares the unit) with it, and what happens to descriptors opened
+ * before the unassign. Every call, refused or not, logs one line: they are rare (once per
+ * Memory Stick event). */
+#define IO_ASSIGN_ALIAS_USED     0x80020326u  /* SCE_ERROR_KERNEL_ALIAS_USED */
+#define IO_ASSIGN_UNSUPPORTED    0x80010086u  /* the IO semantic-boundary error */
+enum {
+    IO_ASSIGN_MODE_RDWR = 0,                  /* IOASSIGN_RDWR */
+    IO_ASSIGN_NAME_MAX = 31,                  /* uofw: an alias name is shorter than 31 bytes */
+    /* ms0, disc0 and fatms0 are the only names that can enter the table, so it never fills. */
+    IO_ASSIGN_MAX_ALIASES = 4,
+};
+
+typedef enum {
+    IO_ASSIGN_FREE = 0,
+    IO_ASSIGN_MOUNTED,
+    IO_ASSIGN_UNMOUNTED,                      /* unassigned by the game: paths on it fail */
+} IoAssignState;
+
+typedef struct {
+    char name[IO_ASSIGN_NAME_MAX + 1];        /* without the ':' */
+    IoAssignState state;
+    bool boot;                                /* served by the VFS from boot */
+} IoAssignAlias;
+
+static IoAssignAlias s_io_aliases[IO_ASSIGN_MAX_ALIASES];
+static bool s_io_aliases_ready;
+
+static IoAssignAlias *io_assign_lookup(const char *name, IoAssignState state) {
+    size_t len = strlen(name);
+    for (size_t i = 0; i < IO_ASSIGN_MAX_ALIASES; i++) {
+        IoAssignAlias *a = &s_io_aliases[i];
+        if (a->state == state && strlen(a->name) == len &&
+            sr_vfs_strnicmp(a->name, name, len) == 0)
+            return a;
+    }
+    return NULL;
+}
+
+/* Mounts `name`, reusing its slot when the game unassigned it earlier. */
+static void io_assign_mount(const char *name, bool boot) {
+    IoAssignAlias *slot = io_assign_lookup(name, IO_ASSIGN_UNMOUNTED);
+    if (!slot) slot = io_assign_lookup("", IO_ASSIGN_FREE);
+    if (!slot) return;   /* unreachable: see IO_ASSIGN_MAX_ALIASES */
+    snprintf(slot->name, sizeof(slot->name), "%s", name);
+    slot->state = IO_ASSIGN_MOUNTED;
+    slot->boot = boot;
+}
+
+/* Called from hle_fd_init with the rest of the IoFileMgr state. */
+void hle_io_assign_reset(void) {
+    memset(s_io_aliases, 0, sizeof(s_io_aliases));
+    io_assign_mount("ms0", true);
+    io_assign_mount("disc0", true);
+    s_io_aliases_ready = true;
+}
+
+static void io_assign_ensure(void) {
+    if (!s_io_aliases_ready) hle_io_assign_reset();
+}
+
+/* The alias name of a device string: leading spaces skipped, up to the ':'. Returns false
+ * when there is no ':' within IO_ASSIGN_NAME_MAX bytes. */
+static bool io_assign_alias_name(const char *dev, char out[IO_ASSIGN_NAME_MAX + 1]) {
+    while (*dev == ' ') dev++;
+    const char *colon = strchr(dev, ':');
+    if (!colon || colon - dev >= IO_ASSIGN_NAME_MAX) return false;
+    memcpy(out, dev, (size_t)(colon - dev));
+    out[colon - dev] = '\0';
+    return true;
+}
+
+uint32_t hle_io_assign_path_check(const char *path) {
+    char name[IO_ASSIGN_NAME_MAX + 1];
+    if (!path || !s_io_aliases_ready || !io_assign_alias_name(path, name)) return 0u;
+    if (!io_assign_lookup(name, IO_ASSIGN_UNMOUNTED)) return 0u;
+    fprintf(stderr, "IO_ASSIGN: \"%s\" -> 0x%08x (%s: was unassigned by sceIoUnassign, so its "
+            "mount is gone)\n", path, HLE_KERNEL_ERROR_NO_SUCH_DEVICE, name);
+    return HLE_KERNEL_ERROR_NO_SUCH_DEVICE;
+}
+
+static bool io_assign_device_is(const char *dev, const char *want) {
+    while (*dev == ' ') dev++;
+    size_t len = strlen(want);
+    return strlen(dev) == len && sr_vfs_strnicmp(dev, want, len) == 0;
+}
+
+/* The one assign the VFS can honour: "fatms0:" on the Memory Stick's block device through
+ * its FAT filesystem, read/write, with no mount argument (not modelled). "ms0" would be the
+ * same mount, but it is a boot alias and so is ALIAS_USED before this is asked. */
+static bool io_assign_is_memstick_mount(const char *name, const char *block, const char *fs,
+                                        int32_t mode, uint32_t arg) {
+    return strlen(name) == 6u && sr_vfs_strnicmp(name, "fatms0", 6u) == 0 &&
+           io_assign_device_is(block, "msstor0p1:") && io_assign_device_is(fs, "fatms0:") &&
+           mode == IO_ASSIGN_MODE_RDWR && arg == 0u;
+}
+
+/* A user-mode pointer argument: the kernel bit is ILLEGAL_ADDR (uofw pspK1PtrOk), and so is
+ * a non-NULL string the runtime cannot read. */
+static bool io_assign_user_cstr(uint32_t addr, char *out, int max, uint32_t *error) {
+    out[0] = '\0';
+    if (addr & 0x80000000u) {
+        *error = HLE_KERNEL_ERROR_ILLEGAL_ADDR;
+        return false;
+    }
+    if (addr == 0u) return true;
+    if (!sr_guest_span_readable(addr, 1u)) {
+        *error = HLE_KERNEL_ERROR_ILLEGAL_ADDR;
+        return false;
+    }
+    /* A string with no terminator in reach is not a device name the PSP would accept. */
+    if (!guest_cstr(addr, out, max)) {
+        *error = HLE_KERNEL_ERROR_NO_SUCH_DEVICE;
+        return false;
+    }
+    return true;
+}
+
+static const char *io_assign_cstr_why(uint32_t error, const char *what) {
+    static char why[96];
+    snprintf(why, sizeof(why), error == HLE_KERNEL_ERROR_ILLEGAL_ADDR
+                 ? "the %s pointer is not readable user memory"
+                 : "the %s has no terminator within 64 bytes", what);
+    return why;
+}
+
+static uint32_t io_assign_refuse(const char *call, uint32_t rc, const char *why) {
+    fprintf(stderr, "IO_ASSIGN: %s -> 0x%08x (%s)\n", call, rc, why);
+    return rc;
+}
+
+static uint32_t h_IoAssign(CpuState *s) {
+    /* int sceIoAssign(const char *dev1, const char *dev2, const char *dev3, int mode,
+     *                 void *unk1, long unk2): arguments 5 and 6 arrive in t0 and t1. */
+    const uint32_t dev_addr = A0, block_addr = A1, fs_addr = A2;
+    const int32_t mode = (int32_t)A3;
+    const uint32_t arg = stack_arg(s, 0), arg_size = stack_arg(s, 1);
+    char dev[64], block[64], fs[64], call[320];
+    uint32_t error = 0u;
+    io_assign_ensure();
+    snprintf(call, sizeof(call), "sceIoAssign(0x%08x, 0x%08x, 0x%08x, mode=%d, arg=0x%08x, "
+             "size=%u)", dev_addr, block_addr, fs_addr, (int)mode, arg, arg_size);
+    if ((((arg + arg_size) | arg | arg_size) & 0x80000000u) != 0u ||
+        (arg != 0u && arg_size != 0u && !sr_guest_span_readable(arg, arg_size)))
+        return io_assign_refuse(call, HLE_KERNEL_ERROR_ILLEGAL_ADDR,
+                                "the mount argument buffer is not readable user memory");
+    /* Pointer checks first, as uofw does, so an illegal pointer wins over a NULL one. */
+    bool dev_ok = io_assign_user_cstr(dev_addr, dev, (int)sizeof(dev), &error);
+    if (!dev_ok && error == HLE_KERNEL_ERROR_ILLEGAL_ADDR)
+        return io_assign_refuse(call, error, io_assign_cstr_why(error, "alias name"));
+    bool block_ok = io_assign_user_cstr(block_addr, block, (int)sizeof(block), &error);
+    if (!block_ok && error == HLE_KERNEL_ERROR_ILLEGAL_ADDR)
+        return io_assign_refuse(call, error, io_assign_cstr_why(error, "block device"));
+    bool fs_ok = io_assign_user_cstr(fs_addr, fs, (int)sizeof(fs), &error);
+    if (!fs_ok && error == HLE_KERNEL_ERROR_ILLEGAL_ADDR)
+        return io_assign_refuse(call, error, io_assign_cstr_why(error, "filesystem"));
+    if (dev_addr == 0u)
+        return io_assign_refuse(call, HLE_KERNEL_ERROR_NO_SUCH_DEVICE, "no alias name");
+    if (block_addr == 0u && fs_addr != 0u)
+        return io_assign_refuse(call, HLE_KERNEL_ERROR_NO_SUCH_DEVICE,
+                                "a filesystem without a block device");
+    if (!dev_ok || !block_ok || !fs_ok)
+        return io_assign_refuse(call, HLE_KERNEL_ERROR_NO_SUCH_DEVICE,
+                                io_assign_cstr_why(error, "device name"));
+    snprintf(call, sizeof(call), "sceIoAssign(\"%s\", \"%s\", \"%s\", mode=%d, arg=0x%08x, "
+             "size=%u)", dev, block_addr ? block : "(null)", fs_addr ? fs : "(null)",
+             (int)mode, arg, arg_size);
+
+    char name[IO_ASSIGN_NAME_MAX + 1];
+    bool named = io_assign_alias_name(dev, name);
+    if (named && io_assign_lookup(name, IO_ASSIGN_MOUNTED))
+        return io_assign_refuse(call, IO_ASSIGN_ALIAS_USED, "alias in use");
+    if (!named)
+        return io_assign_refuse(call, HLE_KERNEL_ERROR_NO_SUCH_DEVICE,
+                                "the alias name has no ':' within 31 characters");
+    if (block_addr == 0u || !io_assign_is_memstick_mount(name, block, fs, mode, arg)) {
+        fprintf(stderr, "SEMANTIC_BOUNDARY: IO_ASSIGN: %s would need the VFS to serve a mount "
+                "it does not; not supported yet (0x80010086)\n", call);
+        return IO_ASSIGN_UNSUPPORTED;
+    }
+    io_assign_mount(name, false);
+    fprintf(stderr, "IO_ASSIGN: %s -> 0 (alias %s: is the VFS Memory Stick)\n", call, name);
+    return 0u;
+}
+
+static uint32_t h_IoUnassign(CpuState *s) {
+    /* int sceIoUnassign(const char *dev) */
+    char dev[64], name[IO_ASSIGN_NAME_MAX + 1], call[96];
+    uint32_t error = 0u;
+    io_assign_ensure();
+    snprintf(call, sizeof(call), "sceIoUnassign(0x%08x)", A0);
+    if (!io_assign_user_cstr(A0, dev, (int)sizeof(dev), &error))
+        return io_assign_refuse(call, error, io_assign_cstr_why(error, "alias name"));
+    if (A0 == 0u) return io_assign_refuse(call, HLE_KERNEL_ERROR_NO_SUCH_DEVICE, "no alias name");
+    snprintf(call, sizeof(call), "sceIoUnassign(\"%s\")", dev);
+    if (!io_assign_alias_name(dev, name))
+        return io_assign_refuse(call, HLE_KERNEL_ERROR_NO_SUCH_DEVICE,
+                                "the alias name has no ':' within 31 characters");
+    IoAssignAlias *alias = io_assign_lookup(name, IO_ASSIGN_MOUNTED);
+    if (!alias) return io_assign_refuse(call, HLE_KERNEL_ERROR_NO_SUCH_DEVICE, "no such alias");
+    if (alias->boot) {
+        fprintf(stderr, "SEMANTIC_BOUNDARY: IO_ASSIGN: %s would remove a device the VFS keeps "
+                "serving; not supported yet (0x80010086)\n", call);
+        return IO_ASSIGN_UNSUPPORTED;
+    }
+    alias->state = IO_ASSIGN_UNMOUNTED;
+    fprintf(stderr, "IO_ASSIGN: %s -> 0 (%s: is unmounted; paths on it are NO_SUCH_DEVICE until "
+            "it is assigned again)\n", call, alias->name);
+    return 0u;
+}
+
 static int s_iofilemgr_handlers_registered;
 
 void hle_register_iofilemgr_handlers(void) {
@@ -2037,6 +2291,8 @@ void hle_register_iofilemgr_handlers(void) {
     sr_hle_register(0x54f5fb11, "sceIoDevctl", h_IoDevctl);
     sr_hle_register(0x06a70004, "sceIoMkdir", h_IoMkdir);
     sr_hle_register(0xf27a9c51, "sceIoRemove", h_IoRemove);
+    sr_hle_register(0xb2a628c1, "sceIoAssign", h_IoAssign);
+    sr_hle_register(0x6d08a871, "sceIoUnassign", h_IoUnassign);
 }
 
 /* Registration runs of the shared helpers in hle.c (#307). Each holds one run of this file's

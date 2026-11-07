@@ -102,8 +102,9 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   fog and light constants, to `hook_tnl_prim`; `shaders/psp_tnl.vert` then skins, transforms,
   fogs, lights (ambient and diffuse, directional and point) and projects them. ge.c offers a
   draw only when a clip-space bound shows that no vertex is clipped, dropped or non-finite, and
-  only in states the shader repeats exactly: no specular or powered-diffuse light (host `powf`
-  has no exact shader counterpart), texture map mode 0, gouraud shading, no clear mode, every
+  only in states the shader repeats exactly: no specular or powered-diffuse light while ge.c's
+  lighting uses the C library's `powf` (the default), texture map mode 0, gouraud shading, no
+  clear mode, every
   float input zero or of magnitude 2^-40..2^40. The shader evaluates ge.c's arithmetic in C's
   order with `precise` (Vulkan rounds add and multiply correctly; the reference has no fused
   multiply-add) and divides and takes square roots exactly in integer arithmetic, subnormal
@@ -115,8 +116,16 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   `SR_GPU_TNL=1` says so once. Everything else, and a draw the fragment state sends to
   software, keeps ge.c's T&L. The `tnl-parity` cells of `gpu-coherence-selftest` compare the
   two routes byte for byte (on a device without the feature, every cell on ge.c's route). Left:
-  texgen, flat shading, specular light, sprites, lines, points, clipped draws, and devices that
-  flush fp32 subnormals.
+  texgen, flat shading, specular light by default, sprites, lines, points, clipped draws, and
+  devices that flush fp32 subnormals.
+- `ge_powf`, the specular and powered-diffuse power, is one text in ge.c and `psp_tnl.vert`
+  (between the `BEGIN ge_pow helpers` and `END ge_powf` markers): 32-bit integer arithmetic
+  only, table-driven log2 and exp2 in 64-bit fixed point, correctly rounded. With
+  `ge_pow_set_exact(1)` ge.c's lighting uses it and the GPU T&L takes specular and
+  powered-diffuse lights; it stays off until it is measured against the PSP (#1732, the
+  `ge-light` oracle case). `tools/test_shader_embed.py` keeps the two copies identical and runs
+  the shader's copy as C against ge.c's, and the `specular-ge-powf` and `light-4-ge-powf`
+  parity cells compare the routes on a device that runs the T&L stage.
 - Render-to-texture chains (the hangar uses fbp swaps), depth readbacks if any game code
   reads zbuf, small-tri rasterization rules (top-left bias already documented in
   raster_tri) via conservative settings.
@@ -132,6 +141,9 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   validation messenger, and the present-truthful frame capture.
 - `ge_gpu.h` / `ge_gpu.c` — Phase 1+2: capture, batching, pipeline/texture caches,
   flush + guest-VRAM writeback. Hooks defined in `src/rt/ge_shared.h`.
+- `pipeline_cache.h` — the on-disk Vulkan pipeline cache (#2149): the file's header (GPU,
+  driver, pipeline cache UUID and shader set), its checks, and the atomic write. `ge_gpu.c`
+  loads it at start and saves it at exit; `pipeline_cache_selftest.c` checks every refusal.
 - `shaders/psp.vert`, `shaders/psp.frag` — compiled by glslc (`GLSLC` in the Makefile)
   into `psp_{vert,frag}.inc` at build time.
 - `shaders/psp_tnl.vert` — the GPU transform-and-lighting vertex stage (`SR_GPU_TNL=1`, #318), a GLSL
@@ -164,6 +176,29 @@ UNDEFINED-layout image and published a PPM under a `.png` name. It is gone. In i
   PPMs; under `SR_VULKAN_VALIDATION=1` it also asserts zero validation-layer errors. Exit 77
   means SKIP (Vulkan unavailable). `fbcap-selftest` covers the presenter-neutral service itself
   without a GPU.
+
+## Widescreen Fill wings (#1881)
+
+Off by default; the contract is `docs/ENHANCEMENT_CONTRACT.md` section 10.8. ge.c decides which
+primitives reach a display framebuffer's wing canvas and moves their vertices there; this backend
+draws them through `hook_wing_tri` / `hook_wing_sprite`, which run the ordinary `hook_tri` /
+`hook_sprite` with `s_wing_dst` set. That records into `s_wbatch` instead of `s_batch`, with the
+canvas columns as the scissor's x and the guest scissor's rows, and `submit_pending` submits those
+batches after the target's own, so every resource a pending batch names is released at the same
+boundaries as before. A canvas (`WingEnt`) is a 512x272 colour and depth pair at render scale,
+the size of every target, so both wings of up to 256 columns each fit (32:9 uses 240). It is never
+in `s_tgts` or `s_deps`: no readback, upload, coherence or texture path reaches it. It is cleared
+whenever ge.c clears its own (`ge_wide_epoch`), which ge.c does on the first draw into the
+framebuffer after it was shown. A state this backend would draw in software is dropped from the
+wings with no flush or readback: `wing_drop` counts it and names each cause once on stderr, and the
+wing hook returns 0, so ge.c does not mark the canvas drawn. `gegpu_wide_read` reads a canvas back
+for `gpu-coherence-selftest`'s `wide-fill` case, which compares it with the software rasterizer's.
+
+With Fill on, `gegpu_present` blits the left wing, the shown image and the right wing into one
+(480 + 2D) x 272 image at the shown image's scale (`wide_compose`, on the GE chain ahead of the
+presenter's work) and presents that; wings the frame did not draw are black. The window fits it
+by its own shape (`sdl3vk_present_plan`). The software renderer's picture is composed in
+`src/rt/gui.c` and presented with `sdl3vk_present_rgba_ex`.
 
 ## Present and swapchain failures (#1377)
 
@@ -206,6 +241,10 @@ validation layer on, and expects no leaked object and no validation error from e
 - `SR_GPU_SYNC_SUBMIT=1` — exact synchronous fallback: one op per submit, each waited on.
 - `SR_GPU_READBACK_FULL=1` — copy the whole scaled target on a readback to guest memory, the
   reference path for the default copy of the rows guest memory keeps (#323).
+- `SR_GPU_PIPELINE_CACHE=0` — run without the pipeline cache in `<data root>/cache/gegpu`
+  (on by default; `on` or `1` keep it, any other value is refused). One start line says
+  whether the file was loaded, absent or discarded and why; one exit line says whether it was
+  saved and how long pipeline creation took.
 - `SR_VIDEO=gdi` — Phase-0 fallback to the classic GDI window.
 - `SR_VULKAN_VALIDATION=1` — enable the `VK_LAYER_KHRONOS_validation` messenger (fail-closed
   if the layer is requested but missing). See `docs/DEBUGGING.md` for FBSNAP/FBDUMP capture

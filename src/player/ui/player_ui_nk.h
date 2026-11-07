@@ -37,7 +37,8 @@ typedef enum {
     PLAYER_UI_ROUTE_STOP = 6,      /* confirm STOP GAME */
     /* An older Nakagawa built some games: the once-per-update prompt, or the
        reminder a launch of one shows. Pushed while player_state says so. */
-    PLAYER_UI_ROUTE_REBUILD = 7
+    PLAYER_UI_ROUTE_REBUILD = 7,
+    PLAYER_UI_ROUTE_SAVES = 8      /* a title's saves: back up, restore, add (#1883) */
 } PlayerUiRoute;
 
 /* The player's version: the one place it is written. The About page shows
@@ -111,7 +112,9 @@ typedef enum {
     PLAYER_UI_ACTION_OPEN_NOTICES,
     PLAYER_UI_ACTION_REMOVE_TITLE,         /* the title page asks to remove it (#1304) */
     PLAYER_UI_ACTION_REMOVE_TOGGLE_SAVES,  /* the confirm screen's saves box */
-    PLAYER_UI_ACTION_REMOVE_CONFIRM,       /* remove it; .primary is 1 to delete saves */
+    PLAYER_UI_ACTION_REMOVE_TOGGLE_DISC_COPY, /* its decrypted files and disc copy box */
+    /* remove it; .primary holds PLAYER_UI_REMOVE_ALSO_* for what goes with it */
+    PLAYER_UI_ACTION_REMOVE_CONFIRM,
     PLAYER_UI_ACTION_STALL_KEEP_WAITING,
     PLAYER_UI_ACTION_STALL_STOP_GAME,
     PLAYER_UI_ACTION_OPEN_BUILD_INPUT_FOLDER, /* fix a package-build preflight blocker */
@@ -128,14 +131,34 @@ typedef enum {
     PLAYER_UI_ACTION_REPORT_PROBLEM,   /* the title page's Report a problem */
     PLAYER_UI_ACTION_CHECK_INPUT_AGAIN, /* the title page checks its files again (#308) */
     PLAYER_UI_ACTION_TOGGLE_60FPS,     /* the title page's 60 FPS game logic switch */
-    PLAYER_UI_ACTION_CYCLE_ACE,        /* the title page's Ace Mode: library, on, authentic */
+    PLAYER_UI_ACTION_CYCLE_PLAY_MODE,  /* the title page's play mode: library default,
+                                          Authentic, Enhanced, Ace (#2055) */
+    PLAYER_UI_ACTION_OPEN_PLAY_OPTIONS, /* the title page's Enhanced options: Settings >
+                                           Enhanced for that game */
     PLAYER_UI_ACTION_CYCLE_SORT,        /* the library's next sort */
     PLAYER_UI_ACTION_FIND_OPEN,         /* open the library's find box */
     PLAYER_UI_ACTION_FIND_KEY,          /* an on-screen key: title_index is a codepoint, or
                                            PLAYER_UI_FIND_DELETE or PLAYER_UI_FIND_DONE */
-    PLAYER_UI_ACTION_DISC_VERIFY        /* the library's disc check line; .primary carries
+    PLAYER_UI_ACTION_DISC_VERIFY,       /* the library's disc check line; .primary carries
                                            the op (PlayerUiDiscVerifyOp) */
+    PLAYER_UI_ACTION_OPEN_SAVES,        /* the title page's Saves (#1883) */
+    PLAYER_UI_ACTION_SAVES              /* a Saves dialog control; .primary carries the
+                                           op (PlayerUiSavesOp) */
 } PlayerUiActionKind;
+
+/* What a Saves dialog control asks for (PLAYER_UI_ACTION_SAVES). Back is
+   PLAYER_UI_ACTION_BACK. */
+typedef enum {
+    PLAYER_UI_SAVES_NONE = 0,
+    PLAYER_UI_SAVES_BACK_UP,         /* Back up saves */
+    PLAYER_UI_SAVES_ADD,             /* Add a save: the host folder picker */
+    PLAYER_UI_SAVES_OPEN_FOLDER,     /* Open save folder */
+    PLAYER_UI_SAVES_CONFIRM,         /* the question's Restore or Replace */
+    PLAYER_UI_SAVES_CANCEL,          /* the question's Cancel */
+    PLAYER_UI_SAVES_OLDER,           /* the list's next, older backups */
+    PLAYER_UI_SAVES_NEWER,           /* the list's newer backups */
+    PLAYER_UI_SAVES_RESTORE_BASE = 0x100 /* + the backup's row: Restore asks first */
+} PlayerUiSavesOp;
 
 /* What the library's disc check line asks for (PLAYER_UI_ACTION_DISC_VERIFY). */
 typedef enum {
@@ -248,17 +271,22 @@ typedef struct {
     bool enhancement_enabled;
     bool enhancement_session;   /* on for this session by --experimental-60hz */
     const char *enhancement_problem;
-    /* Ace Mode (src/rt/ace.h) on the title page's ENHANCEMENTS card: the button's words
-       ("Ace Mode: On (library default)"), whether Ace is in effect for the title, whether the
-       button can change it now (as enhancement_enabled), what it turns on in words, and the
-       last session's line from the runtime's report ("" for none). A demo has no card. */
+    /* The play mode (#2055; src/rt/ace.h) on the title page's ENHANCEMENTS card: the button's
+       words ("Play mode: Enhanced (library default)"), whether Enhanced or Ace is in effect
+       for the title, whether the button can change it now (as enhancement_enabled), what it
+       turns on in words, and the last session's line from the runtime's report ("" for
+       none). A demo has no card. The 60 FPS switch shows while Ace is in effect. */
     bool ace_shown;
     const char *ace_label;
     bool ace_in_effect;
     bool ace_enabled;
     const char *ace_line;
     const char *ace_last_session;
-    bool ace_badge;             /* the library card's ACE badge */
+    const char *play_badge;     /* the library card's badge: "Ace", "Enhanced" or NULL */
+    /* Enhanced options beside the play mode: Settings > Enhanced for this game, where each
+       part follows the library or has the game's own value. */
+    bool options_shown;
+    bool options_enabled;
     /* Disc verification: one sentence about how the image compares with the
        user's disc list, under the title page's tags; NULL when not checked. The
        card's badge carries the short word. */
@@ -529,16 +557,27 @@ typedef enum {
     PLAYER_UI_SETTINGS_CYCLE_INTERFACE_SIZE, /* Automatic, 100, 125, 150, 200% */
     PLAYER_UI_SETTINGS_CYCLE_HIGH_CONTRAST,  /* Automatic, On, Off */
     PLAYER_UI_SETTINGS_CYCLE_TEXT_SIZE,      /* Standard, Large, Larger (100, 125, 150%) */
-    PLAYER_UI_SETTINGS_OPEN_ACE,             /* Settings > Ace Mode */
-    PLAYER_UI_SETTINGS_TOGGLE_ACE,           /* the library's Ace Mode switch */
-    PLAYER_UI_SETTINGS_CYCLE_ACE_FILTERING,  /* 16x, 8x, 4x, 2x, Off */
-    PLAYER_UI_SETTINGS_TOGGLE_ACE_TEXT,
-    PLAYER_UI_SETTINGS_TOGGLE_ACE_READOUT,
-    PLAYER_UI_SETTINGS_TOGGLE_ACE_NOTICE,
+    PLAYER_UI_SETTINGS_OPEN_ACE,             /* Settings > Enhanced, the library's page */
+    PLAYER_UI_SETTINGS_CYCLE_PRESET,         /* the next graphics preset (#2150) */
+    PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE,      /* that page's play mode: the library's default,
+                                                or the title's choice on a title's page */
+    PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART,  /* the part in the action's title_index */
     PLAYER_UI_SETTINGS_OPEN_PROBLEM_REPORT,  /* Settings > Problem report: lists the files */
     PLAYER_UI_SETTINGS_CREATE_REPORT,        /* write the bundle on this PC */
-    PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER
+    PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER,
+    PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER,     /* the folder holding the library, games and settings */
+    PLAYER_UI_SETTINGS_OPEN_LOGS             /* the folder holding the logs */
 } PlayerUiSettingsOp;
+
+/* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
+   PlayerEnhancedPart), in that order. */
+#define PLAYER_UI_ENHANCED_ROWS 12
+typedef struct {
+    const char *name;           /* "Texture filtering" */
+    const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
+    const char *sentence;
+    bool on;                    /* in effect for the page: lit */
+} PlayerUiEnhancedRow;
 
 #define PLAYER_UI_REPORT_LINES 24u   /* PLAYER_REPORT_MAX_FILES */
 
@@ -575,6 +614,7 @@ typedef struct {
     const char *resolution;         /* "2x (960x544)" */
     const char *pacing;             /* "PSP timing" */
     const char *scaling;            /* "Sharp" */
+    const char *preset;             /* "Medium", or "Custom" (#2150) */
     bool vsync;
     bool fullscreen;
     int volume;                     /* 0-100 */
@@ -592,16 +632,24 @@ typedef struct {
     int system_scale_pct;               /* the display's scale */
     bool system_high_contrast;
     bool system_reduced_motion;
-    /* Ace Mode (VIEW_ACE_SETTINGS and the GAME card's row): the library's switch and each
-       feature's value in words */
-    bool ace_enabled;
-    const char *ace_filtering;      /* "16x" ... "Off" */
-    bool ace_text;
-    bool ace_readout;
-    bool ace_notice;
+    /* Settings > Enhanced (VIEW_ACE_SETTINGS, #2055) and the GAME card's row. The page is the
+       library's, or one title's when enhanced_title is set. Its first row is the play mode;
+       then one row per Enhanced part, so a new part needs no change to the page. */
+    bool enhanced_library_on;       /* the library's default is Enhanced */
+    const char *enhanced_title;     /* the game's name on its own page; NULL for the library */
+    const char *enhanced_mode;      /* "Enhanced", "Ace", "Library (Authentic)" */
+    const char *enhanced_mode_sentence;
+    bool enhanced_on;               /* Enhanced or Ace in effect: the part rows can change */
+    int enhanced_row_count;
+    PlayerUiEnhancedRow enhanced_rows[PLAYER_UI_ENHANCED_ROWS];
     const char *controller_line;    /* "Keyboard ready" or the pad's name */
     const char *saves_folder;
     const char *notice;             /* a settings notice (a failed save), or NULL */
+    /* The main page's graphics preset note (#2150): where the preset applies, or NULL for
+       Custom. Drawn when there is no notice; in the warning colour when it names a value
+       the preset could not set. */
+    const char *preset_notice;
+    bool preset_notice_warns;
     /* Build tools and cache: builds share compiled system libraries (#1306) */
     bool share_system_libraries;
     /* Updates (VIEW_UPDATES): what the last step found, in words */
@@ -650,9 +698,23 @@ typedef struct {
     size_t reset_folder_count;
     const char *font_summary;       /* how many of the PSP fonts are the user's own */
     bool fonts_all_own;
+    /* The display the launcher is on, in Hz; 0 when unknown (no advisory then) */
+    double display_refresh_hz;
     float logical_width;
     float logical_height;
 } PlayerUiSettingsModel;
+
+/* Whether a display refresh rate (Hz) gives the game's 60 Hz (59.94 Hz) frames even motion.
+   A whole multiple of either (60, 120, 180, 240, 59.94 ...) is silent, and so is an unknown
+   rate (0 or less, NaN); anything else (75, 90, 144, 165 ...) earns the Settings advisory. */
+typedef enum {
+    PLAYER_UI_REFRESH_SILENT = 0,
+    PLAYER_UI_REFRESH_ADVISORY
+} PlayerUiRefreshAdvice;
+
+PlayerUiRefreshAdvice player_ui_refresh_advice(double refresh_hz);
+/* The advisory sentence for `refresh_hz` into out, or an empty string when it is silent. */
+void player_ui_refresh_advisory_text(double refresh_hz, char *out, size_t out_size);
 
 /* The controller settings page (VIEW_CONTROLLER_SETTINGS): the controller or
    keyboard mapping, or a step of the guided stick and trigger calibration while
@@ -873,7 +935,7 @@ enum {
     PLAYER_UI_ID_LIBRARY_ITEM_BASE = 0x10000u,       /* + the title's index, up to NK_MAX_GAMES */
     PLAYER_UI_ID_TITLE_BACK = 0x2001u,
     PLAYER_UI_ID_TITLE_PRIMARY = 0x2002u,
-    PLAYER_UI_ID_TITLE_SAVE_FOLDER = 0x2003u,
+    PLAYER_UI_ID_TITLE_SAVES = 0x2003u,              /* Saves (#1883) */
     PLAYER_UI_ID_TITLE_REMOVE = 0x2004u,
     PLAYER_UI_ID_TITLE_STALL_KEEP_WAITING = 0x2005u,
     PLAYER_UI_ID_TITLE_STALL_STOP_GAME = 0x2006u,
@@ -881,12 +943,23 @@ enum {
     PLAYER_UI_ID_TITLE_OPEN_INPUT_FOLDER = 0x2008u,
     PLAYER_UI_ID_TITLE_REPORT = 0x2020u,
     PLAYER_UI_ID_TITLE_60FPS = 0x2009u,
-    PLAYER_UI_ID_TITLE_ACE = 0x200Au,                /* the ENHANCEMENTS card's Ace Mode */
+    PLAYER_UI_ID_TITLE_ACE = 0x200Au,                /* the ENHANCEMENTS card's play mode */
+    PLAYER_UI_ID_TITLE_PLAY_OPTIONS = 0x200Bu,       /* the ENHANCEMENTS card's Enhanced options */
     PLAYER_UI_ID_REMOVE_CANCEL = 0x4401u,
     PLAYER_UI_ID_REMOVE_CONFIRM = 0x4402u,
     PLAYER_UI_ID_REMOVE_SAVES = 0x4403u,
+    PLAYER_UI_ID_REMOVE_DISC_COPY = 0x4404u,
     PLAYER_UI_ID_STOP_KEEP = 0x4411u,
     PLAYER_UI_ID_STOP_CONFIRM = 0x4412u,
+    PLAYER_UI_ID_SAVES_BACK_UP = 0x4421u,
+    PLAYER_UI_ID_SAVES_ADD = 0x4422u,
+    PLAYER_UI_ID_SAVES_OPEN_FOLDER = 0x4423u,
+    PLAYER_UI_ID_SAVES_BACK = 0x4424u,
+    PLAYER_UI_ID_SAVES_CONFIRM = 0x4425u,
+    PLAYER_UI_ID_SAVES_CANCEL = 0x4426u,
+    PLAYER_UI_ID_SAVES_OLDER = 0x4427u,
+    PLAYER_UI_ID_SAVES_NEWER = 0x4428u,
+    PLAYER_UI_ID_SAVES_RESTORE_BASE = 0x4430u,      /* + the backup's row */
     PLAYER_UI_ID_TAB_LIBRARY = 0x0F01u,
     PLAYER_UI_ID_TAB_ABOUT = 0x0F02u,
     PLAYER_UI_ID_TAB_SETTINGS = 0x0F03u,
@@ -910,6 +983,7 @@ enum {
     PLAYER_UI_ID_SETTINGS_ONLINE = 0x450Du,
     PLAYER_UI_ID_SETTINGS_NOTICES = 0x450Eu,
     PLAYER_UI_ID_SETTINGS_REMOVE_TOOLS = 0x450Fu,
+    PLAYER_UI_ID_SETTINGS_PRESET = 0x4510u,           /* the GAME card's graphics preset */
     PLAYER_UI_ID_SETTINGS_ONLINE_MODE = 0x4511u,
     PLAYER_UI_ID_SETTINGS_NEWS = 0x4513u,
     PLAYER_UI_ID_SETTINGS_REPORTS = 0x4514u,
@@ -945,16 +1019,16 @@ enum {
     PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE = 0x452Du,
     PLAYER_UI_ID_SETTINGS_HIGH_CONTRAST = 0x452Eu,
     PLAYER_UI_ID_SETTINGS_TEXT_SIZE = 0x452Fu,
-    PLAYER_UI_ID_SETTINGS_ACE = 0x4540u,              /* the GAME card's Ace Mode switch */
-    PLAYER_UI_ID_SETTINGS_ACE_OPEN = 0x4541u,         /* the GAME card's row that opens the page */
-    PLAYER_UI_ID_SETTINGS_ACE_MODE = 0x4542u,         /* the page's own switch */
-    PLAYER_UI_ID_SETTINGS_ACE_FILTERING = 0x4543u,
-    PLAYER_UI_ID_SETTINGS_ACE_TEXT = 0x4544u,
-    PLAYER_UI_ID_SETTINGS_ACE_READOUT = 0x4545u,
-    PLAYER_UI_ID_SETTINGS_ACE_NOTICE = 0x4546u,
+    PLAYER_UI_ID_SETTINGS_ACE = 0x4540u,              /* retired: the GAME card's old switch */
+    PLAYER_UI_ID_SETTINGS_ACE_OPEN = 0x4541u,         /* the GAME card's row that opens Enhanced */
+    PLAYER_UI_ID_SETTINGS_ACE_MODE = 0x4542u,         /* the Enhanced page's play mode */
+    /* + the part (PlayerEnhancedPart): 0x4543 to 0x454E, PLAYER_UI_ENHANCED_ROWS of them */
+    PLAYER_UI_ID_SETTINGS_ENHANCED_PART = 0x4543u,
     PLAYER_UI_ID_SETTINGS_PROBLEM_REPORT = 0x4550u,   /* Settings: opens the Problem report page */
     PLAYER_UI_ID_REPORT_CREATE = 0x4551u,
     PLAYER_UI_ID_REPORT_FOLDER = 0x4552u,
+    PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER = 0x4553u, /* Settings: shows the data folder */
+    PLAYER_UI_ID_SETTINGS_OPEN_LOGS = 0x4554u,        /* Settings: shows the logs folder */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
     PLAYER_UI_ID_CONTROLLER_DEADZONE_UP = 0x4622u,
@@ -1043,6 +1117,9 @@ PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model)
 
 /* Remove from library (#1304): what goes, with sizes, and the saves box. */
 #define PLAYER_UI_REMOVE_ITEM_CAP 4u
+/* What a confirmed removal also deletes, in PLAYER_UI_ACTION_REMOVE_CONFIRM's .primary. */
+#define PLAYER_UI_REMOVE_ALSO_SAVES 1u
+#define PLAYER_UI_REMOVE_ALSO_DISC_COPY 2u
 typedef struct {
     const char *label;          /* "Built package" */
     uint64_t bytes;
@@ -1057,6 +1134,10 @@ typedef struct {
     bool has_saves;             /* the game has saves; false hides the saves box */
     uint64_t saves_bytes;
     bool delete_saves;          /* the saves box; off until the user ticks it */
+    /* The decrypted files and the disc copy Nakagawa made (#2003); false hides the box. */
+    bool has_disc_copy;
+    uint64_t disc_copy_bytes;
+    bool delete_disc_copy;      /* that box; off until the user ticks it */
     /* Another image in the library has this disc ID and uses its folders and
        saves: only the record goes, and the dialog says so. */
     bool files_shared;
@@ -1077,6 +1158,42 @@ typedef struct {
 } PlayerUiStopModel;
 
 PlayerUiAction player_ui_screen_stop(NkUi *ui, const PlayerUiStopModel *model);
+
+/* Saves (#1883): back up the title's saves, restore one of its backups (newest
+   first, a page at a time; Restore asks first), add a save from a folder, and
+   open the save folder. Every change backs the saves up first. */
+#define PLAYER_UI_SAVES_ROW_CAP 4u
+typedef struct {
+    const char *when;           /* "2026-11-04 14:05" */
+    const char *detail;         /* "Before a restore · 120 KB" */
+} PlayerUiSavesRow;
+
+typedef enum {
+    PLAYER_UI_SAVES_ASK_NONE = 0,
+    PLAYER_UI_SAVES_ASK_RESTORE,    /* Restore the backup in row ask_row? */
+    PLAYER_UI_SAVES_ASK_REPLACE     /* Replace the save named ask_name? */
+} PlayerUiSavesAsk;
+
+typedef struct {
+    const char *title;
+    size_t title_index;
+    bool has_saves;             /* false: Back up saves is off */
+    uint64_t saves_bytes;
+    const PlayerUiSavesRow *rows;   /* this page of backups, newest first */
+    size_t row_count;           /* up to PLAYER_UI_SAVES_ROW_CAP */
+    size_t first_row;           /* the page's first backup, from 0 (the newest) */
+    size_t total;               /* backups found */
+    PlayerUiSavesAsk ask;
+    size_t ask_row;             /* the row Restore asks about, on this page */
+    const char *ask_name;       /* the save Add a save would replace */
+    const char *status;         /* what the last action did, or NULL */
+    PlayerUiNoteKind status_kind;
+    const char *blocked;        /* why the saves can't change now, or NULL */
+    float logical_width;
+    float logical_height;
+} PlayerUiSavesModel;
+
+PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model);
 /* The older-build prompt (model->title NULL: Rebuild all, Later) and the launch
    reminder (Rebuild now, Play anyway). Back is the second choice. */
 PlayerUiAction player_ui_screen_rebuild(NkUi *ui, const PlayerUiRebuildModel *model);
@@ -1136,6 +1253,12 @@ bool player_ui_nk_view_active(const PlayerUiNk *player, const PlayerApp *app);
    screen still moves (a drag's momentum, a ring, rule or fill easing), until
    the waves' next 30 Hz step while they play, else idle_ms. */
 uint32_t player_ui_nk_wait_ms(const PlayerUiNk *player, uint32_t idle_ms);
+/* Draws every later frame at now_s instead of the time since SDL started, so
+   whatever moves with time (the waves, the progress sweeps, fades) is drawn
+   the same way on every run. --screenshot holds it (#2124): two captures of
+   one view from one build are then byte-identical. A NULL player or a
+   non-finite time is ignored. */
+void player_ui_nk_hold_clock(PlayerUiNk *player, double now_s);
 /* True when the launcher draws this view. Every PlayerView is drawn by it: the
    shipped player has no other launcher. */
 bool player_ui_nk_draws_view(int view);

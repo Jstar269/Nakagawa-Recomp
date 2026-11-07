@@ -49,6 +49,7 @@
 #include "mp3_bridge.h"     /* minimp3 frame decoder behind sceMp3 */
 #include "fbcap_policy.h"   /* frame-capture slot policy for the present path (issue #57) */
 #include "fbcap.h"           /* presenter-neutral frame capture service (issue #57) */
+#include "videorec.h"        /* video recording of a run on the guest timeline (#1273) */
 #include "audio_resample.h"  /* deterministic SRC-to-host-rate conversion */
 #include "gpu_sdl3vk/ge_gpu.h" /* explicit guest-VRAM snapshot boundary */
 #include "title_config.h"  /* title-qualified compatibility addresses (issue #98) */
@@ -208,6 +209,7 @@ typedef struct {
 
 #define HLE_KERNEL_ERROR_NOT_IMPLEMENTED 0x80020002u /* SCE_KERNEL_ERROR_NOTIMP */
 #define HLE_KERNEL_ERROR_ILLEGAL_ADDR 0x800200d3u     /* SCE_KERNEL_ERROR_ILLEGAL_ADDR */
+#define HLE_KERNEL_ERROR_NO_SUCH_DEVICE 0x80020321u   /* SCE_KERNEL_ERROR_NO_SUCH_DEVICE */
 #define HLE_KERNEL_ERROR_UNKNOWN_UID 0x800200cbu    /* SCE_KERNEL_ERROR_UNKNOWN_UID */
 #define HLE_KERNEL_ERROR_NO_MEMORY 0x80020190u      /* SCE_KERNEL_ERROR_NO_MEMORY */
 
@@ -802,7 +804,6 @@ typedef enum {
     IO_RAW_BOUNDARY_ASYNC_CALLBACK,
     IO_RAW_BOUNDARY_DREAD,
     IO_RAW_BOUNDARY_DCLOSE,
-    IO_RAW_BOUNDARY_READ_PAST_END,
 } IoRawDeviceBoundary;
 
 typedef struct {
@@ -811,6 +812,8 @@ typedef struct {
     int used;
 } IoCwd;
 #define IO_UMD_POSITION_REFUSED 0x8001b003u
+/* A raw UMD read whose position is already past the last sector (PSP-IO-EOF-002). */
+#define IO_UMD_READ_AT_END 0x80210002u
 #define SR_DATA_STATE_READY         2
 
 /* Devices whose reads the archive VFS may serve: the disc (disc0:, umd:) and the
@@ -968,6 +971,7 @@ typedef struct {
     uint32_t stall_addr;
     uint32_t cbid;
     uint32_t cbarg;
+    uint32_t signal_stacks; // SIGNAL CALLs it may nest: SceGeListArgs.numStacks or the SDK default
     int status; // GE_LIST_*
     int executed; // the GE ran this list to its END; a later stall address must not re-run it
     int busy; // the list has started; only sceGeDrawSync(0) or a reset clears it (uofw isBusy)
@@ -1017,7 +1021,7 @@ typedef struct {
     char name[32];
 } MsgPipe;
 
-/* ---- mailboxes (sceKernel*Mbx), campaign psp-hw-20260917 + PSPSDK ABI ---- */
+/* ---- mailboxes (sceKernel*Mbx), PSP-measured + PSPSDK ABI ---- */
 
 #define MBX_MAX 32
 #define MBX_MAX_WAITERS 64
@@ -1143,8 +1147,13 @@ void sreg_note_placeholder_read(int node, const char *caller);
 extern uint32_t s_ctrl_sampling_mode;
 extern uint32_t s_ctrl_sampling_cycle;
 __attribute__((format(printf, 2, 3))) uint32_t hle_unmodelled_stop(const char *import_name, const char *fmt, ...);
+const char *hle_import_name(uint32_t nid);
 int guest_cstr(uint32_t addr, char *out, int max);
 uint32_t free_block(uint32_t uid);
+/* sceNet core library state (hle_network.c): reset at LoadExec and by the self-tests. */
+void hle_net_reset(void);
+int sr_hle_test_net_inited(void);
+uint32_t sr_hle_test_net_pool_uid(void);
 extern FplPool s_fpls[FPL_MAX];
 FplPool *fpl_lookup(uint32_t uid);
 void fpl_remove_waiter(FplPool *p, uint32_t thread_uid);
@@ -1203,6 +1212,9 @@ extern int s_psmf_av_test_queue;
 #endif
 int64_t psmf_av_now_us(void);
 int psmf_av_queue_frames(int ch);
+/* The audio queue depth in frames the guest sees on `ch` (-1: no host output). Under the
+ * deterministic clock it is a model that drains in guest time (#2037), not the host mixer's. */
+int hle_audio_queued(int ch);
 void psmf_av_window_tick(int64_t now_us);
 void psmf_av_final(const char *reason);
 void psmf_av_exit_report(void);
@@ -1322,6 +1334,9 @@ extern uint64_t s_io_async_sequence;
 extern IoCwd s_io_cwds[64];
 IoCwd *io_cwd_find(uint32_t thread_uid, int create);
 void hle_fd_init(void);
+void hle_io_assign_reset(void);   /* sceIoAssign alias table (hle_io.c) */
+/* 0, or NO_SUCH_DEVICE (logged) for a path on a device the game unassigned (hle_io.c). */
+uint32_t hle_io_assign_path_check(const char *path);
 int hle_fd_is_file(uint32_t fd);
 int hle_fd_is_raw_device(uint32_t fd);
 uint32_t hle_io_raw_device_boundary(IoRawDeviceBoundary operation, const char *api, const char *path, uint32_t fd);
@@ -1349,6 +1364,11 @@ uint32_t h_IoWrite(CpuState *s);
 uint32_t h_IoRead(CpuState *s);
 uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence, const char *api, uint32_t *position);
 uint32_t h_IoLseek32(CpuState *s);
+/* The volatile-memory lock handlers (hle_kernel_memory.c); hle_power.c registers their scePower
+ * aliases. */
+uint32_t h_VolatileMemLock(CpuState *s);
+uint32_t h_VolatileMemTryLock(CpuState *s);
+uint32_t h_VolatileMemUnlock(CpuState *s);
 uint32_t h_io_ioctl_args(uint32_t fd, uint32_t cmd, uint32_t in, uint32_t inlen, uint32_t out, uint32_t outlen);
 int io_memstick_capacity(uint32_t info[5]);
 uint32_t io_async_complete_fd(uint32_t fd);
@@ -1668,6 +1688,30 @@ static inline uint32_t hle_io_raw_umd_seek(Fd *f, int64_t offset, uint32_t whenc
     f->off = (uint32_t)target;
     *position = f->off;
     return 0u;
+}
+
+/* The registrations sr_hle_init() makes in the focused media build (SR_MPEG_MEDIA_SELFTEST, #307).
+ * tests/native/hle_focus_media_stubs.c calls this same function, so the two cannot drift. */
+static inline void hle_register_media_selftest_handlers(void) {
+    hle_register_mpeg_ycbcr_handlers();
+    hle_register_mpeg_avc_decode_handler();
+    hle_register_mpeg_userdata_handlers();
+    /* The flush family (sceMpegFlushStream among it), so its stream state is checked through the
+     * production handlers. */
+    hle_register_mpeg_shared_handlers();
+    /* The media fixture drives the production scePsmfPlayer handlers through sr_syscall,
+     * so the guest getter and the A/V presentation boundaries are reachable from a
+     * production-path test (issue #279). */
+    hle_register_psmf_player_handlers();
+    /* ... and the host presentation boundaries those pictures and blocks reach: the display
+     * flip and the audio output calls, so the presentation-offset measurement is exercised
+     * through the production handlers rather than a white-box call. */
+    hle_register_display_setframebuf_handler();
+    hle_register_regular_audio_handlers();
+    hle_register_output2_audio_handlers();
+    /* The sceAtrac family, so the fixture's RIFF-header mutation stage reaches the
+     * production track parser and stream calls (#969). */
+    hle_register_atrac_handlers();
 }
 
 #endif

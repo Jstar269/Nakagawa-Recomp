@@ -77,11 +77,13 @@ The **Where** column of each table names the places a code can appear:
 | `DISC_NOT_PSP` | disc, player | The disc image is not a PSP game: it has no `PSP_GAME` folder. |
 | `EXECUTABLE_UNSUPPORTED` | report | The disc's executable is missing, encrypted with no decrypted copy, or breaks a PSP layout rule. |
 | `INVALID_ISO` | report | The input is not a readable PSP disc image, or its title information is invalid. |
+| `HOMEBREW_KERNEL_MODE_UNSUPPORTED` | player | The package's homebrew is kernel-mode or a custom-firmware plugin, which needs the PSP's own kernel and firmware. |
 | `ISO_CORRUPT` | player | The picked file is not a PSP disc image. |
 | `MODIFIED_DUMP_CFW_LOADER` | report | The disc image was modified by a custom-firmware patch; its real executable needs a decrypted copy. |
+| `PBP_ENCRYPTED_EXECUTABLE_UNSUPPORTED` | player | The PBP holds an encrypted program; only unencrypted homebrew is imported from a package. |
 | `PBP_HEADER_TRUNCATED` | report, route, disc, player | The PlayStation Store package (PBP) ends inside its header. |
 | `PBP_OFFSETS_INVALID` | report, route, disc, player | The PBP's section offsets are out of order or outside the file. |
-| `PBP_PACKAGE_UNSUPPORTED` | report, route, disc, player | The PBP is not a PSN release of a UMD game, the only kind Nakagawa converts. |
+| `PBP_PACKAGE_UNSUPPORTED` | report, route, disc, player | The PBP is neither a PSN release of a UMD game nor unencrypted homebrew, the only kinds Nakagawa converts. |
 | `PBP_SFO_INVALID` | report, route, disc, player | The PBP's title information (`PARAM.SFO`) cannot be read. |
 | `SOURCE_NOT_FOUND` | player | The game's source file is no longer where the library recorded it. |
 
@@ -107,6 +109,7 @@ The **Where** column of each table names the places a code can appear:
 
 | Code | Where | Meaning |
 | --- | --- | --- |
+| `BUILD_KNOWN_BAD` | staging | The disc's executable is a build the title's manifest marks known-bad; the manifest's reason is in the message. |
 | `DISC_FILES_STAGE_FAILED` | report | The game's files on the disc could not be staged; the output says why. |
 | `EXECUTABLE_LOAD_BINDING_REQUIRED` | route | A relocatable executable has no load address bound to it. |
 | `EXPERIMENTAL_CODEGEN_PROFILE_MISSING` | route | An experimental title's profile has no `codegen_profile` setting and is not the player's untouched default profile. |
@@ -264,6 +267,7 @@ The **Where** column of each table names the places a code can appear:
 | `INSTALL_CANCELLED` | player | The prerequisite install was cancelled. |
 | `INTERNAL_ERROR` | decrypt, disc, player | A C engine returned a result it has no name for. This is a defect in Nakagawa. |
 | `LIBRARY_WRITE_FAILED` | player | The library could not be saved. |
+| `LINK_OPEN_FAILED` | player | A web link could not be opened in the browser. |
 | `MANIFEST_INVALID` | player | A prerequisite's pinned download entry (URL, size or SHA-256) is invalid. |
 | `OFFLINE_OR_NETWORK_ERROR` | player | A download failed because the network is unavailable. |
 | `PATH_TOO_LONG` | player | A path is longer than the system allows. |
@@ -279,6 +283,10 @@ The **Where** column of each table names the places a code can appear:
 | `PYTHON_NOT_FOUND` | player | The verified Python runtime is not in app data. |
 | `REDIRECT_REJECTED` | player | A download was redirected to a host it does not use. |
 | `REMOVE_FAILED` | player | The game could not be removed from the library. |
+| `SAVES_ADD_FAILED` | player | A save folder could not be added to a title's saves. |
+| `SAVES_BACKUP_FAILED` | player | A title's saves could not be backed up. |
+| `SAVES_PICKER_FAILED` | player | The folder picker for adding a save could not open. |
+| `SAVES_RESTORE_FAILED` | player | A save backup was refused or could not be restored; the saves are unchanged. |
 | `SIZE_MISMATCH` | player | A download is not the size its manifest lists. |
 | `SPAWN_FAILED` | player | A tool process could not be started. |
 | `SWEEP_REPORT_INVALID` | library | A sweep run's report has no failure class. |

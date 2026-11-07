@@ -12,6 +12,7 @@
  */
 
 #include "nk_launch.h"
+#include "nk_shared_helpers.h"
 #include "nk_font_slots.h"
 #include "../rt/prx_loader.h"
 #include "generated/nk_title_catalog.h"
@@ -27,10 +28,7 @@
 #define NK_ELF_PF_X 1u
 
 static inline void safe_copy_path(char *dest, size_t dest_size, const char *src) {
-    if (!dest || dest_size == 0) return;
-    if (!src) { dest[0] = '\0'; return; }
-    strncpy(dest, src, dest_size - 1);
-    dest[dest_size - 1] = '\0';
+    (void)nk_shared_text_copy(dest, dest_size, src, NK_SHARED_TEXT_COPY_TRUNCATE);
 }
 
 static uint16_t launch_read_u16(const uint8_t *p) {
@@ -60,11 +58,32 @@ static bool launch_join_path(const char *base, const char *relative,
                              char *out_path, size_t out_size) {
     if (!base || !base[0] || !relative || !relative[0] ||
         !out_path || out_size == 0) return false;
-    if (relative[0] == '/' || relative[0] == '\\' ||
-        (relative[0] && relative[1] == ':')) return false;
-    int written = snprintf(out_path, out_size, "%s%c%s", base,
-                           nk_platform_path_separator(), relative);
-    return written >= 0 && (size_t)written < out_size;
+    return nk_shared_path_join(out_path, out_size, base, relative,
+                               nk_platform_path_separator(), NK_SHARED_PATH_JOIN_ALWAYS,
+                               NK_SHARED_PATH_REJECT_ABSOLUTE_RIGHT |
+                                   NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
+}
+
+/* The title's code-capture folder (#1933), <user_data_root>/cache/bringup/<DISC>/captures, the
+   folder `nk_cli.py bringup` reads (bringup_capture_dir). False, with `out_path` empty, when the
+   session has no per-user data directory or no PSP disc ID, or the path does not fit. */
+static bool launch_code_capture_dir(const NkLaunchSession *session, char *out_path,
+                                    size_t out_size) {
+    if (!out_path || out_size == 0u) return false;
+    out_path[0] = '\0';
+    char disc[NK_MAX_DISC_ID_LEN + 8];
+    if (!session->user_data_root[0] ||
+        !nk_title_manifest_package_dir_name(session->disc_id, NULL, disc, sizeof(disc))) {
+        return false;
+    }
+    char sep = nk_platform_path_separator();
+    int written = snprintf(out_path, out_size, "%s%ccache%cbringup%c%s%ccaptures",
+                           session->user_data_root, sep, sep, sep, disc, sep);
+    if (written < 0 || (size_t)written >= out_size) {
+        out_path[0] = '\0';
+        return false;
+    }
+    return true;
 }
 
 /* Build the UMD ISO route's disc path; Memory Stick launches need their own
@@ -1074,6 +1093,7 @@ NkResult nk_launch_prepare_session(
 
     session->config.resolution_scale = 1;
     session->config.present_scaling = NK_PRESENT_SCALING_SHARP;
+    session->config.present_upscale = NK_PRESENT_UPSCALE_OFF;
     session->config.fps_cap = -1;
     session->config.fullscreen = false;
     session->config.vsync = true;
@@ -1175,10 +1195,26 @@ NkResult nk_launch_prepare_session(
        launch at 0 0 as documented -- not an unknown-address guess, and the
        Python planner reads the same fields identically. */
     session->base_address = entry->executable_base;
-    /* The run entry, not the raw executable.entry: a title that declares a
-       fallback entry must start there (the manager and package planner do the
-       same through title_codegen_plan._resolve_run_entry). */
-    session->entry_point = entry->run_entry;
+    /* A title's runtime bindings name addresses inside one exact executable.
+       Reuse the catalog's build identity (the same on-disc SHA-256 used by the
+       card and package builder): a listed or untracked build uses its declared
+       run entry, while an unlisted build starts at its own executable entry. */
+    const char *build_disc_id = game->disc_id[0]
+        ? game->disc_id : entry->primary_disc_id;
+    /* identify_build fails only for a disc id that does not normalize; no build
+       row can name such an id, so the title records no builds for it (untracked)
+       and its run entry stands, as before builds were recorded. */
+    bool unlisted_build = false;
+    if (build_disc_id && build_disc_id[0]) {
+        NkBuildIdentity build_identity;
+        if (nk_title_manifest_identify_build(
+                build_disc_id, game->iso_path,
+                game->selected_executable[0] ? game->selected_executable : NULL,
+                &build_identity))
+            unlisted_build = build_identity.status == NK_BUILD_UNLISTED;
+    }
+    session->entry_point = unlisted_build
+        ? entry->executable_entry : entry->run_entry;
 
     /* A completed native staging transaction carries the source EBOOT under
      * prepared_root. Validate it before any launch environment is assembled;
@@ -1454,6 +1490,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_modules[NK_MAX_PATH * 2 + 32];
     char env_tables[64];
     char env_boot_event[NK_MAX_PATH + 32];
+    char env_code_capture[NK_MAX_PATH + 64];
     char env_fullscreen[32];
     char env_volume[32];
     char env_input_profile[NK_MAX_PATH + 32];
@@ -1505,6 +1542,15 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     envp[env_count++] = env_ge;
     envp[env_count++] = env_scale;
     envp[env_count++] = env_present_scaling;
+    /* The presentation upscaler is set from the chosen mode, never inherited: an authentic session
+       (no enhanced build, Ace Mode off) always runs it off (docs/ENHANCEMENT_CONTRACT.md section
+       10.1); an enhanced or Ace Mode session follows the setting. */
+    {
+        const char *ace_line = session->config.ace_spec[0] ? session->config.ace_spec : "off";
+        bool authentic = !session->enhancement_package_id[0] && strcmp(ace_line, "off") == 0;
+        envp[env_count++] = !authentic && session->config.present_upscale == NK_PRESENT_UPSCALE_FSR1
+                                ? "SR_PRESENT_UPSCALE=fsr1" : "SR_PRESENT_UPSCALE=off";
+    }
     envp[env_count++] = env_vsync;
     envp[env_count++] = env_fs;
     envp[env_count++] = env_fullscreen;
@@ -1543,7 +1589,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         bool ace_on = strcmp(ace, "off") != 0;
         if (ace_on && session->config.headless_accept_presented_frames > 0u) {
             snprintf(session->last_error, sizeof(session->last_error),
-                     "Ace Mode is on; the acceptance checkpoint needs an authentic run.");
+                     "Enhanced or Ace is on; the acceptance checkpoint needs an Authentic run.");
             return NK_ERROR_GENERIC;
         }
         snprintf(env_ace, sizeof(env_ace), "SR_ACE=%s", ace);
@@ -1679,6 +1725,25 @@ NkResult nk_launch_start(NkLaunchSession *session) {
                          "SR_BOOT_EVENT_FILE=%s", boot_event_path);
         if (w > 0 && (size_t)w < sizeof(env_boot_event)) {
             envp[env_count++] = env_boot_event;
+        }
+    }
+    /* Code the game installs at run time (#1933): a call into it stops, and the runtime writes a
+       capture of it to SR_CODE_CAPTURE. The title's folder is the one `nk_cli.py bringup`
+       translates on its next build (cache/bringup/<DISC>/captures under the per-user data
+       directory, removed with the title's build cache). The runtime writes into the folder and
+       does not create it, so it is created here; a folder that cannot be created is still named,
+       and the runtime then names the capture it could not write. A value the user set is kept
+       (an empty one turns the capture off). */
+    {
+        char capture_dir[NK_MAX_PATH];
+        if (!getenv("SR_CODE_CAPTURE") &&
+            launch_code_capture_dir(session, capture_dir, sizeof(capture_dir))) {
+            int w = snprintf(env_code_capture, sizeof(env_code_capture), "SR_CODE_CAPTURE=%s",
+                             capture_dir);
+            if (w > 0 && (size_t)w < sizeof(env_code_capture)) {
+                (void)nk_platform_mkdir_p_private(capture_dir);
+                envp[env_count++] = env_code_capture;
+            }
         }
     }
     /* Every entry above is one of a fixed set, so this holds by construction; it is checked
@@ -1906,35 +1971,35 @@ bool nk_launch_describe_spawn_block(int os_error, const char *program,
     NkSpawnBlock block = nk_platform_spawn_block(os_error);
     if (block == NK_SPAWN_BLOCK_NONE) return false;
     if (!program || !program[0]) program = "the program";
-    if (!program_title || !program_title[0]) program_title = "Program";
+    if (!program_title || !program_title[0]) program_title = "program";
     out->block = block;
     switch (block) {
         case NK_SPAWN_BLOCK_ACCESS_DENIED:
             snprintf(out->code, sizeof(out->code), "WINDOWS_BLOCKED_START");
-            snprintf(out->title, sizeof(out->title), "Windows Blocked the %s", program_title);
+            snprintf(out->title, sizeof(out->title), "Windows blocked the %s", program_title);
             snprintf(out->message, sizeof(out->message),
                      "Windows refused to start %s (access denied). This is often a Microsoft "
                      "Defender attack surface reduction rule. Those rules block programs that are "
                      "new to Windows, and every game Nakagawa builds on this PC is new. Protection "
                      "history in Windows Security names the rule. Whoever manages it can exclude "
-                     "Nakagawa's folders. Please don't turn Windows Security off.",
+                     "Nakagawa's folders. Don't turn Windows Security off.",
                      program);
             break;
         case NK_SPAWN_BLOCK_THREAT:
             snprintf(out->code, sizeof(out->code), "WINDOWS_DEFENDER_THREAT");
-            snprintf(out->title, sizeof(out->title), "Windows Security Blocked the %s",
+            snprintf(out->title, sizeof(out->title), "Windows Security blocked the %s",
                      program_title);
             snprintf(out->message, sizeof(out->message),
                      "Windows Security says %s contains a threat, so Windows would not start it. "
                      "Protection history in Windows Security names the detection. If you checked "
-                     "your download, you can allow it there and try again. Please don't turn "
+                     "your download, you can allow it there and try again. Don't turn "
                      "Windows Security off.",
                      program);
             break;
         case NK_SPAWN_BLOCK_POLICY:
         default:
             snprintf(out->code, sizeof(out->code), "WINDOWS_POLICY_BLOCKED");
-            snprintf(out->title, sizeof(out->title), "Windows Blocked the %s", program_title);
+            snprintf(out->title, sizeof(out->title), "Windows blocked the %s", program_title);
             snprintf(out->message, sizeof(out->message),
                      "A Windows policy on this PC does not allow %s to start. Whoever manages "
                      "this PC sets that policy (AppLocker, App Control or a software restriction "

@@ -134,7 +134,13 @@ static int msg_pipe_trace_call(uint32_t calls) {
 
 static uint32_t h_CreateMsgPipe(CpuState *s) {
     /* a0=name, a1=partition, a2=attr, a3=bufferSize, t0=option. */
-    (void)A1;
+    /* pspautotests tests/threads/msgpipe/create.expected: partitions 2 and 6 are accepted;
+     * 1, 3 and 4 answer 0x800200D1; -5, -1, 0 and 7..10 answer 0x800200D2; attributes outside
+     * the mask 0x51FF answer 0x80020191; sizes 0xFFFFFFFF and 0x04000000 answer 0x80020190
+     * (NO_MEMORY). The file records each argument wrong on its own, so the order between the
+     * three checks below is not measured; partition 5 and sizes between 1 MiB and 64 MiB are
+     * unrecorded and keep their earlier handling (5 accepted, the model ceiling refused). */
+    int32_t partition = (int32_t)A1;
     /* Issue #178: validate against the documented PSP-resource model BEFORE any
      * host allocation. Sizes above MSG_PIPE_MAX_CAPACITY are
      * outside the modeled range. They fail before malloc, before a UID is
@@ -145,7 +151,10 @@ static uint32_t h_CreateMsgPipe(CpuState *s) {
      * name that is unmapped or unterminated fails closed with ILLEGAL_ADDR
      * (project choice) instead of silently becoming "". */
     if (!A0) return 0x80020190u; /* SCE_KERNEL_ERROR_NO_MEMORY */
-    if (A3 > MSG_PIPE_MAX_CAPACITY) return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
+    if (partition == 1 || partition == 3 || partition == 4) return 0x800200d1u;
+    if (partition <= 0 || partition >= 7) return 0x800200d2u;
+    if (A2 & ~0x51ffu) return 0x80020191u;
+    if (A3 > MSG_PIPE_MAX_CAPACITY) return 0x80020190u; /* NO_MEMORY, as recorded for 0xFFFFFFFF and 0x04000000 */
     char name[32];
     if (!guest_cstr(A0, name, sizeof(name))) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     /* A3 <= MSG_PIPE_MAX_CAPACITY (1 MiB), so the allocation is bounded and
@@ -343,7 +352,8 @@ static uint32_t h_TrySendMsgPipe(CpuState *s) {
     if (resultp) MEM_W32(resultp, 0);
     MsgPipe *p = msg_pipe_find(A0);
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_MPPID;
-    /* PSP-B3-01 (psp-hw-20260917): wait mode 2 is ILLEGAL_MODE (0x80020195). */
+    /* Measured on a PSP-3000, firmware 6.61 (PSP-B3-01, docs/HARDWARE_ORACLE.md):
+     * wait mode 2 is ILLEGAL_MODE (0x80020195). */
     if (A3 > 1u) return 0x80020195u;
     if ((int32_t)A2 < 0) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     if (A2 == 0 || (p->capacity && A2 > p->capacity)) return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
@@ -361,7 +371,7 @@ static uint32_t h_TrySendMsgPipe(CpuState *s) {
             if (msg_pipe_trace_call(p->send_calls))
                 fprintf(stderr, "MSGPIPE: send uid=0x%x thread=0x%x call=%u requested=%u queued=%u -> FULL\n",
                         p->uid, sched_current_uid(), p->send_calls, A2, p->count);
-            /* PSP-B3-01 (psp-hw-20260917): an all-or-nothing send without room
+            /* Measured (PSP-B3-01): an all-or-nothing send without room
              * answers MPP_FULL without writing the result. */
             if (resultp) MEM_W32(resultp, saved_result);
             return SCE_KERNEL_ERROR_MPP_FULL;
@@ -406,7 +416,7 @@ static uint32_t h_TryReceiveMsgPipe(CpuState *s) {
     if (resultp) MEM_W32(resultp, 0);
     MsgPipe *p = msg_pipe_find(A0);
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_MPPID;
-    /* PSP-B3-01 (psp-hw-20260917): wait mode 2 is ILLEGAL_MODE (0x80020195). */
+    /* Measured (PSP-B3-01): wait mode 2 is ILLEGAL_MODE (0x80020195). */
     if (A3 > 1u) return 0x80020195u;
     if ((int32_t)A2 < 0) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     if (A2 == 0 || (p->capacity && A2 > p->capacity)) return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
@@ -1069,7 +1079,7 @@ static uint32_t h_ReferMbxStatus(CpuState *s) {
 }
 
 /* Shared by production and the executable HLE selftest so both dispatch the
- * same NID→handler mapping (issue #339). */
+ * same NID->handler mapping (issue #339). */
 void hle_register_mbx_handlers(void) {
     sr_hle_register(0x8125221d, "sceKernelCreateMbx", h_CreateMbx);
     sr_hle_register(0x86255ada, "sceKernelDeleteMbx", h_DeleteMbx);
@@ -1101,14 +1111,14 @@ static Sync *sync_new(int kind) {
 
 static uint32_t h_CreateSema(CpuState *s) {
     /* a0=name, a1=attr, a2=initCount, a3=maxCount.
-     * PSP-B1-01 (psp-hw-20260917): attr bits outside the documented set
+     * Measured (PSP-B1-01): attr bits outside the documented set
      * (anything beyond 0x3FF) reject with 80020191. initCount > maxCount and
      * maxCount == 0 are accepted on hardware, so no validation is added for
      * either. */
     if (A1 & ~0x3ffu) return 0x80020191u;
     Sync *m = sync_new(SYNC_KIND_SEMA); if (!m) return 0x80020000;
     m->count = (int)A2; m->maxc = (int)A3;
-    /* PSP-B2-01 (psp-hw-20260917): CancelSema(-1) resets the count to the
+    /* Measured (PSP-B2-01): CancelSema(-1) resets the count to the
      * create-time initial count, not to zero. */
     m->initc = (int)A2;
     /* Create-time name and attr for ReferSemaStatus (an unreadable name
@@ -1121,10 +1131,10 @@ static uint32_t h_CreateSema(CpuState *s) {
 }
 
 static uint32_t h_DeleteSema(CpuState *s) {
-    /* PSP-B1-01 (psp-hw-20260917): unknown or deleted semaphore id is
+    /* Measured (PSP-B1-01): unknown or deleted semaphore id is
      * UNKNOWN_SEMID. */
     Sync *m = sync_find(A0, SYNC_KIND_SEMA); if (!m) return SCE_KERNEL_ERROR_UNKNOWN_SEMID;
-    /* PSP-B2-01 (psp-hw-20260917): deleting a semaphore with a waiter succeeds
+    /* Measured (PSP-B2-01): deleting a semaphore with a waiter succeeds
      * and the waiter leaves with WAIT_DELETE (0x800201B5). With no waiter there
      * is nothing to wake and no wake result to latch (a stale result would be
      * misattributed to the next waiter). */
@@ -1216,7 +1226,7 @@ static uint32_t h_WaitSema(CpuState *s) {
     uint64_t wait_end = 0;
     int wait_end_set = 0;
     while (m->count < need) {
-        /* PSP-B3-01 (psp-hw-20260917): ReferThreadStatus reports sema waits as
+        /* Measured (PSP-B3-01): ReferThreadStatus reports sema waits as
          * waitType 3 with waitId = the semaphore UID. */
         sched_set_current_wait_kind(3);
         if (toptr) {
@@ -1235,7 +1245,7 @@ static uint32_t h_WaitSema(CpuState *s) {
                 }
             }
             if (sched_block_on_timeout(uid, usec)) {
-                /* PSP-B2-01 (psp-hw-20260917): an expired timed wait writes the
+                /* Measured (PSP-B2-01): an expired timed wait writes the
                  * remaining time (0 at the deadline) to *timeout and answers
                  * WAIT_TIMEOUT. */
                 MEM_W32(toptr, 0u);
@@ -1244,7 +1254,7 @@ static uint32_t h_WaitSema(CpuState *s) {
         } else {
             sched_block_on(uid);
         }
-        /* PSP-B2-01 (psp-hw-20260917): a cancelled/deleted/released wait answers
+        /* Measured (PSP-B2-01): a cancelled/deleted/released wait answers
          * its wake result instead of resuming into a satisfied count. */
         {
             uint32_t woken = 0;
@@ -1279,7 +1289,7 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
         if (toptr) {
             sched_vtime_refresh();
             if (sched_vtime_us() >= end) {
-                /* PSP-B2-01 (psp-hw-20260917): the expired wait reports its
+                /* Measured (PSP-B2-01): the expired wait reports its
                  * remaining timeout (0), it does not leave the caller's word. */
                 MEM_W32(toptr, 0u);
                 return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
@@ -1287,12 +1297,12 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
             uint32_t remaining = (uint32_t)(end - sched_vtime_us());
             MEM_W32(toptr, remaining);
             sched_set_current_cb_wait(1);
-            /* PSP-B3-01 (psp-hw-20260917): sema CB waits report waitType 3. */
+            /* Measured (PSP-B3-01): sema CB waits report waitType 3. */
             sched_set_current_wait_kind(3);
             int timed_out = sched_block_on_timeout(uid, remaining);
             sched_set_current_cb_wait(0);
             if (timed_out) {
-                /* PSP-B2-01 (psp-hw-20260917): same remaining-0 contract after
+                /* Measured (PSP-B2-01): same remaining-0 contract after
                  * a real timed block. */
                 MEM_W32(toptr, 0u);
                 return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
@@ -1303,7 +1313,7 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
             sched_block_on(uid);
             sched_set_current_cb_wait(0);
         }
-        /* PSP-B2-01 (psp-hw-20260917): a cancelled/deleted/released wait answers
+        /* Measured (PSP-B2-01): a cancelled/deleted/released wait answers
          * its wake result instead of resuming into a satisfied count. */
         {
             uint32_t woken = 0;
@@ -1316,12 +1326,12 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
     return 0;
 }
 static uint32_t h_SignalSema(CpuState *s) {
-    /* PSP-B1-01 (psp-hw-20260917): unknown or deleted semaphore id is
+    /* Measured (PSP-B1-01): unknown or deleted semaphore id is
      * UNKNOWN_SEMID, replacing the generic 0x80020000 seam. */
     Sync *m = sync_find(A0, SYNC_KIND_SEMA); if (!m) return SCE_KERNEL_ERROR_UNKNOWN_SEMID;
     int signals = (int)A1;
     int64_t new_count = (int64_t)m->count + signals;
-    /* PSP-B1-01 (psp-hw-20260917): an overflow past maxCount rejects with
+    /* Measured (PSP-B1-01): an overflow past maxCount rejects with
      * 800201AE and leaves the count unchanged; it does not cap. */
     if (new_count > m->maxc) return 0x800201aeu;
     m->count = (int32_t)(uint32_t)new_count;
@@ -1333,12 +1343,16 @@ static uint32_t h_SignalSema(CpuState *s) {
  * blocking forms use, so the family cannot drift to two different spellings of
  * one error. sceKernelPollSema has no context gate because it never blocks. */
 static uint32_t h_PollSema(CpuState *s) {
-    Sync *m = sync_find(A0, SYNC_KIND_SEMA); if (!m) return SCE_KERNEL_ERROR_UNKNOWN_SEMID;
     int need = (int)A1;
-    /* PSP-B1-01 (psp-hw-20260917): count validation answers ILLEGAL_COUNT even
+    /* pspautotests tests/threads/semaphores/poll.expected: "NULL" id with count 0 answers
+     * 800201BD while a NULL/invalid/deleted id with count 1 answers 80020199, so a count <= 0
+     * is checked before the id lookup. */
+    if (need <= 0) return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
+    Sync *m = sync_find(A0, SYNC_KIND_SEMA); if (!m) return SCE_KERNEL_ERROR_UNKNOWN_SEMID;
+    /* Measured (PSP-B1-01): count validation answers ILLEGAL_COUNT even
      * on an empty semaphore; SEMA_ZERO is only for a valid count it cannot
      * satisfy. */
-    if (need <= 0 || need > m->maxc) return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
+    if (need > m->maxc) return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
     if (m->count < need) return 0x800201adu;   /* SCE_KERNEL_ERROR_SEMA_ZERO */
     m->count -= need;
     return 0;
@@ -1431,7 +1445,7 @@ int sr_hle_test_sema_state(uint32_t uid, int *count_out, int *max_out) {
  *     +0x14 int   pad[3]
  *
  * Error returns for the abusive cases are the physical-PSP measurements of
- * runs PSP-B1-01 and PSP-B2-01 (campaign psp-hw-20260917, PSP-3000 / 6.61):
+ * runs PSP-B1-01 and PSP-B2-01 (PSP-3000 / 6.61):
  *   - TryLock that cannot own (another owner, a self-held non-recursive
  *     mutex, or count 0): 0x800201C4.
  *   - Timed Lock of a self-held non-recursive mutex: 0x800201CF at once,
@@ -1453,7 +1467,7 @@ int sr_hle_test_sema_state(uint32_t uid, int *count_out, int *max_out) {
 #define LWMUTEX_ATTR_RECURSIVE 0x0200u
 #define LWMUTEX_DELETED_WORD   0xffffffffu
 
-/* PSP-B2-01 (psp-hw-20260917): an unlock to level 0 with a waiter hands
+/* Measured (PSP-B2-01): an unlock to level 0 with a waiter hands
  * ownership directly to the waiter (lockThread = waiter, level = the waiter's
  * count) before the waiter runs. The waiter's requested count lives on its own
  * host stack while blocked, so a small FIFO queue carries it to the unlocker. */
@@ -1658,7 +1672,7 @@ static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_
         uint32_t uid = MEM_R32(wa + LWMUTEX_UID);
         MEM_W32(wa + LWMUTEX_NUM_WAIT, MEM_R32(wa + LWMUTEX_NUM_WAIT) + 1u);
         lww_enqueue(uid, cur, count);
-        /* PSP-B3-01 (psp-hw-20260917): LwMutex waits report waitType 13 with
+        /* Measured (PSP-B3-01): LwMutex waits report waitType 13 with
          * waitId = the workarea's uid. */
         sched_set_current_wait_kind(13);
         int timed_out = 0;
@@ -1678,7 +1692,7 @@ static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_
         uint32_t waiters = MEM_R32(wa + LWMUTEX_NUM_WAIT);
         if (waiters) MEM_W32(wa + LWMUTEX_NUM_WAIT, waiters - 1u);
         if (!sync_find(uid, SYNC_KIND_LWMUTEX)) { lww_remove_thread(cur); return LWMUTEX_GONE; }
-        /* PSP-B2-01 (psp-hw-20260917): the unlocker hands ownership directly to
+        /* Measured (PSP-B2-01): the unlocker hands ownership directly to
          * the waiter, so a woken waiter that now owns the mutex takes it. */
         if (MEM_R32(wa + LWMUTEX_LOCK_THREAD) == cur) {
             if (has_timeout) {
@@ -1689,7 +1703,7 @@ static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_
             return LWMUTEX_TAKEN;
         }
         if (timed_out || (has_timeout && ({ sched_vtime_refresh(); sched_vtime_us() >= end; }))) {
-            /* PSP-B2-01 (psp-hw-20260917): a contended timed lock answers
+            /* Measured (PSP-B2-01): a contended timed lock answers
              * WAIT_TIMEOUT (0x800201A8) and reports the remaining timeout (0). */
             lww_remove_thread(cur);
             if (toptr) MEM_W32(toptr, 0u);
@@ -1736,13 +1750,34 @@ static uint32_t h_TryLockLwMutex(CpuState *s) {
         ? 0u : SCE_KERNEL_ERROR_LWMUTEX_FAILED_TO_OWN;
 }
 
-/* The 6.00+ export reports a lock it cannot take as LOCKED (0x800201CB): SDK-built code relies on
- * it (the retail libpsmfplayer treats only 0x800201CB from sceKernelTryLockLwMutex_600 as
- * contention and otherwise proceeds as the owner). The original export keeps the hardware-measured
- * 0x800201C4 above. */
+/* The 6.00+ export has its own result mapping, recorded by pspautotests
+ * tests/threads/lwmutex/try600.expected (the original export keeps the mapping of
+ * try.expected above): count <= 0, or count > 1 on a non-recursive mutex, is ILLEGAL_COUNT
+ * (0x800201BD) with the mutex unchanged; a self-held non-recursive mutex is 0x800201CF; a
+ * recursive level that would pass INT_MAX is 0x800201CD with the level unchanged; a mutex held
+ * by another thread is LOCKED (0x800201CB, which the retail libpsmfplayer tests for); a deleted
+ * workarea (uid word 0xFFFFFFFF) is NOT_FOUND (0x800201CA). The cells that hand it a workarea
+ * with uid 0 ("(fake)") are not modelled: they keep the previous LOCKED answer. */
 static uint32_t h_TryLockLwMutex600(CpuState *s) {
-    uint32_t r = h_TryLockLwMutex(s);
-    return r == SCE_KERNEL_ERROR_LWMUTEX_FAILED_TO_OWN ? SCE_KERNEL_ERROR_LWMUTEX_LOCKED : r;
+    uint32_t wa = A0;
+    if (!lwmutex_workarea_ok(wa)) return 0x80000103u;
+    int count = (int)A1;
+    if (count <= 0) return 0x800201bdu;
+    uint32_t uid = MEM_R32(wa + LWMUTEX_UID);
+    if (uid == LWMUTEX_DELETED_WORD) return SCE_KERNEL_ERROR_LWMUTEX_NOT_FOUND;
+    if (sync_find(uid, SYNC_KIND_LWMUTEX)) {
+        int recursive = (MEM_R32(wa + LWMUTEX_ATTR) & LWMUTEX_ATTR_RECURSIVE) != 0;
+        if (!recursive && count > 1) return 0x800201bdu;
+        int level = (int)MEM_R32(wa + LWMUTEX_LOCK_LEVEL);
+        if (recursive && level > 0 && MEM_R32(wa + LWMUTEX_LOCK_THREAD) == sched_current_uid() &&
+            (int64_t)level + (int64_t)count > 0x7fffffffLL)
+            return 0x800201cdu;
+    }
+    switch (lwmutex_acquire(wa, count, 0)) {
+    case LWMUTEX_TAKEN: return 0u;
+    case LWMUTEX_NOT_RECURSIVE: return SCE_KERNEL_ERROR_LWMUTEX_RECURSIVE_NOT_ALLOWED;
+    default: return SCE_KERNEL_ERROR_LWMUTEX_LOCKED;
+    }
 }
 
 static uint32_t h_UnlockLwMutex(CpuState *s) {
@@ -1768,7 +1803,7 @@ static uint32_t h_UnlockLwMutex(CpuState *s) {
     MEM_W32(wa + LWMUTEX_LOCK_LEVEL, (uint32_t)level);
     if (level == 0) {
         uint32_t muid = MEM_R32(wa + LWMUTEX_UID);
-        /* PSP-B2-01 (psp-hw-20260917): ownership passes directly to the waiter
+        /* Measured (PSP-B2-01): ownership passes directly to the waiter
          * before it runs; only then does the waiter become runnable. */
         uint32_t next_thread = 0;
         int next_count = 0;
@@ -1788,7 +1823,7 @@ static uint32_t h_UnlockLwMutex(CpuState *s) {
 
 static uint32_t h_CancelSema(CpuState *s) {
     /* a0=semaid, a1=newCount, a2=numWaitThreads out (stack_arg 0).
-     * PSP-B2-01 (psp-hw-20260917): newCount -1 resets the count to the initial
+     * Measured (PSP-B2-01): newCount -1 resets the count to the initial
      * count, n <= max sets it, n > max rejects with ILLEGAL_COUNT (and numWait
      * stays untouched). Wake waiters with WAIT_CANCEL and report their number;
      * a NULL numWait is allowed. */
@@ -1798,7 +1833,7 @@ static uint32_t h_CancelSema(CpuState *s) {
     if (hle_log_on())
         fprintf(stderr, "HLE: CancelSema uid=0x%x newCount=%d (from 0x%x)\n", A0, new_count, sched_current_uid());
     int waiters = sched_count_waiters(A0);
-    /* PSP-B2-01 (psp-hw-20260917): -1 restores the create-time initial count. */
+    /* Measured (PSP-B2-01): -1 restores the create-time initial count. */
     m->count = (new_count == -1) ? m->initc : new_count;
     uint32_t nump = stack_arg(s, 0);
     if (nump) MEM_W32(nump, (uint32_t)waiters);
@@ -1815,7 +1850,7 @@ static void evf_cancel_outputs(uint32_t uid, uint32_t pattern);
 
 static uint32_t h_CancelEventFlag(CpuState *s) {
     /* a0=evid, a1=newPattern, a2=numWaitThreads out.
-     * PSP-B2-01 (psp-hw-20260917): Cancel sets the pattern, reports the waiter
+     * Measured (PSP-B2-01): Cancel sets the pattern, reports the waiter
      * count and wakes every waiter with WAIT_CANCEL. */
     Sync *m = sync_find(A0, SYNC_KIND_EVENT_FLAG); if (!m) return 0x8002019au;   /* UNKNOWN_EVFID */
     int waiters = sched_count_waiters(A0);
@@ -2206,7 +2241,10 @@ static uint32_t h_CancelMutex(CpuState *s) {
     Mutex *m = mutex_find(uid);
     if (!m) return SCE_KERNEL_ERROR_UNKNOWN_MUTEXID;
 
-    if (new_count < 0 || new_count > 1) {
+    /* pspautotests tests/threads/mutex/cancel.expected: "Negative -3/-1: OK" with the
+     * following refer showing current=0, lockThread=0 (a negative count releases like 0);
+     * "Greater than max: Failed (800201BD)". */
+    if (new_count > 1) {
         return SCE_KERNEL_ERROR_ILLEGAL_COUNT;
     }
 
@@ -2297,7 +2335,7 @@ static uint64_t s_evf_wait_order;
 
 static int evf_waiter_live(const EvfWaiter *w) {
     SrThreadRunStatus rs;
-    /* PSP-B3-01 (psp-hw-20260917): an event-flag wait is waitType 4. */
+    /* Measured (PSP-B3-01): an event-flag wait is waitType 4. */
     return w->active && sched_thread_run_status(w->thread, &rs) == 0 &&
            rs.waitType == 4u && rs.waitId == w->evf;
 }
@@ -2411,7 +2449,7 @@ static uint32_t h_WaitEventFlag(CpuState *s) {
      * A rejected call writes no outBits and consumes no pattern. (L74/L75) */
     if (!sr_evf_matches(m->pattern, bits, mode) && !sched_wait_permitted())
         return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
-    /* PSP-B2-01 (psp-hw-20260917): a second waiter on a single-wait flag
+    /* Measured (PSP-B2-01): a second waiter on a single-wait flag
      * (attr without 0x200) is rejected at once with 0x800201B0, leaving its
      * timeout and outBits untouched. */
     if (!sr_evf_matches(m->pattern, bits, mode) && !(m->attr & 0x200u) &&
@@ -2420,7 +2458,7 @@ static uint32_t h_WaitEventFlag(CpuState *s) {
     uint64_t wait_end = 0;      /* fixed by the first block; see h_WaitSema */
     int wait_end_set = 0;
     while (!sr_evf_matches(m->pattern, bits, mode)) {
-        /* PSP-B3-01 (psp-hw-20260917): evf waits report waitType 4. */
+        /* Measured (PSP-B3-01): evf waits report waitType 4. */
         sched_set_current_wait_kind(4);
         if (toptr) {
             uint32_t usec = MEM_R32(toptr);
@@ -2442,7 +2480,7 @@ static uint32_t h_WaitEventFlag(CpuState *s) {
             int timed_out = sched_block_on_timeout(uid, usec);
             evf_waiter_end();
             if (timed_out) {
-                /* PSP-B2-01 (psp-hw-20260917): an expired wait writes the
+                /* Measured (PSP-B2-01): an expired wait writes the
                  * remaining timeout (0) and reports the current pattern. */
                 MEM_W32(toptr, 0u);
                 m = evf_find(uid);
@@ -2454,7 +2492,7 @@ static uint32_t h_WaitEventFlag(CpuState *s) {
             sched_block_on(uid);
             evf_waiter_end();
         }
-        /* PSP-B2-01 (psp-hw-20260917): a cancelled wait answers WAIT_CANCEL
+        /* Measured (PSP-B2-01): a cancelled wait answers WAIT_CANCEL
          * (0x800201A9) with outBits = the canceller's new pattern. */
         {
             uint32_t woken = 0;
@@ -2484,7 +2522,7 @@ static uint32_t h_WaitEventFlagCB(CpuState *s) {
      * an already-set pattern still returns 0. (L84/L85) */
     if (!sr_evf_matches(m->pattern, bits, mode) && !sched_wait_permitted())
         return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
-    /* PSP-B2-01 (psp-hw-20260917): same single-wait rejection as the non-CB
+    /* Measured (PSP-B2-01): same single-wait rejection as the non-CB
      * form; a rejected call touches neither the timeout nor outBits. */
     if (!sr_evf_matches(m->pattern, bits, mode) && !(m->attr & 0x200u) &&
         sched_count_waiters(uid) > 0)
@@ -2517,7 +2555,7 @@ static uint32_t h_WaitEventFlagCB(CpuState *s) {
         if (toptr) {
             sched_vtime_refresh();
             if (sched_vtime_us() >= end) {
-                /* PSP-B2-01 (psp-hw-20260917): the expired wait reports its
+                /* Measured (PSP-B2-01): the expired wait reports its
                  * remaining timeout (0), it does not leave the caller's word. */
                 MEM_W32(toptr, 0u);
                 if (outp) MEM_W32(outp, m->pattern);
@@ -2526,14 +2564,14 @@ static uint32_t h_WaitEventFlagCB(CpuState *s) {
             uint32_t remaining = (uint32_t)(end - sched_vtime_us());
             MEM_W32(toptr, remaining);
             sched_set_current_cb_wait(1);
-            /* PSP-B3-01 (psp-hw-20260917): evf CB waits report waitType 4. */
+            /* Measured (PSP-B3-01): evf CB waits report waitType 4. */
             sched_set_current_wait_kind(4);
             evf_waiter_begin(uid, outp, bits, mode, toptr, end);
             int timed_out = sched_block_on_timeout(uid, remaining);
             evf_waiter_end();
             sched_set_current_cb_wait(0);
             if (timed_out) {
-                /* PSP-B2-01 (psp-hw-20260917): same remaining-0 contract after
+                /* Measured (PSP-B2-01): same remaining-0 contract after
                  * a real timed block. */
                 MEM_W32(toptr, 0u);
                 m = evf_find(uid);
@@ -2548,7 +2586,7 @@ static uint32_t h_WaitEventFlagCB(CpuState *s) {
             evf_waiter_end();
             sched_set_current_cb_wait(0);
         }
-        /* PSP-B2-01 (psp-hw-20260917): a cancelled wait answers WAIT_CANCEL
+        /* Measured (PSP-B2-01): a cancelled wait answers WAIT_CANCEL
          * (0x800201A9) with outBits = the canceller's new pattern. */
         {
             uint32_t woken = 0;

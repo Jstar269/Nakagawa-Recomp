@@ -26,6 +26,7 @@ import nk_doctor_core  # noqa: E402
 import shader_embed  # noqa: E402
 from hst_test_fixtures import write_elf, write_iso, write_psp_header  # noqa: E402
 from nk_core.prereq_fetcher import PrerequisiteFetchError  # noqa: E402
+from makefile_text import read_makefile  # noqa: E402
 
 _CHECKS_MODULE = nk_doctor_checks
 
@@ -797,8 +798,8 @@ class CliTests(unittest.TestCase):
 class EnvironmentContractTests(unittest.TestCase):
     def test_powerShell_accepts_current_core_line(self) -> None:
         # Still-supported lines per the Microsoft lifecycle table cited in
-        # docs/SETUP.md (7.4 LTS and 7.5 until 2026-11-10; 7.6 LTS beyond).
-        for version in ("7.4.0", "7.4.20", "7.5.10", "7.6.6", "7.7.0"):
+        # docs/SETUP.md (7.6 LTS until 2028-11-14; 7.4 and 7.5 end 2026-11-10).
+        for version in ("7.6.0", "7.6.6", "7.6.9", "7.7.0"):
             with self.subTest(version=version), mock.patch.object(
                 _CHECKS_MODULE,
                 "_probe_powershell",
@@ -825,6 +826,8 @@ class EnvironmentContractTests(unittest.TestCase):
         for edition, version in (
             ("Desktop", "5.1.22621"),
             ("Desktop", "8.0.0"),
+            ("Core", "7.5.11"),
+            ("Core", "7.4.20"),
             ("Core", "7.3.0"),
             ("Core", "6.2.0"),
         ):
@@ -866,7 +869,7 @@ class EnvironmentContractTests(unittest.TestCase):
         # proves no tracked .ps1 needs anything above $IsWindows (6.0); the
         # enforced value is the oldest still-supported line, pinned here so the
         # doctor check, docs, and #requires headers cannot drift apart.
-        self.assertEqual(_CHECKS_MODULE.MINIMUM_POWERSHELL, (7, 4))
+        self.assertEqual(_CHECKS_MODULE.MINIMUM_POWERSHELL, (7, 6))
         floor = _CHECKS_MODULE.MINIMUM_POWERSHELL_TEXT
         for doc in (ROOT / "docs" / "SETUP.md", ROOT / "README.md"):
             # Collapse whitespace: the floor is the rule, so a line wrap inside it must not fail.
@@ -972,7 +975,7 @@ class SimpleFrontEndTests(unittest.TestCase):
     def setUp(self) -> None:
         self.frontend = (ROOT / "nk.ps1").read_text(encoding="utf-8-sig")
         self.manager = (ROOT / "nk_manager.ps1").read_text(encoding="utf-8-sig")
-        self.makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.makefile = read_makefile(ROOT)
 
     def test_frontend_exposes_small_supported_surface(self) -> None:
         for script in (
@@ -1206,6 +1209,66 @@ class LongPathDiagnosticTests(unittest.TestCase):
             self.assertEqual(
                 results[0].metadata["deepest_relative"],
                 nk_doctor_checks.DEEPEST_EXPECTED_BUILD_PATH.as_posix(),
+            )
+
+    def test_inputs_scope_reports_the_configured_asset_root_path(self) -> None:
+        """Input roots participate in the path advisory without scanning their contents."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "checkout"
+            root.mkdir()
+            input_root = Path(tmpdir) / ("asset-input-" + "x" * 260)
+            output: list[str] = []
+            with (
+                mock.patch.object(nk_doctor, "check_data_directory"),
+                mock.patch.object(nk_doctor, "check_private_inputs"),
+                mock.patch.object(nk_doctor, "check_save_root"),
+                mock.patch.object(nk_doctor_checks, "longest_tracked_relative_path", return_value=None),
+                mock.patch.object(nk_doctor_checks, "query_windows_long_paths_enabled", return_value=False),
+                mock.patch.object(nk_doctor_checks.platform, "system", return_value="Windows"),
+                mock.patch.dict(os.environ, {"SR_DATAROOT": str(input_root)}, clear=True),
+                mock.patch("builtins.print", side_effect=lambda value: output.append(value)),
+            ):
+                returned = nk_doctor.main(["--root", str(root), "--scope", "inputs", "--json"])
+
+            payload = json.loads(output[-1])
+            long_paths = [result for result in payload["results"] if result["code"] == "LONG_PATHS"]
+            self.assertEqual(returned, 0)
+            self.assertEqual(len(long_paths), 1)
+            self.assertEqual(long_paths[0]["status"], "WARN")
+            self.assertEqual(long_paths[0]["path"], str(input_root))
+            self.assertEqual(
+                long_paths[0]["metadata"]["deepest_source"], "configured asset input root"
+            )
+            self.assertIn(str(input_root), long_paths[0]["remediation"])
+
+    def test_products_scope_reports_the_configured_user_data_output_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "checkout"
+            root.mkdir()
+            user_data_root = Path(tmpdir) / ("package-output-" + "x" * 260)
+            output: list[str] = []
+            with (
+                mock.patch.object(nk_doctor, "check_data_directory"),
+                mock.patch.object(nk_doctor, "check_build_products"),
+                mock.patch.object(nk_doctor, "check_build_profile"),
+                mock.patch.object(nk_doctor_checks, "longest_tracked_relative_path", return_value=None),
+                mock.patch.object(nk_doctor_checks, "query_windows_long_paths_enabled", return_value=False),
+                mock.patch.object(nk_doctor_checks.platform, "system", return_value="Windows"),
+                mock.patch("builtins.print", side_effect=lambda value: output.append(value)),
+            ):
+                returned = nk_doctor.main([
+                    "--root", str(root), "--scope", "products", "--user-data-root",
+                    str(user_data_root), "--json",
+                ])
+
+            payload = json.loads(output[-1])
+            long_paths = [result for result in payload["results"] if result["code"] == "LONG_PATHS"]
+            self.assertEqual(returned, 0)
+            self.assertEqual(len(long_paths), 1)
+            self.assertEqual(long_paths[0]["status"], "WARN")
+            self.assertEqual(long_paths[0]["path"], str(user_data_root))
+            self.assertEqual(
+                long_paths[0]["metadata"]["deepest_source"], "per-user package output root"
             )
 
 

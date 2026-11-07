@@ -108,10 +108,11 @@ def _addiu_sp(imm: int) -> int:
 HST_SV_ONLY = (0x0010433C, 0x0006E9BC)
 HST_FASTPATHS = (0x0006EA1C, 0x00108630)
 HST_ABORT = (0x00000A1C,)
+# 0x000011B0, 0x0000260C, 0x0000FE3C, 0x00015EA0 and 0x000149A8 left this list when their
+# stubs were retired (#363): each now translates as written in both profiles.
 HST_CUSTOM_STUBS = (
-    0x000011B0, 0x0000260C, 0x0000FE3C, 0x0000F538, 0x000101C4, 0x00010738,
-    0x00013524, 0x00015EA0, 0x000143B0, 0x000468C8,
-    0x00011090, 0x000110DC, 0x000114A8, 0x000114C0, 0x000149A8,
+    0x0000F538, 0x000101C4, 0x00010738, 0x00013524, 0x000143B0,
+    0x00011090, 0x000110DC, 0x000114A8, 0x000114C0,
 )
 HST_GUEST_PATCHES = tuple(sorted(codegen.GUEST_PATCHES))
 HST_SIMPLE_STUB_ADDRS = tuple(sorted(HST_SIMPLE_STUBS))
@@ -314,7 +315,6 @@ class _CodegenRun:
 def _codegen_functions(words: dict[int, int], profile: str,
                        static_verify: bool = False) -> dict[str, str]:
     """Run codegen.main in process over `words` and return its emitted functions."""
-    sv_was = codegen.OPTIONS.static_verify
     with tempfile.TemporaryDirectory(prefix="nakagawa-profile-isolation-") as tmp:
         tmp_path = Path(tmp)
         elf_path = tmp_path / "specimen.elf"
@@ -333,8 +333,6 @@ def _codegen_functions(words: dict[int, int], profile: str,
             captured = sys.stdout.getvalue() + sys.stderr.getvalue()
         finally:
             sys.stdout, sys.stderr = orig_out, orig_err
-            # --static-verify flips a module global; never let it escape.
-            codegen.OPTIONS.static_verify = sv_was
         assert rc == 0, f"codegen failed profile={profile}: {captured}"
         texts = []
         if out_c.is_file():
@@ -344,6 +342,72 @@ def _codegen_functions(words: dict[int, int], profile: str,
     combined = "\n".join(texts)
     assert combined.strip(), f"empty codegen output for profile={profile}"
     return _split_functions(combined)
+
+
+class CodegenOptionsIsolationTests(unittest.TestCase):
+    """A codegen.main call owns its option object, even after another call."""
+
+    @staticmethod
+    def _generated_files(out_dir: Path, flags: tuple[str, ...], *, in_process: bool) -> dict[str, bytes]:
+        out_dir.mkdir(parents=True)
+        elf_path = out_dir / "specimen.elf"
+        add_s = (0x11 << 26) | (0x10 << 21) | (2 << 16) | (1 << 11) | (3 << 6)
+        words = {
+            0x1000: LUI_T0,
+            0x1004: ORI_T0,
+            0x1008: add_s,
+            0x100C: JR_RA,
+            0x1010: NOP,
+        }
+        _write_elf(elf_path, words, entry=0x1000)
+        out_c = out_dir / "out.c"
+        argv = ["codegen.py", str(elf_path), str(out_c), "--base=0", "--funcs-per-chunk=4000", *flags]
+        if in_process:
+            saved_out, saved_err = sys.stdout, sys.stderr
+            try:
+                sys.stdout, sys.stderr = StringIO(), StringIO()
+                status = codegen.main(argv)
+                detail = sys.stdout.getvalue() + sys.stderr.getvalue()
+            finally:
+                sys.stdout, sys.stderr = saved_out, saved_err
+            if status != 0:
+                raise AssertionError(f"in-process codegen failed: {detail}")
+        else:
+            result = subprocess.run(
+                [sys.executable, str(TOOLS / "codegen.py"), *argv[1:]],
+                cwd=ROOT, capture_output=True, text=True, check=False,
+            )
+            if result.returncode != 0:
+                raise AssertionError(
+                    f"separate-process codegen failed: {result.stdout}{result.stderr}")
+        return {
+            path.name: path.read_bytes()
+            for path in sorted(out_dir.glob("out*")) if path.is_file()
+        }
+
+    def test_two_in_process_main_calls_match_separate_processes_after_option_switch(self):
+        options = {
+            "nan-trap": ("--nan-trap",),
+            "static-verify": ("--static-verify",),
+        }
+        with tempfile.TemporaryDirectory(prefix="codegen-options-isolation-") as tmp:
+            root = Path(tmp)
+            in_process = {
+                name: self._generated_files(root / f"in-process-{name}", flags, in_process=True)
+                for name, flags in options.items()
+            }
+            separate = {
+                name: self._generated_files(root / f"separate-{name}", flags, in_process=False)
+                for name, flags in options.items()
+            }
+
+        self.assertIn(b"SR_NAN_TRAP_F", b"".join(in_process["nan-trap"].values()))
+        self.assertIn(b"sr_sv_check", b"".join(in_process["static-verify"].values()))
+        self.assertNotIn(b"SR_NAN_TRAP_F", b"".join(in_process["static-verify"].values()))
+        self.assertEqual(set(in_process["nan-trap"]), set(separate["nan-trap"]))
+        self.assertEqual(set(in_process["static-verify"]), set(separate["static-verify"]))
+        self.assertEqual(in_process["nan-trap"], separate["nan-trap"])
+        self.assertEqual(in_process["static-verify"], separate["static-verify"])
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +510,6 @@ class ProfileHstLegacyTests(unittest.TestCase):
             "ARRSHIFT_FASTPATH",
             "GUEST_ABORT",
             "_Exit(9)",
-            "custom stub: __register_frame_info bypass",
         )
         missing = [s for s in expected if s not in self.combined]
         self.assertEqual(missing, [], "profile=hst lost legacy HST emission")
@@ -508,33 +571,33 @@ class NonBodyCouplingTests(unittest.TestCase):
         return {base: LUI_T0, base + 4: ORI_T0}
 
     def test_sv_special_addresses_are_only_excluded_under_hst(self):
-        was, codegen.OPTIONS.static_verify = codegen.OPTIONS.static_verify, True
-        try:
-            for addr in sorted(codegen._SV_SPECIAL):
-                words = self._sv_words(addr)
-                elf = _FakeElf(words)
-                none_pts = codegen.sv_plan(elf, set(words), set(), hst_profile=False)
-                hst_pts = codegen.sv_plan(elf, set(words), set(), hst_profile=True)
-                self.assertTrue(
-                    none_pts,
-                    f"profile=none suppressed --static-verify at 0x{addr:08x} "
-                    f"solely because that address is in _SV_SPECIAL",
-                )
-                self.assertEqual(
-                    hst_pts, {},
-                    f"profile=hst no longer excludes 0x{addr:08x} from "
-                    f"--static-verify; that is a legacy behavior change",
-                )
-                control = addr + CONTROL_DELTA
-                ctl_words = self._sv_words(control)
-                ctl_pts = codegen.sv_plan(
-                    _FakeElf(ctl_words), set(ctl_words), set(), hst_profile=False)
-                self.assertEqual(
-                    {a - addr: v for a, v in none_pts.items()},
-                    {a - control: v for a, v in ctl_pts.items()},
-                )
-        finally:
-            codegen.OPTIONS.static_verify = was
+        options = codegen.CodegenOptions(static_verify=True)
+        for addr in sorted(codegen._SV_SPECIAL):
+            words = self._sv_words(addr)
+            elf = _FakeElf(words)
+            none_pts = codegen.sv_plan(elf, set(words), set(), hst_profile=False,
+                                       options=options)
+            hst_pts = codegen.sv_plan(elf, set(words), set(), hst_profile=True,
+                                      options=options)
+            self.assertTrue(
+                none_pts,
+                f"profile=none suppressed --static-verify at 0x{addr:08x} "
+                f"solely because that address is in _SV_SPECIAL",
+            )
+            self.assertEqual(
+                hst_pts, {},
+                f"profile=hst no longer excludes 0x{addr:08x} from "
+                f"--static-verify; that is a legacy behavior change",
+            )
+            control = addr + CONTROL_DELTA
+            ctl_words = self._sv_words(control)
+            ctl_pts = codegen.sv_plan(
+                _FakeElf(ctl_words), set(ctl_words), set(), hst_profile=False,
+                options=options)
+            self.assertEqual(
+                {a - addr: v for a, v in none_pts.items()},
+                {a - control: v for a, v in ctl_pts.items()},
+            )
 
 
 class _FakeElf:
@@ -556,8 +619,22 @@ class _FakeElf:
 ADDR_OPERANDS = frozenset({"addr", "a", "start"})
 
 #: Functions whose bodies decide what translated C is emitted.
-EMITTERS = frozenset({"effect", "normal_line", "emit_function", "main", "sv_plan",
-                      "import_stub_test"})
+EMITTERS = frozenset({
+    "effect", "normal_line", "emit_function", "main", "sv_plan",
+    # The steps emit_function and main were split into (#1531).
+    "_translate", "_dup_slot_skips", "_emit_hst_patch_site", "_emit_non_control_word", "_emit_eret",
+    "_emit_slot_exit", "_emit_unrelocated_jal", "_emit_jal", "_emit_jalr", "_emit_jr",
+    "_emit_unrelocated_j", "_emit_j", "_emit_conditional_branch", "_emit_control_transfer",
+    "_emit_continuation_blocks",
+    # ... and the steps split from main.
+    "_check_delay_slot_labels", "_command_line_parser", "_validated_options",
+    "_extra_images", "_refuse_offset0_pointers", "_cfg_report_and_gate",
+    "_refuse_unemitted_enhancement_sites", "_registrable_exec_spans", "_apply_options",
+    "_load_enhancement_package", "_symbol_names", "_registration_lines", "_write_chunks",
+    "_write_unit_fallbacks", "_remove_stale_chunks", "_print_summary",
+    # Added on main for miss seeds (#1848).
+    "import_stub_test",
+})
 
 #: Title-owned address tables, and how each one's profile gate is enforced.
 #: A membership test against one of these binds guest addresses to HST
@@ -568,7 +645,6 @@ ADDRESS_TABLES = {
     "_HST_INLINE_SITES": "hst_profile",
     "SIMPLE_STUBS": "empty-under-none",
     "HST_CUSTOM_STUBS": "hst_profile",
-    "HST_GAME_LOOP_ADDR": "hst_profile",
     "HST_MANUAL_CALLABLES": "catalog-early-return",
     "HST_RESUME_OWNERS": "catalog-early-return",
 }
@@ -596,7 +672,7 @@ IMAGE_DERIVED_TABLES = {
 #: excused every future site below 0x1000 -- ``GUEST_ABORT`` already lives at
 #: 0x00000a1c, well inside the range that threshold discarded.
 NON_ADDRESS_CONSTANTS = {
-    ("emit_function", "a", 31):
+    ("_emit_jr", "a", 31):
         "`a` is rebound to rs(w) for the jr/jalr form; 31 is register $ra",
 }
 
@@ -1264,14 +1340,10 @@ class NullPageGuardTests(unittest.TestCase):
         self.assertNotIn("sr_r32(", chunks)
 
     def test_a_body_reading_its_own_code_is_not_a_guest_data_access(self):
-        was = codegen.OPTIONS.null_page_guard
-        try:
-            codegen.OPTIONS.null_page_guard = True
-            guarded = codegen.emit_decoded_jump_target(0x100)
-            codegen.OPTIONS.null_page_guard = False
-            plain = codegen.emit_decoded_jump_target(0x100)
-        finally:
-            codegen.OPTIONS.null_page_guard = was
+        guarded = codegen.emit_decoded_jump_target(
+            0x100, options=codegen.CodegenOptions(null_page_guard=True))
+        plain = codegen.emit_decoded_jump_target(
+            0x100, options=codegen.CodegenOptions(null_page_guard=False))
         self.assertIn("sr_r32(", guarded)
         self.assertNotIn("MEM_R32(", guarded)
         self.assertIn("MEM_R32(", plain)

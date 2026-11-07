@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 the Nakagawa Recomp authors
 
-"""Stage a runnable player install outside the build tree, with a desktop shortcut.
+"""Stage a runnable player install outside the build tree, with desktop and Start-menu shortcuts.
 
 The install uses the release layout the player already searches
 (``docs/PREVIEW_RELEASE.md``)::
@@ -20,12 +20,30 @@ The install uses the release layout the player already searches
                                      console icon)
 
 Only a folder this tool created (it holds ``.nakagawa-install.json``) is ever
-replaced, so pointing ``--dest`` at an unrelated folder fails closed. The
-shortcut is a plain Windows ``.lnk`` written through ``WScript.Shell``; it
-starts the player with ``--ui=next`` by default, the way Explorer would start it.
-On Linux, ``--desktop-shortcut`` writes a per-user ``.desktop`` entry and a 256 px
-icon under ``$XDG_DATA_HOME`` (``~/.local/share`` when unset). The marker records
-the paths written outside ``--dest`` in ``integration``.
+replaced, so pointing ``--dest`` at an unrelated folder fails closed. A
+shortcut is a Windows ``.lnk`` written through ``WScript.Shell``; it starts the
+player with ``--ui=next`` by default, the way Explorer would start it, and
+carries the player's AppUserModelID (``APP_USER_MODEL_ID``, #2006), so a pinned
+shortcut, the launcher and every game it starts share one taskbar group.
+``--desktop-shortcut`` puts one on the Desktop and ``--start-menu-shortcut`` one
+in the user's Start menu (#2003); both may be given.
+On Linux, either flag writes a per-user ``.desktop`` entry (which the desktop
+shows in its application menu) and a 256 px icon under ``$XDG_DATA_HOME``
+(``~/.local/share`` when unset). The marker records the paths written outside
+``--dest`` in ``integration`` and keeps them across runs. Neither flag runs on its
+own: the portable ZIP writes no shortcut, so a Start-menu entry needs this tool,
+for example ``python tools/stage_install.py --dest <folder> --start-menu-shortcut``.
+
+``--uninstall --dest <folder>`` removes what this tool wrote and nothing else (#2003,
+#324): ``bin/``, ``source/``, the icon, the marker, any half-finished ``.old`` or
+``.staging-*`` copy, and the shortcuts and desktop entries the marker records. It never
+reads or deletes the per-user folders: the library, saves, settings, logs, fonts and
+cache live under ``%LOCALAPPDATA%\\Nakagawa`` (or ``~/.local/share/nakagawa-recomp``),
+not in the install. In portable mode (a ``bin/portable.txt``) the data folder
+``bin/data``, the portable marker and the install marker stay where they are, so the
+user's data is never removed with the program. A recorded path whose name this tool would
+not have written is skipped, so an edited marker cannot make it delete another file. A
+folder with no marker is refused. ``--dry-run`` lists what would go.
 
 The Windows install's ``bin/`` also carries ``runtime-manifest.json``
 (``tools/stage_runtime_dlls.py``): the size, SHA-256 and imports of the player
@@ -42,7 +60,7 @@ which the source export rewrites on every run) are refused.
 
 Usage::
 
-    python tools/stage_install.py --dest "<install folder>" --desktop-shortcut
+    python tools/stage_install.py --dest "<install folder>" --desktop-shortcut --start-menu-shortcut
     python tools/stage_install.py --portable-zip <out.zip> --zip-stage <staged folder>
     python tools/stage_install.py --check-assets <release folder, or file names>
 
@@ -65,6 +83,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from typing import NoReturn
 import zipfile
 import zlib
 
@@ -79,7 +98,12 @@ IS_WINDOWS = os.name == "nt"
 MARKER = ".nakagawa-install.json"
 SCHEMA_VERSION = 2
 SHORTCUT_NAME = "Nakagawa Recomp.lnk"
-DESKTOP_ENTRY_NAME = "nakagawa-recomp.desktop"
+#: The player's identity (#2006): NK_APP_USER_MODEL_ID and NK_APP_DESKTOP_ID in
+#: src/core/nk_launch.h, and their copies in src/rt/gpu_sdl3vk/sdl3vk.c for the game window.
+#: tools/test_stage_install.py keeps the four equal.
+APP_USER_MODEL_ID = "Nakagawa.Recomp"
+APP_DESKTOP_ID = "nakagawa-recomp"
+DESKTOP_ENTRY_NAME = f"{APP_DESKTOP_ID}.desktop"
 DESKTOP_ICON_NAME = "nakagawa-recomp.png"
 DEFAULT_ARGUMENTS = "--ui=next"
 
@@ -173,6 +197,9 @@ def stage_install(dest: Path, player: Path, *, repo: Path = ROOT,
         )
     _check_destination(dest)
     dest.mkdir(parents=True, exist_ok=True)
+    # Shortcuts an earlier staging wrote stay recorded: staging again replaces bin/ and
+    # source/, not the shortcuts outside dest.
+    integration = _recorded_integration(dest)
     stage = dest / f".staging-{os.getpid()}"
     if stage.exists():
         shutil.rmtree(stage)
@@ -209,7 +236,7 @@ def stage_install(dest: Path, player: Path, *, repo: Path = ROOT,
         "player": f"bin/{player.name}",
         "runtime_stage": runtime_stage,
         "runtime_files": sorted(staged),
-        "integration": [],
+        "integration": integration,
         "staged_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
     }
     _write_marker(dest, record)
@@ -220,11 +247,26 @@ def _write_marker(dest: Path, record: dict) -> None:
     (dest / MARKER).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
 
+def _recorded_integration(dest: Path) -> list[str]:
+    """The paths an earlier run recorded in ``dest``'s marker, or [] without a readable one."""
+    try:
+        record = json.loads((dest / MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    paths = record.get("integration") if isinstance(record, dict) else None
+    return [str(path) for path in paths] if isinstance(paths, list) else []
+
+
 def record_integration(dest: Path, paths) -> None:
-    """Record the paths a shortcut wrote outside ``dest`` in the install marker."""
+    """Add the paths a shortcut wrote outside ``dest`` to the install marker, keeping the
+    ones recorded before. ``--uninstall`` reads the list back and removes those files."""
     marker = dest.resolve() / MARKER
     record = json.loads(marker.read_text(encoding="utf-8"))
-    record["integration"] = [str(path) for path in paths]
+    kept = [str(path) for path in record.get("integration", [])]
+    for path in paths:
+        if str(path) not in kept:
+            kept.append(str(path))
+    record["integration"] = kept
     _write_marker(dest.resolve(), record)
 
 
@@ -259,6 +301,7 @@ def write_desktop_entry(dest: Path, arguments: str = DEFAULT_ARGUMENTS) -> list[
         f"TryExec={player}",
         f"Path={dest / 'bin'}",
         f"Icon={icon}",
+        f"StartupWMClass={APP_DESKTOP_ID}",
         "Terminal=false",
         "Categories=Game;",
         "",
@@ -270,38 +313,141 @@ def write_desktop_entry(dest: Path, arguments: str = DEFAULT_ARGUMENTS) -> list[
     return [entry, icon]
 
 
-def desktop_folder() -> Path:
-    """The signed-in user's Desktop folder, wherever Windows has redirected it."""
+def _special_folder(name: str, code: str) -> Path:
     result = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-         "[Environment]::GetFolderPath('Desktop')"],
+         f"[Environment]::GetFolderPath('{name}')"],
         capture_output=True, text=True, check=False)
     folder = result.stdout.strip()
     if result.returncode != 0 or not folder:
-        raise InstallError("INSTALL_DESKTOP_UNKNOWN: Windows did not report a Desktop folder")
+        raise InstallError(f"{code}: Windows did not report a {name} folder")
     return Path(folder)
 
 
+def desktop_folder() -> Path:
+    """The signed-in user's Desktop folder, wherever Windows has redirected it."""
+    return _special_folder("Desktop", "INSTALL_DESKTOP_UNKNOWN")
+
+
+def start_menu_folder() -> Path:
+    """The signed-in user's Start menu Programs folder, where a shortcut shows in Start."""
+    return _special_folder("Programs", "INSTALL_START_MENU_UNKNOWN")
+
+
+# WScript.Shell cannot set a shortcut's AppUserModelID, so the shortcut's property store
+# (System.AppUserModel.ID, PKEY {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3},5) is written through
+# SHGetPropertyStoreFromParsingName. PowerShell compiles this once per run (Add-Type).
+_APP_ID_CSHARP = r"""
+using System;
+using System.Runtime.InteropServices;
+public static class NkShortcutAppId {
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct PropertyKey { public Guid fmtid; public uint pid; }
+    [StructLayout(LayoutKind.Explicit, Size = 24)]
+    public struct PropVariant { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr p; }
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPropertyStore {
+        void GetCount(out uint count);
+        void GetAt(uint index, out PropertyKey key);
+        void GetValue(ref PropertyKey key, out PropVariant value);
+        void SetValue(ref PropertyKey key, ref PropVariant value);
+        void Commit();
+    }
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    static extern void SHGetPropertyStoreFromParsingName(string path, IntPtr bindContext,
+        int flags, ref Guid iid, out IPropertyStore store);
+    [DllImport("ole32.dll", PreserveSig = false)]
+    static extern void PropVariantClear(ref PropVariant value);
+    const ushort VT_LPWSTR = 31;
+    static PropertyKey AppIdKey() {
+        PropertyKey key;
+        key.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+        key.pid = 5;
+        return key;
+    }
+    static IPropertyStore Open(string path, int flags) {
+        Guid iid = typeof(IPropertyStore).GUID;
+        IPropertyStore store;
+        SHGetPropertyStoreFromParsingName(path, IntPtr.Zero, flags, ref iid, out store);
+        return store;
+    }
+    public static void Set(string path, string id) {
+        IPropertyStore store = Open(path, 2);  // GPS_READWRITE
+        try {
+            PropertyKey key = AppIdKey();
+            PropVariant value = new PropVariant();
+            value.vt = VT_LPWSTR;
+            value.p = Marshal.StringToCoTaskMemUni(id);
+            try { store.SetValue(ref key, ref value); store.Commit(); }
+            finally { Marshal.FreeCoTaskMem(value.p); }
+        } finally { Marshal.ReleaseComObject(store); }
+    }
+    public static string Get(string path) {
+        IPropertyStore store = Open(path, 0);  // GPS_DEFAULT
+        try {
+            PropertyKey key = AppIdKey();
+            PropVariant value;
+            store.GetValue(ref key, out value);
+            try { return value.vt == VT_LPWSTR ? Marshal.PtrToStringUni(value.p) : ""; }
+            finally { PropVariantClear(ref value); }
+        } finally { Marshal.ReleaseComObject(store); }
+    }
+}
+"""
+
 _SHORTCUT_SCRIPT = (
+    "$ErrorActionPreference = 'Stop'; "
     "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:NK_LNK); "
     "$s.TargetPath = $env:NK_TARGET; $s.Arguments = $env:NK_ARGS; "
     "$s.WorkingDirectory = $env:NK_WORKDIR; $s.IconLocation = $env:NK_ICON + ',0'; "
-    "$s.Description = 'Nakagawa Recomp'; $s.Save()"
+    "$s.Description = 'Nakagawa Recomp'; $s.Save(); "
+    "Add-Type -TypeDefinition $env:NK_APP_ID_CS; "
+    "[NkShortcutAppId]::Set($env:NK_LNK, $env:NK_APP_ID)"
+)
+
+_READ_APP_ID_SCRIPT = (
+    "$ErrorActionPreference = 'Stop'; "
+    "Add-Type -TypeDefinition $env:NK_APP_ID_CS; "
+    "[NkShortcutAppId]::Get($env:NK_LNK)"
 )
 
 
+def _shell_path(path: Path) -> str:
+    """A path as the Windows shell parses it. MSYS2's Python joins with '/', and
+    SHGetPropertyStoreFromParsingName refuses those (E_INVALIDARG)."""
+    return str(path).replace("/", "\\")
+
+
+def read_shortcut_app_id(shortcut: Path) -> str:
+    """The AppUserModelID a .lnk carries, or "" when it has none (Windows only)."""
+    if os.name != "nt":
+        raise InstallError("INSTALL_SHORTCUT_UNSUPPORTED: shortcuts are read on Windows only")
+    environment = {**os.environ, "NK_LNK": _shell_path(shortcut), "NK_APP_ID_CS": _APP_ID_CSHARP}
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _READ_APP_ID_SCRIPT],
+        capture_output=True, text=True, env=environment, check=False)
+    if result.returncode != 0:
+        raise InstallError(
+            f"INSTALL_SHORTCUT_UNREADABLE: {shortcut}: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
 def write_shortcut(shortcut: Path, dest: Path, arguments: str = DEFAULT_ARGUMENTS) -> None:
-    """Write a .lnk that starts bin/nakagawa_player.exe the way Explorer does."""
+    """Write a .lnk that starts bin/nakagawa_player.exe the way Explorer does, with the
+    player's AppUserModelID."""
     if os.name != "nt":
         raise InstallError("INSTALL_SHORTCUT_UNSUPPORTED: shortcuts are written on Windows only")
     dest = dest.resolve()
     environment = os.environ.copy()
     environment.update({
-        "NK_LNK": str(shortcut),
+        "NK_LNK": _shell_path(shortcut),
         "NK_TARGET": str(dest / "bin" / "nakagawa_player.exe"),
         "NK_ARGS": arguments,
         "NK_WORKDIR": str(dest / "bin"),
         "NK_ICON": str(dest / "nakagawa.ico"),
+        "NK_APP_ID": APP_USER_MODEL_ID,
+        "NK_APP_ID_CS": _APP_ID_CSHARP,
     })
     result = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", _SHORTCUT_SCRIPT],
@@ -552,6 +698,176 @@ def check_release_assets(names) -> list[str]:
     return problems
 
 
+#: What this tool writes directly under ``dest`` (besides the marker). ``--uninstall`` removes
+#: these and nothing else, so a file the user put beside them survives.
+OWNED_ENTRIES = ("bin", "source", "nakagawa.ico")
+#: The file names a recorded integration path may have: the ones this tool writes.
+INTEGRATION_NAMES = frozenset({SHORTCUT_NAME, DESKTOP_ENTRY_NAME, DESKTOP_ICON_NAME})
+#: In portable mode these stay in ``bin/`` (``NK_PORTABLE_MARKER`` and ``NK_PORTABLE_DATA_LEAF``
+#: in src/core/nk_portable.h): the marker the user created and their data folder.
+PORTABLE_MARKER = "portable.txt"
+PORTABLE_DATA_LEAF = "data"
+
+
+def _remove_path(path: Path) -> None:
+    """Delete a file, link or folder tree; a link is unlinked, never followed."""
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+    except OSError as exc:
+        raise InstallError(
+            f"UNINSTALL_IN_USE: {path} could not be removed ({exc}); close the player and run "
+            "the uninstall again") from exc
+
+
+#: The keys every marker this tool wrote has (``stage_install`` writes more; they are checked
+#: when present).
+MARKER_REQUIRED_KEYS = ("schema_version", "source_commit", "platform", "player")
+
+
+def _plain_name(value) -> bool:
+    """A single file name: no folder part, no drive, no ``.`` or ``..``."""
+    return (isinstance(value, str) and value not in ("", ".", "..")
+            and not any(char in value for char in '/\\:\0'))
+
+
+def _read_marker(dest: Path) -> dict:
+    """The marker of ``dest`` once it passes the checks that make it this tool's own.
+
+    A file named ``.nakagawa-install.json`` is not proof by itself: any folder can hold one.
+    It must be a JSON object with the keys ``stage_install`` writes, and every path it lists
+    must stay inside ``dest``. Anything else raises ``INSTALL_MARKER_INVALID`` and nothing
+    has been touched."""
+    marker = dest / MARKER
+
+    def refuse(why: str) -> NoReturn:
+        raise InstallError(
+            f"INSTALL_MARKER_INVALID: {marker} {why}, so this tool will not trust it; nothing "
+            "was removed. If it is not yours, delete the folder by hand")
+
+    try:
+        record = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        refuse(f"cannot be read as JSON ({exc})")
+    if not isinstance(record, dict):
+        refuse("is not a JSON object")
+    missing = [key for key in MARKER_REQUIRED_KEYS if key not in record]
+    if missing:
+        refuse(f"lacks {', '.join(missing)}")
+    version = record["schema_version"]
+    if not isinstance(version, int) or isinstance(version, bool) or not 1 <= version <= SCHEMA_VERSION:
+        refuse(f"has schema_version {version!r}, not 1 to {SCHEMA_VERSION}")
+    player = record["player"]
+    if not (isinstance(player, str) and player.startswith("bin/") and _plain_name(player[4:])):
+        refuse(f"lists the player {player!r}, not bin/<file name>")
+    files = record.get("runtime_files", [])
+    if not isinstance(files, list) or not all(_plain_name(name) for name in files):
+        refuse("lists a runtime file that is not a plain file name inside bin/")
+    integration = record.get("integration", [])
+    if not isinstance(integration, list) or not all(isinstance(path, str) for path in integration):
+        refuse("lists an integration entry that is not a path")
+    root = dest.resolve()
+    for relative in [player, *(f"bin/{name}" for name in files)]:
+        try:
+            (root / relative).resolve().relative_to(root)
+        except ValueError:
+            refuse(f"lists {relative}, which resolves outside {root}")
+    return record
+
+
+def _check_uninstall_destination(dest: Path) -> None:
+    """Refuse a folder no install of this tool would be in: a drive root, the home folder, or
+    a folder holding the home folder."""
+    home = Path.home().resolve()
+    if dest.parent == dest or dest == home or dest in home.parents:
+        raise InstallError(
+            f"UNINSTALL_DESTINATION_REFUSED: {dest} is a drive root or holds the home folder; "
+            "name the folder the install was staged into")
+
+
+def plan_uninstall(dest: Path) -> dict:
+    """What ``uninstall`` would remove and keep, without touching anything.
+
+    Raises ``INSTALL_DESTINATION_NOT_OWNED`` for a folder without this tool's marker and
+    ``INSTALL_MARKER_INVALID`` for one whose marker is not what ``stage_install`` writes."""
+    dest = dest.resolve()
+    _check_uninstall_destination(dest)
+    if not (dest / MARKER).is_file():
+        raise InstallError(
+            f"INSTALL_DESTINATION_NOT_OWNED: {dest} has no {MARKER}, so this tool did not "
+            "create it; remove an unpacked portable ZIP by deleting its folder")
+    record = _read_marker(dest)
+    remove: list[Path] = []
+    keep: list[Path] = []
+    portable = (dest / "bin" / PORTABLE_MARKER).is_file()
+    for name in OWNED_ENTRIES:
+        entry = dest / name
+        if not (entry.exists() or entry.is_symlink()):
+            continue
+        if name == "bin" and portable and entry.is_dir() and not entry.is_symlink():
+            # Portable mode: the program goes, the user's data and their marker stay.
+            for child in sorted(entry.iterdir()):
+                if child.name in (PORTABLE_DATA_LEAF, PORTABLE_MARKER):
+                    keep.append(child)
+                else:
+                    remove.append(child)
+        else:
+            remove.append(entry)
+    leftovers = {f"{name}.old" for name in OWNED_ENTRIES}
+    for child in sorted(dest.iterdir()):
+        if child.name == "bin.old" and child.is_dir() and not child.is_symlink():
+            # A crashed update can leave the previous bin/, with the user's portable data in it.
+            inner = sorted(child.iterdir())
+            if any(item.name in (PORTABLE_DATA_LEAF, PORTABLE_MARKER) for item in inner):
+                for item in inner:
+                    (keep if item.name in (PORTABLE_DATA_LEAF, PORTABLE_MARKER) else remove).append(item)
+            else:
+                remove.append(child)
+        elif child.name.startswith(".staging-") or child.name in leftovers:
+            remove.append(child)
+    integration: list[Path] = []
+    skipped: list[str] = []
+    for recorded in record.get("integration", []):
+        path = Path(recorded)
+        if (not path.is_absolute() or path.name not in INTEGRATION_NAMES
+                or path.is_dir() or path.is_symlink()):
+            skipped.append(recorded)
+        elif path.exists():
+            integration.append(path)
+    return {"dest": dest, "remove": remove, "keep": keep, "integration": integration,
+            "skipped_integration": skipped, "portable": portable}
+
+
+def uninstall(dest: Path, *, dry_run: bool = False) -> dict:
+    """Remove an install this tool made; the module docstring says exactly what goes."""
+    plan = plan_uninstall(dest)
+    dest = plan["dest"]
+    left_in_folder: list[str] = []
+    if not dry_run:
+        # The install first: if it is in use the shortcuts stay, still recorded, and a second
+        # run finishes. The marker goes last so a half-done uninstall can be run again.
+        for path in plan["remove"]:
+            _remove_path(path)
+        for path in plan["integration"]:
+            _remove_path(path)
+        if plan["keep"]:
+            # The user's portable data lives here, so the install marker stays with it.
+            left_in_folder = sorted(child.name for child in dest.iterdir())
+        else:
+            (dest / MARKER).unlink()
+            left_in_folder = sorted(child.name for child in dest.iterdir())
+            if not left_in_folder:
+                dest.rmdir()
+    return {"dest": str(dest), "dry_run": dry_run,
+            "removed": [str(path) for path in plan["remove"]],
+            "removed_integration": [str(path) for path in plan["integration"]],
+            "skipped_integration": plan["skipped_integration"],
+            "kept": [str(path) for path in plan["keep"]],
+            "left_in_folder": left_in_folder}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("--dest", type=Path,
@@ -575,11 +891,31 @@ def main(argv=None) -> int:
     parser.add_argument("--desktop-shortcut", action="store_true",
                         help=f"also write '{SHORTCUT_NAME}' on the Desktop (Windows), or a "
                              f"'{DESKTOP_ENTRY_NAME}' entry (Linux)")
+    parser.add_argument("--start-menu-shortcut", action="store_true",
+                        help=f"also write '{SHORTCUT_NAME}' in the Start menu (Windows); on Linux "
+                             f"the same '{DESKTOP_ENTRY_NAME}' entry, which is the application menu")
     parser.add_argument("--shortcut", type=Path,
                         help="write the Windows shortcut at this exact .lnk path instead")
     parser.add_argument("--arguments", default=DEFAULT_ARGUMENTS,
                         help=f"player arguments in the shortcut (default: {DEFAULT_ARGUMENTS})")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="remove the install in --dest and the shortcuts and desktop entries "
+                             "it recorded; never the per-user data folders")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="with --uninstall, list what would be removed and remove nothing")
     args = parser.parse_args(argv)
+    if args.dry_run and not args.uninstall:
+        parser.error("--dry-run goes with --uninstall")
+    if args.uninstall:
+        if args.dest is None or args.portable_zip is not None or args.zip_stage is not None:
+            parser.error("--uninstall needs --dest and cannot be combined with --portable-zip")
+        try:
+            summary = uninstall(args.dest, dry_run=args.dry_run)
+        except InstallError as exc:
+            print(f"stage_install: FAIL: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"event": "uninstall", **summary}, sort_keys=True))
+        return 0
     if args.check_assets is not None:
         paths = [Path(item) for item in args.check_assets]
         if len(paths) == 1 and paths[0].is_dir():
@@ -610,17 +946,25 @@ def main(argv=None) -> int:
         record = stage_install(args.dest, args.player, revision=args.revision)
         print(f"stage_install: staged {record['player']} and source {record['source_commit'][:12]} "
               f"into {args.dest.resolve()}")
-        if not IS_WINDOWS and args.desktop_shortcut:
-            entry, icon = write_desktop_entry(args.dest, args.arguments)
-            record_integration(args.dest, [entry, icon])
-            print(f"stage_install: desktop entry {entry}")
+        if not IS_WINDOWS:
+            if args.desktop_shortcut or args.start_menu_shortcut:
+                entry, icon = write_desktop_entry(args.dest, args.arguments)
+                record_integration(args.dest, [entry, icon])
+                print(f"stage_install: desktop entry {entry}")
         else:
-            shortcut = args.shortcut or (desktop_folder() / SHORTCUT_NAME
-                                         if args.desktop_shortcut else None)
-            if shortcut is not None:
+            shortcuts = []
+            if args.shortcut is not None:
+                shortcuts.append(args.shortcut)
+            else:
+                if args.desktop_shortcut:
+                    shortcuts.append(desktop_folder() / SHORTCUT_NAME)
+                if args.start_menu_shortcut:
+                    shortcuts.append(start_menu_folder() / SHORTCUT_NAME)
+            for shortcut in shortcuts:
                 write_shortcut(shortcut, args.dest, args.arguments)
-                record_integration(args.dest, [shortcut])
                 print(f"stage_install: shortcut {shortcut}")
+            if shortcuts:
+                record_integration(args.dest, shortcuts)
     except InstallError as exc:
         print(f"stage_install: FAIL: {exc}", file=sys.stderr)
         return 1

@@ -1,6 +1,6 @@
 # `tools/` — Host-side recompiler scripts
 
-These scripts require Python 3.15.x (3.14.x is also accepted). PowerShell entrypoints require PowerShell 7.4+ (`pwsh`); they
+These scripts require Python 3.15.x (3.14.x is also accepted). PowerShell entrypoints require PowerShell 7.6+ (`pwsh`); they
 run on the development host and are never executed by `hst.exe` at runtime. For HST, use the canonical `nk_manager.ps1` with `-GameName hst` and `-TitleManifest`; it supplies the required zero base/entry values and drives the Makefile's two-phase build.
 
 ## Pipeline (in order)
@@ -154,8 +154,10 @@ set, so a new subpackage cannot ship undiscoverable either:
 | `compat_overrides.py` | Semantic-debt manifest of every game-address-specific override in the runtime. |
 | `entry_frame_balance.py` | Stack-symbolic entry classification: callable boundary versus resume PC. |
 | `miss_seeds.py` | Merge the dispatch-miss files a run writes (`SR_MISS_SEEDS`) into a per-title seed list that `analyze.py` and `codegen.py` take as `--miss-seeds` (#1848). |
+| `code_capture.py` | Read the captures a run writes (`SR_CODE_CAPTURE`) of code the game installed at run time, and make each an overlay `codegen.py --code-capture` translates and the runtime binds by its code (#1933). |
 | `elf_bounds.py` | Shared, fail-closed ELF32 envelope checks for the offline PSP tools. |
 | `hle_manifest.py` | Generate the authoritative HLE registration manifest from the runtime HLE table, plus the semantic-status census artifact (`--census-json` / `--census-markdown`). |
+| `hle_focus_check.py` | Prove a focused HLE selftest executable links only the HLE files it names: compares the executable's code symbols with those of the excluded files' objects (#307). |
 | `hle_registry_meta.py` | Curated classification metadata for the HLE registration manifest. |
 | `gen_nidnames.py` | Generate the NID name header from the tracked NID corpus. |
 | `gen_ui_assets.py` | Embed the vendored Kenney prompt glyphs and UI sounds (`third_party/kenney/`) in `src/ui/nk_ui_assets.c`; `--check` reports a stale file. |
@@ -189,6 +191,7 @@ set, so a new subpackage cannot ship undiscoverable either:
 | `ge_transition_diff.py` | Offline diff for the narrow GE transition trace. |
 | `ge_replay_metrics.py` | Strict parsers for aggregate GE replay CPU-profile summaries. |
 | `ge_stat_windows.py` | Read the runtime's `SR_GESTAT` windows by the vblank that closed them, for gates such as the showcase smoke. |
+| `ge_draw_identity.py` | Draw-identity census from an `SR_GEWATCH` log: how many of each frame's transform PRIMs pair with the previous frame's, by exact key, order and the motion design's matcher. A frame the trace does not show whole is not counted, and cut or garbled trace lines are reported. |
 | `perf_summary_diff.py` | Compare two runtime performance summaries within a tolerance. |
 | `perf_attribution.py` | Present cadence (flips, re-presents, vblanks per new frame, implied fps) and cost shares for one `SR_PERF` run, or a diff of two runs. |
 | `pgf_writer.py` | Deterministic PGF writer for project-generated glyph bitmaps (a fixture generator, never an authenticity claim). |
@@ -249,6 +252,7 @@ set, so a new subpackage cannot ship undiscoverable either:
 | `library_build.py` | Build every disc in a folder into one player data folder, with a per-title manifest, keyed by disc ID and image hash and checked against your Redump list. |
 | `compat_table.py` | Turn a private library build into the public whole-library summary in `docs/COMPATIBILITY.md`: counts only, refusing any disc identifier. |
 | `library_sweep.py` | Run the production ISO bring-up route across a library and aggregate blockers. |
+| `library_regress.py` | Library regression net: record each title's ladder place (built, first frame, frames, how its launch ended) per run and commit, compare two runs for titles that went backwards, and run a timed boot-to-first-frame subset. |
 | `progress_tracker.py` | Run concrete gating checks against real outputs and emit a structured progress record. |
 
 ### Publication, provenance and supply chain
@@ -300,7 +304,7 @@ set, so a new subpackage cannot ship undiscoverable either:
 | Module | Purpose |
 | --- | --- |
 | `run_perf_benchmarks.py` | Run the public source-owned performance benchmark matrix. |
-| `compiler_compare.py` | Compare GCC against Clang on the public corpus, with the semantic veto ahead of every timing. |
+| `compiler_compare.py` | Compare compiler and linker choices on the synthetic corpus; the semantic veto runs before any timing. |
 | `generate_benchmarks.py` | Generate the public benchmark matrix. |
 | `capture_native_screenshots.py` | Capture showcase screenshots from a built native player. |
 | `make_showcase_animation.py` | Turn source-owned showcase framebuffer captures into deterministic animated GIFs. |
@@ -308,35 +312,54 @@ set, so a new subpackage cannot ship undiscoverable either:
 | `ppm2png.py` | Convert framebuffer snapshots written by the runtime into PNG. |
 | `pngcmp.py` | Compare two framebuffer PNGs written by `ppm2png.py`. |
 | `frame_capture_check.py` | Temporal acceptance check for present-truthful frame captures: frame accounting, black/stale-frame and frame-gap detection, and watchdog/present-gap classification. |
-| `padscript_from_log.py` | Convert recorded controller transitions into a replay pad script. |
+| `padscript_from_log.py` | Convert recorded controller transitions, buttons and left stick, into a replay pad script. |
 | `mem_debug.py` | Interactive memory and CPU-state query and mutation tool for bring-up. |
 
 #### Comparing host compilers (issue #317)
 
-`compiler_compare.py` answers "is Clang faster here?" only after it has shown that Clang is
-still correct here. Each requested compiler that resolves on `PATH` builds the same public
-source-owned corpus into its own build root, then runs a fixed veto chain — the cosimulation,
-the cosimulation negative corpus, the stale-code detector and the LLE COP0/exception
-selftest. The first failing gate stops the chain, and the compiler is reported `VETOED`
-naming that gate, with no build time, no binary size and no workload timing recorded for it.
-A compiler missing from `PATH` is reported `NOT_AVAILABLE`, never a pass. The per-compiler
-`run_perf_benchmarks.py` workload matrix runs only after the whole chain passes, into a build
-prefix of its own so no candidate reuses another candidate's objects.
+`compiler_compare.py` compares GCC and Clang on the public synthetic
+`production-smoke`, `production-smoke-gap`, `display-smoke` and
+`cosim-selftest` fixtures. Before any measurement, it runs production smoke,
+display smoke, cosimulation and its negative corpus, `native-core-tests`,
+`vfpu-interp-selftest`, `fp-convert-selftest`, `cpu-lle-selftest` and
+`stale-code-selftest`. The first failure is reported as `FAILED_VETO` with its
+output; that compiler/linker row has no timing or size. A compiler or linker missing from
+`PATH` is `NOT_AVAILABLE`.
+
+Each passing compiler/linker combination builds every measurement target into a fresh,
+isolated directory at least three times. The report records generated-C compile wall time,
+sampled peak compiler-process-tree working set, link wall time, object and executable sizes,
+and SHA-256 hashes of normalized fixture-run output. After those repeats, it also runs the
+existing #282 runtime workload matrix once for that compiler/linker pair, using explicit Make
+assignments, a separate `BUILD_DIR` prefix and a per-row `BUILD_ROOT` for targets that honor it.
+The platform-ladder workloads use fixed trees under `build/platform-ladder`, so they are not
+row-isolated; `run_perf_benchmarks.py` runs all workloads sequentially. The report retains each
+workload's status, elapsed time, output and SR_PERF summary path. A failed or skipped runtime matrix is
+`WORKLOAD_FAILED`, not `MEASURED`. GCC/Clang and the default/lld linker are separate report
+rows; the lld row adds `-fuse-ld=lld` to that run's `LDFLAGS`.
+The common runtime and generated-code flags explicitly disable fast-math and reassociation.
+The comparison omits Makefile's existing GCC-only `-ftrack-macro-expansion=0`
+so that its compile-time and memory results are not biased by that tracking flag; normal builds
+keep their current default.
+The harness does not acquire the machine RAM lock, change the default compiler, or apply a
+compiler-specific guest-semantics workaround. Callers running builds must wrap it in the
+machine's RAM lock.
 
 ```powershell
-python tools/compiler_compare.py                        # gcc then clang
-python tools/compiler_compare.py --compilers gcc        # one candidate
+python tools/compiler_compare.py --compilers gcc,clang --linkers default,lld --repeats 3
+python tools/compiler_compare.py --compilers clang --linkers default --repeats 3
 python tools/compiler_compare.py --output build/compiler-compare
 ```
 
-The report is `build/compiler-compare/compiler_compare.json`, and its shape is fixed by
-`validate_report()`, which refuses to accept a report that carries a timing under a vetoed or
-unavailable compiler. Exit status is `0` only when at least one compiler is `MEASURED` and
-none is `VETOED` or `WORKLOAD_FAILED`; a missing `make` is exit `2`. Each compiler's corpus build
-and report stay inside the `--output` root, but five workloads (`production-smoke-gap`, `cosim`
-and the three `platform-ladder-*` targets) build into their fixed repository trees under `build/`,
-which each compiler rewrites in turn. No title/ISO/ELF/PRX input is read, and running the
-harness changes no compiler default. Findings belong in issue #317.
+The harness writes `compiler_compare.json` and `compiler_compare.md` beneath
+`--output`. It stores every effective Make flag and the observed compiler argument
+vectors. The repeated-run hash summary identifies unstable output rather than collapsing it
+into a pass. Exit status is `0` when at least one row is measured and none is
+`NOT_AVAILABLE`, `FAILED_VETO`, `FAILED_MEASUREMENT` or `WORKLOAD_FAILED`; a requested compiler or linker
+that is unavailable has a named `NOT_AVAILABLE` row and returns `1`. A missing Make executable or invalid
+configuration is exit `2`. No game title, ISO, ELF or PRX input is read. Findings belong
+in issue #317. The measured result snapshot is in
+[`../docs/COMPILER_COMPARISON.md`](../docs/COMPILER_COMPARISON.md).
 
 ### Regression tests: code generation and the guest interpreter
 
@@ -391,6 +414,7 @@ harness changes no compiler default. Findings belong in issue #317.
 | `test_nidseq.py` | Fail-closed import-sequence extraction and oracle comparison. |
 | `test_gen_nidnames.py` | Tests for the corpus-driven NID name-table generator. |
 | `test_hle_manifest.py` | Tests for the fail-closed HLE registration manifest. |
+| `test_hle_focus_check.py` | Tests for the focused-HLE-link check, on small compiled objects. |
 | `test_stale_code_detect.py` | Opt-in stale translated-code tracking: detection and invalidation. |
 | `test_trace_window_probe.py` | Contract test for the address-windowed instruction trace. |
 | `test_callback_correctness.py` | Run the callback dispatcher for real instead of grepping its source. |
@@ -420,7 +444,7 @@ harness changes no compiler default. Findings belong in issue #317.
 | `test_savedata_security.py` | Production-path regressions for the bounded savedata security successor. |
 | `test_savedata_spans.py` | Guest span validation, preflight ordering and portable contained-delete seams. |
 | `test_sched_invariants.py` | Source-level guards for scheduler and thread-lifecycle invariants. |
-| `test_scripted_input.py` | Scripted controller input reaches the guest in guest time, including on a starved host. |
+| `test_scripted_input.py` | Scripted controller input reaches the guest in guest time, including on a starved host, and a held left stick lasts exactly its segment. |
 | `test_sdkver_c.py` | Retained-state regression for the compiled SDK-version contract. |
 | `test_tracediff_local_coverage.py` | Strict local trace coverage contract for `tracediff.py --strict-local` and the codegen/microtest gates. |
 | `test_vfs_c.py` | Host-neutral VFS path joining regression test. |
@@ -518,10 +542,11 @@ harness changes no compiler default. Findings belong in issue #317.
 | `test_compat_table.py` | The whole-library summary's tier rules, and that no title, disc ID, file name or hash reaches it. |
 | `test_disc_verify.py` | Whole-image hashing, the Redump datafile reader, the verified retail / modified / unknown tiers, and bring-up library records keyed by disc ID plus hash. |
 | `test_library_sweep.py` | Regressions for the private, resumable library compatibility sweep. |
+| `test_library_regress.py` | The library ladder, its snapshots, the run comparer with its commit ranges, the fast subset's rotation and budget, and title slots. |
 | `test_matrix_disposition.py` | Guard the evidence-matrix disposition field against becoming uninformative. |
 | `test_matrix_report.py` | Generate a conservative, machine-readable unittest evidence matrix. |
 | `test_parse_fuzz.py` | Seeded, deterministic mutation fuzzing over the public offline parsers. |
-| `test_padscript_from_log.py` | Controller log to pad script conversion: press widths and mask-change spans. |
+| `test_padscript_from_log.py` | Controller log to pad script conversion: press widths, mask-change spans and stick columns. |
 | `test_perf_summary_diff.py` | Performance summary comparison within a tolerance. |
 | `test_perf_attribution.py` | Synthetic regressions for the present-cadence and cost attribution report, including source pins on the emitter formats. |
 | `test_pgf_writer.py` | PGF writer determinism and public-reader round trip over generated glyph sets. |
@@ -588,7 +613,7 @@ harness changes no compiler default. Findings belong in issue #317.
 | `test_ci_required.py` | Required-CI status evaluation tests. |
 | `test_ci_test_shards.py` | CI test-shard planner: exactly-once coverage, separation and workflow wiring. |
 | `test_ci_trust_verdict.py` | Trusted CI verdict canaries: same-name jobs, deleted jobs, duplicate contexts, `exit 0` swaps, stale heads, forks and unapproved CI-tool edits. |
-| `test_compiler_compare.py` | The compiler comparison must not publish a timing its semantic veto did not earn. |
+| `test_compiler_compare.py` | Parse fake toolchain output, enforce the veto-before-measurement rule, and validate the JSON and Markdown reports. |
 | `test_contrib_check.py` | The contribution gate must route, and must never turn a skip into a pass. |
 | `test_contrib_refresh.py` | The contributor refresh equals the maintainer generator byte for byte on a synthetic repository, and every refusal fails closed. |
 | `test_discovery_contract.py` | Parallel test execution and discovery contract verification. |

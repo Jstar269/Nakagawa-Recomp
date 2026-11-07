@@ -33,8 +33,8 @@
  * the object when it cannot (ge_bounding_box_visible); the exact PSP visibility test is
  * unmeasured, so only a box wholly beyond one scissor edge is skipped.
  *
- * Not emulated: mip levels in the TEXLEVEL slope mode and per-level CLUTs (the TEXMODE
- * multi-CLUT bit), in this sampler and in the Vulkan backend alike (#1373).
+ * Not emulated: per-level CLUTs (the TEXMODE multi-CLUT bit), in this sampler and in the
+ * Vulkan backend alike (#1373). The TEXLEVEL slope mode is emulated (tex_detail16).
  */
 
 /*
@@ -176,6 +176,11 @@ enum {
 
 /* GeState now lives in ge_shared.h (shared with the optional GPU backend). */
 static GeState ge;
+/* CLUT loads seen, for ge_clut_load_extent. Process-lifetime counters, like PPSSPP's clutTotalBytes_ and
+ * clutMaxBytes_ (never reset), kept outside GeState so the capture format and its size check stay as
+ * they are: a capture replay or snapshot restore does not reset them, and a run that has seen no
+ * GE_LOADCLUT reads (0, 0), for which nk_texrepl_clut_identity hashes the entries the format can index. */
+static uint32_t s_clut_last_bytes, s_clut_max_bytes;
 /* Bumped whenever GE state may change (every list command, init, replay restore); state
  * derived from registers and cached between commands is keyed on it (light_consts). */
 static uint32_t s_ge_state_serial;
@@ -708,6 +713,28 @@ uint32_t ge_cpu_profile_validate(const GeCpuProfileStats *s, char *detail, size_
 uint32_t g_ge_stall_addr = 0;
 static uint32_t s_stack_pc[32], s_stack_offset[32];
 static int s_sp = 0;
+/* SIGNAL list control. A SIGNAL whose behaviour is JUMP, CALL or RET (0x10..0x16) and the END
+ * after it are a jump, call or return the GE driver makes in software: its interrupt handler
+ * saves the caller on the list's own stack, which holds as many entries as the numStacks the
+ * list was enqueued with (uofw src/kd/ge/ge.c _sceGeListInterrupt and _sceGeListEnQueue;
+ * behaviour only, no code copied). The callee starts with an empty hardware CALL stack, so
+ * s_hw_floor is the depth its RET cannot pop below; a SIGNAL RET restores the caller's list
+ * address, offset, base and hardware CALL depth. */
+#define GE_SIGNAL_STACK_CAPACITY 256u   /* sceGeListEnQueue refuses numStacks >= 256 */
+typedef struct {
+    uint32_t pc, offset, base;
+    int hw_sp, hw_floor;
+} GeSignalFrame;
+static GeSignalFrame s_sig_stack[GE_SIGNAL_STACK_CAPACITY];
+static uint32_t s_sig_sp = 0;
+static int s_hw_floor = 0;
+/* A SIGNAL whose END lies at or past the stall address waits for the resumed run: the driver's
+ * interrupt reads the SIGNAL and END words together once the END has run, so the pair holds
+ * across a stall (uofw _sceGeListInterrupt). */
+static int s_stalled_signal = 0;
+static uint32_t s_stalled_signal_op = 0;
+uint32_t g_ge_signal_stack_limit = 32u;
+static char s_ge_signal_fault[160];
 /* Result of the last BOUNDINGBOX, read by BJUMP (ge_bounding_box_visible). A list starts
  * with "visible", so a BJUMP before any BOUNDINGBOX falls through; the PSP's value there is
  * unmeasured. */
@@ -716,6 +743,34 @@ static int s_bbox_visible = 1;
 /* Optional GPU rasterizer hooks (ge_shared.h). NULL = pure software (the GDI build
  * never registers any; the SDL3 build registers them only under SR_GPU_GE=1). */
 static const GeGpuHooks *s_gpu = NULL;
+
+/* ---- widescreen Fill (#1881), the renderer layer ------------------------------------------
+ * Fill shows more of the 3D scene to the left and right of the PSP's picture. The authentic
+ * frame is never touched: each display framebuffer gets a host-only wing canvas, 512x272 like
+ * a target, that holds both wings. Guest x in [-D, 0) is canvas x [0, D), and guest x in
+ * [480, 480 + D) is canvas x [D, 2D). ge.c alone decides which primitives reach a canvas
+ * (wide_tri, wide_sprite) and moves them there by a whole-pixel shift. The software rasterizer
+ * draws them through its own code with the pixel and depth accessors redirected to the canvas
+ * (s_wing); a GPU backend draws them through its wing hooks. D = 0, the default, is off: no
+ * canvas exists and none of this runs. */
+typedef struct {
+    uint32_t fb;          /* display framebuffer, in ge_fb_addr's form; 0 = free */
+    int drawn;            /* a wing primitive was drawn into this canvas since it was cleared */
+    int stale;            /* shown since its last clear: the next draw into its framebuffer clears it */
+    uint32_t epoch;       /* changes whenever the canvas is cleared (ge_wide_epoch) */
+    int fmt;              /* framebuffer format of the last software wing draw */
+    uint32_t *color;      /* software canvas: raw framebuffer words, GE_WIDE_CANVAS_W per row */
+    uint16_t *depth;
+} GeWideSlot;
+#define GE_WIDE_SLOTS 2
+static GeWideSlot s_wide_slot[GE_WIDE_SLOTS];
+static int s_wide_d = 0;          /* wing width in guest pixels; 0 = Fill off */
+static int s_wide_last = 0;       /* slot of the display address noted last */
+static uint32_t s_wide_epochs = 0; /* clears so far, the source of GeWideSlot.epoch */
+static GeWideSlot *s_wing = NULL; /* the software canvas a wing pass draws into */
+static int s_wing_x0, s_wing_x1;  /* canvas columns that pass may write, inclusive */
+#define WING_PX(x, y) ((uint32_t)(y) * GE_WIDE_CANVAS_W + (uint32_t)(x))
+
 volatile int g_sr_vram_read_pending;
 
 void sr_vram_mark_renderer_pending(void) {
@@ -725,7 +780,32 @@ void sr_vram_mark_renderer_pending(void) {
 void ge_set_gpu_hooks(const GeGpuHooks *h) {
     s_gpu = h;
 }
+const GeGpuHooks *ge_get_gpu_hooks(void) { return s_gpu; }
+
+/* Draw observer (ge_shared.h, #2141): ge_replay --first-bad-draw replays a prefix of a
+ * captured frame's draws through each renderer. NULL, the default, costs one branch per list
+ * command and changes nothing. */
+static GeDrawObserver s_draw_observer;
+static void *s_draw_observer_ctx;
+static unsigned long s_draw_observer_index;
+
+void ge_set_draw_observer(GeDrawObserver fn, void *ctx) {
+    s_draw_observer = fn;
+    s_draw_observer_ctx = ctx;
+    s_draw_observer_index = 0;
+}
 GeState *ge_state_ptr(void) { return &ge; }
+
+void ge_clut_note_load(uint32_t bytes) {
+    if (!bytes) return;   /* as PPSSPP's LoadClut: a zero-length load changes nothing */
+    s_clut_last_bytes = bytes;
+    if (bytes > s_clut_max_bytes) s_clut_max_bytes = bytes;
+}
+
+void ge_clut_load_extent(uint32_t *last_bytes, uint32_t *max_bytes) {
+    if (last_bytes) *last_bytes = s_clut_last_bytes;
+    if (max_bytes) *max_bytes = s_clut_max_bytes;
+}
 uint32_t ge_state_serial(void) { return s_ge_state_serial; }
 void ge_state_note_external_write(void) { s_ge_state_serial++; }
 void sr_gpu_vram_dirty(uint32_t addr, uint32_t bytes) {
@@ -1038,11 +1118,28 @@ void ge_replay_restore(const GeState *state, const uint16_t *zbuf) {
     if (s_tr_enabled > 0) ge_transition_trace_sync_written();
     s_ge_inited = 1;
     s_sp = 0;
+    s_sig_sp = 0;
+    s_hw_floor = 0;
+    s_stalled_signal = 0;
+    s_stalled_signal_op = 0;
     s_bbox_visible = 1;
     g_ge_stall_addr = 0;
 }
 
 static void zbuf_fill_rect(int x0, int y0, int x1, int y1, uint16_t z) {
+    if (__builtin_expect(s_wing != NULL, 0)) {
+        /* A wing canvas: its own depth, clipped to the pass's columns and the scissor rows,
+         * as a GPU backend's scissor clips the same clear. */
+        if (x0 < s_wing_x0) x0 = s_wing_x0;
+        if (x1 > s_wing_x1) x1 = s_wing_x1;
+        if (y0 < ge.scis_y1) y0 = ge.scis_y1;
+        if (y1 > ge.scis_y2) y1 = ge.scis_y2;
+        if (y0 < 0) y0 = 0;
+        if (y1 > 271) y1 = 271;
+        for (int y = y0; y <= y1; y++)
+            for (int x = x0; x <= x1; x++) s_wing->depth[WING_PX(x, y)] = z;
+        return;
+    }
     if (!ge_zbuf_prepare_current()) return;
     uint32_t stride = zbuf_stride();
     if (x0 < 0) x0 = 0;
@@ -1060,10 +1157,15 @@ static void zbuf_fill_rect(int x0, int y0, int x1, int y1, uint16_t z) {
 
 static void stat_zfail(void);
 static int ztest_compare_px(int x, int y, uint16_t z) {
-    if (!ge_zbuf_prepare_current()) return 0;
-    uint32_t idx = (uint32_t)(y * (int)zbuf_stride() + x);
-    if (idx >= 272u * 512u) return 0;
-    uint16_t cur = s_zbuf[idx];
+    uint16_t cur;
+    if (__builtin_expect(s_wing != NULL, 0)) {
+        cur = s_wing->depth[WING_PX(x, y)];
+    } else {
+        if (!ge_zbuf_prepare_current()) return 0;
+        uint32_t idx = (uint32_t)(y * (int)zbuf_stride() + x);
+        if (idx >= 272u * 512u) return 0;
+        cur = s_zbuf[idx];
+    }
     int pass;
     switch (ge.ztest & 7) {
         case 0: pass = 0; break;
@@ -2148,14 +2250,14 @@ static float tex_footprint_rho2(float du_dx, float dv_dx, float du_dy, float dv_
  *                   through mode): one level above the slope at w = 1 (s-s1-w1), one more per
  *                   doubling of w (s-s1-w2 .. s-s1-w8), and the texture size plays no part
  *                   (s-s1-w2-4x). log16(1/3) = -27 gives w = 3 level 2 + 11/16 (s-s1-w3).
- * Those cells draw with one footprint, or one w, per window. Where w varies across a
- * triangle (a-quad-w1to4, s-s1-w1to8) the PSP holds one level of detail per 4-pixel span of
- * a row, at a point that depends on the triangle, and the per-fragment value here differs
- * from it; that rule is not modelled. */
-static int tex_detail16(float rho2, float q) {
+ * `auto16` is the automatic mode's value before the bias; the caller computes it, since a
+ * triangle's differs from a sprite's or a line's (raster_tri_lod_span).
+ * Where w varies across a triangle (a-quad-w1to4, s-s1-w1to8) a triangle's fragment takes q,
+ * in both modes, from its span's reference pixel (raster_tri_lod_span). */
+static int tex_detail16(int auto16, float q) {
     int bias16 = (int)(ge.tex_lod_bias * 16.0f);
     switch (ge.tex_level_mode) {
-    case 0u: return ge_lod_log16(sqrtf(rho2)) + bias16;
+    case 0u: return auto16 + bias16;
     case 2u: return 16 + ge_lod_log16(ge.tex_lod_slope) - ge_lod_log16(q) + bias16;
     default: return bias16;
     }
@@ -2520,6 +2622,11 @@ static void ge_fb_store(uint32_t addr, int is32, uint32_t value) {
 }
 
 static void read_fb_px(int x, int y, int *r, int *g, int *b, int *a) {
+    if (__builtin_expect(s_wing != NULL, 0)) {
+        unpack_color(s_wing->color[WING_PX(x, y)], ge.fbfmt & 3, r, g, b, a);
+        if ((ge.fbfmt & 3) == 0) *a = 0;
+        return;
+    }
     uint32_t stride = ge.fbw ? ge.fbw : 512;
     uint32_t off = (uint32_t)(y*(int)stride + x);
     if ((ge.fbfmt & 3) == 3) unpack_color(ge_fb_load(ge_fb_addr() + off*4, 1), 3, r,g,b,a);
@@ -2567,11 +2674,17 @@ static int blend_chan(int s, int d, int sf, int df, int eq) {
 }
 
 static int pixel_in_bounds(int x, int y) {
+    /* A wing pass replaces the screen's columns and the scissor's (which spans the screen:
+     * wide_target) with the pass's canvas columns; the scissor's rows still apply. */
+    if (__builtin_expect(s_wing != NULL, 0))
+        return x >= s_wing_x0 && x <= s_wing_x1 && y >= 0 && y < 272 &&
+               y >= ge.scis_y1 && y <= ge.scis_y2;
     return x >= 0 && x < 480 && y >= 0 && y < 272 &&
            x >= ge.scis_x1 && x <= ge.scis_x2 && y >= ge.scis_y1 && y <= ge.scis_y2;
 }
 
 static uint32_t read_fb_raw(int x, int y) {
+    if (__builtin_expect(s_wing != NULL, 0)) return s_wing->color[WING_PX(x, y)];
     uint32_t stride = ge.fbw ? ge.fbw : 512;
     uint32_t off = (uint32_t)(y * (int)stride + x);
     return (ge.fbfmt & 3) == 3 ? ge_fb_load(ge_fb_addr() + off * 4, 1)
@@ -2579,6 +2692,7 @@ static uint32_t read_fb_raw(int x, int y) {
 }
 
 static void write_fb_raw(int x, int y, uint32_t value) {
+    if (__builtin_expect(s_wing != NULL, 0)) { s_wing->color[WING_PX(x, y)] = value; return; }
     uint32_t stride = ge.fbw ? ge.fbw : 512;
     uint32_t off = (uint32_t)(y * (int)stride + x);
     if ((ge.fbfmt & 3) == 3) ge_fb_store(ge_fb_addr() + off * 4, 1, value);
@@ -2649,8 +2763,7 @@ static void write_stencil_px(int x, int y, int stencil) {
 }
 
 static void compose_px_rgba(int x, int y, int r, int g, int b, int src_a, int stencil) {
-    if (x<0||x>=480||y<0||y>=272) return;
-    if (x<ge.scis_x1||x>ge.scis_x2||y<ge.scis_y1||y>ge.scis_y2) return;
+    if (!pixel_in_bounds(x,y)) return;
     if (s_stat_on > 0 && s_in3d && !ge.clear && s_pxpass < 6) {
         s_pxpass++;
         fprintf(stderr, "PXPASS f=%" PRIu32 " xy=(%d,%d) rgba=(%d,%d,%d,%d) fbp=0x%08" PRIx32 " blend=%d/%06" PRIx32 "\n",
@@ -2697,6 +2810,7 @@ static void compose_px_rgba(int x, int y, int r, int g, int b, int src_a, int st
     stencil=(int)((rgba>>24)&0xFF);
     uint32_t c=pack_fb(r,g,b,stencil), mask=fb_write_mask_native();
     write_fb_raw(x,y,(c&~mask)|(oldraw&mask));
+    if (s_wing) return;   /* host-only: the guest's pixel and list counters stay its own */
     g_ge_pixels++;
     if (s_in3d) s_stat.px3d++; else s_stat.px2d++;
     if (s_stat_on > 0) {
@@ -2731,8 +2845,11 @@ static void put_px_rgba_tested(int x, int y, uint16_t pz, int use_z,
         return;
     }
     if (use_z && !ge.zwrite_disable) {
-        uint32_t zi=(uint32_t)(y*(int)zbuf_stride()+x);
-        if (zi<272u*512u) { s_zbuf[zi]=pz; ge_zbuf_note_write(); }
+        if (__builtin_expect(s_wing != NULL, 0)) s_wing->depth[WING_PX(x, y)] = pz;
+        else {
+            uint32_t zi=(uint32_t)(y*(int)zbuf_stride()+x);
+            if (zi<272u*512u) { s_zbuf[zi]=pz; ge_zbuf_note_write(); }
+        }
     }
     if (ge.stencil_enable)
         stencil=apply_stencil_op((int)((ge.stencil_op>>16)&7),stencil);
@@ -2818,10 +2935,11 @@ static int color_test(int r, int g, int b) {
 }
 
 /* Compute final pixel colour from interpolated texcoord+colour+fog.
- * `rho2` is tex_footprint_rho2() of the texel coordinate (0 for a point), `q` the fragment's
- * interpolated 1/w (1 in through mode).
+ * `rho2` is tex_footprint_rho2() of the texel coordinate (0 for a point), `auto16` the
+ * automatic level of detail before the bias (tex_detail16), `q` the 1/w the level of detail
+ * reads (1 in through mode).
  * `fog` is fixed-point 0..256 (256 = no fog). Returns 0 if the alpha test rejects. */
-static int shade(float u, float fv, float rho2, float q, int fog,
+static int shade(float u, float fv, float rho2, int auto16, float q, int fog,
                  int vr, int vg, int vb, int va, int *or_, int *og, int *ob, int *oa) {
     int r, g, b, a;
     int dbg_ta = -1;
@@ -2837,7 +2955,7 @@ static int shade(float u, float fv, float rho2, float q, int fog,
         uint32_t level = 0u;
         int frac = 0, minifying = rho2 > 1.0f;
         if (ge_tex_mip_active(&ge)) {
-            int detail16 = tex_detail16(rho2, q);
+            int detail16 = tex_detail16(auto16, q);
             ge_tex_level_pick(detail16, ge.tex_filter, ge.tex_max_level, &level, &frac);
             minifying = detail16 > 0;
         }
@@ -3254,15 +3372,18 @@ static void ge_time_transfer(uint32_t src, uint64_t bytes) {
     s_ge_run_clk += (edram ? GE_T_XFER_EDRAM_CLK : GE_T_XFER_RAM_CLK) * (double)bytes;
 }
 
+/* One triangle into the current target, or, during a wing pass (s_wing), into that wing
+ * canvas: a host-only draw, so it charges no GE time and leaves guest depth alone. */
 static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
     if (vtx_nonfinite(A, B, C)) return;
-    if (s_ge_timing_model) ge_time_tri(A, B, C);   /* before the GPU hook: both backends charge alike */
-    if ((ge.ztest_enable || (ge.clear && (ge.clear_mode & 0x400u))) &&
+    const int wing = s_wing != NULL;
+    if (s_ge_timing_model && !wing) ge_time_tri(A, B, C);   /* before the GPU hook: both backends charge alike */
+    if (!wing && (ge.ztest_enable || (ge.clear && (ge.clear_mode & 0x400u))) &&
         !ge_zbuf_prepare_current()) return;
     /* GPU capture seam: a registered backend takes the triangle (and reproduces culling,
      * depth, shading, blending on the GPU); if it declines it has already flushed, so the
      * software path below stays correctly ordered against prior GPU work. */
-    if (s_gpu && s_gpu->tri) {
+    if (s_gpu && s_gpu->tri && !wing) {
         uint64_t profile_started = ge_cpu_profile_begin();
         int handled = s_gpu->tri(A, B, C, persp);
         ge_cpu_profile_end(GE_CPU_GPU_HOOK, profile_started);
@@ -3290,6 +3411,7 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
     int miny=(int)floorf(fminf(A->y,fminf(B->y,C->y))), maxy=(int)ceilf(fmaxf(A->y,fmaxf(B->y,C->y)));
     int cx1 = ge.scis_x1 > 0 ? ge.scis_x1 : 0,   cy1 = ge.scis_y1 > 0 ? ge.scis_y1 : 0;
     int cx2 = ge.scis_x2 < 479 ? ge.scis_x2 : 479, cy2 = ge.scis_y2 < 271 ? ge.scis_y2 : 271;
+    if (wing) { cx1 = s_wing_x0; cx2 = s_wing_x1; }
     if (minx < cx1) minx = cx1;
     if (maxx > cx2) maxx = cx2;
     if (miny < cy1) miny = cy1;
@@ -3341,6 +3463,24 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
     long long bias0 = (dy0 < 0 || (dy0 == 0 && dx0 > 0)) ? 0 : -1;
     long long bias1 = (dy1 < 0 || (dy1 == 0 && dx1 > 0)) ? 0 : -1;
     long long bias2 = (dy2 < 0 || (dy2 == 0 && dx2 > 0)) ? 0 : -1;
+    /* raster_tri_lod_span: the level of detail of a triangle (#1373), measured on a PSP-3000
+     * (PSP-GE-MIP-001: a-quad-w1to4, s-s1-w1to8 and the varying-w confirmation cells; the
+     * largest of all four components, not u along x and v along y only: a-quad-v16-w1to8,
+     * a-quad-v8-w1to8; two separate logarithms: a-quad-u48-w1to4). The GE
+     * holds one value per span of 4 pixels of a row (x & ~3) and triangle, read at the span's
+     * reference pixel: its second pixel, or its first covered pixel when that lies further
+     * right. The automatic mode is log16(rho) - log16(q), two quantised logarithms like the
+     * slope mode's, with rho the largest |screen gradient| of u * q and v * q (the planes the
+     * triangle interpolates, in level-0 texels) and q the 1/w at the reference pixel; the
+     * slope mode reads that q too. A per-fragment, perspective-correct footprint does not
+     * match those two cells. */
+    int lod_rho16 = 0;
+    if (textured) {
+        float su_dx = w0_dx * iu_ac + w1_dx * iu_bc, su_dy = w0_dy * iu_ac + w1_dy * iu_bc;
+        float sv_dx = w0_dx * iv_ac + w1_dx * iv_bc, sv_dy = w0_dy * iv_ac + w1_dy * iv_bc;
+        lod_rho16 = ge_lod_log16(fmaxf(fmaxf(fabsf(su_dx), fabsf(su_dy)),
+                                       fmaxf(fabsf(sv_dx), fabsf(sv_dy))));
+    }
     long long px0 = (long long)minx*16 + 8, py0 = (long long)miny*16 + 8;
     long long e0r = dx0*(py0-ay)  - dy0*(px0-ax);
     long long e1r = dx1*(py0-by)  - dy1*(px0-bx);
@@ -3348,8 +3488,13 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
 
     for (int y=miny; y<=maxy; y++, e0r+=dx0*16, e1r+=dx1*16, e2r+=dx2*16) {
         long long e0=e0r, e1=e1r, e2=e2r;
+        int span_x = -1, span_ref = 0;   /* raster_tri_lod_span, per row */
         for (int x=minx; x<=maxx; x++, e0-=dy0*16, e1-=dy1*16, e2-=dy2*16) {
             if ((e0+bias0) < 0 || (e1+bias1) < 0 || (e2+bias2) < 0) continue;
+            if ((x & ~3) != span_x) {
+                span_x = x & ~3;
+                span_ref = x > span_x + 1 ? x : span_x + 1;
+            }
             float w0f = (float)e1*inv, w1f = (float)e2*inv;
             AT_PIX(irw, rw); AT_PIX(iz, z); AT_PIX(ifog, fog);
             if (!zrange_ok(iz, persp)) { if (s_stat_on > 0) s_stat.zrange++; continue; }
@@ -3360,7 +3505,8 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
             if (ge.clear) {
                 if (ge.clear_mode & 0x400) {
                     uint32_t zi = (uint32_t)(y * (int)zbuf_stride() + x);
-                    if (zi < 272u*512u) {
+                    if (wing) s_wing->depth[WING_PX(x, y)] = clamp_z(iz);
+                    else if (zi < 272u*512u) {
                         s_zbuf[zi] = clamp_z(iz);
                         ge_zbuf_note_write();
                     }
@@ -3377,8 +3523,13 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
             }
 
             float u = 0, fv = 0;
-            float rho2 = 0.0f;
+            float rho2 = 0.0f, lod_q = irw;
+            int auto16 = 0;
             if (textured) {
+                long long d = (long long)(span_ref - x);
+                float rw0 = (float)(e1 - dy1 * 16 * d) * inv, rw1 = (float)(e2 - dy2 * 16 * d) * inv;
+                lod_q = VC->rw + rw0 * irw_ac + rw1 * irw_bc;
+                auto16 = lod_rho16 - ge_lod_log16(lod_q);
                 AT_PIX(iu, u); AT_PIX(iv, v);
                 float iu_dx = w0_dx * iu_ac + w1_dx * iu_bc;
                 float iv_dx = w0_dx * iv_ac + w1_dx * iv_bc;
@@ -3405,7 +3556,7 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
             int fog = use_fog ? (int)(clampf01(ifog) * 256.0f) : 256;
 
             int sr,sg,sb,sa;
-            if (!shade(u,fv,rho2,irw,fog,r,g,b,a,&sr,&sg,&sb,&sa)) continue;
+            if (!shade(u,fv,rho2,auto16,lod_q,fog,r,g,b,a,&sr,&sg,&sb,&sa)) continue;
 
             /* SR_PIXWHO=x,y: log every triangle that writes the chosen pixel — identifies
              * which draw owns a misrendered region without guessing from geometry. */
@@ -3446,6 +3597,19 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
     }
 #undef AT_SETUP
 #undef AT_PIX
+}
+
+static void wide_fresh(void);
+static void wide_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp);
+
+static void raster_tri_and_wings(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
+    if (__builtin_expect(s_wide_d != 0, 0)) {
+        wide_fresh();
+        raster_tri(A, B, C, persp);
+        wide_tri(A, B, C, persp);
+        return;
+    }
+    raster_tri(A, B, C, persp);
 }
 
 /* Line rasterizer (DDA), used for prim types 1/2 in both modes. */
@@ -3508,7 +3672,7 @@ static void draw_line_vtx(const Vtx *A, const Vtx *B, int persp) {
         if (!zrange_ok(lz, persp)) { if (s_stat_on > 0) s_stat.zrange++; continue; }
         int fog = use_fog ? (int)(clampf01(A->fog+(B->fog-A->fog)*t)*256.0f) : 256;
         int sr,sg,sb,sa;
-        if (!shade(u,fv,rho2,lq,fog,r,g,b,a,&sr,&sg,&sb,&sa)) continue;
+        if (!shade(u,fv,rho2,ge_lod_log16(sqrtf(rho2)),lq,fog,r,g,b,a,&sr,&sg,&sb,&sa)) continue;
         put_px_rgba_tested(x,y,clamp_z(lz),use_z,sr,sg,sb,sa);
     }
 }
@@ -3533,7 +3697,7 @@ static void draw_point_vtx(const Vtx *A, int persp) {
     int fog = (persp && ge.fog_enable && !ge.clear) ? (int)(clampf01(A->fog)*256.0f) : 256;
     s_in3d = persp;
     int sr,sg,sb,sa;
-    if (!shade(u,fv,0.0f,persp ? A->rw : 1.0f,fog,A->r,A->g,A->b,A->a,&sr,&sg,&sb,&sa)) return;
+    if (!shade(u,fv,0.0f,ge_lod_log16(0.0f),persp ? A->rw : 1.0f,fog,A->r,A->g,A->b,A->a,&sr,&sg,&sb,&sa)) return;
     int use_z = persp ? ge.ztest_enable : thru_ztest();
     put_px_rgba_tested((int)A->x,(int)A->y,clamp_z(A->z),use_z,sr,sg,sb,sa);
 }
@@ -3614,6 +3778,277 @@ static const LightConsts *light_consts(void) {
     return lc;
 }
 
+/* ge_powf: the specular and powered-diffuse power, written once in the subset of C and GLSL
+ * the two share (the blocks between the BEGIN and END markers), so the CPU T&L here and the
+ * GPU T&L (shaders/psp_tnl.vert) compute the same bits (#318). These definitions give C the GLSL
+ * names the shared text uses; the tables are the same numbers in each language's syntax. */
+#define uint uint32_t
+#define uvec2 GePowV2
+#define GE_POW_FN static inline
+typedef struct { uint32_t x, y; } GePowV2;
+static inline GePowV2 ge_v2(uint32_t h, uint32_t l) { GePowV2 v; v.x = h; v.y = l; return v; }
+static inline uint32_t floatBitsToUint(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+static inline float uintBitsToFloat(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+static inline int findMSB(uint32_t v) { return v ? 31 - __builtin_clz(v) : -1; }
+static inline int ge_i(uint32_t v) { return (int)v; }
+static inline uint32_t ge_u(int v) { return (uint32_t)v; }
+static inline uint32_t ge_pow_mulhi(uint32_t a, uint32_t b) { return (uint32_t)(((uint64_t)a * b) >> 32); }
+static const uint32_t GE_POW_R[92] = {
+    0xB60B60B7u, 0xB40B40B5u, 0xB21642C9u, 0xB02C0B03u, 0xAE4C415Du, 0xAC769185u,
+    0xAAAAAAABu, 0xA8E83F58u, 0xA72F053Au, 0xA57EB503u, 0xA3D70A3Eu, 0xA237C32Cu,
+    0xA0A0A0A1u, 0x9F1165E8u, 0x9D89D89Eu, 0x9C09C09Du, 0x9A90E7DAu, 0x991F1A52u,
+    0x97B425EEu, 0x964FDA6Du, 0x94F20950u, 0x939A85C5u, 0x92492493u, 0x90FDBC0Au,
+    0x8FB823EFu, 0x8E78356Eu, 0x8D3DCB09u, 0x8C08C08Du, 0x8AD8F2FCu, 0x89AE408Au,
+    0x88888889u, 0x8767AB60u, 0x864B8A7Eu, 0x85340854u, 0x84210843u, 0x83126E98u,
+    0x82082083u, 0x81020409u, 0x80000000u, 0x7F01FC08u, 0x7E07E07Fu, 0x7D11967Au,
+    0x7C1F07C2u, 0x7B301ECDu, 0x7A44C6B0u, 0x795CEB25u, 0x78787879u, 0x77975B90u,
+    0x76B981DBu, 0x75DED953u, 0x75075076u, 0x7432D63Eu, 0x73615A25u, 0x7292CC16u,
+    0x71C71C72u, 0x70FE3C08u, 0x70381C0Fu, 0x6F74AE27u, 0x6EB3E454u, 0x6DF5B0F8u,
+    0x6D3A06D4u, 0x6C80D902u, 0x6BCA1AF3u, 0x6B15C06Cu, 0x6A63BD82u, 0x69B4069Cu,
+    0x6906906Au, 0x685B4FE6u, 0x67B23A55u, 0x670B453Cu, 0x66666667u, 0x65C393E1u,
+    0x6522C3F4u, 0x6483ED28u, 0x63E7063Fu, 0x634C0635u, 0x62B2E43Eu, 0x621B97C3u,
+    0x61861862u, 0x60F25DEBu, 0x60606061u, 0x5FD017F5u, 0x5F417D06u, 0x5EB48824u,
+    0x5E293206u, 0x5D9F7391u, 0x5D1745D2u, 0x5C90A1FEu, 0x5C0B8171u, 0x5B87DDAEu,
+    0x5B05B05Cu, 0x5A84F346u
+};
+static const uint32_t GE_POW_TH[92] = {
+    0xBEF50AD0u, 0xC0FF6A2Du, 0xC3041402u, 0xC50327EAu, 0xC6FCC479u, 0xC8F1074Fu,
+    0xCAE00D1Cu, 0xCCC9F1A9u, 0xCEAECFE9u, 0xD08EC1F9u, 0xD269E12Eu, 0xD440461Bu,
+    0xD6120899u, 0xD7DF3FCFu, 0xD9A80238u, 0xDB6C65A8u, 0xDD2C7F58u, 0xDEE863E4u,
+    0xE0A02755u, 0xE253DD2Au, 0xE4039856u, 0xE5AF6B49u, 0xE75767F4u, 0xE8FB9FCDu,
+    0xEA9C23D4u, 0xEC390499u, 0xEDD2523Du, 0xEF681C71u, 0xF0FA728Bu, 0xF2896372u,
+    0xF414FDB3u, 0xF59D4F7Fu, 0xF72266ACu, 0xF8A450B7u, 0xFA231ACCu, 0xFB9ED1C6u,
+    0xFD17822Du, 0xFE8D3844u, 0x00000000u, 0x016FE50Bu, 0x02DCF2CFu, 0x04473474u,
+    0x05AEB4DDu, 0x07137EACu, 0x08759C4Fu, 0x09D517EDu, 0x0B31FB7Cu, 0x0C8C50B6u,
+    0x0DE42120u, 0x0F397608u, 0x108C588Bu, 0x11DCD196u, 0x132AE9E0u, 0x1476A9F8u,
+    0x15C01A39u, 0x170742D3u, 0x184C2BCEu, 0x198EDD06u, 0x1ACF5E2Cu, 0x1C0DB6CCu,
+    0x1D49EE4Bu, 0x1E840BE6u, 0x1FBC16B8u, 0x20F215B5u, 0x22260FB5u, 0x23580B63u,
+    0x24880F54u, 0x25B621F8u, 0x26E2499Bu, 0x280C8C75u, 0x2934F096u, 0x2A5B7BF7u,
+    0x2B803472u, 0x2CA31FC7u, 0x2DC4439Au, 0x2EE3A574u, 0x30014AC5u, 0x311D38E5u,
+    0x32377511u, 0x33500471u, 0x3466EC13u, 0x357C30F1u, 0x368FD7EEu, 0x37A1E5D2u,
+    0x38B25F5Au, 0x39C14924u, 0x3ACEA7BFu, 0x3BDA7FA6u, 0x3CE4D542u, 0x3DEDACE4u,
+    0x3EF50ACFu, 0x3FFAF333u
+};
+static const uint32_t GE_POW_TL[92] = {
+    0x9DE8DE1Du, 0x635E9463u, 0xABCB01ECu, 0x4537E136u, 0xE99B246Eu, 0x960D1402u,
+    0xA196263Bu, 0xD48889C9u, 0xEA7B4B22u, 0xEB5D97B6u, 0x92D93835u, 0x192F2E6Du,
+    0xF4CFBBEEu, 0x7A3CA98Bu, 0x93A382D6u, 0xB4F8820Au, 0x73E87040u, 0x0A115F73u,
+    0xCDAD2B4Du, 0xECC6E3F3u, 0xEB0BDB3Cu, 0x7E1B3CD8u, 0x596E03A6u, 0x06868946u,
+    0xC2EEB845u, 0xC147BD63u, 0x1B1636B0u, 0xD3ED2660u, 0x1316EFD4u, 0x372745B8u,
+    0xF68D6608u, 0xB6A8E33Cu, 0xDD35C662u, 0x2E904B74u, 0x3AF53F6Fu, 0x2D104E32u,
+    0xDC14D474u, 0x87AC478Bu, 0x00000000u, 0x57DB3DB3u, 0x4CCB20B9u, 0x07686F0Du,
+    0x4CAA1A67u, 0xCE73B87Fu, 0x74FAAFC5u, 0x19FC7055u, 0x94CA08B0u, 0xF4EF1E8Du,
+    0x2E70A041u, 0x8EC5A157u, 0x521025E0u, 0xE786683Eu, 0xF609AE42u, 0xAE7278CAu,
+    0x9F816A0Bu, 0x6698C173u, 0x9549FFBCu, 0x5B0439A7u, 0x156D8ED5u, 0xDB63DCE9u,
+    0x90C47C05u, 0xC9AFF242u, 0x32A88796u, 0xCC6BB175u, 0x100C9B85u, 0xD52C556Bu,
+    0x657A2684u, 0x72D021EDu, 0xF521FCA0u, 0x71D3B410u, 0x8537BD3Fu, 0x24F647BEu,
+    0xCB986F1Du, 0x74B81EDEu, 0x30A507A4u, 0x87A969E3u, 0x962E5854u, 0x2877524Bu,
+    0x57594776u, 0xD749460Fu, 0xCCE6AF3Fu, 0x1C625F66u, 0x59EFF9E3u, 0xDCC0F3B1u,
+    0x19017A80u, 0x1B3E84EBu, 0x50D4C53Fu, 0xBC885692u, 0x29654D24u, 0x674013D7u,
+    0x9A397AEDu, 0x9C7010FCu
+};
+static const uint32_t GE_POW_EH[64] = {
+    0x80000000u, 0x8164D1F3u, 0x82CD8698u, 0x843A28C3u, 0x85AAC367u, 0x871F6196u,
+    0x88980E80u, 0x8A14D575u, 0x8B95C1E3u, 0x8D1ADF5Bu, 0x8EA4398Bu, 0x9031DC43u,
+    0x91C3D373u, 0x935A2B2Fu, 0x94F4EFA8u, 0x96942D37u, 0x9837F051u, 0x99E04593u,
+    0x9B8D39B9u, 0x9D3ED9A7u, 0x9EF53260u, 0xA0B0510Fu, 0xA2704303u, 0xA43515AEu,
+    0xA5FED6A9u, 0xA7CD93B4u, 0xA9A15AB4u, 0xAB7A39B5u, 0xAD583EEAu, 0xAF3B78ADu,
+    0xB123F581u, 0xB311C412u, 0xB504F333u, 0xB6FD91E3u, 0xB8FBAF47u, 0xBAFF5AB2u,
+    0xBD08A39Fu, 0xBF1799B6u, 0xC12C4CCAu, 0xC346CCDAu, 0xC5672A11u, 0xC78D74C8u,
+    0xC9B9BD86u, 0xCBEC14FEu, 0xCE248C15u, 0xD06333DAu, 0xD2A81D91u, 0xD4F35AABu,
+    0xD744FCCAu, 0xD99D15C2u, 0xDBFBB797u, 0xDE60F482u, 0xE0CCDEECu, 0xE33F8972u,
+    0xE5B906E7u, 0xE8396A50u, 0xEAC0C6E7u, 0xED4F301Eu, 0xEFE4B99Bu, 0xF281773Cu,
+    0xF5257D15u, 0xF7D0DF73u, 0xFA83B2DBu, 0xFD3E0C0Cu
+};
+static const uint32_t GE_POW_EL[64] = {
+    0x00000000u, 0xBC030773u, 0xAC2BA1D7u, 0xACDE4046u, 0xCC487B15u, 0x9E8D1010u,
+    0x92DA8527u, 0x496EFD9Au, 0xEA8BD6E7u, 0x7E5BA9E6u, 0x45CD53C0u, 0x1466B1DCu,
+    0xAB11C336u, 0x13E6E92Cu, 0xFEF70961u, 0x20185A00u, 0x8DB8A96Fu, 0x20B7FA65u,
+    0xD54E5539u, 0x2CFFB751u, 0x91A111AEu, 0xB9714FC2u, 0x0C496819u, 0x09E6809Eu,
+    0xB15138EAu, 0xE965356Au, 0xEA7C0EF8u, 0xA93ED337u, 0x42A14AC6u, 0x690A4375u,
+    0xD2AC2590u, 0xA9112489u, 0xF9DE6484u, 0x28D17791u, 0x62FB9EE9u, 0x133E45FBu,
+    0x580C36BFu, 0x7A731083u, 0x66709456u, 0x24976407u, 0x5506DADDu, 0xABB9B15Du,
+    0x6E2F27A3u, 0xF2727C5Du, 0x1F8480E4u, 0xEF2B2595u, 0xF12AE45Au, 0xCFEDFA1Fu,
+    0xD69D6AF4u, 0x78AFD7B6u, 0xDAF23755u, 0x5E0E9124u, 0x2A94E111u, 0xBE8A5A51u,
+    0x7C8348A8u, 0x3C4BDC68u, 0xDD24392Fu, 0xD9942B84u, 0xDCDAF5CBu, 0x59FFB13Au,
+    0x2486CC2Cu, 0x0AD13BB9u, 0x722A033Au, 0xF486C175u
+};
+/* ---- BEGIN ge_pow helpers (shared text: identical in src/rt/ge.c and shaders/psp_tnl.vert) ---- */
+/* x^y for the GE's specular and powered-diffuse terms, in unsigned 32-bit integer arithmetic
+ * only, so the C and GLSL copies give the same bits with no libm and no fused multiply-add.
+ * The result is the correctly rounded float (nearest even) for every finite x >= 0 and y > 0
+ * the lighting passes, subnormal results included; tools/test_shader_embed.py keeps the copies
+ * identical and the tnl-parity selftest compares their output. Fixed-point values are
+ * (high word, low word) pairs. ge_pow_mul is the high 64 bits of a 64 x 64-bit product:
+ * ge_pow_mul_limbs here, or the same product from a 128-bit multiply where C has one. */
+GE_POW_FN uvec2 ge_pow_add(uvec2 a, uvec2 b) {
+    uint lo = a.y + b.y;
+    return ge_v2(a.x + b.x + (lo < a.y ? 1u : 0u), lo);
+}
+GE_POW_FN uvec2 ge_pow_sub(uvec2 a, uvec2 b) {
+    return ge_v2(a.x - b.x - (a.y < b.y ? 1u : 0u), a.y - b.y);
+}
+GE_POW_FN uvec2 ge_pow_mul_limbs(uvec2 a, uvec2 b) {
+    uint t = ge_pow_mulhi(a.y, b.y);
+    uint u = t + a.y * b.x;
+    uint k = u < t ? 1u : 0u;
+    uint v = u + a.x * b.y;
+    k = k + (v < u ? 1u : 0u);
+    uint d = ge_pow_mulhi(a.y, b.x);
+    uint e = d + ge_pow_mulhi(a.x, b.y);
+    uint j = e < d ? 1u : 0u;
+    uint f = e + a.x * b.x;
+    j = j + (f < e ? 1u : 0u);
+    uint g = f + k;
+    j = j + (g < f ? 1u : 0u);
+    return ge_v2(ge_pow_mulhi(a.x, b.x) + j, g);
+}
+/* ---- END ge_pow helpers ---- */
+#if defined(__SIZEOF_INT128__)
+__extension__ typedef unsigned __int128 GePowU128;
+static inline GePowV2 ge_pow_mul(GePowV2 a, GePowV2 b) {
+    GePowU128 p = (GePowU128)(((uint64_t)a.x << 32) | a.y) * (((uint64_t)b.x << 32) | b.y);
+    uint64_t h = (uint64_t)(p >> 64);
+    return ge_v2((uint32_t)(h >> 32), (uint32_t)h);
+}
+#else
+static inline GePowV2 ge_pow_mul(GePowV2 a, GePowV2 b) { return ge_pow_mul_limbs(a, b); }
+#endif
+/* ---- BEGIN ge_powf (shared text) ---- */
+/* log2 x = xe + log2 m, m in [sqrt(1/2), sqrt(2)): GE_POW_R[i] is 1/m rounded up for the 92
+ * intervals of m (i = mq >> 24), GE_POW_TH:TL[i] = -log2 R, and a = m R - 1 in [0, 1/90) is
+ * exact; a six-term series gives log2(1 + a). |y log2 x| is formed in 16.48 fixed point and
+ * split as n + g, and 2^g = 2^(j/64) 2^d with GE_POW_E[j] and a five-term series in d. A NaN
+ * x or y is returned as is, a negative x or y gives NaN, x^0 is 1 and 0^y is +0. */
+GE_POW_FN float ge_powf(float x, float y) {
+    uint xb = floatBitsToUint(x);
+    uint yb = floatBitsToUint(y);
+    if ((xb & 0x7FFFFFFFu) > 0x7F800000u) return x;
+    if ((yb & 0x7FFFFFFFu) > 0x7F800000u) return y;
+    if ((yb & 0x7FFFFFFFu) == 0u) return 1.0f;
+    if (yb > 0x7FFFFFFFu) return uintBitsToFloat(0x7FC00000u);
+    if ((xb & 0x7FFFFFFFu) == 0u) return 0.0f;
+    if (xb > 0x7FFFFFFFu) return uintBitsToFloat(0x7FC00000u);
+    if (xb == 0x3F800000u) return 1.0f;
+    if (xb == 0x7F800000u || yb == 0x7F800000u)
+        return xb > 0x3F800000u ? uintBitsToFloat(0x7F800000u) : 0.0f;
+    /* x = xm * 2^(xe - 23) and y = ym * 2^(ye - 23), xm and ym in [2^23, 2^24). */
+    int xe = ge_i((xb >> 23) & 0xFFu);
+    uint xm = xb & 0x7FFFFFu;
+    if (xe == 0) { int sh = 23 - findMSB(xm); xm = xm << sh; xe = 1 - sh; }
+    else xm = xm | 0x800000u;
+    xe = xe - 127;
+    int ye = ge_i((yb >> 23) & 0xFFu);
+    uint ym = yb & 0x7FFFFFu;
+    if (ye == 0) { int sh = 23 - findMSB(ym); ym = ym << sh; ye = 1 - sh; }
+    else ym = ym | 0x800000u;
+    ye = ye - 127;
+    /* x = m * 2^xe, m as mq in 1.31 fixed point. */
+    uint mq = xm << 8;
+    if (xm > 0xB504F3u) { mq = xm << 7; xe = xe + 1; }
+    uint ix = (mq >> 24) - 90u;
+    /* a = m R - 1 in 0.64 fixed point. */
+    uint ph = ge_pow_mulhi(mq, GE_POW_R[ix]);
+    uint pl = mq * GE_POW_R[ix];
+    uvec2 a = ge_v2(((ph - 0x40000000u) << 2) | (pl >> 30), pl << 2);
+    /* log2(1 + a) = a (1/ln 2 - a (1/(2 ln 2) - a (... - a / (6 ln 2)))), coefficients 1.63. */
+    uvec2 b = ge_pow_sub(ge_v2(0x24EED8A1u, 0xDF37FCF2u), ge_pow_mul(a, ge_v2(0x1EC709DCu, 0x3A03FD75u)));
+    b = ge_pow_sub(ge_v2(0x2E2A8ECAu, 0x5705FC2Fu), ge_pow_mul(a, b));
+    b = ge_pow_sub(ge_v2(0x3D8E13B8u, 0x7407FAE9u), ge_pow_mul(a, b));
+    b = ge_pow_sub(ge_v2(0x5C551D94u, 0xAE0BF85Eu), ge_pow_mul(a, b));
+    b = ge_pow_sub(ge_v2(0xB8AA3B29u, 0x5C17F0BCu), ge_pow_mul(a, b));
+    /* log2 m = log2(1 + a) - log2 R, 1.63 two's complement. */
+    uvec2 l = ge_pow_add(ge_v2(GE_POW_TH[ix], GE_POW_TL[ix]), ge_pow_mul(a, b));
+    /* |log2 x| = |xe + log2 m| as l * 2^-fb, shifted to its top bit; lneg its sign. */
+    int fb = 63;
+    if (xe != 0) {
+        l = ge_v2((l.x >> 9) | ((l.x & 0x80000000u) != 0u ? 0xFF800000u : 0u), (l.y >> 9) | (l.x << 23));
+        l.x = l.x + (ge_u(xe) << 22);
+        fb = 54;
+    }
+    uint lneg = l.x >> 31;
+    if (lneg != 0u) l = ge_pow_sub(ge_v2(0u, 0u), l);
+    if ((l.x | l.y) == 0u) return 1.0f;
+    int nz = l.x != 0u ? 31 - findMSB(l.x) : 63 - findMSB(l.y);
+    if (nz >= 32) l = ge_v2(l.y << (nz - 32), 0u);
+    else if (nz > 0) l = ge_v2((l.x << nz) | (l.y >> (32 - nz)), l.y << nz);
+    fb = fb + nz;
+    /* |y log2 x| = w * 2^(9 + ye - fb), w = ym * l / 2^32, as p in 16.48 fixed point, held at
+     * 512 once the result is 0 or infinite anyway. */
+    uvec2 w = ge_pow_mul(ge_v2(ym, 0u), l);
+    int s = 57 + ye - fb;
+    uvec2 p = ge_v2(0x02000000u, 0u);
+    if (s >= 0) {
+        if (32 + findMSB(w.x) + s < 57)
+            p = s == 0 ? w : ge_v2((w.x << s) | (w.y >> (32 - s)), w.y << s);
+    } else if (s > -32) {
+        p = ge_v2(w.x >> (-s), (w.y >> (-s)) | (w.x << (32 + s)));
+    } else if (s > -64) {
+        p = ge_v2(0u, s == -32 ? w.x : w.x >> (-32 - s));
+    } else {
+        p = ge_v2(0u, 0u);
+    }
+    /* y log2 x = n + g, g in [0, 1) as 0.48 fixed point (g.x holds its top 16 bits). */
+    int n = ge_i(p.x >> 16);
+    uvec2 g = ge_v2(p.x & 0xFFFFu, p.y);
+    if (lneg != 0u) {
+        n = -n;
+        if ((g.x | g.y) != 0u) { n = n - 1; g = ge_pow_sub(ge_v2(0x10000u, 0u), g); }
+    }
+    if (n >= 128) return uintBitsToFloat(0x7F800000u);
+    if (n <= -151) return 0.0f;
+    /* 2^g = 2^(j/64) 2^d, d = g - j/64 in 0.64 fixed point, and
+     * 2^d - 1 = d (ln 2 + d ((ln 2)^2/2 + d (... + d (ln 2)^5/120))), coefficients 0.64. */
+    uint j = g.x >> 10;
+    uvec2 d = ge_v2(((g.x & 0x3FFu) << 16) | (g.y >> 16), g.y << 16);
+    b = ge_pow_add(ge_v2(0x0276556Du, 0xF749CEE5u), ge_pow_mul(d, ge_v2(0x005761FFu, 0x9E299CC4u)));
+    b = ge_pow_add(ge_v2(0x0E35846Bu, 0x82505FC6u), ge_pow_mul(d, b));
+    b = ge_pow_add(ge_v2(0x3D7F7BFFu, 0x058B1D51u), ge_pow_mul(d, b));
+    b = ge_pow_add(ge_v2(0xB17217F7u, 0xD1CF79ACu), ge_pow_mul(d, b));
+    b = ge_pow_mul(d, b);
+    /* 2^(j/64) (1.63) times 1 + b (1.63): r in 2.62 fixed point, in [1, 2). */
+    uvec2 r = ge_pow_mul(ge_v2(GE_POW_EH[j], GE_POW_EL[j]), ge_v2(0x80000000u | (b.x >> 1), (b.y >> 1) | (b.x << 31)));
+    /* r * 2^(n - 62) to a float, rounded to nearest even. */
+    int be = n + 127;
+    if (be >= 1) {
+        uint m = r.x >> 7;
+        uint rem = r.x & 0x7Fu;
+        if (rem > 0x40u || (rem == 0x40u && (r.y != 0u || (m & 1u) != 0u))) m = m + 1u;
+        if (m >= 0x1000000u) { m = m >> 1; be = be + 1; }
+        if (be >= 255) return uintBitsToFloat(0x7F800000u);
+        return uintBitsToFloat((ge_u(be) << 23) | (m & 0x7FFFFFu));
+    }
+    int sh = -119 - n;
+    uint sm = r.x >> sh;
+    uint srem = r.x & ((1u << sh) - 1u);
+    uint hb = 1u << (sh - 1);
+    if (srem > hb || (srem == hb && (r.y != 0u || (sm & 1u) != 0u))) sm = sm + 1u;
+    return uintBitsToFloat(sm);
+}
+/* ---- END ge_powf ---- */
+#undef GE_POW_FN
+#undef uvec2
+#undef uint
+
+/* Which power light_vertex uses: 0 (the default) the C library's powf, 1 ge_powf. Only with 1
+ * does the GPU T&L take specular and powered-diffuse lights, since only then are the two
+ * routes' bits the same. ge_powf stays off until it is measured against the PSP (#1732: the
+ * ge-light oracle case). */
+static int s_ge_pow_exact;
+
+void ge_pow_set_exact(int on) { s_ge_pow_exact = on ? 1 : 0; }
+
+static float ge_light_pow(float x, float y) { return s_ge_pow_exact ? ge_powf(x, y) : powf(x, y); }
+
+/* Test seams: ge_powf, and the 64 x 64-bit high product both ways (out[0..1] the one C uses,
+ * out[2..3] ge_pow_mul_limbs, the one the shader runs), each as (high word, low word). */
+float ge_pow_selftest_powf(float x, float y) { return ge_powf(x, y); }
+void ge_pow_selftest_mul(const uint32_t a[2], const uint32_t b[2], uint32_t out[4]) {
+    GePowV2 p = ge_pow_mul(ge_v2(a[0], a[1]), ge_v2(b[0], b[1]));
+    GePowV2 q = ge_pow_mul_limbs(ge_v2(a[0], a[1]), ge_v2(b[0], b[1]));
+    out[0] = p.x; out[1] = p.y; out[2] = q.x; out[3] = q.y;
+}
+
 /* Per-vertex lighting in world space: emissive + scene ambient, plus per-light
  * ambient/diffuse/specular for up to 4 directional/point lights (spot treated as point).
  * Material colours come from the registers or the vertex colour per MATERIALUPDATE bits. */
@@ -3657,7 +4092,7 @@ static int light_vertex(float wx, float wy, float wz, float nx, float ny, float 
         }
         float ndl = nx*lx + ny*ly + nz*lz;
         if (ndl < 0.0f) ndl = 0.0f;
-        if (comp == 2 && ge.spec_coef > 0.0f) ndl = powf(ndl, ge.spec_coef);   /* powered diffuse */
+        if (comp == 2 && ge.spec_coef > 0.0f) ndl = ge_light_pow(ndl, ge.spec_coef);   /* powered diffuse */
 
         r += att*(l->acol[0]*mar + l->dcol[0]*mdr*ndl);
         g += att*(l->acol[1]*mag + l->dcol[1]*mdg*ndl);
@@ -3669,7 +4104,7 @@ static int light_vertex(float wx, float wy, float wz, float nx, float ny, float 
             if (hd > 0.0f) {
                 float ndh = (nx*hx + ny*hy + nz*hz) / hd;
                 if (ndh > 0.0f) {
-                    float s = ge.spec_coef > 0.0f ? powf(ndh, ge.spec_coef) : ndh;
+                    float s = ge.spec_coef > 0.0f ? ge_light_pow(ndh, ge.spec_coef) : ndh;
                     r += att*l->scol[0]*msr*s;
                     g += att*l->scol[1]*msg*s;
                     b += att*l->scol[2]*msb*s;
@@ -3764,15 +4199,15 @@ static void transform_model_vtx_clip(const ModelVtx *m, CVtx *o) {
         ? SDL_GetTicksNS() : 0;
     float mx=m->x, my=m->y, mz=m->z;
 
-    /* World transform (model → world) */
+    /* World transform (model -> world) */
     float wx, wy, wz;
     mat43_mul(ge.world, mx, my, mz, &wx, &wy, &wz);
 
-    /* View transform (world → camera) */
+    /* View transform (world -> camera) */
     float cx, cy, cz;
     mat43_mul(ge.view, wx, wy, wz, &cx, &cy, &cz);
 
-    /* Projection (camera → clip). The divisor is the real clip-space w from the projection
+    /* Projection (camera -> clip). The divisor is the real clip-space w from the projection
      * matrix W row: perspective matrices (sceGumPerspective) have W row (0,0,-1,0), so
      * clipw == -cz; orthographic matrices have W row (0,0,0,1), so clipw == 1 and view
      * depth must NOT divide (hangar/menu 3D and overlay quads use ortho). */
@@ -3917,7 +4352,7 @@ static void transform_vtx_clip(uint32_t addr, const VFmt *vf, CVtx *o) {
 /* Smallest clip-space w kept by the near clipper. */
 #define NEAR_W 1e-3f
 
-/* Perspective divide + viewport: clip-space vertex (cw > 0 required) → screen vertex. */
+/* Perspective divide + viewport: clip-space vertex (cw > 0 required) -> screen vertex. */
 static void project_cvtx(const CVtx *c, Vtx *o) {
     float inv_w = 1.0f / c->cw;
     float ndcx = c->cx * inv_w, ndcy = c->cy * inv_w, ndcz = c->cz * inv_w;
@@ -4183,11 +4618,18 @@ static void dump_xform_debug(uint32_t vbase, uint32_t ibase, int idxfmt, const V
 static void fill_rect_clear_fast(int xa, int ya, int xb, int yb, int r, int g, int b, int a) {
     int cx1 = ge.scis_x1 > 0 ? ge.scis_x1 : 0,   cy1 = ge.scis_y1 > 0 ? ge.scis_y1 : 0;
     int cx2 = ge.scis_x2 < 479 ? ge.scis_x2 : 479, cy2 = ge.scis_y2 < 271 ? ge.scis_y2 : 271;
+    if (s_wing) { cx1 = s_wing_x0; cx2 = s_wing_x1; }
     if (xa < cx1) xa = cx1;
     if (xb > cx2 + 1) xb = cx2 + 1;
     if (ya < cy1) ya = cy1;
     if (yb > cy2 + 1) yb = cy2 + 1;
     if (xa >= xb || ya >= yb) return;
+    if (s_wing) {
+        uint32_t cw = pack_fb(r, g, b, a);
+        for (int y = ya; y < yb; y++)
+            for (int x = xa; x < xb; x++) s_wing->color[WING_PX(x, y)] = cw;
+        return;
+    }
     if (s_stat_on > 0 && xa <= 240 && 240 < xb && ya <= 136 && 136 < yb && s_pxc < 32) {
         s_pxc++;
         fprintf(stderr, "PXC f=%" PRIu32 " CLEARFILL rect=(%d,%d)-(%d,%d) rgba=(%d,%d,%d,%d) fbp=0x%08" PRIx32 "\n",
@@ -4206,13 +4648,15 @@ static void fill_rect_clear_fast(int xa, int ya, int xb, int yb, int r, int g, i
 }
 
 /* Rasterise a sprite (axis-aligned rect from two corner vertices). Used by both modes;
- * persp=1 recovers UV from the over-w storage and depth-tests with the second vertex's z. */
+ * persp=1 recovers UV from the over-w storage and depth-tests with the second vertex's z.
+ * During a wing pass (s_wing) it draws into that canvas, host-only, like raster_tri. */
 static void fill_sprite(const Vtx *p0, const Vtx *p1, int persp) {
     if (vtx_nonfinite(p0, p1, NULL)) return;
-    if (s_ge_timing_model) ge_time_sprite(p0, p1);
-    if ((ge.ztest_enable || (ge.clear && (ge.clear_mode & 0x400u))) &&
+    const int wing = s_wing != NULL;
+    if (s_ge_timing_model && !wing) ge_time_sprite(p0, p1);
+    if (!wing && (ge.ztest_enable || (ge.clear && (ge.clear_mode & 0x400u))) &&
         !ge_zbuf_prepare_current()) return;
-    if (s_gpu && s_gpu->sprite) {
+    if (s_gpu && s_gpu->sprite && !wing) {
         uint64_t profile_started = ge_cpu_profile_begin();
         int handled = s_gpu->sprite(p0, p1, persp);
         ge_cpu_profile_end(GE_CPU_GPU_HOOK, profile_started);
@@ -4273,6 +4717,7 @@ static void fill_sprite(const Vtx *p0, const Vtx *p1, int persp) {
     float u_start = u_left + 0.5f * u_dir;
     float v_start = v_top + 0.5f * v_dir;
     float rho2 = tex_footprint_rho2(u_dir, 0.0f, 0.0f, v_dir);
+    int spr_auto16 = ge_lod_log16(sqrtf(rho2));
     /* The slope mode's 1/w: 1 in through mode; a transform-mode sprite takes its second
      * vertex's, as it does for colour, depth and fog (unmeasured on a PSP). */
     float sq = persp ? p1->rw : 1.0f;
@@ -4301,10 +4746,261 @@ static void fill_sprite(const Vtx *p0, const Vtx *p1, int persp) {
         for (int x = xa; x < xb; x++) {
             float u = u_start + (float)(x - xa) * u_dir;
             int r, g, b, a;
-            if (!shade(u, fv, rho2, sq, fog, p1->r, p1->g, p1->b, p1->a, &r, &g, &b, &a)) continue;
+            if (!shade(u, fv, rho2, spr_auto16, sq, fog, p1->r, p1->g, p1->b, p1->a, &r, &g, &b, &a)) continue;
             put_px_rgba_tested(x, y, pz, use_z, r, g, b, a);
         }
     }
+}
+
+static void wide_sprite(const Vtx *p0, const Vtx *p1, int persp);
+
+static void fill_sprite_and_wings(const Vtx *p0, const Vtx *p1, int persp) {
+    if (__builtin_expect(s_wide_d != 0, 0)) {
+        wide_fresh();
+        fill_sprite(p0, p1, persp);
+        wide_sprite(p0, p1, persp);
+        return;
+    }
+    fill_sprite(p0, p1, persp);
+}
+
+/* ---- widescreen Fill: which primitives reach a wing canvas ------------------------------- */
+
+static uint32_t ge_wide_norm(uint32_t addr) {
+    if (addr < 0x00200000u || (addr & 0x0F000000u) == 0x04000000u)
+        return 0x04000000u | (addr & 0x001FFFFFu);
+    return addr & 0x0FFFFFFFu;
+}
+
+static GeWideSlot *wide_slot_for(uint32_t fb) {
+    for (int i = 0; i < GE_WIDE_SLOTS; i++)
+        if (s_wide_slot[i].fb && s_wide_slot[i].fb == fb) return &s_wide_slot[i];
+    return NULL;
+}
+
+/* The canvas the current draw may reach: Fill is on, the target is a display framebuffer,
+ * and the guest scissor spans the screen's width. A narrower scissor is a viewport or a UI
+ * clip, and what lies outside it is not the scene's. */
+static GeWideSlot *wide_target(void) {
+    if (ge.scis_x1 > 0 || ge.scis_x2 < 479) return NULL;
+    return wide_slot_for(ge_fb_addr());
+}
+
+static void wide_clear_slot(GeWideSlot *w) {
+    w->drawn = 0;
+    w->stale = 0;
+    w->epoch = ++s_wide_epochs ? s_wide_epochs : ++s_wide_epochs;   /* never 0 */
+    if (w->color) memset(w->color, 0, (size_t)GE_WIDE_CANVAS_W * 272u * sizeof *w->color);
+    if (w->depth) memset(w->depth, 0, (size_t)GE_WIDE_CANVAS_W * 272u * sizeof *w->depth);
+}
+
+/* A triangle or sprite is about to be drawn into the current framebuffer. If that buffer was
+ * shown since its canvas was last cleared, a new frame has begun there: clear the canvas, so
+ * its wings never hold the shown frame's pixels. A frame presented again with no draw in
+ * between keeps its wings. Any scissor counts: a frame whose draws all reach no wing still
+ * starts here, and its wings are then black. */
+static void wide_fresh(void) {
+    GeWideSlot *w = wide_slot_for(ge_fb_addr());
+    if (w && w->stale) wide_clear_slot(w);
+}
+
+static void wide_free_slot(GeWideSlot *w) {
+    free(w->color);
+    free(w->depth);
+    memset(w, 0, sizeof *w);
+}
+
+static int wide_sw_canvas(GeWideSlot *w) {
+    if (w->color && w->depth) return 1;
+    w->color = (uint32_t *)calloc((size_t)GE_WIDE_CANVAS_W * 272u, sizeof *w->color);
+    w->depth = (uint16_t *)calloc((size_t)GE_WIDE_CANVAS_W * 272u, sizeof *w->depth);
+    if (w->color && w->depth) return 1;
+    static int reported = 0;
+    if (!reported) {
+        reported = 1;
+        fprintf(stderr, "GE_WIDE: no memory for a wing canvas; Fill draws no wings\n");
+    }
+    free(w->color); free(w->depth);
+    w->color = NULL; w->depth = NULL;
+    return 0;
+}
+
+/* One primitive into canvas columns [x0, x1] of w, its vertices already moved there. A GPU
+ * backend draws its own canvases; without one the software rasterizer draws this one. The
+ * canvas was already cleared if this frame is new (wide_fresh), and `drawn` is set only by a
+ * primitive that was really drawn: a backend's wing hook returns 0 for one it dropped. A
+ * software wing pass is host-only, so the frame statistics and the SR_PIXWHO probe keep
+ * counting the guest's draws alone. */
+static void wide_pass(GeWideSlot *w, int x0, int x1, const Vtx *v, int sprite, int persp) {
+    if (s_gpu) {
+        int drew = 0;
+        if (sprite) { if (s_gpu->wing_sprite) drew = s_gpu->wing_sprite(w->fb, x0, x1, &v[0], &v[1], persp); }
+        else if (s_gpu->wing_tri) drew = s_gpu->wing_tri(w->fb, x0, x1, &v[0], &v[1], &v[2], persp);
+        if (drew) w->drawn = 1;
+        return;
+    }
+    if (!wide_sw_canvas(w)) return;
+    w->fmt = (int)(ge.fbfmt & 3);
+    who_init();
+    const int who_x = s_who_x;
+    __typeof__(s_stat) stat = s_stat;
+    s_who_x = -1;
+    s_wing = w; s_wing_x0 = x0; s_wing_x1 = x1;
+    if (sprite) fill_sprite(&v[0], &v[1], persp);
+    else        raster_tri(&v[0], &v[1], &v[2], persp);
+    s_wing = NULL;
+    s_who_x = who_x;
+    s_stat = stat;
+    w->drawn = 1;
+}
+
+/* A transform-mode triangle that leaves the screen is drawn again in each wing it reaches.
+ * Its positions are first snapped to the 28.4 grid raster_tri snaps to, so the whole-
+ * pixel shift is exact and the canvas rasterizes the triangle the guest's draw would give on
+ * a wider screen. Through-mode triangles stay in the centre. */
+static void wide_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
+    if (!persp || s_wing || vtx_nonfinite(A, B, C)) return;
+    GeWideSlot *w = wide_target();
+    if (!w) return;
+    const int d = s_wide_d;
+    Vtx snap[3] = { *A, *B, *C }, v[3];
+    float lo = 0.0f, hi = 0.0f;
+    for (int i = 0; i < 3; i++) {
+        snap[i].x = floorf(snap[i].x * 16.0f + 0.375f) * (1.0f / 16.0f);
+        if (i == 0 || snap[i].x < lo) lo = snap[i].x;
+        if (i == 0 || snap[i].x > hi) hi = snap[i].x;
+    }
+    if (lo < 0.0f) {
+        for (int i = 0; i < 3; i++) { v[i] = snap[i]; v[i].x += (float)d; }
+        wide_pass(w, 0, d - 1, v, 0, persp);
+    }
+    if (hi > 480.0f) {
+        for (int i = 0; i < 3; i++) { v[i] = snap[i]; v[i].x += (float)(d - 480); }
+        wide_pass(w, d, 2 * d - 1, v, 0, persp);
+    }
+}
+
+/* Sprites: a transform-mode sprite that leaves the screen is shifted like a triangle. Two
+ * through-mode kinds are stretched across a wing instead, because without them the wings go
+ * stale or stay bright through a fade: a clear-mode sprite that reaches that screen edge
+ * (sceGuClear's 64-pixel strips reach both), and an untextured sprite over the whole screen
+ * (a fade, flash or tint). Every other through-mode sprite stays in the centre. */
+static void wide_sprite(const Vtx *p0, const Vtx *p1, int persp) {
+    if (s_wing || vtx_nonfinite(p0, p1, NULL)) return;
+    GeWideSlot *w = wide_target();
+    if (!w) return;
+    const int d = s_wide_d;
+    /* Floor, not truncation: on a wider screen a corner at x = -10.5 lies at x + D, whose
+     * column is D - 11, and a sprite whose left corner lies in (-1, 0) covers column -1. */
+    const int xa = (int)floorf(fminf(p0->x, p1->x)), xb = (int)floorf(fmaxf(p0->x, p1->x));
+    const int ya = (int)fminf(p0->y, p1->y), yb = (int)fmaxf(p0->y, p1->y);
+    Vtx v[2] = { *p0, *p1 };
+    if (persp) {
+        /* fill_sprite's rectangle is its corners truncated toward zero, which a wider
+         * screen would apply to the shifted, non-negative corner. Flooring before the
+         * whole-pixel shift gives that column, keeps the texture span, and leaves an
+         * integer that the software truncation and a GPU backend's floor agree on even
+         * where the canvas x is negative. */
+        const float x0 = floorf(p0->x), x1 = floorf(p1->x);
+        if (xa < 0) {
+            v[0].x = x0 + (float)d; v[1].x = x1 + (float)d;
+            wide_pass(w, 0, d - 1, v, 1, persp);
+        }
+        if (xb > 480) {
+            v[0].x = x0 + (float)(d - 480); v[1].x = x1 + (float)(d - 480);
+            wide_pass(w, d, 2 * d - 1, v, 1, persp);
+        }
+        return;
+    }
+    const int fade = !ge.clear && !ge.tex_enable && xa <= 0 && xb >= 480 && ya <= 0 && yb >= 272;
+    if (!ge.clear && !fade) return;
+    const int left = p0->x <= p1->x ? 0 : 1;   /* the vertex on the left edge stays there */
+    if (xa <= 0) {
+        v[left].x = 0.0f; v[1 - left].x = (float)d;
+        wide_pass(w, 0, d - 1, v, 1, persp);
+    }
+    if (xb >= 480) {
+        v[left].x = (float)d; v[1 - left].x = (float)(2 * d);
+        wide_pass(w, d, 2 * d - 1, v, 1, persp);
+    }
+}
+
+int ge_wide_wing_for(int window_w, int window_h) {
+    if (window_w <= 0 || window_h <= 0) return 0;
+    const long long canvas = 272LL * window_w / window_h;   /* the window's width at 272 rows */
+    long long d = (canvas - 480) / 2;
+    if (d <= 0) return 0;
+    d &= ~3LL;
+    return d > GE_WIDE_MAX_WING ? GE_WIDE_MAX_WING : (int)d;
+}
+
+int ge_wide_set_wing(int wing) {
+    if (wing < 0) wing = 0;
+    if (wing > GE_WIDE_MAX_WING) wing = GE_WIDE_MAX_WING;
+    wing &= ~3;
+    if (wing == s_wide_d) return wing;
+    s_wide_d = wing;
+    for (int i = 0; i < GE_WIDE_SLOTS; i++) {
+        if (!wing) wide_free_slot(&s_wide_slot[i]);
+        else wide_clear_slot(&s_wide_slot[i]);   /* the old columns are at the old width */
+    }
+    return wing;
+}
+
+int ge_wide_wing(void) { return s_wide_d; }
+
+void ge_wide_note_display(uint32_t fb_addr) {
+    if (!s_wide_d || !fb_addr) return;
+    const uint32_t fb = ge_wide_norm(fb_addr);
+    for (int i = 0; i < GE_WIDE_SLOTS; i++)
+        if (s_wide_slot[i].fb == fb) { s_wide_last = i; return; }
+    /* A new display buffer replaces the one not displayed last (double buffering keeps both). */
+    const int i = (s_wide_last + 1) % GE_WIDE_SLOTS;
+    wide_clear_slot(&s_wide_slot[i]);
+    s_wide_slot[i].fb = fb;
+    s_wide_last = i;
+}
+
+int ge_wide_drawn(uint32_t fb_addr) {
+    const GeWideSlot *w = s_wide_d ? wide_slot_for(ge_wide_norm(fb_addr)) : NULL;
+    return w && w->drawn;
+}
+
+void ge_wide_shown(uint32_t fb_addr) {
+    GeWideSlot *w = s_wide_d ? wide_slot_for(ge_wide_norm(fb_addr)) : NULL;
+    if (w) w->stale = 1;
+}
+
+int ge_wide_picture(uint32_t fb_addr, const uint32_t *frame, uint32_t *out,
+                    uint32_t (*convert)(uint32_t word, int fmt)) {
+    const int d = s_wide_d;
+    if (!d || !frame || !out || !convert) return 0;
+    const int cols = 480 + 2 * d;
+    const GeWideSlot *w = wide_slot_for(ge_wide_norm(fb_addr));
+    const uint32_t *cv = w && w->drawn ? w->color : NULL;
+    const int fmt = w ? w->fmt : 3;
+    for (int y = 0; y < 272; y++) {
+        uint32_t *row = out + (size_t)y * (size_t)cols;
+        const uint32_t *crow = cv ? cv + (size_t)y * GE_WIDE_CANVAS_W : NULL;
+        for (int x = 0; x < d; x++) {
+            row[x] = crow ? convert(crow[x], fmt) : 0u;
+            row[d + 480 + x] = crow ? convert(crow[d + x], fmt) : 0u;
+        }
+        memcpy(row + d, frame + (size_t)y * 480u, 480u * sizeof *row);
+    }
+    return cols;
+}
+
+uint32_t ge_wide_epoch(uint32_t fb_addr) {
+    const GeWideSlot *w = s_wide_d ? wide_slot_for(ge_wide_norm(fb_addr)) : NULL;
+    return w ? w->epoch : 0u;
+}
+
+const uint32_t *ge_wide_canvas(uint32_t fb_addr, int *fmt) {
+    const GeWideSlot *w = s_wide_d ? wide_slot_for(ge_wide_norm(fb_addr)) : NULL;
+    if (!w || !w->color) return NULL;
+    if (fmt) *fmt = w->fmt;
+    return w->color;
 }
 
 typedef struct { float basis[4], deriv[4]; } PatchWeight;
@@ -4371,7 +5067,7 @@ static int model_to_through(const ModelVtx *m,Vtx *v){
 }
 
 static void submit_model_triangle(const ModelVtx *a,const ModelVtx *b,const ModelVtx *c,int through){
-    if(through){Vtx x,y,z;if(!model_to_through(a,&x)||!model_to_through(b,&y)||!model_to_through(c,&z))return;raster_tri(&x,&y,&z,0);return;}
+    if(through){Vtx x,y,z;if(!model_to_through(a,&x)||!model_to_through(b,&y)||!model_to_through(c,&z))return;raster_tri_and_wings(&x,&y,&z,0);return;}
     CVtx cv[3],cl[4];transform_model_vtx_clip(a,&cv[0]);transform_model_vtx_clip(b,&cv[1]);transform_model_vtx_clip(c,&cv[2]);
     if(ge.cull_enable&&!ge.clear&&(ge.cull&1)==0){CVtx t=cv[0];cv[0]=cv[1];cv[1]=t;}
     /* Non-finite first, exactly as the triangle path above: a NaN clip position, screen
@@ -4382,11 +5078,11 @@ static void submit_model_triangle(const ModelVtx *a,const ModelVtx *b,const Mode
     if((!ge.depth_clip&&zp+zn>0)||zp>=3||zn>=3)return;
     if(clip_d_nearz(&cv[0])>=0&&clip_d_nearz(&cv[1])>=0&&clip_d_nearz(&cv[2])>=0){
         if(cv[0].cw<=NEAR_W||cv[1].cw<=NEAR_W||cv[2].cw<=NEAR_W)return;
-        Vtx x,y,z;project_cvtx(&cv[0],&x);project_cvtx(&cv[1],&y);project_cvtx(&cv[2],&z);raster_tri(&x,&y,&z,1);
+        Vtx x,y,z;project_cvtx(&cv[0],&x);project_cvtx(&cv[1],&y);project_cvtx(&cv[2],&z);raster_tri_and_wings(&x,&y,&z,1);
     }else{
         int n=clip_poly_near(cv,3,cl);Vtx p[4];int bad[4]={1,1,1,1};
         for(int i=0;i<n&&i<4;i++){bad[i]=cl[i].nf||cl[i].cw<=NEAR_W||clip_vtx_out_of_range(&cl[i]);if(!bad[i])project_cvtx(&cl[i],&p[i]);}
-        for(int i=2;i<n&&i<4;i++)if(!bad[0]&&!bad[i-1]&&!bad[i])raster_tri(&p[0],&p[i-1],&p[i],1);
+        for(int i=2;i<n&&i<4;i++)if(!bad[0]&&!bad[i-1]&&!bad[i])raster_tri_and_wings(&p[0],&p[i-1],&p[i],1);
     }
 }
 
@@ -4411,12 +5107,36 @@ static void submit_model_point(const ModelVtx *a,int through){
     Vtx v;project_cvtx(&c,&v);draw_point_vtx(&v,1);
 }
 
+/* Draws made with mip sampling enabled (#1373): a textured, non-clear draw whose TEXFILTER has a
+ * mip filter and whose TEXMODE highest level is above 0 (ge_tex_mip_active, the predicate both the
+ * software sampler and the Vulkan texture cache use). This says the title enables mipmapping, not
+ * that a level above 0 was picked: a constant level 0 or a magnified draw counts too. Every route
+ * that textures calls it before it rasterizes: PRIM (draw_prim), BEZIER and SPLINE (draw_patch)
+ * and immediate vertices (ge_imm_draw). The count covers the whole run on the GE thread, like the
+ * g_ge_list_* counters, and is not reset per list. The first such draw prints one line;
+ * g_ge_mip_lines_printed says how many lines were printed (0 or 1). */
+unsigned long g_ge_mip_draws = 0;
+unsigned long g_ge_mip_lines_printed = 0;
+
+static void ge_note_mip_draw(void) {
+    if (!ge.tex_enable || !ge.tex_addr || ge.clear || !ge_tex_mip_active(&ge)) return;
+    g_ge_mip_draws++;
+    if (g_ge_mip_lines_printed) return;
+    g_ge_mip_lines_printed++;
+    fprintf(stderr, "GE mip: first draw with mip sampling enabled at frame %" PRIu32
+            ", highest level %" PRIu32 ", filter 0x%" PRIx32 ", level mode %" PRIu32
+            ", bias %d/16 (#1373)\n",
+            s_ge_frame, ge.tex_max_level, ge.tex_filter, ge.tex_level_mode,
+            (int)(ge.tex_lod_bias * 16.0f));
+}
+
 static void draw_patch(uint32_t op,int spline){
     int nu=(int)(op&255),nv=(int)((op>>8)&255);
     VFmt vf;decode_vtype(ge.vtype,&vf);int idxfmt=(int)((ge.vtype>>11)&3),count=nu*nv;
     uint32_t vbase=ge.vaddr,ibase=ge.iaddr;
     if(idxfmt)ge.iaddr+=(uint32_t)(count<<(idxfmt-1));else ge.vaddr+=(uint32_t)(count*vf.stride);
     if(nu<4||nv<4)return;
+    ge_note_mip_draw();
     ModelVtx *all=(ModelVtx*)malloc((size_t)count*sizeof(*all));if(!all)return;
     for(int i=0;i<count;i++)decode_model_vtx(prim_vtx_addr(vbase,ibase,idxfmt,i,vf.stride),&vf,&all[i]);
     int pu=spline?nu-3:(nu-1)/3,pv=spline?nv-3:(nv-1)/3;
@@ -4514,7 +5234,8 @@ static int tnl_state_ok(int type, const VFmt *vf) {
         for (int i = 0; i < GE_TNL_LIGHTS; i++) {
             if (!ge.light_on[i]) continue;
             int comp = (int)(ge.light_type[i] & 3u);
-            if ((comp & 1) || (comp == 2 && ge.spec_coef > 0.0f)) return 0;   /* powf */
+            if (((comp & 1) || (comp == 2 && ge.spec_coef > 0.0f)) && !s_ge_pow_exact)
+                return 0;   /* the C library's powf: no shader counterpart */
             if (!tnl_nums_ok(ge.light_pos[i], 3) || !tnl_nums_ok(ge.light_att[i], 3)) return 0;
         }
     }
@@ -4616,7 +5337,9 @@ static void tnl_params(const VFmt *vf, GeTnlParams *p) {
             p->mat_dif[ch] = lc->mat_dif[ch];
             p->emissive[ch] = lc->emissive[ch];
             p->amb[ch] = lc->amb[ch];
+            p->mat_spe[ch] = lc->mat_spe[ch];
         }
+        p->spec_coef = ge.spec_coef;
         for (int i = 0; i < GE_TNL_LIGHTS; i++) {
             const LightConst *l = &lc->light[i];
             GeTnlLight *o = &p->light[i];
@@ -4627,7 +5350,9 @@ static void tnl_params(const VFmt *vf, GeTnlParams *p) {
                 o->acol[ch] = l->acol[ch];
                 o->dcol[ch] = l->dcol[ch];
                 o->att[ch] = ge.light_att[i][ch];
+                o->scol[ch] = l->scol[ch];
             }
+            o->comp = (uint32_t)l->comp;
         }
     }
 }
@@ -4636,7 +5361,8 @@ static void tnl_params(const VFmt *vf, GeTnlParams *p) {
  * for every triangle, the depth surface could not be prepared), 0 to run the CPU path. */
 static int ge_tnl_try_prim(int type, int count, const VFmt *vf, uint32_t vbase, uint32_t ibase,
                            int idxfmt) {
-    if (!s_gpu || !s_gpu->tnl_prim || !tnl_enabled() || count < 3) return 0;
+    /* Fill's wings (wide_tri) need ge.c's own screen-space triangles. */
+    if (!s_gpu || !s_gpu->tnl_prim || !tnl_enabled() || count < 3 || s_wide_d) return 0;
     if (!tnl_state_ok(type, vf)) { s_tnl_cpu++; return 0; }
     uint32_t ntri = type == 3 ? (uint32_t)(count / 3) : (uint32_t)(count - 2);
     if (!tnl_grow((void **)&s_tnl_refs, &s_tnl_refs_cap, (uint32_t)count, sizeof(GeTnlVtx)) ||
@@ -4951,7 +5677,7 @@ static void draw_prim_through(const DrawPrimCtx *c) {
             if (assembly_started)
                 primitive_profile_end(GE_PRIM_PROFILE_ASSEMBLY, assembly_started);
             primitive_profile_finish_total();
-            raster_tri(&a,&b,&c,0);
+            raster_tri_and_wings(&a,&b,&c,0);
         }
     } else if (type == 6) {   /* sprites */
         for (int i = 1; i < count; i += 2) {
@@ -4990,7 +5716,7 @@ static void draw_prim_through(const DrawPrimCtx *c) {
             if (s_gelog&&(ge.tex_enable&&!ge.clear)) { static int sn=0; if(sn++<12)
                 fprintf(stderr,"  texspr (%.0f,%.0f)-(%.0f,%.0f) uv(%.0f,%.0f)-(%.0f,%.0f) tex=0x%08" PRIx32 " %dx%d fmt=%" PRIu32 " bufw=%" PRIu32 "\n",
                     p0.x,p0.y,p1.x,p1.y,p0.u,p0.v,p1.u,p1.v,ge.tex_addr,ge.tex_w,ge.tex_h,ge.tex_fmt,ge.tex_bufw); }
-            fill_sprite(&p0,&p1,0);
+            fill_sprite_and_wings(&p0,&p1,0);
         }
     }
     s_primitive_profile_counting = 0;
@@ -5344,7 +6070,7 @@ static void draw_prim_xform_triangles(const DrawPrimCtx *c, int rt) {
             if (assembly_started)
                 primitive_profile_end(GE_PRIM_PROFILE_ASSEMBLY, assembly_started);
             primitive_profile_finish_total();
-            raster_tri(&a,&b,&c,1);
+            raster_tri_and_wings(&a,&b,&c,1);
         } else if (dec == D_CLIP) {
             int m = clip_m;
             if (m >= 3) {
@@ -5379,7 +6105,7 @@ static void draw_prim_xform_triangles(const DrawPrimCtx *c, int rt) {
                 }
                 for (int k = 2; k < m && k < 4; k++)
                     if (!bad[0] && !bad[k-1] && !bad[k])
-                        raster_tri(&p[0], &p[k-1], &p[k], 1);
+                        raster_tri_and_wings(&p[0], &p[k-1], &p[k], 1);
             }
             if (m < 3)
                 primitive_profile_finish_total();
@@ -5414,7 +6140,7 @@ static void draw_prim_xform_sprites(const DrawPrimCtx *c) {
         Vtx p0, p1;
         if (!transform_vtx_3d(prim_vtx_addr(vbase,ibase,idxfmt,i-1,vf.stride),&vf,&p0)) continue;
         if (!transform_vtx_3d(prim_vtx_addr(vbase,ibase,idxfmt,i,  vf.stride),&vf,&p1)) continue;
-        fill_sprite(&p0,&p1,1);
+        fill_sprite_and_wings(&p0,&p1,1);
     }
 }
 
@@ -5456,6 +6182,7 @@ static void draw_prim(uint32_t op, unsigned long prim_index, uint32_t list_addr,
     /* Observe both the through and transform frontends.  The optional frame gate
      * preserves the fixed distinct-texture budget for late deterministic scenes. */
     texdump_maybe();
+    ge_note_mip_draw();
 
     DrawPrimCtx c = { type, count, idxfmt, vf, vbase, ibase, prim_index, watch_now };
     /* ---- THROUGH-MODE (2D, screen coords) ---- */
@@ -5530,20 +6257,21 @@ static void ge_imm_draw(int type, const Vtx *a, const Vtx *b, const Vtx *c, int 
     ge.fog_enable = (flags & GE_IMM_FOG) != 0u;
     ge.dither_enable = (flags & GE_IMM_DITHER) != 0u;
     ge.shade_gouraud = (flags & GE_IMM_SHADING) != 0u;
+    ge_note_mip_draw();
 
     if (type == 0) {
         draw_point_vtx(a, 0);
     } else if (type == 1 || type == 2) {
         draw_line_vtx(a, b, 0);
     } else if (type == 6) {
-        fill_sprite(a, b, 0);
+        fill_sprite_and_wings(a, b, 0);
     } else {
         /* Same submission-order culling as the through-mode PRIM path (draw_prim). */
         Vtx ta = *a, tb = *b;
         if (ge.cull_enable && !ge.clear && (((ge.cull & 1u) == 0u) ^ flip)) {
             Vtx t = ta; ta = tb; tb = t;
         }
-        raster_tri(&ta, &tb, c, 0);
+        raster_tri_and_wings(&ta, &tb, c, 0);
     }
 
     ge.tex_enable = old_tex;
@@ -6183,6 +6911,7 @@ static int ge_cmd_texture(uint32_t cmd, uint32_t data) {
              * the hardware (PPSSPP TextureCacheCommon::LoadClut). */
             uint32_t bytes = (data & 0x3F) * 32;
             if (bytes > sizeof(ge.clutram)) bytes = sizeof(ge.clutram);
+            ge_clut_note_load(bytes);
             if (!sr_guest_span_readable(ge.clut_addr, bytes)) {
                 fprintf(stderr, "GE_LOADCLUT: invalid source span addr=0x%08" PRIx32 " bytes=%" PRIu32 "\n",
                         ge.clut_addr, bytes);
@@ -6307,6 +7036,75 @@ static void ge_log_signal_end(uint32_t list_addr, uint32_t addr, uint32_t pendin
     }
 }
 
+int ge_take_signal_fault(char *detail, size_t size) {
+    if (!s_ge_signal_fault[0]) return 0;
+    if (detail && size) snprintf(detail, size, "%s", s_ge_signal_fault);
+    s_ge_signal_fault[0] = '\0';
+    return 1;
+}
+
+static int ge_signal_fail(const char *name, uint32_t signal_pc, const char *why) {
+    snprintf(s_ge_signal_fault, sizeof(s_ge_signal_fault),
+             "GE SIGNAL %s at 0x%08" PRIx32 ": %s", name, signal_pc, why);
+    return -1;
+}
+
+/* A SIGNAL and its END (`addr` is the word after the END). For JUMP, CALL and RET this
+ * sets *next to where the list goes on, saving or restoring the caller, and returns 1;
+ * for any other behaviour it returns 0 and the list runs on after the END. A JUMP or CALL
+ * to an address that is not word-aligned or not readable, a CALL with the list's stack full
+ * and a RET with it empty return -1 with the fault recorded: the GE driver reports each,
+ * and stops the game on an SDK 2.00 or later title, so the list stops at the SIGNAL. */
+static int ge_signal_end(uint32_t signal_op, uint32_t end_data, uint32_t addr, uint32_t *next) {
+    static const char *const names[] = {"JUMP", "CALL", "RET", "RJUMP", "RCALL", "OJUMP", "OCALL"};
+    const unsigned behavior = (signal_op >> 16) & 0xFFu;
+    if (behavior < 0x10u || behavior > 0x16u) {
+        static unsigned char reported[256];
+        if (!reported[behavior]) {
+            reported[behavior] = 1;
+            fprintf(stderr, "GE: SIGNAL behaviour 0x%02x is not modelled; the list runs on "
+                    "after its END [reported once]\n", behavior);
+        }
+        return 0;
+    }
+    const char *name = names[behavior - 0x10u];
+    const uint32_t signal_pc = addr - 8u;
+    if (behavior == 0x12u) {
+        if (s_sig_sp == 0) return ge_signal_fail(name, signal_pc, "stack underflow");
+        const GeSignalFrame *f = &s_sig_stack[--s_sig_sp];
+        ge.offset = f->offset;
+        ge.base = f->base;
+        s_ge_command[GE_BASE] = f->base;
+        s_sp = f->hw_sp;
+        s_hw_floor = f->hw_floor;
+        *next = f->pc;
+        return 1;
+    }
+    const uint32_t off = ((signal_op & 0xFFFFu) << 16) | (end_data & 0xFFFFu);
+    uint32_t target = off;                                      /* JUMP, CALL */
+    if (behavior == 0x13u || behavior == 0x14u) target = signal_pc + off;   /* from the SIGNAL */
+    else if (behavior == 0x15u || behavior == 0x16u) target = ge.offset + off;  /* from ORIGIN */
+    target &= 0x0FFFFFFFu;
+    /* uofw forms RJUMP/RCALL targets from off/4 words, so they can't misalign there; a
+     * relative offset that isn't a multiple of 4 is unmeasured on a PSP and fails closed. */
+    if ((target & 3u) != 0u || !sr_guest_span_readable_current(target, 4u))
+        return ge_signal_fail(name, signal_pc, "address error");
+    if (behavior == 0x11u || behavior == 0x14u || behavior == 0x16u) {
+        uint32_t limit = g_ge_signal_stack_limit < GE_SIGNAL_STACK_CAPACITY
+                             ? g_ge_signal_stack_limit : GE_SIGNAL_STACK_CAPACITY;
+        if (s_sig_sp >= limit) return ge_signal_fail(name, signal_pc, "stack overflow");
+        GeSignalFrame *f = &s_sig_stack[s_sig_sp++];
+        f->pc = addr & 0x0FFFFFFFu;
+        f->offset = ge.offset;
+        f->base = ge.base;
+        f->hw_sp = s_sp;
+        f->hw_floor = s_hw_floor;
+        s_hw_floor = s_sp;
+    }
+    *next = target;
+    return 1;
+}
+
 /* The list's END (no pending SIGNAL): flush the backend, finish the capture and publish the
  * list's signature and primitive count. */
 static void ge_list_end(uint32_t list_addr, unsigned long sig, unsigned long prims, int snap,
@@ -6353,10 +7151,26 @@ static void ge_list_begin(uint32_t list_addr, int resume) {
     g_ge_list_commands=0; s_ge_run_clk=0.0; s_ge_run_tail_words=0; s_ge_prim_vtx_share=0.0;
 }
 
+/* The commands ge_set_draw_observer counts as draws: each can write the framebuffer or depth. */
+static int ge_draw_observed(uint32_t op, uint32_t cmd_addr, uint32_t list_addr) {
+    switch (op >> 24) {
+        case GE_PRIM: case GE_BEZIER: case GE_SPLINE: case GE_VAP: case GE_TRANSFERSTART: break;
+        default: return 0;
+    }
+    if (s_draw_observer(s_draw_observer_ctx, s_draw_observer_index, op, cmd_addr, list_addr))
+        return 1;
+    s_draw_observer_index++;
+    return 0;
+}
+
 static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
     if (!s_ge_inited) ge_state_init();
     if (!resume) {
         s_sp = 0;
+        s_sig_sp = 0;
+        s_hw_floor = 0;
+        s_stalled_signal = 0;
+        s_ge_signal_fault[0] = '\0';
         s_bbox_visible = 1;
     }
     static int snap=-1; if(snap<0) snap=(getenv("SR_FBDUMP")||getenv("SR_GEDUMP"))?1:0;
@@ -6365,8 +7179,9 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
     ge_list_begin(list_addr, resume);
     extern unsigned long g_tex_nonzero; unsigned long start_nz=g_tex_nonzero;
     unsigned long sig=0; unsigned long prims=0;
-    int pending_signal=0;
-    uint32_t pending_signal_op=0;
+    int pending_signal=s_stalled_signal;
+    uint32_t pending_signal_op=s_stalled_signal ? s_stalled_signal_op : 0u;
+    s_stalled_signal=0;
     for (int guard=0; guard<(1<<20); guard++) {
         /* Compare 28-bit addresses. The list pointer and sceGeListUpdateStallAddr value may use
          * the uncached mirror (0x4xxxxxxx), while CALL/JUMP/RET targets are masked to 28 bits,
@@ -6381,6 +7196,8 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
             /* A list streamed through stall updates reaches its END in a later run, which
              * counts only its own primitives: count these toward the capture now. */
             if (ge_capture_active()) s_capture_total_prims += prims;
+            s_stalled_signal = pending_signal;
+            s_stalled_signal_op = pending_signal_op;
             return addr;
         }
         /* An early stop is a stall the guest did not ask for, so nothing holds it apart from one:
@@ -6391,7 +7208,10 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
             s_ge_run_stopped = 1;
             return addr;
         }
-        uint32_t op=MEM_R32(addr); addr+=4;
+        uint32_t op=MEM_R32(addr);
+        /* A draw observer may stop the run before a draw command: nothing of it has run. */
+        if (s_draw_observer && ge_draw_observed(op, addr, list_addr)) return addr;
+        addr+=4;
         uint32_t cmd=op>>24, data=op&0xFFFFFF;
         s_ge_state_serial++;   /* any command may change state that light_consts() caches */
         s_ge_command[cmd] = data;
@@ -6431,7 +7251,7 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
                 }
                 break;
             case GE_RET:
-                if (s_sp>0) { s_sp--; addr=s_stack_pc[s_sp]&0x0FFFFFFFu; ge.offset=s_stack_offset[s_sp]; }
+                if (s_sp>s_hw_floor) { s_sp--; addr=s_stack_pc[s_sp]&0x0FFFFFFFu; ge.offset=s_stack_offset[s_sp]; }
                 break;
             case GE_SIGNAL:
                 /* SIGNAL semantics are selected by bits 16..23 and completed by the following
@@ -6450,7 +7270,12 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
             case GE_END:
                 if (pending_signal) {
                     ge_log_signal_end(list_addr, addr, pending_signal_op, data);
-                    pending_signal=0; pending_signal_op=0; break;
+                    uint32_t signal_next = 0;
+                    int flow = ge_signal_end(pending_signal_op, data, addr, &signal_next);
+                    pending_signal=0; pending_signal_op=0;
+                    if (flow < 0) return addr - 8u;   /* stop at the SIGNAL: a named fault */
+                    if (flow > 0) addr = signal_next;
+                    break;
                 }
                 ge_list_end(list_addr, sig, prims, snap, start_nz);
                 return 0;
@@ -6459,6 +7284,8 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
                 break;
         }
     }
+    s_stalled_signal = pending_signal;
+    s_stalled_signal_op = pending_signal_op;
     return addr;
 }
 

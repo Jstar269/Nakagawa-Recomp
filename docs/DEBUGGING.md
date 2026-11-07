@@ -7,6 +7,9 @@ switches that are added for a focused investigation and have not yet been promot
 
 ## Quick Start
 
+These examples run the Hot Shots Tennis developer build in `build\hst`, which needs your own copy of the
+game and its title manifest; any other runtime takes the same variables.
+
 ```powershell
 # Enable all debug categories
 $env:SR_DEBUG = "0xFF"
@@ -81,6 +84,25 @@ divided by the interval's `wall_ms`, and VBlanks per frame are
   per-CPU scheduler clocks the kernel keeps within a tick or two of the wall clock: one frame can
   read a few ms long, and a run's sum is off by one reading at most. The JSON summary's `frames`
   object holds the run totals.
+
+The buckets say how many frames missed their period, not why. `SR_PERF_FRAMES=<path>` writes one
+CSV row per new game frame, so a slow frame can be read with its cause; like the other paths it
+turns the counters on by itself. `vcount` is the VBlank of the new frame and `vblanks` the VBlanks
+since the previous one; `work_ms` is that frame's host work as above (empty where the thread clock
+gave no reading) and `wall_ms` the host time between the two frames. Every other column is what
+the frame spent in one area, from the same counters as the one-second rows: `guest_ms`, `aot_ms`,
+`interp_ms`, `ge_cpu_ms` with `ge_cpu_calls`, `ge_wait_ms` with `ge_waits`, `readback_waits`, the
+Vulkan `vk_submit_ms`, `vk_wait_ms`, `vk_readback_ms`, `vk_pipeline_ms` and
+`vk_pipeline_creations`, `texture_decode_ms` with `texture_decodes`, `storage_ms` (disc image and
+file reads), `atrac_ms`, `h264_ms`, `audio_mix_ms`, `present_ms` and `sched_switches`. With
+`SR_GPU_TIMESTAMPS=1` the file has seven more columns, holding the GPU time that finished during the
+frame: `gpu_ms` (all GE work), then `gpu_render_ms`, `gpu_snapshot_ms`, `gpu_upload_ms`,
+`gpu_readback_ms` and `gpu_other_ms`, which add up to it, and `gpu_present_ms` (the presentation
+blit). They are empty when the GPU has no timestamp queries. Without the switch the file has no
+`gpu_*` columns at all. The first
+new frame starts the clock and writes no row, and a re-present of the same buffer adds its work to
+the next new frame. Join the rows with an `SR_SAMPLE_SPEC` file of the same run by VBlank to see
+which game phase the slow frames come from.
 
 For sparse GE front-end attribution, build with `GE_FRONTEND_PROFILE=1` (the default is `0`) and
 run with `SR_PERF=1` and `SR_GE_CPU_PROFILE=1`; `command_dispatch` is exported with those two, and
@@ -157,8 +179,8 @@ The summary fields mean:
   VFS byte/read/failure counters. `media` counts H.264 and ATRAC decode calls, elapsed time, and
   failures. If the host H.264 backend is unavailable, the runtime reports its named boundary
   (`H.264 backend unavailable; in the works (#283)`) instead of manufacturing a decode result.
-  `audio` separates SAS mix time from host output-enqueue time and frames; unavailable public audio
-  output remains an explicit product boundary (#301).
+  `audio` separates SAS mix time from host output-enqueue time and frames; public builds play sound through
+  SDL3 (#301), and with no output device the game runs silently.
 
 For exact AOT instruction counts, rebuild generated chunks with the compile-time profile:
 
@@ -390,6 +412,55 @@ not matched yet. The list is derived from a title's code, so keep it with the ti
 build inputs and out of the repository. A changed list is not a Makefile prerequisite, so
 rebuild the title's `_recomp.c` after merging.
 
+**Code a game installs at run time (#1933).** Some games copy code into their BSS or heap from their
+own data files and call it. No translation covers that code, so the call stops as
+`target-not-executable`, and no interpreter runs it (the PR #118 floor). Setting
+`SR_CODE_CAPTURE=<folder>` makes such a stop also write one capture to the folder, and print one more
+line, `CODE_CAPTURE: wrote code_capture_<target>_<digest>.nkcap [lo,hi) target=...`. The capture
+holds the target and the main RAM around it, up to 64 KiB on each side, that no executable span and
+no bound module owns. A bound translation of earlier captures owns only the words it translated. A
+call into the rest of its image, an entry no earlier target led to, is captured again. That capture
+lies inside the earlier window, and the two merge when their bytes agree, so the next build seeds
+both targets. The run still stops. Rebuild with the folder:
+
+```powershell
+python tools/code_capture.py info <folder>           # the images the captures make
+#   codegen.py ... --code-capture=<folder>           (Makefile: CODEGEN_USER_ARGS=--code-capture=<folder>)
+```
+
+Captures that overlap and agree byte for byte become one image. Each image is translated as an ELF type
+0xFFA8 overlay at its own address. Its analysis is seeded only from the addresses the runs called, so a
+word that only looks like code is never translated. The translation's identity is the words it
+translated, as for the overlays of #1938. At instruction-cache maintenance the runtime binds it only
+while memory holds exactly those words (`CODE_OVERLAY_BOUND`). The data around the code does not
+matter. When one of those words differs, the translation is unbound, and a call there stops again and
+writes a capture of the new bytes. Captures of the same address with different bytes stay separate
+images, and they swap as memory changes. A captured target the build cannot translate is named
+(`captured target 0x... has no translation`), and a call to it still stops by name.
+
+A capture holds bytes of your own game: keep the folder with the title's other private files. The
+repository ignores `*.nkcap`, and a capture is never committed or published.
+`mingw32-make code-capture-selftest` runs the whole loop on a synthetic routine.
+
+The player's launcher sets `SR_CODE_CAPTURE` for every title it starts, to the title's own folder
+`<user data>/cache/bringup/<DISC_ID>/captures` (created on launch, removed with the title's build
+cache). A value you set yourself is kept, and an empty one turns the capture off where the platform
+keeps empty variables. `nk_cli.py bringup` uses the same folder, always, and loops: every build
+translates each capture the folder holds (one `--code-capture=<file>` per capture in
+`CODEGEN_USER_ARGS`, so the package cache key changes with the set). When a launch stops at a capture
+the build did not translate, it builds and launches again, up to `--capture-rounds N` rounds
+(default 4, at most 16). The report's `code_capture` field and the summary list every round. It
+gives counts and outcomes, never capture names. A title whose folder holds no capture and whose run
+writes none takes one round, and its report has no `code_capture` field. Three named stops exit
+non-zero:
+
+- `BRINGUP_CAPTURE_BOUND: <n> rounds reached; last capture <file>`: the last round still stopped at
+  a new capture. Raise `--capture-rounds`.
+- `BRINGUP_CAPTURE_NOT_BOUND`: the run stopped at a capture its own build translated. The
+  translation did not bind, because memory did not hold the captured words when the game called
+  them, so another round would build the same thing.
+- `BRINGUP_CAPTURE_MISSING`: the run named a capture the folder does not hold.
+
 The share is a time share. It overstates the interpreter's share of instructions, because the
 interpreter is slower per instruction. The exact instruction share still needs a
 `PERF_AOT_INSTRUCTIONS=1` build with `SR_PERF=1`. Time is charged to the tier that is running. A
@@ -499,6 +570,30 @@ The NID is always the first whitespace-separated token so simple `awk '{print
 $1}'` extraction keeps working; consumers that only need the call sequence
 should ignore the trailing uid/vblank columns.
 
+#### The `HLE` lines on stderr
+
+A run writes a few `HLE ...` lines to stderr whatever `SR_DEBUG` says; no `SR_*` switch turns them on. They
+tell you how far to trust a result. All of them come from `src/rt/hle.c`, and `<name>`, `<nid>` and `<code>` below
+stand for the import's name, its NID and a result code. Only the last two stop the run; the others are
+observations.
+
+| Line (exact text) | Where | Meaning and next step |
+| --- | --- | --- |
+| `HLE: unverified: <name> (NID 0x<nid>) has no recorded evidence (docs/HLE_COVERAGE.md)` | `src/rt/hle.c:105` | Once per NID, just before its handler first runs. The handler exists, but no test records evidence for it. The line changes no result. Look the NID up in [`HLE_COVERAGE.md`](HLE_COVERAGE.md) before you trust what the handler returned. |
+| `HLE: controlled refusal: <name> (NID 0x<nid>) returned 0x<code>; in the works (#341)` | `src/rt/hle.c:86` | Once per NID. The handler is registered only to answer a fixed error code (`0x8...`), because the function is not modelled yet. The game gets that error, not an invented success. Find the handler with the "Find an HLE handler" recipe in [Quick recipes](#quick-recipes). |
+| `HLE: compatibility exception: <name> (NID 0x<nid>) keeps result 0; semantics in the works (<issue>)` | `src/rt/hle.c:114` | Once per NID, after the handler ran. The handler returns 0 so the game can go on, but the real semantics are not modelled; `<issue>` is the tracking issue. If the game misbehaves near this call, start from that issue. |
+| `HLE unimplemented summary: <name> (NID 0x<nid>) -> 0x<code>; in the works (#341)` or `HLE unimplemented summary: <name> (NID 0x<nid>) kept compatibility result 0; in the works (<issue>)` | `src/rt/hle.c:71`, `src/rt/hle.c:76` | Printed once at process exit (registered with `atexit`), one line for each NID that earlier printed a controlled refusal or a compatibility exception. It is the same information gathered at the end of the log. A run that ends with `_Exit`, such as the stop below, does not print it. |
+| `UNSUPPORTED_IMPORT: <name> <detail>; the run stops here (#308)` | `src/rt/hle.c:1922` (`hle_unmodelled_stop`) | A handler met an argument shape the runtime does not model. Under the scheduler the run exits with code 7 and the player shows an `unsupported-import-<name>` stop card. See `UNSUPPORTED_IMPORT` in [`FAILURE_CODES.md`](FAILURE_CODES.md). Fix or model the case; do not work around the stop. |
+| `HLE: unimplemented nid 0x<nid> (<name>) (thread uid 0x<uid>)`, then an indented line `-> add a handler in src/rt/hle.c: sr_hle_register(0x<nid>u, "<name>", h_...);` | `src/rt/hle.c:4072` (`sr_syscall`) | The game called an import with no handler at all (`<name>` is `unknown` if the NID is not in the name table). The run stops: exit code 7 under the scheduler, an HLE-miss stop otherwise. Add a handler, or an unsupported registration, for that NID. |
+
+Two more lines come from registration and mean a build problem, not a game problem:
+`HLE: duplicate NID 0x<nid> (<name>) rejected; first was <name>` (`src/rt/hle.c:216`) and
+`HLE: invalid unsupported result 0x<code> for <name> (NID 0x<nid>)` (`src/rt/hle.c:243`; an unsupported
+result must have its top bit set). Both are printed while handlers register; the second registration is dropped.
+
+`SR_HLELOG=1` adds the per-call `HLE: calling <name> (0x<nid>) from 0x<uid>` lines (`src/rt/hle.c:4065`). The
+coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COVERAGE.md`](HLE_COVERAGE.md).
+
 ### Thread Scheduling (→ SR_DBG_SCHED)
 
 | Variable | Description |
@@ -516,6 +611,11 @@ should ignore the trailing uid/vblank columns.
 | `SR_GEMATW=1` | Log GE matrix writes |
 | `SR_NO2DZ=1` | Disable 2D Z-buffer |
 | `SR_GPU_STATS=1` | Emit bounded Vulkan submission/batch/texture/snapshot counters without per-submit logging |
+| `SR_GPU_TIMESTAMPS=1` | Measure GPU time with Vulkan timestamp queries: each GE command buffer split by op kind (render batch, snapshot copy, upload, readback, other), printed as a `GEGPU_TS` line every 60 presents and a `GEGPU_TS_TOTAL` line at exit, and the presentation blit; with `SR_PERF_FRAMES` the times also fill the `gpu_*` columns. Ops overlap on the GPU, so the split is an attribution and the sum is the whole execution span. It changes no rendering, guest memory or wait |
+| `SR_GPU_TWIN_COLOR=1\|native` | Host twin (#2050), Ace Mode only: `1` presents full 32-bit colour without dither, `native` keeps the authentic colour (for identity checks). Any other value except `0` and `off` is refused. Guest VRAM is unchanged ([ENHANCEMENT_CONTRACT.md 10.11](ENHANCEMENT_CONTRACT.md#1011-full-32-bit-colour-the-host-twin)). Prints `TWIN:` lines at start and exit |
+| `SR_GPU_TWIN_CAPTURE=authentic` | With the twin on, present and capture the authentic image instead of the twin |
+| `SR_GPU_TWIN_DUMP=PREFIX` | `gpu-coherence-selftest` twin-scene: write each shown image as `PREFIX_t<n>_s<scale>.raw` (RGBA) |
+| `SR_GPU_TWIN_REF=PATH` | `gpu-coherence-selftest` twin cases: a twin-off run writes this reference, a twin-on run at the same scale checks against it (the harness's `--twin-ref`) |
 | `SR_GEDUMP=1` | Per-primitive `GE PRIM` lines (through and transform), bounded to the first ~40 |
 | `SR_GE_ENQUEUE_TRACE=1` | Trace GE enqueue/stall-update provenance without enabling the broader GE dump |
 | `SR_GE_ENQUEUE_TRACE_WINDOWS=a-b[,c-d]` | Restrict enqueue trace output to up to eight inclusive vblank ranges; malformed ranges fail closed |
@@ -527,6 +627,24 @@ should ignore the trailing uid/vblank columns.
 | `SR_GE_TRANSITION_TRACE=PATH` | Narrow one-frame-corruption harness (issue #69): one JSONL record per weighted `PRIM` draw with frame/draw ordinal, list id, command address, bone/world/view/proj matrices as both last guest writes and draw-time state, `non_finite` (non-finite values among the four effective matrices, so the record names what the GE drops), decoded `VTYPE`, bases/count/prim, render target, bound texture, and stable `draw_id`. `1` selects `logs/ge_transition_trace.jsonl`. Off by default; zero cost when off. Diff offline with `python tools/ge_transition_diff.py TRACE --frames GOOD:BAD`. A non-finite matrix entry is emitted as JSON `null` (printf's `-nan(ind)` is not JSON) and the diff flags it on its own line as `NON_FINITE in bone_written[0..35]` Also one `{"kind":"late_write"}` record per weighted draw whose vertex or index bytes changed between the draw and the next present, `sceGeDrawSync` wait or completed `sceGeListSync` (the runtime reads those bytes at enqueue, earlier than the console's GE would): `vertex_span`/`index_span`, both hashes, `check` and `check_vblank`; mirrored as a `GE_LATE_WRITE` stderr line. A late write is a candidate cause, not proof. |
 | `SR_NAN_TRAP_LIMIT=N` | Report limit for the `SR_NAN_TRAP` build option below (default 20; `0` silences it). Only has an effect in a package built with `make NAN_TRAP=1` |
 | `SR_NAN_TRAP_CONTEXT=1` | After each `NAN_TRAP` line, a `NAN_TRAP_CTX` line with `ra`, `v0`, `a0`..`a3`, `t0`, `s0`, `s1` and `f12`, then one line per readable 16-byte span behind `v0` and `a0`..`a3` (four floats), so an origin instruction's inputs in guest memory can be read without editing generated code. Same build requirement as the limit. |
+
+### Does a title enable mipmapping? (issue #1373)
+
+The GE prints one line, with no environment variable, at the first textured draw made with mip
+sampling enabled: a mip filter bit in `TEXFILTER` and a highest level above 0 in `TEXMODE`. It
+covers every route that textures (PRIM, BEZIER and SPLINE patches, and immediate vertices):
+
+```text
+GE mip: first draw with mip sampling enabled at frame 412, highest level 3, filter 0x6, level mode 0, bias 0/16 (#1373)
+```
+
+The line says mip sampling is enabled, not that a level above 0 was picked: a constant level 0 or a
+magnified draw counts too. No such line in a run means no textured draw had mip sampling enabled, so
+mip levels cannot be the cause of a defect seen in that run. A line means mipmapping is enabled and
+may or may not be the cause; read the draw's level mode, bias and size to tell. The line names the
+first draw only; `g_ge_mip_draws` (`src/rt/recomp.h`) counts all of them for the whole run and
+`g_ge_mip_lines_printed` counts the lines (0 or 1). `test_ge_texture_mip_levels` and
+`test_ge_mip_use_trace_routes` check both.
 
 ### Locating the instruction that produced a NaN (issue #69)
 
@@ -646,12 +764,12 @@ The diagnostic does not skip guest work or change GE execution.
 
 | Variable | Description |
 | ---------- | ------------- |
-| `SR_INLOG=1` | Log input state changes |
+| `SR_INLOG=1` | Log each change of the pad state the guest is handed, buttons and left stick (`ctrl_latch:` lines, the input of `tools/padscript_from_log.py`); every analog move prints a line, so a live-pad session logs a lot |
 | `SR_PAD=HEX` | Override pad state (hex buttons) |
 | `SR_PADPERIOD=N` | Automatic pad-pulse period in vblanks (default 240) |
 | `SR_PADWIDTH=N` | Automatic pad-pulse width in vblanks (default 4); each pulse is held until the guest has read it (see [Scripted input is delivered in guest time](#scripted-input-is-delivered-in-guest-time)) |
 | `SR_PADSTART=N` | Pad override start frame |
-| `SR_PADSCRIPT=FILE` | Scripted pad input: a state-qualified route program, or the legacy `frame hexmask width` table |
+| `SR_PADSCRIPT=FILE` | Scripted pad input: a state-qualified route program, or the legacy `frame hexmask width [lx ly]` table |
 | `SR_PADSCRIPT_READ_BUDGET=N` | Vblanks a scripted press may wait for the guest to read it before the run fails (default 1800; a press whose width is in guest reads may wait for all of them); not a whole number >= 1 refuses the script |
 | `SR_OSK_SCRIPT=FILE` | Scripted on-screen-keyboard answers, one per input field in order (`CANCEL` answers that field as cancelled) |
 | `SR_OSK_TEXT=TEXT` | Answer every on-screen-keyboard field with the same text |
@@ -679,6 +797,33 @@ The converter expands shorter presses so a replay holds each press for as many
 vblanks as a person would. A one-vblank pulse can no longer fall between the
 game's controller reads, because scripted input waits for a read (below). Use
 `--minimum-width 1` only when an exact-width replay is required.
+
+The left stick is recorded with the buttons. Each `ctrl_latch:` line carries the
+stick the guest was handed (`lx=`, `ly=`; a title in digital mode reads 128, 128),
+and a row whose stick is off centre gets two more columns, `<frame> <hexmask>
+<width> <lx> <ly>`, which the replay holds for that row's width. Where rows
+overlap, the stick of the row that started last holds. A sweep of the stick passes
+through a new position every vblank; positions held for fewer than
+`--stick-min-width` vblanks (default 4) are folded into the next position, so the
+table keeps the positions the stick stayed at. Use `--stick-min-width 1` to keep
+every recorded position. A table is refused at load past 4096 rows; a long
+analog session that passes it needs a larger `--stick-min-width`, or to be
+recorded in parts.
+
+A replayed stick is therefore approximate, not a sample-for-sample copy:
+
+- A position held for fewer than `--stick-min-width` vblanks is not replayed; the
+  stick moves to the next position that many vblanks early.
+- A short press is expanded to `--minimum-width`, and the stick it was pressed
+  with is held for the expanded width as well, up to 8 vblanks by default, unless
+  a later row holds the stick somewhere else.
+- A row with a stick and no button is a press: the replay holds it until the
+  guest has read it, as it holds a button.
+
+Rows without a stick replay exactly as they did before stick columns existed. With
+`SR_INLOG=1`, every change of an analog stick prints a line, so a session with a
+live pad writes a large log: a stick at rest that wobbles by one step prints a
+line each time it moves.
 
 ### Scripted input is delivered in guest time
 
@@ -816,6 +961,7 @@ keeps the original behaviour exactly, and a file mixing the two is refused.
 | `PRESS_UNTIL_NID <import\|0xNID> <hexmask\|buttons> <width> <period> <timeout>` | Repeat the press (held `width`, released for the rest of `period`) until the guest calls that import; fail on timeout. Use it where a press may land without changing the screen, such as a message box or a Yes/No that waits on a savedata check, because the import is the event that says the press was taken |
 | `WIDTHS VBLANKS\|READS` | The unit the widths of `PRESS`, `DELAY`, `PRESS_UNTIL`, `PRESS_WHILE` and `PRESS_UNTIL_NID` count in, for the whole file (default `VBLANKS`); must precede every step, and may appear once |
 | `READS <step>` / `VBLANKS <step>` | The unit of that one `PRESS`, `DELAY`, `PRESS_UNTIL`, `PRESS_WHILE` or `PRESS_UNTIL_NID` line; overrides `WIDTHS` |
+| `STICK <lx> <ly> <step>` | Hold the left stick at `lx`, `ly` (decimal 0-255, 128 centred) while that `PRESS`, `PRESS_UNTIL`, `PRESS_WHILE` or `PRESS_UNTIL_NID` presses; comes before `READS` / `VBLANKS` ([below](#holding-the-left-stick)) |
 | `END` | Route complete |
 
 A mask is either a button name (see [Naming the buttons a route presses](#naming-the-buttons-a-route-presses))
@@ -926,6 +1072,45 @@ Only these rules differ from the vblank widths above:
   line with either word, so an existing route parses and replays exactly as it did.
 - The legacy `frame hexmask width` table has no keyword lines, so it stays in vblanks. Write a
   route program to use reads.
+
+### Holding the left stick
+
+A route without `STICK` leaves the left stick centred (128, 128), so it can press buttons but
+cannot walk a character. `STICK <lx> <ly>` in front of a pressing step holds the stick at that
+position for as long as the step presses. Each axis is a decimal from 0 to 255, with 128
+centred: `lx` 0 is full left and 255 full right, `ly` 0 is full up and 255 full down. A press
+mask of `0` holds the stick with no button:
+
+```text
+STICK 255 128 PRESS 0 120            # right, no button, for 120 vblanks
+STICK 255 128 PRESS CROSS 8          # right with CROSS held
+DELAY 30                             # released, stick centred
+STICK 128 0 READS PRESS 0 4          # up for four guest reads
+STICK 128 255 PRESS_UNTIL_NID sceIoOpen 0 2 8 600
+END
+```
+
+- The stick is part of the pad state the step holds, so it is delivered by the rule above: it
+  is latched into the controller ring with the buttons and reaches the guest in
+  `SceCtrlData`'s `Lx` and `Ly` bytes through the same reads (`sceCtrlReadBuffer*`,
+  `sceCtrlPeekBuffer*`). A press that holds only the stick is still a press: it has the read
+  budget, and a guest that never reads it fails the run.
+- The released half of a `PRESS_UNTIL`, `PRESS_WHILE` or `PRESS_UNTIL_NID` period, `DELAY`,
+  and every other step centre the stick, as they release the buttons.
+- A PSP reports the stick only in analog sampling mode (`sceCtrlSetSamplingMode(1)`). A title
+  in digital mode reads 128, 128 whatever the route holds, and the route log says so once.
+- While a step holds the stick, the scripted position replaces the window's live stick for
+  those samples; before and after, the live stick is read as usual. Buttons are combined with
+  live input, but a stick cannot be, because a pad at rest does not sit at exactly 128, 128.
+- `STICK` applies to the four pressing steps only, comes first on the line, and is refused at
+  load with anything else, including a value outside 0-255 or one that is not a plain decimal.
+- A press the guest never reads fails the run naming the stick position it held, as it names
+  the buttons.
+- A route program has at most 4096 steps; a longer one is refused at load with the line that
+  passed the limit, never cut short.
+  No existing route starts a line with the word, so existing routes parse and replay exactly as
+  they did. The legacy `frame hexmask width` table has no stick column; write a route program to
+  hold the stick.
 
 ### Naming the buttons a route presses
 
@@ -1180,9 +1365,132 @@ the ungated run. **Do not** reach for `SR_NOVBPACE=1` to speed a route up: that 
 jumps over idle delay waits, and it demonstrably changes game speed (it is the behaviour vblank
 pacing was added to fix). A faster route is worthless if it is not the same route.
 
+A run that must give the same frames every time (the picture gate, a capture retake) sets
+`SR_DETERMINISTIC_CLOCK=1` (#2037): guest time then charges the work the guest does instead of the
+time the host took. It is not turbo: it does not run a title ahead of its own work. A pad script or
+a capture window alone does not turn it on, so existing routes keep their paced timing.
+
 `tools/nk_safety.ps1` holds the helpers whose failure modes are silent (bounded wait,
 archive reset, completeness verdict); `tools/test_visual_oracle.py` exercises them against real
 processes and directories.
+
+#### Finding where two runs split (replay checkpoints)
+
+When two runs of the same route end differently, `SR_REPLAY_CHECKPOINTS=<file>` (#2147) names the
+first VBLANK, and the part of the guest state, where they stopped agreeing. Every
+`SR_REPLAY_CHECKPOINT_EVERY` vblanks (default 60, 1..100000) the runtime writes one line of SHA-256
+digests. It digests the guest state, never the guest bytes:
+
+| Digest | What it covers |
+| --- | --- |
+| `cpu.<uid>` | one guest thread's `CpuState`; the running thread's live registers |
+| `sched` | each thread's uid, state, priority and wait object, plus the guest clock |
+| `vram.<addr>` | VRAM in 1 MiB chunks |
+| `ram.<addr>` | main RAM in 1 MiB chunks, named by guest address |
+
+```powershell
+$env:SR_DETERMINISTIC_CLOCK = "1"
+$env:SR_REPLAY_CHECKPOINTS = "logs/run-a.ckpt"   # then run again with logs/run-b.ckpt
+python tools/nkstate.py ckpt-diff logs/run-a.ckpt logs/run-b.ckpt
+```
+
+`ckpt-diff` prints one line:
+
+- `MATCH checkpoints=<n>`, exit 0;
+- `MISMATCH frame=<vcount> index=<k> kind=<frame|names|digest> digest=<name>`, exit 1. `names` means a
+  thread or region appeared or went; `frame` means the runs reached the checkpoint on different
+  vblanks;
+- `NOT_RUN ...`, exit 3: the runs used another cadence or clock (`different-settings`), one stopped
+  before the other (`ended-early`), a line is `malformed`, or there are `no-checkpoints`. `NOT_RUN` is
+  never a match.
+
+Use the deterministic clock. Under the paced clock, guest time follows the host, so `sched` differs
+from the first checkpoint on by design. To narrow a mismatch:
+
+- a `ram.<addr>` chunk: set a memory watch on that MiB;
+- a `cpu.<uid>` thread: arm `SR_FLIGHT_TRIGGER` near the mismatching vblank on the next run.
+
+Hashing all of RAM takes a noticeable fraction of a second per checkpoint, so raise
+`SR_REPLAY_CHECKPOINT_EVERY` on long runs. A checkpoint file holds no game bytes, but it describes a
+private run, so keep it in your logs folder and do not attach it to a public report.
+
+How this differs from the other tools:
+
+- `SR_INLOG` and `SR_PADSCRIPT` (above) repeat a run's *input*; they do not say where two runs split.
+- `ROUTE_SIG` is a signature of one frame's picture, not of the guest state.
+- `tools/flight_diff.py` compares two flight-recorder event bundles. Its `checkpoint:` trigger
+  counts events; it does not compare state.
+
+#### Recording and replaying a run (#2147)
+
+`SR_RECORD=<file>` records a run, and `SR_REPLAY=<file>` replays that recording in a fresh run of the
+same executable. Both need `SR_DETERMINISTIC_CLOCK=1`. With it the guest clock and the RTC follow guest
+time, not the host clock, so what is left to record is what came from outside the guest: the pad
+and the on-screen-keyboard text. A recording holds:
+
+- a header binding it to one build: the cadence, the clock, a digest of the executable, the disc ID
+  (`SR_DISC_ID`), and the `CpuState` ABI version and size;
+- each pad sample the guest was handed (`NKPAD`): buttons, stick, and whether the on-screen keyboard
+  took it, as runs of equal samples. A sample skipped because a pause was requested is recorded as a
+  skip, and the replay skips it too;
+- each keyboard request's answer and how many polls it stayed open first (`NKANSW`);
+- the run's own checkpoints, every `SR_REPLAY_CHECKPOINT_EVERY` vblanks (`NKCKPT`);
+- `NKREC_END` at a normal exit.
+
+Each line is written as soon as it is known, so a run stopped by a capture or a vblank budget keeps a
+recording up to its last checkpoint.
+
+```powershell
+$env:SR_DETERMINISTIC_CLOCK = "1"
+$env:SR_RECORD = "logs/run.nkrec"                  # the first run
+# later, in a new process:
+Remove-Item Env:SR_RECORD
+$env:SR_REPLAY = "logs/run.nkrec"
+```
+
+The replay serves the recorded answers instead of opening the keyboard. It checks each checkpoint as it
+reaches it and writes exactly one verdict to stderr:
+
+| Verdict | Meaning |
+| --- | --- |
+| `REPLAY_REFUSED reason=<name> line=<n>` | exit 1 before the guest runs: another executable, disc, `CpuState` ABI or clock, or a line it cannot read |
+| `REPLAY_MISMATCH frame=<f> index=<i> kind=<k> digest=<name>` | exit 1 at the first checkpoint that differs, naming the thread, scheduler or memory chunk |
+| `REPLAY_MISSING_ANSWER call=osk request=<k> frame=<f> detail=<why>` | exit 1: the guest asked for an answer the recording does not hold. Nothing is made up |
+| `REPLAY_COMPLETE frame=<f> checkpoints=<n> answers=<k>` | every checkpoint matched. Input recorded after the last one is still served; the pad and the keyboard each go live when the recording runs out |
+| `REPLAY_NOT_RUN reached=<f> end=<f> checkpoints=<i>/<n>` | at exit, when the run stopped before the recording was used up. This is never a pass |
+
+The pad is recorded after the route, the stick mode and the keyboard have shaped it, so a replay needs
+neither the person nor the script, and a pause requested during a replay does not change it. Route
+bookkeeping still runs during a replay, so an `SR_ROUTE` run replays with the same route. `ckpt-diff` compares two recordings, or a recording with a checkpoint
+stream taken on the same cadence. A recording holds no game bytes, but it describes a private run:
+keep it with your logs.
+
+#### Save states (#2146)
+
+A save state is an `nkstate` file (`src/rt/nkstate.h`; `python tools/nkstate.py info <file>` prints
+it). It holds:
+
+- a header binding it to one build: the `CpuState` ABI version and size, the executable identity,
+  the runtime build identity (`SR_BUILD_ID`) and the disc ID;
+- one segment per subsystem, each with its own version and SHA-256.
+
+A load refuses another build, a changed segment or a changed header, and names the field that
+differs. It loads nothing until the whole file has been checked. After loading, it checks that each
+subsystem saves back to the exact bytes it was given. A capture is refused, naming the subsystem,
+when a required subsystem has no save and load, or when a subsystem is busy (for example a display
+list in flight). There is no best-effort state.
+
+A state holds game memory, so it stays in the user's private folder like saves. It is never
+committed, uploaded or attached to a report.
+
+What a state cannot capture yet: a guest thread parked inside native code. Every guest thread runs on
+its own host coroutine, and a thread waiting in an import or at a loop back-edge is in the middle of
+native frames that its `CpuState` does not describe. So #2146 builds save states first as a verified
+deterministic replay: the run is replayed from boot under `SR_DETERMINISTIC_CLOCK=1`, and its
+checkpoints are compared on the way. Today the container, its refusals, the checkpoints and
+`SR_RECORD`/`SR_REPLAY`, pad input included, exist; the player's save and load keys are still to
+come. Direct states and fast rewind need the runtime to resume a thread at a guest PC with no host
+frames, which is tracked in #2172.
 
 #### Running on a disposable Memory Stick
 
@@ -1285,9 +1593,16 @@ scan: they are excluded from `presenting` and never counted as a stall.
 | `SR_FBDUMP=N` | At vcount=N publish the presented frame as `present_source.ppm` and exit; status 0 only if a capture was truly published, else 1 |
 | `SR_VRAMDUMP=V[,V...]` | Capture the raw 2 MiB guest VRAM image and GE metadata at up to eight unique presented vblanks; pair with `SR_VRAMDUMP_DIR` |
 | `SR_VRAMDUMP_DIR=PATH` | Existing directory for `vram_<vblank>.bin` and `.json` capture files |
+| `SR_VIDEOREC_DIR=PATH` | Record the run: one video frame per VBLANK at the presenter's output size plus the game's mixed audio, on one guest timeline. Needs `SR_DETERMINISTIC_CLOCK=1`; without it the recording is refused ([Recording a video of a run](#recording-a-video-of-a-run)) |
+| `SR_VIDEOREC_CODEC=ffv1\|x264rgb\|nvenc\|raw` | Encoder for a recording (default `ffv1`, lossless); `raw` writes unencoded frames and needs no FFmpeg. An encoder that cannot run refuses the recording; it never falls back to `raw` |
+| `SR_VIDEOREC_SIZE=WxH` | Output size of a recording, independent of the window (even numbers); default: the window's size at the first recorded present |
+| `SR_VIDEOREC_START=V` | Start the recording at VBLANK V (its first presented picture from there on); earlier pictures and sound are not recorded |
+| `SR_VIDEOREC_FFMPEG=PATH` | Absolute path of the FFmpeg a recording uses; default: the first absolute `PATH` entry that holds it |
 | `SR_DEVELOPER_MODE=0\|1` | Developer mode (the launcher exports its setting): `F3`'s profile HUD and the pause menu's VRAM viewer and Profile page |
 | `SR_REDUCE_MOTION=on\|off\|system` | The launcher's Reduce motion choice (it always exports one): `on` makes the pause overlay's transitions cuts, `off` lets them ease, and `system` (the launcher's Automatic), unset or anything else follows Windows' Animation effects as the overlay draws |
 | `SR_NOVBPACE=0\|1` | Vblank pacing mode: unset, empty, or "0" = paced (default); "1" = turbo. Any other value fails closed at startup |
+| `SR_DETERMINISTIC_CLOCK=0\|1` | Guest time as a function of the guest's work, never the host clock (#2037). `1` = on; unset, empty or `0` = off. `1` with `SR_NOVBPACE=0`, or any other value, fails closed at startup |
+| `SR_DETERMINISTIC_SLICE_US=N` | Guest microseconds the deterministic clock charges per scheduler boundary: 1..100000, default 100 |
 
 For a replayable GE fixture, set `SR_GE_CAPTURE_FRAME=<vblank>` or
 `SR_GE_CAPTURE_FRAME=<first>-<last>`. The range form captures the first submitted frame in that
@@ -1302,7 +1617,7 @@ committed.
 | ---------- | ------------- |
 | `SR_FONTLOG=1` | Log font operations: each slot's source, and the guest's reads of the generated `/DATA/FONT` registry subtree (the keys it asks for, the categories it opens, and each font index served) |
 | `SR_MPEGLOG=1` | Log mpeg operations. The PSMF media producer also logs one bounded counter line per reporting interval: bytes read, packs, PES packets, per-track PES and access-unit counts, access units that carried no presentation time, resync bytes, both compressed-queue depths, EOF state and failure offset, the disposition census of both tracks (submitted, decoded, delivered, warm-up-held, eos-drained, rejected — plus audio format rejects `arejf` and mono upmixes `aupm`), decoder-error counts, the pipeline presentation clocks (`vpts`/`apts`), the guest-facing presentation points at the getters (`vts`/`ats`), the A/V separation between those comparable points (`avgap`, `vts-ats`), submitted-minus-delivered (`vlead`, the pipeline distance inside the output ring), displaced ring times (`vlost`), the last `displaypts`, and the drain flags — enough to classify every decoded picture and locate the first boundary that stops a movie without attaching a debugger |
-| `SR_MPEGAV=1` | Measure the A/V offset where a viewer perceives it, not at the getters (issue #279); `SR_MPEGLOG` also turns it on. Diagnostics only: nothing in the guest changes. Each decoded picture the guest receives (`scePsmfPlayerGetVideoData`, or `sceMpegAvcCsc` writing a `sceMpegAvcDecodeYCbCr` picture) and each audio block (`scePsmfPlayerGetAudioData`) is remembered in a 32-entry ring per stream with its guest byte range, 90 kHz pts and delivery time. The first later `sceDisplaySetFrameBuf` flip (immediate, or applied at VBLANK) whose frame overlaps a picture's range is its presentation, at that guest time; the first `sceAudioOutput*` submit overlapping a block is its play time, taken as the guest time of the submit plus the host queue lead ahead of it (`sr_audio_queued` before the push, 44.1 kHz frames), and `-1` (no host queue) is reported as not measured, never as a lead of zero. A stream's offset is play time minus pts in microseconds; the A/V offset is the video offset minus the audio offset, averaged per 5 s window of guest time. A `PSMF_AV_PRESENT:` line is printed per window (`win`, `end_us`, sample counts `vn`/`an`, `voff_us`, `aoff_us`, `av_us`; `na` where a stream had no measured sample), and `PSMF_AV_PRESENT_FINAL:` at `scePsmfPlayerDelete` and at process exit with the totals: `vdel`/`adel` delivered, `vmatch`/`amatch` matched, `vunmeas`/`aunmeas` matched without a measurable time, `vsuper`/`asuper` overwritten before they were presented or played, `vevict`/`aevict` pushed out of the ring, `vnospan`/`anospan` with no usable byte range, `vpend`/`apend` still waiting at the report (delivered = the sum of those six), `vbnd`/`abnd` presents or submits seen and `vhit`/`ahit` those that matched something, delivery-to-present latency (`vlat_mean_us`, `vlat_max_us`, and `alat_*`), and `av_min_us`, `av_max_us`, `av_mean_us` over the windows with both streams, `av_first_us`, `av_last_us` and `drift_us` (last window minus first, needs two). Reading a run: a flat `av_us` across windows is no drift; a falling or rising `av_us` is one stream running slow against the other. `vmatch=0` with many `vsuper` means the title copies or composites the movie before presenting it, so the picture cannot be matched by address and the video side is not measured, not in sync. `sceMpegAtracDecode` writes no PCM, so no audio is delivered through it |
+| `SR_MPEGAV=1` | Measure the A/V offset where a viewer perceives it, not at the getters (issue #279); `SR_MPEGLOG` also turns it on. Diagnostics only: nothing in the guest changes. Each decoded picture the guest receives (`scePsmfPlayerGetVideoData`, or `sceMpegAvcCsc` writing a `sceMpegAvcDecodeYCbCr` picture) and each audio block (`scePsmfPlayerGetAudioData`) is remembered in a 32-entry ring per stream with its guest byte range, 90 kHz pts and delivery time. The first later `sceDisplaySetFrameBuf` flip (immediate, or applied at VBLANK) whose frame overlaps a picture's range is its presentation, at that guest time; the first `sceAudioOutput*` submit overlapping a block is its play time, taken as the guest time of the submit plus the host queue lead ahead of it (`sr_audio_queued` before the push, 44.1 kHz frames), and `-1` (no host queue) is reported as not measured, never as a lead of zero. A stream's offset is play time minus pts in microseconds; the A/V offset is the video offset minus the audio offset, averaged per 5 s window of guest time. A `PSMF_AV_PRESENT:` line is printed per window (`win`, `end_us`, sample counts `vn`/`an`, `voff_us`, `aoff_us`, `av_us`; `na` where a stream had no measured sample), and `PSMF_AV_PRESENT_FINAL:` at `scePsmfPlayerDelete` and at process exit with the totals: `vdel`/`adel` delivered, `vmatch`/`amatch` matched, `vunmeas`/`aunmeas` matched without a measurable time, `vsuper`/`asuper` overwritten before they were presented or played, `vevict`/`aevict` pushed out of the ring, `vnospan`/`anospan` with no usable byte range, `vpend`/`apend` still waiting at the report (delivered = the sum of those six), `vbnd`/`abnd` presents or submits seen and `vhit`/`ahit` those that matched something, delivery-to-present latency (`vlat_mean_us`, `vlat_max_us`, and `alat_*`), and `av_min_us`, `av_max_us`, `av_mean_us` over the windows with both streams, `av_first_us`, `av_last_us` and `drift_us` (last window minus first, needs two). Each window line also gives `alead_us`, the mean host queue lead its matched audio blocks met, and `av_submit_us`, the A/V offset with that lead left out: video at the flip against audio at the guest's `sceAudioOutput*` submit, two boundaries a PSP has too. The summary gives `alead_mean_us`, `alead_max_us` and `av_submit_mean_us`. `av_us` is `av_submit_us` minus the lead, so an `av_us` that is all lead comes from our output stage, not from the guest's timing. Reading a run: a flat `av_us` across windows is no drift; a falling or rising `av_us` is one stream running slow against the other. `vmatch=0` with many `vsuper` means the title copies or composites the movie before presenting it, so the picture cannot be matched by address and the video side is not measured, not in sync. `sceMpegAtracDecode` writes no PCM, so no audio is delivered through it |
 | `SR_DLGLOG=1` | Log dialog operations |
 | `SR_CBLOG=1` | Log callback operations |
 | `SR_SYSLOG=1` | Log system calls |
@@ -1324,7 +1639,7 @@ committed.
 
 | Variable | Description |
 | ---------- | ------------- |
-| `SR_VBLANK_Q_US=N` | Host-clock vblank quantum in microseconds. In the default paced profile it does **not** produce vblanks -- the scheduler's rational 60000/1001 source is the only producer -- and only sets the threshold at which a yield is counted as late vblank *service* (reported as `vbl_late_service_yields` by the spin watchdog). It is an out-of-band vblank source only under `SR_NOVBPACE=1` |
+| `SR_VBLANK_Q_US=N` | Host-clock vblank quantum in microseconds. In the default paced profile it does **not** produce vblanks -- the scheduler's rational 60000/1001 source is the only producer -- and only sets the threshold at which a yield is counted as late vblank *service* (reported as `vbl_late_service_yields` by the spin watchdog). It is not a vblank source in any mode: turbo and the deterministic clock take theirs from guest time (#2037) |
 | `SR_WATCHDOG_EXIT=N` | Abort after N vblanks with no new frame; a firing is a NO-NEW-FLIP observation, not a hang verdict -- classify it with the display counters, thread dump, and MPEG/PSMF activity the watchdog prints |
 | `SR_GE_TIMING=1` | Opt-in GE completion timing (issue #1296), off by default. A display list that reached its END completes -- finish callback, `sceGeDrawSync`, `sceGeListSync` -- only once guest time passes its cost on one serial GE timeline; the callback is delivered as an interrupt, and the peeks read 2 until it is handled. The cost model in `src/rt/ge.c` is in GE clocks (the bus clock, converted at the emulated bus clock) and every coefficient was measured on a PSP-3000 with `CASE=ge-timing` (PR #1321): per list, command word and PRIM, per vertex by format, per span by width and fill state, texel fetch, CLUT loads and block transfers. Classes the measurement did not cover are charged as the nearest measured class and tagged `UNMEASURED_NEAREST` in the source. Startup prints `GE_TIMING: on, GE time model measured on PSP-3000 ...` |
 | `SR_AUDIO_DISABLED=1` | Disable audio output (null backend). `SR_AUDIO_BACKEND=null` (or `none`, `0`, `off`) does the same; `SR_AUDIO_BACKEND=dummy` keeps the device open on SDL's dummy driver. `SR_HEADLESS=1` also selects the null backend unless `SR_AUDIO_BACKEND` is set |
@@ -2003,9 +2318,144 @@ player and game behave as they do for everyone ([#314](https://github.com/Jstar2
 - **Run one native self-test the way CI does.** `mingw32-make GAME_NAME=ci BUILD_DIR=build/windows-runtime CC=gcc
   hle-thread-selftest` (likewise `psmf-media-selftest`). Each prints a `<name>: N checks, M failures` summary; there is
   no per-test filter, so run the whole target.
+- **Record a video.** `SR_VIDEOREC_DIR=<private folder>` plus `SR_DETERMINISTIC_CLOCK=1`,
+  `SR_VIDEOREC_SIZE=3840x2160`, a route
+  (`SR_PADSCRIPT`) and `SR_EXIT_AT_VBLANK`; `record.json` says `PASS` and `recording.mkv` holds picture
+  and sound ([Recording a video of a run](#recording-a-video-of-a-run)).
+- **Find the first GE draw where Vulkan departs from the software GE.** Build with
+  `mingw32-make ge-replay`, then run `build/ge_replay.exe <capture.ngef> --first-bad-draw` on a GE
+  capture. It replays draw prefixes through both renderers in one process and compares every colour
+  target, depth buffer and block-transfer destination the prefix used. It prints
+  `GE_FIRST_BAD_DRAW result=NO_DIFFERENCE`, or `result=FIRST_BAD_DRAW index=N` followed by a
+  `GE_FBD_DRAW` line with that draw's command-list address and GE state, one `GE_FBD_REGION` line
+  per buffer that differs, with the pixel count, the largest difference and the bounding box, and
+  three crops (`<capture>.first-bad-draw.software.ppm`, `.vulkan.ppm` and `.diff.ppm`; `--report
+  PREFIX` moves them). `--mode linear` checks every prefix. `--mode bisect` halves the prefix and
+  assumes a difference persists to the end of the frame. The default, `auto`, runs linear up to
+  256 draws. A difference `src/rt/gpu_sdl3vk/README.md` allows (fixed-function blends within 2 LSB)
+  is counted under its rule name (`rule=blend-2lsb`), and a frame with only those reports
+  `result=RULE_ONLY`. Each buffer is compared over everything a draw can write there (the scissor,
+  or a transfer's rectangle). When a buffer cannot be compared in full (more than 32 buffers, a
+  stride past 1024, a scissor past the 480x272 that ge.c rasterizes, depth past ge.c's 272 rows),
+  the tool prints `result=INCOMPLETE` with a
+  `GE_FBD_UNCOMPARED` line per buffer and exits 5, and a capture with no draw is `result=NO_DRAWS`
+  (exit 6): neither is ever `NO_DIFFERENCE`. A capture of a title is private, and so are its report
+  and crops.
+  `mingw32-make ge-first-bad-draw-selftest` checks the tool on generated captures against two
+  executed Vulkan mutants and the known overlapping-blend difference (#2109).
+  `ge_replay --write-synthetic <path> [basic|overlap|wide|empty|many|deep]` writes those captures.
 - **Capture frames unattended.** Set `SR_NOINPUT=1` so the automatic START pulse does not reach the game, bound the run
   with `SR_EXIT_AT_VBLANK` ([where it stops](#where-sr_exit_at_vblank-actually-stops)), and capture with
   `SR_FBSNAP_WINDOWS` ([both ends of a transition](#capturing-both-ends-of-a-transition--snapwindows)).
+
+### Recording a video of a run
+
+`SR_VIDEOREC_DIR=<folder>` records a run for a video (#1273): every serviced VBLANK writes one frame,
+the newest picture the presenter showed at its output size, or the previous one again when the guest
+did not flip, so the video has a constant 60000/1001 frames per second. Every `sceAudioOutput*`
+hand-off is mixed into one 44100 Hz stereo track at the guest time it was made, each channel
+continuing where its last buffer ended, as the PSP plays it. Frame *k* and audio sample
+`k * 44100 * 1001 / 60000` are the same guest instant, so picture and sound cannot drift apart. The
+recorder writes no guest memory.
+
+A recording needs `SR_DETERMINISTIC_CLOCK=1`. Reading the picture back, copying it and writing it to
+the encoder take host time on the thread that runs the guest. On the default paced clock that time
+would make the guest skip VBLANKs that a run without the recording keeps, so the recorder refuses to
+start there and says why. On the deterministic clock guest time charges the guest's own work, not
+the host's, so the guest timeline is the same with and without the recording; a slow encoder makes
+the run take longer in host time instead. `display-smoke-run` proves this: it records the display
+fixture through an encoder that stalls every frame write and compares the guest's flight events,
+including the VBLANK count at each `sceDisplaySetFrameBuf`, with an unrecorded run.
+
+The deterministic clock changes the run itself, not only the recording:
+
+- It is unpaced. The guest runs as fast as the host and the encoder allow, faster or slower than
+  real time, so a run being recorded is not one to play live: input from a person, and sound
+  through the speakers, no longer line up with the picture. Drive a recorded run with
+  `SR_PADSCRIPT`.
+- Its guest time follows the guest's own work, and its RTC starts at 2012-01-01 00:00:00 UTC
+  ([Clocks](ARCHITECTURE.md#clocks)). A pad-script route qualified on the
+  default paced clock may not replay the same way on it: a press can land on a different frame,
+  and a game that reads the date sees another one. Re-qualify a route under
+  `SR_DETERMINISTIC_CLOCK=1`, without recording, before recording it.
+
+On the Vulkan presenter the recorded picture is the one the window shows (Ace Mode's smooth motion
+included), scaled with the window's own scaling mode (`SR_PRESENT_SCALING`) into a fixed-size
+target. With `SR_PRESENT_UPSCALE=fsr1` the recording is enlarged by FSR 1 as the window is, at the
+recording's own size and through its own pass, so `SR_VIDEOREC_SIZE` never makes the window's pass
+rebuild its images ([#2138](https://github.com/Jstar269/nakagawa-recomp/issues/2138);
+`gpu-capture-selftest` checks a 960x544 recording against a separate FSR 1 pass's output, byte for
+byte). As in the window, FSR 1 only enlarges: a recording no larger than the picture uses the
+scaling mode. `record.json` names the scaling that made each picture, not the setting that asked
+for it: `"filter"` is `fsr1`; `sharp` (a nearest prescale to a whole multiple, then a linear
+shrink); `nearest` (one nearest-neighbour blit, which is what any mode draws at an exact multiple
+such as 960x544, and what `integer` draws when a multiple fits); `linear` (one linear blit, as
+`bilinear` draws at other sizes and every mode draws when the recording is smaller than the
+picture); `none` (a picture at its own size, as the CPU presenters record); or `mixed` when the
+written frames were made in more than one way. `"filter_frames"` counts the written frames by
+filter. When the recording's FSR 1 pass cannot be made, the log says so once and each frame is
+named by the scaling mode's blits. `gpu-capture-selftest` checks the name at 960x544, at a
+letterboxed 1000x600 and at a shrinking 320x180, in each mode. It is a clean capture:
+no host overlay reaches it, neither the HUD and its frame-rate readout nor the player's notices nor
+the pause overlay. `SR_VIDEOREC_SIZE=3840x2160` records 4K whatever the window's size. The CPU
+presenters (GDI, offscreen) record their 480x272 frame.
+
+The game's own frame rate is kept beside the picture instead, so footage of a 60 Hz presentation
+still says how many frames the game drew: `frames.csv` gives each video frame's count of guest flips
+(`sceDisplaySetFrameBuf` changes; Ace Mode's in-between pictures are not flips), `logic.srt` gives
+one subtitle per 60 frames (`game 29.9 fps (30 frames)`), and `record.json` gives the total.
+
+The folder receives `video.mkv` (FFV1, piped to FFmpeg's standard input), `audio.wav`, `frames.csv`
+(one row per frame: VBLANK, guest time, whether it is a `new` picture, a `repeat` or a `gap`, and its
+guest flips), `logic.srt`, `record.json` (the summary, `PASS` or `FAIL` with the reason) and
+`recording.mkv`: picture, sound and the frame-rate subtitles (a track that is off by default) muxed
+without re-encoding. With `SR_VIDEOREC_CODEC=raw` the frames go to `video.bgr0` instead (raw BGRX,
+size and rate in `record.json`, no mux, `"muxed": null`).
+
+`record.json` is written when the recording starts, as `INCOMPLETE`, and replaced only when the
+recording is finished: on a normal exit, at `SR_EXIT_AT_VBLANK`, and on the fatal stops (the watchdog,
+the `SR_FBDUMP` exit, an unregistered NID or unsupported import, a route check, a guest fault and the
+others), with `run_end` naming the one that ended the run. A crash leaves `INCOMPLETE`, never `PASS`.
+`PASS` and `FAIL` describe the recording, not the run: `exit_status` is the process exit status of
+the end that finished the recording. Every named end records its own: `SR_EXIT_AT_VBLANK` (the end
+of a scripted showcase recording), `the run returned to the driver` and the game's `sceKernelExitGame`
+record 0, and each fatal stop records the code it exits with (1 for the watchdog, 7 for an
+unregistered NID, and so on). An `exit()` that no route named, such as one of the runtime's fatal
+`exit(1)` paths, reaches only the recorder's `atexit` fallback: its `run_end` says no route named the
+end and its `exit_status` is `null`, so it never reads as a clean exit.
+
+A recording that cannot start is `REFUSED` with the reason: no deterministic clock (or, in a tool
+that links the presenter but runs no scheduler, such as the GPU selftests, no guest clock), a codec it does
+not know, an FFmpeg that is not an absolute path to an executable file, no FFmpeg on `PATH` for an
+encoded codec, or less than 4 GiB free in the folder, counting the previous run's files there as
+free, since the start removes them. A refusal names the setting at fault, never the user's FFmpeg
+path. Every check runs before the folder is touched, so a refused start replaces only `record.json`
+(with `REFUSED`, so no earlier `PASS` stands) and leaves the previous run's recording where it was.
+A start that does record first removes the recorder's files a previous run left in the folder, all or
+nothing: it moves each aside, and if one cannot be moved (open in another program, or a folder with
+that name) it puts the others back and refuses, naming that file, so the previous recording stays
+whole. When `record.json` itself is the file that cannot be replaced, only stderr can say so, and
+the previous record stays. The recording's own files are then created as new files, never reused:
+if another program creates one of those names after the clear, the start is refused (or, for
+`video.bgr0`, made at the first picture, the recording is `FAIL`), naming the file, and that
+program's file is left as it was. FFmpeg runs with `-n` for the same reason. An encoded recording is `PASS` only when the encoder and the mux both exited 0, so
+`PASS` always comes with `"muxed": true`. Under 1 GiB free during the run the recorder stops writing
+video and the recording is `FAIL`; so is any write that fails.
+
+FFmpeg is the user's own local tool: Nakagawa never ships, downloads or bundles it. The recorder
+starts the FFmpeg it finds in an absolute `PATH` entry, or the one `SR_VIDEOREC_FFMPEG` names, without
+a shell, and only when `SR_VIDEOREC_DIR` is set.
+
+At 3840x2160 none of the three encoders keeps up with 60 frames a second on its own: on one desktop
+(RTX 3080), offline, FFV1 encoded 49.6, `nvenc` 48.2 and `x264rgb` 43.3 frames a second. On the
+deterministic clock that only makes a 4K recording run slower than real time; `encoder_write_ms` in
+`record.json` is the host time spent waiting on the encoder. `nvenc` takes its load off the CPU; all
+three are RGB-lossless (`nvenc` encodes 4:4:4 RGB, `-pix_fmt gbrp`). A VBLANK the recorder was not
+called for is written as a `gap` frame in its place and counted in `record.json`. Pair a recording
+with `SR_PADSCRIPT` to record the same route in Authentic and Enhanced or Ace Mode, once the route is
+qualified on the deterministic clock (above), with `SR_VIDEOREC_START` to skip the boot, and with
+`SR_EXIT_AT_VBLANK` to end it. A recording of a
+retail title is private: keep it out of the repository and every upload.
 
 ## Troubleshooting
 

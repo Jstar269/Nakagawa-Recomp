@@ -383,6 +383,46 @@
         ]
       },
       {
+        "id": "fidelityfx-sdk",
+        "name": "AMD FidelityFX SDK (FSR 1)",
+        "spdx_id": "MIT",
+        "upstream_origin": "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK",
+        "upstream_revision": "7539ae8b6568ad29ed78a753404351daf3b5cca7",
+        "disposition": "statically_linked_subset",
+        "notice_file": "fidelityfx-sdk.txt",
+        "copyright_notices": [
+          "Copyright (C) 2026 Advanced Micro Devices, Inc."
+        ],
+        "note": "FSR 1 (ffx_fsr1.h) and the ffx_core headers (ffx_common_types.h, ffx_core.h, ffx_core_gpu_common.h, ffx_core_gpu_common_half.h, ffx_core_portability.h) from FidelityFX SDK v2.4.0, each imported byte-identical (third_party/fidelityfx_sdk/PROVENANCE.md). They are compiled into the SPIR-V of the native player's presentation upscaler, src/rt/gpu_sdl3vk/shaders/fsr1_easu.comp and fsr1_rcas.comp. The SDK's docs/license.md at this revision lists each of these files under MIT; each header carries the MIT notice. The GLSL layer they include is the fidelityfx-sdk-glsl component.",
+        "license_texts": [
+          {
+            "file": "third_party/fidelityfx_sdk/LICENSE.txt",
+            "copied_from": "FidelityFX SDK LICENSE.txt at commit c6efa6bf7f2027b3ec94f28578bb5965eabb9e55 (SDK v1.1.4), imported byte-identical; the same MIT text as the notice in every v2.4.0 header",
+            "sha256": "82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a"
+          }
+        ]
+      },
+      {
+        "id": "fidelityfx-sdk-glsl",
+        "name": "AMD FidelityFX SDK GLSL layer (ffx_core_glsl.h)",
+        "spdx_id": "MIT",
+        "upstream_origin": "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK",
+        "upstream_revision": "c6efa6bf7f2027b3ec94f28578bb5965eabb9e55",
+        "disposition": "statically_linked_subset",
+        "notice_file": "fidelityfx-sdk-glsl.txt",
+        "copyright_notices": [
+          "Copyright (C) 2024 Advanced Micro Devices, Inc."
+        ],
+        "note": "ffx_core_glsl.h from FidelityFX SDK v1.1.4, the last release with a GLSL layer (its blob is unchanged since SDK 1.1), imported byte-identical (third_party/fidelityfx_sdk/PROVENANCE.md). The v2.4.0 ffx_core.h includes it for a GLSL build, so its definitions are compiled into the SPIR-V of the native player's presentation upscaler with the fidelityfx-sdk component. SDK v1.1.4 is MIT as a whole.",
+        "license_texts": [
+          {
+            "file": "third_party/fidelityfx_sdk/LICENSE.txt",
+            "copied_from": "FidelityFX SDK LICENSE.txt at commit c6efa6bf7f2027b3ec94f28578bb5965eabb9e55 (SDK v1.1.4), imported byte-identical",
+            "sha256": "82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a"
+          }
+        ]
+      },
+      {
         "id": "libchdr",
         "name": "libchdr",
         "spdx_id": "BSD-3-Clause",
@@ -546,6 +586,26 @@
             "sha256": "7ec0306399fd391c17165cac57361c54da002ebe1b85cbfc49ea83b92867df24"
           }
         ]
+      },
+      {
+        "id": "xbrz",
+        "name": "xBRZ",
+        "spdx_id": "GPL-3.0-only",
+        "upstream_origin": "https://sourceforge.net/projects/xbrz/",
+        "upstream_revision": "1.9 (xBRZ_1.9.zip, 2026-01-24; zip SHA-256 b2dff73b3abd24a18a7cde78d5ff5ed8f0922296dce6ed734dce2264cd0a0fc9)",
+        "disposition": "statically_linked_subset",
+        "notice_file": "xBRZ.txt",
+        "copyright_notices": [
+          "Copyright (C) Zenju (zenju AT gmx DOT de) - All Rights Reserved"
+        ],
+        "note": "The xBRZ 1.9 scaler translated from C++ to C (third_party/xbrz/xbrz.c and xbrz.h, LOCAL DELTA; see third_party/xbrz/PROVENANCE.md). Linked into the runtime, where the Vulkan GE renderer's texture scaling (src/rt/gpu_sdl3vk/tex_scale.c) runs it in Ace Mode only. The upstream header's linking exception for MAME, FreeFileSync, Snes9x and ePSXe is kept unchanged.",
+        "license_texts": [
+          {
+            "file": "third_party/xbrz/License.txt",
+            "copied_from": "xBRZ 1.9 License.txt (GNU GPL version 3), CRLF line endings normalised to LF",
+            "sha256": "c61f12da7cdad526bdcbed47a4c0a603e60dbbfdaf8b66933cd088e9132c303f"
+          }
+        ]
       }
     ],
     "project_output": {
@@ -594,9 +654,9 @@
         "recorded_from": "installed dist-info compiledb-0.10.7.dist-info/METADATA (License: GPL-3.0-or-later; Classifier: License :: OSI Approved :: GNU General Public License v3 (GPLv3)); License-File: LICENSE"
       },
       "ruff": {
-        "version": "0.17.2",
+        "version": "0.17.3",
         "spdx_id": "MIT",
-        "recorded_from": "PyPI release metadata https://pypi.org/pypi/ruff/0.17.2/json (license_expression: MIT; license_files: LICENSE)"
+        "recorded_from": "PyPI release metadata https://pypi.org/pypi/ruff/0.17.3/json (license_expression: MIT; license_files: LICENSE)"
       },
       "click": {
         "version": "8.5.0",
@@ -609,9 +669,9 @@
         "recorded_from": "installed dist-info bashlex-0.18.dist-info/METADATA (License: GPLv3+; Classifier: License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)); License-File: LICENSE"
       },
       "coverage": {
-        "version": "7.17.0",
+        "version": "7.17.2",
         "spdx_id": "Apache-2.0",
-        "recorded_from": "PyPI release metadata https://pypi.org/pypi/coverage/7.17.0/json (license: Apache-2.0; license_files: LICENSE.txt, NOTICE.txt)"
+        "recorded_from": "PyPI release metadata https://pypi.org/pypi/coverage/7.17.2/json (license: Apache-2.0; license_files: LICENSE.txt, NOTICE.txt)"
       }
     }
   }

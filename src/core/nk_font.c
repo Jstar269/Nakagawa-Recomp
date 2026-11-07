@@ -4,6 +4,7 @@
 #include "nk_font.h"
 #include "nk_types.h"
 #include "nk_platform.h"
+#include "nk_shared_helpers.h"
 #include "nk_json.h"
 
 #include <ctype.h>
@@ -140,6 +141,17 @@ static const char *const kLatinIndexFile[NK_FONT_LATIN_INDEX_COUNT] = {
 
 const char *nk_font_latin_index_filename(int index) {
     return (unsigned)index < NK_FONT_LATIN_INDEX_COUNT ? kLatinIndexFile[index] : NULL;
+}
+
+static const char *const kProjectLatinIndexFile[NK_FONT_LATIN_INDEX_COUNT] = {
+    NK_FONT_SLOT_LATIN_FILE, "nkltn1.pgf",  "nkltn2.pgf",  "nkltn3.pgf",
+    "nkltn4.pgf",            "nkltn5.pgf",  "nkltn6.pgf",  "nkltn7.pgf",
+    NK_FONT_PROJECT_LATIN_SMALL_FILE, "nkltn9.pgf", "nkltn10.pgf", "nkltn11.pgf",
+    "nkltn12.pgf",           "nkltn13.pgf", "nkltn14.pgf", "nkltn15.pgf",
+};
+
+const char *nk_font_project_latin_index_file(int index) {
+    return (unsigned)index < NK_FONT_LATIN_INDEX_COUNT ? kProjectLatinIndexFile[index] : NULL;
 }
 
 const char *nk_font_slot_psp_filename(NkFontSlot slot) {
@@ -334,7 +346,8 @@ bool nk_font_get_cache_dir(const char *user_data_root, char *out_dir, size_t max
 }
 
 static void font_join(char *out, size_t out_len, const char *dir, const char *name) {
-    snprintf(out, out_len, "%s%c%s", dir, nk_platform_path_separator(), name);
+    (void)nk_shared_path_join(out, out_len, dir, name, nk_platform_path_separator(),
+                              NK_SHARED_PATH_JOIN_ALWAYS, 0u);
 }
 
 /* The staging name for a target path: the target with ".tmp" appended. */
@@ -761,6 +774,7 @@ bool nk_font_resolve_latin_index(const char *user_data_root, const char *project
     out->source = NK_FONT_SOURCE_NONE;
     out->served_index = -3;
     out->project_file = NULL;
+    out->project_style_index = -1;
     memset(&manifest, 0, sizeof(manifest));
     if (nk_font_get_cache_dir(user_data_root, cache_dir, sizeof(cache_dir)))
         manifest_status = font_load_manifest(cache_dir, &manifest, manifest_message,
@@ -804,11 +818,14 @@ bool nk_font_resolve_latin_index(const char *user_data_root, const char *project
     }
 
     if (project_font_dir && *project_font_dir) {
-        const char *const candidates[2] = {
-            index >= NK_FONT_LATIN_SIZE_GROUP_COUNT ? NK_FONT_PROJECT_LATIN_SMALL_FILE : NK_FONT_SLOT_LATIN_FILE,
-            NK_FONT_SLOT_LATIN_FILE
+        /* The index's own style first, then the regular face of its size, then the larger size's
+         * regular face (an older project folder has only that one). */
+        const int group_regular = index >= NK_FONT_LATIN_SIZE_GROUP_COUNT ? NK_FONT_LATIN_SIZE_GROUP_COUNT : 0;
+        const char *const candidates[3] = {
+            kProjectLatinIndexFile[index], kProjectLatinIndexFile[group_regular], NK_FONT_SLOT_LATIN_FILE
         };
-        for (int candidate = 0; candidate < 2; candidate++) {
+        const int candidate_style[3] = { index, group_regular, 0 };
+        for (int candidate = 0; candidate < 3; candidate++) {
             char project_path[NK_MAX_PATH * 2];
             NkFontInspection inspection;
             char error[NK_FONT_DETAIL_MAX] = "";
@@ -819,6 +836,7 @@ bool nk_font_resolve_latin_index(const char *user_data_root, const char *project
                 out->source = NK_FONT_SOURCE_PROJECT;
                 out->served_index = -1;
                 out->project_file = candidates[candidate];
+                out->project_style_index = candidate_style[candidate];
                 return true;
             }
         }

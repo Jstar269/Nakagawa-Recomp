@@ -19,8 +19,9 @@ Importing a disc doesn't change its status. The **EXPERIMENTAL** badge on the ga
 - **Windows 11 x64** with a Vulkan-capable graphics card and current GPU
   drivers. Windows is the only supported player platform today; other platforms
   are in the works ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306), [#329](https://github.com/Jstar269/nakagawa-recomp/issues/329), [#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
-- **A disc image of a game you own, in uncompressed standard `.iso` format.**
-  The project doesn't make or supply images. Whether you may make an image of
+- **A disc image of a game you own, as an uncompressed `.iso`, or the**
+  **`EBOOT.PBP` of a PSN release of a UMD game.** Builds after v0.0.1 also take
+  a compressed `.cso`, `.zso` or `.chd` image. The project doesn't make or supply images. Whether you may make an image of
   a disc, or of a digital purchase, depends on where you live and on the terms
   you accepted. Check both. Nakagawa Recomp never downloads games and contains no
   game data. Don't use copies you don't own.
@@ -51,10 +52,10 @@ What to expect: adding an ISO identifies the disc and shows a checklist of what
 will and won't work. **BUILD PACKAGE** recompiles the game while you watch, and
 **PLAY** starts it once the package checks out. For most retail discs the
 player first decrypts the game's program from your own disc, on your PC. Building needs a
-C toolchain (Python, GCC and GNU Make). The player can download the exact
-versions it needs after you agree once, or you can install them yourself
-([`SETUP.md`](SETUP.md)). Playing straight from an ISO with no local toolchain
-is in the works ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)).
+C toolchain (Python, GCC and GNU Make). The release ZIP carries the exact versions
+it needs. A player built from source can download them after you agree once, or
+you can install them yourself ([`SETUP.md`](SETUP.md)). Going straight from a disc
+to a running game for more titles is in the works ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)).
 
 ## What the player does automatically
 
@@ -187,10 +188,26 @@ if you had picked it. The conversion shows its progress and can be cancelled; a
 cancelled or failed conversion keeps nothing. Your `EBOOT.PBP` is only read,
 never changed. **Remove from library** keeps the converted image in
 `<user data>/discs/<DISC_ID>/`, and the decrypted files in
-`<user data>/titles/<DISC_ID>/decrypted/`, so adding the game again is quick;
-delete those two folders yourself to get the space back. Other PSN downloads
+`<user data>/titles/<DISC_ID>/decrypted/`, so adding the game again is quick.
+To get the space back, tick **Also delete the decrypted files and disc copy**
+in its dialog. Other PSN downloads
 (PSP minis and games tied to the PSP that bought them), PSOne Classics and
 PGD-protected data aren't supported yet.
+
+### Homebrew
+
+PSP homebrew (programs the community wrote, with no game from a shop in them) is added the same way: pick its
+`EBOOT.PBP`. A homebrew program is not encrypted, so it needs no keys. The player writes a small disc image
+from the package once, on this PC, in `<user data>/discs/<key>/<key>.iso`, holding the program and its icon, and
+adds that image as if you had picked it. The key is made from the program and its title, so the same homebrew is
+the same game wherever you add it from, and the library shows it as **Beta / unofficial**. Homebrew is
+**Experimental**: nobody has checked a program unless [`COMPATIBILITY.md`](COMPATIBILITY.md#homebrew-limits)
+says so. Your `EBOOT.PBP` is only read, never changed.
+
+Some homebrew can't run, and the player says which kind when you pick it: an encrypted program, kernel-mode
+homebrew and custom-firmware plugins (they need the PSP's own kernel), and anything that is not a PSP program.
+A program that writes its own machine code while it runs, such as an emulator with a JIT, starts and then stops
+at the first jump into that code. [Homebrew limits](COMPATIBILITY.md#homebrew-limits) lists each kind.
 
 ### Supplying title manifests
 
@@ -205,6 +222,25 @@ The player loads every `.json` manifest in this folder when it starts (in
 alphabetical order, up to 8 manifests). The command-line tool `tools/nk_cli.py
 build-package` also looks in this folder, after the titles in the repository, and
 finds the same title the player does.
+
+## Graphics presets
+
+**Settings > Graphics preset** picks a set of display settings in one choice. A preset is used only when a game
+plays in Enhanced or Ace. In Authentic, a game always runs with your own **Resolution**, **Scaling**, **VSync** and
+**Game fullscreen** settings, whatever the preset, because a larger render scale also changes what the game can
+copy from its own screen, such as a save picture. Choosing a preset doesn't change those settings. Changing one of
+them yourself sets the preset back to **Custom**, which uses your settings everywhere.
+
+| Preset | Resolution | Scaling | VSync | Game fullscreen |
+| --- | --- | --- | --- | --- |
+| Low | 1x (480x272) | Sharp | On | your setting |
+| Medium | 2x | Sharp | On | your setting |
+| High | 4x | Sharp | On | your setting |
+| Ultra | 4x | Sharp | On | your setting |
+| Handheld | 2x | Sharp | On | On |
+
+Ultra is also meant to turn on the FSR 1 upscaler, which Settings can't set yet
+([#2122](https://github.com/Jstar269/nakagawa-recomp/issues/2122)), so its row reads **Ultra (no upscaler)**.
 
 ## Keep it to your own games
 
@@ -244,7 +280,7 @@ instead of pretending it worked or crashing without a word.
   `PBP_PACKAGE_UNSUPPORTED`; only the package's own `PARAM.SFO` is read to write
   that sentence.
 - **Encrypted program:** the player decrypts it from your own disc
-  ([#295](https://github.com/Jstar269/nakagawa-recomp/issues/295)). If that stops, the checklist
+  ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)). If that stops, the checklist
   reports `ENCRYPTED_EXECUTABLE` or `ENCRYPTED_MODULE` with the reason and names
   the game's folder. An unencrypted `BOOT.BIN` on the disc, or a valid
   `EBOOT.elf` already in that folder, is used as it is. PGD/amctrl protection is
@@ -325,7 +361,7 @@ reports the result. The runtime's environment switches are in [`DEBUGGING.md`](D
 | `fonts import <folder> [--choose SLOT=FILE] [--json]` | `.pgf` font files you dumped from your own PSP | Copies them into the player data for the `japanese`, `latin` and `korean` slots |
 | `fonts status [--project-root DIR] [--json]` | The player data and project `font/` folder | The source of each font slot |
 | `fonts remove (--slot SLOT \| --all)` | The player data | Removes fonts this tool imported |
-| `bringup <iso> --work-dir DIR --report FILE [--launch-timeout S] [--instruction-trace]` | A PSP `.iso` | Runs a time-limited bring-up in a private work folder and writes a JSON report that is safe to share |
+| `bringup <iso> --work-dir DIR --report FILE [--launch-timeout S] [--instruction-trace] [--capture-rounds N]` | A PSP `.iso` | Runs a time-limited bring-up in a private work folder and writes a JSON report that is safe to share; when the run stops at code the game installed at run time, builds again with it, up to `N` rounds ([code capture](DEBUGGING.md)) |
 | `vram <image> --addr A --width W --height H --format F [...] --output PNG` | A 2 MiB raw VRAM capture | Decodes one surface to PNG; `--from-sidecar FILE --out-dir DIR` exports every surface a runtime capture describes |
 
 ### Privacy boundary

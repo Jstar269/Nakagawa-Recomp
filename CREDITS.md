@@ -25,25 +25,43 @@ Nakagawa has since substantially extended and modified that codebase. This repos
   `ext/libkirk/amctrl.c` (amctrl.prx reverse engineering by tpu), the LZRC decoder from
   `Core/FileSystems/tlzrc.cpp` (based on benhur's code, rewritten by tpu; Copyright (c) 2012- PPSSPP Project,
   GPL-2.0-or-later) and the block reader from `Core/FileSystems/BlockDevices.cpp` (GPL-2.0-or-later).
+- **PPSSPP SAS envelope** — the sceSasCore voice envelope (ADSR) model in [`src/rt/sas_envelope.h`](src/rt/PROVENANCE.md) is adapted from PPSSPP at `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` (`Core/HW/SasAudio.cpp`, `Core/HW/SasAudio.h` and `Core/HLE/sceSas.cpp`, Copyright (c) 2012- PPSSPP Project, GPL-2.0-or-later).
+- **PPSSPP texture replacement** — the quick texture hash and the replacement-pack key and lookup order in [`src/rt/texrepl.c`](src/rt/texrepl.c) are translated from PPSSPP at `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` (`GPU/Common/TextureDecoder.cpp`, `GPU/Common/TextureReplacer.cpp` and `GPU/Common/TextureCacheCommon.cpp`, Copyright (c) 2012- PPSSPP Project, GPL-2.0-or-later); the texture pack layout is PPSSPP's.
 - **minimp3 — lieff (Lion) and contributors** — CC0-1.0 public-domain dedication. The MPEG audio decoder header in [`src/rt/minimp3/`](src/rt/minimp3/), pinned to upstream commit `ea99364f61c14656440e8d77e9c233ccf3124633` and kept byte-identical; it backs the `sceMp3` library.
 - **Clay — Nic Barker** — zlib. The layout library in [`third_party/clay/`](third_party/clay/).
 - **Portable Snippets — Evan Nemerson** — CC0-1.0 (public domain). The overflow-checked arithmetic header in [`third_party/portable-snippets/`](third_party/portable-snippets/).
+- **AMD FidelityFX SDK (FSR 1) — Advanced Micro Devices, Inc.** — MIT. EASU and RCAS, the optional presentation upscaler (`SR_PRESENT_UPSCALE=fsr1`), in [`third_party/fidelityfx_sdk/`](third_party/fidelityfx_sdk/): FSR 1 and the `ffx_core` headers from FidelityFX SDK v2.4.0 (commit `7539ae8b6568ad29ed78a753404351daf3b5cca7`), and the GLSL portability header `ffx_core_glsl.h` from FidelityFX SDK v1.1.4 (commit `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55`), the last release that ships one. Every file is imported byte-identical.
 - **dr_libs (dr_wav) — David Reid** — public domain (Unlicense), elected from its Unlicense or MIT-0 choice. The WAV writer selftests use, in [`third_party/dr_libs/`](third_party/dr_libs/).
 - **libchdr — Romain Tisserand and contributors** — BSD-3-Clause, pinned at
   `47d794151b2b64f6aba60304e6480f4f5a2bc24b`, with the codecs it carries: miniz 3.1.2 (RAD Game Tools, Valve Software,
   Rich Geldreich; MIT), the Zstandard 1.5.7 decompressor (Meta Platforms; BSD-3-Clause), the LZMA SDK decoder
   (Igor Pavlov; public domain) and dr_flac (David Reid; public domain, Unlicense elected). It reads CHD disc images
   when the player expands them at import, in [`third_party/libchdr/`](third_party/libchdr/PROVENANCE.md).
+- **xBRZ 1.9 — Zenju** — GPL-3.0, with the author's linking exception kept unchanged. The pixel-art scaler behind
+  Ace Mode's texture scaling, translated from C++ to C (a LOCAL DELTA, checked against the upstream release's output)
+  in [`third_party/xbrz/`](third_party/xbrz/PROVENANCE.md).
+- **AMD FidelityFX SDK (FSR 3) — Advanced Micro Devices, Inc.** — MIT. The FSR 3.1.6 upscaler's eight compute passes,
+  frame generation's seventeen (frame interpolation and optical flow) and the headers they include, from FidelityFX
+  SDK v2.4.0 (commit `7539ae8b6568ad29ed78a753404351daf3b5cca7`), in
+  [`third_party/fidelityfx_sdk/`](third_party/fidelityfx_sdk/PROVENANCE.md): each file is on the SDK's MIT list, which
+  [`LICENSE-AMD.md`](third_party/fidelityfx_sdk/LICENSE-AMD.md) carries, and is imported byte-identical, except three
+  headers with recorded local changes. The C host in `src/rt/fsr3_host.c`, `src/rt/fsr3_jitter.c`,
+  `src/rt/fsr3_fg_host.c`, `src/rt/gpu_sdl3vk/fsr3_pass.c` and `src/rt/gpu_sdl3vk/fsr3_fg_pass.c` is translated from
+  the SDK's C++ and keeps AMD's notice.
 - **Monocypher 4.0.3 — Loup Vaillant, Michael Savage, Fabio Scotoni and contributors** — dual BSD-2-Clause or
   CC0-1.0; the project uses it under CC0-1.0. The Ed25519 signature check in
   [`third_party/monocypher/`](third_party/monocypher/).
+- **rcheevos 12.5.0 — RetroAchievements.org and contributors** — MIT. RetroAchievements' C library for opt-in
+  achievements ([#1316](https://github.com/Jstar269/nakagawa-recomp/issues/1316)), in
+  [`third_party/rcheevos/`](third_party/rcheevos/PROVENANCE.md). Its MD5 (`src/rhash/md5.c`, `md5.h`) is
+  L. Peter Deutsch's (Aladdin Enterprises), under the zlib licence.
 - **PSPSDK / PSPDEV contributors** — BSD-family notices for public ABI definitions and source-owned fixtures ([`THIRD_PARTY_LICENSES/PSPSDK.txt`](THIRD_PARTY_LICENSES/PSPSDK.txt)).
 - **SDL, SDL_ttf and their dependencies** — staged beside the player with their licence texts (listed in [`NOTICE.md`](NOTICE.md)).
 - **stb_image 2.30 — Sean Barrett** — public domain (Unlicense), the alternative to MIT that upstream offers. The PNG
   decoder in [`third_party/stb/`](third_party/stb/), for the player's prompt glyphs and the disc art read from your own disc.
 - **Kenney "Input Prompts" and "Interface Sounds" — Kenney Vleugels ([kenney.nl](https://kenney.nl))** — CC0-1.0. The
   next UI's button prompt glyphs and its optional launcher sounds, in [`third_party/kenney/`](third_party/kenney/).
-- **Font fixtures** — Gudea (Agustina Mingote), Gowun Dodum (The Gowun Dodum Project Authors) and M+ 1p (The M+ Project Authors), all SIL Open Font License 1.1, used only by tests ([`fixtures/fonts/`](fixtures/fonts/)).
+- **Font fixtures** — Gudea (Agustina Mingote), Gowun Dodum (The Gowun Dodum Project Authors), M+ 1p (The M+ Project Authors) and Liberation Sans and Liberation Serif 2.1.5 (Google Corporation and Red Hat, Inc.; Reserved Font Names Arimo, Tinos, Cousine and Liberation), all SIL Open Font License 1.1 ([`fixtures/fonts/`](fixtures/fonts/)). The build converts Liberation (Latin), Gowun Dodum (Korean) and Noto Sans JP with M+ 1p (Japanese) into the project's stand-in PSP fonts; Gudea is used only by tests.
 
 The authoritative, component-by-component provenance records are [`NOTICE.md`](NOTICE.md) and the
 [`public provenance ledger`](assets/public_provenance_ledger.json).

@@ -28,6 +28,7 @@ Contract rules enforced:
 from __future__ import annotations
 
 import argparse
+import bisect
 from collections.abc import Mapping, Sequence
 import hashlib
 import json
@@ -72,6 +73,9 @@ SITE_TRANSFORMS = frozenset({
     "offset_x2",
     "window_start_x2",
     "argument_x2",
+    "count_x2_even",
+    "gate_30hz_hold",
+    "gate_30hz_alt",
 })
 
 # What a site's instruction builds, when its encoding alone cannot say: the upper
@@ -219,6 +223,9 @@ SITE_KEYS = frozenset({
     "acceleration_site",
     "low_insn_offset",
     "low_stock_digest",
+    "stock_values",
+    "requires",
+    "alternates",
 })
 
 # The instruction where one logic update of the title begins: it runs exactly once per update.
@@ -612,6 +619,7 @@ def validate_package(data: Any) -> dict[str, Any]:
                 if target["transform"] != "accel_x0.25":
                     fail(f"sites[{idx}].acceleration_site",
                          f"acceleration_site {accel!r} must be an accel_x0.25 site")
+        _validate_requires(sites)
 
         # Validate update_boundary: where one logic update begins. Gated sites run on
         # alternate updates counted there, so a package that gates must declare it.
@@ -628,10 +636,11 @@ def validate_package(data: Any) -> dict[str, Any]:
             _check_instruction_location(boundary, "update_boundary", "update_boundary")
             if (boundary["function"], boundary["insn_offset"]) in seen_positions:
                 fail("update_boundary", "update_boundary must not be a rewritten site")
-        elif any(site["transform"] == "gate_30hz" for site in sites):
+        elif any(site["transform"] in GATE_TRANSFORMS for site in sites):
             fail(
                 "update_boundary",
-                "A package with gate_30hz sites must declare update_boundary: gated sites run on "
+                "A package with gate_30hz, gate_30hz_hold or gate_30hz_alt sites must declare update_boundary: "
+                "gated sites run on "
                 "alternate logic updates, counted where each update begins",
             )
 
@@ -683,6 +692,51 @@ def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
             fail(f"{path}.low_stock_digest", "low_stock_digest must be a 64-character lowercase hex SHA-256 digest")
         if site["word_count"] != 1:
             fail(f"{path}.low_insn_offset", "a pinned low word completes a lone lui (word_count 1)")
+    if "stock_values" in site:
+        values = site["stock_values"]
+        if (not isinstance(values, list) or not values
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values)):
+            fail(f"{path}.stock_values", "stock_values must be a non-empty list of numbers")
+    if "requires" in site:
+        required = site["requires"]
+        if not isinstance(required, list) or not required or not all(isinstance(r, str) for r in required):
+            fail(f"{path}.requires", "requires must be a non-empty list of site ids")
+    if transform == "gate_30hz_alt":
+        alternates = site.get("alternates")
+        if (not isinstance(alternates, list) or not 1 <= len(alternates) <= ALT_GATE_MAX_ALTERNATES
+                or not all(isinstance(name, str) for name in alternates)):
+            fail(f"{path}.alternates",
+                 f"gate_30hz_alt needs alternates, a list of 1 to {ALT_GATE_MAX_ALTERNATES} function symbols")
+        for name in alternates:
+            check_not_address_literal(name, f"{path}.alternates", "alternate symbol")
+            if not SYMBOL_RE.match(name):
+                fail(f"{path}.alternates", f"alternate {name!r} does not match required pattern {SYMBOL_RE.pattern}")
+        if len(set(alternates)) != len(alternates):
+            fail(f"{path}.alternates", "alternates lists a function twice (duplicate)")
+        if site["word_count"] != 1:
+            fail(f"{path}.word_count", "gate_30hz_alt names one jal (word_count 1)")
+    elif "alternates" in site:
+        fail(f"{path}.alternates", "alternates belongs only to gate_30hz_alt")
+
+
+def _validate_requires(sites: Sequence[Mapping[str, Any]]) -> None:
+    """``requires`` names other sites of the package that declare ``stock_values``."""
+    by_id = {site["id"]: site for site in sites}
+    for idx, site in enumerate(sites):
+        required = site.get("requires")
+        if required is None:
+            continue
+        path = f"sites[{idx}].requires"
+        if len(set(required)) != len(required):
+            fail(path, "requires lists a site id twice (duplicate)")
+        for name in required:
+            if name == site["id"]:
+                fail(path, f"a site cannot require its own id {name!r}")
+            target = by_id.get(name)
+            if target is None or "stock_values" not in target:
+                fail(path, f"requires names sites that declare stock_values; {name!r} is not one")
+            if "requires" in target:
+                fail(path, f"required site {name!r} itself declares requires; chains are not allowed")
 
 
 def _check_id(value: Any, path: str, seen: set[str], role: str) -> None:
@@ -886,6 +940,836 @@ def load_symbol_map(path: Path | str) -> dict[str, int]:
     return out
 
 
+# Opcodes that write memory: sb, sh, swl, sw, swr, cache, sc, swc1, sv.s, svl.q/svr.q, sv.q.
+_STORE_OPS = frozenset((0x28, 0x29, 0x2A, 0x2B, 0x2E, 0x2F, 0x38, 0x39, 0x3A, 0x3D, 0x3E))
+_LOAD_OPS = frozenset((0x20, 0x21, 0x23, 0x24, 0x25))  # lb, lh, lw, lbu, lhu
+HOLD_CALLEE_MAX_WORDS = 256
+EVEN_COUNTER_SCAN_WORDS = 16
+_JR_RA = 0x03E00008
+
+
+def _branch_target(w: int, pc: int) -> int | None:
+    """The target of a conditional branch (likely forms included) at ``pc``, else None."""
+    op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+    is_branch = (op in (0x04, 0x05, 0x06, 0x07, 0x14, 0x15, 0x16, 0x17)
+                 or (op == 0x01 and rt in (0x00, 0x01, 0x02, 0x03))
+                 or (op in (0x11, 0x12) and rs == 0x08))  # bc1*, the VFPU's bvf/bvt
+    if not is_branch:
+        return None
+    simm16 = w & 0xFFFF
+    if simm16 & 0x8000:
+        simm16 -= 0x10000
+    return (pc + 4 + (simm16 << 2)) & 0xFFFFFFFF
+
+
+def _leaf_refusal(w: int) -> str | None:
+    """Why ``w`` cannot appear in a callee whose call may be skipped, or None."""
+    op, rs, rt, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, w & 0x3F
+    if op in (0x02, 0x03):
+        return "jumps or calls"
+    if op == 0x00 and fn == 0x09:
+        return "calls through a register"
+    if op == 0x00 and fn == 0x08 and rs != 31:
+        return "jumps through a register"
+    if op == 0x00 and fn in (0x0C, 0x0D):
+        return "traps (syscall or break)"
+    if op == 0x01 and rt in (0x10, 0x11, 0x12, 0x13):
+        return "calls (a linking branch)"
+    if op in _STORE_OPS:
+        return "writes memory"
+    if op in (0x10, 0x1C):
+        return "uses a system instruction"
+    if op == 0x11 and rs == 0x06:
+        return "writes an FPU control register (ctc1)"
+    return None
+
+
+def _is_likely_branch(w: int) -> bool:
+    """A branch-likely: its delay slot runs only when the branch is taken."""
+    op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+    return (op in (0x14, 0x15, 0x16, 0x17)
+            or (op == 0x01 and rt in (0x02, 0x03))
+            or (op in (0x11, 0x12) and rs == 0x08 and rt & 0x02 != 0))  # bc1fl/bc1tl, bvfl/bvtl
+
+
+def _fpr_uses(w: int) -> tuple[frozenset[int], frozenset[int]]:
+    """(FPU registers read, FPU registers written) by ``w``."""
+    op, fmt = w >> 26, (w >> 21) & 31
+    ft, fs, fd, fn = (w >> 16) & 31, (w >> 11) & 31, (w >> 6) & 31, w & 0x3F
+    if op == 0x31:  # lwc1 ft
+        return frozenset(), frozenset((ft,))
+    if op != 0x11:
+        return frozenset(), frozenset()
+    if fmt == 0x00:  # mfc1 rt, fs
+        return frozenset((fs,)), frozenset()
+    if fmt == 0x04:  # mtc1 rt, fs
+        return frozenset(), frozenset((fs,))
+    if fmt in (0x10, 0x14):  # .s and .w arithmetic, conversions and compares
+        if fn >= 0x30:
+            return frozenset((fs, ft)), frozenset()
+        if fn <= 0x03:
+            return frozenset((fs, ft)), frozenset((fd,))
+        return frozenset((fs,)), frozenset((fd,))
+    return frozenset(), frozenset()
+
+
+def _gpr_destination(w: int) -> int:
+    """The general register ``w`` writes; 0 when it writes none, -1 when this check cannot tell."""
+    op, rs, rt, rd, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, (w >> 11) & 31, w & 0x3F
+    if op == 0x00:
+        if fn in (0x08, 0x0C, 0x0D, 0x0F, 0x11, 0x13) or 0x18 <= fn <= 0x1F:
+            return 0  # jr, syscall, break, sync, mthi/mtlo, mult/div/madd forms write HI/LO
+        return rd
+    if 0x08 <= op <= 0x0F or op in _LOAD_OPS or op in (0x22, 0x26, 0x30, 0x38):
+        return rt
+    if op == 0x03:
+        return 31
+    if op == 0x01:
+        return 31 if rt in (0x10, 0x11, 0x12, 0x13) else 0
+    if op in (0x02, 0x04, 0x05, 0x06, 0x07, 0x14, 0x15, 0x16, 0x17) or op in _STORE_OPS:
+        return 0
+    if op == 0x11:
+        return rt if rs in (0x00, 0x02) else 0  # mfc1, cfc1
+    if op == 0x31 or op in (0x32, 0x35, 0x36):
+        return 0  # lwc1 and the VFPU loads write no general register
+    if op in (0x18, 0x19, 0x1B, 0x34, 0x37, 0x3C, 0x3F):
+        return 0  # VFPU arithmetic writes only VFPU registers
+    if op == 0x12:
+        return rt if rs == 0x03 else 0  # mfv / mfvc write rt; the rest of COP2 writes none
+    if op == 0x1F:
+        return rd if fn == 0x20 else rt if fn in (0x00, 0x04) else -1  # bshfl, ext, ins
+    return -1
+
+
+def _is_jump(w: int) -> bool:
+    """An unconditional jump or call: j, jal, jr, jalr, or a linking branch."""
+    op, rt, fn = w >> 26, (w >> 16) & 31, w & 0x3F
+    return (op in (0x02, 0x03) or (op == 0x00 and fn in (0x08, 0x09))
+            or (op == 0x01 and rt in (0x10, 0x11, 0x12, 0x13)))
+
+
+def _read_word(read_words_fn: Any, addr: int) -> int | None:
+    got = read_words_fn(addr, 1)
+    if not got:
+        return None
+    return int(got[0]) & 0xFFFFFFFF
+
+
+def _check_hold_callee(site_path: str, site_addr: int, word: int, read_words_fn: Any) -> None:
+    """A gate_30hz_hold call may be skipped only when skipping it drops nothing but its result.
+
+    The callee, read from its entry to its ``jr $ra`` and that delay slot, makes no call,
+    jump or trap, writes no memory, branches only inside that body, reads ``f12`` before it
+    writes it, and writes ``f0``: the value the hold then takes from ``f12``.
+    """
+    target = ((site_addr + 4) & 0xF0000000) | ((word & 0x03FFFFFF) << 2)
+    where = f"gate_30hz_hold callee 0x{target:08x}"
+    body: list[int] = []
+    for i in range(HOLD_CALLEE_MAX_WORDS):
+        w = _read_word(read_words_fn, target + 4 * i)
+        if w is None:
+            fail(site_path, f"{where} cannot be read at 0x{target + 4 * i:08x} (fail-closed refusal)")
+        body.append(w)
+        if w == _JR_RA:
+            slot = _read_word(read_words_fn, target + 4 * (i + 1))
+            if slot is None:
+                fail(site_path, f"{where} cannot be read at its return's delay slot (fail-closed refusal)")
+            body.append(slot)
+            break
+    else:
+        fail(site_path, f"{where} has no jr $ra in its first {HOLD_CALLEE_MAX_WORDS} instructions "
+                        f"(fail-closed refusal)")
+    ret = target + 4 * (len(body) - 2)  # the jr $ra; the word after it is its delay slot
+    f12_first: str | None = None
+    writes_f0 = False
+    for i, w in enumerate(body):
+        pc = target + 4 * i
+        why = _leaf_refusal(w)
+        if why is not None:
+            fail(site_path, f"{where} {why} at 0x{pc:08x}: a skipped call must drop nothing but its "
+                            f"result (fail-closed refusal)")
+        written = _gpr_destination(w)
+        if written in (29, 31, -1):
+            what = {29: "writes $sp", 31: "writes $ra", -1: f"has a word this check cannot read (0x{w:08x})"}
+            fail(site_path, f"{where} {what[written]} at 0x{pc:08x}: a skipped call must leave the "
+                            f"caller's frame and return as the call would (fail-closed refusal)")
+        branch = _branch_target(w, pc)
+        if branch is not None and not target <= branch <= ret:
+            # A branch to the return's delay slot would run the slot and then fall through
+            # past the body this check reads.
+            fail(site_path, f"{where} branches from 0x{pc:08x} to 0x{branch:08x}, outside the body "
+                            f"up to its jr $ra (fail-closed refusal)")
+        reads, writes = _fpr_uses(w)
+        if f12_first is None and 12 in reads:
+            f12_first = "read"
+        elif f12_first is None and 12 in writes:
+            f12_first = "written"
+        writes_f0 = writes_f0 or 0 in writes
+    if f12_first != "read":
+        fail(site_path, f"{where} does not read f12 before it writes it: the hold keeps f12 as the "
+                        f"value the call advances (fail-closed refusal)")
+    if not writes_f0:
+        fail(site_path, f"{where} does not write f0, the result the hold replaces (fail-closed refusal)")
+
+
+def _check_even_counter(site_path: str, fn_addr: int, site_addr: int, word: int, read_words_fn: Any) -> None:
+    """count_x2_even compares a counter: its register is loaded from memory in the
+    straight-line code just before the compare, with no call or branch in between."""
+    rs = (word >> 21) & 31
+    lo = max(fn_addr, site_addr - 4 * EVEN_COUNTER_SCAN_WORDS)
+    pc = site_addr - 4
+    while pc >= lo:
+        w = _read_word(read_words_fn, pc)
+        if w is None:
+            break
+        written = _gpr_destination(w)
+        if written == rs:
+            if (w >> 26) in _LOAD_OPS:
+                prev = _read_word(read_words_fn, pc - 4) if pc > fn_addr else None
+                if prev is not None and (_is_jump(prev) or _is_likely_branch(prev)):
+                    # A call's slot runs before the callee, which may change the counter; a
+                    # branch-likely skips its slot on the path that falls through to the compare.
+                    fail(site_path, f"count_x2_even's counter ${rs} is loaded at 0x{pc:08x}, in the delay "
+                                    f"slot of 0x{prev:08x}: the load does not reach the compare on every "
+                                    f"path (fail-closed refusal)")
+                return
+            fail(site_path, f"count_x2_even's counter ${rs} is computed at 0x{pc:08x} (0x{w:08x}), not "
+                            f"loaded from memory: the site must compare a stored count (fail-closed refusal)")
+        if written == -1:
+            fail(site_path, f"count_x2_even cannot tell whether 0x{w:08x} at 0x{pc:08x} writes the counter "
+                            f"${rs} (fail-closed refusal)")
+        if _branch_target(w, pc) is not None or _is_jump(w):
+            break
+        pc -= 4
+    fail(site_path, f"count_x2_even's counter ${rs} is not loaded from memory in the straight-line code "
+                    f"before the compare (fail-closed refusal)")
+
+
+# --- gate_30hz_alt: the static proof that the alternates stand for the skipped update ----------
+#
+# Registers are numbered in one space here: general registers 0-31, FPU registers 64-95, HI 96,
+# LO 97 and the FPU condition flag 98. VFPU registers are not tracked.
+ALT_GATE_MAX_ALTERNATES = 4
+GATE_TRANSFORMS = frozenset(("gate_30hz", "gate_30hz_hold", "gate_30hz_alt"))
+ALT_GATE_MAX_FUNCTION_WORDS = 8192
+ALT_GATE_MAX_TREE_FUNCTIONS = 64
+ALT_GATE_MAX_TABLE_ENTRIES = 256
+ALT_GATE_MAX_CALL_TREE = 2048
+ALT_GATE_INPUT_DEPTH = 3
+_F = 64
+_HI, _LO, _FCC = 96, 97, 98
+_CALL_CLOBBERED = frozenset(range(1, 16)) | frozenset((24, 25, 31))
+#: Inputs an alternate must not read: it is passed only a0 (EABI arguments 2-8, f12-f15, the flag).
+_ALT_INPUTS = frozenset((5, 6, 7, 8, 9, 10, 11)) | frozenset(_F + n for n in (12, 13, 14, 15)) | {_FCC}
+#: What a skipped call leaves behind: the caller must not read these before writing them.
+_CALL_RESULTS = frozenset((2, 3, _F, _F + 1, _F + 2, _F + 3, _HI, _LO))
+_RETURN_READS = frozenset((2, 3, _F))
+_EXIT = -1
+
+
+def _reg_name(r: int) -> str:
+    names = ("zero at v0 v1 a0 a1 a2 a3 t0 t1 t2 t3 t4 t5 t6 t7 "
+             "s0 s1 s2 s3 s4 s5 s6 s7 t8 t9 k0 k1 gp sp fp ra").split()
+    if r < 32:
+        return f"${names[r]}"
+    return {_HI: "HI", _LO: "LO", _FCC: "the FPU condition flag"}.get(r, f"f{r - _F}")
+
+
+def _uses(w: int) -> tuple[frozenset[int], frozenset[int]] | None:
+    """(registers read, registers written) by ``w`` in the numbering above; None when unknown."""
+    op, rs, rt, rd, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, (w >> 11) & 31, w & 0x3F
+
+    def g(*regs: int) -> frozenset[int]:
+        return frozenset(r for r in regs if r != 0)
+
+    if op == 0x00:
+        if fn in (0x00, 0x02, 0x03):
+            return g(rt), g(rd)
+        if fn in (0x04, 0x06, 0x07) or 0x20 <= fn <= 0x27 or fn in (0x2A, 0x2B, 0x2C, 0x2D):
+            return g(rs, rt), g(rd)
+        if fn == 0x08:
+            return g(rs), frozenset()
+        if fn == 0x09:
+            return g(rs), g(rd)
+        if fn in (0x0A, 0x0B):
+            return g(rs, rt, rd), g(rd)
+        if fn in (0x0C, 0x0D, 0x0F):
+            return frozenset(), frozenset()
+        if fn in (0x10, 0x12):
+            return frozenset((_HI if fn == 0x10 else _LO,)), g(rd)
+        if fn in (0x11, 0x13):
+            return g(rs), frozenset((_HI if fn == 0x11 else _LO,))
+        if fn in (0x16, 0x17):
+            return g(rs), g(rd)
+        if 0x18 <= fn <= 0x1B:
+            return g(rs, rt), frozenset((_HI, _LO))
+        if fn in (0x1C, 0x1D, 0x2E, 0x2F):
+            return g(rs, rt) | {_HI, _LO}, frozenset((_HI, _LO))
+        return None
+    if op == 0x01:
+        if rt in (0x00, 0x01, 0x02, 0x03):
+            return g(rs), frozenset()
+        if rt in (0x10, 0x11, 0x12, 0x13):
+            return g(rs), frozenset((31,))
+        return None
+    if op == 0x02:
+        return frozenset(), frozenset()
+    if op == 0x03:
+        return frozenset(), frozenset((31,))
+    if op in (0x04, 0x05, 0x14, 0x15):
+        return g(rs, rt), frozenset()
+    if op in (0x06, 0x07, 0x16, 0x17):
+        return g(rs), frozenset()
+    if 0x08 <= op <= 0x0E:
+        return g(rs), g(rt)
+    if op == 0x0F:
+        return frozenset(), g(rt)
+    if op == 0x11:
+        fs, fd = rd, (w >> 6) & 31
+        if rs == 0x00:
+            return frozenset((_F + fs,)), g(rt)
+        if rs == 0x02:
+            return (frozenset((_FCC,)) if fs == 31 else frozenset()), g(rt)
+        if rs == 0x04:
+            return g(rt), frozenset((_F + fs,))
+        if rs == 0x06:
+            return g(rt), (frozenset((_FCC,)) if fs == 31 else frozenset())
+        if rs == 0x08:
+            return frozenset((_FCC,)), frozenset()
+        if rs in (0x10, 0x14):
+            if fn >= 0x30:
+                return frozenset((_F + fs, _F + rt)), frozenset((_FCC,))
+            if fn <= 0x03:
+                return frozenset((_F + fs, _F + rt)), frozenset((_F + fd,))
+            return frozenset((_F + fs,)), frozenset((_F + fd,))
+        return None
+    if op == 0x12:
+        if rs == 0x03:
+            return frozenset(), g(rt)
+        if rs == 0x07:
+            return g(rt), frozenset()
+        if rs == 0x08:
+            return frozenset(), frozenset()
+        return None
+    if op == 0x1F:
+        if fn == 0x00:
+            return g(rs), g(rt)
+        if fn == 0x04:
+            return g(rs, rt), g(rt)
+        if fn == 0x20:
+            return g(rt), g(rd)
+        return None
+    if op in (0x20, 0x21, 0x23, 0x24, 0x25, 0x30):
+        return g(rs), g(rt)
+    if op in (0x22, 0x26):
+        return g(rs, rt), g(rt)
+    if op in (0x28, 0x29, 0x2A, 0x2B, 0x2E):
+        return g(rs, rt), frozenset()
+    if op == 0x2F:
+        return g(rs), frozenset()
+    if op == 0x38:
+        return g(rs, rt), g(rt)
+    if op == 0x31:
+        return g(rs), frozenset((_F + rt,))
+    if op == 0x39:
+        return g(rs) | {_F + rt}, frozenset()
+    if op in (0x32, 0x35, 0x36, 0x3A, 0x3D, 0x3E):
+        return g(rs), frozenset()
+    if op in (0x18, 0x19, 0x1B, 0x34, 0x37, 0x3C, 0x3F):
+        return frozenset(), frozenset()
+    return None
+
+
+def _function_end(fn_addr: int, known_sorted: Sequence[int], where: str, site_path: str) -> int:
+    """The end of the window a function's code is read in: ALT_GATE_MAX_FUNCTION_WORDS from its entry.
+
+    A body is the code reachable from its entry, not the run up to the next known start: codegen's
+    known starts include entries inside a function (the arms of its table switches), and its own
+    bodies run through them."""
+    if fn_addr not in known_sorted:
+        fail(site_path, f"{where} is not a known function start (fail-closed refusal)")
+    return fn_addr + 4 * ALT_GATE_MAX_FUNCTION_WORDS
+
+
+class _LazyWords(dict):  # type: ignore[type-arg]
+    """Guest words read on demand, one at a time; ``get`` gives None for an unreadable word."""
+
+    def __init__(self, read_words_fn: Any) -> None:
+        super().__init__()
+        self._read = read_words_fn
+
+    def __missing__(self, addr: int) -> int:
+        got = self._read(addr, 1)
+        if not got:
+            raise KeyError(addr)
+        value = int(got[0]) & 0xFFFFFFFF
+        self[addr] = value
+        return value
+
+    def get(self, addr: int, default: Any = None) -> Any:  # type: ignore[override]
+        try:
+            return self[addr]
+        except KeyError:
+            return default
+
+
+def _jump_table(pc: int, w: int, fn_addr: int, words: Mapping[int, int], read_words_fn: Any,
+                where: str, site_path: str) -> list[int]:
+    """The targets of ``jr rX`` at ``pc``: a bounded table switch, or a refusal.
+
+    The recognised form is ``sltiu rB, rI, N`` then ``beq``/``beql rB, $zero`` (the out-of-range branch), and
+    in the straight-line code up to the ``jr`` a table address built from ``lui``/``addiu`` constants
+    plus ``rI << 2``, loaded with ``lw``. Any other write to a register the form uses refuses it.
+    """
+    reg = (w >> 21) & 31
+    start = None
+    p = pc - 4
+    while p >= max(fn_addr, pc - 4 * 16):
+        b = words.get(p)
+        prev = words.get(p - 4)
+        if (b is not None and prev is not None and (b >> 26) in (0x04, 0x14) and (b >> 16) & 31 == 0
+                and (prev >> 26) == 0x0B and (prev >> 16) & 31 == (b >> 21) & 31):
+            start = p - 4
+            break
+        p -= 4
+    if start is None:
+        fail(site_path, f"{where} jumps through ${reg} at 0x{pc:08x} with no bounded table switch before it "
+                        f"(fail-closed refusal)")
+    sltiu = words[start]
+    index, count = (sltiu >> 21) & 31, sltiu & 0xFFFF
+    if not 0 < count <= ALT_GATE_MAX_TABLE_ENTRIES:
+        fail(site_path, f"{where} has a table switch of {count} entries at 0x{pc:08x} (fail-closed refusal)")
+    val: dict[int, tuple[str, int]] = {index: ("index", 0)}
+    # A beql's slot runs only on the out-of-range path; a beq's slot runs on the path to the table too.
+    first = start + 12 if (words[start + 4] >> 26) == 0x14 else start + 8
+    for q in range(first, pc, 4):
+        x = words[q]
+        op, rs, rt, rd, fn = x >> 26, (x >> 21) & 31, (x >> 16) & 31, (x >> 11) & 31, x & 0x3F
+        simm = (x & 0xFFFF) - 0x10000 if x & 0x8000 else x & 0xFFFF
+        dest, new = None, None
+        if op == 0x0F:
+            dest, new = rt, ("const", (x & 0xFFFF) << 16)
+        elif op == 0x09 and val.get(rs, ("", 0))[0] in ("const", "addr"):
+            dest, new = rt, (val[rs][0], (val[rs][1] + simm) & 0xFFFFFFFF)
+        elif op == 0x00 and fn == 0x00 and (x >> 6) & 31 == 2 and val.get(rt) == ("index", 0):
+            dest, new = rd, ("index4", 0)
+        elif op == 0x00 and fn == 0x21:
+            kinds = sorted((val.get(rs, ("", 0)), val.get(rt, ("", 0))))
+            if kinds[0][0] == "const" and kinds[1][0] == "index4":
+                dest, new = rd, ("addr", kinds[0][1])
+        elif op == 0x23 and val.get(rs, ("", 0))[0] == "addr":
+            dest, new = rt, ("entry", (val[rs][1] + simm) & 0xFFFFFFFF)
+        uses = _uses(x)
+        if new is None and uses is not None:
+            for r in uses[1]:
+                val.pop(r, None)
+        elif new is None:
+            val.clear()
+        if dest is not None and dest != 0:
+            val[dest] = new  # type: ignore[assignment]
+    kind, base = val.get(reg, ("", 0))
+    if kind != "entry":
+        fail(site_path, f"{where} jumps through ${reg} at 0x{pc:08x}, which this check cannot read as a "
+                        f"table switch (fail-closed refusal)")
+    table = read_words_fn(base, count)
+    if not table or len(table) != count:
+        fail(site_path, f"{where} has a switch table at 0x{base:08x} this check cannot read (fail-closed refusal)")
+    return [int(t) & 0xFFFFFFFF for t in table]
+
+
+class _Graph:
+    """The instruction graph of one function: each node is an address; a transfer's delay slot is
+    its own node, whose successors are the transfer's destinations. ``_EXIT`` follows a return."""
+
+    def __init__(self, fn_addr: int, end: int, read_words_fn: Any, where: str, site_path: str,
+                 known_sorted: Sequence[int] = ()) -> None:
+        self.fn, self.end, self.where = fn_addr, end, where
+        starts = frozenset(known_sorted)
+        self.words = _LazyWords(read_words_fn)
+        if self.words.get(fn_addr) is None:
+            fail(site_path, f"{where} cannot be read (fail-closed refusal)")
+        self.succ: dict[int, list[int]] = {}
+        self.calls: dict[int, int | None] = {}  # delay-slot node -> callee (None through a register)
+        self.slots: set[int] = set()
+        # Only instructions reachable from the entry are decoded, so alignment padding or data
+        # after the last return cannot refuse a function.
+        todo = [fn_addr]
+        while todo:
+            pc = todo.pop()
+            if pc in self.slots:
+                fail(site_path, f"{where} branches into the delay slot at 0x{pc:08x} (fail-closed refusal)")
+            if pc == _EXIT or pc in self.succ:
+                continue
+            if not fn_addr <= pc < end:
+                fail(site_path, f"{where} runs or transfers to 0x{pc:08x}, more than "
+                                f"{ALT_GATE_MAX_FUNCTION_WORDS} instructions from its entry (fail-closed refusal)")
+            if len(self.succ) >= ALT_GATE_MAX_FUNCTION_WORDS:
+                fail(site_path, f"{where} has more than {ALT_GATE_MAX_FUNCTION_WORDS} reachable instructions "
+                                f"(fail-closed refusal)")
+            w = self.words.get(pc)
+            if w is None:
+                fail(site_path, f"{where} cannot be read at 0x{pc:08x} (fail-closed refusal)")
+            op, rs, rt, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, w & 0x3F
+            slot = pc + 4
+            branch = _branch_target(w, pc)
+            if branch is None and not _is_jump(w):
+                self.succ[pc] = [] if op == 0x00 and fn == 0x0D else [pc + 4]  # break never returns
+                todo.extend(self.succ[pc])
+                continue
+            if slot >= end:
+                fail(site_path, f"{where} ends inside the delay slot of 0x{pc:08x} (fail-closed refusal)")
+            if slot in self.succ:
+                fail(site_path, f"{where} branches into the delay slot at 0x{slot:08x} (fail-closed refusal)")
+            s = self.words.get(slot)
+            if s is None:
+                fail(site_path, f"{where} cannot be read at 0x{slot:08x} (fail-closed refusal)")
+            if _branch_target(s, slot) is not None or _is_jump(s):
+                fail(site_path, f"{where} has a transfer in a delay slot at 0x{slot:08x} (fail-closed refusal)")
+            self.slots.add(slot)
+            likely = _is_likely_branch(w)
+            if branch is not None:
+                always = (op == 0x04 and rs == 0 and rt == 0) or (op == 0x01 and rt == 0x01 and rs == 0)
+                self.succ[pc] = [slot] + ([pc + 8] if likely else [])
+                self.succ[slot] = [branch] + ([] if always or likely else [pc + 8])
+            elif op == 0x02:
+                dest = ((pc + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
+                self.succ[pc] = [slot]
+                if not fn_addr <= dest < end and dest in starts:
+                    self.calls[slot] = dest  # a tail call: the callee returns for this function
+                    self.succ[slot] = [_EXIT]
+                else:
+                    self.succ[slot] = [dest]
+            elif op == 0x03 or (op == 0x00 and fn == 0x09):
+                self.succ[pc], self.succ[slot] = [slot], [pc + 8]
+                self.calls[slot] = ((((pc + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)) if op == 0x03
+                                    else None)
+            elif op == 0x00 and fn == 0x08 and rs == 31:
+                self.succ[pc], self.succ[slot] = [slot], [_EXIT]
+            elif op == 0x00 and fn == 0x08:
+                dests = _jump_table(pc, w, fn_addr, self.words, read_words_fn, where, site_path)
+                self.succ[pc], self.succ[slot] = [slot], sorted(set(dests))
+            else:
+                fail(site_path, f"{where} has a linking branch at 0x{pc:08x} (fail-closed refusal)")
+            todo.extend(n for n in self.succ[pc] if n != slot)
+            todo.extend(self.succ[slot])
+
+    def reach(self, starts: Sequence[int], *, avoid: frozenset[int] = frozenset(),
+              within: set[int] | None = None) -> set[int]:
+        seen: set[int] = set()
+        todo = [s for s in starts if s not in avoid and (within is None or s in within)]
+        while todo:
+            n = todo.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            for m in self.succ.get(n, ()):
+                if m not in avoid and m not in seen and (within is None or m in within):
+                    todo.append(m)
+        return seen
+
+    def returning(self) -> set[int]:
+        """Nodes from which a path reaches the return."""
+        preds: dict[int, list[int]] = {}
+        for n, nxt in self.succ.items():
+            for m in nxt:
+                preds.setdefault(m, []).append(n)
+        seen = {_EXIT}
+        todo = [_EXIT]
+        while todo:
+            for p in preds.get(todo.pop(), ()):
+                if p not in seen:
+                    seen.add(p)
+                    todo.append(p)
+        return seen
+
+
+def _move_source(w: int) -> int | None:
+    """The source register of a register move (``addu``/``or``/``addiu 0``), else None."""
+    op, rs, rt, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, w & 0x3F
+    if op == 0x00 and fn in (0x21, 0x25, 0x20):
+        if rt == 0:
+            return rs
+        if rs == 0:
+            return rt
+    if op in (0x08, 0x09) and w & 0xFFFF == 0:
+        return rs
+    return None
+
+
+def _entry_a0_at_calls(graph: _Graph, site_path: str) -> dict[int, bool]:
+    """For each call slot: whether $a0 holds the function's entry $a0 there on every path."""
+    every = frozenset(range(1, 32))
+    state: dict[int, frozenset[int]] = {graph.fn: frozenset((4,))}
+    at_call: dict[int, bool] = {}
+    todo = [graph.fn]
+    while todo:
+        n = todo.pop()
+        cur = state[n]
+        w = graph.words[n]
+        uses = _uses(w)
+        src = _move_source(w)
+        out: frozenset[int]
+        if uses is None:
+            out = frozenset()  # an unreadable word: nothing is known to hold the entry $a0 after it
+        else:
+            dest = uses[1]
+            out = cur - dest
+            if src is not None and src in cur:
+                out = out | (dest & every)
+        if n in graph.calls:
+            at_call[n] = at_call.get(n, True) and 4 in out
+            out = out - _CALL_CLOBBERED
+        for m in graph.succ.get(n, ()):
+            if m == _EXIT:
+                continue
+            old = state.get(m)
+            new = out if old is None else old & out
+            if old is None or new != old:
+                state[m] = new
+                todo.append(m)
+    return at_call
+
+
+def _check_alt_gate_target(site_path: str, target: int, alternates: Sequence[int], read_words_fn: Any,
+                           known_sorted: Sequence[int]) -> None:
+    """The gated function calls each alternate exactly once on every path that returns, in list
+    order, and passes it the function's own entry $a0."""
+    where = f"gate_30hz_alt target 0x{target:08x}"
+    graph = _Graph(target, _function_end(target, known_sorted, where, site_path), read_words_fn, where, site_path,
+                   known_sorted)
+    returning = graph.returning()
+    if graph.fn not in returning:
+        fail(site_path, f"{where} has no path that returns (fail-closed refusal)")
+    a0_ok = _entry_a0_at_calls(graph, site_path)
+    nodes: list[int] = []
+    for alt in alternates:
+        slots = [slot for slot, callee in graph.calls.items() if callee == alt]
+        if len(slots) != 1:
+            fail(site_path, f"{where} calls alternate 0x{alt:08x} directly {len(slots)} times; it must call it "
+                            f"exactly once, so the alternate is part of the update the gate skips "
+                            f"(fail-closed refusal)")
+        node = slots[0]
+        if _EXIT in graph.reach([graph.fn], avoid=frozenset((node,)), within=returning):
+            fail(site_path, f"{where} has a path that returns without calling alternate 0x{alt:08x} "
+                            f"(fail-closed refusal)")
+        if node in graph.reach(graph.succ[node], within=returning):
+            fail(site_path, f"{where} can call alternate 0x{alt:08x} more than once on a path that returns "
+                            f"(fail-closed refusal)")
+        if not a0_ok.get(node, False):
+            fail(site_path, f"{where} does not pass alternate 0x{alt:08x} its own entry $a0 on every path "
+                            f"(fail-closed refusal)")
+        nodes.append(node)
+    for i, first in enumerate(nodes):
+        for later in nodes[i + 1:]:
+            if later in graph.reach([graph.fn], avoid=frozenset((first,)), within=returning):
+                fail(site_path, f"{where} can reach a later alternate before 0x{alternates[i]:08x}: the "
+                                f"alternates must run in the order the target calls them (fail-closed refusal)")
+
+
+def _check_caller_ignores_results(site_path: str, fn_addr: int, site_addr: int, read_words_fn: Any,
+                                  known_sorted: Sequence[int]) -> None:
+    """After a gated call, no path of the caller reads $v0, $v1, f0-f3, HI or LO before writing it,
+    up to its next call; a return counts as reading $v0, $v1 and f0."""
+    where = f"gate_30hz_alt caller 0x{fn_addr:08x}"
+    graph = _Graph(fn_addr, _function_end(fn_addr, known_sorted, where, site_path), read_words_fn, where,
+                   site_path, known_sorted)
+    seen: set[tuple[int, frozenset[int]]] = set()
+    todo: list[tuple[int, frozenset[int]]] = [(site_addr + 8, frozenset())]
+    while todo:
+        n, written = todo.pop()
+        if (n, written) in seen:
+            continue
+        seen.add((n, written))
+        if n == _EXIT:
+            read = _RETURN_READS - written
+            if read:
+                fail(site_path, f"{where} returns after the gated call without writing "
+                                f"{_reg_name(min(read))}: a skipped call leaves it stale (fail-closed refusal)")
+            continue
+        if n not in graph.words:
+            fail(site_path, f"{where} ends before 0x{n:08x}, after the gated call (fail-closed refusal)")
+        uses = _uses(graph.words[n])
+        if uses is None:
+            fail(site_path, f"{where} has a word this check cannot read at 0x{n:08x} after the gated call "
+                            f"(fail-closed refusal)")
+        read = (uses[0] & _CALL_RESULTS) - written
+        if read:
+            fail(site_path, f"{where} reads {_reg_name(min(read))} at 0x{n:08x} after the gated call: a "
+                            f"skipped call leaves it stale (fail-closed refusal)")
+        if n in graph.calls:
+            continue
+        nxt_written = written | (uses[1] & _CALL_RESULTS)
+        for m in graph.succ.get(n, ()):
+            todo.append((m, nxt_written))
+
+
+def _alt_inputs(site_path: str, fn: int, entry: frozenset[int], read_words_fn: Any, known_sorted: Sequence[int],
+                summaries: dict[tuple[int, frozenset[int]], frozenset[int] | None],
+                depth: int = 0) -> frozenset[int]:
+    """Which of ``entry`` (registers still holding the alternate's entry values) function ``fn``
+    may read. A call is followed only while some of them are still unwritten, and only to
+    ``ALT_GATE_INPUT_DEPTH`` calls below the alternate: past that, and through a register below
+    it, a callee is taken to read only the arguments its caller set (the PSP ABI)."""
+    key = (fn, entry)
+    if key in summaries:
+        got = summaries[key]
+        return entry if got is None else got  # None: still being analysed (a cycle)
+    if len(summaries) >= ALT_GATE_MAX_TREE_FUNCTIONS:
+        fail(site_path, f"gate_30hz_alt alternates pass their unset inputs through more than "
+                        f"{ALT_GATE_MAX_TREE_FUNCTIONS} calls (fail-closed refusal)")
+    summaries[key] = None
+    where = f"gate_30hz_alt alternate call 0x{fn:08x}"
+    graph = _Graph(fn, _function_end(fn, known_sorted, where, site_path), read_words_fn, where, site_path,
+                   known_sorted)
+    state: dict[int, frozenset[int]] = {graph.fn: entry}
+    reads: set[int] = set()
+    todo = [graph.fn]
+    while todo:
+        n = todo.pop()
+        cur = state[n]
+        uses = _uses(graph.words[n])
+        if uses is None:
+            reads |= cur
+            out = cur
+        else:
+            reads |= uses[0] & cur
+            out = cur - uses[1]
+        if n in graph.calls and out and depth < ALT_GATE_INPUT_DEPTH:
+            callee = graph.calls[n]
+            if callee is None and depth == 0:
+                names = ", ".join(_reg_name(r) for r in sorted(out))
+                fail(site_path, f"{where} calls through a register at 0x{n - 4:08x} while {names} may still hold "
+                                f"the alternate's entry values (fail-closed refusal)")
+            if callee is not None:
+                reads |= _alt_inputs(site_path, callee, out, read_words_fn, known_sorted, summaries, depth + 1)
+        for m in graph.succ.get(n, ()):
+            if m == _EXIT:
+                continue
+            old = state.get(m)
+            new = out if old is None else old | out
+            if old is None or new != old:
+                state[m] = new
+                todo.append(m)
+    summaries[key] = frozenset(reads)
+    return summaries[key]  # type: ignore[return-value]
+
+
+def _direct_call_tree(site_path: str, root: int, read_words_fn: Any, known_sorted: Sequence[int]) -> set[int]:
+    """Every function reachable from ``root`` through direct calls (``jal``) and tail jumps (``j`` to a
+    known start more than the read window away). Each body is the code reachable from its entry
+    through branches, jumps and fall-through; after a ``jr`` through a register that is not a table
+    switch this check can read, every word up to the next known start is taken as reachable, and
+    calls through a register are not followed."""
+    starts = sorted(set(known_sorted))
+    tree: set[int] = set()
+    todo = [root]
+    while todo:
+        fn = todo.pop()
+        if fn in tree:
+            continue
+        if len(tree) >= ALT_GATE_MAX_CALL_TREE:
+            fail(site_path, f"gate_30hz_alt alternate 0x{root:08x} reaches more than {ALT_GATE_MAX_CALL_TREE} "
+                            f"functions (fail-closed refusal)")
+        tree.add(fn)
+        where = f"gate_30hz_alt alternate call tree function 0x{fn:08x}"
+        end = _function_end(fn, known_sorted, where, site_path)
+        words = _LazyWords(read_words_fn)
+        seen: set[int] = set()
+        pcs = [fn]
+        while pcs:
+            pc = pcs.pop()
+            if pc in seen:
+                continue
+            if not fn <= pc < end or len(seen) >= ALT_GATE_MAX_FUNCTION_WORDS:
+                fail(site_path, f"{where} runs more than {ALT_GATE_MAX_FUNCTION_WORDS} instructions from its "
+                                f"entry (fail-closed refusal)")
+            w = words.get(pc)
+            if w is None:
+                fail(site_path, f"{where} cannot be read at 0x{pc:08x} (fail-closed refusal)")
+            seen.add(pc)
+            op, rs, fnc = w >> 26, (w >> 21) & 31, w & 0x3F
+            dest = ((pc + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
+            branch = _branch_target(w, pc)
+            transfer = op in (0x02, 0x03) or branch is not None or (op == 0x00 and fnc in (0x08, 0x09))
+            if transfer:
+                seen.add(pc + 4)  # the delay slot runs with the transfer; it has no successor of its own
+            if op == 0x03:
+                todo.append(dest)
+                pcs.append(pc + 8)
+            elif op == 0x02:
+                if dest in starts and not fn <= dest < end:
+                    todo.append(dest)
+                else:
+                    pcs.append(dest)
+            elif branch is not None:
+                pcs += [pc + 8, branch]
+            elif op == 0x00 and fnc == 0x09:
+                pcs.append(pc + 8)
+            elif op == 0x00 and fnc == 0x08:
+                if rs != 31:
+                    try:
+                        pcs += _jump_table(pc, w, fn, words, read_words_fn, where, site_path)
+                    except EnhancementPackageError:
+                        nxt = bisect.bisect_right(starts, pc)
+                        stop = starts[nxt] if nxt < len(starts) else end
+                        pcs += range(pc + 8, min(stop, end), 4)
+            elif not (op == 0x00 and fnc == 0x0D):
+                pcs.append(pc + 4)
+    return tree
+
+
+def _check_alt_gate(site_path: str, fn_addr: int, site_addr: int, word: int, alternates: Sequence[int],
+                    read_words_fn: Any, known_sorted: Sequence[int], gated_functions: Mapping[int, str]) -> None:
+    """Every static condition of a gate_30hz_alt site (contract section 9.2)."""
+    target = ((site_addr + 4) & 0xF0000000) | ((word & 0x03FFFFFF) << 2)
+    for alt in alternates:
+        if alt == target:
+            fail(site_path, "an alternate cannot be the gated function itself (fail-closed refusal)")
+    _check_alt_gate_target(site_path, target, alternates, read_words_fn, known_sorted)
+    _check_caller_ignores_results(site_path, fn_addr, site_addr, read_words_fn, known_sorted)
+    summaries: dict[tuple[int, frozenset[int]], frozenset[int] | None] = {}
+    for alt in alternates:
+        inputs = _alt_inputs(site_path, alt, _ALT_INPUTS, read_words_fn, known_sorted, summaries)
+        if inputs:
+            names = ", ".join(_reg_name(r) for r in sorted(inputs))
+            fail(site_path, f"gate_30hz_alt alternate 0x{alt:08x} may read {names} as its caller left them; "
+                            f"an alternate is passed only $a0 (fail-closed refusal)")
+        for f in sorted(_direct_call_tree(site_path, alt, read_words_fn, known_sorted)):
+            if f in (target, fn_addr):
+                fail(site_path, f"gate_30hz_alt alternate 0x{alt:08x} reaches 0x{f:08x}, the "
+                                f"{'gated function' if f == target else 'caller'}: an alternate must not "
+                                f"re-enter the update it stands for (fail-closed refusal)")
+            if f in gated_functions:
+                fail(site_path, f"gate_30hz_alt alternate 0x{alt:08x} reaches 0x{f:08x}, which holds gated "
+                                f"site {gated_functions[f]}: an alternate runs only on the updates its gate "
+                                f"skips, so a gate inside it would never run (fail-closed refusal)")
+
+
+def _resolve_alternates(pending: Sequence[tuple[Mapping[str, Any], str, int, int, list[int]]],
+                        resolved_by_addr: dict[int, dict[str, Any]], symbol_to_addr: Mapping[str, int],
+                        read_words_fn: Any, known_functions: Sequence[int]) -> None:
+    """Resolve and check each gate_30hz_alt site's alternates, once every site is resolved."""
+    alt_sites = [p for p in pending if p[0]["transform"] == "gate_30hz_alt"]
+    if not alt_sites:
+        return
+    known_sorted = sorted(set(int(a) for a in known_functions))
+    gated_functions: dict[int, str] = {}
+    for entry in resolved_by_addr.values():
+        if entry["rewrite"]["kind"] == "gate":
+            gated_functions.setdefault(entry["fn_addr"], entry["id"])
+    for site, site_path, fn_addr, site_addr, stock_words in alt_sites:
+        addrs: list[int] = []
+        for name in site["alternates"]:
+            if name not in symbol_to_addr:
+                fail(f"{site_path}.alternates", f"alternate {name!r} is not in the symbol map (fail-closed refusal)")
+            addrs.append(int(symbol_to_addr[name]) & 0xFFFFFFFF)
+        if len(set(addrs)) != len(addrs):
+            fail(f"{site_path}.alternates", "two alternates name the same function (fail-closed refusal)")
+        others = {f: sid for f, sid in gated_functions.items() if sid != site["id"]}
+        _check_alt_gate(site_path, fn_addr, site_addr, stock_words[0], addrs, read_words_fn, known_sorted, others)
+        resolved_by_addr[site_addr]["rewrite"]["alternates"] = addrs
+
+
 def verify_and_resolve_sites(
     pkg_data: Mapping[str, Any],
     *,
@@ -983,7 +1867,13 @@ def verify_and_resolve_sites(
                                                acceleration=stock_values[accel])
         elif len(stock_words) == 1:
             rewrites = [plan_site_rewrite(site, stock_words[0])]
+            if site["transform"] == "gate_30hz_hold":
+                _check_hold_callee(site_path, site_addr, stock_words[0], read_words_fn)
+            elif site["transform"] == "count_x2_even":
+                _check_even_counter(site_path, fn_addr, site_addr, stock_words[0], read_words_fn)
         else:
+            if "stock_values" in site:
+                fail(f"{site_path}.stock_values", "stock_values belongs only to swc1 and sw store sites")
             rewrites = plan_float_pair_rewrite(site, stock_words[0], stock_words[1])
         for word_index, rewrite in enumerate(rewrites):
             word_addr = site_addr + 4 * word_index
@@ -996,8 +1886,12 @@ def verify_and_resolve_sites(
             resolved_entry["fn_addr"] = fn_addr
             resolved_entry["site_addr"] = word_addr
             resolved_entry["stock_words"] = [stock_words[word_index]]
+            if "requires" in site:
+                rewrite = dict(rewrite, requires=list(site["requires"]))
             resolved_entry["rewrite"] = rewrite
             resolved_by_addr[word_addr] = resolved_entry
+
+    _resolve_alternates(pending, resolved_by_addr, symbol_to_addr, read_words_fn, known_functions)
 
     if "update_boundary" not in validated:
         gated = sorted(e["id"] for e in resolved_by_addr.values() if e["rewrite"]["kind"] == "gate")
@@ -1137,7 +2031,8 @@ def _scale_value(transform: str, value: float) -> float:
     if not 0.0 < value < 1.0:
         raise ValueError(f"{value!r} is outside (0, 1)")
     if transform == "decay_k_to_1-sqrt(1-k)":
-        return 1.0 - math.sqrt(1.0 - value)
+        # 1 - sqrt(1 - k) without its cancellation, which loses a small k entirely
+        return value / (1.0 + math.sqrt(1.0 - value))
     return math.sqrt(value)
 
 
@@ -1416,7 +2311,87 @@ def plan_float_pair_rewrite(site: Mapping[str, Any], w0: int, w1: int,
     ]
 
 
+def _store_value_pairs(site: Mapping[str, Any], rewrite: dict[str, Any]) -> list[list[int]]:
+    """``[stock bits, scaled bits]`` for each declared stock value of a store site, checked."""
+    sid = site["id"]
+    float_store = rewrite["kind"] == "scale_f_store"
+    pairs: list[list[int]] = []
+    seen: set[int] = set()
+    for value in site["stock_values"]:
+        if float_store:
+            try:
+                bits = _f32_bits(float(value))
+            except OverflowError:
+                bits = 0x7F800000
+            stock = _f32(bits)
+            if not math.isfinite(stock):
+                raise EnhancementPackageError(
+                    f"site {sid}: stock value {value!r} is not finite as an f32 (fail-closed refusal)")
+            try:
+                scaled_bits = _f32_bits(stock * rewrite["factor"])
+            except OverflowError:
+                scaled_bits = 0x7F800000
+            if not math.isfinite(_f32(scaled_bits)):
+                raise EnhancementPackageError(
+                    f"site {sid}: stock value {value!r} scaled is not finite as an f32 (fail-closed refusal)")
+        else:
+            if not isinstance(value, int):
+                raise EnhancementPackageError(
+                    f"site {sid}: stock value {value!r} of an integer store must be an integer "
+                    "(fail-closed refusal)")
+            if not -0x80000000 <= value <= 0x7FFFFFFF or not -0x80000000 <= 2 * value <= 0x7FFFFFFF:
+                raise EnhancementPackageError(
+                    f"site {sid}: stock value {value} or its double is outside the s32 range "
+                    "(fail-closed refusal)")
+            bits, scaled_bits = value & 0xFFFFFFFF, (2 * value) & 0xFFFFFFFF
+        if bits in seen:
+            raise EnhancementPackageError(
+                f"site {sid}: duplicate stock value {value!r} (fail-closed refusal)")
+        seen.add(bits)
+        pairs.append([bits, scaled_bits])
+    return pairs
+
+
+def store_value_overlaps(site_id: str, rewrite: Mapping[str, Any]) -> list[str]:
+    """One note per stock value of a store site whose scaled value is also a stock value.
+
+    The run-time check cannot tell that value, stored again after it was scaled, from a fresh
+    stock value, so a path that re-stores it would scale it twice. It is not refused, because
+    the rows of one table can hold both v and 2v; the package author checks that no such path
+    exists.
+    """
+    pairs = rewrite.get("stock_values", ())
+    stock = {bits for bits, _scaled in pairs}
+
+    def text(bits: int) -> str:
+        if rewrite["kind"] == "scale_f_store":
+            return f"{_f32(bits):g}"
+        return str(bits - (1 << 32) if bits & 0x80000000 else bits)
+
+    return [
+        f"site {site_id}: stock value {text(bits)} scales to {text(scaled)}, which is also a stock "
+        "value; a path that stores an already scaled value again would scale it twice"
+        for bits, scaled in pairs if scaled in stock
+    ]
+
+
 def plan_site_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
+    """The one defined rewrite of a verified stock word, with a store site's stock values."""
+    rewrite = _plan_word_rewrite(site, w)
+    if "stock_values" in site:
+        if rewrite["kind"] not in ("scale_f_store", "scale_int_store"):
+            raise EnhancementPackageError(
+                f"site {site['id']}: stock_values belongs only to swc1 and sw store sites "
+                "(fail-closed refusal)")
+        rewrite["stock_values"] = _store_value_pairs(site, rewrite)
+    elif rewrite["kind"] == "scale_int_store":
+        raise EnhancementPackageError(
+            f"site {site['id']}: an integer store site needs stock_values, so exactness and range "
+            "are proven at build time (fail-closed refusal)")
+    return rewrite
+
+
+def _plan_word_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
     """Return the one defined rewrite of a verified stock word for its declared transform.
 
     The rewrite depends only on the declared transform and the instruction's own
@@ -1426,12 +2401,18 @@ def plan_site_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
 
     Returned kinds:
       ``word``            execute ``word`` instead of the stock word;
-      ``gate``            execute the stock instruction on alternate 60 Hz updates only;
+      ``gate``            execute the stock instruction on alternate 60 Hz updates only; a gated
+                          call with ``hold_f`` sets FPR 0 to FPR ``hold_f`` on the updates it skips;
+      ``word_even``       execute ``word``, then clear GPR ``rt`` when GPR ``reg`` was odd;
       ``scale_int_reg``   after the stock load, multiply GPR ``reg`` by 2;
       ``scale_int_args``  after the stock entry instruction, multiply the GPRs ``regs`` by 2;
       ``scale_f_reg``   after the stock instruction, multiply FPR ``reg`` by ``factor``;
       ``scale_f_store``   store FPR ``reg`` multiplied by ``factor`` (the register is kept);
-      ``scale_f_addend``  run ``fd = fd +/- ft`` with ``ft`` multiplied by ``factor``.
+      ``scale_int_store`` store GPR ``reg`` doubled (the register is kept; count_x2 on ``sw``);
+      ``scale_f_addend``  run ``fd = fd +/- ft`` with ``ft`` multiplied by ``factor``;
+      ``map_f_reg``       after the stock lwc1, map FPR ``reg`` by ``map`` (decay or retention);
+      ``scale_v_reg``     after the stock lv.s, multiply VFPU register ``vreg`` by ``factor``;
+      ``map_v_reg``       after the stock lv.s, map VFPU register ``vreg`` by ``map``.
     """
     w = int(w) & 0xFFFFFFFF
     tf = site["transform"]
@@ -1446,6 +2427,7 @@ def plan_site_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
     is_jal = op == 0x03
     is_jalr = op == 0x00 and fn == 0x09
     is_fpu_s = op == 0x11 and rs == 0x10
+    vt = rt | ((w & 3) << 5)  # lv.s: the VFPU register number
 
     if tf == "vblank_wait_2_to_1":
         if op in _IMM_ARITH_OPS + (0x0D,) and simm16 == 2:
@@ -1497,6 +2479,29 @@ def plan_site_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
     if tf == "launch_velocity_x0.5":
         _refuse(site, w, "launch_velocity_x0.5 rewrites a lui/ori float pair")
 
+    if tf == "gate_30hz_hold":
+        # A call that advances its first float argument (f12) by one update and returns
+        # the result in f0: on a skipped update the call holds that value instead.
+        if is_jal:
+            return {"kind": "gate", "hold_f": 12}
+        _refuse(site, w, "gate_30hz_hold takes a jal")
+
+    if tf == "gate_30hz_alt":
+        # A call skipped on odd updates, with the calls named by ``alternates`` made in its
+        # place; the resolver adds their addresses after checking them (section 9.2).
+        if is_jal:
+            return {"kind": "gate", "alternates": []}
+        _refuse(site, w, "gate_30hz_alt takes a jal")
+
+    if tf == "count_x2_even":
+        # slti/sltiu rt, rs, n where rs counts logic updates: true while rs < 2n and rs is
+        # even, so n events still happen, one every second update, at the stock instants.
+        if op not in (0x0A, 0x0B) or simm16 <= 0 or 2 * simm16 > 0x7FFF:
+            _refuse(site, w, "count_x2_even takes a slti/sltiu with a positive immediate")
+        if rt == 0 or rt == rs:
+            _refuse(site, w, "count_x2_even needs a destination other than $zero and the counter")
+        return {"kind": "word_even", "word": _with_imm(w, 2 * simm16), "reg": rs, "rt": rt}
+
     if tf == "gate_30hz":
         if is_jal or is_jalr:
             return {"kind": "gate"}
@@ -1509,16 +2514,17 @@ def plan_site_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
         _refuse(site, w, "gate_30hz needs a call or an accumulating update")
 
     if tf in ("decay_k_to_1-sqrt(1-k)", "retention_m_to_sqrt(m)"):
+        mapping = "decay" if tf == "decay_k_to_1-sqrt(1-k)" else "retention"
+        if op == 0x31:  # lwc1 of a per-update factor: map the loaded register
+            return {"kind": "map_f_reg", "reg": rt, "map": mapping}
+        if op == 0x32:  # lv.s of a per-update factor: map the loaded VFPU register
+            return {"kind": "map_v_reg", "vreg": vt, "map": mapping}
         if op != 0x0F:
-            _refuse(site, w, "expects the lui of a float constant")
+            _refuse(site, w, "expects the lui of a float constant, an lwc1 or an lv.s")
         value = _f32(imm16 << 16)
         if not 0.0 < value < 1.0:
             _refuse(site, w, f"float constant {value!r} is outside (0, 1)")
-        if tf == "decay_k_to_1-sqrt(1-k)":
-            new_value = 1.0 - math.sqrt(1.0 - value)
-        else:
-            new_value = math.sqrt(value)
-        bits = _f32_bits(new_value)
+        bits = _f32_bits(_scale_value(tf, value))
         hi = ((bits + 0x8000) >> 16) & 0xFFFF
         return {"kind": "word", "word": _with_imm(w, hi)}
 
@@ -1565,8 +2571,14 @@ def plan_site_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
         return {"kind": "scale_int_reg", "reg": rt}
     if op == 0x31:  # lwc1
         return {"kind": "scale_f_reg", "reg": rt, "factor": factor}
+    if op == 0x32:  # lv.s
+        return {"kind": "scale_v_reg", "vreg": vt, "factor": factor}
     if op == 0x39:  # swc1
         return {"kind": "scale_f_store", "reg": rt, "factor": factor}
+    if op == 0x2B and tf == "count_x2":  # sw
+        if rt == 0 or rt == rs:
+            _refuse(site, w, "the stored register must not be $zero or also the base register")
+        return {"kind": "scale_int_store", "reg": rt}
     if is_fpu_s and fn in (0x00, 0x01) and sa == rd and rt != rd:
         return {"kind": "scale_f_addend", "reg": rt, "factor": factor}
     if is_fpu_s and fn in _FPU_RESULT_FUNCS:
@@ -1894,6 +2906,323 @@ def _executable_view(path: Path) -> tuple[dict[int, int], dict[int, int], list[i
     return words, imports, sorted(elf.func_symbols() or ()), hashlib.sha256(data).hexdigest()
 
 
+VBLANK_HZ = 60000.0 / 1001.0
+RATE_EVENT_KINDS = ("count", "change", "lcg")
+RATE_MIN_EVENTS = 20
+RATE_Z = 2.576  # two-sided 99 %
+RATE_SLOWED_BELOW = 57.0  # the runtime's ENHANCEMENT_LOGIC_SLOWED threshold (section 9.5, item 4)
+RATE_MIN_COVERAGE = 0.9   # the shorter run must cover this share of the longer run's game time
+
+
+def parse_rate_event(spec: str) -> dict[str, Any]:
+    """Parse ``KIND:COLUMN[:A:C[:BITS]][=RATIO]`` for --event.
+
+    ``count`` sums the increases of a counter column, ``change`` counts the samples whose value
+    differs from the previous one, and ``lcg`` counts the steps a linear congruential generator
+    ``x' = (A*x + C) mod 2**BITS`` (BITS 32 unless given) took between two samples. ``RATIO`` is
+    the expected enhanced/stock rate per game second (1 unless given).
+    """
+    body, _, ratio_text = spec.partition("=")
+    parts = body.split(":")
+    if parts[0] not in RATE_EVENT_KINDS or len(parts) < 2 or not parts[1]:
+        raise EnhancementPackageError(
+            f"--event {spec!r}: expected KIND:COLUMN with KIND one of {', '.join(RATE_EVENT_KINDS)}")
+    event: dict[str, Any] = {"kind": parts[0], "column": parts[1], "spec": spec}
+    try:
+        event["ratio"] = float(ratio_text) if ratio_text else 1.0
+        if parts[0] == "lcg":
+            if len(parts) not in (4, 5):
+                raise ValueError
+            event["a"], event["c"] = int(parts[2], 0), int(parts[3], 0)
+            event["bits"] = int(parts[4], 0) if len(parts) == 5 else 32
+            if not 1 <= event["bits"] <= 64:
+                raise ValueError
+        elif len(parts) != 2:
+            raise ValueError
+    except ValueError:
+        raise EnhancementPackageError(
+            f"--event {spec!r}: lcg takes lcg:COLUMN:A:C[:BITS]; count and change take KIND:COLUMN; "
+            "RATIO is a number") from None
+    if not math.isfinite(event["ratio"]) or event["ratio"] <= 0:
+        raise EnhancementPackageError(f"--event {spec!r}: the expected ratio must be a positive number")
+    return event
+
+
+def load_sample_rows(path: Path | str, columns: Sequence[str]) -> list[dict[str, str]]:
+    """Read an ``SR_SAMPLE_OUT`` CSV (``vblank,<label>...``) and check that it names ``columns``."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise EnhancementPackageError(f"{path}: cannot read the sample file ({exc})") from None
+    if not lines:
+        raise EnhancementPackageError(f"{path}: empty sample file")
+    header = lines[0].split(",")
+    if header[0] != "vblank":
+        raise EnhancementPackageError(f"{path}: the first column must be vblank (an SR_SAMPLE_OUT file)")
+    missing = [c for c in columns if c not in header]
+    if missing:
+        raise EnhancementPackageError(f"{path}: no column {', '.join(missing)} (columns: {', '.join(header[1:])})")
+    rows = []
+    for n, line in enumerate(lines[1:], start=2):
+        cells = line.split(",")
+        if len(cells) != len(header):
+            raise EnhancementPackageError(f"{path}:{n}: {len(cells)} cells, the header has {len(header)}")
+        rows.append(dict(zip(header, cells, strict=True)))
+    return rows
+
+
+def _lcg_steps(a: int, c: int, bits: int, start: int, end: int, limit: int) -> int | None:
+    mask = (1 << bits) - 1
+    x = start & mask
+    end &= mask
+    for steps in range(limit + 1):
+        if x == end:
+            return steps
+        x = (a * x + c) & mask
+    return None
+
+
+def measure_rates(rows: Sequence[Mapping[str, str]], *, updates: str, nominal_hz: float,
+                  phase: str | None = None, events: Sequence[Mapping[str, Any]] = (),
+                  lcg_limit: int = 4096, source: str = "samples") -> dict[str, Any]:
+    """Count logic updates, vblanks and events per phase of one sampled run.
+
+    A step from one sample to the next belongs to the phase of the earlier sample. A row that
+    repeats the previous row exactly (the sampler wrote one vblank twice) is skipped and counted.
+    Anything else that would lose time refuses the file: a vblank that is not an integer, does not
+    increase, or repeats with different values, and a row without the updates counter. An event
+    counts only over the steps where its column has a value on both sides, and its game time is
+    the updates of those same steps, so an unreadable stretch biases neither side. The updates
+    counter is read as an unsigned 32-bit count, so it may wrap.
+    """
+    if not math.isfinite(nominal_hz) or nominal_hz <= 0:
+        raise EnhancementPackageError(f"{source}: the nominal rate must be a positive number, got {nominal_hz!r}")
+    if lcg_limit < 1:
+        raise EnhancementPackageError(f"--lcg-limit must be at least 1, got {lcg_limit}")
+    phases: dict[str, dict[str, Any]] = {}
+    specs = [e["spec"] for e in events]
+
+    def bucket(name: str) -> dict[str, Any]:
+        if name not in phases:
+            phases[name] = {"vblanks": 0, "updates": 0, "events": dict.fromkeys(specs, 0),
+                            "event_updates": dict.fromkeys(specs, 0), "unresolved": dict.fromkeys(specs, 0)}
+        return phases[name]
+
+    def number(index: int, column: str) -> int:
+        text = rows[index][column]
+        try:
+            return int(text)
+        except ValueError:
+            raise EnhancementPackageError(
+                f"{source}:{index + 2}: column {column}: {text!r} is not an integer") from None
+
+    kept: list[int] = []
+    duplicates = 0
+    for i, row in enumerate(rows):
+        if kept and row == rows[kept[-1]]:
+            duplicates += 1
+            continue
+        vblank = number(i, "vblank")
+        if kept and vblank <= int(rows[kept[-1]]["vblank"]):
+            raise EnhancementPackageError(
+                f"{source}:{i + 2}: vblank {vblank} does not follow vblank {rows[kept[-1]]['vblank']} with "
+                "new values; the file is not one clean capture")
+        if not row[updates]:
+            raise EnhancementPackageError(
+                f"{source}:{i + 2}: no {updates} value; every sample must read the logic-update counter")
+        kept.append(i)
+
+    empty = dict.fromkeys(specs, 0)
+    per_second: dict[int, int] = {}
+    for i, j in zip(kept, kept[1:], strict=False):
+        prev, cur = rows[i], rows[j]
+        b = bucket(prev[phase] if phase else "all")
+        b["vblanks"] += number(j, "vblank") - number(i, "vblank")
+        du = (number(j, updates) - number(i, updates)) & 0xFFFFFFFF
+        b["updates"] += du
+        second = int(number(j, "vblank") / VBLANK_HZ)
+        per_second[second] = per_second.get(second, 0) + du
+        for e in events:
+            spec, column = e["spec"], e["column"]
+            if not prev[column] or not cur[column]:
+                empty[spec] += 1
+                continue
+            b["event_updates"][spec] += du
+            if e["kind"] == "change":
+                b["events"][spec] += prev[column] != cur[column]
+                continue
+            x, y = number(i, column), number(j, column)
+            if e["kind"] == "count":
+                b["events"][spec] += max(0, y - x)
+            else:
+                steps = _lcg_steps(e["a"], e["c"], e["bits"], x, y, lcg_limit)
+                if steps is None:
+                    b["unresolved"][spec] += 1
+                else:
+                    b["events"][spec] += steps
+    for b in phases.values():
+        _derive_rates(b, nominal_hz)
+    return {"nominal_hz": nominal_hz, "phases": phases, "duplicate_rows": duplicates, "empty_steps": empty,
+            "per_second": [per_second[s] for s in sorted(per_second)]}
+
+
+def _derive_rates(b: dict[str, Any], nominal_hz: float) -> None:
+    b["seconds"] = b["vblanks"] / VBLANK_HZ
+    b["game_seconds"] = b["updates"] / nominal_hz
+    b["event_game_seconds"] = {spec: n / nominal_hz for spec, n in b["event_updates"].items()}
+    b["updates_per_second"] = b["updates"] / b["seconds"] if b["seconds"] else 0.0
+
+
+def compare_event_rate(n_stock: int, t_stock: float, n_enh: int, t_enh: float, ratio: float) -> dict[str, Any]:
+    """Compare two event counts over game time against an expected rate ratio.
+
+    Given both counts, the enhanced share of the events is binomial with p = R*t2 / (t1 + R*t2) for
+    the true ratio R; the 99 % Wilson interval of that share gives an interval for R. The verdict is
+    PASS when the expected ratio lies inside it, FAIL when it does not, and NOT_JUDGED with fewer
+    than RATE_MIN_EVENTS events or no game time on one side: a rare event is not a pass.
+    """
+    total = n_stock + n_enh
+    result: dict[str, Any] = {"stock": n_stock, "enhanced": n_enh, "expected_ratio": ratio}
+    if total < RATE_MIN_EVENTS or t_stock <= 0 or t_enh <= 0:
+        result.update(verdict="NOT_JUDGED", ratio=None, low=None, high=None)
+        return result
+    p = n_enh / total
+    z2 = RATE_Z * RATE_Z
+    centre = (p + z2 / (2 * total)) / (1 + z2 / total)
+    half = RATE_Z * math.sqrt(p * (1 - p) / total + z2 / (4 * total * total)) / (1 + z2 / total)
+    scale = t_stock / t_enh
+
+    def to_ratio(share: float) -> float:
+        return math.inf if share >= 1.0 else share / (1.0 - share) * scale
+
+    low, high = to_ratio(max(0.0, centre - half)), to_ratio(min(1.0, centre + half))
+    measured = (n_enh / t_enh) / (n_stock / t_stock) if n_stock else math.inf
+    result.update(ratio=measured, low=low, high=high, verdict="PASS" if low <= ratio <= high else "FAIL")
+    return result
+
+
+def compare_rates(stock: Mapping[str, Any], enhanced: Mapping[str, Any],
+                  events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Side-by-side report of two measure_rates() results: per phase and over the whole run.
+
+    A FAIL in any row, the whole run or one phase, is a failure of the run: a phase whose rate is
+    wrong must not be hidden by the totals. A phase too short to judge adds its events to the whole
+    run and is listed as not judged.
+    """
+    def total(run: Mapping[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {"vblanks": 0, "updates": 0, "events": {e["spec"]: 0 for e in events},
+                               "event_updates": {e["spec"]: 0 for e in events},
+                               "unresolved": {e["spec"]: 0 for e in events}}
+        for b in run["phases"].values():
+            for k in ("vblanks", "updates"):
+                out[k] += b[k]
+            for key in ("events", "event_updates", "unresolved"):
+                for spec in out[key]:
+                    out[key][spec] += b[key][spec]
+        _derive_rates(out, run["nominal_hz"])
+        return out
+
+    names = sorted(set(stock["phases"]) | set(enhanced["phases"]), key=lambda n: (len(n), n))
+    whole_stock, whole_enh = total(stock), total(enhanced)
+    rows = [("all", whole_stock, whole_enh)]
+    rows += [(n, stock["phases"].get(n), enhanced["phases"].get(n)) for n in names]
+    longer = max(whole_stock["game_seconds"], whole_enh["game_seconds"])
+    report: dict[str, Any] = {
+        "phases": [], "failures": 0, "unresolved": 0, "failed_phases": [], "unjudged_phases": [],
+        # A phase that runs no logic (a loading screen) has no game time and no events, so it may
+        # appear in one run only; one that runs logic must appear in both.
+        "one_sided_phases": [n for n in names if (n in stock["phases"]) != (n in enhanced["phases"])
+                             and (stock["phases"].get(n) or enhanced["phases"][n])["updates"]],
+        "coverage": min(whole_stock["game_seconds"], whole_enh["game_seconds"]) / longer if longer else 0.0,
+    }
+    for name, s, e in rows:
+        entry: dict[str, Any] = {"phase": name, "stock": None, "enhanced": None, "logic": "ABSENT", "events": []}
+        for side, b in (("stock", s), ("enhanced", e)):
+            if b is not None:
+                entry[side] = {k: b[k] for k in ("vblanks", "updates", "seconds", "game_seconds",
+                                                  "updates_per_second")}
+        if e is not None and e["updates"]:
+            entry["logic"] = "SLOWED" if e["updates_per_second"] < RATE_SLOWED_BELOW else "OK"
+        for ev in events:
+            spec = ev["spec"]
+            cmp = compare_event_rate(s["events"][spec] if s else 0, s["event_game_seconds"][spec] if s else 0.0,
+                                     e["events"][spec] if e else 0, e["event_game_seconds"][spec] if e else 0.0,
+                                     ev["ratio"])
+            cmp["event"] = spec
+            cmp["unresolved"] = (s["unresolved"][spec] if s else 0) + (e["unresolved"][spec] if e else 0)
+            entry["events"].append(cmp)
+            if cmp["verdict"] == "FAIL":
+                report["failures"] += 1
+                report["failed_phases"].append(f"{name} {spec}")
+            if name == "all":
+                report["unresolved"] += cmp["unresolved"]
+            elif cmp["verdict"] == "NOT_JUDGED" and ((s and s["updates"]) or (e and e["updates"])):
+                report["unjudged_phases"].append(f"{name} {spec}")
+        report["phases"].append(entry)
+    return report
+
+
+def _fmt(value: float | None, digits: int = 2) -> str:
+    if value is None:
+        return "-"
+    return "inf" if math.isinf(value) else f"{value:.{digits}f}"
+
+
+def _rates_main(args: argparse.Namespace) -> int:
+    events = [parse_rate_event(spec) for spec in args.event]
+    needed = [args.updates] + ([args.phase] if args.phase else []) + [e["column"] for e in events]
+    stock = measure_rates(load_sample_rows(args.compare_rates[0], needed), updates=args.updates,
+                          nominal_hz=args.stock_hz, phase=args.phase, events=events, lcg_limit=args.lcg_limit,
+                          source=str(args.compare_rates[0]))
+    enhanced = measure_rates(load_sample_rows(args.compare_rates[1], needed), updates=args.updates,
+                             nominal_hz=args.enhanced_hz, phase=args.phase, events=events,
+                             lcg_limit=args.lcg_limit, source=str(args.compare_rates[1]))
+    report = compare_rates(stock, enhanced, events)
+    if not 0.0 <= args.min_coverage <= 1.0:
+        raise EnhancementPackageError(f"--min-coverage must lie in [0, 1], got {args.min_coverage!r}")
+    print(f"{'phase':<10} {'stock s':>8} {'upd/s':>6} {'enh s':>8} {'upd/s':>6}  logic")
+    for p in report["phases"]:
+        s, e = p["stock"] or {}, p["enhanced"] or {}
+        print(f"{p['phase']:<10} {_fmt(s.get('seconds'), 1):>8} {_fmt(s.get('updates_per_second'), 1):>6} "
+              f"{_fmt(e.get('seconds'), 1):>8} {_fmt(e.get('updates_per_second'), 1):>6}  {p['logic']}")
+        for c in p["events"]:
+            print(f"  {c['event']}: {c['stock']} stock, {c['enhanced']} enhanced; enhanced/stock per game second "
+                  f"{_fmt(c['ratio'])} (99 % {_fmt(c['low'])}..{_fmt(c['high'])}, expected {c['expected_ratio']:g})"
+                  f" {c['verdict']}" + (f", {c['unresolved']} lcg step(s) unresolved" if c["unresolved"] else ""))
+    for label, run in (("stock", stock), ("enhanced", enhanced)):
+        print(f"{label} updates per second: " + " ".join(str(v) for v in run["per_second"]))
+        empty = ", ".join(f"{spec} {n}" for spec, n in run["empty_steps"].items() if n)
+        print(f"{label}: {report['phases'][0][label]['game_seconds']:.1f} game seconds; "
+              f"{run['duplicate_rows']} repeated row(s) skipped; steps without a value: {empty or 'none'}")
+    if args.json is not None:
+        Path(args.json).write_text(json.dumps({"stock": stock, "enhanced": enhanced, "report": report},
+                                              indent=2) + "\n", encoding="utf-8")
+    whole = report["phases"][0]
+    unjudged = sum(c["verdict"] == "NOT_JUDGED" for c in whole["events"])
+    # Judged per phase: a phase with no updates at all (a loading screen) lowers the whole run's
+    # rate without any logic running slow.
+    slowed = [p["phase"] for p in report["phases"][1:] if p["logic"] == "SLOWED"]
+    short = report["coverage"] < args.min_coverage
+    if report["failures"] or report["unresolved"]:
+        verdict = "FAIL"
+    elif unjudged or not events or slowed or short or report["one_sided_phases"]:
+        verdict = "INCOMPLETE"
+    else:
+        verdict = "PASS"
+
+    def listed(items: Sequence[str]) -> str:
+        return ", ".join(items) if items else "none"
+
+    print(f"rates: {verdict} ({len(events)} event(s): {report['failures']} result(s) differ "
+          f"[{listed(report['failed_phases'])}], {unjudged} not judged over the whole run, "
+          f"{report['unresolved']} lcg step(s) unresolved; logic below {RATE_SLOWED_BELOW:g} updates/s in "
+          f"{listed(slowed)}; phases in one run only: {listed(report['one_sided_phases'])}; "
+          f"the shorter run covers {report['coverage']:.0%} of the longer one's game time"
+          f"{' (below ' + format(args.min_coverage, '.0%') + ')' if short else ''}; "
+          f"phase results not judged: {listed(report['unjudged_phases'])})")
+    return {"PASS": 0, "FAIL": 1, "INCOMPLETE": 2}[verdict]
+
+
 def _draft_main(args: argparse.Namespace) -> int:
     words, imports, starts, sha = _executable_view(args.draft)
     draft = draft_timing_package(words, imports, function_starts=starts)
@@ -1933,13 +3262,32 @@ def main(argv: list[str] | None = None) -> int:
     draft.add_argument("--id", default="draft-60hz", help="Package id (default draft-60hz).")
     draft.add_argument("--game-version", default="1.00", help="Game version (default 1.00).")
     draft.add_argument("--out", type=Path, help="Where to write the draft package JSON.")
+    rates = parser.add_argument_group("compare a stock and an enhanced run side by side (section 9.7)")
+    rates.add_argument("--compare-rates", nargs=2, type=Path, metavar=("STOCK_CSV", "ENHANCED_CSV"),
+                       help="Two SR_SAMPLE_OUT files of the same route: the authentic run, then the enhanced run.")
+    rates.add_argument("--updates", default="updates", help="Column of the logic-update counter (default updates).")
+    rates.add_argument("--phase", help="Column whose value names the phase (for example a game-mode word).")
+    rates.add_argument("--event", action="append", default=[], metavar="KIND:COLUMN[=RATIO]",
+                       help="count:COL, change:COL or lcg:COL:A:C[:BITS], with an optional expected ratio.")
+    rates.add_argument("--stock-hz", type=float, default=30.0, help="Logic updates per game second, stock (30).")
+    rates.add_argument("--enhanced-hz", type=float, default=60.0, help="Logic updates per game second, enhanced (60).")
+    rates.add_argument("--lcg-limit", type=int, default=4096, help="Most LCG steps searched between two samples.")
+    rates.add_argument("--min-coverage", type=float, default=RATE_MIN_COVERAGE,
+                       help="Share of the longer run's game time the shorter run must cover (0.9).")
+    rates.add_argument("--json", type=Path, help="Also write the measurements and the report as JSON.")
     args = parser.parse_args(argv)
+    if args.compare_rates is not None:
+        try:
+            return _rates_main(args)
+        except EnhancementPackageError as exc:
+            print(f"rates: FAIL: {exc}", file=sys.stderr)
+            return 1
     if args.draft is not None:
         if not args.title_id or args.out is None:
             parser.error("--draft needs --title-id and --out")
         return _draft_main(args)
     if not args.packages:
-        parser.error("name package files to validate, or --draft an executable")
+        parser.error("name package files to validate, --draft an executable, or --compare-rates two runs")
 
     failures = 0
     for pkg_path in args.packages:

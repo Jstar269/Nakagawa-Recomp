@@ -3,10 +3,74 @@
 
 #include "guest_interp.h"
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define SR_EVIDENCE_NO_NIDS /* this file reads the VFPU form table only */
+#include "hle_evidence.h"  /* generated: VFPU forms with no recorded evidence (docs/HLE_COVERAGE.md) */
+
+/* ---- Unverified VFPU forms (#1877) -------------------------------------------------
+ * A form with no recorded evidence is named once in the run log. Two sources report it:
+ *  - The interpreter floor reports the first word it executes in a pattern of the generated
+ *    table, but only for the VFPU loads and stores it runs under --lle-cpu (primary opcodes
+ *    0x32, 0x35, 0x36, 0x3a, 0x3d, 0x3e). The table's patterns for opcodes 0x34 and 0x3f are
+ *    not memory operations and are never reached here.
+ *  - Translated code reports from the build, for every pattern (codegen lists the first word
+ *    it translated per pattern, and the generated start-up code passes the list to
+ *    sr_vfpu_report_unverified_uses), so no check runs on the hot path.
+ * Output goes to stderr only: no result or state changes. */
+static _Atomic(uint32_t) s_vfpu_floor_noted[SR_VFPU_UNVERIFIED_FORM_COUNT + 1u];
+static _Atomic(uint32_t) s_vfpu_built_noted[SR_VFPU_UNVERIFIED_FORM_COUNT + 1u];
+
+FILE *sr_vfpu_evidence_log; /* a test seam: NULL logs to stderr */
+void sr_vfpu_evidence_reset(void) { /* a test seam: forget which patterns were already named */
+    for (unsigned i = 0u; i <= SR_VFPU_UNVERIFIED_FORM_COUNT; i++) {
+        atomic_store_explicit(&s_vfpu_floor_noted[i], 0u, memory_order_relaxed);
+        atomic_store_explicit(&s_vfpu_built_noted[i], 0u, memory_order_relaxed);
+    }
+}
+static FILE *vfpu_evidence_stream(void) {
+    return sr_vfpu_evidence_log ? sr_vfpu_evidence_log : stderr;
+}
+
+static int vfpu_unverified_pattern(uint32_t word) {
+    for (unsigned i = 0u; i < SR_VFPU_UNVERIFIED_FORM_COUNT; i++) {
+        if ((word & sr_vfpu_unverified_forms[i].mask) == sr_vfpu_unverified_forms[i].match) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+int sr_vfpu_note_unverified(uint32_t word, uint32_t pc) {
+    int i = vfpu_unverified_pattern(word);
+    if (i < 0) return 0;
+    if (atomic_load_explicit(&s_vfpu_floor_noted[i], memory_order_relaxed) ||
+        atomic_exchange_explicit(&s_vfpu_floor_noted[i], 1u, memory_order_acq_rel)) {
+        return 1;
+    }
+    fprintf(vfpu_evidence_stream(),
+            "VFPU: unverified: first use of %s (word 0x%08" PRIx32 ") at 0x%08" PRIx32
+            ": no recorded evidence (docs/HLE_COVERAGE.md)\n",
+            sr_vfpu_unverified_forms[i].forms, word, pc);
+    return 1;
+}
+
+void sr_vfpu_report_unverified_uses(const SrVfpuUse *uses, uint32_t count) {
+    for (uint32_t k = 0u; uses && k < count; k++) {
+        int i = vfpu_unverified_pattern(uses[k].word);
+        if (i < 0 || atomic_exchange_explicit(&s_vfpu_built_noted[i], 1u, memory_order_acq_rel)) {
+            continue;
+        }
+        fprintf(vfpu_evidence_stream(),
+                "VFPU: unverified: translated code uses %s (word 0x%08" PRIx32 ") at 0x%08" PRIx32
+                ": no recorded evidence (docs/HLE_COVERAGE.md)\n",
+                sr_vfpu_unverified_forms[i].forms, uses[k].word, uses[k].pc);
+    }
+}
 
 /* Installed by the scheduler (sched.c) when it owns the guest fibers; see recomp.h. */
 int (*sr_dispatch_host_stack_remaining)(size_t *remaining_out) = NULL;
@@ -473,6 +537,12 @@ uint32_t sr_module_code_sync_overlays(uint32_t lo, uint32_t hi) {
         }
     }
     return changed;
+}
+
+int sr_module_code_capture_covers(uint32_t pc) {
+    const SrModuleBinding *binding = module_binding_for(pc);
+    return binding != NULL && binding->code->name != NULL &&
+           strncmp(binding->code->name, "code_capture_", 13u) == 0;
 }
 
 int sr_module_code_fetch_authority(uint32_t pc) {
@@ -1232,6 +1302,7 @@ static SrGuestInterpResult execute_noncontrol(
                 set_fault(fault, pc, opcode, pc, 1);
                 return SR_GUEST_INTERP_UNSUPPORTED;
             }
+            (void)sr_vfpu_note_unverified(opcode, pc); /* log only; before any fault */
             if (vfpu_width != 0u) {
                 const uint32_t vfpu_address =
                     read_gpr(s, rs) + sign_extend_16(opcode & 0xFFFCu);
@@ -1436,25 +1507,49 @@ static SrGuestInterpCtl classify_control(
     return SR_CTL_REJECT;
 }
 
-/* A load of $sp that keeps it within the stack a call allocated, between where $sp was and
- * where the caller left it, frees only that call's own space, as an alloca free does. Any
- * other load of $sp moves to another frame: a longjmp or a context switch (#1935). */
+/* A load of $sp that keeps it within the stack the run's frame allocated, between where $sp
+ * was and `frame_sp`, where the frame was entered, frees only that frame's own space, as an
+ * alloca free does. Any other load of $sp moves to another frame: a longjmp or a context
+ * switch (#1935). `frame_sp` is a linked call's entry $sp or a TAIL step's own (NULL: the run
+ * has no frame of its own, and every load leaves). Generated code makes the same check
+ * against the body's entry $sp (_sp_load_check in tools/codegen.py). */
 static int sp_load_leaves_frame(uint32_t opcode, uint32_t before, uint32_t after,
-                                const SrGuestInterpCallBoundary *boundary) {
+                                const uint32_t *frame_sp) {
     if ((opcode >> 26) != 0x23u || ((opcode >> 16) & 31u) != 29u) return 0;
-    return boundary == NULL || after < before || after >= boundary->entry_sp;
+    return frame_sp == NULL || after < before || after >= *frame_sp;
+}
+
+/* A `jr $ra` that returns past the call this run is part of (#2016): to the resume PC of an
+ * enclosing live native linked call, with $sp back at or above that call's entry $sp, so the
+ * callee of that call has released its frame. A longjmp into a native frame ends this way:
+ * the interpreter runs the rest of that frame, then returns from it to its caller, a call
+ * the interpreter's own boundary does not name. Any other target is ordinary guest control
+ * flow, which the interpreter follows: a callee that points $ra at a trampoline, or the
+ * return of a call the interpreter ran inline. */
+static int interp_returns_past_its_call(CpuState *s, const SrGuestInterpCallBoundary *boundary,
+                                        uint32_t target, uint32_t sp) {
+    if (boundary != NULL && target == boundary->resume_pc) return 0;
+    return sr_aot_return_boundary_encloses_resume(s, target, sp);
 }
 
 static SrGuestInterpResult sr_guest_interp_run_internal(
     CpuState *s,
     uint32_t entry,
     const SrGuestInterpCallBoundary *boundary,
+    int tail_step,
     SrGuestInterpFault *fault) {
     uint32_t pc = entry;
     unsigned long long instruction_count = 0u;
     const int log_dispatch = getenv("SR_DISPLOG") != NULL;
-    /* Whether this run has loaded $sp out of the stack its call allocated (#1935). */
+    /* Whether this run has loaded $sp out of the stack its frame allocated (#1935). */
     int loaded_sp = 0;
+    /* A TAIL step's frame is the $sp it was entered at, as a native body's _sp_entry is. */
+    const uint32_t tail_entry_sp = s->r[29];
+    const uint32_t *frame_sp = boundary != NULL ? &boundary->entry_sp
+                               : tail_step ? &tail_entry_sp : NULL;
+    /* Whether `pc` was reached by a computed transfer (jr/jalr), not a static one or by
+     * running on: a TAIL step's record keeps the target's body only for the latter. */
+    int reached_by_computed = 0;
     set_fault(fault, entry, 0u, entry, 0);
     /* Establish the COP0 delay-slot contract (spec 3.5): straight-line code
      * runs with in_delay_slot clear; the branch path below sets it around
@@ -1508,8 +1603,10 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
 
         /* Safe-point poll (spec 3.5): before each instruction, never between
          * a branch and its delay slot (the slot below runs without polling).
-         * The Phase 1 poll never reports an interrupt; the call and its flow
-         * propagation stay so later phases cannot skip the site. */
+         * The poll takes a deliverable interrupt here (cpu_lle.c, issue #325:
+         * only with the LLE CPU on and an INTC configured), so this site is
+         * where host-side controller changes reach interpreted code; the flow
+         * it sets enters the interrupt vector. Do not remove or reorder it. */
         if (sr_cpu_poll(s, pc) < 0) {
             return map_flow_result(s, -1, fault, pc, 0u);
         }
@@ -1533,16 +1630,40 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
                         "GUEST_INTERP_AOT_HANDOFF pc=0x%08" PRIx32 " instructions=%llu\n",
                         pc, instruction_count);
             }
+            if (boundary == NULL && tail_step) {
+                /* A TAIL step out of a drain (dispatch_tail_step) leaves as a native body
+                 * entered there does (emit_tail_transfer in tools/codegen.py): it records the
+                 * transfer for the drain, with the entry $sp it owes once the chain completes
+                 * while every $sp load it ran stayed in its frame. The drain keeps the first
+                 * restore of the chain, so the record matters only when no earlier body owes
+                 * one: a head that switched stacks or longjmped (#1935). As in generated code, a
+                 * static transfer or a fall-through keeps its target's body, so the target
+                 * runs in this drain; a computed one is dispatched by address, a step of its
+                 * own. Under the stack census a native body records no restore, and its
+                 * wrapper restores instead. */
+                RecompFn const next_fn = reached_by_computed ? NULL : sr_lookup(pc);
+#if defined(SR_STACK_CENSUS_ENABLED)
+                sr_tail_record(s, pc, next_fn, 0u, 0u);
+#else
+                sr_tail_record(s, pc, next_fn, tail_entry_sp, loaded_sp ? 0u : 1u);
+#endif
+                return SR_GUEST_INTERP_AOT_HANDOFF;
+            }
+            if (boundary == NULL) {
+                dispatch(s, pc);
+                return SR_GUEST_INTERP_AOT_HANDOFF;
+            }
             /* A called body that hands its live frame on by a TAIL owes its caller the $sp
              * it was called with once the chain completes, as a native body records it
              * (sr_tail_record); the native body it hands to was entered at a lowered $sp and
              * owes nobody. One that loaded $sp out of that stack (sp_load_leaves_frame), a
-             * longjmp or a context switch, leaves it to the guest (#1935). */
-            const int owes = boundary != NULL && boundary->owes_entry_sp && !loaded_sp &&
+             * longjmp or a context switch, leaves it to the guest, and so does a chain whose
+             * return went elsewhere: a longjmp in native code (#1935). */
+            const int owes = boundary->owes_entry_sp && !loaded_sp &&
                              s->r[29] != boundary->entry_sp;
             const uint32_t entry_sp = owes ? boundary->entry_sp : 0u;
-            dispatch(s, pc);
-            if (owes) s->r[29] = entry_sp;
+            const int returned_elsewhere = dispatch_call_continue(s, pc, boundary);
+            if (owes && !returned_elsewhere) s->r[29] = entry_sp;
             return SR_GUEST_INTERP_AOT_HANDOFF;
         }
 
@@ -1610,6 +1731,7 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
                 if (sr_perf_enabled) sr_perf_interp_instruction();
                 sr_exec_interp_instructions++;
                 pc += 8u;
+                reached_by_computed = 0;
                 s->pc = pc;
                 continue;
             }
@@ -1644,7 +1766,7 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
             const uint32_t delay_sp = s->r[29];
             SrGuestInterpResult delay_result = execute_noncontrol(
                 s, pc + 4u, delay_opcode, &delay_store_address, &delay_store_size, fault);
-            if (sp_load_leaves_frame(delay_opcode, delay_sp, s->r[29], boundary)) loaded_sp = 1;
+            if (sp_load_leaves_frame(delay_opcode, delay_sp, s->r[29], frame_sp)) loaded_sp = 1;
             s->in_delay_slot = 0u;
             s->next_pc = saved_next_pc;
             if (delay_result != SR_GUEST_INTERP_AOT_HANDOFF) {
@@ -1679,10 +1801,40 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
                 }
                 dispatch_call(s, transfer.target, resume_pc);
                 pc = resume_pc;
+                reached_by_computed = 0;
                 s->pc = pc;
                 continue;
             }
+            /* `jr $ra` past this run's call (#2016). Running on from the target would run the
+             * continuation of a native caller that is still on the host stack and will run it
+             * again, and a return the interpreter cannot hand back loops. Under a TAIL step, or
+             * under a call a checked generated site began, the return is captured on that
+             * native linked call, whose end check resolves it as it resolves a native `jr $ra`:
+             * it unwinds the frames in between, or stops by name at a call whose caller runs
+             * its own continuation. Under any other call boundary that caller is this run's
+             * own, so it is the named mismatch stop a native callee of that call gets. */
+            if ((opcode >> 21) == 31u && (opcode & 0x3fu) == 0x08u &&
+                interp_returns_past_its_call(s, boundary, transfer.target, s->r[29])) {
+                if (log_dispatch) {
+                    fprintf(stderr,
+                            "GUEST_INTERP_RETURN_ELSEWHERE pc=0x%08" PRIx32 " target=0x%08" PRIx32
+                            " sp=0x%08" PRIx32 "\n",
+                            pc, transfer.target, s->r[29]);
+                }
+                /* A checked generated site (dispatch_call_checked) began this call's own
+                 * boundary, whose caller honours its end check as at a direct call: the return
+                 * is captured there, and the site's end resolves it as a native callee's. */
+                const int captures = boundary == NULL || boundary->site_boundary;
+                if (captures && sr_aot_return_boundary_capture_return(
+                        s, transfer.target, boundary != NULL ? &boundary->resume_pc : NULL)) {
+                    s->pc = transfer.target;
+                    return SR_GUEST_INTERP_CALL_RETURN;
+                }
+                set_fault(fault, pc, opcode, transfer.target, 1);
+                return SR_GUEST_INTERP_RETURN_TARGET_MISMATCH;
+            }
             pc = transfer.taken ? transfer.target : pc + 8u;
+            reached_by_computed = transfer.taken && transfer.computed;
             s->pc = pc;
             continue;
         }
@@ -1693,7 +1845,7 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
         const uint32_t sp_before = s->r[29];
         SrGuestInterpResult result = execute_noncontrol(
             s, pc, opcode, &store_address, &store_size, fault);
-        if (sp_load_leaves_frame(opcode, sp_before, s->r[29], boundary)) loaded_sp = 1;
+        if (sp_load_leaves_frame(opcode, sp_before, s->r[29], frame_sp)) loaded_sp = 1;
         if (result != SR_GUEST_INTERP_AOT_HANDOFF) {
             if (result == SR_GUEST_INTERP_EXCEPTION ||
                 result == SR_GUEST_INTERP_ERET) {
@@ -1706,6 +1858,7 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
         if (sr_perf_enabled) sr_perf_interp_instruction();
         sr_exec_interp_instructions++;
         pc += 4u;
+        reached_by_computed = 0;
         s->pc = pc;
     }
 }
@@ -1717,7 +1870,22 @@ SrGuestInterpResult sr_guest_interp_run(
     int exec_previous = sr_exec_enter(SR_EXEC_TIER_INTERP);
     sr_exec_interp_entry(entry);
     if (sr_perf_enabled) sr_perf_interp_begin(entry);
-    SrGuestInterpResult result = sr_guest_interp_run_internal(s, entry, NULL, fault);
+    SrGuestInterpResult result = sr_guest_interp_run_internal(s, entry, NULL, 0, fault);
+    if (sr_perf_enabled) sr_perf_interp_end(s->pc, (int)result);
+    sr_exec_interp_exit(result == SR_GUEST_INTERP_AOT_HANDOFF || result == SR_GUEST_INTERP_CALL_RETURN,
+                        result == SR_GUEST_INTERP_CALL_RETURN);
+    sr_exec_leave(exec_previous);
+    return result;
+}
+
+SrGuestInterpResult sr_guest_interp_run_tail_step(
+    CpuState *s,
+    uint32_t entry,
+    SrGuestInterpFault *fault) {
+    int exec_previous = sr_exec_enter(SR_EXEC_TIER_INTERP);
+    sr_exec_interp_entry(entry);
+    if (sr_perf_enabled) sr_perf_interp_begin(entry);
+    SrGuestInterpResult result = sr_guest_interp_run_internal(s, entry, NULL, 1, fault);
     if (sr_perf_enabled) sr_perf_interp_end(s->pc, (int)result);
     sr_exec_interp_exit(result == SR_GUEST_INTERP_AOT_HANDOFF || result == SR_GUEST_INTERP_CALL_RETURN,
                         result == SR_GUEST_INTERP_CALL_RETURN);
@@ -1733,7 +1901,7 @@ SrGuestInterpResult sr_guest_interp_run_with_boundary(
     int exec_previous = sr_exec_enter(SR_EXEC_TIER_INTERP);
     sr_exec_interp_entry(entry);
     if (sr_perf_enabled) sr_perf_interp_begin(entry);
-    SrGuestInterpResult result = sr_guest_interp_run_internal(s, entry, boundary, fault);
+    SrGuestInterpResult result = sr_guest_interp_run_internal(s, entry, boundary, 0, fault);
     if (sr_perf_enabled) sr_perf_interp_end(s->pc, (int)result);
     sr_exec_interp_exit(result == SR_GUEST_INTERP_AOT_HANDOFF || result == SR_GUEST_INTERP_CALL_RETURN,
                         result == SR_GUEST_INTERP_CALL_RETURN);
@@ -1758,6 +1926,7 @@ const char *sr_guest_interp_result_name(SrGuestInterpResult result) {
     case SR_GUEST_INTERP_HOST_STACK_BOUNDS_UNAVAILABLE:
         return "host-stack-bounds-unavailable";
     case SR_GUEST_INTERP_NULL_CODE_POINTER: return "null-code-pointer";
+    case SR_GUEST_INTERP_RETURN_TARGET_MISMATCH: return "return-target-mismatch";
     default: return "unknown";
     }
 }

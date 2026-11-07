@@ -8,6 +8,7 @@
 #include "player_ui_sound.h"
 #include "iso_reader.h"
 #include "nk_platform.h"
+#include "nk_shared_helpers.h"
 #include "nk_portable.h"
 #include "nk_ui_input.h"
 #include "nk_ui_theme.h"
@@ -70,20 +71,25 @@ static const PlayerUiCompatibilityRecord s_compatibility_records[] = {
      "Shows a lit, rotating cube that answers the stick and buttons, with sound.", ""},
     {"showcase-breakout-v1", "Partially works", PLAYER_UI_TIER_PLAYABLE,
      "Plays a full game of Breakout with sound and keeps your high score.", ""},
-    /* Playable: the owner played full matches and Story Mode on 2026-10-24
-       (#1297). */
+    /* Playable: full matches and Story Mode were played through (#1297). */
     {"UCUS98701", "Boots to a named boundary", PLAYER_UI_TIER_PLAYABLE,
      "Plays full matches and Story Mode.",
-     "Known issues: a few late sound wakes while loading, and some movies show black."},
+     "Known issues: some sound effects can drop out while loading."},
     {"UCUS-98701", "Boots to a named boundary", PLAYER_UI_TIER_PLAYABLE,
      "Plays full matches and Story Mode.",
-     "Known issues: a few late sound wakes while loading, and some movies show black."},
+     "Known issues: some sound effects can drop out while loading."},
     {"PAC-MAN Championship Edition", "Partially works", PLAYER_UI_TIER_NONE,
      "Reaches the title screen and plays a stage. The rest of the game has not been tried yet.",
      ""}
 };
 
+/* The backups the Saves dialog keeps (#1883), newest first. */
+#define PLAYER_UI_SAVES_LIST_CAP 64u
+
 struct PlayerUiNk {
+    SDL_Window *window;     /* the launcher window: Settings reads its display's refresh rate */
+    bool clock_held;        /* frames are drawn at held_clock_s, not the time of day (#2124) */
+    double held_clock_s;
     NkUi *ui;
     NkUiSdlr *backend;
     NkUiTtf *ttf;
@@ -130,14 +136,21 @@ struct PlayerUiNk {
     char input_summary[128];
     char title_input_summary[128];
     char settings_controller[160];
+    /* The graphics preset's note on the main Settings page (#2150). */
+    char settings_preset_note[192];
     char settings_interface_size[16];
     char settings_saves[NK_MAX_PATH];
-    /* Ace Mode on the open title's page: what it turns on, and its last session, read at
-       most every two seconds (the runtime writes the report when a game ends). */
-    char ace_line[200];
+    /* The play mode on the open title's page: what it turns on, and its last session, read
+       at most every two seconds (the runtime writes the report when a game ends). */
+    char ace_line[256];
+    char enhanced_smooth_sentence[160];  /* the Smooth motion row's words under 60 FPS logic */
     char ace_last_session[200];
     char ace_last_disc[NK_MAX_DISC_ID_LEN];
     double ace_last_read_s;
+    /* Settings > Enhanced: the title's name and the rows' "Library (16x)" words. */
+    char enhanced_title[160];
+    char enhanced_mode[48];
+    char enhanced_values[PLAYER_UI_ENHANCED_ROWS][48];
     char settings_tools[PLAYER_UI_SETTINGS_TOOLS][192];
     /* The factory reset check's folders, looked up when the check opens. */
     char reset_folders[PLAYER_UI_RESET_FOLDERS][NK_MAX_PATH];
@@ -178,7 +191,29 @@ struct PlayerUiNk {
     int remove_index;
     char remove_disc[NK_MAX_DISC_ID_LEN];
     bool remove_delete_saves;
+    bool remove_delete_disc_copy;
     bool remove_focus_pending;
+    /* Saves (#1883): the title the dialog is for, its backups newest first and
+       the page shown, the question it asks, and what the last action did. */
+    int saves_index;
+    char saves_disc[NK_MAX_DISC_ID_LEN];
+    NkUiId saves_focus;                 /* focus to give next frame, or 0 */
+    bool saves_waiting_pick;            /* Add a save opened the folder picker */
+    bool saves_has;
+    uint64_t saves_bytes;
+    PlayerSaveBackup saves_list[PLAYER_UI_SAVES_LIST_CAP];
+    size_t saves_list_count;
+    size_t saves_total;
+    size_t saves_first;
+    PlayerUiSavesRow saves_rows[PLAYER_UI_SAVES_ROW_CAP];
+    char saves_when[PLAYER_UI_SAVES_ROW_CAP][32];
+    char saves_detail[PLAYER_UI_SAVES_ROW_CAP][64];
+    PlayerUiSavesAsk saves_ask;
+    size_t saves_ask_row;
+    char saves_ask_path[NK_MAX_PATH];   /* the folder a replacing Add a save copies */
+    char saves_ask_name[72];
+    char saves_status[NK_MAX_PATH + 200];
+    PlayerUiNoteKind saves_status_kind;
     /* STOP GAME asks first: the title page the question was asked from. */
     int stop_index;
     char stop_disc[NK_MAX_DISC_ID_LEN];
@@ -189,6 +224,7 @@ struct PlayerUiNk {
     bool rebuild_focus_pending;
     char rebuild_text[256];
     char rebuild_notice[96];
+    char library_notice[448];   /* the library file's notice and the drop summary together */
     char verify_notice[96];     /* the library's disc check line */
     /* A rebuilding card's status word with its progress ("Rebuilding 40%"). */
     char rebuild_word[PLAYER_UI_TITLE_CAP][32];
@@ -201,6 +237,10 @@ struct PlayerUiNk {
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     bool icon_reported[PLAYER_UI_TITLE_CAP];
     char status_reported[PLAYER_UI_TITLE_CAP][32]; /* the status word last printed */
+    char play_reported[PLAYER_UI_TITLE_CAP][16];   /* the play mode badge last printed */
+    char enhanced_reported[512];                    /* Settings > Enhanced as last printed */
+    char ace_line_reported[256];                    /* the open title's play line last printed */
+    char preset_note_reported[200];                 /* the main Settings page's preset note */
     int disc_reported_view;  /* the game-found card whose rows were printed, or -1 */
 #endif
     bool ready;
@@ -250,19 +290,14 @@ static bool player_ui_file_exists(const char *path) {
 
 static bool player_ui_join_path(const char *root, const char *relative,
                                 char *out, size_t out_size) {
-    size_t root_length;
-    int written;
     if (root == NULL || relative == NULL || out == NULL || out_size == 0u) {
         return false;
     }
-    root_length = strlen(root);
-    written = snprintf(out, out_size, "%s%s%s", root,
-                       root_length != 0u &&
-                           (root[root_length - 1u] == '/' ||
-                            root[root_length - 1u] == '\\') ? "" :
-                           (nk_platform_path_separator() == '\\' ? "\\" : "/"),
-                       relative);
-    return written > 0 && (size_t)written < out_size;
+    char separator = nk_platform_path_separator();
+    return nk_shared_path_join(out, out_size, root, relative,
+                               separator == '\\' ? '\\' : '/',
+                               NK_SHARED_PATH_JOIN_IF_LEFT_NEEDS_SEPARATOR,
+                               NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
 static bool player_ui_add_font(NkUiTtf *ttf, int font, const char *base_path,
@@ -329,7 +364,6 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
     PlayerUiNk *player;
     const char *base_path;
     NkUiConfig config;
-    (void)window;
     if (renderer == NULL) {
         player_ui_set_error(error, error_size,
                             "The next UI could not access the player renderer.");
@@ -346,9 +380,10 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
                             "The next UI could not allocate its renderer state.");
         return NULL;
     }
+    player->window = window;
     player->rest_index = SIZE_MAX;
     player->backdrop_index = SIZE_MAX;
-    player->router = nk_ui_router_create();
+    player->router =nk_ui_router_create();
     if (player->router == NULL) {
         player_ui_set_error(error, error_size,
                             "The next UI could not allocate its screen router.");
@@ -447,7 +482,6 @@ static bool player_ui_settings_view(PlayerView view) {
    the developer log. */
 static bool player_ui_nk_flow_view(PlayerView view) {
     return view == VIEW_SETUP_WIZARD || view == VIEW_BUILDING_PACKAGE ||
-           view == VIEW_PREPARING ||
            view == VIEW_PREREQ_CONSENT ||
            view == VIEW_PREREQ_PROGRESS || view == VIEW_ERROR ||
            player_ui_disc_view(view) || player_ui_settings_view(view) ||
@@ -465,8 +499,20 @@ bool player_ui_nk_view_active(const PlayerUiNk *player, const PlayerApp *app) {
            player_ui_nk_draws_view(app->active_view);
 }
 
+void player_ui_nk_hold_clock(PlayerUiNk *player, double now_s) {
+    if (player == NULL || !isfinite(now_s)) return;
+    player->clock_held = true;
+    player->held_clock_s = now_s;
+}
+
+/* The clock the launcher draws with: the time since SDL started, or the held time. */
+static double player_ui_nk_now_s(const PlayerUiNk *player) {
+    if (player != NULL && player->clock_held) return player->held_clock_s;
+    return (double)SDL_GetTicksNS() / 1000000000.0;
+}
+
 uint32_t player_ui_nk_wait_ms(const PlayerUiNk *player, uint32_t idle_ms) {
-    double now_s = (double)SDL_GetTicksNS() / 1000000000.0;
+    double now_s = player_ui_nk_now_s(player);
     double wait_s;
     if (player == NULL) {
         return idle_ms;
@@ -484,13 +530,7 @@ uint32_t player_ui_nk_wait_ms(const PlayerUiNk *player, uint32_t idle_ms) {
 }
 
 static void player_ui_format_size(char *out, size_t out_size, uint64_t bytes) {
-    if (bytes >= 1024ULL * 1024ULL * 1024ULL) {
-        snprintf(out, out_size, "%.2f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
-    } else if (bytes >= 1024ULL * 1024ULL) {
-        snprintf(out, out_size, "%.2f MB", (double)bytes / (1024.0 * 1024.0));
-    } else {
-        snprintf(out, out_size, "%llu bytes", (unsigned long long)bytes);
-    }
+    nk_shared_format_size(out, out_size, bytes);
 }
 
 static const char *player_ui_resolution_word(int scale) {
@@ -762,6 +802,122 @@ typedef char player_ui_update_step_order[
      PLAYER_UI_UPDATE_DOWNLOADED == (int)PLAYER_UPDATE_DOWNLOADED &&
      PLAYER_UI_UPDATE_FAILED == (int)PLAYER_UPDATE_FAILED) ? 1 : -1];
 
+/* The refresh rate of the display the launcher window is on, in Hz; 0 when SDL does not say.
+   It is the launcher's best answer before a game window exists. */
+static double player_ui_display_refresh_hz(SDL_Window *window) {
+    const SDL_DisplayMode *mode;
+    if (window == NULL) return 0.0;
+    mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
+    return mode != NULL && mode->refresh_rate > 0.0f ? (double)mode->refresh_rate : 0.0;
+}
+
+typedef char player_ui_enhanced_rows_fit[PLAYER_PART_COUNT <= PLAYER_UI_ENHANCED_ROWS ? 1 : -1];
+
+/* Why a title offers no Ace: it has no usable package of its own (#2055). */
+#define PLAYER_UI_ACE_NEEDS_PACKAGE "Ace needs a package made for this game."
+
+/* Settings > Enhanced (#2055): the library's page, or one title's
+   (player_app_open_title_enhanced). One row per part from player_enhanced_part(), so a new
+   part needs no change here. */
+static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
+                                    PlayerUiSettingsModel *model) {
+    const PlayerSettings *settings = &app->settings;
+    int title = player_app_enhanced_page_title(app);
+    bool library_on = settings->enhanced.library == PLAYER_PLAY_ENHANCED;
+    model->enhanced_library_on = library_on;
+    model->enhanced_title = NULL;
+    model->enhanced_on = library_on;
+    model->enhanced_mode = library_on ? "Enhanced" : "Authentic";
+    model->enhanced_mode_sentence =
+        "The default for every game; each game's page can choose its own.";
+    bool logic_60 = false;
+    bool smooth_on = settings->enhanced.part[PLAYER_PART_SMOOTH] != 0;
+    if (title >= 0) {
+        const GameRecord *game = &app->games[title];
+        PlayerPlayMode chosen = player_app_title_play_mode(app, title);
+        PlayerPlayResolved play;
+        player_play_resolve(settings, game->disc_id, &play);
+        /* What its launch runs (player_launch_work_run): with its 60 FPS game logic, smooth
+           motion is off. */
+        player_play_apply_logic_60(&play, player_app_title_60hz_on(app, title));
+        logic_60 = play.logic_60;
+        smooth_on = play.part[PLAYER_PART_SMOOTH] != 0;
+        snprintf(player->enhanced_title, sizeof(player->enhanced_title), "%s",
+                 game->title_name[0] ? game->title_name : game->disc_id);
+        model->enhanced_title = player->enhanced_title;
+        model->enhanced_on = play.on;
+        if (chosen == PLAYER_PLAY_LIBRARY) {
+            snprintf(player->enhanced_mode, sizeof(player->enhanced_mode),
+                     "Library (%s)", library_on ? "Enhanced" : "Authentic");
+            model->enhanced_mode = player->enhanced_mode;
+        } else {
+            model->enhanced_mode = player_play_mode_name(chosen);
+        }
+        model->enhanced_mode_sentence = app->title_enhancements[title].available
+            ? "Ace is Enhanced plus this game's own 60 FPS game logic."
+            : "Enhanced adds the parts below. " PLAYER_UI_ACE_NEEDS_PACKAGE;
+    }
+    model->enhanced_row_count = 0;
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+        const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+        PlayerUiEnhancedRow *row = &model->enhanced_rows[model->enhanced_row_count++];
+        int library = settings->enhanced.part[p];
+        row->name = info->name;
+        row->sentence = info->sentence;
+        row->value = player_enhanced_part_label(p, library);
+        row->on = library != 0;
+        if (title >= 0) {
+            int own = player_app_title_part(app, title, p);
+            if (own < 0) {
+                snprintf(player->enhanced_values[p], sizeof(player->enhanced_values[p]),
+                         "Library (%s)", player_enhanced_part_label(p, library));
+                row->value = player->enhanced_values[p];
+            } else {
+                row->value = player_enhanced_part_label(p, own);
+                row->on = own != 0;
+            }
+            /* The launch line carries smooth=off while the game runs its 60 FPS game logic:
+               this build interpolates only a 30 Hz source (docs/ENHANCEMENT_CONTRACT.md 10.5).
+               The row says so, and keeps the choice it holds for when that logic is off. */
+            if (p == PLAYER_PART_SMOOTH && logic_60) {
+                snprintf(player->enhanced_smooth_sentence,
+                         sizeof(player->enhanced_smooth_sentence),
+                         "This build smooths only 30 FPS games. The choice here (%s) applies "
+                         "when this game's 60 FPS game logic is off.", row->value);
+                row->value = "Off (this game runs at 60 FPS)";
+                row->sentence = player->enhanced_smooth_sentence;
+                row->on = false;
+            }
+        }
+        if (model->enhanced_on) {
+            const char *unavailable =
+                player_enhanced_part_unavailable_label(p, row->on, smooth_on);
+            if (unavailable) {
+                row->value = unavailable;
+                row->on = false;
+            }
+        }
+    }
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    {
+        /* Whose page it is, its play mode and each row's value, as drawn; printed on change. */
+        char line[sizeof(player->enhanced_reported)];
+        int used = snprintf(line, sizeof(line), "title=%s|mode=%s|sentence=%s",
+                            title >= 0 ? app->games[title].disc_id : "library",
+                            model->enhanced_mode, model->enhanced_mode_sentence);
+        for (int p = 0; p < (int)model->enhanced_row_count && used > 0 &&
+                        (size_t)used < sizeof(line); p++) {
+            used += snprintf(line + used, sizeof(line) - (size_t)used, "|%s=%s",
+                             player_enhanced_part(p)->key, model->enhanced_rows[p].value);
+        }
+        if (strcmp(line, player->enhanced_reported) != 0) {
+            snprintf(player->enhanced_reported, sizeof(player->enhanced_reported), "%s", line);
+            printf("[PLAYER_UI_TEST] next_ui_enhanced_page %s\n", line);
+        }
+    }
+#endif
+}
+
 /* The Settings pages' model, from the settings the existing renderer shows. */
 static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *app,
                                                 NkUiScale scale) {
@@ -811,16 +967,14 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.resolution = player_ui_resolution_word(app->settings.resolution_scale);
     model.pacing = app->settings.fps_cap < 0 ? "PSP timing" : "No extra cap";
     model.scaling = player_present_scaling_label(app->settings.present_scaling);
+    model.preset = player_app_graphics_preset_label(app);
     model.vsync = app->settings.vsync;
+    model.display_refresh_hz = player_ui_display_refresh_hz(player->window);
     model.fullscreen = app->settings.fullscreen;
     model.volume = app->settings.master_volume;
     model.ui_sounds = app->settings.ui_sounds;
     model.launcher_fullscreen = app->settings.launcher_fullscreen;
-    model.ace_enabled = app->settings.ace.enabled;
-    model.ace_filtering = player_ace_filtering_label(app->settings.ace.af);
-    model.ace_text = app->settings.ace.text;
-    model.ace_readout = app->settings.ace.readout;
-    model.ace_notice = app->settings.ace.notice;
+    player_ui_fill_enhanced(player, app, &model);
     if (app->settings.interface_size_pct > 0) {
         snprintf(player->settings_interface_size, sizeof(player->settings_interface_size), "%d%%",
                  app->settings.interface_size_pct);
@@ -866,6 +1020,29 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     if (app->settings_newer_schema && app->settings_notice[0] != '\0') {
         model.notice = app->settings_notice;
     }
+    /* The graphics preset (#2150) says on the main page, where its row is, that it is used
+       in Enhanced and Ace only and what it could not set. It is derived from the choice, so
+       it goes with Custom and is back after a restart. */
+    if (model.page == PLAYER_UI_SETTINGS_PAGE_MAIN &&
+        player_app_graphics_preset_note(app, player->settings_preset_note,
+                                        sizeof(player->settings_preset_note),
+                                        &model.preset_notice_warns)) {
+        model.preset_notice = player->settings_preset_note;
+    }
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    if (model.page == PLAYER_UI_SETTINGS_PAGE_MAIN) {
+        /* The preset row and note the main page draws; printed on change. */
+        char line[sizeof(player->preset_note_reported)];
+        snprintf(line, sizeof(line), "value=%s|warns=%d|note=%s", model.preset,
+                 model.preset_notice_warns ? 1 : 0,
+                 model.preset_notice != NULL ? model.preset_notice : "");
+        if (strcmp(line, player->preset_note_reported) != 0) {
+            snprintf(player->preset_note_reported, sizeof(player->preset_note_reported), "%s",
+                     line);
+            printf("[PLAYER_UI_TEST] next_ui_settings_preset %s\n", line);
+        }
+    }
+#endif
     for (size_t i = 0u; i < app->prerequisites.items.count &&
                         model.tool_count < PLAYER_UI_SETTINGS_TOOLS; ++i) {
         const PackagePrerequisite *item = &app->prerequisites.items.items[i];
@@ -873,7 +1050,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         if (!item->installed) continue;
         snprintf(line, sizeof(player->settings_tools[0]), "%.64s %.32s \xC2\xB7 %.80s", item->name,
                  item->version,
-                 strcmp(item->license, "NOASSERTION") == 0 ? "licence review in the works"
+                 strcmp(item->license, "NOASSERTION") == 0 ? "licence not yet reviewed"
                                                             : item->license);
         model.tools[model.tool_count++] = line;
     }
@@ -1262,20 +1439,6 @@ static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
         model.logical_height = scale.logical_h;
         return player_ui_screen_prereq(player->ui, &model);
     }
-    if (app->active_view == VIEW_PREPARING) {
-        /* No preparation pipeline is connected in this build: the card says
-           so plainly, with the way back, and shows no fake progress. */
-        PlayerUiErrorModel model;
-        memset(&model, 0, sizeof(model));
-        model.badge = "Not available";
-        model.title = "Preparation Unavailable";
-        model.message = "No preparation pipeline is connected in this build, so no "
-                        "preparation work is running.";
-        model.recovery_label = "Return to Library";
-        model.logical_width = scale.logical_w;
-        model.logical_height = scale.logical_h;
-        return player_ui_screen_error(player->ui, &model);
-    }
     if (app->active_view == VIEW_ERROR) {
         const ErrorState *error = &app->last_error;
         bool launch_readiness = player_error_leads_with_message(error);
@@ -1357,7 +1520,6 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
             case VIEW_PREREQ_CONSENT: focus = PLAYER_UI_ID_PREREQ_ACCEPT; break;
             case VIEW_PREREQ_PROGRESS: focus = PLAYER_UI_ID_PREREQ_CANCEL; break;
             case VIEW_ERROR:
-            case VIEW_PREPARING: focus = PLAYER_UI_ID_ERROR_RECOVER; break;
             case VIEW_INSPECTING:
             case VIEW_SUPPORTED_TITLE:
             case VIEW_EXPERIMENTAL_TITLE:
@@ -1504,8 +1666,253 @@ static bool player_ui_open_remove(PlayerUiNk *player, const PlayerApp *app, int 
     snprintf(player->remove_disc, sizeof(player->remove_disc), "%s",
              app->games[index].disc_id);
     player->remove_delete_saves = false;
+    player->remove_delete_disc_copy = false;
     player->remove_focus_pending = true;
     return true;
+}
+
+/* Saves (#1883). The dialog reads the save folder and the backups when it
+   opens and after each action, never every frame. */
+static void player_ui_saves_bytes(char *out, size_t cap, uint64_t bytes) {
+    if (bytes < 1024u) {
+        (void)snprintf(out, cap, "%u bytes", (unsigned)bytes);
+    } else if (bytes < 1024u * 1024u) {
+        (void)snprintf(out, cap, "%.0f KB", (double)bytes / 1024.0);
+    } else if (bytes < 1024ull * 1024u * 1024u) {
+        (void)snprintf(out, cap, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
+    } else {
+        (void)snprintf(out, cap, "%.1f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+}
+
+static void player_ui_saves_reload(PlayerUiNk *player, const PlayerApp *app, int index) {
+    static const char *const kinds[PLAYER_SAVE_BACKUP_KIND_COUNT] = {
+        "Backed up", "Before a restore", "Before adding a save", "Before a removal"
+    };
+    char folder[NK_MAX_PATH];
+    uint64_t bytes = 0u;
+    player->saves_has = false;
+    player->saves_bytes = 0u;
+    if (player_app_save_folder(&app->games[index], folder, sizeof(folder)) &&
+        !nk_platform_path_missing(folder) && nk_platform_tree_size(folder, NULL, &bytes) &&
+        bytes > 0u) {
+        player->saves_has = true;
+        player->saves_bytes = bytes;
+    }
+    player->saves_list_count = player_app_list_save_backups(
+        app, index, player->saves_list, PLAYER_UI_SAVES_LIST_CAP, &player->saves_total);
+    if (player->saves_first >= player->saves_list_count) player->saves_first = 0u;
+    for (size_t row = 0u; row < PLAYER_UI_SAVES_ROW_CAP; ++row) {
+        size_t at = player->saves_first + row;
+        const PlayerSaveBackup *backup;
+        const char *st;
+        char size[24];
+        if (at >= player->saves_list_count) break;
+        backup = &player->saves_list[at];
+        st = backup->stamp;
+        /* YYYYMMDD-HHMMSS as YYYY-MM-DD HH:MM:SS */
+        (void)snprintf(player->saves_when[row], sizeof(player->saves_when[row]),
+                       "%.4s-%.2s-%.2s %.2s:%.2s:%.2s", st, st + 4, st + 6, st + 9, st + 11,
+                       st + 13);
+        if (backup->sequence > 1u) {
+            size_t used = strlen(player->saves_when[row]);
+            (void)snprintf(player->saves_when[row] + used,
+                           sizeof(player->saves_when[row]) - used, " (%u)", backup->sequence);
+        }
+        player_ui_saves_bytes(size, sizeof(size), backup->bytes);
+        (void)snprintf(player->saves_detail[row], sizeof(player->saves_detail[row]),
+                       "%s \xC2\xB7 %s",
+                       (unsigned)backup->kind < PLAYER_SAVE_BACKUP_KIND_COUNT
+                           ? kinds[backup->kind] : "Backed up",
+                       size);
+        player->saves_rows[row].when = player->saves_when[row];
+        player->saves_rows[row].detail = player->saves_detail[row];
+    }
+}
+
+static size_t player_ui_saves_page_rows(const PlayerUiNk *player) {
+    size_t rows;
+    if (player->saves_first >= player->saves_list_count) return 0u;
+    rows = player->saves_list_count - player->saves_first;
+    return rows > PLAYER_UI_SAVES_ROW_CAP ? PLAYER_UI_SAVES_ROW_CAP : rows;
+}
+
+static void player_ui_saves_status(PlayerUiNk *player, PlayerUiNoteKind kind, const char *text) {
+    (void)snprintf(player->saves_status, sizeof(player->saves_status), "%s", text);
+    player->saves_status_kind = kind;
+}
+
+static void player_ui_open_saves(PlayerUiNk *player, const PlayerApp *app, int index) {
+    player->saves_index = index;
+    (void)snprintf(player->saves_disc, sizeof(player->saves_disc), "%s",
+                   app->games[index].disc_id);
+    player->saves_first = 0u;
+    player->saves_ask = PLAYER_UI_SAVES_ASK_NONE;
+    player->saves_waiting_pick = false;
+    player->saves_status[0] = '\0';
+    player->saves_status_kind = PLAYER_UI_NOTE_NEUTRAL;
+    player_ui_saves_reload(player, app, index);
+    player->saves_focus = player->saves_has ? PLAYER_UI_ID_SAVES_BACK_UP : PLAYER_UI_ID_SAVES_ADD;
+}
+
+/* Add a save with the folder picked: a save of that name already there asks
+   before it is replaced. */
+static void player_ui_saves_add(PlayerUiNk *player, PlayerApp *app, int index,
+                                const char *picked, bool replace) {
+    char stamp[24];
+    char added[72];
+    char error[NK_MAX_PATH + 160];
+    char text[sizeof(player->saves_status)];
+    PlayerSavesResult result;
+    added[0] = '\0';
+    error[0] = '\0';
+    player_app_save_stamp_now(stamp, sizeof(stamp));
+    result = player_app_add_save(app, index, picked, replace, stamp, added, sizeof(added), error,
+                                 sizeof(error));
+    if (result == PLAYER_SAVES_EXISTS) {
+        (void)snprintf(player->saves_ask_path, sizeof(player->saves_ask_path), "%s", picked);
+        (void)snprintf(player->saves_ask_name, sizeof(player->saves_ask_name), "%s", added);
+        player->saves_ask = PLAYER_UI_SAVES_ASK_REPLACE;
+        player->saves_focus = PLAYER_UI_ID_SAVES_CANCEL;
+        return;
+    }
+    player->saves_ask = PLAYER_UI_SAVES_ASK_NONE;
+    player->saves_focus = PLAYER_UI_ID_SAVES_ADD;
+    if (result == PLAYER_SAVES_DONE) {
+        player->saves_first = 0u;
+        player_ui_saves_reload(player, app, index);
+        (void)snprintf(text, sizeof(text), "%s %s.%s%s",
+                       replace ? "Replaced the save" : "Added the save", added,
+                       replace ? " The saves from before are the newest backup." : "",
+                       error[0] != '\0' ? " " : "");
+        if (error[0] != '\0') {
+            size_t used = strlen(text);
+            (void)snprintf(text + used, sizeof(text) - used, "%s", error);
+        }
+        player_ui_saves_status(player, error[0] != '\0' ? PLAYER_UI_NOTE_WARNING
+                                                         : PLAYER_UI_NOTE_DONE, text);
+        return;
+    }
+    player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL, "");
+    player_app_set_error(app, "SAVES_ADD_FAILED", "The save was not added",
+                         error[0] != '\0' ? error : "Nakagawa could not add the save.", "Back",
+                         VIEW_LIBRARY);
+}
+
+/* One Saves dialog control. Back up and Restore run here, on this frame. */
+static void player_ui_saves_op(PlayerUiNk *player, PlayerApp *app, int index, unsigned op,
+                               PlayerUiAction *out_action) {
+    char stamp[24];
+    char path[NK_MAX_PATH];
+    char error[NK_MAX_PATH + 160];
+    char text[sizeof(player->saves_status)];
+    PlayerSavesResult result;
+    bool blocked = player_app_saves_blocker(app, index) != NULL;
+    error[0] = '\0';
+    if (op == PLAYER_UI_SAVES_OPEN_FOLDER) {
+        if (out_action != NULL) {
+            out_action->kind = PLAYER_UI_ACTION_OPEN_SAVE_FOLDER;
+            out_action->primary = PLAYER_UI_PRIMARY_NONE;
+            out_action->title_index = (size_t)index;
+        }
+    } else if (op == PLAYER_UI_SAVES_OLDER) {
+        if (player->saves_first + PLAYER_UI_SAVES_ROW_CAP < player->saves_list_count) {
+            player->saves_first += PLAYER_UI_SAVES_ROW_CAP;
+        }
+        player_ui_saves_reload(player, app, index);
+        player->saves_focus = player->saves_first + PLAYER_UI_SAVES_ROW_CAP <
+                                      player->saves_list_count
+                                  ? PLAYER_UI_ID_SAVES_OLDER : PLAYER_UI_ID_SAVES_NEWER;
+    } else if (op == PLAYER_UI_SAVES_NEWER) {
+        player->saves_first = player->saves_first > PLAYER_UI_SAVES_ROW_CAP
+                                  ? player->saves_first - PLAYER_UI_SAVES_ROW_CAP : 0u;
+        player_ui_saves_reload(player, app, index);
+        player->saves_focus = player->saves_first > 0u ? PLAYER_UI_ID_SAVES_NEWER
+                                                       : PLAYER_UI_ID_SAVES_OLDER;
+    } else if (blocked) {
+        player->saves_ask = PLAYER_UI_SAVES_ASK_NONE;
+    } else if (op == PLAYER_UI_SAVES_BACK_UP) {
+        player_app_save_stamp_now(stamp, sizeof(stamp));
+        result = player_app_back_up_saves(app, index, stamp, PLAYER_SAVE_BACKUP_MANUAL, path,
+                                          sizeof(path), error, sizeof(error));
+        player->saves_first = 0u;
+        player_ui_saves_reload(player, app, index);
+        if (result == PLAYER_SAVES_DONE) {
+            player_ui_saves_status(player, PLAYER_UI_NOTE_DONE,
+                                   "Backed up. It is the newest backup in the list.");
+        } else if (result == PLAYER_SAVES_NOTHING) {
+            player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL,
+                                   "There are no saves to back up yet.");
+        } else {
+            player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL, "");
+            player_app_set_error(app, "SAVES_BACKUP_FAILED", "Your saves were not backed up",
+                                 error[0] != '\0' ? error
+                                                  : "Nakagawa could not write the backup.",
+                                 "Back", VIEW_LIBRARY);
+        }
+    } else if (op == PLAYER_UI_SAVES_ADD) {
+        player->saves_waiting_pick = true;
+        app->saves_pick_ready = false;
+        app->saves_pick_index = index;
+        app->request_save_folder_picker = true;
+        player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL,
+                               "Pick the save's folder: the one that holds its PARAM.SFO, "
+                               "inside a SAVEDATA folder.");
+    } else if (op >= PLAYER_UI_SAVES_RESTORE_BASE) {
+        size_t row = (size_t)(op - PLAYER_UI_SAVES_RESTORE_BASE);
+        if (row < player_ui_saves_page_rows(player)) {
+            player->saves_ask = PLAYER_UI_SAVES_ASK_RESTORE;
+            player->saves_ask_row = row;
+            player->saves_focus = PLAYER_UI_ID_SAVES_CANCEL;
+        }
+    } else if (op == PLAYER_UI_SAVES_CANCEL) {
+        player->saves_ask = PLAYER_UI_SAVES_ASK_NONE;
+        player->saves_focus = player->saves_has ? PLAYER_UI_ID_SAVES_BACK_UP
+                                                : PLAYER_UI_ID_SAVES_ADD;
+    } else if (op == PLAYER_UI_SAVES_CONFIRM &&
+               player->saves_ask == PLAYER_UI_SAVES_ASK_REPLACE) {
+        (void)snprintf(path, sizeof(path), "%s", player->saves_ask_path);
+        player_ui_saves_add(player, app, index, path, true);
+    } else if (op == PLAYER_UI_SAVES_CONFIRM &&
+               player->saves_ask == PLAYER_UI_SAVES_ASK_RESTORE &&
+               player->saves_ask_row < player_ui_saves_page_rows(player)) {
+        char kept[NK_MAX_PATH];
+        char when[32];
+        const PlayerSaveBackup *backup =
+            &player->saves_list[player->saves_first + player->saves_ask_row];
+        (void)snprintf(path, sizeof(path), "%s", backup->path);
+        (void)snprintf(when, sizeof(when), "%s", player->saves_when[player->saves_ask_row]);
+        player->saves_ask = PLAYER_UI_SAVES_ASK_NONE;
+        player->saves_focus = PLAYER_UI_ID_SAVES_BACK_UP;
+        kept[0] = '\0';
+        player_app_save_stamp_now(stamp, sizeof(stamp));
+        result = player_app_restore_saves(app, index, path, stamp, kept, sizeof(kept), error,
+                                          sizeof(error));
+        player->saves_first = 0u;
+        player_ui_saves_reload(player, app, index);
+        if (result == PLAYER_SAVES_DONE) {
+            (void)snprintf(text, sizeof(text),
+                           "Restored the backup from %s.%s%s", when,
+                           kept[0] != '\0'
+                               ? " Your saves from before are the newest backup, and their "
+                                 "folder is kept beside the save folder."
+                               : "",
+                           error[0] != '\0' ? " " : "");
+            if (error[0] != '\0') {
+                size_t used = strlen(text);
+                (void)snprintf(text + used, sizeof(text) - used, "%s", error);
+            }
+            player_ui_saves_status(player, error[0] != '\0' ? PLAYER_UI_NOTE_WARNING
+                                                              : PLAYER_UI_NOTE_DONE, text);
+        } else {
+            player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL, "");
+            player_app_set_error(app, "SAVES_RESTORE_FAILED", "Your saves were not restored",
+                                 error[0] != '\0' ? error
+                                                  : "Nakagawa could not restore the backup. "
+                                                    "Your saves are as they were.",
+                                 "Back", VIEW_LIBRARY);
+        }
+    }
 }
 
 bool player_ui_nk_at_library_root(const PlayerUiNk *player) {
@@ -1594,7 +2001,7 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     size_t count;
     double now_s;
     if (player == NULL || !player->ready || event == NULL) return false;
-    now_s = (double)SDL_GetTicksNS() / 1000000000.0;
+    now_s = player_ui_nk_now_s(player);
     if (player_ui_nk_find_open(player)) {
         /* The box takes what is typed: SDL's text input brings the characters,
            Backspace deletes one, and a printable key is not also a shortcut
@@ -1802,61 +2209,106 @@ static const char *player_ui_library_status_marker(const GameRecord *game,
     return "▲";
 }
 
-/* Ace Mode on a title (src/rt/ace.h): the library card's badge, and for the open title the
-   ENHANCEMENTS card's button, its line and the last session's line. */
+/* The play mode on a title (#2055; src/rt/ace.h): the library card's badge, and for the open
+   title the ENHANCEMENTS card's buttons, its line and the last session's line. */
 static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int index,
                                 PlayerUiTitle *out) {
     const GameRecord *game = &app->games[index];
-    PlayerAceResolved ace;
-    player_ace_resolve(&app->settings, game->disc_id, &ace);
+    PlayerPlayResolved play;
+    player_play_resolve(&app->settings, game->disc_id, &play);
+    bool smooth_wanted = play.on && play.part[PLAYER_PART_SMOOTH] != 0;
+    player_play_apply_logic_60(&play, out->enhancement_on);
     out->ace_shown = !out->is_demo;
-    out->ace_in_effect = ace.on;
-    out->ace_badge = ace.on && !out->is_demo;
-    out->ace_label = ace.mode == PLAYER_ACE_TITLE_ON ? "Ace Mode: On"
-                   : ace.mode == PLAYER_ACE_TITLE_AUTHENTIC ? "Ace Mode: Authentic"
-                   : ace.on ? "Ace Mode: On (library default)" : "Ace Mode: Off (library default)";
+    out->ace_in_effect = play.on;
+    out->play_badge = out->is_demo ? NULL
+                    : play.mode == PLAYER_PLAY_ACE ? "Ace"
+                    : play.mode == PLAYER_PLAY_ENHANCED ? "Enhanced" : NULL;
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    if (index >= 0 && index < PLAYER_UI_TITLE_CAP) {
+        /* The library card's badge and the title's own choice, printed when either changes. */
+        char reported[sizeof(player->play_reported[0])];
+        const char *badge = out->play_badge != NULL ? out->play_badge : "none";
+        snprintf(reported, sizeof(reported), "%s|%d", badge, (int)play.chosen);
+        if (strcmp(player->play_reported[index], reported) != 0) {
+            snprintf(player->play_reported[index], sizeof(player->play_reported[index]), "%s",
+                     reported);
+            printf("[PLAYER_UI_TEST] next_ui_play_badge index=%d disc=%s badge=%s chosen=%s\n",
+                   index, game->disc_id, badge, player_play_mode_name(play.chosen));
+        }
+    }
+#endif
+    switch (play.chosen) {
+        case PLAYER_PLAY_AUTHENTIC: out->ace_label = "Play mode: Authentic"; break;
+        case PLAYER_PLAY_ENHANCED: out->ace_label = "Play mode: Enhanced"; break;
+        case PLAYER_PLAY_ACE: out->ace_label = "Play mode: Ace"; break;
+        default:
+            out->ace_label = play.on ? "Play mode: Enhanced (library default)"
+                                     : "Play mode: Authentic (library default)";
+            break;
+    }
     out->ace_enabled = out->ace_shown && !app->launch_pending && !app->is_game_running &&
         !(app->build_session.is_building &&
           strcmp(app->build_session.disc_id, game->disc_id) == 0);
+    out->options_shown = out->ace_shown;
+    out->options_enabled = out->ace_enabled;
     out->ace_line = "";
     out->ace_last_session = "";
-    if (ace.mode == PLAYER_ACE_TITLE_AUTHENTIC) {
-        /* #1272's one Authentic switch: the 60 FPS game logic is off while it is chosen. */
+    /* The 60 FPS switch is Ace's own part: it shows while Ace is in effect (the session flag
+       makes a title on Enhanced with a usable package run as Ace). Authentic is the game as
+       released, with no 60 FPS game logic. */
+    if (play.mode == PLAYER_PLAY_AUTHENTIC) {
+        out->enhancement_shown = false;
         out->enhancement_enabled = false;
         out->enhancement_on = false;
+    } else if (play.mode != PLAYER_PLAY_ACE && !out->enhancement_session) {
+        out->enhancement_shown = false;
     }
     if (index != app->selected_game_index || !out->ace_shown) return;
-    if (ace.mode == PLAYER_ACE_TITLE_AUTHENTIC) {
-        out->ace_line = out->enhancement_shown
-            ? "Plays exactly as released, with no enhancements. 60 FPS game logic is off while "
-              "Authentic is chosen."
-            : "Plays exactly as released, with no enhancements.";
-    } else if (!ace.on) {
-        out->ace_line = "Off: Ace Mode is off for the library. On turns it on for this game alone.";
+    if (play.mode == PLAYER_PLAY_AUTHENTIC) {
+        out->ace_line = "Authentic: plays exactly as released, with nothing added.";
     } else {
         char words[160] = "";
         size_t used = 0;
-        const char *parts[4];
         size_t count = 0;
-        char filtering[24];
-        if (ace.af > 0) {
-            snprintf(filtering, sizeof(filtering), "%dx texture filtering", ace.af);
-            parts[count++] = filtering;
-        }
-        if (ace.text) parts[count++] = "crisp keyboard";
-        if (ace.readout) parts[count++] = "speed readout";
-        if (ace.notice) parts[count++] = "game badge";
-        for (size_t i = 0; i < count; i++) {
-            int n = snprintf(words + used, sizeof(words) - used, "%s%s", i ? ", " : "", parts[i]);
+        for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+            const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+            char part[64];
+            if (info == NULL || play.part[p] == 0) continue;
+            /* "16x texture filtering" for a part with levels, else "crisp system text". */
+            if (info->value_count > 2) {
+                snprintf(part, sizeof(part), "%s %s", player_enhanced_part_label(p, play.part[p]),
+                         info->name);
+            } else {
+                snprintf(part, sizeof(part), "%s", info->name);
+            }
+            for (char *c = part; *c; c++) *c = (char)tolower((unsigned char)*c);
+            int n = snprintf(words + used, sizeof(words) - used, "%s%s", count ? ", " : "", part);
             if (n < 0 || used + (size_t)n >= sizeof(words)) break;
             used += (size_t)n;
+            count++;
         }
-        snprintf(player->ace_line, sizeof(player->ace_line), "On for this game: %s.",
-                 count ? words : "no features are chosen");
+        bool ace = play.mode == PLAYER_PLAY_ACE;
+        /* Smooth motion turned on, but off for this launch: the line says why (contract
+           10.5), as the launch line carries smooth=off. */
+        bool smooth_held = smooth_wanted && play.logic_60;
+        snprintf(player->ace_line, sizeof(player->ace_line), "%s for this game: %s%s%s.%s",
+                 ace ? "Ace" : "Enhanced", ace && out->enhancement_on ? "60 FPS game logic" : "",
+                 ace && out->enhancement_on && count ? ", " : "",
+                 count ? words : (ace && out->enhancement_on ? "" : "every part is off"),
+                 smooth_held ? " Smooth motion is off while it runs at 60 FPS: this build "
+                               "smooths only 30 FPS games." : "");
         out->ace_line = player->ace_line;
     }
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    if (strcmp(player->ace_line_reported, out->ace_line) != 0) {
+        snprintf(player->ace_line_reported, sizeof(player->ace_line_reported), "%s",
+                 out->ace_line);
+        printf("[PLAYER_UI_TEST] next_ui_title_play_line disc=%s line=%s\n", game->disc_id,
+               out->ace_line);
+    }
+#endif
     {
-        double now_s = (double)SDL_GetTicksNS() / 1000000000.0;
+        double now_s = player_ui_nk_now_s(player);
         if (strcmp(player->ace_last_disc, game->disc_id) != 0 || now_s - player->ace_last_read_s >= 2.0) {
             snprintf(player->ace_last_disc, sizeof(player->ace_last_disc), "%s", game->disc_id);
             player->ace_last_read_s = now_s;
@@ -1967,7 +2419,7 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         out->status_rgba = PLAYER_UI_READY;
         out->status_marker = "●";
     }
-    /* An older Nakagawa built this package (owner, 2026-10-29): it still
+    /* An older Nakagawa built this package: it still
        plays, and the cards say what a rebuild would do, that it is queued or
        running, or that its disc is missing. */
     PlayerRebuildCard rebuild;
@@ -2049,14 +2501,14 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
     out->primary_action = PLAYER_UI_PRIMARY_NONE;
     if (app->launch_pending) {
         /* The launch worker hands back STOP GAME or an error card. */
-        out->primary_action_label = "STARTING...";
+        out->primary_action_label = "STARTING…";
     } else if (app->is_game_running) {
         out->primary_action_label = "STOP GAME";
         out->primary_action_enabled = true;
         primary = PLAYER_UI_PRIMARY_STOP_GAME;
     } else if (older && rebuild.rebuilding) {
         /* Its package is about to be replaced; the package card says so. */
-        out->primary_action_label = "REBUILDING...";
+        out->primary_action_label = "REBUILDING…";
     } else if (player_app_title_60hz_blocked(app, index)) {
         /* 60 FPS game logic is on but its package is gone: neither variant
            builds or plays until the user turns it off or brings it back. */
@@ -2391,7 +2843,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     nk_ui_set_layout_debug(player->ui,
                            app->settings.developer_mode && app->dev_log.inspect_layout);
     nk_ui_sdlr_set_scale(player->backend, scale.density);
-    now_s = (double)SDL_GetTicksNS() / 1000000000.0;
+    now_s = player_ui_nk_now_s(player);
     repeat_count = nk_ui_input_poll(&player->input.input, now_s, repeats,
                                     sizeof(repeats) / sizeof(repeats[0]));
     for (size_t i = 0u; i < repeat_count; ++i) {
@@ -2602,7 +3054,16 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                      "Version %.40s is out", app->update.check.newest.version);
             model.update_notice = player->update_notice;
         }
-        if (app->library_notice[0] != '\0') model.library_notice = app->library_notice;
+        if (app->library_notice[0] != '\0' && app->drop_notice[0] != '\0') {
+            snprintf(player->library_notice, sizeof(player->library_notice), "%s %s",
+                     app->library_notice, app->drop_notice);
+            model.library_notice = player->library_notice;
+        } else if (app->library_notice[0] != '\0') {
+            model.library_notice = app->library_notice;
+        } else if (app->drop_notice[0] != '\0') {
+            /* The one summary of files dropped together (#2007). */
+            model.library_notice = app->drop_notice;
+        }
         if (player_app_rebuild_banner_visible(app)) {
             (void)player_app_rebuild_banner_text(app, player->rebuild_notice,
                                                  sizeof(player->rebuild_notice),
@@ -2705,8 +3166,12 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                         player->title_primary_refocus = true;
                         player->title_primary_fallback = 0u;
                     } else if (player->title_primary_refocus &&
-                               player->title_primary_fallback == 0u) {
-                        /* A page just opened still shows the library's focus for a
+                               player->title_primary_fallback == 0u &&
+                               !shown->primary_action_enabled) {
+                        /* Only an action that is off (STARTING...) pushes focus away,
+                           so only then is the next button the fallback; leaving STOP
+                           GAME, which stays on, is the user's own move (#2002).
+                           A page just opened still shows the library's focus for a
                            frame or two; the fallback is the page's own button. */
                         if (focused >= 0x2000u && focused < 0x3000u) {
                             player->title_primary_fallback = focused;
@@ -2737,8 +3202,21 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                                               !player->titles[index].enhancement_on);
                 }
                 action.kind = PLAYER_UI_ACTION_NONE;
-            } else if (action.kind == PLAYER_UI_ACTION_CYCLE_ACE) {
-                if (player->titles[index].ace_enabled) player_app_cycle_title_ace_mode(app, index);
+            } else if (action.kind == PLAYER_UI_ACTION_CYCLE_PLAY_MODE) {
+                if (player->titles[index].ace_enabled) player_app_cycle_title_play_mode(app, index);
+                action.kind = PLAYER_UI_ACTION_NONE;
+            } else if (action.kind == PLAYER_UI_ACTION_OPEN_PLAY_OPTIONS) {
+                if (player->titles[index].options_enabled) {
+                    nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
+                    player_app_open_title_enhanced(app, index);
+                }
+                action.kind = PLAYER_UI_ACTION_NONE;
+            } else if (action.kind == PLAYER_UI_ACTION_OPEN_SAVES) {
+                if (player->titles[index].save_folder_enabled) {
+                    player_ui_open_saves(player, app, index);
+                    nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
+                    (void)nk_ui_router_push(player->router, PLAYER_UI_ROUTE_SAVES);
+                }
                 action.kind = PLAYER_UI_ACTION_NONE;
             } else if (action.kind == PLAYER_UI_ACTION_REMOVE_TITLE) {
                 if (player_ui_open_remove(player, app, index)) {
@@ -2816,6 +3294,9 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             model.has_saves = player->remove_plan.has_saves;
             model.saves_bytes = player->remove_plan.saves_bytes;
             model.delete_saves = player->remove_delete_saves;
+            model.has_disc_copy = player->remove_plan.has_disc_copy;
+            model.disc_copy_bytes = player->remove_plan.disc_copy_bytes;
+            model.delete_disc_copy = player->remove_delete_disc_copy;
             model.files_shared = player->remove_plan.files_shared;
             model.logical_width = scale.logical_w;
             model.logical_height = scale.logical_h;
@@ -2826,6 +3307,9 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             } else if (action.kind == PLAYER_UI_ACTION_REMOVE_TOGGLE_SAVES) {
                 player->remove_delete_saves = !player->remove_delete_saves;
                 action.kind = PLAYER_UI_ACTION_NONE;
+            } else if (action.kind == PLAYER_UI_ACTION_REMOVE_TOGGLE_DISC_COPY) {
+                player->remove_delete_disc_copy = !player->remove_delete_disc_copy;
+                action.kind = PLAYER_UI_ACTION_NONE;
             } else if (action.kind == PLAYER_UI_ACTION_REMOVE_CONFIRM) {
                 /* The removal runs after this frame; the library then
                    focuses the tile that takes this one's place. */
@@ -2835,6 +3319,64 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 }
                 player->library_focus_pending = true;
                 player->library_focus_index = (size_t)index;
+                action.kind = PLAYER_UI_ACTION_NONE;
+            }
+        }
+    } else if (route == PLAYER_UI_ROUTE_SAVES) {
+        int index = player->saves_index;
+        /* The dialog closes if its title left the library. */
+        if (index < 0 || index >= app->game_count ||
+            strcmp(app->games[index].disc_id, player->saves_disc) != 0) {
+            player->saves_waiting_pick = false;
+            app->saves_pick_ready = false;
+            (void)nk_ui_router_pop(player->router);
+        } else {
+            PlayerUiSavesModel model;
+            const char *blocked = player_app_saves_blocker(app, index);
+            if (app->saves_pick_ready) {
+                /* The folder Add a save picked (main.c takes it from the picker). */
+                bool ours = player->saves_waiting_pick && app->saves_pick_index == index;
+                app->saves_pick_ready = false;
+                player->saves_waiting_pick = false;
+                player_ui_saves_status(player, PLAYER_UI_NOTE_NEUTRAL, "");
+                if (ours && blocked == NULL) {
+                    player_ui_saves_add(player, app, index, app->saves_picked, false);
+                }
+            }
+            if (blocked != NULL) player->saves_ask = PLAYER_UI_SAVES_ASK_NONE;
+            if (player->saves_focus != 0u) {
+                nk_ui_focus(player->ui, player->saves_focus);
+                player->saves_focus = 0u;
+            }
+            memset(&model, 0, sizeof(model));
+            model.title = app->games[index].title_name;
+            model.title_index = (size_t)index;
+            model.has_saves = player->saves_has;
+            model.saves_bytes = player->saves_bytes;
+            model.rows = player->saves_rows;
+            model.row_count = player_ui_saves_page_rows(player);
+            model.first_row = player->saves_first;
+            model.total = player->saves_total;
+            model.ask = player->saves_ask;
+            model.ask_row = player->saves_ask_row;
+            model.ask_name = player->saves_ask_name;
+            model.status = player->saves_status;
+            model.status_kind = player->saves_status_kind;
+            model.blocked = blocked;
+            model.logical_width = scale.logical_w;
+            model.logical_height = scale.logical_h;
+            action = player_ui_screen_saves(player->ui, &model);
+            if (action.kind == PLAYER_UI_ACTION_BACK) {
+                if (player->saves_ask != PLAYER_UI_SAVES_ASK_NONE) {
+                    /* Back answers the question with Cancel first. */
+                    player_ui_saves_op(player, app, index, PLAYER_UI_SAVES_CANCEL, NULL);
+                } else {
+                    player->saves_waiting_pick = false;
+                    (void)nk_ui_router_pop(player->router);
+                }
+                action.kind = PLAYER_UI_ACTION_NONE;
+            } else if (action.kind == PLAYER_UI_ACTION_SAVES) {
+                player_ui_saves_op(player, app, index, (unsigned)action.primary, out_action);
                 action.kind = PLAYER_UI_ACTION_NONE;
             }
         }

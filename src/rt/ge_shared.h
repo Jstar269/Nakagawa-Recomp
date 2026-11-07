@@ -124,7 +124,7 @@ static inline int ge_tex_mip_active(const GeState *g) {
     return (g->tex_filter & 4u) != 0u && g->tex_max_level > 0u;
 }
 
-/* The GE's level arithmetic, measured on a PSP-3000 (PSP-GE-MIP-001, #1373; 55 of its 57
+/* The GE's level arithmetic, measured on a PSP-3000 (PSP-GE-MIP-001, #1373; all 66 of its
  * cells, docs/HARDWARE_ORACLE.md). A level of detail is an integer in 1/16 levels. Its
  * logarithm is the float's exponent and top four mantissa bits, log2(1 + m) taken as m:
  * 1.5 and 3 texels per pixel give 0.5 and 1.5 levels, not 0.585 and 1.585. The sign bit is
@@ -333,6 +333,18 @@ typedef struct GeGpuHooks {
      * eligible (see GeTnlPrim). Returns 1 when the backend drew it, 0 when it declined (an
      * unsupported fragment state, as tri does), and ge.c then runs its own T&L for the PRIM. */
     int  (*tnl_prim)(const struct GeTnlPrim *p);
+    /* Widescreen Fill (#1881, ge_wide_* below): draw one primitive into the host-only wing
+     * canvas of display framebuffer `fb` (ge.c's 0x04xxxxxx form), never into guest memory.
+     * ge.c has already moved the vertices into canvas coordinates; only canvas columns
+     * [x0, x1] may change, and the guest scissor's rows still apply. Called after the
+     * primitive's own draw, with the GE state that draw used. A backend that cannot draw the
+     * state drops the primitive with no other effect (no flush, no readback). Returns 1 only
+     * when the primitive was drawn (recorded) into the canvas, 0 for a drop: ge.c marks a
+     * canvas drawn only from that (ge_wide_drawn). NULL: no wings. */
+    int  (*wing_tri)(uint32_t fb, int x0, int x1,
+                     const GeVtx *a, const GeVtx *b, const GeVtx *c, int persp);
+    int  (*wing_sprite)(uint32_t fb, int x0, int x1,
+                        const GeVtx *p0, const GeVtx *p1, int persp);
 } GeGpuHooks;
 
 /* ---- GPU transform and lighting (#318) ----------------------------------------------------
@@ -340,7 +352,8 @@ typedef struct GeGpuHooks {
  * Opt-in with SR_GPU_TNL=1. ge.c stays the arbiter: it hands a transform-mode triangle PRIM to
  * the backend only when the result is provably the one its own T&L gives through the same
  * rasterizer. The state is a subset of transform_model_vtx_clip's (no specular or powered
- * diffuse light, which needs host powf; texture map mode 0; gouraud shading; not clear mode),
+ * diffuse light while light_vertex uses the C library's powf: the shader has only ge_powf, which
+ * ge_pow_set_exact selects on both routes; texture map mode 0; gouraud shading; not clear mode),
  * every float input is 0 or a normal number of magnitude 2^-40..2^40, and a clip-space bound of
  * the PRIM's vertices shows that no vertex is non-finite, out of the screen grid or the depth
  * range, or near the near plane, so every triangle is drawn whole. The vertex shader
@@ -366,6 +379,8 @@ typedef struct GeTnlLight {
     float l[3];                        /* normalized direction or position (ge.c light_consts) */
     float acol[3], dcol[3];            /* ambient and diffuse colour, 0..1 */
     float att[3];                      /* constant, linear and quadratic attenuation */
+    uint32_t comp;                     /* light components: 0 diffuse, 1 + specular, 2 powered diffuse */
+    float scol[3];                     /* specular colour, 0..1 */
 } GeTnlLight;
 
 /* Everything the vertex shader reads, as ge.c's T&L uses it. 32-bit words only (std430). */
@@ -383,6 +398,8 @@ typedef struct GeTnlParams {
     uint32_t lit_alpha;                    /* lit alpha when MATERIALUPDATE bit 0 is clear */
     uint32_t amb_alpha;                    /* scene ambient alpha */
     float mat_amb[3], mat_dif[3], emissive[3], amb[3];
+    float mat_spe[3];                      /* material specular colour */
+    float spec_coef;                       /* the specular power, as GeState */
     GeTnlLight light[GE_TNL_LIGHTS];
 } GeTnlParams;
 
@@ -401,11 +418,79 @@ typedef struct GeTnlPrim {
 
 /* Implemented in ge.c. */
 void      ge_set_gpu_hooks(const GeGpuHooks *h);
+const GeGpuHooks *ge_get_gpu_hooks(void);
+
+/* Draw observer, for replay tools only (ge_replay --first-bad-draw, #2141). ge.c calls it
+ * before each draw command of a list (PRIM, BEZIER, SPLINE, VAP and TRANSFERSTART), with
+ * `index` counting the draws that ran since ge_set_draw_observer, the command word, its
+ * address and the address the running list started at. A nonzero return stops the run before
+ * that command: ge_run_list returns the command's address, and nothing of it has run. NULL,
+ * the default, observes nothing. */
+typedef int (*GeDrawObserver)(void *ctx, unsigned long index, uint32_t op,
+                              uint32_t cmd_addr, uint32_t list_addr);
+void      ge_set_draw_observer(GeDrawObserver fn, void *ctx);
+
+/* ---- widescreen Fill (#1881), the renderer layer ------------------------------------------
+ *
+ * Fill shows more of the 3D scene left and right of the PSP's 480x272 picture, which itself is
+ * never changed: guest VRAM, depth, readbacks and captures are those of Fill off. Each display
+ * framebuffer gets a host-only wing canvas, GE_WIDE_CANVAS_W x 272 like a target, holding both
+ * wings of width D: guest x in [-D, 0) is canvas x [0, D), guest x in [480, 480 + D) is canvas
+ * x [D, 2D). The canvas gets a shifted copy of every transform-mode triangle and sprite that
+ * leaves the screen while the target is a display framebuffer and the scissor spans the
+ * screen's width, and two through-mode kinds stretched across the wings: clear-mode sprites
+ * that reach a screen edge and untextured whole-screen sprites (fades). Other 2D stays in the
+ * centre, and CPU writes and block transfers do not reach the wings. Without a GPU backend the
+ * software rasterizer draws the canvases (ge_wide_canvas); with one, its wing hooks do.
+ *
+ * Off (D = 0) is the default and creates nothing. The presenter composes left wing, picture
+ * and right wing into one (480 + 2D) x 272 image. */
+#define GE_WIDE_CANVAS_W 512
+/* 2D must fit the canvas, the GE's widest framebuffer: 480 + 2 * 256 = 992 columns, about 32.8:9
+ * (21:9 needs 76, 32:9 needs 240). */
+#define GE_WIDE_MAX_WING 256
+/* The wing width that widens 480x272 to a window_w x window_h window: a multiple of 4 (the
+ * software dither and mip-span phase stay the guest's), 0 for a window no wider than 30:17. */
+int       ge_wide_wing_for(int window_w, int window_h);
+/* Turn Fill on with wing width `wing` (rounded down to a multiple of 4, capped), or off with 0.
+ * A change clears every canvas. Returns the width in use. */
+int       ge_wide_set_wing(int wing);
+int       ge_wide_wing(void);
+/* The display was given framebuffer `fb_addr`: its canvas exists from now on. The last two
+ * distinct addresses keep canvases (double buffering). No effect while Fill is off. */
+void      ge_wide_note_display(uint32_t fb_addr);
+/* Whether fb_addr's canvas holds wings of the frame in fb_addr: a wing primitive was drawn
+ * there since the canvas was last cleared. A primitive a backend dropped does not count.
+ * ge_wide_shown(fb_addr) marks the frame shown; the next triangle or sprite drawn into fb_addr
+ * begins a new frame and clears the canvas first. So a frame presented twice keeps its wings,
+ * and a new frame whose wings were not drawn shows black wings, never the last frame's. */
+int       ge_wide_drawn(uint32_t fb_addr);
+void      ge_wide_shown(uint32_t fb_addr);
+/* Changes whenever fb_addr's canvas is cleared (a new display buffer, a new wing width); never
+ * 0 for an existing canvas, 0 for none. A backend clears its own canvas when it changes, so
+ * both renderers start each canvas from the same black, depth-0 state. */
+uint32_t  ge_wide_epoch(uint32_t fb_addr);
+/* The software renderer's Fill picture for fb_addr into out, (480 + 2D) x 272 words: the left
+ * wing, `frame` (480 x 272 words, the frame as the presenter shows it), then the right wing, each
+ * canvas word through convert(word, GE pixel format). Wings the frame did not draw
+ * (ge_wide_drawn) are 0, black. Returns the picture's width, or 0 with Fill off. */
+int       ge_wide_picture(uint32_t fb_addr, const uint32_t *frame, uint32_t *out,
+                          uint32_t (*convert)(uint32_t word, int fmt));
+/* The software canvas of fb_addr: GE_WIDE_CANVAS_W raw framebuffer words per row, in format
+ * *fmt (GE pixel format 0..3); NULL when none was drawn by the software rasterizer. */
+const uint32_t *ge_wide_canvas(uint32_t fb_addr, int *fmt);
 /* GPU transform and lighting (#318): on with SR_GPU_TNL=1, or set here (-1 re-reads the
  * environment). The counts are PRIMs the backend drew and PRIMs ge.c found ineligible or the
  * backend declined, since the last reset. */
 void      ge_tnl_set_enabled(int on);
 void      ge_tnl_counts(unsigned long long *taken, unsigned long long *cpu, int reset);
+/* The specular and powered-diffuse power light_vertex uses: 0 (the default) the C library's
+ * powf, 1 ge_powf, the integer power psp_tnl.vert repeats bit for bit, which also lets the GPU
+ * T&L take those lights. The selftest seams give ge_powf and its 64 x 64-bit high product
+ * (out: C's, then the shader's limb form, each high word first). */
+void      ge_pow_set_exact(int on);
+float     ge_pow_selftest_powf(float x, float y);
+void      ge_pow_selftest_mul(const uint32_t a[2], const uint32_t b[2], uint32_t out[4]);
 /* Post-write notification for CPU-side writes that may alias GPU-cached framebuffers
  * (movie decode, DMA memcpy). No-op when no GPU backend is registered. */
 void      sr_gpu_vram_dirty(uint32_t addr, uint32_t bytes);
@@ -463,6 +548,12 @@ int       ge_vram_cli_decode(uint32_t addr, uint32_t width, uint32_t height, uin
  * while a GE capture is active, when the texture's bytes are not all readable, when it is
  * larger than GE_VRAM_VIEW_MAX_*, or when `capacity` words cannot hold it. */
 int       ge_vram_decode_bound_texture(uint32_t *out, size_t capacity);
+/* The CLUT loads seen so far: the size of the last one and the largest, in bytes (0 before the
+ * first). PPSSPP's palette identity for texture replacement is built from them. */
+void      ge_clut_load_extent(uint32_t *last_bytes, uint32_t *max_bytes);
+/* Record a CLUT load of `bytes` (what GE_LOADCLUT does first; selftests that fill the palette
+ * directly call it to say how much they loaded). */
+void      ge_clut_note_load(uint32_t bytes);
 void      ge_replay_restore(const GeState *state, const uint16_t *zbuf);
 void      ge_cpu_profile_reset(void);
 void      ge_cpu_profile_get(GeCpuProfileStats *out);

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from typing import Any
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +26,7 @@ import title_codegen_plan
 from nk_core import package_cache
 from nk_doctor_checks import check_runtime_package_cache
 from nk_doctor_core import Report
+from makefile_text import read_makefile  # noqa: E402
 
 
 def _aot_gap_report(cache: dict, region_count: int) -> str:
@@ -35,7 +37,7 @@ def _aot_gap_report(cache: dict, region_count: int) -> str:
     nodes and comma separators. 6000 records is about 1.3 MB, the measured
     size of a flagship build report, so the fixture reproduces that route.
     """
-    return package_cache.canonical_json({
+    return str(package_cache.canonical_json({
         "cache": cache,
         "unsupported": {
             "regions": [
@@ -50,20 +52,20 @@ def _aot_gap_report(cache: dict, region_count: int) -> str:
                 for index in range(region_count)
             ]
         },
-    })
+    }))
 
 
 class PackageCacheTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="package_cache_")
         self.root = Path(self.temp.name)
-        self.inputs = {
+        self.inputs: dict[str, Any] = {
             "manifest": {"sha256": "1" * 64},
             "executable": {"sha256": "2" * 64},
             "modules": [],
             "psp_header": None,
         }
-        self.identity = package_cache.build_title_input_identity(
+        self.identity: dict[str, Any] = package_cache.build_title_input_identity(
             manifest={"id": "synthetic-cache-test", "schema_version": 1},
             executable_name="EBOOT.BIN",
             executable_sha256="2" * 64,
@@ -80,6 +82,71 @@ class PackageCacheTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_identity_ignores_container_format_warnings(self) -> None:
+        """inspect_iso records tolerated disc quirks under container["format_warnings"]; they are
+        diagnostics, not identity: the record still validates and its digest does not move."""
+        container = {
+            "format": "iso9660", "volume_id": "CACHE_TEST",
+            "size_bytes": 2048, "pvd_sector": 16, "sector_size": 2048,
+            "format_warnings": ["PARAM.SFO TITLE is not UTF-8 (raw bytes 41 96 42)"],
+        }
+        identity = package_cache.build_title_input_identity(
+            manifest={"id": "synthetic-cache-test", "schema_version": 1},
+            executable_name="EBOOT.BIN",
+            executable_sha256="2" * 64,
+            modules=[],
+            disc_id="TEST00001",
+            region="TEST",
+            disc_version="1.00",
+            param_sfo={"DISC_ID": "TEST00001", "DISC_VERSION": "1.00"},
+            container=container,
+        )
+        self.assertEqual(identity, self.identity)
+        self.assertEqual(
+            package_cache.title_input_identity_digest(identity),
+            package_cache.title_input_identity_digest(self.identity),
+        )
+        self.assertEqual(package_cache.title_input_identity_changes(self.identity, identity), ())
+        self.assertIn("format_warnings", container, "the caller's metadata is not modified")
+
+    def test_identity_ignores_source_format_of_a_compressed_disc(self) -> None:
+        """inspect_iso adds source_format (cso, zso, chd) to the container metadata of an
+        expanded image; it names the wrapper, not the disc, and stays out of the identity."""
+        container = {**self.identity["container"], "source_format": "cso"}
+        identity = package_cache.build_title_input_identity(
+            manifest={"id": "synthetic-cache-test", "schema_version": 1},
+            executable_name="EBOOT.BIN",
+            executable_sha256="2" * 64,
+            modules=[],
+            disc_id="TEST00001",
+            region="TEST",
+            disc_version="1.00",
+            param_sfo={"DISC_ID": "TEST00001", "DISC_VERSION": "1.00"},
+            container=container,
+        )
+        self.assertEqual(identity, self.identity)
+        self.assertEqual(identity["container"], self.identity["container"])
+
+    def test_identity_container_schema_stays_exact(self) -> None:
+        # A stored record is validated against exactly the identity keys.
+        for extra in ({"format_warnings": ["note"]}, {"source_format": "cso"}, {"label": "x"}):
+            invalid = dict(self.identity)
+            invalid["container"] = {**self.identity["container"], **extra}
+            with self.assertRaisesRegex(package_cache.PackageCacheError, "container metadata"):
+                package_cache.validate_title_input_identity(invalid)
+        # The builder keeps only the identity keys, so a missing one is still refused.
+        incomplete = {
+            key: value for key, value in self.identity["container"].items() if key != "volume_id"
+        }
+        with self.assertRaisesRegex(package_cache.PackageCacheError, "container metadata"):
+            package_cache.build_title_input_identity(
+                manifest={"id": "synthetic-cache-test", "schema_version": 1},
+                executable_name="EBOOT.BIN",
+                executable_sha256="2" * 64,
+                modules=[],
+                container={**incomplete, "source_format": "cso"},
+            )
 
     def test_native_build_report_byte_ceiling_matches_python(self) -> None:
         header = (ROOT / "src/core/nk_title_manifest.h").read_text(
@@ -354,6 +421,7 @@ class PackageCacheTests(unittest.TestCase):
             native_test,
         )
         self.assertIsNotNone(table)
+        assert table is not None
         cases = re.findall(
             r'^\s*\{"((?:\\.|[^"\\])*)",\s*(true|false)\},?\s*$',
             table.group("cases"),
@@ -993,10 +1061,10 @@ class PackageCacheTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, stdout=str(programs[name]) + "\n",
                                                stderr="")
         with mock.patch.object(package_cache.subprocess, "run", side_effect=run):
-            return package_cache.compiler_identity(
+            return str(package_cache.compiler_identity(
                 environment=environment,
                 repository_root=root if root is not None else self._toolchain_root,
-            )
+            ))
 
     def test_compiler_identity_names_the_programs_the_driver_runs(self) -> None:
         # A binutils update replaces the assembler and the linker and leaves the driver
@@ -1085,7 +1153,7 @@ class PackageCacheTests(unittest.TestCase):
                 if path.suffix in {".c", ".h"} and path.is_file():
                     used.update(include.findall(path.read_text(encoding="utf-8",
                                                                errors="replace")))
-        lines = (ROOT / "Makefile").read_text(encoding="utf-8").splitlines()
+        lines = read_makefile(ROOT).splitlines()
         start = next(i for i, line in enumerate(lines) if line.startswith("RT_NK_UI_FLAGS"))
         flags = [lines[start]]
         while flags[-1].endswith("\\"):
@@ -1097,6 +1165,18 @@ class PackageCacheTests(unittest.TestCase):
         for directory in ("src/rt", "src/core", "src/ui"):
             self.assertIn(directory, listed)
         self.assertNotIn("src/player", listed)
+
+    def test_player_runtime_digest_lists_the_same_directories(self) -> None:
+        # The player computes the same digest in C (package_runtime_source_digest in
+        # src/core/nk_title_manifest.c) to tell whether a package is outdated; a directory
+        # listed on one side only makes every package look outdated to this build.
+        text = (ROOT / "src" / "core" / "nk_title_manifest.c").read_text(encoding="utf-8")
+        start = text.index("static bool package_runtime_source_digest(")
+        block = re.search(r"source_dirs\[\]\s*=\s*\{(.*?)\};", text[start:], re.S)
+        if block is None:
+            self.fail("package_runtime_source_digest has no source_dirs list")
+        names = re.findall(r'"([^"]+)"', block.group(1))
+        self.assertEqual(sorted(names), sorted(package_cache.RUNTIME_SOURCE_DIRECTORIES))
 
     # A generated-code stage: the outputs of one generation phase, named as the planner
     # names them for the game "game", recorded with the package completion discipline.
@@ -1303,7 +1383,7 @@ class PackageCacheTests(unittest.TestCase):
                     raise failures.pop()
                 real_replace(src, dst)
 
-            waits = []
+            waits: list[float] = []
             with mock.patch.object(nk_cli.os, "replace", side_effect=flaky_replace):
                 nk_cli._replace_package_folder(source, target, sleeper=waits.append,
                                                delays=(0.1, 0.2, 0.3))
@@ -1328,7 +1408,7 @@ class PackageCacheTests(unittest.TestCase):
             target = Path(tmp) / "ABCD12345"
             real_replace = os.replace
             sharing_violation = OSError(13, "The process cannot access the file")
-            sharing_violation.winerror = 32
+            sharing_violation.winerror = 32  # type: ignore[attr-defined]
             failures = [sharing_violation]
 
             def flaky_replace(src, dst):
@@ -1336,7 +1416,7 @@ class PackageCacheTests(unittest.TestCase):
                     raise failures.pop()
                 real_replace(src, dst)
 
-            waits = []
+            waits: list[float] = []
             with mock.patch.object(nk_cli.os, "replace", side_effect=flaky_replace):
                 nk_cli._replace_package_folder(source, target, sleeper=waits.append,
                                                delays=(0.1, 0.2))
@@ -1373,7 +1453,7 @@ class PackageCacheTests(unittest.TestCase):
                     raise failures.pop()
                 real_replace(src, dst)
 
-            waits = []
+            waits: list[float] = []
             real_helper = nk_cli._replace_package_folder
 
             def windows_retry(source, destination):
@@ -1589,7 +1669,7 @@ class BoundedJsonArtifactTests(unittest.TestCase):
     failure that embeds it) -- never a parser-implementation exception.
     """
 
-    def _pkg(self, tmp: Path, name: str, payload: str) -> Path:
+    def _pkg(self, tmp: Path | str, name: str, payload: str) -> Path:
         package_dir = Path(tmp) / name
         package_dir.mkdir(parents=True)
         (package_dir / "package.json").write_text(payload, encoding="utf-8")
@@ -1933,7 +2013,7 @@ class NanTrapCacheKeyTests(unittest.TestCase):
         # Ace Mode (src/rt/ace.h) is a runtime launch line only: no codegen option, native
         # flag or package cache key may read it (invariant A6).
         ace = {
-            "SR_ACE": "v1;af=16;text=on;readout=on;notice=on;wide=off;smooth=off",
+            "SR_ACE": "v1;af=16;text=on;readout=on;notice=on;wide=off;smooth=off;sas=off",
             "SR_ACE_REPORT": "ace-report.json",
         }
         def planner(environment):
@@ -2008,12 +2088,12 @@ class ObjectCacheTests(unittest.TestCase):
     def test_key_names_compiler_command_and_input_but_not_the_build_folder(self) -> None:
         def key(line: str, *, build_dir: str, preprocessed: bytes = b"int x;\n",
                 compiler: str = "gcc:1") -> str:
-            return package_cache.object_cache_key(
+            return str(package_cache.object_cache_key(
                 package_cache.parse_compile_command(line),
                 compiler_identity_text=compiler,
                 build_dir=build_dir,
                 preprocessed=preprocessed,
-            )
+            ))
 
         base = key("gcc -O0 -I/one/b -c a.c -o /one/b/a.o", build_dir="/one/b")
         self.assertEqual(base, key("gcc -O0 -I/two/b -c a.c -o /two/b/a.o", build_dir="/two/b"))
@@ -2162,7 +2242,7 @@ class PackageOptimizationTests(unittest.TestCase):
         self.assertEqual(unset, explicit_o1)
 
     def test_default_recomp_flags_are_the_makefile_s(self):
-        makefile = (Path(__file__).resolve().parents[1] / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(Path(__file__).resolve().parents[1])
         line = re.search(r"^RECOMP_FLAGS \?= (.+)$", makefile, re.MULTILINE)
         self.assertIsNotNone(line)
         expanded = (line.group(1).replace("$(RECOMP_OPT)", "-O1")
@@ -2184,7 +2264,7 @@ class PackageOptimizationTests(unittest.TestCase):
 
     def test_the_optimized_cosimulation_lane_runs_the_package_level(self):
         # cosim-selftest-opt proves AOT/interpreter parity for code built the way packages are.
-        makefile = (Path(__file__).resolve().parents[1] / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(Path(__file__).resolve().parents[1])
         lane = re.search(r"^COSIM_OPT_LEVEL \?= (\S+)$", makefile, re.MULTILINE)
         self.assertIsNotNone(lane)
         self.assertEqual(lane.group(1), package_cache.PACKAGE_RECOMP_OPT)

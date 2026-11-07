@@ -14,7 +14,7 @@ import functools
 from pathlib import Path
 import re
 import struct
-from typing import Dict, Iterator, Optional, Sequence
+from typing import Any, Dict, Iterator, Optional, Sequence, overload
 
 import psp_import_table
 import title_manifest
@@ -1148,7 +1148,7 @@ def write_experimental_profile(
         else:
             file_size = path.stat().st_size
         digest = hashlib.sha256()
-        with (decrypted_path if uses_decrypted_eboot else path).open("rb") as stream:
+        with (decrypted_path if decrypted_path is not None else path).open("rb") as stream:
             if uses_decrypted_eboot:
                 lba = 0
                 size = file_size
@@ -1263,17 +1263,24 @@ def write_experimental_profile(
     return profile_path
 
 
+@overload
+def _iso_name_without_version(name: str) -> str: ...
+@overload
+def _iso_name_without_version(name: bytes) -> bytes: ...
 def _iso_name_without_version(name: str | bytes) -> str | bytes:
     """Strip the ISO 9660 ';version' suffix: a trailing ';' and one or more ASCII digits.
 
     Any other ';' is part of the name, which Windows accepts. Mirrors
     nk_iso_name_without_version in src/core/nk_iso.c, which must agree with it.
     """
-    semicolon = ";" if isinstance(name, str) else b";"
-    digits = "0123456789" if isinstance(name, str) else b"0123456789"
-    stripped = name.rstrip(digits)
-    if len(stripped) < len(name) and stripped.endswith(semicolon):
-        return stripped[:-1]
+    if isinstance(name, str):
+        text = name.rstrip("0123456789")
+        if len(text) < len(name) and text.endswith(";"):
+            return text[:-1]
+        return name
+    raw = name.rstrip(b"0123456789")
+    if len(raw) < len(name) and raw.endswith(b";"):
+        return raw[:-1]
     return name
 
 
@@ -1500,7 +1507,8 @@ def _elf32_psp_start_entry(read, image_size: int) -> tuple[int, str | None]:
     Python mirror of sr_prx_start_entry in src/rt/prx_loader.h (which documents the
     rule and its uofw reference); tools/test_iso_parity.py keeps the two in
     agreement. The module manager enters the syslib module_start export, else
-    module_bootstart, else e_entry. Returns ``(entry, None)``, or ``(e_entry, rule)``
+    module_bootstart, else e_entry; a NID listed twice resolves to its last entry.
+    Returns ``(entry, None)``, or ``(e_entry, rule)``
     naming the first rule the image breaks.
     """
     header = _image_read(read, 0, 52) if image_size >= 52 else None
@@ -1566,7 +1574,8 @@ def _elf32_psp_start_entry(read, image_size: int) -> tuple[int, str | None]:
             for index in range(functions):
                 nid = struct.unpack_from("<I", exports, 4 * index)[0]
                 if nid in (PSP_NID_MODULE_START, PSP_NID_MODULE_BOOTSTART):
-                    found.setdefault(nid, struct.unpack_from("<I", exports, 4 * (total + index))[0])
+                    # Every match overwrites the one before it: the last entry wins.
+                    found[nid] = struct.unpack_from("<I", exports, 4 * (total + index))[0]
             break
         if cursor + 4 * words > ent_end:
             return e_entry, "module-exports-range"
@@ -1715,7 +1724,7 @@ def walk_disc_module_entries(
     Returned paths are ISO member components; callers apply their own format
     and executable checks to the files.
     """
-    directories = deque()
+    directories: deque[tuple[tuple[str, ...], int]] = deque()
     visited = 0
     discovered = 0
 
@@ -1751,8 +1760,8 @@ def walk_disc_module_entries(
         if visited > MAX_MODULE_DIRECTORIES:
             raise IsoInspectionError(
                 "DISC_MODULE_DIRECTORY_LIMIT: ISO module discovery exceeds "
-                f"{MAX_MODULE_DIRECTORIES} directories; broader discovery is "
-                "in the works."
+                f"{MAX_MODULE_DIRECTORIES} directories; more directories "
+                "aren't supported yet."
             )
         entries = read_module_directory(directory)
         if entries is None:
@@ -1770,7 +1779,7 @@ def walk_disc_module_entries(
                         raise IsoInspectionError(
                             "DISC_MODULE_DIRECTORY_LIMIT: ISO module discovery "
                             f"exceeds {MAX_MODULE_DIRECTORIES} directories; "
-                            "broader discovery is in the works."
+                            "more directories aren't supported yet."
                         )
                     directories.append((directory + (entry.name,), depth + 1))
                 continue
@@ -1922,7 +1931,7 @@ def list_disc_module_candidates(iso_path: Path | str) -> list[dict]:
                 raise IsoInspectionError(
                     "DISC_MODULE_CANDIDATE_LIMIT: ISO contains more than "
                     f"{MAX_MODULE_CANDIDATES} guest-module candidates; larger "
-                    "module sets are in the works."
+                    "module sets aren't supported yet."
                 )
     return candidates
 
@@ -2215,6 +2224,38 @@ def _classify_iso_executable(stream, file_size: int, path: str) -> dict[str, obj
 _BOOT_FALLBACK_EBOOT_KINDS = frozenset({"PSP_ENCRYPTED_CONTAINER", "EMPTY_OR_ZERO_FILLED"})
 
 
+def iso_executable_sha256(iso_path: Path | str, name: str) -> str | None:
+    """SHA-256 of ``PSP_GAME/SYSDIR/<name>`` as the disc image holds it, or None.
+
+    The file is hashed exactly as stored (an encrypted executable stays
+    encrypted), so the digest names the build on the disc and no key is
+    involved (#2140). None means the image has no such file, it is empty, or it
+    is beyond the supported size bound.
+    """
+    path = Path(iso_path)
+    try:
+        size_bytes = path.stat().st_size
+        with path.open("rb") as stream:
+            entry = _lookup_iso_file(stream, size_bytes, ("PSP_GAME", "SYSDIR", name))
+            if entry is None:
+                return None
+            lba, size = entry
+            if size <= 0 or size > MAX_EXECUTABLE_BYTES:
+                return None
+            digest = hashlib.sha256()
+            offset = 0
+            while offset < size:
+                count = min(64 * 1024, size - offset)
+                chunk = _read_iso_extent(stream, size_bytes, lba, size, offset, count)
+                if len(chunk) != count:
+                    return None
+                digest.update(chunk)
+                offset += count
+            return digest.hexdigest()
+    except (OSError, IsoInspectionError, struct.error):
+        return None
+
+
 def select_boot_executable_source(iso_path: Path | str) -> str | None:
     """Select an on-disc boot filename without resolving keys or decrypting files."""
     path = Path(iso_path)
@@ -2262,7 +2303,7 @@ def inspect_compatibility_preflight(
     *,
     metadata: IsoMetadata,
     runtime_root: Path | str,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Return the player/CLI compatibility checks for a selected ISO."""
     path = Path(iso_path)
     size_bytes = path.stat().st_size
@@ -2326,7 +2367,7 @@ def inspect_compatibility_preflight(
     decrypted_elf: Path | None = None
     decrypted_elf_kind = "MISSING"
     if module_dir is not None:
-        candidate_elf = module_dir / "EBOOT.elf"
+        candidate_elf: Path | None = module_dir / "EBOOT.elf"
         try:
             candidate_elf.resolve(strict=False).relative_to(root.expanduser().resolve(strict=False))
         except ValueError:
@@ -2471,7 +2512,7 @@ def inspect_compatibility_preflight(
     else:
         executable_check = {
             "code": "EXECUTABLE", "status": "UNSUPPORTED",
-            "message": "Unknown/malformed executable boundary; broader title support is in the works.",
+            "message": "Unknown or malformed executable; this game isn't supported yet.",
             "issues": [308],
         }
 
@@ -2487,7 +2528,7 @@ def inspect_compatibility_preflight(
     experimental_check = {
         "code": "EXPERIMENTAL",
         "status": "IN_PROGRESS",
-        "message": "Experimental: this game has not been verified. Compatibility is unknown. Verification for additional titles and generic title intake are in the works.",
+        "message": "Experimental: this game has not been verified. Compatibility is unknown. Verifying other games and starting any disc image aren't supported yet.",
         "issues": [308],
     } if is_experimental else None
 
@@ -2500,7 +2541,7 @@ def inspect_compatibility_preflight(
     elif metadata.matched_profile is None:
         runtime_check = {
             "code": "RUNTIME_PACKAGE", "status": "UNSUPPORTED",
-            "message": "Title profile missing; generic title support is in the works.",
+            "message": "This game isn't in Nakagawa's list of supported games yet.",
             "issues": [308],
         }
     elif package_present:
@@ -2586,7 +2627,7 @@ def inspect_compatibility_preflight(
                    "With no device, the game runs silently.",
         "issues": [],
     }
-    checks = [disc_check]
+    checks: list[dict[str, Any]] = [disc_check]
     if cfw_loader_detected:
         checks.append({
             "code": "MODIFIED_DUMP_CFW_LOADER",

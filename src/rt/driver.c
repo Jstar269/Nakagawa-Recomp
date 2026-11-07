@@ -23,11 +23,13 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "recomp.h"
+#include "../core/nk_shared_helpers.h"
 #include "debug.h"
 #include "title_config.h"
 #include "flight_recorder.h"
 #include "prx_loader.h"
 #include "ace.h"
+#include "videorec.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -58,6 +60,13 @@ static int driver_stop_requested(void) {
     return ge_capture_exit_due() || gui_stop_requested();
 }
 
+/* An end of main once the guest has run: a recording (#1273) names it and the exit status
+ * main is about to return, so record.json tells a clean end from a failed one. */
+static int driver_run_end(int status, const char *how) {
+    (void)sr_videorec_finish_status(how, status);
+    return status;
+}
+
 /* An opt-in file side channel for a parent launcher that cannot reliably own a
  * spawned child's stderr on every host backend. The normal runtime only writes
  * stderr; SR_BOOT_EVENT_FILE is used by the native-player launch smoke. */
@@ -65,29 +74,8 @@ static void sr_driver_boot_event(const char *format, ...) {
     uint64_t timestamp_ns = sr_perf_now_ns();
     va_list args;
     va_start(args, format);
-    vfprintf(stderr, format, args);
+    nk_shared_boot_event_vwrite(stderr, timestamp_ns, format, args);
     va_end(args);
-    if (timestamp_ns) {
-        fprintf(stderr, " t_ns=%llu\n", (unsigned long long)timestamp_ns);
-    } else {
-        fputc('\n', stderr);
-    }
-    fflush(stderr);
-
-    const char *path = getenv("SR_BOOT_EVENT_FILE");
-    if (!path || !*path) return;
-
-    FILE *file = fopen(path, "ab");
-    if (!file) return;
-    va_start(args, format);
-    vfprintf(file, format, args);
-    va_end(args);
-    if (timestamp_ns) {
-        fprintf(file, " t_ns=%llu\n", (unsigned long long)timestamp_ns);
-    } else {
-        fputc('\n', file);
-    }
-    fclose(file);
 }
 
 #ifndef SR_SELFTEST_ONLY
@@ -499,6 +487,8 @@ int main(int argc, char **argv) {
     DriverExpectedU32 expectations[DRIVER_MAX_EXPECT_U32];
     memset(expectations, 0, sizeof(expectations));
     sr_flight_init();
+    /* The run recorder records only on the scheduler's deterministic clock (videorec.h). */
+    sr_videorec_set_clock(sched_clock_deterministic);
 
 #ifndef SR_SELFTEST_ONLY
 #ifdef _WIN32
@@ -542,6 +532,10 @@ int main(int argc, char **argv) {
      * ordinary exit (exit(), the window closing); a fatal _Exit path writes no report. */
     if (ace_init_from_env()) {
         sr_flight_set_enhancements(ace_spec_text());
+        /* sas=sinc (#2054): the feature runs once a SAS mixer has the switch. A link without
+         * the mixer (the headless gate) refuses it, and ace_finish reports it as never run. */
+        if (ace_effective()->sas == ACE_SAS_SINC && sr_hle_sas_set_band_limited(1))
+            ace_confirm(ACE_FEATURE_SAS);
         (void)atexit(ace_finish);
     }
 
@@ -728,7 +722,7 @@ have_image:;
             if (!sched_reset_for_loadexec()) {
                 fprintf(stderr, "LOAD_EXEC_SCHEDULER_RESET_REFUSED: unable to retire old guest threads\n");
                 sr_hle_loadexec_release(&request);
-                return 2;
+                return driver_run_end(2, "LoadExec could not retire the old guest threads");
             }
             sr_hle_loadexec_reset_guest_state();
             sr_mem_reset();
@@ -739,13 +733,13 @@ have_image:;
             uint32_t next_entry = 0u, next_gp = 0u;
             if (!sr_hle_loadexec_boot_module(request.guest_path, &next_entry, &next_gp)) {
                 sr_hle_loadexec_release(&request);
-                return 2;
+                return driver_run_end(2, "LoadExec could not boot the replacement module");
             }
             memset(&s, 0, sizeof(s));
             sr_vfpu_thread_ctrl_init(&s);
             if (!sr_driver_seed_loadexec_arguments(&s, &request, next_entry, next_gp)) {
                 sr_hle_loadexec_release(&request);
-                return 2;
+                return driver_run_end(2, "LoadExec could not pass the replacement its arguments");
             }
             sched_set_guest_process_gp(next_gp);
             sr_driver_boot_event("BOOT_EVENT phase=loadexec_restart entry=0x%08x args=%u",
@@ -811,19 +805,21 @@ have_image:;
         );
         if (!matches) any_failure = 1;
     }
-    if (any_failure) return 3;
+    if (any_failure) return driver_run_end(3, "a DRIVER_EXPECT_U32 check failed");
 
     if (gui_headless_acceptance_requested()) {
         if (gui_headless_acceptance_complete()) {
             uint32_t presented = gui_headless_acceptance_presented_frames();
             sr_driver_boot_event("BOOT_EVENT phase=headless_acceptance status=PASS presented_frames=%u",
                                  presented);
-            return SR_HEADLESS_ACCEPTANCE_EXIT_REACHED;
+            return driver_run_end(SR_HEADLESS_ACCEPTANCE_EXIT_REACHED,
+                                  "the headless acceptance checkpoint was reached");
         }
         sr_driver_boot_event("BOOT_EVENT phase=headless_acceptance status=FAIL reason=checkpoint_not_reached presented_frames=%u",
                              gui_headless_acceptance_presented_frames());
-        return SR_HEADLESS_ACCEPTANCE_EXIT_NOT_REACHED;
+        return driver_run_end(SR_HEADLESS_ACCEPTANCE_EXIT_NOT_REACHED,
+                              "the headless acceptance checkpoint was not reached");
     }
 
-    return 0;
+    return driver_run_end(0, "the run returned to the driver");
 }

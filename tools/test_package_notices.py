@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import package_notices
 from title_codegen_plan import PackageRouteError
+from makefile_text import read_makefile  # noqa: E402
 
 
 class TestPackageNotices(unittest.TestCase):
@@ -311,7 +312,7 @@ class TestPackageNotices(unittest.TestCase):
     def test_relink_objects_follow_makefile_sources(self) -> None:
         """RELINK.md lists exactly the ATRAC3+ objects the Makefile builds, plus the bridge."""
         objects = package_notices.atrac3p_object_names(ROOT)
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         self.assertGreater(len(objects), 1)
         for obj in objects[:-1]:
             source = "src/rt/atrac3p/" + obj[len("$(BUILD_DIR)/atrac3p_"):-2] + ".c"
@@ -365,6 +366,19 @@ class TestPackageNotices(unittest.TestCase):
             (bare / "share" / "licenses").mkdir(parents=True)
             with mock.patch.dict(package_notices.os.environ, {"MINGW_PREFIX": str(bare)}):
                 self.assertEqual(package_notices.resolve_toolchain_root(), bare.resolve())
+
+    def test_toolchain_root_uses_explicit_msys_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tc_dir:
+            root = Path(tc_dir) / "custom-ucrt64"
+            msys_bin = root / "bin"
+            msys_bin.mkdir(parents=True)
+            (msys_bin / "gcc.exe").write_bytes(b"synthetic executable path marker")
+            (root / "share" / "licenses").mkdir(parents=True)
+            with mock.patch.dict(
+                    package_notices.os.environ, {"MSYS_PATH": str(msys_bin)}, clear=True), \
+                    mock.patch.object(package_notices.shutil, "which", return_value=None), \
+                    mock.patch.object(package_notices, "_prerequisite_toolchain_root", return_value=None):
+                self.assertEqual(package_notices.resolve_toolchain_root(), root.resolve())
 
 
 

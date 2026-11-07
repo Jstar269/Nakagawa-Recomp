@@ -74,7 +74,7 @@ ABI_FUNCTIONS = {
     "sr_llvm_tail_drain": _FN(L.void, (L.ptr,)),
     "sr_aot_return_boundary_begin": _FN(L.i32, (L.ptr, L.i32, L.i32, L.i32)),
     "sr_aot_return_boundary_end": _FN(L.i32, (L.ptr,)),
-    "dispatch_call": _FN(L.void, (L.ptr, L.i32, L.i32)),
+    "dispatch_call_checked": _FN(L.i32, (L.ptr, L.i32, L.i32)),
     "sr_null_code_pointer": _FN(L.void, (L.ptr, L.i32)),
     "sr_lwl": _FN(L.i32, (L.i32, L.i32)),
     "sr_lwr": _FN(L.i32, (L.i32, L.i32)),
@@ -153,6 +153,22 @@ def census_body_symbol(addr: int) -> str:
 
 _BINARY = {"add": "add", "sub": "sub", "and": "and_", "or": "or_", "xor": "xor"}
 _COND = {"eq": "eq", "ne": "ne", "lez": "sle", "gtz": "sgt", "ltz": "slt", "gez": "sge"}
+
+
+def _require_delay_slot(transfer: P.Transfer) -> P.Op:
+    if transfer.slot is None:
+        raise LLVMUnsupported(
+            f"{transfer.kind} transfer at 0x{transfer.addr:08x} has no delay-slot operation"
+        )
+    return transfer.slot
+
+
+def _require_condition(transfer: P.Transfer) -> P.Cond:
+    if transfer.cond is None:
+        raise LLVMUnsupported(
+            f"conditional transfer at 0x{transfer.addr:08x} has no branch condition"
+        )
+    return transfer.cond
 
 
 class FunctionLowering:
@@ -306,6 +322,13 @@ class FunctionLowering:
         self.direct_calls = True
         mismatch = self.call("sr_aot_return_boundary_end", self.s)
         _, join = self.split(b.icmp("ne", mismatch, self.c32(0)), "boundary.mismatch")
+        self.ret()
+        self.enter(join)
+
+    def checked_dispatch_call(self, target, link_value):
+        """codegen.emit_checked_dispatch_call: a CALL with no direct body, in its boundary."""
+        abandoned = self.call("dispatch_call_checked", self.s, target, link_value)
+        _, join = self.split(self.builder.icmp("ne", abandoned, self.c32(0)), "call.abandoned")
         self.ret()
         self.enter(join)
 
@@ -550,13 +573,13 @@ class FunctionLowering:
             if t.symbol is not None:
                 self.checked_body_call(t.symbol, t.addr)
             else:
-                self.call("dispatch_call", self.s, self.c32(t.target), link_value)
+                self.checked_dispatch_call(self.c32(t.target), link_value)
 
         if t.kind == "call" and t.cond is None:                # jal
             self.begin(t.addr, t.word)
             self.W(t.link_reg, link_value)
             self.end()
-            self.instruction(t.slot)
+            self.instruction(_require_delay_slot(t))
             call_target()
             then()
         elif t.kind in ("call-computed", "tail-computed"):     # jalr / jr rs
@@ -566,9 +589,9 @@ class FunctionLowering:
             if t.link_reg is not None:
                 self.W(t.link_reg, link_value)
             self.end()
-            self.instruction(t.slot)
+            self.instruction(_require_delay_slot(t))
             if t.kind == "call-computed":
-                self.call("dispatch_call", self.s, latched, link_value)
+                self.checked_dispatch_call(latched, link_value)
                 then()
             else:
                 self.tail_transfer(latched, None)
@@ -581,12 +604,12 @@ class FunctionLowering:
                 self.call("sr_raw_syscall", self.s, self.c32(t.slot_syscall),
                           self.c32(t.addr + 4))
             else:
-                self.instruction(t.slot)
+                self.instruction(_require_delay_slot(t))
             self.host_return()
         elif t.kind.startswith("jump-"):                       # j
             self.begin(t.addr, t.word)
             self.end()
-            self.instruction(t.slot)
+            self.instruction(_require_delay_slot(t))
             if t.kind == "jump-tail":
                 self.tail_transfer(self.c32(t.target), t.symbol)
             else:
@@ -594,23 +617,23 @@ class FunctionLowering:
                     self.yield_(t.addr)
                 self.goto(self.at_label(t.target))
         else:                                                  # conditional: cond, link, slot
-            taken_cond = self.cond(t.cond)
+            taken_cond = self.cond(_require_condition(t))
             self.begin(t.addr, t.word)
             if t.link_reg is not None:
                 self.W(t.link_reg, link_value)
             self.end()
             if t.kind == "call":                               # linked branch CALL (#968)
-                self.instruction(t.slot)
+                self.instruction(_require_delay_slot(t))
                 _, join = self.split(taken_cond, "call")
                 call_target()
                 self.enter(join)
                 then()
                 return
             if not t.likely:
-                self.instruction(t.slot)
+                self.instruction(_require_delay_slot(t))
             _, join = self.split(taken_cond, "taken")
             if t.likely:
-                self.instruction(t.slot)
+                self.instruction(_require_delay_slot(t))
             if t.kind == "branch-label":
                 if t.backward:
                     self.yield_(t.addr)
@@ -625,14 +648,16 @@ class FunctionLowering:
 
 
 def lower(cg, elf, start, ranges, known, *, c_text: str, resume_owners=None, resumable=False,
-          profile=None, dispatch_boundaries=None, stack_census=False) -> LLVMBody:
+          profile=None, dispatch_boundaries=None, stack_census=False, options=None) -> LLVMBody:
     """Lower one function the C emitter already translated; raises LLVMUnsupported.
 
-    ``cg`` is the running codegen module (its flags and address space are live state).
+    ``cg`` supplies codegen helpers and the active address space; ``options`` is this
+    translation's explicit option object.
     """
+    options = cg._options_for_call(options)
     plan = P.plan_function(cg, elf, start, ranges, known, resume_owners=resume_owners,
                            resumable=resumable, profile=profile,
-                           dispatch_boundaries=dispatch_boundaries)
+                           dispatch_boundaries=dispatch_boundaries, options=options)
     lowering = FunctionLowering(plan, stack_census)
     function = lowering.lower()
     returned: LLVMBody = LLVMBody.make(lowering.definition_name, start, lowering.module, function, len(c_text))

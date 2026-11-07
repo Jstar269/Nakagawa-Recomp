@@ -17,6 +17,10 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from makefile_text import read_makefile  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,18 +36,25 @@ _SCRATCH = Path(_SCRATCH_ROOT.name).as_posix()
 _RUNS_BEFORE_PROCESS_TEST = (
     "build/mygame/cpu_lle_selftest",
     "build/mygame/domain_mode_selftest",
+    "build/mygame/nkstate_selftest",
     "build/mygame/clay_layout_selftest",
     "build/test_nk_ui_core",
     "build/test_player_screens",
     "build/test_overlay_screens",
     "build/test_nk_ui_focus",
     "build/test_nk_ui_focus_sdl --sdl-input",
+    "build/test_shared_helpers",
     "build/mygame/heap_selftest",
     "build/mygame/profiler_selftest",
     "build/mygame/ge_texture_ref_selftest",
     "build/mygame/fbcap_selftest build/mygame/fbcap_selftest",
+    "build/mygame/videorec_selftest build/mygame/videorec_selftest",
     "build/mygame/osk_text_entry_selftest",
     "build/mygame/ace_selftest build/mygame",
+    "build/mygame/motion_match_selftest",
+    "build/mygame/fsr3_host_selftest tests/native/fsr3_host_oracle.txt",
+    "build/mygame/fsr3_fg_host_selftest tests/native/fsr3_fg_host_oracle.txt",
+    "build/mygame/fsr3_fg_state_selftest",
     "build/mygame/osk_overlay_selftest",
     "build/mygame/ge_float24_selftest",
     "build/mygame/ge_cpu_profile_validate_selftest",
@@ -55,10 +66,20 @@ _RUNS_BEFORE_PROCESS_TEST = (
     () if os.name == "nt" else ("build/mygame/coro_selftest_asm",)
 ) + (
     "build/mygame/ge_raster_ref_selftest",
+    "build/mygame/psmf_media_focused_selftest --fuzz-iters 0",
+    "build/mygame/psmf_media_focused_selftest --videorec-audio build/mygame/videorec_audio_channel channel",
+    "build/mygame/psmf_media_focused_selftest --videorec-audio build/mygame/videorec_audio_output2 output2",
+    "build/mygame/psmf_media_focused_selftest --videorec-audio build/mygame/videorec_audio_src src",
     # memory-watch-selftest: the store watch on the interpreter's data word (SR_WATCH from
     # the target), then on a main-RAM word, where unwatched stores take the inline path.
     "build/mygame/dispatch_isolation_selftest_generic",
     "build/mygame/dispatch_isolation_selftest_generic --watch 0x08801000:4",
+    # code-capture-selftest: the stop that writes a capture, then, linked with the capture's
+    # translation from tools/code_capture.py, the binding that takes the call (#1933).
+    "build/mygame/code_capture_selftest_capture build/mygame/code-capture-selftest",
+    "build/mygame/code_capture_selftest_bound build/mygame/code-capture-selftest",
+    # pipeline-cache-selftest: the Vulkan pipeline cache file's checks, no GPU (#2149).
+    "build/mygame/pipeline_cache_selftest build/mygame/pipeline_cache_scratch",
     "build/test_pgf_public",
     "build/test_core_catalog",
     "build/test_parsers_hostile",
@@ -71,12 +92,15 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/test_xb_parser",
     "build/test_disc_expand",
     "build/test_disc_verify",
+    "build/test_nk_zip",
+    "build/test_steam_shortcuts",
     "build/test_safe_math",
     "build/test_pcm_wav_dump",
     "build/test_fuzz_parsers --iters 100",
     "build/mygame/psmf_producer_selftest --fuzz-iters 100",
     "build/test_input_profile",
     "build/test_nk_sig",
+    "build/test_nk_achievements",
     "build/test_portable_mode",
 )
 _PROCESS_TEST = "build/test_win32_process" if os.name == "nt" else "build/test_posix_process"
@@ -230,7 +254,7 @@ class StandaloneTestBinTargetTests(unittest.TestCase):
         commands = _dry_run("package-builder-test-bin")
         self.assertTrue(any("-DPYTHON_VERSION_PROBE_TIMEOUT_MS=3000" in c and "src/player/package_builder.c" in c
                             for c in commands))
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         self.assertEqual(makefile.count("PYTHON_VERSION_PROBE_TIMEOUT_MS"), 1)
         source = (ROOT / "src" / "player" / "package_builder.c").read_text(encoding="utf-8")
         self.assertIn("#ifndef PYTHON_VERSION_PROBE_TIMEOUT_MS\n#define PYTHON_VERSION_PROBE_TIMEOUT_MS 10000\n#endif",
@@ -240,6 +264,9 @@ class StandaloneTestBinTargetTests(unittest.TestCase):
         commands = _dry_run("player-state-test-bin")
         self.assertTrue(any("-DNK_TITLE_MANIFEST_TEST_SEAMS" in c and "src/core/nk_font.c" in c
                             for c in commands))
+        # The saves fault seams (#1883) compile into nk_zip.c and player_state.c here only.
+        self.assertTrue(any("-DNK_SAVES_TEST_SEAMS" in c and "src/core/nk_zip.c" in c
+                            and "src/player/player_state.c" in c for c in commands))
 
 
 if __name__ == "__main__":

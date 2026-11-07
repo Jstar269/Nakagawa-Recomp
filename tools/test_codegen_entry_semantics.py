@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
+from typing import ClassVar
 import unittest
 import unittest.mock
 
@@ -33,6 +34,7 @@ import analyze  # noqa: E402
 import codegen  # noqa: E402
 import entry_frame_balance  # noqa: E402
 import scratch_dir  # noqa: E402
+from makefile_text import read_makefile  # noqa: E402
 
 OWNER = 0x00021AC0
 RESUME = 0x00021C78
@@ -251,6 +253,7 @@ void test_mem_w32(uint32_t addr, uint32_t value);
 #define sr_end(s, addr, size) ((void)0)
 void dispatch(CpuState *s, uint32_t target);
 void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc);
+int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc);
 void sr_register(uint32_t addr, void (*fn)(CpuState *));
 void sr_exec_span_reset(void);
 int sr_exec_span_register(uint32_t start, uint32_t end);
@@ -288,6 +291,11 @@ void dispatch(CpuState *s, uint32_t target) {{
 void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc) {{
     (void)resume_pc;
     dispatch(s, target);
+}}
+/* A generated call site's checked form: these stand-ins never abandon a caller. */
+int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc) {{
+    dispatch_call(s, target, resume_pc);
+    return 0;
 }}
 
 int main(void) {{
@@ -489,6 +497,52 @@ int main(void) {{
             self.assertNotIn(f"goto L_{target:08x}", body,
                              "a known function entry must not be treated as an intra-function label")
 
+    def test_an_unsupported_body_leaves_no_sp_load_checks_behind(self):
+        """An Unsupported raised mid-body clears the body's run-time $sp checks (#1935).
+
+        F loads $sp from its frame below where it was, a load the frame walk does not own, so
+        its emission checks the load (_sp_load_check). delay_slot_lines reads that set from
+        callers outside emit_function too (form_sweep, the codegen unit tests); a set left
+        over from a failed body would wrap their slot in a check naming `_sp_entry` and
+        `_sp_kept`, which only emit_function declares.
+        """
+        owner, target = 0x00001000, 0x00001020
+        load = (0x23 << 26) | (29 << 21) | (29 << 16) | 0x10           # lw sp,0x10(sp)
+
+        def words(refused: bool) -> dict[int, int]:
+            return {
+                owner: 0x27BDFFE0,                                      # addiu sp,sp,-0x20
+                owner + 4: 0x27B8FFC0,                                  # addiu t8,sp,-0x40
+                owner + 8: 0xAFB80010,                                  # sw t8,0x10(sp)
+                # srl with a nonzero rs field, which codegen refuses (or a plain nop)
+                owner + 12: 0x00401082 if refused else 0x00000000,
+                owner + 16: (0x02 << 26) | ((target >> 2) & 0x03FFFFFF),  # j target
+                owner + 20: load,
+                owner + 24: 0x00000000,
+                owner + 28: 0x00000000,
+                target: 0x03E00008,                                     # jr ra
+                target + 4: 0x00000000,
+                target + 8: (0x03 << 26) | ((target >> 2) & 0x03FFFFFF),  # jal target
+                target + 12: 0x00000000,
+            }
+
+        for refused in (False, True):
+            with self.subTest(refused=refused), \
+                    scratch_dir.TemporaryDirectory(prefix="sp_checks_") as tmp:
+                path = Path(tmp) / "sp_checks.elf"
+                path.write_bytes(_synthetic_elf(words(refused), owner))
+                elf = analyze.Elf(os.fspath(path))
+                starts, ranges = analyze.analyze(elf)
+                if not refused:
+                    body = "\n".join(codegen.emit_function(elf, owner, ranges, starts))
+                    self.assertIn("_sp_kept = 0u;", body, "the control: F checks its load")
+                else:
+                    with self.assertRaises(codegen.Unsupported):
+                        codegen.emit_function(elf, owner, ranges, starts)
+                self.assertEqual(codegen._BODY_SP_CHECKS, set())
+                slot = "\n".join(codegen.delay_slot_lines(owner + 20, load, owner + 16))
+                self.assertNotIn("_sp_kept", slot)
+
     def test_variadic_argument_save_stub_is_an_ordinary_analyzed_function(self):
         owner = 0x00001000
         words = {owner: 0x27BDFFE0}  # addiu sp,sp,-32
@@ -573,6 +627,7 @@ void test_mem_w32(uint32_t addr, uint32_t value);
 #define sr_end(s, addr, size) ((void)0)
 void dispatch(CpuState *s, uint32_t target);
 void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc);
+int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc);
 void sr_register(uint32_t addr, void (*fn)(CpuState *));
 void sr_exec_span_reset(void);
 int sr_exec_span_register(uint32_t start, uint32_t end);
@@ -612,6 +667,11 @@ void dispatch(CpuState *s, uint32_t actual) {{ dispatch_target(s, actual); }}
 void dispatch_call(CpuState *s, uint32_t actual, uint32_t resume_pc) {{
     (void)resume_pc;
     dispatch_target(s, actual);
+}}
+/* A generated call site's checked form: these stand-ins never abandon a caller. */
+int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc) {{
+    dispatch_call(s, target, resume_pc);
+    return 0;
 }}
 
 int main(void) {{
@@ -1162,6 +1222,8 @@ tail_region = 0x{TAIL_REGION:08x}; // type:func size:0x10
 class SymbolMapContainmentTests(unittest.TestCase):
     """An entry inside a sized map function, past its start, is f_<addr>_in_<name>."""
 
+    inside: ClassVar[dict[str, str]]  # Generated files are shared by the class's tests.
+
     @classmethod
     def setUpClass(cls):
         cls._tmp = scratch_dir.TemporaryDirectory(prefix="symbol_map_inside_")
@@ -1281,7 +1343,7 @@ class SymbolMapFileTests(unittest.TestCase):
         self.assertEqual(codegen.symbol_map_collisions({"f_000468c8": "f_000468c8_loop"}, texts), [])
 
     def test_makefile_passes_the_map_and_regenerates_when_it_changes(self):
-        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(ROOT)
         self.assertIn("SYMBOL_MAP_ARG := --symbol-map=$(SYMBOL_MAP)", makefile)
         self.assertIn("SYMBOL_MAP_PROFILE_LINE := $(NEWLINE)SYMBOL_MAP=$(SYMBOL_MAP)", makefile)
         rule = re.search(r"^\$\(BUILD_DIR\)/\$\(GAME_NAME\)_recomp\.c [^\n]*: ([^\n]*)\n\t([^\n]*)",

@@ -234,6 +234,18 @@
         "player"
       ]
     },
+    "HOMEBREW_KERNEL_MODE_UNSUPPORTED": {
+      "stage": "inspect",
+      "in": [
+        "player"
+      ]
+    },
+    "PBP_ENCRYPTED_EXECUTABLE_UNSUPPORTED": {
+      "stage": "inspect",
+      "in": [
+        "player"
+      ]
+    },
     "PBP_PACKAGE_UNSUPPORTED": {
       "stage": "inspect",
       "in": [
@@ -348,6 +360,12 @@
       "in": [
         "decrypt",
         "player"
+      ]
+    },
+    "BUILD_KNOWN_BAD": {
+      "stage": "import",
+      "in": [
+        "staging"
       ]
     },
     "DISC_FILES_STAGE_FAILED": {
@@ -1129,6 +1147,12 @@
         "player"
       ]
     },
+    "LINK_OPEN_FAILED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
     "MANIFEST_INVALID": {
       "stage": "host",
       "in": [
@@ -1214,6 +1238,30 @@
       ]
     },
     "REMOVE_FAILED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "SAVES_ADD_FAILED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "SAVES_BACKUP_FAILED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "SAVES_PICKER_FAILED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
+    "SAVES_RESTORE_FAILED": {
       "stage": "host",
       "in": [
         "player"

@@ -55,7 +55,7 @@ except ImportError:  # direct script execution
     import pgf_writer  # type: ignore[no-redef]
 
 CONVERTER_NAME = "ttf2pgf"
-CONVERTER_VERSION = "0.3.0"
+CONVERTER_VERSION = "0.4.0"
 SPEC_PATH = "docs/cleanroom/PGF_CONVERTER_SPEC.md"
 PIN_SCHEMA = "font-pin/v1"
 
@@ -80,6 +80,11 @@ MAX_PPEM = 128
 #: Synthetic emboldening strengths are whole sub-samples (eighths of a pixel), at most
 #: one pixel per axis; the advance allowance uses the same unit.
 MAX_EMBOLDEN = SUPERSAMPLE
+#: Letter-spacing (tracking) is also in sub-samples: up to one pixel tighter, two pixels looser.
+MIN_TRACKING = -SUPERSAMPLE
+MAX_TRACKING = 2 * SUPERSAMPLE
+#: The code points ``--digit-advance`` sets to one advance (tabular figures).
+DIGIT_CODES = tuple(range(0x30, 0x3A))
 DEFAULT_PPEM = 12
 DEFAULT_CODES = "0x20-0x7E"
 ELLIPSIS_CODE = 0x2026
@@ -88,6 +93,9 @@ DEFAULT_FONT_NAME = "Nakagawa Open Latin"
 DEFAULT_FONT_TYPE = "Regular"
 JAPANESE_CODE_POINTS_SHA256 = "abc5302681a3c700179f29ac22a7c8082ed087a07b4cf8c3de4de5f73e7e0889"
 LATIN_CODE_POINTS_SHA256 = "7fbcaac92248acdb1c2704c3fef2181e7bc49f2b0e9d0f970cd029fb58057340"
+LATIN_CYRILLIC_CODE_POINTS_SHA256 = "6b8511988b7ce6199c99a45ab3a00ee498986067343117205c22031e2b8b330d"
+JAPANESE_TEXT_CODE_POINTS_SHA256 = "7c737cfedb45385d553dbfeecce9949135f185b5ca31ce486428cd4082904497"
+JAPANESE_TEXT_CODE_POINT_COUNT = 7575
 KOREAN_CODE_POINTS_SHA256 = "50596a7f6e0e5158561147eae40a38edc12c28b1a4be3efff6d717c74b638bc4"
 
 SCALER_TRUE = 0x00010000
@@ -95,7 +103,9 @@ SCALER_APPLE_TRUE = 0x74727565  # 'true'
 SCALER_OTTO = 0x4F54544F  # 'OTTO': PostScript outlines, refused by name
 REQUIRED_TABLES = ("cmap", "glyf", "head", "hhea", "hmtx", "loca", "maxp")
 OUTLINE_TABLE_REFUSALS = ("CFF ", "CFF2")
-VARIABLE_FONT_TABLES = ("fvar", "gvar", "cvar", "HVAR", "MVAR", "STAT")
+#: Tables that only a variable font carries. ``STAT`` is not among them: the members of a static
+#: family carry it too, to name their place in the family (OpenType 1.8 ``STAT`` table).
+VARIABLE_FONT_TABLES = ("fvar", "gvar", "cvar", "avar", "HVAR", "MVAR", "VVAR")
 
 SUPPORTED_CMAP_FORMATS = (0, 4, 6, 12)
 #: Deterministic subtable preference: Unicode platforms first, then Microsoft
@@ -1336,6 +1346,113 @@ def latin_1_text_code_points() -> CodePointSet:
     return CodePointSet(codes=codes, sha256=digest, source="builtin:latin-1-text")
 
 
+#: The Latin text set's additions over ``latin_1_text_code_points``: the characters the console's
+#: Latin fonts carry that the first set lacked (font/README.md, "Measured differences", #2005).
+#: Cyrillic as in the Windows Glyph List 4 set (U+0401-040C, U+040E-044F, U+0451-045C, U+045E-045F,
+#: U+0490-0491) and U+04C0; Latin and modifier letters; four combining accents; and nine symbols.
+_LATIN_CYRILLIC_ADDITIONS = (
+    tuple(range(0x0401, 0x040D)) + tuple(range(0x040E, 0x0450)) + tuple(range(0x0451, 0x045D))
+    + (0x045E, 0x045F, 0x0490, 0x0491, 0x04C0)
+    + (0x0192, 0x02C6, 0x02DC, 0x0301, 0x0306, 0x0308, 0x0338)
+    + (0x2116, 0x2206, 0x2219, 0x221A, 0x221E, 0x2248, 0x2260, 0x2264, 0x2265)
+)
+#: Punctuation in the first set that no console Latin font carries (its symbol block holds the 17 of
+#: Windows-1252 and the nine above) and that the Latin source fonts do not all draw.
+_LATIN_CYRILLIC_REMOVED = (0x2011, 0x2023, 0x2024, 0x2025, 0x2027)
+
+
+def latin_cyrillic_text_code_points() -> CodePointSet:
+    """Return the project Latin repertoire that matches the console's Latin fonts (#2005).
+
+    It is :func:`latin_1_text_code_points` (ASCII, Latin-1 Supplement, Latin Extended-A and common
+    punctuation) without five punctuation marks the console fonts lack, plus the 111 characters
+    they carry that the first set lacked: 95 Cyrillic letters, ``ƒ ˆ ˜``, four combining accents and
+    nine symbols. That is 454 code points; a canonical digest makes mapping drift a named refusal.
+    """
+    first = set(latin_1_text_code_points().codes)
+    additions = set(_LATIN_CYRILLIC_ADDITIONS)
+    removed = set(_LATIN_CYRILLIC_REMOVED)
+    if len(additions) != 111 or additions & first or not removed <= first:
+        raise _refuse(
+            "latin-mapping-invalid",
+            f"the Latin text additions hold {len(additions)} new code points; expected 111 outside the first set",
+        )
+    codes = tuple(sorted((first - removed) | additions))
+    if len(codes) != 454:
+        raise _refuse(
+            "latin-mapping-invalid",
+            f"the built-in tables produced {len(codes)} unique code points; expected 454",
+        )
+    canonical = "".join(f"U+{code:04X}\n" for code in codes).encode("ascii")
+    digest = hashlib.sha256(canonical).hexdigest()
+    if digest != LATIN_CYRILLIC_CODE_POINTS_SHA256:
+        raise _refuse(
+            "latin-mapping-invalid",
+            f"the built-in code-point mapping SHA-256 is {digest}, expected {LATIN_CYRILLIC_CODE_POINTS_SHA256}",
+        )
+    return CodePointSet(codes=codes, sha256=digest, source="builtin:latin-cyrillic-text")
+
+
+def _cp932_double_byte_codes() -> tuple[int, ...]:
+    """Decode every assigned CP932 double-byte code through Python's standard table.
+
+    The user-defined area (lead bytes 0xF0-0xF9, Unicode Private Use) is left out: it has no
+    standard character, so no font can draw it.
+    """
+    codes: set[int] = set()
+    for lead in (*range(0x81, 0xA0), *range(0xE0, 0xFD)):
+        for trail in (*range(0x40, 0x7F), *range(0x80, 0xFD)):
+            try:
+                character = bytes((lead, trail)).decode("cp932")
+            except UnicodeDecodeError:
+                continue
+            except LookupError as exc:  # pragma: no cover - cp932 is a standard Python codec
+                raise _refuse("japanese-codec-unavailable", "Python's cp932 codec is unavailable") from exc
+            if len(character) != 1:
+                raise _refuse(
+                    "japanese-mapping-invalid",
+                    f"CP932 0x{lead:02X}{trail:02X} maps to {len(character)} Unicode characters",
+                )
+            if not 0xE000 <= ord(character) <= 0xF8FF:
+                codes.add(ord(character))
+    return tuple(sorted(codes))
+
+
+def japanese_text_code_points() -> CodePointSet:
+    """Return the project Japanese repertoire: both JIS kanji levels and CP932 (#2005).
+
+    This is the first set (:func:`jis_x_0208_japanese_code_points`) widened to all of JIS X 0208
+    (rows 1-8 and the 6,355 kanji of levels 1 and 2 in rows 16-84), every character of CP932, the
+    Shift JIS that PSP games write (its NEC and IBM extensions and its own mappings of six JIS
+    cells), and the Latin-1 Supplement U+00A0-00FF that Latin text in Japanese games uses. A
+    canonical digest makes mapping drift a named refusal.
+    """
+    first = set(jis_x_0208_japanese_code_points().codes)
+    level2 = set(_jis_x_0208_rows(range(48, 85)))
+    cp932 = set(_cp932_double_byte_codes())
+    latin1 = set(range(0xA0, 0x100))
+    if len(level2) != 3390 or len(cp932) != 7326:
+        raise _refuse(
+            "japanese-mapping-invalid",
+            f"the built-in tables produced {len(level2)} level-2 kanji and {len(cp932)} CP932 "
+            "double-byte characters; expected 3390 and 7326",
+        )
+    codes = tuple(sorted(first | level2 | cp932 | latin1))
+    if len(codes) != JAPANESE_TEXT_CODE_POINT_COUNT:
+        raise _refuse(
+            "japanese-mapping-invalid",
+            f"the built-in tables produced {len(codes)} unique code points; expected {JAPANESE_TEXT_CODE_POINT_COUNT}",
+        )
+    canonical = "".join(f"U+{code:04X}\n" for code in codes).encode("ascii")
+    digest = hashlib.sha256(canonical).hexdigest()
+    if digest != JAPANESE_TEXT_CODE_POINTS_SHA256:
+        raise _refuse(
+            "japanese-mapping-invalid",
+            f"the built-in code-point mapping SHA-256 is {digest}, expected {JAPANESE_TEXT_CODE_POINTS_SHA256}",
+        )
+    return CodePointSet(codes=codes, sha256=digest, source="builtin:jis-x-0208-cp932-japanese")
+
+
 def _ks_x_1001_rows(rows: tuple[int, ...] | list[int] | range) -> tuple[int, ...]:
     """Decode assigned KS X 1001 cells through Python's standard EUC-KR table."""
     codes: list[int] = []
@@ -1451,23 +1568,50 @@ class _Planner:
     number of glyphs it names.
     """
 
-    def __init__(self, font: _Ttf, codes: list[int] | tuple[int, ...], *, baseline_ellipsis: bool = False) -> None:
+    def __init__(
+        self,
+        font: _Ttf,
+        codes: list[int] | tuple[int, ...],
+        *,
+        baseline_ellipsis: bool = False,
+        fallback: _Ttf | None = None,
+    ) -> None:
         self.font = font
+        self.fallback = fallback
         self.codes = tuple(codes)
         self.outline_shift: dict[int, int] = {}
+        #: Horizontal outline shifts in 26.6 at the conversion's ppem (``--digit-advance`` centring).
+        self.shift_x_26_6: dict[int, int] = {}
         gids: dict[int, int] = {}
+        #: The code points the fallback font draws, ascending; empty without a fallback.
+        self.fallback_codes: tuple[int, ...] = ()
+        from_fallback: list[int] = []
         for code in self.codes:
             gid = font.glyph_id(code)
+            if gid is None and fallback is not None:
+                gid = fallback.glyph_id(code)
+                if gid is not None:
+                    from_fallback.append(code)
             if gid is None:
-                raise _refuse(
-                    "missing-code-point",
-                    f"U+{code:04X} has no glyph in the font's character map",
-                )
+                where = "the font's character map" if fallback is None else "either font's character map"
+                raise _refuse("missing-code-point", f"U+{code:04X} has no glyph in {where}")
             gids[code] = gid
         self.gids = gids
+        self.fallback_codes = tuple(from_fallback)
+        self._fallback_set = frozenset(from_fallback)
         self._rasters: dict[int, dict[int, _Raster]] = {}
         if baseline_ellipsis:
             self.outline_shift[ELLIPSIS_CODE] = self._ellipsis_shift()
+
+    def font_for(self, code: int) -> _Ttf:
+        """The font that draws ``code``: the fallback only where the primary font has no glyph."""
+        if code in self._fallback_set:
+            assert self.fallback is not None
+            return self.fallback
+        return self.font
+
+    def advance_units(self, code: int) -> int:
+        return self.font_for(code).advance_units(self.gids[code])
 
     def _ellipsis_shift(self) -> int:
         """Font units that set the ellipsis on the full stop's line.
@@ -1475,7 +1619,7 @@ class _Planner:
         A Japanese font centres U+2026 on the em, which reads as three raised dots in Latin text.
         """
         stop = self.font.glyph_id(FULL_STOP_CODE)
-        if ELLIPSIS_CODE not in self.gids or stop is None:
+        if ELLIPSIS_CODE not in self.gids or stop is None or ELLIPSIS_CODE in self._fallback_set:
             raise _refuse("baseline-ellipsis-unavailable", "the code set or the font lacks U+2026 or U+002E")
         ellipsis_low = min((y for contour in self.font.outline(self.gids[ELLIPSIS_CODE]) for _x, y, _on in contour),
                            default=None)
@@ -1486,17 +1630,35 @@ class _Planner:
 
     def outline(self, code: int) -> list[list[tuple]]:
         """The code's contours in font units, after any shift this conversion asked for."""
-        contours = self.font.outline(self.gids[code])
+        font = self.font_for(code)
+        contours = font.outline(self.gids[code])
         shift = self.outline_shift.get(code, 0)
         if not shift:
             return contours
         return [[(x, y + shift, on) for x, y, on in contour] for contour in contours]
 
+    def set_shift_x(self, code: int, shift_26_6: int) -> None:
+        """Move ``code``'s outline right by ``shift_26_6`` and drop any raster planned before the move.
+
+        A ppem search (``--metric-targets``) rasterizes every code before the shift is known, so a
+        raster cached then would otherwise be served unshifted at the chosen ppem.
+        """
+        self.shift_x_26_6[code] = shift_26_6
+        for per_size in self._rasters.values():
+            per_size.pop(code, None)
+
     def raster_at(self, code: int, ppem: int) -> _Raster:
         per_size = self._rasters.setdefault(ppem, {})
         cached = per_size.get(code)
         if cached is None:
-            cached = _plan_raster(self.outline(code), ppem, self.font.units_per_em)
+            contours = self.outline(code)
+            upem = self.font_for(code).units_per_em
+            shift = self.shift_x_26_6.get(code, 0)
+            if shift:
+                # A 26.6 shift is exact in font units as a rational: x26 = x * ppem * 64 / upem.
+                offset = Fraction(shift * upem, ppem * 64)
+                contours = [[(x + offset, y, on) for x, y, on in contour] for contour in contours]
+            cached = _plan_raster(contours, ppem, upem)
             per_size[code] = cached
         return cached
 
@@ -1528,9 +1690,10 @@ class _Planner:
             top = 0
             bottom = 0
             seen = False
+            upem = self.font_for(code).units_per_em
             for contour in contours:
                 for _x, y, _on in contour:
-                    y26 = _to26_6(y, ppem, self.font.units_per_em)
+                    y26 = _to26_6(y, ppem, upem)
                     if not seen or y26 > top:
                         top = y26
                     if not seen or y26 < bottom:
@@ -1591,11 +1754,20 @@ def convert(
     header_ascender_26_6: int | None = None,
     header_descender_26_6: int | None = None,
     baseline_ellipsis: bool = False,
+    tracking: int = 0,
+    digit_advance_26_6: int | None = None,
+    fallback_data: bytes | None = None,
+    fallback_path: str | None = None,
+    fallback_pin: SourcePin | None = None,
 ) -> Conversion:
     """Convert one pinned TrueType font into a PGF image plus its manifest.
 
     The code points come either from an inclusive ``codes`` range or from an explicit
-    ``code_points`` set (a sparse set is written as a sparse character map). Every stage
+    ``code_points`` set (a sparse set is written as a sparse character map). ``tracking`` adds that
+    many sub-samples (eighths of a pixel, negative for tighter) to every advance.
+    ``digit_advance_26_6`` gives the digits 0-9 one advance (tabular figures) and centres each
+    digit's outline in the change. ``fallback_data`` is a second pinned font that draws only the
+    code points the first lacks. Every stage
     validates before the next runs; the returned bytes are final. Raises
     :class:`TtfConvertError` naming the refusal on any malformed, unsupported, or
     policy-violating input.
@@ -1629,10 +1801,35 @@ def convert(
                 f"{label} {strength!r} is outside 0..{MAX_EMBOLDEN} sub-samples",
             )
 
+    if isinstance(tracking, bool) or not isinstance(tracking, int) or not MIN_TRACKING <= tracking <= MAX_TRACKING:
+        raise _refuse(
+            "tracking-out-of-range",
+            f"--tracking {tracking!r} is outside {MIN_TRACKING}..{MAX_TRACKING} sub-samples",
+        )
+    if digit_advance_26_6 is not None and (
+        isinstance(digit_advance_26_6, bool) or not isinstance(digit_advance_26_6, int)
+        or not 64 <= digit_advance_26_6 <= pgf_writer.MAX_EDGE * 64
+    ):
+        raise _refuse(
+            "digit-advance-out-of-range",
+            f"--digit-advance {digit_advance_26_6!r} is outside 64..{pgf_writer.MAX_EDGE * 64} (26.6 px)",
+        )
+    if (fallback_data is None) != (fallback_path is None):
+        raise _refuse("conflicting-parameters", "a fallback font needs both its bytes and its path")
+    if fallback_pin is not None and fallback_data is None:
+        raise _refuse("conflicting-parameters", "--fallback-pin needs --fallback")
+    if fallback_data is not None and (pin is None) != (fallback_pin is None):
+        raise _refuse("conflicting-parameters", "pin both fonts or neither: --pin and --fallback-pin go together")
+
     validate_output_name(font_name, pin)
+    if fallback_pin is not None:
+        validate_output_name(font_name, fallback_pin)
 
     font = _Ttf(data)
-    planner = _Planner(font, code_list, baseline_ellipsis=baseline_ellipsis)
+    fallback = _Ttf(fallback_data) if fallback_data is not None else None
+    planner = _Planner(font, code_list, baseline_ellipsis=baseline_ellipsis, fallback=fallback)
+    if fallback is not None and not planner.fallback_codes:
+        raise _refuse("fallback-unused", "the first font draws every code point; drop --fallback")
 
     chosen_targets: dict | None = None
     if metric_targets is not None:
@@ -1647,6 +1844,14 @@ def convert(
             "achieved_descender_26_6": extents[1],
         }
     assert ppem is not None
+
+    if digit_advance_26_6 is not None:
+        if any(code not in planner.gids for code in DIGIT_CODES):
+            raise _refuse("digit-advance-unavailable", "--digit-advance needs the digits 0-9 in the code set")
+        for code in DIGIT_CODES:
+            natural = _to26_6(planner.advance_units(code), ppem, planner.font_for(code).units_per_em)
+            # Half the change on each side, rounded down to whole 26.6 units: deterministic and exact.
+            planner.set_shift_x(code, (digit_advance_26_6 - natural) // 2)
 
     glyphs: list[pgf_writer.Glyph] = []
     zero_area: list[int] = []
@@ -1669,8 +1874,11 @@ def convert(
                 f"U+{code:04X} rasterizes to {raster.width}x{raster.height} at ppem {ppem}; "
                 f"the record field holds at most {pgf_writer.MAX_EDGE}",
             )
-        advance_x = _to26_6(font.advance_units(planner.gids[code]), ppem, font.units_per_em)
-        advance_x += embolden_advance * SUB_PIXEL
+        if digit_advance_26_6 is not None and code in DIGIT_CODES:
+            advance_x = digit_advance_26_6
+        else:
+            advance_x = _to26_6(planner.advance_units(code), ppem, planner.font_for(code).units_per_em)
+        advance_x += (embolden_advance + tracking) * SUB_PIXEL
         if raster.width <= 0 or raster.height <= 0:
             zero_area.append(code)
             glyphs.append(pgf_writer.Glyph(code=code, width=0, height=0, samples=(), advance_x=advance_x))
@@ -1733,6 +1941,12 @@ def convert(
         resolution_26_6=resolution_26_6,
         header_extents=(header_ascender_26_6, header_descender_26_6),
         baseline_ellipsis=baseline_ellipsis,
+        tracking=tracking,
+        digit_advance_26_6=digit_advance_26_6,
+        fallback=None if fallback is None else {
+            "data": fallback_data, "font": fallback, "path": fallback_path, "pin": fallback_pin,
+            "codes": planner.fallback_codes,
+        },
     )
     return Conversion(
         image=image,
@@ -1783,22 +1997,39 @@ def _build_manifest(
     embolden: tuple[int, int, int] = (0, 0, 0),
     header_extents: tuple[int | None, int | None] = (None, None),
     baseline_ellipsis: bool = False,
+    tracking: int = 0,
+    digit_advance_26_6: int | None = None,
+    fallback: dict | None = None,
 ) -> dict:
     first, last = codes
     header = _read_header_fields(image)
-    license_block = None
-    if pin is not None:
-        license_block = {
-            "spdx": pin.spdx,
-            "copyright": pin.copyright,
-            "reserved_font_names": list(pin.reserved_font_names),
-            "license_text_file": pin.license_text_file,
-            "license_text_sha256": pin.license_text_sha256,
-            "license_text": pin.license_text,
-            "source": dict(pin.source),
-            "family": pin.family,
-        }
-    return {
+    license_block = _license_block(pin)
+    parameters: dict[str, object] = {
+        "ppem": ppem,
+        "nominal_em_26_6": nominal_size_26_6,
+        "resolution_26_6": resolution_26_6,
+        "header_ascender_26_6": header_extents[0],
+        "header_descender_26_6": header_extents[1],
+        "baseline_ellipsis": baseline_ellipsis,
+        "supersample": SUPERSAMPLE,
+        "coverage_bits": 4,
+        "rounding": "scale: floor(x * ppem * 64 / upem + 1/2); coverage: floor((n * 15 + 32) / 64)",
+        "hinting": "none",
+        "advance_rounding": "26.6, half-up from font units",
+        "embolden": {
+            "unit": "sub-sample (1/8 pixel)",
+            "x": embolden[0],
+            "y": embolden[1],
+            "advance": embolden[2],
+        },
+    }
+    # Keys added in converter 0.4.0 appear only when used, so a conversion that uses none of them
+    # has the keys it had before.
+    if tracking:
+        parameters["tracking_sub_samples"] = tracking
+    if digit_advance_26_6 is not None:
+        parameters["digit_advance_26_6"] = digit_advance_26_6
+    manifest = {
         "converter": {
             "name": CONVERTER_NAME,
             "version": CONVERTER_VERSION,
@@ -1843,25 +2074,37 @@ def _build_manifest(
             "font_type": font_type,
             **header,
         },
-        "parameters": {
-            "ppem": ppem,
-            "nominal_em_26_6": nominal_size_26_6,
-            "resolution_26_6": resolution_26_6,
-            "header_ascender_26_6": header_extents[0],
-            "header_descender_26_6": header_extents[1],
-            "baseline_ellipsis": baseline_ellipsis,
-            "supersample": SUPERSAMPLE,
-            "coverage_bits": 4,
-            "rounding": "scale: floor(x * ppem * 64 / upem + 1/2); coverage: floor((n * 15 + 32) / 64)",
-            "hinting": "none",
-            "advance_rounding": "26.6, half-up from font units",
-            "embolden": {
-                "unit": "sub-sample (1/8 pixel)",
-                "x": embolden[0],
-                "y": embolden[1],
-                "advance": embolden[2],
+        "parameters": parameters,
+    }
+    if fallback is not None:
+        fallback_font = fallback["font"]
+        manifest["fallback"] = {
+            "input": {
+                "path": _leaf_name(fallback["path"]),
+                "sha256": hashlib.sha256(fallback["data"]).hexdigest(),
+                "size_bytes": len(fallback["data"]),
+                "units_per_em": fallback_font.units_per_em,
+                "num_glyphs": fallback_font.num_glyphs,
+                "outline_format": "glyf",
             },
-        },
+            "license": _license_block(fallback["pin"]),
+            "codes": list(fallback["codes"]),
+        }
+    return manifest
+
+
+def _license_block(pin: SourcePin | None) -> dict | None:
+    if pin is None:
+        return None
+    return {
+        "spdx": pin.spdx,
+        "copyright": pin.copyright,
+        "reserved_font_names": list(pin.reserved_font_names),
+        "license_text_file": pin.license_text_file,
+        "license_text_sha256": pin.license_text_sha256,
+        "license_text": pin.license_text,
+        "source": dict(pin.source),
+        "family": pin.family,
     }
 
 
@@ -1910,6 +2153,16 @@ def _main(argv: list[str]) -> int:
         help="use Latin-1 text set (ASCII, Latin-1 Supplement, Latin Extended-A, common symbols; sparse output)",
     )
     source.add_argument(
+        "--latin-cyrillic-text",
+        action="store_true",
+        help="use the Latin text set widened to the console Latin fonts' characters (Cyrillic, symbols; sparse)",
+    )
+    source.add_argument(
+        "--japanese-text",
+        action="store_true",
+        help="use JIS X 0201, all of JIS X 0208 (both kanji levels), CP932 and Latin-1 (sparse output)",
+    )
+    source.add_argument(
         "--ks-x-1001-korean",
         action="store_true",
         help="use ASCII, KS X 1001 Korean text rows 1-4/6-9, and modern Hangul syllables (sparse output)",
@@ -1937,6 +2190,19 @@ def _main(argv: list[str]) -> int:
         default=0,
         help=f"add N/8 px to every advance to make room for bolder strokes (0..{MAX_EMBOLDEN}, default 0)",
     )
+    parser.add_argument(
+        "--tracking",
+        type=int,
+        default=0,
+        help=f"add N/8 px to every advance ({MIN_TRACKING}..{MAX_TRACKING}, default 0)",
+    )
+    parser.add_argument(
+        "--digit-advance",
+        type=int,
+        help="give the digits 0-9 this advance in 26.6 px, each centred in it (tabular figures)",
+    )
+    parser.add_argument("--fallback", type=Path, help="second .ttf drawing only the code points the input lacks")
+    parser.add_argument("--fallback-pin", type=Path, help="font-pin/v1 JSON for --fallback")
     parser.add_argument(
         "--nominal-size",
         type=int,
@@ -1967,6 +2233,10 @@ def _main(argv: list[str]) -> int:
             code_points = jis_x_0208_japanese_code_points()
         elif args.latin_1_text:
             code_points = latin_1_text_code_points()
+        elif args.latin_cyrillic_text:
+            code_points = latin_cyrillic_text_code_points()
+        elif args.japanese_text:
+            code_points = japanese_text_code_points()
         elif args.ks_x_1001_korean:
             code_points = ks_x_1001_korean_code_points()
         else:
@@ -1974,6 +2244,13 @@ def _main(argv: list[str]) -> int:
         codes = None if code_points is not None else parse_code_range(args.codes or DEFAULT_CODES)
         data = args.input.read_bytes()
         pin = load_pin(args.pin, data) if args.pin is not None else None
+        fallback_data = args.fallback.read_bytes() if args.fallback is not None else None
+        fallback_pin = (
+            load_pin(args.fallback_pin, fallback_data)
+            if args.fallback_pin is not None and fallback_data is not None else None
+        )
+        if args.fallback_pin is not None and fallback_data is None:
+            raise _refuse("conflicting-parameters", "--fallback-pin needs --fallback")
         targets = load_metric_targets(args.metric_targets) if args.metric_targets is not None else None
         conversion = convert(
             data,
@@ -1994,6 +2271,11 @@ def _main(argv: list[str]) -> int:
             header_ascender_26_6=args.header_ascender,
             header_descender_26_6=args.header_descender,
             baseline_ellipsis=args.baseline_ellipsis,
+            tracking=args.tracking,
+            digit_advance_26_6=args.digit_advance,
+            fallback_data=fallback_data,
+            fallback_path=None if args.fallback is None else str(args.fallback),
+            fallback_pin=fallback_pin,
         )
         manifest = manifest_bytes(conversion.manifest)
     except TtfConvertError as exc:

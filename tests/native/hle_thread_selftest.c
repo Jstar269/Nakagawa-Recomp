@@ -53,6 +53,7 @@ instrumentation is this test's protection against the historical RAM runaway."
 
 #include "ge_shared.h"
 #include "gpu_sdl3vk/ge_gpu.h"   /* GeGpuFbDescriptor: header-only, no Vulkan */
+#include "sce_kernel_errors.h"
 #include "sched.c" /* white-box fixture setup and observable TCB state */
 #include "flight_recorder.h"
 #include "fbcap.h"            /* capture API this harness stubs (stub presenter) */
@@ -306,7 +307,6 @@ static uint32_t vblank_delivered(uint32_t no, uint32_t *arg) {
 #define NID_SCE_KERNEL_SEND_MSG_PIPE_CB 0x7c41f2c2u
 #define NID_SCE_KERNEL_RECEIVE_MSG_PIPE 0x74829b76u
 #define NID_SCE_KERNEL_RECEIVE_MSG_PIPE_CB 0xfbfa697du
-#define SCE_KERNEL_ERROR_ILLEGAL_ADDR 0x80000103u
 #define NID_SCE_KERNEL_GET_SYSTEM_TIME_LOW 0x369ed59du
 #define NID_SCE_KERNEL_GET_SYSTEM_TIME_WIDE 0x82bc5777u
 #define NID_SCE_KERNEL_GET_SYSTEM_TIME 0xdb738f35u
@@ -380,6 +380,7 @@ static uint32_t vblank_delivered(uint32_t no, uint32_t *arg) {
 #define NID_SCE_AUDIO_OUTPUT2_RESERVE 0x01562ba3u
 #define NID_SCE_AUDIO_OUTPUT2_RELEASE 0x43196845u
 #define NID_SCE_AUDIO_OUTPUT2_REST_SAMPLE 0x647cef33u
+#define NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING 0x2d53f36eu
 #define NID_SCE_AUDIO_SRC_CH_RESERVE 0x38553111u
 #define NID_SCE_AUDIO_SRC_CH_RELEASE 0x5c37c0aeu
 #define NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING 0xe0727056u
@@ -413,10 +414,6 @@ extern void sr_hle_test_reset_rtc_epoch(void);
 #define NID_SCE_POWER_GET_BUS_INT 0x478fe6f5u
 #define NID_SCE_KERNEL_SUSPEND_DISPATCH_THREAD 0x3ad58b8cu
 #define NID_SCE_KERNEL_RESUME_DISPATCH_THREAD  0x27e22ec2u
-#define SCE_KERNEL_ERROR_MPP_FULL     0x800201b3u
-#define SCE_KERNEL_ERROR_MPP_EMPTY    0x800201b4u
-#define SCE_KERNEL_ERROR_ILLEGAL_SIZE 0x800201bcu
-#define SCE_KERNEL_ERROR_UNKNOWN_MPPID 0x8002019eu
 #define NID_SCE_ATRAC_RELEASE_ID 0x61eb33f5u
 #define NID_SCE_ATRAC_SET_DATA 0x0e2a73abu
 #define NID_SCE_ATRAC_SET_DATA_AND_GET_ID 0x7a20e7afu
@@ -451,10 +448,6 @@ extern void sr_hle_test_reset_rtc_epoch(void);
 #define SCE_ERROR_MODULE_ALREADY_LOADED 0x80111102u
 #define SCE_ERROR_MODULE_NOT_LOADED 0x80111103u
 #define SCE_KERNEL_ERROR_NOT_IMPLEMENTED 0x80020002u
-#define SCE_KERNEL_ERROR_ALREADY_STARTED 0x80020133u
-#define SCE_KERNEL_ERROR_NOT_STARTED 0x80020134u
-#define SCE_KERNEL_ERROR_ALREADY_STOPPED 0x80020135u
-#define SCE_KERNEL_ERROR_CAN_NOT_STOP 0x80020136u
 #define SCE_ERROR_AV_MODULE_BAD_ID 0x80110f01u
 #define SCE_ERROR_AV_MODULE_ALREADY_LOADED 0x80110f02u
 #define SCE_ERROR_AV_MODULE_NOT_LOADED 0x80110f03u
@@ -515,6 +508,7 @@ static unsigned long s_audio_queue_calls;
 static int s_audio_push_frames;
 static int16_t s_audio_push_first_l, s_audio_push_first_r;
 static int16_t s_audio_push_last_l, s_audio_push_last_r;
+static int s_audio_push_vol_l, s_audio_push_vol_r;
 static int16_t s_audio_push_capture[8192u * 2u];
 static size_t s_audio_push_capture_frames;
 static int s_audio_queue_result;
@@ -532,9 +526,11 @@ static int s_cap_pending;      /* armed and not yet resolved by the present path
 static int s_cap_arm_accept = 1;
 
 void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
-    (void)ch; (void)volL; (void)volR;
+    (void)ch;
     s_audio_push_calls++;
     s_audio_push_frames = nframes;
+    s_audio_push_vol_l = volL;
+    s_audio_push_vol_r = volR;
     if (lr && nframes > 0) {
         s_audio_push_first_l = lr[0];
         s_audio_push_first_r = lr[1];
@@ -567,6 +563,8 @@ static void audio_fixture_reset(void) {
     s_audio_push_first_r = 0;
     s_audio_push_last_l = 0;
     s_audio_push_last_r = 0;
+    s_audio_push_vol_l = 0;
+    s_audio_push_vol_r = 0;
     s_audio_push_capture_frames = 0;
     s_audio_queue_result = 0;
     s_audio_queue_seq_len = 0;
@@ -598,6 +596,7 @@ void gui_analog(uint8_t *lx, uint8_t *ly) {
     if (ly) *ly = 128;
 }
 int gui_pad_present(void) { return 0; }
+void gui_ace_vblank(uint32_t vcount) { (void)vcount; }
 int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     s_test_gui_present_calls++;
     s_test_gui_last_addr = fbaddr;
@@ -665,6 +664,26 @@ unsigned long g_mpeg_put;
 unsigned long g_mpeg_getavc;
 unsigned long g_mpeg_avcdec;
 unsigned long g_mpeg_nodata;
+/* mpeg.c is not linked here. The sceMpeg handlers the interrupt-context check
+ * registers (test_mpeg_create_refused_in_interrupt) reach these spies, which
+ * record only whether a context was asked for and how many are live. */
+static unsigned s_mpi_create_calls, s_mpi_live;
+uint32_t mpeg_init(void) { return 0; }
+uint32_t mpeg_finish(void) { s_mpi_live = 0; return 0; }
+uint32_t mpeg_create(uint32_t mpegAddr, uint32_t dataPtr, uint32_t size, uint32_t ringAddr,
+                     uint32_t frameWidth, uint32_t mode, uint32_t ddrTop) {
+    (void)mpegAddr; (void)dataPtr; (void)size; (void)ringAddr;
+    (void)frameWidth; (void)mode; (void)ddrTop;
+    s_mpi_create_calls++;
+    s_mpi_live++;
+    return 0;
+}
+uint32_t mpeg_delete(uint32_t mpegAddr) {
+    (void)mpegAddr;
+    if (!s_mpi_live) return 0xffffffffu;
+    s_mpi_live--;
+    return 0;
+}
 int sr_perf_enabled;
 /* Non-zero, and never repeating: every `sr_perf_now_ns()` caller uses the value only as
  * a "the counters are live" predicate before handing it to a stub, so a constant 0 would
@@ -682,6 +701,13 @@ void sr_perf_vblank_coalesced(void) {}
 void sr_perf_vblank_service(uint32_t delivered) { (void)delivered; }
 void sr_perf_phase_report(int force) { (void)force; }
 void sr_perf_shutdown(void) {}
+/* A spy, not the mechanism: perf.c owns the real end-of-process list (profiler-selftest runs
+ * it). This keeps what was registered so a test can count it and call it. */
+void (*g_end_reports[8])(void);
+unsigned g_end_report_count;
+void sr_at_process_end(void (*report)(void)) {
+    if (g_end_report_count < 8u) g_end_reports[g_end_report_count++] = report;
+}
 /* Execution-share counters (perf.c owns the real ones; only the symbols are needed here). */
 int sr_exec_tier;
 uint64_t sr_exec_interp_instructions;
@@ -889,6 +915,14 @@ int sr_aot_return_boundary_scope_end(CpuState *s,
 }
 int sr_aot_return_boundary_capture_resume(CpuState *s, uint32_t target) {
     (void)s; (void)target;
+    return 0;
+}
+int sr_aot_return_boundary_encloses_resume(CpuState *s, uint32_t target, uint32_t sp) {
+    (void)s; (void)target; (void)sp;
+    return 0;
+}
+int sr_aot_return_boundary_capture_return(CpuState *s, uint32_t target, const uint32_t *resume_pc) {
+    (void)s; (void)target; (void)resume_pc;
     return 0;
 }
 /* recomp.c's null-code-pointer stops (#1375). Not linked here; a stand-in that ends the run
@@ -1171,6 +1205,26 @@ static void test_title_config_hle_bindings(void) {
     expect(sr_hle_test_display_set_mode(&cpu) == 0u,
            "DisplaySetMode keeps its PSP success result");
     s_title_hle_probe = 0;
+    /* PSPAutotests tests/display/setmode.expected (recorded on a PSP): only mode 0 at 480x272 is
+     * accepted; the mode check wins over the size check. */
+    {
+        static const struct { uint32_t mode, w, h, want; } cells[] = {
+            {0u, 0u, 0u, 0x80000104u},          {0u, 512u, 272u, 0x80000104u},
+            {0u, 960u, 544u, 0x80000104u},      {0u, 240u, 136u, 0x80000104u},
+            {0xffffffffu, 480u, 272u, 0x80000107u}, {1u, 480u, 272u, 0x80000107u},
+            {2u, 480u, 272u, 0x80000107u},      {1u, 720u, 480u, 0x80000107u},
+            {1u, 720u, 503u, 0x80000107u},      {0u, 480u, 272u, 0u},
+        };
+        for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
+            CpuState mode_cpu;
+            memset(&mode_cpu, 0, sizeof(mode_cpu));
+            mode_cpu.r[4] = cells[i].mode;
+            mode_cpu.r[5] = cells[i].w;
+            mode_cpu.r[6] = cells[i].h;
+            expect(sr_hle_test_display_set_mode(&mode_cpu) == cells[i].want,
+                   "DisplaySetMode returns the PSP-recorded result for each setmode cell");
+        }
+    }
     expect(s_title_hle_guest_calls == 0u,
            "DisplaySetMode dispatches no guest body for any title configuration");
 
@@ -3320,6 +3374,24 @@ static void test_io_enhancement_data_file(void) {
     cpu.r[4] = fd;
     (void)sr_hle_test_io_close(&cpu);
 
+    /* A title that reads a registered file some other way (raw UMD sectors, its own archive
+     * reader) never opens its path, so the end-of-process report names it. hle_data.c adds that
+     * report to the end-of-process list once per process, however many files register and
+     * however often a test resets the file list; the spy above recorded it. */
+    static const uint8_t unused[] = "c,4\n";
+    expect(sr_enhancement_file_register("NKENH/Unused.csv", digest, unused,
+                                        (uint32_t)(sizeof(unused) - 1u)) == 1,
+           "enhancement data file: a second disc path registers");
+    expect(g_end_report_count == 1u && g_end_reports[0] != NULL,
+           "enhancement data file: several files register the end-of-process report exactly once");
+    rt_capture_begin();
+    if (g_end_report_count >= 1u) g_end_reports[0]();
+    const char *report = rt_capture_end();
+    expect(strstr(report, "ENHANCEMENT_DATA_NOT_SERVED: nkenh/unused.csv was never opened by path") != NULL &&
+           strstr(report, "nkenh/timing.csv was never") == NULL &&
+           strstr(report, "ENHANCEMENT_DATA_REPORT: served=1/2") != NULL,
+           "enhancement data file: the end-of-process report names a file that was never served");
+
     sr_hle_test_enhancement_files_reset();
     expect(sr_enhancement_file_register("NKENH/TIMING.CSV", wrong, rewritten,
                                         (uint32_t)(sizeof(rewritten) - 1u)) == 1,
@@ -3333,6 +3405,8 @@ static void test_io_enhancement_data_file(void) {
     cpu.r[4] = fd;
     (void)sr_hle_test_io_close(&cpu);
     sr_hle_test_enhancement_files_reset();
+    expect(g_end_report_count == 1u,
+           "enhancement data file: registering again after a reset adds no second report");
     for (size_t i = 0; i < 2u; i++) {
         fd_host_path(host, sizeof(host), names[i]);
         nk_remove_utf8(host);
@@ -3814,6 +3888,215 @@ static void test_io_async_and_path_imports(void) {
     cpu.r[4] = PATH_ADDR;
     expect(sr_hle_test_io_sync(&cpu) == IO_ERROR_FUNCTION_NOT_SUPPORTED,
            "sceIoSync names unsupported device semantics with a real error");
+}
+
+/* sceIoAssign / sceIoUnassign through the production syscall path. WipEout Pure's Memory
+ * Stick insert handler assigns "fatms0:" to "msstor0p1:" through "fatms0:" read/write, and
+ * its eject handler unassigns it; before these handlers both NIDs were unregistered and the
+ * run stopped at boot. Arguments 5 and 6 (the mount argument buffer and its size) arrive in
+ * t0 and t1 (MIPS EABI): the stack slots hold a kernel-bit poison value, so a handler that
+ * read them from the stack would answer ILLEGAL_ADDR where these cells expect success. */
+static uint32_t io_assign_call(uint32_t dev, uint32_t block, uint32_t fs, uint32_t mode,
+                               uint32_t arg, uint32_t arg_size) {
+    enum { STACK_ADDR = 0x09016000u };
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[29] = STACK_ADDR;
+    MEM_W32(STACK_ADDR, 0x80000000u);
+    MEM_W32(STACK_ADDR + 4u, 0x80000000u);
+    cpu.r[4] = dev;
+    cpu.r[5] = block;
+    cpu.r[6] = fs;
+    cpu.r[7] = mode;
+    cpu.r[8] = arg;
+    cpu.r[9] = arg_size;
+    return sr_syscall(&cpu, 0xb2a628c1u);
+}
+
+static uint32_t io_unassign_call(uint32_t dev) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = dev;
+    return sr_syscall(&cpu, 0x6d08a871u);
+}
+
+/* One sceIo call on a guest path through sr_syscall: open (with flags), getstat, mkdir or
+ * remove. Returns the syscall's result; an open that succeeds is closed again. */
+static uint32_t io_assign_path_call(uint32_t nid, uint32_t path_addr, const char *guest,
+                                    uint32_t flags) {
+    enum { STAT_ADDR = 0x09015200u };
+    CpuState cpu;
+    fd_guest_copy(path_addr, guest, strlen(guest) + 1u);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = path_addr;
+    if (nid == 0x109f50bcu) {          /* sceIoOpen */
+        cpu.r[5] = flags;
+        cpu.r[6] = 0777u;
+    } else if (nid == 0xace946e8u) {   /* sceIoGetstat */
+        cpu.r[5] = STAT_ADDR;
+    } else if (nid == 0x06a70004u) {   /* sceIoMkdir */
+        cpu.r[5] = 0777u;
+    }
+    uint32_t rc = sr_syscall(&cpu, nid);
+    if (nid == 0x109f50bcu && rc >= 3u && rc < 64u) {
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = rc;
+        (void)sr_syscall(&cpu, 0x810c4bc3u);   /* sceIoClose */
+    }
+    return rc;
+}
+
+static void test_io_assign_through_syscall(void) {
+    enum {
+        ALIAS_ADDR = 0x09015000u,
+        BLOCK_ADDR = 0x09015040u,
+        FS_ADDR = 0x09015080u,
+        OTHER_ADDR = 0x090150c0u,
+        PATH_ADDR = 0x09015100u,
+        STAT_ADDR = 0x09015200u,
+        ARG_ADDR = 0x09015300u,
+        NO_SUCH_DEVICE = 0x80020321u,
+        ALIAS_USED = 0x80020326u,
+        ILLEGAL_ADDR = 0x800200d3u,
+        UNSUPPORTED = 0x80010086u,
+        RDWR = 0u,
+        RDONLY = 1u,
+    };
+    static const char probe_guest[] = "fatms0:/NAKAGAWA_IO_ASSIGN.TXT";
+    static const char probe_ms0[] = "ms0:/NAKAGAWA_IO_ASSIGN.TXT";
+    sr_hle_test_register_iofilemgr();   /* the production IoFileMgr registration run */
+    bool registered = sr_hle_test_is_registered(0xb2a628c1u) &&
+                      sr_hle_test_is_registered(0x6d08a871u);
+    expect(registered, "sceIoAssign and sceIoUnassign are registered IoFileMgr imports");
+    if (!registered) return;   /* an unregistered NID ends the run as an import miss */
+
+    fd_guest_copy(ALIAS_ADDR, "fatms0:", sizeof("fatms0:"));
+    fd_guest_copy(BLOCK_ADDR, "msstor0p1:", sizeof("msstor0p1:"));
+    fd_guest_copy(FS_ADDR, "fatms0:", sizeof("fatms0:"));
+    expect(io_assign_call(ALIAS_ADDR, BLOCK_ADDR, FS_ADDR, RDWR, 0u, 0u) == 0u,
+           "sceIoAssign honours fatms0: on msstor0p1: through fatms0: read/write");
+    expect(io_assign_call(ALIAS_ADDR, BLOCK_ADDR, FS_ADDR, RDWR, 0u, 0u) == ALIAS_USED,
+           "a second assign of the same alias name is ALIAS_USED");
+    fd_guest_copy(OTHER_ADDR, " FATMS0:", sizeof(" FATMS0:"));
+    expect(io_assign_call(OTHER_ADDR, BLOCK_ADDR, FS_ADDR, RDWR, 0u, 0u) == ALIAS_USED,
+           "alias names compare case-insensitively after leading spaces");
+
+    /* The alias names the VFS Memory Stick: a file created through fatms0: is the ms0: file. */
+    char host[256];
+    fd_host_path(host, sizeof(host), probe_ms0);
+    nk_remove_utf8(host);
+    CpuState cpu;
+    fd_guest_copy(PATH_ADDR, probe_guest, sizeof(probe_guest));
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = PATH_ADDR;
+    cpu.r[5] = 0x00000602u;   /* PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC */
+    cpu.r[6] = 0777u;
+    uint32_t fd = sr_syscall(&cpu, 0x109f50bcu);   /* sceIoOpen */
+    expect(fd >= 3u && fd < 64u, "a file opens through the assigned fatms0: alias");
+    if (fd >= 3u && fd < 64u) {
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = fd;
+        expect(sr_syscall(&cpu, 0x810c4bc3u) == 0u, "the fatms0: probe closes");   /* sceIoClose */
+        fd_guest_copy(PATH_ADDR, probe_ms0, sizeof(probe_ms0));
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = PATH_ADDR;
+        cpu.r[5] = STAT_ADDR;
+        expect(sr_syscall(&cpu, 0xace946e8u) == 0u,   /* sceIoGetstat */
+               "the file created through fatms0: is the ms0: file");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = PATH_ADDR;
+        expect(sr_syscall(&cpu, 0xf27a9c51u) == 0u, "the probe file is removed");   /* sceIoRemove */
+    }
+
+    /* The aliases the runtime serves from boot are in the table. */
+    fd_guest_copy(OTHER_ADDR, "ms0:", sizeof("ms0:"));
+    expect(io_assign_call(OTHER_ADDR, BLOCK_ADDR, FS_ADDR, RDWR, 0u, 0u) == ALIAS_USED,
+           "ms0 is assigned from boot");
+    fd_guest_copy(OTHER_ADDR, "disc0:", sizeof("disc0:"));
+    fd_guest_copy(BLOCK_ADDR, "umd0:", sizeof("umd0:"));
+    fd_guest_copy(FS_ADDR, "isofs0:", sizeof("isofs0:"));
+    expect(io_assign_call(OTHER_ADDR, BLOCK_ADDR, FS_ADDR, RDONLY, 0u, 0u) == ALIAS_USED,
+           "disc0 is assigned from boot");
+    fd_guest_copy(BLOCK_ADDR, "msstor0p1:", sizeof("msstor0p1:"));
+    fd_guest_copy(FS_ADDR, "fatms0:", sizeof("fatms0:"));
+
+    /* uofw's argument checks. */
+    expect(io_assign_call(0u, BLOCK_ADDR, FS_ADDR, RDWR, 0u, 0u) == NO_SUCH_DEVICE,
+           "a NULL alias is NO_SUCH_DEVICE");
+    fd_guest_copy(OTHER_ADDR, "msnew0:", sizeof("msnew0:"));
+    expect(io_assign_call(OTHER_ADDR, 0u, FS_ADDR, RDWR, 0u, 0u) == NO_SUCH_DEVICE,
+           "a filesystem without a block device is NO_SUCH_DEVICE");
+    expect(io_assign_call(OTHER_ADDR, 0x88000000u, FS_ADDR, RDWR, 0u, 0u) == ILLEGAL_ADDR,
+           "a kernel-space device pointer is ILLEGAL_ADDR");
+    expect(io_assign_call(OTHER_ADDR, BLOCK_ADDR, FS_ADDR, RDWR, ARG_ADDR, 0x80000000u) ==
+               ILLEGAL_ADDR,
+           "the argument size in t1 is checked (a negative size is ILLEGAL_ADDR)");
+    fd_guest_copy(OTHER_ADDR, "nocolon", sizeof("nocolon"));
+    expect(io_assign_call(OTHER_ADDR, BLOCK_ADDR, FS_ADDR, RDWR, 0u, 0u) == NO_SUCH_DEVICE,
+           "an alias without ':' is NO_SUCH_DEVICE");
+
+    /* Assigns the VFS cannot honour stop at the named boundary, never success. */
+    fd_guest_copy(OTHER_ADDR, "msnew0:", sizeof("msnew0:"));
+    expect(io_assign_call(OTHER_ADDR, BLOCK_ADDR, FS_ADDR, RDWR, 0u, 0u) == UNSUPPORTED,
+           "a new alias name the VFS does not serve is refused at the boundary");
+    expect(io_unassign_call(ALIAS_ADDR) == 0u, "sceIoUnassign removes the game-made fatms0 alias");
+
+    /* The unassign unmounts fatms0: (uofw sceIoUnassign calls the driver's df_umount), so a
+     * path on it no longer reaches the Memory Stick: NO_SUCH_DEVICE, also through the
+     * handlers that answer one fixed code for other unusable paths. */
+    enum { OPEN = 0x109f50bcu, GETSTAT = 0xace946e8u, MKDIR = 0x06a70004u, REMOVE = 0xf27a9c51u,
+           CREATE = 0x00000602u /* PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC */ };
+    static const char probe_dir[] = "fatms0:/NAKAGAWA_IO_ASSIGN_DIR";
+    expect(io_assign_path_call(OPEN, PATH_ADDR, probe_guest, CREATE) == NO_SUCH_DEVICE,
+           "after the unassign, sceIoOpen on fatms0: is NO_SUCH_DEVICE");
+    expect(io_assign_path_call(GETSTAT, PATH_ADDR, probe_guest, 0u) == NO_SUCH_DEVICE,
+           "after the unassign, sceIoGetstat on fatms0: is NO_SUCH_DEVICE");
+    expect(io_assign_path_call(MKDIR, PATH_ADDR, probe_dir, 0u) == NO_SUCH_DEVICE,
+           "after the unassign, sceIoMkdir on fatms0: is NO_SUCH_DEVICE");
+    {
+        CpuState dev_cpu;
+        fd_guest_copy(OTHER_ADDR, "fatms0:", sizeof("fatms0:"));
+        memset(&dev_cpu, 0, sizeof(dev_cpu));
+        dev_cpu.r[4] = OTHER_ADDR;
+        dev_cpu.r[5] = 0x02425818u;   /* a Memory Stick devctl command */
+        expect(sr_syscall(&dev_cpu, 0x54f5fb11u) == NO_SUCH_DEVICE,   /* sceIoDevctl */
+               "after the unassign, sceIoDevctl on fatms0: is NO_SUCH_DEVICE");
+    }
+    expect(io_assign_path_call(GETSTAT, PATH_ADDR, probe_ms0, 0u) != 0u,
+           "the refused open created nothing on the Memory Stick");
+    /* ms0 keeps serving the Memory Stick: the runtime's choice, since whether the PSP's
+     * unmount takes the unit ms0 shares with it is not measured. */
+    expect(io_assign_path_call(OPEN, PATH_ADDR, probe_ms0, CREATE) < 64u,
+           "ms0: still opens after fatms0 is unassigned");
+    expect(io_assign_path_call(REMOVE, PATH_ADDR, probe_ms0, 0u) == 0u,
+           "and the ms0: probe is removed");
+    fd_guest_copy(OTHER_ADDR, "msnew0:", sizeof("msnew0:"));
+    expect(io_assign_call(ALIAS_ADDR, BLOCK_ADDR, FS_ADDR, RDWR, ARG_ADDR, 4u) == UNSUPPORTED,
+           "a mount argument buffer in t0 is refused at the boundary (not modelled)");
+    expect(io_assign_call(ALIAS_ADDR, BLOCK_ADDR, FS_ADDR, RDONLY, 0u, 0u) == UNSUPPORTED,
+           "a read-only Memory Stick mount is refused: the VFS serves it read/write");
+
+    /* sceIoUnassign. */
+    expect(io_unassign_call(ALIAS_ADDR) == NO_SUCH_DEVICE,
+           "unassigning an alias that is not assigned is NO_SUCH_DEVICE");
+    expect(io_unassign_call(0u) == NO_SUCH_DEVICE, "sceIoUnassign(NULL) is NO_SUCH_DEVICE");
+    expect(io_unassign_call(0x88000000u) == ILLEGAL_ADDR,
+           "sceIoUnassign of a kernel-space pointer is ILLEGAL_ADDR");
+    fd_guest_copy(OTHER_ADDR, "ms0:", sizeof("ms0:"));
+    expect(io_unassign_call(OTHER_ADDR) == UNSUPPORTED,
+           "unassigning ms0, which the VFS keeps serving, is refused at the boundary");
+    expect(io_assign_call(ALIAS_ADDR, BLOCK_ADDR, FS_ADDR, RDWR, 0u, 0u) == 0u,
+           "fatms0 assigns again after its unassign (the insert-eject-insert sequence)");
+    expect(io_assign_path_call(OPEN, PATH_ADDR, probe_guest, CREATE) < 64u,
+           "fatms0: opens again once it is assigned again");
+    expect(io_assign_path_call(REMOVE, PATH_ADDR, probe_guest, 0u) == 0u,
+           "and the fatms0: probe is removed");
+    expect(io_unassign_call(ALIAS_ADDR) == 0u, "and unassigns again");
+    expect(io_assign_path_call(GETSTAT, PATH_ADDR, probe_guest, 0u) == NO_SUCH_DEVICE,
+           "the second unassign unmounts fatms0: again");
+    /* Leave fatms0: usable for the tests that follow, as it is from boot. */
+    expect(io_assign_call(ALIAS_ADDR, BLOCK_ADDR, FS_ADDR, RDWR, 0u, 0u) == 0u,
+           "fatms0 assigns a third time");
 }
 
 static void test_fd_namespace(void) {
@@ -4507,6 +4790,7 @@ static void test_fd_namespace(void) {
            "the descriptor reused after async close closes cleanly");
 
     test_io_async_and_path_imports();
+    test_io_assign_through_syscall();
     test_io_open_async_notifies_later_callback();
     test_io_enhancement_data_file();
     test_state_sampler_rows();
@@ -4725,8 +5009,10 @@ static int umd_test_sectors_match(uint32_t dst, uint32_t sector, uint32_t count)
  * return sector positions and SEEK_END is relative to the last sector; reads take and return
  * sector counts and advance the position by them; a position below zero or past the last
  * sector is refused with 0x8001b003 and leaves the position unchanged; a zero count is refused
- * with 0x80010016. Uncaptured cases stay visible: a read crossing the last sector stops at the
- * raw-device boundary, and so does every data operation while no disc image is open. */
+ * with 0x80010016. At the end (PSP-IO-EOF-002, measured): a read from the last sector that asks
+ * for two returns 1 and copies one sector, the position is then one past the last sector, a
+ * SEEK_CUR 0 there is refused, and a read there answers 0x80210002. Every data operation while
+ * no disc image is open stays at the raw-device boundary. */
 static void test_umd_block_device_sectors(uint32_t fd, uint32_t data_addr) {
     uint32_t high = 0;
     expect(umd_test_seek64(fd, 0, 0u, &high) == 0u && high == 0u, "UMD SEEK_SET 0 is sector 0");
@@ -4776,16 +5062,26 @@ static void test_umd_block_device_sectors(uint32_t fd, uint32_t data_addr) {
                umd_test_seek32(fd, 0, 1u) == 16u,
            "a zero-count UMD read is refused with 0x80010016 and keeps the position");
 
-    /* A read crossing the last sector is not captured: it stops at the boundary and changes
-     * neither guest memory nor the position. */
-    MEM_W32(data_addr, 0xaabbccddu);
+    /* A read crossing the last sector returns the one sector left and copies only it. */
+    MEM_W32(data_addr + 2048u, 0xaabbccddu);
     expect(umd_test_seek32(fd, (int32_t)UMD_SYNTHETIC_SECTORS - 1, 0u) ==
                UMD_SYNTHETIC_SECTORS - 1u &&
-               umd_test_read(fd, data_addr, 2u) == 0x80010086u &&
-               MEM_R32(data_addr) == 0xaabbccddu &&
-               umd_test_seek32(fd, 0, 1u) == UMD_SYNTHETIC_SECTORS - 1u,
-           "a UMD read across the last sector stops at the raw-device boundary");
-    expect(umd_test_read(fd, data_addr, 1u) == 1u &&
+               umd_test_read(fd, data_addr, 2u) == 1u &&
+               umd_test_sectors_match(data_addr, UMD_SYNTHETIC_SECTORS - 1u, 1u) &&
+               MEM_R32(data_addr + 2048u) == 0xaabbccddu,
+           "a UMD read across the last sector returns 1 and copies only the last sector");
+    /* The position is now one past the last sector: SEEK_CUR 0 is refused there, and a read
+     * answers 0x80210002 without touching guest memory. */
+    MEM_W32(data_addr, 0x11223344u);
+    expect(umd_test_seek64(fd, 0, 1u, &high) == 0x8001b003u && high == 0xffffffffu &&
+               umd_test_read(fd, data_addr, 1u) == 0x80210002u &&
+               MEM_R32(data_addr) == 0x11223344u,
+           "after the last sector a UMD SEEK_CUR 0 is refused and a read answers 0x80210002");
+    expect(umd_test_seek64(fd, 1, 2u, &high) == 0x8001b003u && high == 0xffffffffu,
+           "UMD SEEK_END +1 is refused");
+    expect(umd_test_seek32(fd, (int32_t)UMD_SYNTHETIC_SECTORS - 1, 0u) ==
+               UMD_SYNTHETIC_SECTORS - 1u &&
+               umd_test_read(fd, data_addr, 1u) == 1u &&
                umd_test_sectors_match(data_addr, UMD_SYNTHETIC_SECTORS - 1u, 1u),
            "the last UMD sector itself is readable");
     expect(umd_test_seek32(fd, 0, 0u) == 0u && umd_test_read(fd, 0x0bffff00u, 1u) == 0x80010016u &&
@@ -4905,13 +5201,14 @@ static void test_umd_block_device_async(uint32_t fd, uint32_t data_addr, uint32_
                umd_test_async_result(result_addr) == 16 && umd_test_seek32(fd, 0, 1u) == 16u,
            "a raw UMD sceIoLseek32Async SEEK_SET 16 completes with sector 16");
 
-    /* A read crossing the last sector stays at the named boundary as its result. */
+    /* A queued read crossing the last sector completes with the one sector left, as the
+     * synchronous read does (PSP-IO-EOF-002). */
     expect(umd_test_seek32(fd, (int32_t)UMD_SYNTHETIC_SECTORS - 1, 0u) ==
                UMD_SYNTHETIC_SECTORS - 1u &&
                umd_test_async_call(UMD_NID_READ_ASYNC, fd, data_addr, 2u, 0u, 0u) == 0u &&
                umd_test_async_call(UMD_NID_WAIT_ASYNC, fd, result_addr, 0u, 0u, 0u) == 0u &&
-               umd_test_async_result(result_addr) == (int64_t)(int32_t)0x80010086u,
-           "a queued UMD read across the last sector completes at the raw-device boundary");
+               umd_test_async_result(result_addr) == 1,
+           "a queued UMD read across the last sector completes with 1");
 }
 
 void sr_hle_test_var_reset(void);
@@ -5059,7 +5356,12 @@ static void test_main_function_exports_link_from_boot(void) {
 }
 
 static void test_umd_io_console_model(void) {
-    enum { PATH_ADDR = 0x09010000u, DATA_ADDR = 0x09012000u, FD_KIND_RAW_DEVICE = 3 };
+    enum {
+        PATH_ADDR = 0x09010000u,
+        DATA_ADDR = 0x09012000u,
+        FD_KIND_FILE = 2,
+        FD_KIND_RAW_DEVICE = 3
+    };
     static const uint32_t nid_io_open = 0x109f50bcu;
     static const uint32_t nid_io_close = 0x810c4bc3u;
     static const uint32_t nid_io_write = 0x42ec03acu;
@@ -5209,6 +5511,48 @@ static void test_umd_io_console_model(void) {
         cpu.r[4] = raw_fd;
         expect(sr_syscall(&cpu, nid_io_close) == 0u, "each UMD block device closes");
     }
+
+    /* A disc0: file's position stays inside [0, size] (PSP-IO-EOF-002, measured): every seek
+     * before the start or past the end answers 0x80010005, sceIoLseek's high word 0xFFFFFFFF,
+     * and leaves the position; the end itself is a valid position, where a read returns 0. */
+    fd_set_path(&cpu, PATH_ADDR, "disc0:/UMD_DATA.BIN");
+    cpu.r[5] = 1u;
+    const uint32_t disc_fd = sr_syscall(&cpu, nid_io_open);
+    expect(disc_fd < 64u && sr_hle_test_fd_kind(disc_fd) == FD_KIND_FILE,
+           "a disc0: file opens read-only");
+    {
+        uint32_t high = 0;
+        expect(umd_test_seek64(disc_fd, 0, 2u, &high) == 2048u && high == 0u,
+               "a disc0: SEEK_END 0 is the file size");
+        expect(umd_test_seek64(disc_fd, 8, 0u, &high) == 8u, "disc0: seek setup");
+        static const struct { int64_t offset; uint32_t whence; const char *what; } refused[] = {
+            {16, 2u, "a disc0: SEEK_END +16 is refused with 0x80010005"},
+            {2048 + 0x1000, 0u, "a disc0: SEEK_SET past the end is refused with 0x80010005"},
+            {-1, 0u, "a disc0: SEEK_SET -1 is refused with 0x80010005"},
+            {-(2048 + 1), 2u, "a disc0: SEEK_END before the start is refused with 0x80010005"},
+            {-9, 1u, "a disc0: SEEK_CUR before the start is refused with 0x80010005"},
+            {0xffffffffll, 0u, "a disc0: SEEK_SET 0xFFFFFFFF is refused with 0x80010005"},
+            {0x100000000ll, 0u, "a disc0: SEEK_SET 0x100000000 is refused with 0x80010005"},
+        };
+        for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+            expect(umd_test_seek64(disc_fd, refused[i].offset, refused[i].whence, &high) ==
+                           0x80010005u && high == 0xffffffffu &&
+                       umd_test_seek64(disc_fd, 0, 1u, &high) == 8u,
+                   refused[i].what);
+        }
+        expect(umd_test_seek32(disc_fd, 16, 2u) == 0x80010005u &&
+                   umd_test_seek32(disc_fd, -1, 0u) == 0x80010005u &&
+                   umd_test_seek32(disc_fd, 0, 1u) == 8u,
+               "disc0: sceIoLseek32 past the end and before the start is refused, position kept");
+        MEM_W32(DATA_ADDR, 0xaabbccddu);
+        expect(umd_test_seek32(disc_fd, 0, 2u) == 2048u &&
+                   umd_test_read(disc_fd, DATA_ADDR, 16u) == 0u &&
+                   MEM_R32(DATA_ADDR) == 0xaabbccddu && umd_test_seek32(disc_fd, 0, 1u) == 2048u,
+               "a read at the end of a disc0: file returns 0 and keeps the position");
+    }
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = disc_fd;
+    expect(sr_syscall(&cpu, nid_io_close) == 0u, "the disc0: file closes");
 
     fd_set_path(&cpu, PATH_ADDR, "umd0:");
     cpu.r[5] = 1u;
@@ -5426,9 +5770,12 @@ static void test_ms0_unified_namespace(void) {
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = PATH_ADDR;
     cpu.r[5] = STAT_ADDR;
+    for (uint32_t i = 0; i < 0x58u; i++) MEM_W8(STAT_ADDR + i, 0xcc);
     expect(sr_hle_test_io_getstat(&cpu) == 0u &&
-               MEM_R32(STAT_ADDR) == (0x1000u | 0x0124u),
-           "sceIoGetstat sees the unified directory via the host ms0 leg");
+               MEM_R32(STAT_ADDR) == 0x11ffu && MEM_R32(STAT_ADDR + 4u) == 0x10u,
+           "sceIoGetstat sees the unified directory via the host ms0 leg with the PSP's FAT mode and attr");
+    expect(MEM_R32(STAT_ADDR + 0x40u) == 0xccccccccu && MEM_R32(STAT_ADDR + 0x54u) == 0xccccccccu,
+           "sceIoGetstat leaves st_private untouched on the ms0 leg (stat.expected: private=cccccccc)");
 
     fd_guest_copy(PATH_ADDR, file_guest, sizeof(file_guest));
     memset(&cpu, 0, sizeof cpu);
@@ -5437,6 +5784,60 @@ static void test_ms0_unified_namespace(void) {
     expect(sr_hle_test_io_getstat(&cpu) == 0u &&
                (MEM_R32(STAT_ADDR + 8u) == (uint32_t)(sizeof(payload) - 1u)),
            "sceIoGetstat size matches the file written under unified ms0 root");
+    expect(MEM_R32(STAT_ADDR) == 0x21ffu && MEM_R32(STAT_ADDR + 4u) == 0x20u,
+           "sceIoGetstat reports the PSP's FAT mode 0x21ff and attr 0x0020 for an ms0 file");
+
+    /* stat.expected "getstat vs dread": the listing reports the same mode and attr as sceIoGetstat. */
+    fd_guest_copy(0x09181000u, dir_guest, sizeof(dir_guest));
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 0x09181000u;
+    uint32_t ms_dir_fd = sr_hle_test_io_dopen(&cpu);
+    int ms_dread_file = 0;
+    for (int guard = 0; guard < 16; guard++) {
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = ms_dir_fd;
+        cpu.r[5] = 0x09180000u;
+        if (sr_hle_test_io_dread(&cpu) != 1u) break;
+        if (MEM_R8(0x09180000u + 0x58u) == 'U')
+            ms_dread_file = MEM_R32(0x09180000u) == 0x21ffu && MEM_R32(0x09180000u + 4u) == 0x20u &&
+                            MEM_R32(0x09180000u + 8u) == (uint32_t)(sizeof(payload) - 1u);
+    }
+    expect(ms_dread_file, "sceIoDread lists an ms0 file with sceIoGetstat's mode 0x21ff and attr 0x0020");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = ms_dir_fd;
+    (void)sr_hle_test_io_dclose(&cpu);
+
+    /* The runtime treats ms0:, fatms0: and device-less paths as the same Memory Stick (sr_ms0_classify),
+     * so a listing opened on any of them reports sceIoGetstat's FAT shape; a directory entry gets
+     * 0x11ff / attr 0x0010 and a file 0x21ff / attr 0x0020. */
+    {
+        static const char ms_alias_dirs[3][16] = {"ms0:/", "fatms0:/TESTDIR", "TESTDIR"};
+        static const char ms_alias_names[3][16] = {"TESTDIR", "UNIFIED.TXT", "UNIFIED.TXT"};
+        for (int alias = 0; alias < 3; alias++) {
+            fd_guest_copy(0x09181000u, ms_alias_dirs[alias], 16u);
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = 0x09181000u;
+            uint32_t alias_fd = sr_hle_test_io_dopen(&cpu);
+            int alias_shape = 0;
+            for (int guard = 0; guard < 16; guard++) {
+                memset(&cpu, 0, sizeof cpu);
+                cpu.r[4] = alias_fd;
+                cpu.r[5] = 0x09180000u;
+                if (sr_hle_test_io_dread(&cpu) != 1u) break;
+                if (MEM_R8(0x09180000u + 0x58u) == (uint32_t)(unsigned char)ms_alias_names[alias][0]) {
+                    uint32_t want_mode = alias == 0 ? 0x11ffu : 0x21ffu;
+                    uint32_t want_attr = alias == 0 ? 0x10u : 0x20u;
+                    alias_shape = MEM_R32(0x09180000u) == want_mode && MEM_R32(0x09180000u + 4u) == want_attr;
+                }
+            }
+            expect(alias_shape, alias == 0 ? "an ms0:/ listing reports the FAT directory shape 0x11ff attr 0x10"
+                                           : alias == 1 ? "a fatms0: listing reports the FAT file shape 0x21ff attr 0x20"
+                                                        : "a device-less listing reports the FAT file shape 0x21ff attr 0x20");
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = alias_fd;
+            (void)sr_hle_test_io_dclose(&cpu);
+        }
+    }
 
     fd_guest_copy(PATH2_ADDR, file_guest2, sizeof(file_guest2));
     memset(&cpu, 0, sizeof cpu);
@@ -6753,12 +7154,10 @@ static void test_sysreg_write_model(void) {
 /* Persistence: a flush writes the overlay atomically, a restart loads it, a flush after reads
  * writes nothing, and values equal to their defaults are not recorded. */
 /* Named refusals for NIDs whose contract is not established from the sources in this tree.
- * Each one returns its named error and does not stop the title, so the run continues past it:
- *  - sceNetInit (0x39af39a6): the offline network policy (sceNetGetLocalEtherAddr's 0x80010086).
+ * Each one returns its named error and does not stop the title, so the run continues past it.
  * The test pins the codes, so a later measured handler has to replace them deliberately.
- * sceKernelReferSystemStatus is no longer refused: it is measured (test_refer_system_status). */
-#define NID_REFUSE_NET_INIT                0x39af39a6u
-#define NID_REFUSE_NET_TERM                0x281928a9u
+ * sceKernelReferSystemStatus is no longer refused: it is measured (test_refer_system_status), and
+ * neither are sceNetInit and sceNetTerm (test_net_core_without_network). */
 #define REFUSE_NET_CODE                    0x80010086u
 #define REFUSE_UNSUPPORTED_CODE            0x80020002u
 
@@ -6774,10 +7173,6 @@ static void test_named_refusals(void) {
     static const uint8_t mac[6] = {0x01u, 0x23u, 0x45u, 0x67u, 0x89u, 0xabu};
     reset_fixture();
     sr_hle_init();
-    expect(refuse_call(NID_REFUSE_NET_INIT) == REFUSE_NET_CODE,
-           "sceNetInit refuses with the offline network code 0x80010086");
-    expect(refuse_call(NID_REFUSE_NET_TERM) == REFUSE_NET_CODE,
-           "sceNetTerm has a named offline refusal instead of the unknown-NID stop");
     expect(refuse_call(0xf9d8eb63u) == REFUSE_NET_CODE,
            "sceHttpsEnd refuses with the offline HTTP code 0x80010086, as sceHttpEnd does");
     expect(refuse_call(0x011f03c1u) == REFUSE_UNSUPPORTED_CODE,
@@ -7166,6 +7561,125 @@ static void test_unregistered_batch_profiler_refer_null(void) {
     }
 }
 
+/* The sceNet core library with no network (hle_network.c, #341). A PSP's sceNetInit only takes the
+ * library's pool and returns 0, and so do sceNetTerm and Init again after Term (pspautotests
+ * 70e72391 tests/net: every net test, net/adhoc/socketids). The calls that need a network answer as
+ * a PSP with no group and no access point does: sceNetGetLocalEtherAddr 0x80410180 with the buffer
+ * untouched (net/adhoc/apctlinit), and sceNetAdhocctlGetParameter, with the ad hoc control library
+ * never initialized, 0x80410b08 (net/adhoc/adhocctl "Before init"). Before this, sceNetInit refused
+ * with 0x80010086, and LittleBigPlanet's "connect" then called through a network object it never
+ * set up. The argument codes are PPSSPP's (UNMEASURED). */
+static uint32_t net_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t t0) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = a0; cpu.r[5] = a1; cpu.r[6] = a2; cpu.r[7] = a3; cpu.r[8] = t0;
+    return sr_syscall(&cpu, nid);
+}
+
+static void test_net_core_without_network(void) {
+    enum {
+        NID_NET_INIT = 0x39af39a6u, NID_NET_TERM = 0x281928a9u,
+        NID_NET_LOCAL_ETHER = 0x0bf0a3aeu, NID_ADHOCCTL_GET_PARAMETER = 0xded9d28eu,
+        MAC_ADDR = 0x00281000u, PARAM_ADDR = 0x00281040u, PARAM_SIZE = 0x70u,
+        POOL = 0x20000u,
+    };
+    extern void sr_hle_test_partition_reset(void);
+    extern void hle_net_reset(void);
+    extern int sr_hle_test_net_inited(void);
+    extern uint32_t sr_hle_test_net_pool_uid(void);
+    extern uint32_t block_addr(uint32_t uid);
+    extern uint32_t alloc_block(uint32_t size);
+    extern uint32_t free_block(uint32_t uid);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    reset_fixture();
+    s_fixture_loaded_end = 0x08a00000u;   /* a main image in user RAM, as a game's is */
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    hle_net_reset();
+
+    memset(SR_HOST(MAC_ADDR), 0xcc, 6u);
+    expect(net_call(NID_NET_LOCAL_ETHER, MAC_ADDR, 0, 0, 0, 0) == 0x80410180u,
+           "sceNetGetLocalEtherAddr before sceNetInit: no local address (0x80410180; UNMEASURED before "
+           "Init, measured after it)");
+
+    expect(net_call(NID_NET_INIT, POOL, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u,
+           "sceNetInit(0x20000, 0x20, 0x1000, 0x20, 0x1000) returns 0, as on a PSP");
+    const uint32_t pool_uid = sr_hle_test_net_pool_uid();
+    const uint32_t pool_addr = block_addr(pool_uid);
+    expect(sr_hle_test_net_inited() && pool_addr != 0u &&
+               pool_addr >= 0x08800000u && pool_addr + POOL <= 0x0a000000u,
+           "sceNetInit takes its pool from the user partition");
+
+    expect(net_call(NID_NET_LOCAL_ETHER, MAC_ADDR, 0, 0, 0, 0) == 0x80410180u,
+           "sceNetGetLocalEtherAddr with no group or access point: 0x80410180");
+    const uint8_t *mac = SR_HOST(MAC_ADDR);
+    int untouched = 1;
+    for (int i = 0; i < 6; i++) untouched &= mac[i] == 0xccu;
+    expect(untouched, "sceNetGetLocalEtherAddr leaves the buffer untouched");
+
+    memset(SR_HOST(PARAM_ADDR), 0xcc, PARAM_SIZE);
+    expect(net_call(NID_ADHOCCTL_GET_PARAMETER, PARAM_ADDR, 0, 0, 0, 0) == 0x80410b08u,
+           "sceNetAdhocctlGetParameter before sceNetAdhocctlInit: NOT_INITIALIZED (0x80410b08)");
+    const uint8_t *param = SR_HOST(PARAM_ADDR);
+    untouched = 1;
+    for (uint32_t i = 0; i < PARAM_SIZE; i++) untouched &= param[i] == 0xccu;
+    expect(untouched, "sceNetAdhocctlGetParameter writes nothing when it fails");
+
+    expect(net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == 0u, "sceNetTerm returns 0");
+    expect(!sr_hle_test_net_inited() && block_addr(pool_uid) == 0u,
+           "sceNetTerm gives the pool back to the user partition");
+    expect(net_call(NID_NET_INIT, POOL, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u,
+           "sceNetInit again after sceNetTerm returns 0 (net/adhoc/socketids)");
+    const uint32_t second = sr_hle_test_net_pool_uid();
+    expect(net_call(NID_NET_INIT, POOL, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+               block_addr(second) == 0u && block_addr(sr_hle_test_net_pool_uid()) != 0u,
+           "a second sceNetInit without Term keeps one pool (PPSSPP; UNMEASURED)");
+    expect(net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == 0u, "sceNetTerm after the second Init returns 0");
+
+    expect(net_call(NID_NET_INIT, 0u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0x800201b7u &&
+               !sr_hle_test_net_inited(),
+           "sceNetInit with pool size 0: ILLEGAL_MEMSIZE, nothing initialized (PPSSPP; UNMEASURED)");
+    expect(net_call(NID_NET_INIT, POOL, 0x07u, 0x1000u, 0x20u, 0x1000u) == 0x80020193u &&
+               net_call(NID_NET_INIT, POOL, 0x20u, 0x1000u, 0x78u, 0x1000u) == 0x80020193u &&
+               !sr_hle_test_net_inited(),
+           "sceNetInit with a thread priority outside 0x08-0x77: ILLEGAL_PRIORITY (PPSSPP; UNMEASURED)");
+
+    /* A pool size within 255 of 4 GB has no 256-byte-rounded slot. With a small free block in the
+     * partition the rounding must not wrap to a 256-byte slot that the free block satisfies. */
+    const uint32_t hole = alloc_block(0x1000u), keep = alloc_block(0x1000u);
+    expect(hole != 0xffffffffu && keep != 0xffffffffu && free_block(hole) == 0u,
+           "a 0x1000-byte free block sits below an allocated one");
+    expect(alloc_block(0xffffff01u) == 0xffffffffu,
+           "alloc_block refuses a size whose 256-byte rounding passes 4 GB");
+    expect(net_call(NID_NET_INIT, 0xfffffff0u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0x80020190u &&
+               !sr_hle_test_net_inited(),
+           "sceNetInit with a pool size near 4 GB: NO_MEMORY, nothing initialized");
+    free_block(keep);
+
+    /* The recordings were made with the WLAN switch on. With the profile's switch off sceNetInit
+     * still returns 0: the chosen behaviour for an UNMEASURED case (PPSSPP does not consult it). */
+    static const char switch_off[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, "
+        "\"categories\": [], \"keys\": [], \"console\": {\"wlan_mac_hex\": \"00a1b2c3d4e5\", "
+        "\"open_psid_hex\": \"00112233445566778899aabbccddeeff\", \"wlan_switch\": 0}}";
+    sysreg_scratch_clean();
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, switch_off, sizeof(switch_off) - 1u),
+           "the switch-off overlay is written");
+    sysreg_restart();
+    expect(profile_call(0xd7763699u, 0u) == 0u, "the profile's WLAN switch reads off");
+    expect(net_call(NID_NET_INIT, POOL, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u && sr_hle_test_net_inited(),
+           "sceNetInit with the WLAN switch off returns 0 (UNMEASURED; the switch-on result is kept)");
+    expect(net_call(NID_NET_LOCAL_ETHER, MAC_ADDR, 0, 0, 0, 0) == 0x80410180u &&
+               net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == 0u,
+           "with the switch off there is still no local address, and sceNetTerm returns 0");
+    sysreg_scratch_clean();   /* the process-wide scratch overlay main() set stays selected */
+    sysreg_restart();
+
+    hle_net_reset();
+    sr_hle_test_partition_reset();
+    s_fixture_loaded_end = loaded_end;
+}
+
 /* Imports that stopped titles on an unknown NID now resolve to a named refusal with the code
  * recorded in hle.c's unregistered-import batch. The two NIDs without a confirmed public name
  * must stay unregistered, so an unknown-NID trap still names them. */
@@ -7178,7 +7692,6 @@ static void test_unregistered_batch_refusals(void) {
         {0x7ed59bc4u, 0x80020002u, "sceDisplaySetHoldMode"},
         {0x72189c48u, 0x80010086u, "sceImposeSetUMDPopup"},
         {0x8c943191u, 0x80010086u, "sceImposeGetBatteryIconStatus"},
-        {0x0bf0a3aeu, 0x80010086u, "sceNetGetLocalEtherAddr"},
         {0x0282a3bdu, 0x80010086u, "sceHttpGetContentLength"},
         {0x03d9526fu, 0x80010086u, "sceHttpSetResolveRetry"},
         {0x1f0fc3e3u, 0x80010086u, "sceHttpSetRecvTimeOut"},
@@ -7209,7 +7722,7 @@ static void test_unregistered_batch_refusals(void) {
 
 /* #1139 phase 0: the public PSPSDK ad hoc surface (pspnet_adhoc.h 22, pspnet_adhocctl.h 21,
  * pspnet_adhocmatching.h 16 prototypes; NIDs are sha1(name)) is refused by name with the offline
- * network code sceNetInit uses. That code is the runtime's documented refusal, not a measured ad hoc
+ * network code 0x80010086. That code is the runtime's documented refusal, not a measured ad hoc
  * result. A NID missing from the registry would reach sr_syscall's unknown-NID stop, so membership is
  * checked before the call. */
 static void test_adhoc_named_refusals(void) {
@@ -7250,7 +7763,6 @@ static void test_adhoc_named_refusals(void) {
         {0x362cbe8fu, "sceNetAdhocctlGetAdhocId"},
         {0x5a014ce0u, "sceNetAdhocctlGetGameModeInfo"},
         {0x8916c003u, "sceNetAdhocctlGetNameByAddr"},
-        {0xded9d28eu, "sceNetAdhocctlGetParameter"},
         {0x8db83fdcu, "sceNetAdhocctlGetPeerInfo"},
         {0xe162cb14u, "sceNetAdhocctlGetPeerList"},
         {0x81aee1beu, "sceNetAdhocctlGetScanInfo"},
@@ -7277,7 +7789,8 @@ static void test_adhoc_named_refusals(void) {
         {0x32b156b3u, "sceNetAdhocMatchingStop"},
         {0x7945ecdau, "sceNetAdhocMatchingTerm"},
     };
-    expect(sizeof(adhoc) / sizeof(adhoc[0]) == 59u, "the public ad hoc surface has 59 prototypes");
+    expect(sizeof(adhoc) / sizeof(adhoc[0]) == 58u,
+           "the public ad hoc surface less sceNetAdhocctlGetParameter (test_net_core_without_network) has 58 prototypes");
     reset_fixture();
     sr_hle_init();
     for (size_t i = 0; i < sizeof(adhoc) / sizeof(adhoc[0]); i++) {
@@ -8235,7 +8748,8 @@ static void test_utility_dialog_single_slot(void) {
     osk_env("SR_OSK_SCRIPT", NULL);
     osk_env("SR_OSK_TEXT", NULL);
 
-    /* No dialog ever opened: every type's Update, GetStatus and ShutdownStart is WRONG_TYPE. */
+    /* No dialog ever opened: every type's Update, GetStatus and ShutdownStart is WRONG_TYPE
+     * (measured for all but the OSK by PSP-HLE-UTILITY-NONE-001, and for the OSK by #363). */
     for (size_t i = 0; i < count; i++) {
         snprintf(what, sizeof(what), "%sUpdate, GetStatus and ShutdownStart with no dialog ever "
                  "opened return WRONG_TYPE", dialogs[i].name);
@@ -10055,6 +10569,149 @@ static void test_savedata_nested_outputs(void) {
 /* #1386 against PSPAutotests tests/utility/dialog/{status,sizes}.expected (hrydgard/pspautotests
  * master, recorded on a PSP): message dialog sizes and wrong-state results, a busy slot reported
  * before a bad size, and the message dialog's default button. */
+/* #1386: the keyboard's nested ranges. InitStart proves only the 0x40/0x44-byte block; the field
+ * array, each field's strings and each outtext buffer are the guest's. A range that is not whole
+ * guest memory is never partly read or written, and the keyboard ends CANCELLED rather than
+ * CHANGED. What a PSP does with such a block is not captured, so the CANCELLED answer is the
+ * fail-closed choice, not a measurement. */
+#define OSK_RAM_END         0x0c000000u
+#define OSK_CANARY          0xdeadbeefu
+static void osk_run_malformed(CpuState *cpu, const char *what) {
+    char msg[256];
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[4] = OSK_PARAM_ADDR;
+    snprintf(msg, sizeof(msg), "%s: InitStart accepts the block, whose own size is whole", what);
+    expect(sr_syscall(cpu, NID_OSK_INIT) == 0u, msg);
+    snprintf(msg, sizeof(msg), "%s: the keyboard still reaches QUIT", what);
+    expect(osk_poll(cpu) == 1u && osk_poll(cpu) == 2u && osk_poll_past_visible(cpu) == 3u, msg);
+}
+
+static void osk_finish_malformed(CpuState *cpu, const char *what) {
+    char msg[256];
+    memset(cpu, 0, sizeof(*cpu));
+    snprintf(msg, sizeof(msg), "%s: ShutdownStart cancels the keyboard down to NONE", what);
+    expect(sr_syscall(cpu, NID_OSK_SHUTDOWN) == 0u && osk_poll(cpu) == 4u && osk_poll(cpu) == 0u,
+           msg);
+    utility_param_block(UTILITY_MSG_PARAM_ADDR, 0x2c4u);
+    snprintf(msg, sizeof(msg), "%s: the slot is free for a message dialog afterwards", what);
+    expect(msg_dialog_run_to_finished(cpu, UTILITY_MSG_PARAM_ADDR), msg);
+    sr_hle_test_osk_slot_reset();
+}
+
+static void test_osk_nested_ranges(void) {
+    CpuState cpu;
+    static const uint32_t field_arrays[] = {
+        OSK_RAM_END - 0x100u,   /* eight 0x34-byte fields run past the end of guest memory */
+        OSK_RAM_END,            /* wholly outside */
+        0xfffffff0u,            /* the span's end wraps the address space */
+    };
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    osk_person_reset();
+    osk_env("SR_OSK_SCRIPT", NULL);
+    osk_env("SR_OSK_TEXT", "NAME");
+
+    for (unsigned i = 0; i < sizeof(field_arrays) / sizeof(field_arrays[0]); i++) {
+        const char *what = "an OSK field array that is not a complete guest span";
+        osk_guest_build(1, 16u, 0u);
+        MEM_W32(OSK_PARAM_ADDR + 0x30u, 8u);
+        MEM_W32(OSK_PARAM_ADDR + 0x34u, field_arrays[i]);
+        MEM_W32(OSK_PARAM_ADDR + 0x1cu, OSK_CANARY);
+        MEM_W32(OSK_RAM_END - 0x100u + 0x2cu, OSK_CANARY);   /* where field 0's result would go */
+        MEM_W32(OSK_FIELDS_ADDR + 0x2cu, OSK_CANARY);
+        osk_run_malformed(&cpu, what);
+        expect(MEM_R32(OSK_PARAM_ADDR + 0x1cu) == 1u,
+               "an OSK field array that is not a complete guest span ends the keyboard CANCELLED");
+        expect(MEM_R32(OSK_RAM_END - 0x100u + 0x2cu) == OSK_CANARY &&
+                   MEM_R32(OSK_FIELDS_ADDR + 0x2cu) == OSK_CANARY,
+               "an OSK field array that is not a complete guest span is read and written nowhere");
+        osk_finish_malformed(&cpu, what);
+    }
+
+    /* The outtext buffer: three UTF-16 units and a terminator do not fit in the last two bytes
+     * of guest memory, so none of them may land. */
+    {
+        const char *what = "an OSK outtext buffer that runs past the end of guest memory";
+        osk_guest_build(1, 16u, 0u);
+        MEM_W32(OSK_FIELDS_ADDR + 0x28u, OSK_RAM_END - 2u);
+        MEM_W16(OSK_RAM_END - 2u, 0xbeefu);
+        MEM_W32(OSK_PARAM_ADDR + 0x1cu, OSK_CANARY);
+        osk_run_malformed(&cpu, what);
+        expect(MEM_R16(OSK_RAM_END - 2u) == 0xbeefu,
+               "an OSK outtext buffer that runs past the end of guest memory gets no partial answer");
+        expect(MEM_R32(OSK_FIELDS_ADDR + 0x2cu) == 1u,
+               "an OSK outtext buffer that runs past the end of guest memory reports CANCELLED");
+        osk_finish_malformed(&cpu, what);
+    }
+
+    /* The description and the initial text are read: a string that leaves guest memory is not
+     * read past its end, and the field is not answered. */
+    for (unsigned offset = 0x1cu; offset <= 0x20u; offset += 4u) {
+        const char *what = offset == 0x1cu ? "an OSK description outside guest memory"
+                                           : "an OSK initial text outside guest memory";
+        osk_guest_build(1, 16u, 0u);
+        MEM_W32(OSK_FIELDS_ADDR + offset, OSK_RAM_END);
+        osk_run_malformed(&cpu, what);
+        expect(MEM_R32(OSK_FIELDS_ADDR + 0x2cu) == 1u && MEM_R16(osk_out_addr(0)) == 0u,
+               "an OSK string outside guest memory reports CANCELLED and writes no answer");
+        osk_finish_malformed(&cpu, what);
+    }
+
+    /* A whole block still gets its answer, so the checks refuse only what is malformed. */
+    osk_guest_build(1, 16u, 0u);
+    osk_run_malformed(&cpu, "a well-formed OSK block");
+    expect(MEM_R32(OSK_FIELDS_ADDR + 0x2cu) == 2u &&
+               MEM_R16(osk_out_addr(0)) == (uint16_t)'N',
+           "a well-formed OSK block is still answered CHANGED");
+    osk_finish_malformed(&cpu, "a well-formed OSK block");
+    osk_env("SR_OSK_TEXT", NULL);
+    osk_person_reset();
+}
+
+/* #1386: wrong-state results for the dialogs the OSK measurements do not cover. Netconf, gamedata
+ * and sharing have no capture of their own (PSPAutotests utility/dialog measures message and
+ * savedata, #363 the OSK); each refuses Update and ShutdownStart at NONE and a repeated
+ * ShutdownStart, as every measured type does. Their results from INIT, RUNNING and FINISHED are
+ * unmeasured and not asserted here. */
+static void test_utility_dialog_wrong_states_unmeasured_types(void) {
+    static const UtilityDialogNids dialogs[] = {
+        { "sceUtilityNetconf", NID_NETCONF_DIALOG_INIT, NID_NETCONF_DIALOG_UPDATE,
+          NID_NETCONF_DIALOG_STATUS, NID_NETCONF_DIALOG_SHUTDOWN },
+        { "sceUtilityGamedataInstall", NID_GAMEDATA_DIALOG_INIT, NID_GAMEDATA_DIALOG_UPDATE,
+          NID_GAMEDATA_DIALOG_STATUS, NID_GAMEDATA_DIALOG_SHUTDOWN },
+        { "sceUtilityGameSharing", NID_SHARING_DIALOG_INIT, NID_SHARING_DIALOG_UPDATE,
+          NID_SHARING_DIALOG_STATUS, NID_SHARING_DIALOG_SHUTDOWN },
+    };
+    char what[256];
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    for (size_t i = 0; i < sizeof(dialogs) / sizeof(dialogs[0]); i++) {
+        utility_param_block(UTILITY_OTHER_PARAM_ADDR, utility_fixture_size(dialogs[i].init));
+        snprintf(what, sizeof(what), "%s runs to FINISHED", dialogs[i].name);
+        expect(utility_call(&cpu, dialogs[i].init, UTILITY_OTHER_PARAM_ADDR) == 0u &&
+                   utility_poll_to_finished(&cpu, dialogs[i].update, dialogs[i].status),
+               what);
+        snprintf(what, sizeof(what), "%s ShutdownStart from FINISHED is accepted", dialogs[i].name);
+        expect(utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u, what);
+        snprintf(what, sizeof(what), "%s ShutdownStart again during SHUTDOWN is INVALID_STATUS",
+                 dialogs[i].name);
+        expect(utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u, what);
+        snprintf(what, sizeof(what), "%s reports SHUTDOWN, then NONE", dialogs[i].name);
+        expect(utility_status(&cpu, dialogs[i].status) == 4u &&
+                   utility_status(&cpu, dialogs[i].status) == 0u,
+               what);
+        snprintf(what, sizeof(what), "%s Update at NONE is INVALID_STATUS", dialogs[i].name);
+        expect(utility_call(&cpu, dialogs[i].update, 0u) == 0x80110001u, what);
+        snprintf(what, sizeof(what), "%s ShutdownStart at NONE is INVALID_STATUS", dialogs[i].name);
+        expect(utility_call(&cpu, dialogs[i].shutdown, 0u) == 0x80110001u, what);
+        snprintf(what, sizeof(what), "%s stays NONE after its refused calls", dialogs[i].name);
+        expect(utility_status(&cpu, dialogs[i].status) == 0u, what);
+        sr_hle_test_osk_slot_reset();
+    }
+}
+
 static void test_utility_dialog_measured_states(void) {
     CpuState cpu;
     sr_hle_init();
@@ -10236,6 +10893,135 @@ static uint32_t audio_dispatch(CpuState *cpu, uint32_t nid,
     cpu->r[5] = a1;
     cpu->r[6] = a2;
     return sr_syscall(cpu, nid);
+}
+
+/* Under the deterministic clock (#2037) the audio queue the guest paces against drains in guest
+ * time, not in the host mixer's: a run that is faster than real time must not see a queue that
+ * never empties (every blocking output would then wait out the same lead again and guest time
+ * would race ahead of the work). 44100 frames a second of guest time, from the first push.
+ *
+ * MUTANT: return the host queue depth under the deterministic clock -- the guest sees the
+ *   host's 100000 frames and the drain checks fail. */
+static void test_audio_queue_drains_in_guest_time_under_the_deterministic_clock(void) {
+    extern int hle_audio_queued(int ch);
+    const uint32_t STEREO_BUF = 0x08a00000u;
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0u) == 0u,
+           "drain fixture reserves the regular channel");
+    s_det_clock = 1;
+    s_audio_queue_result = 0;
+    s_vtime_us = 1000u;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u,
+                          STEREO_BUF) == 64u, "the 64-frame output returns");
+    expect(hle_audio_queued(0) == 64, "the guest sees the 64 frames it just pushed");
+    s_vtime_us += 1000u;   /* 1 ms of guest time plays 44.1 frames */
+    expect(hle_audio_queued(0) == 20, "a millisecond of guest time drains 44 of them");
+    s_vtime_us += 1000u;
+    expect(hle_audio_queued(0) == 0, "the second millisecond empties the queue, carry kept");
+    s_audio_queue_result = 100000;   /* the host mixer is far behind: the guest must not see it */
+    expect(hle_audio_queued(0) == 0, "the host mixer's backlog is not what the guest sees");
+    s_audio_queue_result = -1;
+    expect(hle_audio_queued(0) == -1, "no host output stays no host output");
+    s_det_clock = 0;
+    s_audio_queue_result = 100000;
+    expect(hle_audio_queued(0) == 100000, "without the deterministic clock the host depth is reported");
+    s_audio_queue_result = 0;
+    reset_fixture();
+}
+
+/* Every call that paces a guest against the audio queue reads the model under the deterministic
+ * clock (#2037): the blocking output's wait loop, the channel rest length, and the Output2 rest
+ * and release. A host mixer that is far behind (a run faster than real time never lets it drain)
+ * must not reach the guest through any of them. The host stub reports 100000 frames throughout;
+ * on a path that still reads it, the blocking output waits it out (the stub's sequence ends in 0,
+ * so it is counted, not hung on), RestLen and Output2Rest report it, and the release is refused.
+ *
+ * MUTANT: audio_output's wait loop calls sr_audio_queued -- the output consumes the host's whole
+ *   sequence (4+ reads) instead of two.
+ * MUTANT: h_AudioRestLen, h_AudioOutput2Rest or h_AudioOutput2Release calls sr_audio_queued --
+ *   the guest sees the host's 100000 frames and the release is refused. */
+static void test_audio_calls_read_the_guest_queue_under_the_deterministic_clock(void) {
+    const uint32_t STEREO_BUF = 0x08a00000u;
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0u) == 0u,
+           "the regular channel reserves 64 frames");
+    s_det_clock = 1;
+    s_vtime_us = 1000u;
+    s_audio_queue_seq[0] = 100000;
+    s_audio_queue_seq[1] = 100000;
+    s_audio_queue_seq[2] = 100000;
+    s_audio_queue_seq[3] = 0;
+    s_audio_queue_seq_len = 4;
+    s_audio_queue_calls = 0;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, STEREO_BUF) == 64u,
+           "the blocking output returns its frame count");
+    expect(s_audio_queue_calls <= 2u,
+           "the blocking output did not wait out the host mixer's backlog: its lead is the model's 64 frames");
+    s_audio_queue_seq_len = 0;
+    s_audio_queue_result = 100000;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 64u,
+           "GetChannelRestLength reports the model's 64 frames, not the host's 100000");
+    s_vtime_us += 2000u;   /* the 64 frames have played in guest time */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u) == 0u,
+           "and 2 ms of guest time later the model is empty whatever the host holds");
+
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 64u, 0u, 0u) == 0u,
+           "Output2 reserves a 64-sample channel");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_REST_SAMPLE, 0u, 0u, 0u) == 0u,
+           "Output2 rest sample is the model's, empty, not the host's 100000");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "Output2 release is not refused for a backlog only the host mixer holds");
+    s_det_clock = 0;
+    s_audio_queue_result = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+/* The SRC output pushes its converted frames into the guest-time model, and the PSMF player reads
+ * the lead from it, under the deterministic clock (#2037). The host stub reports 100000 frames
+ * throughout: the guest must see the frames the SRC output pushed, not the host's backlog.
+ *
+ * MUTANT: delete audio_vq_pushed in the resampling branch of audio_src_output -- the model
+ *   stays empty and the first model check fails.
+ * MUTANT: psmf_av_queue_frames returns sr_audio_queued(ch) (extern int sr_audio_queued(int ch);
+ *   in the function) -- it reports the host's 100000 and the second check fails. */
+static void test_src_push_and_psmf_lead_read_the_guest_queue_under_the_deterministic_clock(void) {
+    extern int hle_audio_queued(int ch);
+    extern int psmf_av_queue_frames(int ch);
+    enum { SRC_BUF = 0x08a00000u, SRC_SLOT = 8 };
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    s_det_clock = 1;
+    s_vtime_us = 1000u;
+    s_audio_queue_result = 100000;
+    /* 48000 Hz: a 44100 Hz SRC output is a plain audio_output and is covered above; only a
+     * converted rate takes the resampler path that pushes into the model itself. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RESERVE, 1024u, 48000u, 2u) == 0u,
+           "the SRC channel reserves 1024 samples at 48000 Hz");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING, 0x8000u, SRC_BUF, 0u) == 0x400u,
+           "the SRC output returns the reserved sample count");
+    expect(s_audio_push_calls == 1u && s_audio_push_frames > 0,
+           "the SRC output pushed converted frames to the host mixer");
+    expect(hle_audio_queued(SRC_SLOT) == s_audio_push_frames,
+           "the guest-time model holds exactly the frames the SRC output pushed, not the host's 100000");
+    expect(psmf_av_queue_frames(SRC_SLOT) == s_audio_push_frames,
+           "the PSMF audio lead is the model's, not the host's 100000");
+    s_vtime_us += 100000u;   /* 100 ms of guest time plays everything the SRC pushed */
+    expect(psmf_av_queue_frames(SRC_SLOT) == 0,
+           "and the lead is empty once the guest time has played it");
+    s_det_clock = 0;
+    s_audio_queue_result = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
 }
 
 /* Media telemetry truthfulness on the production audio hand-off.
@@ -10527,6 +11313,91 @@ static void test_audio_output2_release_refuses_while_queued(void) {
     s_audio_queue_result = 0;
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
            "release succeeds once Output2 is drained");
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+}
+
+/* The Output2/SRC blocking outputs accept volumes up to 0xFFFFF (PPSSPP-derived, unmeasured
+ * on a PSP: hrydgard/ppsspp caa91b54b535 Core/HLE/sceAudio.cpp, "0xFFFFF, not 0xFFFF"), not
+ * just up to the 0x8000 unity gain. A game that plays its
+ * sound at 0xFFFF must get its block mixed, not 0x8026000B: a sound thread that ignores the
+ * error never blocks and starves every lower-priority thread. Above the bound the call still
+ * refuses and submits nothing; -1 is refused too, because the volume is compared unsigned.
+ * The volume reaches the mixer unchanged, through the 44100 Hz and 48000 Hz SRC paths alike.
+ * Vaudio shares the bound through the SRC output, by analogy only (PPSSPP checks no Vaudio
+ * volume). Entered through the production NIDs. */
+static void test_audio_output2_and_src_accept_volumes_to_0xfffff(void) {
+    enum { OUT_BUF = 0x08a00000u };   /* up to 1024 stereo frames: 4096 bytes inside the arena */
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 64u, 0u, 0u) == 0u,
+           "Output2 reserves a 64-sample channel");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING, 0x8001u, OUT_BUF, 0u) == 0u &&
+               s_audio_push_calls == 1u && s_audio_push_vol_l == 0x8001 &&
+               s_audio_push_vol_r == 0x8001,
+           "Output2 output at volume 0x8001 is accepted and mixed at that volume");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING, 0xffffu, OUT_BUF, 0u) == 0u &&
+               s_audio_push_calls == 2u && s_audio_push_vol_l == 0xffff,
+           "Output2 output at volume 0xFFFF is accepted and mixed");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING, 0xfffffu, OUT_BUF, 0u) == 0u &&
+               s_audio_push_calls == 3u && s_audio_push_vol_l == 0xfffff,
+           "Output2 output at volume 0xFFFFF is accepted and mixed");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING, 0x100000u, OUT_BUF, 0u) ==
+               0x8026000bu && s_audio_push_calls == 3u,
+           "Output2 output above 0xFFFFF returns 0x8026000B and submits nothing");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING, 0xffffffffu, OUT_BUF, 0u) ==
+               0x8026000bu && s_audio_push_calls == 3u,
+           "Output2 output at volume -1 returns 0x8026000B and submits nothing");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "Output2 releases once drained");
+
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RESERVE, 64u, 44100u, 2u) == 0u,
+           "SRC reserves 64 samples at 44100 Hz stereo");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING, 0x8001u, OUT_BUF, 0u) == 64u &&
+               s_audio_push_calls == 4u && s_audio_push_vol_l == 0x8001,
+           "SRC output at volume 0x8001 returns the sample count and is mixed at that volume");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING, 0xffffu, OUT_BUF, 0u) == 64u &&
+               s_audio_push_calls == 5u && s_audio_push_vol_l == 0xffff,
+           "SRC output at volume 0xFFFF returns the sample count and is mixed");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING, 0xfffffu, OUT_BUF, 0u) == 64u &&
+               s_audio_push_calls == 6u && s_audio_push_vol_l == 0xfffff,
+           "SRC output at volume 0xFFFFF returns the sample count and is mixed");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING, 0x100000u, OUT_BUF, 0u) ==
+               0x8026000bu && s_audio_push_calls == 6u,
+           "SRC output above 0xFFFFF returns 0x8026000B and submits nothing");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING, 0xffffffffu, OUT_BUF, 0u) ==
+               0x8026000bu && s_audio_push_calls == 6u,
+           "SRC output at volume -1 returns 0x8026000B and submits nothing");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RELEASE, 0u, 0u, 0u) == 0u,
+           "SRC releases");
+
+    /* The 48000 Hz path converts the block before the mixer; the volume passes through. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RESERVE, 1024u, 48000u, 2u) == 0u,
+           "SRC reserves 1024 samples at 48000 Hz stereo");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING, 0xfffffu, OUT_BUF, 0u) == 1024u &&
+               s_audio_push_calls == 7u && s_audio_push_vol_l == 0xfffff &&
+               s_audio_push_vol_r == 0xfffff,
+           "a 48000 Hz SRC block at volume 0xFFFFF is converted and mixed at that volume");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING, 0x100000u, OUT_BUF, 0u) ==
+               0x8026000bu && s_audio_push_calls == 7u,
+           "a 48000 Hz SRC block above 0xFFFFF returns 0x8026000B and submits nothing");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RELEASE, 0u, 0u, 0u) == 0u,
+           "the 48000 Hz SRC reservation releases");
+
+    /* Vaudio, through the same SRC output. */
+    expect(audio_dispatch(&cpu, NID_SCE_VAUDIO_CH_RESERVE, 256u, 44100u, 2u) == 0u,
+           "Vaudio reserves 256 samples at 44100 Hz, format 2");
+    expect(audio_dispatch(&cpu, NID_SCE_VAUDIO_OUTPUT_BLOCKING, 0xfffffu, OUT_BUF, 0u) == 256u &&
+               s_audio_push_calls == 8u && s_audio_push_vol_l == 0xfffff,
+           "Vaudio output at volume 0xFFFFF returns the sample count and is mixed");
+    expect(audio_dispatch(&cpu, NID_SCE_VAUDIO_OUTPUT_BLOCKING, 0xffffffffu, OUT_BUF, 0u) ==
+               0x8026000bu && s_audio_push_calls == 8u,
+           "Vaudio output at volume -1 returns 0x8026000B and submits nothing");
+    expect(audio_dispatch(&cpu, NID_SCE_VAUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
+           "Vaudio releases");
     sr_hle_test_audio_reset();
     audio_fixture_reset();
 }
@@ -10915,9 +11786,9 @@ static void test_vaudio_plays_through_the_src_slot(void) {
                    0x80260008u,
            "the SRC release and output do not act on a Vaudio reservation");
     expect(s_audio_push_calls == 0u, "nothing reached the mixer through the other API");
-    expect(audio_dispatch(&cpu, NID_SCE_VAUDIO_OUTPUT_BLOCKING, 0x8001u, VA_BUF, 0u) ==
+    expect(audio_dispatch(&cpu, NID_SCE_VAUDIO_OUTPUT_BLOCKING, 0x100000u, VA_BUF, 0u) ==
                0x8026000bu,
-           "a Vaudio volume above 0x8000 returns 0x8026000b");
+           "a Vaudio volume above 0xFFFFF returns 0x8026000b");
     expect(audio_dispatch(&cpu, NID_SCE_VAUDIO_OUTPUT_BLOCKING, 0x8000u, VA_BUF, 0u) == 1152u,
            "Vaudio output returns the reserved sample count");
     expect(s_audio_push_calls == 1u && s_audio_push_frames == 1152,
@@ -11448,8 +12319,8 @@ static void test_pinned_handlers_1814_1815_1816(void) {
     cpu.r[5] = GARBAGE;
     cpu.r[6] = GARBAGE;
     cpu.r[7] = GARBAGE;
-    expect(sr_syscall(&cpu, 0x0e20f177u) == 0u,
-           "sceDisplaySetMode accepts any mode and size and still returns 0 (pins current behaviour)");
+    expect(sr_syscall(&cpu, 0x0e20f177u) == 0x80000107u,
+           "sceDisplaySetMode refuses a garbage mode with 0x80000107 (setmode.expected)");
 }
 
 static void test_psp_measured_cpu_clock_user_mode_20261024(void) {
@@ -12001,13 +12872,13 @@ static void test_umd_unregister_callback(void) {
     expect(sr_syscall(&cpu, NID_UMD_REGISTER_CALLBACK) == 0u,
            "sceUmdRegisterUMDCallBack records the callback");
     cpu.r[4] = cbid;
-    expect(sr_syscall(&cpu, NID_UMD_UNREGISTER_CALLBACK) == 0u,
+    expect(sr_syscall(&cpu, NID_UMD_UNREGISTER_CALLBACK) == cbid,
            "sceUmdUnRegisterUMDCallBack removes a registered callback");
     cpu.r[4] = cbid;
-    expect(sr_syscall(&cpu, NID_UMD_UNREGISTER_CALLBACK) == 0x800201a1u,
+    expect(sr_syscall(&cpu, NID_UMD_UNREGISTER_CALLBACK) == 0x80010016u,
            "sceUmdUnRegisterUMDCallBack rejects an already unregistered callback");
     cpu.r[4] = UNKNOWN_CALLBACK;
-    expect(sr_syscall(&cpu, NID_UMD_UNREGISTER_CALLBACK) == 0x800201a1u,
+    expect(sr_syscall(&cpu, NID_UMD_UNREGISTER_CALLBACK) == 0x80010016u,
            "sceUmdUnRegisterUMDCallBack rejects an unknown callback id");
 
     memset(&cpu, 0, sizeof(cpu));
@@ -12047,8 +12918,11 @@ static void test_umd_unregister_callback(void) {
 
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = cbid;
-    expect(sr_syscall(&cpu, NID_UMD_UNREGISTER_CALLBACK) == 0u,
-           "UMD callback test unregisters its final registration");
+    {
+        /* The answer is the uid below SDK 0x3000001 and 0 from it; earlier tests may have set one. */
+        uint32_t unreg = sr_syscall(&cpu, NID_UMD_UNREGISTER_CALLBACK);
+        expect(unreg == cbid || unreg == 0u, "UMD callback test unregisters its final registration");
+    }
     cpu.r[4] = cbid;
     expect(sr_syscall(&cpu, 0xedba5844u) == 0u,
            "UMD callback test deletes its production callback object");
@@ -12255,6 +13129,37 @@ static void delay_coro_body(void *arg) {
     selftest_park_on_scheduler();
 }
 
+/* A deterministic run (#2037) starts the RTC at a fixed date, not the host's calendar, so two
+ * identical runs see the same time of day; any other run starts from the host's.
+ *
+ * MUTANT: drop the sched_clock_deterministic() branch in rtc_now_tick -- the deterministic ticks
+ *   follow the host calendar and the fixed-date check fails. */
+static void test_rtc_epoch_is_fixed_in_a_deterministic_run(void) {
+    extern uint64_t rtc_now_tick(void);
+    const uint64_t unix_epoch_tick = 62135596800000000ull;   /* 1970-01-01 in the PSP RTC's microseconds */
+    const uint64_t fixed = unix_epoch_tick + 1325376000ull * 1000000ull;   /* 2012-01-01 UTC */
+    reset_fixture();
+    sr_hle_init();
+    s_pace_on = 0;
+    uint64_t tick[2];
+    for (int run = 0; run < 2; run++) {
+        s_det_clock = 1;
+        sr_hle_test_reset_rtc_epoch();
+        s_vtime_us = 1234u;
+        tick[run] = rtc_now_tick();   /* the epoch is anchored at guest time zero: the first read is the date */
+    }
+    expect(tick[0] == tick[1] && tick[0] == fixed,
+           "deterministic clock: the RTC starts at the fixed date");
+    s_vtime_us += 5000u;
+    expect(rtc_now_tick() == fixed + 5000u, "the fixed-date RTC then follows guest time");
+    s_det_clock = 0;
+    sr_hle_test_reset_rtc_epoch();
+    s_vtime_us = 1234u;
+    expect(rtc_now_tick() > fixed + 365ull * 86400ull * 1000000ull,
+           "without the deterministic clock the RTC starts from the host's calendar");
+    sr_hle_test_reset_rtc_epoch();
+}
+
 /* Production-path clock regression: a controlled scheduler delay advances the
  * unified microsecond timeline.  A RUNNING thread parks through the real
  * sceKernelDelayThread NID, the scheduler charges exactly the delay through its
@@ -12349,7 +13254,7 @@ static void test_delay_advances_unified_timeline(void) {
 /* sceDisplayGetFramePerSec returns a single-precision float through $f0.  The
  * integer return convention reports success in $v0, so a guest reading the
  * float must see the measured 60000/1001 bits -- never stale/poisoned state
- * (issue #80 display-clock campaign). */
+ * (issue #80). */
 static void test_display_frame_per_sec_float_return(void) {
     reset_fixture();
     sr_hle_init();
@@ -14784,6 +15689,8 @@ static void test_extracted_data_prepares_before_guest_and_lookup_never_builds(vo
                MEM_R32(dirent_addr + 8u) == 6u &&
                MEM_R8(dirent_addr + 0x58u) == 'c',
            "full disc0 directory enumeration returns the indexed child");
+    expect(MEM_R32(dirent_addr) == 0x2124u && MEM_R32(dirent_addr + 4u) == 0x20u,
+           "a disc0 listing keeps its 0x124 mode bits; only Memory Stick listings take the FAT 0x21ff");
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = dir_fd;
     cpu.r[5] = dirent_addr;
@@ -14970,6 +15877,103 @@ static void test_disc_route_serves_archive_and_loose_content_in_one_namespace(vo
 
     prewarm_env_restore();
     sr_hle_test_data_reset(0);
+}
+
+/* 2c. Archive discovery skips an unpack folder ("<archive>.d" beside the archive
+ *     file "<archive>", the layout staging writes) and walks every other ".d"
+ *     directory. Loose serving is untouched: a loose root's unpack folder still
+ *     serves its files, and the primary root's unpack folders stay out of an
+ *     archive-mode namespace, as before. */
+static const char *const s_xb_unpack_dirs[] = {
+    "", "/primary", "/primary/pack.xb.d", "/primary/pack.xb.d/data",
+    "/primary/pack.xb.d/data/menu", "/primary/orphan.xb.d", "/primary/notes.d",
+    "/loose", "/loose/side.xb.d", "/loose/side.xb.d/data", "/loose/side.xb.d/data/menu"
+};
+static const char *const s_xb_unpack_files[] = {
+    "/primary/pack.xb", "/primary/pack.xb.d/data/decoy.xb",
+    "/primary/pack.xb.d/data/menu/unpacked-primary.to", "/primary/orphan.xb.d/inner.xb",
+    "/primary/notes.d/deep.xb", "/loose/side.xb", "/loose/side.xb.d/data/menu/unpacked.to"
+};
+
+static int host_data_duplicate_write_file(const char *root, const char *relative,
+                                          const char *body);
+
+static int xb_unpack_write_archive(const char *base, const char *relative,
+                                   const char *member, const char *body) {
+    char path[MAX_PATH];
+    if (snprintf(path, sizeof path, "%s%s", base, relative) >= (int)sizeof path) return 0;
+    const HleXbEntry entry = { member, (const uint8_t *)body, strlen(body) };
+    return hle_xb_write(path, &entry, 1u);
+}
+
+static void test_archive_discovery_skips_unpack_folders_only(void) {
+    char scratch[MAX_PATH], base[MAX_PATH], dataroot[MAX_PATH], loose[MAX_PATH + 32];
+    expect(hle_scratch_root(scratch, sizeof scratch), "the unpack-folder fixture has a scratch root");
+    nk_platform_mkdir_p(HLE_BUILD_ROOT);
+    snprintf(base, sizeof base, "%s/xb_unpack_%lu", scratch, (unsigned long)getpid());
+    int made = 1;
+    for (size_t i = 0; i < sizeof(s_xb_unpack_dirs) / sizeof(s_xb_unpack_dirs[0]); i++) {
+        char dir[MAX_PATH];
+        snprintf(dir, sizeof dir, "%s%s", base, s_xb_unpack_dirs[i]);
+        if (!nk_platform_mkdir_p(dir)) made = 0;
+    }
+    made = made &&
+        xb_unpack_write_archive(base, "/primary/pack.xb", "data/menu/inpack.to", "outer-archive") &&
+        /* An archive among an unpack folder's files, as a nested member would be. */
+        xb_unpack_write_archive(base, "/primary/pack.xb.d/data/decoy.xb", "data/menu/decoy.to",
+                                "decoy-archive") &&
+        /* ".d" folders with no archive file of that name beside them. */
+        xb_unpack_write_archive(base, "/primary/orphan.xb.d/inner.xb", "data/menu/orphan.to",
+                                "orphan-archive") &&
+        xb_unpack_write_archive(base, "/primary/notes.d/deep.xb", "data/menu/deep.to",
+                                "deep-archive") &&
+        xb_unpack_write_archive(base, "/loose/side.xb", "data/menu/side.to", "side-archive") &&
+        host_data_duplicate_write_file(base, "/primary/pack.xb.d/data/menu/unpacked-primary.to",
+                                       "unpacked-primary") &&
+        host_data_duplicate_write_file(base, "/loose/side.xb.d/data/menu/unpacked.to",
+                                       "unpacked-loose");
+    expect(made, "the unpack-folder fixture was created");
+
+    snprintf(dataroot, sizeof dataroot, "%s/primary", base);
+    snprintf(loose, sizeof loose, "%s/loose\t\t10\t0\t0\n", base);
+    hle_test_setenv("SR_DATAROOT", dataroot);
+    hle_test_setenv("SR_LOOSE_CONTENT_ROOTS", loose);
+    sr_hle_test_data_reset(0);
+    expect(sr_host_data_prepare() == SR_DATA_TEST_STATE_READY,
+           "a primary root with unpack folders and a loose root reaches READY");
+
+    expect(hle_archive_route_file_matches("disc0:/PSP_GAME/USRDIR/data/menu/inpack.to",
+                                          "outer-archive"),
+           "the archive beside its unpack folder is mounted and serves its member");
+    expect(hle_archive_route_open_result("disc0:/PSP_GAME/USRDIR/data/menu/decoy.to") != 0u,
+           "an archive inside an unpack folder is not mounted as a top-level archive");
+    expect(hle_archive_route_file_matches("disc0:/PSP_GAME/USRDIR/data/menu/orphan.to",
+                                          "orphan-archive"),
+           "a .xb.d folder with no archive beside it is still searched for archives");
+    expect(hle_archive_route_file_matches("disc0:/PSP_GAME/USRDIR/data/menu/deep.to",
+                                          "deep-archive"),
+           "a .d folder whose name is not an archive's is still searched for archives");
+    expect(hle_archive_route_file_matches("disc0:/PSP_GAME/USRDIR/data/menu/unpacked.to",
+                                          "unpacked-loose"),
+           "a loose root's unpack folder still serves its files");
+    expect(hle_archive_route_open_result("disc0:/PSP_GAME/USRDIR/data/menu/side.to") != 0u,
+           "an archive in a loose root is served as a file, never mounted");
+    expect(hle_archive_route_open_result(
+               "disc0:/PSP_GAME/USRDIR/data/menu/unpacked-primary.to") != 0u,
+           "archive mode still serves no file from the primary root's unpack folders");
+
+    prewarm_env_restore();
+    sr_hle_test_data_reset(0);
+    for (size_t i = 0; i < sizeof(s_xb_unpack_files) / sizeof(s_xb_unpack_files[0]); i++) {
+        char path[MAX_PATH];
+        snprintf(path, sizeof path, "%s%s", base, s_xb_unpack_files[i]);
+        nk_remove_utf8(path);
+    }
+    for (size_t i = sizeof(s_xb_unpack_dirs) / sizeof(s_xb_unpack_dirs[0]); i-- > 0;) {
+        char dir[MAX_PATH];
+        snprintf(dir, sizeof dir, "%s%s", base, s_xb_unpack_dirs[i]);
+        rmdir(dir);
+    }
 }
 
 static int host_data_duplicate_write_file(const char *root, const char *relative,
@@ -16196,7 +17200,7 @@ static void wsv_cb_coro_body(void *arg) {
     selftest_park_on_scheduler();
 }
 
-/* PSP-B1-01 (psp-hw-20260917), project-authored synthetic probe on PSP-3000, firmware 6.61. */
+/* PSP-B1-01: project-authored synthetic probe run on a PSP-3000, firmware 6.61. */
 static void b1_expect(uint32_t actual, uint32_t expected, const char *scenario) {
     char msg[256];
     snprintf(msg, sizeof msg, "B1 %s: expected 0x%08x, actual 0x%08x",
@@ -16231,6 +17235,16 @@ static void test_sema_hardware_codes(void) {
         expect(wsv_count(sema) == 0, "B1 rejected PollSema preserves count");
     }
     wsv_delete(sema);
+    /* pspautotests tests/threads/semaphores/poll.expected: a count <= 0 is checked before the id
+     * lookup (NULL, invalid and deleted ids answer 800201BD), a count of 1 answers 80020199. */
+    {
+        const uint32_t ids[] = {0u, sema, 0xdeadbeefu};
+        const uint32_t counts[] = {0u, 0xffffffffu};
+        for (unsigned i = 0; i < 3; i++)
+            for (unsigned j = 0; j < 2; j++)
+                b1_expect(wsv_wait(0x58b1f937u, ids[i], counts[j], 0u), 0x800201bdu,
+                          "PollSema count <= 0 with a NULL/deleted/invalid id returns 800201BD");
+    }
     const uint32_t nids[] = {NID_WSV_SIGNAL_SEMA, NID_WSV_DELETE_SEMA, 0x58b1f937u};
     for (unsigned i = 0; i < sizeof nids / sizeof nids[0]; i++) {
         b1_expect(wsv_wait(nids[i], sema, 1u, 0u), 0x80020199u,
@@ -16251,7 +17265,8 @@ static void test_sema_hardware_codes(void) {
     s_cur = -1;
 }
 
-/* PSP-B1-01 / PSP-B2-01 (psp-hw-20260917): LwMutex return codes and workarea
+/* Measured on a PSP-3000, firmware 6.61 (PSP-B1-01 / PSP-B2-01,
+ * docs/HARDWARE_ORACLE.md): LwMutex return codes and workarea
  * writes. The workarea lives at a fixed guest address; the fixture thread is the
  * owner, and "another owner" is simulated by writing a foreign uid. */
 #define B1_LW_WORKAREA 0x00250300u
@@ -16472,6 +17487,41 @@ static void test_lwmutex_hardware_codes(void) {
            "B1 self-held non-recursive Lock neither waits nor consumes the timeout");
     expect(MEM_R32(wa) == 1u, "B1 rejected relock leaves lockLevel unchanged");
     b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "Delete succeeds");
+    s_cur = -1;
+}
+
+/* pspautotests tests/threads/lwmutex/try600.expected (the "(fake)" uid-0 cells are not modelled). */
+static void test_trylock600_cells(void) {
+    TCB *self = wsv_begin();
+    const uint32_t wa = B1_LW_WORKAREA;
+    const uint32_t me = self->uid;
+    const uint32_t N = NID_TRYLOCK_LWMUTEX_600;
+    /* Non-recursive, free. */
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 0u), 0u, "T600 create FIFO free");
+    b1_expect(b1_call(N, wa, 0u, 0u, 0u), 0x800201bdu, "T600 count 0 returns 800201BD");
+    b1_expect(b1_call(N, wa, 0xffffffffu, 0u, 0u), 0x800201bdu, "T600 count -1 returns 800201BD");
+    b1_expect(b1_call(N, wa, 2u, 0u, 0u), 0x800201bdu, "T600 count 2 on a non-recursive mutex returns 800201BD");
+    expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u, "T600 rejected counts leave the mutex free");
+    b1_expect(b1_call(N, wa, 1u, 0u, 0u), 0u, "T600 count 1 takes the free mutex");
+    expect(MEM_R32(wa) == 1u && MEM_R32(wa + 4u) == me, "T600 taken: level 1, owner is the caller");
+    b1_expect(b1_call(N, wa, 1u, 0u, 0u), 0x800201cfu, "T600 self-held non-recursive returns 800201CF");
+    expect(MEM_R32(wa) == 1u, "T600 self-held relock leaves the level unchanged");
+    /* Held by another thread. */
+    MEM_W32(wa + 4u, me + 0x100u);
+    b1_expect(b1_call(N, wa, 1u, 0u, 0u), 0x800201cbu, "T600 held by another thread returns 800201CB");
+    MEM_W32(wa + 4u, me);
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "T600 delete");
+    b1_expect(b1_call(N, wa, 1u, 0u, 0u), 0x800201cau, "T600 deleted workarea (uid 0xFFFFFFFF) returns 800201CA");
+    /* Recursive. */
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0x200u, 1u), 0u, "T600 create recursive held");
+    b1_expect(b1_call(N, wa, 1u, 0u, 0u), 0u, "T600 recursive relock succeeds");
+    expect(MEM_R32(wa) == 2u, "T600 recursive level is 2");
+    b1_expect(b1_call(N, wa, 0x7ffffffdu, 0u, 0u), 0u, "T600 level reaches INT_MAX");
+    expect(MEM_R32(wa) == 0x7fffffffu, "T600 level is INT_MAX");
+    b1_expect(b1_call(N, wa, 1u, 0u, 0u), 0x800201cdu, "T600 recursive overflow returns 800201CD");
+    expect(MEM_R32(wa) == 0x7fffffffu, "T600 overflow leaves the level unchanged");
+    b1_expect(b1_call(N, wa, 0u, 0u, 0u), 0x800201bdu, "T600 recursive count 0 returns 800201BD");
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "T600 recursive delete");
     s_cur = -1;
 }
 
@@ -16789,7 +17839,7 @@ static void test_expired_timed_sema_wait_enters_strict_priority(uint32_t nid,
              "%s slice C (C): the guest receives SCE_KERNEL_ERROR_WAIT_TIMEOUT (0x800201a8)", who);
     expect(s_slc_ret == SLC_WAIT_TIMEOUT, msg);
     expect(MEM_R32(SLC_TIMEOUT_PTR) == 0u,
-           "PSP-B2-01 (psp-hw-20260917): timed semaphore wait clears timeout");
+           "Measured (PSP-B2-01): timed semaphore wait clears timeout");
     snprintf(msg, sizeof msg,
              "%s slice C (F): earlier promotion manufactured no success result", who);
     expect(s_slc_ret != 0u, msg);
@@ -16835,7 +17885,7 @@ static void test_expired_timed_object_waits_enter_strict_priority(void) {
 }
 
 /* -------------------------------------------------------------------------
- * PSP-B2-01 / PSP-B3-01 (psp-hw-20260917): the cancel/release wake family.
+ * Measured (PSP-B2-01 / PSP-B3-01): the cancel/release wake family.
  * -------------------------------------------------------------------------
  * Hardware cells, entered through the production NIDs:
  *
@@ -16847,7 +17897,8 @@ static void test_expired_timed_object_waits_enter_strict_priority(void) {
  *                                   returns 0; on the running caller (0) it
  *                                   returns 0x80020197.
  *
- * Before this campaign the three NIDs were unregistered entirely (a guest call
+ * Before the cancel/release family was implemented the three NIDs were
+ * unregistered entirely (a guest call
  * stopped at the HLE boundary), and the waiter side had no way to observe a
  * non-satisfaction wake. The waiter runs on its own coroutine exactly like the
  * strict-priority fixture above; the main fixture thread plays the canceller.
@@ -17200,7 +18251,7 @@ static void test_cancel_release_wake_results(void) {
  * UIDs answer UNKNOWN_EVFID; DeleteEventFlag ends a blocked wait. Every call
  * enters through the production NID.
  *
- * Codes: PSP-B1-01 (psp-hw-20260917) unknown-ID codes, 8002019A event flag,
+ * Codes: PSP-B1-01 unknown-ID codes, 8002019A event flag,
  * 80020199 semaphore, 800201CA and 800201C4 for a missing LwMutex. Cells:
  * PSPAutotests tests/threads/events clear.expected L15-L19, refer.expected
  * L23-L25, wait.expected L31-L35, delete.expected L5-L7. A UID of another kind
@@ -17517,7 +18568,7 @@ static void test_evf_typed_uids_and_delete(void) {
 }
 
 /* -------------------------------------------------------------------------
- * PSP-B2-01 / PSP-B3-01 (psp-hw-20260917) second round: init restore, delete,
+ * PSP-B2-01 / PSP-B3-01 second round: init restore, delete,
  * single-wait rejection, LwMutex handoff/timeout, msgpipe modes, dormant
  * threads and waitType. Each cell enters through the production NID.
  * ------------------------------------------------------------------------- */
@@ -17766,7 +18817,7 @@ static void test_b23_second_round(void) {
         main_t->started = 1;
         CpuState c2;
         memset(&c2, 0, sizeof c2);
-        c2.r[4] = B23_MPP_NAME; c2.r[7] = 64u;
+        c2.r[4] = B23_MPP_NAME; c2.r[5] = 2u; c2.r[7] = 64u;
         for (int i = 0; i < 3; i++) MEM_W8(B23_MPP_NAME + (uint32_t)i, (uint8_t)"mp"[i]);
         MEM_W8(B23_MPP_NAME + 2u, 0u);
         uint32_t pipe = sr_syscall(&c2, NID_SCE_KERNEL_CREATE_MSG_PIPE);
@@ -17914,7 +18965,7 @@ static void test_b23_second_round(void) {
 /* PSP-measured (docs/HARDWARE_ORACLE.md kernel-object error table, PSP-B1-01): unknown VPL id. */
 #define VPL_UNKNOWN_ID_ERR    0x8002019cu
 /* UNMEASURED: no VPL exhausted code is recorded; the value predates the FPL measurement. */
-#define VPL_EXHAUSTED_ERR     0x800200d9u
+#define VPL_EXHAUSTED_ERR     0x80020190u /* pspautotests tests/threads/vpl/try.expected */
 #define VPL_INFO              0x00240a00u
 #define VPL_OUTPTR            0x00240a80u
 #define NID_TLSPL_CREATE      0x8daff657u
@@ -18831,6 +19882,93 @@ static TCB *fixture_thread(uint32_t uid, int state, int priority) {
  * handler behavior. */
 #include "intr_conformance.h"
 
+/* sceMpegCreate inside an interrupt handler. pspautotests tests/intr/delays
+ * measured it on a PSP: from a VBLANK sub-interrupt handler it returns
+ * 0x80618008 (delays.expected:24), while the same call on a thread returns 0
+ * and sceMpegDelete then returns 0 (lines 12-13), and after a Finish/Init reset
+ * the library creates again (lines 28-30). PPSSPP took the same check in
+ * 177244863. The check lives in the production handler (hle_mpeg.c); the
+ * library behind it is the spies above. The thread calls run with a fixture
+ * thread current; the interrupt call is reached through the production
+ * sub-interrupt registration and resume path (ic_call_in_interrupt). */
+void sr_hle_test_register_mpeg_create_handlers(void);
+
+#define NID_MPI_INIT    0x682a619bu
+#define NID_MPI_FINISH  0x874624d6u
+#define NID_MPI_CREATE  0xd8c5f121u
+#define NID_MPI_DELETE  0x606a4649u
+#define MPI_DESC        0x00258000u   /* SceMpeg word */
+#define MPI_DATA        0x00260000u   /* 0x10000-byte context buffer */
+
+static void mpi_create_args(CpuState *c) {
+    memset(c, 0, sizeof *c);
+    c->r[4] = MPI_DESC;
+    c->r[5] = MPI_DATA;
+    c->r[6] = 0x10000u;     /* sceMpegQueryMemSize */
+    c->r[7] = 0u;           /* no ringbuffer */
+    c->r[8] = 512u;         /* frameWidth (stack_arg 0), as delays.c passes */
+}
+
+/* One call from guest thread context: a fixture thread is current, as for the
+ * matrix's normal leg. None of these four handlers waits. */
+static uint32_t mpi_on_thread(uint32_t nid, const CpuState *args) {
+    TCB *t = fixture_thread(0x1b0u, TH_RUNNING, 32);
+    if (!t) return 0xdeadbeefu;
+    t->started = 1;
+    s_cur = (int)(t - s_tcb);
+    CpuState c = *args;
+    uint32_t r = sr_syscall(&c, nid);
+    s_cur = -1;
+    return r;
+}
+
+static uint32_t mpi_on_thread_a0(uint32_t nid, uint32_t a0) {
+    CpuState c;
+    memset(&c, 0, sizeof c);
+    c.r[4] = a0;
+    return mpi_on_thread(nid, &c);
+}
+
+static void test_mpeg_create_refused_in_interrupt(void) {
+    static const IcProbe create = {
+        "sceMpegCreate", NID_MPI_CREATE, "", ICG_NONE, 0,
+        {0, 0, 0, 0}, {IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN},
+        {IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN, IC_UNKNOWN},
+        {IC_PREC_NA, IC_PREC_NA, IC_PREC_NA, IC_PREC_NA}, IC_HW_IMMEDIATE, NULL
+    };
+    CpuState c;
+    reset_fixture(); sr_hle_init();
+    sr_hle_test_register_mpeg_create_handlers();
+    s_vbl_next_us = UINT64_MAX;
+    s_mpi_create_calls = 0;
+    s_mpi_live = 0;
+
+    expect(mpi_on_thread_a0(NID_MPI_INIT, 0u) == 0u, "mpeg-intr: sceMpegInit returns 0");
+    mpi_create_args(&c);
+    expect(mpi_on_thread(NID_MPI_CREATE, &c) == 0u,
+           "mpeg-intr: sceMpegCreate on a thread returns 0 (delays.expected:12)");
+    expect(mpi_on_thread_a0(NID_MPI_DELETE, MPI_DESC) == 0u,
+           "mpeg-intr: sceMpegDelete on a thread returns 0 (delays.expected:13)");
+
+    mpi_create_args(&s_ic_probe_cpu);
+    const unsigned creates_before = s_mpi_create_calls;
+    uint64_t in_intr = ic_call_in_interrupt(&create);
+    expect(in_intr == IC_RET(0x80618008u),
+           "mpeg-intr: sceMpegCreate in an interrupt handler returns 0x80618008 "
+           "(delays.expected:24)");
+    expect(s_mpi_create_calls == creates_before,
+           "mpeg-intr: the refused create never reaches the library");
+
+    expect(mpi_on_thread_a0(NID_MPI_FINISH, 0u) == 0u && mpi_on_thread_a0(NID_MPI_INIT, 0u) == 0u,
+           "mpeg-intr: sceMpegFinish and sceMpegInit reset the library");
+    mpi_create_args(&c);
+    expect(mpi_on_thread(NID_MPI_CREATE, &c) == 0u &&
+               mpi_on_thread_a0(NID_MPI_DELETE, MPI_DESC) == 0u,
+           "mpeg-intr: after the reset a thread creates and deletes again (delays.expected:29-30)");
+    (void)mpi_on_thread_a0(NID_MPI_FINISH, 0u);
+    reset_fixture();
+}
+
 static void run_worker(TCB *worker) {
     s_cur = (int)(worker - s_tcb);
     worker->state = TH_RUNNING;
@@ -19060,6 +20198,248 @@ static void test_exit_delete_lifecycle_and_join_result(void) {
     if (worker->coro) {
         sr_coro_destroy(worker->coro);
         worker->coro = NULL;
+    }
+}
+
+/* sceKernelCreateThread / sceKernelStartThread argument contracts through production dispatch.
+ * Every expected value is a cell of PSPAutotests tests/threads/threads/create.expected or
+ * start.expected (2ed7c9c5, recorded on a PSP). */
+enum {
+    CTC_NAME = 0x08301000u,
+    CTC_ARG = 0x08310000u,
+    CTC_ENTRY = 0x08804000u,
+};
+
+static uint32_t ctc_create(uint32_t name, uint32_t entry, uint32_t prio, uint32_t stack,
+                           uint32_t attr) {
+    s_cpu->r[4] = name;
+    s_cpu->r[5] = entry;
+    s_cpu->r[6] = prio;
+    s_cpu->r[7] = stack;
+    s_cpu->r[8] = attr;
+    return sr_syscall(s_cpu, NID_SCE_KERNEL_CREATE_THREAD);
+}
+
+static uint32_t ctc_start(uint32_t uid, uint32_t arglen, uint32_t argp) {
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = arglen;
+    s_cpu->r[6] = argp;
+    return sr_syscall(s_cpu, NID_SCE_KERNEL_START_THREAD);
+}
+
+static void ctc_remove(uint32_t uid) {
+    s_cpu->r[4] = uid;
+    (void)sr_syscall(s_cpu, NID_SCE_KERNEL_TERMINATE_DELETE);
+}
+
+static void test_create_thread_contract(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x195u, TH_RUNNING, 40);
+    s_cur = (int)(cur - s_tcb);
+    title_hle_write_cstr(CTC_NAME, "create");
+
+    uint32_t uid = ctc_create(CTC_NAME, CTC_ENTRY, 0x20u, 0x10000u, 0u);
+    expect((int32_t)uid > 0, "CreateThread accepts a normal create");
+    ctc_remove(uid);
+
+    /* "Names": NULL fails with 0x80020001; blank and 64-character names create. */
+    expect(ctc_create(0u, CTC_ENTRY, 0x20u, 0x10000u, 0u) == 0x80020001u,
+           "CreateThread NULL name returns 0x80020001");
+    title_hle_write_cstr(CTC_NAME + 0x100u, "");
+    uint32_t blank_uid = ctc_create(CTC_NAME + 0x100u, CTC_ENTRY, 0x20u, 0x10000u, 0u);
+    expect((int32_t)blank_uid > 0, "CreateThread accepts a blank name");
+    ctc_remove(blank_uid);
+    title_hle_write_cstr(CTC_NAME + 0x200u,
+                         "1234567890123456789012345678901234567890123456789012345678901234");
+    uint32_t long_uid = ctc_create(CTC_NAME + 0x200u, CTC_ENTRY, 0x20u, 0x10000u, 0u);
+    expect((int32_t)long_uid > 0, "CreateThread accepts a 64-character name");
+    TCB *lt = tcb_by_uid(long_uid);
+    expect(lt && strcmp(lt->name, "1234567890123456789012345678901") == 0,
+           "CreateThread cuts a long name to 31 characters");
+    ctc_remove(long_uid);
+
+    /* "Attributes": bits outside 0xf8f060ff fail with ILLEGAL_ATTR; the rest create. */
+    static const uint32_t bad_attrs[] = {0x100u, 0x200u, 0x400u, 0x600u, 0x800u, 0xf00u, 0x1000u,
+                                         0x8000u, 0xf000u, 0x10000u, 0x20000u, 0x40000u,
+                                         0x80000u, 0xf0000u, 0x1000000u, 0x2000000u,
+                                         0x4000000u, 0xf000000u};
+    for (size_t i = 0; i < sizeof(bad_attrs) / sizeof(bad_attrs[0]); i++)
+        expect(ctc_create(CTC_NAME, CTC_ENTRY, 0x20u, 0x10000u, bad_attrs[i]) == 0x80020191u,
+               "CreateThread refuses an attribute bit outside the user mask");
+    static const uint32_t good_attrs[] = {0x1u, 0x10u, 0x50u, 0x2000u, 0x4000u, 0x6000u,
+                                          0x100000u, 0x200000u, 0x400000u, 0x800000u,
+                                          0xf00000u, 0x8000000u, 0x10000000u, 0x40000000u,
+                                          0x80000000u, 0xf0000000u};
+    for (size_t i = 0; i < sizeof(good_attrs) / sizeof(good_attrs[0]); i++) {
+        uint32_t made = ctc_create(CTC_NAME, CTC_ENTRY, 0x20u, 0x10000u, good_attrs[i]);
+        expect((int32_t)made > 0, "CreateThread accepts a user-mask attribute");
+        ctc_remove(made);
+    }
+
+    /* "Stack size": under 0x200 is ILLEGAL_STACK_SIZE, a size that cannot be had is NO_MEMORY. */
+    static const uint32_t bad_stacks[] = {0u, 1u, 0x100u, 0x1ffu};
+    for (size_t i = 0; i < sizeof(bad_stacks) / sizeof(bad_stacks[0]); i++)
+        expect(ctc_create(CTC_NAME, CTC_ENTRY, 0x20u, bad_stacks[i], 0u) == 0x80020194u,
+               "CreateThread refuses a stack size under 0x200 with ILLEGAL_STACK_SIZE");
+    static const uint32_t huge_stacks[] = {0xffffffffu, 0xffff0000u, 0x20000000u};
+    for (size_t i = 0; i < sizeof(huge_stacks) / sizeof(huge_stacks[0]); i++)
+        expect(ctc_create(CTC_NAME, CTC_ENTRY, 0x20u, huge_stacks[i], 0u) == 0x80020190u,
+               "CreateThread answers NO_MEMORY for a stack that cannot be allocated");
+    static const uint32_t good_stacks[] = {0x200u, 0x1000u, 0x100000u};
+    for (size_t i = 0; i < sizeof(good_stacks) / sizeof(good_stacks[0]); i++) {
+        uint32_t made = ctc_create(CTC_NAME, CTC_ENTRY, 0x20u, good_stacks[i], 0u);
+        expect((int32_t)made > 0, "CreateThread accepts a stack size of 0x200 and up");
+        TCB *mt = tcb_by_uid(made);
+        expect(mt && mt->stack_size == good_stacks[i], "CreateThread reports the requested stack size");
+        ctc_remove(made);
+    }
+    uint32_t odd = ctc_create(CTC_NAME, CTC_ENTRY, 0x20u, 0x01000001u, 0u);
+    TCB *ot = tcb_by_uid(odd);
+    expect((int32_t)odd > 0 && ot && ot->stack_size == 0x01000100u,
+           "CreateThread rounds a 0x01000001 stack to 0x100 granularity");
+    ctc_remove(odd);
+
+    /* "Priorities": 8..0x77 only. */
+    static const uint32_t bad_prios[] = {0u, 6u, 7u, 0x78u, 0xffffffffu};
+    for (size_t i = 0; i < sizeof(bad_prios) / sizeof(bad_prios[0]); i++)
+        expect(ctc_create(CTC_NAME, CTC_ENTRY, bad_prios[i], 0x200u, 0u) == 0x80020193u,
+               "CreateThread refuses a priority outside 8..0x77 with ILLEGAL_PRIORITY");
+    static const uint32_t good_prios[] = {8u, 0x77u};
+    for (size_t i = 0; i < sizeof(good_prios) / sizeof(good_prios[0]); i++) {
+        uint32_t made = ctc_create(CTC_NAME, CTC_ENTRY, good_prios[i], 0x200u, 0u);
+        TCB *pt = tcb_by_uid(made);
+        expect((int32_t)made > 0 && pt && pt->init_priority == (int)good_prios[i],
+               "CreateThread accepts the priority range ends");
+        ctc_remove(made);
+    }
+
+    /* "Entry": NULL creates, a non-memory address fails with 0x800200d3. */
+    uint32_t null_entry = ctc_create(CTC_NAME, 0u, 0x20u, 0x10000u, 0u);
+    expect((int32_t)null_entry > 0, "CreateThread accepts a NULL entry");
+    ctc_remove(null_entry);
+    expect(ctc_create(CTC_NAME, 0xdeadbeefu, 0x20u, 0x10000u, 0u) == 0x800200d3u,
+           "CreateThread refuses an entry that is not memory with 0x800200d3");
+
+    /* "Two with same name". */
+    uint32_t one = ctc_create(CTC_NAME, CTC_ENTRY, 0x20u, 0x1000u, 0u);
+    uint32_t two = ctc_create(CTC_NAME, CTC_ENTRY, 0x20u, 0x1000u, 0u);
+    expect((int32_t)one > 0 && (int32_t)two > 0 && one != two,
+           "CreateThread accepts two threads with one name");
+    ctc_remove(one);
+    ctc_remove(two);
+}
+
+static void test_start_thread_contract(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x195u, TH_RUNNING, 40);
+    s_cur = (int)(cur - s_tcb);
+    title_hle_write_cstr(CTC_NAME, "start");
+    for (uint32_t i = 0; i < 0x700u; i++) MEM_W8(CTC_ARG + i, (uint8_t)(0x40u + i));
+
+    uint32_t target = ctc_create(CTC_NAME, CTC_ENTRY, 0x30u, 0x800u, 0u);
+    TCB *t = tcb_by_uid(target);
+    expect((int32_t)target > 0 && t, "StartThread contract: a 0x800-stack target is created");
+    if (!t) return;
+
+    /* "Argument length": a length that is negative as an int fails with 0x800200d3 and leaves the
+     * thread dormant (the cell's argc stays -1: the thread never ran). */
+    expect(ctc_start(target, 0xffffffffu, CTC_ARG) == 0x800200d3u && t->state == TH_DORMANT,
+           "StartThread refuses a -1 argument length with 0x800200d3 and stays dormant");
+    expect(ctc_start(target, 0x80000000u, CTC_ARG) == 0x800200d3u && t->state == TH_DORMANT,
+           "StartThread refuses a 0x80000000 argument length with 0x800200d3 and stays dormant");
+    /* "Argument pointers": a block that is not memory fails with 0x800200d3. */
+    expect(ctc_start(target, 4u, 0xdeadbeefu) == 0x800200d3u && t->state == TH_DORMANT,
+           "StartThread refuses a 0xdeadbeef argument block with 0x800200d3 and stays dormant");
+    expect(ctc_start(target, 4u, 0x80000000u) == 0x800200d3u && t->state == TH_DORMANT,
+           "StartThread refuses a 0x80000000 argument block with 0x800200d3 and stays dormant");
+    /* A NULL block with a length starts the thread with no argument ("With NULL ptr": 0, argc 0). */
+    expect(ctc_start(target, 8u, 0u) == 0u && t->state == TH_READY && t->arglen == 0u && t->argp == 0u,
+           "StartThread with a NULL block starts the thread with no argument");
+    expect(ctc_start(target, 0u, 0u) == 0x800201a4u, "StartThread twice returns NOT_DORMANT");
+    ctc_remove(target);
+
+    /* "Argument length": the block sits at stack + size - 0x100 - round16(len). */
+    static const struct { uint32_t len, offset; } placed[] = {
+        {1u, 0x6f0u}, {2u, 0x6f0u}, {4u, 0x6f0u}, {8u, 0x6f0u}, {80u, 0x6b0u}, {90u, 0x6a0u}, {0x600u, 0x100u},
+    };
+    for (size_t i = 0; i < sizeof(placed) / sizeof(placed[0]); i++) {
+        uint32_t uid = ctc_create(CTC_NAME, CTC_ENTRY, 0x30u, 0x800u, 0u);
+        TCB *pt = tcb_by_uid(uid);
+        expect(pt && ctc_start(uid, placed[i].len, CTC_ARG) == 0u,
+               "StartThread accepts an argument block");
+        expect(pt && pt->argp == pt->stack_base + placed[i].offset && (pt->argp & 0xfu) == 0u &&
+               memcmp(SR_HOST(pt->argp), SR_HOST(CTC_ARG), placed[i].len) == 0,
+               "StartThread copies the block to the PSP-measured stack offset");
+        /* PSP-NULLCODE-001 (docs/HARDWARE_ORACLE.md): a four-byte block at argv 0x0b7eecf0 enters with
+         * sp 0x0b7eecb0, 0x40 under the block. */
+        expect(pt && pt->saved.r[29] == pt->argp - 0x40u,
+               "StartThread enters the thread with sp 0x40 below the copied block");
+        ctc_remove(uid);
+    }
+
+    /* A block in the scratchpad is memory a user thread can read: it is accepted and copied. Only the
+     * 0xdeadbeef and 0x80000000 blocks are measured as refused (above); kernel-segment blocks are
+     * unmeasured and not pinned here. */
+    {
+        uint32_t uid = ctc_create(CTC_NAME, CTC_ENTRY, 0x30u, 0x800u, 0u);
+        TCB *pt = tcb_by_uid(uid);
+        for (uint32_t i = 0; i < 4u; i++) MEM_W8(0x00010000u + i, (uint8_t)(0xa0u + i));
+        expect(pt && ctc_start(uid, 4u, 0x00010000u) == 0u && pt->argp != 0u &&
+                   memcmp(SR_HOST(pt->argp), SR_HOST(0x00010000u), 4u) == 0,
+               "StartThread accepts and copies a block in the scratchpad");
+        ctc_remove(uid);
+    }
+
+    /* "Thread IDs". */
+    expect(ctc_start(0u, 0u, 0u) == 0x80020197u, "StartThread(0) returns ILLEGAL_THID");
+    expect(ctc_start(0xdeadbeefu, 0u, 0u) == 0x80020198u, "StartThread(unknown) returns UNKNOWN_THID");
+    expect(ctc_start(target, 0u, 0u) == 0x80020198u, "StartThread(deleted) returns UNKNOWN_THID");
+    expect(ctc_start(cur->uid, 0u, 0u) == 0x800201a4u, "StartThread(current) returns NOT_DORMANT");
+}
+
+/* sceKernelGetThreadId returns the calling thread's UID. PSPAutotests threads/start.expected records
+ * "Current: 800201a4" (StartThread(GetThreadId()) is NOT_DORMANT, so the id names the running thread),
+ * and start.c checks inside the thread that the UID word at the stack base and in k0 equals
+ * sceKernelGetThreadId() (no ERROR/WARNING line in start.expected). */
+static void test_get_thread_id_names_calling_thread(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *main_thread = fixture_thread(0x195u, TH_RUNNING, 40);
+    s_cur = (int)(main_thread - s_tcb);
+    title_hle_write_cstr(CTC_NAME, "gettid");
+    uint32_t uid = ctc_create(CTC_NAME, CTC_ENTRY, 0x30u, 0x1000u, 0u);
+    TCB *t = tcb_by_uid(uid);
+    expect((int32_t)uid > 0 && t, "GetThreadId test thread is created");
+    if (!t) return;
+    s_cpu->r[4] = 0u;
+    expect(sr_syscall(s_cpu, 0x293b45b8u) == main_thread->uid,
+           "sceKernelGetThreadId returns the calling thread's UID");
+    s_cur = (int)(t - s_tcb);
+    t->state = TH_RUNNING;
+    expect(sr_syscall(s_cpu, 0x293b45b8u) == uid &&
+           MEM_R32(t->stack_base) == uid && MEM_R32(t->k0_init + SCHED_K0_UID) == uid,
+           "sceKernelGetThreadId returns the UID the stack base and k0 block carry");
+    expect(ctc_start(uid, 0u, 0u) == 0x800201a4u,
+           "StartThread(GetThreadId()) of the running thread is NOT_DORMANT");
+    s_cur = (int)(main_thread - s_tcb);
+    t->state = TH_DORMANT;
+    ctc_remove(uid);
+}
+
+/* PSPAutotests tests/gpu/ge/queue.expected (recorded on a PSP), "sceGeListUpdateStallAddr": an id
+ * that names no list returns 0x80000100 (the "Bad ID" cell passes 0; "Not Enqueued" passes a
+ * dequeued list's id). */
+static void test_ge_update_stall_unknown_id(void) {
+    reset_fixture();
+    sr_hle_init();
+    static const uint32_t ids[] = {0u, 1u, 0x1337u, 0xffffffffu};
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        s_cpu->r[4] = ids[i];
+        s_cpu->r[5] = 0x08800100u;
+        expect(sr_syscall(s_cpu, 0xe0d68148u) == 0x80000100u,
+               "sceGeListUpdateStallAddr answers 0x80000100 for an id that names no list");
     }
 }
 
@@ -19300,7 +20680,7 @@ static void test_refer_thread_status(void) {
         THREAD_ENTRY = 0x08001234u,
         THREAD_PRIORITY = 37u,
         THREAD_STACK_SIZE = 0x1800u,
-        THREAD_ATTR = 0x1000u,
+        THREAD_ATTR = 0x2000u,   /* 0x1000 is refused with ILLEGAL_ATTR on a PSP */
         NID_REFER_THREAD_STATUS = 0x17c1684eu,
         TEST_ILLEGAL_ADDR = 0x80000103u,
         TEST_UNKNOWN_THID = 0x80020198u,
@@ -19380,6 +20760,12 @@ static uint32_t sfs_call(CpuState *cpu, uint32_t nid, uint32_t a0, uint32_t a1, 
     return sr_syscall(cpu, nid);
 }
 
+/* A PSP refuses a NULL thread name (create.expected), so the creates below pass a real one. */
+static uint32_t sfs_thread_name(void) {
+    title_hle_write_cstr(SFS_ARG_ADDR + 0x100u, "sfs-thread");
+    return SFS_ARG_ADDR + 0x100u;
+}
+
 static uint32_t sfs_free(CpuState *cpu, uint32_t uid) {
     return sfs_call(cpu, SFS_NID_GET_STACK_FREE, uid, 0u, 0u, 0u);
 }
@@ -19428,7 +20814,7 @@ static void sfs_main_fn(CpuState *cpu) {
            "stack free: the caller's own UID sees the same used stack as UID 0");
 
     /* Created, never started: its own stack, filled at creation ("Created"). */
-    const uint32_t created = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, 0u, SFS_IDLE_ENTRY,
+    const uint32_t created = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, sfs_thread_name(), SFS_IDLE_ENTRY,
                                       0x30u, 0u);
     TCB *ct = tcb_by_uid(created);
     expect(ct && ct->stack_size == 0x1000u && MEM_R32(ct->stack_base) == created &&
@@ -19442,7 +20828,7 @@ static void sfs_main_fn(CpuState *cpu) {
            "stack free: a created thread answers its own untouched stack, not the caller's");
 
     /* NO_FILLSTACK: nothing is filled and the free size is 0. */
-    const uint32_t nofill = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, 0u, SFS_IDLE_ENTRY,
+    const uint32_t nofill = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, sfs_thread_name(), SFS_IDLE_ENTRY,
                                      0x30u, SFS_ATTR_NO_FILLSTACK);
     TCB *nt = tcb_by_uid(nofill);
     expect(nt && MEM_R8(nt->stack_base + SFS_SKIP) == 0u && MEM_R8(nt->k0_init - 1u) == 0u &&
@@ -19452,7 +20838,7 @@ static void sfs_main_fn(CpuState *cpu) {
            "stack free: a NO_FILLSTACK thread answers 0");
 
     /* Ready, started with a 4-byte argument block, then suspended ("Ready", "Suspended"). */
-    const uint32_t ready = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, 0u, SFS_IDLE_ENTRY,
+    const uint32_t ready = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, sfs_thread_name(), SFS_IDLE_ENTRY,
                                     0x30u, 0u);
     MEM_W32(SFS_ARG_ADDR, 0x01020304u);   /* no 0xFF byte in the copied argument */
     expect(sfs_call(cpu, NID_SCE_KERNEL_START_THREAD, ready, 4u, SFS_ARG_ADDR, 0u) == 0u,
@@ -19467,7 +20853,7 @@ static void sfs_main_fn(CpuState *cpu) {
            "stack free: a suspended thread answers its free size");
 
     /* A stronger thread runs at StartThread, measures itself and finishes ("Finished"). */
-    const uint32_t worker = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, 0u, SFS_WORKER_ENTRY,
+    const uint32_t worker = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, sfs_thread_name(), SFS_WORKER_ENTRY,
                                      0x10u, 0u);
     expect(sfs_call(cpu, NID_SCE_KERNEL_START_THREAD, worker, 0u, 0u, 0u) == 0u,
            "stack free: the stronger thread starts");
@@ -19566,7 +20952,7 @@ static void cts_main_fn(CpuState *cpu) {
     expect(main_check == sp - self->stack_base && main_check > 0x00030000u,
            "check stack: the main thread reads $sp minus its stack's low end, above 0x30000");
 
-    const uint32_t worker = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, 0u, CTS_WORKER_ENTRY,
+    const uint32_t worker = sfs_call(cpu, NID_SCE_KERNEL_CREATE_THREAD, sfs_thread_name(), CTS_WORKER_ENTRY,
                                      0x10u, 0u);
     expect(sfs_call(cpu, NID_SCE_KERNEL_START_THREAD, worker, 0u, 0u, 0u) == 0u,
            "check stack: the 0x1000-byte worker starts");
@@ -23972,7 +25358,7 @@ struct gm_cell {
     float slope, u, v, w0, w1;
 };
 
-#define GM_CELL_COUNT 57u
+#define GM_CELL_COUNT 66u
 static const struct gm_cell gm_cells[GM_CELL_COUNT] = {
     {"c-b0", GM_K_SPRITE, 1u, 7u, 0x00, 0x004u, 0.0f, 16.0f, 4.0f, 0.0f, 0.0f},
     {"c-b1", GM_K_SPRITE, 1u, 7u, 0x10, 0x004u, 0.0f, 16.0f, 4.0f, 0.0f, 0.0f},
@@ -24031,6 +25417,18 @@ static const struct gm_cell gm_cells[GM_CELL_COUNT] = {
     {"sn-s1-w3", GM_K_QUAD, 2u, 7u, 0x00, 0x004u, 1.0f, 16.0f, 4.0f, 3.0f, 3.0f},
     {"s-s1-w1to8", GM_K_QUAD, 2u, 7u, 0x00, 0x006u, 1.0f, 16.0f, 4.0f, 1.0f, 8.0f},
     {"s-spr-s4", GM_K_SPRITE, 2u, 7u, 0x00, 0x006u, 4.0f, 16.0f, 4.0f, 0.0f, 0.0f},
+    /* Varying-w confirmation cells (#1373, 2026-11-03): the span rule's rho term (largest
+       gradient component or u-along-x and v-along-y only), mirrored ramps, a non-power-of-two
+       footprint, nearest-level rounding, a bias after the two logarithms and the slope mode. */
+    {"a-quad-v16-w1to8", GM_K_QUAD, 0u, 7u, 0x00, 0x006u, 0.0f, 16.0f, 16.0f, 1.0f, 8.0f},
+    {"a-quad-v16-w8to1", GM_K_QUAD, 0u, 7u, 0x00, 0x006u, 0.0f, 16.0f, 16.0f, 8.0f, 1.0f},
+    {"a-quad-v8-w1to8", GM_K_QUAD, 0u, 7u, 0x00, 0x006u, 0.0f, 8.0f, 8.0f, 1.0f, 8.0f},
+    {"a-quad-u48-w1to4", GM_K_QUAD, 0u, 7u, 0x00, 0x006u, 0.0f, 48.0f, 12.0f, 1.0f, 4.0f},
+    {"a-quad-w4to1", GM_K_QUAD, 0u, 7u, 0x00, 0x006u, 0.0f, 32.0f, 8.0f, 4.0f, 1.0f},
+    {"an-quad-w1to4", GM_K_QUAD, 0u, 7u, 0x00, 0x004u, 0.0f, 32.0f, 8.0f, 1.0f, 4.0f},
+    {"a-quad-w1to4-bm1f8", GM_K_QUAD, 0u, 7u, -24, 0x006u, 0.0f, 32.0f, 8.0f, 1.0f, 4.0f},
+    {"s-s1-w8to1", GM_K_QUAD, 2u, 7u, 0x00, 0x006u, 1.0f, 16.0f, 4.0f, 8.0f, 1.0f},
+    {"s-s3-w1to8", GM_K_QUAD, 2u, 7u, 0x00, 0x006u, 3.0f, 16.0f, 4.0f, 1.0f, 8.0f},
 };
 
 /* Level `level`'s side in texels, its buffer width (whole 16-byte rows: at least 4 texels)
@@ -24314,11 +25712,10 @@ static void test_ge_mip_cells_software_contract(void) {
     sr_hle_test_ge_lists_reset();
 }
 
-/* PSP-GE-MIP-001 (#1373): the window digest each cell left on a PSP-3000 (system software 6.61,
- * ARK-5.1.0; pspver 6.6.0; probe case ge-mip at 66940d76, docs/HARDWARE_ORACLE.md). Index k is gm_cells[k]. `modelled` is 0
- * for the two cells whose w varies across the window: there the PSP holds one level of detail
- * per 4-pixel span of a row at a triangle-dependent point (ge.c tex_detail16), which the
- * software GE does not model, so their digests are recorded but not required. */
+/* PSP-GE-MIP-001 (#1373): the window digest each of the 66 cells left on a PSP-3000 (pspver
+ * 6.6.0; probe case ge-mip, the 2026-11-03 run at 99a384bb on boot 111, docs/HARDWARE_ORACLE.md;
+ * the first 57 windows are bit-identical to the earlier run at 66940d76). Index k is gm_cells[k].
+ * Every cell is required, the varying-w ones included (ge.c raster_tri_lod_span). */
 static const struct {
     const char *name;
     uint64_t psp;
@@ -24380,14 +25777,19 @@ static const struct {
     {"sn-s1-w3", 0x9dc00e67ab07b725ull},
     {"s-s1-w1to8", 0xc96687bd2bfe7501ull},
     {"s-spr-s4", 0x9dc00e67ab07b725ull},
+    {"a-quad-v16-w1to8", 0x83874c0f11083431ull},
+    {"a-quad-v16-w8to1", 0x3310acc574ce1449ull},
+    {"a-quad-v8-w1to8", 0xa62327ab488981bdull},
+    {"a-quad-u48-w1to4", 0xd40bef19621a2b65ull},
+    {"a-quad-w4to1", 0x0d9488367ddac995ull},
+    {"an-quad-w1to4", 0xcfdef10ef7c147d5ull},
+    {"a-quad-w1to4-bm1f8", 0xc0a0b4c6c4a601a1ull},
+    {"s-s1-w8to1", 0xd859e68db495cbd9ull},
+    {"s-s3-w1to8", 0x3637655ff7f299f1ull},
 };
 
-static int gm_cell_modelled(const char *name) {
-    return strcmp(name, "a-quad-w1to4") != 0 && strcmp(name, "s-s1-w1to8") != 0;
-}
-
 /* Every PSP-GE-MIP-001 cell through production dispatch and the software GE, with the probe's
- * own list, vertices and texture; each modelled cell's window must match the PSP's digest. A
+ * own list, vertices and texture; each cell's window must match the PSP's digest. A
  * diverging cell prints its software window for comparison with the raw hardware rows. */
 static void test_ge_mip_cells_match_psp(void) {
     CpuState cpu;
@@ -24414,7 +25816,6 @@ static void test_ge_mip_cells_match_psp(void) {
         for (uint32_t i = 0; i < GM_N; i++)
             px[i] = MEM_R32(fb + ((GM_WY + i / GM_WW) * GM_STRIDE + GM_WX + i % GM_WW) * 4u);
         if (strcmp(s_gm_psp[k].name, c->name) != 0) names_ok = 0;
-        if (!gm_cell_modelled(c->name)) continue;
         modelled++;
         const uint64_t digest = gm_digest(px);
         if (digest != s_gm_psp[k].psp) {
@@ -24428,8 +25829,8 @@ static void test_ge_mip_cells_match_psp(void) {
     }
     expect(names_ok, "PSP-GE-MIP-001 digest table rows name the cells in table order");
     expect(synced, "every PSP-GE-MIP-001 list is accepted and completes");
-    expect(modelled == GM_CELL_COUNT - 2u, "PSP-GE-MIP-001 leaves only the two varying-w cells unmodelled");
-    expect(diverged == 0, "every modelled PSP-GE-MIP-001 cell matches the PSP window digest");
+    expect(modelled == GM_CELL_COUNT, "every PSP-GE-MIP-001 cell is checked, the varying-w ones included");
+    expect(diverged == 0, "every PSP-GE-MIP-001 cell matches the PSP window digest");
     sr_hle_test_ge_lists_reset();
 }
 
@@ -25560,6 +26961,239 @@ static void test_ge_sync_ids_match_psp(void) {
                gsw_call(NID_SCE_GE_LIST_SYNC, c, 1u, 0u, 0u) == 0x80000100u &&
                gsw_call(NID_SCE_GE_DRAW_SYNC, 1u, 0u, 0u, 0u) == 0u,
            "a reset-removed list peeks as 0x80000100 and the GE as idle");
+    sr_hle_test_ge_lists_reset();
+}
+
+/* A SIGNAL whose behaviour is JUMP (0x10), CALL (0x11), RET (0x12) or their relative (0x13,
+ * 0x14) and origin (0x15, 0x16) forms, with the END after it, moves the list: the GE driver's
+ * interrupt handler jumps, or saves the caller on the list's stack and calls, or returns
+ * (uofw src/kd/ge/ge.c _sceGeListInterrupt). A title that hangs each frame's drawing off one
+ * SIGNAL CALL drew nothing while the pair was only logged. The fog registers are plain state
+ * that sceGeGetCmd reads back, so each says which list words ran. */
+static void ge_signal_pair(uint32_t at, unsigned behavior, uint32_t off) {
+    MEM_W32(at, 0x0e000000u | (behavior << 16) | (off >> 16));
+    MEM_W32(at + 4u, 0x0c000000u | (off & 0xffffu));
+}
+
+static void test_ge_signal_jump_call_ret(void) {
+    const uint32_t ml = 0x08923000u, sub = 0x08924000u, sub2 = 0x08924100u;
+    const uint32_t args = 0x08925000u, ml2 = 0x08926000u, rsub = 0x08926200u;
+    const uint32_t hw = 0x08926400u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_set_compiled_sdk_version(0u);   /* before SDK 2.00: 32 stack entries */
+
+    /* Main list: CALL sub, then FOGCOLOR. sub: FOG1, JUMP sub2. sub2: FOG2, RET. */
+    MEM_W32(ml, 0x10080000u);                   /* BASE 0x08 */
+    ge_signal_pair(ml + 4u, 0x11u, sub);        /* SIGNAL CALL sub */
+    MEM_W32(ml + 12u, 0xcf000011u);             /* FOGCOLOR, after the return */
+    MEM_W32(ml + 16u, 0x0f000000u);             /* FINISH */
+    MEM_W32(ml + 20u, 0x0c000000u);             /* END */
+    MEM_W32(sub, 0xcd000022u);                  /* FOG1 */
+    MEM_W32(sub + 4u, 0x10090000u);             /* BASE 0x09: the RET restores 0x08 */
+    ge_signal_pair(sub + 8u, 0x10u, sub2);      /* SIGNAL JUMP sub2 */
+    MEM_W32(sub + 16u, 0xcd0000eeu);            /* skipped by the JUMP */
+    MEM_W32(sub2, 0xce000033u);                 /* FOG2 */
+    ge_signal_pair(sub2 + 4u, 0x12u, 0u);       /* SIGNAL RET */
+    MEM_W32(sub2 + 12u, 0xce0000eeu);           /* skipped by the RET */
+
+    const uint32_t a = gsw_call(NID_SCE_GE_LIST_ENQUEUE, ml, 0u, 0xffffffffu, 0u);
+    expect((a & 0xff000000u) == 0x35000000u && gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 0u,
+           "a list that SIGNAL-CALLs a sub-list runs to its own END");
+    expect(gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x22u,
+           "SIGNAL CALL runs the called list (uofw _sceGeListInterrupt)");
+    expect(gsw_call(NID_SCE_GE_GET_CMD, 0xceu, 0u, 0u, 0u) == 0x33u,
+           "SIGNAL JUMP continues at its target, not after its END");
+    expect(gsw_call(NID_SCE_GE_GET_CMD, 0xcfu, 0u, 0u, 0u) == 0x11u,
+           "SIGNAL RET returns to the word after the caller's END");
+    expect(gsw_call(NID_SCE_GE_GET_CMD, 0x10u, 0u, 0u, 0u) == 0x080000u,
+           "SIGNAL RET restores the caller's BASE");
+
+    /* Relative CALL (from the SIGNAL word), and a hardware CALL/RET inside the callee: the
+     * callee starts with an empty hardware stack, so its RET returns to it, not to the caller. */
+    MEM_W32(ml2, 0x13000000u);                  /* OFFSETADDR 0 */
+    ge_signal_pair(ml2 + 4u, 0x14u, rsub - (ml2 + 4u));   /* SIGNAL RCALL rsub */
+    MEM_W32(ml2 + 12u, 0xcf000044u);
+    MEM_W32(ml2 + 16u, 0x0f000000u);
+    MEM_W32(ml2 + 20u, 0x0c000000u);
+    MEM_W32(rsub, 0x10080000u);                 /* BASE 0x08 */
+    MEM_W32(rsub + 4u, 0x0a000000u | (hw & 0x00ffffffu));  /* hardware CALL hw */
+    MEM_W32(rsub + 8u, 0xcd000055u);
+    ge_signal_pair(rsub + 12u, 0x12u, 0u);      /* SIGNAL RET */
+    MEM_W32(hw, 0xce000066u);
+    MEM_W32(hw + 4u, 0x0b000000u);              /* hardware RET */
+    const uint32_t b = gsw_call(NID_SCE_GE_LIST_ENQUEUE, ml2, 0u, 0xffffffffu, 0u);
+    expect(gsw_call(NID_SCE_GE_LIST_SYNC, b, 1u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xceu, 0u, 0u, 0u) == 0x66u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x55u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcfu, 0u, 0u, 0u) == 0x44u,
+           "SIGNAL RCALL is relative to the SIGNAL, and a hardware CALL/RET nests inside it");
+
+    /* The stack holds SceGeListArgs.numStacks entries. With none, a CALL is the driver's
+     * stack-overflow error: the run stops by name and the list stays at the SIGNAL. */
+    MEM_W32(args, 16u);                         /* size */
+    MEM_W32(args + 4u, 0u);                     /* context */
+    MEM_W32(args + 8u, 0u);                     /* numStacks */
+    MEM_W32(args + 12u, 0u);                    /* stacks */
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    const uint32_t c = gsw_call(NID_SCE_GE_LIST_ENQUEUE, ml, 0u, 0xffffffffu, args);
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, c, 1u, 0u, 0u) != 0u,
+           "a SIGNAL CALL with numStacks 0 stops the run by name, the list unfinished");
+    sr_hle_test_ge_lists_reset();
+
+    /* After SDK 2.00 a list with no arguments has no stack either (uofw _sceGeListEnQueue). */
+    sr_hle_test_set_compiled_sdk_version(0x02000010u);
+    stops = sr_hle_test_unmodelled_stops();
+    (void)gsw_call(NID_SCE_GE_LIST_ENQUEUE, ml, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u,
+           "an SDK 2.00 list enqueued without arguments has no SIGNAL CALL stack");
+    sr_hle_test_ge_lists_reset();
+    MEM_W32(args + 8u, 1u);
+    stops = sr_hle_test_unmodelled_stops();
+    const uint32_t d = gsw_call(NID_SCE_GE_LIST_ENQUEUE, ml, 0u, 0xffffffffu, args);
+    expect(sr_hle_test_unmodelled_stops() == stops &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, d, 1u, 0u, 0u) == 0u,
+           "numStacks 1 holds the one SIGNAL CALL");
+    MEM_W32(args + 8u, 256u);
+    expect(gsw_call(NID_SCE_GE_LIST_ENQUEUE, ml, 0u, 0xffffffffu, args) == 0x80000104u,
+           "numStacks 256 is SCE_ERROR_INVALID_SIZE (uofw _sceGeListEnQueue)");
+
+    /* A RET with nothing called is the driver's stack-underflow error. */
+    sr_hle_test_ge_lists_reset();
+    stops = sr_hle_test_unmodelled_stops();
+    (void)gsw_call(NID_SCE_GE_LIST_ENQUEUE, sub2, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u,
+           "a SIGNAL RET with an empty stack stops the run by name");
+    sr_hle_test_set_compiled_sdk_version(0u);
+    sr_hle_test_ge_lists_reset();
+}
+
+/* The SIGNAL list-control cases that need a caller inside a hardware CALL, the origin forms,
+ * the address error, the BASE a RET restores, and a stall between a SIGNAL and its END. */
+static void test_ge_signal_depth_origin_stall(void) {
+    const uint32_t m3 = 0x08927000u, h3 = 0x08927100u, c3 = 0x08927200u, x3 = 0x08927300u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_set_compiled_sdk_version(0u);   /* before SDK 2.00: 32 stack entries */
+
+    /* A SIGNAL CALL made one hardware CALL deep. The callee's unpaired hardware RET can't pop
+     * the caller's entry, and the callee's own hardware CALL, left open at its SIGNAL RET, is
+     * dropped: the RET restores the caller's depth, so the caller's RET returns to m3. */
+    MEM_W32(m3, 0x10080000u);                   /* BASE 0x08 */
+    MEM_W32(m3 + 4u, 0x13000000u);              /* OFFSETADDR 0 */
+    MEM_W32(m3 + 8u, 0x0a000000u | (h3 & 0x00ffffffu));   /* hardware CALL h3 */
+    MEM_W32(m3 + 12u, 0xcf000077u);
+    MEM_W32(m3 + 16u, 0x0f000000u);             /* FINISH */
+    MEM_W32(m3 + 20u, 0x0c000000u);             /* END */
+    ge_signal_pair(h3, 0x11u, c3);              /* SIGNAL CALL c3, at hardware depth 1 */
+    MEM_W32(h3 + 8u, 0xce000088u);
+    MEM_W32(h3 + 12u, 0x0b000000u);             /* hardware RET to m3 */
+    MEM_W32(c3, 0x0b000000u);                   /* unpaired hardware RET: ignored */
+    MEM_W32(c3 + 4u, 0x0a000000u | (x3 & 0x00ffffffu));   /* hardware CALL x3, never returned */
+    MEM_W32(c3 + 8u, 0xcd0000eeu);              /* reached only by a wrong RET */
+    MEM_W32(c3 + 12u, 0x0f000000u);
+    MEM_W32(c3 + 16u, 0x0c000000u);
+    MEM_W32(x3, 0xcd000099u);
+    ge_signal_pair(x3 + 4u, 0x12u, 0u);         /* SIGNAL RET to h3 + 8 */
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    const uint32_t a = gsw_call(NID_SCE_GE_LIST_ENQUEUE, m3, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, a, 1u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x99u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xceu, 0u, 0u, 0u) == 0x88u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcfu, 0u, 0u, 0u) == 0x77u,
+           "a SIGNAL CALL one hardware CALL deep: the callee's RET keeps off the caller's "
+           "entry, and SIGNAL RET restores the caller's depth");
+
+    /* OCALL and OJUMP add the offset register (OFFSETADDR or ORIGIN), not BASE. BASE is
+     * 0x09 here, so a target that also added it would land outside these lists. */
+    const uint32_t m4 = 0x08927400u, o4 = 0x08927500u, j4 = 0x08927580u;
+    const uint32_t org = 0x08920000u;
+    MEM_W32(m4, 0x10090000u);                   /* BASE 0x09 */
+    MEM_W32(m4 + 4u, 0x13000000u | (org >> 8)); /* OFFSETADDR org */
+    ge_signal_pair(m4 + 8u, 0x16u, o4 - org);   /* SIGNAL OCALL o4 */
+    ge_signal_pair(m4 + 16u, 0x15u, j4 - org);  /* SIGNAL OJUMP j4 */
+    MEM_W32(m4 + 24u, 0x0f000000u);             /* reached only if the OJUMP falls through */
+    MEM_W32(m4 + 28u, 0x0c000000u);
+    MEM_W32(o4, 0xcd0000a1u);
+    ge_signal_pair(o4 + 4u, 0x12u, 0u);         /* SIGNAL RET */
+    MEM_W32(j4, 0xce0000a2u);
+    MEM_W32(j4 + 4u, 0x0f000000u);
+    MEM_W32(j4 + 8u, 0x0c000000u);
+    stops = sr_hle_test_unmodelled_stops();
+    const uint32_t b = gsw_call(NID_SCE_GE_LIST_ENQUEUE, m4, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, b, 1u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0xa1u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xceu, 0u, 0u, 0u) == 0xa2u,
+           "SIGNAL OCALL and OJUMP are relative to the offset register, without BASE");
+
+    /* SIGNAL RET restores the caller's BASE register itself, not only the value sceGeGetCmd
+     * reads: the caller's next hardware CALL is addressed from it. */
+    const uint32_t m5 = 0x08927600u, c5 = 0x08927700u, t5 = 0x08927780u;
+    MEM_W32(m5, 0x10080000u);                   /* BASE 0x08 */
+    MEM_W32(m5 + 4u, 0x13000000u);              /* OFFSETADDR 0 */
+    ge_signal_pair(m5 + 8u, 0x11u, c5);         /* SIGNAL CALL c5 */
+    MEM_W32(m5 + 16u, 0x0a000000u | (t5 & 0x00ffffffu));  /* hardware CALL t5 under BASE 0x08 */
+    MEM_W32(m5 + 20u, 0x0f000000u);
+    MEM_W32(m5 + 24u, 0x0c000000u);
+    MEM_W32(c5, 0x10090000u);                   /* BASE 0x09 in the callee */
+    ge_signal_pair(c5 + 4u, 0x12u, 0u);         /* SIGNAL RET */
+    MEM_W32(t5, 0xcf0000b3u);
+    MEM_W32(t5 + 4u, 0x0b000000u);
+    const uint32_t wrong = 0x09000000u | (t5 & 0x00ffffffu);
+    MEM_W32(wrong, 0xcf0000eeu);                /* where BASE 0x09 would have sent it */
+    MEM_W32(wrong + 4u, 0x0b000000u);
+    const uint32_t c = gsw_call(NID_SCE_GE_LIST_ENQUEUE, m5, 0u, 0xffffffffu, 0u);
+    expect(gsw_call(NID_SCE_GE_LIST_SYNC, c, 1u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcfu, 0u, 0u, 0u) == 0xb3u,
+           "SIGNAL RET restores BASE for the caller's later addressing");
+
+    /* A JUMP to an address that is not word-aligned, or not readable, is the driver's address
+     * error: the run stops by name, the list unfinished. The aligned word below the misaligned
+     * target ends the list, so a run that skipped the check would finish it. */
+    const uint32_t m6 = 0x08927800u, t6 = 0x08927880u;
+    ge_signal_pair(m6, 0x10u, t6 + 2u);         /* SIGNAL JUMP t6 + 2 */
+    MEM_W32(m6 + 8u, 0x0f000000u);
+    MEM_W32(m6 + 12u, 0x0c000000u);
+    MEM_W32(t6, 0x0f000000u);
+    MEM_W32(t6 + 4u, 0x0c000000u);
+    sr_hle_test_ge_lists_reset();
+    stops = sr_hle_test_unmodelled_stops();
+    const uint32_t d = gsw_call(NID_SCE_GE_LIST_ENQUEUE, m6, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, d, 1u, 0u, 0u) != 0u,
+           "a SIGNAL JUMP to a misaligned address stops the run by name");
+    sr_hle_test_ge_lists_reset();
+    ge_signal_pair(m6, 0x10u, 0x0f000000u);     /* SIGNAL JUMP outside guest memory */
+    stops = sr_hle_test_unmodelled_stops();
+    const uint32_t e = gsw_call(NID_SCE_GE_LIST_ENQUEUE, m6, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, e, 1u, 0u, 0u) != 0u,
+           "a SIGNAL JUMP to an unreadable address stops the run by name");
+    sr_hle_test_ge_lists_reset();
+
+    /* A stall address on the END of a SIGNAL CALL pair: the pair still calls once the stall
+     * moves on, since the driver reads both words when the END runs. */
+    const uint32_t m7 = 0x08927900u, c7 = 0x08927a00u;
+    MEM_W32(m7, 0x10080000u);
+    ge_signal_pair(m7 + 4u, 0x11u, c7);         /* SIGNAL CALL c7; the stall is on its END */
+    MEM_W32(m7 + 12u, 0xcf0000c1u);
+    MEM_W32(m7 + 16u, 0x0f000000u);
+    MEM_W32(m7 + 20u, 0x0c000000u);
+    MEM_W32(c7, 0xcd0000c2u);
+    ge_signal_pair(c7 + 4u, 0x12u, 0u);         /* SIGNAL RET */
+    const uint32_t f = gsw_call(NID_SCE_GE_LIST_ENQUEUE, m7, m7 + 8u, 0xffffffffu, 0u);
+    expect(gsw_call(NID_SCE_GE_LIST_SYNC, f, 1u, 0u, 0u) != 0u,
+           "a list stalled on the END of its SIGNAL CALL waits there");
+    expect(gsw_call(NID_SCE_GE_LIST_UPDATE_STALL_ADDR, f, m7 + 24u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, f, 1u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0xc2u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcfu, 0u, 0u, 0u) == 0xc1u,
+           "a SIGNAL CALL split by a stall between it and its END still calls when resumed");
     sr_hle_test_ge_lists_reset();
 }
 
@@ -26739,6 +28373,45 @@ static void test_dcache_maintenance_notifies_renderer(void) {
     ge_set_gpu_hooks(NULL);
 }
 
+/* Instruction-cache maintenance (#1979). The three Icache NIDs are registered in production
+ * and in this harness (hle_register_icache_handlers); each is entered here through
+ * sr_syscall with a literal NID. The cells pin what the handlers do today: a normal range,
+ * a zero-length range and a range running past 0xffffffff all return 0 without a fault, and
+ * the all-cache forms ignore their arguments. They are synthetic checks of current
+ * behaviour, not PSP measurements: no hardware result is claimed. */
+static void icache_set_args(CpuState *cpu, uint32_t addr, uint32_t length) {
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[4] = addr;
+    cpu->r[5] = length;
+}
+
+static void test_icache_maintenance_returns_zero_for_every_range(void) {
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+
+    icache_set_args(&cpu, 0x08abc000u, 0x2000u);
+    expect(sr_syscall(&cpu, 0x920f104au) == 0u, "sceKernelIcacheInvalidateAll returns 0 for a normal range");
+    icache_set_args(&cpu, 0x08abc000u, 0x2000u);
+    expect(sr_syscall(&cpu, 0xd8779ac6u) == 0u, "sceKernelIcacheClearAll returns 0 for a normal range");
+    icache_set_args(&cpu, 0x08abc000u, 0x2000u);
+    expect(sr_syscall(&cpu, 0xc2df770eu) == 0u, "sceKernelIcacheInvalidateRange returns 0 for a normal range");
+
+    icache_set_args(&cpu, 0x08abc000u, 0u);
+    expect(sr_syscall(&cpu, 0x920f104au) == 0u, "sceKernelIcacheInvalidateAll returns 0 for a zero length");
+    icache_set_args(&cpu, 0x08abc000u, 0u);
+    expect(sr_syscall(&cpu, 0xd8779ac6u) == 0u, "sceKernelIcacheClearAll returns 0 for a zero length");
+    icache_set_args(&cpu, 0x08abc000u, 0u);
+    expect(sr_syscall(&cpu, 0xc2df770eu) == 0u, "sceKernelIcacheInvalidateRange returns 0 for a zero length");
+
+    icache_set_args(&cpu, 0xfffffff0u, 0x100u);
+    expect(sr_syscall(&cpu, 0x920f104au) == 0u, "sceKernelIcacheInvalidateAll returns 0 for a range past 0xffffffff");
+    icache_set_args(&cpu, 0xfffffff0u, 0x100u);
+    expect(sr_syscall(&cpu, 0xd8779ac6u) == 0u, "sceKernelIcacheClearAll returns 0 for a range past 0xffffffff");
+    icache_set_args(&cpu, 0xfffffff0u, 0x100u);
+    expect(sr_syscall(&cpu, 0xc2df770eu) == 0u, "sceKernelIcacheInvalidateRange returns 0 for a range past 0xffffffff");
+}
+
 /* Host-memory safety for the production GE block-transfer command path.  The
  * temporary arena deliberately commits one complete maximum-transfer window after
  * the modeled 192 MiB guest arena.  That makes the historical later-row write
@@ -27115,10 +28788,10 @@ static void test_bulk_guest_span_atomicity(void) {
     expect(MEM_R8(0x0bfffff0u) == 0x3cu && MEM_R8(0x0bfffff0u + 15u) == 0x3cu,
            "rejected memset performs no partial guest mutation");
     for (uint32_t i = 0; i < 16u; i++) MEM_W8(0x0bfffff0u + i, 0x2au);
-    expect(bulk_call(NID_SCE_DMAC_MEMCPY, 0x0bfffff0u, src, 17u) == 0u,
-           "production DMA reports success for a measured one-byte tail");
-    expect(MEM_R8(0x0bfffff0u) == 0x30u && MEM_R8(0x0bfffff0u + 15u) == 0x3fu,
-           "measured one-byte DMA tail copies the valid prefix");
+    expect(bulk_call(NID_SCE_DMAC_MEMCPY, 0x0bfffff0u, src, 17u) == 0x80000103u,
+           "production DMA refuses a one-byte tail past the arena");
+    expect(MEM_R8(0x0bfffff0u) == 0x2au && MEM_R8(0x0bfffff0u + 15u) == 0x2au,
+           "a refused DMA tail performs no partial guest mutation");
 }
 
 /* ---- sceDmacMemcpy / sceDmacTryMemcpy hardware regressions ------------------
@@ -27130,8 +28803,9 @@ static void test_bulk_guest_span_atomicity(void) {
  * The expected values come from the source-owned PSP-3000 / 6.61-ARK
  * measurements; private capture details are intentionally not part of this
  * public-safe tree. Fully valid spans are complete copies through 1 MiB. A
- * one-byte tail past a proven prefix is copied through that prefix; larger
- * or wrapped overruns remain fail-closed until separately measured. */
+ * span past the end of the guest arena, of any length, or a wrapped one is
+ * refused whole: a runtime safety boundary, since the PSP's answer there is
+ * unmeasured (#303). */
 
 /* The probe's source pattern: byte i of the source buffer is 0x10 + (i & 0x3F).
  * Reusing the exact fill makes the expected bytes below the same literals the
@@ -27180,6 +28854,18 @@ static void test_dmac_hardware_semantics(uint32_t nid, const char *who) {
     expect(s_gpu_dirty_calls == 0u,
            "a zero-size request issues no GPU dirty notification");
 
+    /* Hardware: size 0 with a NULL destination, a NULL source or destination
+     * 0xFFFFFFFF -> 0x80000104 too, for both APIs, nothing written (PSP-DMAC-001
+     * invalid-tail-s0-a/b/d, 2026-11-03): the size check precedes the pointer checks. */
+    expect(bulk_call(nid, 0u, src, 0u) == SCE_DMAC_ILLEGAL_SIZE,
+           "PSP: size 0 with a NULL destination returns the illegal-size error");
+    expect(bulk_call(nid, dst, 0u, 0u) == SCE_DMAC_ILLEGAL_SIZE,
+           "PSP: size 0 with a NULL source returns the illegal-size error");
+    expect(bulk_call(nid, 0xffffffffu, src, 0u) == SCE_DMAC_ILLEGAL_SIZE,
+           "PSP: size 0 with destination 0xFFFFFFFF returns the illegal-size error");
+    expect(dmac_span_is(dst, 256u, 0xa5u) && s_gpu_dirty_calls == 0u,
+           "PSP: a zero-size request with a bad pointer writes nothing");
+
     /* Hardware: NULL dst or NULL src with size 64 -> 0x80000103 (v4 and v6).
      * Guest address 0 is inside this runtime's flat arena, so without an
      * explicit check it would pass span validation and silently copy. */
@@ -27190,37 +28876,28 @@ static void test_dmac_hardware_semantics(uint32_t nid, const char *who) {
     expect(dmac_span_is(dst, 256u, 0xa5u),
            "PSP: a NULL-pointer request modifies no destination byte");
 
-    /* Checked span arithmetic. The arena ends at guest physical 0x0c000000.
-     * The one-byte boundary shape is the newly measured partial-tail control;
-     * the complete prefix is copied and the byte past it is untouched. */
+    /* Checked span arithmetic. The arena ends at guest physical 0x0c000000. A
+     * span one byte past it is refused whole, from either side: nothing is copied
+     * and the GPU is not told. Runtime safety boundary, not a PSP measurement. */
     dmac_fill(src, 17u);
     dmac_clear(0x0bfffff0u, 16u, 0x3bu);
     gpu_dirty_reset();
-    expect(bulk_call(nid, 0x0bfffff0u, src, 17u) == 0u,
-           "PSP: a one-byte invalid destination tail returns success");
-    expect(dmac_span_matches(0x0bfffff0u, 16u, 0u),
-           "PSP: a one-byte invalid destination tail copies only the prefix");
-    expect(s_gpu_dirty_calls == 1u && s_gpu_dirty_addr == 0x0bfffff0u &&
-               s_gpu_dirty_bytes == 16u,
-           "PSP: a partial destination tail dirties only the valid prefix");
+    expect(bulk_call(nid, 0x0bfffff0u, src, 17u) == SCE_DMAC_ILLEGAL_ADDR,
+           "a destination span one byte past the arena is refused");
+    expect(dmac_span_is(0x0bfffff0u, 16u, 0x3bu),
+           "a refused one-byte destination tail copies nothing");
 
     dmac_fill(0x0bfffff0u, 16u);
     dmac_clear(dst, 17u, 0x4bu);
-    gpu_dirty_reset();
-    expect(bulk_call(nid, dst, 0x0bfffff0u, 17u) == 0u,
-           "PSP: a one-byte invalid source tail returns success");
-    expect(dmac_span_matches(dst, 16u, 0u),
-           "PSP: a one-byte invalid source tail copies only the prefix");
-    expect(s_gpu_dirty_calls == 1u && s_gpu_dirty_addr == dst &&
-               s_gpu_dirty_bytes == 16u,
-           "PSP: a partial source tail dirties only the valid prefix");
+    expect(bulk_call(nid, dst, 0x0bfffff0u, 17u) == SCE_DMAC_ILLEGAL_ADDR,
+           "a source span one byte past the arena is refused");
+    expect(dmac_span_is(dst, 17u, 0x4bu),
+           "a refused one-byte source tail copies nothing");
 
-    /* Larger tails and uint32 wrap are still deliberately conservative: no
-     * partial host pointer is formed for an unmeasured shape. */
+    /* Larger tails and uint32 wrap: no partial host pointer is formed. */
     dmac_clear(0x0bff1000u, 0xc000u, 0x3bu);
-    gpu_dirty_reset();
     expect(bulk_call(nid, 0x0bff1000u, src, 0x10000u) == SCE_DMAC_ILLEGAL_ADDR,
-           "unmeasured multi-byte invalid tail remains fail-closed");
+           "a multi-byte tail past the arena is refused");
     expect(bulk_call(nid, 0x0bffff00u, src, 0xFFFFFF00u) == SCE_DMAC_ILLEGAL_ADDR,
            "PSP class: a destination span that wraps uint32_t is rejected");
     expect(bulk_call(nid, dst, 0x0bffff00u, 0xFFFFFF00u) == SCE_DMAC_ILLEGAL_ADDR,
@@ -29007,7 +30684,7 @@ static void test_atrac_aa3_and_reinit_1379(void) {
  *   5. MPEG (RingbufferDestruct, FlushAllStream, AvcDecodeFlush)
  *   6. LwMutex status (ReferLwMutexStatus, ReferLwMutexStatusByID)
  *   7. ATRAC second buffer & lifecycle (SetSecondBuffer, GetSecondBufferInfo,
- *      GetBufferInfoForResetting / Reseting, Reinit, ReleaseResources)
+ *      GetBufferInfoForResetting / Reseting, Reinit, EndEntry)
  * Dispatches through sr_syscall to pin the exact production NID mapping. */
 
 #define NID_SCE_CTRL_SET_SAMPLING_MODE               0x1f4011e6u
@@ -29025,6 +30702,7 @@ static void test_atrac_aa3_and_reinit_1379(void) {
 #define NID_SCE_MPEG_RINGBUFFER_DESTRUCT             0x13407f13u
 #define NID_SCE_MPEG_FLUSH_ALL_STREAM                0x707b7629u
 #define NID_SCE_MPEG_AVC_DECODE_FLUSH                0x4571cc64u
+#define NID_SCE_MPEG_FLUSH_STREAM                    0x500f0429u
 #define NID_TD24D_CREATE_LWMUTEX                     0x19cff145u
 #define NID_TD24D_DELETE_LWMUTEX                     0x60107536u
 #define NID_SCE_KERNEL_REFER_LWMUTEX_STATUS          0xc1734599u
@@ -29034,7 +30712,7 @@ static void test_atrac_aa3_and_reinit_1379(void) {
 #define NID_SCE_ATRAC_GET_BUFFER_INFO_FOR_RESETTING  0x2dd3e298u
 #define NID_SCE_ATRAC_GET_BUFFER_INFO_FOR_RESETING   0xca3ca3d2u
 #define NID_SCE_ATRAC_REINIT                         0x132f1ecau
-#define NID_SCE_ATRAC_RELEASE_RESOURCES              0xd5c28cc0u
+#define NID_SCE_ATRAC_END_ENTRY                      0xd5c28cc0u
 
 extern void sr_hle_test_ctrl_sampling_reset(void);
 extern uint32_t sr_hle_test_power_lock_count(void);
@@ -29086,11 +30764,11 @@ static void test_td24d_hle_batch(void) {
            "sceCtrlSetSamplingCycle returns previous cycle 5555");
 
     /* Thresholds round-trip */
-    expect(td24b_dispatch4(NID_SCE_CTRL_SET_IDLE_CANCEL_THRESHOLD, 123u, 456u, 0u, 0u) == 0u,
+    expect(td24b_dispatch4(NID_SCE_CTRL_SET_IDLE_CANCEL_THRESHOLD, 123u, 126u, 0u, 0u) == 0u,
            "sceCtrlSetIdleCancelThreshold accepts custom thresholds");
     expect(td24b_dispatch4(NID_SCE_CTRL_GET_IDLE_CANCEL_THRESHOLD, TD24D_CTRL_OUT, TD24D_CTRL_OUT + 4u, 0u, 0u) == 0u &&
                MEM_R32(TD24D_CTRL_OUT) == 123u &&
-               MEM_R32(TD24D_CTRL_OUT + 4u) == 456u,
+               MEM_R32(TD24D_CTRL_OUT + 4u) == 126u,
            "sceCtrlGetIdleCancelThreshold reflects set thresholds");
     sr_hle_test_ctrl_sampling_reset();
 
@@ -29210,16 +30888,33 @@ static void test_td24d_hle_batch(void) {
                MEM_R32(TD24D_RB_ADDR + 12u) == 0u,
            "sceMpegFlushAllStream flushes ring packet counters");
 
-    /* AvcDecodeFlush clears packet counters via mpeg struct */
+    /* AvcDecodeFlush flushes the video decoder and leaves the ring alone (#286): a guest PSMF
+     * player fills the ring, calls it, and expects the packets to still be there. Only
+     * FlushAllStream clears the ring counters. */
     MEM_W32(TD24D_RB_ADDR + 4u, 12u);
     MEM_W32(TD24D_RB_ADDR + 8u, 22u);
     MEM_W32(TD24D_RB_ADDR + 12u, 32u);
     expect(td24b_dispatch4(NID_SCE_MPEG_AVC_DECODE_FLUSH, TD24D_MPEG_DESC, 0u, 0u, 0u) == 0u,
            "sceMpegAvcDecodeFlush succeeds on valid MPEG descriptor");
-    expect(MEM_R32(TD24D_RB_ADDR + 4u) == 0u &&
-               MEM_R32(TD24D_RB_ADDR + 8u) == 0u &&
-               MEM_R32(TD24D_RB_ADDR + 12u) == 0u,
-           "sceMpegAvcDecodeFlush flushes ring packet counters");
+    expect(MEM_R32(TD24D_RB_ADDR + 4u) == 12u &&
+               MEM_R32(TD24D_RB_ADDR + 8u) == 22u &&
+               MEM_R32(TD24D_RB_ADDR + 12u) == 32u,
+           "sceMpegAvcDecodeFlush leaves the ring counters alone");
+
+    /* FlushStream is registered next to them; it only validates its arguments and leaves the
+     * shared ring counters alone. The stream-id check lives in mpeg.c, which this harness does
+     * not link; the psmf-media-selftest checks it. */
+    expect(td24b_dispatch4(NID_SCE_MPEG_FLUSH_STREAM, 0u, 1u, 0u, 0u) == 0x80020003u,
+           "sceMpegFlushStream rejects null pointer with 0x80020003");
+    MEM_W32(TD24D_RB_ADDR + 4u, 13u);
+    MEM_W32(TD24D_RB_ADDR + 8u, 23u);
+    MEM_W32(TD24D_RB_ADDR + 12u, 33u);
+    expect(td24b_dispatch4(NID_SCE_MPEG_FLUSH_STREAM, TD24D_MPEG_DESC, 1u, 0u, 0u) == 0u,
+           "sceMpegFlushStream succeeds on valid MPEG descriptor");
+    expect(MEM_R32(TD24D_RB_ADDR + 4u) == 13u &&
+               MEM_R32(TD24D_RB_ADDR + 8u) == 23u &&
+               MEM_R32(TD24D_RB_ADDR + 12u) == 33u,
+           "sceMpegFlushStream leaves the ring packet counters alone");
 
     /* =========================================================================
      * 6. LwMutex family (2 NIDs):
@@ -29294,7 +30989,7 @@ static void test_td24d_hle_batch(void) {
      * 7. ATRAC second buffer & lifecycle family (5 NIDs / 6 functions):
      *    sceAtracSetSecondBuffer (0x83bf7afd), sceAtracGetSecondBufferInfo (0x83e85ea0),
      *    sceAtracGetBufferInfoForResetting (0x2dd3e298) / sceAtracGetBufferInfoForReseting (0xca3ca3d2),
-     *    sceAtracReinit (0x132f1eca), sceAtracReleaseResources (0xd5c28cc0)
+     *    sceAtracReinit (0x132f1eca), sceAtracEndEntry (0xd5c28cc0)
      * ========================================================================= */
     sr_hle_test_atrac_reinit_reset();
     sr_hle_test_atrac_release_reset();
@@ -29307,9 +31002,9 @@ static void test_td24d_hle_batch(void) {
            "sceAtracReinit succeeds when no ATRAC contexts are in use");
     expect(sr_hle_test_atrac_reinit_count() == 1u, "reinit count incremented");
 
-    /* Release resources succeeds and increments count */
-    expect(td24b_dispatch4(NID_SCE_ATRAC_RELEASE_RESOURCES, 0u, 0u, 0u, 0u) == 0u,
-           "sceAtracReleaseResources succeeds");
+    /* The module-stop entry releases resources: succeeds and increments the count */
+    expect(td24b_dispatch4(NID_SCE_ATRAC_END_ENTRY, 0u, 0u, 0u, 0u) == 0u,
+           "sceAtracEndEntry succeeds");
     expect(sr_hle_test_atrac_release_count() == 1u, "release count incremented");
 
     /* Bad-ID error checks */
@@ -29654,6 +31349,623 @@ static void sas_test_vag(uint32_t addr, uint32_t blocks, uint8_t flags) {
     }
 }
 
+/* ---- #2054: Ace Mode's band-limited SAS resampling (sas=sinc) ----------------------------------
+ *
+ * Every case plays synthetic VAG data through the guest calls (SetVoice, SetPitch, SetVolume,
+ * SetKeyOn, __sceSasCore) once authentic (zero-order hold) and once band-limited, and reads voice
+ * state through the guest calls each grain (end flags, envelope heights).
+ *
+ * - The alias cells measure only energy that must not be there (Blackman-Harris window, 16384-point
+ *   FFT). Upward, the voice plays a sweep that lies wholly above the output's Nyquist frequency once
+ *   pitched, so every sample it produces is alias: the cell measures the output's energy. Downward,
+ *   it plays a sweep inside the band, and the cell measures the share of energy above the source's
+ *   Nyquist frequency as heard at that pitch, where only images can land. A model of the authentic
+ *   stepping replays the same decoded stream through a zero-order hold, linear interpolation, a
+ *   4-tap Catmull-Rom cubic and sas_resample.h: the model must agree with the mixer, and the cheap
+ *   interpolators must miss the floors the mixer has to reach.
+ * - The golden cell pins the authentic mix to a checksum taken from origin/main's mixer, before
+ *   #2054, so the off path is compared with the old code and not with itself.
+ * - The remaining cells cover a looped voice (against the same data unrolled), pitch 0x4000, two
+ *   voices, a constant signal (DC gain 1), a re-trigger, data that ends mid-grain, and how far ahead
+ *   of the authentic decoder the band-limited path reads guest memory. */
+#include "../../src/rt/sas_resample.h"   /* the reference renderer for the #2054 model */
+/* The #2054 alias floors: each about 3 dB under the measured cut and far above what linear and
+ * 4-tap cubic interpolation reach on the same stepping. Measured (sinc / linear / cubic, dB):
+ * 0x1800 25.5 / 2.7 / 2.3, 0x2A00 28.1 / 2.9 / 1.4, 0x4000 29.8 / 0.0 / 0.0 (whole steps: both
+ * reduce to the zero-order hold), 0x0B00 78.4 / 14.1 / 20.9, 0x0800 80.7 / 8.1 / 17.3. */
+#define SAS_BL_FLOOR_1800 22.0
+#define SAS_BL_FLOOR_2A00 25.0
+#define SAS_BL_FLOOR_4000 26.0
+#define SAS_BL_FLOOR_0B00 75.0
+#define SAS_BL_FLOOR_0800 77.0
+#define NID_SAS_SET_PITCH      0xad84d37fu
+#define NID_SAS_GET_ENV_HEIGHT 0x74ae582au
+#define SAS_BL_GRAIN   256u
+#define SAS_BL_FFT     16384u
+#define SAS_BL_MAX_BLOCKS 2600u   /* enough source for SAS_BL_FFT outputs at pitch 0x4000 */
+#define SAS_BL_GRAINS  200u
+#define SAS_BL_VOICES  2u
+#define SAS_BL_CORE    0x08030000u
+#define SAS_BL_OUT     0x08010000u
+#define SAS_BL_VAG     0x08100000u
+#define SAS_BL_VAG2    0x08140000u
+
+typedef struct {
+    const uint8_t *data;       /* blocks * 16 bytes, copied into guest memory at vag */
+    uint32_t vag, blocks, pitch, vol;
+    int loop;                  /* SetVoice's loop argument */
+} SasBlVoice;
+
+typedef struct {
+    int16_t left[SAS_BL_GRAINS * SAS_BL_GRAIN];
+    uint32_t end_flags[SAS_BL_GRAINS];
+    uint32_t envelope[SAS_BL_GRAINS][SAS_BL_VOICES];
+    uint32_t grains;           /* grains mixed (the run stops two grains after every voice ends) */
+    int32_t last_audible;      /* index of the last nonzero left sample */
+    uint64_t fnv;              /* FNV-1a over every grain's left and right samples */
+} SasBlRun;
+
+typedef void (*SasBlHook)(CpuState *cpu, uint32_t grain, void *ctx);
+
+static SasBlRun s_bl_off, s_bl_on, s_bl_alt;
+static double s_bl_re[SAS_BL_FFT], s_bl_im[SAS_BL_FFT];
+static uint8_t s_bl_data[3][SAS_BL_MAX_BLOCKS * 16u];
+static int16_t s_bl_pcm[SAS_BL_MAX_BLOCKS * 28u];
+static int16_t s_bl_model[5][SAS_BL_FFT];
+static int32_t s_bl_k[SAS_BL_GRAINS * SAS_BL_GRAIN];
+static uint16_t s_bl_frac[SAS_BL_GRAINS * SAS_BL_GRAIN];
+static uint32_t s_bl_blocks_by_grain[SAS_BL_GRAINS];
+
+static const int s_bl_f0[5] = { 0, 60, 115, 98, 122 }, s_bl_f1[5] = { 0, 0, -52, -55, -60 };
+
+/* The mixer's VAG decode rule (sas_vag_block), on host bytes. */
+static void sas_bl_decode(const uint8_t *data, uint32_t blocks, int16_t *pcm) {
+    int h1 = 0, h2 = 0;
+    for (uint32_t b = 0; b < blocks; b++) {
+        const uint8_t *blk = data + b * 16u;
+        int pred = (blk[0] >> 4) & 0xF, shift = blk[0] & 0xF;
+        if (pred > 4) pred = 0;
+        for (int i = 0; i < 28; i++) {
+            int nib = (i & 1) ? (blk[2 + (i >> 1)] >> 4) : (blk[2 + (i >> 1)] & 0xF);
+            int s = ((int)(int16_t)(uint16_t)((unsigned)nib << 12) >> shift) + ((h1 * s_bl_f0[pred] + h2 * s_bl_f1[pred]) >> 6);
+            if (s > 32767) s = 32767;
+            if (s < -32768) s = -32768;
+            pcm[b * 28u + (uint32_t)i] = (int16_t)s;
+            h2 = h1; h1 = s;
+        }
+    }
+}
+
+/* Closed-loop VAG encoder: each block takes the filter and shift whose decode (the mixer's own
+ * rule) is closest to the input. */
+static void sas_bl_encode(uint8_t *out, const int16_t *pcm, uint32_t blocks) {
+    int h1 = 0, h2 = 0;
+    for (uint32_t b = 0; b < blocks; b++) {
+        const int16_t *in = pcm + b * 28u;
+        double best = -1.0;
+        int best_hdr = 0, best_h1 = 0, best_h2 = 0;
+        int nib[28], best_nib[28];
+        for (int pred = 0; pred < 5; pred++) {
+            for (int shift = 0; shift <= 12; shift++) {
+                int t1 = h1, t2 = h2;
+                double err = 0.0;
+                for (int i = 0; i < 28; i++) {
+                    int p = (t1 * s_bl_f0[pred] + t2 * s_bl_f1[pred]) >> 6;
+                    double d = (double)(in[i] - p) * (double)(1 << shift) / 4096.0;
+                    int q = (int)floor(d + 0.5);
+                    if (q > 7) q = 7;
+                    if (q < -8) q = -8;
+                    int s = ((int)(int16_t)(uint16_t)((unsigned)(q & 0xF) << 12) >> shift) + p;
+                    if (s > 32767) s = 32767;
+                    if (s < -32768) s = -32768;
+                    err += (double)(s - in[i]) * (double)(s - in[i]);
+                    nib[i] = q & 0xF;
+                    t2 = t1; t1 = s;
+                }
+                if (best < 0.0 || err < best) {
+                    best = err; best_hdr = (pred << 4) | shift; best_h1 = t1; best_h2 = t2;
+                    memcpy(best_nib, nib, sizeof(nib));
+                }
+            }
+        }
+        h1 = best_h1; h2 = best_h2;
+        uint8_t *blk = out + b * 16u;
+        blk[0] = (uint8_t)best_hdr;
+        blk[1] = 0u;
+        for (uint32_t k = 0; k < 14u; k++) blk[2u + k] = (uint8_t)(best_nib[2 * k] | (best_nib[2 * k + 1] << 4));
+    }
+}
+
+/* A linear sine sweep from fa to fb Hz at the source's own rate, amplitude 12000, encoded into out;
+ * returns its block count. It is long enough for SAS_BL_FFT outputs at `pitch` plus margin, so the
+ * voice's end is never in the analysed window. */
+static uint32_t sas_bl_sweep_hz(uint8_t *out, uint32_t pitch, double fa, double fb) {
+    const double pi = 3.14159265358979323846, rate = 44100.0;
+    const uint32_t blocks = (uint32_t)((double)SAS_BL_FFT * (double)pitch / 4096.0 / 28.0) + 40u;
+    const double len = (double)(blocks * 28u) / rate;
+    for (uint32_t i = 0; i < blocks * 28u; i++) {
+        double t = (double)i / rate;
+        s_bl_pcm[i] = (int16_t)floor(12000.0 * sin(2.0 * pi * (fa * t + (fb - fa) * t * t / (2.0 * len))) + 0.5);
+    }
+    sas_bl_encode(out, s_bl_pcm, blocks);
+    return blocks;
+}
+
+/* The in-band sweep: 1.5 to 9 kHz once played at `pitch`. */
+static uint32_t sas_bl_sweep(uint8_t *out, uint32_t pitch) {
+    const double ratio = (double)pitch / 4096.0;
+    return sas_bl_sweep_hz(out, pitch, 1500.0 / ratio, 9000.0 / ratio);
+}
+
+/* Integer-only VAG data (no libm, so the bytes are the same on every host): filter 0, so a block
+ * decodes the same whatever came before it, shifts 4 to 7 and pseudo-random nibbles; flags 0. */
+static void sas_bl_noise(uint8_t *out, uint32_t blocks, uint32_t seed) {
+    for (uint32_t b = 0; b < blocks; b++) {
+        uint8_t *blk = out + b * 16u;
+        seed = seed * 1664525u + 1013904223u;
+        blk[0] = (uint8_t)(4u + ((seed >> 24) & 3u));
+        blk[1] = 0u;
+        for (uint32_t k = 0; k < 14u; k++) {
+            seed = seed * 1664525u + 1013904223u;
+            blk[2u + k] = (uint8_t)(seed >> 24);
+        }
+    }
+}
+
+static void sas_bl_fnv(uint64_t *h, int16_t v) {
+    uint16_t u = (uint16_t)v;
+    *h = (*h ^ (u & 0xffu)) * 1099511628211ull;
+    *h = (*h ^ (u >> 8)) * 1099511628211ull;
+}
+
+/* One run of up to max_grains grains. hook, when set, runs before each grain's __sceSasCore. */
+static void sas_bl_play(SasBlRun *run, int band_limited, const SasBlVoice *voices, uint32_t nvoices,
+                        uint32_t max_grains, SasBlHook hook, void *ctx) {
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_sas_reset();
+    sr_hle_sas_set_band_limited(band_limited);
+    memset(&cpu, 0, sizeof(cpu));
+    memset(run, 0, sizeof(*run));
+    cpu.r[29] = 0x09012000u;
+    cpu.r[4] = SAS_BL_CORE; cpu.r[5] = SAS_BL_GRAIN; cpu.r[6] = 32; cpu.r[7] = 0; cpu.r[8] = 44100;
+    expect(sr_syscall(&cpu, NID_SAS_INIT) == 0, "sas=sinc fixture: __sceSasInit accepts a 256-sample grain");
+    for (uint32_t v = 0; v < nvoices; v++) {
+        const SasBlVoice *sv = &voices[v];
+        for (uint32_t i = 0; i < sv->blocks * 16u; i++) MEM_W8(sv->vag + i, sv->data[i]);
+        cpu.r[4] = SAS_BL_CORE; cpu.r[5] = v; cpu.r[6] = sv->vag; cpu.r[7] = sv->blocks * 16u; cpu.r[8] = (uint32_t)sv->loop;
+        expect(sr_syscall(&cpu, NID_SAS_SET_VOICE) == 0, "sas=sinc fixture: __sceSasSetVoice accepts the data");
+        cpu.r[4] = SAS_BL_CORE; cpu.r[5] = v; cpu.r[6] = sv->pitch;
+        expect(sr_syscall(&cpu, NID_SAS_SET_PITCH) == 0, "sas=sinc fixture: __sceSasSetPitch accepts the pitch");
+        cpu.r[4] = SAS_BL_CORE; cpu.r[5] = v; cpu.r[6] = sv->vol; cpu.r[7] = sv->vol; cpu.r[8] = 0; cpu.r[9] = 0;
+        expect(sr_syscall(&cpu, NID_SAS_SET_VOLUME) == 0, "sas=sinc fixture: __sceSasSetVolume accepts the volume");
+    }
+    for (uint32_t v = 0; v < nvoices; v++) {
+        cpu.r[4] = SAS_BL_CORE; cpu.r[5] = v;
+        expect(sr_syscall(&cpu, NID_SAS_SET_KEY_ON) == 0, "sas=sinc fixture: __sceSasSetKeyOn keys the voice on");
+    }
+    const uint32_t mask = (1u << nvoices) - 1u;
+    uint32_t ended_at = 0;
+    run->last_audible = -1;
+    run->fnv = 14695981039346656037ull;
+    if (max_grains > SAS_BL_GRAINS) max_grains = SAS_BL_GRAINS;
+    for (uint32_t g = 0; g < max_grains; g++) {
+        if (hook) hook(&cpu, g, ctx);
+        cpu.r[4] = SAS_BL_CORE; cpu.r[5] = SAS_BL_OUT;
+        (void)sr_syscall(&cpu, NID_SAS_CORE);
+        for (uint32_t i = 0; i < SAS_BL_GRAIN; i++) {
+            int16_t l = (int16_t)MEM_R16(SAS_BL_OUT + i * 4u), r = (int16_t)MEM_R16(SAS_BL_OUT + i * 4u + 2u);
+            run->left[g * SAS_BL_GRAIN + i] = l;
+            if (l) run->last_audible = (int32_t)(g * SAS_BL_GRAIN + i);
+            sas_bl_fnv(&run->fnv, l);
+            sas_bl_fnv(&run->fnv, r);
+        }
+        cpu.r[4] = SAS_BL_CORE;
+        run->end_flags[g] = sr_syscall(&cpu, NID_SAS_GET_END);
+        for (uint32_t v = 0; v < nvoices; v++) {
+            cpu.r[4] = SAS_BL_CORE; cpu.r[5] = v;
+            run->envelope[g][v] = sr_syscall(&cpu, NID_SAS_GET_ENV_HEIGHT);
+        }
+        run->grains = g + 1u;
+        if ((run->end_flags[g] & mask) == mask && !ended_at) ended_at = g + 1u;
+        if (ended_at && g >= ended_at + 1u) break;
+    }
+    sr_hle_sas_set_band_limited(0);
+}
+
+static void sas_bl_key(CpuState *cpu, uint32_t nid) {
+    cpu->r[4] = SAS_BL_CORE; cpu->r[5] = 0;
+    (void)sr_syscall(cpu, nid);
+}
+
+/* hook: ctx is the grain (as a uint32_t) at which voice 0 is keyed off. */
+static void sas_bl_hook_key_off(CpuState *cpu, uint32_t grain, void *ctx) {
+    if (grain == *(const uint32_t *)ctx) sas_bl_key(cpu, NID_SAS_SET_KEY_OFF);
+}
+
+/* hook: ctx is the grain at which voice 0 is keyed on again while it plays. */
+static void sas_bl_hook_key_on(CpuState *cpu, uint32_t grain, void *ctx) {
+    if (grain == *(const uint32_t *)ctx) sas_bl_key(cpu, NID_SAS_SET_KEY_ON);
+}
+
+/* The authentic stepping (sas_mix_stateful with sas_next_sample) for one unlooped VAG voice: the
+ * decoded-stream index and fraction of each output sample, and how many blocks the decoder has read
+ * by the end of each grain. A step past a block's end lands on the next block's first sample. */
+static uint32_t sas_bl_stepping(uint32_t pitch, uint32_t outputs, uint32_t blocks) {
+    int bufi = 0, bufn = 0;
+    uint32_t frac = 0, read = 0, i = 0;
+    for (; i < outputs; i++) {
+        if (bufi >= bufn) {
+            if (read >= blocks) break;
+            read++; bufi = 0; bufn = 28;
+        }
+        s_bl_k[i] = (int32_t)((read - 1u) * 28u) + bufi;
+        s_bl_frac[i] = (uint16_t)frac;
+        frac += pitch;
+        while (frac >= 0x1000u) { frac -= 0x1000u; bufi++; }
+        if ((i + 1u) % SAS_BL_GRAIN == 0u && (i + 1u) / SAS_BL_GRAIN <= SAS_BL_GRAINS)
+            s_bl_blocks_by_grain[i / SAS_BL_GRAIN] = read;
+    }
+    return i;
+}
+
+static void sas_bl_fft(double *re, double *im, uint32_t n) {
+    for (uint32_t i = 1, j = 0; i < n; i++) {
+        uint32_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            double t = re[i]; re[i] = re[j]; re[j] = t;
+            t = im[i]; im[i] = im[j]; im[j] = t;
+        }
+    }
+    for (uint32_t len = 2; len <= n; len <<= 1) {
+        double ang = -2.0 * 3.14159265358979323846 / (double)len;
+        for (uint32_t i = 0; i < n; i += len) {
+            for (uint32_t k = 0; k < len / 2u; k++) {
+                double wr = cos(ang * k), wi = sin(ang * k);
+                double xr = re[i + k + len / 2u] * wr - im[i + k + len / 2u] * wi;
+                double xi = re[i + k + len / 2u] * wi + im[i + k + len / 2u] * wr;
+                re[i + k + len / 2u] = re[i + k] - xr; im[i + k + len / 2u] = im[i + k] - xi;
+                re[i + k] += xr; im[i + k] += xi;
+            }
+        }
+    }
+}
+
+/* The windowed energy of the first SAS_BL_FFT samples above edge_hz (0: all of it), in dB. */
+static double sas_bl_band_db(const int16_t *x, double edge_hz) {
+    const double pi = 3.14159265358979323846;
+    double above = 0.0;
+    for (uint32_t i = 0; i < SAS_BL_FFT; i++) {
+        double t = 2.0 * pi * (double)i / (double)(SAS_BL_FFT - 1u);
+        double w = 0.35875 - 0.48829 * cos(t) + 0.14128 * cos(2.0 * t) - 0.01168 * cos(3.0 * t);
+        s_bl_re[i] = w * x[i];
+        s_bl_im[i] = 0.0;
+    }
+    sas_bl_fft(s_bl_re, s_bl_im, SAS_BL_FFT);
+    for (uint32_t k = 1; k <= SAS_BL_FFT / 2u; k++)
+        if ((double)k * 44100.0 / SAS_BL_FFT > edge_hz) above += s_bl_re[k] * s_bl_re[k] + s_bl_im[k] * s_bl_im[k];
+    return 10.0 * log10(above + 1e-30);
+}
+
+/* The cell's metric for a run at `pitch` (lower is cleaner). Upward: all output energy, since the
+ * sweep is wholly alias. Downward: the share above the source's Nyquist frequency at that pitch
+ * (plus 300 Hz), where only images land. */
+static double sas_bl_alias_metric(const int16_t *x, uint32_t pitch) {
+    if (pitch > 0x1000u) return sas_bl_band_db(x, 0.0);
+    return sas_bl_band_db(x, 22050.0 * (double)pitch / 4096.0 + 300.0) - sas_bl_band_db(x, 0.0);
+}
+
+static int16_t sas_bl_round16(double y) {
+    y = floor(y + 0.5);
+    return (int16_t)(y > 32767.0 ? 32767.0 : y < -32768.0 ? -32768.0 : y);
+}
+
+/* The model: the data in s_bl_data[0] decoded, stepped authentically and rendered four ways into
+ * s_bl_model (zero-order hold, linear, Catmull-Rom cubic, sas_resample.h). */
+static void sas_bl_model_renders(uint32_t pitch, uint32_t blocks) {
+    static int16_t padded[SAS_RS_REACH + SAS_BL_MAX_BLOCKS * 28u + SAS_RS_REACH];
+    memset(padded, 0, sizeof(padded));
+    sas_bl_decode(s_bl_data[0], blocks, padded + SAS_RS_REACH);
+    const int16_t *src = padded + SAS_RS_REACH;
+    uint32_t n = sas_bl_stepping(pitch, SAS_BL_FFT, blocks);
+    expect(n == SAS_BL_FFT, "sas=sinc model: the sweep outlasts the analysed window");
+    for (uint32_t i = 0; i < n; i++) {
+        const int16_t *x = src + s_bl_k[i];
+        double f = (double)s_bl_frac[i] / 4096.0;
+        s_bl_model[0][i] = x[0];
+        s_bl_model[1][i] = sas_bl_round16(x[0] + f * (x[1] - x[0]));
+        s_bl_model[2][i] = sas_bl_round16(x[0] + 0.5 * f * (x[1] - x[-1] + f * (2.0 * x[-1] - 5.0 * x[0] + 4.0 * x[1] - x[2]
+                                                         + f * (3.0 * (x[0] - x[1]) + x[2] - x[-1]))));
+    }
+    sas_rs_render(src, (int32_t)(blocks * 28u + SAS_RS_REACH), s_bl_k, s_bl_frac, (int)n, (int)pitch, s_bl_model[3]);
+}
+
+/* Voice state the guest can read: end flags and envelope heights, every grain. (The last nonzero
+ * output sample is compared only where the signal makes it robust: see the data-end cell.) */
+static int sas_bl_timing_equal(const SasBlRun *a, const SasBlRun *b) {
+    if (a->grains != b->grains) return 0;
+    for (uint32_t g = 0; g < a->grains; g++) {
+        if (a->end_flags[g] != b->end_flags[g]) return 0;
+        for (uint32_t v = 0; v < SAS_BL_VOICES; v++)
+            if (a->envelope[g][v] != b->envelope[g][v]) return 0;
+    }
+    return 1;
+}
+
+static void sas_bl_voice(SasBlVoice *v, const uint8_t *data, uint32_t vag, uint32_t blocks, uint32_t pitch) {
+    v->data = data; v->vag = vag; v->blocks = blocks; v->pitch = pitch; v->vol = 0x1000u; v->loop = 0;
+}
+
+/* The alias cells, with the model as the negative control. */
+static void sas_bl_alias_cells(void) {
+    /* Upward 1.5x, 2.625x and 4x (decimation: the sweep runs from 1.1x the output's Nyquist
+     * frequency, as heard at the pitch, to 0.92x the source's) and downward 0.6875x and 0.5x
+     * (images of an in-band sweep), each with the reduction the mixer must reach. */
+    static const uint32_t pitches[] = { 0x1800u, 0x2A00u, 0x4000u, 0x0B00u, 0x0800u };
+    static const double floors[] = { SAS_BL_FLOOR_1800, SAS_BL_FLOOR_2A00, SAS_BL_FLOOR_4000, SAS_BL_FLOOR_0B00,
+                                     SAS_BL_FLOOR_0800 };
+    for (size_t p = 0; p < sizeof(pitches) / sizeof(pitches[0]); p++) {
+        char what[200];
+        SasBlVoice v;
+        const uint32_t pitch = pitches[p];
+        const double ratio = (double)pitch / 4096.0;
+        uint32_t blocks = pitch > 0x1000u ? sas_bl_sweep_hz(s_bl_data[0], pitch, 1.1 * 22050.0 / ratio, 0.92 * 22050.0)
+                                          : sas_bl_sweep(s_bl_data[0], pitch);
+        sas_bl_voice(&v, s_bl_data[0], SAS_BL_VAG, blocks, pitch);
+        sas_bl_play(&s_bl_off, 0, &v, 1, SAS_BL_GRAINS, NULL, NULL);
+        sas_bl_play(&s_bl_on, 1, &v, 1, SAS_BL_GRAINS, NULL, NULL);
+        double cut = sas_bl_alias_metric(s_bl_off.left, pitch) - sas_bl_alias_metric(s_bl_on.left, pitch);
+        sas_bl_model_renders(pitch, blocks);
+        double zoh_m = sas_bl_alias_metric(s_bl_model[0], pitch);
+        double cut_lin = zoh_m - sas_bl_alias_metric(s_bl_model[1], pitch);
+        double cut_cub = zoh_m - sas_bl_alias_metric(s_bl_model[2], pitch);
+        double cut_sinc = zoh_m - sas_bl_alias_metric(s_bl_model[3], pitch);
+        fprintf(stderr, "  sas=sinc pitch 0x%04x: %s cut by %.1f dB (floor %.0f); model cuts: linear %.1f, cubic %.1f, "
+                        "sinc %.1f dB\n",
+                (unsigned)pitch, pitch > 0x1000u ? "alias energy" : "image share", cut, floors[p], cut_lin, cut_cub,
+                cut_sinc);
+        snprintf(what, sizeof(what), "sas=sinc at pitch 0x%04x cuts the %s by at least %.0f dB", (unsigned)pitch,
+                 pitch > 0x1000u ? "alias energy" : "image share", floors[p]);
+        expect(cut >= floors[p], what);
+        snprintf(what, sizeof(what),
+                 "sas=sinc model at pitch 0x%04x: the stepping model's cut matches the mixer's within 0.5 dB",
+                 (unsigned)pitch);
+        expect(fabs(cut_sinc - cut) <= 0.5, what);
+        snprintf(what, sizeof(what),
+                 "sas=sinc negative control at pitch 0x%04x: linear and 4-tap cubic interpolation miss the %.0f dB floor",
+                 (unsigned)pitch, floors[p]);
+        expect(cut_lin < floors[p] && cut_cub < floors[p], what);
+        snprintf(what, sizeof(what), "sas=sinc at pitch 0x%04x: end flags and envelope heights match authentic every grain",
+                 (unsigned)pitch);
+        expect(s_bl_off.grains > 4u && s_bl_off.last_audible > 0 && sas_bl_timing_equal(&s_bl_off, &s_bl_on), what);
+        snprintf(what, sizeof(what), "sas=sinc at pitch 0x%04x changes the mixed sample values", (unsigned)pitch);
+        expect(memcmp(s_bl_off.left, s_bl_on.left, SAS_BL_FFT * sizeof(int16_t)) != 0, what);
+    }
+}
+
+/* The golden cell: two voices of integer-only data, one looped at 0x1800 and keyed off at grain 40,
+ * one ending at 0x0B00, mixed authentic for 64 grains. SAS_BL_GOLDEN_FNV is this run's checksum on
+ * origin/main's mixer before #2054. A deliberate change to the authentic mixer updates it. */
+#define SAS_BL_GOLDEN_FNV 0xaf01339448c39cadull
+static void sas_bl_golden_cell(void) {
+    SasBlVoice v[2];
+    uint32_t off_grain = 40u;
+    sas_bl_noise(s_bl_data[0], 60u, 0x2054u);
+    s_bl_data[0][10u * 16u + 1u] = 6u;    /* loop start */
+    s_bl_data[0][59u * 16u + 1u] = 3u;    /* loop end: back to the loop start */
+    sas_bl_noise(s_bl_data[1], 300u, 0x1807u);
+    sas_bl_voice(&v[0], s_bl_data[0], SAS_BL_VAG, 60u, 0x1800u);
+    v[0].loop = 1;
+    sas_bl_voice(&v[1], s_bl_data[1], SAS_BL_VAG2, 300u, 0x0B00u);
+    v[1].vol = 0x0C00u;
+    sas_bl_play(&s_bl_off, 0, v, 2, 64u, sas_bl_hook_key_off, &off_grain);
+    fprintf(stderr, "  sas=sinc golden: authentic mix checksum 0x%016llx over %u grains\n",
+            (unsigned long long)s_bl_off.fnv, (unsigned)s_bl_off.grains);
+    expect(s_bl_off.fnv == SAS_BL_GOLDEN_FNV,
+           "sas=sinc off: the authentic mix matches the checksum taken from the mixer before #2054");
+    /* Switched on and back off, the mix is the same run again. */
+    sas_bl_play(&s_bl_on, 1, v, 2, 64u, sas_bl_hook_key_off, &off_grain);
+    sas_bl_play(&s_bl_alt, 0, v, 2, 64u, sas_bl_hook_key_off, &off_grain);
+    expect(s_bl_on.fnv != s_bl_off.fnv && s_bl_alt.fnv == s_bl_off.fnv && sas_bl_timing_equal(&s_bl_off, &s_bl_on)
+               && sas_bl_timing_equal(&s_bl_off, &s_bl_alt),
+           "sas=sinc golden: on changes only the values; switched back off the mix is the authentic one again");
+}
+
+/* A looped voice against the same data unrolled: the lookahead follows the loop, so both paths
+ * give the same samples. Filter-0 blocks decode the same after the jump as in sequence. */
+static void sas_bl_loop_cells(void) {
+    static const uint32_t pitches[] = { 0x4000u, 0x0B00u };
+    for (size_t p = 0; p < 2; p++) {
+        enum { INTRO = 3, BODY = 20, GRAINS = 40 };
+        char what[160];
+        uint32_t need = (uint32_t)GRAINS * SAS_BL_GRAIN * pitches[p] / 0x1000u / 28u + 12u;
+        uint32_t reps = (need - INTRO) / BODY + 1u, unrolled = INTRO + reps * BODY;
+        SasBlVoice looped, flat;
+        sas_bl_noise(s_bl_data[0], INTRO + BODY, 0x100u + (uint32_t)p);
+        memcpy(s_bl_data[1], s_bl_data[0], (INTRO + BODY) * 16u);
+        for (uint32_t r = 1; r < reps; r++)
+            memcpy(s_bl_data[1] + (INTRO + r * BODY) * 16u, s_bl_data[0] + INTRO * 16u, BODY * 16u);
+        s_bl_data[0][INTRO * 16u + 1u] = 6u;
+        s_bl_data[0][(INTRO + BODY - 1u) * 16u + 1u] = 3u;
+        sas_bl_voice(&looped, s_bl_data[0], SAS_BL_VAG, INTRO + BODY, pitches[p]);
+        looped.loop = 1;
+        sas_bl_voice(&flat, s_bl_data[1], SAS_BL_VAG2, unrolled, pitches[p]);
+        for (int on = 0; on < 2; on++) {
+            sas_bl_play(&s_bl_off, on, &looped, 1, GRAINS, NULL, NULL);
+            sas_bl_play(&s_bl_on, on, &flat, 1, GRAINS, NULL, NULL);
+            snprintf(what, sizeof(what), "sas=%s at pitch 0x%04x: a looped voice mixes the same samples as its data unrolled",
+                     on ? "sinc" : "off", (unsigned)pitches[p]);
+            expect(s_bl_off.grains == GRAINS && s_bl_on.grains == GRAINS && s_bl_off.fnv == s_bl_on.fnv, what);
+        }
+    }
+}
+
+/* A constant signal (filter 0, shift 0, every nibble 1: 4096) has gain 1 at every pitch: once the
+ * history holds the signal, the band-limited mix equals the authentic one sample for sample. */
+static void sas_bl_dc_cells(void) {
+    static const uint32_t pitches[] = { 0x0B00u, 0x1800u, 0x4000u };
+    for (size_t p = 0; p < 3; p++) {
+        char what[160];
+        SasBlVoice v;
+        for (uint32_t b = 0; b < 1200u; b++) {
+            uint8_t *blk = s_bl_data[0] + b * 16u;
+            blk[0] = 0u; blk[1] = 0u;
+            memset(blk + 2, 0x11, 14);
+        }
+        sas_bl_voice(&v, s_bl_data[0], SAS_BL_VAG, 1200u, pitches[p]);
+        sas_bl_play(&s_bl_off, 0, &v, 1, 20u, NULL, NULL);
+        sas_bl_play(&s_bl_on, 1, &v, 1, 20u, NULL, NULL);
+        int same = s_bl_off.grains == 20u && s_bl_off.left[SAS_BL_GRAIN] != 0;
+        for (uint32_t i = SAS_BL_GRAIN; i < 20u * SAS_BL_GRAIN; i++) if (s_bl_off.left[i] != s_bl_on.left[i]) same = 0;
+        snprintf(what, sizeof(what), "sas=sinc at pitch 0x%04x: a constant signal comes out unchanged (DC gain 1)",
+                 (unsigned)pitches[p]);
+        expect(same, what);
+    }
+}
+
+/* Two voices: the band-limited mix of both is the sum of each alone, and both voices keep their
+ * authentic timing. */
+static void sas_bl_two_voice_cells(void) {
+    SasBlVoice v[2];
+    uint32_t a = sas_bl_sweep(s_bl_data[0], 0x1800u);
+    uint32_t b = sas_bl_sweep(s_bl_data[1], 0x0B00u);
+    sas_bl_voice(&v[0], s_bl_data[0], SAS_BL_VAG, a, 0x1800u);
+    sas_bl_voice(&v[1], s_bl_data[1], SAS_BL_VAG2, b, 0x0B00u);
+    v[0].vol = v[1].vol = 0x0800u;
+    sas_bl_play(&s_bl_off, 0, v, 2, 40u, NULL, NULL);
+    sas_bl_play(&s_bl_on, 1, v, 2, 40u, NULL, NULL);
+    expect(sas_bl_timing_equal(&s_bl_off, &s_bl_on),
+           "sas=sinc with two voices: end flags and both envelope heights match authentic");
+    sas_bl_play(&s_bl_off, 1, &v[0], 1, 40u, NULL, NULL);
+    sas_bl_play(&s_bl_alt, 1, &v[1], 1, 40u, NULL, NULL);
+    int sum = s_bl_on.grains == 40u;
+    for (uint32_t i = 0; i < 40u * SAS_BL_GRAIN; i++)
+        if (s_bl_on.left[i] != s_bl_off.left[i] + s_bl_alt.left[i]) sum = 0;
+    expect(sum, "sas=sinc with two voices: the mix is each voice's band-limited mix added sample for sample");
+}
+
+/* A key-on while the voice plays restarts it: from that grain on, the mix is a fresh run's. */
+static void sas_bl_retrigger_cells(void) {
+    SasBlVoice v;
+    uint32_t again = 20u;
+    uint32_t blocks = sas_bl_sweep(s_bl_data[0], 0x1800u);
+    sas_bl_voice(&v, s_bl_data[0], SAS_BL_VAG, blocks, 0x1800u);
+    for (int on = 0; on < 2; on++) {
+        char what[160];
+        sas_bl_play(&s_bl_on, on, &v, 1, 50u, sas_bl_hook_key_on, &again);
+        sas_bl_play(&s_bl_off, on, &v, 1, 30u, NULL, NULL);
+        snprintf(what, sizeof(what), "sas=%s: a key-on while the voice plays restarts it exactly like a fresh key-on",
+                 on ? "sinc" : "off");
+        expect(s_bl_on.grains == 50u &&
+                   memcmp(s_bl_on.left + again * SAS_BL_GRAIN, s_bl_off.left, 30u * SAS_BL_GRAIN * sizeof(int16_t)) == 0,
+               what);
+    }
+    /* A release ends the voice mid-sweep: the envelope's timing is the authentic one. */
+    uint32_t off_grain = 30u;
+    sas_bl_play(&s_bl_off, 0, &v, 1, SAS_BL_GRAINS, sas_bl_hook_key_off, &off_grain);
+    sas_bl_play(&s_bl_on, 1, &v, 1, SAS_BL_GRAINS, sas_bl_hook_key_off, &off_grain);
+    expect(s_bl_off.grains == 33u && sas_bl_timing_equal(&s_bl_off, &s_bl_on),
+           "sas=sinc: a key-off's release ends the voice in the same grain and sample as authentic");
+    /* Data that ends mid-grain ends the voice in the same grain and on the same sample. The data is a
+     * constant 4096, so the last sample the voice plays is nonzero in both paths. */
+    for (uint32_t b = 0; b < 101u; b++) {
+        uint8_t *blk = s_bl_data[1] + b * 16u;
+        blk[0] = 0u; blk[1] = 0u;
+        memset(blk + 2, 0x11, 14);
+    }
+    sas_bl_voice(&v, s_bl_data[1], SAS_BL_VAG, 101u, 0x1800u);
+    sas_bl_play(&s_bl_off, 0, &v, 1, SAS_BL_GRAINS, NULL, NULL);
+    sas_bl_play(&s_bl_on, 1, &v, 1, SAS_BL_GRAINS, NULL, NULL);
+    expect(s_bl_off.grains < 16u && s_bl_off.last_audible > 0 &&
+               s_bl_off.last_audible % (int32_t)SAS_BL_GRAIN != (int32_t)SAS_BL_GRAIN - 1 &&
+               s_bl_on.last_audible == s_bl_off.last_audible && sas_bl_timing_equal(&s_bl_off, &s_bl_on),
+           "sas=sinc: data that ends mid-grain ends the voice in the same grain and on the same sample as authentic");
+}
+
+/* Streaming just in time: before each grain the guest data holds the real blocks only up to `lead`
+ * blocks past the last block the authentic decoder will have read by that grain's end, and garbage
+ * after them. The lookahead decodes up to one past the last source sample the last output's window
+ * reaches (sas_rs_reach), plus one spare: (28 + reach) / 28 blocks past the decoder, which is 4 at
+ * pitch 0x4000 and 1 at 0x1000 and below. */
+extern int sr_hle_test_sas_lookahead_lead(void);
+typedef struct { uint32_t lead, blocks, vag; } SasBlStream;
+
+static void sas_bl_hook_stream(CpuState *cpu, uint32_t grain, void *ctx) {
+    const SasBlStream *st = (const SasBlStream *)ctx;
+    uint32_t real = s_bl_blocks_by_grain[grain] + st->lead, seed = 0x5eedu + grain;
+    (void)cpu;
+    if (real > st->blocks) real = st->blocks;
+    for (uint32_t i = 0; i < real * 16u; i++) MEM_W8(st->vag + i, s_bl_data[0][i]);
+    for (uint32_t b = real; b < st->blocks; b++) {
+        seed = seed * 1664525u + 1013904223u;
+        MEM_W8(st->vag + b * 16u, (uint8_t)((((seed >> 24) % 5u) << 4) | ((seed >> 16) % 13u)));
+        MEM_W8(st->vag + b * 16u + 1u, 0u);
+        for (uint32_t k = 0; k < 14u; k++) {
+            seed = seed * 1664525u + 1013904223u;
+            MEM_W8(st->vag + b * 16u + 2u + k, (uint8_t)(seed >> 24));
+        }
+    }
+}
+
+static void sas_bl_stream_cells(void) {
+    static const uint32_t pitches[] = { 0x4000u, 0x0B00u };
+    for (size_t p = 0; p < 2; p++) {
+        enum { GRAINS = 40 };
+        char what[200];
+        SasBlVoice v;
+        uint32_t blocks = sas_bl_sweep(s_bl_data[0], pitches[p]);
+        SasBlStream st = { 0u, blocks, SAS_BL_VAG };
+        sas_bl_voice(&v, s_bl_data[0], SAS_BL_VAG, blocks, pitches[p]);
+        (void)sas_bl_stepping(pitches[p], GRAINS * SAS_BL_GRAIN, blocks);
+        const uint32_t bound = (uint32_t)(28 + sas_rs_reach((int)pitches[p])) / 28u;
+        uint64_t clean_on, clean_off;
+        (void)sr_hle_test_sas_lookahead_lead();
+        sas_bl_play(&s_bl_on, 1, &v, 1, GRAINS, NULL, NULL);
+        int lead = sr_hle_test_sas_lookahead_lead();
+        fprintf(stderr, "  sas=sinc pitch 0x%04x: the lookahead decoded at most %d blocks past the decoder (bound %u)\n",
+                (unsigned)pitches[p], lead, (unsigned)bound);
+        snprintf(what, sizeof(what), "sas=sinc at pitch 0x%04x: the lookahead decodes exactly up to its %u-block bound",
+                 (unsigned)pitches[p], (unsigned)bound);
+        expect(lead == (int)bound, what);
+        sas_bl_play(&s_bl_off, 0, &v, 1, GRAINS, NULL, NULL);
+        clean_on = s_bl_on.fnv; clean_off = s_bl_off.fnv;
+        sas_bl_play(&s_bl_alt, 0, &v, 1, GRAINS, sas_bl_hook_stream, &st);
+        snprintf(what, sizeof(what),
+                 "sas=off at pitch 0x%04x: the authentic decoder reads no block past the stepping model's count",
+                 (unsigned)pitches[p]);
+        expect(s_bl_alt.fnv == clean_off, what);
+        sas_bl_play(&s_bl_alt, 1, &v, 1, GRAINS, sas_bl_hook_stream, &st);
+        snprintf(what, sizeof(what),
+                 "sas=sinc at pitch 0x%04x: garbage right past the decoder changes only the mixed values, never voice state",
+                 (unsigned)pitches[p]);
+        expect(s_bl_alt.fnv != clean_on && sas_bl_timing_equal(&s_bl_alt, &s_bl_on), what);
+        st.lead = bound;
+        sas_bl_play(&s_bl_alt, 1, &v, 1, GRAINS, sas_bl_hook_stream, &st);
+        snprintf(what, sizeof(what),
+                 "sas=sinc at pitch 0x%04x: garbage %u blocks past the authentic decoder changes nothing",
+                 (unsigned)pitches[p], (unsigned)bound);
+        expect(s_bl_alt.fnv == clean_on, what);
+        st.lead = bound - 1u;
+        sas_bl_play(&s_bl_alt, 1, &v, 1, GRAINS, sas_bl_hook_stream, &st);
+        snprintf(what, sizeof(what), "sas=sinc at pitch 0x%04x: garbage %u blocks past the decoder reaches the mix",
+                 (unsigned)pitches[p], (unsigned)(bound - 1u));
+        expect(s_bl_alt.fnv != clean_on, what);
+    }
+}
+
+static void test_sas_band_limited_resampling(void) {
+    sas_bl_alias_cells();
+    sas_bl_golden_cell();
+    sas_bl_loop_cells();
+    sas_bl_dc_cells();
+    sas_bl_two_voice_cells();
+    sas_bl_retrigger_cells();
+    sas_bl_stream_cells();
+}
+
 static void test_sas_state_contracts(void) {
     CpuState cpu;
 #ifdef CORE
@@ -29714,7 +32026,7 @@ static void test_sas_state_contracts(void) {
     cpu.r[8] = 0; cpu.r[9] = 0; cpu.r[10] = 0;
     expect(sr_syscall(&cpu, NID_SAS_SET_ADSR) == 0,
            "__sceSasSetADSR updates the selected attack rate");
-    cpu.r[4] = CORE; cpu.r[5] = 1; cpu.r[6] = 1; cpu.r[7] = 5;
+    cpu.r[4] = CORE; cpu.r[5] = 1; cpu.r[6] = 1; cpu.r[7] = 4;
     cpu.r[8] = 5; cpu.r[9] = 5; cpu.r[10] = 5;
     expect(sr_syscall(&cpu, NID_SAS_SET_ADSR_MODE) == 0,
            "__sceSasSetADSRmode updates the selected curve only");
@@ -29782,6 +32094,150 @@ static void test_sas_state_contracts(void) {
            "a non-looping VAG voice ends despite loop markers");
 }
 
+/* #2135: a SAS volume is signed. __sceSasSetVolume accepts |volume| <= 0x1000 on each of its four sides,
+ * and a negative side plays phase-inverted (PPSSPP's sceSasSetVolume checks abs(volume) against 0x1000).
+ * Hot Shots Tennis gives three voices of each title-logo sound one negative side (for example 1886/-455).
+ * Refusing those left the voices at 0/0; KeyOn then raised them to full volume and the logo clipped. Over a
+ * 4 s title-logo window within the first 3,000 vblanks (about 49 s), against a PSP-3000 capture of the same
+ * moment: 11,491 full-scale samples against 126, RMS -9.2 against -13.3 dBFS, and the first voice group's
+ * power -7.7 against -16.8 dBFS. */
+static void test_sas_set_volume_accepts_negative(void) {
+    CpuState cpu;
+    const uint32_t core = 0x08030000u, out = 0x08010000u, vag = 0x08020000u;
+    reset_fixture(); sr_hle_init(); sas_test_init(&cpu, core, 0);
+    sas_test_vag(vag, 4u, 0u);
+    cpu.r[4] = core; cpu.r[5] = 4; cpu.r[6] = vag; cpu.r[7] = 64; cpu.r[8] = 0;
+    expect(sr_syscall(&cpu, NID_SAS_SET_VOICE) == 0, "negative-volume fixture accepts the VAG voice");
+    /* __sceSasSetVolume(core, voice, left, right, effectLeft, effectRight): the last two arrive in t0/t1. */
+    cpu.r[4] = core; cpu.r[5] = 4; cpu.r[6] = 0x1000; cpu.r[7] = (uint32_t)-0x1000;
+    cpu.r[8] = (uint32_t)-0x1000; cpu.r[9] = 0;
+    expect(sr_syscall(&cpu, NID_SAS_SET_VOLUME) == 0,
+           "__sceSasSetVolume accepts a negative side down to -0x1000 (#2135)");
+    cpu.r[4] = core; cpu.r[5] = 4; (void)sr_syscall(&cpu, NID_SAS_SET_KEY_ON);
+    memset(g_mem + (out - 0x08000000u), 0, SAS_TEST_GRAIN * 4u);
+    cpu.r[4] = core; cpu.r[5] = out; (void)sr_syscall(&cpu, NID_SAS_CORE);
+    int audible = 0, inverted = 1;
+    for (uint32_t i = 0; i < SAS_TEST_GRAIN; i++) {
+        int16_t l = (int16_t)MEM_R16(out + i * 4u), r = (int16_t)MEM_R16(out + i * 4u + 2u);
+        if (l) audible = 1;
+        if (r != -l) inverted = 0;
+    }
+    expect(audible && inverted,
+           "a voice at 0x1000/-0x1000 plays the right channel as the phase-inverted left (#2135)");
+
+    /* The bound is the magnitude: one step past -0x1000 is still refused, and refused volumes change nothing. */
+    cpu.r[4] = core; cpu.r[5] = 4; cpu.r[6] = (uint32_t)-0x1001; cpu.r[7] = 0;
+    cpu.r[8] = 0; cpu.r[9] = 0;
+    expect(sr_syscall(&cpu, NID_SAS_SET_VOLUME) == 0x80420018u,
+           "__sceSasSetVolume refuses -0x1001 with SAS_ERROR_VOLUME_VAL");
+    /* Every one of the eight edges: one step past +-0x1000 on any side is refused. */
+    for (uint32_t side = 0; side < 4u; side++)
+        for (int sign = -1; sign <= 1; sign += 2) {
+            cpu.r[4] = core; cpu.r[5] = 4; cpu.r[6] = cpu.r[7] = cpu.r[8] = cpu.r[9] = 0;
+            cpu.r[6 + side] = (uint32_t)(sign * 0x1001);
+            expect(sr_syscall(&cpu, NID_SAS_SET_VOLUME) == 0x80420018u,
+                   "__sceSasSetVolume refuses +-0x1001 on each of its four sides (#2135)");
+        }
+    cpu.r[4] = core; cpu.r[5] = 4; (void)sr_syscall(&cpu, NID_SAS_SET_KEY_ON);
+    memset(g_mem + (out - 0x08000000u), 0, SAS_TEST_GRAIN * 4u);
+    cpu.r[4] = core; cpu.r[5] = out; (void)sr_syscall(&cpu, NID_SAS_CORE);
+    int still_inverted = 1, still_audible = 0;
+    for (uint32_t i = 0; i < SAS_TEST_GRAIN; i++) {
+        int16_t l = (int16_t)MEM_R16(out + i * 4u), r = (int16_t)MEM_R16(out + i * 4u + 2u);
+        if (l) still_audible = 1;
+        if (r != -l) still_inverted = 0;
+    }
+    expect(still_audible && still_inverted, "a refused __sceSasSetVolume leaves the previous volume in place");
+}
+
+/* #2135: a voice starts at full dry and effect volume when __sceSasInit sets it up, and KeyOn
+ * never changes a volume. The runtime used to start voices at 0 and have KeyOn raise a 0/0 voice
+ * to full dry volume, so a game that set 0/0 on purpose heard the voice anyway, and a never-set
+ * voice sent nothing to the effect planes. Raw output mode (1) writes four planes per grain:
+ * dry L, dry R, send L, send R. */
+static void test_sas_voice_volume_defaults(void) {
+    CpuState cpu;
+    const uint32_t core = 0x08030000u, out = 0x08010000u, vag = 0x08020000u;
+    const uint32_t plane = SAS_TEST_GRAIN * 2u;
+    reset_fixture(); sr_hle_init(); sas_test_init(&cpu, core, 1);
+    sas_test_vag(vag, 4u, 0u);
+    cpu.r[4] = core; cpu.r[5] = 3; cpu.r[6] = vag; cpu.r[7] = 64; cpu.r[8] = 0;
+    expect(sr_syscall(&cpu, NID_SAS_SET_VOICE) == 0, "volume-default fixture accepts the VAG voice");
+    cpu.r[4] = core; cpu.r[5] = 3; (void)sr_syscall(&cpu, NID_SAS_SET_KEY_ON);
+    memset(g_mem + (out - 0x08000000u), 0, plane * 4u);
+    cpu.r[4] = core; cpu.r[5] = out; (void)sr_syscall(&cpu, NID_SAS_CORE);
+    int dry = 0, send = 0, equal = 1;
+    for (uint32_t i = 0; i < SAS_TEST_GRAIN; i++) {
+        int16_t dl = (int16_t)MEM_R16(out + i * 2u), dr = (int16_t)MEM_R16(out + plane + i * 2u);
+        int16_t sl = (int16_t)MEM_R16(out + plane * 2u + i * 2u), sr = (int16_t)MEM_R16(out + plane * 3u + i * 2u);
+        if (dl) dry = 1;
+        if (sl) send = 1;
+        if (dl != dr || dl != sl || sl != sr) equal = 0;
+    }
+    expect(dry && send && equal,
+           "a voice whose volume was never set plays at full dry and full effect-send volume (#2135)");
+
+    /* An explicit 0/0 is silence: KeyOn must not raise it. */
+    cpu.r[4] = core; cpu.r[5] = 3; cpu.r[6] = 0; cpu.r[7] = 0; cpu.r[8] = 0; cpu.r[9] = 0;
+    expect(sr_syscall(&cpu, NID_SAS_SET_VOLUME) == 0, "__sceSasSetVolume accepts 0/0/0/0");
+    cpu.r[4] = core; cpu.r[5] = 3; (void)sr_syscall(&cpu, NID_SAS_SET_KEY_ON);
+    memset(g_mem + (out - 0x08000000u), 0, plane * 4u);
+    cpu.r[4] = core; cpu.r[5] = out; (void)sr_syscall(&cpu, NID_SAS_CORE);
+    int any = 0;
+    for (uint32_t i = 0; i < plane * 2u; i++) if (MEM_R16(out + i * 2u)) { any = 1; break; }
+    cpu.r[4] = core;
+    expect(!any && (sr_syscall(&cpu, NID_SAS_GET_END) & (1u << 3)) == 0,
+           "a voice keyed on after an explicit __sceSasSetVolume(0, 0, 0, 0) plays silently (#2135)");
+}
+
+/* #2135: __sceSasCoreWithMix's two volumes scale the caller's PCM already in the buffer, not the
+ * SAS voice mix, and no value is refused: out = clamp_s16(in * vol >> 12 + voices). This is the
+ * reference behaviour (PPSSPP, hrydgard/ppsspp 0b30638e6571: Core/HLE/sceSas.cpp
+ * _sceSasCoreWithMix checks no volume; Core/HW/SasAudio.cpp WriteMixedOutput scales inp by
+ * leftVol/rightVol). It is unmeasured on a PSP. */
+static void test_sas_core_with_mix_scales_caller_pcm(void) {
+    CpuState cpu;
+    const uint32_t core = 0x08030000u, out = 0x08010000u, vag = 0x08020000u;
+    int16_t bgm[SAS_TEST_GRAIN * 2], got[SAS_TEST_GRAIN * 2], voice_only[SAS_TEST_GRAIN * 2];
+    static const int32_t gains[][2] = {
+        { 0x800, 0x800 }, { 0, -0x1000 }, { 0x2000, 0x3000 }, { -0x1800, 0x1001 },
+    };
+    reset_fixture(); sr_hle_init(); sas_test_init(&cpu, core, 0);
+    for (uint32_t i = 0; i < SAS_TEST_GRAIN; i++) {
+        bgm[i * 2 + 0] = (int16_t)(1000 + (int)i * 500);
+        bgm[i * 2 + 1] = (int16_t)(-800 - (int)i * 500);
+    }
+    for (size_t g = 0; g < sizeof(gains) / sizeof(gains[0]); g++) {
+        sas_write_pcm(out, bgm, SAS_TEST_GRAIN);
+        cpu.r[4] = core; cpu.r[5] = out; cpu.r[6] = (uint32_t)gains[g][0]; cpu.r[7] = (uint32_t)gains[g][1];
+        uint32_t rc = sr_syscall(&cpu, NID_SAS_CORE_WITH_MIX);
+        sas_read_pcm(out, got, SAS_TEST_GRAIN);
+        int exact = 1;
+        for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++)
+            if (got[i] != sas_clamp16((int32_t)(((int64_t)bgm[i] * gains[g][i & 1u]) >> 12))) exact = 0;
+        expect(rc == 0 && exact,
+               "__sceSasCoreWithMix accepts any volume and scales the caller PCM by vol >> 12 (#2135)");
+    }
+
+    /* The volumes leave the voices alone: at 0/0 the output is the voice mix and nothing else. */
+    sas_test_vag(vag, 4u, 0u);
+    cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = vag; cpu.r[7] = 64; cpu.r[8] = 0;
+    (void)sr_syscall(&cpu, NID_SAS_SET_VOICE);
+    cpu.r[4] = core; cpu.r[5] = 0; (void)sr_syscall(&cpu, NID_SAS_SET_KEY_ON);
+    memset(g_mem + (out - 0x08000000u), 0, SAS_TEST_GRAIN * 4u);
+    cpu.r[4] = core; cpu.r[5] = out; (void)sr_syscall(&cpu, NID_SAS_CORE);
+    sas_read_pcm(out, voice_only, SAS_TEST_GRAIN);
+    cpu.r[4] = core; cpu.r[5] = 0; (void)sr_syscall(&cpu, NID_SAS_SET_KEY_ON);
+    sas_write_pcm(out, bgm, SAS_TEST_GRAIN);
+    cpu.r[4] = core; cpu.r[5] = out; cpu.r[6] = 0; cpu.r[7] = 0;
+    expect(sr_syscall(&cpu, NID_SAS_CORE_WITH_MIX) == 0, "__sceSasCoreWithMix accepts 0/0");
+    sas_read_pcm(out, got, SAS_TEST_GRAIN);
+    int audible = 0;
+    for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++) if (voice_only[i]) audible = 1;
+    expect(audible && memcmp(got, voice_only, sizeof(got)) == 0,
+           "__sceSasCoreWithMix at 0/0 drops the caller PCM and keeps the voices at their own volume (#2135)");
+}
+
 /* pspsascore.h: "On real hardware, the end flags are refreshed only AFTER __sceSasCore is
  * called", and __sceSasCore "updates end/pause flags".  A voice keyed on between cycles
  * therefore still reads as ended until the next cycle runs, and a drained voice reads as
@@ -29840,6 +32296,262 @@ static void test_sas_end_flags_refresh_per_cycle(void) {
  * is still refused with the address error after an init. */
 #define NID_SAS_GET_GRAIN      0xbd11b7c2u
 #define NID_SAS_GET_OUTPUTMODE 0xe175ef66u
+/* SAS envelopes (#1296). __sceSasSetSimpleADSR packs rates, curves and the sustain level into
+ * two 16-bit words, and __sceSasSetADSRmode picks each phase's curve. The handler stored the
+ * low 16 bits of the words as raw per-sample steps and the envelope ignored every curve, so a
+ * SimpleADSR attack or release ran for the wrong length in every game that uses it.
+ *
+ * Expected heights come from PPSSPP's envelope model at the pin sas_envelope.h names, computed
+ * independently of that header, not from PSP measurements; PSP-measured cells replace them when
+ * they exist. They leave out two things PPSSPP also models, and so does this runtime: the
+ * key-on delay (the first 32 output samples after a key-on are silent while the envelope steps
+ * through its KEYON states, SasAudio.cpp MixVoice) and reading the height before each step
+ * rather than after it. Both belong to the mixer and are a known follow-up (#1296); when they
+ * land, these values move by those samples and are not a regression.
+ * One envelope step per output sample: a 256-sample grain is 256 steps. The voice is a looping
+ * PCM voice, so the source never ends and only the envelope decides the height. */
+#define NID_SAS_GET_ENV_HEIGHT 0x74ae582au
+#define NID_SAS_GET_ALL_ENV_HEIGHTS 0x07f58c24u
+#define NID_SAS_SET_SL         0x5f9529f6u
+static void sas_env_cell_voice(CpuState *cpu, uint32_t core, uint32_t pcm) {
+    cpu->r[4] = core; cpu->r[5] = 0; cpu->r[6] = pcm; cpu->r[7] = 256; cpu->r[8] = 0;
+    expect(sr_syscall(cpu, NID_SAS_SET_VOICE_PCM) == 0, "envelope cell: looping PCM voice set");
+    cpu->r[4] = core; cpu->r[5] = 0; cpu->r[6] = 0x1000; cpu->r[7] = 0x1000; cpu->r[8] = 0; cpu->r[9] = 0;
+    expect(sr_syscall(cpu, NID_SAS_SET_VOLUME) == 0, "envelope cell: volume set");
+}
+
+static uint32_t sas_env_cell_grain(CpuState *cpu, uint32_t core, uint32_t out) {
+    cpu->r[4] = core; cpu->r[5] = out;
+    (void)sr_syscall(cpu, NID_SAS_CORE);
+    cpu->r[4] = core; cpu->r[5] = 0;
+    return sr_syscall(cpu, NID_SAS_GET_ENV_HEIGHT);
+}
+
+static void test_sas_envelope_follows_its_rates_and_curves(void) {
+    CpuState cpu;
+    const uint32_t core = 0x08030000u, out = 0x08010000u, pcm = 0x08040000u;
+    const uint32_t grain = 256u;
+
+    for (int cell = 0; cell < 3; cell++) {
+        reset_fixture(); sr_hle_init(); sr_hle_test_sas_reset();
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[29] = 0x09012000u;
+        cpu.r[4] = core; cpu.r[5] = grain; cpu.r[6] = 32; cpu.r[7] = 0; cpu.r[8] = 44100;
+        expect(sr_syscall(&cpu, NID_SAS_INIT) == 0, "envelope cell: __sceSasInit with a 256-sample grain");
+        for (uint32_t i = 0; i < 256u; i++) MEM_W16(pcm + i * 2u, 0x4000u);
+        sas_env_cell_voice(&cpu, core, pcm);
+
+        if (cell == 0) {
+            /* env1 0x1FFF: linear attack, rate code 0x1F (0x200000 per step); decay code 0xF
+             * (exponential); sustain level 0xF (full). env2 0x5FCA: linear-decrease sustain with
+             * rate code 0x7F (held); linear release, rate code 0x0A (0x40000 per step). */
+            cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = 0x1FFFu; cpu.r[7] = 0x5FCAu;
+            expect(sr_syscall(&cpu, NID_SAS_SET_SIMPLE) == 0, "SimpleADSR accepts 0x1FFF/0x5FCA");
+            cpu.r[4] = core; cpu.r[5] = 0;
+            expect(sr_syscall(&cpu, NID_SAS_SET_KEY_ON) == 0, "envelope cell: key on");
+            expect(sas_env_cell_grain(&cpu, core, out) == 0x20000000u,
+                   "SimpleADSR attack code 0x1F climbs 0x200000 per sample: half height after 256 samples");
+            expect(sas_env_cell_grain(&cpu, core, out) == 0x40000000u,
+                   "SimpleADSR attack code 0x1F reaches full height at sample 512");
+            expect(sas_env_cell_grain(&cpu, core, out) == 0x3FFFC000u,
+                   "SimpleADSR decay code 0xF steps once below a full sustain level, then the held sustain keeps it");
+            cpu.r[4] = core; cpu.r[5] = 0;
+            expect(sr_syscall(&cpu, NID_SAS_SET_KEY_OFF) == 0, "envelope cell: key off");
+            expect(sas_env_cell_grain(&cpu, core, out) == 0x3BFFC000u,
+                   "SimpleADSR linear release code 0x0A falls 0x40000 per sample");
+        } else if (cell == 1) {
+            /* env1 0x9FFF: as cell 0 with the bent attack curve (bit 15): full rate up to three
+             * quarters of the height, a quarter of it above. */
+            cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = 0x9FFFu; cpu.r[7] = 0x5FCAu;
+            expect(sr_syscall(&cpu, NID_SAS_SET_SIMPLE) == 0, "SimpleADSR accepts 0x9FFF/0x5FCA");
+            cpu.r[4] = core; cpu.r[5] = 0;
+            expect(sr_syscall(&cpu, NID_SAS_SET_KEY_ON) == 0, "envelope cell: key on");
+            (void)sas_env_cell_grain(&cpu, core, out);
+            expect(sas_env_cell_grain(&cpu, core, out) == 0x34180000u,
+                   "SimpleADSR bent attack slows to a quarter rate above three quarters of the height");
+        } else {
+            /* __sceSasSetADSRmode DIRECT (5) is a decreasing curve, so the PSP takes it for the
+             * decay (and release), not the attack. A one-step attack reaches the top, then the
+             * DIRECT decay sets the height to the decay rate on every step; with a sustain level
+             * of 0 it never leaves the decay. */
+            cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = 3; cpu.r[7] = 0x40000000u;
+            cpu.r[8] = 0x12345678u; cpu.r[9] = 0; cpu.r[10] = 0;
+            expect(sr_syscall(&cpu, NID_SAS_SET_ADSR) == 0, "ADSR sets the attack and decay rates");
+            cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = 2; cpu.r[7] = 0;
+            cpu.r[8] = 5; cpu.r[9] = 0; cpu.r[10] = 0;
+            expect(sr_syscall(&cpu, NID_SAS_SET_ADSR_MODE) == 0, "ADSRmode sets the decay curve to DIRECT");
+            cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = 0;
+            expect(sr_syscall(&cpu, NID_SAS_SET_SL) == 0, "envelope cell: sustain level 0");
+            cpu.r[4] = core; cpu.r[5] = 0;
+            expect(sr_syscall(&cpu, NID_SAS_SET_KEY_ON) == 0, "envelope cell: key on");
+            expect(sas_env_cell_grain(&cpu, core, out) == 0x12345678u,
+                   "ADSRmode DIRECT decay holds the height at the decay rate");
+        }
+    }
+}
+
+/* One fresh core and looping PCM voice 0 for an envelope cell, with grain `grain`. */
+static void sas_env_cell_begin(CpuState *cpu, uint32_t core, uint32_t pcm, uint32_t grain) {
+    reset_fixture(); sr_hle_init(); sr_hle_test_sas_reset();
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    cpu->r[4] = core; cpu->r[5] = grain; cpu->r[6] = 32; cpu->r[7] = 0; cpu->r[8] = 44100;
+    expect(sr_syscall(cpu, NID_SAS_INIT) == 0, "envelope cell: __sceSasInit");
+    for (uint32_t i = 0; i < 256u; i++) MEM_W16(pcm + i * 2u, 0x4000u);
+    sas_env_cell_voice(cpu, core, pcm);
+}
+
+static uint32_t sas_env_cell_call(CpuState *cpu, uint32_t nid, uint32_t core, uint32_t mask,
+                                  uint32_t a, uint32_t d, uint32_t s, uint32_t r) {
+    cpu->r[4] = core; cpu->r[5] = 0; cpu->r[6] = mask; cpu->r[7] = a;
+    cpu->r[8] = d; cpu->r[9] = s; cpu->r[10] = r;
+    return sr_syscall(cpu, nid);
+}
+
+static void sas_env_cell_key(CpuState *cpu, uint32_t core, uint32_t nid) {
+    cpu->r[4] = core; cpu->r[5] = 0;
+    expect(sr_syscall(cpu, nid) == 0, "envelope cell: key on or off");
+}
+
+/* The curve paths one grain at a time, the per-phase curve check of __sceSasSetADSRmode, and
+ * a voice whose sound data runs out (#2059 review). Expected heights: as above, from PPSSPP's
+ * model computed independently of sas_envelope.h, without the key-on delay. */
+static void test_sas_envelope_curve_paths_and_refusals(void) {
+    CpuState cpu;
+    const uint32_t core = 0x08030000u, out = 0x08010000u, pcm = 0x08040000u, heights = 0x08050000u;
+    const uint32_t mode = NID_SAS_SET_ADSR_MODE, rates = NID_SAS_SET_ADSR;
+
+    /* __sceSasSetADSRmode takes the increasing curves (0, 2, 4) for the attack, the decreasing
+     * ones (1, 3, 5) for the decay and release, and 0..5 for the sustain, and ignores each
+     * value's top bit (PPSSPP sceSas.cpp sceSasSetADSRMode; jpcsp checkADSRmode). A refused
+     * call returns 0x80420013 and changes no curve. */
+    sas_env_cell_begin(&cpu, core, pcm, 256u);
+    expect(sas_env_cell_call(&cpu, mode, core, 1, 5, 1, 1, 1) == SAS_ERROR_ADSR_MODE,
+           "ADSRmode refuses DIRECT (5) for the attack");
+    expect(sas_env_cell_call(&cpu, mode, core, 1, 1, 1, 1, 1) == SAS_ERROR_ADSR_MODE,
+           "ADSRmode refuses a decreasing curve (1) for the attack");
+    expect(sas_env_cell_call(&cpu, mode, core, 2, 0, 0, 0, 1) == SAS_ERROR_ADSR_MODE,
+           "ADSRmode refuses an increasing curve (0) for the decay");
+    expect(sas_env_cell_call(&cpu, mode, core, 8, 0, 1, 0, 4) == SAS_ERROR_ADSR_MODE,
+           "ADSRmode refuses an increasing curve (4) for the release");
+    expect(sas_env_cell_call(&cpu, mode, core, 4, 0, 1, 6, 1) == SAS_ERROR_ADSR_MODE,
+           "ADSRmode refuses a sustain curve above 5");
+    expect(sas_env_cell_call(&cpu, mode, core, 0xF, 5, 5, 5, 5) == SAS_ERROR_ADSR_MODE,
+           "ADSRmode refuses 5,5,5,5 for all four phases");
+    expect(sas_env_cell_call(&cpu, mode, core, 1, 0, 0, 0, 0) == 0,
+           "ADSRmode checks only the phases its mask selects");
+    expect(sas_env_cell_call(&cpu, mode, core, 1, 0x80000000u, 5, 5, 5) == 0,
+           "ADSRmode ignores the top bit of each value");
+    sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_ON);
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x40000000u,
+           "refused ADSRmode calls leave the voice's default linear attack in place");
+
+    /* Exponential increase attack (mode 4) at 0x400000 per step: two grains on the curve. */
+    sas_env_cell_begin(&cpu, core, pcm, 256u);
+    expect(sas_env_cell_call(&cpu, rates, core, 1, 0x00400000u, 0, 0, 0) == 0, "ADSR: attack rate");
+    expect(sas_env_cell_call(&cpu, mode, core, 1, 4, 1, 1, 1) == 0, "ADSRmode: exponential attack");
+    sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_ON);
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x0E625606u,
+           "exponential attack after 256 samples");
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x1995CAC5u,
+           "exponential attack after 512 samples");
+
+    /* Exponential decay with an odd rate, from full height down toward a sustain level of 0:
+     * 255 steps below the top, each taking the proportional part and ceil(rate / 4). */
+    sas_env_cell_begin(&cpu, core, pcm, 256u);
+    expect(sas_env_cell_call(&cpu, rates, core, 3, 0x40000000u, 0x00012345u, 0, 0) == 0,
+           "ADSR: one-step attack, odd decay rate");
+    expect(sas_env_cell_call(&cpu, mode, core, 2, 0, 3, 1, 1) == 0, "ADSRmode: exponential decay");
+    cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = 0;
+    expect(sr_syscall(&cpu, NID_SAS_SET_SL) == 0, "SL 0");
+    sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_ON);
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x3FB79F36u,
+           "exponential decay of rate 0x12345 for 255 samples below the top");
+
+    /* A linear decay that lands exactly on the sustain level stays in the decay for that step
+     * (the switch is height < level) and leaves on the next one: 0x1FF00000 is then held. */
+    sas_env_cell_begin(&cpu, core, pcm, 256u);
+    expect(sas_env_cell_call(&cpu, rates, core, 7, 0x40000000u, 0x00100000u, 0, 0) == 0,
+           "ADSR: attack, decay 0x100000, sustain held");
+    expect(sas_env_cell_call(&cpu, mode, core, 6, 0, 1, 1, 1) == 0, "ADSRmode: linear decay and sustain");
+    cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = 0x20000000u;
+    expect(sr_syscall(&cpu, NID_SAS_SET_SL) == 0, "SL 0x20000000");
+    sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_ON);
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x30100000u, "linear decay after 255 steps");
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x20100000u, "linear decay after 511 steps");
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x1FF00000u,
+           "the decay passes the sustain level by one step, then the sustain holds it");
+
+    /* SimpleADSR with an exponential sustain (env2 bits 14-15 = 3) takes its rate from the
+     * exponent table: code 0x20 is 0x70000, not the linear table's 0x1C0000. */
+    sas_env_cell_begin(&cpu, core, pcm, 256u);
+    cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = 0x00FFu; cpu.r[7] = 0xC81Fu;
+    expect(sr_syscall(&cpu, NID_SAS_SET_SIMPLE) == 0, "SimpleADSR 0x00FF/0xC81F");
+    sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_ON);
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x3E4C9D23u, "exponential sustain, first grain");
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x3C9E6712u, "exponential sustain, second grain");
+
+    /* SimpleADSR exponential release (env2 bit 5), code 16, over a full grain after key off. */
+    sas_env_cell_begin(&cpu, core, pcm, 256u);
+    cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = 0x00FFu; cpu.r[7] = 0x5FF0u;
+    expect(sr_syscall(&cpu, NID_SAS_SET_SIMPLE) == 0, "SimpleADSR 0x00FF/0x5FF0");
+    sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_ON);
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x3FFFC000u, "held sustain before the release");
+    sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_OFF);
+    expect(sas_env_cell_grain(&cpu, core, out) == 0x3FDFC791u, "exponential release code 16, one grain");
+
+    /* SimpleADSR linear release codes 30 (one step to 0: the voice ends and its end flag
+     * sets), 31 (held) and 29 (one per step). */
+    static const struct { uint32_t env2, after; int ends; const char *what; } rel[] = {
+        {0x5FDEu, 0x00000000u, 1, "release code 30 falls to 0 in one step and ends the voice"},
+        {0x5FDFu, 0x3FFFC000u, 0, "release code 31 holds the height"},
+        {0x5FDDu, 0x3FFFBF00u, 0, "release code 29 falls 1 per sample"},
+    };
+    for (size_t i = 0; i < sizeof(rel) / sizeof(rel[0]); i++) {
+        sas_env_cell_begin(&cpu, core, pcm, 256u);
+        cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = 0x00FFu; cpu.r[7] = rel[i].env2;
+        expect(sr_syscall(&cpu, NID_SAS_SET_SIMPLE) == 0, "SimpleADSR with a linear release code");
+        sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_ON);
+        (void)sas_env_cell_grain(&cpu, core, out);
+        sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_OFF);
+        expect(sas_env_cell_grain(&cpu, core, out) == rel[i].after, rel[i].what);
+        cpu.r[4] = core;
+        expect(((sr_syscall(&cpu, NID_SAS_GET_END) & 1u) != 0) == rel[i].ends,
+               "the end flag sets only when the release reaches 0");
+    }
+
+    /* The height read back is clamped at 0: with a 64-sample grain, a linear decay toward a
+     * sustain level of 0 overshoots below zero on the grain's last step (one attack step, then
+     * 63 decay steps of 0x1080000), and the getter reads 0, not the negative height. The next
+     * step zeroes it and the release ends the voice. */
+    sas_env_cell_begin(&cpu, core, pcm, 64u);
+    expect(sas_env_cell_call(&cpu, rates, core, 7, 0x40000000u, 0x01080000u, 0, 0) == 0,
+           "ADSR: attack, decay 0x1080000, sustain held");
+    expect(sas_env_cell_call(&cpu, mode, core, 6, 0, 1, 1, 1) == 0, "ADSRmode: linear decay and sustain");
+    cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = 0;
+    expect(sr_syscall(&cpu, NID_SAS_SET_SL) == 0, "SL 0");
+    sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_ON);
+    expect(sas_env_cell_grain(&cpu, core, out) == 0u, "a height below zero reads as 0");
+    expect(sas_env_cell_grain(&cpu, core, out) == 0u, "the voice then releases from 0");
+    cpu.r[4] = core;
+    expect((sr_syscall(&cpu, NID_SAS_GET_END) & 1u) != 0, "and ends");
+
+    /* A one-shot PCM voice whose data runs out mid-grain ends its envelope, so both height
+     * getters read 0 rather than the last height (PPSSPP calls End() when the samples end). */
+    sas_env_cell_begin(&cpu, core, pcm, 256u);
+    cpu.r[4] = core; cpu.r[5] = 0; cpu.r[6] = pcm; cpu.r[7] = 100; cpu.r[8] = 0xFFFFFFFFu;
+    expect(sr_syscall(&cpu, NID_SAS_SET_VOICE_PCM) == 0, "a 100-sample one-shot PCM voice");
+    sas_env_cell_key(&cpu, core, NID_SAS_SET_KEY_ON);
+    expect(sas_env_cell_grain(&cpu, core, out) == 0u,
+           "GetEnvelopeHeight reads 0 once the voice's data has run out");
+    for (uint32_t i = 0; i < 32u; i++) MEM_W32(heights + i * 4u, 0xDEADBEEFu);
+    cpu.r[4] = core; cpu.r[5] = heights;
+    expect(sr_syscall(&cpu, NID_SAS_GET_ALL_ENV_HEIGHTS) == 0, "GetAllEnvelopeHeights");
+    expect(MEM_R32(heights) == 0u, "GetAllEnvelopeHeights reads 0 for the ended voice");
+    cpu.r[4] = core;
+    expect((sr_syscall(&cpu, NID_SAS_GET_END) & 1u) != 0, "the ended one-shot voice sets its end flag");
+}
+
 static void test_sas_reinit_is_a_fresh_init(void) {
     CpuState cpu;
     const uint32_t CORE = 0x08030000u;
@@ -29899,6 +32611,7 @@ static void test_msgpipe_safety(void) {
     /* --- CreateMsgPipe: resource-model validation before any allocation --- */
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = GUEST_NAME;
+    cpu.r[5] = 2u;  /* partition: msgpipe/create.expected accepts only 2 and 6 */
     cpu.r[7] = 0u;
     uint32_t zero_uid = sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE);
     expect(zero_uid != 0u && zero_uid < 0x80000000u,
@@ -29906,19 +32619,26 @@ static void test_msgpipe_safety(void) {
     cpu.r[4] = zero_uid;
     expect(sr_syscall(&cpu, NID_SCE_KERNEL_DELETE_MSG_PIPE) == 0u,
            "zero-buffer pipe deletes cleanly");
-    cpu.r[4] = GUEST_NAME;
 
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = GUEST_NAME;
+    cpu.r[5] = 2u;
     cpu.r[7] = max_cap + 1u; /* first size above the model ceiling */
-    expect(sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE) == SCE_KERNEL_ERROR_ILLEGAL_SIZE,
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE) == 0x80020190u,
            "CreateMsgPipe rejects bufferSize above the capacity ceiling (bounded time, no alloc)");
 
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = GUEST_NAME;
+    cpu.r[5] = 2u;
     cpu.r[7] = 0xFFFFFFFFu; /* maximal hostile request */
-    expect(sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE) == SCE_KERNEL_ERROR_ILLEGAL_SIZE,
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE) == 0x80020190u,
            "CreateMsgPipe rejects a 4 GiB hostile request before allocation");
 
     /* A rejected create must not consume a UID or slot: a follow-up valid
      * create must succeed and be the FIRST pipe (state probe finds it). */
+    memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = GUEST_NAME;
+    cpu.r[5] = 2u;
     cpu.r[7] = 64u;
     uint32_t uid = sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE);
     expect(uid != 0u && uid < 0x80000000u, "valid CreateMsgPipe returns a kernel UID");
@@ -30042,6 +32762,7 @@ static void test_msgpipe_safety(void) {
     /* --- Exact ceiling boundary: cap itself is legal (probe-backed) --- */
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = GUEST_NAME;
+    cpu.r[5] = 2u;
     cpu.r[7] = max_cap;
     uint32_t big_uid = sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE);
     expect(big_uid != 0u && big_uid < 0x80000000u, "capacity exactly at the ceiling is accepted");
@@ -30116,6 +32837,7 @@ static void test_msgpipe_blocking(void) {
 
     CpuState cpu = {0};
     cpu.r[4] = GUEST_NAME;
+    cpu.r[5] = 2u;
     cpu.r[7] = 4u;
     uint32_t pipe = sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE);
     expect(pipe != 0u && pipe < 0x80000000u, "blocking Message Pipe test creates a four-byte pipe");
@@ -30355,6 +33077,7 @@ static void test_msgpipe_blocking(void) {
 static uint32_t selftest_msgpipe_create(uint32_t name, uint32_t attr, uint32_t size) {
     CpuState cpu = {0};
     cpu.r[4] = name;
+    cpu.r[5] = 2u;
     cpu.r[6] = attr;
     cpu.r[7] = size;
     return sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE);
@@ -30437,7 +33160,7 @@ static void test_msgpipe_rendezvous(void) {
         MEM_W8(src, 0xa1u); MEM_W8(src + 1u, 0xb2u);
         TCB *main_t = fixture_thread(0x201u, TH_RUNNING, 32);
         main_t->started = 1; int main_idx = (int)(main_t - s_tcb); s_cur = main_idx;
-        CpuState cpu = {0}; cpu.r[4] = name; cpu.r[7] = buffered ? 4u : 0u;
+        CpuState cpu = {0}; cpu.r[4] = name; cpu.r[5] = 2u; cpu.r[7] = buffered ? 4u : 0u;
         uint32_t pipe = sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE);
         expect((int32_t)pipe > 0, buffered ? "buffered rendezvous pipe created" : "zero-buffer pipe created");
         if ((int32_t)pipe <= 0) { s_cur = -1; continue; }
@@ -32429,6 +35152,7 @@ static void test_hle_liveness_queue_full_empty(void) {
     MEM_W8(source, 0x5a);
     CpuState cpu = {0};
     cpu.r[4] = name;
+    cpu.r[5] = 2u;
     cpu.r[7] = 1u;
     uint32_t pipe = sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE);
     expect((int32_t)pipe > 0, "HLE queue workload creates a bounded message pipe");
@@ -32485,6 +35209,7 @@ static void test_td23_guest_pointer_validation(void) {
     /* 1. Unmapped name pointer rejected (not treated as "") */
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = 0xDEADBEEFu; /* unmapped address */
+    cpu.r[5] = 2u;          /* partition */
     cpu.r[7] = 64u;         /* bufferSize */
     expect(sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE) == SCE_KERNEL_ERROR_ILLEGAL_ADDR,
            "CreateMsgPipe rejects unmapped name pointer");
@@ -32500,6 +35225,7 @@ static void test_td23_guest_pointer_validation(void) {
     memset((char *)SR_HOST(unterminated_buf), 'A', 64);
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = unterminated_buf;
+    cpu.r[5] = 2u;
     cpu.r[7] = 64u;
     expect(sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE) == SCE_KERNEL_ERROR_ILLEGAL_ADDR,
            "CreateMsgPipe rejects unterminated name string");
@@ -33715,6 +36441,7 @@ static void test_vpl_nonblocking_roundtrip(void) {
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = first;
     expect(sr_syscall(&cpu, NID_VPL_FREE) == 0u, "vpl free succeeds");
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
+    MEM_W32(VPL_INFO, 0x34u); /* a zero size word leaves the record untouched */
     expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u, "vpl refer status succeeds");
     expect(MEM_R32(VPL_INFO + 40) == 0x100u && MEM_R32(VPL_INFO + 44) == 0x80u,
            "vpl status reports pool and free sizes");
@@ -33780,7 +36507,7 @@ static void test_vpl_block_count_bounded_by_pool_size(void) {
            "vpl is exhausted only once its bytes are used");
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = vpl; cpu.r[5] = 0xfffffff8u; cpu.r[6] = VPL_OUTPTR;
-    expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == VPL_EXHAUSTED_ERR,
+    expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == 0x800201b7u,
            "vpl request near 4 GiB is refused, not rounded to zero bytes");
 
     int freed = 1;
@@ -33789,6 +36516,7 @@ static void test_vpl_block_count_bounded_by_pool_size(void) {
         if (sr_syscall(&cpu, NID_VPL_FREE) != 0u) freed = 0;
     }
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
+    MEM_W32(VPL_INFO, 0x34u); /* a zero size word leaves the record untouched */
     expect(freed && sr_syscall(&cpu, NID_VPL_REFER) == 0u &&
            MEM_R32(VPL_INFO + 44) == POOL / 2u,
            "vpl keeps every one of 256 separate free spans");
@@ -33843,11 +36571,11 @@ static void test_tlspl_lifecycle_and_thread_isolation(void) {
     if (!thread_a || !thread_b || !thread_c || !thread_d) return;
     s_cur = (int)(thread_a - s_tcb);
 
-    expect(selftest_tlspl_create(TLSPL_NAMEBUF, 2u, 0u, 0u, 2u, 0u) == TLSPL_SIZE_ERR,
+    expect(selftest_tlspl_create(TLSPL_NAMEBUF, 2u, 0u, 0u, 2u, 0u) == 0x800201b7u,
            "TLSPL rejects a zero block size");
-    expect(selftest_tlspl_create(TLSPL_NAMEBUF, 2u, 0u, 32u, 0u, 0u) == TLSPL_SIZE_ERR,
+    expect(selftest_tlspl_create(TLSPL_NAMEBUF, 2u, 0u, 32u, 0u, 0u) == 0x800201b7u,
            "TLSPL rejects a zero block count");
-    expect(selftest_tlspl_create(TLSPL_NAMEBUF, 1u, 0u, 32u, 2u, 0u) == TLSPL_BAD_ID_ERR,
+    expect(selftest_tlspl_create(TLSPL_NAMEBUF, 5u, 0u, 32u, 2u, 0u) == TLSPL_BAD_ID_ERR,
            "TLSPL names unsupported partitions as an in-progress boundary");
     expect(selftest_tlspl_create(TLSPL_NAMEBUF, 2u, 0x2u, 32u, 2u, 0u) == 0x80020191u,
            "TLSPL names unsupported attributes as an in-progress boundary");
@@ -33855,23 +36583,24 @@ static void test_tlspl_lifecycle_and_thread_isolation(void) {
     expect(pool != 0u && pool < 0x80000000u, "TLSPL create returns a valid UID");
     if (!pool || pool >= 0x80000000u) return;
 
+    MEM_W32(TLSPL_INFO, 60u); /* a zero size word leaves the record untouched */
     expect(selftest_tlspl_refer(pool, TLSPL_INFO) == 0u,
            "TLSPL ReferTlsplStatus succeeds for a writable status record");
-    expect(MEM_R32(TLSPL_INFO + 0u) == 56u,
+    expect(MEM_R32(TLSPL_INFO + 0u) == 60u,
            "TLSPL status reports the PSP SceKernelTlsplInfo size");
     expect(MEM_R8(TLSPL_INFO + 4u) == (uint8_t)'t' &&
            MEM_R8(TLSPL_INFO + 18u) == 0u,
            "TLSPL status reports the pool name");
     expect(MEM_R32(TLSPL_INFO + 36u) == 0u &&
-           MEM_R32(TLSPL_INFO + 40u) == 32u &&
-           MEM_R32(TLSPL_INFO + 44u) == 2u &&
-           MEM_R32(TLSPL_INFO + 48u) == 2u,
+           MEM_R32(TLSPL_INFO + 44u) == 32u &&
+           MEM_R32(TLSPL_INFO + 48u) == 2u &&
+           MEM_R32(TLSPL_INFO + 52u) == 2u,
            "TLSPL status reports attributes, block size, block count, and free blocks");
     expect(selftest_tlspl_refer(pool, 0u) == 0x80000103u,
            "TLSPL status rejects a null output pointer");
     expect(selftest_tlspl_refer(pool, 0xffffffffu) == 0x80000103u,
            "TLSPL status rejects an unwritable output span");
-    expect(selftest_tlspl_refer(0xdeadbeefu, TLSPL_INFO) == TLSPL_BAD_ID_ERR,
+    expect(selftest_tlspl_refer(0xdeadbeefu, TLSPL_INFO) == 0x800201d0u,
            "TLSPL status rejects an invalid pool UID");
 
     uint32_t addr_a = selftest_tlspl_get_addr(pool);
@@ -33904,13 +36633,13 @@ static void test_tlspl_lifecycle_and_thread_isolation(void) {
     expect(selftest_tlspl_get_addr(pool) == addr_a && MEM_R32(addr_a) == 0x3391a11au,
            "TLSPL GetTlsAddr returns the current thread's stable slot");
     expect(selftest_tlspl_refer(pool, TLSPL_INFO) == 0u &&
-           MEM_R32(TLSPL_INFO + 48u) == (addr_b ? 0u : 1u),
+           MEM_R32(TLSPL_INFO + 52u) == (addr_b ? 0u : 1u),
            "TLSPL status reflects the remaining free block count");
 
     s_cur = (int)(thread_b - s_tcb);
     expect(selftest_tlspl_simple(pool, NID_TLSPL_FREE) == 0u,
            "TLSPL FreeTlspl releases the current thread's slot");
-    expect(selftest_tlspl_simple(pool, NID_TLSPL_FREE) == TLSPL_BAD_ID_ERR,
+    expect(selftest_tlspl_simple(pool, NID_TLSPL_FREE) == 0u,
            "TLSPL FreeTlspl rejects a thread without an allocated slot");
 
     s_cur = (int)(thread_a - s_tcb);
@@ -33918,11 +36647,11 @@ static void test_tlspl_lifecycle_and_thread_isolation(void) {
            "TLSPL FreeTlspl releases the first thread's slot");
     expect(selftest_tlspl_get_addr(0xdeadbeefu) == 0u,
            "TLSPL GetTlsAddr returns null for an invalid pool UID");
-    expect(selftest_tlspl_simple(0xdeadbeefu, NID_TLSPL_FREE) == TLSPL_BAD_ID_ERR,
+    expect(selftest_tlspl_simple(0xdeadbeefu, NID_TLSPL_FREE) == 0x800201d0u,
            "TLSPL FreeTlspl rejects an invalid pool UID");
     expect(selftest_tlspl_simple(pool, NID_TLSPL_DELETE) == 0u,
            "TLSPL DeleteTlspl releases the pool");
-    expect(selftest_tlspl_simple(pool, NID_TLSPL_DELETE) == TLSPL_BAD_ID_ERR,
+    expect(selftest_tlspl_simple(pool, NID_TLSPL_DELETE) == 0x800201d0u,
            "TLSPL DeleteTlspl rejects a deleted pool UID");
 
     uint32_t teardown_pool = selftest_tlspl_create(TLSPL_NAMEBUF, 2u, 0u, 32u, 2u, 0u);
@@ -33933,23 +36662,23 @@ static void test_tlspl_lifecycle_and_thread_isolation(void) {
     uint32_t teardown_addr = selftest_tlspl_get_addr(teardown_pool);
     expect(teardown_addr != 0u, "TLSPL teardown fixture allocates a thread slot");
     expect(selftest_tlspl_refer(teardown_pool, TLSPL_INFO) == 0u &&
-           MEM_R32(TLSPL_INFO + 48u) == 1u,
+           MEM_R32(TLSPL_INFO + 52u) == 1u,
            "TLSPL status shows one block held before thread termination");
     s_cur = (int)(thread_b - s_tcb);
     expect(sched_terminate_thread(thread_d->uid) == 0u,
            "TLSPL fixture thread terminates through the scheduler");
     expect(selftest_tlspl_refer(teardown_pool, TLSPL_INFO) == 0u &&
-           MEM_R32(TLSPL_INFO + 48u) == 2u,
+           MEM_R32(TLSPL_INFO + 52u) == 2u,
            "TLSPL thread teardown releases its slot back to the unallocated count");
 
     s_cur = (int)(thread_a - s_tcb);
     uint32_t held_addr = selftest_tlspl_get_addr(teardown_pool);
     expect(held_addr != 0u, "TLSPL delete fixture holds a block on a live thread");
     s_cur = (int)(thread_b - s_tcb);
-    expect(selftest_tlspl_simple(teardown_pool, NID_TLSPL_DELETE) == TLSPL_BUSY_ERR,
+    expect(selftest_tlspl_simple(teardown_pool, NID_TLSPL_DELETE) == 0x800201d2u,
            "TLSPL DeleteTlspl refuses to free a pool with a held block");
     expect(selftest_tlspl_refer(teardown_pool, TLSPL_INFO) == 0u &&
-           MEM_R32(TLSPL_INFO + 48u) == 1u,
+           MEM_R32(TLSPL_INFO + 52u) == 1u,
            "TLSPL pool and held-block accounting survive refused deletion");
     s_cur = (int)(thread_a - s_tcb);
     expect(selftest_tlspl_get_addr(teardown_pool) == held_addr,
@@ -33985,7 +36714,7 @@ static void test_tlspl_lifecycle_and_thread_isolation(void) {
     }
     MEM_W32(TLSPL_OPTIONS + 4u, 3u);
     expect(selftest_tlspl_create(TLSPL_NAMEBUF, 2u, 0u, 32u, 2u, TLSPL_OPTIONS) ==
-           TLSPL_SIZE_ERR,
+           0x800200d2u,
            "TLSPL rejects a non-power-of-two alignment");
 }
 
@@ -34243,6 +36972,180 @@ static uint32_t selftest_tlspl_refer(uint32_t uid, uint32_t info) {
 
 static uint32_t selftest_tlspl_get_addr(uint32_t uid) {
     return selftest_tlspl_simple(uid, NID_TLSPL_GET_ADDR);
+}
+
+/* w-hle-b: pspautotests tests/threads/tls/{create,delete,free,refer}.expected and
+ * tests/threads/vpl/{allocate,try,refer}.expected, through production dispatch. */
+#define WB_TLSPL_MAX 16
+static uint32_t wb_tlspl_create(const char *nm, uint32_t partition, uint32_t attr,
+                                uint32_t block_size, uint32_t count, uint32_t align) {
+    uint32_t options = 0u;
+    if (nm) {
+        for (size_t i = 0; i <= strlen(nm); ++i) MEM_W8(TLSPL_NAMEBUF + (uint32_t)i, (uint8_t)nm[i]);
+    }
+    if (align != 0xdeadbeefu) {
+        options = TLSPL_OPTIONS;
+        MEM_W32(options, 0xffffffffu); /* the options size word is ignored */
+        MEM_W32(options + 4u, align);
+    }
+    return selftest_tlspl_create(nm ? TLSPL_NAMEBUF : 0u, partition, attr, block_size, count, options);
+}
+
+static void test_wb_tlspl_vpl_cells(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *ta = fixture_thread(0x33a1u, TH_RUNNING, 32);
+    TCB *tb = fixture_thread(0x33a2u, TH_READY, 32);
+    expect(ta != NULL && tb != NULL, "wb fixture creates two threads");
+    if (!ta || !tb) return;
+    s_cur = (int)(ta - s_tcb);
+    MEM_W32(TLSPL_INFO, 60u);
+
+    /* create.expected */
+    expect(wb_tlspl_create(NULL, 2u, 0u, 0x100u, 4u, 0xdeadbeefu) == 0x80020190u,
+           "wb tlspl: NULL name is 0x80020190");
+    static const int32_t bad_b[] = {-5, -1, 0, 7, 8, 9, 10};
+    for (size_t i = 0; i < sizeof bad_b / sizeof bad_b[0]; ++i)
+        expect(wb_tlspl_create("tls", (uint32_t)bad_b[i], 0u, 0x100u, 4u, 0xdeadbeefu) == 0x800200d2u,
+               "wb tlspl: partitions <= 0 and 7..10 are 0x800200D2");
+    static const uint32_t bad_a[] = {1u, 3u, 4u};
+    for (size_t i = 0; i < sizeof bad_a / sizeof bad_a[0]; ++i)
+        expect(wb_tlspl_create("tls", bad_a[i], 0u, 0x100u, 4u, 0xdeadbeefu) == 0x800200d1u,
+               "wb tlspl: partitions 1, 3, 4 are 0x800200D1");
+    uint32_t p6 = wb_tlspl_create("tls", 6u, 0u, 0x100u, 4u, 0xdeadbeefu);
+    expect(p6 != 0u && p6 < 0x80000000u, "wb tlspl: partition 6 succeeds");
+    if (p6 < 0x80000000u) (void)selftest_tlspl_simple(p6, NID_TLSPL_DELETE);
+    static const uint32_t good_attr[] = {0x1u, 0x100u}; /* 0x4000 needs the High region, which this fixture partition does not model */
+    for (size_t i = 0; i < sizeof good_attr / sizeof good_attr[0]; ++i) {
+        uint32_t u = wb_tlspl_create("tls", 2u, good_attr[i], 0x100u, 4u, 0xdeadbeefu);
+        expect(u != 0u && u < 0x80000000u, "wb tlspl: attrs 1 and 0x100 succeed");
+        if (u < 0x80000000u) {
+            expect(selftest_tlspl_refer(u, TLSPL_INFO) == 0u && MEM_R32(TLSPL_INFO + 36u) == good_attr[i],
+                   "wb tlspl: the attr is reported as given");
+            (void)selftest_tlspl_simple(u, NID_TLSPL_DELETE);
+        }
+    }
+    expect(wb_tlspl_create("tls", 2u, 0x200u, 0x100u, 4u, 0xdeadbeefu) == 0x80020191u,
+           "wb tlspl: attr 0x200 stays 0x80020191");
+    static const uint32_t bad_vals[] = {0u, 0xffffffffu};
+    for (size_t i = 0; i < 2; ++i) {
+        expect(wb_tlspl_create("tls", 2u, 0u, bad_vals[i], 4u, 0xdeadbeefu) == 0x800201b7u,
+               "wb tlspl: block size 0 and -1 are 0x800201B7");
+        expect(wb_tlspl_create("tls", 2u, 0u, 0x100u, bad_vals[i], 0xdeadbeefu) == 0x800201b7u,
+               "wb tlspl: count 0 and -1 are 0x800201B7");
+    }
+    static const uint32_t good_al[] = {0u, 1u, 0x10u, 0x20u, 0x100u, 0x800u, 0x1000u, 0x10000u};
+    for (size_t i = 0; i < sizeof good_al / sizeof good_al[0]; ++i) {
+        uint32_t u = wb_tlspl_create("tls", 2u, 0u, 1u, 4u, good_al[i]);
+        expect(u != 0u && u < 0x80000000u, "wb tlspl: alignments 0 and powers of two to 0x10000 succeed");
+        if (u < 0x80000000u) {
+            uint32_t a = selftest_tlspl_get_addr(u);
+            uint32_t al = good_al[i] < 4u ? 4u : good_al[i];
+            expect(a != 0u && (a & (al - 1u)) == 0u, "wb tlspl: the block honours the alignment");
+            (void)selftest_tlspl_simple(u, NID_TLSPL_FREE);
+            (void)selftest_tlspl_simple(u, NID_TLSPL_DELETE);
+        }
+    }
+    static const uint32_t bad_al[] = {3u, 0x2fu, 0x30u, 0x31u, 0x32u, 0x131u, 0xffffffffu};
+    for (size_t i = 0; i < sizeof bad_al / sizeof bad_al[0]; ++i)
+        expect(wb_tlspl_create("tls", 2u, 0u, 1u, 4u, bad_al[i]) == 0x800200d2u,
+               "wb tlspl: alignments that are not powers of two are 0x800200D2");
+
+    /* pool limit and index (create.expected "Create 1024: Failed at 16 (800201D1)") */
+    uint32_t pools[WB_TLSPL_MAX + 2];
+    int n = 0;
+    uint32_t err = 0u;
+    for (; n < WB_TLSPL_MAX + 1; ++n) {
+        uint32_t u = wb_tlspl_create("tls", 2u, 0u, 0x100u, 1u, 0xdeadbeefu);
+        if (u >= 0x80000000u) { err = u; break; }
+        pools[n] = u;
+    }
+    expect(err == 0x800201d1u && n <= WB_TLSPL_MAX, "wb tlspl: running out of pool slots is 0x800201D1");
+    if (n >= 2) {
+        expect(selftest_tlspl_refer(pools[n - 1], TLSPL_INFO) == 0u && MEM_R32(TLSPL_INFO + 40u) == WB_TLSPL_MAX - 1u,
+               "wb tlspl: the last pool reads index=15 in the status record");
+        expect(selftest_tlspl_refer(pools[0], TLSPL_INFO) == 0u, "wb tlspl: first pool refer");
+        uint32_t idx0 = MEM_R32(TLSPL_INFO + 40u);
+        (void)selftest_tlspl_simple(pools[0], NID_TLSPL_DELETE);
+        uint32_t again = wb_tlspl_create("tls", 2u, 0u, 0x100u, 1u, 0xdeadbeefu);
+        expect(again < 0x80000000u && selftest_tlspl_refer(again, TLSPL_INFO) == 0u &&
+                   MEM_R32(TLSPL_INFO + 40u) == idx0,
+               "wb tlspl: index is the pool slot, reused after a delete");
+        pools[0] = again;
+    }
+    for (int i = 0; i < n; ++i) (void)selftest_tlspl_simple(pools[i], NID_TLSPL_DELETE);
+
+    /* refer.expected: size 60, index at +40, shifted fields; input size 0 untouched */
+    uint32_t pool = wb_tlspl_create("refer", 2u, 0u, 0x100u, 0x10u, 0xdeadbeefu);
+    expect(pool != 0u && pool < 0x80000000u, "wb tlspl: refer fixture");
+    if (pool >= 0x80000000u) return;
+    for (uint32_t i = 0; i < 64u; ++i) MEM_W8(TLSPL_INFO + i, 0xccu);
+    MEM_W32(TLSPL_INFO, 0u);
+    expect(selftest_tlspl_refer(pool, TLSPL_INFO) == 0u && MEM_R32(TLSPL_INFO) == 0u &&
+               MEM_R32(TLSPL_INFO + 4u) == 0xccccccccu && MEM_R32(TLSPL_INFO + 56u) == 0xccccccccu,
+           "wb tlspl: refer with input size 0 leaves the record untouched");
+    MEM_W32(TLSPL_INFO, 1u);
+    expect(selftest_tlspl_refer(pool, TLSPL_INFO) == 0u && MEM_R32(TLSPL_INFO) == 60u &&
+               MEM_R8(TLSPL_INFO + 4u) == (uint8_t)'r' && MEM_R32(TLSPL_INFO + 36u) == 0u &&
+               MEM_R32(TLSPL_INFO + 44u) == 0x100u && MEM_R32(TLSPL_INFO + 48u) == 0x10u &&
+               MEM_R32(TLSPL_INFO + 52u) == 0x10u && MEM_R32(TLSPL_INFO + 56u) == 0u,
+           "wb tlspl: refer writes the 60-byte record with index at +40");
+
+    /* free.expected: block cleared on free, Twice is OK; delete.expected: held block is 0x800201D2 */
+    uint32_t a = selftest_tlspl_get_addr(pool);
+    expect(a != 0u, "wb tlspl: get address");
+    if (a) {
+        MEM_W32(a, 0xccccccccu);
+        expect(selftest_tlspl_simple(pool, NID_TLSPL_DELETE) == 0x800201d2u,
+               "wb tlspl: delete with a held block is 0x800201D2");
+        expect(selftest_tlspl_simple(pool, NID_TLSPL_FREE) == 0u, "wb tlspl: free is OK");
+        expect(MEM_R32(a) == 0u, "wb tlspl: free clears the block");
+        expect(selftest_tlspl_simple(pool, NID_TLSPL_FREE) == 0u, "wb tlspl: free twice is OK");
+    }
+    expect(selftest_tlspl_simple(pool, NID_TLSPL_DELETE) == 0u, "wb tlspl: delete");
+    expect(selftest_tlspl_simple(pool, NID_TLSPL_DELETE) == 0x800201d0u,
+           "wb tlspl: delete of a deleted pool is 0x800201D0");
+    expect(selftest_tlspl_simple(pool, NID_TLSPL_FREE) == 0x800201d0u,
+           "wb tlspl: free of a deleted pool is 0x800201D0");
+    expect(selftest_tlspl_simple(0xdeadbeefu, NID_TLSPL_FREE) == 0x800201d0u,
+           "wb tlspl: free of an invalid uid is 0x800201D0");
+    expect(selftest_tlspl_refer(0xdeadbeefu, TLSPL_INFO) == 0x800201d0u,
+           "wb tlspl: refer of an invalid uid is 0x800201D0");
+
+    /* vpl/refer.expected: name, input size 0; allocate/try.expected: 0x800201B7 */
+    for (size_t i = 0; i <= strlen("refer"); ++i) MEM_W8(TLSPL_NAMEBUF + (uint32_t)i, (uint8_t)"refer"[i]);
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = TLSPL_NAMEBUF; cpu.r[5] = 2u; cpu.r[6] = 0u; cpu.r[7] = 0x10000u;
+    uint32_t vpl = sr_syscall(&cpu, NID_VPL_CREATE);
+    expect(vpl >= 0x600u && vpl < 0x80000000u, "wb vpl: create");
+    if (vpl >= 0x80000000u) return;
+    for (uint32_t i = 0; i < 64u; ++i) MEM_W8(VPL_INFO + i, 0xccu);
+    MEM_W32(VPL_INFO, 0u);
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
+    expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u && MEM_R32(VPL_INFO) == 0u &&
+               MEM_R32(VPL_INFO + 4u) == 0xccccccccu,
+           "wb vpl: refer with input size 0 leaves the record untouched");
+    MEM_W32(VPL_INFO, 0x34u);
+    memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
+    expect(sr_syscall(&cpu, NID_VPL_REFER) == 0u && MEM_R32(VPL_INFO) == 0x34u &&
+               MEM_R8(VPL_INFO + 4u) == (uint8_t)'r' && MEM_R8(VPL_INFO + 5u) == (uint8_t)'e' &&
+               MEM_R8(VPL_INFO + 9u) == 0u,
+           "wb vpl: refer copies the pool name to +4");
+    static const uint32_t bad_req[] = {0u, 0x10001u, 0xffffffffu};
+    for (size_t i = 0; i < 3; ++i) {
+        expect(selftest_vpl_allocate(vpl, bad_req[i], VPL_OUTPTR, 0u) == 0x800201b7u,
+               "wb vpl: Allocate of 0, more than the pool, or -1 bytes is 0x800201B7");
+        expect(selftest_vpl_try_allocate(vpl, bad_req[i], VPL_OUTPTR) == 0x800201b7u,
+               "wb vpl: TryAllocate of 0, more than the pool, or -1 bytes is 0x800201B7");
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = vpl; cpu.r[5] = bad_req[i]; cpu.r[6] = VPL_OUTPTR;
+        expect(sr_syscall(&cpu, NID_VPL_ALLOCATE_CB) == 0x800201b7u,
+               "wb vpl: AllocateCB of 0, more than the pool, or -1 bytes is 0x800201B7");
+    }
+    (void)selftest_vpl_delete(vpl);
 }
 
 static void test_fpl_blocking_waits(void) {
@@ -34641,7 +37544,7 @@ static void test_vpl_blocking_waits(void) {
 
 /* =========================================================================
  * Mailbox object model tests (issue #339)
- * Measured anchors from docs/HARDWARE_ORACLE.md (campaign psp-hw-20260917):
+ * Measured anchors from docs/HARDWARE_ORACLE.md:
  * unknown id 0x8002019B, timeout 0x800201A8 with remaining 0, Cancel waiters
  * 0x800201A9, empty poll 0x800201B2, FIFO circular next links, attr 0x400
  * ascending msgPriority, waitType 5.
@@ -35517,7 +38420,13 @@ static void test_psp_mutex(void) {
     expect(w_cn.returned == 0 && w_cn.tcb->state == TH_WAIT_OBJ, "T21: waiter blocked on m_cn");
 
     expect(mtx_cancel(m_cn, 2, 0) == 0x800201bdu, "MO-01: CancelMutex newCount=2 returns 0x800201bd");
-    expect(mtx_cancel(m_cn, -1, 0) == 0x800201bdu, "MO-01: CancelMutex newCount=-1 returns 0x800201bd");
+    {   /* pspautotests tests/threads/mutex/cancel.expected "Negative -3/-1: OK", then current=0 lockThread=0 */
+        uint32_t m_neg = mtx_create("neg_mtx", 0, 1);
+        expect(mtx_cancel(m_neg, -1, 0) == 0, "MO-01: CancelMutex newCount=-1 returns 0");
+        expect(mtx_get_info(m_neg, &info) && info.currentCount == 0 && info.lockThread == 0,
+               "MO-01: CancelMutex newCount=-1 releases to count 0, no owner");
+        mtx_delete(m_neg);
+    }
 
     uint32_t num_wait_out = 0x00270090u; MEM_W32(num_wait_out, 0xdeadbeefu);
     s_cur = (int)(cur - s_tcb);
@@ -35669,7 +38578,7 @@ static void check_coroutine_lifecycle(void) {
         extern int s_msgpipe_parks;
         extern int s_vm_parks;
         extern int s_ctrlc_parks;
-        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
+        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 2 /* wc waiters */ + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
         char msg[1024];
         snprintf(msg, sizeof msg,
                  "every parking body parked exactly once (3 joiners (including #668) + 1 sema CB body "
@@ -35677,6 +38586,7 @@ static void check_coroutine_lifecycle(void) {
                  "+ 3 cancel/release waiters + 5 UMD cancel waiters + 3 second-round waiters + 6 liveness waiters "
                  "+ 1 issue #339 joiner + 1 completed sysclock delay body "
                  "(the terminated full-range delay body never parks) + 2 vblank CB waiters "
+                 "+ 2 w-hle-c waiters (a cancelled UMD wait, a WaitVblankStartCB) "
                  "+ 1 vblank multi waiter + 1 zero-period vblank waiter body "
                  "+ 1 ReferSemaStatus waiter "
                  "+ 3 rotate peers + 2 suspended-waiter bodies + 5 released-wait bodies "
@@ -35970,7 +38880,14 @@ static uint32_t oracle_syscall4(CpuState *cpu, uint32_t nid,
     cpu->r[5] = a1;
     cpu->r[6] = a2;
     cpu->r[7] = a3;
+    if (nid == ORACLE_NID_CREATE_THREAD) cpu->r[8] = 0u;   /* the oracle creates are default-attribute */
     return sr_syscall(cpu, nid);
+}
+
+/* A PSP refuses a NULL thread name (create.expected), so the oracle creates pass a real one. */
+static uint32_t oracle_thread_name(void) {
+    title_hle_write_cstr(0x08301800u, "oracle-thread");
+    return 0x08301800u;
 }
 
 static int oracle_setup_owner(TCB **out_owner) {
@@ -36090,7 +39007,7 @@ static int oracle_thread_lifecycle_case(uint32_t *out0, uint32_t *out1,
     TCB *owner = NULL;
     if (!oracle_setup_owner(&owner)) return ORACLE_UNAVAILABLE;
     s_exit_argument = 0x42;
-    uint32_t thid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, 0,
+    uint32_t thid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                     ORACLE_THREAD_ENTRY, 32, 0x4000u);
     if (thid & 0x80000000u) {
         fprintf(stderr, "psp-oracle thread-lifecycle unavailable: CreateThread returned 0x%08x\n", thid);
@@ -36136,7 +39053,7 @@ static int oracle_thread_delete_case(uint32_t *out0, uint32_t *out1,
     uint32_t current_delete = oracle_syscall4(s_cpu, ORACLE_NID_DELETE_THREAD,
                                               current_uid, 0, 0, 0);
 
-    uint32_t term_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, 0,
+    uint32_t term_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *term_target = tcb_by_uid(term_target_uid);
     if (!term_target) return ORACLE_UNAVAILABLE;
@@ -36162,7 +39079,7 @@ static int oracle_thread_delete_case(uint32_t *out0, uint32_t *out1,
     uint32_t term_post_wake = oracle_syscall4(s_cpu, ORACLE_NID_WAKEUP_THREAD,
                                               term_target_uid, 0, 0, 0);
 
-    uint32_t exit_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, 0,
+    uint32_t exit_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *exit_target = tcb_by_uid(exit_target_uid);
     if (!exit_target) return ORACLE_UNAVAILABLE;
@@ -36227,7 +39144,7 @@ static int oracle_thread_delete_followup_case(uint32_t *out0, uint32_t *out1,
     /* The host oracle uses the production scheduler's real target lifecycle,
        while the joiner body is represented by the same observable state that
        the guest entry has after returning from its inner WaitThreadEnd. */
-    uint32_t error_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, 0,
+    uint32_t error_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                 ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *error_target = tcb_by_uid(error_target_uid);
     if (!error_target) return ORACLE_UNAVAILABLE;
@@ -36260,7 +39177,7 @@ static int oracle_thread_delete_followup_case(uint32_t *out0, uint32_t *out1,
     uint32_t error_outer = oracle_syscall4(s_cpu, ORACLE_NID_WAIT_THREAD_END,
                                            error_joiner->uid, 0, 0, 0);
 
-    uint32_t positive_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, 0,
+    uint32_t positive_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                    ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *positive_target = tcb_by_uid(positive_target_uid);
     if (!positive_target) return ORACLE_UNAVAILABLE;
@@ -36365,7 +39282,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     TCB *owner = NULL;
     if (!oracle_setup_owner(&owner)) return ORACLE_UNAVAILABLE;
 
-    uint32_t error_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, 0,
+    uint32_t error_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                 ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *error_target = tcb_by_uid(error_target_uid);
     if (!error_target) return ORACLE_UNAVAILABLE;
@@ -36374,7 +39291,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
     run_worker(error_target);
 
-    uint32_t error_joiner_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, 0,
+    uint32_t error_joiner_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                 ORACLE_THREAD_ENTRY, 16, 0x4000u);
     TCB *error_joiner = tcb_by_uid(error_joiner_uid);
     if (!error_joiner) return ORACLE_UNAVAILABLE;
@@ -36406,7 +39323,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     }
     (void)oracle_syscall4(s_cpu, ORACLE_NID_DELETE_THREAD, error_joiner_uid, 0, 0, 0);
 
-    uint32_t positive_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, 0,
+    uint32_t positive_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                    ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *positive_target = tcb_by_uid(positive_target_uid);
     if (!positive_target) return ORACLE_UNAVAILABLE;
@@ -36415,7 +39332,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
     run_worker(positive_target);
 
-    uint32_t positive_joiner_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, 0,
+    uint32_t positive_joiner_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                    ORACLE_THREAD_ENTRY, 16, 0x4000u);
     TCB *positive_joiner = tcb_by_uid(positive_joiner_uid);
     if (!positive_joiner) return ORACLE_UNAVAILABLE;
@@ -38060,6 +40977,343 @@ static void test_route_read_widths_hold_for_their_reads_on_a_starved_host(void) 
     hle_test_setenv("SR_PADSCRIPT_READ_BUDGET", NULL);
     remove(RT_PATH);
     sr_route_reset();
+}
+
+/* STICK <lx> <ly>: a route step can hold the left analog stick, so a headless route can walk a
+ * player and not only press buttons. Sticks used to be centred in every scripted run, because
+ * sr_ctrl_sample took them only from the window's pad. The stick reaches the guest the way a
+ * live pad's does: the route's segment holds it, sr_ctrl_sample latches it into the controller
+ * ring with the buttons, and sceCtrlReadBufferPositive hands it over in SceCtrlData's Lx/Ly
+ * bytes. Driven, like the case above, through the real vblank episode service and the real
+ * dispatch, with the guest reading once per vblank. */
+typedef struct { uint32_t buttons; uint8_t lx, ly; } RouteStickRead;
+
+static RouteStickRead route_stick_read(CpuState *cpu) {
+    MEM_W32(CTRL_OK_BUF + 4u, 0xa5a5a5a5u);
+    MEM_W8(CTRL_OK_BUF + 8u, 0xa5u);
+    MEM_W8(CTRL_OK_BUF + 9u, 0xa5u);
+    expect(ctrl_dispatch(cpu, CTRL_OK_BUF, 1u) == 1u, "the stick route's guest read returns one sample");
+    RouteStickRead r = { MEM_R32(CTRL_OK_BUF + 4u), MEM_R8(CTRL_OK_BUF + 8u), MEM_R8(CTRL_OK_BUF + 9u) };
+    return r;
+}
+
+static void route_stick_mode(CpuState *cpu, uint32_t mode) {
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[4] = mode;
+    (void)sr_syscall(cpu, NID_SCE_CTRL_SET_SAMPLING_MODE);
+}
+
+static int route_stick_is(RouteStickRead r, uint32_t buttons, uint8_t lx, uint8_t ly) {
+    return r.buttons == buttons && r.lx == lx && r.ly == ly;
+}
+
+static void test_route_stick_reaches_the_guest_through_the_controller_sample(void) {
+    extern void sr_hle_test_ctrl_stick(uint8_t lx, uint8_t ly);
+    CpuState cpu;
+    RouteStickRead r[12];
+    const uint32_t open_nid = sr_route_test_nid("sceIoOpen");
+
+    reset_fixture();
+    sr_hle_init();
+    sr_route_reset();
+    ctrl_env("1", "", "", "");
+    sr_ctrl_test_reset_live_input();
+    sr_hle_test_ctrl_sampling_reset();
+    starve_reset();
+    route_stick_mode(&cpu, 1u);   /* analog: the mode in which a PSP reports the stick at all */
+    ctrl_drain(&cpu);
+
+    /* --- a route without a STICK step reads the stick centred ------------------- */
+    rt_write("PRESS CROSS 2\nDELAY 2\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1 && sr_route_status() == RT_RUNNING, "a route without STICK loads");
+    int centred = 1, crossed = 0;
+    for (int i = 0; i < 8; i++) {
+        starve_batch(1u);
+        r[0] = route_stick_read(&cpu);
+        if (r[0].lx != 128u || r[0].ly != 128u) centred = 0;
+        if (r[0].buttons & NK_PSP_BTN_CROSS_BIT) crossed = 1;
+    }
+    expect(crossed && sr_route_status() == RT_DONE, "the route's press reaches the guest and completes");
+    expect(centred, "a route without a STICK step reads Lx/Ly 128/128 in analog mode");
+    remove(RT_PATH);
+
+    /* --- STICK holds the stick for its press, and the next step centres it ------ */
+    sr_route_reset();
+    ctrl_drain(&cpu);
+    rt_write("STICK 255 0 PRESS 0 3\nDELAY 2\nSTICK 40 200 PRESS CROSS 2\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1 && sr_route_status() == RT_RUNNING, "a route with STICK steps loads");
+    for (int i = 0; i < 9; i++) { starve_batch(1u); r[i] = route_stick_read(&cpu); }
+    expect(route_stick_is(r[0], 0u, 255u, 0u) && route_stick_is(r[1], 0u, 255u, 0u) &&
+               route_stick_is(r[2], 0u, 255u, 0u),
+           "a stick-only PRESS holds Lx/Ly at the scripted position for its width, with no button");
+    expect(route_stick_is(r[3], 0u, 128u, 128u) && route_stick_is(r[4], 0u, 128u, 128u),
+           "the DELAY after it centres the stick, as it releases the buttons");
+    expect(route_stick_is(r[5], NK_PSP_BTN_CROSS_BIT, 40u, 200u) &&
+               route_stick_is(r[6], NK_PSP_BTN_CROSS_BIT, 40u, 200u),
+           "a STICK on a button press holds the stick and the button together");
+    expect(route_stick_is(r[7], 0u, 128u, 128u) && route_stick_is(r[8], 0u, 128u, 128u) &&
+               sr_route_status() == RT_DONE,
+           "a finished route leaves the stick centred");
+    remove(RT_PATH);
+
+    /* --- the live stick stands until a step holds the stick, and is back after --- */
+    sr_route_reset();
+    ctrl_drain(&cpu);
+    sr_hle_test_ctrl_stick(0x75u, 0x7cu);   /* a pad at rest, as a PSP-3000 read it */
+    rt_write("DELAY 1\nSTICK 200 60 PRESS 0 2\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "a route that holds the stick after a DELAY loads");
+    for (int i = 0; i < 5; i++) { starve_batch(1u); r[i] = route_stick_read(&cpu); }
+    expect(route_stick_is(r[0], 0u, 0x75u, 0x7cu),
+           "before a step holds the stick the guest reads the live stick, not a forced centre");
+    expect(route_stick_is(r[1], 0u, 200u, 60u) && route_stick_is(r[2], 0u, 200u, 60u),
+           "a step that holds the stick replaces the live stick outright for its samples");
+    expect(route_stick_is(r[3], 0u, 0x75u, 0x7cu) && route_stick_is(r[4], 0u, 0x75u, 0x7cu),
+           "and the live stick is back once the step is done");
+    sr_hle_test_ctrl_stick(0x80u, 0x80u);
+    remove(RT_PATH);
+
+    /* --- digital mode reads the stick centred whatever the route holds ---------- */
+    sr_route_reset();
+    ctrl_drain(&cpu);
+    route_stick_mode(&cpu, 0u);
+    rt_write("STICK 255 255 PRESS CROSS 2\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "a STICK press for a digital-mode guest loads");
+    for (int i = 0; i < 4; i++) { starve_batch(1u); r[i] = route_stick_read(&cpu); }
+    expect(route_stick_is(r[0], NK_PSP_BTN_CROSS_BIT, 128u, 128u) &&
+               route_stick_is(r[1], NK_PSP_BTN_CROSS_BIT, 128u, 128u),
+           "in digital mode the guest reads the press with the stick centred, as a PSP reports it");
+    expect(sr_route_status() == RT_DONE, "and the press is still delivered by the guest's reads");
+    route_stick_mode(&cpu, 1u);
+    remove(RT_PATH);
+
+    /* --- a repeated stick-only press releases between its pulses ---------------- */
+    sr_route_reset();
+    ctrl_drain(&cpu);
+    rt_write("STICK 0 128 PRESS_UNTIL_NID sceIoOpen 0 2 4 400\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "a stick-only PRESS_UNTIL_NID loads");
+    for (int i = 0; i < 6; i++) { starve_batch(1u); r[i] = route_stick_read(&cpu); }
+    expect(route_stick_is(r[0], 0u, 0u, 128u) && route_stick_is(r[1], 0u, 0u, 128u) &&
+               route_stick_is(r[2], 0u, 128u, 128u) && route_stick_is(r[3], 0u, 128u, 128u) &&
+               route_stick_is(r[4], 0u, 0u, 128u) && route_stick_is(r[5], 0u, 0u, 128u),
+           "a pulse that holds only the stick is pressed for its width and centred for the rest "
+           "of its period, so the guest sees each push as a push");
+    sr_route_test_import(open_nid);
+    starve_batch(1u);
+    (void)route_stick_read(&cpu);
+    expect(sr_route_status() == RT_DONE, "the import completes the stick pulse");
+    remove(RT_PATH);
+
+    /* --- a stick press the guest never reads fails the run by name -------------- */
+    sr_route_reset();
+    ctrl_drain(&cpu);
+    hle_test_setenv("SR_PADSCRIPT_READ_BUDGET", "30");
+    rt_write("STICK 128 0 PRESS 0 4\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "a stick-only press with a 30-vblank read budget loads");
+    starve_batch(1u);
+    starve_batch(28u);
+    expect(sr_route_status() == RT_RUNNING, "an unread stick press is held inside its read budget");
+    starve_batch(2u);
+    expect(sr_route_status() == RT_FAILED,
+           "a stick press the guest never reads fails the route, as an unread button press does");
+    hle_test_setenv("SR_PADSCRIPT_READ_BUDGET", NULL);
+    remove(RT_PATH);
+
+    /* --- what STICK cannot mean is refused at load ------------------------------ */
+    static const char *const refused[] = {
+        "STICK 256 128 PRESS CROSS 2\nEND\n",        /* past the axis */
+        "STICK -1 128 PRESS CROSS 2\nEND\n",         /* negative */
+        "STICK 0x80 128 PRESS CROSS 2\nEND\n",       /* not decimal */
+        "STICK 12a 128 PRESS CROSS 2\nEND\n",        /* a stray character */
+        "STICK 128 PRESS CROSS 2\nEND\n",            /* one axis */
+        "STICK 128 128\nEND\n",                      /* no step */
+        "STICK 128 128 # walk\nEND\n",               /* a comment is not a step */
+        "STICK 128 128 DELAY 4\nEND\n",              /* a step that presses nothing */
+        "STICK 128 128 END\n",
+        "READS STICK 128 128 PRESS CROSS 2\nEND\n",  /* STICK comes first */
+    };
+    for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+        sr_route_reset();
+        rt_write(refused[i]);
+        expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED,
+               "a STICK line that cannot mean a held stick is refused at load");
+    }
+    sr_route_reset();
+    rt_write("STICK 128 0 READS PRESS CROSS 2\nSTICK 0 255 VBLANKS PRESS_UNTIL_NID sceIoOpen 0 2 4 400\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "STICK combines with a READS or VBLANKS unit after it");
+    remove(RT_PATH);
+
+    sr_route_reset();
+    sr_hle_test_ctrl_sampling_reset();
+    ctrl_env("1", "", "", "");
+    ctrl_drain(&cpu);
+}
+
+/* Recording a live session and replaying it: SR_INLOG's ctrl_latch lines are what
+ * padscript_from_log turns into a pad-script table, so the stick has to survive both halves.
+ * The log used to print a line only when a button changed, and the table had no stick column,
+ * so a walk recorded with the analog stick replayed standing still. Also here: an unread stick
+ * press names the position in its failure, and a long route program loads (the step limit was
+ * 256, which a walked level route passes before its first obstacle). */
+static void test_route_recording_carries_the_stick_from_log_to_replay(void) {
+    extern void sr_hle_test_inlog(int on);
+    CpuState cpu;
+    RouteStickRead r[12];
+
+    reset_fixture();
+    sr_hle_init();
+    sr_route_reset();
+    ctrl_env("1", "", "", "");
+    sr_ctrl_test_reset_live_input();
+    sr_hle_test_ctrl_sampling_reset();
+    starve_reset();
+    route_stick_mode(&cpu, 1u);
+    ctrl_drain(&cpu);
+
+    /* --- the latch log prints a stick that moves with no button change ---------- */
+    rt_write("STICK 255 0 PRESS 0 2\nSTICK 40 200 PRESS 0 2\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "a route of stick-only presses loads");
+    {
+        char err[4096] = "";
+        FILE *capture = NULL;
+        int saved = -1;
+        sr_hle_test_inlog(1);
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved);
+        for (int i = 0; i < 6; i++) { starve_batch(1u); (void)route_stick_read(&cpu); }
+        if (capturing) hle_data_stderr_capture_end(capture, saved, err, sizeof err);
+        sr_hle_test_inlog(0);
+        expect(strstr(err, "buttons 0x0000 -> 0x0000 lx=255 ly=0") != NULL,
+               "SR_INLOG logs a stick-only move, so a recording keeps where the stick went");
+        expect(strstr(err, "buttons 0x0000 -> 0x0000 lx=40 ly=200") != NULL,
+               "and each later stick-only move");
+        expect(strstr(err, "buttons 0x0000 -> 0x0000 lx=128 ly=128") != NULL,
+               "and the stick's return to centre");
+    }
+    remove(RT_PATH);
+
+    /* --- a table row holds the stick in its two extra columns ------------------- */
+    sr_route_reset();
+    ctrl_drain(&cpu);
+    rt_write("1 0x0000 3 255 0\n6 0x4000 2\n");
+    expect(sr_route_load(RT_PATH) == 1, "a pad-script table with a stick column loads");
+    int stick_only = 0, stick_with_cross = 0, cross_centred = 0;
+    for (int i = 0; i < 12; i++) {
+        starve_batch(1u);
+        r[0] = route_stick_read(&cpu);
+        if (route_stick_is(r[0], 0u, 255u, 0u)) stick_only++;
+        if ((r[0].buttons & NK_PSP_BTN_CROSS_BIT) && r[0].lx == 255u) stick_with_cross = 1;
+        if (route_stick_is(r[0], NK_PSP_BTN_CROSS_BIT, 128u, 128u)) cross_centred = 1;
+    }
+    expect(stick_only == 3, "a stick row with no button holds the stick for its width");
+    expect(cross_centred && !stick_with_cross, "a row without a stick column leaves the stick centred");
+    remove(RT_PATH);
+
+    /* --- overlapping rows hold the stick of the row that started last ----------- */
+    sr_route_reset();
+    ctrl_drain(&cpu);
+    rt_write("1 0x4000 6\n3 0x0000 2 0 128\n");
+    expect(sr_route_load(RT_PATH) == 1, "a stick row inside a press loads");
+    int pushed_while_held = 0, held_after = 0;
+    for (int i = 0; i < 10; i++) {
+        starve_batch(1u);
+        r[0] = route_stick_read(&cpu);
+        if (route_stick_is(r[0], NK_PSP_BTN_CROSS_BIT, 0u, 128u)) pushed_while_held++;
+        if (pushed_while_held && route_stick_is(r[0], NK_PSP_BTN_CROSS_BIT, 128u, 128u)) held_after = 1;
+    }
+    expect(pushed_while_held == 2, "the stick row moves the stick while the earlier press stays down");
+    expect(held_after, "and the press is still down, stick centred, once the stick row ends");
+    remove(RT_PATH);
+
+    static const char *const refused_rows[] = {
+        "1 0x4000 2 256 0\n",        /* past the axis */
+        "1 0x4000 2 128\n",          /* one axis */
+        "1 0x4000 2 12a 0\n",        /* a stray character */
+        "1 0x4000 2 0 0 7\n",        /* something after the stick */
+        "1 0x4000 2 abc\n",          /* a word where the stick would be */
+        "1 0x4000 2 -1 128\n",       /* a negative axis */
+        "1 0x4000 2 x 0\n",          /* a stray column */
+    };
+    for (size_t i = 0; i < sizeof refused_rows / sizeof refused_rows[0]; i++) {
+        sr_route_reset();
+        rt_write(refused_rows[i]);
+        expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED,
+               "a pad-script row whose stick columns are not '<lx> <ly>' is refused at load");
+    }
+    {
+        char err[1024] = "";
+        FILE *capture = NULL;
+        int saved = -1;
+        sr_route_reset();
+        rt_write("1 0x4000 2\n4 0x0000 3 abc\n");
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved);
+        int loaded = sr_route_load(RT_PATH);
+        if (capturing) hle_data_stderr_capture_end(capture, saved, err, sizeof err);
+        expect(loaded == 0, "a row with a word after its width is refused, not replayed with a centred stick");
+        expect(strstr(err, ":2: a pad-script row's stick is '<lx> <ly>'") != NULL,
+               "the refusal names the row's line");
+    }
+    sr_route_reset();
+    rt_write("1 0x4000 2 # jump\n4 0x0000 2 0 255 # walk\n");
+    expect(sr_route_load(RT_PATH) == 1, "a comment still ends a row, with or without a stick");
+    remove(RT_PATH);
+
+    /* --- an unread stick press names the stick in its failure -------------------- */
+    sr_route_reset();
+    ctrl_drain(&cpu);
+    hle_test_setenv("SR_PADSCRIPT_READ_BUDGET", "30");
+    rt_write("STICK 128 0 PRESS 0 4\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "a stick-only press with a 30-vblank read budget loads");
+    {
+        char err[2048] = "";
+        FILE *capture = NULL;
+        int saved = -1;
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved);
+        starve_batch(1u);
+        starve_batch(28u);
+        starve_batch(2u);
+        if (capturing) hle_data_stderr_capture_end(capture, saved, err, sizeof err);
+        expect(sr_route_status() == RT_FAILED, "the unread stick press fails the route");
+        expect(strstr(err, "while the left stick at 128,0 was held") != NULL,
+               "the failure names the stick position the guest never read");
+    }
+    hle_test_setenv("SR_PADSCRIPT_READ_BUDGET", NULL);
+    remove(RT_PATH);
+
+    /* --- a long route program loads, and one past the limit is refused by name --- */
+    {
+        const int long_steps = 4096;
+        size_t cap = (size_t)(long_steps + 2) * 8u;
+        char *text = (char *)malloc(cap);
+        expect(text != NULL, "the long route's text is allocated");
+        if (text) {
+            size_t used = 0;
+            for (int i = 0; i < 300; i++) used += (size_t)snprintf(text + used, cap - used, "DELAY 1\n");
+            snprintf(text + used, cap - used, "END\n");
+            sr_route_reset();
+            rt_write(text);
+            expect(sr_route_load(RT_PATH) == 1, "a 301-step route program loads");
+            used = 0;
+            for (int i = 0; i < long_steps; i++) used += (size_t)snprintf(text + used, cap - used, "DELAY 1\n");
+            snprintf(text + used, cap - used, "END\n");
+            sr_route_reset();
+            rt_write(text);
+            char err[1024] = "";
+            FILE *capture = NULL;
+            int saved = -1;
+            int capturing = hle_data_stderr_capture_begin(&capture, &saved);
+            int loaded = sr_route_load(RT_PATH);
+            if (capturing) hle_data_stderr_capture_end(capture, saved, err, sizeof err);
+            expect(loaded == 0 && sr_route_status() == RT_FAILED,
+                   "a route program one step past the limit is refused, not cut short");
+            expect(strstr(err, "more than 4096 steps") != NULL, "the refusal names the limit");
+            free(text);
+        }
+        remove(RT_PATH);
+    }
+
+    sr_route_reset();
+    sr_hle_test_ctrl_sampling_reset();
+    ctrl_env("1", "", "", "");
+    ctrl_drain(&cpu);
 }
 
 /* sceKernelExitGame is `void sceKernelExitGame(void)`:
@@ -40237,6 +43491,368 @@ static void test_power_unregister_callback_slots(void) {
            "power unregister: slot -1 returns 0x80000102 (PSP-measured)");
 }
 
+/* ---- w-hle-c: cells read from pspautotests against the production dispatch (#341) ---- */
+
+/* scePowerRegisterCallback error cells, pspautotests tests/power/power.expected (PSP-recorded):
+ * the 17th registration 0x80000022; callback 0 -> 0x80000100 even on an occupied slot; slot -4
+ * -> 0x80000102; slot 31 -> 0x80000023; slot 32 -> 0x80000102; an occupied slot -> 0x80000020. */
+static void test_wc_power_register_callback_errors(void) {
+    CpuState cpu;
+    uint32_t cb;
+    reset_fixture();
+    sr_hle_init();
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = WSV_NAMEBUF;
+    cb = sr_syscall(&cpu, NID_WSV_CREATE_CALLBACK);
+    expect(cb != 0u && sr_callback_is_valid(cb), "wc power register: a callback exists");
+    for (uint32_t slot = 0; slot < 16u; slot++) {
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = slot;
+        (void)sr_syscall(&cpu, NID_POWER_UNREGISTER_CALLBACK);
+    }
+    int filled = 1;
+    for (uint32_t i = 0; i < 16u; i++) {
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = (uint32_t)-1; cpu.r[5] = cb;
+        if (sr_syscall(&cpu, NID_POWER_REGISTER_CALLBACK) != i) filled = 0;
+    }
+    expect(filled, "wc power register: slot -1 takes slots 0..15 in order");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = (uint32_t)-1; cpu.r[5] = cb;
+    expect(sr_syscall(&cpu, NID_POWER_REGISTER_CALLBACK) == 0x80000022u,
+           "wc power register: the 17th registration returns 0x80000022 (PSP-measured)");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = 0u; cpu.r[5] = 0u;
+    expect(sr_syscall(&cpu, NID_POWER_REGISTER_CALLBACK) == 0x80000100u,
+           "wc power register: callback 0 returns 0x80000100 before the slot is checked (PSP-measured)");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = (uint32_t)-4; cpu.r[5] = cb;
+    expect(sr_syscall(&cpu, NID_POWER_REGISTER_CALLBACK) == 0x80000102u,
+           "wc power register: slot -4 returns 0x80000102 (PSP-measured)");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = 31u; cpu.r[5] = cb;
+    expect(sr_syscall(&cpu, NID_POWER_REGISTER_CALLBACK) == 0x80000023u,
+           "wc power register: slot 31 returns 0x80000023 (PSP-measured)");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = 32u; cpu.r[5] = cb;
+    expect(sr_syscall(&cpu, NID_POWER_REGISTER_CALLBACK) == 0x80000102u,
+           "wc power register: slot 32 returns 0x80000102 (PSP-measured)");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = 0u; cpu.r[5] = cb;
+    expect(sr_syscall(&cpu, NID_POWER_REGISTER_CALLBACK) == 0x80000020u,
+           "wc power register: an occupied slot returns 0x80000020 (PSP-measured)");
+    for (uint32_t slot = 0; slot < 16u; slot++) {
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = slot;
+        (void)sr_syscall(&cpu, NID_POWER_UNREGISTER_CALLBACK);
+    }
+}
+
+/* sceKernelVolatileMemUnlock(mode) and the scePower aliases, pspautotests
+ * tests/power/volatile/unlock.expected "Modes" and "Modes (scePower)". */
+static void test_wc_volatile_unlock_mode(void) {
+    enum { NID_PWR_LOCK = 0x23c31ffeu, NID_PWR_TRYLOCK = 0xfa97a599u, NID_PWR_UNLOCK = 0xb3edd801u };
+    static const int32_t bad_modes[] = { -2, -1, 1, 2, 3, 4, 5, 6, 7, 16, 256, 4096, 0x7FFFFFFF };
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_volatile_mem_reset();
+    (void)volatile_mem_current_thread(0x2b02u, 32);
+    expect(sr_hle_test_is_registered(NID_PWR_LOCK) && sr_hle_test_is_registered(NID_PWR_TRYLOCK) &&
+               sr_hle_test_is_registered(NID_PWR_UNLOCK),
+           "wc volatile: scePowerVolatileMemLock, TryLock and Unlock are registered");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[5] = VM_PTR_OUT; cpu.r[6] = VM_SIZE_OUT;
+    expect(sr_syscall(&cpu, NID_VM_TRYLOCK) == 0u, "wc volatile: TryLock takes the lock");
+    for (size_t i = 0; i < sizeof(bad_modes) / sizeof(bad_modes[0]); i++) {
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = (uint32_t)bad_modes[i];
+        expect(sr_syscall(&cpu, NID_VM_UNLOCK) == 0x80000107u,
+               "wc volatile: Unlock with a mode other than 0 returns 0x80000107 (PSP-measured)");
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = (uint32_t)bad_modes[i];
+        expect(sr_syscall(&cpu, NID_PWR_UNLOCK) == 0x80000107u,
+               "wc volatile: scePowerVolatileMemUnlock with a mode other than 0 returns 0x80000107");
+    }
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[5] = VM_PTR_OUT; cpu.r[6] = VM_SIZE_OUT;
+    expect(sr_syscall(&cpu, NID_VM_TRYLOCK) == 0x802b0200u,
+           "wc volatile: refused Unlock calls left the lock held");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_PWR_UNLOCK) == 0u,
+           "wc volatile: scePowerVolatileMemUnlock mode 0 releases the lock");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_PWR_UNLOCK) == 0x800201aeu,
+           "wc volatile: scePowerVolatileMemUnlock while not locked returns 0x800201ae");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[5] = VM_PTR_OUT; cpu.r[6] = VM_SIZE_OUT;
+    expect(sr_syscall(&cpu, NID_PWR_TRYLOCK) == 0u &&
+               MEM_R32(VM_PTR_OUT) == 0x08400000u,
+           "wc volatile: scePowerVolatileMemTryLock takes the lock and writes the region");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[5] = VM_PTR_OUT; cpu.r[6] = VM_SIZE_OUT;
+    expect(sr_syscall(&cpu, NID_PWR_TRYLOCK) == 0x802b0200u,
+           "wc volatile: scePowerVolatileMemTryLock while held returns 0x802b0200");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_VM_UNLOCK) == 0u, "wc volatile: Unlock mode 0 releases the lock");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[5] = VM_PTR_OUT; cpu.r[6] = VM_SIZE_OUT;
+    expect(sr_syscall(&cpu, NID_PWR_LOCK) == 0u && MEM_R32(VM_SIZE_OUT) == 0x00400000u,
+           "wc volatile: scePowerVolatileMemLock takes the free lock and writes the size");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_VM_UNLOCK) == 0u, "wc volatile: Unlock releases the alias lock");
+    sr_hle_test_volatile_mem_reset();
+    s_cur = -1;
+}
+
+/* sceCtrlSet/GetIdleCancelThreshold, pspautotests tests/ctrl/idle/idle.expected. */
+static void test_wc_ctrl_idle_cancel_threshold(void) {
+    enum { OUT = 0x08007300u };
+    static const struct { int32_t a, b; uint32_t want; } sets[] = {
+        { -127, -127, 0x800001FEu }, { -65535, 65536, 0x800001FEu }, { 128, 128, 0u },
+        { 0, -1, 0u }, { -2, -2, 0x800001FEu }, { 129, 129, 0x800001FEu }, { 1, 129, 0x800001FEu },
+    };
+    sr_hle_test_ctrl_sampling_reset();
+    reset_fixture();
+    sr_hle_init();
+    expect(td24b_dispatch4(NID_SCE_CTRL_SET_IDLE_CANCEL_THRESHOLD, 0u, 0u, 0u, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_CTRL_GET_IDLE_CANCEL_THRESHOLD, OUT, OUT + 4u, 0u, 0u) == 0u &&
+               MEM_R32(OUT) == 0u && MEM_R32(OUT + 4u) == 0u,
+           "wc ctrl idle: Set (0, 0) returns 0 and reads back (0, 0)");
+    for (size_t i = 0; i < sizeof(sets) / sizeof(sets[0]); i++) {
+        uint32_t before_a, before_b;
+        (void)td24b_dispatch4(NID_SCE_CTRL_GET_IDLE_CANCEL_THRESHOLD, OUT, OUT + 4u, 0u, 0u);
+        before_a = MEM_R32(OUT); before_b = MEM_R32(OUT + 4u);
+        expect(td24b_dispatch4(NID_SCE_CTRL_SET_IDLE_CANCEL_THRESHOLD, (uint32_t)sets[i].a,
+                               (uint32_t)sets[i].b, 0u, 0u) == sets[i].want,
+               "wc ctrl idle: Set answers the PSP-measured code for the pair");
+        (void)td24b_dispatch4(NID_SCE_CTRL_GET_IDLE_CANCEL_THRESHOLD, OUT, OUT + 4u, 0u, 0u);
+        if (sets[i].want != 0u)
+            expect(MEM_R32(OUT) == before_a && MEM_R32(OUT + 4u) == before_b,
+                   "wc ctrl idle: a refused Set stores nothing");
+    }
+    expect(td24b_dispatch4(NID_SCE_CTRL_SET_IDLE_CANCEL_THRESHOLD, 0u, (uint32_t)-1, 0u, 0u) == 0u &&
+               td24b_dispatch4(NID_SCE_CTRL_GET_IDLE_CANCEL_THRESHOLD, OUT, OUT + 4u, 0u, 0u) == 0u &&
+               MEM_R32(OUT) == 0u && MEM_R32(OUT + 4u) == 0xFFFFFFFFu,
+           "wc ctrl idle: Set (0, -1) reads back (0, -1)");
+    MEM_W32(OUT, 0x11111111u);
+    expect(td24b_dispatch4(NID_SCE_CTRL_GET_IDLE_CANCEL_THRESHOLD, OUT, 0u, 0u, 0u) == 0u &&
+               MEM_R32(OUT) == 0u,
+           "wc ctrl idle: Get with a NULL second pointer answers 0");
+    expect(td24b_dispatch4(NID_SCE_CTRL_GET_IDLE_CANCEL_THRESHOLD, 0u, 0u, 0u, 0u) == 0u,
+           "wc ctrl idle: Get (NULL, NULL) answers 0");
+    MEM_W32(OUT, 0x22222222u);
+    expect(td24b_dispatch4(NID_SCE_CTRL_GET_IDLE_CANCEL_THRESHOLD, OUT, 0xDEADBEEFu, 0u, 0u) ==
+                   0x80000023u && MEM_R32(OUT) == 0x22222222u,
+           "wc ctrl idle: Get with a bad pointer answers 0x80000023 before writing anything");
+    expect(td24b_dispatch4(NID_SCE_CTRL_GET_IDLE_CANCEL_THRESHOLD, 0xDEADBEEFu, 0xDEADBEEFu, 0u, 0u) ==
+               0x80000023u,
+           "wc ctrl idle: Get (0xDEADBEEF, 0xDEADBEEF) answers 0x80000023");
+    sr_hle_test_ctrl_sampling_reset();
+}
+
+extern uint32_t g_sdk_version;
+
+typedef struct {
+    uint32_t nid, a0, a1, ret;
+    int returned;
+} WcUmdWaitCtx;
+
+static void wc_umd_waiter_body(void *arg) {
+    WcUmdWaitCtx *ctx = (WcUmdWaitCtx *)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ctx->a0;
+    cpu.r[5] = ctx->a1;
+    ctx->ret = sr_syscall(&cpu, ctx->nid);
+    ctx->returned = 1;
+    selftest_park_on_scheduler();
+}
+
+/* sceUmdWaitDriveStat / WithTimer / CB, pspautotests tests/umd/api/api.expected: "Wait stat
+ * validation", "Dispatch disabled", "Timeouts" (5, 20, 100, 200 -> ~250 us) and "Zero timeout"
+ * (0 waits until cancelled). */
+static void test_wc_umd_wait_drive_stat(void) {
+    enum { NID_WAIT = 0x8ef08fceu, NID_WAIT_TIMER = 0x56202973u, NID_WAIT_CB = 0x4a9e5e29u,
+           NID_CANCEL = 0x6af9b50au, UMD_OBJ = 0x554D44u };
+    static const uint32_t nids[3] = { NID_WAIT, NID_WAIT_TIMER, NID_WAIT_CB };
+    static const uint32_t bad_stats[] = { 0u, 0x04u, 0x40u, 0x80u, 0xffffffc4u };
+    static const uint32_t good_stats[] = { 0x02u, 0x10u, 0x20u };   /* bits the active drive (0x32) holds */
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_umd_reset();
+    s_cur = -1;
+    for (int n = 0; n < 3; n++) {
+        for (size_t i = 0; i < sizeof(bad_stats) / sizeof(bad_stats[0]); i++) {
+            memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = bad_stats[i]; cpu.r[5] = 1000u;
+            expect(sr_syscall(&cpu, nids[n]) == 0x80010016u,
+                   "wc umd wait: a stat with an invalid bit or no bit answers 0x80010016");
+        }
+    }
+    TCB *owner = fixture_thread(0x2c01u, TH_RUNNING, 32);
+    owner->started = 1;
+    s_cur = (int)(owner - s_tcb);
+    memset(&cpu, 0, sizeof(cpu));
+    uint32_t token = sr_syscall(&cpu, NID_SCE_KERNEL_SUSPEND_DISPATCH_THREAD);
+    expect(token == 1u && !sched_dispatch_enabled(), "wc umd wait: dispatch is disabled");
+    for (int n = 0; n < 3; n++) {
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = 0x20u; cpu.r[5] = 1000u;
+        expect(sr_syscall(&cpu, nids[n]) == 0x800201a7u,
+               "wc umd wait: a satisfied wait with dispatch disabled answers 0x800201a7");
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = 0x08u; cpu.r[5] = 1000u;
+        expect(sr_syscall(&cpu, nids[n]) == 0x800201a7u,
+               "wc umd wait: an unsatisfied wait with dispatch disabled answers 0x800201a7");
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = 0x04u; cpu.r[5] = 1000u;
+        expect(sr_syscall(&cpu, nids[n]) == 0x80010016u,
+               "wc umd wait: the invalid stat is checked before the dispatch state");
+    }
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = token;
+    (void)sr_syscall(&cpu, NID_SCE_KERNEL_RESUME_DISPATCH_THREAD);
+    for (size_t i = 0; i < sizeof(good_stats) / sizeof(good_stats[0]); i++) {
+        for (int n = 0; n < 3; n++) {
+            memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = good_stats[i]; cpu.r[5] = 1000u;
+            expect(sr_syscall(&cpu, nids[n]) == 0u,
+                   "wc umd wait: a valid stat the drive already holds returns 0");
+        }
+    }
+
+    /* Timeouts: WithTimer rounds 5, 20, 100 and 200 up to 250 us; 0 waits with no deadline. */
+    static const struct { uint32_t nid, req, expect_us; } waits[] = {
+        { NID_WAIT_TIMER, 5u, 250u }, { NID_WAIT_TIMER, 20u, 250u }, { NID_WAIT_TIMER, 100u, 250u },
+        { NID_WAIT_TIMER, 200u, 250u }, { NID_WAIT_TIMER, 400u, 400u }, { NID_WAIT_TIMER, 1000u, 1000u },
+        { NID_WAIT_TIMER, 0u, 0u }, { NID_WAIT, 0u, 0u }, { NID_WAIT_CB, 0u, 0u },
+    };
+    for (size_t i = 0; i < sizeof(waits) / sizeof(waits[0]); i++) {
+        reset_fixture();
+        sr_hle_init();
+        sr_hle_test_umd_reset();
+        TCB *own = fixture_thread(0x2c02u, TH_RUNNING, 32);
+        own->started = 1;
+        TCB *waiter = fixture_thread(0x2c03u, TH_READY, 40);
+        waiter->started = 1;
+        WcUmdWaitCtx ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.nid = waits[i].nid;
+        ctx.a0 = 0x08u;                 /* a bit the active drive does not hold */
+        ctx.a1 = waits[i].req;
+        waiter->coro = sr_coro_create(wc_umd_waiter_body, &ctx, (size_t)4 << 20);
+        s_cur = (int)(waiter - s_tcb);
+        uint64_t t0 = s_vtime_us;
+        if (waiter->coro) sr_coro_switch(waiter->coro);
+        expect(waiter->state == TH_WAIT_OBJ && waiter->wait_obj == UMD_OBJ && !ctx.returned,
+               "wc umd wait: an unsatisfied wait blocks on the UMD object");
+        if (waits[i].expect_us == 0u)
+            expect(waiter->wake == SCHED_WAIT_FOREVER,
+                   "wc umd wait: timeout 0 is an untimed wait, not a substituted deadline");
+        else
+            expect(waiter->wake == t0 + waits[i].expect_us,
+                   "wc umd wait: the timeout is rounded as the PSP does (5..215 us -> 250 us)");
+        if (waits[i].expect_us == 0u && waits[i].nid == NID_WAIT_TIMER) {
+            s_cur = (int)(own - s_tcb);
+            memset(&cpu, 0, sizeof(cpu));
+            expect(sr_syscall(&cpu, NID_CANCEL) == 0u, "wc umd wait: CancelWaitDriveStat returns 0");
+            s_cur = (int)(waiter - s_tcb);
+            if (waiter->coro) sr_coro_switch(waiter->coro);
+            expect(ctx.returned && ctx.ret == 0x800201a9u,
+                   "wc umd wait: a cancelled untimed wait returns 0x800201a9");
+        }
+        if (waiter->coro) {
+            sr_coro_destroy(waiter->coro);
+            waiter->coro = NULL;
+        }
+    }
+    s_cur = -1;
+}
+
+/* sceUmdUnRegisterUMDCallBack, pspautotests tests/umd/register.expected. */
+static void test_wc_umd_unregister_callback(void) {
+    enum { NID_REG = 0xaee7404du, NID_UNREG = 0xbd2bde07u };
+    CpuState cpu;
+    uint32_t cb;
+    uint32_t saved_sdk = g_sdk_version;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_umd_reset();
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = WSV_NAMEBUF;
+    cb = sr_syscall(&cpu, NID_WSV_CREATE_CALLBACK);
+    for (int pass = 0; pass < 3; pass++) {
+        g_sdk_version = pass == 0 ? 0u : (pass == 1 ? 0x3000000u : 0x3000001u);
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = (uint32_t)-1;
+        expect(sr_syscall(&cpu, NID_UNREG) == 0x80010016u,
+               "wc umd unregister: uid -1 answers 0x80010016");
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = 0u;
+        expect(sr_syscall(&cpu, NID_UNREG) == 0x80010016u,
+               "wc umd unregister: uid 0 with nothing registered answers 0x80010016");
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = cb;
+        expect(sr_syscall(&cpu, NID_REG) == 0u, "wc umd unregister: the callback registers");
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = cb;
+        expect(sr_syscall(&cpu, NID_UNREG) == (pass == 2 ? 0u : cb),
+               "wc umd unregister: a matching uid answers the uid below SDK 0x3000001 and 0 from it");
+        memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = cb;
+        expect(sr_syscall(&cpu, NID_UNREG) == 0x80010016u,
+               "wc umd unregister: a second unregister answers 0x80010016");
+    }
+    g_sdk_version = saved_sdk;
+}
+
+/* sceDisplayWaitVblankStartMulti / MultiCB, pspautotests tests/display/vblankmulti.expected: counts
+ * 0, -1 and 0x80000000 answer 0x800001fe (the count is a signed int). */
+static void test_wc_display_multi_count_signed(void) {
+    static const uint32_t counts[] = { 0u, 0xffffffffu, 0x80000000u };
+    static const uint32_t nids[2] = { NID_SCE_DISPLAY_WAIT_VBLANK_START_MULTI,
+                                      NID_SCE_DISPLAY_WAIT_VBLANK_START_MULTI_CB };
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    s_cur = -1;
+    for (int n = 0; n < 2; n++)
+        for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+            memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = counts[i];
+            expect(sr_syscall(&cpu, nids[n]) == 0x800001feu,
+                   "wc display multi: a count <= 0 as a signed int answers 0x800001fe");
+        }
+}
+
+/* sceDisplayGetMode (tests/display/setmode.expected: mode=0, 480x272) and sceDisplayWaitVblankStartCB
+ * (tests/display/vblankmulti.expected "StartCB": vcount advances by one per call). */
+static void test_wc_display_getmode_and_start_cb(void) {
+    enum { NID_GET_MODE = 0xdea197d4u, NID_GET_VCOUNT = 0x9c6eaad7u, OUT = 0x08007400u };
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    s_cur = -1;
+    MEM_W32(OUT, 0x11111111u); MEM_W32(OUT + 4u, 0x22222222u); MEM_W32(OUT + 8u, 0x33333333u);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = OUT; cpu.r[5] = OUT + 4u; cpu.r[6] = OUT + 8u;
+    expect(sr_syscall(&cpu, NID_GET_MODE) == 0u && MEM_R32(OUT) == 0u &&
+               MEM_R32(OUT + 4u) == 480u && MEM_R32(OUT + 8u) == 272u,
+           "wc display: sceDisplayGetMode reads back mode 0 and 480x272");
+
+    reset_fixture();
+    sr_hle_init();
+    TCB *owner = fixture_thread(0x2c04u, TH_RUNNING, 32);
+    owner->started = 1;
+    TCB *waiter = fixture_thread(0x2c05u, TH_READY, 40);
+    waiter->started = 1;
+    WcUmdWaitCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.nid = NID_SCE_DISPLAY_WAIT_VBLANK_START_CB;
+    waiter->coro = sr_coro_create(wc_umd_waiter_body, &ctx, (size_t)4 << 20);
+    s_cur = (int)(owner - s_tcb);
+    memset(&cpu, 0, sizeof(cpu));
+    (void)NID_GET_VCOUNT;
+    uint32_t before = s_vbl_count;
+    s_cur = (int)(waiter - s_tcb);
+    if (waiter->coro) sr_coro_switch(waiter->coro);
+    s_cur = (int)(owner - s_tcb);
+    deliver_vblank();
+    s_cur = (int)(waiter - s_tcb);
+    if (waiter->coro) sr_coro_switch(waiter->coro);
+    s_cur = (int)(owner - s_tcb);
+    memset(&cpu, 0, sizeof(cpu));
+    /* The fixture's delivered-VBLANK count is the scheduler edge the wait consumes; the guest
+     * VCOUNT register itself advances on the scheduler's source-edge path, which this fixture
+     * does not drive (deliver_vblank bumps s_vbl_count only). */
+    expect(ctx.returned && ctx.ret == 0u && s_vbl_count == before + 1u,
+           "wc display: sceDisplayWaitVblankStartCB returns 0 after exactly one delivered vblank");
+    if (waiter->coro) {
+        sr_coro_destroy(waiter->coro);
+        waiter->coro = NULL;
+    }
+    s_cur = -1;
+}
+
 static void test_psmf_rejected_stream_names_the_boundary(void) {
     CpuState cpu;
     char captured[8192];
@@ -40621,9 +44237,9 @@ static void test_flight_recorder_trace(void) {
     sr_flight_test_reset(SR_FLIGHT_CLASS_HLE | SR_FLIGHT_CLASS_UNSUPPORTED | SR_FLIGHT_CLASS_FATAL,
                          4u);
     memset(&cpu, 0, sizeof(cpu));
-    expect(sr_syscall(&cpu, 0x39af39a6u) == 0x80010086u,
+    expect(sr_syscall(&cpu, 0xe1d621d7u) == 0x80010086u,
            "controlled unsupported producer returns its named error");
-    expect(sr_syscall(&cpu, 0x39af39a6u) == 0x80010086u,
+    expect(sr_syscall(&cpu, 0xe1d621d7u) == 0x80010086u,
            "controlled unsupported producer remains stable on retry");
     sr_flight_snapshot(&snapshot);
     expect(snapshot.recorded == 4u && snapshot.trigger_count == 0u &&
@@ -40759,17 +44375,17 @@ static void test_flight_recorder_refusals_are_events_not_terminals(void) {
     reset_fixture();
     sr_flight_test_reset(SR_FLIGHT_CLASS_HLE | SR_FLIGHT_CLASS_UNSUPPORTED | SR_FLIGHT_CLASS_FATAL, 16u);
     memset(&cpu, 0, sizeof(cpu));
-    expect(sr_syscall(&cpu, 0x39af39a6u) == 0x80010086u,
+    expect(sr_syscall(&cpu, 0xe1d621d7u) == 0x80010086u,
            "refused call returns its named error and the guest keeps running");
     expect(sr_syscall(&cpu, 0x011f03c1u /* sceRtcGetAccumulativeTime, a named refusal */) == 0x80020002u,
            "a second named refusal returns its own error and the guest keeps running");
-    expect(sr_syscall(&cpu, 0x39af39a6u) == 0x80010086u,
+    expect(sr_syscall(&cpu, 0xe1d621d7u) == 0x80010086u,
            "a repeated refusal returns the same error");
     sr_flight_snapshot(&snapshot);
     expect(snapshot.trigger_count == 0u && snapshot.terminal_reason == SR_FLIGHT_TERMINAL_RUNNING,
            "named refusals do not end the record");
     expect(snapshot.refusal_count == 3u && snapshot.refusal_distinct == 2u &&
-               snapshot.refusal_first_nid == 0x39af39a6u && snapshot.refusal_first_sequence == 2u,
+               snapshot.refusal_first_nid == 0xe1d621d7u && snapshot.refusal_first_sequence == 2u,
            "refusals are counted, and the first refusal is kept in its own field");
     sr_flight_fatal(SR_FLIGHT_KIND_FATAL_RAW_SYSCALL, 0x08900100u, 0x0000000cu, 0u);
     sr_flight_snapshot(&snapshot);
@@ -40785,9 +44401,9 @@ static void test_flight_recorder_refusals_are_events_not_terminals(void) {
            "bundle terminal names the later fatal");
     expect(strstr(bundle, "\"refusals\": {\"count\": 3") != NULL,
            "bundle counts every refusal");
-    snprintf(needle, sizeof(needle), "\"first_nid\": %u", 0x39af39a6u);
+    snprintf(needle, sizeof(needle), "\"first_nid\": %u", 0xe1d621d7u);
     expect(strstr(bundle, needle) != NULL, "bundle keeps the first refused NID in its own field");
-    snprintf(needle, sizeof(needle), "{\"nid\": %u, \"count\": 2}", 0x39af39a6u);
+    snprintf(needle, sizeof(needle), "{\"nid\": %u, \"count\": 2}", 0xe1d621d7u);
     expect(strstr(bundle, needle) != NULL, "bundle lists each refused NID with its count");
     snprintf(needle, sizeof(needle), "{\"nid\": %u, \"count\": 1}", 0x011f03c1u);
     expect(strstr(bundle, needle) != NULL, "bundle lists the second refused NID");
@@ -40798,7 +44414,7 @@ static void test_flight_recorder_refusals_are_events_not_terminals(void) {
     remove(output);
     sr_flight_test_reset(SR_FLIGHT_CLASS_HLE | SR_FLIGHT_CLASS_UNSUPPORTED, 8u);
     memset(&cpu, 0, sizeof(cpu));
-    expect(sr_syscall(&cpu, 0x39af39a6u) == 0x80010086u,
+    expect(sr_syscall(&cpu, 0xe1d621d7u) == 0x80010086u,
            "refusal before a clean exit returns its named error");
     sr_flight_exit(7u);
     sr_flight_snapshot(&snapshot);
@@ -40818,7 +44434,7 @@ static void test_flight_recorder_refusals_are_events_not_terminals(void) {
     remove(output);
     sr_flight_test_reset(SR_FLIGHT_CLASS_HLE | SR_FLIGHT_CLASS_UNSUPPORTED, 8u);
     memset(&cpu, 0, sizeof(cpu));
-    expect(sr_syscall(&cpu, 0x39af39a6u) == 0x80010086u,
+    expect(sr_syscall(&cpu, 0xe1d621d7u) == 0x80010086u,
            "refusal before any terminal returns its named error");
     bundle_size = flight_refusal_read_bundle(output, bundle, sizeof(bundle));
     expect(bundle_size > 0u && strstr(bundle, "\"reason\": \"running\"") != NULL &&
@@ -42190,6 +45806,32 @@ static void test_flash0_latin_index_resolution(void) {
                strcmp(project_small.font_name, "Nakagawa Project Latin Second") == 0 &&
                project_large.h_size != project_small.h_size,
            "the project's Latin font serves each size group its own strike");
+
+    /* #2005: the project has a face per Latin index. Index 13 (serif bold, small) has its own file
+     * and reports its own style; index 12 (sans bold, small) has none here, so the regular face of
+     * its size group serves it and says it is regular. */
+    SrFontRegistryInfo project_style, project_group;
+    expect(sr_flash0_font_registry_info(&project_sources, 14u, &project_style) ==
+                   SR_FONT_REGISTRY_PRESENT &&
+               strcmp(project_style.font_name, "Nakagawa Project Latin Serif Bold") == 0 &&
+               project_style.style == 5u && !project_style.served_as_regular &&
+               !project_style.served_as_other_family,
+           "a project face of its own style reports that style, not a regular substitute");
+    expect(sr_flash0_font_registry_info(&project_sources, 13u, &project_group) ==
+                   SR_FONT_REGISTRY_PRESENT &&
+               strcmp(project_group.font_name, "Nakagawa Project Latin Second") == 0 &&
+               project_group.style == 1u && project_group.served_as_regular &&
+               !project_group.served_as_other_family,
+           "a Latin index with no project face of its own is served by its size group's regular face");
+    /* Index 10 (serif regular, small) has no face here either: the sans-serif regular face of its
+     * group serves it. The style matches, so only the family says it is a substitute. */
+    SrFontRegistryInfo project_family;
+    expect(sr_flash0_font_registry_info(&project_sources, 10u, &project_family) ==
+                   SR_FONT_REGISTRY_PRESENT &&
+               strcmp(project_family.font_name, "Nakagawa Project Latin Second") == 0 &&
+               project_family.style == 1u && !project_family.served_as_regular &&
+               project_family.served_as_other_family && project_family.family_code == 2u,
+           "a serif index served by the sans-serif face of its group is reported as a substitute");
 
     /* #1300: resolving a font for the font list says nothing of what the game draws with; only
      * an open does, and the open is what the log has to name. */
@@ -44993,7 +48635,6 @@ static void test_mp3_error_paths(void) {
 #define TMID_SENTINEL          0xa5a5a5a5u
 #define TMID_ILLEGAL_TYPE_ERR  0x800201bbu   /* PSPSDK SCE_KERNEL_ERROR_ILLEGAL_TYPE */
 #define TMID_ILLEGAL_ADDR_ERR  0x800200d3u   /* PSPSDK SCE_KERNEL_ERROR_ILLEGAL_ADDR */
-#define TMID_ILLEGAL_SIZE_ERR  0x800201bcu   /* PSPSDK SCE_KERNEL_ERROR_ILLEGAL_SIZE */
 #define TMID_NOT_MODELLED_ERR  0x80020002u   /* the runtime's named refusal */
 
 static uint32_t tmid_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
@@ -45109,7 +48750,7 @@ static void test_threadman_id_list(void) {
            "ThreadmanIdList count-only: readbufsize 0 returns 0 and idcount holds the total");
 
     /* Types outside the PSPSDK list are refused before any write. */
-    static const uint32_t illegal[] = {0u, 12u, 63u, 68u, 0xffffffffu};
+    static const uint32_t illegal[] = {0u, 15u, 63u, 68u, 0xffffffffu};
     for (size_t i = 0; i < sizeof illegal / sizeof illegal[0]; i++) {
         tmid_fill();
         rc = tmid_list(illegal[i], TMID_BUF, 4u, TMID_COUNT);
@@ -45137,9 +48778,9 @@ static void test_threadman_id_list(void) {
     expect(tmid_list(1u, 0x0bfffff8u, 4u, TMID_COUNT) == TMID_ILLEGAL_ADDR_ERR &&
                MEM_R32(TMID_COUNT) == TMID_SENTINEL,
            "ThreadmanIdList readbuf span past guest memory: ILLEGAL_ADDR, no count written");
-    expect(tmid_list(1u, TMID_BUF, 0xffffffffu, TMID_COUNT) == TMID_ILLEGAL_SIZE_ERR &&
+    expect(tmid_list(1u, TMID_BUF, 0xffffffffu, TMID_COUNT) == TMID_ILLEGAL_ADDR_ERR &&
                MEM_R32(TMID_COUNT) == TMID_SENTINEL,
-           "ThreadmanIdList negative readbufsize: ILLEGAL_SIZE, no count written");
+           "ThreadmanIdList negative readbufsize: ILLEGAL_ADDR (threadmanidlist.expected), no count written");
     expect(tmid_list(1u, TMID_BUF, 8u, 0x0bfffffeu) == TMID_ILLEGAL_ADDR_ERR &&
                MEM_R32(TMID_BUF) == TMID_SENTINEL,
            "ThreadmanIdList unwritable idcount: ILLEGAL_ADDR, no uid written");
@@ -45167,7 +48808,7 @@ static void test_threadman_id_list(void) {
     uid = fpl_make_pool();
     tmid_check_object("Fpl", 6u, 5u, uid, fpl_base, vpl_base, NID_FPL_DELETE);
     base = tmid_total(7u);
-    tmid_check_object("Mpipe", 7u, 0u, tmid_call(NID_TMID_CREATE_MPP, TMID_NAME, 0u, 0u, 64u),
+    tmid_check_object("Mpipe", 7u, 0u, tmid_call(NID_TMID_CREATE_MPP, TMID_NAME, 2u, 0u, 64u),
                       base, 0u, NID_TMID_DELETE_MPP);
     base = tmid_total(8u);
     tmid_check_object("Callback", 8u, 0u, tmid_call(NID_TMID_CREATE_CB, TMID_NAME, TMID_HANDLER, 0u, 0u),
@@ -45178,6 +48819,144 @@ static void test_threadman_id_list(void) {
     base = tmid_total(11u);
     tmid_check_object("VTimer", 11u, 0u, tmid_call(NID_TMID_CREATE_VT, TMID_NAME, 0u, 0u, 0u),
                       base, 0u, NID_TMID_DELETE_VT);
+    s_cur = -1;
+}
+
+static void test_thread_exit_status_zero_uid(void) {
+    TCB *self = wsv_begin();
+    /* pspautotests tests/threads/threads/exitstatus.expected: -1, Zero and Invalid answer 80020198;
+     * the running thread answers 800201a4 (not dormant). */
+    b1_expect(b1_call(NID_SCE_KERNEL_GET_EXIT_STATUS, 0u, 0u, 0u, 0u), 0x80020198u,
+              "GetThreadExitStatus(0) is UNKNOWN_THID, not the current thread");
+    b1_expect(b1_call(NID_SCE_KERNEL_GET_EXIT_STATUS, 0xffffffffu, 0u, 0u, 0u), 0x80020198u,
+              "GetThreadExitStatus(-1) is UNKNOWN_THID");
+    b1_expect(b1_call(NID_SCE_KERNEL_GET_EXIT_STATUS, 0xdeadbeefu, 0u, 0u, 0u), 0x80020198u,
+              "GetThreadExitStatus(invalid) is UNKNOWN_THID");
+    b1_expect(b1_call(NID_SCE_KERNEL_GET_EXIT_STATUS, self->uid, 0u, 0u, 0u), 0x800201a4u,
+              "GetThreadExitStatus(current) is NOT_DORMANT");
+    s_cur = -1;
+}
+
+static void test_msgpipe_create_cells(void) {
+    (void)wsv_begin();
+    CpuState cpu;
+#define MPC(part, attr, size) (memset(&cpu, 0, sizeof cpu), cpu.r[4] = WSV_NAMEBUF, \
+        cpu.r[5] = (uint32_t)(part), cpu.r[6] = (attr), cpu.r[7] = (size), \
+        sr_syscall(&cpu, NID_SCE_KERNEL_CREATE_MSG_PIPE))
+    /* pspautotests tests/threads/msgpipe/create.expected. */
+    static const struct { int32_t part; uint32_t want; } parts[] = {
+        {-5, 0x800200d2u}, {-1, 0x800200d2u}, {0, 0x800200d2u}, {1, 0x800200d1u}, {3, 0x800200d1u},
+        {4, 0x800200d1u}, {7, 0x800200d2u}, {8, 0x800200d2u}, {9, 0x800200d2u}, {10, 0x800200d2u},
+    };
+    for (unsigned i = 0; i < sizeof parts / sizeof parts[0]; i++)
+        b1_expect(MPC(parts[i].part, 0u, 0u), parts[i].want, "MsgPipe create partition");
+    static const int ok_parts[] = {2, 6};
+    for (unsigned i = 0; i < 2; i++) {
+        uint32_t uid = MPC(ok_parts[i], 0u, 0u);
+        expect((int32_t)uid > 0, "MsgPipe create partition 2/6 succeeds");
+        cpu.r[4] = uid; sr_syscall(&cpu, NID_SCE_KERNEL_DELETE_MSG_PIPE);
+    }
+    static const uint32_t good_attr[] = {0x1u, 0x100u, 0x1000u, 0x4000u, 0x51ffu};
+    for (unsigned i = 0; i < sizeof good_attr / sizeof good_attr[0]; i++) {
+        uint32_t uid = MPC(2, good_attr[i], 100u);
+        expect((int32_t)uid > 0, "MsgPipe create accepts an attribute inside 0x51ff");
+        cpu.r[4] = uid; sr_syscall(&cpu, NID_SCE_KERNEL_DELETE_MSG_PIPE);
+    }
+    static const uint32_t bad_attr[] = {0x200u, 0x300u, 0x3ffu, 0x400u, 0x800u, 0x2000u, 0x8000u,
+                                        0x10000u, 0x20000u, 0x40000u, 0x80000u};
+    for (unsigned i = 0; i < sizeof bad_attr / sizeof bad_attr[0]; i++)
+        b1_expect(MPC(2, bad_attr[i], 100u), 0x80020191u, "MsgPipe create attribute outside 0x51ff");
+    b1_expect(MPC(2, 0u, 0xffffffffu), 0x80020190u, "MsgPipe create size 0xFFFFFFFF is NO_MEMORY");
+    b1_expect(MPC(2, 0u, 0x04000000u), 0x80020190u, "MsgPipe create size 0x04000000 is NO_MEMORY");
+    static const uint32_t good_size[] = {0u, 1u, 0x10u, 0x1000u, 0x100000u};
+    for (unsigned i = 0; i < sizeof good_size / sizeof good_size[0]; i++) {
+        uint32_t uid = MPC(2, 0u, good_size[i]);
+        expect((int32_t)uid > 0, "MsgPipe create accepts a recorded size");
+        cpu.r[4] = uid; sr_syscall(&cpu, NID_SCE_KERNEL_DELETE_MSG_PIPE);
+    }
+#undef MPC
+    s_cur = -1;
+}
+
+/* pspautotests tests/threads/threads/threadmanidlist.expected: types 12 (Mutex), 13 (LwMutex)
+ * and 14 (Tlspl) list; 15 and above are ILLEGAL_TYPE; a negative size is ILLEGAL_ADDR with the
+ * count word unwritten. */
+static void test_threadman_id_list_cells(void) {
+    (void)wsv_begin();
+    for (uint32_t i = 0; i < 8u; i++) MEM_W8(TMID_NAME + i, (uint8_t)"tmidobj"[i]);
+    static const uint32_t neg[] = {0xfffffffeu, 0xffffffffu};
+    for (unsigned i = 0; i < 2; i++) {
+        tmid_fill();
+        b1_expect(tmid_list(1u, TMID_BUF, neg[i], TMID_COUNT), 0x800200d3u, "ThreadmanIdList negative size");
+        expect(MEM_R32(TMID_COUNT) == TMID_SENTINEL, "ThreadmanIdList negative size leaves the count unwritten");
+    }
+    static const uint32_t bad_types[] = {15u, 16u, 0x18u, 0x44u, 0x80u, 0x1000u, 0x80000000u};
+    for (unsigned i = 0; i < sizeof bad_types / sizeof bad_types[0]; i++)
+        b1_expect(tmid_list(bad_types[i], TMID_BUF, 4u, TMID_COUNT), TMID_ILLEGAL_TYPE_ERR,
+                  "ThreadmanIdList type 15 and above");
+    uint32_t base = tmid_total(12u);
+    expect(base != UINT32_MAX, "ThreadmanIdList accepts type 12 (Mutex)");
+    tmid_check_object("Mutex", 12u, 0u, tmid_call(0xb7d098c6u, TMID_NAME, 0u, 0u, 0u), base, 0u, 0xf8170fbeu);
+    base = tmid_total(13u);
+    expect(base != UINT32_MAX, "ThreadmanIdList accepts type 13 (LwMutex)");
+    expect(tmid_call(NID_B1_CREATE_LWMUTEX, TMID_LWMUTEX_WA, TMID_NAME, 0u, 0u) == 0u &&
+               tmid_total(13u) == base + 1u && tmid_lists(13u, MEM_R32(TMID_LWMUTEX_WA + 0x10u)),
+           "ThreadmanIdList LwMutex: created object is listed once");
+    expect(tmid_call(NID_B1_DELETE_LWMUTEX, TMID_LWMUTEX_WA, 0u, 0u, 0u) == 0u && tmid_total(13u) == base,
+           "ThreadmanIdList LwMutex: deleted object is gone");
+    base = tmid_total(14u);
+    expect(base != UINT32_MAX, "ThreadmanIdList accepts type 14 (Tlspl)");
+    CpuState tc; memset(&tc, 0, sizeof tc);
+    tc.r[4] = TMID_NAME; tc.r[5] = 2u; tc.r[6] = 0u; tc.r[7] = 16u; tc.r[8] = 2u;
+    tmid_check_object("Tlspl", 14u, 0u, sr_syscall(&tc, NID_TLSPL_CREATE), base, 0u, NID_TLSPL_DELETE);
+    s_cur = -1;
+}
+
+#define CBC_NAME 0x00252600u
+#define CBC_FUNC TMID_HANDLER
+static uint32_t cbc_create(uint32_t name, uint32_t func, uint32_t arg) {
+    return b1_call(0xe81caf8fu, name, func, arg, 0u);
+}
+
+/* pspautotests tests/threads/callbacks/{create,delete,cancel,count}.expected. The refer.expected
+ * cells (and the name truncation and notifyArg that only sceKernelReferCallbackStatus shows) are
+ * not reachable here: this binary is built with SR_HLE_THREAD_SELFTEST, which leaves the
+ * 0x730ed8bc registration out (hle_register_init_kernel_thread_2). */
+static void test_callback_object_cells(void) {
+    (void)wsv_begin();
+    const char *longname = "1234567890123456789012345678901234567890123456789012345678901234";
+    for (uint32_t i = 0; i <= strlen(longname); i++) MEM_W8(CBC_NAME + i, (uint8_t)longname[i]);
+    /* create.expected */
+    b1_expect(cbc_create(0u, CBC_FUNC, 0u), 0x80020001u, "Callback create NULL name");
+    uint32_t cb = cbc_create(CBC_NAME, CBC_FUNC, 0xdeadbeefu);
+    expect((int32_t)cb > 0, "Callback create with a 64-character name and a wild arg pointer succeeds");
+    b1_expect(b1_call(0xedba5844u, cb, 0u, 0u, 0u), 0u, "Callback delete OK");
+    uint32_t nullfunc = cbc_create(CBC_NAME, 0u, 0x1337u);
+    expect((int32_t)nullfunc > 0, "Callback create NULL func is accepted");
+    b1_expect(b1_call(0xedba5844u, nullfunc, 0u, 0u, 0u), 0u, "Callback delete NULL-func callback");
+    b1_expect(cbc_create(CBC_NAME, 0xdeadbeefu, 0u), 0x800200d3u, "Callback create invalid func is ILLEGAL_ADDR");
+    /* delete.expected: NULL / invalid / deleted answer 800201a1 */
+    b1_expect(b1_call(0xedba5844u, 0u, 0u, 0u, 0u), 0x800201a1u, "Callback delete NULL");
+    b1_expect(b1_call(0xedba5844u, 0xdeadbeefu, 0u, 0u, 0u), 0x800201a1u, "Callback delete invalid");
+    b1_expect(b1_call(0xedba5844u, cb, 0u, 0u, 0u), 0x800201a1u, "Callback delete already deleted");
+    /* count.expected and cancel.expected */
+    cb = cbc_create(CBC_NAME, CBC_FUNC, 0u);
+    b1_expect(b1_call(0x2a3d44ffu, cb, 0u, 0u, 0u), 0u, "Callback count of a fresh callback is 0");
+    b1_expect(b1_call(0xc11ba8c4u, cb, 0x123u, 0u, 0u), 0u, "Callback notify");
+    b1_expect(b1_call(0x2a3d44ffu, cb, 0u, 0u, 0u), 1u, "Callback count after 1 notify is 1");
+    b1_expect(b1_call(0xc11ba8c4u, cb, 0x123u, 0u, 0u), 0u, "Callback notify 2");
+    b1_expect(b1_call(0xc11ba8c4u, cb, 0x123u, 0u, 0u), 0u, "Callback notify 3");
+    b1_expect(b1_call(0x2a3d44ffu, cb, 0u, 0u, 0u), 3u, "Callback count after 3 notifies is 3");
+    b1_expect(b1_call(0xba4051d6u, cb, 0u, 0u, 0u), 0u, "Callback cancel");
+    b1_expect(b1_call(0x2a3d44ffu, cb, 0u, 0u, 0u), 0u, "Callback cancel clears the notify count");
+    /* unknown ids */
+    b1_expect(b1_call(0xba4051d6u, 0u, 0u, 0u, 0u), 0x800201a1u, "Callback cancel NULL");
+    b1_expect(b1_call(0xba4051d6u, 0xdeadbeefu, 0u, 0u, 0u), 0x800201a1u, "Callback cancel invalid");
+    b1_expect(b1_call(0x2a3d44ffu, 0u, 0u, 0u, 0u), 0x800201a1u, "Callback count NULL");
+    b1_expect(b1_call(0x2a3d44ffu, 0xdeadbeefu, 0u, 0u, 0u), 0x800201a1u, "Callback count invalid");
+    b1_expect(b1_call(0xedba5844u, cb, 0u, 0u, 0u), 0u, "Callback delete");
+    b1_expect(b1_call(0xba4051d6u, cb, 0u, 0u, 0u), 0x800201a1u, "Callback cancel deleted");
+    b1_expect(b1_call(0x2a3d44ffu, cb, 0u, 0u, 0u), 0x800201a1u, "Callback count deleted");
     s_cur = -1;
 }
 
@@ -45380,6 +49159,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sysparam_nickname_string();
     test_ge_edram_addr_translation();
     test_named_refusals();
+    test_net_core_without_network();
     test_refer_system_status();
     test_ctrl_read_latch();
     test_ctrl_peek_latch_keeps_the_latch();
@@ -45393,6 +49173,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_blocking_sync_waits_for_stalled_list();
     test_ge_list_stops_for_a_stronger_thread();
     test_ge_sync_ids_match_psp();
+    test_ge_signal_jump_call_ret();
+    test_ge_signal_depth_origin_stall();
     test_ge_break_continue();
     test_ge_completion_timing();
     test_ge_finish_callback_reports();
@@ -45424,6 +49206,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_savedata_commit_faults();
     test_savedata_nested_outputs();
     test_utility_dialog_measured_states();
+    test_osk_nested_ranges();
+    test_utility_dialog_wrong_states_unmeasured_types();
     test_exit_thread_does_not_wake_launcher(0);
     test_exit_thread_does_not_wake_launcher(2);
     test_explicit_exit_status_exact((int32_t)0x800201acu, 0x800200d2u);
@@ -45435,6 +49219,10 @@ static int hle_selftest_main(int argc, char **argv) {
     test_hle_syscall_return_clears_link();
     test_kernel_import_sweep_display_multi();
     test_start_thread_error_semantics();
+    test_create_thread_contract();
+    test_start_thread_contract();
+    test_get_thread_id_names_calling_thread();
+    test_ge_update_stall_unknown_id();
     test_exit_delete_lifecycle_and_join_result();
     test_wait_thread_end_invalid_targets();
     test_wait_thread_end_already_ended();
@@ -45444,9 +49232,13 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_output2_release_refuses_while_queued();
     test_audio_resampler_quality_and_streaming();
     test_audio_src_matches_the_measured_contract();
+    test_audio_output2_and_src_accept_volumes_to_0xfffff();
     test_vaudio_plays_through_the_src_slot();
     test_audio_drift_window_reports_the_pacing_value();
     test_audio_output_telemetry_counts_guest_frames();
+    test_audio_queue_drains_in_guest_time_under_the_deterministic_clock();
+    test_audio_calls_read_the_guest_queue_under_the_deterministic_clock();
+    test_src_push_and_psmf_lead_read_the_guest_queue_under_the_deterministic_clock();
     test_ctrl_live_input_latch_suppresses_phantom_start();
     test_ctrl_pulse_never_synthesises_start_in_a_real_window();
     test_ctrl_read_buffer_contract();
@@ -45469,6 +49261,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_mip_cells_match_psp();
     test_ge_block_transfer_span_atomicity();
     test_dcache_maintenance_notifies_renderer();
+    test_icache_maintenance_returns_zero_for_every_range();
     test_exit_game_ignores_argument_registers(argc > 0 ? argv[0] : NULL);
     test_bulk_guest_span_atomicity();
     test_inline_stores_match_full_bodies();
@@ -45517,6 +49310,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ctrl_sampling_mode_cycle_matrix();
     test_display_clock_reads_are_observational();
     test_delay_advances_unified_timeline();
+    test_rtc_epoch_is_fixed_in_a_deterministic_run();
     test_delay_zero_probe_semantics();
     test_delay_thread_zero_loop_still_preempts_at_timeslice();
     test_delay_threadcb_zero_bounds_a_self_renotifying_callback();
@@ -45540,6 +49334,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_route_observer_waits_for_guest_scanout_state();
     test_extracted_data_prepares_before_guest_and_lookup_never_builds();
     test_disc_route_serves_archive_and_loose_content_in_one_namespace();
+    test_archive_discovery_skips_unpack_folders_only();
     test_primary_extracted_archive_duplicates_match_main();
     test_direct_xb_read_precedence_and_listing();
     test_direct_xb_malformed_archive_fails_closed();
@@ -45571,6 +49366,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_vtimer_handler_catches_up_and_refuses_cancel_inside();
     test_vtimer_handler_return_below_100us_reschedules_100us_on();
     test_lwmutex_hardware_codes();
+    test_trylock600_cells();
+    test_thread_exit_status_zero_uid();
+    test_msgpipe_create_cells();
+    test_threadman_id_list_cells();
+    test_callback_object_cells();
     test_evf_hardware_codes();
     test_threadman_id_list();
     test_wait_sema_count_validation();
@@ -45610,8 +49410,14 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sas_core_mix_preserves_caller_pcm();
     test_sas_mix_saturates_without_wrapping();
     test_sas_state_contracts();
+    test_sas_set_volume_accepts_negative();
+    test_sas_voice_volume_defaults();
+    test_sas_core_with_mix_scales_caller_pcm();
+    test_sas_band_limited_resampling();
     test_sas_end_flags_refresh_per_cycle();
     test_sas_reinit_is_a_fresh_init();
+    test_sas_envelope_follows_its_rates_and_curves();
+    test_sas_envelope_curve_paths_and_refusals();
     test_msgpipe_rendezvous();
     test_msgpipe_safety();
     test_msgpipe_blocking();
@@ -45644,9 +49450,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_vpl_nonblocking_roundtrip();
     test_vpl_block_count_bounded_by_pool_size();
     test_tlspl_lifecycle_and_thread_isolation();
+    test_wb_tlspl_vpl_cells();
     test_vpl_blocking_waits();
     test_mbx_lifecycle_and_ordering();
     test_intr_context_conformance();
+    test_mpeg_create_refused_in_interrupt();
     test_psp_mutex();
     test_kernel_nested_join();
     test_kernel_nested_mutex();
@@ -45663,6 +49471,13 @@ static int hle_selftest_main(int argc, char **argv) {
     test_volatile_partition_allocator();
     test_late_prx_unload_keeps_module_owned_objects();
     test_power_unregister_callback_slots();
+    test_wc_power_register_callback_errors();
+    test_wc_volatile_unlock_mode();
+    test_wc_ctrl_idle_cancel_threshold();
+    test_wc_umd_wait_drive_stat();
+    test_wc_umd_unregister_callback();
+    test_wc_display_multi_count_signed();
+    test_wc_display_getmode_and_start_cb();
     test_psmf_rejected_stream_names_the_boundary();
     test_psmf_get_current_pts_after_stop_stops_by_name();
     test_psmf_start_reads_init_pts_from_the_third_argument();
@@ -45701,6 +49516,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_route_samples_by_elapsed_vcount_cadence();
     test_scripted_input_reaches_a_starved_guest();
     test_route_read_widths_hold_for_their_reads_on_a_starved_host();
+    test_route_stick_reaches_the_guest_through_the_controller_sample();
+    test_route_recording_carries_the_stick_from_log_to_replay();
 
     check_coroutine_lifecycle();
 

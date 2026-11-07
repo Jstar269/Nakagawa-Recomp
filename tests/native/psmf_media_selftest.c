@@ -38,6 +38,7 @@
 #include "flight_recorder.h"
 #include "perf.h"
 #include "iso.h"
+#include "videorec.h"
 #include "mpeg.c"
 #include <stdint.h>
 #include <stdio.h>
@@ -55,6 +56,7 @@ uint32_t sr_hle_test_psmf_summary_count(void);
 int sr_hle_test_psmf_summary_rejects_truncation(void);
 void sr_hle_test_psmf_log_tick(uint32_t guest);
 void sr_hle_test_psmf_log_release(uint32_t guest);
+void sr_hle_test_register_mpeg_ring_handlers(void);
 int sr_hle_test_psmf_stream_contract(const uint8_t *data, uint32_t size,
                                     uint32_t fragment_bytes,
                                     const char *expected_reason,
@@ -1432,6 +1434,32 @@ static void test_backend_malformed_input(void) {
     conformance_backend.destroy(id);
 }
 
+/* The seam's timed submit carries the producer's normalized 90 kHz PTS.  Every backend converts or
+ * forwards it (Media Foundation multiplies by 1000 / 9), so a value outside
+ * +-SR_H264_PTS_ABS_MAX is refused like any malformed unit instead of overflowing int64. */
+static void test_backend_pts_range(void) {
+    static const uint8_t au[] = { 0, 0, 1, 0x09, 0x10 };
+    struct { int64_t pts; int has_pts; int accepted; const char *what; } cases[] = {
+        { SR_H264_PTS_ABS_MAX, 1, 1, "a PTS at the bound is accepted" },
+        { -SR_H264_PTS_ABS_MAX, 1, 1, "a negative PTS at the bound is accepted" },
+        { SR_H264_PTS_ABS_MAX + 1, 1, 0, "a PTS one past the bound is refused" },
+        { -SR_H264_PTS_ABS_MAX - 1, 1, 0, "a negative PTS one past the bound is refused" },
+        { INT64_MAX, 1, 0, "INT64_MAX as a PTS is refused" },
+        { INT64_MIN, 1, 0, "INT64_MIN as a PTS is refused" },
+        { INT64_MAX, 0, 1, "an unknown-PTS unit ignores the PTS value" }
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int id = conformance_backend.create();
+        if (id < 0) {
+            fprintf(stderr, "SKIP: PTS range contract needs a real H.264 backend\n");
+            return;
+        }
+        int r = sr_h264_submit_au_timed(id, au, sizeof(au), cases[i].pts, cases[i].has_pts);
+        CHECK(cases[i].accepted ? r == 0 : r < 0, cases[i].what);
+        conformance_backend.destroy(id);
+    }
+}
+
 static uint64_t demux_fuzz_state = 0x3194844345584D58ULL;
 
 static uint64_t demux_fuzz_rand64(void) {
@@ -2157,6 +2185,13 @@ static void test_mpeg_ycbcr_picture_time_by_bytes(void) {
     CHECK(ycbcr_picture_pts(m, 0x3333u) == -1, "ycbcr-time: a reset forgets the pictures");
 }
 
+/* #279: every picture the host decoder gave a context is delivered, superseded, stale or
+ * rejected, exactly once. */
+static int mpeg_pictures_add_up(const Mpeg *ctx) {
+    return (uint64_t)ctx->h264Frames ==
+           ctx->picDelivered + ctx->picSuperseded + ctx->picStale + ctx->picRejected;
+}
+
 /* sceMpegAvcDecodeYCbCr through the production dispatch writes the decoder's own samples into
  * the measured strip layout (the textured I_PCM fixture, checked against a second decode of the
  * same units through the host YUV target), and sceMpegAvcCsc converts them. */
@@ -2226,9 +2261,15 @@ static void test_mpeg_ycbcr_guest_decode(void) {
     MEM_W32(TD_PTR, TD_YCBCR);
     MEM_W32(TD_INIT, 0xdeadbeefu);
     memset(SR_HOST(TD_AU), 0, 24u);
+    /* PSP-MPEG-001: the decoder runs one access unit behind. */
+    CHECK(guest_mpeg_import(NID_DECODE_YCBCR, TD_DESC, TD_AU, TD_PTR, TD_INIT, 0u) == 0u &&
+              MEM_R32(TD_INIT) == 0u && MEM_R32(TD_YCBCR) == 0u && MEM_R32(TD_YCBCR + 4u) == 0u &&
+              guest_bytes_are(MEM_R32(TD_YCBCR + 16u), 1536u, 0xa5u),
+          "ycbcr-decode: the first DecodeYCbCr returns 0 with init 0 and writes no picture");
+    MEM_W32(TD_INIT, 0xdeadbeefu);
     CHECK(guest_mpeg_import(NID_DECODE_YCBCR, TD_DESC, TD_AU, TD_PTR, TD_INIT, 0u) == 0u &&
               MEM_R32(TD_INIT) == 1u,
-          "ycbcr-decode: DecodeYCbCr decodes a picture and sets init");
+          "ycbcr-decode: the next DecodeYCbCr hands over the first access unit's picture and sets init");
     CHECK(MEM_R32(TD_YCBCR) == 4u && MEM_R32(TD_YCBCR + 4u) == 4u,
           "ycbcr-decode: words 0 and 1 are the decoded height and width in 16-pixel units");
     int exact = 1;
@@ -2272,6 +2313,8 @@ static void test_mpeg_ycbcr_guest_decode(void) {
     CHECK(guest_mpeg_import(NID_DECODE_YCBCR, TD_DESC, TD_AU, TD_PTR, TD_INIT, 0u) == SCE_MPEG_ERROR_INVALID_VALUE &&
               MEM_R32(TD_INIT) == 0u && memcmp(small_before, SR_HOST(TD_SMALL), sizeof(small_before)) == 0,
           "ycbcr-decode: a 64x64 picture is not written into a 64x32 allocation");
+    CHECK(ctx->picRejected == 1u && ctx->picDelivered == 1u && mpeg_pictures_add_up(ctx),
+          "ycbcr-decode: the refused picture is counted as rejected, the handed-over one as delivered");
 
     /* The whole stream was fed and the third access unit was taken but not decoded:
      * DecodeStopYCbCr hands over the picture the decoder still holds, written through the header,
@@ -2290,6 +2333,225 @@ static void test_mpeg_ycbcr_guest_decode(void) {
     MEM_W32(TD_INIT, 0xdeadbeefu);
     CHECK(guest_mpeg_import(NID_STOP_YCBCR, TD_DESC, TD_PTR, TD_INIT, 0u, 0u) == 0u && MEM_R32(TD_INIT) == 0u,
           "ycbcr-decode: with no picture left DecodeStopYCbCr reports status 0");
+    CHECK(ctx->picDelivered == 2u && ctx->picRejected == 1u && mpeg_pictures_add_up(ctx),
+          "ycbcr-decode: the picture DecodeStopYCbCr handed over is counted as delivered");
+    sr_h264_destroy(ref);
+    mpeg_finish();
+}
+
+/* After sceMpegAvcDecodeStopYCbCr (via_flush 0) or sceMpegAvcDecodeFlush (via_flush 1) in
+ * mid-stream, the next sceMpegAvcDecodeYCbCr is a first call after the decoder starts: 0 with init
+ * 0, as PSP-MPEG-001 measured for a fresh decoder, and the call after it hands over the first
+ * access unit taken after the stop.  The host decoder still holds the picture of the unit taken
+ * just before the stop (here its data reaches the host only after the stop, as a picture a
+ * holding decoder gives up late) and that picture is dropped.  The model is unmeasured on the
+ * PSP after a stop in mid-stream (#279, #286). */
+static void test_mpeg_ycbcr_restart_after_stop(int via_flush) {
+    enum {
+        RS_DESC = 0x08100000u, RS_DATA = 0x08110000u, RS_YCBCR = 0x08130000u, RS_PTR = 0x08160000u,
+        RS_INIT = 0x08170000u, RS_AU = 0x08180000u, RS_MODE = 0x08190000u,
+    };
+    static const char *const tag[2] = {"stop", "flush"};
+    const uint32_t avc_decode_flush_nid = 0x4571cc64u;
+    uint32_t au_off[FIX_PICTURES], au_len[FIX_PICTURES], es_len = 0;
+    static uint8_t es[65536];
+    char msg[160];
+#define RS_CHECK(x, text) do { snprintf(msg, sizeof msg, text, tag[via_flush]); CHECK((x), msg); } while (0)
+    s_fixture_textured = 1;
+    int built = build_stream(es, sizeof(es), au_off, au_len, &es_len);
+    s_fixture_textured = 0;
+    RS_CHECK(built, "ycbcr-restart (%s): the textured I_PCM stream builds");
+    if (!built) return;
+    MEM_W32(RS_DESC, 0u);
+    RS_CHECK(mpeg_create(RS_DESC, RS_DATA, 0x10000u, 0, 64u, 0, 0) == 0, "ycbcr-restart (%s): a context");
+    Mpeg *ctx = mpeg_find(RS_DESC);
+    if (!ctx) return;
+    ctx->streamWidth = 64u;
+    ctx->streamHeight = 64u;
+    ctx->h264 = sr_h264_create();
+    ctx->h264Init = 1;
+    if (ctx->h264 < 0) {
+        fprintf(stderr, "SKIP: the YCbCr restart contract needs a real H.264 backend\n");
+        mpeg_finish();
+        return;
+    }
+    MEM_W32(RS_MODE, 0u);
+    MEM_W32(RS_MODE + 4u, 3u);
+    RS_CHECK(guest_mpeg_import(NID_INIT_YCBCR, RS_DESC, 1u, 64u, 64u, RS_YCBCR) == 0u &&
+                 guest_mpeg_import(NID_DECODE_MODE, RS_DESC, RS_MODE, 0u, 0u, 0u) == 0u,
+             "ycbcr-restart (%s): a 64x64 buffer and RGBA8888 output");
+    MEM_W32(RS_PTR, RS_YCBCR);
+    memset(SR_HOST(RS_AU), 0, 24u);
+    uint32_t init[4] = {0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu}, status = 0xdeadbeefu;
+
+    /* The movie runs: two units taken, the first unit's picture handed over. */
+    RS_CHECK(sr_h264_submit_au(ctx->h264, es + au_off[0], au_len[0]) == 0,
+             "ycbcr-restart (%s): the first unit reaches the decoder");
+    for (int i = 0; i < 2; i++) {
+        MEM_W32(RS_INIT, 0xdeadbeefu);
+        guest_mpeg_import(NID_DECODE_YCBCR, RS_DESC, RS_AU, RS_PTR, RS_INIT, 0u);
+        init[i] = MEM_R32(RS_INIT);
+    }
+    /* A low-delay host decoder has given the first unit's picture (init 1); Media Foundation
+     * holds it until more input arrives (init 0).  Either way the first call gave none. */
+    RS_CHECK(init[0] == 0u && (init[1] == 0u || init[1] == 1u) && ctx->h264Frames == (int)init[1],
+             "ycbcr-restart (%s): the first call gives no picture, the second at most the first unit's");
+
+    /* The guest stops in mid-stream; the decoder has given no picture for the second unit. */
+    if (via_flush) {
+        RS_CHECK(guest_mpeg_import(avc_decode_flush_nid, RS_DESC, 0u, 0u, 0u, 0u) == 0u,
+                 "ycbcr-restart (%s): AvcDecodeFlush takes the context");
+    } else {
+        MEM_W32(RS_INIT, 0xdeadbeefu);
+        RS_CHECK(guest_mpeg_import(NID_STOP_YCBCR, RS_DESC, RS_PTR, RS_INIT, 0u, 0u) == 0u,
+                 "ycbcr-restart (%s): DecodeStopYCbCr returns 0");
+        status = MEM_R32(RS_INIT);
+        RS_CHECK(status == 0u, "ycbcr-restart (%s): with no picture to give the stop reports status 0");
+    }
+
+    /* The held unit's picture reaches the host late, then the restarted movie's first unit. */
+    RS_CHECK(sr_h264_submit_au(ctx->h264, es + au_off[1], au_len[1]) == 0 &&
+                 sr_h264_submit_au(ctx->h264, es + au_off[2], au_len[2]) == 0,
+             "ycbcr-restart (%s): the late and the new unit reach the decoder");
+    MEM_W32(RS_INIT, 0xdeadbeefu);
+    RS_CHECK(guest_mpeg_import(NID_DECODE_YCBCR, RS_DESC, RS_AU, RS_PTR, RS_INIT, 0u) == 0u,
+             "ycbcr-restart (%s): the first DecodeYCbCr after the restart returns 0");
+    init[2] = MEM_R32(RS_INIT);
+    RS_CHECK(init[2] == 0u,
+             "ycbcr-restart (%s): the first DecodeYCbCr after the restart gives init 0, not the held picture");
+    /* The whole restarted movie is in the decoder: its first unit's picture comes next. */
+    ctx->streamEnded = 1;
+    MEM_W32(RS_INIT, 0xdeadbeefu);
+    guest_mpeg_import(NID_DECODE_YCBCR, RS_DESC, RS_AU, RS_PTR, RS_INIT, 0u);
+    init[3] = MEM_R32(RS_INIT);
+    RS_CHECK(init[3] == 1u && ctx->h264Frames == 3,
+             "ycbcr-restart (%s): the next call hands over the restarted movie's first picture");
+    RS_CHECK(ctx->ycbcrAuCount == 1u,
+             "ycbcr-restart (%s): only the last unit's time waits for its picture");
+    RS_CHECK(ctx->picStale == (uint64_t)(2 - (int)init[1]) && ctx->picDelivered == (uint64_t)(1 + (int)init[1]) &&
+                 mpeg_pictures_add_up(ctx),
+             "ycbcr-restart (%s): the pictures of units taken before the stop are counted as stale");
+    if (init[2] != 0u || init[3] != 1u)
+        fprintf(stderr, "ycbcr-restart (%s): init %u %u %u %u, status %u, frames %d, times %u\n",
+                tag[via_flush], init[0], init[1], init[2], init[3], status, ctx->h264Frames,
+                ctx->ycbcrAuCount);
+#undef RS_CHECK
+    mpeg_finish();
+}
+
+/* A host decoder that falls behind the PSP's one-unit lag (the guest took units whose data had not
+ * reached it yet) catches up inside one sceMpegAvcDecodeYCbCr.  newest 0: the decoder then holds a
+ * single picture, so the call's second pull finds none; that pull must not clear the size of the
+ * picture already in the scratch planes, or the call fails with INVALID_VALUE ("larger than
+ * 480x272") instead of handing it over.  newest 1: the decoder holds all three pictures; the call
+ * hands over the newest, and the two it overwrote take their units' times with them, so the one
+ * time left waiting is the last unit's, as after any call in step. */
+static void test_mpeg_ycbcr_catch_up(int newest) {
+    enum {
+        CU_DESC = 0x08100000u, CU_DATA = 0x08110000u, CU_YCBCR = 0x08130000u, CU_PTR = 0x08160000u,
+        CU_INIT = 0x08170000u, CU_AU = 0x08180000u, CU_MODE = 0x08190000u,
+    };
+    static const char *const tag[2] = {"one picture held", "three pictures held"};
+    uint32_t au_off[FIX_PICTURES], au_len[FIX_PICTURES], es_len = 0;
+    static uint8_t es[65536];
+    char msg[160];
+#define CU_CHECK(x, text) do { snprintf(msg, sizeof msg, text, tag[newest]); CHECK((x), msg); } while (0)
+    s_fixture_textured = 1;
+    int built = build_stream(es, sizeof(es), au_off, au_len, &es_len);
+    s_fixture_textured = 0;
+    CU_CHECK(built, "ycbcr-catch-up (%s): the textured I_PCM stream builds");
+    if (!built) return;
+    MEM_W32(CU_DESC, 0u);
+    CU_CHECK(mpeg_create(CU_DESC, CU_DATA, 0x10000u, 0, 64u, 0, 0) == 0, "ycbcr-catch-up (%s): a context");
+    Mpeg *ctx = mpeg_find(CU_DESC);
+    if (!ctx) return;
+    ctx->streamWidth = 64u;
+    ctx->streamHeight = 64u;
+    ctx->h264 = sr_h264_create();
+    ctx->h264Init = 1;
+    int ref = sr_h264_create();
+    if (ctx->h264 < 0 || ref < 0) {
+        fprintf(stderr, "SKIP: the YCbCr catch-up needs a real H.264 backend\n");
+        if (ref >= 0) sr_h264_destroy(ref);
+        mpeg_finish();
+        return;
+    }
+    /* The reference: the picture the call must hand over, decoded on its own. */
+    const int expect = newest ? FIX_PICTURES - 1 : 0;
+    static uint8_t ry[64u * 64u], rcb[32u * 32u], rcr[32u * 32u];
+    SrH264FrameTarget target;
+    SrH264FrameInfo info;
+    memset(&target, 0, sizeof(target));
+    target.kind = SR_H264_TARGET_HOST_YUV;
+    target.host_buffer = ry;
+    target.host_width = 64;
+    target.host_height = 64;
+    target.host_stride = 64;
+    target.host_cb = rcb;
+    target.host_cr = rcr;
+    target.host_c_stride = 32;
+    int ref_ok = 1;
+    for (int i = 0; i <= expect; i++)
+        ref_ok = ref_ok && sr_h264_submit_au(ref, es + au_off[i], au_len[i]) == 0;
+    for (int i = 0; i <= expect; i++)
+        ref_ok = ref_ok && sr_h264_frame_ex(ref, 1, &target, &info) > 0;
+    CU_CHECK(ref_ok, "ycbcr-catch-up (%s): the reference decoder gives the expected picture");
+
+    MEM_W32(CU_MODE, 0u);
+    MEM_W32(CU_MODE + 4u, 3u);
+    CU_CHECK(guest_mpeg_import(NID_INIT_YCBCR, CU_DESC, 1u, 64u, 64u, CU_YCBCR) == 0u &&
+                 guest_mpeg_import(NID_DECODE_MODE, CU_DESC, CU_MODE, 0u, 0u, 0u) == 0u,
+             "ycbcr-catch-up (%s): a 64x64 buffer and RGBA8888 output");
+    MEM_W32(CU_PTR, CU_YCBCR);
+    memset(SR_HOST(CU_AU), 0, 24u);
+    /* Three units are taken before any of their data reaches the decoder: no picture yet. */
+    for (int i = 0; i < 3; i++) {
+        au_write_pts(CU_AU, 0, 90000 + 3003 * i);
+        MEM_W32(CU_INIT, 0xdeadbeefu);
+        CU_CHECK(guest_mpeg_import(NID_DECODE_YCBCR, CU_DESC, CU_AU, CU_PTR, CU_INIT, 0u) == 0u &&
+                     MEM_R32(CU_INIT) == 0u,
+                 "ycbcr-catch-up (%s): with no picture decoded a call returns 0 with init 0");
+    }
+    CU_CHECK(ctx->h264Frames == 0 && ctx->ycbcrWant == 3, "ycbcr-catch-up (%s): the decoder is two pictures behind");
+    /* Then the data arrives and the whole movie is in. */
+    int fed = 1;
+    for (int i = 0; i <= expect; i++)
+        fed = fed && sr_h264_submit_au(ctx->h264, es + au_off[i], au_len[i]) == 0;
+    CU_CHECK(fed, "ycbcr-catch-up (%s): the units reach the decoder");
+    ctx->streamEnded = 1;
+    au_write_pts(CU_AU, 0, 90000 + 3003 * 3);
+    MEM_W32(CU_INIT, 0xdeadbeefu);
+    uint32_t r = guest_mpeg_import(NID_DECODE_YCBCR, CU_DESC, CU_AU, CU_PTR, CU_INIT, 0u);
+    CU_CHECK(r == 0u && MEM_R32(CU_INIT) == 1u,
+             "ycbcr-catch-up (%s): the catching-up call returns 0 and hands over a picture");
+    CU_CHECK(MEM_R32(CU_YCBCR) == 4u && MEM_R32(CU_YCBCR + 4u) == 4u,
+             "ycbcr-catch-up (%s): words 0 and 1 are the 64x64 picture's size, not a cleared one");
+    int exact = 1;
+    for (uint32_t y = 0; y < 64u; y++)
+        for (uint32_t x = 0; x < 64u; x++)
+            if (MEM_R8(ref_ycbcr_luma(CU_YCBCR, x, y)) != ry[y * 64u + x]) exact = 0;
+    CU_CHECK(exact, newest ? "ycbcr-catch-up (%s): the newest picture is the one handed over"
+                           : "ycbcr-catch-up (%s): the one picture the decoder held is handed over");
+    if (newest) {
+        const uint32_t cap = (uint32_t)(sizeof(ctx->ycbcrAuPts) / sizeof(ctx->ycbcrAuPts[0]));
+        CU_CHECK(ctx->ycbcrAuCount == 1u &&
+                     ctx->ycbcrAuPts[ctx->ycbcrAuHead % cap] == 90000 + 3003 * 3,
+                 "ycbcr-catch-up (%s): the overwritten pictures took their times; the last unit's waits");
+    }
+    CU_CHECK(ctx->h264Frames == (newest ? 3 : 1) && ctx->picDelivered == 1u &&
+                 ctx->picSuperseded == (newest ? 2u : 0u) && ctx->picStale == 0u && ctx->picRejected == 0u &&
+                 mpeg_pictures_add_up(ctx),
+             "ycbcr-catch-up (%s): the tally has one picture delivered and the overwritten ones superseded");
+    char line[512];
+    int n = mpeg_pictures_line(ctx, "test", line, sizeof(line));
+    CU_CHECK(n > 0 && (size_t)n < sizeof(line) &&
+                 strstr(line, newest ? " decoded=3 delivered=1 superseded=2 stale=0 rejected=0 "
+                                     : " decoded=1 delivered=1 superseded=0 stale=0 rejected=0 ") != NULL,
+             "ycbcr-catch-up (%s): the MPEG_PICTURES line carries the tally");
+    if (r != 0u || MEM_R32(CU_INIT) != 1u || (newest && ctx->ycbcrAuCount != 1u))
+        fprintf(stderr, "ycbcr-catch-up (%s): r=0x%08x init=%u frames=%d want=%d times=%u\n", tag[newest],
+                r, MEM_R32(CU_INIT), ctx->h264Frames, ctx->ycbcrWant, ctx->ycbcrAuCount);
+#undef CU_CHECK
     sr_h264_destroy(ref);
     mpeg_finish();
 }
@@ -3497,7 +3759,6 @@ void sr_vblank_tick(void);
 #define PB_AU_B     0x08622000u
 #define PB_AU_NEVER 0x08624000u
 #define PB_FRAMES   2048
-#define PB_LEAD_US  46439                 /* 2048 frames at 44.1 kHz, truncated */
 #define PB_VBASE_US 100000
 #define PB_ABASE_US 20000
 #define PB_VLAG_US  5000                  /* delivery precedes presentation by this much */
@@ -3505,8 +3766,9 @@ void sr_vblank_tick(void);
 #define PB_SKIP_VIDEO 40                  /* never presented: overwritten by picture 42 */
 #define PB_SKIP_AUDIO 30                  /* never played: overwritten by block 32 */
 #define PB_VOFF_US  PB_VBASE_US
-#define PB_AOFF_US  (PB_ABASE_US + PB_LEAD_US)
-#define PB_AV_US    (PB_VOFF_US - PB_AOFF_US)
+/* At the guest boundaries (flip, submit) the offset is the authored interleave alone; the host
+ * queue lead is added after the submit, so it moves av_us and leaves av_submit_us alone. */
+#define PB_SUBMIT_AV_US (PB_VOFF_US - PB_ABASE_US)
 #define PB_AUDIO_TOL_US 36                /* 3 ticks of anchor extrapolation, plus rounding */
 
 typedef struct {
@@ -3525,6 +3787,12 @@ static struct {
 } pb;
 
 static int64_t pb_us(int64_t ticks) { return ticks * 100 / 9; }
+/* The injected host queue lead in microseconds (44.1 kHz frames, truncated: 2048 -> 46439). */
+static int64_t pb_lead_us(const PbScenario *sc) {
+    return sc->lead_frames >= 0 ? (int64_t)sc->lead_frames * 1000000 / 44100 : 0;
+}
+static int64_t pb_aoff_us(const PbScenario *sc) { return PB_ABASE_US + pb_lead_us(sc); }
+static int64_t pb_av_us(const PbScenario *sc) { return PB_VOFF_US - pb_aoff_us(sc); }
 static uint32_t pb_video_buf(int idx) { return (idx & 1) ? PB_FB_B : PB_FB_A; }
 static uint32_t pb_audio_buf(int idx) { return (idx & 1) ? PB_AU_B : PB_AU_A; }
 static int pb_is_na(const char *line, const char *key) {
@@ -3549,17 +3817,26 @@ static void pb_check_new_windows(const PbScenario *sc) {
     if (an > 0 && sc->lead_frames >= 0 && !pb_is_na(w, " aoff_us=")) {
         CHECK(av_log_field(w, " aoff_us=", &ao), "psmf-present: a window carries its audio offset");
         if (sc->stretch_ppm == 0)
-            CHECK(llabs(ao - PB_AOFF_US) <= PB_AUDIO_TOL_US,
+            CHECK(llabs(ao - pb_aoff_us(sc)) <= PB_AUDIO_TOL_US,
                   "psmf-present: a window's audio offset equals submit time plus queue lead minus pts");
+        long long lead = -1;
+        CHECK(av_log_field(w, " alead_us=", &lead) && lead == pb_lead_us(sc),
+              "psmf-present: a window carries the host queue lead its audio blocks met");
     }
     if (sc->lead_frames < 0) {
-        CHECK(an == 0 && pb_is_na(w, " aoff_us=") && pb_is_na(w, " av_us="),
-              "psmf-present: without a host queue the audio offset and the A/V offset are not measured");
+        CHECK(an == 0 && pb_is_na(w, " aoff_us=") && pb_is_na(w, " av_us=") && pb_is_na(w, " alead_us=") &&
+                  pb_is_na(w, " av_submit_us="),
+              "psmf-present: without a host queue the audio offset, its lead and the A/V offsets are not measured");
     } else if (vn > 0 && an > 0) {
-        CHECK(av_log_field(w, " av_us=", &av), "psmf-present: a paired window carries an A/V offset");
-        if (sc->stretch_ppm == 0)
-            CHECK(llabs(av - PB_AV_US) <= PB_AUDIO_TOL_US + 1,
+        long long avsub = 0;
+        CHECK(av_log_field(w, " av_us=", &av) && av_log_field(w, " av_submit_us=", &avsub),
+              "psmf-present: a paired window carries its A/V offset and its offset at the guest boundaries");
+        if (sc->stretch_ppm == 0) {
+            CHECK(llabs(av - pb_av_us(sc)) <= PB_AUDIO_TOL_US + 1,
                   "psmf-present: a window's A/V offset equals the authored video minus audio offset");
+            CHECK(llabs(avsub - PB_SUBMIT_AV_US) <= PB_AUDIO_TOL_US + 1,
+                  "psmf-present: a window's offset at the flip and the submit leaves the host queue lead out");
+        }
         if (pb.nav < (int)(sizeof(pb.av) / sizeof(pb.av[0]))) pb.av[pb.nav++] = av;
     }
 }
@@ -3758,14 +4035,19 @@ static void pb_run(const PbScenario *sc, const char *name) {
           "psmf-present: the undelivered and the repeated submit are the only non-matching submits");
     if (sc->lead_frames >= 0) {
         CHECK(amatch == AV_AUDIO_BLOCKS - 2 && aunmeas == 0, "psmf-present: every played block was matched");
-        CHECK(av_log_field(f, " alat_mean_us=", &alat) && alat == PB_ALAG_US + PB_LEAD_US &&
-                  av_log_field(f, " alat_max_us=", &vlatmax) && vlatmax == PB_ALAG_US + PB_LEAD_US,
+        CHECK(av_log_field(f, " alat_mean_us=", &alat) && alat == PB_ALAG_US + pb_lead_us(sc) &&
+                  av_log_field(f, " alat_max_us=", &vlatmax) && vlatmax == PB_ALAG_US + pb_lead_us(sc),
               "psmf-present: block delivery-to-play latency is the clock lag plus the queue lead");
+        long long lead_mean = -1, lead_max = -1;
+        CHECK(av_log_field(f, " alead_mean_us=", &lead_mean) && lead_mean == pb_lead_us(sc) &&
+                  av_log_field(f, " alead_max_us=", &lead_max) && lead_max == pb_lead_us(sc),
+              "psmf-present: the summary gives the host queue lead the played blocks met");
     } else {
         CHECK(amatch == 0 && aunmeas == AV_AUDIO_BLOCKS - 2,
               "psmf-present: with no host queue every played block is unmeasured, none reads as zero lead");
-        CHECK(pb_is_na(f, " alat_mean_us=") && pb_is_na(f, " av_mean_us=") && pb_is_na(f, " drift_us="),
-              "psmf-present: unmeasured audio leaves the offsets and the drift unmeasured");
+        CHECK(pb_is_na(f, " alat_mean_us=") && pb_is_na(f, " av_mean_us=") && pb_is_na(f, " drift_us=") &&
+                  pb_is_na(f, " alead_mean_us=") && pb_is_na(f, " av_submit_mean_us="),
+              "psmf-present: unmeasured audio leaves the offsets, the lead and the drift unmeasured");
     }
     if (video) {
         CHECK(vdel == AV_PICTURES && vsuper == 1 && vpend == 1 && vevict == 0 && vnospan == 0,
@@ -3783,9 +4065,15 @@ static void pb_run(const PbScenario *sc, const char *name) {
                       av_log_field(f, " av_mean_us=", &avmean),
                   "psmf-present: the summary carries min, max, mean and drift of the A/V offset");
             if (sc->stretch_ppm == 0) {
-                CHECK(llabs(avmin - PB_AV_US) <= PB_AUDIO_TOL_US + 1 && llabs(avmax - PB_AV_US) <= PB_AUDIO_TOL_US + 1 &&
-                          llabs(avmean - PB_AV_US) <= PB_AUDIO_TOL_US + 1,
+                CHECK(llabs(avmin - pb_av_us(sc)) <= PB_AUDIO_TOL_US + 1 &&
+                          llabs(avmax - pb_av_us(sc)) <= PB_AUDIO_TOL_US + 1 &&
+                          llabs(avmean - pb_av_us(sc)) <= PB_AUDIO_TOL_US + 1,
                       "psmf-present: the A/V offset equals the authored interleave at the host boundaries");
+                long long avsub = 0;
+                CHECK(av_log_field(f, " av_submit_mean_us=", &avsub) &&
+                          llabs(avsub - PB_SUBMIT_AV_US) <= PB_AUDIO_TOL_US + 1,
+                      "psmf-present: at the guest boundaries the A/V offset is the authored interleave, "
+                      "whatever the host queue held");
                 CHECK(llabs(drift) <= 2 * PB_AUDIO_TOL_US,
                       "psmf-present: the A/V offset does not drift across the run");
             } else {
@@ -3823,6 +4111,10 @@ static void test_player_av_presentation_boundary(void) {
     pb_run(&in_step, "in-step regular channel");
     PbScenario packed = { 1, PB_FRAMES, 0, AV_LAYOUT_PACKED, 1 };
     pb_run(&packed, "in-step packed layout, Output2");
+    /* Twice the host queue: the heard offset (av_us) moves by the extra lead, the offset at the
+       guest boundaries (av_submit_us) does not (#279). */
+    PbScenario deep = { 1, 2 * PB_FRAMES, 0, AV_LAYOUT_SPLIT, 0 };
+    pb_run(&deep, "in-step, twice the host queue");
     PbScenario slow = { 1, PB_FRAMES, 10000, AV_LAYOUT_SPLIT, 0 };
     pb_run(&slow, "audio 1% slow");
     PbScenario no_queue = { 1, -1, 0, AV_LAYOUT_SPLIT, 0 };
@@ -4132,6 +4424,48 @@ static void test_mpeg_looped_stream_feeds_past_header_size(uint32_t lead, int st
 /* A movie put whole and only once: the last access unit stays open in the demux, and its packets
  * stay in the ring until it leaves. A title that takes an empty ring for the end of the movie never
  * asks for it otherwise, as WipEout Pure's short menu movies do not. */
+/* sceMpegRingbufferAvailableSize answers through the ring's sceMpeg context.
+ * pspautotests tests/video/mpeg/ringbuffer/avail measured it on a PSP: a 512-packet ring reads
+ * 0x200 free after sceMpegCreate (avail.expected:9); once the context is deleted and the ring
+ * destructed it returns 0x80618009 (line 10); with packetsAvail at the total it reads 0, at 1 it
+ * reads 0x1ff (lines 20-21). PPSSPP answers through getMpegCtx on the ring's handle, which fails
+ * the same way. sceMpegRingbufferAvailableSize's handler is a direct call of
+ * mpeg_ringbuffer_available_size; the destruct goes through its production handler. */
+void hle_register_mpeg_shared_handlers(void);
+
+static void test_mpeg_ringbuffer_available_needs_a_live_context(void) {
+    enum {
+        RA_DESC = 0x08600000u, RA_DATA = 0x08610000u, RA_RING = 0x08630000u,
+        RA_RING_DATA = 0x086c0000u, RA_PACKETS = 512u,
+    };
+    const uint32_t nid_destruct = 0x13407f13u;
+    const uint32_t ring_bytes = RA_PACKETS * MPEG_RING_BYTES_PER_PKT;
+    hle_register_mpeg_shared_handlers();
+    CHECK(mpeg_init() == 0u, "mpeg-avail: sceMpegInit returns 0");
+    MEM_W32(RA_DESC, 0u);
+    CHECK(mpeg_ringbuffer_construct(RA_RING, RA_PACKETS, RA_RING_DATA, ring_bytes, 0u, 0u) == 0u &&
+              mpeg_create(RA_DESC, RA_DATA, 0x10000u, RA_RING, 512u, 0u, 0u) == 0u,
+          "mpeg-avail: a 512-packet ring and its context are set up");
+    CHECK(mpeg_ringbuffer_available_size(RA_RING) == 0x200u,
+          "mpeg-avail: a new ring reads 0x200 free (avail.expected:9)");
+    CHECK(mpeg_delete(RA_DESC) == 0u &&
+              guest_mpeg_import(nid_destruct, RA_RING, 0u, 0u, 0u, 0u) == 0u,
+          "mpeg-avail: the context is deleted and the ring destructed");
+    CHECK(mpeg_ringbuffer_available_size(RA_RING) == 0x80618009u,
+          "mpeg-avail: after the delete the ring reads 0x80618009 (avail.expected:10)");
+    CHECK(mpeg_ringbuffer_construct(RA_RING, RA_PACKETS, RA_RING_DATA, ring_bytes, 0u, 0u) == 0u &&
+              mpeg_create(RA_DESC, RA_DATA, 0x10000u, RA_RING, 512u, 0u, 0u) == 0u,
+          "mpeg-avail: a second context on the same ring is set up");
+    rb_set(RA_RING, RB_packetsAvail, RA_PACKETS);
+    CHECK(mpeg_ringbuffer_available_size(RA_RING) == 0u,
+          "mpeg-avail: packetsAvail at the total reads 0 free (avail.expected:20)");
+    rb_set(RA_RING, RB_packetsAvail, 1u);
+    CHECK(mpeg_ringbuffer_available_size(RA_RING) == 0x1ffu,
+          "mpeg-avail: packetsAvail at 1 reads 0x1ff free (avail.expected:21)");
+    (void)mpeg_delete(RA_DESC);
+    (void)mpeg_finish();
+}
+
 static void test_mpeg_last_unit_keeps_its_ring_packets(void) {
     enum {
         LU_DESC = 0x08600000u, LU_DATA = 0x08610000u, LU_RING = 0x08630000u, LU_HDR = 0x08640000u,
@@ -4184,6 +4518,243 @@ static void test_mpeg_last_unit_keeps_its_ring_packets(void) {
     CHECK(!dryEarly, "mpeg-last: the ring is not empty while an access unit is still to come");
     CHECK(ctx->videoEnd && rb_get(LU_RING, RB_packetsAvail) == 0u, "mpeg-last: the last one empties the ring");
     mpeg_finish();
+    free(image);
+}
+
+/* A guest PSMF player that parses the header with its own psmf module never calls
+ * sceMpegQueryStreamOffset, so the stream size is unknown (#286). It puts the movie through its
+ * fill callback until the callback returns fewer packets than it was asked for, then takes access
+ * units until the ring reads empty. These cases drive the production handlers through sr_syscall
+ * with a fill callback registered as guest code; the callback serves the movie and, at a chosen
+ * packet, once returns fewer packets than it was asked for, as a reader that ran short does. */
+#define NID_MPEG_QUERY_STREAM_OFFSET 0x21ff80e4u
+#define NID_MPEG_RINGBUFFER_PUT      0xb240a59eu
+#define NID_MPEG_RINGBUFFER_AVAIL    0xb5f6dc87u
+#define NID_MPEG_GET_AVC_AU          0xfe246728u
+#define NID_MPEG_FLUSH_ALL_STREAM    0x707b7629u
+#define EF_CALLBACK_ERROR            0x80020001u   /* any negative return of a fill callback */
+enum {
+    EF_DESC = 0x08600000u, EF_DATA = 0x08610000u, EF_RING = 0x08630000u, EF_HDR = 0x08640000u,
+    EF_AU = 0x08641000u, EF_ATTR = 0x08641100u, EF_OFF = 0x08641110u, EF_INIT = 0x08641120u,
+    EF_YCPTR = 0x08641310u, EF_YCBCR = 0x08400000u, EF_RING_DATA = 0x086c0000u,
+    EF_CALLBACK = 0x087f0000u,
+};
+static const uint8_t *s_ef_source;
+static uint32_t s_ef_packets, s_ef_next, s_ef_short_at;
+static uint32_t s_ef_put_calls;          /* callback calls in the current put */
+static int s_ef_error_armed, s_ef_error_seen;
+static void eof_fill_callback_body(CpuState *s) {
+    const uint32_t dst = s->r[4], want = s->r[5];
+    /* A put that meets the ring's end calls the callback a second time for the ring's start;
+     * when armed, that second call fails, after the first call's packets went in. */
+    if (++s_ef_put_calls == 2u && s_ef_error_armed) {
+        s_ef_error_armed = 0;
+        s_ef_error_seen = 1;
+        s->r[2] = EF_CALLBACK_ERROR;
+        SR_AOT_RETURN_CAPTURE(s, s->r[31]);
+        return;
+    }
+    uint32_t give = s_ef_packets - s_ef_next;
+    if (give > want) give = want;
+    if (s_ef_short_at > s_ef_next && s_ef_short_at < s_ef_next + give) give = s_ef_short_at - s_ef_next;
+    memcpy(SR_HOST(dst), s_ef_source + (size_t)s_ef_next * MPEG_PACKET_SIZE, (size_t)give * MPEG_PACKET_SIZE);
+    s_ef_next += give;
+    s->r[2] = give;
+    SR_AOT_RETURN_CAPTURE(s, s->r[31]);
+}
+/* One sceMpegRingbufferPut of up to 8 packets, as the guest's reader asks; returns what went in. */
+static uint32_t eof_put(void) {
+    uint32_t free_packets = guest_mpeg_import(NID_MPEG_RINGBUFFER_AVAIL, EF_RING, 0u, 0u, 0u, 0u);
+    uint32_t n = free_packets < 8u ? free_packets : 8u;
+    s_ef_put_calls = 0u;
+    return n ? guest_mpeg_import(NID_MPEG_RINGBUFFER_PUT, EF_RING, n, free_packets, 0u, 0u) : 0u;
+}
+/* Puts until the callback returns fewer packets than it was asked for. */
+static void eof_put_until_short(void) {
+    for (int guard = 0; guard < 4096; guard++)
+        if (eof_put() < 8u) return;
+}
+/* Takes and decodes access units until GetAvcAu finds none; returns the pictures that came out. */
+static int eof_drain(uint32_t avc) {
+    int pictures = 0;
+    for (int guard = 0; guard < 8 * AV_PICTURES; guard++) {
+        uint32_t r = guest_mpeg_import(NID_MPEG_GET_AVC_AU, EF_DESC, avc, EF_AU, EF_ATTR, 0u);
+        if (r != 0u) {
+            CHECK(r == SCE_MPEG_ERROR_NO_DATA, "mpeg-eof: GetAvcAu only ever says there is no data");
+            return pictures;
+        }
+        MEM_W32(EF_INIT, 0u);
+        uint32_t d = guest_mpeg_import(NID_DECODE_YCBCR, EF_DESC, EF_AU, EF_YCPTR, EF_INIT, 0u);
+        CHECK(d == 0u || d == SCE_MPEG_ERROR_NO_DATA, "mpeg-eof: an access unit decodes, or its picture comes later");
+        pictures += MEM_R32(EF_INIT) == 1u;
+    }
+    return pictures;
+}
+/* mode 0: no QueryStreamOffset; the callback runs short only at the movie's end.
+ * mode 1: no QueryStreamOffset; the callback runs short once in mid-movie and more puts follow.
+ * mode 2: QueryStreamOffset first; a dry GetAvcAu follows a mid-movie short put.
+ * mode 3: a mid-movie short put, then sceMpegFlushAllStream.
+ * mode 4: a mid-movie short put, then sceMpegQueryStreamOffset.
+ * mode 5: a ring smaller than the movie; a put that meets the ring's end gets an error from the
+ *         callback's second call, after the first call's packets went in. */
+/* CHECK with the case's name in its message. */
+#define EF_CHECK(x, text) do { char ef_msg_[192]; snprintf(ef_msg_, sizeof ef_msg_, text, tag[mode]); \
+                                CHECK((x), ef_msg_); } while (0)
+static void test_mpeg_feed_end_without_stream_size(int mode) {
+    static const char *const tag[6] = {"no size", "short mid-movie", "with size", "flush forgets",
+                                       "new offset forgets", "error after a wrap"};
+    uint32_t size = 0;
+    uint8_t *image = build_psmf_av(&size, AV_LAYOUT_SPLIT);
+    if (!image) { CHECK(0, "mpeg-eof: the A/V container builds"); return; }
+    const uint32_t ps = size - 2048u;
+    const uint32_t packets = (ps + MPEG_PACKET_SIZE - 1u) / MPEG_PACKET_SIZE;
+    const uint32_t pad = packets * MPEG_PACKET_SIZE - ps;
+    /* The ring has room past the movie, as a guest's does, so the last put asks for more
+     * packets than are left and the callback runs short. */
+    const uint32_t ring_packets = mode == 5 ? 45u : packets + 32u;
+    uint8_t *source = calloc(packets, MPEG_PACKET_SIZE);
+    if (!source || (pad && pad < 6u) || EF_RING_DATA + ring_packets * MPEG_PACKET_SIZE > EF_CALLBACK) {
+        CHECK(0, "mpeg-eof: the movie and its padding fit the fixture");
+        free(source);
+        free(image);
+        return;
+    }
+    memcpy(source, image + 2048u, ps);
+    if (pad) {
+        uint8_t *tail = source + ps;
+        tail[0] = 0x00; tail[1] = 0x00; tail[2] = 0x01; tail[3] = 0xbe;
+        tail[4] = (uint8_t)((pad - 6u) >> 8); tail[5] = (uint8_t)(pad - 6u);
+        memset(tail + 6, 0xff, pad - 6u);
+    }
+    s_ef_source = source;
+    s_ef_packets = packets;
+    s_ef_next = 0u;
+    s_ef_short_at = mode && mode != 5 ? packets / 2u + 3u : 0u;
+    s_ef_error_armed = mode == 5;
+    s_ef_error_seen = 0;
+    MEM_W32(EF_CALLBACK, 0u);
+    CHECK(sr_exec_span_register(EF_CALLBACK, EF_CALLBACK + 4u), "mpeg-eof: the fill callback is guest code");
+    sr_register(EF_CALLBACK, eof_fill_callback_body);
+    sr_hle_test_register_mpeg_ring_handlers();
+
+    memcpy(SR_HOST(EF_HDR), image, 2048u);
+    memcpy(SR_HOST(EF_HDR + 4u), "0015", 4u);
+    be32_at((uint8_t *)SR_HOST(EF_HDR + 12u), packets * MPEG_PACKET_SIZE);
+    MEM_W32(EF_DESC, 0u);
+    CHECK(mpeg_ringbuffer_construct(EF_RING, ring_packets, EF_RING_DATA,
+                                    ring_packets * MPEG_RING_BYTES_PER_PKT, EF_CALLBACK, 0u) == 0u &&
+              mpeg_create(EF_DESC, EF_DATA, 0x10000u, EF_RING, 512u, 0u, 0u) == 0u,
+          "mpeg-eof: the ring with its fill callback and the context are set up");
+    if (mode == 2)
+        CHECK(guest_mpeg_import(NID_MPEG_QUERY_STREAM_OFFSET, EF_DESC, EF_HDR, EF_OFF, 0u, 0u) == 0u,
+              "mpeg-eof: QueryStreamOffset reads the header");
+    uint32_t avc = mpeg_regist_stream(EF_DESC, MPEG_AVC_STREAM, 0u);
+    Mpeg *ctx = mpeg_find(EF_DESC);
+    CHECK(ctx && ctx->totalPackets == (mode == 2 ? packets : 0u),
+          "mpeg-eof: the stream size is known only after QueryStreamOffset");
+    CHECK(guest_mpeg_import(NID_INIT_YCBCR, EF_DESC, 1u, 480u, 272u, EF_YCBCR) == 0u,
+          "mpeg-eof: the YCbCr buffer is set up");
+    MEM_W32(EF_YCPTR, EF_YCBCR);
+
+    eof_put_until_short();
+    if (!ctx || ctx->h264 < 0) {
+        fprintf(stderr, "SKIP: the end of a feed needs a real H.264 backend\n");
+        mpeg_finish();
+        free(source);
+        free(image);
+        return;
+    }
+    int pictures = 0;
+    if (mode == 3 || mode == 4) {
+        /* No guest call can tell these two resets apart from their absence: after a flush the
+         * ring is empty and GetAvcAu returns NO_DATA before it asks whether the feed stopped, and
+         * the next put sets or clears the flag whatever it was; after a stream offset the stream's
+         * size decides.  So the check is of the state the reset promises: the next feed starts
+         * without the old short put. */
+        EF_CHECK(ctx->feedShort && s_ef_next == s_ef_short_at,
+                 "mpeg-eof (%s): the callback ran short in mid-movie");
+        if (mode == 3)
+            EF_CHECK(guest_mpeg_import(NID_MPEG_FLUSH_ALL_STREAM, EF_DESC, 0u, 0u, 0u, 0u) == 0u,
+                     "mpeg-eof (%s): FlushAllStream takes the context");
+        else
+            EF_CHECK(guest_mpeg_import(NID_MPEG_QUERY_STREAM_OFFSET, EF_DESC, EF_HDR, EF_OFF, 0u, 0u) == 0u,
+                     "mpeg-eof (%s): QueryStreamOffset reads the header");
+        EF_CHECK(!ctx->feedShort, "mpeg-eof (%s): the short put is forgotten");
+        mpeg_finish();
+        free(source);
+        free(image);
+        return;
+    }
+    if (mode == 5) {
+        /* Takes and puts interleave, so a put meets the ring's end.  The callback's error after
+         * packets went in is not the source running out: the put keeps what went in, and a
+         * GetAvcAu that then finds no complete unit does not end the feed.  The units are only
+         * taken after the error, not decoded: the check is of the feed, and the end of the movie
+         * is covered by the other cases. */
+        int checked = 0;
+        for (int guard = 0; guard < 4096 && s_ef_next < packets && !checked; guard++) {
+            pictures += eof_drain(avc);
+            const int seen = s_ef_error_seen;
+            const uint32_t went_in = eof_put();
+            if (!seen && s_ef_error_seen) {
+                uint32_t r = 0u;
+                for (int take = 0; take < 64 && r == 0u; take++)
+                    r = guest_mpeg_import(NID_MPEG_GET_AVC_AU, EF_DESC, avc, EF_AU, EF_ATTR, 0u);
+                EF_CHECK(went_in > 0u && went_in < 8u && r == SCE_MPEG_ERROR_NO_DATA,
+                         "mpeg-eof (%s): the put keeps what went in, and GetAvcAu then finds no unit");
+                EF_CHECK(!ctx->streamEnded && !ctx->feedShort && s_ef_next < packets,
+                         "mpeg-eof (%s): an error after packets went in does not end the feed");
+                checked = 1;
+            }
+        }
+        EF_CHECK(checked, "mpeg-eof (%s): a put met the ring's end and the callback's second call failed");
+        mpeg_finish();
+        free(source);
+        free(image);
+        return;
+    }
+    if (mode == 1 || mode == 2) {
+        EF_CHECK(s_ef_next == s_ef_short_at && s_ef_next < packets,
+              "mpeg-eof (%s): the callback ran short in mid-movie");
+        if (mode == 1) {
+            EF_CHECK(eof_put() == 8u, "mpeg-eof (%s): the next put goes in whole");
+            pictures += eof_drain(avc);
+            pictures += eof_drain(avc);
+            EF_CHECK(!ctx->streamEnded && !ctx->videoEnd,
+                  "mpeg-eof (%s): a short put followed by more puts does not end the stream");
+        } else {
+            pictures += eof_drain(avc);
+            pictures += eof_drain(avc);
+            EF_CHECK(!ctx->streamEnded && !ctx->videoEnd,
+                  "mpeg-eof (%s): with the size known, a short put does not end the stream early");
+        }
+        eof_put_until_short();
+    }
+    EF_CHECK(s_ef_next == packets, "mpeg-eof (%s): the whole movie went in");
+    for (int guard = 0; guard < 16 && !ctx->videoEnd; guard++) pictures += eof_drain(avc);
+    /* As a guest player does at the end of a movie, DecodeStopYCbCr hands over a picture the
+     * decoder still holds (status 1), if it holds one. */
+    MEM_W32(EF_INIT, 0xdeadbeefu);
+    EF_CHECK(guest_mpeg_import(NID_STOP_YCBCR, EF_DESC, EF_YCPTR, EF_INIT, 0u, 0u) == 0u &&
+                 MEM_R32(EF_INIT) <= 1u,
+             "mpeg-eof (%s): DecodeStopYCbCr takes the end of the movie");
+    pictures += (int)MEM_R32(EF_INIT);
+    /* A YCbCr call can take more than one decoded frame and write one picture, so the count is
+     * of access units handed out and frames decoded, not of pictures written. */
+    if (ctx->h264Units != AV_PICTURES || ctx->h264Frames != AV_PICTURES || !ctx->videoEnd)
+        fprintf(stderr, "mpeg-eof (%s): units %d, frames %d of %d (pictures written %d), streamEnded %d, "
+                        "videoEnd %d, ring free %u of %u\n", tag[mode], ctx->h264Units, ctx->h264Frames,
+                AV_PICTURES, pictures, ctx->streamEnded, ctx->videoEnd,
+                guest_mpeg_import(NID_MPEG_RINGBUFFER_AVAIL, EF_RING, 0u, 0u, 0u, 0u), ring_packets);
+    EF_CHECK(ctx->h264Units == AV_PICTURES && ctx->h264Frames == AV_PICTURES,
+             "mpeg-eof (%s): every access unit is handed out and decoded, the last one included");
+    EF_CHECK(ctx->videoEnd, "mpeg-eof (%s): the video ends");
+    EF_CHECK(guest_mpeg_import(NID_MPEG_RINGBUFFER_AVAIL, EF_RING, 0u, 0u, 0u, 0u) == ring_packets,
+          "mpeg-eof (%s): the ring reads empty at the end");
+    EF_CHECK(guest_mpeg_import(NID_MPEG_GET_AVC_AU, EF_DESC, avc, EF_AU, EF_ATTR, 0u) == SCE_MPEG_ERROR_NO_DATA,
+          "mpeg-eof (%s): after the end GetAvcAu says there is no data");
+    mpeg_finish();
+    free(source);
     free(image);
 }
 
@@ -4285,7 +4856,55 @@ static void test_mpeg_atrac_au_decode(void) {
               mpeg_get_atrac_au(AT_DESC, sid, AT_AU, AT_ATTR) == 0u &&
               mpeg_atrac_decode(AT_DESC, AT_AU, AT_OUT, 1u) == 0u,
           "mpeg-atrac: after a flush the refed stream decodes again");
+
+    /* sceMpegFlushStream (0x500f0429) through the production handler checks its arguments and
+     * changes nothing, as PPSSPP's does: a flush in mid-playback keeps the frame the game holds,
+     * the frames still queued and the shared ring counters (an unmeasured PSP behaviour). */
+    const uint32_t flush_stream_nid = 0x500f0429u;
+    CHECK(mpeg_get_atrac_au(AT_DESC, sid, AT_AU, AT_ATTR) == 0u,
+          "mpeg-atrac: a second frame is held before FlushStream");
+    uint32_t avail_before = MEM_R32(AT_RING + 12u);
+    uint32_t read_before = MEM_R32(AT_RING + 4u);
+    CHECK(guest_mpeg_import(flush_stream_nid, AT_DESC, sid, 0u, 0u, 0u) == 0u,
+          "mpeg-atrac: FlushStream on the registered ATRAC stream returns 0");
+    CHECK(MEM_R32(AT_RING + 12u) == avail_before && MEM_R32(AT_RING + 4u) == read_before,
+          "mpeg-atrac: FlushStream leaves the shared ring counters alone");
+    CHECK(mpeg_atrac_decode(AT_DESC, AT_AU, AT_OUT, 0u) == 0u,
+          "mpeg-atrac: FlushStream keeps the frame the game holds");
+    CHECK(mpeg_get_atrac_au(AT_DESC, sid, AT_AU, AT_ATTR) == 0u,
+          "mpeg-atrac: FlushStream keeps the frames still queued");
+    /* sceMpegAvcDecodeFlush (0x4571cc64) through the production handler flushes the video decoder
+     * and leaves the ring alone. A guest PSMF player fills the ring with the whole movie, then calls
+     * it on entering its decode state and reads sceMpegRingbufferAvailableSize next; a reset there
+     * read as an empty ring, and that player stopped its video without asking for an access unit
+     * (#286). PPSSPP's handler (a2001917, Core/HLE/sceMpeg.cpp) does not touch the ring either;
+     * only sceMpegFlushAllStream clears its counters. */
+    const uint32_t avc_decode_flush_nid = 0x4571cc64u;
+    avail_before = MEM_R32(AT_RING + 12u);
+    read_before = MEM_R32(AT_RING + 4u);
+    uint32_t write_before = MEM_R32(AT_RING + 8u);
+    uint32_t free_before = mpeg_ringbuffer_available_size(AT_RING);
+    CHECK(avail_before != 0u || read_before != 0u || write_before != 0u,
+          "mpeg-atrac: the ring holds fed packets before AvcDecodeFlush");
+    CHECK(guest_mpeg_import(avc_decode_flush_nid, AT_DESC, 0u, 0u, 0u, 0u) == 0u,
+          "mpeg-atrac: AvcDecodeFlush returns 0");
+    CHECK(MEM_R32(AT_RING + 12u) == avail_before && MEM_R32(AT_RING + 4u) == read_before &&
+              MEM_R32(AT_RING + 8u) == write_before,
+          "mpeg-atrac: AvcDecodeFlush leaves the ring counters alone");
+    CHECK(mpeg_ringbuffer_available_size(AT_RING) == free_before,
+          "mpeg-atrac: after AvcDecodeFlush the ring reports the same free space");
+    CHECK(guest_mpeg_import(avc_decode_flush_nid, 0u, 0u, 0u, 0u, 0u) == 0x80020003u,
+          "mpeg-atrac: AvcDecodeFlush refuses a null context pointer");
+    CHECK(guest_mpeg_import(flush_stream_nid, AT_DESC, sid + 1000u, 0u, 0u, 0u) == SCE_MPEG_ERROR_INVALID_VALUE,
+          "mpeg-atrac: FlushStream refuses a stream id the context never issued");
+    CHECK(guest_mpeg_import(flush_stream_nid, 0u, sid, 0u, 0u, 0u) == 0x80020003u,
+          "mpeg-atrac: FlushStream refuses a null context pointer");
+    CHECK(mpeg_unregist_stream(AT_DESC, sid) == 0u &&
+              guest_mpeg_import(flush_stream_nid, AT_DESC, sid, 0u, 0u, 0u) == 0u,
+          "mpeg-atrac: FlushStream accepts a stream the context has unregistered");
     CHECK(mpeg_delete(AT_DESC) == 0u, "mpeg-atrac: the context is deleted");
+    CHECK(guest_mpeg_import(flush_stream_nid, AT_DESC, sid, 0u, 0u, 0u) == (uint32_t)-1,
+          "mpeg-atrac: FlushStream refuses a deleted context");
 
     /* A guest PSMF player parses the header with scePsmf and hands sceMpeg only the ring (title
      * X's libpsmfplayer, 2026-10-31): the decoder is set up from the frame's own header (0x28:
@@ -4371,9 +4990,13 @@ static void test_mpeg_csc_presentation_boundary(int copy_planes) {
     MEM_W32(PC_PTR, PC_YCBCR);
     MEM_W32(PC_RANGE, 0u); MEM_W32(PC_RANGE + 4u, 0u);
     MEM_W32(PC_RANGE + 8u, width); MEM_W32(PC_RANGE + 12u, height);
+    MEM_W32(PC_INIT, 0xdeadbeefu);
+    CHECK(guest_mpeg_import(0xf0eb1125u, PC_DESC, PC_AU, PC_PTR, PC_INIT, 0u) == 0 && MEM_R32(PC_INIT) == 0u,
+          "sceMpeg presentation: the first access unit gives no picture yet (the decoder runs one behind)");
+    MEM_W32(PC_AU + 4u, 93003u);              /* the next unit, one frame later */
     MEM_W32(PC_INIT, 0u);
     CHECK(guest_mpeg_import(0xf0eb1125u, PC_DESC, PC_AU, PC_PTR, PC_INIT, 0u) == 0 && MEM_R32(PC_INIT) == 1u,
-          "sceMpeg presentation picture decodes");
+          "sceMpeg presentation picture decodes with the next access unit");
     CHECK(sr_hle_test_psmf_av_counter(0, "delivered") == 0,
           "sceMpeg: a decoded YCbCr picture is not delivered to the guest until sceMpegAvcCsc");
     if (copy_planes) {
@@ -4404,7 +5027,8 @@ static void test_mpeg_csc_presentation_boundary(int copy_planes) {
     const char *w = sr_hle_test_psmf_av_last_window();
     long long vo = 0;
     CHECK(av_log_field(w, " voff_us=", &vo) && vo == 1000000,
-          "sceMpeg: the picture's presentation offset is present time minus its access unit time");
+          "sceMpeg: the picture's presentation offset is present time minus the time of the access "
+          "unit it was decoded from, not of the unit given with the call that handed it over");
     mpeg_finish();
     sr_hle_test_psmf_av_reset();
 }
@@ -4836,6 +5460,101 @@ static void test_atrac_riff_mutations(unsigned iterations) {
            "accepted and driven, 0 crashes\n", iterations, seeds_accepted, iterations, accepted);
 }
 
+/* ---- the recorder's production audio hooks (#1273, #2080 review) ------------------------
+ *
+ * Run as `--videorec-audio DIR channel|output2|src`: a recording (raw, on the deterministic clock)
+ * of ten VBLANKs through the production sr_vblank_tick, while a production handler plays a
+ * constant stereo block from guest memory: sceAudioOutputBlocking on a regular channel, or
+ * sceAudioOutput2OutputBlocking (44100 Hz, the Output2 channel), both through audio_output's
+ * hook; or sceAudioSRCOutputBlocking on a 48000 Hz SRC reservation, whose frames the resampler
+ * converts to 44100 Hz (audio_src_output's hook). audio.wav must hold that block's samples:
+ * removing either hook in hle_audio.c, or skipping the Output2 channel in the first, leaves it
+ * silent and fails its run.
+ *
+ * Two blocks, not one per VBLANK: no scheduler runs here, so guest time does not advance and the
+ * deterministic clock's virtual audio queue never drains. A regular channel's blocking output
+ * waits while more than two blocks are queued (hle_audio.c, #67), which would never end; and two
+ * blocks (4096 frames) fit inside ten VBLANKs (about 7350 frames), so the recording has no
+ * overflow either. */
+extern uint32_t s_vcount;  /* hle_display.c (hle_internal.h) */
+#define VR_NID_SRC_RESERVE 0x38553111u  /* sceAudioSRCChReserve(samples, freq, channels) */
+#define VR_NID_SRC_BLOCK   0xe0727056u  /* sceAudioSRCOutputBlocking(vol, buf) */
+
+static int videorec_audio_hooks(const char *dir, const char *which) {
+    const int src = strcmp(which, "src") == 0, output2 = strcmp(which, "output2") == 0;
+    if (!src && !output2 && strcmp(which, "channel") != 0) {
+        fprintf(stderr, "--videorec-audio: the path is channel, output2 or src, not %s\n", which);
+        return 2;
+    }
+#ifdef _WIN32
+    _putenv_s("SR_VIDEOREC_DIR", dir);
+    _putenv_s("SR_VIDEOREC_CODEC", "raw");
+    _putenv_s("SR_DETERMINISTIC_CLOCK", "1");
+#else
+    setenv("SR_VIDEOREC_DIR", dir, 1);
+    setenv("SR_VIDEOREC_CODEC", "raw", 1);
+    setenv("SR_DETERMINISTIC_CLOCK", "1", 1);
+#endif
+    /* As the runtime's main() does: the recorder takes the scheduler's clock (videorec.h). */
+    sr_videorec_set_clock(sched_clock_deterministic);
+    const int16_t left = src ? 5000 : output2 ? 4000 : 3000, right = (int16_t)-left;
+    for (uint32_t i = 0; i < PB_FRAMES; i++) {
+        MEM_W16(PB_AU_A + i * 4u, (uint16_t)left);
+        MEM_W16(PB_AU_A + i * 4u + 2u, (uint16_t)right);
+    }
+    int channel = -1;
+    if (src) {
+        CHECK(guest_mpeg_import(VR_NID_SRC_RESERVE, PB_FRAMES, 48000u, 2u, 0, 0) == 0,
+              "videorec-audio: a 48000 Hz SRC channel is reserved");
+    } else if (output2) {
+        CHECK(guest_mpeg_import(PB_NID_OUT2_RESERVE, PB_FRAMES, 0, 0, 0, 0) == 0,
+              "videorec-audio: the Output2 channel is reserved");
+    } else {
+        channel = (int)guest_mpeg_import(PB_NID_CH_RESERVE, 0xffffffffu, PB_FRAMES, 0u, 0, 0);
+        CHECK(channel >= 0 && channel < 8, "videorec-audio: a regular channel is reserved");
+    }
+    CHECK(sr_videorec_active(), "videorec-audio: the recording starts on the deterministic clock");
+    static uint32_t picture[480u * 272u];
+    for (uint32_t v = 0; v < 10; v++) {
+        for (uint32_t i = 0; i < 480u * 272u; i++) picture[i] = v;
+        sr_videorec_frame(picture, 480u, 272u, 480u * 4u, SR_CAP_ORDER_BGRX);
+        s_vcount++;
+        sr_vblank_tick();
+        if (v != 1 && v != 6) continue;
+        uint32_t r = src ? guest_mpeg_import(VR_NID_SRC_BLOCK, 0x8000u, PB_AU_A, 0, 0, 0)
+                     : output2 ? guest_mpeg_import(PB_NID_OUT2_BLOCK, 0x8000u, PB_AU_A, 0, 0, 0)
+                               : guest_mpeg_import(PB_NID_OUTPUT_BLOCK, (uint32_t)channel, 0x8000u,
+                                                   PB_AU_A, 0, 0);
+        /* sceAudioOutput2OutputBlocking returns 0; the other two return the sample count. */
+        CHECK(r == (output2 ? 0u : (uint32_t)PB_FRAMES),
+              "videorec-audio: the production output handler takes the block");
+    }
+    s_vcount++;
+    sr_vblank_tick();
+    CHECK(sr_videorec_finish() == 1, "videorec-audio: the recording finishes PASS");
+
+    char path[1024];
+    snprintf(path, sizeof path, "%s/audio.wav", dir);
+    FILE *f = fopen(path, "rb");
+    long matching = 0, samples = 0;
+    if (f) {
+        uint8_t h[44], s4[4];
+        if (fread(h, 1, sizeof h, f) == sizeof h) {
+            while (fread(s4, 1, 4, f) == 4) {
+                int16_t l = (int16_t)((uint16_t)s4[0] | ((uint16_t)s4[1] << 8));
+                int16_t rr = (int16_t)((uint16_t)s4[2] | ((uint16_t)s4[3] << 8));
+                samples++;
+                if (l > left / 2 && l <= left && rr < right / 2 && rr >= right) matching++;
+            }
+        }
+        fclose(f);
+    }
+    CHECK(samples > 0, "videorec-audio: audio.wav holds the recording's samples");
+    CHECK(matching >= 1000, "videorec-audio: the guest's block reached audio.wav through the hook");
+    printf("videorec-audio %s: samples=%ld matching=%ld\n", which, samples, matching);
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     sr_perf_init();
     sr_flight_init();
@@ -4853,6 +5572,8 @@ int main(int argc, char **argv) {
     /* SR_HOST maps VRAM at g_mem - 0x04000000, so reserve that prefix in the fixture arena. */
     g_mem = arena + GUEST_VRAM_PREFIX_BYTES;
     memset(arena, 0, sizeof(arena));
+    if (argc == 4 && strcmp(argv[1], "--videorec-audio") == 0)
+        return videorec_audio_hooks(argv[2], argv[3]);
 
 #if defined(SR_H264_FFMPEG)
     CHECK(sr_h264_select_backend("ffmpeg"),
@@ -4875,11 +5596,16 @@ int main(int argc, char **argv) {
     test_backend_registry_fail_closed();
     test_backend_reset_and_restart();
     test_backend_malformed_input();
+    test_backend_pts_range();
     test_video_eos_waits_for_all_access_units();
     test_mpeg_ps_demux_error_fails_closed();
     test_mpeg_ycbcr_measured_contract();
     test_mpeg_ycbcr_picture_time_by_bytes();
     test_mpeg_ycbcr_guest_decode();
+    test_mpeg_ycbcr_restart_after_stop(0);
+    test_mpeg_ycbcr_restart_after_stop(1);
+    test_mpeg_ycbcr_catch_up(0);
+    test_mpeg_ycbcr_catch_up(1);
     test_mpeg_pcm_and_au_mode();
     test_mpeg_userdata_imports();
     test_mpeg_csc_swizzled_vram_mirrors();
@@ -4901,7 +5627,14 @@ int main(int argc, char **argv) {
     test_mpeg_looped_stream_feeds_past_header_size(0u, 0);
     test_mpeg_looped_stream_feeds_past_header_size(4u, 0);
     test_mpeg_looped_stream_feeds_past_header_size(0u, 1);
+    test_mpeg_ringbuffer_available_needs_a_live_context();
     test_mpeg_last_unit_keeps_its_ring_packets();
+    test_mpeg_feed_end_without_stream_size(0);
+    test_mpeg_feed_end_without_stream_size(1);
+    test_mpeg_feed_end_without_stream_size(2);
+    test_mpeg_feed_end_without_stream_size(3);
+    test_mpeg_feed_end_without_stream_size(4);
+    test_mpeg_feed_end_without_stream_size(5);
     test_mpeg_avc_decode_detail();
     test_psmf_contract_fragmentation_and_malformed_rejection();
     if (fuzz_iterations) test_legacy_demux_mutations(fuzz_iterations);

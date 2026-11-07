@@ -146,7 +146,7 @@ def _build_and_run_stack_census(
                 "-Wall", "-Wextra", "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
                 "-DSR_STACK_CENSUS_ENABLED",
                 f"-DSR_STACK_CENSUS_EXPECTED_STATUS={expected_status}",
-                "-I", str(work), "-I", str(ROOT / "src" / "rt"),
+                "-I", str(work), "-I", str(ROOT / "src" / "rt"), "-I", str(ROOT / "tests" / "native"),
                 str(harness), str(generated), str(work / "census_0.c"),
                 str(GUEST_INTERP), str(PERF),
                 str(ROOT / "src" / "rt" / "sr_coro.c"),
@@ -182,6 +182,9 @@ def _beq(rs: int, rt: int, here: int, target: int) -> int:
 def _j(target: int) -> int: return (0x02 << 26) | ((target >> 2) & 0x03FFFFFF)
 def _jal(target: int) -> int: return (0x03 << 26) | ((target >> 2) & 0x03FFFFFF)
 def _jr(rs: int) -> int: return (rs << 21) | 0x08
+def _mfc0(rt: int, rd: int) -> int: return 0x40000000 | (rt << 16) | (rd << 11)
+def _mtc0(rt: int, rd: int) -> int: return 0x40800000 | (rt << 16) | (rd << 11)
+_BREAK, _ERET, _K0, _CP0_EPC = 0x0000000D, 0x42000018, 26, 14
 def _addu(rd: int, rs: int, rt: int) -> int: return (rs << 21) | (rt << 16) | (rd << 11) | 0x21
 
 
@@ -480,7 +483,9 @@ _A1 = 5
 def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
                              rebinds_fp: bool = False,
                              tail_called_from_alloca: bool = False,
-                             tail_called_plainly: bool = False) -> tuple[int, ...]:
+                             tail_called_plainly: bool = False,
+                             through_a_piece: bool = False,
+                             eret_into: str | None = None) -> tuple[int, ...]:
     """setjmp in F, longjmp from G called by F: F's setjmp returns again, v0 = 0x107.
 
     F saves $sp and $ra in a two-word jmp_buf on its frame, then calls G, which calls
@@ -493,7 +498,11 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
     the jmp_buf and loads through it: the same base and offset again, in other memory. With
     ``tail_called_from_alloca``, G calls H, which frees an alloca, releases its frame and
     tail-calls longjmp. With ``tail_called_plainly``, H has a frame and no alloca, and
-    tail-calls longjmp the same way.
+    tail-calls longjmp the same way. With ``through_a_piece``, H lowers $sp and hands its
+    live frame to P with `j`; P, an entry of its own, tail-calls longjmp. With ``eret_into``,
+    H lowers $sp and executes `break`; the handler at _ERET_VECTOR(...) steps EPC past it and
+    erets into M, the rest of H and an entry of its own. M releases H's frame and returns
+    ("returns": G returns normally, v0 = 0xee0) or tail-calls longjmp ("longjmp").
     """
     t, g, setjmp, longjmp, done = 0x1020, 0x1044, 0x1060, 0x1070, 0x1034
     saves = ([_addu(_T8, _A0, 0), _addiu(_A0, _A0, 8), _sw(_SP, 0, _A0), _addu(_A0, _T8, 0)]
@@ -512,7 +521,20 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
     ] if tail_called_from_alloca else [
         _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # H
         _lw(_RA, 0x1C, _SP), _j(longjmp), _addiu(_SP, _SP, 0x20),
-    ] if tail_called_plainly else []
+    ] if tail_called_plainly else [
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # H
+        _j(longjmp + 4 * (len(saves) + 8)), _NOP,            # j P
+        _j(longjmp), _NOP,                                   # P
+        _jal(longjmp + 4 * (len(saves) + 8)), _NOP,          # never run: makes P an entry
+    ] if through_a_piece else [
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # H
+        _BREAK,
+        *({"returns": [_lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20)],   # M
+           "longjmp": [_j(longjmp), _NOP, _NOP]}[eret_into]),
+        _mfc0(_K0, _CP0_EPC), _addiu(_K0, _K0, 4),           # the vector
+        _mtc0(_K0, _CP0_EPC), _ERET,
+        _jal(h + 24), _NOP,                                  # never run: the vector is an entry
+    ] if eret_into else []
     words = _probe_program([
         _addiu(_SP, _SP, -0x40), _sw(_RA, 0x3C, _SP),        # 0x1010 F
         _jal(setjmp), _addiu(_A0, _SP, 0x10),                # 0x1018 setjmp(&buf)
@@ -522,7 +544,8 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
         _addiu(_V0, _V0, 0x100),                             # 0x1034 done
         _lw(_RA, 0x3C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x40),
         _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1044 G
-        _jal(h if tail_called_from_alloca or tail_called_plainly else longjmp),  # 0x104c
+        _jal(h if tail_called_from_alloca or tail_called_plainly or through_a_piece
+             or eret_into else longjmp),                     # 0x104c
         _addiu(_A1, 0, 7),
         _lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20),
         _sw(_SP, 0, _A0), _sw(_RA, 4, _A0),                  # 0x1060 setjmp
@@ -534,6 +557,99 @@ def _longjmp_into_live_frame(*, saves_through_its_base: bool = False,
     ])
     assert len(words) == (h + 4 * len(frees_alloca_then_tail_calls) - _PROBE_BASE) // 4, (
         "the fixture's labels moved")
+    return words
+
+
+def _eret_vector(words: tuple[int, ...]) -> int:
+    """The exception vector of _longjmp_into_live_frame(eret_into=...): its handler."""
+    return _PROBE_BASE + 4 * (len(words) - 6)
+
+
+def _jalr(rs: int) -> int: return (rs << 21) | (_RA << 11) | 0x09
+
+
+def _longjmp_through_a_computed_call() -> tuple[int, ...]:
+    """_longjmp_into_live_frame with F calling G through `jalr $t9`: a generated dispatch site.
+
+    G is native, so it runs under the site's own boundary; G calls longjmp, whose return
+    lands in F's setjmp call, past the dispatch site. Natively F's setjmp returns again:
+    v0 = 0x107. The `jal G` after longjmp is never run: it makes G an entry.
+    """
+    t, g, setjmp, longjmp, done = 0x1020, 0x104C, 0x1068, 0x1078, 0x103C
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x40), _sw(_RA, 0x3C, _SP),        # 0x1010 F
+        _jal(setjmp), _addiu(_A0, _SP, 0x10),                # 0x1018 setjmp(&buf)
+        _i(0x05, _V0, 0, (done - (t + 4)) >> 2), _NOP,       # 0x1020 bne v0, zero, done
+        _lui(_T9, 0), _ori(_T9, _T9, g),                     # 0x1028
+        _jalr(_T9), _addiu(_A0, _SP, 0x10),                  # 0x1030 G(&buf), computed
+        _addiu(_V0, 0, 0x0DE0),                              # 0x1038 only if G returned
+        _addiu(_V0, _V0, 0x100),                             # 0x103c done
+        _lw(_RA, 0x3C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x40),
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x104c G
+        _jal(longjmp), _addiu(_A1, 0, 7),                    # 0x1054
+        _lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _sw(_SP, 0, _A0), _sw(_RA, 4, _A0),                  # 0x1068 setjmp
+        _jr(_RA), _addu(_V0, 0, 0),
+        _lw(_SP, 0, _A0), _lw(_RA, 4, _A0),                  # 0x1078 longjmp
+        _jr(_RA), _addu(_V0, _A1, 0),
+        _jal(g), _NOP,                                       # 0x1088 never run
+    ])
+    assert len(words) == (0x1090 - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
+# _inline_call_into_a_piece: H's `jal K` (K unregistered, so the interpreter runs it inline),
+# K's `j P` (P native) and P's return into the rest of H, at H's resume after `jal K`.
+_INLINE_H, _INLINE_K, _INLINE_P = 0x1030, 0x1050, 0x1058
+
+
+def _inline_call_into_a_piece() -> tuple[int, ...]:
+    """H calls K inline, K hands H's frame to the native piece P, and P returns into H.
+
+    G calls H (G native, H omitted: a checked dispatch site), or the host enters H directly
+    (the probe's "host-entry" mode, as thread start does). H lowers $sp, calls K, adds 0x10
+    and returns; K does `j P`; P adds 1 and returns to H's resume after `jal K`, a PC no
+    call boundary holds. Natively that is H's own continuation (G sees v0 = 0x111, the host
+    0x11). The runtime cannot resume interpreted H there, so it must stop by name. Before
+    (#1935): P ran under no resume check, the interpreter handed back as if H had returned,
+    and the rest of H was dropped (v0 = 0x101, or 0x1 at the host).
+    """
+    h, k, p = _INLINE_H, _INLINE_K, _INLINE_P
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1010 G
+        _jal(h), _NOP,                                       # 0x1018
+        _addiu(_V0, _V0, 0x100),                             # 0x1020 G's continuation
+        _lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1030 H
+        _jal(k), _NOP,
+        _addiu(_V0, _V0, 0x10),                              # 0x1040 the rest of H
+        _lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _j(p), _NOP,                                         # 0x1050 K
+        _addiu(_V0, _V0, 1), _jr(_RA), _NOP,                 # 0x1058 P
+        _jal(p), _NOP,                                       # never run: makes P an entry
+    ])
+    assert words[(k - _PROBE_BASE) // 4] == _j(p) and words[(p - _PROBE_BASE) // 4] == \
+        _addiu(_V0, _V0, 1), "the fixture's labels moved"
+    return words
+
+
+def _frameless_inline_call() -> tuple[int, ...]:
+    """F calls H; H has no frame and calls K, which returns into H at H's entry $sp.
+
+    H keeps its return address in t0 and leaves by `jr $t0`. K's `jr $ra` lands at H's
+    entry $sp, as a return out of H would, but it returns from a call H made. v0 = 0x111.
+    """
+    h, k = 0x102C, 0x1040
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1010 F
+        _jal(h), _addiu(_V0, 0, 1),                          # 0x1018
+        _lw(_RA, 0x1C, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _addu(_T0, _RA, 0),                                  # 0x102c H
+        _jal(k), _NOP,                                       # 0x1030
+        _jr(_T0), _addiu(_V0, _V0, 0x100),                   # 0x1038
+        _addiu(_V0, _V0, 0x10), _jr(_RA), _NOP,              # 0x1040 K
+    ])
+    assert len(words) == (k + 12 - _PROBE_BASE) // 4, "the fixture's labels moved"
     return words
 
 
@@ -642,10 +758,7 @@ def _call_into_a_live_frame_tail() -> tuple[int, ...]:
 
 
 _S0 = 16
-# 94c278ec9's rule: a transfer that leaves $sp at the recording body's entry owes no restore.
-_SIBCALL_RECORDS_NOTHING = {"recomp.h": (
-    "    sr_tail_transfer.has_restore = owes_restore ? 1u : 0u;",
-    "    sr_tail_transfer.has_restore = (owes_restore && s->r[29] != restore_sp) ? 1u : 0u;")}
+_CENSUS = ("--stack-census",)
 
 
 def _native_head_into_an_alloca_tail_end(*, crossing: str, frame: int = _FP) -> tuple[int, ...]:
@@ -681,11 +794,30 @@ def _native_head_into_an_alloca_tail_end(*, crossing: str, frame: int = _FP) -> 
     return words
 
 
+def _switch_to_a_lower_stack() -> tuple[int, ...]:
+    """F loads $sp from memory, below where it was, and hands on to T there by `j`.
+
+    The shape of a context switch: the load leaves F's frame, as the interpreter decides it
+    (sp_load_leaves_frame), so F owes no restore. T, an entry of its own, returns to F's
+    caller on the stack F switched to: v0 = 0x5A, v1 = _PROBE_SP - 0x60.
+    """
+    t = 0x1024
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _addiu(_T8, _SP, -0x40),    # 0x1010 F
+        _sw(_T8, 0x10, _SP), _j(t), _lw(_SP, 0x10, _SP),     # 0x1018 switch in the slot
+        _addiu(_V0, 0, 0x5A), _jr(_RA), _NOP,                # 0x1024 T
+        _jal(t), _NOP,                                       # T is an entry
+    ])
+    assert len(words) == (t + 0x14 - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
 def _a_piece_that_releases_a_guest_bodys_frame() -> tuple[int, ...]:
     """F, a guest-$sp body, hands its live frame to the piece P by a computed TAIL.
 
-    F reloads $sp through a copy, so its only exit is the guest's and it records nothing.
-    P releases F's frame in the slot of a sibcall to the leaf N. P was entered at F's
+    F reloads $sp through a copy, a load the frame walk does not own, so it checks the load
+    when it runs (sp_load_leaves_frame): the load leaves $sp where it was, inside F's frame,
+    and F records its entry $sp. P releases F's frame in the slot of a sibcall to the leaf N. P was entered at F's
     lowered $sp; once the chain completes, $sp must be the released one, F's entry $sp.
     """
     piece, leaf = 0x1030, 0x103C
@@ -702,6 +834,67 @@ def _a_piece_that_releases_a_guest_bodys_frame() -> tuple[int, ...]:
         _jal(piece), _NOP, _jal(leaf), _NOP,                 # both are entries
     ])
     assert len(words) == (leaf + 0x1C - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
+def _switch_then_a_sibcall_into_a_guest_sp_body() -> tuple[int, ...]:
+    """H switches to a lower stack, as _switch_to_a_lower_stack's F does, and sibcalls F there.
+
+    H's load leaves its frame, so H owes no restore. F is
+    _native_head_into_an_alloca_tail_end's F through $s0: its alloca free is a load that
+    stays in its frame, so F owes the $sp it was entered at, the stack H switched to, and
+    hands its live frame to TAIL, whose own return writes back F's lowered $sp. F's record
+    is the chain's only restore: v0 = 0x57, v1 = _PROBE_SP - 0x60.
+    """
+    f, tail = 0x1024, 0x1048
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _addiu(_T8, _SP, -0x40),    # 0x1010 H
+        _sw(_T8, 0x10, _SP), _j(f), _lw(_SP, 0x10, _SP),     # 0x1018 switch in the slot
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1024 F
+        _sw(_S0, 0x18, _SP), _addu(_S0, _SP, 0),
+        _sw(_SP, 0x10, _S0), _addiu(_SP, _SP, -0x30),        # save $sp, alloca
+        _addiu(_V0, 0, 0x57),
+        _j(tail), _lw(_SP, 0x10, _S0),                       # free it in the slot
+        _addu(_SP, _S0, 0),                                  # 0x1048 TAIL
+        _lw(_RA, 0x1C, _SP), _lw(_S0, 0x18, _SP),
+        _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _jal(tail), _NOP, _jal(f), _NOP,                     # both are entries
+    ])
+    assert len(words) == (tail + 0x24 - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
+def _a_load_above_the_entry_then_a_live_frame_tail(*, head: bool) -> tuple[int, ...]:
+    """F loads $sp from memory 0x40 above its entry $sp, as a longjmp to an outer frame does.
+
+    The load leaves F's frame upwards (the `>= entry` part of sp_load_leaves_frame and of
+    _sp_load_check), so F owes no restore. F hands on by `j` to G there, a plain body that
+    lowers $sp and hands its live frame to PIECE, whose own return writes back G's lowered
+    $sp. G's record is the chain's restore and gives G's caller the stack F loaded:
+    v0 = 0x5B, v1 = F's entry $sp + 0x40. A record of F's entry $sp would come first and
+    leave PIECE's write-back, 0x20 below. ``head`` puts _switch_then_a_sibcall_into_a_guest_sp_body's
+    H in front, which owes no restore and reaches F by a sibcall on the stack it switched to
+    (F's entry $sp _PROBE_SP - 0x60), so F, interpreted, runs as a TAIL step. (A head that
+    owes its entry $sp would put its record first, #1949's limit 2.)
+    """
+    lead = ([_addiu(_SP, _SP, -0x20), _addiu(_T8, _SP, -0x40),
+             _sw(_T8, 0x10, _SP), _j(0x1024), _lw(_SP, 0x10, _SP)] if head else [])
+    f = 0x1010 + 4 * len(lead)
+    g = f + 0x14
+    piece = g + 0x1C
+    words = _probe_program([
+        *lead,                                               # 0x1010 H
+        _addiu(_SP, _SP, -0x20), _addiu(_T8, _SP, 0x60),     # F
+        _sw(_T8, 0x10, _SP), _j(g), _lw(_SP, 0x10, _SP),     # the load in the slot
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # G
+        _sw(_FP, 0x18, _SP), _addu(_FP, _SP, 0),
+        _addiu(_V0, 0, 0x5B),
+        _j(piece), _NOP,
+        _addu(_SP, _FP, 0), _lw(_RA, 0x1C, _SP),             # PIECE
+        _lw(_FP, 0x18, _SP), _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _jal(piece), _NOP, _jal(g), _NOP, _jal(f), _NOP,     # all are entries
+    ])
+    assert len(words) == (piece + 0x2C - _PROBE_BASE) // 4, "the fixture's labels moved"
     return words
 
 
@@ -888,11 +1081,18 @@ static SrCoro *g_probe_main;
 static CpuState g_probe_state;
 static size_t g_probe_top;
 static int g_probe_ran;
+static uint32_t g_probe_host_entry;
 
 static void probe_body(void *arg) {
     (void)arg;
     RecompFn fn = sr_lookup(0x00001000u);
-    if (sr_coro_stack_remaining(&g_probe_top) && fn) {
+    if (g_probe_host_entry) {
+        /* "host-entry ADDR": enter ADDR as thread start does, whichever tier runs it. */
+        if (sr_coro_stack_remaining(&g_probe_top)) {
+            dispatch_from_host(&g_probe_state, g_probe_host_entry);
+            g_probe_ran = 1;
+        }
+    } else if (sr_coro_stack_remaining(&g_probe_top) && fn) {
 #ifdef SR_TAIL_DRAIN
         sr_call_body(fn, &g_probe_state);   /* complete the entry's TAIL chain (#855) */
 #else
@@ -942,6 +1142,9 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < sizeof image / sizeof image[0]; i++)
         MEM_W32(PROBE_BASE + 4u * (uint32_t)i, image[i]);
     sr_register_all();
+#ifdef PROBE_VECTOR
+    sr_cpu_lle_set_vectors(PROBE_VECTOR, PROBE_VECTOR, PROBE_VECTOR);
+#endif
     memset(&g_probe_state, 0, sizeof g_probe_state);
     g_probe_state.r[29] = PROBE_SP;
     g_probe_state.r[31] = SR_HOST_RETURN_PC;   /* a host entry's return address (#1375) */
@@ -950,8 +1153,10 @@ int main(int argc, char **argv) {
     const int pair = argc > 2 && strncmp(argv[2], "pair", 4) == 0;
     /* "no-bounds": the scheduler is on but no stack-bounds query is installed. */
     const int no_bounds = argc > 2 && strcmp(argv[2], "no-bounds") == 0;
+    g_probe_host_entry = argc > 3 && strcmp(argv[2], "host-entry") == 0
+        ? (uint32_t)strtoul(argv[3], NULL, 0) : 0u;
 #ifdef SR_TAIL_DRAIN
-    if (argc > 2 && !neighbour && !pair && !no_bounds) {   /* a broken protocol (#855) must stop with its named fault */
+    if (argc > 2 && !neighbour && !pair && !no_bounds && !g_probe_host_entry) {   /* a broken protocol (#855) must stop with its named fault */
         CpuState other;
         memset(&other, 0, sizeof other);
         if (strcmp(argv[2], "recorded-twice") == 0) {
@@ -1003,11 +1208,12 @@ int main(int argc, char **argv) {
     sr_dispatch_host_stack_remaining = NULL;
     if (!g_probe_ran) return 22;
     printf("DEPTH_PROBE n=%lu native_bytes=%zu samples=%lu v0=%u v1=0x%08x a0=%u sp=0x%08x "
-           "unwinds=%lu\n",
+           "unwinds=%lu fatal=%d\n",
            n, g_probe_top > g_probe_min ? g_probe_top - g_probe_min : (size_t)0,
            g_probe_samples, (unsigned)g_probe_state.r[2], (unsigned)g_probe_state.r[3],
            (unsigned)g_probe_state.r[4], (unsigned)g_probe_state.r[29],
-           (unsigned long)sr_aot_return_unwind_count());
+           (unsigned long)sr_aot_return_unwind_count(),
+           g_probe_state.flow_kind == SR_FLOW_FATAL);
     return 0;
 }
 """
@@ -1028,14 +1234,15 @@ def _mutated_copy(source: Path, work: Path, mutation: tuple[str, str] | None) ->
 
 def _build_depth_probe(
     words: tuple[int, ...], work: Path, *, codegen_args: tuple[str, ...] = (),
-    mutate: dict[str, tuple[str, str]] | None = None,
+    mutate: dict[str, tuple[str, str]] | None = None, vector: int | None = None,
 ) -> tuple[Path | None, str]:
     """Translate a source-owned fixture and link it into the depth-probe harness.
 
     ``mutate`` maps ``codegen.py``, ``analyze.py``, ``entry_frame_balance.py``,
     ``recomp.c``, ``recomp.h``, ``guest_interp.c`` or ``sr_coro.c`` to one exact
     replacement applied to a scratch copy, so a mutant is generated, compiled and run
-    through the same production path as the unmutated build.
+    through the same production path as the unmutated build. ``vector`` points every LLE
+    exception vector at that guest address.
     """
     assert CC is not None
     mutate = mutate or {}
@@ -1107,7 +1314,8 @@ def _build_depth_probe(
             CC, "-std=c11", "-O0", "-fno-strict-aliasing",
             "-Wall", "-Wextra", "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
             *(("-DSR_STACK_CENSUS_ENABLED",) if "--stack-census" in codegen_args else ()),
-            "-I", str(work), "-I", str(ROOT / "src" / "rt"),
+            *((f"-DPROBE_VECTOR=0x{vector:08x}u",) if vector is not None else ()),
+            "-I", str(work), "-I", str(ROOT / "src" / "rt"), "-I", str(ROOT / "tests" / "native"),
             str(harness), str(generated), str(work / "probe_0.c"),
             str(guest_interp), str(PERF),
             str(sr_coro),
@@ -1125,10 +1333,17 @@ def _build_depth_probe(
     return exe, compile_result.stderr + compile_result.stdout
 
 
-def _run_depth_probe(exe: Path, iterations: int) -> tuple[int, str, dict[str, int]]:
-    run = subprocess.run(
-        [str(exe), str(iterations)], cwd=ROOT, capture_output=True, text=True, timeout=120,
-    )
+def _run_depth_probe(exe: Path, iterations: int,
+                     *mode: str, timeout: int = 120) -> tuple[int, str, dict[str, int]]:
+    """Run the probe. A run that does not stop within ``timeout`` seconds is a failed run
+    (rc -1, ``PROBE_NO_STOP``), so a hang fails its test instead of erroring it (#2016)."""
+    try:
+        run = subprocess.run(
+            [str(exe), str(iterations), *mode],
+            cwd=ROOT, capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return -1, f"PROBE_NO_STOP: the run did not stop within {timeout} s", {}
     fields: dict[str, int] = {}
     for line in run.stdout.splitlines():
         if line.startswith(("DEPTH_PROBE ", "INTERP_PROBE ")):
@@ -1170,7 +1385,7 @@ def _build_and_run(mutated_recomp: str | None = None,
             [
                 CC, "-std=c11", "-O0", "-fno-strict-aliasing",
                 "-Wall", "-Wextra", "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
-                "-I", str(work), "-I", str(ROOT / "src" / "rt"),
+                "-I", str(work), "-I", str(ROOT / "src" / "rt"), "-I", str(ROOT / "tests" / "native"),
                  str(work / "dispatch_isolation_selftest.c"), str(interp_path),
                  str(ROOT / "src" / "rt" / "sr_coro.c"),
                  str(PERF),
@@ -1251,6 +1466,7 @@ class DispatchCallBoundaryMutationTests(unittest.TestCase):
             recomp_old=(
                 "SrGuestInterpResult interp_result = call_boundary\n"
                 "        ? sr_guest_interp_run_with_boundary(s, target, call_boundary, &fault)\n"
+                "        : drain == SR_DRAIN_SEGMENT ? sr_guest_interp_run_tail_step(s, target, &fault)\n"
                 "        : sr_guest_interp_run(s, target, &fault);"
             ),
             recomp_new="SrGuestInterpResult interp_result = sr_guest_interp_run(s, target, &fault);",
@@ -1448,13 +1664,14 @@ class StackCensusPipelineTests(unittest.TestCase):
 class GeneratedCallDepthTests(unittest.TestCase):
     """Generated code on a production-size guest fiber, measured at each guest entry."""
 
-    def _probe(self, words, iterations, *, codegen_args=()):
+    def _probe(self, words, iterations, *, codegen_args=(), vector=None, timeout=120):
         with scratch_dir.TemporaryDirectory(prefix="depth_probe_") as tmp:
             work = Path(tmp)
-            exe, output = _build_depth_probe(words, work, codegen_args=codegen_args)
+            exe, output = _build_depth_probe(words, work, codegen_args=codegen_args,
+                                             vector=vector)
             self.assertIsNotNone(exe, output)
             generated = (work / "probe_0.c").read_text(encoding="utf-8")
-            results = [_run_depth_probe(exe, n) for n in iterations]
+            results = [_run_depth_probe(exe, n, timeout=timeout) for n in iterations]
         return generated, results
 
     def test_linked_recursion_native_depth_tracks_guest_depth(self):
@@ -1548,44 +1765,73 @@ class GeneratedCallDepthTests(unittest.TestCase):
                     self.assertEqual(rc, 0, output)
                     self.assertEqual(fields.get("v0"), 0x57, output)
                     self.assertEqual(fields.get("v1"), _PROBE_SP, output)
-        # A1: a transfer at the entry $sp records nothing, as on 94c278ec9.
-        self._assert_mutant_fails(
-            "A1-a-sibcall-at-the-entry-sp-records-nothing",
-            _native_head_into_an_alloca_tail_end(crossing="tail"), (0,),
-            _SIBCALL_RECORDS_NOTHING,
-            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
-            codegen_args=("--omit-aot=0x00001018",),
-        )
+        # A1 (a transfer at the entry $sp records nothing, as on 94c278ec9) no longer changes
+        # this chain: F, native or interpreted as a TAIL step, records the same entry $sp H's
+        # sibcall would have (#1935), so the run cannot tell the two rules apart.
 
     def test_a_sibcall_into_a_guest_sp_body_keeps_the_callers_sp(self):
-        # F frees its alloca through $s0, so it records nothing. On 9832da426 H's sibcall
-        # at its entry $sp recorded nothing either, and natively TAIL's lowered entry $sp
-        # reached H's caller (v1=0x09efffe0); interpreted, F owed it. By a linked call F
-        # interpreted owes its caller's $sp; BASE_SHA lost it there as well. Native F, by a
-        # linked call, is the open limit (#1935): its callee owns the restore, F has none.
+        # F frees its alloca through $s0, a $sp load the frame walk does not own. On
+        # 9832da426 H's sibcall at its entry $sp recorded nothing, and natively TAIL's
+        # lowered entry $sp reached H's caller (v1=0x09efffe0); interpreted, F owed it. By a
+        # linked call F interpreted owes its caller's $sp; BASE_SHA lost it there as well.
+        # Before (#1935): native F took every exit as the guest's and recorded nothing, so by
+        # a linked call TAIL's write-back of F's lowered $sp reached H, which returned through
+        # a null $ra; with H interpreted, for either crossing, H's caller went on at that $sp
+        # (v1=0x09efffe0 by a sibcall). Now F checks the load when it runs, as the interpreter
+        # does (sp_load_leaves_frame): it stayed in F's frame, so F's record owes its entry
+        # $sp and the drain raises TAIL's write-back to it.
         for crossing in ("tail", "call"):
             words = _native_head_into_an_alloca_tail_end(crossing=crossing, frame=_S0)
             f = 0x1010 + (8 if crossing == "tail" else 0x1C)
-            tiers = ((), (f"--omit-aot=0x{f:08x}",)) if crossing == "tail" else (
-                (f"--omit-aot=0x{f:08x}",),)
-            for codegen_args in tiers:
-                with self.subTest(crossing=crossing, interpreted=bool(codegen_args)):
-                    _generated, results = self._probe(words, (0,), codegen_args=codegen_args)
+            for omitted in (None, 0x1010, f):
+                codegen_args = () if omitted is None else (f"--omit-aot=0x{omitted:08x}",)
+                with self.subTest(crossing=crossing, omitted=omitted):
+                    generated, results = self._probe(words, (0,), codegen_args=codegen_args)
                     rc, output, fields = results[0]
                     self.assertEqual(rc, 0, output)
                     self.assertEqual(fields.get("v0"), 0x57, output)
                     self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+                    if omitted != f:
+                        body = generated[generated.index(f"void f_{f:08x}(CpuState *s) {{"):]
+                        body = body[:body.index("\n}")]
+                        self.assertIn("_sp_entry, _sp_kept); return;", body, "F's record")
+        # K2: every checked $sp load counts as leaving the frame: F records nothing again.
         self._assert_mutant_fails(
-            "A1-a-sibcall-at-the-entry-sp-records-nothing",
-            _native_head_into_an_alloca_tail_end(crossing="tail", frame=_S0), (0,),
-            _SIBCALL_RECORDS_NOTHING,
+            "K2-a-checked-sp-load-always-leaves-the-frame",
+            _native_head_into_an_alloca_tail_end(crossing="call", frame=_S0), (0,),
+            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = 0u;",
+                            "_sp_kept = 0u;")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
+        )
+        # A1 (H's sibcall at its entry $sp records nothing) no longer changes this chain in
+        # any tier: F's own record, native or interpreted as a TAIL step, gives the same $sp.
+
+    def test_a_switch_to_a_lower_stack_keeps_the_stack_it_loaded(self):
+        # F's $sp load leaves its frame downwards, as a context switch does, so F owes no
+        # restore: T returns to F's caller on the stack F loaded, in every tier.
+        for codegen_args in ((), ("--omit-aot=0x00001010",), ("--omit-aot=0x00001024",)):
+            with self.subTest(omitted=codegen_args):
+                _generated, results = self._probe(
+                    _switch_to_a_lower_stack(), (0,), codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x5A, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP - 0x60, output)
+        # K1: the check never clears the verdict: F's record raises $sp back to its entry.
+        self._assert_mutant_fails(
+            "K1-a-checked-sp-load-never-leaves-the-frame", _switch_to_a_lower_stack(), (0,),
+            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = 0u;",
+                            "(void)_sp_load;")},
+            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP - 0x60,
         )
 
     def test_a_piece_that_releases_its_frame_keeps_the_released_sp(self):
         # P records its lowered entry $sp, and the chain ends above it at F's entry $sp.
         # Before (BASE_SHA, 9832da426): natively the drain lowered $sp to P's record. On
         # 9832da426, interpreted, P's run owed the $sp it started at and wrote it back.
+        # F's load stays in its frame, so since #1935 F's record of its entry $sp comes
+        # first and is the chain's restore: R1 (the drain lowers $sp to its restore) no longer
+        # changes this chain in any tier, and the plain longjmp tail-call below kills it.
         for codegen_args in ((), ("--omit-aot=0x00001030",)):
             with self.subTest(interpreted=bool(codegen_args)):
                 _generated, results = self._probe(
@@ -1594,14 +1840,75 @@ class GeneratedCallDepthTests(unittest.TestCase):
                 self.assertEqual(rc, 0, output)
                 self.assertEqual(fields.get("v0"), 0x58, output)
                 self.assertEqual(fields.get("v1"), _PROBE_SP, output)
-        # R1 again: the drain lowers $sp to its restore.
+
+    def test_a_sibcall_after_a_stack_switch_keeps_the_switched_sp(self):
+        # Before (#1935, review F1 of #2084): F interpreted ran as a TAIL step with no frame
+        # of its own and handed TAIL a nested dispatch with no record, so TAIL's write-back
+        # of F's lowered $sp reached H's caller (v1=0x09efff80); F native records its entry
+        # $sp (0x09efffa0). Now the interpreted step records what a native body entered
+        # there records. With H interpreted too, one run covers H and F and the runtime does
+        # not know where F begins, so that tier stays open on #1935.
+        for omitted in (None, 0x1010, 0x1024, 0x1048):
+            codegen_args = () if omitted is None else (f"--omit-aot=0x{omitted:08x}",)
+            with self.subTest(omitted=omitted):
+                _generated, results = self._probe(
+                    _switch_then_a_sibcall_into_a_guest_sp_body(), (0,), codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x57, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP - 0x60, output)
+        # TS1: the interpreted TAIL step records its transfer but owes no restore.
         self._assert_mutant_fails(
-            "R1-the-drain-lowers-sp", _a_piece_that_releases_a_guest_bodys_frame(), (0,),
+            "TS1-an-interpreted-tail-step-owes-no-restore",
+            _switch_then_a_sibcall_into_a_guest_sp_body(), (0,),
             {"guest_interp.c": (
-                "    if (chain_restores && s->r[29] < chain_sp) s->r[29] = chain_sp;",
-                "    if (chain_restores) s->r[29] = chain_sp;")},
-            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
+                "sr_tail_record(s, pc, next_fn, tail_entry_sp, loaded_sp ? 0u : 1u);",
+                "sr_tail_record(s, pc, next_fn, 0u, 0u);")},
+            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP - 0x60,
+            codegen_args=("--omit-aot=0x00001024",),
         )
+
+    def test_a_load_above_the_entry_leaves_the_frame_in_every_tier(self):
+        # F's $sp load lands 0x40 above its entry $sp. Native, interpreted by a linked call
+        # and interpreted as a TAIL step, F owes no restore and G's record gives back the
+        # stack F loaded. Before #1935's review F2 no fixture ran this part of the check.
+        # With both H and F interpreted one run covers both (see the test above): not here.
+        cases = ((False, None), (False, 0x1010), (True, None), (True, 0x1010), (True, 0x1024))
+        for head, omitted in cases:
+            loaded = (_PROBE_SP - 0x60 if head else _PROBE_SP) + 0x40
+            codegen_args = () if omitted is None else (f"--omit-aot=0x{omitted:08x}",)
+            with self.subTest(head=head, omitted=omitted):
+                _generated, results = self._probe(
+                    _a_load_above_the_entry_then_a_live_frame_tail(head=head), (0,),
+                    codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x5B, output)
+                self.assertEqual(fields.get("v1"), loaded, output)
+
+        def stays(r, loaded=_PROBE_SP + 0x40):
+            return r[0][0] != 0 or r[0][2].get("v1") != loaded
+
+        # U1: generated code's check drops its `>= _sp_entry` part: F's record comes first.
+        self._assert_mutant_fails(
+            "U1-a-checked-sp-load-above-the-entry-stays-in-the-frame",
+            _a_load_above_the_entry_then_a_live_frame_tail(head=False), (0,),
+            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = 0u;",
+                            "if (s->r[29] < _sp_load) _sp_kept = 0u;")},
+            stays,
+        )
+        # U2: the interpreter's rule drops the same part, by a linked call and as a TAIL step.
+        interp_upward = {"guest_interp.c": (
+            "return frame_sp == NULL || after < before || after >= *frame_sp;",
+            "return frame_sp == NULL || after < before;")}
+        for head, omitted in ((False, 0x1010), (True, 0x1024)):
+            loaded = (_PROBE_SP - 0x60 if head else _PROBE_SP) + 0x40
+            self._assert_mutant_fails(
+                f"U2-an-interpreted-sp-load-above-the-entry-stays-in-the-frame-head-{head}",
+                _a_load_above_the_entry_then_a_live_frame_tail(head=head), (0,),
+                interp_upward, lambda r, loaded=loaded: stays(r, loaded),
+                codegen_args=(f"--omit-aot=0x{omitted:08x}",),
+            )
 
     def test_a_call_site_drains_before_the_caller_goes_on(self):
         _generated, results = self._probe(_call_into_a_live_frame_tail(), (0,))
@@ -1610,12 +1917,14 @@ class GeneratedCallDepthTests(unittest.TestCase):
         self.assertEqual(fields.get("v0"), 0x157, output)
         self.assertEqual(fields.get("v1"), _PROBE_SP, output)
 
-    def _assert_mutant_fails(self, name, words, iterations, mutate, check, codegen_args=()):
+    def _assert_mutant_fails(self, name, words, iterations, mutate, check, codegen_args=(),
+                             vector=None, timeout=120):
         with scratch_dir.TemporaryDirectory(prefix="depth_mutant_") as tmp:
             work = Path(tmp)
-            exe, output = _build_depth_probe(words, work, mutate=mutate, codegen_args=codegen_args)
+            exe, output = _build_depth_probe(words, work, mutate=mutate, codegen_args=codegen_args,
+                                             vector=vector)
             self.assertIsNotNone(exe, f"{name}: MUTANT_BUILD_FAILED (not a semantic kill)\n{output}")
-            results = [_run_depth_probe(exe, n) for n in iterations]
+            results = [_run_depth_probe(exe, n, timeout=timeout) for n in iterations]
         self.assertTrue(check(results), f"{name}: MUTANT_SURVIVED {results}")
         print(f"{name}: MUTANT_EXECUTED_AND_SEMANTIC_TEST_FAILED")
 
@@ -1713,18 +2022,78 @@ class GeneratedCallDepthTests(unittest.TestCase):
             lambda r: "AOT_RETURN_TARGET_MISMATCH" in r[0][1] and r[0][2].get("v0") != 0x107,
         )
 
+    def test_an_interpreted_longjmp_reaches_the_setjmp_frame(self):
+        # longjmp runs in the interpreter, called by G or tail-called by H. Its `jr $ra` into
+        # F's body is guest control flow the interpreter follows; F's own return then goes
+        # past the call the interpreter runs for, to the entry's resume, where the frames in
+        # between unwind as they do natively. Before (#2016): the interpreter ran on into the
+        # entry's continuation, whose `jr $ra` jumped to itself, and the run never stopped.
+        interpreted_longjmp = ("--omit-aot=0x00001070",)
+        for name, words in (
+                ("called", _longjmp_into_live_frame()),
+                ("tail-called", _longjmp_into_live_frame(tail_called_plainly=True)),
+                ("tail-called-from-alloca", _longjmp_into_live_frame(tail_called_from_alloca=True))):
+            with self.subTest(name):
+                _generated, results = self._probe(words, (0,), codegen_args=interpreted_longjmp,
+                                                  timeout=30)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x107, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+                self.assertGreater(fields.get("unwinds", 0), 0, output)
+        # L1: the interpreter runs on past its call, as before.
+        self._assert_mutant_fails(
+            "L1-interpreted-return-past-its-call-runs-on", _longjmp_into_live_frame(), (0,),
+            {"guest_interp.c": ("    return sr_aot_return_boundary_encloses_resume(s, target, sp);",
+                                "    return 0;")},
+            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107,
+            codegen_args=interpreted_longjmp, timeout=30,
+        )
+        # L2: only the innermost live call counts. The entry's call to F lies below the site
+        # boundary G's call begins, so F's return is not seen.
+        self._assert_mutant_fails(
+            "L2-only-the-innermost-call-is-searched", _longjmp_into_live_frame(), (0,),
+            {"recomp.c": ("        if (enclosing->has_resume_pc && enclosing->resume_pc == target &&",
+                          "        if (index == sr_aot_return_boundary_depth && enclosing->has_resume_pc &&"
+                          " enclosing->resume_pc == target &&")},
+            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107,
+            codegen_args=interpreted_longjmp, timeout=30,
+        )
+
+    def test_a_frameless_interpreted_body_returns_from_its_own_inline_call(self):
+        # Control: H and K both run in the interpreter, H with no frame. K's return lands at
+        # H's entry $sp, where a return out of H would leave it, but at no live call's resume
+        # PC: it is K's return to H, which the interpreter follows. A rule keyed on $sp alone
+        # would take it for a return past H's call.
+        frameless = ("--omit-aot=0x0000102c,0x00001040",)
+        _generated, results = self._probe(_frameless_inline_call(), (0,), codegen_args=frameless,
+                                          timeout=30)
+        rc, output, fields = results[0]
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(fields.get("v0"), 0x111, output)
+        self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+        self.assertEqual(fields.get("unwinds", 0), 0, output)
+
     def test_own_slot_mutant_fails_for_its_semantic(self):
         # S1: reloading the frame's own slot counts as a longjmp again: F records no restore.
         loads_are_foreign = {"codegen.py": (
             "if rt(w) == 29 and (rs(w) != 30 or offset not in slots):", "if rt(w) == 29:")}
         # CASE in the switch chain hands on at the $sp it was entered at and records
         # nothing (sr_tail_record), so the pieces that return for F are the ones that tell.
-        for name, fixture, iteration in (
-                ("S1-own-slot-is-foreign-tail-end", _alloca_tail_end(), 0),
-                ("S1-own-slot-is-foreign-scoped-arrays", _scoped_arrays_function(), 2)):
+        # The tail end's only exit is a TAIL, where the run-time check of a load the walk
+        # gives the guest owes the same restore (#1935); the stack census keeps the walk's
+        # verdict there (it wraps F only when the walk owns its exits), so it is that tier.
+        _generated, results = self._probe(_alloca_tail_end(), (0,), codegen_args=_CENSUS)
+        rc, output, fields = results[0]
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+        for name, fixture, iteration, codegen_args in (
+                ("S1-own-slot-is-foreign-tail-end", _alloca_tail_end(), 0, _CENSUS),
+                ("S1-own-slot-is-foreign-scoped-arrays", _scoped_arrays_function(), 2, ())):
             self._assert_mutant_fails(
                 name, fixture, (iteration,), loads_are_foreign,
                 lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
+                codegen_args=codegen_args,
             )
 
     def test_scoped_arrays_keep_the_callers_sp_on_both_ways_out(self):
@@ -1752,17 +2121,22 @@ class GeneratedCallDepthTests(unittest.TestCase):
         )
 
     def test_a_save_through_a_register_copy_is_the_frames_own(self):
-        # `move t8, sp; sw t8, n(fp)` saves the same value as `sw sp, n(fp)`.
-        _generated, results = self._probe(_alloca_tail_end(saved_through_a_copy=True), (0,))
-        rc, output, fields = results[0]
-        self.assertEqual(rc, 0, output)
-        self.assertEqual(fields.get("v0"), 0x57, output)
-        self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+        # `move t8, sp; sw t8, n(fp)` saves the same value as `sw sp, n(fp)`. F2 shows under
+        # the stack census, which keeps the walk's verdict at a TAIL (see S1).
+        for codegen_args in ((), _CENSUS):
+            with self.subTest(census=bool(codegen_args)):
+                _generated, results = self._probe(
+                    _alloca_tail_end(saved_through_a_copy=True), (0,), codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x57, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP, output)
         self._assert_mutant_fails(
             "F2-copy-is-not-followed", _alloca_tail_end(saved_through_a_copy=True), (0,),
             {"codegen.py": ("if op == 0x2B and rt(w) in regs:",
                             "if op == 0x2B and rt(w) == 29 and rt(w) in regs:")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
+            codegen_args=_CENSUS,
         )
 
     def test_a_switch_that_rebinds_fp_stays_with_the_guest(self):
@@ -1819,6 +2193,130 @@ class GeneratedCallDepthTests(unittest.TestCase):
             or r[0][2].get("v1") != _PROBE_SP,
         )
 
+    def test_a_longjmp_through_an_interpreted_callees_piece_reaches_the_setjmp_frame(self):
+        # G calls H, which lowers $sp and hands its live frame to the native piece P, and P
+        # tail-calls longjmp. Natively that return lands in G's linked call to H and unwinds
+        # to F's live frame. Before (#1935): with H interpreted, G called it through a plain
+        # dispatch_call, nothing checked the piece's return, and the interpreter wrote H's
+        # entry $sp back and handed back as if H had returned: G returned, v0 = 0xee0.
+        words = _longjmp_into_live_frame(through_a_piece=True)
+        omit_h = ("--omit-aot=0x00001080",)
+        for codegen_args in ((), omit_h):
+            with self.subTest(interpreted=bool(codegen_args)):
+                generated, results = self._probe(words, (0,), codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x107, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+                self.assertGreater(fields.get("unwinds", 0), 0, output)
+        self.assertIn("if (dispatch_call_checked(s, 0x00001080u, 0x00001054u)) return;", generated)
+        # N1: a dispatch call site runs its continuation whatever the call did, as before.
+        self._assert_mutant_fails(
+            "N1-a-dispatch-call-site-ignores-its-end-check", words, (0,),
+            {"codegen.py": (
+                'return f"if (dispatch_call_checked(s, {target_expr}, {resume_expr})) return;"',
+                'return f"(void)dispatch_call_checked(s, {target_expr}, {resume_expr});"')},
+            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107,
+            codegen_args=omit_h,
+        )
+        # N2: the handoff writes H's entry $sp back over the $sp longjmp loaded.
+        self._assert_mutant_fails(
+            "N2-the-handoff-restores-after-a-return-elsewhere", words, (0,),
+            {"guest_interp.c": ("if (owes && !returned_elsewhere) s->r[29] = entry_sp;",
+                                "if (owes) s->r[29] = entry_sp;")},
+            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107
+            or r[0][2].get("v1") != _PROBE_SP,
+            codegen_args=omit_h,
+        )
+
+    def test_an_eret_into_the_rest_of_an_interpreted_callee_keeps_its_call(self):
+        # H lowers $sp and executes `break`. The handler, native or interpreted, steps EPC
+        # past it and erets into M, the rest of H, which the interpreter runs under H's
+        # call: M releases H's frame and returns (G returns, v0 = 0xee0), or tail-calls
+        # longjmp, whose return reaches F's setjmp frame (v0 = 0x107). H runs interpreted:
+        # the native tier raises an exception to the dispatch that entered the body, past
+        # every native frame in between (LLE Phase 1).
+        for kind, v0 in (("returns", 0xEE0), ("longjmp", 0x107)):
+            words = _longjmp_into_live_frame(eret_into=kind)
+            vector = _eret_vector(words)
+            for omitted in ((0x1080,), (0x1080, vector)):
+                codegen_args = ("--lle-cpu", *(f"--omit-aot=0x{a:08x}" for a in omitted))
+                with self.subTest(kind, handler_interpreted=len(omitted) > 1):
+                    _generated, results = self._probe(
+                        words, (0,), codegen_args=codegen_args, vector=vector)
+                    rc, output, fields = results[0]
+                    self.assertEqual(rc, 0, output)
+                    self.assertEqual(fields.get("v0"), v0, output)
+                    self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+
+    def test_a_longjmp_from_a_native_callee_of_a_computed_call_reaches_the_setjmp_frame(self):
+        # F calls native G through `jalr $t9`, a generated dispatch site, and G's longjmp
+        # returns into F's setjmp call. Natively the unwind passes the site and F's setjmp
+        # returns again. Before (#1935): dispatch_call gave G a dispatch-owned boundary, a
+        # wall to the unwind, and the run stopped at AOT_RETURN_TARGET_MISMATCH.
+        words = _longjmp_through_a_computed_call()
+        generated, results = self._probe(words, (0,))
+        rc, output, fields = results[0]
+        self.assertEqual(rc, 0, output)
+        self.assertNotIn("AOT_RETURN_TARGET_MISMATCH", output)
+        self.assertEqual(fields.get("v0"), 0x107, output)
+        self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+        self.assertGreater(fields.get("unwinds", 0), 0, output)
+        body = generated[generated.index("void f_00001010(CpuState *s) {"):]
+        body = body[:body.index("\n}")]
+        self.assertIn("if (dispatch_call_checked(s, ", body, "F's jalr is a dispatch site")
+        self.assertIn("void f_0000104c(CpuState *s) {", generated, "G is native")
+        # N3: a native callee of a dispatch site owns a dispatch-owned boundary again.
+        self._assert_mutant_fails(
+            "N3-a-dispatch-sites-native-callee-walls-the-unwind", words, (0,),
+            {"recomp.c": ("        ? !call_boundary->site_boundary", "        ? 1")},
+            lambda r: "AOT_RETURN_TARGET_MISMATCH" in r[0][1] and r[0][2].get("v0") != 0x107,
+        )
+
+    def test_a_return_into_an_interpreted_callers_inline_call_stops_by_name(self):
+        # Interpreted H runs `jal K` inline, K hands H's frame to the native piece P with
+        # `j P`, and P returns to H's resume after `jal K`. No call boundary resumes there and
+        # the interpreter's frame for H is gone, so the run must end in the named stop, under
+        # a checked dispatch site (G calls H) and under a host entry (H is the entry).
+        # Before (#1935): no stop; the rest of H was dropped and the run went on (at the
+        # site G returned with v0 = 0x101; at the host the entry returned with v0 = 1).
+        omit = tuple(f"--omit-aot=0x{a:08x}" for a in (_INLINE_H, _INLINE_K))
+        with scratch_dir.TemporaryDirectory(prefix="depth_probe_") as tmp:
+            exe, output = _build_depth_probe(_inline_call_into_a_piece(), Path(tmp),
+                                             codegen_args=omit)
+            self.assertIsNotNone(exe, output)
+            generated = (Path(tmp) / "probe_0.c").read_text(encoding="utf-8")
+            site = _run_depth_probe(exe, 0)
+            host = _run_depth_probe(exe, 0, "host-entry", f"0x{_INLINE_H:08x}")
+        self.assertNotIn(f"void f_{_INLINE_H:08x}(CpuState *s) {{", generated, "H is native")
+        self.assertNotIn(f"void f_{_INLINE_K:08x}(CpuState *s) {{", generated, "K is native")
+        self.assertIn(f"void f_{_INLINE_P:08x}(CpuState *s) {{", generated, "P is interpreted")
+        rest_of_h = _INLINE_H + 16
+        expected = {
+            "site": f"linked call at 0x00001018 resumed at 0x00001020 but its guest jr $ra "
+                    f"target was 0x{rest_of_h:08x}",
+            "host": f"a host-entered guest body returned to 0x{rest_of_h:08x} "
+                    f"instead of the host",
+        }
+        for name, (rc, output, fields) in (("site", site), ("host", host)):
+            with self.subTest(name):
+                self.assertIn(f"SEMANTIC_BOUNDARY: AOT_RETURN_TARGET_MISMATCH: {expected[name]}",
+                              output)
+                self.assertGreater(fields.get("interp", 0), 0, output)
+                if name == "host":   # dispatch_from_host ends the run at the stop
+                    self.assertEqual(rc, 1, output)
+                    self.assertNotIn("DEPTH_PROBE", output, "the run went on past the stop")
+                    continue
+                # Under the site the stop is the state's fatal flow, which the probe hands
+                # back to its host, and no guest code ran after P: not the rest of H, not
+                # G's continuation (+0x100), not the entry's slot that copies $sp to $v1.
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("fatal"), 1, output)
+                self.assertEqual(fields.get("v0"), 1, output)
+                self.assertEqual(fields.get("v1"), 0, output)
+        self.assertIn(f"if (dispatch_call_checked(s, 0x{_INLINE_H:08x}u, 0x00001020u)) return;",
+                      generated)
+
     def test_another_way_out_of_the_switch_head_keeps_its_restore(self):
         # F's other path never runs. Before (#1935): a sibcall on it, or a $sp load on it,
         # took the restore from every exit of F, and CASE's lowered entry $sp reached F's
@@ -1874,8 +2372,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # I1: the interpreter's handoff owes nothing.
         self._assert_mutant_fails(
             "I1-interpreted-handoff-owes-nothing", _alloca_tail_end(), (0,),
-            {"guest_interp.c": ("            if (owes) s->r[29] = entry_sp;",
-                                "            (void)entry_sp;")},
+            {"guest_interp.c": ("            if (owes && !returned_elsewhere) s->r[29] = entry_sp;",
+                                "            (void)entry_sp; (void)returned_elsewhere;")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
             codegen_args=interpreted_f,
         )
@@ -1883,7 +2381,7 @@ class GeneratedCallDepthTests(unittest.TestCase):
         self._assert_mutant_fails(
             "I2-an-alloca-free-leaves-the-frame", _alloca_tail_end(), (0,),
             {"guest_interp.c": (
-                "    return boundary == NULL || after < before || after >= boundary->entry_sp;",
+                "    return frame_sp == NULL || after < before || after >= *frame_sp;",
                 "    return 1;")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
             codegen_args=interpreted_f,

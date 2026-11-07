@@ -76,6 +76,10 @@ int     sr_sched_on = 0;
 atomic_int_least32_t sr_timeslice = 0;
 void    sr_yield(CpuState *s) { (void)s; }
 uint32_t sched_current_uid(void) { return 0u; }
+// driver.c's main() hands this to the run recorder (videorec.c, linked for its run-end report),
+// so the recorder has a clock here. No scheduler runs, so it reports the paced clock, and a
+// requested recording is refused for needing SR_DETERMINISTIC_CLOCK=1.
+int      sched_clock_deterministic(void) { return 0; }
 /* The headless gate has no scheduler, so no thread role is ever captured. Reporting the
  * historical HST UIDs here would hand the gate a role identity it cannot have earned.
  * This file deliberately declares its own symbols instead of including recomp.h, so the
@@ -214,6 +218,7 @@ uint32_t gui_buttons(void) { return 0u; }
 void     gui_consume_button_pulses(void) {}
 void     gui_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = 128; if (ly) *ly = 128; }
 int      gui_pad_present(void) { return 0; }
+void     gui_ace_vblank(uint32_t vcount) { (void)vcount; }
 int      gui_present(uint32_t fbaddr, int fmt, uint32_t stride) { (void)fbaddr; (void)fmt; (void)stride; return 1; }
 /* The gate never runs a headless acceptance launch. */
 int      gui_headless_acceptance_requested(void) { return 0; }
@@ -324,6 +329,8 @@ void     SDL_DelayPrecise(uint64_t ns) { (void)ns; }
 
 /* --- HLE / OSK stubs (dead on microtest path) --- */
 void     sr_syscall_wrapper(uint32_t nid) { (void)nid; }
+/* No SAS mixer here: Ace Mode's sas=sinc is refused, so driver.c never confirms it. */
+int      sr_hle_sas_set_band_limited(int on) { (void)on; return 0; }
 
 #ifdef SR_GATE_BUILD
 void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) {

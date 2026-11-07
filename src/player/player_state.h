@@ -22,6 +22,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* The most dropped disc images the player queues from one drop; the summary says when
+   more arrived. */
+#define PLAYER_DROP_QUEUE_MAX 16u
+
+
 #define MAX_LIBRARY_GAMES NK_MAX_GAMES
 #define MAX_TITLE_LEN NK_MAX_TITLE_LEN
 #define MAX_PATH_LEN NK_MAX_PATH
@@ -34,7 +39,6 @@ typedef enum {
     VIEW_SUPPORTED_TITLE,
     VIEW_EXPERIMENTAL_TITLE,
     VIEW_UNSUPPORTED_TITLE,
-    VIEW_PREPARING,
     VIEW_SETTINGS,
     VIEW_ERROR,
     VIEW_SETUP_WIZARD,
@@ -55,7 +59,7 @@ typedef enum {
     VIEW_UPDATES,           /* Settings > Updates: check for and fetch a newer version */
     VIEW_CONFIRM_FACTORY_RESET, /* Settings > Factory reset: what moves aside */
     VIEW_ACCESSIBILITY_SETTINGS, /* Settings > Accessibility: size, contrast, motion */
-    VIEW_ACE_SETTINGS,          /* Settings > Ace Mode (src/rt/ace.h) */
+    VIEW_ACE_SETTINGS,          /* Settings > Enhanced, the library's or one title's (#2055) */
     VIEW_PROBLEM_REPORT         /* Settings > Problem report (#1849); the last value */
 } PlayerView;
 
@@ -205,43 +209,70 @@ typedef struct {
     char problem[160];
 } PlayerTitleEnhancement;
 
-/* Ace Mode, the library-wide enhancement mode (docs/ENHANCEMENT_CONTRACT.md section 11,
-   src/rt/ace.h): one switch for every game, with a per-title choice on the title page. The
-   launcher resolves both into the one SR_ACE line a launch exports. */
+/* The three play modes (docs/ENHANCEMENT_CONTRACT.md section 10, #2055). Authentic is the
+   game as released; Enhanced adds the parts that work for every game; Ace is Enhanced plus the
+   improvements made for that game (today its 60 FPS game logic package). The library's default
+   is Authentic or Enhanced; a title follows it or chooses one of the three for itself. The
+   launcher resolves the choice into the one SR_ACE line a launch exports (src/rt/ace.h keeps
+   the internal name). */
 typedef enum {
-    PLAYER_ACE_TITLE_LIBRARY = 0,  /* follows the library's switch */
-    PLAYER_ACE_TITLE_ON,           /* on for this title, whatever the library's switch says */
-    PLAYER_ACE_TITLE_AUTHENTIC     /* everything off, 60 FPS game logic included */
-} PlayerAceTitleMode;
+    PLAYER_PLAY_LIBRARY = 0,   /* a title's choice only: follow the library's default */
+    PLAYER_PLAY_AUTHENTIC,     /* everything off, 60 FPS game logic included */
+    PLAYER_PLAY_ENHANCED,
+    PLAYER_PLAY_ACE            /* offered only for a title with a usable package */
+} PlayerPlayMode;
 
-/* The library's Ace Mode settings. The feature values are kept while the switch is off. */
+/* Enhanced's parts. Each is one row of player_enhanced_part(): a new part is one more enum
+   value and one more row, and settings, the launch line and both settings pages take it with
+   no other change. A part's value 0 is off. */
+typedef enum {
+    PLAYER_PART_FILTERING = 0, /* texture filtering: 0, 2, 4, 8 or 16 */
+    PLAYER_PART_TEXT,          /* crisp system text (the on-screen keyboard): 0 or 1 */
+    PLAYER_PART_READOUT,       /* the speed readout: 0 or 1 */
+    PLAYER_PART_NOTICE,        /* the in-game badge at start: 0 or 1 */
+    PLAYER_PART_WIDE,          /* widescreen Fill (#1881): 0 off, 1 fill */
+    PLAYER_PART_SMOOTH,        /* smooth motion (#1272): 0 off, 1 x2 */
+    PLAYER_PART_SAS,           /* band-limited SAS resampling (#2054, section 11.3.1): 0 off, 1 sinc */
+    PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
+                                  runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
+                                  not in the SR_ACE line */
+    PLAYER_PART_COUNT
+} PlayerEnhancedPart;
+
 typedef struct {
-    bool enabled;   /* the master switch: off until the player turns it on (owner, 2026-10-31) */
-    int af;         /* texture filtering: 0, 2, 4, 8 or 16; 16 by default */
-    bool text;      /* crisp system text (the on-screen keyboard); on by default */
-    bool readout;   /* the speed readout; off by default */
-    bool notice;    /* the in-game badge at start; on by default */
-} PlayerAceSettings;
+    const char *key;            /* the settings.json and SR_ACE key */
+    const char *name;           /* the row's name: "Texture filtering" */
+    const char *sentence;       /* what it does and what it costs, beside the row */
+    int value_count;
+    const int *values;          /* in the order a row cycles them; each part has 0 (off) */
+    const char *const *labels;  /* the row's word for each value: "16x", "On", "Off" */
+    const char *const *words;   /* the SR_ACE and settings.json word for each value */
+    int fresh;                  /* the value a new settings file starts with */
+} PlayerEnhancedPartInfo;
 
-/* One title's choice, saved only while it differs from the library: -1 follows the library. */
+/* The library's choice. The parts' values are kept while the default is Authentic. */
+typedef struct {
+    PlayerPlayMode library;    /* PLAYER_PLAY_AUTHENTIC (the default) or PLAYER_PLAY_ENHANCED */
+    int part[PLAYER_PART_COUNT];
+} PlayerEnhancedSettings;
+
+/* One title's choice, saved only while it differs from the library somewhere. */
 typedef struct {
     char key[PLAYER_DISC_ID_KEY_LEN];
-    PlayerAceTitleMode mode;
-    int af;         /* -1, or 0, 2, 4, 8, 16 */
-    int text;       /* -1, 0 or 1 */
-    int readout;
-    int notice;
-} PlayerAceTitle;
+    PlayerPlayMode mode;
+    int part[PLAYER_PART_COUNT];   /* -1 follows the library, else one of the part's values */
+    /* Ace's own parts, each -1 (on, the default) or 0 (off for this title). */
+    int logic_60;                  /* the title's 60 FPS game logic package */
+} PlayerTitlePlay;
 
-/* What a title launches with (player_ace_resolve). */
+/* What a title launches with (player_play_resolve). */
 typedef struct {
-    bool on;
-    PlayerAceTitleMode mode;   /* the title's own choice */
-    int af;
-    bool text;
-    bool readout;
-    bool notice;
-} PlayerAceResolved;
+    PlayerPlayMode chosen;     /* the title's own choice; LIBRARY when it follows */
+    PlayerPlayMode mode;       /* in effect: AUTHENTIC, ENHANCED or ACE */
+    bool on;                   /* Enhanced or Ace: the launch line is not "off" */
+    int part[PLAYER_PART_COUNT];
+    bool logic_60;             /* Ace with its 60 FPS game logic on (the package may be gone) */
+} PlayerPlayResolved;
 
 typedef struct {
     int resolution_scale; /* 1 = Native 480x272, 2 = 2x Vita, 3 = 3x 720p, 4 = 4x 1080p */
@@ -249,6 +280,9 @@ typedef struct {
     bool fullscreen;
     bool launcher_fullscreen;
     bool vsync;
+    /* PLAYER_PRESET_*: the graphics preset chosen (#2150), for Enhanced and Ace sessions
+       only. Editing a row it sets makes it Custom. */
+    int graphics_preset;
     int fps_cap;          /* -1 = PSP scanout, 0 = uncapped host presentation */
     int master_volume;    /* 0..100 */
     /* Launcher accessibility (Settings > Accessibility). Reduce motion holds the
@@ -277,18 +311,15 @@ typedef struct {
     bool online_news;      /* the news strip, when online mode ships */
     bool online_reports;   /* user-sent reports, when online mode ships */
     bool developer_mode;   /* shows the developer log panel (F12, Select + R) */
-    /* The discs whose 60 FPS game-logic enhancement is on, one disc ID each
-       (PLAYER_DISC_ID_KEY_LEN). Off for every title by default; a title in this
-       list launches its enhanced build, packages/<disc_id>-enhanced-<id>
-       (docs/ENHANCEMENT_CONTRACT.md section 9). Saved as
-       "enhancement_60hz_discs". */
-    char enhancement_60hz_discs[MAX_LIBRARY_GAMES][PLAYER_DISC_ID_KEY_LEN];
-    int enhancement_60hz_disc_count;
-    /* Ace Mode: "ace" and the sparse "ace_titles" in settings.json. Both are additions to
-       schema version 2, as text_size is: an older player reads the file and ignores them. */
-    PlayerAceSettings ace;
-    PlayerAceTitle ace_titles[MAX_LIBRARY_GAMES];
-    int ace_title_count;
+    /* The play modes (#2055): "enhanced" and the sparse "title_play" in settings.json,
+       additions to schema version 2 as text_size is. A file without them is read from the
+       development builds' "ace", "ace_titles" and "enhancement_60hz_discs"
+       (docs/ENHANCEMENT_CONTRACT.md section 10.9). A title in Ace launches its enhanced
+       build, packages/<disc_id>-enhanced-<id> (section 9), unless its 60 FPS game logic is
+       turned off. */
+    PlayerEnhancedSettings enhanced;
+    PlayerTitlePlay title_play[MAX_LIBRARY_GAMES];
+    int title_play_count;
     /* Builds keep the compiled system libraries a disc carries in the data folder and
        reuse them for other games with the same library (#1306). On by default; the
        copies never leave this PC. */
@@ -403,7 +434,7 @@ typedef enum {
 } PlayerErrorRetry;
 
 typedef struct {
-    char error_code[32];
+    char error_code[48]; /* PACKAGE_REBUILD_NOT_INCOMPATIBLE is 32 characters */
     char title[128];
     char message[512];
     char details[PLAYER_ERROR_DETAILS_MAX];
@@ -624,6 +655,9 @@ typedef struct {
     char title[MAX_TITLE_LEN];
     /* A checked conversion is already at iso_path. */
     bool iso_ready;
+    /* An EBOOT.PBP holding unencrypted homebrew (#2143): iso_path is a small private disc
+       image written from the package, and disc_id is the library key that image will have. */
+    bool homebrew;
     /* NK_DISC_FORMAT_NONE for a PSN package; otherwise the compressed image's
        format, and iso_path and disc_id are known once it is expanded. */
     NkDiscFormat disc_format;
@@ -635,7 +669,7 @@ typedef struct {
     void *userdata;
 } PlayerPsnConvertCallbacks;
 
-/* Games built by an older Nakagawa (owner decision, 2026-10-29). A package
+/* Games built by an older Nakagawa. A package
  * records the Nakagawa that built it (NkPackageBuildIdentity in
  * nk_title_manifest.h); one whose identity is not this player's is outdated.
  * It still validates and launches: the player suggests a rebuild and never
@@ -827,6 +861,13 @@ struct PlayerApp {
     /* The Fonts & System step requests the host folder dialog for PSP font import through
        this flag; the event loop in main.c opens it. */
     bool request_font_folder_picker;
+    /* Saves > Add a save (#1883) asks for the host folder dialog for games[saves_pick_index];
+       main.c opens it, and the folder picked waits in saves_picked (saves_pick_ready) until
+       the Saves dialog takes it. A cancelled dialog leaves nothing. */
+    bool request_save_folder_picker;
+    int saves_pick_index;
+    bool saves_pick_ready;
+    char saves_picked[NK_MAX_PATH];
     /* The library card requests a package-status worker retry through this
        flag; worker creation and queue ownership stay on the main event loop. */
     bool request_package_status_retry;
@@ -869,9 +910,14 @@ struct PlayerApp {
     /* Settings persistence */
     char settings_path[MAX_PATH_LEN];
     /* --experimental-60hz on the command line: for this session every title that
-       has an enhancement package launches its enhanced build. Never saved with
-       the settings. */
+       has an enhancement package and does not resolve to Authentic launches its
+       enhanced build, as Ace. Never saved with the settings. */
     bool experimental_60hz_session;
+    /* Settings > Enhanced opened from a title's page (player_app_open_title_enhanced): that
+       game's normalised disc key, so a re-sync that reorders the games cannot point the page at
+       another game; empty for the library's page. Any other view clears it, and a re-sync that
+       no longer lists the game closes the page. */
+    char enhanced_page_disc[PLAYER_DISC_ID_KEY_LEN];
     char settings_notice[128];
     /* The operating system's display preferences, as player_app_read_system_preferences
        last read them: what an AUTO accessibility choice follows. */
@@ -884,6 +930,18 @@ struct PlayerApp {
     /* Why the library shows no saved games although library.json exists (a newer
      * player wrote it), or an empty string. Shown on the Library screen. */
     char library_notice[192];
+
+    /* Files dropped on the window together (#2007): SDL sends them one event at a
+     * time between a begin and a complete. Several are gathered in a batch, the
+     * disc images among them wait in `drop_paths` to open one after another, and
+     * drop_notice is the one summary the library shows until the batch is done. */
+    char drop_paths[PLAYER_DROP_QUEUE_MAX][NK_MAX_PATH];
+    size_t drop_count;       /* queued disc images, in drop order */
+    size_t drop_next;        /* the next queued image to open */
+    size_t drop_seen;        /* every file this batch has seen */
+    bool drop_active;        /* between player_app_drop_begin and player_app_drop_finish */
+    char drop_notice[256];
+    bool drop_notice_visible; /* the library has shown it; leaving the library clears it */
 
     /* Window & layout metrics */
     int window_width;
@@ -992,8 +1050,10 @@ bool player_app_remove_game(PlayerApp *app, int game_index);
 /* Remove from library (#1304). What Nakagawa built for one game, found from
  * its disc ID under the player's own roots (never from a stored path): the
  * built package, the build cache, and the disc files it extracted. The disc
- * image and the user's own decrypted files are never part of it. Saves are
- * listed apart and go only when asked. */
+ * image on the user's PC is never part of it. Two groups are listed apart and
+ * go only when asked: the saves, and the disc copy (#2003): the decrypted
+ * files (titles/<ID>/decrypted, which may also hold files the user put there)
+ * and the disc image Nakagawa expanded or converted (<data>/discs/<ID>). */
 typedef enum {
     PLAYER_REMOVAL_PACKAGE = 0,
     PLAYER_REMOVAL_BUILD_CACHE,
@@ -1001,7 +1061,7 @@ typedef enum {
     PLAYER_REMOVAL_KIND_COUNT
 } PlayerRemovalKind;
 
-#define PLAYER_REMOVAL_PATH_CAP 12
+#define PLAYER_REMOVAL_PATH_CAP 16
 
 typedef struct {
     char path[NK_MAX_PATH];
@@ -1010,6 +1070,7 @@ typedef struct {
     char keep_child[16];
     PlayerRemovalKind kind;
     bool saves;              /* this path is save data */
+    bool disc_copy;          /* this path is the opt-in disc copy and decrypted files */
     uint64_t bytes;
 } PlayerRemovalPath;
 
@@ -1021,6 +1082,8 @@ typedef struct {
     bool kind_present[PLAYER_REMOVAL_KIND_COUNT];
     bool has_saves;
     uint64_t saves_bytes;
+    bool has_disc_copy;
+    uint64_t disc_copy_bytes;
     /* Another image in the library has this disc ID (a retail disc beside its
        fan translation) and uses the same folders and saves, so only the
        record goes and paths stays empty. */
@@ -1034,14 +1097,111 @@ const char *player_app_removal_blocker(const PlayerApp *app, int game_index);
  * title cannot be removed or its disc ID is not a plain folder name. */
 bool player_app_plan_game_removal(const PlayerApp *app, int game_index,
                                   PlayerRemovalPlan *plan);
-/* Removes the title from the library and deletes what the plan lists, the
- * saves only when delete_saves is set. Every folder is checked again just
- * before it goes. On failure the library entry stays and error says what was
- * left; the rest may already be deleted. */
-bool player_app_remove_game_and_data(PlayerApp *app, int game_index, bool delete_saves,
+/* The one logs folder (NK_PATH_LOGS, #2003), created if missing: the player's, the games'
+ * and the package builds' and build tools' logs, the folder Settings opens. */
+bool player_app_logs_dir(char *out, size_t out_size);
+
+/* What else goes with a removal: the saves, the disc copy and decrypted files. */
+#define PLAYER_REMOVE_ALSO_SAVES 1u
+#define PLAYER_REMOVE_ALSO_DISC_COPY 2u
+/* Removes the title from the library and deletes what the plan lists; the
+ * saves and the disc copy only when `also` names them (PLAYER_REMOVE_ALSO_*).
+ * Every folder is checked again just before it goes. On failure the library
+ * entry stays and error says what was left; the rest may already be deleted. */
+bool player_app_remove_game_and_data(PlayerApp *app, int game_index, unsigned also,
                                      char *error, size_t error_size);
+
+/* ---- Saves: back up, restore, add a save (#1883) ----
+ *
+ * A title's saves are its Memory Stick folder, <saves>/<disc ID> (NK_PATH_SAVES): the folder
+ * a package launch hands the runtime as SR_MEMSTICK (nk_launch.c) and the one Open save
+ * folder shows. PSP/SAVEDATA in it holds the saves and game-data installs, and the game may
+ * write anywhere else under it, so the whole folder is one backup. A backup is a store-only
+ * ZIP (src/core/nk_zip.h) in <user data>/titles/<disc ID>/save-backups, a folder Remove from
+ * library and a disc-copy removal leave alone; its name is
+ * "<disc ID>-saves-<YYYYMMDD-HHMMSS>[-before-restore|-before-add|-before-remove][-n].zip".
+ * Nothing is uploaded: saves never leave this PC (AGENTS.md section 5). */
+typedef enum {
+    PLAYER_SAVE_BACKUP_MANUAL = 0,      /* Back up saves */
+    PLAYER_SAVE_BACKUP_BEFORE_RESTORE,  /* the saves a restore replaced */
+    PLAYER_SAVE_BACKUP_BEFORE_ADD,      /* the saves before Add a save replaced one */
+    PLAYER_SAVE_BACKUP_BEFORE_REMOVE    /* the saves Remove from library deleted */
+} PlayerSaveBackupKind;
+
+#define PLAYER_SAVE_BACKUP_KIND_COUNT 4
+
+typedef struct {
+    char path[NK_MAX_PATH];
+    char name[128];         /* the file name */
+    char stamp[16];         /* YYYYMMDD-HHMMSS, local time */
+    unsigned sequence;      /* 1, or n for a later backup in the same second */
+    PlayerSaveBackupKind kind;
+    uint64_t bytes;
+} PlayerSaveBackup;
+
+typedef enum {
+    PLAYER_SAVES_DONE = 0,
+    PLAYER_SAVES_NOTHING,   /* there are no saves to back up */
+    PLAYER_SAVES_EXISTS,    /* Add a save: a save of that name is there; ask before replacing */
+    PLAYER_SAVES_FAILED     /* error says what, in plain words */
+} PlayerSavesResult;
+
+#if defined(NK_SAVES_TEST_SEAMS)
+/* Test seam (player-state test build only): the nth rename the saves code makes from now
+   fails, as a rename refused by the system would; 0 turns it off. */
+void player_saves_test_fail_rename(unsigned nth);
+/* The same for the folder syncs the saves code makes (not nk_zip's own): the nth from now
+   fails, as a folder that cannot be put on the disk would; 0 turns it off. */
+void player_saves_test_fail_sync_dir(unsigned nth);
+#endif
+
+/* The title's Memory Stick folder (not created): <saves>/<disc ID>, or the title ID or
+ * "unidentified" for a record without one, as nk_launch.c chooses. */
+bool player_app_save_folder(const GameRecord *game, char *out, size_t out_size);
+/* The title's backup folder (not created). False without a disc ID that names a folder. */
+bool player_app_save_backup_folder(const GameRecord *game, char *out, size_t out_size);
+/* Why the title's saves can't be changed now, or NULL: a disc ID that can't name a folder,
+ * or a game that starts or runs (it has the folder open). */
+const char *player_app_saves_blocker(const PlayerApp *app, int game_index);
+/* The current local time as a backup stamp, YYYYMMDD-HHMMSS. */
+void player_app_save_stamp_now(char *out, size_t out_size);
+/* Writes a backup of the title's save folder, named with `stamp`, and reads it back whole
+ * before keeping it. NOTHING when the folder is missing or empty. out_path gets the new
+ * file's path. */
+PlayerSavesResult player_app_back_up_saves(PlayerApp *app, int game_index, const char *stamp,
+                                           PlayerSaveBackupKind kind, char *out_path,
+                                           size_t out_path_size, char *error,
+                                           size_t error_size);
+/* The title's backups, newest first: up to `cap` in out, and the number found in *out_total.
+ * Files in the folder that are not named as backups are not listed. */
+size_t player_app_list_save_backups(const PlayerApp *app, int game_index, PlayerSaveBackup *out,
+                                    size_t cap, size_t *out_total);
+/* Restores one of the title's backups. The archive is checked whole first (nk_zip.h); the
+ * current saves are backed up (BEFORE_RESTORE); the backup goes into a new folder beside the
+ * save folder; only then is the save folder renamed to "<folder>-backup-<stamp>" (its path
+ * in `kept`, empty when there were no saves) and the new one put in its place. Any failure
+ * before that swap deletes the new folder and leaves the saves as they were; a failed swap
+ * puts the old folder back. A swap that cannot be confirmed on the disk afterwards still returns
+ * DONE (the saves are restored, and the old ones kept), with `error` saying so. */
+PlayerSavesResult player_app_restore_saves(PlayerApp *app, int game_index,
+                                           const char *backup_path, const char *stamp,
+                                           char *kept, size_t kept_size, char *error,
+                                           size_t error_size);
+/* Copies the save folder the user picked (a SAVEDATA/<ID> folder holding PARAM.SFO) into the
+ * title's PSP/SAVEDATA. A save of that name already there is replaced only when `replace`
+ * is true, after a backup (BEFORE_ADD); otherwise EXISTS and nothing changes. `added` gets
+ * the save's folder name. On DONE, error may hold a note about something left behind. */
+PlayerSavesResult player_app_add_save(PlayerApp *app, int game_index, const char *picked_folder,
+                                      bool replace, const char *stamp, char *added,
+                                      size_t added_size, char *error, size_t error_size);
+
 void player_app_set_view(PlayerApp *app, PlayerView view);
 void player_app_set_error(PlayerApp *app, const char *code, const char *title, const char *msg, const char *recovery_label, PlayerView return_view);
+/* player_app_set_error, plus the technical text a plain card keeps in its
+   details box and in Copy details (a tool's own error line, a path). */
+void player_app_set_error_with_details(PlayerApp *app, const char *code, const char *title,
+                                       const char *msg, const char *details,
+                                       const char *recovery_label, PlayerView return_view);
 void player_app_set_cli_not_found_error(PlayerApp *app,
                                         const char *recovery_label,
                                         PlayerView return_view);
@@ -1060,7 +1220,8 @@ void player_launcher_unavailable_message_for_host(NkHostKind host, const char *r
                                                   char *out, size_t out_size);
 /* The opening of every DATA_DIR_UNAVAILABLE card: what the host could not
    resolve and which environment variables fix it (nk_platform_get_app_data_dir).
-   Each card adds its own closing words. */
+   Plain words, no code (the card's details and Copy details carry it). Each
+   card adds its own closing words. */
 const char *player_data_dir_unavailable_text(NkHostKind host);
 /* The FOLDER_OPEN_FAILED card's sentence on how the host was asked to show a
    folder: Windows' own shell, or xdg-open (through SDL) elsewhere. */
@@ -1069,6 +1230,30 @@ const char *player_folder_open_failure_hint(NkHostKind host);
    is the host's error, or empty). The card names the folder so the user can
    open it themselves, and returns to the view it was raised from. */
 void player_app_set_folder_open_error(PlayerApp *app, const char *path, const char *reason);
+/* Dropped files (#2007). player_app_drop_begin starts a batch, player_app_drop_add adds each
+   file, and player_app_drop_finish closes it. A lone file is returned as it is, whatever it
+   is: the caller runs the single-file path it always has. Of several, the disc images (.iso,
+   .cso, .zso, .chd, .pbp) are queued and the rest are skipped; drop_notice says which, once.
+   player_app_drop_take then hands the queued images out one at a time, oldest first, and
+   returns false when none is left. A queue is cleared with its summary when the library is
+   left with nothing queued. */
+void player_app_drop_begin(PlayerApp *app);
+void player_app_drop_add(PlayerApp *app, const char *path);
+void player_app_drop_finish(PlayerApp *app);
+bool player_app_drop_take(PlayerApp *app, char *out, size_t out_size);
+/* Ignores the files of a drop, queue and summary both, and logs why (the player cannot take
+   a new disc image while a worker owns the current game's files). */
+void player_app_drop_discard(PlayerApp *app, const char *reason);
+/* A .iso by its name, or a compressed disc image or PSN package by its contents. */
+bool player_path_looks_like_disc_image(const char *path);
+
+/* LIBRARY_WRITE_FAILED: a title could not be stored in the library file. */
+void player_app_set_library_write_error(PlayerApp *app);
+/* LINK_OPEN_FAILED: the browser could not be asked to open url (reason is the
+   host's error, or empty). The card puts the address in its details so the
+   user can paste it into a browser, and returns to the view it was raised
+   from (the library when raised from a card). */
+void player_app_set_link_open_error(PlayerApp *app, const char *url, const char *reason);
 /* The error card's words, shared by both launchers. The badge is a plain word
    for the kind of problem; an unknown code gets "Problem", never the code. */
 const char *player_error_badge(const ErrorState *error);
@@ -1304,6 +1489,60 @@ void player_app_set_present_scaling(PlayerApp *app, int scaling);
 void player_app_cycle_present_scaling(PlayerApp *app, int direction);
 /* "Sharp", "Integer" or "Bilinear" for a NK_PRESENT_SCALING_* value. */
 const char *player_present_scaling_label(int scaling);
+
+/* Graphics presets (#2150): a named set of values for display settings that already
+   exist, in one table (k_graphics_presets in player_state.c). A preset is an overlay, not
+   a writer: choosing one sets only PlayerSettings.graphics_preset, and an Enhanced or Ace
+   session takes the preset's values in place of the Resolution, Scaling, VSync and Game
+   fullscreen rows (player_session_apply_graphics_preset). An Authentic session always
+   uses the rows as the user set them, whatever the preset: a render scale above 1x is
+   guest-visible (every present commits to VRAM, docs/ENHANCEMENT_CONTRACT.md), so a
+   preset must not reach Authentic launch output. Editing one of the rows a preset sets
+   makes it Custom, which means the rows apply everywhere. The play mode, the Enhanced
+   parts and the launch line are not in the table. */
+typedef enum {
+    PLAYER_PRESET_CUSTOM = 0,
+    PLAYER_PRESET_LOW,
+    PLAYER_PRESET_MEDIUM,
+    PLAYER_PRESET_HIGH,
+    PLAYER_PRESET_ULTRA,
+    PLAYER_PRESET_HANDHELD,
+    PLAYER_PRESET_COUNT
+} PlayerGraphicsPreset;
+
+typedef struct {
+    const char *word;     /* settings.json "graphics_preset" */
+    const char *label;    /* the preset's name, as the Settings notice line says it */
+    const char *value;    /* the Settings row's value: the name, and anything not set */
+    int resolution_scale;
+    int present_scaling;  /* NK_PRESENT_SCALING_* */
+    bool vsync;
+    int fullscreen;       /* 1 on, 0 off, -1 left as the user set it */
+    bool upscaler;        /* asks for the FSR 1 upscaler, which Settings cannot set yet (#2122) */
+} PlayerGraphicsPresetRow;
+
+/* The preset's row; NULL for Custom or a value out of range. */
+const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset);
+/* The chosen preset, or PLAYER_PRESET_CUSTOM (also for a value out of range). */
+int player_app_graphics_preset(const PlayerApp *app);
+/* The Settings row's value: "Low", ..., "Ultra (no upscaler)", "Handheld", or "Custom". */
+const char *player_app_graphics_preset_label(const PlayerApp *app);
+/* The main Settings page's notice line while a preset is chosen: where it applies, and a
+   value it asks for that Settings cannot set. Returns false, with out empty, for Custom.
+   *warns is set when the note names a value that is not set. Derived from the choice, so
+   it goes when the preset becomes Custom and comes back with a saved preset. */
+bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap,
+                                     bool *warns);
+/* Chooses the preset. The rows keep their values: only Enhanced and Ace sessions use the
+   preset's. */
+void player_app_apply_graphics_preset(PlayerApp *app, int preset);
+/* The next (or, with a negative direction, previous) preset, Custom stepping to Low. */
+void player_app_cycle_graphics_preset(PlayerApp *app, int direction);
+/* The overlay: for an Enhanced or Ace session (`enhanced`, the SR_ACE line not "off"), the
+   chosen preset's values replace the rows player_app_apply_settings_to_session copied. An
+   Authentic session, or Custom, leaves `config` as it is. */
+void player_session_apply_graphics_preset(const PlayerSettings *settings, bool enhanced,
+                                          NkRuntimeConfig *config);
 void player_app_set_fps_cap(PlayerApp *app, int cap);
 void player_app_cycle_fps_cap(PlayerApp *app, int direction);
 void player_app_toggle_fullscreen(PlayerApp *app);
@@ -1381,12 +1620,11 @@ void player_app_toggle_ui_sounds(PlayerApp *app);
 void player_app_cycle_library_sort(PlayerApp *app);
 /* "Recently played", "Name A to Z" or "Recently added". */
 const char *player_library_sort_label(PlayerLibrarySort sort);
-/* The 60 FPS game-logic enhancement, per title (docs/ENHANCEMENT_CONTRACT.md
- * section 9). A title launches its enhanced build only when it has a usable
- * enhancement package and the enhancement is on: saved for that disc, or for
- * every such title by the session flag. Otherwise it launches the authentic
- * package. GameRecord.enhancement_package_id carries the choice to package
- * checks, builds and launches. */
+/* A title's 60 FPS game-logic enhancement package (docs/ENHANCEMENT_CONTRACT.md section 9) is
+ * Ace's part for that title. A title launches its enhanced build only when it has a usable
+ * package and its 60 FPS game logic is on: Ace chosen with that part on, or the session flag.
+ * Otherwise it launches the authentic package. GameRecord.enhancement_package_id carries the
+ * choice to package checks, builds and launches. */
 
 /* Reads <user_root>/enhancements/<disc ID, lowercase>-60hz.json for `game` with
  * nk_json. Returns out->available. A showcase demo, a test program or a disc ID
@@ -1396,53 +1634,104 @@ bool player_read_title_enhancement(const char *user_root, const GameRecord *game
 /* Re-reads every title's enhancement package and sets each GameRecord's
  * enhancement_package_id. player_app_sync_library calls it. */
 void player_app_refresh_title_enhancements(PlayerApp *app);
-/* The saved per-title setting for a disc. */
+/* The disc's saved choice asks for its 60 FPS game logic: Ace, with that part on. */
 bool player_app_title_60hz_saved(const PlayerApp *app, const char *disc_id);
-/* The enhancement is on for the title: saved, or the session flag. */
+/* The title's 60 FPS game logic is on: saved, or the session flag for a title with a usable
+ * package. Never while the title resolves to Authentic, by its own choice or the library's. */
 bool player_app_title_60hz_on(const PlayerApp *app, int game_index);
 /* Saved on, but the title has no usable enhancement package: nothing launches
- * or builds until the package is back or the enhancement is turned off. */
+ * or builds until the package is back, or Ace or its 60 FPS game logic is turned off. */
 bool player_app_title_60hz_blocked(const PlayerApp *app, int game_index);
-/* Saves the per-title setting, re-selects the title's package variant, and asks
- * for its package to be checked. */
+/* The title page's 60 FPS switch, Ace's own part: on chooses Ace for the title with its 60 FPS
+ * game logic, off keeps Ace and turns that part off. Re-selects the title's package variant
+ * and asks for its package to be checked. */
 void player_app_set_title_60hz(PlayerApp *app, int game_index, bool on);
 /* The --experimental-60hz flag: on for this session only, never saved. */
 void player_app_set_experimental_60hz_session(PlayerApp *app, bool on);
 
-/* ---- Ace Mode (src/rt/ace.h) ---- */
+/* ---- The play modes (#2055; src/rt/ace.h) ---- */
 
+/* Enhanced's part `part` (PLAYER_PART_*), or NULL past the last. */
+const PlayerEnhancedPartInfo *player_enhanced_part(int part);
+/* The row's word for a part's value ("16x", "On", "Off"); "Off" for a value the part does not
+ * have. */
+const char *player_enhanced_part_label(int part, int value);
+/* If a selected part will be dropped for the resolved Smooth value, its effective row label;
+ * NULL when the selected value is available. Uses the runtime's shared compatibility rule. */
+const char *player_enhanced_part_unavailable_label(int part, int value, int smooth);
+/* "Authentic", "Enhanced", "Ace" or "Library default". */
+const char *player_play_mode_name(PlayerPlayMode mode);
 /* The title's saved choice for a disc, or NULL when it follows the library everywhere. */
-const PlayerAceTitle *player_settings_ace_title(const PlayerSettings *settings,
-                                                const char *disc_id);
-/* What a disc launches with: AUTHENTIC turns everything off; ON, or the library's switch,
- * turns Ace on; each feature then takes the title's value, else the library's. */
-void player_ace_resolve(const PlayerSettings *settings, const char *disc_id,
-                        PlayerAceResolved *out);
-/* The SR_ACE line for a resolution: "off", or "v1;af=16;text=on;readout=off;notice=on;
- * wide=off;smooth=off" (features this build does not carry are always off). Returns false
- * when it does not fit. */
-bool player_ace_launch_line(const PlayerAceResolved *ace, char *out, size_t cap);
+const PlayerTitlePlay *player_settings_title_play(const PlayerSettings *settings,
+                                                 const char *disc_id);
+/* What a disc launches with. The title's mode, else the library's default, decides the mode;
+ * Authentic turns everything off. Enhanced and Ace take each part from the title where it has
+ * a value, else from the library; Ace adds the title's 60 FPS game logic unless that part is
+ * off for it. A part value the build does not know reads as off. */
+void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
+                         PlayerPlayResolved *out);
+/* A title that launches its enhanced 60 FPS build (GameRecord.enhancement_package_id set) calls
+ * this with logic_60 true. An Enhanced or Ace launch then runs as Ace with its 60 FPS game logic
+ * (the session flag on a title on Enhanced included), and smooth motion is off for it whatever
+ * the settings say. The two may be stacked by contract (docs/ENHANCEMENT_CONTRACT.md section
+ * 10.5), but this build's smooth motion interpolates only a 30 Hz source (section 10.6); the item
+ * that adds interpolation above 30 Hz removes this limit. The other parts are untouched, and an
+ * Authentic resolution stays off. */
+void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
+/* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
+ * notice=on;wide=off;smooth=off;sas=off" (tier=ace for Ace; smooth=match is never written).
+ * Returns false when it does not fit. */
+bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);
+/* The presentation upscaler a resolution asks for (NkRuntimeConfig.present_upscale, exported as
+ * SR_PRESENT_UPSCALE): NK_PRESENT_UPSCALE_FSR1 for Enhanced or Ace with the part on, else
+ * NK_PRESENT_UPSCALE_OFF. The launcher still exports off for an authentic session (#2122). */
+int player_play_present_upscale(const PlayerPlayResolved *play);
+/* A launch's play mode into its runtime configuration: the title's resolution (with Ace's 60 FPS
+ * logic when its package is the build, and off for the acceptance checkpoint), its SR_ACE line in
+ * ace_spec ("off" when it does not fit) and its present_upscale. *out, when not NULL, receives
+ * the resolution the launch runs with. */
+void player_play_config_session(const PlayerSettings *settings, const char *disc_id,
+                                bool logic_60_package, bool acceptance, NkRuntimeConfig *config,
+                                PlayerPlayResolved *out);
 /* <user_root>/ace/<disc ID>.json: the runtime's per-run report for that disc. */
 bool player_ace_report_path(const char *user_root, const char *disc_id, char *out, size_t cap);
 /* The title page's "Last session" line from that report ("Last session: 16x filtering,
  * game at 30 Hz."). Returns false, with out empty, when there is no readable report. */
 bool player_ace_last_session_line(const char *user_root, const char *disc_id, char *out,
                                   size_t cap);
-/* The library's settings (Settings > Ace Mode). Each change is saved. */
-void player_app_toggle_ace(PlayerApp *app);
-void player_app_cycle_ace_filtering(PlayerApp *app);   /* 16x, 8x, 4x, 2x, Off */
-void player_app_toggle_ace_text(PlayerApp *app);
-void player_app_toggle_ace_readout(PlayerApp *app);
-void player_app_toggle_ace_notice(PlayerApp *app);
-/* "16x", "8x", "4x", "2x" or "Off". */
-const char *player_ace_filtering_label(int af);
-/* The title page: Library default, On, Authentic, then Library default again. Authentic
- * also takes the title's 60 FPS game logic off for as long as it is chosen. */
-void player_app_cycle_title_ace_mode(PlayerApp *app, int game_index);
-PlayerAceTitleMode player_app_title_ace_mode(const PlayerApp *app, int game_index);
+/* The library's settings (Settings > Enhanced). Each change is saved. */
+void player_app_toggle_library_play_mode(PlayerApp *app);      /* Authentic, Enhanced */
+/* Steps the library's part to its next value (texture filtering: 16x, 8x, 4x, 2x, Off). */
+void player_app_cycle_enhanced_part(PlayerApp *app, int part);
+/* The title page: Library default, Authentic, Enhanced, Ace (only while the title has a usable
+ * package), then Library default again. Authentic also takes the title's 60 FPS game logic
+ * off for as long as it is chosen. */
+void player_app_cycle_title_play_mode(PlayerApp *app, int game_index);
+PlayerPlayMode player_app_title_play_mode(const PlayerApp *app, int game_index);
+/* A title's part: Library default, then each of the part's values, then Library default. */
+void player_app_cycle_title_part(PlayerApp *app, int game_index, int part);
+/* The title's own value for a part: -1 follows the library. */
+int player_app_title_part(const PlayerApp *app, int game_index, int part);
 /* The title's "Last session" line from the report under the user data folder; false, with
  * out empty, when there is none. */
 bool player_app_ace_last_session(const PlayerApp *app, int game_index, char *out, size_t cap);
+/* Settings > Enhanced for one title (its page's Enhanced options): the same page, with the
+ * title's play mode and its own value for each part. The page holds the game by its disc. */
+void player_app_open_title_enhanced(PlayerApp *app, int game_index);
+/* The index of the game whose Settings > Enhanced is shown, found again by its disc; -1 for the
+ * library's page, another view, or a title's page whose game is no longer listed. */
+int player_app_enhanced_page_title(const PlayerApp *app);
+/* Leaves Settings > Enhanced: back to the library's title page when it is a title's page,
+ * else to Settings. */
+void player_app_close_enhanced_page(PlayerApp *app);
+/* After the library is read again: a title's page whose game is no longer listed closes. */
+void player_app_close_enhanced_page_if_title_gone(PlayerApp *app);
+/* Settings > Enhanced's play mode row: the title's choice on a title's page, else the
+ * library's default. On a title's page whose game is gone, it closes the page instead. */
+void player_app_enhanced_page_cycle_mode(PlayerApp *app);
+/* Settings > Enhanced's row for `part`: the title's value on a title's page, else the
+ * library's. On a title's page whose game is gone, it closes the page instead. */
+void player_app_enhanced_page_cycle_part(PlayerApp *app, int part);
 void player_app_toggle_share_system_libraries(PlayerApp *app);
 void player_app_adjust_volume(PlayerApp *app, int delta);
 void player_app_move_focus(PlayerApp *app, int delta, int focus_count);
@@ -1566,6 +1855,8 @@ void player_app_request_launch(PlayerApp *app, int game_index);
 
 /* Copy the launch-relevant player settings into a prepared session's runtime
  * configuration (resolution, frame cap, vsync, fullscreen, master volume).
+ * These are the user's own rows, what an Authentic session runs with; an Enhanced or Ace
+ * session then takes the graphics preset's values (player_session_apply_graphics_preset).
  * The accessibility settings and ui_sounds are launcher-UI state and deliberately not copied. Kept as a
  * named seam so tests can pin the settings -> session mapping without
  * spawning a child. */
@@ -1867,9 +2158,15 @@ bool player_app_open_prerequisite_about(PlayerApp *app);
    nothing, and returns false, when the per-user data folder can't be found. */
 bool player_app_request_open_folder(PlayerApp *app, const char *path);
 bool player_app_request_license_folder(PlayerApp *app);
+/* Settings > Open data folder / Open logs (#2007): asks the main loop to show the
+   per-user data folder (kind NK_PATH_DATA) or the logs folder (NK_PATH_LOGS),
+   creating it first so there is something to show. When the folder can't be
+   resolved or created it raises the DATA_DIR_UNAVAILABLE card, returning to
+   Settings, and returns false. Other kinds are refused. */
+bool player_app_request_user_folder(PlayerApp *app, NkPathType kind);
 void player_app_remove_prerequisites(PlayerApp *app);
 
-/* Factory reset (owner, 2026-10-29): the player goes back to a first run by
+/* Factory reset: the player goes back to a first run by
  * moving its user data aside, never by deleting it. The folders that move are
  * the config, data, cache and saves folders (library, settings, saves,
  * imported PSP fonts, keys, built games and downloaded build tools), and the

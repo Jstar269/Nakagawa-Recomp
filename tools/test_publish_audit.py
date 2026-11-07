@@ -180,6 +180,18 @@ class TestPublishAudit(unittest.TestCase):
         self.assertIsNotNone(publish_audit._forbidden_path("tools/reference_hashes.json"))
         self.assertIsNone(publish_audit._forbidden_path("assets/vfpu/table.dat"))
 
+    def test_code_capture_is_a_forbidden_extension(self):
+        # A .nkcap holds bytes of the user's own game RAM (#1933); it must never be published.
+        for path in (
+            "code_capture_08800000_0123456789abcdef.nkcap",
+            "docs/sample.nkcap",
+            "tests/data/UPPER.NKCAP",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    publish_audit._forbidden_path(path), "prohibited extension " + path[path.rfind("."):]
+                )
+
     def test_forbidden_local_symbol_reference(self):
         # functions.csv is a local-only symbol reference and must be rejected anywhere
         for path in (
@@ -353,7 +365,7 @@ class TestPublishAudit(unittest.TestCase):
         self.assertEqual(publish_audit.private_key_assignment_lines(c_macro_neg, "src/pgd.h"), [])
 
     def test_only_the_reviewed_game_key_table_may_hold_key_literals(self):
-        # Owner decision 2026-10-27: one exact path carries the public game
+        # Policy: one exact path carries the public game
         # tables; the same bytes anywhere else still fail.
         c_key = "static const u8 key_D91613F0[] = {%s};" % ", ".join(
             "0x%02X" % i for i in range(16))
@@ -1945,6 +1957,17 @@ class TextHygieneTests(unittest.TestCase):
         self.assertNotIn("TEXT_FINAL_NEWLINE", self._codes(data, path=path))
         self.assertIn("TEXT_FINAL_NEWLINE", self._codes(data + b" ", path=path))
 
+    def test_exact_fidelityfx_upstream_license_keeps_its_byte_identity(self):
+        # AMD's docs/license.md at the pinned SDK commit has no final newline.
+        path = "third_party/fidelityfx_sdk/LICENSE-AMD.md"
+        data = (publish_audit.ROOT / path).read_bytes()
+        self.assertEqual(
+            hashlib.sha256(data).hexdigest(),
+            "410f9c138e766e846acf2dc93db768198def0293a017d7e3296815b451688dbe",
+        )
+        self.assertNotIn("TEXT_FINAL_NEWLINE", self._codes(data, path=path))
+        self.assertIn("TEXT_FINAL_NEWLINE", self._codes(data + b" ", path=path))
+
     def test_binary_content_is_never_reported(self):
         # NUL-bearing data is binary; CRLF inside it is not a line-ending defect.
         self.assertEqual(self._codes(NUL + b"payload" + CRLF), [])
@@ -2400,6 +2423,17 @@ class GeneratedEmbeddingSpdxTests(unittest.TestCase):
         for source in contract.values():
             head = (Path(publish_audit.ROOT) / source).read_text(encoding="utf-8").splitlines()[:8]
             self.assertTrue(any("SPDX-License-Identifier:" in line for line in head), source)
+
+    def test_dxc_embeddings_match_the_fsr3_shader_table_and_their_sources_are_byte_exact_imports(self) -> None:
+        import shader_embed
+        contract = {embedded.as_posix(): source.as_posix()
+                    for _stage, source, embedded in shader_embed.FSR3_SHADERS + shader_embed.FSR3FG_SHADERS}
+        self.assertEqual(publish_audit.SPDX_DXC_EMBEDDING_SOURCES, contract)
+        for embedded, source in contract.items():
+            self.assertNotIn(embedded, publish_audit.SPDX_GENERATED_EMBEDDING_SOURCES)
+            self.assertTrue(source.startswith(publish_audit.SPDX_BYTE_EXACT_IMPORT_TREES), source)
+            head = (Path(publish_audit.ROOT) / source).read_text(encoding="utf-8").splitlines()[:8]
+            self.assertTrue(any("Advanced Micro Devices" in line for line in head), source)
 
 
 class RetailDiscIdTests(unittest.TestCase):

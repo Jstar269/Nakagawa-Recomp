@@ -27,6 +27,7 @@
 #include "../perf.h"
 #include "../fbcap_policy.h"
 #include "../fbcap.h"
+#include "../videorec.h"
 #include "../recomp.h"   /* sr_parse_display_bounds, sr_pick_display */
 #include "../sr_coro.h"
 
@@ -34,6 +35,7 @@
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +43,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shobjidl.h>  /* SetCurrentProcessExplicitAppUserModelID */
 #include <direct.h>
 #else
 #include <sys/stat.h>
@@ -72,6 +75,7 @@ typedef struct PresentFrame {
     VkDeviceMemory fbimg_mem;
     VkImage source;
     int submitted;
+    int ts_written;   /* SR_GPU_TIMESTAMPS: this recording holds its start/end pair */
 } PresentFrame;
 
 static SDL_Window      *s_win;
@@ -87,6 +91,14 @@ static VkCommandPool    s_pool;
 static VkCommandBuffer  s_cmd;              /* diagnostic capture only */
 static VkFence          s_fence;
 static PresentFrame     s_frame[PRESENT_FRAMES];
+/* SR_GPU_TIMESTAMPS=1: the GPU time of each presentation command buffer (the blit to the swapchain
+ * image, the HUD and any capture copy), from a timestamp pair at its start and end, read once its
+ * frame's fence has signalled and credited to SR_PERF_FRAMES' gpu_present_ms. It changes no
+ * rendering. The overlay path (sdl3vk_present_overlay) is not timed. */
+static VkQueryPool      s_pts_pool;
+static double           s_pts_period_ns = 1.0;
+static uint64_t         s_pts_mask = ~0ull;
+static uint64_t         s_pts_timed, s_pts_ns;   /* since init: buffers read back, their GPU ns */
 static uint32_t         s_frame_cursor;
 static int              s_scaling = SDL3VK_SCALING_SHARP;  /* SR_PRESENT_SCALING (issue #1129) */
 static uint32_t         s_max_image_dim = 4096;  /* Vulkan's guaranteed minimum until init reads it */
@@ -153,6 +165,12 @@ void sdl3vk_present_fault_clear(void) {
     s_present_fault_result = VK_SUCCESS;
 }
 
+int sdl3vk_present_timestamps(uint64_t *timed, uint64_t *ns) {
+    if (timed) *timed = s_pts_timed;
+    if (ns) *ns = s_pts_ns;
+    return s_pts_pool != VK_NULL_HANDLE;
+}
+
 uint64_t sdl3vk_swapchain_generation(void) {
     return s_swapchain_gen;
 }
@@ -212,6 +230,29 @@ void sdl3vk_set_logic_slowed_cb(int (*cb)(unsigned *rate)) {
 }
 
 static void (*s_ui_pass)(const Sdl3VkUiPass *frame);
+static Sdl3VkShowPass s_show_pass;
+static Sdl3VkUpscalePass s_upscale_pass;
+static Sdl3VkUpscalePass s_rec_upscale_pass;  /* the recording's own upscaler (#2138) */
+/* What the last present's frame blit read: its source image and size, its place in the window and
+ * its filter. The capture selftest checks the presentation upscaler's image is what reaches the
+ * window. */
+static struct {
+    VkImage src;
+    int sw, sh, dx, dy, dw, dh;
+    VkFilter filter;
+} s_last_blit;
+
+void sdl3vk_set_show_pass(Sdl3VkShowPass pass) {
+    s_show_pass = pass;
+}
+
+void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass) {
+    s_upscale_pass = pass;
+}
+
+void sdl3vk_set_record_upscale_pass(Sdl3VkUpscalePass pass) {
+    s_rec_upscale_pass = pass;
+}
 
 void sdl3vk_set_ui_pass(void (*pass)(const Sdl3VkUiPass *frame)) {
     s_ui_pass = pass;
@@ -273,6 +314,19 @@ static int wait_present_frame(PresentFrame *f) {
     }
     f->submitted=0;
     f->source=VK_NULL_HANDLE;
+    if (f->ts_written) {
+        uint64_t v[2];
+        uint32_t q = (uint32_t)(f - s_frame) * 2u;
+        f->ts_written = 0;
+        if (vkGetQueryPoolResults(s_dev, s_pts_pool, q, 2u, sizeof v, v, sizeof v[0],
+                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            const uint64_t ns = (uint64_t)((double)(((v[1] & s_pts_mask) - (v[0] & s_pts_mask)) &
+                                                    s_pts_mask) * s_pts_period_ns);
+            s_pts_timed++;
+            s_pts_ns += ns;
+            sr_perf_gpu_present_time(ns);
+        }
+    }
     return 1;
 }
 
@@ -382,6 +436,11 @@ static int create_swapchain(void) {
      * presentation. MAILBOX (no tearing, never blocks) avoids beating against the monitor
      * refresh; FIFO is the mandated fallback. */
     sci.presentMode      = VK_PRESENT_MODE_FIFO_KHR;
+    /* Printed once the swapchain exists: which mode, and why (sdl3vk_present_mode_line), for
+     * the first swapchain and whenever a recreation changes it (sdl3vk_present_mode_log_due). */
+    static int s_present_logged_mode = -1, s_present_logged_vsync = -1;
+    char present_line[256];
+    int vsync_on;
     {
         VkPresentModeKHR pm[8]; uint32_t npm = 8;
         int avail[8]; int navail = 0;
@@ -389,12 +448,10 @@ static int create_swapchain(void) {
             for (uint32_t i = 0; i < npm && i < 8; i++) avail[navail++] = (int)pm[i];
         }
         const char *vs = getenv("SR_VSYNC");
-        int vsync_on = !vs || !vs[0] || atoi(vs) != 0;
+        vsync_on = !vs || !vs[0] || atoi(vs) != 0;
         sci.presentMode = (VkPresentModeKHR)sdl3vk_pick_present_mode(vsync_on, avail, navail);
-        if (!vsync_on && sci.presentMode == VK_PRESENT_MODE_FIFO_KHR) {
-            fprintf(stderr, "sdl3vk: SR_VSYNC=0 requested but this surface offers no "
-                            "MAILBOX/IMMEDIATE mode; falling back to FIFO (vsync)\n");
-        }
+        (void)sdl3vk_present_mode_line(vsync_on, avail, navail, (int)sci.presentMode,
+                                       old != VK_NULL_HANDLE, present_line, sizeof(present_line));
     }
     sci.clipped          = VK_TRUE;
     sci.oldSwapchain     = old;
@@ -415,6 +472,9 @@ static int create_swapchain(void) {
         return 0;
     }
     s_swap = made;
+    if (sdl3vk_present_mode_log_due(&s_present_logged_mode, &s_present_logged_vsync,
+                                    (int)sci.presentMode, vsync_on))
+        fprintf(stderr, "%s\n", present_line);
     if (old) vkDestroySwapchainKHR(s_dev, old, NULL);
     /* Every present that waited on these was to the old swapchain, and the queue was idle
      * before it was replaced (wait_swapchain_unused). */
@@ -459,6 +519,67 @@ static int create_swapchain(void) {
 typedef char sdl3vk_present_mode_immediate_is_0[(int)VK_PRESENT_MODE_IMMEDIATE_KHR == 0 ? 1 : -1];
 typedef char sdl3vk_present_mode_mailbox_is_1[(int)VK_PRESENT_MODE_MAILBOX_KHR == 1 ? 1 : -1];
 typedef char sdl3vk_present_mode_fifo_is_2[(int)VK_PRESENT_MODE_FIFO_KHR == 2 ? 1 : -1];
+
+static const char *sdl3vk_present_mode_name(int mode) {
+    switch (mode) {
+        case 0: return "IMMEDIATE";
+        case 1: return "MAILBOX";
+        case 2: return "FIFO";
+        case 3: return "FIFO_RELAXED";
+        case 1000111000: return "SHARED_DEMAND_REFRESH";
+        case 1000111001: return "SHARED_CONTINUOUS_REFRESH";
+        case 1000361000: return "FIFO_LATEST_READY";
+        default: return NULL;
+    }
+}
+
+int sdl3vk_present_mode_line(int vsync, const int *available, int count, int chosen,
+                             int recreated, char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    const char *why;
+    if (chosen == 2 && vsync)
+        why = "VSync on";
+    else if (chosen == 1)
+        why = "VSync off; the surface offers MAILBOX, which does not tear";
+    else if (chosen == 0)
+        why = "VSync off; the surface offers no MAILBOX, and IMMEDIATE can tear";
+    else if (chosen == 2)
+        why = "VSync off, but the surface offers neither MAILBOX nor IMMEDIATE, so FIFO keeps VSync";
+    else
+        why = "not a mode the picker chooses";
+    const char *name = sdl3vk_present_mode_name(chosen);
+    char unknown[24];
+    if (!name) {
+        snprintf(unknown, sizeof(unknown), "mode %d", chosen);
+        name = unknown;
+    }
+    size_t at = 0;
+    int n = snprintf(out, cap, "sdl3vk: swapchain %s: present mode %s (%s); surface offers",
+                     recreated ? "recreated" : "created", name, why);
+    if (n < 0) { out[0] = '\0'; return 0; }
+    at = (size_t)n < cap ? (size_t)n : cap - 1;
+    if (count <= 0 || !available) {
+        n = snprintf(out + at, cap - at, " none");
+        if (n > 0) at += (size_t)n < cap - at ? (size_t)n : cap - at - 1;
+    }
+    for (int i = 0; available && i < count && at + 1 < cap; i++) {
+        const char *m = sdl3vk_present_mode_name(available[i]);
+        n = m ? snprintf(out + at, cap - at, " %s", m)
+              : snprintf(out + at, cap - at, " mode%d", available[i]);
+        if (n < 0) break;
+        at += (size_t)n < cap - at ? (size_t)n : cap - at - 1;
+    }
+    return (int)at;
+}
+
+int sdl3vk_present_mode_log_due(int *last_mode, int *last_vsync, int mode, int vsync) {
+    if (!last_mode || !last_vsync) return 1;
+    vsync = vsync != 0;
+    if (*last_mode == mode && *last_vsync == vsync) return 0;
+    *last_mode = mode;
+    *last_vsync = vsync;
+    return 1;
+}
 
 int sdl3vk_pick_present_mode(int vsync, const int *available, int count) {
     const int immediate = 0;
@@ -573,8 +694,31 @@ static SDL_Window *sdl3vk_create_window(const char *title) {
     return win;
 }
 
+/* The launcher's identity (#2006), so the game's window joins the launcher's taskbar group on
+ * Windows and its application on Linux instead of showing as an unrelated program. These are
+ * NK_APP_USER_MODEL_ID, NK_APP_DESKTOP_ID and NK_APP_NAME in src/core/nk_launch.h, which the
+ * runtime does not include; tools/test_stage_install.py keeps the copies equal. */
+#define SDL3VK_APP_USER_MODEL_ID "Nakagawa.Recomp"
+#define SDL3VK_APP_DESKTOP_ID "nakagawa-recomp"
+#define SDL3VK_APP_NAME "Nakagawa Recomp"
+
+/* Before SDL_Init and before the window exists: Windows reads the process's ID when the
+ * window's taskbar button is made, and SDL reads its metadata at initialisation. A refusal
+ * only costs the grouping, so it is reported and the game goes on. */
+static void sdl3vk_set_app_identity(void) {
+#ifdef _WIN32
+    HRESULT hr = SetCurrentProcessExplicitAppUserModelID(L"" SDL3VK_APP_USER_MODEL_ID);
+    if (FAILED(hr))
+        fprintf(stderr, "sdl3vk: the taskbar app ID could not be set (HRESULT 0x%08lx)\n",
+                (unsigned long)hr);
+#endif
+    if (!SDL_SetAppMetadata(SDL3VK_APP_NAME, NULL, SDL3VK_APP_DESKTOP_ID))
+        fprintf(stderr, "sdl3vk: SDL app metadata could not be set: %s\n", SDL_GetError());
+}
+
 int sdl3vk_init(const char *title) {
     s_init_steps = 0;
+    sdl3vk_set_app_identity();
     INIT_OK(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD), "sdl3vk: SDL_Init failed: %s\n", SDL_GetError());
     s_sdl_subsystems = 1;
     /* SR_WINDOW_HIDDEN=1: the same presenter (Vulkan swapchain, keyboard, frame capture) with
@@ -763,6 +907,28 @@ int sdl3vk_init(const char *title) {
 
     VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     INIT_VK(vkCreateFence(s_dev, &fci, NULL, &s_fence));
+    {
+        if (sr_perf_gpu_timestamps_requested()) {
+            uint32_t nq = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(s_pdev, &nq, NULL);
+            VkQueueFamilyProperties qf[16];
+            if (nq > 16u) nq = 16u;
+            vkGetPhysicalDeviceQueueFamilyProperties(s_pdev, &nq, qf);
+            uint32_t bits = s_qfam < nq ? qf[s_qfam].timestampValidBits : 0u;
+            VkPhysicalDeviceProperties tp;
+            vkGetPhysicalDeviceProperties(s_pdev, &tp);
+            VkQueryPoolCreateInfo qpc = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+            qpc.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            qpc.queryCount = PRESENT_FRAMES * 2u;
+            if (bits && tp.limits.timestampPeriod > 0.0f &&
+                vkCreateQueryPool(s_dev, &qpc, NULL, &s_pts_pool) == VK_SUCCESS) {
+                s_pts_period_ns = (double)tp.limits.timestampPeriod;
+                s_pts_mask = bits >= 64u ? ~0ull : ((1ull << bits) - 1ull);
+            } else {
+                s_pts_pool = VK_NULL_HANDLE;
+            }
+        }
+    }
     VkSemaphoreCreateInfo sci2 = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     /* Per-frame command/sync/upload resources.  No resource is reused before its fence. */
     for(int i=0;i<PRESENT_FRAMES;i++){
@@ -773,7 +939,7 @@ int sdl3vk_init(const char *title) {
         INIT_VK(vkCreateSemaphore(s_dev,&sci2,NULL,&f->sem_acq));
 
         VkBufferCreateInfo bci={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.size=PSP_W*PSP_H*4;bci.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bci.size=SDL3VK_UPLOAD_MAX_W*PSP_H*4;bci.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         INIT_VK(vkCreateBuffer(s_dev,&bci,NULL,&f->staging));
         VkMemoryRequirements mr;vkGetBufferMemoryRequirements(s_dev,f->staging,&mr);
         VkMemoryAllocateInfo mai={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -801,7 +967,7 @@ int sdl3vk_init(const char *title) {
 
         VkImageCreateInfo imi={.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         imi.imageType=VK_IMAGE_TYPE_2D;imi.format=VK_FORMAT_B8G8R8A8_UNORM;
-        imi.extent.width=PSP_W;imi.extent.height=PSP_H;imi.extent.depth=1;
+        imi.extent.width=SDL3VK_UPLOAD_MAX_W;imi.extent.height=PSP_H;imi.extent.depth=1;
         imi.mipLevels=1;imi.arrayLayers=1;imi.samples=VK_SAMPLE_COUNT_1_BIT;
         imi.tiling=VK_IMAGE_TILING_OPTIMAL;
         imi.usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -1000,6 +1166,11 @@ static NkInputGate    s_gate;
 static uint32_t       s_raw_buttons;
 static uint8_t        s_raw_lx = 128, s_raw_ly = 128;
 static uint32_t       s_claim_saved_pulse, s_claim_saved_pad_pulse;
+/* Mouse aiming (#1791): the movement since the last poll, kept as floats so a slow drag
+ * that SDL reports in fractions of a count is not lost, and what carries between polls. */
+static float          s_mouse_fx, s_mouse_fy;
+static NkAimState     s_aim_state;
+static bool           s_mouse_captured;
 #define KEY_QUEUE_CAP 64
 static Sdl3VkKeyEvent s_key_queue[KEY_QUEUE_CAP];
 static int            s_key_head, s_key_count;
@@ -1082,6 +1253,76 @@ static uint32_t gamepad_button(Uint8 button) {
     return psp_btn;
 }
 
+/* Mouse aiming works in counts per reference poll of 1/60 s (NK_AIM_FULL_DEFLECTION_COUNTS),
+ * but the host polls once per presented frame, so the movement is scaled by the time since
+ * the last aim poll: the same hand speed gives the same nub whatever the frame rate, and a
+ * frame hitch does not saturate it. */
+#define AIM_REFERENCE_POLL_NS 16666667ull
+#define AIM_MIN_POLL_NS 4166667ull       /* polls closer than 1/240 s count as 1/240 s */
+#define AIM_STALL_NS 250000000ull        /* a longer gap is a stall, not a hand movement */
+
+static uint64_t aim_clock_ns_default(void) { return SDL_GetTicksNS(); }
+/* Test seams: the clock, and the call that grabs or frees the pointer. */
+static uint64_t (*s_aim_clock_ns)(void) = aim_clock_ns_default;
+static bool aim_relative_mode_default(bool want) {
+    if (!s_win || s_window_hidden) return false;   /* headless runs never grab the pointer */
+    return SDL_SetWindowRelativeMouseMode(s_win, want);
+}
+static bool (*s_aim_relative_mode)(bool) = aim_relative_mode_default;
+static uint64_t s_aim_last_ns;                    /* 0 = no previous aim poll */
+static float    s_aim_rem_x, s_aim_rem_y;         /* scaled fractions kept for the next poll */
+
+/* Scale the raw movement to counts per reference poll and hand over the whole counts; the
+ * fraction stays for the next poll. `scale` is reference period / elapsed. */
+static int32_t aim_take_counts(float *raw, float *rem, float scale) {
+    const float scaled = *raw * scale + *rem;
+    const float whole = truncf(scaled);
+    *raw = 0.0f;
+    *rem = scaled - whole;
+    if (whole > 2147483000.0f) return INT32_MAX;
+    if (whole < -2147483000.0f) return INT32_MIN;
+    return (int32_t)whole;
+}
+
+/* Nothing the mouse did earlier may reach the game later: a focus change, an overlay claim
+ * or a profile that turns aiming off all start the next poll from rest. */
+static void aim_reset(void) {
+    s_mouse_fx = s_mouse_fy = 0.0f;
+    s_aim_rem_x = s_aim_rem_y = 0.0f;
+    s_aim_last_ns = 0;
+    nk_aim_state_reset(&s_aim_state);
+}
+
+/* The window grabs the pointer while aiming is on and the game has the input, and gives it
+ * back as soon as either stops. The flag follows what the window really did, so a request
+ * that could not be applied (no window, hidden window) is asked again next poll instead of
+ * being remembered as done. */
+static void aim_set_capture(bool want) {
+    if (want == s_mouse_captured) return;
+    if (s_aim_relative_mode(want)) s_mouse_captured = want;
+}
+
+/* The nub for this poll's movement. The first poll after a reset, and a stall, count as one
+ * reference poll and drop the movement that built up. */
+static bool aim_poll(const NkAimConfig *cfg, uint8_t *lx, uint8_t *ly) {
+    const uint64_t now = s_aim_clock_ns();
+    uint64_t dt = AIM_REFERENCE_POLL_NS;
+    if (s_aim_last_ns != 0 && now > s_aim_last_ns) {
+        dt = now - s_aim_last_ns;
+        if (dt > AIM_STALL_NS) {
+            s_mouse_fx = s_mouse_fy = 0.0f;
+            s_aim_rem_x = s_aim_rem_y = 0.0f;
+            dt = AIM_REFERENCE_POLL_NS;
+        } else if (dt < AIM_MIN_POLL_NS) {
+            dt = AIM_MIN_POLL_NS;
+        }
+    }
+    s_aim_last_ns = now ? now : 1;
+    const float scale = (float)AIM_REFERENCE_POLL_NS / (float)dt;
+    return nk_aim_apply(cfg, &s_aim_state, aim_take_counts(&s_mouse_fx, &s_aim_rem_x, scale),
+                        aim_take_counts(&s_mouse_fy, &s_aim_rem_y, scale), lx, ly);
+}
+
 static void pause_request_latch(int request) {
     if (s_claim_sink) return;
     /* The person's own request wins over the pad-lost one if both arrive together. */
@@ -1103,6 +1344,9 @@ static void poll_input_on_this_stack(void *arg) {
                 SDL_CloseGamepad(s_pad); s_pad = NULL;
                 pause_request_latch(SDL3VK_PAUSE_REQUEST_PAD_LOST);
             }
+            break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            aim_reset();
             break;
         default: break;
         }
@@ -1135,6 +1379,10 @@ static void poll_input_on_this_stack(void *arg) {
             break;
         case SDL_EVENT_TEXT_INPUT:
             if (s_text_claim) queue_text_utf8(ev.text.text);
+            break;
+        case SDL_EVENT_MOUSE_MOTION:
+            s_mouse_fx += ev.motion.xrel;
+            s_mouse_fy += ev.motion.yrel;
             break;
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
             /* Guide asks for the pause and is consumed, whatever the profile binds to it. */
@@ -1185,6 +1433,19 @@ static void poll_input_on_this_stack(void *arg) {
             stick_prof = &def_profile;
         }
         (void)nk_input_profile_eval_key_analog(stick_prof, k, key_count, &lx, &ly);
+    }
+    /* Mouse aiming (#1791): a moving mouse takes the nub; a still one leaves the controller's
+     * and the keyboard's value. Off unless the profile turns it on, and never under SR_PADSCRIPT
+     * or while the overlay has the input. */
+    {
+        const NkInputProfile *aim_prof = padscript_active() ? NULL : sdl3vk_get_input_profile();
+        const bool aim_on = aim_prof && aim_prof->aim.mouse && !s_claim_sink;
+        aim_set_capture(aim_on);
+        if (aim_on) {
+            (void)aim_poll(&aim_prof->aim, &lx, &ly);
+        } else {
+            aim_reset();
+        }
     }
     s_raw_buttons = b;
     s_raw_lx = lx; s_raw_ly = ly;
@@ -1614,9 +1875,11 @@ int sdl3vk_parse_present_scaling(const char *value) {
 Sdl3VkPresentPlan sdl3vk_present_plan(int mode, int srcw, int srch, int dw, int dh, int max_dim) {
     Sdl3VkPresentPlan p = { 0, 0, 0, 0, 1, 0 };
     if (srcw <= 0 || srch <= 0 || dw <= 0 || dh <= 0) return p;
-    /* Aspect-correct fit of the PSP picture, letterboxed. */
-    int vw = dw, vh = dw * PSP_H / PSP_W;
-    if (vh > dh) { vh = dh; vw = dh * PSP_W / PSP_H; }
+    /* Aspect-correct fit of the source, letterboxed. Every 480k x 272k source fits as the PSP
+     * picture always did (the same ratio, so the same integer results); a widescreen Fill
+     * picture (480 + 2D) x 272 fits its own, wider shape. */
+    int vw = dw, vh = (int)((long long)dw * srch / srcw);
+    if (vh > dh) { vh = dh; vw = (int)((long long)dh * srcw / srch); }
     if (mode == SDL3VK_SCALING_INTEGER) {
         int k = dw / srcw < dh / srch ? dw / srcw : dh / srch;
         if (k >= 1) { vw = k * srcw; vh = k * srch; p.nearest = 1; }
@@ -1689,6 +1952,195 @@ static int prescale_ensure(int w, int h) {
     s_prescale_w = w;
     s_prescale_h = h;
     failed_w = failed_h = 0;
+    return 1;
+}
+
+/* ---- video recording (videorec.h, #1273) ---------------------------------------------------
+ * With SR_VIDEOREC_DIR set, every present also scales the picture it shows, with the window's
+ * own plan and filters, into a record target of one fixed size (SR_VIDEOREC_SIZE, or the
+ * window's size at the first recorded present), without the HUD or the pause overlay. The
+ * target is copied to the frame slot's own readback buffer in the same command buffer; the
+ * recorder reads that buffer when the next VBLANK writes its frame (rec_resolve), and a present
+ * reads it before it reuses the slot. Each use of the target and of its sharp-scaling image
+ * starts from UNDEFINED behind a transfer-stage barrier, like the window's prescale image. */
+typedef struct RecImage {
+    VkImage img;
+    VkDeviceMemory mem;
+    int w, h;
+} RecImage;
+
+static int s_rec_state = -1;      /* -1 undecided, 0 off, 1 recording */
+static uint32_t s_rec_w, s_rec_h; /* the record target's size, fixed at the first use */
+static RecImage s_rec_target, s_rec_pre;
+static CapBuffer s_rec_buf[PRESENT_FRAMES];
+static int s_rec_filter[PRESENT_FRAMES]; /* the SrVideoRecFilter each slot's picture was made with */
+static PresentFrame *s_rec_pending; /* the slot whose readback holds the newest recorded picture */
+
+static void rec_image_free(RecImage *r) {
+    if (r->img) vkDestroyImage(s_dev, r->img, NULL);
+    if (r->mem) vkFreeMemory(s_dev, r->mem, NULL);
+    memset(r, 0, sizeof *r);
+}
+
+static int rec_image_ensure(RecImage *r, int w, int h, VkFormat fmt) {
+    if (r->img && r->w == w && r->h == h) return 1;
+    if (r->img) {
+        if (!wait_all_present_frames()) return 0;
+        rec_image_free(r);
+    }
+    VkImageCreateInfo imi = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    imi.imageType = VK_IMAGE_TYPE_2D;
+    imi.format = fmt;
+    imi.extent.width = (uint32_t)w; imi.extent.height = (uint32_t)h; imi.extent.depth = 1;
+    imi.mipLevels = 1; imi.arrayLayers = 1; imi.samples = VK_SAMPLE_COUNT_1_BIT;
+    imi.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imi.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    imi.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(s_dev, &imi, NULL, &r->img) != VK_SUCCESS) {
+        r->img = VK_NULL_HANDLE;
+        return 0;
+    }
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(s_dev, r->img, &mr);
+    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = find_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (mai.memoryTypeIndex == UINT32_MAX ||
+        vkAllocateMemory(s_dev, &mai, NULL, &r->mem) != VK_SUCCESS ||
+        vkBindImageMemory(s_dev, r->img, r->mem, 0) != VK_SUCCESS) {
+        rec_image_free(r);
+        return 0;
+    }
+    r->w = w;
+    r->h = h;
+    return 1;
+}
+
+static int rec_on(void) {
+    if (s_rec_state < 0) s_rec_state = sr_videorec_active() ? 1 : 0;
+    return s_rec_state;
+}
+
+/* Hand the newest recorded picture to the recorder (SrVideoRecResolver): wait for the present
+ * that copied it, then pass the mapped readback. */
+static int rec_resolve(void) {
+    PresentFrame *f = s_rec_pending;
+    s_rec_pending = NULL;
+    if (!f) return 0;
+    CapBuffer *c = &s_rec_buf[f - s_frame];
+    if (!wait_present_frame(f) || !cap_invalidate_readback(c)) return 0;
+    sr_videorec_frame_filtered(c->map, s_rec_w, s_rec_h, s_rec_w * 4u, SR_CAP_ORDER_BGRX,
+                               s_rec_filter[f - s_frame]);
+    return 1;
+}
+
+/* Record the shown picture into the record target and its copy into f's readback buffer.
+ * Returns 0 (with the reason) when it could not; the present itself goes on. */
+static int rec_record(VkCommandBuffer cmd, PresentFrame *f, VkImage show, int showw, int showh,
+                      const char **why) {
+    if (!s_rec_w) {
+        uint32_t w = 0, h = 0;
+        if (!sr_videorec_requested_size(&w, &h)) {
+            w = s_swap_ext.width & ~1u;
+            h = s_swap_ext.height & ~1u;
+        }
+        s_rec_w = w;
+        s_rec_h = h;
+        fprintf(stderr, "sdl3vk: recording the presented picture at %ux%u\n", w, h);
+    }
+    if (s_rec_w < 16u || s_rec_h < 16u || s_rec_w > s_max_image_dim || s_rec_h > s_max_image_dim) {
+        *why = "record size is outside the device's image limits";
+        return 0;
+    }
+    if (!rec_image_ensure(&s_rec_target, (int)s_rec_w, (int)s_rec_h, VK_FORMAT_B8G8R8A8_UNORM)) {
+        *why = "no record target image";
+        return 0;
+    }
+    CapBuffer *cb = &s_rec_buf[f - s_frame];
+    if (!cap_ensure(cb, s_rec_w, s_rec_h)) {
+        *why = "no record readback buffer";
+        return 0;
+    }
+    VkImage dst = s_rec_target.img;
+    barrier(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            0, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    {
+        VkClearColorValue black = {{0, 0, 0, 1}};
+        VkImageSubresourceRange rng = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdClearColorImage(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rng);
+    }
+    barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    Sdl3VkPresentPlan plan = sdl3vk_present_plan(s_scaling, showw, showh, (int)s_rec_w,
+                                                 (int)s_rec_h, (int)s_max_image_dim);
+    VkImage blit_src = show;
+    int bw = showw, bh = showh;
+    VkImageBlit blt = {0};
+    blt.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blt.srcSubresource.layerCount = 1;
+    blt.dstSubresource = blt.srcSubresource;
+    blt.srcOffsets[1].z = 1;
+    blt.dstOffsets[1].z = 1;
+    /* With the presentation upscaler on, the recording is enlarged by it as the window is, at
+     * the recording's own size, through its own pass (the window's would rebuild its images for
+     * every size change between the two). The blit below then copies the result 1:1. Only an
+     * enlargement, as in the window: EASU is not a downscaler. */
+    VkImage upscaled = VK_NULL_HANDLE;
+    if (s_rec_upscale_pass && plan.w >= showw && plan.h >= showh && (plan.w > showw || plan.h > showh))
+        upscaled = (VkImage)s_rec_upscale_pass((void *)cmd, (void *)show, showw, showh, plan.w,
+                                               plan.h);
+    int prescaled = 0;
+    if (upscaled) {
+        blit_src = upscaled;
+        bw = plan.w;
+        bh = plan.h;
+        plan.nearest = 1;
+    } else if (plan.prescale > 1 &&
+        rec_image_ensure(&s_rec_pre, plan.prescale * showw, plan.prescale * showh,
+                         VK_FORMAT_R8G8B8A8_UNORM)) {
+        barrier(cmd, s_rec_pre.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        blt.srcOffsets[1].x = showw;          blt.srcOffsets[1].y = showh;
+        blt.dstOffsets[1].x = s_rec_pre.w;    blt.dstOffsets[1].y = s_rec_pre.h;
+        vkCmdBlitImage(cmd, show, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       s_rec_pre.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blt,
+                       VK_FILTER_NEAREST);
+        barrier(cmd, s_rec_pre.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        blit_src = s_rec_pre.img;
+        bw = s_rec_pre.w;
+        bh = s_rec_pre.h;
+        prescaled = 1;
+    }
+    /* What record.json says made this picture: the blits issued here, never the scaling
+     * setting's name. Sharp at an exact multiple, and bilinear there too, are one nearest blit;
+     * sharp shrinking, or without its prescale image, is one linear blit. A 1:1 copy is none. */
+    int filter = upscaled ? SR_VIDEOREC_FILTER_FSR1
+               : prescaled ? SR_VIDEOREC_FILTER_SHARP
+               : plan.nearest ? SR_VIDEOREC_FILTER_NEAREST
+               : SR_VIDEOREC_FILTER_LINEAR;
+    if (plan.w == showw && plan.h == showh) filter = SR_VIDEOREC_FILTER_NONE;
+    if (plan.w > 0 && plan.h > 0) {
+        blt.srcOffsets[1].x = bw;              blt.srcOffsets[1].y = bh;
+        blt.dstOffsets[0].x = plan.x;          blt.dstOffsets[0].y = plan.y;
+        blt.dstOffsets[1].x = plan.x + plan.w; blt.dstOffsets[1].y = plan.y + plan.h;
+        vkCmdBlitImage(cmd, blit_src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blt,
+                       plan.nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
+    }
+    barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    if (!cap_record(cmd, cb, dst, (int)s_rec_w, (int)s_rec_h)) {
+        *why = "record copy failed";
+        return 0;
+    }
+    s_rec_filter[f - s_frame] = filter;
     return 1;
 }
 
@@ -1881,7 +2333,10 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
     /* A picture probe read back by an earlier present is published once its frame's fence
      * has signalled; never waited for here, and always before this slot is reused. */
     (void)cap_probe_resolve(0);
-    if (upload) { memcpy(f->staging_map, upload, PSP_W * PSP_H * 4); src = f->fbimg; }
+    /* A recorded picture still in this slot's readback goes to the recorder before reuse. */
+    if (s_rec_pending == f) sr_videorec_resolve_pending();
+    int rec_in_submit = 0;
+    if (upload) { memcpy(f->staging_map, upload, (size_t)srcw * (size_t)srch * 4u); src = f->fbimg; }
     VkCommandBuffer cmd = f->cmd;
 
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -1921,6 +2376,12 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         if (PSTEP_VK(PSTEP_BEGIN_CMD, vkBeginCommandBuffer(cmd, &bi)) != VK_SUCCESS) {
             why = "vkBeginCommandBuffer failed"; goto fail_acquired;
         }
+        f->ts_written = 0;
+        if (s_pts_pool) {
+            vkCmdResetQueryPool(cmd, s_pts_pool, (uint32_t)(f - s_frame) * 2u, 2u);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_pts_pool,
+                                (uint32_t)(f - s_frame) * 2u);
+        }
 
         if (upload) {
             /* staging buffer -> fb image */
@@ -1930,13 +2391,24 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
             VkBufferImageCopy bic = {0};
             bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             bic.imageSubresource.layerCount = 1;
-            bic.imageExtent.width = PSP_W; bic.imageExtent.height = PSP_H; bic.imageExtent.depth = 1;
+            bic.imageExtent.width = (uint32_t)srcw; bic.imageExtent.height = (uint32_t)srch;
+            bic.imageExtent.depth = 1;
             vkCmdCopyBufferToImage(cmd, f->staging, f->fbimg,
                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
             barrier(cmd, f->fbimg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                     VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         }
+
+        /* Ace Mode's smooth motion may show another image; the capture below still reads src. */
+        VkImage show = src;
+        int showw = srcw, showh = srch;
+        if (s_show_pass) {
+            VkImage alt = (VkImage)s_show_pass((void *)cmd, (void *)src, &showw, &showh);
+            if (alt) show = alt;
+            else { showw = srcw; showh = srch; }
+        }
+        if (!show) { why = "nothing to show"; goto fail_acquired; }
 
         /* fb image -> swapchain, aspect-correct letterbox blit. */
         barrier(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1953,24 +2425,37 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         int dw = (int)s_swap_ext.width, dh = (int)s_swap_ext.height;
-        Sdl3VkPresentPlan plan = sdl3vk_present_plan(s_scaling, srcw, srch, dw, dh,
+        Sdl3VkPresentPlan plan = sdl3vk_present_plan(s_scaling, showw, showh, dw, dh,
                                                      (int)s_max_image_dim);
-        VkImage blit_src = src;
-        int bw = srcw, bh = srch;
+        VkImage blit_src = show;
+        int bw = showw, bh = showh;
         VkImageBlit blt = {0};
         blt.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         blt.srcSubresource.layerCount = 1;
         blt.dstSubresource = blt.srcSubresource;
         blt.srcOffsets[1].z = 1;
         blt.dstOffsets[1].z = 1;
-        if (plan.prescale > 1 && prescale_ensure(plan.prescale * srcw, plan.prescale * srch)) {
+        /* The presentation upscaler, when one is set, makes the picture at its place's size;
+         * the blit below then copies it 1:1. */
+        VkImage upscaled = VK_NULL_HANDLE;
+        /* Only a place at least as large on both axes and larger on one: EASU enlarges, it is not a
+         * downscaler. */
+        if (s_upscale_pass && plan.w >= showw && plan.h >= showh && (plan.w > showw || plan.h > showh))
+            upscaled = (VkImage)s_upscale_pass((void *)cmd, (void *)show, showw, showh, plan.w, plan.h);
+        if (upscaled) {
+            blit_src = upscaled;
+            bw = plan.w;
+            bh = plan.h;
+            plan.nearest = 1;
+        } else if (plan.prescale > 1 &&
+                   prescale_ensure(plan.prescale * showw, plan.prescale * showh)) {
             /* Sharp scaling, pass 1: nearest enlargement to the integer multiple. */
             barrier(cmd, s_prescale_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     0, VK_ACCESS_TRANSFER_WRITE_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-            blt.srcOffsets[1].x = srcw;          blt.srcOffsets[1].y = srch;
+            blt.srcOffsets[1].x = showw;         blt.srcOffsets[1].y = showh;
             blt.dstOffsets[1].x = s_prescale_w;  blt.dstOffsets[1].y = s_prescale_h;
-            vkCmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            vkCmdBlitImage(cmd, show, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            s_prescale_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            1, &blt, VK_FILTER_NEAREST);
             barrier(cmd, s_prescale_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1985,6 +2470,14 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
             blt.srcOffsets[1].x = bw;              blt.srcOffsets[1].y = bh;
             blt.dstOffsets[0].x = plan.x;          blt.dstOffsets[0].y = plan.y;
             blt.dstOffsets[1].x = plan.x + plan.w; blt.dstOffsets[1].y = plan.y + plan.h;
+            s_last_blit.src = blit_src;
+            s_last_blit.sw = bw;
+            s_last_blit.sh = bh;
+            s_last_blit.dx = plan.x;
+            s_last_blit.dy = plan.y;
+            s_last_blit.dw = plan.w;
+            s_last_blit.dh = plan.h;
+            s_last_blit.filter = plan.nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
             vkCmdBlitImage(cmd, blit_src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            1, &blt, plan.nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
@@ -2012,6 +2505,19 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
                 VK_ACCESS_TRANSFER_WRITE_BIT, 0,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
+        /* SR_VIDEOREC_DIR: the shown picture, scaled as the window shows it, for the recorder. */
+        rec_in_submit = 0;
+        if (rec_on() && sr_videorec_wants_frames()) {
+            const char *rec_why = NULL;
+            if (rec_record(cmd, f, show, showw, showh, &rec_why)) {
+                rec_in_submit = 1;
+            } else {
+                static int rec_warned;
+                if (!rec_warned++)
+                    fprintf(stderr, "sdl3vk: a present was not recorded: %s\n", rec_why);
+            }
+        }
+
         int cap_in_submit = 0;
         if (sr_capture_is_armed()) {
             CapBuffer *cb = sr_capture_pending_is_probe() ? &s_probe : &s_cap;
@@ -2030,9 +2536,13 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
             if (!cap_record(cmd, cb, src, srcw, srch)) { why = "capture record failed"; goto fail; }
             cap_in_submit = 1;
         }
+        if (s_pts_pool)
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_pts_pool,
+                                (uint32_t)(f - s_frame) * 2u + 1u);
         if (PSTEP_VK(PSTEP_END_CMD, vkEndCommandBuffer(cmd)) != VK_SUCCESS) {
             why = "vkEndCommandBuffer failed"; goto fail_acquired;
         }
+        f->ts_written = s_pts_pool != VK_NULL_HANDLE;
 
         VkPipelineStageFlags wait_st = VK_PIPELINE_STAGE_TRANSFER_BIT;
         VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -2152,6 +2662,11 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         break;
     }
     if (!presented) { why = "swapchain still out of date after recreation"; goto fail; }
+    /* Only a picture that reached the screen is recorded; the recorder reads it at its VBLANK. */
+    if (rec_in_submit) {
+        s_rec_pending = f;
+        sr_videorec_frame_pending(rec_resolve);
+    }
 
     /* Complete the armed capture only now that this frame is known to have reached the
      * presentation engine, so a published file always corresponds to a presented frame.
@@ -2207,6 +2722,30 @@ int sdl3vk_present_rgba(const uint32_t *px) {
     return result;
 }
 
+int sdl3vk_present_rgba_ex(const uint32_t *px, int w, int h) {
+    if (!px || w < PSP_W || w > SDL3VK_UPLOAD_MAX_W || h != PSP_H) {
+        sr_capture_fail("present_rgba_ex: unsupported picture size");
+        return -1;
+    }
+    uint64_t started = sr_perf_now_ns();
+    int result = present_common(VK_NULL_HANDLE, w, h, px);
+    if (started) sr_perf_present_done(started, result);
+    return result;
+}
+
+int sdl3vk_window_pixel_size(int *w, int *h) {
+    int pw = 0, ph = 0;
+    if (s_swap && s_swap_ext.width && s_swap_ext.height) {
+        pw = (int)s_swap_ext.width;
+        ph = (int)s_swap_ext.height;
+    } else if (s_win) {
+        (void)SDL_GetWindowSizeInPixels(s_win, &pw, &ph);
+    }
+    if (w) *w = pw;
+    if (h) *h = ph;
+    return pw > 0 && ph > 0;
+}
+
 int sdl3vk_present_image(void *vk_image) {
     /* 512x272 GE target: only the visible 480x272 region is shown */
     uint64_t started = sr_perf_now_ns();
@@ -2219,6 +2758,14 @@ int sdl3vk_present_image_ex(void *vk_image, int srcw, int srch) {
     /* render-scaled GE target: the visible region scales with the internal resolution */
     uint64_t started = sr_perf_now_ns();
     int result = present_common((VkImage)vk_image, srcw, srch, NULL);
+    if (started) sr_perf_present_done(started, result);
+    return result;
+}
+
+int sdl3vk_present_held(void) {
+    if (!s_show_pass) return 0;
+    uint64_t started = sr_perf_now_ns();
+    int result = present_common(VK_NULL_HANDLE, PSP_W, PSP_H, NULL);
     if (started) sr_perf_present_done(started, result);
     return result;
 }
@@ -2261,6 +2808,29 @@ static int overlay_format_order(VkFormat fmt, int *rgba) {
 
 int sdl3vk_window_minimized(void) {
     return s_win && (SDL_GetWindowFlags(s_win) & SDL_WINDOW_MINIMIZED) != 0;
+}
+
+int sdl3vk_fullscreen(void) {
+#ifdef SDL_PLATFORM_ANDROID
+    return -1;
+#else
+    if (!s_win || s_window_hidden) return -1;
+    return (SDL_GetWindowFlags(s_win) & SDL_WINDOW_FULLSCREEN) != 0;
+#endif
+}
+
+int sdl3vk_set_fullscreen(int on) {
+    if (sdl3vk_fullscreen() < 0) return 0;
+    if (!SDL_SetWindowFullscreen(s_win, on != 0)) {
+        fprintf(stderr, "sdl3vk: fullscreen %s could not be applied: %s\n",
+                on ? "on" : "off", SDL_GetError());
+        return 0;
+    }
+    /* SDL applies the mode asynchronously; wait for it so the next overlay frame reads the
+     * state the person chose. A window manager that never confirms only costs SDL's timeout. */
+    (void)SDL_SyncWindow(s_win);
+    fprintf(stderr, "sdl3vk: fullscreen %s\n", on ? "on" : "off");
+    return 1;
 }
 
 void sdl3vk_wait_events(uint32_t timeout_ms) {
@@ -2562,6 +3132,16 @@ void sdl3vk_shutdown(void) {
     cap_free_buffer(&s_cap);
     cap_free_buffer(&s_probe);
     prescale_free();
+    /* A recorded picture no VBLANK has written yet goes to the recorder before its buffer goes. */
+    if (s_rec_pending) {
+        if (s_dev) sr_videorec_resolve_pending();
+        else sr_videorec_frame_pending(NULL);
+        s_rec_pending = NULL;
+    }
+    for (int i = 0; i < PRESENT_FRAMES; i++) cap_free_buffer(&s_rec_buf[i]);
+    rec_image_free(&s_rec_target);
+    rec_image_free(&s_rec_pre);
+    s_rec_w = s_rec_h = 0;
     for (int i = PRESENT_FRAMES - 1; i >= 0; i--) {
         PresentFrame *f = &s_frame[i];
         if (f->fbimg)       vkDestroyImage(s_dev, f->fbimg, NULL);
@@ -2577,6 +3157,9 @@ void sdl3vk_shutdown(void) {
         memset(f, 0, sizeof(*f));   /* its command buffer is freed with the pool */
     }
     s_frame_cursor = 0;
+    if (s_pts_pool)    vkDestroyQueryPool(s_dev, s_pts_pool, NULL);
+    s_pts_pool = VK_NULL_HANDLE;
+    s_pts_timed = s_pts_ns = 0;
     if (s_fence)       vkDestroyFence(s_dev, s_fence, NULL);
     if (s_pool)        vkDestroyCommandPool(s_dev, s_pool, NULL);
     if (s_dev)         vkDestroyDevice(s_dev, NULL);
@@ -2599,6 +3182,7 @@ void sdl3vk_shutdown(void) {
     }
     if (s_pad)         { SDL_CloseGamepad(s_pad); s_pad = NULL; }
     if (s_win)         { SDL_DestroyWindow(s_win); s_win = NULL; }
+    s_mouse_captured = false;                      /* the window took its grab with it */
     if (s_sdl_subsystems) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
         s_sdl_subsystems = 0;

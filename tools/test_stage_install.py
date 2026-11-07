@@ -12,6 +12,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import struct
 import subprocess
@@ -26,6 +27,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 import stage_install  # noqa: E402
+from makefile_text import read_makefile  # noqa: E402
 
 _GIT_ENV = {
     "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
@@ -147,6 +149,134 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(arguments, "--ui=next")
         self.assertEqual(Path(workdir), (dest / "bin").resolve())
 
+    @unittest.skipUnless(os.name == "nt", "Windows shortcuts")
+    def test_shortcut_carries_the_player_app_id(self):
+        """#2006: the .lnk's System.AppUserModel.ID is the launcher's and the game window's, so a
+        pinned shortcut and both windows make one taskbar group."""
+        dest = self.root / "install"
+        stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        link = self.root / "Nakagawa Recomp.lnk"
+        stage_install.write_shortcut(link, dest)
+        self.assertEqual(stage_install.read_shortcut_app_id(link), "Nakagawa.Recomp")
+
+
+class ShortcutFlagTests(unittest.TestCase):
+    """--desktop-shortcut and --start-menu-shortcut through main(), with the install and the
+    shortcut writer stubbed, so the routing is checked on any host."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.desktop = self.root / "Desktop"
+        self.programs = self.root / "Start Menu" / "Programs"
+        self.written: list[Path] = []
+        self.recorded: list[list[Path]] = []
+
+        def fake_write(shortcut, dest, arguments=stage_install.DEFAULT_ARGUMENTS):
+            self.written.append(Path(shortcut))
+
+        def fake_record(dest, paths):
+            self.recorded.append([Path(path) for path in paths])
+
+        for patcher in (
+            mock.patch.object(stage_install, "stage_install",
+                              return_value={"player": "bin/nakagawa_player.exe",
+                                            "source_commit": "0" * 40}),
+            mock.patch.object(stage_install, "desktop_folder", return_value=self.desktop),
+            mock.patch.object(stage_install, "start_menu_folder", return_value=self.programs),
+            mock.patch.object(stage_install, "write_shortcut", side_effect=fake_write),
+            mock.patch.object(stage_install, "record_integration", side_effect=fake_record),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _main(self, *flags: str) -> int:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return int(stage_install.main(["--dest", str(self.root / "install"), *flags]))
+
+    def test_start_menu_shortcut_goes_to_the_programs_folder(self):
+        with mock.patch.object(stage_install, "IS_WINDOWS", True):
+            self.assertEqual(self._main("--start-menu-shortcut"), 0)
+        self.assertEqual(self.written, [self.programs / "Nakagawa Recomp.lnk"])
+        self.assertEqual(self.recorded, [[self.programs / "Nakagawa Recomp.lnk"]])
+
+    def test_both_shortcuts_are_written_and_recorded_together(self):
+        with mock.patch.object(stage_install, "IS_WINDOWS", True):
+            self.assertEqual(self._main("--desktop-shortcut", "--start-menu-shortcut"), 0)
+        both = [self.desktop / "Nakagawa Recomp.lnk", self.programs / "Nakagawa Recomp.lnk"]
+        self.assertEqual(self.written, both)
+        self.assertEqual(self.recorded, [both], "one marker update lists both shortcuts")
+
+    def test_no_flag_writes_no_shortcut(self):
+        with mock.patch.object(stage_install, "IS_WINDOWS", True):
+            self.assertEqual(self._main(), 0)
+        self.assertEqual(self.written, [])
+        self.assertEqual(self.recorded, [])
+
+    def test_start_menu_flag_on_linux_writes_the_application_entry(self):
+        entry = self.root / "applications" / "nakagawa-recomp.desktop"
+        icon = self.root / "icons" / "nakagawa-recomp.png"
+        with mock.patch.object(stage_install, "IS_WINDOWS", False), \
+                mock.patch.object(stage_install, "write_desktop_entry",
+                                  return_value=[entry, icon]) as write_entry:
+            self.assertEqual(self._main("--start-menu-shortcut"), 0)
+        write_entry.assert_called_once()
+        self.assertEqual(self.written, [])
+        self.assertEqual(self.recorded, [[entry, icon]])
+
+
+class AppIdentityTests(unittest.TestCase):
+    """#2006: the launcher (src/core/nk_launch.h), the game window (sdl3vk.c, which does not
+    include that header) and the shortcuts this tool writes carry one identity."""
+
+    @staticmethod
+    def _defines(path: Path, prefix: str) -> dict[str, str]:
+        text = path.read_text(encoding="utf-8")
+        return {name: value for name, value in
+                re.findall(rf'#define {prefix}(\w+) "([^"]*)"', text)}
+
+    def test_launcher_game_and_shortcuts_share_one_identity(self):
+        launcher = self._defines(stage_install.ROOT / "src" / "core" / "nk_launch.h", "NK_APP_")
+        game = self._defines(stage_install.ROOT / "src" / "rt" / "gpu_sdl3vk" / "sdl3vk.c",
+                             "SDL3VK_APP_")
+        self.assertEqual(launcher, {"USER_MODEL_ID": "Nakagawa.Recomp",
+                                    "DESKTOP_ID": "nakagawa-recomp",
+                                    "NAME": "Nakagawa Recomp"})
+        self.assertEqual(game, launcher, "the game window's copies equal the launcher's")
+        self.assertEqual(stage_install.APP_USER_MODEL_ID, launcher["USER_MODEL_ID"])
+        self.assertEqual(stage_install.APP_DESKTOP_ID, launcher["DESKTOP_ID"])
+        self.assertEqual(stage_install.DESKTOP_ENTRY_NAME, launcher["DESKTOP_ID"] + ".desktop")
+
+    def test_launcher_sets_the_identity_before_anything_else_in_main(self):
+        # The launcher's process takes the shared ID (player_host.c) as main()'s first act after
+        # the UTF-8 setup, before any window or SDL message box can open under another ID.
+        host = (stage_install.ROOT / "src" / "player" / "player_host.c").read_text(encoding="utf-8")
+        body = host[host.index("void player_host_set_app_identity(void) {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn('SetCurrentProcessExplicitAppUserModelID(L"" NK_APP_USER_MODEL_ID)', body)
+        self.assertIn("SDL_SetAppMetadata(NK_APP_NAME, NULL, NK_APP_DESKTOP_ID)", body)
+        main = (stage_install.ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        start = main[main.index("int main(int argc, char *argv[]) {"):]
+        calls = [line.strip() for line in start.splitlines()[1:]
+                 if line.strip() and not line.strip().startswith(("/*", "*", "//"))
+                 and not line.strip().endswith("*/")]
+        self.assertEqual(calls[:2], ["(void)nk_platform_init_utf8_main(&argc, &argv);",
+                                     "player_host_set_app_identity();"])
+
+    def test_shortcut_path_reaches_the_shell_with_backslashes(self):
+        # MSYS2's Python joins paths with '/', and the shell's property store refuses those.
+        from pathlib import PurePosixPath
+        self.assertEqual(stage_install._shell_path(PurePosixPath("D:/Games/My Apps/Nakagawa Recomp.lnk")),
+                         "D:\\Games\\My Apps\\Nakagawa Recomp.lnk")
+
+    def test_app_user_model_id_follows_the_windows_rules(self):
+        # Windows: at most 128 characters, no spaces, dot-separated sections.
+        value = stage_install.APP_USER_MODEL_ID
+        self.assertLessEqual(len(value), 128)
+        self.assertNotIn(" ", value)
+        self.assertGreaterEqual(value.count("."), 1)
+
 
 class LinuxInstallTests(unittest.TestCase):
     """The Linux branch, exercised on any host by patching the platform flag."""
@@ -177,6 +307,22 @@ class LinuxInstallTests(unittest.TestCase):
             stage_install.stage_install(self.root / "x", self.root / "absent",
                                         repo=self.repo)
 
+    def test_integration_list_keeps_earlier_shortcuts(self):
+        # #2006 review: a second run with only one shortcut flag, or staging again, must not
+        # forget a shortcut an earlier run wrote outside the install folder.
+        dest = self.root / "install"
+        stage_install.stage_install(dest, self.player, repo=self.repo)
+        first, second = self.root / "Desktop.lnk", self.root / "Programs.lnk"
+        stage_install.record_integration(dest, [first])
+        stage_install.record_integration(dest, [second, first])
+        marker = dest / stage_install.MARKER
+        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["integration"],
+                         [str(first), str(second)])
+        record = stage_install.stage_install(dest, self.player, repo=self.repo)
+        self.assertEqual(record["integration"], [str(first), str(second)])
+        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["integration"],
+                         [str(first), str(second)])
+
     def test_linux_stage_skips_the_pe_runtime(self):
         dest = self.root / "install"
         record = stage_install.stage_install(dest, self.player, repo=self.repo)
@@ -203,6 +349,9 @@ class LinuxInstallTests(unittest.TestCase):
         self.assertTrue(Path(section["TryExec"]).is_file())
         self.assertEqual(Path(section["Icon"]), icon)
         self.assertTrue(icon.is_file())
+        # #2006: the window class SDL gives the launcher and the game, so the desktop puts
+        # their windows under this entry.
+        self.assertEqual(section["StartupWMClass"], "nakagawa-recomp")
 
     def test_desktop_icon_is_a_256_pixel_png(self):
         _, icon = stage_install.write_desktop_entry(self.root / "install")
@@ -413,6 +562,243 @@ _SOURCES = f"nakagawa-recomp-{_V}-prerequisite-sources.zip"
 _GOOD_ASSETS = [_PLAYER, f"{_PLAYER}.sha256", f"{_PLAYER}.sha256.minisig", _SOURCES, f"{_SOURCES}.sha256"]
 
 
+class UninstallTests(unittest.TestCase):
+    """--uninstall removes what the install wrote and never the user's data (#2003, #324)."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.repo = _fixture_repo(self.root)
+        self.player = self.root / "nakagawa_player.exe"
+        self.player.write_bytes(b"player")
+        self.dest = self.root / "Nakagawa Recomp"
+        stage_install.stage_install(self.dest, self.player, repo=self.repo,
+                                    stage_dlls=_fake_stager)
+        # The per-user folders sit beside the install, as %LOCALAPPDATA%\Nakagawa does.
+        self.user = self.root / "LocalAppData" / "Nakagawa"
+        for leaf, name in (("data", "library.json"), ("saves", "UCUS00000.sav"),
+                           ("config", "settings.json"), ("logs", "game.txt")):
+            (self.user / leaf).mkdir(parents=True)
+            (self.user / leaf / name).write_text(leaf, encoding="utf-8")
+        self.shortcuts = self.root / "Programs"
+        self.shortcuts.mkdir()
+        self.lnk = self.shortcuts / stage_install.SHORTCUT_NAME
+        self.lnk.write_bytes(b"lnk")
+        stage_install.record_integration(self.dest, [self.lnk])
+
+    def _user_files(self):
+        return sorted(str(path.relative_to(self.user)) for path in self.user.rglob("*")
+                      if path.is_file())
+
+    def test_removes_the_install_its_marker_and_its_shortcuts(self):
+        summary = stage_install.uninstall(self.dest)
+        self.assertFalse(self.dest.exists(), "an emptied install folder goes too")
+        self.assertFalse(self.lnk.exists())
+        self.assertEqual(summary["removed_integration"], [str(self.lnk)])
+        self.assertEqual(summary["left_in_folder"], [])
+
+    def test_never_touches_the_per_user_folders(self):
+        before = self._user_files()
+        self.assertEqual(len(before), 4)
+        stage_install.uninstall(self.dest)
+        self.assertEqual(self._user_files(), before)
+
+    def test_a_file_the_user_added_beside_the_install_survives(self):
+        (self.dest / "notes.txt").write_text("mine", encoding="utf-8")
+        summary = stage_install.uninstall(self.dest)
+        self.assertEqual((self.dest / "notes.txt").read_text(encoding="utf-8"), "mine")
+        self.assertFalse((self.dest / "bin").exists())
+        self.assertFalse((self.dest / stage_install.MARKER).exists())
+        self.assertEqual(summary["left_in_folder"], ["notes.txt"])
+
+    def test_dry_run_lists_and_removes_nothing(self):
+        summary = stage_install.uninstall(self.dest, dry_run=True)
+        self.assertTrue(summary["dry_run"])
+        self.assertIn(str(self.dest / "bin"), summary["removed"])
+        self.assertIn(str(self.dest / "source"), summary["removed"])
+        self.assertTrue((self.dest / "bin" / "SDL3.dll").is_file())
+        self.assertTrue(self.lnk.is_file())
+        self.assertTrue((self.dest / stage_install.MARKER).is_file())
+
+    def test_a_folder_without_the_marker_is_refused_untouched(self):
+        other = self.root / "someone-elses"
+        (other / "bin").mkdir(parents=True)
+        (other / "bin" / "keep.dll").write_bytes(b"keep")
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_DESTINATION_NOT_OWNED"):
+            stage_install.uninstall(other)
+        self.assertTrue((other / "bin" / "keep.dll").is_file())
+
+    def test_an_edited_marker_cannot_delete_another_file(self):
+        precious = self.root / "Documents" / "thesis.docx"
+        precious.parent.mkdir()
+        precious.write_bytes(b"thesis")
+        folder = self.root / "somefolder"
+        folder.mkdir()
+        marker = self.dest / stage_install.MARKER
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        record["integration"] += [str(precious), str(folder), "relative/Nakagawa Recomp.lnk"]
+        marker.write_text(json.dumps(record), encoding="utf-8")
+        summary = stage_install.uninstall(self.dest)
+        self.assertTrue(precious.is_file())
+        self.assertTrue(folder.is_dir())
+        self.assertEqual(summary["skipped_integration"],
+                         [str(precious), str(folder), "relative/Nakagawa Recomp.lnk"])
+        self.assertFalse(self.lnk.exists(), "the entry this tool wrote still goes")
+
+    def test_a_shortcut_already_deleted_by_hand_is_not_an_error(self):
+        self.lnk.unlink()
+        summary = stage_install.uninstall(self.dest)
+        self.assertEqual(summary["removed_integration"], [])
+        self.assertFalse(self.dest.exists())
+
+    def test_half_finished_staging_and_old_copies_go(self):
+        (self.dest / ".staging-1234").mkdir()
+        (self.dest / ".staging-1234" / "x").write_bytes(b"x")
+        (self.dest / "bin.old").mkdir()
+        stage_install.uninstall(self.dest)
+        self.assertFalse(self.dest.exists())
+
+    def test_portable_data_and_markers_stay(self):
+        (self.dest / "bin" / "portable.txt").write_text("", encoding="utf-8")
+        (self.dest / "bin" / "data" / "saves").mkdir(parents=True)
+        save = self.dest / "bin" / "data" / "saves" / "UCUS00000.sav"
+        save.write_bytes(b"save")
+        summary = stage_install.uninstall(self.dest)
+        self.assertEqual(save.read_bytes(), b"save")
+        self.assertTrue((self.dest / "bin" / "portable.txt").is_file())
+        self.assertFalse((self.dest / "bin" / "SDL3.dll").exists())
+        self.assertFalse((self.dest / "bin" / "nakagawa_player.exe").exists())
+        self.assertFalse((self.dest / "source").exists())
+        self.assertTrue((self.dest / stage_install.MARKER).is_file())
+        self.assertEqual(sorted(Path(kept).name for kept in summary["kept"]),
+                         ["data", "portable.txt"])
+
+    def test_a_second_uninstall_of_a_finished_one_is_refused(self):
+        stage_install.uninstall(self.dest)
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_DESTINATION_NOT_OWNED"):
+            stage_install.uninstall(self.dest)
+
+    def test_a_link_inside_the_install_is_unlinked_not_followed(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("keep", encoding="utf-8")
+        try:
+            os.symlink(outside, self.dest / "source" / "escape", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("this host cannot create symbolic links")
+        stage_install.uninstall(self.dest)
+        self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep")
+
+    @unittest.skipUnless(os.name == "nt", "directory junctions are a Windows feature")
+    def test_a_junction_inside_the_install_is_removed_not_followed(self):
+        # A junction needs no privilege on Windows, so this runs where the symlink test is skipped.
+        outside = self.root / "junction-target"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("keep", encoding="utf-8")
+        junction = self.dest / "source" / "escape"
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+                              capture_output=True, text=True, check=False)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        stage_install.uninstall(self.dest)
+        self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep")
+        self.assertFalse(junction.exists())
+
+    def _rewrite_marker(self, change):
+        marker = self.dest / stage_install.MARKER
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        change(record)
+        marker.write_text(json.dumps(record), encoding="utf-8")
+
+    def _refused_untouched(self, dest):
+        before = sorted(str(path) for path in dest.rglob("*"))
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_MARKER_INVALID"):
+            stage_install.uninstall(dest)
+        self.assertEqual(sorted(str(path) for path in dest.rglob("*")), before)
+        self.assertTrue(self.lnk.is_file())
+
+    def test_a_marker_that_is_not_json_is_refused_untouched(self):
+        (self.dest / stage_install.MARKER).write_text("not json {", encoding="utf-8")
+        self._refused_untouched(self.dest)
+
+    def test_a_marker_that_is_not_an_object_is_refused_untouched(self):
+        (self.dest / stage_install.MARKER).write_text("[]", encoding="utf-8")
+        self._refused_untouched(self.dest)
+
+    def test_a_marker_without_the_keys_the_installer_writes_is_refused_untouched(self):
+        (self.dest / stage_install.MARKER).write_text("{}", encoding="utf-8")
+        self._refused_untouched(self.dest)
+
+    def test_a_marker_listing_a_path_outside_the_install_is_refused_untouched(self):
+        for change in (
+            lambda r: r.update(player="bin/../../elsewhere.exe"),
+            lambda r: r.update(player="/abs/nakagawa_player.exe"),
+            lambda r: r.update(runtime_files=["..\\..\\evil.dll"]),
+            lambda r: r.update(runtime_files=["sub/evil.dll"]),
+            lambda r: r.update(schema_version="2"),
+            lambda r: r.update(schema_version=stage_install.SCHEMA_VERSION + 1),
+            lambda r: r.update(integration="not-a-list"),
+        ):
+            with self.subTest(change=change):
+                (self.dest / stage_install.MARKER).unlink()
+                stage_install._write_marker(self.dest, {
+                    "schema_version": stage_install.SCHEMA_VERSION, "source_commit": "x",
+                    "platform": "windows", "player": "bin/nakagawa_player.exe",
+                    "runtime_files": [], "integration": [str(self.lnk)]})
+                self._rewrite_marker(change)
+                self._refused_untouched(self.dest)
+
+    def test_a_drive_root_or_the_home_folder_is_refused(self):
+        root = Path(self.root.anchor)
+        for folder in (root, Path.home(), Path.home().parent):
+            with self.subTest(folder=str(folder)), \
+                    self.assertRaisesRegex(stage_install.InstallError, "UNINSTALL_DESTINATION_REFUSED"):
+                stage_install.plan_uninstall(folder)
+
+    def test_portable_data_in_a_leftover_old_bin_stays(self):
+        old = self.dest / "bin.old"
+        (old / "data" / "saves").mkdir(parents=True)
+        (old / "data" / "saves" / "UCUS00000.sav").write_bytes(b"save")
+        (old / "portable.txt").write_text("", encoding="utf-8")
+        (old / "SDL3.dll").write_bytes(b"old")
+        summary = stage_install.uninstall(self.dest)
+        self.assertEqual((old / "data" / "saves" / "UCUS00000.sav").read_bytes(), b"save")
+        self.assertTrue((old / "portable.txt").is_file())
+        self.assertFalse((old / "SDL3.dll").exists())
+        self.assertTrue((self.dest / stage_install.MARKER).is_file())
+        self.assertEqual(sorted(Path(kept).name for kept in summary["kept"]),
+                         ["data", "portable.txt"])
+
+    def test_the_install_goes_before_its_shortcuts(self):
+        order = []
+        real = stage_install._remove_path
+
+        def spy(path):
+            order.append(Path(path))
+            real(path)
+
+        with mock.patch.object(stage_install, "_remove_path", spy):
+            stage_install.uninstall(self.dest)
+        self.assertEqual(order[-1], self.lnk)
+        self.assertEqual(order[0], self.dest / "bin")
+
+    def test_the_command_line_reports_json_and_flags_misuse(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = stage_install.main(["--uninstall", "--dest", str(self.dest), "--dry-run"])
+        self.assertEqual(code, 0)
+        event = json.loads(out.getvalue())
+        self.assertEqual(event["event"], "uninstall")
+        self.assertTrue(event["dry_run"])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = stage_install.main(["--uninstall", "--dest", str(self.root / "nothing")])
+        self.assertEqual(code, 1)
+        self.assertIn("INSTALL_DESTINATION_NOT_OWNED", err.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            stage_install.main(["--dry-run", "--dest", str(self.dest)])
+
+
 class ReleaseAssetContractTests(unittest.TestCase):
     """One player ZIP per platform, with every other file droppable by name (#1876)."""
 
@@ -499,7 +885,7 @@ class ReleaseAssetContractTests(unittest.TestCase):
 class ReproducibleBuildTests(unittest.TestCase):
     def test_player_links_carry_the_reproducible_link_flag(self):
         """Without it the PE header holds the link time and two builds of one commit differ (#324)."""
-        makefile = (stage_install.ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile = read_makefile(stage_install.ROOT)
         for target in ("$(PLAYER_EXE):", "$(PLAYER_UI_TEST_EXE):"):
             start = makefile.index(f"\n{target} $(PLAYER_SRCS)")
             recipe = makefile[start:makefile.index("\n\n", start)]

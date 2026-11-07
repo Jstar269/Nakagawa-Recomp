@@ -11,68 +11,9 @@
  * (#307). */
 
 #include "hle_internal.h"
+#include "sas_envelope.h"
+#include "sas_resample.h"   /* Ace Mode's sas=sinc (#2054) */
 
-#define PSMF_AV_CONTENT_MAX 8192u            /* one sceMpegAtracDecode block */
-#ifdef SR_MPEG_MEDIA_SELFTEST
-int s_psmf_av_test_queue;
-#endif
-
-extern int sr_audio_queued(int ch);
-int psmf_av_queue_frames(int ch) {
-#ifdef SR_MPEG_MEDIA_SELFTEST
-    if (s_psmf_av_test_queue_set) return s_psmf_av_test_queue;
-#endif
-    return sr_audio_queued(ch);
-}
-
-/* FNV-1a of [addr, +bytes), 0 when the bytes are all zero or cannot be read: a silent block is
- * not told apart from any other. */
-uint64_t psmf_av_content(uint32_t addr, uint32_t bytes) {
-    static uint8_t block[PSMF_AV_CONTENT_MAX];
-    if (!bytes || bytes > PSMF_AV_CONTENT_MAX || !sr_guest_copy_in(block, addr, bytes)) return 0;
-    uint64_t h = 1469598103934665603ull;
-    unsigned any = 0;
-    for (uint32_t i = 0; i < bytes; i++) {
-        any |= block[i];
-        h = (h ^ block[i]) * 1099511628211ull;
-    }
-    return any ? (h ? h : 1u) : 0;
-}
-
-/* A submitted buffer that holds no pending block where it was written may hold one the guest
- * copied there: each block-sized piece of it meets the oldest pending block with the same
- * bytes. */
-void psmf_av_audio_by_content(PsmfAvStream *st, int ch, uint32_t buf, uint32_t bytes,
-                                     uint32_t bytes_per_frame, uint32_t rate_hz) {
-    uint32_t size = 0;
-    for (unsigned i = 0; i < PSMF_AV_PENDING && !size; i++)
-        if (st->pend[i].live && st->pend[i].content) size = st->pend[i].content_bytes;
-    if (!size || bytes < size) return;
-    int ticked = 0, queued = -1;
-    int64_t now = 0, lead_us = 0;
-    for (uint32_t off = 0; bytes - off >= size; off += size) {
-        uint64_t h = psmf_av_content(buf + off, size);
-        if (!h) continue;
-        PsmfAvEntry *best = NULL;
-        for (unsigned i = 0; i < PSMF_AV_PENDING; i++) {
-            PsmfAvEntry *e = &st->pend[i];
-            if (e->live && e->content == h && e->content_bytes == size && (!best || e->seq < best->seq))
-                best = e;
-        }
-        if (!best) continue;
-        if (!ticked) {
-            queued = psmf_av_queue_frames(ch);      /* lead ahead of this buffer, read before the push */
-            now = psmf_av_now_us();
-            lead_us = queued >= 0 ? (int64_t)queued * 1000000 / 44100 : 0;
-            psmf_av_window_tick(now);
-            ticked = 1;
-        }
-        int64_t play = now + lead_us + (int64_t)(off / bytes_per_frame) * 1000000 / (int64_t)rate_hz;
-        st->content_matched++;
-        psmf_av_match(st, best, play, queued >= 0);
-    }
-    if (ticked) st->boundary_hits++;
-}
 /* SR_AUDIOSTAT aggregate counters (investigation telemetry). Declared here because
  * the ATRAC decode path and the vblank exit dump both precede the SAS definitions. */
 unsigned long g_sas_calls, g_sas_calls_add, g_sas_pre_nonzero, g_sas_post_nonzero;
@@ -124,6 +65,15 @@ static SrAudioResampler s_audio_src_resampler;
 #define SCE_AUDIO_ERROR_INVALID_FORMAT  0x80260007u
 #define SCE_AUDIO_ERROR_NOT_RESERVED    0x80260008u
 #define SCE_AUDIO_ERROR_INVALID_VOL     0x8026000bu
+/* The largest volume the Output2/SRC channel's blocking output accepts. PPSSPP-derived and
+ * UNMEASURED on a PSP (#1986): hrydgard/ppsspp caa91b54b535, Core/HLE/sceAudio.cpp,
+ * sceAudioOutput2OutputBlocking and sceAudioSRCOutputBlocking refuse only above 0xFFFFF
+ * ("0xFFFFF, not 0xFFFF!"). The PSP probes PSP-AUDIO-001 and PSP-HLE-AUDIO-SRC-001 used
+ * only volume 0x8000, the unity gain (PSPSDK PSP_AUDIO_VOLUME_MAX), which the runtime had
+ * taken as the bound. A larger value amplifies, and the mixer clamps the result.
+ * sceVaudioOutputBlocking shares the bound through audio_src_output by analogy only: PPSSPP's
+ * Core/HLE/sceVaudio.cpp checks no Vaudio volume. */
+#define SCE_AUDIO_OUTPUT2_VOLUME_MAX    0x000fffffu
 /* Output2 release while samples are still queued. Measured on PSP-3001, firmware 6.6.1
  * (2026-10-01, issue #311); the raw records stay private. */
 #define SCE_AUDIO_ERROR_OUTPUT2_BUSY    0x80268002u
@@ -173,8 +123,8 @@ static uint32_t h_AudioSetChannelDataLen(CpuState *s) {
  * output levels for a reserved regular channel. Public behaviour reference:
  * PSPSDK src/audio/pspaudio.h (sceAudioChangeChannelVolume) and PPSSPP
  * Core/HLE/sceAudio.cpp, which keep per-channel volumes as channel state.
- * Errors reuse the neighbouring regular-audio codes, and the 0x8000 volume
- * ceiling is the same bound h_AudioOutput2Blocking already enforces. Whether
+ * Errors reuse the neighbouring regular-audio codes. The 0x8000 volume ceiling is
+ * unmeasured: PPSSPP's docs/sceAudio.md records 0xFFFF for this call. Whether
  * the retained levels multiply the per-call volumes handed to the
  * OutputBlocking family, and the power-on default level, are UNMEASURED here:
  * mixing still consumes the per-call volumes only. */
@@ -194,6 +144,48 @@ static uint32_t h_AudioChangeChannelVolume(CpuState *s) {
  * slightly slower than the device every iteration (sleep + decode time), so streams drifted
  * behind (voice lagging subtitles) and underran (crackle). */
 extern int sr_audio_queued(int ch);
+
+/* ---- the audio device under the deterministic clock (#2037) --------------------------------
+ *
+ * The host mixer drains its queue in host time. A guest that paces itself against the queue
+ * (sceAudioOutput*Blocking waits out the lead beyond two periods, sceAudioGetChannelRestLength
+ * and the PSMF player's audio lead report it) then sees guest time depend on how fast the host
+ * ran: a run that is faster than real time never sees the queue drain, so each blocking output
+ * waits out the same lead again, guest time races ahead of the work, and the title sits in its
+ * music while its clock runs. Under the deterministic clock the queue the guest sees is the
+ * device the PSP has: it plays 44100 frames a second of GUEST time from the first push. The
+ * host mixer still plays what it is given, and its own depth is only consulted for "is there an
+ * output at all" (-1 stays -1, so a run without audio keeps its open-loop pacing). */
+static uint32_t s_vq_frames[9];
+static uint64_t s_vq_last_us[9];
+static uint64_t s_vq_carry[9];   /* microsecond-frames not yet a whole frame, denominator 1e6 */
+
+static void audio_vq_drain(uint32_t slot) {
+    uint64_t now = now_usec();
+    uint64_t dt = now > s_vq_last_us[slot] ? now - s_vq_last_us[slot] : 0u;
+    s_vq_last_us[slot] = now;
+    if (!s_vq_frames[slot]) { s_vq_carry[slot] = 0u; return; }
+    uint64_t scaled = dt * 44100u + s_vq_carry[slot];
+    uint64_t drained = scaled / 1000000u;
+    s_vq_carry[slot] = scaled % 1000000u;
+    if (drained >= s_vq_frames[slot]) { s_vq_frames[slot] = 0u; s_vq_carry[slot] = 0u; }
+    else s_vq_frames[slot] -= (uint32_t)drained;
+}
+
+/* The queue depth in frames the guest sees on `ch`, or -1 when the host has no output for it. */
+int hle_audio_queued(int ch) {
+    int host = sr_audio_queued(ch);
+    if (host < 0 || ch < 0 || ch > 8 || !sched_clock_deterministic()) return host;
+    audio_vq_drain((uint32_t)ch);
+    return s_vq_frames[ch] > (uint32_t)INT_MAX ? INT_MAX : (int)s_vq_frames[ch];
+}
+
+static void audio_vq_pushed(int ch, int nframes) {
+    if (ch < 0 || ch > 8 || nframes <= 0 || !sched_clock_deterministic()) return;
+    audio_vq_drain((uint32_t)ch);
+    uint64_t sum = (uint64_t)s_vq_frames[ch] + (uint32_t)nframes;
+    s_vq_frames[ch] = sum > UINT32_MAX ? UINT32_MAX : (uint32_t)sum;
+}
 static uint32_t s_audio_delay_carry[9];
 
 /* Convert a frame delta to microseconds without discarding the 44.1 kHz fractional carry.
@@ -302,6 +294,9 @@ void hle_audio_guest_reset(void) {
     s_audio_src_freq = 0;
     sr_audio_resampler_destroy(&s_audio_src_resampler);
     memset(s_audio_delay_carry, 0, sizeof(s_audio_delay_carry));
+    memset(s_vq_frames, 0, sizeof(s_vq_frames));
+    memset(s_vq_last_us, 0, sizeof(s_vq_last_us));
+    memset(s_vq_carry, 0, sizeof(s_vq_carry));
     memset(g_audio_bufs, 0, sizeof(g_audio_bufs));
     memset(g_audio_nbufs, 0, sizeof(g_audio_nbufs));
     s_lead_last_vbl = 0u;
@@ -361,10 +356,12 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
          * which is exactly the case the counters exist to describe. */
         psmf_av_audio_submit((int)ch, buf, bytes, mono ? 2u : 4u, 44100u);   /* queue lead read before the push */
         uint64_t out_started = sr_perf_now_ns();
+        sr_videorec_audio((int)ch, lr, (int)n, voll, volr, sched_vtime_us());
         sr_audio_push((int)ch, lr, (int)n, voll, volr);
+        audio_vq_pushed((int)ch, (int)n);
         if (out_started) sr_perf_audio_output(out_started, n);
     }
-    int q = sr_audio_queued((int)ch);
+    int q = hle_audio_queued((int)ch);
     if (q < 0 || n == 0) {                 /* no host audio: open-loop pacing as before */
         sched_delay_current(n ? audio_frames_to_us(ch, n) : 1000u);
         return n;
@@ -384,7 +381,7 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
      * boundary latency a whole period of headroom while still pacing against the
      * device's real drain; n is bounded by the reserve/SetChannelDataLen
      * contracts (<= 65536 frames), so 2u * n cannot wrap. */
-    while ((q = sr_audio_queued((int)ch)) >= 0 && (uint32_t)q > 2u * n)
+    while ((q = hle_audio_queued((int)ch)) >= 0 && (uint32_t)q > 2u * n)
         sched_delay_current(audio_frames_to_us(ch, (uint32_t)q - 2u * n));
     audio_note_lead((int)ch, q);
     return n;
@@ -409,7 +406,7 @@ static uint32_t h_AudioChangeChannelConfig(CpuState *s) {
 static uint32_t h_AudioRestLen(CpuState *s) {
     (void)s;
     if (A0 >= 8u) return SCE_AUDIO_ERROR_INVALID_CH;
-    int q = sr_audio_queued((int)A0);
+    int q = hle_audio_queued((int)A0);
     return q > 0 ? (uint32_t)q : 0u;
 }
 
@@ -456,7 +453,7 @@ static uint32_t h_AudioOutput2Reserve(CpuState *s) {
 static uint32_t h_AudioOutput2Release(CpuState *s) {
     (void)s;
     if (!audio_output2_reserved()) return SCE_AUDIO_ERROR_NOT_RESERVED;
-    if (sr_audio_queued(AUDIO_OUTPUT2_CHANNEL) > 0) return SCE_AUDIO_ERROR_OUTPUT2_BUSY;
+    if (hle_audio_queued(AUDIO_OUTPUT2_CHANNEL) > 0) return SCE_AUDIO_ERROR_OUTPUT2_BUSY;
     s_audio_ch[AUDIO_OUTPUT2_CHANNEL] = 0;
     s_audio_len[AUDIO_OUTPUT2_CHANNEL] = 0;
     return 0;
@@ -469,14 +466,14 @@ static uint32_t h_AudioOutput2ChangeLength(CpuState *s) {
 }
 static uint32_t h_AudioOutput2Blocking(CpuState *s) {
     if (!audio_output2_reserved()) return SCE_AUDIO_ERROR_NOT_RESERVED;
-    if (A0 > 0x8000u) return SCE_AUDIO_ERROR_INVALID_VOL;
+    if (A0 > SCE_AUDIO_OUTPUT2_VOLUME_MAX) return SCE_AUDIO_ERROR_INVALID_VOL;
     (void)audio_output(s, AUDIO_OUTPUT2_CHANNEL, A1, (int)A0, (int)A0);
     return 0;
 }
 static uint32_t h_AudioOutput2Rest(CpuState *s) {
     (void)s;
     if (!audio_output2_reserved()) return SCE_AUDIO_ERROR_NOT_RESERVED;
-    int queued = sr_audio_queued(AUDIO_OUTPUT2_CHANNEL);
+    int queued = hle_audio_queued(AUDIO_OUTPUT2_CHANNEL);
     return queued > 0 ? (uint32_t)queued : 0u;
 }
 
@@ -493,8 +490,8 @@ static uint32_t h_AudioOutput2Rest(CpuState *s) {
  *
  * Not measured, so held to what is already modelled or refused in the open: the upper
  * sample-count bound (the Output2 range 17..4111 is reused), channel counts other than 1, 2
- * and 4 (refused with the code measured for 4), the volume bound (the Output2 bound 0x8000 is
- * reused), and rates other than 44100 and 48000 (refused with the code measured for an
+ * and 4 (refused with the code measured for 4), the volume bound (SCE_AUDIO_OUTPUT2_VOLUME_MAX,
+ * shared with Output2), and rates other than 44100 and 48000 (refused with the code measured for an
  * unsupported channel count, and a message). The host mixer runs at 44100 Hz; 48000 Hz SRC
  * blocks pass through a streaming band-limited converter while retaining source-rate pacing. */
 static uint32_t audio_src_reserve(int owner, uint32_t samples, uint32_t freq, uint32_t channels) {
@@ -532,7 +529,7 @@ static uint32_t audio_src_release(int owner) {
 /* (vol, buf) blocking output: returns the reserved sample count. */
 static uint32_t audio_src_output(CpuState *s, int owner, uint32_t vol, uint32_t buf) {
     if (s_audio_src_owned != owner) return SCE_AUDIO_ERROR_NOT_RESERVED;
-    if (vol > 0x8000u) return SCE_AUDIO_ERROR_INVALID_VOL;
+    if (vol > SCE_AUDIO_OUTPUT2_VOLUME_MAX) return SCE_AUDIO_ERROR_INVALID_VOL;
     if (s_audio_src_freq == 44100u)
         return audio_output(s, AUDIO_OUTPUT2_CHANNEL, buf, (int)vol, (int)vol);
 
@@ -563,8 +560,11 @@ static uint32_t audio_src_output(CpuState *s, int owner, uint32_t vol, uint32_t 
             &s_audio_src_resampler, converted, 4111u);
         if (converted_frames > 0u) {
             uint64_t out_started = sr_perf_now_ns();
+            sr_videorec_audio(AUDIO_OUTPUT2_CHANNEL, converted, (int)converted_frames,
+                              (int)vol, (int)vol, sched_vtime_us());
             sr_audio_push(AUDIO_OUTPUT2_CHANNEL, converted, (int)converted_frames,
                           (int)vol, (int)vol);
+            audio_vq_pushed(AUDIO_OUTPUT2_CHANNEL, (int)converted_frames);
             if (out_started)
                 sr_perf_audio_output(out_started, (uint32_t)converted_frames);
         }
@@ -594,7 +594,9 @@ static uint32_t h_AudioSRCOutputBlocking(CpuState *s) {
  * taken from that reference: the sample counts 256, 576, 1024, 1152 and 2048 (others return
  * 0x80000104), stereo format 2 only (others 0x80000108) and a second reserve returning
  * 0x80000021. A rate of 0, which that reference leaves at the converter's current rate, is taken
- * as 44100 Hz here (an assumption, also unmeasured). That reference marks a reservation
+ * as 44100 Hz here (an assumption, also unmeasured). That reference checks no output volume;
+ * this model refuses one above SCE_AUDIO_OUTPUT2_VOLUME_MAX, by analogy with the SRC output it
+ * shares (also unmeasured). That reference marks a reservation
  * before its later checks and releases any SRC reservation; here a refused reserve marks
  * nothing and each API releases only its own (audio_src_release). */
 #define SCE_KERNEL_ERROR_INVALID_FORMAT 0x80000108u
@@ -697,21 +699,21 @@ typedef struct {
     int loop_start;               /* marked block offset to loop to (-1 = none) */
     int hist1, hist2;             /* ADPCM filter state */
     int pitch;                    /* 0x1000 = native 44.1 kHz */
-    int voll, volr;               /* dry L/R, 0..0x1000 */
-    int effect_l, effect_r;       /* send L/R, 0..0x1000 */
+    int voll, volr;               /* dry L/R, -0x1000..0x1000; 0x1000 from __sceSasInit */
+    int effect_l, effect_r;       /* send L/R, -0x1000..0x1000; 0x1000 from __sceSasInit */
     int16_t buf[28]; int bufn, bufi;
     uint32_t frac;                /* 12-bit fixed-point resample remainder */
     uint32_t pcm;                 /* mono signed-16 PCM source */
     uint32_t pcm_samples, pcm_pos;
     int pcm_loop_start;
-    /* ADSR rates/modes and retained simple-envelope words. */
-    int adsr_a, adsr_d, adsr_s, adsr_r;
-    int mode_a, mode_d, mode_s, mode_r;
-    int sustain_level;            /* 0..0x40000000 */
-    uint32_t simple_adsr1, simple_adsr2;
-    int env_level;                /* 0..0x40000000 */
-    int env_phase;                /* 0=ATTACK, 1=DECAY, 2=SUSTAIN, 3=RELEASE, 4=OFF */
+    /* The ADSR envelope (sas_envelope.h) and its height after the last step, 0..0x40000000,
+     * which the mixer scales by and the height getters return. */
+    SasEnvelope envelope;
+    int env_level;
     int noise;                    /* 0..63 (noise clock) */
+    /* Ace Mode's sas=sinc only (host-side, never read otherwise): the decoded samples before
+     * the next grain's first one, oldest first (sas_mix_band_limited). */
+    int16_t rs_hist[SAS_RS_REACH];
 } SasVoice;
 
 typedef struct {
@@ -731,6 +733,12 @@ typedef struct {
 static SasVoice s_sasv[SAS_VOICES];
 static SasCoreState s_sas_core;
 static int s_sas_max_voices = SAS_VOICES;
+/* Ace Mode's sas=sinc for the run (sr_hle_sas_set_band_limited); 0 is authentic. */
+static int s_sas_band_limited;
+/* Nonzero while sas=sinc decodes ahead on a copy of a voice: no SR_SASLOG dumps. */
+static int s_sas_lookahead;
+
+int sr_hle_sas_set_band_limited(int on) { s_sas_band_limited = on ? 1 : 0; return 1; }
 
 void hle_sas_guest_reset(void) {
     memset(&s_sas_core, 0, sizeof(s_sas_core));
@@ -766,7 +774,7 @@ static int sas_vag_block(SasVoice *v) {
     uint32_t a = v->vag + v->pos;
     int hdr = MEM_R8(a), flags = MEM_R8(a + 1);
     if (flags == 7) return 0;                            /* end marker block */
-    if (sas_log_on()) {
+    if (sas_log_on() && !s_sas_lookahead) {
         /* Bounded per-voice VAG block dumps (two emissions max, matching the
          * docs): the first block (pos 0, first grain) and the block at +0x10,
          * which is the first data block after a legitimate zero prefix. The
@@ -878,29 +886,21 @@ static void sas_output_write(uint32_t out, uint32_t frame, int channel, int valu
     MEM_W16(out + off, (uint16_t)(int16_t)value);
 }
 
-static int sas_env_step(int configured, int fallback) {
-    return configured > 0 ? configured : fallback;
+/* One sample's envelope step (sas_envelope.h). The configured rates and curves are used as
+ * the game set them: a rate of 0 holds the height, it is not replaced by a default. A voice
+ * whose envelope has ended (released to zero) stops. */
+static void sas_advance_envelope(SasVoice *v) {
+    sas_envelope_step(&v->envelope);
+    v->env_level = sas_envelope_height(&v->envelope);
+    if (sas_envelope_ended(&v->envelope)) v->on = 0;
 }
 
-static void sas_advance_envelope(SasVoice *v) {
-    if (v->env_phase == 0) {
-        int64_t level = (int64_t)v->env_level + sas_env_step(v->adsr_a, 0x1000000);
-        if (level >= SAS_ENVELOPE_MAX) { v->env_level = SAS_ENVELOPE_MAX; v->env_phase = 1; }
-        else v->env_level = (int)level;
-    } else if (v->env_phase == 1) {
-        int step = sas_env_step(v->adsr_d, 0x800000);
-        if (v->env_level > v->sustain_level) {
-            v->env_level -= step;
-            if (v->env_level <= v->sustain_level) {
-                v->env_level = v->sustain_level; v->env_phase = 2;
-            }
-        } else {
-            v->env_level = v->sustain_level; v->env_phase = 2;
-        }
-    } else if (v->env_phase == 3) {
-        v->env_level -= sas_env_step(v->adsr_r, 0x1000000);
-        if (v->env_level <= 0) { v->env_level = 0; v->env_phase = 4; v->on = 0; }
-    }
+/* The voice's sound data has run out: its envelope ends, so both height getters read 0
+ * (PPSSPP ends the envelope there too), and the voice stops. */
+static void sas_voice_data_ended(SasVoice *v) {
+    sas_envelope_end(&v->envelope);
+    v->env_level = 0;
+    v->on = 0;
 }
 
 static int sas_next_sample(SasVoice *v, int *sample) {
@@ -935,8 +935,109 @@ static uint32_t sas_live_end_flags(void) {
     return m;
 }
 
-/* Mix one grain into out (s16 stereo or four planar channels). add=0 overwrites. */
-static void sas_mix_stateful(uint32_t out, int add, int left_gain, int right_gain) {
+/* ---- pitch and resampling ------------------------------------------------------------------
+ *
+ * The authentic path (every run without Ace Mode's sas=sinc) does not interpolate: it is a
+ * zero-order hold. Each output sample plays the decoded sample at the voice's whole position, then
+ * a 12-bit fraction advances by the pitch (0x1000 = one source sample per output sample) and every
+ * whole step moves to the next decoded sample. A pitch above 0x1000 skips samples with no low-pass
+ * filter (aliasing), and one below repeats them (images of the source band). A step that runs past
+ * the end of a 28-sample VAG block lands on the next block's first sample, and PCM and noise
+ * voices ignore the pitch. This rule has been in the mixer since the initial public export
+ * (2026-08-11), inherited with this file; no physical-PSP measurement of the SAS core's own
+ * interpolation backs it.
+ *
+ * With sas=sinc (#2054, docs/ENHANCEMENT_CONTRACT.md section 10.7) a VAG voice runs the same loop:
+ * its decode position, fraction, envelope, end of sample and end flags are the authentic ones. The
+ * loop records each output sample's stream position and envelope instead of mixing, and
+ * sas_mix_band_limited mixes values from sas_resample.h. Samples ahead of the position come from a
+ * copy of the voice decoded ahead; samples behind it are kept per voice in rs_hist. */
+#define SAS_RS_SRC_MAX (SAS_RS_REACH + SAS_GRAIN_MAX * (SAS_RS_PITCH_MAX / 0x1000) + SAS_RS_REACH + 8)
+static int16_t s_rs_src[SAS_RS_SRC_MAX];
+static int32_t s_rs_k[SAS_GRAIN_MAX];
+static uint16_t s_rs_frac[SAS_GRAIN_MAX];
+static int s_rs_env[SAS_GRAIN_MAX];
+static int16_t s_rs_out[SAS_GRAIN_MAX];
+
+/* Stream positions for one grain. Index 0 is the first sample the grain plays; base is the index
+ * of the current block's first sample and next that of the block after it; decoded counts the
+ * blocks the voice decoded during the grain. */
+typedef struct { int32_t base, next; int played, decoded; } SasRsGrain;
+
+#ifdef SR_HLE_THREAD_SELFTEST
+/* The most blocks one grain's lookahead decoded past the blocks the voice itself decoded. */
+static int s_sas_rs_lead_max;
+int sr_hle_test_sas_lookahead_lead(void) {
+    int lead = s_sas_rs_lead_max;
+    s_sas_rs_lead_max = 0;
+    return lead;
+}
+#endif
+
+static void sas_rs_begin(const SasVoice *v, SasRsGrain *g) {
+    g->base = -v->bufi;
+    g->next = v->bufi < v->bufn ? v->bufn - v->bufi : 0;
+    g->played = 0;
+    g->decoded = 0;
+}
+
+/* Output sample i played the voice's current sample; decoded says a new block was decoded for it. */
+static void sas_rs_note(const SasVoice *v, SasRsGrain *g, int i, int decoded) {
+    if (decoded) { g->base = g->next; g->next = g->base + v->bufn; g->decoded++; }
+    s_rs_k[i] = g->base + v->bufi;
+    s_rs_frac[i] = (uint16_t)v->frac;
+    s_rs_env[i] = v->env_level;
+    g->played = i + 1;
+}
+
+/* Mixes the grain the loop recorded. pre is the voice as the grain began. */
+static void sas_mix_band_limited(SasVoice *v, const SasVoice *pre, const SasRsGrain *g, int32_t *mixl,
+                                 int32_t *mixr, int32_t *mixsl, int32_t *mixsr) {
+    if (!g->played) return;
+    int32_t k_next = v->bufi < v->bufn ? g->base + v->bufi : g->next;
+    /* One past the last source sample the last output's window can reach, plus one spare. */
+    int32_t end = s_rs_k[g->played - 1] + sas_rs_reach(v->pitch) + 2;
+    if (end < k_next + 1) end = k_next + 1;
+    if (end > SAS_RS_SRC_MAX - SAS_RS_REACH) end = SAS_RS_SRC_MAX - SAS_RS_REACH;
+    int16_t *src = s_rs_src + SAS_RS_REACH;
+    memcpy(s_rs_src, pre->rs_hist, sizeof(pre->rs_hist));
+    SasVoice ahead = *pre;
+    int live = 1, ahead_blocks = 0;
+    for (int32_t j = 0; j < end; j++) {
+        int samp = 0;
+        if (live && ahead.bufi >= ahead.bufn) {
+            s_sas_lookahead = 1;
+            live = sas_vag_block(&ahead);
+            s_sas_lookahead = 0;
+            ahead_blocks += live;
+        }
+        if (live) samp = ahead.buf[ahead.bufi++];
+        src[j] = (int16_t)samp;
+    }
+#ifdef SR_HLE_THREAD_SELFTEST
+    if (ahead_blocks - g->decoded > s_sas_rs_lead_max) s_sas_rs_lead_max = ahead_blocks - g->decoded;
+#endif
+    (void)ahead_blocks;
+    sas_rs_render(src, end, s_rs_k, s_rs_frac, g->played, v->pitch, s_rs_out);
+    for (int i = 0; i < g->played; i++) {
+        int s_env = (int)(((int64_t)s_rs_out[i] * s_rs_env[i]) >> 30);
+        mixl[i] += (s_env * v->voll) >> 12;
+        mixr[i] += (s_env * v->volr) >> 12;
+        mixsl[i] += (s_env * v->effect_l) >> 12;
+        mixsr[i] += (s_env * v->effect_r) >> 12;
+    }
+    memcpy(v->rs_hist, src + k_next - SAS_RS_REACH, sizeof(v->rs_hist));
+}
+
+/* voice + in * gain >> 12, saturated to the s16 range the store clamps to anyway. */
+static int sas_add_scaled_input(int voice, int16_t in, int32_t gain) {
+    int64_t v = (int64_t)voice + (((int64_t)in * gain) >> 12);
+    return v > 32767 ? 32767 : v < -32768 ? -32768 : (int)v;
+}
+
+/* Mix one grain into out (s16 stereo or four planar channels). add=0 overwrites; add=1 keeps the
+ * caller's PCM in out, scaled by in_gain_l/in_gain_r on the two dry channels. */
+static void sas_mix_stateful(uint32_t out, int add, int32_t in_gain_l, int32_t in_gain_r) {
     uint64_t perf_started = sr_perf_now_ns();
     int32_t mixl[2048], mixr[2048], mixsl[2048], mixsr[2048];
     int n = s_sas_core.grain;
@@ -985,31 +1086,44 @@ static void sas_mix_stateful(uint32_t out, int add, int left_gain, int right_gai
     for (int vi = 0; vi < s_sas_max_voices; vi++) {
         SasVoice *v = &s_sasv[vi];
         if (!v->on || v->paused) continue;
+        int rs = s_sas_band_limited && v->type == SAS_VOICE_VAG;
+        SasVoice pre;
+        SasRsGrain grain;
+        if (rs) { pre = *v; sas_rs_begin(v, &grain); }
         for (int i = 0; i < n; i++) {
             int samp = 0;
-            if (!sas_next_sample(v, &samp)) { v->on = 0; break; }
+            int decoded = v->bufi >= v->bufn;
+            if (!sas_next_sample(v, &samp)) { sas_voice_data_ended(v); break; }
             sas_advance_envelope(v);
-            int s_env = (int)(((int64_t)samp * v->env_level) >> 30);
-            mixl[i] += (s_env * v->voll) >> 12;
-            mixr[i] += (s_env * v->volr) >> 12;
-            mixsl[i] += (s_env * v->effect_l) >> 12;
-            mixsr[i] += (s_env * v->effect_r) >> 12;
+            if (rs) {
+                sas_rs_note(v, &grain, i, decoded);
+            } else {
+                int s_env = (int)(((int64_t)samp * v->env_level) >> 30);
+                mixl[i] += (s_env * v->voll) >> 12;
+                mixr[i] += (s_env * v->volr) >> 12;
+                mixsl[i] += (s_env * v->effect_l) >> 12;
+                mixsr[i] += (s_env * v->effect_r) >> 12;
+            }
             v->frac += (uint32_t)(v->pitch > 0 ? v->pitch : 0x1000);
             while (v->frac >= 0x1000) {
                 v->frac -= 0x1000;
                 if (v->type == SAS_VOICE_VAG) v->bufi++;
             }
         }
+        if (rs) sas_mix_band_limited(v, &pre, &grain, mixl, mixr, mixsl, mixsr);
     }
     for (int i = 0; i < n; i++) {
-        /* The gain product is 64-bit: twenty full-scale voices already sum past INT32_MAX / 4096,
-         * and a wrapped product inverts loud samples instead of saturating them at the output. */
-        int l = (int)(((int64_t)mixl[i] * left_gain) >> 12);
-        int r = (int)(((int64_t)mixr[i] * right_gain) >> 12);
+        /* in_gain_l/in_gain_r scale the caller's PCM already in out (add only), never the voice
+         * mix (#2135). The product is 64-bit and saturated before the store, so a volume of any
+         * size clips instead of wrapping. */
+        int l = mixl[i], r = mixr[i];
         int sl = mixsl[i], sr = mixsr[i];
         if (add) {
-            l += sas_output_read(out, (uint32_t)i, 0);
-            r += sas_output_read(out, (uint32_t)i, 1);
+            l = sas_add_scaled_input(l, sas_output_read(out, (uint32_t)i, 0), in_gain_l);
+            r = sas_add_scaled_input(r, sas_output_read(out, (uint32_t)i, 1), in_gain_r);
+            /* Raw mode adds the caller's send planes unscaled. No reference covers this: PPSSPP
+             * refuses __sceSasCoreWithMix in raw mode (SCE_KERNEL_ERROR_BAD_ARGUMENT), and this
+             * runtime accepted raw mode before #2135. Unmeasured on a PSP. */
             if (s_sas_core.output_mode) {
                 sl += sas_output_read(out, (uint32_t)i, 2);
                 sr += sas_output_read(out, (uint32_t)i, 3);
@@ -1062,9 +1176,18 @@ static uint32_t h_SasInit(CpuState *s) {
     s_sas_core.effect_dry = s_sas_core.effect_wet = 1;
     s_sas_max_voices = max_voices;
     memset(s_sasv, 0, sizeof(s_sasv));
+    /* A voice starts at full dry and effect-send volume, and only __sceSasSetVolume changes it:
+     * KeyOn leaves volumes alone, so an explicit 0/0 stays silent (#2135). Reference: PPSSPP,
+     * hrydgard/ppsspp 0b30638e6571, Core/HW/SasAudio.h:234-237 (the SasVoice defaults);
+     * SasVoice::KeyOn and SasVoice::Reset there touch no volume. PPSSPP builds its voices once
+     * per boot and its sceSasInit resets only playing, loop and sample rate, so there a second
+     * init keeps the volumes; this model treats every init as fresh (PSP-SAS-001 above), which
+     * restores the defaults. Unmeasured on a PSP. */
     for (int i = 0; i < SAS_VOICES; i++) {
         s_sasv[i].pitch = 0x1000; s_sasv[i].loop_start = -1; s_sasv[i].pcm_loop_start = -1;
-        s_sasv[i].sustain_level = SAS_ENVELOPE_MAX; s_sasv[i].env_phase = 4;
+        s_sasv[i].voll = s_sasv[i].volr = SAS_VOLUME_MAX;
+        s_sasv[i].effect_l = s_sasv[i].effect_r = SAS_VOLUME_MAX;
+        sas_envelope_reset(&s_sasv[i].envelope);
     }
     s_sas_core.end_flags = sas_live_end_flags();
     return 0;
@@ -1081,6 +1204,7 @@ static uint32_t h_SasSetVoice(CpuState *s) {
     v->pos = 0; v->loop_requested = loop; v->loop_start = -1;
     v->pcm = v->pcm_samples = v->pcm_pos = 0; v->pcm_loop_start = -1;
     v->noise = 0; v->hist1 = v->hist2 = 0; v->bufn = v->bufi = 0; v->frac = 0;
+    memset(v->rs_hist, 0, sizeof(v->rs_hist));
     return 0;
 }
 
@@ -1111,8 +1235,15 @@ static uint32_t h_SasSetVolume(CpuState *s) {
     int32_t l = (int32_t)A2, r = (int32_t)A3;
     int32_t el = (int32_t)stack_arg(s, 0), er = (int32_t)stack_arg(s, 1);
     if (e) return e;
-    if (l < 0 || l > SAS_VOLUME_MAX || r < 0 || r > SAS_VOLUME_MAX ||
-        el < 0 || el > SAS_VOLUME_MAX || er < 0 || er > SAS_VOLUME_MAX)
+    /* A SAS volume is signed: |volume| <= 0x1000, and a negative side plays phase-inverted (the
+     * mixer multiplies by it). Hot Shots Tennis gives three voices of each title-logo sound one
+     * negative side; refusing them left those voices at 0/0, which a KeyOn rule (since removed)
+     * raised to full volume (#2135). Measured over a 4 s title-logo window within the first 3,000
+     * vblanks (about 49 s), against a PSP-3000 capture of the same moment: 11,491 full-scale samples
+     * against 126, RMS -9.2 against -13.3 dBFS, and the first voice group's power -7.7 against
+     * -16.8 dBFS. */
+    if (l < -SAS_VOLUME_MAX || l > SAS_VOLUME_MAX || r < -SAS_VOLUME_MAX || r > SAS_VOLUME_MAX ||
+        el < -SAS_VOLUME_MAX || el > SAS_VOLUME_MAX || er < -SAS_VOLUME_MAX || er > SAS_VOLUME_MAX)
         return SAS_ERROR_VOLUME_VAL;
     v->voll = l; v->volr = r; v->effect_l = el; v->effect_r = er; return 0;
 }
@@ -1127,10 +1258,7 @@ static uint32_t h_SasSetADSR(CpuState *s) {
     if ((mask & SAS_ADSR_ATTACK && a < 0) || (mask & SAS_ADSR_DECAY && d < 0) ||
         (mask & SAS_ADSR_SUSTAIN && sustain < 0) || (mask & SAS_ADSR_RELEASE && r < 0))
         return SAS_ERROR_ADSR_VAL;
-    if (mask & SAS_ADSR_ATTACK) v->adsr_a = a;
-    if (mask & SAS_ADSR_DECAY) v->adsr_d = d;
-    if (mask & SAS_ADSR_SUSTAIN) v->adsr_s = sustain;
-    if (mask & SAS_ADSR_RELEASE) v->adsr_r = r;
+    sas_envelope_set_rates(&v->envelope, mask, a, d, sustain, r);
     return 0;
 }
 
@@ -1141,14 +1269,11 @@ static uint32_t h_SasSetADSRmode(CpuState *s) {
     int32_t sustain = (int32_t)stack_arg(s, 1), r = (int32_t)stack_arg(s, 2);
     if (e) return e;
     if (mask & ~SAS_ADSR_ALL) return SAS_ERROR_ADSR_MODE;
-    if ((mask & SAS_ADSR_ATTACK && (a < 0 || a > 5)) ||
-        (mask & SAS_ADSR_DECAY && (d < 0 || d > 5)) ||
-        (mask & SAS_ADSR_SUSTAIN && (sustain < 0 || sustain > 5)) ||
-        (mask & SAS_ADSR_RELEASE && (r < 0 || r > 5))) return SAS_ERROR_ADSR_MODE;
-    if (mask & SAS_ADSR_ATTACK) v->mode_a = a;
-    if (mask & SAS_ADSR_DECAY) v->mode_d = d;
-    if (mask & SAS_ADSR_SUSTAIN) v->mode_s = sustain;
-    if (mask & SAS_ADSR_RELEASE) v->mode_r = r;
+    /* The PSP ignores each value's top bit, then refuses a curve its phase cannot take
+     * (sas_envelope.h); a refused call changes no curve. */
+    a &= 0x7FFFFFFF; d &= 0x7FFFFFFF; sustain &= 0x7FFFFFFF; r &= 0x7FFFFFFF;
+    if (sas_envelope_refused_curves(a, d, sustain, r) & mask) return SAS_ERROR_ADSR_MODE;
+    sas_envelope_set_curves(&v->envelope, mask, a, d, sustain, r);
     return 0;
 }
 
@@ -1156,9 +1281,10 @@ static uint32_t h_SasSetSimpleADSR(CpuState *s) {
     SasVoice *v; uint32_t e = sas_voice_for(A0, A1, &v);
     if (e) return e;
     if ((A3 >> 13) & 1u) return SAS_ERROR_ADSR_MODE;
-    v->simple_adsr1 = A2; v->simple_adsr2 = A3;
-    v->adsr_a = (int)(A2 & 0xffffu); v->adsr_r = (int)(A3 & 0xffffu);
-    v->adsr_d = 0; v->adsr_s = SAS_ENVELOPE_MAX;
+    /* Two packed 16-bit words: rates, curves and the sustain level (sas_envelope.h). They
+     * were stored here as raw per-sample steps, which made every SimpleADSR attack and
+     * release the wrong length. */
+    sas_envelope_set_simple(&v->envelope, A2, A3);
     return 0;
 }
 
@@ -1167,7 +1293,7 @@ static uint32_t h_SasSetSL(CpuState *s) {
     int32_t level = (int32_t)A2;
     if (e) return e;
     if (level < 0 || level > SAS_ENVELOPE_MAX) return SAS_ERROR_ADSR_VAL;
-    v->sustain_level = level; return 0;
+    sas_envelope_set_sustain_level(&v->envelope, level); return 0;
 }
 
 static uint32_t h_SasSetNoise(CpuState *s) {
@@ -1196,8 +1322,8 @@ static uint32_t h_SasSetKeyOn(CpuState *s) {
         (v->type == SAS_VOICE_VAG && (!v->vag || v->vag_size < 16u)) ||
         (v->type == SAS_VOICE_PCM && (!v->pcm || !v->pcm_samples))) return SAS_ERROR_INVALID_STATE;
     v->pos = 0; v->pcm_pos = 0; v->hist1 = v->hist2 = 0; v->bufn = v->bufi = 0; v->frac = 0;
-    if (!v->voll && !v->volr) { v->voll = SAS_VOLUME_MAX; v->volr = SAS_VOLUME_MAX; }
-    v->env_level = 0; v->env_phase = 0; v->on = 1;
+    memset(v->rs_hist, 0, sizeof(v->rs_hist));
+    sas_envelope_key_on(&v->envelope); v->env_level = 0; v->on = 1;
     if (sas_log_on()) {
         static uint32_t calls; calls++;
         fprintf(stderr, "SAS_KEYON: call=%u vbl=%u voice=%u type=%d vag=0x%08x size=%u voll=%d volr=%d on=%d\n",
@@ -1209,7 +1335,7 @@ static uint32_t h_SasSetKeyOn(CpuState *s) {
 static uint32_t h_SasSetKeyOff(CpuState *s) {
     SasVoice *v; uint32_t e = sas_voice_for(A0, A1, &v);
     if (e) return e;
-    if (v->on) v->env_phase = 3;
+    if (v->on) sas_envelope_key_off(&v->envelope);
     return 0;
 }
 
@@ -1306,12 +1432,17 @@ static uint32_t h_SasCore(CpuState *s) {
     sas_mix_stateful(A1, 0, SAS_VOLUME_MAX, SAS_VOLUME_MAX); return 0;
 }
 
+/* __sceSasCoreWithMix(core, inout, leftVol, rightVol): leftVol/rightVol scale the PCM the caller
+ * left in inout, and the voices are added at their own volumes (#2135). No volume is refused: a
+ * negative one inverts the caller's PCM, one above 0x1000 amplifies it, and the sum saturates.
+ * Reference: PPSSPP, hrydgard/ppsspp 0b30638e6571, Core/HLE/sceSas.cpp _sceSasCoreWithMix (no
+ * volume check) and Core/HW/SasAudio.cpp WriteMixedOutput (inp * leftVol >> 12, then the dry
+ * mix, then clamp_s16). There the product is a C int, which overflows past |vol| = 0x10000;
+ * here it is 64-bit and saturates. Unmeasured on a PSP. */
 static uint32_t h_SasCoreWithMix(CpuState *s) {
     uint32_t e = sas_require_core(A0);
     int32_t left_gain = (int32_t)A2, right_gain = (int32_t)A3;
     if (e) return e;
-    if (left_gain < 0 || left_gain > SAS_VOLUME_MAX || right_gain < 0 || right_gain > SAS_VOLUME_MAX)
-        return SAS_ERROR_VOLUME_VAL;
     e = sas_output_validate(A1, 1);
     if (e) return e;
     if (!sched_wait_permitted()) return SCE_KERNEL_ERROR_CAN_NOT_WAIT;

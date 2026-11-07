@@ -44,6 +44,7 @@ ISOLATION_SRC = "tests/native/native_test_isolation.c"
 EXE_EXT = ".exe" if _WINDOWS else ""
 
 CORE_SOURCES = [
+    "src/core/nk_shared_helpers.c",
     "src/core/nk_iso.c",
     "src/core/nk_library.c",
     "src/core/nk_launch.c",
@@ -66,8 +67,11 @@ CORE_SOURCES = [
     "src/core/nk_psp_amctrl.c",
     "src/core/nk_psp_lzrc.c",
     "src/core/nk_psp_npumdimg.c",
+    "src/core/nk_pbp_homebrew.c",
     "src/core/nk_disc_expand.c",
     "src/core/nk_disc_verify.c",
+    "src/core/nk_zip.c",
+    "src/core/nk_steam_shortcuts.c",
     "src/core/generated/nk_title_catalog.c",
 ]
 
@@ -514,6 +518,7 @@ class NativeHostBackendTests(unittest.TestCase):
                  "if (msg.message == WM_QUIT) { gui_quit_request(); continue; }": 1,
                  "if (res == GEGPU_PRESENT_WINDOW_CLOSED) {\n            gui_quit_request();": 1,
                  "if (present_result == 0) gui_quit_request();": 1,
+                 "if (result == 0) gui_quit_request();": 1,
                  "if (!sdl3vk_poll()) return gui_pause_quit();": 1,
                  "if (presented == 0) return gui_pause_quit();": 1,
                  "gui_quit_request();\n        if (!gui_stop_requested()) s_pause_resume = 1;": 1,

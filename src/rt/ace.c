@@ -25,9 +25,30 @@ static int value_on_off(const char *v, int *out) {
     return 0;
 }
 
+/* The line's keys. Each says whether a line must carry it, so the order of the table decides
+   nothing: tier is the one key a line may leave out (an Enhanced run). */
+typedef enum {
+    ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
+    ACE_KEY_SAS, ACE_KEY_TIER
+} AceKey;
+
+static const struct {
+    const char *name;
+    AceKey key;
+    int required;
+} k_ace_keys[] = {
+    {"af", ACE_KEY_AF, 1},
+    {"text", ACE_KEY_TEXT, 1},
+    {"readout", ACE_KEY_READOUT, 1},
+    {"notice", ACE_KEY_NOTICE, 1},
+    {"wide", ACE_KEY_WIDE, 1},
+    {"smooth", ACE_KEY_SMOOTH, 1},
+    {"sas", ACE_KEY_SAS, 1},
+    {"tier", ACE_KEY_TIER, 0},
+};
+
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
-    static const char *const keys[] = { "af", "text", "readout", "notice", "wide", "smooth" };
-    enum { KEYS = (int)(sizeof(keys) / sizeof(keys[0])) };
+    enum { KEYS = (int)(sizeof(k_ace_keys) / sizeof(k_ace_keys[0])) };
     AceConfig c;
     char buf[ACE_SPEC_MAX];
     int seen[KEYS] = {0};
@@ -54,33 +75,45 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
             *eq = '\0';
             const char *v = eq + 1;
             for (int i = 0; i < KEYS; i++)
-                if (strcmp(field, keys[i]) == 0) k = i;
+                if (strcmp(field, k_ace_keys[i].name) == 0) k = i;
             if (k < 0) { why_set(why, why_cap, "unknown key"); return 0; }
             if (seen[k]) { why_set(why, why_cap, "duplicate key"); return 0; }
             seen[k] = 1;
             int ok = 0;
-            switch (k) {
-            case 0:
+            switch (k_ace_keys[k].key) {
+            case ACE_KEY_AF:
                 ok = strcmp(v, "0") == 0 || strcmp(v, "2") == 0 || strcmp(v, "4") == 0 ||
                      strcmp(v, "8") == 0 || strcmp(v, "16") == 0;
                 if (ok) c.af = atoi(v);
                 break;
-            case 1: ok = value_on_off(v, &c.text); break;
-            case 2: ok = value_on_off(v, &c.readout); break;
-            case 3: ok = value_on_off(v, &c.notice); break;
-            case 4:
+            case ACE_KEY_TEXT: ok = value_on_off(v, &c.text); break;
+            case ACE_KEY_READOUT: ok = value_on_off(v, &c.readout); break;
+            case ACE_KEY_NOTICE: ok = value_on_off(v, &c.notice); break;
+            case ACE_KEY_WIDE:
                 if (strcmp(v, "off") == 0) { c.wide = ACE_WIDE_OFF; ok = 1; }
                 else if (strcmp(v, "fill") == 0) { c.wide = ACE_WIDE_FILL; ok = 1; }
                 if (ok && c.wide && !ACE_HAS_WIDE) {
                     why_set(why, why_cap, "wide is not part of this build"); return 0;
                 }
                 break;
-            default:
+            case ACE_KEY_TIER:
+                if (strcmp(v, "enhanced") == 0) { c.tier = ACE_TIER_ENHANCED; ok = 1; }
+                else if (strcmp(v, "ace") == 0) { c.tier = ACE_TIER_ACE; ok = 1; }
+                break;
+            case ACE_KEY_SMOOTH:
                 if (strcmp(v, "off") == 0) { c.smooth = ACE_SMOOTH_OFF; ok = 1; }
                 else if (strcmp(v, "match") == 0) { c.smooth = ACE_SMOOTH_MATCH; ok = 1; }
                 else if (strcmp(v, "x2") == 0) { c.smooth = ACE_SMOOTH_X2; ok = 1; }
-                if (ok && c.smooth && !ACE_HAS_SMOOTH) {
-                    why_set(why, why_cap, "smooth is not part of this build"); return 0;
+                if (ok && ((c.smooth && !ACE_HAS_SMOOTH) ||
+                           (c.smooth == ACE_SMOOTH_MATCH && !ACE_HAS_SMOOTH_MATCH))) {
+                    why_set(why, why_cap, "this smooth mode is not part of this build"); return 0;
+                }
+                break;
+            case ACE_KEY_SAS:
+                if (strcmp(v, "off") == 0) { c.sas = ACE_SAS_OFF; ok = 1; }
+                else if (strcmp(v, "sinc") == 0) { c.sas = ACE_SAS_SINC; ok = 1; }
+                if (ok && c.sas && !ACE_HAS_SAS) {
+                    why_set(why, why_cap, "sas is not part of this build"); return 0;
                 }
                 break;
             }
@@ -90,7 +123,7 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
         field = end + 1;
     }
     for (int i = 0; i < KEYS; i++)
-        if (!seen[i]) { why_set(why, why_cap, "missing key"); return 0; }
+        if (k_ace_keys[i].required && !seen[i]) { why_set(why, why_cap, "missing key"); return 0; }
     c.on = 1;
     if (out) *out = c;
     why_set(why, why_cap, "");
@@ -102,14 +135,18 @@ static const char *wide_word(int v) { return v == ACE_WIDE_FILL ? "fill" : "off"
 static const char *smooth_word(int v) {
     return v == ACE_SMOOTH_MATCH ? "match" : v == ACE_SMOOTH_X2 ? "x2" : "off";
 }
+static const char *tier_word(int v) { return v == ACE_TIER_ACE ? "ace" : "enhanced"; }
+static const char *sas_word(int v) { return v == ACE_SAS_SINC ? "sinc" : "off"; }
 
 int ace_format(const AceConfig *c, char *out, size_t cap) {
     int n;
     if (!out || !cap) return 0;
     if (!c || !c->on) n = snprintf(out, cap, "off");
-    else n = snprintf(out, cap, "v1;af=%d;text=%s;readout=%s;notice=%s;wide=%s;smooth=%s",
-                      c->af, on_off(c->text), on_off(c->readout), on_off(c->notice),
-                      wide_word(c->wide), smooth_word(c->smooth));
+    else n = snprintf(out, cap, "v1;tier=%s;af=%d;text=%s;readout=%s;notice=%s;wide=%s;smooth=%s;"
+                                "sas=%s",
+                      tier_word(c->tier), c->af, on_off(c->text), on_off(c->readout),
+                      on_off(c->notice), wide_word(c->wide), smooth_word(c->smooth),
+                      sas_word(c->sas));
     if (n < 0 || (size_t)n >= cap) { out[0] = '\0'; return 0; }
     return 1;
 }
@@ -127,7 +164,7 @@ static int s_confirmed[ACE_FEATURE_COUNT];
 static uint64_t s_af_failures;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas"
 };
 
 /* The run's observation state. */
@@ -144,6 +181,11 @@ static uint32_t s_last_flip_vcount, s_last_flip_fb;
 static int s_have_flip;
 static uint64_t s_rate_vblanks[ACE_RATE_COUNT];
 static uint64_t s_limited_windows;
+static AcePace s_pace;
+static AcePaceStats s_pace_stats;
+static uint32_t s_pace_vcount;
+static AceSmoothAuxStats s_aux_stats;
+static int s_have_aux_stats;
 
 #define ACE_TARGETS 8
 typedef struct { uint32_t fb, bytes, draws, seen, touched; int used; } AceTarget;
@@ -161,6 +203,11 @@ static void observation_reset(void) {
     s_last_flip_vcount = s_last_flip_fb = 0; s_have_flip = 0;
     memset(s_rate_vblanks, 0, sizeof(s_rate_vblanks));
     s_limited_windows = 0;
+    ace_pace_reset(&s_pace);
+    memset(&s_pace_stats, 0, sizeof(s_pace_stats));
+    s_pace_vcount = 0;
+    memset(&s_aux_stats, 0, sizeof(s_aux_stats));
+    s_have_aux_stats = 0;
     memset(s_targets, 0, sizeof(s_targets));
     s_target_clock = 0;
 }
@@ -188,9 +235,10 @@ int ace_init_spec(const char *spec, const char *report_path) {
     if (report_path && report_path[0])
         snprintf(s_report_path, sizeof(s_report_path), "%s", report_path);
     g_ace_on = 1;
-    fprintf(stderr, "ACE_MODE: on (af=%d, text=%s, readout=%s, notice=%s, wide=%s, smooth=%s)\n",
-            s_req.af, on_off(s_req.text), on_off(s_req.readout), on_off(s_req.notice),
-            wide_word(s_req.wide), smooth_word(s_req.smooth));
+    fprintf(stderr, "ACE_MODE: on (tier=%s, af=%d, text=%s, readout=%s, notice=%s, wide=%s, "
+            "smooth=%s, sas=%s)\n", tier_word(s_req.tier), s_req.af, on_off(s_req.text),
+            on_off(s_req.readout), on_off(s_req.notice), wide_word(s_req.wide),
+            smooth_word(s_req.smooth), sas_word(s_req.sas));
     return 1;
 }
 
@@ -201,6 +249,7 @@ int ace_init_from_env(void) {
 const AceConfig *ace_requested(void) { return &s_req; }
 const AceConfig *ace_effective(void) { return &s_eff; }
 const char *ace_spec_text(void) { return s_spec; }
+const char *ace_tier_name(void) { return s_req.tier == ACE_TIER_ACE ? "Ace" : "Enhanced"; }
 
 void ace_feature_unavailable(AceFeature feature, const char *reason) {
     if (!g_ace_on || (unsigned)feature >= ACE_FEATURE_COUNT) return;
@@ -213,7 +262,8 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_READOUT: s_eff.readout = 0; break;
     case ACE_FEATURE_NOTICE: s_eff.notice = 0; break;
     case ACE_FEATURE_WIDE: s_eff.wide = 0; break;
-    default: s_eff.smooth = 0; break;
+    case ACE_FEATURE_SMOOTH: s_eff.smooth = 0; break;
+    default: s_eff.sas = 0; break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
 }
@@ -261,6 +311,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
+    if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
     if (s_eff.readout) used = words_add(out, cap, used, "speed readout");
     return used;
 }
@@ -499,6 +550,9 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
     if (new_frame) { s_counters.new_frames++; s_win_frames++; }
     if (ace_det_flip(&s_det, vcount, new_frame))
         fprintf(stderr, "ACE_RATE: %s\n", ace_rate_name(s_det.stable));
+    s_pace_vcount = vcount;
+    if (s_pace.held && new_frame) s_pace_stats.superseded++;
+    ace_pace_flip(&s_pace, new_frame, s_det.stable, s_eff.smooth, now_ns);
     if (!s_win_started) {
         s_win_started = 1;
         s_win_start_ns = now_ns;
@@ -534,6 +588,86 @@ void ace_counters(AceCounters *out) {
     if (out) *out = s_counters;
 }
 
+/* ---- smooth motion: which frame each present shows ------------------------------------------- */
+
+void ace_pace_reset(AcePace *p) {
+    if (p) memset(p, 0, sizeof(*p));
+}
+
+void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t now_ns) {
+    p->reflip = p->held && !new_frame;
+    p->held = 0;
+    p->flip_ns = now_ns;
+    if (!smooth || !new_frame) p->show = ACE_SHOW_REAL;
+    else p->show = rate == ACE_RATE_K2 ? ACE_SHOW_BETWEEN : ACE_SHOW_KEEP;
+}
+
+AceShow ace_pace_take(AcePace *p) {
+    AceShow show = p->show;
+    p->show = ACE_SHOW_REAL;
+    return show;
+}
+
+void ace_pace_shown_between(AcePace *p, uint32_t vcount, uint64_t now_ns) {
+    p->held = 1;
+    p->held_after = vcount;
+    p->held_ns = now_ns;
+}
+
+AcePresentKind ace_pace_flip_kind(const AcePace *p) {
+    return p->reflip ? ACE_PRESENT_HELD : ACE_PRESENT_REAL;
+}
+
+int ace_pace_vblank(AcePace *p, uint32_t vcount) {
+    if (!p->held || vcount == p->held_after) return 0;
+    p->held = 0;
+    return 1;
+}
+
+AceShow ace_smooth_take(void) {
+    return g_ace_on ? ace_pace_take(&s_pace) : ACE_SHOW_REAL;
+}
+
+void ace_smooth_shown_between(uint64_t now_ns) {
+    if (g_ace_on) ace_pace_shown_between(&s_pace, s_pace_vcount, now_ns);
+}
+
+int ace_smooth_vblank(uint32_t vcount) {
+    return g_ace_on && ace_pace_vblank(&s_pace, vcount);
+}
+
+void ace_pace_stats_add(AcePaceStats *s, AcePresentKind kind, uint64_t now_ns) {
+    if ((unsigned)kind >= ACE_PRESENT_KINDS) return;
+    s->kind[kind]++;
+    if (s->last_ns && now_ns > s->last_ns) {
+        uint64_t ns = now_ns - s->last_ns;
+        uint64_t bin = ns / 1000000u;
+        s->interval[bin < ACE_PACE_BINS ? bin : ACE_PACE_BINS - 1u]++;
+        s->interval_count++;
+        s->interval_sum_ns += ns;
+    }
+    s->last_ns = now_ns;
+}
+
+void ace_smooth_note_present(AcePresentKind kind, uint64_t now_ns) {
+    if (!g_ace_on) return;
+    if (kind == ACE_PRESENT_REAL) {
+        kind = ace_pace_flip_kind(&s_pace);
+        s_pace.reflip = 0;
+    }
+    ace_pace_stats_add(&s_pace_stats, kind, now_ns);
+    if (kind == ACE_PRESENT_HELD && now_ns > s_pace.held_ns) {
+        uint64_t ns = now_ns - s_pace.held_ns;
+        s_pace_stats.hold_count++;
+        s_pace_stats.hold_sum_ns += ns;
+        if (ns > s_pace_stats.hold_max_ns) s_pace_stats.hold_max_ns = ns;
+    }
+}
+
+void ace_pace_stats(AcePaceStats *out) {
+    if (out) *out = s_pace_stats;
+}
+
 /* ---- the per-run report -------------------------------------------------------------------- */
 
 static AceRate dominant_rate(void) {
@@ -543,6 +677,16 @@ static AceRate dominant_rate(void) {
         if (s_rate_vblanks[r] > most) { most = s_rate_vblanks[r]; best = (AceRate)r; }
     }
     return best;
+}
+
+void ace_smooth_aux_report(const AceSmoothAuxStats *s) {
+    if (!s) return;
+    s_aux_stats = *s;
+    s_have_aux_stats = 1;
+}
+
+static uint64_t aux_dropped(const AceSmoothAuxStats *a) {
+    return a->boxes_large + a->boxes_target + a->boxes_outside + a->boxes_full;
 }
 
 size_t ace_report_json(char *out, size_t cap) {
@@ -556,9 +700,10 @@ size_t ace_report_json(char *out, size_t cap) {
     if (!out || !cap) return 0;
     ACE_PUT("{\n  \"schema\": 1,\n  \"spec\": \"%s\",\n", s_spec);
     ACE_PUT("  \"effective\": {\"af\": %d, \"text\": %s, \"readout\": %s, \"notice\": %s, "
-            "\"wide\": \"%s\", \"smooth\": \"%s\"},\n",
+            "\"wide\": \"%s\", \"smooth\": \"%s\", \"sas\": \"%s\"},\n",
             s_eff.af, s_eff.text ? "true" : "false", s_eff.readout ? "true" : "false",
-            s_eff.notice ? "true" : "false", wide_word(s_eff.wide), smooth_word(s_eff.smooth));
+            s_eff.notice ? "true" : "false", wide_word(s_eff.wide), smooth_word(s_eff.smooth),
+            sas_word(s_eff.sas));
     ACE_PUT("  \"unavailable\": {");
     int first = 1;
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
@@ -588,6 +733,44 @@ size_t ace_report_json(char *out, size_t cap) {
     ACE_PUT("}},\n");
     ACE_PUT("  \"frames\": {\"flips\": %llu, \"new\": %llu},\n",
             (unsigned long long)s_counters.flips, (unsigned long long)s_counters.new_frames);
+    if (s_req.smooth) {
+        const AcePaceStats *ps = &s_pace_stats;
+        ACE_PUT("  \"presents\": {\"real\": %llu, \"between\": %llu, \"held\": %llu, "
+                "\"superseded\": %llu},\n",
+                (unsigned long long)ps->kind[ACE_PRESENT_REAL],
+                (unsigned long long)ps->kind[ACE_PRESENT_BETWEEN],
+                (unsigned long long)ps->kind[ACE_PRESENT_HELD],
+                (unsigned long long)ps->superseded);
+        ACE_PUT("  \"added_delay_ms\": {\"mean\": %.2f, \"max\": %.2f},\n",
+                ps->hold_count ? (double)ps->hold_sum_ns / (double)ps->hold_count / 1e6 : 0.0,
+                (double)ps->hold_max_ns / 1e6);
+    }
+    if (s_req.smooth && s_have_aux_stats) {
+        const AceSmoothAuxStats *a = &s_aux_stats;
+        ACE_PUT("  \"smooth_aux\": {\"pairs\": %llu, \"pairs_mask\": %llu, \"pairs_depth\": %llu, "
+                "\"depth_refused\": %llu,\n",
+                (unsigned long long)a->pairs, (unsigned long long)a->pairs_mask,
+                (unsigned long long)a->pairs_depth, (unsigned long long)a->depth_refused);
+        ACE_PUT("    \"boxes\": {\"kept\": %llu, \"merged\": %llu, \"large\": %llu, \"target\": %llu, "
+                "\"outside\": %llu, \"full\": %llu},\n",
+                (unsigned long long)a->boxes_kept, (unsigned long long)a->boxes_merged,
+                (unsigned long long)a->boxes_large, (unsigned long long)a->boxes_target,
+                (unsigned long long)a->boxes_outside, (unsigned long long)a->boxes_full);
+        ACE_PUT("    \"frames\": {\"mask\": %llu, \"overflow\": %llu, \"depth\": %llu, "
+                "\"depth_unwritten\": %llu, \"depth_none\": %llu, \"unshown\": %llu}},\n",
+                (unsigned long long)a->frames_mask, (unsigned long long)a->frames_overflow,
+                (unsigned long long)a->frames_depth, (unsigned long long)a->frames_depth_unwritten,
+                (unsigned long long)a->frames_depth_none, (unsigned long long)a->published_unshown);
+    }
+    if (s_pace_stats.interval_count) {
+        const AcePaceStats *ps = &s_pace_stats;
+        ACE_PUT("  \"present_interval_ms\": {\"count\": %llu, \"mean\": %.2f, \"bins\": [",
+                (unsigned long long)ps->interval_count,
+                (double)ps->interval_sum_ns / (double)ps->interval_count / 1e6);
+        for (uint32_t i = 0; i < ACE_PACE_BINS; i++)
+            ACE_PUT("%s%llu", i ? ", " : "", (unsigned long long)ps->interval[i]);
+        ACE_PUT("]},\n");
+    }
     ACE_PUT("  \"pc_limited_seconds\": %llu\n}\n", (unsigned long long)s_limited_windows);
 #undef ACE_PUT
     return used;
@@ -597,15 +780,27 @@ void ace_finish(void) {
     char json[ACE_REPORT_MAX];
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
-    static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH };
+    static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
-                                        s_eff.wide, s_eff.smooth };
+                                        s_eff.wide, s_eff.smooth, s_eff.sas };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, "did not run: its renderer or presenter did not start");
     }
     size_t len = ace_report_json(json, sizeof(json));
     fprintf(stderr, "ACE_MODE: exit (%s; rate %s)\n", s_spec, ace_rate_name(dominant_rate()));
+    if (s_req.smooth && s_have_aux_stats) {
+        const AceSmoothAuxStats *a = &s_aux_stats;
+        fprintf(stderr, "ACE_MODE: smooth inputs (pairs %llu: HUD mask %llu, depth %llu; HUD boxes kept "
+                        "%llu, dropped %llu: %llu large, %llu sampling a target, %llu off screen, %llu past "
+                        "the limit; frames without a mask %llu, without depth %llu)\n",
+                (unsigned long long)a->pairs, (unsigned long long)a->pairs_mask,
+                (unsigned long long)a->pairs_depth, (unsigned long long)a->boxes_kept,
+                (unsigned long long)aux_dropped(a), (unsigned long long)a->boxes_large,
+                (unsigned long long)a->boxes_target, (unsigned long long)a->boxes_outside,
+                (unsigned long long)a->boxes_full, (unsigned long long)a->frames_overflow,
+                (unsigned long long)(a->frames_depth_unwritten + a->frames_depth_none + a->depth_refused));
+    }
     if (!len || !s_report_path[0]) return;
     char tmp[sizeof(s_report_path) + 8];
     snprintf(tmp, sizeof(tmp), "%s.tmp", s_report_path);
