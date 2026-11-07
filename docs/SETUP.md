@@ -141,7 +141,7 @@ folder it moved, and those are yours to delete.
 
 ## Wine and Proton
 
-The Windows ZIP is the only player build; there is no Linux player build ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306)).
+The Windows ZIP is the only player release; there is no Linux player release ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306)).
 Wine or Proton is not a supported platform, and nothing in the project is changed to make it work. These
 steps are the smoke run from [#1876](https://github.com/Jstar269/nakagawa-recomp/issues/1876). It needs no game disc and
 no network.
@@ -976,8 +976,8 @@ then from `PATH`; without it the built-in readable debug font is used. Placing
 ### Network use
 
 Nakagawa works offline. The player and the runtime make no network connection unless you
-agree to one, and the game itself never reaches the network. Today there are two
-connections, listed below; any future online feature will be opt-in and added here first.
+agree to one, and the game itself never reaches the network. There are two
+connections, listed below, and each is opt-in.
 
 | What | Host | When | Controlled by |
 | --- | --- | --- | --- |

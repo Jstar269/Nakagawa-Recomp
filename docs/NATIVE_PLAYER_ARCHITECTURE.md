@@ -74,8 +74,8 @@ The native player uses the existing SDL3 and Vulkan runtime to render its in-win
 | **Couch / Controller Navigation** | **First-Class** (SDL3 Gamepad API) | Complex focus management | Moderate | Web Gamepad API limits |
 | **Unified Game Window** | **Target** (launcher and title currently run as separate processes) | No (Separate launcher & render window) | No | No |
 | **In-Game Overlay Capable** | **Yes** (the pause overlay draws with nk_ui inside the runtime; the F3 performance HUD draws with SDL debug text) | No | No | No |
-| **Linux / Steam Deck Parity** | **Target** (SDL3/Vulkan; platform acceptance not run) | Good | Good | WebKitGTK packaging fragmentation |
-| **macOS (Metal/MoltenVK)** | **Target** (framework path; project acceptance not run) | Framework capability; project acceptance not run | Framework capability; project acceptance not run | Framework capability; project acceptance not run |
+| **Linux / Steam Deck Parity** | **Not supported** (the player builds on Linux for development; there is no Linux release and platform acceptance has not run) | Good | Good | WebKitGTK packaging fragmentation |
+| **macOS (Metal/MoltenVK)** | **Not supported** (framework capability only; project acceptance not run) | Framework capability; project acceptance not run | Framework capability; project acceptance not run | Framework capability; project acceptance not run |
 | **Build-System Burden** | **Target: native Makefile path** (developer toolchain still required today) | Heavy (CMake + MOC + UIC) | Heavy (Requires Cargo / Rustc) | Heavy (Node + Rust toolchains) |
 | **Startup Latency** | **Target estimate; not acceptance evidence** | ~300–600 ms | ~100 ms | ~400–800 ms |
 
@@ -306,25 +306,3 @@ were the initial survey.
 
 The visual spec the player UI lanes (C5-C10) build against, with its tokens, components and the screen specs for
 Settings, first run, error dialogs and the in-game overlay, is [`PLAYER_UI_DESIGN.md`](PLAYER_UI_DESIGN.md).
-
-## 9. System check (design, not built)
-
-The player has no System check page. This is its design: a page that verifies that this PC can run every part of Nakagawa. It
-is a button in Settings, and the setup wizard's last step offers it ("Check this PC, about 2 minutes", skippable). Each
-row shows a pass or a named failure with the fix, in plain words:
-
-| Check | How |
-| --- | --- |
-| Graphics | Vulkan starts and the GPU and driver are named; the software fallback is reported when Vulkan does not start |
-| Display and fonts | The UI fonts load and text draws at the display's scaling |
-| Audio | The output device opens and a short tone plays, which the user confirms |
-| Input | A controller is detected, and a "press each button" test fills in a picture |
-| Storage | The data folders are writable and there is room for a typical package |
-| Build tools | Python, the compiler and make are found with their versions, or the consented download is offered |
-| Full pipeline | The project's own showcase demo is analysed, recompiled, built and launched for a few frames, proving the whole route works on this PC without any game |
-| Online | Only with online mode on: the host answers and the update notice's signature verifies |
-| Nakagawa Link | Only when the user has it: the PSP is found over USB |
-
-It never claims that a particular game works: game compatibility stays on each title's card. It reuses the
-prerequisite preflight, the showcase fixtures (project-made, no game data), and the developer log from developer mode
-([`ONLINE_FEATURES.md`](ONLINE_FEATURES.md#developer-mode)).
