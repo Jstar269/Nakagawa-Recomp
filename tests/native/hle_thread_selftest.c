@@ -28962,6 +28962,27 @@ static void test_dmac_hardware_semantics(uint32_t nid, const char *who) {
                "a transfer writes nothing past its requested size");
     }
 
+    /* The GPU is told about every byte a large copy writes, not a 0xC000-byte prefix of them:
+     * the size matrix proved the whole request lands, so the whole destination range is dirty
+     * (#303 acceptance: the dirty notification covers exactly the bytes the semantics imply). */
+    {
+        static const uint32_t dirty_sizes[] = {0xC001u, 0x10000u, 0x100000u};
+        for (unsigned i = 0; i < sizeof(dirty_sizes) / sizeof(dirty_sizes[0]); i++) {
+            const uint32_t n = dirty_sizes[i];
+            const uint32_t vram = 0x04000000u;
+            dmac_fill(src, n);
+            dmac_clear(vram, n, 0u);
+            gpu_dirty_reset();
+            expect(bulk_call(nid, vram, src, n) == 0u,
+                   "a large DMA into VRAM returns success");
+            expect(dmac_span_matches(vram, n, 0u),
+                   "a large DMA into VRAM copies every byte");
+            expect(s_gpu_dirty_calls == 1u && s_gpu_dirty_addr == vram && s_gpu_dirty_bytes == n,
+                   "a large DMA reports its whole destination range to the GPU");
+        }
+        gpu_dirty_reset();
+    }
+
     /* --- coherency matrix: RAM/VRAM directions and aliases ------------------
      * The HLE entry must use the unified SR_HOST mapping for every source and
      * destination class. The real GPU hook decides whether a dirty range is

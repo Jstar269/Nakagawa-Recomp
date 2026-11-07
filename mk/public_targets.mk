@@ -141,6 +141,7 @@ PUBLIC_TARGETS := \
 	osk-overlay-selftest \
 	ace-selftest \
 	fsr3-host-selftest \
+	dmac-mutants \
 	fsr3-mutants \
 	fsr3-fg-host-selftest \
 	fsr3-fg-state-selftest \
@@ -338,6 +339,7 @@ HELP_DESCRIPTION_osk-text-entry-selftest := run the on-screen keyboard's non-blo
 HELP_DESCRIPTION_osk-overlay-selftest := run the in-window keyboard's state-machine selftest (pure C)
 HELP_DESCRIPTION_ace-selftest := run Ace Mode's CPU-only selftest (launch line, 30 Hz detector, readout, report; pure C)
 HELP_DESCRIPTION_fsr3-host-selftest := run FSR 3's host selftest against the record of AMD's host code (pure C)
+HELP_DESCRIPTION_dmac-mutants := run the sceDmacMemcpy mutation campaign (each defect must build and fail the HLE thread selftest)
 HELP_DESCRIPTION_fsr3-mutants := run the FSR 3 host mutation campaign (each defect must build and fail the selftest)
 HELP_DESCRIPTION_fsr3-fg-host-selftest := run FSR 3 frame generation's host selftest against the record of AMD's host code (pure C)
 HELP_DESCRIPTION_fsr3-fg-state-selftest := run FSR 3 frame generation's state machine against the G-S table (pure C)
