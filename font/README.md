@@ -26,7 +26,7 @@ fonts are never committed.
 
 These fonts are stand-ins. They let a game draw its text when you have not imported your PSP's fonts, but they look
 different from the PSP's. They are sized and spaced to come close: their nominal sizes are the PSP's (10.125 points
-for Japanese and Korean, and the PSP's two Latin sizes), and their x-height, cap height, stem width and spacing are set
+for Japanese and Korean, and the PSP's two Latin sizes), and their x-height, cap height, stem width, horizontal-stroke weight and spacing are set
 from aggregate measurements of the PSP fonts they stand in for. No letter shape comes from those fonts.
 
 ## Without your PSP's fonts: what changes
@@ -54,6 +54,10 @@ What changes:
   the PSP's. The spacing splits the difference, so in the regular sans-serif faces capitals average about 2 % wider
   than the PSP's and small letters about 2 % narrower. A line in capitals, such as a menu, runs up to 3 % longer and
   a sentence up to 2 % shorter.
+- **Weight of the serif faces.** The sans-serif stand-ins carry the PSP fonts' ink per letter within 4 %. The
+  serif stand-ins (`ltn1`, `ltn3`, `ltn5`, `ltn7` and the same four of the smaller size) carry 6 % to 30 % more,
+  because the PSP's serif faces are lighter than Liberation Serif (measured on 2026-11-07 on the same PSP-3000's files); the PSP's bold sans-serif faces are about 3 %
+  heavier than their stand-ins.
 - **Japanese weight and Latin letters in Japanese text.** The Japanese stand-in is Noto Sans JP's regular weight;
   its stroke weight has not been compared with the PSP font's. Latin letters drawn with the Japanese font come from
   Noto Sans JP and are about 18 % narrower than the PSP's (9.7 pixels on average against 11.8).

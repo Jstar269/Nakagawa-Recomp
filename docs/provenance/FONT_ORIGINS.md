@@ -395,8 +395,11 @@ italic), with the PGF style `Regular`, `Italic`, `Bold` or `Bold Italic`. The
 larger size is 20 ppem (nominal 648, 10.125 points at 128 dpi) and the smaller
 13 ppem (nominal 448), each with synthetic emboldening. Each index has its own
 `--tracking`, and the sans-serif faces `--digit-advance` (tabular figures at
-the console's digit width). Every index's sentence and menu line then comes
-within 3 % of the console's.
+the console's digit width) and `--embolden-y` (horizontal strokes as thick as
+the console's: its sans-serif letters carry 9 to 25 % more ink than the source
+faces draw without it). Every index's sentence and menu line then comes
+within 3 % of the console's, and each sans-serif face's mean ink per letter
+within 4 %.
 
 **Japanese: Noto Sans JP, with M PLUS 1p for one point.** The Japanese input is
 the project UI font `assets/fonts/ui/noto-sans-jp/NotoSansJP-Regular.ttf`
