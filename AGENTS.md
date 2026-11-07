@@ -190,7 +190,8 @@ maintainer's PSP; a contributor's agent uses a PSP only as its user directs.
   locally into the private per-title folder and stays there. Key literals live only in
   `src/core/nk_psp_builtin_keys.c`. Console-bound values (fuse ID, secure-install ID, licence files)
   come only from the user and are never committed. The project ships no firmware or firmware-only key
-  and never decrypts firmware, even privately: firmware inputs are refused before decryption. A user's
+  and never decrypts firmware, even privately: updater PSAR archives, the IPL, the Media Engine image,
+  system-menu files and encrypted `flash0` modules are refused by name before any decryption step. A user's
   plain `flash0` files (such as fonts) stay local, never committed, packaged or uploaded.
 - Treat `place_game_here/`, `logs/`, `memstick/`, `keys/`, `oracle/`, `fs/`, `build/`, and local
   third-party material as sensitive. Never run `git clean -fdx` where inputs exist.
@@ -238,7 +239,8 @@ Re-check live source before changing these; PR numbers are navigation, not evide
 - Nested interpreted calls outside that floor are unproven; broader claims need a new contract and test.
 - `src/rt/recomp.h` is a load-bearing ABI: `$ra` is `r[31]`; `CpuState` is versioned by `SR_CPUSTATE_ABI_VERSION`.
 - Chunk count is dynamic; `FUNCS_PER_CHUNK` is not a fixed ABI.
-- LLE CPU and import seam are opt-in (`--lle-cpu`, `--lle-import-seam`); default output stays byte-identical.
+- LLE CPU and import seam are opt-in (`--lle-cpu`, `--lle-import-seam`; the seam implies `--lle-cpu`); default
+  output stays byte-identical.
 - Unmeasured hardware values stay fail-closed and labelled synthetic until measured on a PSP.
 - HLE arguments 1-4 are `A0`-`A3`, 5-8 `t0`-`t3` (`stack_arg`), 9+ the stack; never read past the public signature.
 
