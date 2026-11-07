@@ -67,9 +67,11 @@ typedef struct {
     SrH264PixelFormat delivered_format;
     /* The time of the access unit this picture was decoded from (its SrH264AccessUnit.pts, 90
      * kHz), carried through the decoder's reordering.  A backend that can return pictures out of
-     * submit order must report it (has_pts = 1) for every picture whose unit had a time, because
-     * the consumer otherwise knows only submit order; the Media Foundation and FFmpeg backends
-     * both do.  has_pts = 0 (pts = -1) means the backend cannot name the picture's unit, and the
+     * submit order must report it (has_pts = 1) whenever it can name the picture's unit, because
+     * the consumer otherwise knows only submit order.  FFmpeg reports the packet time it carried.
+     * Media Foundation reports a time only when the output sample time matches a remembered unit
+     * that had a time and every other pending unit with that sample time carries the same time;
+     * an ambiguous, evicted or unmatched sample time reports none.  has_pts = 0 (pts = -1) means the backend cannot name the picture's unit, and the
      * consumer falls back to its own submit-order bookkeeping.  The time may be one the player
      * extrapolated, so it is not proof that the source packet carried a PTS; consumers that need
      * source provenance must retain the producer's AU metadata. */
