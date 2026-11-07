@@ -2,21 +2,22 @@
 
 ## Supported versions
 
-`main` and the latest release, v0.0.1, are supported. The project does not claim a release-grade security posture: treat arbitrary
+`main` and the latest release, v0.0.2, are supported. The project does not claim a release-grade security posture: treat arbitrary
 PSP and game inputs as untrusted until the parser and guest-span hardening work tracked in GitHub Issues
 is complete.
 
 | Version | Supported | Status / Support Policy |
 | :--- | :--- | :--- |
 | `main` | :white_check_mark: | Active development line. Fixes for all security reports land here. |
-| `v0.0.1` | :white_check_mark: | First experimental release ([#278](https://github.com/Jstar269/nakagawa-recomp/issues/278)). Fixes land on `main` and ship in the next release; no backported point releases. |
+| `v0.0.2` | :white_check_mark: | Second experimental release ([release notes](docs/RELEASE_NOTES_v0.0.2.md)). Fixes land on `main` and ship in the next release; no backported point releases. |
+| `v0.0.1` | :x: | First experimental release ([#278](https://github.com/Jstar269/nakagawa-recomp/issues/278)). Superseded by `v0.0.2`; it receives no fixes. |
 
 ### Release policy
 
 Since the first experimental release, `v0.0.1`:
 
 - The `main` branch remains the primary supported development line.
-- `v0.0.1` is an experimental prerelease milestone, not an LTS or patch-supported line: fixes for security issues identified in `v0.0.1` land on `main` and flow into subsequent releases rather than receiving backported security point releases.
+- Each release, `v0.0.2` included, is an experimental prerelease milestone, not an LTS or patch-supported line: fixes for security issues identified in a release land on `main` and flow into subsequent releases rather than receiving backported security point releases.
 - A release stops receiving security updates as soon as the next release is published; move to the newest
   release or to `main` to keep receiving fixes.
 

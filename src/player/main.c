@@ -1119,7 +1119,7 @@ static void player_ui_wizard_apply(PlayerApp *app, PlayerUiWizardOp op) {
 #define NK_PLAYER_BUILD_COMMIT ""
 #endif
 
-/* The version a report names: "v0.0.2-dev", with the source commit when the
+/* The version a report names: "v0.0.2", with the source commit when the
    build knows it. */
 static const char *player_report_version(void) {
     static char version[64];

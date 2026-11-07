@@ -4,9 +4,9 @@ Status: CURRENT. The maintained release candidate specification, under [issue #2
 
 ## Release version
 
-`v0.0.1`, the first experimental release, was published on 2026-10-28 from an exact, reproducible,
-publication-clean commit on `main`. `main` now builds `0.0.2-dev`, and the next release follows the same
-procedure. An older proposal for a `0.1.0-preview.1` version is withdrawn.
+`v0.0.2` is the second experimental release. Like `v0.0.1`, the first, published on 2026-10-28, it is built from
+an exact, reproducible, publication-clean commit on `main`, whose release manifest and player version read `0.0.2`.
+Each release follows the procedure below. An older proposal for a `0.1.0-preview.1` version is withdrawn.
 
 Agents never create, move, push or delete Git tags, edit GitHub Releases, upload release assets or change a
 published version without the maintainer's explicit authorization in the current turn (`AGENTS.md` § 3). This
@@ -22,7 +22,7 @@ The release is a Windows public-source and reproducibility package built from th
 - **Platform ladder:** `mingw32-make platform-ladder` builds and runs the source-owned synthetic workload ladder, including relocation, scheduler, filesystem, FPU, title-2, and negative cases.
 - **Core runtime selftests:** `mingw32-make selftest sched-selftest hle-thread-selftest public-safe-verify` runs the native interpreter, scheduler, HLE/thread, and public-safe object gates.
 - **Native player application:** `mingw32-make player` builds `build/nakagawa_player.exe` from `src/player/`. The standalone SDL3 desktop application provides direct C ISO9660 PVD reading, `PARAM.SFO` metadata parsing (`DISC_ID`, `TITLE`), asset census staging, gamepad navigation, and structured error views.
-- **Display smoke & player launch:** `mingw32-make display-smoke` proves the two-phase pipeline, loader, NID imports, vblank delivery and display latch without proprietary inputs. Its player-launch variant, `mingw32-make display-smoke-player`, doesn't pass in this release ([release notes](RELEASE_NOTES_v0.0.1.md)).
+- **Display smoke & player launch:** `mingw32-make display-smoke` proves the two-phase pipeline, loader, NID imports, vblank delivery and display latch without proprietary inputs. Its player-launch variant, `mingw32-make display-smoke-player`, needs a display and is not run by hosted CI.
 - **Media subsystem:** PSMF MPEG-PS demuxing and H.264 video decoding pipelines for in-game cutscenes.
 - **User interface:** The native player is the only UI in the public repository.
 
@@ -139,7 +139,7 @@ The packaged player binaries and runtime closure are copied byte-for-byte from t
 At candidate freeze, the maintainer-selected trust anchor is the detailed `IMPLEMENTATION_PROVENANCE.json` from the external authority repository, never a candidate-committed public ledger. Verify the frozen main commit's admissions, commit and push truthful authority changes, then copy the ledger from that exact authority commit to an external immutable file. Record the full candidate SHA, authority commit SHA, and copied ledger SHA-256 together in #278. Set `NAKAGAWA_TRUSTED_PUBLIC_LEDGER` to that detailed copy and do not edit or regenerate it. Different source bytes require a fresh freeze and binding. The export audit consumes a hashed public `entries` projection; the commands below independently generate and verify that projection from the selected detailed authority instead of trusting the candidate's copy, which carries claims only.
 
 ```powershell
-$Version = '0.0.1'
+$Version = '0.0.2'
 $CandidateSha = $env:NAKAGAWA_CANDIDATE_SHA
 $FrozenCandidateSha = (git rev-parse HEAD).Trim()
 if ($CandidateSha -notmatch '^[0-9a-f]{40}$' -or $FrozenCandidateSha -ne $CandidateSha) {
@@ -212,7 +212,7 @@ foreach ($Required in @('nakagawa_player.exe', 'production_smoke.exe', 'SDL3.dll
 Copy-Item -LiteralPath $ToolchainIdentity -Destination (Join-Path $Stage 'toolchain.json')
 Copy-Item LICENSE, NOTICE.md (Join-Path $Stage '.')
 Copy-Item README.md (Join-Path $Stage '.')
-Copy-Item docs\PREVIEW_RELEASE.md, docs\SETUP.md, docs\SMOKE_TEST.md, docs\RELEASE_NOTES_v0.0.1.md $PackageDocs
+Copy-Item docs\PREVIEW_RELEASE.md, docs\SETUP.md, docs\SMOKE_TEST.md, docs\RELEASE_NOTES_v0.0.2.md $PackageDocs
 # The pictures the root README shows, at the same relative paths, so the packaged README displays them.
 $ReadmeImages = Select-String -LiteralPath README.md -Pattern 'docs/(?:images|media)/[A-Za-z0-9._/-]+' -AllMatches |
     ForEach-Object { $_.Matches.Value } | Sort-Object -Unique
@@ -226,7 +226,7 @@ foreach ($Image in $ReadmeImages) {
     "Nakagawa Recomp $Version",
     '',
     'To start: open the bin folder and run nakagawa_player.exe.',
-    'To check the download first, see docs\RELEASE_NOTES_v0.0.1.md, "Checking your download".',
+    'To check the download first, see docs\RELEASE_NOTES_v0.0.2.md, "Checking your download".',
     'You need your own copy of a PSP game; nothing in this folder contains game data.'
 ) | Set-Content -LiteralPath (Join-Path $Stage 'START HERE.txt') -Encoding utf8NoBOM
 Copy-Item (Join-Path $Bin 'THIRD_PARTY_NOTICES') $Stage -Recurse
@@ -455,7 +455,7 @@ Steps:
 4. Check the download and extract it:
 
    ```powershell
-   $Zip = Join-Path $env:USERPROFILE 'Acceptance\nakagawa-recomp-0.0.1-windows-x64.zip'
+   $Zip = Join-Path $env:USERPROFILE 'Acceptance\nakagawa-recomp-0.0.2-windows-x64.zip'
    $Expected = (Get-Content -LiteralPath "$Zip.sha256" -Raw).Split(' ')[0]
    if ((Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Expected) { throw 'ZIP hash mismatch' }
    Expand-Archive -LiteralPath $Zip -DestinationPath (Join-Path $env:USERPROFILE 'Nakagawa')

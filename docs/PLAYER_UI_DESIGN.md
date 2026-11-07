@@ -466,7 +466,7 @@ Reached from the top bar's ABOUT tab (L / R or Q / E switch tabs; Back returns t
 880 px column:
 
 - the N1 mark at 72 px beside `NAKAGAWA RECOMP` in `DISPLAY_XL`, with the version line under it in `LABEL_L`
-  accent, exactly `v0.0.1 (MM-DD-YYYY)`;
+  accent: `v`, then `NK_PLAYER_VERSION`, then the build date as `(MM-DD-YYYY)`, for example `v0.0.2 (11-07-2026)`;
 - a `BODY_L` `muted` line saying what it is (a PSP static recompiler: your own game, recompiled to run natively),
   followed by the privacy promise;
 - a LICENCE card (GPL-3.0-or-later, and a THIRD-PARTY NOTICES button that opens the existing licences screen) beside

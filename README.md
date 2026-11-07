@@ -10,7 +10,7 @@
 
 **Play PSP games you own as native Windows programs.**
 
-**[Download](https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.1) · [Website](https://jstar269.github.io/nakagawa-recomp/) · [Compatibility](docs/COMPATIBILITY.md) · [Discussions](https://github.com/Jstar269/nakagawa-recomp/discussions)**
+**[Download](https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.2) · [Website](https://jstar269.github.io/nakagawa-recomp/) · [Compatibility](docs/COMPATIBILITY.md) · [Discussions](https://github.com/Jstar269/nakagawa-recomp/discussions)**
 
 [![CI](https://github.com/Jstar269/nakagawa-recomp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jstar269/nakagawa-recomp/actions/workflows/ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
@@ -30,8 +30,8 @@ game is playable, one plays a stage, a dozen more start and get part of the way 
 
 ## Download
 
-[Download v0.0.1](https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.1), the first release: one 285 MB
-ZIP for Windows 11, 64-bit. It includes the build tools, so you don't need to install anything else.
+[Download v0.0.2](https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.2), the latest release: one ZIP for
+Windows 11, 64-bit. It includes the build tools, so you don't need to install anything else.
 
 1. Extract the ZIP and start `bin\nakagawa_player.exe`.
 2. Drag your game's `.iso` into the player window, or choose **START SETUP WIZARD**. Nakagawa decrypts your own disc
@@ -39,9 +39,8 @@ ZIP for Windows 11, 64-bit. It includes the build tools, so you don't need to in
 3. Press **BUILD PACKAGE**, then **PLAY**. A first build takes several minutes.
 
 The ZIP isn't code-signed, so Windows may warn you the first time. The
-[release notes](docs/RELEASE_NOTES_v0.0.1.md) say what works, what doesn't yet, and how to check the download.
-v0.0.2, still in progress, adds Settings > Updates, which checks GitHub for a newer version when you ask and can
-download and check it for you.
+[release notes](docs/RELEASE_NOTES_v0.0.2.md) say what works, what doesn't yet, and how to check the download.
+Settings > **CHECK FOR UPDATES** asks GitHub for a newer version when you select it and links to its release page.
 
 You need:
 
@@ -51,7 +50,7 @@ You need:
 - Your own copy of the game as an uncompressed `.iso` disc image, or the `EBOOT.PBP` of a PSN release of a UMD game.
   Nothing here downloads games, firmware or fonts.
   [`docs/YOUR_OWN_GAMES.md`](docs/YOUR_OWN_GAMES.md) covers what to do if a file can't be decrypted.
-- Builds after v0.0.1 also take a compressed `.cso`, `.zso` or `.chd` image. The player expands it once, when you add
+- The player also takes a compressed `.cso`, `.zso` or `.chd` image. It expands it once, when you add
   it, into a plain `.iso` in its data folder, so you need free space for the full `.iso` as well
   ([details](docs/SETUP.md#compressed-disc-images)).
 
@@ -59,7 +58,7 @@ You need:
 
 | Game | Rating | Notes |
 | --- | --- | --- |
-| *Hot Shots Tennis: Get a Grip* | Playable | Full matches and Story Mode play. On the reference PC a full match runs at 29.5 of the game's own 30 frames per second. Its title file ships with Nakagawa. Movies show black in v0.0.1; builds after it play them. Some sound effects can still drop out while the game loads ([#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)). |
+| *Hot Shots Tennis: Get a Grip* | Playable | Full matches and Story Mode play. On the reference PC a full match runs at 29.5 of the game's own 30 frames per second. Its title file ships with Nakagawa. Movies show black in v0.0.1 and play from v0.0.2. Some sound effects can still drop out while the game loads ([#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)). |
 | PAC-MAN Championship Edition | In-game | Reaches its menu, plays a stage and resumes from its own save, through general fixes with no game-specific code ([#552](https://github.com/Jstar269/nakagawa-recomp/pull/552), [#556](https://github.com/Jstar269/nakagawa-recomp/pull/556), [#1126](https://github.com/Jstar269/nakagawa-recomp/issues/1126)). The rest of the game hasn't been tried. |
 | *Super Stardust Portable* | Title screen | Goes through its menus to difficulty select, then stops by name at a VFPU instruction Nakagawa doesn't support yet ([#326](https://github.com/Jstar269/nakagawa-recomp/issues/326)). |
 | Eleven more games, *LittleBigPlanet* among them | No tier | Seen to start or run, in the project's testing or in user reports on v0.0.1, but not checked by the maintainer. Several reach menus or gameplay, most well below full speed. [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) says how far each one gets. |
