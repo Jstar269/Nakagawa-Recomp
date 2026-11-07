@@ -230,8 +230,12 @@ typedef enum {
     PLAYER_PART_TEXT,          /* crisp system text (the on-screen keyboard): 0 or 1 */
     PLAYER_PART_READOUT,       /* the speed readout: 0 or 1 */
     PLAYER_PART_NOTICE,        /* the in-game badge at start: 0 or 1 */
+    PLAYER_PART_WIDE,          /* widescreen Fill (#1881): 0 off, 1 fill */
     PLAYER_PART_SMOOTH,        /* smooth motion (#1272): 0 off, 1 x2 */
     PLAYER_PART_SAS,           /* band-limited SAS resampling (#2054, section 11.3.1): 0 off, 1 sinc */
+    PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
+                                  runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
+                                  not in the SR_ACE line */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -651,6 +655,9 @@ typedef struct {
     char title[MAX_TITLE_LEN];
     /* A checked conversion is already at iso_path. */
     bool iso_ready;
+    /* An EBOOT.PBP holding unencrypted homebrew (#2143): iso_path is a small private disc
+       image written from the package, and disc_id is the library key that image will have. */
+    bool homebrew;
     /* NK_DISC_FORMAT_NONE for a PSN package; otherwise the compressed image's
        format, and iso_path and disc_id are known once it is expanded. */
     NkDiscFormat disc_format;
@@ -1649,6 +1656,9 @@ const PlayerEnhancedPartInfo *player_enhanced_part(int part);
 /* The row's word for a part's value ("16x", "On", "Off"); "Off" for a value the part does not
  * have. */
 const char *player_enhanced_part_label(int part, int value);
+/* If a selected part will be dropped for the resolved Smooth value, its effective row label;
+ * NULL when the selected value is available. Uses the runtime's shared compatibility rule. */
+const char *player_enhanced_part_unavailable_label(int part, int value, int smooth);
 /* "Authentic", "Enhanced", "Ace" or "Library default". */
 const char *player_play_mode_name(PlayerPlayMode mode);
 /* The title's saved choice for a disc, or NULL when it follows the library everywhere. */
@@ -1669,9 +1679,20 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
  * Authentic resolution stays off. */
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
- * notice=on;wide=off;smooth=off;sas=off" (tier=ace for Ace; wide is always off, and smooth=match
- * is never written). Returns false when it does not fit. */
+ * notice=on;wide=off;smooth=off;sas=off" (tier=ace for Ace; smooth=match is never written).
+ * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);
+/* The presentation upscaler a resolution asks for (NkRuntimeConfig.present_upscale, exported as
+ * SR_PRESENT_UPSCALE): NK_PRESENT_UPSCALE_FSR1 for Enhanced or Ace with the part on, else
+ * NK_PRESENT_UPSCALE_OFF. The launcher still exports off for an authentic session (#2122). */
+int player_play_present_upscale(const PlayerPlayResolved *play);
+/* A launch's play mode into its runtime configuration: the title's resolution (with Ace's 60 FPS
+ * logic when its package is the build, and off for the acceptance checkpoint), its SR_ACE line in
+ * ace_spec ("off" when it does not fit) and its present_upscale. *out, when not NULL, receives
+ * the resolution the launch runs with. */
+void player_play_config_session(const PlayerSettings *settings, const char *disc_id,
+                                bool logic_60_package, bool acceptance, NkRuntimeConfig *config,
+                                PlayerPlayResolved *out);
 /* <user_root>/ace/<disc ID>.json: the runtime's per-run report for that disc. */
 bool player_ace_report_path(const char *user_root, const char *disc_id, char *out, size_t cap);
 /* The title page's "Last session" line from that report ("Last session: 16x filtering,

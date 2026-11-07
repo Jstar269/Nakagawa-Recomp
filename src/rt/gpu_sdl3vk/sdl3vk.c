@@ -232,6 +232,7 @@ void sdl3vk_set_logic_slowed_cb(int (*cb)(unsigned *rate)) {
 static void (*s_ui_pass)(const Sdl3VkUiPass *frame);
 static Sdl3VkShowPass s_show_pass;
 static Sdl3VkUpscalePass s_upscale_pass;
+static Sdl3VkUpscalePass s_rec_upscale_pass;  /* the recording's own upscaler (#2138) */
 /* What the last present's frame blit read: its source image and size, its place in the window and
  * its filter. The capture selftest checks the presentation upscaler's image is what reaches the
  * window. */
@@ -247,6 +248,10 @@ void sdl3vk_set_show_pass(Sdl3VkShowPass pass) {
 
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass) {
     s_upscale_pass = pass;
+}
+
+void sdl3vk_set_record_upscale_pass(Sdl3VkUpscalePass pass) {
+    s_rec_upscale_pass = pass;
 }
 
 void sdl3vk_set_ui_pass(void (*pass)(const Sdl3VkUiPass *frame)) {
@@ -934,7 +939,7 @@ int sdl3vk_init(const char *title) {
         INIT_VK(vkCreateSemaphore(s_dev,&sci2,NULL,&f->sem_acq));
 
         VkBufferCreateInfo bci={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.size=PSP_W*PSP_H*4;bci.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bci.size=SDL3VK_UPLOAD_MAX_W*PSP_H*4;bci.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         INIT_VK(vkCreateBuffer(s_dev,&bci,NULL,&f->staging));
         VkMemoryRequirements mr;vkGetBufferMemoryRequirements(s_dev,f->staging,&mr);
         VkMemoryAllocateInfo mai={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -962,7 +967,7 @@ int sdl3vk_init(const char *title) {
 
         VkImageCreateInfo imi={.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         imi.imageType=VK_IMAGE_TYPE_2D;imi.format=VK_FORMAT_B8G8R8A8_UNORM;
-        imi.extent.width=PSP_W;imi.extent.height=PSP_H;imi.extent.depth=1;
+        imi.extent.width=SDL3VK_UPLOAD_MAX_W;imi.extent.height=PSP_H;imi.extent.depth=1;
         imi.mipLevels=1;imi.arrayLayers=1;imi.samples=VK_SAMPLE_COUNT_1_BIT;
         imi.tiling=VK_IMAGE_TILING_OPTIMAL;
         imi.usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -1870,9 +1875,11 @@ int sdl3vk_parse_present_scaling(const char *value) {
 Sdl3VkPresentPlan sdl3vk_present_plan(int mode, int srcw, int srch, int dw, int dh, int max_dim) {
     Sdl3VkPresentPlan p = { 0, 0, 0, 0, 1, 0 };
     if (srcw <= 0 || srch <= 0 || dw <= 0 || dh <= 0) return p;
-    /* Aspect-correct fit of the PSP picture, letterboxed. */
-    int vw = dw, vh = dw * PSP_H / PSP_W;
-    if (vh > dh) { vh = dh; vw = dh * PSP_W / PSP_H; }
+    /* Aspect-correct fit of the source, letterboxed. Every 480k x 272k source fits as the PSP
+     * picture always did (the same ratio, so the same integer results); a widescreen Fill
+     * picture (480 + 2D) x 272 fits its own, wider shape. */
+    int vw = dw, vh = (int)((long long)dw * srch / srcw);
+    if (vh > dh) { vh = dh; vw = (int)((long long)dh * srcw / srch); }
     if (mode == SDL3VK_SCALING_INTEGER) {
         int k = dw / srcw < dh / srch ? dw / srcw : dh / srch;
         if (k >= 1) { vw = k * srcw; vh = k * srch; p.nearest = 1; }
@@ -1966,6 +1973,7 @@ static int s_rec_state = -1;      /* -1 undecided, 0 off, 1 recording */
 static uint32_t s_rec_w, s_rec_h; /* the record target's size, fixed at the first use */
 static RecImage s_rec_target, s_rec_pre;
 static CapBuffer s_rec_buf[PRESENT_FRAMES];
+static int s_rec_filter[PRESENT_FRAMES]; /* the SrVideoRecFilter each slot's picture was made with */
 static PresentFrame *s_rec_pending; /* the slot whose readback holds the newest recorded picture */
 
 static void rec_image_free(RecImage *r) {
@@ -2021,7 +2029,8 @@ static int rec_resolve(void) {
     if (!f) return 0;
     CapBuffer *c = &s_rec_buf[f - s_frame];
     if (!wait_present_frame(f) || !cap_invalidate_readback(c)) return 0;
-    sr_videorec_frame(c->map, s_rec_w, s_rec_h, s_rec_w * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_frame_filtered(c->map, s_rec_w, s_rec_h, s_rec_w * 4u, SR_CAP_ORDER_BGRX,
+                               s_rec_filter[f - s_frame]);
     return 1;
 }
 
@@ -2074,7 +2083,21 @@ static int rec_record(VkCommandBuffer cmd, PresentFrame *f, VkImage show, int sh
     blt.dstSubresource = blt.srcSubresource;
     blt.srcOffsets[1].z = 1;
     blt.dstOffsets[1].z = 1;
-    if (plan.prescale > 1 &&
+    /* With the presentation upscaler on, the recording is enlarged by it as the window is, at
+     * the recording's own size, through its own pass (the window's would rebuild its images for
+     * every size change between the two). The blit below then copies the result 1:1. Only an
+     * enlargement, as in the window: EASU is not a downscaler. */
+    VkImage upscaled = VK_NULL_HANDLE;
+    if (s_rec_upscale_pass && plan.w >= showw && plan.h >= showh && (plan.w > showw || plan.h > showh))
+        upscaled = (VkImage)s_rec_upscale_pass((void *)cmd, (void *)show, showw, showh, plan.w,
+                                               plan.h);
+    int prescaled = 0;
+    if (upscaled) {
+        blit_src = upscaled;
+        bw = plan.w;
+        bh = plan.h;
+        plan.nearest = 1;
+    } else if (plan.prescale > 1 &&
         rec_image_ensure(&s_rec_pre, plan.prescale * showw, plan.prescale * showh,
                          VK_FORMAT_R8G8B8A8_UNORM)) {
         barrier(cmd, s_rec_pre.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -2092,7 +2115,16 @@ static int rec_record(VkCommandBuffer cmd, PresentFrame *f, VkImage show, int sh
         blit_src = s_rec_pre.img;
         bw = s_rec_pre.w;
         bh = s_rec_pre.h;
+        prescaled = 1;
     }
+    /* What record.json says made this picture: the blits issued here, never the scaling
+     * setting's name. Sharp at an exact multiple, and bilinear there too, are one nearest blit;
+     * sharp shrinking, or without its prescale image, is one linear blit. A 1:1 copy is none. */
+    int filter = upscaled ? SR_VIDEOREC_FILTER_FSR1
+               : prescaled ? SR_VIDEOREC_FILTER_SHARP
+               : plan.nearest ? SR_VIDEOREC_FILTER_NEAREST
+               : SR_VIDEOREC_FILTER_LINEAR;
+    if (plan.w == showw && plan.h == showh) filter = SR_VIDEOREC_FILTER_NONE;
     if (plan.w > 0 && plan.h > 0) {
         blt.srcOffsets[1].x = bw;              blt.srcOffsets[1].y = bh;
         blt.dstOffsets[0].x = plan.x;          blt.dstOffsets[0].y = plan.y;
@@ -2108,6 +2140,7 @@ static int rec_record(VkCommandBuffer cmd, PresentFrame *f, VkImage show, int sh
         *why = "record copy failed";
         return 0;
     }
+    s_rec_filter[f - s_frame] = filter;
     return 1;
 }
 
@@ -2303,7 +2336,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
     /* A recorded picture still in this slot's readback goes to the recorder before reuse. */
     if (s_rec_pending == f) sr_videorec_resolve_pending();
     int rec_in_submit = 0;
-    if (upload) { memcpy(f->staging_map, upload, PSP_W * PSP_H * 4); src = f->fbimg; }
+    if (upload) { memcpy(f->staging_map, upload, (size_t)srcw * (size_t)srch * 4u); src = f->fbimg; }
     VkCommandBuffer cmd = f->cmd;
 
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -2358,7 +2391,8 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
             VkBufferImageCopy bic = {0};
             bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             bic.imageSubresource.layerCount = 1;
-            bic.imageExtent.width = PSP_W; bic.imageExtent.height = PSP_H; bic.imageExtent.depth = 1;
+            bic.imageExtent.width = (uint32_t)srcw; bic.imageExtent.height = (uint32_t)srch;
+            bic.imageExtent.depth = 1;
             vkCmdCopyBufferToImage(cmd, f->staging, f->fbimg,
                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
             barrier(cmd, f->fbimg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -2686,6 +2720,30 @@ int sdl3vk_present_rgba(const uint32_t *px) {
     int result = present_common(VK_NULL_HANDLE, PSP_W, PSP_H, px);
     if (started) sr_perf_present_done(started, result);
     return result;
+}
+
+int sdl3vk_present_rgba_ex(const uint32_t *px, int w, int h) {
+    if (!px || w < PSP_W || w > SDL3VK_UPLOAD_MAX_W || h != PSP_H) {
+        sr_capture_fail("present_rgba_ex: unsupported picture size");
+        return -1;
+    }
+    uint64_t started = sr_perf_now_ns();
+    int result = present_common(VK_NULL_HANDLE, w, h, px);
+    if (started) sr_perf_present_done(started, result);
+    return result;
+}
+
+int sdl3vk_window_pixel_size(int *w, int *h) {
+    int pw = 0, ph = 0;
+    if (s_swap && s_swap_ext.width && s_swap_ext.height) {
+        pw = (int)s_swap_ext.width;
+        ph = (int)s_swap_ext.height;
+    } else if (s_win) {
+        (void)SDL_GetWindowSizeInPixels(s_win, &pw, &ph);
+    }
+    if (w) *w = pw;
+    if (h) *h = ph;
+    return pw > 0 && ph > 0;
 }
 
 int sdl3vk_present_image(void *vk_image) {
