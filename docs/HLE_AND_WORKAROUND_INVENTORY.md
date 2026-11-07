@@ -1593,7 +1593,7 @@ own translated code, and the HLE handler only serves NIDs that no started module
 rule that decides this is in `src/rt/hle_kernel_module.c`. A staged, translated module is
 *host-served* (its `module_start` is skipped and the host handlers keep its NIDs) when host HLE
 implements any of its exports. Two exceptions run the module instead: a library listed in
-`guest_module_owns_library()`, which today is only `scePsmfPlayer`, and `libfont.prx` (#1645).
+`guest_module_owns_library()` (`scePsmfPlayer` and `sceMpeg`), and `libfont.prx` (#1645).
 
 The inventory below comes from a survey the standing LLE lane made in November 2026 of every
 title in the maintainer's library that builds. The survey counted 795 titles. The counts are
@@ -1603,7 +1603,7 @@ titles whose build translates that disc module. The survey itself stays private.
 | --- | --- | --- | --- |
 | `libfont.prx` (234) | `sceLibFont` | `src/rt/hle_font.c` | The translated module (#1645) |
 | `libpsmfplayer.prx` (167) | `scePsmfPlayer` | `src/rt/hle_mpeg.c` | The translated module, through the owned-library list (#1782); a few titles with packed modules are still host-served (#1933) |
-| `mpeg.prx` (209) | `sceMpeg` | `src/rt/hle_mpeg.c` | HLE: the module is host-served. Below `sceMpeg` it imports `sceMpegbase` and `sceVideocodec` functions that have no HLE handler, at the Media Engine boundary (`docs/LLE_FIDELITY_ARCHITECTURE.md` section 3.4) |
+| `mpeg.prx` (209) | `sceMpeg` | `src/rt/hle_mpeg.c` | The translated module, through the owned-library list (#286). Below `sceMpeg` it imports `sceMpegbase`, `sceVideocodec` and `sceAudiocodec`, which `src/rt/hle_videocodec.c` serves at the Media Engine boundary (`docs/LLE_FIDELITY_ARCHITECTURE.md` section 3.4) |
 | `pspnet*.prx`, `libhttp.prx`, `libssl.prx` | `sceNet*`, `sceHttp`, `sceSsl` | network HLE | HLE, which stays fail-closed (AGENTS.md section 5); this is not LLE work |
 
 Disc modules with no HLE handler, such as `psmf.prx` and the small `libccc`, `libdeflt` and

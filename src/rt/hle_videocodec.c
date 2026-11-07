@@ -65,10 +65,11 @@
  *     comes from the same ME RAM model. Only codec 0x1000 (ATRAC3plus) is modelled: it is the
  *     one a PSMF movie carries.
  *
- * sceVideocodec and sceMpegbase are not reached in production yet: mpeg.prx is still host-served,
- * and the ownership switch is a later slice (S3c). sceAudiocodec is live: its four calls that
- * returned 0x80010086 before now reach these handlers in any title or module that imports
- * them, and anything other than a PSMF ATRAC3plus frame is refused with a named line. */
+ * sceVideocodec and sceMpegbase are reached through a disc mpeg.prx: sceMpeg is a guest-owned
+ * library (guest_module_owns_library in hle_kernel_module.c), so a title that ships mpeg.prx runs
+ * it and its calls land here. sceAudiocodec is live for every importer: its four calls that
+ * returned 0x80010086 before now reach these handlers, and anything other than a PSMF ATRAC3plus
+ * frame is refused with a named line. */
 
 #include "hle_internal.h"
 #include "atrac3p_bridge.h"
