@@ -102,6 +102,8 @@ typedef struct SrH264Backend {
 } SrH264Backend;
 
 int sr_h264_select_backend(const char *name);
+/* Test seam: select a backend object directly (NULL = automatic).  Production never calls it. */
+int sr_h264_select_backend_object(const SrH264Backend *backend);
 const char *sr_h264_selected_backend(void);
 int sr_h264_backend_available(void);
 const char *sr_h264_backend_unavailable_reason(void);

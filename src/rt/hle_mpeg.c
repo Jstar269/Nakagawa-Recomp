@@ -419,10 +419,14 @@ void psmf_player_release(SrPsmfPlayer *p) {
 
 /* Presentation time of one submitted picture.  A packet that carried a PTS sets the clock;
  * a packet that did not advances it by exactly one frame, and until the first PTS arrives the
- * picture's time stays unknown (-1) rather than invented. */
-static void psmf_video_clock_push(SrPsmfPlayer *p, int has_pts, int64_t pts) {
-    int64_t value = sr_psmf_pts_advance(&p->videoClock, &p->videoClockValid,
-                                        has_pts, pts, PSMF_VIDEO_PTS_STEP);
+ * picture's time stays unknown (-1) rather than invented.  Advances the clock and returns the
+ * time; psmf_video_ring_push records it once the access unit is accepted. */
+static int64_t psmf_video_clock_advance(SrPsmfPlayer *p, int has_pts, int64_t pts) {
+    return sr_psmf_pts_advance(&p->videoClock, &p->videoClockValid,
+                               has_pts, pts, PSMF_VIDEO_PTS_STEP);
+}
+
+static void psmf_video_ring_push(SrPsmfPlayer *p, int64_t value) {
     if ((uint32_t)p->auPtsCount < PSMF_OUT_PTS_CAPACITY) {
         p->auPts[(p->auPtsHead + p->auPtsCount) % PSMF_OUT_PTS_CAPACITY] = value;
         p->auPtsCount++;
@@ -462,18 +466,26 @@ static void psmf_video_pump(SrPsmfPlayer *p) {
             }
         }
         if (p->h264 >= 0) {
+            const int64_t clock_before = p->videoClock;
+            const int valid_before = p->videoClockValid;
+            const int64_t value = psmf_video_clock_advance(p, (slot->flags & 1u) != 0, slot->pts);
             if (slot->hostData && slot->bytes) {
                 sr_psmf_producer_media_stage(p->producer, SR_PSMF_AU_VIDEO,
                                              SR_PSMF_MEDIA_SUBMITTED);
+                /* The decoder carries the player's own time for the unit (extrapolated when the
+                 * packet had none), so a picture it returns out of submit order is still handed
+                 * to the guest with its own time (#279). */
                 if (sr_h264_submit_au_timed(p->h264, (const uint8_t *)slot->hostData,
-                                            slot->bytes, slot->pts,
-                                            (slot->flags & 1u) != 0) < 0) {
+                                            slot->bytes, value >= 0 ? value : slot->pts,
+                                            value >= 0) < 0) {
                     p->videoErrors++;
+                    p->videoClock = clock_before;
+                    p->videoClockValid = valid_before;
                 } else {
-                    psmf_video_clock_push(p, (slot->flags & 1u) != 0, slot->pts);
+                    psmf_video_ring_push(p, value);
                 }
             } else {
-                psmf_video_clock_push(p, (slot->flags & 1u) != 0, slot->pts);
+                psmf_video_ring_push(p, value);
             }
         }
         free(slot->hostData);
@@ -546,6 +558,11 @@ static int psmf_video_take(SrPsmfPlayer *p, uint32_t displaybuf, int bufw,
         p->auPtsHead = (p->auPtsHead + 1) % PSMF_OUT_PTS_CAPACITY;
         p->auPtsCount--;
     }
+    /* The decoder reports the time of the access unit the picture came from.  A decoder that
+     * reorders (output order differs from submit order) gives each picture its own time, where
+     * the submit-order ring above would hand the guest another picture's (#279).  The ring is
+     * popped either way, so its bound on submitted-minus-delivered still holds. */
+    if (info.has_pts && info.pts >= 0) value = info.pts;
     if (value < 0) value = p->displayPts + PSMF_VIDEO_PTS_STEP;
     p->displayPts = value;
     p->displayPtsValid = 1;

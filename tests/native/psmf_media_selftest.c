@@ -3716,6 +3716,91 @@ cleanup:
                 failures - failures_before, layout == AV_LAYOUT_PACKED ? "packed" : "split");
 }
 
+/* ---- decoder output order against the time the guest is handed (issue #279) -------------
+ *
+ * A decoder may return pictures in a different order than it took their access units (picture
+ * reordering).  Each decoded picture then carries the time of its own access unit
+ * (SrH264FrameInfo.pts), and that is the displaypts the guest must see.  The player used to hand
+ * out the submit-order time of the n-th delivery instead, so a reordered picture was shown with
+ * a neighbour's time.  This backend swaps every pair of pictures: it needs only the contract
+ * the seam documents, and no bitstream. */
+#define RO_MAX 256
+static struct { int64_t pts; int has_pts; } s_ro_au[RO_MAX];
+static int s_ro_submitted, s_ro_out;
+
+static int ro_create(void) { s_ro_submitted = 0; s_ro_out = 0; return 0; }
+static void ro_destroy(int id) { (void)id; }
+static int ro_reset(int id) { (void)id; s_ro_submitted = 0; s_ro_out = 0; return 0; }
+static int ro_submit(int id, const SrH264AccessUnit *au) {
+    (void)id;
+    if (!au || s_ro_submitted >= RO_MAX) return -1;
+    s_ro_au[s_ro_submitted].pts = au->pts;
+    s_ro_au[s_ro_submitted].has_pts = au->has_pts;
+    s_ro_submitted++;
+    return 0;
+}
+static int ro_frame(int id, int eos, const SrH264FrameTarget *target, SrH264FrameInfo *info) {
+    (void)id; (void)target;
+    int src = s_ro_out ^ 1;                       /* pictures leave in swapped pairs */
+    if (src >= s_ro_submitted) {
+        if (!eos) return 0;                       /* the partner has not been submitted yet */
+        src = s_ro_out;
+        if (src >= s_ro_submitted) return 0;
+    }
+    if (info) {
+        info->width = 64;
+        info->height = 16;
+        info->stride = 128;
+        info->native_format = SR_H264_PIXEL_5650;
+        info->delivered_format = SR_H264_PIXEL_5650;
+        info->has_pts = s_ro_au[src].has_pts;
+        info->pts = s_ro_au[src].has_pts ? s_ro_au[src].pts : -1;
+    }
+    s_ro_out++;
+    return 1;
+}
+static const SrH264Backend s_ro_backend = {"reorder-test", ro_create, ro_destroy, ro_reset, ro_submit, ro_frame};
+
+static void test_player_reordered_pictures_keep_their_own_time(void) {
+    uint32_t size = 0;
+    uint8_t *image = build_psmf_av(&size, AV_LAYOUT_SPLIT);
+    if (!image) { CHECK(0, "psmf-reorder: the A/V container builds"); return; }
+    s_player_image = image;
+    s_player_image_size = size;
+    CHECK(sr_h264_select_backend_object(&s_ro_backend) && sr_h264_backend_available(),
+          "psmf-reorder: the reordering test backend is selected");
+    lc_prepare_guest();
+    CHECK(guest_mpeg_import(AV_NID_CREATE, AV_PLAYER, AV_CREATE, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_SET_PSMF, AV_PLAYER, AV_PATH, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_START, AV_PLAYER, AV_CONFIG, 0, 0, 0) == 0,
+          "psmf-reorder: the player is created, opened and started");
+    int delivered = 0, mismatches = 0;
+    int64_t seen[AV_PICTURES];
+    for (int guard = 0; guard < 4096 && delivered < AV_PICTURES; guard++) {
+        if (guest_mpeg_import(AV_NID_GET_VIDEO, AV_PLAYER, AV_VIDEO, 0, 0, 0) == 0) {
+            int64_t want = av_video_pts(delivered ^ 1);
+            seen[delivered] = (int64_t)MEM_R32(AV_VIDEO + 8);
+            if (seen[delivered] != want) mismatches++;
+            delivered++;
+        }
+        (void)guest_mpeg_import(AV_NID_GET_AUDIO, AV_PLAYER, AV_AUDIO, 0, 0, 0);
+        if (guest_mpeg_import(AV_NID_UPDATE, AV_PLAYER, 0, 0, 0, 0) != 0) break;
+    }
+    CHECK(delivered == AV_PICTURES, "psmf-reorder: every authored picture reached the guest");
+    CHECK(mismatches == 0,
+          "psmf-reorder: each picture is handed the time of its own access unit, not the n-th submit-order time");
+    CHECK(delivered < 2 || (seen[0] == av_video_pts(1) && seen[1] == av_video_pts(0)),
+          "psmf-reorder: the first reordered pair carries its swapped times");
+    CHECK(guest_mpeg_import(AV_NID_DELETE, AV_PLAYER, 0, 0, 0, 0) == 0, "psmf-reorder: the player is deleted");
+    (void)sr_h264_select_backend_object(NULL);
+#if defined(SR_H264_FFMPEG)
+    CHECK(sr_h264_select_backend("ffmpeg"), "psmf-reorder: the FFmpeg backend is selected again");
+#endif
+    s_player_image = NULL;
+    s_player_image_size = 0;
+    free(image);
+}
+
 /* ---- A/V offset at the host presentation boundaries (issue #279) -------------------------
  *
  * The tests above stop at the guest getters.  These drive the same synthetic PSMF fixture
@@ -5618,6 +5703,7 @@ int main(int argc, char **argv) {
     test_psmf_av_timing_first_principles();
     test_player_av_presentation_timing(AV_LAYOUT_SPLIT);
     test_player_av_presentation_timing(AV_LAYOUT_PACKED);
+    test_player_reordered_pictures_keep_their_own_time();
     test_player_av_presentation_boundary();
     test_player_av_composited_presentation();
     test_mpeg_csc_presentation_boundary(0);
