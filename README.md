@@ -39,7 +39,7 @@ Windows 11, 64-bit. It includes the build tools, so you don't need to install an
 3. Press **BUILD PACKAGE**, then **PLAY**. A first build takes several minutes.
 
 The ZIP isn't code-signed, so Windows may warn you the first time. The
-[release notes](docs/RELEASE_NOTES_v0.0.2.md) say what works, what doesn't yet, and how to check the download.
+[release notes](docs/RELEASE_NOTES_v0.0.2.md) say what works, what doesn't, and how to check the download.
 Settings > **CHECK FOR UPDATES** asks GitHub for a newer version when you select it and links to its release page.
 
 You need:
@@ -62,7 +62,7 @@ You need:
 | PAC-MAN Championship Edition | In-game | Reaches its menu, plays a stage and resumes from its own save, through general fixes with no game-specific code ([#552](https://github.com/Jstar269/nakagawa-recomp/pull/552), [#556](https://github.com/Jstar269/nakagawa-recomp/pull/556), [#1126](https://github.com/Jstar269/nakagawa-recomp/issues/1126)). The rest of the game hasn't been tried. |
 | *Super Stardust Portable* | Title screen | Goes through its menus to difficulty select, then stops by name at a VFPU instruction Nakagawa doesn't support yet ([#326](https://github.com/Jstar269/nakagawa-recomp/issues/326)). |
 | Eleven more games, *LittleBigPlanet* among them | No tier | Seen to start or run, in the project's testing or in user reports on v0.0.1, but not checked by the maintainer. Several reach menus or gameplay, most well below full speed. [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) says how far each one gets. |
-| Any other PSP game | No tier | The player imports it, builds a package and names anything that isn't supported yet. Going straight from your disc to a running game for more titles is in the works ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)). |
+| Any other PSP game | No tier | The player imports it, builds a package and names anything that isn't supported. For most games it stops at one of those named limits ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)). |
 | Two showcase demos | Playable | Small PSP programs the project wrote as tests. They ship with the release and need no game files. |
 
 Ratings use the player's words. Hot Shots Tennis and the two showcase demos are rated from the player's own record;

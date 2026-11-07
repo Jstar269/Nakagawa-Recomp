@@ -1,7 +1,7 @@
 # Playing your own games
 
 Status: CURRENT. This guide explains what the native player needs to play a PSP
-game you own, what it does for you, and what is still in the works.
+game you own, what it does for you, and its current limits.
 
 ## Status of retail games
 
@@ -17,10 +17,10 @@ Importing a disc doesn't change its status. The **EXPERIMENTAL** badge on the ga
 ## What you need
 
 - **Windows 11 x64** with a Vulkan-capable graphics card and current GPU
-  drivers. Windows is the only supported player platform today; other platforms
-  are in the works ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306), [#329](https://github.com/Jstar269/nakagawa-recomp/issues/329), [#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
+  drivers. Windows is the only supported player platform; other platforms
+  are not supported ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306), [#329](https://github.com/Jstar269/nakagawa-recomp/issues/329), [#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
 - **A disc image of a game you own, as an uncompressed `.iso`, or the**
-  **`EBOOT.PBP` of a PSN release of a UMD game.** Builds after v0.0.1 also take
+  **`EBOOT.PBP` of a PSN release of a UMD game.** The player also takes
   a compressed `.cso`, `.zso` or `.chd` image. The project doesn't make or supply images. Whether you may make an image of
   a disc, or of a digital purchase, depends on where you live and on the terms
   you accepted. Check both. Nakagawa Recomp never downloads games and contains no
@@ -54,8 +54,8 @@ will and won't work. **BUILD PACKAGE** recompiles the game while you watch, and
 player first decrypts the game's program from your own disc, on your PC. Building needs a
 C toolchain (Python, GCC and GNU Make). The release ZIP carries the exact versions
 it needs. A player built from source can download them after you agree once, or
-you can install them yourself ([`SETUP.md`](SETUP.md)). Going straight from a disc
-to a running game for more titles is in the works ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)).
+you can install them yourself ([`SETUP.md`](SETUP.md)). For most titles the build
+stops at a named limit ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)).
 
 ## What the player does automatically
 
@@ -192,7 +192,7 @@ never changed. **Remove from library** keeps the converted image in
 To get the space back, tick **Also delete the decrypted files and disc copy**
 in its dialog. Other PSN downloads
 (PSP minis and games tied to the PSP that bought them), PSOne Classics and
-PGD-protected data aren't supported yet.
+PGD-protected data aren't supported.
 
 ### Homebrew
 
@@ -260,7 +260,7 @@ instead of pretending it worked or crashing without a word.
   imported with the **EXPERIMENTAL** badge (see [Status of retail games](#status-of-retail-games)).
   The card says compatibility is unknown, the checklist shows what is missing,
   and **PLAY** stays unavailable until a matching runtime package exists.
-  Support for more games, and for games in general, is in the works
+  Most games stop at a named limit
   ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)). A disc image
   with no `PSP_GAME` folder isn't a PSP game disc and is refused as `DISC_NOT_PSP`.
 - **Compressed disc image:** a `.cso`, `.zso` or `.chd` file is expanded once,
@@ -319,13 +319,13 @@ instead of pretending it worked or crashing without a word.
 [`COMPATIBILITY.md`](COMPATIBILITY.md) has the full breakdown for every game and
 every part of the PSP, with the issues that track them.
 
-## What is still in the works
+## Current limits
 
 | Area | Today | Tracking |
 | --- | --- | --- |
-| Encrypted programs and PRX modules | The player decrypts UMD disc images (`.iso`) with built-in tables, and turns PSN releases of UMD games (`EBOOT.PBP`) into their disc image first. A file it can't decrypt is named, and a decrypted copy from your own disc can stand in. Other PSN packages and PGD data aren't decrypted yet. | [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308) |
+| Encrypted programs and PRX modules | The player decrypts UMD disc images (`.iso`) with built-in tables, and turns PSN releases of UMD games (`EBOOT.PBP`) into their disc image first. A file it can't decrypt is named, and a decrypted copy from your own disc can stand in. Other PSN packages and PGD data aren't decrypted. | [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308) |
 | Commercial-game packages in public builds | Packages build with the public runtime, and public builds draw imported PGF fonts through the project-authored reader for supported inputs (PR [#474](https://github.com/Jstar269/nakagawa-recomp/pull/474)). Composite glyphs and the supported revision and shadow-map variants draw too ([#521](https://github.com/Jstar269/nakagawa-recomp/issues/521)); a revision-3 font's compressed character-map subtables, and any other shadow-map width, are still refused by name. | [PGF_SPEC.md §4](cleanroom/PGF_SPEC.md#4-non-requirements-and-named-boundaries) |
-| Games other than the maintainer-tested ones | Other games import with the **EXPERIMENTAL** badge and stay Untested unless someone has seen them start; work on more games goes on. | [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308) |
+| Games other than the maintainer-tested ones | Other games import with the **EXPERIMENTAL** badge and stay Untested unless someone has seen them start. | [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308) |
 
 See [`SETUP.md`](SETUP.md) for developer setup and the command-line tools.
 

@@ -225,7 +225,7 @@ They create their synthetic inputs under the ignored `build/` folder.
 - **Few network connections, all yours to choose.** The player connects only when you choose to: the build-tool
   download, which the ZIP doesn't need because the tools are in it, and Check for updates. Enhanced runs on
   your PC and makes no connection ([`SETUP.md`](SETUP.md#network-use)).
-- **Not a finished emulator.** Hot Shots Tennis is the one game rated **Playable**;
+- **Not a finished emulator.** Hot Shots Tennis is the one retail game rated **Playable**;
   [`COMPATIBILITY.md`](COMPATIBILITY.md) lists how far each tested game gets. A valid PSP disc with no title file
   is imported as **Experimental**. PGD-protected content, PSP minis, games tied to the PSP that bought them and PSOne
   Classics are not supported.

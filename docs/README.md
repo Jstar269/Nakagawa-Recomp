@@ -211,7 +211,7 @@ Every substantial document carries one status.
 | `CODE_TOUR.md` | CURRENT | Newcomer route through the code, disc image to frame on screen (source remains authoritative) |
 | `ARCHIVE_VFS.md` | CURRENT | Read-only archive-backed VFS: XB mounts, member lookup and loose-content routes (#298) |
 | `SETUP.md` | CURRENT | Supported toolchain; declared authority for setup claims, including the optional local symbol reference (`FindSymbol`) |
-| `YOUR_OWN_GAMES.md` | CURRENT | User guide: own-game input, unencrypted files, ownership and in-the-works boundaries |
+| `YOUR_OWN_GAMES.md` | CURRENT | User guide: own-game input, unencrypted files, ownership and current limits |
 | `COMPATIBILITY.md` | CURRENT | Per-title and subsystem compatibility states and semantic boundaries |
 | `STATUS.md` | CURRENT | Project status summary: live work areas, execution-contract state and evidence boundary; live GitHub Issues win |
 | `SMOKE_TEST.md` | CURRENT | Numbered pass/fail release smoke test for the native player |
@@ -246,7 +246,7 @@ Every substantial document carries one status.
 | `PROJECT_MODEL.md` | CURRENT | Repository and project model |
 | `WORKSPACE_DOCTOR.md` | CURRENT | Doctor checks and host contract |
 | `DCO_POLICY.md` | CURRENT | Sign-off governance |
-| `DECOMPME_INTEGRATION.md` | CURRENT | Forward-looking integration plan (not built work) |
+| `DECOMPME_INTEGRATION.md` | CURRENT | decomp.me notes and the read-only exporter; the later steps are not built |
 | `AI_USAGE.md` | CURRENT | AI-assistance and review boundaries |
 | `PSPDEV_LOCAL_VERIFICATION.md` | CURRENT | PSPDEV local-verification boundary |
 | `LLE_FIDELITY_ARCHITECTURE.md` | CURRENT | Fidelity doctrine; ranks correctness above convenience |
@@ -256,11 +256,11 @@ Every substantial document carries one status.
 | `NATIVE_PLAYER_IMPLEMENTATION_PROGRESS.md` | CURRENT | Native player implementation narrative and launch-path evidence; per-capability status is maintained in `NATIVE_UI_REGRESSION_MATRIX.md` |
 | `PREVIEW_RELEASE.md` | CURRENT | Release scope and qualification guide; tags and releases are maintainer-only |
 | `RELEASE_NOTES_v0.0.2.md` | CURRENT | Notes of the v0.0.2 release |
-| `RELEASE_NOTES_v0.0.1.md` | CURRENT | Notes of the v0.0.1 release, kept as released |
+| `RELEASE_NOTES_v0.0.1.md` | HISTORICAL | Notes of the v0.0.1 release, kept as released |
 | `RELEASE_SIGNING.md` | CURRENT | Update-signing key procedure (minisign, offline) and what the player checks before an update download |
-| `NATIVE_PLAYER_ARCHITECTURE.md` | CURRENT | Maintained native-shell architecture; the wizard's bounded ISO/XB staging exists and the player decrypts the user's own disc locally, while retail-disc hash validation and one-click play without the developer toolchain remain unbuilt and are marked inline |
+| `NATIVE_PLAYER_ARCHITECTURE.md` | CURRENT | Maintained native-shell architecture; the wizard's bounded ISO/XB staging exists and the player decrypts the user's own disc locally and checks it against the user's Redump list, while one-click play without compiling on the user's PC is not built and is marked inline |
 | `PLAYER_UI_DESIGN.md` | CURRENT | Player UI design system for the default launcher: tokens, components, and the screen specs C6-C8 build against |
-| `ONLINE_FEATURES.md` | DRAFT | Design for the launcher's opt-in online mode (update check, news, user-sent reports) and developer mode, asked in the setup wizard; the switches, the wizard step and the developer log panel are built, no online feature is yet |
+| `ONLINE_FEATURES.md` | DRAFT | Design for the launcher's opt-in online mode (update check, news, user-sent reports) and developer mode, asked in the setup wizard; the switches, the wizard step, the developer log panel and the update check are built; news and in-player reports are not |
 | `AOT_PRODUCTIZATION_ARCHITECTURE.md` | CURRENT | Maintained evaluation of end-user recompilation routes A-G; the zero-toolchain recommended routes remain unimplemented |
 | `RUNTIME_PACKAGING_ARCHITECTURE.md` | CURRENT | Maintained process-isolation decision record; installers and one-click end-user preparation remain unbuilt |
 | `ISO_ONLY_GAP_ANALYSIS.md` | CURRENT | Maintained LLE gap analysis; existing bounded ISO helpers and the remaining retail-preparation stages are distinguished inline |

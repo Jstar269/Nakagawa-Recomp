@@ -3,8 +3,7 @@
 ## Supported versions
 
 `main` and the latest release, v0.0.2, are supported. The project does not claim a release-grade security posture: treat arbitrary
-PSP and game inputs as untrusted until the parser and guest-span hardening work tracked in GitHub Issues
-is complete.
+PSP and game inputs as untrusted. Parser and guest-span hardening is tracked in GitHub Issues.
 
 | Version | Supported | Status / Support Policy |
 | :--- | :--- | :--- |
@@ -105,8 +104,8 @@ ELF32/MIPS before it is kept; one it cannot decrypt is refused by name. Every fi
 
 ## Digest inventory
 
-Every digest the project's own code computes is classified here by what it is for, tracked in
-[issue #969](https://github.com/Jstar269/nakagawa-recomp/issues/969). PSP-defined algorithms, Git object
+Every digest the project's own code computes is classified here by what it is for (the review was
+[issue #969](https://github.com/Jstar269/nakagawa-recomp/issues/969)). PSP-defined algorithms, Git object
 identities and format checksums are never replaced. Project-controlled integrity checks use SHA-256, the
 project default: provenance, attestation, packages, prerequisites, toolchain, SBOM, fonts, shaders and the
 VFPU tables at load all rest on it, so SHA-256 is classified as a whole and has no rows below.
