@@ -27,7 +27,8 @@ fonts are never committed.
 These fonts are stand-ins. They let a game draw its text when you have not imported your PSP's fonts, but they look
 different from the PSP's. They are sized and spaced to come close: their nominal sizes are the PSP's (10.125 points
 for Japanese and Korean, and the PSP's two Latin sizes), and their x-height, cap height, stem width,
-horizontal-stroke weight and spacing are set from aggregate measurements of the PSP fonts they stand in for. No letter shape comes from those fonts.
+horizontal-stroke weight and spacing are set from aggregate measurements of the PSP fonts they stand in for.
+No letter shape comes from those fonts.
 
 ## Without your PSP's fonts: what changes
 
