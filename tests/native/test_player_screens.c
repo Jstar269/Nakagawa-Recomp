@@ -420,12 +420,11 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.scaling = "Sharp";
     settings.preset = "Medium";
     if (which == FLOW_SETTINGS_PRESET) {
-        /* Ultra chosen (#2150): the row is plain and the notice line says it does not turn on
-           Sharper enlarging; the note is player_app_graphics_preset_note's, the longest a preset writes. */
-        settings.preset = "Ultra";
-        settings.preset_notice = "Ultra is used in Enhanced and Ace, not turning on "
-                                 "Sharper enlarging. Authentic uses your own display settings.";
-        settings.preset_notice_warns = true;
+        /* High chosen (#2150): the notice line names the Enhanced parts it sets. The note is
+           player_app_graphics_preset_note's for High, the longest a preset writes. */
+        settings.preset = "High";
+        settings.preset_notice = "High is used in Enhanced and Ace, with crisp text on and FSR 1 "
+                                 "off. Authentic uses your settings.";
     }
     settings.vsync = true;
     /* The refresh-rate advisory case runs on a 144 Hz display; the rest on 60 Hz. */
@@ -2893,11 +2892,11 @@ static void test_settings_pages(void) {
           "Settings on a 60 Hz display shows no refresh-rate advisory");
     CHECK(flow_case_fits(FLOW_SETTINGS_PRESET, 960, 540, dump, sizeof(dump)),
           "Settings with a graphics preset's note fits 960 x 540");
-    CHECK(strstr(dump, "Ultra is used in Enhanced and Ace, not turning on") != NULL &&
+    CHECK(strstr(dump, "High is used in Enhanced and Ace, with crisp text on and FSR 1") != NULL &&
               strstr(dump, "Changes are saved as you make them") == NULL,
           "a graphics preset's note takes the Settings notice line");
-    CHECK(strstr(dump, "\"ULTRA\"") != NULL,
-          "the graphics preset row reads Ultra");
+    CHECK(strstr(dump, "\"HIGH\"") != NULL,
+          "the graphics preset row says High");
     CHECK(dump_flow_case(FLOW_SETTINGS, dump, sizeof(dump)) &&
               strstr(dump, "Changes are saved as you make them") != NULL &&
               strstr(dump, "is used in Enhanced and Ace") == NULL,

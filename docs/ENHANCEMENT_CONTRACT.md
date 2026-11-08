@@ -51,15 +51,16 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   (the same selftest compares it with the pass's output, byte for byte), and guest VRAM and every
   guest flight event match with it off (`display-smoke-fsr1`, which needs a Vulkan device and a
   display, so it is a local gate). In the player it is the Enhanced part "Sharper enlarging"
-  (`"upscale"`, off by default) on Settings > Enhanced and each title's page. It is not part of
+  (`"upscale"`, off for a new library) on Settings > Enhanced and each title's page; the Medium, Ultra and
+  Handheld graphics presets turn it on and Low and High off (section 10.1). It is not part of
   Authentic: the launcher exports `SR_PRESENT_UPSCALE=off` for an authentic session whatever the
   setting or the inherited environment (section 10.1), and a run with it on says
   `ACE_MODE: present upscale fsr1`, emits a `phase=present_upscale` boot event and carries
   `"present_upscale": "fsr1"` in its flight bundle's `runtime.enhancements`, so neither
   `flight_diff.py` nor `boot_gate.py` takes it as authentic evidence. `picture_gate.py` and
   `library_sweep.py` run the runtime themselves, so they set the key `off` (a picture-gate route
-  may ask for it) and record the value they used. GPU cost at
-  4K: 0.40 ms per present for 1920x1088 to 3840x2160 on an RTX 3080 (`fsr1-selftest`).
+  may ask for it) and record the value they used. GPU cost on an RTX 3080 (`fsr1-selftest`): 0.40 ms
+  per present for 1920x1088 to 3840x2160, and 0.06 to 0.20 ms at the other preset sizes (`docs/SETUP.md`).
 - **Forbidden:** Mutating GE display list commands, intercepting guest draw calls to alter gameplay geometry, or feeding host input back into the guest controller state.
 
 ### 2.3. Guest Memory and Code Hooks (`guest_memory_code_hook`)
@@ -293,8 +294,10 @@ The player offers three play modes per game (#2055):
 - **Authentic** is the standard: the game as released, recreating the PSP as closely as the project can. It is the
   default for a new library.
 - **Enhanced** turns on the project-authored improvements that work for any game: texture filtering, crisp system
-  text, the speed readout, the game badge, smooth motion, clean pitched sound and sharper enlarging (the last two off
-  by default) today. Each one is a *part* that can be turned off for the library or for a single game.
+  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound and sharper enlarging. A new
+  library starts with texture filtering, crisp system text and the game badge on and the rest off, and a graphics
+  preset sets crisp system text and sharper enlarging (section 10.1). Each one is a *part* that can be turned off for
+  the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.
@@ -314,7 +317,9 @@ refuses the line. So does anything else: the run is Authentic and one `ACE_MODE:
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
 `<user data>/ace/`. Ace's 60 FPS game logic is not on this line: it selects the title's enhanced package variant
 (section 9.4). Nor is sharper enlarging (`"upscale"`, #2122): the launcher exports it as `SR_PRESENT_UPSCALE`, `fsr1`
-for an Enhanced or Ace run with the part on and `off` otherwise, and always `off` for Authentic (section 2.2).
+for an Enhanced or Ace run with the part on, and `off` otherwise, and always `off` for Authentic (section 2.2). The
+part's value is the title's own, else the graphics preset's where it sets the part (Medium, Ultra and Handheld on,
+Low and High off), else the library's; crisp text (`text`) is resolved the same way, and every preset turns it on.
 
 ### 10.2. Authentic Is Untouched
 

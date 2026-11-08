@@ -867,8 +867,10 @@ long-run present rate never exceeds the cap (`gui-present-selftest`).
 
 ### Presentation upscaler (`SR_PRESENT_UPSCALE`)
 
-In the player this is **Sharper enlarging** on Settings > Enhanced and on each game's page, off by
-default; the launcher sets `SR_PRESENT_UPSCALE` from it for an Enhanced or Ace run.
+In the player this is **Sharper enlarging** on Settings > Enhanced and on each game's page, off for a
+new library. The Medium, Ultra and Handheld graphics presets turn it on and Low and High turn it off; a
+game's own value wins over the preset ([PLAYER_UI_DESIGN.md](PLAYER_UI_DESIGN.md)). The launcher sets
+`SR_PRESENT_UPSCALE` from the result for an Enhanced or Ace run.
 
 `SR_PRESENT_UPSCALE=fsr1` makes the Vulkan presenter enlarge the picture to its place in the
 window with AMD FidelityFX Super Resolution 1: EASU, an edge-adaptive upscaler, then RCAS
@@ -879,8 +881,11 @@ the guest's frame, guest VRAM and captures are byte for byte what they are with 
 recording (`SR_VIDEOREC_DIR`) is enlarged by FSR 1 too, at the recording's size, and its
 `record.json` names the filter ([DEBUGGING.md](DEBUGGING.md)). The pause
 overlay is drawn at the window's size on the CPU, so the paused picture is not upscaled and looks
-softer than the running one. Its cost is small: from 1920x1088 to 3840x2160, EASU and RCAS took
-0.40 ms per present on an RTX 3080 (`fsr1-selftest`). An unknown value, or a device without
+softer than the running one. Its cost is small. On an RTX 3080, EASU and RCAS took 0.40 ms per
+present from 1920x1088 to 3840x2160, 0.20 ms to 2560x1440, 0.11 ms from 960x544 to 1920x1080, 0.06 ms
+to 1280x800 and 0.11 ms from 480x272 to 1920x1080 (`fsr1-selftest`, which times each graphics preset's
+sizes, median of 15; measured on 2026-11-08 for #2150, and a second, independent run matched within
+0.01 ms). No low-end or handheld GPU has been measured. An unknown value, or a device without
 compute, leaves it off with a line in the log; so does a size whose images cannot be made, which
 is then not tried again. The launcher turns it off for an authentic session, and a run with it on
 is stamped as enhanced (`ACE_MODE: present upscale fsr1`), which `boot_gate.py` reads. The picture
