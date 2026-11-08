@@ -60,10 +60,8 @@ stands in this stage:
   analyzer's CFG report and, by its own contract, advisory: codegen does not read it, so
   neither backend can lower from it today.
 
-The next steps, in order: move `emit_function` onto the plan and `effect()`'s
-per-instruction C onto `Op` (one decision site, two renderers); then build the plan from
-the shared analysis IR once codegen consumes that IR (#305's successor), with the plan as
-its per-function lowering view.
+Not done: `emit_function` and `effect()`'s per-instruction C do not render from the plan,
+and the plan is not built from the shared analysis IR (both are listed under "Not done" below).
 
 A function the backend does not lower keeps its C body unchanged, and the reason goes to
 `<g>_recomp_llvm.json` (`codegen_llvm.py check-manifest` prints it). Nothing is dropped or
@@ -101,7 +99,7 @@ the C body. What the C path leaves to a C compiler is explicit here:
   change fails the build instead of corrupting state.
 - **Spills.** Because no guest value is cached in an SSA register across an escape, there
   is nothing to spill or flush. Register promotion (#284's verified spans, as allocas that
-  LLVM's `mem2reg` turns into SSA) is the next step; it needs a flush before each escape
+  LLVM's `mem2reg` turns into SSA) is not implemented; it would need a flush before each escape
   listed below and a mirror of every write in trace builds, as #284 does in C.
 - **Escapes to the runtime** are calls that take `s`: the trace hooks around every
   instruction, the preemption point at entry and on backward branches, memory helpers, the
@@ -140,7 +138,7 @@ helpers (`sr_r32`, `sr_w32_pc` and the narrower forms, with their VRAM aperture,
 store-context paths) as out-of-line calls; Clang at `-O1` inlines them at every guest load
 and store. That is most of the LLVM build's extra object size (#330 has the numbers), and
 splitting the helpers into an inline bounds check and an out-of-line slow path is listed
-[below](#not-yet-done).
+[below](#not-done).
 
 ## Scope of the first stage
 
@@ -188,8 +186,8 @@ from another toolchain. A C build's profiles are unchanged by this backend.
 ## Delivery, and the in-process stage
 
 Delivery is the only part tied to external tools: print the module, `llvm-link` it with
-the ABI bitcode, compile it with `clang -c`. The lowering only calls the builder. The next
-stage replaces the delivery and nothing else:
+the ABI bitcode, compile it with `clang -c`. The lowering only calls the builder. An
+in-process stage, which is not built, would replace the delivery and nothing else:
 
 1. Forward each builder call to the LLVM C API (`LLVMModuleCreateWithName`,
    `LLVMBuildAdd`, ...), from the native tool that runs codegen or through a thin binding.
@@ -204,7 +202,7 @@ current stage vendors nothing: it uses the MSYS2 toolchain the user installs. An
 header or library vendored or shipped later gets the usual pin, `PROVENANCE.md` entry,
 `CREDITS.md` credit and admission.
 
-## Not yet done
+## Not done
 
 - The C emitter rendering the lowering plan, and the plan built from the shared analysis
   IR ([above](#one-representation-for-both-backends)).

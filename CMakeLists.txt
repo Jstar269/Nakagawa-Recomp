@@ -19,6 +19,7 @@ endif()
 # Core Recompilation & Platform Library
 # -----------------------------------------------------------------------------
 set(CORE_SOURCES
+    src/core/nk_shared_helpers.c
     src/core/nk_font.c
     src/core/nk_pgf_host.c
     src/rt/pgf_public.c
@@ -43,9 +44,11 @@ set(CORE_SOURCES
     src/core/nk_psp_amctrl.c
     src/core/nk_psp_lzrc.c
     src/core/nk_psp_npumdimg.c
+    src/core/nk_pbp_homebrew.c
     src/core/nk_disc_expand.c
     src/core/nk_disc_verify.c
     src/core/nk_zip.c
+    src/core/nk_steam_shortcuts.c
     src/core/generated/nk_title_catalog.c
 )
 
@@ -57,7 +60,7 @@ endif()
 
 add_library(nakagawa_core STATIC ${CORE_SOURCES})
 if(WIN32)
-    target_link_libraries(nakagawa_core PUBLIC shell32 ole32 uuid)
+    target_link_libraries(nakagawa_core PUBLIC shell32 ole32 uuid advapi32)
 endif()
 
 target_include_directories(nakagawa_core PUBLIC
@@ -129,6 +132,18 @@ add_executable(test_core_catalog
 target_link_libraries(test_core_catalog PRIVATE nakagawa_core)
 add_test(NAME core_catalog_test COMMAND test_core_catalog)
 
+add_executable(test_shared_helpers
+    src/core/nk_shared_helpers.c
+    tests/native/test_shared_helpers.c
+)
+target_include_directories(test_shared_helpers PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+)
+target_compile_definitions(test_shared_helpers PRIVATE
+    SR_SELFTEST_BUILD_ROOT="${CMAKE_CURRENT_BINARY_DIR}/build"
+)
+add_test(NAME shared_helpers_test COMMAND test_shared_helpers)
+
 add_executable(test_parsers_hostile
     tests/native/test_parsers_hostile.c
     tests/native/native_test_isolation.c
@@ -180,6 +195,13 @@ add_executable(test_nk_zip
 )
 target_link_libraries(test_nk_zip PRIVATE nakagawa_core)
 add_test(NAME nk_zip_test COMMAND test_nk_zip)
+
+add_executable(test_steam_shortcuts
+    tests/native/test_steam_shortcuts.c
+    tests/native/native_test_isolation.c
+)
+target_link_libraries(test_steam_shortcuts PRIVATE nakagawa_core)
+add_test(NAME steam_shortcuts_test COMMAND test_steam_shortcuts)
 
 add_executable(test_xb_parser
     tests/native/test_xb_parser.c
@@ -342,6 +364,8 @@ add_executable(test_player_screens
     ${NK_UI_PLAYER_TITLE_SOURCES}
 )
 target_include_directories(test_player_screens PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/player
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ui
     ${CMAKE_CURRENT_SOURCE_DIR}/src/player/ui
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay
@@ -793,6 +817,7 @@ set(NK_RUNTIME_SOURCES
     src/rt/fbcap_policy.c
     src/rt/fbcap.c
     src/rt/videorec.c
+    src/rt/replay_checkpoint.c
     src/rt/ge_capture.c
     src/rt/vfpu_interp.c
     src/rt/hle.c
@@ -822,6 +847,7 @@ set(NK_RUNTIME_SOURCES
     src/rt/hle_system.c
     src/rt/hle_umd.c
     src/rt/hle_utility.c
+    src/rt/hle_videocodec.c
     src/rt/audio_resample.c
     src/rt/flash0_font.c
     src/rt/mp3_bridge.c
@@ -848,6 +874,8 @@ set(NK_RUNTIME_SOURCES
     src/rt/gpu_sdl3vk/sdl3vk.c
     src/rt/gpu_sdl3vk/ge_gpu.c
     src/rt/gpu_sdl3vk/tex_scale.c
+    src/rt/gpu_sdl3vk/glyph_recon.c
+    src/rt/texrepl.c
     third_party/xbrz/xbrz.c
     src/rt/gpu_sdl3vk/ace_ui.c
     src/rt/gpu_sdl3vk/ace_smooth.c
@@ -857,6 +885,7 @@ set(NK_RUNTIME_SOURCES
     src/core/nk_font.c
     src/core/nk_json.c
     src/core/nk_platform_posix.c
+    src/core/nk_shared_helpers.c
 )
 set(NK_RUNTIME_GE_SOURCE src/rt/ge.c)
 set(NK_RUNTIME_ATRAC3P_SOURCES

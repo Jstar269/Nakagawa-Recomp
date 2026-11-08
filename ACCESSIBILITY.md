@@ -4,7 +4,7 @@ Nakagawa Recomp turns a PSP game into a native Windows program you play with the
 people with disabilities, and people who use assistive technology, to be able to set the player up, use it and
 contribute to it. This page says what is true today, including what is missing, and how to tell us about a barrier.
 
-It describes the `main` branch. The v0.0.1 release is older, so a change made since may not be in it.
+It describes the `main` branch. The v0.0.2 release is older, so a change made since may not be in it.
 The code and tests are the authority: where this page and the code disagree, the code is current, and a report that
 says so is welcome.
 
@@ -103,12 +103,12 @@ We know about each of these. They are open work, not a promise of dates. Each is
 | **No screen-reader support.** The launcher draws its own interface with SDL3 and Vulkan and does not expose an accessibility tree to NVDA, JAWS or Narrator. | A screen reader cannot read the library, wizard, settings or error screens. | None inside the player. The documentation is plain Markdown. Setup can be done from the command line: see [`docs/SETUP.md`](docs/SETUP.md) and `python tools/nk_cli.py`. |
 | **Interface size needs room.** *Interface size* scales text and controls together, and the launcher keeps its 1280 x 720 layout, so it cannot grow beyond what the window holds. | In a 1280 x 720 window every interface size looks the same. | Use *Text size*, which works in any window, or maximise the window. |
 | **Text size stops at 150% and leaves the game alone.** *Text size* covers the launcher's screens; the in-game overlay and the game's own text stay as they are. Some dense rows, such as the Controls page's names and bindings, are cut short with an ellipsis at the larger sizes. | Very low vision may need more than 150%. | Combine it with a larger *Interface size* in a larger window, or with Windows' Magnifier. |
-| **Windows' contrast themes change only the focus ring.** A contrast theme turns on the high-contrast focus ring, but the launcher keeps its own colours. | The rest of the launcher does not take a contrast theme's colours. | None yet. |
-| **No light theme and no colour-blind palette.** | The launcher is always the dark theme. Status is already word-and-shape, so meaning is kept, but the accent and status colours are fixed. | None yet. |
+| **Windows' contrast themes change only the focus ring.** A contrast theme turns on the high-contrast focus ring, but the launcher keeps its own colours. | The rest of the launcher does not take a contrast theme's colours. | None. |
+| **No light theme and no colour-blind palette.** | The launcher is always the dark theme. Status is already word-and-shape, so meaning is kept, but the accent and status colours are fixed. | None. |
 | **Launcher shortcuts are fixed.** The in-game keys mirror a PSP by default (`X`, `Z`, `A`, `S`, `Q`, `W`, Enter, Shift, arrow keys; see [`docs/SETUP.md`](docs/SETUP.md)), and you can change them on the Controls page in Settings (choose **KEYBOARD**, [#1467](https://github.com/Jstar269/nakagawa-recomp/pull/1467)). The launcher's own keys, and Esc, F1 and F3 in a game, can't be changed. | Moving around the launcher with other keys needs a controller or an external remapping tool. | Use a controller (any SDL3 pad), or a system-level key remapper. |
 | **No captions, subtitles or transcripts.** The player shows whatever a game shows. Spoken or musical content in a game is not captioned. | If a game relies on sound for information, the player adds nothing to replace it. | None. |
 | **No photosensitivity protection.** The player does not limit flashing or motion in a running game. *Reduce motion* affects the launcher only. | A game that flashes will flash. | Check the game's own content warnings before playing. |
-| **Launcher text is English only.** | No translation. | None yet. |
+| **Launcher text is English only.** | No translation. | None. |
 | **No accessibility scan in CI.** The layout checks catch focus, spacing and alignment regressions but not every barrier. | A new barrier can land unnoticed. | Report it (below). |
 | **No testing with assistive technology and no user research.** We have not tested with screen readers, magnifiers, switch devices or voice control, and we have not worked with disabled users. | Unknown barriers exist. | Report what you find. |
 
@@ -117,8 +117,8 @@ We know about each of these. They are open work, not a promise of dates. Each is
 | Environment | Status |
 | --- | --- |
 | Windows 11 x64 with a Vulkan-capable GPU, SDL3 | Supported: this is where the player is built and used today. |
-| Linux (Ubuntu) | The runtime and the installed player are built and smoke-tested in hosted CI without a display. Interactive use of the launcher on Linux is not supported yet ([`docs/LINUX_DEVELOPMENT.md`](docs/LINUX_DEVELOPMENT.md)). |
-| Android | Planned ([`docs/PLATFORM_PORTABILITY.md`](docs/PLATFORM_PORTABILITY.md)). Nothing runs there. |
+| Linux (Ubuntu) | The runtime and the installed player are built and smoke-tested in hosted CI without a display. Interactive use of the launcher on Linux is not supported ([`docs/LINUX_DEVELOPMENT.md`](docs/LINUX_DEVELOPMENT.md)). |
+| Android | Not supported for play. A development build of the launcher and the showcase demos runs in the Android emulator ([`docs/ANDROID_DEVELOPMENT.md`](docs/ANDROID_DEVELOPMENT.md)). |
 | macOS and consoles | Not planned for the player. |
 | Input | Keyboard and mouse; SDL3 gamepads. Touch, eye tracking, switch and voice devices are untested. |
 | Assistive technology | None tested. A tool that works at the operating-system level (a magnifier, a key remapper, an on-screen keyboard) may help, but we have not verified any. |
