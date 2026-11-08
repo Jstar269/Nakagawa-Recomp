@@ -2646,8 +2646,9 @@ static void dispatch_call_aot(RecompFn fn, CpuState *s, uint32_t target,
         else sr_tail_drain_segment(s);
     }
     /* A chain that ended out of its frame (sr_tail_note_exit) tells the enclosing drain of a
-     * computed step, and an interpreted caller's continuation, which owe no restore then. A
-     * whole chain's other callers go on in their own frames (#1935). */
+     * computed step, and an interpreted caller's continuation, which void their restores at
+     * or below its release's bound. A whole chain's other callers go on in their own frames
+     * (#1935). */
     if (drain == SR_DRAIN_CHAIN && !(call_boundary != NULL && call_boundary->continuation))
         sr_tail_transfer.released = 0u;
     if (owns_return_boundary) (void)sr_aot_return_boundary_end(s);

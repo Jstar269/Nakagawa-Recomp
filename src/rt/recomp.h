@@ -1738,7 +1738,10 @@ int sr_aot_return_boundary_capture_return(CpuState *s, uint32_t target, const ui
  * (SR_TAIL_RELEASES) with a bound, `release_sp`: a load below where $sp was (a switch) leaves
  * every frame, and one at or above the body's entry $sp leaves those whose restore is at or
  * below the $sp it loaded. A load that stays inside an earlier body's frame, such as an
- * alloca free in a piece of it, keeps that body's restore. A voided restore is no longer the
+ * alloca free in a piece of it, keeps that body's restore. At the load, a switch to a stack
+ * that itself lies inside that frame (a coroutine stack in a caller's locals) looks the same,
+ * so it also keeps the restore, and the chain ends at that body's entry SP instead of on the
+ * switched stack; that case stays open (#1935). A voided restore is no longer the
  * first, and a later body's restore is again. A body that ends that way by returning, with no
  * record, says so in `released` (sr_tail_note_exit) for the drain that ran it; every other
  * invoker clears it, since the body's caller is then native code that goes on in its own

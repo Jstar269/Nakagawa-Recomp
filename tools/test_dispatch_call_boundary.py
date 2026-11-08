@@ -938,6 +938,36 @@ def _a_piece_frees_an_alloca_then_hands_the_frame_on() -> tuple[int, ...]:
     return words
 
 
+def _a_piece_frees_an_alloca_reached_by_jr(*, hands_on_by_jr: bool) -> tuple[int, ...]:
+    """_a_piece_frees_an_alloca_then_hands_the_frame_on with F reaching P by a computed `jr`.
+
+    P is then a computed step, and its direct transfer to TAIL runs in the step's segment,
+    whose drain hands P's bounded release to the enclosing drain at its end. With
+    ``hands_on_by_jr`` P reaches TAIL by a computed `jr` too, so the segment hands that
+    transfer on with its release (review S1 of #2238 at 73d86c32c). P and TAIL are entries.
+    """
+    p = 0x1030
+    if hands_on_by_jr:
+        tail = p + 4 * 7
+        piece_out = [_lui(_T9, 0), _ori(_T9, _T9, tail), _jr(_T9), _lw(_SP, 0x10, _FP)]
+    else:
+        tail = p + 4 * 5
+        piece_out = [_j(tail), _lw(_SP, 0x10, _FP)]
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1010 F
+        _sw(_FP, 0x18, _SP), _addu(_FP, _SP, 0),
+        _lui(_T9, 0), _ori(_T9, _T9, p), _jr(_T9), _NOP,
+        _sw(_SP, 0x10, _FP), _addiu(_SP, _SP, -0x30),        # 0x1030 P: save, alloca
+        _addiu(_V0, 0, 0x56),
+        *piece_out,                                          # free it in the slot
+        _lw(_RA, 0x1C, _SP), _lw(_FP, 0x18, _SP),            # TAIL
+        _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _jal(p), _NOP, _jal(tail), _NOP,
+    ])
+    assert len(words) == (tail + 0x20 - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
 def _a_switch_then_a_live_frame_piece_frees_it() -> tuple[int, ...]:
     """A frame allocated on a switched stack and freed by a plain piece (#1935).
 
@@ -2515,6 +2545,31 @@ class GeneratedCallDepthTests(unittest.TestCase):
         ):
             self._assert_mutant_fails(name, words, (0,), mutation, lowered,
                                       codegen_args=codegen_args)
+
+        # F reaches P by a computed `jr`, so P's release travels out of a computed step's
+        # segment: at the segment's end ("j"), or with the computed transfer it hands on
+        # ("jr"). Native and with P interpreted.
+        by_j = _a_piece_frees_an_alloca_reached_by_jr(hands_on_by_jr=False)
+        by_jr = _a_piece_frees_an_alloca_reached_by_jr(hands_on_by_jr=True)
+        for shape, computed in (("j", by_j), ("jr", by_jr)):
+            for codegen_args in ((), ("--omit-aot=0x00001030",)):
+                with self.subTest(reached_by="jr", hands_on_by=shape, omitted=codegen_args):
+                    _generated, results = self._probe(computed, (0,), codegen_args=codegen_args)
+                    rc, output, fields = results[0]
+                    self.assertEqual(rc, 0, output)
+                    self.assertEqual(fields.get("v0"), 0x56, output)
+                    self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+        for name, computed, mutation in (
+            # B5: a segment that ends after a release passes on no bound.
+            ("B5-a-segment-end-passes-on-no-bound", by_j, {"guest_interp.c": (
+                "        sr_tail_transfer.release_sp = chain.release_sp;",
+                "        sr_tail_transfer.release_sp = SR_TAIL_RELEASES_ALL;")}),
+            # B6: a segment hands on a computed transfer with no bound for its release.
+            ("B6-a-segment-hands-on-no-bound", by_jr, {"guest_interp.c": (
+                "sr_tail_transfer.release_sp = chain.released ? chain.release_sp : 0u;",
+                "sr_tail_transfer.release_sp = chain.released ? SR_TAIL_RELEASES_ALL : 0u;")}),
+        ):
+            self._assert_mutant_fails(name, computed, (0,), mutation, lowered)
 
     def test_a_longjmp_through_an_interpreted_callees_piece_reaches_the_setjmp_frame(self):
         # G calls H, which lowers $sp and hands its live frame to the native piece P, and P

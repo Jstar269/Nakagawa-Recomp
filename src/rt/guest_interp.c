@@ -1647,7 +1647,8 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
             s->pc = pc;
 #if !defined(SR_STACK_CENSUS_ENABLED)
             /* A TAIL step that loaded $sp out of its frame returns as a native body's guest
-             * exit does (sr_tail_note_exit): the drain's earlier restores are void (#1935). */
+             * exit does (sr_tail_note_exit): the drain's earlier restores at or below its
+             * release's bound are void (#1935). */
             if (tail_step && loaded_sp) sr_tail_note_exit(SR_TAIL_RELEASES, release_sp);
 #endif
             if (log_dispatch) {
@@ -1697,9 +1698,10 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
                  * entered there does (emit_tail_transfer in tools/codegen.py): it records the
                  * transfer for the drain, with the entry $sp it owes once the chain completes
                  * while every $sp load it ran stayed in its frame, or else the release of the
-                 * restores recorded before it. The drain keeps the first restore of the chain
-                 * since the last release, so an owed restore matters only when no earlier body
-                 * owes one: a head that switched stacks or longjmped (#1935). As in generated code, a
+                 * restores recorded before it at or below its bound (note_sp_load). The drain
+                 * keeps the first restore of the chain since the last release that voided one,
+                 * so an owed restore matters only when no earlier body owes one: a head that
+                 * switched stacks or longjmped (#1935). As in generated code, a
                  * static transfer or a fall-through keeps its target's body, so the target
                  * runs in this drain; a computed one is dispatched by address, a step of its
                  * own. Under the stack census a native body records no restore, and its
