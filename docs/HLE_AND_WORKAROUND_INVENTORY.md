@@ -219,7 +219,7 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Limitation: codec 0x1000 only; allocates ((+16) + 0x3F) | 0x3F bytes of the host ME RAM model, owned by the work area, as uofw sizes it; a work area whose +104 still names its allocation is refused with 0x807F0003 (uofw allocates again and orphans the first; the refusal is synthetic pending W-LLE-1); one whose +104 no longer names it (recycled without a release) gets a new allocation and the stale one is freed; the addresses are not PSP-measured
   - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
 - **`h_AudiocodecInit`** (`sceAudiocodec`): `sceAudiocodecInit` (0x5b37eb1d)
-  - Limitation: codec 0x1000 only; refuses a work area that owns no EDRAM, or whose +12 is not the EDRAM sceAudiocodecGetEDRAM published for it (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)
+  - Limitation: codec 0x1000 only; as in uofw, any work area may name the EDRAM at +12 (a disc mpeg.prx initialises a work area other than the one it allocated with); refuses a +12 that is not an EDRAM sceAudiocodecGetEDRAM published, or a +16 larger than it (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)
   - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
 - **`h_AudiocodecReleaseEDRAM`** (`sceAudiocodec`): `sceAudiocodecReleaseEDRAM` (0x29681260)
   - Limitation: frees only the host ME RAM allocation the work area owns: a +104 naming any other allocation (another work area's, a video context's) is refused with 0x807F0004 and nothing is freed; clears +104 and +12 and drops the host decoder as JPCSP does

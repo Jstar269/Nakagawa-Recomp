@@ -1058,15 +1058,23 @@ static void test_audiocodec(void) {
               MEM_R32(G_AC + 104u) == raw && MEM_R32(G_AC + 12u) == edram,
           "getedram: a second allocation for the same work area is refused");
 
-    /* Init takes only the EDRAM GetEDRAM published for this work area (review S2). */
-    memset(host(G_AC2), 0, 0x80u);
-    MEM_W32(G_AC2 + 12u, edram);
-    CHECK(call(NID_AC_INIT, G_AC2, AC_CODEC, 0, 0) == AC_ERR_ME && !ac_find(G_AC2),
-          "init: a forged +12 with no EDRAM of its own is refused");
+    /* Init takes a +12 that is an EDRAM GetEDRAM published, with +16 bytes inside it. As in
+     * uofw, the work area need not be the one that allocated it: a disc mpeg.prx initialises
+     * another (#286). */
     MEM_W32(G_AC + 12u, edram + 0x40u);
     CHECK(call(NID_AC_INIT, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && !ac_find(G_AC),
-          "init: a +12 other than the EDRAM GetEDRAM published is refused");
+          "init: a +12 other than an EDRAM GetEDRAM published is refused");
     MEM_W32(G_AC + 12u, edram);
+    MEM_W32(G_AC + 16u, 0x7BC0u + 0x100u);   /* the allocation is 0x7C40 bytes */
+    CHECK(call(NID_AC_INIT, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && !ac_find(G_AC),
+          "init: a +16 larger than the EDRAM allocation is refused");
+    MEM_W32(G_AC + 16u, 0x7BC0u);
+    memset(host(G_AC2), 0, 0x80u);
+    MEM_W32(G_AC2 + 12u, edram);
+    MEM_W32(G_AC2 + 16u, 0x7BC0u);
+    CHECK(call(NID_AC_INIT, G_AC2, AC_CODEC, 0, 0) == 0u && ac_find(G_AC2) && MEM_R32(G_AC2) == 0x05100601u,
+          "init: another work area naming that EDRAM at +12 initialises (uofw checks no owner)");
+    ac_drop(ac_find(G_AC2));
 
     /* ReleaseEDRAM frees only the work area's own allocation (review S1): a +104 naming a video
      * context's ME memory, or another work area's, is refused and nothing is freed. */

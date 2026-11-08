@@ -2399,7 +2399,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "tests/native/videocodec_selftest.c:test_audiocodec",
         ],
-        "limitation": "codec 0x1000 only; refuses a work area that owns no EDRAM, or whose +12 is not the EDRAM sceAudiocodecGetEDRAM published for it (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)",
+        "limitation": "codec 0x1000 only; as in uofw, any work area may name the EDRAM at +12 (a disc mpeg.prx initialises a work area other than the one it allocated with); refuses a +12 that is not an EDRAM sceAudiocodecGetEDRAM published, or a +16 larger than it (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)",
     },
     "h_AudiocodecDecode": {
         "status": "partial",

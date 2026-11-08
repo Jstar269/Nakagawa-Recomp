@@ -1084,18 +1084,30 @@ static uint32_t h_AudiocodecReleaseEDRAM(CpuState *s) {
     return 0u;
 }
 
+/* 1 when [edram, edram + bytes) lies inside an ME allocation sceAudiocodecGetEDRAM made, and
+ * edram is that allocation's published (64-byte-aligned) address. */
+static int me_audio_edram_ok(uint32_t edram, uint32_t bytes) {
+    for (int i = 0; i < s_me_alloc_count; i++) {
+        const MeAlloc *a = &s_me_allocs[i];
+        if (a->kind != ME_OWNER_AUDIO || ((a->addr + 0x3Fu) & ~0x3Fu) != edram) continue;
+        return bytes <= a->addr + a->size - edram;
+    }
+    return 0;
+}
+
 /* sceAudiocodecInit(workArea, codec): the work area becomes a decoding context. A context
- * initialised again starts from a clean decoder (JPCSP releases the old one). */
+ * initialised again starts from a clean decoder (JPCSP releases the old one). As in uofw, the
+ * work area need not be the one sceAudiocodecGetEDRAM was called on: uofw checks only that
+ * +12 and +16 name accessible memory, and a disc mpeg.prx initialises a work area other than
+ * the one it allocated with. Here +12 must be an EDRAM sceAudiocodecGetEDRAM published, with
+ * +16 bytes inside it; anything else is refused (the ME would work in memory nobody gave it). */
 static uint32_t h_AudiocodecInit(CpuState *s) {
     static const char call[] = "sceAudiocodecInit";
     const uint32_t work = A0;
     const uint32_t r = ac_check(call, work, A1, AC_WORK_BYTES);
     if (r) return r;
-    const uint32_t held = me_audio_allocation(work);
-    if (!held)
-        return vc_refuse(call, "work area holds no EDRAM (sceAudiocodecGetEDRAM first)", AC_ERR_ME);
-    if (MEM_R32(work + 12u) != ((held + 0x3Fu) & ~0x3Fu))
-        return vc_refuse(call, "+12 is not the EDRAM sceAudiocodecGetEDRAM published", AC_ERR_ME);
+    if (!me_audio_edram_ok(MEM_R32(work + 12u), MEM_R32(work + 16u)))
+        return vc_refuse(call, "+12 and +16 do not name EDRAM sceAudiocodecGetEDRAM published", AC_ERR_ME);
     AcContext *c = ac_find(work);
     if (c) {
         if (c->at3p) (void)atrac3p_bridge_reset(c->at3p);
