@@ -773,7 +773,8 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   alpha channel is coverage and the colour comes from the draw; at least two texels are partly covered (alpha neither
   0 nor 255) and at least one in eight of the inked texels is. A rectangle with two inked colours is art, and a
   hard-edged bitmap font has no coverage to refine; both are drawn as the game drew them. A single-colour soft shape
-  (a shadow, a glow, a fade bar) passes this test and is not an edge: the rebuild keeps it smooth (next bullet).
+  (a shadow, a glow, a fade bar) passes this test; whether the rebuild treats a rectangle as soft art is decided
+  below (next bullet).
 - **The rebuild.** For a rectangle of coverage `c` at factor `f`: the coverage is enlarged with a Catmull-Rom bicubic,
   replicating the rectangle's own edge texels past its border, so a neighbouring cell of the page is never read. Then
   for every texel a threshold is fitted (a bisection) so that the `f x f` block of pixels, each set to
@@ -788,19 +789,32 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   than a texel wide has steps of 0.5 and more, and its texels have the same neighbourhoods as a slanted edge's, so
   the step cannot tell them apart; the rectangle decides. Its partly covered texels (alpha 16/256 to 240/256 of the
   rectangle's highest alpha) are counted and divided by its total variation of coverage, in steps from blank to that
-  alpha. An edge box filtered by the texel grid crosses as many texels as it changes steps, at any angle (ratio 1;
-  curves and corners reach about 1.4), and a ramp w texels wide crosses w times as many. Above 1.2 the rectangle is a
-  shadow, a glow or a fade and is rebuilt smooth throughout, which cannot rib. The cost is some sharpness in glyphs
-  whose edges are wider than the grid's (a filtered font): 1.2 is a choice, and the plain synthetic E at 3x goes from
-  3.7 to 4.0 of 255 mean error against a supersampled truth, the others within 0.2. Every pixel with any coverage
-  takes the rectangle's one colour. The arithmetic is float in a fixed order, so a run is repeatable.
+  alpha. An edge box filtered by the texel grid that reaches solid ink crosses as many texels as it changes steps, at
+  any angle (ratio 1), and a ramp w texels wide crosses w times as many. A stroke about a texel wide that never reaches
+  the rectangle's solid level has two partly covered texels over a variation of about twice its peak, so its ratio is
+  about 1 over its peak. Box-filtered synthetic text measured 0.54 to 1.44, a 6-texel E 1.71, filtered text up to 2.1,
+  and the soft art the rule has to catch starts at 1.23 (a Gaussian disk, sigma 0.4 texels; a linear glow with a
+  falloff of 1.5 texels is 1.30). The two populations overlap, and no single ratio separates them: 1.2 is a choice, and
+  the soft art on both sides of it is within 0.05. Above 1.2 the whole rectangle is rebuilt smooth (the bicubic field
+  shifted to keep each texel's coverage), whether it is a shadow, a glow or a fade, or text this measure takes for
+  one. On a source that does not run back, a smooth rectangle has no run-back beyond the Catmull-Rom undershoot (at
+  most 15 of 255 on the undithered soft art measured, 12 to 44 on a 4x4-dithered 4-bit shadow whose source runs
+  back by up to 17). The cost to text, measured at 4x as the mean error against a supersampled truth (of 255, rebuild
+  smooth against rebuilt as text): of 1,716 box-filtered synthetic variants 45 go smooth (an E from 2.89 to 3.37, a
+  plus 3.05 to 3.26, a thin E 9.55 to 10.39; A, O and diagonal bars never do); a 6-texel E goes from 23.0 to 27.7
+  (21 of 32 smooth) and an 8-texel E from 12.4 to 13.3; a dense grid of bars at 12 texels from 26.7 to 37.2 (29 of 36
+  smooth) and at 16 texels from 18.9 to 24.7; text prefiltered by a tent or a Gaussian goes smooth in 1,104 of 3,432
+  variants (+0.6 to +5.2); text with a same-colour drop shadow goes smooth in every variant measured (76 of 76, +1.0
+  to +2.7). A rectangle that goes smooth is drawn as a smooth enlargement of the game's texels, not refused. Every
+  pixel with any coverage takes the rectangle's one colour. The arithmetic is float in a fixed order, so a run is
+  repeatable.
 - **Checked.** Before a tile is used it is compared with the guest's bytes: each texel of the rectangle must equal
   the mean of its block of the quantized tile within 2 of 255, and every inked pixel must have the rectangle's colour
   (`nk_glyph_verify`). A tile that fails is refused (`downsample`) and its draw is as the game drew it. The check
   does not look at the shape of the pixels: a tile that keeps every mean and the colour passes it, a ribbed or
   mirrored one included. No test of the pixels separates the kink where two edge blocks meet in a glyph from a rib in
-  a ramp (a seam check at 24 of 255 refused half the plain synthetic E at 3x), so ribs are kept out by the rebuild,
-  which treats a soft rectangle as smooth, and by the tests of it below.
+  a ramp (a seam check at 24 of 255 refused half the plain synthetic E at 3x), so the only guard against ribs is the
+  soft-art rule of the rebuild and its tests, and that rule has the limits listed below.
 - **Reading.** The page is decoded from main RAM by the decoder the texture cache uses; a page in VRAM is refused
   before any decode, so the feature never causes a renderer readback. Nothing is written to guest memory, the CLUT or
   a texture source.
@@ -834,18 +848,27 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
 - **Limits.** One page holds at most 768 tiles; a draw past that is drawn as made (`tiles_full`). Text drawn as
   triangles is not rebuilt. A stroke about one texel wide that straddles two texels (a common width in small fonts)
   is sharpened less than one that falls in a single texel: on synthetic strokes the mean error against a supersampled
-  truth at 4x is 4.9 of 255 for a 1.0-texel stroke over nine offsets (the tenth is a hard edge and is refused),
-  against 3.4 when every block was fitted on its own, and 0.9 to 2.1 for strokes of 1.2 texels and more. The feature is not part of the settings pages or the launch line.
+  truth at 4x is 4.9 of 255 for a 1.0-texel stroke over nine offsets (the tenth is a hard edge and is refused), and
+  0.9 to 2.1 for strokes of 1.2 texels and more. Small, dense or filtered text can be drawn smooth by the soft-art
+  rule (the figures are in "The rebuild"). Soft art whose rectangle ratio is 1.2 or less is rebuilt as text and can show
+  doubled edges: a 2-texel fade with a 2-level 4-bit dither (ratio 1.14) runs back by 237 of 255 at 4x (a 1-level
+  dither, the common 4444 case, is clean), a glow with a 1.25-texel falloff (1.02 to 1.18) by 64 to 69, and a soft shape
+  sharing a rectangle with text (an H and a glow, 1.02 to 1.12) by up to 100. A crisp anti-aliased box or disk at a
+  sub-texel offset also runs back at its corners (19, 49, 81 and 159 of 255 for a box at factors 2, 3, 4 and 6), in
+  the edge rebuild and not only in soft art. The feature is not part of the settings pages or the launch line.
 - **Tests.** `glyph-recon-selftest` checks the setting and its Ace gate, every named refusal, the classifier, and the
   rebuild at every factor for 4444, 8888, indexed 4-bit and indexed 8-bit pages (block means, colour, repeatability,
   fewer soft pixels than a bilinear enlargement, no dependence on neighbouring cells), the downsample check
   against tampered and stale tiles, and soft single-colour art at every factor, whose rows and columns must not
   run back where the source does not: fade bars of 64, 6, 4 and 2 texels, glows of 1.5, 2, 3 and 5 texels, a blurred
   drop shadow, a round shadow, and in two dimensions box shadows and disk glows with a falloff of 1.5 to 3 texels at
-  two sub-texel offsets; a bold "A" at 36 stroke widths and offsets, also at ink 237, that must be rebuilt, all on
-  synthetic glyphs. `glyph-recon-mutant` builds the selftest twelve times, each without one guard (the Ace gate, VRAM,
+  two sub-texel offsets; a bold "A" at 36 stroke widths and offsets and a thick-stroke plus at ink 237 that must be rebuilt, and an
+  "E" at four stroke widths, sixteen offsets and ink 255 and 237 (256 draws at factors 3 and 4) of which at least 230
+  must be twice as sharp as a bilinear enlargement (the rule's measured 240; a threshold of 1.0 gives 152), all on
+  synthetic glyphs. `glyph-recon-mutant` builds the selftest thirteen times, each without one guard (the Ace gate, VRAM,
   render scale 1, the mip chain, the two buffer formats, the downsample check, the colour check, the hard-edge check,
-  the size check, the smooth blocks, the soft-rectangle rule, and a rebuild that fits no threshold), and passes only when each fails the cell that names it. `gpu-glyph-selftest` runs the production
+  the size check, the smooth blocks, the soft-rectangle rule, a soft-art threshold of 1.0, and a rebuild that fits no
+  threshold), and passes only when each fails the cell that names it. `gpu-glyph-selftest` runs the production
   path on a Vulkan device at render scales 2, 3 and 4, and fails if the renderer runs at another scale than asked:
   a 1:1 sprite draws the rebuilt tile, device pixel for pixel, with and without other content beside
   the cell, and without the feature it does not; a page in VRAM, a hard-edged page, a two-colour page, a magnified

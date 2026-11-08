@@ -17,17 +17,18 @@
  *      below NK_GLYPH_EDGE_LOW the block is the bicubic field itself, shifted by the offset that
  *      keeps the texel's coverage (clamped to 0..1), above NK_GLYPH_EDGE_HIGH it is the ramp, and
  *      in between the two are mixed. Both keep the block's mean, so the mix does too. A rectangle
- *      of soft art (a shadow, a glow, a fade: soft_ratio above NK_GLYPH_SOFT_RATIO) is smooth
- *      throughout, because a ramp more than a texel wide has steps of 0.5 and more, and a texel's
- *      neighbourhood cannot tell it from a slanted edge.
+ *      that soft_ratio puts above NK_GLYPH_SOFT_RATIO (a shadow, a glow, a fade, and also some
+ *      small, dense or filtered text) is smooth throughout, because a ramp more than a texel wide
+ *      has steps of 0.5 and more, and a texel's neighbourhood cannot tell it from a slanted edge.
  *   3. Colour every pixel with the one colour the rectangle's inked texels share, so a pixel the
  *      blur reaches into a blank texel is not darkened by that texel's stray colour.
  * Everything is float arithmetic in a fixed order; nk_glyph_verify then checks the quantized result
  * against the input in integers: every block's mean and the colour. It does not look for a ribbed
  * gradient or a mirrored block: a tile that keeps every mean and the colour but is not the one
  * the rebuild makes passes it, and so does a ribbed one. No test of the pixels separates the
- * kink where two edge blocks meet in a glyph from a rib in a ramp; the soft-art rule (soft_ratio) is what keeps ribs
- * out of the rebuild.
+ * kink where two edge blocks meet in a glyph from a rib in a ramp. The only guard against ribs is the soft-art
+ * rule (soft_ratio), which has limits: soft art at or under the threshold (a dithered fade, a glow under 1.5
+ * texels, a shape sharing a rectangle with text) is rebuilt as text and can rib; the contract lists them.
  */
 #include "glyph_recon.h"
 
@@ -374,6 +375,8 @@ NkGlyphVerdict nk_glyph_rebuild(const uint32_t *page, int pw, int ph, int x0, in
     const int ink = rect_ink(page, pw, x0, y0, w, h);
 #ifdef NK_GLYPH_MUTANT_NO_SOFT_RECT
     const int soft = 0;   /* glyph-recon-mutant: soft art is rebuilt as text */
+#elif defined(NK_GLYPH_MUTANT_SOFT_RATIO_LOW)
+    const int soft = soft_ratio(page, pw, x0, y0, w, h, ink) > 1.0f;   /* glyph-recon-mutant: text with strokes is called soft */
 #else
     const int soft = soft_ratio(page, pw, x0, y0, w, h, ink) > NK_GLYPH_SOFT_RATIO;
 #endif

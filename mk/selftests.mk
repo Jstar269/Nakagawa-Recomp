@@ -1061,8 +1061,8 @@ native-core-tests: glyph-recon-selftest glyph-recon-mutant
 # named cell's FAIL line: the Ace gate, the VRAM refusal, the render scale 1 refusal, the mip chain
 # refusal, the two buffer refusals, the downsample check, the colour check, the hard-edge check, the
 # size check, a rebuild that steepens every block (a ribbed gradient), a rebuild that treats soft art as text
-# (a two-texel ramp becomes two edges), and a rebuild that does
-# not keep each block's mean.
+# (a two-texel ramp becomes two edges), a soft-art threshold of 1.0 (real text with strokes goes smooth), and a
+# rebuild that does not keep each block's mean.
 GLYPH_RECON_MUTANTS := \
 	NO_ACE_GATE:"FAIL settings: SR_GLYPHS=on with Ace Mode off" \
 	ALLOW_VRAM:"FAIL refuse-vram: a page in VRAM is refused" \
@@ -1075,6 +1075,7 @@ GLYPH_RECON_MUTANTS := \
 	NO_SIZE_CHECK:"FAIL refuse-size: 3 texels wide" \
 	NO_SMOOTH_MODE:"FAIL gradient: fade bar at factor 3" \
 	NO_SOFT_RECT:"FAIL gradient: 2-texel fade at factor" \
+	SOFT_RATIO_LOW:"FAIL text: only " \
 	PLAIN_BICUBIC:"FAIL rebuild: 4444 glyph 0 at factor 2: downsample"
 glyph-recon-mutant:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"

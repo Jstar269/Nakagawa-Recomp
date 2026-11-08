@@ -491,7 +491,7 @@ static void cell_gradient(void) {
                 }
             }
     }
-    /* the same bold A with a lighter ink (237 of 255, as a 4-bit font has): still rebuilt */
+    /* a thick-stroke plus with a lighter ink (237 of 255, as a 4-bit font has): still rebuilt */
     {
         static uint32_t glyph[16 * 16];
         for (int y = 0; y < 16; y++)
@@ -583,6 +583,57 @@ static void cell_soft2d(void) {
             }
 }
 
+/* ---- text stays sharp --------------------------------------------------------------------------- */
+
+/* A box-filtered "E" with strokes sw texels wide, shifted by (ox, oy) of a texel, at the given ink: three bars and a stem. */
+static float text_e_cov(float sw, float ox, float oy, int x, int y) {
+    int n = 0;
+    for (int j = 0; j < 8; j++)
+        for (int i = 0; i < 8; i++) {
+            const float px = (float)x + ((float)i + 0.5f) / 8.0f - ox, py = (float)y + ((float)j + 0.5f) / 8.0f - oy;
+            const int stem = px >= 2.0f && px < 2.0f + sw && py >= 2.0f && py < 12.0f;
+            const int bar = px >= 2.0f && px < 10.0f &&
+                            ((py >= 2.0f && py < 2.0f + sw) || (py >= 6.0f && py < 6.0f + sw) || (py >= 12.0f - sw && py < 12.0f));
+            n += stem || bar;
+        }
+    return (float)n / 64.0f;
+}
+
+static void cell_text_sharp(void) {
+    /* Real text, which a rectangle's soft-art test must leave to the edge rebuild: an E (strokes 1.2 to 2.4 texels, sixteen
+     * sub-texel offsets, ink 255 and 237, factors 3 and 4: 256 draws) has to come out at least twice as sharp as the guest's
+     * bilinear picture in nearly all of them. Some are rebuilt smooth by design (strokes 1.2 texels wide that straddle two
+     * texels have a ratio above 1.2: 14 of the 256 here), and one offset is a hard edge and is refused (2); a threshold of
+     * 1.0 instead of 1.2 makes 102 smooth and fails the count. */
+    static uint32_t page[PW * PH];
+    static uint32_t tile[CELL_W * 6 * CELL_H * 6], base[CELL_W * 6 * CELL_H * 6];
+    static const float widths[] = {1.2f, 1.6f, 2.0f, 2.4f};
+    static const int inks[] = {255, 237};
+    int sharp = 0, total = 0;
+    for (size_t ii = 0; ii < sizeof inks / sizeof inks[0]; ii++)
+        for (size_t wi = 0; wi < sizeof widths / sizeof widths[0]; wi++)
+            for (int o = 0; o < 16; o++) {
+                const float ox = 0.25f * (float)(o & 3), oy = 0.25f * (float)(o >> 2);
+                for (int i = 0; i < PW * PH; i++) page[i] = 0x00123456u;
+                for (int y = 0; y < CELL_H; y++)
+                    for (int x = 0; x < CELL_W; x++) {
+                        const int a = (int)floorf(text_e_cov(widths[wi], ox, oy, x, y) * (float)inks[ii] + 0.5f);
+                        page[(4 + y) * PW + 4 + x] = a ? ((uint32_t)a << 24) | 0x00ffffffu : 0x00123456u;
+                    }
+                for (int f = 3; f <= 4; f++) {
+                    const NkGlyphVerdict v = nk_glyph_rebuild(page, PW, PH, 4, 4, CELL_W, CELL_H, f, tile);
+                    total++;
+                    check(v == NK_GLYPH_OK || v == NK_GLYPH_REFUSE_HARD_EDGE, "text", "E, stroke %.1f, offset %d, ink %d, factor %d: %s",
+                          (double)widths[wi], o, inks[ii], f, nk_glyph_verdict_name(v));
+                    if (v != NK_GLYPH_OK) continue;
+                    bilinear(page, 4, 4, CELL_W, CELL_H, f, base);
+                    const int n = CELL_W * f * CELL_H * f, soft = soft_pixels(tile, n), soft_base = soft_pixels(base, n);
+                    sharp += soft * 2 <= soft_base;
+                }
+            }
+    check(sharp >= 230, "text", "only %d of %d draws of an E are at least twice as sharp as bilinear (a soft-art threshold set too low)", sharp, total);
+}
+
 int main(void) {
     cell_settings();
     cell_sources();
@@ -592,6 +643,7 @@ int main(void) {
     cell_verify();
     cell_gradient();
     cell_soft2d();
+    cell_text_sharp();
     if (g_fail) {
         fprintf(stderr, "glyph-recon-selftest: %d of %d checks failed\n", g_fail, g_cells);
         return 1;

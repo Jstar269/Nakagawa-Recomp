@@ -78,7 +78,7 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   memory cost. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1010-texture-scaling-and-the-smart-2d-filter).
 - **Sharp game text (Ace Mode, development only).** It is reachable only through the `SR_GLYPHS` environment
-  variable (`on`), has no setting in the player, and is not an Enhanced or Ace item, because it
+  variable (`on`), has no setting in the player, and is not an admitted Enhanced item, because it
   changes the frames the game can read back
   ([section 11.3.5](ENHANCEMENT_CONTRACT.md#1135-sharp-game-text-not-admitted)). At a render scale of 2 to 4, a
   small sprite that maps one texel to one pixel over a page of anti-aliased text is redrawn from a version of just

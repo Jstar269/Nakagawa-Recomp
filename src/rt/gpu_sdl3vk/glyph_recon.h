@@ -60,12 +60,15 @@ extern "C" {
 /* Soft art or text, decided for the whole rectangle: its partly covered texels (between NK_GLYPH_PARTIAL_LOW and
  * NK_GLYPH_PARTIAL_HIGH of its highest alpha, in 1/256) are counted and divided by its total variation of
  * coverage (the sum of the steps between neighbouring texels, in steps from blank to that alpha; a hard step with
- * no partly covered texel beside it counts nothing). An edge box filtered by the texel grid crosses as many texels as
- * it changes steps, at any angle (ratio 1; curves and corners reach about 1.4), and a ramp w texels wide crosses w
- * times as many. Above NK_GLYPH_SOFT_RATIO the rectangle is rebuilt smooth throughout, which cannot rib: a ramp
- * fitted to every block of a soft region starts over at each block, and a texel's own neighbours cannot tell a soft
- * ramp from a slanted edge (both have two partly covered texels side by side). The ratio is a choice, measured on
- * synthetic glyphs and shadows (section 10.13 of the enhancement contract). */
+ * no partly covered texel beside it counts nothing). An edge box filtered by the texel grid that reaches
+ * solid ink crosses as many texels as it changes steps, at any angle (ratio 1), and a ramp w texels wide crosses w
+ * times as many; a stroke about a texel wide that never reaches solid has a ratio of about 1 over its peak. Above
+ * NK_GLYPH_SOFT_RATIO the rectangle is rebuilt smooth throughout, which does not rib on a source that does not run
+ * back: a ramp fitted to every block of a soft region starts over at each block, and a texel's own neighbours cannot
+ * tell a soft ramp from a slanted edge (both have two partly covered texels side by side). The ratio is a choice and
+ * the populations overlap: box-filtered text measured 0.54 to 1.44 (small and filtered text more), the soft art to
+ * catch starts at 1.23 and a glow with a 1.25-texel falloff is 1.18. Some text goes smooth and some soft art ribs
+ * (section 10.13 of the enhancement contract gives the figures). */
 #define NK_GLYPH_PARTIAL_LOW 16
 #define NK_GLYPH_PARTIAL_HIGH 240
 #define NK_GLYPH_SOFT_RATIO 1.2f
