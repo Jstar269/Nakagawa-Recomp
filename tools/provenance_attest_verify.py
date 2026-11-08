@@ -174,11 +174,6 @@ try:
         validate_ledger, verify_derived_policy_delta,
     )
     from .public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS
-    from .public_export import (
-        EXPORT_TREE_DERIVED_FIELDS_WITH_POLICY_DIGEST as _TREE_DERIVED_WITH_POLICY_DIGEST,
-        EXPORT_TREE_DERIVED_FIELDS_WITHOUT_POLICY_DIGEST as _TREE_DERIVED_WITHOUT_POLICY_DIGEST,
-        POLICY_DIGEST_FIELD as _POLICY_DIGEST_FIELD,
-    )
     from .public_export import build_control_document as _build_control_document
     from .public_export import build_document as _build_export_document
     from .publication_policy import PolicyError, load_policy
@@ -192,14 +187,20 @@ except ImportError:
         validate_ledger, verify_derived_policy_delta,
     )
     from public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS
-    from public_export import (
-        EXPORT_TREE_DERIVED_FIELDS_WITH_POLICY_DIGEST as _TREE_DERIVED_WITH_POLICY_DIGEST,
-        EXPORT_TREE_DERIVED_FIELDS_WITHOUT_POLICY_DIGEST as _TREE_DERIVED_WITHOUT_POLICY_DIGEST,
-        POLICY_DIGEST_FIELD as _POLICY_DIGEST_FIELD,
-    )
     from public_export import build_control_document as _build_control_document
     from public_export import build_document as _build_export_document
     from publication_policy import PolicyError, load_policy
+
+#: The policy digest and the two ``tree_derived_fields`` lists a committed
+#: control may record, derived as ``public_export`` derives them (its
+#: ``POLICY_DIGEST_FIELD`` and ``EXPORT_TREE_DERIVED_FIELDS_WITH(OUT)_POLICY_DIGEST``;
+#: a test pins them equal).  They are built here from the one imported list so
+#: the dual import above stays as it is.
+_POLICY_DIGEST_FIELD = "policy_sha256"
+_TREE_DERIVED_WITH_POLICY_DIGEST = tuple(sorted(set(_EXPORT_TREE_DERIVED_FIELDS) | {_POLICY_DIGEST_FIELD}))
+_TREE_DERIVED_WITHOUT_POLICY_DIGEST = tuple(
+    field for field in _EXPORT_TREE_DERIVED_FIELDS if field != _POLICY_DIGEST_FIELD
+)
 
 #: Paths the ledger deliberately carries without a content hash: they are the
 #: generated outputs whose own bytes depend on the ledger.
