@@ -1083,7 +1083,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     }
     memset(s_fpls, 0, sizeof(s_fpls));
     for (unsigned i = 0; i < VPL_MAX; i++) vpl_release(&s_vpls[i]);
-    memset(s_sync, 0, sizeof(s_sync));
+    hle_sync_reset();
     memset(s_mbx, 0, sizeof(s_mbx));
     mutex_reset_all();
 
