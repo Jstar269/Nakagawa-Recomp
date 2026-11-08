@@ -618,7 +618,7 @@ The code is `src/rt/gpu_sdl3vk/tex_scale.c` and its hook in `ge_gpu.c`'s texture
   texel to one pixel. Nearest sampling turns each glyph texel into a hard block at a render scale above 1x, so the
   filter makes their text worse, not crisper. The evidence is the before-and-after runs at render scale 4 recorded in
   #2092. `SR_SMART_2D` is off by default for every title, so nothing in the runtime names them. Their per-title
-  setting comes with the launch-line pull request that follows #2074 (section 11.3.3).
+  setting comes with the launch-line pull request that follows #2074 (section 11.3.3). Their text is what section 10.13 rebuilds.
 - **Tests.** `tex-scale-selftest` checks the C port against goldens from the upstream release, the borders, the job
   queue, the settings (an authentic start with both variables set keeps both off) and the classifier, with refused
   draws at the edge of its tolerance. `tex-scale-gate-mutant` builds the selftest without the Ace gate and passes only
@@ -739,6 +739,88 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   `SR_TEX_REPLACE` alone and with xBRZ also on; a rewrite to unlisted
   content never drawn from the old image; the content returning replaced again; an image of no whole factor counted
   and not used; and an authentic start reading no pack.
+
+### 10.13. Sharp Game Text
+
+At a render scale above 1x a game's text looks soft or blocky: it draws small rectangles cut from a glyph page that
+holds 1x anti-aliased coverage, one texel per screen pixel, so every texel is stretched over several device pixels.
+Texture scaling cannot help (section 10.10): it skips a 1:1 draw, and scaling a whole page carries a neighbouring cell
+into a glyph's edge. This feature (#2110) rebuilds the rectangle a draw samples, and only that rectangle, at the
+render scale. It needs no font outline and no hook in the game's code, so it works whichever code drew the page, a
+font the user supplied from their own console included, and it works for *Hot Shots Tennis*, which draws through its
+own font library, and for *LittleBigPlanet*, which draws from pre-built atlases. It is guest-visible (section 11.1)
+and not admitted under section 11.2: section 11.3.5 is its entry, and this section says how it draws. The code is
+`src/rt/gpu_sdl3vk/glyph_recon.c` (the setting, the refusals, the rebuild and its check: no GPU, no guest memory) and
+`glyph_gpu.inc`, included by `ge_gpu.c`.
+
+- **Settings.** `SR_GLYPHS=off|on`, read when the renderer starts; unset is off. It takes effect only in Ace Mode: in
+  an authentic run it is not read, and a request prints one `GLYPHS: off (sharp game text needs Ace Mode)` line. Any
+  other value prints `GLYPHS: refused (SR_GLYPHS takes off or on)` and the feature stays off. It needs a render scale
+  of 2 to 6, the factor the rebuild is made at; at 1x there is nothing to sharpen and a run prints
+  `GLYPHS: idle (render scale <n> leaves nothing to sharpen; it takes 2 to 6)`. It is not the launch line's `text`
+  key (section 10.1), which only sets the on-screen keyboard to the window's resolution; neither reads or implies the
+  other. There is no launch-line key, library setting or per-title setting yet (section 11.3.5).
+- **Which draws.** A sprite primitive that maps one texel to one pixel (the smart 2D test of section 10.10, either
+  direction) over a rectangle of whole texels, each side 4 to 64 texels, inside a cached texture that has one level,
+  is not a render target and lies in main RAM, in 4444, 8888 or an indexed 4-bit or 8-bit format. Text drawn as
+  triangles, magnified or minified, from a page in VRAM, with a mip chain, or in 5650, 5551 or a block-compressed
+  format keeps the game's own picture, byte for byte. The refusals are named: `vram`, `format`, `reversed` (a 4-bit
+  buffer with its nibbles swapped, as sceFont keeps one), `rgb24` (a 24-bit buffer), `mip`, `scale`, `size`,
+  `empty`, `colour` and `hard_edge`.
+- **A page that looks like text.** Every inked texel (alpha above 0) of the rectangle has the same colour, so the
+  alpha channel is coverage and the colour comes from the draw; at least two texels are partly covered (alpha neither
+  0 nor 255) and at least one in eight of the inked texels is. A rectangle with two inked colours is art, and a
+  hard-edged bitmap font has no coverage to refine; both are drawn as the game drew them.
+- **The rebuild.** For a rectangle of coverage `c` at factor `f`: the coverage is enlarged with a Catmull-Rom bicubic,
+  replicating the rectangle's own edge texels past its border, so a neighbouring cell of the page is never read. Then
+  for every texel a threshold is fitted (a bisection) so that the `f x f` block of pixels, each set to
+  `clamp(0.5 + f * (field - threshold), 0, 1)`, averages to that texel's coverage. The ramp is about one device
+  pixel wide at any factor, so the edge is sharp and still anti-aliased at the render resolution, and every block
+  keeps the guest's coverage by construction. Every pixel with any coverage takes the rectangle's one colour. The
+  arithmetic is float in a fixed order, so a run is repeatable.
+- **Checked.** Before a tile is used it is compared with the guest's bytes: each texel of the rectangle must equal
+  the mean of its block of the quantized tile within 2 of 255, and every inked pixel must have the rectangle's colour
+  (`nk_glyph_verify`). A tile that fails is refused (`downsample`) and its draw is as the game drew it.
+- **Reading.** The page is decoded from main RAM by the decoder the texture cache uses; a page in VRAM is refused
+  before any decode, so the feature never causes a renderer readback. Nothing is written to guest memory, the CLUT or
+  a texture source.
+- **How it draws.** The first rectangle rebuilt from a page makes a host-only image beside the cache entry's own, the
+  page's size times the render scale (a side times the scale may not pass 2048 texels; a larger page is drawn as the
+  game made it), transparent, and each tile goes to its own place in it. It shares the GPU budget of
+  `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default); a page that does not fit is counted (`budget_short`) and drawn as
+  made. The draw binds that image with the scaled-copy flag, so the shader samples it on its own texel lattice
+  (section 10.10, "Sampling"): at render scale `f` one rebuilt texel lies under each device pixel centre. The draw
+  samples nearest, whatever filter the game set: each pixel centre is a texel centre, and the shader's linear weight
+  (snapped down to 1/16) would leave a pixel up to 1/16 of a neighbour off at a factor that is not a power of two.
+  A draw uses rebuilt texels only when its rectangle's tile is valid; otherwise the draw is exactly today's picture.
+  Rectangles that overlap are separate tiles, each a rebuild of the same texels, so the one drawn last may overwrite
+  part of the other with an equally valid version.
+- **Never stale, never waited on.** A tile belongs to the cache entry's content hash it was checked against. When the
+  guest rewrites the page the entry's hash changes; the next draw decodes the page once, compares each tile's texels
+  with the ones it was built from, keeps the tiles whose texels are unchanged and rebuilds the rest when they are
+  drawn, so the old tile is never drawn for new content. The rebuild runs on the renderer thread, not on a worker, so
+  the same draws rebuild the same tiles whatever the host's speed. The work is bounded by a count: at most 48
+  rectangles are checked or rebuilt per present, and a draw past the count is drawn as the game made it and offered
+  again by the next draw. No time budget exists.
+- **Stamps.** `GLYPHS: on (per_present=48, tolerance=2)` at start, followed by the line section 11.3.5 describes, and
+  at exit `GLYPHS: draws (bound=, tiles_built=, tiles_kept=, tiles_stale=, page_decodes=, capped=, budget_short=,
+  tiles_full=)` and `GLYPHS: exit (refused: <name>=<count>, ...)`. Section 10.4 applies: the run is an Ace run.
+- **Limits.** One page holds at most 768 tiles; a draw past that is drawn as made (`tiles_full`). Text drawn as
+  triangles is not rebuilt. The feature is not part of the settings pages or the launch line.
+- **Tests.** `glyph-recon-selftest` checks the setting and its Ace gate, every named refusal, the classifier, and the
+  rebuild at every factor for 4444, 8888, indexed 4-bit and indexed 8-bit pages (block means, colour, repeatability,
+  fewer soft pixels than a bilinear enlargement, no dependence on neighbouring cells), and the downsample check
+  against tampered and stale tiles, all on synthetic glyphs. `glyph-recon-mutant` builds the selftest ten times, each
+  without one guard (the Ace gate, VRAM, render scale 1, the mip chain, the two buffer formats, the downsample check,
+  the colour check, the hard-edge check, the size check, and a rebuild that fits no threshold), and passes only when
+  each fails the cell that names it. `gpu-glyph-selftest` runs the production path on a Vulkan device at render scales
+  2, 3, 4 and 6: a 1:1 sprite draws the rebuilt tile, device pixel for pixel, with and without other content beside
+  the cell, and without the feature it does not; a page in VRAM, a hard-edged page, a two-colour page, a magnified
+  sprite, a rectangle too small and one past the page draw exactly as without the feature; a rewritten page draws
+  its new tile and never the old, and an unchanged cell keeps its tile; the 48-per-present count; guest memory and
+  the CLUT unchanged; the setting idle at 1x; and an authentic run that rebuilds nothing and draws the same picture
+  with `SR_GLYPHS` unset and on. `gpu-glyph-mutant` removes the content check of a bound tile, the per-present
+  count, and the VRAM, hard-edge, colour and Ace guards, each of which must fail its own cell.
 
 ## 11. Guest-Visible Items
 
@@ -1055,3 +1137,46 @@ The feature of section 10.12 (#1880). Its presentation is described there; this 
 - **Nothing worse (section 11.2, item 4):** not shown. A pack is the user's own content, so what it does to a title
   is the pack's; the runs item 4 lists, for a title and a pack, do not exist yet, and the feature may not be on by
   default before they do.
+
+#### 11.3.5. Sharp Game Text (Not Yet Admitted)
+
+The feature of section 10.13 (#2110). Its presentation is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
+  so a frame drawn with a rebuilt glyph is the frame the guest keeps. The feature stays outside section 11.2 until the
+  requirements below exist. Until then it is reachable only through an environment variable, for development.
+- **Key and off switch.** None yet. `SR_GLYPHS` is an environment variable, not a key on the launch line (section
+  10.1), and has no library or per-title setting. Its off switch is the variable unset or `off`, and an authentic
+  run, which never reads it. The launch-line key named for it is `glyphs`, in the pull request that follows #2074
+  with `tex` and `s2d` (section 11.3.3), and only that pull request admits the feature.
+- **How it relates to the `text` key.** Not at all. `text` (section 10.1) draws the on-screen keyboard at the window's
+  resolution on the presented image and changes no guest frame; `glyphs` rebuilds the game's own text inside the
+  frame the game draws. Neither reads or implies the other, and `text=on` with `glyphs` off leaves a game's text as
+  the game drew it.
+- **The cost of adding a key to the `SR_ACE` launch line.** Every key but `tier` is required (section 10.1), so a line
+  an older launcher wrote has no `glyphs` and is refused whole: the run is Authentic with an
+  `ACE_MODE: refused (<reason>)` line. A new required key also has to be written in every place that builds or checks
+  a full line: ten files outside the documents spell one out when this was written (among them `src/player/player_state.h`,
+  `src/rt/ace.h`, `tests/native/ace_selftest.c`, the launch-resolution and player-state tests, and the flight diff
+  and package cache tests), 42 times in all. Beyond those, the key needs its row in the parser's table in
+  `src/rt/ace.c`, `AceConfig`, the canonical line, the report's `effective` block, the feature words, and the settings
+  pages and per-title precedence of sections 10.5 and 10.9. Making the key optional, as `tier` is, avoids the first
+  cost and not the second, and changes the rule that every other key is required. That choice is made in the
+  launch-line pull request, with the library and per-title switches.
+- **Never silent.** A run with the feature on prints, after its `GLYPHS: on` line, one line naming it as guest-visible,
+  on through the environment and not admitted under section 11.2. The `glyph-recon-selftest` settings cell pins it.
+- **What it changes:** the frame a present commits, wherever a sprite draw used a rebuilt glyph at a render scale of 2
+  to 6.
+- **VRAM bytes:** differ in those frames, at those draws' pixels.
+- **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them.
+  Texture readbacks and render-to-texture results are unchanged: a render target is never a page, and a page in VRAM
+  is never read. The feature adds no renderer readback. In an authentic run every glyph branch sits behind one switch
+  that stays 0, and `gpu-glyph-selftest` compares the picture of a scene drawn with `SR_GLYPHS` unset and set.
+- **Timing:** differs. A rectangle is checked or rebuilt on the renderer thread, the thread the guest runs on, at
+  most 48 per present (section 10.13), so a scene that first draws many new glyphs takes a little longer for its
+  first frames. Not measured on a title. The VBLANK schedule, the GE timing model and the media clocks are unchanged.
+- **I/O speed:** unchanged.
+- **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run it stays off whatever the environment says.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic. The private runs item 4 lists, before
+  and after at render scale 4 on *Hot Shots Tennis* and *LittleBigPlanet*, and the library sweep, do not exist for
+  this item, and it may not be on by default before they do.
