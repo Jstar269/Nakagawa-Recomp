@@ -45,6 +45,8 @@ them, so they carry no class; `python tools/vfpu_coverage_report.py` lists them.
   counted, because it would give every path the same class.
 - Hardware runs described only in `tools/hle_registry_meta.py` notes count only when
   `tools/psp_oracle/manifest.json` links them; the rows marked `note` below carry such a note.
+- Measured VFPU oracle rows that no census form cites yet: `PSP-VFPU-CCCMOV-001`, `PSP-VFPU-CONVERT-001`, `PSP-VFPU-QUADWB-001`, `PSP-VFPU-UNMODELED-001`. Their forms keep the class
+  their census row gives until the census links them.
 
 At run time `sr_syscall` logs one line the first time each `unverified` NID with a handler is
 called: `HLE: unverified: <name> (NID 0x<nid>) has no recorded evidence (docs/HLE_COVERAGE.md)`.
