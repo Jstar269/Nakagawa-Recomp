@@ -1370,6 +1370,21 @@ A run that must give the same frames every time (the picture gate, a capture ret
 time the host took. It is not turbo: it does not run a title ahead of its own work. A pad script or
 a capture window alone does not turn it on, so existing routes keep their paced timing.
 
+Under the flag, nothing about the host machine reaches the guest through audio, the Memory Stick or
+the console profile (#2160 to #2163). Each of these answers the same on a headless runner and a
+desktop, and at any host speed:
+
+| What the guest reads | Under `SR_DETERMINISTIC_CLOCK=1` | Without it |
+| --- | --- | --- |
+| Audio queue depth and the waits of `sceAudioOutput*Blocking` | Follow a model that plays 44100 frames a second of guest time from the first push, whether the host has an output device, none, or a mixer that is full or behind. The host mixer only follows: it may drop or pad, never feeds back | The host mixer's depth; no device means open-loop pacing |
+| Host mixer drops | Logged with counts: `audio: host mixer queue is full ...` on the first drop and each time the count doubles, and `AUDIOSTAT_HOST_DROPPED: pushes=<n> frames=<n>` at exit | Same |
+| Memory Stick capacity and free space (`sceIoDevctl` `0x02425818`, the savedata size calls) | A fixed virtual card: 65536 clusters of 64 sectors of 512 bytes (2 GiB), minus the clusters (32 KiB) the files under the Memory Stick folder occupy. Saves the run writes use space. The host volume is not read | The host volume's size and free space |
+| WLAN MAC address and OpenPSID on fresh user data | Derived from a seed, never random, and not saved: the MAC is unicast with the locally administered bit set (no console's own address is), the OpenPSID is non-zero. The seed is `SR_IDENTITY_SEED`, default `nakagawa-deterministic-profile-v1`. An identity already in the user data is used as it is | Random, saved on first use |
+
+None of these hides a failure: a host disk that really is full still fails the write with a host
+error, and the synthetic identity is never a console's. A console-bound value still comes only from
+the user's own overlay.
+
 `tools/nk_safety.ps1` holds the helpers whose failure modes are silent (bounded wait,
 archive reset, completeness verdict); `tools/test_visual_oracle.py` exercises them against real
 processes and directories.

@@ -987,7 +987,7 @@ static uint32_t h_IoDclose(CpuState *s) {
  * sectorSize, and sectorCount. The host root is the unified Memory Stick
  * root (issue #334) shared with ordinary sceIo* ms0: operations and savedata. */
 #ifdef _WIN32
-int io_memstick_capacity(uint32_t info[5]) {
+static int io_memstick_host_capacity(uint32_t info[5]) {
     char *host_root = host_dir_path_alloc("");
     wchar_t *host_root_wide = NULL;
     int path_ok = host_root && sr_wide_path_alloc(host_root, &host_root_wide);
@@ -1027,7 +1027,7 @@ int io_memstick_capacity(uint32_t info[5]) {
     return 1;
 }
 #else /* !_WIN32: the same PSP-visible volume numbers from statvfs() ----------- */
-int io_memstick_capacity(uint32_t info[5]) {
+static int io_memstick_host_capacity(uint32_t info[5]) {
     char *host_root = host_dir_path_alloc("");
     struct statvfs vfs;
     int queried = host_root && statvfs(host_root, &vfs) == 0;
@@ -1055,6 +1055,135 @@ int io_memstick_capacity(uint32_t info[5]) {
     return 1;
 }
 #endif /* _WIN32 */
+
+/* The Memory Stick under the deterministic clock (SR_DETERMINISTIC_CLOCK=1, #2161).
+ *
+ * The host volume's size and free space are host inputs: two machines, or one machine at two
+ * moments, would tell the guest different numbers, and a title that checks free space before
+ * saving can branch on them. Under the deterministic clock the guest sees a fixed virtual card
+ * instead: 2 GiB of 512-byte sectors in 32 KiB clusters (the geometry of a FAT32 card of that
+ * size, and the sector the savedata size calls count in), minus the clusters the files under the
+ * Memory Stick folder occupy, so a save the guest writes still uses space. The free space is
+ * therefore a function of the folder's contents, never of the host volume. Normal play reports
+ * the host volume as before. A host disk that is really full still fails the write with a host
+ * error: nothing here turns a failed write into success. */
+#define IO_VIRTUAL_MS_SECTOR_BYTES 512u
+#define IO_VIRTUAL_MS_SECTORS_PER_CLUSTER 64u
+#define IO_VIRTUAL_MS_CLUSTERS 65536u   /* 65536 * 32 KiB = 2 GiB */
+#define IO_VIRTUAL_MS_WALK_DEPTH 32u
+
+/* Adds the clusters of every regular file under `dir` (a host path); links are not followed. A
+ * directory or file that cannot be read adds nothing and returns 0: the caller then reports the
+ * query as failed, which the guest sees as a host I/O error rather than a guessed figure. */
+#ifdef _WIN32
+static int io_virtual_ms_walk(const char *dir, unsigned depth, uint64_t *clusters) {
+    if (depth > IO_VIRTUAL_MS_WALK_DEPTH) return 0;
+    wchar_t *wide = NULL, *pattern = NULL;
+    if (!sr_wide_path_alloc(dir, &wide) || !sr_wide_join_alloc(wide, L"*", &pattern)) {
+        free(wide);
+        free(pattern);
+        return 0;
+    }
+    free(wide);
+    WIN32_FIND_DATAW child;
+    HANDLE handle = FindFirstFileW(pattern, &child);
+    free(pattern);
+    if (handle == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
+    const uint64_t cluster_bytes = (uint64_t)IO_VIRTUAL_MS_SECTOR_BYTES *
+                                   IO_VIRTUAL_MS_SECTORS_PER_CLUSTER;
+    int ok = 1;
+    do {
+        if (child.cFileName[0] == L'.' &&
+            (child.cFileName[1] == L'\0' ||
+             (child.cFileName[1] == L'.' && child.cFileName[2] == L'\0')))
+            continue;
+        if (child.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+        if (child.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            char *name = NULL, *sub = NULL;
+            if (!sr_wide_to_utf8_alloc(child.cFileName, &name) ||
+                !(sub = sr_utf8_join_alloc(dir, name, SR_HOST_PATH_SEP)) ||
+                !io_virtual_ms_walk(sub, depth + 1u, clusters))
+                ok = 0;
+            free(name);
+            free(sub);
+        } else {
+            uint64_t size = ((uint64_t)child.nFileSizeHigh << 32) | child.nFileSizeLow;
+            *clusters += (size + cluster_bytes - 1u) / cluster_bytes;
+        }
+    } while (ok && FindNextFileW(handle, &child));
+    if (ok && GetLastError() != ERROR_NO_MORE_FILES && GetLastError() != ERROR_SUCCESS) ok = 0;
+    FindClose(handle);
+    return ok;
+}
+#else
+static int io_virtual_ms_walk(const char *dir, unsigned depth, uint64_t *clusters) {
+    if (depth > IO_VIRTUAL_MS_WALK_DEPTH) return 0;
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    const uint64_t cluster_bytes = (uint64_t)IO_VIRTUAL_MS_SECTOR_BYTES *
+                                   IO_VIRTUAL_MS_SECTORS_PER_CLUSTER;
+    int ok = 1;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(d);
+        if (!entry) {
+            if (errno != 0) ok = 0;
+            break;
+        }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        char *child = sr_utf8_join_alloc(dir, entry->d_name, '/');
+        struct stat st;
+        if (!child || lstat(child, &st) != 0) {
+            ok = 0;
+        } else if (S_ISDIR(st.st_mode)) {
+            if (!io_virtual_ms_walk(child, depth + 1u, clusters)) ok = 0;
+        } else if (S_ISREG(st.st_mode)) {
+            *clusters += ((uint64_t)st.st_size + cluster_bytes - 1u) / cluster_bytes;
+        }
+        free(child);
+        if (!ok) break;
+    }
+    closedir(d);
+    return ok;
+}
+#endif
+
+static int io_memstick_virtual_capacity(uint32_t info[5]) {
+    char *host_root = host_dir_path_alloc("");
+    uint64_t used = 0;
+    int ok = host_root && io_virtual_ms_walk(host_root, 0u, &used);
+    free(host_root);
+    if (!ok) return 0;
+    if (used > IO_VIRTUAL_MS_CLUSTERS) used = IO_VIRTUAL_MS_CLUSTERS;
+    info[0] = IO_VIRTUAL_MS_CLUSTERS;
+    info[1] = (uint32_t)(IO_VIRTUAL_MS_CLUSTERS - used);
+    info[2] = IO_VIRTUAL_MS_CLUSTERS * IO_VIRTUAL_MS_SECTORS_PER_CLUSTER;
+    info[3] = IO_VIRTUAL_MS_SECTOR_BYTES;
+    info[4] = IO_VIRTUAL_MS_SECTORS_PER_CLUSTER;
+    return 1;
+}
+
+#ifdef SR_HLE_THREAD_SELFTEST
+/* Test-only seam: stands in for the host volume query, so a test can give the same run two
+ * different host free-space values. NULL (the default) measures the real host volume. */
+static const uint32_t *s_test_host_capacity;
+void sr_hle_test_set_host_capacity(const uint32_t info[5]) {
+    static uint32_t held[5];
+    if (info) memcpy(held, info, sizeof(held));
+    s_test_host_capacity = info ? held : NULL;
+}
+#endif
+
+int io_memstick_capacity(uint32_t info[5]) {
+    if (sched_clock_deterministic()) return io_memstick_virtual_capacity(info);
+#ifdef SR_HLE_THREAD_SELFTEST
+    if (s_test_host_capacity) {
+        memcpy(info, s_test_host_capacity, 5u * sizeof(uint32_t));
+        return 1;
+    }
+#endif
+    return io_memstick_host_capacity(info);
+}
 
 static uint32_t h_IoDevctl(CpuState *s) {
     enum {

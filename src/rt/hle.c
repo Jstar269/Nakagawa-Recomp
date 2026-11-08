@@ -1480,6 +1480,44 @@ static int console_random_bytes(uint8_t *out, size_t n) {
 #endif
 }
 
+/* The seed a deterministic run (SR_DETERMINISTIC_CLOCK=1) derives a fresh profile identity from:
+ * SR_IDENTITY_SEED when set and non-empty, else this fixed default. Not secret, not a console's. */
+#define CONSOLE_IDENTITY_DEFAULT_SEED "nakagawa-deterministic-profile-v1"
+static const char *console_identity_seed(void) {
+    const char *seed = getenv("SR_IDENTITY_SEED");
+    return seed && seed[0] ? seed : CONSOLE_IDENTITY_DEFAULT_SEED;
+}
+
+/* A synthetic identity: SHA-256 of "<field>:<seed>" fills each field. The MAC is unicast with the
+ * locally administered bit set, which no console's own address has (a console's is universally
+ * administered), so it can never be mistaken for a real one; the OpenPSID is never all zero.
+ * A profile the user configured in the overlay, and one persisted by a normal run, are used
+ * as they are and never reach here. */
+static void console_synthetic_identity(uint8_t mac[6], uint8_t psid[16]) {
+    const char *seed = console_identity_seed();
+    size_t seed_len = strlen(seed);
+    uint8_t digest[32];
+    char *buf = (char *)malloc(seed_len + 16u);
+    if (!buf) {   /* cannot happen for a few dozen bytes; keep the values fixed rather than random */
+        memset(mac, 0, 6);
+        memset(psid, 0, 16);
+        mac[0] = 0x02u;
+        psid[15] = 1u;
+        return;
+    }
+    int n = snprintf(buf, seed_len + 16u, "wlan-mac:%s", seed);
+    sr_vfpu_sha256((const uint8_t *)buf, (size_t)n, digest);
+    memcpy(mac, digest, 6);
+    mac[0] = (uint8_t)((mac[0] & 0xfcu) | 0x02u);   /* unicast (bit 0 clear), local (bit 1 set) */
+    n = snprintf(buf, seed_len + 16u, "open-psid:%s", seed);
+    sr_vfpu_sha256((const uint8_t *)buf, (size_t)n, digest);
+    memcpy(psid, digest, 16);
+    int set = 0;
+    for (int i = 0; i < 16; i++) set |= psid[i] != 0u;
+    if (!set) psid[15] = 1u;
+    free(buf);
+}
+
 /* Apply a parsed overlay onto the defaults. Returns 1, or 0 with *why set; the caller discards a
  * partial application and serves the defaults. */
 static int sreg_overlay_apply(const NkJsonNode *doc, char *why, size_t why_len) {
@@ -2568,6 +2606,17 @@ int console_profile_identity(void) {
     if (s_console.have_identity) return 1;
     PspConsoleProfile next;
     memset(&next, 0, sizeof(next));
+    if (sched_clock_deterministic()) {
+        /* #2162: under SR_DETERMINISTIC_CLOCK=1 a fresh profile is derived from a named seed,
+         * never from the host's random source, and is not saved: the run leaves the user's
+         * profile as it found it, and the next run derives the same values again. */
+        console_synthetic_identity(next.mac, next.psid);
+        next.have_identity = 1;
+        s_console = next;
+        fprintf(stderr, "system profile: deterministic run: derived a synthetic WLAN MAC address "
+                        "and OpenPSID from seed '%s'; not saved\n", console_identity_seed());
+        return 1;
+    }
     if (!console_random_bytes(next.mac, sizeof(next.mac)) ||
         !console_random_bytes(next.psid, sizeof(next.psid)))
         return 0;
