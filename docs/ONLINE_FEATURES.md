@@ -17,7 +17,7 @@ diagnosing new issues.
   uses GitHub's hosts for the releases themselves.)
 - **Nothing is sent on its own.** No telemetry, analytics, crash upload or identifier. The only automatic traffic is
   fetching the news feed while online mode is on, and the one update check at start when the user turned it on. Requests carry no cookie and no ID; the
-  user agent names the version and operating system only (`NakagawaRecomp/0.0.1 (Windows)`).
+  update check's user agent is the fixed string `NakagawaRecomp/UpdateCheck`, with no version or system details.
 - **Game data never leaves the PC.** No game code, game data, decrypted module, package, save, guest memory or
   capture is ever uploaded (`AGENTS.md`, section 5). A report sends only the fields the user sees in its preview.
 - **Offline stays complete.** Every feature works without online mode except news and reports. A network failure is
@@ -64,8 +64,8 @@ already are.
   replaced and nothing runs on its own.
 - A build without the key, a release without a signature, and a signature that does not verify all fail
   closed: no download, a plain card, and the release page link. The signed checksum names the ZIP, whose name
-  carries the version, so an older signed checksum served for a newer release is refused. A build-provenance
-  attestation for the ZIP does not exist yet.
+  carries the version, so an older signed checksum served for a newer release is refused. The ZIP itself carries no
+  build-provenance attestation; the files in it do.
 
 Hosts, the exact request and the failure cards are in [`SETUP.md`](SETUP.md#network-use).
 

@@ -375,7 +375,7 @@ old code: (fill). Maintainer attestation: (maintainer signs; agents do not).
 Existing (all source-owned, game-input-free; all must pass unmodified):
 
 1. `sched-selftest` build target running `tests/native/sched_selftest.c`
-   (~50 cases: selection fairness, lifecycle, timeouts, exit-status
+   (about 130 test functions: selection fairness, lifecycle, timeouts, exit-status
    normalisation, callbacks, clocks, vblank edges, interrupt frames).
 2. `python tools/test_sched_invariants.py` (scheduled-behaviour invariants).
 3. `hle-thread-selftest` build target + `python tools/test_callback_correctness.py`

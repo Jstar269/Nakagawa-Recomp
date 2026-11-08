@@ -1297,7 +1297,7 @@ typedef struct {
     const char *title_name;
     const char *disc_id;
     const char *disc_version;
-    const char *version;      /* "v0.0.2-dev (commit 3efc890)" */
+    const char *version;      /* "v0.0.2 (commit 3efc890)" */
     const char *platform;     /* player_platform_name() */
     const char *problem;      /* the named boundary or stop code; "" from a title page */
 } PlayerReportFacts;

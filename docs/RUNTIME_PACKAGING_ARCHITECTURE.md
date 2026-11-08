@@ -6,8 +6,9 @@
 > `tools/nk_cli.py build-package <disc_id>` resolves the executable from a library disc
 > image, or from the decrypted `EBOOT.elf` in the title's folder for an encrypted disc (the
 > player decrypts it from the user's disc, #1494), and the
-> player consumes the resulting package. Retail-disc hash validation, installers, and
-> one-click end-user preparation without the developer toolchain (#308) are not built.
+> player consumes the resulting package. The player checks each disc against the user's Redump
+> list, and the release ZIP carries the pinned build tools in `prereqs/`. Installers and a
+> precompiled, compiler-free end-user route (#308) are not built.
 
 ## 1. Context and Goals
 
@@ -95,10 +96,10 @@ first and each OS is a thin wrapper around them):
 
 | Target Environment | Packaging Strategy | Binary Artifacts |
 | --- | --- | --- |
-| **Windows x86-64** | Portable ZIP now; a per-user Inno Setup wrapper later. No MSI or MSIX | `nakagawa_player.exe`, `bin/nakagawa_core.dll` (or static), `build/<game>/<game>.exe`, SDL3.dll, SDL3_ttf.dll + resolved closure, `THIRD_PARTY_NOTICES/` |
-| **Linux / Steam Deck** | Tarball plus a per-user `.desktop` entry, written by the same stager (`tools/stage_install.py`); AppImage later. No Flatpak: its sandbox conflicts with the host compiler the player needs | `nakagawa_player`, `bin/<game>`, `libSDL3.so` |
-| **macOS ARM64** | App Bundle (`Nakagawa.app`), not yet planned in detail | `Nakagawa.app/Contents/MacOS/nakagawa_player`, helper executables in `MacOS/` |
-| **Android** | Planned later (see `PLATFORM_PORTABILITY.md`); the user may move their own packages and saves to their own device | to be designed |
+| **Windows x86-64** | Portable ZIP. No installer, MSI or MSIX | `nakagawa_player.exe`, `bin/nakagawa_core.dll` (or static), `build/<game>/<game>.exe`, SDL3.dll, SDL3_ttf.dll + resolved closure, `THIRD_PARTY_NOTICES/` |
+| **Linux / Steam Deck** | Tarball plus a per-user `.desktop` entry, written by the same stager (`tools/stage_install.py`). No AppImage. No Flatpak: its sandbox conflicts with the host compiler the player needs | `nakagawa_player`, `bin/<game>`, `libSDL3.so` |
+| **macOS ARM64** | Not supported; an App Bundle (`Nakagawa.app`) is the intended form | `Nakagawa.app/Contents/MacOS/nakagawa_player`, helper executables in `MacOS/` |
+| **Android** | Not supported for play; a development APK holds the launcher and the showcase demos (see `ANDROID_DEVELOPMENT.md`). The user may move their own packages and saves to their own device | the APK's native libraries |
 
 Roadmap items decided with the table:
 
@@ -111,7 +112,7 @@ Roadmap items decided with the table:
   expects it. Today the data folders are `Nakagawa` (Windows), `nakagawa-recomp` (Linux) and
   `NakagawaRecomp` (macOS); unify them before a release ships on a second host, with a migration from
   the old Windows folder.
-* **Code signing:** v0.0.1 ships unsigned. Until a build is signed, each
+* **Code signing:** v0.0.1 and v0.0.2 ship unsigned. Until a build is signed, each
   release publishes the ZIP's SHA-256 and GitHub build attestations for every binary, and the release notes
   explain the SmartScreen prompt. The signing procedure is prepared
   ([`RELEASE_SIGNING.md`](RELEASE_SIGNING.md#sign-the-windows-binaries-authenticode)) and waits for the
@@ -560,7 +561,7 @@ includes is listed.
 
 This section records what the Windows portable ZIP holds today and where the player keeps
 everything it writes ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)). The
-installer that #324 also asks for is not built yet; the portable ZIP is the one supported
+installer that #324 also asks for is not built; the portable ZIP is the one supported
 distribution form, and the upgrade and uninstall rules are at the end of this section.
 
 ### The install image (read-only)
@@ -680,5 +681,5 @@ only; the per-user folders above stay until the user deletes them.
   marker records, and nothing else: it never reads or deletes the per-user folders above, a file
   the user added beside the install survives, a recorded path with a name the tool does not write is skipped, and
   a folder with no marker is refused. In portable mode `bin/data` and `bin/portable.txt` stay. An unpacked ZIP is
-  removed by deleting its folder. `tools/test_stage_install.py` (`UninstallTests`) covers each rule. An
-  installer's uninstaller (not built; Inno Setup is the chosen wrapper) is to follow the same rule.
+  removed by deleting its folder. `tools/test_stage_install.py` (`UninstallTests`) covers each rule. No
+  installer exists; an installer's uninstaller (Inno Setup is the chosen wrapper) must follow the same rule.
