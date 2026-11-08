@@ -221,16 +221,55 @@ begin
       end;
 end;
 
-{ A manifest path that stays inside the folder: relative and '/'-separated, with no empty, '.' or '..' part and no
-  drive or stream colon. A package never lists the person's portable data, so a list that names it is not used. }
+{ One part of a manifest path, named exactly by its text. Windows drops a trailing dot or space from a part
+  ("data." opens "data") and may read a part with '~' as an 8.3 short name, so such a part could name another file;
+  that also covers '.' and '..'. Wildcards, stream colons, the other reserved characters, both slashes and control
+  characters never occur in a package. }
+function IsSafeManifestPart(const Part: String): Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  if Part = '' then
+    Exit;
+  if (Part[Length(Part)] = '.') or (Part[Length(Part)] = ' ') then
+    Exit;
+  for Index := 1 to Length(Part) do
+    if (Ord(Part[Index]) < 32) or (Ord(Part[Index]) = 127) or (Pos(Part[Index], '~*?:<>"|\/') > 0) then
+      Exit;
+  Result := True;
+end;
+
+{ A manifest path that stays inside the folder and names one file: relative and '/'-separated, every part safe as
+  above. A package never lists Setup's own top-level files (unins*, SHA256SUMS.txt) or the person's portable data
+  (bin/data, bin/portable.txt), so a list that names any of them, in any case, is not used. }
 function IsSafeManifestName(const Name: String): Boolean;
 var
-  Wrapped: String;
+  Lowered, Rest, Part: String;
+  Split: Integer;
 begin
-  Wrapped := '/' + Lowercase(Name) + '/';
-  Result := (Name <> '') and (Pos('\', Name) = 0) and (Pos(':', Name) = 0) and (Pos('//', Wrapped) = 0)
-    and (Pos('/./', Wrapped) = 0) and (Pos('/../', Wrapped) = 0)
-    and (Wrapped <> '/bin/portable.txt/') and (Pos('/bin/data/', Wrapped) <> 1);
+  Result := False;
+  Lowered := Lowercase(Name);
+  if (Pos('unins', Lowered) = 1) or (Lowered = 'sha256sums.txt') or (Lowered = 'bin/portable.txt')
+     or (Lowered = 'bin/data') or (Pos('bin/data/', Lowered) = 1) then
+    Exit;
+  Rest := Name;
+  repeat
+    Split := Pos('/', Rest);
+    if Split = 0 then
+    begin
+      Part := Rest;
+      Rest := '';
+    end
+    else
+    begin
+      Part := Copy(Rest, 1, Split - 1);
+      Rest := Copy(Rest, Split + 1, Length(Rest));
+    end;
+    if not IsSafeManifestPart(Part) then
+      Exit;
+  until Split = 0;
+  Result := True;
 end;
 
 { The paths and SHA-256 values of a "<sha256>  <path>" manifest. False, with both lists empty, when the file is

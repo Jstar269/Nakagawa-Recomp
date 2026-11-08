@@ -287,11 +287,20 @@ class UpgradeRuleTests(unittest.TestCase):
         self.assertIn("while (Length(Folder) > Length(Dir)) and RemoveDir(Folder) do", remove)
 
     def test_a_manifest_that_is_not_a_plain_relative_list_is_not_used(self):
+        part = self._body("function IsSafeManifestPart", "{ A manifest path that stays inside")
+        # A trailing dot or space is an alias Windows strips; '~' may be an 8.3 short name.
+        self.assertIn("if (Part[Length(Part)] = '.') or (Part[Length(Part)] = ' ') then\n    Exit;", part)
+        self.assertIn("(Ord(Part[Index]) < 32) or (Ord(Part[Index]) = 127) or (Pos(Part[Index], '~*?:<>\"|\\/') > 0)",
+                      part)
+        self.assertIn("if Part = '' then\n    Exit;", part)
         names = self._body("function IsSafeManifestName", "{ The paths and SHA-256 values")
-        for refused in ("Pos('\\', Name) = 0", "Pos(':', Name) = 0", "Pos('//', Wrapped) = 0", "Pos('/./', Wrapped) = 0",
-                        "Pos('/../', Wrapped) = 0", "Wrapped <> '/bin/portable.txt/'", "Pos('/bin/data/', Wrapped) <> 1"):
+        self.assertIn("Lowered := Lowercase(Name);", names)
+        for refused in ("(Pos('unins', Lowered) = 1)", "(Lowered = 'sha256sums.txt')", "(Lowered = 'bin/portable.txt')",
+                        "(Lowered = 'bin/data')", "(Pos('bin/data/', Lowered) = 1)", "if not IsSafeManifestPart(Part) then"):
             with self.subTest(refused):
                 self.assertIn(refused, names)
+        self.assertEqual(verify_installer.INNO_OWN_PREFIX, "unins")
+        self.assertEqual(build_installer.SUMS_NAME.lower(), "sha256sums.txt")
         read = self._body("function ReadManifest", "{ True when Dir, or any folder")
         self.assertIn("if IsReparsePoint(FileName) then\n    Exit;", read)
         # One bad line empties both lists and returns False.
@@ -836,19 +845,66 @@ class RealProbeTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual((app / name).read_bytes(), b"mine")
 
+    #: A bad old-list line and the file it would name if Windows resolved it, carrying that file's real digest:
+    #: each must make the whole list unused, so nothing at all is deleted.
+    BAD_LINES = {
+        "../outside.txt": "notes.txt",
+        "C:/Windows/notepad.exe": "notes.txt",
+        "bin//x": "notes.txt",
+        "bin\\x": "notes.txt",
+        "/notes.txt": "notes.txt",
+        "notes.txt/": "notes.txt",
+        "./notes.txt": "notes.txt",
+        "bin/./dropped.dll": "bin/dropped.dll",
+        "bin/../notes.txt": "notes.txt",
+        # The person's portable data, in any case and through the aliases Windows strips.
+        "bin/data/save.bin": "bin/data/save.bin",
+        "BIN/Data/Save.bin": "bin/data/save.bin",
+        "bin/data./save.bin": "bin/data/save.bin",
+        "bin/data /save.bin": "bin/data/save.bin",
+        "bin/data": "bin/data/save.bin",
+        "bin/portable.txt": "bin/portable.txt",
+        "Bin/PORTABLE.TXT": "bin/portable.txt",
+        "bin/portable.txt.": "bin/portable.txt",
+        "bin/portable.txt ": "bin/portable.txt",
+        "bin/portable.txt..": "bin/portable.txt",
+        "bin/PORTAB~1.TXT": "bin/portable.txt",
+        # Setup's own top-level files.
+        "unins000.exe": "unins000.exe",
+        "UNINS000.DAT": "unins000.dat",
+        "unins000.exe.": "unins000.exe",
+        "SHA256SUMS.txt": "SHA256SUMS.txt",
+        "sha256sums.TXT": "SHA256SUMS.txt",
+        # Wildcards, streams, reserved and control characters.
+        "bin/*.dll": "bin/dropped.dll",
+        "bin/dropped?dll": "bin/dropped.dll",
+        "bin/dropped.dll:stream": "bin/dropped.dll",
+        "bin/<dropped>.dll": "bin/dropped.dll",
+        "bin/\"dropped\".dll": "bin/dropped.dll",
+        "bin/dropped|.dll": "bin/dropped.dll",
+        "bin/drop\tped.dll": "bin/dropped.dll",
+        "bin/drop\x01ped.dll": "bin/dropped.dll",
+        "bin/drop\x7fped.dll": "bin/dropped.dll",
+    }
+
     def test_an_upgrade_uses_no_manifest_with_a_bad_line(self):
-        for bad in ("../outside.txt", "bin/data/save.bin", "C:/Windows/notepad.exe", "bin//x", "bin\\\\x"):
+        for bad, target_name in self.BAD_LINES.items():
             with self.subTest(bad):
                 app, old_sums = self._upgrade_tree()
-                target = app / "bin" / "data" / "save.bin" if bad == "bin/data/save.bin" else app / "notes.txt"
-                with old_sums.open("a", encoding="utf-8", newline="\n") as stream:
-                    stream.write(_sums_line(target, bad))
-                self.run_probe("upgrade", ROOT=app, OLDSUMS=old_sums)
-                self.assertEqual((app / "bin" / "dropped.dll").read_bytes(), b"dropped")
-                self.assertEqual((app / "bin" / "data" / "save.bin").read_bytes(), b"mine")
-                shutil.rmtree(app)
-                (self.outside / "linked-target" / "old.txt").unlink()
-                (self.outside / "linked-target").rmdir()
+                try:
+                    for own in ("unins000.exe", "unins000.dat"):
+                        (app / own).write_bytes(b"Setup's own " + own.encode())
+                    target = app / target_name
+                    before = target.read_bytes()
+                    with old_sums.open("a", encoding="utf-8", newline="\n") as stream:
+                        stream.write(_sums_line(target, bad))
+                    self.run_probe("upgrade", ROOT=app, OLDSUMS=old_sums)
+                    self.assertTrue(target.is_file(), f"{target_name} was deleted")
+                    self.assertEqual(target.read_bytes(), before)
+                    self.assertTrue((app / "bin" / "dropped.dll").is_file(), "the list was used")
+                finally:
+                    shutil.rmtree(app)  # a junction inside is removed as a link
+                    shutil.rmtree(self.outside / "linked-target")
 
     def test_an_upgrade_without_a_new_manifest_deletes_nothing(self):
         app, old_sums = self._upgrade_tree()

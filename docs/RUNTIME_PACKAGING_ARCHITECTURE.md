@@ -669,7 +669,7 @@ only; the per-user folders above stay until the user deletes them.
 
 ### Upgrade and uninstall rules
 
-* **Upgrade is side by side.** A new version is a new folder; the old one keeps running until the user
+* **Upgrade is side by side, except a copy `Setup.exe` installed.** A new version is a new folder; the old one keeps running until the user
   deletes it, so an interrupted update leaves the old version whole and at worst a `.partial` folder
   that the next update replaces. In-place staging (`tools/stage_install.py --dest`) swaps `bin/` and
   `source/` by rename and removes the old copy only afterwards. The one in-place upgrade is a copy `Setup.exe`
