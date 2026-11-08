@@ -480,7 +480,9 @@ void sr_flight_set_present_upscale(const char *mode) {
     size_t n = 0;
     for (; mode && mode[n] && n + 1 < sizeof(s_flight_upscale); n++) {
         char ch = mode[n];
-        int plain = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9');
+        /* A stamp such as "fsr1+movie-anime4k" joins its parts with '+' and '-'; both are
+         * plain in a JSON string. */
+        int plain = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '+' || ch == '-';
         s_flight_upscale[n] = plain ? ch : '?';
     }
     s_flight_upscale[n] = '\0';
