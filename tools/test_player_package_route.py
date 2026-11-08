@@ -402,7 +402,9 @@ class TestReleaseDocumentation(unittest.TestCase):
         self.assertIn("#556", readme)
         self.assertIn("#308", readme)
         self.assertNotIn("#285", readme)
-        self.assertIn("in the works", readme.lower())
+        # #308 is stated as the current limit, not as coming work (no teasers in the README).
+        self.assertIn("For most games it stops at one of those named limits", readme)
+        self.assertNotIn("in the works", readme.lower())
         self.assertIn("START SETUP WIZARD", readme)
         # The default launcher adds later games through the library's add tile,
         # not the legacy renderer's ADD ANOTHER ISO button.

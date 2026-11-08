@@ -851,7 +851,7 @@ class Flash0FontDeviceTests(unittest.TestCase):
             raise unittest.SkipTest(
                 f"WINDOWS_ONLY: {SELFTEST_SOURCE.name} includes <windows.h> without a _WIN32 guard, so the "
                 f"selftest does not build on {sys.platform} yet "
-                "(docs/LINUX_DEVELOPMENT.md, 'What doesn't yet')"
+                "(docs/LINUX_DEVELOPMENT.md, 'Limits')"
             )
         if sdl3_headers_missing():
             raise unittest.SkipTest(
@@ -913,7 +913,7 @@ class Flash0FontDeviceTests(unittest.TestCase):
             raise unittest.SkipTest(
                 f"WINDOWS_ONLY: {SELFTEST_SOURCE.name} includes <windows.h> without a _WIN32 guard, so the "
                 f"selftest does not build on {sys.platform} yet "
-                "(docs/LINUX_DEVELOPMENT.md, 'What doesn't yet')"
+                "(docs/LINUX_DEVELOPMENT.md, 'Limits')"
             )
         if sdl3_headers_missing():
             raise unittest.SkipTest(

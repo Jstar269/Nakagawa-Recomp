@@ -113,8 +113,8 @@ entry set without silently selecting a winner. `canonical_cfg_json()` is stable 
 fixtures and build-cache comparisons. The CFG gate rejects an owned in-range edge whose
 target has no owner, plus ownership conflicts and unmapped entries. Non-padding words
 outside known control-flow remain listed as unowned; this records uncertainty and does
-not prove that no dynamic entry exists. Dynamic-entry ownership remains in the works
-(issue #291); the gate keeps such words visible as unowned instead of assuming the image
+not prove that no dynamic entry exists. Dynamic-entry ownership is not
+modelled; the gate keeps such words visible as unowned instead of assuming the image
 is complete. File adjacency after an unconditional transfer
 does not make a word a callable. The opt-in `codegen.py --stack-census` flag
 also requires the CFG gate and wraps generated callable entries to compare guest
@@ -252,7 +252,7 @@ These tools run on the development host before the native compiler.
   passes, but on HST at `-O1` the guest time outside the GE fell by only about 1.3% (two runs per
   build). The software GE takes 80% of guest time on that route, so frames sped up by about 0.25%.
   Chunk objects grew by 0.03%, and PAC-MAN CE at `-O0` was about 11% slower. The option therefore
-  stays off by default; dropping write-backs of dead locals (liveness) is the next step to measure.
+  stays off by default. It does not drop write-backs of dead locals.
 
 ### Verification tools
 
@@ -608,7 +608,14 @@ one recorded in its chain: the value the nested returns used to leave. A compute
 runs at the live SP. An interpreted body entered by a computed step leaves the same way
 (`sr_guest_interp_run_tail_step`): its handoff to native code is a recorded transfer, with the
 entry-SP restore a native body entered there would record, so both tiers give the chain the same
-restore (#1935).
+restore (#1935). A body whose `$sp` load left its frame, a context switch or a longjmp, may have
+moved the guest out of frames entered before it: its record releases them (`SR_TAIL_RELEASES`),
+bounded by the `$sp` it loaded. A load below where `$sp` was leaves every frame. A load at or
+above the body's entry `$sp` leaves only the frames whose restore is at or below that `$sp`, so an
+alloca free in a piece keeps the restore of the body that handed it the frame. Once a restore is
+void, the first restore recorded after the release is the chain's. A body that leaves that way by
+returning tells the drain that ran it (`sr_tail_note_exit`), and so does a computed step's chain,
+for the enclosing drain and for an interpreted caller's continuation.
 
 The slot is never live across a yield, syscall, dispatch entry or unwind; each of those refuses a
 live transfer with a named `TAIL_TRANSFER_FAULT`.
@@ -808,10 +815,10 @@ Clock ownership:
   or stick still held as the overlay closes stays hidden from the guest until it is let go, so
   the press that resumed never reaches the game as a fresh press (`NkInputGate`,
   `src/core/nk_input_profile.h`). Guide is the pause button only; a profile binding to it has no
-  effect in game. Builds after v0.0.1 draw the overlay's pages (resume, settings, controls, quit to
-  library) inside the runtime with nk_ui (`src/rt/overlay/`,
-  [#1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159)); in v0.0.1, `Esc`, `F1`,
-  Guide or the controller's back button (East) only resumes.
+  effect in game. The runtime draws the overlay's pages (resume, settings, controls, quit to
+  library) with nk_ui (`src/rt/overlay/`,
+  [#1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159)); v0.0.1 had no pages, and `Esc`, `F1`,
+  Guide or the controller's back button (East) only resumed.
 - **libc time/gettimeofday** — seconds/usec since the standard Unix epoch, converted from the RTC
   tick. The PSP timezone is a console setting, not the host process timezone. It lives in the
   virtual system registry (`/CONFIG/DATE/time_zone_offset` and `summer_time`), the same keys

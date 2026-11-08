@@ -1119,7 +1119,7 @@ static void player_ui_wizard_apply(PlayerApp *app, PlayerUiWizardOp op) {
 #define NK_PLAYER_BUILD_COMMIT ""
 #endif
 
-/* The version a report names: "v0.0.2-dev", with the source commit when the
+/* The version a report names: "v0.0.2", with the source commit when the
    build knows it. */
 static const char *player_report_version(void) {
     static char version[64];
@@ -1321,6 +1321,15 @@ static void player_update_start(PlayerApp *app, PlayerUpdateJobKind kind) {
     char data_dir[NK_MAX_PATH];
     char log_dir[NK_MAX_PATH];
     if (s_update_job != NULL) return;   /* one step at a time */
+    if (kind != PLAYER_UPDATE_JOB_CHECK) {
+        /* A copy the Windows installer put in place updates through the next Setup, never a ZIP. */
+        NkUpdateError refused;
+        if (nk_update_refuse_for_setup_copy(app->install_root, &refused)) {
+            player_dev_log_add(app, "update", "%s: %s", refused.code, refused.message);
+            player_update_fail(app, step, refused.code, refused.title, refused.message);
+            return;
+        }
+    }
     job = (PlayerUpdateJob *)calloc(1, sizeof(*job));
     if (!job) {
         player_update_fail(app, step, "UPDATE_START_FAILED", "Couldn't start",
@@ -1437,7 +1446,7 @@ static void player_update_shutdown(void) {
 static void player_update_open_release_page(PlayerApp *app) {
     const char *url = app->update.check.newest.page_url;
     /* Only this repository's release pages, as the check verified. */
-    if (strncmp(url, NK_UPDATE_RELEASE_PAGE_PREFIX, strlen(NK_UPDATE_RELEASE_PAGE_PREFIX)) != 0) {
+    if (!nk_update_is_release_page(url)) {
         return;
     }
     player_open_link(app, "The release page", url);
