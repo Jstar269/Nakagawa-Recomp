@@ -59,8 +59,8 @@
  * mapping are translated from the JPCSP files named above. Nothing here comes from JPCSP's ME
  * code emulation (MEProcessor, METhread, the ME MMIO handlers or the sceMeVideo driver).
  *
- * Every value marked "synthetic" below is JPCSP's value at 00ac4d6d, not a PSP measurement by this
- * project; PSP request W-LLE-1 measures them. Values marked "synthetic, unrecorded read" come
+ * Every value marked plain "synthetic" below is JPCSP's value at 00ac4d6d, not a PSP measurement by
+ * this project; PSP request W-LLE-1 measures them. Values marked "synthetic, unrecorded read" come
  * from a W-LLE-1 read (zeroed contexts, the ATRAC3plus work area given the halfwords 0x5C28,
  * 0x5C5C and 0 at +40) that the hardware register does not record: docs/HARDWARE_ORACLE.md lists
  * PSP-VCODEC-001 as NOT_RUN. They cover Open, GetEDRAM, Init, SetMemory and Stop before any decode,

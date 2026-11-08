@@ -1021,7 +1021,7 @@ static void test_audiocodec(void) {
               call(NID_AC_NEEDMEM, G_AC, 0x1006u, 0, 0) == AC_ERR_NOT_SUPPORTED,
           "audiocodec: a codec type outside 0x1000-0x1005 is refused as not supported");
     CHECK(call(NID_AC_NEEDMEM, G_AC, 0x1001u, 0, 0) == AC_ERR_NOT_MODELLED && MEM_R32(G_AC) == 0u,
-          "audiocodec: an in-range codec other than ATRAC3plus is refused (project-chosen; the PSP returned 0) "
+          "audiocodec: an in-range codec other than ATRAC3plus is refused (project-chosen; the unrecorded read returned 0) "
           "and the work area is untouched");
     CHECK(call(NID_AC_NEEDMEM, 0u, AC_CODEC, 0, 0) == AC_ERR_NOT_RAM &&
               call(NID_AC_NEEDMEM, G_AC + 2u, AC_CODEC, 0, 0) == AC_ERR_NOT_RAM,
@@ -1212,8 +1212,8 @@ static void test_guest_reset(void) {
  * w % 32 == 16, band 2 (the x % 32 == 0 strips, y1 bytes) is longer than JPCSP's size_y2 room. */
 static void test_band_room(void) {
     int geometries = 0, roomy = 1;
-    for (uint32_t w = 16u; w <= VC_MAX_WIDTH; w += 16u)
-        for (uint32_t h = 16u; h <= VC_MAX_HEIGHT; h += 16u) {
+    for (uint32_t w = 16u; w <= VC_MAX_WIDTH && roomy; w += 16u)
+        for (uint32_t h = 16u; h <= VC_MAX_HEIGHT && roomy; h += 16u) {
             VcContext c;
             memset(&c, 0, sizeof(c));
             c.ctx = G_CTX2;
@@ -1226,7 +1226,8 @@ static void test_band_room(void) {
             for (int i = 0; i < VC_BAND_SETS * 8 && roomy; i++) {
                 const uint32_t a = c.bands[i / 8][i % 8], an = bytes[i % 8];
                 if (!an) continue;
-                if (a < c.band_base + 256u || an > c.band_base + size - a) roomy = 0;
+                if (!size || a < c.band_base + 256u || a - c.band_base > size || an > size - (a - c.band_base))
+                    roomy = 0;
                 for (int j = i + 1; j < VC_BAND_SETS * 8 && roomy; j++) {
                     const uint32_t b = c.bands[j / 8][j % 8], bn = bytes[j % 8];
                     if (bn && a < b + bn && b < a + an) roomy = 0;
@@ -1234,7 +1235,6 @@ static void test_band_room(void) {
             }
             if (!roomy) fprintf(stderr, "videocodec: band overlap at %ux%u\n", (unsigned)w, (unsigned)h);
             (void)me_free(c.band_base, ME_OWNER_VIDEO, c.ctx);
-            if (!roomy) break;
         }
     CHECK(geometries > 700 && roomy,
           "bands: at every geometry ME RAM holds, each band has room for its count, apart from every other band");
@@ -1246,7 +1246,6 @@ static void test_band_room(void) {
     s_fix_w_mbs = 3u;
     s_fix_h_mbs = 4u;
     memset(host(G_CTX), 0, 96u);
-    MEM_W32(G_CTX + 24u, 0x4000u);
     CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == 0u && call(NID_GETEDRAM, G_CTX, 0u, 0, 0) == 0u &&
               call(NID_INIT, G_CTX, 0u, 0, 0) == 0u,
           "bands: a 48 x 64 context opens");
