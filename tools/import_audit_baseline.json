@@ -74,6 +74,12 @@
     "name": "scePowerRegisterCallback",
     "status": "partial"
   },
+  "0x0530be4e": {
+    "classification": "dedicated",
+    "handler": "h_Mpegbase_0530BE4E",
+    "name": "sceMpegbase_0530BE4E",
+    "status": "partial"
+  },
   "0x05572a5f": {
     "classification": "dedicated",
     "handler": "h_ExitGame",
@@ -382,6 +388,12 @@
     "name": "sceMpegInitAu",
     "status": "unreviewed"
   },
+  "0x17099f0a": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecInit",
+    "name": "sceVideocodecInit",
+    "status": "partial"
+  },
   "0x172d316e": {
     "classification": "dedicated",
     "handler": "h_StdFd",
@@ -617,6 +629,12 @@
     "name": "__sceSasRevParam",
     "status": "unreviewed"
   },
+  "0x26927d19": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecGetVersion",
+    "name": "sceVideocodecGetVersion",
+    "status": "partial"
+  },
   "0x26d25a5d": {
     "classification": "dedicated",
     "handler": "h_RtcTickAddMicroseconds",
@@ -690,11 +708,10 @@
     "status": "partial"
   },
   "0x29681260": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_AudiocodecReleaseEDRAM",
     "name": "sceAudiocodecReleaseEDRAM",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x2a2a1e07": {
     "classification": "controlled_unsupported",
@@ -763,6 +780,12 @@
     "name": "sceRegGetKeys",
     "status": "partial"
   },
+  "0x2d31f5b1": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecGetEDRAM",
+    "name": "sceVideocodecGetEDRAM",
+    "status": "partial"
+  },
   "0x2d53f36e": {
     "classification": "dedicated",
     "handler": "h_AudioOutput2Blocking",
@@ -780,6 +803,18 @@
     "handler": "h_UnloadModule_Trace",
     "name": "sceKernelUnloadModule",
     "status": "unreviewed"
+  },
+  "0x304882e1": {
+    "classification": "dedicated",
+    "handler": "h_MpegBaseCscAvcRange",
+    "name": "sceMpegBaseCscAvcRange",
+    "status": "partial"
+  },
+  "0x307e6e1c": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecDelete",
+    "name": "sceVideocodecDelete",
+    "status": "partial"
   },
   "0x30be0259": {
     "classification": "dedicated",
@@ -1050,11 +1085,10 @@
     "status": "partial"
   },
   "0x3a20a200": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_AudiocodecGetEDRAM",
     "name": "sceAudiocodecGetEDRAM",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x3a622550": {
     "classification": "dedicated",
@@ -1317,6 +1351,12 @@
     "name": "sceUtilityMsgDialogAbort",
     "status": "partial"
   },
+  "0x492b5e4b": {
+    "classification": "dedicated",
+    "handler": "h_MpegBaseCscInit",
+    "name": "sceMpegBaseCscInit",
+    "status": "partial"
+  },
   "0x4a719fb2": {
     "classification": "dedicated",
     "handler": "h_FreeTlspl",
@@ -1406,6 +1446,12 @@
     "classification": "dedicated",
     "handler": "h_WaitSema",
     "name": "sceKernelWaitSema",
+    "status": "partial"
+  },
+  "0x4f160bf4": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecReleaseEDRAM",
+    "name": "sceVideocodecReleaseEDRAM",
     "status": "partial"
   },
   "0x500f0429": {
@@ -1562,11 +1608,10 @@
     "status": "controlled_unsupported"
   },
   "0x5b37eb1d": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_AudiocodecInit",
     "name": "sceAudiocodecInit",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x5bf4dd27": {
     "classification": "dedicated",
@@ -1688,6 +1733,12 @@
     "classification": "dedicated",
     "handler": "h_TryAllocateFpl",
     "name": "sceKernelTryAllocateFpl",
+    "status": "partial"
+  },
+  "0x627b7d42": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecGetSEI",
+    "name": "sceVideocodecGetSEI",
     "status": "partial"
   },
   "0x627e6f3a": {
@@ -1891,11 +1942,10 @@
     "status": "unreviewed"
   },
   "0x70a703f8": {
-    "classification": "controlled_unsupported",
-    "handler": "h_ControlledUnsupported",
+    "classification": "dedicated",
+    "handler": "h_AudiocodecDecode",
     "name": "sceAudiocodecDecode",
-    "refusal_error": "0x80010086",
-    "status": "controlled_unsupported"
+    "status": "partial"
   },
   "0x71040d5c": {
     "classification": "dedicated",
@@ -1958,6 +2008,12 @@
     "handler": "h_MpegAvcDecodeStop",
     "name": "sceMpegAvcDecodeStop",
     "status": "unreviewed"
+  },
+  "0x745a7b7a": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecSetMemory",
+    "name": "sceVideocodecSetMemory",
+    "status": "partial"
   },
   "0x74829b76": {
     "classification": "dedicated",
@@ -2080,6 +2136,12 @@
     "handler": "h_AtracSetDataAndGetID",
     "name": "sceAtracSetDataAndGetID",
     "status": "unreviewed"
+  },
+  "0x7ac0321a": {
+    "classification": "dedicated",
+    "handler": "h_MpegBaseYCrCbCopy",
+    "name": "sceMpegBaseYCrCbCopy",
+    "status": "partial"
   },
   "0x7c0dc2a0": {
     "classification": "dedicated",
@@ -2440,6 +2502,12 @@
     "name": "sceKernelRotateThreadReadyQueue",
     "status": "partial"
   },
+  "0x91929a21": {
+    "classification": "dedicated",
+    "handler": "h_MpegBaseCscAvc",
+    "name": "sceMpegBaseCscAvc",
+    "status": "partial"
+  },
   "0x91de343c": {
     "classification": "dedicated",
     "handler": "h_SetCompiledSdkVersion",
@@ -2631,6 +2699,12 @@
     "name": "sceAtracSetMOutHalfwayBufferAndGetID",
     "status": "unreviewed"
   },
+  "0x9d3f790c": {
+    "classification": "dedicated",
+    "handler": "h_AudiocodecCheckNeedMem",
+    "name": "sceAudiocodecCheckNeedMem",
+    "status": "partial"
+  },
   "0x9d689e13": {
     "classification": "controlled_unsupported",
     "handler": "h_ControlledUnsupported",
@@ -2747,6 +2821,12 @@
     "handler": "h_AtracGetSoundSample",
     "name": "sceAtracGetSoundSample",
     "status": "unreviewed"
+  },
+  "0xa2f0564e": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecStop",
+    "name": "sceVideocodecStop",
+    "status": "partial"
   },
   "0xa3589d81": {
     "classification": "dedicated",
@@ -3175,6 +3255,12 @@
     "name": "sceUtilityHtmlViewerGetStatus",
     "status": "partial"
   },
+  "0xbea18f91": {
+    "classification": "dedicated",
+    "handler": "h_MpegBasePESpacketCopy",
+    "name": "sceMpegBasePESpacketCopy",
+    "status": "partial"
+  },
   "0xbea46419": {
     "classification": "dedicated",
     "handler": "h_LockLwMutex",
@@ -3197,6 +3283,12 @@
     "classification": "dedicated",
     "handler": "h_DcacheRangeMaintenance",
     "name": "sceKernelDcacheInvalidateRange",
+    "status": "partial"
+  },
+  "0xc01ec829": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecOpen",
+    "name": "sceVideocodecOpen",
     "status": "partial"
   },
   "0xc02cf6b5": {
@@ -3606,6 +3698,12 @@
     "classification": "dedicated",
     "handler": "h_GetMemoryBlockAddr",
     "name": "sceKernelGetMemoryBlockAddr",
+    "status": "partial"
+  },
+  "0xdba273fa": {
+    "classification": "dedicated",
+    "handler": "h_VideocodecDecode",
+    "name": "sceVideocodecDecode",
     "status": "partial"
   },
   "0xdba6c4c4": {
