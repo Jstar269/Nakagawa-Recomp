@@ -42,6 +42,10 @@ static void sched_selftest_delay_precise(uint64_t ns);
 #undef SDL_DelayPrecise
 
 #include <stdlib.h>
+#include <time.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 static void sched_selftest_delay_precise(uint64_t ns) {
     if (s_host_ns_fn == test_host_ns) {
@@ -216,6 +220,9 @@ void sr_exec_interp_exit(int returned_to_aot, int call_return) { (void)returned_
 void sr_exec_slice_begin(int tier) { sr_exec_tier = tier; }
 int sr_exec_slice_end(void) { int tier = sr_exec_tier; sr_exec_tier = 0; return tier; }
 uint64_t sr_exec_now_ns(void) { return 0; }
+/* cpu_lle.c owns the COSIM guest lane's hold (#2201); the cells below set it as
+ * domain_mode.c does around a cosim call's guest lane. */
+SrGuestLaneHold sr_guest_lane_hold;
 void sr_exec_idle(uint64_t started_ns) { (void)started_ns; }
 void sr_exec_share_arm(void) {}
 void sr_exec_share_report(void) {}
@@ -1258,6 +1265,163 @@ static void test_stop_request_returns_a_lone_runner_to_the_scheduler(void) {
     g_qs_suspend_dispatch = 0;
 }
 
+
+/* The COSIM guest lane holds the scheduler (#2201). A cosim call's guest lane runs the game's
+ * own export and refuses any import it reaches; its refusal and memory rollback are
+ * process-wide, so no other thread or interrupt handler may run inside it. Here the lane's
+ * thread has an equal-priority peer ready and VBLANK periods elapse at each yield. While held,
+ * sr_yield switches to no other fiber and delivers no VBLANK, but guest time still follows the
+ * host clock; the first yield after the lane switches to the peer and delivers what came due.
+ *
+ * MUTANT: drop the hold's early return in sr_yield -- the peer runs and VBLANKs are delivered
+ *   inside the held lane. */
+enum { GL_ENTRY = 0x09370000u, GL_PEER = 0x09370100u, GL_START_US = 1000u, GL_HELD_YIELDS = 6,
+       GL_STEP_US = 20000u };
+static int g_gl_peer_ran, g_gl_done;
+static int g_gl_peer_ran_held, g_gl_peer_ran_after;
+static unsigned g_gl_vblank_held, g_gl_vblank_after;
+static uint64_t g_gl_vtime_before, g_gl_vtime_held;
+
+static void guest_lane_body(CpuState *s) {
+    if (s_tcb[s_cur].entry == GL_PEER) {
+        g_gl_peer_ran++;
+        return;
+    }
+    const uint32_t peer = sched_create_thread(GL_PEER, 32, 0x4000u);
+    sched_start_thread(peer, 0u, 0u);
+    const unsigned vblank_before = g_test_vblank_delivered;
+    uint64_t host_us = GL_START_US;
+    g_gl_vtime_before = s_vtime_us;
+    sr_guest_lane_hold.uid = s_tcb[s_cur].uid;
+    sr_guest_lane_hold.held = 1;
+    for (int i = 0; i < GL_HELD_YIELDS; i++) {
+        host_us += GL_STEP_US;            /* more than one display period per yield */
+        set_host_us(host_us);
+        sr_yield(s);
+    }
+    g_gl_peer_ran_held = g_gl_peer_ran;
+    g_gl_vblank_held = g_test_vblank_delivered - vblank_before;
+    g_gl_vtime_held = s_vtime_us;
+    sr_guest_lane_hold.held = 0;
+    sr_guest_lane_hold.uid = 0u;
+    host_us += GL_STEP_US;
+    set_host_us(host_us);
+    sr_yield(s);
+    g_gl_peer_ran_after = g_gl_peer_ran;
+    g_gl_vblank_after = g_test_vblank_delivered - vblank_before;
+    g_gl_done = 1;
+}
+static int guest_lane_stop(void) { return g_gl_done; }
+
+static void test_guest_lane_hold_defers_switches_and_interrupts(void) {
+    reset_sched();
+    begin_clock_fixture(1, GL_START_US);
+    g_gl_peer_ran = g_gl_done = 0;
+    g_test_body = guest_lane_body;
+    sr_sched_stop_requested = guest_lane_stop;
+    sched_run(GL_ENTRY, 0u, 0u);
+    sr_sched_stop_requested = NULL;
+    sr_guest_lane_hold.held = 0;
+    sr_guest_lane_hold.uid = 0u;
+    s_host_ns_fn = NULL;
+    expect(g_gl_done == 1, "guest lane: the lane's thread ran to the end");
+    expect(g_gl_peer_ran_held == 0,
+           "guest lane: no other thread runs while the lane holds the scheduler");
+    expect(g_gl_vblank_held == 0u,
+           "guest lane: no VBLANK is delivered while the lane holds the scheduler");
+    expect(g_gl_vtime_held > g_gl_vtime_before,
+           "guest lane: guest time still follows the host clock while held");
+    expect(g_gl_peer_ran_after == 1,
+           "guest lane: the first yield after the lane switches to the ready peer");
+    expect(g_gl_vblank_after > 0u,
+           "guest lane: the first yield after the lane delivers the VBLANKs that came due");
+}
+
+/* The two named stops (#2201), each in a child process because each ends the run: a fiber
+ * switch inside a held lane (here the lane's thread blocks in a delay, which a lane cannot
+ * reach since its imports are refused), and destroying the lane's thread while the lane is
+ * held (its fiber never parks, so nothing can; the backstop covers anything that ever does).
+ * Without the stops the switch would run another thread under the lane's refusal, and a
+ * destroyed lane would leave its state set for every later import.
+ *
+ * MUTANT: drop the stop in switch_to_scheduler -- the child's lane blocks and runs on.
+ * MUTANT: drop the backstop in sched_destroy_thread_coro -- the child destroys the lane's
+ *   thread and runs on. */
+static const char *g_self_path;
+static int g_glc_ran_on;
+static void guest_lane_switch_body(CpuState *s) {
+    (void)s;
+    sr_guest_lane_hold.uid = s_tcb[s_cur].uid;
+    sr_guest_lane_hold.held = 1;
+    sched_delay_current(100u);
+    sr_guest_lane_hold.held = 0;
+    g_glc_ran_on = 1;
+}
+static int guest_lane_switch_stop(void) { return g_glc_ran_on; }
+
+static int guest_lane_child(const char *mode) {
+    if (strcmp(mode, "switch") == 0) {
+        reset_sched();
+        begin_clock_fixture(0, 0u);
+        g_test_body = guest_lane_switch_body;
+        sr_sched_stop_requested = guest_lane_switch_stop;
+        sched_run(GL_ENTRY, 0u, 0u);
+        fprintf(stderr, "guest lane child: the held lane switched fibers and ran on\n");
+        return 0;
+    }
+    if (strcmp(mode, "destroy") == 0) {
+        reset_sched();
+        const int lane = mk(0x240u, TH_RUNNING, 32);
+        s_cur = lane;
+        sr_guest_lane_hold.uid = s_tcb[lane].uid;
+        sr_guest_lane_hold.held = 1;
+        sched_destroy_thread_coro(&s_tcb[lane]);
+        sr_guest_lane_hold.held = 0;
+        fprintf(stderr, "guest lane child: the lane's thread was destroyed and the run went on\n");
+        return 0;
+    }
+    fprintf(stderr, "guest lane child: unknown mode %s\n", mode);
+    return 2;
+}
+
+/* Runs this executable as `--guest-lane-child <mode>`; returns its exit code and its stderr. */
+static int run_guest_lane_child(const char *mode, char *log, size_t log_size) {
+    char out_path[512], command[2048];
+    const char *tmp = getenv("TEMP") ? getenv("TEMP") : getenv("TMPDIR");
+    snprintf(out_path, sizeof out_path, "%s/nk_sched_guest_lane_%s_%lu.txt", tmp ? tmp : ".",
+             mode, (unsigned long)time(NULL));
+    log[0] = '\0';
+#ifdef _WIN32
+    snprintf(command, sizeof command, "\"\"%s\" --guest-lane-child %s 2>\"%s\"\"", g_self_path,
+             mode, out_path);
+    const int code = system(command);
+#else
+    snprintf(command, sizeof command, "'%s' --guest-lane-child %s 2>'%s'", g_self_path, mode,
+             out_path);
+    const int status = system(command);
+    const int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
+    FILE *f = fopen(out_path, "rb");
+    if (f) {
+        const size_t n = fread(log, 1, log_size - 1u, f);
+        log[n] = '\0';
+        fclose(f);
+    }
+    remove(out_path);
+    return code;
+}
+
+static void test_guest_lane_stops_by_name(void) {
+    char log[8192];
+    int code = run_guest_lane_child("switch", log, sizeof log);
+    expect(code == 1 && strstr(log, "SR_COSIM_FATAL: a fiber switch inside the COSIM guest lane"),
+           "guest lane: a fiber switch inside the held lane stops the run by name");
+    code = run_guest_lane_child("destroy", log, sizeof log);
+    expect(code == 1 &&
+               strstr(log, "SR_COSIM_FATAL: the lane's thread was destroyed inside the COSIM "
+                           "guest lane"),
+           "guest lane: destroying the held lane's thread stops the run by name");
+}
 
 /* Turbo guest time is a function of what the guest did, never of the host clock (#2037): two
  * identical runs must see the same timeline however fast the host ran them. The runner here
@@ -5832,6 +5996,7 @@ static void test_loadexec_retires_scheduler_world(void) {
 }
 
 int main(int argc, char **argv) {
+    g_self_path = argv[0];
     if (argc > 1 && strcmp(argv[1], "--test-pace-setup") == 0) {
         s_pace_on = -1;
         pace_setup();
@@ -5854,6 +6019,9 @@ int main(int argc, char **argv) {
     sched_init(&g_cpu_store);
     expect(s_sched_coro != NULL, "repeat sr_coro_main adoption (ERROR_ALREADY_FIBER path)");
 
+    if (argc > 2 && strcmp(argv[1], "--guest-lane-child") == 0) {
+        return guest_lane_child(argv[2]);
+    }
     if (argc > 1 && strcmp(argv[1], "--pause-forbidden-vtime") == 0) {
         pause_test_reset(1, 2000u);
         sr_sched_pause_host = &s_pause_test_forbidden_time_host;
@@ -5928,6 +6096,8 @@ int main(int argc, char **argv) {
     test_vblank_runs_every_enabled_subintr();
     test_waiting_guest_keeps_host_window_pumped();
     test_stop_request_returns_a_lone_runner_to_the_scheduler();
+    test_guest_lane_hold_defers_switches_and_interrupts();
+    test_guest_lane_stops_by_name();
     test_turbo_timeline_does_not_depend_on_the_host_clock();
     test_deterministic_clock_charges_the_work_not_the_host();
     test_deterministic_clock_does_not_jump_to_a_sleepers_deadline();

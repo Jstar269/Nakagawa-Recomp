@@ -14,6 +14,7 @@
 
 #include "recomp.h"
 #include "flight_recorder.h"
+#include "cpu_lle.h"   /* sr_guest_lane_hold (#2201) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -330,6 +331,8 @@ static void sr_cosim_reset(void) {
     s_cosim_dirty_n = 0u;
     s_cosim_active = 0;
     s_cosim_guest_active = 0;
+    sr_guest_lane_hold.held = 0;
+    sr_guest_lane_hold.uid = 0u;
     sr_dispatch_unwind_requested = 0;
     s_cosim_nested_nid = 0u;
     s_cosim_dead_stack = SR_COSIM_DEAD_STACK_DEFAULT;
@@ -638,7 +641,14 @@ static int sr_import_call_cosim(CpuState *s, uint32_t nid, uint32_t stub_pc) {
     input = *s;
     s_cosim_nested_nid = 0u;
     s_cosim_guest_active = 1;
+    /* The lane holds the scheduler and interrupt delivery (#2201): no other thread or
+     * handler runs inside it, so its refusal and rollback touch only this lane. The HLE
+     * lane below runs unheld, exactly as SR_MODE_HLE. */
+    sr_guest_lane_hold.uid = sched_current_uid();
+    sr_guest_lane_hold.held = 1;
     rc = sr_import_call_guest(s, nid, stub_pc, 1);
+    sr_guest_lane_hold.held = 0;
+    sr_guest_lane_hold.uid = 0u;
     s_cosim_guest_active = 0;
     sr_dispatch_unwind_requested = 0;
     guest = *s;

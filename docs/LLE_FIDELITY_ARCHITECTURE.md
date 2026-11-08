@@ -264,7 +264,13 @@ two can be compared call by call (#2148). The check is the `SR_MODE_COSIM` lane 
   transfer into a native body with no call boundary (`dispatch`) (#2196). The interpreter stops
   on the refusal and returns it to the lane's entry; it never runs on past the call with the
   fatal flow pending. These boundaries honour the refusal only while the guest lane runs;
-  everywhere else they still end the run on any failure.
+  everywhere else they still end the run on any failure. The guest lane also holds the
+  scheduler and interrupt delivery (`sr_guest_lane_hold`, #2201): `sr_yield` switches no fiber
+  while it runs (guest time still advances), no interrupt is taken (the source stays pending
+  and the first safe point after the lane takes it), and a fiber switch or the loss of the
+  lane's thread inside it stops the run by name (`SR_COSIM_FATAL`). So no other thread or
+  handler runs under the lane's refusal or is rolled back with it. The hold is a separate
+  flag, not the guest-visible interrupt state, which the lane leaves untouched.
 - **HLE lane.** Guest memory and CPU state go back to the input state and the handler runs as in
   `SR_MODE_HLE`. Its result is what the guest keeps, so a difference never changes a run.
 - **Compared.** `v0`, the callee-saved registers (`s0`-`s7`, `gp`, `sp`, `fp`) and every byte of

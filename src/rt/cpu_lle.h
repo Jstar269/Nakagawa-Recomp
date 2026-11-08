@@ -160,6 +160,18 @@ int sr_cpu_eret(struct CpuState *s, uint32_t instr_pc);
  * (spec 6.2/6.3). */
 int sr_cpu_poll(struct CpuState *s, uint32_t resume_pc);
 
+/* The COSIM guest lane's hold (#2201). domain_mode.c sets it only while a cosim call's
+ * guest lane runs, with the uid of the thread the lane runs on (0 with no thread). While it
+ * is held no interrupt is taken -- the sources stay latched, so the first safe point after
+ * the lane delivers them -- and the scheduler switches no fiber (sr_yield returns at once,
+ * and a switch or a destroyed lane thread is a named stop, sched.c). The lane's import
+ * refusal and memory rollback then touch only that lane. */
+typedef struct SrGuestLaneHold {
+    volatile int held;
+    uint32_t uid;
+} SrGuestLaneHold;
+extern SrGuestLaneHold sr_guest_lane_hold;
+
 /* Interrupt controller (INTC) pending/enable state and Cause.IP mirroring
  * (spec 6.1; LLE Phase 1 PR 5; issue #325).
  *

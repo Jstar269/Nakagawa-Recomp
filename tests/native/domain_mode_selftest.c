@@ -380,6 +380,7 @@ static void test_cosim_lane(void) {
 /* Interpreted exports: guest words in the export span with no native body, so dispatch
  * runs them on the interpreter floor (#2196). */
 #define EXP_MARK     (TEST_EXPORT + 0xC0u)
+#define EXP_VECTOR   (TEST_EXPORT + 0xD0u)
 #define EXP_INTERP_JAL (TEST_EXPORT + 0x200u)  /* calls EXP_HELPER, then EXP_MARK, returns */
 #define EXP_INTERP_J   (TEST_EXPORT + 0x240u)  /* j EXP_HELPER; nop */
 #define COSIM_VRAM_A 0x04000100u   /* the renderer holds a newer byte here */
@@ -498,6 +499,14 @@ static void exp_mark(CpuState *s) {
     s_interp_continued++;
 }
 
+/* The interrupt vector of the held-lane cell: it must never run inside the guest lane. */
+static int s_vector_ran;
+
+static void exp_vector(CpuState *s) {
+    (void)s;
+    s_vector_ran++;
+}
+
 static uint32_t enc_jump(uint32_t op, uint32_t target) {
     return (op << 26) | ((target >> 2) & 0x03FFFFFFu);
 }
@@ -547,6 +556,7 @@ static void test_cosim_dual_run(void) {
     sr_register(EXP_TAIL, exp_tail);
     sr_register(EXP_NOBOUND, exp_nobound);
     sr_register(EXP_MARK, exp_mark);
+    sr_register(EXP_VECTOR, exp_vector);
     MEM_W32(EXP_INTERP_JAL + 0u, 0x03E04025u);               /* or $t0, $ra, $zero */
     MEM_W32(EXP_INTERP_JAL + 4u, enc_jump(3u, EXP_HELPER));  /* jal EXP_HELPER */
     MEM_W32(EXP_INTERP_JAL + 8u, 0u);                        /* nop */
@@ -780,6 +790,42 @@ static void test_cosim_dual_run(void) {
 #else
         unsetenv("SR_BOOT_EVENT_FILE");
 #endif
+    }
+
+    /* An interrupt that comes due inside the guest lane (#2201, widened by #2166): with the
+     * LLE CPU on, an INTC configured and its source raised and enabled, the interpreter's
+     * safe-point poll would take it at the lane's first instruction and run its handler
+     * under the lane's import refusal and rollback. The lane holds delivery instead: the
+     * handler does not run in the lane, the source stays pending, and the first safe point
+     * after the lane takes it. */
+    {
+        const SrIntcConfig intc = { .source_count = 8u, .cpu_ip_bit = 2u };
+        cosim_fixture(&s, EXP_INTERP_JAL);
+        s_vector_ran = 0;
+        sr_cpu_lle_set_enabled(1);
+        sr_cpu_lle_set_vectors(EXP_VECTOR, EXP_VECTOR, EXP_VECTOR);
+        CHECK(sr_intc_init(&intc) == 0 && sr_intc_set_enable_mask(1u) == 0 &&
+                  sr_intc_raise(0u) == 0,
+              "configure the synthetic INTC and raise its source");
+        s.cop0[SR_CP0_STATUS] = SR_STATUS_IE | (1u << 10);   /* IE, IM2 */
+        rc = sr_import_call(&s, NID_PAIR, STUB_PC);
+        sr_domain_cosim_last_result(&r);
+        CHECK(s_vector_ran == 0, "no interrupt handler runs inside the guest lane (%d ran)",
+              s_vector_ran);
+        CHECK(r.outcome == SR_COSIM_OUTCOME_NOT_COMPARED &&
+                  r.reason == SR_COSIM_REASON_NESTED_IMPORT && s_syscall_calls == 1u &&
+                  rc == (int)s_syscall_canned,
+              "the held lane still reports its nested import and keeps the HLE lane "
+              "(outcome %d reason %d)", (int)r.outcome, (int)r.reason);
+        CHECK(!sr_guest_lane_hold.held && sr_guest_lane_hold.uid == 0u,
+              "the hold is released when the guest lane ends");
+        CHECK((sr_intc_pending_mask() & 1u) != 0u, "the source stays pending across the lane");
+        CHECK(sr_cpu_poll(&s, STUB_PC) == -1 && s.flow_kind == SR_FLOW_EXCEPTION,
+              "the first safe point after the lane takes the interrupt");
+        sr_cpu_clear_flow(&s);
+        sr_intc_reset();
+        sr_cpu_lle_set_enabled(0);
+        sr_cpu_lle_set_vectors(0u, 0u, 0u);
     }
 
     /* Dispatch refuses the guest export: NOT_COMPARED, never fatal, HLE kept. */
