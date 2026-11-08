@@ -862,19 +862,14 @@ int sdl3vk_init(const char *title) {
             }
         free(xs);
         /* The destination-read path (#2109, sdl3vk.h). A forced path the device lacks is refused
-         * with its reason, and the snapshot runs; so is the ROAA path, which this backend lacks. */
+         * with its reason, and the snapshot runs. */
         s_dst_read = SDL3VK_DST_READ_SNAPSHOT;
         const char *dst_env = getenv("SR_GPU_DST_READ");
         int dst_want = sdl3vk_parse_dst_read(dst_env);
         if (dst_want == -1) {
-            fprintf(stderr, "sdl3vk: unknown SR_GPU_DST_READ '%s' (snapshot, interlock or roaa); "
-                            "using the default order\n", dst_env);
+            fprintf(stderr, "sdl3vk: unknown SR_GPU_DST_READ '%s' (snapshot or interlock); using the "
+                            "default: the interlock where the device has it\n", dst_env);
             dst_want = -2;
-        }
-        if (dst_want == SDL3VK_DST_READ_ROAA) {
-            fprintf(stderr, "sdl3vk: SR_GPU_DST_READ=roaa refused (this backend has no "
-                            "rasterization-order path); destination reads use the snapshot\n");
-            dst_want = SDL3VK_DST_READ_SNAPSHOT;
         }
         if (dst_want != SDL3VK_DST_READ_SNAPSHOT) {
             const char *why = NULL;
@@ -919,10 +914,11 @@ int sdl3vk_init(const char *title) {
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = dev_ext_n;
     dci.ppEnabledExtensionNames = dev_ext;
-    /* Ace Mode's texture filtering (ace.h) is the only device feature the player ever asks
-     * for, and only in an Ace run that wants it: an authentic run creates the device with no
-     * features, as before. A device without it, or with less than 2x, runs without filtering
-     * and the run says why; a lower maximum clamps the level. */
+    /* Ace Mode's texture filtering (ace.h) is the only Ace device feature, asked for only in an
+     * Ace run that wants it. The other device features are the interlock path's (below), in every
+     * run where the device has them (docs/ENHANCEMENT_CONTRACT.md section 10.2); on the snapshot
+     * path an authentic run creates the device with no features. A device without filtering, or
+     * with less than 2x, runs without it and the run says why; a lower maximum clamps the level. */
     VkPhysicalDeviceFeatures ace_features = {0};
     if (g_ace_on && ace_effective()->af > 0) {
         VkPhysicalDeviceFeatures have;
@@ -1944,7 +1940,6 @@ int sdl3vk_parse_dst_read(const char *value) {
     if (!value || !value[0]) return -2;
     if (strcmp(value, "snapshot") == 0) return SDL3VK_DST_READ_SNAPSHOT;
     if (strcmp(value, "interlock") == 0) return SDL3VK_DST_READ_INTERLOCK;
-    if (strcmp(value, "roaa") == 0) return SDL3VK_DST_READ_ROAA;
     return -1;
 }
 

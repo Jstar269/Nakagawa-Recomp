@@ -92,12 +92,11 @@ int sdl3vk_parse_present_scaling(const char *value);
  * features: the destination snapshot (a copy of the target taken before the batch; every device),
  * or a fragment-shader interlock read-modify-write of the target itself
  * (VK_EXT_fragment_shader_interlock, fragmentShaderPixelInterlock, fragmentStoresAndAtomics).
- * SR_GPU_DST_READ=snapshot|interlock|roaa forces one; unset, the interlock is taken where the
- * device has it. */
+ * SR_GPU_DST_READ=snapshot|interlock forces one; unset or unknown, the interlock is taken where
+ * the device has it. */
 enum {
     SDL3VK_DST_READ_SNAPSHOT = 0,
     SDL3VK_DST_READ_INTERLOCK = 1,
-    SDL3VK_DST_READ_ROAA = 2,        /* rasterization-order attachment access: always refused */
 };
 
 /* The path an SR_GPU_DST_READ value asks for: NULL or empty is -2 (the default order), an

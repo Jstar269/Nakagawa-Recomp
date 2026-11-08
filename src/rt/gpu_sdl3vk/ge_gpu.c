@@ -2215,6 +2215,15 @@ static int rmw_refuses(const Batch *b) {
 #endif
 }
 
+/* A target whose RMW objects could not be made keeps the snapshot path for its ops; the first
+ * such target in a run says so once, so the fallback stays visible. */
+static void rmw_target_fallback(const char *what) {
+    static int said;
+    if (said) return;
+    said = 1;
+    fprintf(stderr, "gegpu: a target could not make %s; its ops keep the destination snapshot\n", what);
+}
+
 /* Does the op [0, n) of `arr` into `t` take the interlock? It must read the destination, every
  * batch that does must pass the rmwzfb rule, and the target must have its RMW objects (a target in
  * s_tgts; a wing canvas has none). The host twin keeps the snapshot path: its pass reads the twin
@@ -2657,7 +2666,7 @@ static int submit_list(Target *t, const Batch *arr, uint32_t n) {
             s_snap_dirty_gen = t->render_gen;
             s_snap_srcgen = snap_rect_empty(&s_snap_dirty) ? t->render_gen : 0;
         }
-        s_cnt_rmw_ops++;
+        if (ok) s_cnt_rmw_ops++;
         return ok;
     }
     int ok = 1;
@@ -3461,7 +3470,10 @@ static Target *target_color_acquire(uint32_t fba, uint32_t stride, uint32_t fmt,
             if (!t->set[i]) { target_destroy(t); return NULL; }
         }
         /* without its storage set the target's ops keep the snapshot path (op_rmw) */
-        if (s_dst_interlock) t->rmw_set = make_rmw_descriptor(t->view);
+        if (s_dst_interlock) {
+            t->rmw_set = make_rmw_descriptor(t->view);
+            if (!t->rmw_set) rmw_target_fallback("its storage descriptor set");
+        }
         /* a twin that cannot be made turns the twin off for the run */
         if (s_twin && !twin_target_make(t)) { twin_target_free(t); twin_off_for_run("a target's twin"); }
     }
@@ -3673,7 +3685,10 @@ static Target *target_acquire(void) {
         if (s_dst_interlock) {
             VkFramebufferCreateInfo zfc = fbc;
             zfc.renderPass = s_rp_rmw; zfc.attachmentCount = 1; zfc.pAttachments = &d->view;
-            if (vkCreateFramebuffer(s_dev, &zfc, NULL, &t->fb_rmw) != VK_SUCCESS) t->fb_rmw = VK_NULL_HANDLE;
+            if (vkCreateFramebuffer(s_dev, &zfc, NULL, &t->fb_rmw) != VK_SUCCESS) {
+                t->fb_rmw = VK_NULL_HANDLE;
+                rmw_target_fallback("its depth-only framebuffer");
+            }
         }
         /* The twin's (colour, depth) pair, for the twin's pass. Without it the twin goes off for
          * the run: the authentic chain never depends on the twin. */

@@ -869,7 +869,9 @@ asset-index-selftest:
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
 # runs the whole suite with every twin checked against its image after each case, twin-gate
 # checks the switch's values and its Ace gate (`--authentic`), and twin-alloc-fail injects a
-# failed twin allocation, and gpu-timestamps runs once more with the twin shown. The pipeline
+# failed twin allocation, and gpu-timestamps runs once more with the twin shown. The dst-read
+# cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
+# `--dst-read interlock`; a device that refuses the interlock prints a SKIP line). The pipeline
 # cache (#2149) runs last, as three processes over one empty data root: a cold run saves the
 # cache, a warm run must start from it and draw the same frames, and a reject run re-opens it
 # over damaged, foreign and other-driver files and with the switch off or refused.
@@ -1025,7 +1027,7 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 	@for m in 1 2 3 4; do \
 		case $$m in \
 			1) args="--dst-read interlock --case dst-read-order"; kill="the RMW store had no effect";; \
-			2) args="--dst-read interlock --case dst-read-order"; kill="differs from ge.c in [0-9]+ pixels";; \
+			2) args="--dst-read interlock --case dst-read-order"; kill="differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
 			3) args="--dst-read interlock --case dst-read-depth"; kill="depth differs from ge.c in [1-9]";; \
 			*) args="--dst-read snapshot --case dst-read-pins"; kill="the snapshot path made interlock state";; \
 		esac; \

@@ -519,6 +519,15 @@ each device pixel's own position, and so does its uv-edge-clamp case (also at sc
 device pixels outside a screen-aligned strip's or sprite's first and last pixel centres must show
 that edge pixel's 1x sample, with linear and nearest filtering and with repeat and clamp wrapping,
 while a sheared strip stays unclamped.
+The dst-read cells (#2109: order, mask, alpha, mixed, depth, ztest and pins) then run at render scales 1 and 4,
+once forced to the snapshot destination-read path and once to the interlock path (`--dst-read`). On the
+interlock path, overlapping shader-blend primitives must equal the software GE in colour (and in depth for the
+depth cells) with no snapshot copy. On the snapshot path, the known difference must stay inside each overlap, and
+the device must hold no interlock state. A device that refuses the interlock prints one SKIP line for each
+interlock leg. `gpu-dst-read-mutants` then builds four broken variants (`SR_GPU_DSTREAD_MUTANT`), and each must
+fail its cell with its own message. Mutants 1 to 3 run on the interlock path and are a SKIP on a device without
+it. The lavapipe step prints the device's interlock features from `vulkaninfo` first, so the log shows which
+path the hosted legs took.
 Last, `gpu-coherence-selftest-snapbar-mutants` builds three broken variants of
 the destination-snapshot copy's barriers (`SR_GPU_SNAPBAR_MUTANT`), and the submit-batch case must
 fail each one with its own message. `fsr3-pass-selftest` runs FSR 3's eight compute passes on
@@ -535,9 +544,8 @@ or a compiler that is not the pinned one, fails it. Then `ge-first-bad-draw-self
 (`SR_GE_FBD_MUTANT`) must each be named as that draw, in linear and bisect mode. A second generated
 capture holds one PRIM of two overlapping translucent sprites on a 16-bit target, and the tool must
 find exactly its overlap as the first bad draw on the snapshot destination-read path (the known
-shader-blend batch-order difference, #2109), and report `NO_DIFFERENCE` on the interlock path. A
-device without the interlock, lavapipe among them, refuses that path, and the interlock leg is a
-`SKIP`. Four more generated captures check that the
+shader-blend batch-order difference, #2109), and report `NO_DIFFERENCE` on the interlock path. On a
+device that refuses the interlock, the interlock leg is a `SKIP`. Four more generated captures check that the
 tool fails closed: a 512-wide scissor (ge.c rasterizes inside 480x272), 33 targets or a stride of
 1088 are `INCOMPLETE`, and a capture with no draw is `NO_DRAWS`. The same step then runs
 `vram-view-identity-selftest` (#314): the GE decoders the pause menu's VRAM viewer calls, run at
