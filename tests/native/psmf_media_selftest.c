@@ -267,14 +267,18 @@ static void emit_nal(ByteOut *o, uint8_t hdr, const BitW *rbsp) {
 #define FIX_W_MBS 4
 #define FIX_H_MBS 4
 
-static void write_sps_ex(BitW *w, uint32_t w_mbs, uint32_t h_mbs) {
+/* reorder != 0 writes the SPS of the picture-reordering stream (#279): 8-bit frame_num and
+ * pic_order_cnt_lsb, so its 90 pictures never wrap either, and a VUI bitstream_restriction that
+ * fixes the output order a conforming decoder must produce (max_num_reorder_frames 1,
+ * max_dec_frame_buffering 2).  Every other stream keeps the 4-bit fields and no VUI. */
+static void write_sps_full(BitW *w, uint32_t w_mbs, uint32_t h_mbs, int reorder) {
     bw_u(w, 66u, 8);          /* profile_idc: baseline */
     bw_u(w, 0u, 8);           /* constraint set flags  */
     bw_u(w, 30u, 8);          /* level_idc 3.0         */
     bw_ue(w, 0u);             /* seq_parameter_set_id */
-    bw_ue(w, 0u);             /* log2_max_frame_num_minus4 */
+    bw_ue(w, reorder ? 4u : 0u);  /* log2_max_frame_num_minus4 */
     bw_ue(w, 0u);             /* pic_order_cnt_type */
-    bw_ue(w, 0u);             /* log2_max_pic_order_cnt_lsb_minus4 */
+    bw_ue(w, reorder ? 4u : 0u);  /* log2_max_pic_order_cnt_lsb_minus4 */
     bw_ue(w, 1u);             /* max_num_ref_frames */
     bw_bit(w, 0);             /* gaps_in_frame_num_value_allowed_flag */
     bw_ue(w, w_mbs - 1u);     /* pic_width_in_mbs_minus1 */
@@ -282,8 +286,27 @@ static void write_sps_ex(BitW *w, uint32_t w_mbs, uint32_t h_mbs) {
     bw_bit(w, 1);             /* frame_mbs_only_flag */
     bw_bit(w, 1);             /* direct_8x8_inference_flag */
     bw_bit(w, 0);             /* frame_cropping_flag */
-    bw_bit(w, 0);             /* vui_parameters_present_flag */
+    bw_bit(w, reorder);       /* vui_parameters_present_flag */
+    if (reorder) {
+        for (int i = 0; i < 5; i++)
+            bw_bit(w, 0);     /* aspect ratio, overscan, video signal, chroma location, timing */
+        bw_bit(w, 0);         /* nal_hrd_parameters_present_flag */
+        bw_bit(w, 0);         /* vcl_hrd_parameters_present_flag */
+        bw_bit(w, 0);         /* pic_struct_present_flag */
+        bw_bit(w, 1);         /* bitstream_restriction_flag */
+        bw_bit(w, 1);         /* motion_vectors_over_pic_boundaries_flag */
+        bw_ue(w, 0u);         /* max_bytes_per_pic_denom */
+        bw_ue(w, 0u);         /* max_bits_per_mb_denom */
+        bw_ue(w, 15u);        /* log2_max_mv_length_horizontal */
+        bw_ue(w, 15u);        /* log2_max_mv_length_vertical */
+        bw_ue(w, 1u);         /* max_num_reorder_frames */
+        bw_ue(w, 2u);         /* max_dec_frame_buffering */
+    }
     bw_trailing(w);
+}
+
+static void write_sps_ex(BitW *w, uint32_t w_mbs, uint32_t h_mbs) {
+    write_sps_full(w, w_mbs, h_mbs, 0);
 }
 
 static void write_pps(BitW *w) {
@@ -309,12 +332,25 @@ static void write_pps(BitW *w) {
  * picture is flat. */
 static int s_fixture_textured;
 
-/* One IDR picture, every macroblock I_PCM, so luma and chroma are exactly (y, cb, cr). */
-static void write_idr_ex(BitW *w, int picture, uint32_t w_mbs, uint32_t h_mbs, uint8_t y, uint8_t cb, uint8_t cr) {
+/* Slice data of one picture: every macroblock I_PCM, so luma and chroma are exactly (y, cb, cr). */
+static void write_pcm_macroblocks(BitW *w, uint32_t w_mbs, uint32_t h_mbs, uint8_t y, uint8_t cb,
+                                  uint8_t cr) {
     uint8_t pcm[256 + 64 + 64];
     memset(pcm, y, 256u);
     memset(pcm + 256, cb, 64u);
     memset(pcm + 320, cr, 64u);
+    for (uint32_t mb = 0; mb < w_mbs * h_mbs; mb++) {
+        if (s_fixture_textured)         /* 1..254: no sample is 0 */
+            for (uint32_t i = 0; i < (uint32_t)sizeof(pcm); i++)
+                pcm[i] = (uint8_t)(1u + (y + i * 7u + mb * 29u) % 254u);
+        bw_ue(w, 25u);                  /* mb_type: I_PCM */
+        bw_raw(w, pcm, (uint32_t)sizeof(pcm));
+    }
+    bw_trailing(w);
+}
+
+/* One IDR picture of (y, cb, cr). */
+static void write_idr_ex(BitW *w, int picture, uint32_t w_mbs, uint32_t h_mbs, uint8_t y, uint8_t cb, uint8_t cr) {
     bw_ue(w, 0u);                       /* first_mb_in_slice */
     bw_ue(w, 2u);                       /* slice_type: I */
     bw_ue(w, 0u);                       /* pic_parameter_set_id */
@@ -324,14 +360,7 @@ static void write_idr_ex(BitW *w, int picture, uint32_t w_mbs, uint32_t h_mbs, u
     bw_bit(w, 0);                       /* dec_ref_pic_marking.no_output_of_prior_pics_flag */
     bw_bit(w, 0);                       /* dec_ref_pic_marking.long_term_reference_flag */
     bw_ue(w, 0u);                       /* slice_qp_delta (se(0)) */
-    for (uint32_t mb = 0; mb < w_mbs * h_mbs; mb++) {
-        if (s_fixture_textured)         /* 1..254: no sample is 0 */
-            for (uint32_t i = 0; i < (uint32_t)sizeof(pcm); i++)
-                pcm[i] = (uint8_t)(1u + (y + i * 7u + mb * 29u) % 254u);
-        bw_ue(w, 25u);                  /* mb_type: I_PCM */
-        bw_raw(w, pcm, (uint32_t)sizeof(pcm));
-    }
-    bw_trailing(w);
+    write_pcm_macroblocks(w, w_mbs, h_mbs, y, cb, cr);
 }
 
 /* Decoded plane values per picture.  Chosen so the BT.601 limited-range conversion lands on
@@ -361,6 +390,76 @@ static void build_au_ex(int picture, uint32_t w_mbs, uint32_t h_mbs,
     write_idr_ex(&w, picture, w_mbs, h_mbs, y, cb, cr);
     CHECK(!w.overflow, "IDR picture fits the scratch buffer");
     emit_nal(out, 0x65, &w);
+}
+
+/* ---- a stream whose display order differs from its decode order (issue #279) -------------
+ *
+ * Decode order: an IDR picture (POC 0), then pairs of a reference I picture and a non-reference
+ * I picture shown before it (POC 4 then 2, 8 then 6, ...).  A conforming decoder outputs them by
+ * POC, so the second and third access units leave it swapped, and so on.  An odd last picture
+ * is a reference picture with no partner.  Every picture is flat, with its own luma, so the
+ * decoded plane says which access unit it came from. */
+static int reorder_display_index(int picture, int pictures) {
+    if (picture == 0) return 0;
+    if (picture & 1) return picture + 1 < pictures ? picture + 1 : picture;   /* reference */
+    return picture - 1;                                                       /* non-reference */
+}
+
+static uint8_t reorder_luma(int picture) { return (uint8_t)(40 + 2 * picture); }
+
+static void build_au_reorder(int picture, int pictures, ByteOut *out) {
+    static const uint8_t aud[5] = { 0, 0, 1, 0x09, 0x10 };
+    const int idr = picture == 0, ref = idr || (picture & 1);
+    BitW w;
+    uint8_t scratch[8192];
+    bo_raw(out, aud, sizeof(aud));
+    if (idr) {
+        w.d = scratch; w.cap = sizeof(scratch); w.n = 0; w.acc = 0; w.bits = 0; w.overflow = 0;
+        write_sps_full(&w, FIX_W_MBS, FIX_H_MBS, 1);
+        CHECK(!w.overflow, "reorder SPS fits the scratch buffer");
+        emit_nal(out, 0x67, &w);
+        w.n = 0; w.acc = 0; w.bits = 0; w.overflow = 0;
+        write_pps(&w);
+        CHECK(!w.overflow, "reorder PPS fits the scratch buffer");
+        emit_nal(out, 0x68, &w);
+    }
+    /* frame_num counts reference pictures; a non-reference picture takes the next value. */
+    const uint32_t frame_num = idr ? 0u : (picture & 1) ? (uint32_t)(picture + 1) / 2u
+                                                        : (uint32_t)picture / 2u + 1u;
+    w.d = scratch; w.cap = sizeof(scratch); w.n = 0; w.acc = 0; w.bits = 0; w.overflow = 0;
+    bw_ue(&w, 0u);                       /* first_mb_in_slice */
+    bw_ue(&w, 2u);                       /* slice_type: I */
+    bw_ue(&w, 0u);                       /* pic_parameter_set_id */
+    bw_u(&w, frame_num, 8);              /* frame_num */
+    if (idr) bw_ue(&w, 0u);              /* idr_pic_id */
+    bw_u(&w, (uint32_t)(2 * reorder_display_index(picture, pictures)), 8); /* pic_order_cnt_lsb */
+    if (idr) {
+        bw_bit(&w, 0);                   /* no_output_of_prior_pics_flag */
+        bw_bit(&w, 0);                   /* long_term_reference_flag */
+    } else if (ref) {
+        bw_bit(&w, 0);                   /* adaptive_ref_pic_marking_mode_flag: sliding window */
+    }
+    bw_ue(&w, 0u);                       /* slice_qp_delta (se(0)) */
+    write_pcm_macroblocks(&w, FIX_W_MBS, FIX_H_MBS, reorder_luma(picture), 128u, 128u);
+    CHECK(!w.overflow, "reorder picture fits the scratch buffer");
+    emit_nal(out, idr ? 0x65 : ref ? 0x61 : 0x01, &w);
+}
+
+/* Each reordering access unit starts with its delimiter and holds exactly one slice: the IDR
+ * slice for picture 0, otherwise a non-IDR slice whose nal_ref_idc says reference or not. */
+static void reorder_picture_marks(const uint8_t *au, uint32_t n, int picture) {
+    CHECK(n >= 5u && au[0] == 0u && au[1] == 0u && au[2] == 1u && (au[3] & 0x1fu) == 9u,
+          "a reorder access unit begins with an access-unit delimiter");
+    int slices = 0, header = -1;
+    for (uint32_t i = 0; i + 4u < n; i++) {
+        if (au[i] == 0u && au[i + 1] == 0u && au[i + 2] == 1u &&
+            ((au[i + 3] & 0x1fu) == 1u || (au[i + 3] & 0x1fu) == 5u)) {
+            slices++;
+            header = au[i + 3];
+        }
+    }
+    CHECK(slices == 1 && header == (picture == 0 ? 0x65 : (picture & 1) ? 0x61 : 0x01),
+          "a reorder access unit carries one slice of its own kind");
 }
 
 /* Build the annex-B elementary stream and report each access unit's byte range, which is what
@@ -2947,11 +3046,13 @@ static int64_t av_audio_pts(int block) {
 }
 
 /* Packet layouts of the A/V timing container.  SPLIT cuts every picture across two PES
- * packets and gives every ATRAC frame its own packet.  PACKED is the shape of a PSP movie:
+ * packets and gives every ATRAC frame its own packet.  REORDER is SPLIT over the reordering
+ * stream (build_au_reorder), with every picture's first packet carrying that picture's own
+ * display time.  PACKED is the shape of a PSP movie:
  * one timestamped video packet carries two whole pictures and one timestamped audio packet
  * carries up to AV_AUDIO_PER_PES frames, so only the first unit commencing in each packet owns
  * that packet's time (ISO/IEC 13818-1 2.4.3.7) and every later one must be extrapolated. */
-enum { AV_LAYOUT_SPLIT = 0, AV_LAYOUT_PACKED = 1 };
+enum { AV_LAYOUT_SPLIT = 0, AV_LAYOUT_PACKED = 1, AV_LAYOUT_REORDER = 2 };
 #define AV_AUDIO_PER_PES 3
 
 /* Assemble the A/V timing container: a player-valid PSMF header (presentation base and
@@ -2968,8 +3069,11 @@ static uint8_t *build_psmf_av(uint32_t *size_out, int layout) {
     o.d = es; o.cap = sizeof(es); o.n = 0; o.overflow = 0;
     for (int k = 0; k < AV_PICTURES; k++) {
         au_off[k] = o.n;
-        build_au_ex(k, FIX_W_MBS, FIX_H_MBS,
-                    k_y[k % FIX_PICTURES], k_cb[k % FIX_PICTURES], k_cr[k % FIX_PICTURES], &o);
+        if (layout == AV_LAYOUT_REORDER)
+            build_au_reorder(k, AV_PICTURES, &o);
+        else
+            build_au_ex(k, FIX_W_MBS, FIX_H_MBS,
+                        k_y[k % FIX_PICTURES], k_cb[k % FIX_PICTURES], k_cr[k % FIX_PICTURES], &o);
         au_len[k] = o.n - au_off[k];
     }
     CHECK(!o.overflow, "A/V timing elementary stream fits its buffer");
@@ -3004,7 +3108,10 @@ static uint8_t *build_psmf_av(uint32_t *size_out, int layout) {
      * player copies into audioChannels; writing it anywhere else leaves the count zero
      * and every decoded-looking frame is rejected for an implausible channel count. */
     b.d[0x92 + 14] = 2u;                   /* stereo */
-    for (int i = 0; i < AV_PICTURES; i++) mp4_picture_marks(es + au_off[i], au_len[i], i);
+    for (int i = 0; i < AV_PICTURES; i++) {
+        if (layout == AV_LAYOUT_REORDER) reorder_picture_marks(es + au_off[i], au_len[i], i);
+        else mp4_picture_marks(es + au_off[i], au_len[i], i);
+    }
 
     uint8_t frame[0xb10];
     uint8_t packed_frames[0xb10u * AV_AUDIO_PER_PES];
@@ -3036,8 +3143,12 @@ static uint8_t *build_psmf_av(uint32_t *size_out, int layout) {
     } else {
         for (int k = 0; k < AV_PICTURES; k++) {
             uint32_t half = au_len[k] / 2u;
-            add_video_pes(&b, (k % AV_VIDEO_ANCHOR) == 0,
-                          FIX_BASE + av_video_pts(k), es + au_off[k], half);
+            if (layout == AV_LAYOUT_REORDER)
+                add_video_pes(&b, 1, FIX_BASE + av_video_pts(reorder_display_index(k, AV_PICTURES)),
+                              es + au_off[k], half);
+            else
+                add_video_pes(&b, (k % AV_VIDEO_ANCHOR) == 0,
+                              FIX_BASE + av_video_pts(k), es + au_off[k], half);
             add_video_pes(&b, 0, 0, es + au_off[k] + half, au_len[k] - half);
             int upto = (k + 1) * AV_AUDIO_BLOCKS / AV_PICTURES;
             while (audio_next < upto) {
@@ -3754,6 +3865,162 @@ cleanup:
     if (failures != failures_before)
         fprintf(stderr, "FAIL: psmf-av: %d failed checks in the %s packet layout\n",
                 failures - failures_before, layout == AV_LAYOUT_PACKED ? "packed" : "split");
+}
+
+/* ---- decoder output order against the time the guest is handed (issue #279) -------------
+ *
+ * A decoder may return pictures in a different order than it took their access units (picture
+ * reordering).  Each decoded picture then carries the time of its own access unit
+ * (SrH264FrameInfo.pts), and that is the displaypts the guest must see.  The player used to hand
+ * out the submit-order time of the n-th delivery instead, so a reordered picture was shown with
+ * a neighbour's time.  This backend swaps every pair of pictures: it needs only the contract
+ * the seam documents, and no bitstream.  With s_ro_report_pts clear it reports no per-picture
+ * time, and the player must fall back to its submit-order ring. */
+#define RO_MAX 256
+static struct { int64_t pts; int has_pts; } s_ro_au[RO_MAX];
+static int s_ro_submitted, s_ro_out, s_ro_report_pts;
+
+static int ro_create(void) { s_ro_submitted = 0; s_ro_out = 0; return 0; }
+static void ro_destroy(int id) { (void)id; }
+static int ro_reset(int id) { (void)id; s_ro_submitted = 0; s_ro_out = 0; return 0; }
+static int ro_submit(int id, const SrH264AccessUnit *au) {
+    (void)id;
+    if (!au || s_ro_submitted >= RO_MAX) return -1;
+    s_ro_au[s_ro_submitted].pts = au->pts;
+    s_ro_au[s_ro_submitted].has_pts = au->has_pts;
+    s_ro_submitted++;
+    return 0;
+}
+static int ro_frame(int id, int eos, const SrH264FrameTarget *target, SrH264FrameInfo *info) {
+    (void)id; (void)target;
+    int src = s_ro_out ^ 1;                       /* pictures leave in swapped pairs */
+    if (src >= s_ro_submitted) {
+        if (!eos) return 0;                       /* the partner has not been submitted yet */
+        src = s_ro_out;
+        if (src >= s_ro_submitted) return 0;
+    }
+    if (info) {
+        info->width = 64;
+        info->height = 16;
+        info->stride = 128;
+        info->native_format = SR_H264_PIXEL_5650;
+        info->delivered_format = SR_H264_PIXEL_5650;
+        info->has_pts = s_ro_report_pts && s_ro_au[src].has_pts;
+        info->pts = info->has_pts ? s_ro_au[src].pts : -1;
+    }
+    s_ro_out++;
+    return 1;
+}
+static const SrH264Backend s_ro_backend = {"reorder-test", ro_create, ro_destroy, ro_reset, ro_submit, ro_frame};
+
+static void test_player_reordered_pictures_keep_their_own_time(int report_pts) {
+    uint32_t size = 0;
+    uint8_t *image = build_psmf_av(&size, AV_LAYOUT_SPLIT);
+    if (!image) { CHECK(0, "psmf-reorder: the A/V container builds"); return; }
+    s_player_image = image;
+    s_player_image_size = size;
+    s_ro_report_pts = report_pts;
+    CHECK(sr_h264_select_backend_object(&s_ro_backend) && sr_h264_backend_available(),
+          "psmf-reorder: the reordering test backend is selected");
+    lc_prepare_guest();
+    CHECK(guest_mpeg_import(AV_NID_CREATE, AV_PLAYER, AV_CREATE, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_SET_PSMF, AV_PLAYER, AV_PATH, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_START, AV_PLAYER, AV_CONFIG, 0, 0, 0) == 0,
+          "psmf-reorder: the player is created, opened and started");
+    int delivered = 0, mismatches = 0;
+    int64_t seen[AV_PICTURES];
+    for (int guard = 0; guard < 4096 && delivered < AV_PICTURES; guard++) {
+        if (guest_mpeg_import(AV_NID_GET_VIDEO, AV_PLAYER, AV_VIDEO, 0, 0, 0) == 0) {
+            /* A reported time is the picture's own (its swapped partner's access unit); with
+             * none reported, the ring hands out the n-th submitted time. */
+            int64_t want = av_video_pts(report_pts ? delivered ^ 1 : delivered);
+            seen[delivered] = (int64_t)MEM_R32(AV_VIDEO + 8);
+            if (seen[delivered] != want) mismatches++;
+            delivered++;
+        }
+        (void)guest_mpeg_import(AV_NID_GET_AUDIO, AV_PLAYER, AV_AUDIO, 0, 0, 0);
+        if (guest_mpeg_import(AV_NID_UPDATE, AV_PLAYER, 0, 0, 0, 0) != 0) break;
+    }
+    CHECK(delivered == AV_PICTURES, "psmf-reorder: every authored picture reached the guest");
+    if (report_pts) {
+        CHECK(mismatches == 0,
+              "psmf-reorder: each picture is handed the time of its own access unit, not the n-th submit-order time");
+        CHECK(delivered < 2 || (seen[0] == av_video_pts(1) && seen[1] == av_video_pts(0)),
+              "psmf-reorder: the first reordered pair carries its swapped times");
+    } else {
+        CHECK(mismatches == 0,
+              "psmf-reorder: a backend that reports no picture time gets the submit-order ring times");
+    }
+    CHECK(guest_mpeg_import(AV_NID_DELETE, AV_PLAYER, 0, 0, 0, 0) == 0, "psmf-reorder: the player is deleted");
+    (void)sr_h264_select_backend_object(NULL);
+#if defined(SR_H264_FFMPEG)
+    CHECK(sr_h264_select_backend("ffmpeg"), "psmf-reorder: the FFmpeg backend is selected again");
+#endif
+    s_ro_report_pts = 0;
+    s_player_image = NULL;
+    s_player_image_size = 0;
+    free(image);
+}
+
+/* The same rule through the real H.264 backend this build selects (Media Foundation on Windows,
+ * FFmpeg where H264_FFMPEG=1), on a stream whose display order differs from its decode order
+ * (build_au_reorder).  Each delivered picture is identified by its decoded colour, and the
+ * guest must be handed that picture's own access-unit time.  The decoder must also really have
+ * reordered, or the stream could not tell a picture's own time from the ring's. */
+static void test_player_decoder_reorder_keeps_picture_time(void) {
+    if (!sr_h264_backend_available()) {
+        fprintf(stderr, "SKIP: picture reordering through the player needs a real H.264 backend\n");
+        return;
+    }
+    uint32_t size = 0;
+    uint8_t *image = build_psmf_av(&size, AV_LAYOUT_REORDER);
+    if (!image) { CHECK(0, "psmf-reorder-real: the reordering A/V container builds"); return; }
+    s_player_image = image;
+    s_player_image_size = size;
+    lc_prepare_guest();
+    CHECK(guest_mpeg_import(AV_NID_CREATE, AV_PLAYER, AV_CREATE, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_SET_PSMF, AV_PLAYER, AV_PATH, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_START, AV_PLAYER, AV_CONFIG, 0, 0, 0) == 0,
+          "psmf-reorder-real: the player is created, opened and started");
+    uint8_t ref[AV_PICTURES][4];
+    for (int k = 0; k < AV_PICTURES; k++) ref_psp_rgba(reorder_luma(k), 128, 128, ref[k]);
+    int delivered = 0, unknown = 0, repeated = 0, wrong_time = 0, out_of_submit_order = 0;
+    int got[AV_PICTURES];
+    memset(got, 0, sizeof(got));
+    for (int guard = 0; guard < 4096 && delivered < AV_PICTURES; guard++) {
+        if (guest_mpeg_import(AV_NID_GET_VIDEO, AV_PLAYER, AV_VIDEO, 0, 0, 0) == 0) {
+            int id = -1;
+            for (int k = 0; k < AV_PICTURES && id < 0; k++)
+                if (guest_rgba_matches(GUEST_BUF, 1u, 1u, ref[k])) id = k;
+            int64_t displaypts = (int64_t)MEM_R32(AV_VIDEO + 8);
+            MEDIA_DEBUG("psmf-reorder-real: delivery %d is access unit %d, displaypts %lld\n",
+                        delivered, id, (long long)displaypts);
+            if (id < 0) {
+                unknown++;
+            } else {
+                if (got[id]++) repeated++;
+                if (id != delivered) out_of_submit_order++;
+                if (displaypts != av_video_pts(reorder_display_index(id, AV_PICTURES))) wrong_time++;
+            }
+            delivered++;
+        }
+        (void)guest_mpeg_import(AV_NID_GET_AUDIO, AV_PLAYER, AV_AUDIO, 0, 0, 0);
+        if (guest_mpeg_import(AV_NID_UPDATE, AV_PLAYER, 0, 0, 0, 0) != 0) break;
+    }
+    MEDIA_DEBUG("psmf-reorder-real: backend %s delivered %d, %d out of submit order\n",
+                sr_h264_selected_backend(), delivered, out_of_submit_order);
+    CHECK(delivered == AV_PICTURES, "psmf-reorder-real: every authored picture reached the guest");
+    CHECK(unknown == 0 && repeated == 0,
+          "psmf-reorder-real: every delivered picture is one authored picture, delivered once");
+    CHECK(out_of_submit_order > 0,
+          "psmf-reorder-real: the decoder returns the pictures in display order, not decode order");
+    CHECK(wrong_time == 0,
+          "psmf-reorder-real: each decoded picture is handed the time of its own access unit");
+    CHECK(guest_mpeg_import(AV_NID_DELETE, AV_PLAYER, 0, 0, 0, 0) == 0,
+          "psmf-reorder-real: the player is deleted");
+    s_player_image = NULL;
+    s_player_image_size = 0;
+    free(image);
 }
 
 /* ---- A/V offset at the host presentation boundaries (issue #279) -------------------------
@@ -5685,6 +5952,9 @@ int main(int argc, char **argv) {
     test_psmf_av_timing_first_principles();
     test_player_av_presentation_timing(AV_LAYOUT_SPLIT);
     test_player_av_presentation_timing(AV_LAYOUT_PACKED);
+    test_player_reordered_pictures_keep_their_own_time(1);
+    test_player_reordered_pictures_keep_their_own_time(0);
+    test_player_decoder_reorder_keeps_picture_time();
     test_player_av_presentation_boundary();
     test_player_av_composited_presentation();
     test_mpeg_csc_presentation_boundary(0);

@@ -273,11 +273,37 @@ static bool safe_tag(const char *tag) {
     return true;
 }
 
+#define REPOSITORY_URL_LENGTH (sizeof(NK_UPDATE_REPOSITORY_URL) - 1)
+
+/* The first REPOSITORY_URL_LENGTH characters of url name this repository: GitHub owner and
+   repository names are case-insensitive, so they compare without ASCII case. */
+static bool names_this_repository(const char *url) {
+    if (!url || strlen(url) < REPOSITORY_URL_LENGTH) return false;
+    for (size_t i = 0; i < REPOSITORY_URL_LENGTH; i++) {
+        char a = url[i], b = NK_UPDATE_REPOSITORY_URL[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return false;
+    }
+    return true;
+}
+
+/* url is prefix + tag (+ "/" + name), where prefix starts with NK_UPDATE_REPOSITORY_URL; only
+   the repository part ignores case. */
 static bool exact_url(const char *url, const char *prefix, const char *tag, const char *name) {
     char expected[512];
     int n = name ? snprintf(expected, sizeof(expected), "%s%s/%s", prefix, tag, name)
                  : snprintf(expected, sizeof(expected), "%s%s", prefix, tag);
-    return url && n > 0 && (size_t)n < sizeof(expected) && strcmp(url, expected) == 0;
+    return n > 0 && (size_t)n < sizeof(expected) && names_this_repository(url) &&
+           strcmp(url + REPOSITORY_URL_LENGTH, expected + REPOSITORY_URL_LENGTH) == 0;
+}
+
+bool nk_update_is_release_page(const char *url) {
+    static const char page_prefix[] = NK_UPDATE_RELEASE_PAGE_PREFIX;
+    const size_t prefix = sizeof(page_prefix) - 1;
+    return names_this_repository(url) && strlen(url) > prefix &&
+           strncmp(url + REPOSITORY_URL_LENGTH, page_prefix + REPOSITORY_URL_LENGTH,
+                   prefix - REPOSITORY_URL_LENGTH) == 0;
 }
 
 static bool hex64(const char *text) {
@@ -953,6 +979,33 @@ static bool listed_files_present(const char *root, char *missing, size_t missing
     return count > 0;
 }
 #endif
+
+bool nk_update_installed_by_setup(const char *exe_dir) {
+    char uninstaller[NK_MAX_PATH];
+    size_t bin_end, bin_start, install_end;
+    int n;
+    if (!exe_dir || !exe_dir[0]) return false;
+    /* <install>/bin, with Inno's uninstaller beside bin. */
+    bin_end = trimmed_length(exe_dir);
+    bin_start = last_component(exe_dir, bin_end);
+    if (bin_end - bin_start != 3 || strncmp(exe_dir + bin_start, "bin", 3) != 0 || bin_start < 2) {
+        return false;
+    }
+    install_end = bin_start - 1;
+    n = snprintf(uninstaller, sizeof(uninstaller), "%.*s%cunins000.exe", (int)install_end, exe_dir,
+                 nk_platform_path_separator());
+    return n > 0 && (size_t)n < sizeof(uninstaller) && nk_platform_file_exists(uninstaller);
+}
+
+bool nk_update_refuse_for_setup_copy(const char *exe_dir, NkUpdateError *error) {
+    clear_error(error);
+    if (!nk_update_installed_by_setup(exe_dir)) return false;
+    set_error(error, "UPDATE_INSTALLED_BY_SETUP", "Update with Setup",
+              "This copy was installed with Setup, so it updates by running the new release's Setup, "
+              "not by unpacking a ZIP beside it. Download the new Setup from the release page and "
+              "run it; it keeps your games, saves and settings.");
+    return true;
+}
 
 bool nk_update_install_supported(void) {
 #if defined(_WIN32) || defined(_WIN64)
