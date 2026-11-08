@@ -171,11 +171,12 @@ The enhancement subsystem was built in phases, each keeping fidelity intact:
    - Machine-readable package schema in `assets/enhancement_package.schema.json`.
    - Standalone package validation tooling in `tools/enhancement_package.py`.
    - Comprehensive unit test suite in `tools/test_enhancement_package.py`.
-2. **Phase 2: First-Proof Synthetic Presentation Fixture (not built):**
-   - Implement a minimal, source-owned synthetic presentation overlay fixture in the native player.
-   - Prove that authentic execution remains 100% byte- and trace-equivalent when the overlay is disabled.
-   - Verify that enabling the overlay stamps diagnostics into evidence metadata without mutating guest memory.
-   - Verify fail-closed package rejection in the native loader.
+2. **Phase 2: First-Proof Synthetic Presentation Fixture (retired; #1069):**
+   - Host presentation ships as Enhanced and Ace *parts* (section 10): project-authored code in the player and
+     runtime, with no package and no loader. No native presentation-package loader is planned, so the
+     `presentation` payload stays forbidden in the schema.
+   - Authentic mode, the default, keeps the guarantee this phase was meant to prove: with every part off, the
+     player runs the authentic path (section 10).
 3. **Phase 3: Asset Replacement Engine (not built; section 10.12 is a development-only texture replacement):**
    - Texture dumping and replacement interface at the host GPU backend.
    - Streaming replacement audio handler.
