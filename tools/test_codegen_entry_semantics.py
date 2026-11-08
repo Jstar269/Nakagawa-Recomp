@@ -535,7 +535,7 @@ int main(void) {{
                 starts, ranges = analyze.analyze(elf)
                 if not refused:
                     body = "\n".join(codegen.emit_function(elf, owner, ranges, starts))
-                    self.assertIn("_sp_kept = 0u;", body, "the control: F checks its load")
+                    self.assertIn("_sp_kept = SR_TAIL_RELEASES;", body, "the control: F checks its load")
                 else:
                     with self.assertRaises(codegen.Unsupported):
                         codegen.emit_function(elf, owner, ranges, starts)

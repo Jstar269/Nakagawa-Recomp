@@ -118,6 +118,7 @@
 #include "../perf.h"
 #include "../ace.h"   /* Ace Mode: the 30 Hz detector counts draws per target (Ace on only) */
 #include "tex_scale.h"   /* texture scaling (xBRZ) and the smart 2D filter (Ace on only) */
+#include "glyph_recon.h"  /* sharp game text: glyph reconstruction (Ace on only, #2110) */
 #include "pipeline_cache.h"   /* the pipeline cache's file on disk (#2149) */
 #include "../texrepl.h"  /* texture replacement packs (#1880; Ace on only) */
 
@@ -266,6 +267,7 @@ typedef struct {
     uint64_t range_lo[8], range_hi[8];     /* canonical source ranges, level 0 first (#282) */
     int range_n;
     int content_valid;
+    uint64_t gen;                          /* content generation: new on every decode-upload (glyph tiles are keyed on it) */
     int pending;                           /* referenced by not-yet-submitted batches */
     uint8_t *shadow;
     uint32_t shadow_bytes;
@@ -292,6 +294,9 @@ typedef struct {
         VkDescriptorSet set;
         VkSampler smp_af; VkDescriptorSet set_af;
     } xs;
+    /* Sharp game text (glyph_recon.h, glyph_gpu.inc): the rebuilt glyph rectangles of this page, in
+     * a host-only image beside the guest-resolution one. NULL until a draw's rectangle is rebuilt. */
+    struct GlSet *gl;
 } TexEnt;
 
 typedef struct { PipeKey key; VkPipeline pipe; int used; } PipeEnt;
@@ -442,8 +447,12 @@ static int s_xs_smart2d = 0;
  * copy machinery: it is an image `repl_factor` times the guest texture, held in the entry's xs copy. */
 static NkTexRepl *s_repl = NULL;
 static uint64_t s_cnt_repl_bound = 0, s_cnt_repl_queued = 0;
+static uint64_t s_tex_gen = 0;             /* texture cache content generations handed out (TexEnt.gen) */
 static uint64_t s_xs_serial = 0;          /* content generations handed out */
 static int s_tex_bound_scale = 1;          /* factor of the set tex_get last returned */
+static TexEnt *s_tex_cur;                  /* the cache entry tex_bind_set last handled (glyph_apply checks its set) */
+static int s_glyphs = 0;                   /* sharp game text is on and the render scale is above 1 (#2110) */
+static int s_glyphs_asked = 0;             /* SR_GLYPHS was on for this Ace run: the exit lines print */
 static VkDescriptorSet s_tex_plain_set;    /* with a copy returned: the entry's unscaled set */
 /* A draw that maps one texel to one pixel binds the unscaled texture even when a copy is ready:
  * xBRZ adds no detail at that size, and a copy of an atlas (a font page) carries neighbouring
@@ -3853,6 +3862,7 @@ static void tex_xs_budget_wait(TexEnt *e) {
 
 /* Evict the least-recently-used quarter of the cache (the working set survives; the
  * old full-clear rebuilt EVERY texture every frame once a scene exceeded the cap). */
+static void tex_gl_free(TexEnt *e);   /* glyph_gpu.inc */
 static void tex_evict_lru(void) {
     /* The caller submits batches before eviction.  Texture uploads and render submits
      * use the scoped GE fence, so there is no device-wide lifetime dependency here. */
@@ -3872,6 +3882,7 @@ static void tex_evict_lru(void) {
         vkDestroyImage(s_dev, e->img, NULL);
         vkFreeMemory(s_dev, e->mem, NULL);
         tex_xs_free(e);
+        tex_gl_free(e);
         *e = s_tex[--s_tex_n];
     }
 }
@@ -4440,6 +4451,7 @@ static void tex_xs_collect(void) {
  * (tex_xs_bindable, tex_xs_eligible), else tex_entry_set's. s_tex_bound_scale reports which. */
 static VkDescriptorSet tex_bind_set(TexEnt *e, uint32_t levels) {
     s_tex_bound_scale = 1;
+    s_tex_cur = e;
     if (!xs_enabled() || !tex_xs_bindable(e) || !tex_xs_eligible(e, levels)) return tex_entry_set(e);
     VkDescriptorSet set = e->xs.set;
     if (s_ace_af && (tex_filter_variant(s_ge->tex_filter) & 2u) && !(s_ge->vtype & (1u << 23))) {
@@ -4494,6 +4506,7 @@ static void tex_xs_retry(TexEnt *e, uint32_t levels) {
 
 static VkDescriptorSet tex_get(void) {
     s_tex_bound_scale = 1;
+    s_tex_cur = NULL;
     tex_xs_collect();
     int w = s_ge->tex_w, h = s_ge->tex_h;
     if (w <= 0 || h <= 0 || w > 512 || h > 512) return s_white_set;
@@ -4558,6 +4571,7 @@ static VkDescriptorSet tex_get(void) {
             return s_white_set;
         }
         e->hash = hash;
+        e->gen = ++s_tex_gen;
         e->content_valid = 1;
         tex_note_valid();
         tex_shadow_store(e);
@@ -4583,6 +4597,7 @@ static VkDescriptorSet tex_get(void) {
     e->set = make_descriptor(e->view, e->smp, s_dpool_tex);
     if (!e->set) return s_white_set;
     e->key = key; e->hash = hash;
+    e->gen = ++s_tex_gen;
     e->w = w; e->h = h;
     e->addr = s_ge->tex_addr;
     e->bytes = tex_source_size();
@@ -4600,6 +4615,8 @@ static VkDescriptorSet tex_get(void) {
     tex_xs_note_upload(e, levels);   /* s_texscratch still holds level 0 when levels == 1 */
     return tex_bind_set(e, levels);
 }
+
+#include "glyph_gpu.inc"   /* sharp game text (#2110): the rebuilt glyph rectangles of a cache entry */
 
 /* ---- capture --------------------------------------------------------------------------- */
 
@@ -5772,6 +5789,13 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
             if (xs1) xs_onetoone_plain(&b);
         }
     }
+    /* Sharp game text (glyph_recon.h): a sprite that maps one texel to one pixel over a page of
+     * anti-aliased coverage draws from the rebuilt glyph image when its tile is ready. */
+    int glyph_bound = 0;
+    if (s_glyphs && (((uint32_t)b.pc.cfg[0] >> 8) & F_TEX) && !b.tsrc && !b.tsnap && s_tex_cur &&
+        b.dset == s_tex_cur->set && !(((uint32_t)b.pc.cfg[0] >> 8) & (F_LODFRAG | F_CLEAR)) &&
+        nk_smart2d_sprite(xa, ya, xb, yb, ul, vt, ur, vbm))
+        glyph_bound = glyph_apply(&b, s_tex_cur, ul, ur, vt, vbm);
     float ua = ul, ub = ur, va = vt, vb = vbm;
     if (s_scale > 1 && s_ge->tex_enable && !(s_ge->tex_filter & 0x100u)) {   /* nearest mag */
         sprite_nearest_axis(&ua, &ub, xb - xa);
@@ -5784,7 +5808,9 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
     ensure_room(6);
     uint64_t vertex_started = cpu_profile_now();
     uint32_t first = s_nverts;
-    if (uv_edge_applies(persp)) {   /* the centres xa + 0.5 .. xb - 0.5 and ya + 0.5 .. yb - 0.5 */
+    /* A rebuilt glyph tile holds only its own rectangle, so no neighbouring cell can reach an edge sample and
+     * the range (uv_edge_axis) is not needed: every device pixel samples its own rebuilt texel. */
+    if (!glyph_bound && uv_edge_applies(persp)) {   /* the centres xa + 0.5 .. xb - 0.5 and ya + 0.5 .. yb - 0.5 */
         uv_edge_axis(xa, xb, ua, ub, &s_uv_box[0], &s_uv_box[2]);
         uv_edge_axis(ya, yb, va, vb, &s_uv_box[1], &s_uv_box[3]);
     }
@@ -6520,6 +6546,9 @@ static const GeGpuHooks k_hooks = {
 #ifdef SR_GPU_TEXSCALE_SELFTEST
 #include "tex_scale_gpu_selftest.inc"
 #endif
+#ifdef SR_GPU_GLYPH_SELFTEST
+#include "glyph_gpu_selftest.inc"
+#endif
 
 void gegpu_ace_stats(GeGpuAceStats *out) {
     if (!out) return;
@@ -6735,7 +6764,24 @@ int gegpu_init(void) {
         s_xs_smart2d = xs->smart2d;
     }
     tex_repl_init(g_ace_on);
-    const uint32_t tex_sets = (s_ace_af ? 2u * MAX_TEX : MAX_TEX) * (xs_enabled() ? 2u : 1u);
+    {
+        /* Sharp game text (glyph_recon.h): Ace runs only. Its image lives in the scaled-copy budget
+         * and takes one more descriptor set per entry that has one. */
+        const NkGlyphConfig *gl = nk_glyph_init_from_env(g_ace_on);
+        s_glyphs_asked = gl->on;
+        s_glyphs = gl->on && s_scale >= NK_GLYPH_MIN_FACTOR && s_scale <= MAX_SCALE;
+        if (gl->on && !s_glyphs)
+            fprintf(stderr, "GLYPHS: idle (render scale %d leaves nothing to sharpen; it takes %d to %d)\n",
+                    s_scale, NK_GLYPH_MIN_FACTOR, MAX_SCALE);
+        if (s_glyphs && !nk_tex_scale_config()->budget_bytes) {
+            NkTexScaleConfig c = *nk_tex_scale_config();
+            c.budget_bytes = (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20;
+            nk_tex_scale_configure(&c);
+        }
+    }
+    /* Per entry: its set (and the anisotropic one), a scaled copy's set (and its anisotropic one), and a glyph image's. */
+    const uint32_t per_entry = (s_ace_af ? 2u : 1u) + (xs_enabled() ? (s_ace_af ? 2u : 1u) : 0u) + (s_glyphs ? 1u : 0u);
+    const uint32_t tex_sets = MAX_TEX * per_entry;
     s_tex_pool_sets = tex_sets;
     if (s_ace_af) ace_confirm(ACE_FEATURE_AF);   /* the renderer that filters is up */
     VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, tex_sets };
@@ -6925,8 +6971,13 @@ void gegpu_shutdown(void) {
         if (e->img) vkDestroyImage(s_dev, e->img, NULL);
         if (e->mem) vkFreeMemory(s_dev, e->mem, NULL);
         tex_xs_free(e);
+        tex_gl_free(e);
     }
     s_tex_n = 0;
+    if (s_glyphs_asked) {
+        glyph_report();
+        s_glyphs_asked = s_glyphs = 0;
+    }
     const int had_repl = s_repl != NULL;
     tex_repl_shutdown();   /* the exit line, the pack closed; the scaled-copy machinery it used goes next */
     if (had_repl && !s_xs_factor && !s_xs_smart2d) nk_tex_scale_shutdown();
