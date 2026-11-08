@@ -544,38 +544,12 @@ class NonBodyCouplingTests(unittest.TestCase):
             self.assertTrue(catalog[resume].resumable)
             self.assertEqual(catalog[resume].owner, owner)
 
-    def _sv_words(self, base):
-        # lui/ori is a two-instruction predictable run -> one flush point.
-        return {base: LUI_T0, base + 4: ORI_T0}
-
-    def test_sv_special_addresses_are_only_excluded_under_hst(self):
-        options = codegen.CodegenOptions(static_verify=True)
-        for addr in sorted(codegen._SV_SPECIAL):
-            words = self._sv_words(addr)
-            elf = _FakeElf(words)
-            none_pts = codegen.sv_plan(elf, set(words), set(), hst_profile=False,
-                                       options=options)
-            hst_pts = codegen.sv_plan(elf, set(words), set(), hst_profile=True,
-                                      options=options)
-            self.assertTrue(
-                none_pts,
-                f"profile=none suppressed --static-verify at 0x{addr:08x} "
-                f"solely because that address is in _SV_SPECIAL",
-            )
-            self.assertEqual(
-                hst_pts, {},
-                f"profile=hst no longer excludes 0x{addr:08x} from "
-                f"--static-verify; that is a legacy behavior change",
-            )
-            control = addr + CONTROL_DELTA
-            ctl_words = self._sv_words(control)
-            ctl_pts = codegen.sv_plan(
-                _FakeElf(ctl_words), set(ctl_words), set(), hst_profile=False,
-                options=options)
-            self.assertEqual(
-                {a - addr: v for a, v in none_pts.items()},
-                {a - control: v for a, v in ctl_pts.items()},
-            )
+    def test_sv_special_holds_only_guest_patch_addresses(self):
+        # The four stand-alone HST exclusions were retired under #363, so _SV_SPECIAL
+        # holds only GUEST_PATCHES addresses, and there are none. RetiredLoopSiteTests
+        # checks that --static-verify covers the retired functions under profile=hst.
+        self.assertEqual(codegen._SV_SPECIAL, set(codegen.GUEST_PATCHES))
+        self.assertEqual(codegen._SV_SPECIAL, set(), "a static-verify exclusion is back")
 
 
 class _FakeElf:

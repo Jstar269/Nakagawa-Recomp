@@ -4231,13 +4231,15 @@ def _dup_slot_skips(elf, insns, labels):
 
 
 # No title-address site rewrites a guest word any more (#363). The loop caps went first (the
-# F3 and F4 audits); on 2026-11-08 the last three HST-profile sites followed. MEMSET_FASTPATH and ARRSHIFT_FASTPATH replaced two of the
-# title's own loops (a zero fill and a reverse 8-byte element shift) with one native pass, a
-# shortcut from the time those loops ran one interpreted instruction per dispatch; both now
-# translate as written, like every other AOT loop. GUEST_ABORT ended the run with _Exit(9) at
-# the title's abort() instead of letting its body call its handlers and spin; it now runs as
-# written, and a thread spinning there is named by the scheduler's spin watchdog like any
-# other stuck thread.
+# F3 and F4 audits); on 2026-11-08 the last three HST-profile sites followed.
+# MEMSET_FASTPATH and ARRSHIFT_FASTPATH replaced two of the title's own loops (a zero fill and
+# a reverse 8-byte element shift) with one native pass, a shortcut from the time those loops
+# ran one interpreted instruction per dispatch; both now translate as written, like every
+# other AOT loop. GUEST_ABORT ended the run with _Exit(9) at the title's abort() instead of
+# letting its body call its handlers and spin; it now runs as written. A thread spinning
+# there is diagnosed like any other stuck thread: the scheduler's spin watchdog dumps it when
+# no other thread is runnable, and otherwise the display's no-new-frame watchdog names it. The
+# run does not end on its own; SR_WATCHDOG_EXIT=<N> ends it after N vblanks with no new frame.
 
 
 def _emit_non_control_word(ctx, out, addr, w, sv_points):
