@@ -2246,9 +2246,8 @@ class NativePlayerUiTests(unittest.TestCase):
                          "a new library starts on Custom, with the page's own line")
         medium = lines[-1]
         self.assertEqual(medium["note"],
-                         "Medium is used in Enhanced and Ace. Authentic uses your own display "
-                         "settings.")
-        self.assertNotIn("FSR 1", medium["note"])
+                         "Medium is used in Enhanced and Ace, with Crisp system text and Sharper "
+                         "enlarging on. Authentic uses your own display settings.")
         settings = run["settings"]
         assert isinstance(settings, dict)
         self.assertEqual(settings.get("graphics_preset"), "medium", "two steps: Low, then Medium")
@@ -2259,8 +2258,9 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIs(settings.get("fullscreen"), False)
 
     def test_next_ui_graphics_preset_ultra_note_and_custom_on_edit(self) -> None:
-        """#2150: Ultra's row reads Ultra and its note says it uses the FSR 1 upscaler;
-        editing a row the preset sets (Resolution) makes it Custom and the note goes."""
+        """#2150: Ultra's row reads Ultra and its note names the Enhanced parts it turns on,
+        High's the one it turns off; editing a row the preset sets (Resolution) makes it Custom
+        and the note goes."""
         focus = self.SETTINGS_FOCUS
         run = self.next_ui_run(
             "settings",
@@ -2278,9 +2278,9 @@ class NativePlayerUiTests(unittest.TestCase):
                          run["stdout"])
         ultra = lines[4]
         self.assertIn("Ultra is used in Enhanced and Ace", ultra["note"])
-        self.assertIn("with the FSR 1 upscaler", ultra["note"])
+        self.assertIn("with Crisp system text and Sharper enlarging on", ultra["note"])
         self.assertIn("Authentic uses your own display settings", ultra["note"])
-        self.assertNotIn("FSR 1", lines[3]["note"])
+        self.assertIn("with Crisp system text on and Sharper enlarging off", lines[3]["note"])
         self.assertEqual((lines[-1]["note"],), ("",),
                          "an edited row makes the preset Custom and its note goes")
         settings = run["settings"]

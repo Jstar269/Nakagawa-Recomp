@@ -537,27 +537,45 @@ SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut wit
 (top left) are chips on the 16 px safe area.
 GRAPHICS PRESET is the GAME card's last row (#2150). It steps through LOW, MEDIUM, HIGH, ULTRA and HANDHELD.
 A preset is used only by Enhanced and Ace sessions, where its values take the place of the RESOLUTION, SCALING,
-VSYNC and GAME FULLSCREEN rows; ULTRA also turns the FSR 1 upscaler (the SHARPER ENLARGING part) on, over that
-part's own setting. Choosing one changes none of those rows or the part, and an Authentic session always runs with
-them as the user set them, whatever the preset. The reason is that a render scale above 1x is not host-only: every
+VSYNC and GAME FULLSCREEN rows and of two Enhanced parts' library values, CRISP SYSTEM TEXT and SHARPER ENLARGING
+(the FSR 1 upscaler). Choosing one changes none of those rows or parts, and an Authentic session always runs with
+the rows as the user set them, whatever the preset. The reason is that a render scale above 1x is not host-only: every
 present commits the frame to guest VRAM, so a game that copies its screen (a save picture) keeps the larger picture
 (`docs/ENHANCEMENT_CONTRACT.md` section 10.3, Pixels), and Authentic launch output must not change with a
 preset. Editing one of the rows a preset sets makes it CUSTOM, which means the rows apply in every session; GAME
 FULLSCREEN does so only under HANDHELD, the one preset that sets it. While a preset is chosen, the page's notice
-line says that it is used in Enhanced and Ace and that Authentic uses the rows. The settings file keeps the
+line says that it is used in Enhanced and Ace, names the parts it turns on and off, and says that Authentic uses
+the rows (`HIGH is used in Enhanced and Ace, with Crisp system text on and Sharper enlarging off. Authentic uses
+your own display settings.`, the longest, on one line at 960 x 540). The settings file keeps the
 preset's name beside the rows, and a file without it, or with a name this build doesn't know, loads as CUSTOM. The
 values are starting points, to be tuned by measurement on real titles. They live in one table,
 `k_graphics_presets` in `src/player/player_state.c`:
 
-| Preset | Resolution | Scaling | VSync | Game fullscreen | Also |
-| --- | --- | --- | --- | --- | --- |
-| LOW | 1x (480x272) | Sharp | On | the row's | |
-| MEDIUM | 2x | Sharp | On | the row's | |
-| HIGH | 4x | Sharp | On | the row's | |
-| ULTRA | 4x | Sharp | On | the row's | turns the FSR 1 upscaler on, whatever SHARPER ENLARGING says (Enhanced and Ace only; the notice line says so; where the GPU renderer cannot run FSR 1 the normal scaling filter stays, as for the part) |
-| HANDHELD | 2x | Sharp | On | On | |
+| Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging |
+| --- | --- | --- | --- | --- | --- | --- |
+| LOW | 1x (480x272) | Sharp | On | the row's | On | Off |
+| MEDIUM | 2x | Sharp | On | the row's | On | On |
+| HIGH | 4x | Sharp | On | the row's | On | Off |
+| ULTRA | 4x | Sharp | On | the row's | On | On |
+| HANDHELD | 2x | Sharp | On | On | On | On |
 
-A preset never changes frame pacing, the play mode or the launch line. Editing SHARPER ENLARGING, for the library or one game, sets an ULTRA preset to CUSTOM, which uses the part's own value.
+A preset sets only presentation parts, which never reach the guest. CRISP SYSTEM TEXT draws the on-screen keyboard
+at the window's size and costs nothing while the keyboard is down, so every preset turns it on. SHARPER ENLARGING
+runs only where the window enlarges the frame on both axes, and FSR 1 is made for enlarging 1.3x to 2x: MEDIUM's and
+HANDHELD's 2x frame on a 1080p or handheld screen and ULTRA's 4x frame above 1080p are in that range. LOW turns it
+off, since its 1x frame is enlarged 4x in a 1080p window, past that range, and LOW is for the weakest GPUs; HIGH
+turns it off as ULTRA without it, the plain 4x picture. Where the GPU renderer cannot run FSR 1, the normal scaling
+filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes. No preset sets frame
+pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN PITCHED SOUND, the SPEED READOUT or the
+GAME BADGE: they change timing, framing, guest-visible output or the HUD, or have no measured cost on low-end GPUs,
+so they stay the library's and each game's.
+
+The parts a preset sets are resolved with the rest (`player_play_resolve`): a game's own value, else the preset's,
+else the library's, so the launch line, `SR_PRESENT_UPSCALE` and both Enhanced pages agree. Settings > Enhanced shows
+a part the preset sets with the preset's value and name (`ON (ULTRA)`), and a game's page following the library
+shows that value (`LIBRARY (ON)`). Editing such a part on Settings > Enhanced steps from the value shown and sets the
+preset to CUSTOM, which then uses the library's own values; editing a part for one game keeps the preset, since the
+game's own value wins over it.
 Left and Right move between the two cards along a row (`NK_UI_BUTTON_ROW`), so CONTROLLER SETTINGS is reached from
 SCALING. Every change is saved as it is made. Below a 680 px tall window the `SETTINGS` heading is left out (the tab names the
 page) so every row fits 960 x 540. The tabbed layout below is a design that is not built:

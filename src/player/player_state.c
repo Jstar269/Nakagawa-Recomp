@@ -2467,23 +2467,38 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
 
 /* The graphics presets (#2150), one row each. Starting values, to be tuned by
    measurement on real titles: Low draws at the PSP's own 480x272, Medium and Handheld
-   at 2x, High and Ultra at 4x (the GPU renderer's largest scale). Ultra also turns on the
-   FSR 1 upscaler (the "Sharper enlarging" part, #2122) for Enhanced and Ace. Handheld
-   keeps a battery-friendly 2x and starts games fullscreen. No row touches frame pacing or
-   the play mode; Ultra's upscaler overrides the Sharper enlarging part for the session, and
-   editing that part makes the preset Custom. Only Enhanced and Ace sessions use a row
-   (player_session_apply_graphics_preset). docs/PLAYER_UI_DESIGN.md lists the same values. */
+   at 2x, High and Ultra at 4x (the GPU renderer's largest scale). Handheld keeps a
+   battery-friendly 2x and starts games fullscreen.
+
+   A row also sets the Enhanced parts that suit it, and only presentation parts, which never
+   reach the guest (docs/ENHANCEMENT_CONTRACT.md 2.2): Crisp system text is on in every
+   preset (it draws only while the on-screen keyboard is up), and Sharper enlarging (the
+   FSR 1 upscaler, #2122) is on in Medium, Ultra and Handheld. FSR 1 runs only where the
+   window enlarges the frame on both axes, and is made for 1.3x to 2x: Medium's and
+   Handheld's 2x frame on a 1080p or handheld screen, and Ultra's 4x frame on a screen above
+   1080p, each for well under a millisecond (fsr1-selftest's cost cell). Low turns it off:
+   its 1x frame is enlarged 4x in a 1080p window, past that range, on the weakest GPUs; High
+   turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
+   motion, Widescreen, texture filtering, sound, the readout or the badge: those stay the
+   library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
+   test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
+#define PRESET_PARTS(text, upscale)                                                        \
+    {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
+     [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \
+     [PLAYER_PART_SAS] = -1, [PLAYER_PART_UPSCALE] = (upscale)}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
-    [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1, false},
+    [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
+                           PRESET_PARTS(1, 0)},
     [PLAYER_PRESET_MEDIUM] = {"medium", "Medium", "Medium", 2, NK_PRESENT_SCALING_SHARP, true,
-                              -1, false},
+                              -1, PRESET_PARTS(1, 1)},
     [PLAYER_PRESET_HIGH] = {"high", "High", "High", 4, NK_PRESENT_SCALING_SHARP, true, -1,
-                            false},
-    [PLAYER_PRESET_ULTRA] = {"ultra", "Ultra", "Ultra", 4,
-                             NK_PRESENT_SCALING_SHARP, true, -1, true},
+                            PRESET_PARTS(1, 0)},
+    [PLAYER_PRESET_ULTRA] = {"ultra", "Ultra", "Ultra", 4, NK_PRESENT_SCALING_SHARP, true, -1,
+                             PRESET_PARTS(1, 1)},
     [PLAYER_PRESET_HANDHELD] = {"handheld", "Handheld", "Handheld", 2,
-                                NK_PRESENT_SCALING_SHARP, true, 1, false},
+                                NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
 };
+#undef PRESET_PARTS
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -2507,9 +2522,26 @@ bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!row) return false;
-    /* One line, so the page still fits 960 x 540 (test_player_screens.c). */
+    /* The parts it sets, by their rows' names: "with A and B on", or "with A on and B off".
+       One line, so the page still fits 960 x 540 (test_player_screens.c). */
+    char list[2][96] = {"", ""}; /* [0] the parts it turns on, [1] those it turns off */
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+        if (row->part[p] < 0) continue;
+        char *into = list[row->part[p] != 0 ? 0 : 1];
+        size_t used = strlen(into);
+        int w = snprintf(into + used, sizeof(list[0]) - used, "%s%s", used ? " and " : "",
+                         player_enhanced_part(p)->name);
+        if (w <= 0 || (size_t)w >= sizeof(list[0]) - used) return false;
+    }
+    char with[224] = "";
+    if (list[0][0] && list[1][0]) {
+        snprintf(with, sizeof(with), ", with %s on and %s off", list[0], list[1]);
+    } else if (list[0][0] || list[1][0]) {
+        snprintf(with, sizeof(with), ", with %s %s", list[0][0] ? list[0] : list[1],
+                 list[0][0] ? "on" : "off");
+    }
     int n = snprintf(out, cap, "%s is used in Enhanced and Ace%s. Authentic uses your own display "
-                     "settings.", row->label, row->upscaler ? ", with the FSR 1 upscaler" : "");
+                     "settings.", row->label, with);
     if (n <= 0 || (size_t)n >= cap) {
         out[0] = '\0';
         return false;
@@ -2552,7 +2584,13 @@ void player_session_apply_graphics_preset(const PlayerSettings *settings, bool e
     config->present_scaling = row->present_scaling;
     config->vsync = row->vsync;
     if (row->fullscreen >= 0) config->fullscreen = row->fullscreen != 0;
-    if (row->upscaler) config->present_upscale = NK_PRESENT_UPSCALE_FSR1;
+    /* The parts a row sets reach the session through player_play_resolve. */
+}
+
+int player_settings_library_part(const PlayerSettings *settings, int part) {
+    if (!settings || part < 0 || part >= PLAYER_PART_COUNT) return 0;
+    const PlayerGraphicsPresetRow *row = player_graphics_preset_row(settings->graphics_preset);
+    return row && row->part[part] >= 0 ? row->part[part] : settings->enhanced.part[part];
 }
 
 const char *player_present_scaling_label(int scaling) {
@@ -3179,7 +3217,9 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
     }
     out->on = true;
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
-        int value = title && title->part[p] >= 0 ? title->part[p] : settings->enhanced.part[p];
+        /* A game's own value, else the preset's where it sets the part, else the library's. */
+        int value = title && title->part[p] >= 0 ? title->part[p]
+                                                 : player_settings_library_part(settings, p);
         out->part[p] = enhanced_part_value_index(p, value) >= 0 ? value : 0;
     }
     out->logic_60 = out->mode == PLAYER_PLAY_ACE && (!title || title->logic_60 != 0);
@@ -3306,22 +3346,20 @@ void player_app_toggle_library_play_mode(PlayerApp *app) {
     maybe_persist_settings(app);
 }
 
-/* Sharper enlarging is the one Enhanced part a preset sets (Ultra), so editing it, in the
-   library or for one game, makes the preset Custom, which uses the part's own value. */
-static void graphics_preset_part_edited(PlayerApp *app, int part) {
-    const PlayerGraphicsPresetRow *row = player_graphics_preset_row(app->settings.graphics_preset);
-    if (part == PLAYER_PART_UPSCALE && row && row->upscaler) graphics_preset_row_edited(app);
-}
-
 void player_app_cycle_enhanced_part(PlayerApp *app, int part) {
     const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
     if (!app || !info) return;
-    int index = enhanced_part_value_index(part, app->settings.enhanced.part[part]);
+    /* The step starts from the value the page shows, the preset's where it sets the part.
+       The library's value is then the user's own, so the preset becomes Custom, as for a
+       display row it sets; a part no preset sets leaves the preset as it is. */
+    const PlayerGraphicsPresetRow *row = player_graphics_preset_row(app->settings.graphics_preset);
+    bool preset_sets = row && row->part[part] >= 0;
+    int index = enhanced_part_value_index(part, player_settings_library_part(&app->settings, part));
     int next = index < 0 ? 0 : (index + 1) % info->value_count;
     app->settings.enhanced.part[part] = info->values[next];
     player_dev_log_add(app, "settings", "Enhanced %s for the library: %s", info->key,
                        info->words[next]);
-    graphics_preset_part_edited(app, part);
+    if (preset_sets) graphics_preset_row_edited(app);
     maybe_persist_settings(app);
 }
 
@@ -3383,7 +3421,7 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part) {
     player_dev_log_add(app, "settings", "Enhanced %s for %s: %s", info->key, entry.key,
                        entry.part[part] < 0 ? "library default"
                                             : enhanced_part_word(part, entry.part[part]));
-    graphics_preset_part_edited(app, part);
+    /* A game's own value wins over the preset (player_play_resolve), so the preset stays. */
     maybe_persist_settings(app);
 }
 

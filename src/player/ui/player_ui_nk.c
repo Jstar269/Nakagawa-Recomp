@@ -831,7 +831,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
     model->enhanced_mode_sentence =
         "The default for every game; each game's page can choose its own.";
     bool logic_60 = false;
-    bool smooth_on = settings->enhanced.part[PLAYER_PART_SMOOTH] != 0;
+    bool smooth_on = player_settings_library_part(settings, PLAYER_PART_SMOOTH) != 0;
     if (title >= 0) {
         const GameRecord *game = &app->games[title];
         PlayerPlayMode chosen = player_app_title_play_mode(app, title);
@@ -861,11 +861,20 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
         PlayerUiEnhancedRow *row = &model->enhanced_rows[model->enhanced_row_count++];
-        int library = settings->enhanced.part[p];
+        /* The library's value as a session uses it: the graphics preset's where it sets the
+           part (#2150), which the library page names, "On (Ultra)". */
+        int library = player_settings_library_part(settings, p);
+        const PlayerGraphicsPresetRow *preset =
+            player_graphics_preset_row(player_app_graphics_preset(app));
         row->name = info->name;
         row->sentence = info->sentence;
         row->value = player_enhanced_part_label(p, library);
         row->on = library != 0;
+        if (title < 0 && preset && preset->part[p] >= 0) {
+            snprintf(player->enhanced_values[p], sizeof(player->enhanced_values[p]), "%s (%s)",
+                     player_enhanced_part_label(p, library), preset->label);
+            row->value = player->enhanced_values[p];
+        }
         if (title >= 0) {
             int own = player_app_title_part(app, title, p);
             if (own < 0) {

@@ -7887,15 +7887,23 @@ static void test_graphics_presets(void) {
             assert(player_app_graphics_preset(app) == p);
             assert(strcmp(player_app_graphics_preset_label(app), row->value) == 0);
             assert(app->settings_notice[0] == '\0');
-            /* The note says where the preset applies, and names a value it cannot set. */
+            /* The note says where the preset applies and names the parts it sets, on and off. */
             assert(player_app_graphics_preset_note(app, note, sizeof(note)));
             assert(strstr(note, row->label) != NULL &&
                    strstr(note, " is used in Enhanced and Ace") != NULL &&
                    strstr(note, "Authentic uses your own display settings.") != NULL);
-                    assert((strstr(note, "FSR 1") != NULL) == row->upscaler);
+            assert(strstr(note, "Crisp system text") != NULL);
+            assert((strstr(note, "Sharper enlarging on") != NULL) ==
+                   (row->part[PLAYER_PART_UPSCALE] == 1));
+            assert((strstr(note, "Sharper enlarging off") != NULL) ==
+                   (row->part[PLAYER_PART_UPSCALE] == 0));
 
             /* Authentic: the session's config and launch line equal Custom's with the same
-               rows, under every preset. */
+               rows, under every preset. The library's parts are the opposite of the preset's,
+               so the Enhanced session below shows which one it took. */
+            app->settings.enhanced.part[PLAYER_PART_TEXT] = !row->part[PLAYER_PART_TEXT];
+            app->settings.enhanced.part[PLAYER_PART_UPSCALE] = !row->part[PLAYER_PART_UPSCALE];
+            custom.enhanced = app->settings.enhanced;
             graphics_preset_session(&app->settings, &config, &r, line, sizeof(line));
             graphics_preset_session(&custom, &custom_config, &custom_r, custom_line,
                                     sizeof(custom_line));
@@ -7907,58 +7915,96 @@ static void test_graphics_presets(void) {
                    config.fullscreen == (fs != 0));
             assert(config.present_upscale == NK_PRESENT_UPSCALE_OFF && strcmp(config.ace_spec, "off") == 0);
 
-            /* Enhanced: the session takes the preset's values; the rest is the rows'. */
+            /* Enhanced: the session takes the preset's values and parts; the rest is the
+               rows' and the library's. */
             app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
             custom.enhanced.library = PLAYER_PLAY_ENHANCED;
             graphics_preset_session(&app->settings, &config, &r, line, sizeof(line));
             graphics_preset_session(&custom, &custom_config, &custom_r, custom_line,
                                     sizeof(custom_line));
-            assert(r.on && custom_r.on && strcmp(line, custom_line) == 0);
+            assert(r.on && custom_r.on);
             assert(config.resolution_scale == row->resolution_scale);
             assert(config.present_scaling == row->present_scaling);
             assert(config.vsync == row->vsync);
             assert(config.fullscreen == (row->fullscreen >= 0 ? row->fullscreen != 0 : fs != 0));
             assert(config.fps_cap == custom_config.fps_cap &&
                    config.master_volume == custom_config.master_volume);
-            /* Ultra turns the FSR 1 upscaler on (#2122); every other preset leaves the part's. */
-            assert(config.present_upscale == (row->upscaler ? NK_PRESENT_UPSCALE_FSR1
-                                                            : custom_config.present_upscale));
+            for (int part = 0; part < PLAYER_PART_COUNT; part++) {
+                /* Only presentation parts; every other part is the library's. A new part
+                   needs its own choice here and in k_graphics_presets. */
+                if (part == PLAYER_PART_TEXT || part == PLAYER_PART_UPSCALE) {
+                    assert(row->part[part] == 0 || row->part[part] == 1);
+                    assert(r.part[part] == row->part[part]);
+                    assert(custom_r.part[part] == custom.enhanced.part[part]);
+                } else {
+                    assert(row->part[part] == -1);
+                    assert(r.part[part] == custom_r.part[part]);
+                }
+            }
+            assert(strstr(line, row->part[PLAYER_PART_TEXT] ? ";text=on" : ";text=off") != NULL);
+            assert(config.present_upscale == (row->part[PLAYER_PART_UPSCALE] == 1
+                                                  ? NK_PRESENT_UPSCALE_FSR1
+                                                  : NK_PRESENT_UPSCALE_OFF));
+            assert(custom_config.present_upscale == (custom.enhanced.part[PLAYER_PART_UPSCALE] == 1
+                                                         ? NK_PRESENT_UPSCALE_FSR1
+                                                         : NK_PRESENT_UPSCALE_OFF));
+            assert(player_settings_library_part(&app->settings, PLAYER_PART_UPSCALE) ==
+                   row->part[PLAYER_PART_UPSCALE]);
+            assert(player_settings_library_part(&custom, PLAYER_PART_UPSCALE) ==
+                   custom.enhanced.part[PLAYER_PART_UPSCALE]);
             assert(custom_config.resolution_scale == custom.resolution_scale &&
                    custom_config.present_scaling == NK_PRESENT_SCALING_BILINEAR &&
                    !custom_config.vsync);
+
+            /* A game's own value for a part wins over the preset. */
+            {
+                PlayerSettings own = app->settings;
+                PlayerTitlePlay *t = &own.title_play[0];
+                memset(t, 0, sizeof(*t));
+                snprintf(t->key, sizeof(t->key), "TEST92150"); /* its settings key */
+                t->mode = PLAYER_PLAY_LIBRARY;
+                for (int part = 0; part < PLAYER_PART_COUNT; part++) t->part[part] = -1;
+                t->part[PLAYER_PART_UPSCALE] = !row->part[PLAYER_PART_UPSCALE];
+                t->logic_60 = -1;
+                own.title_play_count = 1;
+                graphics_preset_session(&own, &config, &r, line, sizeof(line));
+                assert(r.on && r.part[PLAYER_PART_UPSCALE] == !row->part[PLAYER_PART_UPSCALE]);
+                assert(r.part[PLAYER_PART_TEXT] == row->part[PLAYER_PART_TEXT]);
+                assert(config.resolution_scale == row->resolution_scale);
+            }
         }
     }
 
-    /* Ultra's upscaler (#2122): it overrides the Sharper enlarging part in Enhanced and Ace,
-       other presets leave the part's own value, Authentic stays off, and editing the part
-       (library or one game) makes Ultra Custom but leaves other presets alone. */
-    for (int part_on = 0; part_on < 2; part_on++) {
-        for (int p = PLAYER_PRESET_LOW; p < PLAYER_PRESET_COUNT; p++) {
-            NkRuntimeConfig cfg;
-            PlayerPlayResolved pr;
-            char pline[192];
-            player_app_settings_init_default(&app->settings);
-            app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
-            app->settings.enhanced.part[PLAYER_PART_UPSCALE] = part_on;
-            app->settings.graphics_preset = p;
-            graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
-            assert(cfg.present_upscale == (p == PLAYER_PRESET_ULTRA || part_on
-                                               ? NK_PRESENT_UPSCALE_FSR1
-                                               : NK_PRESENT_UPSCALE_OFF));
-            app->settings.enhanced.library = PLAYER_PLAY_AUTHENTIC;
-            graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
-            assert(cfg.present_upscale == NK_PRESENT_UPSCALE_OFF);
-        }
+    /* The table (docs/PLAYER_UI_DESIGN.md): Crisp system text on in every preset; Sharper
+       enlarging on in Medium, Ultra and Handheld, off in Low and High. */
+    for (int p = PLAYER_PRESET_LOW; p < PLAYER_PRESET_COUNT; p++) {
+        const PlayerGraphicsPresetRow *row = player_graphics_preset_row(p);
+        assert(row->part[PLAYER_PART_TEXT] == 1);
+        assert(row->part[PLAYER_PART_UPSCALE] ==
+               (p == PLAYER_PRESET_MEDIUM || p == PLAYER_PRESET_ULTRA ||
+                p == PLAYER_PRESET_HANDHELD));
     }
+
+    /* Editing a part a preset sets, for the library, steps from the value the page shows (the
+       preset's) and makes the preset Custom; a part no preset sets leaves it as it is. */
     player_app_settings_init_default(&app->settings);
+    app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
     player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
-    player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE); /* shown On (Ultra), so Off */
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 0);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_LOW);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE); /* shown Off (Low), so On */
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
     player_app_apply_graphics_preset(app, PLAYER_PRESET_HIGH);
-    player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE);
-    assert(player_app_graphics_preset(app) == PLAYER_PRESET_HIGH);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_TEXT);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
     player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
     player_app_cycle_enhanced_part(app, PLAYER_PART_SAS);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_FILTERING);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SMOOTH);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_WIDE);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_ULTRA);
 
     /* Editing a row the preset sets makes it Custom, even to the same value, and the note
@@ -13133,7 +13179,7 @@ int main(int argc, char **argv) {
                                      : row->present_scaling == NK_PRESENT_SCALING_INTEGER
                                          ? "integer" : "bilinear",
                                  row->vsync ? 1 : 0, row->fullscreen > 0 ? 1 : 0,
-                                 row->upscaler ? "fsr1" : "off");
+                                 row->part[PLAYER_PART_UPSCALE] == 1 ? "fsr1" : "off");
                     }
                     if (strcmp(report.display, expected) != 0) {
                         fprintf(stderr, "preset %s, %s: launched %s, expected %s\n", row->word,
