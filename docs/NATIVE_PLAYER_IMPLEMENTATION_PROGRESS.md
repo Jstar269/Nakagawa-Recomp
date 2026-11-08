@@ -91,7 +91,7 @@ $$\text{ORIGINAL\_GUEST\_EXECUTION} \succ \text{LLE/GENERIC PSP BEHAVIOR} \succ 
 | Unsupported Title | `native_05_unsupported_game.png` | 1280×720 | Fail-closed boundary preventing unregistered execution |
 | Ready Library | `native_07_ready_library.png` | 1280×720 | Hero game card with "PLAY NOW" & Quick Specs Rail |
 | Settings Dialog | `native_08_settings.png` | 1280×720 | Live resolution/FPS presets, display toggles, reduce-motion switch and volume stepper (persisted to settings.json); keyboard/gamepad focus on every control; single-column flow on narrow windows |
-| Visual Craft | n/a | all | Runtime system-font typography (SDL3_ttf dlopen, zero bundled fonts, DebugText fallback), rounded cards/buttons/pills with shadows, disc ICON0.PNG runtime texture extraction with monogram fallback, dimmed PIC1.PNG hero backdrop, density-aware raster |
+| Visual Craft (legacy renderer) | n/a | all | Runtime system-font typography (SDL3_ttf dlopen, DebugText fallback; the nk_ui launcher uses the bundled fonts in `assets/fonts/ui/`), rounded cards/buttons/pills with shadows, disc ICON0.PNG runtime texture extraction with monogram fallback, dimmed PIC1.PNG hero backdrop, density-aware raster |
 | Missing Source Error | `native_09_missing_source_error.png` | 1280×720 | Structured error recovery for moved or missing ISOs |
 | 1080p Library | `native_10_library_1080p.png` | 1920×1080 | Verified responsive scaling on Full HD displays |
 | 1080p Settings | `native_11_settings_1080p.png` | 1920×1080 | Verified responsive settings modal on Full HD displays |

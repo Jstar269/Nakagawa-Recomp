@@ -1,8 +1,8 @@
 # Android development
 
 Status: the launcher and the source-owned showcase demos build into one APK for arm64-v8a and
-x86_64 and run in the Android emulator. Retail games, importing a disc on the device, and a
-supported-device list are in the works ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
+x86_64 and run in the Android emulator. Retail games, importing a disc on the device and a
+supported-device list are not available ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
 
 This page covers building and running the Android app from source. The plan it belongs to is in
 [`PLATFORM_PORTABILITY.md`](PLATFORM_PORTABILITY.md#3-android).
@@ -127,7 +127,7 @@ newer APK from another build, uninstall the old one first. Uninstalling deletes 
    developer, choose **More details** > **Install anyway**.
 4. Open **Nakagawa** from the app drawer.
 
-This build has no titles in it, and the launcher does not list bundled titles yet. It tests the
+This build has no titles in it, and the launcher does not list bundled titles. It tests the
 launcher itself, and a log needs route B.
 
 ### Route B: install from the PC with adb
@@ -185,16 +185,16 @@ with the UI fonts, `titles/` with the bundled titles) are unpacked into the file
 on the first start after an install or update, and it is the working directory: SDL resolves a
 relative path against that folder, so `SDL_GetBasePath()` (`./` on Android) finds them.
 
-## What doesn't yet
+## Limits
 
 | Area | Status |
 | --- | --- |
-| Launcher library | Bundled titles are not yet listed by the launcher; they start from `adb` (above). |
+| Launcher library | The launcher does not list bundled titles; they start from `adb` (above). |
 | Disc import | Picking the user's own ISO through the system document picker (SAF) is not wired. |
 | Packages from a PC | Moving a package built on a PC to the phone and running it is not wired. |
 | Lifecycle | Measured in the emulator: with the title in the background the guest keeps running and every present fails (`swapchain acquire failed`), because the presenter does not recreate its Vulkan surface and swapchain after Android destroys the window surface. Pausing the guest in the background and recreating the swapchain on return are not done. |
 | Input | Touch controls are not built; SDL gamepads reach the runtime's ordinary input path. |
 | Video | The FFmpeg H.264 subset builds for Android; it has not been run on a device. |
-| Devices | Only the emulator has run it; no physical arm64 device has. Memory and API floors are not yet measured. |
+| Devices | Only the emulator has run it; no physical arm64 device has. Memory and API floors have not been measured. |
 
 <!-- issue-links: #360 -->

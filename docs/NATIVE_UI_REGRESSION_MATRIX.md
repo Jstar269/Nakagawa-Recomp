@@ -148,7 +148,7 @@ path that does not exist.
    `python -m unittest tools.test_nk_core`, and `native-core-tests` runs the `tests/native/`
    binaries (for example `tests/native/test_xb_parser.c`).
 8. **PARTIAL** **Typography:** the launcher draws its text through SDL3_ttf, loaded at run
-   time, with the UI fonts staged beside the player (`assets/fonts/ui`). Without them it has
+   time, with the project's own SIL OFL UI fonts (Chakra Petch, Geist, Geist Mono, Noto Sans JP) staged beside the player (`assets/fonts/ui`). Without them it has
    no fallback: it says why in a message box and exits with code 4
    (`test_next_ui_is_the_only_launcher`). The in-game PGF fonts come from the user's own
    PSP import or the project `font/` folder (`docs/SETUP.md`). No named test checks that no

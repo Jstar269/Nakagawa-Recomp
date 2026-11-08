@@ -96,7 +96,8 @@ We aim to respond promptly and will remove material where appropriate.
 - **Monocypher 4.0.3 Ed25519 signature check** — upstream offers `BSD-2-Clause OR CC0-1.0`;
   the project uses it under CC0-1.0. Four byte-identical source files, the complete upstream
   `LICENCE.md` and the pinned manifest are under `third_party/monocypher/`. It is compiled into
-  the `ed25519-verify-selftest` (RFC 8032 vectors) only; it is not linked into the player yet.
+  the `ed25519-verify-selftest` (RFC 8032 vectors) and into the player, where `src/core/nk_sig.c`
+  uses it to check the signature of an update download.
 - **FFmpeg n4.4 H.264 decoder subset** — LGPL-2.1-or-later, the same pin as the ATRAC3+
   subset. The imported libavcodec/libavutil files (generic C only, no `--enable-gpl` or
   `--enable-nonfree` component), their license text and the byte-exact manifest are under
@@ -174,8 +175,8 @@ SBOM, and the release gate all read that one file.
 The Windows player and every built package stage `SDL3.dll`, `SDL3_ttf.dll`,
 and the mechanically resolved SDL3_ttf dependency closure beside the
 executable (`tools/stage_runtime_dlls.py`, PE import-table walk stopping at
-Windows system DLLs). No font file is bundled: the UI opens a system UI font
-already present on the user's machine. Every staged DLL ships its upstream
+Windows system DLLs). The launcher's fonts are the project's own, under
+`assets/fonts/ui/` (see Project UI fonts below). Every staged DLL ships its upstream
 license text, copied verbatim from the MSYS2 UCRT64 toolchain packages
 (`ucrt64/share/licenses/`, read-only) and recorded with its SHA-256 in
 `assets/third_party_components.json`:
@@ -237,7 +238,7 @@ or generated retail translation unit is part of the public source boundary.
 
 Preserve each file's SPDX header and any upstream notice when copying or
 modifying source. The public provenance ledger assigns every included path an
-explicit class, evidence reference, and content hash. A missing or unresolved
+explicit class and evidence reference. A missing or unresolved
 record is a publication failure. Generated files remain generated and must not be
 hand-edited.
 
