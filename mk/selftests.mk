@@ -1207,8 +1207,8 @@ gpu-texscale-mutant: shader-verify $(RT_GE_O)
 # gpu-glyph-selftest - sharp game text (glyph_recon.h, glyph_gpu.inc, #2110) on the Vulkan GE renderer's
 # production path, at render scales 2, 3 and 4 (the renderer's most): a 1:1 sprite over a glyph cell draws the rebuilt tile
 # and nothing beside it changes it; a page in VRAM, a hard-edged or two-colour page, a magnified sprite
-# and a too-small or off-page rectangle draw exactly as without the feature and make no image; a fade bar of
-# one colour draws without a ribbed row; a rewritten page draws its
+# and a too-small or off-page rectangle draw exactly as without the feature and make no image; fade bars of
+# one colour (shallow, steep, four texels) draw without a ribbed row; a rewritten page draws its
 # new tile, never the old; more new rectangles than the per-present count are rebuilt over two presents;
 # no guest byte changes. At render scale 1 the setting is idle. An authentic run (Ace Mode off) rebuilds
 # nothing and draws byte for byte the same picture with SR_GLYPHS unset and on. In an Ace run with the

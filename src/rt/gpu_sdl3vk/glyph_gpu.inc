@@ -7,8 +7,9 @@
  * A texture cache entry that text is drawn from gets a second, host-only image beside its
  * guest-resolution one: the entry's size times the render scale, holding the rebuilt version of
  * every rectangle a sprite draw has sampled from it. The image is made when the first rectangle
- * of the page passes the checks, so a page that is not text costs a small table of refusals and
- * no GPU memory, descriptor set or synchronous clear. Draw -> tile is exact: a sprite that maps one
+ * of the page passes the checks, so a page that is not text costs its table of tiles (about 28 KiB
+ * of host memory, one per cache entry the feature looks at) and no GPU memory, descriptor set or
+ * synchronous clear. Draw -> tile is exact: a sprite that maps one
  * texel to one pixel over whole texels [x0, x1) x [y0, y1) of a page that looks like anti-aliased
  * text is a tile, rebuilt once on the renderer thread (so a run is the same whatever the host's
  * speed), checked against the guest's bytes (nk_glyph_verify) and uploaded into its own place in
@@ -123,11 +124,11 @@ static void gl_image_free(GlSet *g) {
  * command that could reference them (eviction, shutdown). */
 static void tex_gl_free(TexEnt *e) {
     GlSet *g = e->gl;
+    if (s_gl_page_e == e) s_gl_page_e = NULL;
     if (!g) return;
     gl_image_free(g);
     free(g);
     e->gl = NULL;
-    if (s_gl_page_e == e) s_gl_page_e = NULL;
 }
 
 /* The entry's table of tiles, made the first time a 1:1 sprite over an eligible page asks. */

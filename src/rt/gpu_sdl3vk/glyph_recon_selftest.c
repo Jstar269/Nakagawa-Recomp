@@ -367,10 +367,33 @@ static int row_reversals(const uint32_t *tile, int tw, int y, int x_from, int x_
     return flips;
 }
 
+/* A one-row profile of white coverage, `n` texels, centred in a rectangle `n + 2 * pad` wide and 8 high. */
+static void profile_page(uint32_t *page, int stride, const int *prof, int n, int pad) {
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < n + 2 * pad; x++) {
+            const int c = x >= pad && x < pad + n ? prof[x - pad] : 0;
+            page[y * stride + x] = (uint32_t)c << 24 | 0x00ffffffu;
+        }
+}
+
+/* Rebuild a profile at every factor. It rises from blank and falls back to blank: one rise and one fall at most. */
+static void profile_cell(const char *what, const int *prof, int n, int pad) {
+    static uint32_t page[32 * 8], tile[32 * 6 * 8 * 6];
+    profile_page(page, 32, prof, n, pad);
+    const int w = n + 2 * pad;
+    for (int f = NK_GLYPH_MIN_FACTOR; f <= NK_GLYPH_MAX_FACTOR; f++) {
+        NkGlyphVerdict v = nk_glyph_rebuild(page, 32, 8, 0, 0, w, 8, f, tile);
+        check(v == NK_GLYPH_OK, "gradient", "%s at factor %d: %s", what, f, nk_glyph_verdict_name(v));
+        if (v != NK_GLYPH_OK) continue;
+        const int flips = row_reversals(tile, w * f, 4 * f, 0, w * f);
+        check(flips <= 1, "gradient", "%s at factor %d: %d reversals along a row", what, f, flips);
+    }
+}
+
 static void cell_gradient(void) {
-    /* A shallow gradient of one colour is not an edge: the rebuild keeps it smooth (or refuses it), and never
-     * turns it into a sawtooth that restarts at every block. */
-    static uint32_t shadow[32 * 32], fade[64 * 8];
+    /* A gradient of one colour is not an edge: the rebuild keeps it smooth (or refuses it), and never turns it into
+     * a sawtooth that restarts at every block. A stroke that is one texel wide and half covered is an edge. */
+    static uint32_t shadow[32 * 32], fade[64 * 8], steep[16 * 8], cross[16 * 16];
     static uint32_t tile[64 * 6 * 8 * 6], big[32 * 6 * 32 * 6];
     for (int y = 0; y < 32; y++)
         for (int x = 0; x < 32; x++) {
@@ -394,17 +417,85 @@ static void cell_gradient(void) {
             check(flips <= 1, "gradient", "soft shadow at factor %d: %d reversals along a row that rises once and falls once", f, flips);
         }
     }
-    /* a tile whose blocks are ramps over the same gradient fails the check even though every block mean is right */
-    NkGlyphVerdict v = nk_glyph_rebuild(fade, 64, 8, 0, 0, 64, 8, 4, tile);
-    check(v == NK_GLYPH_OK, "ripple", "setup");
-    const int tw = 64 * 4;
+    /* steeper profiles, down to the width where a gradient turns into an edge */
+    static const int fade4[] = {85, 170, 255, 255};                   /* 4 texels from clear to solid: steps of 0.33 */
+    static const int fade6[] = {40, 80, 120, 160, 200, 240};          /* 6 texels */
+    static const int glow3[] = {85, 170, 255, 170, 85};               /* a 3-texel glow around a solid texel */
+    static const int glow5[] = {51, 102, 153, 204, 255, 204, 153, 102, 51};
+    profile_cell("4-texel fade", fade4, 4, 2);
+    profile_cell("6-texel fade", fade6, 6, 2);
+    profile_cell("3-texel glow", glow3, 5, 2);
+    profile_cell("5-texel glow", glow5, 9, 2);
+    /* a stroke one texel wide and half covered (0 128 128 0, steps of 0.5) is an edge, not a gradient: it is rebuilt
+     * and keeps its coverage (the field is flat across it, so the result stays a soft hump, as the guest's was) */
+    {
+        static const int stroke[] = {128, 128};
+        static uint32_t page[32 * 8], hump[32 * 6 * 8 * 6];
+        profile_page(page, 32, stroke, 2, 6);
+        for (int f = NK_GLYPH_MIN_FACTOR; f <= NK_GLYPH_MAX_FACTOR; f++) {
+            NkGlyphVerdict v = nk_glyph_rebuild(page, 32, 8, 0, 0, 14, 8, f, hump);
+            check(v == NK_GLYPH_OK, "gradient", "half-covered stroke at factor %d: %s", f, nk_glyph_verdict_name(v));
+        }
+    }
+    /* a thick-stroke junction: a plus with a solid core four texels wide and anti-aliased sides, as a bold face has */
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++) {
+            const int ax = x >= 6 && x <= 9 ? 255 : (x == 5 || x == 10 ? 128 : 0);
+            const int ay = y >= 6 && y <= 9 ? 255 : (y == 5 || y == 10 ? 128 : 0);
+            const int a = ax > ay ? ax : ay;
+            cross[y * 16 + x] = (uint32_t)a << 24 | 0x00ffffffu;
+        }
+    for (int f = NK_GLYPH_MIN_FACTOR; f <= NK_GLYPH_MAX_FACTOR; f++) {
+        NkGlyphVerdict v = nk_glyph_rebuild(cross, 16, 16, 0, 0, 16, 16, f, big);
+        check(v == NK_GLYPH_OK, "junction", "thick-stroke plus at factor %d: %s", f, nk_glyph_verdict_name(v));
+    }
+    /* a bold "A" (strokes 1 to 3 texels wide, four sub-texel offsets) has junctions where a texel is flat in its 3 x 3
+     * and two texels from a full step: every one of them is rebuilt, at every factor */
+    {
+        static uint32_t glyph[16 * 16];
+        static const float seg[3][4] = {{2.0f, 14.0f, 8.0f, 2.0f}, {8.0f, 2.0f, 14.0f, 14.0f}, {4.5f, 10.0f, 11.5f, 10.0f}};
+        for (int si = 0; si < 9; si++)
+            for (int oi = 0; oi < 4; oi++) {
+                const float sw = 1.0f + 0.25f * (float)si, ox = 0.25f * (float)(oi & 1), oy = 0.25f * (float)(oi >> 1);
+                for (int y = 0; y < 16; y++)
+                    for (int x = 0; x < 16; x++) {
+                        int hit = 0;
+                        for (int sy = 0; sy < 8; sy++)
+                            for (int sx = 0; sx < 8; sx++) {
+                                const float px = (float)x + ((float)sx + 0.5f) / 8.0f - ox, py = (float)y + ((float)sy + 0.5f) / 8.0f - oy;
+                                for (int k = 0; k < 3; k++) {
+                                    const float ax = seg[k][0], ay = seg[k][1], bx = seg[k][2], by = seg[k][3];
+                                    const float vx = bx - ax, vy = by - ay;
+                                    float t = ((px - ax) * vx + (py - ay) * vy) / (vx * vx + vy * vy);
+                                    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+                                    const float qx = px - (ax + t * vx), qy = py - (ay + t * vy);
+                                    if (qx * qx + qy * qy <= 0.25f * sw * sw) { hit++; break; }
+                                }
+                            }
+                        glyph[y * 16 + x] = (uint32_t)((hit * 255 + 32) / 64) << 24 | 0x00ffffffu;
+                    }
+                for (int f = 3; f <= 4; f++) {
+                    NkGlyphVerdict v = nk_glyph_rebuild(glyph, 16, 16, 0, 0, 16, 16, f, big);
+                    check(v == NK_GLYPH_OK, "junction", "bold A, stroke %.2f, offset %d, factor %d: %s", (double)sw, oi, f, nk_glyph_verdict_name(v));
+                }
+            }
+    }
+    /* a tile whose blocks are ramps over the same gradient fails the check even though every block mean is right:
+     * a gradient of steps of 12 with the pixels of each block pushed apart (alternate +24 and -24, +8, -8 by position) */
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 16; x++) steep[y * 16 + x] = (uint32_t)(20 + x * 12) << 24 | 0x00ffffffu;   /* 20 to 200 */
+    NkGlyphVerdict v = nk_glyph_rebuild(steep, 16, 8, 0, 0, 16, 8, 4, tile);
+    check(v == NK_GLYPH_OK, "ripple", "setup: %s", nk_glyph_verdict_name(v));
+    check(nk_glyph_verify(steep, 16, 8, 0, 0, 16, 8, 4, tile) == NK_GLYPH_OK, "ripple", "the untouched tile fails its own check");
+    const int tw = 16 * 4;
     for (int y = 0; y < 8 * 4; y++)
         for (int x = 0; x < tw; x++) {
-            int a = (int)(tile[y * tw + x] >> 24) + ((x % 4) * 2 - 3) * 8;
+            const int cov = (int)(steep[(y / 4) * 16 + x / 4] >> 24);
+            const int a = (int)(tile[y * tw + x] >> 24) + (cov >= 48 && cov <= 176 ? ((x % 4) * 2 - 3) * 8 : 0);
             tile[y * tw + x] = (uint32_t)a << 24 | 0x00ffffffu;
         }
-    check(nk_glyph_verify(fade, 64, 8, 0, 0, 64, 8, 4, tile) == NK_GLYPH_REFUSE_DOWNSAMPLE, "ripple",
-          "a sawtooth tile over a shallow gradient passed the check");
+    check(nk_glyph_verify(steep, 16, 8, 0, 0, 16, 8, 4, tile) == NK_GLYPH_REFUSE_DOWNSAMPLE, "ripple",
+          "a sawtooth tile over a gradient passed the check");
 }
 
 int main(void) {

@@ -48,15 +48,21 @@ extern "C" {
  * tested up to 6. */
 #define NK_GLYPH_MIN_FACTOR 2
 #define NK_GLYPH_MAX_FACTOR 6
-/* How much of a block is rebuilt as an edge. The range of coverage over the 3 x 3 texels around a texel decides:
- * below LOW the block is the smooth bicubic field, shifted to keep the texel's coverage; above HIGH it is a
- * one-pixel ramp fitted to that coverage; between them the two are mixed. A ramp as steep as an edge over a
- * shallow gradient would start over at every block (a ribbed gradient). In a smooth block the tile's spread may
- * not pass NK_GLYPH_RIPPLE_SHARE of that range, plus NK_GLYPH_RIPPLE_SLACK 8-bit steps. */
+/* How much of a block is rebuilt as an edge, decided by the largest difference between two neighbouring texels in
+ * the 3 x 3 around it (coverage, 0 to 1). Below NK_GLYPH_EDGE_LOW the block is the smooth bicubic field shifted to
+ * keep the texel's coverage; above NK_GLYPH_EDGE_HIGH it is a one-pixel ramp fitted to that coverage; between them
+ * the two are mixed. The basis: an edge that falls inside one texel leaves a step of at least 0.5 to one side (a
+ * texel of coverage c next to 0 and next to 1 has steps c and 1 - c), so 0.55 and above is an edge. A gradient
+ * whose steps stay under 0.35 is at least three texels wide: a one-pixel ramp over it would start over at every
+ * block (a ribbed gradient). The two values are a choice by those cases, not a tuned optimum. */
 #define NK_GLYPH_EDGE_LOW 0.35f
-#define NK_GLYPH_EDGE_HIGH 0.65f
-#define NK_GLYPH_RIPPLE_SHARE 0.6f
-#define NK_GLYPH_RIPPLE_SLACK 2
+#define NK_GLYPH_EDGE_HIGH 0.55f
+/* The seam check of nk_glyph_verify: between two smooth texels whose coverage runs one way through the four texels
+ * around the seam, with a step of at least NK_GLYPH_RUN_MIN_STEP (8-bit), the pixels on either side of the seam
+ * may not run back by more than NK_GLYPH_RUN_SLACK (8-bit). The slack is the bicubic's own ringing from a step two
+ * texels away, at most about 7% of a full step, plus the quantizing. */
+#define NK_GLYPH_RUN_MIN_STEP 10
+#define NK_GLYPH_RUN_SLACK 19
 /* Rectangles checked or rebuilt per present, a fixed count, never a time budget: a run is the same
  * whatever the host's speed. A glyph past the count keeps today's look for that frame and is
  * offered again by the next draw. */

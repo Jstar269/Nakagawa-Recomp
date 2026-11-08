@@ -13,7 +13,7 @@
  *              a rectangle past the page;
  *   rewrite    a page the guest rewrites draws a rebuilt tile for the new texels and never the old
  *              one; a cell whose texels did not change keeps its tile;
- *   gradient   a fade bar of one colour draws without a reversal along its rows, glyph tile or not;
+ *   gradient   fade bars of one colour (shallow, steep, four texels) draw without a reversal along their rows;
  *   cap        more new rectangles in one present than NK_GLYPH_PER_PRESENT: exactly that many are
  *              rebuilt, the rest draw as before and are rebuilt by the next present;
  *   pool       the texture descriptor pool has a set for every image an entry can hold;
@@ -316,35 +316,44 @@ static void gst_blob_page(uint32_t *p, int cells) {
             }
 }
 
-/* A fade bar of one colour: 32 x 8 texels of white rising from alpha 64 to 126. Whether its draw is a rebuilt tile
- * or the game's own, no row may reverse: a ribbed gradient is worse than the soft one. */
+/* Fade bars of one colour, each rising across its width: a shallow one (alpha 64 to 126 over 32 texels), a steeper one
+ * (20 to 200 over 16) and a four-texel one (85 to 255). Whether a draw is a rebuilt tile or the game's own, no row may
+ * reverse: a ribbed gradient is worse than the soft one. */
 static int gst_cell_gradient(void) {
     static uint32_t page[GST_BLOB_W * 16];
-    for (int i = 0; i < GST_BLOB_W * 16; i++) page[i] = 0x00123456u;
-    for (int y = 0; y < 8; y++)
-        for (int x = 0; x < 32; x++) page[y * GST_BLOB_W + x] = ((uint32_t)(64 + x * 2) << 24) | 0x00FFFFFFu;
-    gst_reset();
-    memcpy(SR_HOST(GST_PAGE), page, sizeof(page));
-    sr_gpu_vram_dirty(GST_PAGE, sizeof(page));
-    gst_state(GST_PAGE, GST_BLOB_W, 16);
-    xst_clear_fb();
-    int ok = gst_sprite(20.0f, 20.0f, 32.0f, 8.0f, 0.0f, 0.0f, 32.0f, 8.0f);
-    uint32_t *dev = ok ? gst_device() : NULL;
-    if (!dev) return gst_fail("gradient", "draw or readback failed");
+    static const struct { int w, base, step; const char *what; } bars[] = {
+        {32, 64, 2, "shallow"}, {16, 20, 12, "steep"}, {4, 85, 85, "four-texel"}};
     const int s = s_scale;
-    int flips = 0, last = 0;
-    for (int x = 1; x < 32 * s; x++) {
-        const size_t row = ((size_t)20 * s + (size_t)(4 * s)) * SCL_W + (size_t)20 * s;
-        const int d = GST_ALPHA(dev[row + (size_t)x]) - GST_ALPHA(dev[row + (size_t)x - 1]);
-        const int sgn = d > 0 ? 1 : (d < 0 ? -1 : 0);
-        if (!sgn) continue;
-        if (last && sgn != last) flips++;
-        last = sgn;
+    for (size_t b = 0; b < sizeof(bars) / sizeof(bars[0]); b++) {
+        const int w = bars[b].w;
+        for (int i = 0; i < GST_BLOB_W * 16; i++) page[i] = 0x00123456u;
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < w; x++) {
+                const int a = bars[b].base + x * bars[b].step;
+                page[y * GST_BLOB_W + x] = ((uint32_t)(a > 255 ? 255 : a) << 24) | 0x00FFFFFFu;
+            }
+        gst_reset();
+        memcpy(SR_HOST(GST_PAGE), page, sizeof(page));
+        sr_gpu_vram_dirty(GST_PAGE, sizeof(page));
+        gst_state(GST_PAGE, GST_BLOB_W, 16);
+        xst_clear_fb();
+        int ok = gst_sprite(20.0f, 20.0f, (float)w, 8.0f, 0.0f, 0.0f, (float)w, 8.0f);
+        uint32_t *dev = ok ? gst_device() : NULL;
+        if (!dev) return gst_fail("gradient", "%s fade bar: draw or readback failed", bars[b].what);
+        int flips = 0, last = 0;
+        for (int x = 1; x < w * s; x++) {
+            const size_t row = ((size_t)20 * s + (size_t)(4 * s)) * SCL_W + (size_t)20 * s;
+            const int d = GST_ALPHA(dev[row + (size_t)x]) - GST_ALPHA(dev[row + (size_t)x - 1]);
+            const int sgn = d > 0 ? 1 : (d < 0 ? -1 : 0);
+            if (!sgn) continue;
+            if (last && sgn != last) flips++;
+            last = sgn;
+        }
+        free(dev);
+        if (flips)
+            return gst_fail("gradient", "%s fade bar: %d reversals along a row of a bar that only rises", bars[b].what, flips);
     }
-    free(dev);
-    if (flips)
-        return gst_fail("gradient", "%d reversals along a row of a fade bar that only rises", flips);
-    printf("gpu glyph selftest: PASS %-12s scale %d: a fade bar of one colour draws without a ribbed row\n", "gradient", s);
+    printf("gpu glyph selftest: PASS %-12s scale %d: fade bars of one colour draw without a ribbed row\n", "gradient", s);
     return 1;
 }
 

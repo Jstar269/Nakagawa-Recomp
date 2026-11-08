@@ -11,11 +11,17 @@
  *      clamp(0.5 + f * (h - t), 0, 1), averages to exactly that texel's coverage. The block mean is
  *      continuous and falls from 1 to 0 as t rises, so a bisection finds it. The ramp is about one
  *      device pixel wide at any factor, so the edge is sharp and still anti-aliased at the render
- *      resolution, and every block keeps the guest's coverage by construction.
+ *      resolution, and every block keeps the guest's coverage by construction. That is the block of
+ *      an edge. Where the coverage changes slowly it would start over at every block and rib the
+ *      gradient, so a texel's largest step to a neighbour within its 3 x 3 decides (edge_weight):
+ *      below NK_GLYPH_EDGE_LOW the block is the bicubic field itself, shifted by the offset that
+ *      keeps the texel's coverage (clamped to 0..1), above NK_GLYPH_EDGE_HIGH it is the ramp, and
+ *      in between the two are mixed. Both keep the block's mean, so the mix does too.
  *   3. Colour every pixel with the one colour the rectangle's inked texels share, so a pixel the
  *      blur reaches into a blank texel is not darkened by that texel's stray colour.
  * Everything is float arithmetic in a fixed order; nk_glyph_verify then checks the quantized result
- * against the input in integers, so a wrong or stale tile cannot be shown.
+ * against the input in integers (block means, colour, and no seam between two smooth texels that
+ * runs back against a monotone gradient), so a wrong, stale or ribbed tile cannot be shown.
  */
 #include "glyph_recon.h"
 
@@ -180,20 +186,59 @@ NkGlyphVerdict nk_glyph_rect_check(const uint32_t *page, int pw, int ph, int x0,
     return NK_GLYPH_OK;
 }
 
-/* The range of coverage over the 3 x 3 texels around texel (x, y) of the w x h rectangle at (x0, y0), the
- * rectangle's own edge replicated past its border. 0 is flat, 1 a full step. */
-static float local_range(const uint32_t *page, int pw, int x0, int y0, int w, int h, int x, int y) {
-    int lo = 255, hi = 0;
-    for (int j = -1; j <= 1; j++)
-        for (int i = -1; i <= 1; i++) {
-            const int xx = x + i < 0 ? 0 : (x + i > w - 1 ? w - 1 : x + i);
-            const int yy = y + j < 0 ? 0 : (y + j > h - 1 ? h - 1 : y + j);
-            const int a = alpha_of(page[(size_t)(y0 + yy) * (size_t)pw + (size_t)(x0 + xx)]);
-            if (a < lo) lo = a;
-            if (a > hi) hi = a;
-        }
-    return (float)(hi - lo) * (1.0f / 255.0f);
+/* Coverage (alpha, 0 to 255) of texel (x, y) of the w x h rectangle at (x0, y0), the rectangle's own edge
+ * replicated past its border. */
+static int cov_at(const uint32_t *page, int pw, int x0, int y0, int w, int h, int x, int y) {
+    const int xx = x < 0 ? 0 : (x > w - 1 ? w - 1 : x);
+    const int yy = y < 0 ? 0 : (y > h - 1 ? h - 1 : y);
+    return alpha_of(page[(size_t)(y0 + yy) * (size_t)pw + (size_t)(x0 + xx)]);
 }
+
+/* The largest difference between two neighbouring texels (across or down) in the 3 x 3 around texel (x, y), 0 to 1:
+ * 0 is flat, 1 a full step. */
+static float local_step(const uint32_t *page, int pw, int x0, int y0, int w, int h, int x, int y) {
+    int a[3][3], m = 0;
+    for (int j = 0; j < 3; j++)
+        for (int i = 0; i < 3; i++) a[j][i] = cov_at(page, pw, x0, y0, w, h, x + i - 1, y + j - 1);
+    for (int j = 0; j < 3; j++)
+        for (int i = 0; i < 2; i++) {
+            const int d = abs(a[j][i + 1] - a[j][i]);
+            if (d > m) m = d;
+        }
+    for (int j = 0; j < 2; j++)
+        for (int i = 0; i < 3; i++) {
+            const int d = abs(a[j + 1][i] - a[j][i]);
+            if (d > m) m = d;
+        }
+    return (float)m * (1.0f / 255.0f);
+}
+
+#ifndef NK_GLYPH_MUTANT_NO_RIPPLE_CHECK
+/* Is the seam between texel (x, y) and the next one across (vert = 0) or down (vert = 1) ribbed? Two smooth texels
+ * whose coverage runs one way through the four texels around the seam must have pixels on either side of it that
+ * do not run back: a steep ramp fitted to each block of a gradient would. */
+static int seam_ribbed(const uint32_t *page, int pw, int x0, int y0, int w, int h, int factor, const uint32_t *tile,
+                       int x, int y, int vert) {
+    const int dx = vert ? 0 : 1, dy = vert ? 1 : 0;
+    const int p = cov_at(page, pw, x0, y0, w, h, x - dx, y - dy), a = cov_at(page, pw, x0, y0, w, h, x, y);
+    const int b = cov_at(page, pw, x0, y0, w, h, x + dx, y + dy), q = cov_at(page, pw, x0, y0, w, h, x + 2 * dx, y + 2 * dy);
+    const int step = b - a;
+    if (abs(step) < NK_GLYPH_RUN_MIN_STEP) return 0;
+    const int dir = step > 0 ? 1 : -1;
+    if ((a - p) * dir < 0 || (q - b) * dir < 0) return 0;   /* not one way through the four texels */
+    if (local_step(page, pw, x0, y0, w, h, x, y) >= NK_GLYPH_EDGE_LOW ||
+        local_step(page, pw, x0, y0, w, h, x + dx, y + dy) >= NK_GLYPH_EDGE_LOW)
+        return 0;                                            /* an edge is near: its ramp may sit on the seam */
+    const int tw = w * factor;
+    for (int k = 0; k < factor; k++) {
+        const int row = vert ? (y + 1) * factor - 1 : y * factor + k, col = vert ? x * factor + k : (x + 1) * factor - 1;
+        const int before = alpha_of(tile[(size_t)row * (size_t)tw + (size_t)col]);
+        const int after = alpha_of(tile[(size_t)(row + dy) * (size_t)tw + (size_t)(col + dx)]);
+        if ((after - before) * dir < -NK_GLYPH_RUN_SLACK) return 1;
+    }
+    return 0;
+}
+#endif
 
 NkGlyphVerdict nk_glyph_verify(const uint32_t *page, int pw, int ph, int x0, int y0, int w, int h,
                                int factor, const uint32_t *tile) {
@@ -221,27 +266,15 @@ NkGlyphVerdict nk_glyph_verify(const uint32_t *page, int pw, int ph, int x0, int
             const long want = (long)alpha_of(page[(size_t)(y0 + y) * (size_t)pw + (size_t)(x0 + x)]) * blockn;
             const long diff = sum > want ? sum - want : want - sum;
             if (diff > (long)NK_GLYPH_CHECK_TOLERANCE * blockn) return NK_GLYPH_REFUSE_DOWNSAMPLE;
-#ifndef NK_GLYPH_MUTANT_NO_RIPPLE_CHECK
-            /* Where the guest's coverage varies slowly the block must too: a smooth block spans about half the range of
-             * the texels around it, and one that spans more is a ramp that starts over at the next block (a ribbed
-             * gradient). */
-            const float r = local_range(page, pw, x0, y0, w, h, x, y);
-            if (r < NK_GLYPH_EDGE_LOW) {
-                int lo = 255, hi = 0;
-                for (int j = 0; j < factor; j++) {
-                    const uint32_t *row = tile + (size_t)(y * factor + j) * (size_t)tw + (size_t)(x * factor);
-                    for (int i = 0; i < factor; i++) {
-                        const int a = alpha_of(row[i]);
-                        if (a < lo) lo = a;
-                        if (a > hi) hi = a;
-                    }
-                }
-                if ((float)(hi - lo) > r * 255.0f * NK_GLYPH_RIPPLE_SHARE + (float)NK_GLYPH_RIPPLE_SLACK)
-                    return NK_GLYPH_REFUSE_DOWNSAMPLE;
-            }
-#endif
         }
     }
+#ifndef NK_GLYPH_MUTANT_NO_RIPPLE_CHECK
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            if (x + 1 < w && seam_ribbed(page, pw, x0, y0, w, h, factor, tile, x, y, 0)) return NK_GLYPH_REFUSE_DOWNSAMPLE;
+            if (y + 1 < h && seam_ribbed(page, pw, x0, y0, w, h, factor, tile, x, y, 1)) return NK_GLYPH_REFUSE_DOWNSAMPLE;
+        }
+#endif
     return NK_GLYPH_OK;
 #endif
 }
@@ -298,9 +331,9 @@ static float block_mean(const float *v, int n, float slope, float t) {
     return s / (float)n;
 }
 
-/* 0 below NK_GLYPH_EDGE_LOW, 1 above NK_GLYPH_EDGE_HIGH, smooth between. */
-static float edge_weight(float range) {
-    const float t = clampf((range - NK_GLYPH_EDGE_LOW) / (NK_GLYPH_EDGE_HIGH - NK_GLYPH_EDGE_LOW), 0.0f, 1.0f);
+/* 0 below NK_GLYPH_EDGE_LOW, 1 above NK_GLYPH_EDGE_HIGH, smooth between (a step of coverage, 0 to 1). */
+static float edge_weight(float step) {
+    const float t = clampf((step - NK_GLYPH_EDGE_LOW) / (NK_GLYPH_EDGE_HIGH - NK_GLYPH_EDGE_LOW), 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
 }
 
@@ -335,12 +368,12 @@ NkGlyphVerdict nk_glyph_rebuild(const uint32_t *page, int pw, int ph, int x0, in
                 for (int i = 0; i < factor; i++)
                     blk[j * factor + i] = hi[(size_t)(y * factor + j) * (size_t)W + (size_t)(x * factor + i)];
             float t = 0.0f, off = 0.0f;
-            /* How much of the block is an edge: a step of coverage within the texels around it sharpens, a slow
-             * change does not (a steep ramp over a shallow gradient restarts at every block and ribs it). */
+            /* How much of the block is an edge: a step of coverage to a neighbour within the 3 x 3 around it
+             * sharpens, a slow change does not (a steep ramp over a gradient restarts at every block and ribs it). */
 #ifdef NK_GLYPH_MUTANT_NO_SMOOTH_MODE
             const float wedge = 1.0f;   /* glyph-recon-mutant: every block steepened */
 #else
-            const float wedge = edge_weight(local_range(page, pw, x0, y0, w, h, x, y));
+            const float wedge = edge_weight(local_step(page, pw, x0, y0, w, h, x, y));
 #endif
 #ifdef NK_GLYPH_MUTANT_PLAIN_BICUBIC
             /* glyph-recon-mutant: the bicubic field itself, with no threshold fitted to the texel */

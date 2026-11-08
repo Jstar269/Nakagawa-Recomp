@@ -779,24 +779,28 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   for every texel a threshold is fitted (a bisection) so that the `f x f` block of pixels, each set to
   `clamp(0.5 + f * (field - threshold), 0, 1)`, averages to that texel's coverage. The ramp is about one device
   pixel wide at any factor, so the edge is sharp and still anti-aliased at the render resolution, and every block
-  keeps the guest's coverage by construction. That applies where the coverage steps: the range of coverage over the
-  3 x 3 texels around a texel decides how much of its block is a ramp (nothing below 0.35, all of it above 0.65,
-  a mix between). Elsewhere the block is the bicubic field itself, shifted so its mean is the texel's coverage. A ramp
-  that steep over a slow gradient would start over at every block and rib it. Every pixel with any coverage takes the
+  keeps the guest's coverage by construction. That applies where the coverage steps: the largest difference between
+  two neighbouring texels in the 3 x 3 around a texel decides how much of its block is a ramp (nothing below 0.35,
+  all of it above 0.55, a mix between). An edge that falls inside one texel leaves a step of at least 0.5 to one side,
+  and a gradient whose steps stay under 0.35 is at least three texels wide; the two numbers are a choice by those
+  cases, not a tuned optimum. Elsewhere the block is the bicubic field itself, shifted so its mean is the texel's
+  coverage. A ramp that steep over a slow gradient would start over at every block and rib it. Every pixel with any coverage takes the
   rectangle's one colour. The arithmetic is float in a fixed order, so a run is repeatable.
 - **Checked.** Before a tile is used it is compared with the guest's bytes: each texel of the rectangle must equal
   the mean of its block of the quantized tile within 2 of 255, every inked pixel must have the rectangle's colour,
-  and where the coverage is slowly varying (range below 0.35 around the texel) a block's spread may not pass 0.6 of
-  that range by more than 2 of 255 (`nk_glyph_verify`). A tile that fails is refused (`downsample`) and its draw is as the
-  game drew it.
+  and between two smooth texels whose coverage runs one way through the four texels around their seam, with a step of
+  at least 10 of 255, the pixels on either side of the seam may not run back by more than 19 of 255 (the bicubic's
+  own ringing from a step two texels away is at most about 7% of a full step, plus the quantizing; a ramp fitted to
+  each block of a gradient would run back by far more) (`nk_glyph_verify`). A tile that fails is refused
+  (`downsample`) and its draw is as the game drew it.
 - **Reading.** The page is decoded from main RAM by the decoder the texture cache uses; a page in VRAM is refused
   before any decode, so the feature never causes a renderer readback. Nothing is written to guest memory, the CLUT or
   a texture source.
 - **How it draws.** The first rectangle of a page that passes every check makes a host-only image beside the cache
   entry's own, the page's size times the render scale (a side times the scale may not pass 2048 texels; a larger page
   is drawn as the game made it), transparent, and each tile goes to its own place in it. A page whose rectangles are
-  all refused makes no image, takes no descriptor set and does no synchronous clear; it keeps a small table of its
-  refusals. The texture descriptor pool has a set for the image (one more per entry when glyphs are on). It shares the
+  all refused makes no image, takes no descriptor set and does no synchronous clear; it keeps a table of
+  tiles (about 28 KiB of host memory) recording its refusals. The texture descriptor pool has a set for the image (one more per entry when glyphs are on). It shares the
   GPU budget of `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default); a page that does not fit is counted (`budget_short`) and drawn as
   made. The draw binds that image with the scaled-copy flag, so the shader samples it on its own texel lattice
   (section 10.10, "Sampling"): at render scale `f` one rebuilt texel lies under each device pixel centre. The draw
@@ -821,8 +825,9 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
 - **Tests.** `glyph-recon-selftest` checks the setting and its Ace gate, every named refusal, the classifier, and the
   rebuild at every factor for 4444, 8888, indexed 4-bit and indexed 8-bit pages (block means, colour, repeatability,
   fewer soft pixels than a bilinear enlargement, no dependence on neighbouring cells), the downsample check
-  against tampered and stale tiles, and soft single-colour art (a round shadow, a fade bar) at every factor, whose
-  rows must not reverse where the source does not, and a sawtooth tile that must fail the check, all on synthetic
+  against tampered and stale tiles, and soft single-colour art (a round shadow, fade bars of 64, 16, 6 and 4 texels,
+  glows of 3 and 5 texels) at every factor, whose rows must not reverse where the source does not, a bold "A" at 36
+  stroke widths and offsets that must be rebuilt, and a sawtooth tile that must fail the check, all on synthetic
   glyphs. `glyph-recon-mutant` builds the selftest twelve times, each
   without one guard (the Ace gate, VRAM, render scale 1, the mip chain, the two buffer formats, the downsample check,
   the colour check, the hard-edge check, the size check, the smooth blocks, the ripple check, and a rebuild that fits
@@ -1156,13 +1161,13 @@ The feature of section 10.12 (#1880). Its presentation is described there; this 
   is the pack's; the runs item 4 lists, for a title and a pack, do not exist yet, and the feature may not be on by
   default before they do.
 
-#### 11.3.5. Sharp Game Text (Not Yet Admitted)
+#### 11.3.5. Sharp Game Text (Not Admitted)
 
 The feature of section 10.13 (#2110). Its presentation is described there; this entry is what the guest can observe.
 
 - **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
-  so a frame drawn with a rebuilt glyph is the frame the guest keeps. The feature stays outside section 11.2 until the
-  requirements below exist. Until then it is reachable only through an environment variable, for development.
+  so a frame drawn with a rebuilt glyph is the frame the guest keeps. The feature is outside section 11.2: the
+  requirements below do not exist, and it is reachable only through an environment variable, for development.
 - **Key and off switch.** The feature has no launch-line key. `SR_GLYPHS` is an environment variable, not a key on
   the launch line (section 10.1), and has no library or per-title setting. Its off switch is the variable unset or
   `off`, and an authentic run, which never reads it. Admission under section 11.2 needs all three; the key name
