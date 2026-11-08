@@ -315,6 +315,10 @@ CASE_ID = 121
 # form may raise an exception that stops the launch.
 else ifeq ($(CASE),vfpu-unmodeled)
 CASE_ID = 163
+# 165: #326 lv.q/sv.q with the write-back flag, in a probe-owned buffer (probe_hle_issues.c).
+# POWER RISK: nothing catches an exception the flag may raise.
+else ifeq ($(CASE),vfpu-quad-wb)
+CASE_ID = 165
 else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
@@ -603,6 +607,9 @@ TARGET = $(BUILD_DIR)/vfpu_forms2
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),vfpu-unmodeled)
 TARGET = $(BUILD_DIR)/vfpu_unmodeled
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-quad-wb)
+TARGET = $(BUILD_DIR)/vfpu_quad_wb
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
 # same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.

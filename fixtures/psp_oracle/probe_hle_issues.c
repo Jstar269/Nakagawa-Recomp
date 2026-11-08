@@ -18,6 +18,9 @@
 //   CASE=vfpu-unmodeled (PSP-VFPU-UNMODELED-001): #326 raw words of the VFPU forms the runtime
 //     refuses (vcrs .s/.p/.q, vcmov imm3 7, mfvc/mtvc of control 255, the rejected VFPU9
 //     widths), register-only; a refused form may raise an exception that stops the launch.
+//   CASE=vfpu-quad-wb (PSP-VFPU-QUADWB-001): #326 lv.q/sv.q with the write-back flag (word bit 1):
+//     the base register after each form and the lanes and buffer words moved, in a probe-owned
+//     buffer; POWER RISK: nothing catches an exception.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -47,8 +50,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2 and vfpu-unmodeled run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled and vfpu-quad-wb run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -67,6 +70,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_SORT 125
 #define HLE_CASE_VFPU_FORMS2 121
 #define HLE_CASE_VFPU_UNMODELED 163
+#define HLE_CASE_VFPU_QUAD_WB 165
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -100,6 +104,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-unmodeled"
 #define HLE_TEST_ID "PSP-VFPU-UNMODELED-001"
 #define HLE_LOG "host0:/vfpu_unmodeled_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_QUAD_WB
+#define HLE_CAMPAIGN_ID "vfpu-quad-wb"
+#define HLE_TEST_ID "PSP-VFPU-QUADWB-001"
+#define HLE_LOG "host0:/vfpu_quad_wb_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -1866,6 +1874,232 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_UNMODELED */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_QUAD_WB
+
+/* #326 lv.q / sv.q with the write-back flag (PSP-VFPU-QUADWB-001), one launch, two passes. The
+   word is op 0x36 (lv.q, 0xd8000000) or 0x3e (sv.q, 0xf8000000), rs in bits 21-25, vt in bits
+   16-20 (bit 5 of the register in word bit 0), a 14-bit offset in bits 2-15 and the write-back
+   flag in word bit 1. rs is always $t2 (10) and the seed/readback moves use $t3 (11).
+   Everything stays inside s_qw_buf (1024 bytes, 64-byte aligned); the base is its middle
+   (byte 512, non-zero, 16-byte aligned), so the +/-48 byte forms and a drifting base stay
+   inside it. Rows:
+   - lvq-wb-<off>-p<pass> and svq-wb-<off>-p<pass>, off o0, o16, o32, om16: one wb form, the
+     result is the word; out0 = base before, out1 = base after, out2 = buffer start address,
+     out3-6 = C000 lanes after the form (lv.q: the lanes loaded, read back with a plain sv.q;
+     sv.q: the lanes that were stored), out7 = number of changed buffer words, out8/out9 =
+     first/last changed word index relative to the base (0xffffffff if none), out10-13 = the
+     four buffer words at base + offset after the form;
+   - svq-wb-run-p<pass>: four back-to-back wb sv.q at +0/+16/+32/+48 of one base from C000,
+     C010, C020 and C030; out0 = base before, out1-4 = $t2 after each, out5 = buffer start,
+     out6 = changed buffer words, out7.. = up to 16 (relative word index, word) pairs.
+   POWER RISK: the effect of the write-back flag on the console is unknown; an exception
+   (reserved instruction, address error) cannot be caught here and stops the launch, and the
+   console must then be recovered by a person, never by an unattended reset. Order: the loads
+   first (no memory writes), then the single stores, the run of four last; each form is its own
+   step, written durably first. */
+
+#define QW_BUF_WORDS 256u
+#define QW_MID_WORD 128u
+#define QW_PAIRS 16u
+#define QW_FORM_WORDS_OUT 14u
+#define QW_RUN_WORDS_OUT 39u
+#define QW_MISSING 0xffffffffu
+
+static uint32_t s_qw_buf[QW_BUF_WORDS] __attribute__((aligned(64)));
+static uint32_t s_qw_res[4] __attribute__((aligned(16)));
+static uint32_t s_qw_after[4];
+/* Four quads, C000..C030 seeds: 0xc0de0000 | quad << 8 | lane. */
+static const uint32_t s_qw_pat[16] __attribute__((aligned(16))) = {
+    0xc0de0000u, 0xc0de0001u, 0xc0de0002u, 0xc0de0003u,
+    0xc0de0100u, 0xc0de0101u, 0xc0de0102u, 0xc0de0103u,
+    0xc0de0200u, 0xc0de0201u, 0xc0de0202u, 0xc0de0203u,
+    0xc0de0300u, 0xc0de0301u, 0xc0de0302u, 0xc0de0303u,
+};
+
+typedef uint32_t (*qw_fn)(uint32_t base, const uint32_t *pat, uint32_t *res);
+
+/* Seed C000 from pat, run the wb word on $t2 = base, read $t2 back, read C000 back to res. */
+#define QW_FORM_FN(fname, word)                                                        \
+    static uint32_t fname(uint32_t base, const uint32_t *pat, uint32_t *res)           \
+    {                                                                                  \
+        uint32_t after;                                                                \
+        __asm__ volatile(                                                              \
+            "move $t2, %[base]\n\t"                                                    \
+            "move $t3, %[pat]\n\t"                                                     \
+            ".word 0xd9600000\n\t" /* lv.q C000, 0($t3) */                             \
+            ".word " word "\n\t"                                                       \
+            "move %[after], $t2\n\t"                                                   \
+            "move $t3, %[res]\n\t"                                                     \
+            ".word 0xf9600000\n\t" /* sv.q C000, 0($t3) */                             \
+            : [after] "=&r"(after)                                                     \
+            : [base] "r"(base), [pat] "r"(pat), [res] "r"(res)                         \
+            : "t2", "t3", "memory");                                                   \
+        return after;                                                                  \
+    }
+
+/* lv.q C000, off($t2), wb: 0xd8000000 | 10 << 21 | off & 0xfffc | 2. */
+QW_FORM_FN(qw_lv_o0, "0xd9400002")
+QW_FORM_FN(qw_lv_o16, "0xd9400012")
+QW_FORM_FN(qw_lv_o32, "0xd9400022")
+QW_FORM_FN(qw_lv_om16, "0xd940fff2")
+/* sv.q C000, off($t2), wb: 0xf8000000 | 10 << 21 | off & 0xfffc | 2. */
+QW_FORM_FN(qw_sv_o0, "0xf9400002")
+QW_FORM_FN(qw_sv_o16, "0xf9400012")
+QW_FORM_FN(qw_sv_o32, "0xf9400022")
+QW_FORM_FN(qw_sv_om16, "0xf940fff2")
+
+struct qw_form {
+    const char *name;
+    uint32_t word;
+    int32_t off;
+    qw_fn fn;
+};
+static const struct qw_form s_qw_lv[4] = {
+    {"lvq-wb-o0", 0xd9400002u, 0, qw_lv_o0},
+    {"lvq-wb-o16", 0xd9400012u, 16, qw_lv_o16},
+    {"lvq-wb-o32", 0xd9400022u, 32, qw_lv_o32},
+    {"lvq-wb-om16", 0xd940fff2u, -16, qw_lv_om16},
+};
+static const struct qw_form s_qw_sv[4] = {
+    {"svq-wb-o0", 0xf9400002u, 0, qw_sv_o0},
+    {"svq-wb-o16", 0xf9400012u, 16, qw_sv_o16},
+    {"svq-wb-o32", 0xf9400022u, 32, qw_sv_o32},
+    {"svq-wb-om16", 0xf940fff2u, -16, qw_sv_om16},
+};
+
+/* Four wb sv.q from one base, seeded C000, C010, C020, C030, $t2 stored after each. */
+static void qw_run4(uint32_t base, const uint32_t *pat, uint32_t *after)
+{
+    __asm__ volatile(
+        "move $t2, %[base]\n\t"
+        "move $t3, %[pat]\n\t"
+        ".word 0xd9600000\n\t" /* lv.q C000, 0($t3) */
+        ".word 0xd9640010\n\t" /* lv.q C010, 16($t3) */
+        ".word 0xd9680020\n\t" /* lv.q C020, 32($t3) */
+        ".word 0xd96c0030\n\t" /* lv.q C030, 48($t3) */
+        ".word 0xf9400002\n\t" /* sv.q C000, 0($t2), wb */
+        "sw $t2, 0(%[after])\n\t"
+        ".word 0xf9440012\n\t" /* sv.q C010, 16($t2), wb */
+        "sw $t2, 4(%[after])\n\t"
+        ".word 0xf9480022\n\t" /* sv.q C020, 32($t2), wb */
+        "sw $t2, 8(%[after])\n\t"
+        ".word 0xf94c0032\n\t" /* sv.q C030, 48($t2), wb */
+        "sw $t2, 12(%[after])\n\t"
+        :
+        : [base] "r"(base), [pat] "r"(pat), [after] "r"(after)
+        : "t2", "t3", "memory");
+}
+
+static void qw_fill(void)
+{
+    for (unsigned i = 0; i < QW_BUF_WORDS; i++) {
+        s_qw_buf[i] = 0x51000000u | i;
+    }
+}
+
+/* Changed-word census of the buffer against the fill: count, first and last relative index. */
+static uint32_t qw_census(uint32_t *first, uint32_t *last)
+{
+    uint32_t changed = 0u;
+    *first = QW_MISSING;
+    *last = QW_MISSING;
+    for (unsigned i = 0; i < QW_BUF_WORDS; i++) {
+        if (s_qw_buf[i] != (0x51000000u | i)) {
+            if (changed == 0u) {
+                *first = i - QW_MID_WORD;
+            }
+            *last = i - QW_MID_WORD;
+            changed++;
+        }
+    }
+    return changed;
+}
+
+static void qw_form_cell(const char *name, const struct qw_form *form)
+{
+    qw_fill();
+    for (unsigned i = 0; i < 4u; i++) {
+        s_qw_res[i] = QW_MISSING;
+    }
+    const uint32_t base = (uint32_t)(uintptr_t)&s_qw_buf[QW_MID_WORD];
+    const uint32_t after = form->fn(base, s_qw_pat, s_qw_res);
+    uint32_t w[QW_FORM_WORDS_OUT];
+    w[0] = base;
+    w[1] = after;
+    w[2] = (uint32_t)(uintptr_t)s_qw_buf;
+    for (unsigned i = 0; i < 4u; i++) {
+        w[3u + i] = s_qw_res[i];
+    }
+    w[7] = qw_census(&w[8], &w[9]);
+    const unsigned at = QW_MID_WORD + (unsigned)(form->off / 4);
+    for (unsigned i = 0; i < 4u; i++) {
+        w[10u + i] = s_qw_buf[at + i];
+    }
+    hle_record(name, "PASS", form->word, w, QW_FORM_WORDS_OUT);
+}
+
+static void qw_run_cell(const char *name)
+{
+    qw_fill();
+    for (unsigned i = 0; i < 4u; i++) {
+        s_qw_after[i] = QW_MISSING;
+    }
+    const uint32_t base = (uint32_t)(uintptr_t)&s_qw_buf[QW_MID_WORD];
+    qw_run4(base, s_qw_pat, s_qw_after);
+    uint32_t w[QW_RUN_WORDS_OUT];
+    for (unsigned i = 0; i < QW_RUN_WORDS_OUT; i++) {
+        w[i] = QW_MISSING;
+    }
+    w[0] = base;
+    for (unsigned i = 0; i < 4u; i++) {
+        w[1u + i] = s_qw_after[i];
+    }
+    w[5] = (uint32_t)(uintptr_t)s_qw_buf;
+    uint32_t changed = 0u;
+    for (unsigned i = 0; i < QW_BUF_WORDS; i++) {
+        if (s_qw_buf[i] != (0x51000000u | i)) {
+            if (changed < QW_PAIRS) {
+                w[7u + 2u * changed] = i - QW_MID_WORD;
+                w[8u + 2u * changed] = s_qw_buf[i];
+            }
+            changed++;
+        }
+    }
+    w[6] = changed;
+    hle_record(name, "PASS", 0xf9400002u, w, QW_RUN_WORDS_OUT);
+}
+
+/* Rows <lvq|svq>-wb-<off>-p<pass>, one step of the same name first. */
+static void qw_group(unsigned pass, const struct qw_form *forms, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", forms[form].name, pass);
+    hle_step(name);
+    qw_form_cell(name, &forms[form]);
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < 4u; form++) {
+            qw_group(pass, s_qw_lv, form);
+        }
+        for (unsigned form = 0; form < 4u; form++) {
+            qw_group(pass, s_qw_sv, form);
+        }
+        char name[64];
+        snprintf(name, sizeof(name), "svq-wb-run-p%u", pass);
+        hle_step(name);
+        qw_run_cell(name);
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_QUAD_WB */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_INTR_CELLS

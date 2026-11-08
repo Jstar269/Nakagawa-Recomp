@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -7249,7 +7249,8 @@ class HleIssuesProbeTests(unittest.TestCase):
 
     def test_only_the_vfpu_cases_run_their_main_thread_with_the_vfpu_attribute(self) -> None:
         head = ("#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 "
-                "|| PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163\n")
+                "|| PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 "
+                "|| PSP_ORACLE_CASE == 165\n")
         self.assertIn(head, self.probe)
         attr = self.probe[self.probe.index(head):]
         attr = attr[:attr.index("#endif") + len("#endif")]
@@ -8780,7 +8781,7 @@ class VfpuUnmodeledProbeTests(unittest.TestCase):
                       "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
                       self.makefile)
         self.assertIn("#define HLE_CASE_VFPU_UNMODELED 163\n", self.probe)
-        self.assertIn("PSP_ORACLE_CASE == 163\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 163 ||", self.probe)
         self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-unmodeled"\n'
                       '#define HLE_TEST_ID "PSP-VFPU-UNMODELED-001"\n'
                       '#define HLE_LOG "host0:/vfpu_unmodeled_log.txt"', self.probe)
@@ -8873,6 +8874,143 @@ class VfpuUnmodeledProbeTests(unittest.TestCase):
         self.assertEqual(row["prx"], "vfpu_unmodeled.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-unmodeled"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+        self.assertNotIn("evidence_cases", row)
+        self.assertIn("POWER RISK", row["risk"])
+
+
+class VfpuQuadWbProbeTests(unittest.TestCase):
+    """CASE=vfpu-quad-wb (165, PSP-VFPU-QUADWB-001) in probe_hle_issues.c: lv.q / sv.q with the
+    write-back flag. No system call in the section, bounded loops, every access inside the
+    probe's own buffer, a step before each form with the run of four last, a fixed-shape stream
+    that matches the registry, and no hardware result claimed (NOT_RUN)."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-QUADWB-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_QUAD_WB\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_QUAD_WB */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-quad-wb)\nCASE_ID = 165\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-quad-wb)\nTARGET = $(BUILD_DIR)/vfpu_quad_wb\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_QUAD_WB 165\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 165\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-quad-wb"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-QUADWB-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_quad_wb_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-quad-wb").name,
+                         "vfpu_quad_wb_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-quad-wb"), "strict-golden-sequence")
+        self.assertNotIn("vfpu-quad-wb", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-quad-wb", parse_golden.HLE_OBSERVATION_CASES)
+        self.assertIn("| `vfpu-quad-wb` | `PSP-VFPU-QUADWB-001` |", self.readme)
+
+    def test_section_has_no_system_call_and_only_bounded_loops(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 6)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(header, r"^unsigned (\w+) = 0; \1 < (?:\d+u|QW_\w+); \1\+\+$")
+
+    def test_encodings_follow_the_vfpu_memory_layout(self) -> None:
+        # lv.q is op 0x36, sv.q op 0x3e; rs $t2 (10); vt C000 = 0; offset & 0xfffc; wb = bit 1.
+        for kind, op in (("lv", 0x36), ("sv", 0x3e)):
+            for tag, off in (("o0", 0), ("o16", 16), ("o32", 32), ("om16", -16)):
+                word = (op << 26) | (10 << 21) | (off & 0xfffc) | 2
+                with self.subTest(form=f"{kind}-{tag}"):
+                    self.assertIn(f'QW_FORM_FN(qw_{kind}_{tag}, "0x{word:08x}")', self.section)
+                    self.assertIn(f"0x{word:08x}u, {off}, qw_{kind}_{tag}", self.section)
+        # The run of four: C000/C010/C020/C030 (vt 0, 4, 8, 12) at +0/+16/+32/+48, wb set.
+        for vt, off in ((0, 0), (4, 16), (8, 32), (12, 48)):
+            word = (0x3e << 26) | (10 << 21) | (vt << 16) | off | 2
+            self.assertIn(f'".word 0x{word:08x}\\n\\t"', self.section)
+        # Plain (flag clear) seeds and the readback through $t3 (11).
+        for vt, off in ((0, 0), (4, 16), (8, 32), (12, 48)):
+            word = (0x36 << 26) | (11 << 21) | (vt << 16) | off
+            self.assertIn(f'".word 0x{word:08x}\\n\\t"', self.section)
+        self.assertIn(f'".word 0x{(0x3e << 26) | (11 << 21):08x}\\n\\t"', self.section)
+        self.assertEqual(self.section.count("QW_FORM_FN("), 9)
+
+    def test_every_access_stays_inside_the_probe_buffer(self) -> None:
+        self.assertIn("static uint32_t s_qw_buf[QW_BUF_WORDS] __attribute__((aligned(64)));",
+                      self.section)
+        self.assertIn("#define QW_BUF_WORDS 256u", self.section)
+        self.assertIn("#define QW_MID_WORD 128u", self.section)
+        self.assertIn("&s_qw_buf[QW_MID_WORD]", self.section)
+        # Base byte offset 512 is non-zero and 16-byte aligned; even if every wb store drifted
+        # by its full offset, the reach stays far inside the 1024 bytes.
+        self.assertEqual((128 * 4) % 16, 0)
+        self.assertLessEqual(512 + (0 + 16 + 32 + 48) * 2 + 16, 1024)
+        self.assertGreaterEqual(512 - 16 - (0 + 16 + 32 + 48), 0)
+
+    def test_steps_come_before_forms_and_the_run_of_four_is_last(self) -> None:
+        bodies = _c_function_bodies(self.section)
+        self.assertLess(bodies["qw_group"].index("hle_step(name);"),
+                        bodies["qw_group"].index("qw_form_cell("))
+        run = bodies["hle_run"]
+        order = [run.index(token) for token in ("qw_group(pass, s_qw_lv, form)",
+                                                 "qw_group(pass, s_qw_sv, form)",
+                                                 "hle_step(name);", "qw_run_cell(name);")]
+        self.assertEqual(order, sorted(order))
+        self.assertLess(run.index('"svq-wb-run-p%u"'), run.index("qw_run_cell(name);"))
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-quad-wb"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-QUADWB-001")
+        self.assertEqual(spec.terminal_case, "vfpu-quad-wb-done")
+        cases = parse_golden.VFPU_QUAD_WB_CASES
+        self.assertEqual(len(cases), 2 * (4 + 4 + 1))
+        self.assertEqual(len(cases), len(set(cases)))
+        self.assertEqual(cases[0], "lvq-wb-o0-p0")
+        self.assertEqual(cases[-1], "svq-wb-run-p1")
+        self.assertEqual(counts["svq-wb-om16-p1"], 14)
+        self.assertEqual(counts["svq-wb-run-p0"], 39)
+        for fragment in ("#define QW_FORM_WORDS_OUT 14u", "#define QW_RUN_WORDS_OUT 39u",
+                         "s_qw_lv[4]", "s_qw_sv[4]", "pass < 2u", "form < 4u"):
+            self.assertIn(fragment, self.section)
+        for name in ("lvq-wb-o0", "lvq-wb-o16", "lvq-wb-o32", "lvq-wb-om16",
+                     "svq-wb-o0", "svq-wb-o16", "svq-wb-o32", "svq-wb-om16"):
+            self.assertIn(f'"{name}"', self.section)
+
+    def test_manifest_row_is_a_built_not_run_power_risk_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_quad_wb.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-quad-wb"])
         self.assertEqual(row["issues"], [326])
         self.assertEqual(row["hardware_evidence"], "NOT_RUN")
         self.assertNotIn("evidence_cases", row)

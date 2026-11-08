@@ -2172,6 +2172,30 @@ _register_campaign_probe(
             else VFPU_UNMODELED_IMAGE_WORDS) for case in VFPU_UNMODELED_CASES},
 )
 
+# vfpu-quad-wb (165, probe_hle_issues.c): #326 lv.q/sv.q with the write-back flag, two passes,
+# one buffer. Every row is emitted on every run, so the stream is fixed-shape; an exception stops
+# the launch (POWER RISK) and leaves a short stream. Per pass: lvq-wb-<off>-p<pass> for the four
+# offsets (14 words), then svq-wb-<off>-p<pass> (14 words), then svq-wb-run-p<pass> (39 words).
+VFPU_QUAD_WB_OFFSETS = ("o0", "o16", "o32", "om16")
+VFPU_QUAD_WB_PASSES = 2
+VFPU_QUAD_WB_FORM_WORDS = 14
+VFPU_QUAD_WB_RUN_WORDS = 39
+
+
+def _vfpu_quad_wb_pass_cases(p: int) -> tuple[str, ...]:
+    forms = tuple(f"{kind}-wb-{off}-p{p}" for kind in ("lvq", "svq")
+                  for off in VFPU_QUAD_WB_OFFSETS)
+    return forms + (f"svq-wb-run-p{p}",)
+
+
+VFPU_QUAD_WB_CASES = tuple(case for p in range(VFPU_QUAD_WB_PASSES)
+                           for case in _vfpu_quad_wb_pass_cases(p))
+_register_campaign_probe(
+    "vfpu-quad-wb", "PSP-VFPU-QUADWB-001", VFPU_QUAD_WB_CASES,
+    {case: (VFPU_QUAD_WB_RUN_WORDS if "-run-" in case else VFPU_QUAD_WB_FORM_WORDS)
+     for case in VFPU_QUAD_WB_CASES},
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -2852,7 +2876,7 @@ HLE_MACHINERY_STATUS_CASES = frozenset({
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS.
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
-                                   "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled"})
+                                   "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (

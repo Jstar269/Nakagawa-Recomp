@@ -1742,6 +1742,47 @@
         "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
       },
       {
+        "id": "PSP-VFPU-QUADWB-001",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as case 165, the lv.q/sv.q write-back flag stream. No hardware run is cited.",
+        "group": "cpu",
+        "source": "fixtures/psp_oracle/probe_hle_issues.c",
+        "prx": "vfpu_quad_wb.prx",
+        "apis": [
+          "sceIoClose",
+          "sceIoOpen",
+          "sceIoRead",
+          "sceIoWrite",
+          "sceKernelDeleteThread",
+          "sceKernelExitThread",
+          "sceKernelGetThreadId",
+          "sceKernelSleepThread",
+          "sceKernelWaitThreadEnd",
+          "sceKernelWakeupThread",
+          "Allegrex VFPU lv.q",
+          "Allegrex VFPU sv.q"
+        ],
+        "diagnostic_case_ids": [
+          "vfpu-quad-wb"
+        ],
+        "case_ids": [
+          "lvq-wb-*-p0",
+          "svq-wb-*-p0",
+          "svq-wb-run-p0",
+          "lvq-wb-*-p1",
+          "svq-wb-*-p1",
+          "svq-wb-run-p1",
+          "vfpu-quad-wb-done"
+        ],
+        "invariant": "#326, two passes: lv.q and sv.q with the write-back flag (word bit 1) at offsets 0, 16, 32 and -16 from a non-zero 16-byte-aligned base in the middle of a probe-owned buffer, as the base register after each form, the lanes loaded or stored, the buffer address, a changed-word census and the buffer words at base plus offset; then four back-to-back write-back sv.q at +0/+16/+32/+48 from one base with the base register after each. Every access stays inside the probe's own 1024-byte buffer.",
+        "issues": [
+          326
+        ],
+        "risk": "POWER RISK: the effect of the write-back flag on the console is unknown and nothing in the probe catches an exception (reserved instruction, address error) that stops the launch under PSPLink; the run of four writes last; run only with the owner present and never followed by an unattended reset",
+        "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
+      },
+      {
         "id": "PSP-GE-SAMPLE-001",
         "status": "implemented",
         "hardware_evidence": "MEASURED",
