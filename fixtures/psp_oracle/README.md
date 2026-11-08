@@ -644,6 +644,7 @@ publishes their words.
 | `sas-mix` | `PSP-SAS-003` | Built case 155 from `probe.c`. #2135/#2054 synthetic volume, WithMix and pitch cells. **NOT_RUN**; no hardware result is claimed. |
 | `vcodec-words` | `PSP-VCODEC-001` | Built case 160 from `probe.c`. #286 Media Engine boundary words over synthetic AVC access units. **NOT_RUN**; no hardware result is claimed. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | Built case 161 from `probe_hle_measure.c`. #1386 dialog timing and wrong-state cells. **NOT_RUN**; no hardware result is claimed. |
+| `hle-utility-netconf-sharing` | `PSP-HLE-UTILITY-DIALOG-002` | Built case 166 from `probe_hle_measure.c`. #1386 netconf and game sharing dialog timing and wrong-state cells of case 161, with no savedata and no gamedata install dialog. **NOT_RUN**; no hardware result is claimed. **POWER RISK**: a dialog stuck RUNNING may hang the console; run only with the owner present. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | Modes 2 and 3 are built and now use fresh stream setup per mode. **NOT_RUN** pending an owner-present hardware rerun; no new result is claimed. |
 
 ### #1375 entry and NULL-code probes

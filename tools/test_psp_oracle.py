@@ -2488,7 +2488,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 139)
+        self.assertEqual(len(routes), 140)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 166},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -5221,16 +5221,42 @@ def _c_walk(name, env, functions, defines, arrays, emit, active=()):
             _c_walk(callee, inner, functions, defines, arrays, emit, active + (name,))
 
 
+_SHARED_FAMILY_SECTIONS = {"HLE_CASE_UTILITY_NETCONF_SHARING": "HLE_CASE_UTILITY_DIALOGS"}
+
+
+def _select_case_blocks(section: str, macro: str) -> str:
+    """Resolve the `#if PSP_ORACLE_CASE == X` / `#else` / `#endif` blocks inside a section that
+    two cases compile (161 and 166 share one): keep the lines `macro` builds, drop the rest.
+    The section's own header and closing #endif are outside any block and kept as they are."""
+    out: list[str] = []
+    stack: list[tuple[bool, bool]] = []  # (is a case block, lines kept)
+    for index, line in enumerate(section.split("\n")):
+        text = line.strip()
+        case = re.fullmatch(r"#if PSP_ORACLE_CASE == (\w+)", text)
+        if index > 0 and case:
+            stack.append((True, case.group(1) == macro))
+        elif index > 0 and text.startswith("#if"):
+            stack.append((False, True))
+        elif text == "#else" and stack and stack[-1][0]:
+            stack[-1] = (True, not stack[-1][1])
+        elif text.startswith("#endif") and stack:
+            stack.pop()
+        elif all(kept for _is_case, kept in stack):
+            out.append(line)
+    return "\n".join(out)
+
+
 def _probe_cells(probe: str, macro: str) -> tuple[list[tuple[str, int]], int]:
     """The (cell, out-word count) pairs a family's record calls can emit, in source order,
     and the number of hle_step calls the walk reaches. A cell can appear more than once
     when a skip branch and a record branch both emit it."""
-    anchor = re.search(rf"\*/\n#if PSP_ORACLE_CASE == {macro}\n", probe)
+    host = _SHARED_FAMILY_SECTIONS.get(macro, macro)
+    anchor = re.search(rf"\*/\n#if PSP_ORACLE_CASE == {host}(?: \|\| [^\n]*)?\n", probe)
     if anchor is None:
         raise AssertionError(f"no family section for {macro}")
-    end_marker = f"#endif /* {macro} */"
+    end_marker = f"#endif /* {host} */"
     end = probe.index(end_marker, anchor.start()) + len(end_marker)
-    section = _c_code(probe[anchor.start():end])
+    section = _c_code(_select_case_blocks(probe[anchor.start():end], macro))
     code = _c_code(probe)
     defines = {name: int(value, 0) for name, value in re.findall(
         r"^#define\s+(\w+)\s+(0x[0-9A-Fa-f]+|\d+)[uUlL]*\s*$", code, re.M)}
@@ -5348,6 +5374,9 @@ class HleMeasureProbeTests(unittest.TestCase):
          "HLE_CASE_STD_HANDLES", "PSP-HLE-STDIO-001"),
         ("hle-utility-dialogs", 161, "hle_utility_dialogs", "hle_utility_imports.S",
          "HLE_CASE_UTILITY_DIALOGS", "PSP-HLE-UTILITY-DIALOG-001"),
+        ("hle-utility-netconf-sharing", 166, "hle_utility_netconf_sharing",
+         "hle_utility_imports.S", "HLE_CASE_UTILITY_NETCONF_SHARING",
+         "PSP-HLE-UTILITY-DIALOG-002"),
     )
     ALL_FAMILIES = FAMILIES + SINGLE_LAUNCH_FAMILIES + TABLE_FAMILIES + LATER_FAMILIES
     # Every family block: file -> (library, version word, {function: NID}). The
@@ -5428,6 +5457,21 @@ class HleMeasureProbeTests(unittest.TestCase):
             "nkUtilGamedataInstallGetStatus": 0xB57E95D9,
             "nkUtilGamedataInstallUpdate": 0x4AECD179,
             "nkUtilGamedataInstallShutdownStart": 0x32E32DCB,
+            "nkUtilGameSharingInitStart": 0xC492F751,
+            "nkUtilGameSharingGetStatus": 0x946963F3,
+            "nkUtilGameSharingUpdate": 0x7853182D,
+            "nkUtilGameSharingShutdownStart": 0xEFC6F80F,
+            "sceUtilityLoadNetModule": 0x1579A159,
+            "sceUtilityUnloadNetModule": 0x64D50C56,
+        },
+        # hle-utility-netconf-sharing: case 161's set minus savedata and the gamedata install
+        # dialog (the latter hung the console on boot 147).
+        ("hle_utility_imports.S", 166): {
+            "nkUtilMsgDialogInitStart": 0x2AD8E239,
+            "nkUtilNetconfInitStart": 0x4DB1E739,
+            "nkUtilNetconfGetStatus": 0x6332AA39,
+            "nkUtilNetconfUpdate": 0x91E70E35,
+            "nkUtilNetconfShutdownStart": 0xF88155F6,
             "nkUtilGameSharingInitStart": 0xC492F751,
             "nkUtilGameSharingGetStatus": 0x946963F3,
             "nkUtilGameSharingUpdate": 0x7853182D,
@@ -5565,11 +5609,15 @@ class HleMeasureProbeTests(unittest.TestCase):
                       self._imports(self._block_text(block, case_id))}
         return names
 
-    @staticmethod
-    def _family_span(text: str, macro: str) -> tuple[int, int]:
+    # Case 166 compiles case 161's section; the cells only 161 builds sit in `#if 161` blocks.
+    SHARED_SECTIONS = {"HLE_CASE_UTILITY_NETCONF_SHARING": "HLE_CASE_UTILITY_DIALOGS"}
+
+    @classmethod
+    def _family_span(cls, text: str, macro: str) -> tuple[int, int]:
         # Each family section opens right after its separator comment; the header
         # #if chain that names the same macro does not, so it is never matched.
-        match = re.search(rf"\*/\n#if PSP_ORACLE_CASE == {macro}\n", text)
+        macro = cls.SHARED_SECTIONS.get(macro, macro)
+        match = re.search(rf"\*/\n#if PSP_ORACLE_CASE == {macro}(?: \|\| [^\n]*)?\n", text)
         if match is None:
             raise AssertionError(f"no family section for {macro}")
         end_marker = f"#endif /* {macro} */"
@@ -5578,13 +5626,19 @@ class HleMeasureProbeTests(unittest.TestCase):
 
     def _section(self, macro: str) -> str:
         start, end = self._family_span(self.probe, macro)
-        return self.probe[start:end]
+        text = self.probe[start:end]
+        if macro in self.SHARED_SECTIONS:
+            only = self.SHARED_SECTIONS[macro]
+            text = re.sub(rf"\n#if PSP_ORACLE_CASE == {only}\n.*?\n#endif\n", "\n", text,
+                          flags=re.DOTALL)
+        return text
 
     def _shared_section(self) -> str:
         """Probe text outside every family section (common helpers and main)."""
         text = self.probe
-        for _case, _cid, _stem, _block, macro, _test in reversed(self.ALL_FAMILIES):
-            start, end = self._family_span(text, macro)
+        spans = sorted({self._family_span(text, macro)
+                        for _case, _cid, _stem, _block, macro, _test in self.ALL_FAMILIES})
+        for start, end in reversed(spans):
             text = text[:start] + text[end:]
         return text
 
@@ -5662,13 +5716,14 @@ class HleMeasureProbeTests(unittest.TestCase):
         hle-sysparam can import no savedata call."""
         block = "hle_utility_imports.S"
         self.assertEqual(re.findall(r"^#if PSP_ORACLE_CASE == (\d+)$", self._block_text(block),
-                                    re.MULTILINE), ["104", "140", "161"])
+                                    re.MULTILINE), ["104", "140", "161", "166"])
         self.assertIn("#define HLE_CASE_SAVEDATA_GETSIZE 104\n", self.probe)
         self.assertIn("else ifeq ($(CASE),hle-savedata-getsize)\nCASE_ID = 104\n", self.makefile)
         users = [(case, case_id) for case, case_id, _stem, linked, _macro, _test
                  in self.ALL_FAMILIES if linked == block]
         self.assertEqual(users, [("hle-sysparam", 95), ("hle-savedata-getsize", 104),
-                                 ("hle-utility-none", 140), ("hle-utility-dialogs", 161)])
+                                 ("hle-utility-none", 140), ("hle-utility-dialogs", 161),
+                                 ("hle-utility-netconf-sharing", 166)])
         for case, case_id in users:
             with self.subTest(case=case):
                 gate = self.makefile.split(f"\nifeq ($(CASE),{case})\n", 1)[1].split("endif", 1)[0]
@@ -9737,6 +9792,67 @@ class HleUtilityNoneProbeTests(unittest.TestCase):
         self.assertNotIn("InitStart(", section)
 
 
+class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
+    """CASE=hle-utility-netconf-sharing (166, PSP-HLE-UTILITY-DIALOG-002): case 161's netconf and
+    game sharing cells only. The gamedata install dialog hung the console on boot 147, so no
+    gamedata, savedata or message-dialog open can be built into it."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
+
+    def test_route_and_registry(self) -> None:
+        self.assertIn("else ifeq ($(CASE),hle-utility-netconf-sharing)\nCASE_ID = 166\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_UTILITY_NETCONF_SHARING 166\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "hle-utility-netconf-sharing"\n'
+                      '#define HLE_TEST_ID "PSP-HLE-UTILITY-DIALOG-002"\n'
+                      '#define HLE_LOG "host0:/hle_utility_netconf_sharing_log.txt"', self.probe)
+        spec, _counts = CAMPAIGN_PROBE_CASES["hle-utility-netconf-sharing"]
+        rows = tuple(row for row, _ in parse_golden.HLE_UTILITY_NETCONF_SHARING_ROWS)
+        self.assertEqual(spec.ordered_cases[:-1], rows)
+        self.assertEqual(len(rows), 14)
+        self.assertEqual(rows[0], "netconf-setup")
+        self.assertLess(rows.index("netconf-teardown"), rows.index("sharing-setup"))
+        self.assertFalse(any(row.startswith(("gamedata", "savedata")) for row in rows))
+
+    def test_run_is_netconf_then_sharing_and_gamedata_is_not_compiled(self) -> None:
+        run = self.probe[self.probe.index("/* Netconf first"):]
+        run = run[run.index("static int hle_run"):run.index("\n}\n")]
+        self.assertEqual(re.findall(r"\b(hle_ud_\w+)\(", run), ["hle_ud_netconf", "hle_ud_sharing"])
+        self.assertNotIn("gamedata", run)
+        # Every gamedata and savedata definition sits under the case-161-only guard.
+        for marker in ("static const HleUdType k_ud_gamedata = {",
+                       "static uint32_t hle_ud_gamedata_precheck(void)",
+                       "static void hle_ud_gamedata(void)",
+                       "static void hle_ud_fill_gamedata(uint8_t *block)",
+                       "int nkUtilGamedataInstallInitStart(void *param);"):
+            with self.subTest(marker=marker):
+                before = self.probe[:self.probe.index(marker)]
+                opened = before.rindex("#if ")
+                self.assertTrue(before[opened:].startswith(
+                    "#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS\n"), marker)
+                self.assertNotIn("#endif", before[opened:])
+
+    def test_import_set_has_no_gamedata_savedata_or_umd_call(self) -> None:
+        block = self.imports[self.imports.index("#if PSP_ORACLE_CASE == 166\n"):]
+        block = block[:block.index("#endif")]
+        names = re.findall(r"IMPORT_FUNC\s+\"sceUtility\", 0x[0-9A-F]{8}, (\w+)", block)
+        self.assertEqual(len(names), 11)
+        self.assertFalse([n for n in names if "Gamedata" in n or "Savedata" in n])
+        self.assertEqual([n for n in names if "MsgDialog" in n], ["nkUtilMsgDialogInitStart"])
+        gate = self.makefile[self.makefile.index(
+            "ifeq ($(CASE),hle-utility-netconf-sharing)\nLIBS"):]
+        gate = gate[:gate.index("\nendif\n")]
+        self.assertIn("--forbid-library sceUmdUser", gate)
+        self.assertNotIn("-lpspumd", gate)
+        self.assertNotIn("0x24AC31EB", gate)  # gamedata InitStart
+        self.assertNotIn("0x50C4CD57", gate)  # savedata InitStart
+
+
 class HleUtilityDialogsProbeTests(unittest.TestCase):
     """CASE=hle-utility-dialogs (161, PSP-HLE-UTILITY-DIALOG-001) in probe_hle_measure.c: #1386's
     dialog status timing and wrong-state answers in game context. These pin the safety design:
@@ -9754,7 +9870,8 @@ class HleUtilityDialogsProbeTests(unittest.TestCase):
         cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
-        start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS\n\n")
+        start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || "
+                                "PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING\n\n")
         cls.section = cls.probe[start:cls.probe.index("#endif /* HLE_CASE_UTILITY_DIALOGS */")]
 
     def _body(self, signature: str) -> str:
@@ -12830,6 +12947,7 @@ class Record20261015Tests(unittest.TestCase):
             ("sas-mix", "PSP-SAS-003", "NOT_RUN"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
+            ("hle-utility-netconf-sharing", "PSP-HLE-UTILITY-DIALOG-002", "NOT_RUN"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}
