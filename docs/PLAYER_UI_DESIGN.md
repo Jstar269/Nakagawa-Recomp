@@ -191,7 +191,9 @@ not from constants. At a larger text size:
   would not fit beside it (the tab names the page);
 - the prompt bar's hint ends in an ellipsis in the room the prompts leave;
 - a page body (Library, title page, Settings, About) or a flow card taller than the room between the bars scrolls
-  there, and a control taking focus scrolls into view; at 100% every page fits, as the screen tests check.
+  there, and a control taking focus scrolls into view. The title page's body scrolls at any text size, because what
+  a game's page shows varies (#2245); the screen tests check that its fullest form scrolls at 1280x720 with the
+  prompt bar whole.
 
 The launcher offers it as Settings > Accessibility > Text size; the in-game overlay stays at 100%. The launcher's
 screens are laid out on at least its
@@ -378,7 +380,11 @@ Stop the game to rebuild or change settings." The input note about decrypted fil
 still needs them. Main column: eyebrow LIBRARY › TITLE, the name in `TITLE_XL`, the disc ID in `DATA`, the status
 pill and tag (YOUR DISC, BETA / UNOFFICIAL or the disc check's word, as on the card), then for a checked disc
 one `BODY_S` `muted` sentence on what the check found (for UNKNOWN DUMP: not shown to be retail, not modified,
-since Redump's PSP list names no disc IDs), one action row on the column's left edge with every button 52 px (the primary action, PLAY when
+since Redump's PSP list names no disc IDs), then a PICTURE card when the last run of this game fell back to a
+slower drawing path (#2151): a DRAWN IN SOFTWARE pill in the brand blue, as a fact and not a warning, one `BODY_S`
+`paper` paragraph naming the renderer that did not start and what that costs (Internal resolution has no effect, the
+game may run slower, a graphics driver update may help), and a small Hide button, never the default focus, that hides
+that fallback's notice for the rest of the session; then one action row on the column's left edge with every button 52 px (the primary action, PLAY when
 the package is ready, STARTING… while the launch starts, STOP GAME while a game runs, then SAVES (the
 [Saves](#saves-built) dialog) and BACK), and the WHAT TO EXPECT card. Its eyebrow carries a player tier chip (PERFECT and PLAYABLE `ready`, IN-GAME
 and MENU `info`, TITLE SCREEN `warning`, WON'T BOOT `error`; no chip for a title no one has tried). Below it come
