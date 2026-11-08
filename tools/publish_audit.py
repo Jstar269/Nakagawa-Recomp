@@ -2009,7 +2009,7 @@ def _default_provenance(
 
     # android/ is the Android host target (#360): Gradle, NDK, Java and manifest
     # sources of the same project, admitted like any other path.
-    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1", "nk_manager.ps1"):
+    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1", ".glsl") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1", "nk_manager.ps1"):
         gen_kind = "documentation" if (rel_path.startswith("docs/") or ext == ".md") else ("data" if ext in (".json", ".jsonc", ".dat") else ("script" if ext in (".ps1", ".sh") else "source"))
         return "project_authored", "GPL-2.0-or-later", "NOTICE.md", gen_kind, "included", policy_public
 

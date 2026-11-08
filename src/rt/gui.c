@@ -677,7 +677,7 @@ static int gui_movie_make(MovieUpscale *m, const char *where) {
 ", where,
                     error[0] ? error : "unknown");
     }
-    error[0] = ' ';
+    error[0] = '\0';
     m->fsr1 = gui_fsr1_make(error, sizeof(error));
     if (!m->fsr1 && !m->anime4k) {
         m->failed = 1;
