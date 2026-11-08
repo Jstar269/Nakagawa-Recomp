@@ -264,6 +264,9 @@ extern void sr_display_test_flip_counts(unsigned long *calls, unsigned long *imm
                                         uint32_t *last_err);
 extern void sr_hle_test_sas_reset(void);
 extern void sr_hle_test_audio_reset(void);
+extern void sr_hle_test_audio_wait_reset(void);
+extern void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us));
+extern uint64_t sr_hle_test_audio_wait_total_us(void);
 extern void sr_hle_test_audio_lead_reset(void);
 extern void sr_hle_test_audio_lead_feed(uint32_t vbl, int ch, int queued);
 extern unsigned long sr_hle_test_audio_lead_window(int *peak, uint32_t *peak_ch,
@@ -6657,6 +6660,72 @@ static void profile_read(uint8_t mac[6], uint8_t psid[16]) {
     for (uint32_t i = 0; i < 16u; i++) psid[i] = MEM_R8(PROFILE_OUT + 16u + i);
 }
 
+/* #2162: under the deterministic clock a fresh profile's WLAN MAC address and OpenPSID are
+ * derived from a named seed, not from the host's random source. Two fresh runs agree, the MAC has
+ * the locally administered bit set (no console's address does), nothing is saved, and a normal
+ * run still gets differing random values. An identity the user configured is used as it is.
+ *
+ * MUTANT: console_profile_identity ignores sched_clock_deterministic() -- the two fresh runs get
+ *   different random values and the first check fails. */
+static void test_console_profile_identity_is_deterministic_under_the_deterministic_clock(void) {
+    static const char configured[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, "
+        "\"categories\": [], \"keys\": [], \"console\": {\"wlan_mac_hex\": \"00a1b2c3d4e5\", "
+        "\"open_psid_hex\": \"00112233445566778899aabbccddeeff\"}}";
+    uint8_t mac_a[6], psid_a[16], mac_b[6], psid_b[16], mac_c[6], psid_c[16];
+    reset_fixture();
+    sr_hle_init();
+    sysreg_scratch_clean();
+    sysreg_env(SYSREG_SCRATCH_FILE);
+    hle_test_setenv("SR_IDENTITY_SEED", NULL);
+
+    s_det_clock = 1;
+    sysreg_scratch_clean();
+    sysreg_restart();
+    profile_read(mac_a, psid_a);
+    char *saved = sysreg_read_file(SYSREG_SCRATCH_FILE);
+    expect(saved == NULL || strstr(saved, "wlan_mac_hex") == NULL,
+           "a deterministic run saves no identity into the user's overlay");
+    free(saved);
+    sysreg_scratch_clean();
+    sysreg_restart();
+    profile_read(mac_b, psid_b);
+    expect(memcmp(mac_a, mac_b, 6) == 0 && memcmp(psid_a, psid_b, 16) == 0,
+           "two fresh deterministic runs get the same MAC address and OpenPSID");
+    int psid_set = 0;
+    for (int i = 0; i < 16; i++) psid_set |= psid_a[i] != 0u;
+    expect((mac_a[0] & 0x03u) == 0x02u && psid_set,
+           "the synthetic MAC is unicast with the locally administered bit set; the OpenPSID is non-zero");
+
+    hle_test_setenv("SR_IDENTITY_SEED", "another-named-seed");
+    sysreg_scratch_clean();
+    sysreg_restart();
+    profile_read(mac_c, psid_c);
+    expect(memcmp(mac_a, mac_c, 6) != 0 && memcmp(psid_a, psid_c, 16) != 0 &&
+               (mac_c[0] & 0x03u) == 0x02u,
+           "a different named seed derives different values, still locally administered");
+    hle_test_setenv("SR_IDENTITY_SEED", NULL);
+
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, configured, sizeof(configured) - 1u),
+           "the configured-identity overlay is written");
+    sysreg_restart();
+    profile_read(mac_c, psid_c);
+    expect(mac_c[0] == 0x00 && mac_c[1] == 0xa1 && psid_c[15] == 0xff,
+           "an identity the user configured wins over the derived one");
+
+    s_det_clock = 0;
+    sysreg_scratch_clean();
+    sysreg_restart();
+    profile_read(mac_a, psid_a);
+    sysreg_scratch_clean();
+    sysreg_restart();
+    profile_read(mac_b, psid_b);
+    expect(memcmp(mac_a, mac_b, 6) != 0 || memcmp(psid_a, psid_b, 16) != 0,
+           "without the deterministic clock two fresh runs still get different random values");
+    sysreg_scratch_clean();
+    sysreg_restart();
+}
+
 /* Portable mode (#1850): the game process's registry overlay follows SR_USER_DATA_ROOT, the root the
  * launcher resolved, not the platform default; SR_SYSTEM_REGISTRY still wins, and a relative root
  * is refused rather than answered with the default. */
@@ -7585,6 +7654,41 @@ static void test_sysreg_corrupt_overlay(void) {
     expect(sysreg_sysparam_int(8u) == 4u, "the overlay written after the ignored one loads");
     sysreg_restart();
     sysreg_scratch_clean();
+}
+
+/* #2162: the synthetic identity a deterministic run derives is never written back. A guest that
+ * changes a registry key and flushes under the deterministic clock must leave an overlay without a
+ * console object: a synthetic MAC fails the loader's checks, and a later normal run would discard
+ * the whole overlay for it.
+ *
+ * MUTANT: sreg_overlay_render ignores PspConsoleProfile.synthetic -- the flushed overlay holds the
+ *   synthetic MAC and the first check fails. */
+static void test_deterministic_identity_is_never_flushed_to_the_overlay(void) {
+    uint32_t r, reg, cat;
+    uint8_t mac[6], psid[16];
+    reset_fixture();
+    sr_hle_init();
+    sysreg_scratch_clean();
+    sysreg_env(SYSREG_SCRATCH_FILE);
+    s_det_clock = 1;
+    sysreg_restart();
+    profile_read(mac, psid);   /* the synthetic identity is now live */
+    reg = sysreg_open_registry(2u, &r);
+    cat = sysreg_open_category(reg, "/CONFIG/SYSTEM/XMB", 2u, &r);
+    expect(sysreg_set_int(cat, "language", 4u) == 0u &&
+               sysreg_call(NID_SCE_REG_FLUSH_REGISTRY, reg, 0u, 0u, 0u, 0u) == 0u,
+           "a registry change flushes under the deterministic clock");
+    char *text = sysreg_read_file(SYSREG_SCRATCH_FILE);
+    expect(text != NULL, "the flush wrote the overlay");
+    expect(text && strstr(text, "console") == NULL && strstr(text, "wlan_mac_hex") == NULL,
+           "and the overlay holds no console object: the derived identity is not saved");
+    free(text);
+    s_det_clock = 0;
+    sysreg_restart();
+    expect(sysreg_sysparam_int(8u) == 4u,
+           "a normal run loads the overlay the deterministic run flushed, setting intact");
+    sysreg_scratch_clean();
+    sysreg_restart();
 }
 
 /* A flush that cannot write reports EIO and keeps the change live in memory. */
@@ -9582,6 +9686,70 @@ static uint32_t io_devctl_call(CpuState *cpu, uint32_t device, uint32_t command,
     return sr_syscall(cpu, 0x54f5fb11u);
 }
 
+/* #2161: under the deterministic clock the guest sees a fixed virtual card (2 GiB, 32 KiB
+ * clusters) minus what the Memory Stick folder holds, whatever the host volume reports. Without
+ * the clock the host volume is reported as before.
+ *
+ * MUTANT: io_memstick_capacity skips the deterministic branch -- the two host volumes give the
+ *   guest different numbers under the clock and the first check fails. */
+extern int io_memstick_capacity(uint32_t info[5]);
+extern void sr_hle_test_set_host_capacity(const uint32_t info[5]);
+static void test_memstick_capacity_is_fixed_under_the_deterministic_clock(void) {
+    static const char dir[] = HLE_BUILD_ROOT "/hle_det_memstick";
+    static const char sub[] = HLE_BUILD_ROOT "/hle_det_memstick/PSP";
+    static const char file_a[] = HLE_BUILD_ROOT "/hle_det_memstick/a.bin";
+    static const char file_b[] = HLE_BUILD_ROOT "/hle_det_memstick/PSP/b.bin";
+    const uint32_t host_a[5] = { 1000u, 400u, 64000u, 512u, 64u };
+    const uint32_t host_b[5] = { 7777u, 3u, 497728u, 512u, 64u };
+    uint32_t got_a[5], got_b[5];
+    reset_fixture();
+    nk_platform_mkdir_p(dir);
+    nk_platform_mkdir_p(sub);
+    remove(file_a);
+    remove(file_b);
+    expect(hle_test_setenv("SR_MEMSTICK", dir), "the capacity test selects its own Memory Stick folder");
+    sr_hle_init();
+
+    s_det_clock = 0;
+    sr_hle_test_set_host_capacity(host_a);
+    expect(io_memstick_capacity(got_a) && memcmp(got_a, host_a, sizeof(got_a)) == 0,
+           "without the deterministic clock the host volume is what the guest sees");
+    sr_hle_test_set_host_capacity(host_b);
+    expect(io_memstick_capacity(got_b) && memcmp(got_b, host_b, sizeof(got_b)) == 0 &&
+               memcmp(got_a, got_b, sizeof(got_a)) != 0,
+           "and two host volumes give two different answers");
+
+    s_det_clock = 1;
+    sr_hle_test_set_host_capacity(host_a);
+    expect(io_memstick_capacity(got_a), "a deterministic run reports the virtual card (host A)");
+    sr_hle_test_set_host_capacity(host_b);
+    expect(io_memstick_capacity(got_b), "a deterministic run reports the virtual card (host B)");
+    expect(memcmp(got_a, got_b, sizeof(got_a)) == 0,
+           "two different host free-space values give the guest the same capacity under the clock");
+    expect(got_a[0] == 65536u && got_a[1] == 65536u && got_a[2] == 65536u * 64u &&
+               got_a[3] == 512u && got_a[4] == 64u,
+           "the empty virtual card is 65536 clusters of 64 sectors of 512 bytes, all free");
+
+    FILE *f = fopen(file_a, "wb");
+    expect(f != NULL, "the capacity test writes a file into the Memory Stick folder");
+    if (f) { for (int i = 0; i < 100000; i++) fputc(i, f); fclose(f); }
+    f = fopen(file_b, "wb");
+    expect(f != NULL, "and one in a subfolder");
+    if (f) { fputc(1, f); fclose(f); }
+    expect(io_memstick_capacity(got_b) && got_b[0] == 65536u && got_b[1] == 65536u - 4u - 1u,
+           "what the run wrote uses space: 100000 bytes is 4 clusters, 1 byte is 1 more");
+    sr_hle_test_set_host_capacity(host_a);
+    expect(io_memstick_capacity(got_a) && memcmp(got_a, got_b, sizeof(got_a)) == 0,
+           "and the host volume still does not matter");
+
+    remove(file_a);
+    remove(file_b);
+    sr_hle_test_set_host_capacity(NULL);
+    s_det_clock = 0;
+    hle_test_setenv("SR_MEMSTICK", NULL);
+    reset_fixture();
+}
+
 /* Issue #281: exercise the real sceIoDevctl dispatch for the documented
  * memory-stick capacity, status, and callback commands, plus pointer and
  * unknown-command boundaries. Unknown pairs must be refused and logged once. */
@@ -10999,12 +11167,128 @@ static void test_audio_queue_drains_in_guest_time_under_the_deterministic_clock(
     s_audio_queue_result = 100000;   /* the host mixer is far behind: the guest must not see it */
     expect(hle_audio_queued(0) == 0, "the host mixer's backlog is not what the guest sees");
     s_audio_queue_result = -1;
-    expect(hle_audio_queued(0) == -1, "no host output stays no host output");
+    expect(hle_audio_queued(0) == 0, "no host output device is the same empty model (#2160)");
     s_det_clock = 0;
     s_audio_queue_result = 100000;
     expect(hle_audio_queued(0) == 100000, "without the deterministic clock the host depth is reported");
+    s_audio_queue_result = -1;
+    expect(hle_audio_queued(0) == -1, "without the deterministic clock no host output is still -1");
     s_audio_queue_result = 0;
     reset_fixture();
+}
+
+/* What a guest can observe of the audio it plays, under the deterministic clock, while the host
+ * mixer behaves as `host_depth` says (#2160, #2163): each blocking output's return value, how long
+ * it parked the guest in total, and what GetChannelRestLength reported after each. The guest-time
+ * script is the same for every host: the host differs, never the guest. */
+typedef struct {
+    uint32_t returns[24];
+    uint32_t rest[24];
+    uint64_t wait_us;
+    uint32_t outputs;
+} AudioGuestView;
+
+static uint64_t *s_wait_clock;   /* the fixture's guest clock, advanced by the waits the guest asks for */
+static void audio_wait_advances_clock(uint32_t us) { if (s_wait_clock) *s_wait_clock += us; }
+
+static void audio_guest_view(int host_depth, uint32_t frames, uint32_t outputs, uint32_t step_us, AudioGuestView *v) {
+    const uint32_t STEREO_BUF = 0x08a00000u;
+    CpuState cpu;
+    memset(v, 0, sizeof(*v));
+    reset_fixture();
+    sr_hle_init();
+    s_det_clock = 1;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, frames, 0u) == 0u,
+           "the guest-view fixture reserves the regular channel");
+    sr_hle_test_audio_wait_reset();
+    s_wait_clock = &s_vtime_us;
+    sr_hle_test_audio_wait_hook(audio_wait_advances_clock);
+    s_vtime_us = 1000u;
+    for (uint32_t i = 0; i < outputs && i < 24u; i++) {
+        s_audio_queue_result = host_depth;
+        v->returns[i] = audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, STEREO_BUF);
+        s_vtime_us += step_us;   /* guest time between outputs: 0 is a guest that never lets the model drain */
+        v->rest[i] = audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u);
+        v->outputs++;
+    }
+    v->wait_us = sr_hle_test_audio_wait_total_us();
+    sr_hle_test_audio_wait_hook(NULL);
+    s_wait_clock = NULL;
+    s_det_clock = 0;
+    s_audio_queue_result = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+static int audio_guest_views_equal(const AudioGuestView *a, const AudioGuestView *b) {
+    return a->outputs == b->outputs && a->wait_us == b->wait_us &&
+           memcmp(a->returns, b->returns, sizeof(a->returns)) == 0 &&
+           memcmp(a->rest, b->rest, sizeof(a->rest)) == 0;
+}
+
+/* #2160: the host output device is an optional sink. A run on a headless runner (the host mixer
+ * reports no queue, -1) and a run on a desktop (a queue of any depth) hand the guest the same
+ * return values, the same waits and the same rest lengths.
+ *
+ * MUTANT: hle_audio_queued returns the host's -1 under the deterministic clock -- the no-device
+ *   run takes the open-loop branch of audio_output and waits 1451 us per output where the
+ *   device runs wait for nothing, so the views differ. */
+static void test_audio_guest_view_is_the_same_with_and_without_a_host_device(void) {
+    AudioGuestView with_device, no_device, null_device;
+    audio_guest_view(0, 64u, 8u, 1451u, &with_device);
+    audio_guest_view(-1, 64u, 8u, 1451u, &no_device);
+    audio_guest_view(-1, 1024u, 8u, 23219u, &null_device);
+    expect(with_device.outputs == 8u && with_device.returns[7] == 64u,
+           "the device run completed eight 64-frame outputs");
+    expect(audio_guest_views_equal(&with_device, &no_device),
+           "no host output device: the guest sees the same returns, waits and rest lengths");
+    AudioGuestView with_device_1024;
+    audio_guest_view(0, 1024u, 8u, 23219u, &with_device_1024);
+    expect(audio_guest_views_equal(&with_device_1024, &null_device),
+           "the same holds for a 1024-frame channel");
+}
+
+/* #2163: the guest's audio does not follow the host mixer. A host that keeps up in real time, one
+ * that races ahead and drains at once, one that is behind and holds a full mixer (262144 frames),
+ * and one that has no device at all give the guest the same view of the same audio.
+ *
+ * MUTANT: audio_output paces against sr_audio_queued() under the deterministic clock -- the full
+ *   mixer makes every output wait out the whole backlog and the views differ. */
+static void test_audio_guest_view_ignores_the_host_mixer_speed(void) {
+    enum { MIXER_CAP = 65536 * 4 };
+    AudioGuestView real_time, fast, slow, full, none;
+    audio_guest_view(64, 1024u, 12u, 23219u, &real_time);
+    audio_guest_view(0, 1024u, 12u, 23219u, &fast);
+    audio_guest_view(MIXER_CAP / 2, 1024u, 12u, 23219u, &slow);
+    audio_guest_view(MIXER_CAP, 1024u, 12u, 23219u, &full);
+    audio_guest_view(-1, 1024u, 12u, 23219u, &none);
+    expect(real_time.outputs == 12u && real_time.returns[11] == 1024u,
+           "the real-time run completed twelve 1024-frame outputs");
+    expect(audio_guest_views_equal(&real_time, &fast),
+           "a host that races ahead and drains at once changes nothing the guest sees");
+    expect(audio_guest_views_equal(&real_time, &slow),
+           "a host that is behind changes nothing the guest sees");
+    expect(audio_guest_views_equal(&real_time, &full),
+           "a host mixer at its 262144-frame cap, dropping, changes nothing the guest sees");
+    expect(audio_guest_views_equal(&real_time, &none),
+           "no host mixer at all changes nothing the guest sees");
+}
+
+/* The wait branch itself: a guest that plays faster than its model drains (no guest time passes
+ * between outputs) is held to two periods of lead, and the wait it is given is the model's, the same
+ * whatever the host mixer or device does (#2160, #2163). */
+static void test_audio_model_wait_is_the_same_for_every_host(void) {
+    AudioGuestView ref, none, fast, full;
+    audio_guest_view(0, 1024u, 12u, 0u, &ref);
+    audio_guest_view(-1, 1024u, 12u, 0u, &none);
+    audio_guest_view(0, 1024u, 12u, 0u, &fast);
+    audio_guest_view(65536 * 4, 1024u, 12u, 0u, &full);
+    expect(ref.wait_us > 0u,
+           "a guest that never lets the model drain is made to wait: the model-driven branch ran");
+    expect(audio_guest_views_equal(&ref, &none) && audio_guest_views_equal(&ref, &fast) &&
+               audio_guest_views_equal(&ref, &full),
+           "and no device, a drained mixer and a full mixer give that guest the same waits");
 }
 
 /* Every call that paces a guest against the audio queue reads the model under the deterministic
@@ -17182,8 +17466,8 @@ static void test_can_not_wait_semantics(void) {
  * untouched. L5/L6 is the sharp one: before this change `count -= need` ran with
  * a negative need, ADDED to the semaphore, and returned success.
  *
- * s_sync[128] is never cleared between tests and the conformance matrix runs
- * later out of the same table, so every semaphore created here is deleted.
+ * The semaphore table is never cleared between tests and the conformance matrix
+ * runs later out of the same table, so every semaphore created here is deleted.
  * ------------------------------------------------------------------------- */
 #define NID_WSV_DELETE_SEMA      0x28b6489cu
 #define NID_WSV_SIGNAL_SEMA      0x3f53e640u
@@ -18428,6 +18712,94 @@ static void test_evf_create_and_refer(void) {
     (void)b1_call(NID_B1_REFER_EVF, evf, EVT_INFO, 0u, 0u);
     expect(MEM_R32(EVT_INFO + 36u) == 0xdeadbeefu, "event flag refer size zero writes nothing");
     (void)b1_call(NID_B1_DELETE_EVF, evf, 0u, 0u, 0u);
+    s_cur = -1;
+}
+
+/* ---------------------------------------------------------------------------
+ * #1892: semaphores, event flags and LwMutexes have no fixed cap. A PSP creates
+ * 1024 event flags in a row (PSPAutotests tests/threads/events/create/create.c
+ * and create.expected at 2ed7c9c5, "Create 1024: OK"). The three kinds share one
+ * HLE table; while it held 128 objects, the next create returned 0x80020000 and a
+ * title's loader stalled when its pthread mutex init failed. An object created
+ * before the table grows must still be found after it.
+ * ------------------------------------------------------------------------- */
+#define SYNC_GROW_EVF_COUNT 1024
+
+size_t hle_sync_slot_count(void); /* src/rt/hle.c: slots in the grown table */
+
+#define SYNC_GROW_TMID_EVF     0x94416130u   /* sceKernelGetThreadmanIdList */
+#define SYNC_GROW_TMID_COUNT   (EVT_INFO + 64u)
+
+/* The event-flag total sceKernelGetThreadmanIdList reports, or UINT32_MAX on an error. */
+static uint32_t sync_grow_evf_total(void) {
+    MEM_W32(SYNC_GROW_TMID_COUNT, 0xa5a5a5a5u);
+    return b1_call(SYNC_GROW_TMID_EVF, 3u /* SCE_KERNEL_TMID_EventFlag */, 0u, 0u,
+                   SYNC_GROW_TMID_COUNT) == 0u ? MEM_R32(SYNC_GROW_TMID_COUNT) : UINT32_MAX;
+}
+
+static void test_sync_objects_past_the_old_table(void) {
+    static uint32_t flags[SYNC_GROW_EVF_COUNT];
+    char msg[192];
+    (void)wsv_begin();
+    title_hle_write_cstr(EVT_NAME, "create");
+    const uint32_t listed_before = sync_grow_evf_total();
+    int created = 0;
+    uint32_t failed = 0u;
+    for (; created < SYNC_GROW_EVF_COUNT; created++) {
+        flags[created] = b1_call(NID_B1_CREATE_EVF, EVT_NAME, 0u, (uint32_t)created, 0u);
+        if ((int32_t)flags[created] <= 0) { failed = flags[created]; break; }
+    }
+    snprintf(msg, sizeof msg, "#1892: 1024 event flags create in a row (stopped at %d with 0x%08x)",
+             created, failed);
+    expect(created == SYNC_GROW_EVF_COUNT, msg);
+
+    /* The ID list walks every chunk, not only the first 128 slots. */
+    const uint32_t listed_after = sync_grow_evf_total();
+    snprintf(msg, sizeof msg, "#1892: GetThreadmanIdList lists all %d new event flags (0x%08x before, "
+             "0x%08x after)", created, listed_before, listed_after);
+    expect(listed_before != UINT32_MAX && listed_after == listed_before + (uint32_t)created, msg);
+
+    /* A slot freed in a later chunk is reused before the table grows again. */
+    const size_t slots = hle_sync_slot_count();
+    if (created > 700) {
+        b1_expect(b1_call(NID_B1_DELETE_EVF, flags[700], 0u, 0u, 0u), 0u,
+                  "#1892: an event flag in a later chunk deletes");
+        flags[700] = b1_call(NID_B1_CREATE_EVF, EVT_NAME, 0u, 700u, 0u);
+        expect((int32_t)flags[700] > 0 && hle_sync_slot_count() == slots,
+               "#1892: a create reuses the freed slot without growing the table");
+    }
+
+    uint32_t sema = wsv_create(0, 1);
+    expect((int32_t)sema > 0, "#1892: a semaphore creates beside 1024 event flags");
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, EVT_LW_WA, EVT_NAME, 0u, 0u), 0u,
+              "#1892: an LwMutex creates beside 1024 event flags");
+    b1_expect(wsv_wait(NID_WSV_SIGNAL_SEMA, sema, 1u, 0u), 0u,
+              "#1892: the semaphore past the old table signals");
+    expect(wsv_count(sema) == 1, "#1892: the semaphore past the old table counts its signal");
+
+    /* The first and last flags keep their own create-time pattern. */
+    for (int k = 0; k < 2 && created > 0; k++) {
+        const int i = k == 0 ? 0 : created - 1;
+        MEM_W32(EVT_INFO, 52u);
+        MEM_W32(EVT_INFO + 40u, 0xdeadbeefu);
+        uint32_t rc = b1_call(NID_B1_REFER_EVF, flags[i], EVT_INFO, 0u, 0u);
+        snprintf(msg, sizeof msg, "#1892: event flag %d refers with its own pattern (rc 0x%08x, "
+                 "pattern 0x%08x)", i, rc, MEM_R32(EVT_INFO + 40u));
+        expect(rc == 0u && MEM_R32(EVT_INFO + 40u) == (uint32_t)i, msg);
+    }
+
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, EVT_LW_WA, 0u, 0u, 0u), 0u,
+              "#1892: the LwMutex past the old table deletes");
+    wsv_delete(sema);
+    uint32_t delete_failed = 0u;
+    while (--created >= 0) {
+        uint32_t rc = b1_call(NID_B1_DELETE_EVF, flags[created], 0u, 0u, 0u);
+        if (rc != 0u && delete_failed == 0u) delete_failed = rc;
+    }
+    snprintf(msg, sizeof msg, "#1892: all 1024 event flags delete (first failure 0x%08x)", delete_failed);
+    expect(delete_failed == 0u, msg);
+    expect(sync_grow_evf_total() == listed_before,
+           "#1892: GetThreadmanIdList lists none of the deleted event flags");
     s_cur = -1;
 }
 
@@ -25910,6 +26282,380 @@ static void test_ge_mip_cells_match_psp(void) {
     sr_hle_test_ge_lists_reset();
 }
 
+/* ==== GE CLUT mip cells (PSP-GE-MIP-002, #2031) ====
+ * The software GE side of fixtures/psp_oracle/probe_ge_sample.c CASE=ge-clut-mip (154, commit
+ * 2795f150): the probe's cell table, texture and display list, with the CLUT tables at fixed
+ * guest addresses instead of the probe's statics. Each cell is one display list of
+ * project-written command words (no game data) in the ge-mip window: the 16x4 window x 16..31,
+ * y 8..11 of a 64x32 8888 colour buffer at VRAM offset GC_FB_OFFSET whose pixels are 0 before
+ * the list runs, one through-mode sprite with texture coordinates (0, 0) to (16, 4),
+ * REPLACE/RGBA, nearest filtering, clamped, at the constant level the cell names.
+ *
+ * Level L of the four-level texture holds index gc_base(format) + 4 L + (x & 3) in column x.
+ * CLUT entry k names k and its table: in an 8888 CLUT, R = k & 0xff, G = k >> 8, B = 0x80 for
+ * the main table and 0x40 for the background table; in a 4444 CLUT the raw entry is 0xf000 | k
+ * (main) or 0xf800 | k (background). Each list loads `bg_blocks` blocks of the background
+ * table, then `main_blocks` blocks of the main table. The result is the window. */
+
+#define GC_FB_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
+#define GC_ZB_OFFSET 0x00110000u   /* depth buffer pointer; depth test and writes are off */
+#define GC_STRIDE 64u
+#define GC_ROWS 32u
+#define GC_WX 16u                  /* window x 16..31, y 8..11 */
+#define GC_WY 8u
+#define GC_WW 16u
+#define GC_WH 4u
+#define GC_N 64u
+#define GC_LEVELS 4u
+#define GC_TEX_BYTES 12288u        /* T16: 64x64 + 32x32 + 16x16 + 8x8 texels of 2 bytes, padded */
+#define GC_TABLE_ENTRIES 1024u     /* 4096 bytes of 8888, 2048 of 4444: past the largest load */
+#define GC_LIST_WORDS 160u
+
+enum { GC_T4 = 4, GC_T8 = 5, GC_T16 = 6 };
+enum { GC_C4444 = 2, GC_C8888 = 3 };
+
+/* tex_format: TEXFORMAT's index format; clut_format: CLUTFORMAT bits 0-1; multi: TEXMODE bit
+   8; level: the constant level; bg_blocks, main_blocks: LOADCLUT counts (32-byte blocks);
+   csa: CLUTFORMAT bits 16-20; mask: CLUTFORMAT bits 8-15 (the shift is 0). */
+struct gc_cell {
+    const char *name;
+    uint8_t tex_format, clut_format, multi, level, bg_blocks, main_blocks, csa, mask;
+};
+
+#define GC_FAMILY(prefix, tf, cf, multi, bg, mainb, csa, mask)                         \
+    {prefix "-l0", tf, cf, multi, 0u, bg, mainb, csa, mask},                            \
+    {prefix "-l1", tf, cf, multi, 1u, bg, mainb, csa, mask},                            \
+    {prefix "-l2", tf, cf, multi, 2u, bg, mainb, csa, mask},                            \
+    {prefix "-l3", tf, cf, multi, 3u, bg, mainb, csa, mask}
+
+#define GC_CELL_COUNT 47u
+static const struct gc_cell gc_cells[GC_CELL_COUNT] = {
+    GC_FAMILY("t8-off", GC_T8, GC_C8888, 0u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t8-on", GC_T8, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t8-on-b40", GC_T8, GC_C8888, 1u, 0x40u, 0x40u, 0u, 0xffu),
+    GC_FAMILY("t4-off", GC_T4, GC_C8888, 0u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t4-on", GC_T4, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t4-on-small", GC_T4, GC_C8888, 1u, 0x20u, 0x02u, 0u, 0xffu),
+    GC_FAMILY("c16-t4-on", GC_T4, GC_C4444, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("c16-t8-on", GC_T8, GC_C4444, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t4-on-csa1", GC_T4, GC_C8888, 1u, 0x20u, 0x20u, 1u, 0xffu),
+    GC_FAMILY("t8-on-mask1f", GC_T8, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0x1fu),
+    GC_FAMILY("t16-on", GC_T16, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    {"cap32-csa16-b20", GC_T8, GC_C8888, 0u, 0u, 0x20u, 0x20u, 16u, 0xffu},
+    {"cap32-csa16-b40", GC_T8, GC_C8888, 0u, 0u, 0x40u, 0x40u, 16u, 0xffu},
+    {"cap16-csa16-b20", GC_T8, GC_C4444, 0u, 0u, 0x20u, 0x20u, 16u, 0xffu},
+};
+_Static_assert(sizeof(gc_cells) / sizeof(gc_cells[0]) == GC_CELL_COUNT, "GC_CELL_COUNT");
+
+static uint32_t gc_base(uint32_t tex_format)
+{
+    return tex_format == GC_T4 ? 0u : tex_format == GC_T8 ? 0x10u : 0x20u;
+}
+
+static uint32_t gc_side(uint32_t level)
+{
+    return 64u >> level;
+}
+
+/* Buffer width in texels: whole 16-byte rows. */
+static uint32_t gc_bufw(uint32_t tex_format, uint32_t level)
+{
+    const uint32_t min = tex_format == GC_T4 ? 32u : tex_format == GC_T8 ? 16u : 8u;
+    const uint32_t side = gc_side(level);
+    return side < min ? min : side;
+}
+
+/* Bytes of `texels` texels of `tex_format`. */
+static uint32_t gc_bytes(uint32_t tex_format, uint32_t texels)
+{
+    return tex_format == GC_T4 ? texels / 2u : tex_format == GC_T8 ? texels : texels * 2u;
+}
+
+static uint32_t gc_level_offset(uint32_t tex_format, uint32_t level)
+{
+    uint32_t off = 0;
+    for (uint32_t l = 0; l < level; l++) {
+        off += (gc_bytes(tex_format, gc_bufw(tex_format, l) * gc_side(l)) + 63u) & ~63u;
+    }
+    return off;
+}
+
+/* The texture block for `tex_format`: level L's texel (x, y) = gc_base + 4 L + (x & 3). */
+static void gc_texture(uint32_t tex_format, uint8_t *out)
+{
+    memset(out, 0, GC_TEX_BYTES);
+    for (uint32_t l = 0; l < GC_LEVELS; l++) {
+        uint8_t *base = out + gc_level_offset(tex_format, l);
+        const uint32_t bufw = gc_bufw(tex_format, l);
+        for (uint32_t y = 0; y < gc_side(l); y++) {
+            for (uint32_t x = 0; x < bufw; x++) {
+                const uint32_t index = gc_base(tex_format) + 4u * l + (x & 3u);
+                const uint32_t t = y * bufw + x;
+                if (tex_format == GC_T4) {
+                    base[t / 2u] |= (uint8_t)((index & 0xfu) << ((t & 1u) * 4u));
+                } else if (tex_format == GC_T8) {
+                    base[t] = (uint8_t)index;
+                } else {
+                    base[2u * t] = (uint8_t)index;
+                    base[2u * t + 1u] = (uint8_t)(index >> 8);
+                }
+            }
+        }
+    }
+}
+
+/* The probe's four CLUT tables, in guest RAM at main32, bg32, main16 and bg16. */
+static void gc_tables(uint32_t main32, uint32_t bg32, uint32_t main16, uint32_t bg16)
+{
+    for (uint32_t k = 0; k < GC_TABLE_ENTRIES; k++) {
+        MEM_W32(main32 + 4u * k, 0xff800000u | ((k >> 8) << 8) | (k & 0xffu));
+        MEM_W32(bg32 + 4u * k, 0xff400000u | ((k >> 8) << 8) | (k & 0xffu));
+    }
+    for (uint32_t k = 0; k < 2u * GC_TABLE_ENTRIES; k++) {
+        MEM_W16(main16 + 2u * k, (uint16_t)(0xf000u | (k & 0x3ffu)));
+        MEM_W16(bg16 + 2u * k, (uint16_t)(0xf800u | (k & 0x3ffu)));
+    }
+}
+
+static uint32_t gc_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+/* The cell's display list, as the probe's gc_list with the background and main tables at `bg`
+   and `mn`; returns the word count. Every state the draw reads is set. */
+static uint32_t gc_list(const struct gc_cell *c, uint32_t vtx, uint32_t tex, uint32_t bg,
+                        uint32_t mn, uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    const uint32_t full = (GC_STRIDE - 1u) | ((GC_ROWS - 1u) << 10);
+    uint32_t n = 0;
+#define GC_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GC_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GC_W(0x9c, GC_FB_OFFSET);
+    GC_W(0x9d, GC_STRIDE);
+    GC_W(0xd2, 3u);
+    GC_W(0x9e, GC_ZB_OFFSET);
+    GC_W(0x9f, GC_STRIDE);
+    GC_W(0x15, 0);
+    GC_W(0x16, full);
+    GC_W(0xd4, 0);
+    GC_W(0xd5, full);
+    GC_W(0xd6, 0);
+    GC_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GC_W(off_units[i], 0);
+    }
+    GC_W(0x50, 0);              /* flat shading */
+    GC_W(0xd3, 0);              /* clear mode off */
+    GC_W(0xe7, 1);              /* depth writes off */
+    GC_W(0xe8, 0);
+    GC_W(0xe9, 0);
+    GC_W(0xdb, 0x00ff0001u);    /* alpha test ALWAYS */
+    GC_W(0xd8, 1);              /* colour test ALWAYS */
+    GC_W(0xd9, 0);
+    GC_W(0xda, 0);
+    GC_W(0xdc, 0x00ff0001u);    /* stencil test ALWAYS */
+    GC_W(0xdd, 0);
+    GC_W(0xde, 1);              /* depth test ALWAYS */
+    GC_W(0xdf, 0x32u);
+    GC_W(0xe0, 0);
+    GC_W(0xe1, 0);
+    GC_W(0xe6, 3);              /* logic op COPY */
+    GC_W(0xcf, 0);
+    GC_W(0xcd, 0);
+    GC_W(0xce, 0);
+    GC_W(0x55, 0xffffffu);
+    GC_W(0x58, 0xffu);
+    /* The background load, then the main load (CBP, CBPH, LOADCLUT). */
+    GC_W(0xb0, bg);
+    GC_W(0xb1, (bg >> 8) & 0x000f0000u);
+    GC_W(0xc4, c->bg_blocks);
+    GC_W(0xb0, mn);
+    GC_W(0xb1, (mn >> 8) & 0x000f0000u);
+    GC_W(0xc4, c->main_blocks);
+    GC_W(0xc5, ((uint32_t)c->csa << 16) | ((uint32_t)c->mask << 8) | c->clut_format);
+    GC_W(0x1e, 1);              /* texture on */
+    GC_W(0xc0, 0);              /* UV mapping */
+    GC_W(0xc2, (3u << 16) | ((uint32_t)c->multi << 8));
+    GC_W(0xc3, c->tex_format);
+    for (uint32_t l = 0; l < GC_LEVELS; l++) {
+        const uint32_t a = tex + gc_level_offset(c->tex_format, l);
+        const uint32_t log2 = 6u - l;
+        GC_W(0xa0 + l, a);
+        GC_W(0xa8 + l, ((a >> 8) & 0x000f0000u) | gc_bufw(c->tex_format, l));
+        GC_W(0xb8 + l, (log2 << 8) | log2);
+    }
+    GC_W(0xc6, 0x004u);         /* nearest, nearest level */
+    GC_W(0xc7, 0x101u);         /* clamp u and v */
+    GC_W(0xc8, ((uint32_t)c->level << 20) | 1u);   /* constant level, bias = level (4.4) */
+    GC_W(0xd0, 0);
+    GC_W(0xc9, 0x103u);         /* REPLACE, RGBA */
+    GC_W(0xca, 0);
+    GC_W(0xcb, 0);              /* texture flush */
+    GC_W(0x4c, 0);
+    GC_W(0x4d, 0);
+    GC_W(0x12, 0x00800183u);    /* through, float uv, float position */
+    GC_W(0x01, vtx);
+    GC_W(0x04, (6u << 16) | 2u);
+    GC_W(0x0f, 0);
+    GC_W(0x0c, 0);
+#undef GC_W
+    return n;
+}
+/* ==== end of the GE CLUT mip cells ==== */
+
+/* PSP-GE-MIP-002 (#2031): the window digest each of the 47 cells left on a PSP-3000 (pspver
+ * 6.6.0; probe case ge-clut-mip, the 2026-11-06 run at 2795f150 on boot 134,
+ * docs/HARDWARE_ORACLE.md). Index k is gc_cells[k]. */
+static const struct {
+    const char *name;
+    uint64_t psp;
+} s_gc_psp[GC_CELL_COUNT] = {
+    {"t8-off-l0", 0xa8e993f3f2dac925ull},
+    {"t8-off-l1", 0x1c236fa487f24825ull},
+    {"t8-off-l2", 0x5a8993bcd0b60225ull},
+    {"t8-off-l3", 0x12a8e54e62370825ull},
+    {"t8-on-l0", 0xa8e993f3f2dac925ull},
+    {"t8-on-l1", 0x1c236fa487f24825ull},
+    {"t8-on-l2", 0x5a8993bcd0b60225ull},
+    {"t8-on-l3", 0x12a8e54e62370825ull},
+    {"t8-on-b40-l0", 0xf14fb059da3ef725ull},
+    {"t8-on-b40-l1", 0xf198f139b7771da5ull},
+    {"t8-on-b40-l2", 0x37565e7d8c8b6b25ull},
+    {"t8-on-b40-l3", 0xe25605f21100d625ull},
+    {"t4-off-l0", 0xb41f6ae82bf3a725ull},
+    {"t4-off-l1", 0x5b655ada521a0825ull},
+    {"t4-off-l2", 0xddc07f5b50913025ull},
+    {"t4-off-l3", 0x643885b87cc3f625ull},
+    {"t4-on-l0", 0xb41f6ae82bf3a725ull},
+    {"t4-on-l1", 0x1c236fa487f24825ull},
+    {"t4-on-l2", 0xf1efd2f02a9c1225ull},
+    {"t4-on-l3", 0xb155860de53ee425ull},
+    {"t4-on-small-l0", 0xb41f6ae82bf3a725ull},
+    {"t4-on-small-l1", 0x01d278a837eb4825ull},
+    {"t4-on-small-l2", 0x1245e3be6db71225ull},
+    {"t4-on-small-l3", 0xb52531f44a86e425ull},
+    {"c16-t4-on-l0", 0xab60eadd8986a325ull},
+    {"c16-t4-on-l1", 0xbc955b094450de25ull},
+    {"c16-t4-on-l2", 0x8db249fddb3a6725ull},
+    {"c16-t4-on-l3", 0xf5ae31dc9cdf2625ull},
+    {"c16-t8-on-l0", 0xa3dc683b95803b65ull},
+    {"c16-t8-on-l1", 0x925c4c591a08f325ull},
+    {"c16-t8-on-l2", 0xaf55be169aea5825ull},
+    {"c16-t8-on-l3", 0xd08f1bafa6e11c65ull},
+    {"t4-on-csa1-l0", 0xa8e993f3f2dac925ull},
+    {"t4-on-csa1-l1", 0x135d30b43e8e8825ull},
+    {"t4-on-csa1-l2", 0x05c09e367e774025ull},
+    {"t4-on-csa1-l3", 0x8ee451fecd5ff625ull},
+    {"t8-on-mask1f-l0", 0xa8e993f3f2dac925ull},
+    {"t8-on-mask1f-l1", 0x1c236fa487f24825ull},
+    {"t8-on-mask1f-l2", 0x5a8993bcd0b60225ull},
+    {"t8-on-mask1f-l3", 0x12a8e54e62370825ull},
+    {"t16-on-l0", 0x04b79a9487901325ull},
+    {"t16-on-l1", 0x135d30b43e8e8825ull},
+    {"t16-on-l2", 0xf1efd2f02a9c1225ull},
+    {"t16-on-l3", 0xecc27df7a80df625ull},
+    {"cap32-csa16-b20", 0xa8e993f3f2dac925ull},
+    {"cap32-csa16-b40", 0xf14fb059da3ef725ull},
+    {"cap16-csa16-b20", 0x66978870ac9ac365ull},
+};
+
+/* The cells a load of 0x40 blocks reaches: on the PSP every pixel is a grey ramp that matches
+ * neither table (docs/HARDWARE_ORACLE.md, PSP-GE-MIP-002 "Unexplained"). ge.c copies
+ * LOADCLUT's low six bits of blocks, none for 0x40, so the CLUT keeps the previous cell's
+ * entries; neither is claimed here. */
+static int gc_unexplained(const struct gc_cell *c)
+{
+    return c->bg_blocks == 0x40u || c->main_blocks == 0x40u;
+}
+
+void ge_test_set_multi_clut_mutant(int mutant);
+
+/* Every PSP-GE-MIP-002 cell through production dispatch and the software GE, under multi-CLUT
+ * rule `mutant` (0 the measured rule). Returns the cells whose window differs from the PSP's
+ * digest; *checked counts the cells compared, and the list and sync results go to *synced. */
+static unsigned gc_run_cells(int mutant, unsigned *checked, unsigned *names_ok, unsigned *synced)
+{
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    ge_test_set_multi_clut_mutant(mutant);
+    const uint32_t list = 0x08900000u, vtx = 0x08904000u, tex = 0x08910000u;
+    const uint32_t main32 = 0x08920000u, bg32 = 0x08921000u, main16 = 0x08922000u,
+                   bg16 = 0x08923000u;
+    const uint32_t fb = 0x04000000u + GC_FB_OFFSET;
+    gc_tables(main32, bg32, main16, bg16);
+    unsigned diverged = 0;
+    *checked = 0;
+    *names_ok = 1;
+    *synced = 1;
+    for (uint32_t k = 0; k < GC_CELL_COUNT; k++) {
+        const struct gc_cell *c = &gc_cells[k];
+        const int c16 = c->clut_format == GC_C4444;
+        uint32_t px[GC_N];
+        memset(SR_HOST(fb), 0, GC_STRIDE * GC_ROWS * 4u);
+        const float x0 = (float)GC_WX, y0 = (float)GC_WY;
+        const float verts[10] = {0.0f, 0.0f, x0, y0, 0.0f,
+                                 16.0f, 4.0f, x0 + (float)GC_WW, y0 + (float)GC_WH, 0.0f};
+        for (uint32_t i = 0; i < 10u; i++) MEM_W32(vtx + 4u * i, gc_fbits(verts[i]));
+        gc_texture(c->tex_format, (uint8_t *)SR_HOST(tex));
+        (void)gc_list(c, vtx, tex, c16 ? bg16 : bg32, c16 ? main16 : main32,
+                      (uint32_t *)SR_HOST(list));
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = list;
+        const uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = qid;
+        if ((qid & 0xFF000000u) != 0x35000000u || sr_syscall(&cpu, NID_SCE_GE_LIST_SYNC) != 0u)
+            *synced = 0;
+        if (strcmp(s_gc_psp[k].name, c->name) != 0) *names_ok = 0;
+        if (gc_unexplained(c)) continue;
+        for (uint32_t i = 0; i < GC_N; i++)
+            px[i] = MEM_R32(fb + ((GC_WY + i / GC_WW) * GC_STRIDE + GC_WX + i % GC_WW) * 4u);
+        (*checked)++;
+        const uint64_t digest = gm_digest(px);
+        if (digest != s_gc_psp[k].psp) {
+            diverged++;
+            if (mutant == 0) {
+                fprintf(stderr, "GE-CLUT-MIP %s software=0x%016llx psp=0x%016llx row 0:", c->name,
+                        (unsigned long long)digest, (unsigned long long)s_gc_psp[k].psp);
+                for (uint32_t i = 0; i < GC_WW; i++) fprintf(stderr, " %08x", (unsigned)px[i]);
+                fprintf(stderr, "\n");
+            }
+        }
+    }
+    ge_test_set_multi_clut_mutant(0);
+    sr_hle_test_ge_lists_reset();
+    return diverged;
+}
+
+/* PSP-GE-MIP-002 (#2031): every cell but the five 0x40-block ones matches the PSP under the
+ * measured multi-CLUT rule (ge.c clut_index), and each deliberately wrong rule fails some cell:
+ * 1 steps 16 entries per level for CLUT8 too, 2 ORs the step into the start offset instead of
+ * adding it, 3 has no per-level step (the model before #2031). */
+static void test_ge_clut_mip_cells_match_psp(void)
+{
+    unsigned checked = 0, names_ok = 0, synced = 0;
+    const unsigned diverged = gc_run_cells(0, &checked, &names_ok, &synced);
+    expect(names_ok, "PSP-GE-MIP-002 digest table rows name the cells in table order");
+    expect(synced, "every PSP-GE-MIP-002 list is accepted and completes");
+    expect(checked == GC_CELL_COUNT - 5u, "every PSP-GE-MIP-002 cell but the five 0x40-block loads is checked");
+    expect(diverged == 0, "every checked PSP-GE-MIP-002 cell matches the PSP window digest");
+    for (int mutant = 1; mutant <= 3; mutant++) {
+        unsigned mchecked = 0, mnames = 0, msynced = 0;
+        const unsigned wrong = gc_run_cells(mutant, &mchecked, &mnames, &msynced);
+        fprintf(stderr, "GE-CLUT-MIP mutant %d: %u of %u cells differ from the PSP\n", mutant, wrong,
+                mchecked);
+        expect(msynced && mchecked == checked && wrong > 0,
+               "each wrong PSP-GE-MIP-002 multi-CLUT rule fails at least one cell");
+    }
+}
+
 /* PSP-GE-RASTER-001 (#343): the window digest each cell left on a PSP-3000 (firmware 6.6.1,
  * probe case ge-raster, docs/HARDWARE_ORACLE.md). Index k is gr_cells[k]. */
 static const struct {
@@ -26973,6 +27719,144 @@ static void test_ge_list_stops_for_a_stronger_thread(void) {
     atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
     sr_hle_test_ge_lists_reset();
     sr_test_guest_fn_reset();
+}
+
+/* #1296: a SAVE that sceUtilitySavedataUpdate runs hands the CPU to a stronger thread at its
+ * first preemption point, and that thread ends the saving thread while the SAVE is parked. The
+ * production path: real threads on their own coroutines, the savedata dialog (hle_utility.c),
+ * the thread-end release (sched_terminate_thread -> sr_hle_release_thread_resources) and
+ * savedata.c. While the SAVE is parked another savedata call is refused, also after another
+ * thread's resources are released. Once the saving thread is terminated the lock is free, and
+ * the dialog reaches FINISHED with the SAVE's access error, so the game can shut it down.
+ *
+ * MUTANT: drop the sr_savedata_release_thread call in sr_hle_release_thread_resources -- the
+ *   call after the termination is refused and the dialog stays RUNNING. MUTANT: drop
+ *   savedata_dialog_work_abandoned -- the dialog stays RUNNING. MUTANT: drop the owner check in
+ *   sr_savedata_release_thread -- the call after another thread's release is accepted. */
+enum {
+    SPP_MAIN_ENTRY = 0x08a70000u,
+    SPP_STRONG_ENTRY = 0x08a70040u,
+    SPP_SAVER_ENTRY = 0x08a70080u,
+    SPP_NAME = 0x08a700c0u,
+    SPP_DATA = 0x08a70100u,
+    SPP_DIRECT = 0x08a70400u   /* a 0x600-byte SAVE block for direct sr_savedata_execute calls */
+};
+#define SPP_ACCESS_ERROR 0x80110385u   /* ERR_SAVE_ACCESS_ERROR_UNMEASURED (savedata.c) */
+static uint32_t s_spp_saver, s_spp_first, s_spp_refused, s_spp_refused_after_other;
+static uint32_t s_spp_status_parked, s_spp_terminate, s_spp_update_after, s_spp_status_after;
+static uint32_t s_spp_result, s_spp_shutdown, s_spp_after_save;
+static int s_spp_strong_ran, s_spp_saver_returned, s_spp_none;
+
+static void spp_save_block(uint32_t param, const char *bytes) {
+    const uint32_t n = (uint32_t)strlen(bytes);
+    utility_param_block(param, 0x600u);
+    fd_guest_copy(param + 0x3cu, "NAKAGAWA1296", sizeof("NAKAGAWA1296"));
+    fd_guest_copy(param + 0x4cu, "PREEMPT", sizeof("PREEMPT"));
+    fd_guest_copy(param + 0x64u, "DATA.BIN", sizeof("DATA.BIN"));
+    fd_guest_copy(SPP_DATA, bytes, n);
+    MEM_W32(param + 0x30u, 3u);   /* SAVE */
+    MEM_W32(param + 0x74u, SPP_DATA);
+    MEM_W32(param + 0x78u, n);
+    MEM_W32(param + 0x7cu, n);
+}
+
+static void spp_saver_fn(CpuState *cpu) {
+    CpuState c;
+    spp_save_block(UTILITY_SAVEDATA_PARAM_ADDR, "PARKED-SAVE");
+    if (utility_call(&c, NID_SAVEDATA_DIALOG_INIT, UTILITY_SAVEDATA_PARAM_ADDR) == 0u) {
+        for (int frame = 0; frame < 8 && utility_status(&c, NID_SAVEDATA_DIALOG_STATUS) != 2u; frame++) {
+        }
+        atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
+        (void)utility_call(&c, NID_SAVEDATA_DIALOG_UPDATE, 0u);   /* runs the SAVE, which parks */
+    }
+    s_spp_saver_returned = 1;   /* not reached: the stronger thread ends this one inside Update */
+    cpu->r[2] = 0u;
+}
+
+static void spp_strong_fn(CpuState *cpu) {
+    CpuState c;
+    (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 1u, 0u, 0u, 0u);
+    s_spp_strong_ran = 1;
+    spp_save_block(SPP_DIRECT, "REFUSED-SAVE");
+    s_spp_refused = sr_savedata_execute(SPP_DIRECT);
+    sr_hle_release_thread_resources(s_spp_saver + 1u);   /* no such thread: changes nothing */
+    s_spp_refused_after_other = sr_savedata_execute(SPP_DIRECT);
+    s_spp_status_parked = utility_status(&c, NID_SAVEDATA_DIALOG_STATUS);
+    s_spp_terminate = gsw_call(NID_SCE_KERNEL_TERMINATE_THREAD, s_spp_saver, 0u, 0u, 0u);
+    s_spp_update_after = utility_call(&c, NID_SAVEDATA_DIALOG_UPDATE, 0u);
+    s_spp_status_after = utility_status(&c, NID_SAVEDATA_DIALOG_STATUS);
+    s_spp_result = MEM_R32(UTILITY_SAVEDATA_PARAM_ADDR + 0x1cu);
+    s_spp_shutdown = utility_call(&c, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u);
+    for (int frame = 0; frame < 4 && !s_spp_none; frame++)
+        s_spp_none = utility_status(&c, NID_SAVEDATA_DIALOG_STATUS) == 0u;
+    spp_save_block(SPP_DIRECT, "AFTER-SAVE");
+    s_spp_after_save = sr_savedata_execute(SPP_DIRECT);
+    cpu->r[2] = 0u;
+}
+
+static void spp_main_fn(CpuState *cpu) {
+    spp_save_block(SPP_DIRECT, "FIRST-SAVE");
+    s_spp_first = sr_savedata_execute(SPP_DIRECT);
+    const uint32_t strong = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, SPP_NAME, SPP_STRONG_ENTRY, 16u, 0x1000u);
+    (void)gsw_call(NID_SCE_KERNEL_START_THREAD, strong, 0u, 0u, 0u);   /* it runs and delays */
+    s_spp_saver = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, SPP_NAME, SPP_SAVER_ENTRY, 24u, 0x1000u);
+    (void)gsw_call(NID_SCE_KERNEL_START_THREAD, s_spp_saver, 0u, 0u, 0u);
+    cpu->r[2] = 0u;
+}
+
+static void test_savedata_thread_ended_inside_a_parked_save(void) {
+    static const char ms_root[] = HLE_BUILD_ROOT "/hle_sd_preempt";
+    const char *old_ms = getenv("SR_MEMSTICK");
+    char *save_ms = old_ms ? (char *)malloc(strlen(old_ms) + 1u) : NULL;
+    if (save_ms) memcpy(save_ms, old_ms, strlen(old_ms) + 1u);
+    nk_platform_mkdir_p(ms_root);
+    hle_test_setenv("SR_MEMSTICK", ms_root);
+
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(SPP_MAIN_ENTRY, spp_main_fn);
+    sr_test_register_guest_fn(SPP_STRONG_ENTRY, spp_strong_fn);
+    sr_test_register_guest_fn(SPP_SAVER_ENTRY, spp_saver_fn);
+    title_hle_write_cstr(SPP_NAME, "sd-thread");
+    s_spp_saver = s_spp_first = s_spp_refused = s_spp_refused_after_other = 0xdeadbeefu;
+    s_spp_status_parked = s_spp_terminate = s_spp_update_after = s_spp_status_after = 0xdeadbeefu;
+    s_spp_result = s_spp_shutdown = s_spp_after_save = 0xdeadbeefu;
+    s_spp_strong_ran = s_spp_saver_returned = s_spp_none = 0;
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(SPP_MAIN_ENTRY, 0u, 0u);
+
+    expect(s_spp_first == 0u, "a SAVE with no thread due succeeds");
+    expect(s_spp_strong_ran && s_spp_refused == SPP_ACCESS_ERROR,
+           "a stronger thread runs inside the parked SAVE, and its savedata call is refused");
+    expect(s_spp_refused_after_other == SPP_ACCESS_ERROR,
+           "another thread's release leaves the parked SAVE in flight: a savedata call is still refused");
+    expect(s_spp_status_parked == 2u, "the savedata dialog is RUNNING while its SAVE is parked");
+    expect(s_spp_terminate == 0u && !s_spp_saver_returned,
+           "the saving thread is terminated inside its Update and never returns from it");
+    if (s_spp_status_after != 3u || s_spp_result != SPP_ACCESS_ERROR)
+        printf("  savedata dialog after the thread ended: status %u, result 0x%08x\n",
+               (unsigned)s_spp_status_after, (unsigned)s_spp_result);
+    expect(s_spp_update_after == 0u && s_spp_status_after == 3u && s_spp_result == SPP_ACCESS_ERROR,
+           "the next Update finishes the dialog with the abandoned SAVE's access error");
+    expect(s_spp_shutdown == 0u && s_spp_none, "the finished dialog shuts down to NONE");
+    {
+        char path[600], content[32] = {0};
+        snprintf(path, sizeof(path), "%s/PSP/SAVEDATA/NAKAGAWA1296PREEMPT/DATA.BIN", ms_root);
+        FILE *f = fopen(path, "rb");
+        const size_t n = f ? fread(content, 1, sizeof(content) - 1u, f) : 0u;
+        if (f) fclose(f);
+        expect(s_spp_after_save == 0u && n == strlen("AFTER-SAVE") && !strcmp(content, "AFTER-SAVE"),
+               "with the ended thread's SAVE released, the lock is free and the next SAVE succeeds");
+    }
+
+    atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
+    sr_hle_test_osk_slot_reset();
+    sr_test_guest_fn_reset();
+    hle_test_setenv("SR_MEMSTICK", save_ms);
+    free(save_ms);
 }
 
 /* #1374: what the sync calls return for ids that name no list, for completed lists and
@@ -49181,6 +50065,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_evf_cancel_outputs();
         test_evf_ordered_set();
         test_evf_create_and_refer();
+        test_sync_objects_past_the_old_table();
         test_evf_typed_uids_and_delete();
         fprintf(stderr, "b1-kobj: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
@@ -49231,6 +50116,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sysreg_virtual_registry();
     test_sysreg_overlay_follows_user_data_root();
     test_console_profile_identity();
+    test_console_profile_identity_is_deterministic_under_the_deterministic_clock();
     test_sysreg_write_model();
     test_sysparam_nickname_string();
     test_ge_edram_addr_translation();
@@ -49241,6 +50127,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ctrl_peek_latch_keeps_the_latch();
     test_sysreg_persistence_round_trip();
     test_sysreg_corrupt_overlay();
+    test_deterministic_identity_is_never_flushed_to_the_overlay();
     test_sysreg_flush_failure();
     test_unregistered_batch_refusals();
     test_adhoc_named_refusals();
@@ -49248,6 +50135,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_kernel_import_sweep_ge_head();
     test_ge_blocking_sync_waits_for_stalled_list();
     test_ge_list_stops_for_a_stronger_thread();
+    test_savedata_thread_ended_inside_a_parked_save();
     test_ge_sync_ids_match_psp();
     test_ge_signal_jump_call_ret();
     test_ge_signal_depth_origin_stall();
@@ -49275,6 +50163,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_msg_dialog_abort_sequence();
     test_msg_dialog_abort_without_update();
     test_io_devctl_memory_stick();
+    test_memstick_capacity_is_fixed_under_the_deterministic_clock();
     test_savedata_getsize_free_space();
     test_savedata_list_selection();
     test_savedata_listing_times();
@@ -49313,6 +50202,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_drift_window_reports_the_pacing_value();
     test_audio_output_telemetry_counts_guest_frames();
     test_audio_queue_drains_in_guest_time_under_the_deterministic_clock();
+    test_audio_guest_view_is_the_same_with_and_without_a_host_device();
+    test_audio_guest_view_ignores_the_host_mixer_speed();
+    test_audio_model_wait_is_the_same_for_every_host();
     test_audio_calls_read_the_guest_queue_under_the_deterministic_clock();
     test_src_push_and_psmf_lead_read_the_guest_queue_under_the_deterministic_clock();
     test_ctrl_live_input_latch_suppresses_phantom_start();
@@ -49335,6 +50227,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_raster_cells_match_psp();
     test_ge_mip_cells_software_contract();
     test_ge_mip_cells_match_psp();
+    test_ge_clut_mip_cells_match_psp();
     test_ge_block_transfer_span_atomicity();
     test_dcache_maintenance_notifies_renderer();
     test_icache_maintenance_returns_zero_for_every_range();
@@ -49462,6 +50355,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_evf_cancel_outputs();
     test_evf_ordered_set();
     test_evf_create_and_refer();
+    test_sync_objects_past_the_old_table();
     test_evf_typed_uids_and_delete();
     test_wake_result_is_per_thread();
     test_b23_second_round();

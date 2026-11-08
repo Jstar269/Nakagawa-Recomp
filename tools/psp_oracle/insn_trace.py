@@ -25,6 +25,7 @@ retains its EPC/Cause/BadVAddr/Status frame in the case teardown report.
 """
 
 from __future__ import annotations
+from typing import Any
 
 import argparse
 import hashlib
@@ -240,7 +241,7 @@ def local_records(fixture: dict, consts: dict, workdir: Path, mutate=None) -> li
     if not marker.exists():
         raise InsnTraceError(f"{fixture['id']}: the generated code did not reach the end address")
     end = fixture["base"] + 4 * len(fixture["words"])
-    lines = []
+    lines: list[Any] = []
     for raw in out.read_text(encoding="utf-8").splitlines():
         if not raw or raw.startswith("#"):
             continue

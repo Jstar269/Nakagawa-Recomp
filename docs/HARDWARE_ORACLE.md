@@ -1326,7 +1326,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   | Evidence id | Cells cited | Not cited | Outcome (2026-11-06) |
   | --- | --- | --- | --- |
   | `PSP-GE-LIGHT-001` | `k1-*`, `k2-*`, `k3p5-*`, `k8-*`, `k10-*`, `k16-*`, `k31-*`, `k64-*`, `k100-*`, `k128-*`, `s-*`, `d-*`, `ge-light-done` (`b55f6cd3`, boot 133) | the power function's formula, other light types, colours or several lights, the wait timings | MEASURED (`ge-light`) |
-  | `PSP-GE-MIP-002` | `t8-off-*`, `t8-on-*`, `t8-on-b40-*`, `t4-off-*`, `t4-on-*`, `t4-on-small-*`, `c16-t4-on-*`, `c16-t8-on-*`, `t4-on-csa1-*`, `t8-on-mask1f-*`, `t16-on-*`, `cap32-csa16-b20-*`, `cap32-csa16-b40-*`, `cap16-csa16-b20-*`, `ge-clut-mip-done` (`2795f150`, boot 134) | the CLUT index shift, computed levels, linear mip filtering, what a 0x40-block load does, the wait timings | MEASURED (`ge-clut-mip`) |
+  | `PSP-GE-MIP-002` | `t8-off-*`, `t8-on-*`, `t8-on-b40-*`, `t4-off-*`, `t4-on-*`, `t4-on-small-*`, `c16-t4-on-*`, `c16-t8-on-*`, `t4-on-csa1-*`, `t8-on-mask1f-*`, `t16-on-*`, `cap32-csa16-b20-*`, `cap32-csa16-b40-*`, `cap16-csa16-b20-*`, `ge-clut-mip-done` (`2795f150`, boot 134) | T32 textures, whether the per-level offset comes before or after the index mask, the CLUT index shift, computed levels, linear mip filtering, what a 0x40-block load does, the wait timings | MEASURED (`ge-clut-mip`) |
 
   `ge-light` (#1732): per specular coefficient k, one flat-shaded quad per pixel of a 16x17 window, lit by one
   directional light along (0, 0, 1), with the normal's z spread over 0..1; family s uses light component 1 and
@@ -1350,6 +1350,9 @@ One console is one data point; see §11. Nothing here closes issue #70
   - *Unexplained:* a LOADCLUT of 0x40 blocks leaves every pixel a grey ramp (`0x00d6d6d6` to `0x00d9d9d9`) that
     matches neither table.
   - Pixel x of level L reads texel x >> L, as `ge-mip` measured.
+  - *Unmeasured:* T32 textures, and whether the per-level offset is added before or after the index mask
+    (every index the cells mask is below the offset). The software sampler (`clut_index` in `src/rt/ge.c`)
+    reads t at every level of a T32 texture, as for T16, and adds the offset after the mask.
 
 - **PSP-3000 single-case run of the `hle-audio-rest` probe on commit `8db3ec9d` (2026-11-06)**: system software
   6.61, ARK-5.1.0 (owner); `pspver` 6.6.0, the firmware declared to the runner. PSPLink 3.2.1, operator-declared
@@ -3311,7 +3314,7 @@ not expected PSP values.
 | `sas-mix` | `PSP-SAS-003` | `NOT_RUN` | Built synthetic volume, WithMix and pitch cells for #2135 and #2054; no hardware result is claimed. |
 | `vcodec-words` | `PSP-VCODEC-001` | `NOT_RUN` | Built Media Engine boundary-word cells over synthetic AVC access units; no hardware result is claimed. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. |
-| `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (modes 2 and 3; rerun required) | Each mode now begins from a fresh stream, ringbuffer and MPEG context; no mode 2 or 3 result is measured. |
+| `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (not registered; captured twice, PSP-3000, firmware 6.6.1: 2026-11-07 boot 145 and 2026-11-08 boot 152; rerun required; the probe prints `test_id=PSP-MPEG-001` and the cell is registered here as `PSP-MPEG-YCBCR-001`) | Each mode begins from a fresh stream, ringbuffer and MPEG context. The capture measured mode 2 (query 128, a 128-byte header after a decode, a CSC of zero pixels), the CSC y and h refusals and the 16-bit CSC output (#302). Mode 3's second decode never returned on boot 145 and again on boot 152 (the first returned 0 and left a 16-byte header over a black 4:2:0 frame); the probe now bounds each mode 2 and 3 decode with a 3 s helper thread and stops making MPEG calls after a block. |
 
 ### PSP-MEMEDGE-001 capture 2026-11-02
 
