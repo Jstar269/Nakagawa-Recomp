@@ -18365,11 +18365,24 @@ static void test_evf_create_and_refer(void) {
  * ------------------------------------------------------------------------- */
 #define SYNC_GROW_EVF_COUNT 1024
 
+size_t hle_sync_slot_count(void); /* src/rt/hle.c: slots in the grown table */
+
+#define SYNC_GROW_TMID_EVF     0x94416130u   /* sceKernelGetThreadmanIdList */
+#define SYNC_GROW_TMID_COUNT   (EVT_INFO + 64u)
+
+/* The event-flag total sceKernelGetThreadmanIdList reports, or UINT32_MAX on an error. */
+static uint32_t sync_grow_evf_total(void) {
+    MEM_W32(SYNC_GROW_TMID_COUNT, 0xa5a5a5a5u);
+    return b1_call(SYNC_GROW_TMID_EVF, 3u /* SCE_KERNEL_TMID_EventFlag */, 0u, 0u,
+                   SYNC_GROW_TMID_COUNT) == 0u ? MEM_R32(SYNC_GROW_TMID_COUNT) : UINT32_MAX;
+}
+
 static void test_sync_objects_past_the_old_table(void) {
     static uint32_t flags[SYNC_GROW_EVF_COUNT];
     char msg[192];
     (void)wsv_begin();
     title_hle_write_cstr(EVT_NAME, "create");
+    const uint32_t listed_before = sync_grow_evf_total();
     int created = 0;
     uint32_t failed = 0u;
     for (; created < SYNC_GROW_EVF_COUNT; created++) {
@@ -18379,6 +18392,22 @@ static void test_sync_objects_past_the_old_table(void) {
     snprintf(msg, sizeof msg, "#1892: 1024 event flags create in a row (stopped at %d with 0x%08x)",
              created, failed);
     expect(created == SYNC_GROW_EVF_COUNT, msg);
+
+    /* The ID list walks every chunk, not only the first 128 slots. */
+    const uint32_t listed_after = sync_grow_evf_total();
+    snprintf(msg, sizeof msg, "#1892: GetThreadmanIdList lists all %d new event flags (0x%08x before, "
+             "0x%08x after)", created, listed_before, listed_after);
+    expect(listed_before != UINT32_MAX && listed_after == listed_before + (uint32_t)created, msg);
+
+    /* A slot freed in a later chunk is reused before the table grows again. */
+    const size_t slots = hle_sync_slot_count();
+    if (created > 700) {
+        b1_expect(b1_call(NID_B1_DELETE_EVF, flags[700], 0u, 0u, 0u), 0u,
+                  "#1892: an event flag in a later chunk deletes");
+        flags[700] = b1_call(NID_B1_CREATE_EVF, EVT_NAME, 0u, 700u, 0u);
+        expect((int32_t)flags[700] > 0 && hle_sync_slot_count() == slots,
+               "#1892: a create reuses the freed slot without growing the table");
+    }
 
     uint32_t sema = wsv_create(0, 1);
     expect((int32_t)sema > 0, "#1892: a semaphore creates beside 1024 event flags");
@@ -18399,9 +18428,18 @@ static void test_sync_objects_past_the_old_table(void) {
         expect(rc == 0u && MEM_R32(EVT_INFO + 40u) == (uint32_t)i, msg);
     }
 
-    (void)b1_call(NID_B1_DELETE_LWMUTEX, EVT_LW_WA, 0u, 0u, 0u);
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, EVT_LW_WA, 0u, 0u, 0u), 0u,
+              "#1892: the LwMutex past the old table deletes");
     wsv_delete(sema);
-    while (--created >= 0) (void)b1_call(NID_B1_DELETE_EVF, flags[created], 0u, 0u, 0u);
+    uint32_t delete_failed = 0u;
+    while (--created >= 0) {
+        uint32_t rc = b1_call(NID_B1_DELETE_EVF, flags[created], 0u, 0u, 0u);
+        if (rc != 0u && delete_failed == 0u) delete_failed = rc;
+    }
+    snprintf(msg, sizeof msg, "#1892: all 1024 event flags delete (first failure 0x%08x)", delete_failed);
+    expect(delete_failed == 0u, msg);
+    expect(sync_grow_evf_total() == listed_before,
+           "#1892: GetThreadmanIdList lists none of the deleted event flags");
     s_cur = -1;
 }
 

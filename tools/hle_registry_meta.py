@@ -2063,7 +2063,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_evf_create_and_refer",
             "tests/native/hle_thread_selftest.c:test_sync_objects_past_the_old_table",
         ],
-        "limitation": "the name, attribute, pattern and 1024-flag cells match; the shared semaphore/event-flag/LwMutex table grows with no fixed cap, and the code 0x80020000 it returns when the host cannot allocate more is not measured (the PSP's own limit is not measured); the option struct is ignored",
+        "limitation": "the name, attribute, pattern and 1024-flag cells match; the shared semaphore/event-flag/LwMutex table grows with no fixed cap, and the code 0x80020000 it returns when the host cannot allocate more (and names on stderr) is not measured (the PSP's own limit is not measured); the option struct is ignored",
     },
     "h_DeleteEventFlag": {
         "status": "partial",

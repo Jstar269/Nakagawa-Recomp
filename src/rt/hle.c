@@ -3535,14 +3535,23 @@ Sync *hle_sync_slot(size_t index) {
     return &s_sync_chunks[index / HLE_SYNC_CHUNK][index % HLE_SYNC_CHUNK];
 }
 
+/* The create then returns its unmeasured 0x80020000; say why on stderr, so the
+ * failure is never silent. */
+static Sync *hle_sync_grow_failed(void) {
+    fprintf(stderr, "HLE: the semaphore/event-flag/LwMutex table cannot grow past %zu objects: "
+            "the host could not allocate more memory\n", hle_sync_slot_count());
+    return NULL;
+}
+
 Sync *hle_sync_grow(void) {
-    if (s_sync_chunk_count >= SIZE_MAX / sizeof(*s_sync_chunks) / HLE_SYNC_CHUNK) return NULL;
+    if (s_sync_chunk_count >= SIZE_MAX / sizeof(*s_sync_chunks) / HLE_SYNC_CHUNK)
+        return hle_sync_grow_failed();
     Sync *chunk = (Sync *)calloc(HLE_SYNC_CHUNK, sizeof(Sync));
-    if (!chunk) return NULL;
+    if (!chunk) return hle_sync_grow_failed();
     Sync **grown = (Sync **)realloc(s_sync_chunks, (s_sync_chunk_count + 1u) * sizeof(*grown));
     if (!grown) {
         free(chunk);
-        return NULL;
+        return hle_sync_grow_failed();
     }
     s_sync_chunks = grown;
     s_sync_chunks[s_sync_chunk_count++] = chunk;
