@@ -34,6 +34,9 @@ static void check(int ok, const char *cell, const char *fmt, ...) {
 /* ---- the synthetic corpus ------------------------------------------------------------------- */
 
 #define PW 64
+/* The most a row or column of a rebuilt soft shadow may run back: the Catmull-Rom kernel's own undershoot is at most 19 of
+ * 255 of a full step, and the rest is for the quantizing and the second axis. */
+#define NK_GLYPH_SOFT_RUNBACK 24
 #define PH 48
 #define CELL_W 12
 #define CELL_H 14
@@ -488,22 +491,96 @@ static void cell_gradient(void) {
                 }
             }
     }
-    /* a tile whose blocks are ramps over the same gradient fails the check even though every block mean is right:
-     * a gradient of steps of 12 with the pixels of each block pushed apart (alternate +24 and -24, +8, -8 by position) */
-    for (int y = 0; y < 8; y++)
-        for (int x = 0; x < 16; x++) steep[y * 16 + x] = (uint32_t)(20 + x * 12) << 24 | 0x00ffffffu;   /* 20 to 200 */
-    NkGlyphVerdict v = nk_glyph_rebuild(steep, 16, 8, 0, 0, 16, 8, 4, tile);
-    check(v == NK_GLYPH_OK, "ripple", "setup: %s", nk_glyph_verdict_name(v));
-    check(nk_glyph_verify(steep, 16, 8, 0, 0, 16, 8, 4, tile) == NK_GLYPH_OK, "ripple", "the untouched tile fails its own check");
-    const int tw = 16 * 4;
-    for (int y = 0; y < 8 * 4; y++)
-        for (int x = 0; x < tw; x++) {
-            const int cov = (int)(steep[(y / 4) * 16 + x / 4] >> 24);
-            const int a = (int)(tile[y * tw + x] >> 24) + (cov >= 48 && cov <= 176 ? ((x % 4) * 2 - 3) * 8 : 0);
-            tile[y * tw + x] = (uint32_t)a << 24 | 0x00ffffffu;
+    /* the same bold A with a lighter ink (237 of 255, as a 4-bit font has): still rebuilt */
+    {
+        static uint32_t glyph[16 * 16];
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++) {
+                const int ax = x >= 6 && x <= 9 ? 237 : (x == 5 || x == 10 ? 118 : 0);
+                const int ay = y >= 6 && y <= 9 ? 237 : (y == 5 || y == 10 ? 118 : 0);
+                glyph[y * 16 + x] = (uint32_t)(ax > ay ? ax : ay) << 24 | 0x00ffffffu;
+            }
+        for (int f = NK_GLYPH_MIN_FACTOR; f <= NK_GLYPH_MAX_FACTOR; f++) {
+            NkGlyphVerdict v = nk_glyph_rebuild(glyph, 16, 16, 0, 0, 16, 16, f, big);
+            check(v == NK_GLYPH_OK, "junction", "thick-stroke plus at ink 237, factor %d: %s", f, nk_glyph_verdict_name(v));
         }
-    check(nk_glyph_verify(steep, 16, 8, 0, 0, 16, 8, 4, tile) == NK_GLYPH_REFUSE_DOWNSAMPLE, "ripple",
-          "a sawtooth tile over a gradient passed the check");
+    }
+    (void)steep;
+}
+
+/* ---- soft art in two dimensions ----------------------------------------------------------------- */
+
+/* The deepest run-back along any row or column of a w x h tile against a unimodal profile (rises to the line's
+ * peak, falls after it), in 8-bit steps. */
+static int tile_runback(const uint32_t *tile, int W, int H) {
+    int worst = 0;
+    for (int line = 0; line < H + W; line++) {
+        const int vert = line >= H, n = vert ? H : W, fixed = vert ? line - H : line;
+        int pk = 0, pv = -1;
+        for (int i = 0; i < n; i++) {
+            const int v = (int)(tile[vert ? (size_t)i * (size_t)W + (size_t)fixed : (size_t)fixed * (size_t)W + (size_t)i] >> 24);
+            if (v > pv) { pv = v; pk = i; }
+        }
+        int m = 0;
+        for (int i = 0; i <= pk; i++) {
+            const int v = (int)(tile[vert ? (size_t)i * (size_t)W + (size_t)fixed : (size_t)fixed * (size_t)W + (size_t)i] >> 24);
+            if (v > m) m = v;
+            if (m - v > worst) worst = m - v;
+        }
+        m = 0;
+        for (int i = n - 1; i >= pk; i--) {
+            const int v = (int)(tile[vert ? (size_t)i * (size_t)W + (size_t)fixed : (size_t)fixed * (size_t)W + (size_t)i] >> 24);
+            if (v > m) m = v;
+            if (m - v > worst) worst = m - v;
+        }
+    }
+    return worst;
+}
+
+static float ramp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+/* Coverage of a single-colour shadow at (x, y): kind 0 a 14-texel box blurred by a box `p` texels wide, kind 1 a disk of
+ * radius 6 with a linear falloff `p` texels wide. `q` moves it by a fraction of a texel. */
+static float soft_cov(int kind, float p, float q, float x, float y) {
+    x -= q;
+    y -= q * 0.6f;
+    if (kind == 0) {
+        const float lx = ramp01((x - (9.0f - p * 0.5f)) / p), rx = ramp01(((23.0f + p * 0.5f) - x) / p);
+        const float ly = ramp01((y - (9.0f - p * 0.5f)) / p), ry = ramp01(((23.0f + p * 0.5f) - y) / p);
+        return (lx < rx ? lx : rx) * (ly < ry ? ly : ry);
+    }
+    const float r = sqrtf((x - 16.0f) * (x - 16.0f) + (y - 16.0f) * (y - 16.0f));
+    return r <= 6.0f ? 1.0f : ramp01(1.0f - (r - 6.0f) / p);
+}
+
+static void cell_soft2d(void) {
+    /* A shadow or a glow is a ramp more than a texel wide in two dimensions, with corners and curves along it: the
+     * rectangle is rebuilt smooth, and no row or column of the tile runs back by more than the Catmull-Rom undershoot. */
+    static uint32_t page[32 * 32], tile[32 * 6 * 32 * 6];
+    static const float falls[] = {1.5f, 2.0f, 3.0f};
+    static const float offs[] = {0.0f, 0.37f};
+    for (int kind = 0; kind < 2; kind++)
+        for (size_t pi = 0; pi < sizeof(falls) / sizeof(falls[0]); pi++)
+            for (size_t qi = 0; qi < sizeof(offs) / sizeof(offs[0]); qi++) {
+                for (int y = 0; y < 32; y++)
+                    for (int x = 0; x < 32; x++) {
+                        float a = 0.0f;
+                        for (int j = 0; j < 8; j++)
+                            for (int i = 0; i < 8; i++)
+                                a += soft_cov(kind, falls[pi], offs[qi], (float)x + ((float)i + 0.5f) / 8.0f, (float)y + ((float)j + 0.5f) / 8.0f);
+                        const int ai = (int)(a / 64.0f * 255.0f + 0.5f);
+                        page[y * 32 + x] = ai ? ((uint32_t)ai << 24) | 0x00ffffffu : 0u;
+                    }
+                for (int f = NK_GLYPH_MIN_FACTOR; f <= NK_GLYPH_MAX_FACTOR; f++) {
+                    const NkGlyphVerdict v = nk_glyph_rebuild(page, 32, 32, 0, 0, 32, 32, f, tile);
+                    check(v == NK_GLYPH_OK, "soft", "%s, falloff %.1f, offset %.2f, factor %d: %s", kind ? "disk glow" : "box shadow",
+                          (double)falls[pi], (double)offs[qi], f, nk_glyph_verdict_name(v));
+                    if (v != NK_GLYPH_OK) continue;
+                    const int rb = tile_runback(tile, 32 * f, 32 * f);
+                    check(rb <= NK_GLYPH_SOFT_RUNBACK, "soft", "%s, falloff %.1f, offset %.2f, factor %d: a row or column runs back by %d of 255",
+                          kind ? "disk glow" : "box shadow", (double)falls[pi], (double)offs[qi], f, rb);
+                }
+            }
 }
 
 int main(void) {
@@ -514,6 +591,7 @@ int main(void) {
     cell_isolation();
     cell_verify();
     cell_gradient();
+    cell_soft2d();
     if (g_fail) {
         fprintf(stderr, "glyph-recon-selftest: %d of %d checks failed\n", g_fail, g_cells);
         return 1;

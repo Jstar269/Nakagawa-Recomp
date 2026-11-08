@@ -8,13 +8,13 @@
  *   sharp      a 1:1 sprite over a glyph cell of an anti-aliased page draws the rebuilt tile: every
  *              device pixel's coverage is the tile's alpha (nk_glyph_rebuild) and the cell beside it does not
  *              change them; without the feature the same draw is not the tile (not vacuous);
- *   refuse     draws that must keep today's picture byte for byte, whatever the feature: a page in
+ *   refuse     draws that must keep the game's own picture byte for byte, whatever the feature: a page in
  *              VRAM, a hard-edged page, a two-colour page, a magnified sprite, a rectangle too small,
  *              a rectangle past the page;
  *   rewrite    a page the guest rewrites draws a rebuilt tile for the new texels and never the old
  *              one; a cell whose texels did not change keeps its tile;
  *   rewrite-gap a rewrite the cache's content hash does not see (it samples part of a page) draws its new tile;
- *   gradient   fade bars of one colour (shallow, steep, four texels, two) draw without a reversal along their rows;
+ *   gradient   fade bars of one colour (shallow, steep, four texels, two) and a box shadow draw without a reversal along their rows and columns;
  *   cap        more new rectangles in one present than NK_GLYPH_PER_PRESENT: exactly that many are
  *              rebuilt, the rest draw as before and are rebuilt by the next present;
  *   pool       the texture descriptor pool has a set for every image an entry can hold;
@@ -159,7 +159,7 @@ static int gst_cell_sharp(void) {
         return gst_fail("sharp", "the synthetic glyphs do not rebuild");
     const uint64_t bound0 = s_cnt_gl_bound, built0 = s_cnt_gl_built;
     const int was = s_glyphs;
-    /* the feature off: today's picture, which is not the tile */
+    /* the feature off: the game's own picture, which is not the tile */
     s_glyphs = 0;
     int ok = gst_cell(0, 20.0f, 20.0f);
     uint32_t *plain = ok ? gst_device() : NULL;
@@ -353,6 +353,45 @@ static void gst_blob_page(uint32_t *p, int cells) {
 /* Fade bars of one colour, each rising across its width: a shallow one (alpha 64 to 126 over 32 texels), a steeper one
  * (20 to 200 over 16), a four-texel one (85 to 255) and a two-texel one (64, 191, 255). Whether a draw is a rebuilt tile or the game's own, no row may
  * reverse: a ribbed gradient is worse than the soft one. */
+/* The deepest run-back along any row or column of the w x h device pixels at (x, y) of the target, against a unimodal
+ * profile (rises to the line's peak, falls after it), in 8-bit steps. */
+static int gst_runback(const uint32_t *dev, int x, int y, int w, int h) {
+    int worst = 0;
+    for (int line = 0; line < w + h; line++) {
+        const int vert = line >= h, n = vert ? h : w, fixed = vert ? line - h : line;
+        int pk = 0, pv = -1;
+        for (int i = 0; i < n; i++) {
+            const int v = GST_ALPHA(dev[(size_t)(y + (vert ? i : fixed)) * SCL_W + (size_t)(x + (vert ? fixed : i))]);
+            if (v > pv) { pv = v; pk = i; }
+        }
+        int m = 0;
+        for (int i = 0; i <= pk; i++) {
+            const int v = GST_ALPHA(dev[(size_t)(y + (vert ? i : fixed)) * SCL_W + (size_t)(x + (vert ? fixed : i))]);
+            if (v > m) m = v;
+            if (m - v > worst) worst = m - v;
+        }
+        m = 0;
+        for (int i = n - 1; i >= pk; i--) {
+            const int v = GST_ALPHA(dev[(size_t)(y + (vert ? i : fixed)) * SCL_W + (size_t)(x + (vert ? fixed : i))]);
+            if (v > m) m = v;
+            if (m - v > worst) worst = m - v;
+        }
+    }
+    return worst;
+}
+
+/* A box shadow: a 6-texel box blurred by a box 2 texels wide, on a 16 x 16 page, offset by a fraction of a texel. */
+static float gst_shadow_cov(float x, float y) {
+    const float q = 0.37f;
+    x -= q; y -= q * 0.6f;
+    const float p = 2.0f;
+    float lx = (x - (5.0f - p * 0.5f)) / p, rx = ((11.0f + p * 0.5f) - x) / p;
+    float ly = (y - (5.0f - p * 0.5f)) / p, ry = ((11.0f + p * 0.5f) - y) / p;
+    lx = lx < 0 ? 0 : (lx > 1 ? 1 : lx); rx = rx < 0 ? 0 : (rx > 1 ? 1 : rx);
+    ly = ly < 0 ? 0 : (ly > 1 ? 1 : ly); ry = ry < 0 ? 0 : (ry > 1 ? 1 : ry);
+    return (lx < rx ? lx : rx) * (ly < ry ? ly : ry);
+}
+
 static int gst_cell_gradient(void) {
     static uint32_t page[GST_BLOB_W * 16];
     static const struct { int w, base, step; const char *what; } bars[] = {
@@ -387,7 +426,31 @@ static int gst_cell_gradient(void) {
         if (flips)
             return gst_fail("gradient", "%s fade bar: %d reversals along a row of a bar that only rises", bars[b].what, flips);
     }
-    printf("gpu glyph selftest: PASS %-12s scale %d: fade bars of one colour draw without a ribbed row\n", "gradient", s);
+    /* and a box shadow, a ramp two texels wide with corners: no row or column of the draw runs back */
+    {
+        for (int i = 0; i < GST_BLOB_W * 16; i++) page[i] = 0x00123456u;
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++) {
+                float a = 0.0f;
+                for (int j = 0; j < 8; j++)
+                    for (int i = 0; i < 8; i++) a += gst_shadow_cov((float)x + ((float)i + 0.5f) / 8.0f, (float)y + ((float)j + 0.5f) / 8.0f);
+                const int ai = (int)(a / 64.0f * 255.0f + 0.5f);
+                page[y * GST_BLOB_W + x] = ai ? ((uint32_t)ai << 24) | 0x00FFFFFFu : 0x00123456u;
+            }
+        gst_reset();
+        memcpy(SR_HOST(GST_PAGE), page, sizeof(page));
+        sr_gpu_vram_dirty(GST_PAGE, sizeof(page));
+        gst_state(GST_PAGE, GST_BLOB_W, 16);
+        xst_clear_fb();
+        int ok = gst_sprite(20.0f, 20.0f, 16.0f, 16.0f, 0.0f, 0.0f, 16.0f, 16.0f);
+        uint32_t *dev = ok ? gst_device() : NULL;
+        if (!dev) return gst_fail("gradient", "box shadow: draw or readback failed");
+        const int rb = gst_runback(dev, 20 * s, 20 * s, 16 * s, 16 * s);
+        free(dev);
+        if (rb > 24)
+            return gst_fail("gradient", "box shadow: a row or column runs back by %d of 255", rb);
+    }
+    printf("gpu glyph selftest: PASS %-12s scale %d: fade bars and a box shadow of one colour draw without a ribbed row or column\n", "gradient", s);
     return 1;
 }
 
@@ -484,7 +547,7 @@ int gegpu_glyph_selftest(void) {
             printf("gpu glyph selftest: PASS %-12s render scale %d: the setting is idle, nothing rebuilt\n", "scale-1", s_scale);
             return 1;
         }
-        /* The setting is off in an Ace run (--glyphs off): today's picture. The sharp cell is the one this
+        /* The setting is off in an Ace run (--glyphs off): the game's own picture. The sharp cell is the one this
          * feature changes, and it fails here, which shows it is not vacuous. */
         if (s_glyphs_asked) return gst_fail("setup", "SR_GLYPHS is on but the feature is off at render scale %d", s_scale);
         return gst_cell_sharp();

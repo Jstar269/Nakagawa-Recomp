@@ -1060,8 +1060,8 @@ native-core-tests: glyph-recon-selftest glyph-recon-mutant
 # generates a glyph_recon.c without that guard. A build passes only when the run fails and prints the
 # named cell's FAIL line: the Ace gate, the VRAM refusal, the render scale 1 refusal, the mip chain
 # refusal, the two buffer refusals, the downsample check, the colour check, the hard-edge check, the
-# size check, a rebuild that steepens every block (a ribbed gradient), a rebuild that fits the ramp rule off
-# (a two-texel ramp becomes two edges), the ripple check, and a rebuild that does
+# size check, a rebuild that steepens every block (a ribbed gradient), a rebuild that treats soft art as text
+# (a two-texel ramp becomes two edges), and a rebuild that does
 # not keep each block's mean.
 GLYPH_RECON_MUTANTS := \
 	NO_ACE_GATE:"FAIL settings: SR_GLYPHS=on with Ace Mode off" \
@@ -1074,8 +1074,7 @@ GLYPH_RECON_MUTANTS := \
 	NO_HARD_EDGE_CHECK:"FAIL refuse-hard-edge: a bitmap font" \
 	NO_SIZE_CHECK:"FAIL refuse-size: 3 texels wide" \
 	NO_SMOOTH_MODE:"FAIL gradient: fade bar at factor 3" \
-	NO_RAMP_RULE:"FAIL gradient: 2-texel fade at factor" \
-	NO_RIPPLE_CHECK:"FAIL ripple: a sawtooth tile" \
+	NO_SOFT_RECT:"FAIL gradient: 2-texel fade at factor" \
 	PLAIN_BICUBIC:"FAIL rebuild: 4444 glyph 0 at factor 2: downsample"
 glyph-recon-mutant:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
@@ -1249,7 +1248,8 @@ gpu-glyph-selftest: shader-verify $(RT_GE_O)
 # VRAM refusal, no hard-edge check, no colour check (refuse), and the Ace gate removed (authentic).
 GPU_GLYPH_MUTANTS := \
 	NK_GLYPH_GPU_MUTANT_NO_HASH_CHECK@--scale,4@"FAIL rewrite:" \
-	NK_GLYPH_GPU_MUTANT_KEY_ON_HASH@--scale,4@"FAIL rewrite-gap:" 	NK_GLYPH_GPU_MUTANT_NO_CAP@--scale,4@"FAIL cap:" \
+	NK_GLYPH_GPU_MUTANT_KEY_ON_HASH@--scale,4@"FAIL rewrite-gap:" \
+	NK_GLYPH_GPU_MUTANT_NO_CAP@--scale,4@"FAIL cap:" \
 	NK_GLYPH_MUTANT_ALLOW_VRAM@--scale,4@"FAIL refuse: a page in VRAM" \
 	NK_GLYPH_MUTANT_NO_HARD_EDGE_CHECK@--scale,4@"FAIL refuse: a hard-edged page" \
 	NK_GLYPH_MUTANT_NO_COLOUR_CHECK@--scale,4@"FAIL refuse: a two-colour page" \

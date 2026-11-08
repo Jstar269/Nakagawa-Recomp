@@ -57,24 +57,20 @@ extern "C" {
  * block (a ribbed gradient). The two values are a choice by those cases, not a tuned optimum. */
 #define NK_GLYPH_EDGE_LOW 0.35f
 #define NK_GLYPH_EDGE_HIGH 0.55f
-/* A texel is partial when its coverage (alpha) lies in this range. Two partial texels side by side whose coverage
- * runs one way through the four texels around them, and does not change along the ramp (each within
- * NK_GLYPH_RAMP_UNIFORM of the texels beside it), are a soft ramp two or more texels wide (a shadow, a glow, a
- * fade), and are never rebuilt as an edge whatever their step: a ramp fitted to each block of such a run would
- * start over at every block. An edge that falls inside a single texel has a saturated neighbour on each side, and
- * a slanted or curved edge changes along its length. 16 and 239 are about 6% from blank and from solid, the least
- * a texel can hold and be told from them; 26 (10%) is the change along a straight ramp that rounding of a
- * shadow's corner or a drifting offset adds. Both are choices by those cases, not tuned optima. */
+/* Soft art or text, decided for the whole rectangle: its partly covered texels (between NK_GLYPH_PARTIAL_LOW and
+ * NK_GLYPH_PARTIAL_HIGH of its highest alpha, in 1/256) are counted and divided by its total variation of
+ * coverage (the sum of the steps between neighbouring texels, in steps from blank to that alpha; a hard step with
+ * no partly covered texel beside it counts nothing). An edge box filtered by the texel grid crosses as many texels as
+ * it changes steps, at any angle (ratio 1; curves and corners reach about 1.4), and a ramp w texels wide crosses w
+ * times as many. Above NK_GLYPH_SOFT_RATIO the rectangle is rebuilt smooth throughout, which cannot rib: a ramp
+ * fitted to every block of a soft region starts over at each block, and a texel's own neighbours cannot tell a soft
+ * ramp from a slanted edge (both have two partly covered texels side by side). The ratio is a choice, measured on
+ * synthetic glyphs and shadows (section 10.13 of the enhancement contract). */
 #define NK_GLYPH_PARTIAL_LOW 16
-#define NK_GLYPH_PARTIAL_HIGH 239
-#define NK_GLYPH_RAMP_UNIFORM 26
-/* The span check of nk_glyph_verify: along every line of pixels through the two texels of a soft ramp, the pixels
- * may not run back against it by more than NK_GLYPH_RUN_SLACK (8-bit). The slack is the Catmull-Rom kernel's own undershoot, its negative lobe
- * 0.5 t^3 - 0.5 t^2 at most 0.074 of a step (19 of 255), and about a quarter more for the quantizing and for the
- * second axis, which mixes in the rows beside the line. */
-#define NK_GLYPH_RUN_SLACK 24
+#define NK_GLYPH_PARTIAL_HIGH 240
+#define NK_GLYPH_SOFT_RATIO 1.2f
 /* Rectangles checked or rebuilt per present, a fixed count, never a time budget: a run is the same
- * whatever the host's speed. A glyph past the count keeps today's look for that frame and is
+ * whatever the host's speed. A glyph past the count is drawn as the game made it for that frame and is
  * offered again by the next draw. */
 #define NK_GLYPH_PER_PRESENT 48
 /* The downsample check: each texel of the 1x rectangle must equal the mean of its f x f block of

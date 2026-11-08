@@ -15,7 +15,7 @@
  * speed), checked against the guest's bytes (nk_glyph_verify) and uploaded into its own place in
  * the image. The draw then binds the image with the scaled-copy flag (the shader samples it on its
  * own lattice, one rebuilt texel under each device pixel centre); a draw whose tile is not ready,
- * was refused, or is stale keeps today's picture, exactly.
+ * was refused, or is stale keeps the game's own picture, exactly.
  *
  * Tile validity: a tile belongs to the entry content (its generation, e->gen) it was checked against. e->gen is a number
  * the texture cache hands out each time it decodes and uploads the entry's texels (a new entry, or a
