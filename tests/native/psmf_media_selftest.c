@@ -4758,18 +4758,14 @@ static void test_mpeg_feed_end_without_stream_size(int mode) {
     free(image);
 }
 
-/* The sceMpeg ATRAC path a guest PSMF player drives (#286): the registered ATRAC3+ stream is
- * demultiplexed from the ring packets, GetAtracAu hands out one frame per call, and AtracDecode
- * writes exactly what the ATRAC3+ decoder produces for that frame.  Before any data, and after
- * the last frame, GetAtracAu reports NO_DATA; AtracDecode with no held frame refuses and leaves
- * the block untouched.  A flush restarts the stream. */
 /* #2205: the frame size is ((b2 & 3) << 8 | b3) * 8 + 0x10, so a frame over 2 KiB has b2 & 3 != 0.
  * The expression once multiplied b3 before the OR, which read such a frame as a short one and
- * refused it at the size check, before any decoder was set up. */
+ * refused it at the size check, before any decoder was set up.  The held unit's length comes
+ * from the producer, which uses the same sr_psmf_audio_frame_bytes (psmf_producer_selftest). */
 static void test_mpeg_atrac_frame_size_high_bits(void) {
     static uint8_t frame[0x2010];
     static const struct { uint8_t b2, b3; uint32_t size; } cases[] = {
-        { 0x29, 0x00, 0x810u }, { 0x29, 0x01, 0x818u }, { 0x2a, 0x10, 0x1090u }, { 0x2b, 0xff, 0x2008u },
+        { 0x29, 0x00, 0x810u }, { 0x29, 0x01, 0x818u }, { 0x29, 0x5f, 0xb08u },
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         Mpeg m;
@@ -4777,15 +4773,22 @@ static void test_mpeg_atrac_frame_size_high_bits(void) {
         uint32_t n = make_audio_frame(frame, sizeof(frame), cases[i].b2, cases[i].b3, 0x00);
         CHECK(n == cases[i].size, "mpeg-atrac: the fixture sizes a frame with b2 & 3 != 0 as the format does");
         uint32_t r = mpeg_audio_decode_frame(&m, frame, n, 1u);
-        /* Past the size check the decoder is built for the full frame; a silent frame may then
-         * be refused by the decoder itself, which is a different refusal. */
-        CHECK(m.atracAlign == (int)(n - 8u) || m.audioRejected > 0u || r == 0u,
+        /* Past the size check the decoder is built for the full frame (before it decodes, so a
+         * silent frame the decoder then refuses still shows it).  Frames up to the producer's
+         * 0xB08 cap are what a stream can deliver here. */
+        (void)r;
+        CHECK(m.atracAlign == (int)(n - 8u),
               "mpeg-atrac: a frame over 2 KiB passes the frame-size check");
         atrac3p_bridge_destroy(m.atrac);
         free(m.audioPcm);
     }
 }
 
+/* The sceMpeg ATRAC path a guest PSMF player drives (#286): the registered ATRAC3+ stream is
+ * demultiplexed from the ring packets, GetAtracAu hands out one frame per call, and AtracDecode
+ * writes exactly what the ATRAC3+ decoder produces for that frame.  Before any data, and after
+ * the last frame, GetAtracAu reports NO_DATA; AtracDecode with no held frame refuses and leaves
+ * the block untouched.  A flush restarts the stream. */
 static void test_mpeg_atrac_au_decode(void) {
     enum {
         AT_DESC = 0x08600000u, AT_DATA = 0x08610000u, AT_RING = 0x08630000u, AT_HDR = 0x08640000u,

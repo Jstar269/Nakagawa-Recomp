@@ -385,7 +385,7 @@ static uint32_t mpeg_audio_decode_frame(Mpeg *ctx, const uint8_t *frame, uint32_
     if (bytes <= 8u || frame[0] != 0x0fu || frame[1] != 0xd0u)
         return mpeg_contract_error("sceMpegAtracDecode", "the access unit is not an ATRAC3+ frame",
                                    SCE_MPEG_ERROR_INVALID_VALUE);
-    uint32_t frame_size = (uint32_t)((((frame[2] & 3u) << 8) | (uint32_t)frame[3]) * 8u) + 0x10u;
+    uint32_t frame_size = sr_psmf_audio_frame_bytes(frame);
     if (frame_size != bytes)
         return mpeg_contract_error("sceMpegAtracDecode", "the frame header disagrees with the access unit",
                                    SCE_MPEG_ERROR_INVALID_VALUE);
