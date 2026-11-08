@@ -29,6 +29,9 @@
 //     VFPU_CC, register-only.
 //   CASE=vfpu-vus2i (PSP-VFPU-VUS2I-001): #326 raw result words of vus2i/vs2i .s/.p, vsgn .p/.t/.q
 //     and a vflush cell (pending S prefix), register-only, owner present.
+//   CASE=vfpu-basic-arith (PSP-VFPU-BASICARITH-001): #326 raw result words of vadd, vsub, vmul,
+//     vmin, vmax, vscl, vdiv.s, vneg, vabs, vmov, vzero, vone and vidt over 20 operand classes
+//     (all ordered pairs for the binary forms), register-only; vidt.s may raise an exception.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -58,8 +61,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-cc-cmov, vfpu-convert and vfpu-vus2i run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert and vfpu-vus2i run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -82,6 +85,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_CONVERT 170
 #define HLE_CASE_VFPU_CC_CMOV 169
 #define HLE_CASE_VFPU_VUS2I 171
+#define HLE_CASE_VFPU_BASIC_ARITH 168
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -131,6 +135,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-vus2i"
 #define HLE_TEST_ID "PSP-VFPU-VUS2I-001"
 #define HLE_LOG "host0:/vfpu_vus2i_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_BASIC_ARITH
+#define HLE_CAMPAIGN_ID "vfpu-basic-arith"
+#define HLE_TEST_ID "PSP-VFPU-BASICARITH-001"
+#define HLE_LOG "host0:/vfpu_basic_arith_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -2686,6 +2694,314 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_VUS2I */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_BASIC_ARITH
+
+/* #326 basic VFPU arithmetic (PSP-VFPU-BASICARITH-001), one launch, register-only: the raw
+   result words of vadd, vsub, vmul, vmin and vmax at .s/.p/.t/.q, vscl.p/.q, vdiv.s, vneg,
+   vabs and vmov at .s/.p/.q, and the constant forms vzero, vone and vidt, over 20 operand
+   classes: +-0, +-smallest denormal, +-largest denormal, +-smallest normal, +-1, +-2^127,
+   +-FLT_MAX, +-inf, and a quiet and a signalling NaN of each sign with distinct payloads.
+   Every cell is one instruction word run over the whole register image with no prefix
+   (identity), emitted as a word; encodings are VFPU op 0x60 (vadd 0x00, vsub 0x80, vdiv 0x380
+   in bits 23-31), 0x64 (vmul), 0x65 (vscl), 0x6d (vmin 0x00, vmax 0x80) and 0xd0 (op field in
+   bits 16-22: vmov 0, vabs 1, vneg 2, vidt 3, vzero 6, vone 7), vd C200 (0x08), vs C000 (0),
+   vt C010 or S010 (1), size bit 7 (.p), bit 15 (.t) or both (.q); all were checked against
+   psp-as except vidt.s, which the assembler refuses (its word is the vidt pattern with no
+   size bits). Binary forms: all 400 ordered pairs (A, B) of the 20 operands, A-major, run
+   lane-packed (n lanes of one instruction per execution, the last execution of a record
+   padded with its final pair); a record holds up to 60 pairs (7 records). vscl: one scalar B
+   per execution, A packed across the lanes, 3 scalars per record (7 records). Unary forms:
+   the 20 operands in order, one record. Constant forms: the four words C200 lanes 0-3 after
+   the word, over a background image. Row <form>-<size>-p<pass>[-<record>]: result = the
+   instruction word, out0.. = the destination words of each execution in order (n per
+   execution). POWER RISK: vidt.s may raise a reserved-instruction exception that stops the
+   launch (nothing here catches it); it runs after everything else in both passes, behind a
+   durable step marker, and needs the owner present. */
+
+#include "hle_vfpu_cells.h"
+
+#define BA_OPERANDS 20u
+#define BA_PAIRS (BA_OPERANDS * BA_OPERANDS)
+#define BA_PAIRS_PER_REC 60u
+#define BA_BIN_RECORDS 7u
+#define BA_SCL_PER_REC 3u
+#define BA_MAX_WORDS 64u
+#define BA_DST 32u
+
+typedef void (*ba_fn)(const uint32_t *in, uint32_t *out, uint32_t *cc);
+
+/* Source C000 (image 0-3), second operand C010/S010 (image 4-7), destination C200 (image 32). */
+TN_CELL_FN(ba_vadd_s, TN_PFX_NONE, "0x60010008")
+TN_CELL_FN(ba_vadd_p, TN_PFX_NONE, "0x60010088")
+TN_CELL_FN(ba_vadd_t, TN_PFX_NONE, "0x60018008")
+TN_CELL_FN(ba_vadd_q, TN_PFX_NONE, "0x60018088")
+TN_CELL_FN(ba_vsub_s, TN_PFX_NONE, "0x60810008")
+TN_CELL_FN(ba_vsub_p, TN_PFX_NONE, "0x60810088")
+TN_CELL_FN(ba_vsub_t, TN_PFX_NONE, "0x60818008")
+TN_CELL_FN(ba_vsub_q, TN_PFX_NONE, "0x60818088")
+TN_CELL_FN(ba_vmul_s, TN_PFX_NONE, "0x64010008")
+TN_CELL_FN(ba_vmul_p, TN_PFX_NONE, "0x64010088")
+TN_CELL_FN(ba_vmul_t, TN_PFX_NONE, "0x64018008")
+TN_CELL_FN(ba_vmul_q, TN_PFX_NONE, "0x64018088")
+TN_CELL_FN(ba_vmin_s, TN_PFX_NONE, "0x6d010008")
+TN_CELL_FN(ba_vmin_p, TN_PFX_NONE, "0x6d010088")
+TN_CELL_FN(ba_vmin_t, TN_PFX_NONE, "0x6d018008")
+TN_CELL_FN(ba_vmin_q, TN_PFX_NONE, "0x6d018088")
+TN_CELL_FN(ba_vmax_s, TN_PFX_NONE, "0x6d810008")
+TN_CELL_FN(ba_vmax_p, TN_PFX_NONE, "0x6d810088")
+TN_CELL_FN(ba_vmax_t, TN_PFX_NONE, "0x6d818008")
+TN_CELL_FN(ba_vmax_q, TN_PFX_NONE, "0x6d818088")
+TN_CELL_FN(ba_vscl_p, TN_PFX_NONE, "0x65010088")
+TN_CELL_FN(ba_vscl_q, TN_PFX_NONE, "0x65018088")
+TN_CELL_FN(ba_vdiv_s, TN_PFX_NONE, "0x63810008")
+TN_CELL_FN(ba_vmov_s, TN_PFX_NONE, "0xd0000008")
+TN_CELL_FN(ba_vmov_p, TN_PFX_NONE, "0xd0000088")
+TN_CELL_FN(ba_vmov_q, TN_PFX_NONE, "0xd0008088")
+TN_CELL_FN(ba_vabs_s, TN_PFX_NONE, "0xd0010008")
+TN_CELL_FN(ba_vabs_p, TN_PFX_NONE, "0xd0010088")
+TN_CELL_FN(ba_vabs_q, TN_PFX_NONE, "0xd0018088")
+TN_CELL_FN(ba_vneg_s, TN_PFX_NONE, "0xd0020008")
+TN_CELL_FN(ba_vneg_p, TN_PFX_NONE, "0xd0020088")
+TN_CELL_FN(ba_vneg_q, TN_PFX_NONE, "0xd0028088")
+TN_CELL_FN(ba_vzero_s, TN_PFX_NONE, "0xd0060008")
+TN_CELL_FN(ba_vzero_p, TN_PFX_NONE, "0xd0060088")
+TN_CELL_FN(ba_vzero_q, TN_PFX_NONE, "0xd0068088")
+TN_CELL_FN(ba_vone_s, TN_PFX_NONE, "0xd0070008")
+TN_CELL_FN(ba_vone_p, TN_PFX_NONE, "0xd0070088")
+TN_CELL_FN(ba_vone_q, TN_PFX_NONE, "0xd0078088")
+TN_CELL_FN(ba_vidt_s, TN_PFX_NONE, "0xd0030008")
+TN_CELL_FN(ba_vidt_p, TN_PFX_NONE, "0xd0030088")
+TN_CELL_FN(ba_vidt_q, TN_PFX_NONE, "0xd0038088")
+
+/* The 20 operand classes. Quiet NaNs 0x7fc00011 and 0xffc00022, signalling NaNs 0x7f800033 and
+   0xff800044 (quiet bit clear, non-zero payload). */
+static const uint32_t s_ba_ops[BA_OPERANDS] = {
+    0x00000000u, 0x80000000u,   /* +0, -0 */
+    0x00000001u, 0x80000001u,   /* +-smallest denormal */
+    0x007fffffu, 0x807fffffu,   /* +-largest denormal */
+    0x00800000u, 0x80800000u,   /* +-smallest normal */
+    0x3f800000u, 0xbf800000u,   /* +-1 */
+    0x7f000000u, 0xff000000u,   /* +-2^127 */
+    0x7f7fffffu, 0xff7fffffu,   /* +-FLT_MAX */
+    0x7f800000u, 0xff800000u,   /* +-inf */
+    0x7fc00011u, 0xffc00022u,   /* quiet NaN, both signs */
+    0x7f800033u, 0xff800044u,   /* signalling NaN, both signs */
+};
+
+struct ba_form {
+    const char *stem;
+    uint32_t word;
+    ba_fn fn;
+    unsigned lanes;
+};
+
+/* Binary forms, five operations at four widths, in run order. */
+static const struct ba_form s_ba_bin[20] = {
+    {"vadd-s", 0x60010008u, ba_vadd_s, 1}, {"vadd-p", 0x60010088u, ba_vadd_p, 2},
+    {"vadd-t", 0x60018008u, ba_vadd_t, 3}, {"vadd-q", 0x60018088u, ba_vadd_q, 4},
+    {"vsub-s", 0x60810008u, ba_vsub_s, 1}, {"vsub-p", 0x60810088u, ba_vsub_p, 2},
+    {"vsub-t", 0x60818008u, ba_vsub_t, 3}, {"vsub-q", 0x60818088u, ba_vsub_q, 4},
+    {"vmul-s", 0x64010008u, ba_vmul_s, 1}, {"vmul-p", 0x64010088u, ba_vmul_p, 2},
+    {"vmul-t", 0x64018008u, ba_vmul_t, 3}, {"vmul-q", 0x64018088u, ba_vmul_q, 4},
+    {"vmin-s", 0x6d010008u, ba_vmin_s, 1}, {"vmin-p", 0x6d010088u, ba_vmin_p, 2},
+    {"vmin-t", 0x6d018008u, ba_vmin_t, 3}, {"vmin-q", 0x6d018088u, ba_vmin_q, 4},
+    {"vmax-s", 0x6d810008u, ba_vmax_s, 1}, {"vmax-p", 0x6d810088u, ba_vmax_p, 2},
+    {"vmax-t", 0x6d818008u, ba_vmax_t, 3}, {"vmax-q", 0x6d818088u, ba_vmax_q, 4},
+};
+/* vdiv.s (one lane) and vscl.p/.q (scalar second operand). */
+static const struct ba_form s_ba_div = {"vdiv-s", 0x63810008u, ba_vdiv_s, 1};
+static const struct ba_form s_ba_scl[2] = {
+    {"vscl-p", 0x65010088u, ba_vscl_p, 2}, {"vscl-q", 0x65018088u, ba_vscl_q, 4},
+};
+/* vmov, vabs, vneg at .s/.p/.q over the 20 operands. */
+static const struct ba_form s_ba_unary[9] = {
+    {"vmov-s", 0xd0000008u, ba_vmov_s, 1}, {"vmov-p", 0xd0000088u, ba_vmov_p, 2},
+    {"vmov-q", 0xd0008088u, ba_vmov_q, 4}, {"vabs-s", 0xd0010008u, ba_vabs_s, 1},
+    {"vabs-p", 0xd0010088u, ba_vabs_p, 2}, {"vabs-q", 0xd0018088u, ba_vabs_q, 4},
+    {"vneg-s", 0xd0020008u, ba_vneg_s, 1}, {"vneg-p", 0xd0020088u, ba_vneg_p, 2},
+    {"vneg-q", 0xd0028088u, ba_vneg_q, 4},
+};
+/* vzero, vone, vidt: vidt.s is run apart from the rest, last (POWER RISK). */
+static const struct ba_form s_ba_const[8] = {
+    {"vzero-s", 0xd0060008u, ba_vzero_s, 1}, {"vzero-p", 0xd0060088u, ba_vzero_p, 2},
+    {"vzero-q", 0xd0068088u, ba_vzero_q, 4}, {"vone-s", 0xd0070008u, ba_vone_s, 1},
+    {"vone-p", 0xd0070088u, ba_vone_p, 2},   {"vone-q", 0xd0078088u, ba_vone_q, 4},
+    {"vidt-p", 0xd0030088u, ba_vidt_p, 2},   {"vidt-q", 0xd0038088u, ba_vidt_q, 4},
+};
+static const struct ba_form s_ba_vidt_s = {"vidt-s", 0xd0030008u, ba_vidt_s, 1};
+
+static uint32_t s_ba_in[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+static uint32_t s_ba_out[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+
+/* One execution: background image word i = 0x3f800000 | i << 16, A over image 0-3, B over
+   image 4-7, then the word; the first n destination words (image 32..) go to dst. */
+static void ba_exec(ba_fn fn, const uint32_t *a, const uint32_t *b, uint32_t *dst, unsigned n)
+{
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        s_ba_in[i] = 0x3f800000u | (i << 16);
+    }
+    for (unsigned i = 0; i < 4u; i++) {
+        s_ba_in[i] = a[i];
+        s_ba_in[4u + i] = b[i];
+    }
+    uint32_t cc[2] = {0u, 0u};
+    fn(s_ba_in, s_ba_out, cc);
+    for (unsigned i = 0; i < n; i++) {
+        dst[i] = s_ba_out[BA_DST + i];
+    }
+}
+
+/* Row <form>-p<pass>-<rec>: pairs 60*rec .. (A-major k = 20 * a + b) of the 400, lane l of
+   execution e taking pair 60*rec + e*n + l, clamped to the last pair of the record. */
+static void ba_binary_record(const char *name, const struct ba_form *f, unsigned rec)
+{
+    uint32_t w[BA_MAX_WORDS];
+    const unsigned first = rec * BA_PAIRS_PER_REC;
+    unsigned len = BA_PAIRS - first;
+    if (len > BA_PAIRS_PER_REC) {
+        len = BA_PAIRS_PER_REC;
+    }
+    const unsigned n = f->lanes;
+    const unsigned nexec = (len + n - 1u) / n;
+    unsigned count = 0;
+    for (unsigned e = 0; e < nexec; e++) {
+        uint32_t a[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+        uint32_t b[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+        for (unsigned l = 0; l < n; l++) {
+            unsigned k = e * n + l;
+            if (k >= len) {
+                k = len - 1u;
+            }
+            k += first;
+            a[l] = s_ba_ops[k / BA_OPERANDS];
+            b[l] = s_ba_ops[k % BA_OPERANDS];
+        }
+        ba_exec(f->fn, a, b, &w[count], n);
+        count += n;
+    }
+    hle_record(name, "PASS", f->word, w, count);
+}
+
+/* Row vscl-<size>-p<pass>-<rec>: scalars 3*rec .. 3*rec + 2 (operand index), each over the 20
+   operands A packed n to an execution. */
+static void ba_scale_record(const char *name, const struct ba_form *f, unsigned rec)
+{
+    uint32_t w[BA_MAX_WORDS];
+    const unsigned n = f->lanes;
+    unsigned count = 0;
+    unsigned s_end = (rec + 1u) * BA_SCL_PER_REC;
+    if (s_end > BA_OPERANDS) {
+        s_end = BA_OPERANDS;
+    }
+    for (unsigned s = rec * BA_SCL_PER_REC; s < s_end; s++) {
+        for (unsigned e = 0; e < BA_OPERANDS / n; e++) {
+            uint32_t a[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+            uint32_t b[4] = {s_ba_ops[s], 0x3f800000u, 0x3f800000u, 0x3f800000u};
+            for (unsigned l = 0; l < n; l++) {
+                a[l] = s_ba_ops[e * n + l];
+            }
+            ba_exec(f->fn, a, b, &w[count], n);
+            count += n;
+        }
+    }
+    hle_record(name, "PASS", f->word, w, count);
+}
+
+/* Row <form>-p<pass>: the 20 operands in order over the lanes, n to an execution. */
+static void ba_unary_record(const char *name, const struct ba_form *f)
+{
+    uint32_t w[BA_MAX_WORDS];
+    const unsigned n = f->lanes;
+    unsigned count = 0;
+    for (unsigned e = 0; e < BA_OPERANDS / n; e++) {
+        uint32_t a[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+        const uint32_t b[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+        for (unsigned l = 0; l < n; l++) {
+            a[l] = s_ba_ops[e * n + l];
+        }
+        ba_exec(f->fn, a, b, &w[count], n);
+        count += n;
+    }
+    hle_record(name, "PASS", f->word, w, count);
+}
+
+/* Row <form>-p<pass>: C200 lanes 0-3 after the word over the background image. */
+static void ba_const_record(const char *name, const struct ba_form *f)
+{
+    uint32_t w[4];
+    const uint32_t a[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+    ba_exec(f->fn, a, a, w, 4u);
+    hle_record(name, "PASS", f->word, w, 4u);
+}
+
+/* One durable step per form group (form-p<pass>) before its first cell. */
+static void ba_binary_group(unsigned pass, const struct ba_form *f)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    for (unsigned rec = 0; rec < BA_BIN_RECORDS; rec++) {
+        snprintf(name, sizeof(name), "%s-p%u-%u", f->stem, pass, rec);
+        ba_binary_record(name, f, rec);
+    }
+}
+
+static void ba_scale_group(unsigned pass, const struct ba_form *f)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    for (unsigned rec = 0; rec < BA_BIN_RECORDS; rec++) {
+        snprintf(name, sizeof(name), "%s-p%u-%u", f->stem, pass, rec);
+        ba_scale_record(name, f, rec);
+    }
+}
+
+static void ba_unary_group(unsigned pass, const struct ba_form *f)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    ba_unary_record(name, f);
+}
+
+static void ba_const_group(unsigned pass, const struct ba_form *f)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    ba_const_record(name, f);
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < 20u; form++) {
+            ba_binary_group(pass, &s_ba_bin[form]);
+        }
+        for (unsigned form = 0; form < 2u; form++) {
+            ba_scale_group(pass, &s_ba_scl[form]);
+        }
+        ba_binary_group(pass, &s_ba_div);
+        for (unsigned form = 0; form < 9u; form++) {
+            ba_unary_group(pass, &s_ba_unary[form]);
+        }
+        for (unsigned form = 0; form < 8u; form++) {
+            ba_const_group(pass, &s_ba_const[form]);
+        }
+    }
+    /* The one form the assembler refuses runs last, in both passes. */
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        ba_const_group(pass, &s_ba_vidt_s);
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_BASIC_ARITH */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV

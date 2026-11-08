@@ -2488,7 +2488,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 146)
+        self.assertEqual(len(routes), 147)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 169, 170, 171},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 168, 169, 170, 171},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -7255,7 +7255,7 @@ class HleIssuesProbeTests(unittest.TestCase):
     def test_only_the_vfpu_cases_run_their_main_thread_with_the_vfpu_attribute(self) -> None:
         head = ("#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 "
                 "|| PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 "
-                "|| PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 169 "
+                "|| PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 "
                 "|| PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171\n")
         self.assertIn(head, self.probe)
         attr = self.probe[self.probe.index(head):]
@@ -7276,7 +7276,7 @@ class HleIssuesProbeTests(unittest.TestCase):
         ]))
         for banned in ("for (;;)", "do {", "goto ", "malloc(", "sceKernelAllocPartitionMemory"):
             self.assertNotIn(banned, code)
-        bound = r"(?:\d+u?|[A-Z][A-Z0-9_]*|sizeof\(\w+\)|first \+ n && k < 16u|count && .*|n)"
+        bound = r"(?:\d+u?|[A-Z][A-Z0-9_]*|sizeof\(\w+\)|first \+ n && k < 16u|count && .*|n|nexec|s_end|BA_OPERANDS / n)"
         # The one variable bound: the stored handler calls, capped at IC_TCALLS.
         self.assertIn("const uint32_t n = s_ic_tcount < IC_TCALLS ? s_ic_tcount : IC_TCALLS;", code)
         headers = [code[loop.end():_c_close(code, loop.end() - 1)]
@@ -9371,6 +9371,174 @@ class VfpuVus2iProbeTests(unittest.TestCase):
         self.assertNotIn("evidence_cases", row)
         self.assertEqual(len(row["case_ids"]), 2 * 10 + 1)
         self.assertEqual(row["case_ids"][-1], "vfpu-vus2i-done")
+
+
+class VfpuBasicArithProbeTests(unittest.TestCase):
+    """CASE=vfpu-basic-arith (168, PSP-VFPU-BASICARITH-001) in probe_hle_issues.c: the #326 basic
+    VFPU arithmetic forms. Register-only: no system call in the section beyond the shared writer,
+    bounded loops, a step before each form group, vidt.s last, identity prefixes, a fixed-shape
+    stream that matches the registry, and no hardware result claimed (NOT_RUN)."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-BASICARITH-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_BASIC_ARITH\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_BASIC_ARITH */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-basic-arith)\nCASE_ID = 168\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-basic-arith)\nTARGET = $(BUILD_DIR)/vfpu_basic_arith\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_BASIC_ARITH 168\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 168 ||", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-basic-arith"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-BASICARITH-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_basic_arith_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-basic-arith").name,
+                         "vfpu_basic_arith_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-basic-arith"),
+                         "strict-golden-sequence")
+        self.assertNotIn("vfpu-basic-arith", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-basic-arith", parse_golden.HLE_OBSERVATION_CASES)
+        self.assertIn("| `vfpu-basic-arith` | `PSP-VFPU-BASICARITH-001` |", self.readme)
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 10)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(
+                    header, r"^unsigned \w+ = [\w *]+; \w+ < ")
+        # The identity prefix only: no vpfxs is issued in this case.
+        self.assertNotIn("TN_PFX_P1", self.section)
+        self.assertNotIn("TN_PFX_P2", self.section)
+
+    def test_steps_come_before_their_cells_and_vidt_s_runs_last(self) -> None:
+        bodies = _c_function_bodies(self.section)
+        for group, cell in (("ba_binary_group", "ba_binary_record("),
+                            ("ba_scale_group", "ba_scale_record("),
+                            ("ba_unary_group", "ba_unary_record("),
+                            ("ba_const_group", "ba_const_record(")):
+            with self.subTest(group=group):
+                self.assertLess(bodies[group].index("hle_step(name);"), bodies[group].index(cell))
+        run = bodies["hle_run"]
+        order = [run.index(token) for token in (
+            "ba_binary_group(pass, &s_ba_bin[form])", "ba_scale_group(", "ba_binary_group(pass, &s_ba_div)",
+            "ba_unary_group(", "ba_const_group(pass, &s_ba_const[form])",
+            "ba_const_group(pass, &s_ba_vidt_s)")]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(run.count("s_ba_vidt_s"), 1)
+        self.assertNotIn("vidt_s", self.section.replace("ba_vidt_s", "").replace("s_ba_vidt_s", "")
+                         .replace('"vidt-s"', ""))
+
+    def test_the_encodings_match_the_forms(self) -> None:
+        size_bits = {"s": 0x0008, "p": 0x0088, "t": 0x8008, "q": 0x8088}
+        bases = {"vadd": 0x60010000, "vsub": 0x60810000, "vmul": 0x64010000,
+                 "vmin": 0x6d010000, "vmax": 0x6d810000}
+        expected: dict[str, int] = {}
+        for op, base in bases.items():
+            for size, bits in size_bits.items():
+                expected[f"{op}_{size}"] = base | bits
+        expected["vscl_p"] = 0x65010088
+        expected["vscl_q"] = 0x65018088
+        expected["vdiv_s"] = 0x63810008
+        for op, field in (("vmov", 0), ("vabs", 1), ("vneg", 2), ("vidt", 3), ("vzero", 6),
+                          ("vone", 7)):
+            for size in "spq":
+                expected[f"{op}_{size}"] = 0xd0000000 | (field << 16) | size_bits[size]
+        self.assertEqual(len(expected), 20 + 3 + 18)
+        for name, word in expected.items():
+            with self.subTest(form=name):
+                self.assertIn(f'TN_CELL_FN(ba_{name}, TN_PFX_NONE, "0x{word:08x}")', self.section)
+                self.assertIn(f"0x{word:08x}u, ba_{name},", self.section)
+
+    def test_the_operand_classes(self) -> None:
+        ops = re.search(r"s_ba_ops\[BA_OPERANDS\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(ops)
+        words = [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", _matched(ops).group(1))]
+        self.assertEqual(words, [
+            0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x007fffff, 0x807fffff, 0x00800000,
+            0x80800000, 0x3f800000, 0xbf800000, 0x7f000000, 0xff000000, 0x7f7fffff, 0xff7fffff,
+            0x7f800000, 0xff800000, 0x7fc00011, 0xffc00022, 0x7f800033, 0xff800044])
+        self.assertEqual(len(words), len(set(words)))
+        self.assertIn("#define BA_OPERANDS 20u", self.section)
+        # Quiet NaNs have bit 22 set, signalling NaNs have it clear with a non-zero payload.
+        for word in words[16:18]:
+            self.assertTrue(word & 0x00400000)
+        for word in words[18:20]:
+            self.assertFalse(word & 0x00400000)
+            self.assertTrue(word & 0x003fffff)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-basic-arith"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-BASICARITH-001")
+        self.assertEqual(spec.terminal_case, "vfpu-basic-arith-done")
+        cases = parse_golden.VFPU_BASIC_ARITH_CASES
+        self.assertEqual(len(cases), 2 * (20 * 7 + 2 * 7 + 7 + 9 + 8) + 2)
+        self.assertEqual(len(cases), 358)
+        self.assertLess(len(cases), 400)
+        self.assertEqual(len(cases), len(set(cases)))
+        self.assertEqual(cases[0], "vadd-s-p0-0")
+        self.assertEqual(cases[-1], "vidt-s-p1")
+        self.assertEqual(cases[-3], "vidt-q-p1")
+        self.assertEqual(counts["vadd-s-p0-0"], 60)
+        self.assertEqual(counts["vadd-s-p0-6"], 40)
+        self.assertEqual(counts["vadd-t-p0-0"], 60)
+        self.assertEqual(counts["vadd-t-p0-6"], 42)
+        self.assertEqual(counts["vscl-q-p1-6"], 40)
+        self.assertEqual(counts["vdiv-s-p0-3"], 60)
+        self.assertEqual(counts["vneg-q-p1"], 20)
+        self.assertEqual(counts["vone-s-p0"], 4)
+        self.assertEqual(counts["vidt-s-p0"], 4)
+        self.assertEqual(max(counts.values()), 60)
+        for fragment in ("s_ba_bin[20]", "s_ba_scl[2]", "s_ba_unary[9]", "s_ba_const[8]",
+                         "#define BA_BIN_RECORDS 7u", "#define BA_PAIRS_PER_REC 60u",
+                         "#define BA_SCL_PER_REC 3u", "pass < 2u", "form < 20u", "form < 9u",
+                         "form < 8u"):
+            self.assertIn(fragment, self.section)
+        # Every binary pair is covered: 7 records of up to 60 pairs span the 400.
+        self.assertEqual(6 * 60 + 40, 400)
+
+    def test_manifest_row_is_a_built_not_run_power_risk_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_basic_arith.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-basic-arith"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+        self.assertNotIn("evidence_cases", row)
+        self.assertIn("POWER RISK", row["risk"])
 
 
 class VfpuCcCmovProbeTests(unittest.TestCase):

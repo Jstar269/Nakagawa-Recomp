@@ -2264,6 +2264,72 @@ _register_campaign_probe(
     {case: VFPU_VUS2I_WORDS for case in VFPU_VUS2I_CASES},
 )
 
+# vfpu-basic-arith (168, probe_hle_issues.c): the #326 basic VFPU arithmetic forms, two passes,
+# register-only, over 20 operand classes. Every row is emitted on every run, so the stream is
+# fixed-shape. Per pass, in the order the probe runs them: vadd, vsub, vmul, vmin and vmax at
+# .s/.p/.t/.q (7 records each form, <stem>-p<pass>-<rec>: the 400 ordered operand pairs, 60 per
+# record, n lanes per execution, the last execution padded with the record's final pair); vscl.p
+# and vscl.q (7 records, 3 scalars each); vdiv.s (7 records); vmov, vabs, vneg at .s/.p/.q (one
+# 20-word record each, <stem>-p<pass>); vzero, vone at .s/.p/.q and vidt.p/.q (one 4-word
+# record each). vidt.s (a form the assembler refuses; it may raise an exception, POWER RISK)
+# runs after both passes, once per pass.
+VFPU_BASIC_ARITH_OPERANDS = 20
+VFPU_BASIC_ARITH_PAIRS = VFPU_BASIC_ARITH_OPERANDS ** 2
+VFPU_BASIC_ARITH_PAIRS_PER_RECORD = 60
+VFPU_BASIC_ARITH_RECORDS = 7
+VFPU_BASIC_ARITH_SCALARS_PER_RECORD = 3
+VFPU_BASIC_ARITH_PASSES = 2
+VFPU_BASIC_ARITH_BINARY_OPS = ("vadd", "vsub", "vmul", "vmin", "vmax")
+VFPU_BASIC_ARITH_BINARY_SIZES = (("s", 1), ("p", 2), ("t", 3), ("q", 4))
+VFPU_BASIC_ARITH_SCALE_SIZES = (("p", 2), ("q", 4))
+VFPU_BASIC_ARITH_UNARY_OPS = ("vmov", "vabs", "vneg")
+VFPU_BASIC_ARITH_UNARY_SIZES = (("s", 1), ("p", 2), ("q", 4))
+VFPU_BASIC_ARITH_CONST_STEMS = ("vzero-s", "vzero-p", "vzero-q", "vone-s", "vone-p", "vone-q",
+                                "vidt-p", "vidt-q")
+VFPU_BASIC_ARITH_CONST_WORDS = 4
+VFPU_BASIC_ARITH_UNARY_WORDS = 20
+
+
+def _vfpu_basic_arith_binary_words(lanes: int, rec: int) -> int:
+    length = min(VFPU_BASIC_ARITH_PAIRS_PER_RECORD,
+                 VFPU_BASIC_ARITH_PAIRS - rec * VFPU_BASIC_ARITH_PAIRS_PER_RECORD)
+    return -(-length // lanes) * lanes
+
+
+def _vfpu_basic_arith_scale_words(rec: int) -> int:
+    scalars = min(VFPU_BASIC_ARITH_SCALARS_PER_RECORD,
+                  VFPU_BASIC_ARITH_OPERANDS - rec * VFPU_BASIC_ARITH_SCALARS_PER_RECORD)
+    return scalars * VFPU_BASIC_ARITH_OPERANDS
+
+
+def _vfpu_basic_arith_pass_counts(p: int) -> list[tuple[str, int]]:
+    rows: list[tuple[str, int]] = []
+    for op in VFPU_BASIC_ARITH_BINARY_OPS:
+        for size, lanes in VFPU_BASIC_ARITH_BINARY_SIZES:
+            for rec in range(VFPU_BASIC_ARITH_RECORDS):
+                rows.append((f"{op}-{size}-p{p}-{rec}", _vfpu_basic_arith_binary_words(lanes, rec)))
+    for size, _lanes in VFPU_BASIC_ARITH_SCALE_SIZES:
+        for rec in range(VFPU_BASIC_ARITH_RECORDS):
+            rows.append((f"vscl-{size}-p{p}-{rec}", _vfpu_basic_arith_scale_words(rec)))
+    for rec in range(VFPU_BASIC_ARITH_RECORDS):
+        rows.append((f"vdiv-s-p{p}-{rec}", _vfpu_basic_arith_binary_words(1, rec)))
+    for op in VFPU_BASIC_ARITH_UNARY_OPS:
+        for size, _lanes in VFPU_BASIC_ARITH_UNARY_SIZES:
+            rows.append((f"{op}-{size}-p{p}", VFPU_BASIC_ARITH_UNARY_WORDS))
+    for stem in VFPU_BASIC_ARITH_CONST_STEMS:
+        rows.append((f"{stem}-p{p}", VFPU_BASIC_ARITH_CONST_WORDS))
+    return rows
+
+
+VFPU_BASIC_ARITH_ROWS = tuple(
+    [row for p in range(VFPU_BASIC_ARITH_PASSES) for row in _vfpu_basic_arith_pass_counts(p)]
+    + [(f"vidt-s-p{p}", VFPU_BASIC_ARITH_CONST_WORDS) for p in range(VFPU_BASIC_ARITH_PASSES)])
+VFPU_BASIC_ARITH_CASES = tuple(case for case, _count in VFPU_BASIC_ARITH_ROWS)
+_register_campaign_probe(
+    "vfpu-basic-arith", "PSP-VFPU-BASICARITH-001", VFPU_BASIC_ARITH_CASES,
+    dict(VFPU_BASIC_ARITH_ROWS),
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -2944,7 +3010,7 @@ HLE_MACHINERY_STATUS_CASES = frozenset({
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS.
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
-                                   "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov", "vfpu-vus2i"})
+                                   "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov", "vfpu-vus2i", "vfpu-basic-arith"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (
