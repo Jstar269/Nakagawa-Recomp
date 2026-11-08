@@ -22,7 +22,7 @@ Nakagawa Recomp is a static recompiler for the PlayStation Portable. It translat
 before you play, and compiles it into a native Windows program. It isn't an emulator. You supply the game from your
 own disc: Nakagawa includes no games, game data, firmware or system fonts.
 
-**What works today.** v0.0.2 is an experimental pre-release. *Hot Shots Tennis: Get a Grip* is playable, with full
+**What works today:** v0.0.2 is an experimental pre-release. *Hot Shots Tennis: Get a Grip* is playable, with full
 matches and Story Mode. It runs in **Authentic** mode, as released, or in **Enhanced** mode, which adds options such
 as texture filtering, Smooth motion and Widescreen. *PAC-MAN Championship Edition* plays a stage, about a dozen more
 games start and get part of the way in, and most others stop early and name what is missing.
