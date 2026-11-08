@@ -477,7 +477,9 @@ class BuildToolTests(unittest.TestCase):
         self.assertEqual(Path(summary["checksum_file"]).read_text(encoding="utf-8"),
                          f"{summary['sha256']}  {installer.name}\n")
         command = self.calls[0]
-        self.assertEqual(command[0], str(self.iscc_dir / "ISCC.exe"))
+        # Compare resolved paths: on a hosted runner the temp folder is an 8.3 short name
+        # (RUNNER~1) while the tool reports the long form of the same folder.
+        self.assertEqual(Path(command[0]).resolve(), (self.iscc_dir / "ISCC.exe").resolve())
         for expected in (f"/DPackageDir={self.package.resolve()}", "/DAppVersion=0.0.2",
                          "/DTouchDate=2026-11-05", "/DTouchTime=17:33:20", "/Onakagawa"[:2]):
             self.assertTrue(any(part.startswith(expected) for part in command), expected)
