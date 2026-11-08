@@ -113,6 +113,16 @@ int sr_h264_select_backend(const char *name) {
     return 1;
 }
 
+/* Test seam (#279): select a backend object the build does not carry, so a fixture can give the
+ * player a decoder with a chosen output order and per-picture times.  NULL restores automatic
+ * selection.  Production code never calls it. */
+int sr_h264_select_backend_object(const SrH264Backend *backend) {
+    if (!backend) return sr_h264_select_backend("auto");
+    s_selection = 1;
+    s_selected_named = backend;
+    return 1;
+}
+
 const char *sr_h264_selected_backend(void) {
     const SrH264Backend *backend = selected_backend();
     return backend ? backend->name : "unavailable";

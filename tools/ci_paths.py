@@ -88,6 +88,26 @@ def _is_dependency_metadata(path: str) -> bool:
     } or path.startswith("requirements/")
 
 
+def _is_installer(path: str) -> bool:
+    """Inputs whose Windows Setup build or installation check must run."""
+
+    return (
+        path.startswith("assets/installer/")
+        or path == "assets/upstream/innosetup.lock.json"
+        or path in {
+            "tools/build_installer.py",
+            "tools/verify_installer.py",
+            "tools/stage_install.py",
+            "tools/test_installer.py",
+            "tools/test_stage_install.py",
+            # The CI package step runs the DLL stager, and LICENSE is the installer's licence page.
+            "tools/stage_runtime_dlls.py",
+            "tools/test_stage_runtime_dlls.py",
+            "LICENSE",
+        }
+    )
+
+
 GENERATED_PUBLIC_METADATA = frozenset(
     {
         "PUBLIC_EXPORT.json",
@@ -926,10 +946,52 @@ def trusted_for_self_hosted(
     )
 
 
-def self_hosted_pool_available(switch: str, heartbeat: str, now: float) -> bool:
-    """Whether the pool's off switch is on and its supervisor reported in recently."""
+#: Values of ``NK_SELF_HOSTED_LINUX`` that open the pool. ``on`` takes every trusted run;
+#: ``landing`` takes only the runs that land work (``landing_run``), so a small pool on a
+#: busy PC is not swamped by every task branch's Draft CI. Anything else is off.
+SELF_HOSTED_SWITCH_ON = "on"
+SELF_HOSTED_SWITCH_LANDING = "landing"
+#: Head branches the landing desk opens for a batch of pull requests (``batch/desk-<UTC>``).
+SELF_HOSTED_LANDING_PREFIXES = ("batch/",)
 
-    if switch.strip().lower() != "on":
+
+def self_hosted_switch(switch: str) -> str:
+    """The pool's switch state: ``on``, ``landing``, or ``off`` for any other value."""
+
+    value = switch.strip().lower()
+    if value in (SELF_HOSTED_SWITCH_ON, SELF_HOSTED_SWITCH_LANDING):
+        return value
+    return "off"
+
+
+def landing_run(event_name: str, event: Mapping[str, object], *, ref: str) -> bool:
+    """Whether a run lands work: a push to ``main``, a merge group, a batch, or a Ready pull request.
+
+    The desk lands only Ready pull requests, and a batch is the desk's own branch, so a
+    Draft pull request's CI is not a landing run. This only narrows: callers check
+    ``trusted_for_self_hosted`` first.
+    """
+
+    if event_name == "push":
+        return ref == "refs/heads/main"
+    if event_name == "merge_group":
+        return ref.startswith("refs/heads/gh-readonly-queue/main/")
+    if event_name != "pull_request":
+        return False
+    pull_request = event.get("pull_request")
+    if not isinstance(pull_request, dict):
+        return False
+    head = pull_request.get("head")
+    head_ref = head.get("ref") if isinstance(head, dict) else None
+    if isinstance(head_ref, str) and head_ref.startswith(SELF_HOSTED_LANDING_PREFIXES):
+        return True
+    return pull_request.get("draft") is False
+
+
+def self_hosted_pool_available(switch: str, heartbeat: str, now: float) -> bool:
+    """Whether the pool's switch is open (``on`` or ``landing``) and its supervisor reported in recently."""
+
+    if self_hosted_switch(switch) == "off":
         return False
     try:
         beat = int(heartbeat.strip())
@@ -1002,11 +1064,34 @@ def codeql_runner(
 ) -> str:
     """The ``runs-on`` value, as JSON, for Trusted CodeQL's analyses."""
 
-    if codeql_trusted_target(event_name, event, repository=repository, ref=ref) and self_hosted_pool_available(
-        switch, heartbeat, now
+    if (
+        codeql_trusted_target(event_name, event, repository=repository, ref=ref)
+        and self_hosted_pool_available(switch, heartbeat, now)
+        and (self_hosted_switch(switch) == SELF_HOSTED_SWITCH_ON or codeql_landing_target(event_name, event, ref=ref))
     ):
         return json.dumps(list(SELF_HOSTED_LINUX_RUNNER), separators=(",", ":"))
     return json.dumps(HOSTED_CODEQL_RUNNER)
+
+
+def codeql_landing_target(event_name: str, event: Mapping[str, object], *, ref: str) -> bool:
+    """Whether a CodeQL target lands work: a push to ``main``, or a wake of a merge group or batch.
+
+    A "CodeQL wake" payload does not say whether its pull request is a Draft, so in
+    ``landing`` mode only the desk's batch branches and merge groups take the pool. This
+    only narrows: callers check ``codeql_trusted_target`` first.
+    """
+
+    if event_name == "push":
+        return ref == "refs/heads/main"
+    run = event.get("workflow_run") if event_name == "workflow_run" else None
+    if not isinstance(run, dict):
+        return False
+    head_branch = run.get("head_branch")
+    if not isinstance(head_branch, str):
+        return False
+    if run.get("event") == "merge_group":
+        return head_branch.startswith("gh-readonly-queue/main/")
+    return run.get("event") == "pull_request" and head_branch.startswith(SELF_HOSTED_LANDING_PREFIXES)
 
 
 def linux_runner(
@@ -1027,8 +1112,10 @@ def linux_runner(
     Ubuntu 24.04 for both.
     """
 
-    if trusted_for_self_hosted(event_name, event, repository=repository, ref=ref) and self_hosted_pool_available(
-        switch, heartbeat, now
+    if (
+        trusted_for_self_hosted(event_name, event, repository=repository, ref=ref)
+        and self_hosted_pool_available(switch, heartbeat, now)
+        and (self_hosted_switch(switch) == SELF_HOSTED_SWITCH_ON or landing_run(event_name, event, ref=ref))
     ):
         return json.dumps(list(SELF_HOSTED_LINUX_RUNNER), separators=(",", ":"))
     return json.dumps(hosted)
@@ -1105,13 +1192,16 @@ def _changed_files_from_git(event_name: str, event: Mapping[str, object]) -> lis
     return _parse_changed_paths(result.stdout)
 
 
-#: Python shards for a change whose only build-system edit is a recipe-only Makefile
-#: edit. The Makefile-coupled subset (tools/ci_test_shards.py --select makefile) is
-#: about nine tenths of the suite by measured weight, because most heavy modules run
-#: make, so it keeps four runners, two fewer than the full suite's six. Six full shards keep a
-#: shard well inside the 30-minute job limit on the busy self-hosted pool (2026-11-02).
-PYTHON_SHARDS_FULL = 6
-PYTHON_SHARDS_MAKEFILE = 4
+#: Python shards for the full suite and for a change whose only build-system edit is a
+#: recipe-only Makefile edit. Three full shards keep a whole CI run near 14 jobs, inside
+#: the free plan's 20 concurrent jobs (docs/CI.md, "Jobs per run"); each plans to about
+#: 16 hosted minutes by run 42270920833's weights, and test_production_smoke alone takes
+#: about 12.5, so more shards would shorten the job little. The Makefile-coupled subset
+#: (tools/ci_test_shards.py --select makefile) is about nine tenths of the suite by
+#: measured weight, because most heavy modules run make, so it keeps the same three
+#: runners and saves the unrelated modules rather than a runner.
+PYTHON_SHARDS_FULL = 3
+PYTHON_SHARDS_MAKEFILE = 3
 
 
 _MAKEFILE_INCLUDE_RE = re.compile(r"^[ \t]*include[ \t]+(mk/[A-Za-z0-9_./-]+\.mk)[ \t]*$")
@@ -1246,13 +1336,34 @@ def classify(
     python_scope = "all" if python_full or not makefile_recipe_only else "makefile"
     python_num_shards = PYTHON_SHARDS_FULL if python_scope == "all" else PYTHON_SHARDS_MAKEFILE
     run_windows = run_native
+    # The installer consumes a Windows player package. Every existing Windows
+    # runtime input therefore routes it too; installer-only changes also run the
+    # Windows runtime build so that job can publish the package artifact.
+    run_installer = run_windows or any(_is_installer(path) for path in files)
     # A normal main push is already covered by its PR. Workflow changes are
     # exceptional: validate the new workflow itself on the default branch too.
-    # Draft pull requests are not a separate validation mode: they get the
-    # same path-applicable gates as ready pull requests, so progress does not
-    # require a manual ready-for-review transition or workflow dispatch.
+    # A Draft pull request runs only the quick jobs (classification, hygiene and
+    # security, the public export audit and CI required), whatever its paths: the
+    # substantive gates run when it is marked Ready (``ready_for_review``) and on
+    # every later push while it is not a Draft (docs/CI.md, "Draft pull requests").
+    # The run flags above still describe what the paths would route, and
+    # tools/ci_required.py never reports a Draft's run green (DRAFT_LIGHT_CI).
+    # Only a pull_request event can be a Draft, so no other event is narrowed.
+    #
+    # On a main push only a changed CI definition, or a change set that cannot be
+    # read (no paths, or history unavailable), re-runs the substantive matrix. An
+    # unrecognised path does not: it already forced the full matrix on the pull
+    # request or batch that carried it, whose tree the push lands, and it made 32 of
+    # 79 main pushes repeat that matrix (2026-11-02 to 2026-11-07, docs/CI.md,
+    # "Workflow topology"). ``workflow_ci`` itself still includes ``force_full``.
+    draft_pull_request = event_name == "pull_request" and draft
     is_main_push = event_name == "push" and os.environ.get("GITHUB_REF") == "refs/heads/main"
-    allow_substantive = event_name in FULL_MATRIX_EVENTS or (not is_main_push or workflow_ci)
+    changed_ci_definition = any(_is_workflow_ci(path) for path in files)
+    undeterminable_change = not files or "<history-unavailable>" in files
+    main_push_full = changed_ci_definition or undeterminable_change
+    allow_substantive = not draft_pull_request and (
+        event_name in FULL_MATRIX_EVENTS or not is_main_push or main_push_full
+    )
     run_main_smoke = is_main_push or event_name in FULL_MATRIX_EVENTS
     # #735: only a run of main's own code on main -- a push, the nightly schedule or
     # a manual dispatch of main -- may save the persisted Windows compiler cache.
@@ -1280,11 +1391,12 @@ def classify(
         "python_shards": json.dumps(list(range(python_num_shards)), separators=(",", ":")),
         "run_native": str(run_native).lower(),
         "run_windows": str(run_windows).lower(),
+        "run_installer": str(run_installer).lower(),
         "run_markdown": str(markdown).lower(),
         "run_main_smoke": str(run_main_smoke).lower(),
         "save_compiler_cache": str(save_compiler_cache).lower(),
         "allow_substantive": str(allow_substantive).lower(),
-        "draft": str(draft).lower(),
+        "draft": str(draft_pull_request).lower(),
     }
 
 

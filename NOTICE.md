@@ -96,7 +96,8 @@ We aim to respond promptly and will remove material where appropriate.
 - **Monocypher 4.0.3 Ed25519 signature check** — upstream offers `BSD-2-Clause OR CC0-1.0`;
   the project uses it under CC0-1.0. Four byte-identical source files, the complete upstream
   `LICENCE.md` and the pinned manifest are under `third_party/monocypher/`. It is compiled into
-  the `ed25519-verify-selftest` (RFC 8032 vectors) only; it is not linked into the player yet.
+  the `ed25519-verify-selftest` (RFC 8032 vectors) and into the player, where `src/core/nk_sig.c`
+  uses it to check the signature of an update download.
 - **FFmpeg n4.4 H.264 decoder subset** — LGPL-2.1-or-later, the same pin as the ATRAC3+
   subset. The imported libavcodec/libavutil files (generic C only, no `--enable-gpl` or
   `--enable-nonfree` component), their license text and the byte-exact manifest are under
@@ -119,10 +120,22 @@ We aim to respond promptly and will remove material where appropriate.
   deterministic converter `tools/ttf2pgf.py` for test fixtures only. The font
   is not packaged, generated PGFs stay in temporary or `build/` paths, and the
   output name is project-owned so the Reserved Font Name is never claimed.
-- **Gowun Dodum and M+ 1p font fixtures** — SIL Open Font License 1.1,
-  Copyright 2021 The Gowun Dodum Project Authors and Copyright 2016 The M+
-  Project Authors. Pinned with their licence texts in `fixtures/fonts/gowundodum/`
-  and `fixtures/fonts/mplus1p/`, for test fixtures only, on the same terms as Gudea.
+- **Stand-in PSP font sources (issues #313 and #2005)** — SIL Open Font License 1.1:
+  Liberation Sans and Liberation Serif 2.1.5 (Digitized data copyright (c) 2010
+  Google Corporation, with Reserved Font Names Arimo, Tinos and Cousine; Copyright
+  (c) 2012 Red Hat, Inc., with Reserved Font Name Liberation) in
+  `fixtures/fonts/liberation/`; Gowun Dodum (Copyright 2021 The Gowun Dodum Project
+  Authors) in `fixtures/fonts/gowundodum/`; and M+ 1p (Copyright 2016 The M+ Project
+  Authors) in `fixtures/fonts/mplus1p/`. Each is pinned with its licence text and a
+  `font-pin/v1` record. Unlike Gudea, these are build inputs: `tools/ttf2pgf.py`
+  converts them into the stand-in PSP fonts that a build puts in its `font/` folder
+  and the release ships (`font/README.md`). Liberation makes the Latin `nkltn*.pgf`
+  fonts and Gowun Dodum makes `nkkr.pgf`. `nkjpn.pgf` is made from Noto Sans JP (see
+  Project UI fonts below), with M+ 1p drawing the one character Noto Sans JP lacks
+  (U+2252). Each generated font is shipped with its conversion manifest and the licence
+  text of every font it draws from; `nkjpn-OFL.txt` carries both Noto Sans JP's and
+  M+ 1p's. The generated fonts carry project-owned names (`Nakagawa Open Latin`,
+  `Nakagawa Open Japanese`, `Nakagawa Open Korean`), so no Reserved Font Name is used.
 - **stb_image 2.30** — Sean Barrett; upstream offers `MIT OR Unlicense`, and the
   project uses it under the public-domain (Unlicense) alternative. The byte-identical
   header, upstream `LICENSE` and the pinned manifest are under `third_party/stb/`. It is
@@ -162,8 +175,8 @@ SBOM, and the release gate all read that one file.
 The Windows player and every built package stage `SDL3.dll`, `SDL3_ttf.dll`,
 and the mechanically resolved SDL3_ttf dependency closure beside the
 executable (`tools/stage_runtime_dlls.py`, PE import-table walk stopping at
-Windows system DLLs). No font file is bundled: the UI opens a system UI font
-already present on the user's machine. Every staged DLL ships its upstream
+Windows system DLLs). The launcher's fonts are the project's own, under
+`assets/fonts/ui/` (see Project UI fonts below). Every staged DLL ships its upstream
 license text, copied verbatim from the MSYS2 UCRT64 toolchain packages
 (`ucrt64/share/licenses/`, read-only) and recorded with its SHA-256 in
 `assets/third_party_components.json`:
@@ -225,7 +238,7 @@ or generated retail translation unit is part of the public source boundary.
 
 Preserve each file's SPDX header and any upstream notice when copying or
 modifying source. The public provenance ledger assigns every included path an
-explicit class, evidence reference, and content hash. A missing or unresolved
+explicit class and evidence reference. A missing or unresolved
 record is a publication failure. Generated files remain generated and must not be
 hand-edited.
 
@@ -275,8 +288,9 @@ assets/release_manifest.json.
 ## Project website share card
 
 The PNG file docs/images/brand/og-card.png is the project-authored link-preview image of the project website:
-the N1 mark, the tennis court drawn for the site, and text set in Geist (SIL Open Font License 1.1,
-assets/fonts/ui/geist/OFL.txt). It shows no game imagery. It is distributed under GPL-3.0-or-later and
+the N1 mark, a short MIPS listing written for the card, and text set in Chakra Petch, Geist and Geist Mono
+(SIL Open Font License 1.1, assets/fonts/ui/chakra-petch/OFL.txt, assets/fonts/ui/geist/OFL.txt and
+assets/fonts/ui/geist-mono/OFL.txt). It shows no game imagery and no game code. It is distributed under GPL-3.0-or-later and
 listed with the SHA-256 of its exact bytes in assets/release_manifest.json.
 
 ## Project-authored Nakagawa brand artwork
@@ -295,4 +309,6 @@ distributed under the SIL Open Font License 1.1. Each family's OFL text is besid
 files; only whitespace normalization was applied, with all license wording retained. Exact
 upstream revisions, file hashes, static weights, and license hashes are recorded in
 docs/provenance/FONT_ORIGINS.md and assets/fonts/ui/manifest.json. These are project UI
-assets, not game data.
+assets, not game data. The build also converts the Noto Sans JP file into the Japanese
+stand-in PSP font `nkjpn.pgf` (#2005); `fixtures/fonts/notosansjp/PIN.json` pins it for
+the converter, and its Reserved Font Name `Source` is not used.

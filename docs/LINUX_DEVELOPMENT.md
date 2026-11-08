@@ -1,12 +1,12 @@
 # Linux development
 
 Status: the runtime builds and runs the showcase demos headlessly on Linux; games and an interactive
-window are in progress.
+window are not supported.
 
 This guide covers developing Nakagawa Recomp on Linux, either natively or under
 WSL 2. The runtime builds and runs the project's own showcase demos without a
-window; retail games and interactive play are not supported on Linux yet.
-See [`PLATFORM_PORTABILITY.md`](PLATFORM_PORTABILITY.md) for the staged port plan.
+window; retail games and interactive play are not supported on Linux.
+See [`PLATFORM_PORTABILITY.md`](PLATFORM_PORTABILITY.md) for the port status.
 The supported desktop baseline remains Windows 11 x64 (see [`SETUP.md`](SETUP.md)).
 
 ## Supported setup
@@ -131,7 +131,7 @@ rebuild with SDL3_ttf installed.
   `PATH`. Nothing is downloaded on Linux: the pinned prerequisite download is Windows-only. When a
   tool is missing, the card names it and the Ubuntu package that provides it
   (`BUILD_TOOLCHAIN_MISSING`). The player's checks are tested on Linux; a whole game package
-  built and launched on Linux is not yet.
+  built and launched on Linux has not been tested.
 - **Open folder** buttons (saves, build inputs, updates) go through `xdg-open`. Without it, as in a
   minimal WSL distribution, the player shows a `FOLDER_OPEN_FAILED` card with the folder's path.
 - **Check for updates** shows the release page only; downloading and installing an update works on
@@ -152,12 +152,12 @@ PYTHONPATH=tools python -m unittest tools.test_build_system_parity
 python tools/lint_docs.py
 ```
 
-## What doesn't yet
+## Limits
 
 | Gate | Status | Issue |
 | --- | --- | --- |
-| Consumer ISO compatibility | The automated Linux CMake/player and runtime gates use only the source-owned TEST00007/TEST00008 showcase fixtures. Compatibility across consumer ISOs and title-specific semantics remains in the works. | #306 |
-| Interactive SDL3/Vulkan presentation | The showcase smoke uses dummy video/audio drivers and checks headless output. Interactive desktop presentation and a broader Linux device/display matrix remain in the works. | #306 |
+| Consumer ISO compatibility | The automated Linux CMake/player and runtime gates use only the source-owned TEST00007/TEST00008 showcase fixtures. Compatibility across consumer ISOs and title-specific semantics is not supported. | #306 |
+| Interactive SDL3/Vulkan presentation | The showcase smoke uses dummy video/audio drivers and checks headless output. Interactive desktop presentation and a broader Linux device/display matrix are not supported. | #306 |
 | Python suites that call `git` | `tools/test_lint_docs.py`, `tools/test_publication_policy_gate.py`, and `tools/publish_audit.py` use `git` on the checkout. They work in an ordinary Linux clone; they fail in a Windows checkout opened from WSL, because its worktree paths are Windows paths. Never set `GIT_DIR` to work around it. | #306 |
 | Full `python -m unittest discover -s tools` | Takes several minutes; CI splits it into shards. Run the focused suites above while developing. | #306 |
 
