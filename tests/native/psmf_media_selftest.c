@@ -2249,6 +2249,29 @@ static void test_mpeg_csc_measured_range_and_16bit(void) {
         CHECK(gap_kept, "csc-16bit: the 32 pixels between blocks keep their old bytes");
     }
     mpeg_finish();
+
+    /* UNMEASURED beyond the capture ({0, 0, 64, 64}, stride 512): a 16-bit range wider than 64 pixels,
+     * or one whose 64-pixel block spacing passes the stride, is refused and writes nothing; the
+     * measured shape still converts. */
+    MEM_W32(YR_DESC, 0u);
+    CHECK(mpeg_create(YR_DESC, YR_DATA, 0x10000u, 0, 512u, 0, 0) == 0, "csc-16bit-wide: a decoder-less context");
+    CHECK(mpeg_avc_init_ycbcr(YR_DESC, 1u, 480u, 272u, YR_BUF) == 0, "csc-16bit-wide: a 480x272 buffer initializes");
+    ref_ycbcr_fill(YR_BUF, 480u, 224u, 0, 0u, 0u, 0u);
+    MEM_W32(YR_MODE, 0u);
+    MEM_W32(YR_MODE + 4u, 0u);
+    CHECK(guest_mpeg_import(NID_DECODE_MODE, YR_DESC, YR_MODE, 0u, 0u, 0u) == 0u, "csc-16bit-wide: 5650 output");
+    memset(SR_HOST(YR_DEST), 0x5a, 512u * 224u * 2u);
+    set_range(YR_RANGE, 0, 0, 480, 224);
+    CHECK(guest_mpeg_import(NID_CSC, YR_DESC, YR_BUF, YR_RANGE, 512u, YR_DEST) == PSP_CSC_REFUSED &&
+              guest_bytes_are(YR_DEST, 512u * 224u * 2u, 0x5au),
+          "csc-16bit-wide: a 480-wide 16-bit range (928 pixels of reach, past the 512 stride) is refused, nothing written");
+    set_range(YR_RANGE, 0, 0, 128, 16);
+    CHECK(guest_mpeg_import(NID_CSC, YR_DESC, YR_BUF, YR_RANGE, 512u, YR_DEST) == PSP_CSC_REFUSED,
+          "csc-16bit-wide: a 128-wide 16-bit range is refused as not measured");
+    set_range(YR_RANGE, 0, 0, 64, 64);
+    CHECK(guest_mpeg_import(NID_CSC, YR_DESC, YR_BUF, YR_RANGE, 512u, YR_DEST) == 0u,
+          "csc-16bit-wide: the measured {0, 0, 64, 64} at stride 512 still converts");
+    mpeg_finish();
 }
 
 /* #302, PSP-MPEG-001 boot 145: YCbCr modes 2 and 3 (see mpeg_avc_init_ycbcr).  A mode-2 buffer is a
@@ -2279,6 +2302,14 @@ static void test_mpeg_ycbcr_modes_2_and_3(void) {
     CHECK(guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 3u, 496u, 272u, M2_M3) == PSP_MPEG_INVALID &&
               guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 480u, 272u, M2_BUF + 4u) == PSP_MPEG_INVALID,
           "ycbcr-m2: a mode-3 size wider than 480 (not modeled) and an unaligned buffer are refused");
+    CHECK(guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 0u, 0u, M2_BUF) == PSP_MPEG_INVALID &&
+              guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 16u, 16u, M2_BUF) == 0u &&
+              guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 65535u, 65535u, M2_BUF) == PSP_MPEG_INVALID &&
+              guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 15u, 16u, M2_BUF) == PSP_MPEG_INVALID &&
+              guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 3u, 0u, 0u, M2_M3) == PSP_MPEG_INVALID,
+          "ycbcr-m2: modes 2 and 3 apply the mode-1 size limits (only 480x272 was measured); 0x0, 65535 and non-multiples of 16 are refused");
+    CHECK(guest_mpeg_import(NID_INIT_YCBCR, M2_DESC, 2u, 480u, 272u, M2_BUF) == 0u,
+          "ycbcr-m2: the measured 480x272 mode 2 buffer is initialized again");
 
     /* The header a decode of a 480x224 picture left (measured), placed by hand: the decoder-less
      * context cannot decode, so the header is the measured bytes. */
@@ -2315,6 +2346,10 @@ static void test_mpeg_ycbcr_modes_2_and_3(void) {
               MEM_R32(M2_INIT) == 0u && ctx->ycbcrWant == 0 &&
               guest_bytes_are(M2_M3, 64u * 64u * 3u / 2u + 64u, 0xa5u),
           "ycbcr-m3: a decode into a mode-3 buffer is refused, consumes no access unit and writes nothing");
+    MEM_W32(M2_INIT, 0xdeadbeefu);
+    CHECK(guest_mpeg_import(NID_STOP_YCBCR, M2_DESC, M2_PTR, M2_INIT, 0u, 0u) == PSP_MPEG_INVALID &&
+              guest_bytes_are(M2_M3, 64u * 64u * 3u / 2u + 64u, 0xa5u),
+          "ycbcr-m3: a stop on a mode-3 buffer is refused as not measured and writes nothing");
     mpeg_finish();
 }
 
