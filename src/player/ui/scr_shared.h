@@ -141,6 +141,12 @@ typedef struct {
 #define SCR_ONLINE_STORED_ON_SENTENCE \
     "Online mode is on in your settings, but it does nothing yet because online " \
     "features aren't built. Switch it off to keep it off."
+/* Discord status (#2259) on Settings > Online and developer. */
+#define SCR_DISCORD_SENTENCE \
+    "Show the game you play and for how long in Discord, through the Discord app on this " \
+    "PC. Nakagawa itself connects to nothing."
+#define SCR_DISCORD_UNAVAILABLE_SENTENCE \
+    "This build has no Discord application ID yet, so Discord status can't be turned on."
 /* The developer switch, in the wizard and in Settings. */
 #define WIZARD_DEVELOPER_SENTENCE \
     "Show a developer log on screen to help track down problems. Stays on this PC."

@@ -2,7 +2,8 @@
 
 Status: step 1 of the implementation order is built (the switches, the wizard step and the developer log panel).
 The update check is built too, as its own opt-in feature outside online mode (see
-[Update check](#update-check)); news and reports are not. The player is offline unless the user asks
+[Update check](#update-check)), and so is [Discord status](#discord-status), which makes no
+network connection; news and reports are not. The player is offline unless the user asks
 ([`SETUP.md`](SETUP.md#network-use)). This page is the contract the implementation follows. The launcher gets an update check, a reporting system and a news feed, all behind an
 **online mode** that the setup wizard asks about, and a **developer mode** that shows a developer log for
 diagnosing new issues.
@@ -68,6 +69,34 @@ already are.
   build-provenance attestation; the files in it do.
 
 Hosts, the exact request and the failure cards are in [`SETUP.md`](SETUP.md#network-use).
+
+## Discord status
+
+Built for v0.1.0 (#2259; maintainer decision 2026-11-08): Discord Rich Presence, as PPSSPP offers it,
+opt-in and off by default.
+
+- **Settings > Online and developer** has a **Discord status** switch, off by default
+  (`discord_presence` in `settings.json`; anything but `true` reads as off).
+- **No network connection.** The player writes to the Discord app on the same PC through its local
+  IPC pipe (`\\.\pipe\discord-ipc-0` to `-9`; `src/player/discord_presence.c`, over
+  `nk_platform_local_pipe_*`). The protocol is written from Discord's public RPC documentation: a
+  framed JSON handshake with the application ID, then `SET_ACTIVITY`. No Discord SDK is used or
+  vendored.
+- **What Discord receives:** the game's title from the disc's own metadata (the disc ID when it
+  names no title), the play mode (Authentic, Enhanced or Ace) and the start time, plus the player's
+  process ID, which the protocol requires. Never a path, save, user name or anything from the
+  game's memory. Discord shows these on the user's profile; that is the disclosure the switch
+  asks about.
+- **Quiet failure.** If Discord isn't running, the player tries each pipe once, at most once a
+  minute, and logs nothing. A write gives up after 250 ms and no read waits, so the launcher never
+  stalls. The status clears when the game exits and when the player closes.
+- **Application ID.** The project's Discord application ID is one constant,
+  `NK_DISCORD_APPLICATION_ID` in `src/player/discord_presence.h`. It is public, not a secret. Until
+  the maintainer sets it, it is a placeholder that fails closed: the switch is disabled and says
+  why, and the player never opens the pipe.
+- **Platforms.** Windows only for now; elsewhere the switch stays disabled.
+- **Tests** (`tests/native/test_discord_presence.c`) drive the client against a fake transport and,
+  on Windows, a fake pipe server with a test-only name; they never reach Discord.
 
 ## News
 

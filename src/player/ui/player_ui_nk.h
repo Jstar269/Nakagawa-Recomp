@@ -566,7 +566,8 @@ typedef enum {
     PLAYER_UI_SETTINGS_CREATE_REPORT,        /* write the bundle on this PC */
     PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER,
     PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER,     /* the folder holding the library, games and settings */
-    PLAYER_UI_SETTINGS_OPEN_LOGS             /* the folder holding the logs */
+    PLAYER_UI_SETTINGS_OPEN_LOGS,            /* the folder holding the logs */
+    PLAYER_UI_SETTINGS_TOGGLE_DISCORD        /* Settings > Online and developer (#2259) */
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
@@ -656,6 +657,10 @@ typedef struct {
     PlayerUiUpdateStep update_step;
     PlayerUiUpdateStep update_failed_step;   /* CHECKING, DOWNLOADING or INSTALLING */
     bool check_updates_at_start;
+    /* Settings > Online and developer: Discord status (#2259), and whether this build can
+       turn it on (it has a Discord application ID). */
+    bool discord_presence;
+    bool discord_available;
     const char *current_version;    /* "0.0.2" */
     const char *update_version;     /* "0.0.2", once checked */
     bool update_prerelease;
@@ -1029,6 +1034,7 @@ enum {
     PLAYER_UI_ID_REPORT_FOLDER = 0x4552u,
     PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER = 0x4553u, /* Settings: shows the data folder */
     PLAYER_UI_ID_SETTINGS_OPEN_LOGS = 0x4554u,        /* Settings: shows the logs folder */
+    PLAYER_UI_ID_SETTINGS_DISCORD = 0x4555u,          /* Settings > Online: Discord status */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
     PLAYER_UI_ID_CONTROLLER_DEADZONE_UP = 0x4622u,

@@ -275,6 +275,7 @@ class NativeHostBackendTests(unittest.TestCase):
             self, "tests/native/test_player_state.c", "test_player_state",
             extra_sources=(
                 "src/player/player_state.c",
+                "src/player/discord_presence.c",
                 "src/player/input_settings.c",
                 "src/player/iso_reader.c",
                 "src/player/package_builder.c",

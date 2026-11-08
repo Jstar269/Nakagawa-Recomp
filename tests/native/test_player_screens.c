@@ -433,6 +433,9 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.saves_folder = "C:/synthetic/Nakagawa/saves";
     /* Off, the default; its own case has the stored setting On (#2007). */
     settings.online_mode = which == FLOW_SETTINGS_ONLINE_ON;
+    /* Discord status (#2259): a build with an application ID on the plain page; the stored
+       online mode case is a build without one, where the switch cannot turn on. */
+    settings.discord_available = which == FLOW_SETTINGS_ONLINE;
     settings.developer_mode = true;
     settings.share_system_libraries = true;
     /* Accessibility: a size picked, high contrast following Windows (off), and
@@ -2798,6 +2801,8 @@ static void test_settings_pages(void) {
          PLAYER_UI_SETTINGS_OPEN_DEVELOPER_LOG, "developer mode offers the developer log"},
         {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
          "Back returns to Settings"},
+        {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_DISCORD, PLAYER_UI_SETTINGS_TOGGLE_DISCORD,
+         "the Discord status switch toggles it"},
         {FLOW_SETTINGS_NOTICES, PLAYER_UI_ID_SETTINGS_LICENSE_TEXTS,
          PLAYER_UI_SETTINGS_OPEN_LICENSE_TEXTS, "Open licence texts opens the folder"},
         {FLOW_SETTINGS_NOTICES, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
@@ -2945,6 +2950,19 @@ static void test_settings_pages(void) {
               activate_flow_button(PLAYER_UI_ID_SETTINGS_ONLINE_MODE, FLOW_SETTINGS_ONLINE).kind ==
                   PLAYER_UI_ACTION_NONE,
           "Online and developer shows one plain line instead of an inert online switch");
+    /* Discord status (#2259): off, with what it does, and in a build without a Discord
+       application ID a row that says so and cannot be switched on. */
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "\"DISCORD STATUS: OFF\"") != NULL &&
+              strstr(dump, "through the Discord app on this") != NULL &&
+              strstr(dump, "no Discord application ID") == NULL,
+          "Online and developer offers Discord status, off, and says how it works");
+    CHECK(dump_flow_case(FLOW_SETTINGS_ONLINE_ON, dump, sizeof(dump)) &&
+              strstr(dump, "\"DISCORD STATUS: OFF\"") != NULL &&
+              strstr(dump, "no Discord application ID") != NULL &&
+              activate_flow_button(PLAYER_UI_ID_SETTINGS_DISCORD, FLOW_SETTINGS_ONLINE_ON).kind ==
+                  PLAYER_UI_ACTION_NONE,
+          "without an application ID Discord status says why and cannot be turned on");
     /* A stored online_mode of On still shows its switch, so it can be turned off. */
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_ON, 960, 540, dump, sizeof(dump)) &&
               strstr(dump, "Online mode is on in your settings") != NULL &&

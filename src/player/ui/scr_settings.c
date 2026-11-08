@@ -878,9 +878,18 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         nk_ui_text_role(ui, FLOW_ID_LEAD, SCR_ONLINE_NOT_BUILT_LINE, NK_UI_TYPE_BODY_S,
                         theme->warning);
         if (scr_wizard_box_begin(ui, 0u)) {
-            WizardColumn column = scr_online_developer_column(ui, model->online_mode,
-                                                              model->developer_mode,
-                                                              inner - 32.0f);
+            /* One button column for the page's rows, Discord status included. */
+            const WizardRow rows[] = {
+                {"Online mode", "On", SCR_ONLINE_STORED_ON_SENTENCE},
+                {"Developer mode", model->developer_mode ? "On" : "Off",
+                 WIZARD_DEVELOPER_SENTENCE},
+                {"Discord status", model->discord_presence ? "On" : "Off",
+                 model->discord_available ? SCR_DISCORD_SENTENCE
+                                          : SCR_DISCORD_UNAVAILABLE_SENTENCE}
+            };
+            WizardColumn column = model->online_mode
+                ? scr_wizard_column(ui, rows, 3u, inner - 32.0f, false)
+                : scr_wizard_column(ui, rows + 1, 2u, inner - 32.0f, false);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
                                   "Online mode", SCR_ONLINE_STORED_ON_SENTENCE, true,
@@ -891,6 +900,19 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                               "Developer mode", WIZARD_DEVELOPER_SENTENCE,
                               model->developer_mode, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DEVELOPER);
+            }
+            /* Off by default; while the build has no Discord application ID the row is
+               disabled and says why (it cannot be turned on). A stored On still shows, so
+               it can be turned off. */
+            if (scr_wizard_value_state(
+                    ui, PLAYER_UI_ID_SETTINGS_DISCORD, SET_ID_TEXT + 0xB0u, "Discord status",
+                    model->discord_presence ? "On" : "Off",
+                    model->discord_available ? SCR_DISCORD_SENTENCE
+                                             : SCR_DISCORD_UNAVAILABLE_SENTENCE,
+                    model->discord_presence,
+                    !model->discord_available && !model->discord_presence, inner - 32.0f,
+                    &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DISCORD);
             }
             nk_ui_end_container(ui);
         }
