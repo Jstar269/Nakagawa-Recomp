@@ -484,12 +484,18 @@ const uint32_t *ge_wide_canvas(uint32_t fb_addr, int *fmt);
  * backend declined, since the last reset. */
 void      ge_tnl_set_enabled(int on);
 void      ge_tnl_counts(unsigned long long *taken, unsigned long long *cpu, int reset);
-/* Why each of those `cpu` PRIMs kept ge.c's T&L: one count per reason, in the order ge.c tests
- * them, so a PRIM is counted once, under the first reason that applies. The counts sum to `cpu`,
- * and a reset through either function clears both.
+/* Why each of those `cpu` PRIMs kept ge.c's T&L: one count per reason. A PRIM is counted once,
+ * under the first reason ge.c finds: the draw's state in enum order up to LIGHT_RANGE, then
+ * ALLOC, then each vertex in turn (VERTEX_RANGE for its position, normal or weights before
+ * TEXCOORD_RANGE for its UV), then CLIP, then BACKEND. The counts sum to `cpu`, and a reset
+ * through either function clears both.
  * A PRIM never offered (the switch off, no tnl_prim hook, fewer than 3 vertices, Fill on) is in
- * neither. With SR_GESTAT and SR_GPU_TNL=1 the counts are printed on a `GESTAT-TNL` line each
- * window. */
+ * neither, nor is one dropped because its depth surface could not be prepared.
+ * With SR_GESTAT, while the route is on (SR_GPU_TNL=1 and a backend with tnl_prim, as with
+ * SR_GPU_GE=1, from the first transform-mode triangle draw), each stat window prints
+ *   GESTAT-TNL f=<vblank> taken=<n> cpu=<n>: clear=<n> flat=<n> ... backend=<n>
+ * with every reason in enum order: that window's counts alone, kept apart from these totals and
+ * their resets. */
 typedef enum GeTnlReason {
     GE_TNL_WHY_CLEAR = 0,       /* clear mode */
     GE_TNL_WHY_FLAT,            /* flat shading */

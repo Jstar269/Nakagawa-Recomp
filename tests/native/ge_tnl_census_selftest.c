@@ -13,6 +13,13 @@
 // here: `diagnostic` (the GE timing model, SR_RTRACE or the primitive profile, each latched once
 // per process) and `alloc` (an allocation failure).
 //
+// A reset through either ge_tnl_counts or ge_tnl_reason_counts clears both. SR_GESTAT's
+// GESTAT-TNL line is read back from ge_set_frame over two stat windows: its exact text, and the
+// second window's counts only.
+//
+// The test removes every SR_ variable from its environment first (ge.c latches SR_NOLIGHT,
+// SR_NOFOG, SR_RTRACE, SR_GE_PRIM_PROFILE and others once per process), then sets SR_GESTAT.
+//
 // No game input, no GPU. Runtime entry points a GE list must not reach abort.
 
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
@@ -30,7 +37,32 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#define census_environ _environ
+#define cap_pipe(fds) _pipe((fds), 65536u, _O_BINARY)
+#define cap_dup _dup
+#define cap_dup2 _dup2
+#define cap_close _close
+#define cap_read(fd, buf, n) _read((fd), (buf), (unsigned)(n))
+static int env_unset(const char *name) { return _putenv_s(name, ""); }
+static int env_set(const char *name, const char *value) { return _putenv_s(name, value); }
+#else
+#include <unistd.h>
+extern char **environ;
+#define census_environ environ
+#define cap_pipe(fds) pipe(fds)
+#define cap_dup dup
+#define cap_dup2 dup2
+#define cap_close close
+#define cap_read(fd, buf, n) read((fd), (buf), (n))
+static int env_unset(const char *name) { return unsetenv(name); }
+static int env_set(const char *name, const char *value) { return setenv(name, value, 1); }
+#endif
+
 extern uint32_t ge_run_list(uint32_t addr, int resume);
+extern void ge_set_frame(uint32_t frame);
 
 /* ---- Runtime state at its disabled values, and entry points that must stay cold ---- */
 
@@ -232,7 +264,7 @@ static const Scenario k_scenarios[] = {
     { "backend", GE_TNL_WHY_BACKEND, st_none, -0.4f, -5.0f, 1 },
 };
 
-static void run_scenario(const Scenario *sc) {
+static void run_scenario(const Scenario *sc, int reset_by_reason) {
     put_vtx(VERTS, sc->far_x, -0.4f, sc->z0);
     put_vtx(VERTS + 28u, 0.4f, -0.4f, -5.0f);
     put_vtx(VERTS + 56u, 0.0f, 0.4f, -5.0f);
@@ -270,16 +302,96 @@ static void run_scenario(const Scenario *sc) {
         expect(s_tnl_calls == (sc->decline ? 1u : 0u), sc->name,
                "the backend was offered a PRIM ge.c had ruled out");
     }
-    /* A reset through either function clears both. */
-    ge_tnl_counts(NULL, NULL, 1);
+    /* A reset through either function clears both: the scenarios alternate between them. */
+    if (reset_by_reason) ge_tnl_reason_counts(NULL, 1);
+    else ge_tnl_counts(NULL, NULL, 1);
     ge_tnl_reason_counts(why, 0);
     ge_tnl_counts(&taken, &cpu, 0);
     sum = 0;
     for (int i = 0; i < GE_TNL_WHY_COUNT; i++) sum += why[i];
-    expect(sum == 0u && taken == 0u && cpu == 0u, sc->name, "a reset left counts behind");
+    expect(sum == 0u && taken == 0u && cpu == 0u, sc->name,
+           reset_by_reason ? "a reset through ge_tnl_reason_counts left counts behind"
+                           : "a reset through ge_tnl_counts left counts behind");
+}
+
+/* ---- SR_GESTAT's window line ---- */
+
+/* ge_set_frame(frame) with stderr read back into out. Returns 0, or -1 if stderr could not be
+ * redirected. The window's lines are a few hundred bytes, well inside a pipe's buffer. */
+static int set_frame_captured(uint32_t frame, char *out, size_t cap) {
+    int fds[2];
+    out[0] = 0;
+    if (cap_pipe(fds) != 0) return -1;
+    fflush(stderr);
+    int saved = cap_dup(2);
+    if (saved < 0 || cap_dup2(fds[1], 2) < 0) {
+        if (saved >= 0) cap_close(saved);
+        cap_close(fds[0]);
+        cap_close(fds[1]);
+        return -1;
+    }
+    cap_close(fds[1]);
+    ge_set_frame(frame);
+    fflush(stderr);
+    cap_dup2(saved, 2);
+    cap_close(saved);
+    size_t len = 0;
+    while (len + 1u < cap) {
+        long got = (long)cap_read(fds[0], out + len, cap - 1u - len);
+        if (got <= 0) break;
+        len += (size_t)got;
+    }
+    cap_close(fds[0]);
+    out[len] = 0;
+    return 0;
+}
+
+/* The window closing at `frame` prints exactly one GESTAT-TNL line, equal to `want`. */
+static void expect_window_line(uint32_t frame, const char *scenario, const char *want) {
+    static char out[16384];
+    if (set_frame_captured(frame, out, sizeof out) != 0) {
+        expect(0, scenario, "stderr could not be redirected");
+        return;
+    }
+    const char *line = strstr(out, "GESTAT-TNL ");
+    if (!line) {
+        expect(0, scenario, "no GESTAT-TNL line");
+        return;
+    }
+    const char *end = strchr(line, '\n');
+    size_t len = end ? (size_t)(end - line) : strlen(line);
+    if (len != strlen(want) || memcmp(line, want, len) != 0) {
+        fprintf(stderr, "ge_tnl_census_selftest: %s: got  \"%.*s\"\n", scenario, (int)len, line);
+        fprintf(stderr, "ge_tnl_census_selftest: %s: want \"%s\"\n", scenario, want);
+        expect(0, scenario, "the GESTAT-TNL line differs");
+    }
+    expect(strstr(line + len, "GESTAT-TNL ") == NULL, scenario, "more than one GESTAT-TNL line");
+}
+
+/* Removes every SR_ variable, one at a time so the environment is never walked while it
+ * changes. Returns the number left behind (0 unless removal fails). */
+static int env_scrub(void) {
+    for (int guard = 0; guard < 4096; guard++) {
+        const char *hit = NULL;
+        for (char **e = census_environ; e && *e; e++)
+            if (strncmp(*e, "SR_", 3) == 0) { hit = *e; break; }
+        if (!hit) return 0;
+        char name[256];
+        const char *eq = strchr(hit, '=');
+        size_t n = eq ? (size_t)(eq - hit) : strlen(hit);
+        if (n >= sizeof name) return 1;
+        memcpy(name, hit, n);
+        name[n] = 0;
+        if (env_unset(name) != 0) return 1;
+    }
+    return 1;
 }
 
 int main(void) {
+    if (env_scrub() != 0 || env_set("SR_GESTAT", "1") != 0) {
+        fprintf(stderr, "ge_tnl_census_selftest: cannot clear the SR_ environment\n");
+        return 2;
+    }
     uint8_t *arena = (uint8_t *)calloc(0x0c000000u, 1);
     if (!arena) {
         fprintf(stderr, "ge_tnl_census_selftest: no guest arena\n");
@@ -303,7 +415,8 @@ int main(void) {
     hooks.tnl_prim = hook_tnl_prim;
     ge_set_gpu_hooks(&hooks);
     ge_tnl_set_enabled(1);
-    for (size_t i = 0; i < sizeof k_scenarios / sizeof k_scenarios[0]; i++) run_scenario(&k_scenarios[i]);
+    for (size_t i = 0; i < sizeof k_scenarios / sizeof k_scenarios[0]; i++)
+        run_scenario(&k_scenarios[i], (int)(i & 1u));
 
     /* The switch off: nothing is offered and nothing is counted, a texgen PRIM included. */
     ge_tnl_set_enabled(0);
@@ -323,6 +436,18 @@ int main(void) {
     for (int i = 0; i < GE_TNL_WHY_COUNT; i++) sum += why[i];
     expect(taken == 0u && cpu == 0u && sum == 0u && s_tnl_calls == 0u, "off",
            "the route counted or offered a PRIM while off");
+
+    /* The first window holds every scenario above, whatever the resets between them did, and
+     * nothing from the PRIM drawn with the switch off. The second holds only its own two PRIMs. */
+    ge_tnl_set_enabled(1);
+    expect_window_line(60u, "window-1",
+        "GESTAT-TNL f=60 taken=1 cpu=12: clear=1 flat=1 diagnostic=0 texgen=1 matrix=1 viewport=1"
+        " texcoord=1 fog=1 specular=1 light=1 alloc=0 vertex=1 clip=1 backend=1");
+    run_scenario(&k_scenarios[0], 0);   /* eligible */
+    run_scenario(&k_scenarios[3], 1);   /* texgen */
+    expect_window_line(120u, "window-2",
+        "GESTAT-TNL f=120 taken=1 cpu=1: clear=0 flat=0 diagnostic=0 texgen=1 matrix=0 viewport=0"
+        " texcoord=0 fog=0 specular=0 light=0 alloc=0 vertex=0 clip=0 backend=0");
     ge_set_gpu_hooks(NULL);
 
     if (s_failures) {

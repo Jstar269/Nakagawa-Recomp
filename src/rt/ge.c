@@ -5181,6 +5181,11 @@ static void draw_patch(uint32_t op,int spline){
 static int s_tnl_on = -1;                   /* SR_GPU_TNL=1, read once */
 static unsigned long long s_tnl_taken, s_tnl_cpu;
 static unsigned long long s_tnl_why[GE_TNL_WHY_COUNT];   /* s_tnl_cpu, by reason */
+/* The same counts for the current SR_GESTAT window: cleared by each GESTAT-TNL line, and
+ * independent of the resets of ge_tnl_counts and ge_tnl_reason_counts. */
+static struct {
+    unsigned long long taken, cpu, why[GE_TNL_WHY_COUNT];
+} s_tnl_window;
 static GeTnlVtx *s_tnl_refs;
 static uint32_t *s_tnl_tri;
 static uint32_t s_tnl_refs_cap, s_tnl_tri_cap;
@@ -5211,7 +5216,8 @@ const char *ge_tnl_reason_name(int why) {
     return why >= 0 && why < GE_TNL_WHY_COUNT ? names[why] : NULL;
 }
 
-/* SR_GESTAT's GESTAT-TNL line, while the route is on: the census of ge_tnl_reason_counts. */
+/* SR_GESTAT's GESTAT-TNL line, while the route is on: the census of the window it closes, like
+ * the window's other GESTAT lines; the window's counts then start over. */
 static void tnl_gestat_print(uint32_t frame) {
     if (s_tnl_on != 1) return;
     char why[512];
@@ -5219,18 +5225,21 @@ static void tnl_gestat_print(uint32_t frame) {
     why[0] = 0;
     for (int i = 0; i < GE_TNL_WHY_COUNT && at < sizeof(why); i++) {
         int n = snprintf(why + at, sizeof(why) - at, " %s=%llu", ge_tnl_reason_name(i),
-                         s_tnl_why[i]);
+                         s_tnl_window.why[i]);
         if (n < 0) break;
         at += (size_t)n;
     }
-    fprintf(stderr, "GESTAT-TNL f=%" PRIu32 " taken=%llu cpu=%llu:%s\n", frame, s_tnl_taken,
-            s_tnl_cpu, why);
+    fprintf(stderr, "GESTAT-TNL f=%" PRIu32 " taken=%llu cpu=%llu:%s\n", frame,
+            s_tnl_window.taken, s_tnl_window.cpu, why);
+    memset(&s_tnl_window, 0, sizeof(s_tnl_window));
 }
 
 /* A PRIM keeps ge.c's T&L for reason `why`. */
 static void tnl_decline(int why) {
     s_tnl_cpu++;
     s_tnl_why[why]++;
+    s_tnl_window.cpu++;
+    s_tnl_window.why[why]++;
 }
 
 static int tnl_enabled(void) {
@@ -5508,6 +5517,7 @@ static int ge_tnl_try_prim(int type, int count, const VFmt *vf, uint32_t vbase, 
     ge_cpu_profile_end(GE_CPU_GPU_HOOK, profile_started);
     if (!taken) { tnl_decline(GE_TNL_WHY_BACKEND); return 0; }
     s_tnl_taken++;
+    s_tnl_window.taken++;
     s_stat.gpuprim += n / 3u;
     return 1;
 }
