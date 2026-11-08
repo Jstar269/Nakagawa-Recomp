@@ -299,10 +299,11 @@ static bool exact_url(const char *url, const char *prefix, const char *tag, cons
 }
 
 bool nk_update_is_release_page(const char *url) {
-    const size_t prefix = sizeof(NK_UPDATE_RELEASE_PAGE_PREFIX) - 1;
-    const char *path = NK_UPDATE_RELEASE_PAGE_PREFIX + REPOSITORY_URL_LENGTH;
+    static const char page_prefix[] = NK_UPDATE_RELEASE_PAGE_PREFIX;
+    const size_t prefix = sizeof(page_prefix) - 1;
     return names_this_repository(url) && strlen(url) > prefix &&
-           strncmp(url + REPOSITORY_URL_LENGTH, path, prefix - REPOSITORY_URL_LENGTH) == 0;
+           strncmp(url + REPOSITORY_URL_LENGTH, page_prefix + REPOSITORY_URL_LENGTH,
+                   prefix - REPOSITORY_URL_LENGTH) == 0;
 }
 
 static bool hex64(const char *text) {
