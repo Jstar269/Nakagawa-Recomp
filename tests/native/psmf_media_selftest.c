@@ -2271,6 +2271,13 @@ static void test_mpeg_csc_measured_range_and_16bit(void) {
     set_range(YR_RANGE, 0, 0, 64, 64);
     CHECK(guest_mpeg_import(NID_CSC, YR_DESC, YR_BUF, YR_RANGE, 512u, YR_DEST) == 0u,
           "csc-16bit-wide: the measured {0, 0, 64, 64} at stride 512 still converts");
+    /* Only the reach clause refuses here: w 64 is within the measured width, but its second block ends at
+     * pixel 96, past a stride of 64. */
+    set_range(YR_RANGE, 0, 0, 64, 16);
+    memset(SR_HOST(YR_DEST), 0x5a, 64u * 16u * 2u);
+    CHECK(guest_mpeg_import(NID_CSC, YR_DESC, YR_BUF, YR_RANGE, 64u, YR_DEST) == PSP_CSC_REFUSED &&
+              guest_bytes_are(YR_DEST, 64u * 16u * 2u, 0x5au),
+          "csc-16bit-wide: a 64-wide range at stride 64 (block spacing past the stride) is refused, nothing written");
     mpeg_finish();
 }
 
