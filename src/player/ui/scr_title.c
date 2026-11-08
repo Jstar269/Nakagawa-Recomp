@@ -592,26 +592,44 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 }
                 nk_ui_end_container(ui);
             }
-            /* Report a problem, a link the user's browser opens, and Remove
-               from library (#1304), apart from the play actions: it deletes
-               what Nakagawa built, so it asks first. */
+            /* Add to Steam (#2152), which opens its own dialog; Report a
+               problem, a link the user's browser opens; and Remove from library
+               (#1304), apart from the play actions: it deletes what Nakagawa
+               built, so it asks first. A larger text size wraps the row. */
             bool can_report = title->disc_id != NULL && title->disc_id[0] != '\0';
-            if (can_report || title->can_remove) {
+            if (can_report || title->can_remove || title->can_add_to_steam) {
                 NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                              NK_UI_SPACE_3);
-                if (nk_ui_begin_container(ui, TITLE_ID_REMOVE_ROW, &row, NULL)) {
-                    if (can_report &&
-                        nk_ui_button(ui, PLAYER_UI_ID_TITLE_REPORT, "Report a problem", 0u)) {
-                        result = action(PLAYER_UI_ACTION_REPORT_PROBLEM, model->title_index,
-                                        PLAYER_UI_PRIMARY_NONE);
+                NkUiFlowRow flow;
+                if (nk_ui_flow_begin(ui, &flow, TITLE_ID_REMOVE_ROW, &row,
+                                     width - 2.0f * gutter - NK_UI_DETAIL_GAP - aside)) {
+                    if (title->can_add_to_steam) {
+                        nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Add to Steam", 0u));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_STEAM, "Add to Steam", 0u)) {
+                            result = action(PLAYER_UI_ACTION_ADD_TO_STEAM, model->title_index,
+                                            PLAYER_UI_PRIMARY_NONE);
+                        }
                     }
-                    if (title->can_remove &&
-                        nk_ui_button(ui, PLAYER_UI_ID_TITLE_REMOVE, "Remove from library",
-                                     NK_UI_BUTTON_DANGER)) {
-                        result = action(PLAYER_UI_ACTION_REMOVE_TITLE, model->title_index,
-                                        PLAYER_UI_PRIMARY_NONE);
+                    if (can_report) {
+                        nk_ui_flow_item(ui, &flow,
+                                        nk_ui_button_width(ui, "Report a problem", 0u));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REPORT, "Report a problem",
+                                         0u)) {
+                            result = action(PLAYER_UI_ACTION_REPORT_PROBLEM,
+                                            model->title_index, PLAYER_UI_PRIMARY_NONE);
+                        }
                     }
-                    nk_ui_end_container(ui);
+                    if (title->can_remove) {
+                        nk_ui_flow_item(ui, &flow,
+                                        nk_ui_button_width(ui, "Remove from library",
+                                                           NK_UI_BUTTON_DANGER));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REMOVE, "Remove from library",
+                                         NK_UI_BUTTON_DANGER)) {
+                            result = action(PLAYER_UI_ACTION_REMOVE_TITLE, model->title_index,
+                                            PLAYER_UI_PRIMARY_NONE);
+                        }
+                    }
+                    nk_ui_flow_end(ui, &flow);
                 }
             }
             nk_ui_end_container(ui);
