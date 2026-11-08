@@ -328,7 +328,7 @@ release candidate's `Setup.exe` (they need the uninstall page, which a silent ru
 5. Uninstall while the player runs: Retry/Cancel appears and nothing is removed until the player is closed.
 6. The SmartScreen text on first run matches the release notes.
 
-v0.0.2's installer is not Authenticode-signed, so Windows SmartScreen may warn on first run; say so in the release
+The installer is not Authenticode-signed, so Windows SmartScreen may warn on first run; say so in the release
 notes. Attach the installer and its `.sha256`; signing the `.sha256` is optional, because the player never
 downloads the installer. A copy that Setup installed updates by running the next release's Setup (the player's
 Settings shows the release page for it). Uninstalling removes the program and keeps your data unless you tick the

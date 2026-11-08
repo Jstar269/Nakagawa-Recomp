@@ -96,7 +96,7 @@ first and each OS is a thin wrapper around them):
 
 | Target Environment | Packaging Strategy | Binary Artifacts |
 | --- | --- | --- |
-| **Windows x86-64** | Portable ZIP. No installer, MSI or MSIX | `nakagawa_player.exe`, `bin/nakagawa_core.dll` (or static), `build/<game>/<game>.exe`, SDL3.dll, SDL3_ttf.dll + resolved closure, `THIRD_PARTY_NOTICES/` |
+| **Windows x86-64** | Portable ZIP, and beside it an optional per-user `Setup.exe` with the same files ([#2208](https://github.com/Jstar269/nakagawa-recomp/issues/2208), [`SETUP.md`](SETUP.md#windows-installer-setupexe)). No MSI or MSIX | `nakagawa_player.exe`, `bin/nakagawa_core.dll` (or static), `build/<game>/<game>.exe`, SDL3.dll, SDL3_ttf.dll + resolved closure, `THIRD_PARTY_NOTICES/` |
 | **Linux / Steam Deck** | Tarball plus a per-user `.desktop` entry, written by the same stager (`tools/stage_install.py`). No AppImage. No Flatpak: its sandbox conflicts with the host compiler the player needs | `nakagawa_player`, `bin/<game>`, `libSDL3.so` |
 | **macOS ARM64** | Not supported; an App Bundle (`Nakagawa.app`) is the intended form | `Nakagawa.app/Contents/MacOS/nakagawa_player`, helper executables in `MacOS/` |
 | **Android** | Not supported for play; a development APK holds the launcher and the showcase demos (see `ANDROID_DEVELOPMENT.md`). The user may move their own packages and saves to their own device | the APK's native libraries |
