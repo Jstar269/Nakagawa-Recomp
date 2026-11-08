@@ -7363,8 +7363,9 @@ static int coherence_run_twin_sync(void) {
  * then an opaque sprite behind it. The rmwzfb rule keeps that op on the snapshot path; colour and
  * depth equal ge.c on every path.
  * dst-read-ztest: the blended pair under the depth test GEQUAL over a depth wall, with depth writes
- * off and on: the depth-tested translucent draw. On the interlock path colour and depth equal ge.c
- * and the op took the interlock; on the snapshot path depth equals ge.c and the hazard is pinned.
+ * off and on, and with the second sprite hidden by the first's depth write in the same batch: the
+ * depth-tested translucent draw. On the interlock path colour and depth equal ge.c and the op took
+ * the interlock; on the snapshot path depth equals ge.c and the hazard is pinned where it applies.
  * dst-read-pins: the snapshot path made no interlock object (device extension, features chain,
  * STORAGE_BIT, depth-only pass, variant module); the interlock path made all of them. */
 #define DRO_LIST 0x08040000u
@@ -7711,19 +7712,35 @@ static int coherence_run_dst_read_depth(void) {
 
 /* dst-read-ztest: depth cleared to 0, then a depth-only clear-mode wall at z 25000 across part of
  * the overlap; then the blended pair under the depth test GEQUAL, the first sprite at z 20000 (hidden
- * behind the wall) and the second at z 30000 (in front of the first and of the wall), with depth
- * writes off or on. Every kill in that op is the depth test itself, so the rmwzfb rule lets it take
- * the interlock either way. */
+ * behind the wall). Every kill in that op is the depth test itself, so the rmwzfb rule lets it take
+ * the interlock. Three legs:
+ * - the second sprite at z 30000, depth writes off: it is in front of the first and of the wall,
+ *   so it blends over the first in the overlap;
+ * - the same with depth writes on;
+ * - the second sprite at z 15000, depth writes on: the first sprite's depth write, in the same
+ *   batch, hides it in the overlap, so the snapshot path has no hazard there either. */
 static const DroBox k_dro_wall = { 100u, 50u, 140u, 120u };
 
-static uint32_t dro_ztest_list(const DroState *st, int zwrite) {
+typedef struct DroZLeg {
+    const char *name;
+    float z1;          /* the second sprite's depth; the first is at 20000 */
+    int zwrite, hazard;
+} DroZLeg;
+
+static const DroZLeg k_dro_zlegs[3] = {
+    { "in front, depth writes off", 30000.0f, 0, 1 },
+    { "in front, depth writes on", 30000.0f, 1, 1 },
+    { "hidden by the first, depth writes on", 15000.0f, 1, 0 },
+};
+
+static uint32_t dro_ztest_list(const DroState *st, const DroZLeg *leg) {
     static const float clear[1][5] = { { 0.0f, 0.0f, 480.0f, 272.0f, 0.0f } };
     const float wall[1][5] = { { (float)k_dro_wall.x0, (float)k_dro_wall.y0, (float)k_dro_wall.x1,
                                  (float)k_dro_wall.y1, 25000.0f } };
     float pair[2][5];
     memcpy(pair, k_dro_pair, sizeof pair);
     pair[0][4] = 20000.0f;
-    pair[1][4] = 30000.0f;
+    pair[1][4] = leg->z1;
     static const uint32_t clear_rgba[1] = { 0 };
     StpList l;
     uint32_t vaddr = DRO_VERTS;
@@ -7734,10 +7751,14 @@ static uint32_t dro_ztest_list(const DroState *st, int zwrite) {
     stp_emit(&l, 0xD3, 0);
     stp_emit(&l, 0x23, 1);
     stp_emit(&l, 0xDE, 7);                                /* GEQUAL */
-    stp_emit(&l, 0xE7, zwrite ? 0u : 1u);
+    stp_emit(&l, 0xE7, leg->zwrite ? 0u : 1u);
     dro_sprites(&l, &vaddr, (const float (*)[5])pair, k_dro_pair_rgba, 2u);
     stp_end(&l);
     return DRO_LIST;
+}
+
+static int dro_in(const DroBox *b, uint32_t x, uint32_t y) {
+    return x >= b->x0 && x < b->x1 && y >= b->y0 && y < b->y1;
 }
 
 static int coherence_run_dst_read_ztest(void) {
@@ -7745,60 +7766,76 @@ static int coherence_run_dst_read_ztest(void) {
         { "5650+dither", 0u, 1u, 2u | (3u << 4), 0u, 0u, 0u },
         { "8888 dual-FIX", 3u, 0u, 10u | (10u << 4), 0x5F7F9Fu, 0x9F7F5Fu, 0u },
     };
+    const DroBox first = { (uint32_t)k_dro_pair[0][0], (uint32_t)k_dro_pair[0][1],
+                           (uint32_t)k_dro_pair[0][2], (uint32_t)k_dro_pair[0][3] };
+    const DroBox second = { (uint32_t)k_dro_pair[1][0], (uint32_t)k_dro_pair[1][1],
+                            (uint32_t)k_dro_pair[1][2], (uint32_t)k_dro_pair[1][3] };
     uint8_t *gpu_out = (uint8_t *)malloc(FB_W * FB_H * 4u);
     uint16_t *gz = (uint16_t *)malloc(480u * FB_H * 2u), *wz = (uint16_t *)malloc(480u * FB_H * 2u);
     int ok = gpu_out && gz && wz;
     GeState saved = *s_ge;
     const int ordered = dro_ordered();
     unsigned pinned = 0;
-    for (uint32_t r = 0; r < 4u && ok; r++) {
-        const DroState *st = &states[r / 2u];
-        const int zwrite = (int)(r % 2u);
-        const char *zw = zwrite ? "depth writes on" : "depth writes off";
+    for (uint32_t r = 0; r < 6u && ok; r++) {
+        const DroState *st = &states[r / 3u];
+        const DroZLeg *leg = &k_dro_zlegs[r % 3u];
         DroRun run;
-        if (!dro_run_both(st, dro_ztest_list(st, zwrite), gpu_out, gz, wz, &run)) { ok = 0; break; }
-        unsigned outside = 0, kept = 0, zdiff = 0, hidden = 0;
+        if (!dro_run_both(st, dro_ztest_list(st, leg), gpu_out, gz, wz, &run)) { ok = 0; break; }
+        unsigned outside = 0, kept = 0, zdiff = 0, walled = 0, occluded = 0;
         unsigned diff = dro_compare("dst-read-ztest", st, gpu_out, (const uint8_t *)SR_HOST(DRO_BASE),
                                     &k_dro_overlap, &outside, &kept);
         for (uint32_t i = 0; i < 480u * FB_H; i++) {
             const uint32_t x = i % 480u, y = i / 480u;
-            /* The first sprite is hidden behind the wall: ge.c's depth there stays the wall's. */
-            if (x >= k_dro_wall.x0 && x < k_dro_wall.x1 && y >= k_dro_wall.y0 && y < k_dro_wall.y1 &&
-                x >= (uint32_t)k_dro_pair[0][0] && x < (uint32_t)k_dro_pair[0][2] &&
-                y >= (uint32_t)k_dro_pair[0][1] && y < (uint32_t)k_dro_pair[0][3] &&
-                (x < (uint32_t)k_dro_pair[1][0] || y < (uint32_t)k_dro_pair[1][1]) && wz[i] == 25000u)
-                hidden++;
+            /* In ge.c's depth: the first sprite hidden behind the wall (outside the second), and in
+             * the third leg the second sprite hidden by the first (in the overlap, off the wall). */
+            if (dro_in(&k_dro_wall, x, y) && dro_in(&first, x, y) && !dro_in(&second, x, y) && wz[i] == 25000u)
+                walled++;
+            if (dro_in(&k_dro_overlap, x, y) && !dro_in(&k_dro_wall, x, y) && wz[i] == 20000u) occluded++;
             if (gz[i] == wz[i]) continue;
             if (!zdiff++)
                 fprintf(stderr, "gpu coherence selftest [dst-read-ztest]: %s, %s: depth x=%u y=%u gpu=%u "
-                                "ge_c=%u\n", st->name, zw, x, y, gz[i], wz[i]);
+                                "ge_c=%u\n", st->name, leg->name, x, y, gz[i], wz[i]);
         }
-        if (zdiff || !hidden || run.fallbacks) {
+        if (zdiff) {
             fprintf(stderr, "gpu coherence selftest [dst-read-ztest]: %s, %s: depth differs from ge.c in %u "
-                            "pixels, %u pixels of the first sprite hidden behind the wall (want 1 or more), "
-                            "%llu software fallback primitives\n", st->name, zw, zdiff, hidden, run.fallbacks);
+                            "pixels\n", st->name, leg->name, zdiff);
+            ok = 0;
+        }
+        if (!walled || (!leg->hazard && !occluded)) {
+            fprintf(stderr, "gpu coherence selftest [dst-read-ztest]: %s, %s: the scene is not the cell's: "
+                            "%u pixels of the first sprite behind the wall, %u of the second behind the first "
+                            "(want 1 or more%s)\n", st->name, leg->name, walled, occluded,
+                    leg->hazard ? " behind the wall" : " each");
+            ok = 0;
+        }
+        if (run.fallbacks) {
+            fprintf(stderr, "gpu coherence selftest [dst-read-ztest]: %s, %s: %llu primitives took the "
+                            "software fallback\n", st->name, leg->name, run.fallbacks);
             ok = 0;
         }
         if (ordered) {
             if (diff) {
                 fprintf(stderr, "gpu coherence selftest [dst-read-ztest]: %s, %s: colour differs from ge.c in "
                                 "%u pixels (%u outside the overlap) on the interlock path\n",
-                        st->name, zw, diff, outside);
+                        st->name, leg->name, diff, outside);
                 ok = 0;
             }
             if (run.rmw_ops != 1u || run.rmw_batches != 1u || run.copies != 0u) {
                 fprintf(stderr, "gpu coherence selftest [dst-read-ztest]: %s, %s: interlock ops %llu (want 1), "
                                 "RMW batches %llu (want 1), snapshot copies %llu (want 0)\n",
-                        st->name, zw, run.rmw_ops, run.rmw_batches, run.copies);
+                        st->name, leg->name, run.rmw_ops, run.rmw_batches, run.copies);
                 ok = 0;
             }
         } else {
-            /* The known hazard (#2109): confined to the overlap, and present. */
-            if (!diff || outside || run.rmw_ops || !run.copies) {
+            /* The known hazard (#2109): confined to the overlap, and present where the second
+             * sprite blends over the first; none where the first hides it. */
+            const int colour_ok = leg->hazard ? diff && !outside : !diff;
+            if (!colour_ok || run.rmw_ops || !run.copies) {
                 fprintf(stderr, "gpu coherence selftest [dst-read-ztest]: %s, %s on the snapshot path: colour "
-                                "differs from ge.c in %u pixels, %u outside the overlap (want 1 or more, none "
-                                "outside); %llu interlock ops, %llu snapshot copies (want 0 and 1 or more)\n",
-                        st->name, zw, diff, outside, run.rmw_ops, run.copies);
+                                "differs from ge.c in %u pixels, %u outside the overlap (want %s); %llu "
+                                "interlock ops, %llu snapshot copies (want 0 and 1 or more)\n",
+                        st->name, leg->name, diff, outside,
+                        leg->hazard ? "1 or more, none outside" : "none", run.rmw_ops, run.copies);
                 ok = 0;
             }
             pinned += diff;
@@ -7808,11 +7845,12 @@ static int coherence_run_dst_read_ztest(void) {
     coherence_reset_targets();
     free(gpu_out); free(gz); free(wz);
     if (ok && ordered)
-        printf("gpu coherence selftest: PASS %-22s interlock: colour and depth equal ge.c, depth writes off "
-               "and on, no snapshot copy\n", "dst-read-ztest");
+        printf("gpu coherence selftest: PASS %-22s interlock: colour and depth equal ge.c in 3 depth legs, "
+               "no snapshot copy\n", "dst-read-ztest");
     else if (ok)
         printf("gpu coherence selftest: PASS %-22s snapshot path: depth equals ge.c; the known #2109 hazard, "
-               "%u pixels, all in the overlap\n", "dst-read-ztest", pinned);
+               "%u pixels, all in the overlap, none where the first sprite hides the second\n",
+               "dst-read-ztest", pinned);
     return ok;
 }
 

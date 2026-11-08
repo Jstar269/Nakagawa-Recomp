@@ -1050,7 +1050,7 @@ jobs:
           grep -qi llvmpipe "$RUNNER_TEMP/vulkan-summary.txt"
           # Report only: whether lavapipe offers the interlock destination-read path (#2109).
           # Without it, the interlock legs of gpu-coherence-selftest print SKIP lines.
-          vulkaninfo 2>/dev/null | grep -E "VK_EXT_fragment_shader_interlock|fragmentShaderPixelInterlock" || \
+          { vulkaninfo 2>/dev/null || true; } | grep -E "VK_EXT_fragment_shader_interlock|fragmentShaderPixelInterlock" || \
             echo "no VK_EXT_fragment_shader_interlock: the interlock legs SKIP"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
             make CC=gcc gpu-capture-selftest

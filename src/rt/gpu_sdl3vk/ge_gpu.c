@@ -955,7 +955,7 @@ static void to_layout(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspec
  * of the interlock path (#2109): 1 merges every channel from the loaded destination (the store has
  * no effect), 2 swaps the source and destination blend factors of the RMW batches, 3 lets an op
  * holding a batch the rmwzfb rule refuses take the interlock, 4 gives every colour target
- * STORAGE_BIT on the snapshot path too. */
+ * STORAGE_BIT on the snapshot path too, 5 turns the depth test of the RMW pipelines off. */
 #ifndef SR_GPU_DSTREAD_MUTANT
 #define SR_GPU_DSTREAD_MUTANT 0
 #endif
@@ -1903,6 +1903,9 @@ static VkPipeline pipe_create(const PipeKey *k, int rmw) {
 
     VkPipelineDepthStencilStateCreateInfo ds = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
     ds.depthTestEnable = k->ztest;
+#if SR_GPU_DSTREAD_MUTANT == 5
+    if (rmw) ds.depthTestEnable = VK_FALSE;
+#endif
     ds.depthWriteEnable = k->zwrite;
     ds.depthCompareOp = (VkCompareOp)k->zfunc;
 

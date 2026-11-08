@@ -519,18 +519,21 @@ each device pixel's own position, and so does its uv-edge-clamp case (also at sc
 device pixels outside a screen-aligned strip's or sprite's first and last pixel centres must show
 that edge pixel's 1x sample, with linear and nearest filtering and with repeat and clamp wrapping,
 while a sheared strip stays unclamped.
-The dst-read cells (#2109: order, mask, alpha, mixed, depth, ztest and pins) then run at render scales 1 and 4,
+The dst-read cells (#2109: order, mask, alpha, mixed, depth, ztest and pins) run alone at render scales 1 and 4,
 once forced to the snapshot destination-read path and once to the interlock path (`--dst-read`). On the
-interlock path, overlapping shader-blend primitives must equal the software GE in colour (and in depth for the
-depth cells) with no snapshot copy. On the snapshot path, the known difference must stay inside each overlap, and
-the device must hold no interlock state. A device that refuses the interlock prints one SKIP line for each
-interlock leg. `gpu-dst-read-mutants` then builds four broken variants (`SR_GPU_DSTREAD_MUTANT`), and each must
-fail its cell with its own message. Mutants 1 to 3 run on the interlock path and are a SKIP on a device without
-it. The lavapipe step prints the device's interlock features from `vulkaninfo` first, so the log shows which
-path the hosted legs took.
-Last, `gpu-coherence-selftest-snapbar-mutants` builds three broken variants of
-the destination-snapshot copy's barriers (`SR_GPU_SNAPBAR_MUTANT`), and the submit-batch case must
-fail each one with its own message. `fsr3-pass-selftest` runs FSR 3's eight compute passes on
+interlock path, overlapping shader-blend primitives must equal the software GE in colour with no snapshot copy,
+and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-read-depth`, an alpha-tested op
+that writes depth, must keep the snapshot path on both paths and equal the software GE in colour and depth. On
+the snapshot path, the known difference must stay inside each overlap, and the device must hold no interlock
+state. A device that refuses the interlock prints one SKIP line for each interlock leg. The lavapipe step prints
+the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
+pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Three
+mutant targets follow, and each broken variant must fail its case with its own message:
+`gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
+(`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
+pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths five ways
+(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 run on the interlock path and are a SKIP on a device without it).
+`fsr3-pass-selftest` runs FSR 3's eight compute passes on
 lavapipe, headless, under the validation layer with synchronisation validation of shader accesses,
 and an exit 77 skip fails it, including one for synchronisation validation that is not active.
 `fsr3-fg-pass-selftest` runs frame generation's device refusal (G-R) there: lavapipe's subgroups
