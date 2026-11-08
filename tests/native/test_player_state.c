@@ -6644,7 +6644,9 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     uint8_t icon[24];
     uint8_t *pbp;
     uint8_t *image;
-    size_t pbp_len = 0, image_len = 0;
+    uint8_t *before;
+    uint8_t *after;
+    size_t pbp_len = 0, image_len = 0, before_len = 0, after_len = 0;
     PlayerPsnPackage package;
     PlayerPsnPackage again;
     PlayerPsnPackage renamed;
@@ -6675,8 +6677,8 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     write_binary_file(pbp_path, pbp, pbp_len);
     free(pbp);
     assert(player_path_is_pbp_package(pbp_path));
-    if (!player_psn_package_inspect(pbp_path, &package, code, sizeof(code), message,
-                                    sizeof(message))) fprintf(stderr, "DBG %s: %s\n", code, message);
+    before = psn_test_read_file(pbp_path, &before_len);
+    assert(before != NULL && before_len == pbp_len);
     assert(player_psn_package_inspect(pbp_path, &package, code, sizeof(code), message,
                                       sizeof(message)));
     assert(package.homebrew && !package.iso_ready);
@@ -6710,6 +6712,14 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     assert(memcmp(image + 22u * 2048u, program, 88u) == 0);
     assert(memcmp(image + 23u * 2048u, icon, sizeof(icon)) == 0);
     free(image);
+
+    /* The user's own package is only read, never changed: the import writes under the data
+       folder alone. (The package's folder is not mounted as ms0:/PSP/GAME/<folder>/ for the
+       program; the disc image holds only the program, its title and its icon, #2143.) */
+    after = psn_test_read_file(pbp_path, &after_len);
+    assert(after != NULL && after_len == before_len && memcmp(after, before, before_len) == 0);
+    free(before);
+    free(after);
 
     /* Picking it again reuses the checked image; the same program under another title is
        another game, and the same package picked from another place is the same one. */
