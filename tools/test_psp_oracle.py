@@ -5452,6 +5452,8 @@ class HleMeasureProbeTests(unittest.TestCase):
         # of its gamedata precheck and cleanup, and the net libraries' Init/Term pairs.
         "sceDisplayGetVcount", "sceUmdCheckMedium",
         "sceIoDopen", "sceIoDread", "sceIoDclose", "sceIoRmdir",
+        # hle-io-seek: the seeks, the ioctl and the probe-owned ms0: directory.
+        "sceIoLseek", "sceIoLseek32", "sceIoIoctl", "sceIoMkdir",
         "sceNetInit", "sceNetTerm", "sceNetInetInit", "sceNetInetTerm",
         "sceNetApctlInit", "sceNetApctlTerm", "sceNetAdhocInit", "sceNetAdhocTerm",
         "sceNetAdhocctlInit", "sceNetAdhocctlTerm",
@@ -5878,7 +5880,10 @@ class HleMeasureProbeTests(unittest.TestCase):
         # Removal is this file's alone on host0; the only other removal is hle-utility-dialogs'
         # cleanup of its own gamedata directory on ms0: (HleUtilityDialogsProbeTests).
         self.assertEqual(re.findall(r"\bsceIoRemove\s*\(([^)]*)\)", self.probe),
-                         ["HLE_PRIVATE_STRINGS_PATH", "s_ud_path"])
+                         ["HLE_PRIVATE_STRINGS_PATH", "s_ud_path",
+                          # hle-io-seek: the probe-owned ms0: file, the same file once more on
+                          # its setup failure, and the file its RDONLY|CREAT cell may create.
+                          "HLE_IS_FILE", "HLE_IS_FILE", "HLE_IS_MISSING"])
         issues = (self.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
         self.assertNotRegex(issues, r"\bsceIoRemove\s*\(")
 

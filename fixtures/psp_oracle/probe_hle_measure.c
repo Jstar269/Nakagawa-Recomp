@@ -3517,7 +3517,7 @@ static void hle_is_flash(void)
     hle_step("io-seek-flash-open");
     const SceUID fd = sceIoOpen(HLE_IS_FLASH, PSP_O_RDONLY, 0);
     if (fd < 0) {
-        static const char *const rows[10] = {
+        static const char *const flash_rows[10] = {
             "io-seek-flash-s64-set-neg1", "io-seek-flash-s64-set-past",
             "io-seek-flash-s64-end-plus16", "io-seek-flash-s64-end-minus-size1",
             "io-seek-flash-s64-set-2p32", "io-seek-flash-s64-set-ffffffff",
@@ -3525,7 +3525,7 @@ static void hle_is_flash(void)
             "io-seek-flash-s32-end-plus16", "io-seek-flash-s32-end-minus-size1",
         };
         hle_is_skip("io-seek-flash-open", 3u, (uint32_t)fd);
-        for (unsigned i = 0; i < 10u; i++) hle_is_skip(rows[i], 5u, (uint32_t)fd);
+        for (unsigned i = 0; i < 10u; i++) hle_is_skip(flash_rows[i], 5u, (uint32_t)fd);
         hle_is_skip("io-seek-flash-close", 1u, (uint32_t)fd);
         return;
     }
@@ -3614,10 +3614,10 @@ static void hle_is_ms(void)
     uint8_t pattern[HLE_IS_FILE_SIZE];
     for (unsigned i = 0; i < HLE_IS_FILE_SIZE; i++) pattern[i] = (uint8_t)(0x40u + i);
 
+    /* If the directory exists it is not the probe's, so nothing below may touch it. */
     hle_step("io-seek-ms-setup");
     const SceUID pre = sceIoDopen(HLE_IS_DIR);
     if (pre >= 0) {
-        /* The directory exists: it is not the probe's, so nothing below may touch it. */
         (void)sceIoDclose(pre);
         hle_is_skip("io-seek-ms-setup", 4u, (uint32_t)pre);
         hle_is_ms_skip_rest((uint32_t)pre);
@@ -3636,6 +3636,7 @@ static void hle_is_ms(void)
     w[3] = (uint32_t)wrote;
     hle_record("io-seek-ms-setup", "PASS", (uint32_t)fd, w, 4u);
     if (fd < 0 || wrote != (int)HLE_IS_FILE_SIZE) {
+        hle_step("io-seek-ms-setup-abort");
         (void)sceIoRemove(HLE_IS_FILE);
         (void)sceIoRmdir(HLE_IS_DIR);
         hle_is_ms_skip_rest((uint32_t)fd);
@@ -3699,6 +3700,7 @@ static void hle_is_ms(void)
     }
     SceIoStat st;
     memset(&st, 0, sizeof(st));
+    hle_step("io-seek-ms-write-rdonly-creat-stat");
     w[3] = (uint32_t)sceIoGetstat(HLE_IS_MISSING, &st);
     hle_record("io-seek-ms-write-rdonly-creat", "PASS", (uint32_t)fd, w, 4u);
 
@@ -3706,6 +3708,7 @@ static void hle_is_ms(void)
     w[0] = (uint32_t)sceIoRemove(HLE_IS_FILE);
     w[1] = (uint32_t)sceIoRemove(HLE_IS_MISSING);
     w[2] = (uint32_t)sceIoRmdir(HLE_IS_DIR);
+    hle_step("io-seek-ms-cleanup-check");
     const SceUID post = sceIoDopen(HLE_IS_DIR);
     w[3] = (uint32_t)post;
     if (post >= 0) (void)sceIoDclose(post);
@@ -3717,7 +3720,7 @@ static void hle_is_ms(void)
    SEEK_CUR 0 (low, high). */
 static void hle_is_umd(void)
 {
-    static const char *const rows[3] = {
+    static const char *const umd_rows[3] = {
         "io-seek-umd-ioctl-neg1", "io-seek-umd-ioctl-size", "io-seek-umd-ioctl-size1",
     };
     uint32_t w[8];
@@ -3727,7 +3730,7 @@ static void hle_is_umd(void)
     if (fd >= 0) size = sceIoLseek(fd, 0, PSP_SEEK_END);
     if (fd < 0 || size <= 0) {
         hle_is_skip("io-seek-umd-open", 2u, (uint32_t)fd);
-        for (unsigned i = 0; i < 3u; i++) hle_is_skip(rows[i], 6u, (uint32_t)fd);
+        for (unsigned i = 0; i < 3u; i++) hle_is_skip(umd_rows[i], 6u, (uint32_t)fd);
         if (fd >= 0) (void)sceIoClose(fd);
         hle_is_skip("io-seek-umd-close", 1u, (uint32_t)fd);
         return;
@@ -3737,7 +3740,7 @@ static void hle_is_umd(void)
     hle_record("io-seek-umd-open", "PASS", (uint32_t)fd, w, 2u);
     const uint64_t targets[3] = {0xffffffffffffffffull, (uint64_t)size, (uint64_t)size + 1u};
     for (unsigned i = 0; i < 3u; i++) {
-        hle_step(rows[i]);
+        hle_step(umd_rows[i]);
         (void)sceIoLseek(fd, HLE_IS_PRE, PSP_SEEK_SET);
         w[0] = (uint32_t)hle_is_ioctl_seek(fd, targets[i]);
         s_hle_is_out[0] = HLE_SENTINEL;
@@ -3746,7 +3749,7 @@ static void hle_is_umd(void)
         w[2] = s_hle_is_out[0];
         w[3] = s_hle_is_out[1];
         hle_is_pair(&w[4], sceIoLseek(fd, 0, PSP_SEEK_CUR));
-        hle_record(rows[i], "PASS", w[0], w, 6u);
+        hle_record(umd_rows[i], "PASS", w[0], w, 6u);
     }
     hle_step("io-seek-umd-close");
     w[0] = (uint32_t)sceIoClose(fd);
