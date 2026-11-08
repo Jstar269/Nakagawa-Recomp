@@ -186,7 +186,7 @@ file and `NK_ANDROID_TEST_DIR`, a folder under `/data/local/tmp`:
 
 ```bash
 cmake -S . -B build/android-arm64-ctest -G Ninja \
-  -DCMAKE_MAKE_PROGRAM=$ANDROID_HOME/cmake/4.1.2/bin/ninja \
+  -DCMAKE_MAKE_PROGRAM=$ANDROID_HOME/cmake/4.1.2/bin/ninja.exe \
   -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/30.0.16248370/build/cmake/android.toolchain.cmake \
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DBUILD_PLAYER=OFF \
   -DNK_ANDROID_TEST_DIR=/data/local/tmp/<folder>
@@ -195,20 +195,23 @@ ANDROID_SERIAL=<serial> ctest --test-dir build/android-arm64-ctest --output-on-f
 ```
 
 The NDK, CMake and minimum API are the ones the Gradle build pins
-([Prerequisites](#prerequisites)). With `NK_ANDROID_TEST_DIR` set, CMake uses
+([Prerequisites](#prerequisites)); on a Linux host the SDK's Ninja is `bin/ninja`. With
+`NK_ANDROID_TEST_DIR` set, CMake uses
 `tools/android_test_runner.py` as its cross-compiling emulator. A first setup test copies the
 repository's tracked files to `<dir>/src`. Then each test executable is pushed to `<dir>/bin` and
 run from `<dir>/work` or `<dir>/src`, whichever matches its CTest working directory, so every
 PASS, FAIL and SKIP (exit 77) is the device's own exit status. adb comes from `PATH` or `NK_ADB`,
-and `ANDROID_SERIAL` picks the device. The tool writes only under `NK_ANDROID_TEST_DIR`; it needs
-USB debugging and no root. In Git Bash, set `MSYS_NO_PATHCONV=1` first, or the shell rewrites
+and `ANDROID_SERIAL` picks the device. Each test runs with `TMPDIR` set to `<dir>/tmp`, so the
+tests' temporary folders are in the device folder too, and the next run's setup test empties it.
+The tool writes only under `NK_ANDROID_TEST_DIR`; it needs USB debugging and no root. In Git Bash, set `MSYS_NO_PATHCONV=1` first, or the shell rewrites
 the device path into a Windows path, which the configure step refuses.
 
 Tests that start a child process through the desktop spawn route cannot run from `adb shell`.
 On Android a title starts in its own process through `TitleActivity`, and a program started from
 `adb shell` has no Java VM. Those subtests report SKIP with the reason, and the spawn call is
-checked to fail closed. The two package-build tests fail there: building a package on the
-device is not supported ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
+checked to fail closed. Two tests fail there, so `ctest` exits non-zero on every device run:
+`package_builder_test`, and the package-rebuild subtest of `player_state_test`. Both build a
+package on the device, which Android does not support ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
 
 ## Storage
 

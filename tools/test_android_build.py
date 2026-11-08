@@ -202,7 +202,20 @@ class AndroidDeviceTestRunnerTests(unittest.TestCase):
         self.assertEqual(str(self.paths.map(str(self.source / "assets" / "fonts"))),
                          f"{DEVICE}/src/assets/fonts")
         self.assertIsNone(self.paths.map(str(self.tmp / "elsewhere")))
+        self.assertIsNone(self.paths.map(str(self.tmp / "src-other" / "a")))
         self.assertEqual(self.paths.map_value("--check"), "--check")
+
+    def test_the_part_below_a_tree_keeps_its_case(self) -> None:
+        # The device's file system is case-sensitive; the files are synced under their real names.
+        font = self.source / "assets" / "fonts" / "UI" / "NotoSans-Regular.ttf"
+        self.assertEqual(str(self.paths.map(str(font))),
+                         f"{DEVICE}/src/assets/fonts/UI/NotoSans-Regular.ttf")
+        self.assertEqual(self.paths.map_value(str(self.binary / "build" / "Out.bin")),
+                         f"{DEVICE}/work/build/Out.bin")
+        if os.name == "nt":
+            # Windows paths are case-insensitive: a root spelled in another case is still the tree.
+            self.assertEqual(str(self.paths.map(os.path.join(str(self.source).upper(), "assets", "Fonts"))),
+                             f"{DEVICE}/src/assets/Fonts")
 
     def test_remote_script_maps_cwd_args_and_test_environment(self) -> None:
         env = {"NK_TEST_SCRATCH_DIR": str(self.binary / "build"), "SR_GESTAT": "1",
@@ -212,7 +225,7 @@ class AndroidDeviceTestRunnerTests(unittest.TestCase):
         self.assertEqual(
             script,
             f"mkdir -p {DEVICE}/src && cd {DEVICE}/src && "
-            f"env NK_TEST_SCRATCH_DIR={DEVICE}/work/build SR_GESTAT=1 "
+            f"env TMPDIR={DEVICE}/tmp NK_TEST_SCRATCH_DIR={DEVICE}/work/build SR_GESTAT=1 "
             f"{DEVICE}/bin/test_x --input '{DEVICE}/src/fixtures/a b'")
 
     def test_a_working_directory_outside_both_trees_is_refused(self) -> None:
@@ -260,6 +273,12 @@ class AndroidDeviceTestRunnerTests(unittest.TestCase):
         self.assertIn("target_compile_options(${nk_target} PRIVATE -UNDEBUG)", cmake)
         for test in ("sr_coro_test", "fp_convert_test", "ge_float24_test", "ge_raster_ref_test"):
             self.assertIn(f"add_test(NAME {test} ", cmake)
+        # src/rt/sr_coro.c does not build on macOS (ELF-only assembly, no _XOPEN_SOURCE for
+        # Apple's ucontext), so neither coroutine target may be defined there.
+        self.assertRegex(cmake, r"if\(NOT APPLE\)\n\s*add_executable\(test_sr_coro ")
+        self.assertRegex(cmake, r"if\(NOT WIN32 AND NOT ANDROID AND NOT APPLE\n"
+                                r"\s*AND CMAKE_SYSTEM_PROCESSOR [^\n]*\n"
+                                r"(?:\s*#.*\n)*\s*add_executable\(test_sr_coro_asm ")
 
 
 if __name__ == "__main__":

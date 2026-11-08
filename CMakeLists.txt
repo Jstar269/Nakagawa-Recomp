@@ -648,32 +648,41 @@ else()
 endif()
 
 # Host-neutral runtime selftests: the Makefile's coro-selftest, coro-selftest-asm,
-# fp-convert-selftest, ge-float24-selftest and ge-raster-ref-selftest, from the same sources.
-# They need no SDL and no game input, so a cross build runs them on its target too: on Android
-# the coroutine test exercises the stack-switch backend bionic needs and the FP test the AArch64
-# FPCR window, on the device's own CPU.
-add_executable(test_sr_coro tests/native/sr_coro_selftest.c src/rt/sr_coro.c)
-target_include_directories(test_sr_coro PRIVATE src/rt src/core)
-target_compile_options(test_sr_coro PRIVATE -fno-strict-aliasing)
-if(WIN32)
-    target_link_libraries(test_sr_coro PRIVATE psapi)
-else()
-    target_link_libraries(test_sr_coro PRIVATE m)
+# fp-convert-selftest, ge-float24-selftest and ge-raster-ref-selftest. The sources are the same;
+# the flags are CMake's, not the Makefile's (no -O2, -Wpedantic or runtime CFLAGS), so these
+# results do not stand in for the Make gate. They need no SDL and no game input, so a cross build
+# runs them on its target too: on Android the coroutine test exercises the stack-switch backend
+# bionic needs and the FP test the AArch64 FPCR window, on the device's own CPU.
+set(NK_RUNTIME_SELFTEST_C_OPTIONS $<$<NOT:$<C_COMPILER_ID:MSVC>>:-fno-strict-aliasing>)
+# src/rt/sr_coro.c builds on Windows (fibers), Linux (ucontext) and Android (stack switch), not
+# on macOS: its stack-switch assembly is ELF-only, and its ucontext route lacks the
+# _XOPEN_SOURCE that Apple's <ucontext.h> requires. The macOS port is #329.
+if(NOT APPLE)
+    add_executable(test_sr_coro tests/native/sr_coro_selftest.c src/rt/sr_coro.c)
+    target_include_directories(test_sr_coro PRIVATE src/rt src/core)
+    target_compile_options(test_sr_coro PRIVATE ${NK_RUNTIME_SELFTEST_C_OPTIONS})
+    if(WIN32)
+        target_link_libraries(test_sr_coro PRIVATE psapi)
+    else()
+        target_link_libraries(test_sr_coro PRIVATE m)
+    endif()
+    add_test(NAME sr_coro_test COMMAND test_sr_coro)
 endif()
-add_test(NAME sr_coro_test COMMAND test_sr_coro)
-if(NOT WIN32 AND NOT ANDROID AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
-    # Android builds the stack-switch backend by default; another POSIX host selects it here.
+if(NOT WIN32 AND NOT ANDROID AND NOT APPLE
+        AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
+    # x86-64 and AArch64 System V (ELF) hosts, as in mk/selftests.mk. Android builds the
+    # stack-switch backend by default; another such host selects it here.
     add_executable(test_sr_coro_asm tests/native/sr_coro_selftest.c src/rt/sr_coro.c)
     target_include_directories(test_sr_coro_asm PRIVATE src/rt src/core)
     target_compile_definitions(test_sr_coro_asm PRIVATE SR_CORO_BACKEND_ASM)
-    target_compile_options(test_sr_coro_asm PRIVATE -fno-strict-aliasing)
+    target_compile_options(test_sr_coro_asm PRIVATE ${NK_RUNTIME_SELFTEST_C_OPTIONS})
     target_link_libraries(test_sr_coro_asm PRIVATE m)
     add_test(NAME sr_coro_asm_test COMMAND test_sr_coro_asm)
 endif()
 
 add_executable(test_fp_convert tests/native/fp_convert_selftest.c)
 target_include_directories(test_fp_convert PRIVATE src/rt src/core)
-target_compile_options(test_fp_convert PRIVATE -fno-strict-aliasing)
+target_compile_options(test_fp_convert PRIVATE ${NK_RUNTIME_SELFTEST_C_OPTIONS})
 add_test(NAME fp_convert_test COMMAND test_fp_convert)
 
 add_executable(test_ge_float24 tests/native/ge_float24_selftest.c src/rt/ge_float24.c)

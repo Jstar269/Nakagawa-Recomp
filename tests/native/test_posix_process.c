@@ -97,7 +97,7 @@ static int android_main(void) {
     assert(!none.is_active && none.native_handle == NULL && none.process_id == 0);
     file_size_subtest();
     printf("SKIP posix_process_test subtests 1-7 (exit 77): Android starts titles through "
-           "TitleActivity, not fork/exec; they run on Linux and macOS\n");
+           "TitleActivity, not fork/exec; they run on Linux\n");
     return 77;
 }
 #endif

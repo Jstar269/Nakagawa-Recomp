@@ -14,7 +14,8 @@ Two subcommands:
 
 ``sync``
     Copies the repository's tracked files (the same set ``git ls-files`` lists, read from the
-    working tree) to ``<device dir>/src`` and creates ``<device dir>/work/build``. Tests whose
+    working tree) to ``<device dir>/src`` and creates ``<device dir>/work/build`` and an empty
+    ``<device dir>/tmp``. Tests whose
     CTest working directory is the source tree read their source-owned inputs from there. CTest
     runs it first, as the setup fixture of every test.
 
@@ -24,6 +25,10 @@ Two subcommands:
     ``<device dir>/src``. Arguments and ``NK_*``/``SR_*`` environment values that name a path in
     either tree are mapped the same way. A working directory outside both trees is refused, so
     a test never runs somewhere its inputs are not.
+
+Every test runs with ``TMPDIR`` set to ``<device dir>/tmp``, so the temporary folders the tests
+make (``native_test_create_root``) are inside the device directory as well; one that a failed
+test leaves behind is removed by the next ``sync``.
 
 adb comes from ``NK_ADB`` or ``PATH``; pick the device with adb's own ``ANDROID_SERIAL``. The
 device directory must be under ``/data/local/tmp``, the shell user's scratch area: nothing else
@@ -69,31 +74,33 @@ def checked_device_dir(value: str) -> PurePosixPath:
     return path
 
 
-def _norm(path: str | os.PathLike[str]) -> str:
-    return os.path.normcase(os.path.abspath(os.fspath(path)))
-
-
 class PathMap:
     """Maps host paths in the binary and source trees to their device copies.
 
     The binary tree is checked first because a build directory may sit inside the source tree.
+    Whether a path is in a tree follows the host's rule (case-insensitive on Windows), but the
+    part below the tree root keeps the case it was given: the device's file system is
+    case-sensitive and holds the files under their real names.
     """
 
     def __init__(self, device_dir: PurePosixPath, source_root: str, binary_root: str) -> None:
         self.roots = [
-            (_norm(binary_root), device_dir / "work"),
-            (_norm(source_root), device_dir / "src"),
+            (os.path.abspath(binary_root), device_dir / "work"),
+            (os.path.abspath(source_root), device_dir / "src"),
         ]
 
     def map(self, host_path: str) -> PurePosixPath | None:
-        candidate = _norm(host_path)
+        candidate = os.path.abspath(host_path)
         for root, device_root in self.roots:
-            if candidate == root:
-                return device_root
-            prefix = root.rstrip("\\/") + os.sep
-            if candidate.startswith(prefix):
-                rel = candidate[len(prefix):].replace(os.sep, "/")
-                return device_root / rel
+            try:
+                common = os.path.commonpath([root, candidate])
+            except ValueError:  # another drive
+                continue
+            if os.path.normcase(common) != os.path.normcase(root):
+                continue
+            # relpath compares components by the host's rule and keeps the candidate's own.
+            # The tree root itself is "." and has no parts.
+            return device_root.joinpath(*Path(os.path.relpath(candidate, root)).parts)
         return None
 
     def map_value(self, value: str) -> str:
@@ -148,9 +155,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
         local_tar.write_bytes(payload)
         adb_checked(adb, "push", str(local_tar), str(remote_tar))
     script = " && ".join([
-        f"rm -rf {shlex.quote(str(src))}",
+        f"rm -rf {shlex.quote(str(src))} {shlex.quote(str(device_dir / 'tmp'))}",
         f"mkdir -p {shlex.quote(str(src))} {shlex.quote(str(device_dir / 'work' / 'build'))}"
-        f" {shlex.quote(str(device_dir / 'bin'))}",
+        f" {shlex.quote(str(device_dir / 'bin'))} {shlex.quote(str(device_dir / 'tmp'))}",
         f"tar -xf {shlex.quote(str(remote_tar))} -C {shlex.quote(str(src))}",
         f"rm -f {shlex.quote(str(remote_tar))}",
     ])
@@ -161,8 +168,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 0
 
 
-def device_environment(path_map: PathMap, environ: dict[str, str]) -> list[str]:
-    assignments = []
+def device_environment(device_dir: PurePosixPath, path_map: PathMap,
+                       environ: dict[str, str]) -> list[str]:
+    # TMPDIR always comes from the device folder, never from the host.
+    assignments = [f"TMPDIR={shlex.quote(str(device_dir / 'tmp'))}"]
     for key in sorted(environ):
         if key in HOST_ONLY_ENV or not key.startswith(ENV_PREFIXES):
             continue
@@ -177,8 +186,8 @@ def remote_run_script(device_dir: PurePosixPath, path_map: PathMap, cwd: str, ex
         raise RunnerError(f"working directory {cwd} is outside the source and binary trees")
     exe = device_dir / "bin" / exe_name
     command = [str(exe), *(path_map.map_value(arg) for arg in argv)]
-    env = device_environment(path_map, environ)
-    run = " ".join([*(["env", *env] if env else []), *map(shlex.quote, command)])
+    env = device_environment(device_dir, path_map, environ)
+    run = " ".join(["env", *env, *map(shlex.quote, command)])
     return (f"mkdir -p {shlex.quote(str(device_cwd))} && cd {shlex.quote(str(device_cwd))}"
             f" && {run}")
 
