@@ -35,7 +35,7 @@ Guest middleware and title acceptance remain partial or open.
 | :--- | :--- | :--- | :--- | :--- |
 | **Main Executable** | A user-supplied decrypted MIPS ELF (`EBOOT.elf`) or the automatically selected plain `BOOT.BIN` fallback | The analyzer consumes MIPS ELF32 only; an encrypted executable without a decrypted copy fails closed as `ENCRYPTED_EXECUTABLE` | The player decrypts it from the user's disc with built-in tables ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)); plain and user-decrypted inputs are accepted | **USER-SUPPLIED DECRYPTED INPUT; TITLE EXECUTION AND ACCEPTANCE REMAIN TITLE-SPECIFIC** |
 | **Encrypted PRXs** | User-decrypted copies of the modules selected by the player or required by the title manifest | An encrypted module without a plain copy fails closed as `ENCRYPTED_MODULE`; guest translation/startup and middleware support remain separate boundaries | The player decrypts them from the user's disc with built-in tables ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)); genuine guest middleware execution remains incomplete | **USER-SUPPLIED DECRYPTED INPUT; GUEST MIDDLEWARE EXECUTION PARTIAL** |
-| **PSP System Fonts** | Dumped firmware PGFs (`jpn0.pgf`, `ltn0.pgf`) from `flash0:/font/` | Sony PGF format has proprietary metrics; fonts reside in firmware, not on UMD | Honest prerequisite: require the user's own console fonts for authentic rendering; optional synthetic font provider for developer convenience | **HONEST_PREREQUISITE_REQUIRED** |
+| **PSP System Fonts** | Dumped firmware PGFs (`jpn0.pgf`, `ltn0.pgf`) from `flash0:/font/` | Sony PGF format has proprietary metrics; fonts reside in firmware, not on UMD | Honest prerequisite: the user's own console fonts are needed for authentic rendering (Settings > PSP fonts imports them); without them the project's open stand-in fonts are used, and the player says so | **HONEST_PREREQUISITE_REQUIRED** |
 | **Video Middleware** | Host-HLE `scePsmfPlayer*` driving it over a bounded PSMF producer (see `docs/LLE_FIDELITY_ARCHITECTURE.md` §3.4) | The host-HLE player works, but the genuine `psmf.prx` / `libpsmfplayer.prx` middleware is not executing yet | Execute original guest `psmf.prx` & `libpsmfplayer.prx`; bridge only the lowest hardware codec boundary (`sceMpeg`) to host decoders | **PARTIAL — CODEC BRIDGE AND PRODUCER LANDED; GUEST MIDDLEWARE EXECUTION OPEN** |
 | **Game Assets** | Loose `xbdata_extracted/` (~56k files) or the `.xb` archives | Host filesystem previously expected flat directories | Transparent in-engine block VFS reading `.xb` archive sectors directly, preserving all PSP I/O semantics | **LANDED — READ-ONLY ARCHIVE-BACKED VFS (#298); LOOSE LAYOUT STILL ACCEPTED** |
 | **Title Manifest** | The title-specific manifest; HST's ships in `assets/titles/` | Other titles have none yet | Generic title-catalog parameterization without hardcoded patches | **GENERIC SUPPORT EXISTS; HST MANIFEST PUBLIC; OTHER TITLES NOT RUN** |
@@ -50,7 +50,7 @@ are not evidence that the paths have landed in the current player.
 ### 3.1 Retail EBOOT and PRX Cryptography
 
 * **Input boundary:** `tools/codegen.py` consumes supported MIPS ELF inputs and fails closed on encrypted headers. The player decrypts an encrypted executable or module from the user's disc, refuses one it can't decrypt by name, and accepts decrypted files from the user's own copy ([`docs/SETUP.md`](SETUP.md#encrypted-executables)).
-* **Status:** UMD disc images, and PSN releases of UMD games (an `EBOOT.PBP` holding an NPUMDIMG disc image, converted once into its ISO), are decrypted locally with built-in tables; other PSN (NPDRM) packages are not yet ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)). PGD-protected game data, guest middleware startup, and any specific title's compatibility remain separate boundaries.
+* **Status:** UMD disc images, and PSN releases of UMD games (an `EBOOT.PBP` holding an NPUMDIMG disc image, converted once into its ISO), are decrypted locally with built-in tables; other PSN (NPDRM) packages are not ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)). PGD-protected game data, guest middleware startup, and any specific title's compatibility remain separate boundaries.
 
 ---
 
@@ -74,7 +74,7 @@ are not evidence that the paths have landed in the current player.
   * The game calls `libfont.prx` to load PGF fonts.
   * The system fonts (`jpn0.pgf`, `ltn0.pgf`) reside in PSP firmware `flash0:/font/`, not on the game disc.
   * **Honest Prerequisite Policy:** We state truthfully that 100% authentic typography requires the PSP's own fonts, copied by the user from their own console's `flash0:/font/`.
-  * Nakagawa may offer a clearly labeled, non-authentic fallback font provider for developers without firmware files, but it will never be masqueraded as an authentic LLE replacement.
+  * Without the PSP's fonts, Nakagawa uses its own open stand-in fonts and says they are not the PSP's; it never presents them as an authentic LLE replacement.
 
 ---
 
@@ -82,12 +82,13 @@ are not evidence that the paths have landed in the current player.
 
 * **Preserving Original Middleware:** `scePsmf_library.prx` and `scePsmfP_library.prx` contain the authentic demuxing, timestamp synchronization, and ring-buffer management logic.
 * **The Proper Hardware Boundary:**
-  * Guest PSMF code delegates low-level bitstream decoding to `sceMpeg` / `sceVideocodec`.
-  * On real hardware, this is processed by the Media Engine (ME).
-  * In Nakagawa, the HLE boundary is established at `sceMpeg`:
-    * Guest PRXs demux the streams and manage buffers.
-    * Nakagawa takes the elementary AVC/H.264 video NAL units from `sceMpeg` and dispatches them to host hardware decoders (Vulkan Video / Media Foundation).
-    * Audio NAL units (ATRAC3plus) are decoded via standalone host audio routines and written back into guest memory buffers.
+  * Guest PSMF code calls `sceMpeg`; `sceMpeg` (the title's `mpeg.prx`) delegates bitstream decoding to `sceVideocodec`, `sceMpegbase` and `sceAudiocodec`.
+  * On real hardware, this is processed by the Media Engine (ME), whose code is firmware.
+  * In Nakagawa, the HLE boundary is that Media Engine floor (`src/rt/hle_videocodec.c`, #286):
+    * Guest PRXs, the title's `mpeg.prx` included, demux the streams and manage buffers.
+    * `sceVideocodecDecode` hands each AVC/H.264 access unit to the host H.264 seam, and `sceMpegBaseCscAvc` converts the picture into the guest buffer.
+    * ATRAC3plus frames are decoded through `sceAudiocodecDecode` by the project's ATRAC3plus decoder and written back into guest memory buffers.
+    * The host `sceMpeg` handlers serve only titles without their own `mpeg.prx` and the synthetic fixtures.
 
 ---
 
