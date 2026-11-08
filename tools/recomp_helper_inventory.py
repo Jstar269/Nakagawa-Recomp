@@ -482,7 +482,7 @@ def render_markdown(inv: dict) -> str:
         "",
         "<!-- markdownlint-disable MD013 -->",
         "",
-        "Tracking issue #346 (independence: replace inherited CPU runtime semantics). One row per",
+        "Written for issue #346 (independence: replace inherited CPU runtime semantics; closed). One row per",
         "helper of `src/rt/recomp.c` and `src/rt/recomp.h`: where it is defined, whether `recomp.h`",
         "declares it, how generated code and the runtime reach it, and the provenance class of its",
         "defining file. It is a text inventory, not a call graph, a semantic review or a provenance",
