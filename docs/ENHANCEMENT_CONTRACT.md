@@ -855,7 +855,8 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   dither, the common 4444 case, is clean), a glow with a 1.25-texel falloff (1.02 to 1.18) by 64 to 69, and a soft shape
   sharing a rectangle with text (an H and a glow, 1.02 to 1.12) by up to 100. A crisp anti-aliased box or disk at a
   sub-texel offset also runs back at its corners (19, 49, 81 and 159 of 255 for a box at factors 2, 3, 4 and 6), in
-  the edge rebuild and not only in soft art. The feature is not part of the settings pages or the launch line.
+  the edge rebuild and not only in soft art. The feature is not part of the settings pages or the launch line. It is off unless `SR_GLYPHS=on` in an Ace
+  run; turning it on by default or putting it in a preset needs the owner's decision, to which these costs apply.
 - **Tests.** `glyph-recon-selftest` checks the setting and its Ace gate, every named refusal, the classifier, and the
   rebuild at every factor for 4444, 8888, indexed 4-bit and indexed 8-bit pages (block means, colour, repeatability,
   fewer soft pixels than a bilinear enlargement, no dependence on neighbouring cells), the downsample check

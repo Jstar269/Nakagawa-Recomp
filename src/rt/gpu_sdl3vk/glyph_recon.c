@@ -370,8 +370,9 @@ NkGlyphVerdict nk_glyph_rebuild(const uint32_t *page, int pw, int ph, int x0, in
         return NK_GLYPH_REFUSE_MEMORY;
     }
     const float slope = (float)factor;
-    /* Soft art is not text: a rectangle whose edges are ramps (soft_ratio) is rebuilt all smooth, the bicubic field
-     * shifted to keep each texel's coverage, which runs the way the field does. */
+    /* A rectangle whose soft_ratio is above the threshold is taken for soft art and rebuilt all smooth, the bicubic
+     * field shifted to keep each texel's coverage. That includes some small, dense or filtered text; and soft art at or
+     * under the threshold is rebuilt as text and can rib (section 10.13, Limits). */
     const int ink = rect_ink(page, pw, x0, y0, w, h);
 #ifdef NK_GLYPH_MUTANT_NO_SOFT_RECT
     const int soft = 0;   /* glyph-recon-mutant: soft art is rebuilt as text */
