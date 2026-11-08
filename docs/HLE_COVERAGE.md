@@ -26,11 +26,11 @@ Classes are listed strongest first. A path takes the first class whose source na
 | `hardware-measured` | 64 | 26 |
 | `ppsspp-derived` | 125 | 89 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 356 | 224 |
-| `unverified` | 162 | 20 |
-| total | 707 | 359 |
+| `synthetic` | 356 | 226 |
+| `unverified` | 162 | 22 |
+| total | 707 | 363 |
 
-The VFPU census also lists 310 forms the runtime refuses at the
+The VFPU census also lists 308 forms the runtime refuses at the
 issue #326 boundary (`unsupported-encoding` and `supported-opcode-form-unmodeled`). No path executes
 them, so they carry no class; `python tools/vfpu_coverage_report.py` lists them.
 
@@ -1055,8 +1055,10 @@ a title that translates none has generated code unchanged.
 | `vfpu-35-d4018100-e4c37f0fbf47` | `0x35` | `0xd401810f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
 | `vfpu-35-d4050100-55232218a9a5` | `0x35` | `0xd4050101` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
 | `vfpu-36-d8000000-460695424519` | `0x36` | `0xd8000000` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
+| `vfpu-36-d8018100-a59abdf93d57` | `0x36` | `0xd801810f` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
 | `vfpu-36-d8050100-311bbc14b1ed` | `0x36` | `0xd8050101` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
 | `vfpu-36-d8200000-21b49665cf78` | `0x36` | `0xd8200000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
+| `vfpu-36-d8218000-44bff127c0fe` | `0x36` | `0xd821800f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-36-d8258000-b04c26043d59` | `0x36` | `0xd8258081` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-37-dc000000-04aa804c6140` | `0x37` | `0xdc000000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-37-dd000000-fc234082344e` | `0x37` | `0xdd000000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
@@ -1138,7 +1140,9 @@ a title that translates none has generated code unchanged.
 | `vfpu-3d-f4018100-4ab6d9b8ecd6` | `0x3d` | `0xf401810f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
 | `vfpu-3d-f4050100-9398f112c7ca` | `0x3d` | `0xf4050101` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
 | `vfpu-3e-f8000000-eafd4b0b3fa0` | `0x3e` | `0xf8000000` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
+| `vfpu-3e-f8018100-bdb3647af048` | `0x3e` | `0xf801810f` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
 | `vfpu-3e-f8050100-e50967e96480` | `0x3e` | `0xf8050101` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
 | `vfpu-3e-f8200000-c7eee1612aba` | `0x3e` | `0xf8200000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
+| `vfpu-3e-f8218000-9dd390013655` | `0x3e` | `0xf821800f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-3e-f8258000-51b5a0cb59ca` | `0x3e` | `0xf8258081` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
 | `vfpu-3f-fc000000-2f62df9cdfc2` | `0x3f` | `0xfc000000` | - | `aot-direct` | `unverified` | no recorded evidence |

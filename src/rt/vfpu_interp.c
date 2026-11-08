@@ -307,11 +307,6 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         MEM_W32_PC(addr,s->vi[idx[0]],s->pc);return SR_VFPU_STATE;
     }
     if (op == 0x35 || op == 0x36 || op == 0x3d || op == 0x3e) {
-        /* Bit 1 of lv.q/sv.q is the base-register write-back flag ("wb"); for ulv.q/usv.q
-         * it selects the left or right half. Whether a PSP updates rs for the aligned
-         * forms, and to what, has no hardware cell (issue #326), so a wb word is refused
-         * before any lane, memory word or register changes. */
-        if ((op == 0x36 || op == 0x3e) && (w & 2u)) return SR_VFPU_OTHER;
         int vt=((w>>16)&0x1F)|((w&1)<<5),base=(w>>21)&0x1F;
         uint32_t addr=s->r[base]+(uint32_t)(int32_t)(int16_t)(w&0xFFFCu);
         uint8_t idx[4];vreg_idx(vt,4,idx);

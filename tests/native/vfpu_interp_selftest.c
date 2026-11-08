@@ -314,30 +314,43 @@ static int check_quad_memops(void) {
           MEM_R32(ARENA_END - 4u) == 0xCAFE0002u,
           "sv.q rejection leaves every earlier guest word unchanged");
 
-    /* 7b. Bit 1 of lv.q/sv.q is the base-register write-back flag. No PSP cell shows what
-     * it does to rs, so the word is refused with no register, lane or memory change
-     * (issue #326); the same word with the bit clear still runs. */
-    sr_mem_init();
-    setup_state(&s);
-    s.r[4] = 0x08003000u;
-    for (int i = 0; i < 4; i++) {
-        s.vi[i] = 0x0bad0000u + (uint32_t)i;
-        MEM_W32(0x08003000u + (uint32_t)i * 4u, 0xCAFE0000u + (uint32_t)i);
-    }
+    /* 7b. Bit 1 of an aligned lv.q/sv.q is the write-back flag. A PSP-3000 run (2026-11-08,
+     * issue #326, probe case vfpu-quad-wb, base $t2 = r10, 16-byte aligned) showed it does
+     * not change the base register in any form (offsets 0, +16, +32, -16; four stores in a
+     * row from one base did not drift) and that the access uses base + offset, as the plain
+     * word does. Both lanes must therefore treat bit 1 as inert for these two opcodes. */
     {
-        const CpuState wb_before = s;
-        CHECK(sr_vfpu_interp(&s, svq(4, 0, 16) | 2u) == SR_VFPU_OTHER,
-              "sv.q with the write-back bit set is refused");
-        CHECK(memcmp(&s, &wb_before, sizeof(s)) == 0 && MEM_R32(0x08003010u) != 0x0bad0000u,
-              "refused sv.q wb changes no register, lane or memory word");
-        for (int i = 0; i < 4; i++) MEM_W32(0x08003010u + (uint32_t)i * 4u, 0x5a5a0000u + (uint32_t)i);
-        fill_vi(&s, 0);
-        const CpuState wb_load = s;
-        CHECK(sr_vfpu_interp(&s, lvq(4, 0, 16) | 2u) == SR_VFPU_OTHER &&
-              memcmp(&s, &wb_load, sizeof(s)) == 0,
-              "lv.q with the write-back bit set is refused and changes no state");
-        CHECK(sr_vfpu_interp(&s, lvq(4, 0, 16)) == SR_VFPU_COMPUTE && s.vi[0] == 0x5a5a0000u,
-              "lv.q without the write-back bit still loads");
+        static const uint32_t offsets[4] = {0x0000u, 0x0010u, 0x0020u, 0xFFF0u};
+        const uint32_t base = 0x08004200u;
+        for (int k = 0; k < 4; k++) {
+            const uint32_t at = base + (uint32_t)(int32_t)(int16_t)offsets[k];
+            sr_mem_init();
+            setup_state(&s);
+            s.r[10] = base;
+            for (int i = 0; i < 4; i++) MEM_W32(at + (uint32_t)i * 4u, 0x5a5a0000u + (uint32_t)i);
+            fill_vi(&s, 0);
+            CHECK(sr_vfpu_interp(&s, lvq(10, 0, offsets[k]) | 2u) == SR_VFPU_COMPUTE,
+                  "lv.q with the write-back bit set loads");
+            CHECK(s.vi[0] == 0x5a5a0000u && s.vi[3] == 0x5a5a0003u && s.r[10] == base,
+                  "lv.q wb loads from base + offset and leaves the base register unchanged");
+            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + (uint32_t)i;
+            CHECK(sr_vfpu_interp(&s, svq(10, 0, offsets[k]) | 2u) == SR_VFPU_STATE,
+                  "sv.q with the write-back bit set stores");
+            CHECK(MEM_R32(at) == 0xc0de0000u && MEM_R32(at + 12u) == 0xc0de0003u && s.r[10] == base,
+                  "sv.q wb stores at base + offset and leaves the base register unchanged");
+        }
+        /* Four stores in a row from one base land in order and the base never drifts. */
+        sr_mem_init();
+        setup_state(&s);
+        s.r[10] = base;
+        for (int q = 0; q < 4; q++) {
+            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + ((uint32_t)q << 8) + (uint32_t)i;
+            CHECK(sr_vfpu_interp(&s, svq(10, 0, (uint32_t)q * 16u) | 2u) == SR_VFPU_STATE &&
+                  s.r[10] == base, "a run of sv.q wb from one base does not drift the base");
+        }
+        CHECK(MEM_R32(base) == 0xc0de0000u && MEM_R32(base + 16u) == 0xc0de0100u &&
+              MEM_R32(base + 32u) == 0xc0de0200u && MEM_R32(base + 60u) == 0xc0de0303u,
+              "a run of sv.q wb stores each quad at its own offset");
     }
 
     /* 8. Left/right merge forms preflight their exact sub-span. The sub-span

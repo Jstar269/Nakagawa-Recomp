@@ -292,22 +292,23 @@ int main(void) {{
         self.assertIn("s->r[4] + 0x00000000u",effect)
         self.assertNotIn("s->r[4] + 0x00000001u",effect)
 
-    def test_quad_write_back_flag_is_never_executed_inline(self):
-        # Bit 1 of lv.q/sv.q is the base-register write-back flag. No PSP cell shows what it
-        # does to rs (issue #326), so the word must not become an inline load or store that
-        # silently skips the write-back: it goes to sr_vfpu_interp, which refuses it and stops.
-        for op, inline in ((0x36, "MEM_R32("), (0x3E, "MEM_W32_PC(")):
-            plain = (op << 26) | (4 << 21) | (1 << 16) | 0x10
-            for lle_cpu in (False, True):
-                with self.subTest(op=hex(op), lle_cpu=lle_cpu):
-                    effect, _, _ = codegen.vfpu_effect(0x3000, plain, lle_cpu=lle_cpu)
-                    self.assertIn(inline, effect)
-                    with self.assertRaises(codegen.Unsupported):
-                        codegen.vfpu_effect(0x3000, plain | 2, lle_cpu=lle_cpu)
-                    line = codegen.normal_line(0x3000, plain | 2)
-                    self.assertIn("sr_vfpu_interp(s,", line)
-                    self.assertNotIn(inline, line)
-                    self.assertIn("sr_end(s, 0u, 0); return;", line)
+    def test_quad_write_back_flag_leaves_the_base_register_alone(self):
+        # PSP-3000 (2026-11-08, issue #326, probe case vfpu-quad-wb): bit 1 of an aligned
+        # lv.q/sv.q, the write-back flag, did not change the base register in any form
+        # (offsets 0, +16, +32, -16; four in a row from one base did not drift), and the
+        # access used base + offset. The generated code therefore must emit the same access
+        # as the plain word and never assign the base register.
+        for op, plain_word in ((0x36, 0xD9400000), (0x3E, 0xF9400000)):
+            for offset in (0x0000, 0x0010, 0x0020, 0xFFF0):
+                for lle_cpu in (False, True):
+                    with self.subTest(op=hex(op), offset=hex(offset), lle_cpu=lle_cpu):
+                        plain = plain_word | offset
+                        base, _, _ = codegen.vfpu_effect(0x3000, plain, lle_cpu=lle_cpu)
+                        wb, _, _ = codegen.vfpu_effect(0x3000, plain | 2, lle_cpu=lle_cpu)
+                        # The unaligned fallback names its own word; everything else is equal.
+                        self.assertEqual(wb.replace(f"{plain | 2:08x}", "W"), base.replace(f"{plain:08x}", "W"))
+                        self.assertNotRegex(wb, r"s->r\[\d+\]\s*=[^=]")
+                        self.assertIn("s->r[10] + ", wb)
 
     def test_vrot_overlap_recomputes_cosine_from_written_lane(self):
         # vt/op subfields select vrot; choose vd/vs in one matrix with scalar vs
