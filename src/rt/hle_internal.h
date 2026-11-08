@@ -1364,6 +1364,11 @@ uint32_t h_IoWrite(CpuState *s);
 uint32_t h_IoRead(CpuState *s);
 uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence, const char *api, uint32_t *position);
 uint32_t h_IoLseek32(CpuState *s);
+/* The volatile-memory lock handlers (hle_kernel_memory.c); hle_power.c registers their scePower
+ * aliases. */
+uint32_t h_VolatileMemLock(CpuState *s);
+uint32_t h_VolatileMemTryLock(CpuState *s);
+uint32_t h_VolatileMemUnlock(CpuState *s);
 uint32_t h_io_ioctl_args(uint32_t fd, uint32_t cmd, uint32_t in, uint32_t inlen, uint32_t out, uint32_t outlen);
 int io_memstick_capacity(uint32_t info[5]);
 uint32_t io_async_complete_fd(uint32_t fd);
@@ -1455,6 +1460,8 @@ void hle_register_ge_handlers(void);
 void hle_register_mp3_handlers(void);
 void hle_register_atrac_handlers(void);
 void hle_register_sas_handlers(void);
+void hle_register_videocodec_handlers(void);
+void hle_videocodec_guest_reset(void);
 void hle_register_utility_module_handlers(void);
 void hle_register_exit_game_handler(void);
 void hle_register_devkit_version_handler(void);
@@ -1509,7 +1516,6 @@ void hle_register_unregistered_import_utility(void);
 void hle_register_unregistered_import_network_1(void);
 void hle_register_unregistered_import_rtc(void);
 void hle_register_unregistered_import_network_2(void);
-void hle_register_unregistered_import_audio_codec(void);
 void hle_register_wait_conformance_kernel_thread(void);
 void hle_register_wait_conformance_display(void);
 void hle_register_wait_conformance_kernel_sync_1(void);

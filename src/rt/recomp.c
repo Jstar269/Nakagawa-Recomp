@@ -2149,8 +2149,11 @@ static int dispatch_run_interp(
     const SrGuestInterpCallBoundary *call_boundary,
     int drain) {
     SrGuestInterpFault fault;
+    /* Without a call boundary, a segment drain's run is a TAIL step (dispatch_tail_step): it
+     * leaves its handoff to the drain it runs in, as a native body does (#1935). */
     SrGuestInterpResult interp_result = call_boundary
         ? sr_guest_interp_run_with_boundary(s, target, call_boundary, &fault)
+        : drain == SR_DRAIN_SEGMENT ? sr_guest_interp_run_tail_step(s, target, &fault)
         : sr_guest_interp_run(s, target, &fault);
     if (interp_result == SR_GUEST_INTERP_AOT_HANDOFF ||
         interp_result == SR_GUEST_INTERP_CALL_RETURN) {
@@ -2642,6 +2645,12 @@ static void dispatch_call_aot(RecompFn fn, CpuState *s, uint32_t target,
         if (drain == SR_DRAIN_CHAIN) sr_tail_drain(s);
         else sr_tail_drain_segment(s);
     }
+    /* A chain that ended out of its frame (sr_tail_note_exit) tells the enclosing drain of a
+     * computed step, and an interpreted caller's continuation, which void their restores at
+     * or below its release's bound. A whole chain's other callers go on in their own frames
+     * (#1935). */
+    if (drain == SR_DRAIN_CHAIN && !(call_boundary != NULL && call_boundary->continuation))
+        sr_tail_transfer.released = 0u;
     if (owns_return_boundary) (void)sr_aot_return_boundary_end(s);
     sr_exec_leave(exec_previous);
     if (sr_perf_enabled) sr_perf_aot_end();
@@ -2980,6 +2989,11 @@ void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc) {
     }
 }
 
+/* Set only while the COSIM guest lane runs (src/rt/domain_mode.c, #2148): an import it
+ * reaches is refused with SR_FLOW_FATAL, and the two call boundaries below return through
+ * that refusal to the lane's entry instead of ending the run. 0 everywhere else. */
+volatile int sr_dispatch_unwind_requested;
+
 /* A dispatch_call frame is otherwise a wall to a guest return past it: its caller runs its
  * own continuation whatever the callee did. A generated call site honours the end check
  * instead, as at a direct call, so the call gets the same boundary. Under it, native code
@@ -2996,6 +3010,11 @@ int dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc) {
 #endif
     if (refused) return 1;
     if (dispatch_call_try_at(s, target, resume_pc, 1u) < 0) {
+        if (sr_dispatch_unwind_requested && s->flow_kind == SR_FLOW_FATAL) {
+            /* The COSIM guest lane refused an import: unwind as a direct call does. */
+            (void)sr_aot_return_boundary_end(s);
+            return 1;
+        }
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, target, resume_pc, 0u);
         fflush(stderr);
         exit(1);
@@ -3013,6 +3032,9 @@ int dispatch_call_continue(CpuState *s, uint32_t target, const SrGuestInterpCall
         .resume_pc = call->resume_pc, .site_boundary = call->site_boundary,
         .continuation = 1u };
     if (dispatch_try_with_boundary(s, target, &rest, SR_DRAIN_CHAIN) < 0) {
+        /* The COSIM guest lane refused an import: the interpreter returns with the
+         * fatal flow pending, and its dispatch reports it to the lane's entry. */
+        if (sr_dispatch_unwind_requested && s->flow_kind == SR_FLOW_FATAL) return 1;
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, target, call->resume_pc, 0u);
         fflush(stderr);
         exit(1);
