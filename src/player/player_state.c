@@ -2465,10 +2465,10 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
     maybe_persist_settings(app);
 }
 
-/* The graphics presets (#2150), one row each. Starting values, to be tuned by
-   measurement on real titles: Low draws at the PSP's own 480x272, Medium and Handheld
-   at 2x, High and Ultra at 4x (the GPU renderer's largest scale). Handheld keeps a
-   battery-friendly 2x and starts games fullscreen.
+/* The graphics presets (#2150), one row each. The values are the project's choice, and
+   only FSR 1's cost is measured (an RTX 3080, docs/SETUP.md). Low draws at the PSP's own
+   480x272, Medium and Handheld at 2x, High and Ultra at 4x (the GPU renderer's largest
+   scale). Handheld keeps a battery-friendly 2x and starts games fullscreen.
 
    A row also sets the Enhanced parts that suit it, and only presentation parts, which never
    reach the guest (docs/ENHANCEMENT_CONTRACT.md 2.2): Crisp system text is on in every
@@ -2478,7 +2478,7 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    Quality) to 2x (Performance) per axis: Medium's and Handheld's 2x frame on a 1080p or
    handheld screen, and Ultra's 4x frame on a screen above 1080p, each for well under a
    millisecond (fsr1-selftest's cost cell). Low turns it off:
-   its 1x frame is enlarged at least 4x on any screen of 1080p or more, past that range, on
+   its 1x frame is enlarged about 4x or more on any screen of 1080p or more, past that range, on
    the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
    motion, Widescreen, texture filtering, sound, the readout or the badge: those stay the
@@ -2501,8 +2501,10 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
                                 NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
 };
 #undef PRESET_PARTS
-/* PRESET_PARTS names every part: a new PLAYER_PART_* needs its value under each preset there (-1
-   leaves it the library's), or this fails to compile. */
+/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until PRESET_PARTS
+   gives it a value under each preset (-1 leaves it the library's); update PRESET_PARTS first,
+   then this count. The count catches a new part only; a part PRESET_PARTS leaves out reads 0
+   (off), which test_graphics_presets catches by requiring -1 for every part it does not set. */
 typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 8 ? 1 : -1];
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {

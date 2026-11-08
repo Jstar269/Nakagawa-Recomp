@@ -550,8 +550,8 @@ line says that it is used in Enhanced and Ace, names the parts it turns on and o
 the rows, in short words (`High is used in Enhanced and Ace, with crisp text on and FSR 1 off. Authentic uses your
 settings.`, the longest, on one line at 960 x 540 and 853 x 480). The settings file keeps the
 preset's name beside the rows, and a file without it, or with a name this build doesn't know, loads as CUSTOM. The
-values are starting points, to be tuned by measurement on real titles. They live in one table,
-`k_graphics_presets` in `src/player/player_state.c`:
+values are the project's choice, and FSR 1's cost is measured only on an RTX 3080 (`docs/SETUP.md`). They live in one
+table, `k_graphics_presets` in `src/player/player_state.c`:
 
 | Preset | Resolution | Scaling | VSync | Game fullscreen | Crisp system text | Sharper enlarging |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -561,30 +561,30 @@ values are starting points, to be tuned by measurement on real titles. They live
 | ULTRA | 4x | Sharp | On | the row's | On | On |
 | HANDHELD | 2x | Sharp | On | On | On | On |
 
-A preset sets only presentation parts, which never reach the guest. CRISP SYSTEM TEXT draws the on-screen keyboard
-at the window's size and costs nothing while the keyboard is down, so every preset turns it on. SHARPER ENLARGING
-runs only where the window enlarges the frame on both axes. AMD's published FSR 1 quality modes span 1.3x (Ultra Quality) to 2x (Performance) per axis
-([GPUOpen: FidelityFX Super Resolution 1](https://gpuopen.com/fidelityfx-superresolution/)). MEDIUM's and
-HANDHELD's 2x frame on a 1080p or handheld screen and ULTRA's 4x frame on a 1440p or 4K screen are in that range;
-on a 1440p or 4K screen MEDIUM's and HANDHELD's frame is enlarged 2.7x to 4x, past it, where HIGH or ULTRA is the
-better choice. LOW turns it off: its 1x frame is enlarged at least 4x on any screen of 1080p or more, past that range
-everywhere, and LOW is for the weakest GPUs, where every pass counts. HIGH turns it off as ULTRA without it, the
-plain 4x picture. Where the GPU renderer cannot run FSR 1, the normal scaling filter stays, as for the part.
-`fsr1-selftest` reports the pass's cost at each of these sizes (`docs/SETUP.md`). No preset sets frame
-pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN PITCHED SOUND, the SPEED READOUT or the
-GAME BADGE: they change timing, framing, guest-visible output or the HUD, or have no measured cost on low-end GPUs,
-so they stay the library's and each game's.
+A preset sets only presentation parts, which never reach the guest. CRISP SYSTEM TEXT draws the on-screen keyboard at
+the window's size and costs nothing while the keyboard is down, so every preset turns it on. SHARPER ENLARGING runs
+only where the window enlarges the frame on both axes. AMD's published FSR 1 quality modes span 1.3x (Ultra Quality)
+to 2x (Performance) per axis ([GPUOpen: FidelityFX Super Resolution
+1](https://gpuopen.com/fidelityfx-superresolution/)). MEDIUM's and HANDHELD's 2x frame on a 1080p or handheld screen
+and ULTRA's 4x frame on a 1440p or 4K screen are in that range; on a 1440p or 4K screen MEDIUM's and HANDHELD's frame
+is enlarged 2.7x to 4x, past it, where HIGH or ULTRA is the better choice. LOW turns it off: its 1x frame is enlarged
+about 4x or more on any screen of 1080p or more, past that range everywhere, and LOW is for the weakest GPUs, where
+every pass counts. HIGH turns it off as ULTRA without it, the plain 4x picture. Where the GPU renderer cannot run FSR
+1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
+(`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
+PITCHED SOUND, the SPEED READOUT or the GAME BADGE: they change timing, framing, guest-visible output or the HUD, or
+have no measured cost on low-end GPUs, so they stay the library's and each game's.
 
 The parts a preset sets are resolved with the rest (`player_play_resolve`): a game's own value, else the preset's,
 else the library's, so the launch line, `SR_PRESENT_UPSCALE` and both Enhanced pages agree. Settings > Enhanced shows
-a part the preset sets with the preset's value and name (`ON (ULTRA)`), and a game's page following the library
-shows that value (`LIBRARY (ON)`). With an Authentic library the rows are dimmed but keep those values, for when a
-game plays in Enhanced. Editing such a part on Settings > Enhanced steps from the value shown and sets the preset to
+a part the preset sets with the preset's value and name (`ON (ULTRA)`), and a game's page following the library shows
+that value (`LIBRARY (ON)`). With an Authentic library the rows are dimmed but keep those values, for when a game
+plays in Enhanced. Editing such a part on Settings > Enhanced steps from the value shown and sets the preset to
 CUSTOM. Going CUSTOM by any edit keeps what the pages showed: the parts the preset set become the library's values
 (`graphics_preset_row_edited`), so editing RESOLUTION under ULTRA leaves SHARPER ENLARGING on. Editing a part for one
-game keeps the preset, since the game's own value wins over it. A settings file from v0.0.2 with a preset chosen
-keeps its library parts as written, and an Enhanced session takes the preset's parts over them (HIGH with SHARPER
-ENLARGING on in the library launches with FSR 1 off; the page says `OFF (HIGH)`).
+game keeps the preset, since the game's own value wins over it. A settings file from v0.0.2 with a preset chosen keeps
+its library parts as written, and an Enhanced session takes the preset's parts over them (HIGH with SHARPER ENLARGING
+on in the library launches with FSR 1 off; the page says `OFF (HIGH)`).
 Left and Right move between the two cards along a row (`NK_UI_BUTTON_ROW`), so CONTROLLER SETTINGS is reached from
 SCALING. Every change is saved as it is made. Below a 680 px tall window the `SETTINGS` heading is left out (the tab names the
 page) so every row fits 960 x 540. The tabbed layout below is a design that is not built:

@@ -295,9 +295,9 @@ The player offers three play modes per game (#2055):
   default for a new library.
 - **Enhanced** turns on the project-authored improvements that work for any game: texture filtering, crisp system
   text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound and sharper enlarging. A new
-  library starts with texture filtering, crisp system text and the game badge on and the rest off, and a graphics preset sets crisp system text and
-  sharper enlarging (section 10.1). Each one is a *part* that can be turned off for the library or for a single
-  game.
+  library starts with texture filtering, crisp system text and the game badge on and the rest off, and a graphics
+  preset sets crisp system text and sharper enlarging (section 10.1). Each one is a *part* that can be turned off for
+  the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.

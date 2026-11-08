@@ -8041,6 +8041,38 @@ static void test_graphics_presets(void) {
     player_app_toggle_fullscreen(app);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
     assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+    /* A row edit while already Custom changes no part, and going Custom never touches a game's
+       own value, which keeps winning over the library's. */
+    app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
+    app->settings.enhanced.part[PLAYER_PART_TEXT] = 0;
+    player_app_cycle_resolution_scale(app, 1);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 0 &&
+           app->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
+    {
+        NkRuntimeConfig cfg;
+        PlayerPlayResolved pr;
+        char pline[192];
+        PlayerTitlePlay *t = &app->settings.title_play[0];
+        player_app_settings_init_default(&app->settings);
+        app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+        memset(t, 0, sizeof(*t));
+        snprintf(t->key, sizeof(t->key), "TEST92150");
+        t->mode = PLAYER_PLAY_LIBRARY;
+        for (int part = 0; part < PLAYER_PART_COUNT; part++) t->part[part] = -1;
+        t->part[PLAYER_PART_UPSCALE] = 0;
+        t->logic_60 = -1;
+        app->settings.title_play_count = 1;
+        player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+        player_app_cycle_resolution_scale(app, 1);
+        assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+        assert(app->settings.title_play_count == 1 &&
+               app->settings.title_play[0].part[PLAYER_PART_UPSCALE] == 0);
+        assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(cfg.present_upscale == NK_PRESENT_UPSCALE_OFF);
+        app->settings.title_play_count = 0;
+    }
 
     /* A v0.0.2 settings file keeps its preset and its library parts as written, and an
        Enhanced session takes the preset's parts over them: High with Sharper enlarging on and
