@@ -608,11 +608,14 @@ one recorded in its chain: the value the nested returns used to leave. A compute
 runs at the live SP. An interpreted body entered by a computed step leaves the same way
 (`sr_guest_interp_run_tail_step`): its handoff to native code is a recorded transfer, with the
 entry-SP restore a native body entered there would record, so both tiers give the chain the same
-restore (#1935). A body whose `$sp` load left its frame, a context switch or a longjmp, has moved
-the guest out of every frame entered before it: its record releases the restores recorded before
-it (`SR_TAIL_RELEASES`), and the first restore recorded after it is the chain's. A body that
-leaves that way by returning tells the drain that ran it (`sr_tail_note_exit`), and so does a
-computed step's chain, for the enclosing drain and for an interpreted caller's continuation.
+restore (#1935). A body whose `$sp` load left its frame, a context switch or a longjmp, may have
+moved the guest out of frames entered before it: its record releases them (`SR_TAIL_RELEASES`),
+bounded by the `$sp` it loaded. A load below where `$sp` was leaves every frame. A load at or
+above the body's entry `$sp` leaves only the frames whose restore is at or below that `$sp`, so an
+alloca free in a piece keeps the restore of the body that handed it the frame. Once a restore is
+void, the first restore recorded after the release is the chain's. A body that leaves that way by
+returning tells the drain that ran it (`sr_tail_note_exit`), and so does a computed step's chain,
+for the enclosing drain and for an interpreted caller's continuation.
 
 The slot is never live across a yield, syscall, dispatch entry or unwind; each of those refuses a
 live transfer with a named `TAIL_TRANSFER_FAULT`.

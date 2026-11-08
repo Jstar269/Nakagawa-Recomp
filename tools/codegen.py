@@ -1301,10 +1301,11 @@ def emit_host_return(resumable, comment=None, stack_census=False, sp_kept=False)
     """The single host-exit policy for callable and live-frame resume entries.
 
     ``sp_kept`` is a guest-owned exit of a body that checks its $sp loads (_sp_load_check):
-    the drain that ran it learns whether one of them left the frame (sr_tail_note_exit).
+    the drain that ran it learns whether one of them left the frame, and the release's bound
+    (sr_tail_note_exit).
     """
     if sp_kept and not stack_census:
-        return "sr_tail_note_exit(_sp_kept); return;"
+        return "sr_tail_note_exit(_sp_kept, _sp_named); return;"
     if resumable:
         return "return;"
     if stack_census:
@@ -1326,14 +1327,15 @@ def emit_tail_transfer(target_expr, fn_symbol, resumable, stack_census=False, co
     nested native return used to apply it. A resume body owes none, and under the stack
     census the wrapper restores after its own drain. ``sp_kept`` is an exit of a body that
     loads $sp: it owes the restore only while every $sp load it ran stayed in its frame
-    (``_sp_kept``, _sp_load_check). ``fn_symbol`` keeps a known target's
+    (``_sp_kept``, _sp_load_check), and ``_sp_named`` is its entry $sp or else the release's
+    bound. ``fn_symbol`` keeps a known target's
     direct call (no dispatcher entry); ``None`` keeps a computed or unknown target's
     dispatch, which also keeps that path's timeslice tick and guards.
     """
     fn = fn_symbol if fn_symbol else "NULL"
     suffix = f" /* {comment} */" if comment else ""
     if sp_kept and not stack_census:
-        return f"sr_tail_record(s, {target_expr}, {fn}, _sp_entry, _sp_kept); return;{suffix}"
+        return f"sr_tail_record(s, {target_expr}, {fn}, _sp_named, _sp_kept); return;{suffix}"
     if resumable or stack_census:
         return f"sr_tail_record(s, {target_expr}, {fn}, 0u, 0u); return;{suffix}"
     return f"sr_tail_record(s, {target_expr}, {fn}, _sp_entry, 1u); return;{suffix}"
@@ -1346,10 +1348,14 @@ def _sp_load_check(line, indent="    "):
     where it was and the body's entry $sp frees only the body's own space, an alloca free.
     Any other one moves to another frame, a longjmp or a context switch: the body's tail
     transfers then owe no restore and release the restores recorded before them in the
-    chain, and its returns say so to the drain (sr_tail_note_exit).
+    chain, and its returns say so to the drain (sr_tail_note_exit). ``_sp_named`` becomes the
+    release's bound (sr_tail_release_bound): a load above the entry $sp leaves only the frames
+    whose restore is at or below it, so a piece's load into a frame that an earlier body of
+    the chain handed on keeps that body's restore.
     """
     return (f"{indent}{{ uint32_t _sp_load = s->r[29];\n{line}\n"
-            f"{indent}  if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = SR_TAIL_RELEASES; }}")
+            f"{indent}  if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) {{ _sp_kept = SR_TAIL_RELEASES;\n"
+            f"{indent}    _sp_named = sr_tail_release_bound(_sp_named, _sp_load, s->r[29]); }} }}")
 
 
 def emit_code_pointer_check(target_expr, transfer_pc):
@@ -1407,7 +1413,7 @@ def emit_host_stack_check(entry_expr):
 def emit_host_fallthrough(resumable, stack_census=False, sp_kept=False):
     """Natural C fallthrough follows the same entry contract without a fake guest return."""
     if sp_kept and not stack_census:
-        return "sr_tail_note_exit(_sp_kept); /* guest fall-through: guest owns SP */"
+        return "sr_tail_note_exit(_sp_kept, _sp_named); /* guest fall-through: guest owns SP */"
     if resumable:
         return "/* resume fall-through: guest owns SP */"
     if stack_census:
@@ -4870,9 +4876,9 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
     # Whether a $sp load left the frame is known only when it runs (#1935): a body with
     # guest-owned exits keeps its entry $sp and checks each such load. A TAIL record owes the
     # restore exactly when every load it ran was an alloca free, and releases the restores
-    # recorded before it in the chain when one left the frame; a return says the same to the
-    # drain (sr_tail_note_exit). The census records no restore at a TAIL, so it keeps the
-    # static verdict.
+    # recorded before it in the chain, up to the bound in _sp_named, when one left the
+    # frame; a return says the same to the drain (sr_tail_note_exit). The census records no
+    # restore at a TAIL, so it keeps the static verdict.
     sp_kept = not stack_census and bool(guest_exits)
     if guest_exits:
         GUEST_SP_ENTRIES.add(start)
@@ -4901,6 +4907,7 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
         out.append("    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;")
     if sp_kept:
         out.append("    uint32_t _sp_kept = 1u; (void)_sp_kept;")
+        out.append("    uint32_t _sp_named = _sp_entry; (void)_sp_named;")
     if insns and start != min(insns):
         labels = set(labels)
         labels.add(start)

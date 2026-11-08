@@ -89,44 +89,59 @@ void sr_tail_fatal(const char *what, uint32_t target) {
     exit(1);
 }
 
+/* What a tail chain owes so far (#1935): its first restore, and the release that reaches past
+ * it to whoever ran the chain. */
+typedef struct {
+    uint32_t restore_sp;
+    uint32_t release_sp;
+    int restores;
+    int released;
+} SrTailChain;
+
+/* A body that loaded $sp out of its frame left every frame entered before it in the chain
+ * whose restore is at or below `bound`: their restores no longer apply. A load that stays
+ * inside the frame the first restore gives back (an alloca free in a piece) leaves the
+ * restore, and the frames of whoever ran the chain, which lie outside it. */
+static inline __attribute__((always_inline)) void sr_tail_chain_release(SrTailChain *chain,
+                                                                        uint32_t bound) {
+    if (chain->restores && bound < chain->restore_sp) return;
+    chain->restores = 0;
+    if (!chain->released || bound > chain->release_sp) chain->release_sp = bound;
+    chain->released = 1;
+}
+
 /* Inlined into both drains so a drain is one native frame at every CALL site (#855). */
 static inline __attribute__((always_inline)) void sr_tail_drain_run(CpuState *s, int segment) {
-    uint32_t chain_sp = 0u;
-    int chain_restores = 0;
-    /* Whether a body of this chain left its frame by a $sp load (#1935). */
-    int chain_released = 0;
+    SrTailChain chain = { 0u, 0u, 0, 0 };
     while (sr_tail_transfer.pending) {
         if (segment && !sr_tail_transfer.fn) {
             /* The next computed transfer belongs to the enclosing drain. Its target runs at
-             * the live SP, as it did nested; the segment's part of the chain travels with it
-             * so the enclosing chain applies what it would have applied to each body in turn:
-             * its outermost restore, after any release, unless the record's body released
-             * it again. */
-            if (!(sr_tail_transfer.has_restore & SR_TAIL_RELEASES)) {
-                if (chain_restores) {
-                    sr_tail_transfer.restore_sp = chain_sp;
-                    sr_tail_transfer.has_restore =
-                        (uint8_t)(SR_TAIL_OWES | (chain_released ? SR_TAIL_RELEASES : 0u));
-                } else if (chain_released) {
-                    sr_tail_transfer.has_restore |= SR_TAIL_RELEASES;
-                }
+             * the live SP, as it did nested; the segment's part of the chain, the record's own
+             * included, travels with it so the enclosing chain applies what it would have
+             * applied to each body in turn: the release that reaches past the segment, then
+             * its outermost restore. */
+            if (sr_tail_transfer.has_restore & SR_TAIL_RELEASES)
+                sr_tail_chain_release(&chain, sr_tail_transfer.release_sp);
+            if ((sr_tail_transfer.has_restore & SR_TAIL_OWES) && !chain.restores) {
+                chain.restore_sp = sr_tail_transfer.restore_sp;
+                chain.restores = 1;
             }
+            sr_tail_transfer.restore_sp = chain.restores ? chain.restore_sp : 0u;
+            sr_tail_transfer.release_sp = chain.released ? chain.release_sp : 0u;
+            sr_tail_transfer.has_restore =
+                (uint8_t)((chain.restores ? SR_TAIL_OWES : 0u) |
+                          (chain.released ? SR_TAIL_RELEASES : 0u));
             return;
         }
         const SrTailTransfer next = sr_tail_transfer;
         memset(&sr_tail_transfer, 0, sizeof sr_tail_transfer);
         if (next.state != s) sr_tail_fatal("tail-transfer-foreign-state", next.target);
-        /* A body that loaded $sp out of its frame moved the guest out of every frame entered
-         * before it in the chain: their restores no longer apply. */
-        if (next.has_restore & SR_TAIL_RELEASES) {
-            chain_restores = 0;
-            chain_released = 1;
-        }
+        if (next.has_restore & SR_TAIL_RELEASES) sr_tail_chain_release(&chain, next.release_sp);
         /* The nested returns restored each callable body's entry SP in turn, innermost
          * first, with no guest instruction in between; only the outermost survived. */
-        if ((next.has_restore & SR_TAIL_OWES) && !chain_restores) {
-            chain_sp = next.restore_sp;
-            chain_restores = 1;
+        if ((next.has_restore & SR_TAIL_OWES) && !chain.restores) {
+            chain.restore_sp = next.restore_sp;
+            chain.restores = 1;
         }
         if (next.fn) {
             next.fn(s);
@@ -139,19 +154,23 @@ static inline __attribute__((always_inline)) void sr_tail_drain_run(CpuState *s,
         /* The body returned out of its frame, or the computed step's segment ended so. */
         if (sr_tail_transfer.released) {
             sr_tail_transfer.released = 0u;
-            chain_restores = 0;
-            chain_released = 1;
+            sr_tail_chain_release(&chain, sr_tail_transfer.release_sp);
         }
     }
     /* The native pieces of a frame handed on live were entered below the outermost body's
      * entry SP and returned there; the restore gives that frame back. A chain that ends
-     * above it left through a longjmp or an unwind, and the guest's SP stands (#1935). */
-    if (chain_restores && s->r[29] < chain_sp) s->r[29] = chain_sp;
-    /* A chain that ended after a release says so to whoever ran it, as its last body would
-     * have: the enclosing drain of a computed step, whose restores recorded before the step
-     * are void, or an interpreted caller's continuation (dispatch_call_continue). This drain
+     * above it left through a longjmp or an unwind, or freed a frame that a body owing no
+     * restore (one that switched stacks) allocated and handed on, and the guest's SP stands
+     * (#1935). */
+    if (chain.restores && s->r[29] < chain.restore_sp) s->r[29] = chain.restore_sp;
+    /* A chain whose release reaches past it says so to whoever ran it, as its last body would
+     * have: the enclosing drain of a computed step, or an interpreted caller's continuation
+     * (dispatch_call_continue), which void their restores at or below the bound. This drain
      * applied its own restore above. Other invokers clear it. */
-    if (chain_released) sr_tail_transfer.released = 1u;
+    if (chain.released) {
+        sr_tail_transfer.released = 1u;
+        sr_tail_transfer.release_sp = chain.release_sp;
+    }
 }
 
 void sr_tail_drain(CpuState *s) {
@@ -1545,6 +1564,17 @@ static int sp_load_leaves_frame(uint32_t opcode, uint32_t before, uint32_t after
     return frame_sp == NULL || after < before || after >= *frame_sp;
 }
 
+/* A run's $sp load out of its frame bounds its release as a native body's _sp_load_check
+ * does: a load below where $sp was leaves every frame, one at or above `frame_sp` the frames
+ * whose restore is at or below the $sp it loaded (#1935). */
+static void note_sp_load(uint32_t opcode, uint32_t before, uint32_t after,
+                         const uint32_t *frame_sp, int *loaded_sp, uint32_t *release_sp) {
+    if (!sp_load_leaves_frame(opcode, before, after, frame_sp)) return;
+    const uint32_t bound = frame_sp == NULL || after < before ? SR_TAIL_RELEASES_ALL : after;
+    if (!*loaded_sp || bound > *release_sp) *release_sp = bound;
+    *loaded_sp = 1;
+}
+
 /* A `jr $ra` that returns past the call this run is part of (#2016): to the resume PC of an
  * enclosing live native linked call, with $sp back at or above that call's entry $sp, so the
  * callee of that call has released its frame. A longjmp into a native frame ends this way:
@@ -1569,6 +1599,7 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
     const int log_dispatch = getenv("SR_DISPLOG") != NULL;
     /* Whether this run has loaded $sp out of the stack its frame allocated (#1935). */
     int loaded_sp = 0;
+    uint32_t release_sp = 0u;
     /* A TAIL step's frame is the $sp it was entered at, as a native body's _sp_entry is. */
     const uint32_t tail_entry_sp = s->r[29];
     const uint32_t *frame_sp = boundary != NULL ? &boundary->entry_sp
@@ -1617,7 +1648,7 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
 #if !defined(SR_STACK_CENSUS_ENABLED)
             /* A TAIL step that loaded $sp out of its frame returns as a native body's guest
              * exit does (sr_tail_note_exit): the drain's earlier restores are void (#1935). */
-            if (tail_step && loaded_sp) sr_tail_transfer.released = 1u;
+            if (tail_step && loaded_sp) sr_tail_note_exit(SR_TAIL_RELEASES, release_sp);
 #endif
             if (log_dispatch) {
                 fprintf(stderr,
@@ -1677,7 +1708,7 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
 #if defined(SR_STACK_CENSUS_ENABLED)
                 sr_tail_record(s, pc, next_fn, 0u, 0u);
 #else
-                sr_tail_record(s, pc, next_fn, tail_entry_sp,
+                sr_tail_record(s, pc, next_fn, loaded_sp ? release_sp : tail_entry_sp,
                                loaded_sp ? SR_TAIL_RELEASES : SR_TAIL_OWES);
 #endif
                 return SR_GUEST_INTERP_AOT_HANDOFF;
@@ -1691,14 +1722,16 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
              * (sr_tail_record); the native body it hands to was entered at a lowered $sp and
              * owes nobody. One that loaded $sp out of that stack (sp_load_leaves_frame), a
              * longjmp or a context switch, leaves it to the guest, and so does a chain whose
-             * return went elsewhere, a longjmp in native code, or that loaded $sp out of its
-             * frame, as a later native body's release voids a native caller's record (#1935). */
+             * return went elsewhere, a longjmp in native code, or that loaded $sp out of the
+             * frame the restore gives back (a release whose bound reaches entry_sp), as a later
+             * native body's release voids a native caller's record (#1935). */
             const int owes = boundary->owes_entry_sp && !loaded_sp &&
                              s->r[29] != boundary->entry_sp;
             const uint32_t entry_sp = owes ? boundary->entry_sp : 0u;
             sr_tail_transfer.released = 0u;
             const int returned_elsewhere = dispatch_call_continue(s, pc, boundary);
-            const int released = sr_tail_transfer.released != 0u;
+            const int released = sr_tail_transfer.released != 0u &&
+                                  sr_tail_transfer.release_sp >= entry_sp;
             sr_tail_transfer.released = 0u;
             if (owes && !returned_elsewhere && !released) s->r[29] = entry_sp;
             return SR_GUEST_INTERP_AOT_HANDOFF;
@@ -1803,7 +1836,7 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
             const uint32_t delay_sp = s->r[29];
             SrGuestInterpResult delay_result = execute_noncontrol(
                 s, pc + 4u, delay_opcode, &delay_store_address, &delay_store_size, fault);
-            if (sp_load_leaves_frame(delay_opcode, delay_sp, s->r[29], frame_sp)) loaded_sp = 1;
+            note_sp_load(delay_opcode, delay_sp, s->r[29], frame_sp, &loaded_sp, &release_sp);
             s->in_delay_slot = 0u;
             s->next_pc = saved_next_pc;
             if (delay_result != SR_GUEST_INTERP_AOT_HANDOFF) {
@@ -1882,7 +1915,7 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
         const uint32_t sp_before = s->r[29];
         SrGuestInterpResult result = execute_noncontrol(
             s, pc, opcode, &store_address, &store_size, fault);
-        if (sp_load_leaves_frame(opcode, sp_before, s->r[29], frame_sp)) loaded_sp = 1;
+        note_sp_load(opcode, sp_before, s->r[29], frame_sp, &loaded_sp, &release_sp);
         if (result != SR_GUEST_INTERP_AOT_HANDOFF) {
             if (result == SR_GUEST_INTERP_EXCEPTION ||
                 result == SR_GUEST_INTERP_ERET) {

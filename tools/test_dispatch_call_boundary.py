@@ -913,6 +913,54 @@ def _a_load_above_the_entry_then_a_live_frame_tail(*, head: str) -> tuple[int, .
     return words
 
 
+def _a_piece_frees_an_alloca_then_hands_the_frame_on() -> tuple[int, ...]:
+    """_alloca_tail_end with its alloca and free in a piece of F (#1935, review B1 of #2238).
+
+    F binds $fp and hands its live frame to P. P saves $sp through F's $fp, allocates and
+    frees through it in the slot of `j TAIL`: a load the walk does not own, which P checks,
+    and which lands on P's entry $sp, inside F's frame. TAIL, the epilogue, returns to F's
+    caller, v0 = 0x56, with F's entry $sp. F owes that restore; P's load leaves P's own
+    frame upwards but stays below F's restore, so it keeps it. All three are entries.
+    """
+    p, tail = 0x1028, 0x103C
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # 0x1010 F
+        _sw(_FP, 0x18, _SP), _addu(_FP, _SP, 0),
+        _j(p), _NOP,
+        _sw(_SP, 0x10, _FP), _addiu(_SP, _SP, -0x30),        # 0x1028 P: save, alloca
+        _addiu(_V0, 0, 0x56),
+        _j(tail), _lw(_SP, 0x10, _FP),                       # free it in the slot
+        _lw(_RA, 0x1C, _SP), _lw(_FP, 0x18, _SP),            # 0x103C TAIL
+        _jr(_RA), _addiu(_SP, _SP, 0x20),
+        _jal(p), _NOP, _jal(tail), _NOP,
+    ])
+    assert len(words) == (tail + 0x20 - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
+def _a_switch_then_a_live_frame_piece_frees_it() -> tuple[int, ...]:
+    """A frame allocated on a switched stack and freed by a plain piece (#1935).
+
+    F switches to S = _PROBE_SP - 0x60 (a load below where $sp was: a release), allocates a
+    frame on S and hands it live to P. P is plain: it records its entry $sp, S - 0x20, and
+    frees the frame in the slot of `j N`. N, a leaf, returns, v0 = 0x5D, and writes back S.
+    The chain ends above P's restore with no $sp load of its own, so only the drain's
+    raise-only rule leaves $sp at S. P and N are entries.
+    """
+    p, n = 0x1030, 0x103C
+    words = _probe_program([
+        _addiu(_SP, _SP, -0x20), _addiu(_T8, _SP, -0x40),    # 0x1010 F
+        _sw(_T8, 0x10, _SP), _lw(_SP, 0x10, _SP),            # switch to S
+        _addiu(_SP, _SP, -0x20), _sw(_RA, 0x1C, _SP),        # a frame on S
+        _j(p), _NOP,
+        _lw(_RA, 0x1C, _SP), _j(n), _addiu(_SP, _SP, 0x20),  # 0x1030 P
+        _addiu(_V0, 0, 0x5D), _jr(_RA), _NOP,                # 0x103C N
+        _jal(p), _NOP, _jal(n), _NOP,
+    ])
+    assert len(words) == (n + 0x1C - _PROBE_BASE) // 4, "the fixture's labels moved"
+    return words
+
+
 def _an_owing_head_into_a_switch_to_a_lower_stack(*, way_out: str,
                                                   reach: str = "j") -> tuple[int, ...]:
     """H sibcalls F at its entry $sp, so H owes it; F switches to a lower stack (#1949 limit 2).
@@ -1873,13 +1921,13 @@ class GeneratedCallDepthTests(unittest.TestCase):
                     if omitted != f:
                         body = generated[generated.index(f"void f_{f:08x}(CpuState *s) {{"):]
                         body = body[:body.index("\n}")]
-                        self.assertIn("_sp_entry, _sp_kept); return;", body, "F's record")
+                        self.assertIn("_sp_named, _sp_kept); return;", body, "F's record")
         # K2: every checked $sp load counts as leaving the frame: F records nothing again.
         self._assert_mutant_fails(
             "K2-a-checked-sp-load-always-leaves-the-frame",
             _native_head_into_an_alloca_tail_end(crossing="call", frame=_S0), (0,),
-            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = SR_TAIL_RELEASES;",
-                            "_sp_kept = SR_TAIL_RELEASES;")},
+            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) {{",
+                            "if (1) {{")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP,
         )
         # A1 (H's sibcall at its entry $sp records nothing) no longer changes this chain in
@@ -1899,8 +1947,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # K1: the check never clears the verdict: F's record raises $sp back to its entry.
         self._assert_mutant_fails(
             "K1-a-checked-sp-load-never-leaves-the-frame", _switch_to_a_lower_stack(), (0,),
-            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = SR_TAIL_RELEASES;",
-                            "(void)_sp_load;")},
+            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) {{",
+                            "(void)_sp_load; if (0) {{")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP - 0x60,
         )
 
@@ -1910,7 +1958,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # 9832da426, interpreted, P's run owed the $sp it started at and wrote it back.
         # F's load stays in its frame, so since #1935 F's record of its entry $sp comes
         # first and is the chain's restore: R1 (the drain lowers $sp to its restore) no longer
-        # changes this chain in any tier, and the plain longjmp tail-call below kills it.
+        # changes this chain in any tier, and
+        # test_a_frame_freed_after_a_switch_keeps_the_switched_stack kills it.
         for codegen_args in ((), ("--omit-aot=0x00001030",)):
             with self.subTest(interpreted=bool(codegen_args)):
                 _generated, results = self._probe(
@@ -1973,8 +2022,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         self._assert_mutant_fails(
             "U1-a-checked-sp-load-above-the-entry-stays-in-the-frame",
             _a_load_above_the_entry_then_a_live_frame_tail(head="none"), (0,),
-            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) _sp_kept = SR_TAIL_RELEASES;",
-                            "if (s->r[29] < _sp_load) _sp_kept = SR_TAIL_RELEASES;")},
+            {"codegen.py": ("if (s->r[29] < _sp_load || s->r[29] >= _sp_entry) {{",
+                            "if (s->r[29] < _sp_load) {{")},
             stays,
         )
         # U2: the interpreter's rule drops the same part, by a linked call and as a TAIL step.
@@ -2022,26 +2071,25 @@ class GeneratedCallDepthTests(unittest.TestCase):
         mutants = (
             # S1: the drain keeps the restore recorded before a release.
             ("S1-a-release-record-keeps-the-earlier-restore", "tail", "j", (), {
-                "guest_interp.c": ("if (next.has_restore & SR_TAIL_RELEASES) {",
-                                   "if (0) {")}),
+                "guest_interp.c": (
+                    "if (next.has_restore & SR_TAIL_RELEASES) sr_tail_chain_release(&chain, next.release_sp);",
+                    "(void)0;")}),
             # S2: generated code's check records "owes nothing", as before #1935's limit 2.
             ("S2-a-checked-sp-load-out-of-the-frame-owes-nothing", "tail", "j", (), {
-                "codegen.py": ("_sp_kept = SR_TAIL_RELEASES; }}", "_sp_kept = 0u; }}")}),
+                "codegen.py": ("{{ _sp_kept = SR_TAIL_RELEASES;", "{{ _sp_kept = 0u;")}),
             # S3: a guest exit that returns says nothing to the drain.
             ("S3-a-returning-guest-exit-keeps-the-earlier-restore", "return", "j", (), {
-                "codegen.py": ('return "sr_tail_note_exit(_sp_kept); return;"',
+                "codegen.py": ('return "sr_tail_note_exit(_sp_kept, _sp_named); return;"',
                                'return "return;"')}),
             # S4: the drain ignores a body that returned out of its frame.
             ("S4-the-drain-ignores-a-returned-release", "return", "j", (), {
                 "guest_interp.c": ("if (sr_tail_transfer.released) {", "if (0) {")}),
             # S5: a computed step's segment that ends after a release says nothing.
             ("S5-a-segment-ending-after-a-release-says-nothing", "tail", "computed", (), {
-                "guest_interp.c": ("if (chain_released) sr_tail_transfer.released = 1u;",
-                                   "(void)chain_released;")}),
+                "guest_interp.c": ("    if (chain.released) {", "    if (0) {")}),
             # S6: a segment hands on a computed transfer without its release.
             ("S6-a-segment-hands-on-without-its-release", "computed", "computed", (), {
-                "guest_interp.c": ("sr_tail_transfer.has_restore |= SR_TAIL_RELEASES;",
-                                   "(void)0;")}),
+                "guest_interp.c": ("(chain.released ? SR_TAIL_RELEASES : 0u)", "0u")}),
             # S7: an interpreted TAIL step records "owes nothing" after leaving its frame.
             ("S7-an-interpreted-tail-step-out-of-its-frame-owes-nothing", "tail", "j",
              ("--omit-aot=0x00001018",), {
@@ -2050,8 +2098,9 @@ class GeneratedCallDepthTests(unittest.TestCase):
             # S8: an interpreted TAIL step that returns out of its frame says nothing.
             ("S8-an-interpreted-tail-step-return-says-nothing", "return", "j",
              ("--omit-aot=0x00001018",), {
-                 "guest_interp.c": ("if (tail_step && loaded_sp) sr_tail_transfer.released = 1u;",
-                                    "(void)loaded_sp;")}),
+                 "guest_interp.c": (
+                     "if (tail_step && loaded_sp) sr_tail_note_exit(SR_TAIL_RELEASES, release_sp);",
+                     "(void)loaded_sp;")}),
         )
         for name, way_out, reach, codegen_args, mutation in mutants:
             self._assert_mutant_fails(
@@ -2077,7 +2126,9 @@ class GeneratedCallDepthTests(unittest.TestCase):
         self._assert_mutant_fails(
             "S9-a-release-record-keeps-the-earlier-restore-upwards",
             _a_load_above_the_entry_then_a_live_frame_tail(head="owing"), (0,),
-            {"guest_interp.c": ("if (next.has_restore & SR_TAIL_RELEASES) {", "if (0) {")},
+            {"guest_interp.c": (
+                "if (next.has_restore & SR_TAIL_RELEASES) sr_tail_chain_release(&chain, next.release_sp);",
+                "(void)0;")},
             lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP + 0x40,
         )
 
@@ -2105,8 +2156,8 @@ class GeneratedCallDepthTests(unittest.TestCase):
         self._assert_mutant_fails(
             "S10-an-interpreted-continuation-ignores-a-release",
             _a_coroutine_switch_from_a_yield(), (0,),
-            {"guest_interp.c": ("const int released = sr_tail_transfer.released != 0u;",
-                                "const int released = 0;")},
+            {"guest_interp.c": ("const int released = sr_tail_transfer.released != 0u &&",
+                                "const int released = 0 &&")},
             raised, codegen_args=("--omit-aot=0x00001010",))
         # S11: dispatch clears a continuation's release before the interpreter reads it.
         self._assert_mutant_fails(
@@ -2153,7 +2204,7 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # longjmp checks its $sp load (#1935) and tells the drain that it left its frame,
         # but no exit restores its entry $sp over the one it loaded.
         self.assertNotIn("s->r[29] = _sp_entry", body, "longjmp's exits restore its entry $sp")
-        self.assertIn("sr_tail_note_exit(_sp_kept); return;", body)
+        self.assertIn("sr_tail_note_exit(_sp_kept, _sp_named); return;", body)
 
     def test_switch_case_chaining_to_a_loaded_sp_leaves_the_callers_sp(self):
         # Each case is an entry entered at the alloca-lowered $sp. Before: CASE owed that
@@ -2397,9 +2448,73 @@ class GeneratedCallDepthTests(unittest.TestCase):
                 self.assertEqual(fields.get("v1"), _PROBE_SP, output)
         # R1 (the drain lowers $sp to its restore too) no longer changes these chains: the
         # release voids H's record in "plain" and "alloca", and in "piece" the unwind leaves
-        # past the drain's end. Generated code and the interpreter reach the raise-only rule
-        # with $sp above a restore only after an upward $sp load, which now releases it; the
-        # rule stays for exits that check no load (the stack census, the LLVM backend).
+        # past the drain's end. A frame freed after a switch still ends a chain above its
+        # restore with no load: the next test kills R1 there.
+
+    def test_a_frame_freed_after_a_switch_keeps_the_switched_stack(self):
+        # F switches to S and hands P a frame on S; P records its entry $sp and frees the
+        # frame, and N writes back S. The chain ends above P's restore, and $sp stays at S.
+        p, n = "--omit-aot=0x00001030", "--omit-aot=0x0000103c"
+        for codegen_args in ((), (p,), (n,)):
+            with self.subTest(omitted=codegen_args):
+                _generated, results = self._probe(
+                    _a_switch_then_a_live_frame_piece_frees_it(), (0,), codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x5D, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP - 0x60, output)
+        # R1: the drain lowers $sp to its restore too: F's caller comes back on S - 0x20.
+        self._assert_mutant_fails(
+            "R1-the-drain-lowers-sp", _a_switch_then_a_live_frame_piece_frees_it(), (0,),
+            {"guest_interp.c": (
+                "    if (chain.restores && s->r[29] < chain.restore_sp) s->r[29] = chain.restore_sp;",
+                "    if (chain.restores) s->r[29] = chain.restore_sp;")},
+            lambda r: r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP - 0x60,
+        )
+
+    def test_a_piece_that_frees_an_alloca_keeps_the_heads_restore(self):
+        # F owes its entry $sp; P's checked load frees its alloca back to P's entry $sp,
+        # above P's frame but inside F's, and TAIL returns to F's caller. Before (review B1 of
+        # #2238, at b0b54722d): every tier released F's restore and F's caller came back
+        # 0x20 too low, v1 = _PROBE_SP - 0x20; base 9b69a1d27 was right.
+        words = _a_piece_frees_an_alloca_then_hands_the_frame_on()
+        f, p = "--omit-aot=0x00001010", "--omit-aot=0x00001028"
+        for codegen_args in ((), (p,), (f,)):
+            with self.subTest(omitted=codegen_args):
+                generated, results = self._probe(words, (0,), codegen_args=codegen_args)
+                rc, output, fields = results[0]
+                self.assertEqual(rc, 0, output)
+                self.assertEqual(fields.get("v0"), 0x56, output)
+                self.assertEqual(fields.get("v1"), _PROBE_SP, output)
+                if not codegen_args:
+                    body = generated[generated.index("void f_00001028(CpuState *s) {"):]
+                    body = body[:body.index("\n}")]
+                    self.assertIn("_sp_named = sr_tail_release_bound(_sp_named, _sp_load, s->r[29]);",
+                                  body, "P checks its load")
+
+        def lowered(r):
+            return r[0][0] != 0 or r[0][2].get("v1") != _PROBE_SP
+
+        for name, codegen_args, mutation in (
+            # B1: the drain voids an earlier restore whatever the release's bound.
+            ("B1-the-drain-ignores-the-release-bound", (), {"guest_interp.c": (
+                "if (chain->restores && bound < chain->restore_sp) return;", "(void)bound;")}),
+            # B2: generated code's release leaves every frame.
+            ("B2-a-checked-load-releases-every-frame", (), {"codegen.py": (
+                "_sp_named = sr_tail_release_bound(_sp_named, _sp_load, s->r[29]);",
+                "_sp_named = SR_TAIL_RELEASES_ALL;")}),
+            # B3: the interpreter's release leaves every frame.
+            ("B3-an-interpreted-load-releases-every-frame", (p,), {"guest_interp.c": (
+                "const uint32_t bound = frame_sp == NULL || after < before ? SR_TAIL_RELEASES_ALL : after;",
+                "const uint32_t bound = SR_TAIL_RELEASES_ALL;")}),
+            # B4: an interpreted caller's continuation ignores the release's bound.
+            ("B4-the-continuation-ignores-the-release-bound", (f,), {"guest_interp.c": (
+                "sr_tail_transfer.released != 0u &&\n"
+                "                                  sr_tail_transfer.release_sp >= entry_sp;",
+                "sr_tail_transfer.released != 0u;")}),
+        ):
+            self._assert_mutant_fails(name, words, (0,), mutation, lowered,
+                                      codegen_args=codegen_args)
 
     def test_a_longjmp_through_an_interpreted_callees_piece_reaches_the_setjmp_frame(self):
         # G calls H, which lowers $sp and hands its live frame to the native piece P, and P
@@ -2434,7 +2549,10 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # H's restore ("tail"), and when P calls longjmp ("call") F's setjmp frame resumes at
         # the $sp longjmp loaded either way. Measured at 712f0b630: both
         # shapes, interpreted H, mutant and source alike end v0 = 0x107, v1 = _PROBE_SP. The
-        # guard stays for exits that note no release (the stack census, the LLVM backend).
+        # guard is for exits that note no release, the stack census's. The census does tell
+        # them apart on the "tail" shape (source v0 = 0x7, mutant 0x107), but there the source
+        # itself stops fatal=1 before F's continuation, on base 9b69a1d27 as on this branch,
+        # so that tier is no evidence either way.
 
     def test_an_eret_into_the_rest_of_an_interpreted_callee_keeps_its_call(self):
         # H lowers $sp and executes `break`. The handler, native or interpreted, steps EPC
@@ -2542,7 +2660,10 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # P1 (a $sp load on one path takes the restore from every exit of the body) no
         # longer changes this chain: since #1949's limit 2 every body with guest-owned exits
         # checks its loads when they run, so the switch's record owes F's entry $sp whatever
-        # the static walk claims, as long as the load on the other path never ran.
+        # the static walk claims, as long as the load on the other path never ran. That
+        # covers TAIL exits only: the mutant also drops the write-back of each return and
+        # fall-off end that follows no load, which no fixture here pins (each such return
+        # path is balanced, or an earlier record raises $sp after it).
 
     def test_scoped_arrays_with_a_sibcall_keep_the_callers_sp(self):
         # The shape of real code again, with an error path that releases the frame and
@@ -2603,7 +2724,7 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # The last recorded restore wins instead of the first: the caller sees C2's SP.
         self._assert_mutant_fails(
             "T1-last-restore-wins", _three_body_chain(), (0,),
-            {"guest_interp.c": ("if ((next.has_restore & SR_TAIL_OWES) && !chain_restores) {",
+            {"guest_interp.c": ("if ((next.has_restore & SR_TAIL_OWES) && !chain.restores) {",
                                 "if (next.has_restore & SR_TAIL_OWES) {")},
             lambda r: r[0][0] == 0 and r[0][2].get("v1") != _PROBE_SP,
         )
@@ -2661,11 +2782,9 @@ class GeneratedCallDepthTests(unittest.TestCase):
         # F runs in H's frame instead of the live one.
         self._assert_mutant_fails(
             "T6-segment-restores-early", _segment_chain(), (0,),
-            {"guest_interp.c": ("                    sr_tail_transfer.has_restore |= SR_TAIL_RELEASES;\n"
-                                "                }\n            }\n            return;",
-                                "                    sr_tail_transfer.has_restore |= SR_TAIL_RELEASES;\n"
-                                "                }\n            }\n"
-                                "            if (chain_restores) s->r[29] = chain_sp;\n"
+            {"guest_interp.c": ("(chain.released ? SR_TAIL_RELEASES : 0u));\n            return;",
+                                "(chain.released ? SR_TAIL_RELEASES : 0u));\n"
+                                "            if (chain.restores) s->r[29] = chain.restore_sp;\n"
                                 "            return;")},
             lambda r: r[0][0] == 0 and r[0][2].get("v0") != _PROBE_SP - 32,
         )
