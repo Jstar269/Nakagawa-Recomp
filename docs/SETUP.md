@@ -94,8 +94,8 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
 
 ## Install, update and uninstall (Windows)
 
-Nakagawa is a portable ZIP today ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)); there is no
-installer yet. The unpacked folder is the program and holds nothing you create, so installing and removing it
+Nakagawa is a portable ZIP ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)); there is no
+installer. The unpacked folder is the program and holds nothing you create, so installing and removing it
 never touches your games or saves.
 
 **Install.** Unpack `nakagawa-recomp-<version>-windows-x64.zip` into a folder of your choice (a read-only folder
@@ -106,8 +106,8 @@ both shortcuts with the player's taskbar identity, so the launcher and the games
 button. The ZIP itself writes no shortcut.
 
 **Add to Steam** ([#2152](https://github.com/Jstar269/nakagawa-recomp/issues/2152)). The code that adds Nakagawa to a
-Steam library as a non-Steam game is in `src/core/nk_steam_shortcuts.c`; the player button that calls it is not
-wired yet, so until then add the executable in Steam by hand. It works on your PC only and makes no network call or
+Steam library as a non-Steam game is in `src/core/nk_steam_shortcuts.c`; the player has no button that calls it,
+so add the executable in Steam by hand. It works on your PC only and makes no network call or
 download. It edits the binary `shortcuts.vdf` in the `userdata\<account>\config` folder of the Steam account you pick
 (Steam's folder comes from the current user's own registry setting on Windows). It adds one entry with the app name,
 the executable and its start-in folder, and no launch options, and it only adds: entries it did not write are copied
@@ -116,7 +116,7 @@ untouched. Before it writes, it copies the file to `shortcuts.vdf.nakagawa-backu
 back; if that fails it writes nothing. It writes a temporary file and renames it over the original. Steam rewrites
 this file when it exits, so while Steam runs nothing is written: close Steam first (Nakagawa never closes it). In
 portable mode the entry points at the executable's current folder, so moving the folder breaks the shortcut.
-Other platforms are unsupported for now and say so.
+Other platforms are unsupported and say so.
 
 **Update.** Check for updates unpacks the new version into a new folder next to the running one and leaves the old
 one. Your data is in the per-user folders below, so the new version finds it. Delete the old folder when you
@@ -151,7 +151,7 @@ folder it moved, and those are yours to delete.
 
 ## Wine and Proton
 
-The Windows ZIP is the only player build; there is no Linux build yet ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306)).
+The Windows ZIP is the only player release; there is no Linux player release ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306)).
 Wine or Proton is not a supported platform, and nothing in the project is changed to make it work. These
 steps are the smoke run from [#1876](https://github.com/Jstar269/nakagawa-recomp/issues/1876). It needs no game disc and
 no network.
@@ -264,7 +264,7 @@ make CC=gcc showcase-linux   # needs PSPDEV at /usr/local/pspdev, as above
 
 The smoke selects SDL's dummy video and audio drivers and runs without a desktop or
 GPU. This confirms the Linux runtime builds and runs the showcase fixtures; general
-consumer ISO compatibility and interactive Linux presentation remain in the works
+consumer ISO compatibility and interactive Linux presentation are not supported
 ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306)).
 
 ## Supported development baseline
@@ -273,7 +273,7 @@ The supported and tested core development environment is:
 
 - Windows 11 x64. Older or unsupported Windows versions may work, but receive no compatibility guarantee.
 - PowerShell 7.6+ (`pwsh`) as the shell you type into. Windows PowerShell 5.1 is not supported for that.
-- CPython 3.15.x (3.14.x is also accepted, `>=3.14,<3.16`), with `python` resolving to that feature line. 3.15 is the default: the pinned prerequisite uses 3.15.2 and hosted CI uses 3.15.1.
+- CPython 3.15.x (3.14.x is also accepted, `>=3.14,<3.16`), with `python` resolving to that feature line. 3.15 is the default: the pinned prerequisite and hosted CI both use 3.15.2.
 - Current MSYS2 UCRT64 GCC/G++, GNU Make, SDL3, and Vulkan loader packages. The release
   manifest's `toolchain_policy` records only the floors the code actually needs: a C11 compiler
   (GCC 4.9+), GNU Make 4.0+ (the title link uses `$(file ...)`), SDL3 3.x, a Vulkan SDK for API 1.1+, and Python 3.15 (the manifest says `>=3.15,<3.16`; the tooling itself also accepts 3.14, see the first bullet). The rolling
@@ -323,7 +323,7 @@ python -m pip install .
 This installs the declared tooling dependencies, including `compiledb`. Run it before you add the MSYS2
 line to `PATH`; see [PATH order](#path-order).
 
-`glslc` from the Vulkan SDK is only needed when regenerating the checked-in shader headers. LLD, Clang, CMake, Ninja, and Node.js are not required for the Windows core build (a staged CMake target for portability work is tracked separately in [`PLATFORM_PORTABILITY.md`](PLATFORM_PORTABILITY.md)).
+`glslc` from the Vulkan SDK is only needed when regenerating the checked-in shader headers. LLD, Clang, CMake, Ninja, and Node.js are not required for the Windows core build (the CMake build used on Linux and Android is described in [`PLATFORM_PORTABILITY.md`](PLATFORM_PORTABILITY.md)).
 
 ### PATH order
 
@@ -519,7 +519,7 @@ A PSN release of a UMD game (an `EBOOT.PBP` whose `DATA.PSAR` is an NPUMDIMG dis
 
 ### Compressed disc images
 
-Builds after v0.0.1 also take a compressed disc image: a `.cso` (CISO, versions 1 and 2), a `.zso` (ZISO) or a `.chd`
+The player also takes a compressed disc image: a `.cso` (CISO, versions 1 and 2), a `.zso` (ZISO) or a `.chd`
 made with `chdman createdvd`. It expands the image once, when you add it, into a plain `.iso` at
 `<user data>/discs/<DISC_ID>/<DISC_ID>.<cso|zso|chd>.iso`, and every later step reads that `.iso` exactly as it
 reads one you added yourself. This needs free space for the whole `.iso` (up to 1.8 GB for a UMD) beside the
@@ -554,7 +554,7 @@ Similarly, `python tools/nk_cli.py build-package` searches `assets/titles` first
 
 ### Portable mode (`portable.txt`)
 
-Portable mode is in builds after v0.0.1. By default every per-user folder lives under the per-user data root (on Windows,
+By default every per-user folder lives under the per-user data root (on Windows,
 `%LOCALAPPDATA%\Nakagawa\data`). To keep the library, saves, settings, logs, cache and downloads
 beside the program instead, for a USB stick, a handheld PC or two versions that must not share
 settings, create an empty file named `portable.txt` in the same folder as `nakagawa_player.exe`.
@@ -617,7 +617,7 @@ You can copy the whole `font` folder. The import reads only the `.pgf` files in 
 
 If your custom firmware has no Flash 0 USB setting, use Nakagawa Font Copy, a small PSP app built from this project's source in `src/psp_companion/` (#737). It reads the PSP's font files, decrypts nothing and changes nothing on the PSP. It writes only to its own folder, `NAKAGAWA/fonts`, on the Memory Stick, or on a PSP Go's internal storage when you start it from there.
 
-1. Build the app with the PSPSDK (`make -C src/psp_companion`; see [PSPDEV integration](PSPDEV_LOCAL_VERIFICATION.md)), then copy `src/psp_companion/build/EBOOT.PBP` to `PSP/GAME/NAKAGAWAFONTS/EBOOT.PBP` on the Memory Stick. Releases do not include the app yet.
+1. Build the app with the PSPSDK (`make -C src/psp_companion`; see [PSPDEV integration](PSPDEV_LOCAL_VERIFICATION.md)), then copy `src/psp_companion/build/EBOOT.PBP` to `PSP/GAME/NAKAGAWAFONTS/EBOOT.PBP` on the Memory Stick. Releases do not include the app.
 2. On the PSP, open **Game > Memory Stick > Nakagawa Font Copy** and press **X**. The app copies every `.pgf` file in `flash0:/font` and checks each copy against the original, then says how many fonts it copied. Running it again replaces the copies.
 3. Leave the app, connect the PSP to your PC with a USB cable, and turn on **Settings > USB Connection** on the PSP. The Memory Stick appears on the PC as a drive.
 4. In the player, open **Settings**, then **PSP FONTS**, and choose **GET FONTS FROM MY PSP**: the player finds the Memory Stick's `NAKAGAWA\fonts` folder and imports it. You can instead choose **CHOOSE FONT FILES**, open that folder and pick its `.pgf` files. From a terminal, `python tools/nk_cli.py fonts import <drive>:\NAKAGAWA\fonts` does the same, with your PSP's drive letter in place of `<drive>`.
@@ -975,7 +975,7 @@ in `tools/test_prereq_fetcher.py` refuses `NOASSERTION`; the consent card would 
 entry as under review.
 
 This automatic prerequisite flow currently targets Windows x64 with the
-UCRT64 package set. Linux prerequisite installation is in the works
+UCRT64 package set. Linux prerequisite installation is not supported
 ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306)); the wider
 distribution and update contract remains tracked by [#324](https://github.com/Jstar269/nakagawa-recomp/issues/324).
 
@@ -986,19 +986,19 @@ then from `PATH`; without it the built-in readable debug font is used. Placing
 ### Network use
 
 Nakagawa works offline. The player and the runtime make no network connection unless you
-agree to one, and the game itself never reaches the network. Today there are two
-connections, listed below; any future online feature will be opt-in and added here first.
+agree to one, and the game itself never reaches the network. There are two
+connections, listed below, and each is opt-in.
 
 | What | Host | When | Controlled by |
 | --- | --- | --- | --- |
 | Build-tool download | `www.python.org`, `repo.msys2.org` (HTTPS) | Only after you select **DOWNLOAD** on the BUILD PACKAGE consent card | That consent card, per build |
-| Check for updates (builds after v0.0.1) | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
+| Check for updates | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
 
-Enhanced and Ace (Settings > Enhanced, in builds after v0.0.1) make no network connection: its features run on this PC, and its per-game report
+Enhanced and Ace (Settings > Enhanced) make no network connection: its features run on this PC, and its per-game report
 stays in the user data folder.
 
 Links the player shows, such as a release page, **Report this game**, **See existing reports** and a
@@ -1184,7 +1184,7 @@ The default C backend needs none of this. `LLVM_CLANG` and `LLVM_LINK` name othe
   address notes, or other redistributable metadata—never a project database containing game
   bytes.
 
-Do not add any of these large checkouts to this repository, and do not make the eventual player
+Do not add any of these large checkouts to this repository, and do not make the player
 download them. They are development/oracle aids; the release path should remain the recompiler,
 its redistributable host dependencies, and user-supplied game input.
 
@@ -1248,7 +1248,7 @@ outside the published repository.
 
 ### Local problem report (`nk_cli.py report`)
 
-In builds after v0.0.1, `python tools/nk_cli.py report --title <DISC_ID>` writes one ZIP you can attach to an issue yourself. It
+`python tools/nk_cli.py report --title <DISC_ID>` writes one ZIP you can attach to an issue yourself. It
 is made on your PC and **nothing is uploaded**: the code uses no network library, and a test fails if it
 opens a connection. The ZIP goes to `<user data>\reports\<UTC time>-<title>.zip`; `--preview` lists the
 files without writing it, `--json` prints the list for a tool, and `--no-doctor` leaves out the toolchain

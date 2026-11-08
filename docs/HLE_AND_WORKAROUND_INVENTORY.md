@@ -1384,17 +1384,16 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 
 ```text
 Dispatch Hooks & Walkers (src/rt/recomp.c):
-  - Exact-Match Dispatch Hooks:                      8 sites (Tier 5, diagnostic only)
+  - Exact-Match Dispatch Hooks:                      0 sites (trace-only hooks deleted)
   - Address-Range Hooks:                             0 sites (retired by issue #362)
-  - Inline Dispatch Guard (INIT_WALKER_GUARD):        1 site  (Tier 5)
-  - WALKER_CAP:                                      historical comment, not an active cap
+  - Inline Dispatch Guard (INIT_WALKER_GUARD):        0 sites (retired, #363)
+  - WALKER_CAP:                                      removed
 
-  Every surviving g_exact_hooks[] entry is a read-only trace that always falls
-  through to normal dispatch, and g_range_hooks[] is empty: generic dispatch no
-  longer turns any target shape into a success. Issue #362 removed the last
-  behavior-changing target predicates (see 3.1 and 3.4).
-  `tools/compat_overrides.py` (DISPATCH_HOOKS / DISPATCH_RANGE_HOOKS) is the
-  maintained census for these tables; `tools/test_compat_manifest.py` and
+  Generic dispatch has no hook tables and no longer turns any target shape into
+  a success. Issue #362 removed the last behavior-changing target predicates
+  (see 3.1 and 3.4).
+  `tools/compat_overrides.py` (DISPATCH_HOOKS / DISPATCH_RANGE_HOOKS, both empty,
+  and RETIRED_INIT_WALKER_GUARD) is the maintained census for these tables; `tools/test_compat_manifest.py` and
   `tools/test_dispatch_c.py` fail if a source address or a retired hook name
   reappears without being inventoried.
 
@@ -1418,10 +1417,10 @@ Title Configuration Overrides (src/rt/title_config.c):
 - **Root Cause:** An earlier compatibility bypass skipped `module_start` and wrote readiness during load. Translated startup and export routing now have a source-owned production-path fixture. Real-title startup readiness remains unverified when no locally supplied decrypted executable and PRXs are available.
 - **Lower-Level Solution:** Provide translated guest startup and its kernel, thread, callback, heap and file dependencies; remove the retired field from existing manifests.
 
-#### 2. `psmf.prx` and `libpsmfplayer.prx` Start Module Skip
+#### 2. Host-Served Module Start Skip
 
 - **Location:** `src/rt/hle_kernel_module.c` (`h_StartModule`).
-- **Mechanism:** Explicitly skips calling `f_32280000` (`psmf`) and `f_322f8868` (`libpsmfplayer`). A guest-placed module (placed by the guest allocator at run time) keeps the same bypass when host HLE implements one of its named exports, so its importers stay on the host implementation.
+- **Mechanism:** `sceKernelStartModule` does not run `module_start` for a module whose exports host HLE implements (`host_served`, decided from its export table, never from its file name, #1385), and a guest-placed module (placed by the guest allocator at run time) keeps the same bypass, so its importers stay on the host implementation. `libfont.prx`, and a module of a library the guest owns (`guest_module_owns_library`, such as `scePsmfPlayer`), run their translated `module_start`; `psmf.prx` has no HLE handler and always runs translated (3.4).
 - **Root Cause:** Sony SDK initialization assumes low-level kernel callbacks and ring buffer allocation.
 - **Lower-Level Solution:** Provide faithful kernel memory partition allocation (`sceKernelAllocPartitionMemory`) and let the genuine PSMF modules execute their lifecycle.
 
@@ -1496,27 +1495,21 @@ reproduced here.
 
 ---
 
-### 3.2 Register Clobber Guards and Loop Caps (Tier 5)
+### 3.2 Register Clobber Guards and Loop Caps (Retired)
 
 #### 1. `INIT_WALKER_GUARD` (Callee-Saved `$s0` / `$r16` Preservation)
 
-- **Location:** `src/rt/recomp.c:2068–2080`, inline in `dispatch()`, not a dispatch hook-table entry.
-- **Mechanism:** When the caller's `s->pc` is `0x00000f98` or `0x00000fdc`, saves `s->r[16]` around `fn(s)` and unconditionally restores it on return. These PCs select the guard; they are not the dispatch target.
-- **Root Cause:** A MIPS ABI violation in recompiled code or compiler optimization where a callee corrupted callee-saved register `$s0`.
-- **Lower-Level Solution:** Audit the recompiled functions called by `0x00000fdc` in `tools/codegen.py` to ensure standard MIPS calling conventions preserve `$s0`–`$s7` across function boundaries.
+- **Status:** **RETIRED (#363).** The inline guard in `dispatch()` saved `s->r[16]` around the call when the caller's `s->pc` was `0x00000f98` or `0x00000fdc`, and restored it on return. It and the HST-only restore of `$s0`-`$s7`/`$fp` that replaced it are gone: every title keeps its callee's register writes, as on hardware. `RETIRED_INIT_WALKER_GUARD` in `tools/compat_overrides.py` keeps the caller PCs, and `tools/test_compat_manifest.py` fails if the guard returns.
 
 #### 2. `WALKER_CAP` Historical Comment
 
-- **Location:** `src/rt/recomp.c:1591–1612` (comment only; `WALKER_CAP` mentions at lines 1598 and 1606).
-- **Mechanism:** The comment describes a former 2048-iteration cap and the rationale for bypassing `f_000008d8` by returning `r[2]=0` directly (`WALKER_SKIP`, line 1611). It is not an active cap or executable function at those lines.
-- **Root Cause:** The historical comment describes recursive walker dispatch and repeated yields starving frame-present progress; it is not current behavioral proof.
-- **Lower-Level Solution:** Verify current walker execution and guest table initialization before treating the historical bypass rationale as an active workaround.
+- **Status:** **REMOVED.** The comment about a former 2048-iteration cap and the `f_000008d8` bypass is no longer in `src/rt/recomp.c`.
 
 ---
 
 ### 3.3 Remaining Fake-Success Registrations and #281 Dispositions
 
-The current registration classes and semantic statuses are in the generated census above. At the time of the #281 migration, the then-18 fake-success registrations were reclassified as 13 controlled refusals, one bounded UMD compatibility implementation, one partial `sceIoDevctl` implementation, and three named compatibility exceptions; those are historical migration counts, not the current census. Static refusal entries carry a literal PSP-visible error in `sr_hle_register_unsupported`; `sr_syscall` logs each function/NID once and emits one summary line per called function at process exit. These APIs are marked “in the works” under issue #281. Unregistered NIDs still use the fatal unknown-import path.
+The current registration classes and semantic statuses are in the generated census above. At the time of the #281 migration, the then-18 fake-success registrations were reclassified as 13 controlled refusals, one bounded UMD compatibility implementation, one partial `sceIoDevctl` implementation, and three named compatibility exceptions; those are historical migration counts, not the current census. Static refusal entries carry a literal PSP-visible error in `sr_hle_register_unsupported`; `sr_syscall` logs each function/NID once and emits one summary line per called function at process exit. That migration was issue #281, now closed. Unregistered NIDs still use the fatal unknown-import path.
 
 | API family | Registration(s) | Disposition |
 | :--- | :--- | :--- |
@@ -1572,18 +1565,11 @@ those calls are reported as not compared.
 gave the same result in both forms. It says nothing about other inputs, and a private title's
 report proves only that title's calls and stays private.
 
-## 4. Workaround Elimination & Migration Roadmap
+## 4. Workaround Elimination
 
-```mermaid
-timeline
-    title Workaround Elimination & LLE Convergence
-    Phase 1 : Zero-Initialize BSS & Segment Extents : Audit tools/codegen.py for $s0 register preservation : Eliminate INIT_WALKER_GUARD : Revalidate historical walker bypass rationale
-    Phase 2 : Implement standalone ATRAC3+ decoder : Eliminate high-risk fake_success audio NIDs : Implement sceReg virtual system registry
-    Phase 3 : Complete kernel semaphore & thread synchronization : Remove libfont readiness injection; validate real guest startup for #299
-    Phase 4 : Execute scePsmf_library.prx & psmf.prx module_start : Bridge low-level sceMpeg to host hardware decoders : Eliminate StartModule bypasses
-    Phase 5 : Eliminate remaining fake_success stubs : Retire title-specific manifest overrides : Reach Zero-Workaround State
-```
+The workarounds that remain are the entries in section 3 that are not marked retired, and the compatibility
+exceptions in the generated census above. Each entry names the lower-level solution that removes it.
 
-### The Invariant for Future Work
+### The Invariant for Each Migration Step
 
 Every migration step must be accompanied by an automated regression test in `tools/` that executes both the positive and negative paths to prove that guest code executes correctly without synthetic intervention.

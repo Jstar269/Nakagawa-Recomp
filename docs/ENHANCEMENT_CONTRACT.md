@@ -2,7 +2,7 @@
 
 > **Status: CURRENT — maintained architectural contract.** Issue reference: #327. Build cache coordination coordinates with #316, and high-refresh presentation coordinates with #328.
 
-Sections 1–7 define the authentic baseline, category boundaries, fail-closed package validation (`tools/enhancement_package.py`), and AOT cache epoch separation (`tools/nk_core/package_cache.py`, `tools/codegen.py`). Declarative frame-rate rescale packages (60 Hz logic rescaling for 30 Hz titles) are implemented on the AOT codegen and package-builder path; host runtime asset replacement and overlay loaders remain in the works. Section 10 covers the project-authored library-wide mode, and section 11 the class of its items that change what the guest can observe (#2055).
+Sections 1–7 define the authentic baseline, category boundaries, fail-closed package validation (`tools/enhancement_package.py`), and AOT cache epoch separation (`tools/nk_core/package_cache.py`, `tools/codegen.py`). Declarative frame-rate rescale packages (60 Hz logic rescaling for 30 Hz titles) are implemented on the AOT codegen and package-builder path; host runtime asset replacement and overlay loaders are not built. Section 10 covers the project-authored library-wide mode, and section 11 the class of its items that change what the guest can observe (#2055).
 
 ## 1. Core Principle: Authentic Mode is the Untouched Baseline
 
@@ -162,29 +162,29 @@ The enhancement architecture enforces a clean boundary between the compiled host
 
 ---
 
-## 8. Implementation Roadmap and First-Proof Fixture
+## 8. Implementation Status and First-Proof Fixture
 
-Implementation of the enhancement subsystem is phased to maintain fidelity at every milestone:
+The enhancement subsystem was built in phases, each keeping fidelity intact:
 
-1. **Phase 1: Contract, Schema, and Package Validator (Current Task — Issue #327):**
+1. **Phase 1: Contract, Schema, and Package Validator (built; #327):**
    - Architectural contract defined in `docs/ENHANCEMENT_CONTRACT.md`.
    - Machine-readable package schema in `assets/enhancement_package.schema.json`.
    - Standalone package validation tooling in `tools/enhancement_package.py`.
    - Comprehensive unit test suite in `tools/test_enhancement_package.py`.
-2. **Phase 2: First-Proof Synthetic Presentation Fixture (Next Step):**
+2. **Phase 2: First-Proof Synthetic Presentation Fixture (not built):**
    - Implement a minimal, source-owned synthetic presentation overlay fixture in the native player.
    - Prove that authentic execution remains 100% byte- and trace-equivalent when the overlay is disabled.
    - Verify that enabling the overlay stamps diagnostics into evidence metadata without mutating guest memory.
    - Verify fail-closed package rejection in the native loader.
-3. **Phase 3: Asset Replacement Engine:**
+3. **Phase 3: Asset Replacement Engine (not built; section 10.12 is a development-only texture replacement):**
    - Texture dumping and replacement interface at the host GPU backend.
    - Streaming replacement audio handler.
-4. **Phase 4: High-Refresh Frame Pacing and Declarative 60 Hz Logic Rescaling (#328):**
+4. **Phase 4: High-Refresh Frame Pacing and Declarative 60 Hz Logic Rescaling (built; #328):**
    - Declarative frame-rate rescale package format (`game_version`, `executable_sha256`, `rng_policy`, symbolic `sites` with `stock_digest` and the section 9.2 transforms).
    - Fail-closed loader and stock-word digest verifier in `tools/enhancement_package.py` and `tools/codegen.py`.
-   - Separate AOT instrumentation epoch (`aot-enhancement-package-v1`) in `tools/nk_core/package_cache.py`, `tools/title_codegen_plan.py`, and `tools/nk_cli.py`, plus the run-time opt-in (`SR_EXPERIMENTAL_60HZ`, the player's `experimental_60hz` setting).
+   - Separate AOT instrumentation epoch (`aot-enhancement-package-v1`) in `tools/nk_core/package_cache.py`, `tools/title_codegen_plan.py`, and `tools/nk_cli.py`, plus the run-time opt-in (`SR_EXPERIMENTAL_60HZ`, which the launcher sets only for a session with an enhancement package).
    - VBLANK multiplier and display list presentation decoupling.
-5. **Phase 5: Symbolic Guest Hook Dispatch and Cache Epochs (#316):**
+5. **Phase 5: Symbolic Guest Hook Dispatch and Cache Epochs (#316, closed):**
    - Symbolic hook resolution via private title profiles and instrumented AOT cache keys.
 
 ---
@@ -374,13 +374,12 @@ package's own switch does not turn it on or off.
 What stays refused is a second interpolator: one interpolation mode runs at a time, so `smooth=match` and `smooth=x2`
 are never both on, and a launch line that names a mode this build does not carry is refused whole (section 10.1).
 
-This build does not yet interpolate above 30 Hz. Smooth motion acts only on a title the detector holds at 30 (section
+This build does not interpolate above 30 Hz. Smooth motion acts only on a title the detector holds at 30 (section
 10.6); a title running 60 FPS game logic is presented frame by frame as it comes, as without the feature. The
 interpolator for a 60 Hz source is its own item, with its own key, entry and evidence: a host-only feature under
-section 10.6 unless it changes something section 11.1 lists, in which case it is a section 11 item. Until it
-lands, the player still turns smooth motion off for a launch of the enhanced 60 FPS build, and the title page says
-so. That is a limit of this build, not a rule of the contract; the item that lands the interpolator removes it and
-updates the tests that pin it.
+section 10.6 unless it changes something section 11.1 lists, in which case it is a section 11 item. The
+player turns smooth motion off for a launch of the enhanced 60 FPS build, and the title page says so. That is a
+limit of this build, not a rule of the contract.
 
 The session flag `--experimental-60hz` makes every title with a usable package that resolves to Enhanced or Ace run as
 Ace for that session, with its 60 FPS game logic and `tier=ace`; a title that resolves to Authentic stays Authentic.
@@ -1144,10 +1143,8 @@ observe.
   so a frame drawn with a scaled copy, or with a 1:1 draw sampled nearest by smart 2D, is the frame the guest keeps.
   The features stay outside section 11.2 until the requirements below exist. Until then they are reachable only
   through environment variables, for development.
-- **Key.** None yet. `SR_TEX_SCALE` and `SR_SMART_2D` are environment variables, not keys on the launch line (section
-  10.1), and have no library or per-title setting. Those come in the launch-line pull request that follows the Ace
-  settings work (#2074): it adds `tex`, `s2d` and `glyphs` (#2110) to `SR_ACE` in one change, with the library and
-  per-title switches. This entry is completed in that pull request, and only then are the features admitted.
+- **Key.** None. `SR_TEX_SCALE` and `SR_SMART_2D` are environment variables, not keys on the launch line (section
+  10.1), and have no library or per-title setting, so the features are not admitted.
 - **Never silent.** A run with either feature on prints, after its `TEX_SCALE: on` line, one line naming the features
   as guest-visible, on through the environment and not admitted under section 11.2. The `tex-scale-selftest`
   settings cell pins it.
@@ -1177,9 +1174,8 @@ The feature of section 10.12 (#1880). Its presentation is described there; this 
   so a frame drawn with a pack's image in place of a guest texture is the frame the guest keeps. The feature stays
   outside section 11.2 until the requirements below exist. Until then it is reachable only through environment
   variables, for development.
-- **Key.** None yet. `SR_TEX_REPLACE` and `SR_TEX_REPLACE_BUDGET_MB` are environment variables, not keys on the launch
-  line (section 10.1), and have no library or per-title setting. Those come with the launch-line pull request that
-  follows the Ace settings work (#2074), and only then is the feature admitted. The pack itself is the user's own:
+- **Key.** None. `SR_TEX_REPLACE` and `SR_TEX_REPLACE_BUDGET_MB` are environment variables, not keys on the launch
+  line (section 10.1), and have no library or per-title setting, so the feature is not admitted. The pack itself is the user's own:
   the project ships none.
 - **Never silent.** A run with a pack loaded prints, after its `TEX_REPLACE: on` line, one line naming the feature as
   guest-visible, on through the environment and not admitted under section 11.2.
