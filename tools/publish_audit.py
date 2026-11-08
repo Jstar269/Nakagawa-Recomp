@@ -2022,10 +2022,12 @@ def _export_staleness_findings(
     ``policy_sha256`` is held to it exactly as before.  A control may instead
     omit it: the digest is that of the policy blob itself, recomputed here as
     ``policy.digest``, and committing it makes every two profile-changing pull
-    requests conflict.  Such a control still carries every field the policy
-    decides -- the profile, its version and both exclusion lists -- and each is
-    compared with the policy below, so a control that a policy change would
-    rewrite is still stale.  The policy bytes themselves are bound to the
+    requests conflict.  Such a control must name ``policy_sha256`` in its
+    ``tree_derived_fields`` and still carries every field the policy decides:
+    the profile, its version and the exclusion globs are compared with the
+    policy below, and ``excluded_paths`` by the export-exclusion check, so a
+    control that a policy change would rewrite is still stale.  The exact
+    ``tree_derived_fields`` list is the attestation verifier's to check.  The policy bytes themselves are bound to the
     externally trusted policy by ``POLICY_SOURCE_MISMATCH``.
     """
     resolved = export_path or (repo_root / "PUBLIC_EXPORT.json")

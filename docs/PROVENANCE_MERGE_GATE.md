@@ -245,10 +245,11 @@ A control whose list does not name `policy_sha256` and that declares no digest
 is refused with `EXPORT_FIELD_MISMATCH`, and the message names
 `make contrib-refresh` (`mingw32-make` on Windows) and
 `python tools/regen_all.py`. The publication audit (`tools/publish_audit.py`)
-holds the same line: a declared digest, even an empty or null one, must equal
-the policy digest, and a control without one must name it in
-`tree_derived_fields` and match the policy's profile, version and exclusion
-lists, else `POLICY_EXPORT_STALE`.
+runs a staleness check of its own: a declared digest, even an empty or null
+one, must equal the policy digest, and a control without one must name
+`policy_sha256` in `tree_derived_fields` and match the policy's profile,
+version and exclusion lists, else `POLICY_EXPORT_STALE`. It does not compare the
+whole `tree_derived_fields` list; that is the verifier's check above.
 
 `candidate_tree` and `source_tree` are the two advisory exceptions: the release
 process records the pre-export tree there, so they are informational. The real
