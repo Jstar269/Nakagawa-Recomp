@@ -673,16 +673,14 @@ static int gui_movie_make(MovieUpscale *m, const char *where) {
     if (s_movie_mode == MOVIE_UPSCALE_ANIME4K) {
         m->anime4k = gui_anime4k_make(error, sizeof(error));
         if (!m->anime4k)
-            fprintf(stderr, "sdl3vk: Anime4K is unavailable for %s (%s); its movies use FSR 1
-", where,
+            fprintf(stderr, "sdl3vk: Anime4K is unavailable for %s (%s); its movies use FSR 1\n", where,
                     error[0] ? error : "unknown");
     }
     error[0] = '\0';
     m->fsr1 = gui_fsr1_make(error, sizeof(error));
     if (!m->fsr1 && !m->anime4k) {
         m->failed = 1;
-        fprintf(stderr, "sdl3vk: movie upscaling is unavailable for %s (%s)
-", where,
+        fprintf(stderr, "sdl3vk: movie upscaling is unavailable for %s (%s)\n", where,
                 error[0] ? error : "unknown");
         return 0;
     }
@@ -774,15 +772,13 @@ static void gui_upscale_init(void) {
     const char *value = getenv("SR_PRESENT_UPSCALE");
     int mode = fsr1_parse_mode(value);
     if (mode < 0)
-        fprintf(stderr, "sdl3vk: unknown SR_PRESENT_UPSCALE '%s' (off or fsr1); upscaling stays off
-",
+        fprintf(stderr, "sdl3vk: unknown SR_PRESENT_UPSCALE '%s' (off or fsr1); upscaling stays off\n",
                 value);
     const char *movie = getenv("SR_MOVIE_UPSCALE");
     s_movie_mode = anime4k_parse_movie_mode(movie);
     if (s_movie_mode < 0) {
         fprintf(stderr, "sdl3vk: unknown SR_MOVIE_UPSCALE '%s' (off, fsr1 or anime4k); movie upscaling "
-                "stays off
-", movie);
+                "stays off\n", movie);
         s_movie_mode = MOVIE_UPSCALE_OFF;
     }
     if (mode != 1 && s_movie_mode == MOVIE_UPSCALE_OFF) return;
@@ -790,8 +786,7 @@ static void gui_upscale_init(void) {
     if (mode == 1) {
         s_fsr1 = gui_fsr1_make(error, sizeof(error));
         if (!s_fsr1)
-            fprintf(stderr, "sdl3vk: FSR 1 upscaling is unavailable (%s); the window scales as before
-",
+            fprintf(stderr, "sdl3vk: FSR 1 upscaling is unavailable (%s); the window scales as before\n",
                     error[0] ? error : "no Vulkan device");
     }
     if (s_movie_mode != MOVIE_UPSCALE_OFF && !gui_movie_make(&s_movie, "the window"))
@@ -806,22 +801,18 @@ static void gui_upscale_init(void) {
                                : (s_movie_mode == MOVIE_UPSCALE_ANIME4K ? "movie-anime4k" : "movie-fsr1");
     sr_flight_set_present_upscale(stamp);
     fprintf(stderr, "ACE_MODE: present upscale %s (the window and its recording; captures hold "
-                    "the guest's frame)
-", stamp);
+                    "the guest's frame)\n", stamp);
     /* In the boot events too, so tools/boot_gate.py sees it when stderr was silenced. */
     sr_gui_boot_event("BOOT_EVENT phase=present_upscale mode=%s", stamp);
-    if (s_fsr1) fprintf(stderr, "sdl3vk: FSR 1 upscaling on (EASU + RCAS, presentation only)
-");
+    if (s_fsr1) fprintf(stderr, "sdl3vk: FSR 1 upscaling on (EASU + RCAS, presentation only)\n");
     if (s_movie_mode != MOVIE_UPSCALE_OFF)
-        fprintf(stderr, "sdl3vk: movie upscaling on (%s, presentation only)
-",
+        fprintf(stderr, "sdl3vk: movie upscaling on (%s, presentation only)\n",
                 s_movie.anime4k ? "Anime4K CNN x2 + FSR 1" : "FSR 1");
 }
 
 static void gui_movie_release(MovieUpscale *m, const char *what) {
     if (m->presents)
-        fprintf(stderr, "sdl3vk: the movie upscaler made %llu %spresents
-", m->presents, what);
+        fprintf(stderr, "sdl3vk: the movie upscaler made %llu %spresents\n", m->presents, what);
     anime4k_destroy(m->anime4k);
     fsr1_destroy(m->fsr1);
     memset(m, 0, sizeof(*m));
@@ -833,11 +824,9 @@ static void gui_upscale_release(void) {
         sdl3vk_set_record_upscale_pass(NULL);
     }
     if (s_fsr1) {
-        fprintf(stderr, "sdl3vk: FSR 1 upscaled %llu presents
-", s_fsr1_presents);
+        fprintf(stderr, "sdl3vk: FSR 1 upscaled %llu presents\n", s_fsr1_presents);
         if (s_fsr1_rec)
-            fprintf(stderr, "sdl3vk: FSR 1 upscaled %llu recorded presents
-", s_fsr1_rec_presents);
+            fprintf(stderr, "sdl3vk: FSR 1 upscaled %llu recorded presents\n", s_fsr1_rec_presents);
     }
     gui_movie_release(&s_movie, "");
     gui_movie_release(&s_movie_rec, "recorded ");
