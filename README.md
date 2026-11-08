@@ -19,14 +19,23 @@
 </div>
 
 Nakagawa Recomp is a static recompiler for the PlayStation Portable. It translates a game's MIPS code into C once,
-before you play, and compiles it into a native Windows program. You supply the game from your own disc. The project
-is early, and v0.0.2 is an experimental pre-release: one game is playable, one plays a stage, a dozen more start and
-get part of the way in, and the rest are untested.
+before you play, and compiles it into a native Windows program. It isn't an emulator. You supply the game from your
+own disc: Nakagawa includes no games, game data, firmware or system fonts.
+
+**What works today.** v0.0.2 is an experimental pre-release. *Hot Shots Tennis: Get a Grip* is playable, with full
+matches and Story Mode. It runs in **Authentic** mode, as released, or in **Enhanced** mode, which adds options such
+as texture filtering, Smooth motion and Widescreen. *PAC-MAN Championship Edition* plays a stage, about a dozen more
+games start and get part of the way in, and most others stop early and name what is missing.
+
+**Try it:** [download v0.0.2](#download), extract the ZIP, start `bin\nakagawa_player.exe`, drag in your game's
+`.iso`, then press **BUILD PACKAGE** and **PLAY**. Without a game of your own, the library's **TEST THIS PC** row has
+two demos the project wrote, which need no game files.
 
 [![A rally in Hot Shots Tennis: Get a Grip, running natively in Nakagawa Recomp; play the clip](docs/media/hst-rally-poster.png)](https://jstar269.github.io/Nakagawa-Recomp/media/hst-rally.mp4)
 
 [Watch a 28-second rally with sound](https://jstar269.github.io/Nakagawa-Recomp/media/hst-rally.mp4) (MP4, 4.5 MB),
-recorded with v0.0.1.
+recorded with v0.0.1. The [v0.0.2 release page](https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.2) has
+screenshots of Enhanced mode.
 
 <div align="center"><sub>Hot Shots Tennis: Get a Grip belongs to its publisher. This repository contains no game data: you need your own copy of the game, and nothing here downloads one.</sub></div>
 
