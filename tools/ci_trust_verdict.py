@@ -117,6 +117,7 @@ App pinned in the ruleset); see docs/CI.md, "Trusted CI verdict".
 """
 
 from __future__ import annotations
+from typing import Any
 
 import argparse
 from dataclasses import dataclass, field
@@ -577,7 +578,7 @@ def tree_entries(repo: Path, rev: str) -> dict[str, str]:
 
 def referenced_tools(workflow_text: str) -> set[str]:
     """``tools/`` paths a workflow names outside a comment line."""
-    found = set()
+    found: set[Any] = set()
     for line in workflow_text.splitlines():
         if line.lstrip().startswith("#"):
             continue

@@ -40,7 +40,7 @@ from urllib.parse import unquote
 try:
     from .nk_core.git_isolation import isolated_git_env
 except ImportError:
-    from nk_core.git_isolation import isolated_git_env
+    from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
