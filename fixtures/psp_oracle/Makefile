@@ -327,6 +327,10 @@ CASE_ID = 170
 # VFPU_CC; probe_hle_issues.c). Owner present.
 else ifeq ($(CASE),vfpu-cc-cmov)
 CASE_ID = 169
+# 171: the #326 vus2i/vs2i double-width unpack, vsgn and vflush cells (probe_hle_issues.c),
+# register-only.
+else ifeq ($(CASE),vfpu-vus2i)
+CASE_ID = 171
 else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
@@ -624,6 +628,9 @@ TARGET = $(BUILD_DIR)/vfpu_convert
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),vfpu-cc-cmov)
 TARGET = $(BUILD_DIR)/vfpu_cc_cmov
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-vus2i)
+TARGET = $(BUILD_DIR)/vfpu_vus2i
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
 # same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.

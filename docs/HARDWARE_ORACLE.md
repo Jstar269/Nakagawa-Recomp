@@ -3390,6 +3390,7 @@ not expected PSP values.
 | `vfpu-quad-wb` | `PSP-VFPU-QUADWB-001` | `MEASURED` (2026-11-08, PSP-3000, boot 159, `ecc203af`; 19 records) | #326: lv.q and sv.q with the write-back flag; the base register is unchanged and the access is base plus offset. |
 | `vfpu-convert` | `PSP-VFPU-CONVERT-001` | `MEASURED` (2026-11-08, PSP-3000, boot 160, `266552d0`; 229 records) | #326: VFPU float/integer conversions (vf2iz/in/iu/id, vi2f, vi2s/us/c/uc). |
 | `vfpu-cc-cmov` | `PSP-VFPU-CCCMOV-001` | `MEASURED` (2026-11-08, PSP-3000, boot 159 `750c5fb1` and boot 161 `831d54f0`; 217 and 153 records) | #326: VFPU_CC round trip, vcmovt/vcmovf, and vcmp CC bits (readable only after vsync or vflush). |
+| `vfpu-vus2i` | `PSP-VFPU-VUS2I-001` | `NOT_RUN` (case 171, built; not in the campaign queue) | #326, two passes, register-only: raw result words of `vus2i.s`/`.p` and `vs2i.s`/`.p` (double-width output) over twelve source words, `vsgn.p`/`.t`/`.q` over float lanes, and three droppable `vflush-*` cells (pending S prefix, `vflush` 0xffff040d, `vmov.s`/`vadd.s`, with a control). Identity prefixes except the vflush cells. No hardware result claimed. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (modes 2 and 3; rerun required) | Each mode now begins from a fresh stream, ringbuffer and MPEG context; no mode 2 or 3 result is measured. |
 
 ### PSP-MEMEDGE-001 capture 2026-11-02

@@ -2141,6 +2141,67 @@
         "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
       },
       {
+        "id": "PSP-VFPU-VUS2I-001",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as case 171, the fixed-shape stream of the vus2i/vs2i, vsgn and vflush cells. No hardware run is cited.",
+        "group": "cpu",
+        "source": "fixtures/psp_oracle/probe_hle_issues.c",
+        "prx": "vfpu_vus2i.prx",
+        "apis": [
+          "sceIoClose",
+          "sceIoOpen",
+          "sceIoRead",
+          "sceIoWrite",
+          "sceKernelDeleteThread",
+          "sceKernelExitThread",
+          "sceKernelGetThreadId",
+          "sceKernelSleepThread",
+          "sceKernelWaitThreadEnd",
+          "sceKernelWakeupThread",
+          "Allegrex VFPU vus2i.s",
+          "Allegrex VFPU vus2i.p",
+          "Allegrex VFPU vs2i.s",
+          "Allegrex VFPU vs2i.p",
+          "Allegrex VFPU vsgn.p",
+          "Allegrex VFPU vsgn.t",
+          "Allegrex VFPU vsgn.q",
+          "Allegrex VFPU vflush"
+        ],
+        "diagnostic_case_ids": [
+          "vfpu-vus2i"
+        ],
+        "case_ids": [
+          "vus2i-s-p0-*",
+          "vus2i-p-p0-*",
+          "vs2i-s-p0-*",
+          "vs2i-p-p0-*",
+          "vsgn-p-p0-*",
+          "vsgn-t-p0-*",
+          "vsgn-q-p0-*",
+          "vflush-vmov-p0-*",
+          "vflush-vadd-p0-*",
+          "vflush-ctrl-p0-*",
+          "vus2i-s-p1-*",
+          "vus2i-p-p1-*",
+          "vs2i-s-p1-*",
+          "vs2i-p-p1-*",
+          "vsgn-p-p1-*",
+          "vsgn-t-p1-*",
+          "vsgn-q-p1-*",
+          "vflush-vmov-p1-*",
+          "vflush-vadd-p1-*",
+          "vflush-ctrl-p1-*",
+          "vfpu-vus2i-done"
+        ],
+        "invariant": "#326, two passes, register-only: the raw words of vus2i.s/.p and vs2i.s/.p over twelve source words (the output is double width: .s makes two words, .p four, the low half of each source lane going to the even output lane), vsgn.p/.t/.q over three images of four float lanes (+-1, +-0, 2.5, -3.5, qNaN, +inf, +-smallest denormal, a negative qNaN, a signalling NaN), and three droppable vflush cells (a pending S prefix negating lane 0, vflush 0xffff040d, then vmov.s or vadd.s, plus a control without the flush), under identity prefixes except the vflush cells (out0-3 = C200 and out4-7 = C000 after the words).",
+        "issues": [
+          326
+        ],
+        "risk": "low but unmeasured; register-only VFPU cells on the main thread (VFPU attribute) with legal words; no handler, timer, kernel call or device state is installed or changed; run with the owner present",
+        "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
+      },
+      {
         "id": "PSP-GE-SAMPLE-001",
         "status": "implemented",
         "hardware_evidence": "MEASURED",

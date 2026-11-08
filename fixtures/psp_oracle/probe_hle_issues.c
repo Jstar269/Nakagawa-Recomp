@@ -27,6 +27,8 @@
 //   CASE=vfpu-cc-cmov (PSP-VFPU-CCCMOV-001): #326 raw VFPU_CC words of vcmp (16 conditions,
 //     .s/.q, VFPU_CC read three ways and through a vcmovt), vcmovt/vcmovf imm3 0-6 under nine VFPU_CC presets and mfvc/mtvc of
 //     VFPU_CC, register-only.
+//   CASE=vfpu-vus2i (PSP-VFPU-VUS2I-001): #326 raw result words of vus2i/vs2i .s/.p, vsgn .p/.t/.q
+//     and a vflush cell (pending S prefix), register-only, owner present.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -56,8 +58,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-cc-cmov and vfpu-convert run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-cc-cmov, vfpu-convert and vfpu-vus2i run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -79,6 +81,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_QUAD_WB 165
 #define HLE_CASE_VFPU_CONVERT 170
 #define HLE_CASE_VFPU_CC_CMOV 169
+#define HLE_CASE_VFPU_VUS2I 171
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -124,6 +127,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-cc-cmov"
 #define HLE_TEST_ID "PSP-VFPU-CCCMOV-001"
 #define HLE_LOG "host0:/vfpu_cc_cmov_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_VUS2I
+#define HLE_CAMPAIGN_ID "vfpu-vus2i"
+#define HLE_TEST_ID "PSP-VFPU-VUS2I-001"
+#define HLE_LOG "host0:/vfpu_vus2i_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -2500,6 +2507,185 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_CONVERT */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_VUS2I
+
+/* #326 vus2i/vs2i (double-width unpack), vsgn and vflush (PSP-VFPU-VUS2I-001), two passes,
+   register-only: no memory or host I/O runs between a cell's register seeding and its
+   readback, and every instruction is a legal Allegrex word. No prefix word is issued before a
+   vus2i, vs2i or vsgn cell (identity prefixes); only the vflush cells issue one. POWER RISK
+   is low but unmeasured, so run it with the owner present. A step marker is written durably
+   before each form group.
+   One cell loads twelve words (C000 = in0-3, C010 = in4-7, C200 = in8-11, a sentinel
+   background), runs the form's words, then stores C200 to out0-3 and C000 to out4-7. Row
+   <stem>-p<pass>-<index>: result = the form's instruction word, out0-3 = C200 after the words
+   and out4-7 = C000 after the words (the source operand lanes, which also records the inputs).
+   vus2i.s/vs2i.s: source S000 (lane 0 of C000), dest the pair C200 lanes 0-1 (the output is
+   double width: one source lane makes two words, the low half of the lane going to the even
+   output lane). vus2i.p/vs2i.p: source the pair C000 lanes 0-1, dest the quad C200. Records
+   <form>-p<pass>-<k>, k = 0..11, the source lanes of cell k being the twelve source words
+   rotated by k: C000 = w[k], w[k+1], w[k+2], w[k+3] (indices mod 12), so every source word
+   appears as lane 0 (.s) and as a pair (word, next word) (.p).
+   vsgn.p/.t/.q: C000 into C200, one record per image (<stem>-p<pass>-<image>, three images of
+   four float lanes: 1.0, -1.0, +0, -0 / 2.5, -3.5, qNaN, +inf / smallest denormal, its
+   negative, a negative qNaN and a signalling NaN); the lanes past the width keep the
+   sentinel in out0-3.
+   vflush cells (names vflush-*, droppable as one group): the prefix word 0xdc0100e4 (negate
+   lane 0, identity swizzle), then vflush 0xffff040d, then vmov.s S200,S000 and vmov.s S201,S000
+   (vflush-vmov), or vadd.s S200,S000,S010 and vadd.s S201,S000,S010 (vflush-vadd); the
+   control vflush-ctrl runs the prefix and the two vmov.s without the vflush. The prefix
+   applied if C200 lane 0 is the negation of C000 lane 0 (vmov) and C200 lane 1 is its plain
+   value (the prefix is consumed by the first instruction). C000 = 3, 5, 7, 9 and
+   C010 = 11, 13, 15, 17 as floats. result = the vflush word 0xffff040d for all three.
+   Words: vus2i 0xd03a, vs2i 0xd03b, vsgn 0xd04a in the top half, size in bits 15 and 7,
+   source in bits 14:8 and destination in bits 6:0. */
+
+#define VU_IN_WORDS 12u
+#define VU_OUT_WORDS 8u
+#define VU_BACKGROUND 0x7a5a5a00u
+#define VU_SRC_WORDS 12u
+#define VU_IMAGES 3u
+#define VU_VFLUSH_WORD 0xffff040du
+
+typedef void (*vu_fn)(const uint32_t *in, uint32_t *out);
+
+#define VU_CELL_FN(fname, body)                                                        \
+    static void fname(const uint32_t *in, uint32_t *out)                               \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "lv.q C000, 0(%[in])\n\t"                                                  \
+            "lv.q C010, 16(%[in])\n\t"                                                 \
+            "lv.q C200, 32(%[in])\n\t"                                                 \
+            body                                                                       \
+            "sv.q C200, 0(%[out])\n\t"                                                 \
+            "sv.q C000, 16(%[out])\n\t"                                                \
+            :                                                                          \
+            : [in] "r"(in), [out] "r"(out)                                             \
+            : "memory");                                                               \
+    }
+
+VU_CELL_FN(vu_vus2i_s,
+    ".word 0xd03a0008\n\t")
+VU_CELL_FN(vu_vus2i_p,
+    ".word 0xd03a0088\n\t")
+VU_CELL_FN(vu_vs2i_s,
+    ".word 0xd03b0008\n\t")
+VU_CELL_FN(vu_vs2i_p,
+    ".word 0xd03b0088\n\t")
+VU_CELL_FN(vu_vsgn_p,
+    ".word 0xd04a0088\n\t")
+VU_CELL_FN(vu_vsgn_t,
+    ".word 0xd04a8008\n\t")
+VU_CELL_FN(vu_vsgn_q,
+    ".word 0xd04a8088\n\t")
+VU_CELL_FN(vu_vflush_vmov,
+    ".word 0xdc0100e4\n\t"
+    ".word 0xffff040d\n\t"
+    ".word 0xd0000008\n\t"
+    ".word 0xd0000028\n\t")
+VU_CELL_FN(vu_vflush_vadd,
+    ".word 0xdc0100e4\n\t"
+    ".word 0xffff040d\n\t"
+    ".word 0x60040008\n\t"
+    ".word 0x60040028\n\t")
+VU_CELL_FN(vu_vflush_ctrl,
+    ".word 0xdc0100e4\n\t"
+    ".word 0xd0000008\n\t"
+    ".word 0xd0000028\n\t")
+
+/* The twelve source words (one record per word, per form). */
+static const uint32_t s_vu_src[VU_SRC_WORDS] = {
+    0x00000000u, 0x00000001u, 0x00008000u, 0x0000ffffu, 0xffff0000u, 0x80000000u,
+    0x7fff8001u, 0xffff0001u, 0x12345678u, 0xffffffffu, 0x00010000u, 0x80008000u,
+};
+
+/* Float lanes for vsgn: the ten requested classes plus a negative qNaN, a signalling NaN. */
+static const uint32_t s_vu_float[VU_IMAGES][4] = {
+    {0x3f800000u, 0xbf800000u, 0x00000000u, 0x80000000u},
+    {0x40200000u, 0xc0600000u, 0x7fc00000u, 0x7f800000u},
+    {0x00000001u, 0x80000001u, 0xffc00000u, 0x7f800001u},
+};
+
+/* The vflush cell operands as floats: 3, 5, 7, 9 (C000) and 11, 13, 15, 17 (C010). */
+static const uint32_t s_vu_flush[8] = {
+    0x40400000u, 0x40a00000u, 0x40e00000u, 0x41100000u,
+    0x41300000u, 0x41500000u, 0x41700000u, 0x41880000u,
+};
+
+struct vu_form {
+    const char *stem;
+    uint32_t word;
+    uint32_t kind;  /* 0 = rotated source words, 1 = float images, 2 = vflush operands */
+    uint32_t count; /* records per pass */
+    vu_fn fn;
+};
+static const struct vu_form s_vu_forms[10] = {
+    {"vus2i-s", 0xd03a0008u, 0u, 12u, vu_vus2i_s},
+    {"vus2i-p", 0xd03a0088u, 0u, 12u, vu_vus2i_p},
+    {"vs2i-s", 0xd03b0008u, 0u, 12u, vu_vs2i_s},
+    {"vs2i-p", 0xd03b0088u, 0u, 12u, vu_vs2i_p},
+    {"vsgn-p", 0xd04a0088u, 1u, 3u, vu_vsgn_p},
+    {"vsgn-t", 0xd04a8008u, 1u, 3u, vu_vsgn_t},
+    {"vsgn-q", 0xd04a8088u, 1u, 3u, vu_vsgn_q},
+    {"vflush-vmov", VU_VFLUSH_WORD, 2u, 1u, vu_vflush_vmov},
+    {"vflush-vadd", VU_VFLUSH_WORD, 2u, 1u, vu_vflush_vadd},
+    {"vflush-ctrl", VU_VFLUSH_WORD, 2u, 1u, vu_vflush_ctrl},
+};
+
+static uint32_t s_vu_in[VU_IN_WORDS] __attribute__((aligned(64)));
+static uint32_t s_vu_out[VU_OUT_WORDS] __attribute__((aligned(64)));
+
+static void vu_cell(const char *name, const struct vu_form *form, unsigned index)
+{
+    for (unsigned i = 0; i < 4u; i++) {
+        if (form->kind == 0u) {
+            s_vu_in[i] = s_vu_src[(index + i) % VU_SRC_WORDS];
+        } else if (form->kind == 1u) {
+            s_vu_in[i] = s_vu_float[index][i];
+        } else {
+            s_vu_in[i] = s_vu_flush[i];
+        }
+        s_vu_in[4u + i] = form->kind == 2u ? s_vu_flush[4u + i] : (VU_BACKGROUND | (4u + i));
+        s_vu_in[8u + i] = VU_BACKGROUND | (8u + i);
+    }
+    for (unsigned i = 0; i < VU_OUT_WORDS; i++) {
+        s_vu_out[i] = 0xffffffffu;
+    }
+    form->fn(s_vu_in, s_vu_out);
+    uint32_t w[VU_OUT_WORDS];
+    for (unsigned i = 0; i < VU_OUT_WORDS; i++) {
+        w[i] = s_vu_out[i];
+    }
+    hle_record(name, "PASS", form->word, w, VU_OUT_WORDS);
+}
+
+/* Rows <stem>-p<pass>-<index>, one step <stem>-p<pass> first. */
+static void vu_group(unsigned pass, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", s_vu_forms[form].stem, pass);
+    hle_step(name);
+    const unsigned n = s_vu_forms[form].count;
+    for (unsigned index = 0; index < n; index++) {
+        snprintf(name, sizeof(name), "%s-p%u-%u", s_vu_forms[form].stem, pass, index);
+        vu_cell(name, &s_vu_forms[form], index);
+    }
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < 10u; form++) {
+            vu_group(pass, form);
+        }
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_VUS2I */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV
