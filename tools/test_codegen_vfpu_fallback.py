@@ -312,6 +312,17 @@ int main(void) {{
                         self.assertNotRegex(wb, r"s->r\[\d+\]\s*=[^=]")
                         self.assertIn("s->r[10] + ", wb)
 
+    def test_mtvc_to_the_condition_code_register_keeps_six_bits(self):
+        # Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
+        # register entry is not in this tree yet): mtvc then mfvc on VFPU_CC read back the
+        # written value and 0x3f in every cell. Only control register 3 is masked here.
+        mtvc = lambda reg: (0x12 << 26) | (7 << 21) | (5 << 16) | (128 + reg)
+        effect, _, _ = codegen.vfpu_effect(0x3000, mtvc(3))
+        self.assertEqual(effect, "s->vfpuCtrl[3] = s->r[5] & 0x3fu;")
+        for reg in (0, 1, 2, 8):
+            other, _, _ = codegen.vfpu_effect(0x3000, mtvc(reg))
+            self.assertEqual(other, f"s->vfpuCtrl[{reg}] = s->r[5];")
+
     def test_vrot_overlap_recomputes_cosine_from_written_lane(self):
         # vt/op subfields select vrot; choose vd/vs in one matrix with scalar vs
         # present in the destination vector.

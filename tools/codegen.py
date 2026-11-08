@@ -2828,6 +2828,10 @@ def _vfpu_cop2_effect(addr, w, options, delay_branch_pc):
     handler = _VFPU_COP2_MOVE_FORMS.get(sub)
     if handler is None:
         raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
+    if sub == 7 and imm == 131:
+        # VFPU_CC keeps only bits 0..5: mtvc then mfvc read back written & 0x3f in every cell of
+        # a PSP-3000 run (2026-11-08, issue #326, probe case vfpu-cc-cmov).
+        return f"{dst} = {R(rt(w))} & 0x3fu;", None, 0
     return handler(w, src, dst)
 
 

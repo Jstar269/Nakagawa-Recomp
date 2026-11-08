@@ -279,6 +279,10 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
             if (imm < 128) {
                 vreg_idx(imm, 1, vi_idx);
                 s->vi[vi_idx[0]] = value;
+            } else if (imm == 131) {
+                /* VFPU_CC keeps only bits 0..5 (PSP-3000 2026-11-08, issue #326, probe case
+                 * vfpu-cc-cmov: mtvc then mfvc read back written & 0x3f in every cell). */
+                s->vfpuCtrl[3] = value & 0x3fu;
             } else s->vfpuCtrl[imm - 128] = value;
             return SR_VFPU_COMPUTE;
         }

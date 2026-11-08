@@ -150,6 +150,10 @@ static inline uint32_t sr_vfpu_to_word(float x, unsigned mode, unsigned scale) {
     const uint32_t bits = sr_float_bits(x);
     uint32_t invalid_result = 0u;
     if (sr_float_invalid_word(bits, &invalid_result)) return invalid_result;
+    /* A PSP-3000 run (2026-11-08, issue #326, probe case vfpu-convert) flushed a denormal
+     * input of either sign to zero before the conversion in all four modes: vf2iu of
+     * 0x00000001 and vf2id of 0x80000001 give 0, not 1 and -1. */
+    if (((bits >> 23) & 0xffu) == 0u) return 0u;
     return sr_fp_to_s32(
         ldexp(sr_finite_float_to_double(bits), (int)(scale & 31u)), mode
     );

@@ -198,7 +198,9 @@ static int check_cop2_control_transfers(void) {
         s.r[5] = value;
         CHECK(sr_vfpu_interp(&s, cop2_transfer(7, 5, 128 + i)) == SR_VFPU_COMPUTE,
               "mtvc accepts every VFPU control register");
-        CHECK(s.vfpuCtrl[i] == value, "mtvc writes the selected VFPU control register");
+        /* VFPU_CC (3) keeps only bits 0..5; see check_vfpu_cc_write_mask. */
+        CHECK(s.vfpuCtrl[i] == (i == 3 ? (value & 0x3fu) : value),
+              "mtvc writes the selected VFPU control register");
     }
 
     setup_state(&s);
@@ -208,6 +210,28 @@ static int check_cop2_control_transfers(void) {
     CHECK(memcmp(&s, &before, sizeof(s)) == 0,
           "invalid mfvc leaves the complete CpuState unchanged");
     bad |= memcmp(&s, &before, sizeof(s)) != 0;
+    return bad;
+}
+
+static int check_vfpu_cc_write_mask(void) {
+    /* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
+     * register entry is not in this tree yet): mtvc then mfvc on VFPU_CC (control register 3)
+     * read back written & 0x3f in every cell. */
+    static const uint32_t written[] = {0x00u, 0x3fu, 0x15u, 0x2au, 0x01u, 0x10u, 0x20u,
+                                       0x40u, 0x80u, 0xffu, 0x100u, 0xffffffffu};
+    CpuState s;
+    int bad = 0;
+    for (size_t i = 0; i < sizeof(written) / sizeof(written[0]); i++) {
+        setup_state(&s);
+        s.r[5] = written[i];
+        CHECK(sr_vfpu_interp(&s, cop2_transfer(7, 5, 128 + 3)) == SR_VFPU_COMPUTE,
+              "mtvc accepts VFPU_CC");
+        s.r[6] = 0xa5a5a5a5u;
+        CHECK(sr_vfpu_interp(&s, cop2_transfer(3, 6, 128 + 3)) == SR_VFPU_COMPUTE,
+              "mfvc reads VFPU_CC");
+        CHECK(s.r[6] == (written[i] & 0x3fu), "VFPU_CC reads back the written value and 0x3f");
+        bad |= s.r[6] != (written[i] & 0x3fu);
+    }
     return bad;
 }
 
@@ -743,6 +767,19 @@ static int check_vf2i_conversions(void) {
         {"vf2in negative infinity", 0xff800000u, 0u, 0u, 0x80000000u},
         {"vf2in NaN", 0x7fc00000u, 0u, 0u, 0x7fffffffu},
         {"vf2in signaling NaN", 0x7f800001u, 0u, 0u, 0x7fffffffu},
+        /* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-convert; its
+         * register entry is not in this tree yet): a denormal input of either sign converts
+         * as zero in all four modes, and either sign of NaN gives 0x7fffffff. */
+        {"vf2in +denormal", 0x00000001u, 0u, 0u, 0x00000000u},
+        {"vf2in -denormal", 0x80000001u, 0u, 0u, 0x00000000u},
+        {"vf2iz +denormal", 0x00000001u, 1u, 0u, 0x00000000u},
+        {"vf2iz -denormal", 0x80000001u, 1u, 0u, 0x00000000u},
+        {"vf2iu +denormal not ceiled", 0x00000001u, 2u, 0u, 0x00000000u},
+        {"vf2iu -denormal", 0x80000001u, 2u, 0u, 0x00000000u},
+        {"vf2id +denormal", 0x00000001u, 3u, 0u, 0x00000000u},
+        {"vf2id -denormal not floored", 0x80000001u, 3u, 0u, 0x00000000u},
+        {"vf2iu largest denormal scaled", 0x007fffffu, 2u, 31u, 0x00000000u},
+        {"vf2in negative quiet NaN", 0xffc00000u, 0u, 0u, 0x7fffffffu},
     };
     static const int host_modes[] = {
         FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO,
@@ -2846,6 +2883,7 @@ int main(void) {
     bad |= check_vrndi_rule_cells();
     bad |= check_vfpu_forms_measured();
     bad |= check_cop2_control_transfers();
+    bad |= check_vfpu_cc_write_mask();
     bad |= check_quad_memops();
     bad |= check_vcrs_widths();
     bad |= check_vasin_measured_domain_words();
