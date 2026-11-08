@@ -545,8 +545,8 @@ present commits the frame to guest VRAM, so a game that copies its screen (a sav
 preset. Editing one of the rows a preset sets makes it CUSTOM, which means the rows apply in every session; GAME
 FULLSCREEN does so only under HANDHELD, the one preset that sets it. While a preset is chosen, the page's notice
 line says that it is used in Enhanced and Ace, names the parts it turns on and off, and says that Authentic uses
-the rows (`HIGH is used in Enhanced and Ace, with Crisp system text on and Sharper enlarging off. Authentic uses
-your own display settings.`, the longest, on one line at 960 x 540). The settings file keeps the
+the rows, in short words (`High is used in Enhanced and Ace, with crisp text on and FSR 1 off. Authentic uses your
+settings.`, the longest, on one line at 960 x 540 and 853 x 480). The settings file keeps the
 preset's name beside the rows, and a file without it, or with a name this build doesn't know, loads as CUSTOM. The
 values are starting points, to be tuned by measurement on real titles. They live in one table,
 `k_graphics_presets` in `src/player/player_state.c`:

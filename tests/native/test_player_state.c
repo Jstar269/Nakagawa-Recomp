@@ -7891,12 +7891,13 @@ static void test_graphics_presets(void) {
             assert(player_app_graphics_preset_note(app, note, sizeof(note)));
             assert(strstr(note, row->label) != NULL &&
                    strstr(note, " is used in Enhanced and Ace") != NULL &&
-                   strstr(note, "Authentic uses your own display settings.") != NULL);
-            assert(strstr(note, "Crisp system text") != NULL);
-            assert((strstr(note, "Sharper enlarging on") != NULL) ==
-                   (row->part[PLAYER_PART_UPSCALE] == 1));
-            assert((strstr(note, "Sharper enlarging off") != NULL) ==
-                   (row->part[PLAYER_PART_UPSCALE] == 0));
+                   strstr(note, "Authentic uses your settings.") != NULL);
+            assert(strcmp(note + strlen(row->label),
+                          row->part[PLAYER_PART_UPSCALE] == 1
+                              ? " is used in Enhanced and Ace, with crisp text and FSR 1 on. "
+                                "Authentic uses your settings."
+                              : " is used in Enhanced and Ace, with crisp text on and FSR 1 off. "
+                                "Authentic uses your settings.") == 0);
 
             /* Authentic: the session's config and launch line equal Custom's with the same
                rows, under every preset. The library's parts are the opposite of the preset's,
@@ -8080,7 +8081,7 @@ static void test_graphics_presets(void) {
     assert(back->settings.resolution_scale == 1);
     assert(strcmp(player_app_graphics_preset_label(back), "Ultra") == 0);
     assert(player_app_graphics_preset_note(back, note, sizeof(note)) &&
-           strstr(note, "FSR 1") != NULL);
+           strstr(note, "FSR 1 on") != NULL);
 
     /* The rows a file holds are kept as they are beside its preset. */
     write_text_file(path,

@@ -832,8 +832,9 @@ the guest's frame, guest VRAM and captures are byte for byte what they are with 
 recording (`SR_VIDEOREC_DIR`) is enlarged by FSR 1 too, at the recording's size, and its
 `record.json` names the filter ([DEBUGGING.md](DEBUGGING.md)). The pause
 overlay is drawn at the window's size on the CPU, so the paused picture is not upscaled and looks
-softer than the running one. Its cost is small: from 1920x1088 to 3840x2160, EASU and RCAS took
-0.40 ms per present on an RTX 3080 (`fsr1-selftest`). An unknown value, or a device without
+softer than the running one. Its cost is small. On an RTX 3080, EASU and RCAS took 0.40 ms per present from
+1920x1088 to 3840x2160, 0.20 ms to 2560x1440, 0.11 ms from 960x544 to 1920x1080 and 0.06 ms to 1280x800
+(`fsr1-selftest`, which times each graphics preset's sizes). An unknown value, or a device without
 compute, leaves it off with a line in the log; so does a size whose images cannot be made, which
 is then not tried again. The launcher turns it off for an authentic session, and a run with it on
 is stamped as enhanced (`ACE_MODE: present upscale fsr1`), which `boot_gate.py` reads. The picture

@@ -2522,15 +2522,18 @@ bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!row) return false;
-    /* The parts it sets, by their rows' names: "with A and B on", or "with A on and B off".
-       One line, so the page still fits 960 x 540 (test_player_screens.c). */
+    /* The parts it sets, "with A and B on" or "with A on and B off", in short words (crisp
+       text, FSR 1): the line must stay one line, so the page fits 960 x 540 and 853 x 480
+       (test_player_screens.c). */
     char list[2][96] = {"", ""}; /* [0] the parts it turns on, [1] those it turns off */
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         if (row->part[p] < 0) continue;
         char *into = list[row->part[p] != 0 ? 0 : 1];
         size_t used = strlen(into);
-        int w = snprintf(into + used, sizeof(list[0]) - used, "%s%s", used ? " and " : "",
-                         player_enhanced_part(p)->name);
+        const char *word = p == PLAYER_PART_TEXT      ? "crisp text"
+                         : p == PLAYER_PART_UPSCALE ? "FSR 1"
+                                                    : player_enhanced_part(p)->name;
+        int w = snprintf(into + used, sizeof(list[0]) - used, "%s%s", used ? " and " : "", word);
         if (w <= 0 || (size_t)w >= sizeof(list[0]) - used) return false;
     }
     char with[224] = "";
@@ -2540,8 +2543,8 @@ bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap
         snprintf(with, sizeof(with), ", with %s %s", list[0][0] ? list[0] : list[1],
                  list[0][0] ? "on" : "off");
     }
-    int n = snprintf(out, cap, "%s is used in Enhanced and Ace%s. Authentic uses your own display "
-                     "settings.", row->label, with);
+    int n = snprintf(out, cap, "%s is used in Enhanced and Ace%s. Authentic uses your settings.",
+                     row->label, with);
     if (n <= 0 || (size_t)n >= cap) {
         out[0] = '\0';
         return false;
