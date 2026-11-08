@@ -2429,17 +2429,12 @@ class GeneratedCallDepthTests(unittest.TestCase):
             lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107,
             codegen_args=omit_h,
         )
-        # N2: the handoff writes H's entry $sp back over the $sp longjmp loaded. P's tail
-        # call into longjmp releases H's restore too, so the shape is P calling longjmp,
-        # whose note of leaving its frame stays at P's call site.
-        self._assert_mutant_fails(
-            "N2-the-handoff-restores-after-a-return-elsewhere", calls, (0,),
-            {"guest_interp.c": ("if (owes && !returned_elsewhere && !released) s->r[29] = entry_sp;",
-                                "if (owes && !released) s->r[29] = entry_sp;")},
-            lambda r: r[0][0] != 0 or r[0][2].get("v0") != 0x107
-            or r[0][2].get("v1") != _PROBE_SP,
-            codegen_args=omit_h,
-        )
+        # N2 (the handoff writes H's entry $sp back after a return elsewhere) no longer
+        # changes these chains: since #1949's limit 2, P's tail call into longjmp releases
+        # H's restore ("tail"), and when P calls longjmp ("call") F's setjmp frame resumes at
+        # the $sp longjmp loaded either way. Measured at 712f0b630: both
+        # shapes, interpreted H, mutant and source alike end v0 = 0x107, v1 = _PROBE_SP. The
+        # guard stays for exits that note no release (the stack census, the LLVM backend).
 
     def test_an_eret_into_the_rest_of_an_interpreted_callee_keeps_its_call(self):
         # H lowers $sp and executes `break`. The handler, native or interpreted, steps EPC
