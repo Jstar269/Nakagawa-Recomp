@@ -11,6 +11,7 @@
 #include "nk_library.h"
 #include "nk_disc_verify.h"
 #include "nk_launch.h"
+#include "nk_steam_shortcuts.h"
 #include "nk_font.h"
 #include "input_settings.h"
 #include "package_builder.h"
@@ -823,6 +824,9 @@ struct PlayerApp {
     /* Directory holding the player executable; the package builder finds
        tools/nk_cli.py relative to it. Empty when unknown. */
     char install_root[MAX_PATH_LEN];
+    /* The folder this process was started with --user-data-root, absolute, or empty
+       for the default (or portable) folder. A Steam shortcut passes it on (#2152). */
+    char user_data_root[MAX_PATH_LEN];
     /* Read-only package root beside the player executable. Bundled showcase
        records are transient and never enter the user's persisted library. */
     char showcase_root[MAX_PATH_LEN];
@@ -2226,5 +2230,93 @@ size_t player_dev_log_text(const PlayerApp *app, char *out, size_t out_size);
 bool player_dev_log_save(PlayerApp *app);
 bool player_app_open_developer_log(PlayerApp *app);  /* false without developer mode */
 void player_app_close_developer_log(PlayerApp *app);
+
+/* ---- Start one game directly: --launch-title (#2152) ----
+ *
+ * `nakagawa_player --launch-title=<value>` starts one library game without the launcher
+ * window, through the same package check and launch as PLAY, and waits for the game to end,
+ * so a Steam shortcut tracks the game while it runs. The value is the game's disc ID, or
+ * "<disc ID>:<SHA-1 of the image>" when another image in the library has that disc ID (a
+ * retail disc beside its fan translation). Library indexes change as games come and go, so a
+ * shortcut never names one. */
+#define PLAYER_LAUNCH_TITLE_ARG "--launch-title="
+#define PLAYER_LAUNCH_TITLE_VALUE_MAX (NK_MAX_DISC_ID_LEN + 48)
+
+typedef enum {
+    PLAYER_LAUNCH_TITLE_FOUND = 0,
+    PLAYER_LAUNCH_TITLE_MALFORMED,   /* not a disc ID with an optional :SHA-1 */
+    PLAYER_LAUNCH_TITLE_MISSING,     /* no game in the library has it */
+    PLAYER_LAUNCH_TITLE_AMBIGUOUS    /* several images have the disc ID; the value needs :SHA-1 */
+} PlayerLaunchTitleResult;
+
+/* The value that names the user's library game at game_index. False for a bundled demo or
+ * sample, or a disc ID that is not letters, digits, '-' and '_'. */
+bool player_app_launch_title_value(const PlayerApp *app, int game_index, char *out,
+                                   size_t out_size);
+/* The library game a --launch-title value names. `message` (optional) gets a sentence for the
+ * user when it is not FOUND. */
+PlayerLaunchTitleResult player_app_find_launch_title(const PlayerApp *app, const char *value,
+                                                     int *game_index, char *message,
+                                                     size_t message_size);
+
+/* ---- Add to Steam (#2152) ----
+ *
+ * The title page's Add to Steam writes one non-Steam shortcut for the game into the user's
+ * local Steam library (src/core/nk_steam_shortcuts.h): this program, started in its own folder
+ * with --launch-title for the game (and --user-data-root when this process has one). Steam is
+ * found from this PC's own settings; nothing is downloaded and no network call is made. The
+ * shortcut carries no picture of its own: the player keeps disc art in memory only
+ * (player_ui_art.h), so Steam shows the executable's icon. */
+typedef enum {
+    PLAYER_STEAM_READY = 0,         /* Steam and an account were found; nothing written yet */
+    PLAYER_STEAM_ADDED,             /* a new shortcut */
+    PLAYER_STEAM_UPDATED,           /* the game's shortcut from another Nakagawa folder points here */
+    PLAYER_STEAM_ALREADY,           /* the same shortcut is there: nothing written */
+    PLAYER_STEAM_NOT_A_GAME,        /* a demo or sample, or a disc ID a shortcut cannot name */
+    PLAYER_STEAM_UNSUPPORTED,       /* this system cannot find Steam by itself */
+    PLAYER_STEAM_NOT_FOUND,         /* Steam is not installed for this user */
+    PLAYER_STEAM_NO_ACCOUNT,        /* no account has signed in to Steam on this PC */
+    PLAYER_STEAM_RUNNING,           /* Steam runs (or may): nothing written */
+    PLAYER_STEAM_UNREADABLE,        /* Steam's file does not parse or is too large: left alone */
+    PLAYER_STEAM_BACKUP_FAILED,     /* no verified backup, so nothing written */
+    PLAYER_STEAM_WRITE_FAILED,      /* the new file could not be written or did not verify */
+    PLAYER_STEAM_NO_PROGRAM         /* this program's own path is unknown or unusable */
+} PlayerSteamOutcome;
+
+#define PLAYER_STEAM_NAME_MAX 64u
+#define PLAYER_STEAM_OPTIONS_MAX (MAX_PATH_LEN + 96)
+
+typedef struct {
+    char disc_id[NK_MAX_DISC_ID_LEN];   /* the game the plan is for */
+    char app_name[NK_MAX_TITLE_LEN];
+    char exe[NK_MAX_PATH];
+    char start_dir[NK_MAX_PATH];
+    char launch_options[PLAYER_STEAM_OPTIONS_MAX];
+    char root[NK_MAX_PATH];             /* Steam's folder */
+    NkSteamAccount accounts[NK_STEAM_ACCOUNT_CAP];
+    char account_names[NK_STEAM_ACCOUNT_CAP][PLAYER_STEAM_NAME_MAX]; /* "" when unnamed */
+    size_t account_count;
+    bool ready;                         /* Steam and an account were found: Add can run */
+    bool portable;                      /* moving the folder needs Add to Steam again */
+    PlayerSteamOutcome outcome;
+    char backup_path[NK_MAX_PATH];      /* the last add's backup, or "" */
+} PlayerSteamPlan;
+
+/* Fills plan for the game: its shortcut, Steam's folder and the accounts, and returns
+ * plan->outcome (READY, or why nothing can be added). steam_root NULL finds Steam on this PC;
+ * exe NULL is this program (a test names both). Writes nothing. */
+PlayerSteamOutcome player_app_plan_steam_shortcut(const PlayerApp *app, int game_index,
+                                                  const char *steam_root, const char *exe,
+                                                  PlayerSteamPlan *plan);
+/* Adds or updates the shortcut for plan->accounts[account], after a verified backup, unless
+ * Steam runs (running NULL asks nk_steam_client_running). `stamp` names the backup
+ * (YYYYMMDD-HHMMSS). Returns and records the outcome; a READY plan is needed. */
+PlayerSteamOutcome player_steam_add(PlayerSteamPlan *plan, size_t account,
+                                    NkSteamRunningFn running, const char *stamp);
+/* The plain-words sentence for plan->outcome: what happened and what to do. Paths in the
+ * user's profile are shown with the profile folder shortened (player_display_text). */
+size_t player_steam_outcome_text(const PlayerSteamPlan *plan, char *out, size_t out_size);
+/* Whether the outcome is a success the user can act on (ADDED, UPDATED, ALREADY). */
+bool player_steam_outcome_ok(PlayerSteamOutcome outcome);
 
 #endif /* NAKAGAWA_PLAYER_STATE_H */
