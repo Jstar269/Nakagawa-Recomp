@@ -17,11 +17,21 @@
  * own lattice, one rebuilt texel under each device pixel centre); a draw whose tile is not ready,
  * was refused, or is stale keeps today's picture, exactly.
  *
- * Tile validity: a tile belongs to the entry content (e->hash) it was checked against. When the
- * guest rewrites the page, the entry's hash changes; the next draw decodes the page once, compares
+ * Tile validity: a tile belongs to the entry content (its generation, e->gen) it was checked against. e->gen is a number
+ * the texture cache hands out each time it decodes and uploads the entry's texels (a new entry, or a
+ * rewrite found on lookup), never reused by another entry: the cache's content hash samples part of a
+ * page, so a rewrite can leave it unchanged, and an address can name another entry after an eviction.
+ * When the guest rewrites the page, the entry's generation changes; the next draw decodes the page once, compares
  * every tile's texels with the ones it was built from, keeps the tiles whose texels are unchanged
  * and drops the rest to be rebuilt. A tile is never bound for content it was not built from.
  */
+
+/* The entry content a tile is keyed on: the cache's generation (see above). */
+#ifdef NK_GLYPH_GPU_MUTANT_KEY_ON_HASH
+#define GL_KEY(e) ((e)->hash)   /* gpu-glyph-mutant: the sampled content hash, which a rewrite can leave unchanged */
+#else
+#define GL_KEY(e) ((e)->gen)
+#endif
 
 #define GL_MAX_TILES 768
 #define GL_IDX 2048u   /* a power of two, more than GL_MAX_TILES */
@@ -31,7 +41,7 @@ typedef struct GlTile {
     uint16_t x, y, w, h;      /* the rectangle, in texels of the page */
     uint8_t state, verdict;   /* GL_TILE_*, NkGlyphVerdict */
     uint64_t rect_hash;       /* of the page's texels in the rectangle when it was checked */
-    uint64_t entry_hash;      /* the entry content it was checked against */
+    uint64_t entry_gen;      /* the entry content (generation) it was checked against */
 } GlTile;
 
 typedef struct GlSet {
@@ -39,7 +49,7 @@ typedef struct GlSet {
     VkImageLayout layout;
     int factor;
     uint64_t bytes;           /* budget the image holds; the image handles stay null until a tile passes */
-    uint64_t synced_hash;     /* the entry content every tile was last compared with */
+    uint64_t synced_gen;     /* the entry content every tile was last compared with */
     int n;
     GlTile t[GL_MAX_TILES];
     uint16_t idx[GL_IDX];     /* open-addressed table of tile numbers + 1 */
@@ -94,13 +104,13 @@ static GlTile *gl_add(GlSet *g, int x, int y, int w, int h) {
  * decode, not N). It is the glyph code's own, so the texture upload's scratch is never overwritten. */
 static uint32_t s_gl_page[512 * 512];
 static const TexEnt *s_gl_page_e;
-static uint64_t s_gl_page_hash;
+static uint64_t s_gl_page_gen;
 
 static void gl_decode(TexEnt *e) {
-    if (s_gl_page_e == e && s_gl_page_hash == e->hash) return;
+    if (s_gl_page_e == e && s_gl_page_gen == GL_KEY(e)) return;
     ge_decode_tex_rgba(s_gl_page);
     s_gl_page_e = e;
-    s_gl_page_hash = e->hash;
+    s_gl_page_gen = GL_KEY(e);
     s_cnt_gl_decodes++;
 }
 
@@ -266,16 +276,16 @@ static void gl_sync(TexEnt *e) {
     GlSet *g = e->gl;
     for (int i = 0; i < g->n; i++) {
         GlTile *t = &g->t[i];
-        if (t->entry_hash == e->hash) continue;
+        if (t->entry_gen == GL_KEY(e)) continue;
         if (gl_hash_rect(s_gl_page, e->w, t->x, t->y, t->w, t->h) == t->rect_hash) {
-            t->entry_hash = e->hash;
+            t->entry_gen = GL_KEY(e);
             s_cnt_gl_kept++;
         } else if (t->state != GL_TILE_STALE) {
             t->state = GL_TILE_STALE;
             s_cnt_gl_stale++;
         }
     }
-    g->synced_hash = e->hash;
+    g->synced_gen = GL_KEY(e);
 }
 
 /* A sprite draw, batch `b`, from the entry `e` its descriptor set belongs to, over the texel
@@ -301,8 +311,8 @@ static int glyph_apply(Batch *b, TexEnt *e, float ul, float ur, float vt, float 
 #ifdef NK_GLYPH_GPU_MUTANT_NO_HASH_CHECK
     if (!t) {   /* gpu-glyph-mutant: a tile is bound for whatever content the page holds now */
 #else
-    const int fresh = g && g->synced_hash == e->hash;
-    if (!(t && fresh && t->entry_hash == e->hash)) {
+    const int fresh = g && g->synced_gen == GL_KEY(e);
+    if (!(t && fresh && t->entry_gen == GL_KEY(e))) {
 #endif
         /* New, stale, or the page changed since the tiles were compared: the page is decoded once per content. */
         if (!gl_take_op()) return 0;
@@ -312,11 +322,11 @@ static int glyph_apply(Batch *b, TexEnt *e, float ul, float ur, float vt, float 
             return 0;
         }
         if (g->factor != f) return 0;
-        if (g->synced_hash != e->hash) {
+        if (g->synced_gen != GL_KEY(e)) {
             gl_sync(e);
             t = gl_find(g, x0, y0, w, h);
         }
-        if (!t || t->entry_hash != e->hash) {
+        if (!t || t->entry_gen != GL_KEY(e)) {
             if (!t) t = gl_add(g, x0, y0, w, h);
             if (!t) {
                 s_cnt_gl_full++;
@@ -325,7 +335,7 @@ static int glyph_apply(Batch *b, TexEnt *e, float ul, float ur, float vt, float 
             static uint32_t tile[GL_TILE_SIDE * GL_TILE_SIDE];
             const NkGlyphVerdict v = nk_glyph_rebuild(s_gl_page, e->w, e->h, x0, y0, w, h, f, tile);
             t->rect_hash = gl_hash_rect(s_gl_page, e->w, x0, y0, w, h);
-            t->entry_hash = e->hash;
+            t->entry_gen = GL_KEY(e);
             t->verdict = (uint8_t)v;
             if (v != NK_GLYPH_OK) {
                 t->state = GL_TILE_REFUSED;
@@ -345,13 +355,13 @@ static int glyph_apply(Batch *b, TexEnt *e, float ul, float ur, float vt, float 
                     s_cnt_gl_built++;
                 }
             }
-            g->synced_hash = e->hash;
+            g->synced_gen = GL_KEY(e);
         }
     }
 #ifdef NK_GLYPH_GPU_MUTANT_NO_HASH_CHECK
     if (!t || t->state != GL_TILE_VALID || !e->gl || !e->gl->img) return 0;
 #else
-    if (!t || t->state != GL_TILE_VALID || t->entry_hash != e->hash || !e->gl || !e->gl->img) return 0;
+    if (!t || t->state != GL_TILE_VALID || t->entry_gen != GL_KEY(e) || !e->gl || !e->gl->img) return 0;
 #endif
     e->pending = 1;
     b->dset = e->gl->set;

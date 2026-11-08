@@ -13,7 +13,8 @@
  *              a rectangle past the page;
  *   rewrite    a page the guest rewrites draws a rebuilt tile for the new texels and never the old
  *              one; a cell whose texels did not change keeps its tile;
- *   gradient   fade bars of one colour (shallow, steep, four texels) draw without a reversal along their rows;
+ *   rewrite-gap a rewrite the cache's content hash does not see (it samples part of a page) draws its new tile;
+ *   gradient   fade bars of one colour (shallow, steep, four texels, two) draw without a reversal along their rows;
  *   cap        more new rectangles in one present than NK_GLYPH_PER_PRESENT: exactly that many are
  *              rebuilt, the rest draw as before and are rebuilt by the next present;
  *   pool       the texture descriptor pool has a set for every image an entry can hold;
@@ -304,6 +305,39 @@ static int gst_cell_rewrite(void) {
     return 1;
 }
 
+/* A rewrite that misses the bytes tex_hash samples (it hashes 16 bytes in every 32 of this 2 KiB page, texels 4 to 7 of
+ * each 8 are not read): the cache sees the same hash and finds the rewrite through its shadow copy, and the glyph
+ * code must find it too and draw the new tile. */
+static int gst_cell_rewrite_gap(void) {
+    static uint32_t page[GST_W * GST_H], other[GST_W * GST_H], want0[GST_CW * 6 * GST_CH * 6], want1[GST_CW * 6 * GST_CH * 6];
+    gst_reset();
+    gst_page(page, 0, 1, 0x00FFFFFFu);
+    gst_put(GST_PAGE, page);
+    gst_state(GST_PAGE, GST_W, GST_H);
+    const uint64_t hash0 = tex_hash();
+    int ok = gst_cell(0, 20.0f, 20.0f);
+    (void)nk_glyph_rebuild(page, GST_W, GST_H, 0, 0, GST_CW, GST_CH, s_scale, want0);
+    gst_page(other, 2, 1, 0x00FFFFFFu);
+    for (int y = 0; y < GST_CH; y++)
+        for (int x = 4; x < 8; x++) page[y * GST_W + x] = other[y * GST_W + x];   /* texels no sample reads */
+    gst_put(GST_PAGE, page);
+    gst_state(GST_PAGE, GST_W, GST_H);
+    if (tex_hash() != hash0) return gst_fail("rewrite-gap", "the rewrite changed the sampled bytes; the cell tests nothing");
+    if (nk_glyph_rebuild(page, GST_W, GST_H, 0, 0, GST_CW, GST_CH, s_scale, want1) != NK_GLYPH_OK)
+        return gst_fail("rewrite-gap", "the rewritten glyph does not rebuild");
+    ok = ok && gst_cell(0, 100.0f, 20.0f);
+    uint32_t *dev = ok ? gst_device() : NULL;
+    if (!dev) return gst_fail("rewrite-gap", "draw or readback failed");
+    const int new_off = gst_off_tile(dev, 100, 20, GST_CW, GST_CH, want1);
+    const int old_match = gst_off_tile(dev, 100, 20, GST_CW, GST_CH, want0) == 0;
+    free(dev);
+    if (new_off || old_match)
+        return gst_fail("rewrite-gap", "after a rewrite the hash does not see: %d device pixels differ from the new tile, old tile %s",
+                        new_off, old_match ? "drawn" : "not drawn");
+    printf("gpu glyph selftest: PASS %-12s scale %d: a rewrite the content hash does not see draws its new tile\n", "rewrite-gap", s_scale);
+    return 1;
+}
+
 #define GST_BLOB_W 512   /* wide enough for NK_GLYPH_PER_PRESENT + 12 cells, 5 texels apart */
 /* A 4 x 6 soft blob of ink at cell i of a wide page. */
 static void gst_blob_page(uint32_t *p, int cells) {
@@ -317,12 +351,12 @@ static void gst_blob_page(uint32_t *p, int cells) {
 }
 
 /* Fade bars of one colour, each rising across its width: a shallow one (alpha 64 to 126 over 32 texels), a steeper one
- * (20 to 200 over 16) and a four-texel one (85 to 255). Whether a draw is a rebuilt tile or the game's own, no row may
+ * (20 to 200 over 16), a four-texel one (85 to 255) and a two-texel one (64, 191, 255). Whether a draw is a rebuilt tile or the game's own, no row may
  * reverse: a ribbed gradient is worse than the soft one. */
 static int gst_cell_gradient(void) {
     static uint32_t page[GST_BLOB_W * 16];
     static const struct { int w, base, step; const char *what; } bars[] = {
-        {32, 64, 2, "shallow"}, {16, 20, 12, "steep"}, {4, 85, 85, "four-texel"}};
+        {32, 64, 2, "shallow"}, {16, 20, 12, "steep"}, {4, 85, 85, "four-texel"}, {4, 64, 127, "two-texel"}};
     const int s = s_scale;
     for (size_t b = 0; b < sizeof(bars) / sizeof(bars[0]); b++) {
         const int w = bars[b].w;
@@ -455,7 +489,7 @@ int gegpu_glyph_selftest(void) {
         if (s_glyphs_asked) return gst_fail("setup", "SR_GLYPHS is on but the feature is off at render scale %d", s_scale);
         return gst_cell_sharp();
     }
-    int ok = gst_cell_pool() && gst_cell_sharp() && gst_cell_refuse() && gst_cell_rewrite() && gst_cell_gradient() &&
+    int ok = gst_cell_pool() && gst_cell_sharp() && gst_cell_refuse() && gst_cell_rewrite() && gst_cell_rewrite_gap() && gst_cell_gradient() &&
              gst_cell_cap();
     if (ok) {
         /* No guest byte moved: the page and the CLUT are what the CPU left. */

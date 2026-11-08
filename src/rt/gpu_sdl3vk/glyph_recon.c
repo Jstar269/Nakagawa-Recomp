@@ -16,12 +16,16 @@
  *      gradient, so a texel's largest step to a neighbour within its 3 x 3 decides (edge_weight):
  *      below NK_GLYPH_EDGE_LOW the block is the bicubic field itself, shifted by the offset that
  *      keeps the texel's coverage (clamped to 0..1), above NK_GLYPH_EDGE_HIGH it is the ramp, and
- *      in between the two are mixed. Both keep the block's mean, so the mix does too.
+ *      in between the two are mixed. Both keep the block's mean, so the mix does too. A texel in a
+ *      soft ramp (in_ramp: two partial texels side by side on a monotone run) is always the smooth
+ *      block, whatever its step: a ramp two texels wide has steps of 0.5 and more.
  *   3. Colour every pixel with the one colour the rectangle's inked texels share, so a pixel the
  *      blur reaches into a blank texel is not darkened by that texel's stray colour.
  * Everything is float arithmetic in a fixed order; nk_glyph_verify then checks the quantized result
- * against the input in integers (block means, colour, and no seam between two smooth texels that
- * runs back against a monotone gradient), so a wrong, stale or ribbed tile cannot be shown.
+ * against the input in integers: block means, colour, and along every monotone run of two
+ * texels the pixels may not run back by more than the slack (span_ribbed). That bounds a ribbed
+ * gradient or a mirrored block to the slack; it does not prove the tile is the one the rebuild
+ * makes.
  */
 #include "glyph_recon.h"
 
@@ -213,29 +217,57 @@ static float local_step(const uint32_t *page, int pw, int x0, int y0, int w, int
     return (float)m * (1.0f / 255.0f);
 }
 
+static int is_partial(int c) { return c >= NK_GLYPH_PARTIAL_LOW && c <= NK_GLYPH_PARTIAL_HIGH; }
+
+/* Is the pair of texels (x, y) and (x + dx, y + dy) a soft ramp: both partial, the four texels along the axis (the
+ * one before and the one after included) rising (+1) or falling (-1) without turning and differing between the
+ * pair, and the ramp uniform along its length (each of the two within NK_GLYPH_RAMP_UNIFORM of the texels beside
+ * it on either side)? 0 if not. A uniform ramp two or more texels wide is a shadow, a glow or a fade: an edge
+ * that falls inside one texel has a saturated neighbour, and a slanted or curved edge changes along its length. */
+static int soft_ramp(const uint32_t *page, int pw, int x0, int y0, int w, int h, int x, int y, int dx, int dy) {
+    const int a = cov_at(page, pw, x0, y0, w, h, x, y), b = cov_at(page, pw, x0, y0, w, h, x + dx, y + dy);
+    if (!is_partial(a) || !is_partial(b) || a == b) return 0;
+    const int p = cov_at(page, pw, x0, y0, w, h, x - dx, y - dy), q = cov_at(page, pw, x0, y0, w, h, x + 2 * dx, y + 2 * dy);
+    const int dir = b > a ? 1 : -1;
+    if ((a - p) * dir < 0 || (q - b) * dir < 0) return 0;
+    for (int side = -1; side <= 1; side += 2) {
+        const int sx = dy ? side : 0, sy = dx ? side : 0;
+        if (abs(cov_at(page, pw, x0, y0, w, h, x + sx, y + sy) - a) > NK_GLYPH_RAMP_UNIFORM ||
+            abs(cov_at(page, pw, x0, y0, w, h, x + dx + sx, y + dy + sy) - b) > NK_GLYPH_RAMP_UNIFORM)
+            return 0;
+    }
+    return dir;
+}
+
+/* Is texel (x, y) one of the pair of a soft ramp, along either axis? */
+static int in_ramp(const uint32_t *page, int pw, int x0, int y0, int w, int h, int x, int y) {
+#ifdef NK_GLYPH_MUTANT_NO_RAMP_RULE
+    (void)page; (void)pw; (void)x0; (void)y0; (void)w; (void)h; (void)x; (void)y;
+    return 0;   /* glyph-recon-mutant: a soft ramp is classified by its step alone */
+#else
+    return soft_ramp(page, pw, x0, y0, w, h, x, y, 1, 0) || soft_ramp(page, pw, x0, y0, w, h, x - 1, y, 1, 0) ||
+           soft_ramp(page, pw, x0, y0, w, h, x, y, 0, 1) || soft_ramp(page, pw, x0, y0, w, h, x, y - 1, 0, 1);
+#endif
+}
+
 #ifndef NK_GLYPH_MUTANT_NO_RIPPLE_CHECK
-/* Is the seam between texel (x, y) and the next one across (vert = 0) or down (vert = 1) ribbed? Two smooth texels
- * whose coverage runs one way through the four texels around the seam must have pixels on either side of it that
- * do not run back: a steep ramp fitted to each block of a gradient would. */
-static int seam_ribbed(const uint32_t *page, int pw, int x0, int y0, int w, int h, int factor, const uint32_t *tile,
+/* Do the pixels through the soft ramp of texel (x, y) and the next one across (vert = 0) or down (vert = 1) run
+ * back against it? Every line of the 2 f pixels of the two blocks is checked, so a block that is mirrored, or
+ * ramped over the run, shows. Only soft ramps are checked: beside a junction or a stroke end a monotone run says
+ * nothing about the pixels (the field is bicubic in both axes). */
+static int span_ribbed(const uint32_t *page, int pw, int x0, int y0, int w, int h, int factor, const uint32_t *tile,
                        int x, int y, int vert) {
     const int dx = vert ? 0 : 1, dy = vert ? 1 : 0;
-    const int p = cov_at(page, pw, x0, y0, w, h, x - dx, y - dy), a = cov_at(page, pw, x0, y0, w, h, x, y);
-    const int b = cov_at(page, pw, x0, y0, w, h, x + dx, y + dy), q = cov_at(page, pw, x0, y0, w, h, x + 2 * dx, y + 2 * dy);
-    const int step = b - a;
-    if (abs(step) < NK_GLYPH_RUN_MIN_STEP) return 0;
-    const int dir = step > 0 ? 1 : -1;
-    if ((a - p) * dir < 0 || (q - b) * dir < 0) return 0;   /* not one way through the four texels */
-    if (local_step(page, pw, x0, y0, w, h, x, y) >= NK_GLYPH_EDGE_LOW ||
-        local_step(page, pw, x0, y0, w, h, x + dx, y + dy) >= NK_GLYPH_EDGE_LOW)
-        return 0;                                            /* an edge is near: its ramp may sit on the seam */
+    const int dir = soft_ramp(page, pw, x0, y0, w, h, x, y, dx, dy);
+    if (!dir) return 0;
     const int tw = w * factor;
-    for (int k = 0; k < factor; k++) {
-        const int row = vert ? (y + 1) * factor - 1 : y * factor + k, col = vert ? x * factor + k : (x + 1) * factor - 1;
-        const int before = alpha_of(tile[(size_t)row * (size_t)tw + (size_t)col]);
-        const int after = alpha_of(tile[(size_t)(row + dy) * (size_t)tw + (size_t)(col + dx)]);
-        if ((after - before) * dir < -NK_GLYPH_RUN_SLACK) return 1;
-    }
+    for (int k = 0; k < factor; k++)
+        for (int i = 0; i + 1 < 2 * factor; i++) {
+            const int c0 = vert ? x * factor + k : x * factor + i, r0 = vert ? y * factor + i : y * factor + k;
+            const int before = alpha_of(tile[(size_t)r0 * (size_t)tw + (size_t)c0]);
+            const int after = alpha_of(tile[(size_t)(r0 + dy) * (size_t)tw + (size_t)(c0 + dx)]);
+            if ((after - before) * dir < -NK_GLYPH_RUN_SLACK) return 1;
+        }
     return 0;
 }
 #endif
@@ -271,8 +303,8 @@ NkGlyphVerdict nk_glyph_verify(const uint32_t *page, int pw, int ph, int x0, int
 #ifndef NK_GLYPH_MUTANT_NO_RIPPLE_CHECK
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
-            if (x + 1 < w && seam_ribbed(page, pw, x0, y0, w, h, factor, tile, x, y, 0)) return NK_GLYPH_REFUSE_DOWNSAMPLE;
-            if (y + 1 < h && seam_ribbed(page, pw, x0, y0, w, h, factor, tile, x, y, 1)) return NK_GLYPH_REFUSE_DOWNSAMPLE;
+            if (x + 1 < w && span_ribbed(page, pw, x0, y0, w, h, factor, tile, x, y, 0)) return NK_GLYPH_REFUSE_DOWNSAMPLE;
+            if (y + 1 < h && span_ribbed(page, pw, x0, y0, w, h, factor, tile, x, y, 1)) return NK_GLYPH_REFUSE_DOWNSAMPLE;
         }
 #endif
     return NK_GLYPH_OK;
@@ -373,7 +405,8 @@ NkGlyphVerdict nk_glyph_rebuild(const uint32_t *page, int pw, int ph, int x0, in
 #ifdef NK_GLYPH_MUTANT_NO_SMOOTH_MODE
             const float wedge = 1.0f;   /* glyph-recon-mutant: every block steepened */
 #else
-            const float wedge = edge_weight(local_step(page, pw, x0, y0, w, h, x, y));
+            const float wedge = in_ramp(page, pw, x0, y0, w, h, x, y) ? 0.0f
+                                                                : edge_weight(local_step(page, pw, x0, y0, w, h, x, y));
 #endif
 #ifdef NK_GLYPH_MUTANT_PLAIN_BICUBIC
             /* glyph-recon-mutant: the bicubic field itself, with no threshold fitted to the texel */

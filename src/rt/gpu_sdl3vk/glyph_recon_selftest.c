@@ -422,12 +422,20 @@ static void cell_gradient(void) {
     static const int fade6[] = {40, 80, 120, 160, 200, 240};          /* 6 texels */
     static const int glow3[] = {85, 170, 255, 170, 85};               /* a 3-texel glow around a solid texel */
     static const int glow5[] = {51, 102, 153, 204, 255, 204, 153, 102, 51};
+    static const int fade2[] = {64, 191, 255, 255};                   /* a 2-texel ramp: steps of 0.25, 0.5, 0.25 */
+    static const int glow2[] = {64, 191, 255, 191, 64};               /* a 2-texel glow: the same ramp each side */
+    static const int glow15[] = {40, 150, 255, 150, 40};              /* a 1.5-texel glow: steps of 0.43 */
+    static const int gauss[] = {8, 68, 187, 247, 247, 187, 68, 8};    /* a blurred drop shadow, sigma 0.75 */
     profile_cell("4-texel fade", fade4, 4, 2);
     profile_cell("6-texel fade", fade6, 6, 2);
     profile_cell("3-texel glow", glow3, 5, 2);
     profile_cell("5-texel glow", glow5, 9, 2);
+    profile_cell("2-texel fade", fade2, 4, 2);
+    profile_cell("2-texel glow", glow2, 5, 2);
+    profile_cell("1.5-texel glow", glow15, 5, 2);
+    profile_cell("Gaussian shadow", gauss, 8, 2);
     /* a stroke one texel wide and half covered (0 128 128 0, steps of 0.5) is an edge, not a gradient: it is rebuilt
-     * and keeps its coverage (the field is flat across it, so the result stays a soft hump, as the guest's was) */
+     * and keeps its coverage (the result is a peaked hump, softer than a stroke that falls in one texel; the cell pins that it is rebuilt) */
     {
         static const int stroke[] = {128, 128};
         static uint32_t page[32 * 8], hump[32 * 6 * 8 * 6];

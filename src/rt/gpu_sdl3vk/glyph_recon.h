@@ -57,12 +57,22 @@ extern "C" {
  * block (a ribbed gradient). The two values are a choice by those cases, not a tuned optimum. */
 #define NK_GLYPH_EDGE_LOW 0.35f
 #define NK_GLYPH_EDGE_HIGH 0.55f
-/* The seam check of nk_glyph_verify: between two smooth texels whose coverage runs one way through the four texels
- * around the seam, with a step of at least NK_GLYPH_RUN_MIN_STEP (8-bit), the pixels on either side of the seam
- * may not run back by more than NK_GLYPH_RUN_SLACK (8-bit). The slack is the bicubic's own ringing from a step two
- * texels away, at most about 7% of a full step, plus the quantizing. */
-#define NK_GLYPH_RUN_MIN_STEP 10
-#define NK_GLYPH_RUN_SLACK 19
+/* A texel is partial when its coverage (alpha) lies in this range. Two partial texels side by side whose coverage
+ * runs one way through the four texels around them, and does not change along the ramp (each within
+ * NK_GLYPH_RAMP_UNIFORM of the texels beside it), are a soft ramp two or more texels wide (a shadow, a glow, a
+ * fade), and are never rebuilt as an edge whatever their step: a ramp fitted to each block of such a run would
+ * start over at every block. An edge that falls inside a single texel has a saturated neighbour on each side, and
+ * a slanted or curved edge changes along its length. 16 and 239 are about 6% from blank and from solid, the least
+ * a texel can hold and be told from them; 26 (10%) is the change along a straight ramp that rounding of a
+ * shadow's corner or a drifting offset adds. Both are choices by those cases, not tuned optima. */
+#define NK_GLYPH_PARTIAL_LOW 16
+#define NK_GLYPH_PARTIAL_HIGH 239
+#define NK_GLYPH_RAMP_UNIFORM 26
+/* The span check of nk_glyph_verify: along every line of pixels through the two texels of a soft ramp, the pixels
+ * may not run back against it by more than NK_GLYPH_RUN_SLACK (8-bit). The slack is the Catmull-Rom kernel's own undershoot, its negative lobe
+ * 0.5 t^3 - 0.5 t^2 at most 0.074 of a step (19 of 255), and about a quarter more for the quantizing and for the
+ * second axis, which mixes in the rows beside the line. */
+#define NK_GLYPH_RUN_SLACK 24
 /* Rectangles checked or rebuilt per present, a fixed count, never a time budget: a run is the same
  * whatever the host's speed. A glyph past the count keeps today's look for that frame and is
  * offered again by the next draw. */

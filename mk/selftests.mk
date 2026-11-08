@@ -1060,7 +1060,8 @@ native-core-tests: glyph-recon-selftest glyph-recon-mutant
 # generates a glyph_recon.c without that guard. A build passes only when the run fails and prints the
 # named cell's FAIL line: the Ace gate, the VRAM refusal, the render scale 1 refusal, the mip chain
 # refusal, the two buffer refusals, the downsample check, the colour check, the hard-edge check, the
-# size check, a rebuild that steepens every block (a ribbed gradient), the ripple check, and a rebuild that does
+# size check, a rebuild that steepens every block (a ribbed gradient), a rebuild that fits the ramp rule off
+# (a two-texel ramp becomes two edges), the ripple check, and a rebuild that does
 # not keep each block's mean.
 GLYPH_RECON_MUTANTS := \
 	NO_ACE_GATE:"FAIL settings: SR_GLYPHS=on with Ace Mode off" \
@@ -1073,6 +1074,7 @@ GLYPH_RECON_MUTANTS := \
 	NO_HARD_EDGE_CHECK:"FAIL refuse-hard-edge: a bitmap font" \
 	NO_SIZE_CHECK:"FAIL refuse-size: 3 texels wide" \
 	NO_SMOOTH_MODE:"FAIL gradient: fade bar at factor 3" \
+	NO_RAMP_RULE:"FAIL gradient: 2-texel fade at factor" \
 	NO_RIPPLE_CHECK:"FAIL ripple: a sawtooth tile" \
 	PLAIN_BICUBIC:"FAIL rebuild: 4444 glyph 0 at factor 2: downsample"
 glyph-recon-mutant:
@@ -1208,8 +1210,8 @@ gpu-texscale-mutant: shader-verify $(RT_GE_O)
 # production path, at render scales 2, 3 and 4 (the renderer's most): a 1:1 sprite over a glyph cell draws the rebuilt tile
 # and nothing beside it changes it; a page in VRAM, a hard-edged or two-colour page, a magnified sprite
 # and a too-small or off-page rectangle draw exactly as without the feature and make no image; fade bars of
-# one colour (shallow, steep, four texels) draw without a ribbed row; a rewritten page draws its
-# new tile, never the old; more new rectangles than the per-present count are rebuilt over two presents;
+# one colour (shallow, steep, four texels, two) draw without a ribbed row; a rewritten page draws its
+# new tile, never the old, also when the rewrite misses the bytes the cache's content hash samples; more new rectangles than the per-present count are rebuilt over two presents;
 # no guest byte changes. At render scale 1 the setting is idle. An authentic run (Ace Mode off) rebuilds
 # nothing and draws byte for byte the same picture with SR_GLYPHS unset and on. In an Ace run with the
 # setting off (`--glyphs off`) the sharp cell must fail, which shows it is not vacuous. Exit 77 (SKIP)
@@ -1242,11 +1244,12 @@ gpu-glyph-selftest: shader-verify $(RT_GE_O)
 	echo "PASS gpu-glyph-selftest authentic: the same picture with SR_GLYPHS unset and on ($$a)"
 
 # gpu-glyph-mutant - the selftest above built with one guard removed per build, each of which must fail
-# the cell that names it: no entry-content check on a bound tile (rewrite), no per-present count (cap), no
+# the cell that names it: no entry-content check on a bound tile (rewrite), tiles keyed on the cache's sampled
+# content hash instead of its generation (rewrite-gap), no per-present count (cap), no
 # VRAM refusal, no hard-edge check, no colour check (refuse), and the Ace gate removed (authentic).
 GPU_GLYPH_MUTANTS := \
 	NK_GLYPH_GPU_MUTANT_NO_HASH_CHECK@--scale,4@"FAIL rewrite:" \
-	NK_GLYPH_GPU_MUTANT_NO_CAP@--scale,4@"FAIL cap:" \
+	NK_GLYPH_GPU_MUTANT_KEY_ON_HASH@--scale,4@"FAIL rewrite-gap:" 	NK_GLYPH_GPU_MUTANT_NO_CAP@--scale,4@"FAIL cap:" \
 	NK_GLYPH_MUTANT_ALLOW_VRAM@--scale,4@"FAIL refuse: a page in VRAM" \
 	NK_GLYPH_MUTANT_NO_HARD_EDGE_CHECK@--scale,4@"FAIL refuse: a hard-edged page" \
 	NK_GLYPH_MUTANT_NO_COLOUR_CHECK@--scale,4@"FAIL refuse: a two-colour page" \

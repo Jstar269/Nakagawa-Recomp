@@ -784,15 +784,21 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   all of it above 0.55, a mix between). An edge that falls inside one texel leaves a step of at least 0.5 to one side,
   and a gradient whose steps stay under 0.35 is at least three texels wide; the two numbers are a choice by those
   cases, not a tuned optimum. Elsewhere the block is the bicubic field itself, shifted so its mean is the texel's
-  coverage. A ramp that steep over a slow gradient would start over at every block and rib it. Every pixel with any coverage takes the
-  rectangle's one colour. The arithmetic is float in a fixed order, so a run is repeatable.
+  coverage. A ramp that steep over a slow gradient would start over at every block and rib it. A soft ramp two or
+  more texels wide has steps of 0.5 and more, so the step alone cannot tell it from an edge: two partial texels (alpha
+  16 to 239) side by side, on a run that rises or falls without turning through the four texels around them and does
+  not change along its length (each within 26 of the texels beside it), are always the smooth block. An edge that
+  falls inside one texel has a saturated neighbour on each side, and a slanted or curved edge changes along its
+  length, so neither is taken for a ramp. Every pixel with any coverage takes the rectangle's one colour. The
+  arithmetic is float in a fixed order, so a run is repeatable.
 - **Checked.** Before a tile is used it is compared with the guest's bytes: each texel of the rectangle must equal
   the mean of its block of the quantized tile within 2 of 255, every inked pixel must have the rectangle's colour,
-  and between two smooth texels whose coverage runs one way through the four texels around their seam, with a step of
-  at least 10 of 255, the pixels on either side of the seam may not run back by more than 19 of 255 (the bicubic's
-  own ringing from a step two texels away is at most about 7% of a full step, plus the quantizing; a ramp fitted to
-  each block of a gradient would run back by far more) (`nk_glyph_verify`). A tile that fails is refused
-  (`downsample`) and its draw is as the game drew it.
+  and along every line of pixels through the two texels of a soft ramp (as above) the pixels may not run back against
+  it by more than 24 of 255: the Catmull-Rom kernel's own undershoot is at most 19 of 255, and the rest is for the
+  quantizing and the second axis (`nk_glyph_verify`). That bounds a ribbed or mirrored block on a soft ramp to the
+  slack, so such a tile can still hold ribs under 24 of 255, and it is the only shape the check examines: beside a
+  junction or a stroke end a monotone run says nothing about the pixels, and there the block-mean and colour checks
+  are the guard. A tile that fails is refused (`downsample`) and its draw is as the game drew it.
 - **Reading.** The page is decoded from main RAM by the decoder the texture cache uses; a page in VRAM is refused
   before any decode, so the feature never causes a renderer readback. Nothing is written to guest memory, the CLUT or
   a texture source.
@@ -809,8 +815,11 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   A draw uses rebuilt texels only when its rectangle's tile is valid; otherwise the draw is exactly today's picture.
   Rectangles that overlap are separate tiles, each a rebuild of the same texels, so the one drawn last may overwrite
   part of the other with an equally valid version.
-- **Never stale, never waited on.** A tile belongs to the cache entry's content hash it was checked against. When the
-  guest rewrites the page the entry's hash changes; the next draw decodes the page once (every other new rectangle of
+- **Never stale, never waited on.** A tile belongs to the cache entry's content generation it was checked against.
+  The cache hands out a new generation, never reused by another entry, each time it decodes and uploads an entry's
+  texels; its content hash samples part of a page (16 bytes in every `size / 64`), so a rewrite can leave the hash
+  unchanged, and the cache finds such a rewrite through its shadow copy. When the guest rewrites the page the entry's
+  generation changes; the next draw decodes the page once (every other new rectangle of
   that content reuses the decode), compares each tile's texels
   with the ones it was built from, keeps the tiles whose texels are unchanged and rebuilds the rest when they are
   drawn, so the old tile is never drawn for new content. The rebuild runs on the renderer thread, not on a worker, so
@@ -821,27 +830,30 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   at exit `GLYPHS: draws (bound=, tiles_built=, tiles_kept=, tiles_stale=, page_decodes=, images=, capped=,
   budget_short=, tiles_full=)` and `GLYPHS: exit (refused: <name>=<count>, ...)`. Section 10.4 applies: the run is an Ace run.
 - **Limits.** One page holds at most 768 tiles; a draw past that is drawn as made (`tiles_full`). Text drawn as
-  triangles is not rebuilt. The feature is not part of the settings pages or the launch line.
+  triangles is not rebuilt. A stroke about one texel wide that straddles two texels (a common width in small fonts)
+  is sharpened less than one that falls in a single texel: on synthetic strokes the mean error against a supersampled
+  truth at 4x is 4.9 of 255 for a 1.0-texel stroke over ten offsets, against 3.4 when every block was fitted on its own
+  (and 1.5 to 2.1 for strokes of 1.2 texels and more). The feature is not part of the settings pages or the launch line.
 - **Tests.** `glyph-recon-selftest` checks the setting and its Ace gate, every named refusal, the classifier, and the
   rebuild at every factor for 4444, 8888, indexed 4-bit and indexed 8-bit pages (block means, colour, repeatability,
   fewer soft pixels than a bilinear enlargement, no dependence on neighbouring cells), the downsample check
-  against tampered and stale tiles, and soft single-colour art (a round shadow, fade bars of 64, 16, 6 and 4 texels,
-  glows of 3 and 5 texels) at every factor, whose rows must not reverse where the source does not, a bold "A" at 36
-  stroke widths and offsets that must be rebuilt, and a sawtooth tile that must fail the check, all on synthetic
-  glyphs. `glyph-recon-mutant` builds the selftest twelve times, each
-  without one guard (the Ace gate, VRAM, render scale 1, the mip chain, the two buffer formats, the downsample check,
-  the colour check, the hard-edge check, the size check, the smooth blocks, the ripple check, and a rebuild that fits
-  no threshold), and passes only when each fails the cell that names it. `gpu-glyph-selftest` runs the production
+  against tampered and stale tiles, and soft single-colour art (a round shadow, fade bars of 64 and 6 texels and of 4
+  and 2, glows of 1.5, 2, 3 and 5 texels, a blurred drop shadow) at every factor, whose rows must not reverse where
+  the source does not, a bold "A" at 36 stroke widths and offsets that must be rebuilt, and a sawtooth tile on a
+  steady gradient that must fail the check, all on synthetic glyphs. `glyph-recon-mutant` builds the selftest
+  thirteen times, each without one guard (the Ace gate, VRAM, render scale 1, the mip chain, the two buffer formats,
+  the downsample check, the colour check, the hard-edge check, the size check, the smooth blocks, the soft-ramp rule,
+  the ripple check, and a rebuild that fits no threshold), and passes only when each fails the cell that names it. `gpu-glyph-selftest` runs the production
   path on a Vulkan device at render scales 2, 3 and 4, and fails if the renderer runs at another scale than asked:
   a 1:1 sprite draws the rebuilt tile, device pixel for pixel, with and without other content beside
   the cell, and without the feature it does not; a page in VRAM, a hard-edged page, a two-colour page, a magnified
-  sprite, a rectangle too small and one past the page draw exactly as without the feature and make no image; a fade
-  bar of one colour draws without a ribbed row; the descriptor pool holds a set for every image an entry can have; a
-  rewritten page draws
-  its new tile and never the old, and an unchanged cell keeps its tile; the 48-per-present count; guest memory and
+  sprite, a rectangle too small and one past the page draw exactly as without the feature and make no image; fade
+  bars of one colour (shallow, steep, four texels and two) draw without a ribbed row; the descriptor pool holds a set
+  for every image an entry can have; a rewritten page draws its new tile and never the old, also when the rewrite
+  misses the bytes the cache's content hash samples, and an unchanged cell keeps its tile; the 48-per-present count; guest memory and
   the CLUT unchanged; the setting idle at 1x; and an authentic run that rebuilds nothing and draws the same picture
-  with `SR_GLYPHS` unset and on. `gpu-glyph-mutant` removes the content check of a bound tile, the per-present
-  count, and the VRAM, hard-edge, colour and Ace guards, each of which must fail its own cell.
+  with `SR_GLYPHS` unset and on. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
+  cache's sampled content hash instead of its generation, removes the per-present count, and the VRAM, hard-edge, colour and Ace guards, each of which must fail its own cell.
 
 ## 11. Guest-Visible Items
 
@@ -1179,17 +1191,17 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
 - **The cost of adding a key to the `SR_ACE` launch line.** Every key but `tier` is required (section 10.1), so a line
   an older launcher wrote has no `glyphs` and is refused whole: the run is Authentic with an
   `ACE_MODE: refused (<reason>)` line. A new required key also has to be written in every place that builds or checks
-  a full line: ten files outside the documents spell one out when this was written (among them `src/player/player_state.h`,
-  `src/rt/ace.h`, `tests/native/ace_selftest.c`, the launch-resolution and player-state tests, and the flight diff
-  and package cache tests), 42 times in all. Beyond those, the key needs its row in the parser's table in
+  a full line: files outside the documents spell one out (among them `src/player/player_state.h`, `src/rt/ace.h`,
+  `tests/native/ace_selftest.c`, the launch-resolution and player-state tests, and the flight diff and package cache
+  tests). Beyond those, the key needs its row in the parser's table in
   `src/rt/ace.c`, `AceConfig`, the canonical line, the report's `effective` block, the feature words, and the settings
   pages and per-title precedence of sections 10.5 and 10.9. Making the key optional, as `tier` is, avoids the first
-  cost and not the second, and changes the rule that every other key is required. That choice is made in the
-  launch-line pull request, with the library and per-title switches.
+  cost and not the second, and changes the rule that every other key is required. Which of the two is a decision
+  admission needs, with the library and per-title switches.
 - **Never silent.** A run with the feature on prints, after its `GLYPHS: on` line, one line naming it as guest-visible,
   on through the environment and not admitted under section 11.2. The `glyph-recon-selftest` settings cell pins it.
 - **What it changes:** the frame a present commits, wherever a sprite draw used a rebuilt glyph at a render scale of 2
-  to 6.
+  to 4.
 - **VRAM bytes:** differ in those frames, at those draws' pixels.
 - **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them.
   Texture readbacks and render-to-texture results are unchanged: a render target is never a page, and a page in VRAM
@@ -1202,4 +1214,4 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
 - **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run it stays off whatever the environment says.
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic. The private runs item 4 lists, before
   and after at render scale 4 on *Hot Shots Tennis* and *LittleBigPlanet*, and the library sweep, do not exist for
-  this item, and it may not be on by default before they do.
+  this item, and it may not be on by default without them.

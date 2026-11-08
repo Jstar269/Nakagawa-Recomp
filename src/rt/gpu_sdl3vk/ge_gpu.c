@@ -267,6 +267,7 @@ typedef struct {
     uint64_t range_lo[8], range_hi[8];     /* canonical source ranges, level 0 first (#282) */
     int range_n;
     int content_valid;
+    uint64_t gen;                          /* content generation: new on every decode-upload (glyph tiles are keyed on it) */
     int pending;                           /* referenced by not-yet-submitted batches */
     uint8_t *shadow;
     uint32_t shadow_bytes;
@@ -446,6 +447,7 @@ static int s_xs_smart2d = 0;
  * copy machinery: it is an image `repl_factor` times the guest texture, held in the entry's xs copy. */
 static NkTexRepl *s_repl = NULL;
 static uint64_t s_cnt_repl_bound = 0, s_cnt_repl_queued = 0;
+static uint64_t s_tex_gen = 0;             /* texture cache content generations handed out (TexEnt.gen) */
 static uint64_t s_xs_serial = 0;          /* content generations handed out */
 static int s_tex_bound_scale = 1;          /* factor of the set tex_get last returned */
 static TexEnt *s_tex_cur;                  /* the cache entry tex_bind_set last handled (glyph_apply checks its set) */
@@ -4569,6 +4571,7 @@ static VkDescriptorSet tex_get(void) {
             return s_white_set;
         }
         e->hash = hash;
+        e->gen = ++s_tex_gen;
         e->content_valid = 1;
         tex_note_valid();
         tex_shadow_store(e);
@@ -4594,6 +4597,7 @@ static VkDescriptorSet tex_get(void) {
     e->set = make_descriptor(e->view, e->smp, s_dpool_tex);
     if (!e->set) return s_white_set;
     e->key = key; e->hash = hash;
+    e->gen = ++s_tex_gen;
     e->w = w; e->h = h;
     e->addr = s_ge->tex_addr;
     e->bytes = tex_source_size();
