@@ -25998,6 +25998,380 @@ static void test_ge_mip_cells_match_psp(void) {
     sr_hle_test_ge_lists_reset();
 }
 
+/* ==== GE CLUT mip cells (PSP-GE-MIP-002, #2031) ====
+ * The software GE side of fixtures/psp_oracle/probe_ge_sample.c CASE=ge-clut-mip (154, commit
+ * 2795f150): the probe's cell table, texture and display list, with the CLUT tables at fixed
+ * guest addresses instead of the probe's statics. Each cell is one display list of
+ * project-written command words (no game data) in the ge-mip window: the 16x4 window x 16..31,
+ * y 8..11 of a 64x32 8888 colour buffer at VRAM offset GC_FB_OFFSET whose pixels are 0 before
+ * the list runs, one through-mode sprite with texture coordinates (0, 0) to (16, 4),
+ * REPLACE/RGBA, nearest filtering, clamped, at the constant level the cell names.
+ *
+ * Level L of the four-level texture holds index gc_base(format) + 4 L + (x & 3) in column x.
+ * CLUT entry k names k and its table: in an 8888 CLUT, R = k & 0xff, G = k >> 8, B = 0x80 for
+ * the main table and 0x40 for the background table; in a 4444 CLUT the raw entry is 0xf000 | k
+ * (main) or 0xf800 | k (background). Each list loads `bg_blocks` blocks of the background
+ * table, then `main_blocks` blocks of the main table. The result is the window. */
+
+#define GC_FB_OFFSET 0x00100000u   /* VRAM-relative colour buffer, stride 64, 32 rows */
+#define GC_ZB_OFFSET 0x00110000u   /* depth buffer pointer; depth test and writes are off */
+#define GC_STRIDE 64u
+#define GC_ROWS 32u
+#define GC_WX 16u                  /* window x 16..31, y 8..11 */
+#define GC_WY 8u
+#define GC_WW 16u
+#define GC_WH 4u
+#define GC_N 64u
+#define GC_LEVELS 4u
+#define GC_TEX_BYTES 12288u        /* T16: 64x64 + 32x32 + 16x16 + 8x8 texels of 2 bytes, padded */
+#define GC_TABLE_ENTRIES 1024u     /* 4096 bytes of 8888, 2048 of 4444: past the largest load */
+#define GC_LIST_WORDS 160u
+
+enum { GC_T4 = 4, GC_T8 = 5, GC_T16 = 6 };
+enum { GC_C4444 = 2, GC_C8888 = 3 };
+
+/* tex_format: TEXFORMAT's index format; clut_format: CLUTFORMAT bits 0-1; multi: TEXMODE bit
+   8; level: the constant level; bg_blocks, main_blocks: LOADCLUT counts (32-byte blocks);
+   csa: CLUTFORMAT bits 16-20; mask: CLUTFORMAT bits 8-15 (the shift is 0). */
+struct gc_cell {
+    const char *name;
+    uint8_t tex_format, clut_format, multi, level, bg_blocks, main_blocks, csa, mask;
+};
+
+#define GC_FAMILY(prefix, tf, cf, multi, bg, mainb, csa, mask)                         \
+    {prefix "-l0", tf, cf, multi, 0u, bg, mainb, csa, mask},                            \
+    {prefix "-l1", tf, cf, multi, 1u, bg, mainb, csa, mask},                            \
+    {prefix "-l2", tf, cf, multi, 2u, bg, mainb, csa, mask},                            \
+    {prefix "-l3", tf, cf, multi, 3u, bg, mainb, csa, mask}
+
+#define GC_CELL_COUNT 47u
+static const struct gc_cell gc_cells[GC_CELL_COUNT] = {
+    GC_FAMILY("t8-off", GC_T8, GC_C8888, 0u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t8-on", GC_T8, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t8-on-b40", GC_T8, GC_C8888, 1u, 0x40u, 0x40u, 0u, 0xffu),
+    GC_FAMILY("t4-off", GC_T4, GC_C8888, 0u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t4-on", GC_T4, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t4-on-small", GC_T4, GC_C8888, 1u, 0x20u, 0x02u, 0u, 0xffu),
+    GC_FAMILY("c16-t4-on", GC_T4, GC_C4444, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("c16-t8-on", GC_T8, GC_C4444, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    GC_FAMILY("t4-on-csa1", GC_T4, GC_C8888, 1u, 0x20u, 0x20u, 1u, 0xffu),
+    GC_FAMILY("t8-on-mask1f", GC_T8, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0x1fu),
+    GC_FAMILY("t16-on", GC_T16, GC_C8888, 1u, 0x20u, 0x20u, 0u, 0xffu),
+    {"cap32-csa16-b20", GC_T8, GC_C8888, 0u, 0u, 0x20u, 0x20u, 16u, 0xffu},
+    {"cap32-csa16-b40", GC_T8, GC_C8888, 0u, 0u, 0x40u, 0x40u, 16u, 0xffu},
+    {"cap16-csa16-b20", GC_T8, GC_C4444, 0u, 0u, 0x20u, 0x20u, 16u, 0xffu},
+};
+_Static_assert(sizeof(gc_cells) / sizeof(gc_cells[0]) == GC_CELL_COUNT, "GC_CELL_COUNT");
+
+static uint32_t gc_base(uint32_t tex_format)
+{
+    return tex_format == GC_T4 ? 0u : tex_format == GC_T8 ? 0x10u : 0x20u;
+}
+
+static uint32_t gc_side(uint32_t level)
+{
+    return 64u >> level;
+}
+
+/* Buffer width in texels: whole 16-byte rows. */
+static uint32_t gc_bufw(uint32_t tex_format, uint32_t level)
+{
+    const uint32_t min = tex_format == GC_T4 ? 32u : tex_format == GC_T8 ? 16u : 8u;
+    const uint32_t side = gc_side(level);
+    return side < min ? min : side;
+}
+
+/* Bytes of `texels` texels of `tex_format`. */
+static uint32_t gc_bytes(uint32_t tex_format, uint32_t texels)
+{
+    return tex_format == GC_T4 ? texels / 2u : tex_format == GC_T8 ? texels : texels * 2u;
+}
+
+static uint32_t gc_level_offset(uint32_t tex_format, uint32_t level)
+{
+    uint32_t off = 0;
+    for (uint32_t l = 0; l < level; l++) {
+        off += (gc_bytes(tex_format, gc_bufw(tex_format, l) * gc_side(l)) + 63u) & ~63u;
+    }
+    return off;
+}
+
+/* The texture block for `tex_format`: level L's texel (x, y) = gc_base + 4 L + (x & 3). */
+static void gc_texture(uint32_t tex_format, uint8_t *out)
+{
+    memset(out, 0, GC_TEX_BYTES);
+    for (uint32_t l = 0; l < GC_LEVELS; l++) {
+        uint8_t *base = out + gc_level_offset(tex_format, l);
+        const uint32_t bufw = gc_bufw(tex_format, l);
+        for (uint32_t y = 0; y < gc_side(l); y++) {
+            for (uint32_t x = 0; x < bufw; x++) {
+                const uint32_t index = gc_base(tex_format) + 4u * l + (x & 3u);
+                const uint32_t t = y * bufw + x;
+                if (tex_format == GC_T4) {
+                    base[t / 2u] |= (uint8_t)((index & 0xfu) << ((t & 1u) * 4u));
+                } else if (tex_format == GC_T8) {
+                    base[t] = (uint8_t)index;
+                } else {
+                    base[2u * t] = (uint8_t)index;
+                    base[2u * t + 1u] = (uint8_t)(index >> 8);
+                }
+            }
+        }
+    }
+}
+
+/* The probe's four CLUT tables, in guest RAM at main32, bg32, main16 and bg16. */
+static void gc_tables(uint32_t main32, uint32_t bg32, uint32_t main16, uint32_t bg16)
+{
+    for (uint32_t k = 0; k < GC_TABLE_ENTRIES; k++) {
+        MEM_W32(main32 + 4u * k, 0xff800000u | ((k >> 8) << 8) | (k & 0xffu));
+        MEM_W32(bg32 + 4u * k, 0xff400000u | ((k >> 8) << 8) | (k & 0xffu));
+    }
+    for (uint32_t k = 0; k < 2u * GC_TABLE_ENTRIES; k++) {
+        MEM_W16(main16 + 2u * k, (uint16_t)(0xf000u | (k & 0x3ffu)));
+        MEM_W16(bg16 + 2u * k, (uint16_t)(0xf800u | (k & 0x3ffu)));
+    }
+}
+
+static uint32_t gc_fbits(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+/* The cell's display list, as the probe's gc_list with the background and main tables at `bg`
+   and `mn`; returns the word count. Every state the draw reads is set. */
+static uint32_t gc_list(const struct gc_cell *c, uint32_t vtx, uint32_t tex, uint32_t bg,
+                        uint32_t mn, uint32_t *out)
+{
+    static const uint8_t off_units[12] = {0x17u, 0x1cu, 0x1du, 0x1fu, 0x20u, 0x21u,
+                                          0x22u, 0x23u, 0x24u, 0x25u, 0x27u, 0x28u};
+    const uint32_t full = (GC_STRIDE - 1u) | ((GC_ROWS - 1u) << 10);
+    uint32_t n = 0;
+#define GC_W(cmd, data) (out[n++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(data) & 0x00ffffffu))
+    GC_W(0x10, (vtx >> 8) & 0x000f0000u);
+    GC_W(0x9c, GC_FB_OFFSET);
+    GC_W(0x9d, GC_STRIDE);
+    GC_W(0xd2, 3u);
+    GC_W(0x9e, GC_ZB_OFFSET);
+    GC_W(0x9f, GC_STRIDE);
+    GC_W(0x15, 0);
+    GC_W(0x16, full);
+    GC_W(0xd4, 0);
+    GC_W(0xd5, full);
+    GC_W(0xd6, 0);
+    GC_W(0xd7, 0xffffu);
+    for (uint32_t i = 0; i < 12u; i++) {
+        GC_W(off_units[i], 0);
+    }
+    GC_W(0x50, 0);              /* flat shading */
+    GC_W(0xd3, 0);              /* clear mode off */
+    GC_W(0xe7, 1);              /* depth writes off */
+    GC_W(0xe8, 0);
+    GC_W(0xe9, 0);
+    GC_W(0xdb, 0x00ff0001u);    /* alpha test ALWAYS */
+    GC_W(0xd8, 1);              /* colour test ALWAYS */
+    GC_W(0xd9, 0);
+    GC_W(0xda, 0);
+    GC_W(0xdc, 0x00ff0001u);    /* stencil test ALWAYS */
+    GC_W(0xdd, 0);
+    GC_W(0xde, 1);              /* depth test ALWAYS */
+    GC_W(0xdf, 0x32u);
+    GC_W(0xe0, 0);
+    GC_W(0xe1, 0);
+    GC_W(0xe6, 3);              /* logic op COPY */
+    GC_W(0xcf, 0);
+    GC_W(0xcd, 0);
+    GC_W(0xce, 0);
+    GC_W(0x55, 0xffffffu);
+    GC_W(0x58, 0xffu);
+    /* The background load, then the main load (CBP, CBPH, LOADCLUT). */
+    GC_W(0xb0, bg);
+    GC_W(0xb1, (bg >> 8) & 0x000f0000u);
+    GC_W(0xc4, c->bg_blocks);
+    GC_W(0xb0, mn);
+    GC_W(0xb1, (mn >> 8) & 0x000f0000u);
+    GC_W(0xc4, c->main_blocks);
+    GC_W(0xc5, ((uint32_t)c->csa << 16) | ((uint32_t)c->mask << 8) | c->clut_format);
+    GC_W(0x1e, 1);              /* texture on */
+    GC_W(0xc0, 0);              /* UV mapping */
+    GC_W(0xc2, (3u << 16) | ((uint32_t)c->multi << 8));
+    GC_W(0xc3, c->tex_format);
+    for (uint32_t l = 0; l < GC_LEVELS; l++) {
+        const uint32_t a = tex + gc_level_offset(c->tex_format, l);
+        const uint32_t log2 = 6u - l;
+        GC_W(0xa0 + l, a);
+        GC_W(0xa8 + l, ((a >> 8) & 0x000f0000u) | gc_bufw(c->tex_format, l));
+        GC_W(0xb8 + l, (log2 << 8) | log2);
+    }
+    GC_W(0xc6, 0x004u);         /* nearest, nearest level */
+    GC_W(0xc7, 0x101u);         /* clamp u and v */
+    GC_W(0xc8, ((uint32_t)c->level << 20) | 1u);   /* constant level, bias = level (4.4) */
+    GC_W(0xd0, 0);
+    GC_W(0xc9, 0x103u);         /* REPLACE, RGBA */
+    GC_W(0xca, 0);
+    GC_W(0xcb, 0);              /* texture flush */
+    GC_W(0x4c, 0);
+    GC_W(0x4d, 0);
+    GC_W(0x12, 0x00800183u);    /* through, float uv, float position */
+    GC_W(0x01, vtx);
+    GC_W(0x04, (6u << 16) | 2u);
+    GC_W(0x0f, 0);
+    GC_W(0x0c, 0);
+#undef GC_W
+    return n;
+}
+/* ==== end of the GE CLUT mip cells ==== */
+
+/* PSP-GE-MIP-002 (#2031): the window digest each of the 47 cells left on a PSP-3000 (pspver
+ * 6.6.0; probe case ge-clut-mip, the 2026-11-06 run at 2795f150 on boot 134,
+ * docs/HARDWARE_ORACLE.md). Index k is gc_cells[k]. */
+static const struct {
+    const char *name;
+    uint64_t psp;
+} s_gc_psp[GC_CELL_COUNT] = {
+    {"t8-off-l0", 0xa8e993f3f2dac925ull},
+    {"t8-off-l1", 0x1c236fa487f24825ull},
+    {"t8-off-l2", 0x5a8993bcd0b60225ull},
+    {"t8-off-l3", 0x12a8e54e62370825ull},
+    {"t8-on-l0", 0xa8e993f3f2dac925ull},
+    {"t8-on-l1", 0x1c236fa487f24825ull},
+    {"t8-on-l2", 0x5a8993bcd0b60225ull},
+    {"t8-on-l3", 0x12a8e54e62370825ull},
+    {"t8-on-b40-l0", 0xf14fb059da3ef725ull},
+    {"t8-on-b40-l1", 0xf198f139b7771da5ull},
+    {"t8-on-b40-l2", 0x37565e7d8c8b6b25ull},
+    {"t8-on-b40-l3", 0xe25605f21100d625ull},
+    {"t4-off-l0", 0xb41f6ae82bf3a725ull},
+    {"t4-off-l1", 0x5b655ada521a0825ull},
+    {"t4-off-l2", 0xddc07f5b50913025ull},
+    {"t4-off-l3", 0x643885b87cc3f625ull},
+    {"t4-on-l0", 0xb41f6ae82bf3a725ull},
+    {"t4-on-l1", 0x1c236fa487f24825ull},
+    {"t4-on-l2", 0xf1efd2f02a9c1225ull},
+    {"t4-on-l3", 0xb155860de53ee425ull},
+    {"t4-on-small-l0", 0xb41f6ae82bf3a725ull},
+    {"t4-on-small-l1", 0x01d278a837eb4825ull},
+    {"t4-on-small-l2", 0x1245e3be6db71225ull},
+    {"t4-on-small-l3", 0xb52531f44a86e425ull},
+    {"c16-t4-on-l0", 0xab60eadd8986a325ull},
+    {"c16-t4-on-l1", 0xbc955b094450de25ull},
+    {"c16-t4-on-l2", 0x8db249fddb3a6725ull},
+    {"c16-t4-on-l3", 0xf5ae31dc9cdf2625ull},
+    {"c16-t8-on-l0", 0xa3dc683b95803b65ull},
+    {"c16-t8-on-l1", 0x925c4c591a08f325ull},
+    {"c16-t8-on-l2", 0xaf55be169aea5825ull},
+    {"c16-t8-on-l3", 0xd08f1bafa6e11c65ull},
+    {"t4-on-csa1-l0", 0xa8e993f3f2dac925ull},
+    {"t4-on-csa1-l1", 0x135d30b43e8e8825ull},
+    {"t4-on-csa1-l2", 0x05c09e367e774025ull},
+    {"t4-on-csa1-l3", 0x8ee451fecd5ff625ull},
+    {"t8-on-mask1f-l0", 0xa8e993f3f2dac925ull},
+    {"t8-on-mask1f-l1", 0x1c236fa487f24825ull},
+    {"t8-on-mask1f-l2", 0x5a8993bcd0b60225ull},
+    {"t8-on-mask1f-l3", 0x12a8e54e62370825ull},
+    {"t16-on-l0", 0x04b79a9487901325ull},
+    {"t16-on-l1", 0x135d30b43e8e8825ull},
+    {"t16-on-l2", 0xf1efd2f02a9c1225ull},
+    {"t16-on-l3", 0xecc27df7a80df625ull},
+    {"cap32-csa16-b20", 0xa8e993f3f2dac925ull},
+    {"cap32-csa16-b40", 0xf14fb059da3ef725ull},
+    {"cap16-csa16-b20", 0x66978870ac9ac365ull},
+};
+
+/* The cells a load of 0x40 blocks reaches: on the PSP every pixel is a grey ramp that matches
+ * neither table (docs/HARDWARE_ORACLE.md, PSP-GE-MIP-002 "Unexplained"). ge.c copies
+ * LOADCLUT's low six bits of blocks, none for 0x40, so the CLUT keeps the previous cell's
+ * entries; neither is claimed here. */
+static int gc_unexplained(const struct gc_cell *c)
+{
+    return c->bg_blocks == 0x40u || c->main_blocks == 0x40u;
+}
+
+void ge_test_set_multi_clut_mutant(int mutant);
+
+/* Every PSP-GE-MIP-002 cell through production dispatch and the software GE, under multi-CLUT
+ * rule `mutant` (0 the measured rule). Returns the cells whose window differs from the PSP's
+ * digest; *checked counts the cells compared, and the list and sync results go to *synced. */
+static unsigned gc_run_cells(int mutant, unsigned *checked, unsigned *names_ok, unsigned *synced)
+{
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    ge_test_set_multi_clut_mutant(mutant);
+    const uint32_t list = 0x08900000u, vtx = 0x08904000u, tex = 0x08910000u;
+    const uint32_t main32 = 0x08920000u, bg32 = 0x08921000u, main16 = 0x08922000u,
+                   bg16 = 0x08923000u;
+    const uint32_t fb = 0x04000000u + GC_FB_OFFSET;
+    gc_tables(main32, bg32, main16, bg16);
+    unsigned diverged = 0;
+    *checked = 0;
+    *names_ok = 1;
+    *synced = 1;
+    for (uint32_t k = 0; k < GC_CELL_COUNT; k++) {
+        const struct gc_cell *c = &gc_cells[k];
+        const int c16 = c->clut_format == GC_C4444;
+        uint32_t px[GC_N];
+        memset(SR_HOST(fb), 0, GC_STRIDE * GC_ROWS * 4u);
+        const float x0 = (float)GC_WX, y0 = (float)GC_WY;
+        const float verts[10] = {0.0f, 0.0f, x0, y0, 0.0f,
+                                 16.0f, 4.0f, x0 + (float)GC_WW, y0 + (float)GC_WH, 0.0f};
+        for (uint32_t i = 0; i < 10u; i++) MEM_W32(vtx + 4u * i, gc_fbits(verts[i]));
+        gc_texture(c->tex_format, (uint8_t *)SR_HOST(tex));
+        (void)gc_list(c, vtx, tex, c16 ? bg16 : bg32, c16 ? main16 : main32,
+                      (uint32_t *)SR_HOST(list));
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = list;
+        const uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = qid;
+        if ((qid & 0xFF000000u) != 0x35000000u || sr_syscall(&cpu, NID_SCE_GE_LIST_SYNC) != 0u)
+            *synced = 0;
+        if (strcmp(s_gc_psp[k].name, c->name) != 0) *names_ok = 0;
+        if (gc_unexplained(c)) continue;
+        for (uint32_t i = 0; i < GC_N; i++)
+            px[i] = MEM_R32(fb + ((GC_WY + i / GC_WW) * GC_STRIDE + GC_WX + i % GC_WW) * 4u);
+        (*checked)++;
+        const uint64_t digest = gm_digest(px);
+        if (digest != s_gc_psp[k].psp) {
+            diverged++;
+            if (mutant == 0) {
+                fprintf(stderr, "GE-CLUT-MIP %s software=0x%016llx psp=0x%016llx row 0:", c->name,
+                        (unsigned long long)digest, (unsigned long long)s_gc_psp[k].psp);
+                for (uint32_t i = 0; i < GC_WW; i++) fprintf(stderr, " %08x", (unsigned)px[i]);
+                fprintf(stderr, "\n");
+            }
+        }
+    }
+    ge_test_set_multi_clut_mutant(0);
+    sr_hle_test_ge_lists_reset();
+    return diverged;
+}
+
+/* PSP-GE-MIP-002 (#2031): every cell but the five 0x40-block ones matches the PSP under the
+ * measured multi-CLUT rule (ge.c clut_index), and each deliberately wrong rule fails some cell:
+ * 1 steps 16 entries per level for CLUT8 too, 2 ORs the step into the start offset instead of
+ * adding it, 3 has no per-level step (the model before #2031). */
+static void test_ge_clut_mip_cells_match_psp(void)
+{
+    unsigned checked = 0, names_ok = 0, synced = 0;
+    const unsigned diverged = gc_run_cells(0, &checked, &names_ok, &synced);
+    expect(names_ok, "PSP-GE-MIP-002 digest table rows name the cells in table order");
+    expect(synced, "every PSP-GE-MIP-002 list is accepted and completes");
+    expect(checked == GC_CELL_COUNT - 5u, "every PSP-GE-MIP-002 cell but the five 0x40-block loads is checked");
+    expect(diverged == 0, "every checked PSP-GE-MIP-002 cell matches the PSP window digest");
+    for (int mutant = 1; mutant <= 3; mutant++) {
+        unsigned mchecked = 0, mnames = 0, msynced = 0;
+        const unsigned wrong = gc_run_cells(mutant, &mchecked, &mnames, &msynced);
+        fprintf(stderr, "GE-CLUT-MIP mutant %d: %u of %u cells differ from the PSP\n", mutant, wrong,
+                mchecked);
+        expect(msynced && mchecked == checked && wrong > 0,
+               "each wrong PSP-GE-MIP-002 multi-CLUT rule fails at least one cell");
+    }
+}
+
 /* PSP-GE-RASTER-001 (#343): the window digest each cell left on a PSP-3000 (firmware 6.6.1,
  * probe case ge-raster, docs/HARDWARE_ORACLE.md). Index k is gr_cells[k]. */
 static const struct {
@@ -49563,6 +49937,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_raster_cells_match_psp();
     test_ge_mip_cells_software_contract();
     test_ge_mip_cells_match_psp();
+    test_ge_clut_mip_cells_match_psp();
     test_ge_block_transfer_span_atomicity();
     test_dcache_maintenance_notifies_renderer();
     test_icache_maintenance_returns_zero_for_every_range();
