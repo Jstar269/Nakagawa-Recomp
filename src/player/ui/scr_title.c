@@ -177,7 +177,11 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
     layout.padding_bottom = NK_UI_BODY_PAD_BOTTOM;
     layout.padding_left = gutter;
     layout.padding_right = gutter;
-    layout.scroll = page_scrolls(ui);
+    /* The body always scrolls between the bars (#2245): what a game's page shows varies
+       (the Enhancements card, the disc check, the compatibility notes, the stall notice), so
+       at the design text size it can still be taller than the room, and a body that did not
+       scroll pushed the prompt bar out of the window. A page that fits does not move. */
+    layout.scroll = true;
     if (nk_ui_begin_container(ui, TITLE_ID_BODY, &layout, NULL)) {
         /* Left column: the art and what the package needs. */
         layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(aside), sizing_grow(),

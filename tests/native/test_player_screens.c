@@ -255,7 +255,8 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                /* Whole pages for the window-fit sweep only. */
                FLOW_PAGE_LIBRARY, FLOW_PAGE_LIBRARY_FIND, FLOW_PAGE_TITLE, FLOW_PAGE_ABOUT,
                FLOW_PAGE_REMOVE,
-               FLOW_PAGE_STOP, FLOW_PAGE_TITLE_ACE,
+               FLOW_PAGE_STOP, FLOW_PAGE_TITLE_ACE, FLOW_PAGE_TITLE_ENHANCED,
+               FLOW_PAGE_TITLE_AUTHENTIC,
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_CONSENT_FULL, FLOW_COUNT } FlowCase;
 
@@ -828,6 +829,46 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         fixture.ace_last_session = "Last session: 16x filtering; the game ran at 30 Hz.";
         fixture.enhancement_shown = true;
         fixture.enhancement_enabled = true;
+        memset(&title, 0, sizeof(title));
+        title.title = &fixture;
+        title.title_index = 6u;
+        title.logical_width = g_flow_width;
+        title.logical_height = g_flow_height;
+        return player_ui_screen_title(ui, &title);
+    }
+    if (which == FLOW_PAGE_TITLE_ENHANCED || which == FLOW_PAGE_TITLE_AUTHENTIC) {
+        /* #2245: a game's page as the player fills it for the user's own disc on Enhanced (or
+           Authentic): every Enhanced part on, the longest last-session line the runtime's
+           report gives, the disc check, the compatibility notes with the developer view, and
+           Rebuild beside PLAY. On main the page did not scroll at the design text size, so
+           this page pushed the prompt bar off the window. */
+        static PlayerUiTitle fixture;
+        PlayerUiTitleModel title;
+        bool enhanced = which == FLOW_PAGE_TITLE_ENHANCED;
+        fixture = k_titles[6];
+        fixture.library_status_detail = "Built by an older Nakagawa. It still plays; rebuild "
+                                        "it to use this version's fixes.";
+        fixture.rebuild_offered = true;
+        fixture.compatibility_tier = k_compatibility_cases[1].tier;
+        fixture.compatibility_expect = k_compatibility_cases[1].expect;
+        fixture.compatibility_known_issues = k_compatibility_cases[1].known_issues;
+        fixture.compatibility_category = "Playable";
+        fixture.disc_check_note = "Disc check: a changed copy of a retail disc in your "
+                                  "library, such as a fan translation or a patch.";
+        fixture.ace_shown = true;
+        fixture.ace_label = enhanced ? "Play mode: Enhanced" : "Play mode: Authentic";
+        fixture.ace_in_effect = enhanced;
+        fixture.ace_enabled = true;
+        fixture.ace_line = enhanced
+            ? "Enhanced for this game: 16x texture filtering, crisp system text, speed "
+              "readout, game badge, widescreen, smooth motion, clean pitched sound, sharper "
+              "enlarging."
+            : "Authentic: plays exactly as released, with nothing added.";
+        fixture.ace_last_session = enhanced ? "Last session: 16x filtering, crisp keyboard; "
+                                              "the game ran at 30 Hz."
+                                            : "";
+        fixture.options_shown = true;
+        fixture.options_enabled = true;
         memset(&title, 0, sizeof(title));
         title.title = &fixture;
         title.title_index = 6u;
@@ -3385,6 +3426,144 @@ static void test_every_screen_fits_the_window(void) {
     g_flow_text_size_pct = 100;
 }
 
+/* Whether a screen's prompt bar is whole in a width x height window: the bar is drawn
+   unclipped along the window's bottom edge, and each of its prompt words that the screen
+   shows is painted whole inside it. A page taller than the room between the bars used to
+   push its bar out of the window, where it was not drawn at all, so the fit checks (which
+   look only at what is drawn) passed (#2245). */
+static bool hint_bar_whole(FlowCase which, int width, int height) {
+    /* Every screen's prompt bar has offset 0x40 in its own screen's ids; one-card flows
+       share the flow screen's. */
+    static const NkUiId bars[] = {
+        NK_UI_ID(NK_UI_ID_SCREEN_LIBRARY, 0x000040u), NK_UI_ID(NK_UI_ID_SCREEN_TITLE, 0x000040u),
+        NK_UI_ID(NK_UI_ID_SCREEN_ABOUT, 0x000040u), NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000040u),
+        NK_UI_ID(NK_UI_ID_SCREEN_CONTROLS, 0x000040u),
+        NK_UI_ID(NK_UI_ID_SCREEN_DEVELOPER_LOG, 0x000040u), FLOW_ID_PROMPTS
+    };
+    static const char *const labels[] = {"MOVE", "SELECT", "BACK"};
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    const NkUiDrawCmd *bar = NULL;
+    uint32_t after_bar = 0u;
+    bool whole = draw != NULL;
+    for (uint32_t i = 0u; whole && i < draw->ncmd && bar == NULL; ++i) {
+        for (size_t b = 0u; b < sizeof(bars) / sizeof(bars[0]); ++b) {
+            if (draw->cmd[i].kind == NK_UI_DRAW_RECTANGLE && draw->cmd[i].element_id == bars[b]) {
+                bar = &draw->cmd[i];
+                after_bar = i + 1u;
+            }
+        }
+    }
+    whole = whole && bar != NULL && memcmp(bar->clip, bar->bounds, sizeof(bar->clip)) == 0 &&
+            bar->bounds[0] >= 0 && bar->bounds[1] >= 0 && bar->bounds[2] <= width &&
+            bar->bounds[3] <= height && bar->bounds[3] >= height - 1;
+    /* The bar's own words are drawn after its fill. A card's controls scrolled out of its
+       view can lie under the bar too; they are not shown, so they are not the bar's. */
+    for (uint32_t i = after_bar; whole && i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        const NkUiTextRun *run = cmd->kind == NK_UI_DRAW_TEXT ? (const NkUiTextRun *)cmd->custom
+                                                              : NULL;
+        if (run == NULL || run->text == NULL || cmd->bounds[1] < bar->bounds[1] ||
+            !command_shows(cmd)) {
+            continue;
+        }
+        for (size_t l = 0u; l < sizeof(labels) / sizeof(labels[0]); ++l) {
+            if (run->length == strlen(labels[l]) &&
+                memcmp(run->text, labels[l], run->length) == 0 &&
+                (memcmp(cmd->clip, cmd->bounds, sizeof(cmd->clip)) != 0 ||
+                 cmd->bounds[3] > bar->bounds[3])) {
+                whole = false;
+            }
+        }
+    }
+    if (!whole) {
+        fprintf(stderr, "  prompt bar of case %d at %d x %d: %s\n", (int)which, width, height,
+                bar == NULL ? "not drawn (pushed out of the window)" : "cut off");
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    return whole;
+}
+
+/* Whether a game's page, scrolled to the end of its body, shows the text run `label`
+   whole and above the prompt bar: what the page scrolls away is still reachable. */
+static bool title_end_shows_after_scroll(FlowCase which, int width, int height,
+                                         const char *label, bool *scrolled) {
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    NkUiScrollState state;
+    NkUiScale scale;
+    NkUiViewport viewport = launcher_viewport(width, height, 1.0f);
+    size_t length = strlen(label);
+    bool shown = false;
+    *scrolled = false;
+    if (draw == NULL || ui == NULL) {
+        if (ui != NULL) nk_ui_destroy(ui);
+        return false;
+    }
+    viewport.text_size_pct = g_flow_text_size_pct;
+    scale = nk_ui_scale_for_viewport(&viewport);
+    *scrolled = nk_ui_scroll_state(ui, NK_UI_ID(NK_UI_ID_SCREEN_TITLE, 0x000020u), &state) &&
+                state.max_offset > 0.0f;
+    nk_ui_scroll_to(ui, NK_UI_ID(NK_UI_ID_SCREEN_TITLE, 0x000020u), 1.0e6f);
+    g_flow_width = scale.logical_w;
+    g_flow_height = scale.logical_h;
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)draw_flow_case(ui, which);
+        draw = nk_ui_end(ui);
+    }
+    g_flow_width = 1280.0f;
+    g_flow_height = 800.0f;
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd && !shown; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        const NkUiTextRun *run = cmd->kind == NK_UI_DRAW_TEXT ? (const NkUiTextRun *)cmd->custom
+                                                              : NULL;
+        shown = run != NULL && run->text != NULL && run->length == length &&
+                memcmp(run->text, label, length) == 0 &&
+                memcmp(cmd->clip, cmd->bounds, sizeof(cmd->clip)) == 0 &&
+                cmd->bounds[3] <= height;
+    }
+    nk_ui_destroy(ui);
+    return shown;
+}
+
+/* #2245: every screen keeps its prompt bar whole at every window size the launcher
+   supports and at every text size: a game's page in each play mode, with the fullest
+   Enhancements card, included. What does not fit scrolls between the bars. */
+static void test_prompt_bar_stays_whole(void) {
+    /* The default window, the minimum, a small laptop's maximised window, the
+       1280 x 720 pixels of a 150% display (853 x 480 at 1x), and a large window. */
+    static const struct { int w; int h; } sizes[] = {
+        {1280, 720}, {960, 540}, {1366, 705}, {853, 480}, {1920, 1080}
+    };
+    static const int text_sizes[] = {100, 125, 150};
+    int saved = g_flow_text_size_pct;
+    for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+        g_flow_text_size_pct = text_sizes[t];
+        for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+            for (int which = FLOW_BUILD; which < FLOW_COUNT; ++which) {
+                char message[160];
+                (void)snprintf(message, sizeof(message),
+                               "screen case %d keeps its prompt bar whole at %d x %d, %d%% text",
+                               which, sizes[s].w, sizes[s].h, text_sizes[t]);
+                CHECK(hint_bar_whole((FlowCase)which, sizes[s].w, sizes[s].h), message);
+            }
+        }
+    }
+    g_flow_text_size_pct = 100;
+    for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+        bool scrolled = false;
+        CHECK(title_end_shows_after_scroll(FLOW_PAGE_TITLE_ENHANCED, sizes[s].w, sizes[s].h,
+                                           "REPORT A PROBLEM", &scrolled),
+              "a game's page scrolled to its end shows its last row, Report a problem");
+        if (sizes[s].h <= 720) {
+            CHECK(scrolled, "the fullest Enhanced page is taller than the room at the design "
+                            "size, so its body scrolls (#2245)");
+        }
+    }
+    g_flow_text_size_pct = saved;
+}
+
 static void test_refresh_advice_classifier(void) {
     static const double silent[] = {60.0, 120.0, 180.0, 240.0, 59.94, 119.88, 179.82,
                                     60000.0 / 1001.0, 59.9401, 0.0, -1.0};
@@ -5548,6 +5727,7 @@ int main(int argc, char **argv) {
     test_refresh_advice_classifier();
     test_error_details_fit_the_minimum_window();
     test_every_screen_fits_the_window();
+    test_prompt_bar_stays_whole();
     test_psp_fonts_page();
     test_wizard_actions();
     test_plain_cards();
