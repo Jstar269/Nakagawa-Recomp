@@ -221,6 +221,10 @@ CASE_ID = 161
 # 162: #1380's flash0:/ms0:/disc0: seek cells and sceIoIoctl file commands (probe_hle_measure.c).
 else ifeq ($(CASE),hle-io-seek)
 CASE_ID = 162
+# 164: W-NET-1's nickname limit: owner_name key info and the system-parameter string length
+# refusals, read-only (probe_hle_measure.c, PSP-HLE-NICKNAME-001).
+else ifeq ($(CASE),hle-nickname-limit)
+CASE_ID = 164
 # 106-108: the HLE issue cells (probe_hle_issues.c). 106 is the #356 model-getter and
 # #326 vrnd carry / vscmp batch; 107 the #325 interrupt and timer delivery cells; 108 the
 # #326 VFPU form words (vh2f, vuc2i, vsocp, vwbn, vrndf1/2).
@@ -570,6 +574,9 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(
 else ifeq ($(CASE),hle-io-seek)
 TARGET = $(BUILD_DIR)/hle_io_seek
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-nickname-limit)
+TARGET = $(BUILD_DIR)/hle_nickname_limit
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 # HLE issue cells: their own source, which installs and removes interrupt and timer
 # handlers (107) and reaches a kernel getter through the kernel bridge (106), so they
 # stay out of probe_hle_measure.c. Same ThreadManForUser block and module lifecycle.
@@ -874,6 +881,16 @@ REGISTRY_CASES = registry-readonly registry-font
 ifneq ($(filter $(REGISTRY_CASES),$(CASE)),)
 LIBS += -lpspreg
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceReg=0x92E41280,0xFA8A5739,0x1D8A762E,0x0CAE832B,0x2C0DB9DD,0x2D211135,0xD4475AA8,0x28A8E98A
+endif
+# hle-nickname-limit: the two system-parameter Get calls only (the nickname string is read for its
+# return and length, never written), and from the registry exactly the seven read calls the guarded
+# walk makes: open and close of the registry and of a category, GetKeysNum, GetKeys and GetKeyInfo.
+# sceRegGetKeyValue (the nickname bytes) and every set, create, remove and flush call are not
+# importable: the gate fails the build on any other sceReg NID.
+ifeq ($(CASE),hle-nickname-limit)
+LIBS += -lpspreg
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceReg=0x92E41280,0xFA8A5739,0x1D8A762E,0x0CAE832B,0x2C0DB9DD,0x2D211135,0xD4475AA8
 endif
 # The UMD case reads the drive state only: exactly sceUmdCheckMedium and sceUmdGetDriveStat,
 # so a build that imported sceUmdActivate (or any other UMD call) fails the gate.

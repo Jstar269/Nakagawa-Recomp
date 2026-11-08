@@ -17,7 +17,9 @@
 // (PSP-HLE-SAVEDATA-GETSIZE-001), plus hle-utility-none (PSP-HLE-UTILITY-NONE-001), which
 // imports no InitStart call, and hle-utility-dialogs (PSP-HLE-UTILITY-DIALOG-001), which opens
 // the savedata, gamedata install, netconf and game sharing dialogs in game context and never
-// answers them. Cases 97-101 have recorded PSP-3000 runs from
+// answers them, and hle-nickname-limit (PSP-HLE-NICKNAME-001, case 164), which reads the owner_name
+// key's type and size and the system-parameter string's length refusals and records no value bytes.
+// Cases 97-101 have recorded PSP-3000 runs from
 // 2026-10-15: the VTimer and power cases were measured; pool-bounds was captured
 // only in its earlier revision, and the revised form has not run; null-out was
 // captured incomplete. Case 104 was measured on 2026-11-02 (docs/HARDWARE_ORACLE.md).
@@ -53,6 +55,7 @@
 #include <pspdisplay.h>
 #include <pspsuspend.h>
 #include <pspstdio.h>
+#include <pspreg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -85,6 +88,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_AUDIO_REST 159
 #define HLE_CASE_UTILITY_DIALOGS 161
 #define HLE_CASE_IO_SEEK 162
+#define HLE_CASE_NICKNAME_LIMIT 164
 
 #if PSP_ORACLE_CASE == HLE_CASE_KERNEL_STATUS
 #define HLE_CAMPAIGN_ID "hle-kernel-status"
@@ -166,6 +170,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "hle-io-seek"
 #define HLE_TEST_ID "PSP-HLE-IO-SEEK-001"
 #define HLE_LOG "host0:/hle_io_seek_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_NICKNAME_LIMIT
+#define HLE_CAMPAIGN_ID "hle-nickname-limit"
+#define HLE_TEST_ID "PSP-HLE-NICKNAME-001"
+#define HLE_LOG "host0:/hle_nickname_limit_log.txt"
 #else
 #error probe_hle_measure.c has no family for this PSP_ORACLE_CASE
 #endif
@@ -3765,6 +3773,218 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_IO_SEEK */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_NICKNAME_LIMIT
+
+/* W-NET-1 (#2197): how long the PSP's nickname can be. Read-only: the registry lives in flash1,
+   so this section calls only the seven read calls the Makefile gate pins (open and close of the
+   registry and of a category, GetKeysNum, GetKeys, GetKeyInfo). It never calls
+   sceRegGetKeyValue, and no buffer that a call filled with the nickname is ever written to the
+   log, a file or any record: the system-parameter string is read into a static buffer, only its
+   NUL position (a number) is kept, and the buffer is zeroed at once. A record carries returns,
+   the key's type and size, and counts, nothing else.
+
+   On PSP-3000 6.6.1 sceRegOpenCategory on a category that does not exist creates it (see
+   registry_walk.h), so "/CONFIG/SYSTEM" is opened only after /CONFIG listed a key named SYSTEM
+   and sceRegGetKeyInfo reported it as a directory. "/CONFIG" is the one category measured to
+   exist (PSP-REGISTRY-001). sceRegGetKeyInfo of a missing key name returns an error and creates
+   nothing, so the owner_name query cannot write either. Every loop is bounded. */
+
+#define HLE_NICK_KEYS_MAX 64u
+#define HLE_NICK_BUFFER_BYTES 0x90u
+#define HLE_NICK_LENGTH_COUNT 8u
+
+static struct RegParam s_nick_param;
+static char s_nick_keys[HLE_NICK_KEYS_MAX * REG_KEYNAME_SIZE];
+static uint8_t s_nick_buffer[HLE_NICK_BUFFER_BYTES];
+static const int s_nick_lengths[HLE_NICK_LENGTH_COUNT] = {0x10, 0x11, 0x20, 0x21, 0x40, 0x41, 0x80, 0x81};
+static const char *const s_nick_length_cases[HLE_NICK_LENGTH_COUNT] = {
+    "nick-len-0x10", "nick-len-0x11", "nick-len-0x20", "nick-len-0x21",
+    "nick-len-0x40", "nick-len-0x41", "nick-len-0x80", "nick-len-0x81",
+};
+
+static uint32_t s_nick_key_size;
+static int s_nick_key_known;
+
+static void hle_nick_registry(void)
+{
+    REGHANDLE registry = 0;
+    REGHANDLE config = 0;
+    REGHANDLE system = 0;
+    int registry_open = 0;
+    int config_open = 0;
+    int system_open = 0;
+    int guard_ok = 0;
+
+    memset(&s_nick_param, 0, sizeof(s_nick_param));
+    s_nick_param.regtype = 1u;
+    memcpy(s_nick_param.name, SYSTEM_REGISTRY, sizeof(SYSTEM_REGISTRY));
+    s_nick_param.namelen = sizeof(SYSTEM_REGISTRY) - 1u;
+    s_nick_param.unk2 = 1u;
+    s_nick_param.unk3 = 1u;
+
+    hle_step("reg-open-registry");
+    const int open_rc = sceRegOpenRegistry(&s_nick_param, 1, &registry);
+    registry_open = open_rc == 0;
+    const uint32_t open_out[1] = {registry_open && registry != 0 ? 1u : 0u};
+    hle_record("reg-open-registry", "PASS", (uint32_t)open_rc, open_out, 1);
+
+    if (registry_open) {
+        hle_step("reg-config-open");
+        const int config_rc = sceRegOpenCategory(registry, "/CONFIG", 1, &config);
+        config_open = config_rc == 0;
+        const uint32_t out[1] = {config_open && config != 0 ? 1u : 0u};
+        hle_record("reg-config-open", "PASS", (uint32_t)config_rc, out, 1);
+    } else {
+        hle_skip("reg-config-open", 1);
+    }
+
+    /* The guard: SYSTEM must be listed by /CONFIG and be a directory before it is opened. */
+    if (config_open) {
+        uint32_t guard_out[5] = {HLE_SENTINEL, 0u, 0u, HLE_SENTINEL, 0u};
+        int count = 0;
+        hle_step("reg-system-guard");
+        const int num_rc = sceRegGetKeysNum(config, &count);
+        int keys_rc = num_rc;
+        guard_out[0] = (uint32_t)num_rc;
+        guard_out[1] = (uint32_t)count;
+        if (num_rc == 0 && count > 0 && (uint32_t)count <= HLE_NICK_KEYS_MAX) {
+            uint32_t found = 0;
+            memset(s_nick_keys, 0, sizeof(s_nick_keys));
+            keys_rc = sceRegGetKeys(config, s_nick_keys, count);
+            if (keys_rc == 0) {
+                for (int i = 0; i < count; i++) {
+                    const char *name = s_nick_keys + (size_t)i * REG_KEYNAME_SIZE;
+                    if (memchr(name, '\0', REG_KEYNAME_SIZE) != NULL && strcmp(name, "SYSTEM") == 0) {
+                        found = 1u;
+                    }
+                }
+            }
+            guard_out[2] = found;
+            if (found) {
+                REGHANDLE key = 0;
+                unsigned int type = 0;
+                SceSize size = 0;
+                const int info_rc = sceRegGetKeyInfo(config, "SYSTEM", &key, &type, &size);
+                guard_out[3] = (uint32_t)info_rc;
+                guard_out[4] = (uint32_t)type;
+                guard_ok = info_rc == 0 && type == REG_TYPE_DIR;
+            }
+        }
+        hle_record("reg-system-guard", "PASS", (uint32_t)keys_rc, guard_out, 5);
+    } else {
+        hle_skip("reg-system-guard", 5);
+    }
+
+    if (guard_ok) {
+        hle_step("reg-system-open");
+        const int system_rc = sceRegOpenCategory(registry, "/CONFIG/SYSTEM", 1, &system);
+        system_open = system_rc == 0;
+        const uint32_t out[1] = {system_open && system != 0 ? 1u : 0u};
+        hle_record("reg-system-open", "PASS", (uint32_t)system_rc, out, 1);
+    } else {
+        hle_skip("reg-system-open", 1);
+    }
+
+    /* The query: return, type and size only. The key handle it returns is never used. */
+    if (system_open) {
+        REGHANDLE key = 0;
+        unsigned int type = HLE_SENTINEL;
+        SceSize size = HLE_SENTINEL;
+        hle_step("reg-owner-name-info");
+        const int info_rc = sceRegGetKeyInfo(system, "owner_name", &key, &type, &size);
+        const uint32_t out[2] = {(uint32_t)type, (uint32_t)size};
+        hle_record("reg-owner-name-info", "PASS", (uint32_t)info_rc, out, 2);
+        if (info_rc == 0) {
+            s_nick_key_known = 1;
+            s_nick_key_size = (uint32_t)size;
+        }
+    } else {
+        hle_skip("reg-owner-name-info", 2);
+    }
+
+    /* Release in reverse order; HLE_SENTINEL marks a handle that was never opened. */
+    uint32_t close_out[3] = {HLE_SENTINEL, HLE_SENTINEL, HLE_SENTINEL};
+    hle_step("reg-close");
+    if (system_open) {
+        close_out[0] = (uint32_t)sceRegCloseCategory(system);
+    }
+    if (config_open) {
+        close_out[1] = (uint32_t)sceRegCloseCategory(config);
+    }
+    if (registry_open) {
+        close_out[2] = (uint32_t)sceRegCloseRegistry(registry);
+    }
+    hle_record("reg-close", "PASS", 0, close_out, 3);
+}
+
+/* The return is the only thing kept of each call. The one number taken from the bytes is the
+   NUL position of the 0x80 call (the nickname's length in bytes); the buffer is zeroed before
+   the next call and again before this function returns. */
+static void hle_nick_lengths(void)
+{
+    uint32_t success_mask = 0;
+    uint32_t stored_length = HLE_SENTINEL;
+    int results[HLE_NICK_LENGTH_COUNT];
+    for (uint32_t i = 0; i < HLE_NICK_LENGTH_COUNT; i++) {
+        const int length = s_nick_lengths[i];
+        memset(s_nick_buffer, 0xA5, sizeof(s_nick_buffer));
+        hle_step(s_nick_length_cases[i]);
+        const int rc = sceUtilityGetSystemParamString(PSP_SYSTEMPARAM_ID_STRING_NICKNAME,
+                                                      (char *)s_nick_buffer, length);
+        results[i] = rc;
+        if (rc == 0) {
+            success_mask |= 1u << i;
+            if (length == 0x80) {
+                for (uint32_t j = 0; j < (uint32_t)length; j++) {
+                    if (s_nick_buffer[j] == 0) {
+                        stored_length = j;
+                        break;
+                    }
+                }
+            }
+        }
+        memset(s_nick_buffer, 0, sizeof(s_nick_buffer));
+        const uint32_t out[1] = {(uint32_t)length};
+        hle_record(s_nick_length_cases[i], "PASS", (uint32_t)rc, out, 1);
+    }
+
+    /* How the refusals line up with the numbers just measured: how many of the eight lengths
+       have a result that agrees with "accepted when length >= the key's size", and with
+       "accepted when length > the nickname's byte length" (room for the terminator). Each stays
+       0xA5A5A5A5 when the number it needs was not obtained. */
+    uint32_t agree_key_size = HLE_SENTINEL;
+    uint32_t agree_string = HLE_SENTINEL;
+    if (s_nick_key_known) {
+        agree_key_size = 0;
+        for (uint32_t i = 0; i < HLE_NICK_LENGTH_COUNT; i++) {
+            const int accepted = results[i] == 0;
+            agree_key_size += accepted == ((uint32_t)s_nick_lengths[i] >= s_nick_key_size) ? 1u : 0u;
+        }
+    }
+    if (stored_length != HLE_SENTINEL) {
+        agree_string = 0;
+        for (uint32_t i = 0; i < HLE_NICK_LENGTH_COUNT; i++) {
+            const int accepted = results[i] == 0;
+            agree_string += accepted == ((uint32_t)s_nick_lengths[i] > stored_length) ? 1u : 0u;
+        }
+    }
+    const uint32_t summary[5] = {
+        s_nick_key_known ? s_nick_key_size : HLE_SENTINEL, stored_length, success_mask,
+        agree_key_size, agree_string,
+    };
+    hle_record("nick-len-summary", "PASS", 0, summary, 5);
+}
+
+static int hle_run(void)
+{
+    hle_nick_registry();
+    hle_nick_lengths();
+    return 1;
+}
+
+#endif /* HLE_CASE_NICKNAME_LIMIT */
 
 /* ------------------------------------------------------------------------- */
 

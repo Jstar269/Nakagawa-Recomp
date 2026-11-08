@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -5350,6 +5350,8 @@ class HleMeasureProbeTests(unittest.TestCase):
          "HLE_CASE_UTILITY_DIALOGS", "PSP-HLE-UTILITY-DIALOG-001"),
         ("hle-io-seek", 162, "hle_io_seek", None,
          "HLE_CASE_IO_SEEK", "PSP-HLE-IO-SEEK-001"),
+        ("hle-nickname-limit", 164, "hle_nickname_limit", "hle_utility_imports.S",
+         "HLE_CASE_NICKNAME_LIMIT", "PSP-HLE-NICKNAME-001"),
     )
     ALL_FAMILIES = FAMILIES + SINGLE_LAUNCH_FAMILIES + TABLE_FAMILIES + LATER_FAMILIES
     # Every family block: file -> (library, version word, {function: NID}). The
@@ -5448,6 +5450,10 @@ class HleMeasureProbeTests(unittest.TestCase):
         "sceKernelStdin", "sceKernelStdout", "sceKernelStderr",
         "sceAudioChReserve", "sceAudioChRelease", "sceAudioOutputBlocking",
         "sceAudioGetChannelRestLen", "sceAudioGetChannelRestLength",
+        # hle-nickname-limit: the seven read-only registry calls, linked from -lpspreg and
+        # pinned by the Makefile's --exact-library sceReg gate.
+        "sceRegOpenRegistry", "sceRegCloseRegistry", "sceRegOpenCategory",
+        "sceRegCloseCategory", "sceRegGetKeysNum", "sceRegGetKeys", "sceRegGetKeyInfo",
         # hle-utility-dialogs: the vblank counter, the UMD presence check, the directory calls
         # of its gamedata precheck and cleanup, and the net libraries' Init/Term pairs.
         "sceDisplayGetVcount", "sceUmdCheckMedium",
@@ -5672,7 +5678,8 @@ class HleMeasureProbeTests(unittest.TestCase):
         users = [(case, case_id) for case, case_id, _stem, linked, _macro, _test
                  in self.ALL_FAMILIES if linked == block]
         self.assertEqual(users, [("hle-sysparam", 95), ("hle-savedata-getsize", 104),
-                                 ("hle-utility-none", 140), ("hle-utility-dialogs", 161)])
+                                 ("hle-utility-none", 140), ("hle-utility-dialogs", 161),
+                                 ("hle-nickname-limit", 164)])
         for case, case_id in users:
             with self.subTest(case=case):
                 gate = self.makefile.split(f"\nifeq ($(CASE),{case})\n", 1)[1].split("endif", 1)[0]
@@ -10059,6 +10066,95 @@ class HleUtilityDialogsProbeTests(unittest.TestCase):
                               "reason : 0u);", group)
 
 
+class HleNicknameLimitProbeTests(unittest.TestCase):
+    """CASE=hle-nickname-limit (164, PSP-HLE-NICKNAME-001) in probe_hle_measure.c: W-NET-1's
+    read-only nickname-limit cells. These pin the safety design: no registry write or value
+    call, no nickname byte in any record, file or write, and a category opened only after it
+    was listed."""
+
+    probe: ClassVar[str]
+    section: ClassVar[str]
+    makefile: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_NICKNAME_LIMIT\n\n")
+        cls.section = cls.probe[start:cls.probe.index("#endif /* HLE_CASE_NICKNAME_LIMIT */")]
+
+    def test_route_and_registry(self) -> None:
+        self.assertIn("else ifeq ($(CASE),hle-nickname-limit)\nCASE_ID = 164\n", self.makefile)
+        self.assertIn("#define HLE_CASE_NICKNAME_LIMIT 164\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "hle-nickname-limit"\n'
+                      '#define HLE_TEST_ID "PSP-HLE-NICKNAME-001"\n'
+                      '#define HLE_LOG "host0:/hle_nickname_limit_log.txt"', self.probe)
+        spec, counts = CAMPAIGN_PROBE_CASES["hle-nickname-limit"]
+        rows = tuple(row for row, _ in parse_golden.HLE_NICKNAME_ROWS)
+        self.assertEqual(spec.ordered_cases[:-1], rows)
+        self.assertEqual(len(rows), 15)
+        self.assertEqual(sum(counts[row] for row in rows), 1 + 1 + 5 + 1 + 2 + 3 + 8 + 5)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "hle-nickname-limit").name,
+                         "hle_nickname_limit_log.txt")
+        for length in (0x10, 0x11, 0x20, 0x21, 0x40, 0x41, 0x80, 0x81):
+            self.assertIn(f"nick-len-0x{length:02x}", rows)
+
+    def test_only_the_seven_read_registry_calls_are_made(self) -> None:
+        code = _c_code(self.section)
+        self.assertEqual(set(re.findall(r"\b(sceReg\w+)\s*\(", code)), {
+            "sceRegOpenRegistry", "sceRegCloseRegistry", "sceRegOpenCategory",
+            "sceRegCloseCategory", "sceRegGetKeysNum", "sceRegGetKeys", "sceRegGetKeyInfo"})
+        self.assertNotIn("sceRegGetKeyValue", code)
+        self.assertNotRegex(code, r"\bsce\w*(?:Set|Create|Remove|Flush)\w*\s*\(")
+        gate = self.makefile[self.makefile.index("ifeq ($(CASE),hle-nickname-limit)\nLIBS"):]
+        gate = gate[:gate.index("\nendif\n")]
+        self.assertIn("--exact-library sceUtility=0xA5DA2406,0x34B78343\n", gate + "\n")
+        line = [row for row in gate.splitlines() if "--exact-library sceReg=" in row]
+        self.assertEqual(len(line), 1)
+        nids = {int(item, 16) for item in line[0].split("sceReg=", 1)[1].split(",")}
+        self.assertEqual(nids, {0x92E41280, 0xFA8A5739, 0x1D8A762E, 0x0CAE832B, 0x2C0DB9DD,
+                                0x2D211135, 0xD4475AA8})
+        self.assertNotIn(0x28A8E98A, nids)   # sceRegGetKeyValue
+
+    def test_categories_are_opened_read_only_and_only_after_listing(self) -> None:
+        code = _c_code(self.section)
+        opens = re.findall(r"sceRegOpenCategory\s*\(([^;]*)\);", code)
+        self.assertEqual(opens, ['registry, "/CONFIG", 1, &config',
+                                 'registry, "/CONFIG/SYSTEM", 1, &system'])
+        self.assertEqual(re.findall(r"sceRegOpenRegistry\s*\([^,]*,\s*(\d+)", code), ["1"])
+        self.assertLess(code.index("sceRegGetKeys(config"), code.index('"/CONFIG/SYSTEM"'))
+        self.assertLess(code.index("guard_ok = info_rc == 0 && type == REG_TYPE_DIR"),
+                        code.index('"/CONFIG/SYSTEM"'))
+        self.assertIn("if (guard_ok) {", code)
+        self.assertEqual(re.findall(r'sceRegGetKeyInfo\s*\(\s*\w+,\s*("[^"]*")', code),
+                         ['"SYSTEM"', '"owner_name"'])
+        self.assertIn("(uint32_t)count <= HLE_NICK_KEYS_MAX", code)
+
+    def test_no_nickname_byte_is_emitted_or_written(self) -> None:
+        code = _c_code(self.section)
+        # The private-output helper of hle-sysparam is another case's section and is not used.
+        self.assertNotIn("hle_private_nickname_write", code)
+        self.assertNotIn("HLE_PRIVATE_STRINGS_PATH", code)
+        self.assertNotRegex(code, r"\b(?:sceIo\w+|fopen|fwrite|fprintf|printf|hle_write|hle_emit"
+                                  r"|snprintf)\s*\(")
+        # The buffer is handed only to the call, scanned for its NUL position and zeroed.
+        for use in re.findall(r"[^\n]*s_nick_buffer[^\n]*", code):
+            self.assertRegex(use, r"memset\(s_nick_buffer|s_nick_buffer\[j\] == 0|"
+                                  r"\(char \*\)s_nick_buffer|s_nick_buffer\[HLE_NICK_BUFFER_BYTES\]"
+                                  r"|sizeof\(s_nick_buffer\)")
+        self.assertNotRegex(code, r"hle_(?:record|emit)\([^;]*s_nick_buffer")
+        self.assertNotRegex(code, r"hle_(?:record|emit)\([^;]*s_nick_keys")
+        self.assertEqual(code.count("memset(s_nick_buffer, 0, sizeof(s_nick_buffer));"), 1)
+
+    def test_the_length_cells_pass_the_eight_lengths_in_order(self) -> None:
+        self.assertIn("{0x10, 0x11, 0x20, 0x21, 0x40, 0x41, 0x80, 0x81}", self.section)
+        self.assertIn("PSP_SYSTEMPARAM_ID_STRING_NICKNAME", self.section)
+        run = self.section[self.section.index("static int hle_run(void)"):]
+        self.assertEqual(re.findall(r"\b(hle_nick_\w+)\(", run),
+                         ["hle_nick_registry", "hle_nick_lengths"])
+
+
 class GeMipProbeTests(unittest.TestCase):
     """CASE=ge-mip (126, PSP-GE-MIP-001) in probe_ge_sample.c: the #1373 level-of-detail and
     mip cells. The cell table and list builder are one block shared byte for byte with
@@ -12980,6 +13076,7 @@ class Record20261015Tests(unittest.TestCase):
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
             ("hle-io-seek", "PSP-HLE-IO-SEEK-001", "NOT_RUN"),
+            ("hle-nickname-limit", "PSP-HLE-NICKNAME-001", "NOT_RUN"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}

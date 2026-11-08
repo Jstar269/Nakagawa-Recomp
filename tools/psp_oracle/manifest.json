@@ -6605,6 +6605,22 @@
       "reset": "one PRX launch; PSPLink soft reset before the next launch"
     },
     {
+      "id": "PSP-HLE-NICKNAME-001",
+      "status": "implemented",
+      "hardware_evidence": "NOT_RUN",
+      "evidence_note": "Built as the fixed-shape case 164 nickname-limit stream (W-NET-1, #2197). No hardware run is cited.",
+      "group": "system",
+      "source": "fixtures/psp_oracle/probe_hle_measure.c",
+      "prx": "hle_nickname_limit.prx",
+      "apis": ["sceRegOpenRegistry", "sceRegOpenCategory", "sceRegGetKeysNum", "sceRegGetKeys", "sceRegGetKeyInfo", "sceRegCloseCategory", "sceRegCloseRegistry", "sceUtilityGetSystemParamString"],
+      "diagnostic_case_ids": ["hle-nickname-limit"],
+      "case_ids": ["reg-*", "nick-len-*"],
+      "invariant": "The owner_name key's return, type and size and the return of the nickname string call at eight buffer lengths; read-only, with no registry value call and no nickname bytes in any record.",
+      "issues": [2197],
+      "risk": "low; read-only registry calls (a category is opened only after it was listed) and one system-parameter read; no value bytes are recorded",
+      "reset": "one PRX launch; PSPLink soft reset before the next launch"
+    },
+    {
       "id": "PSP-MPEG-YCBCR-001",
       "status": "implemented",
       "hardware_evidence": "NOT_RUN",

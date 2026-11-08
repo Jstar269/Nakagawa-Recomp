@@ -3312,6 +3312,7 @@ not expected PSP values.
 | `vcodec-words` | `PSP-VCODEC-001` | `NOT_RUN` | Built Media Engine boundary-word cells over synthetic AVC access units; no hardware result is claimed. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. |
 | `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | `NOT_RUN` | Built #1380 flash0: seek, sceIoIoctl and read-only-descriptor write cells; no hardware result is claimed. |
+| `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | `NOT_RUN` | Built W-NET-1 (#2197) read-only cells: the `owner_name` key's return, type and size, and the nickname string call's return at eight buffer lengths; no value bytes are recorded; no hardware result is claimed. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (modes 2 and 3; rerun required) | Each mode now begins from a fresh stream, ringbuffer and MPEG context; no mode 2 or 3 result is measured. |
 
 ### PSP-MEMEDGE-001 capture 2026-11-02

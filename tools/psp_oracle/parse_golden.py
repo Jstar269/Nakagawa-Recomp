@@ -2021,6 +2021,21 @@ _register_campaign_probe(
     "hle-io-seek", "PSP-HLE-IO-SEEK-001",
     tuple(row for row, _ in HLE_IO_SEEK_ROWS), dict(HLE_IO_SEEK_ROWS),
 )
+# hle-nickname-limit (164, probe_hle_measure.c): W-NET-1, read-only. The registry walk to the
+# owner_name key (type and size only; no value call and no value bytes), then the system-parameter
+# string with eight buffer lengths (the return only) and one summary row. Every row is emitted on
+# every run with a fixed word count; a SKIP row keeps the shape.
+HLE_NICKNAME_LENGTHS = (0x10, 0x11, 0x20, 0x21, 0x40, 0x41, 0x80, 0x81)
+HLE_NICKNAME_ROWS = (
+    ("reg-open-registry", 1), ("reg-config-open", 1), ("reg-system-guard", 5),
+    ("reg-system-open", 1), ("reg-owner-name-info", 2), ("reg-close", 3),
+    *((f"nick-len-0x{length:02x}", 1) for length in HLE_NICKNAME_LENGTHS),
+    ("nick-len-summary", 5),
+)
+_register_campaign_probe(
+    "hle-nickname-limit", "PSP-HLE-NICKNAME-001",
+    tuple(row for row, _ in HLE_NICKNAME_ROWS), dict(HLE_NICKNAME_ROWS),
+)
 
 # io-umd-eof (137, probe_kernel_semantics.c): #1380 on the UMD, read-only: the drive state
 # before and after; for two disc0: files (a = UMD_DATA.BIN, b = PSP_GAME/PARAM.SFO) the open

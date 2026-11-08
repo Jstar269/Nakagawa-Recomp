@@ -646,6 +646,7 @@ publishes their words.
 | `vcodec-words` | `PSP-VCODEC-001` | Built case 160 from `probe.c`. #286 Media Engine boundary words over synthetic AVC access units. **NOT_RUN**; no hardware result is claimed. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | Built case 161 from `probe_hle_measure.c`. #1386 dialog timing and wrong-state cells. **NOT_RUN**; no hardware result is claimed. |
 | `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | Built case 162 from `probe_hle_measure.c`. #1380 flash0: seeks, sceIoIoctl file commands on ms0: and disc0:, and writes on read-only descriptors. **NOT_RUN**; no hardware result is claimed. |
+| `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | Built case 164 from `probe_hle_measure.c`. W-NET-1 (#2197), read-only: the `owner_name` key's return, type and size under `/CONFIG/SYSTEM` (opened only after `/CONFIG` listed it as a directory; no `sceRegGetKeyValue`), then the return of `sceUtilityGetSystemParamString(1, ...)` at buffer lengths 0x10, 0x11, 0x20, 0x21, 0x40, 0x41, 0x80 and 0x81 and a summary row (key size, nickname byte length as a number, success mask, agreement counts). No value bytes are recorded or written. **NOT_RUN**; no hardware result is claimed. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | Modes 2 and 3 are built and now use fresh stream setup per mode. **NOT_RUN** pending an owner-present hardware rerun; no new result is claimed. |
 
 ### #1375 entry and NULL-code probes
