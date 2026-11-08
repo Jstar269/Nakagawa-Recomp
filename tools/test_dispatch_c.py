@@ -399,9 +399,11 @@ class HostEntriesReturnToTheHost(unittest.TestCase):
                 offenders.append(f"{relative}:{line}")
         self.assertEqual(offenders, [], "a host entry seeds $ra = 0; seed SR_HOST_RETURN_PC")
 
-    def test_only_the_two_call_boundaries_read_the_cosim_unwind_flag(self):
-        """#2148 review S1: the COSIM guest lane's refused import unwinds through
-        dispatch_call_checked and dispatch_call_continue. Those two boundaries are the only
+    def test_only_the_dispatch_boundaries_read_the_cosim_unwind_flag(self):
+        """#2148 review S1, #2196: the COSIM guest lane's refused import unwinds through
+        dispatch_call_checked, dispatch_call_continue, the interpreter's linked call
+        (dispatch_call_interp), dispatch_tail_step and dispatch, and the interpreter's result
+        for it is not reported as a rejection (dispatch_run_interp). Those are the only
         readers of the flag; domain_mode.c only sets and clears it; nothing else names it."""
         flag = re.compile(r"\bsr_dispatch_unwind_requested\b")
         recomp = _strip_comments_keep_lines((RT / "recomp.c").read_text(encoding="utf-8"))
@@ -417,7 +419,9 @@ class HostEntriesReturnToTheHost(unittest.TestCase):
             self.assertIn("sr_dispatch_unwind_requested && s->flow_kind == SR_FLOW_FATAL",
                           lines[index], f"recomp.c:{index + 1} reads the flag without the "
                           "fatal-flow guard")
-        self.assertEqual(readers, {"dispatch_call_checked", "dispatch_call_continue"})
+        self.assertEqual(readers, {"dispatch_call_checked", "dispatch_call_continue",
+                                   "dispatch_call_interp", "dispatch_tail_step", "dispatch",
+                                   "dispatch_run_interp"})
 
         domain = _strip_comments_keep_lines((RT / "domain_mode.c").read_text(encoding="utf-8"))
         uses = [domain[m.start():domain.find(";", m.start()) + 1] for m in flag.finditer(domain)]
