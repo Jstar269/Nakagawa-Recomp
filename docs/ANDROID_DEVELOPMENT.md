@@ -13,7 +13,8 @@ This page covers building and running the Android app from source. The plan it b
   `LauncherActivity` through SDL's Android Java layer.
 - **A title** runs in its own Android process, `:title`, as `TitleActivity`. The desktop player
   starts one child process per title; an Android app may not execute programs from its own files
-  (API 29 and later) and cannot fork itself safely, so the launcher asks Android to start that
+  (API 29 and later; a tool the app ships in its native library folder is the one exception, see
+  [native tests on a device](#native-tests-on-a-device)) and cannot fork itself safely, so the launcher asks Android to start that
   activity instead, with the same arguments and environment a desktop child gets
   (`nk_platform_spawn_process`, Android section of `src/core/nk_platform_posix.c`). The activity
   loads the title's runtime library, `libnk_title_<id>.so`, runs the runtime's `main()`, and its
@@ -206,10 +207,14 @@ tests' temporary folders are in the device folder too, and the next run's setup 
 The tool writes only under `NK_ANDROID_TEST_DIR`; it needs USB debugging and no root. In Git Bash, set `MSYS_NO_PATHCONV=1` first, or the shell rewrites
 the device path into a Windows path, which the configure step refuses.
 
-Tests that start a child process through the desktop spawn route cannot run from `adb shell`.
-On Android a title starts in its own process through `TitleActivity`, and a program started from
-`adb shell` has no Java VM. Those subtests report SKIP with the reason, and the spawn call is
-checked to fail closed. Two tests fail there, so `ctest` exits non-zero on every device run:
+A title cannot start from `adb shell`: on Android it starts in its own process through
+`TitleActivity`, and a program started from `adb shell` has no Java VM, so the title spawn fails
+closed there and the subtests that need it report SKIP with the reason. Tools are different:
+`nk_platform_spawn_tool` starts a program directly, but only one that is a regular file directly
+in the folder holding the app's native libraries (`nativeLibraryDir` in the app, the test's own
+folder under `adb shell`), because Android lets an app run programs it ships there and nothing it
+wrote itself. `posix_process_test` runs its child processes through that route. Two tests fail
+there, so `ctest` exits non-zero on every device run:
 `package_builder_test`, and the package-rebuild subtest of `player_state_test`. Both build a
 package on the device, which Android does not support ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
 

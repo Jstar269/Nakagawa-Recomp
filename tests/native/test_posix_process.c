@@ -9,6 +9,12 @@
  * as nk_launch_wait(session, 5000) hung forever whenever the runtime stalled.
  * Win32 has tests/native/test_win32_process.c; this is the equivalent for the
  * other backend, and only builds where that backend does.
+ *
+ * The children are this program itself in a child mode (--child-sleep, --child-exit,
+ * --child-tree), so the same subtests run wherever the backend does. On Android the app may
+ * run only the programs its APK ships, from the folder its code was loaded from: there they
+ * start through nk_platform_spawn_tool, which a test program run from its own folder
+ * satisfies, and a program anywhere else must be refused (#360).
  */
 
 /* Scratch root for the files this test writes: the checkout's build/ by default, or
@@ -30,7 +36,9 @@ int main(void) {
 #else
 
 /* Strict -std=c99 hides clock_gettime, nanosleep and CLOCK_MONOTONIC behind
-   the feature-test macro, exactly as src/core/nk_platform_posix.c does. */
+   the feature-test macro, exactly as src/core/nk_platform_posix.c does; symlink and
+   mkdtemp need the XSI level. */
+#define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
 
 #include "nk_launch.h"
@@ -40,12 +48,60 @@ int main(void) {
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
+
+static char s_self[NK_MAX_PATH];
 
 static double elapsed_ms(const struct timespec *a, const struct timespec *b) {
     return (double)(b->tv_sec - a->tv_sec) * 1000.0
          + (double)(b->tv_nsec - a->tv_nsec) / 1000000.0;
+}
+
+static void pause_ms(long ms) {
+    struct timespec slice = { ms / 1000L, (ms % 1000L) * 1000L * 1000L };
+    nanosleep(&slice, NULL);
+}
+
+/* The child modes. --child-tree starts a grandchild that sleeps, records its pid in the named
+ * file and waits for it, as `sh -c "sleep 60 & echo $! > file; wait"` would. */
+static int child_main(int argc, char **argv) {
+    if (strcmp(argv[1], "--child-sleep") == 0 && argc >= 3) {
+        pause_ms(atol(argv[2]) * 1000L);
+        return 0;
+    }
+    if (strcmp(argv[1], "--child-exit") == 0 && argc >= 3) return atoi(argv[2]);
+    if (strcmp(argv[1], "--child-tree") == 0 && argc >= 3) {
+        pid_t grandchild = fork();
+        if (grandchild < 0) return 98;
+        if (grandchild == 0) {
+            pause_ms(60000L);
+            _exit(0);
+        }
+        FILE *pf = fopen(argv[2], "w");
+        if (!pf) return 97;
+        fprintf(pf, "%d\n", (int)grandchild);
+        fclose(pf);
+        int status = 0;
+        (void)waitpid(grandchild, &status, 0);
+        return 0;
+    }
+    return 99;
+}
+
+/* Starts this program in a child mode the way the backend under test starts a program here. */
+static bool spawn_self(const char *mode, const char *value, NkProcessHandle *out) {
+    const char *argv[] = { s_self, mode, value, NULL };
+#if defined(__ANDROID__)
+    return nk_platform_spawn_tool(s_self, argv, NULL, NULL, NULL, out);
+#else
+    return nk_platform_spawn_process(s_self, argv, NULL, NULL, NULL, out);
+#endif
 }
 
 /* 8. nk_platform_get_file_size POSIX file size queries. */
@@ -81,33 +137,110 @@ static void file_size_subtest(void) {
     remove(data_path);
 }
 
+static void touch(const char *path) {
+    FILE *f = fopen(path, "wb");
+    assert(f != NULL);
+    fclose(f);
+}
+
+/* 9. The tool-folder rule nk_platform_spawn_tool applies on Android: a program qualifies only
+ * when it resolves, links followed, to a regular file directly in the folder. */
+static void tool_dir_rule_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 9: the bundled-tool folder rule\n");
+    fflush(stdout);
+    char root[NK_MAX_PATH];
+    snprintf(root, sizeof(root), "%s/nk-tool-rule-XXXXXX",
+             getenv("TMPDIR") && getenv("TMPDIR")[0] ? getenv("TMPDIR") : "/tmp");
+    assert(mkdtemp(root) != NULL);
+    char tools[NK_MAX_PATH + 8], other[NK_MAX_PATH + 8], nested[NK_MAX_PATH + 8];
+    char tool[NK_MAX_PATH + 32], outside[NK_MAX_PATH + 32], deep[NK_MAX_PATH + 32];
+    char link_out[NK_MAX_PATH + 32], link_in[NK_MAX_PATH + 32], escape[NK_MAX_PATH + 32];
+    char missing[NK_MAX_PATH + 32];
+    snprintf(tools, sizeof(tools), "%s/lib", root);
+    snprintf(other, sizeof(other), "%s/files", root);
+    snprintf(nested, sizeof(nested), "%s/lib/sub", root);
+    assert(mkdir(tools, 0700) == 0 && mkdir(other, 0700) == 0 && mkdir(nested, 0700) == 0);
+    snprintf(tool, sizeof(tool), "%s/libtool.so", tools);
+    snprintf(outside, sizeof(outside), "%s/written", other);
+    snprintf(deep, sizeof(deep), "%s/libdeep.so", nested);
+    snprintf(link_out, sizeof(link_out), "%s/liblink.so", tools);
+    snprintf(link_in, sizeof(link_in), "%s/link-to-tool", other);
+    snprintf(escape, sizeof(escape), "%s/../files/written", tools);
+    snprintf(missing, sizeof(missing), "%s/libmissing.so", tools);
+    touch(tool);
+    touch(outside);
+    touch(deep);
+    assert(symlink(outside, link_out) == 0);
+    assert(symlink(tool, link_in) == 0);
+
+    assert(nk_platform_path_is_tool_in_dir(tools, tool));
+    assert(nk_platform_path_is_tool_in_dir(tools, link_in));     /* resolves into the folder */
+    assert(!nk_platform_path_is_tool_in_dir(tools, outside));
+    assert(!nk_platform_path_is_tool_in_dir(tools, escape));     /* ".." out of the folder */
+    assert(!nk_platform_path_is_tool_in_dir(tools, link_out));   /* resolves out of it */
+    assert(!nk_platform_path_is_tool_in_dir(tools, deep));       /* below it, not in it */
+    assert(!nk_platform_path_is_tool_in_dir(tools, nested));     /* a folder, not a file */
+    assert(!nk_platform_path_is_tool_in_dir(tools, tools));
+    assert(!nk_platform_path_is_tool_in_dir(tools, missing));
+    assert(!nk_platform_path_is_tool_in_dir(NULL, tool));
+    assert(!nk_platform_path_is_tool_in_dir(tools, ""));
+
+    remove(link_in);
+    remove(link_out);
+    remove(deep);
+    remove(outside);
+    remove(tool);
+    rmdir(nested);
+    rmdir(other);
+    rmdir(tools);
+    rmdir(root);
+}
+
 #if defined(__ANDROID__)
-/* Android does not build the fork/exec backend that subtests 1-7 drive: a title starts in its
- * own process through TitleActivity, over JNI (the Android section of nk_platform_posix.c), and
- * an app may not execute files from its storage. A program run from adb shell has no Java VM,
- * so there spawning must fail closed and leave no handle a caller could wait on. The JNI route
- * itself runs only inside the app. */
-static int android_main(void) {
-    printf("[POSIX_PROCESS_TEST] Android: spawning without a Java VM fails closed\n");
+/* A title starts through TitleActivity over JNI, and a program run from adb shell has no Java
+ * VM, so the title spawn must fail closed and leave no handle a caller could wait on. A tool
+ * outside the tool folder must be refused before anything runs. */
+static void android_refusals_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 10: Android refuses what it may not start\n");
+    fflush(stdout);
     NkProcessHandle none;
     memset(&none, 0x5a, sizeof(none));
     const char *argv[] = { "/system/bin/true", NULL };
     assert(!nk_platform_spawn_process("/system/bin/true", argv, NULL, NULL, NULL, &none));
     assert(none.spawn_error == ENOSYS);
     assert(!none.is_active && none.native_handle == NULL && none.process_id == 0);
-    file_size_subtest();
-    printf("SKIP posix_process_test subtests 1-7 (exit 77): Android starts titles through "
-           "TitleActivity, not fork/exec; they run on Linux\n");
-    return 77;
+
+    memset(&none, 0x5a, sizeof(none));
+    assert(!nk_platform_spawn_tool("/system/bin/true", argv, NULL, NULL, NULL, &none));
+    assert(none.spawn_error == EACCES);
+    assert(!none.is_active && !none.tool_child && none.process_id == 0);
+
+    char tool_dir[NK_MAX_PATH];
+    assert(nk_platform_get_tool_dir(tool_dir, sizeof(tool_dir)));
+    assert(nk_platform_path_is_tool_in_dir(tool_dir, s_self));
+}
+#else
+/* On the desktop a tool program is an ordinary child. */
+static void desktop_tool_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 10: a desktop tool is an ordinary child\n");
+    fflush(stdout);
+    char unused[8];
+    assert(!nk_platform_get_tool_dir(unused, sizeof(unused)));
+    NkProcessHandle tool;
+    memset(&tool, 0, sizeof(tool));
+    const char *argv[] = { s_self, "--child-exit", "4", NULL };
+    assert(nk_platform_spawn_tool(s_self, argv, NULL, NULL, NULL, &tool));
+    assert(!tool.tool_child);
+    assert(nk_platform_wait_process(&tool, 10000) == 4);
+    nk_platform_close_process(&tool);
 }
 #endif
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc >= 2 && strncmp(argv[1], "--child-", 8) == 0) return child_main(argc, argv);
+    assert(nk_platform_get_executable_path(s_self, sizeof(s_self)));
+
     struct timespec t0, t1;
-#if defined(__ANDROID__)
-    (void)t0; (void)t1; (void)elapsed_ms;
-    return android_main();
-#else
 
     /* 1. A finite timeout must expire and return, leaving the child alive.
      *
@@ -118,8 +251,7 @@ int main(void) {
 
     NkProcessHandle slow;
     memset(&slow, 0, sizeof(slow));
-    const char *slow_argv[] = { "/bin/sleep", "30", NULL };
-    assert(nk_platform_spawn_process("/bin/sleep", slow_argv, NULL, NULL, NULL, &slow));
+    assert(spawn_self("--child-sleep", "30", &slow));
 
     assert(clock_gettime(CLOCK_MONOTONIC, &t0) == 0);
     int timed_out = nk_platform_wait_process(&slow, 300);
@@ -139,8 +271,7 @@ int main(void) {
 
     NkProcessHandle quick;
     memset(&quick, 0, sizeof(quick));
-    const char *quick_argv[] = { "/bin/sh", "-c", "exit 7", NULL };
-    assert(nk_platform_spawn_process("/bin/sh", quick_argv, NULL, NULL, NULL, &quick));
+    assert(spawn_self("--child-exit", "7", &quick));
     assert(nk_platform_wait_process(&quick, 10000) == 7);
     nk_platform_close_process(&quick);
 
@@ -150,8 +281,7 @@ int main(void) {
 
     NkProcessHandle blocking;
     memset(&blocking, 0, sizeof(blocking));
-    const char *blocking_argv[] = { "/bin/sh", "-c", "exit 5", NULL };
-    assert(nk_platform_spawn_process("/bin/sh", blocking_argv, NULL, NULL, NULL, &blocking));
+    assert(spawn_self("--child-exit", "5", &blocking));
     assert(nk_platform_wait_process(&blocking, -1) == 5);
     nk_platform_close_process(&blocking);
 
@@ -167,8 +297,7 @@ int main(void) {
 
     NkProcessHandle polled;
     memset(&polled, 0, sizeof(polled));
-    const char *polled_argv[] = { "/bin/sh", "-c", "exit 3", NULL };
-    assert(nk_platform_spawn_process("/bin/sh", polled_argv, NULL, NULL, NULL, &polled));
+    assert(spawn_self("--child-exit", "3", &polled));
 
     bool observed_exit = false;
     for (int i = 0; i < 2000; i++) {
@@ -176,8 +305,7 @@ int main(void) {
             observed_exit = true;
             break;
         }
-        struct timespec slice = { 0, 5L * 1000L * 1000L }; /* 5 ms */
-        nanosleep(&slice, NULL);
+        pause_ms(5);
     }
     assert(observed_exit);
     assert(nk_platform_wait_process(&polled, 0) == 3);
@@ -197,8 +325,7 @@ int main(void) {
 
     NkLaunchSession session;
     memset(&session, 0, sizeof(session));
-    const char *session_argv[] = { "/bin/sleep", "30", NULL };
-    assert(nk_platform_spawn_process("/bin/sleep", session_argv, NULL, NULL, NULL, &session.process));
+    assert(spawn_self("--child-sleep", "30", &session.process));
     session.is_running = true;
     pid_t session_pid = (pid_t)session.process.process_id;
 
@@ -220,8 +347,7 @@ int main(void) {
     fflush(stdout);
 
     memset(&session, 0, sizeof(session));
-    const char *code_argv[] = { "/bin/sh", "-c", "exit 9", NULL };
-    assert(nk_platform_spawn_process("/bin/sh", code_argv, NULL, NULL, NULL, &session.process));
+    assert(spawn_self("--child-exit", "9", &session.process));
     session.is_running = true;
 
     bool session_exited = false;
@@ -230,8 +356,7 @@ int main(void) {
             session_exited = true;
             break;
         }
-        struct timespec poll_slice = { 0, 5L * 1000L * 1000L }; /* 5 ms */
-        nanosleep(&poll_slice, NULL);
+        pause_ms(5);
     }
     assert(session_exited);
     assert(nk_launch_wait(&session, 0) == 9);
@@ -247,17 +372,20 @@ int main(void) {
     fflush(stdout);
 
     const char *posix_pid_file = SR_SELFTEST_BUILD_ROOT "/test_posix_grandchild.pid";
+    char pid_file_abs[NK_MAX_PATH];
     remove(posix_pid_file);
+    /* The child resolves the file name itself; give it the absolute form. */
+    assert(getcwd(pid_file_abs, sizeof(pid_file_abs)) != NULL);
+    if (posix_pid_file[0] == '/') {
+        snprintf(pid_file_abs, sizeof(pid_file_abs), "%s", posix_pid_file);
+    } else {
+        size_t used = strlen(pid_file_abs);
+        snprintf(pid_file_abs + used, sizeof(pid_file_abs) - used, "/%s", posix_pid_file);
+    }
 
     NkProcessHandle tree_proc;
     memset(&tree_proc, 0, sizeof(tree_proc));
-    const char *tree_argv[] = {
-        "/bin/sh",
-        "-c",
-        "sleep 60 & echo $! > " SR_SELFTEST_BUILD_ROOT "/test_posix_grandchild.pid; wait",
-        NULL
-    };
-    assert(nk_platform_spawn_process("/bin/sh", tree_argv, NULL, NULL, NULL, &tree_proc));
+    assert(spawn_self("--child-tree", pid_file_abs, &tree_proc));
     assert(tree_proc.is_active);
 
     pid_t grandchild_pid = 0;
@@ -272,8 +400,7 @@ int main(void) {
             }
             fclose(pf);
         }
-        struct timespec slice = { 0, 10L * 1000L * 1000L }; /* 10 ms */
-        nanosleep(&slice, NULL);
+        pause_ms(10);
     }
     assert(grandchild_pid > 0);
     assert(kill(grandchild_pid, 0) == 0);
@@ -287,8 +414,7 @@ int main(void) {
             grandchild_dead = true;
             break;
         }
-        struct timespec slice = { 0, 10L * 1000L * 1000L }; /* 10 ms */
-        nanosleep(&slice, NULL);
+        pause_ms(10);
     }
     if (!grandchild_dead) {
         kill(grandchild_pid, SIGKILL);
@@ -300,10 +426,15 @@ int main(void) {
     printf("[POSIX_PROCESS_TEST] Grandchild PID %d terminated successfully.\n", (int)grandchild_pid);
 
     file_size_subtest();
+    tool_dir_rule_subtest();
+#if defined(__ANDROID__)
+    android_refusals_subtest();
+#else
+    desktop_tool_subtest();
+#endif
 
     printf("[POSIX_PROCESS_TEST] ALL POSIX PROCESS TESTS PASSED!\n");
     return 0;
-#endif /* !__ANDROID__ */
 }
 
 #endif /* !_WIN32 */

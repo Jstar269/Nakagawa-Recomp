@@ -642,9 +642,6 @@ else()
     add_executable(test_posix_process tests/native/test_posix_process.c)
     target_link_libraries(test_posix_process PRIVATE nakagawa_core)
     add_test(NAME posix_process_test COMMAND test_posix_process)
-    # On Android the fork/exec subtests do not apply (titles start through TitleActivity):
-    # the test checks that spawning fails closed there and exits 77.
-    set_tests_properties(posix_process_test PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # Host-neutral runtime selftests: the Makefile's coro-selftest, coro-selftest-asm,
