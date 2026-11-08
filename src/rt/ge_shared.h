@@ -61,6 +61,7 @@ typedef struct {
     uint32_t tex_mip_addr[7], tex_mip_bufw[7];
     uint8_t tex_mip_wlog2[7], tex_mip_hlog2[7];
     uint32_t tex_max_level;                  /* TEXMODE bits 16-18: highest level sampled */
+    uint32_t tex_multi_clut;                 /* TEXMODE bit 8: per-level CLUT offset (#2031) */
     uint32_t tex_level_mode;                 /* TEXLEVEL bits 0-1: 0 auto, 1 constant, 2 slope */
     float tex_lod_bias;                      /* TEXLEVEL bits 16-23: signed 4.4 level bias */
     float tex_lod_slope;                     /* TEXLODSLOPE */
@@ -550,7 +551,8 @@ void ge_fb_access_counts(unsigned long long *direct, unsigned long long *accesso
  * tex_w*tex_h words; layout is row-major, r|g<<8|b<<16|a<<24. */
 void      ge_decode_tex_rgba(uint32_t *out);
 /* Decode mip level `level` (1-7) of the CURRENT texture the same way: the level's own
- * address, buffer width and size (tex_mip_*), with level 0's format, swizzle and CLUT.
+ * address, buffer width and size (tex_mip_*), with level 0's format, swizzle and CLUT
+ * (TEXMODE's multi-CLUT bit offsets the level's CLUT entries, #2031).
  * out must hold that level's (1 << tex_mip_wlog2) * (1 << tex_mip_hlog2) words. */
 void      ge_decode_tex_level_rgba(uint32_t level, uint32_t *out);
 /* Decode one linear surface of guest memory to RGBA8 for the developer VRAM viewer (#314):
