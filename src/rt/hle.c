@@ -1810,7 +1810,7 @@ static void sreg_overlay_render(SregText *t) {
         first = 0;
     }
     sreg_text_str(t, "\n  ]");
-    if (s_console.have_identity) {
+    if (s_console.have_identity && !s_console.synthetic) {   /* a derived identity is never saved */
         static const char digits[] = "0123456789abcdef";
         sreg_text_str(t, ",\n  \"console\": {\"wlan_mac_hex\": \"");
         for (size_t b = 0; b < sizeof(s_console.mac); b++) {
@@ -2612,6 +2612,7 @@ int console_profile_identity(void) {
          * profile as it found it, and the next run derives the same values again. */
         console_synthetic_identity(next.mac, next.psid);
         next.have_identity = 1;
+        next.synthetic = 1;
         s_console = next;
         fprintf(stderr, "system profile: deterministic run: derived a synthetic WLAN MAC address "
                         "and OpenPSID from seed '%s'; not saved\n", console_identity_seed());

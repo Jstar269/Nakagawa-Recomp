@@ -1061,23 +1061,28 @@ static int io_memstick_host_capacity(uint32_t info[5]) {
  * The host volume's size and free space are host inputs: two machines, or one machine at two
  * moments, would tell the guest different numbers, and a title that checks free space before
  * saving can branch on them. Under the deterministic clock the guest sees a fixed virtual card
- * instead: 2 GiB of 512-byte sectors in 32 KiB clusters (the geometry of a FAT32 card of that
- * size, and the sector the savedata size calls count in), minus the clusters the files under the
+ * instead: 2 GiB of 512-byte sectors in 32 KiB clusters, minus the clusters the files under the
  * Memory Stick folder occupy, so a save the guest writes still uses space. The free space is
- * therefore a function of the folder's contents, never of the host volume. Normal play reports
+ * therefore a function of the folder's contents, never of the host volume. The size and cluster
+ * are project-chosen, not measured from a console or taken from a FAT format (32 KiB is the unit
+ * the savedata size calls count in); a measured card geometry would replace them. Normal play reports
  * the host volume as before. A host disk that is really full still fails the write with a host
  * error: nothing here turns a failed write into success. */
 #define IO_VIRTUAL_MS_SECTOR_BYTES 512u
 #define IO_VIRTUAL_MS_SECTORS_PER_CLUSTER 64u
 #define IO_VIRTUAL_MS_CLUSTERS 65536u   /* 65536 * 32 KiB = 2 GiB */
-#define IO_VIRTUAL_MS_WALK_DEPTH 32u
 
-/* Adds the clusters of every regular file under `dir` (a host path); links are not followed. A
- * directory or file that cannot be read adds nothing and returns 0: the caller then reports the
- * query as failed, which the guest sees as a host I/O error rather than a guessed figure. */
+/* Adds the clusters of every regular file under `dir` (a host path); links are not followed, so
+ * the walk ends and has no depth cap. A directory or file that cannot be read returns 0: the
+ * caller then reports the query as failed, which the guest sees as a host I/O error rather than a
+ * guessed figure.
+ *
+ * The walk is not cached: the folder changes through every guest write, rename and delete and
+ * through the user's own tools, none of which pass one hook, so a cache could only be kept honest
+ * by walking again. It runs once per capacity query, which a title makes before a save, and costs
+ * one directory read per folder. */
 #ifdef _WIN32
-static int io_virtual_ms_walk(const char *dir, unsigned depth, uint64_t *clusters) {
-    if (depth > IO_VIRTUAL_MS_WALK_DEPTH) return 0;
+static int io_virtual_ms_walk(const char *dir, uint64_t *clusters) {
     wchar_t *wide = NULL, *pattern = NULL;
     if (!sr_wide_path_alloc(dir, &wide) || !sr_wide_join_alloc(wide, L"*", &pattern)) {
         free(wide);
@@ -1102,7 +1107,7 @@ static int io_virtual_ms_walk(const char *dir, unsigned depth, uint64_t *cluster
             char *name = NULL, *sub = NULL;
             if (!sr_wide_to_utf8_alloc(child.cFileName, &name) ||
                 !(sub = sr_utf8_join_alloc(dir, name, SR_HOST_PATH_SEP)) ||
-                !io_virtual_ms_walk(sub, depth + 1u, clusters))
+                !io_virtual_ms_walk(sub, clusters))
                 ok = 0;
             free(name);
             free(sub);
@@ -1116,8 +1121,7 @@ static int io_virtual_ms_walk(const char *dir, unsigned depth, uint64_t *cluster
     return ok;
 }
 #else
-static int io_virtual_ms_walk(const char *dir, unsigned depth, uint64_t *clusters) {
-    if (depth > IO_VIRTUAL_MS_WALK_DEPTH) return 0;
+static int io_virtual_ms_walk(const char *dir, uint64_t *clusters) {
     DIR *d = opendir(dir);
     if (!d) return 0;
     const uint64_t cluster_bytes = (uint64_t)IO_VIRTUAL_MS_SECTOR_BYTES *
@@ -1136,7 +1140,7 @@ static int io_virtual_ms_walk(const char *dir, unsigned depth, uint64_t *cluster
         if (!child || lstat(child, &st) != 0) {
             ok = 0;
         } else if (S_ISDIR(st.st_mode)) {
-            if (!io_virtual_ms_walk(child, depth + 1u, clusters)) ok = 0;
+            if (!io_virtual_ms_walk(child, clusters)) ok = 0;
         } else if (S_ISREG(st.st_mode)) {
             *clusters += ((uint64_t)st.st_size + cluster_bytes - 1u) / cluster_bytes;
         }
@@ -1151,9 +1155,13 @@ static int io_virtual_ms_walk(const char *dir, unsigned depth, uint64_t *cluster
 static int io_memstick_virtual_capacity(uint32_t info[5]) {
     char *host_root = host_dir_path_alloc("");
     uint64_t used = 0;
-    int ok = host_root && io_virtual_ms_walk(host_root, 0u, &used);
+    int ok = host_root && io_virtual_ms_walk(host_root, &used);
     free(host_root);
-    if (!ok) return 0;
+    if (!ok) {
+        fprintf(stderr, "HLE: sceIoDevctl: the Memory Stick folder could not be read to compute "
+                        "the virtual card's used space; answering a host I/O error\n");
+        return 0;
+    }
     if (used > IO_VIRTUAL_MS_CLUSTERS) used = IO_VIRTUAL_MS_CLUSTERS;
     info[0] = IO_VIRTUAL_MS_CLUSTERS;
     info[1] = (uint32_t)(IO_VIRTUAL_MS_CLUSTERS - used);

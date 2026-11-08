@@ -580,6 +580,16 @@ static void audio_note_overrun(int ch, int nframes) {
             (unsigned long long)s_stats.overrun_frames);
 }
 
+/* The other side: a push that finds a channel that was playing already dry is host playback that
+ * ran ahead of the guest. Counted in underrun_events; logged the same way. */
+static void audio_note_underrun(int ch) {
+    const uint64_t n = s_stats.underrun_events;
+    if (n & (n - 1u)) return;
+    fprintf(stderr, "audio: host mixer underrun on channel %d: the queue ran dry; %llu so far (the guest "
+                    "is not affected under SR_DETERMINISTIC_CLOCK=1)\n",
+            ch, (unsigned long long)n);
+}
+
 void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     if (ch < 0 || ch >= SR_AUDIO_CHANNELS || !lr || nframes <= 0) {
         return;
@@ -605,6 +615,7 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     /* Instrumentation: underrun detection (queue had completely dried up after previous activity) */
     if (cur_queued_frames == 0 && s_stats.channel_pushed_frames[ch] > 0) {
         s_stats.underrun_events++;
+        audio_note_underrun(ch);
     }
 
     /* Instrumentation: backpressure detection (queue has more than two periods of lead) */
@@ -1144,6 +1155,11 @@ static void test_full_mixer_drops_are_counted(void) {
     assert(s_stats.overrun_events == 2);
     assert(s_stats.overrun_frames == 4096u + 1000u);
     assert(s_stats.total_pushed_frames == (uint64_t)SR_AUDIO_MAX_QUEUED_FRAMES);
+    /* A channel that was playing and ran dry is an underrun: counted and logged. */
+    SDL_ClearAudioStream(s_streams[0]);
+    assert(sr_audio_queued(0) == 0);
+    sr_audio_push(0, block, 64, 0x8000, 0x8000);
+    assert(s_stats.underrun_events == 1);
     sr_audio_dump_stats();
     printf("test_full_mixer_drops_are_counted: PASS\n");
 }

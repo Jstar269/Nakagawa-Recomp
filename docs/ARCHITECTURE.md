@@ -875,9 +875,10 @@ re-qualified under `SR_DETERMINISTIC_CLOCK=1` before it is recorded, and a recor
 real-time, so it cannot be played live
 ([Recording a video of a run](DEBUGGING.md#recording-a-video-of-a-run)). Guest time and the RTC
 are then a function of the guest's own work, so two runs with the same inputs give the same
-frames. Host inputs that remain: whether the host has an audio device, the Memory Stick volume's
-free space, a random console MAC and PSID on fresh user data, and the mixer's 262144-frame cap,
-which drops audio when a run is faster than real time.
+frames. Audio (with or without a host device, whatever the mixer holds), the Memory Stick's
+size and free space, and a fresh profile's console MAC and PSID no longer come from the host:
+[Where `SR_EXIT_AT_VBLANK` actually stops](DEBUGGING.md#where-sr_exit_at_vblank-actually-stops)
+lists what the guest reads instead.
 
 **Runtime host-thread audit.** Guest threads, HLE handlers, the window's event pump and the
 pause loop all run on the runtime thread. Work that runs elsewhere, and why a paused guest

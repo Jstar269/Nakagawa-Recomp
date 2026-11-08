@@ -340,12 +340,16 @@ int sr_hle_test_audio_volume(uint32_t ch, uint32_t *left, uint32_t *right) {
  * otherwise not see how long the guest would have waited (#2160, #2163). */
 #ifdef SR_HLE_THREAD_SELFTEST
 static uint64_t s_audio_wait_total_us;
+static void (*s_audio_wait_hook)(uint32_t us);
+/* A fixture without a scheduler thread cannot advance guest time by waiting; the hook lets it. */
+void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us)) { s_audio_wait_hook = hook; }
 void sr_hle_test_audio_wait_reset(void) { s_audio_wait_total_us = 0u; }
 uint64_t sr_hle_test_audio_wait_total_us(void) { return s_audio_wait_total_us; }
 #endif
 static void audio_wait(uint32_t us) {
 #ifdef SR_HLE_THREAD_SELFTEST
     s_audio_wait_total_us += us;
+    if (s_audio_wait_hook) s_audio_wait_hook(us);
 #endif
     sched_delay_current(us);
 }

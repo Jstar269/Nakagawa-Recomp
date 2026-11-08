@@ -204,6 +204,7 @@ typedef struct {
     uint8_t mac[6];
     uint8_t psid[16];
     int wlan_switch_set;     /* the overlay set the switch */
+    int synthetic;           /* derived for a deterministic run (#2162): never written to the overlay */
     uint32_t wlan_switch;
 } PspConsoleProfile;
 
