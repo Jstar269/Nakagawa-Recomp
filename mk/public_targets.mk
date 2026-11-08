@@ -118,6 +118,7 @@ PUBLIC_TARGETS := \
 	stale-code-selftest \
 	cpu-lle-selftest \
 	domain-mode-selftest \
+	videocodec-selftest \
 	nkstate-selftest \
 	dispatch-isolation-selftest \
 	dispatch-isolation-selftest-one \
@@ -178,6 +179,10 @@ PUBLIC_TARGETS := \
 	gpu-texscale-selftest \
 	gpu-texscale-mutant \
 	gpu-texrepl-mutant \
+	gpu-glyph-selftest \
+	gpu-glyph-mutant \
+	glyph-recon-selftest \
+	glyph-recon-mutant \
 	ge-replay \
 	ge-first-bad-draw-selftest \
 	run \
@@ -316,6 +321,7 @@ HELP_DESCRIPTION_dispatch-selftest := run the production dispatch selftest
 HELP_DESCRIPTION_stale-code-selftest := run the stale translated-code detector selftest
 HELP_DESCRIPTION_cpu-lle-selftest := run the LLE COP0/exception interpreter selftest
 HELP_DESCRIPTION_domain-mode-selftest := run the LLE domain-mode and import-seam selftest
+HELP_DESCRIPTION_videocodec-selftest := run the Media Engine boundary (sceVideocodec, sceMpegbase, sceAudiocodec) selftest
 HELP_DESCRIPTION_nkstate-selftest := run the save-state container, checkpoint and record/replay selftest
 HELP_DESCRIPTION_dispatch-isolation-selftest := run dispatch isolation selftests
 HELP_DESCRIPTION_dispatch-isolation-selftest-one := run one dispatch isolation selftest
@@ -376,6 +382,10 @@ HELP_DESCRIPTION_texrepl-mutant := prove the texture replacement selftest kills 
 HELP_DESCRIPTION_gpu-texscale-selftest := run texture scaling and the smart 2D filter on a real Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_gpu-texscale-mutant := prove the texture scaling selftest kills a cache that binds a stale scaled copy
 HELP_DESCRIPTION_gpu-texrepl-mutant := prove the replace cells kill a stub lookup and a palette identity without the CLUTFORMAT word
+HELP_DESCRIPTION_glyph-recon-selftest := run sharp game text's CPU selftest on synthetic glyphs (the Ace gate, the refusals, the rebuild and its downsample check; no GPU)
+HELP_DESCRIPTION_glyph-recon-mutant := prove the glyph selftest kills each removed guard (Ace gate, VRAM, scale 1, mip chain, buffers, downsample check, colour, hard edge, size)
+HELP_DESCRIPTION_gpu-glyph-selftest := run sharp game text on a real Vulkan device (the rebuilt tile, refusals, rewrites, the per-present count, an unchanged authentic picture; SKIPs without one)
+HELP_DESCRIPTION_gpu-glyph-mutant := prove the GPU glyph cells kill a bound stale tile, a missing per-present count, and the removed VRAM, hard-edge, colour and Ace guards
 HELP_DESCRIPTION_ge-replay := run the graphics-engine replay selftest
 HELP_DESCRIPTION_ge-first-bad-draw-selftest := prove ge_replay --first-bad-draw finds the draw an executed Vulkan mutant changes (SKIPs without Vulkan)
 HELP_DESCRIPTION_run := build and launch the current title runtime
