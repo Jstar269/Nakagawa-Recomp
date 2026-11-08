@@ -2056,11 +2056,3 @@ void hle_register_atrac_handlers(void) {
     sr_hle_register_unsupported(0x1575d64b, "sceAtracLowLevelInitDecoder", 0x80630004u); /* ATRAC invalid codec type */
     sr_hle_register_unsupported(0x0c116e1b, "sceAtracLowLevelDecode", 0x80630004u); /* ATRAC invalid codec type */
 }
-
-/* Registration runs of the shared helpers in hle.c (#307). Each holds one run of this file's
- * registrations, in their order, and is called from the helper where the run stood. */
-
-/* From hle_register_unregistered_import_batch(). The sceAudiocodec stubs that stood here are
- * real handlers now, beside the other Media Engine codecs in hle_videocodec.c (#286). */
-void hle_register_unregistered_import_audio_codec(void) {
-}

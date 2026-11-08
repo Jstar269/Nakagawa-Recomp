@@ -38,30 +38,38 @@
 // (src/jpcsp/HLE/modules/sceMeAudio.java and sceAudiocodec.java at the JPCSP revision above).
 
 /* The Media Engine (ME) boundary under a game's own disc mpeg.prx (#286): sceVideocodec
- * (8 calls), sceMpegbase (4 calls) and sceAudiocodec (5 calls). When mpeg.prx runs as LLE, these are the calls below it
- * that reach the ME, whose code is firmware the project never carries. Each handler is HLE over
- * a host model:
- *   - ME RAM is a host buffer at ME address 0 with a low-first allocator. The guest sees ME
- *     addresses only as opaque numbers in context words and packet lists.
- *   - sceVideocodecDecode hands the access unit to the host H.264 backend (src/rt/sr_h264.h)
- *     and keeps the decoded picture as host 4:2:0 planes, keyed by the ME address published
- *     as buffer 0 of that picture. The title's mpeg.prx imports no sceMpegBaseYCrCbCopy, so no
- *     guest code reads the PSP's banded picture layout and it is not written here.
- *   - sceMpegBaseCscAvc finds the planes by that address and converts them with the measured
- *     sr_h264_psp_rgb (PSP-MPEG-001) into the guest RGB buffer.
+ * (10 calls), sceMpegbase (6 calls) and sceAudiocodec (5 calls). When mpeg.prx runs as LLE, these
+ * are the calls below it that reach the ME, whose code is firmware the project never carries.
+ * Each handler is HLE over a host model:
+ *   - ME RAM is a host buffer at ME address 0 with a low-first allocator. Every address the ME
+ *     side reads or writes (an access unit, a packet destination, an info block, a band) goes
+ *     through JPCSP's ME memory view: ME RAM when it falls inside ME RAM, guest memory otherwise.
+ *     mpeg.prx names buffers in main RAM this way (sceMpegBasePESpacketCopy into its ringbuffer's
+ *     access-unit buffer, for one).
+ *   - sceVideocodecDecode hands the access unit to the host H.264 backend (src/rt/sr_h264.h) and
+ *     writes the decoded picture into ME RAM in the PSP's band layout (vc_band_walk), at the eight
+ *     band addresses it publishes.
+ *   - sceMpegBaseYCrCbCopy copies band bytes into guest buffers, and sceMpegBaseCscAvc reads the
+ *     eight bands back from whatever memory their addresses name (ME RAM or guest RAM, as JPCSP's
+ *     ME memory view does) and converts them with the measured sr_h264_psp_rgb (PSP-MPEG-001)
+ *     into the guest RGB buffer.
  *
  * derived-translated: the context-word offsets and values, the decode output words, the band
- * buffer allocation, the CSC struct layout, the packet-list layout and the pixel-mode mapping are
- * translated from the JPCSP files named above. Nothing here comes from JPCSP's ME code emulation
- * (MEProcessor, METhread, the ME MMIO handlers or the sceMeVideo driver).
+ * buffer allocation and layout, the CSC struct layout, the packet-list layout and the pixel-mode
+ * mapping are translated from the JPCSP files named above. Nothing here comes from JPCSP's ME
+ * code emulation (MEProcessor, METhread, the ME MMIO handlers or the sceMeVideo driver).
  *
  * Every value marked "synthetic" below is JPCSP's value at 00ac4d6d, not a PSP measurement by this
- * project; PSP request W-LLE-1 measures them. Values marked "measured" come from PSP-VCODEC-001
- * (W-LLE-1 boot 149: a PSP-3000 on firmware 6.60, the firmware's own sceVideocodec and
- * sceAudiocodec on zeroed contexts): Open, GetEDRAM, Init, SetMemory and Stop before any decode,
- * and sceAudiocodecCheckNeedMem. The decode, band, CSC and copy words are not measured yet. Unknown codec types, a context the runtime did not
- * open, ME addresses outside ME RAM, zero-length packets, a CSC of a picture never decoded and a
- * build without an H.264 backend are refused with a named error and one diagnostic line.
+ * project; PSP request W-LLE-1 measures them. Values marked "PSP-observed, capture pending" were
+ * read on a PSP by W-LLE-1 boot 149 (case 160 at 979de58f: a PSP-3000 on firmware 6.60, the
+ * firmware's own sceVideocodec and sceAudiocodec on zeroed contexts, the ATRAC3plus work area given
+ * the halfwords 0x5C28, 0x5C5C and 0 at +40): Open, GetEDRAM, Init, SetMemory and Stop before any
+ * decode, and sceAudiocodecCheckNeedMem. They stay "capture pending" until the oracle records
+ * PSP-VCODEC-001 (docs/HARDWARE_ORACLE.md). The decode words, the band layout, the CSC
+ * conversion and the copy sizes are synthetic, pending W-LLE-1. Unknown codec types, a context
+ * the runtime did not open, ME addresses outside ME RAM, zero-length packets, band buffers outside
+ * readable memory and a build without an H.264 backend are refused with a named error and one
+ * diagnostic line.
  *
  *   - sceAudiocodec decodes the movie's ATRAC3plus frames with the project's ATRAC3plus decoder
  *     (atrac3p_bridge.h), by the same frame rules sceMpegAtracDecode uses in mpeg.c. Its EDRAM
@@ -90,7 +98,6 @@
 /* JPCSP's ERROR_AVC_INVALID_VALUE, used here for every state refusal JPCSP does not check. */
 #define VC_ERR_NOT_OPEN       0x806201FEu
 #define VC_ERR_STATE          0x806201FEu
-#define VC_ERR_NO_PICTURE     0x806201FEu
 #define VC_ERR_CSC_GEOMETRY   0x806201FEu
 /* JPCSP's ERROR_AVC_VIDEO_FATAL, used here when no host decoder can run the access unit. */
 #define VC_ERR_NO_BACKEND     0x80628002u
@@ -183,12 +190,49 @@ static int me_span(uint32_t addr, uint32_t size, uint32_t *offset) {
     return 1;
 }
 
-static void me_w8(uint32_t off, uint8_t v) { s_me_ram[off] = v; }
-static void me_w32(uint32_t off, uint32_t v) {
-    s_me_ram[off] = (uint8_t)v;
-    s_me_ram[off + 1u] = (uint8_t)(v >> 8);
-    s_me_ram[off + 2u] = (uint8_t)(v >> 16);
-    s_me_ram[off + 3u] = (uint8_t)(v >> 24);
+/* JPCSP's ME memory view (MEMemory over Memory; synthetic: W-LLE-1): an address in segment 0, 2, 4
+ * or 5 whose low 29 bits fall inside ME RAM is ME RAM; any other address is guest memory. */
+static int me_view_address(uint32_t addr) {
+    const uint32_t segment = addr >> 29;
+    return (segment == 0u || segment == 2u || segment == 4u || segment == 5u) &&
+           (addr & 0x1FFFFFFFu) < ME_RAM_SIZE;
+}
+
+/* 1 when [addr, addr + size) can be read (written, when `write`) whole through the ME memory
+ * view: inside ME RAM, or a guest span. A range that starts in ME RAM and leaves it is refused. */
+static int me_view_span(uint32_t addr, uint32_t size, int write) {
+    uint32_t off;
+    if (me_view_address(addr)) return me_span(addr, size, &off);
+    if (!addr || !size) return 0;
+    return write ? sr_guest_span_writable_any_view(addr, size) : sr_guest_span_readable(addr, size);
+}
+
+/* The refusal code for a span me_view_span refused. */
+static uint32_t me_view_error(uint32_t addr) {
+    return me_view_address(addr) ? VC_ERR_ME_ADDRESS : VC_ERR_GUEST_ADDRESS;
+}
+
+/* Copies through the ME memory view; 0 when the span is not whole. */
+static int me_view_copy_in(void *host, uint32_t addr, uint32_t size) {
+    uint32_t off;
+    if (!me_view_address(addr)) return sr_guest_copy_in(host, addr, size);
+    if (!me_span(addr, size, &off)) return 0;
+    memcpy(host, s_me_ram + off, size);
+    return 1;
+}
+
+static int me_view_copy_out(uint32_t addr, const void *host, uint32_t size) {
+    uint32_t off;
+    if (!me_view_address(addr)) return sr_guest_copy_out(addr, host, size);
+    if (!me_span(addr, size, &off)) return 0;
+    memcpy(s_me_ram + off, host, size);
+    return 1;
+}
+
+static void me_view_w8(uint32_t addr, uint8_t v) { (void)me_view_copy_out(addr, &v, 1u); }
+static void me_view_w32(uint32_t addr, uint32_t v) {
+    const uint8_t b[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24) };
+    (void)me_view_copy_out(addr, b, 4u);
 }
 
 /* ---- refusals ---- */
@@ -205,7 +249,7 @@ static int vc_guest_words(uint32_t addr, uint32_t bytes) {
 /* ---- sceVideocodec contexts (sceVideocodec.java) ---- */
 #define VC_CONTEXT_BYTES      96u          /* JPCSP videocodecBufferSize */
 #define VC_TYPE_AVC           0u
-/* measured (PSP-VCODEC-001): sceVideocodecOpen writes +0 = 0x05100601 for both codec types; for
+/* PSP-observed, capture pending (PSP-VCODEC-001): sceVideocodecOpen writes +0 = 0x05100601 for both codec types; for
  * type 0 it writes +8 = 1 and +24 = 0x8344, the size sceVideocodecGetEDRAM reads, and returns 0.
  * For type 1 it writes +8 = 0x80000000 and +24 = 0x264C and returns 0x80628001. */
 #define VC_OPEN_WORD0         0x05100601u
@@ -236,12 +280,6 @@ static int vc_guest_words(uint32_t addr, uint32_t bytes) {
 #define VC_ME_INFO2_BYTES     32u
 
 typedef struct {
-    uint32_t key;        /* the ME address published as buffer 0 of this picture; 0 = empty */
-    uint32_t width, height;
-    uint8_t *y, *cb, *cr;
-} VcPicture;
-
-typedef struct {
     int used;
     uint32_t ctx;        /* guest address of the 96-byte context */
     uint32_t edram;      /* raw ME allocation behind context +92; 0 = none */
@@ -251,7 +289,6 @@ typedef struct {
     uint32_t band_base;                /* ME allocation for the band buffers; 0 = none */
     uint32_t band_width, band_height;  /* the geometry the bands were sized for */
     uint32_t bands[VC_BAND_SETS][8];
-    VcPicture pictures[VC_PICTURE_SLOTS];
 } VcContext;
 
 static VcContext s_vc[VC_MAX_CONTEXTS];
@@ -275,15 +312,6 @@ static uint32_t vc_context_for(const char *call, uint32_t ctx, uint32_t type, in
     return 0u;
 }
 
-static void vc_release_pictures(VcContext *c) {
-    for (int i = 0; i < VC_PICTURE_SLOTS; i++) {
-        free(c->pictures[i].y);
-        free(c->pictures[i].cb);
-        free(c->pictures[i].cr);
-        memset(&c->pictures[i], 0, sizeof(c->pictures[i]));
-    }
-}
-
 static void vc_stop_decoder(VcContext *c) {
     if (c->h264 >= 0) sr_h264_destroy(c->h264);
     c->h264 = -1;
@@ -293,7 +321,7 @@ static void vc_stop_decoder(VcContext *c) {
 static uint32_t h_VideocodecOpen(CpuState *s) {
     const uint32_t ctx = A0, type = A1;
     if (type == VC_TYPE_SECOND && vc_guest_words(ctx, VC_CONTEXT_BYTES) && !vc_find(ctx)) {
-        /* measured: the PSP refuses type 1 here after writing three words. The later calls on a
+        /* PSP-observed, capture pending: the PSP refuses type 1 here after writing three words. The later calls on a
          * type 1 context are not modelled and stay refused. */
         MEM_W32(ctx, VC_OPEN_WORD0);
         MEM_W32(ctx + 8u, VC_OPEN_T1_WORD8);
@@ -352,8 +380,8 @@ static uint32_t h_VideocodecReleaseEDRAM(CpuState *s) {
     return 0u;
 }
 
-/* sceVideocodecInit(ctx, type): +12 = +20 and +8 = 0 (measured, PSP-VCODEC-001, type 0; JPCSP's
- * +20 + 8 is what the PSP writes for type 1). */
+/* sceVideocodecInit(ctx, type): +12 = +20 and +8 = 0 (PSP-observed, capture pending:
+ * PSP-VCODEC-001, type 0). */
 static uint32_t h_VideocodecInit(CpuState *s) {
     VcContext *c;
     uint32_t r = vc_context_for("sceVideocodecInit", A0, A1, 1, &c);
@@ -399,8 +427,9 @@ static uint32_t h_VideocodecGetSEI(CpuState *s) {
 }
 
 /* sceVideocodecStop(ctx, type): JPCSP drops its decoder; the next decode starts a new one. The
- * pictures already decoded stay convertible (synthetic: W-LLE-1). Before any decode the PSP
- * returns 0x806201FE and changes no context word (measured, PSP-VCODEC-001, type 0). */
+ * pictures already decoded stay in their ME bands (synthetic: W-LLE-1). Before any decode the PSP
+ * returns 0x806201FE and changes no context word (PSP-observed, capture pending: PSP-VCODEC-001,
+ * type 0). */
 static uint32_t h_VideocodecStop(CpuState *s) {
     VcContext *c;
     uint32_t r = vc_context_for("sceVideocodecStop", A0, A1, 1, &c);
@@ -411,8 +440,8 @@ static uint32_t h_VideocodecStop(CpuState *s) {
     return 0u;
 }
 
-/* sceVideocodecDelete(ctx, type): the decoder, the band buffers, the ME memory and the pictures
- * go, and the context is closed. JPCSP notes from its own PSP traces that the call takes about
+/* sceVideocodecDelete(ctx, type): the decoder, the band buffers and the ME memory go, and the
+ * context is closed. JPCSP notes from its own PSP traces that the call takes about
  * 40 ms; it returns at once here (synthetic timing: W-LLE-1). */
 static uint32_t h_VideocodecDelete(CpuState *s) {
     VcContext *c;
@@ -421,7 +450,6 @@ static uint32_t h_VideocodecDelete(CpuState *s) {
     vc_stop_decoder(c);
     if (c->band_base) (void)me_free(c->band_base, ME_OWNER_VIDEO, c->ctx);
     if (c->edram) (void)me_free(c->edram, ME_OWNER_VIDEO, c->ctx);
-    vc_release_pictures(c);
     memset(c, 0, sizeof(*c));
     c->h264 = -1;
     return 0u;
@@ -431,8 +459,8 @@ static uint32_t h_VideocodecDelete(CpuState *s) {
 static uint32_t vc_align512(uint32_t v) { return (v + 0x1FFu) & ~0x1FFu; }
 
 /* The band buffers, allocated once in ME RAM for the first picture's geometry, laid out as
- * JPCSP videocodecDecodeType0 does (synthetic: W-LLE-1 items 2 and 3). Only the addresses are
- * used: the bands themselves are not written (see the file comment). */
+ * JPCSP videocodecDecodeType0 does (synthetic: W-LLE-1 items 2 and 3). Each band has room for
+ * its vc_band_bytes() count: buffers 4 and 5 size_c1, buffers 6 and 7 size_c2. */
 static int vc_allocate_bands(VcContext *c, uint32_t w, uint32_t h) {
     const uint32_t size_y1 = vc_align512(((w + 16u) >> 5) * (h >> 1) * 16u);
     const uint32_t size_y2 = vc_align512((w >> 5) * (h >> 1) * 16u);
@@ -462,38 +490,65 @@ static int vc_allocate_bands(VcContext *c, uint32_t w, uint32_t h) {
     return 1;
 }
 
+/* ---- the band layout (JPCSP sceMpegbase.read and the format note in sceVideocodecDecode;
+ * synthetic: W-LLE-1 item 3) ----
+ * A w x h picture, both multiples of 16, sits in eight bands:
+ *   - luma is cut into 16-column strips. Band 0 holds the strips at x % 32 == 0 on even rows,
+ *     band 1 those at x % 32 == 16 on even rows, bands 2 and 3 the same strips on odd rows;
+ *   - chroma (w/2 x h/2) is cut into 8-column groups of interleaved (cb, cr) byte pairs. Band 4
+ *     holds the groups at x % 16 == 0 on even chroma rows, band 5 the same groups on odd chroma
+ *     rows, bands 6 and 7 the groups at x % 16 == 8 on even and odd chroma rows.
+ * Each band is strip-major: one strip's rows follow each other, 16 bytes a row, then the next
+ * strip. sceMpegBaseYCrCbCopy's flags bit 0 moves bands 0, 1, 4 and 5 (the even luma rows and
+ * the left half of every 16-column chroma group), bit 1 bands 2, 3, 6 and 7. */
+static void vc_band_bytes(uint32_t w, uint32_t h, uint32_t bytes[8]) {
+    const uint32_t y1 = ((w + 16u) >> 5) * (h >> 1) * 16u, y2 = (w >> 5) * (h >> 1) * 16u;
+    bytes[0] = y1; bytes[1] = y2; bytes[2] = y1; bytes[3] = y2;
+    bytes[4] = y1 >> 1; bytes[5] = y1 >> 1; bytes[6] = y2 >> 1; bytes[7] = y2 >> 1;
+}
+
+/* Move a w x h picture between host planes (y_stride and c_stride bytes a row) and the eight
+ * bands: into the bands when `to_bands`, out of them otherwise. Each band pointer has room for
+ * its vc_band_bytes() count. */
+static void vc_band_walk(uint8_t *const band[8], uint8_t *y, uint32_t y_stride, uint8_t *cb,
+                         uint8_t *cr, uint32_t c_stride, uint32_t w, uint32_t h, int to_bands) {
+    for (uint32_t b = 0; b < 4u; b++) {
+        uint8_t *at = band[b];
+        for (uint32_t x = (b & 1u) ? 16u : 0u; x < w; x += 32u)
+            for (uint32_t row = (b & 2u) ? 1u : 0u; row < h; row += 2u, at += 16) {
+                uint8_t *pixels = y + (size_t)row * y_stride + x;
+                if (to_bands) memcpy(at, pixels, 16u);
+                else memcpy(pixels, at, 16u);
+            }
+    }
+    const uint32_t cw = w / 2u, ch = h / 2u;
+    for (uint32_t b = 4; b < 8u; b++) {
+        uint8_t *at = band[b];
+        for (uint32_t x = b >= 6u ? 8u : 0u; x < cw; x += 16u)
+            for (uint32_t row = b & 1u; row < ch; row += 2u)
+                for (uint32_t i = 0; i < 8u; i++, at += 2) {
+                    const size_t c_at = (size_t)row * c_stride + x + i;
+                    if (to_bands) { at[0] = cb[c_at]; at[1] = cr[c_at]; }
+                    else { cb[c_at] = at[0]; cr[c_at] = at[1]; }
+                }
+    }
+}
+
+/* The decoder's output and the CSC's input, one picture at a time (both calls are synchronous). */
 static uint8_t s_vc_scratch_y[VC_MAX_WIDTH * VC_MAX_HEIGHT];
 static uint8_t s_vc_scratch_cb[(VC_MAX_WIDTH / 2) * (VC_MAX_HEIGHT / 2)];
 static uint8_t s_vc_scratch_cr[(VC_MAX_WIDTH / 2) * (VC_MAX_HEIGHT / 2)];
 
-/* Keep the scratch picture as the host planes of picture slot `slot`. */
-static int vc_store_picture(VcContext *c, int slot, uint32_t w, uint32_t h) {
-    VcPicture *p = &c->pictures[slot];
-    const size_t luma = (size_t)w * h, chroma = (size_t)(w / 2u) * (h / 2u);
-    if (!p->y || p->width != w || p->height != h) {
-        free(p->y); free(p->cb); free(p->cr);
-        p->y = (uint8_t *)malloc(luma);
-        p->cb = (uint8_t *)malloc(chroma);
-        p->cr = (uint8_t *)malloc(chroma);
-        if (!p->y || !p->cb || !p->cr) {
-            free(p->y); free(p->cb); free(p->cr);
-            memset(p, 0, sizeof(*p));
-            return 0;
-        }
-    }
-    for (uint32_t row = 0; row < h; row++)
-        memcpy(p->y + (size_t)row * w, s_vc_scratch_y + (size_t)row * VC_MAX_WIDTH, w);
-    for (uint32_t row = 0; row < h / 2u; row++) {
-        memcpy(p->cb + (size_t)row * (w / 2u), s_vc_scratch_cb + (size_t)row * (VC_MAX_WIDTH / 2), w / 2u);
-        memcpy(p->cr + (size_t)row * (w / 2u), s_vc_scratch_cr + (size_t)row * (VC_MAX_WIDTH / 2), w / 2u);
-    }
-    p->width = w;
-    p->height = h;
-    p->key = c->bands[slot][0];
-    return 1;
+/* Write the scratch picture into ME RAM as the bands of picture slot `slot`. */
+static void vc_store_picture(VcContext *c, int slot, uint32_t w, uint32_t h) {
+    uint8_t *band[8];
+    for (uint32_t i = 0; i < 8u; i++) band[i] = s_me_ram + c->bands[slot][i];
+    vc_band_walk(band, s_vc_scratch_y, VC_MAX_WIDTH, s_vc_scratch_cb, s_vc_scratch_cr, VC_MAX_WIDTH / 2,
+                 w, h, 1);
 }
 
-/* sceVideocodecDecode(ctx, type): decode the access unit at ME address ctx+36, ctx+40 bytes.
+/* sceVideocodecDecode(ctx, type): decode the access unit at ctx+36 (read through the ME memory
+ * view), ctx+40 bytes.
  * The decode is synchronous here: the call returns after the host decoder ran (synthetic timing;
  * JPCSP blocks the caller about 4 ms on a decoder thread; W-LLE-1 item 2 measures it). */
 static uint32_t h_VideocodecDecode(CpuState *s) {
@@ -505,26 +560,33 @@ static uint32_t h_VideocodecDecode(CpuState *s) {
     const uint32_t au_addr = MEM_R32(ctx + 36u), au_size = MEM_R32(ctx + 40u);
     const uint32_t buffer2 = MEM_R32(ctx + 16u), yuv = MEM_R32(ctx + 44u);
     const uint32_t buffer3 = MEM_R32(ctx + 48u), sei = MEM_R32(ctx + 80u);
-    uint32_t au_off, info1 = 0u, info2 = 0u, info1_off = 0u, info2_off = 0u;
+    uint32_t info1 = 0u, info2 = 0u;
     if (au_size == 0u) return vc_refuse(call, "zero-length access unit", VC_ERR_ZERO_LENGTH);
-    if (!me_span(au_addr, au_size, &au_off))
-        return vc_refuse(call, "access unit outside ME RAM", VC_ERR_ME_ADDRESS);
+    if (!me_view_span(au_addr, au_size, 0))
+        return vc_refuse(call, "access unit is neither inside ME RAM nor a readable guest span", me_view_error(au_addr));
     if (!vc_guest_words(buffer2, VC_BUFFER2_BYTES) || !vc_guest_words(yuv, VC_YUV_BYTES) ||
         !vc_guest_words(buffer3, VC_BUFFER3_BYTES) || (sei && !vc_guest_words(sei, VC_SEI_BYTES)))
         return vc_refuse(call, "an output structure is not a writable guest span", VC_ERR_GUEST_ADDRESS);
     info1 = MEM_R32(yuv + 36u);
     info2 = MEM_R32(yuv + 40u);
-    if ((info1 && !me_span(info1, VC_ME_INFO1_BYTES, &info1_off)) ||
-        (info2 && !me_span(info2, VC_ME_INFO2_BYTES, &info2_off)))
-        return vc_refuse(call, "an ME info block outside ME RAM", VC_ERR_ME_ADDRESS);
+    if (info1 && !me_view_span(info1, VC_ME_INFO1_BYTES, 1))
+        return vc_refuse(call, "the first ME info block is neither inside ME RAM nor a writable guest span",
+                         me_view_error(info1));
+    if (info2 && !me_view_span(info2, VC_ME_INFO2_BYTES, 1))
+        return vc_refuse(call, "the second ME info block is neither inside ME RAM nor a writable guest span",
+                         me_view_error(info2));
     if (!sr_h264_backend_available())
         return vc_refuse(call, SR_H264_UNAVAILABLE_BOUNDARY, VC_ERR_NO_BACKEND);
     if (c->h264 < 0) {
         c->h264 = sr_h264_create();
         if (c->h264 < 0) return vc_refuse(call, SR_H264_UNAVAILABLE_BOUNDARY, VC_ERR_NO_BACKEND);
     }
-    if (sr_h264_submit_au_timed(c->h264, s_me_ram + au_off, au_size, -1, 0) < 0)
-        return vc_refuse(call, "the H.264 backend rejected the access unit", VC_ERR_DECODE);
+    uint8_t *au = (uint8_t *)malloc(au_size);
+    if (!au) return vc_refuse(call, "no host memory for the access unit", VC_ERR_DECODE);
+    const int submitted = me_view_copy_in(au, au_addr, au_size) &&
+                          sr_h264_submit_au_timed(c->h264, au, au_size, -1, 0) >= 0;
+    free(au);
+    if (!submitted) return vc_refuse(call, "the H.264 backend rejected the access unit", VC_ERR_DECODE);
 
     /* Every picture the decoder has ready; the newest is the one handed over. */
     SrH264FrameTarget target;
@@ -559,8 +621,7 @@ static uint32_t h_VideocodecDecode(CpuState *s) {
         if (w != c->band_width || h != c->band_height)
             return vc_refuse(call, "picture size differs from the size the band buffers were allocated for", VC_ERR_DECODE);
         slot = (int)(c->frame_count % VC_PICTURE_SLOTS);
-        if (!vc_store_picture(c, slot, w, h))
-            return vc_refuse(call, "no host memory for the decoded picture", VC_ERR_DECODE);
+        vc_store_picture(c, slot, w, h);
         c->width = w;
         c->height = h;
     }
@@ -579,24 +640,22 @@ static uint32_t h_VideocodecDecode(CpuState *s) {
     MEM_W32(yuv + 32u, 1u);
     if (!info1) {
         info1 = c->band_base;
-        info1_off = c->band_base;
         MEM_W32(yuv + 36u, info1);
     }
     if (!info2) {
         info2 = c->band_base + 36u;
-        info2_off = c->band_base + 36u;
         MEM_W32(yuv + 40u, info2);
     }
-    me_w8(info1_off, 0x02u);
-    me_w32(info1_off + 8u, VC_TIMESTAMP_PER_SECOND);
-    me_w32(info1_off + 16u, VC_TIMESTAMP_PER_SECOND);
-    me_w32(info1_off + 24u, c->frame_count * 2u);
-    me_w32(info1_off + 28u, 2u);
-    me_w8(info1_off + 32u, 0x00u);
-    me_w8(info1_off + 33u, 0x01u);
-    me_w8(info2_off, 0x00u);
-    me_w32(info2_off + 24u, 0u);
-    me_w32(info2_off + 28u, 0u);
+    me_view_w8(info1, 0x02u);
+    me_view_w32(info1 + 8u, VC_TIMESTAMP_PER_SECOND);
+    me_view_w32(info1 + 16u, VC_TIMESTAMP_PER_SECOND);
+    me_view_w32(info1 + 24u, c->frame_count * 2u);
+    me_view_w32(info1 + 28u, 2u);
+    me_view_w8(info1 + 32u, 0x00u);
+    me_view_w8(info1 + 33u, 0x01u);
+    me_view_w8(info2, 0x00u);
+    me_view_w32(info2 + 24u, 0u);
+    me_view_w32(info2 + 28u, 0u);
 
     MEM_W8(buffer3, 0x01u);
     MEM_W8(buffer3 + 1u, 0xFFu);
@@ -648,12 +707,13 @@ static uint32_t h_Mpegbase_0530BE4E(CpuState *s) {
 }
 
 /* sceMpegBasePESpacketCopy(packetInfo): copy a linked list of 16-byte packets
- * { main-RAM source, ME destination, next packet, length in the low 12 bits } into ME RAM.
+ * { main-RAM source, destination, next packet, length in the low 12 bits }. The destination is
+ * written through the ME memory view (JPCSP reads it with getPointer(getMEMemory(), 4)): ME RAM,
+ * or guest memory past it.
  * The whole list is checked before the first byte moves, so a refused list copies nothing
  * (JPCSP copies the packets before a bad one). A list that loops back on itself is refused. */
 static uint32_t vc_packet_check(uint32_t packet) {
     static const char call[] = "sceMpegBasePESpacketCopy";
-    uint32_t off;
     if ((packet & 3u) || !sr_guest_span_readable(packet, 16u))
         return vc_refuse(call, "packet descriptor is not a readable guest span", VC_ERR_GUEST_ADDRESS);
     const uint32_t src = MEM_R32(packet), dst = MEM_R32(packet + 4u);
@@ -661,8 +721,9 @@ static uint32_t vc_packet_check(uint32_t packet) {
     if (len == 0u) return vc_refuse(call, "zero-length packet", VC_ERR_ZERO_LENGTH);
     if (!src || !sr_guest_span_readable(src, len))
         return vc_refuse(call, "packet source is not a readable guest span", VC_ERR_GUEST_ADDRESS);
-    if (!me_span(dst, len, &off))
-        return vc_refuse(call, "packet destination outside ME RAM", VC_ERR_ME_ADDRESS);
+    if (!me_view_span(dst, len, 1))
+        return vc_refuse(call, "packet destination is neither inside ME RAM nor a writable guest span",
+                         me_view_error(dst));
     return 0u;
 }
 
@@ -681,120 +742,36 @@ static uint32_t h_MpegBasePESpacketCopy(CpuState *s) {
             return vc_refuse("sceMpegBasePESpacketCopy", "packet list loops back on itself", VC_ERR_GUEST_ADDRESS);
     }
     for (uint32_t packet = head; packet; packet = MEM_R32(packet + 8u)) {
-        uint32_t off;
+        uint8_t bytes[0x1000];
         const uint32_t len = MEM_R32(packet + 12u) & 0xFFFu;
-        (void)me_span(MEM_R32(packet + 4u), len, &off);
-        if (!sr_guest_copy_in(s_me_ram + off, MEM_R32(packet), len))
-            return vc_refuse("sceMpegBasePESpacketCopy", "packet source became unreadable", VC_ERR_GUEST_ADDRESS);
+        if (!sr_guest_copy_in(bytes, MEM_R32(packet), len) || !me_view_copy_out(MEM_R32(packet + 4u), bytes, len))
+            return vc_refuse("sceMpegBasePESpacketCopy", "a packet span became unusable", VC_ERR_GUEST_ADDRESS);
     }
     return 0u;
 }
 
-/* The decoded picture whose eight published ME band addresses are `buffers`. */
-static const VcPicture *vc_decoded_picture_for(const uint32_t buffers[8]) {
-    for (int i = 0; i < VC_MAX_CONTEXTS; i++) {
-        const VcContext *c = &s_vc[i];
-        if (!c->used) continue;
-        for (int slot = 0; slot < VC_PICTURE_SLOTS; slot++) {
-            const VcPicture *p = &c->pictures[slot];
-            if (!p->key || p->key != buffers[0]) continue;
-            for (int b = 1; b < 8; b++)
-                if (c->bands[slot][b] != buffers[b]) return NULL;
-            return p;
-        }
+/* Host copies of guest band buffers, one per band, each large enough for a 720 x 576 band. */
+#define VC_BAND_MAX_BYTES     (((VC_MAX_WIDTH + 16u) >> 5) * (VC_MAX_HEIGHT >> 1) * 16u)
+static uint8_t *s_vc_band_scratch[8];
+
+/* Band `band`'s `bytes` bytes at `addr`, read through the ME memory view: *out points into ME RAM,
+ * or into a host copy of guest memory. A zero-byte band reads nothing (*out = NULL). Returns NULL,
+ * or the reason the span cannot be read whole. */
+static const char *vc_band_source(uint32_t addr, uint32_t bytes, int band, const uint8_t **out) {
+    uint32_t off;
+    *out = NULL;
+    if (!bytes) return NULL;
+    if (me_view_address(addr)) {
+        if (!me_span(addr, bytes, &off)) return "a band buffer leaves ME RAM";
+        *out = s_me_ram + off;
+        return NULL;
     }
+    if (!addr || !sr_guest_span_readable(addr, bytes)) return "a band buffer is not readable guest memory";
+    if (!s_vc_band_scratch[band] && !(s_vc_band_scratch[band] = (uint8_t *)malloc(VC_BAND_MAX_BYTES)))
+        return "no host scratch for a band";
+    if (!sr_guest_copy_in(s_vc_band_scratch[band], addr, bytes)) return "a band buffer is not readable guest memory";
+    *out = s_vc_band_scratch[band];
     return NULL;
-}
-
-/* sceMpegBaseYCrCbCopy copies a decoded picture's bands out of ME RAM into eight guest buffers.
- * As for the decode, the bands' bytes are not written (see the file comment): the copy is a
- * second host picture keyed by the eight guest addresses, so a CscAvc of those buffers converts
- * it. The two halves of the copy (flags bit 0 and bit 1) are kept apart, exactly as the bands
- * split the picture in JPCSP's layout: bit 0 is the even luma rows and the left eight columns of
- * every 16-column chroma group, bit 1 the odd rows and the right eight. A copy converts only once
- * both halves have arrived. The record table is host bookkeeping, not a PSP value: when it is
- * full, the oldest record is dropped, and a later CscAvc of its buffers is refused by name. */
-#define VC_COPY_SLOTS         8
-#define VC_COPY_HALF_A        1u
-#define VC_COPY_HALF_B        2u
-typedef struct {
-    uint32_t buffers[8];   /* the guest addresses; buffers[0] == 0 = empty */
-    uint32_t halves;       /* VC_COPY_HALF_A | VC_COPY_HALF_B once complete */
-    uint32_t age;
-    VcPicture picture;     /* key = buffers[0] */
-} VcCopy;
-static VcCopy s_vc_copies[VC_COPY_SLOTS];
-static uint32_t s_vc_copy_clock;
-
-static int vc_copy_matches(const VcCopy *k, const uint32_t buffers[8]) {
-    return k->buffers[0] != 0u && memcmp(k->buffers, buffers, sizeof(k->buffers)) == 0;
-}
-
-/* The complete copy whose eight guest buffers are `buffers`. */
-static const VcPicture *vc_copied_picture_for(const uint32_t buffers[8]) {
-    for (int i = 0; i < VC_COPY_SLOTS; i++)
-        if (vc_copy_matches(&s_vc_copies[i], buffers))
-            return s_vc_copies[i].halves == (VC_COPY_HALF_A | VC_COPY_HALF_B) ? &s_vc_copies[i].picture : NULL;
-    return NULL;
-}
-
-/* The picture a CscAvc converts: a decoded picture by its ME bands, else a complete copy. */
-static const VcPicture *vc_picture_for(const uint32_t buffers[8]) {
-    const VcPicture *p = vc_decoded_picture_for(buffers);
-    return p ? p : vc_copied_picture_for(buffers);
-}
-
-/* The copy record for `buffers`, made ready for a w x h picture: the existing record for these
- * buffers (emptied when its size differs), else a free one, else the oldest. NULL when no host
- * memory is left. */
-static VcCopy *vc_copy_record(const uint32_t buffers[8], uint32_t w, uint32_t h) {
-    VcCopy *k = NULL;
-    for (int i = 0; i < VC_COPY_SLOTS && !k; i++)
-        if (vc_copy_matches(&s_vc_copies[i], buffers)) k = &s_vc_copies[i];
-    for (int i = 0; i < VC_COPY_SLOTS && !k; i++)
-        if (!s_vc_copies[i].buffers[0]) k = &s_vc_copies[i];
-    if (!k) {
-        k = &s_vc_copies[0];
-        for (int i = 1; i < VC_COPY_SLOTS; i++)
-            if (s_vc_copies[i].age < k->age) k = &s_vc_copies[i];
-        k->buffers[0] = 0u;   /* evicted: rebuilt below */
-    }
-    VcPicture *p = &k->picture;
-    if (!vc_copy_matches(k, buffers) || p->width != w || p->height != h || !p->y) {
-        const size_t luma = (size_t)w * h, chroma = (size_t)(w / 2u) * (h / 2u);
-        free(p->y); free(p->cb); free(p->cr);
-        memset(k, 0, sizeof(*k));
-        p->y = (uint8_t *)calloc(luma, 1u);
-        p->cb = (uint8_t *)calloc(chroma, 1u);
-        p->cr = (uint8_t *)calloc(chroma, 1u);
-        if (!p->y || !p->cb || !p->cr) {
-            free(p->y); free(p->cb); free(p->cr);
-            memset(k, 0, sizeof(*k));
-            return NULL;
-        }
-        p->width = w;
-        p->height = h;
-        memcpy(k->buffers, buffers, sizeof(k->buffers));
-        p->key = buffers[0];
-    }
-    k->age = ++s_vc_copy_clock;
-    return k;
-}
-
-/* Copy half `half` (VC_COPY_HALF_A or _B) of picture `src` into `dst` (same size). */
-static void vc_copy_half(VcPicture *dst, const VcPicture *src, uint32_t half) {
-    const uint32_t w = src->width, h = src->height, cw = w / 2u, ch = h / 2u;
-    const uint32_t first_row = half == VC_COPY_HALF_A ? 0u : 1u;
-    const uint32_t first_col = half == VC_COPY_HALF_A ? 0u : 8u;
-    for (uint32_t row = first_row; row < h; row += 2u)
-        memcpy(dst->y + (size_t)row * w, src->y + (size_t)row * w, w);
-    for (uint32_t row = 0; row < ch; row++)
-        for (uint32_t col = first_col; col < cw; col += 16u) {
-            const uint32_t n = cw - col < 8u ? cw - col : 8u;
-            const size_t at = (size_t)row * cw + col;
-            memcpy(dst->cb + at, src->cb + at, n);
-            memcpy(dst->cr + at, src->cr + at, n);
-        }
 }
 
 /* Read the 48-byte SceMp4AvcCscStruct { height in 16-pixel units, width in 16-pixel units,
@@ -807,55 +784,67 @@ static int vc_read_csc_struct(uint32_t csc, uint32_t *h16, uint32_t *w16, uint32
     return 1;
 }
 
-/* sceMpegBaseYCrCbCopy(dst, src, flags): src names a decoded picture by its ME bands, dst the
- * eight guest buffers it is copied into. JPCSP sizes the copy from the src struct's geometry
- * and ignores the dst struct's. Flags 0 copies nothing. */
+/* A struct size the host scratch holds: 1..45 x 1..36 units (720 x 576, the decoder's bound). */
+static int vc_csc_size_ok(uint32_t w16, uint32_t h16) {
+    return w16 && h16 && w16 <= VC_MAX_WIDTH / 16u && h16 <= VC_MAX_HEIGHT / 16u;
+}
+
+#define VC_COPY_HALF_A        1u
+#define VC_COPY_HALF_B        2u
+
+/* sceMpegBaseYCrCbCopy(dst, src, flags): copy the bands of the half or halves `flags` names from
+ * the buffers of the src struct (read through the ME memory view) into the guest buffers of the
+ * dst struct, sized by the src struct's geometry (the dst struct's is ignored, as in JPCSP).
+ * Every span is checked before the first byte moves, so a refused copy writes nothing; flags 0
+ * copies nothing.
+ * The byte counts are the band sizes of vc_band_bytes, the room the decoder's bands have
+ * (synthetic: W-LLE-1 item 3). JPCSP's handler counts 16-byte blocks from the struct's 16-pixel
+ * units, ((width + 16) >> 5) * (height >> 1): for a 480 x 272 picture that is 8 blocks against
+ * the 32640 bytes of band 0. It also gives band 5 band 1's count. Neither is followed. */
 static uint32_t h_MpegBaseYCrCbCopy(CpuState *s) {
     static const char call[] = "sceMpegBaseYCrCbCopy";
     const uint32_t flags = A2;
-    uint32_t dh16, dw16, sh16, sw16, dst[8], src[8];
+    uint32_t dh16, dw16, sh16, sw16, dst[8], src[8], bytes[8];
+    const uint8_t *from[8] = { 0 };
     if (!vc_read_csc_struct(A0, &dh16, &dw16, dst) || !vc_read_csc_struct(A1, &sh16, &sw16, src))
         return vc_refuse(call, "a CSC struct is not a readable guest span", VC_ERR_GUEST_ADDRESS);
     if (flags & ~(VC_COPY_HALF_A | VC_COPY_HALF_B))
         return vc_refuse(call, "flags other than bits 0 and 1 are not modelled", VC_ERR_STATE);
-    const VcPicture *p = vc_decoded_picture_for(src);
-    if (!p) return vc_refuse(call, "copy of a picture this boundary never decoded", VC_ERR_NO_PICTURE);
-    if (sw16 > 0xFFFu || sh16 > 0xFFFu || (sw16 << 4) != p->width || (sh16 << 4) != p->height)
-        return vc_refuse(call, "source struct size differs from the decoded picture", VC_ERR_CSC_GEOMETRY);
-    /* JPCSP's copy sizes, in bytes per band. */
-    const uint32_t w = p->width, h = p->height;
-    const uint32_t size1 = ((w + 16u) >> 5) * (h >> 1) * 16u, size2 = (w >> 5) * (h >> 1) * 16u;
-    const uint32_t bytes[8] = { size1, size2, size1, size2, size1 >> 1, size2 >> 1, size1 >> 1, size2 >> 1 };
-    for (uint32_t i = 0; i < 8u; i++) {
-        const uint32_t half = (i & 2u) ? VC_COPY_HALF_B : VC_COPY_HALF_A;
-        if ((flags & half) && bytes[i] && (!dst[i] || !sr_guest_span_writable_any_view(dst[i], bytes[i])))
-            return vc_refuse(call, "a destination buffer is not a writable guest span", VC_ERR_GUEST_ADDRESS);
-    }
     if (!flags) return 0u;
-    VcCopy *k = vc_copy_record(dst, w, h);
-    if (!k) return vc_refuse(call, "no host memory for the copied picture", VC_ERR_DECODE);
-    if (flags & VC_COPY_HALF_A) vc_copy_half(&k->picture, p, VC_COPY_HALF_A);
-    if (flags & VC_COPY_HALF_B) vc_copy_half(&k->picture, p, VC_COPY_HALF_B);
-    k->halves |= flags;
+    if (!vc_csc_size_ok(sw16, sh16))
+        return vc_refuse(call, "source struct size is empty or larger than 720 x 576", VC_ERR_CSC_GEOMETRY);
+    vc_band_bytes(sw16 << 4, sh16 << 4, bytes);
+    for (uint32_t i = 0; i < 8u; i++) {
+        const uint32_t half = (i == 0u || i == 1u || i == 4u || i == 5u) ? VC_COPY_HALF_A : VC_COPY_HALF_B;
+        if (!(flags & half) || !bytes[i]) continue;
+        if (!dst[i] || me_view_address(dst[i]) || !sr_guest_span_writable_any_view(dst[i], bytes[i]))
+            return vc_refuse(call, "a destination buffer is not a writable guest span", VC_ERR_GUEST_ADDRESS);
+        const char *why = vc_band_source(src[i], bytes[i], (int)i, &from[i]);
+        if (why) return vc_refuse(call, why, me_view_error(src[i]));
+    }
+    for (uint32_t i = 0; i < 8u; i++)
+        if (from[i] && !sr_guest_copy_out(dst[i], from[i], bytes[i]))
+            return vc_refuse(call, "a destination buffer could not be written", VC_ERR_GUEST_ADDRESS);
     return 0u;
 }
 
-/* Convert the rectangle (rx16, ry16, rw16, rh16), in 16-pixel units, of the picture the CSC
- * struct at `csc` names into `dest`, whose first row is the rectangle's top row; rows are
- * `buffer_width` pixels apart (0 takes CscInit's default). `whole` converts the whole picture. */
+/* Convert the rectangle (rx16, ry16, rw16, rh16), in 16-pixel units, of the picture whose bands
+ * the CSC struct at `csc` names into `dest`, whose first row is the rectangle's top row; rows are
+ * `buffer_width` pixels apart (0 takes CscInit's default). `whole` converts the whole picture.
+ * The bands are read through the ME memory view, so a decoded picture in ME RAM and a copy in
+ * guest buffers convert the same way. */
 static uint32_t vc_csc(const char *call, uint32_t dest, uint32_t buffer_width, uint32_t csc,
                        int whole, uint32_t rx16, uint32_t ry16, uint32_t rw16, uint32_t rh16) {
-    uint32_t h16, w16, buffers[8];
+    uint32_t h16, w16, buffers[8], bytes[8];
     if (!buffer_width) buffer_width = s_csc_default_width;
     if (!vc_read_csc_struct(csc, &h16, &w16, buffers))
         return vc_refuse(call, "CSC struct is not a readable guest span", VC_ERR_GUEST_ADDRESS);
-    const VcPicture *p = vc_picture_for(buffers);
-    if (!p) return vc_refuse(call, "CSC of a picture this boundary never decoded", VC_ERR_NO_PICTURE);
-    if (w16 > 0xFFFu || h16 > 0xFFFu || (w16 << 4) != p->width || (h16 << 4) != p->height)
-        return vc_refuse(call, "CSC struct size differs from the decoded picture", VC_ERR_CSC_GEOMETRY);
+    if (!vc_csc_size_ok(w16, h16))
+        return vc_refuse(call, "CSC struct size is empty or larger than 720 x 576", VC_ERR_CSC_GEOMETRY);
     if (whole) { rx16 = 0u; ry16 = 0u; rw16 = w16; rh16 = h16; }
     if (!rw16 || !rh16 || rx16 > w16 || rw16 > w16 - rx16 || ry16 > h16 || rh16 > h16 - ry16)
         return vc_refuse(call, "range is empty or leaves the picture", VC_ERR_CSC_GEOMETRY);
+    const uint32_t w = w16 << 4, h = h16 << 4;
     const uint32_t rx = rx16 << 4, ry = ry16 << 4, rw = rw16 << 4, rh = rh16 << 4;
     if (buffer_width < rw)
         return vc_refuse(call, "row width narrower than the converted rectangle", VC_ERR_CSC_GEOMETRY);
@@ -865,16 +854,24 @@ static uint32_t vc_csc(const char *call, uint32_t dest, uint32_t buffer_width, u
     if (!dest || !sr_guest_rect_geometry(dest, 0u, 0u, buffer_width, rw, rh, bpp, &span) ||
         !sr_guest_span_writable_any_view(span.first, span.total_bytes))
         return vc_refuse(call, "destination rectangle is outside guest memory", VC_ERR_GUEST_ADDRESS);
+    vc_band_bytes(w, h, bytes);
+    const uint8_t *from[8];
+    for (uint32_t i = 0; i < 8u; i++) {
+        const char *why = vc_band_source(buffers[i], bytes[i], (int)i, &from[i]);
+        if (why) return vc_refuse(call, why, me_view_error(buffers[i]));
+    }
+    vc_band_walk((uint8_t *const *)from, s_vc_scratch_y, w, s_vc_scratch_cb, s_vc_scratch_cr, w / 2u, w, h, 0);
     uint8_t *out = (uint8_t *)malloc(span.row_bytes);
     if (!out) return vc_refuse(call, "no host scratch row", VC_ERR_CSC_GEOMETRY);
-    const uint32_t cw = p->width / 2u;
+    const uint32_t cw = w / 2u;
     for (uint32_t row = 0; row < rh; row++) {
         const uint32_t y = ry + row;
         for (uint32_t col = 0; col < rw; col++) {
             const uint32_t x = rx + col;
             const size_t c_at = (size_t)(y >> 1) * cw + (x >> 1);
             uint8_t r, g, b;
-            sr_h264_psp_rgb(p->y[(size_t)y * p->width + x], p->cb[c_at], p->cr[c_at], &r, &g, &b);
+            sr_h264_psp_rgb(s_vc_scratch_y[(size_t)y * w + x], s_vc_scratch_cb[c_at], s_vc_scratch_cr[c_at],
+                            &r, &g, &b);
             uint16_t v16;
             switch (mode) {
                 case VC_PIXEL_5650: v16 = (uint16_t)((r >> 3) | ((g >> 2) << 5) | ((b >> 3) << 11)); break;
@@ -932,17 +929,24 @@ static uint32_t h_MpegBaseCscAvcRange(CpuState *s) {
 #define AC_WORK_BYTES_EDRAM     108u        /* uofw GetEDRAM/ReleaseEDRAM check 108 bytes */
 /* uofw error codes. */
 #define AC_ERR_NOT_RAM          0x807F0002u
-#define AC_ERR_NOT_SUPPORTED    0x80000004u /* SCE_ERROR_NOT_SUPPORTED */
+#define AC_ERR_NOT_SUPPORTED    0x80000004u /* SCE_ERROR_NOT_SUPPORTED, for a codec outside 0x1000-0x1005 */
+/* project-chosen, synthetic: uofw goes on for an in-range codec (0x1001-0x1005) that this boundary
+ * does not model, and the PSP returned 0 from sceAudiocodecCheckNeedMem for 0x1001 and 0x1002
+ * (PSP-observed, capture pending: PSP-VCODEC-001). Such a codec is refused here, fail-closed, with
+ * the same code as an out-of-range one. */
+#define AC_ERR_NOT_MODELLED     0x80000004u
 #define AC_ERR_PRIV_REQUIRED    0x80000023u /* SCE_ERROR_PRIV_REQUIRED */
 #define AC_ERR_EDRAM            0x807F0003u
 #define AC_ERR_EDRAM_NOT_HELD   0x807F0004u
 /* synthetic: uofw maps an ME driver result of -1 to 0x807F00FF (g_retValues[3]); JPCSP's
  * driver returns -1 for a decode it cannot run. Used for every ME-side refusal (W-LLE-1). */
 #define AC_ERR_ME               0x807F00FFu
-/* measured (PSP-VCODEC-001): sceAudiocodecCheckNeedMem for ATRAC3plus reads the halfword at +40,
- * which sceMpegCreate leaves at 0x5C28 or 0x5C5C. For each it returns 0 and writes +16 (the ME
- * memory the codec needs), +52 (the sample rate), +60 and +64. For 0 it returns 0x807F00FD and
- * writes +8, +52 and +64. Any other halfword is not measured and is refused. */
+/* PSP-observed, capture pending (PSP-VCODEC-001): sceAudiocodecCheckNeedMem for ATRAC3plus reads
+ * the halfword at +40, which sceMpegCreate leaves at 0x5C28 or 0x5C5C. For each it returns 0 and
+ * writes +16 (the ME memory the codec needs), +52 (the sample rate), +60 and +64. For 0 it returns
+ * 0x807F00FD and writes +8, +52 and +64. In every case it also writes +0 = AC_WORK_WORD0 (uofw
+ * audiocodec.c sets info->unk0 the same way). Any other halfword is not measured and is refused. */
+#define AC_WORK_WORD0           0x05100601u
 #define AC_AT3P_PARAM_OFF       40u
 #define AC_AT3P_ZERO_RESULT     0x807F00FDu
 #define AC_AT3P_ZERO_WORD8      0x20Fu
@@ -982,7 +986,7 @@ static uint32_t ac_check(const char *call, uint32_t work, uint32_t codec, uint32
     if (codec < AC_CODEC_FIRST || codec >= AC_CODEC_END)
         return vc_refuse(call, "codec type out of range", AC_ERR_NOT_SUPPORTED);
     if (codec != AC_CODEC_AT3PLUS)
-        return vc_refuse(call, "codec type other than 0x1000 (ATRAC3plus) is not modelled", AC_ERR_NOT_SUPPORTED);
+        return vc_refuse(call, "codec type other than 0x1000 (ATRAC3plus) is not modelled", AC_ERR_NOT_MODELLED);
     return 0u;
 }
 
@@ -1001,7 +1005,7 @@ static uint32_t h_AudiocodecCheckNeedMem(CpuState *s) {
     if (r) return r;
     const uint16_t param = MEM_R16(work + AC_AT3P_PARAM_OFF);
     if (param == 0u) {
-        MEM_W32(work, VC_OPEN_WORD0);
+        MEM_W32(work, AC_WORK_WORD0);
         MEM_W32(work + 8u, AC_AT3P_ZERO_WORD8);
         MEM_W32(work + 52u, AC_AT3P_ZERO_WORD52);
         MEM_W32(work + 64u, AC_AT3P_ZERO_WORD64);
@@ -1010,7 +1014,7 @@ static uint32_t h_AudiocodecCheckNeedMem(CpuState *s) {
     }
     for (size_t i = 0; i < sizeof(k_at3p) / sizeof(k_at3p[0]); i++) {
         if (param != k_at3p[i].param) continue;
-        MEM_W32(work, VC_OPEN_WORD0);
+        MEM_W32(work, AC_WORK_WORD0);
         MEM_W32(work + 16u, k_at3p[i].needed);
         MEM_W32(work + 52u, k_at3p[i].rate);
         MEM_W32(work + 60u, k_at3p[i].word60);
@@ -1103,7 +1107,7 @@ static uint32_t h_AudiocodecInit(CpuState *s) {
         c->used = 1;
         c->work = work;
     }
-    MEM_W32(work, VC_OPEN_WORD0);
+    MEM_W32(work, AC_WORK_WORD0);
     MEM_W32(work + 8u, 0u);
     return 0u;
 }
@@ -1183,6 +1187,23 @@ static uint32_t h_AudiocodecDecode(CpuState *s) {
     MEM_W32(work + 28u, (uint32_t)data);
     MEM_W32(work + 36u, out_bytes);
     return 0u;
+}
+
+/* LoadExec: the next program starts with no codec context, no ME allocation and the CSC state of
+ * a fresh boot. Every host decoder and ATRAC3plus bridge goes; ME RAM is zeroed, so nothing the
+ * old program decoded can be read back through a band address. */
+void hle_videocodec_guest_reset(void) {
+    for (int i = 0; i < VC_MAX_CONTEXTS; i++) {
+        if (s_vc[i].used) vc_stop_decoder(&s_vc[i]);
+        memset(&s_vc[i], 0, sizeof(s_vc[i]));
+        s_vc[i].h264 = -1;
+    }
+    for (int i = 0; i < AC_MAX_CONTEXTS; i++) ac_drop(&s_ac[i]);
+    memset(s_me_allocs, 0, sizeof(s_me_allocs));
+    s_me_alloc_count = 0;
+    if (s_me_ram) memset(s_me_ram, 0, ME_RAM_SIZE);
+    s_csc_pixel_mode = VC_PIXEL_8888;
+    s_csc_default_width = 0u;
 }
 
 void hle_register_videocodec_handlers(void) {

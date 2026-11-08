@@ -3722,7 +3722,6 @@ static void hle_register_unregistered_import_batch(void) {
      * is not established here and it is refused under its name rather than guessed. */
     hle_register_unregistered_import_rtc();
     hle_register_unregistered_import_network_2();
-    hle_register_unregistered_import_audio_codec();
 }
 
 /* What a stalled thread's object wait is on, for the watchdog's thread dump: the kernel

@@ -2193,6 +2193,10 @@ class ModuleBucketTests(unittest.TestCase):
     def test_newlib_and_unknown_shapes_are_named_not_guessed(self) -> None:
         self.assertEqual(hle_manifest.derive_module("newlibModuleStreamWrite"), "newlib")
         self.assertEqual(hle_manifest.derive_module("SomethingElse"), "other")
+        # sceMpegBase* calls belong to the sceMpegbase library, not sceMpeg (#286).
+        self.assertEqual(hle_manifest.derive_module("sceMpegBaseCscAvc"), "sceMpegbase")
+        self.assertEqual(hle_manifest.derive_module("sceMpegbase_0530BE4E"), "sceMpegbase")
+        self.assertEqual(hle_manifest.derive_module("sceMpegCreate"), "sceMpeg")
 
 
 class TriageTests(unittest.TestCase):

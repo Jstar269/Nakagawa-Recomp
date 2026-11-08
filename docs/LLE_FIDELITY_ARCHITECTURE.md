@@ -183,12 +183,21 @@ PSMF (PlayStation Stream Media Format) multiplexes AVC/H.264 video and ATRAC3plu
 
 Executing guest PSMF middleware does not require software-emulating an H.264 video decoder on the MIPS CPU.
 
-1. The guest PSMF modules call downward into low-level hardware abstraction libraries: `sceMpeg`, `sceVideocodec`, and `sceAudiocodec`.
-2. On physical hardware, `sceMpeg` delegates bitstream decoding to the PSP's dedicated Media Engine (ME) and AVC hardware decoder.
-3. Therefore, the **correct, natural HLE boundary** is at the `sceMpeg` / `sceVideocodec` interface:
-   - Guest PSMF middleware handles demuxing, buffering, and state transitions.
-   - Nakagawa's runtime intercepts raw compressed NAL packets at the `sceMpeg` boundary and dispatches them to host hardware decoders (Vulkan Video, DXVA2/Media Foundation, or ffmpeg/libavcodec).
-   - Audio packets (ATRAC3plus) are decoded via host audio libraries and fed back into guest ring buffers.
+1. The guest PSMF modules call downward into `sceMpeg`, and `sceMpeg` (the `mpeg.prx` a title
+   ships) calls down into `sceVideocodec`, `sceMpegbase` and `sceAudiocodec`.
+2. On physical hardware, those three libraries hand bitstream decoding to the PSP's dedicated Media
+   Engine (ME), whose code is firmware.
+3. Therefore, the **correct, natural HLE boundary** is the Media Engine floor: `sceVideocodec`,
+   `sceMpegbase` and `sceAudiocodec`:
+   - Guest PSMF middleware and the title's own `mpeg.prx` handle demuxing, ring buffers, access-unit
+     assembly and state transitions as guest code.
+   - `src/rt/hle_videocodec.c` takes each access unit at `sceVideocodecDecode`, decodes it on the host
+     H.264 seam and writes the picture back in the PSP's band layout; `sceMpegBaseCscAvc` converts it
+     into the guest's RGB buffer.
+   - ATRAC3plus frames reach the project's ATRAC3plus decoder through `sceAudiocodecDecode` and are
+     written back into guest buffers.
+   - The host `sceMpeg` handlers remain for titles that rely on the firmware's own `mpeg.prx`, which
+     the project never carries, and for the synthetic fixtures.
 
 #### Implemented Boundary Today (public source)
 
@@ -206,6 +215,11 @@ end to end by source-owned tests:
   pictures, the project's ATRAC3plus decoder import for audio). A getter returns success only for
   output a decoder actually produced; a compressed access unit is never presented as a decoded
   frame or PCM block, and a track that runs dry reports `NO_MORE_DATA` rather than silence.
+- `sceMpeg` is a guest-owned library: a title that ships and translates `mpeg.prx` runs it as guest
+  code once it starts (`guest_module_owns_library` in `src/rt/hle_kernel_module.c`), over the
+  Media Engine floor in `src/rt/hle_videocodec.c` (#286). That floor's context words are JPCSP's,
+  synthetic until the PSP request W-LLE-1 measures them; `tests/native/videocodec_selftest.c`
+  covers it with source-authored H.264 and ATRAC3plus fixtures.
 - Evidence tiers: the access-unit, timestamp and queue contract is covered by
   `tests/native/psmf_producer_selftest.c` against fixtures built byte-for-byte by that file (tier S), and
   the decoder seam by `tests/native/psmf_media_selftest.c`, which constructs a baseline-profile H.264
