@@ -4356,7 +4356,10 @@ static int capture_screens(const char *directory) {
              PLAYER_UI_ID_CONTROLLER_CALIBRATION_PRIMARY},
             {FLOW_CALIBRATE_RESULT, "controller-calibrate-result",
              PLAYER_UI_ID_CONTROLLER_CALIBRATION_PRIMARY},
-            {FLOW_DEVLOG, "developer-log", PLAYER_UI_ID_DEVELOPER_LOG_CLOSE}
+            {FLOW_DEVLOG, "developer-log", PLAYER_UI_ID_DEVELOPER_LOG_CLOSE},
+            /* #2245 and #2151: the fullest Enhanced page, and with the render notice. */
+            {FLOW_PAGE_TITLE_ENHANCED, "title-enhanced-full", PLAYER_UI_ID_TITLE_PRIMARY},
+            {FLOW_PAGE_TITLE_RENDER, "title-render-notice", PLAYER_UI_ID_TITLE_PRIMARY}
         };
         for (size_t i = 0u; i < sizeof(flows) / sizeof(flows[0]); ++i) {
             g_flow_case = flows[i].which;
