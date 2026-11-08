@@ -2406,7 +2406,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "tests/native/videocodec_selftest.c:test_audiocodec",
         ],
-        "limitation": "codec 0x1000 only, PSMF frames with the 0x0FD0 header only; mono or stereo input into a mono or stereo 16-bit block (no downmix); synchronous decode; the +28 and +36 words and the refusal code are synthetic pending W-LLE-1",
+        "limitation": "codec 0x1000 only, PSMF frames with the 0x0FD0 header only; mono or stereo input into one stereo 16-bit block of 2048 samples (JPCSP's sceAudiocodecInit output; a mono frame is duplicated); uofw's +56/+72 size rule is written at +36 and does not choose the layout; synchronous decode; the +28 and +36 words and the refusal code are synthetic pending W-LLE-1",
     },
     # #341 graduations (2026-11-06): handlers that already reproduce every pspautotests cell the
     # runtime can replay. Cells are from the pinned pspautotests clone at 70e7239 unless an entry

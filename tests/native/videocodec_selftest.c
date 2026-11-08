@@ -1123,13 +1123,18 @@ static void test_audiocodec(void) {
               bytes_are(G_AOUT, 0x2000u, 0x00u) && MEM_R32(G_AC + 36u) == 0x2000u,
           "decode: a stereo frame writes the reference block");
 
-    /* Refusals leave the output untouched. */
+    /* The +56/+72 size rule fills only +36: the block is stereo whatever it gives (JPCSP's
+     * sceAudiocodecInit output), as a disc mpeg.prx needs (#286). */
     ac_set_io(0u, 1u);
-    CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && bytes_are(G_AOUT, 0x2000u, 0xAAu),
-          "decode: a stereo frame into a mono block (downmix) is refused");
+    CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == 0u && memcmp(host(G_AOUT), expect, 0x2000u) == 0 &&
+              bytes_are(G_AOUT + 0x2000u, 64u, 0xAAu) && MEM_R32(G_AC + 36u) == 0x1000u,
+          "decode: +72 = 1 still writes the stereo block, and +36 holds the rule's 0x1000");
     ac_set_io(0u, 0u);
-    CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && bytes_are(G_AOUT, 0x2000u, 0xAAu),
-          "decode: an output size of zero is refused");
+    CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == 0u && memcmp(host(G_AOUT), expect, 0x2000u) == 0 &&
+              MEM_R32(G_AC + 36u) == 0u,
+          "decode: words that give a size of 0 still write the stereo block, and +36 holds 0");
+
+    /* Refusals leave the output untouched. */
     ac_set_io(2u, 2u);
     host(G_AIN)[1] = 0x00u;
     CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && bytes_are(G_AOUT, 0x2000u, 0xAAu),

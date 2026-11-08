@@ -1126,10 +1126,14 @@ static uint32_t h_AudiocodecInit(CpuState *s) {
 
 /* sceAudiocodecDecode(workArea, codec): one ATRAC3plus frame from +24 to PCM at +32.
  * The input is a PSMF audio frame: an 8-byte 0x0FD0 header whose bytes 2-3 name the size and
- * channel layout, then the frame (the rule mpeg.c's sceMpegAtracDecode applies). The output size
- * follows uofw's rule: 0x2000 when +56 is 1 and +72 is not, else +72 << 12. Mono input written to
- * a stereo output is duplicated into both channels. Synchronous (synthetic timing: JPCSP delays
+ * channel layout, then the frame (the rule mpeg.c's sceMpegAtracDecode applies). The output is
+ * one stereo 16-bit block of 2048 samples (0x2000 bytes): JPCSP's sceAudiocodecInit sets up two
+ * output channels, and a mono frame is duplicated into both. uofw's size rule (0x2000 when +56
+ * is 1 and +72 is not, else +72 << 12) sizes only its cache writeback; it is written at +36, as
+ * JPCSP writes it, and does not choose the layout (synthetic: W-LLE-1). A disc mpeg.prx leaves
+ * words there that give neither 0x1000 nor 0x2000. Synchronous (synthetic timing: JPCSP delays
  * the caller 2.3 ms; W-LLE-1). */
+#define AC_OUT_BYTES            0x2000u
 static uint32_t h_AudiocodecDecode(CpuState *s) {
     static const char call[] = "sceAudiocodecDecode";
     const uint32_t work = A0;
@@ -1140,10 +1144,8 @@ static uint32_t h_AudiocodecDecode(CpuState *s) {
     MEM_W32(work + 8u, 0u);
     const uint32_t in = MEM_R32(work + 24u), out = MEM_R32(work + 32u);
     const uint32_t w56 = MEM_R32(work + 56u), w72 = MEM_R32(work + 72u);
-    const uint32_t out_bytes = (w56 == 1u && w72 != 1u) ? 0x2000u : (w72 << 12);
-    if (out_bytes != 0x1000u && out_bytes != 0x2000u)
-        return vc_refuse(call, "output layout other than mono or stereo 16-bit is not modelled", AC_ERR_ME);
-    const int out_channels = (int)(out_bytes >> 12);
+    const uint32_t size_word = (w56 == 1u && w72 != 1u) ? 0x2000u : (w72 << 12);
+    const uint32_t out_bytes = AC_OUT_BYTES;
     uint8_t hdr[8];
     if (!sr_guest_copy_in(hdr, in, sizeof(hdr)))
         return vc_refuse(call, "input is not a readable guest span", AC_ERR_PRIV_REQUIRED);
@@ -1156,8 +1158,6 @@ static uint32_t h_AudiocodecDecode(CpuState *s) {
     const int channels = (hdr[2] >> 2) & 7;
     if (channels < 1 || channels > 2)
         return vc_refuse(call, "the frame header names no mono or stereo layout", AC_ERR_ME);
-    if (channels > out_channels)
-        return vc_refuse(call, "a stereo frame into a mono output (downmix) is not modelled", AC_ERR_ME);
     if (!sr_guest_span_readable(in, frame_bytes))
         return vc_refuse(call, "input frame is not a readable guest span", AC_ERR_PRIV_REQUIRED);
     if (!out || !sr_guest_span_writable(out, out_bytes))
@@ -1180,7 +1180,7 @@ static uint32_t h_AudiocodecDecode(CpuState *s) {
                    samples == (int)AC_FRAME_SAMPLES;
     free(frame);
     if (!ok) return vc_refuse(call, "the ATRAC3plus frame did not decode to one block", AC_ERR_ME);
-    if (channels == 1 && out_channels == 2)
+    if (channels == 1)
         for (int i = (int)AC_FRAME_SAMPLES - 1; i >= 0; i--) {
             s_ac_pcm[i * 2] = s_ac_pcm[i];
             s_ac_pcm[i * 2 + 1] = s_ac_pcm[i];
@@ -1194,10 +1194,10 @@ static uint32_t h_AudiocodecDecode(CpuState *s) {
     const int copied = sr_guest_copy_out(out, bytes, out_bytes);
     free(bytes);
     if (!copied) return vc_refuse(call, "the output block could not be written", AC_ERR_PRIV_REQUIRED);
-    /* synthetic (W-LLE-1): JPCSP writes the frame bytes its decoder read at +28 and the output
-     * size at +36; here +28 is the frame without its 8-byte header. */
+    /* synthetic (W-LLE-1): JPCSP writes the frame bytes its decoder read at +28 and uofw's size
+     * rule at +36; here +28 is the frame without its 8-byte header. */
     MEM_W32(work + 28u, (uint32_t)data);
-    MEM_W32(work + 36u, out_bytes);
+    MEM_W32(work + 36u, size_word);
     return 0u;
 }
 
