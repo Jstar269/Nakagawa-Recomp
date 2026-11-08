@@ -4923,10 +4923,21 @@ void player_app_set_game_stop_error(PlayerApp *app, const char *code,
     const char *where = boundary && boundary[0] ? boundary : "an unnamed boundary";
     char message[512];
     if (strcmp(code, "RUNTIME_SEMANTIC_BOUNDARY") == 0) {
-        snprintf(message, sizeof(message),
-                 "The game needed %s that this version of Nakagawa can't run yet, so it was "
-                 "stopped. %s",
-                 player_runtime_stop_feature(boundary), progress);
+        if (boundary != NULL && strcmp(boundary, "target-not-executable") == 0 &&
+            nk_disc_id_is_non_retail_key(disc_id)) {
+            /* A homebrew program or unofficial disc jumped to code the analyzer never found:
+               code the program generated while it ran, as an emulator's JIT does (#2145).
+               Only code found ahead of time runs (the interpreter floor, AGENTS.md Section 7). */
+            snprintf(message, sizeof(message),
+                     "This program ran code it generated while it was running, as an emulator's "
+                     "dynamic recompiler does. Nakagawa only runs code it found before the game "
+                     "started, so it was stopped. %s", progress);
+        } else {
+            snprintf(message, sizeof(message),
+                     "The game needed %s that this version of Nakagawa can't run yet, so it was "
+                     "stopped. %s",
+                     player_runtime_stop_feature(boundary), progress);
+        }
         player_app_set_error(app, code, "Game stopped early", message,
                              "Back to library", VIEW_LIBRARY);
         if (issue != 0) {

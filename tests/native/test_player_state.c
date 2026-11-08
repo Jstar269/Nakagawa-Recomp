@@ -6545,12 +6545,12 @@ static const unsigned char real_kernel_prx[998] = {
     0x74, 0x72, 0x74, 0x61, 0x62, 0x00,
 };
 
-/* A PBP package of homebrew: PARAM.SFO (EG, no DISC_ID), an ICON0 section, a DATA.PSP program
+/* A PBP package of homebrew: PARAM.SFO (MG, the category PSPSDK writes; no DISC_ID), an ICON0 section, a DATA.PSP program
    and an empty DATA.PSAR, the form a homebrew EBOOT.PBP has. */
 static uint8_t *homebrew_pbp(const char *title, const uint8_t *program, size_t program_len,
                              const uint8_t *icon, size_t icon_len, size_t *out_len) {
     uint8_t sfo[512];
-    size_t sfo_len = psp_seal_sfo(sfo, sizeof(sfo), "EG", "", title);
+    size_t sfo_len = psp_seal_sfo(sfo, sizeof(sfo), "MG", "", title);
     size_t icon_at = 0x28u + sfo_len;
     size_t psp_at = icon_at + icon_len;
     uint8_t *pbp = (uint8_t *)calloc(1, psp_at + program_len);
@@ -6593,6 +6593,36 @@ static void homebrew_expect_program(const char *title, const uint8_t *program, s
     } else {
         psn_test_refused(path, "HOMEBREW_KERNEL_MODE_UNSUPPORTED", "kernel-mode homebrew");
     }
+}
+
+/* #2145: a stop on code the program generated at run time (target-not-executable) says so for a
+   homebrew library key, never the generic "processor feature" card; a retail disc ID keeps the
+   generic card, and a network stop on homebrew names online play. Each card ends the run with
+   its boundary visible. */
+static void test_homebrew_stop_cards_name_their_limit(void) {
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    printf("[PLAYER_STATE_TEST] Subtest: homebrew stop cards name run-time code and network use\n");
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", "target-not-executable",
+                                   308u, 9, 9000u, "XABC01234", NULL);
+    assert(nk_disc_id_is_non_retail_key("XABC01234"));
+    assert(strcmp(app->last_error.title, "Game stopped early") == 0);
+    assert(strstr(app->last_error.message, "generated while it was running") != NULL);
+    assert(strstr(app->last_error.message, "processor feature") == NULL);
+    assert(strstr(app->last_error.boundary_text, "target-not-executable") != NULL);
+    assert(strcmp(app->last_error.stop_boundary, "target-not-executable") == 0);
+
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", "target-not-executable",
+                                   308u, 9, 9000u, "ULUS10041", NULL);
+    assert(strstr(app->last_error.message, "processor feature") != NULL);
+    assert(strstr(app->last_error.message, "generated while it was running") == NULL);
+
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY",
+                                   "unsupported-import-scenetadhocinit", 308u, 9, 9000u,
+                                   "XABC01234", NULL);
+    assert(strstr(app->last_error.message, "ad hoc wireless play") != NULL);
+    assert(strstr(app->last_error.boundary_text, "unsupported-import-scenetadhocinit") != NULL);
+    free(app);
 }
 
 /* #2143: an unencrypted homebrew EBOOT.PBP imports as a small private disc image holding its
@@ -6645,6 +6675,8 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     write_binary_file(pbp_path, pbp, pbp_len);
     free(pbp);
     assert(player_path_is_pbp_package(pbp_path));
+    if (!player_psn_package_inspect(pbp_path, &package, code, sizeof(code), message,
+                                    sizeof(message))) fprintf(stderr, "DBG %s: %s\n", code, message);
     assert(player_psn_package_inspect(pbp_path, &package, code, sizeof(code), message,
                                       sizeof(message)));
     assert(package.homebrew && !package.iso_ready);
@@ -8632,6 +8664,7 @@ int main(int argc, char **argv) {
     test_versioned_user_data();
     test_psn_package_imports_as_its_iso();
     test_homebrew_package_becomes_a_private_disc();
+    test_homebrew_stop_cards_name_their_limit();
     test_stage_discard_removes_a_deep_tree();
     test_tree_helpers_walk_a_deep_tree();
 #if defined(_WIN32) || defined(_WIN64)
