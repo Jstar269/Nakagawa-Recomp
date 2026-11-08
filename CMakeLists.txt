@@ -847,6 +847,7 @@ set(NK_RUNTIME_SOURCES
     src/rt/hle_system.c
     src/rt/hle_umd.c
     src/rt/hle_utility.c
+    src/rt/hle_videocodec.c
     src/rt/audio_resample.c
     src/rt/flash0_font.c
     src/rt/mp3_bridge.c
@@ -873,6 +874,7 @@ set(NK_RUNTIME_SOURCES
     src/rt/gpu_sdl3vk/sdl3vk.c
     src/rt/gpu_sdl3vk/ge_gpu.c
     src/rt/gpu_sdl3vk/tex_scale.c
+    src/rt/gpu_sdl3vk/glyph_recon.c
     src/rt/texrepl.c
     third_party/xbrz/xbrz.c
     src/rt/gpu_sdl3vk/ace_ui.c

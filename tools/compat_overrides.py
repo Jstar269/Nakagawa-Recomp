@@ -371,6 +371,7 @@ SCHEDULER_HOOKS = [
                  "binding once the guest's reent bring-up needs no host participation.",
          test="make sched-selftest (generic build allocates UID 0x111 and asserts it is ordinary)",
          owner_issue="#363",
+         retired_by="#1580",
          retirement="retired (2026-10-28): a PSP-3000 measurement (docs/HARDWARE_ORACLE.md "
                     "PSP-THREAD-K0-001) shows the kernel hands every new thread a k0 block with "
                     "k0+4 == 0, also over a dirtied stack. sched.c now builds that block and no "
@@ -585,6 +586,7 @@ HLE_TITLE_CONFIGURED_COMPAT = [
          accidental_inheritance="no -- no host path writes a libfont readiness word",
          test="tools/test_hle_title_config_behavior.py:test_libfont_guest_startup_routes_exports_without_ready_binding",
          owner_issue="#299",
+         retired_by="#767",
          retirement="retired; legacy manifest fields fail with LIBFONT_READY_FLAG_RETIRED"),
     dict(name="frame_ready_latch_assist", category="temporary_compatibility_patch",
          title2_bucket="PROFILE_OWNED_CONFIGURATION",
@@ -602,6 +604,7 @@ HLE_TITLE_CONFIGURED_COMPAT = [
          accidental_inheritance="no -- generic build touches no latch; configured title touches only its own",
          test="tools/test_hle_title_config_behavior.py:test_retired_hle_assist_bindings_have_a_named_migration_error",
          owner_issue="#363",
+         retired_by="#1516",
          retirement="retired (2026-10-27); no runtime path advances a title frame latch, and legacy "
                     "manifest fields fail with HLE_TITLE_ASSIST_RETIRED"),
     dict(name="runtime_sync_callback_config", category="temporary_compatibility_patch",
@@ -622,7 +625,8 @@ HLE_TITLE_CONFIGURED_COMPAT = [
          evidence="title_config gated: generic hle.c has no literal 0x00333138 etc.",
          accidental_inheritance="no -- generic build installs nothing; configured title installs its own pairs",
          test="tools/test_hle_title_config_behavior.py:test_retired_hle_assist_bindings_have_a_named_migration_error",
-         owner_issue="#363"),
+         owner_issue="#363",
+         retired_by="#1516"),
     dict(name="display_setmode_guest_init", category="temporary_compatibility_patch",
          title2_bucket="PROFILE_OWNED_CONFIGURATION",
          title_scope="hst-ucus98701",
@@ -637,6 +641,7 @@ HLE_TITLE_CONFIGURED_COMPAT = [
          accidental_inheritance="no -- generic build calls nothing; configured title calls its own entries",
          test="tools/test_hle_title_config_behavior.py:test_retired_hle_assist_bindings_have_a_named_migration_error",
          owner_issue="#363",
+         retired_by="#1516",
          retirement="retired (2026-10-27); sceDisplaySetMode replays no guest display bring-up, and "
                     "legacy manifest fields fail with HLE_TITLE_ASSIST_RETIRED"),
 ]
@@ -674,6 +679,16 @@ AGGREGATE_COLLECTIONS = frozenset({"OVERRIDES"})
 #: such as "docs/STATUS.md #5.1" is a documentation pointer, not an owner, and does
 #: not satisfy it.
 OWNER_ISSUE_RE = re.compile(r"#\d+\b")
+
+#: A temporary patch whose ``retirement`` text starts with this word has been
+#: retired: its behavior is gone from source, and the entry stays only as
+#: historical provenance (#363 keeps the record instead of deleting it).
+RETIRED_PATCH_PREFIX = "retired"
+#: The merged pull request that retired an entry, e.g. "#1516".
+RETIRED_BY_RE = re.compile(r"#\d+")
+RETIRED_BY_DEFECT = 'retired entry must name the pull request that retired it (retired_by="#N")'
+LIVE_RETIRED_BY_DEFECT = ("retired_by is set but the retirement condition does not start "
+                          f"with {RETIRED_PATCH_PREFIX!r}")
 
 #: Spellings that mean "no regression" exactly as surely as test="none".  A
 #: gate that accepts only one of them can be passed by relabelling the same gap,
@@ -815,6 +830,21 @@ def temporary_compatibility_patches() -> "list[dict]":
     return patches
 
 
+def is_retired_patch(patch: dict) -> bool:
+    """True when a temporary patch is retired and kept only as provenance."""
+    return str(patch.get("retirement") or "").startswith(RETIRED_PATCH_PREFIX)
+
+
+def active_temporary_compatibility_patches() -> "list[dict]":
+    """The census entries that can still fire: the live #363 debt."""
+    return [patch for patch in temporary_compatibility_patches() if not is_retired_patch(patch)]
+
+
+def retired_temporary_compatibility_patches() -> "list[dict]":
+    """Retired census entries: historical provenance with no firing site."""
+    return [patch for patch in temporary_compatibility_patches() if is_retired_patch(patch)]
+
+
 def temporary_patch_defects(patch: dict) -> "list[str]":
     """The #363 census facts a temporary compatibility patch is missing.
 
@@ -830,6 +860,12 @@ def temporary_patch_defects(patch: dict) -> "list[str]":
         problems.append("owner_issue must lead with a live GitHub issue number (e.g. #363)")
     if not str(patch.get("retirement") or "").strip():
         problems.append("no retirement condition")
+    retired_by = str(patch.get("retired_by") or "").strip()
+    if is_retired_patch(patch):
+        if not RETIRED_BY_RE.fullmatch(retired_by):
+            problems.append(RETIRED_BY_DEFECT)
+    elif retired_by:
+        problems.append(LIVE_RETIRED_BY_DEFECT)
     if has_no_test(patch):
         problems.append(NO_TEST_DEFECT)
     else:
@@ -869,13 +905,17 @@ def format_debt_census() -> str:
     """Render the temporary-compatibility debt census (#363).
 
     One block per patch -- id, owner issue, retirement condition and test, the
-    four facts #363's acceptance requires -- followed by a DEFECTS section
+    four facts #363's acceptance requires -- with the active patches first and
+    the retired ones (provenance, with the pull request that retired each)
+    after them, followed by a DEFECTS section
     naming every patch that is missing one of them and a closing section naming
     the untested behavior-changing entries the temporary-patch gate does not
     cover.  Reporting only: the CI gate, which also knows the reviewed no-test
     allowlist, is tools/test_compat_manifest.TemporaryCompatibilityDebtGateTests.
     """
     patches = temporary_compatibility_patches()
+    active = [patch for patch in patches if not is_retired_patch(patch)]
+    retired = [patch for patch in patches if is_retired_patch(patch)]
     found = [(patch, temporary_patch_defects(patch)) for patch in patches]
     defects = [(patch, problems) for patch, problems in found if problems]
     untested_others = untested_non_temporary_entries()
@@ -883,16 +923,30 @@ def format_debt_census() -> str:
     lines = [
         "temporary compatibility patch census (#363)",
         f"collections scanned: {len(scanned)} ({', '.join(scanned)})",
-        f"temporary_compatibility_patch entries: {len(patches)}",
+        f"active temporary_compatibility_patch entries: {len(active)}",
+        f"retired temporary_compatibility_patch entries: {len(retired)}",
         f"defective entries: {len(defects)}",
         "",
+        "ACTIVE (can fire; each firing is named in COMPAT_PATCH_REPORT):",
     ]
-    for patch in patches:
+    for patch in active:
         lines.append(patch["id"])
         lines.append(f"    owner_issue: {patch.get('owner_issue') or '-'}")
         lines.append(f"    retirement:   {patch.get('retirement') or '-'}")
         lines.append(f"    test:         {patch.get('test') or '-'}")
         lines.append("")
+    if not active:
+        lines += ["    none", ""]
+    lines.append("RETIRED (historical provenance; no firing site):")
+    for patch in retired:
+        lines.append(patch["id"])
+        lines.append(f"    owner_issue: {patch.get('owner_issue') or '-'}")
+        lines.append(f"    retired_by:  {patch.get('retired_by') or '-'}")
+        lines.append(f"    retirement:   {patch.get('retirement') or '-'}")
+        lines.append(f"    test:         {patch.get('test') or '-'}")
+        lines.append("")
+    if not retired:
+        lines += ["    none", ""]
     if defects:
         lines.append("DEFECTS (temporary patch missing owner/retirement/test):")
         for patch, problems in defects:

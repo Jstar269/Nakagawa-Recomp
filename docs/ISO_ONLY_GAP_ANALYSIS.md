@@ -82,12 +82,13 @@ are not evidence that the paths have landed in the current player.
 
 * **Preserving Original Middleware:** `scePsmf_library.prx` and `scePsmfP_library.prx` contain the authentic demuxing, timestamp synchronization, and ring-buffer management logic.
 * **The Proper Hardware Boundary:**
-  * Guest PSMF code delegates low-level bitstream decoding to `sceMpeg` / `sceVideocodec`.
-  * On real hardware, this is processed by the Media Engine (ME).
-  * In Nakagawa, the HLE boundary is established at `sceMpeg`:
-    * Guest PRXs demux the streams and manage buffers.
-    * Nakagawa takes the elementary AVC/H.264 video NAL units from `sceMpeg` and dispatches them to host hardware decoders (Vulkan Video / Media Foundation).
-    * Audio NAL units (ATRAC3plus) are decoded via standalone host audio routines and written back into guest memory buffers.
+  * Guest PSMF code calls `sceMpeg`; `sceMpeg` (the title's `mpeg.prx`) delegates bitstream decoding to `sceVideocodec`, `sceMpegbase` and `sceAudiocodec`.
+  * On real hardware, this is processed by the Media Engine (ME), whose code is firmware.
+  * In Nakagawa, the HLE boundary is that Media Engine floor (`src/rt/hle_videocodec.c`, #286):
+    * Guest PRXs, the title's `mpeg.prx` included, demux the streams and manage buffers.
+    * `sceVideocodecDecode` hands each AVC/H.264 access unit to the host H.264 seam, and `sceMpegBaseCscAvc` converts the picture into the guest buffer.
+    * ATRAC3plus frames are decoded through `sceAudiocodecDecode` by the project's ATRAC3plus decoder and written back into guest memory buffers.
+    * The host `sceMpeg` handlers serve only titles without their own `mpeg.prx` and the synthetic fixtures.
 
 ---
 
