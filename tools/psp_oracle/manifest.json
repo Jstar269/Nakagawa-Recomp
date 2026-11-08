@@ -6515,7 +6515,7 @@
       "id": "PSP-MPEG-YCBCR-001",
       "status": "implemented",
       "hardware_evidence": "NOT_RUN",
-      "evidence_note": "The YCbCr mode 2 and 3 cells now each create a fresh ringbuffer, MPEG context and registered stream from the PSMF offset. They have not been rerun on hardware; the cells remain NOT_RUN.",
+      "evidence_note": "The YCbCr mode 2 and 3 cells now each create a fresh ringbuffer, MPEG context and registered stream from the PSMF offset. They were captured on hardware twice (2026-11-07 boot 145, 2026-11-08 boot 152; the probe prints test_id PSP-MPEG-001); the completion contract is unregistered, so the cells remain NOT_RUN.",
       "group": "media",
       "source": "fixtures/psp_oracle/probe.c",
       "prx": "nakagawa_psp_oracle.prx",

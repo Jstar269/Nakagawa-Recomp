@@ -612,16 +612,18 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract",
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode",
+            "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_modes_2_and_3",
         ],
-        "limitation": "writes the MEASURED mode-1 header (eight plane pointers into the buffer) and leaves the planes; modes 2 and 3 and an odd number of 16-pixel strips are refused as not measured, and the query's mode-1 limits stand in for Init's own (#302)",
+        "limitation": "writes the MEASURED mode-1 header (eight plane pointers into the buffer) and leaves the planes; mode 2 returns 0 for the measured 128-byte buffer (its bytes before a decode are zeroed, unmeasured) and mode 3 returns 0 and writes nothing (its effect is unmeasured); an odd number of 16-pixel strips is refused as not measured, and the query's mode-1 limits stand in for Init's own, applied to modes 2 and 3 too (only 480x272 was passed to Init there) (#302)",
     },
     "h_MpegAvcDecodeYCbCr": {
         "status": "partial",
         "evidence": [
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract",
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode",
+            "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_mode2_decode",
         ],
-        "limitation": "runs one access unit behind as MEASURED (PSP-MPEG-001: the first call returns 0 with init 0 and no picture, each later call the picture of the unit before it); writes the decoder's samples into the MEASURED mode-1 strip layout through the header's plane pointers and sets words 0 and 1; a picture larger than its InitYCbCr allocation or than 480x272 is refused as not measured, and the strip length from the decoded height rests on one measured geometry (#302)",
+        "limitation": "runs one access unit behind as MEASURED (PSP-MPEG-001: the first call returns 0 with init 0 and no picture, each later call the picture of the unit before it); writes the decoder's samples into the MEASURED mode-1 strip layout through the header's plane pointers and sets words 0 and 1, or, into a mode-2 buffer, only the MEASURED 128-byte header (a mode-2 buffer holds no picture); a decode into a mode-3 buffer is refused (the PSP's first call returned 0 and wrote a 16-byte {h/16, w/16, 0, 0} header over a black 4:2:0 frame, its second call never returned, PSP-MPEG-001 boots 145 and 152, so the picture layout stays unmeasured); a picture larger than its InitYCbCr allocation or than 480x272 is refused as not measured, and the strip length from the decoded height rests on one measured geometry (#302)",
     },
     "h_MpegAvcDecodeStopYCbCr": {
         "status": "partial",
@@ -630,7 +632,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode",
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_restart_after_stop",
         ],
-        "limitation": "takes the address of the buffer pointer and hands over the picture the decoder still holds with status 1, as MEASURED after the last access unit (PSP-MPEG-001); that held picture is the one the decoder runs behind by (sceMpegAvcDecodeYCbCr), the decoder is drained only once the whole stream was fed, and a stop in mid-stream is not measured (#302); after a stop the decoder holds no earlier unit's picture, and one a host decoder still owes is dropped as it comes (an unmeasured model, #279)",
+        "limitation": "takes the address of the buffer pointer and hands over the picture the decoder still holds with status 1, as MEASURED after the last access unit (PSP-MPEG-001); that held picture is the one the decoder runs behind by (sceMpegAvcDecodeYCbCr), the decoder is drained only once the whole stream was fed, and a stop in mid-stream is not measured, nor is a stop on a mode-3 buffer, which is refused (#302); after a stop the decoder holds no earlier unit's picture, and one a host decoder still owes is dropped as it comes (an unmeasured model, #279)",
     },
     "h_MpegAvcCopyYCbCr": {
         "status": "partial",
@@ -646,8 +648,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract",
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode",
             "tests/native/psmf_media_selftest.c:test_mpeg_csc_swizzled_vram_mirrors",
+            "tests/native/psmf_media_selftest.c:test_mpeg_csc_measured_range_and_16bit",
+            "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_modes_2_and_3",
         ],
-        "limitation": "converts the guest planes, read through the header's pointers, with the MEASURED PSP matrix and gives the MEASURED range refusals; the destination is written from its first pixel with rows from the top of the picture (one measured sub-range), and the 16-bit pixel modes are not measured (#302)",
+        "limitation": "converts the guest planes, read through the header's pointers, with the MEASURED PSP matrix and gives the MEASURED range refusals (including the y and h cells: y 1, 161, 200 and an odd h are invalid values); the destination is written from its first pixel with rows from the top of the picture (y never selects rows); the 16-bit modes use the MEASURED packing with alpha 0 and 32-pixel blocks 64 pixels apart (block origin at x 0 only measured, and only a 64-pixel-wide range at stride 512 was captured: a wider 16-bit range, or one whose block spacing passes the stride, is refused as not measured); a mode-2 buffer converts to zero pixels in 8888 (MEASURED) and is refused in 16-bit; that y must be a multiple of 16 is inferred from three refused values (#302)",
     },
     "h_MpegQueryPcmEsSize": {
         "status": "partial",

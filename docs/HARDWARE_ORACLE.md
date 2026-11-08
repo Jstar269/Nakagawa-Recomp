@@ -3311,7 +3311,7 @@ not expected PSP values.
 | `sas-mix` | `PSP-SAS-003` | `NOT_RUN` | Built synthetic volume, WithMix and pitch cells for #2135 and #2054; no hardware result is claimed. |
 | `vcodec-words` | `PSP-VCODEC-001` | `NOT_RUN` | Built Media Engine boundary-word cells over synthetic AVC access units; no hardware result is claimed. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. |
-| `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (modes 2 and 3; rerun required) | Each mode now begins from a fresh stream, ringbuffer and MPEG context; no mode 2 or 3 result is measured. |
+| `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (not registered; captured twice, PSP-3000, firmware 6.6.1: 2026-11-07 boot 145 and 2026-11-08 boot 152; rerun required; the probe prints `test_id=PSP-MPEG-001` and the cell is registered here as `PSP-MPEG-YCBCR-001`) | Each mode begins from a fresh stream, ringbuffer and MPEG context. The capture measured mode 2 (query 128, a 128-byte header after a decode, a CSC of zero pixels), the CSC y and h refusals and the 16-bit CSC output (#302). Mode 3's second decode never returned on boot 145 and again on boot 152 (the first returned 0 and left a 16-byte header over a black 4:2:0 frame); the probe now bounds each mode 2 and 3 decode with a 3 s helper thread and stops making MPEG calls after a block. |
 
 ### PSP-MEMEDGE-001 capture 2026-11-02
 
