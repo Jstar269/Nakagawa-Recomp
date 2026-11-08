@@ -77,6 +77,16 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   uploads per frame, which can make a busy game drop frames. The scaler builds no lookup table, so it adds no fixed
   memory cost. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1010-texture-scaling-and-the-smart-2d-filter).
+- **Sharp game text (Ace Mode, development only).** It is reachable only through the `SR_GLYPHS` environment
+  variable (`on`), has no setting in the player, and is not an admitted Enhanced item, because it
+  changes the frames the game can read back
+  ([section 11.3.5](ENHANCEMENT_CONTRACT.md#1135-sharp-game-text-not-admitted)). At a render scale of 2 to 4, a
+  small sprite that maps one texel to one pixel over a page of anti-aliased text is redrawn from a version of just
+  that rectangle rebuilt at the render scale, checked against the game's own bytes. A page with a rebuilt rectangle
+  costs the page's GPU memory times the render scale squared (a 256x256 page at 4x is 4 MB), taken from the
+  same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
+  frame, on the game's thread. Text drawn as triangles, or from a page in VRAM, is drawn as the game made it. The
+  rules are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1013-sharp-game-text).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
@@ -84,9 +94,9 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
 
 ## Install, update and uninstall (Windows)
 
-Nakagawa is a portable ZIP ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)); there is no
-installer. The unpacked folder is the program and holds nothing you create, so installing and removing it
-never touches your games or saves.
+Nakagawa is a portable ZIP ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)), and a release can also
+carry a per-user installer, [`Setup.exe`](#windows-installer-setupexe). The unpacked folder, or the installed
+program, holds nothing you create, so installing and removing it never touches your games or saves.
 
 **Install.** Unpack `nakagawa-recomp-<version>-windows-x64.zip` into a folder of your choice (a read-only folder
 works) and start `bin\nakagawa_player.exe`. For a Start-menu or Desktop entry, right-click the executable and
@@ -108,7 +118,7 @@ this file when it exits, so while Steam runs nothing is written: close Steam fir
 portable mode the entry points at the executable's current folder, so moving the folder breaks the shortcut.
 Other platforms are unsupported and say so.
 
-**Update.** Check for updates unpacks the new version into a new folder next to the running one and leaves the old
+**Update.** A copy `Setup.exe` installed updates by running the next release's Setup (see [below](#windows-installer-setupexe)). For a ZIP copy, Check for updates unpacks the new version into a new folder next to the running one and leaves the old
 one. Your data is in the per-user folders below, so the new version finds it. Delete the old folder when you
 are done with it.
 
@@ -541,6 +551,34 @@ For titles requiring a title manifest overlay, place the manifest JSON files in:
 On start-up, `nakagawa_player.exe` automatically scans `<user data>/manifests` and loads every `*.json` file as an overlay in alphabetical filename order (via `nk_title_manifest_load_overlay_dir`, capped at `NK_MANIFEST_MAX_OVERLAYS` = 8). Any malformed or skipped files are reported to stderr.
 
 Similarly, `python tools/nk_cli.py build-package` searches `assets/titles` first and then `<user data>/manifests`, resolving title manifests identically to the native player so user-configured titles build without command-line overlay arguments.
+
+### Windows installer (`Setup.exe`)
+
+A release can also carry `nakagawa-recomp-<version>-windows-x64-setup.exe`
+([#2208](https://github.com/Jstar269/nakagawa-recomp/issues/2208)), a per-user installer with the same files as the
+ZIP. It needs no administrator and installs to `%LOCALAPPDATA%\Programs\Nakagawa Recomp` (you can choose another
+folder). It adds a Start-menu entry and, if you tick it, a Desktop one, both with the player's taskbar identity, and
+an entry under Apps & features. It makes no network call.
+
+- **Update:** run the next release's Setup; it uses the same folder. It replaces the program files with the new
+  release's, then deletes each file the previous release installed there (as listed in that install's own
+  `SHA256SUMS.txt`) that the new release no longer carries, but only if the file is unchanged since Setup installed
+  it, and removes the folders that leaves empty. Files you added or changed in the install folder, a portable
+  `bin\data` and `bin\portable.txt` are kept, nothing is deleted through a junction or symbolic link, and
+  `%LOCALAPPDATA%\Nakagawa` (your games, saves and settings) is not touched. The player's Settings page offers the
+  release page for a copy Setup installed, not a ZIP download.
+- **Uninstall:** Apps & features, or `unins000.exe` in the install folder. It removes the program and keeps
+  `%LOCALAPPDATA%\Nakagawa` (the `config`, `data`, `cache`, `logs` and `saves` folders) unless you tick "Also delete my
+  games, saves and settings" on the uninstall page and confirm a second time; a silent uninstall never deletes them. A
+  junction or symbolic link inside those folders is removed as a link and what it points to is left alone. Close the
+  player first: the uninstaller does not close it, and stops without changing anything while it runs.
+- **One copy per shortcut name:** the installer and `tools/stage_install.py` write the same Start-menu shortcut, so
+  Setup refuses to install while a shortcut of that name starts another copy (for example one made by
+  `stage_install.py`), and `stage_install.py --shortcut`, `--start-menu-shortcut` and `--desktop-shortcut` refuse to
+  replace a shortcut that starts another existing copy (a shortcut whose program is gone is replaced). Uninstall or
+  delete that copy and its shortcut first. The two also never share a folder: Setup refuses a folder
+  `stage_install.py` set up, and `stage_install.py` refuses a folder with Setup's `unins000.exe`
+  (`INSTALL_DESTINATION_INSTALLER_OWNED`).
 
 ### Portable mode (`portable.txt`)
 
