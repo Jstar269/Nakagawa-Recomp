@@ -470,10 +470,10 @@ static void add_audio_pes(Buf *b, const uint8_t *frame, uint32_t len) {
     add_audio_pes_sub(b, 0x00u, 0, 0, frame, len);
 }
 /* One self-delimiting ATRAC frame (8-byte header + data); the size field is
- * ((code1 & 3) << 8 | code2 * 8) + 0x10 total bytes. */
+ * (((code1 & 3) << 8 | code2) * 8) + 0x10 total bytes. */
 static uint32_t make_audio_frame(uint8_t *dst, uint32_t cap, uint8_t code1, uint8_t code2,
                                  uint8_t fill) {
-    uint32_t total = (uint32_t)(((code1 & 0x03u) << 8) | ((uint32_t)code2 * 8u)) + 0x10u;
+    uint32_t total = (uint32_t)((((code1 & 0x03u) << 8) | (uint32_t)code2) * 8u) + 0x10u;
     if (total > cap) return 0;
     memset(dst, fill, total);
     dst[0] = 0x0f; dst[1] = 0xd0; dst[2] = code1; dst[3] = code2;
@@ -4763,6 +4763,29 @@ static void test_mpeg_feed_end_without_stream_size(int mode) {
  * writes exactly what the ATRAC3+ decoder produces for that frame.  Before any data, and after
  * the last frame, GetAtracAu reports NO_DATA; AtracDecode with no held frame refuses and leaves
  * the block untouched.  A flush restarts the stream. */
+/* #2205: the frame size is ((b2 & 3) << 8 | b3) * 8 + 0x10, so a frame over 2 KiB has b2 & 3 != 0.
+ * The expression once multiplied b3 before the OR, which read such a frame as a short one and
+ * refused it at the size check, before any decoder was set up. */
+static void test_mpeg_atrac_frame_size_high_bits(void) {
+    static uint8_t frame[0x2010];
+    static const struct { uint8_t b2, b3; uint32_t size; } cases[] = {
+        { 0x29, 0x00, 0x810u }, { 0x29, 0x01, 0x818u }, { 0x2a, 0x10, 0x1090u }, { 0x2b, 0xff, 0x2008u },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        Mpeg m;
+        memset(&m, 0, sizeof(m));
+        uint32_t n = make_audio_frame(frame, sizeof(frame), cases[i].b2, cases[i].b3, 0x00);
+        CHECK(n == cases[i].size, "mpeg-atrac: the fixture sizes a frame with b2 & 3 != 0 as the format does");
+        uint32_t r = mpeg_audio_decode_frame(&m, frame, n, 1u);
+        /* Past the size check the decoder is built for the full frame; a silent frame may then
+         * be refused by the decoder itself, which is a different refusal. */
+        CHECK(m.atracAlign == (int)(n - 8u) || m.audioRejected > 0u || r == 0u,
+              "mpeg-atrac: a frame over 2 KiB passes the frame-size check");
+        atrac3p_bridge_destroy(m.atrac);
+        free(m.audioPcm);
+    }
+}
+
 static void test_mpeg_atrac_au_decode(void) {
     enum {
         AT_DESC = 0x08600000u, AT_DATA = 0x08610000u, AT_RING = 0x08630000u, AT_HDR = 0x08640000u,
@@ -5624,6 +5647,7 @@ int main(int argc, char **argv) {
     test_mpeg_csc_presentation_boundary(1);
     test_mpeg_av_audio_followed_by_content();
     test_mpeg_atrac_au_decode();
+    test_mpeg_atrac_frame_size_high_bits();
     test_mpeg_looped_stream_feeds_past_header_size(0u, 0);
     test_mpeg_looped_stream_feeds_past_header_size(4u, 0);
     test_mpeg_looped_stream_feeds_past_header_size(0u, 1);

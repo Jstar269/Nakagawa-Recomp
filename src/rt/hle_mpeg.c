@@ -580,8 +580,8 @@ static int psmf_audio_fill(SrPsmfPlayer *p) {
         SrPsmfQueueSlot *slot = &q->slot[q->head];
         const uint8_t *frame = (const uint8_t *)slot->hostData;
         if (frame && slot->bytes > 8u && frame[0] == 0x0fu && frame[1] == 0xd0u) {
-            uint32_t frame_size = (uint32_t)(((frame[2] & 3u) << 8) |
-                                             ((uint32_t)frame[3] * 8u)) + 0x10u;
+            uint32_t frame_size = (uint32_t)((((frame[2] & 3u) << 8) |
+                                              (uint32_t)frame[3]) * 8u) + 0x10u;
             if (frame_size == slot->bytes) {
                 uint32_t data = frame_size - 8u;
                 int channels = (int)p->audioChannels;
