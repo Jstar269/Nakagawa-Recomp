@@ -33,8 +33,10 @@
  * the object when it cannot (ge_bounding_box_visible); the exact PSP visibility test is
  * unmeasured, so only a box wholly beyond one scissor edge is skipped.
  *
- * Not emulated: per-level CLUTs (the TEXMODE multi-CLUT bit), in this sampler and in the
- * Vulkan backend alike (#1373). The TEXLEVEL slope mode is emulated (tex_detail16).
+ * Per-level CLUTs: TEXMODE bit 8 moves level L of a CLUT4 or CLUT8 texture L x 16 or
+ * L x 256 entries further into CLUT RAM, as PSP-GE-MIP-002 measured (clut_index). The
+ * Vulkan backend decodes every level through the same lookup. The TEXLEVEL slope mode
+ * is emulated (tex_detail16).
  */
 
 /*
@@ -1503,16 +1505,40 @@ static void read_color(uint32_t addr, const VFmt *v, int *r, int *g, int *b, int
     *r=ci[0]; *g=ci[1]; *b=ci[2]; *a=ci[3];
 }
 
-/* Look up a CLUT entry (palette index -> RGBA). */
-static void clut_lookup(uint32_t index, int *r, int *g, int *b, int *a) {
+/* Test-only (hle_thread_selftest): a deliberately wrong multi-CLUT rule, so the PSP-GE-MIP-002
+ * cells are shown to fail under it. 0 is the measured rule. */
+static int s_multi_clut_mutant;
+void ge_test_set_multi_clut_mutant(int mutant) { s_multi_clut_mutant = mutant; }
+
+/* The CLUT entry a texel index of mip level `level` reads. CLUTFORMAT's shift, mask and start
+ * offset come first. With TEXMODE bit 8 set, level L then adds L << (bits per index): 16 L
+ * entries for CLUT4 and 256 L for CLUT8, after the start offset (the two add). The entry
+ * wraps in the 1 KiB of CLUT RAM, 256 8888 entries or 512 16-bit ones, so CLUT8 with an 8888
+ * CLUT reads the same entry at every level, and CLUT16 always does (PSP-GE-MIP-002, #2031:
+ * the ge-clut-mip cells, PSP-3000 boot 134). CLUT32 is unmeasured and follows CLUT16, whose
+ * per-level step is also a whole number of CLUT RAMs. Whether the step comes before or after
+ * the index mask is not decided by the cells: every index they mask is below the step. */
+static uint32_t clut_index(uint32_t index, uint32_t level) {
     uint32_t shift = (ge.clut_fmt >> 2) & 0x1F;
     uint32_t mask  = (ge.clut_fmt >> 8) & 0xFF;
     uint32_t start = ((ge.clut_fmt >> 16) & 0x1F) << 4;
     uint32_t start_mask = (ge.clut_fmt & 3) == 3 ? 0xFFu : 0x1FFu;
     index = ((index >> shift) & mask) | (start & start_mask);
+    if (ge.tex_multi_clut && level != 0u && (ge.tex_fmt == 4u || ge.tex_fmt == 5u)) {
+        uint32_t step = level << (ge.tex_fmt == 4u ? 4u : 8u);
+        if (s_multi_clut_mutant == 1) step = level << 4;       /* 16 L whatever the format */
+        if (s_multi_clut_mutant == 2) index |= step;           /* OR with the start offset */
+        else if (s_multi_clut_mutant != 3) index += step;      /* 3: no per-level step */
+    }
+    return index & start_mask;
+}
+
+/* Look up a CLUT entry (palette index of mip level `level` -> RGBA). */
+static void clut_lookup(uint32_t index, uint32_t level, int *r, int *g, int *b, int *a) {
+    index = clut_index(index, level);
     int epsm = ge.clut_fmt & 3;
-    if (epsm == 3) { uint32_t raw; memcpy(&raw, &ge.clutram[(index * 4) & 2047], 4); unpack_color(raw, 3, r, g, b, a); }
-    else           { uint16_t raw; memcpy(&raw, &ge.clutram[(index * 2) & 2047], 2); unpack_color(raw, epsm, r, g, b, a); }
+    if (epsm == 3) { uint32_t raw; memcpy(&raw, &ge.clutram[index * 4], 4); unpack_color(raw, 3, r, g, b, a); }
+    else           { uint16_t raw; memcpy(&raw, &ge.clutram[index * 2], 2); unpack_color(raw, epsm, r, g, b, a); }
 }
 
 unsigned long g_tex_samples = 0, g_tex_nonzero = 0;
@@ -2102,7 +2128,7 @@ static void sample_dxt(uint32_t base, uint32_t stride, uint32_t u, uint32_t v,
 
 /* One texture level as the sampler addresses it. Format, swizzle, CLUT and wrap are
  * shared by every level; address, buffer width and size are per level (#1373). */
-typedef struct TexLevel { uint32_t addr, bufw; int w, h; } TexLevel;
+typedef struct TexLevel { uint32_t addr, bufw; int w, h; uint32_t level; } TexLevel;
 
 /* Level 0 is the TEXADDR0/TEXBUFWIDTH0/TEXSIZE0 state every other GE path reads. */
 static TexLevel tex_level(uint32_t level) {
@@ -2115,6 +2141,7 @@ static TexLevel tex_level(uint32_t level) {
         t.w = 1 << ge.tex_mip_wlog2[level - 1u];
         t.h = 1 << ge.tex_mip_hlog2[level - 1u];
     }
+    t.level = level > 7u ? 0u : level;
     return t;
 }
 
@@ -2173,7 +2200,7 @@ static int tex_decode_clut_fast(const TexLevel *t, uint32_t *out) {
     uint8_t lit[256];
     for (uint32_t i = 0; i < entries; i++) {
         int r, g, b, a;
-        clut_lookup(i, &r, &g, &b, &a);
+        clut_lookup(i, t->level, &r, &g, &b, &a);
         pal[i] = (uint32_t)(r & 0xFF) | ((uint32_t)(g & 0xFF) << 8) |
                  ((uint32_t)(b & 0xFF) << 16) | ((uint32_t)(a & 0xFF) << 24);
         lit[i] = (r | g | b) != 0;
@@ -2212,13 +2239,13 @@ static void sample_tex_level(const TexLevel *t, int tu, int tv, int *r, int *g, 
             uint32_t off = texel_offset(stride, u, v, 4);
             uint8_t byte = (uint8_t)tex_r8(t->addr + off);
             int ni = (u & 1) ? (byte >> 4) : (byte & 0xF);
-            clut_lookup((uint32_t)ni, r, g, b, a); break;
+            clut_lookup((uint32_t)ni, t->level, r, g, b, a); break;
         }
-        case 5: clut_lookup(tex_r8(t->addr + texel_offset(stride, u, v, 8)), r, g, b, a); break;
+        case 5: clut_lookup(tex_r8(t->addr + texel_offset(stride, u, v, 8)), t->level, r, g, b, a); break;
         case 6:  /* CLUT16: 16-bit index through the same shift/mask/start transform */
-            clut_lookup(tex_r16(t->addr + texel_offset(stride, u, v, 16)), r, g, b, a); break;
+            clut_lookup(tex_r16(t->addr + texel_offset(stride, u, v, 16)), t->level, r, g, b, a); break;
         case 7:  /* CLUT32 */
-            clut_lookup(tex_r32(t->addr + texel_offset(stride, u, v, 32)), r, g, b, a); break;
+            clut_lookup(tex_r32(t->addr + texel_offset(stride, u, v, 32)), t->level, r, g, b, a); break;
         case 8: case 9: case 10:
             sample_dxt(t->addr, stride, u, v, r, g, b, a); break;
         default: *r=*g=*b=*a=255; break;
@@ -6879,9 +6906,13 @@ static int ge_cmd_texture(uint32_t cmd, uint32_t data) {
             ge.tex_mip_wlog2[cmd - GE_TEXSIZE0 - 1u] = (uint8_t)(data & 0xFu);
             ge.tex_mip_hlog2[cmd - GE_TEXSIZE0 - 1u] = (uint8_t)((data >> 8) & 0xFu);
             break;
-        /* sceGuTexMode: maxmips << 16 | multi-CLUT << 8 | swizzle. The multi-CLUT bit is
-         * not applied: every level samples through the one CLUT (#1373). */
-        case GE_TEXMODE:   ge.tex_swizzle=data&1; ge.tex_max_level=(data>>16)&7u; break;
+        /* sceGuTexMode: maxmips << 16 | multi-CLUT << 8 | swizzle. clut_index applies the
+         * multi-CLUT bit to levels above 0 (#2031). */
+        case GE_TEXMODE:
+            ge.tex_swizzle = data & 1u;
+            ge.tex_multi_clut = (data >> 8) & 1u;
+            ge.tex_max_level = (data >> 16) & 7u;
+            break;
         case GE_TEXFORMAT: ge.tex_fmt=data&0xF; break;
         case GE_TEXFILTER: ge.tex_filter=data; break;
         case GE_TEXWRAP:   ge.tex_wrap=data; break;

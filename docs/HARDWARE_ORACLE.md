@@ -1326,7 +1326,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   | Evidence id | Cells cited | Not cited | Outcome (2026-11-06) |
   | --- | --- | --- | --- |
   | `PSP-GE-LIGHT-001` | `k1-*`, `k2-*`, `k3p5-*`, `k8-*`, `k10-*`, `k16-*`, `k31-*`, `k64-*`, `k100-*`, `k128-*`, `s-*`, `d-*`, `ge-light-done` (`b55f6cd3`, boot 133) | the power function's formula, other light types, colours or several lights, the wait timings | MEASURED (`ge-light`) |
-  | `PSP-GE-MIP-002` | `t8-off-*`, `t8-on-*`, `t8-on-b40-*`, `t4-off-*`, `t4-on-*`, `t4-on-small-*`, `c16-t4-on-*`, `c16-t8-on-*`, `t4-on-csa1-*`, `t8-on-mask1f-*`, `t16-on-*`, `cap32-csa16-b20-*`, `cap32-csa16-b40-*`, `cap16-csa16-b20-*`, `ge-clut-mip-done` (`2795f150`, boot 134) | the CLUT index shift, computed levels, linear mip filtering, what a 0x40-block load does, the wait timings | MEASURED (`ge-clut-mip`) |
+  | `PSP-GE-MIP-002` | `t8-off-*`, `t8-on-*`, `t8-on-b40-*`, `t4-off-*`, `t4-on-*`, `t4-on-small-*`, `c16-t4-on-*`, `c16-t8-on-*`, `t4-on-csa1-*`, `t8-on-mask1f-*`, `t16-on-*`, `cap32-csa16-b20-*`, `cap32-csa16-b40-*`, `cap16-csa16-b20-*`, `ge-clut-mip-done` (`2795f150`, boot 134) | T32 textures, whether the per-level offset comes before or after the index mask, the CLUT index shift, computed levels, linear mip filtering, what a 0x40-block load does, the wait timings | MEASURED (`ge-clut-mip`) |
 
   `ge-light` (#1732): per specular coefficient k, one flat-shaded quad per pixel of a 16x17 window, lit by one
   directional light along (0, 0, 1), with the normal's z spread over 0..1; family s uses light component 1 and
@@ -1350,6 +1350,9 @@ One console is one data point; see §11. Nothing here closes issue #70
   - *Unexplained:* a LOADCLUT of 0x40 blocks leaves every pixel a grey ramp (`0x00d6d6d6` to `0x00d9d9d9`) that
     matches neither table.
   - Pixel x of level L reads texel x >> L, as `ge-mip` measured.
+  - *Unmeasured:* T32 textures, and whether the per-level offset is added before or after the index mask
+    (every index the cells mask is below the offset). The software sampler (`clut_index` in `src/rt/ge.c`)
+    reads t at every level of a T32 texture, as for T16, and adds the offset after the mask.
 
 - **PSP-3000 single-case run of the `hle-audio-rest` probe on commit `8db3ec9d` (2026-11-06)**: system software
   6.61, ARK-5.1.0 (owner); `pspver` 6.6.0, the firmware declared to the runner. PSPLink 3.2.1, operator-declared
