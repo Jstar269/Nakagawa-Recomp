@@ -7320,14 +7320,18 @@ static int coherence_run_twin_sync(void) {
  * each Q texel covers 4S device pixels instead. (A nearest sample of a target takes the centre of
  * its guest texel by design, psp.frag, so only a linear one shows the target's own resolution.)
  *
- * Q holds a flat quad whose top edge is long and shallow: 10 rows of rise over 128 columns,
+ * Q holds a flat white quad whose top edge is long and shallow: 10 rows of rise over 128 columns,
  * so per device column it climbs one Q device row at most. In M's device image the edge is the
- * first row per column whose red is at least half the quad's (the filter's 50% crossing). The
- * quad's red is 254, not 255. psp.frag snaps the position to 1/16 of a guest texel, which is S/16
- * of a device texel, so each linear weight is a multiple of 1/16 at every scale (a sampler keeps
- * at least 4 sub-texel bits) and a blend is 254 * k / 256: a weight of exactly one half gives
- * exactly 127. With 255 it would give 127.5, and how a device rounds that tie in its UNORM store
- * would move the crossing; with 254 the only ties are 63.5 and 190.5, far from the threshold.
+ * first row per column whose blend weight of Q's white is at least one half (the filter's 50%
+ * crossing). The check is on the ramps' width, not on an exact colour, so the threshold sits
+ * where no blend this sprite makes can reach it. M's device pixels step 1/(4S) of a guest texel
+ * and psp.frag snaps positions to 1/16, so each weight along an axis is an odd number of eighths
+ * at 1x and 2x and a whole number of quarters at 4x. A blend of white is then 255 * j / 64; over
+ * every set of white texels in a 2x2 footprint, the values nearest one half are 119.5 and 135.5
+ * (30/64 and 34/64, at 1x and 2x, where 32/64 cannot occur) and 127.5 (32/64, at 4x). Red >= 125
+ * lies between them, more than one step from each, so a device that stores
+ * a UNORM value as either neighbouring integer (Vulkan recommends rounding to nearest but does
+ * not require it, and 127.5 is a tie) gives the same edge.
  * The edge stays on a plateau across a Q device pixel's run of columns and climbs one Q device
  * pixel, 4 device rows, in a ramp of the 4 columns where the filter blends two Q device columns:
  * so every ramp rises exactly 4 rows at 1x, 2x and 4x. (At 3x a device texel is 16/3 sixteenths,
@@ -7349,8 +7353,7 @@ static int coherence_run_twin_sync(void) {
 typedef struct { uint32_t rgba; float x, y, z; } RttCVtx;
 typedef struct { uint32_t steps, minjump, maxjump, bad, bad_x, y_first, y_last; } RttEdge;
 
-#define RTT_RED 0xFEu                                /* the quad's red, see above */
-#define RTT_LIT(px) (((px) & 0xFFu) >= RTT_RED / 2u)  /* red at least half the quad's */
+#define RTT_LIT(px) (((px) & 0xFFu) >= 125u)        /* weight at least one half: see above */
 
 /* Scan columns [x0, x1) of a w-wide image of h rows. Per column the edge is the first lit row; it
  * must lie in [ylo, yhi) and every row below it must be lit, and it never moves up. A filtered
@@ -7396,11 +7399,11 @@ static int coherence_run_rtt_scale(void) {
     RttCVtx *cv = (RttCVtx *)SR_HOST(COH_SAMPLE_VERTS);
     RawSpriteVtx *sv = (RawSpriteVtx *)(cv + 6);
     const uint32_t cv_addr = COH_SAMPLE_VERTS, sv_addr = COH_SAMPLE_VERTS + 6u * (uint32_t)sizeof(RttCVtx);
-    const uint32_t quad = 0xFFFFFF00u | RTT_RED;
+    const uint32_t white = 0xFFFFFFFFu;
     /* the quad: top edge (0,30) to (128,40), as two triangles sharing the diagonal */
-    cv[0] = (RttCVtx){ quad, 0.0f, 30.0f, 0.0f };   cv[1] = (RttCVtx){ quad, 128.0f, 40.0f, 0.0f };
-    cv[2] = (RttCVtx){ quad, 0.0f, 68.0f, 0.0f };   cv[3] = (RttCVtx){ quad, 128.0f, 40.0f, 0.0f };
-    cv[4] = (RttCVtx){ quad, 128.0f, 68.0f, 0.0f }; cv[5] = (RttCVtx){ quad, 0.0f, 68.0f, 0.0f };
+    cv[0] = (RttCVtx){ white, 0.0f, 30.0f, 0.0f };   cv[1] = (RttCVtx){ white, 128.0f, 40.0f, 0.0f };
+    cv[2] = (RttCVtx){ white, 0.0f, 68.0f, 0.0f };   cv[3] = (RttCVtx){ white, 128.0f, 40.0f, 0.0f };
+    cv[4] = (RttCVtx){ white, 128.0f, 68.0f, 0.0f }; cv[5] = (RttCVtx){ white, 0.0f, 68.0f, 0.0f };
     sv[0] = (RawSpriteVtx){ 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
     sv[1] = (RawSpriteVtx){ 128.0f, 68.0f, 512.0f, 272.0f, 0.0f };
 
@@ -7498,7 +7501,8 @@ static int coherence_run_rtt_scale(void) {
         steps_want = (10u * 126u * s) / 128u;
         if (e.bad || e.minjump != 4u || e.maxjump != 4u || e.steps + 1u < steps_want || e.steps > steps_want + 1u) {
             fprintf(stderr, "gpu coherence selftest [%s]: FAIL scale=%u: M's edge (first row per device "
-                    "column with red at least half) %s: %u ramps rising %u..%u device rows (rows %u to %u), want about "
+                    "column with red at least 125, a weight of one half) %s: %u ramps rising %u..%u device rows "
+                    "(rows %u to %u), want about "
                     "%u ramps of exactly 4 rows (one Q device pixel, stretched 4x); a 1x decode of Q climbs "
                     "%u rows per Q texel\n",
                     name, s, e.bad ? "is broken (a hole, out of range or moving up) from column" : "has the wrong lattice",

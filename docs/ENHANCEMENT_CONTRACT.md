@@ -954,8 +954,10 @@ does, so it shows one device texel per guest texel.
 Every other read of a render target, including a read in another format, a swizzled or mipmapped read and another
 buffer width, decodes the target from guest memory at 1x. That is the GE's own picture of it, so such an effect shows
 1x detail at any render scale; it never shows a picture the PSP would not draw. A render-target read is found by
-address alone, so depth read as a texture decodes from guest memory only when its address lies outside every colour
-target's span. The cases, the depth rule and the debug switch are in `src/rt/gpu_sdl3vk/README.md` (#2052).
+address alone: depth read as a texture decodes from guest memory at 1x when its address lies outside every colour
+target's span, and if it lies inside one and the read passes the rules above, that colour target's image is bound
+instead, because the renderer does not detect depth aliasing. The cases, the depth rule and the debug switch are in
+`src/rt/gpu_sdl3vk/README.md` (#2052).
 
 At 1x the readback is the PSP's value.
 

@@ -248,8 +248,9 @@ into one target and read it back as a texture keep the scale in these cases:
     a target shows one device texel per guest texel at any render scale.
 - **A block transfer between targets** copies at render scale (`hook_xfer`).
 
-A texture is a render-target read when its address lies inside a colour target's span: from the
-target's base address, its stride times 272 rows (`target_containing` in `ge_gpu.c`). The direct
+A texture is a render-target read when its address lies inside the span of a colour target the
+GPU has drawn (one whose image is valid): from the target's base address, its stride times 272
+rows (`target_containing` in `ge_gpu.c`). The direct
 bind then needs all of these: the texture format equals the target's pixel format, the texture is
 not swizzled and mipmapping is not active (a mipmap filter with a maximum level above 0), its
 buffer width equals the target's stride (or is 0), the texture address is pixel-aligned inside the
