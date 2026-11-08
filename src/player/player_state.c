@@ -2474,10 +2474,12 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    reach the guest (docs/ENHANCEMENT_CONTRACT.md 2.2): Crisp system text is on in every
    preset (it draws only while the on-screen keyboard is up), and Sharper enlarging (the
    FSR 1 upscaler, #2122) is on in Medium, Ultra and Handheld. FSR 1 runs only where the
-   window enlarges the frame on both axes, and is made for 1.3x to 2x: Medium's and
-   Handheld's 2x frame on a 1080p or handheld screen, and Ultra's 4x frame on a screen above
-   1080p, each for well under a millisecond (fsr1-selftest's cost cell). Low turns it off:
-   its 1x frame is enlarged 4x in a 1080p window, past that range, on the weakest GPUs; High
+   window enlarges the frame on both axes, and AMD's quality modes for it span 1.3x (Ultra
+   Quality) to 2x (Performance) per axis: Medium's and Handheld's 2x frame on a 1080p or
+   handheld screen, and Ultra's 4x frame on a screen above 1080p, each for well under a
+   millisecond (fsr1-selftest's cost cell). Low turns it off:
+   its 1x frame is enlarged at least 4x on any screen of 1080p or more, past that range, on
+   the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
    motion, Widescreen, texture filtering, sound, the readout or the badge: those stay the
    library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
@@ -2499,6 +2501,9 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
                                 NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
 };
 #undef PRESET_PARTS
+/* PRESET_PARTS names every part: a new PLAYER_PART_* needs its value under each preset there (-1
+   leaves it the library's), or this fails to compile. */
+typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 8 ? 1 : -1];
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -2553,8 +2558,16 @@ bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap
 }
 
 /* An edit to a row the chosen preset sets: the rows now apply everywhere, so the preset is
-   Custom. Each such setter calls this; nothing derives Custom from the values. */
+   Custom. Each such setter calls this; nothing derives Custom from the values. Custom keeps
+   what the pages showed: the display rows were always the user's own, and the Enhanced parts
+   the preset set (shown as "On (Ultra)") become the library's values, so an edit to one row
+   never turns another part off or on. The parts are not guest-visible in Authentic, which
+   resolves every part off, so writing them is safe where writing the rows is not. */
 static void graphics_preset_row_edited(PlayerApp *app) {
+    const PlayerGraphicsPresetRow *row = player_graphics_preset_row(app->settings.graphics_preset);
+    for (int p = 0; row && p < PLAYER_PART_COUNT; p++) {
+        if (row->part[p] >= 0) app->settings.enhanced.part[p] = row->part[p];
+    }
     app->settings.graphics_preset = PLAYER_PRESET_CUSTOM;
 }
 
@@ -3353,16 +3366,16 @@ void player_app_cycle_enhanced_part(PlayerApp *app, int part) {
     const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
     if (!app || !info) return;
     /* The step starts from the value the page shows, the preset's where it sets the part.
-       The library's value is then the user's own, so the preset becomes Custom, as for a
-       display row it sets; a part no preset sets leaves the preset as it is. */
+       Editing such a part makes the preset Custom, as for a display row it sets, and Custom
+       keeps the preset's other parts (graphics_preset_row_edited); a part no preset sets
+       leaves the preset as it is. */
     const PlayerGraphicsPresetRow *row = player_graphics_preset_row(app->settings.graphics_preset);
-    bool preset_sets = row && row->part[part] >= 0;
     int index = enhanced_part_value_index(part, player_settings_library_part(&app->settings, part));
     int next = index < 0 ? 0 : (index + 1) % info->value_count;
+    if (row && row->part[part] >= 0) graphics_preset_row_edited(app);
     app->settings.enhanced.part[part] = info->values[next];
     player_dev_log_add(app, "settings", "Enhanced %s for the library: %s", info->key,
                        info->words[next]);
-    if (preset_sets) graphics_preset_row_edited(app);
     maybe_persist_settings(app);
 }
 

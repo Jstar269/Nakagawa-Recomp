@@ -1503,7 +1503,8 @@ const char *player_present_scaling_label(int scaling);
    library's values: player_play_resolve uses them, so the launch line, the upscaler and the
    Enhanced pages agree. A game's own value for a part still wins over the preset. Editing a
    part the preset sets, for the library, makes the preset Custom; editing it for one game
-   does not. */
+   does not. Going Custom by any edit copies the preset's parts into the library's, so Custom
+   keeps what the pages showed. */
 typedef enum {
     PLAYER_PRESET_CUSTOM = 0,
     PLAYER_PRESET_LOW,

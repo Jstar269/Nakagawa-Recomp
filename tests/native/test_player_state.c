@@ -8008,6 +8008,61 @@ static void test_graphics_presets(void) {
     player_app_cycle_enhanced_part(app, PLAYER_PART_WIDE);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_ULTRA);
 
+    /* Going Custom keeps what the pages showed: the preset's parts become the library's, so
+       editing a display row, or one part, never turns the other part off. */
+    for (int edit = 0; edit < 2; edit++) {
+        NkRuntimeConfig cfg;
+        PlayerPlayResolved pr;
+        char pline[192];
+        player_app_settings_init_default(&app->settings);
+        app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+        app->settings.enhanced.part[PLAYER_PART_TEXT] = 0;
+        app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
+        player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(cfg.present_upscale == NK_PRESENT_UPSCALE_FSR1 && pr.part[PLAYER_PART_TEXT] == 1);
+        if (edit == 0) {
+            player_app_cycle_resolution_scale(app, 1);
+        } else {
+            player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE); /* FSR 1 (Ultra) -> Off */
+        }
+        assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+        assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 1);
+        assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == (edit == 0 ? 1 : 0));
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(pr.part[PLAYER_PART_TEXT] == 1 && strstr(pline, ";text=on") != NULL);
+        assert(cfg.present_upscale == (edit == 0 ? NK_PRESENT_UPSCALE_FSR1
+                                                 : NK_PRESENT_UPSCALE_OFF));
+    }
+    /* Under Handheld, toggling fullscreen (a row it sets) keeps its parts the same way. */
+    player_app_settings_init_default(&app->settings);
+    app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_HANDHELD);
+    player_app_toggle_fullscreen(app);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+
+    /* A v0.0.2 settings file keeps its preset and its library parts as written, and an
+       Enhanced session takes the preset's parts over them: High with Sharper enlarging on and
+       Crisp system text off in the library launches with FSR 1 off and crisp text on. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"graphics_preset\": \"high\", \"enhanced\": {\"default\": "
+        "\"enhanced\", \"af\": \"16\", \"text\": \"off\", \"upscale\": \"fsr1\"}}");
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(player_app_graphics_preset(back) == PLAYER_PRESET_HIGH);
+    assert(back->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
+    assert(back->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+    {
+        NkRuntimeConfig cfg;
+        PlayerPlayResolved pr;
+        char pline[192];
+        graphics_preset_session(&back->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(pr.on && pr.part[PLAYER_PART_TEXT] == 1 && strstr(pline, ";text=on") != NULL);
+        assert(cfg.present_upscale == NK_PRESENT_UPSCALE_OFF);
+        assert(cfg.resolution_scale == 4);
+    }
+
     /* Editing a row the preset sets makes it Custom, even to the same value, and the note
        goes with it. */
     player_app_settings_init_default(&app->settings);
