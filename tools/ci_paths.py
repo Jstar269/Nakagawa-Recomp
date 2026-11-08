@@ -815,6 +815,9 @@ def _is_recognised(path: str) -> bool:
             _is_build_system,
             _is_native_runtime,
             _is_python_tool,
+            # The Inno script and lock route the installer gate; unrecognised they
+            # would force the full matrix the installer-inputs row skips.
+            _is_installer,
         )
     )
 

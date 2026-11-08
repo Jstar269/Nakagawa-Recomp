@@ -131,6 +131,21 @@ class CiPathClassificationTests(unittest.TestCase):
                 result = classify([path])
                 self.assertEqual(result["run_installer"], "true")
 
+    def test_installer_only_inputs_skip_native_and_translation(self) -> None:
+        # The Inno script and its lock are recognised installer inputs, not unknown
+        # paths, so they route the installer (whose Windows job builds the package)
+        # without forcing the full native/translation matrix.
+        for path in (
+            "assets/installer/nakagawa.iss",
+            "assets/installer/fragments/setup.iss",
+            "assets/upstream/innosetup.lock.json",
+        ):
+            with self.subTest(path=path):
+                result = classify([path])
+                self.assertEqual(result["run_installer"], "true")
+                self.assertEqual(result["run_native"], "false")
+                self.assertEqual(result["run_windows"], "false")
+
     def test_windows_runtime_inputs_also_route_the_installer_gate(self) -> None:
         result = classify(["src/rt/sched.c"])
         self.assertEqual(result["run_windows"], "true")
