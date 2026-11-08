@@ -2261,7 +2261,7 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIs(settings.get("fullscreen"), False)
 
     def test_next_ui_graphics_preset_ultra_note_and_custom_on_edit(self) -> None:
-        """#2150: Ultra's row and note say its upscaler is not set, in the warning colour;
+        """#2150: Ultra's note says it does not turn on Sharper enlarging, in the warning colour;
         editing a row the preset sets (Resolution) makes it Custom and the note goes."""
         focus = self.SETTINGS_FOCUS
         run = self.next_ui_run(
@@ -2276,15 +2276,15 @@ class NativePlayerUiTests(unittest.TestCase):
                       "Up returns to Resolution")
         lines = self.preset_lines(run)
         self.assertEqual([line["value"] for line in lines],
-                         ["Custom", "Low", "Medium", "High", "Ultra (no upscaler)", "Custom"],
+                         ["Custom", "Low", "Medium", "High", "Ultra", "Custom"],
                          run["stdout"])
         ultra = lines[4]
-        self.assertEqual(ultra["warns"], "1", "Ultra's note names what it could not set")
+        self.assertEqual(ultra["warns"], "1", "Ultra's note says it does not turn on Sharper enlarging")
         self.assertIn("Ultra is used in Enhanced and Ace", ultra["note"])
-        self.assertIn("without its FSR 1 upscaler", ultra["note"])
+        self.assertIn("not turning on Sharper enlarging", ultra["note"])
         self.assertIn("Authentic uses your own display settings", ultra["note"])
         self.assertEqual(lines[3]["warns"], "0")
-        self.assertNotIn("FSR 1", lines[3]["note"])
+        self.assertNotIn("Sharper enlarging", lines[3]["note"])
         self.assertEqual((lines[-1]["warns"], lines[-1]["note"]), ("0", ""),
                          "an edited row makes the preset Custom and its note goes")
         settings = run["settings"]

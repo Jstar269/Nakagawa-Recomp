@@ -6,7 +6,7 @@ the native player and record the result. It covers public synthetic and homebrew
 titles only. Retail titles, including the checked-in HST manifest, are not qualified
 here: `validate` names a checked-in retail manifest as `SKIP`.
 
-Tracking: [#699](https://github.com/Jstar269/nakagawa-recomp/issues/699). Umbrella
+Umbrella
 for title intake: [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308).
 
 ## What the route proves
@@ -190,8 +190,7 @@ claim it.
   the title. The `input-responsive` stage is not reported.
 - **Generic intake.** Only the display fixture has a launch surface. Other public
   titles need a bundled entry or a generic launch path, tracked under
-  [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308) and
-  [#309](https://github.com/Jstar269/nakagawa-recomp/issues/309).
+  [#308](https://github.com/Jstar269/nakagawa-recomp/issues/308).
 - **Hardware.** Nothing here runs on a PSP. Hardware claims need the oracle route
   in [`HARDWARE_ORACLE.md`](HARDWARE_ORACLE.md).
 
