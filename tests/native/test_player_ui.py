@@ -6009,6 +6009,57 @@ class FirstRunRouteTests(unittest.TestCase):
         self.assertIn("library is empty", completed.stderr)
         self.assertNotIn("has no prepared runtime", completed.stderr)
 
+    def test_launch_title_names_a_library_game_by_disc_id(self) -> None:
+        """#2152: --launch-title (what an Add to Steam shortcut runs) finds the game by its
+        disc ID, or disc ID and image SHA-1 when two images share it, and takes the
+        --launch-index route; a missing, shared or malformed value is refused by name."""
+        with tempfile.TemporaryDirectory(prefix=".first-run-launch-title-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            user_root = scratch / "user data"
+            user_root.mkdir()
+            # A record keeps both image hashes or neither (nk_library.c).
+            games = [
+                {"disc_id": "ULUS10001", "title_name": "Synthetic One",
+                 "iso_path": str(scratch / "one.iso"), "title_id": "synthetic-one"},
+                {"disc_id": "ULUS10002", "title_name": "Synthetic Retail",
+                 "iso_path": str(scratch / "retail.iso"), "title_id": "synthetic-two",
+                 "content_sha1": "b" * 40, "content_crc32": "b" * 8},
+                {"disc_id": "ULUS10002", "title_name": "Synthetic Translation",
+                 "iso_path": str(scratch / "translation.iso"), "title_id": "synthetic-two",
+                 "content_sha1": "c" * 40, "content_crc32": "c" * 8},
+            ]
+            (user_root / "library.json").write_text(
+                json.dumps({"schema_version": 1, "games": games}), encoding="utf-8")
+            base = [f"--user-data-root={user_root}", "--headless-launch"]
+
+            found = self.run_route(scratch, [*base, "--launch-title=ULUS10001"])
+            # Found, then the launch route's own check: no runtime in the scratch root.
+            self.assertEqual(found.returncode, 3, found.stdout + found.stderr)
+            self.assertIn("PLAY NOW is unavailable", found.stderr)
+            self.assertIn("is not built for this PC yet", found.stderr)
+
+            by_image = self.run_route(scratch, [*base, "--launch-title=ULUS10002:" + "C" * 40])
+            self.assertEqual(by_image.returncode, 3, by_image.stdout + by_image.stderr)
+            self.assertIn("Synthetic Translation is not built", by_image.stderr)
+
+            shared = self.run_route(scratch, [*base, "--launch-title=ULUS10002"])
+            self.assertEqual(shared.returncode, 2, shared.stdout + shared.stderr)
+            self.assertIn("Several disc images in this library have disc ID ULUS10002",
+                          shared.stderr)
+
+            missing = self.run_route(scratch, [*base, "--launch-title=ULUS99999"])
+            self.assertEqual(missing.returncode, 2, missing.stdout + missing.stderr)
+            self.assertIn("No game with disc ID ULUS99999", missing.stderr)
+
+            malformed = self.run_route(scratch, [*base, "--launch-title=../ULUS10001"])
+            self.assertEqual(malformed.returncode, 2, malformed.stdout + malformed.stderr)
+            self.assertIn("needs a game's disc ID", malformed.stderr)
+
+            both = self.run_route(scratch, [*base, "--launch-title=ULUS10001",
+                                            "--launch-index=0"])
+            self.assertEqual(both.returncode, 2, both.stdout + both.stderr)
+            self.assertIn("not both", both.stderr)
+
     def test_demo_launch_index_names_its_bundled_entry_as_a_sample(self) -> None:
         with tempfile.TemporaryDirectory(prefix=".first-run-demo-", dir=ROOT) as tmp:
             scratch = Path(tmp)

@@ -391,9 +391,12 @@ switch 60 FPS GAME LOGIC: ON or OFF (`PRIMARY` while on, never the default focus
 runs or the title's package builds), then a `BODY_S` line saying it is an optional enhancement made for this game
 and that off plays the original game as released ([ENHANCEMENT_CONTRACT.md](ENHANCEMENT_CONTRACT.md#9-declarative-frame-rate-rescale-packages-60-hz-logic)
 section 9). When the switch is saved on but the package is gone, the card stays and says why in `error`, and the
-primary action reads ENHANCEMENT UNAVAILABLE. Under the cards, REMOVE FROM LIBRARY (a `DANGER` button) for a disc the user added. It is left off
-the showcase demos, and also while that game starts or runs, a package builds or a disc is being copied. Prompt
-bar: MOVE, SELECT, BACK.
+primary action reads ENHANCEMENT UNAVAILABLE. Under the cards, one row that wraps at a larger text size: ADD TO
+STEAM (the [Add to Steam](#add-to-steam-built) dialog), REPORT A PROBLEM, and REMOVE FROM LIBRARY (a `DANGER`
+button). ADD TO STEAM and REMOVE FROM LIBRARY are for a disc the user added and are left off the showcase demos;
+ADD TO STEAM is also left off a disc whose ID is not letters, digits, `-` and `_`, which a shortcut cannot name.
+REMOVE FROM LIBRARY is also left off while that game starts or runs, a package builds or a disc is being copied.
+Prompt bar: MOVE, SELECT, BACK.
 
 ### Stop game (built)
 
@@ -458,6 +461,29 @@ runs." The save folder is `<saves>/<DISC_ID>`, the game's Memory Stick; backups 
 `<user data>/titles/<DISC_ID>/save-backups`, named `<DISC_ID>-saves-<date>-<time>.zip` with a `-before-restore`,
 `-before-add` or `-before-remove` ending for the automatic ones. Nothing is uploaded and nothing is deleted
 automatically. Prompt bar: MOVE, SELECT, BACK.
+
+### Add to Steam (built)
+
+ADD TO STEAM on the title page opens a flow card, 640 px wide, over it (#2152). It finds Steam and its accounts on
+this PC when it opens and writes nothing until ADD TO STEAM is chosen. The eyebrow is ADD TO STEAM with an
+`accent_dark` diamond, then the game's name in `TITLE` and one `BODY_S` `muted` line: "Adds a shortcut to your
+Steam library that starts this game directly, for Steam Input and Big Picture. Nakagawa changes only Steam's list
+of non-Steam games on this PC, after saving a copy of it, and downloads nothing." A box follows: STARTS in
+`LABEL_S` `muted` over the command in `DATA` (the program's file name and its launch options, such as
+`nakagawa_player.exe --launch-title=ULUS10041`), and, for a single account, STEAM ACCOUNT over its name. With
+several accounts, WHICH STEAM ACCOUNT? in `LABEL_S` `muted` heads a row of small buttons, one per account, named
+with the account's Steam name (or "Account *ID*" when Steam has no name for it); the chosen one is `PRIMARY` and
+reads "CHOSEN: *name*", so colour is not the only sign. One `BODY_S` `muted` line says "Exit Steam first: it
+rewrites this list when it exits."; a portable copy adds that moving its folder needs Add to Steam again here. Then
+ADD TO STEAM (`PRIMARY`, the first focus: it only adds, after a backup) and BACK.
+
+A `BODY_S` line under the buttons says what the last add did and what to do, in `ready` for an added or updated
+shortcut and `warning` for a refusal: added (start Steam to find it; no restart is needed; where the copy of the
+list from before is), updated (the game's shortcut from another Nakagawa folder now starts this one; its play time
+and collections stay), already there (nothing changed), Steam running (nothing changed; exit Steam, then choose
+Add to Steam again; no restart follows), the list unreadable (left as it was), or no verified backup (nothing
+changed). With no Steam, no signed-in account, or a system where Nakagawa cannot find Steam itself, the card shows
+only that sentence in `warning` and BACK. Back closes the card. Prompt bar: MOVE, SELECT, BACK.
 
 ### About (built)
 
