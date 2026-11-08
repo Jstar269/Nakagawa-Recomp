@@ -3456,6 +3456,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # 159), vfpu-convert (#326, boot 160) and vfpu-cc-cmov (#326, boots 159 and 161) runs.
                 "PSP-HLE-IO-SEEK-001", "PSP-VFPU-UNMODELED-001", "PSP-HLE-NICKNAME-001",
                 "PSP-VFPU-QUADWB-001", "PSP-VFPU-CONVERT-001", "PSP-VFPU-CCCMOV-001",
+                # The 2026-11-08 vfpu-basic-arith (#326, boot 166) and vfpu-vus2i (#326, boot 164)
+                # runs.
+                "PSP-VFPU-BASICARITH-001", "PSP-VFPU-VUS2I-001",
             },
         )
         self.assertEqual(
@@ -9213,8 +9216,8 @@ class VfpuVus2iProbeTests(unittest.TestCase):
     """CASE=vfpu-vus2i (171, PSP-VFPU-VUS2I-001) in probe_hle_issues.c: the #326 vus2i/vs2i
     double-width unpack, vsgn and vflush cells. Register-only: no system call in the section
     beyond the shared writer, bounded loops, a step before each form group, identity prefixes
-    except the vflush cells, a fixed-shape stream that matches the registry, and no hardware
-    result claimed (NOT_RUN)."""
+    except the vflush cells, a fixed-shape stream that matches the registry, and the 2026-11-08
+    hardware result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -9288,7 +9291,7 @@ class VfpuVus2iProbeTests(unittest.TestCase):
         self.assertIn("vfpu-vus2i", parse_golden.HLE_OBSERVATION_CASES)
         self.assertIn("| `vfpu-vus2i` | `PSP-VFPU-VUS2I-001` |", self.readme)
         row = self.readme[self.readme.index("| `vfpu-vus2i` |"):].split("\n", 1)[0]
-        self.assertIn("NOT_RUN", row)
+        self.assertIn("MEASURED", row)
         self.assertIn("Register-only, owner present", row)
 
     def test_section_is_register_only_and_bounded(self) -> None:
@@ -9360,15 +9363,15 @@ class VfpuVus2iProbeTests(unittest.TestCase):
                      0x7F800000, 0x00000001, 0x80000001):
             self.assertIn(word, floats)
 
-    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+    def test_manifest_row_is_a_measured_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_vus2i.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-vus2i"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(set(row["evidence_cases"]) | set(row["uncited_cases"]), set(row["case_ids"]))
         self.assertEqual(len(row["case_ids"]), 2 * 10 + 1)
         self.assertEqual(row["case_ids"][-1], "vfpu-vus2i-done")
 
@@ -9377,7 +9380,7 @@ class VfpuBasicArithProbeTests(unittest.TestCase):
     """CASE=vfpu-basic-arith (168, PSP-VFPU-BASICARITH-001) in probe_hle_issues.c: the #326 basic
     VFPU arithmetic forms. Register-only: no system call in the section beyond the shared writer,
     bounded loops, a step before each form group, vidt.s last, identity prefixes, a fixed-shape
-    stream that matches the registry, and no hardware result claimed (NOT_RUN)."""
+    stream that matches the registry, and the 2026-11-08 hardware result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -9529,15 +9532,15 @@ class VfpuBasicArithProbeTests(unittest.TestCase):
         # Every binary pair is covered: 7 records of up to 60 pairs span the 400.
         self.assertEqual(6 * 60 + 40, 400)
 
-    def test_manifest_row_is_a_built_not_run_power_risk_case(self) -> None:
+    def test_manifest_row_is_a_measured_power_risk_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_basic_arith.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-basic-arith"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
         self.assertIn("POWER RISK", row["risk"])
 
 
@@ -13884,6 +13887,8 @@ class Record20261015Tests(unittest.TestCase):
             ("vfpu-quad-wb", "PSP-VFPU-QUADWB-001", "MEASURED"),
             ("vfpu-convert", "PSP-VFPU-CONVERT-001", "MEASURED"),
             ("vfpu-cc-cmov", "PSP-VFPU-CCCMOV-001", "MEASURED"),
+            ("vfpu-basic-arith", "PSP-VFPU-BASICARITH-001", "MEASURED"),
+            ("vfpu-vus2i", "PSP-VFPU-VUS2I-001", "MEASURED"),
             ("sas-adsr", "PSP-SAS-002", "NOT_RUN"),
             ("sas-mix", "PSP-SAS-003", "NOT_RUN"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),

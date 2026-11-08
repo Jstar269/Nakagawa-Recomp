@@ -1351,6 +1351,42 @@ One console is one data point; see §11. Nothing here closes issue #70
     matches neither table.
   - Pixel x of level L reads texel x >> L, as `ge-mip` measured.
 
+- **PSP-3000 single-case runs of `vfpu-basic-arith` and `vfpu-vus2i` (2026-11-08)**: system software 6.6.0 as
+  reported by `pspver`, operator-declared model PSP-3000, XMB context, one launch per case on its own boot, harness
+  verdict ok, all PASS, no exception, no hang, both in `fixtures/psp_oracle/probe_hle_issues.c`. `vfpu-basic-arith`
+  (case 168) on boot 166 at `187681f0`, 359 records; `vfpu-vus2i` (case 171) on boot 164 at `3cf15b8c`, 120 records.
+  The raw envelopes, host0 logs and decoded tables stay in the private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-08) |
+  | --- | --- | --- | --- |
+  | `PSP-VFPU-VUS2I-001` | `vus2i-s-p0-*`, `vus2i-p-p0-*`, `vs2i-s-p0-*`, `vs2i-p-p0-*`, `vsgn-p-p0-*`, `vsgn-t-p0-*`, `vsgn-q-p0-*`, `vflush-vmov-p0-*`, `vflush-ctrl-p0-*`, `vus2i-s-p1-*`, `vus2i-p-p1-*`, `vs2i-s-p1-*`, `vs2i-p-p1-*`, `vsgn-p-p1-*`, `vsgn-t-p1-*`, `vsgn-q-p1-*`, `vflush-vmov-p1-*`, `vflush-ctrl-p1-*`, `vfpu-vus2i-done` (boot 164) | the `vflush-vadd-*` cells, non-identity prefixes, vus2i.t/.q | MEASURED (`vfpu-vus2i`) |
+  | `PSP-VFPU-BASICARITH-001` | `vadd-s-p0*`, `vadd-p-p0*`, `vadd-t-p0*`, `vadd-q-p0*`, `vsub-s-p0*`, `vsub-p-p0*`, `vsub-t-p0*`, `vsub-q-p0*`, `vmul-s-p0*`, `vmul-p-p0*`, `vmul-t-p0*`, `vmul-q-p0*`, `vmin-s-p0*`, `vmin-p-p0*`, `vmin-t-p0*`, `vmin-q-p0*`, `vmax-s-p0*`, `vmax-p-p0*`, `vmax-t-p0*`, `vmax-q-p0*`, `vscl-p-p0*`, `vscl-q-p0*`, `vdiv-s-p0*`, `vmov-s-p0*`, `vmov-p-p0*`, `vmov-q-p0*`, `vabs-s-p0*`, `vabs-p-p0*`, `vabs-q-p0*`, `vneg-s-p0*`, `vneg-p-p0*`, `vneg-q-p0*`, `vzero-s-p0*`, `vzero-p-p0*`, `vzero-q-p0*`, `vone-s-p0*`, `vone-p-p0*`, `vone-q-p0*`, `vidt-p-p0*`, `vidt-q-p0*`, `vadd-s-p1*`, `vadd-p-p1*`, `vadd-t-p1*`, `vadd-q-p1*`, `vsub-s-p1*`, `vsub-p-p1*`, `vsub-t-p1*`, `vsub-q-p1*`, `vmul-s-p1*`, `vmul-p-p1*`, `vmul-t-p1*`, `vmul-q-p1*`, `vmin-s-p1*`, `vmin-p-p1*`, `vmin-t-p1*`, `vmin-q-p1*`, `vmax-s-p1*`, `vmax-p-p1*`, `vmax-t-p1*`, `vmax-q-p1*`, `vscl-p-p1*`, `vscl-q-p1*`, `vdiv-s-p1*`, `vmov-s-p1*`, `vmov-p-p1*`, `vmov-q-p1*`, `vabs-s-p1*`, `vabs-p-p1*`, `vabs-q-p1*`, `vneg-s-p1*`, `vneg-p-p1*`, `vneg-q-p1*`, `vzero-s-p1*`, `vzero-p-p1*`, `vzero-q-p1*`, `vone-s-p1*`, `vone-p-p1*`, `vone-q-p1*`, `vidt-p-p1*`, `vidt-q-p1*`, `vidt-s-p0`, `vidt-s-p1`, `vfpu-basic-arith-done` (boot 166) | non-identity prefixes, other vidt destination rows, vdiv.p/.t/.q | MEASURED (`vfpu-basic-arith`) |
+
+  `vfpu-basic-arith` (#326): over 20 operand classes (zeros, denormals, normals, 2^127, FLT_MAX, infinities, quiet
+  and signalling NaNs of both signs), all 400 ordered pairs for the binary forms, with `.s`, `.p`, `.t` and `.q`
+  identical per pair, and passes 0 and 1 agreeing in every record. `vadd`, `vsub` and `vmul` are IEEE float32 with
+  denormals flushed to zero on input and output (sign kept), round to nearest, and overflow to infinity. Any NaN
+  operand and inf-inf give `0x7f800001` for `vadd` and `vsub`; `vmul` with a NaN operand or 0*inf gives `0x7f800001`
+  or `0xff800001`, the sign being the XOR of the operand signs; input NaN payloads are never propagated. `vscl`
+  equals `vmul` of the same pair. `vmin` and `vmax` compare the sign-magnitude bit pattern with denormals equal to
+  zero, return the operand's raw bits, return the second operand on a tie, and order NaNs by sign beyond the
+  infinities (a positive NaN is larger than +inf, a negative NaN smaller than -inf), the NaN returned with its own
+  payload. `vdiv.s` gives 1/+0 = +inf, 1/-0 = -inf, and `0x7f800001` for 0/0, inf/inf and a NaN divisor, with a
+  denormal divisor acting as zero. `vmov`, `vabs` and `vneg` are bitwise. `vzero`, `vone` and `vidt` write only the
+  lanes of the width (`vidt.q` gives (1.0, 0, 0, 0), `vidt.p` gives (1.0, 0)); the `vidt.s` word did not fault and
+  wrote lane 0 = 1.0, measured for destination row 0 only.
+
+  `vfpu-vus2i` (#326): the two passes agree in all 60 cells. `vus2i` zero-extends each 16-bit half and shifts it
+  left by 15 (result = half << 15), the low half to the even output lane and the high half to the odd lane: `.s`
+  writes two words and `.p` four, and lanes beyond the width keep the sentinel (`0x00000001` gives `0x00008000`
+  and 0; `0x0000ffff` gives `0x7fff8000` and 0; `0xffffffff` gives `0x7fff8000` twice). `vs2i` shifts each half
+  left by 16 with the same lane order (`0x00008000` gives `0x80000000` and 0; `0xffffffff` gives `0xffff0000`
+  twice). `vsgn.p`/`.t`/`.q` gives +1.0 for a positive input, -1.0 for a negative, +0 for both +0 and -0, 0 for
+  positive and negative denormals, and for NaNs the sign bit decides (positive quiet and signalling NaNs give
+  +1.0, a negative quiet NaN gives -1.0). With a pending S prefix, `vflush` did not clear it: the prefix applied to
+  the first following instruction and was consumed, the same as the control without the `vflush`. The
+  `vflush-vadd-*` cells did not return an addition result and are not cited.
+
 - **PSP-3000 single-case runs of six probes (2026-11-08)**: system software 6.6.0 as reported by `pspver`,
   operator-declared model PSP-3000, XMB context, one launch per case, each after the `transport-write` preflight
   (PSP-TRANSPORT-001 is not re-cited). The runs of cases 162-165 and 170 and the boot-159 run of case 169 are
@@ -3390,7 +3426,8 @@ not expected PSP values.
 | `vfpu-quad-wb` | `PSP-VFPU-QUADWB-001` | `MEASURED` (2026-11-08, PSP-3000, boot 159, `ecc203af`; 19 records) | #326: lv.q and sv.q with the write-back flag; the base register is unchanged and the access is base plus offset. |
 | `vfpu-convert` | `PSP-VFPU-CONVERT-001` | `MEASURED` (2026-11-08, PSP-3000, boot 160, `266552d0`; 229 records) | #326: VFPU float/integer conversions (vf2iz/in/iu/id, vi2f, vi2s/us/c/uc). |
 | `vfpu-cc-cmov` | `PSP-VFPU-CCCMOV-001` | `MEASURED` (2026-11-08, PSP-3000, boot 159 `750c5fb1` and boot 161 `831d54f0`; 217 and 153 records) | #326: VFPU_CC round trip, vcmovt/vcmovf, and vcmp CC bits (readable only after vsync or vflush). |
-| `vfpu-vus2i` | `PSP-VFPU-VUS2I-001` | `NOT_RUN` (case 171, built; not in the campaign queue) | #326, two passes, register-only: raw result words of `vus2i.s`/`.p` and `vs2i.s`/`.p` (double-width output) over twelve source words, `vsgn.p`/`.t`/`.q` over float lanes, and three droppable `vflush-*` cells (pending S prefix, `vflush` 0xffff040d, `vmov.s`/`vadd.s`, with a control). Identity prefixes except the vflush cells. No hardware result claimed. |
+| `vfpu-vus2i` | `PSP-VFPU-VUS2I-001` | `MEASURED` (2026-11-08, PSP-3000, boot 164, `3cf15b8c`; 120 records) | #326: vus2i/vs2i double-width unpack, vsgn over float lanes, and the vflush pending-prefix cell. |
+| `vfpu-basic-arith` | `PSP-VFPU-BASICARITH-001` | `MEASURED` (2026-11-08, PSP-3000, boot 166, `187681f0`; 359 records) | #326: vadd/vsub/vmul/vmin/vmax .s-.q, vscl, vdiv.s, vmov/vabs/vneg, vzero/vone/vidt over 20 operand classes. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (modes 2 and 3; rerun required) | Each mode now begins from a fresh stream, ringbuffer and MPEG context; no mode 2 or 3 result is measured. |
 
 ### PSP-MEMEDGE-001 capture 2026-11-02
