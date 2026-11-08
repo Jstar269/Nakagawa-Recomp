@@ -1,7 +1,8 @@
 # SDL3 + Vulkan GPU renderer
 
-New GPU renderer for the recompiled runtime, replacing the Win32/GDI presentation path and
-(eventually) the software GE rasterizer in `src/rt/ge.c`. Built from scratch in this
+GPU renderer for the recompiled runtime. It replaces the Win32/GDI presentation path and, with
+`SR_GPU_GE=1` (which the player sets for every launch), the software GE rasterizer in `src/rt/ge.c`,
+which stays as the fallback. Built from scratch in this
 directory — it is the project's own Vulkan backend and does **not** reuse PPSSPP's GPU. (An
 earlier PPSSPP-GPU bridge under `src/rt/gpu_vk/` was a frozen experiment and has been removed.)
 
@@ -126,11 +127,11 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   `ge-light` oracle case). `tools/test_shader_embed.py` keeps the two copies identical and runs
   the shader's copy as C against ge.c's, and the `specular-ge-powf` and `light-4-ge-powf`
   parity cells compare the routes on a device that runs the T&L stage.
-- Render-to-texture chains (the hangar uses fbp swaps), depth readbacks if any game code
+- Not done: render-to-texture chains (the hangar uses fbp swaps), depth readbacks if any game code
   reads zbuf, small-tri rasterization rules (top-left bias already documented in
   raster_tri) via conservative settings.
-- Only after Phase 3 ships does GDI/software become optional at build time. The software
-  GE is never deleted: it is the documentation of GE semantics.
+- The GDI presenter and the software GE stay in the build. The software GE is never deleted:
+  it is the documentation of GE semantics.
 
 ## Files
 
@@ -141,6 +142,9 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   validation messenger, and the present-truthful frame capture.
 - `ge_gpu.h` / `ge_gpu.c` — Phase 1+2: capture, batching, pipeline/texture caches,
   flush + guest-VRAM writeback. Hooks defined in `src/rt/ge_shared.h`.
+- `pipeline_cache.h` — the on-disk Vulkan pipeline cache (#2149): the file's header (GPU,
+  driver, pipeline cache UUID and shader set), its checks, and the atomic write. `ge_gpu.c`
+  loads it at start and saves it at exit; `pipeline_cache_selftest.c` checks every refusal.
 - `shaders/psp.vert`, `shaders/psp.frag` — compiled by glslc (`GLSLC` in the Makefile)
   into `psp_{vert,frag}.inc` at build time.
 - `shaders/psp_tnl.vert` — the GPU transform-and-lighting vertex stage (`SR_GPU_TNL=1`, #318), a GLSL
@@ -185,11 +189,17 @@ batches after the target's own, so every resource a pending batch names is relea
 boundaries as before. A canvas (`WingEnt`) is a 512x272 colour and depth pair at render scale,
 the size of every target, so both wings of up to 256 columns each fit (32:9 uses 240). It is never
 in `s_tgts` or `s_deps`: no readback, upload, coherence or texture path reaches it. It is cleared
-whenever ge.c clears its own (`ge_wide_epoch`), which ge.c does on the first wing draw after the
-canvas was shown. A state this backend would draw in software is dropped from the wings with no
-flush or readback: `wing_drop` counts it and names each cause once on stderr, and the wing hook
-returns 0, so ge.c does not mark the canvas drawn. `gegpu_wide_read` reads a canvas back for
-`gpu-coherence-selftest`'s `wide-fill` case, which compares it with the software rasterizer's.
+whenever ge.c clears its own (`ge_wide_epoch`), which ge.c does on the first draw into the
+framebuffer after it was shown. A state this backend would draw in software is dropped from the
+wings with no flush or readback: `wing_drop` counts it and names each cause once on stderr, and the
+wing hook returns 0, so ge.c does not mark the canvas drawn. `gegpu_wide_read` reads a canvas back
+for `gpu-coherence-selftest`'s `wide-fill` case, which compares it with the software rasterizer's.
+
+With Fill on, `gegpu_present` blits the left wing, the shown image and the right wing into one
+(480 + 2D) x 272 image at the shown image's scale (`wide_compose`, on the GE chain ahead of the
+presenter's work) and presents that; wings the frame did not draw are black. The window fits it
+by its own shape (`sdl3vk_present_plan`). The software renderer's picture is composed in
+`src/rt/gui.c` and presented with `sdl3vk_present_rgba_ex`.
 
 ## Present and swapchain failures (#1377)
 
@@ -271,6 +281,10 @@ effect shows 1x detail at any render scale. Those reads are:
 - `SR_GPU_SYNC_SUBMIT=1` — exact synchronous fallback: one op per submit, each waited on.
 - `SR_GPU_READBACK_FULL=1` — copy the whole scaled target on a readback to guest memory, the
   reference path for the default copy of the rows guest memory keeps (#323).
+- `SR_GPU_PIPELINE_CACHE=0` — run without the pipeline cache in `<data root>/cache/gegpu`
+  (on by default; `on` or `1` keep it, any other value is refused). One start line says
+  whether the file was loaded, absent or discarded and why; one exit line says whether it was
+  saved and how long pipeline creation took.
 - `SR_VIDEO=gdi` — Phase-0 fallback to the classic GDI window.
 - `SR_VULKAN_VALIDATION=1` — enable the `VK_LAYER_KHRONOS_validation` messenger (fail-closed
   if the layer is requested but missing). See `docs/DEBUGGING.md` for FBSNAP/FBDUMP capture

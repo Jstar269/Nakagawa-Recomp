@@ -5974,6 +5974,74 @@ static int wide_frames(const WideBufs *B) {
     return ok_all;
 }
 
+/* The picture gegpu_present shows with Fill on (Vulkan only; the software presenter composes
+ * the same picture in gui.c): the left wing, the frame, then the right wing, (480 + 2D) x 272.
+ * `want_wings` 1: the wings are the canvas's; 0: they are black. RGB only: the canvas holds the
+ * GE's alpha, and the presenter shows no alpha. */
+static int wide_picture_check(const char *what, const uint32_t *pic, int cols, const uint32_t *frame,
+                              const uint32_t *canvas, int want_wings) {
+    const uint32_t d = (uint32_t)WIDE_D;
+    if (cols != (int)(480u + 2u * d)) {
+        fprintf(stderr, "gpu coherence selftest [wide-fill]: present %s: %d columns, want %u\n", what, cols,
+                480u + 2u * d);
+        return 0;
+    }
+    for (uint32_t y = 0; y < FB_H; y++)
+        for (uint32_t x = 0; x < (uint32_t)cols; x++) {
+            uint32_t want;
+            if (x < d) want = want_wings ? canvas[y * 512u + x] : 0u;
+            else if (x < d + 480u) want = frame[y * 512u + x - d];
+            else want = want_wings ? canvas[y * 512u + x - 480u] : 0u;
+            const uint32_t got = pic[(size_t)y * (uint32_t)cols + x];
+            if ((got & 0x00FFFFFFu) != (want & 0x00FFFFFFu)) {
+                fprintf(stderr, "gpu coherence selftest [wide-fill]: present %s: picture (%u,%u) = %08x, want "
+                                "%08x\n", what, x, y, (unsigned)got, (unsigned)want);
+                return 0;
+            }
+        }
+    return 1;
+}
+
+static int wide_present(const WideBufs *B) {
+    const size_t cap = (size_t)(480 + 2 * GE_WIDE_MAX_WING) * FB_H;
+    uint32_t *pic = (uint32_t *)malloc(cap * 4u);
+    if (!pic) return 0;
+    int ok = 1, cols = 0;
+    coherence_reset_targets();
+    ge_wide_set_wing(WIDE_D);
+    /* A frame whose wings are drawn: wings from its canvas, the frame between them. */
+    if (!wide_frame(1, 0, B->gpu_on, B->gpu_wing) || !ge_wide_drawn(WIDE_FB) ||
+        !gegpu_wide_present_read(WIDE_FB, 3, 512, pic, &cols) ||
+        !wide_picture_check("drawn", pic, cols, B->gpu_on, B->gpu_wing, 1))
+        ok = 0;
+    /* Shown, then presented again with no draw in between (a 30 Hz frame on a 60 Hz VBLANK): it
+     * keeps its wings. */
+    ge_wide_shown(WIDE_FB);
+    if (ok && (!gegpu_wide_present_read(WIDE_FB, 3, 512, pic, &cols) ||
+               !wide_picture_check("again", pic, cols, B->gpu_on, B->gpu_wing, 1))) {
+        fprintf(stderr, "gpu coherence selftest [wide-fill]: a frame presented twice lost its wings\n");
+        ok = 0;
+    }
+    /* The next frame draws, none of it in a wing: its wings are black, not the last frame's. */
+    ge_wide_shown(WIDE_FB);
+    if (ok && (!wide_frame(1, WF_NARROW, B->gpu_on, NULL) || ge_wide_drawn(WIDE_FB) ||
+               !gegpu_wide_present_read(WIDE_FB, 3, 512, pic, &cols) ||
+               !wide_picture_check("undrawn", pic, cols, B->gpu_on, B->gpu_wing, 0))) {
+        fprintf(stderr, "gpu coherence selftest [wide-fill]: a new frame with no wing draw showed old wings\n");
+        ok = 0;
+    }
+    /* Fill off: no picture is made, and the frame is presented alone, as before. */
+    ge_wide_set_wing(0);
+    if (ok && gegpu_wide_present_read(WIDE_FB, 3, 512, pic, &cols)) {
+        fprintf(stderr, "gpu coherence selftest [wide-fill]: Fill off still made a wide picture\n");
+        ok = 0;
+    }
+    free(pic);
+    if (ok) printf("gpu coherence selftest: PASS %-22s vulkan present scale=%d\n", "wide-fill", s_scale);
+    else fprintf(stderr, "gpu coherence selftest [wide-fill]: FAIL vulkan present\n");
+    return ok;
+}
+
 static int coherence_run_wide_fill(void) {
     const size_t px = (size_t)512 * FB_H, vw = WIDE_VRAM_SIZE / 4u;
     uint32_t *buf = (uint32_t *)malloc((vw * 4u + px * 2u) * 4u);
@@ -5985,6 +6053,7 @@ static int coherence_run_wide_fill(void) {
     ok &= wide_aspect("21:9", 2520, 1080, WIDE_D, &B);
     ok &= wide_aspect("32:9", 3840, 1080, 240, &B);
     ok &= wide_frames(&B);
+    ok &= wide_present(&B);
     coherence_reset_targets();
     free(buf);
     return ok;
@@ -6716,6 +6785,264 @@ static int twin_ref_read(const char *path, TwinRef *r) {
     return 1;
 }
 
+/* ---- the pipeline cache on disk (#2149) ------------------------------------------------
+ *
+ * Run by the recipe as three processes over one empty folder (`--pipeline-cache DIR`):
+ *   pipeline-cache-cold    the cache starts empty; the blend matrix below creates its pipelines,
+ *                          and the frame hash is written to DIR/cold-frames.txt. Shutdown saves.
+ *   pipeline-cache-warm    the cache must start from that file; the same matrix must give the
+ *                          same frames, byte for byte. Creation times of both runs are printed
+ *                          (not asserted: a driver keeps a disk cache of its own).
+ *   pipeline-cache-reject  re-opens the cache over a truncated, a foreign, a corrupt and a
+ *                          changed-key file, and with the switch off or refused. Each start must
+ *                          run without the file's data, and the run must still draw. */
+
+static int pcache_set_env(const char *name, const char *value) {
+#ifdef _WIN32
+    return _putenv_s(name, value ? value : "") == 0;
+#else
+    return (value ? setenv(name, value, 1) : unsetenv(name)) == 0;
+#endif
+}
+
+/* Every blend state of the parity matrix on the Vulkan path, one guest frame each (about 970
+ * draws over the pipelines they need). *hash: FNV-1a 64 of every frame the guest reads back. */
+static int pcache_scene(uint32_t eq_end, uint64_t *hash) {
+    const uint32_t base = 0x04000000u | 0x00140000u, vaddr = 0x00101000u;
+    const uint32_t sprites = PARITY_GRID * PARITY_GRID;
+    parity_vertices(vaddr, sprites);
+    ge_set_gpu_hooks(&k_hooks);
+    *hash = 0;
+    for (uint32_t eq = 0; eq < eq_end; eq++)
+        for (uint32_t sfp = 0; sfp <= 10; sfp++)
+            for (uint32_t dfp = 0; dfp <= 10; dfp++) {
+                const uint32_t list = parity_list(base, vaddr, sfp | (dfp << 4) | (eq << 8), PARITY_FIXA,
+                                                  PARITY_FIXB, sprites);
+                coherence_reset_targets();
+                parity_fill_background(base);
+                ge_run_list(list, 0);
+                GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = 512u, .width = 480, .height = FB_H };
+                if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) return 0;
+                *hash = nk_pcache_fnv1a64(*hash, SR_HOST(base), FB_W * FB_H * 4u);
+            }
+    coherence_reset_targets();
+    return 1;
+}
+
+/* DIR/cache/gegpu/cold-frames.txt: next to the cache file, in the folder the harness made the
+ * data root. */
+static int pcache_ref_path(char *out, size_t n) {
+    if (!s_pcache_path[0] || snprintf(out, n, "%s", s_pcache_path) >= (int)n) return 0;
+    char *cut = NULL;
+    for (char *p = out; *p; p++)
+        if (*p == '/' || *p == '\\') cut = p;
+    if (!cut) return 0;
+    const size_t at = (size_t)(cut - out) + 1u;
+    return snprintf(out + at, n - at, "cold-frames.txt") < (int)(n - at);
+}
+
+static int coherence_run_pipeline_cache(int warm) {
+    const char *name = warm ? "pipeline-cache-warm" : "pipeline-cache-cold";
+    char ref[4200];
+    if (!s_pcache || !pcache_ref_path(ref, sizeof ref)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the pipeline cache is not on (run with "
+                        "--pipeline-cache DIR)\n", name);
+        return 0;
+    }
+    if (s_pcache_loaded != warm) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the cache %s\n", name,
+                warm ? "did not start from the cold run's file" : "started from a file: the folder was not empty");
+        return 0;
+    }
+    const unsigned long creates0 = s_pcache_creates, through0 = s_pcache_through;
+    const uint64_t ns0 = s_pcache_create_ns;
+    uint64_t hash = 0;
+    if (!pcache_scene(8u, &hash)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the scene did not run\n", name);
+        return 0;
+    }
+    const unsigned long creates = s_pcache_creates - creates0;
+    const double ms = (double)(s_pcache_create_ns - ns0) / 1e6;
+    if (!creates) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the scene created no pipeline\n", name);
+        return 0;
+    }
+    /* The pipelines went through the cache, on any driver: every create took the open cache's
+     * handle (pipe_create counts the handle it passed). */
+    const unsigned long through = s_pcache_through - through0;
+    if (through != creates) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %lu of %lu pipelines were created with the cache's "
+                        "handle: the pipelines did not go through it\n", name, through, creates);
+        return 0;
+    }
+    /* What the driver kept, where it keeps anything. A cold cache must grow past the header it
+     * opened with. A driver whose cache did not grow at all, though every create above took its
+     * handle, keeps no pipeline data (lavapipe returns only its header): that is the driver's
+     * property, measured here, and the growth check is reported as not run, naming the driver. */
+    const size_t held = pcache_data_size();
+    char drv[300] = "an unnamed device";
+    {
+        Sdl3VkInfo vi;
+        if (sdl3vk_get_vk(&vi) && vi.physical) {
+            VkPhysicalDeviceProperties pp;
+            vkGetPhysicalDeviceProperties((VkPhysicalDevice)vi.physical, &pp);
+            snprintf(drv, sizeof drv, "%s (vendor 0x%04x, driver 0x%08x)", pp.deviceName, pp.vendorID,
+                     pp.driverVersion);
+        }
+    }
+    if (!warm && held == s_pcache_held_n) {
+        printf("gpu coherence selftest: SKIP %s growth check (NOT_RUN): %s returned the same %zu bytes before "
+               "and after %lu pipelines created through its cache: this driver keeps no pipeline data\n",
+               name, drv, held, creates);
+    } else if (!warm && held < s_pcache_held_n) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the cache holds %zu bytes after %lu pipelines, fewer "
+                        "than the %zu it opened with\n", name, held, creates, s_pcache_held_n);
+        return 0;
+    }
+    if (warm && (s_pcache_held_n < s_pcache_file_n || held < s_pcache_file_n)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the cache opened with %zu bytes and holds %zu after the "
+                        "scene, against the file's %zu: the driver did not take the cold run's pipelines\n",
+                name, s_pcache_held_n, held, s_pcache_file_n);
+        return 0;
+    }
+    if (!warm) {
+        FILE *f = nk_fopen_utf8(ref, "w");
+        int ok = f && fprintf(f, "%016llx %lu %.3f\n", (unsigned long long)hash, creates, ms) > 0;
+        if (f) ok = fclose(f) == 0 && ok;
+        if (!ok) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL could not write cold-frames.txt\n", name);
+            return 0;
+        }
+        printf("gpu coherence selftest: PASS %-22s %lu pipelines created in %.1f ms from an empty cache, all "
+               "with its handle (%zu bytes, then %zu), frames %016llx\n", name, creates, ms, s_pcache_held_n,
+               held, (unsigned long long)hash);
+        return 1;
+    }
+    unsigned long long cold_hash = 0;
+    unsigned long cold_creates = 0;
+    double cold_ms = 0.0;
+    FILE *f = nk_fopen_utf8(ref, "r");
+    int got = f ? fscanf(f, "%llx %lu %lf", &cold_hash, &cold_creates, &cold_ms) : 0;
+    if (f) fclose(f);
+    if (got != 3) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL cold-frames.txt is missing or unreadable\n", name);
+        return 0;
+    }
+    if (cold_hash != hash || cold_creates != creates) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL frames %016llx (%lu pipelines) against the cold "
+                        "run's %016llx (%lu)\n", name, (unsigned long long)hash, creates, cold_hash, cold_creates);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %-22s %lu pipelines created in %.1f ms from %zu cached bytes "
+           "(cold: %.1f ms), frames identical to the cold run\n", name, creates, ms, s_pcache_loaded_n, cold_ms);
+    return 1;
+}
+
+/* Destroys every pipeline the renderer holds, once the device is idle, so the next draws create
+ * theirs again through whichever cache is open (or none). */
+static void pcache_drop_pipelines(void) {
+    if (s_nbatch) (void)submit_pending();
+    (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+    (void)vkDeviceWaitIdle(s_dev);
+    for (int i = 0; i < s_pipe_n; i++)
+        if (s_pipes[i].pipe) vkDestroyPipeline(s_dev, s_pipes[i].pipe, NULL);
+    s_pipe_n = 0;
+}
+
+/* One reopen of the cache over `file` (NULL: no file) with SR_GPU_PIPELINE_CACHE=`mode`. */
+static int pcache_reopen_cell(const char *cell, VkPhysicalDevice pdev, const char *path, const uint8_t *file,
+                              size_t n, const char *mode, int want_cache, int want_discard) {
+    pcache_close(0);
+    if (file) {
+        const char *why = NULL;
+        if (!nk_pcache_write_file(path, file, n, &why)) {
+            fprintf(stderr, "gpu coherence selftest [pipeline-cache-reject]: FAIL %s: %s\n", cell, why);
+            return 0;
+        }
+    }
+    const unsigned long discards0 = s_pcache_discards;
+    if (!pcache_set_env("SR_GPU_PIPELINE_CACHE", mode)) return 0;
+    pcache_open(pdev);
+    pcache_drop_pipelines();
+    const unsigned long creates0 = s_pcache_creates;
+    uint64_t hash = 0;
+    const int drew = pcache_scene(1u, &hash) &&   /* the run goes on, with or without the cache, */
+                     s_pcache_creates > creates0;      /* and creates its pipelines again */
+    const int ok = drew && !s_pcache_loaded && (s_pcache != VK_NULL_HANDLE) == want_cache &&
+                   s_pcache_discards - discards0 == (unsigned long)want_discard;
+    if (!ok) {
+        fprintf(stderr, "gpu coherence selftest [pipeline-cache-reject]: FAIL %s: drew %d, cache %s, loaded %d, "
+                        "discarded %lu (want cache %s, %d discarded)\n", cell, drew,
+                s_pcache ? "on" : "off", s_pcache_loaded, s_pcache_discards - discards0,
+                want_cache ? "on" : "off", want_discard);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %-22s %-24s the run went on %s, %lu pipelines created\n",
+           "pipeline-cache-reject", cell, want_cache ? "with an empty cache" : "without a cache",
+           s_pcache_creates - creates0);
+    return 1;
+}
+
+static int coherence_run_pipeline_cache_reject(void) {
+    const char *name = "pipeline-cache-reject";
+    Sdl3VkInfo vi;
+    if (!s_pcache || !sdl3vk_get_vk(&vi)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the pipeline cache is not on (run with "
+                        "--pipeline-cache DIR)\n", name);
+        return 0;
+    }
+    const VkPhysicalDevice pdev = (VkPhysicalDevice)vi.physical;
+    char path[sizeof s_pcache_path];   /* pcache_open clears s_pcache_path when the switch is off */
+    memcpy(path, s_pcache_path, sizeof path);
+    /* A good file of this run's own: the driver's data after a small scene. */
+    uint64_t hash = 0;
+    size_t sz = 0;
+    if (!pcache_scene(1u, &hash) || vkGetPipelineCacheData(s_dev, s_pcache, &sz, NULL) != VK_SUCCESS || sz < 32) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the driver gave no cache data\n", name);
+        return 0;
+    }
+    uint8_t *data = (uint8_t *)malloc(sz);
+    if (!data || vkGetPipelineCacheData(s_dev, s_pcache, &sz, data) != VK_SUCCESS) { free(data); return 0; }
+    size_t n = 0;
+    uint8_t *good = nk_pcache_pack(&s_pcache_key, data, sz, &n);
+    NkPcacheKey other = s_pcache_key;
+    other.driver_version += 1u;
+    size_t on = 0;
+    uint8_t *changed = nk_pcache_pack(&other, data, sz, &on);
+    uint8_t *corrupt = good ? (uint8_t *)malloc(n) : NULL;
+    static const uint8_t foreign[96] = { 'P', 'K', 3, 4 };   /* a ZIP header, then zeros */
+    int ok = good && changed && corrupt;
+    if (ok) {
+        memcpy(corrupt, good, n);
+        corrupt[n - 1] ^= 0x01u;
+        const char *saved = getenv("SR_GPU_PIPELINE_CACHE");
+        char keep[64];
+        snprintf(keep, sizeof keep, "%s", saved ? saved : "on");
+        ok = pcache_reopen_cell("truncated file", pdev, path, good, n - 1, "on", 1, 1) &&
+             pcache_reopen_cell("foreign file", pdev, path, foreign, sizeof foreign, "on", 1, 1) &&
+             pcache_reopen_cell("corrupt data", pdev, path, corrupt, n, "on", 1, 1) &&
+             pcache_reopen_cell("another driver", pdev, path, changed, on, "on", 1, 1) &&
+             pcache_reopen_cell("switch off", pdev, path, NULL, 0, "off", 0, 0) &&
+             pcache_reopen_cell("switch refused", pdev, path, NULL, 0, "maybe", 0, 0);
+        /* Back on over the good file: it loads again, so the cells above were each refused for
+         * their own reason and not for something the folder or the device does every time. */
+        if (ok) {
+            pcache_close(0);
+            const char *why = NULL;
+            ok = nk_pcache_write_file(path, good, n, &why) && pcache_set_env("SR_GPU_PIPELINE_CACHE", keep);
+            if (ok) pcache_open(pdev);
+            if (!ok || !s_pcache_loaded || s_pcache_loaded_n != sz) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL the good file did not load again\n", name);
+                ok = 0;
+            } else {
+                printf("gpu coherence selftest: PASS %-22s %-24s loaded again, %zu bytes\n", name, "good file", sz);
+            }
+        }
+    }
+    free(corrupt); free(changed); free(good); free(data);
+    return ok;
+}
+
 static int coherence_run_twin_scene(void) {
     const char *name = "twin-scene";
     const char *ref_path = getenv("SR_GPU_TWIN_REF");
@@ -7248,6 +7575,9 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "twin-sync") == 0) return coherence_run_twin_sync();
         if (strcmp(only, "twin-gate") == 0) return coherence_run_twin_gate();
         if (strcmp(only, "twin-alloc-fail") == 0) return coherence_run_twin_alloc_fail();
+        if (strcmp(only, "pipeline-cache-cold") == 0) return coherence_run_pipeline_cache(0);
+        if (strcmp(only, "pipeline-cache-warm") == 0) return coherence_run_pipeline_cache(1);
+        if (strcmp(only, "pipeline-cache-reject") == 0) return coherence_run_pipeline_cache_reject();
         if (strcmp(only, "rtt-scale") == 0) return coherence_run_rtt_scale();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
