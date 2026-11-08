@@ -7320,28 +7320,37 @@ static int coherence_run_twin_sync(void) {
  * each Q texel covers 4S device pixels instead. (A nearest sample of a target takes the centre of
  * its guest texel by design, psp.frag, so only a linear one shows the target's own resolution.)
  *
- * Q holds a flat white quad whose top edge is long and shallow: 10 rows of rise over 128 columns,
+ * Q holds a flat quad whose top edge is long and shallow: 10 rows of rise over 128 columns,
  * so per device column it climbs one Q device row at most. In M's device image the edge is the
- * first row per column whose red is at least half (the filter's 50% crossing). It stays on a
- * plateau across a Q device pixel's run of columns and climbs one Q device pixel, 4 device rows,
- * in a ramp of the 4 columns where the filter blends two Q device columns: so every ramp rises
- * exactly 4 rows at every scale. Decoded at 1x, a Q texel is 4S device pixels and the same climb
- * is 4S rows (16 at 4x), here split in uneven ramps (1, 13 and 2 rows at 4x). The case asserts
- * that every ramp rises exactly 4 rows and that there are about 10 * S of them (10 Q-guest rows,
- * S device rows each, over the columns scanned); at scale 1 the two routes agree, and the same 4
- * rows are the 1x lattice. The picture is also checked against the
+ * first row per column whose red is at least half the quad's (the filter's 50% crossing). The
+ * quad's red is 254, not 255. psp.frag snaps the position to 1/16 of a guest texel, which is S/16
+ * of a device texel, so each linear weight is a multiple of 1/16 at every scale (a sampler keeps
+ * at least 4 sub-texel bits) and a blend is 254 * k / 256: a weight of exactly one half gives
+ * exactly 127. With 255 it would give 127.5, and how a device rounds that tie in its UNORM store
+ * would move the crossing; with 254 the only ties are 63.5 and 190.5, far from the threshold.
+ * The edge stays on a plateau across a Q device pixel's run of columns and climbs one Q device
+ * pixel, 4 device rows, in a ramp of the 4 columns where the filter blends two Q device columns:
+ * so every ramp rises exactly 4 rows at 1x, 2x and 4x. (At 3x a device texel is 16/3 sixteenths,
+ * the ramps are uneven, and the recipe does not run this case there.) Decoded at 1x, a Q texel is
+ * 4S device pixels and the same climb is 4S rows (16 at 4x), here split in uneven ramps (1, 13
+ * and 2 rows at 4x).
+ * The case asserts that every ramp rises exactly 4 rows and that there are about 10 * S of them
+ * (10 Q-guest rows, S device rows each, over the columns scanned); at scale 1 the two routes
+ * agree, and the same 4 rows are the 1x lattice. The picture is also checked against the
  * software renderer running the same list: guest VRAM of M holds the top-left device sample of
  * each guest pixel (as sprite-scaled) and equals the software picture within 2 per channel,
- * except above 1x in a band of 8 guest rows around its edge (a Q texel is 4 rows: the finer
- * device staircase and the guest one part by up to a texel, and the filter's blend reaches half
- * a texel past that). s_cnt_rtt counts every draw that samples a target, direct or decoded,
+ * except above 1x within 8 guest rows either side of its edge. There the scaled picture is not
+ * the 1x one by design: a Q texel is 4 guest rows, the finer device staircase and the guest one
+ * part by up to a texel, and the filter's blend reaches half a texel past that (6 rows; 8 leaves
+ * half a texel of margin). s_cnt_rtt counts every draw that samples a target, direct or decoded,
  * so it shows only that the sprite sampled Q; the step size shows how. */
 #define RTT_Q  0x00100000u
 #define RTT_M  0x00060000u
 typedef struct { uint32_t rgba; float x, y, z; } RttCVtx;
 typedef struct { uint32_t steps, minjump, maxjump, bad, bad_x, y_first, y_last; } RttEdge;
 
-#define RTT_LIT(px) (((px) & 0xFFu) >= 0x80u)       /* red at least half */
+#define RTT_RED 0xFEu                                /* the quad's red, see above */
+#define RTT_LIT(px) (((px) & 0xFFu) >= RTT_RED / 2u)  /* red at least half the quad's */
 
 /* Scan columns [x0, x1) of a w-wide image of h rows. Per column the edge is the first lit row; it
  * must lie in [ylo, yhi) and every row below it must be lit, and it never moves up. A filtered
@@ -7387,11 +7396,11 @@ static int coherence_run_rtt_scale(void) {
     RttCVtx *cv = (RttCVtx *)SR_HOST(COH_SAMPLE_VERTS);
     RawSpriteVtx *sv = (RawSpriteVtx *)(cv + 6);
     const uint32_t cv_addr = COH_SAMPLE_VERTS, sv_addr = COH_SAMPLE_VERTS + 6u * (uint32_t)sizeof(RttCVtx);
-    const uint32_t white = 0xFFFFFFFFu;
+    const uint32_t quad = 0xFFFFFF00u | RTT_RED;
     /* the quad: top edge (0,30) to (128,40), as two triangles sharing the diagonal */
-    cv[0] = (RttCVtx){ white, 0.0f, 30.0f, 0.0f };   cv[1] = (RttCVtx){ white, 128.0f, 40.0f, 0.0f };
-    cv[2] = (RttCVtx){ white, 0.0f, 68.0f, 0.0f };   cv[3] = (RttCVtx){ white, 128.0f, 40.0f, 0.0f };
-    cv[4] = (RttCVtx){ white, 128.0f, 68.0f, 0.0f }; cv[5] = (RttCVtx){ white, 0.0f, 68.0f, 0.0f };
+    cv[0] = (RttCVtx){ quad, 0.0f, 30.0f, 0.0f };   cv[1] = (RttCVtx){ quad, 128.0f, 40.0f, 0.0f };
+    cv[2] = (RttCVtx){ quad, 0.0f, 68.0f, 0.0f };   cv[3] = (RttCVtx){ quad, 128.0f, 40.0f, 0.0f };
+    cv[4] = (RttCVtx){ quad, 128.0f, 68.0f, 0.0f }; cv[5] = (RttCVtx){ quad, 0.0f, 68.0f, 0.0f };
     sv[0] = (RawSpriteVtx){ 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
     sv[1] = (RawSpriteVtx){ 128.0f, 68.0f, 512.0f, 272.0f, 0.0f };
 
