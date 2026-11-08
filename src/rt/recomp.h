@@ -207,6 +207,14 @@ static inline uint32_t sr_vfpu_uc2i(uint32_t b) {
     return ((b & 0xffu) * 0x01010101u) >> 1;
 }
 
+/* vus2i: one unsigned 16-bit half h to the word h << 15 (zero-extended, not the vuc2i
+ * replicate); vs2i's twin is h << 16. A PSP-3000 returned 0x0000ffff -> 0x7fff8000,
+ * 0x8000 -> 0x40000000 and 0x12345678 -> 0x2b3c0000 (low half) and 0x091a0000 (high half)
+ * (probe case vfpu-forms-3, 2026-11-08; its register entry is not in this tree yet). */
+static inline uint32_t sr_vfpu_us2i(uint32_t h) {
+    return (h & 0xffffu) << 15;
+}
+
 /* vwbn.s with exponent imm8 e: a word whose exponent field is 0xff passes unchanged.
  * Otherwise the significand (implicit bit included for a normal, the raw mantissa for a
  * zero or denormal) shifts left by (x_exp - e) & 15 when x_exp > e, right by

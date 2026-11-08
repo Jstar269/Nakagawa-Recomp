@@ -121,6 +121,13 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     # PSP-3000 returned.
     cases.append((_vv2_word(28, 1, 0x40, 0x00), "vrexp2-s-measured", 1))
 
+    # vus2i / vs2i .s and .p (issue #326, probe case vfpu-vus2i, PSP-3000, 2026-11-08):
+    # check_vus2i_vs2i_measured_words() finds them by name and pins both lanes to the words
+    # the PSP returned for twelve source words.
+    for name, word in (("vus2i-s-measured", 0xD03A0008), ("vus2i-p-measured", 0xD03A0088),
+                       ("vs2i-s-measured", 0xD03B0008), ("vs2i-p-measured", 0xD03B0088)):
+        cases.append((word, name, 1 if name.endswith("-s-measured") else 2))
+
     # vrndi.s (issue #326): the PSP-HLE-ISSUES-001 probe word vrndi.s S000, and the same draw
     # into S323 (vd=0x6E) so the destination decode is exercised off lane 0.
     # check_vrndi_rule_cells() finds them by name and steps both lanes from the probe's states.

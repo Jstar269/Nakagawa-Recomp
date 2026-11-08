@@ -2235,6 +2235,16 @@ def _vfpu_form_vh2f(addr, w):
     return _vfpu_forms_stmt(addr, w, f"vh2f.{'sp'[n - 1]}", f"{reads} {writes}")
 
 
+def _vfpu_form_vus2i(addr, w):
+    n = vec_size(w)
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    si, di = vreg_indices(vs, n), vreg_indices(vd, 2 * n)
+    reads = " ".join(f"uint32_t _s{i}=s->vi[{si[i]}];" for i in range(n))
+    writes = " ".join(f"s->vi[{di[2 * i]}]=sr_vfpu_us2i(_s{i}); "
+                      f"s->vi[{di[2 * i + 1]}]=sr_vfpu_us2i(_s{i}>>16);" for i in range(n))
+    return _vfpu_forms_stmt(addr, w, f"vus2i.{'sp'[n - 1]}", f"{reads} {writes}")
+
+
 def _vfpu_form_vuc2i(addr, w):
     vd, vs = w & 0x7F, (w >> 8) & 0x7F
     s0, di = vreg_indices(vs, 1)[0], vreg_indices(vd, 4)
@@ -2258,6 +2268,7 @@ _VFPU_SPECIAL_FORM_TABLE: dict[tuple[int, int | None, int], Any] = {
     (1, 2, 1): _vfpu_form_vrndf, (1, 3, 1): _vfpu_form_vrndf,
     (1, 19, 1): _vfpu_form_vh2f, (1, 19, 2): _vfpu_form_vh2f,
     (1, 24, 1): _vfpu_form_vuc2i,
+    (1, 26, 1): _vfpu_form_vus2i, (1, 26, 2): _vfpu_form_vus2i,
     (2, 5, 1): _vfpu_form_vsocp, (2, 5, 2): _vfpu_form_vsocp,
 }
 
