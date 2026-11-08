@@ -3451,6 +3451,11 @@ class PspDmacProbeTests(unittest.TestCase):
                 "PSP-GE-RTT-001",
                 # The 2026-11-06 acceptance-eligible hle-audio-rest (#279, boot 138) run.
                 "PSP-HLE-AUDIO-REST-001",
+                # The 2026-11-08 acceptance-eligible hle-io-seek (#1380, boot 156), vfpu-unmodeled
+                # (#326, boot 157), hle-nickname-limit (#2197, boot 155), vfpu-quad-wb (#326, boot
+                # 159), vfpu-convert (#326, boot 160) and vfpu-cc-cmov (#326, boots 159 and 161) runs.
+                "PSP-HLE-IO-SEEK-001", "PSP-VFPU-UNMODELED-001", "PSP-HLE-NICKNAME-001",
+                "PSP-VFPU-QUADWB-001", "PSP-VFPU-CONVERT-001", "PSP-VFPU-CCCMOV-001",
             },
         )
         self.assertEqual(
@@ -8743,7 +8748,7 @@ class VfpuUnmodeledProbeTests(unittest.TestCase):
     """CASE=vfpu-unmodeled (163, PSP-VFPU-UNMODELED-001) in probe_hle_issues.c: the #326 VFPU
     forms the runtime refuses as unmodeled. Register-only: no system call in the section beyond
     the shared writer, bounded loops, a step before each form, the control-255 words last, a
-    fixed-shape stream that matches the registry, and no hardware result claimed (NOT_RUN)."""
+    fixed-shape stream that matches the registry, and the 2026-11-08 hardware result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -8869,15 +8874,15 @@ class VfpuUnmodeledProbeTests(unittest.TestCase):
         self.assertEqual(words[1][:4], words[0][4:])
         self.assertEqual(words[1][4:], words[0][:4])
 
-    def test_manifest_row_is_a_built_not_run_power_risk_case(self) -> None:
+    def test_manifest_row_is_a_measured_power_risk_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_unmodeled.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-unmodeled"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
         self.assertIn("POWER RISK", row["risk"])
 
 
@@ -8885,7 +8890,7 @@ class VfpuQuadWbProbeTests(unittest.TestCase):
     """CASE=vfpu-quad-wb (165, PSP-VFPU-QUADWB-001) in probe_hle_issues.c: lv.q / sv.q with the
     write-back flag. No system call in the section, bounded loops, every access inside the
     probe's own buffer, a step before each form with the run of four last, a fixed-shape stream
-    that matches the registry, and no hardware result claimed (NOT_RUN)."""
+    that matches the registry, and the 2026-11-08 hardware result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -9006,15 +9011,15 @@ class VfpuQuadWbProbeTests(unittest.TestCase):
                      "svq-wb-o0", "svq-wb-o16", "svq-wb-o32", "svq-wb-om16"):
             self.assertIn(f'"{name}"', self.section)
 
-    def test_manifest_row_is_a_built_not_run_power_risk_case(self) -> None:
+    def test_manifest_row_is_a_measured_power_risk_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_quad_wb.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-quad-wb"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
         self.assertIn("POWER RISK", row["risk"])
 
 
@@ -9022,7 +9027,7 @@ class VfpuConvertProbeTests(unittest.TestCase):
     """CASE=vfpu-convert (170, PSP-VFPU-CONVERT-001) in probe_hle_issues.c: the #326 VFPU
     float/integer conversions. Register-only: no system call in the section beyond the shared
     writer, bounded loops, a step before each form group, identity prefixes (none issued), a
-    fixed-shape stream that matches the registry, and no hardware result claimed (NOT_RUN)."""
+    fixed-shape stream that matches the registry, and the 2026-11-08 hardware result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -9116,7 +9121,7 @@ class VfpuConvertProbeTests(unittest.TestCase):
         self.assertIn("vfpu-convert", parse_golden.HLE_OBSERVATION_CASES)
         self.assertIn("| `vfpu-convert` | `PSP-VFPU-CONVERT-001` |", self.readme)
         row = self.readme[self.readme.index("| `vfpu-convert` |"):].split("\n", 1)[0]
-        self.assertIn("NOT_RUN", row)
+        self.assertIn("MEASURED", row)
         self.assertIn("Register-only, owner present", row)
 
     def test_section_is_register_only_and_bounded(self) -> None:
@@ -9191,15 +9196,15 @@ class VfpuConvertProbeTests(unittest.TestCase):
         self.assertEqual(len(floats), 24)
         self.assertEqual(len(ints), 24)
 
-    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+    def test_manifest_row_is_a_measured_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_convert.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-convert"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
         self.assertEqual(len(row["case_ids"]), 2 * 38 + 1)
         self.assertEqual(row["case_ids"][-1], "vfpu-convert-done")
 
@@ -9209,7 +9214,7 @@ class VfpuCcCmovProbeTests(unittest.TestCase):
     condition-code and conditional-move cells. Register-only: no system call in the section
     beyond the shared writer, bounded loops, a step before each form group, identity prefixes,
     a fixed-shape stream under 400 records that matches the registry, and no hardware result
-    claimed (NOT_RUN)."""
+    recorded as MEASURED (2026-11-08)."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -9259,7 +9264,7 @@ class VfpuCcCmovProbeTests(unittest.TestCase):
         self.assertNotIn("vfpu-cc-cmov", CAMPAIGN_QUEUE_CASES)
         self.assertIn("vfpu-cc-cmov", parse_golden.HLE_OBSERVATION_CASES)
         self.assertIn("| `vfpu-cc-cmov` | `PSP-VFPU-CCCMOV-001` |", self.readme)
-        self.assertIn("NOT_RUN, owner present", self.readme)
+        self.assertIn("register-only, owner present", self.readme)
 
     def test_section_is_register_only_and_bounded(self) -> None:
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
@@ -9337,15 +9342,15 @@ class VfpuCcCmovProbeTests(unittest.TestCase):
         for preset in ("0x00u", "0x3fu", "0x15u"):
             self.assertIn(preset, self.section)
 
-    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+    def test_manifest_row_is_a_measured_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_cc_cmov.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-cc-cmov"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
         self.assertEqual(row["case_ids"][-1], "vfpu-cc-cmov-done")
 
 
@@ -13541,12 +13546,16 @@ class Record20261015Tests(unittest.TestCase):
             ("ge-rtt", "PSP-GE-RTT-001", "MEASURED"),
             ("hle-std-handles", "PSP-HLE-STDIO-001", "MEASURED"),
             ("hle-audio-rest", "PSP-HLE-AUDIO-REST-001", "MEASURED"),
+            ("hle-io-seek", "PSP-HLE-IO-SEEK-001", "MEASURED"),
+            ("hle-nickname-limit", "PSP-HLE-NICKNAME-001", "MEASURED"),
+            ("vfpu-unmodeled", "PSP-VFPU-UNMODELED-001", "MEASURED"),
+            ("vfpu-quad-wb", "PSP-VFPU-QUADWB-001", "MEASURED"),
+            ("vfpu-convert", "PSP-VFPU-CONVERT-001", "MEASURED"),
+            ("vfpu-cc-cmov", "PSP-VFPU-CCCMOV-001", "MEASURED"),
             ("sas-adsr", "PSP-SAS-002", "NOT_RUN"),
             ("sas-mix", "PSP-SAS-003", "NOT_RUN"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
-            ("hle-io-seek", "PSP-HLE-IO-SEEK-001", "NOT_RUN"),
-            ("hle-nickname-limit", "PSP-HLE-NICKNAME-001", "NOT_RUN"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}

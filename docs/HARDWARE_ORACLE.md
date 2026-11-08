@@ -1351,6 +1351,79 @@ One console is one data point; see §11. Nothing here closes issue #70
     matches neither table.
   - Pixel x of level L reads texel x >> L, as `ge-mip` measured.
 
+- **PSP-3000 single-case runs of six probes (2026-11-08)**: system software 6.6.0 as reported by `pspver`,
+  operator-declared model PSP-3000, XMB context, one launch per case, each after the `transport-write` preflight
+  (PSP-TRANSPORT-001 is not re-cited). The runs of cases 162-165 and 170 and the boot-159 run of case 169 are
+  acceptance-eligible with harness verdict ok, all PASS and no exception; the boot-161 vcmp re-run is recorded as
+  complete with no exception (its harness verdict is not cited here): `hle-io-seek` (case 162, boot 156, `59520eb0`,
+  30 records), `vfpu-unmodeled` (case 163, boot 157, `d1d8558a`, 115 records), `hle-nickname-limit` (case 164, boot 155,
+  `07e58170`, 16 records), `vfpu-quad-wb` (case 165, boot 159, `ecc203af`, 19 records), `vfpu-convert` (case 170,
+  boot 160, `266552d0`, 229 records) and `vfpu-cc-cmov` (case 169: boot 159, `750c5fb1`, 217 records, and the
+  vcmp re-run on boot 161, `831d54f0`, 153 records). The cases are in `fixtures/psp_oracle/probe_hle_measure.c`
+  (162, 164) and `fixtures/psp_oracle/probe_hle_issues.c` (the rest). The raw envelopes, host0 logs and decoded
+  tables stay in the private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-08) |
+  | --- | --- | --- | --- |
+  | `PSP-HLE-IO-SEEK-001` | `io-seek-flash-*`, `io-seek-ms-*`, `io-seek-umd-*` (boot 156) | other flash0 files, other devices, the position after a successful ioctl seek on Memory Stick | MEASURED (`hle-io-seek`) |
+  | `PSP-VFPU-UNMODELED-001` | `vsgn-q-p0-*`, `vt4444-p-p0-*`, `vt4444-t-p0-*`, `vbfy1-s-p0-*`, `vbfy1-t-p0-*`, `vbfy2-p-p0-*`, `vcrs-s-p0-*`, `vcrs-p-p0-*`, `vcrs-q-p0-*`, `cmov0-p0-*`, `cmov1-p0-*`, `cmov2-p0-*`, `cmov3-p0-*`, `mfvc255-p0`, `mtvc255-zero-p0`, `mtvc255-val-p0`, `vsgn-q-p1-*`, `vt4444-p-p1-*`, `vt4444-t-p1-*`, `vbfy1-s-p1-*`, `vbfy1-t-p1-*`, `vbfy2-p-p1-*`, `vcrs-s-p1-*`, `vcrs-p-p1-*`, `vcrs-q-p1-*`, `cmov0-p1-*`, `cmov1-p1-*`, `cmov2-p1-*`, `cmov3-p1-*`, `mfvc255-p1`, `mtvc255-zero-p1`, `mtvc255-val-p1`, `vfpu-unmodeled-done` (boot 157) | exceptions: none occurred; the cause of the watchdog recovery afterwards | MEASURED (`vfpu-unmodeled`) |
+  | `PSP-HLE-NICKNAME-001` | `reg-*`, `nick-len-*` (boot 155) | the maximum nickname length, lengths below the stored string | MEASURED (`hle-nickname-limit`) |
+  | `PSP-VFPU-QUADWB-001` | `lvq-wb-*-p0`, `svq-wb-*-p0`, `svq-wb-run-p0`, `lvq-wb-*-p1`, `svq-wb-*-p1`, `svq-wb-run-p1`, `vfpu-quad-wb-done` (boot 159) | other base registers, unaligned bases | MEASURED (`vfpu-quad-wb`) |
+  | `PSP-VFPU-CONVERT-001` | `vf2iz-s-sc0-p0-*`, `vf2iz-s-sc1-p0-*`, `vf2iz-s-sc8-p0-*`, `vf2iz-s-sc15-p0-*`, `vf2iz-s-sc16-p0-*`, `vf2iz-s-sc23-p0-*`, `vf2iz-s-sc30-p0-*`, `vf2iz-s-sc31-p0-*`, `vf2iz-q-sc0-p0-*`, `vf2iz-q-sc1-p0-*`, `vf2iz-q-sc8-p0-*`, `vf2iz-q-sc15-p0-*`, `vf2iz-q-sc16-p0-*`, `vf2iz-q-sc23-p0-*`, `vf2iz-q-sc30-p0-*`, `vf2iz-q-sc31-p0-*`, `vf2in-s-sc0-p0-*`, `vf2in-s-sc8-p0-*`, `vf2iu-s-sc0-p0-*`, `vf2iu-s-sc8-p0-*`, `vf2id-s-sc0-p0-*`, `vf2id-s-sc8-p0-*`, `vi2f-s-sc0-p0-*`, `vi2f-s-sc8-p0-*`, `vi2f-s-sc31-p0-*`, `vi2f-p-sc0-p0-*`, `vi2f-p-sc8-p0-*`, `vi2f-p-sc31-p0-*`, `vi2f-t-sc0-p0-*`, `vi2f-t-sc8-p0-*`, `vi2f-t-sc31-p0-*`, `vi2f-q-sc0-p0-*`, `vi2f-q-sc8-p0-*`, `vi2f-q-sc31-p0-*`, `vi2s-q-p0-*`, `vi2us-q-p0-*`, `vi2c-q-p0-*`, `vi2uc-q-p0-*`, `vf2iz-s-sc0-p1-*`, `vf2iz-s-sc1-p1-*`, `vf2iz-s-sc8-p1-*`, `vf2iz-s-sc15-p1-*`, `vf2iz-s-sc16-p1-*`, `vf2iz-s-sc23-p1-*`, `vf2iz-s-sc30-p1-*`, `vf2iz-s-sc31-p1-*`, `vf2iz-q-sc0-p1-*`, `vf2iz-q-sc1-p1-*`, `vf2iz-q-sc8-p1-*`, `vf2iz-q-sc15-p1-*`, `vf2iz-q-sc16-p1-*`, `vf2iz-q-sc23-p1-*`, `vf2iz-q-sc30-p1-*`, `vf2iz-q-sc31-p1-*`, `vf2in-s-sc0-p1-*`, `vf2in-s-sc8-p1-*`, `vf2iu-s-sc0-p1-*`, `vf2iu-s-sc8-p1-*`, `vf2id-s-sc0-p1-*`, `vf2id-s-sc8-p1-*`, `vi2f-s-sc0-p1-*`, `vi2f-s-sc8-p1-*`, `vi2f-s-sc31-p1-*`, `vi2f-p-sc0-p1-*`, `vi2f-p-sc8-p1-*`, `vi2f-p-sc31-p1-*`, `vi2f-t-sc0-p1-*`, `vi2f-t-sc8-p1-*`, `vi2f-t-sc31-p1-*`, `vi2f-q-sc0-p1-*`, `vi2f-q-sc8-p1-*`, `vi2f-q-sc31-p1-*`, `vi2s-q-p1-*`, `vi2us-q-p1-*`, `vi2c-q-p1-*`, `vi2uc-q-p1-*`, `vfpu-convert-done` (boot 160) | prefixes other than identity | MEASURED (`vfpu-convert`) |
+  | `PSP-VFPU-CCCMOV-001` | `vcmp-c00-*`, `vcmp-c01-*`, `vcmp-c02-*`, `vcmp-c03-*`, `vcmp-c04-*`, `vcmp-c05-*`, `vcmp-c06-*`, `vcmp-c07-*`, `vcmp-c08-*`, `vcmp-c09-*`, `vcmp-c0a-*`, `vcmp-c0b-*`, `vcmp-c0c-*`, `vcmp-c0d-*`, `vcmp-c0e-*`, `vcmp-c0f-*`, `vcmovt0-*`, `vcmovt1-*`, `vcmovt2-*`, `vcmovt3-*`, `vcmovt4-*`, `vcmovt5-*`, `vcmovt6-*`, `vcmovf0-*`, `vcmovf1-*`, `vcmovf2-*`, `vcmovf3-*`, `vcmovf4-*`, `vcmovf5-*`, `vcmovf6-*`, `cc-initial-p0`, `cc-roundtrip-p0`, `cc-initial-p1`, `cc-roundtrip-p1`, `vfpu-cc-cmov-done` (boots 159 and 161) | vcmp with a prefix | MEASURED (`vfpu-cc-cmov`) |
+
+  `hle-io-seek` (#1380): on a flash0 file opened read-only every refused seek leaves the position unchanged. The
+  64-bit `sceIoLseek` of SET -1, SET size+16, END +16 and END -(size+1) returns `0x80010016` in the low word and
+  `0xffffffff` in the high word; SET `0x100000000` and SET `0xFFFFFFFF` return low `0x80010016` with a zero high
+  word; `sceIoLseek32` of the same offsets returns `0x80010016`. Every `sceIoIoctl` file command on a probe-owned
+  Memory Stick file (seek `0x01010005` to -1, 8, 16 and 32; queries `0x01020004`, `0x01020003`, `0x01020006`,
+  `0x01020007` and `0x01030008`) returns `0x80020325` and changes nothing. On a disc0 file the ioctl seek to -1
+  returns `0x80010005`, to the file size returns 0 and to size+1 returns `0x80010005` (range-checked at the size,
+  inclusive); the position ioctl returns 0 and writes only the low out word. `sceIoWrite` on a `PSP_O_RDONLY`
+  descriptor returns `0x80020323` and leaves the file unchanged; `PSP_O_RDONLY|PSP_O_CREAT` on a missing file fails
+  the open with `0x80010016` and creates nothing. No flash0 or disc0 byte was recorded.
+
+  `vfpu-unmodeled` (#326): no instruction raised an exception and every form executed; the two passes agree.
+  `vcrs.s`, `vcrs.p` and `vcrs.q` execute and write one, two and four words (lane 3 of `vcrs.q` is 0; VFPU_CC is
+  unchanged). `vcmov` with imm3 7 (`0xd2a70000`, `0xd2a701ff`, `0xd2a7808f`) changed no register word at VFPU_CC
+  `0x00`, `0x3f` or `0x15`, and `0xd2bfff00` moved three lanes unconditionally at all three. `mfvc` of control 255
+  returns 0, and `mtvc` to control 255 changes none of controls 0-15. `vsgn.q`, `vt4444.p`/`.t`, `vbfy1.s`/`.t` and
+  `vbfy2.p` write result words with and without a negate-all S prefix. After the launch the PSP did not answer
+  PSPLink and needed its watchdog to recover; the last words run were the control-255 `mtvc`, so those words stay
+  a POWER RISK.
+
+  `hle-nickname-limit` (W-NET-1, #2197): read-only, no registry write and no value bytes recorded.
+  `sceRegOpenRegistry` returns 0, `/CONFIG` and `/CONFIG/SYSTEM` open, and `sceRegGetKeyInfo` of the `owner_name`
+  key returns 0 with type 3 (a string). `sceUtilityGetSystemParamString` returned 0 at every tested buffer length
+  (`0x10`, `0x11`, `0x20`, `0x21`, `0x40`, `0x41`, `0x80` and `0x81`), never `0x80110102`, so no refusal boundary
+  is bracketed. The maximum nickname length is not answered.
+
+  `vfpu-quad-wb` (#326): the write-back flag (word bit 1) did not change the base register in any form, and the
+  access used base plus the instruction offset. `lv.q` with wb (`0xd9400002`, `0xd9400012`, `0xd9400022`,
+  `0xd940fff2`: offsets 0, +16, +32, -16) left the base unchanged and loaded the four buffer words at base +
+  offset. `sv.q` with wb (`0xf9400002`, `0xf9400012`, `0xf9400022`, `0xf940fff2`) left the base unchanged and
+  stored the four seeded lanes at base + offset. Four wb `sv.q` at +0, +16, +32 and +48 from one base showed no
+  drift and each store hit its own offset. Only an aligned base in one register inside a probe-owned buffer was
+  tested; no exception was raised.
+
+  `vfpu-convert` (#326): the two passes agree in all 114 cells. `vf2iz` truncates toward zero and saturates
+  (2^31 and above, +inf and every NaN give `0x7fffffff`; -2^31 and below and -inf give `0x80000000`; denormals and
+  -0 give 0); scale 16 and 31 shift the binary point and saturate from `0x4effffff` and 1.0. `vf2in` rounds to
+  nearest even, `vf2iu` up and `vf2id` down, with the same saturation and NaN results. `vi2f` rounds to nearest
+  (`0x7fffffff` gives `0x4f000000`) and a scale divides by 2^scale. `vi2s.q` takes the upper 16 bits of each lane
+  pair, `vi2c.q` the top bytes of four lanes, `vi2us.q` bits 30..15 and `vi2uc.q` bits 30..23, the unsigned forms
+  clamping negatives to 0. `.p`, `.t` and `.q` agree with `.s` lane for lane.
+
+  `vfpu-cc-cmov` (#326): VFPU_CC reads `0x20` at launch. Of the values written with `mtvc` only the low six bits are
+  stored (bits 6 and up read back as 0). `vcmovt` and `vcmovf` with imm3 0-5 are all-or-nothing over the lanes of the
+  width: `vcmovt` moves iff CC bit imm3 is set and `vcmovf` iff it is clear; lanes beyond the width keep their old
+  value. imm3 6 is per lane: lane j moves for `vcmovt` iff CC bit j is set and for `vcmovf` iff it is clear. After
+  `vcmp`, a plain `mfvc` straight after the instruction returns the old CC (255 of 256 cells; the boot-159 "CC
+  unchanged" reading was this stale read); after `vsync` or `vflush`, which agree in all 256 cells, bits 0-3 hold the
+  per-lane results (lane j at bit j), bit 4 the OR and bit 5 the AND of the lanes the instruction covers. `vcmp.s`
+  writes only lane 0 and recomputes bits 4 and 5 from it; `vcmp.q` writes all four lane bits. The vcmov cells ran as
+  a second launch on boot 159 because the mailbox reset was refused; the vcmp cells ran on their own boot 161.
+
 - **PSP-3000 single-case run of the `hle-audio-rest` probe on commit `8db3ec9d` (2026-11-06)**: system software
   6.61, ARK-5.1.0 (owner); `pspver` 6.6.0, the firmware declared to the runner. PSPLink 3.2.1, operator-declared
   model PSP-3000, XMB context. `hle-audio-rest` (case 159, `fixtures/psp_oracle/probe_hle_measure.c`) on boot 138,
@@ -3311,8 +3384,12 @@ not expected PSP values.
 | `sas-mix` | `PSP-SAS-003` | `NOT_RUN` | Built synthetic volume, WithMix and pitch cells for #2135 and #2054; no hardware result is claimed. |
 | `vcodec-words` | `PSP-VCODEC-001` | `NOT_RUN` | Built Media Engine boundary-word cells over synthetic AVC access units; no hardware result is claimed. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. |
-| `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | `NOT_RUN` | Built #1380 flash0: seek, sceIoIoctl and read-only-descriptor write cells; no hardware result is claimed. |
-| `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | `NOT_RUN` | Built W-NET-1 (#2197) read-only cells: the `owner_name` key's return, type and size, and the nickname string call's return at eight buffer lengths; no value bytes are recorded; no hardware result is claimed. |
+| `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | `MEASURED` (2026-11-08, PSP-3000, boot 156, `59520eb0`; 30 records) | #1380: flash0 seeks (64- and 32-bit), sceIoIoctl file commands, and writes on read-only descriptors. |
+| `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | `MEASURED` (2026-11-08, PSP-3000, boot 155, `07e58170`; 16 records) | W-NET-1 (#2197): the owner_name key type and the nickname string call at eight buffer lengths; no value bytes. |
+| `vfpu-unmodeled` | `PSP-VFPU-UNMODELED-001` | `MEASURED` (2026-11-08, PSP-3000, boot 157, `d1d8558a`; 115 records; the PSP needed its watchdog afterwards) | #326: VFPU forms the runtime refuses (vcrs, vcmov imm3 7, control 255, VFPU9 widths). POWER RISK. |
+| `vfpu-quad-wb` | `PSP-VFPU-QUADWB-001` | `MEASURED` (2026-11-08, PSP-3000, boot 159, `ecc203af`; 19 records) | #326: lv.q and sv.q with the write-back flag; the base register is unchanged and the access is base plus offset. |
+| `vfpu-convert` | `PSP-VFPU-CONVERT-001` | `MEASURED` (2026-11-08, PSP-3000, boot 160, `266552d0`; 229 records) | #326: VFPU float/integer conversions (vf2iz/in/iu/id, vi2f, vi2s/us/c/uc). |
+| `vfpu-cc-cmov` | `PSP-VFPU-CCCMOV-001` | `MEASURED` (2026-11-08, PSP-3000, boot 159 `750c5fb1` and boot 161 `831d54f0`; 217 and 153 records) | #326: VFPU_CC round trip, vcmovt/vcmovf, and vcmp CC bits (readable only after vsync or vflush). |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (modes 2 and 3; rerun required) | Each mode now begins from a fresh stream, ringbuffer and MPEG context; no mode 2 or 3 result is measured. |
 
 ### PSP-MEMEDGE-001 capture 2026-11-02
