@@ -44,7 +44,7 @@ typedef enum {
 /* The player's version: the one place it is written. The About page shows
    "v" NK_PLAYER_VERSION " (MM-DD-YYYY)"; nothing else (tags, releases, the
    tools' package version) reads it. */
-#define NK_PLAYER_VERSION "0.0.2-dev"
+#define NK_PLAYER_VERSION "0.0.2"
 
 typedef enum {
     PLAYER_UI_PRIMARY_NONE = 0,
@@ -656,7 +656,7 @@ typedef struct {
     PlayerUiUpdateStep update_step;
     PlayerUiUpdateStep update_failed_step;   /* CHECKING, DOWNLOADING or INSTALLING */
     bool check_updates_at_start;
-    const char *current_version;    /* "0.0.2-dev" */
+    const char *current_version;    /* "0.0.2" */
     const char *update_version;     /* "0.0.2", once checked */
     bool update_prerelease;
     const char *update_published;   /* "2026-11-04", or "" */
@@ -666,6 +666,7 @@ typedef struct {
     bool update_can_download;       /* a Windows ZIP and a Windows build */
     bool update_unverifiable;       /* this build has no update-signing key */
     bool update_unsigned;           /* the release lists no signature */
+    bool update_installed_by_setup; /* put here by the installer: update by running its Setup.exe */
     const char *update_zip_name;
     unsigned long long update_zip_bytes;
     unsigned long long update_received_bytes;

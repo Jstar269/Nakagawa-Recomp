@@ -2318,7 +2318,7 @@ class LiveRepositoryTests(unittest.TestCase):
         """Enforcement stays off while context-name spoofing is unresolved."""
         self.assertIn("OBSERVATION MODE", (ROOT / TRUSTED_WORKFLOW).read_text(encoding="utf-8"))
         doc = (ROOT / "docs" / "PROVENANCE_MERGE_GATE.md").read_text(encoding="utf-8")
-        self.assertIn("DO NOT ADD IT YET", doc)
+        self.assertIn("**3. Required status check — do not add it.**", doc)
 
     def test_every_third_party_action_is_pinned_to_a_commit_sha(self) -> None:
         raw = (ROOT / TRUSTED_WORKFLOW).read_text(encoding="utf-8")

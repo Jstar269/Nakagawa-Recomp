@@ -57,6 +57,13 @@ static const GUID L_MF_LOW_LATENCY      = {0x9c27891a,0xed7a,0x40e1,{0x88,0xe8,0
 
 typedef struct { uint32_t off, len; int64_t pts; int has_pts; } EsChunk;
 
+/* The sample time one access unit was handed to the MFT with, and the unit's exact 90 kHz time.
+ * The MFT returns pictures in display order, each output sample carrying the time of the input
+ * sample it came from, so an exact match of the output time names the picture's own unit. */
+typedef struct { LONGLONG time; int64_t pts; int has_pts; } SentTime;
+/* Far above the 16-frame DPB: pull_frame feeds a unit only when the MFT asks for input. */
+#define H264_MF_SENT_TIMES 64u
+
 typedef struct {
     int used;
     IMFTransform *xf;
@@ -68,6 +75,10 @@ typedef struct {
     EsChunk *ck; uint32_t nCk, capCk, curCk;
     uint32_t takeCk;               /* complete access units accepted from the common layer */
     LONGLONG fakeTime;             /* synthetic input timestamp when the PES had no PTS */
+    /* Units submitted and not yet matched to an output picture, oldest first.  A full table
+     * drops its oldest entry, whose picture then reports no time. */
+    SentTime sent[H264_MF_SENT_TIMES];
+    uint32_t nSent;
 } Dec;
 
 #define MAX_DEC 4
@@ -142,6 +153,40 @@ static void es_compact(Dec *d) {
     d->takeCk = d->takeCk > d->curCk ? d->takeCk - d->curCk : 0;
     d->nCk = live;
     d->curCk = 0;
+}
+
+/* ---- per-picture times ------------------------------------------------------------------ */
+static void sent_push(Dec *d, LONGLONG time, int64_t pts, int has_pts) {
+    if (d->nSent == H264_MF_SENT_TIMES) {
+        memmove(d->sent, d->sent + 1, (size_t)(H264_MF_SENT_TIMES - 1u) * sizeof(d->sent[0]));
+        d->nSent--;
+    }
+    d->sent[d->nSent].time = time;
+    d->sent[d->nSent].pts = pts;
+    d->sent[d->nSent].has_pts = has_pts;
+    d->nSent++;
+}
+
+/* Consume the oldest unit sent with exactly `time`.  Its 90 kHz time is reported only when the
+ * unit had one and no other pending unit shares the sample time with a different 90 kHz time;
+ * otherwise *has_pts stays 0 and the caller keeps its own order.  Never rounds 100 ns back. */
+static void sent_take(Dec *d, LONGLONG time, int64_t *pts, int *has_pts) {
+    *pts = -1;
+    *has_pts = 0;
+    for (uint32_t i = 0; i < d->nSent; i++) {
+        if (d->sent[i].time != time) continue;
+        int unique = 1;
+        for (uint32_t j = i + 1u; j < d->nSent; j++)
+            if (d->sent[j].time == time && (d->sent[j].has_pts != d->sent[i].has_pts ||
+                                            d->sent[j].pts != d->sent[i].pts)) unique = 0;
+        if (unique && d->sent[i].has_pts) {
+            *pts = d->sent[i].pts;
+            *has_pts = 1;
+        }
+        memmove(d->sent + i, d->sent + i + 1u, (size_t)(d->nSent - i - 1u) * sizeof(d->sent[0]));
+        d->nSent--;
+        return;
+    }
 }
 
 /* ---- Media Foundation ------------------------------------------------------------------- */
@@ -243,8 +288,14 @@ static int feed_one(Dec *d) {
             d->fakeTime = t + 1;
             IMFSample_SetSampleTime(smp, t);
             HRESULT hr = IMFTransform_ProcessInput(d->xf, 0, smp, 0);
-            if (SUCCEEDED(hr)) { d->curCk++; es_compact(d); ret = 1; }
-            else ret = (hr == MF_E_NOTACCEPTING) ? 0 : -1;
+            if (SUCCEEDED(hr)) {
+                sent_push(d, t, c->pts, c->has_pts);
+                d->curCk++;
+                es_compact(d);
+                ret = 1;
+            } else {
+                ret = (hr == MF_E_NOTACCEPTING) ? 0 : -1;
+            }
             IMFSample_Release(smp);
         }
     }
@@ -431,6 +482,12 @@ static int pump_out(Dec *d, uint32_t buffer, int frameWidth, int pixelMode,
             if (mflog()) fprintf(stderr, "h264: ProcessOutput hr=0x%08lx\n", (unsigned long)hr);
             return -1;
         }
+        /* The picture leaves the MFT whether or not it can be written, so its unit is consumed
+         * either way. */
+        LONGLONG outTime = 0;
+        int64_t pts = -1;
+        int has_pts = 0;
+        if (SUCCEEDED(IMFSample_GetSampleTime(smp, &outTime))) sent_take(d, outTime, &pts, &has_pts);
         int delivered = 0;
         if (buffer || host || yuv) {
             IMFMediaBuffer *cbuf = NULL;
@@ -457,7 +514,8 @@ static int pump_out(Dec *d, uint32_t buffer, int frameWidth, int pixelMode,
             info->delivered_format = yuv ? SR_H264_PIXEL_NATIVE_NV12 :
                                      host ? SR_H264_PIXEL_RGBA8888 :
                                             guest_pixel_format(pixelMode);
-            info->pts = -1;
+            info->has_pts = has_pts;
+            info->pts = pts;
         }
         IMFMediaBuffer_Release(mb); IMFSample_Release(smp);
         return delivered ? 1 : 2;

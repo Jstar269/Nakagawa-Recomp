@@ -7894,9 +7894,9 @@ static void test_graphics_presets(void) {
                    strstr(note, " is used in Enhanced and Ace") != NULL &&
                    strstr(note, "Authentic uses your own display settings.") != NULL);
             assert(warns == row->upscaler);
-            assert((strstr(note, "FSR 1") != NULL) == row->upscaler);
+            assert((strstr(note, "Sharper enlarging") != NULL) == row->upscaler);
             if (row->upscaler) {
-                assert(strcmp(player_app_graphics_preset_label(app), "Ultra (no upscaler)") == 0);
+                assert(strcmp(player_app_graphics_preset_label(app), "Ultra") == 0);
             }
 
             /* Authentic: the session's config and launch line equal Custom's with the same
@@ -8003,9 +8003,9 @@ static void test_graphics_presets(void) {
     assert(player_app_load_settings(back, path) == NK_OK);
     assert(player_app_graphics_preset(back) == PLAYER_PRESET_ULTRA);
     assert(back->settings.resolution_scale == 1);
-    assert(strcmp(player_app_graphics_preset_label(back), "Ultra (no upscaler)") == 0);
+    assert(strcmp(player_app_graphics_preset_label(back), "Ultra") == 0);
     assert(player_app_graphics_preset_note(back, note, sizeof(note), &warns) && warns &&
-           strstr(note, "FSR 1") != NULL);
+           strstr(note, "Sharper enlarging") != NULL);
 
     /* The rows a file holds are kept as they are beside its preset. */
     write_text_file(path,

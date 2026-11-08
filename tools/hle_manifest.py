@@ -1538,8 +1538,17 @@ _MODULE_RE = re.compile(r"^(?:_+)?(sce[A-Z][a-z0-9]*)")
 PUBLIC_TEST_GLOBS = ("tools/test_*.py", "src/rt/*_selftest.c")
 
 
+#: Names whose library is not the leading camel-case word: the sceMpegbase library exports
+#: sceMpegBaseCscAvc and its siblings (and sceMpegbase_0530BE4E), not sceMpeg.
+_MODULE_PREFIX_LIBRARIES = (("sceMpegBase", "sceMpegbase"),)
+
+
 def derive_module(name: str) -> str:
     """Best-effort PSP module bucket. Grouping only -- never a support claim."""
+    bare = name.lstrip("_")
+    for prefix, library in _MODULE_PREFIX_LIBRARIES:
+        if bare.startswith(prefix):
+            return library
     m = _MODULE_RE.match(name)
     if m:
         return m.group(1)
