@@ -112,14 +112,14 @@ if (Test-Path -LiteralPath $AttestedBundle) {
     throw "Attested bundle directory already exists: $AttestedBundle"
 }
 New-Item -ItemType Directory -Path $AttestedBundle | Out-Null
-gh run download $RunId --repo Jstar269/nakagawa-recomp --name $ArtifactName --dir $AttestedBundle
+gh run download $RunId --repo Jstar269/Nakagawa-Recomp --name $ArtifactName --dir $AttestedBundle
 if ($LASTEXITCODE -ne 0) { throw 'Could not download the selected workflow artifact.' }
 
-$SignerWorkflow = 'Jstar269/nakagawa-recomp/.github/workflows/provenance-attestation.yml'
+$SignerWorkflow = 'Jstar269/Nakagawa-Recomp/.github/workflows/provenance-attestation.yml'
 $AttestedFiles = Get-ChildItem -LiteralPath $AttestedBundle -Recurse -File
 if ($AttestedFiles.Count -eq 0) { throw 'The workflow artifact is empty.' }
 foreach ($File in $AttestedFiles) {
-    gh attestation verify $File.FullName --repo Jstar269/nakagawa-recomp --signer-workflow $SignerWorkflow --source-ref refs/heads/main --source-digest $CandidateSha
+    gh attestation verify $File.FullName --repo Jstar269/Nakagawa-Recomp --signer-workflow $SignerWorkflow --source-ref refs/heads/main --source-digest $CandidateSha
     if ($LASTEXITCODE -ne 0) { throw "Attestation verification failed for $($File.Name)." }
 }
 
@@ -132,7 +132,7 @@ $env:NAKAGAWA_ATTESTED_BUNDLE = $AttestedBundle
 $env:NAKAGAWA_CANDIDATE_SHA = $CandidateSha
 ```
 
-`gh attestation verify <file> -R Jstar269/nakagawa-recomp` is the basic user command. The fuller loop above also checks the signer workflow, `main` source ref, and exact source commit. Run it for the downloaded executable, runtime DLLs, and toolchain record. See the [GitHub CLI verification reference](https://cli.github.com/manual/gh_attestation_verify).
+`gh attestation verify <file> -R Jstar269/Nakagawa-Recomp` is the basic user command. The fuller loop above also checks the signer workflow, `main` source ref, and exact source commit. Run it for the downloaded executable, runtime DLLs, and toolchain record. See the [GitHub CLI verification reference](https://cli.github.com/manual/gh_attestation_verify).
 
 The packaged player binaries and runtime closure are copied byte-for-byte from the verified bundle. The package script below repeats the attestation checks and confirms the bundle's `toolchain.json` matches the frozen source SHA; it does not rebuild or restage those binaries locally. The resulting ZIP is a packaging container, not a subject of this Build L2 workflow: after extracting it, verify each executable and runtime DLL individually with gh attestation verify.
 
@@ -159,11 +159,11 @@ $Toolchain = Get-Content -LiteralPath $ToolchainIdentity -Raw | ConvertFrom-Json
 if ($Toolchain.candidate.commit -ne $CandidateSha -or -not $Toolchain.candidate.working_tree_clean) {
     throw 'The toolchain record does not identify this clean candidate.'
 }
-$SignerWorkflow = 'Jstar269/nakagawa-recomp/.github/workflows/provenance-attestation.yml'
+$SignerWorkflow = 'Jstar269/Nakagawa-Recomp/.github/workflows/provenance-attestation.yml'
 $AttestedFiles = Get-ChildItem -LiteralPath $AttestedBundle -Recurse -File
 if ($AttestedFiles.Count -eq 0) { throw 'The verified bundle is empty.' }
 foreach ($File in $AttestedFiles) {
-    gh attestation verify $File.FullName --repo Jstar269/nakagawa-recomp --signer-workflow $SignerWorkflow --source-ref refs/heads/main --source-digest $CandidateSha
+    gh attestation verify $File.FullName --repo Jstar269/Nakagawa-Recomp --signer-workflow $SignerWorkflow --source-ref refs/heads/main --source-digest $CandidateSha
     if ($LASTEXITCODE -ne 0) { throw "Attestation verification failed for $($File.Name)." }
 }
 $CandidateShort = $CandidateSha.Substring(0, 12)

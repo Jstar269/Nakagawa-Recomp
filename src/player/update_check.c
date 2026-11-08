@@ -273,11 +273,36 @@ static bool safe_tag(const char *tag) {
     return true;
 }
 
+#define REPOSITORY_URL_LENGTH (sizeof(NK_UPDATE_REPOSITORY_URL) - 1)
+
+/* The first REPOSITORY_URL_LENGTH characters of url name this repository: GitHub owner and
+   repository names are case-insensitive, so they compare without ASCII case. */
+static bool names_this_repository(const char *url) {
+    if (!url || strlen(url) < REPOSITORY_URL_LENGTH) return false;
+    for (size_t i = 0; i < REPOSITORY_URL_LENGTH; i++) {
+        char a = url[i], b = NK_UPDATE_REPOSITORY_URL[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return false;
+    }
+    return true;
+}
+
+/* url is prefix + tag (+ "/" + name), where prefix starts with NK_UPDATE_REPOSITORY_URL; only
+   the repository part ignores case. */
 static bool exact_url(const char *url, const char *prefix, const char *tag, const char *name) {
     char expected[512];
     int n = name ? snprintf(expected, sizeof(expected), "%s%s/%s", prefix, tag, name)
                  : snprintf(expected, sizeof(expected), "%s%s", prefix, tag);
-    return url && n > 0 && (size_t)n < sizeof(expected) && strcmp(url, expected) == 0;
+    return n > 0 && (size_t)n < sizeof(expected) && names_this_repository(url) &&
+           strcmp(url + REPOSITORY_URL_LENGTH, expected + REPOSITORY_URL_LENGTH) == 0;
+}
+
+bool nk_update_is_release_page(const char *url) {
+    const size_t prefix = sizeof(NK_UPDATE_RELEASE_PAGE_PREFIX) - 1;
+    const char *path = NK_UPDATE_RELEASE_PAGE_PREFIX + REPOSITORY_URL_LENGTH;
+    return names_this_repository(url) && strlen(url) > prefix &&
+           strncmp(url + REPOSITORY_URL_LENGTH, path, prefix - REPOSITORY_URL_LENGTH) == 0;
 }
 
 static bool hex64(const char *text) {
