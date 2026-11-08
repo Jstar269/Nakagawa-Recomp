@@ -314,11 +314,13 @@ static int check_quad_memops(void) {
           MEM_R32(ARENA_END - 4u) == 0xCAFE0002u,
           "sv.q rejection leaves every earlier guest word unchanged");
 
-    /* 7b. Bit 1 of an aligned lv.q/sv.q is the write-back flag. A PSP-3000 run (2026-11-08,
-     * issue #326, probe case vfpu-quad-wb, base $t2 = r10, 16-byte aligned) showed it does
-     * not change the base register in any form (offsets 0, +16, +32, -16; four stores in a
-     * row from one base did not drift) and that the access uses base + offset, as the plain
-     * word does. Both lanes must therefore treat bit 1 as inert for these two opcodes. */
+    /* 7b. Bit 1 of an aligned lv.q/sv.q is the write-back flag. An unrecorded PSP read
+     * (PSP-3000, 2026-11-08, issue #326, probe case vfpu-quad-wb, base $t2 = r10, 16-byte
+     * aligned; its register entry, PSP-VFPU-QUADWB-001, is not in this tree yet and is not
+     * a MEASURED row here) showed the flag does not change the base register in any form
+     * (offsets 0, +16, +32, -16; four stores in a row from one base did not drift) and
+     * that the access uses base + offset, as the plain word does. This pins that read in
+     * both lanes; it is not hardware evidence until the register entry lands. */
     {
         static const uint32_t offsets[4] = {0x0000u, 0x0010u, 0x0020u, 0xFFF0u};
         const uint32_t base = 0x08004200u;

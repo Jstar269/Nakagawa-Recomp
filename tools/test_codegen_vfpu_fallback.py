@@ -293,11 +293,13 @@ int main(void) {{
         self.assertNotIn("s->r[4] + 0x00000001u",effect)
 
     def test_quad_write_back_flag_leaves_the_base_register_alone(self):
-        # PSP-3000 (2026-11-08, issue #326, probe case vfpu-quad-wb): bit 1 of an aligned
-        # lv.q/sv.q, the write-back flag, did not change the base register in any form
-        # (offsets 0, +16, +32, -16; four in a row from one base did not drift), and the
-        # access used base + offset. The generated code therefore must emit the same access
-        # as the plain word and never assign the base register.
+        # An unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-quad-wb;
+        # its register entry, PSP-VFPU-QUADWB-001, is not in this tree yet): bit 1 of an
+        # aligned lv.q/sv.q, the write-back flag, did not change the base register in any
+        # form (offsets 0, +16, +32, -16; four in a row from one base did not drift), and
+        # the access used base + offset. The generated code therefore emits the same access
+        # as the plain word and never assigns the base register. Not hardware evidence until
+        # the register entry lands.
         for op, plain_word in ((0x36, 0xD9400000), (0x3E, 0xF9400000)):
             for offset in (0x0000, 0x0010, 0x0020, 0xFFF0):
                 for lle_cpu in (False, True):
