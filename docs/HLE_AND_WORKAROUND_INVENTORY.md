@@ -449,7 +449,7 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-UMDIO-001: io-dopen-0004 and io-dopen-0005 close results)
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_io_console_model
 - **`h_IoDevctl`** (`sceIo`): `sceIoDevctl` (0x54f5fb11)
-  - Limitation: Memory Stick insert/eject callbacks, including the mscmhc0: 0x02015804/0x02015805 forms, are notified once, with argument 1, when registered; no later insert or eject event exists, and the 32-entry bound, duplicate entries and 0x80010016 refusals follow PPSSPP's model, not a hardware measurement (#1378)
+  - Limitation: Memory Stick insert/eject callbacks, including the mscmhc0: 0x02015804/0x02015805 forms, are notified once, with argument 1, when registered; no later insert or eject event exists, and the 32-entry bound, duplicate entries and 0x80010016 refusals follow PPSSPP's model, not a hardware measurement (#1378); the GETDEV capacity under SR_DETERMINISTIC_CLOCK=1 is a project-chosen virtual card (2 GiB, 32 KiB clusters, minus the Memory Stick folder's files), not a measured one (#2161)
 - **`h_IoDopen`** (`sceIo`): `sceIoDopen` (0xb29ddf9c)
   - Limitation: the measured cells establish results and close outcomes for six fixed UMD/disc path calls only; directory contents/order, MS0 paths and general error precedence remain unmeasured (#341)
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_io_console_model
