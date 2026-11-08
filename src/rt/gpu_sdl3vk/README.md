@@ -259,7 +259,7 @@ validation layer on, and expects no leaked object and no validation error from e
 - `SR_GPU_DST_READ=snapshot|interlock|roaa` — the destination-read path (#2109), read before
   the device is made. Unset, the interlock is taken where the device has it. A forced path the
   device lacks is refused with its reason, and the snapshot path runs. `roaa`
-  (rasterization-order attachment access) has no code yet and is always refused.
+  (rasterization-order attachment access) is always refused: this backend has no such path.
 - `SR_GPU_READBACK_FULL=1` — copy the whole scaled target on a readback to guest memory, the
   reference path for the default copy of the rows guest memory keeps (#323).
 - `SR_GPU_PIPELINE_CACHE=0` — run without the pipeline cache in `<data root>/cache/gegpu`

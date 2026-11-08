@@ -97,7 +97,7 @@ int sdl3vk_parse_present_scaling(const char *value);
 enum {
     SDL3VK_DST_READ_SNAPSHOT = 0,
     SDL3VK_DST_READ_INTERLOCK = 1,
-    SDL3VK_DST_READ_ROAA = 2,        /* rasterization-order attachment access: no code yet */
+    SDL3VK_DST_READ_ROAA = 2,        /* rasterization-order attachment access: always refused */
 };
 
 /* The path an SR_GPU_DST_READ value asks for: NULL or empty is -2 (the default order), an

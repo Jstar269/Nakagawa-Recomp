@@ -1261,9 +1261,11 @@ ge-replay: shader-verify $(RT_GE_O)
 # data): the comparison rules without a GPU, NO_DIFFERENCE from the unchanged backend, then each
 # executed SR_GE_FBD_MUTANT (1: a blend draw 3 does not have, 2: draw 3's depth writes off) builds
 # its own binary and must be named as draw 3 in linear and bisect mode, mutant 2 in depth alone.
-# Last, a known difference no mutant made: the "overlap" capture's one PRIM of two overlapping
-# 50% blends on 5650 (#2109; shader-blend batches read one pre-batch copy of the target) must be
-# found as draw 1, its 100x100 overlap and nothing else. The #2109 fix flips this expectation.
+# Last, the "overlap" capture: one PRIM of two overlapping 50% blends on 5650 (#2109). On the
+# snapshot destination-read path every primitive of the shader-blend batch reads one pre-batch
+# copy of the target, a known difference no mutant made: it must be found as draw 1, its 100x100
+# overlap and nothing else. On the interlock path the capture must be NO_DIFFERENCE; a device
+# without the interlock refuses that path (sdl3vk prints the reason) and the leg is a SKIP.
 # Then fail-closed cells: a 512-wide scissor (ge.c rasterizes inside 480x272 only), 33 targets
 # (one past the limit) and a stride past 1024 are INCOMPLETE (exit 5), and a capture with no
 # draw is NO_DRAWS (exit 6); none is ever NO_DIFFERENCE.
@@ -1307,16 +1309,24 @@ ge-first-bad-draw-selftest: ge-replay
 		done; \
 	done
 	@$(BUILD_DIR)/ge_replay.exe --write-synthetic $(GE_FBD_DIR)/overlap.ngef overlap
-	@for mode in linear bisect; do \
-		log=$(GE_FBD_DIR)/overlap-$$mode.log; result=0; \
-		$(BUILD_DIR)/ge_replay.exe $(GE_FBD_DIR)/overlap.ngef --first-bad-draw --mode $$mode \
-			--report $(GE_FBD_DIR)/overlap-$$mode > $$log 2>&1 || result=$$?; \
+	@for path in snapshot interlock; do for mode in linear bisect; do \
+		log=$(GE_FBD_DIR)/overlap-$$path-$$mode.log; result=0; \
+		$(BUILD_DIR)/ge_replay.exe $(GE_FBD_DIR)/overlap.ngef --first-bad-draw --mode $$mode --dst-read $$path \
+			--report $(GE_FBD_DIR)/overlap-$$path-$$mode > $$log 2>&1 || result=$$?; \
 		if test $$result -eq 77; then cat $$log; echo "SKIP ge-first-bad-draw-selftest overlap (no Vulkan device)"; exit $(GE_FBD_SKIP_STATUS); fi; \
+		if ! grep -Fq "sdl3vk: destination reads: $$path" $$log; then \
+			if test $$path = interlock && grep -Fq "SR_GPU_DST_READ=interlock refused" $$log; then \
+				echo "SKIP ge-first-bad-draw-selftest overlap on the interlock path (the device refused it; $$mode)"; continue; fi; \
+			cat $$log; echo "FAIL ge-first-bad-draw-selftest: the overlap did not run on the $$path path ($$mode)" >&2; exit 1; fi; \
+		if test $$path = interlock; then \
+			if test $$result -ne 0 || ! grep -Fq "result=NO_DIFFERENCE draws=2 " $$log; then \
+				cat $$log; echo "FAIL ge-first-bad-draw-selftest: the #2109 overlap differs on the interlock path ($$mode)" >&2; exit 1; fi; \
+			echo "ge-first-bad-draw-selftest: the #2109 overlap is NO_DIFFERENCE on the interlock path ($$mode)"; continue; fi; \
 		if test $$result -ne 1 || ! grep -Fq "result=FIRST_BAD_DRAW index=1 draws=2 " $$log || \
 		   ! grep -Fq "pixels=10000 max_diff=" $$log || ! grep -Fq "bbox=140,100,239,199" $$log; then \
 			cat $$log; echo "FAIL ge-first-bad-draw-selftest: the #2109 overlap was not found as draw 1, exactly the overlap ($$mode)" >&2; exit 1; fi; \
-		echo "ge-first-bad-draw-selftest: known difference #2109 found at draw 1, the 100x100 overlap only ($$mode)"; \
-	done
+		echo "ge-first-bad-draw-selftest: known difference #2109 on the snapshot path found at draw 1, the 100x100 overlap only ($$mode)"; \
+	done; done
 	@for v in wide empty many deep; do \
 		$(BUILD_DIR)/ge_replay.exe --write-synthetic $(GE_FBD_DIR)/$$v.ngef $$v || exit 1; \
 	done

@@ -4086,7 +4086,19 @@ static int coherence_run_gpu_timestamps_off(void) {
  * splits into render, snapshot and upload time, with only the few microseconds after a buffer's last
  * op left on the buffer's mixed submit reason; every present is read back with a GPU time. The frames
  * stay ge.c's (timestamps change no rendering). Returns 77 (SKIP) when the queue has no timestamps. */
+static int coherence_run_gpu_timestamps_snapshot(void);
+
+/* The case wants time under every reason its scene records, the snapshot copy included, so it
+ * runs on the snapshot path on every device: an interlock op (#2109) takes no snapshot copy. */
 static int coherence_run_gpu_timestamps(void) {
+    const int interlock = s_dst_interlock;
+    s_dst_interlock = 0;
+    int ok = coherence_run_gpu_timestamps_snapshot();
+    s_dst_interlock = interlock;
+    return ok;
+}
+
+static int coherence_run_gpu_timestamps_snapshot(void) {
     if (!sr_perf_gpu_timestamps_requested()) {
         fprintf(stderr, "gpu coherence selftest [gpu-timestamps]: SR_GPU_TIMESTAMPS is not set; this case "
                         "runs with --gpu-timestamps 1\n");

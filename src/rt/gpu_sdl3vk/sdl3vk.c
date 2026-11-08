@@ -862,7 +862,7 @@ int sdl3vk_init(const char *title) {
             }
         free(xs);
         /* The destination-read path (#2109, sdl3vk.h). A forced path the device lacks is refused
-         * with its reason, and the snapshot runs; so does the ROAA path, which has no code yet. */
+         * with its reason, and the snapshot runs; so is the ROAA path, which this backend lacks. */
         s_dst_read = SDL3VK_DST_READ_SNAPSHOT;
         const char *dst_env = getenv("SR_GPU_DST_READ");
         int dst_want = sdl3vk_parse_dst_read(dst_env);
@@ -872,8 +872,8 @@ int sdl3vk_init(const char *title) {
             dst_want = -2;
         }
         if (dst_want == SDL3VK_DST_READ_ROAA) {
-            fprintf(stderr, "sdl3vk: SR_GPU_DST_READ=roaa refused (the rasterization-order path has "
-                            "no code yet); destination reads use the snapshot\n");
+            fprintf(stderr, "sdl3vk: SR_GPU_DST_READ=roaa refused (this backend has no "
+                            "rasterization-order path); destination reads use the snapshot\n");
             dst_want = SDL3VK_DST_READ_SNAPSHOT;
         }
         if (dst_want != SDL3VK_DST_READ_SNAPSHOT) {

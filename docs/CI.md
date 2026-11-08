@@ -533,8 +533,10 @@ or a compiler that is not the pinned one, fails it. Then `ge-first-bad-draw-self
 `NO_DIFFERENCE`, and two executed mutants that change one draw's Vulkan blend or depth state
 (`SR_GE_FBD_MUTANT`) must each be named as that draw, in linear and bisect mode. A second generated
 capture holds one PRIM of two overlapping translucent sprites on a 16-bit target, and the tool must
-find exactly its overlap as the first bad draw: the known shader-blend batch-order difference
-(#2109), which that fix turns into `NO_DIFFERENCE`. Four more generated captures check that the
+find exactly its overlap as the first bad draw on the snapshot destination-read path (the known
+shader-blend batch-order difference, #2109), and report `NO_DIFFERENCE` on the interlock path. A
+device without the interlock, lavapipe among them, refuses that path, and the interlock leg is a
+`SKIP`. Four more generated captures check that the
 tool fails closed: a 512-wide scissor (ge.c rasterizes inside 480x272), 33 targets or a stride of
 1088 are `INCOMPLETE`, and a capture with no draw is `NO_DRAWS`. The same step then runs
 `vram-view-identity-selftest` (#314): the GE decoders the pause menu's VRAM viewer calls, run at
