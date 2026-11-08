@@ -2296,6 +2296,83 @@ static void test_runtime_placed_guest_owned_library(void) {
     remove(owned_path);
 }
 
+/* sceMpeg is a guest-owned library too (#286): a title that ships mpeg.prx runs it, and host
+ * HLE stays only at the Media Engine boundary beneath it (hle_videocodec.c) and for titles
+ * that load the firmware copy. The same start-less fixture, now exporting a sceMpeg NID the
+ * host implements. sr_hle_init() leaves sceMpeg out of this build, so the production
+ * sceMpegInit/Finish/Create/Delete handlers are registered as the interrupt-context check
+ * does; sceMpegFinish answers 0 from the host and RT_OWNED_MARK from the guest body once the
+ * module has started. Kill switch and unload as for scePsmfPlayer above. */
+#define RT_OWNED_MPEG_NID 0x874624D6u      /* sceMpegFinish */
+#define RT_OWNED_MPEG_HOST 0u              /* the host handler's result */
+
+static uint32_t rt_owned_mpeg_import(void) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    return sr_syscall(&cpu, RT_OWNED_MPEG_NID);
+}
+
+static void test_runtime_placed_guest_owned_mpeg(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern void sr_hle_test_register_mpeg_create_handlers(void);
+    static const char owned_guest[] = "disc0:/PSP_GAME/USRDIR/rt-nostart.prx";
+    char owned_path[1024];
+    const char *out;
+    uint32_t base = 0;
+    sr_hle_test_register_mpeg_create_handlers();
+    expect(sr_hle_test_is_registered(RT_OWNED_MPEG_NID) &&
+               sr_hle_resolve_late_import(RT_OWNED_MPEG_NID) == SR_HLE_LATE_BUILTIN &&
+               rt_owned_mpeg_import() == RT_OWNED_MPEG_HOST,
+           "guest-owned sceMpeg: host HLE serves sceMpegFinish before any module");
+    runtime_module_path(owned_path, sizeof(owned_path), "rt-nostart.prx");
+    expect(write_runtime_module_prx_lib(owned_path, 6u, 0, RT_OWNED_MPEG_NID, "rtowned", 0u,
+                                        "sceMpeg") &&
+               runtime_module_identity(owned_path, &s_rt_owned_code),
+           "guest-owned sceMpeg: the start-less sceMpeg module fixture is written");
+
+    for (int kill_switch = 0; kill_switch <= 1; kill_switch++) {
+        sr_hle_test_module_reset();
+        sr_hle_test_partition_reset();
+        sr_module_code_reset();
+        sr_module_code_register(&s_rt_owned_code);
+        hle_test_setenv("SR_REAL_MODULE_START", kill_switch ? "0" : NULL);
+        unsigned stops = s_rt_stop_calls;
+        uint32_t uid = rt_load(owned_guest, 0u);
+        expect(uid != 0u && (uid & 0x80000000u) == 0u &&
+                   sr_module_code_is_bound(&s_rt_owned_code, &base) &&
+                   sr_hle_resolve_late_import(RT_OWNED_MPEG_NID) == base + RT_QUERY &&
+                   rt_owned_mpeg_import() == RT_OWNED_MPEG_HOST,
+               "guest-owned sceMpeg: before start the import reaches host HLE");
+        rt_capture_begin();
+        uint32_t started = rt_lifecycle(sr_hle_test_start_module, uid, 0u, 0u, 0u);
+        uint32_t answer = rt_owned_mpeg_import();
+        out = rt_capture_end();
+        if (!kill_switch) {
+            expect(started == 0u && strstr(out, "host HLE serves") == NULL &&
+                       sr_hle_test_started_export(RT_OWNED_MPEG_NID) == base + RT_QUERY &&
+                       answer == RT_OWNED_MARK,
+                   "guest-owned sceMpeg: by default the module starts and its export runs "
+                   "instead of the host handler");
+        } else {
+            expect(started == 0u && sr_hle_test_started_export(RT_OWNED_MPEG_NID) == 0u &&
+                       answer == RT_OWNED_MPEG_HOST,
+                   "guest-owned sceMpeg: SR_REAL_MODULE_START=0 keeps the host handler");
+        }
+        expect(rt_lifecycle(sr_hle_test_stop_module, uid, 0u, 0u, 0u) == 0u &&
+                   s_rt_stop_calls == stops + (kill_switch ? 0u : 1u) &&
+                   rt_lifecycle(sr_hle_test_unload_module, uid, 0u, 0u, 0u) == 0u &&
+                   sr_hle_resolve_late_import(RT_OWNED_MPEG_NID) == SR_HLE_LATE_BUILTIN &&
+                   rt_owned_mpeg_import() == RT_OWNED_MPEG_HOST,
+               "guest-owned sceMpeg: unload hands the NID back to host HLE");
+    }
+
+    hle_test_setenv("SR_REAL_MODULE_START", NULL);
+    sr_hle_test_module_reset();
+    sr_hle_test_partition_reset();
+    sr_module_code_reset();
+    remove(owned_path);
+}
+
 static TCB *fixture_thread(uint32_t uid, int state, int priority);
 static int write_runtime_module_bytes(const char *path, const uint8_t *bytes, size_t size) {
     FILE *f = fopen(path, "wb");
@@ -2950,6 +3027,7 @@ static void test_runtime_placed_modules(void) {
 
     test_runtime_placed_hle_shadow(alpha_guest, alpha_path);
     test_runtime_placed_guest_owned_library();
+    test_runtime_placed_guest_owned_mpeg();
 
     sr_hle_test_module_reset();
     sr_hle_test_partition_reset();
@@ -7699,10 +7777,8 @@ static void test_unregistered_batch_refusals(void) {
         {0x3eaba285u, 0x80010086u, "sceHttpAddExtraHeader"},
         {0xab1abe07u, 0x80010086u, "sceHttpInit"},
         {0xd1c8945eu, 0x80010086u, "sceHttpEnd"},
-        {0x29681260u, 0x80010086u, "sceAudiocodecReleaseEDRAM"},
-        {0x3a20a200u, 0x80010086u, "sceAudiocodecGetEDRAM"},
-        {0x5b37eb1du, 0x80010086u, "sceAudiocodecInit"},
-        {0x70a703f8u, 0x80010086u, "sceAudiocodecDecode"},
+        /* sceAudiocodec's four calls left this list when hle_videocodec.c made them live
+         * (#286); videocodec_selftest.c covers them. */
     };
     reset_fixture();
     sr_hle_init();

@@ -3768,7 +3768,6 @@ static void hle_register_unregistered_import_batch(void) {
      * is not established here and it is refused under its name rather than guessed. */
     hle_register_unregistered_import_rtc();
     hle_register_unregistered_import_network_2();
-    hle_register_unregistered_import_audio_codec();
 }
 
 /* What a stalled thread's object wait is on, for the watchdog's thread dump: the kernel
@@ -4008,6 +4007,7 @@ void sr_hle_init(void) {
     hle_register_atrac_handlers();
     hle_register_mp3_handlers();
     hle_register_sas_handlers();
+    hle_register_videocodec_handlers();
 #endif
 #ifndef SR_MPEG_MEDIA_SELFTEST
     /* Opt-in GE completion timing: the hooks report nothing unless SR_GE_TIMING=1. */

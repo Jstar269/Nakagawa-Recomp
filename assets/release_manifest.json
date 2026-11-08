@@ -765,9 +765,9 @@
       "public_scope_included": true,
       "optional": false,
       "hashes": {
-        "sha256": "49df1cf342198bbee93b80258decd49719f5030be4bcd868aed4682521831529"
+        "sha256": "2a69bba14707825cf417d1b7fa72c9a4e34b2cbf320fac83abc43934586c6355"
       },
-      "comment": "Project-authored link preview: the N1 mark, the site's tennis court and text in Geist (OFL-1.1). No game imagery."
+      "comment": "Project-authored link preview: the N1 mark, a short MIPS listing written for the card, and text in Chakra Petch, Geist and Geist Mono (OFL-1.1). No game imagery or game code."
     },
     {
       "id": "readme-showcase-ge-scene-animation",
