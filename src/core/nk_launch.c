@@ -1550,6 +1550,10 @@ NkResult nk_launch_start(NkLaunchSession *session) {
         bool authentic = !session->enhancement_package_id[0] && strcmp(ace_line, "off") == 0;
         envp[env_count++] = !authentic && session->config.present_upscale == NK_PRESENT_UPSCALE_FSR1
                                 ? "SR_PRESENT_UPSCALE=fsr1" : "SR_PRESENT_UPSCALE=off";
+        /* The movie upscaler (SR_MOVIE_UPSCALE) has no setting: an authentic session runs it off
+           whatever the environment says, and an enhanced or Ace Mode session keeps the
+           inherited value. */
+        if (authentic) envp[env_count++] = "SR_MOVIE_UPSCALE=off";
     }
     envp[env_count++] = env_vsync;
     envp[env_count++] = env_fs;

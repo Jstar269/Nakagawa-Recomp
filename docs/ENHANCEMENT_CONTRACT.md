@@ -69,8 +69,9 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   A run with it on is stamped as `SR_PRESENT_UPSCALE` is (`ACE_MODE: present upscale
   movie-anime4k`, the `phase=present_upscale` boot event and `runtime.enhancements`), so neither
   `flight_diff.py` nor `boot_gate.py` takes it as authentic evidence. It reaches only frames the CPU
-  presents: a movie the GE presents (drawn as a texture, or decoded into a GE target) is shown
-  as the presentation upscaler sees it ([#2111](https://github.com/Jstar269/nakagawa-recomp/issues/2111)).
+  presents: a movie the GE presents (drawn as a texture, or decoded into a GE target) is a GE frame
+  and is not upscaled by it. An Authentic launcher session, the picture gate and the library sweep
+  run with it `off`, whatever the environment says.
   GPU cost at 4K: 0.74 ms per present for a 480x272 frame to 3811x2160 on an RTX 3080
   (`anime4k-selftest`).
 - **Forbidden:** Mutating GE display list commands, intercepting guest draw calls to alter gameplay geometry, or feeding host input back into the guest controller state.

@@ -158,11 +158,12 @@ int sdl3vk_present_held(void);
  * and returns an image of exactly out_w x out_h, in TRANSFER_SRC_OPTIMAL, that is copied 1:1 into
  * that place, or NULL to scale as SR_PRESENT_SCALING says. `cpu_frame` is 1 when the picture is
  * a CPU-presented frame (a movie, or any frame of a software-GE run; a held present repeats the
- * last one's kind). A capture always reads the guest's frame, so what it returns is never
- * captured. Registered only when SR_PRESENT_UPSCALE or SR_MOVIE_UPSCALE asks for it; NULL removes
- * it. Handles are Vulkan's, passed as void pointers. */
+ * last one's kind). `*anime4k` (NULL when the caller does not ask) is set to 1 when Anime4K's
+ * stages made the returned image, so record.json can name them. A capture always reads the
+ * guest's frame, so what it returns is never captured. Registered only when SR_PRESENT_UPSCALE or
+ * SR_MOVIE_UPSCALE asks for it; NULL removes it. Handles are Vulkan's, passed as void pointers. */
 typedef void *(*Sdl3VkUpscalePass)(void *cmd, void *src, int w, int h, int out_w, int out_h,
-                                   int cpu_frame);
+                                   int cpu_frame, int *anime4k);
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass);
 /* The same for the recording (SR_VIDEOREC_DIR, #2138): called with the recording's place for a
  * recorded present whose shown image is smaller than it, so a recording made with the upscaler

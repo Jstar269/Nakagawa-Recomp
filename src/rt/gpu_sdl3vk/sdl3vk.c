@@ -2089,9 +2089,10 @@ static int rec_record(VkCommandBuffer cmd, PresentFrame *f, VkImage show, int sh
      * every size change between the two). The blit below then copies the result 1:1. Only an
      * enlargement, as in the window: EASU is not a downscaler. */
     VkImage upscaled = VK_NULL_HANDLE;
+    int by_anime4k = 0;
     if (s_rec_upscale_pass && plan.w >= showw && plan.h >= showh && (plan.w > showw || plan.h > showh))
         upscaled = (VkImage)s_rec_upscale_pass((void *)cmd, (void *)show, showw, showh, plan.w,
-                                               plan.h, s_upscale_cpu_frame);
+                                               plan.h, s_upscale_cpu_frame, &by_anime4k);
     int prescaled = 0;
     if (upscaled) {
         blit_src = upscaled;
@@ -2121,7 +2122,7 @@ static int rec_record(VkCommandBuffer cmd, PresentFrame *f, VkImage show, int sh
     /* What record.json says made this picture: the blits issued here, never the scaling
      * setting's name. Sharp at an exact multiple, and bilinear there too, are one nearest blit;
      * sharp shrinking, or without its prescale image, is one linear blit. A 1:1 copy is none. */
-    int filter = upscaled ? SR_VIDEOREC_FILTER_FSR1
+    int filter = upscaled ? (by_anime4k ? SR_VIDEOREC_FILTER_ANIME4K : SR_VIDEOREC_FILTER_FSR1)
                : prescaled ? SR_VIDEOREC_FILTER_SHARP
                : plan.nearest ? SR_VIDEOREC_FILTER_NEAREST
                : SR_VIDEOREC_FILTER_LINEAR;
@@ -2444,7 +2445,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
          * downscaler. */
         if (s_upscale_pass && plan.w >= showw && plan.h >= showh && (plan.w > showw || plan.h > showh))
             upscaled = (VkImage)s_upscale_pass((void *)cmd, (void *)show, showw, showh, plan.w, plan.h,
-                                               s_upscale_cpu_frame);
+                                               s_upscale_cpu_frame, NULL);
         if (upscaled) {
             blit_src = upscaled;
             bw = plan.w;

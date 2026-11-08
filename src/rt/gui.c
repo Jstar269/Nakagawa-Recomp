@@ -693,7 +693,7 @@ static int gui_movie_make(MovieUpscale *m, const char *where) {
  * its place (anime4k), then FSR 1 to the exact size; FSR 1 alone for fsr1, or when Anime4K is
  * unavailable. NULL leaves the frame to the presentation upscaler or the scaling. */
 static VkImage gui_movie_record(MovieUpscale *m, VkCommandBuffer cmd, VkImage src, int w, int h,
-                                int out_w, int out_h) {
+                                int out_w, int out_h, int *anime4k) {
     VkImage in = src;
     int iw = w, ih = h;
     if (m->anime4k) {
@@ -705,14 +705,21 @@ static VkImage gui_movie_record(MovieUpscale *m, VkCommandBuffer cmd, VkImage sr
             ih = h << stages;
         }
     }
-    if (in != src && iw == out_w && ih == out_h) return in;
+    if (in != src && iw == out_w && ih == out_h) {
+        if (anime4k) *anime4k = 1;
+        return in;
+    }
     if (!m->fsr1) return VK_NULL_HANDLE;
-    return fsr1_record(m->fsr1, cmd, in, iw, ih, out_w, out_h, FSR1_SHARPNESS_DEFAULT);
+    VkImage out = fsr1_record(m->fsr1, cmd, in, iw, ih, out_w, out_h, FSR1_SHARPNESS_DEFAULT);
+    if (out && in != src && anime4k) *anime4k = 1;
+    return out;
 }
 
-static void *gui_upscale_pass(void *cmd, void *src, int w, int h, int out_w, int out_h, int cpu_frame) {
+static void *gui_upscale_pass(void *cmd, void *src, int w, int h, int out_w, int out_h, int cpu_frame,
+                              int *anime4k) {
     if (cpu_frame && s_movie_mode != MOVIE_UPSCALE_OFF) {
-        VkImage movie = gui_movie_record(&s_movie, (VkCommandBuffer)cmd, (VkImage)src, w, h, out_w, out_h);
+        VkImage movie = gui_movie_record(&s_movie, (VkCommandBuffer)cmd, (VkImage)src, w, h, out_w, out_h,
+                                         anime4k);
         if (movie) {
             s_movie.presents++;
             return (void *)movie;
@@ -731,10 +738,10 @@ static unsigned long long s_fsr1_rec_presents;  /* recorded presents the upscale
  * the recording's never make one rebuild its images for the other. Without it the recording is
  * scaled as SR_PRESENT_SCALING says, and record.json names the blits that made it. */
 static void *gui_record_upscale_pass(void *cmd, void *src, int w, int h, int out_w, int out_h,
-                                     int cpu_frame) {
+                                     int cpu_frame, int *anime4k) {
     if (cpu_frame && s_movie_mode != MOVIE_UPSCALE_OFF && gui_movie_make(&s_movie_rec, "the recording")) {
         VkImage movie = gui_movie_record(&s_movie_rec, (VkCommandBuffer)cmd, (VkImage)src, w, h, out_w,
-                                         out_h);
+                                         out_h, anime4k);
         if (movie) {
             s_movie_rec.presents++;
             return (void *)movie;
