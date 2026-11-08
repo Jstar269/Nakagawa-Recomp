@@ -77,14 +77,81 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   uploads per frame, which can make a busy game drop frames. The scaler builds no lookup table, so it adds no fixed
   memory cost. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1010-texture-scaling-and-the-smart-2d-filter).
+- **Sharp game text (Ace Mode, development only).** It is reachable only through the `SR_GLYPHS` environment
+  variable (`on`), has no setting in the player, and is not an admitted Enhanced item, because it
+  changes the frames the game can read back
+  ([section 11.3.5](ENHANCEMENT_CONTRACT.md#1135-sharp-game-text-not-admitted)). At a render scale of 2 to 4, a
+  small sprite that maps one texel to one pixel over a page of anti-aliased text is redrawn from a version of just
+  that rectangle rebuilt at the render scale, checked against the game's own bytes. A page with a rebuilt rectangle
+  costs the page's GPU memory times the render scale squared (a 256x256 page at 4x is 4 MB), taken from the
+  same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
+  frame, on the game's thread. Text drawn as triangles, or from a page in VRAM, is drawn as the game made it. The
+  rules are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1013-sharp-game-text).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
   folder deletes no games or saves.
 
+## Install, update and uninstall (Windows)
+
+Nakagawa is a portable ZIP ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)), and a release can also
+carry a per-user installer, [`Setup.exe`](#windows-installer-setupexe). The unpacked folder, or the installed
+program, holds nothing you create, so installing and removing it never touches your games or saves.
+
+**Install.** Unpack `nakagawa-recomp-<version>-windows-x64.zip` into a folder of your choice (a read-only folder
+works) and start `bin\nakagawa_player.exe`. For a Start-menu or Desktop entry, right-click the executable and
+choose **Pin to Start**, or send a shortcut to the Desktop. From a source checkout,
+`python tools/stage_install.py --dest "<folder>" --start-menu-shortcut --desktop-shortcut` stages the same layout and writes
+both shortcuts with the player's taskbar identity, so the launcher and the games it starts share one taskbar
+button. The ZIP itself writes no shortcut.
+
+**Add to Steam** ([#2152](https://github.com/Jstar269/nakagawa-recomp/issues/2152)). The code that adds Nakagawa to a
+Steam library as a non-Steam game is in `src/core/nk_steam_shortcuts.c`; the player has no button that calls it,
+so add the executable in Steam by hand. It works on your PC only and makes no network call or
+download. It edits the binary `shortcuts.vdf` in the `userdata\<account>\config` folder of the Steam account you pick
+(Steam's folder comes from the current user's own registry setting on Windows). It adds one entry with the app name,
+the executable and its start-in folder, and no launch options, and it only adds: entries it did not write are copied
+byte for byte, an entry for the same executable is reported and nothing is written, and a file it cannot read is left
+untouched. Before it writes, it copies the file to `shortcuts.vdf.nakagawa-backup-<date>-<time>` and reads the copy
+back; if that fails it writes nothing. It writes a temporary file and renames it over the original. Steam rewrites
+this file when it exits, so while Steam runs nothing is written: close Steam first (Nakagawa never closes it). In
+portable mode the entry points at the executable's current folder, so moving the folder breaks the shortcut.
+Other platforms are unsupported and say so.
+
+**Update.** A copy `Setup.exe` installed updates by running the next release's Setup (see [below](#windows-installer-setupexe)). For a ZIP copy, Check for updates unpacks the new version into a new folder next to the running one and leaves the old
+one. Your data is in the per-user folders below, so the new version finds it. Delete the old folder when you
+are done with it.
+
+**Uninstall the program.**
+
+- A ZIP you unpacked: close the player and delete its folder. Nothing was written anywhere else, except any
+  shortcut you made yourself.
+- A folder made by `tools/stage_install.py --dest`: run
+  `python tools/stage_install.py --uninstall --dest "<folder>"` (add `--dry-run` to see the list first). It removes
+  `bin\`, `source\`, the icon, the install marker and the shortcuts and desktop entries it recorded, and it
+  skips any recorded path it would not have written itself. It never reads or deletes the per-user folders,
+  and a file you added to the install folder stays.
+- Portable mode ([below](#portable-mode-portabletxt)): the `data` folder beside the executable is your data. The
+  uninstall keeps `bin\data` and `bin\portable.txt`; delete the folder yourself when you want it gone.
+
+**What stays after an uninstall, and how to remove it.** Everything the player writes is under
+`%LOCALAPPDATA%\Nakagawa` (or the `data` folder in portable mode, or the folder given with `--user-data-root`):
+
+| Folder | Holds | To remove it |
+| --- | --- | --- |
+| `data/` | the library, built games and their build cache, imported discs and decrypted files (`titles\<DISC_ID>`, `discs\<DISC_ID>`), imported fonts, downloaded build tools | **Remove from library** on a game removes what Nakagawa built for it; its disc copy and decrypted files go only when you tick them, and the size is shown first. **Settings > Factory reset** moves the folders aside instead of deleting them. |
+| `cache/` | the platform cache folder | **Settings > Build tools and cache** deletes the shared library cache; or delete the folder |
+| `saves/` | each game's Memory Stick folder | **Remove from library** keeps it unless you tick the saves (it backs them up first); otherwise delete the folder by hand |
+| `config/` | `settings.json` | **Factory reset**, or delete the folder |
+| `logs/` | the player's, the games' and the builds' logs, in one folder | **Settings** opens it; delete what you like |
+
+Your disc images on your own drives are never touched. To remove everything Nakagawa ever wrote, uninstall the
+program as above and then delete `%LOCALAPPDATA%\Nakagawa`. Factory reset leaves a `-backup-<time>` copy of each
+folder it moved, and those are yours to delete.
+
 ## Wine and Proton
 
-The Windows ZIP is the only player build; there is no Linux build yet ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306)).
+The Windows ZIP is the only player release; there is no Linux player release ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306)).
 Wine or Proton is not a supported platform, and nothing in the project is changed to make it work. These
 steps are the smoke run from [#1876](https://github.com/Jstar269/nakagawa-recomp/issues/1876). It needs no game disc and
 no network.
@@ -197,7 +264,7 @@ make CC=gcc showcase-linux   # needs PSPDEV at /usr/local/pspdev, as above
 
 The smoke selects SDL's dummy video and audio drivers and runs without a desktop or
 GPU. This confirms the Linux runtime builds and runs the showcase fixtures; general
-consumer ISO compatibility and interactive Linux presentation remain in the works
+consumer ISO compatibility and interactive Linux presentation are not supported
 ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306)).
 
 ## Supported development baseline
@@ -206,7 +273,7 @@ The supported and tested core development environment is:
 
 - Windows 11 x64. Older or unsupported Windows versions may work, but receive no compatibility guarantee.
 - PowerShell 7.6+ (`pwsh`) as the shell you type into. Windows PowerShell 5.1 is not supported for that.
-- CPython 3.15.x (3.14.x is also accepted, `>=3.14,<3.16`), with `python` resolving to that feature line. 3.15 is the default: the pinned prerequisite uses 3.15.2 and hosted CI uses 3.15.1.
+- CPython 3.15.x (3.14.x is also accepted, `>=3.14,<3.16`), with `python` resolving to that feature line. 3.15 is the default: the pinned prerequisite and hosted CI both use 3.15.2.
 - Current MSYS2 UCRT64 GCC/G++, GNU Make, SDL3, and Vulkan loader packages. The release
   manifest's `toolchain_policy` records only the floors the code actually needs: a C11 compiler
   (GCC 4.9+), GNU Make 4.0+ (the title link uses `$(file ...)`), SDL3 3.x, a Vulkan SDK for API 1.1+, and Python 3.15 (the manifest says `>=3.15,<3.16`; the tooling itself also accepts 3.14, see the first bullet). The rolling
@@ -256,7 +323,7 @@ python -m pip install .
 This installs the declared tooling dependencies, including `compiledb`. Run it before you add the MSYS2
 line to `PATH`; see [PATH order](#path-order).
 
-`glslc` from the Vulkan SDK is only needed when regenerating the checked-in shader headers. LLD, Clang, CMake, Ninja, and Node.js are not required for the Windows core build (a staged CMake target for portability work is tracked separately in [`PLATFORM_PORTABILITY.md`](PLATFORM_PORTABILITY.md)).
+`glslc` from the Vulkan SDK is only needed when regenerating the checked-in shader headers. LLD, Clang, CMake, Ninja, and Node.js are not required for the Windows core build (the CMake build used on Linux and Android is described in [`PLATFORM_PORTABILITY.md`](PLATFORM_PORTABILITY.md)).
 
 ### PATH order
 
@@ -452,7 +519,7 @@ A PSN release of a UMD game (an `EBOOT.PBP` whose `DATA.PSAR` is an NPUMDIMG dis
 
 ### Compressed disc images
 
-Builds after v0.0.1 also take a compressed disc image: a `.cso` (CISO, versions 1 and 2), a `.zso` (ZISO) or a `.chd`
+The player also takes a compressed disc image: a `.cso` (CISO, versions 1 and 2), a `.zso` (ZISO) or a `.chd`
 made with `chdman createdvd`. It expands the image once, when you add it, into a plain `.iso` at
 `<user data>/discs/<DISC_ID>/<DISC_ID>.<cso|zso|chd>.iso`, and every later step reads that `.iso` exactly as it
 reads one you added yourself. This needs free space for the whole `.iso` (up to 1.8 GB for a UMD) beside the
@@ -485,9 +552,37 @@ On start-up, `nakagawa_player.exe` automatically scans `<user data>/manifests` a
 
 Similarly, `python tools/nk_cli.py build-package` searches `assets/titles` first and then `<user data>/manifests`, resolving title manifests identically to the native player so user-configured titles build without command-line overlay arguments.
 
+### Windows installer (`Setup.exe`)
+
+A release can also carry `nakagawa-recomp-<version>-windows-x64-setup.exe`
+([#2208](https://github.com/Jstar269/nakagawa-recomp/issues/2208)), a per-user installer with the same files as the
+ZIP. It needs no administrator and installs to `%LOCALAPPDATA%\Programs\Nakagawa Recomp` (you can choose another
+folder). It adds a Start-menu entry and, if you tick it, a Desktop one, both with the player's taskbar identity, and
+an entry under Apps & features. It makes no network call.
+
+- **Update:** run the next release's Setup; it uses the same folder. It replaces the program files with the new
+  release's, then deletes each file the previous release installed there (as listed in that install's own
+  `SHA256SUMS.txt`) that the new release no longer carries, but only if the file is unchanged since Setup installed
+  it, and removes the folders that leaves empty. Files you added or changed in the install folder, a portable
+  `bin\data` and `bin\portable.txt` are kept, nothing is deleted through a junction or symbolic link, and
+  `%LOCALAPPDATA%\Nakagawa` (your games, saves and settings) is not touched. The player's Settings page offers the
+  release page for a copy Setup installed, not a ZIP download.
+- **Uninstall:** Apps & features, or `unins000.exe` in the install folder. It removes the program and keeps
+  `%LOCALAPPDATA%\Nakagawa` (the `config`, `data`, `cache`, `logs` and `saves` folders) unless you tick "Also delete my
+  games, saves and settings" on the uninstall page and confirm a second time; a silent uninstall never deletes them. A
+  junction or symbolic link inside those folders is removed as a link and what it points to is left alone. Close the
+  player first: the uninstaller does not close it, and stops without changing anything while it runs.
+- **One copy per shortcut name:** the installer and `tools/stage_install.py` write the same Start-menu shortcut, so
+  Setup refuses to install while a shortcut of that name starts another copy (for example one made by
+  `stage_install.py`), and `stage_install.py --shortcut`, `--start-menu-shortcut` and `--desktop-shortcut` refuse to
+  replace a shortcut that starts another existing copy (a shortcut whose program is gone is replaced). Uninstall or
+  delete that copy and its shortcut first. The two also never share a folder: Setup refuses a folder
+  `stage_install.py` set up, and `stage_install.py` refuses a folder with Setup's `unins000.exe`
+  (`INSTALL_DESTINATION_INSTALLER_OWNED`).
+
 ### Portable mode (`portable.txt`)
 
-Portable mode is in builds after v0.0.1. By default every per-user folder lives under the per-user data root (on Windows,
+By default every per-user folder lives under the per-user data root (on Windows,
 `%LOCALAPPDATA%\Nakagawa\data`). To keep the library, saves, settings, logs, cache and downloads
 beside the program instead, for a USB stick, a handheld PC or two versions that must not share
 settings, create an empty file named `portable.txt` in the same folder as `nakagawa_player.exe`.
@@ -550,7 +645,7 @@ You can copy the whole `font` folder. The import reads only the `.pgf` files in 
 
 If your custom firmware has no Flash 0 USB setting, use Nakagawa Font Copy, a small PSP app built from this project's source in `src/psp_companion/` (#737). It reads the PSP's font files, decrypts nothing and changes nothing on the PSP. It writes only to its own folder, `NAKAGAWA/fonts`, on the Memory Stick, or on a PSP Go's internal storage when you start it from there.
 
-1. Build the app with the PSPSDK (`make -C src/psp_companion`; see [PSPDEV integration](PSPDEV_LOCAL_VERIFICATION.md)), then copy `src/psp_companion/build/EBOOT.PBP` to `PSP/GAME/NAKAGAWAFONTS/EBOOT.PBP` on the Memory Stick. Releases do not include the app yet.
+1. Build the app with the PSPSDK (`make -C src/psp_companion`; see [PSPDEV integration](PSPDEV_LOCAL_VERIFICATION.md)), then copy `src/psp_companion/build/EBOOT.PBP` to `PSP/GAME/NAKAGAWAFONTS/EBOOT.PBP` on the Memory Stick. Releases do not include the app.
 2. On the PSP, open **Game > Memory Stick > Nakagawa Font Copy** and press **X**. The app copies every `.pgf` file in `flash0:/font` and checks each copy against the original, then says how many fonts it copied. Running it again replaces the copies.
 3. Leave the app, connect the PSP to your PC with a USB cable, and turn on **Settings > USB Connection** on the PSP. The Memory Stick appears on the PC as a drive.
 4. In the player, open **Settings**, then **PSP FONTS**, and choose **GET FONTS FROM MY PSP**: the player finds the Memory Stick's `NAKAGAWA\fonts` folder and imports it. You can instead choose **CHOOSE FONT FILES**, open that folder and pick its `.pgf` files. From a terminal, `python tools/nk_cli.py fonts import <drive>:\NAKAGAWA\fonts` does the same, with your PSP's drive letter in place of `<drive>`.
@@ -659,6 +754,8 @@ Doctor reports a missing, incomplete, or stale cache entry and names the changed
 
 Builds also share compiled objects. The runtime compiles once for every game, an unchanged rebuild compiles nothing, and the system libraries a disc carries are compiled once for every game that carries the same library. These objects stay in `<user data>/cache/objects/` and `<user data>/cache/shared-libraries/` and are never uploaded or shared. Settings > BUILD TOOLS AND CACHE turns library sharing off and clears its folder. [`RUNTIME_PACKAGING_ARCHITECTURE.md`](RUNTIME_PACKAGING_ARCHITECTURE.md#shared-compiled-objects-1306) has the keys and limits.
 
+The GPU renderer keeps a pipeline cache in `<user data>/cache/gegpu/`, one `gegpu-<vendor>-<device>.vkpc` file per graphics card ([#2149](https://github.com/Jstar269/nakagawa-recomp/issues/2149)). It holds the compiled draw states the graphics driver built in earlier runs, so a game's first scenes stutter less on the next start. It changes start-up time only, never a pixel. The file is checked before the driver sees it. A file written for another card, another driver version, another build's shaders, or one that is truncated or damaged is ignored, and the run starts with an empty cache and replaces it at exit. A file that passes the checks is never replaced by less data than it held, so a short run, or a driver that ignores the file, cannot shrink the cache. The log says on one line at start which of these happened. The file is safe to delete at any time, and set `SR_GPU_PIPELINE_CACHE=0` to run without it.
+
 Alternatively, to build a local AOT package directly from a validated title manifest and plaintext executable ELF, use
 the planner's package action. It runs the same two-phase Make pipeline and writes the executable,
 generated objects, `package.json`, and `build-report.json` under one dedicated untracked directory:
@@ -761,12 +858,17 @@ long-run present rate never exceeds the cap (`gui-present-selftest`).
 
 ### Presentation upscaler (`SR_PRESENT_UPSCALE`)
 
+In the player this is **Sharper enlarging** on Settings > Enhanced and on each game's page, off by
+default; the launcher sets `SR_PRESENT_UPSCALE` from it for an Enhanced or Ace run.
+
 `SR_PRESENT_UPSCALE=fsr1` makes the Vulkan presenter enlarge the picture to its place in the
 window with AMD FidelityFX Super Resolution 1: EASU, an edge-adaptive upscaler, then RCAS
 sharpening. `off`, the default, keeps the `SR_PRESENT_SCALING` filter. It runs only when the
 picture is enlarged on both axes, on whatever frame the presenter shows. It is presentation only:
 the guest's frame, guest VRAM and captures are byte for byte what they are with it off
-(`gpu-capture-selftest` and, with a Vulkan device and a display, `display-smoke-fsr1`). The pause
+(`gpu-capture-selftest` and, with a Vulkan device and a display, `display-smoke-fsr1`). A run
+recording (`SR_VIDEOREC_DIR`) is enlarged by FSR 1 too, at the recording's size, and its
+`record.json` names the filter ([DEBUGGING.md](DEBUGGING.md)). The pause
 overlay is drawn at the window's size on the CPU, so the paused picture is not upscaled and looks
 softer than the running one. Its cost is small: from 1920x1088 to 3840x2160, EASU and RCAS took
 0.40 ms per present on an RTX 3080 (`fsr1-selftest`). An unknown value, or a device without
@@ -901,7 +1003,7 @@ in `tools/test_prereq_fetcher.py` refuses `NOASSERTION`; the consent card would 
 entry as under review.
 
 This automatic prerequisite flow currently targets Windows x64 with the
-UCRT64 package set. Linux prerequisite installation is in the works
+UCRT64 package set. Linux prerequisite installation is not supported
 ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306)); the wider
 distribution and update contract remains tracked by [#324](https://github.com/Jstar269/nakagawa-recomp/issues/324).
 
@@ -912,19 +1014,19 @@ then from `PATH`; without it the built-in readable debug font is used. Placing
 ### Network use
 
 Nakagawa works offline. The player and the runtime make no network connection unless you
-agree to one, and the game itself never reaches the network. Today there are two
-connections, listed below; any future online feature will be opt-in and added here first.
+agree to one, and the game itself never reaches the network. There are two
+connections, listed below, and each is opt-in.
 
 | What | Host | When | Controlled by |
 | --- | --- | --- | --- |
 | Build-tool download | `www.python.org`, `repo.msys2.org` (HTTPS) | Only after you select **DOWNLOAD** on the BUILD PACKAGE consent card | That consent card, per build |
-| Check for updates (builds after v0.0.1) | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
+| Check for updates | `api.github.com` (HTTPS) | When you select **CHECK FOR UPDATES** (Settings > Updates), or once at start if you turn on **Check at start** (off by default) | That button, and that switch |
 | Update download | `github.com`, which redirects to `release-assets.githubusercontent.com` (HTTPS) | Only after a check finds a newer version and you select **DOWNLOAD** | That button, per download |
 
 A release folder that carries a verified `prereqs/` tree never makes the build-tool
 download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
 
-Enhanced and Ace (Settings > Enhanced, in builds after v0.0.1) make no network connection: its features run on this PC, and its per-game report
+Enhanced and Ace (Settings > Enhanced) make no network connection: its features run on this PC, and its per-game report
 stays in the user data folder.
 
 Links the player shows, such as a release page, **Report this game**, **See existing reports** and a
@@ -1068,9 +1170,22 @@ same on Windows and Linux; it is not a pre-push hook, because pre-commit passes 
 that stage and directory mode would then scan the whole working tree, including the private input
 directories (the pushed history is scanned in hosted CI); its upstream git mode sets `GIT_CONFIG_GLOBAL=NUL`,
 which Git for Windows rejects, so that mode scanned nothing on Windows. C formatting is defined by
-`.clang-format` but is not currently an automatic pre-commit hook. A mypy configuration remains in
-`pyproject.toml`, but mypy is **not** a shared gate while the pre-existing Python typing baseline is being corrected. Do not describe a known-failing type check as a required
-contributor hook. These tools are not core runtime dependencies.
+`.clang-format` but is not currently an automatic pre-commit hook. Mypy 2.4.1 is a shared check for
+the issue #1391 import/VFPU scope. Before this work, the full `tools/` scan used
+`python -m mypy --no-incremental --no-error-summary --no-pretty --python-version 3.15 --platform linux --explicit-package-bases tools`
+and reported 353 errors in 120 modules. The full-tree per-module ratchet remains in
+`tools/mypy_baseline.json`; its entries outside the clean scope are existing typing debt, not
+suppressed errors. The current full-tree residual is 318 errors in 106 modules; their per-module
+counts are listed in `tools/mypy_baseline.json` and remain guarded by that ratchet. The clean scope
+directly checks `tools/verify_vfpu_provenance.py`,
+`tools/hle_manifest.py`, `tools/psp_import_table.py`, `tools/import_audit_gate.py`,
+`tools/vfpu_fuzz_gen.py`, `tools/test_import_audit.py`, `tools/test_hle_manifest.py`,
+`tools/test_enhancement_package.py` and `tools/mypy_baseline.py`; mypy also checks their imports.
+The historical `tools/test_pgd_malformed.py` path is not present in this checkout. Run the focused
+shared check with `python tools/mypy_baseline.py --scope issue-1391`. The local hook installs
+its own `mypy==2.4.1` into pre-commit's environment, so no separate install is needed; for the direct command above,
+run `python -m pip install mypy==2.4.1` (the helper rejects any other version). These tools are not
+core runtime dependencies.
 
 ### Optional LLVM backend
 
@@ -1097,7 +1212,7 @@ The default C backend needs none of this. `LLVM_CLANG` and `LLVM_LINK` name othe
   address notes, or other redistributable metadata—never a project database containing game
   bytes.
 
-Do not add any of these large checkouts to this repository, and do not make the eventual player
+Do not add any of these large checkouts to this repository, and do not make the player
 download them. They are development/oracle aids; the release path should remain the recompiler,
 its redistributable host dependencies, and user-supplied game input.
 
@@ -1161,7 +1276,7 @@ outside the published repository.
 
 ### Local problem report (`nk_cli.py report`)
 
-In builds after v0.0.1, `python tools/nk_cli.py report --title <DISC_ID>` writes one ZIP you can attach to an issue yourself. It
+`python tools/nk_cli.py report --title <DISC_ID>` writes one ZIP you can attach to an issue yourself. It
 is made on your PC and **nothing is uploaded**: the code uses no network library, and a test fails if it
 opens a connection. The ZIP goes to `<user data>\reports\<UTC time>-<title>.zip`; `--preview` lists the
 files without writing it, `--json` prints the list for a tool, and `--no-doctor` leaves out the toolchain
