@@ -48,6 +48,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from typing import Any
 import unittest
 from pathlib import Path
 
@@ -96,7 +97,7 @@ MATRIX_WRITES = re.compile(r"s->v\[\d+\]=(?:_v\d+|_m\d+_\d+);")
 
 def macro_arguments(text: str, name: str) -> list[str]:
     """The top-level arguments of every `name(...)` call in `text`."""
-    calls = []
+    calls: list[Any] = []
     start = 0
     while True:
         i = text.find(name + "(", start)
