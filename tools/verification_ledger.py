@@ -66,7 +66,7 @@ CLASS_SOURCES = {
         "family of handlers. VFPU: the form's AOT body calls a kernel from the `src/rt/recomp.c` section derived "
         "from PPSSPP's table-based kernels (`assets/vfpu/PROVENANCE.json`)."
     ),
-    "game-route": "No public, title-free record of the NIDs or forms a qualified title route exercised exists yet.",
+    "game-route": "No public, title-free record of the NIDs or forms a qualified title route exercised exists.",
     "synthetic": (
         "HLE: an executable host test enters the NID (`src/rt/intr_conformance.h` cells or "
         "`tests/native/hle_thread_selftest.c` dispatch), or the handler's notes cite a selftest, a "

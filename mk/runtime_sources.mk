@@ -109,7 +109,7 @@ HLE_SRCS   := src/rt/hle.c src/rt/hle_audio.c src/rt/hle_audio_codec.c src/rt/hl
               src/rt/hle_kernel_thread.c src/rt/hle_kernel_time.c src/rt/hle_kernel_utils.c \
               src/rt/hle_mpeg.c src/rt/hle_network.c src/rt/hle_npdrm.c src/rt/hle_power.c \
               src/rt/hle_route.c src/rt/hle_rtc.c src/rt/hle_system.c src/rt/hle_umd.c \
-              src/rt/hle_utility.c
+              src/rt/hle_utility.c src/rt/hle_videocodec.c
 HLE_HDRS   := src/rt/hle_internal.h src/rt/hle_power.h
 HLE_OBJS   := $(addprefix $(BUILD_DIR)/,$(notdir $(HLE_SRCS:.c=.o)))
 
@@ -158,6 +158,7 @@ RT_SRCS    := src/rt/recomp.c \
               src/rt/gpu_sdl3vk/sdl3vk.c \
               src/rt/gpu_sdl3vk/ge_gpu.c \
               src/rt/gpu_sdl3vk/tex_scale.c \
+              src/rt/gpu_sdl3vk/glyph_recon.c \
               src/rt/texrepl.c \
               third_party/xbrz/xbrz.c \
               src/rt/gpu_sdl3vk/ace_ui.c \
@@ -204,9 +205,10 @@ HLE_INCLUDES := -Isrc/rt/atrac3p -Isrc/rt/atrac3p/libavcodec -Isrc/rt/atrac3p/li
 
 # The Vulkan GE renderer, with Ace Smooth's HUD mask (ace_hud.c), texture scaling (tex_scale.c)
 # and the xBRZ scaler it runs (third_party/xbrz, GPL-3.0, see its PROVENANCE.md), and texture
-# replacement (texrepl.c, #1880). Every build that compiles ge_gpu.c takes all five.
+# replacement (texrepl.c, #1880), and sharp game text (glyph_recon.c, #2110). Every build that compiles
+# ge_gpu.c takes all of them.
 GEGPU_SRCS := src/rt/gpu_sdl3vk/ge_gpu.c src/rt/gpu_sdl3vk/ace_hud.c src/rt/gpu_sdl3vk/tex_scale.c \
-              third_party/xbrz/xbrz.c src/rt/texrepl.c
+              src/rt/gpu_sdl3vk/glyph_recon.c third_party/xbrz/xbrz.c src/rt/texrepl.c
 
 # Everything needed to LINK src/rt/gpu_sdl3vk/sdl3vk.c, in one place. sdl3vk.c
 # calls the framebuffer-capture policy (sr_fbcap_owner / sr_fbcap_path /

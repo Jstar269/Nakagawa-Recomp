@@ -332,6 +332,28 @@ static void test_synthetic_release_lists(void) {
     /* A release with no Windows ZIP is still the newest release. */
     assert(parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"" PAGE "v1.0.0\"}]", &release, &error));
     assert(!release.has_zip && strcmp(release.version, "1.0.0") == 0);
+    /* GitHub answers with the repository's current capitalisation (Jstar269/Nakagawa-Recomp
+       since its rename). Owner and repository names are case-insensitive; the rest of a
+       URL is not. */
+#define PAGE_CASED "https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/"
+#define DOWNLOAD_CASED "https://github.com/Jstar269/Nakagawa-Recomp/releases/download/"
+    assert(parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"" PAGE_CASED "v1.0.0\",\"assets\":"
+                 "[{\"name\":\"nakagawa-recomp-1.0.0-windows-x64.zip\",\"state\":\"uploaded\","
+                 "\"size\":10,\"browser_download_url\":\"" DOWNLOAD_CASED
+                 "v1.0.0/nakagawa-recomp-1.0.0-windows-x64.zip\"}]}]", &release, &error));
+    assert(release.has_zip && strcmp(release.page_url, PAGE_CASED "v1.0.0") == 0);
+    assert(nk_update_is_release_page(release.page_url));
+    assert(nk_update_is_release_page(PAGE "v0.0.1"));
+    /* A look-alike repository, a different owner or a changed path stays outside. */
+    assert(!parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"https://github.com/Jstar269/"
+                  "Nakagawa-Recomp-fork/releases/tag/v1.0.0\"}]", &release, &error));
+    assert(!parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"https://github.com/Jstar269/"
+                  "Nakagawa-Recomp/Releases/tag/v1.0.0\"}]", &release, &error));
+    assert(!nk_update_is_release_page("https://github.com/Jstar269/Nakagawa-Recomp-fork/"
+                                      "releases/tag/v1.0.0"));
+    assert(!nk_update_is_release_page("https://github.com/other/nakagawa-recomp/releases/tag/v1"));
+    assert(!nk_update_is_release_page("https://github.com/Jstar269/Nakagawa-Recomp"));
+    assert(!nk_update_is_release_page(NULL));
     /* Pages and files outside this repository fail closed. */
     assert(!parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"https://github.com/other/"
                   "nakagawa-recomp/releases/tag/v1.0.0\"}]", &release, &error));
@@ -877,6 +899,37 @@ static void test_install_folder(void) {
     assert(!nk_update_install_folder(bin, downloads, "x.tar", out, sizeof(out)));
     assert(!nk_update_install_folder(bin, downloads, "../x.zip", out, sizeof(out)));
     assert(!nk_update_install_folder(bin, downloads, ".zip", out, sizeof(out)));
+
+    /* A copy the Windows installer put in place has Inno's uninstaller beside bin: it
+       updates through the next Setup.exe, not a ZIP. A ZIP copy never does. */
+    {
+        char uninstaller[NATIVE_TEST_PATH_MAX + 72];
+        char other[NATIVE_TEST_PATH_MAX + 80];
+        snprintf(uninstaller, sizeof(uninstaller), "%s%cunins000.exe", install, sep);
+        assert(!nk_update_installed_by_setup(bin));
+        write_file(uninstaller);
+        assert(nk_update_installed_by_setup(bin));            /* without a trailing separator */
+        snprintf(other, sizeof(other), "%s%c", bin, sep);
+        assert(nk_update_installed_by_setup(other));
+        assert(!nk_update_installed_by_setup(install));       /* not the bin folder */
+        assert(!nk_update_installed_by_setup(NULL));
+        assert(!nk_update_installed_by_setup(""));
+        assert(!nk_update_installed_by_setup("bin"));
+        snprintf(other, sizeof(other), "%s%cnotbin", install, sep);
+        assert(!nk_update_installed_by_setup(other));
+        /* The player's download and install steps refuse such a copy with a named error, and a
+           check (which writes nothing) is not asked. */
+        {
+            NkUpdateError refused;
+            memset(&refused, 'x', sizeof(refused));
+            assert(nk_update_refuse_for_setup_copy(bin, &refused));
+            assert(strcmp(refused.code, "UPDATE_INSTALLED_BY_SETUP") == 0);
+            assert(strstr(refused.message, "Setup") != NULL);
+            assert(!nk_update_refuse_for_setup_copy(install, &refused));  /* not the bin folder */
+            assert(refused.code[0] == '\0');
+            assert(!nk_update_refuse_for_setup_copy(NULL, &refused));
+        }
+    }
 
     {
         NkUpdateError error;
