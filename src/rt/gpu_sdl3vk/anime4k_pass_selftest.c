@@ -507,6 +507,25 @@ static void cell_source_a4k(Anime4kPass *a) {
     image_free(&src);
 }
 
+/* A size past the device's image limit is refused (and said once, not retried with a device wait),
+ * and the pass works at a good size afterwards. 32768 << 1 is past every real device's limit. */
+static void cell_limits(Anime4kPass *a) {
+    const int w = 64, h = 48;
+    Source src;
+    memset(&src, 0, sizeof(src));
+    if (!image_make(&src, w, h, VK_FORMAT_R8G8B8A8_UNORM)) { CHECK(0, "source image"); return; }
+    source_fill(&src, w, h, 1);
+    cmd_begin();
+    VkImage first = anime4k_record(a, g.cb, src.image, 32768, 1, 1);
+    VkImage again = anime4k_record(a, g.cb, src.image, 32768, 1, 1);
+    cmd_end();
+    CHECK(first == VK_NULL_HANDLE && again == VK_NULL_HANDLE,
+          "a size past the device's image limit is refused, and again without a retry");
+    VkImage out = a4k_run(a, &src, w, h, 1);
+    CHECK(out != VK_NULL_HANDLE, "the pass still works at a good size after a refusal");
+    image_free(&src);
+}
+
 static void cell_stages(void) {
     CHECK(anime4k_stages_for(480, 272, 3811, 2160) == 2, "480x272 to 4K takes two stages");
     CHECK(anime4k_stages_for(480, 272, 960, 544) == 1, "480x272 to 960x544 takes one stage");
@@ -523,7 +542,7 @@ static int cmp_d(const void *x, const void *y) {
     return a < b ? -1 : a > b;
 }
 
-/* cost: a 480x272 movie frame through two stages (1920x1088), then FSR 1 to 3840x2160. */
+/* cost: a 480x272 movie frame through two stages (1920x1088), then FSR 1 to 3811x2160. */
 static void cell_cost_a4k(Anime4kPass *a, Fsr1Pass *f) {
     VkPhysicalDeviceProperties props;
     GetPhysicalDeviceProperties(g.physical, &props);
@@ -629,6 +648,7 @@ int main(int argc, char **argv) {
         if (!s_mutant) {
             cell_flat_a4k(a);
             cell_source_a4k(a);
+            cell_limits(a);
             cell_cost_a4k(a, f);
         }
     }

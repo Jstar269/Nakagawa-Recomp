@@ -845,7 +845,8 @@ gate and the library sweep set it `off` for their own runs.
 `SR_MOVIE_UPSCALE` gives frames the CPU presents, which are decoded movies (and every frame when the
 software GE draws), their own upscaler: `fsr1` scales them with FSR 1, and `anime4k` first doubles
 them once or twice with Anime4K's CNN x2 (M) network, which suits the flat colours and dark lines
-of animated and pre-rendered movies, then takes them to the window's size with FSR 1. `off`, the
+of animated and pre-rendered movies, then takes them to the window's size with FSR 1 (unless the
+doubled picture is already that size, as at the default 960x544 window). `off`, the
 default, leaves them to `SR_PRESENT_UPSCALE`. It applies in the window and in a recording
 (`SR_VIDEOREC_DIR`), each with its own passes at its own size. Use `anime4k` for line art and movies
 only: on other pictures, such as fine regular stripes, it adds a faint ripple along edges. It reaches

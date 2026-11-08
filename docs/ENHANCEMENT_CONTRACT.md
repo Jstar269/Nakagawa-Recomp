@@ -62,8 +62,9 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   4K: 0.40 ms per present for 1920x1088 to 3840x2160 on an RTX 3080 (`fsr1-selftest`).
 - **Movie upscaling:** `SR_MOVIE_UPSCALE=off|fsr1|anime4k` (default `off`) gives CPU-presented
   frames (decoded movies, and every frame when the software GE draws) FSR 1, or Anime4K's CNN x2 (M)
-  network followed by FSR 1, in the window and in a recording, and overrides `SR_PRESENT_UPSCALE`
-  for those frames. It reads the shown image and writes private images only; captures still hold
+  network, then FSR 1 to the exact size unless the doubled picture already is that size (as at the
+  default 960x544), in the window and in a recording, and overrides `SR_PRESENT_UPSCALE` for those
+  frames. It reads the shown image and writes private images only; captures still hold
   the guest's frame, and the decoded movie, guest VRAM and every guest flight event match with it
   off (`display-smoke-anime4k`, which needs a Vulkan device and a display, so it is a local gate).
   A run with it on is stamped as `SR_PRESENT_UPSCALE` is (`ACE_MODE: present upscale
@@ -329,6 +330,8 @@ Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`
 `<user data>/ace/`. Ace's 60 FPS game logic is not on this line: it selects the title's enhanced package variant
 (section 9.4). Nor is sharper enlarging (`"upscale"`, #2122): the launcher exports it as `SR_PRESENT_UPSCALE`, `fsr1`
 for an Enhanced or Ace run with the part on and `off` otherwise, and always `off` for Authentic (section 2.2).
+The launcher also exports `SR_MOVIE_UPSCALE=off` for an Authentic session; an Enhanced or Ace session
+keeps the inherited value, as the movie upscaler has no setting.
 
 ### 10.2. Authentic Is Untouched
 

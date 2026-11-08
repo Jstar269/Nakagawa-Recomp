@@ -1677,7 +1677,7 @@ def videorec_smoke(build_dir: Path, fake_ffmpeg: Path) -> int:
 
 
 def _upscale_smoke(build_dir: Path, key: str, value: str, banner: str, count: str, tag: str,
-                   stamp: str) -> int:
+                   stamp: str, both_keys: tuple[dict[str, str], str] | None = None) -> int:
     """An upscaler (`key`=`value`) is presentation only: the guest's frame, guest VRAM and every
     guest flight event are byte-identical with it on and off.
 
@@ -1689,6 +1689,9 @@ def _upscale_smoke(build_dir: Path, key: str, value: str, banner: str, count: st
     first frames must be the exact stripe pixels and equal, every VRAM dump's framebuffer must be
     exactly the guest frame it names, and the dumps of a guest frame both runs captured must hold
     the same VRAM bytes.
+
+    `both_keys` (environment, stamp) adds a third run with those variables set as well as `key`: its
+    flight bundle must carry that stamp whole, as the window's two upscalers name themselves together.
     """
     build_dir = build_dir.resolve()
     manifest = _read_manifest(build_dir / "fixture")
@@ -1708,7 +1711,7 @@ def _upscale_smoke(build_dir: Path, key: str, value: str, banner: str, count: st
     # where two runs' host pacing has drifted least, so they share guest frames.
     vblanks = ",".join(str(v) for v in range(6, 14))
 
-    def launch(work: Path, upscale: str | None) -> tuple[dict, str]:
+    def launch(work: Path, upscale: str | None, extra: dict[str, str] | None = None) -> tuple[dict, str]:
         (work / "capture").mkdir(parents=True)
         env = os.environ.copy()
         for name in ("SR_VIDEO", "SR_FBDUMP", "SR_EXIT_AT_VBLANK", "SR_FLIGHT_TRIGGER", "SR_WATCH",
@@ -1726,6 +1729,8 @@ def _upscale_smoke(build_dir: Path, key: str, value: str, banner: str, count: st
         })
         if upscale:
             env[key] = upscale
+        if extra:
+            env.update(extra)
         done = subprocess.run(command, cwd=work, env=env, capture_output=True, text=True,
                               timeout=120, check=False)
         combined = done.stdout + done.stderr
@@ -1751,6 +1756,10 @@ def _upscale_smoke(build_dir: Path, key: str, value: str, banner: str, count: st
         upscaled = re.search(count, on_log)
         if banner not in on_log or not upscaled or int(upscaled.group(1)) < 1:
             raise RuntimeError(f"the {value} run did not upscale any present: " + on_log[-2000:])
+        # A second count, when the message has one, is the presents the Anime4K stages made (the
+        # others went to FSR 1 alone): the run must show Anime4K ran, not only the movie set.
+        if upscaled.re.groups > 1 and int(upscaled.group(2)) < 1:
+            raise RuntimeError(f"the {value} run counted no present through its first stage: " + on_log[-2000:])
         if banner in off_log or re.search(count, off_log):
             raise RuntimeError(f"the off run reported {tag} upscaling")
 
@@ -1769,6 +1778,13 @@ def _upscale_smoke(build_dir: Path, key: str, value: str, banner: str, count: st
         stamps = [runs[label][1]["runtime"].get("enhancements") for label in ("off", value)]
         if stamps != [None, {"present_upscale": stamp}]:
             raise RuntimeError(f"flight bundle enhancements are {stamps}, not none and {stamp}")
+        if both_keys:
+            extra, combined_stamp = both_keys
+            both, _log = launch(root / "combined", value, extra)
+            seen = both["runtime"].get("enhancements")
+            if seen != {"present_upscale": combined_stamp}:
+                raise RuntimeError(f"the combined run's flight bundle enhancements are {seen}, "
+                                   f"not {combined_stamp}")
         paths = []
         for label in ("off", value):
             target = root / f"{label}.projected.json"
@@ -1820,8 +1836,9 @@ def anime4k_smoke(build_dir: Path) -> int:
     """SR_MOVIE_UPSCALE=anime4k leaves the guest untouched (see _upscale_smoke). The fixture's frames
     are CPU-presented, the movie upscaler's input, so the on run must count them as upscaled."""
     return _upscale_smoke(build_dir, "SR_MOVIE_UPSCALE", "anime4k", "movie upscaling on (Anime4K CNN x2 + FSR 1",
-                          r"sdl3vk: the movie upscaler made (\d+) presents", "The Anime4K movie upscaler",
-                          "movie-anime4k")
+                          r"sdl3vk: the movie upscaler made (\d+) presents, (\d+) through Anime4K",
+                          "The Anime4K movie upscaler", "movie-anime4k",
+                          both_keys=({"SR_PRESENT_UPSCALE": "fsr1"}, "fsr1+movie-anime4k"))
 
 
 def run_player(build_dir: Path) -> int:

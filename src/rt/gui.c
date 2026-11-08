@@ -106,6 +106,7 @@ typedef struct {
     Fsr1Pass *fsr1;
     int failed;                        /* the set could not be made: said once, not retried */
     unsigned long long presents;       /* presents it made, said at shutdown */
+    unsigned long long anime4k_presents;  /* of those, the ones Anime4K's stages made */
 } MovieUpscale;
 static int s_movie_mode;               /* MOVIE_UPSCALE_* */
 static MovieUpscale s_movie, s_movie_rec;
@@ -703,13 +704,16 @@ static VkImage gui_movie_record(MovieUpscale *m, VkCommandBuffer cmd, VkImage sr
             ih = h << stages;
         }
     }
-    if (in != src && iw == out_w && ih == out_h) {
-        if (anime4k) *anime4k = 1;
-        return in;
+    VkImage out = in;
+    if (in == src || iw != out_w || ih != out_h) {
+        /* FSR 1 takes the picture to the exact size, unless Anime4K's doubling already is it. */
+        if (!m->fsr1) return VK_NULL_HANDLE;
+        out = fsr1_record(m->fsr1, cmd, in, iw, ih, out_w, out_h, FSR1_SHARPNESS_DEFAULT);
     }
-    if (!m->fsr1) return VK_NULL_HANDLE;
-    VkImage out = fsr1_record(m->fsr1, cmd, in, iw, ih, out_w, out_h, FSR1_SHARPNESS_DEFAULT);
-    if (out && in != src && anime4k) *anime4k = 1;
+    if (out && in != src) {
+        m->anime4k_presents++;
+        if (anime4k) *anime4k = 1;
+    }
     return out;
 }
 
@@ -796,9 +800,11 @@ static void gui_upscale_init(void) {
     /* A recording (SR_VIDEOREC_DIR) is enlarged the same way, at its own size (#2138). */
     sdl3vk_set_record_upscale_pass(gui_record_upscale_pass);
     /* Stamped like Ace Mode: the window is not the authentic picture (captures still are). */
-    const char *stamp = s_fsr1 ? (s_movie_mode == MOVIE_UPSCALE_ANIME4K ? "fsr1+movie-anime4k"
-                                  : s_movie_mode == MOVIE_UPSCALE_FSR1 ? "fsr1+movie-fsr1" : "fsr1")
-                               : (s_movie_mode == MOVIE_UPSCALE_ANIME4K ? "movie-anime4k" : "movie-fsr1");
+    /* The stamp names what runs: a movie upscaler asked for Anime4K but made without it is FSR 1. The
+     * longest is "fsr1+movie-anime4k"; flight_recorder.c's buffer is sized for it. */
+    const char *stamp = s_fsr1 ? (s_movie_mode == MOVIE_UPSCALE_OFF ? "fsr1"
+                                  : s_movie.anime4k ? "fsr1+movie-anime4k" : "fsr1+movie-fsr1")
+                               : (s_movie.anime4k ? "movie-anime4k" : "movie-fsr1");
     sr_flight_set_present_upscale(stamp);
     fprintf(stderr, "ACE_MODE: present upscale %s (the window and its recording; captures hold "
                     "the guest's frame)\n", stamp);
@@ -812,7 +818,8 @@ static void gui_upscale_init(void) {
 
 static void gui_movie_release(MovieUpscale *m, const char *what) {
     if (m->presents)
-        fprintf(stderr, "sdl3vk: the movie upscaler made %llu %spresents\n", m->presents, what);
+        fprintf(stderr, "sdl3vk: the movie upscaler made %llu %spresents, %llu through Anime4K\n",
+                m->presents, what, m->anime4k_presents);
     anime4k_destroy(m->anime4k);
     fsr1_destroy(m->fsr1);
     memset(m, 0, sizeof(*m));

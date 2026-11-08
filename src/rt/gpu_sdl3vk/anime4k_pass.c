@@ -72,6 +72,8 @@ struct Anime4kPass {
     Anime4kInit init;
     VkDevice dev;
     int w, h, stages;
+    uint32_t max_dim;         /* the device's maxImageDimension2D */
+    int fail_w, fail_h, fail_stages;  /* the size whose images could not be made */
     Img in;                   /* stage 0's input: the shown image, 1:1 */
     Stage stage[ANIME4K_MAX_STAGES];
     VkSampler linear;
@@ -208,6 +210,9 @@ static void sets_write(Anime4kPass *p, int s) {
 }
 
 static int sized_make(Anime4kPass *p, int w, int h, int stages) {
+    /* The largest image is the last stage's output, w << stages wide: a size past the device's limit
+     * is invalid usage, so it is refused before anything is made. */
+    if ((uint32_t)w > (p->max_dim >> stages) || (uint32_t)h > (p->max_dim >> stages)) return 0;
     p->DeviceWaitIdle(p->dev);
     sized_free(p);
     if (!img_make(p, &p->in, w, h, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
@@ -251,9 +256,19 @@ static void image_barrier(Anime4kPass *p, VkCommandBuffer cmd, VkImage image, Vk
 VkImage anime4k_record(Anime4kPass *p, VkCommandBuffer cmd, VkImage src, int w, int h, int stages) {
     if (!p || !cmd || !src || w <= 0 || h <= 0 || stages < 1 || stages > ANIME4K_MAX_STAGES)
         return VK_NULL_HANDLE;
-    if ((w != p->w || h != p->h || stages != p->stages) && !sized_make(p, w, h, stages)) {
-        sized_free(p);
-        return VK_NULL_HANDLE;
+    if (w != p->w || h != p->h || stages != p->stages) {
+        /* A size whose images could not be made is not tried again: no device wait per present. */
+        if (w == p->fail_w && h == p->fail_h && stages == p->fail_stages) return VK_NULL_HANDLE;
+        if (!sized_make(p, w, h, stages)) {
+            sized_free(p);
+            p->fail_w = w;
+            p->fail_h = h;
+            p->fail_stages = stages;
+            fprintf(stderr, "sdl3vk: Anime4K cannot make its images for %dx%d at %d stage%s (the "
+                            "device's limit is %u); this picture goes to FSR 1 at this size\n",
+                    w, h, stages, stages == 1 ? "" : "s", p->max_dim);
+            return VK_NULL_HANDLE;
+        }
     }
     const VkPipelineStageFlags earlier = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
@@ -421,6 +436,14 @@ Anime4kPass *anime4k_create(const Anime4kInit *init, char *error, size_t error_s
     p->dev = init->device;
     p->GetPhysicalDeviceMemoryProperties = (PFN_vkGetPhysicalDeviceMemoryProperties)
         init->get_instance_proc_addr(init->instance, "vkGetPhysicalDeviceMemoryProperties");
+    PFN_vkGetPhysicalDeviceProperties props_fn = (PFN_vkGetPhysicalDeviceProperties)
+        init->get_instance_proc_addr(init->instance, "vkGetPhysicalDeviceProperties");
+    if (props_fn) {
+        VkPhysicalDeviceProperties props;
+        props_fn(init->physical_device, &props);
+        p->max_dim = props.limits.maxImageDimension2D;
+    }
+    if (!p->max_dim) p->max_dim = 4096u;  /* Vulkan's required minimum */
 #define DEV(name) p->name = (PFN_vk##name)dev_addr(p->dev, "vk" #name)
     DEV(CreateImage); DEV(DestroyImage); DEV(GetImageMemoryRequirements); DEV(AllocateMemory);
     DEV(FreeMemory); DEV(BindImageMemory); DEV(CreateImageView); DEV(DestroyImageView);

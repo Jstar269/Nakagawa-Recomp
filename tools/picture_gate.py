@@ -42,9 +42,10 @@ A route file is private JSON next to the title's other private inputs:
 Relative paths resolve against the route file's folder. The gate adds the offscreen
 presenter, dummy SDL drivers and the capture window; ``{run}`` in the command and in env
 values is the run's fresh scratch folder (``mkdirs`` creates folders in it); it removes inherited ``SR_FBSNAP*``,
-``SR_PADSCRIPT``, ``SR_FLIGHT*``, ``SR_DATAROOT`` and ``SR_PRESENT_UPSCALE`` so the route file alone decides
-them. The presentation upscaler (#1273) is ``off`` unless the route's ``env`` asks for it, and a reference
-records the value its run used.
+``SR_PADSCRIPT``, ``SR_FLIGHT*``, ``SR_DATAROOT``, ``SR_PRESENT_UPSCALE`` and ``SR_MOVIE_UPSCALE`` so the route
+file alone decides them. The presentation and movie upscalers (#1273) are ``off`` unless the route's ``env`` asks
+for them, and a reference records the values its run used (``<present>+movie-<mode>`` when the movie upscaler
+was on).
 """
 
 from __future__ import annotations

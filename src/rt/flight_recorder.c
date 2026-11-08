@@ -218,7 +218,9 @@ static uint64_t s_flight_last_sequence;
 static uint32_t s_flight_last_kind;
 static int s_flight_init_state;
 static char s_flight_ace[96];          /* Ace Mode's line for an enhanced run, else empty */
-static char s_flight_upscale[16];      /* SR_PRESENT_UPSCALE's mode when the window is upscaled */
+/* The window's upscale stamp (gui.c gui_upscale_init): "fsr1", "movie-anime4k", "movie-fsr1",
+ * "fsr1+movie-anime4k" or "fsr1+movie-fsr1". 32 holds the longest (18) with room to spare. */
+static char s_flight_upscale[32];
 static int s_flight_exit_registered;
 static int s_flight_dumped;
 static uint32_t s_flight_dump_count;
