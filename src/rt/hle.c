@@ -2653,8 +2653,9 @@ uint32_t sr_savedata_release_thread(uint32_t thread_uid);   /* savedata.c: a SAV
 
 /* #1296: the thread whose sceUtilitySavedataUpdate was running the dialog's SAVE ended while the
  * SAVE was parked, so that Update never returns to record a result (hle_utility.c). Finish the
- * dialog's work with the abandoned SAVE's access error, so the next Update reports FINISHED, the
- * pause overlay's Quit is no longer refused, and the game can shut the dialog down. On a PSP the
+ * dialog's work with the abandoned SAVE's result (its mode's savedata_access_error code), so the
+ * next Update reports FINISHED and the game can shut the dialog down; the pause overlay's Quit
+ * stays refused until it does (sr_savedata_pause_busy counts FINISHED as busy). On a PSP the
  * utility's own thread does the save and finishes it whatever happens to the caller; what the
  * dialog then reports is UNMEASURED. */
 static void savedata_dialog_work_abandoned(uint32_t result) {
