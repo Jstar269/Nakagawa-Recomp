@@ -36,6 +36,7 @@ import os
 import random
 import re
 import shutil
+import string
 import struct
 import subprocess
 import sys
@@ -1457,6 +1458,11 @@ class ProjectLatinStrikeTests(unittest.TestCase):
     )
     #: The regular sans faces' class averages in pixels (lowercase, capitals, digits).
     CLASSES = {0: (11.435, 14.64, 14.69), 8: (7.63, 9.76, 9.80)}
+    #: Mean ink per letter of the console's sans-serif faces, A-Z and a-z, in pixels of full coverage
+    #: (the sum of each glyph's 4-bit samples over 15). Measured on the console's own files (#1300);
+    #: only the number is recorded. Horizontal strokes of the source faces are thinner than the
+    #: console's, so without a per-face --embolden-y a letter carries 9 to 25 % less ink.
+    LETTER_INK = {0: 68.5, 2: 68.4, 4: 104.5, 6: 104.4, 8: 30.8, 10: 30.8, 12: 46.9, 14: 46.9}
     #: Ink of the regular sans faces: nominal, header ascender and descender, x-height, cap height,
     #: descender drop and stem.
     INK = {0: (648, 863, -196, 11, 14, -3, 2.13), 8: (448, 576, -131, 7, 9, -2, 1.40)}
@@ -1542,6 +1548,16 @@ class ProjectLatinStrikeTests(unittest.TestCase):
                 self.assertLessEqual(abs(self._ink_rows(glyphs[ord("H")])[0] - cap), 1)
                 self.assertLessEqual(abs(self._ink_rows(glyphs[ord("p")])[1] - drop), 1)
                 self.assertLessEqual(abs(self._stem(glyphs[ord("l")]) - stem), 0.2)
+
+    def test_sans_faces_carry_the_console_ink_per_letter(self) -> None:
+        """#1300: the stand-ins' horizontal strokes were thinner than the console's, so game text
+        drawn with a stand-in looked light. Each sans-serif face is within 4 % of the console's ink."""
+        letters = [ord(c) for c in string.ascii_letters]
+        for index, target in self.LETTER_INK.items():
+            with self.subTest(index=index):
+                glyphs = _glyph_map(self._convert(index).glyphs)
+                ink = sum(sum(glyphs[code].samples) for code in letters) / 15 / len(letters)
+                self.assertLessEqual(abs(ink - target) / target, 0.04, f"ink per letter {ink:.1f}")
 
     def test_the_ellipsis_sits_on_the_line_of_the_full_stop(self) -> None:
         # No strike passes --baseline-ellipsis: every Liberation face already draws U+2026 there.

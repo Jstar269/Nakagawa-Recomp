@@ -111,8 +111,8 @@ git diff --check origin/main...HEAD
 
 Expected behavior:
 
-- the lock validates but reports pending local artifact/tool evidence;
-- `--require-local` fails until the lock is deliberately completed;
+- the lock validates and reports `complete`;
+- `--require-local` passes;
 - no command accesses the network;
 - no command modifies tracked files;
 - no private/game-derived data appears in reports.
@@ -166,15 +166,14 @@ The probe report is evidence input, not an automatic lock update. Review:
 - missing, timed-out, truncated, or nonzero results;
 - whether wrappers resolve to the intended PSPDEV installation.
 
-A local model may add a separate, reviewed command to merge approved probe fields
+A maintainer may add a separate, reviewed command to merge approved probe fields
 into the lock, but that command must fail closed and must not silently replace
 source pins.
 
 ## Phase 4: resolve release/container digests
 
-The first implementation slice deliberately left release archive and container digests null.
-A local model may resolve them only from official PSPDEV release/package sources.
-Record:
+The lock records the release archive and container digests. A pin update resolves them only from
+official PSPDEV release/package sources and records:
 
 - exact download URL or registry reference;
 - size;
@@ -186,20 +185,19 @@ Record:
 Do not claim that the component heads built a release artifact unless the
 upstream build metadata proves that relationship.
 
-## Hard stop before fixture generation
+## Generated PSP binaries are not committed
 
-After phases 1-4, stop and review the PR before adding synthetic PSP binaries.
-Nakagawa's publication audit currently rejects `.elf`, `.prx`, `.pbp`, and `.sfo`
-files by extension. Do not weaken that gate casually.
+Nakagawa's publication audit rejects `.elf`, `.prx`, `.pbp`, and `.sfo` files by extension. The
+project's PSP fixtures are rebuilt from source with the pinned toolchain: the repository commits
+only their source and, for profile zero, the digests of the build output
+(`fixtures/profile_zero/prebuilt/SHA256SUMS`), never the executables. A fixture that needs a
+committed binary needs a narrowly scoped exception with a per-artifact manifest (source hashes,
+exact toolchain identity, commands, output hashes, licensing, expected parser behavior, and a
+statement excluding Sony SDK/firmware/retail material).
 
-The later fixture PR must first define a narrowly scoped exception or a
-source-only regeneration policy, with per-artifact manifests containing source
-hashes, exact toolchain identity, commands, output hashes, licensing, expected
-parser behavior, and a statement excluding Sony SDK/firmware/retail material.
+## Required local review questions
 
-## Required local Codex review questions
-
-Before the implementation PR can be marked ready, a local reviewer must answer:
+Before a change to the lock or its tools is marked ready, a local reviewer must answer:
 
 1. Does the lock match the exact official sources and licenses actually used?
 2. Are the lock validator and source scanner fail-closed under malformed JSON,

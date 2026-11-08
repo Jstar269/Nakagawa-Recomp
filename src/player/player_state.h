@@ -1297,7 +1297,7 @@ typedef struct {
     const char *title_name;
     const char *disc_id;
     const char *disc_version;
-    const char *version;      /* "v0.0.2-dev (commit 3efc890)" */
+    const char *version;      /* "v0.0.2 (commit 3efc890)" */
     const char *platform;     /* player_platform_name() */
     const char *problem;      /* the named boundary or stop code; "" from a title page */
 } PlayerReportFacts;
@@ -1518,14 +1518,14 @@ typedef struct {
     int present_scaling;  /* NK_PRESENT_SCALING_* */
     bool vsync;
     int fullscreen;       /* 1 on, 0 off, -1 left as the user set it */
-    bool upscaler;        /* asks for the FSR 1 upscaler, which Settings cannot set yet (#2122) */
+    bool upscaler;        /* the note says the preset does not turn on Sharper enlarging (#2122) */
 } PlayerGraphicsPresetRow;
 
 /* The preset's row; NULL for Custom or a value out of range. */
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset);
 /* The chosen preset, or PLAYER_PRESET_CUSTOM (also for a value out of range). */
 int player_app_graphics_preset(const PlayerApp *app);
-/* The Settings row's value: "Low", ..., "Ultra (no upscaler)", "Handheld", or "Custom". */
+/* The Settings row's value: "Low", ..., "Ultra", "Handheld", or "Custom". */
 const char *player_app_graphics_preset_label(const PlayerApp *app);
 /* The main Settings page's notice line while a preset is chosen: where it applies, and a
    value it asks for that Settings cannot set. Returns false, with out empty, for Custom.
