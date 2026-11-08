@@ -281,5 +281,257 @@ class AndroidDeviceTestRunnerTests(unittest.TestCase):
                                 r"(?:\s*#.*\n)*\s*add_executable\(test_sr_coro_asm ")
 
 
+class AndroidMakeTargetTests(unittest.TestCase):
+    """NK_TARGET=android: the package route's Make build links a title as the library
+    TitleActivity loads, on the device or cross from a PC (#360). A dry run (make -n) of the
+    compile goal over an empty pregenerated title needs no compiler or SDK."""
+
+    make: str | None
+    root: Path
+    sdl: Path
+    build_dir: Path
+    android_out: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.make = shutil.which("mingw32-make") or shutil.which("make")
+        if not cls.make:
+            raise unittest.SkipTest("GNU Make is required")
+        scratch = tempfile.TemporaryDirectory(prefix="nk-android-make-")
+        cls.addClassCleanup(scratch.cleanup)
+        cls.root = Path(scratch.name)
+        cls.sdl = cls.root / "sdl"
+        (cls.sdl / "include" / "SDL3").mkdir(parents=True)
+        (cls.sdl / "include" / "SDL3" / "SDL_version.h").write_text(
+            "#define SDL_MAJOR_VERSION   3\n#define SDL_MINOR_VERSION   4\n"
+            "#define SDL_MICRO_VERSION   18\n", encoding="ascii")
+        (cls.sdl / "lib").mkdir()
+        (cls.sdl / "lib" / "libSDL3.so").write_bytes(b"")
+        cls.build_dir = cls.root / "build" / "demo"
+        cls.build_dir.mkdir(parents=True)
+        for name in ("demo_recomp.c", "demo_recomp_0.c", "demo_recomp_funcs.h"):
+            (cls.build_dir / name).write_bytes(b"")
+        # One Android dry run serves every test that reads it (each run parses the whole
+        # Makefile, about 15 s).
+        proc = cls._dry_run("compile", *cls._android_overrides())
+        if proc.returncode != 0:
+            raise AssertionError(proc.stdout[-2000:] + proc.stderr[-2000:])
+        cls.android_out = proc.stdout
+
+    @classmethod
+    def _android_overrides(cls) -> tuple[str, ...]:
+        return ("NK_TARGET=android", "CC=aarch64-linux-android29-clang",
+                f"ANDROID_SDL3_INCLUDE={(cls.sdl / 'include').as_posix()}",
+                f"ANDROID_SDL3_LIBDIR={(cls.sdl / 'lib').as_posix()}")
+
+    @classmethod
+    def _dry_run(cls, goal: str, *overrides: str) -> subprocess.CompletedProcess[str]:
+        env = {k: v for k, v in os.environ.items() if k not in ("NK_TARGET", "CC", "CFLAGS")}
+        return subprocess.run(
+            [cast_str(cls.make), "-n", "--no-print-directory", goal,
+             f"PYTHON={Path(sys.executable).as_posix()}", "GAME_NAME=demo",
+             "NK_AOT_PREGENERATED=1", f"BUILD_ROOT={(cls.root / 'build').as_posix()}",
+             f"LOG_DIR={(cls.root / 'logs').as_posix()}",
+             f"BUILD_DIR={cls.build_dir.as_posix()}", *overrides],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=300, check=False)
+
+    def _android_dry_run(self) -> str:
+        return self.android_out
+
+    def test_the_title_links_as_the_library_title_activity_loads(self) -> None:
+        out = self._android_dry_run()
+        library = f"{self.build_dir.as_posix()}/libdemo.so"
+        link = next((line for line in out.splitlines() if f"-o {library}" in line), None)
+        self.assertIsNotNone(link, "the compile goal links no libdemo.so")
+        link_words = str(link).split()
+        for flag in ("-shared", "-Wl,--wrap=exit", "-Wl,--wrap=_exit", "-Wl,--wrap=_Exit"):
+            self.assertIn(flag, link_words)
+        rsp = (out.split(f"-o {library}", 1)[1]).split("\n", 3)[:3]
+        self.assertIn("-lSDL3 -lvulkan", " ".join(rsp))
+        self.assertIn("-lm -llog -landroid", " ".join(rsp))
+        self.assertIn(f'-L"{(self.sdl / "lib").as_posix()}"', link_words)
+        # The entry point TitleActivity calls is compiled and linked.
+        self.assertRegex(out, r"-c android/app/src/main/cpp/nk_android_title\.c -o \S+/nk_android_title\.o")
+
+    def test_every_object_is_position_independent_and_posix(self) -> None:
+        out = self._android_dry_run()
+        # A recipe may span lines; join each command before reading its flags.
+        commands = out.replace("\\\n", " ").splitlines()
+        compiles = [c for c in commands if re.search(r" -c \S+\.c -o \S+\.o\b", c)]
+        self.assertGreater(len(compiles), 150)
+        self.assertEqual([c for c in compiles if "-fPIC" not in c.split()], [])
+        sources = {m.group(1) for c in compiles for m in [re.search(r" -c (\S+\.c) ", c)] if m}
+        self.assertIn("src/core/nk_platform_posix.c", sources)
+        self.assertNotIn("src/core/nk_platform_win32.c", sources)
+        self.assertIn("src/rt/h264_ffmpeg.c", sources)
+        self.assertFalse([c for c in commands if "windres" in c or "copy_build_assets" in c])
+
+    def test_the_host_build_is_unchanged(self) -> None:
+        proc = self._dry_run("compile", "CC=gcc", "SDL3_DIR=", "VULKAN_SDK=")
+        out = proc.stdout + proc.stderr
+        self.assertNotIn("libdemo.so", out)
+        self.assertNotIn("nk_android_title", out)
+        self.assertNotIn("-shared", out.split())
+
+    def test_an_unknown_target_or_missing_sdl3_is_refused(self) -> None:
+        proc = self._dry_run("compile", "NK_TARGET=ios")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("NK_TARGET 'ios' is not a target this Makefile builds", proc.stderr)
+        for missing in ("ANDROID_SDL3_INCLUDE", "ANDROID_SDL3_LIBDIR"):
+            overrides = [o for o in self._android_overrides() if not o.startswith(missing)]
+            proc = self._dry_run("sdl3-check", *overrides, f"{missing}={(self.root / 'missing').as_posix()}")
+            self.assertIn(f"NK_TARGET=android needs {missing}", proc.stdout)
+
+
+class AndroidPackageTargetTests(unittest.TestCase):
+    """The package route's target choice (tools/title_codegen_plan.py, nk_cli build-package)."""
+
+    def test_the_package_names_the_file_make_links(self) -> None:
+        import title_codegen_plan as plan
+        self.assertEqual(plan.package_executable_name("demo", "android"), "libdemo.so")
+        self.assertEqual(plan.package_executable_name("demo", "host"),
+                         "demo.exe" if os.name == "nt" else "demo")
+        self.assertEqual(plan.PACKAGE_TARGETS, ("host", "android"))
+
+    def test_android_is_the_default_only_on_android(self) -> None:
+        import title_codegen_plan as plan
+        with mock.patch.object(plan.sys, "platform", "android"):
+            self.assertEqual(plan.default_package_target(), "android")
+        with mock.patch.object(plan.sys, "platform", "linux"):
+            self.assertEqual(plan.default_package_target(), "host")
+
+    def test_an_unknown_target_is_refused(self) -> None:
+        import title_codegen_plan as plan
+        with self.assertRaises(plan.PackageRouteError) as caught:
+            plan.build_package({}, manifest_path=Path("m.json"), game_elf=Path("e.elf"),
+                               output_dir=Path("out"), target="ios")
+        self.assertEqual(caught.exception.code, "PACKAGE_INVALID_TARGET")
+
+    def test_the_cli_passes_the_target_to_the_planner(self) -> None:
+        help_text = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "nk_cli.py"), "build-package", "--help"],
+            cwd=ROOT, capture_output=True, text=True, timeout=120, check=True).stdout
+        self.assertRegex(help_text, r"--target \{host,android\}")
+        source = (ROOT / "tools" / "nk_cli.py").read_text(encoding="utf-8")
+        self.assertIn('planner.extend(("--target", package_target))', source)
+
+
+_TITLE_LIBRARY_PROBE = """package io.github.jstar269.nakagawa;
+
+public final class TitleLibraryProbe {
+    public static void main(String[] args) {
+        for (int i = 2; i < args.length; i++) {
+            TitleLibrary.Choice choice = TitleLibrary.resolve(args[i], args[0], args[1]);
+            System.out.println(choice == null ? "REFUSED" : choice.path + "|" + choice.bundledName);
+        }
+    }
+}
+"""
+
+
+class AndroidTitleLibraryTests(unittest.TestCase):
+    """TitleActivity loads a library the APK ships, or one built in the app's files folder, and
+    nothing else (TitleLibrary.java, #360). The rule is plain Java, run here with the host JDK."""
+
+    work: Path
+    java: list[str]
+    lib: Path
+    files: Path
+    outside: Path
+    links: bool
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        home = os.environ.get("JAVA_HOME", "")
+        javac = shutil.which("javac") or (shutil.which("javac", path=str(Path(home) / "bin")) if home else None)
+        if not javac:
+            raise unittest.SkipTest("a JDK (javac) is required")
+        java = shutil.which("java", path=str(Path(javac).parent)) or shutil.which("java")
+        scratch = tempfile.TemporaryDirectory(prefix="nk-title-library-")
+        cls.addClassCleanup(scratch.cleanup)
+        cls.work = Path(scratch.name).resolve()
+        package = cls.work / "src" / "io" / "github" / "jstar269" / "nakagawa"
+        package.mkdir(parents=True)
+        (package / "TitleLibraryProbe.java").write_text(_TITLE_LIBRARY_PROBE, encoding="utf-8")
+        classes = cls.work / "classes"
+        subprocess.run([javac, "-d", str(classes), "-encoding", "UTF-8",
+                        str(ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" /
+                            "nakagawa" / "TitleLibrary.java"),
+                        str(package / "TitleLibraryProbe.java")],
+                       check=True, capture_output=True, text=True, timeout=300)
+        cls.java = [cast_str(java), "-cp", str(classes), "io.github.jstar269.nakagawa.TitleLibraryProbe"]
+        # The app's two folders, as Android lays them out, and a folder outside both.
+        cls.lib = cls.work / "app" / "lib" / "arm64"
+        cls.files = cls.work / "data" / "files"
+        cls.outside = cls.work / "outside"
+        for folder in (cls.lib / "sub", cls.files / "Nakagawa" / "packages" / "ULUS00000", cls.outside):
+            folder.mkdir(parents=True)
+        for path in (cls.lib / "libnk_title_demo.so", cls.lib / "sub" / "libnested.so",
+                     cls.files / "Nakagawa" / "packages" / "ULUS00000" / "libULUS00000.so",
+                     cls.files / "notes.txt", cls.outside / "libother.so"):
+            path.write_bytes(b"\x7fELF")
+        (cls.files / "dir.so").mkdir()
+        cls.links = True
+        try:
+            (cls.files / "escape.so").symlink_to(cls.outside / "libother.so")
+            (cls.files / "inside.so").symlink_to(
+                cls.files / "Nakagawa" / "packages" / "ULUS00000" / "libULUS00000.so")
+        except OSError:
+            cls.links = False   # Windows without the symbolic-link privilege
+
+    def _resolve(self, *libraries: str) -> list[str]:
+        out = subprocess.run([*self.java, self.lib.as_posix(), self.files.as_posix(), *libraries],
+                             check=True, capture_output=True, text=True, timeout=120).stdout
+        return out.splitlines()
+
+    def _abs(self, path: Path) -> str:
+        # Java's canonical form: on Windows the drive path with backslashes, else the POSIX path.
+        return str(path.resolve())
+
+    def test_a_library_the_apk_ships_loads_by_name_or_path(self) -> None:
+        bundled = f"{self._abs(self.lib / 'libnk_title_demo.so')}|nk_title_demo"
+        self.assertEqual(self._resolve("nk_title_demo", "libnk_title_demo.so",
+                                       (self.lib / "libnk_title_demo.so").as_posix()),
+                         [bundled, bundled, bundled])
+
+    def test_a_built_title_loads_by_its_path_in_the_files_folder(self) -> None:
+        built = self.files / "Nakagawa" / "packages" / "ULUS00000" / "libULUS00000.so"
+        self.assertEqual(self._resolve(built.as_posix()), [f"{self._abs(built)}|"])
+        if self.links:
+            self.assertEqual(self._resolve((self.files / "inside.so").as_posix()), [f"{self._abs(built)}|"])
+
+    def test_every_other_name_is_refused(self) -> None:
+        refused = [
+            (self.outside / "libother.so").as_posix(),               # outside both folders
+            (self.files / ".." / ".." / "outside" / "libother.so").as_posix(),   # a .. escape
+            (self.lib / "sub" / "libnested.so").as_posix(),          # not directly in the lib folder
+            "sub/libnested.so", "Nakagawa/packages/ULUS00000/libULUS00000.so",   # relative paths
+            (self.files / "notes.txt").as_posix(),                   # not a library
+            (self.files / "dir.so").as_posix(),                      # a folder
+            (self.files / "missing.so").as_posix(), "nk_title_missing", "lib.so", "",
+        ]
+        if self.links:
+            refused.append((self.files / "escape.so").as_posix())    # a link that resolves out
+        self.assertEqual(self._resolve(*refused), ["REFUSED"] * len(refused))
+
+    def test_title_activity_loads_only_what_title_library_allows(self) -> None:
+        source = (ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" /
+                  "nakagawa" / "TitleActivity.java").read_text(encoding="utf-8")
+        self.assertIn("TitleLibrary.resolve(\n                    library, "
+                      "getApplicationInfo().nativeLibraryDir, getFilesDir().getPath());", source)
+        self.assertRegex(source, r"if \(choice == null\) \{\s*refuse\(library, env\);")
+        self.assertIn("static final int EXIT_REFUSED = 126;", source)
+        self.assertIn('entry.startsWith("NK_ANDROID_EXIT_FILE=")', source)
+        self.assertIn("Process.killProcess(Process.myPid());", source)
+        # The env is applied before the library is chosen, so a refusal can record its status.
+        self.assertLess(source.index("NakagawaHost.setenv(entry.substring(0, eq)"),
+                        source.index("TitleLibrary.resolve("))
+
+
+def cast_str(value: str | None) -> str:
+    assert value is not None
+    return value
+
+
 if __name__ == "__main__":
     unittest.main()

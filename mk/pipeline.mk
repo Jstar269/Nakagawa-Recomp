@@ -337,6 +337,6 @@ LIBRARY_OBJS = $(patsubst %.c,%.o,$(wildcard $(BUILD_DIR)/nk_lib_*.c))
 # reported a missing ".../atrac3p" input. GCC reads backslashes in a response file
 # as escapes, so the paths are written with forward slashes; BUILD_DIR is already
 # refused when it contains whitespace, so each object stays one argument.
-LINK_OBJECTS = $(BUILD_DIR)/$(GAME_NAME)_recomp.o $(CHUNK_OBJS) $(LIBRARY_OBJS) $(RT_GE_O) $(RT_OBJS) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o $(TITLE_ICON_OBJ)
+LINK_OBJECTS = $(BUILD_DIR)/$(GAME_NAME)_recomp.o $(CHUNK_OBJS) $(LIBRARY_OBJS) $(RT_GE_O) $(RT_OBJS) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o $(TITLE_ICON_OBJ) $(TITLE_ANDROID_OBJ)
 LINK_OBJECTS_RSP = $(BUILD_DIR)/link-objects.rsp
 DEP_FILES = $(patsubst %.o,%.d,$(RT_GE_O) $(RT_OBJS) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o $(PORTABLE_CORE_OBJS) $(CHUNK_OBJS) $(LIBRARY_OBJS) $(BUILD_DIR)/$(GAME_NAME)_recomp.o $(BUILD_DIR)/vfpu_fuzz.o)

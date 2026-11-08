@@ -1045,7 +1045,7 @@ bool nk_update_install(const char *zip_path, const char *target_dir, const char 
     {
         const char *argv[] = { tar_exe, "-xf", zip_path, "-C", staging, NULL };
         memset(&process, 0, sizeof(process));
-        if (!nk_platform_spawn_process(tar_exe, argv, NULL, NULL, log_path, &process)) {
+        if (!nk_platform_spawn_tool(tar_exe, argv, NULL, NULL, log_path, &process)) {
             NkSpawnBlockReport block;
             (void)nk_platform_remove_tree(staging, NULL);
             if (nk_launch_describe_spawn_block(process.spawn_error,

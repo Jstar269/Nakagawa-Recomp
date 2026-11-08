@@ -21,7 +21,12 @@ This page covers building and running the Android app from source. The plan it b
   process ends when the run ends, as a desktop child's does. The guest sees no difference.
 - **A title's runtime library** is the package's generated C compiled with the runtime for the
   device's ABI (`nk_add_title_runtime` in `CMakeLists.txt`). Packages are built on a PC by the
-  ordinary route; the phone does not run the recompiler or a C compiler.
+  ordinary route; the phone does not run the recompiler or a C compiler yet.
+- **A title built by the package route** is the same library, linked by Make with
+  `NK_TARGET=android` ([below](#a-title-library-from-the-package-route)). `TitleActivity` loads a
+  library the APK ships by its name, or a built one by its absolute path in the app's files
+  folder (`TitleLibrary.java`); it refuses any other library, and its process ends with exit
+  status 126.
 
 ## Prerequisites
 
@@ -72,6 +77,33 @@ clean checkout, with the versions listed under [Prerequisites](#prerequisites), 
 that runs the native gates ([`CI.md`](CI.md#android-launcher-build)). It builds and packages;
 it does not run the APK. It keeps the APK for 14 days as the artifact
 `nakagawa-android-arm64-debug`, for [testing on a phone](#test-on-a-phone).
+
+### A title library from the package route
+
+The Makefile builds a title for Android when `NK_TARGET=android`. The compile goal then links
+`<BUILD_DIR>/lib<GAME_NAME>.so`, a shared library holding `nk_android_title.c`, with every object
+built `-fPIC`, the exit wrappers that `nk_android_title.c` provides, and the libraries `-lSDL3
+-lvulkan -lm -llog -landroid`. `CC` is an Android Clang. `ANDROID_SDL3_INCLUDE` names the folder
+that holds `SDL3/SDL.h`, and `ANDROID_SDL3_LIBDIR` the folder that holds the APK's `libSDL3.so`.
+The conditionals about the built program (platform source, libraries, H.264 backend) follow
+`NK_TARGET`; the ones about the host's own shell follow the host. From a PC with the NDK:
+
+```bash
+mingw32-make all NK_TARGET=android \
+  CC=<ndk>/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang \
+  ANDROID_SDL3_INCLUDE=<deps>/SDL/include ANDROID_SDL3_LIBDIR=<folder with libSDL3.so> \
+  GAME_NAME=... GAME_ELF=... BUILD_DIR=...
+```
+
+The package route passes the same choice through: `python tools/nk_cli.py build-package <disc
+id> --target android` (the default when nk_cli itself runs on Android). The package then records
+`lib<id>.so` as its executable.
+
+A build on the phone also needs a C compiler, GNU Make and CPython in the APK. Android lets an
+app run only the programs it ships in its native library folder, so those would ship there as
+`lib*.so` files. `nk_platform_spawn_tool` starts only programs in that folder, and on Android the
+package builder's Python is the APK's `libnk_python.so` there. None of the three is bundled yet
+([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
 
 ## Run in the emulator
 
@@ -232,7 +264,8 @@ relative path against that folder, so `SDL_GetBasePath()` (`./` on Android) find
 | --- | --- |
 | Launcher library | The launcher does not list bundled titles; they start from `adb` (above). |
 | Disc import | Picking the user's own ISO through the system document picker (SAF) is not wired. |
-| Packages from a PC | Moving a package built on a PC to the phone and running it is not wired. |
+| Packages from a PC | A package can be built for Android on a PC (`NK_TARGET=android`), and `TitleActivity` loads a built library from the files folder. Moving the package to the phone, and the launcher starting it, are not wired. |
+| Building on the phone | The package route and its process rules are in place. The compiler, Make and Python it needs are not in the APK. |
 | Lifecycle | Measured in the emulator: with the title in the background the guest keeps running and every present fails (`swapchain acquire failed`), because the presenter does not recreate its Vulkan surface and swapchain after Android destroys the window surface. Pausing the guest in the background and recreating the swapchain on return are not done. |
 | Input | Touch controls are not built; SDL gamepads reach the runtime's ordinary input path. |
 | Video | The FFmpeg H.264 subset builds for Android; it has not been run on a device. |

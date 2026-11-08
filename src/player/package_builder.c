@@ -1060,7 +1060,7 @@ static bool bootstrap_expand_python(PackageBootstrapSession *session) {
         NULL
     };
     NkProcessHandle process;
-    if (!nk_platform_spawn_process(tar_exe, argv, NULL, NULL, log_path, &process)) return false;
+    if (!nk_platform_spawn_tool(tar_exe, argv, NULL, NULL, log_path, &process)) return false;
     while (process.is_active && nk_platform_is_process_running(&process)) {
         if (bootstrap_cancel_requested(session)) {
             nk_platform_terminate_process(&process);
@@ -1441,8 +1441,8 @@ NkResult package_builder_start_prerequisite_fetch(
         "'--total-bytes',os.environ['NK_PREREQ_TOTAL_BYTES']]; "
         "runpy.run_module('tools.nk_core.prereq_fetcher',run_name='__main__')";
     const char *argv[] = { python_path, "-c", code, NULL };
-    if (!nk_platform_spawn_process(python_path, argv, envp, source_root,
-                                   session->log_file_path, &session->process)) {
+    if (!nk_platform_spawn_tool(python_path, argv, envp, source_root,
+                                session->log_file_path, &session->process)) {
         NkSpawnBlockReport block;
         if (nk_launch_describe_spawn_block(session->process.spawn_error,
                                            "the build tools' Python", "build tools",
@@ -1818,8 +1818,8 @@ static bool python_candidate_runs_required_version(const char *executable_path,
     const char *argv[] = { executable_path, "-c", probe, NULL };
     if (!executable_path || !executable_path[0] ||
         !package_builder_developer_log_path(log_path, sizeof(log_path)) ||
-        !nk_platform_spawn_process(executable_path, argv, NULL, NULL,
-                                   log_path, &process)) {
+        !nk_platform_spawn_tool(executable_path, argv, NULL, NULL,
+                                log_path, &process)) {
         return false;
     }
 
@@ -1937,9 +1937,28 @@ static bool find_python_pass(bool only_315, char *out_path, size_t out_size) {
     return false;
 }
 
+/* A host with a bundled tool folder (Android: the app's native library folder,
+ * nk_platform_get_tool_dir) runs only the programs in it (nk_platform_spawn_tool),
+ * so the one Python a package build can use there is the app's own CPython 3.15
+ * launcher in that folder. PYTHON, PATH and the per-user prerequisites are not
+ * searched: nothing they name could start. */
+#define PACKAGE_BUILDER_BUNDLED_PYTHON "libnk_python.so"
+
+static bool find_bundled_python(const char *tool_dir, char *out_path, size_t out_size) {
+    char candidate[NK_MAX_PATH + sizeof(PACKAGE_BUILDER_BUNDLED_PYTHON) + 1];
+    int n = snprintf(candidate, sizeof(candidate), "%s/%s", tool_dir,
+                     PACKAGE_BUILDER_BUNDLED_PYTHON);
+    return n > 0 && (size_t)n < sizeof(candidate) &&
+           accept_python_candidate(candidate, true, out_path, out_size);
+}
+
 bool package_builder_find_python(char *out_path, size_t out_size) {
     if (!out_path || out_size == 0) return false;
     out_path[0] = '\0';
+    char tool_dir[NK_MAX_PATH];
+    if (nk_platform_get_tool_dir(tool_dir, sizeof(tool_dir))) {
+        return find_bundled_python(tool_dir, out_path, out_size);
+    }
 
     /* CPython 3.15 is the documented default, so search every location for it
      * first. A 3.14 interpreter is accepted only when no runnable 3.15 exists;
@@ -2131,7 +2150,12 @@ PackageBundleStatus package_builder_resolve_bundled_tools(const char *install_ro
                                                           PackageBundledTools *out) {
     if (!out) return PACKAGE_BUNDLE_ABSENT;
     memset(out, 0, sizeof(*out));
-    if (!package_builder_bundled_prerequisites_root(install_root, out->root, sizeof(out->root)) ||
+    /* A host with a bundled tool folder (Android) runs only the programs in it, so a
+       release zip's prereqs/ tree cannot apply there: the app's own folder is its bundle,
+       and package_builder_find_python looks there. */
+    char tool_dir[NK_MAX_PATH];
+    if (nk_platform_get_tool_dir(tool_dir, sizeof(tool_dir)) ||
+        !package_builder_bundled_prerequisites_root(install_root, out->root, sizeof(out->root)) ||
         !nk_platform_dir_exists(out->root)) {
         out->root[0] = '\0';
         out->status = PACKAGE_BUNDLE_ABSENT;
@@ -2349,7 +2373,7 @@ NkResult package_builder_start(
         }
     }
 
-    bool spawned = nk_platform_spawn_process(
+    bool spawned = nk_platform_spawn_tool(
         python_path,
         argv,
         envp[0] ? envp : NULL,

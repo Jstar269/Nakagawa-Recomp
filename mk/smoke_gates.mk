@@ -387,6 +387,12 @@ RECOMP_OPT ?= -O0
 RECOMP_CC_IS_CLANG := $(findstring clang version,$(shell "$(CC)" --version 2>&1))
 RECOMP_GCC_ONLY_FLAGS := $(if $(RECOMP_CC_IS_CLANG),,-ftrack-macro-expansion=0)
 RECOMP_FLAGS ?= $(RECOMP_OPT) -w -fno-strict-aliasing -fno-var-tracking $(RECOMP_GCC_ONLY_FLAGS) $(NAN_TRAP_CFLAG)
+# An Android title is a shared library: its generated and GE objects are position
+# independent like the runtime's (the root Makefile adds -fPIC to CFLAGS).
+ifeq ($(NK_TARGET_OS),android)
+override GE_CFLAGS += -fPIC
+override RECOMP_FLAGS += -fPIC
+endif
 override RECOMP_FLAGS += $(STACK_CENSUS_CFLAG)
 override RECOMP_FLAGS += -DSR_FLIGHT_RECORDER_LINKED
 ifeq ($(TRACE),1)
