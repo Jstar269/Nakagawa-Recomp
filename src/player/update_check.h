@@ -51,8 +51,10 @@ extern "C" {
    repository's current capitalisation (Jstar269/Nakagawa-Recomp since its rename), so this
    part of a URL compares without case and the rest of the URL exactly. */
 #define NK_UPDATE_REPOSITORY_URL "https://github.com/" NK_UPDATE_REPOSITORY
-#define NK_UPDATE_RELEASE_PAGE_PREFIX NK_UPDATE_REPOSITORY_URL "/releases/tag/"
-#define NK_UPDATE_DOWNLOAD_PREFIX NK_UPDATE_REPOSITORY_URL "/releases/download/"
+/* Both prefixes start with NK_UPDATE_REPOSITORY_URL. They spell it out so that the network
+   egress test in tools/test_prereq_fetcher.py can read each URL from this header. */
+#define NK_UPDATE_RELEASE_PAGE_PREFIX "https://github.com/" NK_UPDATE_REPOSITORY "/releases/tag/"
+#define NK_UPDATE_DOWNLOAD_PREFIX "https://github.com/" NK_UPDATE_REPOSITORY "/releases/download/"
 #define NK_UPDATE_USER_AGENT "NakagawaRecomp/UpdateCheck"
 
 /* The largest answers read into memory: the release list, a checksum file and its
