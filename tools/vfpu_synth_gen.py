@@ -717,7 +717,7 @@ def iter_synthetic_corpus_raw() -> Iterator[int]:
 # words; the high six bits are the opcode. The fuzz harness needs a nonzero base register,
 # so rs is r4 here; census rows that were only visited with rs = r0 stay unverified.
 _CENSUS_GAP_SCALAR_MEMORY: tuple[int, ...] = (0x0A1800F, 0x0A5000F)
-_CENSUS_GAP_QUAD_MEMORY: tuple[int, ...] = (0x0A1800F,)
+_CENSUS_GAP_QUAD_MEMORY: tuple[int, ...] = (0x0A1800D,)
 
 
 def _iter_vfpu_memory_cop2() -> Iterator[int]:

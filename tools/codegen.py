@@ -2729,7 +2729,20 @@ def _vfpu_quad_memory_effect(addr, w, options, delay_branch_pc):
     return handler(addr, w, options, delay_branch_pc)
 
 
+def _refuse_quad_write_back(addr, w):
+    """Bit 1 of lv.q/sv.q is the base-register write-back flag ("wb").
+
+    What a PSP does with it (whether rs changes, and to which value) has no hardware cell
+    yet (issue #326), so the word is never executed inline with the flag ignored. It is
+    Unsupported, so normal_line emits the fail-closed sr_vfpu_interp fallback, which
+    refuses it and stops the run before any lane, memory word or register changes."""
+    if w & 2:
+        name = "lv.q" if (w >> 26) == 0x36 else "sv.q"
+        raise Unsupported(f"VFPU {name} write-back flag at 0x{addr:08x}")
+
+
 def _vfpu_lvq(addr, w, options, delay_branch_pc):
+    _refuse_quad_write_back(addr, w)
     lle_cpu = options.lle_cpu
     vt = ((w >> 16) & 0x1F) | ((w & 1) << 5)
     idx = vreg_indices(vt, 4)
@@ -2749,6 +2762,7 @@ def _vfpu_lvq(addr, w, options, delay_branch_pc):
 
 
 def _vfpu_svq(addr, w, options, delay_branch_pc):
+    _refuse_quad_write_back(addr, w)
     lle_cpu = options.lle_cpu
     vt = ((w >> 16) & 0x1F) | ((w & 1) << 5)
     idx = vreg_indices(vt, 4)

@@ -409,6 +409,8 @@ def _reason_kind(reason: str) -> str:
         return "operand-register"
     if "prefix" in reason:
         return "operand-prefix"
+    if "write-back flag" in reason:
+        return "operand-write-back"
     return "encoding"
 
 

@@ -292,6 +292,23 @@ int main(void) {{
         self.assertIn("s->r[4] + 0x00000000u",effect)
         self.assertNotIn("s->r[4] + 0x00000001u",effect)
 
+    def test_quad_write_back_flag_is_never_executed_inline(self):
+        # Bit 1 of lv.q/sv.q is the base-register write-back flag. No PSP cell shows what it
+        # does to rs (issue #326), so the word must not become an inline load or store that
+        # silently skips the write-back: it goes to sr_vfpu_interp, which refuses it and stops.
+        for op, inline in ((0x36, "MEM_R32("), (0x3E, "MEM_W32_PC(")):
+            plain = (op << 26) | (4 << 21) | (1 << 16) | 0x10
+            for lle_cpu in (False, True):
+                with self.subTest(op=hex(op), lle_cpu=lle_cpu):
+                    effect, _, _ = codegen.vfpu_effect(0x3000, plain, lle_cpu=lle_cpu)
+                    self.assertIn(inline, effect)
+                    with self.assertRaises(codegen.Unsupported):
+                        codegen.vfpu_effect(0x3000, plain | 2, lle_cpu=lle_cpu)
+                    line = codegen.normal_line(0x3000, plain | 2)
+                    self.assertIn("sr_vfpu_interp(s,", line)
+                    self.assertNotIn(inline, line)
+                    self.assertIn("sr_end(s, 0u, 0); return;", line)
+
     def test_vrot_overlap_recomputes_cosine_from_written_lane(self):
         # vt/op subfields select vrot; choose vd/vs in one matrix with scalar vs
         # present in the destination vector.

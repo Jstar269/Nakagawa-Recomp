@@ -314,6 +314,32 @@ static int check_quad_memops(void) {
           MEM_R32(ARENA_END - 4u) == 0xCAFE0002u,
           "sv.q rejection leaves every earlier guest word unchanged");
 
+    /* 7b. Bit 1 of lv.q/sv.q is the base-register write-back flag. No PSP cell shows what
+     * it does to rs, so the word is refused with no register, lane or memory change
+     * (issue #326); the same word with the bit clear still runs. */
+    sr_mem_init();
+    setup_state(&s);
+    s.r[4] = 0x08003000u;
+    for (int i = 0; i < 4; i++) {
+        s.vi[i] = 0x0bad0000u + (uint32_t)i;
+        MEM_W32(0x08003000u + (uint32_t)i * 4u, 0xCAFE0000u + (uint32_t)i);
+    }
+    {
+        const CpuState wb_before = s;
+        CHECK(sr_vfpu_interp(&s, svq(4, 0, 16) | 2u) == SR_VFPU_OTHER,
+              "sv.q with the write-back bit set is refused");
+        CHECK(memcmp(&s, &wb_before, sizeof(s)) == 0 && MEM_R32(0x08003010u) != 0x0bad0000u,
+              "refused sv.q wb changes no register, lane or memory word");
+        for (int i = 0; i < 4; i++) MEM_W32(0x08003010u + (uint32_t)i * 4u, 0x5a5a0000u + (uint32_t)i);
+        fill_vi(&s, 0);
+        const CpuState wb_load = s;
+        CHECK(sr_vfpu_interp(&s, lvq(4, 0, 16) | 2u) == SR_VFPU_OTHER &&
+              memcmp(&s, &wb_load, sizeof(s)) == 0,
+              "lv.q with the write-back bit set is refused and changes no state");
+        CHECK(sr_vfpu_interp(&s, lvq(4, 0, 16)) == SR_VFPU_COMPUTE && s.vi[0] == 0x5a5a0000u,
+              "lv.q without the write-back bit still loads");
+    }
+
     /* 8. Left/right merge forms preflight their exact sub-span. The sub-span
      * always lies inside the aligned 16-byte window containing addr (the left
      * form starts at the window base, the right form ends at the window top),

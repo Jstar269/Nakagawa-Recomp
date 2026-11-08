@@ -185,15 +185,13 @@ static const uint32_t sr_hle_unverified_nids[162] = {
 #ifndef SR_EVIDENCE_NO_VFPU
 /* A word is in a form when (word & mask) == match. `forms` lists the ledger rows' form ids. */
 typedef struct { uint32_t mask; uint32_t match; const char *forms; } SrVfpuUnverifiedForm;
-#define SR_VFPU_UNVERIFIED_FORM_COUNT 22u
-static const SrVfpuUnverifiedForm sr_vfpu_unverified_forms[22] = {
+#define SR_VFPU_UNVERIFIED_FORM_COUNT 20u
+static const SrVfpuUnverifiedForm sr_vfpu_unverified_forms[20] = {
     { 0xfc000000u, 0xfc000000u, "VFPU opcode 0x3f [vfpu-3f-fc000000-2f62df9cdfc2]" },
     { 0xffe00003u, 0xd8000000u, "lv.q [vfpu-36-d8000000-460695424519]" },
     { 0xffe00003u, 0xd8000001u, "lv.q [vfpu-36-d8050100-311bbc14b1ed]" },
-    { 0xffe00003u, 0xd8000003u, "lv.q [vfpu-36-d8018100-a59abdf93d57]" },
     { 0xffe00003u, 0xf8000000u, "sv.q [vfpu-3e-f8000000-eafd4b0b3fa0]" },
     { 0xffe00003u, 0xf8000001u, "sv.q [vfpu-3e-f8050100-e50967e96480]" },
-    { 0xffe00003u, 0xf8000003u, "sv.q [vfpu-3e-f8018100-bdb3647af048]" },
     { 0xffe08003u, 0xc8000000u, "lv.s [vfpu-32-c8000000-4ed11a01c431]" },
     { 0xffe08003u, 0xc8000001u, "lv.s [vfpu-32-c8050100-cf7177187253]" },
     { 0xffe08003u, 0xc8000003u, "lv.s [vfpu-32-c8050100-7190ae39c3e3]" },

@@ -259,10 +259,10 @@ class VfpuCoverageCensusTests(unittest.TestCase):
         # cross-check of their own; their rs != 0 neighbours are verified.
         ("0x32", "0xc8000000"), ("0x32", "0xc801810f"), ("0x32", "0xc805010f"),
         ("0x32", "0xc8050101"), ("0x32", "0xc8058181"), ("0x32", "0xc80a8010"),
-        ("0x36", "0xd8000000"), ("0x36", "0xd801810f"), ("0x36", "0xd8050101"),
+        ("0x36", "0xd8000000"), ("0x36", "0xd8050101"),
         ("0x3a", "0xe8000000"), ("0x3a", "0xe801810f"), ("0x3a", "0xe805010f"),
         ("0x3a", "0xe8050101"), ("0x3a", "0xe8058181"), ("0x3a", "0xe80a8010"),
-        ("0x3e", "0xf8000000"), ("0x3e", "0xf801810f"), ("0x3e", "0xf8050101"),
+        ("0x3e", "0xf8000000"), ("0x3e", "0xf8050101"),
         # VFPU4 forms the AOT routes to sr_vfpu_interp: both lanes are one implementation,
         # so a cross-check would compare the interpreter with itself, and no PSP oracle row
         # pins these widths (vsgn.p/.q, vt4444 other than .q).
