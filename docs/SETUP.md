@@ -335,6 +335,13 @@ Some folders hold a second copy of a tool that the build also calls, so the orde
   (for example, `C:/path/to/Python315/python.exe`); Make recipes and the player package builder use
   that explicit path even when MSYS2 is first on `PATH`. Run direct tooling commands through the
   same `PYTHON` path. Install the declared Python tooling dependencies before adding MSYS2 to `PATH`.
+- **The player's package build.** BUILD PACKAGE puts one UCRT64 toolchain's `bin` in front of the build
+  child's `PATH`, so Python, `mingw32-make` and `gcc` come from the same place: the release bundle, else
+  the per-user download, else a system MSYS2 UCRT64 install (a UCRT64 `bin` already on `PATH`,
+  `MSYS_PATH`, or `C:\msys64\ucrt64`) whose `bin` holds `gcc.exe` and whose `include` holds the SDL3
+  headers. A MinGW from another package manager ahead of MSYS2 on your `PATH`, such as Chocolatey's,
+  therefore no longer wins. With no complete UCRT64 toolchain the `PATH` is left alone and the build
+  stops at `sdl3-check`, which names the `gcc` it found.
 - **POSIX shell.** If a Make recipe needs `sh`, put Git for Windows' `usr\bin` (`%ProgramFiles%\Git\usr\bin`)
   ahead of MSYS2's `usr\bin` (`C:\msys64\usr\bin`), as the [Windows host pitfalls](#windows-host-pitfalls)
   table describes.

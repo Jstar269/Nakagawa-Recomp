@@ -394,6 +394,27 @@ bool package_builder_toolchain_missing(
     char *out_message, size_t out_message_size
 );
 
+/* The UCRT64 bin folder that must lead the build child's PATH, so python, make
+ * and gcc all come from one toolchain (#2278). In order: a verified release
+ * bundle's msys64/ucrt64/bin (prerequisites_root, which alone decides when set),
+ * the per-user download under data_root, then a system MSYS2 UCRT64 install: a
+ * bin on path_env whose parent folder is named ucrt64, msys_hint (a prefix or its
+ * bin, as MSYS_PATH), then msys_default_prefix (NULL off Windows). A candidate
+ * counts only when its bin/gcc.exe exists and, for a system install, so does
+ * include/SDL3/SDL.h. Returns false, with out empty, when no complete toolchain is
+ * found: PATH is then left alone and sdl3-check names the problem. */
+bool package_builder_resolve_toolchain_bin(const char *prerequisites_root,
+                                           const char *data_root,
+                                           const char *path_env,
+                                           const char *msys_hint,
+                                           const char *msys_default_prefix,
+                                           char *out, size_t out_size);
+
+/* Compose "<toolchain_bin><list separator><path_env>" for the build child's
+ * PATH. False, with out empty, when it does not fit. */
+bool package_builder_compose_build_path(const char *toolchain_bin, const char *path_env,
+                                        char *out, size_t out_size);
+
 /* Start the package build as a child process using nk_platform_spawn_process. */
 NkResult package_builder_start(
     PackageBuildSession *session,
