@@ -858,7 +858,7 @@ run with it on is stamped as enhanced (`ACE_MODE: present upscale movie-anime4k`
 `phase=present_upscale` boot event and `runtime.enhancements` in the flight bundle), so boot and
 flight evidence never takes it as authentic; an Authentic session from the launcher, the picture
 gate and the library sweep run with it `off`. A 480x272 movie frame costs 0.31 ms through two
-Anime4K stages and 0.74 ms with FSR 1 to 3811x2160 on an RTX 3080 (`anime4k-selftest`).
+Anime4K stages and 0.75 ms with FSR 1 to 3811x2160 on an RTX 3080 (`anime4k-selftest`).
 
 Runtime logs are written under `logs/`. Use `SR_DEBUG=0xFF` for all categories or consult [DEBUGGING.md](DEBUGGING.md) for targeted logging.
 On Windows, runtime output redirected to a file or pipe is buffered: a line reaches the log within 50 ms,

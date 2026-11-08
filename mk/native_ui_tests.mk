@@ -360,7 +360,8 @@ fsr1-selftest: shader-verify
 # third_party/anime4k) on a headless Vulkan device, beside FSR 1: one stage at 2x lands closer to a
 # supersampled line-art truth than FSR 1 at 2x by a measured margin; a flat colour stays within 2
 # through two stages; the source image is never written; the stage rule and SR_MOVIE_UPSCALE values
-# hold. Linked from the two passes, the C library and libm alone. No Vulkan headers, loader or
+# hold; a size past the device's image limit is refused without building images and the last good
+# size is kept; a size whose images cannot be made is built once, not tried again. Linked from the two passes, the C library and libm alone. No Vulkan headers, loader or
 # device: SKIP (exit 77), visible in the log; NK_UI_VK_REQUIRE=1 makes a skip fail.
 native-core-tests: anime4k-selftest
 .PHONY: anime4k-selftest

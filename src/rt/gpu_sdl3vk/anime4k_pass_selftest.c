@@ -13,6 +13,8 @@
  *   source-unread   the pass never writes the image it is given, and returns its own
  *   limits          a size past the device's image limit is refused without building images or
  *                   touching the last good size's, and the pass still works at the good size
+ *   alloc-failure   a size whose vkCreateImage fails (wrapped through the init's proc-addr hook) is
+ *                   built once and not tried again, and the pass still works at a good size
  *   cost            a 480x272 frame through two stages and FSR 1 to 3811x2160, by timestamps
  *
  * --mutant PASS FILE runs line-art with another shader for one pass; it must then fail.
@@ -511,8 +513,8 @@ static void cell_source_a4k(Anime4kPass *a) {
 
 /* A size past the device's image limit is refused before anything is touched: no image build (so no
  * device wait), the last good size's images stay (no build when the caller goes back to it), and
- * the pass still works. 32768 << 1 is past every real device's limit. This covers the limit path;
- * the latch on a size that passes the limit but fails to allocate cannot be forced here. */
+ * the pass still works. 32768 << 1 is past every real device's limit. The allocation-failure path
+ * is cell_alloc_failure's. */
 static void cell_limits(Anime4kPass *a) {
     const int w = 64, h = 48;
     Source src;
@@ -533,6 +535,74 @@ static void cell_limits(Anime4kPass *a) {
     CHECK(back != VK_NULL_HANDLE, "the pass still works at the good size after a refusal");
     CHECK(anime4k_size_builds(a) == builds, "going back to the good size rebuilds nothing");
     image_free(&src);
+}
+
+/* The allocation-failure path, which the limit check never reaches: vkCreateImage is wrapped (through
+ * Anime4kInit's own proc-addr hook, so the pass has no test seam) to fail for one width. A size whose
+ * images cannot be made is built once, freed after that build's device wait, and not tried again. */
+static PFN_vkGetDeviceProcAddr s_real_dev_addr;
+static PFN_vkCreateImage s_real_create_image;
+static uint32_t s_fail_width;  /* vkCreateImage fails for images this wide, when not 0 */
+
+static VKAPI_ATTR VkResult VKAPI_CALL failing_create_image(VkDevice device, const VkImageCreateInfo *info,
+                                                           const VkAllocationCallbacks *alloc,
+                                                           VkImage *image) {
+    if (s_fail_width && info->extent.width == s_fail_width) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    return s_real_create_image(device, info, alloc, image);
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL wrapped_device_addr(VkDevice device, const char *name) {
+    PFN_vkVoidFunction fn = s_real_dev_addr(device, name);
+    if (strcmp(name, "vkCreateImage") == 0) {
+        s_real_create_image = (PFN_vkCreateImage)fn;
+        return (PFN_vkVoidFunction)failing_create_image;
+    }
+    return fn;
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL wrapped_instance_addr(VkInstance instance, const char *name) {
+    PFN_vkVoidFunction fn = g.gipa(instance, name);
+    if (strcmp(name, "vkGetDeviceProcAddr") == 0) {
+        s_real_dev_addr = (PFN_vkGetDeviceProcAddr)fn;
+        return (PFN_vkVoidFunction)wrapped_device_addr;
+    }
+    return fn;
+}
+
+static void cell_alloc_failure(void) {
+    Anime4kInit ai;
+    memset(&ai, 0, sizeof(ai));
+    ai.get_instance_proc_addr = wrapped_instance_addr;
+    ai.instance = g.instance;
+    ai.physical_device = g.physical;
+    ai.device = g.device;
+    ai.queue_family = g.family;
+    char why[160] = "";
+    Anime4kPass *a = anime4k_create(&ai, why, sizeof(why));
+    CHECK(a != NULL, "anime4k_create with a wrapped vkCreateImage: %s", why);
+    if (!a) return;
+    const int w = 64, h = 48;
+    Source src;
+    memset(&src, 0, sizeof(src));
+    if (!image_make(&src, w, h, VK_FORMAT_R8G8B8A8_UNORM)) {
+        CHECK(0, "source image");
+        anime4k_destroy(a);
+        return;
+    }
+    source_fill(&src, w, h, 1);
+    unsigned builds = anime4k_size_builds(a);
+    s_fail_width = 100;
+    cmd_begin();
+    VkImage first = anime4k_record(a, g.cb, src.image, 100, 50, 1);
+    VkImage again = anime4k_record(a, g.cb, src.image, 100, 50, 1);
+    cmd_end();
+    s_fail_width = 0;
+    CHECK(first == VK_NULL_HANDLE && again == VK_NULL_HANDLE, "a size whose images cannot be made is refused");
+    CHECK(anime4k_size_builds(a) == builds + 1, "that size is built once, then not tried again");
+    VkImage ok = a4k_run(a, &src, w, h, 1);
+    CHECK(ok != VK_NULL_HANDLE, "the pass works at a good size after an allocation failure");
+    image_free(&src);
+    anime4k_destroy(a);
 }
 
 static void cell_stages(void) {
@@ -658,6 +728,7 @@ int main(int argc, char **argv) {
             cell_flat_a4k(a);
             cell_source_a4k(a);
             cell_limits(a);
+            cell_alloc_failure();
             cell_cost_a4k(a, f);
         }
     }

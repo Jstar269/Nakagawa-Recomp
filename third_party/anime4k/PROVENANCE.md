@@ -50,7 +50,7 @@ check` fails when one differs from what the generator writes from the imported f
 ## Local deltas
 
 The two imported files above carry none: they are byte-identical. The local deltas are the nine
-derived shaders in the table above. The nine `anime4k_cnn_x2_m_*_comp.inc` files beside them are
-their compiled SPIR-V (`tools/shader_embed.py`), and `anime4k_passes.h` is the pass graph
-(`tools/anime4k_port.py`); both are generated from this import, hold no upstream text beyond the
-compiled shader code, and are recomputable.
+derived shaders in the table above. The nine `anime4k_cnn_x2_m_*_comp.inc` files in
+`src/rt/gpu_sdl3vk/` are their compiled SPIR-V (`tools/shader_embed.py`), and `anime4k_passes.h` there
+is the pass graph (`tools/anime4k_port.py`); both are generated from this import, hold upstream text
+only as compiled shader code and pass names, and are recomputable.
