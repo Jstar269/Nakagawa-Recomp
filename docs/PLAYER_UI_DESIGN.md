@@ -1,7 +1,6 @@
 # Player UI design system
 
-The visual spec for the native player's launcher UI (the only launcher since v0.0.1; the old renderer survives only in the regression-test build for
-one release). It is the reference every
+The visual spec for the native player's launcher UI (the only launcher since v0.0.1; the old renderer survives only in the regression-test build). It is the reference every
 screen lane builds against: Library and Title detail (C5, built), Settings (C6), first run (C7) and error dialogs
 (C8). The tokens and components it names live in code:
 
@@ -340,7 +339,7 @@ while the box is open, so an input method works too), Backspace deletes, and let
 a controller or the mouse, on Q. Esc or B clears and closes the box and focus returns to FIND. The prompt bar reads
 MOVE, SELECT and CLEAR while it is open.
 
-The sorts are those three, with room for a compatibility tier later (#1731). Find is one
+The sorts are those three. Find is one
 model for every input: a Find action (a button, and a controller button) opens a find box that filters the library
 as you type, with an on-screen keyboard for controllers, and Esc or B clears and closes it. Typing a letter to open it
 would collide with the letter shortcuts, so "/" and Ctrl+F open it from a hardware keyboard and every letter shortcut stays (#1742). A library holds up to 4096 games; only the page shown reads
@@ -466,7 +465,7 @@ Reached from the top bar's ABOUT tab (L / R or Q / E switch tabs; Back returns t
 880 px column:
 
 - the N1 mark at 72 px beside `NAKAGAWA RECOMP` in `DISPLAY_XL`, with the version line under it in `LABEL_L`
-  accent, exactly `v0.0.1 (MM-DD-YYYY)`;
+  accent: `v`, then `NK_PLAYER_VERSION`, then the build date as `(MM-DD-YYYY)`, for example `v0.0.2 (11-07-2026)`;
 - a `BODY_L` `muted` line saying what it is (a PSP static recompiler: your own game, recompiled to run natively),
   followed by the privacy promise;
 - a LICENCE card (GPL-3.0-or-later, and a THIRD-PARTY NOTICES button that opens the existing licences screen) beside
@@ -554,13 +553,13 @@ values are starting points, to be tuned by measurement on real titles. They live
 | LOW | 1x (480x272) | Sharp | On | the row's | |
 | MEDIUM | 2x | Sharp | On | the row's | |
 | HIGH | 4x | Sharp | On | the row's | |
-| ULTRA | 4x | Sharp | On | the row's | the FSR 1 upscaler, which Settings can't set until #2122: the row reads ULTRA (NO UPSCALER) and the notice line says so |
+| ULTRA | 4x | Sharp | On | the row's | does not turn on Sharper enlarging (the FSR 1 upscaler, #2122); the notice line says so |
 | HANDHELD | 2x | Sharp | On | On | |
 
 A preset never changes frame pacing, the play mode, an Enhanced part or the launch line.
 Left and Right move between the two cards along a row (`NK_UI_BUTTON_ROW`), so CONTROLLER SETTINGS is reached from
 SCALING. Every change is saved as it is made. Below a 680 px tall window the `SETTINGS` heading is left out (the tab names the
-page) so every row fits 960 x 540. The tabbed layout below is the target for a later pass:
+page) so every row fits 960 x 540. The tabbed layout below is a design that is not built:
 
 - Top bar with SETTINGS active; `SETTINGS` in `DISPLAY`; a tab row (`LABEL`, 10/12 px padding, 3 px accent rule
   under the active tab, `line` underneath): DISPLAY, AUDIO, CONTROLS, PATHS AND STORAGE, ACCESSIBILITY, ABOUT.
@@ -644,12 +643,11 @@ Built now: the setup wizard's four steps (Welcome, Options, Game, Verify) on the
 dialog card the build and error screens use. Copying the disc's files at Verify ends on the library card, where the
 game is built and played, and the PSP fonts are imported in Settings > PSP fonts, so the step chips name only those
 four steps. The older Fonts and Ready step states remain only for state-only callers and the old renderer.
-Options ("Online and developer options", [`ONLINE_FEATURES.md`](ONLINE_FEATURES.md)) comes right after Welcome because it needs no game: one plain line that online features aren't built yet (the
-Online mode switch returns with them), one switch row (a 220 px button reading "Developer mode: On" or "Off",
+Options ("Online and developer options", [`ONLINE_FEATURES.md`](ONLINE_FEATURES.md)) comes right after Welcome because it needs no game: one plain line that online features aren't built (an Online mode switch shows only when a stored setting has online mode on), one switch row (a 220 px button reading "Developer mode: On" or "Off",
 accent while on, with its sentence beside it), then CONTINUE (the default focus, so Enter never flips a switch), SKIP and BACK. A strip of step chips sits at the top (current: accent fill; done:
 `ready` edge and a check); each step has one primary action first, then Back and Cancel. Every control returns
 `PLAYER_UI_ACTION_WIZARD` with an op that `main.c` runs through the handlers the existing wizard calls. The Welcome
-step says the privacy promise once. The left rail below is the target layout for a later pass:
+step says the privacy promise once. The left rail below is a design that is not built:
 
 - Left rail 260 px (32/24 px padding, `line` edge on the right) listing the steps: Welcome, Disc image, System
   fonts, Build, Play. There is no key-file step. Each step is 44 px with a 26 px numbered circle (`line_strong`
