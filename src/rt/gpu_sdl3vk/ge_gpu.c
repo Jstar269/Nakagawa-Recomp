@@ -6765,17 +6765,19 @@ int gegpu_init(void) {
          * and takes one more descriptor set per entry that has one. */
         const NkGlyphConfig *gl = nk_glyph_init_from_env(g_ace_on);
         s_glyphs_asked = gl->on;
-        s_glyphs = gl->on && s_scale >= NK_GLYPH_MIN_FACTOR && s_scale <= NK_GLYPH_MAX_FACTOR;
+        s_glyphs = gl->on && s_scale >= NK_GLYPH_MIN_FACTOR && s_scale <= MAX_SCALE;
         if (gl->on && !s_glyphs)
             fprintf(stderr, "GLYPHS: idle (render scale %d leaves nothing to sharpen; it takes %d to %d)\n",
-                    s_scale, NK_GLYPH_MIN_FACTOR, NK_GLYPH_MAX_FACTOR);
+                    s_scale, NK_GLYPH_MIN_FACTOR, MAX_SCALE);
         if (s_glyphs && !nk_tex_scale_config()->budget_bytes) {
             NkTexScaleConfig c = *nk_tex_scale_config();
             c.budget_bytes = (uint64_t)NK_TEX_SCALE_DEFAULT_BUDGET_MB << 20;
             nk_tex_scale_configure(&c);
         }
     }
-    const uint32_t tex_sets = (s_ace_af ? 2u * MAX_TEX : MAX_TEX) * ((xs_enabled() || s_glyphs) ? 2u : 1u);
+    /* Per entry: its set (and the anisotropic one), a scaled copy's set (and its anisotropic one), and a glyph image's. */
+    const uint32_t per_entry = (s_ace_af ? 2u : 1u) + (xs_enabled() ? (s_ace_af ? 2u : 1u) : 0u) + (s_glyphs ? 1u : 0u);
+    const uint32_t tex_sets = MAX_TEX * per_entry;
     s_tex_pool_sets = tex_sets;
     if (s_ace_af) ace_confirm(ACE_FEATURE_AF);   /* the renderer that filters is up */
     VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, tex_sets };

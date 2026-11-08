@@ -180,6 +180,21 @@ NkGlyphVerdict nk_glyph_rect_check(const uint32_t *page, int pw, int ph, int x0,
     return NK_GLYPH_OK;
 }
 
+/* The range of coverage over the 3 x 3 texels around texel (x, y) of the w x h rectangle at (x0, y0), the
+ * rectangle's own edge replicated past its border. 0 is flat, 1 a full step. */
+static float local_range(const uint32_t *page, int pw, int x0, int y0, int w, int h, int x, int y) {
+    int lo = 255, hi = 0;
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++) {
+            const int xx = x + i < 0 ? 0 : (x + i > w - 1 ? w - 1 : x + i);
+            const int yy = y + j < 0 ? 0 : (y + j > h - 1 ? h - 1 : y + j);
+            const int a = alpha_of(page[(size_t)(y0 + yy) * (size_t)pw + (size_t)(x0 + xx)]);
+            if (a < lo) lo = a;
+            if (a > hi) hi = a;
+        }
+    return (float)(hi - lo) * (1.0f / 255.0f);
+}
+
 NkGlyphVerdict nk_glyph_verify(const uint32_t *page, int pw, int ph, int x0, int y0, int w, int h,
                                int factor, const uint32_t *tile) {
 #ifdef NK_GLYPH_MUTANT_NO_DOWNSAMPLE_CHECK
@@ -206,6 +221,25 @@ NkGlyphVerdict nk_glyph_verify(const uint32_t *page, int pw, int ph, int x0, int
             const long want = (long)alpha_of(page[(size_t)(y0 + y) * (size_t)pw + (size_t)(x0 + x)]) * blockn;
             const long diff = sum > want ? sum - want : want - sum;
             if (diff > (long)NK_GLYPH_CHECK_TOLERANCE * blockn) return NK_GLYPH_REFUSE_DOWNSAMPLE;
+#ifndef NK_GLYPH_MUTANT_NO_RIPPLE_CHECK
+            /* Where the guest's coverage varies slowly the block must too: a smooth block spans about half the range of
+             * the texels around it, and one that spans more is a ramp that starts over at the next block (a ribbed
+             * gradient). */
+            const float r = local_range(page, pw, x0, y0, w, h, x, y);
+            if (r < NK_GLYPH_EDGE_LOW) {
+                int lo = 255, hi = 0;
+                for (int j = 0; j < factor; j++) {
+                    const uint32_t *row = tile + (size_t)(y * factor + j) * (size_t)tw + (size_t)(x * factor);
+                    for (int i = 0; i < factor; i++) {
+                        const int a = alpha_of(row[i]);
+                        if (a < lo) lo = a;
+                        if (a > hi) hi = a;
+                    }
+                }
+                if ((float)(hi - lo) > r * 255.0f * NK_GLYPH_RIPPLE_SHARE + (float)NK_GLYPH_RIPPLE_SLACK)
+                    return NK_GLYPH_REFUSE_DOWNSAMPLE;
+            }
+#endif
         }
     }
     return NK_GLYPH_OK;
@@ -227,10 +261,10 @@ static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 /* The bicubic field of a w x h coverage plane at factor f, into hi (w f x h f). */
-static void upsample(const float *cov, int w, int h, int f, float *hi) {
+static int upsample(const float *cov, int w, int h, int f, float *hi) {
     const int W = w * f, H = h * f;
     float *tmp = (float *)malloc(sizeof(float) * (size_t)W * (size_t)h);
-    if (!tmp) return;
+    if (!tmp) return 0;
     for (int X = 0; X < W; X++) {
         const float sx = ((float)X + 0.5f) / (float)f - 0.5f;
         const int ix = (int)floorf(sx);
@@ -254,6 +288,7 @@ static void upsample(const float *cov, int w, int h, int f, float *hi) {
         }
     }
     free(tmp);
+    return 1;
 }
 
 /* The mean of a block of ramp values at threshold t. */
@@ -261,6 +296,12 @@ static float block_mean(const float *v, int n, float slope, float t) {
     float s = 0.0f;
     for (int i = 0; i < n; i++) s += clampf(0.5f + slope * (v[i] - t), 0.0f, 1.0f);
     return s / (float)n;
+}
+
+/* 0 below NK_GLYPH_EDGE_LOW, 1 above NK_GLYPH_EDGE_HIGH, smooth between. */
+static float edge_weight(float range) {
+    const float t = clampf((range - NK_GLYPH_EDGE_LOW) / (NK_GLYPH_EDGE_HIGH - NK_GLYPH_EDGE_LOW), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
 }
 
 NkGlyphVerdict nk_glyph_rebuild(const uint32_t *page, int pw, int ph, int x0, int y0, int w, int h,
@@ -282,7 +323,10 @@ NkGlyphVerdict nk_glyph_rebuild(const uint32_t *page, int pw, int ph, int x0, in
         for (int x = 0; x < w; x++)
             cov[(size_t)y * (size_t)w + (size_t)x] =
                 (float)alpha_of(page[(size_t)(y0 + y) * (size_t)pw + (size_t)(x0 + x)]) * (1.0f / 255.0f);
-    upsample(cov, w, h, factor, hi);
+    if (!upsample(cov, w, h, factor, hi)) {
+        free(cov); free(hi); free(out); free(blk);
+        return NK_GLYPH_REFUSE_MEMORY;
+    }
     const float slope = (float)factor;
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
@@ -290,20 +334,38 @@ NkGlyphVerdict nk_glyph_rebuild(const uint32_t *page, int pw, int ph, int x0, in
             for (int j = 0; j < factor; j++)
                 for (int i = 0; i < factor; i++)
                     blk[j * factor + i] = hi[(size_t)(y * factor + j) * (size_t)W + (size_t)(x * factor + i)];
-            float t = 0.0f;
+            float t = 0.0f, off = 0.0f;
+            /* How much of the block is an edge: a step of coverage within the texels around it sharpens, a slow
+             * change does not (a steep ramp over a shallow gradient restarts at every block and ribs it). */
+#ifdef NK_GLYPH_MUTANT_NO_SMOOTH_MODE
+            const float wedge = 1.0f;   /* glyph-recon-mutant: every block steepened */
+#else
+            const float wedge = edge_weight(local_range(page, pw, x0, y0, w, h, x, y));
+#endif
 #ifdef NK_GLYPH_MUTANT_PLAIN_BICUBIC
             /* glyph-recon-mutant: the bicubic field itself, with no threshold fitted to the texel */
             for (int k = 0; k < blockn; k++) blk[k] = clampf(blk[k], 0.0f, 1.0f);
 #else
             if (c > 0.0f && c < 1.0f) {
-                float lo = -1.0f, up = 2.0f;   /* mean(lo) = 1, mean(up) = 0 for slope >= 1 */
-                for (int it = 0; it < 24; it++) {
+                if (wedge > 0.0f) {
+                    float lo = -1.0f, up = 2.0f;   /* mean(lo) = 1, mean(up) = 0 for slope >= 1 */
+                    for (int it = 0; it < 24; it++) {
+                        t = 0.5f * (lo + up);
+                        if (block_mean(blk, blockn, slope, t) > c) lo = t; else up = t;
+                    }
                     t = 0.5f * (lo + up);
-                    if (block_mean(blk, blockn, slope, t) > c) lo = t; else up = t;
                 }
-                t = 0.5f * (lo + up);
+                if (wedge < 1.0f) {
+                    float lo = -1.0f, up = 1.0f;   /* mean of the field shifted by off, clamped, rises with off */
+                    for (int it = 0; it < 24; it++) {
+                        off = 0.5f * (lo + up);
+                        if (block_mean(blk, blockn, 1.0f, 0.5f - off) < c) lo = off; else up = off;
+                    }
+                    off = 0.5f * (lo + up);
+                }
             } else {
                 t = c <= 0.0f ? 2.0f : -1.0f;
+                off = c <= 0.0f ? -1.0f : 1.0f;
             }
 #endif
             for (int j = 0; j < factor; j++) {
@@ -311,7 +373,10 @@ NkGlyphVerdict nk_glyph_rebuild(const uint32_t *page, int pw, int ph, int x0, in
 #ifdef NK_GLYPH_MUTANT_PLAIN_BICUBIC
                     const float val = blk[j * factor + i];
 #else
-                    const float val = clampf(0.5f + slope * (blk[j * factor + i] - t), 0.0f, 1.0f);
+                    const float field = blk[j * factor + i];
+                    const float sharp = clampf(0.5f + slope * (field - t), 0.0f, 1.0f);
+                    const float soft = clampf(field + off, 0.0f, 1.0f);
+                    const float val = wedge * sharp + (1.0f - wedge) * soft;
 #endif
                     const int a = (int)floorf(val * 255.0f + 0.5f);
                     out[(size_t)(y * factor + j) * (size_t)W + (size_t)(x * factor + i)] =

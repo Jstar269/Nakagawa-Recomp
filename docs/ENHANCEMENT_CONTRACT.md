@@ -756,38 +756,48 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
 - **Settings.** `SR_GLYPHS=off|on`, read when the renderer starts; unset is off. It takes effect only in Ace Mode: in
   an authentic run it is not read, and a request prints one `GLYPHS: off (sharp game text needs Ace Mode)` line. Any
   other value prints `GLYPHS: refused (SR_GLYPHS takes off or on)` and the feature stays off. It needs a render scale
-  of 2 to 6, the factor the rebuild is made at; at 1x there is nothing to sharpen and a run prints
-  `GLYPHS: idle (render scale <n> leaves nothing to sharpen; it takes 2 to 6)`. It is not the launch line's `text`
+  of 2 to 4, the factor the rebuild is made at (4 is the renderer's largest scale; the rebuild itself is tested up to
+  6); at 1x there is nothing to sharpen and a run prints
+  `GLYPHS: idle (render scale <n> leaves nothing to sharpen; it takes 2 to 4)`. It is not the launch line's `text`
   key (section 10.1), which only sets the on-screen keyboard to the window's resolution; neither reads or implies the
-  other. There is no launch-line key, library setting or per-title setting yet (section 11.3.5).
+  other. It has no launch-line key, library setting or per-title setting; section 11.3.5 says what admission needs.
 - **Which draws.** A sprite primitive that maps one texel to one pixel (the smart 2D test of section 10.10, either
   direction) over a rectangle of whole texels, each side 4 to 64 texels, inside a cached texture that has one level,
   is not a render target and lies in main RAM, in 4444, 8888 or an indexed 4-bit or 8-bit format. Text drawn as
   triangles, magnified or minified, from a page in VRAM, with a mip chain, or in 5650, 5551 or a block-compressed
-  format keeps the game's own picture, byte for byte. The refusals are named: `vram`, `format`, `reversed` (a 4-bit
-  buffer with its nibbles swapped, as sceFont keeps one), `rgb24` (a 24-bit buffer), `mip`, `scale`, `size`,
-  `empty`, `colour` and `hard_edge`.
+  format keeps the game's own picture, byte for byte. The refusals are named: `vram`, `format`, `mip`, `scale`,
+  `size`, `empty`, `colour`, `hard_edge`, `downsample` and `memory`, and two that guard callers other than the GE
+  path, which has no such formats: `reversed` (a 4-bit buffer with its nibbles swapped, as sceFont keeps one) and
+  `rgb24` (a 24-bit buffer).
 - **A page that looks like text.** Every inked texel (alpha above 0) of the rectangle has the same colour, so the
   alpha channel is coverage and the colour comes from the draw; at least two texels are partly covered (alpha neither
   0 nor 255) and at least one in eight of the inked texels is. A rectangle with two inked colours is art, and a
-  hard-edged bitmap font has no coverage to refine; both are drawn as the game drew them.
+  hard-edged bitmap font has no coverage to refine; both are drawn as the game drew them. A single-colour soft shape
+  (a shadow, a glow, a fade bar) passes this test and is not an edge: the rebuild keeps it smooth (next bullet).
 - **The rebuild.** For a rectangle of coverage `c` at factor `f`: the coverage is enlarged with a Catmull-Rom bicubic,
   replicating the rectangle's own edge texels past its border, so a neighbouring cell of the page is never read. Then
   for every texel a threshold is fitted (a bisection) so that the `f x f` block of pixels, each set to
   `clamp(0.5 + f * (field - threshold), 0, 1)`, averages to that texel's coverage. The ramp is about one device
   pixel wide at any factor, so the edge is sharp and still anti-aliased at the render resolution, and every block
-  keeps the guest's coverage by construction. Every pixel with any coverage takes the rectangle's one colour. The
-  arithmetic is float in a fixed order, so a run is repeatable.
+  keeps the guest's coverage by construction. That applies where the coverage steps: the range of coverage over the
+  3 x 3 texels around a texel decides how much of its block is a ramp (nothing below 0.35, all of it above 0.65,
+  a mix between). Elsewhere the block is the bicubic field itself, shifted so its mean is the texel's coverage. A ramp
+  that steep over a slow gradient would start over at every block and rib it. Every pixel with any coverage takes the
+  rectangle's one colour. The arithmetic is float in a fixed order, so a run is repeatable.
 - **Checked.** Before a tile is used it is compared with the guest's bytes: each texel of the rectangle must equal
-  the mean of its block of the quantized tile within 2 of 255, and every inked pixel must have the rectangle's colour
-  (`nk_glyph_verify`). A tile that fails is refused (`downsample`) and its draw is as the game drew it.
+  the mean of its block of the quantized tile within 2 of 255, every inked pixel must have the rectangle's colour,
+  and where the coverage is slowly varying (range below 0.35 around the texel) a block's spread may not pass 0.6 of
+  that range by more than 2 of 255 (`nk_glyph_verify`). A tile that fails is refused (`downsample`) and its draw is as the
+  game drew it.
 - **Reading.** The page is decoded from main RAM by the decoder the texture cache uses; a page in VRAM is refused
   before any decode, so the feature never causes a renderer readback. Nothing is written to guest memory, the CLUT or
   a texture source.
-- **How it draws.** The first rectangle rebuilt from a page makes a host-only image beside the cache entry's own, the
-  page's size times the render scale (a side times the scale may not pass 2048 texels; a larger page is drawn as the
-  game made it), transparent, and each tile goes to its own place in it. It shares the GPU budget of
-  `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default); a page that does not fit is counted (`budget_short`) and drawn as
+- **How it draws.** The first rectangle of a page that passes every check makes a host-only image beside the cache
+  entry's own, the page's size times the render scale (a side times the scale may not pass 2048 texels; a larger page
+  is drawn as the game made it), transparent, and each tile goes to its own place in it. A page whose rectangles are
+  all refused makes no image, takes no descriptor set and does no synchronous clear; it keeps a small table of its
+  refusals. The texture descriptor pool has a set for the image (one more per entry when glyphs are on). It shares the
+  GPU budget of `SR_TEX_SCALE_BUDGET_MB` (512 MiB by default); a page that does not fit is counted (`budget_short`) and drawn as
   made. The draw binds that image with the scaled-copy flag, so the shader samples it on its own texel lattice
   (section 10.10, "Sampling"): at render scale `f` one rebuilt texel lies under each device pixel centre. The draw
   samples nearest, whatever filter the game set: each pixel centre is a texel centre, and the shader's linear weight
@@ -796,27 +806,33 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   Rectangles that overlap are separate tiles, each a rebuild of the same texels, so the one drawn last may overwrite
   part of the other with an equally valid version.
 - **Never stale, never waited on.** A tile belongs to the cache entry's content hash it was checked against. When the
-  guest rewrites the page the entry's hash changes; the next draw decodes the page once, compares each tile's texels
+  guest rewrites the page the entry's hash changes; the next draw decodes the page once (every other new rectangle of
+  that content reuses the decode), compares each tile's texels
   with the ones it was built from, keeps the tiles whose texels are unchanged and rebuilds the rest when they are
   drawn, so the old tile is never drawn for new content. The rebuild runs on the renderer thread, not on a worker, so
   the same draws rebuild the same tiles whatever the host's speed. The work is bounded by a count: at most 48
   rectangles are checked or rebuilt per present, and a draw past the count is drawn as the game made it and offered
   again by the next draw. No time budget exists.
 - **Stamps.** `GLYPHS: on (per_present=48, tolerance=2)` at start, followed by the line section 11.3.5 describes, and
-  at exit `GLYPHS: draws (bound=, tiles_built=, tiles_kept=, tiles_stale=, page_decodes=, capped=, budget_short=,
-  tiles_full=)` and `GLYPHS: exit (refused: <name>=<count>, ...)`. Section 10.4 applies: the run is an Ace run.
+  at exit `GLYPHS: draws (bound=, tiles_built=, tiles_kept=, tiles_stale=, page_decodes=, images=, capped=,
+  budget_short=, tiles_full=)` and `GLYPHS: exit (refused: <name>=<count>, ...)`. Section 10.4 applies: the run is an Ace run.
 - **Limits.** One page holds at most 768 tiles; a draw past that is drawn as made (`tiles_full`). Text drawn as
   triangles is not rebuilt. The feature is not part of the settings pages or the launch line.
 - **Tests.** `glyph-recon-selftest` checks the setting and its Ace gate, every named refusal, the classifier, and the
   rebuild at every factor for 4444, 8888, indexed 4-bit and indexed 8-bit pages (block means, colour, repeatability,
-  fewer soft pixels than a bilinear enlargement, no dependence on neighbouring cells), and the downsample check
-  against tampered and stale tiles, all on synthetic glyphs. `glyph-recon-mutant` builds the selftest ten times, each
+  fewer soft pixels than a bilinear enlargement, no dependence on neighbouring cells), the downsample check
+  against tampered and stale tiles, and soft single-colour art (a round shadow, a fade bar) at every factor, whose
+  rows must not reverse where the source does not, and a sawtooth tile that must fail the check, all on synthetic
+  glyphs. `glyph-recon-mutant` builds the selftest twelve times, each
   without one guard (the Ace gate, VRAM, render scale 1, the mip chain, the two buffer formats, the downsample check,
-  the colour check, the hard-edge check, the size check, and a rebuild that fits no threshold), and passes only when
-  each fails the cell that names it. `gpu-glyph-selftest` runs the production path on a Vulkan device at render scales
-  2, 3, 4 and 6: a 1:1 sprite draws the rebuilt tile, device pixel for pixel, with and without other content beside
+  the colour check, the hard-edge check, the size check, the smooth blocks, the ripple check, and a rebuild that fits
+  no threshold), and passes only when each fails the cell that names it. `gpu-glyph-selftest` runs the production
+  path on a Vulkan device at render scales 2, 3 and 4, and fails if the renderer runs at another scale than asked:
+  a 1:1 sprite draws the rebuilt tile, device pixel for pixel, with and without other content beside
   the cell, and without the feature it does not; a page in VRAM, a hard-edged page, a two-colour page, a magnified
-  sprite, a rectangle too small and one past the page draw exactly as without the feature; a rewritten page draws
+  sprite, a rectangle too small and one past the page draw exactly as without the feature and make no image; a fade
+  bar of one colour draws without a ribbed row; the descriptor pool holds a set for every image an entry can have; a
+  rewritten page draws
   its new tile and never the old, and an unchanged cell keeps its tile; the 48-per-present count; guest memory and
   the CLUT unchanged; the setting idle at 1x; and an authentic run that rebuilds nothing and draws the same picture
   with `SR_GLYPHS` unset and on. `gpu-glyph-mutant` removes the content check of a bound tile, the per-present
@@ -879,6 +895,8 @@ top-left device pixel of each guest pixel, so the guest reads what the device dr
   What it does not do:
   - Rotated and sheared primitives, a strip half without both a horizontal and a vertical leg (a trapezoid), and
     transform-mode (3D) geometry are not clamped.
+  - A sprite drawn from a rebuilt glyph tile (section 10.13) is not clamped: the tile holds only its own rectangle, so
+    no neighbouring cell can reach an edge sample, and each device pixel samples its own rebuilt texel.
   - Where two clamped primitives meet with continuous texture coordinates, each keeps its edge pixel's sample over
     its outer band, so the seam shows the 1x step instead of a smooth upscaled blend across it.
   - A sprite that samples a render target at device resolution (a screen copy) is clamped the same way, so the copy's
@@ -1145,10 +1163,10 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
 - **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
   so a frame drawn with a rebuilt glyph is the frame the guest keeps. The feature stays outside section 11.2 until the
   requirements below exist. Until then it is reachable only through an environment variable, for development.
-- **Key and off switch.** None yet. `SR_GLYPHS` is an environment variable, not a key on the launch line (section
-  10.1), and has no library or per-title setting. Its off switch is the variable unset or `off`, and an authentic
-  run, which never reads it. The launch-line key named for it is `glyphs`, in the pull request that follows #2074
-  with `tex` and `s2d` (section 11.3.3), and only that pull request admits the feature.
+- **Key and off switch.** The feature has no launch-line key. `SR_GLYPHS` is an environment variable, not a key on
+  the launch line (section 10.1), and has no library or per-title setting. Its off switch is the variable unset or
+  `off`, and an authentic run, which never reads it. Admission under section 11.2 needs all three; the key name
+  `glyphs` is reserved for it.
 - **How it relates to the `text` key.** Not at all. `text` (section 10.1) draws the on-screen keyboard at the window's
   resolution on the presented image and changes no guest frame; `glyphs` rebuilds the game's own text inside the
   frame the game draws. Neither reads or implies the other, and `text=on` with `glyphs` off leaves a game's text as

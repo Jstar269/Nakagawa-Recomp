@@ -352,6 +352,61 @@ static void cell_verify(void) {
     check(nk_glyph_rebuild(page, PW, PH, RX(0), RY, CELL_W, CELL_H, 1, bad) == NK_GLYPH_REFUSE_SCALE, "refuse-scale", "factor 1 in the rebuild");
 }
 
+/* ---- soft single-colour art: shadows, glows, fade bars ----------------------------------------- */
+
+/* Sign changes of the steps along row `y` of a tile `tw` wide, ignoring flat steps. */
+static int row_reversals(const uint32_t *tile, int tw, int y, int x_from, int x_to) {
+    int last = 0, flips = 0;
+    for (int x = x_from + 1; x < x_to; x++) {
+        const int d = (int)(tile[(size_t)y * (size_t)tw + (size_t)x] >> 24) - (int)(tile[(size_t)y * (size_t)tw + (size_t)x - 1] >> 24);
+        const int sgn = d > 0 ? 1 : (d < 0 ? -1 : 0);
+        if (!sgn) continue;
+        if (last && sgn != last) flips++;
+        last = sgn;
+    }
+    return flips;
+}
+
+static void cell_gradient(void) {
+    /* A shallow gradient of one colour is not an edge: the rebuild keeps it smooth (or refuses it), and never
+     * turns it into a sawtooth that restarts at every block. */
+    static uint32_t shadow[32 * 32], fade[64 * 8];
+    static uint32_t tile[64 * 6 * 8 * 6], big[32 * 6 * 32 * 6];
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) {
+            const float dx = (float)x - 15.5f, dy = (float)y - 15.5f, r = sqrtf(dx * dx + dy * dy);
+            const int a = r >= 15.0f ? 0 : (int)(255.0f * (1.0f - r / 15.0f) + 0.5f);
+            shadow[y * 32 + x] = (uint32_t)a << 24;   /* black */
+        }
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 64; x++) fade[y * 64 + x] = (uint32_t)(32 + x * 3) << 24 | 0x00ffffffu;   /* white, 32 to 221 */
+    for (int f = NK_GLYPH_MIN_FACTOR; f <= NK_GLYPH_MAX_FACTOR; f++) {
+        NkGlyphVerdict v = nk_glyph_rebuild(fade, 64, 8, 0, 0, 64, 8, f, tile);
+        check(v == NK_GLYPH_OK, "gradient", "fade bar at factor %d: %s", f, nk_glyph_verdict_name(v));
+        if (v == NK_GLYPH_OK) {
+            const int flips = row_reversals(tile, 64 * f, 4 * f, 0, 64 * f);
+            check(flips == 0, "gradient", "fade bar at factor %d: %d reversals along a row that only rises", f, flips);
+        }
+        v = nk_glyph_rebuild(shadow, 32, 32, 0, 0, 32, 32, f, big);
+        check(v == NK_GLYPH_OK, "gradient", "soft shadow at factor %d: %s", f, nk_glyph_verdict_name(v));
+        if (v == NK_GLYPH_OK) {
+            const int flips = row_reversals(big, 32 * f, 16 * f, 0, 32 * f);
+            check(flips <= 1, "gradient", "soft shadow at factor %d: %d reversals along a row that rises once and falls once", f, flips);
+        }
+    }
+    /* a tile whose blocks are ramps over the same gradient fails the check even though every block mean is right */
+    NkGlyphVerdict v = nk_glyph_rebuild(fade, 64, 8, 0, 0, 64, 8, 4, tile);
+    check(v == NK_GLYPH_OK, "ripple", "setup");
+    const int tw = 64 * 4;
+    for (int y = 0; y < 8 * 4; y++)
+        for (int x = 0; x < tw; x++) {
+            int a = (int)(tile[y * tw + x] >> 24) + ((x % 4) * 2 - 3) * 8;
+            tile[y * tw + x] = (uint32_t)a << 24 | 0x00ffffffu;
+        }
+    check(nk_glyph_verify(fade, 64, 8, 0, 0, 64, 8, 4, tile) == NK_GLYPH_REFUSE_DOWNSAMPLE, "ripple",
+          "a sawtooth tile over a shallow gradient passed the check");
+}
+
 int main(void) {
     cell_settings();
     cell_sources();
@@ -359,6 +414,7 @@ int main(void) {
     cell_rebuild();
     cell_isolation();
     cell_verify();
+    cell_gradient();
     if (g_fail) {
         fprintf(stderr, "glyph-recon-selftest: %d of %d checks failed\n", g_fail, g_cells);
         return 1;

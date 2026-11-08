@@ -4,7 +4,7 @@
  * glyph_gpu_selftest.inc - sharp game text on ge_gpu.c's production path (glyph_gpu.inc, #2110;
  * included by ge_gpu.c in the SR_GPU_GLYPH_SELFTEST build, which is also the texture scaling
  * selftest build, so it shares that file's helpers; mk/selftests.mk gpu-glyph-selftest).
- * Synthetic pages only. The cells, at render scale 2 to 6:
+ * Synthetic pages only. The cells, at render scale 2 to 4 (the renderer's range, MAX_SCALE):
  *   sharp      a 1:1 sprite over a glyph cell of an anti-aliased page draws the rebuilt tile: every
  *              device pixel's coverage is the tile's alpha (nk_glyph_rebuild) and the cell beside it does not
  *              change them; without the feature the same draw is not the tile (not vacuous);
@@ -13,8 +13,10 @@
  *              a rectangle past the page;
  *   rewrite    a page the guest rewrites draws a rebuilt tile for the new texels and never the old
  *              one; a cell whose texels did not change keeps its tile;
+ *   gradient   a fade bar of one colour draws without a reversal along its rows, glyph tile or not;
  *   cap        more new rectangles in one present than NK_GLYPH_PER_PRESENT: exactly that many are
  *              rebuilt, the rest draw as before and are rebuilt by the next present;
+ *   pool       the texture descriptor pool has a set for every image an entry can hold;
  *   guest-bytes the page, the CLUT and VRAM outside the frame are unchanged by any of it.
  * `--authentic` (Ace Mode off, SR_GLYPHS whatever it is) draws the same scene and prints a hash of
  * the device image; mk/selftests.mk compares the hash with the feature unset and set.
@@ -204,7 +206,7 @@ static int gst_cell_sharp(void) {
 
 /* One refused draw: the device image with the feature on equals the one with it off, and nothing is bound. */
 static int gst_refused_draw(const char *what, int (*draw)(void)) {
-    const uint64_t bound0 = s_cnt_gl_bound;
+    const uint64_t bound0 = s_cnt_gl_bound, images0 = s_cnt_gl_images;
     const int was = s_glyphs;
     s_glyphs = 0;
     xst_clear_fb();   /* the blend would otherwise draw the second picture over the first */
@@ -216,9 +218,10 @@ static int gst_refused_draw(const char *what, int (*draw)(void)) {
     uint32_t *on = ok ? gst_device() : NULL;
     int diff = on ? gst_diff_region(on, off, 0, 0, SCL_W / s_scale, SCL_H / s_scale) : -1;
     free(on); free(off);
-    if (diff != 0 || s_cnt_gl_bound != bound0)
-        return gst_fail("refuse", "%s: %d device pixels differ with the feature on, %llu draws bound (want 0, 0)", what,
-                        diff, (unsigned long long)(s_cnt_gl_bound - bound0));
+    if (diff != 0 || s_cnt_gl_bound != bound0 || s_cnt_gl_images != images0)
+        return gst_fail("refuse", "%s: %d device pixels differ with the feature on, %llu draws bound, %llu images made (want 0, 0, 0)",
+                        what, diff, (unsigned long long)(s_cnt_gl_bound - bound0),
+                        (unsigned long long)(s_cnt_gl_images - images0));
     return 1;
 }
 
@@ -313,6 +316,38 @@ static void gst_blob_page(uint32_t *p, int cells) {
             }
 }
 
+/* A fade bar of one colour: 32 x 8 texels of white rising from alpha 64 to 126. Whether its draw is a rebuilt tile
+ * or the game's own, no row may reverse: a ribbed gradient is worse than the soft one. */
+static int gst_cell_gradient(void) {
+    static uint32_t page[GST_BLOB_W * 16];
+    for (int i = 0; i < GST_BLOB_W * 16; i++) page[i] = 0x00123456u;
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 32; x++) page[y * GST_BLOB_W + x] = ((uint32_t)(64 + x * 2) << 24) | 0x00FFFFFFu;
+    gst_reset();
+    memcpy(SR_HOST(GST_PAGE), page, sizeof(page));
+    sr_gpu_vram_dirty(GST_PAGE, sizeof(page));
+    gst_state(GST_PAGE, GST_BLOB_W, 16);
+    xst_clear_fb();
+    int ok = gst_sprite(20.0f, 20.0f, 32.0f, 8.0f, 0.0f, 0.0f, 32.0f, 8.0f);
+    uint32_t *dev = ok ? gst_device() : NULL;
+    if (!dev) return gst_fail("gradient", "draw or readback failed");
+    const int s = s_scale;
+    int flips = 0, last = 0;
+    for (int x = 1; x < 32 * s; x++) {
+        const size_t row = ((size_t)20 * s + (size_t)(4 * s)) * SCL_W + (size_t)20 * s;
+        const int d = GST_ALPHA(dev[row + (size_t)x]) - GST_ALPHA(dev[row + (size_t)x - 1]);
+        const int sgn = d > 0 ? 1 : (d < 0 ? -1 : 0);
+        if (!sgn) continue;
+        if (last && sgn != last) flips++;
+        last = sgn;
+    }
+    free(dev);
+    if (flips)
+        return gst_fail("gradient", "%d reversals along a row of a fade bar that only rises", flips);
+    printf("gpu glyph selftest: PASS %-12s scale %d: a fade bar of one colour draws without a ribbed row\n", "gradient", s);
+    return 1;
+}
+
 static int gst_cell_cap(void) {
     static uint32_t page[GST_BLOB_W * 16];
     const int cells = NK_GLYPH_PER_PRESENT + 12;
@@ -378,7 +413,22 @@ int gegpu_glyph_authentic_selftest(void) {
     return 1;
 }
 
+/* The texture descriptor pool holds a set for each image an entry can have: its own, a scaled copy's (and the
+ * anisotropic ones), and a glyph image's. A full pool draws new textures white. */
+static int gst_cell_pool(void) {
+    const uint32_t per_af = s_ace_af ? 2u : 1u;
+    const uint32_t need = (uint32_t)MAX_TEX * (per_af + (xs_enabled() ? per_af : 0u) + 1u);
+    if (s_tex_pool_sets < need)
+        return gst_fail("pool", "the pool has %u sets and an entry with every image needs %u in all", s_tex_pool_sets, need);
+    printf("gpu glyph selftest: PASS %-12s %u descriptor sets for %d entries\n", "pool", s_tex_pool_sets, MAX_TEX);
+    return 1;
+}
+
 int gegpu_glyph_selftest(void) {
+    /* The renderer clamps the scale it was asked for; a cell that ran at another scale would prove nothing. */
+    const char *asked = getenv("SR_GPU_SCALE");
+    if (asked && atoi(asked) != s_scale)
+        return gst_fail("setup", "render scale %s was asked for and the renderer runs at %d", asked, s_scale);
     if (!s_glyphs) {
         if (s_scale < NK_GLYPH_MIN_FACTOR || s_scale > NK_GLYPH_MAX_FACTOR) {
             /* Render scale 1: nothing to sharpen. The scene draws as without the feature. */
@@ -396,7 +446,8 @@ int gegpu_glyph_selftest(void) {
         if (s_glyphs_asked) return gst_fail("setup", "SR_GLYPHS is on but the feature is off at render scale %d", s_scale);
         return gst_cell_sharp();
     }
-    int ok = gst_cell_sharp() && gst_cell_refuse() && gst_cell_rewrite() && gst_cell_cap();
+    int ok = gst_cell_pool() && gst_cell_sharp() && gst_cell_refuse() && gst_cell_rewrite() && gst_cell_gradient() &&
+             gst_cell_cap();
     if (ok) {
         /* No guest byte moved: the page and the CLUT are what the CPU left. */
         static uint32_t page[GST_W * GST_H];

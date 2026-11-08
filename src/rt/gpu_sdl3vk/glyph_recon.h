@@ -26,8 +26,8 @@
  *
  * The feature is guest-visible (docs/ENHANCEMENT_CONTRACT.md, the section 11.3 entry "Sharp Game
  * Text"): each present commits the frame, rebuilt glyphs included, to guest VRAM. It is not admitted
- * under section 11.2 until its launch-line key and its library and per-title switches exist, so a
- * run that turns it on through the variable says so at start.
+ * under section 11.2: it has no launch-line key and no library or per-title switch, so a run that
+ * turns it on through the variable says so at start.
  */
 #ifndef NK_GLYPH_RECON_H
 #define NK_GLYPH_RECON_H
@@ -43,9 +43,20 @@ extern "C" {
  * larger is a picture. The rebuilt tile is at most 64 * 6 = 384 texels on a side. */
 #define NK_GLYPH_MIN_SIDE 4
 #define NK_GLYPH_MAX_SIDE 64
-/* The factors a rebuild takes: the render scale, which the draw's device pixels line up with. */
+/* The factors a rebuild takes: the render scale, which the draw's device pixels line up with. The Vulkan
+ * renderer runs at 1 to 4 (MAX_SCALE in ge_gpu.c, asserted there), so a run uses 2 to 4; the rebuild itself is
+ * tested up to 6. */
 #define NK_GLYPH_MIN_FACTOR 2
 #define NK_GLYPH_MAX_FACTOR 6
+/* How much of a block is rebuilt as an edge. The range of coverage over the 3 x 3 texels around a texel decides:
+ * below LOW the block is the smooth bicubic field, shifted to keep the texel's coverage; above HIGH it is a
+ * one-pixel ramp fitted to that coverage; between them the two are mixed. A ramp as steep as an edge over a
+ * shallow gradient would start over at every block (a ribbed gradient). In a smooth block the tile's spread may
+ * not pass NK_GLYPH_RIPPLE_SHARE of that range, plus NK_GLYPH_RIPPLE_SLACK 8-bit steps. */
+#define NK_GLYPH_EDGE_LOW 0.35f
+#define NK_GLYPH_EDGE_HIGH 0.65f
+#define NK_GLYPH_RIPPLE_SHARE 0.6f
+#define NK_GLYPH_RIPPLE_SLACK 2
 /* Rectangles checked or rebuilt per present, a fixed count, never a time budget: a run is the same
  * whatever the host's speed. A glyph past the count keeps today's look for that frame and is
  * offered again by the next draw. */

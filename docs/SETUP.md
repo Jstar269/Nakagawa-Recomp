@@ -78,12 +78,12 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   memory cost. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1010-texture-scaling-and-the-smart-2d-filter).
 - **Sharp game text (Ace Mode, development only).** It is reachable only through the `SR_GLYPHS` environment
-  variable (`on`), has no setting in the player, and is not admitted as an Enhanced or Ace item yet, because it
+  variable (`on`), has no setting in the player, and is not an Enhanced or Ace item, because it
   changes the frames the game can read back
-  ([section 11.3.5](ENHANCEMENT_CONTRACT.md#1135-sharp-game-text-not-yet-admitted)). At a render scale of 2 to 6, a
+  ([section 11.3.5](ENHANCEMENT_CONTRACT.md#1135-sharp-game-text-not-yet-admitted)). At a render scale of 2 to 4, a
   small sprite that maps one texel to one pixel over a page of anti-aliased text is redrawn from a version of just
-  that rectangle rebuilt at the render scale, checked against the game's own bytes. A page the feature rebuilds
-  from costs the page's GPU memory times the render scale squared (a 256x256 page at 4x is 4 MB), taken from the
+  that rectangle rebuilt at the render scale, checked against the game's own bytes. A page with a rebuilt rectangle
+  costs the page's GPU memory times the render scale squared (a 256x256 page at 4x is 4 MB), taken from the
   same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
   frame, on the game's thread. Text drawn as triangles, or from a page in VRAM, is drawn as the game made it. The
   rules are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1013-sharp-game-text).

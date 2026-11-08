@@ -1060,7 +1060,8 @@ native-core-tests: glyph-recon-selftest glyph-recon-mutant
 # generates a glyph_recon.c without that guard. A build passes only when the run fails and prints the
 # named cell's FAIL line: the Ace gate, the VRAM refusal, the render scale 1 refusal, the mip chain
 # refusal, the two buffer refusals, the downsample check, the colour check, the hard-edge check, the
-# size check, and a rebuild that does not keep each block's mean.
+# size check, a rebuild that steepens every block (a ribbed gradient), the ripple check, and a rebuild that does
+# not keep each block's mean.
 GLYPH_RECON_MUTANTS := \
 	NO_ACE_GATE:"FAIL settings: SR_GLYPHS=on with Ace Mode off" \
 	ALLOW_VRAM:"FAIL refuse-vram: a page in VRAM is refused" \
@@ -1071,6 +1072,8 @@ GLYPH_RECON_MUTANTS := \
 	NO_COLOUR_CHECK:"FAIL refuse-colour: two inked colours" \
 	NO_HARD_EDGE_CHECK:"FAIL refuse-hard-edge: a bitmap font" \
 	NO_SIZE_CHECK:"FAIL refuse-size: 3 texels wide" \
+	NO_SMOOTH_MODE:"FAIL gradient: fade bar at factor 3" \
+	NO_RIPPLE_CHECK:"FAIL ripple: a sawtooth tile" \
 	PLAIN_BICUBIC:"FAIL rebuild: 4444 glyph 0 at factor 2: downsample"
 glyph-recon-mutant:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
@@ -1202,9 +1205,10 @@ gpu-texscale-mutant: shader-verify $(RT_GE_O)
 	@$(MAKE) --no-print-directory texrepl-mutant gpu-texrepl-mutant gpu-glyph-selftest gpu-glyph-mutant
 
 # gpu-glyph-selftest - sharp game text (glyph_recon.h, glyph_gpu.inc, #2110) on the Vulkan GE renderer's
-# production path, at render scales 2, 3, 4 and 6: a 1:1 sprite over a glyph cell draws the rebuilt tile
+# production path, at render scales 2, 3 and 4 (the renderer's most): a 1:1 sprite over a glyph cell draws the rebuilt tile
 # and nothing beside it changes it; a page in VRAM, a hard-edged or two-colour page, a magnified sprite
-# and a too-small or off-page rectangle draw exactly as without the feature; a rewritten page draws its
+# and a too-small or off-page rectangle draw exactly as without the feature and make no image; a fade bar of
+# one colour draws without a ribbed row; a rewritten page draws its
 # new tile, never the old; more new rectangles than the per-present count are rebuilt over two presents;
 # no guest byte changes. At render scale 1 the setting is idle. An authentic run (Ace Mode off) rebuilds
 # nothing and draws byte for byte the same picture with SR_GLYPHS unset and on. In an Ace run with the
@@ -1216,7 +1220,7 @@ GPU_GLYPH_BUILD = $(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_TEXSCALE_
 		$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS)
 gpu-glyph-selftest: shader-verify $(RT_GE_O)
 	$(GPU_GLYPH_BUILD) -o $(BUILD_DIR)/gpu_glyph_selftest.exe
-	@for args in "--scale 4" "--scale 2" "--scale 3" "--scale 6" "--scale 1"; do \
+	@for args in "--scale 4" "--scale 2" "--scale 3" "--scale 1"; do \
 		rc=0; $(BUILD_DIR)/gpu_glyph_selftest.exe $$args || rc=$$?; \
 		if [ $$rc -eq 77 ]; then echo "SKIP gpu-texscale gpu-glyph-selftest $$args (exit 77; the reason is printed above)"; exit 0; \
 		elif [ $$rc -ne 0 ]; then echo "FAIL gpu-glyph-selftest $$args (exit $$rc)"; exit $$rc; fi; \
@@ -1229,8 +1233,9 @@ gpu-glyph-selftest: shader-verify $(RT_GE_O)
 	@rc=0; $(BUILD_DIR)/gpu_glyph_selftest.exe --authentic --scale 4 > $(BUILD_DIR)/gpu_glyph_auth_unset.log 2>&1 || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-texscale gpu-glyph-selftest --authentic (exit 77; the reason is printed above)"; exit 0; \
 	elif [ $$rc -ne 0 ]; then cat $(BUILD_DIR)/gpu_glyph_auth_unset.log; echo "FAIL gpu-glyph-selftest --authentic (exit $$rc)"; exit $$rc; fi; \
-	$(BUILD_DIR)/gpu_glyph_selftest.exe --authentic --scale 4 --glyphs on > $(BUILD_DIR)/gpu_glyph_auth_on.log 2>&1 || rc=$$?; \
-	if [ $$rc -ne 0 ]; then cat $(BUILD_DIR)/gpu_glyph_auth_on.log; echo "FAIL gpu-glyph-selftest --authentic --glyphs on (exit $$rc)"; exit $$rc; fi; \
+	rc=0; $(BUILD_DIR)/gpu_glyph_selftest.exe --authentic --scale 4 --glyphs on > $(BUILD_DIR)/gpu_glyph_auth_on.log 2>&1 || rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP gpu-texscale gpu-glyph-selftest --authentic --glyphs on (exit 77; the reason is printed above)"; exit 0; \
+	elif [ $$rc -ne 0 ]; then cat $(BUILD_DIR)/gpu_glyph_auth_on.log; echo "FAIL gpu-glyph-selftest --authentic --glyphs on (exit $$rc)"; exit $$rc; fi; \
 	a=$$(grep -a '^GLYPH-AUTH-HASH' $(BUILD_DIR)/gpu_glyph_auth_unset.log); b=$$(grep -a '^GLYPH-AUTH-HASH' $(BUILD_DIR)/gpu_glyph_auth_on.log); \
 	if [ -z "$$a" ] || [ "$$a" != "$$b" ]; then echo "FAIL gpu-glyph-selftest authentic: the picture differs with SR_GLYPHS set ('$$a' against '$$b')"; exit 1; fi; \
 	grep -aq 'GLYPHS: off (sharp game text needs Ace Mode)' $(BUILD_DIR)/gpu_glyph_auth_on.log || { echo "FAIL gpu-glyph-selftest authentic: an authentic run did not name the request it ignored"; exit 1; }; \

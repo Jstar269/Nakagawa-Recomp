@@ -6,7 +6,9 @@
  *
  * A texture cache entry that text is drawn from gets a second, host-only image beside its
  * guest-resolution one: the entry's size times the render scale, holding the rebuilt version of
- * every rectangle a sprite draw has sampled from it. Draw -> tile is exact: a sprite that maps one
+ * every rectangle a sprite draw has sampled from it. The image is made when the first rectangle
+ * of the page passes the checks, so a page that is not text costs a small table of refusals and
+ * no GPU memory, descriptor set or synchronous clear. Draw -> tile is exact: a sprite that maps one
  * texel to one pixel over whole texels [x0, x1) x [y0, y1) of a page that looks like anti-aliased
  * text is a tile, rebuilt once on the renderer thread (so a run is the same whatever the host's
  * speed), checked against the guest's bytes (nk_glyph_verify) and uploaded into its own place in
@@ -35,7 +37,7 @@ typedef struct GlSet {
     VkImage img; VkDeviceMemory mem; VkImageView view; VkSampler smp; VkDescriptorSet set;
     VkImageLayout layout;
     int factor;
-    uint64_t bytes;           /* budget the image holds */
+    uint64_t bytes;           /* budget the image holds; the image handles stay null until a tile passes */
     uint64_t synced_hash;     /* the entry content every tile was last compared with */
     int n;
     GlTile t[GL_MAX_TILES];
@@ -43,7 +45,11 @@ typedef struct GlSet {
 } GlSet;
 
 static uint64_t s_cnt_gl_bound, s_cnt_gl_built, s_cnt_gl_kept, s_cnt_gl_stale, s_cnt_gl_capped,
-                s_cnt_gl_budget, s_cnt_gl_full, s_cnt_gl_decodes;
+                s_cnt_gl_budget, s_cnt_gl_full, s_cnt_gl_decodes, s_cnt_gl_images;
+
+/* The render scale is the renderer's, and the tile buffer is sized for its largest. */
+_Static_assert(MAX_SCALE <= NK_GLYPH_MAX_FACTOR, "the glyph rebuild must take every render scale the renderer runs at");
+#define GL_TILE_SIDE (NK_GLYPH_MAX_SIDE * MAX_SCALE)
 static uint64_t s_cnt_gl_refused[NK_GLYPH_VERDICT_COUNT];
 
 static uint64_t gl_hash_rect(const uint32_t *page, int pw, int x0, int y0, int w, int h) {
@@ -83,40 +89,70 @@ static GlTile *gl_add(GlSet *g, int x, int y, int w, int h) {
     return t;
 }
 
-/* Free an entry's glyph image and tiles and give back its budget. The caller has drained every
- * command that could reference them (eviction, shutdown). */
-static void tex_gl_free(TexEnt *e) {
-    GlSet *g = e->gl;
-    if (!g) return;
+/* The page the tiles are built from: the entry's texels, decoded once per content (N tiles of a new page cost one
+ * decode, not N). It is the glyph code's own, so the texture upload's scratch is never overwritten. */
+static uint32_t s_gl_page[512 * 512];
+static const TexEnt *s_gl_page_e;
+static uint64_t s_gl_page_hash;
+
+static void gl_decode(TexEnt *e) {
+    if (s_gl_page_e == e && s_gl_page_hash == e->hash) return;
+    ge_decode_tex_rgba(s_gl_page);
+    s_gl_page_e = e;
+    s_gl_page_hash = e->hash;
+    s_cnt_gl_decodes++;
+}
+
+/* Free the glyph image of a set, giving back its budget. */
+static void gl_image_free(GlSet *g) {
     if (g->set) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &g->set);
     if (g->smp) vkDestroySampler(s_dev, g->smp, NULL);
     if (g->view) vkDestroyImageView(s_dev, g->view, NULL);
     if (g->img) vkDestroyImage(s_dev, g->img, NULL);
     if (g->mem) vkFreeMemory(s_dev, g->mem, NULL);
     if (g->bytes) nk_tex_scale_budget_give(g->bytes);
-    free(g);
-    e->gl = NULL;
+    g->set = VK_NULL_HANDLE;
+    g->smp = VK_NULL_HANDLE;
+    g->view = VK_NULL_HANDLE;
+    g->img = VK_NULL_HANDLE;
+    g->mem = VK_NULL_HANDLE;
+    g->bytes = 0;
 }
 
-/* The entry's glyph image, made on the first tile: transparent, so no texel is ever read before a
- * tile wrote it (a draw binds the image only over a valid tile, but the sampler's neighbours at an
- * edge are then transparent at worst). */
-static GlSet *gl_set_for(TexEnt *e, int factor) {
+/* Free an entry's glyph image and tiles and give back its budget. The caller has drained every
+ * command that could reference them (eviction, shutdown). */
+static void tex_gl_free(TexEnt *e) {
+    GlSet *g = e->gl;
+    if (!g) return;
+    gl_image_free(g);
+    free(g);
+    e->gl = NULL;
+    if (s_gl_page_e == e) s_gl_page_e = NULL;
+}
+
+/* The entry's table of tiles, made the first time a 1:1 sprite over an eligible page asks. */
+static GlSet *gl_tiles_for(TexEnt *e, int factor) {
     if (e->gl) return e->gl->factor == factor ? e->gl : NULL;
-    const uint32_t sw = (uint32_t)(e->w * factor), sh = (uint32_t)(e->h * factor);
+    GlSet *g = (GlSet *)calloc(1, sizeof(*g));
+    if (!g) return NULL;
+    g->factor = factor;
+    g->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    e->gl = g;
+    return g;
+}
+
+/* The set's image, made when its first tile passes the checks: transparent, so no texel is ever read before a
+ * tile wrote it (a draw binds the image only over a valid tile, but the sampler's neighbours at an edge are
+ * then transparent at worst). */
+static int gl_image_for(TexEnt *e, GlSet *g) {
+    if (g->img) return 1;
+    const uint32_t sw = (uint32_t)(e->w * g->factor), sh = (uint32_t)(e->h * g->factor);
     const uint64_t bytes = (uint64_t)sw * sh * 4u;
     if (!nk_tex_scale_budget_take(bytes)) {
         s_cnt_gl_budget++;
-        return NULL;
-    }
-    GlSet *g = (GlSet *)calloc(1, sizeof(*g));
-    if (!g) {
-        nk_tex_scale_budget_give(bytes);
-        return NULL;
+        return 0;
     }
     g->bytes = bytes;
-    g->factor = factor;
-    g->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkSamplerCreateInfo sci;
     TexMipKey none;
     memset(&none, 0, sizeof(none));
@@ -129,30 +165,29 @@ static GlSet *gl_set_for(TexEnt *e, int factor) {
         vkCreateSampler(s_dev, &sci, NULL, &g->smp) != VK_SUCCESS ||
         !(g->set = make_descriptor(g->view, g->smp, s_dpool_tex))) {
         /* Nothing recorded references the half-made image yet. */
-        e->gl = g;
-        tex_gl_free(e);
-        return NULL;
+        gl_image_free(g);
+        return 0;
     }
     /* A fresh command buffer of its own (a boundary, as the render-target transition is): nothing is
      * recording here, and the clear must be in the queue before any tile is copied into the image. */
     if (s_nbatch) submit_pending();
     if (!cmd_begin()) {
-        e->gl = g;
-        tex_gl_free(e);
-        return NULL;
+        gl_image_free(g);
+        return 0;
     }
+    g->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     to_layout(s_cmd, g->img, VK_IMAGE_ASPECT_COLOR_BIT, &g->layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkClearColorValue zero;
     memset(&zero, 0, sizeof(zero));
     VkImageSubresourceRange rng = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     vkCmdClearColorImage(s_cmd, g->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &rng);
     to_layout(s_cmd, g->img, VK_IMAGE_ASPECT_COLOR_BIT, &g->layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    e->gl = g;
     if (!cmd_submit_wait(SR_PERF_GE_TEXTURE_UPLOAD)) {
-        tex_gl_free(e);
-        return NULL;
+        gl_image_free(g);
+        return 0;
     }
-    return g;
+    s_cnt_gl_images++;
+    return 1;
 }
 
 /* Upload a built tile into its place in the entry's glyph image. */
@@ -224,14 +259,14 @@ static int gl_sprite_rect(float ul, float ur, float vt, float vb, int *x0, int *
     return 1;
 }
 
-/* Decode the entry's page (main RAM only: a page in VRAM was refused before this) into s_texscratch,
- * compare every tile with it, and keep the ones whose texels are unchanged. */
+/* Compare every tile with the entry's decoded page (s_gl_page; main RAM only, a page in VRAM was refused before
+ * any decode), and keep the ones whose texels are unchanged. */
 static void gl_sync(TexEnt *e) {
     GlSet *g = e->gl;
     for (int i = 0; i < g->n; i++) {
         GlTile *t = &g->t[i];
         if (t->entry_hash == e->hash) continue;
-        if (gl_hash_rect(s_texscratch, e->w, t->x, t->y, t->w, t->h) == t->rect_hash) {
+        if (gl_hash_rect(s_gl_page, e->w, t->x, t->y, t->w, t->h) == t->rect_hash) {
             t->entry_hash = e->hash;
             s_cnt_gl_kept++;
         } else if (t->state != GL_TILE_STALE) {
@@ -268,34 +303,36 @@ static int glyph_apply(Batch *b, TexEnt *e, float ul, float ur, float vt, float 
     const int fresh = g && g->synced_hash == e->hash;
     if (!(t && fresh && t->entry_hash == e->hash)) {
 #endif
-        /* New, stale, or the page changed since the tiles were compared: one decode of the page. */
+        /* New, stale, or the page changed since the tiles were compared: the page is decoded once per content. */
         if (!gl_take_op()) return 0;
-        ge_decode_tex_rgba(s_texscratch);
-        s_cnt_gl_decodes++;
-        if (g && g->synced_hash != e->hash) {
+        gl_decode(e);
+        if (!g && !(g = gl_tiles_for(e, f))) {
+            s_cnt_gl_refused[NK_GLYPH_REFUSE_MEMORY]++;
+            return 0;
+        }
+        if (g->factor != f) return 0;
+        if (g->synced_hash != e->hash) {
             gl_sync(e);
             t = gl_find(g, x0, y0, w, h);
         }
         if (!t || t->entry_hash != e->hash) {
-            if (!e->gl && !gl_set_for(e, f)) {
-                s_cnt_gl_refused[NK_GLYPH_REFUSE_MEMORY]++;
-                return 0;
-            }
-            g = e->gl;
-            if (g->factor != f) return 0;
             if (!t) t = gl_add(g, x0, y0, w, h);
             if (!t) {
                 s_cnt_gl_full++;
                 return 0;
             }
-            static uint32_t tile[NK_GLYPH_MAX_SIDE * NK_GLYPH_MAX_FACTOR * NK_GLYPH_MAX_SIDE * NK_GLYPH_MAX_FACTOR];
-            const NkGlyphVerdict v = nk_glyph_rebuild(s_texscratch, e->w, e->h, x0, y0, w, h, f, tile);
-            t->rect_hash = gl_hash_rect(s_texscratch, e->w, x0, y0, w, h);
+            static uint32_t tile[GL_TILE_SIDE * GL_TILE_SIDE];
+            const NkGlyphVerdict v = nk_glyph_rebuild(s_gl_page, e->w, e->h, x0, y0, w, h, f, tile);
+            t->rect_hash = gl_hash_rect(s_gl_page, e->w, x0, y0, w, h);
             t->entry_hash = e->hash;
             t->verdict = (uint8_t)v;
             if (v != NK_GLYPH_OK) {
                 t->state = GL_TILE_REFUSED;
                 s_cnt_gl_refused[v]++;
+            } else if (!gl_image_for(e, g)) {
+                t->state = GL_TILE_REFUSED;
+                t->verdict = (uint8_t)NK_GLYPH_REFUSE_MEMORY;
+                s_cnt_gl_refused[NK_GLYPH_REFUSE_MEMORY]++;
             } else {
                 if (e->pending) submit_pending();   /* recorded batches may sample the image */
                 if (!gl_store(g, t, tile)) {
@@ -311,9 +348,9 @@ static int glyph_apply(Batch *b, TexEnt *e, float ul, float ur, float vt, float 
         }
     }
 #ifdef NK_GLYPH_GPU_MUTANT_NO_HASH_CHECK
-    if (!t || t->state != GL_TILE_VALID || !e->gl) return 0;
+    if (!t || t->state != GL_TILE_VALID || !e->gl || !e->gl->img) return 0;
 #else
-    if (!t || t->state != GL_TILE_VALID || t->entry_hash != e->hash || !e->gl) return 0;
+    if (!t || t->state != GL_TILE_VALID || t->entry_hash != e->hash || !e->gl || !e->gl->img) return 0;
 #endif
     e->pending = 1;
     b->dset = e->gl->set;
@@ -330,10 +367,11 @@ static int glyph_apply(Batch *b, TexEnt *e, float ul, float ur, float vt, float 
 static void glyph_report(void) {
     if (!s_glyphs_asked) return;
     fprintf(stderr, "GLYPHS: draws (bound=%llu, tiles_built=%llu, tiles_kept=%llu, tiles_stale=%llu, "
-                    "page_decodes=%llu, capped=%llu, budget_short=%llu, tiles_full=%llu)\n",
+                    "page_decodes=%llu, images=%llu, capped=%llu, budget_short=%llu, tiles_full=%llu)\n",
             (unsigned long long)s_cnt_gl_bound, (unsigned long long)s_cnt_gl_built,
             (unsigned long long)s_cnt_gl_kept, (unsigned long long)s_cnt_gl_stale,
-            (unsigned long long)s_cnt_gl_decodes, (unsigned long long)s_cnt_gl_capped,
+            (unsigned long long)s_cnt_gl_decodes, (unsigned long long)s_cnt_gl_images,
+            (unsigned long long)s_cnt_gl_capped,
             (unsigned long long)s_cnt_gl_budget, (unsigned long long)s_cnt_gl_full);
     char refused[256];
     size_t used = 0;
