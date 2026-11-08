@@ -223,6 +223,9 @@ class NativeHostBackendTests(unittest.TestCase):
         cls._objects["src/player/player_state.c"] = _compile_object(
             cls, "src/player/player_state.c", "player_state.o", ("-Isrc/player",)
         )
+        cls._objects["src/player/discord_presence.c"] = _compile_object(
+            cls, "src/player/discord_presence.c", "discord_presence.o", ("-Isrc/player",)
+        )
         cls._objects["src/player/input_settings.c"] = _compile_object(
             cls, "src/player/input_settings.c", "input_settings.o", ("-Isrc/player",)
         )
