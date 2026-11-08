@@ -63,8 +63,10 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   slower. Keep the player's data folder on an SSD if you can.
 - **Processor.** BUILD PACKAGE runs up to eight compile jobs at a time, one per logical
   processor, as far as memory allows, and the build screen counts the parts as they finish.
-  A first build takes several minutes. To choose the job count yourself, set the
-  `NK_PACKAGE_JOBS` environment variable to a number from 1 to 8 before starting the player.
+  When free memory, a single processor or `NK_PACKAGE_JOBS` limits it to one job, the build
+  screen says so and that the build will take longer. A first build takes several minutes. To
+  choose the job count yourself, set the `NK_PACKAGE_JOBS` environment variable to a number from
+  1 to 8 before starting the player.
 - **Texture scaling (Ace Mode, development only).** It is reachable only through the `SR_TEX_SCALE` and
   `SR_SMART_2D` environment variables, has no setting in the player, and is not admitted as an Enhanced or Ace
   item yet, because it changes the frames the game can read back
