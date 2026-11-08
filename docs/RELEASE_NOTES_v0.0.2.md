@@ -261,8 +261,8 @@ choose **More info** and then **Run anyway**, check that the download is the one
 
    ```powershell
    $Commit = '<the 40-character commit from the release page>'
-   gh attestation verify .\bin\nakagawa_player.exe --repo Jstar269/nakagawa-recomp `
-       --signer-workflow Jstar269/nakagawa-recomp/.github/workflows/provenance-attestation.yml `
+   gh attestation verify .\bin\nakagawa_player.exe --repo Jstar269/Nakagawa-Recomp `
+       --signer-workflow Jstar269/Nakagawa-Recomp/.github/workflows/provenance-attestation.yml `
        --source-ref refs/heads/main --source-digest $Commit
    ```
 
@@ -270,8 +270,8 @@ choose **More info** and then **Run anyway**, check that the download is the one
 
    ```powershell
    Get-ChildItem .\bin -Recurse -File | ForEach-Object {
-       gh attestation verify $_.FullName --repo Jstar269/nakagawa-recomp `
-           --signer-workflow Jstar269/nakagawa-recomp/.github/workflows/provenance-attestation.yml `
+       gh attestation verify $_.FullName --repo Jstar269/Nakagawa-Recomp `
+           --signer-workflow Jstar269/Nakagawa-Recomp/.github/workflows/provenance-attestation.yml `
            --source-ref refs/heads/main --source-digest $Commit
    }
    ```
