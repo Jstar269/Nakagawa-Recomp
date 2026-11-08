@@ -161,8 +161,20 @@ class LiveListTests(unittest.TestCase):
         self.assertIn("SPDX-License-Identifier: GPL-2.0-or-later", licence)
         self.assertIn("Derived from PPSSPP", licence)
         for relative, body in hle_sources.sources(headers=True):
+            if relative in hle_sources.OWN_LINEAGE_SOURCES:
+                continue  # a new file with its own lineage; checked below
             with self.subTest(path=relative):
                 self.assertTrue(body.startswith(licence), relative)
+
+    def test_a_new_hle_file_carries_its_own_lineage_header(self) -> None:
+        """A runtime HLE file written new, not split from hle.c, is listed as such and carries an
+        SPDX header of its own instead of hle.c's (src/rt/hle_videocodec.c, #286)."""
+        for relative in hle_sources.OWN_LINEAGE_SOURCES:
+            with self.subTest(path=relative):
+                self.assertIn(relative, hle_sources.RUNTIME_HLE_SOURCES)
+                head = (ROOT / relative).read_text(encoding="utf-8").splitlines()[:8]
+                self.assertTrue(head[0].startswith("// SPDX-License-Identifier: "), relative)
+                self.assertNotIn("Derived from PPSSPP", "\n".join(head), relative)
 
     def test_every_hle_source_includes_the_private_header_first(self) -> None:
         for relative, body in hle_sources.sources():
