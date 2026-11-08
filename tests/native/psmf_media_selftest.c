@@ -569,10 +569,10 @@ static void add_audio_pes(Buf *b, const uint8_t *frame, uint32_t len) {
     add_audio_pes_sub(b, 0x00u, 0, 0, frame, len);
 }
 /* One self-delimiting ATRAC frame (8-byte header + data); the size field is
- * ((code1 & 3) << 8 | code2 * 8) + 0x10 total bytes. */
+ * (((code1 & 3) << 8 | code2) * 8) + 0x10 total bytes. */
 static uint32_t make_audio_frame(uint8_t *dst, uint32_t cap, uint8_t code1, uint8_t code2,
                                  uint8_t fill) {
-    uint32_t total = (uint32_t)(((code1 & 0x03u) << 8) | ((uint32_t)code2 * 8u)) + 0x10u;
+    uint32_t total = (uint32_t)((((code1 & 0x03u) << 8) | (uint32_t)code2) * 8u) + 0x10u;
     if (total > cap) return 0;
     memset(dst, fill, total);
     dst[0] = 0x0f; dst[1] = 0xd0; dst[2] = code1; dst[3] = code2;
@@ -3059,6 +3059,9 @@ enum { AV_LAYOUT_SPLIT = 0, AV_LAYOUT_PACKED = 1, AV_LAYOUT_REORDER = 2 };
  * stream table included -- scePsmfPlayer refuses anything else), the authored I_PCM
  * pictures, and decodable ATRAC3+ frames interleaved with PTS anchors on both tracks, in
  * one of the packet layouts above. */
+/* The ATRAC3+ header bytes 2 and 3 of the A/V fixture's audio frames.  0x28/0x00 is a 16-byte frame;
+ * a test sets 0x29/0x00 for a 0x810-byte frame (b2 & 3 != 0) and restores them. */
+static uint8_t s_av_audio_b2 = 0x28u, s_av_audio_b3 = 0x00u;
 static uint8_t *build_psmf_av(uint32_t *size_out, int layout) {
     static uint8_t es[1024u * 1024u];
     uint32_t au_off[AV_PICTURES], au_len[AV_PICTURES];
@@ -3077,7 +3080,7 @@ static uint8_t *build_psmf_av(uint32_t *size_out, int layout) {
     if (o.overflow) return NULL;
 
     Buf b;
-    b.cap = 2048u + o.n * 2u + 16384u;
+    b.cap = 2048u + o.n * 2u + 16384u + (uint32_t)AV_AUDIO_BLOCKS * 0xb10u;
     b.d = (uint8_t *)calloc(1, b.cap);
     b.at = 2048u;
     b.overflow = 0;
@@ -3110,9 +3113,9 @@ static uint8_t *build_psmf_av(uint32_t *size_out, int layout) {
         else mp4_picture_marks(es + au_off[i], au_len[i], i);
     }
 
-    uint8_t frame[64];
-    uint8_t packed_frames[64u * AV_AUDIO_PER_PES];
-    uint32_t frame_bytes = make_audio_frame(frame, sizeof(frame), 0x28, 0x00, 0x00);
+    uint8_t frame[0xb10];
+    uint8_t packed_frames[0xb10u * AV_AUDIO_PER_PES];
+    uint32_t frame_bytes = make_audio_frame(frame, sizeof(frame), s_av_audio_b2, s_av_audio_b3, 0x00);
     frame[8] = 0x60u;      /* terminator-first ATRAC unit: a frame the project's own
                             * ATRAC3+ bridge really decodes (2048 samples, stereo) */
     for (int i = 0; i < AV_AUDIO_PER_PES; i++)
@@ -3309,6 +3312,43 @@ static void test_player_handle_word(void) {
           "psmf-handle: Delete clears the player word");
     CHECK(guest_mpeg_import(AV_NID_GET_STATUS, AV_PLAYER_COPY, 0, 0, 0, 0) == AV_ERR_STATUS,
           "psmf-handle: a copy of a deleted player's word names no player");
+    s_player_image = NULL;
+    s_player_image_size = 0;
+    free(image);
+}
+
+/* #2205: scePsmfPlayerGetAudioData checks the access unit's length against the size in its header
+ * in psmf_audio_fill (hle_mpeg.c).  A 0x810-byte frame (b2 & 3 = 1) is read as a 0x110-byte one
+ * if the multiply comes before the OR, and the player then refuses every audio block. */
+static void test_player_audio_frame_over_2_kib(void) {
+    if (!sr_h264_backend_available()) {
+        fprintf(stderr, "SKIP: the player audio-size cell needs an H.264 backend\n");
+        return;
+    }
+    s_av_audio_b2 = 0x29u; s_av_audio_b3 = 0x00u;
+    uint32_t size = 0;
+    uint8_t *image = build_psmf_av(&size, AV_LAYOUT_SPLIT);
+    s_av_audio_b2 = 0x28u; s_av_audio_b3 = 0x00u;
+    if (!image) { CHECK(0, "psmf-audio-size stream builds"); return; }
+    av_latch_mpeglog();
+    s_player_image = image;
+    s_player_image_size = size;
+    lc_prepare_guest();
+    CHECK(guest_mpeg_import(AV_NID_CREATE, AV_PLAYER, AV_CREATE, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_SET_PSMF, AV_PLAYER, AV_PATH, 0, 0, 0) == 0 &&
+              guest_mpeg_import(AV_NID_START, AV_PLAYER, AV_CONFIG, 0, 0, 0) == 0,
+          "psmf-audio-size: the player starts the stream");
+    memset(SR_HOST(AV_AUDIO), 0xa5, 8192u);
+    int delivered = 0;
+    for (int i = 0; i < 128 && !delivered; i++) {
+        (void)guest_mpeg_import(AV_NID_GET_VIDEO, AV_PLAYER, AV_VIDEO, 0, 0, 0);
+        delivered = guest_mpeg_import(AV_NID_GET_AUDIO, AV_PLAYER, AV_AUDIO, 0, 0, 0) == 0;
+        if (!delivered && guest_mpeg_import(AV_NID_UPDATE, AV_PLAYER, 0, 0, 0, 0) != 0) break;
+    }
+    CHECK(delivered && MEM_R32(AV_AUDIO) != 0xa5a5a5a5u,
+          "psmf-audio-size: a 0x810-byte ATRAC3+ frame decodes and is delivered");
+    CHECK(guest_mpeg_import(AV_NID_DELETE, AV_PLAYER, 0, 0, 0, 0) == 0,
+          "psmf-audio-size: the player is deleted");
     s_player_image = NULL;
     s_player_image_size = 0;
     free(image);
@@ -5025,6 +5065,32 @@ static void test_mpeg_feed_end_without_stream_size(int mode) {
     free(image);
 }
 
+/* #2205: the frame size is ((b2 & 3) << 8 | b3) * 8 + 0x10, so a frame over 2 KiB has b2 & 3 != 0.
+ * The expression once multiplied b3 before the OR, which read such a frame as a short one and
+ * refused it at the size check, before any decoder was set up.  The held unit's length comes
+ * from the producer, which uses the same sr_psmf_audio_frame_bytes (psmf_producer_selftest). */
+static void test_mpeg_atrac_frame_size_high_bits(void) {
+    static uint8_t frame[0x2010];
+    static const struct { uint8_t b2, b3; uint32_t size; } cases[] = {
+        { 0x29, 0x00, 0x810u }, { 0x29, 0x01, 0x818u }, { 0x29, 0x5f, 0xb08u },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        Mpeg m;
+        memset(&m, 0, sizeof(m));
+        uint32_t n = make_audio_frame(frame, sizeof(frame), cases[i].b2, cases[i].b3, 0x00);
+        CHECK(n == cases[i].size, "mpeg-atrac: the fixture sizes a frame with b2 & 3 != 0 as the format does");
+        uint32_t r = mpeg_audio_decode_frame(&m, frame, n, 1u);
+        /* Past the size check the decoder is built for the full frame (before it decodes, so a
+         * silent frame the decoder then refuses still shows it).  Frames up to the producer's
+         * 0xB08 cap are what a stream can deliver here. */
+        (void)r;
+        CHECK(m.atracAlign == (int)(n - 8u),
+              "mpeg-atrac: a frame over 2 KiB passes the frame-size check");
+        atrac3p_bridge_destroy(m.atrac);
+        free(m.audioPcm);
+    }
+}
+
 /* The sceMpeg ATRAC path a guest PSMF player drives (#286): the registered ATRAC3+ stream is
  * demultiplexed from the ring packets, GetAtracAu hands out one frame per call, and AtracDecode
  * writes exactly what the ATRAC3+ decoder produces for that frame.  Before any data, and after
@@ -5880,6 +5946,7 @@ int main(int argc, char **argv) {
     test_player_lifecycle_releases_what_it_acquired();
     test_player_get_psmf_info();
     test_player_handle_word();
+    test_player_audio_frame_over_2_kib();
     test_psmf_player_display_in_vram_mirrors();
     test_psmf_log_tick_instance_isolation();
     test_psmf_av_timing_first_principles();
@@ -5894,6 +5961,7 @@ int main(int argc, char **argv) {
     test_mpeg_csc_presentation_boundary(1);
     test_mpeg_av_audio_followed_by_content();
     test_mpeg_atrac_au_decode();
+    test_mpeg_atrac_frame_size_high_bits();
     test_mpeg_looped_stream_feeds_past_header_size(0u, 0);
     test_mpeg_looped_stream_feeds_past_header_size(4u, 0);
     test_mpeg_looped_stream_feeds_past_header_size(0u, 1);
