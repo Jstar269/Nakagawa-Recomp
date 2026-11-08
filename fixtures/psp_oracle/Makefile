@@ -306,6 +306,11 @@ CASE_ID = 125
 # probe_hle_issues.c).
 else ifeq ($(CASE),vfpu-forms2)
 CASE_ID = 121
+# 163: the #326 VFPU forms the runtime refuses as unmodeled (vcrs widths, vcmov imm3 7,
+# mfvc/mtvc of control 255, rejected VFPU9 widths; probe_hle_issues.c). POWER RISK: a refused
+# form may raise an exception that stops the launch.
+else ifeq ($(CASE),vfpu-unmodeled)
+CASE_ID = 163
 else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
@@ -588,6 +593,9 @@ TARGET = $(BUILD_DIR)/vfpu_sort
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),vfpu-forms2)
 TARGET = $(BUILD_DIR)/vfpu_forms2
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-unmodeled)
+TARGET = $(BUILD_DIR)/vfpu_unmodeled
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
 # same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.

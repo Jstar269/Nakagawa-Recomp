@@ -2118,6 +2118,45 @@ _register_campaign_probe(
             else VFPU_FORMS2_CELL_WORDS) for case in VFPU_FORMS2_CASES},
 )
 
+# vfpu-unmodeled (163, probe_hle_issues.c): the #326 VFPU forms the runtime refuses as unmodeled,
+# two passes, register-only. Every row is emitted on every run, so the stream is fixed-shape; a
+# refused form that raises an exception stops the launch (POWER RISK) and leaves a short stream.
+# Per pass, in the order the probe runs them: six VFPU9 width forms over two operand sets, each
+# under no S prefix and negate-all (<stem>-p<pass>-<set>-<none|p1>, 29 words); vcrs.s/.p/.q over
+# two operand sets (<stem>-p<pass>-<set>, 29 words); four vcmov imm3 7 words under VFPU_CC 0x00,
+# 0x3f and 0x15 over two operand sets (cmov<k>-p<pass>-cc<hh>-<set>, 29 words); and the three
+# control-255 cells (mfvc255, mtvc255-zero, mtvc255-val, 33 words).
+VFPU_UNMODELED_WIDE_STEMS = ("vsgn-q", "vt4444-p", "vt4444-t", "vbfy1-s", "vbfy1-t", "vbfy2-p")
+VFPU_UNMODELED_VCRS_STEMS = ("vcrs-s", "vcrs-p", "vcrs-q")
+VFPU_UNMODELED_CMOV_WORDS = 4
+VFPU_UNMODELED_CMOV_CCS = ("cc00", "cc3f", "cc15")
+VFPU_UNMODELED_CTL_STEMS = ("mfvc255", "mtvc255-zero", "mtvc255-val")
+VFPU_UNMODELED_SETS = 2
+VFPU_UNMODELED_PREFIXES = ("none", "p1")
+VFPU_UNMODELED_PASSES = 2
+VFPU_UNMODELED_IMAGE_WORDS = 29
+VFPU_UNMODELED_CTL_WORDS = 33
+
+
+def _vfpu_unmodeled_pass_cases(p: int) -> tuple[str, ...]:
+    wide = tuple(f"{stem}-p{p}-{i}-{x}" for stem in VFPU_UNMODELED_WIDE_STEMS
+                 for i in range(VFPU_UNMODELED_SETS) for x in VFPU_UNMODELED_PREFIXES)
+    vcrs = tuple(f"{stem}-p{p}-{i}" for stem in VFPU_UNMODELED_VCRS_STEMS
+                 for i in range(VFPU_UNMODELED_SETS))
+    cmov = tuple(f"cmov{k}-p{p}-{cc}-{i}" for k in range(VFPU_UNMODELED_CMOV_WORDS)
+                 for cc in VFPU_UNMODELED_CMOV_CCS for i in range(VFPU_UNMODELED_SETS))
+    ctl = tuple(f"{stem}-p{p}" for stem in VFPU_UNMODELED_CTL_STEMS)
+    return wide + vcrs + cmov + ctl
+
+
+VFPU_UNMODELED_CASES = tuple(case for p in range(VFPU_UNMODELED_PASSES)
+                             for case in _vfpu_unmodeled_pass_cases(p))
+_register_campaign_probe(
+    "vfpu-unmodeled", "PSP-VFPU-UNMODELED-001", VFPU_UNMODELED_CASES,
+    {case: (VFPU_UNMODELED_CTL_WORDS if case.startswith(("mfvc255", "mtvc255"))
+            else VFPU_UNMODELED_IMAGE_WORDS) for case in VFPU_UNMODELED_CASES},
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -2798,7 +2837,7 @@ HLE_MACHINERY_STATUS_CASES = frozenset({
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS.
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
-                                   "vfpu-funnel", "vfpu-sort"})
+                                   "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (

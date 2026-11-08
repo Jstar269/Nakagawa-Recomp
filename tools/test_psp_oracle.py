@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -7242,7 +7242,7 @@ class HleIssuesProbeTests(unittest.TestCase):
 
     def test_only_the_vfpu_cases_run_their_main_thread_with_the_vfpu_attribute(self) -> None:
         head = ("#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 "
-                "|| PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125\n")
+                "|| PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163\n")
         self.assertIn(head, self.probe)
         attr = self.probe[self.probe.index(head):]
         attr = attr[:attr.index("#endif") + len("#endif")]
@@ -8728,6 +8728,148 @@ class VfpuSortProbeTests(unittest.TestCase):
         # The 2026-10-29 acceptance-eligible PSP-3000 run of 9171f055 cites every cell.
         self.assertEqual(row["hardware_evidence"], "MEASURED")
         self.assertEqual(row["evidence_cases"], row["case_ids"])
+
+
+class VfpuUnmodeledProbeTests(unittest.TestCase):
+    """CASE=vfpu-unmodeled (163, PSP-VFPU-UNMODELED-001) in probe_hle_issues.c: the #326 VFPU
+    forms the runtime refuses as unmodeled. Register-only: no system call in the section beyond
+    the shared writer, bounded loops, a step before each form, the control-255 words last, a
+    fixed-shape stream that matches the registry, and no hardware result claimed (NOT_RUN)."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-UNMODELED-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_UNMODELED\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_UNMODELED */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-unmodeled)\nCASE_ID = 163\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-unmodeled)\nTARGET = $(BUILD_DIR)/vfpu_unmodeled\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_UNMODELED 163\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 163\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-unmodeled"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-UNMODELED-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_unmodeled_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-unmodeled").name,
+                         "vfpu_unmodeled_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-unmodeled"),
+                         "strict-golden-sequence")
+        self.assertNotIn("vfpu-unmodeled", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-unmodeled", parse_golden.HLE_OBSERVATION_CASES)
+        self.assertIn("| `vfpu-unmodeled` | `PSP-VFPU-UNMODELED-001` |", self.readme)
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 10)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(
+                    header, r"^unsigned (\w+) = 0; \1 < (?:\d+u|TN_IMAGE_WORDS|UM_\w+); \1\+\+$")
+
+    def test_steps_come_before_their_cells_and_control_255_runs_last(self) -> None:
+        bodies = _c_function_bodies(self.section)
+        for group, cell in (("um_wide_group", "um_image_cell("), ("um_vcrs_group", "um_image_cell("),
+                            ("um_cmov_group", "um_image_cell(")):
+            with self.subTest(group=group):
+                self.assertLess(bodies[group].index("hle_step(name);"), bodies[group].index(cell))
+        run = bodies["hle_run"]
+        order = [run.index(token) for token in (
+            "um_wide_group(", "um_vcrs_group(", "um_cmov_group(", "um_mfvc255,",
+            "um_mtvc255_zero,", "um_mtvc255_val,")]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(run.count("hle_step(name);"), 3)
+        self.assertLess(run.index('"mfvc255-p%u"'), run.index("um_ctl_cell(name, um_mfvc255"))
+
+    def test_the_brief_words_are_run_verbatim(self) -> None:
+        for word in ("0x66800000", "0x66810190", "0x66808090", "0xd2a70000", "0xd2a701ff",
+                     "0xd2a7808f", "0xd2bfff00", "0x486200ff", "0x48e000ff", "0xd04a80ff"):
+            with self.subTest(word=word):
+                self.assertIn(f'"{word}")', self.section)
+                self.assertIn(f"{word}u", self.section)
+        # VFPU op 0x34, jump field 2, op field 0x19 / 2 / 3, vd C200 (0x08), vs C000, size bits.
+        for name, op, size in (("t4444_p", 0x19, 0x80), ("t4444_t", 0x19, 0x8000),
+                               ("bfy1_s", 2, 0), ("bfy1_t", 2, 0x8000), ("bfy2_p", 3, 0x80)):
+            word = (0x34 << 26) | (2 << 21) | (op << 16) | size | 0x08
+            with self.subTest(form=name):
+                self.assertIn(f'UM_CELL_FN(um_{name}_none, TN_PFX_NONE, "0x{word:08x}")',
+                              self.section)
+        # Identity prefixes except the negate-all form of the width cells.
+        self.assertEqual(self.section.count("TN_PFX_P1,"), 6)
+        self.assertNotIn("TN_PFX_P2", self.section)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-unmodeled"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-UNMODELED-001")
+        self.assertEqual(spec.terminal_case, "vfpu-unmodeled-done")
+        cases = parse_golden.VFPU_UNMODELED_CASES
+        self.assertEqual(len(cases), 2 * (24 + 6 + 24 + 3))
+        self.assertEqual(len(cases), len(set(cases)))
+        self.assertEqual(cases[0], "vsgn-q-p0-0-none")
+        self.assertEqual(cases[-1], "mtvc255-val-p1")
+        self.assertEqual(counts["vsgn-q-p0-0-none"], 29)
+        self.assertEqual(counts["cmov3-p1-cc15-1"], 29)
+        self.assertEqual(counts["mtvc255-val-p0"], 33)
+        self.assertIn("hle_record(name, \"PASS\", word, w, UM_IMAGE_WORDS_OUT);", self.section)
+        self.assertIn("hle_record(name, \"PASS\", word, w, UM_CTL_WORDS_OUT);", self.section)
+        self.assertIn("#define UM_IMAGE_WORDS_OUT 29u", self.section)
+        self.assertIn("#define UM_CTL_WORDS_OUT 33u", self.section)
+        for fragment in ("s_um_wide[6]", "s_um_vcrs[3]", "s_um_cmov[4]", "s_um_cmov_cc[3]",
+                         "s_um_sets[2][8]", "pass < 2u", "form < 6u", "form < 3u", "form < 4u"):
+            self.assertIn(fragment, self.section)
+        self.assertEqual(len(parse_golden.VFPU_UNMODELED_CASES), 114)
+
+    def test_the_operand_sets_seed_the_synthetic_words(self) -> None:
+        ops = re.search(r"s_um_sets\[2\]\[8\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(ops)
+        sets = re.findall(r"\{(0x[0-9a-f]{8}u(?:,\s*0x[0-9a-f]{8}u){7})\}",
+                          _matched(ops).group(1))
+        words = [[int(w.strip()[:-1], 16) for w in item.split(",")] for item in sets]
+        self.assertEqual(words[0], [0x3f800000, 0x40000000, 0xc0600000, 0, 0x80000000,
+                                    0x7f800000, 0x7fc00000, 1])
+        self.assertEqual(words[1][:4], words[0][4:])
+        self.assertEqual(words[1][4:], words[0][:4])
+
+    def test_manifest_row_is_a_built_not_run_power_risk_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_unmodeled.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-unmodeled"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+        self.assertNotIn("evidence_cases", row)
+        self.assertIn("POWER RISK", row["risk"])
 
 
 class VfpuForms2ProbeTests(unittest.TestCase):

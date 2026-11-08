@@ -15,6 +15,9 @@
 //     .p, .t and .q, register-only;
 //   CASE=vfpu-sort (PSP-VFPU-SORT-001): #326 raw result words of vsrt1.q to vsrt4.q,
 //     register-only.
+//   CASE=vfpu-unmodeled (PSP-VFPU-UNMODELED-001): #326 raw words of the VFPU forms the runtime
+//     refuses (vcrs .s/.p/.q, vcmov imm3 7, mfvc/mtvc of control 255, the rejected VFPU9
+//     widths), register-only; a refused form may raise an exception that stops the launch.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -44,8 +47,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort and vfpu-forms2 run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2 and vfpu-unmodeled run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -63,6 +66,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_FUNNEL 122
 #define HLE_CASE_VFPU_SORT 125
 #define HLE_CASE_VFPU_FORMS2 121
+#define HLE_CASE_VFPU_UNMODELED 163
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -92,6 +96,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-forms2"
 #define HLE_TEST_ID "PSP-VFPU-FORMS2-001"
 #define HLE_LOG "host0:/vfpu_forms2_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_UNMODELED
+#define HLE_CAMPAIGN_ID "vfpu-unmodeled"
+#define HLE_TEST_ID "PSP-VFPU-UNMODELED-001"
+#define HLE_LOG "host0:/vfpu_unmodeled_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -1569,6 +1577,295 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_FORMS2 */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_UNMODELED
+
+/* #326 VFPU forms the runtime refuses as unmodeled (PSP-VFPU-UNMODELED-001), one launch,
+   register-only: no memory or host I/O runs between a cell's register seeding and its readback.
+   POWER RISK: a refused form may raise a reserved-instruction or coprocessor exception. Nothing
+   here can catch it: under PSPLink an exception stops the launch, and the console must then be
+   recovered by a person, never by an unattended reset. Each form group writes a durable step
+   marker first, and the forms most likely to fault run last in each pass (the mfvc/mtvc words
+   with control 255 run at the very end, the mtvc ones after the mfvc one). Rows:
+   - image cells run the exact word over a seeded register image and record VFPU_CC before and
+     after, the count of changed image words, the prefix word, the operand set and the first 12
+     changed (index, word) pairs;
+   - control cells run an mfvc/mtvc word, preset VFPU_CC, and record the GPR $v0 (sentinel
+     0xa5a5a5a5 before) and controls 0-15 before and after. Encodings are the census rows of
+     the brief (vcrs 0x66800000/0x66810190/0x66808090, vcmov imm3 7 0xd2a70000/0xd2a701ff/
+     0xd2a7808f/0xd2bfff00, mfvc 0x486200ff, mtvc 0x48e000ff) plus mtvc 0x48e900ff, the same
+     control with $t1 = 0x2b so a changed control shows the value. Everything else is the VFPU
+     op 0x34 (0xd0...) vsgn (op 0x0a), vbfy1 (2), vbfy2 (3) and vt4444 (0x19) layout of the
+     2026-10-24 cells, vd C200 (0x08), vs C000. */
+
+#include "hle_vfpu_cells.h"
+
+#define UM_SENTINEL 0xa5a5a5a5u
+#define UM_PAIRS 12u
+#define UM_IMAGE_WORDS_OUT 29u
+#define UM_CTL_WORDS_OUT 33u
+#define UM_MTVC_VALUE 0x2bu
+
+typedef void (*um_img_fn)(const uint32_t *in, uint32_t *out, uint32_t *cc, uint32_t pre);
+typedef void (*um_ctl_fn)(uint32_t *before, uint32_t *after, uint32_t *gpr, uint32_t pre,
+                          uint32_t val);
+
+/* The TN_CELL_FN shape with the VFPU_CC preset as an argument. */
+#define UM_CELL_FN(fname, pfx, word)                                                   \
+    static void fname(const uint32_t *in, uint32_t *out, uint32_t *cc, uint32_t pre)   \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "move $t0, %[pre]\n\t"                                                     \
+            ".word 0x48e80083\n\t" /* mtvc $t0, VFPU_CC */                             \
+            TN_LOAD_ALL                                                                \
+            ".word 0x48690083\n\t" /* mfvc $t1, VFPU_CC */                             \
+            "sw $t1, 0(%[cc])\n\t"                                                     \
+            pfx                                                                        \
+            ".word " word "\n\t"                                                       \
+            TN_STORE_ALL                                                               \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 4(%[cc])\n\t"                                                     \
+            :                                                                          \
+            : [in] "r"(in), [out] "r"(out), [cc] "r"(cc), [pre] "r"(pre)              \
+            : "t0", "t1", "memory");                                                   \
+    }
+
+/* mfvc $t1, control 0-15 (0x48690080 + control) stored to dst[0..15]. */
+#define UM_CTL_READ(dst)                                                                       \
+    ".word 0x48690080\n\tsw $t1, 0(" dst ")\n\t.word 0x48690081\n\tsw $t1, 4(" dst ")\n\t"   \
+    ".word 0x48690082\n\tsw $t1, 8(" dst ")\n\t.word 0x48690083\n\tsw $t1, 12(" dst ")\n\t"  \
+    ".word 0x48690084\n\tsw $t1, 16(" dst ")\n\t.word 0x48690085\n\tsw $t1, 20(" dst ")\n\t" \
+    ".word 0x48690086\n\tsw $t1, 24(" dst ")\n\t.word 0x48690087\n\tsw $t1, 28(" dst ")\n\t" \
+    ".word 0x48690088\n\tsw $t1, 32(" dst ")\n\t.word 0x48690089\n\tsw $t1, 36(" dst ")\n\t" \
+    ".word 0x4869008a\n\tsw $t1, 40(" dst ")\n\t.word 0x4869008b\n\tsw $t1, 44(" dst ")\n\t" \
+    ".word 0x4869008c\n\tsw $t1, 48(" dst ")\n\t.word 0x4869008d\n\tsw $t1, 52(" dst ")\n\t" \
+    ".word 0x4869008e\n\tsw $t1, 56(" dst ")\n\t.word 0x4869008f\n\tsw $t1, 60(" dst ")\n\t"
+
+/* Presets VFPU_CC, reads controls 0-15, sets $v0 to the sentinel and $t1 to val, runs the word,
+   stores $v0, reads controls 0-15 again. */
+#define UM_CTL_FN(fname, word)                                                         \
+    static void fname(uint32_t *before, uint32_t *after, uint32_t *gpr, uint32_t pre,  \
+                      uint32_t val)                                                    \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "move $t0, %[pre]\n\t"                                                     \
+            ".word 0x48e80083\n\t" /* mtvc $t0, VFPU_CC */                             \
+            UM_CTL_READ("%[before]")                                                   \
+            "move $t1, %[val]\n\t"                                                     \
+            "move $v0, %[sent]\n\t"                                                    \
+            ".word " word "\n\t"                                                       \
+            "sw $v0, 0(%[gpr])\n\t"                                                    \
+            UM_CTL_READ("%[after]")                                                    \
+            :                                                                          \
+            : [before] "r"(before), [after] "r"(after), [gpr] "r"(gpr), [pre] "r"(pre), \
+              [val] "r"(val), [sent] "r"(UM_SENTINEL)                                  \
+            : "t0", "t1", "v0", "memory");                                             \
+    }
+
+/* Source C000 (image 0-3) and C010 (image 4-7), destinations wherever the word names. */
+UM_CELL_FN(um_vsgn_q_none, TN_PFX_NONE, "0xd04a80ff")   /* vsgn.q */
+UM_CELL_FN(um_vsgn_q_p1, TN_PFX_P1, "0xd04a80ff")
+UM_CELL_FN(um_t4444_p_none, TN_PFX_NONE, "0xd0590088")  /* vt4444.p */
+UM_CELL_FN(um_t4444_p_p1, TN_PFX_P1, "0xd0590088")
+UM_CELL_FN(um_t4444_t_none, TN_PFX_NONE, "0xd0598008")  /* vt4444.t */
+UM_CELL_FN(um_t4444_t_p1, TN_PFX_P1, "0xd0598008")
+UM_CELL_FN(um_bfy1_s_none, TN_PFX_NONE, "0xd0420008")   /* vbfy1.s */
+UM_CELL_FN(um_bfy1_s_p1, TN_PFX_P1, "0xd0420008")
+UM_CELL_FN(um_bfy1_t_none, TN_PFX_NONE, "0xd0428008")   /* vbfy1.t */
+UM_CELL_FN(um_bfy1_t_p1, TN_PFX_P1, "0xd0428008")
+UM_CELL_FN(um_bfy2_p_none, TN_PFX_NONE, "0xd0430088")   /* vbfy2.p */
+UM_CELL_FN(um_bfy2_p_p1, TN_PFX_P1, "0xd0430088")
+UM_CELL_FN(um_vcrs_s, TN_PFX_NONE, "0x66800000")        /* vcrs.s */
+UM_CELL_FN(um_vcrs_p, TN_PFX_NONE, "0x66810190")        /* vcrs.p */
+UM_CELL_FN(um_vcrs_q, TN_PFX_NONE, "0x66808090")        /* vcrs.q */
+UM_CELL_FN(um_cmov0, TN_PFX_NONE, "0xd2a70000")         /* vcmov imm3 7 */
+UM_CELL_FN(um_cmov1, TN_PFX_NONE, "0xd2a701ff")
+UM_CELL_FN(um_cmov2, TN_PFX_NONE, "0xd2a7808f")
+UM_CELL_FN(um_cmov3, TN_PFX_NONE, "0xd2bfff00")
+UM_CTL_FN(um_mfvc255, "0x486200ff")                     /* mfvc $v0, control 255 */
+UM_CTL_FN(um_mtvc255_zero, "0x48e000ff")                /* mtvc $zero, control 255 */
+UM_CTL_FN(um_mtvc255_val, "0x48e900ff")                 /* mtvc $t1, control 255 */
+
+/* Two operand sets: lanes 0-3 (C000) then 4-7 (C010). 1.0, 2.0, -3.5, +0, -0, +inf, qNaN,
+   smallest denormal. The second set swaps the two quads. */
+static const uint32_t s_um_sets[2][8] = {
+    {0x3f800000u, 0x40000000u, 0xc0600000u, 0x00000000u,
+     0x80000000u, 0x7f800000u, 0x7fc00000u, 0x00000001u},
+    {0x80000000u, 0x7f800000u, 0x7fc00000u, 0x00000001u,
+     0x3f800000u, 0x40000000u, 0xc0600000u, 0x00000000u},
+};
+
+struct um_wide {
+    const char *stem;
+    uint32_t word;
+    um_img_fn none;
+    um_img_fn p1;
+};
+static const struct um_wide s_um_wide[6] = {
+    {"vsgn-q", 0xd04a80ffu, um_vsgn_q_none, um_vsgn_q_p1},
+    {"vt4444-p", 0xd0590088u, um_t4444_p_none, um_t4444_p_p1},
+    {"vt4444-t", 0xd0598008u, um_t4444_t_none, um_t4444_t_p1},
+    {"vbfy1-s", 0xd0420008u, um_bfy1_s_none, um_bfy1_s_p1},
+    {"vbfy1-t", 0xd0428008u, um_bfy1_t_none, um_bfy1_t_p1},
+    {"vbfy2-p", 0xd0430088u, um_bfy2_p_none, um_bfy2_p_p1},
+};
+static const char *const s_um_pfx_names[2] = {"none", "p1"};
+static const uint32_t s_um_pfx_words[2] = {TN_PFXW_NONE, TN_PFXW_P1};
+
+struct um_plain {
+    const char *stem;
+    uint32_t word;
+    um_img_fn fn;
+};
+static const struct um_plain s_um_vcrs[3] = {
+    {"vcrs-s", 0x66800000u, um_vcrs_s},
+    {"vcrs-p", 0x66810190u, um_vcrs_p},
+    {"vcrs-q", 0x66808090u, um_vcrs_q},
+};
+static const struct um_plain s_um_cmov[4] = {
+    {"cmov0", 0xd2a70000u, um_cmov0},
+    {"cmov1", 0xd2a701ffu, um_cmov1},
+    {"cmov2", 0xd2a7808fu, um_cmov2},
+    {"cmov3", 0xd2bfff00u, um_cmov3},
+};
+static const uint32_t s_um_cmov_cc[3] = {0x00u, 0x3fu, 0x15u};
+static const char *const s_um_cmov_cc_names[3] = {"cc00", "cc3f", "cc15"};
+
+static uint32_t s_um_in[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+static uint32_t s_um_out[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+
+/* One image cell: background image word i = 0x3f800000 | i << 16, operand set over image 0-7,
+   then the word. Row <name>: result = the instruction word; out0/out1 = VFPU_CC after the preset
+   / after the word; out2 = number of image words that changed; out3 = the vpfxs word issued
+   before it (0 = none); out4 = the operand set; out5.. = up to 12 changed (image index, word)
+   pairs in index order, 0xffffffff where fewer changed. */
+static void um_image_cell(const char *name, um_img_fn fn, uint32_t word, uint32_t pfx,
+                          uint32_t pre, unsigned set)
+{
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        s_um_in[i] = 0x3f800000u | (i << 16);
+    }
+    for (unsigned i = 0; i < 8u; i++) {
+        s_um_in[i] = s_um_sets[set][i];
+    }
+    uint32_t cc[2] = {0u, 0u};
+    fn(s_um_in, s_um_out, cc, pre);
+    uint32_t w[UM_IMAGE_WORDS_OUT];
+    for (unsigned i = 0; i < UM_IMAGE_WORDS_OUT; i++) {
+        w[i] = 0xffffffffu;
+    }
+    uint32_t changed = 0u;
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        if (s_um_out[i] != s_um_in[i]) {
+            if (changed < UM_PAIRS) {
+                w[5u + 2u * changed] = i;
+                w[6u + 2u * changed] = s_um_out[i];
+            }
+            changed++;
+        }
+    }
+    w[0] = cc[0];
+    w[1] = cc[1];
+    w[2] = changed;
+    w[3] = pfx;
+    w[4] = set;
+    hle_record(name, "PASS", word, w, UM_IMAGE_WORDS_OUT);
+}
+
+/* One control cell. Row <name>: result = the instruction word; out0 = $v0 after the word;
+   out1-16 = controls 0-15 before; out17-32 = controls 0-15 after. */
+static void um_ctl_cell(const char *name, um_ctl_fn fn, uint32_t word, uint32_t val)
+{
+    uint32_t before[16], after[16], gpr = UM_SENTINEL;
+    for (unsigned i = 0; i < 16u; i++) {
+        before[i] = 0xffffffffu;
+        after[i] = 0xffffffffu;
+    }
+    fn(before, after, &gpr, TN_CC_PRESET, val);
+    uint32_t w[UM_CTL_WORDS_OUT];
+    w[0] = gpr;
+    for (unsigned i = 0; i < 16u; i++) {
+        w[1u + i] = before[i];
+        w[17u + i] = after[i];
+    }
+    hle_record(name, "PASS", word, w, UM_CTL_WORDS_OUT);
+}
+
+/* Rows <stem>-p<pass>-<set>-<none|p1>, one step <stem>-p<pass> first. */
+static void um_wide_group(unsigned pass, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", s_um_wide[form].stem, pass);
+    hle_step(name);
+    for (unsigned set = 0; set < 2u; set++) {
+        for (unsigned f = 0; f < 2u; f++) {
+            snprintf(name, sizeof(name), "%s-p%u-%u-%s", s_um_wide[form].stem, pass, set,
+                     s_um_pfx_names[f]);
+            um_image_cell(name, f == 0u ? s_um_wide[form].none : s_um_wide[form].p1,
+                          s_um_wide[form].word, s_um_pfx_words[f], TN_CC_PRESET, set);
+        }
+    }
+}
+
+/* Rows <stem>-p<pass>-<set>, one step <stem>-p<pass> first. */
+static void um_vcrs_group(unsigned pass, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", s_um_vcrs[form].stem, pass);
+    hle_step(name);
+    for (unsigned set = 0; set < 2u; set++) {
+        snprintf(name, sizeof(name), "%s-p%u-%u", s_um_vcrs[form].stem, pass, set);
+        um_image_cell(name, s_um_vcrs[form].fn, s_um_vcrs[form].word, TN_PFXW_NONE, TN_CC_PRESET,
+                      set);
+    }
+}
+
+/* Rows cmov<k>-p<pass>-cc<hh>-<set>, one step cmov<k>-p<pass> first. */
+static void um_cmov_group(unsigned pass, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", s_um_cmov[form].stem, pass);
+    hle_step(name);
+    for (unsigned c = 0; c < 3u; c++) {
+        for (unsigned set = 0; set < 2u; set++) {
+            snprintf(name, sizeof(name), "%s-p%u-%s-%u", s_um_cmov[form].stem, pass,
+                     s_um_cmov_cc_names[c], set);
+            um_image_cell(name, s_um_cmov[form].fn, s_um_cmov[form].word, TN_PFXW_NONE,
+                          s_um_cmov_cc[c], set);
+        }
+    }
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < 6u; form++) {
+            um_wide_group(pass, form);
+        }
+        for (unsigned form = 0; form < 3u; form++) {
+            um_vcrs_group(pass, form);
+        }
+        for (unsigned form = 0; form < 4u; form++) {
+            um_cmov_group(pass, form);
+        }
+        char name[64];
+        snprintf(name, sizeof(name), "mfvc255-p%u", pass);
+        hle_step(name);
+        um_ctl_cell(name, um_mfvc255, 0x486200ffu, 0u);
+        snprintf(name, sizeof(name), "mtvc255-zero-p%u", pass);
+        hle_step(name);
+        um_ctl_cell(name, um_mtvc255_zero, 0x48e000ffu, 0u);
+        snprintf(name, sizeof(name), "mtvc255-val-p%u", pass);
+        hle_step(name);
+        um_ctl_cell(name, um_mtvc255_val, 0x48e900ffu, UM_MTVC_VALUE);
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_UNMODELED */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_INTR_CELLS
