@@ -113,6 +113,33 @@ class CiPathClassificationTests(unittest.TestCase):
         self.assertEqual(result["run_native"], "false")
         self.assertEqual(result["run_windows"], "false")
 
+    def test_installer_inputs_route_the_windows_installer_gate(self) -> None:
+        for path in (
+            "assets/installer/nakagawa.iss",
+            "assets/installer/fragments/setup.iss",
+            "assets/upstream/innosetup.lock.json",
+            "tools/build_installer.py",
+            "tools/verify_installer.py",
+            "tools/stage_install.py",
+            "tools/test_installer.py",
+            "tools/test_stage_install.py",
+            "tools/stage_runtime_dlls.py",
+            "tools/test_stage_runtime_dlls.py",
+            "LICENSE",
+        ):
+            with self.subTest(path=path):
+                result = classify([path])
+                self.assertEqual(result["run_installer"], "true")
+
+    def test_windows_runtime_inputs_also_route_the_installer_gate(self) -> None:
+        result = classify(["src/rt/sched.c"])
+        self.assertEqual(result["run_windows"], "true")
+        self.assertEqual(result["run_installer"], "true")
+
+    def test_unrelated_docs_and_python_tools_skip_the_installer_gate(self) -> None:
+        self.assertEqual(classify(["docs/CI.md"])["run_installer"], "false")
+        self.assertEqual(classify(["tools/test_progress_tracker.py"])["run_installer"], "false")
+
     def test_codegen_tool_is_native_relevant(self) -> None:
         result = classify(["tools/codegen.py"])
         self.assertEqual(result["run_python"], "true")
@@ -138,10 +165,12 @@ class CiPathClassificationTests(unittest.TestCase):
                 self.assertEqual(result["run_native"], "true")
                 self.assertEqual(result["run_windows"], "true")
 
-    def test_draft_pr_runs_substantive_jobs(self) -> None:
+    def test_draft_pr_runs_only_the_quick_jobs(self) -> None:
+        # The run flags keep describing the paths; allow_substantive is what skips the jobs.
         result = classify(["src/rt/recomp.c"], draft=True)
-        self.assertEqual(result["allow_substantive"], "true")
+        self.assertEqual(result["allow_substantive"], "false")
         self.assertEqual(result["run_native"], "true")
+        self.assertEqual(result["draft"], "true")
 
     def test_ordinary_main_push_keeps_only_smoke_jobs(self) -> None:
         with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/main"}):
@@ -161,6 +190,7 @@ class CiPathClassificationTests(unittest.TestCase):
             "run_python",
             "run_native",
             "run_windows",
+            "run_installer",
             "run_markdown",
             "run_main_smoke",
             "allow_substantive",
@@ -169,13 +199,13 @@ class CiPathClassificationTests(unittest.TestCase):
 
     def test_history_failure_is_conservative(self) -> None:
         result = classify(["<history-unavailable>"])
-        for key in ("run_python", "run_native", "run_windows", "run_markdown",
+        for key in ("run_python", "run_native", "run_windows", "run_installer", "run_markdown",
                     "allow_substantive"):
             self.assertEqual(result[key], "true")
 
     def test_unknown_paths_fail_closed_to_full_validation(self) -> None:
         result = classify(["new-tool-input.dat"])
-        for key in ("run_python", "run_native", "run_windows", "run_markdown",
+        for key in ("run_python", "run_native", "run_windows", "run_installer", "run_markdown",
                     "allow_substantive"):
             self.assertEqual(result[key], "true")
 
@@ -302,15 +332,15 @@ class CiPathAdversarialTests(unittest.TestCase):
         self.assertEqual(result["allow_substantive"], "true")
         self.assertEqual(result["run_native"], "true")
 
-    def test_draft_keeps_gates_applicable_and_running(self) -> None:
-        """Draft status must not delay path-applicable validation."""
+    def test_draft_keeps_gates_applicable_but_suppressed(self) -> None:
+        """A Draft defers the substantive gates to Ready; their applicability is still exported."""
         result = classify(["src/rt/hle.c"], draft=True)
-        self.assertEqual(result["allow_substantive"], "true")
+        self.assertEqual(result["allow_substantive"], "false")
         self.assertEqual(result["run_native"], "true")
 
-    def test_draft_unknown_path_runs_full_matrix_and_fails_closed(self) -> None:
+    def test_draft_unknown_path_still_routes_the_full_matrix_for_ready(self) -> None:
         result = classify(["new-tool-input.dat"], draft=True)
-        self.assertEqual(result["allow_substantive"], "true")
+        self.assertEqual(result["allow_substantive"], "false")
         self.assertEqual(result["run_python"], "true")
         self.assertEqual(result["run_native"], "true")
 
@@ -319,6 +349,48 @@ class CiPathAdversarialTests(unittest.TestCase):
             result = classify([".github/workflows/ci.yml"], event_name="push")
         self.assertEqual(result["allow_substantive"], "true")
         self.assertEqual(result["run_main_smoke"], "true")
+
+    def test_unrecognised_path_on_main_push_keeps_the_compact_run(self) -> None:
+        """An unknown path forced the full matrix on the PR or batch that carried it.
+
+        The push lands that validated tree, so it no longer repeats the matrix: 32 of 79
+        main pushes did (2026-11-02 to 2026-11-07). Markdown and the export exercise
+        still follow force_full, and the substantive flags still describe the change.
+        """
+        with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/main"}):
+            for paths in (["new-tool-input.dat"],
+                          ["tests/native/test_player_ui.py", "src/rt/hle.c"],
+                          ["fixtures/psp_oracle/Makefile", "docs/CI.md"]):
+                with self.subTest(paths=paths):
+                    result = classify(paths, event_name="push")
+                    self.assertEqual(result["allow_substantive"], "false")
+                    self.assertEqual(result["run_main_smoke"], "true")
+                    self.assertEqual(result["run_python"], "true")
+                    self.assertEqual(result["run_markdown"], "true")
+                    self.assertEqual(result["security_publication"], "true")
+
+    def test_ci_definition_change_on_main_push_still_runs_the_matrix(self) -> None:
+        with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/main"}):
+            for path in (".github/workflows/ci.yml", ".github/actions/x/action.yml",
+                         "tools/ci_paths.py", "tools/ci_test_shards.py", "tools/test_ci_required.py"):
+                with self.subTest(path=path):
+                    result = classify([path, "new-tool-input.dat"], event_name="push")
+                    self.assertEqual(result["allow_substantive"], "true")
+
+    def test_unreadable_main_push_still_runs_the_matrix(self) -> None:
+        with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/main"}):
+            for paths in ([], ["<history-unavailable>"], ["<history-unavailable>", "docs/CI.md"]):
+                with self.subTest(paths=paths):
+                    self.assertEqual(classify(paths, event_name="push")["allow_substantive"], "true")
+
+    def test_unrecognised_path_stays_full_everywhere_but_a_main_push(self) -> None:
+        for event in ("pull_request", "merge_group", "schedule", "workflow_dispatch"):
+            with self.subTest(event=event):
+                result = classify(["new-tool-input.dat"], event_name=event)
+                self.assertEqual(result["allow_substantive"], "true")
+                self.assertEqual(result["run_windows"], "true")
+        with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/feature"}):
+            self.assertEqual(classify(["new-tool-input.dat"], event_name="push")["allow_substantive"], "true")
 
     def test_non_main_push_is_not_treated_as_main_smoke(self) -> None:
         with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/feature"}):
@@ -332,6 +404,7 @@ class CiPathAdversarialTests(unittest.TestCase):
             "run_python",
             "run_native",
             "run_windows",
+            "run_installer",
             "run_markdown",
             "run_main_smoke",
             "allow_substantive",
@@ -344,6 +417,7 @@ class CiPathAdversarialTests(unittest.TestCase):
             "run_python",
             "run_native",
             "run_windows",
+            "run_installer",
             "run_markdown",
             "run_main_smoke",
             "allow_substantive",
@@ -676,6 +750,7 @@ class MergeGroupRoutingTests(unittest.TestCase):
         "run_python",
         "run_native",
         "run_windows",
+        "run_installer",
         "run_markdown",
         "run_main_smoke",
         "allow_substantive",
@@ -761,6 +836,98 @@ class MergeGroupRoutingTests(unittest.TestCase):
         self.assertEqual(result["run_native"], "false")
         self.assertEqual(result["run_main_smoke"], "false")
         self.assertEqual(result["allow_substantive"], "true")
+
+
+class DraftLightRoutingTests(unittest.TestCase):
+    """A Draft pull request runs only the quick jobs; every other event routes as before.
+
+    Each case writes a real event payload and runs the classifier's entry point, as the
+    workflow's classify step does, so the draft flag is read from the payload.
+    """
+
+    PATHS = ["src/rt/hle.c", "tools/codegen.py", "docs/CI.md"]
+
+    def _outputs(self, event_name: str, event: dict[str, object], ref: str = "refs/pull/7/merge",
+                 paths: list[str] | None = None) -> dict[str, str]:
+        with tempfile.TemporaryDirectory() as scratch:
+            event_path = Path(scratch) / "event.json"
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            output_path = Path(scratch) / "github_output"
+            with patch.dict(os.environ, {"GITHUB_REF": ref}), patch("sys.stdout"):
+                code = ci_paths_module.main([
+                    "--event-name", event_name,
+                    "--event-path", str(event_path),
+                    "--github-output", str(output_path),
+                    "--files", *(self.PATHS if paths is None else paths),
+                ])
+            self.assertEqual(code, 0)
+            return dict(line.split("=", 1) for line in output_path.read_text(encoding="utf-8").splitlines())
+
+    @staticmethod
+    def _pull_request(action: str, draft: bool) -> dict[str, object]:
+        return {"action": action, "pull_request": {"number": 7, "draft": draft, "base": {"sha": "a" * 40}}}
+
+    def assertFull(self, values: dict[str, str]) -> None:
+        self.assertEqual(values["allow_substantive"], "true")
+        self.assertEqual(values["draft"], "false")
+        for key in ("run_python", "run_native", "run_windows"):
+            self.assertEqual(values[key], "true", key)
+
+    def test_a_draft_pull_request_suppresses_every_substantive_gate(self) -> None:
+        for action in ("opened", "synchronize", "reopened", "converted_to_draft"):
+            with self.subTest(action=action):
+                values = self._outputs("pull_request", self._pull_request(action, True))
+                self.assertEqual(values["allow_substantive"], "false")
+                self.assertEqual(values["draft"], "true")
+                # Applicability is unchanged, so the Ready run routes the same gates.
+                for key in ("run_python", "run_native", "run_windows", "run_markdown"):
+                    self.assertEqual(values[key], "true", key)
+                self.assertEqual(values["run_main_smoke"], "false")
+
+    def test_ready_for_review_runs_the_full_path_applicable_matrix(self) -> None:
+        self.assertFull(self._outputs("pull_request", self._pull_request("ready_for_review", False)))
+
+    def test_a_push_to_a_pull_request_that_is_not_a_draft_runs_the_full_matrix(self) -> None:
+        for action in ("opened", "synchronize", "reopened"):
+            with self.subTest(action=action):
+                self.assertFull(self._outputs("pull_request", self._pull_request(action, False)))
+
+    def test_a_draft_and_a_ready_run_route_the_same_gates(self) -> None:
+        draft = self._outputs("pull_request", self._pull_request("synchronize", True))
+        ready = self._outputs("pull_request", self._pull_request("ready_for_review", False))
+        self.assertEqual(draft.pop("allow_substantive"), "false")
+        self.assertEqual(ready.pop("allow_substantive"), "true")
+        self.assertEqual(draft.pop("draft"), "true")
+        self.assertEqual(ready.pop("draft"), "false")
+        self.assertEqual(draft, ready)
+
+    def test_a_docs_only_draft_is_still_docs_only(self) -> None:
+        values = self._outputs("pull_request", self._pull_request("opened", True), paths=["docs/CI.md"])
+        self.assertEqual(values["docs_only"], "true")
+        self.assertEqual(values["allow_substantive"], "false")
+        self.assertEqual(values["draft"], "true")
+
+    def test_merge_group_schedule_and_dispatch_are_never_light(self) -> None:
+        # A payload that claims a draft cannot narrow a full-matrix event.
+        claim = {"pull_request": {"draft": True}, "merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40}}
+        for event_name in ("merge_group", "schedule", "workflow_dispatch"):
+            with self.subTest(event=event_name):
+                values = self._outputs(event_name, claim, ref="refs/heads/main")
+                self.assertFull(values)
+                self.assertEqual(values["run_main_smoke"], "true")
+                direct = classify(self.PATHS, event_name=event_name, draft=True)
+                self.assertEqual(direct["allow_substantive"], "true")
+                self.assertEqual(direct["draft"], "false")
+
+    def test_a_push_to_main_keeps_its_policy(self) -> None:
+        values = self._outputs("push", {"before": "a" * 40}, ref="refs/heads/main")
+        self.assertEqual(values["allow_substantive"], "false")
+        self.assertEqual(values["run_main_smoke"], "true")
+        self.assertEqual(values["draft"], "false")
+        workflow = self._outputs("push", {"before": "a" * 40}, ref="refs/heads/main",
+                                 paths=[".github/workflows/ci.yml"])
+        self.assertEqual(workflow["allow_substantive"], "true")
+        self.assertEqual(classify(self.PATHS, event_name="push", draft=True)["draft"], "false")
 
 
 class PublicSurfaceRoutingRegressionTests(unittest.TestCase):
@@ -1368,12 +1535,15 @@ NOW = 1_800_000_000
 
 def _pull_request(head_ref: str = "batch/desk-20261030T185810Z", *, head_repo: str = REPO,
                   fork: object = False, author: str = OWNER, base_repo: str = REPO,
-                  sender: str | None = OWNER) -> dict[str, object]:
-    event: dict[str, object] = {"pull_request": {
+                  sender: str | None = OWNER, draft: object = None) -> dict[str, object]:
+    pull_request: dict[str, object] = {
         "head": {"ref": head_ref, "repo": {"full_name": head_repo, "fork": fork}},
         "base": {"ref": "main", "repo": {"full_name": base_repo}},
         "user": {"login": author},
-    }}
+    }
+    if draft is not None:
+        pull_request["draft"] = draft
+    event: dict[str, object] = {"pull_request": pull_request}
     if sender is not None:
         event["sender"] = {"login": sender}
     return event
@@ -1468,6 +1638,73 @@ class CodeqlRunnerRoutingTests(unittest.TestCase):
         self.assertEqual(self.route("push", switch="off"), self.HOSTED)
         self.assertEqual(self.route("push", heartbeat=str(NOW - 601)), self.HOSTED)
         self.assertEqual(self.route("push", heartbeat=""), self.HOSTED)
+
+
+class LandingOnlyPoolRoutingTests(unittest.TestCase):
+    """``NK_SELF_HOSTED_LINUX=landing`` gives the pool only to runs that land work."""
+
+    def route(self, event_name: str, event: dict[str, object] | None = None, *, ref: str = "refs/pull/1/merge",
+              switch: str = "landing", heartbeat: str = str(NOW - 30)) -> str:
+        runner: str = ci_paths_module.linux_runner(
+            event_name, event or {}, repository=REPO, ref=ref, switch=switch, heartbeat=heartbeat, now=NOW)
+        return runner
+
+    def codeql(self, event_name: str, event: dict[str, object] | None = None, *, ref: str = "refs/heads/main",
+               switch: str = "landing") -> str:
+        runner: str = ci_paths_module.codeql_runner(
+            event_name, event or {}, repository=REPO, ref=ref, switch=switch, heartbeat=str(NOW - 30), now=NOW)
+        return runner
+
+    def test_landing_runs_use_the_pool(self) -> None:
+        self.assertEqual(self.route("push", ref="refs/heads/main"), SELF_HOSTED)
+        self.assertEqual(self.route("merge_group", ref="refs/heads/gh-readonly-queue/main/pr-7-" + "a" * 40),
+                         SELF_HOSTED)
+        self.assertEqual(self.route("pull_request", _pull_request()), SELF_HOSTED)
+        self.assertEqual(self.route("pull_request", _pull_request(draft=True)), SELF_HOSTED)
+        self.assertEqual(self.route("pull_request", _pull_request("fix/thing", draft=False)), SELF_HOSTED)
+        self.assertEqual(self.route("pull_request", _pull_request("fix/thing", draft=False), switch=" LANDING "),
+                         SELF_HOSTED)
+
+    def test_draft_and_unknown_draft_task_branches_stay_hosted(self) -> None:
+        for label, draft in (("draft", True), ("draft missing", None), ("draft a string", "false"), ("draft 0", 0)):
+            with self.subTest(label):
+                self.assertEqual(self.route("pull_request", _pull_request("fix/thing", draft=draft)), HOSTED)
+        self.assertEqual(self.route("push", ref="refs/heads/fix/thing"), HOSTED)
+
+    def test_landing_mode_never_widens_trust(self) -> None:
+        cases = {
+            "fork batch": _pull_request(head_repo="someone/nakagawa-recomp", fork=True, author="someone"),
+            "fork ready": _pull_request("fix/thing", head_repo="someone/nakagawa-recomp", fork=True, draft=False),
+            "carry ready": _pull_request("carry/pr-1757", draft=False),
+            "desk ready": _pull_request("desk/pr1757", draft=False),
+            "batch by someone else": _pull_request(author="contributor", sender="contributor"),
+            "ready sent by someone else": _pull_request("fix/thing", sender="contributor", draft=False),
+        }
+        for label, event in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self.route("pull_request", event), HOSTED)
+        self.assertEqual(self.route("push", ref="refs/heads/main", heartbeat=str(NOW - 601)), HOSTED)
+
+    def test_off_and_unknown_switch_values_stay_hosted(self) -> None:
+        for switch in ("off", "", "landings", "on-landing", "true"):
+            with self.subTest(switch=switch):
+                self.assertEqual(self.route("push", ref="refs/heads/main", switch=switch), HOSTED)
+
+    def test_on_still_takes_every_trusted_run(self) -> None:
+        self.assertEqual(self.route("pull_request", _pull_request("fix/thing", draft=True), switch="on"), SELF_HOSTED)
+
+    def test_codeql_landing_mode_takes_only_main_merge_groups_and_batches(self) -> None:
+        hosted = json.dumps("ubuntu-26.04")
+        self.assertEqual(self.codeql("push"), SELF_HOSTED)
+        self.assertEqual(self.codeql("workflow_run", _wake("pull_request", "batch/desk-20261030T193657Z")),
+                         SELF_HOSTED)
+        self.assertEqual(self.codeql("workflow_run", _wake("merge_group", "gh-readonly-queue/main/pr-7-abc")),
+                         SELF_HOSTED)
+        self.assertEqual(self.codeql("workflow_run", _wake("pull_request", "fix/thing")), hosted)
+        self.assertEqual(self.codeql("workflow_run", _wake("pull_request", "batch/desk-1", actor="contributor")),
+                         hosted)
+        self.assertEqual(self.codeql("workflow_run", _wake("pull_request", "fix/thing"), switch="on"), SELF_HOSTED)
+        self.assertEqual(self.codeql("push", switch="off"), hosted)
 
 
 class SelfHostedRunnerRoutingTests(unittest.TestCase):

@@ -161,6 +161,12 @@ int sdl3vk_present_held(void);
  * it; NULL removes it. Handles are Vulkan's, passed as void pointers. */
 typedef void *(*Sdl3VkUpscalePass)(void *cmd, void *src, int w, int h, int out_w, int out_h);
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass);
+/* The same for the recording (SR_VIDEOREC_DIR, #2138): called with the recording's place for a
+ * recorded present whose shown image is smaller than it, so a recording made with the upscaler
+ * on is enlarged by it as the window is. A separate pass, so its images keep the recording's
+ * size while the window's keep the window's. NULL scales the recording as SR_PRESENT_SCALING
+ * says; record.json names the filter each frame was made with. */
+void sdl3vk_set_record_upscale_pass(Sdl3VkUpscalePass pass);
 
 /* Pumps the SDL event loop without presenting a frame. Returns 0 on quit, 1 otherwise. */
 int  sdl3vk_poll(void);
@@ -170,6 +176,18 @@ int  sdl3vk_poll(void);
  * event loop and samples input. Returns 1 when presented, 0 when the user closed the
  * window / pressed ESC, and -1 for a recoverable presentation failure. */
 int  sdl3vk_present_rgba(const uint32_t *px);
+
+/* The widest picture sdl3vk_present_rgba_ex uploads: 480 + 2 x 256 wing columns of a
+ * widescreen Fill picture (ge_shared.h GE_WIDE_MAX_WING). */
+#define SDL3VK_UPLOAD_MAX_W 992
+/* sdl3vk_present_rgba for a w x 272 picture, PSP_W <= w <= SDL3VK_UPLOAD_MAX_W, packed like
+ * it (a Fill picture: left wing, the frame, right wing). The window fits the picture's own
+ * aspect. Another size is a recoverable failure (-1). Same return semantics. */
+int  sdl3vk_present_rgba_ex(const uint32_t *px, int w, int h);
+
+/* The size in pixels the picture is fitted into: the swapchain's, or the window's before
+ * the first swapchain. Returns 0 (and 0 x 0) with no window. */
+int  sdl3vk_window_pixel_size(int *w, int *h);
 
 /* Present directly from a VkImage owned by the GPU rasterizer (ge_gpu.c). The image
  * must be RGBA8 in TRANSFER_SRC_OPTIMAL layout; the visible region (480x272, or its

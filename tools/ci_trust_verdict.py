@@ -46,7 +46,8 @@ outside a comment. A head whose copy differs from the default branch's is
     byte-identical to the approved head's (see "Carried approval" below; the
     workflow removes the label on any push that cannot be carried);
 ``CI_DEFINITION_BEHIND``
-    when only the default branch changed it. Merge ``main``; no label waives it.
+    when only the default branch changed it. The integrator merges ``main`` when
+    it lands the pull request, not the author, and no label waives it.
 ``CI_CONTEXT_COLLISION``
     a candidate workflow other than the verdict workflow names the verdict
     context, or any check run is named like it (the verdict is a status).
@@ -99,6 +100,11 @@ contain exactly one job of that name, completed with ``success``.
     may differ).
 ``PR_NOT_OPEN`` / ``BASE_NOT_DEFAULT``
     nothing to judge for merge into the default branch.
+``DRAFT_LIGHT_CI``
+    the pull request is a Draft, or its draft state cannot be read. CI runs only
+    the quick checks on a Draft (``tools/ci_paths.py``), so its head is never
+    judged green, and no Draft can join a landing batch. Marking it Ready starts
+    the full CI run, whose completion judges the head again.
 
 A run that is still going gives ``pending`` rather than a finding. Any fatal
 finding makes the verdict ``failure``; ``pending`` holds only when nothing is
@@ -240,6 +246,8 @@ def normalise(raw: dict) -> dict:
             "head_sha": (pr.get("head") or {}).get("sha"),
             "base_ref": (pr.get("base") or {}).get("ref"),
             "fork": head_repo.get("full_name") != base_repo.get("full_name"),
+            # GitHub's pulls API always answers a boolean; anything else is judged as a Draft.
+            "draft": pr.get("draft"),
             "labels": sorted(label.get("name", "") for label in pr.get("labels") or []),
         }
     approval = None
@@ -389,6 +397,17 @@ def _check_pull_request(snapshot: dict) -> list[Finding]:
         findings.append(Finding(
             "STALE_HEAD", head, f"the pull request head moved to {fetched} while it was being read",
         ))
+    if pr["draft"] is True:
+        findings.append(Finding(
+            "DRAFT_LIGHT_CI", f"#{pr['number']}",
+            "the pull request is a Draft, so CI ran only the quick checks; mark it Ready for review to run the "
+            "full checks",
+        ))
+    elif pr["draft"] is not False:
+        findings.append(Finding(
+            "DRAFT_LIGHT_CI", f"#{pr['number']}",
+            f"the pull request's draft state is {pr['draft']!r}, not false; a head that may be a Draft is not green",
+        ))
     for other in snapshot["open_pull_requests"]:
         if other["head_sha"] == head and other["number"] != pr["number"]:
             findings.append(Finding(
@@ -407,7 +426,8 @@ def _check_definitions(snapshot: dict) -> list[Finding]:
         if change["kind"] == "behind":
             findings.append(Finding(
                 "CI_DEFINITION_BEHIND", path,
-                "the default branch changed this CI definition after the branch point; merge main",
+                "the default branch changed this CI definition after the branch point; the integrator"
+                " merges main when it lands the pull request, not the author",
             ))
         elif approved:
             findings.append(Finding("CI_CHANGE_APPROVED", path, reason, fatal=False))

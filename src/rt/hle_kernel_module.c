@@ -1077,9 +1077,12 @@ int loadexec_module_file_matches_translation(const char *file) {
  * and its exports take over the host handlers once it has started. The host handlers stay
  * for a title that does not stage the module and for the public synthetic fixtures (#286).
  * scePsmfPlayer is the SDK's libpsmfplayer.prx: user-mode code over sceMpeg, scePsmf and
- * the kernel, all of which stay reachable beneath it. */
+ * the kernel, all of which stay reachable beneath it. sceMpeg is the disc mpeg.prx:
+ * user-mode code over the Media Engine boundary (sceVideocodec, sceMpegbase, sceAudiocodec
+ * in hle_videocodec.c) and the kernel; titles that load the firmware copy keep the host
+ * sceMpeg handlers. */
 static int guest_module_owns_library(const char *lib) {
-    static const char *const owned[] = { "scePsmfPlayer" };
+    static const char *const owned[] = { "scePsmfPlayer", "sceMpeg" };
     for (size_t i = 0; i < sizeof(owned) / sizeof(owned[0]); i++)
         if (strcmp(lib, owned[i]) == 0) return 1;
     return 0;
