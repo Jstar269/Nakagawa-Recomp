@@ -143,6 +143,18 @@ static inline uint32_t sr_fpu_to_word(float x, uint32_t funct, uint32_t fcr31) {
     return sr_fp_to_s32(sr_finite_float_to_double(bits), mode);
 }
 
+/* A PSP-3000 vcmp reads a denormal operand as a zero of its sign, so +-denormal
+ * compares equal to +-0 and EZ/NZ test the flushed value (operand set "signed
+ * zeros and denormals" of the VFPU_CC probe, measured 2026-11-08; a quiet NaN, an
+ * infinity and every normal value pass through unchanged). */
+static inline float sr_vfpu_ftz(float x) {
+    uint32_t bits = sr_float_bits(x);
+    if ((bits & 0x7f800000u) == 0u) bits &= 0x80000000u;
+    float r;
+    memcpy(&r, &bits, sizeof r);
+    return r;
+}
+
 /* VFPU vf2in/vf2iz/vf2iu/vf2id use the same four rounding modes after an
  * exact power-of-two scale. ldexp keeps the operation independent of the host
  * FP rounding mode for every float input and scale 0..31. */

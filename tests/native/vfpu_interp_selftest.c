@@ -2223,6 +2223,41 @@ static int check_vrexp2_measured_words(void) {
     return bad;
 }
 
+/* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
+ * register entry is not in this tree yet): vcmp.q of C000 against C010 on the signed-zero and
+ * denormal operand set a = (+0, -0, +den, -den), b = (-0, +0, +0, +den), preset CC 0, read after
+ * vsync. A denormal operand compares as a zero, so EQ/LE/GE are true on all four lanes and
+ * LT/NE/GT are false; EZ is true and NZ false for all four. Both lanes run the same words. */
+static int check_vcmp_denormal_operands(void) {
+    static const uint32_t cc[16] = {0x00, 0x3f, 0x00, 0x3f, 0x3f, 0x00, 0x3f, 0x00,
+                                    0x3f, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x3f, 0x3f};
+    static const uint32_t a[4] = {0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u};
+    static const uint32_t b[4] = {0x80000000u, 0x00000000u, 0x00000000u, 0x00000001u};
+    int bad = 0;
+    for (int cond = 0; cond < 16; cond++) {
+        char name[32];
+        snprintf(name, sizeof(name), "vcmp-q-c%02d-measured", cond);
+        const int c = find_overlap_diff_case(name);
+        CHECK(c >= 0, "measured vcmp word is in the overlap-diff header");
+        if (c < 0) { bad = 1; continue; }
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        for (int i = 0; i < 4; i++) { aot.vi[i] = a[i]; aot.vi[4 + i] = b[i]; }
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, overlap_diff_cases[c].w);
+        g_checks++;
+        if (kind != SR_VFPU_STATE || aot.vfpuCtrl[3] != cc[cond] ||
+            interp.vfpuCtrl[3] != cc[cond]) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: vcmp.q cond %d psp=0x%02x aot=0x%02x interp=0x%02x kind=%d\n",
+                    cond, cc[cond], aot.vfpuCtrl[3], interp.vfpuCtrl[3], kind);
+        }
+    }
+    return bad;
+}
+
 /* RCX0-7 image of a random-unit state as probe_hle_issues.c writes it: Ck split into
  * the low halves of RCXk and RCX(k+4), carry nibble k in bits 16-19 of RCXk, 0x3f8 above. */
 static void vrndi_probe_image(uint32_t *rcx, const uint32_t c[4], uint32_t carry) {
@@ -2884,6 +2919,7 @@ int main(void) {
     bad |= check_vfpu_forms_measured();
     bad |= check_cop2_control_transfers();
     bad |= check_vfpu_cc_write_mask();
+    bad |= check_vcmp_denormal_operands();
     bad |= check_quad_memops();
     bad |= check_vcrs_widths();
     bad |= check_vasin_measured_domain_words();

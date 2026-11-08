@@ -121,6 +121,12 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     # PSP-3000 returned.
     cases.append((_vv2_word(28, 1, 0x40, 0x00), "vrexp2-s-measured", 1))
 
+    # vcmp.q C000 against C010, all 16 conditions (VFPU_CC probe, PSP-3000, 2026-11-08, issue #326):
+    # check_vcmp_denormal_operands() finds them by name and pins both lanes to the CC the
+    # PSP read back for the signed-zero and denormal operand set.
+    for cond in range(16):
+        cases.append((_bin_word(0x1B, 0, 4, cond, 0x00, 0x01), f"vcmp-q-c{cond:02d}-measured", 4))
+
     # vrndi.s (issue #326): the PSP-HLE-ISSUES-001 probe word vrndi.s S000, and the same draw
     # into S323 (vd=0x6E) so the destination decode is exercised off lane 0.
     # check_vrndi_rule_cells() finds them by name and steps both lanes from the probe's states.
