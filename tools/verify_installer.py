@@ -11,19 +11,27 @@ The check a built installer has to pass before it is a release asset:
 3. the Start-menu shortcut exists and carries the player's taskbar identity (``Nakagawa.Recomp``);
 4. the uninstall entry is under HKCU only, never HKLM;
 5. a silent uninstall removes the shortcut, the entry and the program, keeps a portable ``bin/data``,
-   ``bin/portable.txt``, a file the person added, and the per-user data (a sentinel file this tool
-   plants in ``%LOCALAPPDATA%\\Nakagawa\\logs`` only when that folder already exists, and removes after).
+   ``bin/portable.txt``, a file the person added, and the per-user data: before anything is installed the tool
+   plants marker files in all five data folders under ``%LOCALAPPDATA%\\Nakagawa`` (``config``, ``data``,
+   ``cache``, ``logs`` and ``saves``, plus a nested folder in ``data`` and ``saves``), creating any folder that is
+   missing, checks that every marker is still there, and at the end removes the markers and the folders it made;
+6. an upgrade in place: it builds an older synthetic release with the pinned Inno Setup compiler (the package plus
+   files a newer release dropped), installs it, adds files and changes one installed file, then runs this
+   installer over it. The folder must then equal this package's ``SHA256SUMS.txt`` plus exactly the files the
+   person added or changed: the dropped files and their emptied folder are gone. A silent uninstall then keeps
+   the person's files and the markers again.
 
-WARNING: it plants and removes marker files in the real ``%LOCALAPPDATA%\\Nakagawa`` folders (config, data,
-cache, logs, saves), because the installer reads that folder and not an environment variable. It only adds and
-removes its own marker files, but run it on a PC with no real saves or with them backed up: if an installer
-under test ever deleted that data on a silent uninstall, this check would be the one that lost it.
+WARNING: it plants and removes marker files in the real ``%LOCALAPPDATA%\\Nakagawa`` folders, and writes the real
+per-user uninstall entry and Start-menu shortcut while it runs, because the installer uses those places and not an
+environment variable. It only adds and removes its own files, but never run it where real Nakagawa data lives: use
+a throwaway Windows user account, Windows Sandbox or a virtual machine (the hosted CI job runs it on a fresh
+runner). If an installer under test ever deleted that data on a silent uninstall, this check would be the one that
+lost it.
 
-It refuses to run when a shortcut of the name it tests already exists, so a PC that has the real
-shortcut keeps it: test an installer built with ``/DShortcutName=...`` (``build_installer.build_installer``'s
-``extra_defines``) or on a PC without one. Windows only; nothing here uses the network.
+It refuses to run when a shortcut of the name it tests or the installer's uninstall entry already exists, so a PC
+with an installed copy keeps it. Windows only; nothing here uses the network.
 
-    python tools/verify_installer.py --installer <setup.exe> --package-dir <unpacked ZIP> [--shortcut-name NAME]
+    python tools/verify_installer.py --installer <setup.exe> --package-dir <unpacked ZIP> [--iscc <ISCC.exe>]
 """
 
 from __future__ import annotations
@@ -47,6 +55,8 @@ if str(TOOLS) not in sys.path:
 import build_installer  # noqa: E402
 import stage_install  # noqa: E402
 
+#: The shortcut a release installer writes (nakagawa.iss, ShortcutName).
+DEFAULT_SHORTCUT_NAME = "Nakagawa Recomp"
 APP_ID = "A37F65B8-FB5B-41BB-AC7B-3700FE43CB02"
 UNINSTALL_KEY = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{{{APP_ID}}}_is1"
 SENTINEL_NAME = "installer-verify-sentinel.txt"
@@ -65,6 +75,49 @@ def compare_installed(package_dir: Path, installed_dir: Path) -> list[str]:
         if code == "UNLISTED" and "/" not in name and name.startswith(INNO_OWN_PREFIX):
             continue
         problems.append(problem)
+    return problems
+
+
+#: What the person adds beside the program; every install, upgrade and uninstall keeps it.
+PERSON_FILES = ("bin/data/save.bin", "bin/portable.txt", "notes.txt")
+#: The synthetic older release of the upgrade check: the package plus files a newer release dropped.
+UPGRADE_VERSION = "0.0.0-upgrade-check"
+UPGRADE_EPOCH = 1_700_000_000
+UPGRADE_DROPPED_FOLDER = "installer-verify-dropped"
+UPGRADE_DROPPED = ("bin/installer-verify-dropped.dll", f"{UPGRADE_DROPPED_FOLDER}/nested/old.txt")
+#: Installed by the older release and then changed by the person, so it is no longer what Setup installed.
+UPGRADE_EDITED = "bin/installer-verify-edited.txt"
+
+
+def make_older_package(package_dir: Path, older_dir: Path) -> None:
+    """A copy of the package that also holds ``UPGRADE_DROPPED`` and ``UPGRADE_EDITED``, with its own manifest."""
+    shutil.copytree(package_dir, older_dir)
+    for name in (*UPGRADE_DROPPED, UPGRADE_EDITED):
+        path = older_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"installed by the older release: {name}\n", encoding="utf-8")
+    stage_install.write_sha256sums(older_dir)
+
+
+def add_person_files(dest: Path) -> None:
+    """A portable data folder, the portable switch and a note, as a person would leave them beside the program."""
+    for name in PERSON_FILES:
+        path = dest / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"the person's own file")
+
+
+def upgrade_problems(package_dir: Path, dest: Path) -> list[str]:
+    """What an upgrade over ``make_older_package``'s install got wrong; empty when it is right.
+
+    Right is: the folder equals the new package's ``SHA256SUMS.txt`` (plus Inno's ``unins000.*``) and holds
+    exactly the person's files and the installed file they changed, and the dropped files' folder is gone."""
+    kept = {*PERSON_FILES, UPGRADE_EDITED}
+    problems = [problem for problem in compare_installed(package_dir, dest)
+                if not (problem.startswith("UNLISTED: ") and problem.removeprefix("UNLISTED: ") in kept)]
+    problems += [f"REMOVED_KEPT_FILE: {name}" for name in sorted(kept) if not (dest / name).is_file()]
+    if (dest / UPGRADE_DROPPED_FOLDER).exists():
+        problems.append(f"LEFT_FOLDER: {UPGRADE_DROPPED_FOLDER}")
     return problems
 
 
@@ -188,8 +241,11 @@ def _hold_open(path: Path):
     return lambda: kernel32.CloseHandle(handle)
 
 
-def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str = "Nakagawa Recomp") -> dict:
-    """Run the whole check; raise ``InstallerError`` on the first failure. Windows only."""
+def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str = DEFAULT_SHORTCUT_NAME,
+                     iscc: Path | None = None) -> dict:
+    """Run the whole check; raise ``InstallerError`` on the first failure. Windows only.
+
+    ``iscc`` is the pinned compiler for the upgrade leg's older installer (default: ``build_installer.find_iscc``)."""
     if os.name != "nt":
         raise build_installer.InstallerError("INSTALLER_VERIFY_UNSUPPORTED: the installer runs on Windows only")
     installer = installer.resolve()
@@ -199,24 +255,61 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
     if shortcut.exists() or _hkcu_key_exists():
         raise build_installer.InstallerError(
             f"INSTALLER_VERIFY_REFUSED: {shortcut} or the installer's uninstall entry already exists on this "
-            "PC; the check would replace and then remove it. Use an installer built with a different "
-            "/DShortcutName on a PC with no installer-made install")
+            "PC; the check would replace and then remove it. Run it in a throwaway Windows user account, "
+            "Windows Sandbox or a virtual machine with no installed copy")
     local = os.environ.get("LOCALAPPDATA")
     if not local:
         raise build_installer.InstallerError("INSTALLER_VERIFY_REFUSED: LOCALAPPDATA is not set")
     # Marker files in every per-user data folder (made if missing, removed after): a silent uninstall must keep
     # them all. With none planted the check would prove nothing, so that is a failure of its own.
     sentinels = Sentinels(Path(local) / "Nakagawa")
-    sentinels.plant()
 
     def fail(code: str, why: str):
         raise build_installer.InstallerError(f"{code}: {why}")
+
+    def install(setup: Path, folder: Path, code: str) -> None:
+        done = subprocess.run([str(setup), *silent_install, f"/DIR={folder}"], capture_output=True,
+                              text=True, timeout=600, check=False)
+        if done.returncode != 0:
+            fail(code, f"{setup.name} exited {done.returncode}: {done.stdout}{done.stderr}")
+
+    def check_shortcut_and_entry() -> None:
+        if not shortcut.is_file():
+            fail("INSTALLER_NO_SHORTCUT", f"{shortcut} was not created")
+        app_id = stage_install.read_shortcut_app_id(shortcut)
+        if app_id != stage_install.APP_USER_MODEL_ID:
+            fail("INSTALLER_SHORTCUT_IDENTITY", f"the shortcut carries {app_id!r}, not {stage_install.APP_USER_MODEL_ID!r}")
+        if not _hkcu_key_exists():
+            fail("INSTALLER_NO_UNINSTALL_ENTRY", f"HKCU\\{UNINSTALL_KEY} is missing")
+        if _hklm_key_exists():
+            fail("INSTALLER_WROTE_HKLM", "an uninstall entry exists under HKLM: the install was not per user")
+
+    def uninstall(folder: Path) -> list[str]:
+        """Uninstall silently and return the files left in ``folder``."""
+        subprocess.run([str(folder / "unins000.exe"), *silent_uninstall], capture_output=True, text=True,
+                       timeout=600, check=False)
+        if not _wait_for(lambda: not _hkcu_key_exists() and not shortcut.exists()):
+            fail("INSTALLER_UNINSTALL_INCOMPLETE", "the uninstall entry or the shortcut is still there after 90 s")
+        _wait_for(lambda: not (folder / "unins000.exe").exists(), 30.0)
+        return sorted(str(path.relative_to(folder)).replace("\\", "/") for path in folder.rglob("*") if path.is_file())
 
     silent_install = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/CURRENTUSER", "/NORESTART", "/SP-", "/NOCANCEL"]
     silent_uninstall = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
     result: dict = {"installer": str(installer), "shortcut": str(shortcut)}
     with tempfile.TemporaryDirectory(prefix="nk-installer-verify-") as temp:
         dest = Path(temp) / "Nakagawa Recomp"
+        upgraded = Path(temp) / "Nakagawa Recomp upgraded"
+        # The upgrade leg's older release is built first, so a missing or unpinned compiler stops the check
+        # before anything is planted or installed. It is a synthetic test package: its runtime manifest is the
+        # new package's, so that check is not repeated for it.
+        older_package = Path(temp) / "older-package"
+        make_older_package(package_dir, older_package)
+        older_setup = Path(build_installer.build_installer(
+            older_package, UPGRADE_VERSION, Path(temp) / "older-setup", source_date_epoch=UPGRADE_EPOCH, iscc=iscc,
+            verify_runtime=lambda _bin: None,
+            extra_defines=None if shortcut_name == DEFAULT_SHORTCUT_NAME else {"ShortcutName": shortcut_name},
+        )["installer"])
+        sentinels.plant()
         try:
             # 1. A shortcut that starts another copy (what tools/stage_install.py writes) is never taken over.
             other = Path(temp) / "other-copy"
@@ -234,31 +327,17 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
             shortcut.unlink()
 
             # 2. The install itself.
-            done = subprocess.run([str(installer), *silent_install, f"/DIR={dest}"], capture_output=True,
-                                  text=True, timeout=600, check=False)
-            if done.returncode != 0:
-                fail("INSTALLER_INSTALL_FAILED", f"Setup exited {done.returncode}: {done.stdout}{done.stderr}")
+            install(installer, dest, "INSTALLER_INSTALL_FAILED")
             problems = compare_installed(package_dir, dest)
             if problems:
                 fail("INSTALLER_INSTALL_DIFFERS", "; ".join(problems[:8]))
             if not (dest / "unins000.exe").is_file():
                 fail("INSTALLER_NO_UNINSTALLER", f"{dest} has no unins000.exe")
-            if not shortcut.is_file():
-                fail("INSTALLER_NO_SHORTCUT", f"{shortcut} was not created")
-            app_id = stage_install.read_shortcut_app_id(shortcut)
-            if app_id != stage_install.APP_USER_MODEL_ID:
-                fail("INSTALLER_SHORTCUT_IDENTITY", f"the shortcut carries {app_id!r}, not {stage_install.APP_USER_MODEL_ID!r}")
-            if not _hkcu_key_exists():
-                fail("INSTALLER_NO_UNINSTALL_ENTRY", f"HKCU\\{UNINSTALL_KEY} is missing")
-            if _hklm_key_exists():
-                fail("INSTALLER_WROTE_HKLM", "an uninstall entry exists under HKLM: the install was not per user")
+            check_shortcut_and_entry()
             result["installed_files"] = len(build_installer.files_under(dest))
 
             # What the person owns beside the program survives the uninstall.
-            (dest / "bin" / "data").mkdir()
-            (dest / "bin" / "data" / "save.bin").write_bytes(b"save")
-            (dest / "bin" / "portable.txt").write_text("", encoding="utf-8")
-            (dest / "notes.txt").write_text("mine", encoding="utf-8")
+            add_person_files(dest)
 
             # 3. While the player runs (its program file is open and cannot be written), a silent uninstall stops
             #    and changes nothing: Inno's uninstaller does not close programs the way Setup does.
@@ -275,43 +354,72 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
                      f"the uninstaller exited {blocked.returncode} with the player running and left a partial uninstall")
 
             # 4. The uninstall.
-            subprocess.run([str(dest / "unins000.exe"), *silent_uninstall], capture_output=True, text=True,
-                           timeout=600, check=False)
-            if not _wait_for(lambda: not _hkcu_key_exists() and not shortcut.exists()):
-                fail("INSTALLER_UNINSTALL_INCOMPLETE", "the uninstall entry or the shortcut is still there after 90 s")
-            _wait_for(lambda: not (dest / "unins000.exe").exists(), 30.0)
-            left = sorted(str(path.relative_to(dest)).replace("\\", "/") for path in dest.rglob("*") if path.is_file())
-            expected = ["bin/data/save.bin", "bin/portable.txt", "notes.txt"]
+            left = uninstall(dest)
+            expected = sorted(PERSON_FILES)
             if left != expected:
                 fail("INSTALLER_UNINSTALL_LEFTOVER", f"left {left}, expected {expected}")
             gone = sentinels.missing()
             if gone:
                 fail("INSTALLER_UNINSTALL_TOUCHED_USER_DATA", f"a silent uninstall removed {gone}")
             result["left_after_uninstall"] = left
+
+            # 5. An upgrade in place: the older release, the person's files and one installed file they changed,
+            #    then this installer over it. Setup removes exactly the files the older install's own
+            #    SHA256SUMS.txt lists, the new one does not, and that are unchanged; nothing else.
+            install(older_setup, upgraded, "INSTALLER_UPGRADE_OLDER_FAILED")
+            problems = compare_installed(older_package, upgraded)
+            if problems:
+                fail("INSTALLER_UPGRADE_OLDER_DIFFERS", "; ".join(problems[:8]))
+            add_person_files(upgraded)
+            (upgraded / UPGRADE_EDITED).write_text("changed by the person\n", encoding="utf-8")
+            install(installer, upgraded, "INSTALLER_UPGRADE_FAILED")
+            problems = upgrade_problems(package_dir, upgraded)
+            if problems:
+                fail("INSTALLER_UPGRADE_DIFFERS", "; ".join(problems[:8]))
+            check_shortcut_and_entry()
+            gone = sentinels.missing()
+            if gone:
+                fail("INSTALLER_UPGRADE_TOUCHED_USER_DATA", f"the upgrade removed {gone}")
+            left = uninstall(upgraded)
+            lost = sorted(set(PERSON_FILES) - set(left))
+            if lost:
+                fail("INSTALLER_UNINSTALL_LEFTOVER", f"the uninstall after the upgrade removed {lost}")
+            gone = sentinels.missing()
+            if gone:
+                fail("INSTALLER_UNINSTALL_TOUCHED_USER_DATA", f"a silent uninstall removed {gone}")
+            result["upgrade_removed"] = list(UPGRADE_DROPPED)
+            result["upgrade_kept"] = sorted({*PERSON_FILES, UPGRADE_EDITED})
             result["user_data_sentinels_kept"] = len(sentinels.files)
             result["status"] = "PASS"
         finally:
-            if _hkcu_key_exists() and (dest / "unins000.exe").is_file():
-                subprocess.run([str(dest / "unins000.exe"), *silent_uninstall], capture_output=True, text=True,
-                               timeout=600, check=False)
-                _wait_for(lambda: not _hkcu_key_exists(), 60.0)
+            for folder in (upgraded, dest):
+                if _hkcu_key_exists() and (folder / "unins000.exe").is_file():
+                    subprocess.run([str(folder / "unins000.exe"), *silent_uninstall], capture_output=True,
+                                   text=True, timeout=600, check=False)
+                    _wait_for(lambda: not _hkcu_key_exists(), 60.0)
             if shortcut.is_file() and stage_install.read_shortcut_app_id(shortcut) == stage_install.APP_USER_MODEL_ID:
                 shortcut.unlink()  # the one this check made (the check refused to start with one present)
             sentinels.remove()
             shutil.rmtree(dest, ignore_errors=True)
+            shutil.rmtree(upgraded, ignore_errors=True)
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0],
                                      epilog="WARNING: writes marker files into the real %LOCALAPPDATA%\\Nakagawa "
-                                            "folders; run it on a PC with no real saves, or back them up first.")
+                                            "folders and the real per-user uninstall entry and Start-menu shortcut; "
+                                            "never run it where real Nakagawa data lives. Use a throwaway Windows "
+                                            "user account, Windows Sandbox or a virtual machine.")
     parser.add_argument("--installer", type=Path, required=True)
     parser.add_argument("--package-dir", type=Path, required=True)
-    parser.add_argument("--shortcut-name", default="Nakagawa Recomp")
+    parser.add_argument("--shortcut-name", default=DEFAULT_SHORTCUT_NAME,
+                        help="the shortcut name the installer was built with (tests build others through the API)")
+    parser.add_argument("--iscc", type=Path, default=None,
+                        help="the pinned ISCC.exe, for the upgrade leg's older installer (default: as build_installer)")
     args = parser.parse_args(argv)
     try:
-        result = verify_installer(args.installer, args.package_dir, shortcut_name=args.shortcut_name)
+        result = verify_installer(args.installer, args.package_dir, shortcut_name=args.shortcut_name, iscc=args.iscc)
     except build_installer.InstallerError as exc:
         print(str(exc), file=sys.stderr)
         return 1

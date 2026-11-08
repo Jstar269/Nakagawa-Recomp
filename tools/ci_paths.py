@@ -100,6 +100,10 @@ def _is_installer(path: str) -> bool:
             "tools/stage_install.py",
             "tools/test_installer.py",
             "tools/test_stage_install.py",
+            # The CI package step runs the DLL stager, and LICENSE is the installer's licence page.
+            "tools/stage_runtime_dlls.py",
+            "tools/test_stage_runtime_dlls.py",
+            "LICENSE",
         }
     )
 

@@ -2243,7 +2243,17 @@ jobs:
         run: |
           $lock = Get-Content -LiteralPath 'assets/upstream/innosetup.lock.json' -Raw | ConvertFrom-Json
           $download = Join-Path $env:RUNNER_TEMP $lock.installer.file
-          Invoke-WebRequest -Uri $lock.installer.url -OutFile $download
+          # Up to three attempts against a transient server error; the SHA-256 check below decides what is used.
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $lock.installer.url -OutFile $download
+              break
+            } catch {
+              if ($attempt -eq 3) { throw }
+              Write-Output "Inno Setup download attempt $attempt failed: $($_.Exception.Message)"
+              Start-Sleep -Seconds (15 * $attempt)
+            }
+          }
           $actual = (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $lock.installer.sha256) {
             throw "Inno Setup SHA-256 mismatch: expected $($lock.installer.sha256), got $actual"
@@ -2262,6 +2272,16 @@ jobs:
           if (-not (Test-Path -LiteralPath (Join-Path $innoDir 'ISCC.exe') -PathType Leaf)) {
             throw 'Inno Setup completed without installing ISCC.exe into the temporary directory.'
           }
+
+      - name: Run the installer tests with the pinned compiler
+        shell: pwsh
+        env:
+          NK_INNO_SETUP_DIR: ${{ runner.temp }}\inno-setup
+          # The compiler-backed tests (reproducible builds, the delete routines on temp folders) must run, not skip.
+          NK_INSTALLER_REQUIRE_COMPILER: "1"
+        run: |
+          python -B -m unittest -v tools.test_installer
+          if ($LASTEXITCODE -ne 0) { throw 'The installer tests failed.' }
 
       - name: Build, verify, and compare the installer
         shell: pwsh

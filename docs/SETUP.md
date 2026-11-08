@@ -550,8 +550,13 @@ ZIP. It needs no administrator and installs to `%LOCALAPPDATA%\Programs\Nakagawa
 folder). It adds a Start-menu entry and, if you tick it, a Desktop one, both with the player's taskbar identity, and
 an entry under Apps & features. It makes no network call.
 
-- **Update:** run the next release's Setup. It updates the copy in place and keeps your games, saves and settings;
-  the player's Settings page offers the release page for a copy Setup installed, not a ZIP download.
+- **Update:** run the next release's Setup; it uses the same folder. It replaces the program files with the new
+  release's, then deletes each file the previous release installed there (as listed in that install's own
+  `SHA256SUMS.txt`) that the new release no longer carries, but only if the file is unchanged since Setup installed
+  it, and removes the folders that leaves empty. Files you added or changed in the install folder, a portable
+  `bin\data` and `bin\portable.txt` are kept, nothing is deleted through a junction or symbolic link, and
+  `%LOCALAPPDATA%\Nakagawa` (your games, saves and settings) is not touched. The player's Settings page offers the
+  release page for a copy Setup installed, not a ZIP download.
 - **Uninstall:** Apps & features, or `unins000.exe` in the install folder. It removes the program and keeps
   `%LOCALAPPDATA%\Nakagawa` (the `config`, `data`, `cache`, `logs` and `saves` folders) unless you tick "Also delete my
   games, saves and settings" on the uninstall page and confirm a second time; a silent uninstall never deletes them. A

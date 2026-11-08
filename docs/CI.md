@@ -25,7 +25,7 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 | Ready pull request, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
 | Ready pull request, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over three shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
 | Ready pull request, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
-| Ready pull request, installer inputs (`assets/installer/**`, the Inno lock, installer/stager tools and tests) | classification, hygiene/security, Windows (all three groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
+| Ready pull request, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all three groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
 | Ready pull request, only `tools/test_*.py` modules that no native or Windows gate runs | classification, hygiene/security, Python tooling, CI required | native/translation, Windows (see [Tests-only changes](#tests-only-changes)) |
 | Marked Ready (`ready_for_review`) | the path-applicable jobs of a ready pull request, on the head the Draft run left light | only jobs irrelevant to the changed paths |
 | Workflow/CI configuration | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
@@ -115,9 +115,14 @@ The jobs:
   player and its runtime closure into a package artifact; an installer-only change therefore
   runs all three Windows groups, and a failed staging or upload step fails `windows_runtime`.
   The separate `windows_installer`
-  job downloads that artifact, checks the locked Inno Setup SHA-256 before a silent
-  `/CURRENTUSER` install under the runner temp folder, builds and verifies `Setup.exe`, then
-  repeats the build and compares both SHA-256 values. The job requires
+  job downloads that artifact, downloads the locked Inno Setup (up to three attempts) and checks its
+  SHA-256 before a silent `/CURRENTUSER` install under the runner temp folder, and runs
+  `tools/test_installer.py` with `NK_INSTALLER_REQUIRE_COMPILER=1`, so the compiler-backed tests
+  (reproducible builds, and `RealProbeTests`, which run the script's uninstall-data and upgrade
+  delete routines on temp folders with junctions, symbolic links and a read-only file) fail instead
+  of skipping. It then builds `Setup.exe` and runs `tools/verify_installer.py`, which installs,
+  uninstalls and checks an upgrade in place over an older synthetic release, then repeats the build
+  and compares both SHA-256 values. The job requires
   `allow_substantive == true`, so Draft-light runs skip this heavy gate.
 
 `CI required` needs `classify`, `hygiene`, `public_export`, `python_tools`, `native_tools`,
@@ -274,7 +279,7 @@ event whose payload says `draft: true`, `tools/ci_paths.py` exports `allow_subst
 and `draft=true`. Every substantive job gates on `allow_substantive`, so Python tooling,
 native/translation, the GCC 16 canary, the Android launcher build, the Windows runtime gate, the Windows installer job and
 the profile-zero fixture build are skipped, whatever the changed paths. The path flags (`run_python`, `run_native`,
-`run_windows`, `run_markdown`) are unchanged, so the Ready run routes exactly the gates a
+`run_windows`, `run_installer`, `run_markdown`) are unchanged, so the Ready run routes exactly the gates a
 ready pull request gets. OSV-Scanner, Dependency Review and the provenance attestation run on
 a Draft as before. This keeps the hosted runners free for landing runs, which otherwise queue
 behind every Draft's full matrix.

@@ -123,6 +123,9 @@ class CiPathClassificationTests(unittest.TestCase):
             "tools/stage_install.py",
             "tools/test_installer.py",
             "tools/test_stage_install.py",
+            "tools/stage_runtime_dlls.py",
+            "tools/test_stage_runtime_dlls.py",
+            "LICENSE",
         ):
             with self.subTest(path=path):
                 result = classify([path])

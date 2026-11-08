@@ -43,6 +43,14 @@ def _code(text: str) -> str:
     return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(";"))
 
 
+_PROBE_BLOCK = re.compile(r"^#ifdef TestProbe\n.*?^#endif\n?", re.MULTILINE | re.DOTALL)
+
+
+def _release(text: str) -> str:
+    """The script as a release build compiles it: without the test-only ``#ifdef TestProbe`` block."""
+    return _PROBE_BLOCK.sub("", text)
+
+
 def _section(text: str, name: str) -> str:
     match = re.search(rf"^\[{name}\]\n(.*?)(?=^\[|\Z)", text, re.MULTILINE | re.DOTALL)
     return match.group(1) if match else ""
@@ -166,10 +174,11 @@ class UninstallRuleTests(unittest.TestCase):
             self.assertEqual(sorted(names.values()), sorted(rows))
 
     def test_the_delete_is_reached_only_from_the_unchecked_box_and_never_when_silent(self):
-        self.assertEqual(len(re.findall(r"\bRemoveUserData\b", self.text)), 2)  # the procedure and its one call
-        self.assertEqual(len(re.findall(r"\bRemoveUserDataIn\b", self.text)), 2)  # its body and the one caller
+        release = _release(self.text)
+        self.assertEqual(len(re.findall(r"\bRemoveUserData\b", release)), 2)  # the procedure and its one call
+        self.assertEqual(len(re.findall(r"\bRemoveUserDataIn\b", release)), 2)  # its body and the one caller
         self.assertIn("Box.Checked := False;", self.text)
-        call = re.search(r"CurUninstallStepChanged.*?end;\s*\Z", self.text, re.DOTALL)
+        call = re.search(r"CurUninstallStepChanged.*?end;\s*\Z", release, re.DOTALL)
         self.assertIsNotNone(call)
         self.assertIn("DeleteUserData and (not UninstallSilent)", call.group(0))
         init = self.text[self.text.index("function InitializeUninstall"):]
@@ -209,6 +218,160 @@ class UninstallRuleTests(unittest.TestCase):
         self.assertIn("MB_RETRYCANCEL", loop)
         probe = self.text[self.text.index("function PlayerIsRunning"):self.text.index("{ The uninstall page")]
         self.assertIn("not SaveStringToFile(Exe, '', True)", probe)  # open for write, nothing written
+
+
+class TestProbeHookTests(unittest.TestCase):
+    """The compile-time hook RealProbeTests uses is test-only: a release build never has it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = SCRIPT.read_text(encoding="utf-8")
+
+    def test_the_probe_is_one_ifdef_block_at_the_end_and_the_only_initialize_setup(self):
+        blocks = _PROBE_BLOCK.findall(self.text)
+        self.assertEqual(len(blocks), 1)
+        self.assertTrue(self.text.rstrip().endswith(blocks[0].rstrip()))
+        self.assertIn("function InitializeSetup", blocks[0])
+        self.assertNotIn("InitializeSetup", _release(self.text))
+        # Unknown or missing /PROBE= does nothing and Setup still exits before its wizard.
+        self.assertLess(blocks[0].index("Result := False;"), blocks[0].index("Probe := "))
+
+    def test_a_release_build_never_defines_it(self):
+        command = build_installer.compiler_command(Path("ISCC.exe"), Path("p"), "0.0.2", Path("o"), 1793900000)
+        self.assertFalse(any("TestProbe" in part for part in command))
+        self.assertNotIn("TestProbe", (TOOLS / "build_installer.py").read_text(encoding="utf-8"))
+        self.assertNotIn("TestProbe", (TOOLS / "verify_installer.py").read_text(encoding="utf-8"))
+
+
+class UpgradeRuleTests(unittest.TestCase):
+    """An upgrade in place deletes only files the previous install's own manifest lists and the new one drops."""
+
+    text: str
+    release: str
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = SCRIPT.read_text(encoding="utf-8")
+        cls.release = _release(cls.text)
+
+    def _body(self, start: str, end: str) -> str:
+        return self.release[self.release.index(start):self.release.index(end)]
+
+    def test_there_is_no_blanket_delete_section(self):
+        lowered = _code(self.text).lower()
+        self.assertNotIn("[installdelete]", lowered)
+        self.assertNotIn("[uninstalldelete]", lowered)
+
+    def test_the_previous_manifest_is_read_before_the_copy_only_for_setups_own_install_here(self):
+        step = self._body("procedure CurStepChanged", "{ Deletes Dir")
+        self.assertLess(step.index("if CurStep = ssInstall then"), step.index("(CurStep = ssPostInstall)"))
+        self.assertLess(step.index("HavePreviousManifest := False;"), step.index("IsSetupInstallIn("))
+        self.assertLess(step.index("IsSetupInstallIn("), step.index("ReadManifest("))
+        self.assertIn("(CurStep = ssPostInstall) and HavePreviousManifest", step)
+        owner = self._body("function IsSetupInstallIn", "procedure CurStepChanged")
+        self.assertIn("unins000.dat", owner)
+        self.assertIn("RegQueryStringValue(HKCU, UNINSTALL_KEY, 'InstallLocation', Location)", owner)
+        self.assertIn(f"UNINSTALL_KEY = '{verify_installer.UNINSTALL_KEY}';", self.release)
+        self.assertIn(f"MANIFEST_NAME = '{build_installer.SUMS_NAME}';", self.release)
+
+    def test_a_file_is_deleted_only_when_dropped_unchanged_and_not_behind_a_link(self):
+        remove = self._body("procedure RemoveDroppedFiles", "{ True only when the uninstall entry")
+        self.assertIn("if not ReadManifest(Dir + '\\' + MANIFEST_NAME, NewPaths, NewDigests) then\n    Exit;", remove)
+        self.assertIn("if not Carried.Find(Lowercase(OldPaths[Index]), Found) then", remove)
+        delete = remove.index("DeleteFile(Path)")
+        for guard in ("FileExists(Path)", "(not LinkOnPath(Dir, Relative))", "FileHasDigest(Path, OldDigests[Index])"):
+            with self.subTest(guard):
+                self.assertLess(remove.index(guard), delete)
+        self.assertEqual(remove.count("DeleteFile("), 1)
+        # Only emptied folders go, never the install folder itself.
+        self.assertIn("while (Length(Folder) > Length(Dir)) and RemoveDir(Folder) do", remove)
+
+    def test_a_manifest_that_is_not_a_plain_relative_list_is_not_used(self):
+        names = self._body("function IsSafeManifestName", "{ The paths and SHA-256 values")
+        for refused in ("Pos('\\', Name) = 0", "Pos(':', Name) = 0", "Pos('//', Wrapped) = 0", "Pos('/./', Wrapped) = 0",
+                        "Pos('/../', Wrapped) = 0", "Wrapped <> '/bin/portable.txt/'", "Pos('/bin/data/', Wrapped) <> 1"):
+            with self.subTest(refused):
+                self.assertIn(refused, names)
+        read = self._body("function ReadManifest", "{ True when Dir, or any folder")
+        self.assertIn("if IsReparsePoint(FileName) then\n    Exit;", read)
+        # One bad line empties both lists and returns False.
+        bad = read[read.index("if (Copy(Line, 65, 2) <> '  ')"):]
+        self.assertLess(bad.index("SetArrayLength(Paths, 0);"), bad.index("Exit;"))
+
+    def test_every_folder_on_the_path_is_checked_for_a_link(self):
+        body = self._body("function LinkOnPath", "function FileHasDigest")
+        self.assertIn("Result := IsReparsePoint(Dir);", body)
+        self.assertIn("Result := IsReparsePoint(Current);", body)
+
+
+class VerifierUpgradeTests(unittest.TestCase):
+    """The upgrade leg's older package and its expectation, without Inno Setup."""
+
+    root: Path
+    package: Path
+    older: Path
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.package = self.root / "package"
+        (self.package / "bin").mkdir(parents=True)
+        (self.package / "bin" / "nakagawa_player.exe").write_bytes(b"player")
+        (self.package / "LICENSE").write_bytes(b"l")
+        stage_install.write_sha256sums(self.package)
+        self.older = self.root / "older"
+        verify_installer.make_older_package(self.package, self.older)
+
+    def _upgraded(self) -> Path:
+        """A folder as a correct upgrade leaves it: the new package, the person's files and their changed file."""
+        dest = self.root / "upgraded"
+        shutil.copytree(self.package, dest)
+        (dest / "unins000.exe").write_bytes(b"u")
+        verify_installer.add_person_files(dest)
+        (dest / verify_installer.UPGRADE_EDITED).write_text("changed by the person\n", encoding="utf-8")
+        return dest
+
+    def test_the_older_package_is_the_new_one_plus_the_dropped_files_under_its_own_manifest(self):
+        sums = build_installer.read_sums(self.older)
+        self.assertEqual(build_installer.compare_with_sums(self.older, sums), [])
+        new = build_installer.read_sums(self.package)
+        self.assertEqual(sorted(set(sums) - set(new)),
+                         sorted({*verify_installer.UPGRADE_DROPPED, verify_installer.UPGRADE_EDITED}))
+        self.assertEqual({name: sums[name] for name in new}, new)
+        self.assertEqual(build_installer.read_sums(self.package), new)  # the package itself is untouched
+
+    def test_a_correct_upgrade_has_no_problem(self):
+        self.assertEqual(verify_installer.upgrade_problems(self.package, self._upgraded()), [])
+
+    def test_a_dropped_file_left_behind_is_a_problem(self):
+        dest = self._upgraded()
+        for name in verify_installer.UPGRADE_DROPPED:
+            (dest / name).parent.mkdir(parents=True, exist_ok=True)
+            (dest / name).write_text("stale", encoding="utf-8")
+        self.assertEqual(verify_installer.upgrade_problems(self.package, dest),
+                         [f"UNLISTED: {name}" for name in sorted(verify_installer.UPGRADE_DROPPED)]
+                         + [f"LEFT_FOLDER: {verify_installer.UPGRADE_DROPPED_FOLDER}"])
+
+    def test_an_emptied_folder_left_behind_is_a_problem(self):
+        dest = self._upgraded()
+        (dest / verify_installer.UPGRADE_DROPPED_FOLDER / "nested").mkdir(parents=True)
+        self.assertEqual(verify_installer.upgrade_problems(self.package, dest),
+                         [f"LEFT_FOLDER: {verify_installer.UPGRADE_DROPPED_FOLDER}"])
+
+    def test_a_removed_person_file_or_changed_file_is_a_problem(self):
+        dest = self._upgraded()
+        (dest / "notes.txt").unlink()
+        (dest / verify_installer.UPGRADE_EDITED).unlink()
+        self.assertEqual(verify_installer.upgrade_problems(self.package, dest),
+                         ["REMOVED_KEPT_FILE: bin/installer-verify-edited.txt", "REMOVED_KEPT_FILE: notes.txt"])
+
+    def test_a_missing_or_stale_new_file_is_a_problem(self):
+        dest = self._upgraded()
+        (dest / "LICENSE").unlink()
+        (dest / "bin" / "nakagawa_player.exe").write_bytes(b"older player")
+        self.assertEqual(verify_installer.upgrade_problems(self.package, dest),
+                         ["MISSING: LICENSE", "CHANGED: bin/nakagawa_player.exe"])
 
 
 def _lock() -> dict[str, Any]:
@@ -466,7 +629,25 @@ def _pinned_compiler() -> Path | None:
     return iscc
 
 
-@unittest.skipUnless(os.name == "nt" and _pinned_compiler() is not None, "the pinned Inno Setup is not installed (SKIP, not a pass)")
+#: Set to 1 where the pinned compiler must be present (the hosted installer job): then a missing compiler fails
+#: these tests instead of skipping them.
+REQUIRE_COMPILER_ENV = "NK_INSTALLER_REQUIRE_COMPILER"
+_RUN_COMPILER_TESTS = os.name == "nt" and (os.environ.get(REQUIRE_COMPILER_ENV) == "1" or _pinned_compiler() is not None)
+_NO_COMPILER = "the pinned Inno Setup is not installed (SKIP, not a pass)"
+
+
+def _player_package(package: Path) -> None:
+    """A minimal package whose player is a real Windows program, so the script compiles."""
+    for name, data in (("bin/runtime-manifest.json", b"{}"), ("LICENSE", b"licence"), ("docs/README.md", b"readme")):
+        path = package / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    shutil.copy(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "notepad.exe",
+                package / "bin" / "nakagawa_player.exe")
+    stage_install.write_sha256sums(package)
+
+
+@unittest.skipUnless(_RUN_COMPILER_TESTS, _NO_COMPILER)
 class RealCompilerTests(unittest.TestCase):
     """Compile the real script with the pinned compiler: two builds are byte-identical, and the file times follow the epoch."""
 
@@ -474,13 +655,7 @@ class RealCompilerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             package = root / "package"
-            for name, data in (("bin/runtime-manifest.json", b"{}"), ("LICENSE", b"licence"), ("docs/README.md", b"readme")):
-                path = package / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
-            shutil.copy(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "notepad.exe",
-                        package / "bin" / "nakagawa_player.exe")
-            stage_install.write_sha256sums(package)
+            _player_package(package)
             moved = root / "elsewhere" / "copy"
             shutil.copytree(package, moved)
             for path in moved.rglob("*"):
@@ -494,6 +669,192 @@ class RealCompilerTests(unittest.TestCase):
             later = build_installer.build_installer(package, "0.0.2", root / "out-later", source_date_epoch=1793900000 + 86400,
                                                     verify_runtime=lambda _bin: None)
             self.assertNotEqual(later["sha256"], digests[0])
+
+
+def _junction(target: Path, link: Path) -> None:
+    import _winapi  # Windows only; a junction needs no privilege, unlike a symbolic link
+    # The repository's mypy run checks with Linux's stubs, which lack this Windows-only function.
+    _winapi.CreateJunction(str(target), str(link))  # type: ignore[attr-defined,unused-ignore]
+
+
+def _is_link(path: Path) -> bool:
+    return path.is_symlink() or path.is_junction()
+
+
+def _sums_line(path: Path, name: str) -> str:
+    return f"{build_installer.sha256_file(path)}  {name}\n"
+
+
+@unittest.skipUnless(_RUN_COMPILER_TESTS, _NO_COMPILER)
+class RealProbeTests(unittest.TestCase):
+    """The script's own delete routines, compiled with the test-only ``TestProbe`` hook and run on temp folders.
+
+    The probe Setup runs one routine on the folder it is given and exits before its wizard, so nothing is installed:
+    no program folder, shortcut or uninstall entry, and nothing under the real ``%LOCALAPPDATA%\\Nakagawa``. It is
+    started without ``/SILENT``: if the hook were ever missing, Setup would only show its wizard (the timeout ends
+    it), never install."""
+
+    probe: Path
+    root: Path
+    outside: Path
+
+    @classmethod
+    def setUpClass(cls):
+        cls._temp = tempfile.TemporaryDirectory(prefix="nk-installer-probe-")
+        root = Path(cls._temp.name)
+        _player_package(root / "package")
+        summary = build_installer.build_installer(
+            root / "package", "0.0.2", root / "out", source_date_epoch=1793900000, verify_runtime=lambda _bin: None,
+            extra_defines={"TestProbe": "1", "ShortcutName": "Nakagawa Recomp installer probe"})
+        cls.probe = Path(summary["installer"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._temp.cleanup()
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="nk-installer-probe-case-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.outside = self.root / "outside"
+        self.outside.mkdir()
+
+    def run_probe(self, probe: str, **params: Path) -> None:
+        done = self.root / f"done-{probe}.txt"
+        done.unlink(missing_ok=True)
+        command = [str(self.probe), f"/PROBE={probe}", *(f"/{name}={value}" for name, value in params.items()),
+                   f"/DONE={done}"]
+        process = subprocess.Popen(command)
+        try:
+            process.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False)
+            self.fail("the probe did not exit: Setup was built without its TestProbe hook (nothing was installed)")
+        self.assertEqual(done.read_text(encoding="utf-8"), probe)  # the routine ran; not a vacuous pass
+
+    def _outside(self, name: str, text: str = "keep me") -> Path:
+        path = self.outside / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def _data_root(self) -> Path:
+        base = self.root / "local" / "Nakagawa"
+        for name in verify_installer.USER_DATA_FOLDERS:
+            (base / name).mkdir(parents=True)
+            (base / name / "file.txt").write_text(name, encoding="utf-8")
+        (base / "data" / "library" / "deep").mkdir(parents=True)
+        (base / "data" / "library" / "deep" / "save.bin").write_bytes(b"save")
+        (base / "other").mkdir()
+        (base / "other" / "untouched.txt").write_text("not a data folder", encoding="utf-8")
+        return base
+
+    def test_the_data_delete_removes_junctions_as_links_and_read_only_files(self):
+        base = self._data_root()
+        kept = self._outside("keep/target.txt")
+        _junction(kept.parent, base / "saves" / "linked")
+        cache_kept = self._outside("cache-target/cache.bin")
+        (base / "cache" / "file.txt").unlink()
+        (base / "cache").rmdir()
+        _junction(cache_kept.parent, base / "cache")  # a data folder that is itself a junction
+        read_only = base / "saves" / "slot.bin"
+        read_only.write_bytes(b"slot")
+        os.chmod(read_only, 0o444)
+        self.run_probe("userdata", ROOT=base)
+        for name in ("config", "data", "logs", "saves"):
+            with self.subTest(name):
+                self.assertFalse(os.path.lexists(base / name))
+        self.assertTrue(_is_link(base / "cache"))  # neither followed nor deleted
+        self.assertEqual(cache_kept.read_text(encoding="utf-8"), "keep me")
+        self.assertEqual(kept.read_text(encoding="utf-8"), "keep me")
+        self.assertEqual((base / "other" / "untouched.txt").read_text(encoding="utf-8"), "not a data folder")
+
+    def test_the_data_delete_removes_symbolic_links_as_links(self):
+        base = self._data_root()
+        file_target = self._outside("file.txt")
+        folder_target = self._outside("folder/inside.txt").parent
+        try:
+            os.symlink(file_target, base / "logs" / "file-link.txt")
+            os.symlink(folder_target, base / "config" / "folder-link", target_is_directory=True)
+        except OSError:
+            self.skipTest("this account cannot make a symbolic link (SKIP, not a pass)")
+        self.run_probe("userdata", ROOT=base)
+        self.assertFalse(os.path.lexists(base / "logs"))
+        self.assertFalse(os.path.lexists(base / "config"))
+        self.assertEqual(file_target.read_text(encoding="utf-8"), "keep me")
+        self.assertEqual((folder_target / "inside.txt").read_text(encoding="utf-8"), "keep me")
+
+    def test_the_data_delete_does_nothing_through_a_linked_root(self):
+        real = self.outside / "real-root"
+        (real / "config").mkdir(parents=True)
+        (real / "config" / "settings.json").write_text("{}", encoding="utf-8")
+        (self.root / "local").mkdir()
+        _junction(real, self.root / "local" / "Nakagawa")
+        self.run_probe("userdata", ROOT=self.root / "local" / "Nakagawa")
+        self.assertEqual((real / "config" / "settings.json").read_text(encoding="utf-8"), "{}")
+
+    def _upgrade_tree(self) -> tuple[Path, Path]:
+        """An install folder after the new files were copied, and the previous install's manifest."""
+        app = self.root / "app"
+        files = {"bin/nakagawa_player.exe": b"new player", "bin/kept.dll": b"kept", "LICENSE": b"licence"}
+        for name, data in files.items():
+            (app / name).parent.mkdir(parents=True, exist_ok=True)
+            (app / name).write_bytes(data)
+        (app / "SHA256SUMS.txt").write_text("".join(_sums_line(app / name, name) for name in sorted(files)),
+                                            encoding="utf-8", newline="\n")
+        old = {"bin/dropped.dll": b"dropped", "bin/edited.txt": b"as installed",
+               "dropped-folder/nested/old.txt": b"old"}
+        for name, data in old.items():
+            (app / name).parent.mkdir(parents=True, exist_ok=True)
+            (app / name).write_bytes(data)
+        lines = [_sums_line(app / name, name) for name in sorted(old)]
+        lines.append(f"{'0' * 64}  bin/nakagawa_player.exe\n")  # the older player: overwritten, never deleted
+        lines.append(_sums_line(app / "bin" / "kept.dll", "BIN/Kept.DLL"))  # names compare without case
+        (app / "bin" / "edited.txt").write_bytes(b"changed by the person")
+        linked = self._outside("linked-target/old.txt", "behind a link")
+        _junction(linked.parent, app / "linked")
+        lines.append(_sums_line(linked, "linked/old.txt"))
+        for name in verify_installer.PERSON_FILES:
+            (app / name).parent.mkdir(parents=True, exist_ok=True)
+            (app / name).write_bytes(b"mine")
+        old_sums = self.root / "previous-SHA256SUMS.txt"
+        old_sums.write_text("".join(lines), encoding="utf-8", newline="\n")
+        return app, old_sums
+
+    def test_an_upgrade_removes_only_dropped_unchanged_files_and_their_emptied_folders(self):
+        app, old_sums = self._upgrade_tree()
+        self.run_probe("upgrade", ROOT=app, OLDSUMS=old_sums)
+        self.assertFalse((app / "bin" / "dropped.dll").exists())
+        self.assertFalse((app / "dropped-folder").exists())
+        self.assertEqual((app / "bin" / "edited.txt").read_bytes(), b"changed by the person")
+        self.assertEqual((app / "bin" / "kept.dll").read_bytes(), b"kept")
+        self.assertEqual((app / "bin" / "nakagawa_player.exe").read_bytes(), b"new player")
+        self.assertTrue((app / "SHA256SUMS.txt").is_file())
+        self.assertTrue(_is_link(app / "linked"))
+        self.assertEqual((self.outside / "linked-target" / "old.txt").read_text(encoding="utf-8"), "behind a link")
+        for name in verify_installer.PERSON_FILES:
+            with self.subTest(name):
+                self.assertEqual((app / name).read_bytes(), b"mine")
+
+    def test_an_upgrade_uses_no_manifest_with_a_bad_line(self):
+        for bad in ("../outside.txt", "bin/data/save.bin", "C:/Windows/notepad.exe", "bin//x", "bin\\\\x"):
+            with self.subTest(bad):
+                app, old_sums = self._upgrade_tree()
+                target = app / "bin" / "data" / "save.bin" if bad == "bin/data/save.bin" else app / "notes.txt"
+                with old_sums.open("a", encoding="utf-8", newline="\n") as stream:
+                    stream.write(_sums_line(target, bad))
+                self.run_probe("upgrade", ROOT=app, OLDSUMS=old_sums)
+                self.assertEqual((app / "bin" / "dropped.dll").read_bytes(), b"dropped")
+                self.assertEqual((app / "bin" / "data" / "save.bin").read_bytes(), b"mine")
+                shutil.rmtree(app)
+                (self.outside / "linked-target" / "old.txt").unlink()
+                (self.outside / "linked-target").rmdir()
+
+    def test_an_upgrade_without_a_new_manifest_deletes_nothing(self):
+        app, old_sums = self._upgrade_tree()
+        (app / "SHA256SUMS.txt").unlink()
+        self.run_probe("upgrade", ROOT=app, OLDSUMS=old_sums)
+        self.assertEqual((app / "bin" / "dropped.dll").read_bytes(), b"dropped")
 
 
 if __name__ == "__main__":

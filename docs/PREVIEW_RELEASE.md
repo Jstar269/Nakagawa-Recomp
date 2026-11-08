@@ -304,34 +304,57 @@ $SetupExe = Join-Path $ArtifactRoot "nakagawa-recomp-$Version-windows-x64-setup.
 $Epoch = git show -s --format=%ct $CandidateSha
 python tools/build_installer.py --package-dir $Stage --version $Version --out-dir $ArtifactRoot --source-date-epoch $Epoch
 if ($LASTEXITCODE -ne 0) { throw 'Building the installer failed.' }
+```
+
+The build writes `nakagawa-recomp-<version>-windows-x64-setup.exe.sha256` beside the installer. Two builds of the
+same package with the same `SOURCE_DATE_EPOCH` give the same bytes, from any folder.
+
+#### Check the installer where no real data lives
+
+**Never run the installer check, or the owner checks below, on a PC or Windows account that holds real Nakagawa
+data.** `tools/verify_installer.py` says why in its own warning: it plants and removes marker files in the real
+`%LOCALAPPDATA%\Nakagawa` folders, and it writes the real per-user uninstall entry and Start-menu shortcut while it
+runs. Owner check 4 below deletes those folders outright. Use a throwaway Windows user account, Windows Sandbox or
+a virtual machine that has never held a Nakagawa install or data. Copy `$SetupExe`, the unpacked package `$Stage`
+and a checkout of `$CandidateSha` there, and install Python and the pinned Inno Setup for that user only. Then run
+the check from the checkout:
+
+```powershell
+# In the throwaway account, Windows Sandbox or virtual machine only: never where real Nakagawa data lives.
 python tools/verify_installer.py --installer $SetupExe --package-dir $Stage
 if ($LASTEXITCODE -ne 0) { throw 'The installer check failed.' }
 ```
 
-The build writes `nakagawa-recomp-<version>-windows-x64-setup.exe.sha256` beside the installer. Two builds of the
-same package with the same `SOURCE_DATE_EPOCH` give the same bytes, from any folder. The check installs into a
-temporary folder, compares every file with `SHA256SUMS.txt`, reads the shortcut's taskbar identity and the
-HKCU-only uninstall entry back, then uninstalls and checks that your data was not touched. It refuses to run on a PC
-that already has the shortcut it tests, so run it on one without, or build a test copy with `/DShortcutName` (see
-`tools/verify_installer.py`).
+The check installs into a temporary folder, compares every file with `SHA256SUMS.txt`, reads the shortcut's
+taskbar identity and the HKCU-only uninstall entry back, then uninstalls and checks that the person's files and
+the marker files were not touched. It then checks an upgrade in place: it builds an older synthetic release (this
+package plus files a newer release dropped) with the pinned compiler, installs it, adds files and changes one
+installed file, runs `$SetupExe` over it, and requires the folder to equal this package's `SHA256SUMS.txt` plus
+exactly the added and changed files. It refuses to run where a `Nakagawa Recomp` Start-menu shortcut or the
+installer's uninstall entry already exists. The delete routines themselves (the uninstall box's and the
+upgrade's) are checked on temporary folders with junctions, symbolic links and a read-only file by
+`RealProbeTests` in `tools/test_installer.py`, which the hosted `windows_installer` job runs.
 
-Before publishing a release that carries the installer, the owner does these checks on a Windows PC with the
-release candidate's `Setup.exe` (they need the uninstall page, which a silent run never shows):
+Before publishing a release that carries the installer, the owner does these checks with the release candidate's
+`Setup.exe`, in the same throwaway account, Windows Sandbox or virtual machine (they need the uninstall page, which a
+silent run never shows):
 
 1. Start-menu shortcut: the icon shows, and the running player groups with it on the taskbar.
 2. Apps & features lists Nakagawa Recomp at the release version.
 3. Uninstall page: the box is unchecked by default, Cancel changes nothing, and OK without the box keeps
    `%LOCALAPPDATA%\Nakagawa`.
-4. Link safety: make a junction inside `%LOCALAPPDATA%\Nakagawa\saves` to a throwaway folder that holds a file
-   (`mklink /J`), run the uninstall with the box ticked and the second prompt answered Yes, and confirm the five data
-   folders are gone and the throwaway folder and its file are still there.
+4. Delete prompts (throwaway account, Windows Sandbox or virtual machine only: this deletes `%LOCALAPPDATA%\Nakagawa`):
+   tick the box and choose Uninstall; a second prompt asks again with No as the default. Answer Yes and confirm the
+   five data folders are gone.
 5. Uninstall while the player runs: Retry/Cancel appears and nothing is removed until the player is closed.
 6. The SmartScreen text on first run matches the release notes.
 
 The installer is not Authenticode-signed, so Windows SmartScreen may warn on first run; say so in the release
 notes. Attach the installer and its `.sha256`; signing the `.sha256` is optional, because the player never
 downloads the installer. A copy that Setup installed updates by running the next release's Setup (the player's
-Settings shows the release page for it). Uninstalling removes the program and keeps your data unless you tick the
+Settings shows the release page for it). That Setup replaces the program files in place and deletes the files the
+previous version installed and the new one no longer carries, each only if it is unchanged since it was installed;
+files the person added or changed, and `%LOCALAPPDATA%\Nakagawa`, are left alone. Uninstalling removes the program and keeps your data unless you tick the
 box on the uninstall page.
 
 ### Check that the package is reproducible

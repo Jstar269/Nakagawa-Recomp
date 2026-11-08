@@ -247,6 +247,7 @@ class PublicCiWiringTests(unittest.TestCase):
     def test_windows_installer_steps_name_their_own_inno_folder(self) -> None:
         job = _ci_job_blocks()["windows_installer"]
         for step_name in ("Download and install hash-pinned Inno Setup",
+                          "Run the installer tests with the pinned compiler",
                           "Build, verify, and compare the installer"):
             step = _ci_step(job, step_name)
             assert step is not None
@@ -268,6 +269,23 @@ class PublicCiWiringTests(unittest.TestCase):
             with self.subTest(option=option):
                 self.assertIn(option, install_text)
         self.assertNotIn("GITHUB_PATH", install_text)
+        # A bounded retry of the download only; the hash check after it decides what runs.
+        self.assertIn("for ($attempt = 1; $attempt -le 3; $attempt++)", install_text)
+        self.assertLess(install_text.index("Invoke-WebRequest"), install_text.index("Get-FileHash"))
+        self.assertLess(install_text.index("if ($attempt -eq 3) { throw }"), install_text.index("Get-FileHash"))
+
+        tests_step = _ci_step(job, "Run the installer tests with the pinned compiler")
+        self.assertIsNotNone(tests_step)
+        assert tests_step is not None
+        tests_text = "\n".join(tests_step)
+        self.assertIn('NK_INSTALLER_REQUIRE_COMPILER: "1"', tests_text)
+        self.assertIn("python -B -m unittest -v tools.test_installer", tests_text)
+        self.assertIn("if ($LASTEXITCODE -ne 0)", tests_text)
+        job_text = "\n".join(job)
+        self.assertLess(job_text.index("Download and install hash-pinned Inno Setup"),
+                        job_text.index("Run the installer tests with the pinned compiler"))
+        self.assertLess(job_text.index("Run the installer tests with the pinned compiler"),
+                        job_text.index("Build, verify, and compare the installer"))
 
         verify_step = _ci_step(job, "Build, verify, and compare the installer")
         self.assertIsNotNone(verify_step)

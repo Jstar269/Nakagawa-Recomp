@@ -11,6 +11,8 @@
 ;     taskbar identity, and Inno's own per-user uninstall entry. No other registry value, no file
 ;     association, no PATH entry, no service, no scheduled task.
 ;   - Uses no network: no download, no plugin, no web request.
+;   - An upgrade in place also deletes the files the previous install's own SHA256SUMS.txt lists, the new one does
+;     not, and that are unchanged since Setup installed them; nothing else in the folder is touched.
 ;   - The uninstaller removes what Setup installed. It never touches %LOCALAPPDATA%\Nakagawa (settings,
 ;     games, saves, per-title folders) unless the person ticks the box on the uninstall page; a silent
 ;     uninstall never deletes it.
@@ -32,8 +34,9 @@
 #endif
 
 #define AppName "Nakagawa Recomp"
-; The shortcut's name. Only tests/test_installer runs override it (/DShortcutName=...), so a trial install on a
-; PC that has the real shortcut never replaces or removes it.
+; The shortcut's name. Only tests override it (/DShortcutName=..., build_installer.build_installer's extra_defines), so
+; a trial install on a PC that has the real shortcut never replaces or removes it. The other test-only define is
+; TestProbe (the end of [Code]); a release build defines neither.
 #ifndef ShortcutName
   #define ShortcutName AppName
 #endif
@@ -96,9 +99,15 @@ Filename: "{app}\bin\{#AppExe}"; Description: "Start {#AppName}"; Flags: postins
 [Code]
 const
   USER_DATA_FOLDER_COUNT = 5;
+  { The uninstall entry Inno writes for this AppId (tools/verify_installer.py, UNINSTALL_KEY). }
+  UNINSTALL_KEY = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{A37F65B8-FB5B-41BB-AC7B-3700FE43CB02}_is1';
+  MANIFEST_NAME = 'SHA256SUMS.txt';
 
 var
   DeleteUserData: Boolean;
+  { The previous install's own manifest, read just before the new files are copied over it. }
+  PreviousPaths, PreviousDigests: TArrayOfString;
+  HavePreviousManifest: Boolean;
 
 { The five folders of the per-user data layout: the only folders the uninstall opt-in may delete. They are the
   folders the player resolves under %LOCALAPPDATA%\Nakagawa (nk_platform_win32.c, resolve_windows_path), and
@@ -191,6 +200,180 @@ begin
     Result := 'A shortcut named {#ShortcutName} already starts another copy of Nakagawa (' + Target + '). Installing here would replace it, and removing either copy later would remove the shortcut of the other. Uninstall or delete that copy and its shortcut, then run Setup again.';
 end;
 
+{ Upgrading in place. Inno Setup overwrites the files the new package carries but leaves the ones an earlier release
+  installed and this one dropped (a stale DLL in bin\ would be found before the system's). The previous install's
+  own SHA256SUMS.txt lists the files Setup put there, so after the new files are copied Setup deletes each file that
+  list names, the new SHA256SUMS.txt does not, and that is still byte-identical to what was installed. A file the
+  person added or changed, bin\data, bin\portable.txt and everything outside the install folder
+  (%LOCALAPPDATA%\Nakagawa included) are never touched, and nothing is deleted through a junction or link. }
+
+function IsHexDigest(const Text: String): Boolean;
+var
+  Index: Integer;
+begin
+  Result := Length(Text) = 64;
+  if Result then
+    for Index := 1 to 64 do
+      if Pos(Text[Index], '0123456789abcdef') = 0 then
+      begin
+        Result := False;
+        Exit;
+      end;
+end;
+
+{ A manifest path that stays inside the folder: relative and '/'-separated, with no empty, '.' or '..' part and no
+  drive or stream colon. A package never lists the person's portable data, so a list that names it is not used. }
+function IsSafeManifestName(const Name: String): Boolean;
+var
+  Wrapped: String;
+begin
+  Wrapped := '/' + Lowercase(Name) + '/';
+  Result := (Name <> '') and (Pos('\', Name) = 0) and (Pos(':', Name) = 0) and (Pos('//', Wrapped) = 0)
+    and (Pos('/./', Wrapped) = 0) and (Pos('/../', Wrapped) = 0)
+    and (Wrapped <> '/bin/portable.txt/') and (Pos('/bin/data/', Wrapped) <> 1);
+end;
+
+{ The paths and SHA-256 values of a "<sha256>  <path>" manifest. False, with both lists empty, when the file is
+  missing, is a link or cannot be read, or when any line is not of that form: then nothing is deleted. }
+function ReadManifest(const FileName: String; var Paths, Digests: TArrayOfString): Boolean;
+var
+  Lines: TArrayOfString;
+  Index, Count: Integer;
+  Line, Digest, Name: String;
+begin
+  Result := False;
+  SetArrayLength(Paths, 0);
+  SetArrayLength(Digests, 0);
+  if IsReparsePoint(FileName) then
+    Exit;
+  if not LoadStringsFromFile(FileName, Lines) then
+    Exit;
+  SetArrayLength(Paths, GetArrayLength(Lines));
+  SetArrayLength(Digests, GetArrayLength(Lines));
+  Count := 0;
+  for Index := 0 to GetArrayLength(Lines) - 1 do
+  begin
+    Line := Lines[Index];
+    if Line <> '' then
+    begin
+      Digest := Copy(Line, 1, 64);
+      Name := Copy(Line, 67, Length(Line) - 66);
+      if (Copy(Line, 65, 2) <> '  ') or (not IsHexDigest(Digest)) or (not IsSafeManifestName(Name)) then
+      begin
+        SetArrayLength(Paths, 0);
+        SetArrayLength(Digests, 0);
+        Exit;
+      end;
+      Paths[Count] := Name;
+      Digests[Count] := Digest;
+      Count := Count + 1;
+    end;
+  end;
+  SetArrayLength(Paths, Count);
+  SetArrayLength(Digests, Count);
+  Result := Count > 0;
+end;
+
+{ True when Dir, or any folder or file from Dir down to Dir\Relative, is a junction or symbolic link, or cannot be
+  examined. }
+function LinkOnPath(const Dir, Relative: String): Boolean;
+var
+  Current, Rest: String;
+  Split: Integer;
+begin
+  Result := IsReparsePoint(Dir);
+  Current := Dir;
+  Rest := Relative;
+  while (not Result) and (Rest <> '') do
+  begin
+    Split := Pos('\', Rest);
+    if Split = 0 then
+    begin
+      Current := Current + '\' + Rest;
+      Rest := '';
+    end
+    else
+    begin
+      Current := Current + '\' + Copy(Rest, 1, Split - 1);
+      Rest := Copy(Rest, Split + 1, Length(Rest));
+    end;
+    Result := IsReparsePoint(Current);
+  end;
+end;
+
+function FileHasDigest(const Path, Digest: String): Boolean;
+begin
+  try
+    Result := Lowercase(GetSHA256OfFile(Path)) = Digest;
+  except
+    Result := False;
+  end;
+end;
+
+{ Deletes the files OldPaths lists and Dir's own (new) SHA256SUMS.txt does not, each only when it is a plain file
+  still equal to its OldDigests value and no link lies on its path; then removes the folders that are left empty,
+  never Dir itself. Names compare without case, as Windows does. }
+procedure RemoveDroppedFiles(const Dir: String; const OldPaths, OldDigests: TArrayOfString);
+var
+  NewPaths, NewDigests: TArrayOfString;
+  Carried: TStringList;
+  Index, Found: Integer;
+  Relative, Path, Folder: String;
+begin
+  if not ReadManifest(Dir + '\' + MANIFEST_NAME, NewPaths, NewDigests) then
+    Exit;
+  Carried := TStringList.Create;
+  try
+    for Index := 0 to GetArrayLength(NewPaths) - 1 do
+      Carried.Add(Lowercase(NewPaths[Index]));
+    Carried.Sorted := True;
+    for Index := 0 to GetArrayLength(OldPaths) - 1 do
+    begin
+      if not Carried.Find(Lowercase(OldPaths[Index]), Found) then
+      begin
+        Relative := OldPaths[Index];
+        StringChangeEx(Relative, '/', '\', True);
+        Path := Dir + '\' + Relative;
+        if FileExists(Path) and (not LinkOnPath(Dir, Relative)) then
+          if FileHasDigest(Path, OldDigests[Index]) then
+            if DeleteFile(Path) then
+            begin
+              Folder := ExtractFileDir(Path);
+              while (Length(Folder) > Length(Dir)) and RemoveDir(Folder) do
+                Folder := ExtractFileDir(Folder);
+            end;
+      end;
+    end;
+  finally
+    Carried.Free;
+  end;
+end;
+
+{ True only when the uninstall entry of this AppId says Setup installed into Dir and Setup's uninstall log is there:
+  then Dir's SHA256SUMS.txt lists files Setup itself installed, not an unpacked ZIP or someone else's files. }
+function IsSetupInstallIn(const Dir: String): Boolean;
+var
+  Location: String;
+begin
+  Result := False;
+  if not FileExists(Dir + '\unins000.dat') then
+    Exit;
+  if RegQueryStringValue(HKCU, UNINSTALL_KEY, 'InstallLocation', Location) then
+    Result := CompareText(RemoveBackslashUnlessRoot(Location), RemoveBackslashUnlessRoot(Dir)) = 0;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+  begin
+    HavePreviousManifest := False;
+    if IsSetupInstallIn(ExpandConstant('{app}')) then
+      HavePreviousManifest := ReadManifest(ExpandConstant('{app}') + '\' + MANIFEST_NAME, PreviousPaths, PreviousDigests);
+  end
+  else if (CurStep = ssPostInstall) and HavePreviousManifest then
+    RemoveDroppedFiles(ExpandConstant('{app}'), PreviousPaths, PreviousDigests);
+end;
+
 { Deletes Dir and what is in it without ever following a junction or symbolic link: a link inside the tree is
   removed as a link (its target is left alone), and a folder is entered only when it is a real folder. }
 function DeleteTreeNoLinks(const Dir: String; Depth: Integer): Boolean;
@@ -268,8 +451,8 @@ begin
   RemoveUserDataIn(UserDataRoot);
 end;
 
-{ True while the player (or one of its DLLs) is running from this install: a running program's file cannot
-  be opened for writing. Inno's uninstaller does not close programs the way Setup does, so it would remove the
+{ True while the player is running from this install. Only the player's own program file is probed: a running
+  program's file cannot be opened for writing. Inno's uninstaller does not close programs the way Setup does, so it would remove the
   shortcut and the uninstall entry and leave the locked files behind. }
 function PlayerIsRunning: Boolean;
 var
@@ -371,3 +554,28 @@ begin
   if (CurUninstallStep = usPostUninstall) and DeleteUserData and (not UninstallSilent) then
     RemoveUserData;
 end;
+
+#ifdef TestProbe
+{ Tests only (tools/test_installer.py, RealCompilerTests); a release build never defines TestProbe. /PROBE=userdata
+  runs RemoveUserDataIn on /ROOT=; /PROBE=upgrade runs RemoveDroppedFiles on /ROOT= with /OLDSUMS= as the previous
+  install's manifest. It then writes the probe's name to /DONE= and exits before the wizard, so nothing is
+  installed, and nothing at all happens without a known /PROBE=. }
+function InitializeSetup(): Boolean;
+var
+  Probe: String;
+  Paths, Digests: TArrayOfString;
+begin
+  Result := False;
+  Probe := ExpandConstant('{param:PROBE|}');
+  if Probe = 'userdata' then
+    RemoveUserDataIn(ExpandConstant('{param:ROOT|}'))
+  else if Probe = 'upgrade' then
+  begin
+    if ReadManifest(ExpandConstant('{param:OLDSUMS|}'), Paths, Digests) then
+      RemoveDroppedFiles(ExpandConstant('{param:ROOT|}'), Paths, Digests);
+  end
+  else
+    Exit;
+  SaveStringToFile(ExpandConstant('{param:DONE|}'), Probe, False);
+end;
+#endif

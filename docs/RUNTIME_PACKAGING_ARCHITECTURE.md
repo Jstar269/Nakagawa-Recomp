@@ -561,8 +561,9 @@ includes is listed.
 
 This section records what the Windows portable ZIP holds today and where the player keeps
 everything it writes ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)). The
-installer that #324 also asks for is not built; the portable ZIP is the one supported
-distribution form, and the upgrade and uninstall rules are at the end of this section.
+per-user `Setup.exe` that #324 also asks for carries the ZIP's exact files
+([#2208](https://github.com/Jstar269/nakagawa-recomp/issues/2208), [`SETUP.md`](SETUP.md#windows-installer-setupexe)),
+and the upgrade and uninstall rules for both are at the end of this section.
 
 ### The install image (read-only)
 
@@ -671,7 +672,12 @@ only; the per-user folders above stay until the user deletes them.
 * **Upgrade is side by side.** A new version is a new folder; the old one keeps running until the user
   deletes it, so an interrupted update leaves the old version whole and at worst a `.partial` folder
   that the next update replaces. In-place staging (`tools/stage_install.py --dest`) swaps `bin/` and
-  `source/` by rename and removes the old copy only afterwards.
+  `source/` by rename and removes the old copy only afterwards. The one in-place upgrade is a copy `Setup.exe`
+  installed: the next release's Setup replaces its files in the same folder, then deletes each file the previous
+  install's own `SHA256SUMS.txt` lists and the new one does not, only while it is unchanged since it was installed
+  and no junction or link lies on its path, and removes the folders that leaves empty. Files the user added or
+  changed, `bin/data`, `bin/portable.txt` and the per-user folders stay (`RealProbeTests` and the upgrade leg of
+  `tools/verify_installer.py`).
 * **A runtime or AOT epoch change forces a rebuild, never a stale launch.** Packages live in the
   per-user data folder and are keyed on the epochs of Section 6. A package built by another epoch
   is INCOMPATIBLE: the card offers REBUILD PACKAGE and the old code is never started. Saves and
@@ -681,5 +687,6 @@ only; the per-user folders above stay until the user deletes them.
   marker records, and nothing else: it never reads or deletes the per-user folders above, a file
   the user added beside the install survives, a recorded path with a name the tool does not write is skipped, and
   a folder with no marker is refused. In portable mode `bin/data` and `bin/portable.txt` stay. An unpacked ZIP is
-  removed by deleting its folder. `tools/test_stage_install.py` (`UninstallTests`) covers each rule. No
-  installer exists; an installer's uninstaller (Inno Setup is the chosen wrapper) must follow the same rule.
+  removed by deleting its folder. `tools/test_stage_install.py` (`UninstallTests`) covers each rule. The
+  `Setup.exe` uninstaller follows the same rule: it removes what Setup installed and keeps the per-user folders
+  unless the user ticks the box on its uninstall page and confirms ([`SETUP.md`](SETUP.md#windows-installer-setupexe)).
