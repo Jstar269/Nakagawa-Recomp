@@ -119,10 +119,12 @@ The jobs:
   SHA-256 before a silent `/CURRENTUSER` install under the runner temp folder, and runs
   `tools/test_installer.py` with `NK_INSTALLER_REQUIRE_COMPILER=1`, so the compiler-backed tests
   (reproducible builds, and `RealProbeTests`, which run the script's uninstall-data and upgrade
-  delete routines on temp folders with junctions, symbolic links and a read-only file) fail instead
-  of skipping. It then builds `Setup.exe` and runs `tools/verify_installer.py`, which installs,
-  uninstalls and checks an upgrade in place over an older synthetic release, then repeats the build
-  and compares both SHA-256 values. The job requires
+  delete routines on temp folders with junctions, symbolic links and a read-only file, and its path
+  compare on the 8.3 short and long spellings of one folder) fail instead of skipping. It then builds
+  `Setup.exe` and runs `tools/verify_installer.py`, which installs, uninstalls and checks an upgrade
+  in place over an older synthetic release, then repeats the build and compares both SHA-256 values.
+  Each install runs with Setup's `/LOG=`, and a failed one reports Setup's PrepareToInstall message
+  (or the log's last lines) beside its exit code. The job requires
   `allow_substantive == true`, so Draft-light runs skip this heavy gate.
 
 `CI required` needs `classify`, `hygiene`, `public_export`, `python_tools`, `native_tools`,

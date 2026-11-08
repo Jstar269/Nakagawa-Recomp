@@ -130,10 +130,22 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertIn("{userdesktop}\\{#ShortcutName}.lnk", prepare)
         self.assertIn("WizardIsTaskSelected('desktopicon')", prepare)  # the desktop one only when it will be written
         other = self.text[self.text.index("function OtherCopyShortcutTarget"):self.text.index("function PrepareToInstall")]
-        self.assertIn("CompareText(ExpandFileName(Target), ExpandFileName(Ours)) <> 0", other)
+        self.assertIn("(not SamePath(Target, Ours)) and FileExists(Target)", other)
         self.assertIn("FileExists(Target)", other)  # a stale shortcut (its target is gone) is replaced
         self.assertIn("Ours := ExpandConstant('{app}') + '\\bin\\{#AppExe}'", other)
         self.assertIn("Uninstall or delete that copy", prepare)
+
+    def test_paths_compare_in_long_form(self):
+        # A hosted runner's TEMP has the short part RUNNER~1: /DIR= keeps that form, while the shell reads an
+        # installed shortcut's target back in long form. A text compare took the install's own shortcut for another
+        # copy's and refused the upgrade (Setup exit 7).
+        same = self.text[self.text.index("function SamePath"):self.text.index("{ The target of an existing shortcut")]
+        self.assertIn("CompareText(LongPathName(RemoveBackslashUnlessRoot(ExpandFileName(A))),", same)
+        self.assertIn("LongPathName(RemoveBackslashUnlessRoot(ExpandFileName(B)))) = 0", same)
+        self.assertIn("external 'GetLongPathNameW@kernel32.dll stdcall'", self.text)
+        self.assertEqual(re.findall(r"external\s+'([^']*)'", self.text), ["GetLongPathNameW@kernel32.dll stdcall"])
+        located = self.text[self.text.index("function IsSetupInstallIn"):self.text.index("procedure CurStepChanged")]
+        self.assertIn("Result := SamePath(Location, Dir);", located)
 
     def test_the_only_com_object_is_the_local_scripting_shell(self):
         self.assertEqual(re.findall(r"CreateOleObject\(([^)]*)\)", self.text), ["'WScript.Shell'"])
@@ -311,6 +323,33 @@ class UpgradeRuleTests(unittest.TestCase):
         body = self._body("function LinkOnPath", "function FileHasDigest")
         self.assertIn("Result := IsReparsePoint(Dir);", body)
         self.assertIn("Result := IsReparsePoint(Current);", body)
+
+
+class SetupLogReasonTests(unittest.TestCase):
+    """A failed Setup run names its reason from the /LOG= file, so a hosted failure says why (exit 7 alone does not)."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="nk-installer-log-")
+        self.addCleanup(temp.cleanup)
+        self.log = Path(temp.name) / "setup.log"
+
+    def test_the_prepare_to_install_message_is_named(self):
+        self.log.write_text("﻿2026-11-08 09:00:00.000   Setup version: Inno Setup version 6.7.3\n"
+                            "2026-11-08 09:00:01.000   PrepareToInstall failed: A shortcut named X already starts "
+                            "another copy\n2026-11-08 09:00:01.100   Need to restart Windows? No\n", encoding="utf-8")
+        reason = verify_installer.setup_log_reason(self.log)
+        self.assertIn("PrepareToInstall failed: A shortcut named X already starts another copy", reason)
+        self.assertNotIn("Need to restart", reason)
+
+    def test_without_that_message_the_last_lines_are_shown(self):
+        self.log.write_text("".join(f"line {index}\n" for index in range(30)), encoding="utf-8")
+        reason = verify_installer.setup_log_reason(self.log)
+        self.assertIn("line 29", reason)
+        self.assertIn("line 18", reason)
+        self.assertNotIn("line 17", reason)
+
+    def test_no_log_is_no_reason(self):
+        self.assertEqual(verify_installer.setup_log_reason(self.log), "")
 
 
 class VerifierUpgradeTests(unittest.TestCase):
@@ -631,6 +670,21 @@ class VerifierPureTests(unittest.TestCase):
             verify_installer.verify_installer(Path("x.exe"), self.package)
 
 
+def _short_path(path: Path) -> str | None:
+    """Windows' 8.3 short spelling of an existing path, or None when it cannot be read."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    get_short = ctypes.windll.kernel32.GetShortPathNameW
+    get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    get_short.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(1024)
+    written = get_short(str(path), buffer, len(buffer))
+    return buffer.value if 0 < written < len(buffer) else None
+
+
 def _pinned_compiler() -> Path | None:
     try:
         iscc: Path = build_installer.find_iscc()
@@ -742,6 +796,30 @@ class RealProbeTests(unittest.TestCase):
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)], capture_output=True, check=False)
             self.fail("the probe did not exit: Setup was built without its TestProbe hook (nothing was installed)")
         self.assertEqual(done.read_text(encoding="utf-8"), probe)  # the routine ran; not a vacuous pass
+
+    def same_path(self, a: str, b: str) -> str:
+        out = self.root / "samepath.txt"
+        out.unlink(missing_ok=True)
+        self.run_probe("samepath", A=Path(a), B=Path(b), OUT=out)
+        return out.read_text(encoding="utf-8")
+
+    def test_a_short_and_a_long_spelling_of_one_path_are_the_same_path(self):
+        # The upgrade leg on a hosted runner: /DIR= under the short RUNNER~1, the shortcut's target in long form.
+        folder = self.root / "longfoldername-for-a-short-name"
+        player = folder / "bin" / "nakagawa_player.exe"
+        player.parent.mkdir(parents=True)
+        player.write_bytes(b"player")
+        other = self.root / "other-copy" / "bin" / "nakagawa_player.exe"
+        other.parent.mkdir(parents=True)
+        other.write_bytes(b"player")
+        short = _short_path(player)
+        if short is None or short.lower() == str(player).lower():
+            self.skipTest("this volume makes no 8.3 short names (SKIP, not a pass)")
+        self.assertEqual(self.same_path(short, str(player)), "same")
+        self.assertEqual(self.same_path(str(player).upper(), str(player)), "same")
+        self.assertEqual(self.same_path(str(_short_path(folder)) + "\\", str(folder)), "same")
+        self.assertEqual(self.same_path(str(other), str(player)), "different")
+        self.assertEqual(self.same_path(short, str(other)), "different")
 
     def _outside(self, name: str, text: str = "keep me") -> Path:
         path = self.outside / name

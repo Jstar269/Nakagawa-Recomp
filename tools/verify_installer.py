@@ -136,6 +136,18 @@ def egress_findings(script_text: str) -> list[str]:
     return findings
 
 
+def setup_log_reason(log: Path) -> str:
+    """Why Setup stopped, from its ``/LOG=`` file: the PrepareToInstall message when there is one (Setup exit 7),
+    else the log's last lines. Empty when Setup wrote no log."""
+    try:
+        lines = log.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return ""
+    prepare = [line for line in lines if "PrepareToInstall" in line]
+    shown = prepare or lines[-12:]
+    return f" (Setup log {log.name}: " + " | ".join(line.strip() for line in shown) + ")" if shown else ""
+
+
 def _hkcu_key_exists() -> bool:
     if sys.platform != "win32":
         return False
@@ -268,10 +280,11 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
         raise build_installer.InstallerError(f"{code}: {why}")
 
     def install(setup: Path, folder: Path, code: str) -> None:
-        done = subprocess.run([str(setup), *silent_install, f"/DIR={folder}"], capture_output=True,
+        log = Path(temp) / f"setup-{code.lower()}.log"
+        done = subprocess.run([str(setup), *silent_install, f"/DIR={folder}", f"/LOG={log}"], capture_output=True,
                               text=True, timeout=600, check=False)
         if done.returncode != 0:
-            fail(code, f"{setup.name} exited {done.returncode}: {done.stdout}{done.stderr}")
+            fail(code, f"{setup.name} exited {done.returncode}: {done.stdout}{done.stderr}{setup_log_reason(log)}")
 
     def check_shortcut_and_entry() -> None:
         if not shortcut.is_file():

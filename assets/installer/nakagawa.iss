@@ -10,7 +10,8 @@
 ;   - Writes the program files, a Start-menu shortcut (and an optional desktop shortcut) with the player's
 ;     taskbar identity, and Inno's own per-user uninstall entry. No other registry value, no file
 ;     association, no PATH entry, no service, no scheduled task.
-;   - Uses no network: no download, no plugin, no web request.
+;   - Uses no network: no download, no plugin, no web request. The one DLL function it calls is kernel32's
+;     GetLongPathNameW, a local file-system lookup.
 ;   - An upgrade in place also deletes the files the previous install's own SHA256SUMS.txt lists, the new one does
 ;     not, and that are unchanged since Setup installed them; nothing else in the folder is touched.
 ;   - The uninstaller removes what Setup installed. It never touches %LOCALAPPDATA%\Nakagawa (settings,
@@ -162,6 +163,38 @@ begin
   end;
 end;
 
+{ Windows' own GetLongPathNameW (kernel32, a local file-system call; the only DLL function the script uses). }
+function GetLongPathName(ShortPath: String; LongPath: String; Size: Cardinal): Cardinal;
+  external 'GetLongPathNameW@kernel32.dll stdcall';
+
+{ Path with every 8.3 short part spelt in full (a hosted runners "RUNNER~1" is "runneradmin"), or Path itself when
+  it does not exist or cannot be read. }
+function LongPathName(const Path: String): String;
+var
+  Size, Written: Cardinal;
+begin
+  Result := Path;
+  Size := GetLongPathName(Path, '', 0);
+  if Size = 0 then
+    Exit;
+  Result := StringOfChar(' ', Size);
+  Written := GetLongPathName(Path, Result, Size);
+  if (Written = 0) or (Written >= Size) then
+    Result := Path
+  else
+    SetLength(Result, Written);
+end;
+
+{ True when A and B name the same file or folder: compared without case, as Windows does, and with the short and
+  long spellings of a folder taken as one. The shell keeps a shortcut's target in long form whatever form Setup
+  wrote, while the install folder keeps the form /DIR= or the wizard gave it, so a plain text compare would take this install's
+  own shortcut for another copy's. }
+function SamePath(const A, B: String): Boolean;
+begin
+  Result := CompareText(LongPathName(RemoveBackslashUnlessRoot(ExpandFileName(A))),
+                        LongPathName(RemoveBackslashUnlessRoot(ExpandFileName(B)))) = 0;
+end;
+
 { The target of an existing shortcut that points at another copy of the player, or '' when there is no
   shortcut, it is ours, or its target is gone (a stale shortcut is replaced). }
 function OtherCopyShortcutTarget(const Link: String): String;
@@ -175,7 +208,7 @@ begin
   if Target = '' then
     Exit;
   Ours := ExpandConstant('{app}') + '\bin\{#AppExe}';
-  if (CompareText(ExpandFileName(Target), ExpandFileName(Ours)) <> 0) and FileExists(Target) then
+  if (not SamePath(Target, Ours)) and FileExists(Target) then
     Result := Target;
 end;
 
@@ -398,7 +431,7 @@ begin
   if not FileExists(Dir + '\unins000.dat') then
     Exit;
   if RegQueryStringValue(HKCU, UNINSTALL_KEY, 'InstallLocation', Location) then
-    Result := CompareText(RemoveBackslashUnlessRoot(Location), RemoveBackslashUnlessRoot(Dir)) = 0;
+    Result := SamePath(Location, Dir);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -597,8 +630,9 @@ end;
 #ifdef TestProbe
 { Tests only (tools/test_installer.py, RealCompilerTests); a release build never defines TestProbe. /PROBE=userdata
   runs RemoveUserDataIn on /ROOT=; /PROBE=upgrade runs RemoveDroppedFiles on /ROOT= with /OLDSUMS= as the previous
-  install's manifest. It then writes the probe's name to /DONE= and exits before the wizard, so nothing is
-  installed, and nothing at all happens without a known /PROBE=. }
+  install's manifest; /PROBE=samepath writes same or different to /OUT= for SamePath(/A=, /B=). It then writes the
+  probe's name to /DONE= and exits before the wizard, so nothing is installed, and nothing at all happens without a
+  known /PROBE=. }
 function InitializeSetup(): Boolean;
 var
   Probe: String;
@@ -612,6 +646,13 @@ begin
   begin
     if ReadManifest(ExpandConstant('{param:OLDSUMS|}'), Paths, Digests) then
       RemoveDroppedFiles(ExpandConstant('{param:ROOT|}'), Paths, Digests);
+  end
+  else if Probe = 'samepath' then
+  begin
+    if SamePath(ExpandConstant('{param:A|}'), ExpandConstant('{param:B|}')) then
+      SaveStringToFile(ExpandConstant('{param:OUT|}'), 'same', False)
+    else
+      SaveStringToFile(ExpandConstant('{param:OUT|}'), 'different', False);
   end
   else
     Exit;
