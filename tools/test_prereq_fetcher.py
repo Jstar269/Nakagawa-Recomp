@@ -1353,7 +1353,7 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
             self.assertEqual(re.findall(r"https?://", text), [], rel)
         header = (REPO_ROOT / "src/player/discord_presence.h").read_text(encoding="utf-8")
         self.assertIn(f'#define NK_DISCORD_PIPE_PREFIX "{DISCORD_PIPE_PREFIX}"', header)
-        # The local pipe seam opens pipes on this PC only: \\.\pipe\<name>, nothing remote.
+        # The local pipe seam opens pipes in this PC's own pipe namespace only, nothing remote.
         win32 = (REPO_ROOT / "src/core/nk_platform_win32.c").read_text(encoding="utf-8")
         pipe_paths = re.findall(r'"(\\\\\\\\[^"]*pipe[^"]*)"', win32)
         self.assertEqual(pipe_paths, ["\\\\\\\\.\\\\pipe\\\\%s"])

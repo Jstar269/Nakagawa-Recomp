@@ -7,7 +7,8 @@
 /* Discord Rich Presence (#2259): opt-in, off by default (owner decision 2026-11-08).
  *
  * The player writes to the Discord app on this PC through its local IPC pipe
- * (\\.\pipe\discord-ipc-0 to -9 on Windows) and makes no network connection itself. The
+ * (the named pipes discord-ipc-0 to discord-ipc-9 on Windows) and makes no network
+ * connection itself. The
  * protocol is written from Discord's public RPC documentation: each message is a frame of a
  * little-endian opcode, a little-endian length and that many bytes of UTF-8 JSON. The client
  * sends HANDSHAKE {"v":1,"client_id":...}, waits for the READY dispatch, then SET_ACTIVITY.

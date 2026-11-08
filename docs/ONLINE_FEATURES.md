@@ -78,7 +78,7 @@ opt-in and off by default.
 - **Settings > Online and developer** has a **Discord status** switch, off by default
   (`discord_presence` in `settings.json`; anything but `true` reads as off).
 - **No network connection.** The player writes to the Discord app on the same PC through its local
-  IPC pipe (`\\.\pipe\discord-ipc-0` to `-9`; `src/player/discord_presence.c`, over
+  named pipe (`discord-ipc-0` to `discord-ipc-9`; `src/player/discord_presence.c`, over
   `nk_platform_local_pipe_*`). The protocol is written from Discord's public RPC documentation: a
   framed JSON handshake with the application ID, then `SET_ACTIVITY`. No Discord SDK is used or
   vendored.

@@ -990,9 +990,9 @@ download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
 
 **Discord status** (Settings > Online and developer, off by default) makes no network
 connection either. While a game runs, the player passes three things to the Discord app on this
-PC through Discord's local pipe (`\\.\pipe\discord-ipc-0` to `-9`): the game's title as the disc
-names it (its disc ID when the disc names no title), the play mode (Authentic, Enhanced or Ace)
-and when the game started, with the player's process ID, which Discord's protocol needs. The
+PC through Discord's local named pipe (`discord-ipc-0` to `discord-ipc-9`): the game's title as
+the disc names it (its disc ID when the disc names no title), the play mode (Authentic, Enhanced
+or Ace) and when the game started, with the player's process ID, which Discord's protocol needs. The
 Discord app then shows them on your profile, so Discord learns which game you play. Nothing else
 is sent: no path, save, user name or game memory. If Discord isn't running, the player tries
 again at most once a minute and says nothing; the status clears when the game exits. Until the
