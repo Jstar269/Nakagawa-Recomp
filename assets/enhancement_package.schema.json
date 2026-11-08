@@ -426,14 +426,31 @@
               "type": "object",
               "additionalProperties": false,
               "required": [
-                "column",
                 "transform"
+              ],
+              "oneOf": [
+                {
+                  "required": [
+                    "column"
+                  ]
+                },
+                {
+                  "required": [
+                    "column_index"
+                  ]
+                }
               ],
               "properties": {
                 "column": {
                   "type": "string",
                   "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$",
                   "description": "ASCII column name from the header line."
+                },
+                "column_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255,
+                  "description": "Zero-based column number, for a header that is not an ASCII name."
                 },
                 "rows": {
                   "type": "array",
@@ -445,6 +462,19 @@
                     "maximum": 65535
                   },
                   "description": "Zero-based data-row indexes; all data rows when left out."
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "u8",
+                    "s8",
+                    "u16",
+                    "s16",
+                    "u32",
+                    "s32",
+                    "f32"
+                  ],
+                  "description": "Type the title parses the cell into; inferred from a decimal point when left out."
                 },
                 "transform": {
                   "type": "string",
