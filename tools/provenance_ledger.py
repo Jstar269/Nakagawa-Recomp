@@ -98,11 +98,11 @@ try:
     from .public_export import write_document as _write_json_document
     from .publication_policy import load_policy as _load_publication_policy
 except ImportError:
-    from nk_core.git_isolation import isolated_git_env
-    from public_export import build_control_document as _build_control_document
-    from public_export import build_document as _build_export_document
-    from public_export import write_document as _write_json_document
-    from publication_policy import load_policy as _load_publication_policy
+    from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
+    from public_export import build_control_document as _build_control_document  # type: ignore[no-redef]
+    from public_export import build_document as _build_export_document  # type: ignore[no-redef]
+    from public_export import write_document as _write_json_document  # type: ignore[no-redef]
+    from publication_policy import load_policy as _load_publication_policy  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parent.parent
 POLICY_PATH = ROOT / "assets" / "public_source_profile.json"
@@ -706,7 +706,7 @@ def _check_derived_delta_preconditions(
     derived: dict, *, base_blobs: dict[str, bytes], candidate_blobs: dict[str, bytes], candidate_policy,
 ) -> None:
     """Preconditions a V3 or V4 derivation alone does not imply."""
-    folded = {}
+    folded: dict[str, Any] = {}
     for path in candidate_blobs:
         folded.setdefault(_fold(path), []).append(path)
     for item in derived["include_added"]:

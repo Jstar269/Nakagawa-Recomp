@@ -1175,7 +1175,7 @@ the issue #1391 import/VFPU scope. Before this work, the full `tools/` scan used
 `python -m mypy --no-incremental --no-error-summary --no-pretty --python-version 3.15 --platform linux --explicit-package-bases tools`
 and reported 353 errors in 120 modules. The full-tree per-module ratchet remains in
 `tools/mypy_baseline.json`; its entries outside the clean scope are existing typing debt, not
-suppressed errors. The current full-tree residual is 318 errors in 106 modules; their per-module
+suppressed errors. The current full-tree residual is 246 errors in 92 modules; their per-module
 counts are listed in `tools/mypy_baseline.json` and remain guarded by that ratchet. The clean scope
 directly checks `tools/verify_vfpu_provenance.py`,
 `tools/hle_manifest.py`, `tools/psp_import_table.py`, `tools/import_audit_gate.py`,

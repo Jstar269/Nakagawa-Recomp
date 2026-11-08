@@ -29,9 +29,9 @@ try:
     from . import provenance_ledger
     from .nk_core.git_isolation import isolated_git_env
 except ImportError:
-    import provenance_attest_verify as verifier
-    import provenance_ledger
-    from nk_core.git_isolation import isolated_git_env
+    import provenance_attest_verify as verifier  # type: ignore[no-redef]
+    import provenance_ledger  # type: ignore[no-redef]
+    from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
 
 
 def _run(repo: Path, *args: str, capture: bool = True) -> subprocess.CompletedProcess:
