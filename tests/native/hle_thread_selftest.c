@@ -27063,6 +27063,144 @@ static void test_ge_list_stops_for_a_stronger_thread(void) {
     sr_test_guest_fn_reset();
 }
 
+/* #1296: a SAVE that sceUtilitySavedataUpdate runs hands the CPU to a stronger thread at its
+ * first preemption point, and that thread ends the saving thread while the SAVE is parked. The
+ * production path: real threads on their own coroutines, the savedata dialog (hle_utility.c),
+ * the thread-end release (sched_terminate_thread -> sr_hle_release_thread_resources) and
+ * savedata.c. While the SAVE is parked another savedata call is refused, also after another
+ * thread's resources are released. Once the saving thread is terminated the lock is free, and
+ * the dialog reaches FINISHED with the SAVE's access error, so the game can shut it down.
+ *
+ * MUTANT: drop the sr_savedata_release_thread call in sr_hle_release_thread_resources -- the
+ *   call after the termination is refused and the dialog stays RUNNING. MUTANT: drop
+ *   savedata_dialog_work_abandoned -- the dialog stays RUNNING. MUTANT: drop the owner check in
+ *   sr_savedata_release_thread -- the call after another thread's release is accepted. */
+enum {
+    SPP_MAIN_ENTRY = 0x08a70000u,
+    SPP_STRONG_ENTRY = 0x08a70040u,
+    SPP_SAVER_ENTRY = 0x08a70080u,
+    SPP_NAME = 0x08a700c0u,
+    SPP_DATA = 0x08a70100u,
+    SPP_DIRECT = 0x08a70400u   /* a 0x600-byte SAVE block for direct sr_savedata_execute calls */
+};
+#define SPP_ACCESS_ERROR 0x80110385u   /* ERR_SAVE_ACCESS_ERROR_UNMEASURED (savedata.c) */
+static uint32_t s_spp_saver, s_spp_first, s_spp_refused, s_spp_refused_after_other;
+static uint32_t s_spp_status_parked, s_spp_terminate, s_spp_update_after, s_spp_status_after;
+static uint32_t s_spp_result, s_spp_shutdown, s_spp_after_save;
+static int s_spp_strong_ran, s_spp_saver_returned, s_spp_none;
+
+static void spp_save_block(uint32_t param, const char *bytes) {
+    const uint32_t n = (uint32_t)strlen(bytes);
+    utility_param_block(param, 0x600u);
+    fd_guest_copy(param + 0x3cu, "NAKAGAWA1296", sizeof("NAKAGAWA1296"));
+    fd_guest_copy(param + 0x4cu, "PREEMPT", sizeof("PREEMPT"));
+    fd_guest_copy(param + 0x64u, "DATA.BIN", sizeof("DATA.BIN"));
+    fd_guest_copy(SPP_DATA, bytes, n);
+    MEM_W32(param + 0x30u, 3u);   /* SAVE */
+    MEM_W32(param + 0x74u, SPP_DATA);
+    MEM_W32(param + 0x78u, n);
+    MEM_W32(param + 0x7cu, n);
+}
+
+static void spp_saver_fn(CpuState *cpu) {
+    CpuState c;
+    spp_save_block(UTILITY_SAVEDATA_PARAM_ADDR, "PARKED-SAVE");
+    if (utility_call(&c, NID_SAVEDATA_DIALOG_INIT, UTILITY_SAVEDATA_PARAM_ADDR) == 0u) {
+        for (int frame = 0; frame < 8 && utility_status(&c, NID_SAVEDATA_DIALOG_STATUS) != 2u; frame++) {
+        }
+        atomic_store_explicit(&sr_preempt_due, 1, memory_order_relaxed);
+        (void)utility_call(&c, NID_SAVEDATA_DIALOG_UPDATE, 0u);   /* runs the SAVE, which parks */
+    }
+    s_spp_saver_returned = 1;   /* not reached: the stronger thread ends this one inside Update */
+    cpu->r[2] = 0u;
+}
+
+static void spp_strong_fn(CpuState *cpu) {
+    CpuState c;
+    (void)gsw_call(NID_SCE_KERNEL_DELAY_THREAD, 1u, 0u, 0u, 0u);
+    s_spp_strong_ran = 1;
+    spp_save_block(SPP_DIRECT, "REFUSED-SAVE");
+    s_spp_refused = sr_savedata_execute(SPP_DIRECT);
+    sr_hle_release_thread_resources(s_spp_saver + 1u);   /* no such thread: changes nothing */
+    s_spp_refused_after_other = sr_savedata_execute(SPP_DIRECT);
+    s_spp_status_parked = utility_status(&c, NID_SAVEDATA_DIALOG_STATUS);
+    s_spp_terminate = gsw_call(NID_SCE_KERNEL_TERMINATE_THREAD, s_spp_saver, 0u, 0u, 0u);
+    s_spp_update_after = utility_call(&c, NID_SAVEDATA_DIALOG_UPDATE, 0u);
+    s_spp_status_after = utility_status(&c, NID_SAVEDATA_DIALOG_STATUS);
+    s_spp_result = MEM_R32(UTILITY_SAVEDATA_PARAM_ADDR + 0x1cu);
+    s_spp_shutdown = utility_call(&c, NID_SAVEDATA_DIALOG_SHUTDOWN, 0u);
+    for (int frame = 0; frame < 4 && !s_spp_none; frame++)
+        s_spp_none = utility_status(&c, NID_SAVEDATA_DIALOG_STATUS) == 0u;
+    spp_save_block(SPP_DIRECT, "AFTER-SAVE");
+    s_spp_after_save = sr_savedata_execute(SPP_DIRECT);
+    cpu->r[2] = 0u;
+}
+
+static void spp_main_fn(CpuState *cpu) {
+    spp_save_block(SPP_DIRECT, "FIRST-SAVE");
+    s_spp_first = sr_savedata_execute(SPP_DIRECT);
+    const uint32_t strong = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, SPP_NAME, SPP_STRONG_ENTRY, 16u, 0x1000u);
+    (void)gsw_call(NID_SCE_KERNEL_START_THREAD, strong, 0u, 0u, 0u);   /* it runs and delays */
+    s_spp_saver = gsw_call(NID_SCE_KERNEL_CREATE_THREAD, SPP_NAME, SPP_SAVER_ENTRY, 24u, 0x1000u);
+    (void)gsw_call(NID_SCE_KERNEL_START_THREAD, s_spp_saver, 0u, 0u, 0u);
+    cpu->r[2] = 0u;
+}
+
+static void test_savedata_thread_ended_inside_a_parked_save(void) {
+    static const char ms_root[] = HLE_BUILD_ROOT "/hle_sd_preempt";
+    const char *old_ms = getenv("SR_MEMSTICK");
+    char *save_ms = old_ms ? (char *)malloc(strlen(old_ms) + 1u) : NULL;
+    if (save_ms) memcpy(save_ms, old_ms, strlen(old_ms) + 1u);
+    nk_platform_mkdir_p(ms_root);
+    hle_test_setenv("SR_MEMSTICK", ms_root);
+
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_osk_slot_reset();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(SPP_MAIN_ENTRY, spp_main_fn);
+    sr_test_register_guest_fn(SPP_STRONG_ENTRY, spp_strong_fn);
+    sr_test_register_guest_fn(SPP_SAVER_ENTRY, spp_saver_fn);
+    title_hle_write_cstr(SPP_NAME, "sd-thread");
+    s_spp_saver = s_spp_first = s_spp_refused = s_spp_refused_after_other = 0xdeadbeefu;
+    s_spp_status_parked = s_spp_terminate = s_spp_update_after = s_spp_status_after = 0xdeadbeefu;
+    s_spp_result = s_spp_shutdown = s_spp_after_save = 0xdeadbeefu;
+    s_spp_strong_ran = s_spp_saver_returned = s_spp_none = 0;
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+    sched_run(SPP_MAIN_ENTRY, 0u, 0u);
+
+    expect(s_spp_first == 0u, "a SAVE with no thread due succeeds");
+    expect(s_spp_strong_ran && s_spp_refused == SPP_ACCESS_ERROR,
+           "a stronger thread runs inside the parked SAVE, and its savedata call is refused");
+    expect(s_spp_refused_after_other == SPP_ACCESS_ERROR,
+           "another thread's release leaves the parked SAVE in flight: a savedata call is still refused");
+    expect(s_spp_status_parked == 2u, "the savedata dialog is RUNNING while its SAVE is parked");
+    expect(s_spp_terminate == 0u && !s_spp_saver_returned,
+           "the saving thread is terminated inside its Update and never returns from it");
+    if (s_spp_status_after != 3u || s_spp_result != SPP_ACCESS_ERROR)
+        printf("  savedata dialog after the thread ended: status %u, result 0x%08x\n",
+               (unsigned)s_spp_status_after, (unsigned)s_spp_result);
+    expect(s_spp_update_after == 0u && s_spp_status_after == 3u && s_spp_result == SPP_ACCESS_ERROR,
+           "the next Update finishes the dialog with the abandoned SAVE's access error");
+    expect(s_spp_shutdown == 0u && s_spp_none, "the finished dialog shuts down to NONE");
+    {
+        char path[600], content[32] = {0};
+        snprintf(path, sizeof(path), "%s/PSP/SAVEDATA/NAKAGAWA1296PREEMPT/DATA.BIN", ms_root);
+        FILE *f = fopen(path, "rb");
+        const size_t n = f ? fread(content, 1, sizeof(content) - 1u, f) : 0u;
+        if (f) fclose(f);
+        expect(s_spp_after_save == 0u && n == strlen("AFTER-SAVE") && !strcmp(content, "AFTER-SAVE"),
+               "with the ended thread's SAVE released, the lock is free and the next SAVE succeeds");
+    }
+
+    atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
+    sr_hle_test_osk_slot_reset();
+    sr_test_guest_fn_reset();
+    hle_test_setenv("SR_MEMSTICK", save_ms);
+    free(save_ms);
+}
+
 /* #1374: what the sync calls return for ids that name no list, for completed lists and
  * for sync types other than 0 and 1. Every expected value is a PSP-GE-SYNC-001 cell
  * (PSP-3000, probe ge-sync-ids, captured by the runs of 96fe29f6 and f6da6125 on
@@ -49337,6 +49475,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_kernel_import_sweep_ge_head();
     test_ge_blocking_sync_waits_for_stalled_list();
     test_ge_list_stops_for_a_stronger_thread();
+    test_savedata_thread_ended_inside_a_parked_save();
     test_ge_sync_ids_match_psp();
     test_ge_signal_jump_call_ret();
     test_ge_signal_depth_origin_stall();

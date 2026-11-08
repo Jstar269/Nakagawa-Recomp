@@ -2346,8 +2346,13 @@ static uint64_t s_quit_stop_deadline_us;
  * running inside that window, so a quit does not cut off a save in progress (the pause
  * overlay's Quit is refused for the same reason). Returns 1 once the run should end; the window
  * bounds the wait, so a guest that never finishes cannot hold the player open. The stop lands
- * only between guest slices, never inside the sceUtilitySavedataUpdate call that writes the
- * save (sr_savedata_execute_sized runs within it), so no write is cut off halfway. */
+ * only between guest slices. A SAVE that hands the CPU over at one of its preemption points
+ * (#1296) is parked inside the sceUtilitySavedataUpdate call that writes it; the driver holds a
+ * stop while that SAVE is parked, for up to its own window of guest time
+ * (sr_savedata_stop_deferred, the same length as this one). Past it the run stops with the SAVE
+ * half done, and the next savedata call rolls it back or finishes it from its journal. A quit
+ * can therefore wait this window and then that one, at most 10 s of guest time. A LoadExec is
+ * not held: it ends the parked SAVE through sr_hle_release_thread_resources. */
 int sr_exit_request_stop_due(void) {
     if (!s_quit_stop_armed) {
         s_quit_stop_armed = 1;
@@ -2644,9 +2649,30 @@ static void mbx_remove_thread_waiters(uint32_t thread_uid);
 static void io_cwd_release_thread(uint32_t thread_uid);
 
 
+uint32_t sr_savedata_release_thread(uint32_t thread_uid);   /* savedata.c: a SAVE it left parked */
+
+/* #1296: the thread whose sceUtilitySavedataUpdate was running the dialog's SAVE ended while the
+ * SAVE was parked, so that Update never returns to record a result (hle_utility.c). Finish the
+ * dialog's work with the abandoned SAVE's result (its mode's savedata_access_error code), so the
+ * next Update reports FINISHED and the game can shut the dialog down; the pause overlay's Quit
+ * stays refused until it does (sr_savedata_pause_busy counts FINISHED as busy). On a PSP the
+ * utility's own thread does the save and finishes it whatever happens to the caller; what the
+ * dialog then reports is UNMEASURED. */
+static void savedata_dialog_work_abandoned(uint32_t result) {
+    dialog_lock();
+    if (s_utility_slot == UTILITY_SLOT_SAVEDATA && s_dlg_status == 2 && s_dlg_work_started &&
+        !s_dlg_work_done) {
+        s_dlg_result = result;
+        s_dlg_work_done = 1u;
+    }
+    dialog_unlock();
+}
+
 void sr_hle_release_thread_resources(uint32_t thread_uid) {
     sr_mutex_release_thread(thread_uid);
     if (thread_uid) {
+        const uint32_t abandoned = sr_savedata_release_thread(thread_uid);
+        if (abandoned) savedata_dialog_work_abandoned(abandoned);
         io_cwd_release_thread(thread_uid);
         mbx_remove_thread_waiters(thread_uid);
 
