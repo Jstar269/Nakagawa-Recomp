@@ -102,7 +102,7 @@ The **Where** column of each table names the places a code can appear:
 | `OUTPUT_EXISTS` | decrypt, player | A file is already where the decrypted copy would go. |
 | `PSONE_CLASSIC_UNSUPPORTED` | decrypt, disc, player | The package is a PSOne Classic, a PlayStation game for the PSP's emulator, which is out of scope. |
 | `RESOURCE_LIMIT` | decrypt, player | The file on the disc is empty or over the decryption size limit, or memory for it could not be allocated. |
-| `UNSUPPORTED_SCHEME` | decrypt, player | The file uses an encryption form Nakagawa does not cover yet. |
+| `UNSUPPORTED_SCHEME` | decrypt, player | The file uses an encryption form Nakagawa does not cover. |
 | `VALIDATION_FAILURE` | decrypt, player | The decrypted file failed its check, so it was not kept. |
 
 ## import
@@ -232,7 +232,7 @@ The **Where** column of each table names the places a code can appear:
 | `RUNTIME_NO_NEW_FRAMES` | player | The game presented no new frame for a long stretch, and it was stopped from the stall notice. |
 | `RUNTIME_NO_PICTURE` | player | The game kept presenting frames, but every one was dark for a long stretch, and it was stopped from the stall notice. |
 | `RUNTIME_PREMATURE_EXIT` | player | The game's process exited within 500 ms of starting, whatever its exit code. |
-| `RUNTIME_SEMANTIC_BOUNDARY` | report, player | The game reached a feature Nakagawa does not run yet; the [stop boundary](#stop-boundaries) names it. |
+| `RUNTIME_SEMANTIC_BOUNDARY` | report, player | The game reached a feature Nakagawa does not run; the [stop boundary](#stop-boundaries) names it. |
 | `RUNTIME_START_TIMEOUT` | player | The game's process wrote no boot event within the start time limit, so the player stopped it. |
 | `RUNTIME_TRACE_UNAVAILABLE` | report | The runtime could not read a usable reference trace. |
 | `RUN_BUDGET_ENDED_BEFORE_FRAMEBUFFER_SETUP` | report | The run's time budget ended while the game was still running, before it set up its display. |
@@ -240,7 +240,7 @@ The **Where** column of each table names the places a code can appear:
 | `TITLE_DATA_MISSING` | player | The data folder the title manifest names was not found when the game was launched. |
 | `TITLE_PROFILE_INVALID` | player | The title's settings file is invalid. |
 | `UNRESOLVED_DISPATCH_TARGET` | report | The runtime refused a jump to code it has no translation for. |
-| `UNSUPPORTED_IMPORT` | report | The game called a system function Nakagawa does not provide yet. |
+| `UNSUPPORTED_IMPORT` | report | The game called a system function Nakagawa does not provide. |
 | `UNSUPPORTED_INSTRUCTION` | report | The game ran an instruction the generated code and the interpreter do not cover. |
 | `WINDOWS_BLOCKED_START` | player | Windows blocked the runtime from starting. |
 | `WINDOWS_DEFENDER_THREAT` | player | Windows Security flagged the runtime and stopped it. |
@@ -314,7 +314,7 @@ The **Where** column of each table names the places a code can appear:
 | `UPDATE_INSTALL_MOVE_FAILED` | player | The new version could not be moved into place. |
 | `UPDATE_INSTALL_NOT_WRITABLE` | player | The install folder is not writable. |
 | `UPDATE_INSTALL_PATH` | player | The folder for the new version has too long a path. |
-| `UPDATE_NO_RELEASES` | player | GitHub lists no release yet. |
+| `UPDATE_NO_RELEASES` | player | GitHub lists no release. |
 | `UPDATE_NO_SIGNING_KEY` | player | This build carries no update signing key, so it fetches no update. |
 | `UPDATE_NO_WINDOWS_ZIP` | player | The release has no Windows ZIP. |
 | `UPDATE_OFFLINE` | player | GitHub could not be reached. |
@@ -332,7 +332,7 @@ The **Where** column of each table names the places a code can appear:
 
 ## Stop boundaries
 
-When a running game reaches something Nakagawa does not run yet, the runtime stops it at a
+When a running game reaches something Nakagawa does not run, the runtime stops it at a
 named boundary and the player's problem report says `RUNTIME_SEMANTIC_BOUNDARY`. The boundary
 name is written as `BOOT_EVENT phase=stop reason=semantic-boundary boundary=<name>`.
 
@@ -351,7 +351,7 @@ name is written as `BOOT_EVENT phase=stop reason=semantic-boundary boundary=<nam
 | `null-code-pointer` | 1375 | The game jumped to address 0, a null code pointer. |
 | `null-data-pointer` | 363 | The game read or wrote through a null pointer. |
 | `target-not-executable` | 118 | The game jumped to an address outside executable code. |
-| `unsupported-import-<name>` | 308 | The game called the system function `<name>`, which Nakagawa does not provide yet. |
+| `unsupported-import-<name>` | 308 | The game called the system function `<name>`, which Nakagawa does not provide. |
 | `unsupported-interpreter-form` | 118 | The interpreter met an instruction form it does not run. |
 
 ## Adding a code

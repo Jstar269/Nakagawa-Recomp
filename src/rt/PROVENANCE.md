@@ -2,8 +2,9 @@
 
 Runtime and reference-interpreter source that this project inherited from the
 sal063 PSP Recompilation Project, a fork whose code in turn derives from PPSSPP,
-plus files the project created from those. This manifest covers the 61 files
-under `src/` that are marked GPL-2.0-or-later. It records what the project can
+plus files the project created from those. This manifest covers the 65 files
+under `src/rt/` and `src/ref/` that are marked GPL-2.0-or-later, plus `rt/evf.h` and
+`rt/gpu_sdl3vk/README.md` (`src/core/PROVENANCE.md` covers the two in `src/core/`). It records what the project can
 establish about their origin and states plainly what it cannot.
 
 Related but separate manifests: `src/rt/atrac3p/PROVENANCE.md` (FFmpeg
@@ -54,6 +55,7 @@ The one partial pin that exists is described under "Pins" below.
 | Later PPSSPP behaviour adapted into the sceMpeg port in `rt/mpeg.c` and `rt/hle_mpeg.c` | `c9e2afb65fac6b43c51154471435ab7b137af32f` (PPSSPP merge of 2026-10-31): the per-stream access-unit skip mode (`streamIgnoreMap`, upstream 9c78c886e), the nine-word stream-info probe and the data-stream ES sizes, added by #1782; `caa91b54b53585811b0fd84405ea04aec72a952b` (PPSSPP merge of 2026-11-03): `sceMpegFlushStream`, added by #1991; `1772448638243242c9b1f5cd03ad3af0edc2e238` (2026-10-01, "HLE: Don't delay results in an interrupt handler"): `sceMpegCreate` returns `0x80618008` inside an interrupt handler, added 2026-11-05. All three are in file `Core/HLE/sceMpeg.cpp` | Each adapting change names its revision in a code comment beside the behaviour. The interrupt refusal is also measured on a PSP by pspautotests `tests/intr/delays` (`delays.expected:24`), and the ringbuffer available-size refusal after `sceMpegDelete` (`0x80618009`, same date) follows pspautotests `tests/video/mpeg/ringbuffer/avail.expected:10`, which the pin already matched. A review on 2026-11-05 of the 27 upstream commits to `Core/HLE/sceMpeg.cpp` between `4e109dd6` and `5b3ddcc0628585b7b091c9a9904dba58bb4118c8` found no other change that both alters PSP-visible behaviour and is missing here, except the access-unit field values of `dd0fa10f8`, which are unmeasured and left for a PSP probe. |
 | PPSSPP source of the sceMp3 adaptation in `rt/hle_audio_codec.c` (added to `rt/hle.c` 2026-10-24) | `0028f30da6784570264a41ef6cce1c3963692ea7` (PPSSPP `master` when adapted), files `Core/HLE/sceMp3.cpp` and `Core/HW/SimpleAudioDec.cpp` (`AuCtx`) | Adapted by this project under the 2026-10-20 import rule; the sceMp3 block comment (now in `rt/hle_audio_codec.c`) names the pin, keeps the PPSSPP copyright line, lists the modifications and labels the block derived-translated. The decoder behind it is minimp3 (`src/rt/minimp3/PROVENANCE.md`), not PPSSPP code. |
 | PPSSPP source of the SAS envelope model in `rt/sas_envelope.h` (added 2026-11-04, #1296) | `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` (PPSSPP `master` when adapted), files `Core/HW/SasAudio.cpp` (blob `0d5170cb97757abc0ae72a0805bdcbaead8ddf38`) and `Core/HW/SasAudio.h` (blob `bbf6677d75c0262663106cc70505b688d5040474`), class `ADSREnvelope` and the simple-envelope bitfield decoders; `Core/HLE/sceSas.cpp` (blob `bf7d901847bd88998e558da829c295998bfb9ad2`), the per-phase curve check of `sceSasSetADSRMode` | Adapted by this project under the import rule; the file header names the pin, keeps the PPSSPP copyright and licence notice, lists the modifications and labels the file derived-translated. |
+| PPSSPP source of the texture replacement hash and pack lookup in `rt/texrepl.c` (added 2026-11-06, #1880) | `3bc60270eae3069f13dfbfdb7292a7e1375de6f6` (PPSSPP `master` when adapted), files `GPU/Common/TextureDecoder.cpp` (`StableQuickTexHash`, `QuickTexHashNonSSE`), `GPU/Common/TextureReplacer.cpp` (`textures.ini`, hash ranges, key and wildcard lookup) and `GPU/Common/TextureCacheCommon.cpp` (the palette hash) | Adapted by this project under the import rule; the file header names the pin, keeps the PPSSPP copyright line and says it was modified. |
 | Every other PPSSPP-derived file | unknown | No revision text exists in sal063's tree or in this repository's history. |
 
 ## Import-rule check (2026-10-20 and later)
@@ -77,6 +79,7 @@ for later adaptation found none:
   `Core/HLE/sceMp3.cpp`
   and `Core/HW/SimpleAudioDec.cpp` at the exact pin in the table above, and says so.
 - 2026-11-04: `rt/sas_envelope.h` adapts PPSSPP `Core/HW/SasAudio.cpp` and `Core/HW/SasAudio.h` (the SAS envelope) and the `sceSasSetADSRMode` curve check from `Core/HLE/sceSas.cpp` at the exact pin in the table above, and says so (#1296).
+- 2026-11-06: `rt/texrepl.c` adapts the quick texture hash and the replacement-pack key and lookup order from PPSSPP `GPU/Common/TextureDecoder.cpp`, `GPU/Common/TextureReplacer.cpp` and `GPU/Common/TextureCacheCommon.cpp` at the exact pin in the table above, and says so (#1880).
 
 This is a text search of the history, not proof that no PPSSPP code was typed
 in by hand without a mention. The 2026-10-20 rule did not change the status of
@@ -232,6 +235,7 @@ Created in this repository. The code moved out of a sal063-lineage file, so the 
 | Path (under `src/`) | Lineage | Classification | PPSSPP pin | Local modifications | Notice lines in the file header | Commits here |
 | --- | --- | --- | --- | --- | --- | --- |
 | `rt/sas_envelope.h` | PPSSPP `3bc60270` (no sal063 lineage) | derived-translated | `3bc60270eae3069f13dfbfdb7292a7e1375de6f6`, `Core/HW/SasAudio.cpp`, `Core/HW/SasAudio.h` and `Core/HLE/sceSas.cpp` (see Pins) | LOCAL DELTA: `ADSREnvelope`, the simple-envelope decoders and the ADSRmode curve check translated from C++ to C99 static inline functions over a plain struct; the per-title `RockmanDash2SoundFix` flag, savestate and debug-string code left out; KeyOn enters the attack state without the `STATE_KEYON`/`STATE_KEYON_STEP` delay; an unconfigured voice keeps the runtime's previous default curve, which departs from PPSSPP's and jpcsp's all-zero default until a PSP measurement settles it; the height read back is clamped at 0 from below. | SPDX GPL-2.0-or-later; PPSSPP copyright and GPL-2.0-or-later notice as upstream; Nakagawa Recomp authors copyright; PPSSPP derivation line naming the pin; Nakagawa modification line 2026-11-04 | 1 |
+| `rt/texrepl.c` | PPSSPP `3bc60270` (no sal063 lineage) | derived-translated | `3bc60270eae3069f13dfbfdb7292a7e1375de6f6`, `GPU/Common/TextureDecoder.cpp`, `GPU/Common/TextureReplacer.cpp` and `GPU/Common/TextureCacheCommon.cpp` (see Pins) | LOCAL DELTA: the quick texture hash, the palette hash and the pack key and lookup order translated from C++ to C99; the `textures.ini` parser, the PNG decode (stb), the cache and the memory budget are this project's own | SPDX GPL-2.0-or-later; PPSSPP Project copyright; Nakagawa Recomp authors copyright; PPSSPP derivation line with the pin; Nakagawa modification line 2026-11-06 | 1 |
 
 ## Related files that this manifest does not cover
 

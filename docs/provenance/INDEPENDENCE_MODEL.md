@@ -29,14 +29,14 @@ explicitly marked false:
 | --- | --- | --- |
 | build the runtime | no | nothing in the build reads `third_party/ppsspp*` |
 | run the game | no | `driver.c` accepts `none` for the reference-trace argument |
-| `make verify` | **yes** *(narrowed 2026-10-01)* | the codegen and microtest gates consume external golden traces and report NOT_RUN without them; the PSP-side v2 trace producer is not built (#312), so the only traces a user can supply today are PPSSPP-captured, which are corroborative only |
+| `make verify` | **yes** *(narrowed 2026-10-01)* | the codegen and microtest gates consume external golden traces and report NOT_RUN without them; the PSP-side v2 trace producer (`tools/psp_oracle/insn_trace.py psp`, #312) needs a PSP; without one, the only traces a user can supply are PPSSPP-captured, which are corroborative only |
 | regenerate `src/rt/nid_names.h` | no *(was yes)* | IND-1 replaced the PPSSPP scrape with the tracked `tools/nid_corpus.json` |
 
 So the honest present-tense claim is "build and run", not "build, run and verify". One `yes` row
 remains. Retiring it is a longer-term question for the oracle gates -- the trace *format* is
 documented in `tools/TRACE_FORMAT.md` and consuming an oracle is not derivation, but a gate that
-cannot run without upstream output is still an upstream dependency. The row is a candidate for
-retirement once the PSP-side v2 producer lands and a `PSP_HARDWARE` capture can be supplied.
+cannot run without upstream output is still an upstream dependency. The PSP-side v2 producer
+exists; the row stays `yes` until the gates run from supplied `PSP_HARDWARE` captures.
 
 Sentence 2 is true for a minority of the runtime today. Sentence 3 is the invariant this ledger
 exists to hold.

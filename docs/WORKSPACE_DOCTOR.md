@@ -84,9 +84,9 @@ The doctor does more than test path existence:
 - `xbdata_extracted/` (or configured `SR_DATAROOT`) must contain files rather than merely exist as an empty placeholder;
 - `memstick/` (or configured `SR_MEMSTICK`) is verified for directory presence and writability (`SAVE_ROOT`).
 
-The disc-ID scan is deliberately an additional signal, not a cryptographic identity guarantee. A
-future importer should parse `PARAM.SFO`, record exact source hashes, and bind all generated inputs to
-a private workspace manifest.
+The disc-ID scan is deliberately an additional signal, not a cryptographic identity guarantee. The
+player's importer reads the disc ID and version from `PARAM.SFO`; the doctor does not bind generated
+inputs to a workspace manifest.
 
 ### Runtime closure
 
@@ -157,26 +157,18 @@ The first version does not:
 
 Those operations require separate, transactional workflows with their own provenance and tests.
 
-## Next simplification steps
+## Commands the doctor sits beneath
 
-The doctor is intended to become the validation layer beneath three later commands:
+Importing a disc, building a package and starting a game are done in the player (**BUILD PACKAGE**,
+**PLAY**) and with `tools/nk_cli.py` (`prepare`, `build-package`, `launch`); the doctor is their
+preflight. These questions about the workspace stay open:
 
-```text
-ImportGame  -> prepare and bind private inputs transactionally
-Play        -> choose no-build/incremental/full rebuild from manifests, then launch
-PackageLocal -> produce a private runtime closure for a second Windows machine
-```
-
-Before implementing those commands, the project should complete the following investigations:
-
-1. parse the ISO's `PARAM.SFO` and bind the disc ID/version to every derived input;
-2. test current decrypters against the exact three game PRXs and record a versioned compatibility
-   matrix rather than relying on generic tool claims;
-3. make extraction interruption recovery and completeness machine-verifiable (containment and
+1. bind the disc ID/version read from `PARAM.SFO` to every derived input;
+2. make extraction interruption recovery and completeness machine-verifiable (containment and
    decode budgets are now repository-owned; `libxb` is no longer an extraction dependency);
-4. determine whether a direct XB virtual filesystem can remove the expanded asset tree entirely;
-5. separate build-time dependencies from the files required only to run a completed local build;
-6. unify the flattened `fs/` and hierarchical `memstick/` mappings under one safe Memory Stick root — **DONE (issue #334)**: ordinary `sceIo*` and savedata share `SR_MEMSTICK` (default `memstick/`) via `sr_ms0_resolve`; `fs/` remains only as a read-only legacy-import source.
+3. determine whether a direct XB virtual filesystem can remove the expanded asset tree entirely;
+4. separate build-time dependencies from the files required only to run a completed local build;
+5. unify the flattened `fs/` and hierarchical `memstick/` mappings under one safe Memory Stick root — **DONE (issue #334)**: ordinary `sceIo*` and savedata share `SR_MEMSTICK` (default `memstick/`) via `sr_ms0_resolve`; `fs/` remains only as a read-only legacy-import source.
 
 ## Output roots and clean preview
 
@@ -273,12 +265,11 @@ promise. The remedy is always the same order: export the working-tree diff and a
 the branch, remove the regenerable build output, then remove and prune the worktree. Doctor
 never removes, prunes or writes anything itself.
 
-## Deferred build and workspace ergonomics
+## Build and workspace ergonomics
 
-The governance work intentionally leaves these as separate, evidence-backed follow-ups:
+The state of each build and workspace ergonomics item:
 
-1. replace mixed cmd/sh Make recipes with a Windows-native wrapper that preserves the current
-   dependency and fail-closed semantics;
+1. [NOT DONE] the Make recipes mix cmd and sh; no Windows-native wrapper replaces them;
 2. [DONE - #368] remove hardcoded machine paths from VS Code, `mem_debug`, and tool discovery:
    toolchain lookup honors an explicit `MSYS_PATH` (never `MSYSTEM_PREFIX`, which Git Bash points at its
    own MinGW), with documented defaults in `nk.ps1`, `nk_manager.ps1`, `tools/nk_doctor.py`, and
@@ -308,7 +299,7 @@ The governance work intentionally leaves these as separate, evidence-backed foll
    make Make write `spaces/` litter into a checkout, and a whitespace-bearing `BUILD_DIR` is refused
    outright; `clean-preview` still selects only its bounded allowlist (the disposable roots in the
    table), and linked-worktree build output is now surfaced by `WORKTREES_BUILD_SIZE`, but a non-build
-   route that writes outside the listed roots is not yet surfaced by a single inventory;
+   route that writes outside the listed roots is not surfaced by a single inventory;
 7. [DONE - #368] eliminate absolute paths from generated `compile_commands.json`:
    `python tools/compdb_relocate.py compile_commands.json` rewrites every path under the checkout
    to a root-relative form and keeps only `directory` absolute, so a moved or cloned workspace
@@ -317,5 +308,4 @@ The governance work intentionally leaves these as separate, evidence-backed foll
    `check_worktree_accumulation` in `tools/nk_doctor_checks.py` inventories every registered
    worktree (count, nesting inside a checkout, unregistered directories in the sibling
    `worktrees/` layout, and stale paths) and the regenerable `build/` output under each one, with
-   advisory bounds and a bounded scan; `tools/test_workspace_paths.py` covers every result;
-9. consider build-cache research only after the correctness and ownership contracts are stable.
+   advisory bounds and a bounded scan; `tools/test_workspace_paths.py` covers every result.

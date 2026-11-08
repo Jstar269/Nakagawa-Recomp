@@ -25,7 +25,7 @@ run on the development host and are never executed by `hst.exe` at runtime. For 
    manager discovers and validates it automatically. Do not replace `all` with a single dependency
    line: generated chunk discovery occurs in the second Make process. For a title with a local manifest, use
    `.\nk_manager.ps1 -Action BuildFull -TitleManifest <manifest> -GameName <name>` from the repository root; the
-   maintainer's HST manifest (`assets/titles/hst-ucus98701.json`) is local and not in the repository.
+   HST manifest is `assets/titles/hst-ucus98701.json`.
 
 ## Gates
 

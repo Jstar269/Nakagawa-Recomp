@@ -54,10 +54,11 @@ of 2026-11-02, whole history, hosted runners):
 
 GitHub's free plan runs about 20 jobs at once for this repository. A full `CI` run (a workflow
 change, a manual run, the nightly schedule, a merge group) used to need 23 jobs, so a second
-pull request's run waited for runners while the first ran. The existing checks now run in 14
-jobs; installer and Windows-runtime changes add one path-gated Windows installer job.
-Nothing was dropped and no command changed; jobs were merged and their steps run one after
-another. Three things differ in when or how a step runs, and none of them skips a step
+pull request's run waited for runners while the first ran. The same checks then ran in 14
+jobs; the Android launcher build (`android_build`), added later, makes 15, and installer and
+Windows-runtime changes add one path-gated Windows installer job. Nothing was dropped and no
+command changed; jobs were merged and their steps run one after another. Three things differ in
+when or how a step runs, and none of them skips a step
 where it ran before:
 
 - The main smoke steps no longer wait for the public-export job. The old `main_smoke` job
@@ -80,6 +81,7 @@ The jobs:
 | `python_tools` | 6 shards, 4.2-18.2 min | 3 shards, about 16.5 min each |
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 3 groups of parts, about 10-13 min each |
 | `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
+| `android_build` ("Android launcher build") | not present | 1 job, added later |
 | `ci_required` | 1 job | unchanged |
 
 - **Hygiene.** The check keeps its name, which the ruleset and the
@@ -545,7 +547,7 @@ or a compiler that is not the pinned one, fails it. Then `ge-first-bad-draw-self
 (`SR_GE_FBD_MUTANT`) must each be named as that draw, in linear and bisect mode. A second generated
 capture holds one PRIM of two overlapping translucent sprites on a 16-bit target, and the tool must
 find exactly its overlap as the first bad draw: the known shader-blend batch-order difference
-(#2109), which that fix turns into `NO_DIFFERENCE`. Four more generated captures check that the
+(#2109, open). Four more generated captures check that the
 tool fails closed: a 512-wide scissor (ge.c rasterizes inside 480x272), 33 targets or a stride of
 1088 are `INCOMPLETE`, and a capture with no draw is `NO_DRAWS`. The same step then runs
 `vram-view-identity-selftest` (#314): the GE decoders the pause menu's VRAM viewer calls, run at
@@ -569,7 +571,7 @@ suite as four parallel shards (`PLAYER_UI_SHARDS`, `NAKAGAWA_PLAYER_UI_SHARD`) t
 every test exactly once; each test already uses its own temporary data roots. The CMake player is configured with CMake's default, unoptimized build type, so
 the gate covers only that configuration: an optimized Release configuration fails under the global
 `-Werror` on existing truncation warnings in `src/core/nk_launch.c`, a separate defect, and this
-job does not claim that configuration builds. Consumer ISO compatibility remains in the works
+job does not claim that configuration builds. Consumer ISO compatibility on Linux is not supported
 (#306); these checks do not establish PSP hardware acceptance or interactive desktop presentation.
 
 ### GCC 16 canary
@@ -1252,7 +1254,7 @@ and each token's remaining budget.
 | Code | Fails when |
 | --- | --- |
 | `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`) or any `tools/` file a default-branch workflow runs, without a current `ci-change-approved` label |
-| `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; merge `main` (no label waives it) |
+| `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; the integrator merges `main` when it lands the pull request; the author merges it only for a real conflict in content that is not generated, or when asked (`AGENTS.md` section 10). No label waives it |
 | `CI_CONTEXT_COLLISION` | another workflow names `Trusted CI verdict`, or a check run uses that name |
 | `FOREIGN_PRODUCER` | a check run or status under an intended context is not from the intended workflow path and event at this head |
 | `JOB_MISSING`, `JOB_FAILED`, `JOB_CANCELLED`, `DUPLICATE_CONTEXT` | the latest non-cancelled intended run lacks the job, the job did not succeed, every run was cancelled, or two jobs share the name |
@@ -1260,6 +1262,9 @@ and each token's remaining budget.
 | `RUN_FOR_OTHER_PR`, `AMBIGUOUS_HEAD` | the intended run belongs to another pull request, or another open pull request has the same head |
 | `PR_NOT_OPEN`, `BASE_NOT_DEFAULT` | nothing to judge for a merge into `main` |
 | `DRAFT_LIGHT_CI` | the pull request is a Draft, or its draft state cannot be read: CI ran only the quick checks ([Draft pull requests](#draft-pull-requests)); mark it Ready for review |
+
+Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and when, is decided by
+[`AGENTS.md` section 10](../AGENTS.md#10-pr-and-integration-authorization), as the row above states.
 
 The intended producers are `CI required` and `Hygiene and security` from `ci.yml`, `OSV
 Vulnerability Scan` from `osv-scanner.yml`, `dependency-review` from `dependency-review.yml`

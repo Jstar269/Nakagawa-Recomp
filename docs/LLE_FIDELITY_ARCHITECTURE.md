@@ -201,7 +201,7 @@ end to end by source-owned tests:
   per-track compressed-access-unit queues with backpressure, bounded parsing, and fail-closed
   malformed-input handling. Its H.264 boundary accepts both Annex-B start-code forms:
   `00 00 01` and `00 00 00 01` (the latter keeps its leading zero in the first access unit).
-- The `scePsmfPlayer*` handlers remain host HLE for now: they own the guest control block and the
+- The `scePsmfPlayer*` handlers are host HLE: they own the guest control block and the
   output contract, and drive that producer plus the host codecs (Media Foundation H.264 for
   pictures, the project's ATRAC3plus decoder import for audio). A getter returns success only for
   output a decoder actually produced; a compressed access unit is never presented as a decoded
@@ -274,8 +274,8 @@ two can be compared call by call (#2148). The check is the `SR_MODE_COSIM` lane 
   (`link_started_export`), so pairing started-module exports needs an HLE-only entry for the HLE
   lane before it can compare anything.
 - **Scope.** COSIM is off by default and is selected only through the C API, so only the
-  synthetic selftest (`domain-mode-selftest`) runs it today. Running it on a title needs a build
-  with `--lle-import-seam` and started-module exports in the registry; that is the next step.
+  synthetic selftest (`domain-mode-selftest`) runs it. Running it on a title needs a build
+  with `--lle-import-seam` and started-module exports in the registry, which is not done.
   A match proves only the compared call with those inputs. A difference is evidence for fixing the
   handler or for moving the library to LLE, not a hardware result.
 

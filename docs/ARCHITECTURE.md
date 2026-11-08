@@ -113,8 +113,8 @@ entry set without silently selecting a winner. `canonical_cfg_json()` is stable 
 fixtures and build-cache comparisons. The CFG gate rejects an owned in-range edge whose
 target has no owner, plus ownership conflicts and unmapped entries. Non-padding words
 outside known control-flow remain listed as unowned; this records uncertainty and does
-not prove that no dynamic entry exists. Dynamic-entry ownership remains in the works
-(issue #291); the gate keeps such words visible as unowned instead of assuming the image
+not prove that no dynamic entry exists. Dynamic-entry ownership is not
+modelled; the gate keeps such words visible as unowned instead of assuming the image
 is complete. File adjacency after an unconditional transfer
 does not make a word a callable. The opt-in `codegen.py --stack-census` flag
 also requires the CFG gate and wraps generated callable entries to compare guest
@@ -252,7 +252,7 @@ These tools run on the development host before the native compiler.
   passes, but on HST at `-O1` the guest time outside the GE fell by only about 1.3% (two runs per
   build). The software GE takes 80% of guest time on that route, so frames sped up by about 0.25%.
   Chunk objects grew by 0.03%, and PAC-MAN CE at `-O0` was about 11% slower. The option therefore
-  stays off by default; dropping write-backs of dead locals (liveness) is the next step to measure.
+  stays off by default. It does not drop write-backs of dead locals.
 
 ### Verification tools
 
@@ -628,7 +628,7 @@ refuses a body whose slot label has no owned successor. `cosim-selftest` covers 
 taken, used to carry the body into the other entry's code and translate a copy of it. In a large
 branch-connected region every entry then holds a copy of the whole region (one title: 6,539
 entries in a region of 1.33 million instructions). A body whose walk exceeds
-`OPTIONS.region_split_threshold` instructions (`tools/codegen.py`, `--region-split-threshold=N|off`)
+`CodegenOptions.region_split_threshold` instructions (`tools/codegen.py`, `--region-split-threshold=N|off`)
 instead stops at every other entry. A conditional branch into one records a TAIL transfer to that
 entry's own body after the delay slot (annulled on the not-taken path of a branch-likely), and a
 not-taken successor that is one is a continuation, exactly as straight-line fall-through is. A
@@ -808,10 +808,10 @@ Clock ownership:
   or stick still held as the overlay closes stays hidden from the guest until it is let go, so
   the press that resumed never reaches the game as a fresh press (`NkInputGate`,
   `src/core/nk_input_profile.h`). Guide is the pause button only; a profile binding to it has no
-  effect in game. Builds after v0.0.1 draw the overlay's pages (resume, settings, controls, quit to
-  library) inside the runtime with nk_ui (`src/rt/overlay/`,
-  [#1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159)); in v0.0.1, `Esc`, `F1`,
-  Guide or the controller's back button (East) only resumes.
+  effect in game. The runtime draws the overlay's pages (resume, settings, controls, quit to
+  library) with nk_ui (`src/rt/overlay/`,
+  [#1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159)); v0.0.1 had no pages, and `Esc`, `F1`,
+  Guide or the controller's back button (East) only resumed.
 - **libc time/gettimeofday** — seconds/usec since the standard Unix epoch, converted from the RTC
   tick. The PSP timezone is a console setting, not the host process timezone. It lives in the
   virtual system registry (`/CONFIG/DATE/time_zone_offset` and `summer_time`), the same keys

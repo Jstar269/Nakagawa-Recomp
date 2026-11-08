@@ -47,6 +47,12 @@ extern "C" {
     "https://api.github.com/repos/" NK_UPDATE_REPOSITORY "/releases?per_page=10"
 /* Release assets download from github.com, which redirects to GitHub's asset host. */
 #define NK_UPDATE_DOWNLOAD_HOSTS "github.com;release-assets.githubusercontent.com"
+/* GitHub treats owner and repository names as case-insensitive, and its answers use the
+   repository's current capitalisation (Jstar269/Nakagawa-Recomp since its rename), so this
+   part of a URL compares without case and the rest of the URL exactly. */
+#define NK_UPDATE_REPOSITORY_URL "https://github.com/" NK_UPDATE_REPOSITORY
+/* Both prefixes start with NK_UPDATE_REPOSITORY_URL. They spell it out so that the network
+   egress test in tools/test_prereq_fetcher.py can read each URL from this header. */
 #define NK_UPDATE_RELEASE_PAGE_PREFIX "https://github.com/" NK_UPDATE_REPOSITORY "/releases/tag/"
 #define NK_UPDATE_DOWNLOAD_PREFIX "https://github.com/" NK_UPDATE_REPOSITORY "/releases/download/"
 #define NK_UPDATE_USER_AGENT "NakagawaRecomp/UpdateCheck"
@@ -102,6 +108,10 @@ typedef struct {
     NkSemver current;
     bool newer;               /* newest is newer than the running version */
 } NkUpdateCheckResult;
+
+/* True when url is one of this repository's release pages: NK_UPDATE_RELEASE_PAGE_PREFIX
+   (the repository part in any case) followed by a tag. */
+bool nk_update_is_release_page(const char *url);
 
 /* Picks the newest release in a GitHub Releases API answer (a JSON array).
    Drafts and tags that are not versions are skipped; pre-releases count. Fails
