@@ -210,7 +210,7 @@ Semantic handler census: **584** handlers across **30** API families, covering *
 - **`h_AudioSRCOutputBlocking`** (`sceAudio`): `sceAudioSRCOutputBlocking` (0xe0727056)
   - Limitation: returns 0x80260008 with nothing reserved and the reserved sample count after a reserve (0x400), both measured (PSP-HLE-AUDIO-SRC-001); the volume bound 0xFFFFF (shared with Output2, from PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp) and the NULL or unreadable buffer result, which follows the regular output, are both unmeasured; the host mixer runs at 44100 Hz, so a 48000 Hz block passes through a band-limited converter and keeps its source-rate pacing (#339)
 - **`h_AudiocodecCheckNeedMem`** (`sceAudiocodec`): `sceAudiocodecCheckNeedMem` (0x9d3f790c)
-  - Limitation: codec 0x1000 (ATRAC3plus) only; the wrapper checks follow uofw; the ATRAC3plus words (+16 = 0x7BC0, +52 = 44100, +60 = 2, +64 = 0x2E8) are JPCSP's and synthetic pending W-LLE-1
+  - Limitation: codec 0x1000 (ATRAC3plus) only; the wrapper checks follow uofw; the words are measured on a PSP-3000 (PSP-VCODEC-001) for the three halfwords at +40 it was given: 0x5C28 (+16 = 0x7BC0, +52 = 44100, +60 = 2, +64 = 0x2E8), 0x5C5C (+16 = 0x1F6C0, +52 = 48000, +60 = 7, +64 = 0x2E8), and 0 (0x807F00FD; +8 = 0x20F, +52 = 0x7D00, +64 = 8); any other halfword is refused
   - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
 - **`h_AudiocodecDecode`** (`sceAudiocodec`): `sceAudiocodecDecode` (0x70a703f8)
   - Limitation: codec 0x1000 only, PSMF frames with the 0x0FD0 header only; mono or stereo input into a mono or stereo 16-bit block (no downmix); synchronous decode; the +28 and +36 words and the refusal code are synthetic pending W-LLE-1
@@ -1412,7 +1412,7 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Limitation: synthetic context words from JPCSP pending W-LLE-1; frees the decoder, ME memory and pictures and closes the context; returns at once (JPCSP notes about 40 ms on a PSP)
   - Evidence: tests/native/videocodec_selftest.c:test_teardown
 - **`h_VideocodecGetEDRAM`** (`sceVideocodec`): `sceVideocodecGetEDRAM` (0x2d31f5b1)
-  - Limitation: synthetic context words from JPCSP pending W-LLE-1; allocates ((+24) + 63) | 0x3F bytes of a host 2 MiB ME RAM model, low-first, 64-byte aligned, first 0x10000 reserved; addresses are not PSP-measured
+  - Limitation: writes +92 = the raw ME address and +20 = it aligned to 64 bytes, the rule measured on a PSP-3000 (PSP-VCODEC-001, type 0); allocates ((+24) + 63) | 0x3F bytes of a host 2 MiB ME RAM model, low-first, first 0x10000 reserved, so the addresses themselves differ from the PSP's
   - Evidence: tests/native/videocodec_selftest.c:test_context_words
 - **`h_VideocodecGetSEI`** (`sceVideocodec`): `sceVideocodecGetSEI` (0x627b7d42)
   - Limitation: synthetic word from JPCSP pending W-LLE-1; clears word +28 of the SEI block named by context +80 and nothing else; a context without a writable SEI block is refused
@@ -1421,19 +1421,19 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Limitation: synthetic context word from JPCSP pending W-LLE-1 (JPCSP cites its own JpcspTrace record); writes context +4 = 0x78 and returns 0; codec type 0 only
   - Evidence: tests/native/videocodec_selftest.c:test_version_sei
 - **`h_VideocodecInit`** (`sceVideocodec`): `sceVideocodecInit` (0x17099f0a)
-  - Limitation: synthetic context words from JPCSP pending W-LLE-1; writes +12 = +20 + 8 only
+  - Limitation: words measured on a PSP-3000 (PSP-VCODEC-001, type 0): writes +12 = +20 and +8 = 0 and nothing else
   - Evidence: tests/native/videocodec_selftest.c:test_context_words
 - **`h_VideocodecOpen`** (`sceVideocodec`): `sceVideocodecOpen` (0xc01ec829)
-  - Limitation: synthetic context words from JPCSP pending W-LLE-1; writes context +0 = 0x05100601 and returns 0 (JPCSP returns its ME driver's result, not modelled); codec type 0 only, other types refused
+  - Limitation: words measured on a PSP-3000 (PSP-VCODEC-001, zeroed context): type 0 writes +0 = 0x05100601, +8 = 1 and +24 = 0x8344 and returns 0; type 1 writes +0, +8 = 0x80000000 and +24 = 0x264C and returns 0x80628001, and the later calls on a type 1 context are refused; other types are refused
   - Evidence: tests/native/videocodec_selftest.c:test_context_words
 - **`h_VideocodecReleaseEDRAM`** (`sceVideocodec`): `sceVideocodecReleaseEDRAM` (0x4f160bf4)
-  - Limitation: synthetic context words from JPCSP pending W-LLE-1; clears +20 and +92 and frees the host ME RAM allocation
+  - Limitation: clears +20 and +92 and leaves +12, as measured on a PSP-3000 (PSP-VCODEC-001, type 0), and frees the host ME RAM allocation
   - Evidence: tests/native/videocodec_selftest.c:test_teardown
 - **`h_VideocodecSetMemory`** (`sceVideocodec`): `sceVideocodecSetMemory` (0x745a7b7a)
-  - Limitation: synthetic context words from JPCSP pending W-LLE-1; accepts the call and writes nothing, as JPCSP does; the meaning of words +64..+76 is not modelled
+  - Limitation: accepts the call and writes nothing; no context word changes on a PSP-3000 either (PSP-VCODEC-001, type 0, zeroed +64..+76); the meaning of words +64..+76 is not modelled
   - Evidence: tests/native/videocodec_selftest.c:test_context_words
 - **`h_VideocodecStop`** (`sceVideocodec`): `sceVideocodecStop` (0xa2f0564e)
-  - Limitation: synthetic context words from JPCSP pending W-LLE-1; drops the host decoder (the next decode starts a new one); whether the PSP drains pending pictures is not measured
+  - Limitation: before any decode returns 0x806201FE and changes nothing (measured, PSP-VCODEC-001, type 0); after a decode drops the host decoder and returns 0 (JPCSP, synthetic pending W-LLE-1); whether the PSP drains pending pictures is not measured
   - Evidence: tests/native/videocodec_selftest.c:test_teardown
 
 #### Compatibility Handlers (Named Limitations)

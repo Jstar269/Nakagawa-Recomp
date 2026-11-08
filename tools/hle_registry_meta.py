@@ -2265,42 +2265,42 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "tests/native/videocodec_selftest.c:test_context_words",
         ],
-        "limitation": "synthetic context words from JPCSP pending W-LLE-1; writes context +0 = 0x05100601 and returns 0 (JPCSP returns its ME driver's result, not modelled); codec type 0 only, other types refused",
+        "limitation": "words measured on a PSP-3000 (PSP-VCODEC-001, zeroed context): type 0 writes +0 = 0x05100601, +8 = 1 and +24 = 0x8344 and returns 0; type 1 writes +0, +8 = 0x80000000 and +24 = 0x264C and returns 0x80628001, and the later calls on a type 1 context are refused; other types are refused",
     },
     "h_VideocodecInit": {
         "status": "partial",
         "evidence": [
             "tests/native/videocodec_selftest.c:test_context_words",
         ],
-        "limitation": "synthetic context words from JPCSP pending W-LLE-1; writes +12 = +20 + 8 only",
+        "limitation": "words measured on a PSP-3000 (PSP-VCODEC-001, type 0): writes +12 = +20 and +8 = 0 and nothing else",
     },
     "h_VideocodecGetEDRAM": {
         "status": "partial",
         "evidence": [
             "tests/native/videocodec_selftest.c:test_context_words",
         ],
-        "limitation": "synthetic context words from JPCSP pending W-LLE-1; allocates ((+24) + 63) | 0x3F bytes of a host 2 MiB ME RAM model, low-first, 64-byte aligned, first 0x10000 reserved; addresses are not PSP-measured",
+        "limitation": "writes +92 = the raw ME address and +20 = it aligned to 64 bytes, the rule measured on a PSP-3000 (PSP-VCODEC-001, type 0); allocates ((+24) + 63) | 0x3F bytes of a host 2 MiB ME RAM model, low-first, first 0x10000 reserved, so the addresses themselves differ from the PSP's",
     },
     "h_VideocodecReleaseEDRAM": {
         "status": "partial",
         "evidence": [
             "tests/native/videocodec_selftest.c:test_teardown",
         ],
-        "limitation": "synthetic context words from JPCSP pending W-LLE-1; clears +20 and +92 and frees the host ME RAM allocation",
+        "limitation": "clears +20 and +92 and leaves +12, as measured on a PSP-3000 (PSP-VCODEC-001, type 0), and frees the host ME RAM allocation",
     },
     "h_VideocodecSetMemory": {
         "status": "partial",
         "evidence": [
             "tests/native/videocodec_selftest.c:test_context_words",
         ],
-        "limitation": "synthetic context words from JPCSP pending W-LLE-1; accepts the call and writes nothing, as JPCSP does; the meaning of words +64..+76 is not modelled",
+        "limitation": "accepts the call and writes nothing; no context word changes on a PSP-3000 either (PSP-VCODEC-001, type 0, zeroed +64..+76); the meaning of words +64..+76 is not modelled",
     },
     "h_VideocodecStop": {
         "status": "partial",
         "evidence": [
             "tests/native/videocodec_selftest.c:test_teardown",
         ],
-        "limitation": "synthetic context words from JPCSP pending W-LLE-1; drops the host decoder (the next decode starts a new one); whether the PSP drains pending pictures is not measured",
+        "limitation": "before any decode returns 0x806201FE and changes nothing (measured, PSP-VCODEC-001, type 0); after a decode drops the host decoder and returns 0 (JPCSP, synthetic pending W-LLE-1); whether the PSP drains pending pictures is not measured",
     },
     "h_VideocodecDelete": {
         "status": "partial",
@@ -2378,7 +2378,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "tests/native/videocodec_selftest.c:test_audiocodec",
         ],
-        "limitation": "codec 0x1000 (ATRAC3plus) only; the wrapper checks follow uofw; the ATRAC3plus words (+16 = 0x7BC0, +52 = 44100, +60 = 2, +64 = 0x2E8) are JPCSP's and synthetic pending W-LLE-1",
+        "limitation": "codec 0x1000 (ATRAC3plus) only; the wrapper checks follow uofw; the words are measured on a PSP-3000 (PSP-VCODEC-001) for the three halfwords at +40 it was given: 0x5C28 (+16 = 0x7BC0, +52 = 44100, +60 = 2, +64 = 0x2E8), 0x5C5C (+16 = 0x1F6C0, +52 = 48000, +60 = 7, +64 = 0x2E8), and 0 (0x807F00FD; +8 = 0x20F, +52 = 0x7D00, +64 = 8); any other halfword is refused",
     },
     "h_AudiocodecGetEDRAM": {
         "status": "partial",

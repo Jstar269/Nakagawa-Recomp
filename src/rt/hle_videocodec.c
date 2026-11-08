@@ -56,7 +56,10 @@
  * (MEProcessor, METhread, the ME MMIO handlers or the sceMeVideo driver).
  *
  * Every value marked "synthetic" below is JPCSP's value at 00ac4d6d, not a PSP measurement by this
- * project; PSP request W-LLE-1 measures them. Unknown codec types, a context the runtime did not
+ * project; PSP request W-LLE-1 measures them. Values marked "measured" come from PSP-VCODEC-001
+ * (W-LLE-1 boot 149: a PSP-3000 on firmware 6.60, the firmware's own sceVideocodec and
+ * sceAudiocodec on zeroed contexts): Open, GetEDRAM, Init, SetMemory and Stop before any decode,
+ * and sceAudiocodecCheckNeedMem. The decode, band, CSC and copy words are not measured yet. Unknown codec types, a context the runtime did not
  * open, ME addresses outside ME RAM, zero-length packets, a CSC of a picture never decoded and a
  * build without an H.264 backend are refused with a named error and one diagnostic line.
  *
@@ -202,8 +205,16 @@ static int vc_guest_words(uint32_t addr, uint32_t bytes) {
 /* ---- sceVideocodec contexts (sceVideocodec.java) ---- */
 #define VC_CONTEXT_BYTES      96u          /* JPCSP videocodecBufferSize */
 #define VC_TYPE_AVC           0u
-/* synthetic: JPCSP sceVideocodecOpen writes this at context +0; W-LLE-1 item 1. */
+/* measured (PSP-VCODEC-001): sceVideocodecOpen writes +0 = 0x05100601 for both codec types; for
+ * type 0 it writes +8 = 1 and +24 = 0x8344, the size sceVideocodecGetEDRAM reads, and returns 0.
+ * For type 1 it writes +8 = 0x80000000 and +24 = 0x264C and returns 0x80628001. */
 #define VC_OPEN_WORD0         0x05100601u
+#define VC_OPEN_WORD8         1u
+#define VC_OPEN_EDRAM_BYTES   0x8344u
+#define VC_TYPE_SECOND        1u
+#define VC_OPEN_T1_WORD8      0x80000000u
+#define VC_OPEN_T1_EDRAM_BYTES 0x264Cu
+#define VC_OPEN_T1_RESULT     0x80628001u
 /* Host bookkeeping bound, not a PSP value. */
 #define VC_MAX_CONTEXTS       4
 /* synthetic: JPCSP allocates 4 sets of 8 band buffers and hands out set (frame count % 3);
@@ -281,6 +292,14 @@ static void vc_stop_decoder(VcContext *c) {
 /* sceVideocodecOpen(ctx, type) */
 static uint32_t h_VideocodecOpen(CpuState *s) {
     const uint32_t ctx = A0, type = A1;
+    if (type == VC_TYPE_SECOND && vc_guest_words(ctx, VC_CONTEXT_BYTES) && !vc_find(ctx)) {
+        /* measured: the PSP refuses type 1 here after writing three words. The later calls on a
+         * type 1 context are not modelled and stay refused. */
+        MEM_W32(ctx, VC_OPEN_WORD0);
+        MEM_W32(ctx + 8u, VC_OPEN_T1_WORD8);
+        MEM_W32(ctx + 24u, VC_OPEN_T1_EDRAM_BYTES);
+        return vc_refuse("sceVideocodecOpen", "codec type 1 is refused, as the PSP refuses it", VC_OPEN_T1_RESULT);
+    }
     if (type != VC_TYPE_AVC)
         return vc_refuse("sceVideocodecOpen", "codec type other than 0 (AVC) is not modelled", VC_ERR_TYPE);
     if (!vc_guest_words(ctx, VC_CONTEXT_BYTES))
@@ -296,7 +315,8 @@ static uint32_t h_VideocodecOpen(CpuState *s) {
     c->ctx = ctx;
     c->h264 = -1;
     MEM_W32(ctx, VC_OPEN_WORD0);
-    /* synthetic: 0. JPCSP returns its ME driver's result here, which this project does not model. */
+    MEM_W32(ctx + 8u, VC_OPEN_WORD8);
+    MEM_W32(ctx + 24u, VC_OPEN_EDRAM_BYTES);
     return 0u;
 }
 
@@ -332,12 +352,14 @@ static uint32_t h_VideocodecReleaseEDRAM(CpuState *s) {
     return 0u;
 }
 
-/* sceVideocodecInit(ctx, type): ctx+12 = ctx+20 + 8 (synthetic: W-LLE-1 item 1). */
+/* sceVideocodecInit(ctx, type): +12 = +20 and +8 = 0 (measured, PSP-VCODEC-001, type 0; JPCSP's
+ * +20 + 8 is what the PSP writes for type 1). */
 static uint32_t h_VideocodecInit(CpuState *s) {
     VcContext *c;
     uint32_t r = vc_context_for("sceVideocodecInit", A0, A1, 1, &c);
     if (r) return r;
-    MEM_W32(c->ctx + 12u, MEM_R32(c->ctx + 20u) + 8u);
+    MEM_W32(c->ctx + 12u, MEM_R32(c->ctx + 20u));
+    MEM_W32(c->ctx + 8u, 0u);
     return 0u;
 }
 
@@ -377,11 +399,14 @@ static uint32_t h_VideocodecGetSEI(CpuState *s) {
 }
 
 /* sceVideocodecStop(ctx, type): JPCSP drops its decoder; the next decode starts a new one. The
- * pictures already decoded stay convertible. (synthetic: W-LLE-1) */
+ * pictures already decoded stay convertible (synthetic: W-LLE-1). Before any decode the PSP
+ * returns 0x806201FE and changes no context word (measured, PSP-VCODEC-001, type 0). */
 static uint32_t h_VideocodecStop(CpuState *s) {
     VcContext *c;
     uint32_t r = vc_context_for("sceVideocodecStop", A0, A1, 1, &c);
     if (r) return r;
+    if (c->h264 < 0 && c->frame_count == 0u)
+        return vc_refuse("sceVideocodecStop", "no access unit was decoded since Open", VC_ERR_STATE);
     vc_stop_decoder(c);
     return 0u;
 }
@@ -914,10 +939,15 @@ static uint32_t h_MpegBaseCscAvcRange(CpuState *s) {
 /* synthetic: uofw maps an ME driver result of -1 to 0x807F00FF (g_retValues[3]); JPCSP's
  * driver returns -1 for a decode it cannot run. Used for every ME-side refusal (W-LLE-1). */
 #define AC_ERR_ME               0x807F00FFu
-/* synthetic: JPCSP sceMeAudio_driver_81956A0B for ATRAC3plus (W-LLE-1 item 4). */
-#define AC_AT3P_NEEDED_MEM      0x7BC0u
-#define AC_AT3P_WORD52          44100u
-#define AC_AT3P_WORD60          2u
+/* measured (PSP-VCODEC-001): sceAudiocodecCheckNeedMem for ATRAC3plus reads the halfword at +40,
+ * which sceMpegCreate leaves at 0x5C28 or 0x5C5C. For each it returns 0 and writes +16 (the ME
+ * memory the codec needs), +52 (the sample rate), +60 and +64. For 0 it returns 0x807F00FD and
+ * writes +8, +52 and +64. Any other halfword is not measured and is refused. */
+#define AC_AT3P_PARAM_OFF       40u
+#define AC_AT3P_ZERO_RESULT     0x807F00FDu
+#define AC_AT3P_ZERO_WORD8      0x20Fu
+#define AC_AT3P_ZERO_WORD52     0x7D00u
+#define AC_AT3P_ZERO_WORD64     8u
 #define AC_AT3P_WORD64          0x2E8u
 #define AC_FRAME_SAMPLES        2048u
 /* Host bookkeeping bound, not a PSP value. */
@@ -958,15 +988,37 @@ static uint32_t ac_check(const char *call, uint32_t work, uint32_t codec, uint32
 
 /* sceAudiocodecCheckNeedMem(workArea, codec) */
 static uint32_t h_AudiocodecCheckNeedMem(CpuState *s) {
+    static const char call[] = "sceAudiocodecCheckNeedMem";
+    static const struct {
+        uint16_t param;
+        uint32_t needed, rate, word60;
+    } k_at3p[] = {
+        { 0x5C28u, 0x7BC0u, 44100u, 2u },
+        { 0x5C5Cu, 0x1F6C0u, 48000u, 7u },
+    };
     const uint32_t work = A0;
-    const uint32_t r = ac_check("sceAudiocodecCheckNeedMem", work, A1, AC_WORK_BYTES);
+    const uint32_t r = ac_check(call, work, A1, AC_WORK_BYTES);
     if (r) return r;
-    MEM_W32(work, VC_OPEN_WORD0);              /* uofw: info->unk0 = 0x05100601 */
-    MEM_W32(work + 16u, AC_AT3P_NEEDED_MEM);
-    MEM_W32(work + 52u, AC_AT3P_WORD52);
-    MEM_W32(work + 60u, AC_AT3P_WORD60);
-    MEM_W32(work + 64u, AC_AT3P_WORD64);
-    return 0u;
+    const uint16_t param = MEM_R16(work + AC_AT3P_PARAM_OFF);
+    if (param == 0u) {
+        MEM_W32(work, VC_OPEN_WORD0);
+        MEM_W32(work + 8u, AC_AT3P_ZERO_WORD8);
+        MEM_W32(work + 52u, AC_AT3P_ZERO_WORD52);
+        MEM_W32(work + 64u, AC_AT3P_ZERO_WORD64);
+        return vc_refuse(call, "the ATRAC3plus parameter halfword at +40 is 0, as the PSP refuses it",
+                         AC_AT3P_ZERO_RESULT);
+    }
+    for (size_t i = 0; i < sizeof(k_at3p) / sizeof(k_at3p[0]); i++) {
+        if (param != k_at3p[i].param) continue;
+        MEM_W32(work, VC_OPEN_WORD0);
+        MEM_W32(work + 16u, k_at3p[i].needed);
+        MEM_W32(work + 52u, k_at3p[i].rate);
+        MEM_W32(work + 60u, k_at3p[i].word60);
+        MEM_W32(work + 64u, AC_AT3P_WORD64);
+        return 0u;
+    }
+    return vc_refuse(call, "an ATRAC3plus parameter halfword at +40 other than 0x5C28 or 0x5C5C is not measured",
+                     AC_ERR_ME);
 }
 
 /* sceAudiocodecGetEDRAM(workArea, codec): uofw allocates ((+16) + 0x3F) | 0x3F bytes of ME

@@ -388,14 +388,18 @@ static void test_registration(void) {
 static uint32_t s_edram_raw, s_edram;
 
 static void test_context_words(void) {
-    memset(host(G_CTX), 0xA5, 96u);
-    CHECK(call(NID_OPEN, G_CTX, 1u, 0, 0) == VC_ERR_TYPE && MEM_R32(G_CTX) == 0xA5A5A5A5u,
-          "open: codec type 1 is refused and the context is untouched");
+    memset(host(G_CTX), 0, 96u);
+    CHECK(call(NID_OPEN, G_CTX, 1u, 0, 0) == 0x80628001u && MEM_R32(G_CTX) == 0x05100601u &&
+              MEM_R32(G_CTX + 8u) == 0x80000000u && MEM_R32(G_CTX + 24u) == 0x264Cu && !vc_find(G_CTX),
+          "open: codec type 1 returns 0x80628001 after writing +0, +8 and +24, and stays unopened (measured)");
+    CHECK(call(NID_OPEN, G_CTX, 2u, 0, 0) == VC_ERR_TYPE, "open: codec type 2 is refused");
     memset(host(G_CTX), 0, 96u);
     memset(host(G_CTX2), 0, 96u);
     CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == 0u, "open: type 0 opens the context");
-    CHECK(MEM_R32(G_CTX) == 0x05100601u, "open: context +0 is 0x05100601 (JPCSP, synthetic)");
-    CHECK(bytes_are(G_CTX + 4u, 92u, 0u), "open: no other context word changes");
+    CHECK(MEM_R32(G_CTX) == 0x05100601u && MEM_R32(G_CTX + 8u) == 1u && MEM_R32(G_CTX + 24u) == 0x8344u,
+          "open: +0 = 0x05100601, +8 = 1 and +24 = 0x8344 (measured)");
+    CHECK(bytes_are(G_CTX + 4u, 4u, 0u) && bytes_are(G_CTX + 12u, 12u, 0u) && bytes_are(G_CTX + 28u, 68u, 0u),
+          "open: no other context word changes");
     CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == VC_ERR_STATE, "open: an open context cannot be opened again");
     CHECK(call(NID_INIT, G_CTX2, 0u, 0, 0) == VC_ERR_NOT_OPEN, "init: a context the runtime did not open is refused");
     CHECK(call(NID_GETEDRAM, G_CTX2, 0u, 0, 0) == VC_ERR_NOT_OPEN, "getedram: an unopened context is refused");
@@ -412,14 +416,17 @@ static void test_context_words(void) {
     CHECK(call(NID_GETEDRAM, G_CTX, 0u, 0, 0) == VC_ERR_STATE && MEM_R32(G_CTX + 92u) == s_edram_raw,
           "getedram: a second allocation for the same context is refused");
 
-    CHECK(call(NID_INIT, G_CTX, 0u, 0, 0) == 0u && MEM_R32(G_CTX + 12u) == s_edram + 8u,
-          "init: +12 is +20 plus 8");
+    CHECK(call(NID_INIT, G_CTX, 0u, 0, 0) == 0u && MEM_R32(G_CTX + 12u) == s_edram && MEM_R32(G_CTX + 8u) == 0u,
+          "init: +12 = +20 and +8 = 0 (measured)");
 
     for (uint32_t i = 0; i < 4u; i++) MEM_W32(G_CTX + 64u + i * 4u, 0x11111111u * (i + 1u));
     uint8_t before[96];
     memcpy(before, host(G_CTX), 96u);
     CHECK(call(NID_SETMEMORY, G_CTX, 0u, 0, 0) == 0u && memcmp(before, host(G_CTX), 96u) == 0,
           "setmemory: accepted and no context word changes");
+    CHECK(call(NID_STOP, G_CTX, 0u, 0, 0) == VC_ERR_STATE && memcmp(before, host(G_CTX), 96u) == 0 &&
+              vc_find(G_CTX),
+          "stop: before any decode it returns 0x806201FE and changes nothing (measured)");
 }
 
 /* sceVideocodecGetVersion and sceVideocodecGetSEI: the words JPCSP writes (synthetic, W-LLE-1). */
@@ -816,7 +823,10 @@ static void test_copy_range(void) {
 }
 
 static void test_teardown(void) {
-    CHECK(call(NID_STOP, G_CTX, 0u, 0, 0) == 0u && vc_find(G_CTX) && vc_find(G_CTX)->h264 < 0,
+    /* Without an H.264 backend no access unit decoded, and Stop answers as before any decode. */
+    const uint32_t stop_want = vc_find(G_CTX) && vc_find(G_CTX)->frame_count == 0u && vc_find(G_CTX)->h264 < 0
+                                   ? VC_ERR_STATE : 0u;
+    CHECK(call(NID_STOP, G_CTX, 0u, 0, 0) == stop_want && vc_find(G_CTX) && vc_find(G_CTX)->h264 < 0,
           "stop: the host decoder is released");
     const int allocs = s_me_alloc_count;
     CHECK(call(NID_RELEASE, G_CTX, 0, 0, 0) == 0u && MEM_R32(G_CTX + 20u) == 0u && MEM_R32(G_CTX + 92u) == 0u &&
@@ -923,10 +933,28 @@ static void test_audiocodec(void) {
               call(NID_AC_NEEDMEM, G_AC + 2u, AC_CODEC, 0, 0) == AC_ERR_NOT_RAM,
           "audiocodec: a null or unaligned work area is refused");
 
+    /* The halfword at +40 selects the words (measured, PSP-VCODEC-001). */
+    CHECK(call(NID_AC_NEEDMEM, G_AC, AC_CODEC, 0, 0) == 0x807F00FDu && MEM_R32(G_AC) == 0x05100601u &&
+              MEM_R32(G_AC + 8u) == 0x20Fu && MEM_R32(G_AC + 16u) == 0u && MEM_R32(G_AC + 52u) == 0x7D00u &&
+              MEM_R32(G_AC + 60u) == 0u && MEM_R32(G_AC + 64u) == 8u,
+          "checkneedmem: a zero halfword at +40 returns 0x807F00FD with +8, +52 and +64 written");
+    memset(host(G_AC), 0, 0x100u);
+    MEM_W16(G_AC + 40u, 0x5C5Cu);
+    CHECK(call(NID_AC_NEEDMEM, G_AC, AC_CODEC, 0, 0) == 0u && MEM_R32(G_AC) == 0x05100601u &&
+              MEM_R32(G_AC + 8u) == 0u && MEM_R32(G_AC + 16u) == 0x1F6C0u && MEM_R32(G_AC + 52u) == 48000u &&
+              MEM_R32(G_AC + 60u) == 7u && MEM_R32(G_AC + 64u) == 0x2E8u,
+          "checkneedmem: halfword 0x5C5C at +40: the 48 kHz words");
+    memset(host(G_AC), 0, 0x100u);
+    MEM_W16(G_AC + 40u, 0x1234u);
+    CHECK(call(NID_AC_NEEDMEM, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && MEM_R32(G_AC) == 0u &&
+              MEM_R32(G_AC + 16u) == 0u,
+          "checkneedmem: an unmeasured halfword at +40 is refused and the work area is untouched");
+    memset(host(G_AC), 0, 0x100u);
+    MEM_W16(G_AC + 40u, 0x5C28u);
     CHECK(call(NID_AC_NEEDMEM, G_AC, AC_CODEC, 0, 0) == 0u && MEM_R32(G_AC) == 0x05100601u &&
               MEM_R32(G_AC + 16u) == 0x7BC0u && MEM_R32(G_AC + 52u) == 44100u &&
               MEM_R32(G_AC + 60u) == 2u && MEM_R32(G_AC + 64u) == 0x2E8u,
-          "checkneedmem: the ATRAC3plus work-area words");
+          "checkneedmem: halfword 0x5C28 at +40: the 44.1 kHz words");
     CHECK(call(NID_AC_INIT, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME && !ac_find(G_AC),
           "init: a work area without EDRAM is refused");
 
@@ -1026,6 +1054,7 @@ static void test_audiocodec(void) {
               call(NID_AC_INIT, G_AC, AC_CODEC, 0, 0) == 0u && s_me_alloc_count == allocs + 1,
           "recycle: a work area holds EDRAM and a decoder");
     memset(host(G_AC), 0, AC_WORK_BYTES_EDRAM);
+    MEM_W16(G_AC + 40u, 0x5C28u);   /* the parameter halfword sceMpegCreate leaves */
     CHECK(call(NID_AC_NEEDMEM, G_AC, AC_CODEC, 0, 0) == 0u && call(NID_AC_GETEDRAM, G_AC, AC_CODEC, 0, 0) == 0u &&
               s_me_alloc_count == allocs + 1 && MEM_R32(G_AC + 104u) != 0u && !ac_find(G_AC),
           "recycle: GetEDRAM on the cleared work area frees the stale allocation and makes a new one");
