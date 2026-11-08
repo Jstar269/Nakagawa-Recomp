@@ -326,8 +326,8 @@ static int ff_deliver(const NkH264Picture *pic, const SrH264FrameTarget *t, SrH2
                                                   : ff_to_guest(pic, &pl, t, info);
         if (ok && info) {
             info->native_format = pl.native;
-            /* The decoder reports the decoded frame PTS (the source PTS of the access unit it
-             * came from), never a best-effort timestamp. */
+            /* The decoder reports the time of the access unit the picture came from (its
+             * SrH264AccessUnit.pts, carried through reordering), never a best-effort timestamp. */
             info->has_pts = pic->has_pts;
             info->pts = pic->has_pts ? pic->pts : -1;
         }
