@@ -1526,6 +1526,9 @@ typedef struct {
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset);
 /* The chosen preset, or PLAYER_PRESET_CUSTOM (also for a value out of range). */
 int player_app_graphics_preset(const PlayerApp *app);
+/* True while the chosen preset (Ultra) turns the FSR 1 upscaler on for Enhanced and Ace
+   sessions, over the Sharper enlarging part: the Enhanced pages show the part as included. */
+bool player_app_preset_turns_on_upscaler(const PlayerApp *app);
 /* The Settings row's value: "Low", ..., "Ultra", "Handheld", or "Custom". */
 const char *player_app_graphics_preset_label(const PlayerApp *app);
 /* The main Settings page's notice line while a preset is chosen: where it applies, and the

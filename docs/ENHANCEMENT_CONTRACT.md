@@ -51,7 +51,8 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   (the same selftest compares it with the pass's output, byte for byte), and guest VRAM and every
   guest flight event match with it off (`display-smoke-fsr1`, which needs a Vulkan device and a
   display, so it is a local gate). In the player it is the Enhanced part "Sharper enlarging"
-  (`"upscale"`, off by default) on Settings > Enhanced and each title's page. It is not part of
+  (`"upscale"`, off by default) on Settings > Enhanced and each title's page; the Ultra graphics
+  preset turns it on for Enhanced and Ace runs whatever that setting says. It is not part of
   Authentic: the launcher exports `SR_PRESENT_UPSCALE=off` for an authentic session whatever the
   setting or the inherited environment (section 10.1), and a run with it on says
   `ACE_MODE: present upscale fsr1`, emits a `phase=present_upscale` boot event and carries

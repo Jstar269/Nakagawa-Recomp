@@ -889,6 +889,12 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                 row->on = false;
             }
         }
+        if (p == PLAYER_PART_UPSCALE && model->enhanced_on &&
+            player_app_preset_turns_on_upscaler(app)) {
+            /* The Ultra graphics preset turns the upscaler on whatever the part says. */
+            row->value = "FSR 1 (included by Ultra)";
+            row->on = true;
+        }
         if (model->enhanced_on) {
             const char *unavailable =
                 player_enhanced_part_unavailable_label(p, row->on, smooth_on);
@@ -2271,10 +2277,14 @@ static void player_ui_title_ace(PlayerUiNk *player, const PlayerApp *app, int in
         for (int p = 0; p < PLAYER_PART_COUNT; p++) {
             const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
             char part[64];
-            if (info == NULL || play.part[p] == 0) continue;
+            int value = play.part[p];
+            if (p == PLAYER_PART_UPSCALE && play.on && player_app_preset_turns_on_upscaler(app)) {
+                value = 1;     /* the Ultra graphics preset, over the part */
+            }
+            if (info == NULL || value == 0) continue;
             /* "16x texture filtering" for a part with levels, else "crisp system text". */
             if (info->value_count > 2) {
-                snprintf(part, sizeof(part), "%s %s", player_enhanced_part_label(p, play.part[p]),
+                snprintf(part, sizeof(part), "%s %s", player_enhanced_part_label(p, value),
                          info->name);
             } else {
                 snprintf(part, sizeof(part), "%s", info->name);

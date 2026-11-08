@@ -821,7 +821,8 @@ long-run present rate never exceeds the cap (`gui-present-selftest`).
 ### Presentation upscaler (`SR_PRESENT_UPSCALE`)
 
 In the player this is **Sharper enlarging** on Settings > Enhanced and on each game's page, off by
-default; the launcher sets `SR_PRESENT_UPSCALE` from it for an Enhanced or Ace run.
+default; the launcher sets `SR_PRESENT_UPSCALE` from it for an Enhanced or Ace run. The **Ultra**
+graphics preset turns it on for those runs as well, whatever that setting says.
 
 `SR_PRESENT_UPSCALE=fsr1` makes the Vulkan presenter enlarge the picture to its place in the
 window with AMD FidelityFX Super Resolution 1: EASU, an edge-adaptive upscaler, then RCAS

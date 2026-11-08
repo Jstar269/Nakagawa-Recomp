@@ -7478,6 +7478,20 @@ static void test_play_mode_settings(void) {
     player_app_cycle_title_part(app, 0, PLAYER_PART_FILTERING);   /* library -> 16 */
     player_app_cycle_title_part(app, 0, PLAYER_PART_FILTERING);   /* 16 -> 8 */
     assert(player_app_title_part(app, 0, PLAYER_PART_FILTERING) == 8);
+    /* Ultra includes the Sharper enlarging upscaler (#2122); editing that part for one game
+       makes it Custom, while another part or a preset without the upscaler stays. */
+    app->settings.graphics_preset = PLAYER_PRESET_ULTRA;
+    assert(player_app_preset_turns_on_upscaler(app));
+    player_app_cycle_title_part(app, 0, PLAYER_PART_UPSCALE);     /* library -> off */
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM &&
+           !player_app_preset_turns_on_upscaler(app));
+    app->settings.graphics_preset = PLAYER_PRESET_HIGH;
+    assert(!player_app_preset_turns_on_upscaler(app));
+    player_app_cycle_title_part(app, 0, PLAYER_PART_UPSCALE);     /* off -> FSR 1 */
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_HIGH);
+    player_app_cycle_title_part(app, 0, PLAYER_PART_UPSCALE);     /* FSR 1 -> library */
+    assert(player_app_title_part(app, 0, PLAYER_PART_UPSCALE) < 0);
+    app->settings.graphics_preset = PLAYER_PRESET_CUSTOM;
     player_app_cycle_title_part(app, 0, PLAYER_PART_NOTICE);      /* library -> on */
     player_app_cycle_title_part(app, 0, PLAYER_PART_NOTICE);      /* on -> off */
     assert(player_app_title_part(app, 0, PLAYER_PART_NOTICE) == 0);

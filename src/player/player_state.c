@@ -2497,6 +2497,11 @@ int player_app_graphics_preset(const PlayerApp *app) {
     return app->settings.graphics_preset;
 }
 
+bool player_app_preset_turns_on_upscaler(const PlayerApp *app) {
+    const PlayerGraphicsPresetRow *row = player_graphics_preset_row(player_app_graphics_preset(app));
+    return row && row->upscaler;
+}
+
 const char *player_app_graphics_preset_label(const PlayerApp *app) {
     const PlayerGraphicsPresetRow *row = player_graphics_preset_row(player_app_graphics_preset(app));
     return row ? row->value : "Custom";
