@@ -1709,7 +1709,8 @@ def _active_census() -> "list[dict]":
 
     The split is compat_overrides' own, so this gate, the --debt-census report and
     docs/COMPATIBILITY.md cannot disagree about which patches are live."""
-    return compat_overrides.active_temporary_compatibility_patches()
+    active: "list[dict]" = compat_overrides.active_temporary_compatibility_patches()
+    return active
 
 
 def _runtime_compat_fired_sites(sources: "dict[str, str]") -> "set[tuple[str, str]]":
@@ -1834,7 +1835,8 @@ class DebtReportActiveCountTests(unittest.TestCase):
     """
 
     def _report(self) -> str:
-        return compat_overrides.format_debt_census()
+        report: str = compat_overrides.format_debt_census()
+        return report
 
     def test_the_report_states_the_active_count(self) -> None:
         report = self._report()
