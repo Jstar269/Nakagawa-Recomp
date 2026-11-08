@@ -37,8 +37,9 @@ switches, each with one plain sentence (today the Online mode row is hidden, as 
 | Developer mode | Off | "Show a developer log on screen to help track down problems. Stays on this PC." |
 
 Until news and reports exist, the wizard step and Settings > Online and developer do not show the Online mode
-switch or its two parts (news, reports): they say in one line that online features are not built yet, and
-only the Developer mode switch is there. A user whose stored `online_mode` is On still gets the Online mode
+switch or its two parts (news, reports): they say in one line that online features are not built yet. The
+wizard step then has only the Developer mode switch; Settings > Online and developer has the Developer mode switch
+and, in a build that can show it, the [Discord status](#discord-status) switch. A user whose stored `online_mode` is On still gets the Online mode
 switch (with a sentence that it does nothing yet), so it can be turned off. The `online_mode`, `online_news` and `online_reports` settings are still
 stored and still default to off, so a build that adds the features keeps what the user chose; with online mode
 on, Settings will show its two parts again, each on by default and each switchable alone. The step is skippable;
@@ -91,10 +92,12 @@ opt-in and off by default.
   minute, and logs nothing. A write gives up after 250 ms and no read waits, so the launcher never
   stalls. The status clears when the game exits and when the player closes.
 - **Application ID.** The project's Discord application ID is one constant,
-  `NK_DISCORD_APPLICATION_ID` in `src/player/discord_presence.h`. It is public, not a secret. Until
-  the maintainer sets it, it is a placeholder that fails closed: the switch is disabled and says
-  why, and the player never opens the pipe.
-- **Platforms.** Windows only for now; elsewhere the switch stays disabled.
+  `NK_DISCORD_APPLICATION_ID` in `src/player/discord_presence.h`. It is public, not a secret. An
+  empty or malformed value fails closed: the build cannot show Discord status, and the player never
+  opens the pipe.
+- **Which builds show it.** Windows builds with an application ID. Other builds (no application ID,
+  or Linux and macOS, which have no local pipes here) have no Discord status row; one whose stored
+  setting is On still shows the row, saying the build can't show it, so it can be turned off.
 - **Tests** (`tests/native/test_discord_presence.c`) drive the client against a fake transport and,
   on Windows, a fake pipe server with a test-only name; they never reach Discord.
 

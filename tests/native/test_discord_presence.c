@@ -198,6 +198,13 @@ static void test_activity_make(void) {
     assert(nk_discord_activity_make(&a, "A", "Enhanced", 5) && a.details[0] == '\0');
     assert(nk_discord_activity_make(&a, "Bad \xC3\x28 bytes", "Enhanced", 5) &&
            a.details[0] == '\0');
+    /* Discord's minimum counts characters: one 3-byte character is too short, two are not. */
+    assert(nk_discord_activity_make(&a, "\xE3\x81\x82", "Enhanced", 5) && a.details[0] == '\0');
+    assert(nk_discord_activity_make(&a, "\xE3\x81\x82\xE3\x81\x84", "Enhanced", 5) &&
+           strcmp(a.details, "\xE3\x81\x82\xE3\x81\x84") == 0);
+    /* A title cut short upstream inside a character keeps everything before it. */
+    assert(nk_discord_activity_make(&a, "Test Game \xE3\x81", "Enhanced", 5) &&
+           strcmp(a.details, "Test Game") == 0);
     /* Nothing left to show. */
     assert(!nk_discord_activity_make(&a, "", NULL, 5));
     assert(!nk_discord_activity_make(&a, NULL, "", 5));
@@ -416,6 +423,34 @@ static void test_dropped_connections(void) {
     nk_discord_client_update(&s_client, &a, 20u);
     assert(s_fake.opens == 1);
 
+    /* A peer that floods PINGs gets at most NK_DISCORD_FRAMES_PER_UPDATE answers per
+       update; the rest are answered on the following updates. */
+    fake_init(&s_fake, &t);
+    s_fake.serve[0] = true;
+    nk_discord_client_init(&s_client, TEST_APP_ID, &t, s_fake.prefix);
+    fake_send(&s_fake, NK_DISCORD_OP_FRAME, k_ready);
+    nk_discord_client_update(&s_client, &a, 0u);
+    assert(s_client.link == NK_DISCORD_READY);
+    {
+        uint32_t op;
+        char got[256];
+        while (fake_next(&s_fake, &op, got, sizeof(got))) {
+        }
+        for (int i = 0; i < 200; i++) fake_send(&s_fake, NK_DISCORD_OP_PING, "{}");
+        int pongs = 0;
+        nk_discord_client_update(&s_client, &a, 1u);
+        while (fake_next(&s_fake, &op, got, sizeof(got))) {
+            assert(op == NK_DISCORD_OP_PONG);
+            pongs++;
+        }
+        assert(pongs == (int)NK_DISCORD_FRAMES_PER_UPDATE);
+        for (uint64_t now = 2u; now < 10u; now++) {
+            nk_discord_client_update(&s_client, &a, now);
+            while (fake_next(&s_fake, &op, got, sizeof(got))) pongs++;
+        }
+        assert(pongs == 200 && s_client.link == NK_DISCORD_READY);
+    }
+
     /* A frame longer than the client accepts: closed, not read past its buffer. */
     fake_init(&s_fake, &t);
     s_fake.serve[0] = true;
@@ -485,6 +520,20 @@ static void test_windows_pipe(void) {
     assert(connected || GetLastError() == ERROR_PIPE_CONNECTED);
     server_expect(server, NK_DISCORD_OP_HANDSHAKE,
                   "{\"v\":1,\"client_id\":\"" TEST_APP_ID "\"}");
+    /* Whoever serves the pipe may identify the player but never act as it: the client
+       connects at identification level only. */
+    {
+        HANDLE token = NULL;
+        SECURITY_IMPERSONATION_LEVEL level = SecurityImpersonation;
+        DWORD size = 0;
+        assert(ImpersonateNamedPipeClient(server));
+        assert(OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token));
+        assert(GetTokenInformation(token, TokenImpersonationLevel, &level, sizeof(level),
+                                   &size));
+        CloseHandle(token);
+        assert(RevertToSelf());
+        assert(level == SecurityIdentification);
+    }
 
     unsigned char frame[1024];
     size_t n = nk_discord_frame(frame, sizeof(frame), NK_DISCORD_OP_FRAME, k_ready,

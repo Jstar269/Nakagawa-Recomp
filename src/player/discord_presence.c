@@ -34,8 +34,9 @@ static size_t utf8_char_len(unsigned char c) {
     return 4;
 }
 
-/* Copy at most `max_chars` characters of valid UTF-8 `src` into out[cap]. */
-static void utf8_copy_chars(char *out, size_t cap, const char *src, size_t max_chars) {
+/* Copy at most `max_chars` characters of valid UTF-8 `src` into out[cap]; returns how many
+   characters it copied. */
+static size_t utf8_copy_chars(char *out, size_t cap, const char *src, size_t max_chars) {
     size_t used = 0;
     size_t chars = 0;
     while (src[used] != '\0' && chars < max_chars) {
@@ -46,6 +47,7 @@ static void utf8_copy_chars(char *out, size_t cap, const char *src, size_t max_c
     }
     memcpy(out, src, used);
     out[used] = '\0';
+    return chars;
 }
 
 bool nk_discord_activity_make(NkDiscordActivity *out, const char *title, const char *mode,
@@ -56,16 +58,26 @@ bool nk_discord_activity_make(NkDiscordActivity *out, const char *title, const c
         /* Leading and trailing spaces would count toward Discord's 2-character minimum. */
         while (*title == ' ') title++;
         size_t len = strlen(title);
+        /* A title the library cut to NK_MAX_TITLE_LEN bytes may end inside a character: drop
+           that partial character (at most 3 bytes) and keep the rest. */
+        for (int k = 0; k < 3 && len > 0 &&
+                        !nk_json_validate_utf8((const uint8_t *)title, len); k++) {
+            len--;
+        }
         while (len > 0 && title[len - 1] == ' ') len--;
         char trimmed[sizeof(out->details)];
         /* Titles hold ':' and '/' ("Fate/Extra"), never a backslash: one would be a
            Windows path, which must not leave the PC. */
         bool path_like = memchr(title, '\\', len) != NULL;
-        if (len >= 2 && len < sizeof(trimmed) && !path_like &&
+        if (len > 0 && len < sizeof(trimmed) && !path_like &&
             nk_json_validate_utf8((const uint8_t *)title, len)) {
             memcpy(trimmed, title, len);
             trimmed[len] = '\0';
-            utf8_copy_chars(out->details, sizeof(out->details), trimmed, NK_DISCORD_TEXT_MAX);
+            /* Discord's minimum is 2 characters, not bytes: one CJK character is 3 bytes. */
+            if (utf8_copy_chars(out->details, sizeof(out->details), trimmed,
+                                NK_DISCORD_TEXT_MAX) < 2) {
+                out->details[0] = '\0';
+            }
         }
     }
     if (mode && strlen(mode) >= 2 && strlen(mode) < sizeof(out->state)) {
@@ -277,9 +289,44 @@ static void client_frame(NkDiscordClient *client, const unsigned char *payload, 
     nk_json_free(root);
 }
 
-/* Read what has arrived and act on each whole frame. */
+/* Act on each whole frame that has arrived, reading more as needed. One call handles at most
+   NK_DISCORD_FRAMES_PER_UPDATE frames and reads at most one buffer's worth of bytes, so a peer
+   that writes without pause cannot hold the launcher's frame; the rest waits for the next
+   update. */
 static void client_pump(NkDiscordClient *client) {
+    unsigned frames = 0;
+    size_t read_total = 0;
     while (client->link != NK_DISCORD_CLOSED && client->transport.read) {
+        while (client->link != NK_DISCORD_CLOSED && client->rx_used >= 8u) {
+            uint32_t opcode = get_le32(client->rx);
+            uint32_t len = get_le32(client->rx + 4);
+            if (len > sizeof(client->rx) - 8u) {
+                client_close(client);
+                return;
+            }
+            if (client->rx_used < 8u + len) break;
+            if (frames >= NK_DISCORD_FRAMES_PER_UPDATE) return;
+            frames++;
+            const unsigned char *payload = client->rx + 8;
+            if (opcode == NK_DISCORD_OP_FRAME) {
+                client_frame(client, payload, len);
+            } else if (opcode == NK_DISCORD_OP_PING) {
+                unsigned char echo[NK_DISCORD_RX_MAX];
+                memcpy(echo, payload, len);
+                bool sent = client_send(client, NK_DISCORD_OP_PONG, echo, len);
+                memset(echo, 0, len);
+                if (!sent) return;
+            } else if (opcode == NK_DISCORD_OP_CLOSE) {
+                client_close(client);
+                return;
+            }
+            size_t consumed = 8u + len;
+            memmove(client->rx, client->rx + consumed, client->rx_used - consumed);
+            client->rx_used -= consumed;
+            /* The frame's bytes (READY names the account) are cleared once handled. */
+            memset(client->rx + client->rx_used, 0, consumed);
+        }
+        if (client->link == NK_DISCORD_CLOSED || read_total >= sizeof(client->rx)) return;
         if (client->rx_used >= sizeof(client->rx)) {
             client_close(client);
             return;
@@ -290,33 +337,9 @@ static void client_pump(NkDiscordClient *client) {
             client_close(client);
             return;
         }
-        if (got == 0) break;
+        if (got == 0) return;
         client->rx_used += (size_t)got;
-        while (client->link != NK_DISCORD_CLOSED && client->rx_used >= 8u) {
-            uint32_t opcode = get_le32(client->rx);
-            uint32_t len = get_le32(client->rx + 4);
-            if (len > sizeof(client->rx) - 8u) {
-                client_close(client);
-                return;
-            }
-            if (client->rx_used < 8u + len) break;
-            const unsigned char *payload = client->rx + 8;
-            if (opcode == NK_DISCORD_OP_FRAME) {
-                client_frame(client, payload, len);
-            } else if (opcode == NK_DISCORD_OP_PING) {
-                unsigned char echo[NK_DISCORD_RX_MAX];
-                memcpy(echo, payload, len);
-                if (!client_send(client, NK_DISCORD_OP_PONG, echo, len)) return;
-            } else if (opcode == NK_DISCORD_OP_CLOSE) {
-                client_close(client);
-                return;
-            }
-            size_t consumed = 8u + len;
-            memmove(client->rx, client->rx + consumed, client->rx_used - consumed);
-            client->rx_used -= consumed;
-            /* What Discord sent (READY names the account) is not kept once read. */
-            memset(client->rx + client->rx_used, 0, consumed);
-        }
+        read_total += (size_t)got;
     }
 }
 

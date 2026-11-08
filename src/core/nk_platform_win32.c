@@ -1418,8 +1418,12 @@ bool nk_platform_local_pipe_open(NkLocalPipe *pipe, const char *name) {
         !utf8_to_wide(narrow, wide, sizeof(wide) / sizeof(wide[0]))) {
         return false;
     }
+    /* Identification level only: whatever program serves the pipe (any local process could
+       create it first) may learn who connected but can never impersonate this user. */
     HANDLE handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                                FILE_FLAG_OVERLAPPED, NULL);
+                                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT |
+                                    SECURITY_IDENTIFICATION,
+                                NULL);
     if (handle == INVALID_HANDLE_VALUE) return false;
     pipe->handle = handle;
     pipe->open = true;

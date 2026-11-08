@@ -995,8 +995,8 @@ the disc names it (its disc ID when the disc names no title), the play mode (Aut
 or Ace) and when the game started, with the player's process ID, which Discord's protocol needs. The
 Discord app then shows them on your profile, so Discord learns which game you play. Nothing else
 is sent: no path, save, user name or game memory. If Discord isn't running, the player tries
-again at most once a minute and says nothing; the status clears when the game exits. Until the
-project's Discord application ID is set in the build, the switch can't be turned on
+again at most once a minute and says nothing; the status clears when the game exits. A build
+without the project's Discord application ID has no Discord status switch
 ([`ONLINE_FEATURES.md`](ONLINE_FEATURES.md#discord-status)).
 
 Enhanced and Ace (Settings > Enhanced) make no network connection: its features run on this PC, and its per-game report

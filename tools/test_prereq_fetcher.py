@@ -1357,6 +1357,9 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         win32 = (REPO_ROOT / "src/core/nk_platform_win32.c").read_text(encoding="utf-8")
         pipe_paths = re.findall(r'"(\\\\\\\\[^"]*pipe[^"]*)"', win32)
         self.assertEqual(pipe_paths, ["\\\\\\\\.\\\\pipe\\\\%s"])
+        # The pipe's server, whoever created it, may identify the player but never act as it.
+        self.assertIn("SECURITY_SQOS_PRESENT", win32)
+        self.assertIn("SECURITY_IDENTIFICATION", win32)
         setup = (REPO_ROOT / "docs/SETUP.md").read_text(encoding="utf-8")
         self.assertIn("**Discord status**", setup)
 

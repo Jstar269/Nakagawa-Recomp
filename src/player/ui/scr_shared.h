@@ -145,8 +145,11 @@ typedef struct {
 #define SCR_DISCORD_SENTENCE \
     "Show the game you play and for how long in Discord, through the Discord app on this " \
     "PC. Nakagawa itself connects to nothing."
-#define SCR_DISCORD_UNAVAILABLE_SENTENCE \
-    "This build has no Discord application ID yet, so Discord status can't be turned on."
+/* A build that cannot show Discord status (no application ID, or no local pipes) hides the
+   row, except for a stored On, which it shows with this sentence so it can be turned off. */
+#define SCR_DISCORD_STORED_ON_SENTENCE \
+    "Discord status is on in your settings, but this build can't show it. Switch it off " \
+    "to keep it off."
 /* The developer switch, in the wizard and in Settings. */
 #define WIZARD_DEVELOPER_SENTENCE \
     "Show a developer log on screen to help track down problems. Stays on this PC."

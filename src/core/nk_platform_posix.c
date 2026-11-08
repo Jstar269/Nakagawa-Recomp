@@ -1296,8 +1296,8 @@ unsigned long nk_platform_process_id(void) {
     return (unsigned long)getpid();
 }
 
-/* Local pipes are not built on POSIX yet (Discord's socket there is a Unix-domain socket
-   under XDG_RUNTIME_DIR): every open fails and the caller's feature stays off. */
+/* Local pipes are unsupported on POSIX: every open fails and the caller's feature stays
+   off. */
 bool nk_platform_local_pipe_supported(void) {
     return false;
 }

@@ -340,7 +340,9 @@ unsigned long nk_platform_process_id(void);
 /* The client end of a named pipe another program on this PC serves: local IPC, never a
    network connection. Discord Rich Presence (#2259) talks to the Discord app through one.
    Win32: the named pipe <name> on this PC (the local pipe namespace only), opened for
-   overlapped I/O so a write can give up and no read waits. POSIX: not built yet; supported() is false and open fails. */
+   overlapped I/O so a write can give up and no read waits, at identification level only, so
+   the program serving the pipe cannot act as this user. POSIX: unsupported; supported() is
+   false and open fails. */
 typedef struct {
     void *handle;  /* Win32: the pipe's HANDLE */
     bool open;

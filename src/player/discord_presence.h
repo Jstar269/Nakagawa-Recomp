@@ -18,7 +18,8 @@
  * path, a save, a user name or anything from the game's memory. The SET_ACTIVITY command
  * also carries the player's process ID, which the protocol requires so Discord can clear
  * the status if the player ends without clearing it. Discord's READY answer names the
- * signed-in account; the client reads only its event name and keeps none of it.
+ * signed-in account; the client reads only its event name, stores nothing from it and
+ * clears the frame's bytes once handled.
  *
  * The client never blocks the launcher: reads take only what has arrived, and a write
  * gives up after NK_DISCORD_WRITE_TIMEOUT_MS. When Discord is not running it fails
@@ -54,6 +55,9 @@ extern "C" {
 #define NK_DISCORD_TEXT_MAX 128
 /* The largest frame the client accepts from Discord (READY is about 1 KB). */
 #define NK_DISCORD_RX_MAX 16384
+/* One update handles at most this many frames from Discord (and reads at most
+ * NK_DISCORD_RX_MAX bytes), so a peer that never stops writing cannot hold the launcher. */
+#define NK_DISCORD_FRAMES_PER_UPDATE 64u
 
 /* Frame opcodes (Discord RPC documentation). */
 enum {
@@ -116,9 +120,10 @@ bool nk_discord_application_id_valid(const char *id);
 bool nk_discord_available(void);
 
 /* Fill an activity. The title, trimmed of spaces, is cut to 128 characters on a character
- * boundary; a title that is not valid UTF-8, is shorter than 2 bytes, or holds a backslash
- * (it would be a Windows path, not a title) is left out. False when nothing would be
- * shown. */
+ * boundary, and a partial character at its end (a title cut short upstream) is dropped. A
+ * title that is otherwise not valid UTF-8, is shorter than 2 characters, or holds a
+ * backslash (it would be a Windows path, not a title) is left out. False when nothing would
+ * be shown. */
 bool nk_discord_activity_make(NkDiscordActivity *out, const char *title, const char *mode,
                               int64_t start_ms);
 
