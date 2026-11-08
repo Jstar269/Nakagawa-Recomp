@@ -61,6 +61,10 @@ endif()
 add_library(nakagawa_core STATIC ${CORE_SOURCES})
 if(WIN32)
     target_link_libraries(nakagawa_core PUBLIC shell32 ole32 uuid advapi32)
+elseif(ANDROID)
+    # The Android section of nk_platform_posix.c sends standard output and errors to the
+    # system log (__android_log_write), so everything linking the core needs liblog.
+    target_link_libraries(nakagawa_core PUBLIC log)
 endif()
 
 target_include_directories(nakagawa_core PUBLIC
@@ -124,6 +128,38 @@ enable_testing()
 # Several native CTests write relative scratch files under build/. Keep that
 # directory in the CMake binary tree for out-of-source builds.
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/build")
+# NK_TEST_BUILD_ROOT is that scratch directory as the test binaries see it (their
+# SR_SELFTEST_BUILD_ROOT): the binary tree's build/, or its device copy below.
+set(NK_TEST_BUILD_ROOT "${CMAKE_CURRENT_BINARY_DIR}/build")
+
+# Native tests on an Android device (#360, docs/ANDROID_DEVELOPMENT.md#native-tests-on-a-device).
+# With the NDK toolchain and NK_ANDROID_TEST_DIR set to a folder under /data/local/tmp, CTest runs
+# every test executable on the device through tools/android_test_runner.py (CMake's cross-compiling
+# emulator hook), after one setup test copies the tracked source tree there. The results are the
+# device's own exit statuses.
+set(NK_ANDROID_TEST_DIR "" CACHE STRING
+    "Android only: run CTest on the adb device in this folder under /data/local/tmp")
+if(NK_ANDROID_TEST_DIR)
+    if(NOT ANDROID)
+        message(FATAL_ERROR "NK_ANDROID_TEST_DIR needs the Android NDK toolchain "
+            "(CMAKE_TOOLCHAIN_FILE=<ndk>/build/cmake/android.toolchain.cmake)")
+    endif()
+    if(NOT NK_ANDROID_TEST_DIR MATCHES "^/data/local/tmp/[^/]")
+        message(FATAL_ERROR "NK_ANDROID_TEST_DIR must be a folder under /data/local/tmp, "
+            "the adb shell user's scratch area: ${NK_ANDROID_TEST_DIR}")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(NK_TEST_BUILD_ROOT "${NK_ANDROID_TEST_DIR}/work/build")
+    set(CMAKE_CROSSCOMPILING_EMULATOR "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/android_test_runner.py" run
+        --device-dir "${NK_ANDROID_TEST_DIR}"
+        --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+        --binary-root "${CMAKE_CURRENT_BINARY_DIR}" --)
+    add_test(NAME android_device_sync
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/android_test_runner.py"
+            sync --device-dir "${NK_ANDROID_TEST_DIR}" --source-root "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(android_device_sync PROPERTIES FIXTURES_SETUP nk_android_device)
+endif()
 
 add_executable(test_core_catalog
     tests/native/test_core_catalog.c
@@ -140,7 +176,7 @@ target_include_directories(test_shared_helpers PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
 )
 target_compile_definitions(test_shared_helpers PRIVATE
-    SR_SELFTEST_BUILD_ROOT="${CMAKE_CURRENT_BINARY_DIR}/build"
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
 )
 add_test(NAME shared_helpers_test COMMAND test_shared_helpers)
 
@@ -161,6 +197,9 @@ add_executable(test_launch_resolution
 )
 target_link_libraries(test_launch_resolution PRIVATE nakagawa_core)
 add_test(NAME launch_resolution_test COMMAND test_launch_resolution)
+# On Android the two subtests that spawn the runtime need the app's TitleActivity; the test
+# runs the rest and exits 77.
+set_tests_properties(launch_resolution_test PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(test_pgf_public
     tests/native/test_pgf_public.c
@@ -371,7 +410,7 @@ target_include_directories(test_player_screens PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay
 )
 target_compile_definitions(test_player_screens PRIVATE
-    SR_SELFTEST_BUILD_ROOT="${CMAKE_CURRENT_BINARY_DIR}/build"
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
 )
 if(NOT WIN32)
     target_link_libraries(test_player_screens PRIVATE m)
@@ -418,7 +457,7 @@ target_include_directories(test_nk_ui_sdlr PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/clay
 )
 target_compile_definitions(test_nk_ui_sdlr PRIVATE
-    SR_SELFTEST_BUILD_ROOT="${CMAKE_CURRENT_BINARY_DIR}/build"
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
 )
 if(TARGET SDL3::SDL3 AND TARGET SDL3_ttf::SDL3_ttf)
     target_compile_definitions(test_nk_ui_sdlr PRIVATE NK_UI_WITH_SDL NK_UI_WITH_SDL_TTF)
@@ -603,6 +642,51 @@ else()
     add_executable(test_posix_process tests/native/test_posix_process.c)
     target_link_libraries(test_posix_process PRIVATE nakagawa_core)
     add_test(NAME posix_process_test COMMAND test_posix_process)
+    # On Android the fork/exec subtests do not apply (titles start through TitleActivity):
+    # the test checks that spawning fails closed there and exits 77.
+    set_tests_properties(posix_process_test PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# Host-neutral runtime selftests: the Makefile's coro-selftest, coro-selftest-asm,
+# fp-convert-selftest, ge-float24-selftest and ge-raster-ref-selftest, from the same sources.
+# They need no SDL and no game input, so a cross build runs them on its target too: on Android
+# the coroutine test exercises the stack-switch backend bionic needs and the FP test the AArch64
+# FPCR window, on the device's own CPU.
+add_executable(test_sr_coro tests/native/sr_coro_selftest.c src/rt/sr_coro.c)
+target_include_directories(test_sr_coro PRIVATE src/rt src/core)
+target_compile_options(test_sr_coro PRIVATE -fno-strict-aliasing)
+if(WIN32)
+    target_link_libraries(test_sr_coro PRIVATE psapi)
+else()
+    target_link_libraries(test_sr_coro PRIVATE m)
+endif()
+add_test(NAME sr_coro_test COMMAND test_sr_coro)
+if(NOT WIN32 AND NOT ANDROID AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
+    # Android builds the stack-switch backend by default; another POSIX host selects it here.
+    add_executable(test_sr_coro_asm tests/native/sr_coro_selftest.c src/rt/sr_coro.c)
+    target_include_directories(test_sr_coro_asm PRIVATE src/rt src/core)
+    target_compile_definitions(test_sr_coro_asm PRIVATE SR_CORO_BACKEND_ASM)
+    target_compile_options(test_sr_coro_asm PRIVATE -fno-strict-aliasing)
+    target_link_libraries(test_sr_coro_asm PRIVATE m)
+    add_test(NAME sr_coro_asm_test COMMAND test_sr_coro_asm)
+endif()
+
+add_executable(test_fp_convert tests/native/fp_convert_selftest.c)
+target_include_directories(test_fp_convert PRIVATE src/rt src/core)
+target_compile_options(test_fp_convert PRIVATE -fno-strict-aliasing)
+add_test(NAME fp_convert_test COMMAND test_fp_convert)
+
+add_executable(test_ge_float24 tests/native/ge_float24_selftest.c src/rt/ge_float24.c)
+target_include_directories(test_ge_float24 PRIVATE src/rt)
+add_test(NAME ge_float24_test COMMAND test_ge_float24)
+
+add_executable(test_ge_raster_ref tests/native/ge_raster_ref_selftest.c src/rt/ge_raster_ref.c)
+target_include_directories(test_ge_raster_ref PRIVATE src/rt)
+add_test(NAME ge_raster_ref_test COMMAND test_ge_raster_ref)
+if(NOT WIN32)
+    foreach(nk_runtime_test test_fp_convert test_ge_float24 test_ge_raster_ref)
+        target_link_libraries(${nk_runtime_test} PRIVATE m)
+    endforeach()
 endif()
 
 # -----------------------------------------------------------------------------
@@ -1070,3 +1154,28 @@ function(nk_add_title_runtime target package_dir title_id)
         target_link_libraries(${target} PRIVATE log android)
     endif()
 endfunction()
+
+# -----------------------------------------------------------------------------
+# Test executables keep assert()
+# -----------------------------------------------------------------------------
+# The native tests check with assert(). A Release, RelWithDebInfo or MinSizeRel configuration
+# defines NDEBUG, which would compile those checks away and let a test pass without testing
+# anything, so every test executable undefines it again (the flag comes after the configuration's
+# flags on the command line). On a device run, every test also needs the source copy the
+# android_device_sync setup test makes.
+get_property(nk_buildsystem_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(nk_target IN LISTS nk_buildsystem_targets)
+    get_target_property(nk_target_type ${nk_target} TYPE)
+    if(nk_target_type STREQUAL "EXECUTABLE" AND nk_target MATCHES "^test_")
+        if(MSVC)
+            target_compile_options(${nk_target} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${nk_target} PRIVATE -UNDEBUG)
+        endif()
+    endif()
+endforeach()
+if(NK_ANDROID_TEST_DIR)
+    get_property(nk_device_tests DIRECTORY PROPERTY TESTS)
+    list(REMOVE_ITEM nk_device_tests android_device_sync)
+    set_tests_properties(${nk_device_tests} PROPERTIES FIXTURES_REQUIRED nk_android_device)
+endif()

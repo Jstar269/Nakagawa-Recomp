@@ -18,12 +18,18 @@ it shares with the desktop build are checked here, without an SDK:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import android_test_runner as runner  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -161,6 +167,99 @@ class AndroidAppContractTests(unittest.TestCase):
         for entry in ("/android/local.properties", "/android/.gradle/", "/android/app/.cxx/",
                       "/android/.idea/", "/android/app/build/"):
             self.assertIn(entry, ignore.splitlines())
+
+
+# The device scratch folder, kept out of literals: the publication audit reads a literal
+# temporary-folder path as a local path.
+SCRATCH = runner.DEVICE_SCRATCH_ROOT
+DEVICE = f"{SCRATCH}/nk-test"
+
+
+class AndroidDeviceTestRunnerTests(unittest.TestCase):
+    """tools/android_test_runner.py, the CTest emulator that runs the native tests on a device."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.source = self.tmp / "src"
+        self.binary = self.source / "build" / "android-arm64-ctest"
+        self.binary.mkdir(parents=True)
+        self.device = runner.checked_device_dir(DEVICE)
+        self.paths = runner.PathMap(self.device, str(self.source), str(self.binary))
+
+    def test_device_dir_must_be_under_the_shell_scratch_area(self) -> None:
+        self.assertEqual(str(self.device), DEVICE)
+        for bad in (str(SCRATCH), f"{SCRATCH}/../app", "/sdcard/nk", f"{SCRATCH}/nk"[1:],
+                    # What Git Bash makes of a device path without MSYS_NO_PATHCONV=1.
+                    f"C:/Program Files/Git{SCRATCH}/nk"):
+            with self.subTest(bad=bad), self.assertRaises(runner.RunnerError):
+                runner.checked_device_dir(bad)
+
+    def test_trees_map_to_their_device_copies_binary_tree_first(self) -> None:
+        self.assertEqual(str(self.paths.map(str(self.binary))), f"{DEVICE}/work")
+        self.assertEqual(str(self.paths.map(str(self.binary / "build" / "x.bin"))),
+                         f"{DEVICE}/work/build/x.bin")
+        self.assertEqual(str(self.paths.map(str(self.source / "assets" / "fonts"))),
+                         f"{DEVICE}/src/assets/fonts")
+        self.assertIsNone(self.paths.map(str(self.tmp / "elsewhere")))
+        self.assertEqual(self.paths.map_value("--check"), "--check")
+
+    def test_remote_script_maps_cwd_args_and_test_environment(self) -> None:
+        env = {"NK_TEST_SCRATCH_DIR": str(self.binary / "build"), "SR_GESTAT": "1",
+               "NK_ADB": "C:/sdk/adb.exe", "PATH": "C:/Windows"}
+        script = runner.remote_run_script(self.device, self.paths, str(self.source), "test_x",
+                                          ["--input", str(self.source / "fixtures" / "a b")], env)
+        self.assertEqual(
+            script,
+            f"mkdir -p {DEVICE}/src && cd {DEVICE}/src && "
+            f"env NK_TEST_SCRATCH_DIR={DEVICE}/work/build SR_GESTAT=1 "
+            f"{DEVICE}/bin/test_x --input '{DEVICE}/src/fixtures/a b'")
+
+    def test_a_working_directory_outside_both_trees_is_refused(self) -> None:
+        with self.assertRaises(runner.RunnerError):
+            runner.remote_run_script(self.device, self.paths, str(self.tmp), "test_x", [], {})
+
+    def test_run_pushes_runs_and_returns_the_device_exit_status(self) -> None:
+        exe = self.binary / "test_x"
+        exe.write_bytes(b"\x7fELF")
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, check=False, **kwargs):  # noqa: ANN001
+            calls.append(list(cmd))
+            rc = 77 if cmd[1] == "shell" and "cd " in cmd[2] else 0
+            return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
+
+        cwd = os.getcwd()
+        os.chdir(self.binary)
+        try:
+            with mock.patch.dict(os.environ, {"NK_ADB": "adb-test"}), \
+                    mock.patch.object(runner.subprocess, "run", fake_run):
+                rc = runner.main(["run", "--device-dir", str(self.device), "--source-root",
+                                  str(self.source), "--binary-root", str(self.binary), "--",
+                                  str(exe), "--check"])
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(rc, 77)  # a device SKIP stays a SKIP; nothing is turned into a pass
+        self.assertEqual(calls[0], ["adb-test", "push", str(exe), f"{DEVICE}/bin/test_x"])
+        self.assertEqual(calls[1], ["adb-test", "shell", f"chmod 755 {DEVICE}/bin/test_x"])
+        self.assertTrue(calls[2][2].endswith(f"{DEVICE}/bin/test_x --check"))
+        self.assertIn(f"cd {DEVICE}/work &&", calls[2][2])
+
+    def test_cmake_wires_the_runner_as_the_cross_compiling_emulator(self) -> None:
+        cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertIn('"${CMAKE_CURRENT_SOURCE_DIR}/tools/android_test_runner.py" run', cmake)
+        self.assertIn('set(NK_TEST_BUILD_ROOT "${NK_ANDROID_TEST_DIR}/work/build")', cmake)
+        self.assertIn("FIXTURES_SETUP nk_android_device", cmake)
+        self.assertIn("FIXTURES_REQUIRED nk_android_device", cmake)
+        # Compiled-in scratch paths follow the device copy instead of naming the host tree.
+        self.assertNotIn('SR_SELFTEST_BUILD_ROOT="${CMAKE_CURRENT_BINARY_DIR}/build"', cmake)
+        # Linking the core on Android needs liblog (nk_platform_posix.c's log redirection).
+        self.assertRegex(cmake, r"elseif\(ANDROID\)\s*\n(?:\s*#.*\n)*\s*target_link_libraries\("
+                                r"nakagawa_core PUBLIC log\)")
+        # Release-type configurations would otherwise compile every assert() away.
+        self.assertIn("target_compile_options(${nk_target} PRIVATE -UNDEBUG)", cmake)
+        for test in ("sr_coro_test", "fp_convert_test", "ge_float24_test", "ge_raster_ref_test"):
+            self.assertIn(f"add_test(NAME {test} ", cmake)
 
 
 if __name__ == "__main__":

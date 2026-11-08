@@ -177,6 +177,39 @@ The `-s` filter keeps only the launcher's, the title runtime's and SDL's lines, 
 lines and the rest of the system log stay out. Do not attach a full `adb logcat` or a bug report
 from Developer options: those carry other apps' data and account details.
 
+## Native tests on a device
+
+The native CTest set (the core, launcher-state and UI tests, and the runtime's coroutine, FP
+conversion and GE reference selftests) builds for arm64-v8a with the NDK and runs on a phone over
+`adb`, without Gradle or the APK. Configure the top-level CMake project with the NDK's toolchain
+file and `NK_ANDROID_TEST_DIR`, a folder under `/data/local/tmp`:
+
+```bash
+cmake -S . -B build/android-arm64-ctest -G Ninja \
+  -DCMAKE_MAKE_PROGRAM=$ANDROID_HOME/cmake/4.1.2/bin/ninja \
+  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/30.0.16248370/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DBUILD_PLAYER=OFF \
+  -DNK_ANDROID_TEST_DIR=/data/local/tmp/<folder>
+cmake --build build/android-arm64-ctest
+ANDROID_SERIAL=<serial> ctest --test-dir build/android-arm64-ctest --output-on-failure
+```
+
+The NDK, CMake and minimum API are the ones the Gradle build pins
+([Prerequisites](#prerequisites)). With `NK_ANDROID_TEST_DIR` set, CMake uses
+`tools/android_test_runner.py` as its cross-compiling emulator. A first setup test copies the
+repository's tracked files to `<dir>/src`. Then each test executable is pushed to `<dir>/bin` and
+run from `<dir>/work` or `<dir>/src`, whichever matches its CTest working directory, so every
+PASS, FAIL and SKIP (exit 77) is the device's own exit status. adb comes from `PATH` or `NK_ADB`,
+and `ANDROID_SERIAL` picks the device. The tool writes only under `NK_ANDROID_TEST_DIR`; it needs
+USB debugging and no root. In Git Bash, set `MSYS_NO_PATHCONV=1` first, or the shell rewrites
+the device path into a Windows path, which the configure step refuses.
+
+Tests that start a child process through the desktop spawn route cannot run from `adb shell`.
+On Android a title starts in its own process through `TitleActivity`, and a program started from
+`adb shell` has no Java VM. Those subtests report SKIP with the reason, and the spawn call is
+checked to fail closed. The two package-build tests fail there: building a package on the
+device is not supported ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
+
 ## Storage
 
 The player's data, settings, caches, logs and saves are in `Nakagawa/` in the app's private
@@ -195,6 +228,6 @@ relative path against that folder, so `SDL_GetBasePath()` (`./` on Android) find
 | Lifecycle | Measured in the emulator: with the title in the background the guest keeps running and every present fails (`swapchain acquire failed`), because the presenter does not recreate its Vulkan surface and swapchain after Android destroys the window surface. Pausing the guest in the background and recreating the swapchain on return are not done. |
 | Input | Touch controls are not built; SDL gamepads reach the runtime's ordinary input path. |
 | Video | The FFmpeg H.264 subset builds for Android; it has not been run on a device. |
-| Devices | Only the emulator has run it; no physical arm64 device has. Memory and API floors have not been measured. |
+| Devices | The APK has run only in the emulator. The native test set has run on one physical arm64 device, an Android 16 handheld with a Snapdragon 7 Gen 4-class SoC ([Native tests on a device](#native-tests-on-a-device)). Memory and API floors have not been measured. |
 
 <!-- issue-links: #360 -->

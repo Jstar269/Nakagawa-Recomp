@@ -48,8 +48,66 @@ static double elapsed_ms(const struct timespec *a, const struct timespec *b) {
          + (double)(b->tv_nsec - a->tv_nsec) / 1000000.0;
 }
 
+/* 8. nk_platform_get_file_size POSIX file size queries. */
+static void file_size_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 8: nk_platform_get_file_size file size queries\n");
+    fflush(stdout);
+
+    /* 8a. NULL path handling returns -1 */
+    assert(nk_platform_get_file_size(NULL) == -1);
+
+    /* 8b. Non-existent file path returns -1 */
+    const char *nonexistent_path = SR_SELFTEST_BUILD_ROOT "/test_posix_nonexistent_12345.tmp";
+    remove(nonexistent_path);
+    assert(nk_platform_get_file_size(nonexistent_path) == -1);
+
+    /* 8c. Empty file returns 0 */
+    const char *empty_path = SR_SELFTEST_BUILD_ROOT "/test_posix_empty.tmp";
+    FILE *f_empty = fopen(empty_path, "wb");
+    assert(f_empty != NULL);
+    fclose(f_empty);
+    assert(nk_platform_get_file_size(empty_path) == 0);
+    remove(empty_path);
+
+    /* 8d. Regular file with known size */
+    const char *data_path = SR_SELFTEST_BUILD_ROOT "/test_posix_data.tmp";
+    FILE *f_data = fopen(data_path, "wb");
+    assert(f_data != NULL);
+    char test_buf[2048];
+    memset(test_buf, 0x5A, sizeof(test_buf));
+    assert(fwrite(test_buf, 1, sizeof(test_buf), f_data) == sizeof(test_buf));
+    fclose(f_data);
+    assert(nk_platform_get_file_size(data_path) == (int64_t)sizeof(test_buf));
+    remove(data_path);
+}
+
+#if defined(__ANDROID__)
+/* Android does not build the fork/exec backend that subtests 1-7 drive: a title starts in its
+ * own process through TitleActivity, over JNI (the Android section of nk_platform_posix.c), and
+ * an app may not execute files from its storage. A program run from adb shell has no Java VM,
+ * so there spawning must fail closed and leave no handle a caller could wait on. The JNI route
+ * itself runs only inside the app. */
+static int android_main(void) {
+    printf("[POSIX_PROCESS_TEST] Android: spawning without a Java VM fails closed\n");
+    NkProcessHandle none;
+    memset(&none, 0x5a, sizeof(none));
+    const char *argv[] = { "/system/bin/true", NULL };
+    assert(!nk_platform_spawn_process("/system/bin/true", argv, NULL, NULL, NULL, &none));
+    assert(none.spawn_error == ENOSYS);
+    assert(!none.is_active && none.native_handle == NULL && none.process_id == 0);
+    file_size_subtest();
+    printf("SKIP posix_process_test subtests 1-7 (exit 77): Android starts titles through "
+           "TitleActivity, not fork/exec; they run on Linux and macOS\n");
+    return 77;
+}
+#endif
+
 int main(void) {
     struct timespec t0, t1;
+#if defined(__ANDROID__)
+    (void)t0; (void)t1; (void)elapsed_ms;
+    return android_main();
+#else
 
     /* 1. A finite timeout must expire and return, leaving the child alive.
      *
@@ -241,39 +299,11 @@ int main(void) {
     remove(posix_pid_file);
     printf("[POSIX_PROCESS_TEST] Grandchild PID %d terminated successfully.\n", (int)grandchild_pid);
 
-    /* 8. nk_platform_get_file_size POSIX file size queries. */
-    printf("[POSIX_PROCESS_TEST] Subtest 8: nk_platform_get_file_size file size queries\n");
-    fflush(stdout);
-
-    /* 8a. NULL path handling returns -1 */
-    assert(nk_platform_get_file_size(NULL) == -1);
-
-    /* 8b. Non-existent file path returns -1 */
-    const char *nonexistent_path = SR_SELFTEST_BUILD_ROOT "/test_posix_nonexistent_12345.tmp";
-    remove(nonexistent_path);
-    assert(nk_platform_get_file_size(nonexistent_path) == -1);
-
-    /* 8c. Empty file returns 0 */
-    const char *empty_path = SR_SELFTEST_BUILD_ROOT "/test_posix_empty.tmp";
-    FILE *f_empty = fopen(empty_path, "wb");
-    assert(f_empty != NULL);
-    fclose(f_empty);
-    assert(nk_platform_get_file_size(empty_path) == 0);
-    remove(empty_path);
-
-    /* 8d. Regular file with known size */
-    const char *data_path = SR_SELFTEST_BUILD_ROOT "/test_posix_data.tmp";
-    FILE *f_data = fopen(data_path, "wb");
-    assert(f_data != NULL);
-    char test_buf[2048];
-    memset(test_buf, 0x5A, sizeof(test_buf));
-    assert(fwrite(test_buf, 1, sizeof(test_buf), f_data) == sizeof(test_buf));
-    fclose(f_data);
-    assert(nk_platform_get_file_size(data_path) == (int64_t)sizeof(test_buf));
-    remove(data_path);
+    file_size_subtest();
 
     printf("[POSIX_PROCESS_TEST] ALL POSIX PROCESS TESTS PASSED!\n");
     return 0;
+#endif /* !__ANDROID__ */
 }
 
 #endif /* !_WIN32 */
