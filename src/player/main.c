@@ -1119,7 +1119,7 @@ static void player_ui_wizard_apply(PlayerApp *app, PlayerUiWizardOp op) {
 #define NK_PLAYER_BUILD_COMMIT ""
 #endif
 
-/* The version a report names: "v0.0.2-dev", with the source commit when the
+/* The version a report names: "v0.0.2", with the source commit when the
    build knows it. */
 static const char *player_report_version(void) {
     static char version[64];
@@ -1437,7 +1437,7 @@ static void player_update_shutdown(void) {
 static void player_update_open_release_page(PlayerApp *app) {
     const char *url = app->update.check.newest.page_url;
     /* Only this repository's release pages, as the check verified. */
-    if (strncmp(url, NK_UPDATE_RELEASE_PAGE_PREFIX, strlen(NK_UPDATE_RELEASE_PAGE_PREFIX)) != 0) {
+    if (!nk_update_is_release_page(url)) {
         return;
     }
     player_open_link(app, "The release page", url);

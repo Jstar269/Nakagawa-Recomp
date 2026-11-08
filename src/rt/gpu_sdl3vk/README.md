@@ -1,7 +1,8 @@
 # SDL3 + Vulkan GPU renderer
 
-New GPU renderer for the recompiled runtime, replacing the Win32/GDI presentation path and
-(eventually) the software GE rasterizer in `src/rt/ge.c`. Built from scratch in this
+GPU renderer for the recompiled runtime. It replaces the Win32/GDI presentation path and, with
+`SR_GPU_GE=1` (which the player sets for every launch), the software GE rasterizer in `src/rt/ge.c`,
+which stays as the fallback. Built from scratch in this
 directory — it is the project's own Vulkan backend and does **not** reuse PPSSPP's GPU. (An
 earlier PPSSPP-GPU bridge under `src/rt/gpu_vk/` was a frozen experiment and has been removed.)
 
@@ -126,11 +127,11 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   `ge-light` oracle case). `tools/test_shader_embed.py` keeps the two copies identical and runs
   the shader's copy as C against ge.c's, and the `specular-ge-powf` and `light-4-ge-powf`
   parity cells compare the routes on a device that runs the T&L stage.
-- Render-to-texture chains (the hangar uses fbp swaps), depth readbacks if any game code
+- Not done: render-to-texture chains (the hangar uses fbp swaps), depth readbacks if any game code
   reads zbuf, small-tri rasterization rules (top-left bias already documented in
   raster_tri) via conservative settings.
-- Only after Phase 3 ships does GDI/software become optional at build time. The software
-  GE is never deleted: it is the documentation of GE semantics.
+- The GDI presenter and the software GE stay in the build. The software GE is never deleted:
+  it is the documentation of GE semantics.
 
 ## Files
 

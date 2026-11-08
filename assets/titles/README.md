@@ -116,9 +116,8 @@ Titles that omit the key are unaffected.
 - `showcase-scene.json` (TEST00007) and `showcase-breakout.json` (TEST00008) are
   the source-owned showcase demos: a lit, textured 3D scene and Breakout, built
   from `fixtures/showcase/` with PSPDEV and packaged by `fixtures/showcase/showcase.py`
-  (see [`docs/SHOWCASE.md`](../../docs/SHOWCASE.md)). Their acceptance profiles stay
-  `scaffold` until their public evidence matrix is complete; no open issue tracks
-  that yet. Publication-safe and deterministic.
+  (see [`docs/SHOWCASE.md`](../../docs/SHOWCASE.md)). Their acceptance profiles are
+  `scaffold`: no public evidence matrix exists for them. Publication-safe and deterministic.
 
 The analyzer applies **no** title-specific executable span by default: a raw
 base-zero image never silently inherits another title's span. An extra executable
