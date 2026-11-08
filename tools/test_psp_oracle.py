@@ -2488,7 +2488,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 147)
+        self.assertEqual(len(routes), 149)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 168, 169, 170, 171},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -5360,6 +5360,9 @@ class HleMeasureProbeTests(unittest.TestCase):
          "HLE_CASE_IO_SEEK", "PSP-HLE-IO-SEEK-001"),
         ("hle-nickname-limit", 164, "hle_nickname_limit", "hle_utility_imports.S",
          "HLE_CASE_NICKNAME_LIMIT", "PSP-HLE-NICKNAME-001"),
+        # #341 part 2: loads the helper PRX of case 172 (probe_hle_self_stop_helper.c).
+        ("hle-self-stop-unload", 167, "hle_self_stop_unload", None,
+         "HLE_CASE_SELF_STOP", "PSP-HLE-SELFSTOP-001"),
     )
     ALL_FAMILIES = FAMILIES + SINGLE_LAUNCH_FAMILIES + TABLE_FAMILIES + LATER_FAMILIES
     # Every family block: file -> (library, version word, {function: NID}). The
@@ -5462,6 +5465,9 @@ class HleMeasureProbeTests(unittest.TestCase):
         # pinned by the Makefile's --exact-library sceReg gate.
         "sceRegOpenRegistry", "sceRegCloseRegistry", "sceRegOpenCategory",
         "sceRegCloseCategory", "sceRegGetKeysNum", "sceRegGetKeys", "sceRegGetKeyInfo",
+        # hle-self-stop-unload: the module manager calls the probe makes on its helper PRX.
+        "sceKernelLoadModule", "sceKernelStartModule", "sceKernelStopModule",
+        "sceKernelUnloadModule", "sceKernelGetModuleIdByAddress",
         # hle-utility-dialogs: the vblank counter, the UMD presence check, the directory calls
         # of its gamedata precheck and cleanup, and the net libraries' Init/Term pairs.
         "sceDisplayGetVcount", "sceUmdCheckMedium",
@@ -5613,6 +5619,8 @@ class HleMeasureProbeTests(unittest.TestCase):
                            self.makefile)
         # The HLE issue cells (106-107) are routed too, from their own source.
         registered = self.ALL_FAMILIES + HleIssuesProbeTests.CASES
+        # The self stop-unload helper PRX (case 172) is built from its own source, not a family.
+        registered = registered + (("hle-self-stop-helper", 172),)
         self.assertEqual(sorted(pairs),
                          sorted((case, str(case_id)) for case, case_id, *_ in registered))
         all_ids = re.findall(r"^CASE_ID = (\d+)$", self.makefile, re.MULTILINE)

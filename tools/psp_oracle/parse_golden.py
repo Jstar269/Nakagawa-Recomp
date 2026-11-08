@@ -1951,6 +1951,20 @@ _register_campaign_probe(
     tuple(row for row, _ in HLE_STD_HANDLES_ROWS), dict(HLE_STD_HANDLES_ROWS),
 )
 
+# hle-self-stop-unload (167, probe_hle_measure.c): #341's sceKernelSelfStopUnloadModule from a helper
+# PRX's own thread (the helper is case 172, hle-self-stop-helper, loaded from host0). Per form a
+# 12-word record and a 3-word cleanup record; the form that may fault the launch runs last.
+HLE_SELF_STOP_FORMS = ("arg0", "arg1", "argp-past-ram")
+HLE_SELF_STOP_ROWS = tuple(
+    row
+    for form in HLE_SELF_STOP_FORMS
+    for row in ((f"self-stop-{form}", 12), (f"self-stop-{form}-cleanup", 3))
+)
+_register_campaign_probe(
+    "hle-self-stop-unload", "PSP-HLE-SELFSTOP-001",
+    tuple(row for row, _ in HLE_SELF_STOP_ROWS), dict(HLE_SELF_STOP_ROWS),
+)
+
 # hle-audio-rest (159, probe_hle_measure.c): #279's rest length after each of 32 blocking
 # outputs on a 1024-, 2048- and 4096-frame stereo channel, then the drain and the release.
 HLE_AUDIO_REST_FRAMES = (1024, 2048, 4096)

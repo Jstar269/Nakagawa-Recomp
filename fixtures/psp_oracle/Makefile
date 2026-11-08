@@ -212,6 +212,11 @@ CASE_ID = 140
 # 156: #341's standard handles, a write to each and a write after closing Stdout.
 else ifeq ($(CASE),hle-std-handles)
 CASE_ID = 156
+# 167: #341's sceKernelSelfStopUnloadModule from a helper PRX the probe loads (case 172, the helper).
+else ifeq ($(CASE),hle-self-stop-unload)
+CASE_ID = 167
+else ifeq ($(CASE),hle-self-stop-helper)
+CASE_ID = 172
 # 159: #279's audio channel rest length at each blocking-output return (1024, 2048, 4096).
 else ifeq ($(CASE),hle-audio-rest)
 CASE_ID = 159
@@ -586,6 +591,14 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(
 else ifeq ($(CASE),hle-std-handles)
 TARGET = $(BUILD_DIR)/hle_std_handles
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-self-stop-unload)
+TARGET = $(BUILD_DIR)/hle_self_stop_unload
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+# The helper PRX that case loads from host0 (probe_hle_self_stop_helper.c); built as its own CASE,
+# so build_probe_batch.sh copies it as hle_self_stop_helper.prx next to the probe.
+else ifeq ($(CASE),hle-self-stop-helper)
+TARGET = $(BUILD_DIR)/hle_self_stop_helper
+OBJS = $(BUILD_DIR)/probe_hle_self_stop_helper.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-audio-rest)
 TARGET = $(BUILD_DIR)/hle_audio_rest
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
@@ -1003,6 +1016,10 @@ endif
 ifneq ($(filter $(BUILD_DIR)/probe_insn_trace.o,$(OBJS)),)
 PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
 endif
+# The self stop-unload helper (probe_hle_self_stop_helper.c) exports module_stop too.
+ifneq ($(filter $(BUILD_DIR)/probe_hle_self_stop_helper.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
 # And the module_start thread cell (probe_module_start.c), which defines its own module_stop.
 ifneq ($(filter $(BUILD_DIR)/probe_module_start.o,$(OBJS)),)
 PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
@@ -1081,6 +1098,9 @@ $(BUILD_DIR)/probe_dmac_timing.o: probe_dmac_timing.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/probe_insn_trace.o: probe_insn_trace.c insn_trace_fixtures.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_hle_self_stop_helper.o: probe_hle_self_stop_helper.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/probe_module_start.o: probe_module_start.c

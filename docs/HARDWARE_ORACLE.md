@@ -3419,6 +3419,7 @@ not expected PSP values.
 | `sas-adsr` | `PSP-SAS-002` | `NOT_RUN` (current status encoding) | The current PASS/ERROR status encoding has not been run on hardware. Historical envelope values from 2026-11-05 remain in the fixture index. |
 | `sas-mix` | `PSP-SAS-003` | `NOT_RUN` | Built synthetic volume, WithMix and pitch cells for #2135 and #2054; no hardware result is claimed. |
 | `vcodec-words` | `PSP-VCODEC-001` | `NOT_RUN` | Built Media Engine boundary-word cells over synthetic AVC access units; no hardware result is claimed. |
+| `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | `NOT_RUN` | Built #341 self stop-unload cells (case 167, helper PRX case 172); no hardware result is claimed. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. |
 | `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | `MEASURED` (2026-11-08, PSP-3000, boot 156, `59520eb0`; 30 records) | #1380: flash0 seeks (64- and 32-bit), sceIoIoctl file commands, and writes on read-only descriptors. |
 | `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | `MEASURED` (2026-11-08, PSP-3000, boot 155, `07e58170`; 16 records) | W-NET-1 (#2197): the owner_name key type and the nickname string call at eight buffer lengths; no value bytes. |

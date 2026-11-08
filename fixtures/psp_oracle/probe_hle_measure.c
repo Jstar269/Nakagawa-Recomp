@@ -86,6 +86,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_UTILITY_NONE 140
 #define HLE_CASE_STD_HANDLES 156
 #define HLE_CASE_AUDIO_REST 159
+#define HLE_CASE_SELF_STOP 167
 #define HLE_CASE_UTILITY_DIALOGS 161
 #define HLE_CASE_IO_SEEK 162
 #define HLE_CASE_NICKNAME_LIMIT 164
@@ -158,6 +159,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "hle-std-handles"
 #define HLE_TEST_ID "PSP-HLE-STDIO-001"
 #define HLE_LOG "host0:/hle_std_handles_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_SELF_STOP
+#define HLE_CAMPAIGN_ID "hle-self-stop-unload"
+#define HLE_TEST_ID "PSP-HLE-SELFSTOP-001"
+#define HLE_LOG "host0:/hle_self_stop_unload_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_AUDIO_REST
 #define HLE_CAMPAIGN_ID "hle-audio-rest"
 #define HLE_TEST_ID "PSP-HLE-AUDIO-REST-001"
@@ -2315,6 +2320,125 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_STD_HANDLES */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_SELF_STOP
+
+/* #341 (W-HLE-2, part 2): sceKernelSelfStopUnloadModule called by a helper module's own
+   thread. The helper (probe_hle_self_stop_helper.c, CASE=hle-self-stop-helper, loaded from
+   host0:/hle_self_stop_helper.prx) is loaded and started once per form; the probe passes it
+   the address of an 8-word marker buffer and the mode as argument strings. The helper's main
+   thread calls the function, so the caller that may or may not survive is the helper's, never
+   this probe's. module_stop returns 0 and writes a marker into the buffer.
+
+   Forms, in the order run (the one most likely to fault the launch is last, each with a step
+   written durably before it):
+   - self-stop-arg0: (0, 0, NULL)
+   - self-stop-arg1: (1, 0, NULL), the first argument nonzero
+   - self-stop-argp-past-ram: (0, 4, 0x0C000000), argp past the 64 MB of RAM
+
+   Per form two records. self-stop-<form> (12 words, result: the call's return value as the
+   helper saw it, or HLE_SENTINEL when it never returned): LoadModule, StartModule, start
+   status, entered marker, call return, continued marker, module_stop marker, module_stop
+   args, module_stop argp, module_stop call count, anchor address, GetModuleIdByAddress(anchor)
+   after the poll. The poll waits at most 2 s with sceKernelDelayThread for the continued
+   marker, then 100 ms more. self-stop-<form>-cleanup (3 words, result: the StopModule
+   answer; HLE_SENTINEL when the module was already gone): StopModule, UnloadModule,
+   GetModuleIdByAddress again. The cleanup runs after the first record, so its module_stop
+   call cannot change it. */
+
+#define SS_WORDS 8u
+#define SS_OUT_WORDS 12u
+#define SS_PATH "host0:/hle_self_stop_helper.prx"
+
+static uint32_t s_ss_words[SS_WORDS] __attribute__((aligned(64)));
+
+static void hle_ss_form(const char *case_id, const char *cleanup_id, const char *name,
+                        unsigned mode)
+{
+    char step[64];
+    for (unsigned i = 0; i < SS_WORDS; i++) {
+        s_ss_words[i] = HLE_SENTINEL;
+    }
+    s_ss_words[7] = 0;
+    uint32_t out[SS_OUT_WORDS];
+    for (unsigned i = 0; i < SS_OUT_WORDS; i++) {
+        out[i] = HLE_SENTINEL;
+    }
+
+    snprintf(step, sizeof(step), "self-stop-%s-load", name);
+    hle_step(step);
+    const SceUID modid = sceKernelLoadModule(SS_PATH, 0, NULL);
+    out[0] = (uint32_t)modid;
+    if (modid < 0) {
+        hle_record(case_id, "FAIL", HLE_SENTINEL, out, SS_OUT_WORDS);
+        return;
+    }
+
+    /* argv[0] module path, argv[1] marker buffer address in hex, argv[2] mode. */
+    char args[96];
+    size_t used = 0;
+    used += (size_t)snprintf(args + used, sizeof(args) - used, "%s", SS_PATH) + 1u;
+    used += (size_t)snprintf(args + used, sizeof(args) - used, "0x%08x",
+                             (unsigned int)(uintptr_t)s_ss_words) + 1u;
+    used += (size_t)snprintf(args + used, sizeof(args) - used, "%u", mode) + 1u;
+
+    snprintf(step, sizeof(step), "self-stop-%s-call", name);
+    hle_step(step);
+    int status = (int)HLE_SENTINEL;
+    const int start_rc = sceKernelStartModule(modid, (SceSize)used, args, &status, NULL);
+    out[1] = (uint32_t)start_rc;
+    out[2] = (uint32_t)status;
+
+    volatile uint32_t *w = s_ss_words;
+    snprintf(step, sizeof(step), "self-stop-%s-poll", name);
+    hle_step(step);
+    for (unsigned i = 0; i < HLE_POLL_ITERATIONS && w[6] == HLE_SENTINEL; i++) {
+        sceKernelDelayThread(HLE_POLL_DELAY_US);
+    }
+    hle_step(step);
+    sceKernelDelayThread(100000u);
+
+    out[3] = w[0];
+    out[4] = w[5];
+    out[5] = w[6];
+    out[6] = w[2];
+    out[7] = w[3];
+    out[8] = w[4];
+    out[9] = w[7];
+    out[10] = w[1];
+    snprintf(step, sizeof(step), "self-stop-%s-query", name);
+    hle_step(step);
+    const int after = (w[1] == HLE_SENTINEL) ? (int)HLE_SENTINEL
+                                             : (int)sceKernelGetModuleIdByAddress((const void *)(uintptr_t)w[1]);
+    out[11] = (uint32_t)after;
+    hle_record(case_id, "PASS", out[4], out, SS_OUT_WORDS);
+
+    uint32_t clean[3] = {HLE_SENTINEL, HLE_SENTINEL, HLE_SENTINEL};
+    uint32_t clean_result = HLE_SENTINEL;
+    if (after >= 0) {
+        snprintf(step, sizeof(step), "self-stop-%s-cleanup", name);
+        hle_step(step);
+        int stop_status = 0;
+        const int stop_rc = sceKernelStopModule(modid, 0, NULL, &stop_status, NULL);
+        const int unload_rc = sceKernelUnloadModule(modid);
+        clean[0] = (uint32_t)stop_rc;
+        clean[1] = (uint32_t)unload_rc;
+        clean[2] = (uint32_t)sceKernelGetModuleIdByAddress((const void *)(uintptr_t)w[1]);
+        clean_result = (uint32_t)stop_rc;
+    }
+    hle_record(cleanup_id, "PASS", clean_result, clean, 3);
+}
+
+static int hle_run(void)
+{
+    hle_ss_form("self-stop-arg0", "self-stop-arg0-cleanup", "arg0", 0u);
+    hle_ss_form("self-stop-arg1", "self-stop-arg1-cleanup", "arg1", 1u);
+    hle_ss_form("self-stop-argp-past-ram", "self-stop-argp-past-ram-cleanup", "argp-past-ram", 2u);
+    return 1;
+}
+
+#endif /* HLE_CASE_SELF_STOP */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_AUDIO_REST

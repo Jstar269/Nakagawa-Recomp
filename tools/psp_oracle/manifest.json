@@ -7298,6 +7298,22 @@
       "reset": "one PRX launch; PSPLink soft reset before the next launch"
     },
     {
+      "id": "PSP-HLE-SELFSTOP-001",
+      "status": "implemented",
+      "hardware_evidence": "NOT_RUN",
+      "evidence_note": "Built as case 167: sceKernelSelfStopUnloadModule called by the thread of a project-authored helper PRX (case 172, hle-self-stop-helper) that the probe loads from host0, in three forms (0, 0, NULL), (1, 0, NULL) and (0, 4, argp past RAM). No hardware run is cited.",
+      "group": "system",
+      "source": "fixtures/psp_oracle/probe_hle_measure.c",
+      "prx": "hle_self_stop_unload.prx",
+      "apis": ["sceKernelLoadModule", "sceKernelStartModule", "sceKernelSelfStopUnloadModule", "sceKernelGetModuleIdByAddress", "sceKernelStopModule", "sceKernelUnloadModule"],
+      "diagnostic_case_ids": ["hle-self-stop-unload"],
+      "case_ids": ["self-stop-arg0", "self-stop-arg0-cleanup", "self-stop-arg1", "self-stop-arg1-cleanup", "self-stop-argp-past-ram", "self-stop-argp-past-ram-cleanup"],
+      "invariant": "#341: the return value, whether module_stop ran, whether the calling thread continued, and sceKernelGetModuleIdByAddress for an address inside the helper afterwards, for each of three argument forms.",
+      "issues": [341],
+      "risk": "medium; a successful self-unload ends the helper's thread and may fault the launch; the argp-past-RAM form runs last, each form has a durable step before it",
+      "reset": "one PRX launch with the helper PRX beside it on host0; a fresh boot before the next launch"
+    },
+    {
       "id": "PSP-HLE-UTILITY-DIALOG-001",
       "status": "implemented",
       "hardware_evidence": "NOT_RUN",
