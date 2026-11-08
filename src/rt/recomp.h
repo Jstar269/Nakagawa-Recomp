@@ -2361,10 +2361,10 @@ uint32_t sched_pending_interrupts(void);             /* source bits not yet serv
 void     sched_delay_current(uint64_t usec);        /* block current thread for usec */
 void     sched_preempt(void);                       /* yield now if a higher-priority thread is ready */
 /* Set by the preemption timer when a stronger thread's deadline comes. A long HLE call polls it
- * between units of work and, where nothing it holds can be reached by the thread that runs,
- * calls sched_preempt_point(): that thread then runs inside the call, as it would on the PSP
- * (#1296). Callers: the GE list run, and a savedata SAVE, which refuses another savedata call
- * while parked and is released if its thread ends (savedata.c). */
+ * between units of work and, where the thread that runs cannot reach the call's own state (for
+ * a SAVE, its savedata state), calls sched_preempt_point(): that thread then runs inside the
+ * call, as it would on the PSP (#1296). Callers: the GE list run, and a savedata SAVE, which
+ * refuses another savedata call while parked and is released if its thread ends (savedata.c). */
 extern atomic_int_least32_t sr_preempt_due;
 void     sched_preempt_point(void);
 void     sched_block_on(uint32_t obj);              /* block current thread until sched_wake(obj) */

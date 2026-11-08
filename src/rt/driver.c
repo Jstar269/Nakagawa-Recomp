@@ -56,7 +56,8 @@ static SrPauseHost s_driver_pause_host = {
 /* A scheduler run that ends without the guest ending it stops at the scheduler's next
  * boundary (#1377): the window reports an acceptance launch's last frame or the person's quit
  * (gui_stop_requested), and an SR_GE_CAPTURE_EXIT capture asks to end once written. A SAVE
- * parked at one of its preemption points finishes first (#1296). */
+ * parked at one of its preemption points holds the stop for up to 5 s of guest time, so it can
+ * finish first (#1296, sr_savedata_stop_deferred). */
 int sr_savedata_stop_deferred(uint64_t now_us);   /* savedata.c */
 static int driver_stop_requested(void) {
     if (!ge_capture_exit_due() && !gui_stop_requested()) return 0;
