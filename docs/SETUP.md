@@ -105,7 +105,7 @@ player started with `--user-data-root` passes that folder on too. Start Steam af
 library; no restart is needed.
 
 It works on your PC only and makes no network call or download. Steam's folder comes from the current user's own
-registry setting (Windows only for now; elsewhere the dialog says it is unsupported and writes nothing), and the
+registry setting (Windows only; on other systems the dialog says it is unsupported and writes nothing), and the
 account names come from Steam's own `config\loginusers.vdf`. It edits the binary `shortcuts.vdf` in that
 account's `userdata\<account>\config` folder. Before it writes, it copies the file to
 `shortcuts.vdf.nakagawa-backup-<date>-<time>` and reads the copy back; if that fails it writes nothing. It writes a

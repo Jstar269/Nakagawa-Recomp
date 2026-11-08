@@ -11321,6 +11321,17 @@ PlayerSteamOutcome player_app_plan_steam_shortcut(const PlayerApp *app, int game
         while (root_length > 1u && nk_platform_is_path_separator(root[root_length - 1u])) {
             root[--root_length] = '\0';
         }
+        /* A drive root keeps its separator: a bare "C:" means the current folder on drive C.
+           A backslash before the closing quote is doubled, so Windows reads one backslash and
+           then the quote. */
+        if (root_length == 2u && root[1] == ':' && isalpha((unsigned char)root[0]) &&
+            nk_platform_is_path_separator(app->user_data_root[2])) {
+            if (app->user_data_root[2] == '\\') {
+                (void)snprintf(root + 2, sizeof(root) - 2u, "\\\\");
+            } else {
+                (void)snprintf(root + 2, sizeof(root) - 2u, "/");
+            }
+        }
         if (strchr(root, '"') != NULL ||
             snprintf(plan->launch_options, sizeof(plan->launch_options),
                      PLAYER_LAUNCH_TITLE_ARG "%s \"--user-data-root=%s\"", value, root) >=
@@ -11455,7 +11466,7 @@ size_t player_steam_outcome_text(const PlayerSteamPlan *plan, char *out, size_t 
             break;
         case PLAYER_STEAM_UNSUPPORTED:
             n = snprintf(out, out_size, "%s",
-                         "Add to Steam works on Windows only for now. Nothing was changed.");
+                         "Add to Steam works on Windows only. Nothing was changed.");
             break;
         case PLAYER_STEAM_NOT_FOUND:
             n = snprintf(out, out_size, "%s",

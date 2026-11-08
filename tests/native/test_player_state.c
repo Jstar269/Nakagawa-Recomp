@@ -8812,6 +8812,17 @@ static void test_add_to_steam_outcomes(void) {
     assert(strcmp(plan.launch_options,
                   "--launch-title=ULUS10001 \"--user-data-root=C:/Synthetic data/Nakagawa\"") ==
            0);
+    /* A drive root keeps its separator ("C:" alone is relative to drive C's current folder);
+       a backslash before the closing quote is doubled so Windows reads one. */
+    snprintf(app->user_data_root, sizeof(app->user_data_root), "D:/");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_READY);
+    assert(strcmp(plan.launch_options, "--launch-title=ULUS10001 \"--user-data-root=D:/\"") == 0);
+#ifdef _WIN32
+    snprintf(app->user_data_root, sizeof(app->user_data_root), "D:\\");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_READY);
+    assert(strcmp(plan.launch_options,
+                  "--launch-title=ULUS10001 \"--user-data-root=D:\\\\\"") == 0);
+#endif
     snprintf(app->user_data_root, sizeof(app->user_data_root), "C:/Odd\"Folder");
     assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_NO_PROGRAM);
     free(app);

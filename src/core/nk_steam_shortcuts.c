@@ -587,17 +587,17 @@ NkSteamStatus nk_steam_add_to_file(const char *vdf_path, const NkSteamShortcut *
         /* A dated backup beside the file, never over an earlier one; if it cannot be made and
          * read back, nothing is written. */
         status = NK_STEAM_ERR_BACKUP;
-        bool made = false;
-        for (unsigned attempt = 0; attempt < 100u && !made; attempt++) {
+        bool backup_ready = false;
+        for (unsigned attempt = 0; attempt < 100u && !backup_ready; attempt++) {
             int n = attempt == 0u
                 ? snprintf(backup, sizeof(backup), "%s.nakagawa-backup-%s", vdf_path, stamp)
                 : snprintf(backup, sizeof(backup), "%s.nakagawa-backup-%s-%u", vdf_path, stamp,
                            attempt + 1u);
             if (n <= 0 || (size_t)n >= sizeof(backup)) goto done;
             if (!nk_platform_path_missing(backup)) continue;
-            made = true;
+            backup_ready = true;
         }
-        if (!made || !write_file_synced(backup, current, current_size) ||
+        if (!backup_ready || !write_file_synced(backup, current, current_size) ||
             !file_equals(backup, current, current_size)) {
             (void)nk_remove_utf8(backup);
             backup[0] = '\0';
