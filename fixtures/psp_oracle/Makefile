@@ -319,6 +319,10 @@ CASE_ID = 163
 # POWER RISK: nothing catches an exception the flag may raise.
 else ifeq ($(CASE),vfpu-quad-wb)
 CASE_ID = 165
+# 170: the #326 VFPU float/integer conversions (vf2iz/vf2in/vf2iu/vf2id, vi2f, vi2s/vi2us/vi2c/vi2uc;
+# probe_hle_issues.c), register-only.
+else ifeq ($(CASE),vfpu-convert)
+CASE_ID = 170
 else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
@@ -610,6 +614,9 @@ TARGET = $(BUILD_DIR)/vfpu_unmodeled
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),vfpu-quad-wb)
 TARGET = $(BUILD_DIR)/vfpu_quad_wb
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-convert)
+TARGET = $(BUILD_DIR)/vfpu_convert
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
 # same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.

@@ -2196,6 +2196,27 @@ _register_campaign_probe(
      for case in VFPU_QUAD_WB_CASES},
 )
 
+# vfpu-convert (170, probe_hle_issues.c): the #326 VFPU float/integer conversions, two passes,
+# register-only. Every row is emitted on every run, so the stream is fixed-shape. Per pass, in the
+# order the probe runs them: one group per form (<stem> below), three operand images per form
+# (<stem>-p<pass>-<image>, 8 words: C200 then C210 after the conversion words).
+VFPU_CONVERT_STEMS = (
+    tuple(f"vf2iz-{w}-sc{s}" for w in "sq" for s in (0, 1, 8, 15, 16, 23, 30, 31))
+    + tuple(f"{op}-s-sc{s}" for op in ("vf2in", "vf2iu", "vf2id") for s in (0, 8))
+    + tuple(f"vi2f-{w}-sc{s}" for w in "sptq" for s in (0, 8, 31))
+    + tuple(f"{op}-q" for op in ("vi2s", "vi2us", "vi2c", "vi2uc"))
+)
+VFPU_CONVERT_IMAGES = 3
+VFPU_CONVERT_PASSES = 2
+VFPU_CONVERT_WORDS = 8
+VFPU_CONVERT_CASES = tuple(
+    f"{stem}-p{p}-{i}" for p in range(VFPU_CONVERT_PASSES) for stem in VFPU_CONVERT_STEMS
+    for i in range(VFPU_CONVERT_IMAGES))
+_register_campaign_probe(
+    "vfpu-convert", "PSP-VFPU-CONVERT-001", VFPU_CONVERT_CASES,
+    {case: VFPU_CONVERT_WORDS for case in VFPU_CONVERT_CASES},
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -2876,7 +2897,7 @@ HLE_MACHINERY_STATUS_CASES = frozenset({
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS.
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
-                                   "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb"})
+                                   "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (

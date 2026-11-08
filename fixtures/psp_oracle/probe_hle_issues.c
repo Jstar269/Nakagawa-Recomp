@@ -21,6 +21,9 @@
 //   CASE=vfpu-quad-wb (PSP-VFPU-QUADWB-001): #326 lv.q/sv.q with the write-back flag (word bit 1):
 //     the base register after each form and the lanes and buffer words moved, in a probe-owned
 //     buffer; POWER RISK: nothing catches an exception.
+//   CASE=vfpu-convert (PSP-VFPU-CONVERT-001): #326 raw result words of the VFPU float/integer
+//     conversions (vf2iz .s/.q over scales 0-31, vf2in/vf2iu/vf2id .s, vi2f .s/.p/.t/.q,
+//     vi2s/vi2us/vi2c/vi2uc .q), register-only, owner present.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -50,8 +53,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled and vfpu-quad-wb run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 170
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb and vfpu-convert run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -71,6 +74,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_FORMS2 121
 #define HLE_CASE_VFPU_UNMODELED 163
 #define HLE_CASE_VFPU_QUAD_WB 165
+#define HLE_CASE_VFPU_CONVERT 170
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -108,6 +112,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-quad-wb"
 #define HLE_TEST_ID "PSP-VFPU-QUADWB-001"
 #define HLE_LOG "host0:/vfpu_quad_wb_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_CONVERT
+#define HLE_CAMPAIGN_ID "vfpu-convert"
+#define HLE_TEST_ID "PSP-VFPU-CONVERT-001"
+#define HLE_LOG "host0:/vfpu_convert_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -2100,6 +2108,390 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_QUAD_WB */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_CONVERT
+
+/* #326 VFPU float/integer conversion forms the second title executes (PSP-VFPU-CONVERT-001),
+   two passes, register-only: no memory or host I/O runs between a cell's register seeding and
+   its readback, every instruction is a legal Allegrex word, and no prefix is issued (identity
+   prefixes). POWER RISK is low but unmeasured, so run it with the owner present. A step marker
+   is written durably before each form group.
+   One cell loads sixteen words (eight operands in C000 and C010, a sentinel background in C200
+   and C210), runs the form's words so that all eight operands are converted, and stores C200
+   and C210 back. A .q form converts four operands per word (two words), .t the first three of
+   each quad, .p two per word (four words), .s one per word (eight words). vi2s and vi2us .q
+   write a pair, vi2c and vi2uc .q one word, at the first lane of C200 and C210. Row
+   <stem>-p<pass>-<image>: result = the form's first instruction word, out0-3 = C200 and
+   out4-7 = C210 after the words.
+   Operand images (three per kind, eight words each) hold the float classes (+-0, +-0.5, +-1.5,
+   +-2.5, +-1.0, the neighbours of +-2^31, +-inf, quiet NaNs of both signs, a signalling
+   pattern, +-smallest denormal, FLT_MAX) or the integer edge words (0, 1, 2, 0x7fffffff,
+   0x80000000, 0xffffffff, 16-bit and byte boundary patterns). The words are the Allegrex VFPU
+   encodings (vf2in 0xd200, vf2iz 0xd220, vf2iu 0xd240, vf2id 0xd260, vi2f 0xd280 in the top
+   half, 0xd03c-0xd03f for vi2uc/vi2c/vi2us/vi2s), scale in bits 20:16, size in bits 15 and 7,
+   source in bits 14:8 and destination in bits 6:0. */
+
+#define CV_IMAGES 3u
+#define CV_IN_WORDS 16u
+#define CV_OUT_WORDS 8u
+#define CV_BACKGROUND 0x7a5a5a00u
+
+typedef void (*cv_fn)(const uint32_t *in, uint32_t *out);
+
+#define CV_CELL_FN(fname, body)                                                        \
+    static void fname(const uint32_t *in, uint32_t *out)                               \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "lv.q C000, 0(%[in])\n\t"                                                  \
+            "lv.q C010, 16(%[in])\n\t"                                                 \
+            "lv.q C200, 32(%[in])\n\t"                                                 \
+            "lv.q C210, 48(%[in])\n\t"                                                 \
+            body                                                                       \
+            "sv.q C200, 0(%[out])\n\t"                                                 \
+            "sv.q C210, 16(%[out])\n\t"                                                \
+            :                                                                          \
+            : [in] "r"(in), [out] "r"(out)                                             \
+            : "memory");                                                               \
+    }
+
+CV_CELL_FN(cv_vf2iz_s_sc0,
+    ".word 0xd2200008\n\t"
+    ".word 0xd2202028\n\t"
+    ".word 0xd2204048\n\t"
+    ".word 0xd2206068\n\t"
+    ".word 0xd2200109\n\t"
+    ".word 0xd2202129\n\t"
+    ".word 0xd2204149\n\t"
+    ".word 0xd2206169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc1,
+    ".word 0xd2210008\n\t"
+    ".word 0xd2212028\n\t"
+    ".word 0xd2214048\n\t"
+    ".word 0xd2216068\n\t"
+    ".word 0xd2210109\n\t"
+    ".word 0xd2212129\n\t"
+    ".word 0xd2214149\n\t"
+    ".word 0xd2216169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc8,
+    ".word 0xd2280008\n\t"
+    ".word 0xd2282028\n\t"
+    ".word 0xd2284048\n\t"
+    ".word 0xd2286068\n\t"
+    ".word 0xd2280109\n\t"
+    ".word 0xd2282129\n\t"
+    ".word 0xd2284149\n\t"
+    ".word 0xd2286169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc15,
+    ".word 0xd22f0008\n\t"
+    ".word 0xd22f2028\n\t"
+    ".word 0xd22f4048\n\t"
+    ".word 0xd22f6068\n\t"
+    ".word 0xd22f0109\n\t"
+    ".word 0xd22f2129\n\t"
+    ".word 0xd22f4149\n\t"
+    ".word 0xd22f6169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc16,
+    ".word 0xd2300008\n\t"
+    ".word 0xd2302028\n\t"
+    ".word 0xd2304048\n\t"
+    ".word 0xd2306068\n\t"
+    ".word 0xd2300109\n\t"
+    ".word 0xd2302129\n\t"
+    ".word 0xd2304149\n\t"
+    ".word 0xd2306169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc23,
+    ".word 0xd2370008\n\t"
+    ".word 0xd2372028\n\t"
+    ".word 0xd2374048\n\t"
+    ".word 0xd2376068\n\t"
+    ".word 0xd2370109\n\t"
+    ".word 0xd2372129\n\t"
+    ".word 0xd2374149\n\t"
+    ".word 0xd2376169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc30,
+    ".word 0xd23e0008\n\t"
+    ".word 0xd23e2028\n\t"
+    ".word 0xd23e4048\n\t"
+    ".word 0xd23e6068\n\t"
+    ".word 0xd23e0109\n\t"
+    ".word 0xd23e2129\n\t"
+    ".word 0xd23e4149\n\t"
+    ".word 0xd23e6169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc31,
+    ".word 0xd23f0008\n\t"
+    ".word 0xd23f2028\n\t"
+    ".word 0xd23f4048\n\t"
+    ".word 0xd23f6068\n\t"
+    ".word 0xd23f0109\n\t"
+    ".word 0xd23f2129\n\t"
+    ".word 0xd23f4149\n\t"
+    ".word 0xd23f6169\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc0,
+    ".word 0xd2208088\n\t"
+    ".word 0xd2208189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc1,
+    ".word 0xd2218088\n\t"
+    ".word 0xd2218189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc8,
+    ".word 0xd2288088\n\t"
+    ".word 0xd2288189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc15,
+    ".word 0xd22f8088\n\t"
+    ".word 0xd22f8189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc16,
+    ".word 0xd2308088\n\t"
+    ".word 0xd2308189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc23,
+    ".word 0xd2378088\n\t"
+    ".word 0xd2378189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc30,
+    ".word 0xd23e8088\n\t"
+    ".word 0xd23e8189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc31,
+    ".word 0xd23f8088\n\t"
+    ".word 0xd23f8189\n\t")
+CV_CELL_FN(cv_vf2in_s_sc0,
+    ".word 0xd2000008\n\t"
+    ".word 0xd2002028\n\t"
+    ".word 0xd2004048\n\t"
+    ".word 0xd2006068\n\t"
+    ".word 0xd2000109\n\t"
+    ".word 0xd2002129\n\t"
+    ".word 0xd2004149\n\t"
+    ".word 0xd2006169\n\t")
+CV_CELL_FN(cv_vf2in_s_sc8,
+    ".word 0xd2080008\n\t"
+    ".word 0xd2082028\n\t"
+    ".word 0xd2084048\n\t"
+    ".word 0xd2086068\n\t"
+    ".word 0xd2080109\n\t"
+    ".word 0xd2082129\n\t"
+    ".word 0xd2084149\n\t"
+    ".word 0xd2086169\n\t")
+CV_CELL_FN(cv_vf2iu_s_sc0,
+    ".word 0xd2400008\n\t"
+    ".word 0xd2402028\n\t"
+    ".word 0xd2404048\n\t"
+    ".word 0xd2406068\n\t"
+    ".word 0xd2400109\n\t"
+    ".word 0xd2402129\n\t"
+    ".word 0xd2404149\n\t"
+    ".word 0xd2406169\n\t")
+CV_CELL_FN(cv_vf2iu_s_sc8,
+    ".word 0xd2480008\n\t"
+    ".word 0xd2482028\n\t"
+    ".word 0xd2484048\n\t"
+    ".word 0xd2486068\n\t"
+    ".word 0xd2480109\n\t"
+    ".word 0xd2482129\n\t"
+    ".word 0xd2484149\n\t"
+    ".word 0xd2486169\n\t")
+CV_CELL_FN(cv_vf2id_s_sc0,
+    ".word 0xd2600008\n\t"
+    ".word 0xd2602028\n\t"
+    ".word 0xd2604048\n\t"
+    ".word 0xd2606068\n\t"
+    ".word 0xd2600109\n\t"
+    ".word 0xd2602129\n\t"
+    ".word 0xd2604149\n\t"
+    ".word 0xd2606169\n\t")
+CV_CELL_FN(cv_vf2id_s_sc8,
+    ".word 0xd2680008\n\t"
+    ".word 0xd2682028\n\t"
+    ".word 0xd2684048\n\t"
+    ".word 0xd2686068\n\t"
+    ".word 0xd2680109\n\t"
+    ".word 0xd2682129\n\t"
+    ".word 0xd2684149\n\t"
+    ".word 0xd2686169\n\t")
+CV_CELL_FN(cv_vi2f_s_sc0,
+    ".word 0xd2800008\n\t"
+    ".word 0xd2802028\n\t"
+    ".word 0xd2804048\n\t"
+    ".word 0xd2806068\n\t"
+    ".word 0xd2800109\n\t"
+    ".word 0xd2802129\n\t"
+    ".word 0xd2804149\n\t"
+    ".word 0xd2806169\n\t")
+CV_CELL_FN(cv_vi2f_s_sc8,
+    ".word 0xd2880008\n\t"
+    ".word 0xd2882028\n\t"
+    ".word 0xd2884048\n\t"
+    ".word 0xd2886068\n\t"
+    ".word 0xd2880109\n\t"
+    ".word 0xd2882129\n\t"
+    ".word 0xd2884149\n\t"
+    ".word 0xd2886169\n\t")
+CV_CELL_FN(cv_vi2f_s_sc31,
+    ".word 0xd29f0008\n\t"
+    ".word 0xd29f2028\n\t"
+    ".word 0xd29f4048\n\t"
+    ".word 0xd29f6068\n\t"
+    ".word 0xd29f0109\n\t"
+    ".word 0xd29f2129\n\t"
+    ".word 0xd29f4149\n\t"
+    ".word 0xd29f6169\n\t")
+CV_CELL_FN(cv_vi2f_p_sc0,
+    ".word 0xd2800088\n\t"
+    ".word 0xd28040c8\n\t"
+    ".word 0xd2800189\n\t"
+    ".word 0xd28041c9\n\t")
+CV_CELL_FN(cv_vi2f_p_sc8,
+    ".word 0xd2880088\n\t"
+    ".word 0xd28840c8\n\t"
+    ".word 0xd2880189\n\t"
+    ".word 0xd28841c9\n\t")
+CV_CELL_FN(cv_vi2f_p_sc31,
+    ".word 0xd29f0088\n\t"
+    ".word 0xd29f40c8\n\t"
+    ".word 0xd29f0189\n\t"
+    ".word 0xd29f41c9\n\t")
+CV_CELL_FN(cv_vi2f_t_sc0,
+    ".word 0xd2808008\n\t"
+    ".word 0xd2808109\n\t")
+CV_CELL_FN(cv_vi2f_t_sc8,
+    ".word 0xd2888008\n\t"
+    ".word 0xd2888109\n\t")
+CV_CELL_FN(cv_vi2f_t_sc31,
+    ".word 0xd29f8008\n\t"
+    ".word 0xd29f8109\n\t")
+CV_CELL_FN(cv_vi2f_q_sc0,
+    ".word 0xd2808088\n\t"
+    ".word 0xd2808189\n\t")
+CV_CELL_FN(cv_vi2f_q_sc8,
+    ".word 0xd2888088\n\t"
+    ".word 0xd2888189\n\t")
+CV_CELL_FN(cv_vi2f_q_sc31,
+    ".word 0xd29f8088\n\t"
+    ".word 0xd29f8189\n\t")
+CV_CELL_FN(cv_vi2s_q,
+    ".word 0xd03f8088\n\t"
+    ".word 0xd03f8189\n\t")
+CV_CELL_FN(cv_vi2us_q,
+    ".word 0xd03e8088\n\t"
+    ".word 0xd03e8189\n\t")
+CV_CELL_FN(cv_vi2c_q,
+    ".word 0xd03d8088\n\t"
+    ".word 0xd03d8189\n\t")
+CV_CELL_FN(cv_vi2uc_q,
+    ".word 0xd03c8088\n\t"
+    ".word 0xd03c8189\n\t")
+
+/* Float operand images: zeros and halves, ties and the 2^31 neighbours, infinities, NaNs,
+   denormals and FLT_MAX. */
+static const uint32_t s_cv_float[CV_IMAGES][8] = {
+    {0x00000000u, 0x80000000u, 0x3f000000u, 0x3fc00000u,
+     0x40200000u, 0xbf000000u, 0xbfc00000u, 0xc0200000u},
+    {0x3f800000u, 0x4effffffu, 0x4f000000u, 0x4f000001u,
+     0xcf000000u, 0xcf000001u, 0xceffffffu, 0xbf800000u},
+    {0x7f800000u, 0xff800000u, 0x7fc00000u, 0xffc00000u,
+     0x7f800001u, 0x00000001u, 0x80000001u, 0x7f7fffffu},
+};
+
+/* Integer edge-word images: the 32-bit edges, the 16-bit boundaries, byte patterns. */
+static const uint32_t s_cv_int[CV_IMAGES][8] = {
+    {0x00000000u, 0x00000001u, 0x00000002u, 0x7fffffffu,
+     0x80000000u, 0xffffffffu, 0xfffffffeu, 0x00007fffu},
+    {0x00008000u, 0x0000ffffu, 0x00010000u, 0xffff8000u,
+     0xffff0000u, 0x12345678u, 0x80008000u, 0x7fff7fffu},
+    {0x01020304u, 0x7f7f7f7fu, 0x80808080u, 0xff00ff00u,
+     0x00ff00ffu, 0x80000001u, 0x0f1e2d3cu, 0xfedcba98u},
+};
+
+struct cv_form {
+    const char *stem;
+    uint32_t word;
+    uint32_t kind; /* 0 = float images, 1 = integer images */
+    cv_fn fn;
+};
+static const struct cv_form s_cv_forms[38] = {
+    {"vf2iz-s-sc0", 0xd2200008u, 0u, cv_vf2iz_s_sc0},
+    {"vf2iz-s-sc1", 0xd2210008u, 0u, cv_vf2iz_s_sc1},
+    {"vf2iz-s-sc8", 0xd2280008u, 0u, cv_vf2iz_s_sc8},
+    {"vf2iz-s-sc15", 0xd22f0008u, 0u, cv_vf2iz_s_sc15},
+    {"vf2iz-s-sc16", 0xd2300008u, 0u, cv_vf2iz_s_sc16},
+    {"vf2iz-s-sc23", 0xd2370008u, 0u, cv_vf2iz_s_sc23},
+    {"vf2iz-s-sc30", 0xd23e0008u, 0u, cv_vf2iz_s_sc30},
+    {"vf2iz-s-sc31", 0xd23f0008u, 0u, cv_vf2iz_s_sc31},
+    {"vf2iz-q-sc0", 0xd2208088u, 0u, cv_vf2iz_q_sc0},
+    {"vf2iz-q-sc1", 0xd2218088u, 0u, cv_vf2iz_q_sc1},
+    {"vf2iz-q-sc8", 0xd2288088u, 0u, cv_vf2iz_q_sc8},
+    {"vf2iz-q-sc15", 0xd22f8088u, 0u, cv_vf2iz_q_sc15},
+    {"vf2iz-q-sc16", 0xd2308088u, 0u, cv_vf2iz_q_sc16},
+    {"vf2iz-q-sc23", 0xd2378088u, 0u, cv_vf2iz_q_sc23},
+    {"vf2iz-q-sc30", 0xd23e8088u, 0u, cv_vf2iz_q_sc30},
+    {"vf2iz-q-sc31", 0xd23f8088u, 0u, cv_vf2iz_q_sc31},
+    {"vf2in-s-sc0", 0xd2000008u, 0u, cv_vf2in_s_sc0},
+    {"vf2in-s-sc8", 0xd2080008u, 0u, cv_vf2in_s_sc8},
+    {"vf2iu-s-sc0", 0xd2400008u, 0u, cv_vf2iu_s_sc0},
+    {"vf2iu-s-sc8", 0xd2480008u, 0u, cv_vf2iu_s_sc8},
+    {"vf2id-s-sc0", 0xd2600008u, 0u, cv_vf2id_s_sc0},
+    {"vf2id-s-sc8", 0xd2680008u, 0u, cv_vf2id_s_sc8},
+    {"vi2f-s-sc0", 0xd2800008u, 1u, cv_vi2f_s_sc0},
+    {"vi2f-s-sc8", 0xd2880008u, 1u, cv_vi2f_s_sc8},
+    {"vi2f-s-sc31", 0xd29f0008u, 1u, cv_vi2f_s_sc31},
+    {"vi2f-p-sc0", 0xd2800088u, 1u, cv_vi2f_p_sc0},
+    {"vi2f-p-sc8", 0xd2880088u, 1u, cv_vi2f_p_sc8},
+    {"vi2f-p-sc31", 0xd29f0088u, 1u, cv_vi2f_p_sc31},
+    {"vi2f-t-sc0", 0xd2808008u, 1u, cv_vi2f_t_sc0},
+    {"vi2f-t-sc8", 0xd2888008u, 1u, cv_vi2f_t_sc8},
+    {"vi2f-t-sc31", 0xd29f8008u, 1u, cv_vi2f_t_sc31},
+    {"vi2f-q-sc0", 0xd2808088u, 1u, cv_vi2f_q_sc0},
+    {"vi2f-q-sc8", 0xd2888088u, 1u, cv_vi2f_q_sc8},
+    {"vi2f-q-sc31", 0xd29f8088u, 1u, cv_vi2f_q_sc31},
+    {"vi2s-q", 0xd03f8088u, 1u, cv_vi2s_q},
+    {"vi2us-q", 0xd03e8088u, 1u, cv_vi2us_q},
+    {"vi2c-q", 0xd03d8088u, 1u, cv_vi2c_q},
+    {"vi2uc-q", 0xd03c8088u, 1u, cv_vi2uc_q},
+};
+
+static uint32_t s_cv_in[CV_IN_WORDS] __attribute__((aligned(64)));
+static uint32_t s_cv_out[CV_OUT_WORDS] __attribute__((aligned(64)));
+
+static void cv_cell(const char *name, const struct cv_form *form, unsigned image)
+{
+    const uint32_t *ops = form->kind == 0u ? s_cv_float[image] : s_cv_int[image];
+    for (unsigned i = 0; i < 8u; i++) {
+        s_cv_in[i] = ops[i];
+        s_cv_in[8u + i] = CV_BACKGROUND | i;
+    }
+    for (unsigned i = 0; i < CV_OUT_WORDS; i++) {
+        s_cv_out[i] = 0xffffffffu;
+    }
+    form->fn(s_cv_in, s_cv_out);
+    uint32_t w[CV_OUT_WORDS];
+    for (unsigned i = 0; i < CV_OUT_WORDS; i++) {
+        w[i] = s_cv_out[i];
+    }
+    hle_record(name, "PASS", form->word, w, CV_OUT_WORDS);
+}
+
+/* Rows <stem>-p<pass>-<image>, one step <stem>-p<pass> first. */
+static void cv_group(unsigned pass, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", s_cv_forms[form].stem, pass);
+    hle_step(name);
+    for (unsigned image = 0; image < CV_IMAGES; image++) {
+        snprintf(name, sizeof(name), "%s-p%u-%u", s_cv_forms[form].stem, pass, image);
+        cv_cell(name, &s_cv_forms[form], image);
+    }
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < 38u; form++) {
+            cv_group(pass, form);
+        }
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_CONVERT */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_INTR_CELLS
