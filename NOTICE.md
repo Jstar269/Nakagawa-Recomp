@@ -288,8 +288,9 @@ assets/release_manifest.json.
 ## Project website share card
 
 The PNG file docs/images/brand/og-card.png is the project-authored link-preview image of the project website:
-the N1 mark, the tennis court drawn for the site, and text set in Geist (SIL Open Font License 1.1,
-assets/fonts/ui/geist/OFL.txt). It shows no game imagery. It is distributed under GPL-3.0-or-later and
+the N1 mark, a short MIPS listing written for the card, and text set in Chakra Petch, Geist and Geist Mono
+(SIL Open Font License 1.1, assets/fonts/ui/chakra-petch/OFL.txt, assets/fonts/ui/geist/OFL.txt and
+assets/fonts/ui/geist-mono/OFL.txt). It shows no game imagery and no game code. It is distributed under GPL-3.0-or-later and
 listed with the SHA-256 of its exact bytes in assets/release_manifest.json.
 
 ## Project-authored Nakagawa brand artwork
