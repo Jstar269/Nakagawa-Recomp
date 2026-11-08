@@ -2063,10 +2063,11 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     "h_CreateEventFlag": {
         "status": "partial",
         "evidence": [
-            "PSPAutotests tests/threads/events/create/create.expected at 2ed7c9c5 (NULL name 0x80020001, attr 0x100/0x122/0x300/0x900/0x1200 refused with 0x80020191, long names cut to 31 bytes)",
+            "PSPAutotests tests/threads/events/create/create.expected at 2ed7c9c5 (NULL name 0x80020001, attr 0x100/0x122/0x300/0x900/0x1200 refused with 0x80020191, long names cut to 31 bytes, 1024 flags created in a row)",
             "tests/native/hle_thread_selftest.c:test_evf_create_and_refer",
+            "tests/native/hle_thread_selftest.c:test_sync_objects_past_the_old_table",
         ],
-        "limitation": "the name, attribute and pattern cells match; the shared semaphore/event-flag/LwMutex table holds 128 objects, while the same PSP-recorded output shows 1024 event flags created, and the exhaustion code 0x80020000 is not measured; the option struct is ignored",
+        "limitation": "the name, attribute, pattern and 1024-flag cells match; the shared semaphore/event-flag/LwMutex table grows with no fixed cap, and the code 0x80020000 it returns when the host cannot allocate more (and names on stderr) is not measured (the PSP's own limit is not measured); the option struct is ignored",
     },
     "h_DeleteEventFlag": {
         "status": "partial",

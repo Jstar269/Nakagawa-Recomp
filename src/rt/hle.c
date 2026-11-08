@@ -3517,7 +3517,53 @@ static void mbx_remove_thread_waiters(uint32_t thread_uid) {
         if (s_mbx[i].used) mbx_remove_waiter(&s_mbx[i], thread_uid);
     }
 }
-Sync s_sync[128];
+/* Semaphores, event flags and LwMutexes: one Sync each, tagged with its kind. The PSP has no
+ * fixed number of them: it creates 1024 event flags in a row (PSPAutotests
+ * tests/threads/events/create/create.expected at 2ed7c9c5, "Create 1024: OK"), and a title's
+ * loader can need more than a small fixed table holds (#1892). The table grows by whole chunks
+ * that never move, so a Sync pointer a handler holds across a reschedule stays valid while
+ * another thread creates objects. */
+#define HLE_SYNC_CHUNK 128u
+static Sync **s_sync_chunks = NULL;
+static size_t s_sync_chunk_count = 0u;
+
+size_t hle_sync_slot_count(void) {
+    return s_sync_chunk_count * HLE_SYNC_CHUNK;
+}
+
+Sync *hle_sync_slot(size_t index) {
+    return &s_sync_chunks[index / HLE_SYNC_CHUNK][index % HLE_SYNC_CHUNK];
+}
+
+/* The create then returns its unmeasured 0x80020000; say why on stderr, so the
+ * failure is never silent. */
+static Sync *hle_sync_grow_failed(void) {
+    fprintf(stderr, "HLE: the semaphore/event-flag/LwMutex table cannot grow past %zu objects: "
+            "the host could not allocate more memory\n", hle_sync_slot_count());
+    return NULL;
+}
+
+Sync *hle_sync_grow(void) {
+    if (s_sync_chunk_count >= SIZE_MAX / sizeof(*s_sync_chunks) / HLE_SYNC_CHUNK)
+        return hle_sync_grow_failed();
+    Sync *chunk = (Sync *)calloc(HLE_SYNC_CHUNK, sizeof(Sync));
+    if (!chunk) return hle_sync_grow_failed();
+    Sync **grown = (Sync **)realloc(s_sync_chunks, (s_sync_chunk_count + 1u) * sizeof(*grown));
+    if (!grown) {
+        free(chunk);
+        return hle_sync_grow_failed();
+    }
+    s_sync_chunks = grown;
+    s_sync_chunks[s_sync_chunk_count++] = chunk;
+    return chunk;
+}
+
+void hle_sync_reset(void) {
+    for (size_t i = 0; i < s_sync_chunk_count; i++) free(s_sync_chunks[i]);
+    free(s_sync_chunks);
+    s_sync_chunks = NULL;
+    s_sync_chunk_count = 0u;
+}
 
 /* Measured on a PSP-3000, firmware 6.61 (PSP-B2-01 / PSP-B3-01,
  * docs/HARDWARE_ORACLE.md): cancel/release family, measured by
@@ -3729,8 +3775,10 @@ static void hle_register_unregistered_import_batch(void) {
  * has the uid (a thread left waiting on a deleted object, or a wait the HLE does not own). */
 static int hle_describe_wait_object(uint32_t thread_uid, uint32_t obj, char *out, size_t cap) {
     Sync *y = NULL;
-    for (int i = 0; i < (int)(sizeof(s_sync) / sizeof(s_sync[0])); i++)
-        if (s_sync[i].used && s_sync[i].uid == obj) { y = &s_sync[i]; break; }
+    for (size_t i = 0, n = hle_sync_slot_count(); i < n; i++) {
+        Sync *slot = hle_sync_slot(i);
+        if (slot->used && slot->uid == obj) { y = slot; break; }
+    }
     if (y && y->kind == SYNC_KIND_SEMA) {
         snprintf(out, cap, "semaphore 0x%x '%s' count=%d max=%d", obj, y->name, y->count, y->maxc);
         return 1;
