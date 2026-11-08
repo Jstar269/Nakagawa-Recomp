@@ -264,15 +264,13 @@ def decode_cond(w: int) -> Cond:
 # Function plans
 # ---------------------------------------------------------------------------
 
-#: emit_function's GUEST_ABORT site: the one hst_profile emission site no codegen table
-#: names. tools/test_codegen_llvm.py re-derives every `hst_profile and addr == ...` site
-#: from codegen.py's AST and checks that hst_emission_sites covers it.
-HST_GUEST_ABORT = 0x00000a1c
-
-
 def hst_emission_sites(cg) -> set[int]:
-    """Addresses where emit_function emits HST-profile code instead of the plain word."""
-    return (set(cg._SV_SPECIAL) | set(cg.GUEST_PATCHES) | {HST_GUEST_ABORT})
+    """Addresses where emit_function emits HST-profile code instead of the plain word.
+
+    Only the codegen tables remain: the last stand-alone HST emission site (the guest
+    abort exit) was retired under #363, so tools/test_codegen_llvm.py, which re-derives
+    every `hst_profile and addr == ...` site from codegen.py's AST, finds none."""
+    return set(cg._SV_SPECIAL) | set(cg.GUEST_PATCHES)
 
 
 def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumable=False,
