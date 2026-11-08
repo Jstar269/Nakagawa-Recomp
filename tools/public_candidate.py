@@ -22,7 +22,7 @@ from typing import Any
 try:
     from . import publish_audit
 except ImportError:  # direct script execution
-    import publish_audit
+    import publish_audit  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROFILE = ROOT / "assets" / "public_source_profile.json"
@@ -37,7 +37,7 @@ def load_profile(path: Path) -> dict:
     try:
         from . import publication_policy
     except ImportError:
-        import publication_policy
+        import publication_policy  # type: ignore[no-redef]
 
     publication_policy.load_policy(path)
 
