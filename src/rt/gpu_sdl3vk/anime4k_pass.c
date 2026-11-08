@@ -74,6 +74,7 @@ struct Anime4kPass {
     int w, h, stages;
     uint32_t max_dim;         /* the device's maxImageDimension2D */
     int fail_w, fail_h, fail_stages;  /* the size whose images could not be made */
+    unsigned size_builds;     /* how many times the images were built for a new size */
     Img in;                   /* stage 0's input: the shown image, 1:1 */
     Stage stage[ANIME4K_MAX_STAGES];
     VkSampler linear;
@@ -209,10 +210,14 @@ static void sets_write(Anime4kPass *p, int s) {
     }
 }
 
+/* The largest image is the last stage's output, w << stages wide: past the device's limit a size
+ * is invalid usage, so it is refused before anything is made. */
+static int size_within_limit(const Anime4kPass *p, int w, int h, int stages) {
+    return (uint32_t)w <= (p->max_dim >> stages) && (uint32_t)h <= (p->max_dim >> stages);
+}
+
 static int sized_make(Anime4kPass *p, int w, int h, int stages) {
-    /* The largest image is the last stage's output, w << stages wide: a size past the device's limit
-     * is invalid usage, so it is refused before anything is made. */
-    if ((uint32_t)w > (p->max_dim >> stages) || (uint32_t)h > (p->max_dim >> stages)) return 0;
+    p->size_builds++;
     p->DeviceWaitIdle(p->dev);
     sized_free(p);
     if (!img_make(p, &p->in, w, h, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
@@ -253,20 +258,32 @@ static void image_barrier(Anime4kPass *p, VkCommandBuffer cmd, VkImage image, Vk
     p->CmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1, &b);
 }
 
+unsigned anime4k_size_builds(const Anime4kPass *p) {
+    return p ? p->size_builds : 0;
+}
+
 VkImage anime4k_record(Anime4kPass *p, VkCommandBuffer cmd, VkImage src, int w, int h, int stages) {
     if (!p || !cmd || !src || w <= 0 || h <= 0 || stages < 1 || stages > ANIME4K_MAX_STAGES)
         return VK_NULL_HANDLE;
     if (w != p->w || h != p->h || stages != p->stages) {
         /* A size whose images could not be made is not tried again: no device wait per present. */
         if (w == p->fail_w && h == p->fail_h && stages == p->fail_stages) return VK_NULL_HANDLE;
-        if (!sized_make(p, w, h, stages)) {
-            sized_free(p);
+        const char *why = NULL;
+        if (!size_within_limit(p, w, h, stages)) {
+            /* Refused before anything is touched: the last good size's images may still be in
+             * flight, and they stay (no wait, no free, no rebuild if the caller goes back to it). */
+            why = "past the device's image limit";
+        } else if (!sized_make(p, w, h, stages)) {
+            sized_free(p);  /* sized_make has waited for the device */
+            why = "a Vulkan image or its memory could not be made";
+        }
+        if (why) {
             p->fail_w = w;
             p->fail_h = h;
             p->fail_stages = stages;
-            fprintf(stderr, "sdl3vk: Anime4K cannot make its images for %dx%d at %d stage%s (the "
-                            "device's limit is %u); this picture goes to FSR 1 at this size\n",
-                    w, h, stages, stages == 1 ? "" : "s", p->max_dim);
+            fprintf(stderr, "sdl3vk: Anime4K cannot make its images for %dx%d at %d stage%s: %s "
+                            "(the device's limit is %u)\n",
+                    w, h, stages, stages == 1 ? "" : "s", why, p->max_dim);
             return VK_NULL_HANDLE;
         }
     }

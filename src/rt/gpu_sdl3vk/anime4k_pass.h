@@ -55,7 +55,15 @@ void anime4k_destroy(Anime4kPass *p);
 /* Records `stages` (1..ANIME4K_MAX_STAGES) doublings of `src` (w x h, in TRANSFER_SRC_OPTIMAL,
  * any 8-bit-per-channel colour format a blit converts) and returns the private result, (w << stages)
  * x (h << stages), RGBA16F, in TRANSFER_SRC_OPTIMAL. `src` is only read. A size change waits for
- * the device and rebuilds the images. VK_NULL_HANDLE when they cannot be made. */
+ * the device and rebuilds the images. VK_NULL_HANDLE when they cannot be made: a size whose
+ * last stage is wider or taller than the device's maxImageDimension2D is refused at once, with
+ * the images of the last good size left as they are (they may still be in flight), and a size
+ * whose Vulkan images or memory fail is freed after the wait. Either failure is said once on
+ * stderr and that size is not tried again, so a failed size costs no device wait on later
+ * presents; the caller then shows `src` as it would without the pass. */
 VkImage anime4k_record(Anime4kPass *p, VkCommandBuffer cmd, VkImage src, int w, int h, int stages);
+
+/* How many times the pass has built its images for a new size (a device wait each time). */
+unsigned anime4k_size_builds(const Anime4kPass *p);
 
 #endif /* SR_ANIME4K_PASS_H */

@@ -113,9 +113,11 @@ display-smoke-fsr1:
 	$(MAKE) display-smoke
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) fsr1 --build-dir $(DISPLAY_SMOKE_DIR)
 
-# display-smoke-anime4k is the same two runs with SR_MOVIE_UPSCALE off and anime4k: the fixture's
-# frames are CPU-presented, the movie upscaler's input, so the on run upscaled them (#1273). Like
-# display-smoke-fsr1 it needs a Vulkan device and a display and is part of no aggregate gate.
+# display-smoke-anime4k is the same two runs with SR_MOVIE_UPSCALE off and anime4k, plus a third with
+# SR_PRESENT_UPSCALE=fsr1 as well, whose flight bundle must carry the stamp fsr1+movie-anime4k: the
+# fixture's frames are CPU-presented, the movie upscaler's input, so the on run must count presents
+# through Anime4K (#1273). Like display-smoke-fsr1 it needs a Vulkan device and a display and is part
+# of no aggregate gate.
 display-smoke-anime4k:
 	$(MAKE) display-smoke
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) anime4k --build-dir $(DISPLAY_SMOKE_DIR)

@@ -11,6 +11,8 @@
  *   flat            a flat colour from a BGRA source stays within 2 through two stages, 120x68 to
  *                   480x272
  *   source-unread   the pass never writes the image it is given, and returns its own
+ *   limits          a size past the device's image limit is refused without building images or
+ *                   touching the last good size's, and the pass still works at the good size
  *   cost            a 480x272 frame through two stages and FSR 1 to 3811x2160, by timestamps
  *
  * --mutant PASS FILE runs line-art with another shader for one pass; it must then fail.
@@ -507,22 +509,29 @@ static void cell_source_a4k(Anime4kPass *a) {
     image_free(&src);
 }
 
-/* A size past the device's image limit is refused (and said once, not retried with a device wait),
- * and the pass works at a good size afterwards. 32768 << 1 is past every real device's limit. */
+/* A size past the device's image limit is refused before anything is touched: no image build (so no
+ * device wait), the last good size's images stay (no build when the caller goes back to it), and
+ * the pass still works. 32768 << 1 is past every real device's limit. This covers the limit path;
+ * the latch on a size that passes the limit but fails to allocate cannot be forced here. */
 static void cell_limits(Anime4kPass *a) {
     const int w = 64, h = 48;
     Source src;
     memset(&src, 0, sizeof(src));
     if (!image_make(&src, w, h, VK_FORMAT_R8G8B8A8_UNORM)) { CHECK(0, "source image"); return; }
     source_fill(&src, w, h, 1);
+    VkImage good = a4k_run(a, &src, w, h, 1);
+    CHECK(good != VK_NULL_HANDLE, "the pass works at a good size");
+    unsigned builds = anime4k_size_builds(a);
     cmd_begin();
     VkImage first = anime4k_record(a, g.cb, src.image, 32768, 1, 1);
     VkImage again = anime4k_record(a, g.cb, src.image, 32768, 1, 1);
     cmd_end();
     CHECK(first == VK_NULL_HANDLE && again == VK_NULL_HANDLE,
-          "a size past the device's image limit is refused, and again without a retry");
-    VkImage out = a4k_run(a, &src, w, h, 1);
-    CHECK(out != VK_NULL_HANDLE, "the pass still works at a good size after a refusal");
+          "a size past the device's image limit is refused");
+    CHECK(anime4k_size_builds(a) == builds, "a refused size builds no images, so it waits for no device");
+    VkImage back = a4k_run(a, &src, w, h, 1);
+    CHECK(back != VK_NULL_HANDLE, "the pass still works at the good size after a refusal");
+    CHECK(anime4k_size_builds(a) == builds, "going back to the good size rebuilds nothing");
     image_free(&src);
 }
 

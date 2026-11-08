@@ -2388,7 +2388,7 @@ rebuild its images ([#2138](https://github.com/Jstar269/nakagawa-recomp/issues/2
 byte). As in the window, FSR 1 only enlarges: a recording no larger than the picture uses the
 scaling mode. `record.json` names the scaling that made each picture, not the setting that asked
 for it: `"filter"` is `anime4k` for a CPU-presented frame the movie upscaler
-(`SR_MOVIE_UPSCALE=anime4k`) doubled once or twice, then took to the recording's size with FSR 1 unless the
+(`SR_MOVIE_UPSCALE=anime4k`) doubled once or twice, then FSR 1 took it to the recording's size unless the
 doubled picture was already that size; `fsr1`; `sharp` (a nearest prescale to a whole multiple, then a linear
 shrink); `nearest` (one nearest-neighbour blit, which is what any mode draws at an exact multiple
 such as 960x544, and what `integer` draws when a multiple fits); `linear` (one linear blit, as
