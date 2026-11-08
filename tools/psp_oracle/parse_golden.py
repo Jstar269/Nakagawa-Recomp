@@ -2217,6 +2217,33 @@ _register_campaign_probe(
     {case: VFPU_CONVERT_WORDS for case in VFPU_CONVERT_CASES},
 )
 
+# vfpu-cc-cmov (169, probe_hle_issues.c): the #326 VFPU condition-code and conditional-move cells,
+# two passes, register-only. Every row is emitted on every run, so the stream is fixed-shape. Per
+# pass, in the order the probe runs them: vcmp conditions 0-15 at .s/.q
+# (vcmp-c<hh>-<s|q>-p<pass>, 58 words), vcmovt then vcmovf imm3 0-6 at .s/.p/.q
+# (vcmov<t|f><imm>-<s|p|q>-p<pass>, 54 words), then cc-initial (1 word) and cc-roundtrip (12 words).
+VFPU_CC_CMOV_PASSES = 2
+VFPU_CC_CMOV_CMP_WORDS = 58
+VFPU_CC_CMOV_CMOV_WORDS = 54
+VFPU_CC_CMOV_ROUNDTRIP_WORDS = 12
+
+
+def _vfpu_cc_cmov_pass_cases(p: int) -> tuple[str, ...]:
+    cmp_cases = tuple(f"vcmp-c{c:02x}-{w}-p{p}" for c in range(16) for w in "sq")
+    cmov = tuple(f"vcmov{f}{imm}-{w}-p{p}" for f in "tf" for imm in range(7) for w in "spq")
+    return cmp_cases + cmov + (f"cc-initial-p{p}", f"cc-roundtrip-p{p}")
+
+
+VFPU_CC_CMOV_CASES = tuple(case for p in range(VFPU_CC_CMOV_PASSES)
+                           for case in _vfpu_cc_cmov_pass_cases(p))
+_register_campaign_probe(
+    "vfpu-cc-cmov", "PSP-VFPU-CCCMOV-001", VFPU_CC_CMOV_CASES,
+    {case: (VFPU_CC_CMOV_CMP_WORDS if case.startswith("vcmp-")
+            else VFPU_CC_CMOV_CMOV_WORDS if case.startswith("vcmov")
+            else 1 if case.startswith("cc-initial")
+            else VFPU_CC_CMOV_ROUNDTRIP_WORDS) for case in VFPU_CC_CMOV_CASES},
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -2897,7 +2924,7 @@ HLE_MACHINERY_STATUS_CASES = frozenset({
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS.
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
-                                   "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert"})
+                                   "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (

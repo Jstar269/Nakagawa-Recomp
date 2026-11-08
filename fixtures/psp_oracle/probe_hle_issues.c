@@ -24,6 +24,9 @@
 //   CASE=vfpu-convert (PSP-VFPU-CONVERT-001): #326 raw result words of the VFPU float/integer
 //     conversions (vf2iz .s/.q over scales 0-31, vf2in/vf2iu/vf2id .s, vi2f .s/.p/.t/.q,
 //     vi2s/vi2us/vi2c/vi2uc .q), register-only, owner present.
+//   CASE=vfpu-cc-cmov (PSP-VFPU-CCCMOV-001): #326 raw VFPU_CC words of vcmp (16 conditions,
+//     .s/.q, VFPU_CC read three ways and through a vcmovt), vcmovt/vcmovf imm3 0-6 under nine VFPU_CC presets and mfvc/mtvc of
+//     VFPU_CC, register-only.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -53,8 +56,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 170
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb and vfpu-convert run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-cc-cmov and vfpu-convert run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -75,6 +78,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_UNMODELED 163
 #define HLE_CASE_VFPU_QUAD_WB 165
 #define HLE_CASE_VFPU_CONVERT 170
+#define HLE_CASE_VFPU_CC_CMOV 169
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -116,6 +120,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-convert"
 #define HLE_TEST_ID "PSP-VFPU-CONVERT-001"
 #define HLE_LOG "host0:/vfpu_convert_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV
+#define HLE_CAMPAIGN_ID "vfpu-cc-cmov"
+#define HLE_TEST_ID "PSP-VFPU-CCCMOV-001"
+#define HLE_LOG "host0:/vfpu_cc_cmov_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -2492,6 +2500,294 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_CONVERT */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV
+
+/* #326 VFPU condition codes and conditional moves (PSP-VFPU-CCCMOV-001), two passes,
+   register-only: no memory or host I/O runs between a cell's register seeding and its readback.
+   Every VFPU word is a valid form (vcmp conditions 0-15, vcmovt/vcmovf imm3 0-6, mfvc/mtvc of
+   VFPU_CC), so no exception is expected; a fault would still stop the launch (POWER RISK, owner
+   present). An identity vpfxs (and vpfxt for vcmp) is issued right before every word. Each form
+   group writes a durable step marker first. Rows:
+   - vcmp-c<hh>-<s|q>-p<pass>: result = the word; out0/out1 = VFPU_CC read back after the
+     preset 0x00 / 0x3f; then for each of 4 operand sets (C000 = a, C010 = b) and each preset
+     (0x00 then 0x3f) seven words: VFPU_CC at once after the word, after a vsync, after a vflush,
+     and the four C200 words after a dependent vcmovt.q imm3 6 from C020 (a lane moves when its
+     own CC bit is set). A lane beyond the width that keeps its old bit shows as 0 under 0x00 and
+     1 under 0x3f; bits 4 (OR) and 5 (AND) are recomputed;
+   - vcmov<t|f><imm>-<s|p|q>-p<pass>: result = the word; for each of nine preset VFPU_CC values
+     the readback before, VFPU_CC after, and the four words of C200 after the word (source C000,
+     C200 preloaded with distinct words so a lane that is not moved keeps them);
+   - cc-roundtrip-p<pass>: mtvc VFPU_CC with twelve words, each read back with mfvc;
+   - cc-initial-p<pass>: mfvc VFPU_CC with no write first (pass 0: state at launch). */
+
+#define CM_SETS 4u
+#define CM_PRESETS 9u
+#define CM_RT_VALUES 12u
+#define CM_CMP_WORDS_OUT 58u
+#define CM_CMOV_WORDS_OUT 54u
+#define CM_PASSES 2u
+
+typedef void (*cm_cmp_fn)(const uint32_t *a, const uint32_t *b, const uint32_t *src,
+                          const uint32_t *dst, uint32_t *out, uint32_t *cc, uint32_t pre);
+typedef void (*cm_cmov_fn)(const uint32_t *src, const uint32_t *dst, uint32_t *out, uint32_t *cc,
+                           uint32_t pre);
+
+#define CM_SIZE_S 0x0u
+#define CM_SIZE_P 0x80u
+#define CM_SIZE_T 0x8000u
+#define CM_SIZE_Q 0x8080u
+/* vcmp: op 0x6c, cond in bits 0-3, vs = C000 / S000 (0), vt = C010 / S010 (1 << 16). */
+#define CM_CMP_WORD(c, size) (0x6c000000u | (c) | 0x10000u | (size))
+/* The dependent readout after a vcmp: vcmovt.q imm3 6 (each lane moves when its own CC bit is set,
+   whatever the preset) from C020 into C200, so the CC bits show through the data path. */
+#define CM_RD_WORD (CM_CMOV_WORD(0u, 6u, CM_SIZE_Q) | (2u << 8))
+/* vcmovt 0xd2a00000, vcmovf 0xd2a80000, imm3 in bits 16-18, vs = C000 / S000, vd = C200 / S200. */
+#define CM_CMOV_WORD(f, imm, size) \
+    (0xd2a00000u | ((f) ? 0x80000u : 0u) | ((imm) << 16) | (size) | 0x08u)
+
+/* mtvc $t0, VFPU_CC; lv.q a, b, source C020 and destination C200; mfvc readback; identity vpfxs and
+   vpfxt; the vcmp word; then VFPU_CC three ways: mfvc at once (cc[1]), mfvc after a vsync
+   0xffff0320 (cc[2]), mfvc after a vflush 0xffff040d (cc[3]); then the dependent vcmovt.q imm3 6
+   and the four words of C200 stored to out. */
+#define CM_CMP_FN(fname, word)                                                         \
+    static void fname(const uint32_t *a, const uint32_t *b, const uint32_t *src,       \
+                      const uint32_t *dst, uint32_t *out, uint32_t *cc, uint32_t pre)  \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "move $t0, %[pre]\n\t"                                                     \
+            ".word 0x48e80083\n\t" /* mtvc $t0, VFPU_CC */                             \
+            "lv.q C000, 0(%[a])\n\t"                                                   \
+            "lv.q C010, 0(%[b])\n\t"                                                   \
+            "lv.q C020, 0(%[src])\n\t"                                                 \
+            "lv.q C200, 0(%[dst])\n\t"                                                 \
+            ".word 0x48690083\n\t" /* mfvc $t1, VFPU_CC */                             \
+            "sw $t1, 0(%[cc])\n\t"                                                     \
+            ".word 0xdc0000e4\n\t" /* vpfxs identity */                                \
+            ".word 0xdd0000e4\n\t" /* vpfxt identity */                                \
+            ".word %[w]\n\t"                                                           \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 4(%[cc])\n\t"                                                     \
+            ".word 0xffff0320\n\t" /* vsync */                                         \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 8(%[cc])\n\t"                                                     \
+            ".word 0xffff040d\n\t" /* vflush */                                        \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 12(%[cc])\n\t"                                                    \
+            ".word %[rd]\n\t"                                                          \
+            "sv.q C200, 0(%[out])\n\t"                                                 \
+            :                                                                          \
+            : [a] "r"(a), [b] "r"(b), [src] "r"(src), [dst] "r"(dst), [out] "r"(out),  \
+              [cc] "r"(cc), [pre] "r"(pre), [w] "i"(word), [rd] "i"(CM_RD_WORD)        \
+            : "t0", "t1", "memory");                                                   \
+    }
+
+#define CM_CMOV_FN(fname, word)                                                        \
+    static void fname(const uint32_t *src, const uint32_t *dst, uint32_t *out,         \
+                      uint32_t *cc, uint32_t pre)                                      \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "move $t0, %[pre]\n\t"                                                     \
+            ".word 0x48e80083\n\t"                                                     \
+            "lv.q C000, 0(%[src])\n\t"                                                 \
+            "lv.q C200, 0(%[dst])\n\t"                                                 \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 0(%[cc])\n\t"                                                     \
+            ".word 0xdc0000e4\n\t" /* vpfxs identity */                                \
+            ".word %[w]\n\t"                                                           \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 4(%[cc])\n\t"                                                     \
+            "sv.q C200, 0(%[out])\n\t"                                                 \
+            :                                                                          \
+            : [src] "r"(src), [dst] "r"(dst), [out] "r"(out), [cc] "r"(cc),            \
+              [pre] "r"(pre), [w] "i"(word)                                            \
+            : "t0", "t1", "memory");                                                   \
+    }
+
+#define CM_DEF_CMP(c)                                          \
+    CM_CMP_FN(cm_cmp##c##_s, CM_CMP_WORD(c, CM_SIZE_S))        \
+    CM_CMP_FN(cm_cmp##c##_q, CM_CMP_WORD(c, CM_SIZE_Q))
+#define CM_DEF_CMOV(f, imm)                                                   \
+    CM_CMOV_FN(cm_cmov##f##imm##_s, CM_CMOV_WORD(f, imm, CM_SIZE_S))          \
+    CM_CMOV_FN(cm_cmov##f##imm##_p, CM_CMOV_WORD(f, imm, CM_SIZE_P))          \
+    CM_CMOV_FN(cm_cmov##f##imm##_q, CM_CMOV_WORD(f, imm, CM_SIZE_Q))
+
+CM_DEF_CMP(0)  CM_DEF_CMP(1)  CM_DEF_CMP(2)  CM_DEF_CMP(3)
+CM_DEF_CMP(4)  CM_DEF_CMP(5)  CM_DEF_CMP(6)  CM_DEF_CMP(7)
+CM_DEF_CMP(8)  CM_DEF_CMP(9)  CM_DEF_CMP(10) CM_DEF_CMP(11)
+CM_DEF_CMP(12) CM_DEF_CMP(13) CM_DEF_CMP(14) CM_DEF_CMP(15)
+CM_DEF_CMOV(0, 0) CM_DEF_CMOV(0, 1) CM_DEF_CMOV(0, 2) CM_DEF_CMOV(0, 3)
+CM_DEF_CMOV(0, 4) CM_DEF_CMOV(0, 5) CM_DEF_CMOV(0, 6)
+CM_DEF_CMOV(1, 0) CM_DEF_CMOV(1, 1) CM_DEF_CMOV(1, 2) CM_DEF_CMOV(1, 3)
+CM_DEF_CMOV(1, 4) CM_DEF_CMOV(1, 5) CM_DEF_CMOV(1, 6)
+
+#define CM_CMP_ROW(c) {cm_cmp##c##_s, cm_cmp##c##_q}
+static const cm_cmp_fn s_cm_cmp[16][2] = {
+    CM_CMP_ROW(0),  CM_CMP_ROW(1),  CM_CMP_ROW(2),  CM_CMP_ROW(3),
+    CM_CMP_ROW(4),  CM_CMP_ROW(5),  CM_CMP_ROW(6),  CM_CMP_ROW(7),
+    CM_CMP_ROW(8),  CM_CMP_ROW(9),  CM_CMP_ROW(10), CM_CMP_ROW(11),
+    CM_CMP_ROW(12), CM_CMP_ROW(13), CM_CMP_ROW(14), CM_CMP_ROW(15),
+};
+#define CM_CMOV_ROW(f, imm) {cm_cmov##f##imm##_s, cm_cmov##f##imm##_p, cm_cmov##f##imm##_q}
+static const cm_cmov_fn s_cm_cmov[2][7][3] = {
+    {CM_CMOV_ROW(0, 0), CM_CMOV_ROW(0, 1), CM_CMOV_ROW(0, 2), CM_CMOV_ROW(0, 3),
+     CM_CMOV_ROW(0, 4), CM_CMOV_ROW(0, 5), CM_CMOV_ROW(0, 6)},
+    {CM_CMOV_ROW(1, 0), CM_CMOV_ROW(1, 1), CM_CMOV_ROW(1, 2), CM_CMOV_ROW(1, 3),
+     CM_CMOV_ROW(1, 4), CM_CMOV_ROW(1, 5), CM_CMOV_ROW(1, 6)},
+};
+static const char s_cm_widths[4] = {'s', 'p', 't', 'q'};
+
+/* Operand sets: a lanes 0-3 then b lanes 0-3. Finite orderings, signed zeros and denormals,
+   infinities, quiet and signalling NaNs of both signs. */
+static const uint32_t s_cm_sets[4][8] = {
+    {0x3f800000u, 0x40000000u, 0x40400000u, 0x40800000u,
+     0x40000000u, 0x40000000u, 0x3f800000u, 0x40a00000u}, /* lt eq gt lt */
+    {0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u,
+     0x80000000u, 0x00000000u, 0x00000000u, 0x00000001u}, /* signed zeros and denormals */
+    {0x7f800000u, 0xff800000u, 0x7f800000u, 0xff800000u,
+     0x7f800000u, 0x7f800000u, 0x3f800000u, 0xbf800000u}, /* infinities */
+    {0x7fc00000u, 0x7f800001u, 0xffc00000u, 0x3f800000u,
+     0x3f800000u, 0x7fc00000u, 0x7fc00000u, 0x3f800000u}, /* quiet, signalling, negative NaN */
+};
+static const uint32_t s_cm_presets[CM_PRESETS] = {0x00u, 0x3fu, 0x15u, 0x01u, 0x02u,
+                                                  0x04u, 0x08u, 0x10u, 0x20u};
+static const uint32_t s_cm_rt[CM_RT_VALUES] = {0x00u, 0x3fu, 0x15u, 0x2au, 0x01u, 0x10u,
+                                               0x20u, 0x40u, 0x80u, 0xffu, 0x100u, 0xffffffffu};
+/* cmov source: 1.0, -0, qNaN, smallest denormal; destination preload: four other words. */
+static const uint32_t s_cm_cmov_src[4] __attribute__((aligned(16))) = {
+    0x3f800000u, 0x80000000u, 0x7fc00000u, 0x00000001u};
+static const uint32_t s_cm_cmov_dst[4] __attribute__((aligned(16))) = {
+    0xbf800000u, 0x40400000u, 0xc0800000u, 0x41200000u};
+static uint32_t s_cm_a[4] __attribute__((aligned(16)));
+static uint32_t s_cm_b[4] __attribute__((aligned(16)));
+static uint32_t s_cm_out[4] __attribute__((aligned(16)));
+
+static void cm_cmp_group(unsigned pass, unsigned cond)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "vcmp-c%02x-p%u", cond, pass);
+    hle_step(name);
+    for (unsigned w = 0; w < 2u; w++) {
+        const uint32_t sizes[2] = {CM_SIZE_S, CM_SIZE_Q};
+        const uint32_t word = CM_CMP_WORD(cond, sizes[w]);
+        uint32_t rec[CM_CMP_WORDS_OUT];
+        for (unsigned i = 0; i < CM_CMP_WORDS_OUT; i++) {
+            rec[i] = 0xffffffffu;
+        }
+        for (unsigned set = 0; set < CM_SETS; set++) {
+            for (unsigned i = 0; i < 4u; i++) {
+                s_cm_a[i] = s_cm_sets[set][i];
+                s_cm_b[i] = s_cm_sets[set][4u + i];
+            }
+            for (unsigned p = 0; p < 2u; p++) {
+                uint32_t cc[4] = {0u, 0u, 0u, 0u};
+                s_cm_out[0] = s_cm_out[1] = s_cm_out[2] = s_cm_out[3] = 0xffffffffu;
+                s_cm_cmp[cond][w](s_cm_a, s_cm_b, s_cm_cmov_src, s_cm_cmov_dst, s_cm_out, cc,
+                                  p == 0u ? 0x00u : 0x3fu);
+                rec[p] = cc[0];
+                const unsigned base = 2u + 14u * set + 7u * p;
+                rec[base] = cc[1];
+                rec[base + 1u] = cc[2];
+                rec[base + 2u] = cc[3];
+                for (unsigned i = 0; i < 4u; i++) {
+                    rec[base + 3u + i] = s_cm_out[i];
+                }
+            }
+        }
+        snprintf(name, sizeof(name), "vcmp-c%02x-%c-p%u", cond, s_cm_widths[w == 1u ? 3u : w],
+                 pass);
+        hle_record(name, "PASS", word, rec, CM_CMP_WORDS_OUT);
+    }
+}
+
+static void cm_cmov_group(unsigned pass, unsigned f, unsigned imm)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "vcmov%c%u-p%u", f ? 'f' : 't', imm, pass);
+    hle_step(name);
+    for (unsigned w = 0; w < 3u; w++) {
+        const uint32_t sizes[3] = {CM_SIZE_S, CM_SIZE_P, CM_SIZE_Q};
+        const uint32_t word = CM_CMOV_WORD(f, imm, sizes[w]);
+        uint32_t rec[CM_CMOV_WORDS_OUT];
+        for (unsigned i = 0; i < CM_CMOV_WORDS_OUT; i++) {
+            rec[i] = 0xffffffffu;
+        }
+        for (unsigned p = 0; p < CM_PRESETS; p++) {
+            uint32_t cc[2] = {0u, 0u};
+            s_cm_out[0] = s_cm_out[1] = s_cm_out[2] = s_cm_out[3] = 0xffffffffu;
+            s_cm_cmov[f][imm][w](s_cm_cmov_src, s_cm_cmov_dst, s_cm_out, cc, s_cm_presets[p]);
+            rec[6u * p] = cc[0];
+            rec[6u * p + 1u] = cc[1];
+            for (unsigned i = 0; i < 4u; i++) {
+                rec[6u * p + 2u + i] = s_cm_out[i];
+            }
+        }
+        snprintf(name, sizeof(name), "vcmov%c%u-%c-p%u", f ? 'f' : 't', imm,
+                 s_cm_widths[w == 2u ? 3u : w], pass);
+        hle_record(name, "PASS", word, rec, CM_CMOV_WORDS_OUT);
+    }
+}
+
+/* mtvc $t1, VFPU_CC; mfvc $t1, VFPU_CC. */
+static uint32_t cm_cc_roundtrip(uint32_t value)
+{
+    uint32_t back;
+    __asm__ volatile(
+        "move $t1, %[v]\n\t"
+        ".word 0x48e90083\n\t"
+        ".word 0x48690083\n\t"
+        "move %[o], $t1\n\t"
+        : [o] "=&r"(back)
+        : [v] "r"(value)
+        : "t1", "memory");
+    return back;
+}
+
+static uint32_t cm_cc_read(void)
+{
+    uint32_t back;
+    __asm__ volatile(
+        ".word 0x48690083\n\t"
+        "move %[o], $t1\n\t"
+        : [o] "=&r"(back)
+        :
+        : "t1", "memory");
+    return back;
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < CM_PASSES; pass++) {
+        char name[64];
+        for (unsigned cond = 0; cond < 16u; cond++) {
+            cm_cmp_group(pass, cond);
+        }
+        for (unsigned f = 0; f < 2u; f++) {
+            for (unsigned imm = 0; imm < 7u; imm++) {
+                cm_cmov_group(pass, f, imm);
+            }
+        }
+        snprintf(name, sizeof(name), "cc-initial-p%u", pass);
+        hle_step(name);
+        uint32_t init[1];
+        init[0] = cm_cc_read();
+        hle_record(name, "PASS", 0x48690083u, init, 1u);
+        snprintf(name, sizeof(name), "cc-roundtrip-p%u", pass);
+        hle_step(name);
+        uint32_t rt[CM_RT_VALUES];
+        for (unsigned i = 0; i < CM_RT_VALUES; i++) {
+            rt[i] = cm_cc_roundtrip(s_cm_rt[i]);
+        }
+        (void)cm_cc_roundtrip(0u);
+        hle_record(name, "PASS", 0x48e90083u, rt, CM_RT_VALUES);
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_CC_CMOV */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_INTR_CELLS

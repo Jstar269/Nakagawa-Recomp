@@ -323,6 +323,10 @@ CASE_ID = 165
 # probe_hle_issues.c), register-only.
 else ifeq ($(CASE),vfpu-convert)
 CASE_ID = 170
+# 169: the #326 VFPU condition codes and conditional moves (vcmp, vcmovt/vcmovf, mfvc/mtvc of
+# VFPU_CC; probe_hle_issues.c). Owner present.
+else ifeq ($(CASE),vfpu-cc-cmov)
+CASE_ID = 169
 else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
@@ -617,6 +621,9 @@ TARGET = $(BUILD_DIR)/vfpu_quad_wb
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),vfpu-convert)
 TARGET = $(BUILD_DIR)/vfpu_convert
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-cc-cmov)
+TARGET = $(BUILD_DIR)/vfpu_cc_cmov
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
 # same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.
