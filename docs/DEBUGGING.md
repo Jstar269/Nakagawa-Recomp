@@ -579,19 +579,19 @@ observations.
 
 | Line (exact text) | Where | Meaning and next step |
 | --- | --- | --- |
-| `HLE: unverified: <name> (NID 0x<nid>) has no recorded evidence (docs/HLE_COVERAGE.md)` | `src/rt/hle.c:105` | Once per NID, just before its handler first runs. The handler exists, but no test records evidence for it. The line changes no result. Look the NID up in [`HLE_COVERAGE.md`](HLE_COVERAGE.md) before you trust what the handler returned. |
-| `HLE: controlled refusal: <name> (NID 0x<nid>) returned 0x<code>; in the works (#341)` | `src/rt/hle.c:86` | Once per NID. The handler is registered only to answer a fixed error code (`0x8...`), because the function is not modelled yet. The game gets that error, not an invented success. Find the handler with the "Find an HLE handler" recipe in [Quick recipes](#quick-recipes). |
-| `HLE: compatibility exception: <name> (NID 0x<nid>) keeps result 0; semantics in the works (<issue>)` | `src/rt/hle.c:114` | Once per NID, after the handler ran. The handler returns 0 so the game can go on, but the real semantics are not modelled; `<issue>` is the tracking issue. If the game misbehaves near this call, start from that issue. |
-| `HLE unimplemented summary: <name> (NID 0x<nid>) -> 0x<code>; in the works (#341)` or `HLE unimplemented summary: <name> (NID 0x<nid>) kept compatibility result 0; in the works (<issue>)` | `src/rt/hle.c:71`, `src/rt/hle.c:76` | Printed once at process exit (registered with `atexit`), one line for each NID that earlier printed a controlled refusal or a compatibility exception. It is the same information gathered at the end of the log. A run that ends with `_Exit`, such as the stop below, does not print it. |
-| `UNSUPPORTED_IMPORT: <name> <detail>; the run stops here (#308)` | `src/rt/hle.c:1922` (`hle_unmodelled_stop`) | A handler met an argument shape the runtime does not model. Under the scheduler the run exits with code 7 and the player shows an `unsupported-import-<name>` stop card. See `UNSUPPORTED_IMPORT` in [`FAILURE_CODES.md`](FAILURE_CODES.md). Fix or model the case; do not work around the stop. |
-| `HLE: unimplemented nid 0x<nid> (<name>) (thread uid 0x<uid>)`, then an indented line `-> add a handler in src/rt/hle.c: sr_hle_register(0x<nid>u, "<name>", h_...);` | `src/rt/hle.c:4072` (`sr_syscall`) | The game called an import with no handler at all (`<name>` is `unknown` if the NID is not in the name table). The run stops: exit code 7 under the scheduler, an HLE-miss stop otherwise. Add a handler, or an unsupported registration, for that NID. |
+| `HLE: unverified: <name> (NID 0x<nid>) has no recorded evidence (docs/HLE_COVERAGE.md)` | `src/rt/hle.c:106` | Once per NID, just before its handler first runs. The handler exists, but no test records evidence for it. The line changes no result. Look the NID up in [`HLE_COVERAGE.md`](HLE_COVERAGE.md) before you trust what the handler returned. |
+| `HLE: controlled refusal: <name> (NID 0x<nid>) returned 0x<code>; in the works (#341)` | `src/rt/hle.c:87` | Once per NID. The handler is registered only to answer a fixed error code (`0x8...`), because the function is not modelled yet. The game gets that error, not an invented success. Find the handler with the "Find an HLE handler" recipe in [Quick recipes](#quick-recipes). |
+| `HLE: compatibility exception: <name> (NID 0x<nid>) keeps result 0; semantics in the works (<issue>)` | `src/rt/hle.c:115` | Once per NID, after the handler ran. The handler returns 0 so the game can go on, but the real semantics are not modelled; `<issue>` is the tracking issue. If the game misbehaves near this call, start from that issue. |
+| `HLE unimplemented summary: <name> (NID 0x<nid>) -> 0x<code>; in the works (#341)` or `HLE unimplemented summary: <name> (NID 0x<nid>) kept compatibility result 0; in the works (<issue>)` | `src/rt/hle.c:72`, `src/rt/hle.c:77` | Printed once at process exit (registered with `atexit`), one line for each NID that earlier printed a controlled refusal or a compatibility exception. It is the same information gathered at the end of the log. A run that ends with `_Exit`, such as the stop below, does not print it. |
+| `UNSUPPORTED_IMPORT: <name> <detail>; the run stops here (#308)` | `src/rt/hle.c:1932` (`hle_unmodelled_stop`) | A handler met an argument shape the runtime does not model. Under the scheduler the run exits with code 7 and the player shows an `unsupported-import-<name>` stop card. See `UNSUPPORTED_IMPORT` in [`FAILURE_CODES.md`](FAILURE_CODES.md). Fix or model the case; do not work around the stop. |
+| `HLE: unimplemented nid 0x<nid> (<name>) (thread uid 0x<uid>)`, then an indented line `-> add a handler in src/rt/hle.c: sr_hle_register(0x<nid>u, "<name>", h_...);` | `src/rt/hle.c:4103` (`sr_syscall`) | The game called an import with no handler at all (`<name>` is `unknown` if the NID is not in the name table). The run stops: exit code 7 under the scheduler, an HLE-miss stop otherwise. Add a handler, or an unsupported registration, for that NID. |
 
 Two more lines come from registration and mean a build problem, not a game problem:
-`HLE: duplicate NID 0x<nid> (<name>) rejected; first was <name>` (`src/rt/hle.c:216`) and
-`HLE: invalid unsupported result 0x<code> for <name> (NID 0x<nid>)` (`src/rt/hle.c:243`; an unsupported
+`HLE: duplicate NID 0x<nid> (<name>) rejected; first was <name>` (`src/rt/hle.c:217`) and
+`HLE: invalid unsupported result 0x<code> for <name> (NID 0x<nid>)` (`src/rt/hle.c:244`; an unsupported
 result must have its top bit set). Both are printed while handlers register; the second registration is dropped.
 
-`SR_HLELOG=1` adds the per-call `HLE: calling <name> (0x<nid>) from 0x<uid>` lines (`src/rt/hle.c:4065`). The
+`SR_HLELOG=1` adds the per-call `HLE: calling <name> (0x<nid>) from 0x<uid>` lines (`src/rt/hle.c:4096`). The
 coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COVERAGE.md`](HLE_COVERAGE.md).
 
 ### Thread Scheduling (→ SR_DBG_SCHED)
@@ -1483,13 +1483,13 @@ list in flight). There is no best-effort state.
 A state holds game memory, so it stays in the user's private folder like saves. It is never
 committed, uploaded or attached to a report.
 
-What a state cannot capture yet: a guest thread parked inside native code. Every guest thread runs on
+What a state cannot capture: a guest thread parked inside native code. Every guest thread runs on
 its own host coroutine, and a thread waiting in an import or at a loop back-edge is in the middle of
-native frames that its `CpuState` does not describe. So #2146 builds save states first as a verified
+native frames that its `CpuState` does not describe. So save states (#2146) start as a verified
 deterministic replay: the run is replayed from boot under `SR_DETERMINISTIC_CLOCK=1`, and its
-checkpoints are compared on the way. Today the container, its refusals, the checkpoints and
-`SR_RECORD`/`SR_REPLAY`, pad input included, exist; the player's save and load keys are still to
-come. Direct states and fast rewind need the runtime to resume a thread at a guest PC with no host
+checkpoints are compared on the way. The container, its refusals, the checkpoints and
+`SR_RECORD`/`SR_REPLAY`, pad input included, exist; the player has no save or load keys.
+Direct states and fast rewind need the runtime to resume a thread at a guest PC with no host
 frames, which is tracked in #2172.
 
 #### Running on a disposable Memory Stick
@@ -1649,7 +1649,7 @@ committed.
 | `SR_PARTITION_TOP=HEX` | Override partition top |
 | `SR_CALLCOUNT=1` | Enable call counting |
 | `SR_CBLOG=1` | Log callback create/register/notify/dispatch to stderr |
-| `SR_PGD_KEYS=PATH` | Not read by public runtime builds: PGD-protected data is unsupported and the PGD backend is excluded; broader ISO-to-Play support is in the works ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)) |
+| `SR_PGD_KEYS=PATH` | Not read by public runtime builds: PGD-protected data is unsupported and the PGD backend is excluded; broader ISO-to-Play support is not available ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)) |
 
 There is no `SR_HLE_CONTINUE` switch. In a scheduled game run, an unimplemented NID is fatal;
 returning zero would turn an unknown operation into phantom success. Register the NID with real

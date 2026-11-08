@@ -1,10 +1,13 @@
 # PSP threading semantics: CreateThread and StartThread
 
+> Research note (2026-09). The oracle design sections below were written before the hardware run of
+> 2026-09-03; the Status block records that run. The note is not updated as the runtime changes.
+
 This is the canonical public research note for PSP thread creation and start
 semantics used by Nakagawa and the broader PSP recompilation documentation.
 It consolidates the current source boundary, public declarations, emulator
-comparators, measured observations, disagreements, and the next hardware
-oracle work. It is intentionally title-neutral.
+comparators, measured observations, disagreements, and the hardware
+oracle design. It is intentionally title-neutral.
 
 **Status:** `PSP_THREADING_ORACLE_DESIGN = COMPLETE / HARDWARE_MEASURED`.
 `CT/ST-ORACLE_EXECUTION = HARDWARE_MEASURED` (56 gating records across 10 launches; all 28 core cases observed twice, plus optional CT-C05 and CT-C06 covering all 30 matrix cases).
@@ -177,11 +180,11 @@ value is the low allocation address, another base, or an orientation marker. No
 | Does firmware honor `stackMpid`, and does it mean a partition ID or block UID? | `IMPLEMENTATION_DISAGREEMENT` / `HARDWARE_UNKNOWN` | Keep partition IDs primary and block UID as the competing PSPSDK hypothesis. |
 | What does a malformed option size do? | `HARDWARE_UNKNOWN` | Test only in a dedicated malformed-input phase; do not call it lower-risk. |
 
-### Planned CreateThread hardware oracle
+### CreateThread hardware oracle design
 
-The oracle is a plan, not a result. Its required status marker is
-`CREATE_THREAD_HARDWARE_ORACLE_SPEC_READY` followed by `HARDWARE_NOT_RUN` until
-an authorized real-device run produces records.
+This section is the design as written before the run. Its status marker was
+`CREATE_THREAD_HARDWARE_ORACLE_SPEC_READY` followed by `HARDWARE_NOT_RUN`; the
+oracle has since run on a PSP (see Status above).
 
 The obsolete minimum arithmetic is retired. The corrected first-principles
 minimum is:
@@ -385,12 +388,12 @@ VFPU-related thread attributes and register/context behavior have
 consequences are `HARDWARE_UNKNOWN` and unmeasured here. This document records
 that boundary only. It does not modify or expand the separate VFPU work.
 
-### Planned StartThread hardware oracle
+### StartThread hardware oracle design
 
-The specification status is `START_THREAD_HARDWARE_ORACLE_SPEC_READY` and
-`HARDWARE_NOT_RUN`. The canonical minimum uses the StartThread cases in L3,
-L4, and L5 above. The planned signed-negative return threshold is
-`ST-SR03 = 0x80000000`; it is planned hardware work, not a measured result.
+The pre-run specification status was `START_THREAD_HARDWARE_ORACLE_SPEC_READY` and
+`HARDWARE_NOT_RUN`; the oracle has since run (see Status above). The canonical minimum uses the StartThread cases in L3,
+L4, and L5 above. The signed-negative return threshold case is
+`ST-SR03 = 0x80000000`; this note records its design, not its result.
 The normal and bounded controls must run before malformed-pointer and huge-size
 cases. A planned record is not evidence merely because it is listed, and a
 launch labeled lower-risk is not guaranteed harmless.
@@ -506,7 +509,6 @@ published anywhere.
 The following statements must not appear in either surface:
 
 - that PPSSPP/JPCSP consensus proves PSP hardware behavior;
-- that the planned CreateThread or StartThread oracle has already run;
 - that a probe phase is guaranteed safe or cannot destabilize a device;
 - that a block UID is the established meaning of `stackMpid`;
 - that an adjacent/outside-allocation probe establishes stack orientation;
