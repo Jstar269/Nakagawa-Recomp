@@ -255,6 +255,8 @@ static void emit_nal(ByteOut *o, uint8_t hdr, const BitW *rbsp) {
 #define FIX_W     (FIX_W_MBS * 16u)
 #define FIX_H     (FIX_H_MBS * 16u)
 #define FIX_PICTURES 3
+/* The geometry write_sps and write_idr emit: FIX_W_MBS x FIX_H_MBS except in test_band_room. */
+static uint32_t s_fix_w_mbs = FIX_W_MBS, s_fix_h_mbs = FIX_H_MBS;
 static const uint8_t k_seed[FIX_PICTURES] = { 200u, 60u, 128u };
 
 static void write_sps(BitW *w) {
@@ -267,8 +269,8 @@ static void write_sps(BitW *w) {
     bw_ue(w, 0u);             /* log2_max_pic_order_cnt_lsb_minus4 */
     bw_ue(w, 1u);             /* max_num_ref_frames */
     bw_bit(w, 0);             /* gaps_in_frame_num_value_allowed_flag */
-    bw_ue(w, FIX_W_MBS - 1u); /* pic_width_in_mbs_minus1 */
-    bw_ue(w, FIX_H_MBS - 1u); /* pic_height_in_map_units_minus1 */
+    bw_ue(w, s_fix_w_mbs - 1u); /* pic_width_in_mbs_minus1 */
+    bw_ue(w, s_fix_h_mbs - 1u); /* pic_height_in_map_units_minus1 */
     bw_bit(w, 1);             /* frame_mbs_only_flag */
     bw_bit(w, 1);             /* direct_8x8_inference_flag */
     bw_bit(w, 0);             /* frame_cropping_flag */
@@ -312,7 +314,7 @@ static void write_idr(BitW *w, int picture, uint8_t seed) {
     bw_bit(w, 0);                       /* dec_ref_pic_marking.no_output_of_prior_pics_flag */
     bw_bit(w, 0);                       /* dec_ref_pic_marking.long_term_reference_flag */
     bw_ue(w, 0u);                       /* slice_qp_delta (se(0)) */
-    for (uint32_t mb = 0; mb < FIX_W_MBS * FIX_H_MBS; mb++) {
+    for (uint32_t mb = 0; mb < s_fix_w_mbs * s_fix_h_mbs; mb++) {
         for (uint32_t i = 0; i < 384u; i++) pcm[i] = pcm_sample(seed, mb, i);
         bw_ue(w, 25u);                  /* mb_type: I_PCM */
         bw_raw(w, pcm, 384u);
@@ -337,7 +339,7 @@ static uint32_t build_au(int picture, uint8_t *dst, uint32_t cap) {
         emit_nal(&out, 0x68, &w);
     }
     w.d = scratch; w.cap = sizeof(scratch); w.n = 0; w.acc = 0; w.bits = 0; w.overflow = 0;
-    write_idr(&w, picture, k_seed[picture]);
+    write_idr(&w, picture, k_seed[picture % FIX_PICTURES]);
     CHECK(!w.overflow, "fixture: the IDR picture fits the scratch buffer");
     emit_nal(&out, 0x65, &w);
     CHECK(!out.overflow, "fixture: the access unit fits its buffer");
@@ -431,13 +433,13 @@ static void test_context_words(void) {
     memset(host(G_CTX), 0, 96u);
     CHECK(call(NID_OPEN, G_CTX, 1u, 0, 0) == 0x80628001u && MEM_R32(G_CTX) == 0x05100601u &&
               MEM_R32(G_CTX + 8u) == 0x80000000u && MEM_R32(G_CTX + 24u) == 0x264Cu && !vc_find(G_CTX),
-          "open: codec type 1 returns 0x80628001 after writing +0, +8 and +24, and stays unopened (PSP-observed)");
+          "open: codec type 1 returns 0x80628001 after writing +0, +8 and +24, and stays unopened (unrecorded read)");
     CHECK(call(NID_OPEN, G_CTX, 2u, 0, 0) == VC_ERR_TYPE, "open: codec type 2 is refused");
     memset(host(G_CTX), 0, 96u);
     memset(host(G_CTX2), 0, 96u);
     CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == 0u, "open: type 0 opens the context");
     CHECK(MEM_R32(G_CTX) == 0x05100601u && MEM_R32(G_CTX + 8u) == 1u && MEM_R32(G_CTX + 24u) == 0x8344u,
-          "open: +0 = 0x05100601, +8 = 1 and +24 = 0x8344 (PSP-observed)");
+          "open: +0 = 0x05100601, +8 = 1 and +24 = 0x8344 (unrecorded read)");
     CHECK(bytes_are(G_CTX + 4u, 4u, 0u) && bytes_are(G_CTX + 12u, 12u, 0u) && bytes_are(G_CTX + 28u, 68u, 0u),
           "open: no other context word changes");
     CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == VC_ERR_STATE, "open: an open context cannot be opened again");
@@ -457,7 +459,7 @@ static void test_context_words(void) {
           "getedram: a second allocation for the same context is refused");
 
     CHECK(call(NID_INIT, G_CTX, 0u, 0, 0) == 0u && MEM_R32(G_CTX + 12u) == s_edram && MEM_R32(G_CTX + 8u) == 0u,
-          "init: +12 = +20 and +8 = 0 (PSP-observed)");
+          "init: +12 = +20 and +8 = 0 (unrecorded read)");
 
     for (uint32_t i = 0; i < 4u; i++) MEM_W32(G_CTX + 64u + i * 4u, 0x11111111u * (i + 1u));
     uint8_t before[96];
@@ -466,7 +468,7 @@ static void test_context_words(void) {
           "setmemory: accepted and no context word changes");
     CHECK(call(NID_STOP, G_CTX, 0u, 0, 0) == VC_ERR_STATE && memcmp(before, host(G_CTX), 96u) == 0 &&
               vc_find(G_CTX),
-          "stop: before any decode it returns 0x806201FE and changes nothing (PSP-observed)");
+          "stop: before any decode it returns 0x806201FE and changes nothing (unrecorded read)");
 }
 
 /* sceVideocodecGetVersion and sceVideocodecGetSEI: the words JPCSP writes (synthetic, W-LLE-1). */
@@ -818,6 +820,11 @@ static void test_copy_range(void) {
     MEM_W32(G_DCSC + 16u + 5u * 4u, 0x00100000u);
     CHECK(call(NID_YCRCBCOPY, G_DCSC, G_CSC, 1u, 0) == VC_ERR_GUEST_ADDRESS && bytes_are(G_YCC, 8u * YCC_STEP, 0xA5u),
           "ycrcbcopy: a destination in ME RAM is refused (the copy writes guest memory)");
+    memset(host(G_NOWHERE - 16u), 0xA5, 16u);
+    MEM_W32(G_DCSC + 16u + 5u * 4u, G_NOWHERE - 16u);   /* band 5 needs BAND_CHROMA bytes, 16 are guest memory */
+    CHECK(call(NID_YCRCBCOPY, G_DCSC, G_CSC, 1u, 0) == VC_ERR_GUEST_ADDRESS && bytes_are(G_YCC, 8u * YCC_STEP, 0xA5u) &&
+              bytes_are(G_NOWHERE - 16u, 16u, 0xA5u),
+          "ycrcbcopy: a destination that leaves guest memory part-way is refused before any band moves (review S6)");
     put_dst_csc(G_DCSC, G_YCC);
     MEM_W32(G_SCSC2, FIX_H / 16u);
     MEM_W32(G_SCSC2 + 4u, FIX_W / 16u);
@@ -933,7 +940,8 @@ static void test_teardown(void) {
 /* ---- sceAudiocodec: the ATRAC3plus half --------------------------------------------------- */
 
 #define G_AC       0x08900800u   /* 108-byte work area */
-#define G_AC2      0x08900880u   /* a second work area that is never initialised */
+#define G_AC2      0x08900880u   /* a second work area that borrows G_AC's EDRAM */
+#define G_AC3      0x08900900u   /* a work area that is never initialised */
 #define G_AIN      0x08940000u   /* one PSMF audio frame */
 #define G_AOUT     0x08942000u   /* one 0x2000-byte block, then a guard */
 #define AC_CODEC   0x1000u
@@ -1019,7 +1027,7 @@ static void test_audiocodec(void) {
               call(NID_AC_NEEDMEM, G_AC + 2u, AC_CODEC, 0, 0) == AC_ERR_NOT_RAM,
           "audiocodec: a null or unaligned work area is refused");
 
-    /* The halfword at +40 selects the words (PSP-observed, capture pending: PSP-VCODEC-001). */
+    /* The halfword at +40 selects the words (synthetic, unrecorded read: PSP-VCODEC-001). */
     CHECK(call(NID_AC_NEEDMEM, G_AC, AC_CODEC, 0, 0) == 0x807F00FDu && MEM_R32(G_AC) == 0x05100601u &&
               MEM_R32(G_AC + 8u) == 0x20Fu && MEM_R32(G_AC + 16u) == 0u && MEM_R32(G_AC + 52u) == 0x7D00u &&
               MEM_R32(G_AC + 60u) == 0u && MEM_R32(G_AC + 64u) == 8u,
@@ -1074,7 +1082,6 @@ static void test_audiocodec(void) {
     MEM_W32(G_AC2 + 16u, 0x7BC0u);
     CHECK(call(NID_AC_INIT, G_AC2, AC_CODEC, 0, 0) == 0u && ac_find(G_AC2) && MEM_R32(G_AC2) == 0x05100601u,
           "init: another work area naming that EDRAM at +12 initialises (uofw checks no owner)");
-    ac_drop(ac_find(G_AC2));
 
     /* ReleaseEDRAM frees only the work area's own allocation (review S1): a +104 naming a video
      * context's ME memory, or another work area's, is refused and nothing is freed. */
@@ -1095,7 +1102,8 @@ static void test_audiocodec(void) {
           "releaseedram: the video context still frees its own ME memory");
 
     CHECK(call(NID_AC_DECODE, G_AC, AC_CODEC, 0, 0) == AC_ERR_ME, "decode: before init it is refused");
-    CHECK(call(NID_AC_DECODE, G_AC2, AC_CODEC, 0, 0) == AC_ERR_ME,
+    memset(host(G_AC3), 0, 0x80u);
+    CHECK(call(NID_AC_DECODE, G_AC3, AC_CODEC, 0, 0) == AC_ERR_ME,
           "decode: a work area the runtime never initialised is refused");
     MEM_W32(G_AC + 8u, 0x1234u);
     CHECK(call(NID_AC_INIT, G_AC, AC_CODEC, 0, 0) == 0u && ac_find(G_AC) && MEM_R32(G_AC + 8u) == 0u,
@@ -1143,6 +1151,8 @@ static void test_audiocodec(void) {
     CHECK(call(NID_AC_RELEASE, G_AC, 0, 0, 0) == 0u && MEM_R32(G_AC + 104u) == 0u && MEM_R32(G_AC + 12u) == 0u &&
               s_me_alloc_count == allocs && !ac_find(G_AC),
           "releaseedram: the ME memory and the decoder go and the words are cleared");
+    CHECK(!ac_find(G_AC2) && call(NID_AC_DECODE, G_AC2, AC_CODEC, 0, 0) == AC_ERR_ME,
+          "releaseedram: the work area that borrowed the EDRAM goes with it (review S5)");
     CHECK(call(NID_AC_RELEASE, G_AC, 0, 0, 0) == AC_ERR_EDRAM_NOT_HELD,
           "releaseedram: a second release is refused");
 
@@ -1152,11 +1162,17 @@ static void test_audiocodec(void) {
     CHECK(call(NID_AC_NEEDMEM, G_AC, AC_CODEC, 0, 0) == 0u && call(NID_AC_GETEDRAM, G_AC, AC_CODEC, 0, 0) == 0u &&
               call(NID_AC_INIT, G_AC, AC_CODEC, 0, 0) == 0u && s_me_alloc_count == allocs + 1,
           "recycle: a work area holds EDRAM and a decoder");
+    memset(host(G_AC2), 0, 0x80u);
+    MEM_W32(G_AC2 + 12u, MEM_R32(G_AC + 12u));
+    MEM_W32(G_AC2 + 16u, 0x7BC0u);
+    CHECK(call(NID_AC_INIT, G_AC2, AC_CODEC, 0, 0) == 0u && ac_find(G_AC2),
+          "recycle: another work area borrows that EDRAM");
     memset(host(G_AC), 0, AC_WORK_BYTES_EDRAM);
     MEM_W16(G_AC + 40u, 0x5C28u);   /* the parameter halfword sceMpegCreate leaves */
     CHECK(call(NID_AC_NEEDMEM, G_AC, AC_CODEC, 0, 0) == 0u && call(NID_AC_GETEDRAM, G_AC, AC_CODEC, 0, 0) == 0u &&
-              s_me_alloc_count == allocs + 1 && MEM_R32(G_AC + 104u) != 0u && !ac_find(G_AC),
-          "recycle: GetEDRAM on the cleared work area frees the stale allocation and makes a new one");
+              s_me_alloc_count == allocs + 1 && MEM_R32(G_AC + 104u) != 0u && !ac_find(G_AC) && !ac_find(G_AC2),
+          "recycle: GetEDRAM on the cleared work area frees the stale allocation, and every context on it, "
+          "and makes a new one");
     CHECK(call(NID_AC_RELEASE, G_AC, 0, 0, 0) == 0u && s_me_alloc_count == allocs,
           "recycle: the new allocation releases");
 }
@@ -1191,6 +1207,77 @@ static void test_guest_reset(void) {
           "reset: the reopened context closes");
 }
 
+/* Band room (review B1). Every band of every set has room for its vc_band_bytes() count inside
+ * the band allocation, apart from every other band, at each geometry the ME RAM model holds. At
+ * w % 32 == 16, band 2 (the x % 32 == 0 strips, y1 bytes) is longer than JPCSP's size_y2 room. */
+static void test_band_room(void) {
+    int geometries = 0, roomy = 1;
+    for (uint32_t w = 16u; w <= VC_MAX_WIDTH; w += 16u)
+        for (uint32_t h = 16u; h <= VC_MAX_HEIGHT; h += 16u) {
+            VcContext c;
+            memset(&c, 0, sizeof(c));
+            c.ctx = G_CTX2;
+            if (!vc_allocate_bands(&c, w, h)) continue;
+            uint32_t size = 0u, bytes[8];
+            for (int i = 0; i < s_me_alloc_count; i++)
+                if (s_me_allocs[i].addr == c.band_base) size = s_me_allocs[i].size;
+            vc_band_bytes(w, h, bytes);
+            geometries++;
+            for (int i = 0; i < VC_BAND_SETS * 8 && roomy; i++) {
+                const uint32_t a = c.bands[i / 8][i % 8], an = bytes[i % 8];
+                if (!an) continue;
+                if (a < c.band_base + 256u || an > c.band_base + size - a) roomy = 0;
+                for (int j = i + 1; j < VC_BAND_SETS * 8 && roomy; j++) {
+                    const uint32_t b = c.bands[j / 8][j % 8], bn = bytes[j % 8];
+                    if (bn && a < b + bn && b < a + an) roomy = 0;
+                }
+            }
+            if (!roomy) fprintf(stderr, "videocodec: band overlap at %ux%u\n", (unsigned)w, (unsigned)h);
+            (void)me_free(c.band_base, ME_OWNER_VIDEO, c.ctx);
+            if (!roomy) break;
+        }
+    CHECK(geometries > 700 && roomy,
+          "bands: at every geometry ME RAM holds, each band has room for its count, apart from every other band");
+
+    /* A 48 x 64 movie (y1 = 1024, y2 = 512): decoding the next picture leaves the previous
+     * picture's bands as they were. */
+    static const char k_case[] = "Decode keeps a picture's bands when the next picture decodes, at w % 32 == 16";
+    if (!sr_h264_backend_available()) { skip(k_case); return; }
+    s_fix_w_mbs = 3u;
+    s_fix_h_mbs = 4u;
+    memset(host(G_CTX), 0, 96u);
+    MEM_W32(G_CTX + 24u, 0x4000u);
+    CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == 0u && call(NID_GETEDRAM, G_CTX, 0u, 0, 0) == 0u &&
+              call(NID_INIT, G_CTX, 0u, 0, 0) == 0u,
+          "bands: a 48 x 64 context opens");
+    MEM_W32(G_CTX + 16u, G_BUF2);
+    MEM_W32(G_CTX + 44u, G_YUV);
+    MEM_W32(G_CTX + 48u, G_BUF3);
+    MEM_W32(G_CTX + 80u, G_SEI);
+    uint32_t bytes[8];
+    vc_band_bytes(48u, 64u, bytes);
+    static uint8_t prev[8][1024];
+    uint32_t prev_at[8];
+    int delivered = 0, kept = 1;
+    for (int au = 0; au < 4; au++) {
+        load_au(au, 1);
+        CHECK(call(NID_DECODE, G_CTX, 0u, 0, 0) == 0u, "bands: a 48 x 64 access unit decodes");
+        if (MEM_R32(G_BUF2 + 32u) != 1u) continue;
+        if (delivered)
+            for (int b = 0; b < 8; b++)
+                if (memcmp(s_me_ram + prev_at[b], prev[b], bytes[b]) != 0) kept = 0;
+        for (int b = 0; b < 8; b++) {
+            prev_at[b] = MEM_R32(G_YUV + (uint32_t)b * 4u);
+            memcpy(prev[b], s_me_ram + prev_at[b], bytes[b]);
+        }
+        delivered++;
+    }
+    CHECK(delivered >= 2 && kept, "bands: each 48 x 64 picture's bands survive the next decode byte for byte");
+    CHECK(call(NID_DELETE, G_CTX, 0u, 0, 0) == 0u && !vc_find(G_CTX), "bands: the 48 x 64 context closes");
+    s_fix_w_mbs = FIX_W_MBS;
+    s_fix_h_mbs = FIX_H_MBS;
+}
+
 int main(void) {
     sr_mem_init();
     test_registration();
@@ -1204,6 +1291,7 @@ int main(void) {
     test_teardown();
     test_audiocodec();
     test_guest_reset();
+    test_band_room();
     if (failures) {
         fprintf(stderr, "videocodec selftest: FAILED (%d of %d checks)\n", failures, checks);
         return 1;

@@ -192,7 +192,7 @@ Executing guest PSMF middleware does not require software-emulating an H.264 vid
    - Guest PSMF middleware and the title's own `mpeg.prx` handle demuxing, ring buffers, access-unit
      assembly and state transitions as guest code.
    - `src/rt/hle_videocodec.c` takes each access unit at `sceVideocodecDecode`, decodes it on the host
-     H.264 seam and writes the picture back in the PSP's band layout; `sceMpegBaseCscAvc` converts it
+     H.264 seam and writes the picture back in JPCSP's band layout; `sceMpegBaseCscAvc` converts it
      into the guest's RGB buffer.
    - ATRAC3plus frames reach the project's ATRAC3plus decoder through `sceAudiocodecDecode` and are
      written back into guest buffers.

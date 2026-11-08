@@ -47,7 +47,7 @@
  *     mpeg.prx names buffers in main RAM this way (sceMpegBasePESpacketCopy into its ringbuffer's
  *     access-unit buffer, for one).
  *   - sceVideocodecDecode hands the access unit to the host H.264 backend (src/rt/sr_h264.h) and
- *     writes the decoded picture into ME RAM in the PSP's band layout (vc_band_walk), at the eight
+ *     writes the decoded picture into ME RAM in JPCSP's band layout (vc_band_walk), at the eight
  *     band addresses it publishes.
  *   - sceMpegBaseYCrCbCopy copies band bytes into guest buffers, and sceMpegBaseCscAvc reads the
  *     eight bands back from whatever memory their addresses name (ME RAM or guest RAM, as JPCSP's
@@ -60,16 +60,15 @@
  * code emulation (MEProcessor, METhread, the ME MMIO handlers or the sceMeVideo driver).
  *
  * Every value marked "synthetic" below is JPCSP's value at 00ac4d6d, not a PSP measurement by this
- * project; PSP request W-LLE-1 measures them. Values marked "PSP-observed, capture pending" were
- * read on a PSP by W-LLE-1 boot 149 (case 160 at 979de58f: a PSP-3000 on firmware 6.60, the
- * firmware's own sceVideocodec and sceAudiocodec on zeroed contexts, the ATRAC3plus work area given
- * the halfwords 0x5C28, 0x5C5C and 0 at +40): Open, GetEDRAM, Init, SetMemory and Stop before any
- * decode, and sceAudiocodecCheckNeedMem. They stay "capture pending" until the oracle records
- * PSP-VCODEC-001 (docs/HARDWARE_ORACLE.md). The decode words, the band layout, the CSC
- * conversion and the copy sizes are synthetic, pending W-LLE-1. Unknown codec types, a context
- * the runtime did not open, ME addresses outside ME RAM, zero-length packets, band buffers outside
- * readable memory and a build without an H.264 backend are refused with a named error and one
- * diagnostic line.
+ * project; PSP request W-LLE-1 measures them. Values marked "synthetic, unrecorded read" come
+ * from a W-LLE-1 read (zeroed contexts, the ATRAC3plus work area given the halfwords 0x5C28,
+ * 0x5C5C and 0 at +40) that the hardware register does not record: docs/HARDWARE_ORACLE.md lists
+ * PSP-VCODEC-001 as NOT_RUN. They cover Open, GetEDRAM, Init, SetMemory and Stop before any decode,
+ * and sceAudiocodecCheckNeedMem, and count as synthetic until PSP-VCODEC-001 records a capture.
+ * The decode words, the band layout, the CSC conversion and the copy sizes are synthetic, pending
+ * W-LLE-1. Unknown codec types, a context the runtime did not open, a span that starts in ME RAM
+ * and leaves it, an address in neither ME RAM nor guest memory, zero-length packets and a build
+ * without an H.264 backend are refused with a named error and one diagnostic line.
  *
  *   - sceAudiocodec decodes the movie's ATRAC3plus frames with the project's ATRAC3plus decoder
  *     (atrac3p_bridge.h), by the same frame rules sceMpegAtracDecode uses in mpeg.c. Its EDRAM
@@ -104,7 +103,7 @@
 #define VC_ERR_DECODE         0x80628002u
 /* A guest pointer that is null, unaligned or outside guest memory. */
 #define VC_ERR_GUEST_ADDRESS  SCE_KERNEL_ERROR_ILLEGAL_ADDR
-/* An ME address outside the modelled ME RAM. */
+/* A span that starts in ME RAM and runs past its end. */
 #define VC_ERR_ME_ADDRESS     SCE_KERNEL_ERROR_ILLEGAL_ADDR
 
 /* ---- the ME RAM model (MEMemory.java, MEEmulator.java) ---- */
@@ -249,7 +248,7 @@ static int vc_guest_words(uint32_t addr, uint32_t bytes) {
 /* ---- sceVideocodec contexts (sceVideocodec.java) ---- */
 #define VC_CONTEXT_BYTES      96u          /* JPCSP videocodecBufferSize */
 #define VC_TYPE_AVC           0u
-/* PSP-observed, capture pending (PSP-VCODEC-001): sceVideocodecOpen writes +0 = 0x05100601 for both codec types; for
+/* synthetic, unrecorded read (PSP-VCODEC-001): sceVideocodecOpen writes +0 = 0x05100601 for both codec types; for
  * type 0 it writes +8 = 1 and +24 = 0x8344, the size sceVideocodecGetEDRAM reads, and returns 0.
  * For type 1 it writes +8 = 0x80000000 and +24 = 0x264C and returns 0x80628001. */
 #define VC_OPEN_WORD0         0x05100601u
@@ -321,12 +320,12 @@ static void vc_stop_decoder(VcContext *c) {
 static uint32_t h_VideocodecOpen(CpuState *s) {
     const uint32_t ctx = A0, type = A1;
     if (type == VC_TYPE_SECOND && vc_guest_words(ctx, VC_CONTEXT_BYTES) && !vc_find(ctx)) {
-        /* PSP-observed, capture pending: the PSP refuses type 1 here after writing three words. The later calls on a
-         * type 1 context are not modelled and stay refused. */
+        /* synthetic, unrecorded read: type 1 is refused here after three words are written. The later
+         * calls on a type 1 context are not modelled and stay refused. */
         MEM_W32(ctx, VC_OPEN_WORD0);
         MEM_W32(ctx + 8u, VC_OPEN_T1_WORD8);
         MEM_W32(ctx + 24u, VC_OPEN_T1_EDRAM_BYTES);
-        return vc_refuse("sceVideocodecOpen", "codec type 1 is refused, as the PSP refuses it", VC_OPEN_T1_RESULT);
+        return vc_refuse("sceVideocodecOpen", "codec type 1 is refused (synthetic, unrecorded read)", VC_OPEN_T1_RESULT);
     }
     if (type != VC_TYPE_AVC)
         return vc_refuse("sceVideocodecOpen", "codec type other than 0 (AVC) is not modelled", VC_ERR_TYPE);
@@ -380,7 +379,7 @@ static uint32_t h_VideocodecReleaseEDRAM(CpuState *s) {
     return 0u;
 }
 
-/* sceVideocodecInit(ctx, type): +12 = +20 and +8 = 0 (PSP-observed, capture pending:
+/* sceVideocodecInit(ctx, type): +12 = +20 and +8 = 0 (synthetic, unrecorded read:
  * PSP-VCODEC-001, type 0). */
 static uint32_t h_VideocodecInit(CpuState *s) {
     VcContext *c;
@@ -427,8 +426,8 @@ static uint32_t h_VideocodecGetSEI(CpuState *s) {
 }
 
 /* sceVideocodecStop(ctx, type): JPCSP drops its decoder; the next decode starts a new one. The
- * pictures already decoded stay in their ME bands (synthetic: W-LLE-1). Before any decode the PSP
- * returns 0x806201FE and changes no context word (PSP-observed, capture pending: PSP-VCODEC-001,
+ * pictures already decoded stay in their ME bands (synthetic: W-LLE-1). Before any decode it
+ * returns 0x806201FE and changes no context word (synthetic, unrecorded read: PSP-VCODEC-001,
  * type 0). */
 static uint32_t h_VideocodecStop(CpuState *s) {
     VcContext *c;
@@ -459,19 +458,22 @@ static uint32_t h_VideocodecDelete(CpuState *s) {
 static uint32_t vc_align512(uint32_t v) { return (v + 0x1FFu) & ~0x1FFu; }
 
 /* The band buffers, allocated once in ME RAM for the first picture's geometry, laid out as
- * JPCSP videocodecDecodeType0 does (synthetic: W-LLE-1 items 2 and 3). Each band has room for
- * its vc_band_bytes() count: buffers 4 and 5 size_c1, buffers 6 and 7 size_c2. */
+ * JPCSP videocodecDecodeType0 does (synthetic: W-LLE-1 items 2 and 3), with one change: JPCSP
+ * places band 2 size_y1 past band 0 and the next set size_y2 past band 2, but band 2 holds the
+ * x % 32 == 0 strips, y1 bytes (vc_band_bytes). When w % 32 == 16, y1 exceeds y2 by 8h bytes,
+ * more than the 512-byte alignment absorbs, and band 2 would run into the next set's band 0.
+ * Here a luma set is 2 * size_y1, so every band has room for its vc_band_bytes() count: bands 0
+ * to 3 size_y1 (bands 1 and 3 need y2 <= y1), bands 4 and 5 size_c1, bands 6 and 7 size_c2. */
 static int vc_allocate_bands(VcContext *c, uint32_t w, uint32_t h) {
     const uint32_t size_y1 = vc_align512(((w + 16u) >> 5) * (h >> 1) * 16u);
-    const uint32_t size_y2 = vc_align512((w >> 5) * (h >> 1) * 16u);
     const uint32_t size_c1 = vc_align512(((w + 16u) >> 5) * (h >> 1) * 8u);
     const uint32_t size_c2 = vc_align512((w >> 5) * (h >> 1) * 8u);
-    const uint32_t set_bytes = size_y1 + size_y2 + size_c1 + size_c2;
-    const uint32_t step = set_bytes * VC_BAND_SETS;
+    const uint32_t luma_set = size_y1 * 2u;
+    const uint32_t step = (luma_set + size_c1 + size_c2) * VC_BAND_SETS;
     const uint32_t base = me_alloc(256u + step * 2u, ME_OWNER_VIDEO, c->ctx);
     if (!base) return 0;
     uint32_t base1 = base + 256u;
-    uint32_t base2 = base1 + (size_y1 + size_y2) * VC_BAND_SETS;
+    uint32_t base2 = base1 + luma_set * VC_BAND_SETS;
     for (int i = 0; i < VC_BAND_SETS; i++) {
         c->bands[i][0] = base1;
         c->bands[i][1] = base1 + step;
@@ -481,7 +483,7 @@ static int vc_allocate_bands(VcContext *c, uint32_t w, uint32_t h) {
         c->bands[i][5] = base2 + step;
         c->bands[i][6] = base2 + size_c1;
         c->bands[i][7] = base2 + size_c1 + step;
-        base1 += size_y1 + size_y2;
+        base1 += luma_set;
         base2 += size_c1 + size_c2;
     }
     c->band_base = base;
@@ -800,7 +802,8 @@ static int vc_csc_size_ok(uint32_t w16, uint32_t h16) {
  * The byte counts are the band sizes of vc_band_bytes, the room the decoder's bands have
  * (synthetic: W-LLE-1 item 3). JPCSP's handler counts 16-byte blocks from the struct's 16-pixel
  * units, ((width + 16) >> 5) * (height >> 1): for a 480 x 272 picture that is 8 blocks against
- * the 32640 bytes of band 0. It also gives band 5 band 1's count. Neither is followed. */
+ * the 32640 bytes of band 0. It also gives buffer 5 band 1's count and buffer 6 band 4's
+ * (size1 >> 1). None of these is followed. */
 static uint32_t h_MpegBaseYCrCbCopy(CpuState *s) {
     static const char call[] = "sceMpegBaseYCrCbCopy";
     const uint32_t flags = A2;
@@ -931,8 +934,8 @@ static uint32_t h_MpegBaseCscAvcRange(CpuState *s) {
 #define AC_ERR_NOT_RAM          0x807F0002u
 #define AC_ERR_NOT_SUPPORTED    0x80000004u /* SCE_ERROR_NOT_SUPPORTED, for a codec outside 0x1000-0x1005 */
 /* project-chosen, synthetic: uofw goes on for an in-range codec (0x1001-0x1005) that this boundary
- * does not model, and the PSP returned 0 from sceAudiocodecCheckNeedMem for 0x1001 and 0x1002
- * (PSP-observed, capture pending: PSP-VCODEC-001). Such a codec is refused here, fail-closed, with
+ * does not model, and the W-LLE-1 read returned 0 from sceAudiocodecCheckNeedMem for 0x1001 and
+ * 0x1002 (synthetic, unrecorded read: PSP-VCODEC-001). Such a codec is refused here, fail-closed, with
  * the same code as an out-of-range one. */
 #define AC_ERR_NOT_MODELLED     0x80000004u
 #define AC_ERR_PRIV_REQUIRED    0x80000023u /* SCE_ERROR_PRIV_REQUIRED */
@@ -941,7 +944,7 @@ static uint32_t h_MpegBaseCscAvcRange(CpuState *s) {
 /* synthetic: uofw maps an ME driver result of -1 to 0x807F00FF (g_retValues[3]); JPCSP's
  * driver returns -1 for a decode it cannot run. Used for every ME-side refusal (W-LLE-1). */
 #define AC_ERR_ME               0x807F00FFu
-/* PSP-observed, capture pending (PSP-VCODEC-001): sceAudiocodecCheckNeedMem for ATRAC3plus reads
+/* synthetic, unrecorded read (PSP-VCODEC-001): sceAudiocodecCheckNeedMem for ATRAC3plus reads
  * the halfword at +40, which sceMpegCreate leaves at 0x5C28 or 0x5C5C. For each it returns 0 and
  * writes +16 (the ME memory the codec needs), +52 (the sample rate), +60 and +64. For 0 it returns
  * 0x807F00FD and writes +8, +52 and +64. In every case it also writes +0 = AC_WORK_WORD0 (uofw
@@ -960,6 +963,7 @@ static uint32_t h_MpegBaseCscAvcRange(CpuState *s) {
 typedef struct {
     int used;
     uint32_t work;        /* guest address of the work area */
+    uint32_t edram;       /* the ME allocation (raw address) Init found at +12 */
     Atrac3pBridge *at3p;  /* created at the first decode: the frame names its size and layout */
     int align, channels;
 } AcContext;
@@ -976,6 +980,13 @@ static AcContext *ac_find(uint32_t work) {
 static void ac_drop(AcContext *c) {
     atrac3p_bridge_destroy(c->at3p);
     memset(c, 0, sizeof(*c));
+}
+
+/* An audio ME allocation was freed: every context initialised on it goes, the work area that
+ * allocated it or one that borrowed it (sceAudiocodecInit). */
+static void ac_drop_on_edram(uint32_t alloc) {
+    for (int i = 0; i < AC_MAX_CONTEXTS; i++)
+        if (s_ac[i].used && s_ac[i].edram == alloc) ac_drop(&s_ac[i]);
 }
 
 /* The checks every sceAudiocodec call starts with (uofw): a work area in RAM, a codec in range,
@@ -1009,7 +1020,7 @@ static uint32_t h_AudiocodecCheckNeedMem(CpuState *s) {
         MEM_W32(work + 8u, AC_AT3P_ZERO_WORD8);
         MEM_W32(work + 52u, AC_AT3P_ZERO_WORD52);
         MEM_W32(work + 64u, AC_AT3P_ZERO_WORD64);
-        return vc_refuse(call, "the ATRAC3plus parameter halfword at +40 is 0, as the PSP refuses it",
+        return vc_refuse(call, "the ATRAC3plus parameter halfword at +40 is 0 (synthetic, unrecorded read)",
                          AC_AT3P_ZERO_RESULT);
     }
     for (size_t i = 0; i < sizeof(k_at3p) / sizeof(k_at3p[0]); i++) {
@@ -1034,7 +1045,7 @@ static uint32_t h_AudiocodecCheckNeedMem(CpuState *s) {
  *     synthetic choice like sceVideocodecGetEDRAM's: W-LLE-1);
  *   - a work area that owns an allocation +104 no longer names was recycled without a release
  *     (cleared or reused by the title): that stale allocation and its host decoder go, and a
- *     new allocation is made, as on the PSP. */
+ *     new allocation is made, as uofw allocates. */
 static uint32_t h_AudiocodecGetEDRAM(CpuState *s) {
     static const char call[] = "sceAudiocodecGetEDRAM";
     const uint32_t work = A0;
@@ -1046,6 +1057,7 @@ static uint32_t h_AudiocodecGetEDRAM(CpuState *s) {
             return vc_refuse(call, "work area already holds its ME memory (sceAudiocodecReleaseEDRAM first)",
                              AC_ERR_EDRAM);
         (void)me_free(held, ME_OWNER_AUDIO, work);
+        ac_drop_on_edram(held);
         AcContext *stale = ac_find(work);
         if (stale) ac_drop(stale);
     }
@@ -1079,20 +1091,21 @@ static uint32_t h_AudiocodecReleaseEDRAM(CpuState *s) {
         return vc_refuse(call, "+104 names ME memory this work area does not own", AC_ERR_EDRAM_NOT_HELD);
     MEM_W32(work + 104u, 0u);
     MEM_W32(work + 12u, 0u);
+    ac_drop_on_edram(alloc);
     AcContext *c = ac_find(work);
     if (c) ac_drop(c);
     return 0u;
 }
 
-/* 1 when [edram, edram + bytes) lies inside an ME allocation sceAudiocodecGetEDRAM made, and
- * edram is that allocation's published (64-byte-aligned) address. */
-static int me_audio_edram_ok(uint32_t edram, uint32_t bytes) {
+/* The raw address of the ME allocation sceAudiocodecGetEDRAM made whose published
+ * (64-byte-aligned) address is edram, when [edram, edram + bytes) lies inside it; else 0. */
+static uint32_t me_audio_edram(uint32_t edram, uint32_t bytes) {
     for (int i = 0; i < s_me_alloc_count; i++) {
         const MeAlloc *a = &s_me_allocs[i];
         if (a->kind != ME_OWNER_AUDIO || ((a->addr + 0x3Fu) & ~0x3Fu) != edram) continue;
-        return bytes <= a->addr + a->size - edram;
+        return bytes <= a->addr + a->size - edram ? a->addr : 0u;
     }
-    return 0;
+    return 0u;
 }
 
 /* sceAudiocodecInit(workArea, codec): the work area becomes a decoding context. A context
@@ -1100,13 +1113,16 @@ static int me_audio_edram_ok(uint32_t edram, uint32_t bytes) {
  * work area need not be the one sceAudiocodecGetEDRAM was called on: uofw checks only that
  * +12 and +16 name accessible memory, and a disc mpeg.prx initialises a work area other than
  * the one it allocated with. Here +12 must be an EDRAM sceAudiocodecGetEDRAM published, with
- * +16 bytes inside it; anything else is refused (the ME would work in memory nobody gave it). */
+ * +16 bytes inside it; anything else is refused (the ME would work in memory nobody gave it).
+ * The context ends when that allocation is freed (sceAudiocodecReleaseEDRAM, or GetEDRAM on a
+ * recycled work area), whichever work area allocated it. */
 static uint32_t h_AudiocodecInit(CpuState *s) {
     static const char call[] = "sceAudiocodecInit";
     const uint32_t work = A0;
     const uint32_t r = ac_check(call, work, A1, AC_WORK_BYTES);
     if (r) return r;
-    if (!me_audio_edram_ok(MEM_R32(work + 12u), MEM_R32(work + 16u)))
+    const uint32_t alloc = me_audio_edram(MEM_R32(work + 12u), MEM_R32(work + 16u));
+    if (!alloc)
         return vc_refuse(call, "+12 and +16 do not name EDRAM sceAudiocodecGetEDRAM published", AC_ERR_ME);
     AcContext *c = ac_find(work);
     if (c) {
@@ -1119,6 +1135,7 @@ static uint32_t h_AudiocodecInit(CpuState *s) {
         c->used = 1;
         c->work = work;
     }
+    c->edram = alloc;
     MEM_W32(work, AC_WORK_WORD0);
     MEM_W32(work + 8u, 0u);
     return 0u;
