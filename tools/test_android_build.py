@@ -486,7 +486,9 @@ class AndroidTitleLibraryTests(unittest.TestCase):
 
     def _abs(self, path: Path) -> str:
         # Java's canonical form: on Windows the drive path with backslashes, else the POSIX path.
-        return str(path.resolve())
+        # Built here, not taken from str(): an MSYS2 Python on Windows prints paths with "/".
+        resolved = str(path.resolve())
+        return resolved.replace("/", "\\") if os.name == "nt" else resolved
 
     def test_a_library_the_apk_ships_loads_by_name_or_path(self) -> None:
         bundled = f"{self._abs(self.lib / 'libnk_title_demo.so')}|nk_title_demo"
