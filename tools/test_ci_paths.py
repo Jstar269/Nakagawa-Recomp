@@ -139,6 +139,8 @@ class CiPathClassificationTests(unittest.TestCase):
             "assets/installer/nakagawa.iss",
             "assets/installer/fragments/setup.iss",
             "assets/upstream/innosetup.lock.json",
+            # Under the tools/build* build-system prefix, but it builds only the installer.
+            "tools/build_installer.py",
         ):
             with self.subTest(path=path):
                 result = classify([path])
