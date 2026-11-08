@@ -1238,6 +1238,8 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
   first frames. Not measured on a title. The VBLANK schedule, the GE timing model and the media clocks are unchanged.
 - **I/O speed:** unchanged.
 - **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run it stays off whatever the environment says.
+  Turning it on by default, or putting it in a preset, needs the owner's decision first, because of the trade-off in
+  section 10.13 (some small, dense or filtered text is drawn smooth, and some soft art can still rib).
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic. The private runs item 4 lists, before
   and after at render scale 4 on *Hot Shots Tennis* and *LittleBigPlanet*, and the library sweep, do not exist for
   this item, and it may not be on by default without them.
