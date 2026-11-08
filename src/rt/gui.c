@@ -34,6 +34,8 @@
 #include "osk_overlay.h"        /* the in-window keyboard: keys in, the frame drawn over */
 #include "osk_overlay_paint.h"
 #include "ace.h"             /* Ace Mode: crisp keyboard; refused by the acceptance checkpoint */
+#include "ge_shared.h"       /* the software renderer's twin rows (#2050) and the VRAM viewer's
+                                decoders (#314) */
 #ifdef SR_SDL3VK
 #include "gpu_sdl3vk/ge_gpu.h"
 #include "gpu_sdl3vk/ace_smooth.h" /* Ace Mode's in-between frames */
@@ -45,7 +47,6 @@
 #include "overlay/overlay_host.h" /* the pause overlay's pages (C9c) */
 #include "gpu_sdl3vk/ace_ui.h"   /* Ace Mode's in-game UI: notice, readout, crisp keyboard */
 #include "nk_platform.h"         /* the system's Reduce motion, for the Ace UI */
-#include "ge_shared.h"           /* the developer VRAM viewer's decoders (#314) */
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_render.h>
 #endif
