@@ -423,7 +423,6 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         settings.preset = "Ultra";
         settings.preset_notice = "Ultra is used in Enhanced and Ace, with the FSR 1 upscaler. "
                                  "Authentic uses your own display settings.";
-        settings.preset_notice_warns = false;
     }
     settings.vsync = true;
     /* The refresh-rate advisory case runs on a 144 Hz display; the rest on 60 Hz. */

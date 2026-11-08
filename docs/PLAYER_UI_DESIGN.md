@@ -538,7 +538,8 @@ SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut wit
 (top left) are chips on the 16 px safe area.
 GRAPHICS PRESET is the GAME card's last row (#2150). It steps through LOW, MEDIUM, HIGH, ULTRA and HANDHELD.
 A preset is used only by Enhanced and Ace sessions, where its values take the place of the RESOLUTION, SCALING,
-VSYNC and GAME FULLSCREEN rows. Choosing one changes none of those rows, and an Authentic session always runs with
+VSYNC and GAME FULLSCREEN rows; ULTRA also turns the FSR 1 upscaler (the SHARPER ENLARGING part) on, over that
+part's own setting. Choosing one changes none of those rows or the part, and an Authentic session always runs with
 them as the user set them, whatever the preset. The reason is that a render scale above 1x is not host-only: every
 present commits the frame to guest VRAM, so a game that copies its screen (a save picture) keeps the larger picture
 (`docs/ENHANCEMENT_CONTRACT.md` section 10.3, Pixels), and Authentic launch output must not change with a
@@ -554,10 +555,10 @@ values are starting points, to be tuned by measurement on real titles. They live
 | LOW | 1x (480x272) | Sharp | On | the row's | |
 | MEDIUM | 2x | Sharp | On | the row's | |
 | HIGH | 4x | Sharp | On | the row's | |
-| ULTRA | 4x | Sharp | On | the row's | turns the FSR 1 upscaler on (Enhanced and Ace only; the notice line says so) |
+| ULTRA | 4x | Sharp | On | the row's | turns the FSR 1 upscaler on, whatever SHARPER ENLARGING says (Enhanced and Ace only; the notice line says so; where the GPU renderer cannot run FSR 1 the normal scaling filter stays, as for the part) |
 | HANDHELD | 2x | Sharp | On | On | |
 
-A preset never changes frame pacing, the play mode, an Enhanced part or the launch line.
+A preset never changes frame pacing, the play mode or the launch line. Editing SHARPER ENLARGING, for the library or one game, sets an ULTRA preset to CUSTOM, which uses the part's own value.
 Left and Right move between the two cards along a row (`NK_UI_BUTTON_ROW`), so CONTROLLER SETTINGS is reached from
 SCALING. Every change is saved as it is made. Below a 680 px tall window the `SETTINGS` heading is left out (the tab names the
 page) so every row fits 960 x 540. The tabbed layout below is the target for a later pass:

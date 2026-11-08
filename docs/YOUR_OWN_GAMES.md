@@ -225,7 +225,7 @@ finds the same title the player does.
 
 ## Graphics presets
 
-**Settings > Graphics preset** picks a set of display settings in one choice. A preset is used only when a game
+**Settings > Graphics preset** picks a set of display settings in one choice (Ultra also picks the FSR 1 upscaler). A preset is used only when a game
 plays in Enhanced or Ace. In Authentic, a game always runs with your own **Resolution**, **Scaling**, **VSync** and
 **Game fullscreen** settings, whatever the preset, because a larger render scale also changes what the game can
 copy from its own screen, such as a save picture. Choosing a preset doesn't change those settings. Changing one of
@@ -239,7 +239,7 @@ them yourself sets the preset back to **Custom**, which uses your settings every
 | Ultra | 4x | Sharp | On | your setting |
 | Handheld | 2x | Sharp | On | On |
 
-Ultra also turns on the FSR 1 upscaler (the **Sharper enlarging** setting) in Enhanced and Ace sessions.
+Ultra also turns on the FSR 1 upscaler in Enhanced and Ace sessions, whatever your **Sharper enlarging** setting says. Changing **Sharper enlarging** yourself sets the preset back to **Custom**. Where the graphics card can't run FSR 1, the normal scaling filter stays.
 
 ## Keep it to your own games
 

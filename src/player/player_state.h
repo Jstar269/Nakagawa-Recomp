@@ -1498,8 +1498,9 @@ const char *player_present_scaling_label(int scaling);
    uses the rows as the user set them, whatever the preset: a render scale above 1x is
    guest-visible (every present commits to VRAM, docs/ENHANCEMENT_CONTRACT.md), so a
    preset must not reach Authentic launch output. Editing one of the rows a preset sets
-   makes it Custom, which means the rows apply everywhere. The play mode, the Enhanced
-   parts and the launch line are not in the table. */
+   makes it Custom, which means the rows apply everywhere. The play mode is not in the table.
+   Ultra also sets the Sharper enlarging part's value (the presentation upscaler) for the
+   session, over the part's own setting; editing that part makes the preset Custom. */
 typedef enum {
     PLAYER_PRESET_CUSTOM = 0,
     PLAYER_PRESET_LOW,
@@ -1527,12 +1528,11 @@ const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset);
 int player_app_graphics_preset(const PlayerApp *app);
 /* The Settings row's value: "Low", ..., "Ultra", "Handheld", or "Custom". */
 const char *player_app_graphics_preset_label(const PlayerApp *app);
-/* The main Settings page's notice line while a preset is chosen: where it applies, and a
-   value it asks for that Settings cannot set. Returns false, with out empty, for Custom.
-   *warns is set when the note names a value that is not set. Derived from the choice, so
-   it goes when the preset becomes Custom and comes back with a saved preset. */
-bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap,
-                                     bool *warns);
+/* The main Settings page's notice line while a preset is chosen: where it applies, and the
+   FSR 1 upscaler where the preset turns it on. Returns false, with out empty, for Custom.
+   Derived from the choice, so it goes when the preset becomes Custom and comes back with a
+   saved preset. */
+bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap);
 /* Chooses the preset. The rows keep their values: only Enhanced and Ace sessions use the
    preset's. */
 void player_app_apply_graphics_preset(PlayerApp *app, int preset);

@@ -314,7 +314,7 @@ refuses the line. So does anything else: the run is Authentic and one `ACE_MODE:
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
 `<user data>/ace/`. Ace's 60 FPS game logic is not on this line: it selects the title's enhanced package variant
 (section 9.4). Nor is sharper enlarging (`"upscale"`, #2122): the launcher exports it as `SR_PRESENT_UPSCALE`, `fsr1`
-for an Enhanced or Ace run with the part on and `off` otherwise, and always `off` for Authentic (section 2.2).
+for an Enhanced or Ace run with the part on or the Ultra graphics preset chosen, and `off` otherwise, and always `off` for Authentic (section 2.2).
 
 ### 10.2. Authentic Is Untouched
 

@@ -2223,9 +2223,8 @@ class NativePlayerUiTests(unittest.TestCase):
         lines = []
         for line in stdout.splitlines():
             if line.startswith(prefix):
-                value, warns, note = line[len(prefix):].split("|", 2)
-                lines.append({"value": value[len("value="):], "warns": warns[len("warns="):],
-                              "note": note[len("note="):]})
+                value, note = line[len(prefix):].split("|", 1)
+                lines.append({"value": value[len("value="):], "note": note[len("note="):]})
         return lines
 
     def test_next_ui_graphics_preset_writes_its_settings(self) -> None:
@@ -2243,10 +2242,9 @@ class NativePlayerUiTests(unittest.TestCase):
         lines = self.preset_lines(run)
         self.assertEqual([line["value"] for line in lines], ["Custom", "Low", "Medium"],
                          run["stdout"])
-        self.assertEqual((lines[0]["warns"], lines[0]["note"]), ("0", ""),
+        self.assertEqual((lines[0]["note"],), ("",),
                          "a new library starts on Custom, with the page's own line")
         medium = lines[-1]
-        self.assertEqual(medium["warns"], "0")
         self.assertEqual(medium["note"],
                          "Medium is used in Enhanced and Ace. Authentic uses your own display "
                          "settings.")
@@ -2261,7 +2259,7 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIs(settings.get("fullscreen"), False)
 
     def test_next_ui_graphics_preset_ultra_note_and_custom_on_edit(self) -> None:
-        """#2150: Ultra's row and note say its upscaler is not set, in the warning colour;
+        """#2150: Ultra's row reads Ultra and its note says it uses the FSR 1 upscaler;
         editing a row the preset sets (Resolution) makes it Custom and the note goes."""
         focus = self.SETTINGS_FOCUS
         run = self.next_ui_run(
@@ -2279,13 +2277,11 @@ class NativePlayerUiTests(unittest.TestCase):
                          ["Custom", "Low", "Medium", "High", "Ultra", "Custom"],
                          run["stdout"])
         ultra = lines[4]
-        self.assertEqual(ultra["warns"], "0", "every Ultra value is set")
         self.assertIn("Ultra is used in Enhanced and Ace", ultra["note"])
         self.assertIn("with the FSR 1 upscaler", ultra["note"])
         self.assertIn("Authentic uses your own display settings", ultra["note"])
-        self.assertEqual(lines[3]["warns"], "0")
         self.assertNotIn("FSR 1", lines[3]["note"])
-        self.assertEqual((lines[-1]["warns"], lines[-1]["note"]), ("0", ""),
+        self.assertEqual((lines[-1]["note"],), ("",),
                          "an edited row makes the preset Custom and its note goes")
         settings = run["settings"]
         assert isinstance(settings, dict)

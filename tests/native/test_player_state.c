@@ -7833,7 +7833,7 @@ static void graphics_preset_session(const PlayerSettings *settings, NkRuntimeCon
        preset for an Enhanced or Ace session. */
     memset(config, 0, sizeof(*config));
     player_app_apply_settings_to_session(settings, config);
-    player_play_resolve(settings, "TEST92150", r);
+    player_play_config_session(settings, "TEST92150", false, false, config, r);
     assert(player_play_launch_line(r, line, cap));
     player_session_apply_graphics_preset(settings, r->on, config);
 }
@@ -7843,7 +7843,6 @@ static void test_graphics_presets(void) {
     char cache_root[512], root[700], path[800];
     char line[192], custom_line[192];
     char note[192];
-    bool warns = true;
     PlayerPlayResolved r, custom_r;
     NkRuntimeConfig config, custom_config;
     PlayerSettings custom;
@@ -7858,8 +7857,8 @@ static void test_graphics_presets(void) {
     player_app_settings_init_default(&app->settings);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
     assert(strcmp(player_app_graphics_preset_label(app), "Custom") == 0);
-    assert(!player_app_graphics_preset_note(app, note, sizeof(note), &warns));
-    assert(note[0] == '\0' && !warns);
+    assert(!player_app_graphics_preset_note(app, note, sizeof(note)));
+    assert(note[0] == '\0');
     assert(player_graphics_preset_row(PLAYER_PRESET_CUSTOM) == NULL);
     assert(player_graphics_preset_row(PLAYER_PRESET_COUNT) == NULL);
     app->settings.graphics_preset = PLAYER_PRESET_COUNT;
@@ -7889,12 +7888,11 @@ static void test_graphics_presets(void) {
             assert(strcmp(player_app_graphics_preset_label(app), row->value) == 0);
             assert(app->settings_notice[0] == '\0');
             /* The note says where the preset applies, and names a value it cannot set. */
-            assert(player_app_graphics_preset_note(app, note, sizeof(note), &warns));
+            assert(player_app_graphics_preset_note(app, note, sizeof(note)));
             assert(strstr(note, row->label) != NULL &&
                    strstr(note, " is used in Enhanced and Ace") != NULL &&
                    strstr(note, "Authentic uses your own display settings.") != NULL);
-            assert(!warns);
-            assert((strstr(note, "FSR 1") != NULL) == row->upscaler);
+                    assert((strstr(note, "FSR 1") != NULL) == row->upscaler);
 
             /* Authentic: the session's config and launch line equal Custom's with the same
                rows, under every preset. */
@@ -7907,7 +7905,7 @@ static void test_graphics_presets(void) {
             assert(config.resolution_scale == custom.resolution_scale &&
                    config.present_scaling == NK_PRESENT_SCALING_BILINEAR && !config.vsync &&
                    config.fullscreen == (fs != 0));
-            assert(config.present_upscale == NK_PRESENT_UPSCALE_OFF && config.ace_spec[0] == '\0');
+            assert(config.present_upscale == NK_PRESENT_UPSCALE_OFF && strcmp(config.ace_spec, "off") == 0);
 
             /* Enhanced: the session takes the preset's values; the rest is the rows'. */
             app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
@@ -7931,16 +7929,48 @@ static void test_graphics_presets(void) {
         }
     }
 
+    /* Ultra's upscaler (#2122): it overrides the Sharper enlarging part in Enhanced and Ace,
+       other presets leave the part's own value, Authentic stays off, and editing the part
+       (library or one game) makes Ultra Custom but leaves other presets alone. */
+    for (int part_on = 0; part_on < 2; part_on++) {
+        for (int p = PLAYER_PRESET_LOW; p < PLAYER_PRESET_COUNT; p++) {
+            NkRuntimeConfig cfg;
+            PlayerPlayResolved pr;
+            char pline[192];
+            player_app_settings_init_default(&app->settings);
+            app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+            app->settings.enhanced.part[PLAYER_PART_UPSCALE] = part_on;
+            app->settings.graphics_preset = p;
+            graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+            assert(cfg.present_upscale == (p == PLAYER_PRESET_ULTRA || part_on
+                                               ? NK_PRESENT_UPSCALE_FSR1
+                                               : NK_PRESENT_UPSCALE_OFF));
+            app->settings.enhanced.library = PLAYER_PLAY_AUTHENTIC;
+            graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+            assert(cfg.present_upscale == NK_PRESENT_UPSCALE_OFF);
+        }
+    }
+    player_app_settings_init_default(&app->settings);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_HIGH);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_HIGH);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SAS);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_ULTRA);
+
     /* Editing a row the preset sets makes it Custom, even to the same value, and the note
        goes with it. */
     player_app_settings_init_default(&app->settings);
     player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
-    assert(player_app_graphics_preset_note(app, note, sizeof(note), &warns) && !warns);
+    assert(player_app_graphics_preset_note(app, note, sizeof(note)));
     player_app_cycle_resolution_scale(app, 1);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
     assert(strcmp(player_app_graphics_preset_label(app), "Custom") == 0);
-    assert(!player_app_graphics_preset_note(app, note, sizeof(note), &warns));
-    assert(note[0] == '\0' && !warns);
+    assert(!player_app_graphics_preset_note(app, note, sizeof(note)));
+    assert(note[0] == '\0');
     player_app_apply_graphics_preset(app, PLAYER_PRESET_MEDIUM);
     player_app_set_resolution_scale(app, app->settings.resolution_scale);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
@@ -8003,7 +8033,7 @@ static void test_graphics_presets(void) {
     assert(player_app_graphics_preset(back) == PLAYER_PRESET_ULTRA);
     assert(back->settings.resolution_scale == 1);
     assert(strcmp(player_app_graphics_preset_label(back), "Ultra") == 0);
-    assert(player_app_graphics_preset_note(back, note, sizeof(note), &warns) && !warns &&
+    assert(player_app_graphics_preset_note(back, note, sizeof(note)) &&
            strstr(note, "FSR 1") != NULL);
 
     /* The rows a file holds are kept as they are beside its preset. */

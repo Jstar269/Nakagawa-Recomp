@@ -1025,16 +1025,14 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
        it goes with Custom and is back after a restart. */
     if (model.page == PLAYER_UI_SETTINGS_PAGE_MAIN &&
         player_app_graphics_preset_note(app, player->settings_preset_note,
-                                        sizeof(player->settings_preset_note),
-                                        &model.preset_notice_warns)) {
+                                        sizeof(player->settings_preset_note))) {
         model.preset_notice = player->settings_preset_note;
     }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     if (model.page == PLAYER_UI_SETTINGS_PAGE_MAIN) {
         /* The preset row and note the main page draws; printed on change. */
         char line[sizeof(player->preset_note_reported)];
-        snprintf(line, sizeof(line), "value=%s|warns=%d|note=%s", model.preset,
-                 model.preset_notice_warns ? 1 : 0,
+        snprintf(line, sizeof(line), "value=%s|note=%s", model.preset,
                  model.preset_notice != NULL ? model.preset_notice : "");
         if (strcmp(line, player->preset_note_reported) != 0) {
             snprintf(player->preset_note_reported, sizeof(player->preset_note_reported), "%s",

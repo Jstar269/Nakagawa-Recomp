@@ -2469,8 +2469,9 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    measurement on real titles: Low draws at the PSP's own 480x272, Medium and Handheld
    at 2x, High and Ultra at 4x (the GPU renderer's largest scale). Ultra also turns on the
    FSR 1 upscaler (the "Sharper enlarging" part, #2122) for Enhanced and Ace. Handheld
-   keeps a battery-friendly 2x and starts games fullscreen. No row touches frame pacing,
-   the play mode or an Enhanced part, and only Enhanced and Ace sessions use a row
+   keeps a battery-friendly 2x and starts games fullscreen. No row touches frame pacing or
+   the play mode; Ultra's upscaler overrides the Sharper enlarging part for the session, and
+   editing that part makes the preset Custom. Only Enhanced and Ace sessions use a row
    (player_session_apply_graphics_preset). docs/PLAYER_UI_DESIGN.md lists the same values. */
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
     [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1, false},
@@ -2501,10 +2502,8 @@ const char *player_app_graphics_preset_label(const PlayerApp *app) {
     return row ? row->value : "Custom";
 }
 
-bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap,
-                                     bool *warns) {
+bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap) {
     const PlayerGraphicsPresetRow *row = player_graphics_preset_row(player_app_graphics_preset(app));
-    if (warns) *warns = false;
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!row) return false;
@@ -3307,6 +3306,13 @@ void player_app_toggle_library_play_mode(PlayerApp *app) {
     maybe_persist_settings(app);
 }
 
+/* Sharper enlarging is the one Enhanced part a preset sets (Ultra), so editing it, in the
+   library or for one game, makes the preset Custom, which uses the part's own value. */
+static void graphics_preset_part_edited(PlayerApp *app, int part) {
+    const PlayerGraphicsPresetRow *row = player_graphics_preset_row(app->settings.graphics_preset);
+    if (part == PLAYER_PART_UPSCALE && row && row->upscaler) graphics_preset_row_edited(app);
+}
+
 void player_app_cycle_enhanced_part(PlayerApp *app, int part) {
     const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
     if (!app || !info) return;
@@ -3315,6 +3321,7 @@ void player_app_cycle_enhanced_part(PlayerApp *app, int part) {
     app->settings.enhanced.part[part] = info->values[next];
     player_dev_log_add(app, "settings", "Enhanced %s for the library: %s", info->key,
                        info->words[next]);
+    graphics_preset_part_edited(app, part);
     maybe_persist_settings(app);
 }
 
@@ -3376,6 +3383,7 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part) {
     player_dev_log_add(app, "settings", "Enhanced %s for %s: %s", info->key, entry.key,
                        entry.part[part] < 0 ? "library default"
                                             : enhanced_part_word(part, entry.part[part]));
+    graphics_preset_part_edited(app, part);
     maybe_persist_settings(app);
 }
 
