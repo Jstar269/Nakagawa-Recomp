@@ -184,6 +184,7 @@ static void xst_reset(void) {
         vkDestroyImage(s_dev, e->img, NULL);
         vkFreeMemory(s_dev, e->mem, NULL);
         tex_xs_free(e);
+        tex_gl_free(e);
     }
     nk_tex_scale_set_hold(0);
     nk_tex_scale_wait_idle();
