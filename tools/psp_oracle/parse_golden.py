@@ -1992,6 +1992,36 @@ _register_campaign_probe(
     tuple(row for row, _ in HLE_UTILITY_DIALOGS_ROWS), dict(HLE_UTILITY_DIALOGS_ROWS),
 )
 
+# hle-io-seek (162, probe_hle_measure.c): #1380's seeks on a flash0: file (64- and 32-bit), the
+# sceIoIoctl file commands on a probe-owned ms0: file, two writes on descriptors opened without
+# PSP_O_WRONLY, then the same ioctl seek on disc0:/UMD_DATA.BIN (last: the only calls that could
+# wait on a drive). Every row is emitted on every run with a fixed word count; SKIP rows keep it.
+HLE_IO_SEEK_ROWS = (
+    ("io-seek-flash-open", 3),
+    ("io-seek-flash-s64-set-neg1", 5), ("io-seek-flash-s64-set-past", 5),
+    ("io-seek-flash-s64-end-plus16", 5), ("io-seek-flash-s64-end-minus-size1", 5),
+    ("io-seek-flash-s64-set-2p32", 5), ("io-seek-flash-s64-set-ffffffff", 5),
+    ("io-seek-flash-s32-set-neg1", 5), ("io-seek-flash-s32-set-past", 5),
+    ("io-seek-flash-s32-end-plus16", 5), ("io-seek-flash-s32-end-minus-size1", 5),
+    ("io-seek-flash-close", 1),
+    ("io-seek-ms-setup", 4),
+    ("io-seek-ms-ioctl-set-neg1", 3), ("io-seek-ms-ioctl-set-8", 3),
+    ("io-seek-ms-ioctl-set-16", 3), ("io-seek-ms-ioctl-set-32", 3),
+    ("io-seek-ms-ioctl-getpos", 5), ("io-seek-ms-ioctl-sector", 5),
+    ("io-seek-ms-ioctl-startsector", 5), ("io-seek-ms-ioctl-size", 5),
+    ("io-seek-ms-ioctl-read4", 5),
+    ("io-seek-ms-write-rdonly", 4), ("io-seek-ms-write-rdonly-creat", 4),
+    ("io-seek-ms-cleanup", 4),
+    ("io-seek-umd-open", 2),
+    ("io-seek-umd-ioctl-neg1", 6), ("io-seek-umd-ioctl-size", 6),
+    ("io-seek-umd-ioctl-size1", 6),
+    ("io-seek-umd-close", 1),
+)
+_register_campaign_probe(
+    "hle-io-seek", "PSP-HLE-IO-SEEK-001",
+    tuple(row for row, _ in HLE_IO_SEEK_ROWS), dict(HLE_IO_SEEK_ROWS),
+)
+
 # io-umd-eof (137, probe_kernel_semantics.c): #1380 on the UMD, read-only: the drive state
 # before and after; for two disc0: files (a = UMD_DATA.BIN, b = PSP_GAME/PARAM.SFO) the open
 # and size, seeks past the end, reads past and across the end, negative seeks and seeks at and

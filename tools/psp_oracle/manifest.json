@@ -6512,6 +6512,22 @@
       "reset": "one PRX launch; PSPLink soft reset before the next launch"
     },
     {
+      "id": "PSP-HLE-IO-SEEK-001",
+      "status": "implemented",
+      "hardware_evidence": "NOT_RUN",
+      "evidence_note": "Built as the fixed-shape case 162 flash0:/ms0:/disc0: seek and sceIoIoctl file-command stream. No hardware run is cited.",
+      "group": "system",
+      "source": "fixtures/psp_oracle/probe_hle_measure.c",
+      "prx": "hle_io_seek.prx",
+      "apis": ["sceIoLseek", "sceIoLseek32", "sceIoIoctl", "sceIoWrite", "sceIoOpen"],
+      "diagnostic_case_ids": ["hle-io-seek"],
+      "case_ids": ["io-seek-flash-*", "io-seek-ms-*", "io-seek-umd-*"],
+      "invariant": "Each seek, ioctl and read-only-descriptor write has a fixed-shape record of return values and 64-bit positions as (low, high) words; no file byte of flash0: or disc0: is recorded and the only writes are to a probe-owned ms0: directory the probe removes.",
+      "issues": [1380],
+      "risk": "low; read-only on flash0: and disc0:, probe-owned ms0: directory only; the disc0: ioctl cells run last",
+      "reset": "one PRX launch; PSPLink soft reset before the next launch"
+    },
+    {
       "id": "PSP-MPEG-YCBCR-001",
       "status": "implemented",
       "hardware_evidence": "NOT_RUN",

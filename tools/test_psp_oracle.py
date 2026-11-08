@@ -2488,7 +2488,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 139)
+        self.assertEqual(len(routes), 140)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -5348,6 +5348,8 @@ class HleMeasureProbeTests(unittest.TestCase):
          "HLE_CASE_STD_HANDLES", "PSP-HLE-STDIO-001"),
         ("hle-utility-dialogs", 161, "hle_utility_dialogs", "hle_utility_imports.S",
          "HLE_CASE_UTILITY_DIALOGS", "PSP-HLE-UTILITY-DIALOG-001"),
+        ("hle-io-seek", 162, "hle_io_seek", None,
+         "HLE_CASE_IO_SEEK", "PSP-HLE-IO-SEEK-001"),
     )
     ALL_FAMILIES = FAMILIES + SINGLE_LAUNCH_FAMILIES + TABLE_FAMILIES + LATER_FAMILIES
     # Every family block: file -> (library, version word, {function: NID}). The
@@ -12830,6 +12832,7 @@ class Record20261015Tests(unittest.TestCase):
             ("sas-mix", "PSP-SAS-003", "NOT_RUN"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
+            ("hle-io-seek", "PSP-HLE-IO-SEEK-001", "NOT_RUN"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}

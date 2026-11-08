@@ -218,6 +218,9 @@ CASE_ID = 159
 # 161: #1386's utility dialog status timing and wrong-state answers, in game context.
 else ifeq ($(CASE),hle-utility-dialogs)
 CASE_ID = 161
+# 162: #1380's flash0:/ms0:/disc0: seek cells and sceIoIoctl file commands (probe_hle_measure.c).
+else ifeq ($(CASE),hle-io-seek)
+CASE_ID = 162
 # 106-108: the HLE issue cells (probe_hle_issues.c). 106 is the #356 model-getter and
 # #326 vrnd carry / vscmp batch; 107 the #325 interrupt and timer delivery cells; 108 the
 # #326 VFPU form words (vh2f, vuc2i, vsocp, vwbn, vrndf1/2).
@@ -559,6 +562,9 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-utility-dialogs)
 TARGET = $(BUILD_DIR)/hle_utility_dialogs
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-io-seek)
+TARGET = $(BUILD_DIR)/hle_io_seek
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 # HLE issue cells: their own source, which installs and removes interrupt and timer
 # handlers (107) and reaches a kernel getter through the kernel bridge (106), so they
 # stay out of probe_hle_measure.c. Same ThreadManForUser block and module lifecycle.

@@ -644,6 +644,7 @@ publishes their words.
 | `sas-mix` | `PSP-SAS-003` | Built case 155 from `probe.c`. #2135/#2054 synthetic volume, WithMix and pitch cells. **NOT_RUN**; no hardware result is claimed. |
 | `vcodec-words` | `PSP-VCODEC-001` | Built case 160 from `probe.c`. #286 Media Engine boundary words over synthetic AVC access units. **NOT_RUN**; no hardware result is claimed. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | Built case 161 from `probe_hle_measure.c`. #1386 dialog timing and wrong-state cells. **NOT_RUN**; no hardware result is claimed. |
+| `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | Built case 162 from `probe_hle_measure.c`. #1380 flash0: seeks, sceIoIoctl file commands on ms0: and disc0:, and writes on read-only descriptors. **NOT_RUN**; no hardware result is claimed. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | Modes 2 and 3 are built and now use fresh stream setup per mode. **NOT_RUN** pending an owner-present hardware rerun; no new result is claimed. |
 
 ### #1375 entry and NULL-code probes
