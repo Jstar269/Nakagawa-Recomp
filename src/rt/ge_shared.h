@@ -419,6 +419,17 @@ typedef struct GeTnlPrim {
 
 /* Implemented in ge.c. */
 void      ge_set_gpu_hooks(const GeGpuHooks *h);
+const GeGpuHooks *ge_get_gpu_hooks(void);
+
+/* Draw observer, for replay tools only (ge_replay --first-bad-draw, #2141). ge.c calls it
+ * before each draw command of a list (PRIM, BEZIER, SPLINE, VAP and TRANSFERSTART), with
+ * `index` counting the draws that ran since ge_set_draw_observer, the command word, its
+ * address and the address the running list started at. A nonzero return stops the run before
+ * that command: ge_run_list returns the command's address, and nothing of it has run. NULL,
+ * the default, observes nothing. */
+typedef int (*GeDrawObserver)(void *ctx, unsigned long index, uint32_t op,
+                              uint32_t cmd_addr, uint32_t list_addr);
+void      ge_set_draw_observer(GeDrawObserver fn, void *ctx);
 
 /* ---- widescreen Fill (#1881), the renderer layer ------------------------------------------
  *
@@ -449,16 +460,23 @@ int       ge_wide_wing(void);
 /* The display was given framebuffer `fb_addr`: its canvas exists from now on. The last two
  * distinct addresses keep canvases (double buffering). No effect while Fill is off. */
 void      ge_wide_note_display(uint32_t fb_addr);
-/* Whether a wing primitive was drawn into fb_addr's canvas since ge_wide_shown(fb_addr). A
- * primitive a backend dropped does not count. The first wing draw after ge_wide_shown clears
- * the canvas, so a drawn canvas holds this frame's wings only; the presenter shows black
- * wings for a frame whose wings were not drawn, never stale ones. */
+/* Whether fb_addr's canvas holds wings of the frame in fb_addr: a wing primitive was drawn
+ * there since the canvas was last cleared. A primitive a backend dropped does not count.
+ * ge_wide_shown(fb_addr) marks the frame shown; the next triangle or sprite drawn into fb_addr
+ * begins a new frame and clears the canvas first. So a frame presented twice keeps its wings,
+ * and a new frame whose wings were not drawn shows black wings, never the last frame's. */
 int       ge_wide_drawn(uint32_t fb_addr);
 void      ge_wide_shown(uint32_t fb_addr);
 /* Changes whenever fb_addr's canvas is cleared (a new display buffer, a new wing width); never
  * 0 for an existing canvas, 0 for none. A backend clears its own canvas when it changes, so
  * both renderers start each canvas from the same black, depth-0 state. */
 uint32_t  ge_wide_epoch(uint32_t fb_addr);
+/* The software renderer's Fill picture for fb_addr into out, (480 + 2D) x 272 words: the left
+ * wing, `frame` (480 x 272 words, the frame as the presenter shows it), then the right wing, each
+ * canvas word through convert(word, GE pixel format). Wings the frame did not draw
+ * (ge_wide_drawn) are 0, black. Returns the picture's width, or 0 with Fill off. */
+int       ge_wide_picture(uint32_t fb_addr, const uint32_t *frame, uint32_t *out,
+                          uint32_t (*convert)(uint32_t word, int fmt));
 /* The software canvas of fb_addr: GE_WIDE_CANVAS_W raw framebuffer words per row, in format
  * *fmt (GE pixel format 0..3); NULL when none was drawn by the software rasterizer. */
 const uint32_t *ge_wide_canvas(uint32_t fb_addr, int *fmt);
@@ -532,6 +550,12 @@ int       ge_vram_cli_decode(uint32_t addr, uint32_t width, uint32_t height, uin
  * while a GE capture is active, when the texture's bytes are not all readable, when it is
  * larger than GE_VRAM_VIEW_MAX_*, or when `capacity` words cannot hold it. */
 int       ge_vram_decode_bound_texture(uint32_t *out, size_t capacity);
+/* The CLUT loads seen so far: the size of the last one and the largest, in bytes (0 before the
+ * first). PPSSPP's palette identity for texture replacement is built from them. */
+void      ge_clut_load_extent(uint32_t *last_bytes, uint32_t *max_bytes);
+/* Record a CLUT load of `bytes` (what GE_LOADCLUT does first; selftests that fill the palette
+ * directly call it to say how much they loaded). */
+void      ge_clut_note_load(uint32_t bytes);
 void      ge_replay_restore(const GeState *state, const uint16_t *zbuf);
 void      ge_cpu_profile_reset(void);
 void      ge_cpu_profile_get(GeCpuProfileStats *out);

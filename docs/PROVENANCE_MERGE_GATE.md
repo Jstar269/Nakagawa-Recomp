@@ -484,7 +484,7 @@ access token scoped to the private authority repository only, with
 gate fails closed rather than skipping. The token is only ever held by a job
 that does not execute a single byte of candidate code.
 
-**3. Required status check — DO NOT ADD IT YET.**
+**3. Required status check — do not add it.**
 
 The gate ships in **observation mode**. It runs on every pull request, fails
 closed, and publishes its findings, but it is deliberately **not** a required
@@ -515,7 +515,7 @@ chosen for #364. It does not make this context required. It requires a
 workflow, event or app (`FOREIGN_PRODUCER`). Since 2026-10-29 the ruleset requires
 `Trusted CI verdict` and `CodeQL` only.
 
-When the day comes, the ruleset already carries a `pull_request` rule,
+If this context is ever made required, the ruleset already carries a `pull_request` rule,
 `required_linear_history`, and an empty `bypass_actors` list; its
 `strict_required_status_checks_policy` is already `true` (live value read from
 the ruleset, 2026-10-29). Whatever context

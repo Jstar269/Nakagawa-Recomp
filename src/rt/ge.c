@@ -178,6 +178,11 @@ enum {
 
 /* GeState now lives in ge_shared.h (shared with the optional GPU backend). */
 static GeState ge;
+/* CLUT loads seen, for ge_clut_load_extent. Process-lifetime counters, like PPSSPP's clutTotalBytes_ and
+ * clutMaxBytes_ (never reset), kept outside GeState so the capture format and its size check stay as
+ * they are: a capture replay or snapshot restore does not reset them, and a run that has seen no
+ * GE_LOADCLUT reads (0, 0), for which nk_texrepl_clut_identity hashes the entries the format can index. */
+static uint32_t s_clut_last_bytes, s_clut_max_bytes;
 /* Bumped whenever GE state may change (every list command, init, replay restore); state
  * derived from registers and cached between commands is keyed on it (light_consts). */
 static uint32_t s_ge_state_serial;
@@ -753,7 +758,7 @@ static const GeGpuHooks *s_gpu = NULL;
 typedef struct {
     uint32_t fb;          /* display framebuffer, in ge_fb_addr's form; 0 = free */
     int drawn;            /* a wing primitive was drawn into this canvas since it was cleared */
-    int stale;            /* shown since its last clear: the next wing draw clears it first */
+    int stale;            /* shown since its last clear: the next draw into its framebuffer clears it */
     uint32_t epoch;       /* changes whenever the canvas is cleared (ge_wide_epoch) */
     int fmt;              /* framebuffer format of the last software wing draw */
     uint32_t *color;      /* software canvas: raw framebuffer words, GE_WIDE_CANVAS_W per row */
@@ -777,7 +782,32 @@ void sr_vram_mark_renderer_pending(void) {
 void ge_set_gpu_hooks(const GeGpuHooks *h) {
     s_gpu = h;
 }
+const GeGpuHooks *ge_get_gpu_hooks(void) { return s_gpu; }
+
+/* Draw observer (ge_shared.h, #2141): ge_replay --first-bad-draw replays a prefix of a
+ * captured frame's draws through each renderer. NULL, the default, costs one branch per list
+ * command and changes nothing. */
+static GeDrawObserver s_draw_observer;
+static void *s_draw_observer_ctx;
+static unsigned long s_draw_observer_index;
+
+void ge_set_draw_observer(GeDrawObserver fn, void *ctx) {
+    s_draw_observer = fn;
+    s_draw_observer_ctx = ctx;
+    s_draw_observer_index = 0;
+}
 GeState *ge_state_ptr(void) { return &ge; }
+
+void ge_clut_note_load(uint32_t bytes) {
+    if (!bytes) return;   /* as PPSSPP's LoadClut: a zero-length load changes nothing */
+    s_clut_last_bytes = bytes;
+    if (bytes > s_clut_max_bytes) s_clut_max_bytes = bytes;
+}
+
+void ge_clut_load_extent(uint32_t *last_bytes, uint32_t *max_bytes) {
+    if (last_bytes) *last_bytes = s_clut_last_bytes;
+    if (max_bytes) *max_bytes = s_clut_max_bytes;
+}
 uint32_t ge_state_serial(void) { return s_ge_state_serial; }
 void ge_state_note_external_write(void) { s_ge_state_serial++; }
 void sr_gpu_vram_dirty(uint32_t addr, uint32_t bytes) {
@@ -3596,11 +3626,17 @@ static void raster_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
 #undef AT_PIX
 }
 
+static void wide_fresh(void);
 static void wide_tri(const Vtx *A, const Vtx *B, const Vtx *C, int persp);
 
 static void raster_tri_and_wings(const Vtx *A, const Vtx *B, const Vtx *C, int persp) {
+    if (__builtin_expect(s_wide_d != 0, 0)) {
+        wide_fresh();
+        raster_tri(A, B, C, persp);
+        wide_tri(A, B, C, persp);
+        return;
+    }
     raster_tri(A, B, C, persp);
-    if (__builtin_expect(s_wide_d != 0, 0)) wide_tri(A, B, C, persp);
 }
 
 /* Line rasterizer (DDA), used for prim types 1/2 in both modes. */
@@ -4746,8 +4782,13 @@ static void fill_sprite(const Vtx *p0, const Vtx *p1, int persp) {
 static void wide_sprite(const Vtx *p0, const Vtx *p1, int persp);
 
 static void fill_sprite_and_wings(const Vtx *p0, const Vtx *p1, int persp) {
+    if (__builtin_expect(s_wide_d != 0, 0)) {
+        wide_fresh();
+        fill_sprite(p0, p1, persp);
+        wide_sprite(p0, p1, persp);
+        return;
+    }
     fill_sprite(p0, p1, persp);
-    if (__builtin_expect(s_wide_d != 0, 0)) wide_sprite(p0, p1, persp);
 }
 
 /* ---- widescreen Fill: which primitives reach a wing canvas ------------------------------- */
@@ -4780,6 +4821,16 @@ static void wide_clear_slot(GeWideSlot *w) {
     if (w->depth) memset(w->depth, 0, (size_t)GE_WIDE_CANVAS_W * 272u * sizeof *w->depth);
 }
 
+/* A triangle or sprite is about to be drawn into the current framebuffer. If that buffer was
+ * shown since its canvas was last cleared, a new frame has begun there: clear the canvas, so
+ * its wings never hold the shown frame's pixels. A frame presented again with no draw in
+ * between keeps its wings. Any scissor counts: a frame whose draws all reach no wing still
+ * starts here, and its wings are then black. */
+static void wide_fresh(void) {
+    GeWideSlot *w = wide_slot_for(ge_fb_addr());
+    if (w && w->stale) wide_clear_slot(w);
+}
+
 static void wide_free_slot(GeWideSlot *w) {
     free(w->color);
     free(w->depth);
@@ -4803,12 +4854,11 @@ static int wide_sw_canvas(GeWideSlot *w) {
 
 /* One primitive into canvas columns [x0, x1] of w, its vertices already moved there. A GPU
  * backend draws its own canvases; without one the software rasterizer draws this one. The
- * first wing draw after a canvas was shown clears it, so a frame's wings never hold an
- * earlier frame's pixels, and `drawn` is set only by a primitive that was really drawn: a
- * backend's wing hook returns 0 for one it dropped. A software wing pass is host-only, so
- * the frame statistics and the SR_PIXWHO probe keep counting the guest's draws alone. */
+ * canvas was already cleared if this frame is new (wide_fresh), and `drawn` is set only by a
+ * primitive that was really drawn: a backend's wing hook returns 0 for one it dropped. A
+ * software wing pass is host-only, so the frame statistics and the SR_PIXWHO probe keep
+ * counting the guest's draws alone. */
 static void wide_pass(GeWideSlot *w, int x0, int x1, const Vtx *v, int sprite, int persp) {
-    if (w->stale) wide_clear_slot(w);
     if (s_gpu) {
         int drew = 0;
         if (sprite) { if (s_gpu->wing_sprite) drew = s_gpu->wing_sprite(w->fb, x0, x1, &v[0], &v[1], persp); }
@@ -4945,7 +4995,27 @@ int ge_wide_drawn(uint32_t fb_addr) {
 
 void ge_wide_shown(uint32_t fb_addr) {
     GeWideSlot *w = s_wide_d ? wide_slot_for(ge_wide_norm(fb_addr)) : NULL;
-    if (w) { w->drawn = 0; w->stale = 1; }
+    if (w) w->stale = 1;
+}
+
+int ge_wide_picture(uint32_t fb_addr, const uint32_t *frame, uint32_t *out,
+                    uint32_t (*convert)(uint32_t word, int fmt)) {
+    const int d = s_wide_d;
+    if (!d || !frame || !out || !convert) return 0;
+    const int cols = 480 + 2 * d;
+    const GeWideSlot *w = wide_slot_for(ge_wide_norm(fb_addr));
+    const uint32_t *cv = w && w->drawn ? w->color : NULL;
+    const int fmt = w ? w->fmt : 3;
+    for (int y = 0; y < 272; y++) {
+        uint32_t *row = out + (size_t)y * (size_t)cols;
+        const uint32_t *crow = cv ? cv + (size_t)y * GE_WIDE_CANVAS_W : NULL;
+        for (int x = 0; x < d; x++) {
+            row[x] = crow ? convert(crow[x], fmt) : 0u;
+            row[d + 480 + x] = crow ? convert(crow[d + x], fmt) : 0u;
+        }
+        memcpy(row + d, frame + (size_t)y * 480u, 480u * sizeof *row);
+    }
+    return cols;
 }
 
 uint32_t ge_wide_epoch(uint32_t fb_addr) {
@@ -6872,6 +6942,7 @@ static int ge_cmd_texture(uint32_t cmd, uint32_t data) {
              * the hardware (PPSSPP TextureCacheCommon::LoadClut). */
             uint32_t bytes = (data & 0x3F) * 32;
             if (bytes > sizeof(ge.clutram)) bytes = sizeof(ge.clutram);
+            ge_clut_note_load(bytes);
             if (!sr_guest_span_readable(ge.clut_addr, bytes)) {
                 fprintf(stderr, "GE_LOADCLUT: invalid source span addr=0x%08" PRIx32 " bytes=%" PRIu32 "\n",
                         ge.clut_addr, bytes);
@@ -7111,6 +7182,18 @@ static void ge_list_begin(uint32_t list_addr, int resume) {
     g_ge_list_commands=0; s_ge_run_clk=0.0; s_ge_run_tail_words=0; s_ge_prim_vtx_share=0.0;
 }
 
+/* The commands ge_set_draw_observer counts as draws: each can write the framebuffer or depth. */
+static int ge_draw_observed(uint32_t op, uint32_t cmd_addr, uint32_t list_addr) {
+    switch (op >> 24) {
+        case GE_PRIM: case GE_BEZIER: case GE_SPLINE: case GE_VAP: case GE_TRANSFERSTART: break;
+        default: return 0;
+    }
+    if (s_draw_observer(s_draw_observer_ctx, s_draw_observer_index, op, cmd_addr, list_addr))
+        return 1;
+    s_draw_observer_index++;
+    return 0;
+}
+
 static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
     if (!s_ge_inited) ge_state_init();
     if (!resume) {
@@ -7156,7 +7239,10 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
             s_ge_run_stopped = 1;
             return addr;
         }
-        uint32_t op=MEM_R32(addr); addr+=4;
+        uint32_t op=MEM_R32(addr);
+        /* A draw observer may stop the run before a draw command: nothing of it has run. */
+        if (s_draw_observer && ge_draw_observed(op, addr, list_addr)) return addr;
+        addr+=4;
         uint32_t cmd=op>>24, data=op&0xFFFFFF;
         s_ge_state_serial++;   /* any command may change state that light_consts() caches */
         s_ge_command[cmd] = data;
