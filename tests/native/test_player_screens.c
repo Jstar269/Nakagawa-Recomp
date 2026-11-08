@@ -256,7 +256,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_LIBRARY, FLOW_PAGE_LIBRARY_FIND, FLOW_PAGE_TITLE, FLOW_PAGE_ABOUT,
                FLOW_PAGE_REMOVE,
                FLOW_PAGE_STOP, FLOW_PAGE_TITLE_ACE, FLOW_PAGE_TITLE_ENHANCED,
-               FLOW_PAGE_TITLE_AUTHENTIC,
+               FLOW_PAGE_TITLE_AUTHENTIC, FLOW_PAGE_TITLE_RENDER,
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_CONSENT_FULL, FLOW_COUNT } FlowCase;
 
@@ -836,15 +836,17 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         title.logical_height = g_flow_height;
         return player_ui_screen_title(ui, &title);
     }
-    if (which == FLOW_PAGE_TITLE_ENHANCED || which == FLOW_PAGE_TITLE_AUTHENTIC) {
+    if (which == FLOW_PAGE_TITLE_ENHANCED || which == FLOW_PAGE_TITLE_AUTHENTIC ||
+        which == FLOW_PAGE_TITLE_RENDER) {
         /* #2245: a game's page as the player fills it for the user's own disc on Enhanced (or
            Authentic): every Enhanced part on, the longest last-session line the runtime's
            report gives, the disc check, the compatibility notes with the developer view, and
            Rebuild beside PLAY. On main the page did not scroll at the design text size, so
-           this page pushed the prompt bar off the window. */
+           this page pushed the prompt bar off the window. The render case adds #2151's notice
+           with the longer of its two sentences (player_render_notice_text). */
         static PlayerUiTitle fixture;
         PlayerUiTitleModel title;
-        bool enhanced = which == FLOW_PAGE_TITLE_ENHANCED;
+        bool enhanced = which != FLOW_PAGE_TITLE_AUTHENTIC;
         fixture = k_titles[6];
         fixture.library_status_detail = "Built by an older Nakagawa. It still plays; rebuild "
                                         "it to use this version's fixes.";
@@ -874,6 +876,13 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         title.title_index = 6u;
         title.logical_width = g_flow_width;
         title.logical_height = g_flow_height;
+        if (which == FLOW_PAGE_TITLE_RENDER) {
+            title.render_notice_heading = "Drawn in software";
+            title.render_notice_text =
+                "Vulkan did not start on this PC, so this game is drawn in software and shown "
+                "in a basic Windows window. The Internal resolution setting has no effect, and "
+                "the game may run slower. Updating the graphics driver may help.";
+        }
         return player_ui_screen_title(ui, &title);
     }
     if (which == FLOW_PAGE_ABOUT) {
@@ -3025,6 +3034,26 @@ static void test_settings_pages(void) {
     CHECK(activate_flow_button(PLAYER_UI_ID_TITLE_PLAY_OPTIONS, FLOW_PAGE_TITLE_ACE).kind ==
               PLAYER_UI_ACTION_OPEN_PLAY_OPTIONS,
           "Enhanced options opens the game's own Enhanced page");
+    /* #2151: the render notice names the slower path on the game's page, with Hide, and
+       leaves the first focus on PLAY. */
+    CHECK(flow_case_fits(FLOW_PAGE_TITLE_RENDER, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "Vulkan did not start on this PC, so this game is drawn in "
+                           "software") != NULL &&
+              strstr(dump, "\"DRAWN IN SOFTWARE\"") != NULL && strstr(dump, "\"HIDE\"") != NULL,
+          "the render notice shows its heading, its sentence and Hide on the game's page");
+    CHECK(dump_flow_case(FLOW_PAGE_TITLE_ENHANCED, dump, sizeof(dump)) &&
+              strstr(dump, "DRAWN IN SOFTWARE") == NULL && strstr(dump, "\"HIDE\"") == NULL,
+          "without a fallback the game's page has no render notice");
+    CHECK(activate_flow_button(PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE, FLOW_PAGE_TITLE_RENDER)
+                  .kind == PLAYER_UI_ACTION_HIDE_RENDER_NOTICE,
+          "the render notice's Hide asks to hide it");
+    {
+        NkUi *ui = NULL;
+        (void)flow_case_layout(FLOW_PAGE_TITLE_RENDER, 1280, 720, &ui);
+        CHECK(ui != NULL && nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY,
+              "the render notice is never the first focus: PLAY is");
+        if (ui != NULL) nk_ui_destroy(ui);
+    }
     CHECK(dump_flow_case(FLOW_SETTINGS_NOTICES, dump, sizeof(dump)) &&
               strstr(dump, "synthetic-compiler 14.2") != NULL &&
               strstr(dump, "GPL-3.0-or-later; see LICENSE") != NULL,
