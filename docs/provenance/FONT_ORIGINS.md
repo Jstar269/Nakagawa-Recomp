@@ -395,8 +395,19 @@ italic), with the PGF style `Regular`, `Italic`, `Bold` or `Bold Italic`. The
 larger size is 20 ppem (nominal 648, 10.125 points at 128 dpi) and the smaller
 13 ppem (nominal 448), each with synthetic emboldening. Each index has its own
 `--tracking`, and the sans-serif faces `--digit-advance` (tabular figures at
-the console's digit width). Every index's sentence and menu line then comes
-within 3 % of the console's.
+the console's digit width) and `--embolden-y` (horizontal strokes as thick as
+the console's: its sans-serif letters carry 9 to 25 % more ink than the source
+faces draw without it). Every index's sentence and menu line then comes
+within 3 % of the console's, and each sans-serif face's mean ink per letter
+within 4 %.
+
+The ink targets (`LETTER_INK` in `tools/test_ttf2pgf.py`) are one number per sans-serif face, measured on
+a PSP-3000's own font files that the maintainer read locally; no font bytes or glyph data are recorded. To
+reproduce a number, read the console's `ltn<N>.pgf` with the project's PGF reader (`tools/nk_core/fonts.py`),
+decode each glyph's 4-bit coverage samples for the 52 letters `A-Z` and `a-z`, divide each sample by 15, sum the
+samples of each glyph, and average over the 52 glyphs. The test applies the same procedure to the generated
+stand-in and requires a result within 4 % of the recorded number. The measured values are 68.5, 68.4, 104.5 and
+104.4 (indices 0, 2, 4 and 6) and 30.8, 30.8, 46.9 and 46.9 (indices 8, 10, 12 and 14).
 
 **Japanese: Noto Sans JP, with M PLUS 1p for one point.** The Japanese input is
 the project UI font `assets/fonts/ui/noto-sans-jp/NotoSansJP-Regular.ttf`

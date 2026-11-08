@@ -191,7 +191,7 @@ the one that was translated (`guest-module-identity-mismatch`), a module codegen
 could not translate, for example one with GPREL16 relocations
 (`guest-module-translation-unsupported`), a second live instance of one module
 (`guest-module-second-instance`), and a load option asking for another partition
-or for High placement. These are in the works (#704).
+or for High placement. These are not supported.
 
 ## Step 5: Build
 

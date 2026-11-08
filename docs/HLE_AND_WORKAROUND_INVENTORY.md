@@ -46,13 +46,13 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **690** (dedicated **588**, fake_success **4**, controlled_unsupported **98**).
-Semantic handler census: **563** handlers across **27** API families, covering **595** handler-associated NID registrations.
+Registered NIDs: **707** (dedicated **609**, fake_success **4**, controlled_unsupported **94**).
+Semantic handler census: **584** handlers across **30** API families, covering **616** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
 | `complete` | 14 | 23 |
-| `partial` | 324 | 335 |
+| `partial` | 345 | 356 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
 | `unreviewed` | 221 | 229 |
@@ -63,6 +63,7 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 | `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
 | `sceAtrac` | 0 | 0 | 0 | 0 | 32 | 32 | 33 |
 | `sceAudio` | 0 | 11 | 0 | 0 | 5 | 16 | 17 |
+| `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 12 | 0 | 0 | 0 | 12 | 12 |
 | `sceDisplay` | 1 | 14 | 0 | 0 | 1 | 16 | 16 |
 | `sceDmac` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
@@ -74,6 +75,7 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 | `sceKernel` | 3 | 142 | 0 | 0 | 44 | 189 | 209 |
 | `sceMp3` | 0 | 0 | 0 | 0 | 20 | 20 | 20 |
 | `sceMpeg` | 0 | 12 | 0 | 2 | 26 | 40 | 40 |
+| `sceMpegbase` | 0 | 6 | 0 | 0 | 0 | 6 | 6 |
 | `sceNet` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceNp` | 0 | 2 | 0 | 0 | 0 | 2 | 2 |
 | `sceOpen` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
@@ -85,8 +87,9 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 | `sceUmd` | 0 | 11 | 1 | 0 | 2 | 14 | 14 |
 | `sceUtility` | 0 | 10 | 0 | 0 | 27 | 37 | 37 |
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
+| `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **324** | **1** | **3** | **221** | **563** | **595** |
+| **Total** | **14** | **345** | **1** | **3** | **221** | **584** | **616** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -206,6 +209,21 @@ Semantic handler census: **563** handlers across **27** API families, covering *
   - Limitation: the returns for an unreserved slot, a held slot (0x80268002, including Output2 holding it), sample counts 0 (0x80000104), 65 and 4096 (accepted), 48000 Hz (accepted) and channel counts 1 (0x80000104) and 4 (0x80000003) are measured (PSP-HLE-AUDIO-SRC-001); the upper sample-count bound reuses the Output2 range 17..4111, channel counts other than 1, 2 and 4 take the code measured for 4, and rates other than 44100 and 48000 are refused with that same code and a message, all unmeasured (#339)
 - **`h_AudioSRCOutputBlocking`** (`sceAudio`): `sceAudioSRCOutputBlocking` (0xe0727056)
   - Limitation: returns 0x80260008 with nothing reserved and the reserved sample count after a reserve (0x400), both measured (PSP-HLE-AUDIO-SRC-001); the volume bound 0xFFFFF (shared with Output2, from PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp) and the NULL or unreadable buffer result, which follows the regular output, are both unmeasured; the host mixer runs at 44100 Hz, so a 48000 Hz block passes through a band-limited converter and keeps its source-rate pacing (#339)
+- **`h_AudiocodecCheckNeedMem`** (`sceAudiocodec`): `sceAudiocodecCheckNeedMem` (0x9d3f790c)
+  - Limitation: codec 0x1000 (ATRAC3plus) only; the wrapper checks follow uofw, except that an in-range codec other than 0x1000 (0x1001-0x1005) is refused with 0x80000004, a project-chosen synthetic code (uofw goes on; the W-LLE-1 read returned 0 for 0x1001 and 0x1002, synthetic); every call writes +0 = 0x05100601 as uofw does; the words are synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet, for the three halfwords at +40 it was given: 0x5C28 (+16 = 0x7BC0, +52 = 44100, +60 = 2, +64 = 0x2E8), 0x5C5C (+16 = 0x1F6C0, +52 = 48000, +60 = 7, +64 = 0x2E8), and 0 (0x807F00FD; +8 = 0x20F, +52 = 0x7D00, +64 = 8); any other halfword is refused
+  - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
+- **`h_AudiocodecDecode`** (`sceAudiocodec`): `sceAudiocodecDecode` (0x70a703f8)
+  - Limitation: codec 0x1000 only, PSMF frames with the 0x0FD0 header only; mono or stereo input into one stereo 16-bit block of 2048 samples (JPCSP's sceAudiocodecInit output; a mono frame is duplicated); uofw's +56/+72 size rule is written at +36 and does not choose the layout; synchronous decode; the +28 and +36 words and the refusal code are synthetic pending W-LLE-1
+  - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
+- **`h_AudiocodecGetEDRAM`** (`sceAudiocodec`): `sceAudiocodecGetEDRAM` (0x3a20a200)
+  - Limitation: codec 0x1000 only; allocates ((+16) + 0x3F) | 0x3F bytes of the host ME RAM model, owned by the work area, as uofw sizes it; a work area whose +104 still names its allocation is refused with 0x807F0003 (uofw allocates again and orphans the first; the refusal is synthetic pending W-LLE-1); one whose +104 no longer names it (recycled without a release) gets a new allocation and the stale one is freed; the addresses are not PSP-measured
+  - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
+- **`h_AudiocodecInit`** (`sceAudiocodec`): `sceAudiocodecInit` (0x5b37eb1d)
+  - Limitation: codec 0x1000 only; as in uofw, any work area may name the EDRAM at +12 (a disc mpeg.prx initialises a work area other than the one it allocated with); refuses a +12 that is not an EDRAM sceAudiocodecGetEDRAM published, or a +16 larger than it (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)
+  - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
+- **`h_AudiocodecReleaseEDRAM`** (`sceAudiocodec`): `sceAudiocodecReleaseEDRAM` (0x29681260)
+  - Limitation: frees only the host ME RAM allocation the work area owns: a +104 naming any other allocation (another work area's, a video context's) is refused with 0x807F0004 and nothing is freed; clears +104 and +12 and drops the host decoder as JPCSP does
+  - Evidence: tests/native/videocodec_selftest.c:test_audiocodec
 - **`h_CtrlGetIdleCancelThreshold`** (`sceCtrl`): `sceCtrlGetIdleCancelThreshold` (0x687660fa)
   - Limitation: the recorded read-backs are reproduced (#341)
   - Evidence: PSPAutotests tests/ctrl/idle/idle.expected (reads back -1, -1 at start and each stored pair; NULL pointers are skipped; an unusable non-NULL pointer 0x80000023 before any write)
@@ -1081,6 +1099,24 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 - **`h_MpegQueryUserdataEsSize`** (`sceMpeg`): `sceMpegQueryUserdataEsSize` (0xc45c99cc)
   - Limitation: writes the 0xA0000 ES and output sizes PPSSPP c9e2afb6 uses and refuses a bad handle or pointer with -1; neither is measured on a PSP (#302)
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_userdata_imports
+- **`h_MpegBaseCscAvc`** (`sceMpegbase`): `sceMpegBaseCscAvc` (0x91929a21)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; reads the eight bands through JPCSP's ME memory view (ME RAM, else guest memory) in JPCSP's band layout and converts the struct's whole picture, up to 720 x 576; band addresses are converted as given, so a zeroed struct converts ME RAM from offset 0 (the ME memory view) and returns 0, and a picture never decoded is no longer refused; 16-bit pixel modes and alpha follow sceMpegAvcCsc and are not measured
+  - Evidence: tests/native/videocodec_selftest.c:test_csc
+- **`h_MpegBaseCscAvcRange`** (`sceMpegbase`): `sceMpegBaseCscAvcRange` (0x304882e1)
+  - Limitation: synthetic layout from JPCSP pending W-LLE-1; the range words are 16-pixel units and the rectangle's top-left lands at the destination, as JPCSP writes it; otherwise the CscAvc limitations apply
+  - Evidence: tests/native/videocodec_selftest.c:test_copy_range
+- **`h_MpegBaseCscInit`** (`sceMpegbase`): `sceMpegBaseCscInit` (0x492b5e4b)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; records the default row width only; the coefficient table the PSP writes is not reproduced (conversion is the measured sr_h264_psp_rgb)
+  - Evidence: tests/native/videocodec_selftest.c:test_csc
+- **`h_MpegBasePESpacketCopy`** (`sceMpegbase`): `sceMpegBasePESpacketCopy` (0xbea18f91)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; checks the whole packet list (sources, destinations, lengths, cycles) before copying; destinations go through JPCSP's ME memory view (ME RAM, else guest memory); refusal codes other than the zero-length one are project-chosen
+  - Evidence: tests/native/videocodec_selftest.c:test_packet_copy
+- **`h_MpegBaseYCrCbCopy`** (`sceMpegbase`): `sceMpegBaseYCrCbCopy` (0x7ac0321a)
+  - Limitation: synthetic band split from JPCSP pending W-LLE-1; flags bit 0 copies bands 0, 1, 4 and 5 and bit 1 bands 2, 3, 6 and 7 from the source buffers (ME memory view) into the guest buffers, byte for byte; other bits are refused; the byte counts are the decoder's band sizes, not JPCSP's handler counts (16-pixel units; buffer 5 given band 1's count and buffer 6 band 4's); every span is checked before the first byte moves
+  - Evidence: tests/native/videocodec_selftest.c:test_copy_range
+- **`h_Mpegbase_0530BE4E`** (`sceMpegbase`): `sceMpegbase_0530BE4E` (0x0530be4e)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; mode mapping 0=8888, 1=5650, 2=5551, 3=4444 from JPCSP; unknown modes return -1
+  - Evidence: tests/native/videocodec_selftest.c:test_csc
 - **`h_NetAdhocctlGetParameter`** (`sceNet`): `sceNetAdhocctlGetParameter` (0xded9d28e)
   - Limitation: always NOT_INITIALIZED (0x80410b08), writing nothing, because sceNetAdhocctlInit stays refused with no network; GetParameter's own pre-init code is UNMEASURED and follows the measured calls; with the WLAN switch off PPSSPP answers DISCONNECTED (0x80410b09) instead (UNMEASURED)
   - Evidence: tests/native/hle_thread_selftest.c:test_net_core_without_network
@@ -1373,6 +1409,36 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 - **`h_VaudioOutputBlocking`** (`sceVaudio`): `sceVaudioOutputBlocking` (0x8986295e)
   - Limitation: the SRC blocking output for a Vaudio reservation: returns the reserved sample count, 0x80260008 with no Vaudio reservation, and 0x8026000b above volume 0xFFFFF, a project choice by analogy with the Output2 and SRC bound because this model plays Vaudio through the SRC output (the public reference checks no Vaudio volume); unmeasured on a PSP (#1986)
   - Evidence: tests/native/hle_thread_selftest.c:test_vaudio_plays_through_the_src_slot
+- **`h_VideocodecDecode`** (`sceVideocodec`): `sceVideocodecDecode` (0xdba273fa)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; type 0 (AVC) only; synchronous host H.264 decode; reads the access unit and writes the ME info blocks through JPCSP's ME memory view (ME RAM, else guest memory); writes the picture into its ME band buffers in JPCSP's band layout; buffer2, YUV struct, ME info blocks, buffer3 and SEI words are JPCSP's; a decoded size that is not whole macroblocks (a cropped 480 x 270, for example) is refused; fails closed without an H.264 backend
+  - Evidence: tests/native/videocodec_selftest.c:test_decode
+- **`h_VideocodecDelete`** (`sceVideocodec`): `sceVideocodecDelete` (0x307e6e1c)
+  - Limitation: synthetic context words from JPCSP pending W-LLE-1; frees the decoder and ME memory and closes the context; returns at once (JPCSP notes about 40 ms on a PSP)
+  - Evidence: tests/native/videocodec_selftest.c:test_teardown
+- **`h_VideocodecGetEDRAM`** (`sceVideocodec`): `sceVideocodecGetEDRAM` (0x2d31f5b1)
+  - Limitation: writes +92 = the raw ME address and +20 = it aligned to 64 bytes, the rule synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (type 0); allocates ((+24) + 63) | 0x3F bytes of a host 2 MiB ME RAM model, low-first, first 0x10000 reserved, so the addresses themselves differ from the PSP's
+  - Evidence: tests/native/videocodec_selftest.c:test_context_words
+- **`h_VideocodecGetSEI`** (`sceVideocodec`): `sceVideocodecGetSEI` (0x627b7d42)
+  - Limitation: synthetic word from JPCSP pending W-LLE-1; clears word +28 of the SEI block named by context +80 and nothing else; a context without a writable SEI block is refused
+  - Evidence: tests/native/videocodec_selftest.c:test_version_sei
+- **`h_VideocodecGetVersion`** (`sceVideocodec`): `sceVideocodecGetVersion` (0x26927d19)
+  - Limitation: synthetic context word from JPCSP pending W-LLE-1 (JPCSP cites its own JpcspTrace record); writes context +4 = 0x78 and returns 0; codec type 0 only
+  - Evidence: tests/native/videocodec_selftest.c:test_version_sei
+- **`h_VideocodecInit`** (`sceVideocodec`): `sceVideocodecInit` (0x17099f0a)
+  - Limitation: words synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (type 0): writes +12 = +20 and +8 = 0 and nothing else
+  - Evidence: tests/native/videocodec_selftest.c:test_context_words
+- **`h_VideocodecOpen`** (`sceVideocodec`): `sceVideocodecOpen` (0xc01ec829)
+  - Limitation: words synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (zeroed context): type 0 writes +0 = 0x05100601, +8 = 1 and +24 = 0x8344 and returns 0; type 1 writes +0, +8 = 0x80000000 and +24 = 0x264C and returns 0x80628001, and the later calls on a type 1 context are refused; other types are refused
+  - Evidence: tests/native/videocodec_selftest.c:test_context_words
+- **`h_VideocodecReleaseEDRAM`** (`sceVideocodec`): `sceVideocodecReleaseEDRAM` (0x4f160bf4)
+  - Limitation: clears +20 and +92 and leaves +12, the rule synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (type 0), and frees the host ME RAM allocation
+  - Evidence: tests/native/videocodec_selftest.c:test_teardown
+- **`h_VideocodecSetMemory`** (`sceVideocodec`): `sceVideocodecSetMemory` (0x745a7b7a)
+  - Limitation: accepts the call and writes nothing; no context word changed in that read either (synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet; type 0, zeroed +64..+76); the meaning of words +64..+76 is not modelled
+  - Evidence: tests/native/videocodec_selftest.c:test_context_words
+- **`h_VideocodecStop`** (`sceVideocodec`): `sceVideocodecStop` (0xa2f0564e)
+  - Limitation: before any decode returns 0x806201FE and changes nothing (synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet; type 0); after a decode drops the host decoder and returns 0 (JPCSP, synthetic pending W-LLE-1); whether the PSP drains pending pictures is not measured
+  - Evidence: tests/native/videocodec_selftest.c:test_teardown
 
 #### Compatibility Handlers (Named Limitations)
 
@@ -1388,17 +1454,16 @@ Semantic handler census: **563** handlers across **27** API families, covering *
 
 ```text
 Dispatch Hooks & Walkers (src/rt/recomp.c):
-  - Exact-Match Dispatch Hooks:                      8 sites (Tier 5, diagnostic only)
+  - Exact-Match Dispatch Hooks:                      0 sites (trace-only hooks deleted)
   - Address-Range Hooks:                             0 sites (retired by issue #362)
-  - Inline Dispatch Guard (INIT_WALKER_GUARD):        1 site  (Tier 5)
-  - WALKER_CAP:                                      historical comment, not an active cap
+  - Inline Dispatch Guard (INIT_WALKER_GUARD):        0 sites (retired, #363)
+  - WALKER_CAP:                                      removed
 
-  Every surviving g_exact_hooks[] entry is a read-only trace that always falls
-  through to normal dispatch, and g_range_hooks[] is empty: generic dispatch no
-  longer turns any target shape into a success. Issue #362 removed the last
-  behavior-changing target predicates (see 3.1 and 3.4).
-  `tools/compat_overrides.py` (DISPATCH_HOOKS / DISPATCH_RANGE_HOOKS) is the
-  maintained census for these tables; `tools/test_compat_manifest.py` and
+  Generic dispatch has no hook tables and no longer turns any target shape into
+  a success. Issue #362 removed the last behavior-changing target predicates
+  (see 3.1 and 3.4).
+  `tools/compat_overrides.py` (DISPATCH_HOOKS / DISPATCH_RANGE_HOOKS, both empty,
+  and RETIRED_INIT_WALKER_GUARD) is the maintained census for these tables; `tools/test_compat_manifest.py` and
   `tools/test_dispatch_c.py` fail if a source address or a retired hook name
   reappears without being inventoried.
 
@@ -1422,10 +1487,10 @@ Title Configuration Overrides (src/rt/title_config.c):
 - **Root Cause:** An earlier compatibility bypass skipped `module_start` and wrote readiness during load. Translated startup and export routing now have a source-owned production-path fixture. Real-title startup readiness remains unverified when no locally supplied decrypted executable and PRXs are available.
 - **Lower-Level Solution:** Provide translated guest startup and its kernel, thread, callback, heap and file dependencies; remove the retired field from existing manifests.
 
-#### 2. `psmf.prx` and `libpsmfplayer.prx` Start Module Skip
+#### 2. Host-Served Module Start Skip
 
 - **Location:** `src/rt/hle_kernel_module.c` (`h_StartModule`).
-- **Mechanism:** Explicitly skips calling `f_32280000` (`psmf`) and `f_322f8868` (`libpsmfplayer`). A guest-placed module (placed by the guest allocator at run time) keeps the same bypass when host HLE implements one of its named exports, so its importers stay on the host implementation.
+- **Mechanism:** `sceKernelStartModule` does not run `module_start` for a module whose exports host HLE implements (`host_served`, decided from its export table, never from its file name, #1385), and a guest-placed module (placed by the guest allocator at run time) keeps the same bypass, so its importers stay on the host implementation. `libfont.prx`, and a module of a library the guest owns (`guest_module_owns_library`, such as `scePsmfPlayer`), run their translated `module_start`; `psmf.prx` has no HLE handler and always runs translated (3.4).
 - **Root Cause:** Sony SDK initialization assumes low-level kernel callbacks and ring buffer allocation.
 - **Lower-Level Solution:** Provide faithful kernel memory partition allocation (`sceKernelAllocPartitionMemory`) and let the genuine PSMF modules execute their lifecycle.
 
@@ -1500,27 +1565,21 @@ reproduced here.
 
 ---
 
-### 3.2 Register Clobber Guards and Loop Caps (Tier 5)
+### 3.2 Register Clobber Guards and Loop Caps (Retired)
 
 #### 1. `INIT_WALKER_GUARD` (Callee-Saved `$s0` / `$r16` Preservation)
 
-- **Location:** `src/rt/recomp.c:2068–2080`, inline in `dispatch()`, not a dispatch hook-table entry.
-- **Mechanism:** When the caller's `s->pc` is `0x00000f98` or `0x00000fdc`, saves `s->r[16]` around `fn(s)` and unconditionally restores it on return. These PCs select the guard; they are not the dispatch target.
-- **Root Cause:** A MIPS ABI violation in recompiled code or compiler optimization where a callee corrupted callee-saved register `$s0`.
-- **Lower-Level Solution:** Audit the recompiled functions called by `0x00000fdc` in `tools/codegen.py` to ensure standard MIPS calling conventions preserve `$s0`–`$s7` across function boundaries.
+- **Status:** **RETIRED (#363).** The inline guard in `dispatch()` saved `s->r[16]` around the call when the caller's `s->pc` was `0x00000f98` or `0x00000fdc`, and restored it on return. It and the HST-only restore of `$s0`-`$s7`/`$fp` that replaced it are gone: every title keeps its callee's register writes, as on hardware. `RETIRED_INIT_WALKER_GUARD` in `tools/compat_overrides.py` keeps the caller PCs, and `tools/test_compat_manifest.py` fails if the guard returns.
 
 #### 2. `WALKER_CAP` Historical Comment
 
-- **Location:** `src/rt/recomp.c:1591–1612` (comment only; `WALKER_CAP` mentions at lines 1598 and 1606).
-- **Mechanism:** The comment describes a former 2048-iteration cap and the rationale for bypassing `f_000008d8` by returning `r[2]=0` directly (`WALKER_SKIP`, line 1611). It is not an active cap or executable function at those lines.
-- **Root Cause:** The historical comment describes recursive walker dispatch and repeated yields starving frame-present progress; it is not current behavioral proof.
-- **Lower-Level Solution:** Verify current walker execution and guest table initialization before treating the historical bypass rationale as an active workaround.
+- **Status:** **REMOVED.** The comment about a former 2048-iteration cap and the `f_000008d8` bypass is no longer in `src/rt/recomp.c`.
 
 ---
 
 ### 3.3 Remaining Fake-Success Registrations and #281 Dispositions
 
-The current registration classes and semantic statuses are in the generated census above. At the time of the #281 migration, the then-18 fake-success registrations were reclassified as 13 controlled refusals, one bounded UMD compatibility implementation, one partial `sceIoDevctl` implementation, and three named compatibility exceptions; those are historical migration counts, not the current census. Static refusal entries carry a literal PSP-visible error in `sr_hle_register_unsupported`; `sr_syscall` logs each function/NID once and emits one summary line per called function at process exit. These APIs are marked “in the works” under issue #281. Unregistered NIDs still use the fatal unknown-import path.
+The current registration classes and semantic statuses are in the generated census above. At the time of the #281 migration, the then-18 fake-success registrations were reclassified as 13 controlled refusals, one bounded UMD compatibility implementation, one partial `sceIoDevctl` implementation, and three named compatibility exceptions; those are historical migration counts, not the current census. Static refusal entries carry a literal PSP-visible error in `sr_hle_register_unsupported`; `sr_syscall` logs each function/NID once and emits one summary line per called function at process exit. That migration was issue #281, now closed. Unregistered NIDs still use the fatal unknown-import path.
 
 | API family | Registration(s) | Disposition |
 | :--- | :--- | :--- |
@@ -1543,7 +1602,7 @@ own translated code, and the HLE handler only serves NIDs that no started module
 rule that decides this is in `src/rt/hle_kernel_module.c`. A staged, translated module is
 *host-served* (its `module_start` is skipped and the host handlers keep its NIDs) when host HLE
 implements any of its exports. Two exceptions run the module instead: a library listed in
-`guest_module_owns_library()`, which today is only `scePsmfPlayer`, and `libfont.prx` (#1645).
+`guest_module_owns_library()` (`scePsmfPlayer` and `sceMpeg`), and `libfont.prx` (#1645).
 
 The inventory below comes from a survey the standing LLE lane made in November 2026 of every
 title in the maintainer's library that builds. The survey counted 795 titles. The counts are
@@ -1553,7 +1612,7 @@ titles whose build translates that disc module. The survey itself stays private.
 | --- | --- | --- | --- |
 | `libfont.prx` (234) | `sceLibFont` | `src/rt/hle_font.c` | The translated module (#1645) |
 | `libpsmfplayer.prx` (167) | `scePsmfPlayer` | `src/rt/hle_mpeg.c` | The translated module, through the owned-library list (#1782); a few titles with packed modules are still host-served (#1933) |
-| `mpeg.prx` (209) | `sceMpeg` | `src/rt/hle_mpeg.c` | HLE: the module is host-served. Below `sceMpeg` it imports `sceMpegbase` and `sceVideocodec` functions that have no HLE handler, at the Media Engine boundary (`docs/LLE_FIDELITY_ARCHITECTURE.md` section 3.4) |
+| `mpeg.prx` (209) | `sceMpeg` | `src/rt/hle_mpeg.c` | The translated module, through the owned-library list (#286). Below `sceMpeg` it imports `sceMpegbase`, `sceVideocodec` and `sceAudiocodec`, which `src/rt/hle_videocodec.c` serves at the Media Engine boundary (`docs/LLE_FIDELITY_ARCHITECTURE.md` section 3.4) |
 | `pspnet*.prx`, `libhttp.prx`, `libssl.prx` | `sceNet*`, `sceHttp`, `sceSsl` | network HLE | HLE, which stays fail-closed (AGENTS.md section 5); this is not LLE work |
 
 Disc modules with no HLE handler, such as `psmf.prx` and the small `libccc`, `libdeflt` and
@@ -1576,18 +1635,11 @@ those calls are reported as not compared.
 gave the same result in both forms. It says nothing about other inputs, and a private title's
 report proves only that title's calls and stays private.
 
-## 4. Workaround Elimination & Migration Roadmap
+## 4. Workaround Elimination
 
-```mermaid
-timeline
-    title Workaround Elimination & LLE Convergence
-    Phase 1 : Zero-Initialize BSS & Segment Extents : Audit tools/codegen.py for $s0 register preservation : Eliminate INIT_WALKER_GUARD : Revalidate historical walker bypass rationale
-    Phase 2 : Implement standalone ATRAC3+ decoder : Eliminate high-risk fake_success audio NIDs : Implement sceReg virtual system registry
-    Phase 3 : Complete kernel semaphore & thread synchronization : Remove libfont readiness injection; validate real guest startup for #299
-    Phase 4 : Execute scePsmf_library.prx & psmf.prx module_start : Bridge low-level sceMpeg to host hardware decoders : Eliminate StartModule bypasses
-    Phase 5 : Eliminate remaining fake_success stubs : Retire title-specific manifest overrides : Reach Zero-Workaround State
-```
+The workarounds that remain are the entries in section 3 that are not marked retired, and the compatibility
+exceptions in the generated census above. Each entry names the lower-level solution that removes it.
 
-### The Invariant for Future Work
+### The Invariant for Each Migration Step
 
 Every migration step must be accompanied by an automated regression test in `tools/` that executes both the positive and negative paths to prove that guest code executes correctly without synthetic intervention.

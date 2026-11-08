@@ -40,9 +40,9 @@ results directory (`--results-directory`, default `oracle/hardware-results/`) by
 SHA-256, and the gate verifies that file. Without that directory a hardware claim reports
 `NOT_RUN`, never `MEASURED`. Software, Vulkan, or
 PPSSPP data cannot be promoted by setting a hardware label. The current case reports `NOT_RUN`.
-**GE raster pixel conformance is IN THE WORKS (#343):** the
+**GE raster pixel conformance is partial (#343, open):** the
 `ge-raster` cells are measured; the schema corpus case, the Vulkan comparison and the families no cell covers
-yet are not.
+are not.
 
 ## Measured to date (index — exact cells only, do not generalize)
 
@@ -174,7 +174,7 @@ proposals. Each claim covers only the exact fixture named:
   again on 2026-10-15 (`f2d6c91a`) with identical records, and the measured
   index publishes its words. It does not repeat the already measured VASIN
   edge words, and its framebuffer hashes have not established a hardware
-  rasterization rule; this GE boundary remains in the works under #69. The out-of-domain arc-sine argument that can produce a
+  rasterization rule; this GE boundary is not established (#69 is closed). The out-of-domain arc-sine argument that can produce a
   non-finite bone matrix remains a separate cell.
 - **Audio query and blocking-output semantics** (issue #311; `CASE=audio-query`):
   MEASURED in the index row above (2026-10-10, PSP-3000, 6.61 / ARK-5.1.0). The
@@ -321,7 +321,7 @@ and its K3/K4 result remain in the works under #303.
   For these exact cells, zero-duration delays do not park or switch to the
   equal-priority ready thread; only `sceKernelDelayThreadCB` dispatches the
   pending callback before returning. Broader scheduler and callback-pump
-  behavior remains in the works under #340.
+  behavior is not measured beyond these cells (#340 is closed).
 - **Misaligned data access** (runs PSP-A3-02 and PSP-A3-03; same route,
   campaign and console; fixtures `exception-a3-mload` and `exception-a3-mstore`,
   which are `probe_exception_a3.c` built with `-DA3_CASE=2` and `=3`):
@@ -3239,7 +3239,7 @@ ge-timing-done
 
 ## Pending PSP-3000 measurement campaign
 
-The following twenty-three source-owned cases are in the PSP-3000 / 6.61 measurement
+The following fifty source-owned cases are in the PSP-3000 / 6.61 measurement
 registry; the status column distinguishes measured, captured-only and pending evidence.
 Six were measured by the 2026-10-10 campaign on `f6ccfb33`; `ge-break-continue`
 was measured by its acceptance-eligible 2026-10-15 re-run on `c642039a` after two
