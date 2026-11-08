@@ -7776,9 +7776,11 @@ static int coherence_run_dst_read_ztest(void) {
     GeState saved = *s_ge;
     const int ordered = dro_ordered();
     unsigned pinned = 0;
-    for (uint32_t r = 0; r < 6u && ok; r++) {
-        const DroState *st = &states[r / 3u];
-        const DroZLeg *leg = &k_dro_zlegs[r % 3u];
+    const uint32_t nlegs = (uint32_t)(sizeof k_dro_zlegs / sizeof k_dro_zlegs[0]);
+    const uint32_t nstates = (uint32_t)(sizeof states / sizeof states[0]);
+    for (uint32_t r = 0; r < nstates * nlegs && ok; r++) {
+        const DroState *st = &states[r / nlegs];
+        const DroZLeg *leg = &k_dro_zlegs[r % nlegs];
         DroRun run;
         if (!dro_run_both(st, dro_ztest_list(st, leg), gpu_out, gz, wz, &run)) { ok = 0; break; }
         unsigned outside = 0, kept = 0, zdiff = 0, walled = 0, occluded = 0;
@@ -7803,9 +7805,9 @@ static int coherence_run_dst_read_ztest(void) {
         }
         if (!walled || (!leg->hazard && !occluded)) {
             fprintf(stderr, "gpu coherence selftest [dst-read-ztest]: %s, %s: the scene is not the cell's: "
-                            "%u pixels of the first sprite behind the wall, %u of the second behind the first "
-                            "(want 1 or more%s)\n", st->name, leg->name, walled, occluded,
-                    leg->hazard ? " behind the wall" : " each");
+                            "%u pixels of the first sprite behind the wall (want 1 or more), %u of the second "
+                            "behind the first (want %s)\n", st->name, leg->name, walled, occluded,
+                    leg->hazard ? "any" : "1 or more");
             ok = 0;
         }
         if (run.fallbacks) {
@@ -7845,8 +7847,8 @@ static int coherence_run_dst_read_ztest(void) {
     coherence_reset_targets();
     free(gpu_out); free(gz); free(wz);
     if (ok && ordered)
-        printf("gpu coherence selftest: PASS %-22s interlock: colour and depth equal ge.c in 3 depth legs, "
-               "no snapshot copy\n", "dst-read-ztest");
+        printf("gpu coherence selftest: PASS %-22s interlock: colour and depth equal ge.c in %u depth legs, "
+               "no snapshot copy\n", "dst-read-ztest", (unsigned)(sizeof k_dro_zlegs / sizeof k_dro_zlegs[0]));
     else if (ok)
         printf("gpu coherence selftest: PASS %-22s snapshot path: depth equals ge.c; the known #2109 hazard, "
                "%u pixels, all in the overlap, none where the first sprite hides the second\n",
