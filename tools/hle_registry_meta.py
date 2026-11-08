@@ -764,7 +764,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     # command pairs remain visible per pair and are tracked under issue #341.
     "h_IoDevctl": {
         "status": "partial",
-        "limitation": "Memory Stick insert/eject callbacks, including the mscmhc0: 0x02015804/0x02015805 forms, are notified once, with argument 1, when registered; no later insert or eject event exists, and the 32-entry bound, duplicate entries and 0x80010016 refusals follow PPSSPP's model, not a hardware measurement (#1378)",
+        "limitation": "Memory Stick insert/eject callbacks, including the mscmhc0: 0x02015804/0x02015805 forms, are notified once, with argument 1, when registered; no later insert or eject event exists, and the 32-entry bound, duplicate entries and 0x80010016 refusals follow PPSSPP's model, not a hardware measurement (#1378); the GETDEV capacity under SR_DETERMINISTIC_CLOCK=1 is a project-chosen virtual card (2 GiB, 32 KiB clusters, minus the Memory Stick folder's files), not a measured one (#2161)",
     },
     "h_NetEtherNtostr": {
         "status": "partial",

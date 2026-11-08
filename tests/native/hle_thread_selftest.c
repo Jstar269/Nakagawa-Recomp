@@ -264,6 +264,9 @@ extern void sr_display_test_flip_counts(unsigned long *calls, unsigned long *imm
                                         uint32_t *last_err);
 extern void sr_hle_test_sas_reset(void);
 extern void sr_hle_test_audio_reset(void);
+extern void sr_hle_test_audio_wait_reset(void);
+extern void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us));
+extern uint64_t sr_hle_test_audio_wait_total_us(void);
 extern void sr_hle_test_audio_lead_reset(void);
 extern void sr_hle_test_audio_lead_feed(uint32_t vbl, int ch, int queued);
 extern unsigned long sr_hle_test_audio_lead_window(int *peak, uint32_t *peak_ch,
@@ -6657,6 +6660,72 @@ static void profile_read(uint8_t mac[6], uint8_t psid[16]) {
     for (uint32_t i = 0; i < 16u; i++) psid[i] = MEM_R8(PROFILE_OUT + 16u + i);
 }
 
+/* #2162: under the deterministic clock a fresh profile's WLAN MAC address and OpenPSID are
+ * derived from a named seed, not from the host's random source. Two fresh runs agree, the MAC has
+ * the locally administered bit set (no console's address does), nothing is saved, and a normal
+ * run still gets differing random values. An identity the user configured is used as it is.
+ *
+ * MUTANT: console_profile_identity ignores sched_clock_deterministic() -- the two fresh runs get
+ *   different random values and the first check fails. */
+static void test_console_profile_identity_is_deterministic_under_the_deterministic_clock(void) {
+    static const char configured[] =
+        "{\"schema\": \"nakagawa.psp-system-registry-overlay\", \"schema_version\": 1, "
+        "\"categories\": [], \"keys\": [], \"console\": {\"wlan_mac_hex\": \"00a1b2c3d4e5\", "
+        "\"open_psid_hex\": \"00112233445566778899aabbccddeeff\"}}";
+    uint8_t mac_a[6], psid_a[16], mac_b[6], psid_b[16], mac_c[6], psid_c[16];
+    reset_fixture();
+    sr_hle_init();
+    sysreg_scratch_clean();
+    sysreg_env(SYSREG_SCRATCH_FILE);
+    hle_test_setenv("SR_IDENTITY_SEED", NULL);
+
+    s_det_clock = 1;
+    sysreg_scratch_clean();
+    sysreg_restart();
+    profile_read(mac_a, psid_a);
+    char *saved = sysreg_read_file(SYSREG_SCRATCH_FILE);
+    expect(saved == NULL || strstr(saved, "wlan_mac_hex") == NULL,
+           "a deterministic run saves no identity into the user's overlay");
+    free(saved);
+    sysreg_scratch_clean();
+    sysreg_restart();
+    profile_read(mac_b, psid_b);
+    expect(memcmp(mac_a, mac_b, 6) == 0 && memcmp(psid_a, psid_b, 16) == 0,
+           "two fresh deterministic runs get the same MAC address and OpenPSID");
+    int psid_set = 0;
+    for (int i = 0; i < 16; i++) psid_set |= psid_a[i] != 0u;
+    expect((mac_a[0] & 0x03u) == 0x02u && psid_set,
+           "the synthetic MAC is unicast with the locally administered bit set; the OpenPSID is non-zero");
+
+    hle_test_setenv("SR_IDENTITY_SEED", "another-named-seed");
+    sysreg_scratch_clean();
+    sysreg_restart();
+    profile_read(mac_c, psid_c);
+    expect(memcmp(mac_a, mac_c, 6) != 0 && memcmp(psid_a, psid_c, 16) != 0 &&
+               (mac_c[0] & 0x03u) == 0x02u,
+           "a different named seed derives different values, still locally administered");
+    hle_test_setenv("SR_IDENTITY_SEED", NULL);
+
+    expect(sysreg_write_file(SYSREG_SCRATCH_FILE, configured, sizeof(configured) - 1u),
+           "the configured-identity overlay is written");
+    sysreg_restart();
+    profile_read(mac_c, psid_c);
+    expect(mac_c[0] == 0x00 && mac_c[1] == 0xa1 && psid_c[15] == 0xff,
+           "an identity the user configured wins over the derived one");
+
+    s_det_clock = 0;
+    sysreg_scratch_clean();
+    sysreg_restart();
+    profile_read(mac_a, psid_a);
+    sysreg_scratch_clean();
+    sysreg_restart();
+    profile_read(mac_b, psid_b);
+    expect(memcmp(mac_a, mac_b, 6) != 0 || memcmp(psid_a, psid_b, 16) != 0,
+           "without the deterministic clock two fresh runs still get different random values");
+    sysreg_scratch_clean();
+    sysreg_restart();
+}
+
 /* Portable mode (#1850): the game process's registry overlay follows SR_USER_DATA_ROOT, the root the
  * launcher resolved, not the platform default; SR_SYSTEM_REGISTRY still wins, and a relative root
  * is refused rather than answered with the default. */
@@ -7585,6 +7654,41 @@ static void test_sysreg_corrupt_overlay(void) {
     expect(sysreg_sysparam_int(8u) == 4u, "the overlay written after the ignored one loads");
     sysreg_restart();
     sysreg_scratch_clean();
+}
+
+/* #2162: the synthetic identity a deterministic run derives is never written back. A guest that
+ * changes a registry key and flushes under the deterministic clock must leave an overlay without a
+ * console object: a synthetic MAC fails the loader's checks, and a later normal run would discard
+ * the whole overlay for it.
+ *
+ * MUTANT: sreg_overlay_render ignores PspConsoleProfile.synthetic -- the flushed overlay holds the
+ *   synthetic MAC and the first check fails. */
+static void test_deterministic_identity_is_never_flushed_to_the_overlay(void) {
+    uint32_t r, reg, cat;
+    uint8_t mac[6], psid[16];
+    reset_fixture();
+    sr_hle_init();
+    sysreg_scratch_clean();
+    sysreg_env(SYSREG_SCRATCH_FILE);
+    s_det_clock = 1;
+    sysreg_restart();
+    profile_read(mac, psid);   /* the synthetic identity is now live */
+    reg = sysreg_open_registry(2u, &r);
+    cat = sysreg_open_category(reg, "/CONFIG/SYSTEM/XMB", 2u, &r);
+    expect(sysreg_set_int(cat, "language", 4u) == 0u &&
+               sysreg_call(NID_SCE_REG_FLUSH_REGISTRY, reg, 0u, 0u, 0u, 0u) == 0u,
+           "a registry change flushes under the deterministic clock");
+    char *text = sysreg_read_file(SYSREG_SCRATCH_FILE);
+    expect(text != NULL, "the flush wrote the overlay");
+    expect(text && strstr(text, "console") == NULL && strstr(text, "wlan_mac_hex") == NULL,
+           "and the overlay holds no console object: the derived identity is not saved");
+    free(text);
+    s_det_clock = 0;
+    sysreg_restart();
+    expect(sysreg_sysparam_int(8u) == 4u,
+           "a normal run loads the overlay the deterministic run flushed, setting intact");
+    sysreg_scratch_clean();
+    sysreg_restart();
 }
 
 /* A flush that cannot write reports EIO and keeps the change live in memory. */
@@ -9582,6 +9686,70 @@ static uint32_t io_devctl_call(CpuState *cpu, uint32_t device, uint32_t command,
     return sr_syscall(cpu, 0x54f5fb11u);
 }
 
+/* #2161: under the deterministic clock the guest sees a fixed virtual card (2 GiB, 32 KiB
+ * clusters) minus what the Memory Stick folder holds, whatever the host volume reports. Without
+ * the clock the host volume is reported as before.
+ *
+ * MUTANT: io_memstick_capacity skips the deterministic branch -- the two host volumes give the
+ *   guest different numbers under the clock and the first check fails. */
+extern int io_memstick_capacity(uint32_t info[5]);
+extern void sr_hle_test_set_host_capacity(const uint32_t info[5]);
+static void test_memstick_capacity_is_fixed_under_the_deterministic_clock(void) {
+    static const char dir[] = HLE_BUILD_ROOT "/hle_det_memstick";
+    static const char sub[] = HLE_BUILD_ROOT "/hle_det_memstick/PSP";
+    static const char file_a[] = HLE_BUILD_ROOT "/hle_det_memstick/a.bin";
+    static const char file_b[] = HLE_BUILD_ROOT "/hle_det_memstick/PSP/b.bin";
+    const uint32_t host_a[5] = { 1000u, 400u, 64000u, 512u, 64u };
+    const uint32_t host_b[5] = { 7777u, 3u, 497728u, 512u, 64u };
+    uint32_t got_a[5], got_b[5];
+    reset_fixture();
+    nk_platform_mkdir_p(dir);
+    nk_platform_mkdir_p(sub);
+    remove(file_a);
+    remove(file_b);
+    expect(hle_test_setenv("SR_MEMSTICK", dir), "the capacity test selects its own Memory Stick folder");
+    sr_hle_init();
+
+    s_det_clock = 0;
+    sr_hle_test_set_host_capacity(host_a);
+    expect(io_memstick_capacity(got_a) && memcmp(got_a, host_a, sizeof(got_a)) == 0,
+           "without the deterministic clock the host volume is what the guest sees");
+    sr_hle_test_set_host_capacity(host_b);
+    expect(io_memstick_capacity(got_b) && memcmp(got_b, host_b, sizeof(got_b)) == 0 &&
+               memcmp(got_a, got_b, sizeof(got_a)) != 0,
+           "and two host volumes give two different answers");
+
+    s_det_clock = 1;
+    sr_hle_test_set_host_capacity(host_a);
+    expect(io_memstick_capacity(got_a), "a deterministic run reports the virtual card (host A)");
+    sr_hle_test_set_host_capacity(host_b);
+    expect(io_memstick_capacity(got_b), "a deterministic run reports the virtual card (host B)");
+    expect(memcmp(got_a, got_b, sizeof(got_a)) == 0,
+           "two different host free-space values give the guest the same capacity under the clock");
+    expect(got_a[0] == 65536u && got_a[1] == 65536u && got_a[2] == 65536u * 64u &&
+               got_a[3] == 512u && got_a[4] == 64u,
+           "the empty virtual card is 65536 clusters of 64 sectors of 512 bytes, all free");
+
+    FILE *f = fopen(file_a, "wb");
+    expect(f != NULL, "the capacity test writes a file into the Memory Stick folder");
+    if (f) { for (int i = 0; i < 100000; i++) fputc(i, f); fclose(f); }
+    f = fopen(file_b, "wb");
+    expect(f != NULL, "and one in a subfolder");
+    if (f) { fputc(1, f); fclose(f); }
+    expect(io_memstick_capacity(got_b) && got_b[0] == 65536u && got_b[1] == 65536u - 4u - 1u,
+           "what the run wrote uses space: 100000 bytes is 4 clusters, 1 byte is 1 more");
+    sr_hle_test_set_host_capacity(host_a);
+    expect(io_memstick_capacity(got_a) && memcmp(got_a, got_b, sizeof(got_a)) == 0,
+           "and the host volume still does not matter");
+
+    remove(file_a);
+    remove(file_b);
+    sr_hle_test_set_host_capacity(NULL);
+    s_det_clock = 0;
+    hle_test_setenv("SR_MEMSTICK", NULL);
+    reset_fixture();
+}
+
 /* Issue #281: exercise the real sceIoDevctl dispatch for the documented
  * memory-stick capacity, status, and callback commands, plus pointer and
  * unknown-command boundaries. Unknown pairs must be refused and logged once. */
@@ -10999,12 +11167,128 @@ static void test_audio_queue_drains_in_guest_time_under_the_deterministic_clock(
     s_audio_queue_result = 100000;   /* the host mixer is far behind: the guest must not see it */
     expect(hle_audio_queued(0) == 0, "the host mixer's backlog is not what the guest sees");
     s_audio_queue_result = -1;
-    expect(hle_audio_queued(0) == -1, "no host output stays no host output");
+    expect(hle_audio_queued(0) == 0, "no host output device is the same empty model (#2160)");
     s_det_clock = 0;
     s_audio_queue_result = 100000;
     expect(hle_audio_queued(0) == 100000, "without the deterministic clock the host depth is reported");
+    s_audio_queue_result = -1;
+    expect(hle_audio_queued(0) == -1, "without the deterministic clock no host output is still -1");
     s_audio_queue_result = 0;
     reset_fixture();
+}
+
+/* What a guest can observe of the audio it plays, under the deterministic clock, while the host
+ * mixer behaves as `host_depth` says (#2160, #2163): each blocking output's return value, how long
+ * it parked the guest in total, and what GetChannelRestLength reported after each. The guest-time
+ * script is the same for every host: the host differs, never the guest. */
+typedef struct {
+    uint32_t returns[24];
+    uint32_t rest[24];
+    uint64_t wait_us;
+    uint32_t outputs;
+} AudioGuestView;
+
+static uint64_t *s_wait_clock;   /* the fixture's guest clock, advanced by the waits the guest asks for */
+static void audio_wait_advances_clock(uint32_t us) { if (s_wait_clock) *s_wait_clock += us; }
+
+static void audio_guest_view(int host_depth, uint32_t frames, uint32_t outputs, uint32_t step_us, AudioGuestView *v) {
+    const uint32_t STEREO_BUF = 0x08a00000u;
+    CpuState cpu;
+    memset(v, 0, sizeof(*v));
+    reset_fixture();
+    sr_hle_init();
+    s_det_clock = 1;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, frames, 0u) == 0u,
+           "the guest-view fixture reserves the regular channel");
+    sr_hle_test_audio_wait_reset();
+    s_wait_clock = &s_vtime_us;
+    sr_hle_test_audio_wait_hook(audio_wait_advances_clock);
+    s_vtime_us = 1000u;
+    for (uint32_t i = 0; i < outputs && i < 24u; i++) {
+        s_audio_queue_result = host_depth;
+        v->returns[i] = audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, STEREO_BUF);
+        s_vtime_us += step_us;   /* guest time between outputs: 0 is a guest that never lets the model drain */
+        v->rest[i] = audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u);
+        v->outputs++;
+    }
+    v->wait_us = sr_hle_test_audio_wait_total_us();
+    sr_hle_test_audio_wait_hook(NULL);
+    s_wait_clock = NULL;
+    s_det_clock = 0;
+    s_audio_queue_result = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+static int audio_guest_views_equal(const AudioGuestView *a, const AudioGuestView *b) {
+    return a->outputs == b->outputs && a->wait_us == b->wait_us &&
+           memcmp(a->returns, b->returns, sizeof(a->returns)) == 0 &&
+           memcmp(a->rest, b->rest, sizeof(a->rest)) == 0;
+}
+
+/* #2160: the host output device is an optional sink. A run on a headless runner (the host mixer
+ * reports no queue, -1) and a run on a desktop (a queue of any depth) hand the guest the same
+ * return values, the same waits and the same rest lengths.
+ *
+ * MUTANT: hle_audio_queued returns the host's -1 under the deterministic clock -- the no-device
+ *   run takes the open-loop branch of audio_output and waits 1451 us per output where the
+ *   device runs wait for nothing, so the views differ. */
+static void test_audio_guest_view_is_the_same_with_and_without_a_host_device(void) {
+    AudioGuestView with_device, no_device, null_device;
+    audio_guest_view(0, 64u, 8u, 1451u, &with_device);
+    audio_guest_view(-1, 64u, 8u, 1451u, &no_device);
+    audio_guest_view(-1, 1024u, 8u, 23219u, &null_device);
+    expect(with_device.outputs == 8u && with_device.returns[7] == 64u,
+           "the device run completed eight 64-frame outputs");
+    expect(audio_guest_views_equal(&with_device, &no_device),
+           "no host output device: the guest sees the same returns, waits and rest lengths");
+    AudioGuestView with_device_1024;
+    audio_guest_view(0, 1024u, 8u, 23219u, &with_device_1024);
+    expect(audio_guest_views_equal(&with_device_1024, &null_device),
+           "the same holds for a 1024-frame channel");
+}
+
+/* #2163: the guest's audio does not follow the host mixer. A host that keeps up in real time, one
+ * that races ahead and drains at once, one that is behind and holds a full mixer (262144 frames),
+ * and one that has no device at all give the guest the same view of the same audio.
+ *
+ * MUTANT: audio_output paces against sr_audio_queued() under the deterministic clock -- the full
+ *   mixer makes every output wait out the whole backlog and the views differ. */
+static void test_audio_guest_view_ignores_the_host_mixer_speed(void) {
+    enum { MIXER_CAP = 65536 * 4 };
+    AudioGuestView real_time, fast, slow, full, none;
+    audio_guest_view(64, 1024u, 12u, 23219u, &real_time);
+    audio_guest_view(0, 1024u, 12u, 23219u, &fast);
+    audio_guest_view(MIXER_CAP / 2, 1024u, 12u, 23219u, &slow);
+    audio_guest_view(MIXER_CAP, 1024u, 12u, 23219u, &full);
+    audio_guest_view(-1, 1024u, 12u, 23219u, &none);
+    expect(real_time.outputs == 12u && real_time.returns[11] == 1024u,
+           "the real-time run completed twelve 1024-frame outputs");
+    expect(audio_guest_views_equal(&real_time, &fast),
+           "a host that races ahead and drains at once changes nothing the guest sees");
+    expect(audio_guest_views_equal(&real_time, &slow),
+           "a host that is behind changes nothing the guest sees");
+    expect(audio_guest_views_equal(&real_time, &full),
+           "a host mixer at its 262144-frame cap, dropping, changes nothing the guest sees");
+    expect(audio_guest_views_equal(&real_time, &none),
+           "no host mixer at all changes nothing the guest sees");
+}
+
+/* The wait branch itself: a guest that plays faster than its model drains (no guest time passes
+ * between outputs) is held to two periods of lead, and the wait it is given is the model's, the same
+ * whatever the host mixer or device does (#2160, #2163). */
+static void test_audio_model_wait_is_the_same_for_every_host(void) {
+    AudioGuestView ref, none, fast, full;
+    audio_guest_view(0, 1024u, 12u, 0u, &ref);
+    audio_guest_view(-1, 1024u, 12u, 0u, &none);
+    audio_guest_view(0, 1024u, 12u, 0u, &fast);
+    audio_guest_view(65536 * 4, 1024u, 12u, 0u, &full);
+    expect(ref.wait_us > 0u,
+           "a guest that never lets the model drain is made to wait: the model-driven branch ran");
+    expect(audio_guest_views_equal(&ref, &none) && audio_guest_views_equal(&ref, &fast) &&
+               audio_guest_views_equal(&ref, &full),
+           "and no device, a drained mixer and a full mixer give that guest the same waits");
 }
 
 /* Every call that paces a guest against the audio queue reads the model under the deterministic
@@ -49832,6 +50116,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sysreg_virtual_registry();
     test_sysreg_overlay_follows_user_data_root();
     test_console_profile_identity();
+    test_console_profile_identity_is_deterministic_under_the_deterministic_clock();
     test_sysreg_write_model();
     test_sysparam_nickname_string();
     test_ge_edram_addr_translation();
@@ -49842,6 +50127,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ctrl_peek_latch_keeps_the_latch();
     test_sysreg_persistence_round_trip();
     test_sysreg_corrupt_overlay();
+    test_deterministic_identity_is_never_flushed_to_the_overlay();
     test_sysreg_flush_failure();
     test_unregistered_batch_refusals();
     test_adhoc_named_refusals();
@@ -49877,6 +50163,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_msg_dialog_abort_sequence();
     test_msg_dialog_abort_without_update();
     test_io_devctl_memory_stick();
+    test_memstick_capacity_is_fixed_under_the_deterministic_clock();
     test_savedata_getsize_free_space();
     test_savedata_list_selection();
     test_savedata_listing_times();
@@ -49915,6 +50202,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_drift_window_reports_the_pacing_value();
     test_audio_output_telemetry_counts_guest_frames();
     test_audio_queue_drains_in_guest_time_under_the_deterministic_clock();
+    test_audio_guest_view_is_the_same_with_and_without_a_host_device();
+    test_audio_guest_view_ignores_the_host_mixer_speed();
+    test_audio_model_wait_is_the_same_for_every_host();
     test_audio_calls_read_the_guest_queue_under_the_deterministic_clock();
     test_src_push_and_psmf_lead_read_the_guest_queue_under_the_deterministic_clock();
     test_ctrl_live_input_latch_suppresses_phantom_start();
