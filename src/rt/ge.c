@@ -5130,7 +5130,7 @@ static void ge_note_mip_draw(void) {
             (int)(ge.tex_lod_bias * 16.0f));
 }
 
-/* ---- finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.13) ----------------
+/* ---- finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14) ----------------
  *
  * An Ace Mode feature: draw_patch multiplies the guest's U and V division of a triangle patch by
  * an integer factor F after the PSP's own vertex cap has set them, so every vertex of the PSP's

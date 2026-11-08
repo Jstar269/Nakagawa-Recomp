@@ -402,7 +402,7 @@ ge-cpu-profile-validate-selftest: $(RT_GE_O)
 
 native-core-tests: ge-cpu-profile-validate-selftest
 
-# ge-patch-tess-selftest - finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.13)
+# ge-patch-tess-selftest - finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14)
 # on the production GE object's software renderer: the SR_GE_PATCH_TESS settings and their Ace
 # gate; factor F on a guest division d draws byte for byte what the PSP draws at division d*F;
 # F*F times the quads; factor 1 is the default path; no background pixel between neighbouring

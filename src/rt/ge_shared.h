@@ -484,7 +484,7 @@ const uint32_t *ge_wide_canvas(uint32_t fb_addr, int *fmt);
  * backend declined, since the last reset. */
 void      ge_tnl_set_enabled(int on);
 void      ge_tnl_counts(unsigned long long *taken, unsigned long long *cpu, int reset);
-/* Finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.13): a host factor on the
+/* Finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14): a host factor on the
  * guest's PATCHDIVISION for triangle patches, from SR_GE_PATCH_TESS=off|2|3|4, taken only when
  * `enhanced` (the run's Ace switch) is set. ge_patch_tess_init prints the run's start line and
  * returns the factor in use (1: the PSP's division); ge_patch_tess_set is the selftest seam

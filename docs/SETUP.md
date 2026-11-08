@@ -87,6 +87,13 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
   frame, on the game's thread. Text drawn as triangles, or from a page in VRAM, is drawn as the game made it. The
   rules are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1013-sharp-game-text).
+- **Finer Bezier and spline patches (Ace Mode, development only).** It is reachable only through the
+  `SR_GE_PATCH_TESS` environment variable (`2`, `3` or `4`), has no setting in the player, and is not an admitted
+  Enhanced item, because it changes the frames the game can read back
+  ([section 11.3.6](ENHANCEMENT_CONTRACT.md#1136-finer-bezier-and-spline-patches-not-admitted)). Each curved patch
+  is drawn with factor x factor times the triangles, on the game's thread, up to 262144 vertices a draw, so a scene
+  with many patches takes longer to draw. The rules are in
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1014-finer-bezier-and-spline-patches).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release

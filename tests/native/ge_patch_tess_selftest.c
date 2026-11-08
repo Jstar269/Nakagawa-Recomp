@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 the Nakagawa Recomp authors
 //
-// ge-patch-tess-selftest: finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.13)
+// ge-patch-tess-selftest: finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14)
 // on the production GE object's software renderer. Source-owned display lists run through
 // ge_run_list(); the harness supplies guest memory and the runtime's diagnostic globals at their
 // disabled values. No game input.
