@@ -1614,13 +1614,15 @@ class LandingOnlyPoolRoutingTests(unittest.TestCase):
 
     def route(self, event_name: str, event: dict[str, object] | None = None, *, ref: str = "refs/pull/1/merge",
               switch: str = "landing", heartbeat: str = str(NOW - 30)) -> str:
-        return ci_paths_module.linux_runner(
+        runner: str = ci_paths_module.linux_runner(
             event_name, event or {}, repository=REPO, ref=ref, switch=switch, heartbeat=heartbeat, now=NOW)
+        return runner
 
     def codeql(self, event_name: str, event: dict[str, object] | None = None, *, ref: str = "refs/heads/main",
                switch: str = "landing") -> str:
-        return ci_paths_module.codeql_runner(
+        runner: str = ci_paths_module.codeql_runner(
             event_name, event or {}, repository=REPO, ref=ref, switch=switch, heartbeat=str(NOW - 30), now=NOW)
+        return runner
 
     def test_landing_runs_use_the_pool(self) -> None:
         self.assertEqual(self.route("push", ref="refs/heads/main"), SELF_HOSTED)

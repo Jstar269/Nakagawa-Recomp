@@ -70,7 +70,8 @@ class AttributeListTests(unittest.TestCase):
     def test_public_target_lists_stay_one_item_per_line(self) -> None:
         text = (ROOT / "mk" / "public_targets.mk").read_text(encoding="utf-8")
         block = re.search(r"(?ms)^PUBLIC_TARGETS := \\\n(.*?)^\n", text)
-        self.assertIsNotNone(block)
+        if block is None:
+            self.fail("mk/public_targets.mk has no PUBLIC_TARGETS block")
         lines = [l for l in block.group(1).splitlines()]
         for line in lines[:-1]:
             self.assertRegex(line, r"^\t[A-Za-z0-9_.%/+?-]+ \\$", "one target per line, each ending in a backslash")
