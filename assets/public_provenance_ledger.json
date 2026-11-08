@@ -1695,6 +1695,14 @@
       }
     },
     {
+      "path": "docs/RELEASE_NOTES_v0.0.2.md",
+      "classification": "reviewed_documentation",
+      "evidence": {
+        "source": "public documentation review",
+        "statement": "generic/public documentation; no private operational evidence"
+      }
+    },
+    {
       "path": "docs/RELEASE_SIGNING.md",
       "classification": "reviewed_documentation",
       "evidence": {

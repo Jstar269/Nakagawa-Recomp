@@ -15,7 +15,7 @@ Classes are listed strongest first. A path takes the first class whose source na
 | --- | --- |
 | `hardware-measured` | HLE: a `MEASURED` row of `tools/psp_oracle/manifest.json` whose committed citation names the API (the `HARDWARE_MEASURED` tier of `tools/hle_manifest.py --evidence-chain`). VFPU: census evidence tier `H`, or a selftest that compares the form with words a `MEASURED` oracle row recorded (`VFPU_MEASURED_SELFTESTS`). |
 | `ppsspp-derived` | HLE: PPSSPP is named in the handler's body or in the comment directly above it, in its `tools/hle_registry_meta.py` notes, or in a block comment that `PPSSPP_BLOCKS` ties to a family of handlers. VFPU: the form's AOT body calls a kernel from the `src/rt/recomp.c` section derived from PPSSPP's table-based kernels (`assets/vfpu/PROVENANCE.json`). |
-| `game-route` | No public, title-free record of the NIDs or forms a qualified title route exercised exists yet. |
+| `game-route` | No public, title-free record of the NIDs or forms a qualified title route exercised exists. |
 | `synthetic` | HLE: an executable host test enters the NID (`src/rt/intr_conformance.h` cells or `tests/native/hle_thread_selftest.c` dispatch), or the handler's notes cite a selftest, a `tools/test_*.py` module, a Makefile target or a synthetic fixture. VFPU: the census lists a differential test (synthetic corpus, fuzz or interpreter selftest). |
 | `unverified` | None of the above, or the NID routes to a generic success handler. |
 

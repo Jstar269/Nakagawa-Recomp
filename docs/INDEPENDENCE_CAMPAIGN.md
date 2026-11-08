@@ -116,7 +116,7 @@ Corrections to the mission list:
    **absent from the public tree**. The public-source profile
    (`assets/public_source_profile.json`, `exclude_paths`) excludes them;
    the public build links project-authored seams instead
-   (`iso_unavailable.c`, `audio_sdl3.c` (formerly `audio_unavailable.c`) and `pgd_unavailable.c`, all
+   (`iso_public.c`, `audio_sdl3.c` (formerly `audio_unavailable.c`) and `pgd_unavailable.c`, all
    `project_authored_attested`, and the project-authored PGF reader `pgf_public.c`,
    #349). They remain
    campaign items — a platform without ISO/VFS, audio, fonts, and
@@ -376,8 +376,7 @@ typed it).
    or repository history. Enforced by workspace construction (§5.2), not by
    asking nicely.
 3. **Similarity check before admission.** Proposed
-   `tools/similarity_check.py` (design, not yet built — building it is a
-   docs-allowed tooling task for a later session): token-sequence and
+   `tools/similarity_check.py` (a design; the tool does not exist): token-sequence and
    line-overlap comparison of the candidate against the removed derived
    file(s) plus pinned upstream blobs where available. Suggested admission
    thresholds (to be calibrated on G1 before they bind): normalised
