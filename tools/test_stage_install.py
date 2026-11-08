@@ -146,7 +146,7 @@ class InstallTests(unittest.TestCase):
             env={**os.environ, "NK_LNK": str(link)})
         target, arguments, workdir = result.stdout.strip().splitlines()
         self.assertEqual(Path(target), (dest / "bin" / "nakagawa_player.exe").resolve())
-        self.assertEqual(arguments, "--ui=next")
+        self.assertEqual(arguments, "")
         self.assertEqual(Path(workdir), (dest / "bin").resolve())
 
     @unittest.skipUnless(os.name == "nt", "Windows shortcuts")
@@ -344,7 +344,7 @@ class LinuxInstallTests(unittest.TestCase):
         section = parser["Desktop Entry"]
         player = str((dest / "bin" / "nakagawa_player").resolve())
         self.assertEqual(section["Type"], "Application")
-        self.assertEqual(shlex.split(section["Exec"]), [player, "--ui=next"])
+        self.assertEqual(shlex.split(section["Exec"]), [player])
         self.assertEqual(section["TryExec"], player)
         self.assertTrue(Path(section["TryExec"]).is_file())
         self.assertEqual(Path(section["Icon"]), icon)

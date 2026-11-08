@@ -22,7 +22,7 @@ The install uses the release layout the player already searches
 Only a folder this tool created (it holds ``.nakagawa-install.json``) is ever
 replaced, so pointing ``--dest`` at an unrelated folder fails closed. A
 shortcut is a Windows ``.lnk`` written through ``WScript.Shell``; it starts the
-player with ``--ui=next`` by default, the way Explorer would start it, and
+player with no arguments by default, the way Explorer would start it, and
 carries the player's AppUserModelID (``APP_USER_MODEL_ID``, #2006), so a pinned
 shortcut, the launcher and every game it starts share one taskbar group.
 ``--desktop-shortcut`` puts one on the Desktop and ``--start-menu-shortcut`` one
@@ -105,7 +105,7 @@ APP_USER_MODEL_ID = "Nakagawa.Recomp"
 APP_DESKTOP_ID = "nakagawa-recomp"
 DESKTOP_ENTRY_NAME = f"{APP_DESKTOP_ID}.desktop"
 DESKTOP_ICON_NAME = "nakagawa-recomp.png"
-DEFAULT_ARGUMENTS = "--ui=next"
+DEFAULT_ARGUMENTS = ""
 
 
 class InstallError(RuntimeError):
@@ -897,7 +897,7 @@ def main(argv=None) -> int:
     parser.add_argument("--shortcut", type=Path,
                         help="write the Windows shortcut at this exact .lnk path instead")
     parser.add_argument("--arguments", default=DEFAULT_ARGUMENTS,
-                        help=f"player arguments in the shortcut (default: {DEFAULT_ARGUMENTS})")
+                        help="player arguments in the shortcut (default: none)")
     parser.add_argument("--uninstall", action="store_true",
                         help="remove the install in --dest and the shortcuts and desktop entries "
                              "it recorded; never the per-user data folders")
