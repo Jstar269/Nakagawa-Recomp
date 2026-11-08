@@ -818,6 +818,138 @@ class TestProductionSmokePackage(unittest.TestCase):
         self.assertEqual(caught.exception.code, "PACKAGE_UNSUPPORTED_PATH")
         self.assertIn("characters the Make recipes cannot quote", str(caught.exception))
 
+    def test_spaced_profile_keeps_short_build_root_to_make(self):
+        """#2281: a package whose data folder has a space builds in the 8.3 short form
+        of that folder, and every path the planner derives from it, the staged guest
+        PRXs included, reaches Make in that form. On Windows Path.resolve() expands
+        an 8.3 alias back to the long, spaced name; this resolve does the same on any
+        host, so a check that resolves a staged path refuses a Make-safe build."""
+        long_root = self.root / "Spaced Profile"
+        alias_root = self.root / "short_alias_root"
+        for directory in (long_root, alias_root):
+            directory.mkdir()
+        module_dir = long_root / "disc modules"
+        module_dir.mkdir()
+        (module_dir / "block.i3d.prx").write_bytes(build_synthetic_decrypted_prx())
+        output_dir = long_root / "packages" / "pkg"
+        manifest = json.loads(json.dumps(self.manifest))
+        manifest["modules"] = [{
+            "name": "block.i3d.prx",
+            "role": "guest-prx",
+            "required": True,
+            "placement": "runtime",
+            "guest_path": "disc0:/PSP_GAME/USRDIR/block.i3d.prx",
+        }]
+        # Every input lives under the spaced folder, as a cached disc's do, so each
+        # one is staged into the build workspace.
+        inputs = long_root / "disc files"
+        inputs.mkdir()
+        manifest_path = inputs / "title manifest.json"
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+        game_elf = inputs / "EBOOT.BIN"
+        shutil.copyfile(self.fixture_dir / "guest.prx", game_elf)
+        psp_header = inputs / "EBOOT header.psp"
+        shutil.copyfile(self.fixture_dir / "guest.psp", psp_header)
+
+        path_class = type(self.root)
+        real_resolve = path_class.resolve
+        real_which = shutil.which
+        real_run = subprocess.run
+
+        def short_path(path):
+            # GetShortPathNameW: the alias of the spaced folder, absolute, not resolved.
+            relative = Path(path).relative_to(long_root)
+            return alias_root.joinpath(relative)
+
+        def expanding_resolve(path, strict=False):
+            resolved = real_resolve(path, strict=strict)
+            if resolved.is_relative_to(alias_root):
+                return long_root.joinpath(resolved.relative_to(alias_root))
+            return resolved
+
+        make_calls = []
+
+        def record_make(command, *args, **kwargs):
+            if command and command[0] == "/toolchain/make":
+                make_calls.append((list(command), dict(kwargs["env"])))
+                return subprocess.CompletedProcess(command, 0)
+            return real_run(command, *args, **kwargs)
+
+        with (
+            mock.patch.dict(os.environ, {}, clear=False),
+            mock.patch.object(title_codegen_plan, "_windows_short_path", side_effect=short_path),
+            mock.patch.object(path_class, "resolve", expanding_resolve),
+            mock.patch.object(title_codegen_plan.shutil, "which", side_effect=lambda name, **kw: (
+                f"/toolchain/{name}" if name in {"make", "gcc"} else real_which(name, **kw))),
+            mock.patch.object(title_codegen_plan, "_version_identity",
+                              return_value=("synthetic 1.0", "synthetic 1.0")),
+            mock.patch.object(title_codegen_plan.subprocess, "run", side_effect=record_make),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(title_codegen_plan.PackageRouteError) as caught,
+        ):
+            os.environ.pop("NK_BUILD_ROOT", None)
+            os.environ["CC"] = "gcc"
+            title_codegen_plan.build_package(
+                manifest,
+                manifest_path=manifest_path,
+                game_elf=game_elf,
+                psp_header=psp_header,
+                module_dir=module_dir,
+                output_dir=output_dir,
+                make_command="make",
+            )
+        # Make was recorded, not run, so the package is incomplete; any path refusal
+        # would have stopped the route before Make with PACKAGE_UNSUPPORTED_PATH.
+        self.assertEqual(caught.exception.code, "PACKAGE_BUILD_INCOMPLETE", caught.exception)
+        self.assertTrue(make_calls)
+        path_keys = ("GAME_ELF", "GAME_PSP_HEADER", "TITLE_MANIFEST", "BUILD_DIR", "LINK_MAP")
+        for command, environment in make_calls:
+            for argument in command[1:]:
+                self.assertFalse(title_codegen_plan._make_unsafe(argument), argument)
+            for key in path_keys:
+                value = environment[key]
+                self.assertFalse(title_codegen_plan._make_unsafe(value), (key, value))
+                self.assertTrue(Path(value).is_relative_to(alias_root), (key, value))
+            extra = environment["GAME_EXTRA_ELFS"].split(" ")
+            self.assertEqual(len(extra), 1, extra)
+            module_path = extra[0].rsplit("@", 1)[0]
+            self.assertTrue(Path(module_path).is_relative_to(alias_root), module_path)
+            self.assertEqual(Path(module_path).name, "block.i3d.prx")
+            self.assertEqual(Path(module_path).parent.name, "modules")
+
+    def test_spaced_enhancement_data_root_uses_short_form_or_is_refused(self):
+        """#2281: the data root is read in place and interpolated into the codegen
+        recipe, so a spaced one is named by its short form, or refused by name."""
+        spaced = self.root / "Spaced Data" / "title files"
+        spaced.mkdir(parents=True)
+        alias = self.root / "short_alias_data"
+        with mock.patch.object(title_codegen_plan, "_windows_short_path", return_value=alias):
+            self.assertEqual(
+                title_codegen_plan._make_safe_directory(spaced, "enhancement data root"), alias
+            )
+        for unavailable in (None, self.root / "Still Spaced"):
+            with (
+                mock.patch.object(title_codegen_plan, "_windows_short_path",
+                                  return_value=unavailable),
+                self.assertRaises(title_codegen_plan.PackageRouteError) as caught,
+            ):
+                title_codegen_plan._make_safe_directory(spaced, "enhancement data root")
+            self.assertEqual(caught.exception.code, "PACKAGE_UNSUPPORTED_PATH")
+            self.assertIn("enhancement data root", str(caught.exception))
+        safe = self.root / "safe_data"
+        safe.mkdir()
+        self.assertEqual(
+            title_codegen_plan._make_safe_directory(safe, "enhancement data root"),
+            safe.resolve(),
+        )
+
+    def test_unsafe_path_refusal_does_not_claim_pending_work(self):
+        with self.assertRaises(title_codegen_plan.PackageRouteError) as caught:
+            title_codegen_plan._require_make_safe(self.root / "has space.prx", "guest PRX x")
+        self.assertEqual(caught.exception.code, "PACKAGE_UNSUPPORTED_PATH")
+        self.assertNotIn("in the works", str(caught.exception))
+        self.assertNotIn("#296", str(caught.exception))
+
     def test_package_builds_to_spaced_destination_via_nk_build_root(self):
         required = ("mingw32-make", "gcc", "pwsh")
         if not all(shutil.which(name) for name in required):
