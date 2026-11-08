@@ -2371,9 +2371,9 @@ def build_package(
             build_environment["ENHANCEMENT_PACKAGE"] = enhancement_package_path.as_posix()
             if enhancement_data_root is not None:
                 build_environment["ENHANCEMENT_DATA_ROOT"] = enhancement_data_root.as_posix()
-        build_plan = _host_package_build_plan(build_environment["CHUNK_TARGET_BYTES"])
-        build_jobs = build_plan.jobs
-        print(f"PACKAGE_BUILD_JOBS: {build_jobs} ({build_plan.reason})", flush=True)
+        jobs_plan = _host_package_build_plan(build_environment["CHUNK_TARGET_BYTES"])
+        build_jobs = jobs_plan.jobs
+        print(f"PACKAGE_BUILD_JOBS: {build_jobs} ({jobs_plan.reason})", flush=True)
         progress_text = os.environ.get(COMPILE_PROGRESS_FILE_ENV, "")
         progress_file = Path(progress_text) if progress_text else None
         build_environment.pop(COMPILE_PROGRESS_FILE_ENV, None)
@@ -2385,7 +2385,7 @@ def build_package(
         )
         for target in _make_build_targets(native_only=pregenerated, aot_stage=aot_stage):
             jobs = build_jobs
-            plan = build_plan
+            job_plan = jobs_plan
             if target == "compile":
                 # Make executes the per-unit levels: refuse content codegen did not write. A
                 # missing file runs nothing, and is refused with the other missing outputs.
@@ -2394,12 +2394,12 @@ def build_package(
                     _read_unit_fallbacks(opt_makefile)
                 # The units exist now: one larger than the chunk target needs its own budget.
                 largest = _largest_generated_unit(build_workspace, selected_name)
-                plan = _host_package_build_plan(
+                job_plan = _host_package_build_plan(
                     build_environment["CHUNK_TARGET_BYTES"], largest)
-                jobs = plan.jobs
-                if jobs != build_jobs or plan.memory_short:
+                jobs = job_plan.jobs
+                if jobs != build_jobs or job_plan.memory_short:
                     print(f"PACKAGE_BUILD_JOBS: {jobs} for compile, largest unit {largest} bytes "
-                          f"({plan.reason})", flush=True)
+                          f"({job_plan.reason})", flush=True)
             command = _make_build_command(make_executable, target, jobs=jobs)
             try:
                 if target == "compile" and (progress_file is not None or object_cache is not None):
@@ -2411,7 +2411,7 @@ def build_package(
                         object_cache=object_cache,
                         library_cache=library_cache,
                         build_dir=build_workspace.as_posix(),
-                        plan=plan,
+                        plan=job_plan,
                     )
                 else:
                     returncode = subprocess.run(
