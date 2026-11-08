@@ -36,9 +36,9 @@ Every derived file below is labelled `derived-translated` in the trusted provena
     the five upstream commits to `Core/ELF/PrxDecrypter.*` and `ext/libkirk` between the pin and
     `5b3ddcc0628585b7b091c9a9904dba58bb4118c8` found no new or changed game key, tag recipe or cipher fix missing here;
   - the type-3 DRM BB patch tag `0x89742B04`, the SPRX decrypt-mode pad `xor_91E0A9AD` and the KIRK command-2 results,
-    which need the installing console's context (PBP/NPDRM, a later phase);
+    which need the installing console's context (PBP/NPDRM);
   - amctrl's fixed-key tables (`key_357C`, `key_363C`, `dnas_key1A90`, `dnas_key1AA0`), which only PGD data and
-    `sceNpDrmGetFixedKey` use (a later phase);
+    `sceNpDrmGetFixedKey` use;
   - every KIRK value no game recipe uses: curve 2, the signing key `kirk16_key`, and the keyvault rows no included
     recipe names (among them `0x4E`, the updater's, and `0x52`, the Media Engine image's).
 - Regenerating: the table is a mechanical extraction of the two pinned files under the rules above. A refresh pins a new

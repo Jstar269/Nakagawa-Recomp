@@ -2,7 +2,7 @@
 
 Nakagawa Recomp has three related but distinct engineering products. Keeping them separate prevents
 HST-specific compatibility work, private reverse-engineering artifacts, and reusable PSP tooling
-from becoming indistinguishable in code review or a future public release.
+from becoming indistinguishable in code review or a public release.
 
 ## Product 1 — Hot Shots Tennis recompilation
 
@@ -19,7 +19,7 @@ oracle traces, screenshots/frame dumps, and any locally supplied game-specific k
 provenance records that do not contain or reconstruct copyrighted game expression.
 
 Product 1 is not a game download, emulator distribution, or substitute source release of the game.
-The active public repository and any future release must not contain the game or
+The active public repository and every release must not contain the game or
 a mechanically translated distribution of its implementation.
 
 ## Product 2 — Hot Shots Tennis decompilation/reconstruction
@@ -88,22 +88,17 @@ See [`LLE_FIDELITY_ARCHITECTURE.md`](LLE_FIDELITY_ARCHITECTURE.md) for the fidel
 
 The project intends to:
 
-- keep publishing Windows releases with build provenance attestations after the first, v0.0.1 (2026-10-28)
-  ([#278](https://github.com/Jstar269/nakagawa-recomp/issues/278));
+- keep publishing Windows releases with build provenance attestations, as v0.0.1 (2026-10-28) and v0.0.2 did;
 - broaden title support through generic fixes rather than per-title patches
-  ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)). PAC-MAN Championship Edition already reaches
-  its menu and plays a stage with no title-specific branch; the next milestone takes one such title through a
-  documented gameplay scenario that saves, closes and resumes in the native player, with no title-specific branch
-  or HLE override ([#1126](https://github.com/Jstar269/nakagawa-recomp/issues/1126));
+  ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)). PAC-MAN Championship Edition reaches
+  its menu, plays a stage, and saves, closes and resumes in the native player with no title-specific branch
+  or HLE override ([#1126](https://github.com/Jstar269/nakagawa-recomp/issues/1126), met 2026-10-28);
 - extend the [title qualification route](TITLE_TESTING.md) past boot, so menus, gameplay, saving, loading, movies,
   rendering and recovery are each reported, and a stage that was not proven reads `NOT_RUN`, `BLOCKED` or `SKIP`.
   Retail titles stay local-only: a run on a user's own game is recorded outside the public tree, and only a
   public-safe summary is published;
 - deliver one-click play from a PSP ISO the user owns, without the developer toolchain
   ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)), within the lawful-input and fail-closed rules;
-- finish moving the player interface onto one controller-first UI on SDL3 with the Clay layout library: the launcher,
-  Settings and the setup wizard use it today, and the in-game overlay is next
-  ([#1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159));
 - move more of the runtime from high-level emulation to low-level emulation, measured against a physical PSP;
 - bring the player to Linux, macOS and Android ([#306](https://github.com/Jstar269/nakagawa-recomp/issues/306),
   [#329](https://github.com/Jstar269/nakagawa-recomp/issues/329),
