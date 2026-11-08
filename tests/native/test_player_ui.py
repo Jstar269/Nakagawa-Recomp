@@ -2223,9 +2223,8 @@ class NativePlayerUiTests(unittest.TestCase):
         lines = []
         for line in stdout.splitlines():
             if line.startswith(prefix):
-                value, warns, note = line[len(prefix):].split("|", 2)
-                lines.append({"value": value[len("value="):], "warns": warns[len("warns="):],
-                              "note": note[len("note="):]})
+                value, note = line[len(prefix):].split("|", 1)
+                lines.append({"value": value[len("value="):], "note": note[len("note="):]})
         return lines
 
     def test_next_ui_graphics_preset_writes_its_settings(self) -> None:
@@ -2243,14 +2242,12 @@ class NativePlayerUiTests(unittest.TestCase):
         lines = self.preset_lines(run)
         self.assertEqual([line["value"] for line in lines], ["Custom", "Low", "Medium"],
                          run["stdout"])
-        self.assertEqual((lines[0]["warns"], lines[0]["note"]), ("0", ""),
+        self.assertEqual((lines[0]["note"],), ("",),
                          "a new library starts on Custom, with the page's own line")
         medium = lines[-1]
-        self.assertEqual(medium["warns"], "0")
         self.assertEqual(medium["note"],
-                         "Medium is used in Enhanced and Ace. Authentic uses your own display "
-                         "settings.")
-        self.assertNotIn("FSR 1", medium["note"])
+                         "Medium is used in Enhanced and Ace, with crisp text and FSR 1 on. "
+                         "Authentic uses your settings.")
         settings = run["settings"]
         assert isinstance(settings, dict)
         self.assertEqual(settings.get("graphics_preset"), "medium", "two steps: Low, then Medium")
@@ -2261,8 +2258,9 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIs(settings.get("fullscreen"), False)
 
     def test_next_ui_graphics_preset_ultra_note_and_custom_on_edit(self) -> None:
-        """#2150: Ultra's note says it does not turn on Sharper enlarging, in the warning colour;
-        editing a row the preset sets (Resolution) makes it Custom and the note goes."""
+        """#2150: Ultra's row reads Ultra and its note names the Enhanced parts it turns on,
+        High's the one it turns off; editing a row the preset sets (Resolution) makes it Custom
+        and the note goes."""
         focus = self.SETTINGS_FOCUS
         run = self.next_ui_run(
             "settings",
@@ -2279,13 +2277,11 @@ class NativePlayerUiTests(unittest.TestCase):
                          ["Custom", "Low", "Medium", "High", "Ultra", "Custom"],
                          run["stdout"])
         ultra = lines[4]
-        self.assertEqual(ultra["warns"], "1", "Ultra's note says it does not turn on Sharper enlarging")
         self.assertIn("Ultra is used in Enhanced and Ace", ultra["note"])
-        self.assertIn("not turning on Sharper enlarging", ultra["note"])
-        self.assertIn("Authentic uses your own display settings", ultra["note"])
-        self.assertEqual(lines[3]["warns"], "0")
-        self.assertNotIn("Sharper enlarging", lines[3]["note"])
-        self.assertEqual((lines[-1]["warns"], lines[-1]["note"]), ("0", ""),
+        self.assertIn("with crisp text and FSR 1 on", ultra["note"])
+        self.assertIn("Authentic uses your settings", ultra["note"])
+        self.assertIn("with crisp text on and FSR 1 off", lines[3]["note"])
+        self.assertEqual((lines[-1]["note"],), ("",),
                          "an edited row makes the preset Custom and its note goes")
         settings = run["settings"]
         assert isinstance(settings, dict)
@@ -2364,6 +2360,27 @@ class NativePlayerUiTests(unittest.TestCase):
         trail = self.focus_trail(page)
         self.assertEqual(trail[-2:], [focus["ace_mode"], focus["ace_open"]],
                          "the page opens on its play mode and Back focuses the row that opened it")
+
+    def test_next_ui_enhanced_page_shows_the_graphics_presets_parts(self) -> None:
+        """#2150: with Ultra chosen, Settings > Enhanced shows the parts the preset sets with
+        its values and name, over the library's own (both off here); the other parts keep
+        the library's value."""
+        run = self.next_ui_run(
+            "settings",
+            ("WAIT_MS=100",) + ("KEY_DOWN",) * 5 + ("KEY_RETURN", "WAIT_MS=150", "KEY_ESCAPE",
+                                                     "WAIT_MS=100"),
+            settings={"graphics_preset": "ultra",
+                      "enhanced": {"default": "enhanced", "af": "4", "text": "off",
+                                   "readout": "off", "notice": "on", "smooth": "off",
+                                   "upscale": "off"}},
+        )
+        pages = [page for page in self.enhanced_pages(run) if page.get("title") == "library"]
+        self.assertTrue(pages, run["stdout"])
+        page = pages[-1]
+        self.assertEqual(page["text"], "On (Ultra)", page)
+        self.assertEqual(page["upscale"], "FSR 1 (Ultra)", page)
+        self.assertNotIn("(Ultra)", page["af"], "texture filtering is the library's own")
+        self.assertNotIn("(Ultra)", page["smooth"])
 
     def test_a_dedicated_data_root_keeps_everything_out_of_the_default_profile(self) -> None:
         """--user-data-root=<folder> opens the player on a second profile, for example a

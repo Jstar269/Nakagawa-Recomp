@@ -1502,8 +1502,13 @@ const char *player_present_scaling_label(int scaling);
    uses the rows as the user set them, whatever the preset: a render scale above 1x is
    guest-visible (every present commits to VRAM, docs/ENHANCEMENT_CONTRACT.md), so a
    preset must not reach Authentic launch output. Editing one of the rows a preset sets
-   makes it Custom, which means the rows apply everywhere. The play mode, the Enhanced
-   parts and the launch line are not in the table. */
+   makes it Custom, which means the rows apply everywhere. The play mode is not in the table.
+   A row also sets some Enhanced parts (PlayerGraphicsPresetRow.part) in place of the
+   library's values: player_play_resolve uses them, so the launch line, the upscaler and the
+   Enhanced pages agree. A game's own value for a part still wins over the preset. Editing a
+   part the preset sets, for the library, makes the preset Custom; editing it for one game
+   does not. Going Custom by any edit copies the preset's parts into the library's, so Custom
+   keeps what the pages showed. */
 typedef enum {
     PLAYER_PRESET_CUSTOM = 0,
     PLAYER_PRESET_LOW,
@@ -1522,7 +1527,9 @@ typedef struct {
     int present_scaling;  /* NK_PRESENT_SCALING_* */
     bool vsync;
     int fullscreen;       /* 1 on, 0 off, -1 left as the user set it */
-    bool upscaler;        /* the note says the preset does not turn on Sharper enlarging (#2122) */
+    /* Each Enhanced part's value under this preset, or -1 where the library's own value
+       stays. Only presentation parts are set: Crisp system text and Sharper enlarging. */
+    int part[PLAYER_PART_COUNT];
 } PlayerGraphicsPresetRow;
 
 /* The preset's row; NULL for Custom or a value out of range. */
@@ -1531,12 +1538,11 @@ const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset);
 int player_app_graphics_preset(const PlayerApp *app);
 /* The Settings row's value: "Low", ..., "Ultra", "Handheld", or "Custom". */
 const char *player_app_graphics_preset_label(const PlayerApp *app);
-/* The main Settings page's notice line while a preset is chosen: where it applies, and a
-   value it asks for that Settings cannot set. Returns false, with out empty, for Custom.
-   *warns is set when the note names a value that is not set. Derived from the choice, so
-   it goes when the preset becomes Custom and comes back with a saved preset. */
-bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap,
-                                     bool *warns);
+/* The main Settings page's notice line while a preset is chosen: where it applies, and the
+   Enhanced parts it turns on and off. Returns false, with out empty, for Custom.
+   Derived from the choice, so it goes when the preset becomes Custom and comes back with a
+   saved preset. */
+bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap);
 /* Chooses the preset. The rows keep their values: only Enhanced and Ace sessions use the
    preset's. */
 void player_app_apply_graphics_preset(PlayerApp *app, int preset);
@@ -1547,6 +1553,9 @@ void player_app_cycle_graphics_preset(PlayerApp *app, int direction);
    Authentic session, or Custom, leaves `config` as it is. */
 void player_session_apply_graphics_preset(const PlayerSettings *settings, bool enhanced,
                                           NkRuntimeConfig *config);
+/* The library's value for an Enhanced part as an Enhanced or Ace session uses it: the chosen
+   preset's where it sets the part, else the library's own (settings->enhanced.part). */
+int player_settings_library_part(const PlayerSettings *settings, int part);
 void player_app_set_fps_cap(PlayerApp *app, int cap);
 void player_app_cycle_fps_cap(PlayerApp *app, int direction);
 void player_app_toggle_fullscreen(PlayerApp *app);
