@@ -54,7 +54,9 @@ symbols, WGL4 Cyrillic and nine mathematical symbols), and every face covers
 all of them. The larger size is built at 20 ppem and the smaller at 13 ppem,
 with the converter's synthetic emboldening and a per-face tracking (and, for
 the sans-serif faces, tabular digits) chosen so that each face's line widths
-come within 3 % of the console font it stands in for.
+come within 3 % of the console font it stands in for. The sans-serif faces also
+thicken horizontal strokes (`--embolden-y`), so that a letter carries the ink
+of the console's within 4 % (#1300).
 
 M PLUS 1p was the first project Japanese build input. Its pin uses the immutable
 Google Fonts commit recorded in `mplus1p/PIN.json`; the adjacent `OFL.txt`

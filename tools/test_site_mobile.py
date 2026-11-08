@@ -413,7 +413,8 @@ DOWNLOAD_TABLE_JS = r"""
     const ver = row.querySelector('td.ver');
     const head = document.createRange();
     head.setStart(ver, 0);
-    head.setEndAfter(ver.querySelector('.latest'));
+    // Only the newest row has the Latest badge; an older row's version is its first text node.
+    head.setEndAfter(ver.querySelector('.latest') || ver.firstChild);
     if (spread(head) > 8) out.wrapped.push(`version "${head.toString().trim()}"`);
     for (const el of row.querySelectorAll('.plat, .meta, td.rel, td.size, .btn')) {
       out.shown[el.className] = shown(el);
