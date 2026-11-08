@@ -847,6 +847,7 @@ set(NK_RUNTIME_SOURCES
     src/rt/hle_system.c
     src/rt/hle_umd.c
     src/rt/hle_utility.c
+    src/rt/hle_videocodec.c
     src/rt/audio_resample.c
     src/rt/flash0_font.c
     src/rt/mp3_bridge.c

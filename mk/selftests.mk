@@ -1304,3 +1304,19 @@ selftest:
 		-DSR_SELFTEST_ONLY -fno-exceptions
 	$(BUILD_DIR)/selftest.exe
 	@echo "selftest passed"
+
+# videocodec-selftest -- the Media Engine boundary a disc mpeg.prx calls as LLE (#286):
+# sceVideocodec, sceMpegbase and sceAudiocodec (ATRAC3plus) in src/rt/hle_videocodec.c, over the host ME RAM model and the
+# H.264 backend seam. The harness #includes recomp.c, cpu_lle.c and hle_videocodec.c, so a scratch
+# copy of hle_videocodec.c earlier on the include path replaces it for a mutation run, and links
+# the backend this build selects: Media Foundation on Windows, the FFmpeg subset where
+# H264_FFMPEG=1. With neither, h264_null.c fails closed and the decode cases report SKIP.
+videocodec-selftest: $(GENERIC_TITLE_CONFIG_HEADER) $(H264_SUB_OBJS)
+	$(CC) $(CFLAGS) $(HLE_INCLUDES) -I$(GENERIC_TITLE_CONFIG_DIR) $(LDFLAGS) -o $(BUILD_DIR)/videocodec_selftest.exe \
+		tests/native/videocodec_selftest.c src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/guest_interp.c src/rt/domain_mode.c src/rt/stale_code.c src/rt/vfpu_tables.c src/rt/title_config.c src/rt/perf.c \
+		src/rt/psmf_producer.c src/rt/h264_null.c src/rt/h264_mf.c src/rt/h264_ffmpeg.c $(H264_SUB_OBJS) \
+		src/rt/atrac3p_bridge.c $(ATRAC3P_SRCS) $(PSMF_MEDIA_LIBS) -lm
+	$(BUILD_DIR)/videocodec_selftest.exe
+
+# The hosted gate for the boundary: native-core-tests runs on every pull request.
+native-core-tests: videocodec-selftest

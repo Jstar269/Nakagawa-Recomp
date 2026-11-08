@@ -109,7 +109,7 @@ HLE_SRCS   := src/rt/hle.c src/rt/hle_audio.c src/rt/hle_audio_codec.c src/rt/hl
               src/rt/hle_kernel_thread.c src/rt/hle_kernel_time.c src/rt/hle_kernel_utils.c \
               src/rt/hle_mpeg.c src/rt/hle_network.c src/rt/hle_npdrm.c src/rt/hle_power.c \
               src/rt/hle_route.c src/rt/hle_rtc.c src/rt/hle_system.c src/rt/hle_umd.c \
-              src/rt/hle_utility.c
+              src/rt/hle_utility.c src/rt/hle_videocodec.c
 HLE_HDRS   := src/rt/hle_internal.h src/rt/hle_power.h
 HLE_OBJS   := $(addprefix $(BUILD_DIR)/,$(notdir $(HLE_SRCS:.c=.o)))
 
