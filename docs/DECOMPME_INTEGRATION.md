@@ -1,6 +1,6 @@
 # decomp.me integration (decompilation track)
 
-**Status: forward-looking plan + a first read-only tool.** This is decompilation
+**Status: a read-only exporter (`tools/decompme_export.py`) and notes on using decomp.me with it; steps 3 to 8 below are not built.** This is decompilation
 infrastructure. It does **not** touch the recompiler (`codegen.py`) or the
 runtime. Game-derived output stays outside the public candidate; see
 [`PUBLICATION_READINESS.md`](PUBLICATION_READINESS.md) for the boundary.
@@ -38,7 +38,7 @@ Target-game assembly is proprietary-derived (see the publication review). Theref
 - **Do not upload retail-game functions to the public service.** Its privacy policy
   retains submitted scratch data and allows public exports.
 - The exporter writes only to the **gitignored build dir** and never uploads. Any
-  submission (even local) is a separate, deliberate step; a future `--submit` must
+  submission (even local) is a separate, deliberate step; the exporter has no submit option, and one added later must
   default to `localhost` and require an explicit `--allow-external-upload` for the
   public service.
 - Matched source and symbols are **game data** and stay in a private local
@@ -128,7 +128,9 @@ fn, a stack-frame fn, an FP fn, a switch/jump-table fn, one Allegrex-specific fn
 one VFPU-heavy fn. If the last two fail, prefer the `target.o` object path (already
 the default here) and/or contribute Allegrex assembler support upstream.
 
-## Staged plan
+## Steps
+
+Step 2 is built. Steps 3 to 8 are not.
 
 1. **Self-host** decomp.me locally; manually create one PSP scratch from a simple HST
    function; try GCC / SNC / several CodeWarrior builds.
