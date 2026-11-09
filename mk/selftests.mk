@@ -875,7 +875,9 @@ asset-index-selftest:
 # The scaled-upload case (#1296), the per-fragment mip level case (#1373), the readback-rows
 # case (#323, also on its SR_GPU_READBACK_FULL reference path), the undrawn-rows case and the
 # widescreen Fill case (#1881) run again alone at render scales 2 and 4; the sprite-scaled and
-# uv-edge-clamp cases (#2110) run alone at scales 2, 3 and 4. Each is selected by arguments: a
+# uv-edge-clamp cases (#2110) run alone at scales 2, 3 and 4; rtt-scale (#2052: a quarter-size
+# render target sampled back, linear, at the render scale and not at 1x) runs alone at scales 2
+# and 4 (the whole-suite run covers 1x). Each is selected by arguments: a
 # VAR=value prefix needs a POSIX shell, and cmd.exe does not take one. The host twin (#2050) runs
 # after them: twin-off runs of twin-scene write reference files that the twin-on runs at the
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
@@ -919,6 +921,8 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 2 --case uv-edge-clamp
 	$(GPU_COHERENCE_BIN) --scale 3 --case uv-edge-clamp
 	$(GPU_COHERENCE_BIN) --scale 4 --case uv-edge-clamp
+	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-scale
+	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-scale
 	$(GPU_COHERENCE_BIN) --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
 	$(GPU_COHERENCE_BIN) --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
