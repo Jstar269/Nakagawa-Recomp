@@ -227,6 +227,98 @@ void nk_shared_boot_event_vwrite(FILE *stderr_stream, uint64_t timestamp_ns,
     fclose(file);
 }
 
+static const char *const k_render_fallback_names[NK_RENDER_FALLBACK_COUNT] = {
+    "none", "gdi_presenter", "software_ge"
+};
+
+NkRenderPath nk_render_path_from_init(bool vulkan_asked, bool vulkan_started,
+                                      bool gpu_ge_asked, bool gpu_ge_started) {
+    NkRenderPath path;
+    /* The GPU GE renderer draws only into the Vulkan presenter. */
+    path.vulkan = vulkan_asked && vulkan_started;
+    path.gpu_ge = path.vulkan && gpu_ge_asked && gpu_ge_started;
+    if (vulkan_asked && !vulkan_started) {
+        path.fallback = NK_RENDER_FALLBACK_GDI_PRESENTER;
+    } else if (path.vulkan && gpu_ge_asked && !gpu_ge_started) {
+        path.fallback = NK_RENDER_FALLBACK_SOFTWARE_GE;
+    } else {
+        path.fallback = NK_RENDER_FALLBACK_NONE;
+    }
+    return path;
+}
+
+const char *nk_render_fallback_name(NkRenderFallback fallback) {
+    return (unsigned)fallback < NK_RENDER_FALLBACK_COUNT ? k_render_fallback_names[fallback]
+                                                          : NULL;
+}
+
+int nk_render_path_event_format(const NkRenderPath *path, char *out, size_t out_capacity) {
+    const char *fallback = path ? nk_render_fallback_name(path->fallback) : NULL;
+    if (!out || out_capacity == 0u) return 0;
+    out[0] = '\0';
+    if (!fallback) return 0;
+    int written = snprintf(out, out_capacity,
+                           "BOOT_EVENT phase=render_path presenter=%s ge=%s fallback=%s",
+                           path->vulkan ? "vulkan" : "gdi", path->gpu_ge ? "gpu" : "software",
+                           fallback);
+    if (written <= 0 || (size_t)written >= out_capacity) {
+        out[0] = '\0';
+        return 0;
+    }
+    return written;
+}
+
+/* The value after " key=" in line, up to the next space or line end; false when absent. */
+static bool event_value(const char *line, const char *key, const char **value, size_t *length) {
+    size_t key_length = strlen(key);
+    for (const char *at = strchr(line, ' '); at != NULL; at = strchr(at + 1, ' ')) {
+        if (strncmp(at + 1, key, key_length) == 0 && at[1 + key_length] == '=') {
+            *value = at + 2 + key_length;
+            *length = strcspn(*value, " \r\n");
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool event_value_is(const char *value, size_t length, const char *word) {
+    return length == strlen(word) && strncmp(value, word, length) == 0;
+}
+
+bool nk_render_path_event_parse(const char *line, NkRenderPath *out) {
+    static const char prefix[] = "BOOT_EVENT phase=render_path ";
+    const char *value;
+    size_t length;
+    NkRenderPath path;
+    if (!line || !out || strncmp(line, prefix, sizeof(prefix) - 1u) != 0) return false;
+    if (!event_value(line, "presenter", &value, &length)) return false;
+    if (event_value_is(value, length, "vulkan")) {
+        path.vulkan = true;
+    } else if (event_value_is(value, length, "gdi")) {
+        path.vulkan = false;
+    } else {
+        return false;
+    }
+    if (!event_value(line, "ge", &value, &length)) return false;
+    if (event_value_is(value, length, "gpu")) {
+        path.gpu_ge = true;
+    } else if (event_value_is(value, length, "software")) {
+        path.gpu_ge = false;
+    } else {
+        return false;
+    }
+    if (!event_value(line, "fallback", &value, &length)) return false;
+    path.fallback = NK_RENDER_FALLBACK_COUNT;
+    for (int i = 0; i < NK_RENDER_FALLBACK_COUNT; ++i) {
+        if (event_value_is(value, length, k_render_fallback_names[i])) {
+            path.fallback = (NkRenderFallback)i;
+        }
+    }
+    if (path.fallback == NK_RENDER_FALLBACK_COUNT) return false;
+    *out = path;
+    return true;
+}
+
 int nk_shared_boot_event_format_path(char *out, size_t out_capacity,
                                     const char *cache_dir, char separator,
                                     unsigned long process_id, unsigned int sequence) {
