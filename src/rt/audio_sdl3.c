@@ -44,6 +44,7 @@ typedef struct {
     uint64_t channel_pushed_frames[SR_AUDIO_CHANNELS];
     uint64_t underrun_events;
     uint64_t overrun_events;
+    uint64_t overrun_frames;   /* frames those events dropped (#2163) */
     uint64_t backpressure_events;
     uint64_t pause_enters;
     uint64_t pause_held_frames;
@@ -565,6 +566,30 @@ int sr_audio_init(void) {
     return 0;
 }
 
+/* A push the full mixer drops is host playback falling behind the guest (a run faster than real
+ * time). The guest does not see it: under SR_DETERMINISTIC_CLOCK=1 it paces against its own model
+ * (hle_audio.c). It stays visible here with counts, on the first drop and then each time the
+ * count of dropped pushes doubles, and in AUDIOSTAT_HOST at exit. */
+static void audio_note_overrun(int ch, int nframes) {
+    const uint64_t n = s_stats.overrun_events;
+    if (n & (n - 1u)) return;
+    fprintf(stderr, "audio: host mixer queue is full (%d frames) on channel %d: dropped %d frames; "
+                    "%llu pushes and %llu frames dropped so far (the guest is not affected under "
+                    "SR_DETERMINISTIC_CLOCK=1)\n",
+            SR_AUDIO_MAX_QUEUED_FRAMES, ch, nframes, (unsigned long long)n,
+            (unsigned long long)s_stats.overrun_frames);
+}
+
+/* The other side: a push that finds a channel that was playing already dry is host playback that
+ * ran ahead of the guest. Counted in underrun_events; logged the same way. */
+static void audio_note_underrun(int ch) {
+    const uint64_t n = s_stats.underrun_events;
+    if (n & (n - 1u)) return;
+    fprintf(stderr, "audio: host mixer underrun on channel %d: the queue ran dry; %llu so far (the guest "
+                    "is not affected under SR_DETERMINISTIC_CLOCK=1)\n",
+            ch, (unsigned long long)n);
+}
+
 void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     if (ch < 0 || ch >= SR_AUDIO_CHANNELS || !lr || nframes <= 0) {
         return;
@@ -590,6 +615,7 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     /* Instrumentation: underrun detection (queue had completely dried up after previous activity) */
     if (cur_queued_frames == 0 && s_stats.channel_pushed_frames[ch] > 0) {
         s_stats.underrun_events++;
+        audio_note_underrun(ch);
     }
 
     /* Instrumentation: backpressure detection (queue has more than two periods of lead) */
@@ -600,6 +626,8 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     /* Backpressure ceiling: drop samples if queue has grown excessively to protect memory */
     if (cur_queued_frames >= SR_AUDIO_MAX_QUEUED_FRAMES) {
         s_stats.overrun_events++;
+        s_stats.overrun_frames += (uint64_t)nframes;
+        audio_note_overrun(ch, nframes);
         return;
     }
 
@@ -973,6 +1001,10 @@ void sr_audio_dump_stats(void) {
             (unsigned long long)s_stats.pause_held_frames,
             (unsigned long long)s_stats.pause_stash_failures,
             (unsigned)peak, worst, lead_ms);
+    if (s_stats.overrun_events)   /* a separate line: tools/soak_audit.py parses the one above */
+        fprintf(stderr, "AUDIOSTAT_HOST_DROPPED: pushes=%llu frames=%llu\n",
+                (unsigned long long)s_stats.overrun_events,
+                (unsigned long long)s_stats.overrun_frames);
     fflush(stderr);
     /* The dump is closed after the stats line, so the WAV header is finalised. The hle.c _Exit path
      * reaches this only with SR_AUDIOSTAT set and always calls sr_audio_dump_finish, so whichever
@@ -1099,6 +1131,37 @@ static void test_dummy_mixer_handoff(void) {
 
     sr_audio_dump_stats();
     printf("test_dummy_mixer_handoff: PASS\n");
+}
+
+/* #2163: a run faster than real time fills the mixer to its cap and the next pushes are dropped.
+ * The drop is host playback falling behind, so it must be visible with counts (and the guest, which
+ * paces against its own model under SR_DETERMINISTIC_CLOCK=1, never feels it: hle_thread_selftest).
+ * The device is paused so the dummy driver cannot drain the queue between the pushes.
+ *
+ * MUTANT: delete the overrun_frames accounting in sr_audio_push -- the frame count stays 0. */
+static void test_full_mixer_drops_are_counted(void) {
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    assert(sr_audio_init() == 0 && s_audio_state == AUDIO_STATE_ACTIVE);
+    assert(SDL_PauseAudioDevice(s_device_id));
+    static int16_t block[4096 * 2];   /* silence is enough: only the queue depth matters */
+    for (int i = 0; i < SR_AUDIO_MAX_QUEUED_FRAMES / 4096; i++)
+        sr_audio_push(0, block, 4096, 0x8000, 0x8000);
+    assert(sr_audio_queued(0) == SR_AUDIO_MAX_QUEUED_FRAMES);
+    assert(s_stats.overrun_events == 0 && s_stats.overrun_frames == 0);
+    sr_audio_push(0, block, 4096, 0x8000, 0x8000);   /* the mixer is full: dropped, and counted */
+    sr_audio_push(0, block, 1000, 0x8000, 0x8000);
+    assert(sr_audio_queued(0) == SR_AUDIO_MAX_QUEUED_FRAMES);
+    assert(s_stats.overrun_events == 2);
+    assert(s_stats.overrun_frames == 4096u + 1000u);
+    assert(s_stats.total_pushed_frames == (uint64_t)SR_AUDIO_MAX_QUEUED_FRAMES);
+    /* A channel that was playing and ran dry is an underrun: counted and logged. */
+    SDL_ClearAudioStream(s_streams[0]);
+    assert(sr_audio_queued(0) == 0);
+    sr_audio_push(0, block, 64, 0x8000, 0x8000);
+    assert(s_stats.underrun_events == 1);
+    sr_audio_dump_stats();
+    printf("test_full_mixer_drops_are_counted: PASS\n");
 }
 
 static void test_no_device_path(void) {
@@ -1667,6 +1730,7 @@ int main(int argc, char **argv) {
     test_pause_master_gain_applied_once();
     test_volume_above_16_bits_is_clamped();
     test_pause_fade_has_no_dumped_click();
+    test_full_mixer_drops_are_counted();
     test_no_device_path();
     test_null_backend_env();
     test_pause_stash_failure_is_visible();

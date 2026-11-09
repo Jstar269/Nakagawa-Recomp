@@ -875,9 +875,10 @@ re-qualified under `SR_DETERMINISTIC_CLOCK=1` before it is recorded, and a recor
 real-time, so it cannot be played live
 ([Recording a video of a run](DEBUGGING.md#recording-a-video-of-a-run)). Guest time and the RTC
 are then a function of the guest's own work, so two runs with the same inputs give the same
-frames. Host inputs that remain: whether the host has an audio device, the Memory Stick volume's
-free space, a random console MAC and PSID on fresh user data, and the mixer's 262144-frame cap,
-which drops audio when a run is faster than real time.
+frames. Audio (with or without a host device, whatever the mixer holds), the Memory Stick's
+size and free space, and a fresh profile's console MAC and PSID no longer come from the host:
+[Where `SR_EXIT_AT_VBLANK` actually stops](DEBUGGING.md#where-sr_exit_at_vblank-actually-stops)
+lists what the guest reads instead.
 
 **Runtime host-thread audit.** Guest threads, HLE handlers, the window's event pump and the
 pause loop all run on the runtime thread. Work that runs elsewhere, and why a paused guest
@@ -889,7 +890,7 @@ cannot observe it ([#1159](https://github.com/Jstar269/nakagawa-recomp/issues/11
 | Diagnostic stream drain (`src/rt/debug.c`, [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) | A native thread, Windows only, started when stdout or stderr is redirected | Every 50 ms it writes the C runtime's buffered stdout and stderr text to the log. It reads no guest memory and writes nothing the guest reads, so a paused guest observes nothing. |
 | Android output pump (`src/core/nk_platform_posix.c`, [#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)) | A native thread, Android only, started by `nk_platform_host_startup` | An app process's stdout and stderr go nowhere on Android, so it copies their text, line by line, to the system log and to the run log. It reads no guest memory and writes nothing the guest reads, so a paused guest observes nothing. |
 | Texture-scaling workers (`src/rt/gpu_sdl3vk/tex_scale.c`, [#1273](https://github.com/Jstar269/nakagawa-recomp/issues/1273)) | Two native threads, started at the first scaling job of an Ace Mode run with `SR_TEX_SCALE` on | They scale a host copy of texels the renderer already decoded and write only a host buffer. The runtime thread takes a finished copy at a later texture lookup, so nothing reaches guest memory except through the GE rendering row below, and a paused guest observes nothing. |
-| Preemption timer (`src/rt/sched.c`, [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) | A native thread, paced runs started by the driver | It sleeps until the earliest timed wait of a thread stronger than the running one runs out, then ends the running slice so the next yield point enters the scheduler. It reads no guest memory and writes only the slice counter, which the runtime thread resets at every switch, so a paused guest observes nothing. |
+| Preemption timer (`src/rt/sched.c`, [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) | A native thread, paced runs started by the driver | It sleeps until the earliest timed wait of a thread stronger than the running one runs out, then ends the running slice so the next yield point enters the scheduler. It reads no guest memory and writes only the slice counter, which the runtime thread resets at every switch, so a paused guest observes nothing. The timer's thread and the runtime thread that starts it ask the host for high priority. On Windows that needs no privilege; on Linux it means nice -10, which an ordinary session refuses (and which threads the runtime thread creates later inherit when it is granted). A refusal leaves normal priority and is logged once, with its cause. |
 | SDL audio output (`src/rt/audio_sdl3.c`) | SDL's audio device thread consumes the bound channel streams | The guest reads only the queue depth, on its own calls. A pause stashes each queue and puts back exactly that depth on resume. If the stash fails, the device is paused, so nothing is consumed (`audio-selftest`). |
 | Audio dump (`SR_AUDIODUMP`, postmix callback) | SDL's audio device thread | It writes the mixed output to a host WAV file and reads no guest memory. |
 | Asynchronous file I/O (`sceIoReadAsync` and related calls) | The runtime thread | A request completes in `io_async_dispatch_tick`, which runs at guest syscall entry and counts syscalls, not host time. A paused guest makes no syscalls. |
