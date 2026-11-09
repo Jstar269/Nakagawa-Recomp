@@ -218,25 +218,33 @@ int nk_pbp_identify(NkPspCtx *ctx, const NkPsarSource *src, NkPbpInfo *out)
     }
 
     /* Firmware first: an updater's PARAM.SFO category, its DATA.PSP tag, or
-     * a PSAR archive in DATA.PSAR, before anything else is looked at. */
-    if (strcmp(out->category, "MG") == 0) {
+     * a PSAR archive in DATA.PSAR, before anything else is looked at.
+     * The category "MG" (Memory Stick game) is what PSPSDK's mksfoex writes for
+     * every homebrew EBOOT.PBP, so it names an updater only when the package also
+     * carries a DATA.PSAR archive and DATA.PSP is not a plain ELF/PRX program (#2143).
+     * A homebrew package with an empty DATA.PSAR, signed or not, is classified below. */
+    memset(psp_head, 0, sizeof(psp_head));
+    if ((uint64_t)out->psp_offset + 4u <= (uint64_t)out->psar_offset) {
+        /* A small program is shorter than the encrypted header's tag field. */
+        uint64_t room = (uint64_t)out->psar_offset - out->psp_offset;
+        size_t want = room < sizeof(psp_head) ? (size_t)room : sizeof(psp_head);
+        rc = src_read(ctx, src, out->psp_offset, psp_head, want, "the package's DATA.PSP");
+        if (rc != NK_PSP_OK) return rc;
+    }
+    if (strcmp(out->category, "MG") == 0 && (uint64_t)out->psar_offset < src->size &&
+        memcmp(psp_head, "\x7f" "ELF", 4) != 0) {
         out->payload = NK_PBP_PAYLOAD_FIRMWARE;
         return nk_psp_fail(ctx, NK_PSP_ERR_FIRMWARE, NULL,
                            "this package is a PSP system software update; "
                            "Nakagawa never decrypts firmware");
     }
-    if ((uint64_t)out->psp_offset + sizeof(psp_head) <= (uint64_t)out->psar_offset) {
-        rc = src_read(ctx, src, out->psp_offset, psp_head, sizeof(psp_head),
-                      "the package's DATA.PSP");
-        if (rc != NK_PSP_OK) return rc;
-        if (memcmp(psp_head, "~PSP", 4) == 0) {
-            const char *what = firmware_tag_name(rd32(psp_head + 0xD0));
-            if (what != NULL) {
-                out->payload = NK_PBP_PAYLOAD_FIRMWARE;
-                return nk_psp_fail(ctx, NK_PSP_ERR_FIRMWARE, NULL,
-                                   "this package carries a %s; Nakagawa never "
-                                   "decrypts firmware", what);
-            }
+    if (memcmp(psp_head, "~PSP", 4) == 0) {
+        const char *what = firmware_tag_name(rd32(psp_head + 0xD0));
+        if (what != NULL) {
+            out->payload = NK_PBP_PAYLOAD_FIRMWARE;
+            return nk_psp_fail(ctx, NK_PSP_ERR_FIRMWARE, NULL,
+                               "this package carries a %s; Nakagawa never "
+                               "decrypts firmware", what);
         }
     }
     memset(psar_head, 0, sizeof(psar_head));

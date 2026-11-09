@@ -373,6 +373,22 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                             (PlayerUiPrimaryAction)PLAYER_UI_REBUILD_TITLE);
                         }
                     }
+                    /* The build queue: Add to queue beside BUILD PACKAGE, or
+                       Remove from queue while it waits (the package card says
+                       its place). */
+                    if (title->queue_add_offered || title->queue_remove_offered) {
+                        const char *queue = title->queue_add_offered ? "Add to queue"
+                                                                     : "Remove from queue";
+                        nk_ui_flow_item(ui, &flow,
+                                        nk_ui_button_width(ui, queue, NK_UI_BUTTON_LARGE));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_QUEUE, queue,
+                                         NK_UI_BUTTON_LARGE | NK_UI_BUTTON_NOT_DEFAULT)) {
+                            result = action(PLAYER_UI_ACTION_QUEUE, model->title_index,
+                                            (PlayerUiPrimaryAction)(title->queue_add_offered
+                                                ? PLAYER_UI_QUEUE_ADD
+                                                : PLAYER_UI_QUEUE_REMOVE));
+                        }
+                    }
                     /* Saves (#1883): back up, restore, add a save, open the folder. */
                     nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Saves", save_flags));
                     if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_SAVES, "Saves", save_flags)) {

@@ -92,6 +92,7 @@ static inline uint32_t note_rgba(const NkUiTheme *theme, PlayerUiNoteKind kind) 
 #define FLOW_ID_MESSAGE FLOW_ID(0x000042u)
 #define FLOW_ID_ELAPSED FLOW_ID(0x000043u)
 #define FLOW_ID_NOTICE FLOW_ID(0x000044u)
+#define FLOW_ID_QUEUE_LINE FLOW_ID(0x000046u)  /* the build card's build queue line */
 #define FLOW_ID_LOG FLOW_ID(0x000050u)
 #define FLOW_ID_LOG_SPAN 0x10u
 #define FLOW_ID_ROWS FLOW_ID(0x000060u)

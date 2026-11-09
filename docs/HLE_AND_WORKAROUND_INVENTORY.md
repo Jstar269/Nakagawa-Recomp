@@ -1624,13 +1624,14 @@ never carries. For the same reason HLE is the only path for `sceMpeg` in titles 
 `mpeg.prx`.
 
 **Comparing the two forms.** Where both forms exist, the HLE handler can be checked against the
-disc module by running both on the same call. That check belongs to the standing LLE lane, as
-the dual-execution mode `SR_MODE_COSIM` reserved in `src/rt/domain_mode.h`. Its pull request
-for #2148 documents what it compares and how it reports. A pair can be compared only after its HLE
-handler has been read for host-side state. A handler that keeps any state (an object table, a
-file position, a decoder, the scheduler) cannot run beside the export, because later calls would
-then get different answers. Every `sceLibFont` handler keeps a host library or font handle, so
-those calls are reported as not compared.
+disc module by running both on the same call. That check is the `SR_MODE_COSIM` lane of the
+import seam (`src/rt/domain_mode.c`); `docs/LLE_FIDELITY_ARCHITECTURE.md` section 3.6 says what it
+compares, how it reports, and its limits. It is selected only through the C API, and no title
+registers a pair yet. A pair can be compared only after its HLE handler has been read for
+host-side state. A handler that keeps any state (an object table, a file position, a decoder, the
+scheduler) cannot run beside the export, because later calls would then get different answers.
+Every `sceLibFont` handler keeps a host library or font handle, so `sceLibFont` is not a candidate
+until that state is accounted for.
 
 **What a match proves.** Only that the compared call, with those arguments and that guest memory,
 gave the same result in both forms. It says nothing about other inputs, and a private title's
