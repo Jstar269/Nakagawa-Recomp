@@ -29,6 +29,10 @@ char nk_platform_path_separator(void) {
     return '\\';
 }
 
+char nk_platform_path_list_separator(void) {
+    return ';';
+}
+
 /* Bounded UTF-8 -> UTF-16 conversion */
 static bool utf8_to_wide(const char *utf8, WCHAR *out_wide, size_t max_wide_chars) {
     if (!utf8 || !out_wide || max_wide_chars == 0) return false;

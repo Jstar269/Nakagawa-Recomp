@@ -70,6 +70,10 @@ char nk_platform_path_separator(void) {
     return '/';
 }
 
+char nk_platform_path_list_separator(void) {
+    return ':';
+}
+
 /* POSIX file names are byte strings and this project's paths are UTF-8, so the
  * narrow CRT calls already carry the exact name the wide Win32 path would
  * have produced. These exist so host code never has to know that. */

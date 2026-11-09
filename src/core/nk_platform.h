@@ -50,6 +50,8 @@ int nk_rename_utf8(const char *from, const char *to);
 
 /* Filesystem and path utilities (all paths in UTF-8) */
 char nk_platform_path_separator(void);
+/* The separator between entries of a PATH-style list: ';' on Windows, ':' elsewhere. */
+char nk_platform_path_list_separator(void);
 bool nk_platform_file_exists(const char *path);
 bool nk_platform_dir_exists(const char *path);
 /* True only when the OS says the name does not exist: ENOENT or ENOTDIR on POSIX, and

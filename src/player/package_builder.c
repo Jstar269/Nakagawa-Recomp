@@ -2347,11 +2347,7 @@ bool package_builder_resolve_toolchain_bin(const char *prerequisites_root,
            any resolved gcc path containing "ucrt64", while this needs a bin folder
            whose parent folder is named exactly ucrt64. */
         if (!found && path_env && path_env[0]) {
-#if defined(_WIN32) || defined(_WIN64)
-            const char list_sep = ';';
-#else
-            const char list_sep = ':';
-#endif
+            const char list_sep = nk_platform_path_list_separator();
             const char *entry = path_env;
             while (!found && entry && *entry) {
                 const char *next = strchr(entry, list_sep);
@@ -2385,11 +2381,7 @@ bool package_builder_compose_build_path(const char *toolchain_bin, const char *p
     if (!out || out_size == 0) return false;
     out[0] = '\0';
     if (!toolchain_bin || !toolchain_bin[0]) return false;
-#if defined(_WIN32) || defined(_WIN64)
-    const char list_sep = ';';
-#else
-    const char list_sep = ':';
-#endif
+    const char list_sep = nk_platform_path_list_separator();
     int n = (path_env && path_env[0])
         ? snprintf(out, out_size, "%s%c%s", toolchain_bin, list_sep, path_env)
         : snprintf(out, out_size, "%s", toolchain_bin);
