@@ -741,6 +741,14 @@ static void test_toolchain_preflight(void) {
 #if defined(_WIN32) || defined(_WIN64)
     assert(strstr(msg, "build tools download prompt") != NULL);
     assert(strstr(msg, "mingw-w64-ucrt-x86_64-gcc") != NULL);
+#elif defined(__ANDROID__)
+    /* No download exists off Windows (#306), and Android has no system package for a
+       compiler (#360): the card says the app ships none and gives no desktop advice. */
+    assert(strstr(msg, "build tools download prompt") == NULL);
+    assert(strstr(msg, "MSYS2") == NULL);
+    assert(strstr(msg, "build-essential") == NULL);
+    assert(strstr(msg, "ships no compiler") != NULL);
+    assert(strstr(msg, "downloads build tools only on Windows") != NULL);
 #else
     /* No download exists off Windows (#306): the card points at the system's
        packages and never at a consent card or an MSYS2 package. */

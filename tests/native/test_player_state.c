@@ -5981,6 +5981,20 @@ static void test_bundled_prerequisite_build(const char *self_executable) {
     nk_ps_set_env("NK_INSTALL_ROOT", NULL);
     nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "reuse");
 
+#if defined(__ANDROID__)
+    /* On Android the build's Python is only the app's libnk_python.so (#360); a bundle's
+       python.exe is never used there, so the bundled build is refused by name instead. */
+    (void)prereqs;
+    (void)path;
+    (void)sep;
+    assert(!player_app_start_package_build(app, 0));
+    assert(strcmp(app->last_error.error_code, "BUILD_TOOLCHAIN_MISSING") == 0);
+    assert(strstr(app->last_error.message, "(libnk_python.so)") != NULL);
+    assert(!app->build_session.is_building);
+    printf("SKIP player_state_test bundled prerequisites (exit 77): the bundle's Python is not "
+           "used on Android (#360)\n");
+    s_package_rebuild_skipped = true;
+#else
     bool started = player_app_start_package_build(app, 0);
     if (!started) {
         fprintf(stderr, "bundled build refused: %s: %s\n", app->last_error.error_code,
@@ -6021,6 +6035,8 @@ static void test_bundled_prerequisite_build(const char *self_executable) {
     assert(app->prerequisites.phase != PLAYER_PREREQ_CONSENT);
     assert(!app->build_session.is_building);
 
+#endif
+
     restore_environment_value("PATH", saved_path, had_path);
     restore_environment_value("PYTHON", saved_python, had_python);
     restore_environment_value("NK_INSTALL_ROOT", saved_override, had_override);
@@ -6031,7 +6047,9 @@ static void test_bundled_prerequisite_build(const char *self_executable) {
     free(saved_mode);
     free(app);
     assert(native_test_remove_tree(root));
+#if !defined(__ANDROID__)
     printf("[PLAYER_STATE_TEST] bundled prerequisites PASS\n");
+#endif
 }
 
 /* ---- PSN releases of UMD games (#295 phase 2) ---------------------------- */
