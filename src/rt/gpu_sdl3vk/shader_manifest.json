@@ -38,11 +38,11 @@
     },
     {
       "embedded": "ace_match_comp.inc",
-      "embedded_sha256": "1f15823082b6fe2829acf161e5cfebeb6af94b6b7d83b26df4dae3f787d34e14",
+      "embedded_sha256": "9236dc4fa1f4caffd0b0c487351d1aae2bf9fd4c66a351fec3a9062d3f6d4be1",
       "source": "shaders/ace_match.comp",
-      "source_sha256": "ed47f45228a0220981a4f7dda29bd0d26aac3f21f77c4e3cf7e94ab69be463c6",
-      "spirv_bytes": 24976,
-      "spirv_sha256": "3145c899c01edb52c69b566646352145c6fcb65b6249f231a09888bcd32fd33c",
+      "source_sha256": "dd56133da4cccdabd8b262d43dd5d728001bc7a7c7133aeecd43ed2222c0552c",
+      "spirv_bytes": 24960,
+      "spirv_sha256": "20c92b1569f0d2126e987423c58eb39f88032bfa0c6e8e3fa8c96ad226dc60dc",
       "stage": "comp"
     },
     {

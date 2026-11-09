@@ -19,7 +19,8 @@
  * A block whose frames differ guesses when its vector fits no better than the vectors two samples
  * beside it (on a plain floor every vector that lands on floor fits), or when at half its changed
  * samples, and at three at least, the vector joins two things that are alike but not the same,
- * while what the frames show there went nowhere a vector here takes it (on a textured floor).
+ * while what the frames show there went nowhere a vector here takes it unchanged (on a textured
+ * floor, one patch of floor looks like another, but only the right vector finds the same one).
  * A still block never guesses. Every level marks its guesses; the in-between reads the sharpest
  * level's. */
 #version 450
@@ -79,13 +80,13 @@ bool changed_at(vec2 p) {
 vec3 old_at(vec2 p) { return textureLod(old_frame, p, lv.lod).rgb; }
 vec3 new_at(vec2 p) { return textureLod(new_frame, p, lv.lod).rgb; }
 
-bool alike(vec3 x, vec3 y) {
+bool same(vec3 x, vec3 y) {
     vec3 e = abs(x - y);
-    return e.r + e.g + e.b < JOINS;
+    return e.r + e.g + e.b < STILL;
 }
 
 /* What either frame shows at p moved a whole step of d, or of a vector of the level above around
- * here, at three samples: the old frame's from p, or the new frame's to p. */
+ * here, unchanged at three samples: the old frame's from p, or the new frame's to p. */
 bool carried(vec2 p, vec2 d) {
     vec2 step_up = 1.0 / vec2(textureSize(coarser, 0));
     vec2 t = lv.texel;
@@ -96,10 +97,10 @@ bool carried(vec2 p, vec2 d) {
             int k = i - 1;
             v = textureLod(coarser, p + vec2(k % 3 - 1, k / 3 - 1) * step_up, 0.0).xy;
         }
-        if (alike(old_at(p), new_at(p + 2.0 * v)) && alike(old_at(p - t), new_at(p - t + 2.0 * v)) &&
-            alike(old_at(p + t), new_at(p + t + 2.0 * v))) return true;
-        if (alike(new_at(p), old_at(p - 2.0 * v)) && alike(new_at(p - t), old_at(p - t - 2.0 * v)) &&
-            alike(new_at(p + t), old_at(p + t - 2.0 * v))) return true;
+        if (same(old_at(p), new_at(p + 2.0 * v)) && same(old_at(p - t), new_at(p - t + 2.0 * v)) &&
+            same(old_at(p + t), new_at(p + t + 2.0 * v))) return true;
+        if (same(new_at(p), old_at(p - 2.0 * v)) && same(new_at(p - t), old_at(p - t - 2.0 * v)) &&
+            same(new_at(p + t), old_at(p + t - 2.0 * v))) return true;
     }
     return false;
 }
@@ -211,8 +212,12 @@ void main() {
             vec2 c = block_cost(centre, best + NUDGE * nudge[i] * lv.texel, false);
             worse = max(worse, c.y < MIN_SEEN ? 1.0 : c.x - here);
         }
-        vec2 st = stale_joins(centre, best);
-        if (worse < AMBIGUOUS || (st.x >= STALE_MIN && 2.0 * st.x >= st.y)) guess = 1.0;
+        if (worse < AMBIGUOUS) {
+            guess = 1.0;
+        } else {
+            vec2 st = stale_joins(centre, best);
+            if (st.x >= STALE_MIN && 2.0 * st.x >= st.y) guess = 1.0;
+        }
     }
     imageStore(field, cell, vec4(best, best_raw, guess));
     if (lv.count_bad != 0 && (torn || best_raw > BAD_BLOCK)) atomicAdd(stats.bad_blocks, 1u);

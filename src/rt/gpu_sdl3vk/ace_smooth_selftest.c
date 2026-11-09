@@ -21,8 +21,9 @@
  *   figure-kept     a figure that stands still while its pose changes stays whole: a plain
  *                   floor's vector never wipes out what both frames show
  *   figure-posed    a figure whose two poses hardly overlap is whole in the in-between, as the
- *                   old frame or the new, and a shape crossing more than its width is whole too:
- *                   where the search can only guess, the in-between repeats the old frame
+ *                   old frame or the new: where the search can only guess, the in-between repeats
+ *                   the old frame. A limit: a small fast shape near a guess stays where it was
+ *   figure-textured the same figure on a textured floor, where a floor's vector fits only nearly
  *
  * Exit 77 (SKIP) without a Vulkan loader or device.
  */
@@ -1012,8 +1013,11 @@ static void cell_figure_kept(void) {
  * floor, while a small shape crosses the floor further than its own width. Each pixel of the
  * figure is floor in one of the two frames, so a vector that carries the floor fits everywhere on
  * it, and taking whichever frame shows floor wiped the figure out as a whole. The in-between must
- * show the figure whole, as one frame or the other, and the shape whole, wherever it is. Run at
- * four positions against the search's blocks. */
+ * show the figure whole, as one frame or the other. The shape shows a limit of that fallback: its
+ * blocks guess too, so it stays whole where it was in the old frame instead of moving halfway.
+ * On the textured floor of the other cells a vector that carries the floor fits only nearly, and
+ * the search must tell it from one that carries the figure (no shape there). Run at four
+ * positions against the search's blocks. */
 #define POSE_Y 120
 #define POSE_SHAPE 0xFF20C0F0u
 
@@ -1030,11 +1034,18 @@ static uint32_t posed_px(int x, int y, int pose, int pose_x) {
     return 0;
 }
 
-static void paint_posed(int w, int h, int pose, int pose_x, int shape_x) {
+/* The floor under the posed figure: plain, or the textured floor of the other cells. */
+static uint32_t posed_floor(int x, int y, int textured) {
+    if (!textured) return FLOOR_PX;
+    return floor_px(x, y, 0);
+}
+
+/* shape_x < 0: no shape. */
+static void paint_posed(int w, int h, int pose, int pose_x, int shape_x, int textured) {
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            uint32_t v = FLOOR_PX;
-            if (x >= shape_x && x < shape_x + 16 && y >= 40 && y < 56) v = POSE_SHAPE;
+            uint32_t v = posed_floor(x, y, textured);
+            if (shape_x >= 0 && x >= shape_x && x < shape_x + 16 && y >= 40 && y < 56) v = POSE_SHAPE;
             uint32_t f = posed_px(x, y, pose, pose_x);
             g.map[y * w + x] = f ? f : v;
         }
@@ -1048,21 +1059,22 @@ static int px_off(uint32_t got, uint32_t want) {
     return 0;
 }
 
-static void cell_figure_posed(void) {
+static void posed_run(int textured) {
+    const char *name = textured ? "figure-textured" : "figure-posed";
     int w = 480, h = 272;
     for (int at = 0; at < 4; at++) {
         int pose_x = 300 + at;
         Source src;
         memset(&src, 0, sizeof(src));
         AceBetween *s = smooth_new();
-        if (!s || !source_make(&src, w, h)) { CHECK(0, "posed setup failed"); ace_smooth_destroy(s); return; }
-        paint_posed(w, h, 0, pose_x, 100);
+        if (!s || !source_make(&src, w, h)) { CHECK(0, "%s setup failed", name); ace_smooth_destroy(s); return; }
+        paint_posed(w, h, 0, pose_x, textured ? -1 : 100, textured);
         source_fill(&src, w, h, 1);
         (void)feed(s, &src, w, h, 0);
-        paint_posed(w, h, 1, pose_x, 124);
+        paint_posed(w, h, 1, pose_x, textured ? -1 : 124, textured);
         source_fill(&src, w, h, 0);
         VkImage mid = feed(s, &src, w, h, 1);
-        CHECK(mid != VK_NULL_HANDLE, "posed: no in-between");
+        CHECK(mid != VK_NULL_HANDLE, "%s: no in-between", name);
         if (mid) {
             image_read(mid, w, h);
             /* Over both pictures of the figure: the pixels unlike the old frame, and unlike the new. */
@@ -1071,20 +1083,33 @@ static void cell_figure_posed(void) {
                 for (int x = pose_x; x < pose_x + 30; x++) {
                     uint32_t a = posed_px(x, y, 0, pose_x), b = posed_px(x, y, 1, pose_x);
                     if (!a && !b) continue;
-                    uint32_t got = g.map[y * w + x];
-                    off_a += px_off(got, a ? a : FLOOR_PX);
-                    off_b += px_off(got, b ? b : FLOOR_PX);
+                    uint32_t got = g.map[y * w + x], fl = posed_floor(x, y, textured);
+                    off_a += px_off(got, a ? a : fl);
+                    off_b += px_off(got, b ? b : fl);
                     total++;
                 }
             }
-            int shape = 0;
-            for (int y = 40; y < 56; y++)
-                for (int x = 90; x < 150; x++) shape += !px_off(g.map[y * w + x], POSE_SHAPE);
-            printf("  figure-posed at %d: %d of %d figure px unlike the old frame, %d unlike the new;"
-                   " shape %d of 256 px\n", pose_x, off_a, total, off_b, shape);
-            CHECK(off_a == 0 || off_b == 0, "figure-posed at %d: %d of %d px unlike the old frame, %d unlike the new",
+            printf("  %s at %d: %d of %d figure px unlike the old frame, %d unlike the new\n", name, pose_x,
+                   off_a, total, off_b);
+            CHECK(off_a == 0 || off_b == 0, "%s at %d: %d of %d px unlike the old frame, %d unlike the new", name,
                   pose_x, off_a, total, off_b);
-            CHECK(shape == 256, "figure-posed at %d: the moving shape has %d of 256 px", pose_x, shape);
+            if (!textured) {
+                /* The shape crossed more than its width, so its midpoint is partly floor in both
+                 * frames, which the in-between copies: it cannot be drawn there. Beside a guess it
+                 * keeps the old frame instead, whole where it was: 256 px there, none elsewhere. */
+                int there = 0, elsewhere = 0;
+                for (int y = 32; y < 64; y++) {
+                    for (int x = 80; x < 160; x++) {
+                        if (px_off(g.map[y * w + x], POSE_SHAPE)) continue;
+                        if (x >= 100 && x < 116 && y >= 40 && y < 56) there++;
+                        else elsewhere++;
+                    }
+                }
+                printf("  %s at %d: shape %d of 256 px where it was in the old frame, %d px elsewhere\n", name,
+                       pose_x, there, elsewhere);
+                CHECK(there == 256 && elsewhere == 0, "%s at %d: shape %d of 256 px at its old place, %d elsewhere",
+                      name, pose_x, there, elsewhere);
+            }
         }
         DeviceWaitIdle(g.device);
         ace_smooth_destroy(s);
@@ -1092,6 +1117,9 @@ static void cell_figure_posed(void) {
         FreeMemory(g.device, src.memory, NULL);
     }
 }
+
+static void cell_figure_posed(void) { posed_run(0); }
+static void cell_figure_textured(void) { posed_run(1); }
 
 
 int main(int argc, char **argv) {
@@ -1114,6 +1142,7 @@ int main(int argc, char **argv) {
     cell_aux_neutral();
     cell_figure_kept();
     cell_figure_posed();
+    cell_figure_textured();
     gpu_close();
     printf(s_fail ? "ace-smooth-selftest: FAIL\n" : "ace-smooth-selftest: PASS\n");
     return s_fail ? 1 : 0;
