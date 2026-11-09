@@ -110,12 +110,13 @@ class PsplinkDeviceDetectionTests(unittest.TestCase):
 
         def fake_run(command, *, timeout=5.0):
             calls.append(command)
-            if command[0].lower().endswith("powershell.exe"):
+            if command[0] == "pwsh-test":
                 return 0, "0"
             return 0, "Bus 001 Device 004: ID 054c:01c9 Sony Corp. PSP Type B"
 
         with mock.patch.object(psp_readiness.sys, "platform", "win32"), \
              mock.patch.object(psp_readiness, "_run", fake_run), \
+             mock.patch.object(psp_readiness, "powershell_exe", return_value="pwsh-test"), \
              mock.patch.object(psp_readiness.shutil, "which", return_value="wsl.exe"):
             connected, detail = psp_readiness._psplink_device()
 
