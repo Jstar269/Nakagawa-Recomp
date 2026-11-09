@@ -80,7 +80,9 @@ class PackageRouteMakeSafetyTests(unittest.TestCase):
             with self.assertRaises(title_codegen_plan.PackageRouteError) as ctx:
                 title_codegen_plan._absolute_path(spaced, "output-dir")
             self.assertEqual(ctx.exception.code, "PACKAGE_UNSUPPORTED_PATH")
-            self.assertIn("in the works", str(ctx.exception))
+            self.assertIn("choose a location without them", str(ctx.exception))
+            # #296 is closed: the refusal names a remedy, not pending work (#2281).
+            self.assertNotIn("in the works", str(ctx.exception))
 
     def test_unicode_without_space_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
