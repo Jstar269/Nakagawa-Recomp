@@ -51,15 +51,16 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   (the same selftest compares it with the pass's output, byte for byte), and guest VRAM and every
   guest flight event match with it off (`display-smoke-fsr1`, which needs a Vulkan device and a
   display, so it is a local gate). In the player it is the Enhanced part "Sharper enlarging"
-  (`"upscale"`, off by default) on Settings > Enhanced and each title's page. It is not part of
+  (`"upscale"`, off for a new library) on Settings > Enhanced and each title's page; the Medium, Ultra and
+  Handheld graphics presets turn it on and Low and High off (section 10.1). It is not part of
   Authentic: the launcher exports `SR_PRESENT_UPSCALE=off` for an authentic session whatever the
   setting or the inherited environment (section 10.1), and a run with it on says
   `ACE_MODE: present upscale fsr1`, emits a `phase=present_upscale` boot event and carries
   `"present_upscale": "fsr1"` in its flight bundle's `runtime.enhancements`, so neither
   `flight_diff.py` nor `boot_gate.py` takes it as authentic evidence. `picture_gate.py` and
   `library_sweep.py` run the runtime themselves, so they set the key `off` (a picture-gate route
-  may ask for it) and record the value they used. GPU cost at
-  4K: 0.40 ms per present for 1920x1088 to 3840x2160 on an RTX 3080 (`fsr1-selftest`).
+  may ask for it) and record the value they used. GPU cost on an RTX 3080 (`fsr1-selftest`): 0.40 ms
+  per present for 1920x1088 to 3840x2160, and 0.06 to 0.20 ms at the other preset sizes (`docs/SETUP.md`).
 - **Forbidden:** Mutating GE display list commands, intercepting guest draw calls to alter gameplay geometry, or feeding host input back into the guest controller state.
 
 ### 2.3. Guest Memory and Code Hooks (`guest_memory_code_hook`)
@@ -171,11 +172,12 @@ The enhancement subsystem was built in phases, each keeping fidelity intact:
    - Machine-readable package schema in `assets/enhancement_package.schema.json`.
    - Standalone package validation tooling in `tools/enhancement_package.py`.
    - Comprehensive unit test suite in `tools/test_enhancement_package.py`.
-2. **Phase 2: First-Proof Synthetic Presentation Fixture (not built):**
-   - Implement a minimal, source-owned synthetic presentation overlay fixture in the native player.
-   - Prove that authentic execution remains 100% byte- and trace-equivalent when the overlay is disabled.
-   - Verify that enabling the overlay stamps diagnostics into evidence metadata without mutating guest memory.
-   - Verify fail-closed package rejection in the native loader.
+2. **Phase 2: First-Proof Synthetic Presentation Fixture (retired; #1069):**
+   - Host presentation ships as Enhanced and Ace *parts* (section 10): project-authored code in the player and
+     runtime, with no package and no loader. No native presentation-package loader is planned, so the
+     `presentation` payload stays forbidden in the schema.
+   - Authentic mode, the default, keeps the guarantee this phase was meant to prove: with every part off, the
+     player runs the authentic path (section 10).
 3. **Phase 3: Asset Replacement Engine (not built; section 10.12 is a development-only texture replacement):**
    - Texture dumping and replacement interface at the host GPU backend.
    - Streaming replacement audio handler.
@@ -252,7 +254,7 @@ This package format is experimental and opt-in.
 Some frame-counted values are data, not instructions: tables in the executable's initialised data, and parameter files the title reads from its disc. A package rescales them once, when they are loaded, and only while `SR_EXPERIMENTAL_60HZ=1`. The scaling transforms of §9.2 apply (`count_x2`, `step_x0.5`, `probability_per_update_x0.5`, `decay_k_to_1-sqrt(1-k)`, `retention_m_to_sqrt(m)`); an integer value with no exact result, a float outside the range its transform needs, or an overflow refuses the package.
 
 - **`data_sites`** name a symbolic data label (`symbol`, resolved like a site's function), a byte `offset` aligned to the element `type` (`u8`, `s8`, `u16`, `s16`, `u32`, `s32` or `f32`), an element `count`, the SHA-256 `stock_digest` of those bytes and a `transform`. Codegen reads the bytes from an allocated, non-executable `PROGBITS` section (never code or zero-fill), checks the digest and computes the rescaled bytes. The generated start-up (`nk_enhancement_apply_data()`, run from `sr_register_all()` after the executable is loaded and before it runs) compares the loaded bytes with the stock bytes and writes the rescaled ones; any difference stops the run with `ENHANCEMENT_DATA_MISMATCH`.
-- **`data_files`** name a disc `path` (plain names separated by `/`, compared without case), the file's `sha256`, a `format` (`csv`), the zero-based `header_row` that names the columns, the `first_data_row`, and `cells`: a `column` by its header name, optional zero-based data `rows` (all data rows when left out) and a `transform`. A cell is a plain decimal number. An integer cell stays an integer and must rescale exactly; a decimal cell is read as a float, rescaled, and written as the shortest decimal that reads back to the same float. Build-package passes the title's extracted files (`--enhancement-data-root`); codegen finds the file by path and digest, rewrites it, and embeds the result. At run time `sr_enhancement_file_register()` holds it, and opening that path for reading reads the stock bytes first: matching bytes are served rewritten, with the rewritten size; any other bytes at a registered path stop the run with `ENHANCEMENT_DATA_MISMATCH`. Files on disc are never modified. Only an open by path is served: a title that reads its data through raw UMD sectors or its own archive reader never opens these paths, and their rewrites do not apply. With the other end-of-process reports, however the run ends (their order relative to `COMPAT_PATCH_REPORT` is not fixed), `ENHANCEMENT_DATA_REPORT: served=K/N` counts the registered files that were opened and served, and `ENHANCEMENT_DATA_NOT_SERVED` names each one that never was.
+- **`data_files`** name a disc `path` (plain names separated by `/`, compared without case), the file's `sha256`, a `format` (`csv`), the zero-based `header_row` that names the columns, the `first_data_row`, and `cells`: a `column` by its header name, or a zero-based `column_index` where the header line has no ASCII name for it, optional zero-based data `rows` (all data rows when left out) and a `transform`. Several `cells` entries may name one column when their `rows` do not overlap, so no value is rescaled twice. A cell is a plain decimal number. Its optional `type` (a `data_sites` type) says how the title parses it; without one, a cell with a decimal point is a float and any other an integer. An integer cell stays an integer and must rescale exactly; when the cell gives a `type`, both the stock value and the rescaled value must fit that type, and a cell without a `type` has no range check; a float cell must stay within the float32 range, before and after the rescale; a float cell is read as a float, rescaled, and written as the shortest decimal that reads back to the same float. Build-package passes the title's extracted files (`--enhancement-data-root`); codegen finds the file by path and digest, rewrites it, and embeds the result. At run time `sr_enhancement_file_register()` holds it, and opening that path for reading reads the stock bytes first: matching bytes are served rewritten, with the rewritten size; any other bytes at a registered path stop the run with `ENHANCEMENT_DATA_MISMATCH`. Files on disc are never modified. Only an open by path is served: a title that reads its data through raw UMD sectors or its own archive reader never opens these paths, and their rewrites do not apply. With the other end-of-process reports, however the run ends (their order relative to `COMPAT_PATCH_REPORT` is not fixed), `ENHANCEMENT_DATA_REPORT: served=K/N` counts the registered files that were opened and served, and `ENHANCEMENT_DATA_NOT_SERVED` names each one that never was.
 
 Both are covered by the package digest, so a change to either is a different enhanced build.
 
@@ -293,8 +295,10 @@ The player offers three play modes per game (#2055):
 - **Authentic** is the standard: the game as released, recreating the PSP as closely as the project can. It is the
   default for a new library.
 - **Enhanced** turns on the project-authored improvements that work for any game: texture filtering, crisp system
-  text, the speed readout, the game badge, smooth motion, clean pitched sound, finer patches and sharper enlarging
-  (the last three off by default) today. Each one is a *part* that can be turned off for the library or for a single game.
+  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches and sharper
+  enlarging. A new library starts with texture filtering, crisp system text and the game badge on and the rest off,
+  and a graphics preset sets crisp system text and sharper enlarging (section 10.1); finer patches are in no preset.
+  Each one is a *part* that can be turned off for the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.
@@ -314,7 +318,9 @@ refuses the line. So does anything else: the run is Authentic and one `ACE_MODE:
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
 `<user data>/ace/`. Ace's 60 FPS game logic is not on this line: it selects the title's enhanced package variant
 (section 9.4). Nor is sharper enlarging (`"upscale"`, #2122): the launcher exports it as `SR_PRESENT_UPSCALE`, `fsr1`
-for an Enhanced or Ace run with the part on and `off` otherwise, and always `off` for Authentic (section 2.2).
+for an Enhanced or Ace run with the part on, and `off` otherwise, and always `off` for Authentic (section 2.2). The
+part's value is the title's own, else the graphics preset's where it sets the part (Medium, Ultra and Handheld on,
+Low and High off), else the library's; crisp text (`text`) is resolved the same way, and every preset turns it on.
 
 ### 10.2. Authentic Is Untouched
 

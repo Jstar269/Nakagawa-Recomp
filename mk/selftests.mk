@@ -906,6 +906,7 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 4 --case scaled-upload
 	$(GPU_COHERENCE_BIN) --scale 2 --case mip-lod
 	$(GPU_COHERENCE_BIN) --scale 4 --case mip-lod
+	$(GPU_COHERENCE_BIN) --scale 4 --case mip-clut
 	$(GPU_COHERENCE_BIN) --scale 2 --case readback-rows
 	$(GPU_COHERENCE_BIN) --scale 4 --case readback-rows
 	$(GPU_COHERENCE_BIN) --scale 4 --case readback-rows --readback-full 1

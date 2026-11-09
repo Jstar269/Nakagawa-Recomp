@@ -2585,6 +2585,151 @@ static int coherence_run_mip_slope_change(void) {
     return ok;
 }
 
+/* Multi-CLUT mip levels (#2031). A CLUT8 chain of four levels whose level-L texel in column u
+ * holds index 0x10 + 4 L + (u & 3), through a 512-entry 4444 CLUT whose entry k is 0xF000 | k,
+ * so a pixel names the entry it read. With TEXMODE bit 8 set, level L reads entry t + 256 L
+ * wrapped in CLUT RAM (ge.c clut_index, PSP-GE-MIP-002); the Vulkan backend decodes each level
+ * through that lookup. Each cell draws one through-mode sprite at a constant level on the GPU
+ * and with the software GE, and the two framebuffers must be equal, with the first pixel the
+ * entry the rule names. off-level-1 follows on-level-1 with only the bit changed, so a texture
+ * cache that keys the chain without the bit reuses level 1 read through the wrong entries. */
+#define COH_MCLUT_TEX  0x04046000u           /* level L at COH_MCLUT_TEX + L * 0x200, width 16 */
+#define COH_MCLUT_CLUT 0x04047000u           /* 512 4444 entries (32 blocks) */
+
+static uint32_t coherence_mclut_rgb(uint32_t k) {
+    return ((k & 15u) * 17u) | ((((k >> 4) & 15u) * 17u) << 8) | ((((k >> 8) & 15u) * 17u) << 16);
+}
+
+static uint32_t coherence_mclut_list(uint32_t multi, uint32_t level) {
+    RawSpriteVtx *vtx = (RawSpriteVtx *)SR_HOST(COH_MIP_VERTS);
+    /* UV from 0: half a level-0 texel per pixel, so every texel edge of every level falls on a
+     * pixel edge and the texels, which change with u, give the same pixels at any render scale. */
+    vtx[0] = (RawSpriteVtx){ 0.0f, 0.0f, (float)COH_MIP_X, (float)COH_MIP_Y, 0.0f };
+    vtx[1] = (RawSpriteVtx){ 8.0f, 8.0f, (float)(COH_MIP_X + 16), (float)(COH_MIP_Y + 16), 0.0f };
+    uint32_t *dl = (uint32_t *)SR_HOST(COH_MIP_LIST);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    DL_EMIT(0x10, 0);
+    DL_EMIT(0x9C, 0x00160000u);
+    DL_EMIT(0x9D, 512u | (0x04000000u >> 8));
+    DL_EMIT(0x9E, 0x00080000u);
+    DL_EMIT(0x9F, 512u | (0x04000000u >> 8));
+    DL_EMIT(0xD2, 3);
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x4C, 0);
+    DL_EMIT(0x4D, 0);
+    DL_EMIT(0x23, 0);
+    DL_EMIT(0x22, 0);
+    DL_EMIT(0x21, 0);
+    DL_EMIT(0x15, 0);
+    DL_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xD4, 0);
+    DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xB0, COH_MCLUT_CLUT & 0x00FFFFFFu);                           /* CLUTADDR */
+    DL_EMIT(0xB1, (COH_MCLUT_CLUT & 0xFF000000u) >> 8);                    /* CLUTADDRUPPER */
+    DL_EMIT(0xC4, 0x20u);                                                  /* LOADCLUT: 512 entries */
+    DL_EMIT(0xC5, 2u | (0xFFu << 8));                                      /* 4444, mask 0xFF */
+    for (uint32_t l = 0; l < 4u; l++) {
+        const uint32_t addr = COH_MCLUT_TEX + l * 0x200u, log2 = 3u - l;
+        DL_EMIT(0xA0 + l, addr & 0x00FFFFFFu);
+        DL_EMIT(0xA8 + l, 16u | ((addr & 0xFF000000u) >> 8));
+        DL_EMIT(0xB8 + l, (log2 << 8) | log2);
+    }
+    DL_EMIT(0xC2, (3u << 16) | (multi << 8));           /* TEXMODE: levels 0-3, multi-CLUT */
+    DL_EMIT(0xC8, 1u | ((level << 4) << 16));           /* TEXLEVEL: constant, bias = level */
+    DL_EMIT(0xC0, 0);
+    DL_EMIT(0xC3, 5);                                   /* CLUT8 */
+    DL_EMIT(0xC6, 0x004u);                              /* nearest, nearest level */
+    DL_EMIT(0xC7, 0);
+    DL_EMIT(0xC9, 3u | (1u << 8));                      /* replace, RGBA */
+    DL_EMIT(0x1E, 1);
+    DL_EMIT(0x12, (3u << 0) | (3u << 7) | (1u << 23));  /* float UV and position, through */
+    DL_EMIT(0x01, COH_MIP_VERTS & 0x00FFFFFFu);
+    DL_EMIT(0x04, (6u << 16) | 2u);
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+    return COH_MIP_LIST;
+}
+
+static int coherence_run_mip_clut(void) {
+    static const struct { const char *name; uint32_t multi, level; } cells[] = {
+        { "on-level-1", 1u, 1u }, { "off-level-1", 0u, 1u }, { "on-level-2", 1u, 2u },
+        { "on-level-3", 1u, 3u }, { "on-level-0", 1u, 0u },
+    };
+    const uint32_t base = 0x04000000u | 0x00160000u, stride = 512u;
+    const size_t bytes = (size_t)stride * FB_H * 4u, pixels = bytes / 4u;
+    uint32_t *fb = (uint32_t *)SR_HOST(base);
+    uint32_t *gpu = (uint32_t *)malloc(bytes);
+    if (!gpu) {
+        fprintf(stderr, "gpu coherence selftest [mip-clut]: no reference buffer\n");
+        return 0;
+    }
+    for (uint32_t l = 0; l < 4u; l++) {
+        uint8_t *tex = (uint8_t *)SR_HOST(COH_MCLUT_TEX + l * 0x200u);
+        for (uint32_t v = 0; v < (8u >> l); v++)
+            for (uint32_t u = 0; u < 16u; u++) tex[v * 16u + u] = (uint8_t)(0x10u + 4u * l + (u & 3u));
+        sr_gpu_vram_dirty(COH_MCLUT_TEX + l * 0x200u, 16u * (8u >> l));
+    }
+    uint16_t *clut = (uint16_t *)SR_HOST(COH_MCLUT_CLUT);
+    for (uint32_t k = 0; k < 512u; k++) clut[k] = (uint16_t)(0xF000u | k);
+    sr_gpu_vram_dirty(COH_MCLUT_CLUT, 512u * 2u);
+    int all = 1;
+    for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
+        const uint32_t list = coherence_mclut_list(cells[i].multi, cells[i].level);
+        coherence_reset_targets();
+        memset(fb, 0, bytes);
+        sr_gpu_vram_dirty(base, (uint32_t)bytes);
+        ge_set_gpu_hooks(&k_hooks);
+        const unsigned long long fallback0 = s_replay_stats.fallback_prims;
+        ge_run_list(list, 0);
+        const unsigned long long fallbacks = s_replay_stats.fallback_prims - fallback0;
+        GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
+                                   .width = 480, .height = 272 };
+        int ok = gegpu_sync_guest_fb(&desc);
+        if (!ok) fprintf(stderr, "gpu coherence selftest [mip-clut %s]: GPU readback failed\n", cells[i].name);
+        if (ok && fallbacks != 0u) {
+            fprintf(stderr, "gpu coherence selftest [mip-clut %s]: %llu software fallback primitive(s), "
+                    "want the GPU\n", cells[i].name, fallbacks);
+            ok = 0;
+        }
+        if (ok) {
+            memcpy(gpu, fb, bytes);
+            memset(fb, 0, bytes);
+            ge_set_gpu_hooks(NULL);
+            ge_run_list(list, 0);
+            ge_set_gpu_hooks(&k_hooks);
+        }
+        /* The first pixel reads level texel 0 (a quarter level-0 texel in, at every level). */
+        const uint32_t t = 0x10u + 4u * cells[i].level;
+        const uint32_t k = cells[i].multi ? (t + 256u * cells[i].level) & 511u : t;
+        const uint32_t want = coherence_mclut_rgb(k);
+        const size_t first = (size_t)COH_MIP_Y * stride + COH_MIP_X;
+        if (ok && ((fb[first] & 0x00FFFFFFu) != want || (gpu[first] & 0x00FFFFFFu) != want)) {
+            fprintf(stderr, "gpu coherence selftest [mip-clut %s]: first pixel gpu=%06x software=%06x, "
+                    "want entry 0x%03x (%06x)\n", cells[i].name, gpu[first] & 0x00FFFFFFu,
+                    fb[first] & 0x00FFFFFFu, k, want);
+            ok = 0;
+        }
+        size_t diff = 0, at = 0;
+        for (size_t px = 0; ok && px < pixels; px++)
+            if (gpu[px] != fb[px] && diff++ == 0) at = px;
+        if (diff) {
+            fprintf(stderr, "gpu coherence selftest [mip-clut %s]: %zu GPU/software mismatches, first "
+                    "at (%zu,%zu) gpu=%08x software=%08x\n", cells[i].name, diff, at % stride,
+                    at / stride, gpu[at], fb[at]);
+            ok = 0;
+        }
+        if (ok)
+            printf("gpu coherence selftest: PASS mip-clut %-12s bit=%u level=%u entry=0x%03x\n",
+                   cells[i].name, cells[i].multi, cells[i].level, k);
+        if (!ok) all = 0;
+    }
+    free(gpu);
+    coherence_reset_targets();
+    return all;
+}
+
 static int coherence_run_mip_levels(void) {
     static const CohMipCase cases[] = {
         /* Constant mode: the bias is the level, clamped to the highest level; one half
@@ -2642,6 +2787,7 @@ static int coherence_run_mip_levels(void) {
     if (!coherence_run_mip_shadow()) ok = 0;
     if (!coherence_run_mip_lod()) ok = 0;
     if (!coherence_run_mip_slope_change()) ok = 0;
+    if (!coherence_run_mip_clut()) ok = 0;
     coherence_mip_reset_state();
     coherence_reset_targets();
     return ok;
@@ -7467,6 +7613,7 @@ static int coherence_selftest_cases(void) {
     if (only && *only) {
         if (strcmp(only, "scaled-upload") == 0) return coherence_run_scaled_upload();
         if (strcmp(only, "mip-lod") == 0) return coherence_run_mip_lod();
+        if (strcmp(only, "mip-clut") == 0) return coherence_run_mip_clut();
         if (strcmp(only, "readback-rows") == 0) return coherence_run_readback_rows();
         if (strcmp(only, "sprite-scaled") == 0) return coherence_run_sprite_scaled();
         if (strcmp(only, "uv-edge-clamp") == 0) return coherence_run_uv_edge_clamp();

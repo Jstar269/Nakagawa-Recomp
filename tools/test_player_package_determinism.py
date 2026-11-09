@@ -354,7 +354,7 @@ class PackagePair:
         self.left, self.right = read_tree(left_root), read_tree(right_root)
         # A digest the package records for a differing file is a consequence of an
         # already-attributed difference, never an independent one.
-        digests = set()
+        digests: set[Any] = set()
         for tree, other in ((self.left, self.right), (self.right, self.left)):
             digests.update(hashlib.sha256(data).hexdigest()
                            for name, data in tree.items() if other.get(name) != data)
