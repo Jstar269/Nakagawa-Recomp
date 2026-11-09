@@ -192,7 +192,7 @@ static void test_activity_make(void) {
     assert(strcmp(a.details, "Fate/Extra") == 0 && a.start_ms == 0);
 
     /* A backslash would be a Windows path: the title is left out, the mode stays. */
-    assert(nk_discord_activity_make(&a, "C:\\Users\\someone\\game.iso", "Enhanced", 5));
+    assert(nk_discord_activity_make(&a, "C:\\path\\game.iso", "Enhanced", 5));
     assert(a.details[0] == '\0' && strcmp(a.state, "Enhanced") == 0);
     /* Too short for Discord, or not UTF-8: left out. */
     assert(nk_discord_activity_make(&a, "A", "Enhanced", 5) && a.details[0] == '\0');
