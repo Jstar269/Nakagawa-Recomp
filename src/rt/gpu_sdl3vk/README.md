@@ -71,8 +71,27 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   (analytic bound: truncation of two products plus round-to-nearest). Shader blends are
   bit-exact to `ge.c` for non-overlapping primitives. Measured by the
   `gpu-coherence-selftest` blend-parity matrix (726 factor/equation states on synthetic
-  draws). The shader reads a batch-start destination snapshot, so overlapping primitives
-  inside one batch are not bit-exact on the shader path; the matrix does not exercise that.
+  draws). Overlapping primitives inside one batch (#2109) depend on the destination-read
+  path below.
+- Destination reads (shader blends and the stencil test, #2109). On the snapshot path every
+  primitive of a batch reads one copy of the target taken before the batch, so a primitive
+  drawn over an earlier one of the same batch blends against the pre-batch pixels, not
+  against what that primitive stored. On the interlock path (`VK_EXT_fragment_shader_interlock`
+  with `fragmentShaderPixelInterlock` and `fragmentStoresAndAtomics`) such batches run
+  `psp_frag_rmw.inc`, `psp.frag` built with `-DSR_DST_INTERLOCK`. Each fragment loads the
+  target as a storage image, blends, and stores it inside a pixel-ordered interlock, so
+  overlapping primitives match `ge.c`. These batches record in a depth-only render pass with
+  the colour image in `GENERAL`. The other batches of the op keep the fixed-function pass, with
+  a barrier at each switch, and the op takes no snapshot copy. The variant tests depth early,
+  so an op whose destination-reading batch writes depth and may still kill a fragment in the
+  shader keeps the snapshot path (the alpha test, the transform-mode depth range when it is
+  narrower than 0–65535, or a stencil-fail KEEP). So does an op whose stencil state also
+  blends in fixed function, every op into a widescreen wing canvas (which has no RMW objects), and
+  every op while the host twin runs. The `submit-batch` and `gpu-timestamps` cells hold the
+  snapshot path on every device, since they count and time snapshot copies. The interlock path is
+  taken where the device has it; `SR_GPU_DST_READ` forces a path. On the snapshot path the
+  device, images, render passes and default shader are made exactly as before. The
+  `gpu-coherence-selftest` dst-read cells check both paths against `ge.c`.
 - Source-premultiplied states (src factor 2·α or 1−2α with a dst factor that reads the
   source colour, and min/max with those src factors) go through the shader or drop the
   premultiply, because fixed-function blending would otherwise read the premultiplied
@@ -289,6 +308,10 @@ depth aliasing.
   software fallback) closes the open command buffer itself. A larger limit trades CPU/GPU
   overlap inside one command buffer for fewer submits and fence waits.
 - `SR_GPU_SYNC_SUBMIT=1` — exact synchronous fallback: one op per submit, each waited on.
+- `SR_GPU_DST_READ=snapshot|interlock` — the destination-read path (#2109), read before the
+  device is made. Unset, the interlock is taken where the device has it; an unknown value says
+  so once and gets the same default. A forced path the device lacks is refused with its reason,
+  and the snapshot path runs.
 - `SR_GPU_READBACK_FULL=1` — copy the whole scaled target on a readback to guest memory, the
   reference path for the default copy of the rows guest memory keeps (#323).
 - `SR_GPU_PIPELINE_CACHE=0` — run without the pipeline cache in `<data root>/cache/gegpu`
