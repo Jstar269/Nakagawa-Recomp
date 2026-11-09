@@ -1716,6 +1716,8 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
                 return SR_GUEST_INTERP_AOT_HANDOFF;
             }
             if (boundary == NULL) {
+                /* A COSIM guest-lane refusal under it returns here with the fatal flow
+                 * pending (#2196), which this run's caller reports to the lane. */
                 dispatch(s, pc);
                 return SR_GUEST_INTERP_AOT_HANDOFF;
             }
@@ -1871,7 +1873,12 @@ static SrGuestInterpResult sr_guest_interp_run_internal(
                             " resume=0x%08" PRIx32 "\n",
                             transfer.target, resume_pc);
                 }
-                dispatch_call(s, transfer.target, resume_pc);
+                if (dispatch_call_interp(s, transfer.target, resume_pc)) {
+                    /* The COSIM guest lane refused an import under the call: none of this
+                     * caller's continuation runs, and the fatal flow goes to the lane's
+                     * entry (#2196). */
+                    return map_flow_result(s, -1, fault, pc, opcode);
+                }
                 pc = resume_pc;
                 reached_by_computed = 0;
                 s->pc = pc;
