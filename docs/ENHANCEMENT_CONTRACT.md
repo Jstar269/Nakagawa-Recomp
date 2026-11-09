@@ -153,8 +153,8 @@ Enhancement packages are declared as versioned JSON manifests adhering to `asset
 The declaration schema is kept lean and focused on core metadata and capability requests:
 
 - **Required root properties:** `schema_version` (must be 1), `id` (package identifier), `display_name`, `version` (semver), `category` (one of the 6 recognized categories), `target_title_id` (title ID or `*`), and `capabilities` (non-empty array of symbolic capability names).
-- **Optional root properties:** `min_runtime_version` (semver), `hooks` (array of hook objects with `symbol` and `type` only), and—for declarative frame-rate rescale packages (category `timing_frame_presentation` only)—`game_version` (exact title version string), `executable_sha256` (64-char lowercase hex SHA-256 of the stock guest ELF), `rng_policy` (`mode` and `reason`), and `sites` (non-empty array of symbolic instruction-site transform descriptors).
-- **Symbolic site descriptors (`sites`):** Each site entry declares `id` (site identifier), `function` (symbolic function name, never a raw hex address or `FUN_`/`sub_`/`loc_`/`func_` stem), `insn_offset` (non-negative 4-byte-aligned byte offset inside the function), `stock_digest` (64-char lowercase hex SHA-256 of the expected little-endian stock MIPS instruction word or words), optional `word_count` (an integer from 1 to 16, default `1`, the number of words `stock_digest` covers; only `1` has a defined rewrite, so a larger value refuses the package), and `transform` (one of the site transforms of section 9.2). A `gate_30hz_alt` site also declares `alternates`, a list of 1 to 4 distinct function symbols; every other transform refuses that field.
+- **Optional root properties:** `min_runtime_version` (semver), `hooks` (array of hook objects with `symbol` and `type` only), and—for declarative frame-rate rescale packages (category `timing_frame_presentation`, and the `game_version`, `executable_sha256` and `sites` of a `guest_memory_code_hook` package, section 11.3.6)—`game_version` (exact title version string), `executable_sha256` (64-char lowercase hex SHA-256 of the stock guest ELF), `rng_policy` (`mode` and `reason`), and `sites` (non-empty array of symbolic instruction-site transform descriptors).
+- **Symbolic site descriptors (`sites`):** Each site entry declares `id` (site identifier), `function` (symbolic function name, never a raw hex address or `FUN_`/`sub_`/`loc_`/`func_` stem), `insn_offset` (non-negative 4-byte-aligned byte offset inside the function), `stock_digest` (64-char lowercase hex SHA-256 of the expected little-endian stock MIPS instruction word or words), optional `word_count` (an integer from 1 to 16, default `1`, the number of words `stock_digest` covers; only `1` has a defined rewrite, so a larger value refuses the package), and `transform` (one of the site transforms of section 9.2). A `gate_30hz_alt` site also declares `alternates`, a list of 1 to 4 distinct function symbols; every other transform refuses that field. A `clip_x_widen` site (category `guest_memory_code_hook`, section 11.3.6) also declares `clip_register` (`v0` or `v1`) and `clip_offsets` (1 to 4 distinct 16-byte-aligned byte offsets from 0 to 65536); no other transform takes them, and a `guest_memory_code_hook` package takes no other transform and carries only `game_version`, `executable_sha256` and `sites` of the timing fields.
 - **No speculative payloads:** Unimplemented category payloads (`assets`, `presentation`, `timing`, `camera`, `save_data`) remain forbidden in the schema until their respective runtime loaders land.
 
 The package loader and AOT codegen hook (`tools/enhancement_package.py` and `tools/codegen.py`) strictly adhere to fail-closed principles:
@@ -327,8 +327,9 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off`. `tier` (`enhanced` or `ace`) only names the
-run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. Every other key is
-required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
+run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
+section 11.3.6) is the other key a line may leave out: a missing `cull` is off, and `cull=on` needs `tier=ace`. Every
+other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
 `<user data>/ace/`. Ace's 60 FPS game logic is not on this line: it selects the title's enhanced package variant
@@ -568,8 +569,9 @@ the Vulkan picture), `src/rt/gui.c` (the setting, the wing width and the softwar
 are missing from the wings or pop in at their edges. A declared symbolic `guest_memory_code_hook` (section 2.3) that
 widens that title's culling extents together with the view, resolved through its title profile and never by a raw
 address in a package (section 5), fixes that title, and the title's HUD stays inside the PSP's picture at every
-aspect. That hook changes what the guest computes, so it is a section 11 item. The Widescreen row's help text says
-that objects can pop in at the edges.
+aspect. That hook changes what the guest computes, so it is a section 11 item (11.3.6). The Widescreen row's help
+text says that objects can pop in at the edges. The `clip_x_widen` site of section 9.2 is the mechanism for a title
+that builds one clip-space matrix per camera and tests object bounds against it.
 
 ### 10.9. Settings
 
@@ -1346,3 +1348,58 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic. The private runs item 4 lists, before
   and after at render scale 4 on *Hot Shots Tennis* and *LittleBigPlanet*, and the library sweep, do not exist for
   this item, and it may not be on by default without them.
+
+#### 11.3.6. Widescreen Culling Widening (`clip_x_widen`, Not Yet Admitted)
+
+The Layer 2 mechanism of section 10.8, for a title that skips objects outside its own view before they reach the GE.
+
+- **Status: guest-visible, not admitted under section 11.2.** It is a `guest_memory_code_hook` package (section 2.3)
+  built into the title's own AOT output, and it changes guest memory.
+- **Mechanism.** A package site (`transform: "clip_x_widen"`, section 9.2) names the one `jal` where the title builds
+  a camera's clip matrices, by symbolic function and offset with the stock word's digest. The stock call runs
+  unchanged. When it returns, generated code calls `sr_enhancement_widen_clip_x` with the pointer the call returned
+  (`clip_register`) and the offsets of the title's visibility matrices (`clip_offsets`). The runtime scales the x output
+  row (elements 0, 4, 8 and 12 of each column-major 4x4 float matrix) by `480 / (480 + 2D)`, where `D` is the Widescreen
+  wing width (section 10.8), so a bounds test against `-w <= x <= w` accepts the same extra width the wings draw. The
+  matrices the GE receives are not touched, and the vertical extent and the HUD are unchanged.
+- **Key.** `cull=on` or `cull=off` on the launch line (section 10.1), an optional key: a line without it reads as
+  off, and `cull=on` is refused unless the line carries `tier=ace`. The player has a library setting and a per-title
+  setting, "Wider culling", each able to turn it off alone (section 11.2, item 2); the line carries `;cull=on` only for
+  an Ace launch with the part on, so every other line is as it was. The runtime scales only while the run asked for
+  the key and Widescreen has a wing (`D` > 0); with either missing, the stock call runs and nothing is written. The run
+  names it (`ACE_MODE: cull on (...)`, the report's `cull`), and reports it unavailable when no matrix was scaled by
+  the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
+  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is a separate
+  change. The player cannot tell ahead of a launch which games have a culling build, so the row's text says it
+  acts only in games that do, and a run without one says so in the `ACE_MODE: cull unavailable (...)` line and
+  the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's
+  `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
+  while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
+  tracked before the table filled were widened, the rest were not), never as a complete run.
+- **What it changes:** for the matrices at `clip_offsets`, 4 floats per listed matrix (its x output row) of guest memory
+  per call, only while Widescreen is on and the key is on; and so which objects the title submits, and any logic the
+  title gates on the same visibility test (animation or AI updates on visible objects, fixed object or display-list
+  budgets), which can change what the guest computes or draw objects in the centre that were skipped before.
+- **VRAM bytes:** differ in the wings and nowhere else, as objects the title used to skip are drawn there, provided
+  the package names matrices that only the title's own visibility test reads (below).
+- **Readbacks:** unchanged in the centre picture on that same condition; the wings are host-only (section 10.8).
+- **Timing:** differs: the title submits more objects, so its own submit time and the GE list grow. The GE timing
+  model, the VBLANK schedule and the media clocks are unchanged. The one private run so far (a single title, the GPU
+  renderer) measured +31% to +34% guest primitives in the wings and between +0.6 and +1.2 ms of mean frame time on a
+  shared host, with a 30 Hz-class tail at one aspect that has not been re-run; these figures are indicative and do
+  not establish the item's frame cost.
+- **I/O speed:** unchanged.
+- **Package obligations.** The mechanism cannot check these, so the package author shows them for the title: (1) the
+  call at the site leaves every listed matrix describing the camera it was built for, either rewritten at each call or
+  unchanged since the last one (the runtime does not scale a matrix whose x row still holds the words it wrote, so a
+  matrix the call does not rebuild is not scaled twice); (2) the listed offsets are matrices only the title's visibility
+  test reads, so the matrices the GE receives, and with them the centre picture, are untouched; (3) the title's logic
+  that depends on what is visible is not a behaviour change to guard against, or is guarded.
+- **Limits.** It cannot create what the title never modelled, what it places only inside the original view, or what
+  it hides by a rule that is not a horizontal clip test (a distance, a side-of-wall or a course-direction rule). The
+  wing cap of section 10.8 is unchanged. The table that keeps a matrix from being scaled twice holds 4096
+  distinct matrix addresses for the whole run and is never cleared; a title whose matrices move to new
+  addresses can fill it, after which new matrices are left unscaled (said once on stderr, counted in the
+  report's `cull_untracked`) instead of being scaled without a record.
+- **Tier:** Ace (one title). **Default:** off.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.

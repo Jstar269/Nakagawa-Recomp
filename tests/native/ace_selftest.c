@@ -44,6 +44,29 @@ static void cell_parse(void) {
     CHECK(ace_parse("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tier=ace",
                     &c, why, sizeof(why)) == 1 && c.on && c.tier == ACE_TIER_ACE,
           "tier=ace names an Ace run");
+    /* cull (contract 11.3.6): optional, a missing key and cull=off are both off, cull=on needs an Ace
+       line, and a line without it formats as before. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=fill;smooth=off;sas=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.cull == 0, "a missing cull is off");
+        snprintf(spec, sizeof(spec), "%s;tier=ace;cull=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.cull == 0 && c.tier == ACE_TIER_ACE,
+              "cull=off is off");
+        snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.cull == 1, "cull=on in an Ace line");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 8, ";cull=on") == 0 &&
+              strstr(out, "tier=ace;") == out + 3, "an Ace line with cull=on formats with the key last (%s)", out);
+        c.cull = 0;
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "cull") == NULL, "off writes no cull key (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;cull=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "cull needs tier=ace") == 0 &&
+              c.on == 0 && c.cull == 0, "cull=on without tier=ace is refused (%s)", why);
+        snprintf(spec, sizeof(spec), "%s;tier=ace;cull=fill", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0, "cull=fill is a bad value");
+        snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;cull=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate cull");
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {
@@ -112,7 +135,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -209,6 +232,17 @@ static void cell_switch(void) {
     CHECK(ace_effective()->sas == ACE_SAS_OFF && ace_requested()->sas == ACE_SAS_SINC,
           "an unavailable sas is off for the run");
     CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->sas == ACE_SAS_OFF, "sas=off is off");
+    /* cull: the report counts the matrices the hook left alone once its table was full, and a run with
+     * any is partial (cull unavailable), never a complete one (contract 11.3.6). */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tier=ace;cull=on",
+                        NULL) == 1 && ace_effective()->cull == 1, "cull=on with tier=ace turns cull on");
+    ace_set_cull_untracked(7);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": true") != NULL &&
+          strstr(json, "\"cull_untracked\": 7") != NULL, "the report counts untracked matrices:\n%s", json);
+    ace_feature_unavailable(ACE_FEATURE_CULL, "partial: test");
+    CHECK(ace_effective()->cull == 0 && ace_requested()->cull == 1 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
+          strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
 }
 
 /* ---- C4: the 30 Hz detector ----------------------------------------------------------------- */

@@ -3000,6 +3000,9 @@ def _package_codegen(st):
             str(identity_path),
             "--public-safe",
         ]
+        package_target = getattr(args, "target", None)
+        if package_target is not None:
+            planner.extend(("--target", package_target))
         if module_dir is not None:
             planner.extend(("--module-dir", str(module_dir)))
         if cached_header is not None:
@@ -6017,6 +6020,10 @@ def main() -> int:
     p_build.add_argument("--no-shared-libraries", action="store_true",
                          help="compile the disc's system libraries for this game only, "
                               "without the shared library cache")
+    p_build.add_argument("--target", choices=("host", "android"), default=None,
+                         help="system the package runs on: host, or android for the "
+                              "shared library the Android app loads (default: android "
+                              "when this runs on Android, else host)")
     p_build.set_defaults(func=cmd_build_package)
 
     p_bringup = subparsers.add_parser(
