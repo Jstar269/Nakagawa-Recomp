@@ -338,7 +338,7 @@ class TestDmacGpuAliasBoundary(unittest.TestCase):
 # `make dmac-mutants` runs TestDmacMutationCampaign (minutes: one selftest build per mutant).  Plain test
 # runs only check that the list still applies.
 
-DMAC_TARGET = "src/rt/hle_cache_dma.c"
+DMAC_TARGET = hle_sources.defining_file("dmac_transfer")
 DMAC_SELFTEST = ROOT / "tests" / "native" / "hle_thread_selftest.c"
 
 # (name, old text, new text, text the failure output must contain)
@@ -451,7 +451,7 @@ class TestDmacMutationCampaign(unittest.TestCase):
             if only and only not in name:
                 continue
             with self.subTest(name):
-                copy = base / f"m{index:02d}" / "hle_cache_dma.c"
+                copy = base / f"m{index:02d}" / Path(DMAC_TARGET).name
                 copy.parent.mkdir(parents=True, exist_ok=True)
                 copy.write_text(original.replace(old, new), encoding="utf-8")
                 srcs = [copy.as_posix() if s == DMAC_TARGET else s for s in sources]
