@@ -5937,9 +5937,9 @@ static int wide_frame(int gpu, int flags, uint32_t *vram, uint32_t *canvas) {
 /* clip_x_widen (docs/ENHANCEMENT_CONTRACT.md section 11.3.6): with Fill on the runtime scales the x row (elements
  * 0, 4, 8, 12) of each column-major clip matrix by 480 / (480 + 2D) and touches nothing else; with Fill off it
  * leaves every float alone. Two matrices at different offsets from one base, in guest RAM away from the frames. */
-static int wide_clip_x_check(int wing, int cull) {
+static int wide_clip_x_check(int wing, int cull, uint32_t off0, uint32_t off1) {
     const uint32_t base = SR_RAM_BASE + 0x00f00000u;
-    const uint32_t offsets[2] = {640u, 448u};
+    const uint32_t offsets[2] = {off0, off1};
     /* A stock matrix pair: what the title's call leaves each time it rebuilds them. */
     const int rebuilds = 2;   /* call, call again with no rebuild, then rebuild and call */
     int ok = 1;
@@ -6151,9 +6151,13 @@ static int wide_frames(const WideBufs *B) {
                 ok = 0;
             }
         }
-        if (ok && ge_wide_set_wing(WIDE_D) == WIDE_D) ok = wide_clip_x_check(WIDE_D, 1) && wide_clip_x_check(WIDE_D, 0);
+        /* The second pair lies 41344 bytes apart, which shared a slot in a direct-mapped table: each
+         * matrix is scaled once however the pair falls (a repeat call must not scale it again). */
+        if (ok && ge_wide_set_wing(WIDE_D) == WIDE_D)
+            ok = wide_clip_x_check(WIDE_D, 1, 640u, 448u) && wide_clip_x_check(WIDE_D, 0, 640u, 448u) &&
+                 wide_clip_x_check(WIDE_D, 1, 0u, 41344u);
         ge_wide_set_wing(0);
-        if (ok) ok = wide_clip_x_check(0, 1);
+        if (ok) ok = wide_clip_x_check(0, 1, 640u, 448u);
         if (ok) printf("gpu coherence selftest: PASS %-22s %s frames scale=%d\n", "wide-fill", who, s_scale);
         else fprintf(stderr, "gpu coherence selftest [wide-fill]: FAIL %s frames\n", who);
         ok_all &= ok;

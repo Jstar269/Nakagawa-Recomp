@@ -1283,7 +1283,8 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the key and Widescreen has a wing (`D` > 0); with either missing, the stock call runs and nothing is written. The run
   names it (`ACE_MODE: cull on (...)`, the report's `cull`), and reports it unavailable when no matrix was scaled by
   the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
-  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is a separate change.
+  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is a separate change. The player cannot tell ahead of a launch which games have a culling build, so the row's text says it acts only in games
+  that do, and a run without one says so in the `ACE_MODE: cull unavailable (...)` line and the report.
 - **What it changes:** for the matrices at `clip_offsets`, 4 floats per listed matrix (its x output row) of guest memory
   per call, only while Widescreen is on and the key is on; and so which objects the title submits, and any logic the
   title gates on the same visibility test (animation or AI updates on visible objects, fixed object or display-list
@@ -1293,9 +1294,9 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
 - **Readbacks:** unchanged in the centre picture on that same condition; the wings are host-only (section 10.8).
 - **Timing:** differs: the title submits more objects, so its own submit time and the GE list grow. The GE timing
   model, the VBLANK schedule and the media clocks are unchanged. The one private run so far (a single title, the GPU
-  renderer) measured +31% to +34% guest primitives in the wings and between +0.6 and +1.2 ms of mean frame time, with
-  one aspect showing a 30 Hz-class tail on a shared host; that tail has not been re-run, so no frame-cost figure
-  is claimed.
+  renderer) measured +31% to +34% guest primitives in the wings and between +0.6 and +1.2 ms of mean frame time on a
+  shared host, with a 30 Hz-class tail at one aspect that has not been re-run; these figures are indicative and do
+  not establish the item's frame cost.
 - **I/O speed:** unchanged.
 - **Package obligations.** The mechanism cannot check these, so the package author shows them for the title: (1) the
   call at the site leaves every listed matrix describing the camera it was built for, either rewritten at each call or

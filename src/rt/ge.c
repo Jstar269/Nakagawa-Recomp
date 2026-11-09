@@ -4984,7 +4984,9 @@ void ge_wide_set_cull(int on) { s_cull_on = on ? 1 : 0; }
 unsigned long ge_wide_cull_calls(void) { return s_cull_calls; }
 
 /* A matrix the hook scaled is remembered with the four x-row words it left, so a call that finds
- * those words unchanged (the title did not rebuild the matrix since) does not scale it again. */
+ * those words unchanged (the title did not rebuild the matrix since) does not scale it again. The
+ * table is open-addressed by the matrix's full address and never evicts, so two matrices cannot
+ * share an entry; when it is full a new matrix is left alone (said once), never scaled untracked. */
 #define GE_CULL_SEEN 4096u
 static struct { uint32_t addr; uint32_t row[4]; } s_cull_seen[GE_CULL_SEEN];
 
@@ -5005,7 +5007,21 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
         }
         uint32_t row[4];   /* the x output row of a column-major matrix: elements 0, 4, 8 and 12 */
         for (uint32_t k = 0; k < 4u; k++) memcpy(&row[k], SR_HOST(m + 16u * k), sizeof row[k]);
-        const uint32_t slot = ((m >> 4) * 2654435761u) >> 20;   /* 12 bits */
+        uint32_t slot = ((m >> 4) * 2654435761u) >> 20;   /* 12 bits */
+        uint32_t probes = 0;
+        while (probes < GE_CULL_SEEN && s_cull_seen[slot].addr != 0u && s_cull_seen[slot].addr != m) {
+            slot = (slot + 1u) % GE_CULL_SEEN;
+            probes++;
+        }
+        if (probes == GE_CULL_SEEN) {
+            static int full_reported;
+            if (!full_reported) {
+                full_reported = 1;
+                fprintf(stderr, "clip_x_widen: more than %u distinct matrices; the rest are left alone "
+                                "(said once)\n", GE_CULL_SEEN);
+            }
+            continue;
+        }
         if (s_cull_seen[slot].addr == m && memcmp(s_cull_seen[slot].row, row, sizeof row) == 0)
             continue;   /* still the words this hook wrote: not rebuilt since, already widened */
         for (uint32_t k = 0; k < 4u; k++) {
