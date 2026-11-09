@@ -69,17 +69,19 @@ void sr_videorec_frame(const void *px, uint32_t w, uint32_t h, uint32_t row_byte
  * Each names the scaling that was carried out, not the setting that asked for it: NONE is a
  * picture at its own size; NEAREST is one nearest-neighbour scale; SHARP is a nearest prescale
  * to a whole multiple, then one linear scale; LINEAR is one linear scale; FSR1 is the
- * presentation upscaler (SR_PRESENT_UPSCALE=fsr1). */
+ * presentation upscaler (SR_PRESENT_UPSCALE=fsr1); ANIME4K is the movie upscaler
+ * (SR_MOVIE_UPSCALE=anime4k: Anime4K's CNN stages, then FSR 1). */
 typedef enum {
     SR_VIDEOREC_FILTER_NONE = 0,
     SR_VIDEOREC_FILTER_NEAREST,
     SR_VIDEOREC_FILTER_SHARP,
     SR_VIDEOREC_FILTER_LINEAR,
     SR_VIDEOREC_FILTER_FSR1,
+    SR_VIDEOREC_FILTER_ANIME4K,
     SR_VIDEOREC_FILTER_COUNT
 } SrVideoRecFilter;
 
-/* The name record.json gives a filter ("none", "nearest", "sharp", "linear", "fsr1"), or NULL
+/* The name record.json gives a filter ("none", "nearest", "sharp", "linear", "fsr1", "anime4k"), or NULL
  * for a value that is not one. */
 const char *sr_videorec_filter_name(int filter);
 

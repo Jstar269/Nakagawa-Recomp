@@ -71,6 +71,87 @@
       "spirv_bytes": 16976,
       "spirv_sha256": "492a9dd7802bc46ab219022f044cf3c619dbaf769fde542fdcc8b9417f0656cd",
       "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_0_comp.inc",
+      "embedded_sha256": "6028c48ed7f58829d58fa24edcd2686db8d5f60570b7fc3e6a5bd20be9e2fce7",
+      "source": "shaders/anime4k_cnn_x2_m_0.comp",
+      "source_sha256": "86233a317def05d87d74f76548262706c1aa01db8610a56aacc09d1c0862ff6a",
+      "spirv_bytes": 7080,
+      "spirv_sha256": "23fe88d4b10a0e51e3bcfaeb84d094f1e0c7b963ba9ef81556314a2888fae3e9",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_1_comp.inc",
+      "embedded_sha256": "8f3d9ac074c862e1adcf4fd1b21a3a63c6f4cc6f69f5714b4fe490d652d3dc0e",
+      "source": "shaders/anime4k_cnn_x2_m_1.comp",
+      "source_sha256": "b0f24f9dff7ee14f3d050b6bfbc2c4126a4804804fed26d1e0f90580daebeb13",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "7fd5355af0b6430844880830159b046f86f39c114595540abf15e3565477513c",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_2_comp.inc",
+      "embedded_sha256": "a1613ead97aff0c2d0c624a43c4f5f12ca3a383c1371c66140b338ee9efbdda3",
+      "source": "shaders/anime4k_cnn_x2_m_2.comp",
+      "source_sha256": "91a781ceb9775fd0baeb24fa3d2987415e161c26d67e842ca75ce6a6d69746e7",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "6046fa4a8fdc26d83ddb2df85679b8966e815f8ece166b433aeebc708063dd39",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_3_comp.inc",
+      "embedded_sha256": "53b8a80ef08e414f89c58b0cebecb59dbf09b397bfed9e20277dccfe424229ea",
+      "source": "shaders/anime4k_cnn_x2_m_3.comp",
+      "source_sha256": "4347216d7d0723d6568a296b3f75f705cf3bb31b2900be4de624b803d53552ae",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "8f189b533cb7b5e6135d0830aec42bab98d7832a6f426038e95fc6cf0eff7edc",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_4_comp.inc",
+      "embedded_sha256": "de3fffccb451fb470546d7b1c3d9a33f896a9c516acb23318b10b4860f19f614",
+      "source": "shaders/anime4k_cnn_x2_m_4.comp",
+      "source_sha256": "8f29006e73653e8a9dd883245407b29a4beb29c5d049d1c71ced44428a945f40",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "e7c91413779605271331fa7dae0e565b6906d51cb0992a98abb09defa2a81b02",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_5_comp.inc",
+      "embedded_sha256": "8961a5e7d1336ba21eff39a61caf80abbaa5b2a7b208da5b2dad07ab45651cfd",
+      "source": "shaders/anime4k_cnn_x2_m_5.comp",
+      "source_sha256": "49e9a03daeaa0dd357e15fddb9044a7fa1d26b54242cc2451ceafe3d67543484",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "0d2e3c725c24be1ffbbdcd3bf084e4d9742c4ba52407aaf8a0b89680073c83dc",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_6_comp.inc",
+      "embedded_sha256": "813a2d630ede9b5d513ea6a4f2e882264a9008c1ca7df1e5a189d3313e1f36dd",
+      "source": "shaders/anime4k_cnn_x2_m_6.comp",
+      "source_sha256": "d4384490b4ee18d2fd3fb8648e91bfae87b366dd3b8fef57c47cdb08d466298b",
+      "spirv_bytes": 14900,
+      "spirv_sha256": "443ba649f412baa58bcd170e13555faef83b3ae0e974a611e21dd18dc2847c11",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_7_comp.inc",
+      "embedded_sha256": "9a9bb42d8e50a4ad4ee5dd601087df8f53861e723915d04a827b202fc04a37a9",
+      "source": "shaders/anime4k_cnn_x2_m_7.comp",
+      "source_sha256": "d046874474b356764b1ba663b9d2c4d83ba8f3d45658fb81c366aeb22a0b9bc9",
+      "spirv_bytes": 10408,
+      "spirv_sha256": "ba1a506a2a1e011567af8818b1f07e15b97f843cd7c567bd9525784e91af5a75",
+      "stage": "comp"
+    },
+    {
+      "embedded": "anime4k_cnn_x2_m_8_comp.inc",
+      "embedded_sha256": "d161848395932112e04a14d5899778047cfea9c6a1bd0f2a378817f8530844b8",
+      "source": "shaders/anime4k_cnn_x2_m_8.comp",
+      "source_sha256": "0d137f6ffc12f18da826c4739ecd5c0d07821b5b155b0cfc658104dc01cee99d",
+      "spirv_bytes": 2848,
+      "spirv_sha256": "6743abaf8c31fee01fed007164b1c0d05fd5ed27a2c8bc5a48124d6fbdc68cd1",
+      "stage": "comp"
     }
   ]
 }
