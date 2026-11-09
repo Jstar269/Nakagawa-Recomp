@@ -241,6 +241,8 @@ extern void sr_hle_test_data_mark_guest_start(void);
 extern unsigned long sr_hle_test_data_walk_calls(void);
 extern unsigned long long sr_hle_test_data_scan_names(void);
 extern unsigned long long sr_hle_test_data_scan_probes(void);
+extern unsigned long long nk_xb_test_lazy_path_calls(void);
+extern void nk_xb_test_reset_lazy_path_calls(void);
 extern unsigned long sr_hle_test_data_build_attempts(void);
 extern unsigned long sr_hle_test_data_builds_after_guest(void);
 extern int sr_hle_test_data_state(void);
@@ -16299,8 +16301,15 @@ static void test_archive_discovery_skips_unpack_folders_only(void) {
     hle_test_setenv("SR_DATAROOT", dataroot);
     hle_test_setenv("SR_LOOSE_CONTENT_ROOTS", loose);
     sr_hle_test_data_reset(0);
+    nk_xb_test_reset_lazy_path_calls();
     expect(sr_host_data_prepare() == SR_DATA_TEST_STATE_READY,
            "a primary root with unpack folders and a loose root reaches READY");
+    expect(sr_hle_test_data_entry_count() == 3u,
+           "discovery mounts the three top-level one-member archives of the primary root");
+    /* One lookup by path per mounted archive, its open: the mount's size checks ask
+     * the open handle, not the path, so a title's boot pays no extra name lookups. */
+    expect(nk_xb_test_lazy_path_calls() == 3u,
+           "each archive mount makes one host lookup by path");
 
     expect(hle_archive_route_file_matches("disc0:/PSP_GAME/USRDIR/data/menu/inpack.to",
                                           "outer-archive"),
