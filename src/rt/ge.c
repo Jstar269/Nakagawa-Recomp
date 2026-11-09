@@ -5003,7 +5003,7 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
             static int reported;
             if (!reported) {
                 reported = 1;
-                fprintf(stderr, "clip_x_widen: matrix at 0x%08x is outside guest RAM; left alone "
+                fprintf(stderr, "clip_x_widen: matrix at 0x%08" PRIx32 " is outside guest RAM; left alone "
                                 "(said once)\n", m);
             }
             continue;
