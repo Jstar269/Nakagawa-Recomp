@@ -999,8 +999,9 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         /* The title page at its tallest: the game starting (its progress card),
            the disc check's note, what to expect with known issues, the
            ENHANCEMENTS card at its fullest and the Add to Steam, Report and
-           Remove row. It is taller than the room between the bars of a
-           1280 x 720 window at 100% text, so its body scrolls. */
+           Remove row, with #2151's render notice above it all. It is taller
+           than the room between the bars of a 1280 x 720 window at 100% text,
+           so its body scrolls. */
         static PlayerUiTitle fixture;
         PlayerUiTitleModel title;
         fixture = k_titles[6];
@@ -1028,6 +1029,11 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         title.title_index = 6u;
         title.logical_width = g_flow_width;
         title.logical_height = g_flow_height;
+        title.render_notice_heading = "Drawn in software";
+        title.render_notice_text =
+            "Vulkan did not start on this PC, so this game is drawn in software and shown "
+            "in a basic Windows window. The Internal resolution setting has no effect, and "
+            "the game may run slower. Updating the graphics driver may help.";
         return player_ui_screen_title(ui, &title);
     }
     if (which == FLOW_PAGE_STEAM || which == FLOW_PAGE_STEAM_ACCOUNTS ||
