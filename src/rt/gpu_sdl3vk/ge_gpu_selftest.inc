@@ -4834,6 +4834,8 @@ static int coherence_run_stencil_constant(void) {
  *  - textured (8888): a 16x16 texture, a quarter of its texels a key colour with hashed alpha,
  *    drawn 1:1 with REPLACE under each function, with the full mask and a 5-bit-lattice one:
  *    the colour-keyed sprite a game draws with the color test;
+ *  - doubled (8888): the same sprites with REPLACE and colour doubling, which psp.frag computes
+ *    exactly on whole texels (doubled and clamped), so this list stays on the GPU;
  *  - modulated (8888): the same sprites with MODULATE and a non-white vertex colour. psp.frag
  *    computes that colour in floating point, 1 away from ge.c's integer one at some texels, and
  *    the key turns that into a pixel kept or dropped, so this list must stay on ge.c (every
@@ -4841,7 +4843,7 @@ static int coherence_run_stencil_constant(void) {
  * A table of states then checks color_test_colour_inexact() directly, including the Gouraud
  * triangle and transform-mode fog cases these sprite lists cannot reach. */
 enum { CTP_FLAT_8888, CTP_FLAT_5650, CTP_FLAT_5551, CTP_FLAT_4444, CTP_BLEND_8888,
-       CTP_TEX_8888, CTP_TEXMOD_8888, CTP_KINDS };
+       CTP_TEX_8888, CTP_TEXDBL_8888, CTP_TEXMOD_8888, CTP_KINDS };
 #define CTP_TEX 0x08100000u                      /* 16x16 8888 texture in main RAM */
 #define CTP_KEY 0x00C03080u                      /* the textured cells' key colour */
 
@@ -4863,7 +4865,7 @@ static uint32_t ctp_list(uint32_t base, int kind, int on) {
     stp_emit(&l, 0x24, 0);                               /* no stencil test */
     stp_emit(&l, 0x27, on ? 1u : 0u);
     uint32_t vaddr = 0x08060000u;
-    if (kind != CTP_TEX_8888 && kind != CTP_TEXMOD_8888) {
+    if (kind != CTP_TEX_8888 && kind != CTP_TEXDBL_8888 && kind != CTP_TEXMOD_8888) {
         const int blended = kind == CTP_BLEND_8888;
         stp_emit(&l, 0x21, blended ? 1u : 0u);
         for (uint32_t cell = 0; cell < 4u * 6u * 2u; cell++) {
@@ -4884,9 +4886,10 @@ static uint32_t ctp_list(uint32_t base, int kind, int on) {
         stp_emit(&l, 0xB8, 4u | (4u << 8));
         stp_emit(&l, 0xC0, 0); stp_emit(&l, 0xC2, 0); stp_emit(&l, 0xC3, 3);
         stp_emit(&l, 0xC6, 0); stp_emit(&l, 0xC7, 0);
-        const int modulate = kind == CTP_TEXMOD_8888;
+        const int modulate = kind == CTP_TEXMOD_8888, doubled = kind == CTP_TEXDBL_8888;
         const uint32_t vcol = modulate ? 0xFFB06A3Du : 0xFFFFFFFFu;
-        stp_emit(&l, 0xC9, (modulate ? 0u : 3u) | (1u << 8));   /* modulate or replace, texture alpha */
+        /* modulate or replace, texture alpha, the colour doubled for the doubled list */
+        stp_emit(&l, 0xC9, (modulate ? 0u : 3u) | (1u << 8) | (doubled ? 1u << 16 : 0u));
         stp_emit(&l, 0xCB, 0);
         stp_emit(&l, 0x1E, 1);
         stp_emit(&l, 0x21, 0);
@@ -4899,8 +4902,9 @@ static uint32_t ctp_list(uint32_t base, int kind, int on) {
             /* Modulated, only functions that test (ALWAYS is no test, so it would stay on the GPU). */
             static const uint32_t mod_func[8] = { 0u, 2u, 3u, 2u, 0u, 3u, 2u, 3u };
             stp_emit(&l, 0xD8, modulate ? mod_func[cell] : (cell & 3u));
-            /* Modulated, the key is the key texel times the vertex colour as ge.c truncates it. */
-            stp_emit(&l, 0xD9, modulate ? 0x0084141Fu : CTP_KEY);
+            /* Modulated, the key is the key texel times the vertex colour as ge.c truncates it;
+             * doubled, the key texel doubled and clamped. */
+            stp_emit(&l, 0xD9, modulate ? 0x0084141Fu : doubled ? 0x00FF60FFu : CTP_KEY);
             stp_emit(&l, 0xDA, cell < 4u ? 0xFFFFFFu : 0xF8F8F8u);
             stp_emit(&l, 0x01, vaddr & 0x00FFFFFFu);
             stp_emit(&l, 0x04, (6u << 16) | 2u);
@@ -4941,7 +4945,7 @@ static int ctp_run(uint32_t base, uint32_t fmt, uint32_t list, int gpu, uint8_t 
 static int coherence_run_color_test(void) {
     static const char *const names[CTP_KINDS] = { "flat-8888", "flat-5650", "flat-5551",
                                                   "flat-4444", "blended-8888", "textured-8888",
-                                                  "modulated-8888" };
+                                                  "doubled-8888", "modulated-8888" };
     const uint32_t base = 0x04000000u | 0x00140000u, bytes = FB_W * FB_H * 4u;
     uint8_t *gpu_out = (uint8_t *)malloc(bytes), *sw_out = (uint8_t *)malloc(bytes);
     uint8_t *off_out = (uint8_t *)malloc(bytes);
@@ -5014,27 +5018,36 @@ static int coherence_run_color_test(void) {
     free(gpu_out); free(sw_out); free(off_out);
     *s_ge = saved;
     /* color_test_colour_inexact(interp, persp) under Gouraud shading, fog, a texture function
-     * (0xFFFF: untextured; bit 8 texture alpha) and a filter. */
-    static const struct { int interp, persp, gouraud, fog; uint32_t tfunc, filter; int want; } cx[] = {
-        { 0, 0, 0, 0, 0xFFFFu, 0u, 0 },      /* untextured flat sprite */
-        { 1, 0, 0, 0, 0xFFFFu, 0u, 0 },      /* untextured flat triangle */
-        { 1, 0, 1, 0, 0xFFFFu, 0u, 1 },      /* Gouraud triangle */
-        { 0, 0, 1, 0, 0xFFFFu, 0u, 0 },      /* Gouraud sprite: one colour */
-        { 0, 1, 0, 1, 0xFFFFu, 0u, 1 },      /* transform-mode fog */
-        { 0, 0, 0, 1, 0xFFFFu, 0u, 0 },      /* fog has no effect in through mode */
-        { 0, 0, 0, 0, 0x103u, 0u, 0 },       /* replace, nearest */
-        { 0, 0, 0, 0, 0x001u, 0u, 0 },       /* decal without texture alpha */
-        { 0, 0, 0, 0, 0x101u, 0u, 1 },       /* decal with texture alpha: a float mix */
-        { 0, 0, 0, 0, 0x100u, 0u, 1 },       /* modulate */
-        { 0, 0, 0, 0, 0x102u, 0u, 1 },       /* blend */
-        { 0, 0, 0, 0, 0x104u, 0u, 1 },       /* add */
-        { 0, 0, 0, 0, 0x103u, 0x101u, 1 },   /* replace, filtered */
+     * (0xFFFF: untextured; bit 8 texture alpha, bit 16 colour doubling), a filter and a
+     * texture format (3 8888, 0 5650, 2 4444, 5 CLUT8). */
+    static const struct { int interp, persp, gouraud, fog; uint32_t tfunc, filter; int want; uint32_t fmt; } cx[] = {
+        { 0, 0, 0, 0, 0xFFFFu, 0u, 0, 3u },      /* untextured flat sprite */
+        { 1, 0, 0, 0, 0xFFFFu, 0u, 0, 3u },      /* untextured flat triangle */
+        { 1, 0, 1, 0, 0xFFFFu, 0u, 1, 3u },      /* Gouraud triangle */
+        { 0, 0, 1, 0, 0xFFFFu, 0u, 0, 3u },      /* Gouraud sprite: one colour */
+        { 0, 1, 0, 1, 0xFFFFu, 0u, 1, 3u },      /* transform-mode fog */
+        { 0, 0, 0, 1, 0xFFFFu, 0u, 0, 3u },      /* fog has no effect in through mode */
+        { 0, 0, 0, 0, 0x103u, 0u, 0, 3u },       /* replace, nearest */
+        { 0, 0, 0, 0, 0x001u, 0u, 0, 3u },       /* decal without texture alpha */
+        { 0, 0, 0, 0, 0x101u, 0u, 1, 3u },       /* decal with texture alpha: a float mix */
+        { 0, 0, 0, 0, 0x100u, 0u, 1, 3u },       /* modulate */
+        { 0, 0, 0, 0, 0x102u, 0u, 1, 3u },       /* blend */
+        { 0, 0, 0, 0, 0x104u, 0u, 1, 3u },       /* add */
+        { 0, 0, 0, 0, 0x103u, 0x101u, 1, 3u },   /* replace, filtered */
+        { 0, 0, 0, 0, 0x10103u, 0u, 0, 3u }, /* replace, colour doubled: whole texels doubled and clamped */
+        { 0, 0, 0, 0, 0x10001u, 0u, 0, 3u }, /* decal without texture alpha, colour doubled */
+        { 0, 0, 0, 0, 0x10100u, 0u, 1, 3u }, /* modulate, colour doubled */
+        { 0, 0, 0, 0, 0x103u, 0u, 0, 0u },   /* replace, 5650 texels */
+        { 0, 0, 0, 0, 0x103u, 0u, 0, 2u },   /* replace, 4444 texels */
+        { 0, 0, 0, 0, 0x103u, 0u, 0, 5u },   /* replace, CLUT8 texels */
+        { 0, 0, 0, 0, 0x100u, 0u, 1, 5u },   /* modulate, CLUT8 texels */
     };
     for (unsigned i = 0; i < sizeof(cx) / sizeof(cx[0]); i++) {
         s_ge->color_test_enable = 1; s_ge->color_test = 2u; s_ge->clear = 0;
         s_ge->shade_gouraud = cx[i].gouraud; s_ge->fog_enable = cx[i].fog;
         s_ge->tex_enable = cx[i].tfunc != 0xFFFFu; s_ge->tex_addr = s_ge->tex_enable ? CTP_TEX : 0u;
-        s_ge->tex_func = cx[i].tfunc & 0x1FFu; s_ge->tex_filter = cx[i].filter;
+        s_ge->tex_func = cx[i].tfunc & 0x101FFu; s_ge->tex_filter = cx[i].filter;
+        s_ge->tex_fmt = cx[i].fmt;
         s_ge->tex_max_level = 0u;
         const int got = color_test_colour_inexact(cx[i].interp, cx[i].persp);
         if (got != cx[i].want) {

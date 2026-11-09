@@ -4455,12 +4455,21 @@ static void tex_xs_collect(void) {
     }
 }
 
+/* Whether the GE color test decides a draw's pixels: as ge.c shade() runs it, never in clear
+ * mode, and ALWAYS tests nothing. */
+static int color_test_active(const GeState *g) {
+    return g->color_test_enable && !g->clear && (g->color_test & 3u) != 1u;
+}
+
 /* The set a draw binds for entry `e`: its scaled copy while that is current and allowed
- * (tex_xs_bindable, tex_xs_eligible), else tex_entry_set's. s_tex_bound_scale reports which. */
+ * (tex_xs_bindable, tex_xs_eligible), else tex_entry_set's. s_tex_bound_scale reports which.
+ * A color-test draw binds the guest-resolution set: ge.c keys on the guest's texels, and an xBRZ
+ * or replacement copy's texels are other colours, with the key blended into their edges. */
 static VkDescriptorSet tex_bind_set(TexEnt *e, uint32_t levels) {
     s_tex_bound_scale = 1;
     s_tex_cur = e;
-    if (!xs_enabled() || !tex_xs_bindable(e) || !tex_xs_eligible(e, levels)) return tex_entry_set(e);
+    if (!xs_enabled() || color_test_active(s_ge) || !tex_xs_bindable(e) || !tex_xs_eligible(e, levels))
+        return tex_entry_set(e);
     VkDescriptorSet set = e->xs.set;
     if (s_ace_af && (tex_filter_variant(s_ge->tex_filter) & 2u) && !(s_ge->vtype & (1u << 23))) {
         /* Ace Mode's texture filtering applies to the copy as tex_entry_set applies it. */
@@ -5383,7 +5392,7 @@ static int gpu_state_unsupported_reason(void) {
  * `interp`: the primitive interpolates its vertex colours (triangles); `persp`: transform mode. */
 static int color_test_colour_inexact(int interp, int persp) {
     const GeState *g = s_ge;
-    if (!g->color_test_enable || g->clear || (g->color_test & 3u) == 1u) return 0;
+    if (!color_test_active(g)) return 0;
     if (interp && g->shade_gouraud) return 1;
     if (persp && g->fog_enable) return 1;
     if (g->tex_enable && g->tex_addr) {
@@ -5836,9 +5845,10 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
         }
     }
     /* Sharp game text (glyph_recon.h): a sprite that maps one texel to one pixel over a page of
-     * anti-aliased coverage draws from the rebuilt glyph image when its tile is ready. */
+     * anti-aliased coverage draws from the rebuilt glyph image when its tile is ready. A
+     * color-test draw keeps the guest's texels, which the test keys on (tex_bind_set). */
     int glyph_bound = 0;
-    if (s_glyphs && (((uint32_t)b.pc.cfg[0] >> 8) & F_TEX) && !b.tsrc && !b.tsnap && s_tex_cur &&
+    if (s_glyphs && !color_test_active(s_ge) && (((uint32_t)b.pc.cfg[0] >> 8) & F_TEX) && !b.tsrc && !b.tsnap && s_tex_cur &&
         b.dset == s_tex_cur->set && !(((uint32_t)b.pc.cfg[0] >> 8) & (F_LODFRAG | F_CLEAR)) &&
         nk_smart2d_sprite(xa, ya, xb, yb, ul, vt, ur, vbm))
         glyph_bound = glyph_apply(&b, s_tex_cur, ul, ur, vt, vbm);
