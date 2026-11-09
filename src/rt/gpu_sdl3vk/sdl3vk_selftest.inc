@@ -1153,7 +1153,9 @@ static Fsr1Pass *s_test_fsr;
 static VkImage s_test_fsr_out;
 static int s_test_fsr_calls, s_test_fsr_args[4];
 
-static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h) {
+static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h, int cpu_frame,
+                           int *anime4k) {
+    (void)cpu_frame; (void)anime4k;
     s_test_fsr_calls++;
     s_test_fsr_args[0] = w;
     s_test_fsr_args[1] = h;
@@ -1170,7 +1172,9 @@ static void *test_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int ou
 static Fsr1Pass *s_test_rec_fsr;
 static int s_test_rec_calls, s_test_rec_args[4];
 
-static void *test_rec_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h) {
+static void *test_rec_fsr_pass(void *cmd, void *src, int w, int h, int out_w, int out_h,
+                               int cpu_frame, int *anime4k) {
+    (void)cpu_frame; (void)anime4k;
     s_test_rec_calls++;
     s_test_rec_args[0] = w;
     s_test_rec_args[1] = h;
@@ -1193,8 +1197,9 @@ static int test_rec_read(uint8_t *out, size_t bytes, int *filter) {
 }
 
 /* The recording's upscaler when gui.c could not make its pass: asked, it returns nothing. */
-static void *test_rec_null_pass(void *cmd, void *src, int w, int h, int out_w, int out_h) {
-    (void)cmd; (void)src; (void)w; (void)h; (void)out_w; (void)out_h;
+static void *test_rec_null_pass(void *cmd, void *src, int w, int h, int out_w, int out_h,
+                                int cpu_frame, int *anime4k) {
+    (void)cmd; (void)src; (void)w; (void)h; (void)out_w; (void)out_h; (void)cpu_frame; (void)anime4k;
     s_test_rec_calls++;
     return NULL;
 }

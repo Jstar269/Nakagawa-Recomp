@@ -640,6 +640,9 @@ static bool library_heading_fits(NkUi *ui, const PlayerUiLibraryModel *model,
             used += 2.0f * NK_UI_SPACE_3 + nk_ui_button_width(ui, "Rebuild all", small) +
                     nk_ui_button_width(ui, "Hide", small);
         }
+        if (model->rebuild_notice_offers_queue) {
+            used += NK_UI_SPACE_3 + nk_ui_button_width(ui, "Queue", small);
+        }
     }
     if (page_count > 1u) {
         used += NK_UI_SPACE_4 + nk_ui_button_width(ui, "Previous", small) + NK_UI_SPACE_3 +
@@ -800,8 +803,9 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                 }
             }
             /* Games an older Nakagawa built: one line with Rebuild all and
-               Hide, or the queue's count while it runs. Never the default
-               focus: that stays on the first card. */
+               Hide, or the build queue's count while it runs, with Queue,
+               which opens it. Never the default focus: that stays on the
+               first card. */
             if (model->rebuild_notice != NULL && model->rebuild_notice[0] != '\0') {
                 NkUiLayout notice = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                                 NK_UI_SPACE_3);
@@ -820,6 +824,13 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                                          NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                             result.kind = PLAYER_UI_ACTION_REBUILD;
                             result.primary = (PlayerUiPrimaryAction)PLAYER_UI_REBUILD_HIDE_BANNER;
+                        }
+                    }
+                    if (model->rebuild_notice_offers_queue) {
+                        if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_QUEUE, "Queue",
+                                         NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
+                            result.kind = PLAYER_UI_ACTION_QUEUE;
+                            result.primary = (PlayerUiPrimaryAction)PLAYER_UI_QUEUE_OPEN;
                         }
                     }
                     nk_ui_end_container(ui);

@@ -1310,6 +1310,9 @@ class TypographyRuntimeCheckTests(unittest.TestCase):
             self.assertEqual(ttf[0].status, "FAIL")
             self.assertIn("SDL3_ttf", ttf[0].summary)
             self.assertTrue(ttf[0].remediation)
+            # The launcher has no bitmap-font fallback: without SDL3_ttf it cannot start.
+            self.assertNotIn("bitmap", ttf[0].remediation)
+            self.assertIn("exits with code 4", ttf[0].remediation)
 
     def test_staged_ttf_with_resolved_closure_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -335,10 +335,12 @@ retail inputs, or hardware.
 ### Project website (GitHub Pages)
 
 `.github/workflows/pages.yml` publishes the project website,
-<https://jstar269.github.io/Nakagawa-Recomp/>, from [`docs/index.html`](index.html). The
-repository's Pages source is "GitHub Actions". The page is one static file with inline CSS and
-two small inline scripts (the theme picker, remembered in the visitor's own browser, and the phone
-menu), and no web fonts, external scripts or third-party requests. It shows two launcher screenshots,
+<https://jstar269.github.io/Nakagawa-Recomp/>, from [`docs/index.html`](index.html). Pages paths
+are case-sensitive, so the lowercase address returns 404. The repository's Pages source is "GitHub
+Actions". The page is one static file with inline CSS and two small inline scripts (one applies a
+remembered theme before the first paint; the other is the theme picker, which keeps a choice in the
+visitor's own browser), and no web fonts, external scripts or third-party requests. It shows two
+launcher screenshots,
 `docs/media/launcher-library.png` and `docs/media/launcher-building.png`, with their notice, and link
 previews show the share card `docs/images/brand/og-card.png`. The artifact also carries the presentation
 clip `docs/media/hst-rally.mp4` for the README's link. The build job copies an explicit list of
@@ -538,9 +540,21 @@ each device pixel's own position, and so does its uv-edge-clamp case (also at sc
 device pixels outside a screen-aligned strip's or sprite's first and last pixel centres must show
 that edge pixel's 1x sample, with linear and nearest filtering and with repeat and clamp wrapping,
 while a sheared strip stays unclamped.
-Last, `gpu-coherence-selftest-snapbar-mutants` builds three broken variants of
-the destination-snapshot copy's barriers (`SR_GPU_SNAPBAR_MUTANT`), and the submit-batch case must
-fail each one with its own message. `fsr3-pass-selftest` runs FSR 3's eight compute passes on
+The dst-read cells (#2109: order, mask, alpha, mixed, depth, ztest and pins) run alone at render scales 1 and 4,
+once forced to the snapshot destination-read path and once to the interlock path (`--dst-read`). On the
+interlock path, overlapping shader-blend primitives must equal the software GE in colour with no snapshot copy,
+and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-read-depth`, an alpha-tested op
+that writes depth, must keep the snapshot path on both paths and equal the software GE in colour and depth. On
+the snapshot path, the known difference must stay inside each overlap, and the device must hold no interlock
+state. A device that refuses the interlock prints one SKIP line for each interlock leg. The lavapipe step prints
+the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
+pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Three
+mutant targets follow, and each broken variant must fail its case with its own message:
+`gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
+(`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
+pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths five ways
+(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 run on the interlock path and are a SKIP on a device without it).
+`fsr3-pass-selftest` runs FSR 3's eight compute passes on
 lavapipe, headless, under the validation layer with synchronisation validation of shader accesses,
 and an exit 77 skip fails it, including one for synchronisation validation that is not active.
 `fsr3-fg-pass-selftest` runs frame generation's device refusal (G-R) there: lavapipe's subgroups
@@ -553,8 +567,9 @@ or a compiler that is not the pinned one, fails it. Then `ge-first-bad-draw-self
 `NO_DIFFERENCE`, and two executed mutants that change one draw's Vulkan blend or depth state
 (`SR_GE_FBD_MUTANT`) must each be named as that draw, in linear and bisect mode. A second generated
 capture holds one PRIM of two overlapping translucent sprites on a 16-bit target, and the tool must
-find exactly its overlap as the first bad draw: the known shader-blend batch-order difference
-(#2109, open). Four more generated captures check that the
+find exactly its overlap as the first bad draw on the snapshot destination-read path (the known
+shader-blend batch-order difference, #2109), and report `NO_DIFFERENCE` on the interlock path. On a
+device that refuses the interlock, the interlock leg is a `SKIP`. Four more generated captures check that the
 tool fails closed: a 512-wide scissor (ge.c rasterizes inside 480x272), 33 targets or a stride of
 1088 are `INCOMPLETE`, and a capture with no draw is `NO_DRAWS`. The same step then runs
 `vram-view-identity-selftest` (#314): the GE decoders the pause menu's VRAM viewer calls, run at
@@ -796,17 +811,18 @@ tool does not touch them.
 
 ### The generated control files must be in the commit
 
-Adding or removing a tracked file makes three generated files stale:
-`assets/public_source_profile.json` (classification),
-`assets/public_provenance_ledger.json` (the path's claim) and `PUBLIC_EXPORT.json`
-(policy digest). Changing an existing file makes none of them stale: the committed
-ledger carries claims, not content hashes (#1673), and the export's committed control
-omits the tree-derived digests, which are recomputed at verification. Regenerating
+Adding or removing a tracked file makes two generated files stale:
+`assets/public_source_profile.json` (classification) and
+`assets/public_provenance_ledger.json` (the path's claim). Changing an existing file
+makes neither stale: the committed ledger carries claims, not content hashes (#1673).
+`PUBLIC_EXPORT.json` goes stale only when the profile's name, version or exclusion
+lists change: its committed control omits the tree-derived digests and the policy
+digest, which are recomputed at verification, so admitting a path leaves it
+byte-identical and two path-adding pull requests do not conflict on it. Regenerating
 them in the working tree is not enough — they have to be **staged and committed**
 with the change they describe (a refresh after merging `main` is its own commit; see
 `REVIEW.md`), or the commit ships a new path without the evidence for it and fails
-with `POLICY_UNCLASSIFIED`, `UNRESOLVED_PUBLIC`, `POLICY_EXPORT_STALE` and
-`PROVENANCE_MISSING` together.
+with `POLICY_UNCLASSIFIED`, `UNRESOLVED_PUBLIC` and `PROVENANCE_MISSING` together.
 
 `make readiness` re-runs the export generator at the end and fails if that
 changes anything, which catches precisely this.
@@ -952,6 +968,9 @@ and `tools/test_stage_install.py`. A change under `tools/`, `src/core/`, `src/pl
 on Windows. The full local suite builds the native fixtures and takes over an hour on
 Windows. Make-based tests need a POSIX `sh` on `PATH` (MSYS2 `usr/bin` or Git for Windows
 `bin`).
+
+`make dmac-mutants` is also left to local runs: it builds `hle-thread-selftest` against each mutated copy
+of `src/rt/hle_cache_dma.c`, one selftest build per mutant (`NK_DMAC_MUTANTS_ONLY=<part of a name>` runs one).
 
 ## Coverage
 

@@ -111,7 +111,7 @@ nk-ui-player-screens-capture: export SDL_RENDER_DRIVER := software
 nk-ui-player-screens-capture:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -DNK_UI_WITH_SDL -DNK_UI_WITH_SDL_TTF -DNK_UI_SCREEN_CAPTURE \
-		-Isrc/ui -Isrc/player/ui -Ithird_party/clay $(SDL3_TTF_CFLAGS) \
+		-Isrc/core -Isrc/player -Isrc/ui -Isrc/player/ui -Ithird_party/clay $(SDL3_TTF_CFLAGS) \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		$(NK_UI_CORE_SRCS) src/ui/nk_ui_ttf.c src/ui/backend/nk_ui_sdlr.c \
 		src/player/ui/ui_router.c src/player/ui/scr_library.c $(NK_UI_PLAYER_TITLE_SRCS) \
@@ -355,6 +355,30 @@ fsr1-selftest: shader-verify
 		echo "FAIL fsr1-selftest (skipped, but NK_UI_VK_REQUIRE=1 requires a Vulkan device)"; exit 1; \
 	elif [ $$rc -eq 77 ]; then echo "SKIP fsr1-selftest (exit 77)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL fsr1-selftest (exit $$rc)"; exit $$rc; fi
+
+# anime4k-selftest - the movie upscaler (src/rt/gpu_sdl3vk/anime4k_pass.c, Anime4K CNN x2 M from
+# third_party/anime4k) on a headless Vulkan device, beside FSR 1: one stage at 2x lands closer to a
+# supersampled line-art truth than FSR 1 at 2x by a measured margin; a flat colour stays within 2
+# through two stages; the source image is never written; the stage rule and SR_MOVIE_UPSCALE values
+# hold; a size past the device's image limit is refused without building images and the last good
+# size is kept; a size whose images cannot be made is built once, not tried again. Linked from the two passes, the C library and libm alone. No Vulkan headers, loader or
+# device: SKIP (exit 77), visible in the log; NK_UI_VK_REQUIRE=1 makes a skip fail.
+native-core-tests: anime4k-selftest
+.PHONY: anime4k-selftest
+anime4k-selftest: shader-verify
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	@if ! printf '%s\n' '#include <vulkan/vulkan.h>' | $(CC) -E -x c $(VULKAN_INC_FLAGS) - >/dev/null 2>&1; then \
+		echo "SKIP anime4k-selftest (the Vulkan headers were not found)"; \
+		if [ "$(NK_UI_VK_REQUIRE)" = 1 ]; then exit 1; fi; exit 0; \
+	fi; \
+	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt -Isrc/rt/gpu_sdl3vk $(VULKAN_INC_FLAGS) \
+		src/rt/gpu_sdl3vk/fsr1_pass.c src/rt/gpu_sdl3vk/anime4k_pass.c src/rt/gpu_sdl3vk/anime4k_pass_selftest.c \
+		$(NK_UI_VK_SELFTEST_LIBS) -lm -o $(BUILD_ROOT)/anime4k_selftest$(EXE_EXT) || exit 1; \
+	rc=0; $(BUILD_ROOT_RUN)/anime4k_selftest$(EXE_EXT) || rc=$$?; \
+	if [ $$rc -eq 77 ] && [ "$(NK_UI_VK_REQUIRE)" = 1 ]; then \
+		echo "FAIL anime4k-selftest (skipped, but NK_UI_VK_REQUIRE=1 requires a Vulkan device)"; exit 1; \
+	elif [ $$rc -eq 77 ]; then echo "SKIP anime4k-selftest (exit 77)"; \
+	elif [ $$rc -ne 0 ]; then echo "FAIL anime4k-selftest (exit $$rc)"; exit $$rc; fi
 
 # ace-ui-selftest - Ace Mode's in-game UI (src/rt/gpu_sdl3vk/ace_ui.c): the readout, the launch
 # notice and the crisp keyboard laid out at the overlay's sizes and two ultrawide windows (inside

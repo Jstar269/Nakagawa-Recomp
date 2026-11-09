@@ -137,7 +137,7 @@ class TestStrictCompileIncludePath(unittest.TestCase):
         """Does one of the unit's player headers pull a header outside the project?
 
         A slash inside an angle include means an SDK header (`<SDL3/SDL.h>`), and
-        standard C headers never carry one.  `ui_clip.h` and `ui_renderer.h`
+        standard C headers never carry one.  `ui_clip.h` and `player_host.h`
         pull SDL3, which the native and UI gates build and the Python-only shard
         that runs this file does not install.
         """
