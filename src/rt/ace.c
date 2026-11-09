@@ -190,7 +190,7 @@ static int s_have_view;
 static AceCounters s_counters;
 static uint64_t s_win_start_ns;
 static int s_win_started;
-static uint32_t s_win_frames, s_win_skipped, s_win_betweens, s_win_shown;
+static uint32_t s_win_frames, s_win_skipped, s_win_betweens, s_win_shown, s_win_motion_milli;
 static uint64_t s_shown_seq;   /* AcePace.frame_seq of the newest real frame that reached the screen */
 static uint64_t s_win_idle_ns;
 static uint32_t s_last_flip_vcount, s_last_flip_fb;
@@ -201,6 +201,7 @@ static AcePace s_pace;
 static AcePaceStats s_pace_stats;
 static uint32_t s_pace_vcount;
 static AceSmoothAuxStats s_aux_stats;
+static AceMotionStats s_motion;
 static int s_have_aux_stats;
 
 #define ACE_TARGETS 8
@@ -216,6 +217,8 @@ static void observation_reset(void) {
     memset(&s_counters, 0, sizeof(s_counters));
     s_win_start_ns = 0; s_win_started = 0;
     s_win_frames = s_win_skipped = s_win_betweens = s_win_shown = 0; s_win_idle_ns = 0;
+    s_win_motion_milli = 0;
+    memset(&s_motion, 0, sizeof(s_motion));
     s_shown_seq = 0;
     s_last_flip_vcount = s_last_flip_fb = 0; s_have_flip = 0;
     memset(s_rate_vblanks, 0, sizeof(s_rate_vblanks));
@@ -501,9 +504,12 @@ void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *o
     if (w->smooth) {
         v.smooth_on = 1;
         v.shown_fps = (double)w->shown / secs;
+        /* What moved: the real pictures, and each in-between by its measured weight. */
+        uint32_t real = w->shown >= w->betweens ? w->shown - w->betweens : 0u;
+        v.motion_fps = ((double)real + (double)w->motion_milli / 1000.0) / secs;
         size_t len = strlen(v.text);
         if (w->betweens)
-            snprintf(v.text + len, sizeof(v.text) - len, "  SMOOTH %d", (int)(v.shown_fps + 0.5));
+            snprintf(v.text + len, sizeof(v.text) - len, "  SMOOTH %d", (int)(v.motion_fps + 0.5));
         else
             snprintf(v.text + len, sizeof(v.text) - len, "  SMOOTH OFF");
     }
@@ -591,6 +597,7 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         s_win_started = 1;
         s_win_start_ns = now_ns;
         s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
+        s_win_motion_milli = 0;
     } else if (now_ns - s_win_start_ns >= 1000000000ull) {
         AceWindow w;
         w.wall_ns = now_ns - s_win_start_ns;
@@ -603,12 +610,14 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         w.smooth = s_req.smooth != 0;  /* asked for: off for the run (no GPU) still says so */
         w.betweens = s_win_betweens;
         w.shown = s_win_shown;
+        w.motion_milli = s_win_motion_milli;
         ace_readout_judge(&s_readout, &w, &s_view);
         s_have_view = 1;
         s_counters.windows++;
         if (s_view.pc_limited) s_limited_windows++;
         s_win_start_ns = now_ns;
         s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
+        s_win_motion_milli = 0;
     }
     return new_frame;
 }
@@ -722,6 +731,66 @@ void ace_pace_stats(AcePaceStats *out) {
     if (out) *out = s_pace_stats;
 }
 
+/* ---- smooth motion: what an in-between moved ------------------------------------------------- */
+
+uint32_t ace_motion_weight_milli(uint32_t sum_old, uint32_t sum_new) {
+    uint64_t total = (uint64_t)sum_old + (uint64_t)sum_new;
+    uint64_t least = sum_old < sum_new ? sum_old : sum_new;
+    if (!total) return 0u;
+    return (uint32_t)((2000u * least + total / 2u) / total);
+}
+
+void ace_smooth_note_motion(uint32_t moving, uint32_t eq_old, uint32_t eq_new, uint32_t sum_old,
+                            uint32_t sum_new, uint32_t novel) {
+    if (!g_ace_on) return;
+    uint32_t weight = ace_motion_weight_milli(sum_old, sum_new);
+    s_motion.measured++;
+    s_motion.moving += moving;
+    s_motion.eq_old += eq_old;
+    s_motion.eq_new += eq_new;
+    s_motion.sum_old += sum_old;
+    s_motion.sum_new += sum_new;
+    s_motion.novel += novel;
+    s_motion.weight_milli += weight;
+    s_win_motion_milli += weight;
+}
+
+void ace_smooth_note_motion_unread(void) {
+    if (g_ace_on) s_motion.unread++;
+}
+
+void ace_motion_stats(AceMotionStats *out) {
+    if (out) *out = s_motion;
+}
+
+void ace_motion_queue_reset(AceMotionQueue *q) {
+    if (q) memset(q, 0, sizeof(*q));
+}
+
+void ace_motion_queue_pass(AceMotionQueue *q) {
+    q->passes++;
+}
+
+int ace_motion_queue_made(AceMotionQueue *q, uint64_t serial) {
+    if (q->count == ACE_MOTION_PENDING) {
+        q->dropped++;
+        return 0;
+    }
+    uint32_t at = (q->head + q->count) % ACE_MOTION_PENDING;
+    q->serial[at] = serial;
+    q->made_at[at] = q->passes;
+    q->count++;
+    return 1;
+}
+
+uint64_t ace_motion_queue_due(AceMotionQueue *q, uint32_t slots) {
+    if (!q->count || q->passes < q->made_at[q->head] + slots) return 0u;
+    uint64_t serial = q->serial[q->head];
+    q->head = (q->head + 1u) % ACE_MOTION_PENDING;
+    q->count--;
+    return serial;
+}
+
 /* ---- the per-run report -------------------------------------------------------------------- */
 
 static AceRate dominant_rate(void) {
@@ -800,6 +869,18 @@ size_t ace_report_json(char *out, size_t cap) {
         ACE_PUT("  \"added_delay_ms\": {\"mean\": %.2f, \"max\": %.2f},\n",
                 ps->hold_count ? (double)ps->hold_sum_ns / (double)ps->hold_count / 1e6 : 0.0,
                 (double)ps->hold_max_ns / 1e6);
+    }
+    if (s_req.smooth && (s_motion.measured || s_motion.unread)) {
+        const AceMotionStats *m = &s_motion;
+        uint64_t sums = m->sum_old + m->sum_new;
+        ACE_PUT("  \"smooth_motion\": {\"measured\": %llu, \"unread\": %llu, \"moving_px\": %llu, "
+                "\"old_px\": %llu, \"new_px\": %llu, \"novel_px\": %llu, \"phase\": %.3f, "
+                "\"weight\": %.3f},\n",
+                (unsigned long long)m->measured, (unsigned long long)m->unread,
+                (unsigned long long)m->moving, (unsigned long long)m->eq_old,
+                (unsigned long long)m->eq_new, (unsigned long long)m->novel,
+                sums ? (double)m->sum_old / (double)sums : 0.0,
+                m->measured ? (double)m->weight_milli / 1000.0 / (double)m->measured : 0.0);
     }
     if (s_req.smooth && s_have_aux_stats) {
         const AceSmoothAuxStats *a = &s_aux_stats;

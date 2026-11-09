@@ -164,6 +164,11 @@ void sdl3vk_set_ui_pass(void (*pass)(const Sdl3VkUiPass *frame));
  * motion; NULL removes it. */
 typedef void *(*Sdl3VkShowPass)(void *cmd, void *src, int *w, int *h);
 void sdl3vk_set_show_pass(Sdl3VkShowPass pass);
+/* The number of present frame slots. Each present waits for its slot's previous submission
+ * before it records, and the slots are used in turn. So what a show pass recorded has finished
+ * on the GPU once this many later show passes have begun: a result it left in a buffer of its
+ * own may be read then. */
+int sdl3vk_present_frame_slots(void);
 /* Presents what the show pass returns for no source: no capture, no input latch. Returns as the
  * other presents do, and 0 with nothing to show or no pass. */
 int sdl3vk_present_held(void);

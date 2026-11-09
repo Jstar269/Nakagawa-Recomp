@@ -570,10 +570,28 @@ static void gui_ace_ui_init(void) {
  * so any other present records what it did before. Without compute the feature is off for the
  * run, said once. */
 static AcePresentKind s_ace_present_kind;
+static AceMotionQueue s_ace_motion_queue;
+
+/* What the in-betweens moved: each one is measured in its own command buffer (ace_smooth.h), and
+ * its numbers are read here once those commands have finished, a few presents later (ace.h,
+ * AceMotionQueue). One that cannot be read then is counted, never guessed. */
+static void gui_ace_collect_motion(void) {
+    uint64_t serial;
+    while ((serial = ace_motion_queue_due(&s_ace_motion_queue,
+                                          (uint32_t)sdl3vk_present_frame_slots())) != 0u) {
+        AceSmoothMotion m;
+        if (ace_smooth_motion(s_ace_smooth, serial, &m))
+            ace_smooth_note_motion(m.moving, m.eq_old, m.eq_new, m.sum_old, m.sum_new, m.novel);
+        else
+            ace_smooth_note_motion_unread();
+    }
+}
 
 static void *gui_ace_show_pass(void *cmd, void *src, int *w, int *h) {
     VkCommandBuffer vk_cmd = (VkCommandBuffer)cmd;
     s_ace_present_kind = ACE_PRESENT_REAL;
+    ace_motion_queue_pass(&s_ace_motion_queue);
+    gui_ace_collect_motion();
     if (!src) {
         VkImage held = ace_smooth_held(s_ace_smooth, vk_cmd);
         if (!held) return NULL;
@@ -596,6 +614,8 @@ static void *gui_ace_show_pass(void *cmd, void *src, int *w, int *h) {
     ace_smooth_aux_stats(s_ace_smooth, &st);
     ace_smooth_aux_report(&st);
     if (!between) return NULL;
+    if (!ace_motion_queue_made(&s_ace_motion_queue, ace_smooth_between_serial(s_ace_smooth)))
+        ace_smooth_note_motion_unread();
     ace_smooth_shown_between(SDL_GetTicksNS());
     s_ace_present_kind = ACE_PRESENT_BETWEEN;
     return (void *)between;
@@ -621,6 +641,7 @@ static void gui_ace_smooth_init(void) {
         ace_feature_unavailable(ACE_FEATURE_SMOOTH, error[0] ? error : "no Vulkan device");
         return;
     }
+    ace_motion_queue_reset(&s_ace_motion_queue);
     sdl3vk_set_show_pass(gui_ace_show_pass);
     /* The HUD mask and depth: on with smooth motion; SR_ACE_SMOOTH_HUD=0 and SR_ACE_SMOOTH_DEPTH=0
      * turn each off (ace_hud.h), and with both off the in-betweens are today's, byte for byte. */

@@ -275,6 +275,10 @@ void sdl3vk_set_show_pass(Sdl3VkShowPass pass) {
     s_show_pass = pass;
 }
 
+int sdl3vk_present_frame_slots(void) {
+    return PRESENT_FRAMES;
+}
+
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass) {
     s_upscale_pass = pass;
 }

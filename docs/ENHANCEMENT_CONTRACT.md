@@ -425,8 +425,10 @@ off by default.
 
 ### 10.6. Smooth Motion
 
-With `smooth=x2`, a title the 30 Hz detector holds steady at 30 presents at the VBLANK rate. The code is
-`src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure pacing rule in `src/rt/ace.c`.
+With `smooth=x2`, a title the 30 Hz detector holds steady at 30 is presented at the VBLANK rate: every second
+picture is an in-between made from the two frames around it. That doubles the pictures, not always the motion.
+Content the search cannot follow is shown as in the old frame and still moves 30 times a second ("What it follows"
+below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure pacing rule in `src/rt/ace.c`.
 
 - **How a frame is made.** Block-matched motion between two private copies of consecutive presented frames, in a
   compute pass on the present's command buffer. It does not need #318, and it treats a GPU target and a CPU frame (a
@@ -470,20 +472,44 @@ With `smooth=x2`, a title the 30 Hz detector holds steady at 30 presents at the 
 - **Only at 30.** Every other detector class, a pause and a static picture show each frame as it comes, as without
   the feature. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
   30 Hz after a second of agreement and leaves after half a second of disagreement.
-- **Never off without saying so.** The setting's description says it acts on steady 30 FPS scenes only. With the
-  speed readout on, its text ends with `SMOOTH n`, the distinct pictures a second that reached the screen (the
-  in-betweens, the held real frames and any new frame shown as it is; a present the presenter dropped is not
-  counted), or `SMOOTH OFF` for a second in which it added none: another frame rate, a PC that cannot keep up, or
-  no Vulkan device for it.
+- **Never off without saying so, and never more than it moved.** The setting's description says it smooths
+  steady 30 FPS scenes only where it can follow the motion. With the speed readout on, its text ends with
+  `SMOOTH n`, or with `SMOOTH OFF` for a second in which no in-between was shown: another frame rate, a PC that
+  cannot keep up, or no Vulkan device for it. `n` counts what moved, not what was presented: the real pictures
+  that reached the screen in that second (the held frames and any new frame shown as it is; a present the
+  presenter dropped is not counted), plus each in-between by its measured weight (next item). A scene whose
+  in-betweens repeat the old frame reads `SMOOTH 30` at sixty presents a second.
+- **What an in-between moved.** Every in-between is measured against its two frames in its own command buffer
+  (`shaders/ace_measure.comp`), on a 480 x 272 grid of the picture, by the largest channel difference in 1/255.
+  A pixel is moving when the two real frames differ there by more than 40. Over the moving pixels the pass sums
+  the in-between's distance to the old frame and to the new one. The phase is the old sum over both: 0 for a
+  repeat of the old frame, one half when the changing content sits half-way, 1 for the new frame. The weight is
+  twice the smaller sum over both: 0 at either end, 1 at one half, and 0 when nothing differs. A plain blend of
+  the two frames also weighs 1, so the weight says the content is between the frames, not that it is sharp. The
+  counts of moving pixels within 6 of the old frame and of the new one tell the two apart: a carried object
+  leaves its old place showing the new frame, a blend shows neither. The pass also counts the pixels the two
+  frames agree on (within 40) that the in-between shows more than 64 from both. That is an object drawn in mid
+  flight or a hole in something that stood still, and the count cannot tell which. The numbers are read a few
+  presents later, when those commands have finished. One that cannot be read then is counted, never guessed, and
+  the last few of a run are not read. The report's `smooth_motion` block holds the run's totals (`measured`,
+  `unread`, `moving_px`, `old_px`, `new_px`, `novel_px`), the pooled `phase` and the mean `weight`.
 - **Recording.** A run recording (`SR_VIDEOREC_DIR`) holds what the window shows, in-betweens included: the recorder
   keeps each in-between for its own VBLANK and writes the held real frame at the next one. Its `frames.csv` and
   `logic.srt` still count only the game's own flips.
 - **UI.** A pixel that did not change between the two frames is copied, so a HUD stays exact while the scene moves
   behind it.
-- **Known limit.** A figure whose pose changes a lot between two frames on a plain floor (a player serving) can
-  lose most of its pixels in the in-between: no vector carries it, and at each pixel the composition takes whichever
-  frame shows the floor there. The composition judges pixels, not objects, so such a figure flickers for one
-  picture in two.
+- **What it follows.** The search matches blocks of two finished pictures. It finds motion of the picture as a
+  whole or in large parts (a scroll, a camera move) and shows that half-way. It does not find a figure whose pose
+  changes a lot between two frames, or a small object that travels further than its own size (a ball). Those keep
+  the old frame ("Where the search guesses" below), so they still move 30 times a second, one VBLANK late.
+  Measured on 2026-11-09 on a private route through a *Hot Shots Tennis* rally: a pooled phase of 0.03, with
+  92.5% of the moving pixels shown as the old frame. For such a scene the feature adds presents, not motion, and
+  the readout says so.
+- **Which titles use what.** A title with a 60 FPS game logic package (section 9; *Hot Shots Tennis* has one)
+  gets every frame from the game itself. That is its path to 60, and the player turns smooth motion off for that
+  launch (section 10.5). A 30 FPS title without a package has only smooth motion, with the limit above.
+  In-betweens drawn from the game's own draws with interpolated positions, which would follow figures and small
+  objects exactly, are not built yet (#1272).
 - **Cuts.** When a third of the blocks fit nothing or disagree with their neighbours, the two frames are different
   pictures: the in-between is the old frame, and the new one follows on its VBLANK.
 - **Where the search guesses.** In a block whose two frames differ, a vector is a guess when moving it two samples
@@ -491,14 +517,14 @@ With `smooth=x2`, a title the 30 Hz detector holds steady at 30 presents at the 
   looks alike but differs and that neither it nor the coarser level's 3x3 vectors carry unchanged (a textured
   floor). Every changed pixel within two blocks of a guess keeps the old frame. So a figure whose pose changes too
   much for any vector (a player serving on a plain court) shows whole, as in the old frame, and never partly as
-  floor. This supersedes the earlier figure-flicker limit. Limits: in such a scene most moving pixels repeat the
-  real frame instead of moving halfway; a small fast object near a guess (a ball in hand) freezes where it was in
-  the old frame; and on strongly blocky textured floors a few pixels can still be wrong (4 to 12 in a probe).
+  floor. Limits: in such a scene most moving pixels repeat the real frame instead of moving halfway; a small fast
+  object near a guess (a ball in hand) freezes where it was in the old frame; and on strongly blocky textured floors
+  a few pixels can still be wrong (4 to 12 in a probe).
 - **What it never touches.** The in-between and the held frame are private images blitted to the swapchain. The
   flip's own present still commits the real frame to guest VRAM and gives any capture the real frame. The VBLANK's
   present latches no input and serves no capture.
-- **Stamps.** The report adds `presents` (real, between, held, superseded, unpaired) and `present_interval_ms`. Section 10.4
-  applies: the run is refused as evidence.
+- **Stamps.** The report adds `presents` (real, between, held, superseded, unpaired), `smooth_motion` and
+  `present_interval_ms`. Section 10.4 applies: the run is refused as evidence.
 
 ### 10.7. Band-Limited SAS Resampling
 

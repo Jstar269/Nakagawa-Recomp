@@ -420,8 +420,9 @@ static AceWindow window(double fps, double idle, uint32_t skipped, AceRate stabl
     return w;
 }
 
-/* Smooth motion is never off without saying so: with it on, the readout ends with the pictures
- * a second that reached the screen, or SMOOTH OFF in a window it added none in. */
+/* Smooth motion is never off without saying so: with it on, the readout ends with SMOOTH n, or
+ * SMOOTH OFF in a window it showed no in-between in. n is what moved: the real pictures that
+ * reached the screen, plus each in-between by its measured motion weight. */
 static void cell_readout_smooth(void) {
     AceReadoutState s;
     AceReadoutView v;
@@ -432,9 +433,21 @@ static void cell_readout_smooth(void) {
     w.smooth = 1;
     w.betweens = 30;
     w.shown = 60;
+    w.motion_milli = 30000;
     ace_readout_judge(&s, &w, &v);
-    CHECK(v.smooth_on && v.shown_fps > 59.9 && strcmp(v.text, "100%  30 FPS  SMOOTH 60") == 0,
+    CHECK(v.smooth_on && v.shown_fps > 59.9 && v.motion_fps > 59.9 &&
+              strcmp(v.text, "100%  30 FPS  SMOOTH 60") == 0,
           "smooth engaged: '%s'", v.text);
+    /* Sixty presents a second whose in-betweens all repeat the old frame: 30 pictures moved. */
+    w.motion_milli = 0;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(v.shown_fps > 59.9 && v.motion_fps > 29.9 && v.motion_fps < 30.1 &&
+              strcmp(v.text, "100%  30 FPS  SMOOTH 30") == 0,
+          "in-betweens that repeat the old frame: '%s'", v.text);
+    /* In-betweens that carry a sixteenth of what changes add two pictures, not thirty. */
+    w.motion_milli = 30u * 64u;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(strcmp(v.text, "100%  30 FPS  SMOOTH 32") == 0, "in-betweens that move little: '%s'", v.text);
     /* A 60 FPS scene: nothing to add, and the readout says it added nothing. */
     w = window(60, 0.4, 0, ACE_RATE_K1, 1, ACE_RATE_K1);
     w.smooth = 1;
@@ -453,6 +466,7 @@ static void cell_readout_smooth(void) {
     w.smooth = 1;
     w.betweens = 12;
     w.shown = 42;
+    w.motion_milli = 12000;
     ace_readout_judge(&s, &w, &v);
     CHECK(strcmp(v.text, "100%  30 FPS  SMOOTH 42") == 0, "part engaged: '%s'", v.text);
     /* Flips whose present was dropped are not pictures on the screen: 30 new frames and 20
@@ -461,6 +475,7 @@ static void cell_readout_smooth(void) {
     w.smooth = 1;
     w.betweens = 20;
     w.shown = 37;
+    w.motion_milli = 20000;
     ace_readout_judge(&s, &w, &v);
     CHECK(v.shown_fps > 36.9 && v.shown_fps < 37.1 && strcmp(v.text, "100%  30 FPS  SMOOTH 37") == 0,
           "pictures that reached the screen: '%s'", v.text);
@@ -470,7 +485,8 @@ static void cell_readout_smooth(void) {
     CHECK(!v.smooth_on && strcmp(v.text, "100%  30 FPS") == 0, "smooth off: '%s'", v.text);
 
     /* The feed: a 30 Hz run with smooth motion asked for counts the pictures that reached the
-     * screen: each in-between and held frame the presenter accepted. */
+     * screen, each in-between and held frame the presenter accepted, and weighs each in-between
+     * by its measurement. Here every in-between shows the changing content half-way. */
     (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off",
                         NULL);
     uint64_t ns = 0;
@@ -482,12 +498,33 @@ static void cell_readout_smooth(void) {
         if (ace_smooth_take() == ACE_SHOW_BETWEEN) {
             ace_smooth_shown_between(ns);
             ace_smooth_note_present(ACE_PRESENT_BETWEEN, ns);
+            ace_smooth_note_motion(4000u, 1900u, 1900u, 90000u, 90000u, 0u);
         } else {
             ace_smooth_note_present(ACE_PRESENT_REAL, ns);   /* the held frame, re-flipped */
         }
     }
     CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS  SMOOTH 60") == 0,
           "fed 30 Hz with smooth motion: '%s'", v.text);
+    /* The same presents, but every in-between repeats the old frame over what changes: the
+     * readout says 30, though sixty pictures a second reached the screen. */
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off",
+                        NULL);
+    ns = 0;
+    for (uint32_t vc = 1; vc <= 600; vc++) {
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u;
+        ace_note_host_wait(8000000u);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+        if (ace_smooth_take() == ACE_SHOW_BETWEEN) {
+            ace_smooth_shown_between(ns);
+            ace_smooth_note_present(ACE_PRESENT_BETWEEN, ns);
+            ace_smooth_note_motion(4000u, 4000u, 0u, 0u, 180000u, 0u);
+        } else {
+            ace_smooth_note_present(ACE_PRESENT_REAL, ns);
+        }
+    }
+    CHECK(ace_readout_view(&v) && v.shown_fps > 59.0 && strcmp(v.text, "100%  30 FPS  SMOOTH 30") == 0,
+          "fed 30 Hz, in-betweens that repeat the old frame: '%s' (%.1f shown)", v.text, v.shown_fps);
     /* The same, but the presenter drops the present of every fourth VBLANK (an in-between on
      * its flip, or a held frame): the readout counts what reached the screen, not every flip. */
     (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off",
@@ -502,6 +539,7 @@ static void cell_readout_smooth(void) {
         if (between) ace_smooth_shown_between(ns);
         if (vc % 4 == 0) continue;                               /* dropped: never noted */
         ace_smooth_note_present(between ? ACE_PRESENT_BETWEEN : ACE_PRESENT_REAL, ns);
+        if (between) ace_smooth_note_motion(4000u, 1900u, 1900u, 90000u, 90000u, 0u);
     }
     CHECK(ace_readout_view(&v) && v.shown_fps > 40.0 && v.shown_fps < 50.0 &&
               strcmp(v.text, "100%  30 FPS  SMOOTH 45") == 0,
@@ -659,6 +697,84 @@ static void cell_report(const char *dir) {
           "a run without smooth motion reported its inputs");
 }
 
+/* What an in-between moved: the weight of a measurement, when a measurement may be read, and the
+ * report's totals. */
+static void cell_motion(void) {
+    /* The weight: 0 for a repeat of either frame or when nothing differs, 1000 at half-way, and
+     * the same from either side. */
+    CHECK(ace_motion_weight_milli(0u, 0u) == 0u, "nothing differs: %u", ace_motion_weight_milli(0u, 0u));
+    CHECK(ace_motion_weight_milli(0u, 5000u) == 0u, "a repeat of the old frame");
+    CHECK(ace_motion_weight_milli(5000u, 0u) == 0u, "the new frame shown early");
+    CHECK(ace_motion_weight_milli(5000u, 5000u) == 1000u, "half-way");
+    CHECK(ace_motion_weight_milli(1000u, 3000u) == 500u && ace_motion_weight_milli(3000u, 1000u) == 500u,
+          "a quarter of the way, from either side: %u %u", ace_motion_weight_milli(1000u, 3000u),
+          ace_motion_weight_milli(3000u, 1000u));
+    CHECK(ace_motion_weight_milli(32u, 968u) == 64u, "phase 0.032: %u", ace_motion_weight_milli(32u, 968u));
+    CHECK(ace_motion_weight_milli(0xFFFFFFFFu, 0xFFFFFFFFu) == 1000u, "the largest sums do not overflow");
+
+    /* A measurement is due once as many later show passes have begun as the presenter has frame
+     * slots, in the order made; one made in the pass that just began is never due in it. */
+    AceMotionQueue q;
+    ace_motion_queue_reset(&q);
+    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "an empty queue had something due");
+    ace_motion_queue_pass(&q);
+    CHECK(ace_motion_queue_made(&q, 1u) == 1, "the queue refused its first serial");
+    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "due in the pass that made it");
+    ace_motion_queue_pass(&q);                              /* a held present: no in-between */
+    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "due one pass later");
+    ace_motion_queue_pass(&q);
+    CHECK(ace_motion_queue_made(&q, 2u) == 1, "the queue refused its second serial");
+    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "due two passes later");
+    ace_motion_queue_pass(&q);
+    CHECK(ace_motion_queue_due(&q, 3u) == 1u, "serial 1 was not due three passes later");
+    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "serial 2 was due one pass after it was made");
+    ace_motion_queue_pass(&q);
+    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "serial 2 was due two passes after it was made");
+    ace_motion_queue_pass(&q);
+    CHECK(ace_motion_queue_due(&q, 3u) == 2u && ace_motion_queue_due(&q, 3u) == 0u,
+          "serial 2 was not due three passes after it was made");
+    /* A queue nobody reads fills, then drops and counts: it never overwrites a pending serial. */
+    ace_motion_queue_reset(&q);
+    for (uint64_t serial = 1; serial <= ACE_MOTION_PENDING + 2u; serial++) {
+        ace_motion_queue_pass(&q);
+        int kept = ace_motion_queue_made(&q, serial);
+        CHECK(kept == (serial <= ACE_MOTION_PENDING), "serial %llu kept=%d", (unsigned long long)serial, kept);
+    }
+    CHECK(q.dropped == 2u && ace_motion_queue_due(&q, 3u) == 1u, "a full queue dropped %llu",
+          (unsigned long long)q.dropped);
+
+    /* The report: the totals, the pooled phase and the mean weight; nothing before a measurement
+     * and nothing in a run without smooth motion. */
+    char json[ACE_REPORT_MAX];
+    AceMotionStats m;
+    (void)ace_init_spec("v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off", NULL);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "smooth_motion") == NULL,
+          "a smooth run reported motion before any in-between was measured");
+    ace_smooth_note_motion(1000u, 900u, 10u, 300u, 9700u, 4u);      /* phase 0.03: weight 60 */
+    ace_smooth_note_motion(3000u, 100u, 1400u, 5000u, 5000u, 6u);   /* half-way: weight 1000 */
+    ace_smooth_note_motion_unread();
+    ace_motion_stats(&m);
+    CHECK(m.measured == 2u && m.unread == 1u && m.moving == 4000u && m.eq_old == 1000u && m.eq_new == 1410u &&
+              m.sum_old == 5300u && m.sum_new == 14700u && m.novel == 10u && m.weight_milli == 1060u,
+          "motion totals: measured %llu weight %llu", (unsigned long long)m.measured,
+          (unsigned long long)m.weight_milli);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 &&
+              strstr(json, "\"smooth_motion\": {\"measured\": 2, \"unread\": 1, \"moving_px\": 4000, "
+                           "\"old_px\": 1000, \"new_px\": 1410, \"novel_px\": 10, \"phase\": 0.265, "
+                           "\"weight\": 0.530},"),
+          "the report lacks what the in-betweens moved:\n%s", json);
+    (void)ace_init_spec(k_good, NULL);
+    ace_smooth_note_motion(1000u, 900u, 10u, 300u, 9700u, 4u);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "smooth_motion") == NULL,
+          "a run without smooth motion reported motion");
+    /* Off, the feed reads nothing. */
+    (void)ace_init_spec(NULL, NULL);
+    ace_smooth_note_motion(1000u, 900u, 10u, 300u, 9700u, 4u);
+    ace_smooth_note_motion_unread();
+    ace_motion_stats(&m);
+    CHECK(m.measured == 0u && m.unread == 0u, "an off run counted a measurement");
+}
+
 /* A 30 Hz title's frames: the flip shows the in-between, the next VBLANK the frame. */
 static void cell_pace(void) {
     AceConfig c;
@@ -744,6 +860,7 @@ int main(int argc, char **argv) {
     cell_feed();
     cell_readout();
     cell_readout_smooth();
+    cell_motion();
     cell_report(argc > 1 ? argv[1] : NULL);
     if (s_fail) {
         fprintf(stderr, "ace-selftest: %d check(s) FAILED\n", s_fail);

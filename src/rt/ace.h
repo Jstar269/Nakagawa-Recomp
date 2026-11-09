@@ -185,6 +185,8 @@ typedef struct {
     uint32_t betweens;         /* in-betweens that reached the screen in the window */
     uint32_t shown;            /* distinct pictures that reached the screen: those, the held
                                 * frames and the new frames shown as they are */
+    uint32_t motion_milli;     /* the motion weights of the in-betweens measured in the window, in
+                                * thousandths (ace_motion_weight_milli) */
 } AceWindow;
 
 typedef struct {
@@ -201,6 +203,8 @@ typedef struct {
     int speed_pct;             /* F / T while PC limited, else 100 */
     int smooth_on;             /* Smooth motion is on: the text says whether it added frames */
     double shown_fps;          /* with it on, pictures that reached the screen per second */
+    double motion_fps;         /* with it on, the real pictures per second plus each in-between's
+                                * motion weight: what "SMOOTH n" prints */
     char text[64];             /* "100%  30 FPS", "\xE2\x96\xB2 87%  26 FPS  PC LIMITED", "\xE2\x80\x94 27 FPS" */
 } AceReadoutView;
 
@@ -208,9 +212,11 @@ void ace_readout_reset(AceReadoutState *s);
 /* Judges one window; PC limited when a slot was skipped, or when the host idled under 2% while
  * frames came slower than the class allows. The target keeps the class stable when the stretch
  * began, so a steady slowdown does not redefine it. With Smooth motion on, the text ends with
- * "SMOOTH n" (n pictures a second reached the screen, in-betweens included) or, in a window it
- * showed no in-between in (the game was not at a steady 30 FPS), "SMOOTH OFF": it is never off
- * without saying so. */
+ * "SMOOTH n" or, in a window it showed no in-between in (the game was not at a steady 30 FPS),
+ * "SMOOTH OFF": it is never off without saying so. n counts what moved, not what was presented:
+ * the real pictures that reached the screen in a second, plus each in-between by its measured
+ * motion weight. An in-between that repeats the old frame adds nothing, so a scene the
+ * in-betweens cannot follow reads SMOOTH 30 however many presents there were. */
 void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *out);
 
 /* ---- observation feed (Ace on only; callers check g_ace_on) ---------------------------------- */
@@ -325,6 +331,62 @@ void ace_smooth_note_present(AcePresentKind kind, uint64_t now_ns);
 void ace_pace_stats(AcePaceStats *out);
 void ace_pace_stats_add(AcePaceStats *s, AcePresentKind kind, uint64_t now_ns);
 
+/* ---- smooth motion: what an in-between moved ------------------------------------------------- */
+
+/* The presenter measures every in-between it makes against its two real frames
+ * (gpu_sdl3vk/ace_smooth.h, AceSmoothMotion): over the pixels that differ between the two frames,
+ * `sum_old` and `sum_new` are the in-between's summed distance to the old and to the new frame.
+ * Its phase is sum_old / (sum_old + sum_new): 0 for a repeat of the old frame, one half when the
+ * changing content sits half-way, 1 for the new frame. The weight is how much of a picture of
+ * its own that makes it, in thousandths: 2 * min(sum_old, sum_new) / (sum_old + sum_new), so 0
+ * at either end and 1000 at one half, and 0 when nothing differs. A plain blend of the two
+ * frames also weighs 1000: the weight says the content is between the frames, not that it is
+ * sharp. */
+uint32_t ace_motion_weight_milli(uint32_t sum_old, uint32_t sum_new);
+
+typedef struct {
+    uint64_t measured;      /* in-betweens measured */
+    uint64_t moving;        /* sampled pixels that differ between the two real frames */
+    uint64_t eq_old;        /* of those, shown as the old frame */
+    uint64_t eq_new;        /* of the rest, shown as the new frame */
+    uint64_t sum_old;       /* summed distance of the moving pixels to the old frame */
+    uint64_t sum_new;       /* and to the new frame */
+    uint64_t novel;         /* pixels the two frames agree on that the in-between shows otherwise */
+    uint64_t weight_milli;  /* the sum of the in-betweens' weights */
+    uint64_t unread;        /* in-betweens whose measurement could not be read */
+} AceMotionStats;
+
+/* One in-between's measurement, read once its commands have finished on the GPU. Feeds the
+ * readout's window and the report's `smooth_motion`. */
+void ace_smooth_note_motion(uint32_t moving, uint32_t eq_old, uint32_t eq_new, uint32_t sum_old,
+                            uint32_t sum_new, uint32_t novel);
+/* An in-between whose measurement was gone when it came due: counted, never guessed. */
+void ace_smooth_note_motion_unread(void);
+void ace_motion_stats(AceMotionStats *out);
+
+/* When a measurement may be read. The show pass records an in-between and its measurement into
+ * the present's command buffer, and each present waits for its frame slot's previous submission
+ * before it records. So once `slots` later show passes have begun, with `slots` the presenter's
+ * number of frame slots, the commands of the pass that made it have finished. Pure: the
+ * presenter feeds it (gui.c) and reads what is due. */
+#define ACE_MOTION_PENDING 8u
+typedef struct {
+    uint64_t serial[ACE_MOTION_PENDING];
+    uint64_t made_at[ACE_MOTION_PENDING];
+    uint32_t head, count;
+    uint64_t passes;        /* show passes begun */
+    uint64_t dropped;       /* serials dropped because the queue was full */
+} AceMotionQueue;
+
+void ace_motion_queue_reset(AceMotionQueue *q);
+/* A show pass begins: one per present that got past its frame slot's wait. */
+void ace_motion_queue_pass(AceMotionQueue *q);
+/* The pass that just began made in-between `serial`. Returns 0 when the queue is full; the serial
+ * is then dropped and counted. */
+int ace_motion_queue_made(AceMotionQueue *q, uint64_t serial);
+/* The oldest serial whose commands have finished, removed from the queue; 0 when none is due. */
+uint64_t ace_motion_queue_due(AceMotionQueue *q, uint32_t slots);
+
 /* What smooth motion's in-betweens read besides the pixels (gpu_sdl3vk/ace_hud.c and ace_smooth.c,
  * contract section 10.6), counted so a title where the HUD rule or the depth gate never applies
  * shows in the report instead of looking like one where it works. */
@@ -357,7 +419,7 @@ void ace_smooth_aux_report(const AceSmoothAuxStats *s);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 
-#define ACE_REPORT_MAX 6144u
+#define ACE_REPORT_MAX 6400u
 /* The report's JSON for the run so far; 0 when it would not fit. */
 size_t ace_report_json(char *out, size_t cap);
 /* Settles the features that never ran (ace_confirm), then writes the report (SR_ACE_REPORT,
