@@ -87,6 +87,22 @@ enum {
  * value -1. */
 int sdl3vk_parse_present_scaling(const char *value);
 
+/* How the GE backend reads the destination of a shader-blend or stencil draw (#2109), chosen
+ * once before the device is made, because the interlock path enables a device extension and
+ * features: the destination snapshot (a copy of the target taken before the batch; every device),
+ * or a fragment-shader interlock read-modify-write of the target itself
+ * (VK_EXT_fragment_shader_interlock, fragmentShaderPixelInterlock, fragmentStoresAndAtomics).
+ * SR_GPU_DST_READ=snapshot|interlock forces one; unset or unknown, the interlock is taken where
+ * the device has it. */
+enum {
+    SDL3VK_DST_READ_SNAPSHOT = 0,
+    SDL3VK_DST_READ_INTERLOCK = 1,
+};
+
+/* The path an SR_GPU_DST_READ value asks for: NULL or empty is -2 (the default order), an
+ * unknown value -1. */
+int sdl3vk_parse_dst_read(const char *value);
+
 typedef struct {
     int x, y, w, h;  /* destination rectangle in the swapchain image; w == 0 means draw nothing */
     int prescale;    /* > 1: nearest blit into a (prescale*srcw x prescale*srch) image first */
@@ -363,6 +379,12 @@ typedef struct Sdl3VkInfo {
      * declaring DenormPreserve keeps fp32 subnormals, as GPU T&L needs (#318). */
     int      denorm_preserve_f32;
     void    *get_instance_proc_addr;   /* PFN_vkGetInstanceProcAddr */
+    /* SDL3VK_DST_READ_*: the path the device was made for. */
+    int      dst_read;
+    /* What vkCreateDevice was given, for the selftests' fallback pins: the extension count,
+     * whether pEnabledFeatures was set, and whether a VkPhysicalDeviceFeatures2 chain was. */
+    uint32_t device_extensions;
+    int      device_features, device_features2;
 } Sdl3VkInfo;
 int sdl3vk_get_vk(Sdl3VkInfo *out);
 

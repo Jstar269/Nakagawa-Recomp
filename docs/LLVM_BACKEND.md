@@ -152,9 +152,10 @@ and `break`, and the stack census wrapper.
 Kept in C, with the reason recorded: scalar FPU and VFPU instructions and their branches,
 COP0 and `eret`, `--lle-cpu` (its synchronous exception lowering), `--static-verify`
 assertions, `--stale-detect`'s `cache` hook, enhancement-package rewrite sites,
-runtime-placed modules (their addresses are relocatable expressions), and the HST
-profile's emission sites (`hst_emission_sites`, which a test re-derives from
-`emit_function`).
+runtime-placed modules (their addresses are relocatable expressions), and any HST
+profile address in a codegen table (`hst_emission_sites`: `GUEST_PATCHES` and `_SV_SPECIAL`,
+both empty since #363). A test re-derives every HST-profile address site from
+`emit_function` and requires that none remains.
 
 ## Verification
 

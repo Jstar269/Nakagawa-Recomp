@@ -262,6 +262,46 @@ class NkCliProgressTests(unittest.TestCase):
             for alarm in ("!", "warning", "WARNING", "danger", "overheat", "crash"):
                 self.assertNotIn(alarm, text)
 
+    def test_one_job_notice_names_the_planners_reason(self) -> None:
+        import nk_cli
+
+        memory = nk_cli.compile_load_notice(1, 24, "memory", 4.2)
+        cpu = nk_cli.compile_load_notice(1, 1, "cpu", 3.0)
+        override = nk_cli.compile_load_notice(1, 24, "override", 30.0)
+        self.assertIn("one part at a time", memory)
+        self.assertIn("only 4.2 GB of memory is free", memory)
+        self.assertIn("take longer", memory)
+        self.assertNotIn("single processor", memory)
+        self.assertIn("single processor", cpu)
+        self.assertNotIn("memory", cpu)
+        self.assertIn("NK_PACKAGE_JOBS", override)
+        self.assertNotIn("memory is free", override)
+        self.assertIn("low on free memory", nk_cli.compile_load_notice(1, 24, "memory", None))
+        # A one-job row from a planner that names no reason keeps saying nothing.
+        self.assertIsNone(nk_cli.compile_load_notice(1, 24))
+        self.assertIsNone(nk_cli.compile_load_notice(1, 24, "max", 30.0))
+        for text in (memory, cpu, override):
+            for alarm in ("!", "warning", "WARNING", "danger", "overheat", "crash"):
+                self.assertNotIn(alarm, text)
+
+    def test_compile_progress_relay_passes_the_one_job_reason(self) -> None:
+        import nk_cli
+
+        with tempfile.TemporaryDirectory(prefix="nk_cli_compile_notice_") as temp:
+            events_path = Path(temp) / "events.jsonl"
+            progress_path = Path(temp) / "compile-progress.jsonl"
+            reporter = nk_cli._BuildProgressReporter(events_path)
+            progress_path.write_text(
+                '{"completed": 0, "total": 172, "jobs": 1, "cpus": 24, '
+                '"limit": "memory", "free_gb": 4.6}\n',
+                encoding="utf-8",
+            )
+            nk_cli._CompileProgressRelay(reporter, progress_path).drain()
+            reporter.close()
+            rows = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(rows[0]["notice"], nk_cli.compile_load_notice(1, 24, "memory", 4.6))
+        self.assertIn("only 4.6 GB of memory is free", rows[0]["notice"])
+
     def test_compile_progress_relay_passes_the_load_notice(self) -> None:
         import nk_cli
 

@@ -102,6 +102,7 @@ static int write_ppm(const char *path, const GeState *state) {
 static void usage(const char *exe) {
     fprintf(stderr, "usage: %s <fixture.ngef> [--backend software|vulkan] [--repeat N] [--output frame.ppm]\n"
                     "       %s <fixture.ngef> --first-bad-draw [--mode auto|linear|bisect] [--report PREFIX]\n"
+                    "         (either Vulkan form also takes --dst-read snapshot|interlock: SR_GPU_DST_READ)\n"
                     "       %s --write-synthetic <fixture.ngef> [basic|overlap|wide|empty|many|deep]\n"
                     "       %s --fbd-self-check\n", exe, exe, exe, exe);
 }
@@ -962,6 +963,7 @@ int main(int argc, char **argv) {
     const char *output = "ge_replay.ppm";
     const char *fbd_mode = NULL;
     const char *fbd_report = NULL;
+    const char *dst_read = NULL;
     unsigned long repeat = 1;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) backend = argv[++i];
@@ -970,7 +972,20 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--first-bad-draw") == 0) { if (!fbd_mode) fbd_mode = "auto"; }
         else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) fbd_mode = argv[++i];
         else if (strcmp(argv[i], "--report") == 0 && i + 1 < argc) fbd_report = argv[++i];
+        else if (strcmp(argv[i], "--dst-read") == 0 && i + 1 < argc) dst_read = argv[++i];
         else { usage(argv[0]); return 2; }
+    }
+    /* The Vulkan backend's destination-read path (#2109, sdl3vk.h), which sdl3vk_init reads when
+     * it makes the device: an argument, since cmd.exe takes no `VAR=value` prefix. */
+    if (dst_read) {
+        if (strcmp(dst_read, "snapshot") != 0 && strcmp(dst_read, "interlock") != 0) {
+            usage(argv[0]); return 2;
+        }
+#ifdef _WIN32
+        if (_putenv_s("SR_GPU_DST_READ", dst_read) != 0) return 2;
+#else
+        if (setenv("SR_GPU_DST_READ", dst_read, 1) != 0) return 2;
+#endif
     }
     if (fbd_mode) {
         if (strcmp(fbd_mode, "auto") != 0 && strcmp(fbd_mode, "linear") != 0 &&
