@@ -32,6 +32,15 @@ SHADERS = (
     ("comp", Path("shaders/ace_compose.comp"), Path("ace_compose_comp.inc")),
     ("comp", Path("shaders/fsr1_easu.comp"), Path("fsr1_easu_comp.inc")),
     ("comp", Path("shaders/fsr1_rcas.comp"), Path("fsr1_rcas_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_0.comp"), Path("anime4k_cnn_x2_m_0_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_1.comp"), Path("anime4k_cnn_x2_m_1_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_2.comp"), Path("anime4k_cnn_x2_m_2_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_3.comp"), Path("anime4k_cnn_x2_m_3_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_4.comp"), Path("anime4k_cnn_x2_m_4_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_5.comp"), Path("anime4k_cnn_x2_m_5_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_6.comp"), Path("anime4k_cnn_x2_m_6_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_7.comp"), Path("anime4k_cnn_x2_m_7_comp.inc")),
+    ("comp", Path("shaders/anime4k_cnn_x2_m_8.comp"), Path("anime4k_cnn_x2_m_8_comp.inc")),
 )
 UI_SHADERS = (
     ("vert", Path("shaders/ui.vert"), Path("shaders/ui_vert.inc")),
