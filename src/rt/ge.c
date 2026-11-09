@@ -1319,13 +1319,18 @@ static void read_pos_one(uint32_t addr, const VFmt *v, float *x, float *y, float
     if (v->pos_fmt == 3) {
         uint32_t xi = vtx_r32(a), yi = vtx_r32(a+4), zi = vtx_r32(a+8);
         memcpy(x, &xi, 4); memcpy(y, &yi, 4); memcpy(z, &zi, 4);
-        /* A float z in through mode is still the 16-bit depth: saturate it to 0..65535, as
-         * PPSSPP's through-mode float decoder does. A title may write any float there (a
-         * 2D overlay at z = -1.0 with the depth test off), and both renderers must take
-         * the same depth; the Vulkan path clips depth outside the 16-bit range. A NaN stays
-         * NaN, so the non-finite vertex rule still drops it. */
-        if (v->through && *z < 0.0f) *z = 0.0f;
-        else if (v->through && *z > 65535.0f) *z = 65535.0f;
+        /* A float z in through mode is still the 16-bit depth, an integer: saturate it to
+         * 0..65535 and drop the fraction, the rule of PPSSPP's through-mode float decoder
+         * for a finite z. A title may write any float there (a 2D overlay at z = -1.0 with
+         * the depth test off), and both renderers must take the same depth: the Vulkan
+         * path clips depth outside the 16-bit range and rounds a fraction to the nearest
+         * step, where the software path truncates it. PPSSPP draws a NaN z at depth 0;
+         * here a NaN stays NaN, so the non-finite vertex rule still drops the primitive. */
+        if (v->through) {
+            if (*z >= 65535.0f) *z = 65535.0f;
+            else if (*z > 0.0f) *z = (float)(int)*z;
+            else if (*z <= 0.0f) *z = 0.0f;
+        }
     } else if (v->pos_fmt == 2) {
         if (v->through) {
             *x = (float)(int16_t)vtx_r16(a);

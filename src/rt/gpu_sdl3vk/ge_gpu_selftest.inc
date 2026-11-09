@@ -3376,14 +3376,81 @@ static int coherence_run_clut_format_same_palette(void) {
     return 1;
 }
 
-/* The same palette change sent the way a title sends it: one list loads the palette, draws a
- * CLUT8 sprite, changes only CLUTFORMAT (shift 1), and draws again. Every command moves the
- * GE state serial, so the second sprite must rebuild its state and decode through index >> 1. */
 /* Through mode takes z as the GE's unsigned 16-bit depth. A title that writes float positions
  * there may put any float in z: two triangles at z = -1.0 (a 2D overlay drawn last, with the
  * depth test off) must still be drawn. The Vulkan path maps z / 65535 to the clip depth, so an
- * unclamped -1.0 lies outside the depth range and every such triangle was clipped away. */
+ * unclamped -1.0 lies outside the depth range and every such triangle was clipped away. A
+ * fraction must give the same depth on both renderers too: ge.c truncates a pixel's depth and the
+ * Vulkan path rounds z / 65535 to the nearest step, so an undecoded 100.7 was 100 on one and 101
+ * on the other. */
 typedef struct ThroughFloatVtx { uint32_t c; float x, y, z; } ThroughFloatVtx;
+
+/* Does a through-mode float z of `z` equal the stored depth `depth`? One list draws a quad at
+ * z = depth (an integer) with the depth test ALWAYS and depth writes on, then a second quad over
+ * it at `z` with the test EQUAL and depth writes off. Returns 1 when the second quad's colour is
+ * there, 0 when the first one's is, -1 when neither is or the readback failed. `gpu`: through the
+ * Vulkan hooks, else ge.c alone. */
+static int through_float_z_equals(float z, uint32_t depth, int gpu) {
+    const uint32_t base = 0x04000000u | 0x00160000u, stride = 512u;
+    const uint32_t vaddr = 0x00101800u, list_addr = 0x00100800u;
+    const uint32_t under = 0xFF3366CCu, over = 0xFF20C040u;   /* ABGR: opaque */
+    uint32_t *guest = (uint32_t *)SR_HOST(base);
+    coherence_reset_targets();
+    memset(guest, 0, stride * FB_H * 4u);
+    sr_gpu_vram_dirty(base, stride * FB_H * 4u);
+    memset(s_ge, 0, sizeof(*s_ge));
+    ThroughFloatVtx *vtx = (ThroughFloatVtx *)SR_HOST(vaddr);
+    const float x0 = 16.0f, y0 = 16.0f, x1 = 48.0f, y1 = 48.0f;
+    for (int q = 0; q < 2; q++) {
+        const uint32_t c = q ? over : under;
+        const float qz = q ? z : (float)depth;
+        ThroughFloatVtx *v = vtx + 6 * q;
+        v[0] = (ThroughFloatVtx){ c, x0, y0, qz };
+        v[1] = (ThroughFloatVtx){ c, x1, y0, qz };
+        v[2] = (ThroughFloatVtx){ c, x0, y1, qz };
+        v[3] = (ThroughFloatVtx){ c, x1, y0, qz };
+        v[4] = (ThroughFloatVtx){ c, x1, y1, qz };
+        v[5] = (ThroughFloatVtx){ c, x0, y1, qz };
+    }
+    uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    DL_EMIT(0x10, 0);
+    DL_EMIT(0x9C, base & 0x00FFFFFFu);
+    DL_EMIT(0x9D, stride | ((base & 0xFF000000u) >> 8));
+    DL_EMIT(0x9E, 0x00080000u);                         /* depth buffer */
+    DL_EMIT(0x9F, 512u | (0x04000000u >> 8));
+    DL_EMIT(0xD2, 3);
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x1E, 0);                                   /* no texture */
+    DL_EMIT(0x1D, 0);                                   /* no culling */
+    DL_EMIT(0x21, 0);
+    DL_EMIT(0x22, 0);
+    DL_EMIT(0x23, 1);                                   /* depth test */
+    DL_EMIT(0xDE, 1);                                   /* ALWAYS */
+    DL_EMIT(0xE7, 0);                                   /* depth writes on */
+    DL_EMIT(0xD4, 0);
+    DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0x12, (1u << 23) | (7u << 2) | (3u << 7)); /* through, 8888 colour, float pos */
+    DL_EMIT(0x01, vaddr & 0x00FFFFFFu);
+    DL_EMIT(0x04, (3u << 16) | 6u);
+    DL_EMIT(0xDE, 2);                                   /* EQUAL */
+    DL_EMIT(0xE7, 1);                                   /* depth writes off */
+    DL_EMIT(0x04, (3u << 16) | 6u);                     /* the next six vertices */
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+    ge_set_gpu_hooks(gpu ? &k_hooks : NULL);
+    ge_run_list(list_addr, 0);
+    ge_set_gpu_hooks(&k_hooks);
+    if (gpu) {
+        GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
+                                   .width = 480, .height = 272 };
+        if (!gegpu_sync_guest_fb(&desc)) return -1;
+    }
+    const uint32_t px = guest[32u * stride + 32u] & 0x00FFFFFFu;
+    return px == (over & 0x00FFFFFFu) ? 1 : px == (under & 0x00FFFFFFu) ? 0 : -1;
+}
 
 static int coherence_run_through_float_z(void) {
     const char *name = "through-float-z";
@@ -3445,11 +3512,34 @@ static int coherence_run_through_float_z(void) {
             ok = 0;
         }
     }
+    /* The depth each renderer takes for a z with a fraction, and for one just outside the range:
+     * the depth test EQUAL must pass against `want` and fail against its neighbour. */
+    static const struct { float z; uint32_t want; } k_frac[] = {
+        { 100.7f, 100u }, { 100.3f, 100u }, { 0.99f, 0u }, { 65534.7f, 65534u },
+        { -0.5f, 0u }, { 65535.5f, 65535u },
+    };
+    for (unsigned i = 0; i < sizeof k_frac / sizeof k_frac[0]; i++) {
+        const uint32_t want = k_frac[i].want, other = want < 65535u ? want + 1u : want - 1u;
+        for (int gpu = 1; gpu >= 0; gpu--) {
+            const int at_want = through_float_z_equals(k_frac[i].z, want, gpu);
+            const int at_other = through_float_z_equals(k_frac[i].z, other, gpu);
+            if (at_want == 1 && at_other == 0) continue;
+            fprintf(stderr, "gpu coherence selftest [%s]: z=%.2f on %s: equal to depth %u: %d (want 1), "
+                            "to depth %u: %d (want 0)\n", name, (double)k_frac[i].z,
+                    gpu ? "the Vulkan path" : "ge.c", want, at_want, other, at_other);
+            ok = 0;
+        }
+    }
     coherence_reset_targets();
-    if (ok) printf("gpu coherence selftest: PASS %-22s z=-1.0 and z=70000.0 drawn\n", name);
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s z=-1.0 and z=70000.0 drawn; a fraction is the same "
+               "depth on both renderers\n", name);
     return ok;
 }
 
+/* The same palette change sent the way a title sends it: one list loads the palette, draws a
+ * CLUT8 sprite, changes only CLUTFORMAT (shift 1), and draws again. Every command moves the
+ * GE state serial, so the second sprite must rebuild its state and decode through index >> 1. */
 static int coherence_run_clut_format_list(void) {
     const uint32_t base = 0x04000000u | 0x00160000u;
     const uint32_t tex_base = 0x04040000u, clut_base = 0x04041000u;
