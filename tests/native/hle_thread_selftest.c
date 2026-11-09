@@ -7389,6 +7389,24 @@ static void test_sysparam_nickname_string(void) {
     expect(sysreg_guest_str_is(SYSPARAM_STR_OUT, "Player") && MEM_R8(SYSPARAM_STR_OUT + 7u) == 0xaau,
            "the default nickname writes \"Player\" and its NUL terminator only");
 
+    /* A read into the PSP's full 0x80-byte nickname field (measured on a PSP-3000 with the
+       probe's 0xA5 fill: the extent written is the string and its NUL, nothing past it) writes
+       the string and its NUL only. The rest of the field, and the byte after it, keep what the
+       game had there: the read does not zero-pad. */
+    for (uint32_t i = 0u; i <= 0x80u; i++) MEM_W8(SYSPARAM_STR_OUT + i, 0xaau);
+    expect(sysparam_string(1u, SYSPARAM_STR_OUT, 0x80u) == 0u &&
+               sysreg_guest_str_is(SYSPARAM_STR_OUT, "Player"),
+           "the 0x80-byte nickname read succeeds and holds \"Player\"");
+    {
+        uint32_t untouched = 0u;
+        for (uint32_t i = 7u; i <= 0x80u; i++) {
+            if (MEM_R8(SYSPARAM_STR_OUT + i) == 0xaau) untouched++;
+        }
+        expect(MEM_R8(SYSPARAM_STR_OUT + 6u) == 0u && untouched == 0x80u - 7u + 1u,
+               "the 0x80-byte nickname read writes the string and its NUL only: every byte "
+               "after the NUL, through the end of the field and one past, is untouched");
+    }
+
     /* A registry write is what the utility reports. */
     reg2 = sysreg_open_registry(2u, &r);
     cat3 = sysreg_open_category(reg2, "/CONFIG/SYSTEM", 2u, &r);

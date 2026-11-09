@@ -7,8 +7,7 @@
 /* The player's on-screen keyboard (#2197): a grid of keys for a controller or the mouse,
    drawn from the nk_ui buttons, that edits one UTF-8 text in place. It knows nothing of
    what the text is for: the caller gives the buffer, the most bytes it may hold, and a
-   character filter, so the same keyboard can serve the nickname editor, the library's
-   find box or a game's text entry later.
+   character filter. Today the nickname editor is its caller.
 
    The keys, row by row (the layout of src/rt/osk_overlay.h's guest keyboard):
        1 2 3 4 5 6 7 8 9 0

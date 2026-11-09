@@ -245,6 +245,13 @@ set_tests_properties(player_state_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     ENVIRONMENT "NK_TEST_SCRATCH_DIR=${CMAKE_CURRENT_BINARY_DIR}/build")
 
+# The console nickname rule (src/core/nk_nickname.h) is header-only; its test needs no library.
+add_executable(test_nk_nickname tests/native/test_nk_nickname.c)
+target_include_directories(test_nk_nickname PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+)
+add_test(NAME nk_nickname_test COMMAND test_nk_nickname)
+
 # The nk_ui core and its C3a reserved stubs stay SDL and Vulkan free. Keep this
 # explicit source inventory in sync with mk/nk_ui.mk.
 set(NK_UI_CORE_SOURCES
