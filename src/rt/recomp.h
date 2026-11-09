@@ -1126,74 +1126,20 @@ int sr_guest_format_host(CpuState *s, uint32_t fmt, uint32_t first_reg,
 void sr_vread(float *r, const CpuState *s, const uint8_t *idx, int n, uint32_t prefix);
 void sr_vwrite(CpuState *s, const uint8_t *idx, float *d, int n, uint32_t dprefix);
 
-/* Sum of products a[i] * b[i] (i < n, n <= 4) as a PSP-3000 returned it for vdot, vhdp, vtfm,
- * vhtfm, vcrsp, vqmul, vmmul and (n = 1) vmscl (W-CPU-VFPU-2 row 2, 2026-11-09, issue #326;
- * probe case vfpu-wide-dot-matrix, 537 cells, finite and special, two passes identical; its
- * register entry is not in this tree yet). The sum is not a chain of float adds. Each exact
- * product (a denormal operand flushed to zero first) is truncated toward zero to a multiple
- * of 2^(E-24), E being the exponent of the largest product; the terms are added exactly, so
- * the order does not matter; the sum is truncated toward zero to a multiple of 2^(E-23) and
- * then to a float32. A NaN operand (payload and sign ignored), 0 * Inf, or Inf terms of mixed
- * sign give the positive word 0x7f800001 (a single product, n = 1, takes the vmul rule: the
- * XOR of the operand signs); Inf with a finite non-zero counterpart gives the signed Inf; a
- * product of zeros is +0 (a single product keeps the XOR sign). The caller negates an operand
- * for a subtracted term. */
+/* The VFPU sum-of-products adder (sr_vfpu_dot_bits in recomp.c, PSP-VFPU-FUNNEL-001 and
+ * PSP-VFPU-WIDEDOT-001): sum(a[i] * b[i]) for i < n <= 4, with the products aligned and
+ * summed in integers, not as a chain of float adds. sr_vfpu_interp and the generated code
+ * call it for vdot, vhdp, vcrsp, vqmul, vmmul, vtfm and vhtfm; vfad and vavg run on it too.
+ * The caller negates an operand for a subtracted term. It is out of line: inlined, a
+ * 16-lane vmmul.q body grew about twenty-fold. */
+uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n);
 static inline float sr_vfpu_sop(const float *fa, const float *fb, int n) {
-    uint32_t a[4], b[4], r;
-    int nan = 0, inf_neg = 0, inf_pos = 0, i;
-    for (i = 0; i < n; i++) {
+    uint32_t a[4], b[4];
+    for (int i = 0; i < n; i++) {
         memcpy(&a[i], &fa[i], 4);
         memcpy(&b[i], &fb[i], 4);
-        const uint32_t ae = (a[i] >> 23) & 0xffu, be = (b[i] >> 23) & 0xffu;
-        if ((ae == 255u && (a[i] & 0x7fffffu)) || (be == 255u && (b[i] & 0x7fffffu)) ||
-            (ae == 255u && be == 0u) || (be == 255u && ae == 0u))
-            nan = 1;
-        else if (ae == 255u || be == 255u) {
-            if ((a[i] ^ b[i]) >> 31) inf_neg = 1; else inf_pos = 1;
-        }
     }
-    if (nan) {
-        r = 0x7f800001u | (n == 1 ? ((a[0] ^ b[0]) & 0x80000000u) : 0u);
-    } else if (inf_neg || inf_pos) {
-        r = (inf_neg && inf_pos) ? 0x7f800001u : (inf_neg ? 0xff800000u : 0x7f800000u);
-    } else {
-        uint64_t pr[4];
-        int ex[4], top = -100000, any = 0;
-        for (i = 0; i < n; i++) {
-            const uint32_t ae = (a[i] >> 23) & 0xffu, be = (b[i] >> 23) & 0xffu;
-            pr[i] = 0;
-            if (ae == 0u || be == 0u) continue;
-            pr[i] = (uint64_t)((a[i] & 0x7fffffu) | 0x800000u) * (uint64_t)((b[i] & 0x7fffffu) | 0x800000u);
-            ex[i] = (int)ae + (int)be - 254;
-            if (ex[i] + (int)((pr[i] >> 47) & 1u) > top) top = ex[i] + (int)((pr[i] >> 47) & 1u);
-            any = 1;
-        }
-        if (!any) {
-            r = n == 1 ? ((a[0] ^ b[0]) & 0x80000000u) : 0u;
-        } else {
-            int64_t sum = 0;
-            for (i = 0; i < n; i++) {
-                if (pr[i] == 0) continue;
-                const int sh = top - ex[i] + 22;
-                const int64_t m = sh >= 64 ? 0 : (int64_t)(pr[i] >> sh);
-                sum += ((a[i] ^ b[i]) >> 31) ? -m : m;
-            }
-            sum = (sum / 2) * 2;
-            const uint32_t sign = sum < 0 ? 0x80000000u : 0u;
-            uint64_t m = (uint64_t)(sum < 0 ? -sum : sum);
-            if (m == 0) {
-                r = 0u;
-            } else {
-                int bl = 0;
-                while ((m >> bl) != 0) bl++;
-                const int ev = bl - 1 + top - 24;
-                m = bl > 24 ? m >> (bl - 24) : m << (24 - bl);
-                if (ev > 127) r = sign | 0x7f800000u;
-                else if (ev < -126) r = sign;
-                else r = sign | ((uint32_t)(ev + 127) << 23) | (uint32_t)(m & 0x7fffffu);
-            }
-        }
-    }
+    const uint32_t r = sr_vfpu_dot_bits(a, b, n);
     float out;
     memcpy(&out, &r, 4);
     return out;
@@ -1205,18 +1151,16 @@ static inline float sr_vfpu_sop(const float *fa, const float *fb, int n) {
  * generated code and sr_vfpu_interp, each compiled on its own, kept different NaNs when
  * two met (the alias-edge sweep in tests/native/vfpu_interp_selftest.c, built at -O1 or
  * -O2). Both lanes call these helpers for every lane operation of vadd, vsub, vmul, vdiv,
- * vscl and vcrs (the forms sr_vfpu_sop above does not own). The rule: the first NaN
+ * vscl, vcrs and vmscl (the forms the sum-of-products adder above does not own). The rule: the first NaN
  * operand, quieted, else the invalid-operation NaN 0xFFC00000 (Inf - Inf, 0 * Inf, 0 / 0,
  * Inf / Inf). That is what x86-64 SSE returns for the operands in source order, but it is a
  * change for default builds too: even at -O0 (RECOMP_OPT, the Makefile default) GCC may
  * evaluate a plain + or * with its operands swapped, as MSYS2 GCC 16.2 does for the old
- * vadd and vmul lane loops, so NaN-with-NaN lanes of vadd, vmul, vcrsp and vqmul now keep
- * the first source where they used to keep the second. Results without a NaN are unchanged.
+ * vadd and vmul lane loops, so NaN-with-NaN lanes of vadd and vmul now keep the first
+ * source where they used to keep the second. Results without a NaN are unchanged.
  * It is project semantics, not PSP evidence: the PSP's NaN word for these forms is
- * unmeasured or contested. docs/HARDWARE_ORACLE.md PSP-GE-001 and the issue #40 fixture
- * fixtures/vfpu_nan_payload/vfpu_nan_cases.h disagree, and the dot-product adder measured
- * as PSP-VFPU-FUNNEL-001 (vfpu_dot_bits in vfpu_interp.c, used by vfad and vavg) returns
- * the fixed 0x7F800001 for any NaN operand, which this rule for vdot does not follow.
+ * unmeasured. The sum-of-products forms follow sr_vfpu_dot_bits above instead, which
+ * returns the fixed 0x7F800001 for any NaN operand as the console did.
  * At -O0 GCC does not inline these static inline helpers, so an ad-hoc build makes one
  * call per lane operation; package builds (-O1, PACKAGE_RECOMP_OPT) inline them. */
 static inline float sr_vf_nan(float a, float b) {

@@ -371,8 +371,8 @@ int main(void) {{
         word=(0x3c<<26)|(4<<23)|(0<<16)|(1<<15)|(0x20<<8)|(0x20)  # vmscl.t 3x3, vd=0x20, vs=0x20, vt=0x00
         effect,_,_=codegen.vfpu_effect(0x5300,word)
         self.assertIn("float _sc = s->v[0];",effect)
-        self.assertIn("s->v[0] = sr_vfpu_sop(&s->v[0], &_sc, 1);",effect)
-        self.assertNotIn("sr_vfpu_sop(&s->v[0], &s->v[0], 1)",effect,
+        self.assertIn("s->v[0] = sr_vf_mul(s->v[0], _sc);",effect)
+        self.assertNotIn("sr_vf_mul(s->v[0], s->v[0])",effect,
                          "vmscl must not read the scalar fresh after it is overwritten")
 
     def test_vmscl_alias_snapshots_scalar_before_destructive_writes(self):
@@ -380,8 +380,8 @@ int main(void) {{
         word=(0x3c<<26)|(7<<23)|(1<<16)|(1<<15)|(0x20<<8)|(0x20)  # Matrix1 which=1, vd=0x20, vs=0x20
         effect,_,_=codegen.vfpu_effect(0x5400,word)
         self.assertIn("float _sc = s->v[4];",effect)
-        self.assertIn("s->v[0] = sr_vfpu_sop(&s->v[0], &_sc, 1);",effect)
-        self.assertNotIn("sr_vfpu_sop(&s->v[0], &s->v[4], 1)",effect,
+        self.assertIn("s->v[0] = sr_vf_mul(s->v[0], _sc);",effect)
+        self.assertNotIn("sr_vf_mul(s->v[0], s->v[4])",effect,
                          "vmscl alias must not read the scalar fresh after it is overwritten")
 
     def test_lane_arithmetic_goes_through_the_nan_rule_helpers(self):
@@ -403,8 +403,7 @@ int main(void) {{
                 effect, _, _ = codegen.vfpu_effect(0x5500, word)
                 self.assertNotIn("sr_vfpu_interp", effect)
                 self.assertRegex(effect, r"sr_vf(pu)?_")
-                if name in ("vdot.q", "vhdp.t", "vcrsp.t", "vqmul.q", "vmmul.t", "vtfm2.t", "vmscl.t",
-                            "vmscl alias"):
+                if name in ("vdot.q", "vhdp.t", "vcrsp.t", "vqmul.q", "vmmul.t", "vtfm2.t"):
                     self.assertIn("sr_vfpu_sop(", effect)
                 self.assertIsNone(bare.search(effect), effect)
 

@@ -236,6 +236,12 @@ float sr_vfpu_log2(float x) { return x; }
 float sr_vfpu_sin(float x) { return x; }
 float sr_vfpu_cos(float x) { return x; }
 float sr_vfpu_exp2(float x) { return x; }
+uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n) {
+    (void)a;
+    (void)b;
+    (void)n;
+    return 0u;
+}
 
 int sr_cpu_lle_enabled(void) { return 0; }
 unsigned sr_cpu_data_access_fault(const CpuState *s, uint32_t address, unsigned width, int store) {
@@ -660,7 +666,10 @@ def _hardware_evidence(record: Record, vector_size: int | None) -> list[dict[str
             {
                 "oracle_id": "issue-40-group-a",
                 "kind": "semantic",
-                "coverage": "measured vdot/vhdp NaN and infinity cells",
+                "coverage": (
+                    "measured vdot/vhdp cells; its NaN words and the zero sign of a flushed sum "
+                    "are superseded by PSP-VFPU-WIDEDOT-001 (PSP-3000, 2026-11-08)"
+                ),
             }
         )
     group_b_form = (
@@ -679,14 +688,9 @@ def _hardware_evidence(record: Record, vector_size: int | None) -> list[dict[str
                 "coverage": "measured vmscl and named source/destination overlap cells only",
             }
         )
-    if measured_triple and op == 0x3C and sub3 in {0, 3}:
-        evidence.append(
-            {
-                "oracle_id": "issue-40-vmmul-vtfm3-nan",
-                "kind": "semantic",
-                "coverage": "measured vmmul.t and vtfm3.t NaN cells only",
-            }
-        )
+    # The issue #40 vmmul.t / vtfm3.t NaN cells (sNaN quieted to 0x7FC00001, inf*0 to 0x7FC00000) are
+    # superseded: PSP-VFPU-WIDEDOT-001 and PSP-VFPU-FUNNEL-001 returned 0x7F800001 for every NaN
+    # operand and 0 * Inf. Those rows no longer claim hardware evidence from them.
     immediate_vfpu = op == 0x37 and ((word >> 24) & 3) == 3
     uses_vector_addressing = op in VECTOR_SIZE_OPS or op == 0x12 or immediate_vfpu
     if uses_vector_addressing:
@@ -940,7 +944,6 @@ def build_census() -> Record:
                 "hardware_vfpu_addr_001",
                 "issue-40-group-a",
                 "issue-40-group-b",
-                "issue-40-vmmul-vtfm3-nan",
                 "PSP-A3-08",
                 "PSP-A3-09",
                 "PSP-A3-10",

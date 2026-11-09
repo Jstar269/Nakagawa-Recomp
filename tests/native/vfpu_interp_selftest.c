@@ -2689,12 +2689,13 @@ static int check_vf_nan_rule(void) {
     return bad;
 }
 
-/* PSP-3000 reads of the dot, cross, quaternion and matrix forms (W-CPU-VFPU-2 row 2, 2026-11-09,
- * issue #326, probe case vfpu-wide-dot-matrix; its register entry is not in this tree yet).
+/* PSP-3000 reads of the dot, cross, quaternion and matrix forms (PSP-VFPU-WIDEDOT-001,
+ * 2026-11-08, issue #326, probe case vfpu-wide-dot-matrix: vdot.p/.q, vhdp.q, vcrsp.t, vqmul.q,
+ * vtfm4.q, vhtfm4.q, vmmul.q at identity prefixes, plus vmmov, vrot and the constant fills).
  * wd_stream holds cells of that run, each the form index, the source words, then the result
  * words, the console's own values (synthetic operands, no game data). Selected: the cells
  * whose result is a NaN, an infinity or a negative zero first, then an even spread of the rest;
- * the run had 566 cells, and the model in sr_vfpu_sop matched all of them. Every cell runs
+ * the run had 549 such cells and sr_vfpu_dot_bits returned all of them. Every cell runs
  * through the AOT body (via the overlap-diff header) and sr_vfpu_interp. Image words are
  * m*16 + c*4 + r: vectors at the probe word's own registers, a matrix operand at matrix 1
  * (vmmul: vt at matrix 0 and vs at matrix 1), the destination at matrix 2. */
@@ -2702,8 +2703,8 @@ typedef struct { const char *name; int nsrc, ndst; } WdForm;
 static const WdForm wd_forms[] = {
     {"vdot-p", 4, 1},  {"vdot-q", 8, 1},  {"vhdp-q", 8, 1},   {"vcrsp-t", 6, 3},  {"vqmul-q", 8, 4},
     {"vtfm-q", 20, 4}, {"vhtfm-q", 19, 4}, {"vmmul-q", 32, 16}, {"vmmul-qt", 32, 16},
-    {"vmscl-q", 17, 16}, {"vmmov-q", 16, 16}, {"vrot-q", 1, 4}, {"vmzero-q", 0, 16},
-    {"vmidt-q", 0, 16}, {"vmone-q", 0, 16},
+    {"vmmov-q", 16, 16}, {"vrot-q", 1, 4}, {"vmzero-q", 0, 16}, {"vmidt-q", 0, 16},
+    {"vmone-q", 0, 16},
 };
 static const uint32_t wd_stream[] = {
         0, 0x3fc00000u, 0xc0100000u, 0x3f400000u, 0x40800000u, 0xc0fc0000u,
@@ -2905,95 +2906,55 @@ static const uint32_t wd_stream[] = {
       0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x41130000u, 0x41688000u,
       0xc10b8000u, 0xc0400000u, 0x412a0000u, 0xc1bbc000u, 0x41010000u, 0x419e0000u, 0x414e0000u,
       0x41528000u, 0xc1150000u, 0x41be0000u, 0xc15c0000u, 0xc0e30000u, 0x41140000u, 0xc0980000u,
-        9, 0x40200000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u,
-      0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u,
-      0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x40200000u, 0x40a00000u, 0xc0f00000u,
-      0x3fa00000u, 0xc0700000u, 0x41200000u, 0x3f200000u, 0xc0a00000u, 0x410c0000u, 0xbff00000u,
-      0x40480000u, 0x41700000u, 0xc1340000u, 0x3ea00000u, 0x40dc0000u, 0xc0200000u,
-        9, 0x7fc00011u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u,
-      0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u,
-      0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800001u, 0x7f800001u, 0xff800001u,
-      0x7f800001u, 0xff800001u, 0x7f800001u, 0x7f800001u, 0xff800001u, 0x7f800001u, 0xff800001u,
-      0x7f800001u, 0x7f800001u, 0xff800001u, 0x7f800001u, 0x7f800001u, 0xff800001u,
-        9, 0xffc00022u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u,
-      0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u,
-      0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0xff800001u, 0xff800001u, 0x7f800001u,
-      0xff800001u, 0x7f800001u, 0xff800001u, 0xff800001u, 0x7f800001u, 0xff800001u, 0x7f800001u,
-      0xff800001u, 0xff800001u, 0x7f800001u, 0xff800001u, 0xff800001u, 0x7f800001u,
-        9, 0x7f800033u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u,
-      0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u,
-      0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800001u, 0x7f800001u, 0xff800001u,
-      0x7f800001u, 0xff800001u, 0x7f800001u, 0x7f800001u, 0xff800001u, 0x7f800001u, 0xff800001u,
-      0x7f800001u, 0x7f800001u, 0xff800001u, 0x7f800001u, 0x7f800001u, 0xff800001u,
-        9, 0x7f800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u,
-      0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u,
-      0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800000u, 0x7f800000u, 0xff800000u,
-      0x7f800000u, 0xff800000u, 0x7f800000u, 0x7f800000u, 0xff800000u, 0x7f800000u, 0xff800000u,
-      0x7f800000u, 0x7f800000u, 0xff800000u, 0x7f800000u, 0x7f800000u, 0xff800000u,
-        9, 0x80000000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u,
-      0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u,
-      0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x80000000u, 0x80000000u, 0x00000000u,
-      0x80000000u, 0x00000000u, 0x80000000u, 0x80000000u, 0x00000000u, 0x80000000u, 0x00000000u,
-      0x80000000u, 0x80000000u, 0x00000000u, 0x80000000u, 0x80000000u, 0x00000000u,
-        9, 0x40200000u, 0x7f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u,
-      0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u,
-      0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x7f800000u, 0x40a00000u, 0xc0f00000u,
-      0x3fa00000u, 0xc0700000u, 0x41200000u, 0x3f200000u, 0xc0a00000u, 0x410c0000u, 0xbff00000u,
-      0x40480000u, 0x41700000u, 0xc1340000u, 0x3ea00000u, 0x40dc0000u, 0xc0200000u,
-        9, 0x40200000u, 0x80000000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u,
-      0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u,
-      0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u, 0x80000000u, 0x40a00000u, 0xc0f00000u,
-      0x3fa00000u, 0xc0700000u, 0x41200000u, 0x3f200000u, 0xc0a00000u, 0x410c0000u, 0xbff00000u,
-      0x40480000u, 0x41700000u, 0xc1340000u, 0x3ea00000u, 0x40dc0000u, 0xc0200000u,
-        10, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u,
       0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
       0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
       0xbfc00000u, 0x40800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
       0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
-        10, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x7fc00011u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x7fc00011u,
       0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
       0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
       0xbfc00000u, 0x7fc00011u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
       0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
-        10, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0xffc00022u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0xffc00022u,
       0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
       0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
       0xbfc00000u, 0xffc00022u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
       0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
-        10, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x7f800033u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x7f800033u,
       0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
       0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
       0xbfc00000u, 0x7f800033u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
       0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
-        10, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x7f800000u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x7f800000u,
       0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
       0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
       0xbfc00000u, 0x7f800000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
       0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
-        10, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x00000001u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x00000001u,
       0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
       0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
       0xbfc00000u, 0x00000001u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
       0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
-        10, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x80000000u,
+        9, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x80000000u,
       0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u, 0xc0900000u,
       0x3e000000u, 0x40300000u, 0xbf800000u, 0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u,
       0xbfc00000u, 0x80000000u, 0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u,
       0x40c00000u, 0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
-        11, 0x00000000u, 0x3f800000u, 0x00000000u, 0x00000000u, 0x00000000u,
-        11, 0x80000000u, 0x3f800000u, 0x80000000u, 0x00000000u, 0x00000000u,
-        11, 0x3f800000u, 0x80000000u, 0x3f800000u, 0x00000000u, 0x00000000u,
-        11, 0x40800000u, 0x3f800000u, 0x00000000u, 0x00000000u, 0x00000000u,
-        11, 0x7f800000u, 0x7f800001u, 0x7f800001u, 0x00000000u, 0x00000000u,
-        11, 0xff800000u, 0x7f800001u, 0xff800001u, 0x00000000u, 0x00000000u,
-        11, 0x7fc00011u, 0x7f800001u, 0x7f800001u, 0x00000000u, 0x00000000u,
-        12, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+        10, 0x00000000u, 0x3f800000u, 0x00000000u, 0x00000000u, 0x00000000u,
+        10, 0x80000000u, 0x3f800000u, 0x80000000u, 0x00000000u, 0x00000000u,
+        10, 0x3f800000u, 0x80000000u, 0x3f800000u, 0x00000000u, 0x00000000u,
+        10, 0x40800000u, 0x3f800000u, 0x00000000u, 0x00000000u, 0x00000000u,
+        10, 0x7f800000u, 0x7f800001u, 0x7f800001u, 0x00000000u, 0x00000000u,
+        10, 0xff800000u, 0x7f800001u, 0xff800001u, 0x00000000u, 0x00000000u,
+        10, 0x7fc00011u, 0x7f800001u, 0x7f800001u, 0x00000000u, 0x00000000u,
+        11, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
       0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
       0x00000000u, 0x00000000u, 0x00000000u,
-        13, 0x3f800000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x3f800000u,
+        12, 0x3f800000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x3f800000u,
       0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x3f800000u, 0x00000000u, 0x00000000u,
       0x00000000u, 0x00000000u, 0x3f800000u,
-        14, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        13, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
       0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
       0x3f800000u, 0x3f800000u, 0x3f800000u,
 };
@@ -3020,15 +2981,10 @@ static void wd_place(CpuState *s, int f, uint32_t w, const uint32_t *src) {
     case 7: case 8:
         for (int k = 0; k < 32; k++) s->vi[k] = src[k];
         break;
-    case 9:  /* vmscl: the scalar at vt, the matrix at matrix 1 */
-        vreg_idx(vt, 1, ix);
-        s->vi[ix[0]] = src[0];
-        for (int k = 0; k < 16; k++) s->vi[16 + k] = src[1 + k];
-        break;
-    case 10:
+    case 9:
         for (int k = 0; k < 16; k++) s->vi[16 + k] = src[k];
         break;
-    case 11:
+    case 10:
         vreg_idx(vs, 1, ix);
         s->vi[ix[0]] = src[0];
         break;
@@ -3083,10 +3039,12 @@ static int check_vfpu_wide_dot_measured(void) {
 }
 
 /* Cells of the same run quoted by value, independent of wd_stream's selection: the sum of the
- * truncated products is neither a float add chain nor an exact-then-rounded sum. (1, 2^-24,
+ * products is neither a float add chain nor an exact-then-rounded sum. (1, 2^-24,
  * 2^-24, 2^-24) . (1, 1, 1, 1) is 1 + 1.5 ulp and the console returned 1 + 1 ulp; (2^24, 1, 1, 1)
  * is 2^24 + 3 and it returned 2^24 + 2; 1e8 + 1 - 1e8 + 1 is zero in every operand order
- * because each product of 1 truncates away against the 1e8 term's exponent. */
+ * because each product of 1 truncates away against the 1e8 term's exponent. The carry-out
+ * cells separate that truncation of lower terms from the rounding to nearest even that follows
+ * a carry into a higher binade, the rule PSP-VFPU-FUNNEL-001 measured for vfad. */
 static int check_vfpu_wide_dot_quoted_cells(void) {
     static const struct { uint32_t a[4], b[4], want; const char *what; } dots[] = {
         {{0x3f800000u, 0x33800000u, 0x33800000u, 0x33800000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
@@ -3097,6 +3055,23 @@ static int check_vfpu_wide_dot_quoted_cells(void) {
          0x00000000u, "1e8 + 1 - 1e8 + 1 = 0"},
         {{0x3f800000u, 0xccbebc20u, 0x3f800000u, 0x4cbebc20u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
          0x00000000u, "the same terms in another order = 0"},
+        /* Carry-out into the next binade rounds to nearest even (probe case vfpu-round-sep,
+         * unrecorded PSP read, PSP-3000, 2026-11-09, b = (1, 1, 1, 1) with the last lane of a
+         * zero unless listed). */
+        {{0x3f800003u, 0x3f800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40000002u, "(1 + 3 ulp) + 1 rounds to nearest even at the carry-out"},
+        {{0x3f800003u, 0x3f800003u, 0x3f800000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40400003u, "three terms carrying out into [2, 4)"},
+        {{0x3f800001u, 0x3f800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40000000u, "(1 + 1 ulp) + 1 = 2"},
+        {{0xbf800003u, 0xbf800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0xc0000002u, "(-1 - 3 ulp) - 1 rounds to nearest even"},
+        {{0x3f800007u, 0x3f800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40000004u, "(1 + 7 ulp) + 1 rounds up to 2 + 4 ulp"},
+        {{0x3f800005u, 0x3f800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40000002u, "(1 + 5 ulp) + 1 rounds down to 2 + 2 ulp"},
+        {{0x40000001u, 0x40000000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+         0x40800000u, "(2 + 1 ulp) + 2 = 4"},
         {{0x7f800000u, 0x3f800000u, 0xff800000u, 0x3f800000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
          0x7f800001u, "+Inf and -Inf terms give 0x7f800001"},
         {{0x00000000u, 0x3f800000u, 0x3f800000u, 0x3f800000u}, {0x7f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
