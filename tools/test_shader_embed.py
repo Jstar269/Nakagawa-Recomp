@@ -437,7 +437,8 @@ class DstReadVariantTests(unittest.TestCase):
         manifest = shader_embed.load_manifest(shader_embed.MANIFEST)
         entries = [e for e in manifest["shaders"] if e.get("embedded") == embedded]
         self.assertEqual(len(entries), 1, embedded)
-        return entries[0]
+        entry: dict = entries[0]
+        return entry
 
     def test_default_module_is_unchanged(self) -> None:
         entry = self.manifest_entry("psp_frag.inc")
