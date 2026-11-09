@@ -4637,6 +4637,221 @@ static int coherence_run_stencil_parity(void) {
     return 1;
 }
 
+/* Stencil mesh: the draw-once mask a game draws translucent shapes with (NOTEQUAL against bit
+ * 7, REPLACE on depth pass, alpha-blended), so each pixel blends at most once. The state reads
+ * what it writes, so a primitive that meets the batch's earlier primitives must start a new
+ * batch; one whose triangles cover no sample theirs cover need not (ge_gpu.c tris_disjoint).
+ * The list, flat-shaded on an 8888 target over a hashed background, in one TRIANGLES command:
+ *  - a 16x6 grid of triangles, two per cell on alternating diagonals, each vertex shared bit for
+ *    bit by its neighbours, at hashed positions an odd number of sixteenths off the pixel grid
+ *    (never within 1/16 of a pixel centre at render scales 1 to 4), so shared edges cross pixel
+ *    centres and diagonal neighbours meet at a single vertex off every sample;
+ *  - a fan of seven triangles around one vertex;
+ *  - the same grid moved by a fraction of a cell, over the first: it must split once;
+ *  - two triangles that meet only at a pixel centre: they must split there.
+ * At 1x every pixel must match ge.c bit for bit with no software fallback; the second grid
+ * must split, or its overlap would blend twice and differ from ge.c. Those two splits and a few
+ * more are allowed: where diagonal neighbours meet at one vertex and a jittered vertex lies
+ * within TAIL_SEP_EPS of the other's edge line, the test cannot separate them and splits, which
+ * is safe (this list has two such, located with a CPU model of append). At least nine in ten
+ * triangles must join by the triangle test; with the box alone nearly every one splits. A table
+ * then checks the separation test itself at render scales 1 to 4. */
+#define SMP_COLS 16
+#define SMP_ROWS 6
+#define SMP_CELL 12.0f
+
+static float smp_jitter(uint32_t h) {
+    return (float)((int)(h % 13u) - 6) * 0.125f + 0.0625f;   /* -0.6875 .. 0.8125 in eighths + 1/16 */
+}
+
+static void smp_grid(ParityGuestVtx *v, int *n, float ox, float oy, uint32_t seed) {
+    float gx[SMP_ROWS + 1][SMP_COLS + 1], gy[SMP_ROWS + 1][SMP_COLS + 1];
+    for (int j = 0; j <= SMP_ROWS; j++)
+        for (int i = 0; i <= SMP_COLS; i++) {
+            const uint32_t h = wrap_hash(seed + (uint32_t)(j * 97 + i));
+            gx[j][i] = ox + SMP_CELL * (float)i + smp_jitter(h);
+            gy[j][i] = oy + SMP_CELL * (float)j + smp_jitter(h >> 8);
+        }
+    for (int j = 0; j < SMP_ROWS; j++)
+        for (int i = 0; i < SMP_COLS; i++) {
+            const uint32_t c0 = (wrap_hash(seed ^ (uint32_t)(j * 131 + i * 7)) & 0x00FFFFFFu) | 0x80000000u;
+            const uint32_t c1 = (wrap_hash(seed ^ (uint32_t)(j * 131 + i * 7 + 3)) & 0x00FFFFFFu) | 0x60000000u;
+            const float ax = gx[j][i], ay = gy[j][i], bx = gx[j][i + 1], by = gy[j][i + 1];
+            const float cx = gx[j + 1][i + 1], cy = gy[j + 1][i + 1], ex = gx[j + 1][i], ey = gy[j + 1][i];
+            if ((i + j) & 1) {   /* diagonal a-c */
+                v[(*n)++] = (ParityGuestVtx){ c0, ax, ay, 0.0f };
+                v[(*n)++] = (ParityGuestVtx){ c0, bx, by, 0.0f };
+                v[(*n)++] = (ParityGuestVtx){ c0, cx, cy, 0.0f };
+                v[(*n)++] = (ParityGuestVtx){ c1, ax, ay, 0.0f };
+                v[(*n)++] = (ParityGuestVtx){ c1, cx, cy, 0.0f };
+                v[(*n)++] = (ParityGuestVtx){ c1, ex, ey, 0.0f };
+            } else {             /* diagonal b-e */
+                v[(*n)++] = (ParityGuestVtx){ c0, ax, ay, 0.0f };
+                v[(*n)++] = (ParityGuestVtx){ c0, bx, by, 0.0f };
+                v[(*n)++] = (ParityGuestVtx){ c0, ex, ey, 0.0f };
+                v[(*n)++] = (ParityGuestVtx){ c1, bx, by, 0.0f };
+                v[(*n)++] = (ParityGuestVtx){ c1, cx, cy, 0.0f };
+                v[(*n)++] = (ParityGuestVtx){ c1, ex, ey, 0.0f };
+            }
+        }
+}
+
+static uint32_t smp_list(uint32_t base, int *ntris) {
+    StpList l;
+    stp_begin(&l, base, 3u, 0);
+    stp_emit(&l, 0x50, 0);                                 /* flat shading */
+    stp_emit(&l, 0x21, 1);                                 /* alpha blending */
+    stp_emit(&l, 0xDC, 3u | (0x80u << 8) | (0x80u << 16)); /* NOTEQUAL 0x80 under mask 0x80 */
+    stp_emit(&l, 0xDD, 2u << 16);                          /* REPLACE on depth pass, else KEEP */
+    stp_emit(&l, 0xE9, 0);
+    const uint32_t vaddr = 0x08060000u;
+    ParityGuestVtx *v = (ParityGuestVtx *)SR_HOST(vaddr);
+    int n = 0;
+    smp_grid(v, &n, 24.0f, 40.0f, 0x51u);
+    /* the fan: seven rim points at hashed radii and angles around an off-sample centre */
+    const float fx = 300.0625f, fy = 120.1875f;
+    float rx[7], ry[7];
+    for (int k = 0; k < 7; k++) {
+        const uint32_t h = wrap_hash(0x7A11u + (uint32_t)k);
+        const float a = 6.2831853f * ((float)k + 0.1f + 0.3f * (float)(h & 7u) / 8.0f) / 7.0f;
+        const float r = 18.0f + (float)((h >> 4) & 7u);
+        rx[k] = floorf((fx + r * cosf(a)) * 8.0f) / 8.0f + 0.0625f;
+        ry[k] = floorf((fy + r * sinf(a)) * 8.0f) / 8.0f + 0.0625f;
+    }
+    for (int k = 0; k < 7; k++) {
+        const uint32_t c = (wrap_hash(0x7B00u + (uint32_t)k) & 0x00FFFFFFu) | 0x90000000u;
+        v[n++] = (ParityGuestVtx){ c, fx, fy, 0.0f };
+        v[n++] = (ParityGuestVtx){ c, rx[k], ry[k], 0.0f };
+        v[n++] = (ParityGuestVtx){ c, rx[(k + 1) % 7], ry[(k + 1) % 7], 0.0f };
+    }
+    smp_grid(v, &n, 24.0f + 5.25f, 40.0f + 4.125f, 0x52u);
+    /* two triangles that meet only at the pixel centre (400.5, 180.5) */
+    v[n++] = (ParityGuestVtx){ 0xA0336699u, 390.0625f, 172.0625f, 0.0f };
+    v[n++] = (ParityGuestVtx){ 0xA0336699u, 400.5f, 180.5f, 0.0f };
+    v[n++] = (ParityGuestVtx){ 0xA0336699u, 390.0625f, 190.0625f, 0.0f };
+    v[n++] = (ParityGuestVtx){ 0xB0996633u, 400.5f, 180.5f, 0.0f };
+    v[n++] = (ParityGuestVtx){ 0xB0996633u, 410.0625f, 172.0625f, 0.0f };
+    v[n++] = (ParityGuestVtx){ 0xB0996633u, 410.0625f, 190.0625f, 0.0f };
+    stp_emit(&l, 0x01, vaddr & 0x00FFFFFFu);
+    stp_emit(&l, 0x04, (3u << 16) | (uint32_t)n);
+    stp_end(&l);
+    *ntris = n / 3;
+    return 0x08040000u;
+}
+
+static void smp_tri(TailTri *t, const float *p) {
+    for (int m = 0; m < 3; m++) { t->x[m] = p[2 * m]; t->y[m] = p[2 * m + 1]; }
+    t->x0 = fminf(t->x[0], fminf(t->x[1], t->x[2])); t->x1 = fmaxf(t->x[0], fmaxf(t->x[1], t->x[2]));
+    t->y0 = fminf(t->y[0], fminf(t->y[1], t->y[2])); t->y1 = fmaxf(t->y[0], fmaxf(t->y[1], t->y[2]));
+}
+
+static int coherence_run_stencil_mesh(void) {
+    const uint32_t base = 0x04000000u | 0x00140000u, bytes = FB_W * FB_H * 4u;
+    uint8_t *gpu_out = (uint8_t *)malloc(bytes);
+    if (!gpu_out) return 0;
+    GeState saved = *s_ge;
+    int ok = 1, ntris = 0;
+    const uint32_t list = smp_list(base, &ntris);
+    coherence_reset_targets();
+    stp_fill_background(base, 3u);
+    const GeGpuReplayStats before = s_replay_stats;
+    ge_set_gpu_hooks(&k_hooks);
+    ge_run_list(list, 0);
+    GeGpuFbDescriptor desc = { .addr = base, .format = 3u, .stride = 512u, .width = 480, .height = FB_H };
+    const int sync = gegpu_sync_guest_fb(&desc);
+    memcpy(gpu_out, SR_HOST(base), bytes);
+    const GeGpuReplayStats after = s_replay_stats;
+    coherence_reset_targets();
+    stp_fill_background(base, 3u);
+    ge_set_gpu_hooks(NULL);
+    ge_run_list(list, 0);
+    ge_set_gpu_hooks(&k_hooks);
+    const uint32_t *sw = (const uint32_t *)SR_HOST(base), *gp = (const uint32_t *)gpu_out;
+    const unsigned long long splits = after.stencil_splits - before.stencil_splits;
+    const unsigned long long merged = after.stencil_disjoint_merges - before.stencil_disjoint_merges;
+    const unsigned long long fell = after.fallback_prims - before.fallback_prims;
+    unsigned differing = 0, drawn = 0, replaced = 0;
+    for (uint32_t i = 0; i < FB_W * FB_H; i++) {
+        if (i % FB_W >= 480u) continue;
+        const uint32_t bg = wrap_hash(0x3C1u + i * 40503u);
+        if (sw[i] != bg) drawn++;
+        if ((bg & 0x80000000u) == 0u && (sw[i] >> 24) == 0x80u) replaced++;
+        if (sw[i] == gp[i]) continue;
+        if (!differing++)
+            fprintf(stderr, "gpu coherence selftest [stencil-mesh]: x=%u y=%u gpu=%08x ge_c=%08x\n",
+                    i % FB_W, i / FB_W, gp[i], sw[i]);
+        ok = 0;
+    }
+    if (sync != GEGPU_SYNC_OK || fell) {
+        fprintf(stderr, "gpu coherence selftest [stencil-mesh]: sync status %d, %llu software fallback "
+                        "primitives (want 0)\n", sync, fell);
+        ok = 0;
+    }
+    if (drawn < 4096u || replaced == 0u) {
+        fprintf(stderr, "gpu coherence selftest [stencil-mesh]: the list changed %u pixels, %u of them by "
+                        "REPLACE (want at least 4096, and some)\n", drawn, replaced);
+        ok = 0;
+    }
+    if (splits < 2u || splits > 8u || merged * 10u < (unsigned long long)ntris * 9u) {
+        fprintf(stderr, "gpu coherence selftest [stencil-mesh]: %llu splits and %llu triangle-test merges "
+                        "over %d triangles (want 2 to 8 splits, the second grid and the pixel-centre touch "
+                        "among them, and nine in ten triangles merged)\n", splits, merged, ntris);
+        ok = 0;
+    }
+    free(gpu_out);
+    *s_ge = saved;
+    coherence_reset_targets();
+    /* The separation test itself. Each pair of triangles, both ways round, at render scales 1-4.
+     * The single-vertex cells meet at P, where only the line of a's vertical edge through P
+     * separates them, so the verdict is whether a sample can lie on P at that scale. */
+    static const struct { float a[6], b[6]; int want[4]; } sep[] = {
+        /* a common edge with identical ends */
+        { { 10.1f, 10.1f, 20.3f, 10.2f, 10.2f, 20.4f }, { 20.3f, 10.2f, 20.6f, 20.7f, 10.2f, 20.4f }, { 1, 1, 1, 1 } },
+        /* P = (20.0625, 20.0625): no sample on it at any of the four scales */
+        { { 20.0625f, 10.0625f, 10.0625f, 20.0625f, 20.0625f, 20.0625f },
+          { 20.0625f, 20.0625f, 30.0625f, 20.0625f, 30.0625f, 30.0625f }, { 1, 1, 1, 1 } },
+        /* P = (20.5, 20.5): a pixel centre at 1x and 3x (61.5), on the pixel grid at 2x and 4x */
+        { { 20.5f, 10.5f, 10.5f, 20.5f, 20.5f, 20.5f },
+          { 20.5f, 20.5f, 30.5f, 20.5f, 30.5f, 30.5f }, { 0, 1, 0, 1 } },
+        /* P = (20.25, 20.25): a pixel centre at 2x only (40.5) */
+        { { 20.25f, 10.25f, 10.25f, 20.25f, 20.25f, 20.25f },
+          { 20.25f, 20.25f, 30.25f, 20.25f, 30.25f, 30.25f }, { 1, 0, 1, 1 } },
+        /* overlapping */
+        { { 10.0f, 10.0f, 30.0f, 10.0f, 10.0f, 30.0f }, { 12.0f, 12.0f, 32.0f, 12.0f, 12.0f, 32.0f }, { 0, 0, 0, 0 } },
+        /* a gap of 1/16 pixel across parallel edges: under TAIL_SEP_EPS, so not separated */
+        { { 10.0f, 10.0f, 20.0f, 10.0f, 10.0f, 20.0f }, { 20.0f, 10.0625f, 20.0f, 20.0f, 10.0625f, 20.0f }, { 0, 0, 0, 0 } },
+        /* a gap of half a pixel across parallel edges */
+        { { 10.0f, 10.0f, 20.0f, 10.0f, 10.0f, 20.0f }, { 20.5f, 10.5f, 20.5f, 20.5f, 10.5f, 20.5f }, { 1, 1, 1, 1 } },
+        /* the same triangle twice */
+        { { 10.0f, 10.0f, 20.0f, 10.0f, 10.0f, 20.0f }, { 10.0f, 10.0f, 20.0f, 10.0f, 10.0f, 20.0f }, { 0, 0, 0, 0 } },
+    };
+    const int scale_saved = s_scale;
+    unsigned sep_bad = 0;
+    for (unsigned c = 0; c < sizeof(sep) / sizeof(sep[0]); c++)
+        for (int sc = 1; sc <= 4; sc++) {
+            TailTri a, b;
+            smp_tri(&a, sep[c].a);
+            smp_tri(&b, sep[c].b);
+            s_scale = sc;   /* only the shared-vertex rule reads it: the scale's sample lattice */
+            const int got = tris_disjoint(&a, &b), got_r = tris_disjoint(&b, &a);
+            if (got != sep[c].want[sc - 1] || got_r != got) {
+                fprintf(stderr, "gpu coherence selftest [stencil-mesh]: separation cell %u at %dx gave %d / %d, "
+                                "want %d\n", c, sc, got, got_r, sep[c].want[sc - 1]);
+                sep_bad++;
+            }
+        }
+    s_scale = scale_saved;
+    if (sep_bad) ok = 0;
+    if (!ok) {
+        fprintf(stderr, "gpu coherence selftest [stencil-mesh]: %u pixels differ from ge.c\n", differing);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %-22s triangles=%d splits=%llu triangle-test merges=%llu drawn=%u "
+           "exact; separation cells=%u at 4 scales\n", "stencil-mesh", ntris, splits, merged, drawn,
+           (unsigned)(sizeof(sep) / sizeof(sep[0])));
+    return 1;
+}
+
 /* Constant stencil: on an 8888 target, a test that always passes with a depth-pass op that
  * keeps the stencil or stores a constant (KEEP, or ZERO and REPLACE under a full alpha write
  * mask, or any op under a mask that keeps every bit) reads no destination (ge_gpu.c
@@ -7739,6 +7954,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "pipeline-cache-warm") == 0) return coherence_run_pipeline_cache(1);
         if (strcmp(only, "pipeline-cache-reject") == 0) return coherence_run_pipeline_cache_reject();
         if (strcmp(only, "rtt-scale") == 0) return coherence_run_rtt_scale();
+        if (strcmp(only, "stencil-mesh") == 0) return coherence_run_stencil_mesh();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
     }
@@ -7797,6 +8013,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_uv_edge_clamp()) ok = 0;
     /* After the mip fixtures: it rewrites the depth buffer they start from. */
     if (!coherence_run_stencil_parity()) ok = 0;
+    if (!coherence_run_stencil_mesh()) ok = 0;
     if (!coherence_run_stencil_constant()) ok = 0;
     if (!coherence_run_tnl_parity()) ok = 0;
     /* Last: it rewrites ge.c's depth surface. */

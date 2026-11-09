@@ -5252,6 +5252,105 @@ static int stencil_reads_own_writes(const Batch *b) {
  * writes (append). */
 static SnapRect s_tail_prims;
 
+/* The same batch's triangles, so that a new primitive inside that box is checked against each
+ * of them instead of against the box (append). A primitive whose triangles cover no sample any
+ * of them covers reads only destination pixels nothing in the batch draws, so drawing it in
+ * the batch gives what a split gives. A batch whose list is full splits at the next primitive
+ * that meets its box, and the new batch keeps its own list. After a primitive that is not
+ * checked this way (T&L, or one that joined because its box was apart while the list was
+ * full), only the box decides for the rest of the batch, as before. */
+#define TAIL_TRIS 512
+typedef struct TailTri { float x[3], y[3], x0, y0, x1, y1; } TailTri;
+static TailTri s_tail_tri[TAIL_TRIS];
+static int s_tail_ntri = -1;   /* -1: the box alone decides for this batch */
+
+/* Guest pixels a vertex must keep from the far side of a separating line: far more than the
+ * position error of psp.vert and the rasterizer's sub-pixel snap at any render scale. */
+#define TAIL_SEP_EPS 0.125
+
+static double tri_side(double px, double py, double qx, double qy, double vx, double vy) {
+    return (qx - px) * (vy - py) - (qy - py) * (vx - px);
+}
+
+/* Whether no sample can lie exactly on the guest point (x, y) at render scale `scale`: device
+ * samples sit at pixel centres, k + 0.5 in device pixels (single-sampled targets, psp.vert maps
+ * guest x to device x * scale), and a vertex 1/16 device pixel or more from them on one axis
+ * cannot reach one through the sub-pixel snap (at least 4 bits, Vulkan's minimum). */
+static int tri_point_off_samples(float x, float y, int scale) {
+    const double s = (double)scale;
+    const double fx = x * s - floor(x * s), fy = y * s - floor(y * s);
+    return fabs(fx - 0.5) >= 1.0 / 16.0 || fabs(fy - 0.5) >= 1.0 / 16.0;
+}
+
+/* Whether the line through edge i of `a` keeps `b` on its far side, so that no sample is in both.
+ * Each vertex of `b` lies TAIL_SEP_EPS past the line, or is an end of the edge. With both ends
+ * shared, the edge is a common edge with identical endpoints, and Vulkan covers a sample on it
+ * in exactly one of the two triangles. With one end shared, `b` meets the line only at that
+ * point, which must be one no sample lies on. */
+static int tri_edge_separates(const TailTri *a, int i, const TailTri *b) {
+    const int j = (i + 1) % 3, k = (i + 2) % 3;
+    const double px = a->x[i], py = a->y[i], qx = a->x[j], qy = a->y[j];
+    const double r = tri_side(px, py, qx, qy, a->x[k], a->y[k]);
+    const double len = fabs(qx - px) + fabs(qy - py);   /* at least the edge's length */
+    if (r == 0.0 || len == 0.0) return 0;               /* a degenerate triangle separates nothing */
+    int shared = 0, at = -1;
+    for (int m = 0; m < 3; m++) {
+        const float vx = b->x[m], vy = b->y[m];
+        if ((vx == a->x[i] && vy == a->y[i]) || (vx == a->x[j] && vy == a->y[j])) { shared++; at = m; continue; }
+        const double d = tri_side(px, py, qx, qy, vx, vy);
+        if (r > 0.0 ? !(d <= -TAIL_SEP_EPS * len) : !(d >= TAIL_SEP_EPS * len)) return 0;
+    }
+    if (shared == 1) return tri_point_off_samples(b->x[at], b->y[at], s_scale);
+    return shared == 0 || shared == 2;
+}
+
+/* Whether triangles `a` and `b` can cover no sample in common: apart by their boxes, or by the
+ * line of one of their six edges (two triangles that do not meet have a separating edge). */
+static int tris_disjoint(const TailTri *a, const TailTri *b) {
+    if (a->x1 + TAIL_SEP_EPS <= b->x0 || b->x1 + TAIL_SEP_EPS <= a->x0 ||
+        a->y1 + TAIL_SEP_EPS <= b->y0 || b->y1 + TAIL_SEP_EPS <= a->y0)
+        return 1;
+    for (int i = 0; i < 3; i++)
+        if (tri_edge_separates(a, i, b) || tri_edge_separates(b, i, a)) return 1;
+    return 0;
+}
+
+/* The triangles of primitive [first, first + count) of s_vcpu: a triangle (3 vertices) or a
+ * sprite or line run quad (6). Returns their number, or 0 when the primitive is another shape. */
+static int prim_tris(const Batch *b, uint32_t first, uint32_t count, TailTri *out) {
+    if (b->key.tnl || (count != 3u && count != 6u)) return 0;
+    const int n = (int)(count / 3u);
+    for (int t = 0; t < n; t++) {
+        const GpuVert *v = &s_vcpu[first + 3u * (uint32_t)t];
+        TailTri *o = &out[t];
+        for (int m = 0; m < 3; m++) {
+            if (!isfinite(v[m].x) || !isfinite(v[m].y)) return 0;
+            o->x[m] = v[m].x; o->y[m] = v[m].y;
+        }
+        o->x0 = fminf(o->x[0], fminf(o->x[1], o->x[2])); o->x1 = fmaxf(o->x[0], fmaxf(o->x[1], o->x[2]));
+        o->y0 = fminf(o->y[0], fminf(o->y[1], o->y[2])); o->y1 = fmaxf(o->y[0], fmaxf(o->y[1], o->y[2]));
+    }
+    return n;
+}
+
+/* Record the primitive's triangles as the batch's tail (start: a new batch). */
+static void tail_tris_note(const TailTri *t, int n, int start) {
+    if (start) s_tail_ntri = 0;
+    if (s_tail_ntri < 0) return;
+    if (n == 0 || s_tail_ntri + n > TAIL_TRIS) { s_tail_ntri = -1; return; }
+    memcpy(&s_tail_tri[s_tail_ntri], t, sizeof(*t) * (size_t)n);
+    s_tail_ntri += n;
+}
+
+/* Whether the primitive's triangles cover no sample the batch's recorded triangles cover. */
+static int tail_tris_disjoint(const TailTri *t, int n) {
+    if (s_tail_ntri < 0 || n == 0 || s_tail_ntri + n > TAIL_TRIS) return 0;
+    for (int p = 0; p < n; p++)
+        for (int q = 0; q < s_tail_ntri; q++)
+            if (!tris_disjoint(&t[p], &s_tail_tri[q])) return 0;
+    return 1;
+}
+
 /* A wing primitive's batch: the wing list, merged with the previous one when it continues
  * it on the same canvas. A stencil batch that reads its own writes is never merged. */
 static void append_wing(Batch *b, uint32_t first, uint32_t count) {
@@ -5284,6 +5383,8 @@ static void append(Batch *b, uint32_t first, uint32_t count) {
     const int self_dep = stencil_reads_own_writes(b);
     SnapRect prim = !self_dep ? k_snap_rect_empty
                   : b->key.tnl ? tnl_rect(b, first, count) : verts_rect(b, first, count);
+    TailTri tris[2];
+    const int ntris = self_dep ? prim_tris(b, first, count, tris) : 0;
     if (s_nbatch) {
         Batch *last = &s_batch[s_nbatch - 1];
         if (s_cpu_profile) s_cpu_profile_stats.append_compare_calls++;
@@ -5292,9 +5393,14 @@ static void append(Batch *b, uint32_t first, uint32_t count) {
             last->sx == b->sx && last->sy == b->sy && last->sw == b->sw && last->sh == b->sh &&
             !memcmp(last->bconst, b->bconst, sizeof(b->bconst)) &&
             !memcmp(&last->pc, &b->pc, sizeof(b->pc)) && last->dset == b->dset) {
-            if (!self_dep || !snap_rect_overlap(&s_tail_prims, &prim)) {
+            const int boxed_apart = !self_dep || !snap_rect_overlap(&s_tail_prims, &prim);
+            if (boxed_apart || tail_tris_disjoint(tris, ntris)) {
                 last->count += count;
-                if (self_dep) snap_rect_union(&s_tail_prims, &prim);
+                if (self_dep) {
+                    snap_rect_union(&s_tail_prims, &prim);
+                    tail_tris_note(tris, ntris, 0);
+                    if (!boxed_apart) s_replay_stats.stencil_disjoint_merges++;
+                }
                 if (s_cpu_profile) s_cpu_profile_stats.append_merges++;
                 return;
             }
@@ -5304,6 +5410,7 @@ static void append(Batch *b, uint32_t first, uint32_t count) {
     b->first = first; b->count = count;
     s_batch[s_nbatch++] = *b;
     s_tail_prims = prim;
+    tail_tris_note(tris, ntris, 1);
 }
 
 static void ensure_room(uint32_t verts) {
