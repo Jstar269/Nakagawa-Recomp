@@ -2737,10 +2737,12 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         break;
     }
     if (!presented) { why = "swapchain still out of date after recreation"; goto fail; }
-    /* Only a picture that reached the screen is recorded; the recorder reads it at its VBLANK. */
+    /* Only a picture that reached the screen is recorded; the recorder reads it at its VBLANK.
+     * Registering first lets the recorder read a kept picture still pending (an in-between,
+     * sr_videorec_frame_keep) through s_rec_pending before this one takes its place. */
     if (rec_in_submit) {
-        s_rec_pending = f;
         sr_videorec_frame_pending(rec_resolve);
+        s_rec_pending = f;
     }
 
     /* Complete the armed capture only now that this frame is known to have reached the
