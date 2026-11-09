@@ -66,10 +66,14 @@ class CallSiteTests(unittest.TestCase):
 
     def test_psp_readiness(self) -> None:
         calls: list[list[str]] = []
+
+        def fake_run(command: list[str], *, timeout: float = 5.0) -> tuple[int, str]:
+            calls.append(command)
+            return 0, "1"
+
         with mock.patch.object(nk_powershell.shutil, "which", _which({"pwsh": "P7"})), \
              mock.patch.object(psp_readiness.sys, "platform", "win32"), \
-             mock.patch.object(psp_readiness, "_run",
-                               lambda command, *, timeout=5.0: (calls.append(command), (0, "1"))[1]):
+             mock.patch.object(psp_readiness, "_run", fake_run):
             psp_readiness._psplink_device()
         self.assertEqual(calls[0][0], "P7")
 
