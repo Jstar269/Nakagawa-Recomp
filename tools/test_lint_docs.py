@@ -184,6 +184,19 @@ class TestPagesUrlCase(unittest.TestCase):
         self.assertTrue(errors[0].startswith("README.md:13:"))
         self.assertTrue(errors[1].startswith("docs/index.html:41:"))
 
+    def test_a_git_grep_error_is_reported_not_passed(self) -> None:
+        result = subprocess.CompletedProcess(args=["git", "grep"], returncode=2, stdout="", stderr="fatal: boom")
+        with patch("tools.lint_docs.subprocess.run", return_value=result):
+            errors = lint_pages_url_case(ROOT)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("git grep failed (exit 2): fatal: boom", errors[0])
+
+    def test_outside_a_git_repository_the_lint_skips(self) -> None:
+        result = subprocess.CompletedProcess(args=["git", "grep"], returncode=128, stdout="",
+                                             stderr="fatal: not a git repository (or any of the parent directories): .git")
+        with patch("tools.lint_docs.subprocess.run", return_value=result):
+            self.assertEqual(lint_pages_url_case(ROOT), [])
+
     def test_published_case_is_allowed(self) -> None:
         self.assertEqual(self._lint(f"README.md:13:{self.HOST}Nakagawa-Recomp\n"), [])
 

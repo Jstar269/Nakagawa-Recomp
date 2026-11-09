@@ -824,6 +824,11 @@ def lint_pages_url_case(repo_root: pathlib.Path = ROOT) -> list[str]:
         )
     except OSError:
         return []
+    if result.returncode not in (0, 1):  # 1: no match
+        stderr = (result.stderr or "").strip()
+        if "not a git repository" in stderr.lower():
+            return []  # no tracked files to check here, as the other git-based lints skip
+        return [f"lint_pages_url_case: git grep failed (exit {result.returncode}): {stderr}"]
     errors: list[str] = []
     for line in result.stdout.splitlines():
         location, _, match = line.rpartition(":")
