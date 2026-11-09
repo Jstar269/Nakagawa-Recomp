@@ -180,3 +180,7 @@ int sr_prx_guest_write(uint32_t guest_addr, const void *src, uint32_t n) {
 int sr_hle_memstick_free_bytes(uint64_t *free_bytes) {
     (void)free_bytes; focus_fail("sr_hle_memstick_free_bytes", "hle_data.c"); return 0;
 }
+void flash0_user_data_root(char *dst, size_t capacity) {
+    if (capacity) dst[0] = '\0';
+    focus_fail("flash0_user_data_root", "hle_host.c (the screenshot key's folder)");
+}
