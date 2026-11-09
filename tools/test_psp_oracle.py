@@ -3459,6 +3459,8 @@ class PspDmacProbeTests(unittest.TestCase):
                 # The 2026-11-08 vfpu-basic-arith (#326, boot 166) and vfpu-vus2i (#326, boot 164)
                 # runs.
                 "PSP-VFPU-BASICARITH-001", "PSP-VFPU-VUS2I-001",
+                # The 2026-11-08 acceptance-eligible hle-self-stop-unload (#341, boot 165) run.
+                "PSP-HLE-SELFSTOP-001",
             },
         )
         self.assertEqual(
@@ -13897,6 +13899,7 @@ class Record20261015Tests(unittest.TestCase):
             ("vfpu-cc-cmov", "PSP-VFPU-CCCMOV-001", "MEASURED"),
             ("vfpu-basic-arith", "PSP-VFPU-BASICARITH-001", "MEASURED"),
             ("vfpu-vus2i", "PSP-VFPU-VUS2I-001", "MEASURED"),
+            ("hle-self-stop-unload", "PSP-HLE-SELFSTOP-001", "MEASURED"),
             ("sas-adsr", "PSP-SAS-002", "NOT_RUN"),
             ("sas-mix", "PSP-SAS-003", "NOT_RUN"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),

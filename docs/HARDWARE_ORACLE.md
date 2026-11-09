@@ -1351,6 +1351,27 @@ One console is one data point; see §11. Nothing here closes issue #70
     matches neither table.
   - Pixel x of level L reads texel x >> L, as `ge-mip` measured.
 
+- **PSP-3000 single-case run of `hle-self-stop-unload` (2026-11-08)**: system software 6.6.0 as reported by
+  `pspver`, operator-declared model PSP-3000, XMB context, one launch on its own boot (boot 165) at `935f225d`,
+  harness verdict ok, 6 records, all PASS, no exception, no hang. Case 167 is in
+  `fixtures/psp_oracle/probe_hle_measure.c` and loads the helper PRX of case 172
+  (`fixtures/psp_oracle/probe_hle_self_stop_helper.c`; the helper was case 168 when this run was made). The raw
+  envelope and host0 log stay in the private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-08) |
+  | --- | --- | --- | --- |
+  | `PSP-HLE-SELFSTOP-001` | `self-stop-arg0`, `self-stop-arg0-cleanup`, `self-stop-arg1`, `self-stop-arg1-cleanup`, `self-stop-argp-past-ram`, `self-stop-argp-past-ram-cleanup` (boot 165) | a call from the module_start thread, a nonzero module_stop return | MEASURED (`hle-self-stop-unload`) |
+
+  `hle-self-stop-unload` (#341): the helper module's own thread calls `sceKernelSelfStopUnloadModule`; the probe's
+  thread never does. Three forms, each loaded and started fresh: `(0, 0, NULL)`, `(1, 0, NULL)` and `(0, 4, argp)`
+  with an argp past the 64 MB of RAM (run last). All three behaved the same: the call did not return to its caller
+  and the module was unloaded. The helper's thread reached the call and never resumed after it, its `module_stop`
+  ran exactly once, and `sceKernelGetModuleIdByAddress` on the helper's code afterwards answered `0x8002012e` (the
+  module is gone); the cleanup stop and unload calls found nothing left to do. `module_stop` saw argument size 0
+  and argp 0 for the first two forms; for the third it saw size 4 and an argp that was not the caller's
+  out-of-RAM pointer, and the call was neither refused nor faulted. So a helper thread's self stop-unload runs
+  `module_stop`, unloads the module and never returns to the calling thread.
+
 - **PSP-3000 single-case runs of `vfpu-basic-arith` and `vfpu-vus2i` (2026-11-08)**: system software 6.6.0 as
   reported by `pspver`, operator-declared model PSP-3000, XMB context, one launch per case on its own boot, harness
   verdict ok, all PASS, no exception, no hang, both in `fixtures/psp_oracle/probe_hle_issues.c`. `vfpu-basic-arith`
@@ -3419,7 +3440,7 @@ not expected PSP values.
 | `sas-adsr` | `PSP-SAS-002` | `NOT_RUN` (current status encoding) | The current PASS/ERROR status encoding has not been run on hardware. Historical envelope values from 2026-11-05 remain in the fixture index. |
 | `sas-mix` | `PSP-SAS-003` | `NOT_RUN` | Built synthetic volume, WithMix and pitch cells for #2135 and #2054; no hardware result is claimed. |
 | `vcodec-words` | `PSP-VCODEC-001` | `NOT_RUN` | Built Media Engine boundary-word cells over synthetic AVC access units; no hardware result is claimed. |
-| `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | `NOT_RUN` | Built #341 self stop-unload cells (case 167, helper PRX case 172); no hardware result is claimed. |
+| `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | `MEASURED` (2026-11-08, PSP-3000, boot 165, `935f225d`; 6 records) | #341: sceKernelSelfStopUnloadModule from a helper PRX's own thread: the call does not return, module_stop runs once and the module is unloaded. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. |
 | `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | `MEASURED` (2026-11-08, PSP-3000, boot 156, `59520eb0`; 30 records) | #1380: flash0 seeks (64- and 32-bit), sceIoIoctl file commands, and writes on read-only descriptors. |
 | `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | `MEASURED` (2026-11-08, PSP-3000, boot 155, `07e58170`; 16 records) | W-NET-1 (#2197): the owner_name key type and the nickname string call at eight buffer lengths; no value bytes. |

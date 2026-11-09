@@ -7300,8 +7300,10 @@
     {
       "id": "PSP-HLE-SELFSTOP-001",
       "status": "implemented",
-      "hardware_evidence": "NOT_RUN",
-      "evidence_note": "Built as case 167: sceKernelSelfStopUnloadModule called by the thread of a project-authored helper PRX (case 172, hle-self-stop-helper) that the probe loads from host0, in three forms (0, 0, NULL), (1, 0, NULL) and (0, 4, argp past RAM). No hardware run is cited.",
+      "hardware_evidence": "MEASURED",
+      "evidence_ref": "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize",
+      "evidence_cases": ["self-stop-arg0", "self-stop-arg0-cleanup", "self-stop-arg1", "self-stop-arg1-cleanup", "self-stop-argp-past-ram", "self-stop-argp-past-ram-cleanup"],
+      "measurement_note": "Measured by the 2026-11-08 PSP-3000 launch (system software 6.6.0 as reported by pspver; boot 165, XMB context) of commit 935f225d, case hle-self-stop-unload: 6 records, all PASS, harness verdict ok, acceptance-eligible. The helper PRX's own thread calls sceKernelSelfStopUnloadModule; the probe's thread never does. Three forms, each loaded and started fresh: (0, 0, NULL), (1, 0, NULL) and (0, 4, an argp past the 64 MB of RAM, run last). All three behaved the same: the call did not return to its caller and the module was unloaded. The helper's entered marker was set, its call-return word and continued marker stayed at their preset sentinel, its module_stop ran exactly once, and sceKernelGetModuleIdByAddress on the helper's code afterwards answered 0x8002012e (the module is gone); the cleanup stop and unload calls found nothing to do. module_stop saw argument size 0 and argp 0 for the first two forms; for the third it saw size 4 and an argp that was not the caller's out-of-RAM pointer, and the call was neither refused nor faulted. Not tested: a call from the module_start thread, and a nonzero module_stop return. The raw stream and the decoded tables stay in the private campaign directory.",
       "group": "system",
       "source": "fixtures/psp_oracle/probe_hle_measure.c",
       "prx": "hle_self_stop_unload.prx",
