@@ -1283,8 +1283,13 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the key and Widescreen has a wing (`D` > 0); with either missing, the stock call runs and nothing is written. The run
   names it (`ACE_MODE: cull on (...)`, the report's `cull`), and reports it unavailable when no matrix was scaled by
   the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
-  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is a separate change. The player cannot tell ahead of a launch which games have a culling build, so the row's text says it acts only in games
-  that do, and a run without one says so in the `ACE_MODE: cull unavailable (...)` line and the report.
+  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is a separate
+  change. The player cannot tell ahead of a launch which games have a culling build, so the row's text says it
+  acts only in games that do, and a run without one says so in the `ACE_MODE: cull unavailable (...)` line and
+  the report. The runtime remembers at most 4096 distinct matrices (see Limits below); the report's
+  `cull_untracked` counts the matrix uses it left alone once that table was full, and cull is confirmed only
+  while that count is 0: a run with a nonzero count reports cull unavailable as `partial` (the matrices
+  tracked before the table filled were widened, the rest were not), never as a complete run.
 - **What it changes:** for the matrices at `clip_offsets`, 4 floats per listed matrix (its x output row) of guest memory
   per call, only while Widescreen is on and the key is on; and so which objects the title submits, and any logic the
   title gates on the same visibility test (animation or AI updates on visible objects, fixed object or display-list
@@ -1306,6 +1311,9 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   that depends on what is visible is not a behaviour change to guard against, or is guarded.
 - **Limits.** It cannot create what the title never modelled, what it places only inside the original view, or what
   it hides by a rule that is not a horizontal clip test (a distance, a side-of-wall or a course-direction rule). The
-  wing cap of section 10.8 is unchanged.
+  wing cap of section 10.8 is unchanged. The table that keeps a matrix from being scaled twice holds 4096
+  distinct matrix addresses for the whole run and is never cleared; a title whose matrices move to new
+  addresses can fill it, after which new matrices are left unscaled (said once on stderr, counted in the
+  report's `cull_untracked`) instead of being scaled without a record.
 - **Tier:** Ace (one title). **Default:** off.
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.

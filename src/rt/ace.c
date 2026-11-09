@@ -176,6 +176,7 @@ static char s_unavailable[ACE_FEATURE_COUNT][96];
 static int s_af_device;          /* the device's level when lower than the request, else 0 */
 static int s_confirmed[ACE_FEATURE_COUNT];
 static uint64_t s_af_failures;
+static unsigned long s_cull_untracked;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "cull"
@@ -234,6 +235,7 @@ int ace_init_spec(const char *spec, const char *report_path) {
     memset(s_unavailable, 0, sizeof(s_unavailable));
     memset(s_confirmed, 0, sizeof(s_confirmed));
     s_af_failures = 0;
+    s_cull_untracked = 0;
     s_af_device = 0;
     s_report_path[0] = '\0';
     snprintf(s_spec, sizeof(s_spec), "off");
@@ -282,6 +284,10 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     default: s_eff.sas = 0; break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
+}
+
+void ace_set_cull_untracked(unsigned long n) {
+    if (g_ace_on) s_cull_untracked = n;
 }
 
 void ace_confirm(AceFeature feature) {
@@ -721,7 +727,8 @@ size_t ace_report_json(char *out, size_t cap) {
             s_eff.af, s_eff.text ? "true" : "false", s_eff.readout ? "true" : "false",
             s_eff.notice ? "true" : "false", wide_word(s_eff.wide), smooth_word(s_eff.smooth),
             sas_word(s_eff.sas));
-    if (s_req.cull) ACE_PUT("  \"cull\": %s,\n", s_eff.cull ? "true" : "false");
+    if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
+                            s_eff.cull ? "true" : "false", s_cull_untracked);
     ACE_PUT("  \"unavailable\": {");
     int first = 1;
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {

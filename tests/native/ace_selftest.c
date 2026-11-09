@@ -232,6 +232,17 @@ static void cell_switch(void) {
     CHECK(ace_effective()->sas == ACE_SAS_OFF && ace_requested()->sas == ACE_SAS_SINC,
           "an unavailable sas is off for the run");
     CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->sas == ACE_SAS_OFF, "sas=off is off");
+    /* cull: the report counts the matrices the hook left alone once its table was full, and a run with
+     * any is partial (cull unavailable), never a complete one (contract 11.3.6). */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tier=ace;cull=on",
+                        NULL) == 1 && ace_effective()->cull == 1, "cull=on with tier=ace turns cull on");
+    ace_set_cull_untracked(7);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": true") != NULL &&
+          strstr(json, "\"cull_untracked\": 7") != NULL, "the report counts untracked matrices:\n%s", json);
+    ace_feature_unavailable(ACE_FEATURE_CULL, "partial: test");
+    CHECK(ace_effective()->cull == 0 && ace_requested()->cull == 1 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
+          strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
 }
 
 /* ---- C4: the 30 Hz detector ----------------------------------------------------------------- */

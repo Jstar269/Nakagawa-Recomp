@@ -5973,6 +5973,51 @@ static int wide_clip_x_check(int wing, int cull, uint32_t off0, uint32_t off1) {
     return ok;
 }
 
+/* The table that stops a matrix being scaled twice holds 4096 matrices and never evicts. One call listing more
+ * than that must scale each tracked matrix once, leave every other matrix untouched (never scaled untracked),
+ * and count those in ge_wide_cull_untracked, which the run report names; a repeat call changes nothing and
+ * counts them again. Run after the other clip_x_widen cells: the table is never cleared. */
+#define FILL_N 4200u
+static int wide_clip_x_fill_check(int wing) {
+    static uint32_t offsets[FILL_N];
+    const uint32_t base = SR_RAM_BASE + 0x00f00000u, first = 0x20000u;   /* clear of the other cells' matrices */
+    const float scale = 480.0f / (480.0f + 2.0f * (float)wing);
+    int ok = 1;
+    for (uint32_t i = 0; i < FILL_N; i++) {
+        offsets[i] = first + 64u * i;
+        for (uint32_t e = 0; e < 16u; e++) {
+            const float v = 1.0f + (float)e + (float)(i % 7u);
+            memcpy(SR_HOST(base + offsets[i] + 4u * e), &v, sizeof v);
+        }
+    }
+    unsigned long left_alone[2] = {0, 0};
+    for (int pass = 0; pass < 2; pass++) {
+        const unsigned long u0 = ge_wide_cull_untracked();
+        ge_wide_set_cull(1);
+        sr_enhancement_widen_clip_x(base, offsets, FILL_N);
+        ge_wide_set_cull(0);
+        unsigned long scaled = 0, untouched = 0;
+        for (uint32_t i = 0; i < FILL_N; i++) {
+            float got;
+            memcpy(&got, SR_HOST(base + offsets[i]), sizeof got);
+            const float v = 1.0f + (float)(i % 7u);
+            if (got == v * scale) scaled++;
+            else if (got == v) untouched++;
+            else ok = 0;   /* scaled twice, or partly */
+        }
+        left_alone[pass] = ge_wide_cull_untracked() - u0;
+        if (scaled + untouched != FILL_N || untouched != left_alone[pass] || untouched == 0 ||
+            untouched >= FILL_N) {
+            fprintf(stderr, "gpu coherence selftest [wide-fill]: clip_x_widen table full pass %d: scaled %lu, "
+                            "untouched %lu, counted untracked %lu of %u\n", pass, scaled, untouched,
+                    left_alone[pass], FILL_N);
+            ok = 0;
+        }
+    }
+    if (left_alone[0] != left_alone[1]) ok = 0;
+    return ok;
+}
+
 /* A fresh run with wing width `wing`: Fill is turned on for it and off after. */
 static int wide_run(int gpu, int wing, int flags, uint32_t *vram, uint32_t *canvas) {
     coherence_reset_targets();
@@ -6155,7 +6200,7 @@ static int wide_frames(const WideBufs *B) {
          * matrix is scaled once however the pair falls (a repeat call must not scale it again). */
         if (ok && ge_wide_set_wing(WIDE_D) == WIDE_D)
             ok = wide_clip_x_check(WIDE_D, 1, 640u, 448u) && wide_clip_x_check(WIDE_D, 0, 640u, 448u) &&
-                 wide_clip_x_check(WIDE_D, 1, 0u, 41344u);
+                 wide_clip_x_check(WIDE_D, 1, 0u, 41344u) && wide_clip_x_fill_check(WIDE_D);
         ge_wide_set_wing(0);
         if (ok) ok = wide_clip_x_check(0, 1, 640u, 448u);
         if (ok) printf("gpu coherence selftest: PASS %-22s %s frames scale=%d\n", "wide-fill", who, s_scale);

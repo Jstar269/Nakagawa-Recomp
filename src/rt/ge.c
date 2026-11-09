@@ -4980,13 +4980,16 @@ int ge_wide_wing(void) { return s_wide_d; }
  * sets this from the effective SR_ACE line) and Widescreen has a wing. */
 static int s_cull_on;
 static unsigned long s_cull_calls;
+static unsigned long s_cull_untracked;
 void ge_wide_set_cull(int on) { s_cull_on = on ? 1 : 0; }
 unsigned long ge_wide_cull_calls(void) { return s_cull_calls; }
+unsigned long ge_wide_cull_untracked(void) { return s_cull_untracked; }
 
 /* A matrix the hook scaled is remembered with the four x-row words it left, so a call that finds
  * those words unchanged (the title did not rebuild the matrix since) does not scale it again. The
  * table is open-addressed by the matrix's full address and never evicts, so two matrices cannot
- * share an entry; when it is full a new matrix is left alone (said once), never scaled untracked. */
+ * share an entry; when it is full a new matrix is left alone (said once, and counted in
+ * s_cull_untracked for the run report), never scaled untracked. */
 #define GE_CULL_SEEN 4096u
 static struct { uint32_t addr; uint32_t row[4]; } s_cull_seen[GE_CULL_SEEN];
 
@@ -5020,6 +5023,7 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
                 fprintf(stderr, "clip_x_widen: more than %u distinct matrices; the rest are left alone "
                                 "(said once)\n", GE_CULL_SEEN);
             }
+            s_cull_untracked++;
             continue;
         }
         if (s_cull_seen[slot].addr == m && memcmp(s_cull_seen[slot].row, row, sizeof row) == 0)

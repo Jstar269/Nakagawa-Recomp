@@ -112,6 +112,8 @@ void ace_feature_unavailable(AceFeature feature, const char *reason);
  * confirmed is reported unavailable (its renderer or presenter did not start), so the report
  * never claims what did not happen. */
 void ace_confirm(AceFeature feature);
+/* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
+void ace_set_cull_untracked(unsigned long n);
 /* An anisotropic sampler the renderer could not make: that draw kept the plain one. */
 void ace_note_af_failure(void);
 /* The pause menu's live Speed readout switch (Ace on only; a readout this host cannot draw
