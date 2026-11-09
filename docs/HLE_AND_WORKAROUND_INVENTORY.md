@@ -449,7 +449,7 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-UMDIO-001: io-dopen-0004 and io-dopen-0005 close results)
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_io_console_model
 - **`h_IoDevctl`** (`sceIo`): `sceIoDevctl` (0x54f5fb11)
-  - Limitation: Memory Stick insert/eject callbacks, including the mscmhc0: 0x02015804/0x02015805 forms, are notified once, with argument 1, when registered; no later insert or eject event exists, and the 32-entry bound, duplicate entries and 0x80010016 refusals follow PPSSPP's model, not a hardware measurement (#1378)
+  - Limitation: Memory Stick insert/eject callbacks, including the mscmhc0: 0x02015804/0x02015805 forms, are notified once, with argument 1, when registered; no later insert or eject event exists, and the 32-entry bound, duplicate entries and 0x80010016 refusals follow PPSSPP's model, not a hardware measurement (#1378); the GETDEV capacity under SR_DETERMINISTIC_CLOCK=1 is a project-chosen virtual card (2 GiB, 32 KiB clusters, minus the Memory Stick folder's files), not a measured one (#2161)
 - **`h_IoDopen`** (`sceIo`): `sceIoDopen` (0xb29ddf9c)
   - Limitation: the measured cells establish results and close outcomes for six fixed UMD/disc path calls only; directory contents/order, MS0 paths and general error precedence remain unmeasured (#341)
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_io_console_model
@@ -629,9 +629,10 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/threads/callbacks/create.expected
   - Evidence: tests/native/hle_thread_selftest.c:test_callback_object_cells
 - **`h_CreateEventFlag`** (`sceKernel`): `sceKernelCreateEventFlag` (0x55c20a00)
-  - Limitation: the name, attribute and pattern cells match; the shared semaphore/event-flag/LwMutex table holds 128 objects, while the same PSP-recorded output shows 1024 event flags created, and the exhaustion code 0x80020000 is not measured; the option struct is ignored
-  - Evidence: PSPAutotests tests/threads/events/create/create.expected at 2ed7c9c5 (NULL name 0x80020001, attr 0x100/0x122/0x300/0x900/0x1200 refused with 0x80020191, long names cut to 31 bytes)
+  - Limitation: the name, attribute, pattern and 1024-flag cells match; the shared semaphore/event-flag/LwMutex table grows with no fixed cap, and the code 0x80020000 it returns when the host cannot allocate more (and names on stderr) is not measured (the PSP's own limit is not measured); the option struct is ignored
+  - Evidence: PSPAutotests tests/threads/events/create/create.expected at 2ed7c9c5 (NULL name 0x80020001, attr 0x100/0x122/0x300/0x900/0x1200 refused with 0x80020191, long names cut to 31 bytes, 1024 flags created in a row)
   - Evidence: tests/native/hle_thread_selftest.c:test_evf_create_and_refer
+  - Evidence: tests/native/hle_thread_selftest.c:test_sync_objects_past_the_old_table
 - **`h_CreateFpl`** (`sceKernel`): `sceKernelCreateFpl` (0xc07bb470)
   - Limitation: the cited cells cover valid pool creation and block/status behavior; the handler converts zero block size/count to 16/1, a branch not established by those cited valid-pool cells, and allocation exhaustion plus partition, attribute, and option error precedence need separate evidence
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001: fpl-create and valid pool status/allocation cells)
@@ -1061,26 +1062,30 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode
 - **`h_MpegAvcCsc`** (`sceMpeg`): `sceMpegAvcCsc` (0x31bd0272)
-  - Limitation: converts the guest planes, read through the header's pointers, with the MEASURED PSP matrix and gives the MEASURED range refusals; the destination is written from its first pixel with rows from the top of the picture (one measured sub-range), and the 16-bit pixel modes are not measured (#302)
+  - Limitation: converts the guest planes, read through the header's pointers, with the MEASURED PSP matrix and gives the MEASURED range refusals (including the y and h cells: y 1, 161, 200 and an odd h are invalid values); the destination is written from its first pixel with rows from the top of the picture (y never selects rows); the 16-bit modes use the MEASURED packing with alpha 0 and 32-pixel blocks 64 pixels apart (block origin at x 0 only measured, and only a 64-pixel-wide range at stride 512 was captured: a wider 16-bit range, or one whose block spacing passes the stride, is refused as not measured); a mode-2 buffer converts to zero pixels in 8888 (MEASURED) and is refused in 16-bit; that y must be a multiple of 16 is inferred from three refused values (#302)
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_csc_swizzled_vram_mirrors
+  - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_csc_measured_range_and_16bit
+  - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_modes_2_and_3
 - **`h_MpegAvcDecodeDetail`** (`sceMpeg`): `sceMpegAvcDecodeDetail` (0x0f6c18d7)
   - Limitation: the 13 words MEASURED on a PSP-3000 (PSP-MPEG-001): word 0 is 0, words 2 and 3 the header's frame width and height, words 4-7 zero, word 8 the last decode's frame status; word 1 is written as the pictures decoded, which the PSP's is not (0 after 240 pictures), and words 9-12 as 0, one of which holds an unidentified pointer on the PSP (#302)
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_avc_decode_detail
 - **`h_MpegAvcDecodeStopYCbCr`** (`sceMpeg`): `sceMpegAvcDecodeStopYCbCr` (0xf2930c9c)
-  - Limitation: takes the address of the buffer pointer and hands over the picture the decoder still holds with status 1, as MEASURED after the last access unit (PSP-MPEG-001); that held picture is the one the decoder runs behind by (sceMpegAvcDecodeYCbCr), the decoder is drained only once the whole stream was fed, and a stop in mid-stream is not measured (#302); after a stop the decoder holds no earlier unit's picture, and one a host decoder still owes is dropped as it comes (an unmeasured model, #279)
+  - Limitation: takes the address of the buffer pointer and hands over the picture the decoder still holds with status 1, as MEASURED after the last access unit (PSP-MPEG-001); that held picture is the one the decoder runs behind by (sceMpegAvcDecodeYCbCr), the decoder is drained only once the whole stream was fed, and a stop in mid-stream is not measured, nor is a stop on a mode-3 buffer, which is refused (#302); after a stop the decoder holds no earlier unit's picture, and one a host decoder still owes is dropped as it comes (an unmeasured model, #279)
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_restart_after_stop
 - **`h_MpegAvcDecodeYCbCr`** (`sceMpeg`): `sceMpegAvcDecodeYCbCr` (0xf0eb1125)
-  - Limitation: runs one access unit behind as MEASURED (PSP-MPEG-001: the first call returns 0 with init 0 and no picture, each later call the picture of the unit before it); writes the decoder's samples into the MEASURED mode-1 strip layout through the header's plane pointers and sets words 0 and 1; a picture larger than its InitYCbCr allocation or than 480x272 is refused as not measured, and the strip length from the decoded height rests on one measured geometry (#302)
+  - Limitation: runs one access unit behind as MEASURED (PSP-MPEG-001: the first call returns 0 with init 0 and no picture, each later call the picture of the unit before it); writes the decoder's samples into the MEASURED mode-1 strip layout through the header's plane pointers and sets words 0 and 1, or, into a mode-2 buffer, only the MEASURED 128-byte header (a mode-2 buffer holds no picture); a decode into a mode-3 buffer is refused (the PSP's first call returned 0 and wrote a 16-byte {h/16, w/16, 0, 0} header over a black 4:2:0 frame, its second call never returned, PSP-MPEG-001 boots 145 and 152, so the picture layout stays unmeasured); a picture larger than its InitYCbCr allocation or than 480x272 is refused as not measured, and the strip length from the decoded height rests on one measured geometry (#302)
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode
+  - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_mode2_decode
 - **`h_MpegAvcInitYCbCr`** (`sceMpeg`): `sceMpegAvcInitYCbCr` (0x67179b1b)
-  - Limitation: writes the MEASURED mode-1 header (eight plane pointers into the buffer) and leaves the planes; modes 2 and 3 and an odd number of 16-pixel strips are refused as not measured, and the query's mode-1 limits stand in for Init's own (#302)
+  - Limitation: writes the MEASURED mode-1 header (eight plane pointers into the buffer) and leaves the planes; mode 2 returns 0 for the measured 128-byte buffer (its bytes before a decode are zeroed, unmeasured) and mode 3 returns 0 and writes nothing (its effect is unmeasured); an odd number of 16-pixel strips is refused as not measured, and the query's mode-1 limits stand in for Init's own, applied to modes 2 and 3 too (only 480x272 was passed to Init there) (#302)
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode
+  - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_modes_2_and_3
 - **`h_MpegAvcQueryYCbCrSize`** (`sceMpeg`): `sceMpegAvcQueryYCbCrSize` (0x211a057c)
   - Limitation: the sizes and refusals MEASURED for modes 0-4 and -1 (PSP-MPEG-001); a mode-3 size wider than 480, which does not follow 1.5 w h on the PSP, is refused as not modeled (#302)
   - Evidence: tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract

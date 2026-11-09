@@ -195,8 +195,10 @@ DATA_FILE_FORMATS = frozenset({
 
 CSV_CELL_KEYS = frozenset({
     "column",
+    "column_index",
     "rows",
     "transform",
+    "type",
 })
 
 HOOK_KEYS = frozenset({
@@ -828,19 +830,25 @@ def _validate_data_files(data_files: Any) -> None:
         cells = entry["cells"]
         if not isinstance(cells, list) or not cells:
             fail(f"{path}.cells", "cells must be a non-empty array")
-        seen_columns: set[str] = set()
+        # Rows each column has claimed so far; None claims every data row.
+        claimed: dict[str | int, set[int] | None] = {}
         for cidx, cell in enumerate(cells):
             cpath = f"{path}.cells[{cidx}]"
-            _check_keys(cell, cpath, CSV_CELL_KEYS, ("column", "transform"), "csv cell")
-            column = cell["column"]
-            if not isinstance(column, str) or not CSV_COLUMN_RE.match(column):
-                fail(f"{cpath}.column", f"column {column!r} must be an ASCII header name matching {CSV_COLUMN_RE.pattern}")
-            if column in seen_columns:
-                fail(f"{cpath}.column", f"column {column!r} is rescaled twice")
-            seen_columns.add(column)
+            _check_keys(cell, cpath, CSV_CELL_KEYS, ("transform",), "csv cell")
+            if ("column" in cell) == ("column_index" in cell):
+                fail(cpath, "a csv cell names exactly one of column or column_index")
+            if "column" in cell:
+                column = cell["column"]
+                if not isinstance(column, str) or not CSV_COLUMN_RE.match(column):
+                    fail(f"{cpath}.column",
+                         f"column {column!r} must be an ASCII header name matching {CSV_COLUMN_RE.pattern}")
+            else:
+                column = _check_int(cell["column_index"], f"{cpath}.column_index", 0, 255)
             if cell["transform"] not in DATA_TRANSFORMS:
                 fail(f"{cpath}.transform",
                      f"Transform {cell['transform']!r} has no data rescale; must be one of {sorted(DATA_TRANSFORMS)}")
+            if "type" in cell and cell["type"] not in DATA_TYPES:
+                fail(f"{cpath}.type", f"Unknown data type {cell['type']!r}; must be one of {sorted(DATA_TYPES)}")
             if "rows" in cell:
                 rows = cell["rows"]
                 if not isinstance(rows, list) or not rows:
@@ -849,6 +857,14 @@ def _validate_data_files(data_files: Any) -> None:
                     _check_int(row, f"{cpath}.rows[{ridx}]", 0, 65535)
                 if len(set(rows)) != len(rows):
                     fail(f"{cpath}.rows", "rows must not repeat")
+            wanted = set(cell["rows"]) if "rows" in cell else None
+            if column in claimed:
+                taken = claimed[column]
+                if taken is None or wanted is None or taken & wanted:
+                    fail(cpath, f"column {column!r} is rescaled twice in the same row")
+                claimed[column] = taken | wanted
+            else:
+                claimed[column] = wanted
 
 
 def compute_stock_words_digest(words: Sequence[int]) -> str:
@@ -2092,24 +2108,43 @@ def verify_and_resolve_data_sites(
 _CSV_NUMBER_RE = re.compile(rb"^(-?)([0-9]+)(?:\.([0-9]+))?$")
 
 
-def _rescale_csv_number(transform: str, text: bytes) -> bytes:
-    """Rescale one numeric CSV cell, keeping it an integer when it was one."""
+def _rescale_csv_number(transform: str, text: bytes, ctype: str | None = None) -> bytes:
+    """Rescale one numeric CSV cell as the title reads it.
+
+    ``ctype`` is the data type the title parses the cell into. Without one, a cell
+    written with a decimal point is a float and any other cell an integer.
+    """
     m = _CSV_NUMBER_RE.match(text)
     if m is None:
         raise ValueError(f"cell {text!r} is not a plain decimal number")
     sign, whole, frac = m.group(1), m.group(2), m.group(3)
-    if frac is None:
+    if ctype != "f32" and (ctype is not None or frac is None):
+        if frac is not None:
+            raise ValueError(f"{ctype} cell {text.decode('ascii')} has a fractional part")
         value = int(sign + whole)
+        if ctype is not None:
+            try:
+                struct.pack(DATA_TYPES[ctype][1], value)
+            except struct.error:
+                raise ValueError(f"{ctype} cell {value} is out of range for its type") from None
         if transform not in ("count_x2", "step_x0.5", "probability_per_update_x0.5", "accel_x0.25"):
             raise ValueError(f"{transform} needs a decimal cell, not the integer {value}")
         scaled = _scale_value(transform, value)
         if scaled != int(scaled):
             raise ValueError(f"integer cell {value} has no exact rescale")
+        if ctype is not None:
+            try:
+                struct.pack(DATA_TYPES[ctype][1], int(scaled))
+            except struct.error:
+                raise ValueError(f"{ctype} cell {value} rescales to {int(scaled)}, out of range") from None
         return str(int(scaled)).encode("ascii")
     # A decimal cell is read into a float: rescale that float and write the shortest
     # decimal that reads back to the same float.
-    value = struct.unpack("<f", struct.pack("<f", float(text.decode("ascii"))))[0]
-    scaled = struct.unpack("<f", struct.pack("<f", _scale_value(transform, value)))[0]
+    try:
+        value = struct.unpack("<f", struct.pack("<f", float(text.decode("ascii"))))[0]
+        scaled = struct.unpack("<f", struct.pack("<f", _scale_value(transform, value)))[0]
+    except OverflowError:
+        raise ValueError(f"cell {text.decode('ascii')} or its rescale is outside the float32 range") from None
     for digits in range(1, 18):
         rendered = f"{scaled:.{digits}f}"
         if struct.unpack("<f", struct.pack("<f", float(rendered)))[0] == scaled:
@@ -2129,12 +2164,23 @@ def transform_data_file(entry: Mapping[str, Any], stock: bytes) -> bytes:
     header = lines[header_row].rstrip(b"\r").split(b",")
     data_rows = [i for i in range(first, len(lines)) if lines[i].rstrip(b"\r")]
     rows = [line.split(b",") for line in lines]
+    # Resolve every cell's column and lines before rewriting any, so two cells that meet
+    # on one line (a name and a number for the same column, say) refuse the package
+    # rather than rescale it twice.
+    plan: list[tuple[Mapping[str, Any], int, str, list[int]]] = []
+    claimed: set[tuple[int, int]] = set()
     for cell in entry["cells"]:
-        column = cell["column"].encode("ascii")
-        if header.count(column) != 1:
-            fail(f"data_files({entry['id']})",
-                 f"column {cell['column']!r} is not exactly one header of {entry['path']} (fail-closed refusal)")
-        col = header.index(column)
+        if "column" in cell:
+            label = f"column {cell['column']!r}"
+            if header.count(cell["column"].encode("ascii")) != 1:
+                fail(f"data_files({entry['id']})",
+                     f"{label} is not exactly one header of {entry['path']} (fail-closed refusal)")
+            col = header.index(cell["column"].encode("ascii"))
+        else:
+            col = int(cell["column_index"])
+            label = f"column {col}"
+            if col >= len(header):
+                fail(f"data_files({entry['id']})", f"{entry['path']} has no {label} (fail-closed refusal)")
         wanted = cell.get("rows")
         targets = data_rows if wanted is None else []
         if wanted is not None:
@@ -2143,18 +2189,23 @@ def transform_data_file(entry: Mapping[str, Any], stock: bytes) -> bytes:
                     fail(f"data_files({entry['id']})", f"row {r} is past the last data row (fail-closed refusal)")
                 targets.append(data_rows[r])
         for line_no in targets:
+            if (col, line_no) in claimed:
+                fail(f"data_files({entry['id']})",
+                     f"line {line_no + 1}, {label} is rescaled twice (fail-closed refusal)")
+            claimed.add((col, line_no))
+        plan.append((cell, col, label, targets))
+    for cell, col, label, targets in plan:
+        for line_no in targets:
             fields = rows[line_no]
             last = len(fields) - 1
             if col > last:
-                fail(f"data_files({entry['id']})",
-                     f"line {line_no + 1} has no column {cell['column']!r} (fail-closed refusal)")
+                fail(f"data_files({entry['id']})", f"line {line_no + 1} has no {label} (fail-closed refusal)")
             text = fields[col]
             crlf = col == last and text.endswith(b"\r")
             try:
-                new = _rescale_csv_number(cell["transform"], text[:-1] if crlf else text)
+                new = _rescale_csv_number(cell["transform"], text[:-1] if crlf else text, cell.get("type"))
             except ValueError as exc:
-                fail(f"data_files({entry['id']})",
-                     f"line {line_no + 1}, column {cell['column']!r}: {exc} (fail-closed refusal)")
+                fail(f"data_files({entry['id']})", f"line {line_no + 1}, {label}: {exc} (fail-closed refusal)")
             fields[col] = new + (b"\r" if crlf else b"")
     return b"\n".join(b",".join(fields) for fields in rows)
 
