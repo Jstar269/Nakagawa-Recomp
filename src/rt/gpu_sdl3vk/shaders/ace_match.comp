@@ -11,7 +11,18 @@
  * the HUD the scene's own vector puts most samples under it: a vector from the level above that
  * this block cannot see keeps the cost the level above measured for it. With
  * the pair's depth (aux bit 2), a vector whose two ends land at different depths fits worse: it
- * joins two surfaces, not one surface that moved. */
+ * joins two surfaces, not one surface that moved.
+ *
+ * Where a figure changes its pose too much for any vector to carry it, the search still finds a
+ * vector that carries the floor over it, and the in-between would wipe the figure out. Such a
+ * vector is a guess (w = 1), and the in-between keeps the old frame around it (ace_compose.comp).
+ * A block whose frames differ guesses when its vector fits no better than the vectors two samples
+ * beside it (on a plain floor every vector that lands on floor fits), or when at half its changed
+ * samples, and at three at least, the vector joins two things that are alike but not the same,
+ * while what the frames show there went nowhere a vector here takes it unchanged (on a textured
+ * floor, one patch of floor looks like another, but only the right vector finds the same one).
+ * A still block never guesses. Every level marks its guesses; the in-between reads the sharpest
+ * level's. */
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -45,6 +56,12 @@ const float DEPTH_COST = 1.0;        /* cost per unit of depth between a vector'
 const float MIN_SEEN = 0.25;         /* a block needs this share of samples off the HUD */
 const ivec2 HUD_SIZE = ivec2(480, 272);
 const float UNSURE = 1.0;            /* the cost stored for a block that is mostly HUD */
+const float CHANGED = 0.02;          /* a still cost over this: the frames differ in the block */
+const float AMBIGUOUS = 0.01;        /* a vector no better than its neighbours by this is a guess */
+const float NUDGE = 2.0;             /* samples from a vector to its neighbours */
+const float STILL = 0.03;            /* summed channel difference under which the frames agree */
+const float JOINS = 0.30;            /* summed channel difference of two ends the in-between blends */
+const float STALE_MIN = 3.0;         /* stale joins that can make a guess */
 
 bool on_hud(vec2 uv, bool newer) {
     ivec2 g = ivec2(floor(uv * vec2(HUD_SIZE)));
@@ -54,13 +71,71 @@ bool on_hud(vec2 uv, bool newer) {
     return ((word >> (i & 31u)) & 1u) != 0u;
 }
 
-/* x: the mean cost over the samples that count; y: the share of samples that count. */
-vec2 block_cost(vec2 centre, vec2 d) {
+/* The frames differ at p. */
+bool changed_at(vec2 p) {
+    vec3 d = abs(textureLod(old_frame, p, lv.lod).rgb - textureLod(new_frame, p, lv.lod).rgb);
+    return d.r + d.g + d.b >= STILL;
+}
+
+vec3 old_at(vec2 p) { return textureLod(old_frame, p, lv.lod).rgb; }
+vec3 new_at(vec2 p) { return textureLod(new_frame, p, lv.lod).rgb; }
+
+bool same(vec3 x, vec3 y) {
+    vec3 e = abs(x - y);
+    return e.r + e.g + e.b < STILL;
+}
+
+/* What either frame shows at p moved a whole step of d, or of a vector of the level above around
+ * here, unchanged at three samples: the old frame's from p, or the new frame's to p. */
+bool carried(vec2 p, vec2 d) {
+    vec2 step_up = 1.0 / vec2(textureSize(coarser, 0));
+    vec2 t = lv.texel;
+    for (int i = 0; i < 10; i++) {
+        vec2 v = d;
+        if (i > 0) {
+            if (lv.first != 0) break;
+            int k = i - 1;
+            v = textureLod(coarser, p + vec2(k % 3 - 1, k / 3 - 1) * step_up, 0.0).xy;
+        }
+        if (same(old_at(p), new_at(p + 2.0 * v)) && same(old_at(p - t), new_at(p - t + 2.0 * v)) &&
+            same(old_at(p + t), new_at(p + t + 2.0 * v))) return true;
+        if (same(new_at(p), old_at(p - 2.0 * v)) && same(new_at(p - t), old_at(p - t - 2.0 * v)) &&
+            same(new_at(p + t), old_at(p + t - 2.0 * v))) return true;
+    }
+    return false;
+}
+
+/* Of the samples that changed, the stale joins: d joins two things that look alike but are not
+ * the same, and neither frame's content there was carried by d or by the coarser level's vectors
+ * around it. x the count, y the samples that changed. */
+vec2 stale_joins(vec2 centre, vec2 d) {
+    float half_w = float(lv.window - 1) * 0.5;
+    bool hud = (lv.aux & 1) != 0;
+    float n = 0.0, changed = 0.0;
+    for (int y = 0; y < lv.window; y++) {
+        for (int x = 0; x < lv.window; x++) {
+            vec2 p = centre + (vec2(x, y) - half_w) * lv.texel;
+            if (hud && (on_hud(p, false) || on_hud(p, true) || on_hud(p - d, false) || on_hud(p + d, true)))
+                continue;
+            if (!changed_at(p)) continue;
+            changed += 1.0;
+            vec3 e = abs(textureLod(old_frame, p - d, lv.lod).rgb - textureLod(new_frame, p + d, lv.lod).rgb);
+            float fit = e.r + e.g + e.b;
+            if (fit >= STILL && fit < JOINS && !carried(p, d))
+                n += 1.0;
+        }
+    }
+    return vec2(n, changed);
+}
+
+/* x: the mean cost over the samples that count; y: the share of samples that count. Depth counts
+ * when the pair has it and with_depth is set. */
+vec2 block_cost(vec2 centre, vec2 d, bool with_depth) {
     float cost = 0.0;
     float seen = 0.0;
     float half_w = float(lv.window - 1) * 0.5;
     bool hud = (lv.aux & 1) != 0;
-    bool depth = (lv.aux & 2) != 0;
+    bool depth = with_depth && (lv.aux & 2) != 0;
     for (int y = 0; y < lv.window; y++) {
         for (int x = 0; x < lv.window; x++) {
             vec2 p = centre + (vec2(x, y) - half_w) * lv.texel;
@@ -85,7 +160,7 @@ void main() {
     vec2 centre = (vec2(cell) + 0.5) / vec2(lv.grid);
 
     vec2 best = vec2(0.0);
-    vec2 still = block_cost(centre, best);
+    vec2 still = block_cost(centre, best, true);
     if (still.y < MIN_SEEN) {
         /* Mostly HUD: the block stays where it is, is no evidence of a cut, and is no
          * evidence for the blocks beside it either. */
@@ -106,7 +181,7 @@ void main() {
             /* Across a cut the search still finds something for each block, but a different
              * something: neighbours stop agreeing. Within one picture they mostly agree. */
             if (length((d - anchor) / lv.texel) > TORN) torn = true;
-            vec2 c = block_cost(centre, d);
+            vec2 c = block_cost(centre, d, true);
             /* Too little of the scene seen here at this vector: the level above's cost for it. */
             float raw = c.y < MIN_SEEN ? up.z : c.x;
             float cost = raw + SMOOTH_COST * length(d - anchor);
@@ -118,13 +193,32 @@ void main() {
         for (int x = -lv.range; x <= lv.range; x++) {
             if (x == 0 && y == 0) continue;
             vec2 d = start + vec2(x, y) * lv.texel;
-            vec2 c = block_cost(centre, d);
+            vec2 c = block_cost(centre, d, true);
             if (c.y < MIN_SEEN) continue;   /* cannot be judged, and nothing vouches for it */
             float raw = c.x;
             float cost = raw + SMOOTH_COST * length(d - anchor);
             if (cost < best_cost) { best_cost = cost; best_raw = raw; best = d; }
         }
     }
-    imageStore(field, cell, vec4(best, best_raw, 0.0));
+    /* A guess: moved two samples any way, the vector fits the colours about as well (a neighbour
+     * mostly under the HUD cannot be judged and counts as worse; depth, smooth across a floor, does
+     * not pin a vector down), or it joins look-alike content that no vector here carried. */
+    float guess = 0.0;
+    if (best != vec2(0.0) && still.x > CHANGED) {
+        const vec2 nudge[4] = vec2[4](vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0));
+        float here = block_cost(centre, best, false).x;
+        float worse = 0.0;
+        for (int i = 0; i < 4; i++) {
+            vec2 c = block_cost(centre, best + NUDGE * nudge[i] * lv.texel, false);
+            worse = max(worse, c.y < MIN_SEEN ? 1.0 : c.x - here);
+        }
+        if (worse < AMBIGUOUS) {
+            guess = 1.0;
+        } else {
+            vec2 st = stale_joins(centre, best);
+            if (st.x >= STALE_MIN && 2.0 * st.x >= st.y) guess = 1.0;
+        }
+    }
+    imageStore(field, cell, vec4(best, best_raw, guess));
     if (lv.count_bad != 0 && (torn || best_raw > BAD_BLOCK)) atomicAdd(stats.bad_blocks, 1u);
 }
