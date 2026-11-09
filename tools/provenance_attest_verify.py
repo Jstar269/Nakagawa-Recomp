@@ -178,18 +178,29 @@ try:
     from .public_export import build_document as _build_export_document
     from .publication_policy import PolicyError, load_policy
 except ImportError:
-    from nk_core.git_isolation import isolated_git_env
-    from provenance_ledger import (
+    from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
+    from provenance_ledger import (  # type: ignore[no-redef]
         ALLOWED_CLASSES as ALLOWED_CLASSES, RefreshError, _admission_requires_implementation,
         _canonical_json_bytes, _class_for, _classify_policy_delta, _read_policy_delta_authority,
         admission_claim, claims_ledger, claims_ledger_bytes, derive_policy_delta_v3, is_claims_ledger,
         is_derived_policy_delta, policy_delta_v3_bytes, policy_delta_v3_name, policy_delta_v4_key,
         validate_ledger, verify_derived_policy_delta,
     )
-    from public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS
-    from public_export import build_control_document as _build_control_document
-    from public_export import build_document as _build_export_document
-    from publication_policy import PolicyError, load_policy
+    from public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS  # type: ignore[no-redef]
+    from public_export import build_control_document as _build_control_document  # type: ignore[no-redef]
+    from public_export import build_document as _build_export_document  # type: ignore[no-redef]
+    from publication_policy import PolicyError, load_policy  # type: ignore[no-redef]
+
+#: The policy digest and the two ``tree_derived_fields`` lists a committed
+#: control may record, derived as ``public_export`` derives them (its
+#: ``POLICY_DIGEST_FIELD`` and ``EXPORT_TREE_DERIVED_FIELDS_WITH(OUT)_POLICY_DIGEST``;
+#: a test pins them equal).  They are built here from the one imported list so
+#: the dual import above stays as it is.
+_POLICY_DIGEST_FIELD = "policy_sha256"
+_TREE_DERIVED_WITH_POLICY_DIGEST = tuple(sorted(set(_EXPORT_TREE_DERIVED_FIELDS) | {_POLICY_DIGEST_FIELD}))
+_TREE_DERIVED_WITHOUT_POLICY_DIGEST = tuple(
+    field for field in _EXPORT_TREE_DERIVED_FIELDS if field != _POLICY_DIGEST_FIELD
+)
 
 #: Paths the ledger deliberately carries without a content hash: they are the
 #: generated outputs whose own bytes depend on the ledger.
@@ -1192,7 +1203,28 @@ def _export_field_findings(declared: dict, generated: dict, *, label: str) -> li
     value is recomputed here from the candidate tree and the policy, and a
     declared value that disagrees is refused exactly like any other field.  Every
     other field, and any field the recomputation does not produce, stays required.
+
+    ``policy_sha256`` may be absent on the same terms, but only from a control
+    whose ``tree_derived_fields`` names it.  It is recomputed from the
+    candidate's own policy blob, whose bytes this verifier has already bound to
+    the trusted base policy or to the maintainer's policy-delta authority, so the
+    committed copy was a staleness check and never a trust anchor.  Two
+    committed shapes are accepted, whichever one the generator writes:
+
+    * the list without the digest, and the digest declared -- it is compared;
+    * the list naming the digest, and the digest omitted (or declared, and then
+      compared).
+
+    The list itself is descriptive, so either accepted value matches either
+    generator.  The list without the digest and no declared digest is the shape
+    of neither generator, and is refused naming the refresh.
     """
+    declared_list = declared.get("tree_derived_fields")
+    digest_recomputed = declared_list == list(_TREE_DERIVED_WITH_POLICY_DIGEST)
+    accepted_shape = digest_recomputed or (
+        declared_list == list(_TREE_DERIVED_WITHOUT_POLICY_DIGEST) and _POLICY_DIGEST_FIELD in declared
+    )
+    accepted_lists = (list(_TREE_DERIVED_WITH_POLICY_DIGEST), list(_TREE_DERIVED_WITHOUT_POLICY_DIGEST))
     findings: list[Finding] = []
     for field in sorted(set(generated) | set(declared)):
         if field in EXPORT_ADVISORY_FIELDS:
@@ -1200,21 +1232,35 @@ def _export_field_findings(declared: dict, generated: dict, *, label: str) -> li
         if field not in declared:
             if field in _EXPORT_TREE_DERIVED_FIELDS:
                 continue
-            findings.append(Finding(
-                "EXPORT_FIELD_MISMATCH", EXPORT_PATH,
-                f"{label} omits the required field {field!r}",
-            ))
+            if field == _POLICY_DIGEST_FIELD and digest_recomputed:
+                continue
+            detail = f"{label} omits the required field {field!r}"
+            if field == _POLICY_DIGEST_FIELD:
+                detail += (
+                    "; only a control whose tree_derived_fields names it may omit it. "
+                    "Regenerate it with make contrib-refresh (mingw32-make on Windows) or "
+                    "python tools/regen_all.py"
+                )
+            findings.append(Finding("EXPORT_FIELD_MISMATCH", EXPORT_PATH, detail))
         elif field not in generated:
             findings.append(Finding(
                 "EXPORT_FIELD_MISMATCH", EXPORT_PATH,
                 f"{label} declares {field!r}, which the recomputation does not produce",
             ))
         elif declared[field] != generated[field]:
-            findings.append(Finding(
-                "EXPORT_FIELD_MISMATCH", EXPORT_PATH,
+            if field == "tree_derived_fields" and accepted_shape and generated[field] in accepted_lists:
+                continue
+            detail = (
                 f"{label} field {field!r} does not match the trusted recomputation "
-                "from the candidate tree and the canonical policy",
-            ))
+                "from the candidate tree and the canonical policy"
+            )
+            if field == "tree_derived_fields" and declared[field] == list(_TREE_DERIVED_WITHOUT_POLICY_DIGEST):
+                detail += (
+                    "; a control whose list does not name policy_sha256 must declare it. "
+                    "Regenerate it with make contrib-refresh (mingw32-make on Windows) or "
+                    "python tools/regen_all.py"
+                )
+            findings.append(Finding("EXPORT_FIELD_MISMATCH", EXPORT_PATH, detail))
     return findings
 
 

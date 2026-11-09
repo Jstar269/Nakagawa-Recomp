@@ -105,18 +105,27 @@ choose **Pin to Start**, or send a shortcut to the Desktop. From a source checko
 both shortcuts with the player's taskbar identity, so the launcher and the games it starts share one taskbar
 button. The ZIP itself writes no shortcut.
 
-**Add to Steam** ([#2152](https://github.com/Jstar269/nakagawa-recomp/issues/2152)). The code that adds Nakagawa to a
-Steam library as a non-Steam game is in `src/core/nk_steam_shortcuts.c`; the player has no button that calls it,
-so add the executable in Steam by hand. It works on your PC only and makes no network call or
-download. It edits the binary `shortcuts.vdf` in the `userdata\<account>\config` folder of the Steam account you pick
-(Steam's folder comes from the current user's own registry setting on Windows). It adds one entry with the app name,
-the executable and its start-in folder, and no launch options, and it only adds: entries it did not write are copied
-byte for byte, an entry for the same executable is reported and nothing is written, and a file it cannot read is left
-untouched. Before it writes, it copies the file to `shortcuts.vdf.nakagawa-backup-<date>-<time>` and reads the copy
-back; if that fails it writes nothing. It writes a temporary file and renames it over the original. Steam rewrites
-this file when it exits, so while Steam runs nothing is written: close Steam first (Nakagawa never closes it). In
-portable mode the entry points at the executable's current folder, so moving the folder breaks the shortcut.
-Other platforms are unsupported and say so.
+**Add to Steam** ([#2152](https://github.com/Jstar269/nakagawa-recomp/issues/2152)). To start a game from Steam
+(for Steam Input, Big Picture or a handheld), exit Steam, open the game's page in the player, and choose
+**Add to Steam**. Choose the Steam account if more than one has signed in on this PC, then **Add to Steam** again.
+The shortcut starts `nakagawa_player.exe --launch-title=<disc ID>` from the player's own folder, which starts that
+game without the launcher window and waits for it to end, so Steam shows it as running. When two images in your
+library share a disc ID (a retail disc and its translation), the value also names the image, `<disc ID>:<SHA-1>`; a
+player started with `--user-data-root` passes that folder on too. Start Steam afterwards to find the game in your
+library; no restart is needed.
+
+It works on your PC only and makes no network call or download. Steam's folder comes from the current user's own
+registry setting (Windows only; on other systems the dialog says it is unsupported and writes nothing), and the
+account names come from Steam's own `config\loginusers.vdf`. It edits the binary `shortcuts.vdf` in that
+account's `userdata\<account>\config` folder. Before it writes, it copies the file to
+`shortcuts.vdf.nakagawa-backup-<date>-<time>` and reads the copy back; if that fails it writes nothing. It writes a
+temporary file and renames it over the original. Steam rewrites this file when it exits, so while Steam runs
+nothing is written: exit Steam first (Nakagawa never closes it). Entries Nakagawa did not write are copied byte for
+byte, and a file it cannot read is left untouched. Choosing **Add to Steam** again for a game already there changes
+nothing. After an update, which unpacks into a new folder, or after moving a portable copy, choosing it again updates
+that game's shortcut to the new folder instead of adding a second one: only its program and start-in folder change,
+and its play time and collections stay. The shortcut has no picture of its own (the player keeps disc art in memory
+only), so Steam shows the player's icon until you set one in Steam.
 
 **Update.** A copy `Setup.exe` installed updates by running the next release's Setup (see [below](#windows-installer-setupexe)). For a ZIP copy, Check for updates unpacks the new version into a new folder next to the running one and leaves the old
 one. Your data is in the per-user folders below, so the new version finds it. Delete the old folder when you
@@ -782,6 +791,11 @@ output directory contains spaces, the route builds in a Make-safe workspace—re
 the finished package to the destination. If neither fallback is available, or if the path contains
 characters that Make recipes cannot quote, the route stops with the named `PACKAGE_UNSUPPORTED_PATH`
 boundary.
+An enhancement data root is read in place rather than copied. When its path has a space or another
+character Make cannot take, the route uses its 8.3 short form on Windows, and stops with
+`PACKAGE_UNSUPPORTED_PATH` naming the data root when no short form exists (a volume with 8.3 names
+turned off, or any other platform). `NK_BUILD_ROOT` does not help there; move the data root to a
+location without such characters.
 
 `assets/titles/hst-ucus98701.json` is the HST title manifest, part of the repository since 2026-10-27: it carries HST's guest-address runtime bindings, and a `GAME_NAME=hst` build refuses to compile without it rather than silently producing a runtime with every title binding disabled. See [`assets/titles/README.md`](../assets/titles/README.md).
 
@@ -858,8 +872,10 @@ long-run present rate never exceeds the cap (`gui-present-selftest`).
 
 ### Presentation upscaler (`SR_PRESENT_UPSCALE`)
 
-In the player this is **Sharper enlarging** on Settings > Enhanced and on each game's page, off by
-default; the launcher sets `SR_PRESENT_UPSCALE` from it for an Enhanced or Ace run.
+In the player this is **Sharper enlarging** on Settings > Enhanced and on each game's page, off for a
+new library. The Medium, Ultra and Handheld graphics presets turn it on and Low and High turn it off; a
+game's own value wins over the preset ([PLAYER_UI_DESIGN.md](PLAYER_UI_DESIGN.md)). The launcher sets
+`SR_PRESENT_UPSCALE` from the result for an Enhanced or Ace run.
 
 `SR_PRESENT_UPSCALE=fsr1` makes the Vulkan presenter enlarge the picture to its place in the
 window with AMD FidelityFX Super Resolution 1: EASU, an edge-adaptive upscaler, then RCAS
@@ -870,8 +886,11 @@ the guest's frame, guest VRAM and captures are byte for byte what they are with 
 recording (`SR_VIDEOREC_DIR`) is enlarged by FSR 1 too, at the recording's size, and its
 `record.json` names the filter ([DEBUGGING.md](DEBUGGING.md)). The pause
 overlay is drawn at the window's size on the CPU, so the paused picture is not upscaled and looks
-softer than the running one. Its cost is small: from 1920x1088 to 3840x2160, EASU and RCAS took
-0.40 ms per present on an RTX 3080 (`fsr1-selftest`). An unknown value, or a device without
+softer than the running one. Its cost is small. On an RTX 3080, EASU and RCAS took 0.40 ms per
+present from 1920x1088 to 3840x2160, 0.20 ms to 2560x1440, 0.11 ms from 960x544 to 1920x1080, 0.06 ms
+to 1280x800 and 0.11 ms from 480x272 to 1920x1080 (`fsr1-selftest`, which times each graphics preset's
+sizes, median of 15; measured on 2026-11-08 for #2150, and a second, independent run matched within
+0.01 ms). No low-end or handheld GPU has been measured. An unknown value, or a device without
 compute, leaves it off with a line in the log; so does a size whose images cannot be made, which
 is then not tried again. The launcher turns it off for an authentic session, and a run with it on
 is stamped as enhanced (`ACE_MODE: present upscale fsr1`), which `boot_gate.py` reads. The picture
@@ -1147,7 +1166,7 @@ refuses such a `BUILD_DIR` before any recipe runs and names the boundary:
 BUILD_DIR 'C:/path/with spaces/build' contains a space, which GNU Make cannot represent
 in a target or prerequisite name. Use a relative BUILD_DIR under the repository
 root (the default `build/<game>`), or set NK_BUILD_ROOT to a folder without spaces
-so tools/title_codegen_plan.py can pick a Make-safe build root (issue #296).
+so tools/title_codegen_plan.py can pick a Make-safe build root.
 ```
 
 The default relative `BUILD_DIR` carries no space, so an ordinary checkout is unaffected. Every route
@@ -1186,7 +1205,7 @@ the issue #1391 import/VFPU scope. Before this work, the full `tools/` scan used
 `python -m mypy --no-incremental --no-error-summary --no-pretty --python-version 3.15 --platform linux --explicit-package-bases tools`
 and reported 353 errors in 120 modules. The full-tree per-module ratchet remains in
 `tools/mypy_baseline.json`; its entries outside the clean scope are existing typing debt, not
-suppressed errors. The current full-tree residual is 318 errors in 106 modules; their per-module
+suppressed errors. The current full-tree residual is 246 errors in 92 modules; their per-module
 counts are listed in `tools/mypy_baseline.json` and remain guarded by that ratchet. The clean scope
 directly checks `tools/verify_vfpu_provenance.py`,
 `tools/hle_manifest.py`, `tools/psp_import_table.py`, `tools/import_audit_gate.py`,

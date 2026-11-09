@@ -2052,6 +2052,10 @@ static void player_ui_nk_apply_action(PlayerApp *app,
         player_app_stop_stalled_game(app);
         return;
     }
+    if (action->kind == PLAYER_UI_ACTION_HIDE_RENDER_NOTICE) {
+        player_app_hide_render_notice(app);
+        return;
+    }
     if (action->kind == PLAYER_UI_ACTION_CHECK_INPUT_AGAIN) {
         /* The title page's Check again (#308): the same build check, now,
            whatever its cache holds; the disc is not added again. */
@@ -3514,7 +3518,8 @@ static PlayerLaunchJob *player_launch_job_poll(PlayerApp *app, PlayerLaunchJob *
  * and `--launch-now --headless-launch`: the launcher's own player_app_launch_game,
  * then a wait for the child. A headless run is bounded by the timeout above. */
 static int player_run_command_line_launch(PlayerApp *app, int game_index,
-                                          const char *route) {
+                                          const char *route, bool *started) {
+    if (started) *started = false;
     if (!player_app_launch_game(app, game_index)) {
         const char *reason = app->launch_session.last_error[0]
             ? app->launch_session.last_error
@@ -3530,6 +3535,7 @@ static int player_run_command_line_launch(PlayerApp *app, int game_index,
         player_app_stop_game(app);
         return 5;
     }
+    if (started) *started = true;
     if (app->headless_accept_presented_frames > 0u) {
         uint32_t timeout_ms = app->headless_launch_timeout_ms > 0u
             ? app->headless_launch_timeout_ms : NK_HEADLESS_ACCEPTANCE_TIMEOUT_MS;
@@ -3882,6 +3888,8 @@ typedef struct PlayerRun {
     bool stage_only;
     bool launch_index_requested;
     int launch_index;
+    /* --launch-title=<value>: one library game, named by its disc ID (#2152). */
+    const char *launch_title;
     int override_w;
     int override_h;
     float capture_render_scale;
@@ -3969,7 +3977,7 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
                    "[--iso=<path> [--stage|--stage-only|--launch-now]] "
                    "[--runtime-root=<path>] [--view=<name>] [--screenshot=<bmp>] "
                    "[--width=W --height=H [--render-scale=S]] "
-                   "[--launch-index=N] [--headless-launch] "
+                   "[--launch-index=N | --launch-title=<disc ID>] [--headless-launch] "
                    "[--headless-accept-presented-frames=N] "
                    "[--headless-timeout-ms=N] "
                    "[--experimental-60hz]\n");
@@ -3993,7 +4001,12 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
         } else if (strncmp(argv[i], "--iso=", 6) == 0) {
             run->initial_iso_path = argv[i] + 6;
         } else if (strncmp(argv[i], "--user-data-root=", 17) == 0) {
-            /* Applied by player_apply_user_data_root before the library loaded. */
+            /* Applied by player_apply_user_data_root before the library loaded. A Steam
+               shortcut made here passes the same folder on (#2152). */
+            if (!nk_platform_absolute_path(argv[i] + 17, app->user_data_root,
+                                           sizeof(app->user_data_root))) {
+                app->user_data_root[0] = '\0';
+            }
         } else if (strncmp(argv[i], "--runtime-root=", 15) == 0) {
             run->runtime_root_path = argv[i] + 15;
         } else if (strncmp(argv[i], "--runtime-bin=", 14) == 0) {
@@ -4010,6 +4023,9 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
         } else if (strncmp(argv[i], "--launch-index=", 15) == 0) {
             run->launch_index_requested = true;
             run->launch_index = atoi(argv[i] + 15);
+        } else if (strncmp(argv[i], PLAYER_LAUNCH_TITLE_ARG,
+                           sizeof(PLAYER_LAUNCH_TITLE_ARG) - 1u) == 0) {
+            run->launch_title = argv[i] + sizeof(PLAYER_LAUNCH_TITLE_ARG) - 1u;
         } else if (strncmp(argv[i], "--width=", 8) == 0) {
             run->override_w = atoi(argv[i] + 8);
         } else if (strncmp(argv[i], "--height=", 9) == 0) {
@@ -4050,8 +4066,13 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
         }
     }
 
+    if (run->launch_title && run->launch_index_requested) {
+        fprintf(stderr, "[PLAYER] Use --launch-title or --launch-index, not both.\n");
+        return 2;
+    }
     if ((app->headless_accept_presented_frames > 0u &&
-         (!app->launch_headless || (!run->launch_index_requested && !run->launch_now))) ||
+         (!app->launch_headless ||
+          (!run->launch_index_requested && !run->launch_now && !run->launch_title))) ||
         (app->headless_launch_timeout_ms > 0u &&
          app->headless_accept_presented_frames == 0u)) {
         fprintf(stderr,
@@ -4067,6 +4088,16 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
 /* One launcher per data folder (#2006): a second start on the same library and settings
    brings the first launcher's window forward and exits. Screenshots, test views, staging,
    headless launches and UI tests run beside a launcher on purpose and are left alone. */
+/* A --launch-title start that cannot go on (#2152). A Steam shortcut started this process,
+   which has no console to read: the reason goes to the log and to a message box. Headless
+   runs and UI tests only log it. */
+static void player_launch_title_refused(const PlayerRun *run, const char *message) {
+    fprintf(stderr, "[PLAYER] --launch-title: %s\n", message);
+    if (run->app.launch_headless || player_ui_test_active(&run->ui_test)) return;
+    (void)SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                                   "Nakagawa Recomp could not start the game", message, NULL);
+}
+
 static int player_claim_single_instance(PlayerRun *run) {
     char data_root[NK_MAX_PATH];
     if (run->screenshot_path || run->test_view || run->stage_only || run->app.launch_headless ||
@@ -4084,7 +4115,13 @@ static int player_claim_single_instance(PlayerRun *run) {
     case NK_INSTANCE_RUNNING:
         break;
     }
-    if (run->launch_now || run->launch_index_requested) {
+    if (run->launch_title) {
+        /* Started from a Steam shortcut, with no console to read. */
+        player_launch_title_refused(run, "Nakagawa Recomp is already open on this data "
+                                         "folder, so the game was not started. Start it from "
+                                         "the open window, or close that window and start the "
+                                         "game again.");
+    } else if (run->launch_now || run->launch_index_requested) {
         fprintf(stderr, "[PLAYER] Nakagawa Recomp is already open on this data folder, so the "
                         "game was not started. Start it from the open window.\n");
     } else if (run->initial_iso_path) {
@@ -4335,7 +4372,8 @@ static int player_load_library(PlayerRun *run) {
                         /* --launch-now stands in for pressing PLAY NOW: the
                            same launch function and the same bounded wait as
                            --launch-index. */
-                        return player_run_command_line_launch(app, game_idx, "--launch-now");
+                        return player_run_command_line_launch(app, game_idx, "--launch-now",
+                                                              NULL);
                     } else if (player_app_launch_game(app, game_idx)) {
                         app->launch_time_ms = SDL_GetTicks();
                         /* The disc is in the library now, so the card's
@@ -4664,9 +4702,24 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
     }
 }
 
-/* Mechanical launch driver for the real player path (--launch-index). */
+/* Mechanical launch driver for the real player path (--launch-index, --launch-title). */
 static int player_command_line_launch(PlayerRun *run) {
     PlayerApp *app = &run->app;
+    const char *route = "--launch-index";
+    if (run->launch_title) {
+        /* A shortcut names the game, never its place in the list (#2152); it then takes
+           the --launch-index route below, package check and all. */
+        char message[512];
+        int index = -1;
+        if (player_app_find_launch_title(app, run->launch_title, &index, message,
+                                         sizeof(message)) != PLAYER_LAUNCH_TITLE_FOUND) {
+            player_launch_title_refused(run, message);
+            return 2;
+        }
+        run->launch_index_requested = true;
+        run->launch_index = index;
+        route = "--launch-title";
+    }
     /* Mechanical launch driver for the real player path. This deliberately
        stops before SDL initialization: the child runtime owns the game window,
        while the parent waits for its real exit status. A test can set
@@ -4705,6 +4758,15 @@ static int player_command_line_launch(PlayerRun *run) {
                 fprintf(stderr, "[PLAYER] Launch index %d has no prepared runtime; PLAY NOW is unavailable.\n",
                         run->launch_index);
             }
+            if (run->launch_title) {
+                char message[320];
+                (void)snprintf(message, sizeof(message),
+                               "%s is not built for this PC yet. Open Nakagawa Recomp and "
+                               "build it from its page, then start it from Steam again.",
+                               launch_game->title_name[0] ? launch_game->title_name
+                                                          : launch_game->disc_id);
+                player_launch_title_refused(run, message);
+            }
             return 3;
         }
         if (sample_entry) {
@@ -4717,7 +4779,22 @@ static int player_command_line_launch(PlayerRun *run) {
                    run->launch_index, app->games[run->launch_index].disc_id,
                    app->games[run->launch_index].title_name);
         }
-        return player_run_command_line_launch(app, run->launch_index, "--launch-index");
+        bool started = false;
+        int code = player_run_command_line_launch(app, run->launch_index, route, &started);
+        if (run->launch_title && !started) {
+            /* The game did not start: say why where the user looks. Once it started, its
+               own exit code is the result, not a launcher failure. */
+            char message[NK_MAX_TITLE_LEN + sizeof(app->last_error.message) +
+                         sizeof(app->launch_session.last_error) + 32];
+            const char *reason = app->launch_session.last_error[0]
+                ? app->launch_session.last_error
+                : app->last_error.message[0] ? app->last_error.message
+                                             : "The game could not be started.";
+            (void)snprintf(message, sizeof(message), "%s could not be started. %s",
+                           app->games[run->launch_index].title_name, reason);
+            player_launch_title_refused(run, message);
+        }
+        return code;
     }
     return PLAYER_RUN_CONTINUE;
 }

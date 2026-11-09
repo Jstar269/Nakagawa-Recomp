@@ -3333,8 +3333,29 @@ static void sched_preempt_timer_arm(void) {
     SDL_UnlockMutex(s_preempt_timer_mutex);
 }
 
+/* The two host threads that keep guest time (#1296): the scheduler's, which runs every guest
+ * thread and sleeps until the next deadline when none is ready, and the preemption timer's. At
+ * normal priority a busy host keeps either one from its core after its sleep ends: with every
+ * core busy, a 1-16 ms SDL_DelayPrecise on the reference PC ended a median 20 ms and up to 52 ms
+ * late, against under 1 ms at high priority or on an idle host. Each late wake makes the guest
+ * thread due then late, and the priority-16 sound threads of Hot Shots Tennis let the host queue
+ * run dry. Each thread raises itself once. What HIGH means depends on the host: on Windows a
+ * thread priority within the process's class, which needs no privilege; on Linux nice -10,
+ * which an ordinary session refuses ("setpriority() failed" on Ubuntu 24.04 with RLIMIT_NICE 0
+ * and no rtkit), and which threads the raised thread creates later inherit. A host that
+ * refuses keeps normal priority, and the first refusal is reported once, with its cause. */
+static void sched_host_thread_raise(const char *which) {
+    static atomic_flag s_said = ATOMIC_FLAG_INIT;
+    if (SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH)) return;
+    if (atomic_flag_test_and_set(&s_said)) return;
+    fprintf(stderr, "sched: the host refused high priority for the %s thread (%s); on a busy host "
+                    "a timed wake can come late\n", which, SDL_GetError());
+    fflush(stderr);
+}
+
 static int SDLCALL sched_preempt_timer_main(void *unused) {
     (void)unused;
+    sched_host_thread_raise("preemption timer");
     SDL_LockMutex(s_preempt_timer_mutex);
     for (;;) {
         const uint64_t at = s_preempt_timer_at_ns;
@@ -3368,6 +3389,7 @@ static int SDLCALL sched_preempt_timer_main(void *unused) {
 void sched_preempt_timer_start(void) {
     pace_setup();
     if (!s_pace_on || s_preempt_timer_mode != SCHED_PREEMPT_TIMER_OFF) return;
+    sched_host_thread_raise("scheduler");   /* the driver calls this on the scheduler's thread */
     s_preempt_timer_mutex = SDL_CreateMutex();
     s_preempt_timer_cond = SDL_CreateCondition();
     SDL_Thread *thread = s_preempt_timer_mutex && s_preempt_timer_cond

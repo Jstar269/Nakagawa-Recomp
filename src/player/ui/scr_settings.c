@@ -163,8 +163,7 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                                          : "Changes are saved as you make them. Game settings "
                                            "apply the next time a game starts.",
                             NK_UI_TYPE_BODY_S,
-                            has_notice || (has_preset && model->preset_notice_warns)
-                                ? theme->warning : theme->muted);
+                            has_notice ? theme->warning : theme->muted);
             if (advisory[0] != '\0') {
                 nk_ui_text_role(ui, SET_ID_TEXT + 2u, advisory, NK_UI_TYPE_BODY_S,
                                 theme->warning);
