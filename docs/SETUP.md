@@ -36,6 +36,9 @@ download first ([details](#player-build-package-prerequisites)).
 build itself still calls the built-in Windows PowerShell 5.1 (`powershell.exe`) for one step,
 copying the build assets (`tools/copy_build_assets.ps1`, through `POWERSHELL` in the
 `Makefile`). That script supports 5.1, so you do not need to change or install anything for it.
+The Python tools that start PowerShell (`tools/stage_install.py`, `tools/psp_readiness.py` and the
+report bundle) use PowerShell 7 (`pwsh`) when it is on `PATH` and fall back to Windows PowerShell
+5.1 otherwise. Set `NK_POWERSHELL` to a full path to choose one yourself.
 
 ## System requirements
 
@@ -281,7 +284,8 @@ consumer ISO compatibility and interactive Linux presentation are not supported
 The supported and tested core development environment is:
 
 - Windows 11 x64. Older or unsupported Windows versions may work, but receive no compatibility guarantee.
-- PowerShell 7.6+ (`pwsh`) as the shell you type into. Windows PowerShell 5.1 is not supported for that.
+- PowerShell 7.6+ (`pwsh`) as the shell you type into. Windows PowerShell 5.1 is not supported for that,
+  although the build tools fall back to it where PowerShell 7 is missing ([Which PowerShell](#prerequisites)).
 - CPython 3.15.x (3.14.x is also accepted, `>=3.14,<3.16`), with `python` resolving to that feature line. 3.15 is the default: the pinned prerequisite and hosted CI both use 3.15.2.
 - Current MSYS2 UCRT64 GCC/G++, GNU Make, SDL3, and Vulkan loader packages. The release
   manifest's `toolchain_policy` records only the floors the code actually needs: a C11 compiler
@@ -947,10 +951,11 @@ it needs all of the following:
 - `python`, `gcc`, and `mingw32-make` from either the current environment or the
   player's per-user downloaded build tools. The player changes `PATH` only for
   the build child; it never edits system `PATH` or the registry.
-- `powershell.exe` (Windows PowerShell 5.1, built into Windows 10 and 11). The
-  asset-copy step and the unpacking of the downloaded Python archive
-  (`Expand-Archive`) use it; PowerShell 7 remains the development baseline for
-  the other repository scripts.
+- PowerShell. The unpacking of the downloaded Python archive (`Expand-Archive`)
+  uses PowerShell 7 (`pwsh`) when it is installed and otherwise the built-in
+  Windows PowerShell 5.1, so nothing needs installing; `NK_POWERSHELL` names a
+  specific one. The asset-copy step uses `powershell.exe` (5.1) through
+  `POWERSHELL` in the `Makefile`.
 
 A release folder can carry the pinned prerequisites itself, in `prereqs/` beside `bin/` and
 `source/` ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)). BUILD PACKAGE
