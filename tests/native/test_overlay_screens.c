@@ -678,6 +678,71 @@ static void test_menu_fits_small_windows(void) {
     }
 }
 
+/* The pause menu at every game-window height from the PSP's 272 to 800 (every 8 px, 960
+   wide, with and without the developer entries): the card stays above the prompt bar with
+   the game's name and RESUME whole and RESUME focused, and a card with nothing to scroll
+   shows every entry whole. A drift between the menu's height estimate and the dialog's
+   real spacing shows here as a cut entry. */
+static void test_menu_height_sweep(void) {
+    static const NkUiId entries[] = {
+        NK_OVERLAY_ID_RESUME, NK_OVERLAY_ID_SETTINGS, NK_OVERLAY_ID_CONTROLS,
+        NK_OVERLAY_ID_VRAM, NK_OVERLAY_ID_PROFILE, NK_OVERLAY_ID_QUIT
+    };
+    const NkUiId title_id = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x001002u); /* MENU_ID_TITLE */
+    const NkUiId card_id = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x000003u);  /* OVERLAY_ID_CARD */
+    const NkUiTheme *theme = nk_ui_theme_n1();
+    for (int height = 272; height <= 800; height += 8) {
+        for (int developer = 0; developer < 2; ++developer) {
+            NkUi *ui = overlay_ui(960, height, 1.0f);
+            NkOverlayModel model = base_model(960.0f, (float)height);
+            NkOverlayState state;
+            NkUiScrollState scroll;
+            const NkUiDrawList *list;
+            int bar_top = height - (int)NK_UI_PROMPT_BAR_HEIGHT;
+            int card_top = -1;
+            int card_bottom = -1;
+            bool scrolls;
+            bool ok = true;
+            if (ui == NULL) continue;
+            model.title_name = "Synthetic Showcase Scene: A Rather Long Name for the Pause Card";
+            model.ace_caption = "Enhanced: 16x filtering \xC2\xB7 crisp keyboard";
+            model.developer = developer != 0;
+            nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+            (void)settle(ui, &state, &model);
+            nk_ui_begin(ui, 0.0);
+            (void)nk_overlay_frame(ui, &state, &model);
+            list = nk_ui_end(ui);
+            for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+                const NkUiDrawCmd *cmd = &list->cmd[i];
+                if (cmd->kind == NK_UI_DRAW_BORDER && cmd->rgba_pm == theme->line_strong &&
+                    cmd->bounds[2] - cmd->bounds[0] > 240) {
+                    if (card_top < 0 || cmd->clip[1] < card_top) card_top = cmd->clip[1];
+                    if (cmd->clip[3] > card_bottom) card_bottom = cmd->clip[3];
+                }
+            }
+            scrolls = nk_ui_scroll_state(ui, card_id, &scroll) && scroll.max_offset > 0.0f;
+            ok = list != NULL && card_top >= (int)NK_UI_SAFE_AREA_MIN && card_bottom <= bar_top &&
+                 list_shows_whole(list, title_id, card_top, card_bottom) &&
+                 nk_ui_focused(ui) == NK_OVERLAY_ID_RESUME &&
+                 list_shows_whole(list, NK_OVERLAY_ID_RESUME, card_top, card_bottom);
+            for (size_t e = 0u; ok && !scrolls && e < sizeof(entries) / sizeof(entries[0]); ++e) {
+                if (!developer && (entries[e] == NK_OVERLAY_ID_VRAM ||
+                                   entries[e] == NK_OVERLAY_ID_PROFILE)) {
+                    continue;
+                }
+                ok = list_shows_whole(list, entries[e], card_top, card_bottom);
+            }
+            if (!ok) {
+                fprintf(stderr, "  pause menu at 960x%d%s: card %d..%d, bar %d, %s\n", height,
+                        developer ? " (developer)" : "", card_top, card_bottom, bar_top,
+                        scrolls ? "scrolls" : "does not scroll");
+            }
+            CHECK(ok, "the pause menu fits, or scrolls with RESUME shown, at every height");
+            nk_ui_destroy(ui);
+        }
+    }
+}
+
 /* Every page at the design's three capture sizes: nothing drawn outside the window,
    nothing under the prompt bar but the bar, and the card clear of the edges. */
 static void test_fits_every_window(void) {
@@ -1420,6 +1485,7 @@ int main(int argc, char **argv) {
     test_pad_lost();
     test_fits_every_window();
     test_menu_fits_small_windows();
+    test_menu_height_sweep();
     test_developer_gate();
     test_vram_page();
     test_vram_clamp();

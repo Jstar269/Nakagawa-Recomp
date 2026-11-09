@@ -598,6 +598,10 @@ typedef struct {
     const char *const *labels;
     int label_count;
     const char *library_value;  /* NULL on the library's page */
+    /* A value another setting on the page can give the row, or NULL: on a game's page,
+       Smooth motion's "Off (this game runs at 60 FPS)", which stepping the play mode turns
+       on and off with the game's 60 FPS game logic. */
+    const char *other_value;
 } PlayerUiEnhancedRow;
 
 #define PLAYER_UI_REPORT_LINES 24u   /* PLAYER_REPORT_MAX_FILES */

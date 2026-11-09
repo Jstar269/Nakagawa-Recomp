@@ -24,6 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Smooth motion's value on a game's page while that game runs its 60 FPS game logic. */
+#define ENHANCED_SMOOTH_AT_60_VALUE "Off (this game runs at 60 FPS)"
+
 /* Status colours, from the theme's tokens. */
 #define PLAYER_UI_READY (nk_ui_theme_n1()->ready)
 #define PLAYER_UI_WARNING (nk_ui_theme_n1()->warning)
@@ -892,6 +895,8 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         row->labels = info->labels;
         row->label_count = info->value_count;
         row->library_value = NULL;
+        row->other_value = title >= 0 && p == PLAYER_PART_SMOOTH ? ENHANCED_SMOOTH_AT_60_VALUE
+                                                                  : NULL;
         row->value = player_enhanced_part_label(p, library);
         row->on = library != 0;
         if (title < 0 && preset && preset->part[p] >= 0) {
@@ -920,7 +925,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                          sizeof(player->enhanced_smooth_sentence),
                          "This build smooths only 30 FPS games. The choice here (%s) applies "
                          "when this game's 60 FPS game logic is off.", row->value);
-                row->value = "Off (this game runs at 60 FPS)";
+                row->value = ENHANCED_SMOOTH_AT_60_VALUE;
                 row->sentence = player->enhanced_smooth_sentence;
                 row->on = false;
             }

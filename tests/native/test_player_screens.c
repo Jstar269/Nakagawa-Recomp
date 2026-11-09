@@ -55,6 +55,7 @@ static const char *const k_enhanced_af_labels[] = {"16x", "8x", "4x", "2x", "Off
 static const char *const k_enhanced_switch_labels[] = {"On", "Off"};
 static const char *const k_enhanced_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_enhanced_library_modes[] = {"Authentic", "Enhanced"};
+static const char k_enhanced_smooth_at_60[] = "Off (this game runs at 60 FPS)";
 static const char *const k_enhanced_title_modes[] = {"Library (Enhanced)", "Authentic",
                                                      "Enhanced", "Ace"};
 /* What the Settings > Enhanced case shows instead of the fixture: a part's value (NULL
@@ -438,6 +439,10 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                                              : k_enhanced_switch_labels;
             settings.enhanced_rows[i].label_count = i == 0 ? 5 : 2;
             settings.enhanced_rows[i].library_value = title ? followed[i] : NULL;
+            /* As player_ui_nk.c gives a game's page: the value Smooth motion shows while
+               the play mode runs the game's 60 FPS game logic. */
+            settings.enhanced_rows[i].other_value =
+                title && i == 5 ? k_enhanced_smooth_at_60 : NULL;
         }
     }
     settings.pacing = "PSP timing";
@@ -3587,8 +3592,9 @@ static EnhancedRowPlaces enhanced_row_places(FlowCase which) {
    motion on used to relabel Widescreen "Off (Smooth motion is on)": the wider button widened
    the column past the side-by-side threshold and every row stacked its sentence under its
    button. The column now comes from the widest value each row can show on its page, so no
-   value moves a row: Smooth motion on with Widescreen off, any part at any of its values, or
-   any play mode, on the library's page and on a game's. */
+   value moves a row: Smooth motion on with Widescreen off, Smooth motion off while a game's
+   60 FPS game logic runs, any part at any of its values, or any play mode, on the library's
+   page and on a game's. */
 static void test_enhanced_rows_stay_put(void) {
     static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
     static const char *const *const labels[PLAYER_PART_COUNT] = {
@@ -3604,14 +3610,20 @@ static void test_enhanced_rows_stay_put(void) {
             CHECK(base.box[row][0] >= 0 && base.box[row][1] > base.box[row][0],
                   "every Settings > Enhanced row draws its button");
         }
-        /* -2: Smooth motion on, Widescreen off; -1 and up: the play modes, then each part
-           at each of its values. */
-        for (int step = -2; step < 4 + PLAYER_PART_COUNT * 5; ++step) {
+        /* -3: on a game's page, Smooth motion off while the play mode runs the game's 60
+           FPS game logic; -2: Smooth motion on, Widescreen off; -1 and up: the play modes,
+           then each part at each of its values. */
+        for (int step = -3; step < 4 + PLAYER_PART_COUNT * 5; ++step) {
             EnhancedRowPlaces moved;
             char message[160];
             memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
             g_enhanced_mode = NULL;
-            if (step == -2) {
+            if (step == -3) {
+                if (pages[g] != FLOW_SETTINGS_ACE_TITLE) continue;
+                g_enhanced_value[5] = k_enhanced_smooth_at_60;
+                (void)snprintf(message, sizeof(message),
+                               "page %d: Smooth motion off at 60 FPS moves no row", (int)g);
+            } else if (step == -2) {
                 g_enhanced_value[5] = "On";
                 g_enhanced_value[4] = "Off";
                 (void)snprintf(message, sizeof(message),
