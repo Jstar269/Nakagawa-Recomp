@@ -1601,8 +1601,13 @@ class ForkProducerTests(unittest.TestCase):
     def test_upstream_producers_are_unchanged(self) -> None:
         for repository, repository_id in (
             ("Jstar269/Nakagawa-Recomp", None),
+            ("jstar269/nakagawa-recomp", None),
+            ("jstar269/nakagawa-recomp", "987654321"),
             ("jstar269/nakagawa-recomp", "1330183186"),
             ("Some-Org/Nakagawa-Recomp", "1330183186"),
+            # An unknown ID fails closed to the upstream's producers.
+            ("example-user/Nakagawa-Recomp", None),
+            ("example-user/Nakagawa-Recomp", ""),
         ):
             with self.subTest(repository=repository):
                 producers = ctv.producers_for(repository, repository_id)
@@ -1620,6 +1625,12 @@ class ForkProducerTests(unittest.TestCase):
             [item for item in producers if item.context != "Fork provenance check"],
             [item for item in ctv.PRODUCERS if item.context != "Trusted provenance attestation"],
         )
+
+    def test_the_mode_switch_is_protected_gate_code(self) -> None:
+        # The verifier imports tools/provenance_mode.py to choose its producers, so a change to it
+        # needs the CI-change approval even when no workflow line names it.
+        self.assertIn("tools/provenance_mode.py", ctv.PROTECTED_EXTRA)
+        self.assertIn("tools/provenance_mode.py", ctv.protected_paths({}, {}, []))
 
     def test_a_skipped_upstream_job_fails_the_upstream_verdict(self) -> None:
         # On the upstream the fork job is skipped and the attestation must still succeed: a skipped

@@ -71,13 +71,14 @@ jobs:
     # than a verdict computed from a base the author may control.
     #
     # It runs only in the upstream repository, matched by its numeric ID (which
-    # survives a rename or a transfer) or by its name. A fork runs the Fork
+    # survives a rename or a transfer) or by its name, and in any run whose ID is
+    # empty, which fails closed to this strict job. A fork runs the Fork
     # provenance check below instead; nothing a pull request or a repository
     # variable controls can move the upstream onto that path
     # (tools/provenance_mode.py, docs/FORKING.md).
     if: >-
       ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == github.event.repository.default_branch &&
-          (github.repository_id == '1330183186' || github.repository == 'Jstar269/Nakagawa-Recomp') }}
+          (github.repository_id == '' || github.repository_id == '1330183186' || github.repository == 'Jstar269/Nakagawa-Recomp') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -425,7 +426,7 @@ jobs:
     name: Fork provenance check
     if: >-
       ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == github.event.repository.default_branch &&
-          (github.repository_id != '1330183186' && github.repository != 'Jstar269/Nakagawa-Recomp') }}
+          (github.repository_id != '' && github.repository_id != '1330183186' && github.repository != 'Jstar269/Nakagawa-Recomp') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:

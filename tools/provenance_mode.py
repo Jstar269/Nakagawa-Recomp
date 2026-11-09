@@ -14,6 +14,8 @@ two apart, and the workflow's job conditions are built from the same constants
 A repository is the upstream when its numeric ID is the upstream's **or** its name is the
 upstream's. The ID survives a rename or a transfer to an organisation, so neither can turn
 fork mode on there; the name keeps the upstream strict even if a run could not see the ID.
+A run whose ID is missing, empty or not numeric also gets the strict path: fork mode needs a
+known ID that differs from the upstream's.
 No variable, secret, input or file in a pull request takes part in the decision, so fork mode
 cannot be switched on for the upstream at all.
 
@@ -61,23 +63,30 @@ WORKFLOW_PREFIX = ".github/workflows/"
 POLICY = "assets/public_source_profile.json"
 
 #: The job conditions in ``WORKFLOW``. GitHub's ``==`` ignores letter case for strings, as
-#: ``is_upstream`` does. They are exact complements, so exactly one of the two jobs runs.
+#: ``is_upstream`` does. They are exact complements, so exactly one of the two jobs runs, and an
+#: empty ID selects the upstream's strict job. The fork job's first step repeats the check in
+#: Python, which also refuses a non-numeric ID.
 UPSTREAM_CONDITION = (
-    f"(github.repository_id == '{UPSTREAM_REPOSITORY_ID}' || github.repository == '{UPSTREAM_REPOSITORY}')"
+    f"(github.repository_id == '' || github.repository_id == '{UPSTREAM_REPOSITORY_ID}' || "
+    f"github.repository == '{UPSTREAM_REPOSITORY}')"
 )
 FORK_CONDITION = (
-    f"(github.repository_id != '{UPSTREAM_REPOSITORY_ID}' && github.repository != '{UPSTREAM_REPOSITORY}')"
+    f"(github.repository_id != '' && github.repository_id != '{UPSTREAM_REPOSITORY_ID}' && "
+    f"github.repository != '{UPSTREAM_REPOSITORY}')"
 )
 
 
 def is_upstream(repository: str | None, repository_id: str | int | None) -> bool:
-    """Whether a run belongs to the upstream repository: its ID or its name matches.
+    """Whether a run gets the upstream's strict path: its ID or its name matches, or its ID is unknown.
 
-    The name comparison folds ASCII case only, as GitHub does. A name with any non-ASCII
-    character is never the upstream's name; GitHub names are ASCII, and Unicode folding would
-    let a lookalike match.
+    A fork must prove it is one with a numeric repository ID that differs from the upstream's; a
+    missing, empty or malformed ID fails closed to the strict path, which needs the private
+    authority. The name comparison folds ASCII case only, as GitHub does. A name with any
+    non-ASCII character is never the upstream's name; GitHub names are ASCII, and Unicode
+    folding would let a lookalike match.
     """
-    if repository_id is not None and str(repository_id).strip() == UPSTREAM_REPOSITORY_ID:
+    identity = "" if repository_id is None else str(repository_id).strip()
+    if not (identity.isascii() and identity.isdecimal()) or identity == UPSTREAM_REPOSITORY_ID:
         return True
     return (
         isinstance(repository, str)

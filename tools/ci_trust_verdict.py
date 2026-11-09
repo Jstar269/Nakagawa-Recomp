@@ -205,6 +205,8 @@ PROTECTED_EXTRA = frozenset({
     "tools/ci_test_shards.py",
     "tools/ci_test_weights.json",
     "tools/ci_trust_verdict.py",
+    # Decides which provenance producer this verifier judges (producers_for).
+    "tools/provenance_mode.py",
     "tools/requirements-lock.txt",
 })
 

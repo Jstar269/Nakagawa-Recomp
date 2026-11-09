@@ -149,8 +149,18 @@ UPSTREAM_RUNS = (
     # A rename or a transfer to an organisation keeps the ID.
     ("Nakagawa-Project/Nakagawa-Recomp", UPSTREAM_ID),
     ("Jstar269/Nakagawa", UPSTREAM_ID),
-    # A run that could not see the ID still matches by name.
+    # A run that could not see the ID still matches by name, in any letter case.
     ("Jstar269/Nakagawa-Recomp", ""),
+    ("jstar269/nakagawa-recomp", ""),
+    ("JSTAR269/NAKAGAWA-RECOMP", ""),
+    # The name alone decides when the ID is a different number: compared without regard to case.
+    ("jstar269/nakagawa-recomp", "987654321"),
+    ("JSTAR269/Nakagawa-RECOMP", "987654321"),
+)
+#: Runs whose ID is unknown take the strict path whatever their name says.
+UNKNOWN_ID_RUNS = (
+    ("example-user/Nakagawa-Recomp", ""),
+    ("example-org/nakagawa-recomp-fork", ""),
 )
 FORK_RUNS = (
     ("example-user/Nakagawa-Recomp", "987654321"),
@@ -163,6 +173,17 @@ class ModeDecisionTest(unittest.TestCase):
         for repository, repository_id in UPSTREAM_RUNS:
             with self.subTest(repository=repository, repository_id=repository_id):
                 self.assertEqual(pm.mode(repository, repository_id or None), "upstream")
+
+    def test_an_unknown_id_fails_closed_to_upstream(self) -> None:
+        for repository_id in (None, "", "  ", "abc", "12a", "-5", "١٢"):
+            for repository in (None, "", "example-user/Nakagawa-Recomp"):
+                with self.subTest(repository=repository, repository_id=repository_id):
+                    self.assertEqual(pm.mode(repository, repository_id), "upstream")
+        self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "example-user/Nakagawa-Recomp"}, clear=True):
+            self.assertEqual(pm.main(["--require", "fork"]), 1)
+        self.assertEqual(pm.main(["--repository", "example-user/Nakagawa-Recomp", "--repository-id", "abc",
+                                  "--require", "fork"]), 1)
 
     def test_fork_needs_a_different_name_and_id(self) -> None:
         for repository, repository_id in FORK_RUNS:
@@ -231,6 +252,11 @@ class WorkflowConditionTest(unittest.TestCase):
                 context = _context(repository, repository_id)
                 self.assertFalse(evaluate(attest, context))
                 self.assertTrue(evaluate(fork, context))
+        for repository, repository_id in UNKNOWN_ID_RUNS:
+            with self.subTest(repository=repository, repository_id="(empty)"):
+                context = _context(repository, repository_id)
+                self.assertTrue(evaluate(attest, context))
+                self.assertFalse(evaluate(fork, context))
 
     def test_neither_job_runs_for_another_base_branch(self) -> None:
         for repository, repository_id in UPSTREAM_RUNS + FORK_RUNS:
