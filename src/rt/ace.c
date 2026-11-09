@@ -175,7 +175,8 @@ static int s_have_view;
 static AceCounters s_counters;
 static uint64_t s_win_start_ns;
 static int s_win_started;
-static uint32_t s_win_frames, s_win_skipped, s_win_betweens;
+static uint32_t s_win_frames, s_win_skipped, s_win_betweens, s_win_shown;
+static uint64_t s_shown_seq;   /* AcePace.frame_seq of the newest real frame that reached the screen */
 static uint64_t s_win_idle_ns;
 static uint32_t s_last_flip_vcount, s_last_flip_fb;
 static int s_have_flip;
@@ -199,7 +200,8 @@ static void observation_reset(void) {
     s_have_view = 0;
     memset(&s_counters, 0, sizeof(s_counters));
     s_win_start_ns = 0; s_win_started = 0;
-    s_win_frames = s_win_skipped = s_win_betweens = 0; s_win_idle_ns = 0;
+    s_win_frames = s_win_skipped = s_win_betweens = s_win_shown = 0; s_win_idle_ns = 0;
+    s_shown_seq = 0;
     s_last_flip_vcount = s_last_flip_fb = 0; s_have_flip = 0;
     memset(s_rate_vblanks, 0, sizeof(s_rate_vblanks));
     s_limited_windows = 0;
@@ -475,7 +477,7 @@ void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *o
     }
     if (w->smooth) {
         v.smooth_on = 1;
-        v.shown_fps = (double)(w->new_frames + w->betweens) / secs;
+        v.shown_fps = (double)w->shown / secs;
         size_t len = strlen(v.text);
         if (w->betweens)
             snprintf(v.text + len, sizeof(v.text) - len, "  SMOOTH %d", (int)(v.shown_fps + 0.5));
@@ -565,7 +567,7 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
     if (!s_win_started) {
         s_win_started = 1;
         s_win_start_ns = now_ns;
-        s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_idle_ns = 0;
+        s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
     } else if (now_ns - s_win_start_ns >= 1000000000ull) {
         AceWindow w;
         w.wall_ns = now_ns - s_win_start_ns;
@@ -577,12 +579,13 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         w.last_rate = s_det.last_rate;
         w.smooth = s_req.smooth != 0;  /* asked for: off for the run (no GPU) still says so */
         w.betweens = s_win_betweens;
+        w.shown = s_win_shown;
         ace_readout_judge(&s_readout, &w, &s_view);
         s_have_view = 1;
         s_counters.windows++;
         if (s_view.pc_limited) s_limited_windows++;
         s_win_start_ns = now_ns;
-        s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_idle_ns = 0;
+        s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
     }
     return new_frame;
 }
@@ -649,7 +652,6 @@ AceShow ace_smooth_take(void) {
 void ace_smooth_shown_between(uint64_t now_ns) {
     if (!g_ace_on) return;
     ace_pace_shown_between(&s_pace, s_pace_vcount, now_ns);
-    s_win_betweens++;
 }
 
 int ace_smooth_vblank(uint32_t vcount) {
@@ -676,6 +678,15 @@ void ace_smooth_note_present(AcePresentKind kind, uint64_t now_ns) {
         s_pace.reflip = 0;
     }
     ace_pace_stats_add(&s_pace_stats, kind, now_ns);
+    /* The window's pictures that reached the screen: every in-between, the held frame the first
+     * time it shows, and a flip's own frame unless it is one already shown. */
+    if (kind == ACE_PRESENT_BETWEEN) {
+        s_win_betweens++;
+        s_win_shown++;
+    } else if (kind == ACE_PRESENT_HELD || s_pace.frame_seq != s_shown_seq) {
+        s_win_shown++;
+        s_shown_seq = s_pace.frame_seq;
+    }
     if (kind == ACE_PRESENT_HELD && now_ns > s_pace.held_ns) {
         uint64_t ns = now_ns - s_pace.held_ns;
         s_pace_stats.hold_count++;

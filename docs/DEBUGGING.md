@@ -2397,8 +2397,10 @@ The deterministic clock changes the run itself, not only the recording:
 On the Vulkan presenter the recorded picture is the one the window shows (Ace Mode's smooth motion
 included). An in-between stays on screen until its held real frame's VBLANK, so the recorder keeps
 it for its own VBLANK and writes the real frame, presented before that VBLANK's write, at the next
-one (`carried_frames` in `record.json`). Without that rule the real frame replaced the in-between
-unread, and a 30 FPS game with smooth motion recorded at 30 pictures a second. The picture is
+one (`carried_frames` in `record.json`); with smooth motion on, the recorded real frames land one VBLANK
+later than without it, as on screen. Pictures behind a carried one queue, three at most, and a full queue
+replaces its newest picture and counts it (`replaced_frames`). Without that rule the real frame replaced
+the in-between unread, and a 30 FPS game with smooth motion recorded at 30 pictures a second. The picture is
 scaled with the window's own scaling mode (`SR_PRESENT_SCALING`) into a fixed-size
 target. With `SR_PRESENT_UPSCALE=fsr1` the recording is enlarged by FSR 1 as the window is, at the
 recording's own size and through its own pass, so `SR_VIDEOREC_SIZE` never makes the window's pass

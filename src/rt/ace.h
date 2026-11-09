@@ -176,7 +176,9 @@ typedef struct {
     int ever_stable;
     AceRate last_rate;         /* the last stable K class */
     int smooth;                /* Smooth motion is on for the run */
-    uint32_t betweens;         /* in-betweens it showed in the window */
+    uint32_t betweens;         /* in-betweens that reached the screen in the window */
+    uint32_t shown;            /* distinct pictures that reached the screen: those, the held
+                                * frames and the new frames shown as they are */
 } AceWindow;
 
 typedef struct {
@@ -192,7 +194,7 @@ typedef struct {
     double target_fps;         /* T = 59.94 / k */
     int speed_pct;             /* F / T while PC limited, else 100 */
     int smooth_on;             /* Smooth motion is on: the text says whether it added frames */
-    double shown_fps;          /* with it on, new frames plus in-betweens per second */
+    double shown_fps;          /* with it on, pictures that reached the screen per second */
     char text[64];             /* "100%  30 FPS", "\xE2\x96\xB2 87%  26 FPS  PC LIMITED", "\xE2\x80\x94 27 FPS" */
 } AceReadoutView;
 
@@ -304,11 +306,15 @@ AcePresentKind ace_pace_flip_kind(const AcePace *p);
 
 /* The run's verdict for the flip ace_flip just saw. */
 AceShow ace_smooth_take(void);
+/* The show pass made an in-between for this present: the frame is held for the VBLANK after. It
+ * counts nothing; ace_smooth_note_present counts what the swapchain accepted. */
 void ace_smooth_shown_between(uint64_t now_ns);
 /* One VBLANK: 1 when the held frame should be presented now. Off, it reads nothing. */
 int ace_smooth_vblank(uint32_t vcount);
-/* A present reached the swapchain. A flip's present that showed no in-between is passed as
- * REAL and counted as HELD when it re-showed the held frame. */
+/* A present reached the swapchain (the presenter accepted it). A flip's present that showed no
+ * in-between is passed as REAL and counted as HELD when it re-showed the held frame. This is also
+ * what the readout's "SMOOTH n" counts: an in-between, a held frame, and a flip's own frame when
+ * it was not shown before; a present the presenter dropped is not noted and not counted. */
 void ace_smooth_note_present(AcePresentKind kind, uint64_t now_ns);
 void ace_pace_stats(AcePaceStats *out);
 void ace_pace_stats_add(AcePaceStats *s, AcePresentKind kind, uint64_t now_ns);

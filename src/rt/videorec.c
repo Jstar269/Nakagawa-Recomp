@@ -69,12 +69,15 @@ static int s_exit_status = VR_EXIT_UNKNOWN;
 static uint64_t s_enc_write_us; /* host time spent handing frames to the encoder */
 
 /* Packed BGRX pictures: the one last written (s_out); the newest presented one, which a present
- * writes into the other buffer so a gap frame can still repeat the written picture; and
- * (VR_CARRY) a picture presented after a kept one before that one's VBLANK, which the next VBLANK
- * writes (sr_videorec_frame_keep). */
-#define VR_CARRY 2
-static uint8_t *s_buf[3];
-static int s_buf_filter[3];     /* each picture's SrVideoRecFilter */
+ * writes into the other buffer so a gap frame can still repeat the written picture; and a queue
+ * of up to VR_CARRY_MAX pictures presented after a kept one before that one's VBLANK, which the
+ * next VBLANKs write in order, one each (sr_videorec_frame_keep). */
+#define VR_CARRY_MAX 3
+static uint8_t *s_buf[2];
+static int s_buf_filter[2];     /* each picture's SrVideoRecFilter */
+static uint8_t *s_carry_buf[VR_CARRY_MAX]; /* a ring: s_carry_n pictures from s_carry_head */
+static int s_carry_filter[VR_CARRY_MAX];
+static int s_carry_head, s_carry_n;
 static uint64_t s_filter_frames[SR_VIDEOREC_FILTER_COUNT]; /* written frames, by filter */
 static int s_out;
 static uint8_t *s_cur;
@@ -82,10 +85,10 @@ static uint32_t s_w, s_h;
 static int s_have_frame;
 static int s_cur_new;
 static int s_cur_keep;          /* the waiting picture keeps its VBLANK */
-static int s_carry_new;         /* s_buf[VR_CARRY] waits for the VBLANK after the next */
 static SrVideoRecResolver s_resolver;
 static int s_pending_keep;      /* the picture s_resolver finishes is kept */
-static uint64_t s_carried_frames; /* pictures written one VBLANK after the one they came before */
+static uint64_t s_carried_frames; /* pictures written one VBLANK or more after the one they came before */
+static uint64_t s_replaced_frames; /* carried pictures lost: the queue was full, the newest was replaced */
 
 /* The timeline: video frame k is VBLANK s_vcount0 + k. */
 static uint32_t s_start_vcount; /* SR_VIDEOREC_START: no frame is written before this VBLANK */
@@ -894,8 +897,12 @@ void sr_videorec_frame_filtered(const void *px, uint32_t w, uint32_t h, uint32_t
         if ((uint64_t)w * h * 4u > (uint64_t)1 << 31) { vr_fail("frame too large"); return; }
         s_buf[0] = (uint8_t *)calloc((size_t)w * h, 4u);
         s_buf[1] = (uint8_t *)calloc((size_t)w * h, 4u);
-        s_buf[VR_CARRY] = (uint8_t *)calloc((size_t)w * h, 4u);
-        if (!s_buf[0] || !s_buf[1] || !s_buf[VR_CARRY]) {
+        int ok = s_buf[0] && s_buf[1];
+        for (int i = 0; i < VR_CARRY_MAX; i++) {
+            s_carry_buf[i] = (uint8_t *)calloc((size_t)w * h, 4u);
+            if (!s_carry_buf[i]) ok = 0;
+        }
+        if (!ok) {
             vr_fail("out of memory for the frame store");
             return;
         }
@@ -909,9 +916,20 @@ void sr_videorec_frame_filtered(const void *px, uint32_t w, uint32_t h, uint32_t
         return;
     }
     const uint8_t *src = (const uint8_t *)px;
-    /* A picture presented after a kept one waits for the next VBLANK; the newest such wins. */
-    int slot = s_cur_new && s_cur_keep ? VR_CARRY : 1 - s_out;
-    uint8_t *dst = s_buf[slot];
+    /* A picture presented after a kept one waits for a VBLANK of its own, behind any already
+     * waiting. With the queue full the newest waiting picture is replaced and that is counted. */
+    int carry = s_cur_new && s_cur_keep;
+    int slot = 1 - s_out;
+    if (carry) {
+        if (s_carry_n < VR_CARRY_MAX) {
+            slot = (s_carry_head + s_carry_n) % VR_CARRY_MAX;
+            s_carry_n++;
+        } else {
+            slot = (s_carry_head + s_carry_n - 1) % VR_CARRY_MAX;
+            s_replaced_frames++;
+        }
+    }
+    uint8_t *dst = carry ? s_carry_buf[slot] : s_buf[slot];
     for (uint32_t y = 0; y < h; y++) {
         const uint8_t *s = src + (size_t)y * row_bytes;
         uint8_t *d = dst + (size_t)y * w * 4u;
@@ -926,11 +944,10 @@ void sr_videorec_frame_filtered(const void *px, uint32_t w, uint32_t h, uint32_t
             }
         }
     }
-    s_buf_filter[slot] = filter;
+    if (carry) s_carry_filter[slot] = filter;
+    else s_buf_filter[slot] = filter;
     s_have_frame = 1;
-    if (slot == VR_CARRY) {
-        s_carry_new = 1;
-    } else {
+    if (!carry) {
         s_cur = dst;
         s_cur_new = 1;
         s_cur_keep = 0;
@@ -940,7 +957,7 @@ void sr_videorec_frame_filtered(const void *px, uint32_t w, uint32_t h, uint32_t
 /* The newest picture handed over keeps its VBLANK. A carried picture already does (vr_take_carry
  * marks it when it becomes the waiting one). */
 static void vr_keep_newest(void) {
-    if (!s_carry_new && s_cur_new) s_cur_keep = 1;
+    if (!s_carry_n && s_cur_new) s_cur_keep = 1;
 }
 
 void sr_videorec_frame_keep(void) {
@@ -958,21 +975,24 @@ void sr_videorec_frame_pending(SrVideoRecResolver resolver) {
     s_pending_keep = 0;
 }
 
-/* After a VBLANK wrote its frame: the picture carried past that VBLANK becomes the next one's.
- * It was already moved once, so it keeps that VBLANK; a later picture is carried in its turn. */
+/* After a VBLANK wrote its frame: the oldest picture carried past that VBLANK becomes the next
+ * one's. It was already moved once, so it keeps that VBLANK; a later picture is carried in its
+ * turn. */
 static void vr_take_carry(void) {
-    if (!s_carry_new) return;
+    if (!s_carry_n) return;
     int next = 1 - s_out;
+    int h = s_carry_head;
     uint8_t *b = s_buf[next];
     int bf = s_buf_filter[next];
-    s_buf[next] = s_buf[VR_CARRY];
-    s_buf_filter[next] = s_buf_filter[VR_CARRY];
-    s_buf[VR_CARRY] = b;
-    s_buf_filter[VR_CARRY] = bf;
+    s_buf[next] = s_carry_buf[h];
+    s_buf_filter[next] = s_carry_filter[h];
+    s_carry_buf[h] = b;
+    s_carry_filter[h] = bf;
+    s_carry_head = (h + 1) % VR_CARRY_MAX;
+    s_carry_n--;
     s_cur = s_buf[next];
     s_cur_new = 1;
     s_cur_keep = 1;
-    s_carry_new = 0;
     s_carried_frames++;
 }
 
@@ -1239,7 +1259,8 @@ static int vr_fill_full(FILE *j, const void *ctx) {
                    "  \"width\": %u,\n  \"height\": %u,\n"
                    "  \"fps_num\": %u,\n  \"fps_den\": %u,\n  \"first_vcount\": %u,\n"
                    "  \"frames\": %llu,\n  \"new_frames\": %llu,\n  \"repeat_frames\": %llu,\n"
-                   "  \"carried_frames\": %llu,\n  \"guest_flips\": %llu,\n"
+                   "  \"carried_frames\": %llu,\n  \"replaced_frames\": %llu,\n"
+                   "  \"guest_flips\": %llu,\n"
                    "  \"gap_frames\": %llu,\n  \"late_vblanks\": %llu,\n  \"refused_frames\": %llu,\n"
                    "  \"readback_failures\": %llu,\n"
                    "  \"audio_rate\": %u,\n  \"audio_samples\": %llu,\n"
@@ -1254,7 +1275,8 @@ static int vr_fill_full(FILE *j, const void *ctx) {
                    s_w, s_h, SR_VIDEOREC_FPS_NUM,
                    SR_VIDEOREC_FPS_DEN, s_vcount0, (unsigned long long)s_frames,
                    (unsigned long long)s_new_frames, (unsigned long long)s_repeat_frames,
-                   (unsigned long long)s_carried_frames, (unsigned long long)s_guest_flips,
+                   (unsigned long long)s_carried_frames, (unsigned long long)s_replaced_frames,
+                   (unsigned long long)s_guest_flips,
                    (unsigned long long)s_gap_frames, (unsigned long long)s_late_vblanks,
                    (unsigned long long)s_refused_frames, (unsigned long long)s_resolve_failures,
                    SR_VIDEOREC_AUDIO_RATE, (unsigned long long)s_audio_samples,
@@ -1324,11 +1346,11 @@ int sr_videorec_finish_status(const char *run_end, int exit_status) {
     char exit_text[16] = "unknown";
     if (s_exit_status != VR_EXIT_UNKNOWN) snprintf(exit_text, sizeof exit_text, "%d", s_exit_status);
     fprintf(stderr,
-            "VIDEOREC: %s frames=%llu new=%llu repeat=%llu carried=%llu gap=%llu late_vblanks=%llu "
+            "VIDEOREC: %s frames=%llu new=%llu repeat=%llu carried=%llu replaced=%llu gap=%llu late_vblanks=%llu "
             "audio_samples=%llu encoder=%s encoder_write_ms=%llu run_end=\"%s\" exit_status=%s%s%s\n",
             s_failed || !written ? "FAIL" : "PASS", (unsigned long long)s_frames,
             (unsigned long long)s_new_frames, (unsigned long long)s_repeat_frames,
-            (unsigned long long)s_carried_frames,
+            (unsigned long long)s_carried_frames, (unsigned long long)s_replaced_frames,
             (unsigned long long)s_gap_frames, (unsigned long long)s_late_vblanks,
             (unsigned long long)s_audio_samples, s_codec,
             (unsigned long long)(s_enc_write_us / 1000u), s_run_end, exit_text,
@@ -1374,6 +1396,7 @@ void sr_videorec_test_stats(SrVideoRecStats *out) {
     out->guest_flips = s_guest_flips;
     out->repeat_frames = s_repeat_frames;
     out->carried_frames = s_carried_frames;
+    out->replaced_frames = s_replaced_frames;
     out->gap_frames = s_gap_frames;
     out->late_vblanks = s_late_vblanks;
     out->refused_frames = s_refused_frames;
@@ -1395,9 +1418,14 @@ void sr_videorec_test_reset(void) {
     if (s_enc.running) (void)vr_proc_finish(&s_enc);
     free(s_buf[0]);
     free(s_buf[1]);
-    free(s_buf[VR_CARRY]);
-    s_buf[0] = s_buf[1] = s_buf[VR_CARRY] = NULL;
-    s_buf_filter[0] = s_buf_filter[1] = s_buf_filter[VR_CARRY] = SR_VIDEOREC_FILTER_NONE;
+    s_buf[0] = s_buf[1] = NULL;
+    s_buf_filter[0] = s_buf_filter[1] = SR_VIDEOREC_FILTER_NONE;
+    for (int i = 0; i < VR_CARRY_MAX; i++) {
+        free(s_carry_buf[i]);
+        s_carry_buf[i] = NULL;
+        s_carry_filter[i] = SR_VIDEOREC_FILTER_NONE;
+    }
+    s_carry_head = s_carry_n = 0;
     memset(s_filter_frames, 0, sizeof s_filter_frames);
     s_out = 0;
     free(s_ring);
@@ -1419,8 +1447,8 @@ void sr_videorec_test_reset(void) {
     memset(&s_enc, 0, sizeof s_enc);
     s_w = s_h = 0;
     s_have_frame = s_cur_new = s_started = s_failed = 0;
-    s_cur_keep = s_carry_new = s_pending_keep = 0;
-    s_carried_frames = 0;
+    s_cur_keep = s_pending_keep = 0;
+    s_carried_frames = s_replaced_frames = 0;
     s_resolver = NULL;
     s_vcount0 = s_last_vcount = 0;
     s_start_vcount = s_seen_vcount = 0;

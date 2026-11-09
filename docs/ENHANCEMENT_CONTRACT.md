@@ -443,8 +443,9 @@ With `smooth=x2`, a title the 30 Hz detector holds steady at 30 presents at the 
   the feature. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
   30 Hz after a second of agreement and leaves after half a second of disagreement.
 - **Never off without saying so.** The setting's description says it acts on steady 30 FPS scenes only. With the
-  speed readout on, its text ends with `SMOOTH n`, the pictures a second that reached the screen with the
-  in-betweens, or `SMOOTH OFF` for a second in which it added none: another frame rate, a PC that cannot keep up, or
+  speed readout on, its text ends with `SMOOTH n`, the distinct pictures a second that reached the screen (the
+  in-betweens, the held real frames and any new frame shown as it is; a present the presenter dropped is not
+  counted), or `SMOOTH OFF` for a second in which it added none: another frame rate, a PC that cannot keep up, or
   no Vulkan device for it.
 - **Recording.** A run recording (`SR_VIDEOREC_DIR`) holds what the window shows, in-betweens included: the recorder
   keeps each in-between for its own VBLANK and writes the held real frame at the next one. Its `frames.csv` and
@@ -453,8 +454,8 @@ With `smooth=x2`, a title the 30 Hz detector holds steady at 30 presents at the 
   behind it.
 - **Known limit.** A figure whose pose changes a lot between two frames on a plain floor (a player serving) can
   lose most of its pixels in the in-between: no vector carries it, and at each pixel the composition takes whichever
-  frame shows the floor there. Until the composition judges objects rather than pixels, such a figure flickers for
-  one picture in two.
+  frame shows the floor there. The composition judges pixels, not objects, so such a figure flickers for one
+  picture in two.
 - **Cuts.** When a third of the blocks fit nothing or disagree with their neighbours, the two frames are different
   pictures: the in-between is the old frame, and the new one follows on its VBLANK.
 - **What it never touches.** The in-between and the held frame are private images blitted to the swapchain. The

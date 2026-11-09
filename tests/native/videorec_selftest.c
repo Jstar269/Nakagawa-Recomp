@@ -14,8 +14,9 @@
 //   - channel volume (0x8000 unity), the sum of two channels, and clipping;
 //   - a GE-order (RGBX) picture is written in the video's BGRX order;
 //   - a kept picture (a smooth-motion in-between) keeps its VBLANK and the picture after it
-//     goes to the next one, a pending kept picture is read back before it can be replaced, and
-//     without a keep the newest picture wins;
+//     goes to the next one, pictures behind a carried one queue and are written in order, one
+//     per VBLANK, a full queue replaces its newest picture and counts it, a pending kept picture
+//     is read back before it can be replaced, and without a keep the newest picture wins;
 //   - a picture of another size is refused and reported, never written;
 //   - the recorder never writes the pixels or samples it is handed;
 //   - with FFmpeg on PATH, the FFV1 encode and the mux finish with status PASS (SKIP otherwise);
@@ -374,6 +375,51 @@ static void test_keep(const char *root) {
     n = read_firsts(dir, got, 16);
     CHECK(n == 3 && got[1] == 0xB0u && got[2] == 0xB0u && st.carried_frames == 0,
           "without a keep, a later picture replaces the earlier one");
+
+    /* A kept in-between presented while a carried real frame still waits goes behind it, not over
+     * it: A, M1 kept with B1 after it, then M2 kept and B2 before the VBLANK that writes B1. */
+    snprintf(dir, sizeof dir, "%s/keep-queue", root);
+    CHECK(sr_videorec_test_start(dir, "raw"), "the carry queue recording starts");
+    fill(px, 0xA0u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_vblank(400, vtime(400));                              /* A */
+    fill(px, 0x10u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_frame_keep();                                          /* M1 */
+    fill(px, 0xB0u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX); /* B1, carried */
+    sr_videorec_vblank(401, vtime(401));                              /* M1 */
+    fill(px, 0x20u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_frame_keep();                                          /* M2, behind B1 */
+    fill(px, 0xC0u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX); /* B2, behind M2 */
+    sr_videorec_vblank(402, vtime(402));                              /* B1 */
+    sr_videorec_vblank(403, vtime(403));                              /* M2 */
+    sr_videorec_vblank(404, vtime(404));                              /* B2 */
+    sr_videorec_test_stats(&st);
+    CHECK(sr_videorec_finish() == 1, "the carry queue recording reports PASS");
+    n = read_firsts(dir, got, 16);
+    CHECK(n == 5 && got[0] == 0xA0u && got[1] == 0x10u && got[2] == 0xB0u && got[3] == 0x20u &&
+              got[4] == 0xC0u,
+          "carried pictures are written in order, one per VBLANK, none lost");
+    CHECK(st.replaced_frames == 0 && st.carried_frames == 3 && st.repeat_frames == 0,
+          "a queue that never filled replaces nothing");
+
+    /* With the queue full the newest picture replaces the newest queued one, and that is counted. */
+    snprintf(dir, sizeof dir, "%s/keep-full", root);
+    CHECK(sr_videorec_test_start(dir, "raw"), "the full carry queue recording starts");
+    fill(px, 0xA0u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_vblank(500, vtime(500));                              /* A */
+    fill(px, 0x10u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_frame_keep();                                          /* M */
+    for (uint32_t i = 1; i <= 4; i++) {                                /* P1..P4, three fit */
+        fill(px, 0x20u + i); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    }
+    for (uint32_t v = 501; v <= 504; v++) sr_videorec_vblank(v, vtime(v));
+    sr_videorec_test_stats(&st);
+    CHECK(sr_videorec_finish() == 1, "the full carry queue recording reports PASS");
+    n = read_firsts(dir, got, 16);
+    CHECK(n == 5 && got[0] == 0xA0u && got[1] == 0x10u && got[2] == 0x21u && got[3] == 0x22u &&
+              got[4] == 0x24u,
+          "a full queue replaces its newest picture and the rest stay in order");
+    CHECK(st.replaced_frames == 1 && st.carried_frames == 3,
+          "the picture a full queue lost is counted");
     sr_videorec_test_reset();
 }
 
