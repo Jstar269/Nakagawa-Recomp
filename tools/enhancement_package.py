@@ -76,6 +76,14 @@ SITE_TRANSFORMS = frozenset({
     "count_x2_even",
     "gate_30hz_hold",
     "gate_30hz_alt",
+    "clip_x_widen",
+})
+
+# Transforms of a guest_memory_code_hook package (contract section 10.8, "Next layer"): they act
+# on guest memory after a call returns, never on a frame-rate constant, so a timing package may
+# not use them and a code-hook package may use nothing else.
+CODE_HOOK_TRANSFORMS = frozenset({
+    "clip_x_widen",
 })
 
 # What a site's instruction builds, when its encoding alone cannot say: the upper
@@ -86,6 +94,13 @@ SITE_OPERANDS = frozenset({
 
 # The registers that carry a function's first eight arguments (MIPS EABI): the
 # caller rebuilds them for each call, so an argument_x2 site may double them.
+# The registers that carry a call's result (MIPS EABI): a clip_x_widen site reads the guest
+# pointer a call returned from one of them.
+RESULT_REGISTERS = {
+    "v0": 2,
+    "v1": 3,
+}
+
 ARGUMENT_REGISTERS = {
     "a0": 4,
     "a1": 5,
@@ -226,6 +241,8 @@ SITE_KEYS = frozenset({
     "stock_values",
     "requires",
     "alternates",
+    "clip_register",
+    "clip_offsets",
 })
 
 # The instruction where one logic update of the title begins: it runs exactly once per update.
@@ -493,18 +510,28 @@ def validate_package(data: Any) -> dict[str, Any]:
 
     # Validate timing / frame-rate rescale fields (fail-closed consistency)
     present_timing_keys = sorted(set(data.keys()) & (TIMING_PACKAGE_KEYS | OPTIONAL_TIMING_PACKAGE_KEYS))
+    code_hook = category == "guest_memory_code_hook"
     if present_timing_keys:
-        if category != "timing_frame_presentation":
+        if category != "timing_frame_presentation" and not code_hook:
             fail(
                 "category",
                 f"Fields {present_timing_keys} are only valid for category "
-                f"'timing_frame_presentation', got {category!r}",
+                f"'timing_frame_presentation' or 'guest_memory_code_hook', got {category!r}",
             )
-        for req_timing in ("game_version", "executable_sha256", "rng_policy", "sites"):
+        if code_hook:
+            # A code-hook package pins the executable and lists its sites; it has no frame-rate
+            # state, so no RNG policy, update boundary or data rewrite.
+            extra = sorted(set(present_timing_keys) - {"game_version", "executable_sha256", "sites"})
+            if extra:
+                fail("category", f"Fields {extra} are not valid for category 'guest_memory_code_hook'")
+        required_keys = (("game_version", "executable_sha256", "sites") if code_hook
+                         else ("game_version", "executable_sha256", "rng_policy", "sites"))
+        for req_timing in required_keys:
             if req_timing not in data:
-                fail("$", f"Missing required timing package property {req_timing!r}")
+                fail("$", f"Missing required {'code-hook' if code_hook else 'timing'} package property {req_timing!r}")
         if title_id == "*":
-            fail("target_title_id", "Timing rescale package must target a specific title id, not '*'")
+            fail("target_title_id", ("Code-hook package" if code_hook else "Timing rescale package")
+                 + " must target a specific title id, not '*'")
 
         # Validate game_version
         game_ver = data["game_version"]
@@ -526,26 +553,28 @@ def validate_package(data: Any) -> dict[str, Any]:
             )
 
         # Validate rng_policy
-        rng = data["rng_policy"]
-        if not isinstance(rng, dict):
-            fail("rng_policy", f"rng_policy must be an object, got {type(rng).__name__}")
-        unknown_rng_keys = sorted(set(rng.keys()) - RNG_POLICY_KEYS)
-        if unknown_rng_keys:
-            fail("rng_policy", f"Unknown properties forbidden in rng_policy: {unknown_rng_keys}")
-        for req_rng in ("mode", "reason"):
-            if req_rng not in rng:
-                fail("rng_policy", f"Missing required property {req_rng!r} in rng_policy")
-        rng_mode = rng["mode"]
-        if not isinstance(rng_mode, str) or rng_mode not in RNG_POLICY_MODES:
-            fail(
-                "rng_policy.mode",
-                f"Unknown rng_policy mode: {rng_mode!r}; must be one of {sorted(RNG_POLICY_MODES)}",
-            )
-        rng_reason = rng["reason"]
-        if not isinstance(rng_reason, str) or not rng_reason.strip():
-            fail("rng_policy.reason", "rng_policy.reason must be a non-empty string")
-        if rng_reason != rng_reason.strip():
-            fail("rng_policy.reason", "rng_policy.reason must not have leading or trailing whitespace")
+        # A guest_memory_code_hook package carries no rng_policy (its keys are refused above).
+        if not code_hook:
+            rng = data["rng_policy"]
+            if not isinstance(rng, dict):
+                fail("rng_policy", f"rng_policy must be an object, got {type(rng).__name__}")
+            unknown_rng_keys = sorted(set(rng.keys()) - RNG_POLICY_KEYS)
+            if unknown_rng_keys:
+                fail("rng_policy", f"Unknown properties forbidden in rng_policy: {unknown_rng_keys}")
+            for req_rng in ("mode", "reason"):
+                if req_rng not in rng:
+                    fail("rng_policy", f"Missing required property {req_rng!r} in rng_policy")
+            rng_mode = rng["mode"]
+            if not isinstance(rng_mode, str) or rng_mode not in RNG_POLICY_MODES:
+                fail(
+                    "rng_policy.mode",
+                    f"Unknown rng_policy mode: {rng_mode!r}; must be one of {sorted(RNG_POLICY_MODES)}",
+                )
+            rng_reason = rng["reason"]
+            if not isinstance(rng_reason, str) or not rng_reason.strip():
+                fail("rng_policy.reason", "rng_policy.reason must be a non-empty string")
+            if rng_reason != rng_reason.strip():
+                fail("rng_policy.reason", "rng_policy.reason must not have leading or trailing whitespace")
 
         # Validate sites
         sites = data["sites"]
@@ -605,6 +634,14 @@ def validate_package(data: Any) -> dict[str, Any]:
                 fail(
                     tf_path,
                     f"Unknown site transform: {transform!r}; must be one of {sorted(SITE_TRANSFORMS)}",
+                )
+            if (transform in CODE_HOOK_TRANSFORMS) != code_hook:
+                fail(
+                    tf_path,
+                    f"site transform {transform!r} "
+                    + ("is not a code-hook transform; a guest_memory_code_hook package takes only "
+                       f"{sorted(CODE_HOOK_TRANSFORMS)}" if code_hook else
+                       "acts on guest memory and needs category 'guest_memory_code_hook'"),
                 )
             _validate_site_extras(site, site_path)
 
@@ -701,6 +738,24 @@ def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
         required = site["requires"]
         if not isinstance(required, list) or not required or not all(isinstance(r, str) for r in required):
             fail(f"{path}.requires", "requires must be a non-empty list of site ids")
+    if transform == "clip_x_widen":
+        # Contract section 10.8: after the call at the site returns, the runtime scales the
+        # x output row of the 4x4 clip matrices at clip_offsets from the pointer in clip_register.
+        reg = site.get("clip_register")
+        if not isinstance(reg, str) or reg not in RESULT_REGISTERS:
+            fail(f"{path}.clip_register",
+                 f"clip_x_widen needs clip_register, one of {sorted(RESULT_REGISTERS)}")
+        offsets = site.get("clip_offsets")
+        if (not isinstance(offsets, list) or not 1 <= len(offsets) <= 4
+                or not all(isinstance(o, int) and not isinstance(o, bool) and 0 <= o <= 65536 and o % 16 == 0
+                           for o in offsets)
+                or len(set(offsets)) != len(offsets)):
+            fail(f"{path}.clip_offsets",
+                 "clip_x_widen needs clip_offsets, 1 to 4 distinct 16-byte-aligned offsets in [0, 65536]")
+        if site["word_count"] != 1:
+            fail(f"{path}.word_count", "clip_x_widen names one jal (word_count 1)")
+    elif "clip_register" in site or "clip_offsets" in site:
+        fail(path, "clip_register and clip_offsets belong only to clip_x_widen")
     if transform == "gate_30hz_alt":
         alternates = site.get("alternates")
         if (not isinstance(alternates, list) or not 1 <= len(alternates) <= ALT_GATE_MAX_ALTERNATES
@@ -2420,7 +2475,9 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
       ``scale_f_addend``  run ``fd = fd +/- ft`` with ``ft`` multiplied by ``factor``;
       ``map_f_reg``       after the stock lwc1, map FPR ``reg`` by ``map`` (decay or retention);
       ``scale_v_reg``     after the stock lv.s, multiply VFPU register ``vreg`` by ``factor``;
-      ``map_v_reg``       after the stock lv.s, map VFPU register ``vreg`` by ``map``.
+      ``map_v_reg``       after the stock lv.s, map VFPU register ``vreg`` by ``map``;
+      ``clip_x_widen``    after the stock jal returns, scale the x row of the clip matrices at ``offsets``
+                          from GPR ``reg`` by the run-time widen factor (contract section 10.8).
     """
     w = int(w) & 0xFFFFFFFF
     tf = site["transform"]
@@ -2509,6 +2566,12 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
         if rt == 0 or rt == rs:
             _refuse(site, w, "count_x2_even needs a destination other than $zero and the counter")
         return {"kind": "word_even", "word": _with_imm(w, 2 * simm16), "reg": rs, "rt": rt}
+
+    if tf == "clip_x_widen":
+        if not is_jal:
+            _refuse(site, w, "clip_x_widen takes a jal: it acts after the call returns")
+        return {"kind": "clip_x_widen", "reg": RESULT_REGISTERS[site["clip_register"]],
+                "offsets": [int(o) for o in site["clip_offsets"]]}
 
     if tf == "gate_30hz":
         if is_jal or is_jalr:

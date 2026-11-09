@@ -456,6 +456,12 @@ int       ge_wide_wing_for(int window_w, int window_h);
 /* Turn Fill on with wing width `wing` (rounded down to a multiple of 4, capped), or off with 0.
  * A change clears every canvas. Returns the width in use. */
 int       ge_wide_set_wing(int wing);
+/* Whether the clip_x_widen hook may scale (the run's Ace cull key, after Widescreen is up), and how
+ * many matrices it has scaled so far (the run reports the key as confirmed once that is above 0). */
+void      ge_wide_set_cull(int on);
+unsigned long ge_wide_cull_calls(void);
+/* Matrix uses left unscaled because the hook's 4096-entry table was full (contract 11.3.6). */
+unsigned long ge_wide_cull_untracked(void);
 int       ge_wide_wing(void);
 /* The display was given framebuffer `fb_addr`: its canvas exists from now on. The last two
  * distinct addresses keep canvases (double buffering). No effect while Fill is off. */

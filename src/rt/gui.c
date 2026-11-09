@@ -646,10 +646,23 @@ static void gui_wide_init(void) {
     }
     s_wide_on = 1;
     ace_confirm(ACE_FEATURE_WIDE);
+    ge_wide_set_cull(effective->cull);
+}
+
+static void gui_cull_sync(void) {
+    /* Confirmed only while no matrix was left alone; a full table is a partial run (contract 11.3.6). */
+    ace_set_cull_untracked(ge_wide_cull_untracked());
+    if (ge_wide_cull_untracked())
+        ace_feature_unavailable(ACE_FEATURE_CULL,
+                                "partial: the 4096-matrix table filled, later matrices were left alone");
+    else if (ge_wide_cull_calls())
+        ace_confirm(ACE_FEATURE_CULL);   /* the title's hook has run */
 }
 
 static void gui_wide_release(void) {
+    gui_cull_sync();
     if (s_wide_on) (void)ge_wide_set_wing(0);
+    ge_wide_set_cull(0);
     s_wide_on = 0;
 }
 
@@ -1196,6 +1209,7 @@ static void gui_wide_update(uint32_t fbaddr) {
     int w = 0, h = 0;
     if (!s_wide_on) return;
     if (sdl3vk_window_pixel_size(&w, &h)) (void)ge_wide_set_wing(ge_wide_wing_for(w, h));
+    gui_cull_sync();
     ge_wide_note_display(fbaddr);
 }
 
