@@ -2533,7 +2533,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertEqual(order, sorted(order))
         self.assertIn("ycbcr_mode = 2; ycbcr_mode <= 3", run)
         helper = probe[probe.index("static void mpy_ycbcr_mode("):start]
-        for call in ("sceMpegAvcQueryYCbCrSize(", "sceMpegAvcInitYCbCr(", "sceMpegAvcDecodeYCbCr(",
+        for call in ("sceMpegAvcQueryYCbCrSize(", "sceMpegAvcInitYCbCr(", "mpy_decode_bounded(",
                      "mpy_csc_buf(", "sceMpegAvcDecodeStopYCbCr(", '"m%d-qsize"', '"m%d-init"',
                      '"m%d-decode-end"', '"ycbcr-m%d-picture"', '"m%d-full"', '"m%d-decode-stop"'):
             self.assertIn(call, helper)
@@ -2547,6 +2547,27 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertIn('"m%d-stream-ring-construct"', fresh)
         # A refusal never drops a record: every skipped call is still written with the return value.
         self.assertGreaterEqual(helper.count("mpy_not_called("), 5)
+
+    def test_mpeg_ycbcr_mode_decodes_are_bounded_and_a_block_stops_every_later_call(self) -> None:
+        # #302: on boot 145 the second sceMpegAvcDecodeYCbCr of mode 3 never returned. Each mode 2 and 3
+        # decode runs in a helper thread with a deadline; a call still running is recorded and no later
+        # MPEG call is made (no stop, CSC, teardown, finish or module unload).
+        probe = (self.root / "fixtures" / "psp_oracle" / "probe.c").read_text(encoding="utf-8")
+        helper = probe[probe.index("static int mpy_decode_thread("):probe.index("static void mpy_ycbcr_mode(")]
+        for text in ("sceKernelWaitThreadEnd(thid, &timeout)", "MPY_DECODE_DEADLINE_US", "s_mpy_blocked = 1",
+                     "return MPY_WAIT_TIMEOUT"):
+            self.assertIn(text, helper)
+        mode = probe[probe.index("static void mpy_ycbcr_mode("):probe.index("static void mpy_ycbcr_mode_fresh(")]
+        self.assertIn("mpy_decode_bounded(mpeg, &s_mpy_au, &ptr, &init)", mode)
+        self.assertNotIn("= sceMpegAvcDecodeYCbCr(", mode)
+        self.assertIn("if (init_ok && !s_mpy_blocked)", mode)   # no sceMpegAvcDecodeStopYCbCr after a block
+        self.assertIn('"decode-blocked"', mode)
+        fresh = probe[probe.index("static void mpy_ycbcr_mode_fresh("):probe.index("static void run_mpeg_ycbcr(")]
+        cleanup = fresh[fresh.index("cleanup:"):]
+        self.assertLess(cleanup.index("if (s_mpy_blocked)"), cleanup.index("sceMpegFreeAvcEsBuf("))
+        run = probe[probe.index("static void run_mpeg_ycbcr("):]
+        self.assertLess(run.index("ycbcr_mode <= 3 && !s_mpy_blocked"), run.index("if (s_mpy_blocked) goto park;"))
+        self.assertLess(run.index("if (s_mpy_blocked) goto park;"), run.index("sceMpegFinish();"))
 
     def test_sas_adsr_case_links_sascore_and_covers_the_adsr_calls(self) -> None:
         # The case's own LIBS block links the SAS and utility stubs; without them the PRX

@@ -25,7 +25,7 @@ import zipfile
 try:
     from .nk_core.git_isolation import run_git
 except ImportError:
-    from nk_core.git_isolation import run_git
+    from nk_core.git_isolation import run_git  # type: ignore[no-redef]
 
 
 ROOT = Path(__file__).resolve().parent.parent
