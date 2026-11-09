@@ -319,7 +319,7 @@ static int present_slot_due(void) {
  * never for a frame an armed file or evidence capture is waiting for (SR_FBDUMP, SR_FBSNAP, the
  * capture tools): that frame waits and is served, as before. The picture probe is not such a
  * capture; a probe on a frame the display could not take resolves as nothing attempted. */
-static int gui_present_nowait(int paced, int capture_armed, int capture_is_probe) {
+static int gui_frame_may_skip_busy_display(int paced, int capture_armed, int capture_is_probe) {
     return paced && !(capture_armed && !capture_is_probe);
 }
 
@@ -1419,10 +1419,10 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
         accepted = 0;
         /* While the scheduler paces the guest to real time (the default), a game frame never
          * waits for the display: a FIFO (VSync) swapchain that still holds every image returns
-         * DISPLAY_BUSY instead of holding back the guest's VBLANK clock (gui_present_nowait). */
+         * DISPLAY_BUSY instead of holding back the guest's VBLANK clock (gui_frame_may_skip_busy_display). */
         {
             extern int sched_vbl_paced(void);
-            sdl3vk_set_present_nowait(gui_present_nowait(sched_vbl_paced(), sr_capture_is_armed(),
+            sdl3vk_set_present_nowait(gui_frame_may_skip_busy_display(sched_vbl_paced(), sr_capture_is_armed(),
                                                          sr_capture_pending_is_probe()));
         }
         /* While the on-screen keyboard is open the frame must pass through the host copy the
@@ -2407,17 +2407,15 @@ static void selftest_hold_frame(int result) {
     s_stub_held_result = result;
 }
 
-/* A press and release that the held present's event read records reach the game's sample in
- * the same VBLANK; the sample then consumes it, as on any other VBLANK. */
 /* A paced present may skip a busy display, except for a frame an armed file or evidence capture
  * waits for; an unpaced run always waits. A busy GPU present is not shown and never falls
  * through to the CPU path, which would redraw it from guest VRAM. */
 static void selftest_display_busy_frames(void) {
-    assert(gui_present_nowait(1, 0, 0) == 1);
-    assert(gui_present_nowait(1, 1, 1) == 1);   /* the picture probe */
-    assert(gui_present_nowait(1, 1, 0) == 0);   /* SR_FBDUMP, SR_FBSNAP, a capture tool */
-    assert(gui_present_nowait(0, 0, 0) == 0);   /* deterministic clock or turbo */
-    assert(gui_present_nowait(0, 1, 1) == 0);
+    assert(gui_frame_may_skip_busy_display(1, 0, 0) == 1);
+    assert(gui_frame_may_skip_busy_display(1, 1, 1) == 1);   /* the picture probe */
+    assert(gui_frame_may_skip_busy_display(1, 1, 0) == 0);   /* SR_FBDUMP, SR_FBSNAP, a capture tool */
+    assert(gui_frame_may_skip_busy_display(0, 0, 0) == 0);   /* deterministic clock or turbo */
+    assert(gui_frame_may_skip_busy_display(0, 1, 1) == 0);
     assert(gui_gpu_result_action(GEGPU_PRESENT_DISPLAY_BUSY) == GUI_GPU_NOT_SHOWN);
     assert(gui_gpu_result_action(GEGPU_PRESENT_SHOWN) == GUI_GPU_SHOWN);
     assert(gui_gpu_result_action(GEGPU_PRESENT_WINDOW_CLOSED) == GUI_GPU_CLOSED);
@@ -2425,6 +2423,8 @@ static void selftest_display_busy_frames(void) {
     assert(gui_gpu_result_action(GEGPU_PRESENT_TARGET_FAILED) == GUI_GPU_TRY_CPU);
 }
 
+/* A press and release that the held present's event read records reach the game's sample in
+ * the same VBLANK; the sample then consumes it, as on any other VBLANK. */
 static void selftest_held_present_passes_a_tap_to_the_game(void) {
     const uint32_t cross = 0x4000u;
     s_quit_requested = 0;
