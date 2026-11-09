@@ -300,7 +300,7 @@ typedef enum GeProfileCheck {
 
 /* GPU rasterizer hooks. The primitive hooks return 1 when the primitive was taken by
  * the GPU backend (the software rasterizer is skipped) — in the full GPU renderer they
- * always take it. flush(reason) is called at GE sync points ("listend", "loadclut");
+ * always take it. flush(reason) is called at GE sync points ("listend", "xfersrc");
  * the backend decides what each requires. vram_dirty(addr,bytes) is a POST-WRITE notification:
  * guest memory already contains the CPU's new bytes. An overlapping persistent target must
  * merge exactly that byte span, preserve newer GPU bytes outside it, and prevent an older
