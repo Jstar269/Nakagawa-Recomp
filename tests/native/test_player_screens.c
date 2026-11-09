@@ -44,7 +44,8 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
     {"Game badge", "On", "Names the mode for a few seconds when a game starts."},
     {"Widescreen", "Off", "Shows more 3D space; HUD stays shaped. Some objects pop in. Smooth "
                             "motion disables it."},
-    {"Smooth motion", "Off", "Shows 30 FPS games at 60. Adds about 17 ms of delay."},
+    {"Smooth motion", "Off", "Shows steady 30 FPS scenes at 60, others as they are. Adds about 17 "
+                              "ms of delay."},
     {"Clean pitched sound", "Off",
      "Resamples pitched effects without aliasing. The game receives changed samples."},
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
