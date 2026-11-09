@@ -1367,7 +1367,10 @@ Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and wh
 The intended producers are `CI required` and `Hygiene and security` from `ci.yml`, `OSV
 Vulnerability Scan` from `osv-scanner.yml`, `dependency-review` from `dependency-review.yml`
 (all `pull_request`), and the provenance attestation from `provenance-attestation.yml`
-(`pull_request_target`). A run still in progress gives `pending`. While any producer has
+(`pull_request_target`). In a fork, where the attestation job is skipped, that last producer is the
+same workflow's **Fork provenance check** instead (`producers_for` in the verifier,
+[`FORKING.md`](FORKING.md)); the upstream, matched by repository ID or name, always judges the
+attestation. A run still in progress gives `pending`. While any producer has
 no run at the head yet, or its newest run is unfinished, the verifier reads only the head's
 workflow runs and posts `pending`. The full read, about a dozen API calls, waits for the
 last producer to finish. Running it on every completion exhausted the repository's

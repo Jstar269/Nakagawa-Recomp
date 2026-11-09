@@ -47,6 +47,7 @@ Each row is something you are about to do. Find yours and read what it points to
 | Decide whether a surface is title-specific or generic | [`provenance/HST_PUBLIC_CENSUS.md`](provenance/HST_PUBLIC_CENSUS.md) |
 | Work with an AI agent (yours or the maintainer's) | [`AGENTS.md`](../AGENTS.md) (the policy authority; its "Where to start" is the quick start), then [`REVIEW.md`](../REVIEW.md) when reviewing |
 | Contribute, sign off, or report a vulnerability | [`SECURITY.md`](../SECURITY.md), [`CONTRIBUTING.md`](../CONTRIBUTING.md), [`DCO_POLICY.md`](DCO_POLICY.md) |
+| Fork the project and maintain the fork | [`FORKING.md`](FORKING.md) |
 
 ## Maintained engineering guides
 
@@ -218,6 +219,7 @@ Every substantial document carries one status.
 | `TITLE_TESTING.md` | CURRENT | Public title qualification: manifest and input-profile validation, sandboxed native-player smoke, bring-up-schema report and sweep vocabulary (#699) |
 | `SHOWCASE.md` | CURRENT | Source-owned showcase demos: sources, packaging, player discovery and notices (#309) |
 | `CI.md` | CURRENT | Hosted-check routing and evidence limits |
+| `FORKING.md` | CURRENT | Fork path: what a fork inherits, becoming its provenance authority, bringing up a game, sending fixes upstream |
 | `PARSER_SAFETY_INVENTORY.json` | CURRENT | Per-boundary hostile-input/resource and campaign inventory (#319); does not establish issue completion |
 | `DEBUGGING.md` | CURRENT | Diagnostics and safe local troubleshooting |
 | `decisions/README.md` | CURRENT | Index of decision records and how to add one |

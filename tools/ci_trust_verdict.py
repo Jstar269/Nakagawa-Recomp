@@ -134,6 +134,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import provenance_mode  # noqa: E402
+
 VERDICT_CONTEXT = "Trusted CI verdict"
 VERDICT_WORKFLOW = ".github/workflows/ci-trust-verdict.yml"
 APPROVAL_LABEL = "ci-change-approved"
@@ -171,6 +174,24 @@ PRODUCERS: tuple[Producer, ...] = (
         ("pull_request_target",),
     ),
 )
+
+
+
+def producers_for(repository: str | None, repository_id: str | None) -> tuple[Producer, ...]:
+    """The producers judged for ``repository``: ``PRODUCERS`` unchanged for the upstream.
+
+    A fork has no access to the upstream's private provenance authority, so its provenance job is the
+    Fork provenance check from the same workflow and event (``tools/provenance_mode.py``,
+    ``docs/FORKING.md``). The upstream, matched by ID or by name, always gets ``PRODUCERS``.
+    """
+    if provenance_mode.is_upstream(repository, repository_id):
+        return PRODUCERS
+    return tuple(
+        Producer(provenance_mode.FORK_CONTEXT, producer.workflow, producer.events)
+        if producer.context == provenance_mode.UPSTREAM_CONTEXT else producer
+        for producer in PRODUCERS
+    )
+
 
 PROTECTED_PREFIXES = (".github/workflows/", ".github/actions/")
 
@@ -540,11 +561,11 @@ def _check_producer(snapshot: dict, producer: Producer, pending: list[str]) -> l
     return findings
 
 
-def evaluate(snapshot: dict) -> Verdict:
+def evaluate(snapshot: dict, producers: tuple[Producer, ...] = PRODUCERS) -> Verdict:
     """Apply every rule to a normalised snapshot. Pure: no I/O."""
     findings = _check_pull_request(snapshot) + _check_definitions(snapshot)
     pending: list[str] = []
-    for producer in PRODUCERS:
+    for producer in producers:
         findings += _check_producer(snapshot, producer, pending)
     if any(item.fatal for item in findings):
         state = "failure"
@@ -853,7 +874,9 @@ def recorded_digests(gh: "GitHub", head_sha: str, number: int, default_branch: s
     )
 
 
-def unfinished_producers(workflow_runs: list[dict], head_sha: str) -> list[str]:
+def unfinished_producers(
+    workflow_runs: list[dict], head_sha: str, producers: tuple[Producer, ...] = PRODUCERS,
+) -> list[str]:
     """The intended contexts whose producer has no run at this head yet, or whose newest live run is unfinished.
 
     While any is listed the verdict cannot be success, so ``collect`` stops after reading the workflow runs and
@@ -864,7 +887,7 @@ def unfinished_producers(workflow_runs: list[dict], head_sha: str) -> list[str]:
     and pending never satisfies the ruleset.
     """
     waiting = []
-    for producer in PRODUCERS:
+    for producer in producers:
         runs = [run for run in workflow_runs
                 if run.get("path") == producer.workflow and run.get("event") in producer.events
                 and run.get("head_sha") == head_sha]
@@ -876,7 +899,10 @@ def unfinished_producers(workflow_runs: list[dict], head_sha: str) -> list[str]:
     return waiting
 
 
-def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: int | None) -> dict | None:
+def collect(
+    gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: int | None,
+    producers: tuple[Producer, ...] = PRODUCERS,
+) -> dict | None:
     """Read everything the rules need. ``None`` when no pull request into the default branch has this head.
 
     While a producer is unfinished (``unfinished_producers``) only the workflow runs are read, and the result
@@ -890,7 +916,7 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
             return None
         number = min(int(pr["number"]) for pr in matches)
     workflow_runs = gh.paginate(f"actions/runs?head_sha={head_sha}", "workflow_runs")
-    waiting = unfinished_producers(workflow_runs, head_sha)
+    waiting = unfinished_producers(workflow_runs, head_sha, producers)
     if waiting:
         return {"head_sha": head_sha, "waiting_producers": waiting}
     pr = gh.get(f"pulls/{number}")
@@ -920,7 +946,7 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
                 raw["label_actor_permission"] = None
     # The rules read jobs only from each producer's newest live run at this head (``_check_producer``), so only
     # those runs' jobs are fetched: one call per run, and superseded or cancelled runs used to cost one each.
-    latest_ids = {run["id"] for run in (latest_live_run(workflow_runs, producer, head_sha) for producer in PRODUCERS)
+    latest_ids = {run["id"] for run in (latest_live_run(workflow_runs, producer, head_sha) for producer in producers)
                   if run is not None}
     raw["jobs"] = {
         str(run["id"]): gh.paginate(f"actions/runs/{run['id']}/jobs?filter=latest", "jobs")
@@ -1124,7 +1150,8 @@ def main(argv: list[str] | None = None) -> int:
             })
 
     try:
-        raw = collect(gh, args.repo_dir, args.default_branch, head, args.pull_request)
+        producers = producers_for(args.repository, os.environ.get("GITHUB_REPOSITORY_ID"))
+        raw = collect(gh, args.repo_dir, args.default_branch, head, args.pull_request, producers)
         if raw is None:
             print(f"no open pull request into {args.default_branch} has head {head}; no verdict")
             print(gh.budget_note())
@@ -1138,7 +1165,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.snapshot_out:
             args.snapshot_out.write_text(json.dumps(raw, indent=1, sort_keys=True), encoding="utf-8")
         snapshot = normalise(raw)
-        verdict = evaluate(snapshot)
+        verdict = evaluate(snapshot, producers)
     except Exception as error:
         # An earlier verdict for this head may still say success. Replace it:
         # a head that cannot be judged now is not a passing head.
