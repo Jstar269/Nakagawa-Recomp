@@ -1284,6 +1284,14 @@ static VkResult pace_test_acquire(VkDevice dev, VkSwapchainKHR swap, uint64_t ti
     return vkAcquireNextImageKHR(dev, swap, timeout, sem, fence, idx);
 }
 
+/* A show pass that only counts its calls. */
+static int s_pace_test_pass_calls;
+static void *pace_test_show_pass(void *cmd, void *src, int *w, int *h) {
+    (void)cmd; (void)src; (void)w; (void)h;
+    s_pace_test_pass_calls++;
+    return NULL;
+}
+
 static int sdl3vk_present_pacing_selftest(void) {
     static uint32_t px[PSP_W * PSP_H];
     const uint64_t period = 16683333u;   /* one guest VBLANK, 1001/60000 s */
@@ -1324,6 +1332,23 @@ static int sdl3vk_present_pacing_selftest(void) {
                         "%d)\n", s_pace_test_waits, PACE_TEST_FRAMES, late, (double)worst / 1e6,
                 busy, (unsigned long long)counted, PACE_TEST_FRAMES, PACE_TEST_FRAMES);
         ok = 0;
+    }
+
+    /* Smooth motion's held present is a game-frame present too: with the display holding every
+     * image it returns DISPLAY_BUSY before its show pass runs. Nothing of the held frame was
+     * shown, so its caller still owes that frame (gui_ace_vblank). */
+    {
+        Sdl3VkShowPass saved = s_show_pass;
+        s_pace_test_pass_calls = 0;
+        sdl3vk_set_show_pass(pace_test_show_pass);
+        const int held = sdl3vk_present_held();
+        sdl3vk_set_show_pass(saved);
+        if (held != SDL3VK_PRESENT_DISPLAY_BUSY || s_pace_test_pass_calls != 0) {
+            fprintf(stderr, "pacing: with the display holding every image, the held present returned %d "
+                            "and ran its show pass %d time(s) (want DISPLAY_BUSY and 0)\n", held,
+                    s_pace_test_pass_calls);
+            ok = 0;
+        }
     }
 
     /* The display frees: presents are shown again (the real display may still need a VBLANK). */

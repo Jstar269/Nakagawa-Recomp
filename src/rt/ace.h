@@ -258,38 +258,61 @@ void ace_counters(AceCounters *out);
 typedef enum {
     ACE_SHOW_REAL = 0,     /* no new frame, or smooth off: this present is today's */
     ACE_SHOW_KEEP,         /* a new frame outside 30 Hz: show it and keep a copy */
-    ACE_SHOW_BETWEEN       /* a new 30 Hz frame: show the in-between, hold the frame */
+    ACE_SHOW_BETWEEN,      /* a new 30 Hz frame: show the in-between, hold the frame */
+    ACE_SHOW_OWED          /* a new frame while the one before it is owed: show that one, hold
+                            * this one */
 } AceShow;
 
 typedef struct {
     AceShow show;          /* the flip's verdict, until its present takes it */
-    int held;              /* a frame waits for its VBLANK */
+    int held;              /* a real frame the pass holds has not reached the screen */
+    int owed;              /* its present came due and the display could not take it */
     uint32_t held_after;   /* the VCOUNT of the present that holds it */
     uint64_t flip_ns;      /* when the latest flip arrived */
     uint64_t held_ns;      /* when the in-between of the held frame was presented */
+    uint64_t owed_ns;      /* the same for an owed frame the next flip's present shows */
+    int owed_shown;        /* that present is on its way: its HELD note is the owed frame's */
     int reflip;            /* this flip shows the held frame again: it is the held present */
     uint64_t frame_seq;    /* new frames flipped with smooth motion on */
     uint64_t taken_seq;    /* the newest of them whose verdict a present took */
     uint64_t unpaired;     /* in-betweens refused: the frame before never reached a present */
+    uint64_t superseded;   /* held frames a later flip replaced before they were shown */
+    uint64_t busy;         /* held presents the display could not take */
 } AcePace;
 
 void ace_pace_reset(AcePace *p);
-/* A flip. The verdict stands until ace_pace_take. A new frame supersedes a frame still held; a
- * flip of the unchanged frame (a title that flips each frame twice) shows it, so that present
- * is the held one and the VBLANK has nothing left to show. */
+/* A flip. The verdict stands until ace_pace_take. A flip of the unchanged frame (a title that
+ * flips each frame twice) shows the held frame, so that present is the held one. A new frame
+ * that arrives before the held frame was due supersedes it. A new frame that arrives while the
+ * held frame is owed (its present came due and the display could not take it) does not: the
+ * verdict is OWED, the present shows the owed frame in place of an in-between, and the new
+ * frame is held as usual. So a game frame whose in-between was shown is never dropped for a
+ * made-up picture, and a display that takes only every second present gets the real frames. */
 void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t now_ns);
 /* The flip's present: returns the verdict and clears it. An in-between is made only of two
  * consecutive frames: when the frame before this one never reached a present (the presenter's
  * slot rule dropped its flip, or the present failed), the pass holds an older frame, and an
  * in-between of the two would put whatever moved between them in the wrong place, or lose it.
- * Such a verdict becomes KEEP (the real frame is shown and kept) and is counted in `unpaired`. */
+ * Such a verdict becomes KEEP (the real frame is shown and kept) and is counted in `unpaired`.
+ * An OWED verdict needs the same: when the pass does not hold the frame just before this one,
+ * the owed frame is older still, so it is superseded and this frame is shown as it is. */
 AceShow ace_pace_take(AcePace *p);
 /* The in-between went to the screen at now_ns (the presenter's clock): the frame is held for the
  * VBLANK after `vcount`. Without smooth motion the frame would have been shown then, so the
  * held present's time less this one is the delay smooth motion adds. */
 void ace_pace_shown_between(AcePace *p, uint32_t vcount, uint64_t now_ns);
-/* One VBLANK. Returns 1 when the held frame is due; it is then no longer held. */
+/* The owed frame went to the screen with the flip of the frame after it, at now_ns: that frame
+ * is now the held one, for the VBLANK after `vcount`. */
+void ace_pace_shown_owed(AcePace *p, uint32_t vcount, uint64_t now_ns);
+/* One VBLANK. Returns 1 when the held frame is due. It stays held until a present shows it
+ * (ace_pace_held_shown) or gives it up (ace_pace_held_missed). */
 int ace_pace_vblank(AcePace *p, uint32_t vcount);
+/* A present showed a held frame. Returns when that frame's in-between was presented. */
+uint64_t ace_pace_held_shown(AcePace *p);
+/* The held frame's present was due and did not show it. `busy`: the display could not take a
+ * frame, so the frame is owed and tried again at the next VBLANK, or shown by the next new
+ * flip. Otherwise the present failed or the window closed, and the frame is given up. */
+void ace_pace_held_missed(AcePace *p, int busy);
 
 typedef enum {
     ACE_PRESENT_REAL = 0,  /* the flip's own frame */
@@ -310,6 +333,7 @@ typedef struct {
     uint64_t hold_sum_ns;         /* flip to held present: the delay smooth motion adds */
     uint64_t hold_max_ns;
     uint64_t superseded;          /* a held frame a later flip replaced */
+    uint64_t busy;                /* held presents the display could not take */
     uint64_t last_ns;
 } AcePaceStats;
 
@@ -321,8 +345,16 @@ AceShow ace_smooth_take(void);
 /* The show pass made an in-between for this present: the frame is held for the VBLANK after. It
  * counts nothing; ace_smooth_note_present counts what the swapchain accepted. */
 void ace_smooth_shown_between(uint64_t now_ns);
+/* The show pass showed the owed frame for this present and kept the new one: that one is held
+ * for the VBLANK after. */
+void ace_smooth_shown_owed(uint64_t now_ns);
 /* One VBLANK: 1 when the held frame should be presented now. Off, it reads nothing. */
 int ace_smooth_vblank(uint32_t vcount);
+/* The held frame's present did not show it (ace_pace_held_missed). */
+void ace_smooth_held_missed(int busy);
+/* A flip's own present found the display busy. When that flip re-showed the held frame, the
+ * frame is owed. */
+void ace_smooth_flip_busy(void);
 /* A present reached the swapchain (the presenter accepted it). A flip's present that showed no
  * in-between is passed as REAL and counted as HELD when it re-showed the held frame. This is also
  * what the readout's "SMOOTH n" counts: an in-between, a held frame, and a flip's own frame when

@@ -464,7 +464,17 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   frame to overflow the mask prints a warning.
 - **When.** The flip of frame B shows the in-between of A and B; the next VBLANK shows B. Nothing is shown before the
   guest made it, so a frame is never predicted. The cost is one VBLANK of added delay (about 17 ms), reported in the
-  run's report as `added_delay_ms`. A flip that arrives first replaces the held frame.
+  run's report as `added_delay_ms`. A new flip that arrives before B was due replaces it, counted in
+  `presents.superseded`.
+- **A busy display never costs a real frame.** While the guest is paced to real time, a present does not wait for
+  the display (`src/rt/gpu_sdl3vk/README.md`): when the display cannot take a frame, the present returns at once
+  and shows nothing. When that happens to B's present, B stays owed. It is tried again at each VBLANK that has no
+  flip, and the flip of the next frame C shows B in place of the in-between of B and C, then C at its own VBLANK.
+  So a frame whose in-between was shown is never dropped for a made-up picture, and a display that takes only
+  every second present shows the real frames, with `SMOOTH OFF` on the readout. A title that flips each frame
+  twice shows its newest frame at the second flip; when flips in between found the display busy too, that frame is
+  newer than the owed one and replaces it. `presents.busy` counts the held presents the display could not take,
+  and `presents.superseded` every held frame that never reached the screen.
 - **Only consecutive frames.** An in-between is made of a frame and the one flipped just before it. When that one
   never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed), the
   pass still holds an older frame, and an in-between of the two would put a fast-moving object in the wrong place
