@@ -817,6 +817,23 @@ UPDATE_DOWNLOAD_PREFIX = "https://github.com/Jstar269/nakagawa-recomp/releases/d
 # ceiling, not a sleep: the script moves on as soon as the phase is reached.
 UPDATE_STEP_TIMEOUT_MS = 60000
 
+
+def _release_newer_than_player() -> str:
+    """One minor step past the player's own NK_PLAYER_VERSION, so the fixture release stays newer.
+
+    A fixed number goes stale at the next version bump: the player then rightly calls the
+    fixture's release current, and every update test reads "current" instead of "available".
+    """
+    header = (ROOT / "src" / "player" / "ui" / "player_ui_nk.h").read_text(encoding="utf-8")
+    found = re.search(r'#define\s+NK_PLAYER_VERSION\s+"(\d+)\.(\d+)\.(\d+)', header)
+    if found is None:
+        raise AssertionError("src/player/ui/player_ui_nk.h no longer defines NK_PLAYER_VERSION as x.y.z")
+    return f"{int(found[1])}.{int(found[2]) + 1}.0"
+
+
+# The release the update fixture serves as the newest one.
+UPDATE_NEWER_VERSION = _release_newer_than_player()
+
 # A TEST-ONLY minisign signer for the synthetic releases: Ed25519 (RFC 8032) in plain
 # Python, so no package is needed. Its key pair is derived from a fixed label at run
 # time, so no key is stored anywhere. It is not the update-signing key: the player
@@ -909,7 +926,7 @@ class TestOnlyMinisigner:
 
 
 def write_update_fixture(
-    folder: Path, version: str = "0.0.3", *, wrong_checksum: bool = False,
+    folder: Path, version: str = UPDATE_NEWER_VERSION, *, wrong_checksum: bool = False,
     missing_file: bool = False, signed: bool = True, bad_signature: bool = False,
     player_key: bool = True,
 ) -> None:
@@ -2773,28 +2790,28 @@ class NativePlayerUiTests(unittest.TestCase):
         run, steps, requests = self.update_run(
             "updates", events, {}, env_extra={"NK_UI_TEST_UPDATE_REQUEST_DELAY_MS": "600"})
         names = [step["update"] for step in steps]
-        self.assertEqual(steps[0]["newest"], "v0.0.3")
+        self.assertEqual(steps[0]["newest"], f"v{UPDATE_NEWER_VERSION}")
         self.assertIn("available", names)
         self.assertEqual(requests[0], UPDATE_RELEASES_URL)
         if sys.platform != "win32":
             # No native download or SHA-256 check off Windows: the release page only.
             self.assertEqual(names, ["available"], steps)
             self.assertEqual(len(requests), 1)
-            self.assertIn("open_url=https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.3",
+            self.assertIn(f"open_url=https://github.com/Jstar269/nakagawa-recomp/releases/tag/v{UPDATE_NEWER_VERSION}",
                           run["stdout"])
             return
         self.assertEqual(names, ["available", "downloaded", "installed"], steps)
         self.assertEqual(
             requests[1:],
-            [UPDATE_DOWNLOAD_PREFIX + "v0.0.3/nakagawa-recomp-0.0.3-windows-x64.zip.sha256",
-             UPDATE_DOWNLOAD_PREFIX + "v0.0.3/nakagawa-recomp-0.0.3-windows-x64.zip.sha256.minisig",
-             UPDATE_DOWNLOAD_PREFIX + "v0.0.3/nakagawa-recomp-0.0.3-windows-x64.zip"],
+            [UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip.sha256",
+             UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip.sha256.minisig",
+             UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"],
             "the checksum file and its signature first, then the ZIP, each once")
         installed = steps[-1]
         self.assertTrue(installed["zip"].endswith(
-            os.sep.join(("Nakagawa", "data", "downloads", "nakagawa-recomp-0.0.3-windows-x64.zip"))),
+            os.sep.join(("Nakagawa", "data", "downloads", f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"))),
             installed)
-        self.assertTrue(installed["install"].endswith("nakagawa-recomp-0.0.3-windows-x64"), installed)
+        self.assertTrue(installed["install"].endswith(f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64"), installed)
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["view"], "updates")
@@ -2894,8 +2911,8 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(steps[-1]["zip"], "none", "nothing is kept or offered to install")
         self.assertEqual(
             requests[1:],
-            [UPDATE_DOWNLOAD_PREFIX + "v0.0.3/nakagawa-recomp-0.0.3-windows-x64.zip.sha256",
-             UPDATE_DOWNLOAD_PREFIX + "v0.0.3/nakagawa-recomp-0.0.3-windows-x64.zip.sha256.minisig"],
+            [UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip.sha256",
+             UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip.sha256.minisig"],
             "the ZIP is never requested")
 
     def test_update_without_a_signing_key_or_signature_offers_only_the_release_page(self) -> None:
@@ -2909,7 +2926,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 self.assertEqual([step["update"] for step in steps], ["available"], steps)
                 self.assertEqual(requests, [UPDATE_RELEASES_URL])
                 self.assertIn(
-                    "open_url=https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.3",
+                    f"open_url=https://github.com/Jstar269/nakagawa-recomp/releases/tag/v{UPDATE_NEWER_VERSION}",
                     run["stdout"])
 
     def test_update_install_that_loses_a_listed_file_is_refused(self) -> None:
