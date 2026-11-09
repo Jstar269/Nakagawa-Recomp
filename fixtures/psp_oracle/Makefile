@@ -352,6 +352,10 @@ CASE_ID = 174
 # reserved indices 20-31 may raise an exception; they run last.
 else ifeq ($(CASE),vfpu-constants)
 CASE_ID = 175
+# 176: the #326 rounding separation of vdot.q, vmscl.q, vmul.s, vadd.s and vsub.s (probe_hle_issues.c),
+# register-only.
+else ifeq ($(CASE),vfpu-round-sep)
+CASE_ID = 176
 else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
@@ -672,6 +676,9 @@ TARGET = $(BUILD_DIR)/vfpu_mfv_mtv
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),vfpu-constants)
 TARGET = $(BUILD_DIR)/vfpu_constants
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-round-sep)
+TARGET = $(BUILD_DIR)/vfpu_round_sep
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
 # same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.

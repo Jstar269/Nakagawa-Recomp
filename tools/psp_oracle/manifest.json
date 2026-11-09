@@ -2626,6 +2626,54 @@
         "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
       },
       {
+        "id": "PSP-VFPU-ROUNDSEP-001",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as case 176, the fixed-shape stream of the VFPU rounding-separation cells. No hardware run is cited.",
+        "group": "cpu",
+        "source": "fixtures/psp_oracle/probe_hle_issues.c",
+        "prx": "vfpu_round_sep.prx",
+        "apis": [
+          "sceIoClose",
+          "sceIoOpen",
+          "sceIoRead",
+          "sceIoWrite",
+          "sceKernelDeleteThread",
+          "sceKernelExitThread",
+          "sceKernelGetThreadId",
+          "sceKernelSleepThread",
+          "sceKernelWaitThreadEnd",
+          "sceKernelWakeupThread",
+          "Allegrex VFPU vdot.q",
+          "Allegrex VFPU vmscl.q",
+          "Allegrex VFPU vmul.s",
+          "Allegrex VFPU vadd.s",
+          "Allegrex VFPU vsub.s"
+        ],
+        "diagnostic_case_ids": [
+          "vfpu-round-sep"
+        ],
+        "case_ids": [
+          "vdot-rs-p0*",
+          "vmscl-rs-p0*",
+          "vmul-rs-p0*",
+          "vadd-rs-p0*",
+          "vsub-rs-p0*",
+          "vdot-rs-p1*",
+          "vmscl-rs-p1*",
+          "vmul-rs-p1*",
+          "vadd-rs-p1*",
+          "vsub-rs-p1*",
+          "vfpu-round-sep-done"
+        ],
+        "invariant": "#326, two passes, register-only: the raw result words of vdot.q, vmscl.q, vmul.s, vadd.s and vsub.s over operands whose exact result lies between two float32 values, with the source register image words recorded beside the destination words, to separate round-to-nearest-even from truncation in the multi-term adder and in single products. No hardware result is claimed.",
+        "issues": [
+          326
+        ],
+        "risk": "low but unmeasured; register-only VFPU cells on the main thread (VFPU attribute) with documented words the assembler accepts; no handler, timer, kernel call or device state is installed or changed",
+        "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
+      },
+      {
         "id": "PSP-GE-SAMPLE-001",
         "status": "implemented",
         "hardware_evidence": "MEASURED",

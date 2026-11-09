@@ -2409,6 +2409,42 @@ _register_campaign_probe(
     "vfpu-constants", "PSP-VFPU-CONSTANTS-001", VFPU_CONSTANTS_CASES, dict(VFPU_CONSTANTS_ROWS),
 )
 
+
+# vfpu-round-sep (176, probe_hle_issues.c): the #326 rounding separation of vdot.q, vmscl.q, vmul.s,
+# vadd.s and vsub.s, two passes, register-only. Every row is emitted on every run, so the stream is
+# fixed-shape. Per pass, in the order the probe runs them, each form is a run of cells packed into
+# records of at most 80 words; a cell is its recorded source image words followed by its destination
+# words. A form with one record is <stem>-p<pass>, else <stem>-p<pass>-<record>.
+VFPU_ROUND_SEP_PASSES = 2
+VFPU_ROUND_SEP_MAX_WORDS = 80
+#: (stem, source words per cell, destination words per cell, cells).
+VFPU_ROUND_SEP_FORMS = (
+    ("vdot-rs", 8, 1, 7), ("vmscl-rs", 17, 16, 6), ("vmul-rs", 2, 1, 4),
+    ("vadd-rs", 2, 1, 3), ("vsub-rs", 2, 1, 1),
+)
+
+
+def _vfpu_round_sep_pass_rows(p: int) -> list[tuple[str, int]]:
+    rows: list[tuple[str, int]] = []
+    for stem, nin, nout, cells in VFPU_ROUND_SEP_FORMS:
+        width = nin + nout
+        per = VFPU_ROUND_SEP_MAX_WORDS // width
+        records = -(-cells // per)
+        for rec in range(records):
+            count = min(per, cells - rec * per)
+            name = f"{stem}-p{p}" if records == 1 else f"{stem}-p{p}-{rec}"
+            rows.append((name, count * width))
+    return rows
+
+
+VFPU_ROUND_SEP_ROWS = tuple(
+    row for p in range(VFPU_ROUND_SEP_PASSES) for row in _vfpu_round_sep_pass_rows(p))
+VFPU_ROUND_SEP_CASES = tuple(case for case, _count in VFPU_ROUND_SEP_ROWS)
+_register_campaign_probe(
+    "vfpu-round-sep", "PSP-VFPU-ROUNDSEP-001", VFPU_ROUND_SEP_CASES,
+    dict(VFPU_ROUND_SEP_ROWS),
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -3095,7 +3131,7 @@ VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
                                    "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov", "vfpu-vus2i", "vfpu-basic-arith",
                                    "hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-wide-dot-matrix",
-                                   "vfpu-mfv-mtv", "vfpu-constants"})
+                                   "vfpu-mfv-mtv", "vfpu-constants", "vfpu-round-sep"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (

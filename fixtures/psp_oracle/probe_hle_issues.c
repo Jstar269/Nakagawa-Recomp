@@ -41,6 +41,9 @@
 //   CASE=vfpu-constants (PSP-VFPU-CONSTANTS-001): #326 raw destination words of vcst.s and vcst.q for constant
 //     indices 0-31 over a sentinel background (indices 20-31 are reserved and run last),
 //     register-only; a reserved index may raise an exception.
+//   CASE=vfpu-round-sep (PSP-VFPU-ROUNDSEP-001): #326 raw result words of vdot.q, vmscl.q,
+//     vmul.s, vadd.s and vsub.s over operands that separate round-to-nearest-even from
+//     truncation, register-only.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -70,8 +73,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 || PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i, vfpu-wide-dot-matrix, vfpu-mfv-mtv and vfpu-constants run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 || PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175 || PSP_ORACLE_CASE == 176
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i, vfpu-wide-dot-matrix, vfpu-mfv-mtv, vfpu-constants and vfpu-round-sep run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -98,6 +101,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_WIDE_DOT 173
 #define HLE_CASE_VFPU_MFV_MTV 174
 #define HLE_CASE_VFPU_CONSTANTS 175
+#define HLE_CASE_VFPU_ROUND_SEP 176
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -163,6 +167,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-constants"
 #define HLE_TEST_ID "PSP-VFPU-CONSTANTS-001"
 #define HLE_LOG "host0:/vfpu_constants_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_ROUND_SEP
+#define HLE_CAMPAIGN_ID "vfpu-round-sep"
+#define HLE_TEST_ID "PSP-VFPU-ROUNDSEP-001"
+#define HLE_LOG "host0:/vfpu_round_sep_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -3622,6 +3630,203 @@ static int hle_run(void)
 #endif /* HLE_CASE_VFPU_CONSTANTS */
 
 /* ------------------------------------------------------------------------- */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_ROUND_SEP
+
+/* #326 VFPU rounding separation (PSP-VFPU-ROUNDSEP-001), two passes, register-only: the raw
+   result words of vdot.q (0x64818088), vmscl.q (0xf2018488), vmul.s (0x64010008), vadd.s
+   (0x60010008) and vsub.s (0x60810008), over operands whose exact result lies between two
+   float32 values, so the stored word shows whether the multi-term adder and the single product
+   round to nearest even or truncate. Every cell is one instruction word run over the whole
+   register image with no prefix word issued (the prefixes stay identity), emitted as a word;
+   the words are the ones of the vfpu-wide-dot-matrix and vfpu-basic-arith cases. Image layout
+   (word m*16 + c*4 + r): vector C000 (a, image 0-3), C010 (b, image 4-7), the matrix of vmscl M100
+   (image 16-31), the destination C200/M200 (image 32..). vmscl multiplies the matrix by the scalar
+   S010 (image 4); matrix elements 1-15 are the fixed finite table of the wide-dot case. The scalar
+   forms use lane 0 of C000 and S010. Cells: vdot.q (a; b) = (0x3f800003, 0x3f800000, 0, 0; 1, 1,
+   0, 0), (0x3f800003, 0x3f800003, 0x3f800000, 0; 1, 1, 1, 1), (0x3f800001, 0x3f800000, 0, 0; 1,
+   1, 0, 0), the first with a negated, (0x3f800007, 0x3f800000, 0, 0; 1, 1, 0, 0) and two exact
+   halves, (0x3f800005, 0x3f800000, 0, 0; 1, 1, 0, 0) above 2.0 and (0x40000001, 0x40000000, 0,
+   0; 1, 1, 0, 0) above 4.0; vmscl.q (scalar, element 0) = (0x3fc00001, 0x3fc00001), (0x3fc00001,
+   0xbfc00001), (0xbfc00001, 0x3fc00001), (0xbfc00001, 0xbfc00001), (0x3f800001, 0x3f800001),
+   (0x3fc00003, 0x3fc00001); vmul.s (a0, S010) over (0x3fc00001, 0x3fc00001), (0x3fc00001,
+   0xbfc00001), (0x3f800001, 0x3f800001), (0x3fc00003, 0x3fc00001); vadd.s over (0x3f800003,
+   0x3f800000), (0x3f800001, 0x3f000000), (0xbf800003, 0xbf800000); vsub.s over (0x3f800003,
+   0xbf800000).
+   Row <form>-p<pass>[-<record>] (one record when the cells fit, else numbered): result = the
+   instruction word; per cell in order, the recorded source image words (a then b for vdot.q;
+   the scalar, then the matrix for vmscl.q; a0 then S010 for the scalar forms) followed by the
+   destination words (1 for vdot.q and the scalar forms, 16 for vmscl.q). A durable step marker
+   comes before every form group. Nothing here writes memory outside the probe's own image and
+   output buffers, no control register is written, and no reserved word is run. */
+
+#include "hle_vfpu_cells.h"
+
+#define RS_MAX_WORDS 80u
+#define RS_FORMS 5u
+#define RS_DST 32u
+#define RS_ONE 0x3f800000u
+
+enum { RS_VDOT, RS_MSCL, RS_SCAL };
+
+typedef void (*rs_fn)(const uint32_t *in, uint32_t *out, uint32_t *cc);
+
+TN_CELL_FN(rs_vdot_q, TN_PFX_NONE, "0x64818088")
+TN_CELL_FN(rs_vmscl_q, TN_PFX_NONE, "0xf2018488")
+TN_CELL_FN(rs_vmul_s, TN_PFX_NONE, "0x64010008")
+TN_CELL_FN(rs_vadd_s, TN_PFX_NONE, "0x60010008")
+TN_CELL_FN(rs_vsub_s, TN_PFX_NONE, "0x60810008")
+
+struct rs_form {
+    const char *stem;
+    uint32_t word;
+    rs_fn fn;
+    unsigned kind;
+    const uint32_t *cells; /* nscen rows of stride operand words */
+    unsigned stride;
+    unsigned nscen;        /* cells */
+    unsigned nout;         /* destination words recorded per cell */
+    unsigned pos0, cnt0, pos1, cnt1; /* recorded source image words: two runs */
+};
+
+/* vdot.q: a0..a3, b0..b3 (image 0-7). */
+static const uint32_t s_rs_vdot[7][8] = {
+    {0x3f800003u, 0x3f800000u, 0u, 0u, RS_ONE, RS_ONE, 0u, 0u},
+    {0x3f800003u, 0x3f800003u, 0x3f800000u, 0u, RS_ONE, RS_ONE, RS_ONE, RS_ONE},
+    {0x3f800001u, 0x3f800000u, 0u, 0u, RS_ONE, RS_ONE, 0u, 0u},
+    {0xbf800003u, 0xbf800000u, 0u, 0u, RS_ONE, RS_ONE, 0u, 0u},
+    {0x3f800007u, 0x3f800000u, 0u, 0u, RS_ONE, RS_ONE, 0u, 0u},
+    {0x3f800005u, 0x3f800000u, 0u, 0u, RS_ONE, RS_ONE, 0u, 0u},
+    {0x40000001u, 0x40000000u, 0u, 0u, RS_ONE, RS_ONE, 0u, 0u},
+};
+/* vmscl.q: scalar (image 4), matrix element 0 (image 16). */
+static const uint32_t s_rs_mscl[6][2] = {
+    {0x3fc00001u, 0x3fc00001u}, {0x3fc00001u, 0xbfc00001u},
+    {0xbfc00001u, 0x3fc00001u}, {0xbfc00001u, 0xbfc00001u},
+    {0x3f800001u, 0x3f800001u}, {0x3fc00003u, 0x3fc00001u},
+};
+/* Scalar forms: lane 0 of C000 (image 0), S010 (image 4). */
+static const uint32_t s_rs_vmul[4][2] = {
+    {0x3fc00001u, 0x3fc00001u}, {0x3fc00001u, 0xbfc00001u},
+    {0x3f800001u, 0x3f800001u}, {0x3fc00003u, 0x3fc00001u},
+};
+static const uint32_t s_rs_vadd[3][2] = {
+    {0x3f800003u, 0x3f800000u}, {0x3f800001u, 0x3f000000u}, {0xbf800003u, 0xbf800000u},
+};
+static const uint32_t s_rs_vsub[1][2] = {
+    {0x3f800003u, 0xbf800000u},
+};
+
+static const struct rs_form s_rs_forms[RS_FORMS] = {
+    {"vdot-rs", 0x64818088u, rs_vdot_q, RS_VDOT, &s_rs_vdot[0][0], 8, 7, 1, 0, 4, 4, 4},
+    {"vmscl-rs", 0xf2018488u, rs_vmscl_q, RS_MSCL, &s_rs_mscl[0][0], 2, 6, 16, 4, 1, 16, 16},
+    {"vmul-rs", 0x64010008u, rs_vmul_s, RS_SCAL, &s_rs_vmul[0][0], 2, 4, 1, 0, 1, 4, 1},
+    {"vadd-rs", 0x60010008u, rs_vadd_s, RS_SCAL, &s_rs_vadd[0][0], 2, 3, 1, 0, 1, 4, 1},
+    {"vsub-rs", 0x60810008u, rs_vsub_s, RS_SCAL, &s_rs_vsub[0][0], 2, 1, 1, 0, 1, 4, 1},
+};
+
+/* 1, 2, -3, 0.5, -1.5, 4, 0.25, -2, 3.5, -0.75, 1.25, 6, -4.5, 0.125, 2.75, -1. */
+static const uint32_t s_rs_mat[16] = {
+    0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u,
+    0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u,
+    0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+};
+
+static uint32_t s_rs_in[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+static uint32_t s_rs_out[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+
+/* Overlays the cell's operands on the background image s_rs_in (word i = 0x3f800000 | i << 16). */
+static void rs_build(const struct rs_form *f, unsigned idx)
+{
+    const uint32_t *v = &f->cells[idx * f->stride];
+    uint32_t *img = s_rs_in;
+    switch (f->kind) {
+    case RS_VDOT:
+        for (unsigned i = 0; i < 8u; i++) {
+            img[i] = v[i];
+        }
+        break;
+    case RS_MSCL:
+        img[4] = v[0];
+        for (unsigned i = 0; i < 16u; i++) {
+            img[16u + i] = s_rs_mat[i];
+        }
+        img[16] = v[1];
+        break;
+    default:
+        img[0] = v[0];
+        img[4] = v[1];
+        break;
+    }
+}
+
+/* One cell: background image, operand overlay, the word; dst gets the recorded source words and
+   then the destination words (image 32..), and the number of words is returned. */
+static unsigned rs_exec(const struct rs_form *f, unsigned idx, uint32_t *dst)
+{
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        s_rs_in[i] = 0x3f800000u | (i << 16);
+    }
+    rs_build(f, idx);
+    const unsigned c0 = f->cnt0;
+    const unsigned c1 = f->cnt1;
+    const unsigned nout = f->nout;
+    unsigned count = 0;
+    for (unsigned i = 0; i < c0; i++) {
+        dst[count++] = s_rs_in[f->pos0 + i];
+    }
+    for (unsigned i = 0; i < c1; i++) {
+        dst[count++] = s_rs_in[f->pos1 + i];
+    }
+    uint32_t cc[2] = {0u, 0u};
+    f->fn(s_rs_in, s_rs_out, cc);
+    for (unsigned i = 0; i < nout; i++) {
+        dst[count++] = s_rs_out[RS_DST + i];
+    }
+    return count;
+}
+
+/* One durable step per form group, then its records: as many cells as fit in RS_MAX_WORDS. */
+static void rs_group(unsigned pass, const struct rs_form *f)
+{
+    char name[64];
+    uint32_t w[RS_MAX_WORDS];
+    const unsigned per = RS_MAX_WORDS / (f->cnt0 + f->cnt1 + f->nout);
+    const unsigned nrec = (f->nscen + per - 1u) / per;
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    for (unsigned rec = 0; rec < nrec; rec++) {
+        const unsigned first = rec * per;
+        unsigned last = first + per;
+        if (last > f->nscen) {
+            last = f->nscen;
+        }
+        unsigned count = 0;
+        for (unsigned s = first; s < last; s++) {
+            count += rs_exec(f, s, &w[count]);
+        }
+        if (nrec > 1u) {
+            snprintf(name, sizeof(name), "%s-p%u-%u", f->stem, pass, rec);
+        }
+        hle_record(name, "PASS", f->word, w, count);
+    }
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < RS_FORMS; form++) {
+            rs_group(pass, &s_rs_forms[form]);
+        }
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_ROUND_SEP */
+
 #if PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV
 
 /* #326 VFPU condition codes and conditional moves (PSP-VFPU-CCCMOV-001), two passes,
