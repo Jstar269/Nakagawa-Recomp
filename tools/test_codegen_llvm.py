@@ -235,12 +235,14 @@ class LoweringTests(unittest.TestCase):
     def test_hst_emission_sites_cover_every_hst_address_in_emit_function(self):
         # Every `hst_profile and ... addr == <literal>` site in emit_function or
         # one of the `_emit_*` steps it was split into (#1531) emits something
-        # other than the plain word; the LLVM backend must refuse each one.
+        # other than the plain word; the LLVM backend must refuse each one. The last
+        # such sites (two loop fast paths and the guest abort exit) were retired under
+        # #363, so none may come back unnoticed.
         tree = ast.parse((ROOT / "tools" / "codegen.py").read_text(encoding="utf-8"))
         emitters = [n for n in ast.walk(tree)
                     if isinstance(n, ast.FunctionDef)
                     and (n.name == "emit_function" or n.name.startswith("_emit_"))]
-        self.assertIn("_emit_hst_patch_site", {n.name for n in emitters})
+        self.assertIn("emit_function", {n.name for n in emitters})
         literals = set()
         for node in (n for emit in emitters for n in ast.walk(emit)):
             if not isinstance(node, ast.If):
@@ -253,7 +255,7 @@ class LoweringTests(unittest.TestCase):
                         and isinstance(cmp.ops[0], ast.Eq)
                         and isinstance(cmp.comparators[0], ast.Constant)):
                     literals.add(cmp.comparators[0].value)
-        self.assertTrue(literals)
+        self.assertEqual(literals, set(), "an HST-profile address site is back in an emitter")
         self.assertLessEqual(literals, codegen_llvm.hst_emission_sites(codegen))
 
 
