@@ -215,6 +215,10 @@ enum { F_TEX = 1, F_RGBA = 2, F_DBL = 4, F_FOG = 8, F_PERSP = 16, F_CLEAR = 32,
  * value + 1; 0 for every guest texture and render target, so the shader samples exactly as
  * before. Bit 16 is left for the 32-bit colour chain's flag (#2050). */
 #define F_TSCALE_SHIFT 17
+/* bit 20 (cfg[0] bit 28): the GE color test, bits 21-22 its function; fixa[3] and fixb[3] carry
+ * the masked reference and the mask (psp.frag). */
+#define F_CTEST (1 << 20)
+#define F_CTEST_FUNC_SHIFT 21
 
 typedef struct {
     uint8_t blend_on, srcf, dstf, eq;      /* VkBlendFactor / VkBlendOp values */
@@ -5017,6 +5021,15 @@ static void build_state(int persp, int sprite, Batch *b) {
     }
     if (sfix != SFIX_NONE) s_replay_stats.stencil_fixed++;
 
+    /* Color test (ge.c color_test): off in clear mode, as shade() skips it there, and for the
+     * function that always passes. The reference and mask are whole numbers below 2^24, so the
+     * floats hold them exactly. */
+    if (!clear && g->color_test_enable && (g->color_test & 3u) != 1u) {
+        const uint32_t cmask = g->color_test_mask & 0x00FFFFFFu;
+        flags |= F_CTEST | (int)((g->color_test & 3u) << F_CTEST_FUNC_SHIFT);
+        b->pc.fixa[3] = (float)(g->color_ref & cmask);
+        b->pc.fixb[3] = (float)cmask;
+    }
     b->pc.cfg[1] = (int32_t)(((!clear && g->atest_enable) ? (g->atest & 0xFFFFFFu) : 1u /* ALWAYS */) |
                              (lodcfg << 24));
     b->pc.cfg[2] = (int32_t)g->minz;
@@ -5140,6 +5153,7 @@ typedef struct {
     uint32_t tex_mip_addr[7], tex_mip_bufw[7]; uint8_t tex_mip_wlog2[7], tex_mip_hlog2[7];
     uint32_t clut_fmt, clut_gen;
     int atest_enable; uint32_t atest;
+    int color_test_enable; uint32_t color_test, color_ref, color_test_mask;
     int stencil_enable; uint32_t stencil_test, stencil_op;
     int fog_enable; uint32_t fog_color;
     uint32_t fbfmt;
@@ -5175,6 +5189,8 @@ static void snap_fill(StateSnap *o, int persp, int sprite) {
     memcpy(o->tex_mip_hlog2, g->tex_mip_hlog2, sizeof(o->tex_mip_hlog2));
     o->clut_fmt = g->clut_fmt; o->clut_gen = g->clut_gen;
     o->atest_enable = g->atest_enable; o->atest = g->atest;
+    o->color_test_enable = g->color_test_enable; o->color_test = g->color_test;
+    o->color_ref = g->color_ref; o->color_test_mask = g->color_test_mask;
     o->stencil_enable = g->stencil_enable;
     o->stencil_test = g->stencil_test; o->stencil_op = g->stencil_op;
     o->fog_enable = g->fog_enable; o->fog_color = g->fog_color;
@@ -5330,8 +5346,9 @@ static int native_rgb_mask_exact(void) {
  * blending against a destination snapshot everywhere else (including post-blend 16-bit
  * quantization and post-blend dither, which run in the shader in hardware order — see
  * build_state). Only states the batch model cannot express at all remain on ge.c, the
- * behavioral arbiter: per-bit write masks, stencil, color test, and logic ops (all of
- * which read-modify-write destination bits per pixel). */
+ * behavioral arbiter: per-bit write masks, the stencil states below, and logic ops (all of
+ * which read-modify-write destination bits per pixel). The color test reads no destination:
+ * psp.frag runs it (F_CTEST). */
 /* The shader runs the stencil test before the pipeline depth test, so a stencil-fail
  * pixel the depth test would also reject, or a depth-fail pixel, can only be dropped: the
  * ops for them must be KEEP while the depth test is on. A test that always passes never
@@ -5346,7 +5363,6 @@ static int stencil_gpu_supported(void) {
 
 static int gpu_state_unsupported_reason(void) {
     if (!stencil_gpu_supported()) return GEGPU_FALLBACK_STENCIL;
-    if (s_ge->color_test_enable) return GEGPU_FALLBACK_COLOR_TEST;
     if (s_ge->logic_op_enable) return GEGPU_FALLBACK_LOGIC_OP;
     if (!s_ge->clear&&!native_rgb_mask_exact()) return GEGPU_FALLBACK_WRITE_MASK;
     /* Framebuffer placements the persistent-target model cannot represent: color
