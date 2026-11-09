@@ -179,10 +179,17 @@ under `optimization.fallback_units`, with the level the rest compiled at. These 
 compile flags that differ between units.
 Current Make recipes cannot transport whitespace or shell-sensitive characters
 in bound paths. Inputs at such paths are copied byte-for-byte into
-`<output-dir>/staged-inputs/` (hashes are unchanged). When the output directory
-contains spaces, packaging builds in a Make-safe workspace (`NK_BUILD_ROOT` or
-Windows 8.3 short paths) and atomically promotes into the destination; otherwise
-an unsupported path is rejected as `PACKAGE_UNSUPPORTED_PATH` (#296).
+`<output-dir>/staged-inputs/` (hashes are unchanged); staged guest PRX modules are
+included. When the output directory contains spaces, packaging builds in a Make-safe
+workspace (`NK_BUILD_ROOT` or Windows 8.3 short paths) and atomically promotes into the
+destination; otherwise an unsupported path is rejected as `PACKAGE_UNSUPPORTED_PATH`.
+Paths derived from that workspace are checked as written and never resolved again, because
+resolving a short form expands it back to the spaced name (#2281).
+
+An enhancement data root is read in place, not copied. The rule for it is the one for
+every path Make cannot take: it is used in its short (8.3) form, or refused by name when
+no short form exists, before Make runs. `NK_BUILD_ROOT` moves the build, not an input
+directory, so it does not apply to the data root.
 
 `package.json` is canonical JSON with this versioned shape:
 
