@@ -105,7 +105,10 @@ def validate(corpus: dict[str, Any], lock: dict[str, Any] | None = None) -> None
         seen: set[str] = set()
         for entry in program.get("files", []) + program.get("shared_files", []):
             _check_file_entry(program_id, entry, seen)
-        if f"{program['sample_dir']}/Makefile" not in seen:
+        sample_dir = program.get("sample_dir")
+        if not isinstance(sample_dir, str) or not sample_dir:
+            _fail(f"{program_id}: sample_dir is required")
+        if f"{sample_dir}/Makefile" not in seen:
             _fail(f"{program_id}: the program's Makefile is not pinned")
         if not program.get("copyright") or not program.get("title") or not program.get("target"):
             _fail(f"{program_id}: title, target and copyright holders are required")
@@ -116,7 +119,13 @@ def validate(corpus: dict[str, Any], lock: dict[str, Any] | None = None) -> None
         status = expected.get("status")
         if status not in statuses:
             _fail(f"{program_id}: expected.status {status!r} is not one of {sorted(statuses)}")
-        if status == "KNOWN_FAIL" and not isinstance(expected.get("issue"), int):
+        if status == "PASS":
+            _fail(f"{program_id}: PASS is refused: the corpus schema has no evidence field yet and every result "
+                  "stays UNMEASURED until a smoke run has measured it")
+        if "evidence" in expected:
+            _fail(f"{program_id}: expected.evidence is refused on {status}: only a measured PASS can carry evidence")
+        issue = expected.get("issue")
+        if status == "KNOWN_FAIL" and not (type(issue) is int and issue > 0):
             _fail(f"{program_id}: KNOWN_FAIL needs the number of the issue that tracks it")
 
 

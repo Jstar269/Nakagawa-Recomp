@@ -63,6 +63,25 @@ class CorpusPinTests(unittest.TestCase):
         refused(lambda c: c["programs"][1].update(id=c["programs"][0]["id"]), "malformed or repeated")
         refused(lambda c: c["programs"][0].update(smoke_checks=["nonblank_frame"]), "first_frame")
         refused(lambda c: c["programs"][0]["expected"].update(status="PASSED"), "expected.status")
+        refused(lambda c: c["programs"][0]["files"].append(dict(c["programs"][0]["files"][0])), "listed twice")
+        refused(lambda c: c["programs"][0]["files"].__delitem__(0), "Makefile is not pinned")
+        refused(lambda c: c["programs"][0].pop("sample_dir"), "sample_dir is required")
+        refused(lambda c: c["programs"][0].update(smoke_checks=["first_frame", "bogus"]), "only the vocabulary")
+        refused(lambda c: c["programs"][0]["files"][0].update(upstream_path="elsewhere/x.c"), "under src/samples/")
+
+    def test_a_result_without_backing_evidence_is_refused(self) -> None:
+        def refused(**expected: object) -> None:
+            broken = copy.deepcopy(self.corpus)
+            broken["programs"][0]["expected"].update(expected)
+            with self.assertRaises(homebrew_corpus.CorpusError):
+                homebrew_corpus.validate(broken)
+
+        refused(status="PASS")
+        refused(status="PASS", evidence="")
+        refused(status="PASS", evidence="reports/smoke/gu-cube.log")
+        refused(evidence="reports/smoke/gu-cube.log")
+        for issue in (True, "308", 0, -1, 3.5):
+            refused(status="KNOWN_FAIL", issue=issue)
 
     def test_known_fail_must_name_its_issue(self) -> None:
         broken = copy.deepcopy(self.corpus)
@@ -71,13 +90,6 @@ class CorpusPinTests(unittest.TestCase):
             homebrew_corpus.validate(broken)
         broken["programs"][0]["expected"]["issue"] = 308
         homebrew_corpus.validate(broken)
-
-    def test_no_result_is_claimed_before_it_is_measured(self) -> None:
-        """A program is UNMEASURED until a smoke run measured it; PASS needs that run's evidence."""
-        for program in self.corpus["programs"]:
-            expected = program["expected"]
-            if expected["status"] == "PASS":
-                self.assertTrue(expected.get("evidence"), f"{program['id']}: PASS needs evidence")
 
     def test_git_blob_id_matches_git(self) -> None:
         self.assertEqual(homebrew_corpus.git_blob_sha1(b"hello world"),
@@ -128,7 +140,9 @@ class CorpusRecordsTests(unittest.TestCase):
         page = COMPATIBILITY.read_text(encoding="utf-8")
         self.assertIn("## Homebrew corpus", page)
         for program in self.corpus["programs"]:
-            self.assertIn(f"`{program['id']}`", page)
+            row = next((line for line in page.splitlines() if line.startswith(f"| `{program['id']}` |")), None)
+            self.assertIsNotNone(row, program["id"])
+            self.assertTrue(row.rstrip(" |").endswith(f"| {program['expected']['status'].lower()}"), row)
 
     def test_every_copyright_holder_is_credited(self) -> None:
         for program in self.corpus["programs"]:

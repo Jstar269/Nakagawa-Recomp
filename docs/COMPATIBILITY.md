@@ -66,7 +66,7 @@ custom-firmware-only imports are refused later, when code generation reads the p
 
 ## Homebrew corpus
 
-The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) is open-source PSPSDK sample programs built from the pinned PSPDEV release and run with no per-title patches. The list, pins and licences are in [`fixtures/homebrew_corpus/`](../fixtures/homebrew_corpus/PROVENANCE.md); nothing is copied into the repository. A result stays *unmeasured* until a smoke run has measured it; a failing program is recorded as a known failure with its issue, never dropped.
+The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) lists four open-source PSPSDK sample programs, pinned to the PSPDEV release, for a smoke run with no per-title patches. Nothing builds or runs them, and no smoke run has measured any of them. The list, pins and licences are in [`fixtures/homebrew_corpus/`](../fixtures/homebrew_corpus/PROVENANCE.md); nothing is copied into the repository. Every result is *unmeasured*. The list accepts a result other than unmeasured only for a known failure, and that entry must name its issue.
 
 | Program | PSPSDK sample | Smoke checks | Result |
 | :--- | :--- | :--- | :--- |
