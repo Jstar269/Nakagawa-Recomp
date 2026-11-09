@@ -11240,11 +11240,16 @@ bool player_app_build_queue_move(PlayerApp *app, const char *disc_id, int direct
     if (index < 0 || queue->entries[index].state != PLAYER_REBUILD_PENDING) return false;
     int step = direction < 0 ? -1 : 1;
     int other = index + step;
-    /* Past finished titles, to the next one that waits; never past the one
-       building. */
-    while (other >= 0 && other < queue->count &&
-           queue->entries[other].state != PLAYER_REBUILD_PENDING &&
-           queue->entries[other].state != PLAYER_REBUILD_ACTIVE) {
+    /* Past finished titles, and past waiting ones whose game left the library
+       (the queue screen does not show them), to the next one the screen shows;
+       never past the one building. */
+    while (other >= 0 && other < queue->count) {
+        const PlayerRebuildEntry *entry = &queue->entries[other];
+        if (entry->state == PLAYER_REBUILD_ACTIVE) break;
+        if (entry->state == PLAYER_REBUILD_PENDING &&
+            player_app_find_game_by_disc_id(app, entry->disc_id) >= 0) {
+            break;
+        }
         other += step;
     }
     if (other < 0 || other >= queue->count ||

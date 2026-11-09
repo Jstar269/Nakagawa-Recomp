@@ -3961,6 +3961,28 @@ static void test_build_queue(PlayerApp *app, const char *user_root) {
            strcmp(queue->entries[1].disc_id, "ULUS99998") == 0);
     assert(player_app_build_queue_place(app, "ULUS99998", &total) == 2 && total == 3);
     assert(queue_file_has(queue_path, "\"disc_id\": \"ULUS99995\", \"kind\": \"build\""));
+    /* A waiting game that left the library is not on the queue screen, so Up
+       and Down pass it like a finished one: each press visibly moves a row. */
+    queue->entries[3] = queue->entries[2];
+    queue->entries[2] = queue->entries[1];
+    memset(&queue->entries[1], 0, sizeof(queue->entries[1]));
+    snprintf(queue->entries[1].disc_id, sizeof(queue->entries[1].disc_id), "ULUS90001");
+    queue->entries[1].state = PLAYER_REBUILD_PENDING;
+    queue->entries[1].kind = PLAYER_QUEUE_BUILD;
+    queue->count = 4;
+    assert(player_app_find_game_by_disc_id(app, "ULUS90001") < 0);
+    assert(player_app_build_queue_move(app, "ULUS99998", -1));
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99998") == 0 &&
+           strcmp(queue->entries[1].disc_id, "ULUS90001") == 0 &&
+           strcmp(queue->entries[2].disc_id, "ULUS99995") == 0);
+    assert(player_app_build_queue_move(app, "ULUS99998", 1));
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99995") == 0 &&
+           strcmp(queue->entries[1].disc_id, "ULUS90001") == 0 &&
+           strcmp(queue->entries[2].disc_id, "ULUS99998") == 0);
+    queue->entries[1] = queue->entries[2];
+    queue->entries[2] = queue->entries[3];
+    queue->count = 3;
+    (void)player_app_rebuild_queue_save(app);
     printf("[PLAYER_STATE_TEST] the build queue reorders PASS\n");
 
     /* Remove from queue: the game leaves; the others keep their order. */
