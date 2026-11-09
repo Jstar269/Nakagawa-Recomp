@@ -2402,7 +2402,9 @@ rebuild its images ([#2138](https://github.com/Jstar269/nakagawa-recomp/issues/2
 `gpu-capture-selftest` checks a 960x544 recording against a separate FSR 1 pass's output, byte for
 byte). As in the window, FSR 1 only enlarges: a recording no larger than the picture uses the
 scaling mode. `record.json` names the scaling that made each picture, not the setting that asked
-for it: `"filter"` is `fsr1`; `sharp` (a nearest prescale to a whole multiple, then a linear
+for it: `"filter"` is `anime4k` for a CPU-presented frame the movie upscaler
+(`SR_MOVIE_UPSCALE=anime4k`) doubled once or twice, then FSR 1 took it to the recording's size unless the
+doubled picture was already that size; `fsr1`; `sharp` (a nearest prescale to a whole multiple, then a linear
 shrink); `nearest` (one nearest-neighbour blit, which is what any mode draws at an exact multiple
 such as 960x544, and what `integer` draws when a multiple fits); `linear` (one linear blit, as
 `bilinear` draws at other sizes and every mode draws when the recording is smaller than the
@@ -2497,3 +2499,11 @@ retail title is private: keep it out of the repository and every upload.
 1. Avoid `SR_DEBUG=0xFF` in production — causes massive stderr output
 2. Use specific categories: `SR_DEBUG=0x02` for HLE tracing only
 3. Set `SR_WATCHDOG_EXIT=N` to abort after N vblanks without a newly presented frame; the firing is a NO-NEW-FLIP observation, so classify it with the display counters, thread dump, and MPEG/PSMF activity the watchdog prints, not the threshold alone
+4. Check how the picture is drawn: before `window_ready`, the runtime writes one
+   `BOOT_EVENT phase=render_path presenter=<vulkan|gdi> ge=<gpu|software> fallback=<none|gdi_presenter|software_ge>`
+   line from what `gui_init` asked for and what started (`nk_render_path_from_init` in
+   `src/core/nk_shared_helpers.c`, #2151). `gdi_presenter` means SDL3/Vulkan did not start and the GDI window shows a
+   software-drawn picture; `software_ge` means `SR_GPU_GE` asked for the GPU renderer and `gegpu_init` failed. A path
+   that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is `fallback=none`. The native player names a fallback
+   on the game's page, with Hide for the rest of its session. Primitives the GPU renderer hands to the software
+   rasterizer during a frame (`GEGPU_FALLBACK_*`) are not part of this line.

@@ -791,6 +791,11 @@ output directory contains spaces, the route builds in a Make-safe workspace—re
 the finished package to the destination. If neither fallback is available, or if the path contains
 characters that Make recipes cannot quote, the route stops with the named `PACKAGE_UNSUPPORTED_PATH`
 boundary.
+An enhancement data root is read in place rather than copied. When its path has a space or another
+character Make cannot take, the route uses its 8.3 short form on Windows, and stops with
+`PACKAGE_UNSUPPORTED_PATH` naming the data root when no short form exists (a volume with 8.3 names
+turned off, or any other platform). `NK_BUILD_ROOT` does not help there; move the data root to a
+location without such characters.
 
 `assets/titles/hst-ucus98701.json` is the HST title manifest, part of the repository since 2026-10-27: it carries HST's guest-address runtime bindings, and a `GAME_NAME=hst` build refuses to compile without it rather than silently producing a runtime with every title binding disabled. See [`assets/titles/README.md`](../assets/titles/README.md).
 
@@ -875,7 +880,8 @@ game's own value wins over the preset ([PLAYER_UI_DESIGN.md](PLAYER_UI_DESIGN.md
 `SR_PRESENT_UPSCALE=fsr1` makes the Vulkan presenter enlarge the picture to its place in the
 window with AMD FidelityFX Super Resolution 1: EASU, an edge-adaptive upscaler, then RCAS
 sharpening. `off`, the default, keeps the `SR_PRESENT_SCALING` filter. It runs only when the
-picture is enlarged on both axes, on whatever frame the presenter shows. It is presentation only:
+picture is enlarged on both axes, on every frame the presenter shows except a CPU-presented one
+while `SR_MOVIE_UPSCALE` is on. It is presentation only:
 the guest's frame, guest VRAM and captures are byte for byte what they are with it off
 (`gpu-capture-selftest` and, with a Vulkan device and a display, `display-smoke-fsr1`). A run
 recording (`SR_VIDEOREC_DIR`) is enlarged by FSR 1 too, at the recording's size, and its
@@ -890,6 +896,26 @@ compute, leaves it off with a line in the log; so does a size whose images canno
 is then not tried again. The launcher turns it off for an authentic session, and a run with it on
 is stamped as enhanced (`ACE_MODE: present upscale fsr1`), which `boot_gate.py` reads. The picture
 gate and the library sweep set it `off` for their own runs.
+
+### Movie upscaler (`SR_MOVIE_UPSCALE`)
+
+`SR_MOVIE_UPSCALE` gives frames the CPU presents, which are decoded movies (and every frame when the
+software GE draws), their own upscaler: `fsr1` scales them with FSR 1, and `anime4k` first doubles
+them once or twice with Anime4K's CNN x2 (M) network, which suits the flat colours and dark lines
+of animated and pre-rendered movies, then takes them to the window's size with FSR 1 (unless the
+doubled picture is already that size, as at the default 960x544 window). `off`, the
+default, leaves them to `SR_PRESENT_UPSCALE`. It applies in the window and in a recording
+(`SR_VIDEOREC_DIR`), each with its own passes at its own size. Use `anime4k` for line art and movies
+only: on other pictures, such as fine regular stripes, it adds a faint ripple along edges. It reaches
+only frames the CPU presents. A game whose movie the GE presents, drawn as a texture (LittleBigPlanet)
+or decoded into a GE target (Hot Shots Tennis), shows a GE frame, which this key does not upscale.
+Like `SR_PRESENT_UPSCALE` it is presentation only: the decoded movie, the guest's frame, guest VRAM
+and captures are unchanged (`display-smoke-anime4k`, which needs a Vulkan device and a display). A
+run with it on is stamped as enhanced (`ACE_MODE: present upscale movie-anime4k`, a
+`phase=present_upscale` boot event and `runtime.enhancements` in the flight bundle), so boot and
+flight evidence never takes it as authentic; an Authentic session from the launcher, the picture
+gate and the library sweep run with it `off`. A 480x272 movie frame costs 0.31 ms through two
+Anime4K stages and 0.75 ms with FSR 1 to 3811x2160 on an RTX 3080 (`anime4k-selftest`).
 
 Runtime logs are written under `logs/`. Use `SR_DEBUG=0xFF` for all categories or consult [DEBUGGING.md](DEBUGGING.md) for targeted logging.
 On Windows, runtime output redirected to a file or pipe is buffered: a line reaches the log within 50 ms,
@@ -1150,7 +1176,7 @@ refuses such a `BUILD_DIR` before any recipe runs and names the boundary:
 BUILD_DIR 'C:/path/with spaces/build' contains a space, which GNU Make cannot represent
 in a target or prerequisite name. Use a relative BUILD_DIR under the repository
 root (the default `build/<game>`), or set NK_BUILD_ROOT to a folder without spaces
-so tools/title_codegen_plan.py can pick a Make-safe build root (issue #296).
+so tools/title_codegen_plan.py can pick a Make-safe build root.
 ```
 
 The default relative `BUILD_DIR` carries no space, so an ordinary checkout is unaffected. Every route

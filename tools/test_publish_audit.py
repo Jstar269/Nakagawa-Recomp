@@ -2603,6 +2603,13 @@ class AndroidTreeMetadataTests(unittest.TestCase):
                 self.assertEqual(disp, "included")
                 self.assertFalse(public, "metadata alone must never make a path public")
 
+    def test_a_vendored_glsl_shader_is_classified_like_other_third_party_source(self):
+        # Anime4K's upstream shader is a .glsl file under third_party/ (#1273); a path with no
+        # classification is an UNCLASSIFIED_PATH finding, so the extension must be known.
+        prov, *_rest = publish_audit._default_provenance(
+            "third_party/anime4k/Anime4K_Upscale_CNN_x2_M.glsl", None)
+        self.assertEqual(prov, "project_authored")
+
     def test_unknown_top_level_files_stay_unclassified(self):
         prov, *_rest = publish_audit._default_provenance("elsewhere/app/build.gradle.kts", None)
         self.assertEqual(prov, "unclassified")
@@ -2637,6 +2644,7 @@ class ExportPolicyDigestTests(unittest.TestCase):
         committed = json.loads(
             (Path(__file__).resolve().parent.parent / "PUBLIC_EXPORT.json").read_text(encoding="utf-8")
         )
+        self.assertNotIn("policy_sha256", committed)
         self.assertEqual(self._codes(committed), [])
 
     def test_a_control_without_a_digest_is_current_when_its_policy_fields_match(self) -> None:
