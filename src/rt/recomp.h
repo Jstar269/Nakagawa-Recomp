@@ -2307,6 +2307,10 @@ int sched_clock_deterministic(void);
 extern int g_prof_enabled;
 void sr_profile_init(void);
 void sr_profile_dump(void);
+/* The end-of-run SR_PROFILE dump, printed once: from atexit, and from every hard exit (_Exit)
+ * that skips atexit, such as SR_EXIT_AT_VBLANK. A no-op when profiling is off. The periodic
+ * SR_PROFILE_DUMP_VBLANKS dumps call sr_profile_dump. */
+void sr_profile_dump_final(void);
 void sr_profile_block(uint32_t target_pc);
 /* Test accessors: defined only in SR_PROFILER_SELFTEST builds (recomp.c), but
  * declared unconditionally so no translation unit ever sees an implicit
