@@ -1367,6 +1367,9 @@ pace:
     /* Every Ace run times its presents, so a run without smooth motion is the baseline. */
     if (accepted && g_ace_on) {
         ace_smooth_note_present(s_ace_smooth ? s_ace_present_kind : ACE_PRESENT_REAL, SDL_GetTicksNS());
+        /* An in-between stays on screen until the held frame's VBLANK, so a recording keeps it
+         * for its own VBLANK and writes the held frame at the next (videorec.h). */
+        if (s_ace_smooth && s_ace_present_kind == ACE_PRESENT_BETWEEN) sr_videorec_frame_keep();
     }
 #endif
     if (accepted) {

@@ -13,6 +13,9 @@
 //     previous one with no gap;
 //   - channel volume (0x8000 unity), the sum of two channels, and clipping;
 //   - a GE-order (RGBX) picture is written in the video's BGRX order;
+//   - a kept picture (a smooth-motion in-between) keeps its VBLANK and the picture after it
+//     goes to the next one, a pending kept picture is read back before it can be replaced, and
+//     without a keep the newest picture wins;
 //   - a picture of another size is refused and reported, never written;
 //   - the recorder never writes the pixels or samples it is handed;
 //   - with FFmpeg on PATH, the FFV1 encode and the mux finish with status PASS (SKIP otherwise);
@@ -270,6 +273,108 @@ static void test_timeline(const char *root) {
     /* 41 frames: one partial cue, frames 0..41, with the 20 flips. */
     CHECK(strstr(srt, "1\n00:00:00,000 --> 00:00:00,684\ngame 29.2 fps (20 frames)") != NULL,
           "logic.srt carries the game's frame rate for the recorded stretch");
+}
+
+/* The pictures of a raw recording's frames, by their first pixel. */
+static int read_firsts(const char *dir, uint32_t *out, int max) {
+    char p[700];
+    path_in(p, sizeof p, dir, "video.bgr0");
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    static uint32_t got[W * H];
+    int n = 0;
+    while (n < max && fread(got, 4, W * H, f) == W * H) out[n++] = got[0];
+    fclose(f);
+    return n;
+}
+
+static uint32_t s_pending_px[W * H];
+static int s_resolved;
+static int resolve_test_picture(void) {
+    s_resolved++;
+    sr_videorec_frame(s_pending_px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    return 1;
+}
+
+/* A kept picture (an Ace smooth-motion in-between) keeps its VBLANK: the picture presented after
+ * it before that VBLANK goes to the next VBLANK, as the screen shows it, where newest-wins would
+ * have dropped the kept one unread (a 30 Hz game with smooth motion recorded at 30 pictures a
+ * second). Without a keep, the newest picture still wins. */
+static void test_keep(const char *root) {
+    char dir[600];
+    static uint32_t px[W * H];
+    uint32_t got[16];
+    SrVideoRecStats st;
+
+    /* The 30 Hz pattern: real A, then per game frame an in-between M (kept) presented after one
+     * VBLANK and the held real frame presented before the next. */
+    snprintf(dir, sizeof dir, "%s/keep", root);
+    CHECK(sr_videorec_test_start(dir, "raw"), "the keep recording starts");
+    fill(px, 0xA0u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_vblank(100, vtime(100));                              /* A */
+    fill(px, 0x10u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_frame_keep();                                          /* M1 */
+    fill(px, 0xB0u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX); /* B, same period */
+    sr_videorec_vblank(101, vtime(101));                              /* M1 */
+    sr_videorec_vblank(102, vtime(102));                              /* B, carried */
+    fill(px, 0x20u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_frame_keep();                                          /* M2 */
+    sr_videorec_vblank(103, vtime(103));                              /* M2 */
+    fill(px, 0xC0u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_vblank(104, vtime(104));                              /* C */
+    sr_videorec_vblank(105, vtime(105));                              /* C again */
+    /* A carried picture keeps its VBLANK too: D after it goes on to the next. */
+    fill(px, 0x30u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_frame_keep();
+    fill(px, 0xD0u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_vblank(106, vtime(106));                              /* M3 */
+    fill(px, 0xE0u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_vblank(107, vtime(107));                              /* D, carried */
+    sr_videorec_vblank(108, vtime(108));                              /* E, carried in turn */
+    sr_videorec_test_stats(&st);
+    CHECK(sr_videorec_finish() == 1, "a recording with kept pictures reports PASS");
+    static const uint32_t want[] = { 0xA0u, 0x10u, 0xB0u, 0x20u, 0xC0u, 0xC0u, 0x30u, 0xD0u, 0xE0u };
+    int n = read_firsts(dir, got, 16);
+    CHECK(n == 9, "one frame per VBLANK");
+    for (int k = 0; k < n && k < 9; k++)
+        CHECK(got[k] == want[k], "a kept picture is written at its VBLANK, the next at the next");
+    CHECK(st.carried_frames == 3 && st.new_frames == 8 && st.repeat_frames == 1,
+          "carried pictures are counted, and each is a new frame");
+
+    /* The same through a GPU readback: a kept picture still pending is read back when the next
+     * present registers its own, never replaced unread. */
+    snprintf(dir, sizeof dir, "%s/keep-pending", root);
+    CHECK(sr_videorec_test_start(dir, "raw"), "the pending keep recording starts");
+    s_resolved = 0;
+    fill(s_pending_px, 0xA0u); sr_videorec_frame_pending(resolve_test_picture);
+    sr_videorec_vblank(200, vtime(200));                              /* A */
+    fill(s_pending_px, 0x10u); sr_videorec_frame_pending(resolve_test_picture);
+    sr_videorec_frame_keep();
+    sr_videorec_frame_pending(resolve_test_picture);                   /* M read back here */
+    CHECK(s_resolved == 2, "the kept picture is read back before the next present replaces it");
+    fill(s_pending_px, 0xB0u);
+    sr_videorec_vblank(201, vtime(201));                              /* M */
+    sr_videorec_vblank(202, vtime(202));                              /* B */
+    CHECK(sr_videorec_finish() == 1, "a recording with a pending kept picture reports PASS");
+    n = read_firsts(dir, got, 16);
+    CHECK(n == 3 && got[0] == 0xA0u && got[1] == 0x10u && got[2] == 0xB0u,
+          "the pending kept picture keeps its VBLANK");
+
+    /* Without a keep the newest picture wins, as before. */
+    snprintf(dir, sizeof dir, "%s/keep-none", root);
+    CHECK(sr_videorec_test_start(dir, "raw"), "the newest-wins recording starts");
+    fill(px, 0xA0u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_vblank(300, vtime(300));
+    fill(px, 0x10u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    fill(px, 0xB0u); sr_videorec_frame(px, W, H, W * 4u, SR_CAP_ORDER_BGRX);
+    sr_videorec_vblank(301, vtime(301));
+    sr_videorec_vblank(302, vtime(302));
+    sr_videorec_test_stats(&st);
+    CHECK(sr_videorec_finish() == 1, "the newest-wins recording reports PASS");
+    n = read_firsts(dir, got, 16);
+    CHECK(n == 3 && got[1] == 0xB0u && got[2] == 0xB0u && st.carried_frames == 0,
+          "without a keep, a later picture replaces the earlier one");
+    sr_videorec_test_reset();
 }
 
 /* A GE render target (RGBX) is written in BGRX order, and a clean recording reports PASS. */
@@ -986,6 +1091,7 @@ int main(int argc, char **argv) {
     test_name_taken(root);
     test_audio_failures(root);
     test_filters(root);
+    test_keep(root);
     char self[1024];
     CHECK(self_path(self, sizeof self), "the selftest finds its own path for the fake FFmpeg");
     test_encoder_failures(root, self);

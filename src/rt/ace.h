@@ -175,6 +175,8 @@ typedef struct {
     AceRate stable;            /* the detector's class at the window's end */
     int ever_stable;
     AceRate last_rate;         /* the last stable K class */
+    int smooth;                /* Smooth motion is on for the run */
+    uint32_t betweens;         /* in-betweens it showed in the window */
 } AceWindow;
 
 typedef struct {
@@ -189,13 +191,18 @@ typedef struct {
     int have_target;           /* a percentage can be shown */
     double target_fps;         /* T = 59.94 / k */
     int speed_pct;             /* F / T while PC limited, else 100 */
+    int smooth_on;             /* Smooth motion is on: the text says whether it added frames */
+    double shown_fps;          /* with it on, new frames plus in-betweens per second */
     char text[64];             /* "100%  30 FPS", "\xE2\x96\xB2 87%  26 FPS  PC LIMITED", "\xE2\x80\x94 27 FPS" */
 } AceReadoutView;
 
 void ace_readout_reset(AceReadoutState *s);
 /* Judges one window; PC limited when a slot was skipped, or when the host idled under 2% while
  * frames came slower than the class allows. The target keeps the class stable when the stretch
- * began, so a steady slowdown does not redefine it. */
+ * began, so a steady slowdown does not redefine it. With Smooth motion on, the text ends with
+ * "SMOOTH n" (n pictures a second reached the screen, in-betweens included) or, in a window it
+ * showed no in-between in (the game was not at a steady 30 FPS), "SMOOTH OFF": it is never off
+ * without saying so. */
 void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *out);
 
 /* ---- observation feed (Ace on only; callers check g_ace_on) ---------------------------------- */
@@ -247,6 +254,9 @@ typedef struct {
     uint64_t flip_ns;      /* when the latest flip arrived */
     uint64_t held_ns;      /* when the in-between of the held frame was presented */
     int reflip;            /* this flip shows the held frame again: it is the held present */
+    uint64_t frame_seq;    /* new frames flipped with smooth motion on */
+    uint64_t taken_seq;    /* the newest of them whose verdict a present took */
+    uint64_t unpaired;     /* in-betweens refused: the frame before never reached a present */
 } AcePace;
 
 void ace_pace_reset(AcePace *p);
@@ -254,7 +264,11 @@ void ace_pace_reset(AcePace *p);
  * flip of the unchanged frame (a title that flips each frame twice) shows it, so that present
  * is the held one and the VBLANK has nothing left to show. */
 void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t now_ns);
-/* The flip's present: returns the verdict and clears it. */
+/* The flip's present: returns the verdict and clears it. An in-between is made only of two
+ * consecutive frames: when the frame before this one never reached a present (the presenter's
+ * slot rule dropped its flip, or the present failed), the pass holds an older frame, and an
+ * in-between of the two would put whatever moved between them in the wrong place, or lose it.
+ * Such a verdict becomes KEEP (the real frame is shown and kept) and is counted in `unpaired`. */
 AceShow ace_pace_take(AcePace *p);
 /* The in-between went to the screen at now_ns (the presenter's clock): the frame is held for the
  * VBLANK after `vcount`. Without smooth motion the frame would have been shown then, so the

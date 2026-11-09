@@ -14,7 +14,12 @@
 //   - the presenter hands the recorder each frame it shows, at its output resolution
 //     (sr_videorec_frame, or sr_videorec_frame_pending for a GPU readback still in flight);
 //   - every serviced VBLANK writes one video frame: the newest presented picture, or the
-//     previous one again when the guest did not flip (constant 60000/1001 frames per second);
+//     previous one again when the guest did not flip (constant 60000/1001 frames per second).
+//     A kept picture (sr_videorec_frame_keep: an Ace Mode smooth-motion in-between) is not
+//     replaced by a later one before its VBLANK; that later picture is written at the next
+//     VBLANK instead, as the screen shows it then. So a smooth-motion recording holds what the
+//     window showed, in-betweens included, and frames.csv still counts only the game's own
+//     flips;
 //   - every sceAudioOutput* hand-off is mixed into one stereo 44100 Hz track at the guest time
 //     it was made, each channel continuing where its last buffer ended, as the PSP plays it.
 // Frame k of the video and audio sample k * 44100 * 1001 / 60000 are the same guest instant, so
@@ -101,6 +106,14 @@ typedef int (*SrVideoRecResolver)(void);
 void sr_videorec_frame_pending(SrVideoRecResolver resolver);
 void sr_videorec_resolve_pending(void);
 
+/* The picture just handed over (shown, or pending) is the only picture of its VBLANK: a later
+ * one before that VBLANK's frame is written goes to the next VBLANK (counted in record.json's
+ * carried_frames). Ace Mode's smooth motion keeps each in-between, which stays on screen until
+ * the held real frame's VBLANK; without the keep, that held frame replaced it unread and a
+ * 30 Hz game recorded at 30 pictures a second. A pending kept picture is read back when the
+ * next present registers its own. */
+void sr_videorec_frame_keep(void);
+
 /* One serviced VBLANK at guest time guest_us: write this VBLANK's frame and the audio before it.
  * VCOUNT steps the guest skipped (a late host) are written as repeats and counted. */
 void sr_videorec_vblank(uint32_t vcount, uint64_t guest_us);
@@ -132,6 +145,7 @@ int sr_videorec_test_start(const char *dir, const char *codec);
 int sr_videorec_test_start_at(const char *dir, const char *codec, uint32_t start_vcount);
 typedef struct {
     uint64_t frames, new_frames, guest_flips, repeat_frames, gap_frames, late_vblanks, refused_frames;
+    uint64_t carried_frames;
     uint64_t audio_samples, audio_overflow, audio_trimmed;
     uint32_t width, height, first_vcount;
     int failed;
