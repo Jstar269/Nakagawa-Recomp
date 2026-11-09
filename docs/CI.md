@@ -335,10 +335,12 @@ retail inputs, or hardware.
 ### Project website (GitHub Pages)
 
 `.github/workflows/pages.yml` publishes the project website,
-<https://jstar269.github.io/nakagawa-recomp/>, from [`docs/index.html`](index.html). The
-repository's Pages source is "GitHub Actions". The page is one static file with inline CSS and
-two small inline scripts (the theme picker, remembered in the visitor's own browser, and the phone
-menu), and no web fonts, external scripts or third-party requests. It shows two launcher screenshots,
+<https://jstar269.github.io/Nakagawa-Recomp/>, from [`docs/index.html`](index.html). Pages paths
+are case-sensitive, so the lowercase address returns 404. The repository's Pages source is "GitHub
+Actions". The page is one static file with inline CSS and two small inline scripts (one applies a
+remembered theme before the first paint; the other is the theme picker, which keeps a choice in the
+visitor's own browser), and no web fonts, external scripts or third-party requests. It shows two
+launcher screenshots,
 `docs/media/launcher-library.png` and `docs/media/launcher-building.png`, with their notice, and link
 previews show the share card `docs/images/brand/og-card.png`. The artifact also carries the presentation
 clip `docs/media/hst-rally.mp4` for the README's link. The build job copies an explicit list of
