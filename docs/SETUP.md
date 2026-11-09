@@ -61,12 +61,18 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   more once unpacked.
 - **SSD.** Builds read and write thousands of small files, so a hard disk makes them much
   slower. Keep the player's data folder on an SSD if you can.
-- **Processor.** BUILD PACKAGE runs up to eight compile jobs at a time, one per logical
-  processor, as far as memory allows, and the build screen counts the parts as they finish.
-  When free memory, a single processor or `NK_PACKAGE_JOBS` limits it to one job, the build
-  screen says so and that the build will take longer. A first build takes several minutes. To
-  choose the job count yourself, set the `NK_PACKAGE_JOBS` environment variable to a number from
-  1 to 8 before starting the player.
+- **Processor.** Settings > Build tools and cache > Build speed sets how much of the PC a
+  build takes. Balanced, the default, runs up to eight compile jobs at a time, one per logical
+  processor, as far as memory allows. Background runs at most two, with the whole build at low
+  priority, so a game you play meanwhile stays smooth and the build takes longer. Fastest runs
+  one per logical processor, as far as memory allows. No speed runs more jobs than the free
+  memory allows. The build screen names the speed, the job count and what limited it, and counts
+  the parts as they finish; the build log names them too. When free memory, a single processor
+  or `NK_PACKAGE_JOBS` limits it to one job, the build screen says so and that the build will
+  take longer. A first build takes several minutes. To choose the job count yourself, set the
+  `NK_PACKAGE_JOBS` environment variable to a number from 1 to 8 before starting the player: it
+  replaces the speed's job count (a Background build stays at low priority), and the build log
+  and screen say so. `nk_cli.py build-package` takes the same speeds as `--build-speed`.
 - **Texture scaling (Ace Mode, development only).** It is reachable only through the `SR_TEX_SCALE` and
   `SR_SMART_2D` environment variables, has no setting in the player, and is not admitted as an Enhanced or Ace
   item yet, because it changes the frames the game can read back

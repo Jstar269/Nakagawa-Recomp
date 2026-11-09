@@ -305,6 +305,54 @@ int main(int argc, char *argv[]) {
     remove(pid_file);
     printf("[PROCESS_TEST] Process tree termination verified: grandchild terminated!\n");
 
+    /* Settings > Build speed: Background starts the build child below normal, and what
+       the child starts inherits it (the build's Make and compilers). Before
+       nk_platform_spawn_process_at_priority every child ran at the player's class. */
+    {
+        DWORD own_class = GetPriorityClass(GetCurrentProcess());
+        bool runner_low = own_class == IDLE_PRIORITY_CLASS ||
+                          own_class == BELOW_NORMAL_PRIORITY_CLASS;
+        NkProcessPriority read_back = NK_PROCESS_PRIORITY_LOW;
+        const char *sleep_argv[] = { helper_exe, "--sleep-ms", "30000", NULL };
+        NkProcessHandle normal_proc;
+        assert(nk_platform_spawn_process(helper_exe, sleep_argv, NULL, NULL, NULL,
+                                         &normal_proc));
+        assert(nk_platform_process_priority(&normal_proc, &read_back));
+        assert(read_back == (runner_low ? NK_PROCESS_PRIORITY_LOW : NK_PROCESS_PRIORITY_NORMAL));
+        nk_platform_terminate_process(&normal_proc);
+        nk_platform_close_process(&normal_proc);
+
+        remove(pid_file);
+        NkProcessHandle low_proc;
+        assert(nk_platform_spawn_process_at_priority(helper_exe, tree_argv, NULL, NULL, NULL,
+                                                     NK_PROCESS_PRIORITY_LOW, &low_proc));
+        assert(nk_platform_process_priority(&low_proc, &read_back));
+        assert(read_back == NK_PROCESS_PRIORITY_LOW);
+        DWORD low_grandchild_pid = 0;
+        for (int i = 0; i < 200 && low_grandchild_pid == 0; i++) {
+            FILE *pf = fopen(pid_file, "r");
+            if (pf) {
+                if (fscanf(pf, "%lu", &low_grandchild_pid) != 1) low_grandchild_pid = 0;
+                fclose(pf);
+            }
+            if (low_grandchild_pid == 0) Sleep(25);
+        }
+        assert(low_grandchild_pid > 0);
+        HANDLE low_grandchild = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                                            FALSE, low_grandchild_pid);
+        assert(low_grandchild != NULL);
+        DWORD grandchild_class = GetPriorityClass(low_grandchild);
+        assert(grandchild_class == BELOW_NORMAL_PRIORITY_CLASS ||
+               (runner_low && grandchild_class == own_class));
+        nk_platform_terminate_process(&low_proc);
+        nk_platform_close_process(&low_proc);
+        (void)WaitForSingleObject(low_grandchild, 2000);
+        CloseHandle(low_grandchild);
+        remove(pid_file);
+        printf("[PROCESS_TEST] Low priority reaches the child and its children%s\n",
+               runner_low ? " (the runner itself is below normal)" : "");
+    }
+
     printf("[PROCESS_TEST] Process & quoting test PASSED successfully!\n");
 #else
     printf("[PROCESS_TEST] Skipping Windows-specific tests on non-Windows host.\n");

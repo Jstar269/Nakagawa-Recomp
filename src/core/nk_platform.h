@@ -281,6 +281,36 @@ bool nk_platform_spawn_process(
     NkProcessHandle *out_process
 );
 
+/* The scheduling priority a spawned process starts at. Its children inherit it, so a
+ * low-priority package build keeps every compiler it starts low too. */
+typedef enum {
+    NK_PROCESS_PRIORITY_NORMAL = 0,
+    /* Win32 BELOW_NORMAL_PRIORITY_CLASS; POSIX nice NK_PLATFORM_LOW_PRIORITY_NICE. A game
+       at normal priority then always runs first, and the process uses what is left. */
+    NK_PROCESS_PRIORITY_LOW
+} NkProcessPriority;
+
+/* The POSIX nice value of NK_PROCESS_PRIORITY_LOW. */
+#define NK_PLATFORM_LOW_PRIORITY_NICE 10
+
+/* nk_platform_spawn_process, with the child started at `priority`. The child never runs
+ * a single instruction at a higher priority: Win32 sets the class at creation and POSIX
+ * before exec. A priority the OS refuses fails the spawn. */
+bool nk_platform_spawn_process_at_priority(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessPriority priority,
+    NkProcessHandle *out_process
+);
+
+/* The priority a running child has now, as NK_PROCESS_PRIORITY_LOW when it runs below
+ * normal (any lower class or nice value counts) and NORMAL otherwise. False when the OS
+ * cannot say, or where processes are not spawned (Android). */
+bool nk_platform_process_priority(const NkProcessHandle *process, NkProcessPriority *out);
+
 bool nk_platform_is_process_running(NkProcessHandle *process);
 int nk_platform_wait_process(NkProcessHandle *process, int timeout_ms);
 /* Gives the foreground to the child's visible top-level window. The caller must

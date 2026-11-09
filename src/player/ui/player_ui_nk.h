@@ -566,7 +566,8 @@ typedef enum {
     PLAYER_UI_SETTINGS_CREATE_REPORT,        /* write the bundle on this PC */
     PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER,
     PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER,     /* the folder holding the library, games and settings */
-    PLAYER_UI_SETTINGS_OPEN_LOGS             /* the folder holding the logs */
+    PLAYER_UI_SETTINGS_OPEN_LOGS,            /* the folder holding the logs */
+    PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED     /* Background, Balanced, Fastest */
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
@@ -652,6 +653,8 @@ typedef struct {
     bool preset_notice_warns;
     /* Build tools and cache: builds share compiled system libraries (#1306) */
     bool share_system_libraries;
+    const char *build_speed;        /* "Background", "Balanced" or "Fastest" */
+    const char *build_speed_sentence;   /* what that speed does, one sentence */
     /* Updates (VIEW_UPDATES): what the last step found, in words */
     PlayerUiUpdateStep update_step;
     PlayerUiUpdateStep update_failed_step;   /* CHECKING, DOWNLOADING or INSTALLING */
@@ -828,6 +831,8 @@ typedef struct {
     bool built;                    /* written; being checked before PLAY */
     float fraction;                /* compiled share of the parts, -1 when unknown */
     const char *notice;            /* compile-stage "other apps may feel slower" note */
+    /* "Build speed: Balanced. 6 parts at a time, ..." while building, or NULL */
+    const char *speed_line;
     const char *message;
     unsigned elapsed_ms;
     const char *lines[4];          /* the last output lines, oldest first */
@@ -1030,6 +1035,7 @@ enum {
     PLAYER_UI_ID_REPORT_FOLDER = 0x4552u,
     PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER = 0x4553u, /* Settings: shows the data folder */
     PLAYER_UI_ID_SETTINGS_OPEN_LOGS = 0x4554u,        /* Settings: shows the logs folder */
+    PLAYER_UI_ID_SETTINGS_BUILD_SPEED = 0x4555u,      /* Build tools and cache: Build speed */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
     PLAYER_UI_ID_CONTROLLER_DEADZONE_UP = 0x4622u,

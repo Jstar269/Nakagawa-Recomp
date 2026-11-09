@@ -4168,8 +4168,16 @@ static void render_build_cache(SDL_Renderer *ren, PlayerApp *app, const UiInput 
                             "REMOVE DOWNLOADED BUILD TOOLS", false, in, focused)) {
         player_app_set_view(app, VIEW_CONFIRM_REMOVE_TOOLS);
     }
+    snprintf(label, sizeof(label), "BUILD SPEED: %s",
+             app->settings.build_speed == PACKAGE_BUILD_SPEED_BACKGROUND ? "BACKGROUND"
+             : app->settings.build_speed == PACKAGE_BUILD_SPEED_FASTEST ? "FASTEST"
+                                                                         : "BALANCED");
+    focused = app->focus_index == focus++;
+    if (draw_button_focused(ren, x, y + 60.0f, 320.0f, 36.0f, label, false, in, focused)) {
+        player_app_cycle_build_speed(app);
+    }
     if (app->settings_notice[0]) {
-        draw_text_ellipsized(ren, x, y + 60.0f, app->settings_notice, 1.0f, card_w - 64.0f,
+        draw_text_ellipsized(ren, x, y + 108.0f, app->settings_notice, 1.0f, card_w - 64.0f,
                              COLOR_AMBER);
     }
     focused = app->focus_index == focus++;

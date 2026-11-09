@@ -1016,6 +1016,29 @@ bool nk_platform_spawn_process(
     const char *output_log_path,
     NkProcessHandle *out_process
 ) {
+    return nk_platform_spawn_process_at_priority(executable_path, argv, envp,
+                                                 working_directory, output_log_path,
+                                                 NK_PROCESS_PRIORITY_NORMAL, out_process);
+}
+
+bool nk_platform_process_priority(const NkProcessHandle *process, NkProcessPriority *out) {
+    if (!process || !process->is_active || !process->native_handle || !out) return false;
+    DWORD priority_class = GetPriorityClass((HANDLE)process->native_handle);
+    if (priority_class == 0) return false;
+    *out = priority_class == BELOW_NORMAL_PRIORITY_CLASS || priority_class == IDLE_PRIORITY_CLASS
+        ? NK_PROCESS_PRIORITY_LOW : NK_PROCESS_PRIORITY_NORMAL;
+    return true;
+}
+
+bool nk_platform_spawn_process_at_priority(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessPriority priority,
+    NkProcessHandle *out_process
+) {
     if (!executable_path || !out_process) return false;
     memset(out_process, 0, sizeof(*out_process));
 
@@ -1124,6 +1147,16 @@ bool nk_platform_spawn_process(
 
     DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED |
                            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+    /* The class is set at creation, so the child never runs at normal priority, and the
+       processes it starts inherit it: a below-normal creator's children default to its
+       class. A creator already below normal or idle passes its own class on instead, so
+       a low child is never raised above it. Normal leaves the flag out, as before. */
+    if (priority == NK_PROCESS_PRIORITY_LOW) {
+        DWORD own_class = GetPriorityClass(GetCurrentProcess());
+        if (own_class != IDLE_PRIORITY_CLASS && own_class != BELOW_NORMAL_PRIORITY_CLASS) {
+            creation_flags |= BELOW_NORMAL_PRIORITY_CLASS;
+        }
+    }
 
     STARTUPINFOEXW si;
     PROCESS_INFORMATION pi;

@@ -51,6 +51,41 @@ static double elapsed_ms(const struct timespec *a, const struct timespec *b) {
 int main(void) {
     struct timespec t0, t1;
 
+    /* 0. Settings > Build speed: Background starts the build child at nice
+     * NK_PLATFORM_LOW_PRIORITY_NICE, and what the child starts inherits it (the build's
+     * Make and compilers). Before nk_platform_spawn_process_at_priority every child ran
+     * at the player's priority. */
+    printf("[POSIX_PROCESS_TEST] Subtest 0: a low-priority child and its children\n");
+    fflush(stdout);
+    {
+        NkProcessPriority read_back = NK_PROCESS_PRIORITY_NORMAL;
+        NkProcessHandle low;
+        const char *low_argv[] = { "/bin/sleep", "30", NULL };
+        assert(nk_platform_spawn_process_at_priority("/bin/sleep", low_argv, NULL, NULL, NULL,
+                                                     NK_PROCESS_PRIORITY_LOW, &low));
+        assert(nk_platform_process_priority(&low, &read_back));
+        assert(read_back == NK_PROCESS_PRIORITY_LOW);
+        nk_platform_terminate_process(&low);
+        nk_platform_close_process(&low);
+
+        /* `nice` with no operand prints the niceness it runs at: a grandchild here. */
+        const char *nice_log = SR_SELFTEST_BUILD_ROOT "/posix_process_nice.log";
+        (void)remove(nice_log);
+        NkProcessHandle tree;
+        const char *tree_argv[] = { "/bin/sh", "-c", "nice", NULL };
+        assert(nk_platform_spawn_process_at_priority("/bin/sh", tree_argv, NULL, NULL, nice_log,
+                                                     NK_PROCESS_PRIORITY_LOW, &tree));
+        assert(nk_platform_wait_process(&tree, 10000) == 0);
+        nk_platform_close_process(&tree);
+        FILE *log = fopen(nice_log, "r");
+        int niceness = -1;
+        assert(log != NULL);
+        assert(fscanf(log, "%d", &niceness) == 1);
+        fclose(log);
+        (void)remove(nice_log);
+        assert(niceness >= NK_PLATFORM_LOW_PRIORITY_NICE);
+    }
+
     /* 1. A finite timeout must expire and return, leaving the child alive.
      *
      * Before the fix this blocked for the child's full 30 seconds and then

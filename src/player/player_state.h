@@ -324,6 +324,10 @@ typedef struct {
        reuse them for other games with the same library (#1306). On by default; the
        copies never leave this PC. */
     bool share_system_libraries;
+    /* Settings > Build speed: how much of the PC a package build takes (Background,
+       Balanced, Fastest). "build_speed" in settings.json, an addition to schema version 2
+       as text_size is; a value this build does not know keeps Balanced. */
+    PackageBuildSpeed build_speed;
     /* Ask GitHub for a newer version once each time the player starts. Off until
        the user turns it on (AGENTS.md section 5; the button needs no switch). */
     bool check_updates_at_start;
@@ -1733,6 +1737,9 @@ void player_app_enhanced_page_cycle_mode(PlayerApp *app);
  * library's. On a title's page whose game is gone, it closes the page instead. */
 void player_app_enhanced_page_cycle_part(PlayerApp *app, int part);
 void player_app_toggle_share_system_libraries(PlayerApp *app);
+/* Settings > Build speed: Background, Balanced, Fastest, then round; saved at once. The
+   next build uses it; a running one keeps the speed it started with. */
+void player_app_cycle_build_speed(PlayerApp *app);
 void player_app_adjust_volume(PlayerApp *app, int delta);
 void player_app_move_focus(PlayerApp *app, int delta, int focus_count);
 

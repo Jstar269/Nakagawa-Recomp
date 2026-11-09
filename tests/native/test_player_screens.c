@@ -435,6 +435,9 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.online_mode = which == FLOW_SETTINGS_ONLINE_ON;
     settings.developer_mode = true;
     settings.share_system_libraries = true;
+    settings.build_speed = "Background";
+    settings.build_speed_sentence = "Two parts at a time at low priority, so a game you play "
+                                    "meanwhile stays smooth. Builds take longer.";
     /* Accessibility: a size picked, high contrast following Windows (off), and
        Reduce motion turned on. */
     settings.interface_size = "125%";
@@ -969,6 +972,10 @@ static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
             ? "Building uses most of your PC's power for a few minutes, so other apps "
               "may feel slower until it finishes."
             : NULL;
+        build.speed_line = which == FLOW_BUILD_PARTS
+            ? "Build speed: Balanced. 6 parts at a time, as many as the free memory allows "
+              "(14.2 GB free)."
+            : NULL;
         build.elapsed_ms = 83400u;
         build.lines[0] = "[compile] 1204 of 3311 functions";
         build.lines[1] = "[compile] chunk 12 of 31";
@@ -1140,6 +1147,25 @@ static void test_build_bar_shows_compiled_parts(void) {
             CHECK(notice_y > bar_y, "the note sits under the progress bar");
         }
     }
+    {
+        /* Settings > Build speed: the card names the speed, the job count and what bound
+           it, in the muted colour, between the bar and the note. */
+        const char *speed = strstr(out, "60000045 TEXT ");
+        const char *notice = strstr(out, "60000044 TEXT ");
+        const char *elapsed = strstr(out, "60000043 TEXT ");
+        CHECK(speed != NULL && strstr(speed, "Build speed: Balanced. 6 parts at a time") != NULL,
+              "the build card names the build speed and its job count");
+        if (speed != NULL && notice != NULL && elapsed != NULL) {
+            int speed_y = 0, notice_y = 0;
+            char speed_rgba[9] = "", elapsed_rgba[9] = "";
+            CHECK(sscanf(speed + 14, "%*d %d %*d %*d %8s", &speed_y, speed_rgba) == 2 &&
+                  sscanf(notice + 14, "%*d %d", &notice_y) == 1 &&
+                  sscanf(elapsed + 14, "%*d %*d %*d %*d %8s", elapsed_rgba) == 1,
+                  "read the speed line's, the note's and the elapsed time's rows");
+            CHECK(strcmp(speed_rgba, elapsed_rgba) == 0, "the speed line is muted");
+            CHECK(speed_y < notice_y, "the speed line comes before the note");
+        }
+    }
     used = 0u;
     out[0] = '\0';
     {
@@ -1154,6 +1180,8 @@ static void test_build_bar_shows_compiled_parts(void) {
             nk_ui_destroy(plain);
             CHECK(strstr(out, "60000044 TEXT ") == NULL,
                   "a build without a note draws none");
+            CHECK(strstr(out, "60000045 TEXT ") == NULL,
+                  "a build without a speed line draws none");
         }
     }
 }
@@ -2226,7 +2254,9 @@ static bool flow_row_sentence_is_beside_button(FlowCase which, NkUiId button_id,
     draw = flow_case_layout(which, 1280, 800, &ui);
     for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
         const NkUiDrawCmd *cmd = &draw->cmd[i];
-        if (cmd->element_id == button_id && cmd->kind == NK_UI_DRAW_RECTANGLE) {
+        /* A button that is on is filled; one that is off has only its border. */
+        if (cmd->element_id == button_id &&
+            (cmd->kind == NK_UI_DRAW_RECTANGLE || cmd->kind == NK_UI_DRAW_BORDER)) {
             button = cmd;
         }
         if (cmd->kind == NK_UI_DRAW_TEXT && cmd->custom != NULL) {
@@ -2786,6 +2816,9 @@ static void test_settings_pages(void) {
          "Build tools and cache opens its page"},
         {FLOW_SETTINGS_BUILD_CACHE, PLAYER_UI_ID_SETTINGS_SHARE_LIBRARIES,
          PLAYER_UI_SETTINGS_TOGGLE_SHARE_LIBRARIES, "the share switch toggles library sharing"},
+        {FLOW_SETTINGS_BUILD_CACHE, PLAYER_UI_ID_SETTINGS_BUILD_SPEED,
+         PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED,
+         "the build speed button steps Background, Balanced, Fastest"},
         {FLOW_SETTINGS_BUILD_CACHE, PLAYER_UI_ID_SETTINGS_CLEAR_LIBRARIES,
          PLAYER_UI_SETTINGS_CLEAR_SHARED_LIBRARIES, "Clear shared library cache clears it"},
         {FLOW_SETTINGS_BUILD_CACHE, PLAYER_UI_ID_SETTINGS_REMOVE_TOOLS,
@@ -3001,6 +3034,13 @@ static void test_settings_pages(void) {
               strstr(dump, "\"REMOVE BUILD TOOLS\"") != NULL &&
               strstr(dump, "Shared library cache cleared.") != NULL,
           "build tools and cache shows the switch, tool removal and the clear notice");
+    CHECK(flow_case_fits(FLOW_SETTINGS_BUILD_CACHE, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "\"BUILD SPEED: BACKGROUND\"") != NULL,
+          "build tools and cache shows the build speed at 960 x 540");
+    CHECK(flow_row_sentence_is_beside_button(FLOW_SETTINGS_BUILD_CACHE,
+                                             PLAYER_UI_ID_SETTINGS_BUILD_SPEED,
+                                             "Two parts at a time"),
+          "Settings > Build cache keeps the Build speed sentence beside its button");
     CHECK(flow_row_sentence_is_beside_button(FLOW_SETTINGS_BUILD_CACHE,
                                              PLAYER_UI_ID_SETTINGS_SHARE_LIBRARIES,
                                              "Builds keep each compiled library"),
