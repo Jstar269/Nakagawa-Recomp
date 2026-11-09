@@ -332,7 +332,7 @@ and `SR_PROFILE=1` reach the game.
 
 `SR_PROFILE=1` prints its hot-path table (`--- PERF_PROFILE ---`) to the runtime's standard error
 when the run ends. That includes a run stopped by `SR_EXIT_AT_VBLANK`, an `SR_FBDUMP` capture exit,
-the `SR_WATCHDOG_EXIT` watchdog and the stops for an unsupported import or a guest fault: each of
-those ends the process without the C runtime's exit handlers, and prints the table first.
+the `SR_WATCHDOG_EXIT` watchdog, the stops for an unsupported import or a guest fault, and the stop
+when the guest's own exit path fails: each of those ends the process without the C runtime's exit handlers, and prints the table first.
 `SR_PROFILE_DUMP_VBLANKS=<N>` also prints it every N VBLANKs, for a run that may be killed from
 outside.
