@@ -823,7 +823,9 @@ class TestProductionSmokePackage(unittest.TestCase):
         of that folder, and every path the planner derives from it, the staged guest
         PRXs included, reaches Make in that form. On Windows Path.resolve() expands
         an 8.3 alias back to the long, spaced name; this resolve does the same on any
-        host, so a check that resolves a staged path refuses a Make-safe build."""
+        host, so a check that resolves a staged path refuses a Make-safe build.
+        The enhancement package is staged and the spaced enhancement data root is named
+        by its short form, so both reach Make unsafe-free."""
         long_root = self.root / "Spaced Profile"
         alias_root = self.root / "short_alias_root"
         for directory in (long_root, alias_root):
@@ -850,6 +852,11 @@ class TestProductionSmokePackage(unittest.TestCase):
         shutil.copyfile(self.fixture_dir / "guest.prx", game_elf)
         psp_header = inputs / "EBOOT header.psp"
         shutil.copyfile(self.fixture_dir / "guest.psp", psp_header)
+        enhancement_package = inputs / "enhancement package.json"
+        enhancement_package.write_text("{}", encoding="utf-8")
+        enhancement_data_root = long_root / "enhancement data"
+        enhancement_data_root.mkdir()
+        data_root_alias = alias_root / "ENHDAT~1"
 
         path_class = type(self.root)
         real_resolve = path_class.resolve
@@ -858,6 +865,8 @@ class TestProductionSmokePackage(unittest.TestCase):
 
         def short_path(path):
             # GetShortPathNameW: the alias of the spaced folder, absolute, not resolved.
+            if Path(path) == enhancement_data_root:
+                return data_root_alias
             relative = Path(path).relative_to(long_root)
             return alias_root.joinpath(relative)
 
@@ -883,6 +892,8 @@ class TestProductionSmokePackage(unittest.TestCase):
                 f"/toolchain/{name}" if name in {"make", "gcc"} else real_which(name, **kw))),
             mock.patch.object(title_codegen_plan, "_version_identity",
                               return_value=("synthetic 1.0", "synthetic 1.0")),
+            # The package file is staged, not parsed, by this route test.
+            mock.patch("nk_core.package_cache.enhancement_package_options", return_value={}),
             mock.patch.object(title_codegen_plan.subprocess, "run", side_effect=record_make),
             contextlib.redirect_stdout(io.StringIO()),
             self.assertRaises(title_codegen_plan.PackageRouteError) as caught,
@@ -897,12 +908,17 @@ class TestProductionSmokePackage(unittest.TestCase):
                 module_dir=module_dir,
                 output_dir=output_dir,
                 make_command="make",
+                enhancement_package_path=enhancement_package,
+                enhancement_data_root=enhancement_data_root,
             )
         # Make was recorded, not run, so the package is incomplete; any path refusal
         # would have stopped the route before Make with PACKAGE_UNSUPPORTED_PATH.
         self.assertEqual(caught.exception.code, "PACKAGE_BUILD_INCOMPLETE", caught.exception)
         self.assertTrue(make_calls)
-        path_keys = ("GAME_ELF", "GAME_PSP_HEADER", "TITLE_MANIFEST", "BUILD_DIR", "LINK_MAP")
+        path_keys = (
+            "GAME_ELF", "GAME_PSP_HEADER", "TITLE_MANIFEST", "BUILD_DIR", "LINK_MAP",
+            "ENHANCEMENT_PACKAGE", "ENHANCEMENT_DATA_ROOT",
+        )
         for command, environment in make_calls:
             for argument in command[1:]:
                 self.assertFalse(title_codegen_plan._make_unsafe(argument), argument)
@@ -910,6 +926,8 @@ class TestProductionSmokePackage(unittest.TestCase):
                 value = environment[key]
                 self.assertFalse(title_codegen_plan._make_unsafe(value), (key, value))
                 self.assertTrue(Path(value).is_relative_to(alias_root), (key, value))
+            # The data root is read in place: its short form is passed on as written.
+            self.assertEqual(environment["ENHANCEMENT_DATA_ROOT"], data_root_alias.as_posix())
             extra = environment["GAME_EXTRA_ELFS"].split(" ")
             self.assertEqual(len(extra), 1, extra)
             module_path = extra[0].rsplit("@", 1)[0]
@@ -923,10 +941,23 @@ class TestProductionSmokePackage(unittest.TestCase):
         spaced = self.root / "Spaced Data" / "title files"
         spaced.mkdir(parents=True)
         alias = self.root / "short_alias_data"
-        with mock.patch.object(title_codegen_plan, "_windows_short_path", return_value=alias):
-            self.assertEqual(
-                title_codegen_plan._make_safe_directory(spaced, "enhancement data root"), alias
-            )
+        path_class = type(self.root)
+        real_resolve = path_class.resolve
+
+        def expanding_resolve(path, strict=False):
+            # Windows expands an 8.3 alias back to its long, spaced name when resolved.
+            resolved = real_resolve(path, strict=strict)
+            if resolved.is_relative_to(alias):
+                return spaced.joinpath(resolved.relative_to(alias))
+            return resolved
+
+        with (
+            mock.patch.object(title_codegen_plan, "_windows_short_path", return_value=alias),
+            mock.patch.object(path_class, "resolve", expanding_resolve),
+        ):
+            named = title_codegen_plan._make_safe_directory(spaced, "enhancement data root")
+        self.assertEqual(named, alias)
+        self.assertFalse(title_codegen_plan._make_unsafe(named.as_posix()), named)
         for unavailable in (None, self.root / "Still Spaced"):
             with (
                 mock.patch.object(title_codegen_plan, "_windows_short_path",

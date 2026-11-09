@@ -1050,11 +1050,16 @@ def _make_safe_directory(path: Path, label: str) -> Path:
     if short is not None and not _make_unsafe(short.as_posix()):
         # Not resolved again: that would expand the alias back to the spaced name.
         return short
+    # 8.3 short names exist only on Windows, so name what applies on this host.
+    no_safe_form = (
+        "it has no 8.3 short name without them"
+        if os.name == "nt"
+        else "it is read in place and this platform has no short form to use instead"
+    )
     raise PackageRouteError(
         "PACKAGE_UNSUPPORTED_PATH",
         f"{label} {resolved.as_posix()!r} contains spaces or characters the Make recipes "
-        "cannot quote, and it has no 8.3 short name without them; move it to a "
-        "location without them",
+        f"cannot quote, and {no_safe_form}; move it to a location without them",
     )
 
 
