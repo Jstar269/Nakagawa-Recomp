@@ -937,7 +937,7 @@ static void test_filters(const char *root) {
     read_record_text(dir, text, sizeof text);
     CHECK(strstr(text, "\"filter\": \"mixed\"") != NULL, "frames made two ways read mixed");
     CHECK(strstr(text, "\"filter_frames\": {\"none\": 0, \"nearest\": 0, \"sharp\": 1, "
-                       "\"linear\": 0, \"fsr1\": 2}") != NULL, "and record.json counts each");
+                       "\"linear\": 0, \"fsr1\": 2, \"anime4k\": 0}") != NULL, "and record.json counts each");
 
     snprintf(dir, sizeof dir, "%s/filter-fsr1", root);
     CHECK(sr_videorec_test_start(dir, "raw"), "the fsr1 recording starts");
@@ -946,7 +946,17 @@ static void test_filters(const char *root) {
     CHECK(sr_videorec_finish() == 1, "an fsr1 recording reports PASS");
     read_record_text(dir, text, sizeof text);
     CHECK(strstr(text, "\"filter\": \"fsr1\"") != NULL &&
-          strstr(text, "\"fsr1\": 4}") != NULL, "a recording made through FSR 1 says so");
+          strstr(text, "\"fsr1\": 4, \"anime4k\": 0}") != NULL, "a recording made through FSR 1 says so");
+
+    snprintf(dir, sizeof dir, "%s/filter-anime4k", root);
+    CHECK(sr_videorec_test_start(dir, "raw"), "the anime4k recording starts");
+    sr_videorec_frame_filtered(px, W, H, W * 4u, SR_CAP_ORDER_BGRX, SR_VIDEOREC_FILTER_ANIME4K);
+    for (uint32_t v = 40; v < 43; v++) sr_videorec_vblank(v, vtime(v));
+    CHECK(sr_videorec_finish() == 1, "an anime4k recording reports PASS");
+    read_record_text(dir, text, sizeof text);
+    CHECK(strstr(text, "\"filter\": \"anime4k\"") != NULL &&
+          strstr(text, "\"fsr1\": 0, \"anime4k\": 3}") != NULL,
+          "a recording made through the movie upscaler says so");
 
     snprintf(dir, sizeof dir, "%s/filter-none", root);
     CHECK(sr_videorec_test_start(dir, "raw"), "the unscaled recording starts");
