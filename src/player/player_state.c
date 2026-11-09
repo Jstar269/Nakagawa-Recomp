@@ -6685,7 +6685,7 @@ bool player_app_factory_reset(PlayerApp *app, const char *stamp) {
     /* Logs stay where they are (the confirm dialog says so). Where the data folder is the
        root of a rooted layout (a data-root override, or Android's NK_ANDROID_DATA_DIR), the
        logs folder is inside it and moved with it, so it is moved back. The reset is already
-       done if that fails: the logs are then in the backup, and the developer log says so. */
+       done if that fails: the logs are then in the backup, and stderr and the developer log say so. */
     char logs[NK_MAX_PATH];
     if (nk_platform_resolve_path(NK_PATH_LOGS, logs, sizeof(logs))) {
         for (size_t i = 0; i < count; ++i) {
@@ -6704,6 +6704,8 @@ bool player_app_factory_reset(PlayerApp *app, const char *stamp) {
             } else {
                 player_dev_log_add(app, "settings", "factory reset: the logs stayed in %s",
                                    moved_logs);
+                /* The player quits after a reset, so the developer log goes with it. */
+                fprintf(stderr, "[PLAYER] Factory reset: the logs stayed in %s\n", moved_logs);
             }
             break;
         }
