@@ -1319,13 +1319,17 @@ static void read_pos_one(uint32_t addr, const VFmt *v, float *x, float *y, float
     if (v->pos_fmt == 3) {
         uint32_t xi = vtx_r32(a), yi = vtx_r32(a+4), zi = vtx_r32(a+8);
         memcpy(x, &xi, 4); memcpy(y, &yi, 4); memcpy(z, &zi, 4);
-        /* A float z in through mode is still the 16-bit depth, an integer: saturate it to
-         * 0..65535 and drop the fraction, the rule of PPSSPP's through-mode float decoder
-         * for a finite z. A title may write any float there (a 2D overlay at z = -1.0 with
-         * the depth test off), and both renderers must take the same depth: the Vulkan
-         * path clips depth outside the 16-bit range and rounds a fraction to the nearest
-         * step, where the software path truncates it. PPSSPP draws a NaN z at depth 0;
-         * here a NaN stays NaN, so the non-finite vertex rule still drops the primitive. */
+        /* A float z in through mode is saturated to 0..65535 and loses its fraction, so
+         * both renderers take one integer depth: the Vulkan path clips depth outside the
+         * 16-bit range and rounds a fraction to the nearest step, where the software path
+         * truncates it. A title may write any float there (a 2D overlay at z = -1.0 with
+         * the depth test off). NOT MEASURED on a PSP: this is the rule PPSSPP's
+         * through-mode float decoder applies, and which depth the hardware stores for
+         * such a z is an open probe. An infinite z saturates as well (+inf to 65535, -inf
+         * to 0), so its primitive is drawn, where the non-finite vertex rule dropped it
+         * before. PPSSPP draws a NaN z too, at depth 0; here a NaN stays NaN and the
+         * non-finite vertex rule still drops the primitive. Transform mode is untouched:
+         * its z is a model coordinate. */
         if (v->through) {
             if (*z >= 65535.0f) *z = 65535.0f;
             else if (*z > 0.0f) *z = (float)(int)*z;

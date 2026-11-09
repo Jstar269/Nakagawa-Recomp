@@ -3382,15 +3382,20 @@ static int coherence_run_clut_format_same_palette(void) {
  * unclamped -1.0 lies outside the depth range and every such triangle was clipped away. A
  * fraction must give the same depth on both renderers too: ge.c truncates a pixel's depth and the
  * Vulkan path rounds z / 65535 to the nearest step, so an undecoded 100.7 was 100 on one and 101
- * on the other. */
+ * on the other. An infinite z saturates and is drawn, a NaN z is dropped, and a transform-mode z
+ * is left alone. */
 typedef struct ThroughFloatVtx { uint32_t c; float x, y, z; } ThroughFloatVtx;
 
-/* Does a through-mode float z of `z` equal the stored depth `depth`? One list draws a quad at
- * z = depth (an integer) with the depth test ALWAYS and depth writes on, then a second quad over
- * it at `z` with the test EQUAL and depth writes off. Returns 1 when the second quad's colour is
- * there, 0 when the first one's is, -1 when neither is or the readback failed. `gpu`: through the
- * Vulkan hooks, else ge.c alone. */
-static int through_float_z_equals(float z, uint32_t depth, int gpu) {
+static uint32_t tfz_f24(float f) { uint32_t u; memcpy(&u, &f, 4); return u >> 8; }
+
+/* Does a float z of `z` pass the depth test `zfunc` against the stored depth `depth`? One list
+ * draws a through-mode quad at z = depth (an integer) with the depth test ALWAYS and depth writes
+ * on, then a second quad over it at `z` with the test `zfunc` and depth writes off. Returns 1 when
+ * the second quad's colour is there, 0 when the first one's is, -1 when neither is or the readback
+ * failed. `gpu`: through the Vulkan hooks, else ge.c alone. `transform`: the second quad is drawn
+ * in transform mode, with identity matrices and a viewport that maps a clip z to
+ * z * 30000 + 32768, so its z is a model coordinate the decoder must leave alone. */
+static int through_float_z_passes(float z, uint32_t depth, int gpu, uint32_t zfunc, int transform) {
     const uint32_t base = 0x04000000u | 0x00160000u, stride = 512u;
     const uint32_t vaddr = 0x00101800u, list_addr = 0x00100800u;
     const uint32_t under = 0xFF3366CCu, over = 0xFF20C040u;   /* ABGR: opaque */
@@ -3400,10 +3405,13 @@ static int through_float_z_equals(float z, uint32_t depth, int gpu) {
     sr_gpu_vram_dirty(base, stride * FB_H * 4u);
     memset(s_ge, 0, sizeof(*s_ge));
     ThroughFloatVtx *vtx = (ThroughFloatVtx *)SR_HOST(vaddr);
-    const float x0 = 16.0f, y0 = 16.0f, x1 = 48.0f, y1 = 48.0f;
     for (int q = 0; q < 2; q++) {
         const uint32_t c = q ? over : under;
         const float qz = q ? z : (float)depth;
+        /* through mode: pixels 16..48; transform mode: clip coordinates of pixels 12..60, 13.6..54.4 */
+        const int clip = q && transform;
+        const float x0 = clip ? -0.95f : 16.0f, x1 = clip ? -0.75f : 48.0f;
+        const float y0 = clip ? 0.9f : 16.0f, y1 = clip ? 0.6f : 48.0f;
         ThroughFloatVtx *v = vtx + 6 * q;
         v[0] = (ThroughFloatVtx){ c, x0, y0, qz };
         v[1] = (ThroughFloatVtx){ c, x1, y0, qz };
@@ -3429,12 +3437,35 @@ static int through_float_z_equals(float z, uint32_t depth, int gpu) {
     DL_EMIT(0x23, 1);                                   /* depth test */
     DL_EMIT(0xDE, 1);                                   /* ALWAYS */
     DL_EMIT(0xE7, 0);                                   /* depth writes on */
+    DL_EMIT(0x15, 0);
+    DL_EMIT(0x16, ((FB_H - 1) << 10) | 479);
     DL_EMIT(0xD4, 0);
     DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xD6, 0);
+    DL_EMIT(0xD7, 0xFFFF);
     DL_EMIT(0x12, (1u << 23) | (7u << 2) | (3u << 7)); /* through, 8888 colour, float pos */
     DL_EMIT(0x01, vaddr & 0x00FFFFFFu);
     DL_EMIT(0x04, (3u << 16) | 6u);
-    DL_EMIT(0xDE, 2);                                   /* EQUAL */
+    if (transform) {
+        static const float ident43[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+        static const float ident44[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        DL_EMIT(0x3A, 0);                               /* world, view and projection: identity */
+        for (int k = 0; k < 12; k++) DL_EMIT(0x3B, tfz_f24(ident43[k]));
+        DL_EMIT(0x3C, 0);
+        for (int k = 0; k < 12; k++) DL_EMIT(0x3D, tfz_f24(ident43[k]));
+        DL_EMIT(0x3E, 0);
+        for (int k = 0; k < 16; k++) DL_EMIT(0x3F, tfz_f24(ident44[k]));
+        DL_EMIT(0x42, tfz_f24(240.0f));
+        DL_EMIT(0x43, tfz_f24(-136.0f));
+        DL_EMIT(0x44, tfz_f24(30000.0f));
+        DL_EMIT(0x45, tfz_f24(2048.0f));
+        DL_EMIT(0x46, tfz_f24(2048.0f));
+        DL_EMIT(0x47, tfz_f24(32768.0f));
+        DL_EMIT(0x4C, (2048u - 240u) << 4);
+        DL_EMIT(0x4D, (2048u - 136u) << 4);
+        DL_EMIT(0x12, (7u << 2) | (3u << 7));           /* transform mode, 8888 colour, float pos */
+    }
+    DL_EMIT(0xDE, zfunc);
     DL_EMIT(0xE7, 1);                                   /* depth writes off */
     DL_EMIT(0x04, (3u << 16) | 6u);                     /* the next six vertices */
     DL_EMIT(0x0F, 0);
@@ -3512,17 +3543,19 @@ static int coherence_run_through_float_z(void) {
             ok = 0;
         }
     }
-    /* The depth each renderer takes for a z with a fraction, and for one just outside the range:
-     * the depth test EQUAL must pass against `want` and fail against its neighbour. */
+    /* The depth each renderer takes for a z with a fraction, for one just outside the range and for
+     * an infinite one: the depth test EQUAL must pass against `want` and fail against its
+     * neighbour. An infinite z was dropped by the non-finite vertex rule before the decoder
+     * saturated it; it is drawn now, at the end of the range it lies beyond. */
     static const struct { float z; uint32_t want; } k_frac[] = {
         { 100.7f, 100u }, { 100.3f, 100u }, { 0.99f, 0u }, { 65534.7f, 65534u },
-        { -0.5f, 0u }, { 65535.5f, 65535u },
+        { -0.5f, 0u }, { 65535.5f, 65535u }, { INFINITY, 65535u }, { -INFINITY, 0u },
     };
     for (unsigned i = 0; i < sizeof k_frac / sizeof k_frac[0]; i++) {
         const uint32_t want = k_frac[i].want, other = want < 65535u ? want + 1u : want - 1u;
         for (int gpu = 1; gpu >= 0; gpu--) {
-            const int at_want = through_float_z_equals(k_frac[i].z, want, gpu);
-            const int at_other = through_float_z_equals(k_frac[i].z, other, gpu);
+            const int at_want = through_float_z_passes(k_frac[i].z, want, gpu, 2u, 0);
+            const int at_other = through_float_z_passes(k_frac[i].z, other, gpu, 2u, 0);
             if (at_want == 1 && at_other == 0) continue;
             fprintf(stderr, "gpu coherence selftest [%s]: z=%.2f on %s: equal to depth %u: %d (want 1), "
                             "to depth %u: %d (want 0)\n", name, (double)k_frac[i].z,
@@ -3530,10 +3563,39 @@ static int coherence_run_through_float_z(void) {
             ok = 0;
         }
     }
+    /* A NaN z stays NaN: the non-finite vertex rule drops the primitive on both renderers, even
+     * under a depth test that always passes. The same quad at a finite z is drawn, so the cell can
+     * tell the two apart. */
+    for (int gpu = 1; gpu >= 0; gpu--) {
+        const int nan_drawn = through_float_z_passes(NAN, 100u, gpu, 1u, 0);
+        const int finite_drawn = through_float_z_passes(50.0f, 100u, gpu, 1u, 0);
+        if (nan_drawn != 0 || finite_drawn != 1) {
+            fprintf(stderr, "gpu coherence selftest [%s]: on %s a quad at z=NaN under the depth test ALWAYS "
+                            "was drawn: %d (want 0), and one at z=50: %d (want 1)\n", name,
+                    gpu ? "the Vulkan path" : "ge.c", nan_drawn, finite_drawn);
+            ok = 0;
+        }
+    }
+    /* Through mode only: a transform-mode z is a model coordinate, and the decoder must leave it
+     * alone. With identity matrices and a viewport of z * 30000 + 32768, a model z of -0.5 is depth
+     * 17768 and one of 0.25 is depth 40268; saturated or truncated in the decoder, both would be
+     * depth 32768. */
+    static const struct { float z; uint32_t want; } k_scope[] = { { -0.5f, 17768u }, { 0.25f, 40268u } };
+    for (unsigned i = 0; i < sizeof k_scope / sizeof k_scope[0]; i++)
+        for (int gpu = 1; gpu >= 0; gpu--) {
+            const int at_want = through_float_z_passes(k_scope[i].z, k_scope[i].want, gpu, 2u, 1);
+            const int at_zero = through_float_z_passes(k_scope[i].z, 32768u, gpu, 2u, 1);
+            if (at_want == 1 && at_zero == 0) continue;
+            fprintf(stderr, "gpu coherence selftest [%s]: transform-mode z=%.2f on %s: equal to depth %u: %d "
+                            "(want 1), to depth 32768: %d (want 0) -- the decoder changed a transform-mode z\n",
+                    name, (double)k_scope[i].z, gpu ? "the Vulkan path" : "ge.c", k_scope[i].want, at_want,
+                    at_zero);
+            ok = 0;
+        }
     coherence_reset_targets();
     if (ok)
-        printf("gpu coherence selftest: PASS %-22s z=-1.0 and z=70000.0 drawn; a fraction is the same "
-               "depth on both renderers\n", name);
+        printf("gpu coherence selftest: PASS %-22s z=-1.0 and z=70000.0 drawn; a fraction and an infinity "
+               "are the same depth on both renderers; NaN dropped; transform-mode z untouched\n", name);
     return ok;
 }
 
