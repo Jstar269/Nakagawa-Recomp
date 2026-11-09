@@ -1272,8 +1272,9 @@ NkResult nk_xb_open_file_lazy(const char *path, bool big_endian,
     XB_TEST_COUNT_LAZY_PATH_CALL();
     FILE *file = nk_fopen_utf8(path, "rb");
     if (!file) {
+        /* The strict reader's text for the same input (a missing path or a directory). */
         return xb_fail(error_message, error_message_size,
-                       "cannot open XB archive");
+                       "cannot stat XB archive");
     }
     int64_t file_size = xb_file_handle_size(file);
     if (file_size <= 0) {

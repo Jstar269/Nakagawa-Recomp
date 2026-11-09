@@ -436,10 +436,17 @@ static void test_lazy_mount_size_checks(void) {
     /* Cut inside the string-table header: the metadata runs past the end of the file. */
     write_file_bytes(path, bytes.data, 8u + 2u * 8u + 4u);
     assert(nk_xb_open_file_lazy(path, false, NULL, &lazy, error, sizeof(error)) != NK_OK);
+    /* An empty and a missing archive are refused with the strict reader's text. */
     write_file_bytes(path, bytes.data, 0u);
     assert(nk_xb_open_file_lazy(path, false, NULL, &lazy, error, sizeof(error)) != NK_OK);
+    assert(strcmp(error, "cannot stat XB archive") == 0);
+    assert(nk_xb_open_file(path, false, NULL, &strict, error, sizeof(error)) != NK_OK);
+    assert(strcmp(error, "cannot stat XB archive") == 0);
     assert(remove(path) == 0);
     assert(nk_xb_open_file_lazy(path, false, NULL, &lazy, error, sizeof(error)) != NK_OK);
+    assert(strcmp(error, "cannot stat XB archive") == 0);
+    assert(nk_xb_open_file(path, false, NULL, &strict, error, sizeof(error)) != NK_OK);
+    assert(strcmp(error, "cannot stat XB archive") == 0);
     free(bytes.data);
     printf("[XB_TEST] lazy mount size checks through the open handle PASSED\n");
 }

@@ -16312,7 +16312,7 @@ static void test_archive_discovery_skips_unpack_folders_only(void) {
      * not a count taken at the host file layer (nk_platform has no such seam), so a new
      * lookup added there without its marker would not fail this check. */
     expect(nk_xb_test_lazy_path_calls() == 3u,
-           "each archive mount makes one host lookup by path");
+           "each archive mount passes its one marked lookup by path");
 
     expect(hle_archive_route_file_matches("disc0:/PSP_GAME/USRDIR/data/menu/inpack.to",
                                           "outer-archive"),
