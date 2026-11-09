@@ -7947,6 +7947,8 @@ static int coherence_run_twin_sync(void) {
  * dst-read-depth: an alpha-tested, depth-writing blend whose second sprite the alpha test rejects,
  * then an opaque sprite behind it. The rmwzfb rule keeps that op on the snapshot path; colour and
  * depth equal ge.c on every path.
+ * dst-read-ctest: the same op with the color test rejecting the second sprite, the shader's other
+ * kill that the interlock variant's early depth test cannot undo.
  * dst-read-ztest: the blended pair under the depth test GEQUAL over a depth wall, with depth writes
  * off and on, and with the second sprite hidden by the first's depth write in the same batch: the
  * depth-tested translucent draw. On the interlock path colour and depth equal ge.c and the op took
@@ -8048,8 +8050,10 @@ static uint32_t dro_mixed_list(const DroState *st) {
 /* dst-read-depth: clear depth to 0 in clear mode; then, with depth writes on and the depth test
  * ALWAYS, a blended pair (not overlapping) under the alpha test GREATER 0x40, whose second sprite
  * (alpha 0x20) the test rejects; then an opaque sprite at z 20000 under GEQUAL over both. Where
- * a rejected fragment wrote depth anyway, the opaque sprite would be hidden. */
-static uint32_t dro_depth_list(const DroState *st) {
+ * a rejected fragment wrote depth anyway, the opaque sprite would be hidden.
+ * dst-read-ctest (`colour_kill`): the same with the color test NOTEQUAL the second sprite's colour
+ * in place of the alpha test, so the color test rejects that sprite. */
+static uint32_t dro_depth_list(const DroState *st, int colour_kill) {
     static const float clear[1][5] = { { 0.0f, 0.0f, 480.0f, 272.0f, 0.0f } };
     static const float pair[2][5] = {
         { 40.0f, 40.0f, 100.0f, 100.0f, 30000.0f },
@@ -8067,10 +8071,18 @@ static uint32_t dro_depth_list(const DroState *st) {
     stp_emit(&l, 0x23, 1);
     stp_emit(&l, 0xE7, 0);                                /* depth writes on */
     stp_emit(&l, 0xDE, 1);                                /* ALWAYS */
-    stp_emit(&l, 0x22, 1);
-    stp_emit(&l, 0xDB, 6u | (0x40u << 8) | (0xFFu << 16));   /* alpha GREATER 0x40 */
+    if (colour_kill) {
+        stp_emit(&l, 0x27, 1);
+        stp_emit(&l, 0xD8, 3u);                           /* color NOTEQUAL the second sprite's */
+        stp_emit(&l, 0xD9, pair_rgba[1] & 0x00FFFFFFu);
+        stp_emit(&l, 0xDA, 0xFFFFFFu);
+    } else {
+        stp_emit(&l, 0x22, 1);
+        stp_emit(&l, 0xDB, 6u | (0x40u << 8) | (0xFFu << 16));   /* alpha GREATER 0x40 */
+    }
     dro_sprites(&l, &vaddr, pair, pair_rgba, 2u);
     stp_emit(&l, 0x22, 0);
+    stp_emit(&l, 0x27, 0);
     stp_emit(&l, 0x21, 0);
     stp_emit(&l, 0xDE, 7);                                /* GEQUAL */
     dro_sprites(&l, &vaddr, behind, behind_rgba, 1u);
@@ -8250,39 +8262,40 @@ static int coherence_run_dst_read_mixed(void) {
     return dro_overlap_cell("dst-read-mixed", k_dro_mixed, 1u, dro_mixed_list, 1u, 3u);
 }
 
-static int coherence_run_dst_read_depth(void) {
-    static const DroState st = { "5650 alpha-tested", 0u, 0u, 2u | (3u << 4), 0u, 0u, 0u };
+/* dst-read-depth and dst-read-ctest: `what` names the shader kill in the messages. */
+static int dro_kill_cell(const char *cell, const DroState *stp, int colour_kill, const char *what) {
+    const DroState st = *stp;
     uint8_t *gpu_out = (uint8_t *)malloc(FB_W * FB_H * 4u);
     uint16_t *gz = (uint16_t *)malloc(480u * FB_H * 2u), *wz = (uint16_t *)malloc(480u * FB_H * 2u);
     int ok = gpu_out && gz && wz;
     GeState saved = *s_ge;
     DroRun run = {0};
-    if (ok && !dro_run_both(&st, dro_depth_list(&st), gpu_out, gz, wz, &run)) ok = 0;
+    if (ok && !dro_run_both(&st, dro_depth_list(&st, colour_kill), gpu_out, gz, wz, &run)) ok = 0;
     if (ok) {
         static const DroBox none = { 0u, 0u, 0u, 0u };
         unsigned outside = 0, kept = 0, zdiff = 0;
-        unsigned diff = dro_compare("dst-read-depth", &st, gpu_out, (const uint8_t *)SR_HOST(DRO_BASE),
+        unsigned diff = dro_compare(cell, &st, gpu_out, (const uint8_t *)SR_HOST(DRO_BASE),
                                     &none, &outside, &kept);
         for (uint32_t i = 0; i < 480u * FB_H; i++) {
             if (gz[i] == wz[i]) continue;
             if (!zdiff++)
-                fprintf(stderr, "gpu coherence selftest [dst-read-depth]: depth x=%u y=%u gpu=%u ge_c=%u\n",
+                fprintf(stderr, "gpu coherence selftest [%s]: depth x=%u y=%u gpu=%u ge_c=%u\n", cell,
                         i % 480u, i / 480u, gz[i], wz[i]);
         }
         if (diff || zdiff) {
-            fprintf(stderr, "gpu coherence selftest [dst-read-depth]: colour differs from ge.c in %u pixels, "
-                            "depth differs from ge.c in %u pixels\n", diff, zdiff);
+            fprintf(stderr, "gpu coherence selftest [%s]: colour differs from ge.c in %u pixels, "
+                            "depth differs from ge.c in %u pixels\n", cell, diff, zdiff);
             ok = 0;
         }
         if (run.rmw_ops) {
-            fprintf(stderr, "gpu coherence selftest [dst-read-depth]: the alpha-tested depth-writing op took "
+            fprintf(stderr, "gpu coherence selftest [%s]: the %s depth-writing op took "
                             "the interlock (%llu ops); the rmwzfb rule keeps it on the snapshot path\n",
-                    run.rmw_ops);
+                    cell, what, run.rmw_ops);
             ok = 0;
         }
         if (run.fallbacks) {
-            fprintf(stderr, "gpu coherence selftest [dst-read-depth]: %llu primitives took the software "
-                            "fallback\n", run.fallbacks);
+            fprintf(stderr, "gpu coherence selftest [%s]: %llu primitives took the software "
+                            "fallback\n", cell, run.fallbacks);
             ok = 0;
         }
     }
@@ -8291,8 +8304,18 @@ static int coherence_run_dst_read_depth(void) {
     free(gpu_out); free(gz); free(wz);
     if (ok)
         printf("gpu coherence selftest: PASS %-22s colour and depth equal ge.c; the op kept the snapshot\n",
-               "dst-read-depth");
+               cell);
     return ok;
+}
+
+static int coherence_run_dst_read_depth(void) {
+    static const DroState st = { "5650 alpha-tested", 0u, 0u, 2u | (3u << 4), 0u, 0u, 0u };
+    return dro_kill_cell("dst-read-depth", &st, 0, "alpha-tested");
+}
+
+static int coherence_run_dst_read_ctest(void) {
+    static const DroState st = { "5650 colour-tested", 0u, 0u, 2u | (3u << 4), 0u, 0u, 0u };
+    return dro_kill_cell("dst-read-ctest", &st, 1, "colour-tested");
 }
 
 /* dst-read-ztest: depth cleared to 0, then a depth-only clear-mode wall at z 25000 across part of
@@ -8503,6 +8526,7 @@ static int coherence_run_dst_read(void) {
     if (!coherence_run_dst_read_alpha()) ok = 0;
     if (!coherence_run_dst_read_mixed()) ok = 0;
     if (!coherence_run_dst_read_depth()) ok = 0;
+    if (!coherence_run_dst_read_ctest()) ok = 0;
     if (!coherence_run_dst_read_ztest()) ok = 0;
     if (!coherence_run_dst_read_pins()) ok = 0;
     return ok;
@@ -8521,6 +8545,7 @@ static int coherence_run_dst_read_one(const char *name) {
     if (strcmp(name, "dst-read-alpha") == 0) return coherence_run_dst_read_alpha();
     if (strcmp(name, "dst-read-mixed") == 0) return coherence_run_dst_read_mixed();
     if (strcmp(name, "dst-read-depth") == 0) return coherence_run_dst_read_depth();
+    if (strcmp(name, "dst-read-ctest") == 0) return coherence_run_dst_read_ctest();
     if (strcmp(name, "dst-read-ztest") == 0) return coherence_run_dst_read_ztest();
     if (strcmp(name, "dst-read-pins") == 0)
         return coherence_run_dst_read_order() && coherence_run_dst_read_pins();

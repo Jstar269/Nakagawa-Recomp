@@ -2213,7 +2213,8 @@ static int batch_reads_dst(const Batch *b) {
 
 /* The rmwzfb rule (#2109): the RMW variant tests depth before the shader runs, so a destination-
  * reading batch whose shader may kill a fragment that the depth test already wrote cannot take
- * it: with depth writes on, the alpha test (anything but ALWAYS), the transform-mode depth range
+ * it: with depth writes on, the alpha test (anything but ALWAYS), the color test (F_CTEST, set
+ * for every function but ALWAYS), the transform-mode depth range
  * when it is narrower than 0-65535, or a stencil-fail KEEP that can run. A batch that also blends
  * in fixed function (a stencil state with a native blend) has no colour attachment to blend into
  * there. An op holding such a batch keeps the snapshot path. */
@@ -2226,6 +2227,7 @@ static int rmw_refuses(const Batch *b) {
     if (b->key.blend_on) return 1;
     if (!b->key.zwrite) return 0;
     if (((uint32_t)b->pc.cfg[1] & 7u) != 1u) return 1;
+    if (flags & F_CTEST) return 1;
     if ((flags & F_PERSP) && (b->pc.cfg[2] > 0 || b->pc.cfg[3] < 65535)) return 1;
     if ((flags & F_STENCIL) && ((uint32_t)b->pc.bl[3] & 7u) == 0u && ((uint32_t)b->pc.bl[2] & 7u) != 1u)
         return 1;
