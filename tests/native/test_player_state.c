@@ -14404,6 +14404,17 @@ int main(int argc, char **argv) {
         player_app_prereq_cancel(capp);
         assert(capp->prerequisites.phase == PLAYER_PREREQ_CANCELLED);
         assert(capp->active_view == VIEW_LIBRARY);
+#elif defined(__ANDROID__)
+        /* No download on Android either (#306), and its Python is only the app's
+           libnk_python.so (#360): the card names that folder, not a PATH search. */
+        assert(!player_app_start_package_build(capp, 0));
+        assert(strcmp(capp->last_error.error_code, "BUILD_TOOLCHAIN_MISSING") == 0);
+        assert(strstr(capp->last_error.message, "(libnk_python.so)") != NULL);
+        assert(strstr(capp->last_error.message, "was not found on PATH") == NULL);
+        assert(strstr(capp->last_error.message, "downloads build tools only on Windows") != NULL);
+        assert(strstr(capp->last_error.message, "in the works") == NULL);
+        assert(strstr(capp->last_error.message, "#") == NULL);
+        assert(capp->prerequisites.phase != PLAYER_PREREQ_CONSENT);
 #else
         /* Only Windows has a pinned download: other hosts use the system's own
            tools, so the card names the first missing one and its package, and
