@@ -546,9 +546,9 @@ def build_plan(inputs: ReportInputs, identity: Identity, project_root: Path,
         found = _newest(logs.glob("flight-recorder*.json"))
         recorder = found[0] if found else None
     if recorder is not None and recorder.is_file():
-        reason = exclusion_reason(recorder.name)
-        if reason:
-            plan.skipped.append(("flight-recorder summary", reason))
+        excluded = exclusion_reason(recorder.name)
+        if excluded:
+            plan.skipped.append(("flight-recorder summary", excluded))
         else:
             try:
                 summary = flight_recorder_summary(recorder, identity)
