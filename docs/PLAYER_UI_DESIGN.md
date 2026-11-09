@@ -598,7 +598,7 @@ about 4x or more on any screen of 1080p or more, past that range everywhere, and
 every pass counts. HIGH turns it off as ULTRA without it, the plain 4x picture. Where the GPU renderer cannot run FSR
 1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
-PITCHED SOUND, the SPEED READOUT or the GAME BADGE: they change timing, framing, guest-visible output or the HUD, or
+PITCHED SOUND, FINER PATCHES, the SPEED READOUT or the GAME BADGE: they change timing, framing, guest-visible output or the HUD, or
 have no measured cost on low-end GPUs, so they stay the library's and each game's.
 
 The parts a preset sets are resolved with the rest (`player_play_resolve`): a game's own value, else the preset's,
