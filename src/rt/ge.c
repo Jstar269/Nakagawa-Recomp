@@ -5144,9 +5144,11 @@ static void ge_note_mip_draw(void) {
  * run's `PATCH_TESS: exit` line reports the count.
  * It alters GE timing (SR_GE_TIMING): ge_time_prim_begin charges a patch's control points, and with the GE timing model on
  * (SR_GE_TIMING) raster_tri also charges every triangle drawn, the finer ones included, so a
- * factor F on division d costs what division d*F costs, not what the PSP's d costs: more for a
- * small patch (one more fixed row charge per triangle), possibly less for a large one whose spans
- * the finer grid narrows below 64 pixels. List completion, sceGeDrawSync, sceGeListSync and the
+ * factor F on division d costs what division d*F costs, not what the PSP's d costs: on 8888
+ * without depth test (untextured or fill-rate textured spans) a span under 48 pixels carries a fixed row
+ * charge, so a small patch costs more (one more per triangle) and a large one whose spans the finer grid
+ * cuts below 48 pixels can cost less; depth-tested, 16-bit and most textured spans are charged per
+ * pixel, so the cost follows the finer surface's coverage in either direction. List completion, sceGeDrawSync, sceGeListSync and the
  * finish interrupt move with it. With the model off the extra triangles cost host time only. Off (F = 1) is the PSP's path exactly. */
 #define GE_PATCH_TESS_MAX 4
 #define GE_PATCH_TESS_MAX_VERTS 262144u

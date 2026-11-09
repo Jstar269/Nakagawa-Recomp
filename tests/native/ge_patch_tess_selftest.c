@@ -23,8 +23,9 @@
 //   psp-cap     a draw the PSP's own 65535-vertex cap lowers is lowered first and multiplied
 //               after: four patches at 127x127 draw 126x126 times F, not 127x127 times F.
 //   timing      with the GE timing model on, factor F on a division d costs exactly the GE clocks
-//               of the division d*F, which differ from the PSP's d: less for a patch whose spans
-//               the finer grid narrows below 64 pixels, more for a small one.
+//               of the division d*F, which differ from the PSP's d: the dome costs less, the ribbon and
+//               the small patch more. On 8888 without depth test, each added triangle adds a fixed
+//               row charge on spans under 48 pixels; elsewhere the charge is per pixel.
 //   exit        the run's end prints PATCH_TESS: exit with the quads drawn and the capped draws.
 
 #include "recomp.h"
@@ -436,16 +437,18 @@ int main(void) {
 
     /* timing: with the GE timing model on, factor F on division d costs exactly the GE clocks
      * of the division d*F, and that is not the PSP's d: the model charges each triangle's rows
-     * and spans, so a finer grid costs less where it cuts a span of 64 pixels or more into
-     * narrower ones (the dome and the ribbon) and more where the spans were already narrow (a
-     * 30-pixel patch: one more fixed row charge per triangle). The contract states the change. */
+     * and spans. The fixture is 8888, untextured, without depth test, the case that charges a
+     * fixed amount per row on spans under 48 pixels (ge_time_row_clk); elsewhere a span costs
+     * per pixel. A finer grid costs less for the dome, whose wide spans it cuts below 48 pixels,
+     * and more for the ribbon (21614 to 21936 clocks at factor 2) and for a 30-pixel patch (one
+     * more fixed row charge per triangle). The contract states the change. */
     {
         const uint32_t tiny_at = s_vtx;
         for (int v = 0; v < 4; v++)
             for (int u = 0; u < 4; u++) vtx(200.0f + 10.0f * (float)u, 100.0f + 10.0f * (float)v, 0xFFFFFFFFu);
         const Patch tiny_p = { tiny_at, 0x0404u, 0 };
-        const struct { const Patch *p; const char *name; int finer_costs_more; } shapes[] = {
-            { &dome_p, "bezier", 0 }, { &ribbon_p, "spline", 0 }, { &tiny_p, "small bezier", 1 },
+        const struct { const Patch *p; const char *name; int direction; /* 1: finer costs more, -1: costs less */ } shapes[] = {
+            { &dome_p, "bezier", -1 }, { &ribbon_p, "spline", 1 }, { &tiny_p, "small bezier", 1 },
         };
         ge_timing_set_enabled(1);
         int ok = 1;
@@ -461,7 +464,7 @@ int main(void) {
                 ge_patch_tess_set(f);
                 run_patches(shapes[s].p, 1, 2, 1, 0);
                 const double got = ge_timing_run_clk();
-                const int direction_ok = shapes[s].finer_costs_more ? got > psp : got != psp;
+                const int direction_ok = shapes[s].direction > 0 ? got > psp : got < psp;
                 if (got != fine || !direction_ok) {
                     snprintf(detail, sizeof detail, "%s factor %d: %.3f clocks, division %dx%d %.3f, the PSP's %.3f",
                              shapes[s].name, f, got, 2 * f, f, fine, psp);
@@ -471,7 +474,7 @@ int main(void) {
             }
         }
         snprintf(what, sizeof what, "factors 2 to 4 on 2x1 cost the clocks of the division 2F x F, not the PSP's "
-                 "2x1 (more for a small patch)%s%s", ok ? "" : ": ", detail);
+                 "2x1 (the dome less, the ribbon and the small patch more)%s%s", ok ? "" : ": ", detail);
         check(ok, "timing", what);
         ge_timing_set_enabled(0);
         ge_patch_tess_set(1);

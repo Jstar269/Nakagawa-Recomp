@@ -914,8 +914,11 @@ both renderers share, so the software renderer and the Vulkan renderer draw the 
 - **GE timing.** With the GE timing model off (the default) the extra triangles cost host time only. With
   `SR_GE_TIMING=1` the model charges a patch's control points and then the rows and spans of every triangle drawn,
   the finer ones included, so factor F on a division d costs exactly the GE time of the division d x F, which is not
-  the time of the PSP's division d. A small patch costs more, one more fixed row charge for each added triangle. A
-  large patch whose spans the finer grid narrows below 64 pixels can cost less. List completion, `sceGeDrawSync`,
+  the time of the PSP's division d. On 8888 targets without depth test, for untextured spans and textures that run
+  at fill rate, each added triangle adds a fixed row charge on spans under 48 pixels, so a small patch costs
+  more and a patch whose wide spans the finer grid cuts below 48 pixels can cost less. Elsewhere (depth-tested,
+  16-bit targets, most textured spans) a span is charged per pixel, and the cost changes only with the coverage
+  of the finer surface, in either direction. List completion, `sceGeDrawSync`,
   `sceGeListSync` and the finish interrupt move with it (section 11.3.6).
 - **Stamps.** `PATCH_TESS: on (factor=<F>, at most 262144 vertices a patch draw)` at start, followed by the line
   section 11.3.6 describes, and `PATCH_TESS: exit (quads=<n>, capped_draws=<n>)` when the run ends, through
@@ -1307,8 +1310,9 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
   off by default and in no preset.
 - **Key and off switch.** `tess=off`, `tess=2`, `tess=3` or `tess=4` on the launch line (section 10.1), a required
   key. A line without it, or with any other value, is refused, and the run is Authentic. Its off switch is `tess=off`
-  in a run, and `"tess": "off"` for the library or for one game (section 10.9); the value unset or unknown in a
-  settings file reads as off, and an authentic run, which has no line, never has a factor. Section 11.3.5 lists what
+  in a run, and `"tess": "off"` for the library or for one game (section 10.9); an unknown value in a settings
+  file reads as off, an unset value in the library block is off, an unset value for one game follows the library
+  setting, and an authentic run, which has no line, never has a factor. Section 11.3.5 lists what
   adding a key to the `SR_ACE` launch line costs.
 - **Never silent.** A run with it on prints, after its `PATCH_TESS: on` line, one line naming the feature as
   guest-visible and as altering GE timing under `SR_GE_TIMING=1`, and at its end a `PATCH_TESS: exit` line with the
@@ -1320,8 +1324,10 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
   for a render-to-texture pass that draws patches.
 - **Timing:** differs with the GE timing model on. With `SR_GE_TIMING=1` every finer triangle's rows and spans are
   charged, so factor F on a division d costs what the division d x F costs, not what the PSP's division d costs
-  (section 10.14). A list with small patches completes later in guest time, and `sceGeDrawSync`, `sceGeListSync` and
-  the finish interrupt wait longer; a list with large patches can complete earlier. With the model off (the
+  (section 10.14). Where the fixed row charge applies (8888 without depth test, spans under 48 pixels),
+  a list with small patches completes later in guest time, and `sceGeDrawSync`, `sceGeListSync` and the finish
+  interrupt wait longer, and a list with large patches can complete earlier; elsewhere the change follows the
+  finer surface's coverage, in either direction. With the model off (the
   default) the GE timing is the PSP path's. The VBLANK schedule and the media clocks are unchanged either way. The
   finer triangles are host work on the GE thread, the thread the guest runs on, so a guest frame with many patches
   can take longer in host time. Not measured on a title.

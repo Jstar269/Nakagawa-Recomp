@@ -94,8 +94,9 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   ([section 11.3.6](ENHANCEMENT_CONTRACT.md#1136-finer-bezier-and-spline-patches-tess)). Each curved patch is drawn
   with factor x factor times the triangles, on the game's thread, up to 262144 vertices a draw, so a scene with many
   patches takes longer to draw. With the GE timing model on (`SR_GE_TIMING=1`) the extra triangles also change
-  when the game's display lists complete and when `sceGeDrawSync` returns in game time: later for small patches,
-  and possibly earlier for large ones. A run's log ends with a `PATCH_TESS: exit` line
+  when the game's display lists complete and when `sceGeDrawSync` returns in game time: on 8888 targets without
+  depth test, later for small patches and possibly earlier for large ones; elsewhere by the finer surface's
+  coverage, in either direction. A run's log ends with a `PATCH_TESS: exit` line
   that counts the draws the vertex cap lowered. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1014-finer-bezier-and-spline-patches).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
