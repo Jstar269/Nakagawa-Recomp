@@ -868,6 +868,17 @@
       }
     },
     {
+      "path": "assets/enhancements/ucus98701-60hz.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ace_public_hst_60hz_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "assets/failure_codes.json",
       "classification": "reviewed_configuration",
       "evidence": {
