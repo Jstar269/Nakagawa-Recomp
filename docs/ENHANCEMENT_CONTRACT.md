@@ -138,7 +138,7 @@ I publish a title's packages as site data, so that a user who builds from source
 - each site's change: one of the declared transforms of section 9.2, or replacement code the project wrote;
 - for each byte range a site reads or replaces, a digest of the stock bytes, keyed by the executable (below).
 
-It holds no game bytes: no instruction words, data, tables, strings or values copied from the disc, and no patched code. `stock_values` and any other field that would carry a value read from the game are refused in a published package.
+It holds no game bytes: no instruction words, data, tables, strings or values copied from the disc, and no patched code. A store site that checks the values the game's loader stores publishes only keyed digests of them (`stock_value_digests`, never `stock_values`): when the game stores a value, the runtime digests it, compares, and scales the value it observed, and on a mismatch it stops the run, naming the site. A replacement the project writes is its own value and may be published; where it is a function of the stock value (such as twice it), the package publishes the rule, never the result.
 
 **Keyed digests.** A plain SHA-256 of one 32-bit instruction word can be inverted by trying all $2^{32}$ words, so it would publish the word. Every stock digest in a published package is therefore an HMAC-SHA-256 whose key is derived from the whole executable (a different hash from the published executable digest, so that digest does not give the key away). Only someone who holds the executable can compute or check it, and they already have the bytes.
 
