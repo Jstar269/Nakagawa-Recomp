@@ -6545,12 +6545,12 @@ static const unsigned char real_kernel_prx[998] = {
     0x74, 0x72, 0x74, 0x61, 0x62, 0x00,
 };
 
-/* A PBP package of homebrew: PARAM.SFO (EG, no DISC_ID), an ICON0 section, a DATA.PSP program
-   and an empty DATA.PSAR, the form a homebrew EBOOT.PBP has. */
+/* A PBP package of homebrew: PARAM.SFO (MG, the category PSPSDK writes; no DISC_ID), an ICON0
+   section, a DATA.PSP program and an empty DATA.PSAR, the form a homebrew EBOOT.PBP has. */
 static uint8_t *homebrew_pbp(const char *title, const uint8_t *program, size_t program_len,
                              const uint8_t *icon, size_t icon_len, size_t *out_len) {
     uint8_t sfo[512];
-    size_t sfo_len = psp_seal_sfo(sfo, sizeof(sfo), "EG", "", title);
+    size_t sfo_len = psp_seal_sfo(sfo, sizeof(sfo), "MG", "", title);
     size_t icon_at = 0x28u + sfo_len;
     size_t psp_at = icon_at + icon_len;
     uint8_t *pbp = (uint8_t *)calloc(1, psp_at + program_len);
@@ -6595,6 +6595,39 @@ static void homebrew_expect_program(const char *title, const uint8_t *program, s
     }
 }
 
+/* #2145: a stop on code the program generated at run time (target-not-executable) says so for a
+   homebrew library key, never the generic "processor feature" card; a retail disc ID keeps the
+   generic card, and a network stop on homebrew names online play. Each card ends the run with
+   its boundary visible. */
+static void test_homebrew_stop_cards_name_their_limit(void) {
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    printf("[PLAYER_STATE_TEST] Subtest: homebrew stop cards name run-time code and network use\n");
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", "target-not-executable",
+                                   308u, 9, 9000u, "XABC01234", NULL);
+    assert(nk_disc_id_is_non_retail_key("XABC01234"));
+    assert(strcmp(app->last_error.title, "Game stopped early") == 0);
+    assert(strstr(app->last_error.message,
+                  "usually code a program generates while it runs") != NULL);
+    assert(strstr(app->last_error.message, "did not find before it started") != NULL);
+    assert(strstr(app->last_error.boundary_text, "not supported yet") == NULL);
+    assert(strstr(app->last_error.message, "processor feature") == NULL);
+    assert(strstr(app->last_error.boundary_text, "target-not-executable") != NULL);
+    assert(strcmp(app->last_error.stop_boundary, "target-not-executable") == 0);
+
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", "target-not-executable",
+                                   308u, 9, 9000u, "ULUS10041", NULL);
+    assert(strstr(app->last_error.message, "processor feature") != NULL);
+    assert(strstr(app->last_error.message, "usually code a program generates") == NULL);
+
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY",
+                                   "unsupported-import-scenetadhocinit", 308u, 9, 9000u,
+                                   "XABC01234", NULL);
+    assert(strstr(app->last_error.message, "ad hoc wireless play") != NULL);
+    assert(strstr(app->last_error.boundary_text, "unsupported-import-scenetadhocinit") != NULL);
+    free(app);
+}
+
 /* #2143: an unencrypted homebrew EBOOT.PBP imports as a small private disc image holding its
    program (and icon) under the library key of that image: the same program and title is the
    same game, a different title is another. Encrypted and kernel-mode packages keep a named
@@ -6614,7 +6647,9 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     uint8_t icon[24];
     uint8_t *pbp;
     uint8_t *image;
-    size_t pbp_len = 0, image_len = 0;
+    uint8_t *before;
+    uint8_t *after;
+    size_t pbp_len = 0, image_len = 0, before_len = 0, after_len = 0;
     PlayerPsnPackage package;
     PlayerPsnPackage again;
     PlayerPsnPackage renamed;
@@ -6645,6 +6680,8 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     write_binary_file(pbp_path, pbp, pbp_len);
     free(pbp);
     assert(player_path_is_pbp_package(pbp_path));
+    before = psn_test_read_file(pbp_path, &before_len);
+    assert(before != NULL && before_len == pbp_len);
     assert(player_psn_package_inspect(pbp_path, &package, code, sizeof(code), message,
                                       sizeof(message)));
     assert(package.homebrew && !package.iso_ready);
@@ -6678,6 +6715,14 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     assert(memcmp(image + 22u * 2048u, program, 88u) == 0);
     assert(memcmp(image + 23u * 2048u, icon, sizeof(icon)) == 0);
     free(image);
+
+    /* The user's own package is only read, never changed: the import writes under the data
+       folder alone. (The package's folder is not mounted as ms0:/PSP/GAME/<folder>/ for the
+       program; the disc image holds only the program, its title and its icon, #2143.) */
+    after = psn_test_read_file(pbp_path, &after_len);
+    assert(after != NULL && after_len == before_len && memcmp(after, before, before_len) == 0);
+    free(before);
+    free(after);
 
     /* Picking it again reuses the checked image; the same program under another title is
        another game, and the same package picked from another place is the same one. */
@@ -6718,6 +6763,39 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         write_binary_file(other_path, pbp, pbp_len);
         free(pbp);
         psn_test_refused(other_path, "PBP_PACKAGE_UNSUPPORTED", "Only unencrypted homebrew");
+    }
+
+    /* A homebrew program that packs extra data into its DATA.PSAR is still a program: an MG
+       package whose DATA.PSP is a plain ELF is never reported as a firmware update. The same
+       package with a signed (~PSP) DATA.PSP and data after it is refused as one. */
+    {
+        PlayerPsnPackage package;
+        char code[64];
+        char message[512];
+        uint8_t signed_head[256];
+        size_t padded_len;
+        pbp = homebrew_pbp("Packed data", program, 88u, icon, sizeof(icon), &pbp_len);
+        padded_len = pbp_len + 64u;
+        pbp = (uint8_t *)realloc(pbp, padded_len);
+        assert(pbp != NULL);
+        memset(pbp + pbp_len, 0x5A, 64u);
+        write_binary_file(other_path, pbp, padded_len);
+        free(pbp);
+        (void)player_psn_package_inspect(other_path, &package, code, sizeof(code), message,
+                                         sizeof(message));
+        assert(strcmp(code, "FIRMWARE_OUT_OF_SCOPE") != 0);
+        assert(strstr(message, "firmware") == NULL);
+
+        memset(signed_head, 0, sizeof(signed_head));
+        memcpy(signed_head, "~PSP", 4);
+        pbp = homebrew_pbp("Packed data", signed_head, sizeof(signed_head), NULL, 0, &pbp_len);
+        padded_len = pbp_len + 64u;
+        pbp = (uint8_t *)realloc(pbp, padded_len);
+        assert(pbp != NULL);
+        memset(pbp + pbp_len, 0x5A, 64u);
+        write_binary_file(other_path, pbp, padded_len);
+        free(pbp);
+        psn_test_refused(other_path, "FIRMWARE_OUT_OF_SCOPE", "never decrypts firmware");
     }
 
     /* Modules built by the real PSPSDK (see the arrays above): the user-mode ones are taken and
@@ -9079,6 +9157,7 @@ int main(int argc, char **argv) {
     test_versioned_user_data();
     test_psn_package_imports_as_its_iso();
     test_homebrew_package_becomes_a_private_disc();
+    test_homebrew_stop_cards_name_their_limit();
     test_stage_discard_removes_a_deep_tree();
     test_tree_helpers_walk_a_deep_tree();
 #if defined(_WIN32) || defined(_WIN64)
