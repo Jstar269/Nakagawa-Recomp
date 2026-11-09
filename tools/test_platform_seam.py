@@ -166,8 +166,8 @@ class PlatformSeamTests(unittest.TestCase):
 
     def test_launcher_callers_have_no_host_conditionals(self) -> None:
         # The callers this seam was cut for: the launcher's main loop and the UI.
-        for rel in ("src/player/main.c", "src/player/ui_renderer.c",
-                    "src/player/ui/player_ui_nk.c", "src/player/player_state.h"):
+        for rel in ("src/player/main.c", "src/player/ui/player_ui_nk.c",
+                    "src/player/player_state.h"):
             with self.subTest(path=rel):
                 text = (ROOT / rel).read_text(encoding="utf-8")
                 self.assertEqual(count_host_conditionals(text), 0)

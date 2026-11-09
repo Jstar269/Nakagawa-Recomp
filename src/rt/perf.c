@@ -113,6 +113,7 @@ typedef struct SrPerfMetrics {
     uint64_t ge_waits;
     uint64_t present_waits;
     uint64_t present_skips;
+    uint64_t present_busy;
     uint64_t readback_waits;
     uint64_t ge_reason_submits[SR_PERF_GE_REASON_COUNT];
     uint64_t ge_reason_waits[SR_PERF_GE_REASON_COUNT];
@@ -807,9 +808,10 @@ static void write_summary(const char *path, uint64_t wall_ns) {
             PERF_AOT_INSTRUCTIONS ? "true" : "false");
     fprintf(json, "  \"wall_ns\":%llu,\n", (unsigned long long)wall_ns);
     fprintf(json, "  \"interval_count\":%llu,\n", (unsigned long long)s_perf.interval_count);
-    fprintf(json, "  \"vblanks\":{\"count\":%llu,\"presents\":%llu,\"present_skips\":%llu},\n",
+    fprintf(json, "  \"vblanks\":{\"count\":%llu,\"presents\":%llu,\"present_skips\":%llu,"
+                  "\"present_busy\":%llu},\n",
             (unsigned long long)m->vblanks, (unsigned long long)m->presents,
-            (unsigned long long)m->present_skips);
+            (unsigned long long)m->present_skips, (unsigned long long)m->present_busy);
     fprintf(json, "  \"frames\":{\"new\":%llu,\"intervals\":%llu,\"interval_vblanks\":%llu,"
                   "\"intervals_by_vblanks\":[%llu,%llu,%llu,%llu,%llu],\"one_vblank_after_late_latch\":%llu,"
                   "\"work\":{\"frames\":%llu,\"ns\":%llu,\"max_ns\":%llu,\"buckets\":{",
@@ -1746,6 +1748,10 @@ void sr_perf_present_done(uint64_t started_ns, int result) {
 
 void sr_perf_present_skip(void) {
     if (s_perf.enabled && !s_perf.shutdown) ADD(present_skips, 1);
+}
+
+void sr_perf_present_busy(void) {
+    if (s_perf.enabled && !s_perf.shutdown) ADD(present_busy, 1);
 }
 
 /* SR_PERF_FRAMES: what one game frame cost, from the previous new frame to this one, so a frame

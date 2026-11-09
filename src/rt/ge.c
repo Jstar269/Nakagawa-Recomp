@@ -1950,6 +1950,8 @@ static int thru_ztest(void) {
     return ge.ztest_enable && !no2dz;
 }
 
+static void tnl_gestat_print(uint32_t frame);   /* the GPU T&L section */
+
 void ge_set_frame(uint32_t frame) {
     ge_capture_configure();
     ge_transition_trace_configure();
@@ -2000,6 +2002,7 @@ void ge_set_frame(uint32_t frame) {
             s_stat.mw_world, s_stat.mw_view, s_stat.mw_proj);
         s_wall_last = now;
         s_ge_ms_acc = 0;
+        tnl_gestat_print(frame);
         fprintf(stderr,
             "GESTAT+ f=%" PRIu32 " blk3d=%lu skin=%lu bonew=%lu deg3d=%lu line3d=%lu nonfinite=%lu gpuprim=%lu zrange=%lu zr=[%" PRIu32 ",%" PRIu32 "] fmt=%" PRIu32 " zbp=0x%08" PRIx32 " fb=[0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu]\n",
             frame, s_stat.blk3d, s_stat.skin, s_stat.bonew, s_stat.deg3d, s_stat.line3d, s_stat.nonfinite, s_stat.gpuprim,
@@ -4976,6 +4979,71 @@ int ge_wide_set_wing(int wing) {
 
 int ge_wide_wing(void) { return s_wide_d; }
 
+/* The Ace cull key (contract 11.3.6): the hook scales only while the run asked for it (gui.c
+ * sets this from the effective SR_ACE line) and Widescreen has a wing. */
+static int s_cull_on;
+static unsigned long s_cull_calls;
+static unsigned long s_cull_untracked;
+void ge_wide_set_cull(int on) { s_cull_on = on ? 1 : 0; }
+unsigned long ge_wide_cull_calls(void) { return s_cull_calls; }
+unsigned long ge_wide_cull_untracked(void) { return s_cull_untracked; }
+
+/* A matrix the hook scaled is remembered with the four x-row words it left, so a call that finds
+ * those words unchanged (the title did not rebuild the matrix since) does not scale it again. The
+ * table is open-addressed by the matrix's full address and never evicts, so two matrices cannot
+ * share an entry; when it is full a new matrix is left alone (said once, and counted in
+ * s_cull_untracked for the run report), never scaled untracked. */
+#define GE_CULL_SEEN 4096u
+static struct { uint32_t addr; uint32_t row[4]; } s_cull_seen[GE_CULL_SEEN];
+
+void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count) {
+    const int wing = s_wide_d;
+    if (!s_cull_on || wing <= 0 || base == 0u || !offsets) return;
+    const float inv = 480.0f / (480.0f + 2.0f * (float)wing);
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t m = base + offsets[i];
+        if (!sr_guest_span_writable_at(m, 64u, "clip_x_widen")) {
+            static int reported;
+            if (!reported) {
+                reported = 1;
+                fprintf(stderr, "clip_x_widen: matrix at 0x%08" PRIx32 " is outside guest RAM; left alone "
+                                "(said once)\n", m);
+            }
+            continue;
+        }
+        uint32_t row[4];   /* the x output row of a column-major matrix: elements 0, 4, 8 and 12 */
+        for (uint32_t k = 0; k < 4u; k++) memcpy(&row[k], SR_HOST(m + 16u * k), sizeof row[k]);
+        uint32_t slot = ((m >> 4) * 2654435761u) >> 20;   /* 12 bits */
+        uint32_t probes = 0;
+        while (probes < GE_CULL_SEEN && s_cull_seen[slot].addr != 0u && s_cull_seen[slot].addr != m) {
+            slot = (slot + 1u) % GE_CULL_SEEN;
+            probes++;
+        }
+        if (probes == GE_CULL_SEEN) {
+            static int full_reported;
+            if (!full_reported) {
+                full_reported = 1;
+                fprintf(stderr, "clip_x_widen: more than %u distinct matrices; the rest are left alone "
+                                "(said once)\n", GE_CULL_SEEN);
+            }
+            s_cull_untracked++;
+            continue;
+        }
+        if (s_cull_seen[slot].addr == m && memcmp(s_cull_seen[slot].row, row, sizeof row) == 0)
+            continue;   /* still the words this hook wrote: not rebuilt since, already widened */
+        for (uint32_t k = 0; k < 4u; k++) {
+            float v;
+            memcpy(&v, &row[k], sizeof v);
+            v *= inv;
+            memcpy(&row[k], &v, sizeof v);
+            memcpy(SR_HOST(m + 16u * k), &row[k], sizeof row[k]);
+        }
+        s_cull_seen[slot].addr = m;
+        memcpy(s_cull_seen[slot].row, row, sizeof row);
+        s_cull_calls++;
+    }
+}
+
 void ge_wide_note_display(uint32_t fb_addr) {
     if (!s_wide_d || !fb_addr) return;
     const uint32_t fb = ge_wide_norm(fb_addr);
@@ -5272,16 +5340,66 @@ static void draw_patch(uint32_t op,int spline){
  * takes the CPU path exactly as before. */
 static int s_tnl_on = -1;                   /* SR_GPU_TNL=1, read once */
 static unsigned long long s_tnl_taken, s_tnl_cpu;
+static unsigned long long s_tnl_why[GE_TNL_WHY_COUNT];   /* s_tnl_cpu, by reason */
+/* The same counts for the current SR_GESTAT window: cleared by each GESTAT-TNL line, and
+ * independent of the resets of ge_tnl_counts and ge_tnl_reason_counts. */
+static struct {
+    unsigned long long taken, cpu, why[GE_TNL_WHY_COUNT];
+} s_tnl_window;
 static GeTnlVtx *s_tnl_refs;
 static uint32_t *s_tnl_tri;
 static uint32_t s_tnl_refs_cap, s_tnl_tri_cap;
 
 void ge_tnl_set_enabled(int on) { s_tnl_on = on; }
 
+static void tnl_counts_reset(void) {
+    s_tnl_taken = s_tnl_cpu = 0;
+    memset(s_tnl_why, 0, sizeof(s_tnl_why));
+}
+
 void ge_tnl_counts(unsigned long long *taken, unsigned long long *cpu, int reset) {
     if (taken) *taken = s_tnl_taken;
     if (cpu) *cpu = s_tnl_cpu;
-    if (reset) s_tnl_taken = s_tnl_cpu = 0;
+    if (reset) tnl_counts_reset();
+}
+
+void ge_tnl_reason_counts(unsigned long long out[GE_TNL_WHY_COUNT], int reset) {
+    if (out) memcpy(out, s_tnl_why, sizeof(s_tnl_why));
+    if (reset) tnl_counts_reset();
+}
+
+const char *ge_tnl_reason_name(int why) {
+    static const char *const names[GE_TNL_WHY_COUNT] = {
+        "clear", "flat", "diagnostic", "texgen", "matrix", "viewport", "texcoord", "fog",
+        "specular", "light", "alloc", "vertex", "clip", "backend",
+    };
+    return why >= 0 && why < GE_TNL_WHY_COUNT ? names[why] : NULL;
+}
+
+/* SR_GESTAT's GESTAT-TNL line, while the route is on: the census of the window it closes, like
+ * the window's other GESTAT lines; the window's counts then start over. */
+static void tnl_gestat_print(uint32_t frame) {
+    if (s_tnl_on != 1) return;
+    char why[512];
+    size_t at = 0;
+    why[0] = 0;
+    for (int i = 0; i < GE_TNL_WHY_COUNT && at < sizeof(why); i++) {
+        int n = snprintf(why + at, sizeof(why) - at, " %s=%llu", ge_tnl_reason_name(i),
+                         s_tnl_window.why[i]);
+        if (n < 0) break;
+        at += (size_t)n;
+    }
+    fprintf(stderr, "GESTAT-TNL f=%" PRIu32 " taken=%llu cpu=%llu:%s\n", frame,
+            s_tnl_window.taken, s_tnl_window.cpu, why);
+    memset(&s_tnl_window, 0, sizeof(s_tnl_window));
+}
+
+/* A PRIM keeps ge.c's T&L for reason `why`. */
+static void tnl_decline(int why) {
+    s_tnl_cpu++;
+    s_tnl_why[why]++;
+    s_tnl_window.cpu++;
+    s_tnl_window.why[why]++;
 }
 
 static int tnl_enabled(void) {
@@ -5307,34 +5425,40 @@ static int tnl_nums_ok(const float *f, int n) {
     return 1;
 }
 
-/* State that changes nothing per vertex: the parts of the PRIM's state the shader supports. */
-static int tnl_state_ok(int type, const VFmt *vf) {
-    if (type < 3 || type > 5 || vf->through || ge.clear || !ge.shade_gouraud) return 0;
-    if (s_ge_timing_model || s_rtrace > 0 || s_primitive_profile > 0) return 0;
-    if (ge.tex_enable && (ge.tex_map_mode & 3u) != 0u) return 0;
+/* State that changes nothing per vertex: the parts of the PRIM's state the shader supports.
+ * Returns -1 when the shader supports it, else the first GeTnlReason that rules it out. The
+ * caller offers only transform-mode triangle PRIMs (draw_prim), so the type and through-mode
+ * tests are guards that do not fire there. */
+static int tnl_state_why(int type, const VFmt *vf) {
+    if (type < 3 || type > 5 || vf->through || ge.clear) return GE_TNL_WHY_CLEAR;
+    if (!ge.shade_gouraud) return GE_TNL_WHY_FLAT;
+    if (s_ge_timing_model || s_rtrace > 0 || s_primitive_profile > 0) return GE_TNL_WHY_DIAGNOSTIC;
+    if (ge.tex_enable && (ge.tex_map_mode & 3u) != 0u) return GE_TNL_WHY_TEXGEN;
     if (!tnl_nums_ok(ge.world, 12) || !tnl_nums_ok(ge.view, 12) || !tnl_nums_ok(ge.proj, 16))
-        return 0;
-    if (vf->w_n && !tnl_nums_ok(ge.bone, 12 * vf->w_n)) return 0;
+        return GE_TNL_WHY_MATRIX_RANGE;
+    if (vf->w_n && !tnl_nums_ok(ge.bone, 12 * vf->w_n)) return GE_TNL_WHY_MATRIX_RANGE;
     for (int i = 0; i < 6; i++)
-        if (!tnl_num_ok(decode_float24(ge.viewport_raw[i]))) return 0;
+        if (!tnl_num_ok(decode_float24(ge.viewport_raw[i]))) return GE_TNL_WHY_VIEWPORT_RANGE;
     float tex[4] = { ge.tex_scale_u, ge.tex_scale_v, ge.tex_off_u, ge.tex_off_v };
-    if (!tnl_nums_ok(tex, 4)) return 0;
+    if (!tnl_nums_ok(tex, 4)) return GE_TNL_WHY_TEXCOORD_RANGE;
     if (ge.fog_enable && !ge_env_nofog()) {
         /* An infinite or NaN end is a constant factor and an infinite or NaN slope is
          * rewritten (transform_model_vtx_clip); a finite one has to be in range. */
-        if (isfinite(ge.fog_end) && !tnl_num_ok(ge.fog_end)) return 0;
-        if (isfinite(ge.fog_end) && isfinite(ge.fog_slope) && !tnl_num_ok(ge.fog_slope)) return 0;
+        if (isfinite(ge.fog_end) && !tnl_num_ok(ge.fog_end)) return GE_TNL_WHY_FOG_RANGE;
+        if (isfinite(ge.fog_end) && isfinite(ge.fog_slope) && !tnl_num_ok(ge.fog_slope))
+            return GE_TNL_WHY_FOG_RANGE;
     }
     if (ge.lighting_enable && !ge_env_nolight()) {
         for (int i = 0; i < GE_TNL_LIGHTS; i++) {
             if (!ge.light_on[i]) continue;
             int comp = (int)(ge.light_type[i] & 3u);
             if (((comp & 1) || (comp == 2 && ge.spec_coef > 0.0f)) && !s_ge_pow_exact)
-                return 0;   /* the C library's powf: no shader counterpart */
-            if (!tnl_nums_ok(ge.light_pos[i], 3) || !tnl_nums_ok(ge.light_att[i], 3)) return 0;
+                return GE_TNL_WHY_SPECULAR_POW;   /* the C library's powf: no shader counterpart */
+            if (!tnl_nums_ok(ge.light_pos[i], 3) || !tnl_nums_ok(ge.light_att[i], 3))
+                return GE_TNL_WHY_LIGHT_RANGE;
         }
     }
-    return 1;
+    return -1;
 }
 
 /* Corner test of the PRIM's position bound. lo/hi bound the positions the T&L transforms
@@ -5458,11 +5582,12 @@ static int ge_tnl_try_prim(int type, int count, const VFmt *vf, uint32_t vbase, 
                            int idxfmt) {
     /* Fill's wings (wide_tri) need ge.c's own screen-space triangles. */
     if (!s_gpu || !s_gpu->tnl_prim || !tnl_enabled() || count < 3 || s_wide_d) return 0;
-    if (!tnl_state_ok(type, vf)) { s_tnl_cpu++; return 0; }
+    int why = tnl_state_why(type, vf);
+    if (why >= 0) { tnl_decline(why); return 0; }
     uint32_t ntri = type == 3 ? (uint32_t)(count / 3) : (uint32_t)(count - 2);
     if (!tnl_grow((void **)&s_tnl_refs, &s_tnl_refs_cap, (uint32_t)count, sizeof(GeTnlVtx)) ||
         !tnl_grow((void **)&s_tnl_tri, &s_tnl_tri_cap, ntri * 3u, sizeof(uint32_t))) {
-        s_tnl_cpu++;
+        tnl_decline(GE_TNL_WHY_ALLOC);
         return 0;
     }
     /* Decode every reference once (with morphing, without skinning) and bound the positions. */
@@ -5485,9 +5610,12 @@ static int ge_tnl_try_prim(int type, int count, const VFmt *vf, uint32_t vbase, 
         if (vf->w_n) read_weights(a, vf, o->w);
         vtx_linear_end();
         float pos[3] = { o->x, o->y, o->z }, nrm[3] = { o->nx, o->ny, o->nz };
-        if (!tnl_nums_ok(pos, 3) || (lit && !tnl_nums_ok(nrm, 3)) || !tnl_nums_ok(o->w, vf->w_n) ||
-            (ge.tex_enable && (!tnl_num_ok(o->u) || !tnl_num_ok(o->v)))) {
-            s_tnl_cpu++;
+        if (!tnl_nums_ok(pos, 3) || (lit && !tnl_nums_ok(nrm, 3)) || !tnl_nums_ok(o->w, vf->w_n)) {
+            tnl_decline(GE_TNL_WHY_VERTEX_RANGE);
+            return 0;
+        }
+        if (ge.tex_enable && (!tnl_num_ok(o->u) || !tnl_num_ok(o->v))) {
+            tnl_decline(GE_TNL_WHY_TEXCOORD_RANGE);
             return 0;
         }
         for (int k = 0; k < 3; k++) {
@@ -5522,7 +5650,7 @@ static int ge_tnl_try_prim(int type, int count, const VFmt *vf, uint32_t vbase, 
         memcpy(hi, shi, sizeof(hi));
     }
     float box[4];
-    if (!tnl_corners_ok(lo, hi, box)) { s_tnl_cpu++; return 0; }
+    if (!tnl_corners_ok(lo, hi, box)) { tnl_decline(GE_TNL_WHY_CLIP); return 0; }
     /* The triangles, in the order draw_prim submits them. */
     uint32_t n = 0;
     for (int i = 2; i < count; i++) {
@@ -5547,8 +5675,9 @@ static int ge_tnl_try_prim(int type, int count, const VFmt *vf, uint32_t vbase, 
     uint64_t profile_started = ge_cpu_profile_begin();
     int taken = s_gpu->tnl_prim(&prim);
     ge_cpu_profile_end(GE_CPU_GPU_HOOK, profile_started);
-    if (!taken) { s_tnl_cpu++; return 0; }
+    if (!taken) { tnl_decline(GE_TNL_WHY_BACKEND); return 0; }
     s_tnl_taken++;
+    s_tnl_window.taken++;
     s_stat.gpuprim += n / 3u;
     return 1;
 }

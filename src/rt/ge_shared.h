@@ -456,6 +456,12 @@ int       ge_wide_wing_for(int window_w, int window_h);
 /* Turn Fill on with wing width `wing` (rounded down to a multiple of 4, capped), or off with 0.
  * A change clears every canvas. Returns the width in use. */
 int       ge_wide_set_wing(int wing);
+/* Whether the clip_x_widen hook may scale (the run's Ace cull key, after Widescreen is up), and how
+ * many matrices it has scaled so far (the run reports the key as confirmed once that is above 0). */
+void      ge_wide_set_cull(int on);
+unsigned long ge_wide_cull_calls(void);
+/* Matrix uses left unscaled because the hook's 4096-entry table was full (contract 11.3.6). */
+unsigned long ge_wide_cull_untracked(void);
 int       ge_wide_wing(void);
 /* The display was given framebuffer `fb_addr`: its canvas exists from now on. The last two
  * distinct addresses keep canvases (double buffering). No effect while Fill is off. */
@@ -485,6 +491,37 @@ const uint32_t *ge_wide_canvas(uint32_t fb_addr, int *fmt);
  * backend declined, since the last reset. */
 void      ge_tnl_set_enabled(int on);
 void      ge_tnl_counts(unsigned long long *taken, unsigned long long *cpu, int reset);
+/* Why each of those `cpu` PRIMs kept ge.c's T&L: one count per reason. A PRIM is counted once,
+ * under the first reason ge.c finds: the draw's state in enum order up to LIGHT_RANGE, then
+ * ALLOC, then each vertex in turn (VERTEX_RANGE for its position, normal or weights before
+ * TEXCOORD_RANGE for its UV), then CLIP, then BACKEND. The counts sum to `cpu`, and a reset
+ * through either function clears both.
+ * A PRIM never offered (the switch off, no tnl_prim hook, fewer than 3 vertices, Fill on) is in
+ * neither, nor is one dropped because its depth surface could not be prepared.
+ * With SR_GESTAT, while the route is on (SR_GPU_TNL=1 and a backend with tnl_prim, as with
+ * SR_GPU_GE=1, from the first transform-mode triangle draw), each stat window prints
+ *   GESTAT-TNL f=<vblank> taken=<n> cpu=<n>: clear=<n> flat=<n> ... backend=<n>
+ * with every reason in enum order: that window's counts alone, kept apart from these totals and
+ * their resets. */
+typedef enum GeTnlReason {
+    GE_TNL_WHY_CLEAR = 0,       /* clear mode */
+    GE_TNL_WHY_FLAT,            /* flat shading */
+    GE_TNL_WHY_DIAGNOSTIC,      /* the GE timing model, SR_RTRACE or the primitive profile is on */
+    GE_TNL_WHY_TEXGEN,          /* texture map mode 1 or 2 */
+    GE_TNL_WHY_MATRIX_RANGE,    /* a WORLD, VIEW, PROJ or bone entry outside 0 or 2^-40..2^40 */
+    GE_TNL_WHY_VIEWPORT_RANGE,  /* a viewport scale or centre outside that range */
+    GE_TNL_WHY_TEXCOORD_RANGE,  /* the texture scale or offset, or a vertex UV, outside it */
+    GE_TNL_WHY_FOG_RANGE,       /* a finite fog end or slope outside it */
+    GE_TNL_WHY_SPECULAR_POW,    /* a specular or powered-diffuse light while ge_pow is inexact */
+    GE_TNL_WHY_LIGHT_RANGE,     /* a light position or attenuation outside that range */
+    GE_TNL_WHY_ALLOC,           /* the vertex or triangle buffer could not grow */
+    GE_TNL_WHY_VERTEX_RANGE,    /* a position, normal or weight outside that range */
+    GE_TNL_WHY_CLIP,            /* the clip-space bound: near plane, screen grid or depth range */
+    GE_TNL_WHY_BACKEND,         /* the backend's tnl_prim declined */
+    GE_TNL_WHY_COUNT
+} GeTnlReason;
+void        ge_tnl_reason_counts(unsigned long long out[GE_TNL_WHY_COUNT], int reset);
+const char *ge_tnl_reason_name(int why);   /* "clear", "flat", ...; NULL out of range */
 /* Finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14): a host factor on the
  * guest's PATCHDIVISION for triangle patches, from the tess key of the SR_ACE launch line (off,
  * 2, 3 or 4; an authentic run has none). It alters GE timing under SR_GE_TIMING=1.

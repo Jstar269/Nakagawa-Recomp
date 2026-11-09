@@ -129,6 +129,7 @@ PUBLIC_TARGETS := \
 	fp-convert-selftest \
 	ge-float24-selftest \
 	ge-cpu-profile-validate-selftest \
+	ge-tnl-census-selftest \
 	ge-patch-tess-selftest \
 	ge-flight-overhead \
 	vfpu-tables-selftest \
@@ -144,6 +145,7 @@ PUBLIC_TARGETS := \
 	osk-overlay-selftest \
 	ace-selftest \
 	fsr3-host-selftest \
+	dmac-mutants \
 	fsr3-mutants \
 	fsr3-fg-host-selftest \
 	fsr3-fg-state-selftest \
@@ -171,6 +173,7 @@ PUBLIC_TARGETS := \
 	gpu-coherence-selftest-snapbar-mutants \
 	gpu-coherence-pcache-mutant \
 	vram-view-identity-selftest \
+	gpu-dst-read-mutants \
 	gpu-snapsync-selftest \
 	gpu-ace-selftest \
 	tex-scale-selftest \
@@ -334,6 +337,7 @@ HELP_DESCRIPTION_asset-index-selftest := run the asset-index selftest
 HELP_DESCRIPTION_fp-convert-selftest := run the FPU conversion selftest
 HELP_DESCRIPTION_ge-float24-selftest := run the GE float24/row-sum/reciprocal reference selftest
 HELP_DESCRIPTION_ge-cpu-profile-validate-selftest := run the GE CPU-profile validator selftest on the production GE object
+HELP_DESCRIPTION_ge-tnl-census-selftest := run the GPU T&L decline census selftest (#318) on the production GE object
 HELP_DESCRIPTION_ge-patch-tess-selftest := run the finer Bezier and spline patch selftest on the production GE object (no GPU)
 HELP_DESCRIPTION_ge-flight-overhead := measure the disarmed flight recorder cost on the GE draw path (recorder linked vs absent; no game data)
 HELP_DESCRIPTION_vfpu-tables-selftest := run the VFPU table-loader selftest
@@ -349,6 +353,7 @@ HELP_DESCRIPTION_osk-text-entry-selftest := run the on-screen keyboard's non-blo
 HELP_DESCRIPTION_osk-overlay-selftest := run the in-window keyboard's state-machine selftest (pure C)
 HELP_DESCRIPTION_ace-selftest := run Ace Mode's CPU-only selftest (launch line, 30 Hz detector, readout, report; pure C)
 HELP_DESCRIPTION_fsr3-host-selftest := run FSR 3's host selftest against the record of AMD's host code (pure C)
+HELP_DESCRIPTION_dmac-mutants := run the sceDmacMemcpy mutation campaign (each defect must build and fail the HLE thread selftest)
 HELP_DESCRIPTION_fsr3-mutants := run the FSR 3 host mutation campaign (each defect must build and fail the selftest)
 HELP_DESCRIPTION_fsr3-fg-host-selftest := run FSR 3 frame generation's host selftest against the record of AMD's host code (pure C)
 HELP_DESCRIPTION_fsr3-fg-state-selftest := run FSR 3 frame generation's state machine against the G-S table (pure C)
@@ -376,6 +381,7 @@ HELP_DESCRIPTION_gpu-coherence-selftest := run the GPU coherence selftest
 HELP_DESCRIPTION_gpu-coherence-selftest-snapbar-mutants := prove the GPU coherence selftest kills three broken snapshot-copy barrier variants
 HELP_DESCRIPTION_gpu-coherence-pcache-mutant := prove pipeline-cache-cold fails when pipelines bypass the Vulkan pipeline cache
 HELP_DESCRIPTION_vram-view-identity-selftest := check that the GE decoders the pause menu's VRAM viewer calls leave later frames, guest memory and the GE state unchanged (#314; needs a Vulkan device and fails without one)
+HELP_DESCRIPTION_gpu-dst-read-mutants := prove the GPU coherence dst-read cells kill five broken destination-read variants
 HELP_DESCRIPTION_gpu-snapsync-selftest := run the GPU snapshot-sync selftest
 HELP_DESCRIPTION_gpu-ace-selftest := run Ace Mode's texture filtering selftest on a real Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_tex-scale-selftest := run the xBRZ texture scaling selftest against the pinned upstream goldens (no GPU)

@@ -2202,12 +2202,30 @@ def compile_progress_message(completed: int, total: int) -> str:
     return f"Compiling part {completed + 1} of {total}"
 
 
-def compile_load_notice(jobs: int | None, cpus: int | None) -> str | None:
-    """A calm note that other apps may slow down, sized to the share of the PC in use.
+def compile_load_notice(jobs: int | None, cpus: int | None, limit: str | None = None,
+                        free_gb: float | None = None) -> str | None:
+    """A calm note about how the build uses the PC.
 
-    One job leaves most of the PC free, so it gets no notice.
+    Several jobs get a note that other apps may slow down, sized to the share of the PC in
+    use. One job gets a note that parts compile one at a time and the build takes longer,
+    with the planner's real reason: ``limit`` is what bound the job count (``"memory"``,
+    ``"cpu"`` or ``"override"``) and ``free_gb`` the free memory then. A one-job row from
+    an older planner has no ``limit`` and gets no note.
     """
-    if not jobs or jobs <= 1:
+    if not jobs:
+        return None
+    if jobs <= 1:
+        if limit == "memory":
+            how = (f"only {free_gb:.1f} GB of memory is free" if free_gb is not None
+                   else "your PC is low on free memory")
+            return (f"Building compiles one part at a time because {how}, so it will "
+                    "take longer. Closing other apps or builds frees memory.")
+        if limit == "cpu":
+            return ("Building compiles one part at a time because your PC reports a single "
+                    "processor, so it will take longer.")
+        if limit == "override":
+            return ("Building compiles one part at a time because the job count was set "
+                    "to 1 (NK_PACKAGE_JOBS), so it will take longer.")
         return None
     if not cpus or jobs * 2 >= cpus:
         return ("Building uses most of your PC's power for a few minutes, "
@@ -2267,12 +2285,15 @@ class _CompileProgressRelay:
                 continue
             self.last = (completed, total)
             jobs, cpus = row.get("jobs"), row.get("cpus")
+            limit, free_gb = row.get("limit"), row.get("free_gb")
             self.reporter.report("compile", "RUNNING",
                                  compile_progress_message(completed, total),
                                  completed=completed, total=total,
                                  notice=compile_load_notice(
                                      jobs if isinstance(jobs, int) else None,
-                                     cpus if isinstance(cpus, int) else None))
+                                     cpus if isinstance(cpus, int) else None,
+                                     limit if isinstance(limit, str) else None,
+                                     free_gb if isinstance(free_gb, (int, float)) else None))
 
 
 _BUILD_DIAGNOSTIC_MARKERS = ("error:", "cannot find", "undefined reference")
@@ -2979,6 +3000,9 @@ def _package_codegen(st):
             str(identity_path),
             "--public-safe",
         ]
+        package_target = getattr(args, "target", None)
+        if package_target is not None:
+            planner.extend(("--target", package_target))
         if module_dir is not None:
             planner.extend(("--module-dir", str(module_dir)))
         if cached_header is not None:
@@ -5996,6 +6020,10 @@ def main() -> int:
     p_build.add_argument("--no-shared-libraries", action="store_true",
                          help="compile the disc's system libraries for this game only, "
                               "without the shared library cache")
+    p_build.add_argument("--target", choices=("host", "android"), default=None,
+                         help="system the package runs on: host, or android for the "
+                              "shared library the Android app loads (default: android "
+                              "when this runs on Android, else host)")
     p_build.set_defaults(func=cmd_build_package)
 
     p_bringup = subparsers.add_parser(

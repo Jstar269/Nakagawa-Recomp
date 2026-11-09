@@ -1381,6 +1381,7 @@ SPDX_DXC_EMBEDDING_SOURCES.update({
 # carried by (and audited on) the GLSL source each one is compiled from.
 SPDX_GENERATED_EMBEDDING_SOURCES = {
     "src/rt/gpu_sdl3vk/psp_frag.inc": "src/rt/gpu_sdl3vk/shaders/psp.frag",
+    "src/rt/gpu_sdl3vk/psp_frag_rmw.inc": "src/rt/gpu_sdl3vk/shaders/psp.frag",
     "src/rt/gpu_sdl3vk/psp_vert.inc": "src/rt/gpu_sdl3vk/shaders/psp.vert",
     "src/rt/gpu_sdl3vk/psp_tnl_vert.inc": "src/rt/gpu_sdl3vk/shaders/psp_tnl.vert",
     "src/rt/gpu_sdl3vk/ace_match_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_match.comp",

@@ -11,8 +11,9 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. Every other key is required in v1, in any order, each
- * once. A key or value for a feature this build
+ * line without it is an Enhanced run. cull is the other key a line may leave out: a missing cull
+ * reads as off (section 11.2 item 2), and a line that writes cull=off means the same. Every other
+ * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
  * the run and one "ACE_MODE: refused (<reason>)" line says why. Unset is off and says nothing.
@@ -44,6 +45,7 @@
 #define ACE_HAS_SMOOTH_MATCH 0  /* smooth=match: the monitor's rate */
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
 #define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
+#define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
 typedef enum { ACE_SMOOTH_OFF = 0, ACE_SMOOTH_MATCH = 1, ACE_SMOOTH_X2 = 2 } AceSmooth;
@@ -67,6 +69,7 @@ typedef struct {
     int tier;        /* AceTier */
     int sas;         /* AceSas: SAS voices mix through a band-limited resampler (host-only) */
     int tess;        /* finer patches (#2053): 0 off, or the factor 2, 3 or 4 on the guest's division */
+    int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
 } AceConfig;
 
 typedef enum {
@@ -78,6 +81,7 @@ typedef enum {
     ACE_FEATURE_SMOOTH,
     ACE_FEATURE_SAS,
     ACE_FEATURE_TESS,
+    ACE_FEATURE_CULL,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -113,6 +117,8 @@ void ace_feature_unavailable(AceFeature feature, const char *reason);
  * confirmed is reported unavailable (its renderer or presenter did not start), so the report
  * never claims what did not happen. */
 void ace_confirm(AceFeature feature);
+/* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
+void ace_set_cull_untracked(unsigned long n);
 /* An anisotropic sampler the renderer could not make: that draw kept the plain one. */
 void ace_note_af_failure(void);
 /* The pause menu's live Speed readout switch (Ace on only; a readout this host cannot draw
@@ -180,6 +186,10 @@ typedef struct {
     AceRate stable;            /* the detector's class at the window's end */
     int ever_stable;
     AceRate last_rate;         /* the last stable K class */
+    int smooth;                /* Smooth motion is on for the run */
+    uint32_t betweens;         /* in-betweens that reached the screen in the window */
+    uint32_t shown;            /* distinct pictures that reached the screen: those, the held
+                                * frames and the new frames shown as they are */
 } AceWindow;
 
 typedef struct {
@@ -194,13 +204,18 @@ typedef struct {
     int have_target;           /* a percentage can be shown */
     double target_fps;         /* T = 59.94 / k */
     int speed_pct;             /* F / T while PC limited, else 100 */
+    int smooth_on;             /* Smooth motion is on: the text says whether it added frames */
+    double shown_fps;          /* with it on, pictures that reached the screen per second */
     char text[64];             /* "100%  30 FPS", "\xE2\x96\xB2 87%  26 FPS  PC LIMITED", "\xE2\x80\x94 27 FPS" */
 } AceReadoutView;
 
 void ace_readout_reset(AceReadoutState *s);
 /* Judges one window; PC limited when a slot was skipped, or when the host idled under 2% while
  * frames came slower than the class allows. The target keeps the class stable when the stretch
- * began, so a steady slowdown does not redefine it. */
+ * began, so a steady slowdown does not redefine it. With Smooth motion on, the text ends with
+ * "SMOOTH n" (n pictures a second reached the screen, in-betweens included) or, in a window it
+ * showed no in-between in (the game was not at a steady 30 FPS), "SMOOTH OFF": it is never off
+ * without saying so. */
 void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *out);
 
 /* ---- observation feed (Ace on only; callers check g_ace_on) ---------------------------------- */
@@ -252,6 +267,9 @@ typedef struct {
     uint64_t flip_ns;      /* when the latest flip arrived */
     uint64_t held_ns;      /* when the in-between of the held frame was presented */
     int reflip;            /* this flip shows the held frame again: it is the held present */
+    uint64_t frame_seq;    /* new frames flipped with smooth motion on */
+    uint64_t taken_seq;    /* the newest of them whose verdict a present took */
+    uint64_t unpaired;     /* in-betweens refused: the frame before never reached a present */
 } AcePace;
 
 void ace_pace_reset(AcePace *p);
@@ -259,7 +277,11 @@ void ace_pace_reset(AcePace *p);
  * flip of the unchanged frame (a title that flips each frame twice) shows it, so that present
  * is the held one and the VBLANK has nothing left to show. */
 void ace_pace_flip(AcePace *p, int new_frame, AceRate rate, int smooth, uint64_t now_ns);
-/* The flip's present: returns the verdict and clears it. */
+/* The flip's present: returns the verdict and clears it. An in-between is made only of two
+ * consecutive frames: when the frame before this one never reached a present (the presenter's
+ * slot rule dropped its flip, or the present failed), the pass holds an older frame, and an
+ * in-between of the two would put whatever moved between them in the wrong place, or lose it.
+ * Such a verdict becomes KEEP (the real frame is shown and kept) and is counted in `unpaired`. */
 AceShow ace_pace_take(AcePace *p);
 /* The in-between went to the screen at now_ns (the presenter's clock): the frame is held for the
  * VBLANK after `vcount`. Without smooth motion the frame would have been shown then, so the
@@ -295,11 +317,15 @@ AcePresentKind ace_pace_flip_kind(const AcePace *p);
 
 /* The run's verdict for the flip ace_flip just saw. */
 AceShow ace_smooth_take(void);
+/* The show pass made an in-between for this present: the frame is held for the VBLANK after. It
+ * counts nothing; ace_smooth_note_present counts what the swapchain accepted. */
 void ace_smooth_shown_between(uint64_t now_ns);
 /* One VBLANK: 1 when the held frame should be presented now. Off, it reads nothing. */
 int ace_smooth_vblank(uint32_t vcount);
-/* A present reached the swapchain. A flip's present that showed no in-between is passed as
- * REAL and counted as HELD when it re-showed the held frame. */
+/* A present reached the swapchain (the presenter accepted it). A flip's present that showed no
+ * in-between is passed as REAL and counted as HELD when it re-showed the held frame. This is also
+ * what the readout's "SMOOTH n" counts: an in-between, a held frame, and a flip's own frame when
+ * it was not shown before; a present the presenter dropped is not noted and not counted. */
 void ace_smooth_note_present(AcePresentKind kind, uint64_t now_ns);
 void ace_pace_stats(AcePaceStats *out);
 void ace_pace_stats_add(AcePaceStats *s, AcePresentKind kind, uint64_t now_ns);
