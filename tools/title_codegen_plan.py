@@ -2060,6 +2060,24 @@ def _build_report_text(report: dict[str, Any]) -> str:
     return text
 
 
+#: The systems a package can be built for (``build_package``'s ``target``).
+PACKAGE_TARGETS = ("host", "android")
+
+
+def default_package_target() -> str:
+    """``android`` when this interpreter runs on Android (CPython reports
+    ``sys.platform == "android"`` there), otherwise ``host``."""
+    return "android" if sys.platform == "android" else "host"
+
+
+def package_executable_name(game_name: str, target: str) -> str:
+    """The file the compile goal links (Make's TITLE_OUTPUT): an executable for this
+    host, or the shared library TitleActivity loads on Android."""
+    if target == "android":
+        return f"lib{game_name}.so"
+    return f"{game_name}{'.exe' if os.name == 'nt' else ''}"
+
+
 def build_package(
     manifest: dict[str, Any],
     *,
@@ -2081,8 +2099,14 @@ def build_package(
     reuse_aot_stage: Path | None = None,
     enhancement_package_path: Path | None = None,
     enhancement_data_root: Path | None = None,
+    target: str = "host",
 ) -> dict[str, Any]:
     """Run the canonical two-phase Make build and emit package/report JSON.
+
+    ``target`` is the system the title runs on: ``host`` (this machine) or ``android``,
+    which links the title as the shared library ``lib<game>.so`` TitleActivity loads
+    (Make's ``NK_TARGET=android``). An Android build needs ``CC`` naming an Android Clang
+    and ``ANDROID_SDL3_INCLUDE`` and ``ANDROID_SDL3_LIBDIR`` naming the APK's SDL3.
 
     ``aot_stage`` runs only the generation phase into an empty ``output_dir`` and
     records it with the package completion discipline (the cache key and the digest
@@ -2094,6 +2118,11 @@ def build_package(
     """
     from nk_core import package_cache
 
+    if target not in PACKAGE_TARGETS:
+        raise PackageRouteError(
+            "PACKAGE_INVALID_TARGET",
+            f"target {target!r} is not one of {', '.join(PACKAGE_TARGETS)}",
+        )
     # The Makefile reads ENHANCEMENT_PACKAGE and CODEGEN_USER_ARGS from the environment,
     # so an inherited one would enhance an authentic package or override the explicit
     # package. A package build names its package with enhancement_package_path only.
@@ -2338,7 +2367,13 @@ def build_package(
             raise PackageRouteError(
                 "PACKAGE_TOOLCHAIN_MISSING", f"{make_name} is not available on PATH"
             )
-        cc_name = os.environ.get("CC", "gcc")
+        cc_name = os.environ.get("CC", "gcc" if target == "host" else "")
+        if not cc_name:
+            raise PackageRouteError(
+                "PACKAGE_TOOLCHAIN_MISSING",
+                "an Android build needs CC naming an Android Clang "
+                "(aarch64-linux-android<api>-clang from the NDK, or the APK's own)",
+            )
         cc_executable = shutil.which(cc_name)
         if cc_executable is None:
             raise PackageRouteError(
@@ -2422,6 +2457,8 @@ def build_package(
             "LINK_MAP": link_map.as_posix(),
             "PUBLIC_SAFE": "1",
             "NK_AOT_PREGENERATED": "1" if pregenerated else "0",
+            # Set either way, so an inherited NK_TARGET never retargets a host build.
+            "NK_TARGET": "" if target == "host" else target,
         })
         if enhancement_package_path is not None:
             build_environment["ENHANCEMENT_PACKAGE"] = enhancement_package_path.as_posix()
@@ -2497,8 +2534,7 @@ def build_package(
                 title_input_identity,
             )
 
-        executable_suffix = ".exe" if os.name == "nt" else ""
-        executable_name = f"{selected_name}{executable_suffix}"
+        executable_name = package_executable_name(selected_name, target)
         compiled_executable = build_workspace / executable_name
         image_path = build_workspace / f"{selected_name}_image.bin"
         funcs_header = build_workspace / f"{selected_name}_recomp_funcs.h"
@@ -2682,6 +2718,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--psp-header", type=Path)
     parser.add_argument("--title-input-identity-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--make-command", help="Make executable (default: mingw32-make on Windows, make elsewhere)")
+    parser.add_argument(
+        "--target", choices=PACKAGE_TARGETS, default=None,
+        help="system the package runs on: host, or android for the shared library "
+             "TitleActivity loads (default: android on Android, else host)",
+    )
     parser.add_argument("--public-safe", action="store_true", help="accepted for compatibility: packages always build with the public runtime backends")
     parser.add_argument("--reuse-aot-from", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--native-only", action="store_true", help=argparse.SUPPRESS)
@@ -2757,10 +2798,12 @@ def main(argv: list[str] | None = None) -> int:
                 reuse_aot_stage=args.reuse_aot_stage,
                 enhancement_package_path=args.enhancement_package,
                 enhancement_data_root=args.enhancement_data_root,
+                target=args.target or default_package_target(),
             )
             return 0
-        if args.output_dir is not None or args.make_command is not None or args.public_safe:
-            parser.error("--output-dir, --make-command, and --public-safe require --package")
+        if (args.output_dir is not None or args.make_command is not None or args.public_safe
+                or args.target is not None):
+            parser.error("--output-dir, --make-command, --target and --public-safe require --package")
         if args.aot_stage or args.reuse_aot_stage is not None:
             parser.error("--aot-stage and --reuse-aot-stage require --package")
         if args.print_protected_digest:
