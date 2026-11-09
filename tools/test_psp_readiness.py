@@ -53,6 +53,13 @@ class PpssppHeadlessDiscoveryTests(unittest.TestCase):
 class PsplinkDeviceDetectionTests(unittest.TestCase):
     """Tool presence must never be mistaken for a reachable device."""
 
+    def setUp(self) -> None:
+        # The tests fake sys.platform as win32; the real host lookup would take
+        # shutil.which's Windows path on this machine, so pin the PowerShell host.
+        patcher = mock.patch.object(psp_readiness, "powershell_exe", return_value="pwsh-default")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_no_endpoint_reports_not_connected(self) -> None:
         with mock.patch.object(psp_readiness.sys, "platform", "win32"), \
              mock.patch.object(psp_readiness, "_run", return_value=(0, "0")):
