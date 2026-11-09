@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **468** (declared in `recomp.h`: 396)
-- reach class: emitter-reached 84, production-runtime-only 348, selftest-only 0, address-only 8, none 28
-- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 429
+- helpers: **469** (declared in `recomp.h`: 397)
+- reach class: emitter-reached 84, production-runtime-only 349, selftest-only 0, address-only 8, none 28
+- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 430
 
 ## Helpers
 
@@ -404,6 +404,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_pick_display` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_profile_block` | `rt/recomp.c` | yes | emitter-reached (via `SR_YIELD`) | `rt/recomp.c`: upstream_derived |
 | `sr_profile_dump` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `sr_profile_dump_final` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_profile_init` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_profile_test_block_count` | `rt/recomp.c` | yes | none | `rt/recomp.c`: upstream_derived |
 | `sr_profile_test_lookup_drops` | `rt/recomp.c` | yes | none | `rt/recomp.c`: upstream_derived |
