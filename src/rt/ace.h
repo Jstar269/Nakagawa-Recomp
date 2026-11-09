@@ -209,6 +209,11 @@ void ace_note_vram_write(uint32_t off, uint32_t bytes);
 /* Host time the scheduler spent waiting (vblank_pace, sleep_until_us), and slots it skipped. */
 void ace_note_host_wait(uint64_t ns);
 void ace_note_skipped_slots(uint32_t slots);
+/* Fast forward started (1) or stopped (0) (sched.c; recomp.h, sched_fast_forward_on). The
+ * readout's window is a second of wall time, so time at the fast-forward speed is never judged:
+ * the readout hides, skipped slots are not counted, no window counts towards the report, and the
+ * first full second at normal speed brings the readout back. */
+void ace_note_fast_forward(int on);
 /* The display flipped to the `bytes`-long buffer at VRAM offset `fb` at `vcount`
  * (display_present_active, before the presenter's own slot rule). Feeds the detector and,
  * once a second of `now_ns`, the readout. Returns 1 when the flip shows a new frame: the

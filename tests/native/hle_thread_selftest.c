@@ -11384,6 +11384,79 @@ static void test_src_push_and_psmf_lead_read_the_guest_queue_under_the_determini
     reset_fixture();
 }
 
+/* Fast forward (docs/ENHANCEMENT_CONTRACT.md section 10.14) gives the host device no audio, and
+ * the queue the guest paces against is then the guest-time model: seeded once per fast-forward run
+ * with the host queue's depth, draining in guest time, and fed by both output paths. When fast
+ * forward stops, the guest reads the host queue again and the host gets audio again.
+ *
+ * MUTANT: audio_output or audio_src_output pushes to the host while fast forward runs -- the
+ *   push count moves.
+ * MUTANT: audio_vq_on returns 0 outside the deterministic clock -- the guest sees the host's
+ *   100000 frames and the seed and drain checks fail.
+ * MUTANT: audio_vq_on reseeds on every call -- the second read reports the host's 100000. */
+static void test_audio_fast_forward_mutes_the_host_and_reads_the_guest_queue(void) {
+    extern int hle_audio_queued(int ch);
+    enum { STEREO_BUF = 0x08a00000u, SRC_SLOT = 8 };
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0u) == 0u,
+           "fast forward fixture reserves the regular channel");
+    s_det_clock = 0;
+    s_vtime_us = 1000u;
+
+    /* Fast forward starts while the host still holds 100 frames. */
+    s_ff_speed = SCHED_FAST_FORWARD_SPEED;
+    s_ff_epoch++;
+    s_audio_queue_result = 100;
+    expect(hle_audio_queued(0) == 100, "fast forward starts the guest queue at the host's depth");
+    s_audio_queue_result = 100000;   /* the host keeps its backlog: nothing new reaches it */
+    expect(hle_audio_queued(0) == 100, "the host depth is read once per fast-forward run");
+    s_vtime_us += 1000u;   /* 1 ms of guest time plays 44.1 frames */
+    expect(hle_audio_queued(0) == 56, "the seeded queue drains in guest time");
+    s_vtime_us += 2000u;
+    expect(hle_audio_queued(0) == 0, "and is empty once guest time has played it");
+
+    s_audio_push_calls = 0;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, STEREO_BUF) == 64u,
+           "the blocking output returns during fast forward");
+    expect(s_audio_push_calls == 0u, "fast forward gives the host device no audio");
+    expect(hle_audio_queued(0) == 64, "the guest queue holds the 64 frames the output played");
+
+    /* 48000 Hz takes the resampler path, which pushes on its own. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RESERVE, 1024u, 48000u, 2u) == 0u,
+           "the SRC channel reserves 1024 samples at 48000 Hz");
+    s_audio_queue_result = 0;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_OUTPUT_BLOCKING, 0x8000u, STEREO_BUF, 0u) == 0x400u,
+           "the SRC output returns during fast forward");
+    expect(s_audio_push_calls == 0u, "the SRC output gives the host device no audio either");
+    expect(hle_audio_queued(SRC_SLOT) > 0, "the guest queue holds the SRC output's converted frames");
+
+    /* Stopped: the host queue answers again, and the host gets audio again. */
+    s_ff_speed = 1u;
+    s_audio_queue_result = 100000;
+    expect(hle_audio_queued(0) == 100000, "after fast forward the guest reads the host queue again");
+    s_audio_queue_result = 0;
+    s_vtime_us += 10000u;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, STEREO_BUF) == 64u,
+           "the blocking output returns after fast forward");
+    expect(s_audio_push_calls == 1u, "after fast forward the host device gets audio again");
+
+    /* A second run seeds again from the host's depth at that time. */
+    s_ff_speed = SCHED_FAST_FORWARD_SPEED;
+    s_ff_epoch++;
+    s_audio_queue_result = 10;
+    expect(hle_audio_queued(0) == 10, "a second fast-forward run seeds from the host again");
+
+    s_ff_speed = 1u;
+    s_audio_queue_result = 0;
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
 /* Media telemetry truthfulness on the production audio hand-off.
  *
  * audio_output_calls / audio_output_frames used to be raised only inside the SDL3 host
@@ -50207,6 +50280,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_model_wait_is_the_same_for_every_host();
     test_audio_calls_read_the_guest_queue_under_the_deterministic_clock();
     test_src_push_and_psmf_lead_read_the_guest_queue_under_the_deterministic_clock();
+    test_audio_fast_forward_mutes_the_host_and_reads_the_guest_queue();
     test_ctrl_live_input_latch_suppresses_phantom_start();
     test_ctrl_pulse_never_synthesises_start_in_a_real_window();
     test_ctrl_read_buffer_contract();

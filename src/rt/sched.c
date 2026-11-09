@@ -1470,6 +1470,7 @@ static void pace_set_speed(uint32_t speed) {
     s_ff_host_anchor_ns = host;
     if (speed > 1u && s_ff_speed == 1u) s_ff_epoch++;
     s_ff_speed = speed;
+    ace_note_fast_forward(speed > 1u);
     fprintf(stderr, "FAST_FORWARD: %s\n", speed > 1u ? "on" : "off");
 }
 
@@ -1806,7 +1807,7 @@ static void vblank_pace(void) {
         uint64_t wait_started = sr_perf_now_ns();
         uint64_t exec_wait_started = sr_exec_now_ns();
         sr_rt_phase = SR_RT_PHASE_HOST_WAIT;
-        const uint64_t host_from = host_now_ns();
+        const uint64_t host_from = g_ace_on ? host_now_ns() : 0u;
         SDL_DelayPrecise(pace_to_host_ns(s_vbl_next_ns - now));
         sr_perf_guest_idle_wait(wait_started);
         sr_exec_idle(exec_wait_started);

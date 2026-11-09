@@ -891,8 +891,10 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
 A speed control for Enhanced and Ace runs, the way emulators offer one. It is not a part on the launch line: the game
 window's keys turn it on, and it never runs in an Authentic run.
 
-- **Keys.** `Tab` held, unless the input profile binds `Tab` to a PSP button, and `F9` to turn it on or off. The
-  scheduler applies a change at its next VBLANK (`src/rt/sched.c`, `sched_fast_forward_*` in `src/rt/recomp.h`).
+- **Keys.** `Tab` held, unless the input profile binds `Tab` to a PSP button, and `F9` to turn it on or off. Neither
+  key counts while the on-screen keyboard has the keys. The scheduler applies a key's change at its next VBLANK
+  (`src/rt/sched.c`, `sched_fast_forward_*` in `src/rt/recomp.h`); the pause stops fast forward at once, and a toggle
+  still on starts it again at the first VBLANK after the pause. The pause menu's controls page lists both keys.
 - **What runs fast.** The paced clock samples guest time from the host monotonic clock run at
   `SCHED_FAST_FORWARD_SPEED` (3) times its rate, re-anchored at each change so guest time is continuous. VBLANKs, timed
   waits and the RTC all follow that one clock, so the guest sees the events it always sees, in the same order and at
@@ -903,10 +905,21 @@ window's keys turn it on, and it never runs in an Authentic run.
   blocking audio outputs and the queue depth the guest reads come from the same guest-time model as under the
   deterministic clock, seeded with the host queue's depth when fast forward starts, so the game paces its sound as it
   would on a PSP. When it stops, the guest reads the host queue again, which drained while nothing was pushed.
+- **The speed readout and the Ace report.** Their window is a second of wall time, so time at the fast-forward speed is
+  never judged: the readout hides while fast forward runs, skipped slots are not counted, no second counts as PC
+  LIMITED in the report, and the first full second at normal speed brings the readout back (`ace_note_fast_forward`
+  in `src/rt/ace.h`).
+- **Limit.** With **Frame pacing** set to no extra cap and vsync on, each present waits for the display, so fast
+  forward runs no faster than the display's refresh allows: about 1x on a 60 Hz display. Under the default PSP
+  timing, presents beyond the scanout rate are dropped and the guest never waits on them.
 - **Never.** It is off in an Authentic run, under the deterministic clock (`SR_DETERMINISTIC_CLOCK`, and with it
   recordings and replays), on the turbo clock (`SR_NOVBPACE=1`) and during the pause. Until it first starts, the paced
-  clock is the host clock exactly. `sched-selftest` pins the rate, the continuity, the VBLANK wait, the pause and
-  each refusal. Each start and stop prints one `FAST_FORWARD: on` or `FAST_FORWARD: off` line.
+  clock is the host clock exactly. Each start and stop prints one `FAST_FORWARD: on` or `FAST_FORWARD: off` line.
+- **Tests.** `sched-selftest` pins the rate, the continuity, the VBLANK wait, the pause, and the refusals in an
+  Authentic run, on the turbo clock and by the gate's deterministic term (a deterministic run has no paced clock, so
+  its VBLANK returns where the turbo clock's does). `hle-thread-selftest` pins the audio: no host push from either
+  output path, the guest queue seeded from the host's depth once per run and draining in guest time, and the host
+  queue and pushes back after it stops. `ace-selftest` pins the readout and the report.
 
 ## 11. Guest-Visible Items
 

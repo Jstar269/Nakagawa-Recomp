@@ -5966,6 +5966,19 @@ static void test_fast_forward_paces_the_guest_clock(void) {
     vblank_pace();
     expect(!sched_fast_forward_on(), "fast forward: the toggle stops it");
 
+    /* A run on the deterministic clock has no paced clock, so its VBLANK returns where the turbo
+     * clock's does (below); the gate's own deterministic term refuses it even on a paced clock. */
+    reset_sched();
+    ff_reset();
+    begin_clock_fixture(1, 0u);
+    disable_vblank_sources();
+    s_det_clock = 1;
+    ace_ff_hold(1);
+    vblank_pace();
+    expect(!sched_fast_forward_on() && sched_fast_forward_epoch() == 0u,
+           "fast forward: the deterministic clock ignores the hold");
+    s_det_clock = 0;
+
     /* The turbo clock never fast forwards: the VBLANK returns before the paced clock. */
     reset_sched();
     ff_reset();
