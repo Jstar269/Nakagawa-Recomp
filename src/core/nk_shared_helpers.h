@@ -60,4 +60,41 @@ int nk_shared_boot_event_format_path(char *out, size_t out_capacity,
                                     const char *cache_dir, char separator,
                                     unsigned long process_id, unsigned int sequence);
 
+/* How a game's picture is drawn, as the runtime set it up (#2151): which presenter shows it,
+ * whether the GPU GE renderer draws it, and the slower path taken, if any, because what was
+ * asked for did not start. The runtime reports it once as a boot event,
+ *   BOOT_EVENT phase=render_path presenter=<vulkan|gdi> ge=<gpu|software> fallback=<name>
+ * and the player reads that line; both sides use the names below. */
+typedef enum NkRenderFallback {
+    NK_RENDER_FALLBACK_NONE,           /* what was asked for is what draws */
+    NK_RENDER_FALLBACK_GDI_PRESENTER,  /* Vulkan did not start: the Windows GDI window shows a
+                                          software-drawn picture */
+    NK_RENDER_FALLBACK_SOFTWARE_GE,    /* the GPU GE renderer did not start: the Vulkan window
+                                          shows a software-drawn picture */
+    NK_RENDER_FALLBACK_COUNT
+} NkRenderFallback;
+
+typedef struct NkRenderPath {
+    bool vulkan;                /* the SDL3/Vulkan presenter shows the picture (else GDI) */
+    bool gpu_ge;                /* the GPU GE renderer draws it (else the software GE) */
+    NkRenderFallback fallback;
+} NkRenderPath;
+
+/* The path from what the runtime asked for and what started. A presenter or renderer that was
+ * not asked for (SR_VIDEO=gdi, SR_GPU_GE unset) is no fallback. */
+NkRenderPath nk_render_path_from_init(bool vulkan_asked, bool vulkan_started,
+                                      bool gpu_ge_asked, bool gpu_ge_started);
+
+/* The fallback's name in the event ("none", "gdi_presenter", "software_ge"); NULL when out of
+ * range. */
+const char *nk_render_fallback_name(NkRenderFallback fallback);
+
+/* Formats the event's text (without "t_ns"); returns its length, or 0 with out cleared when it
+ * does not fit. */
+int nk_render_path_event_format(const NkRenderPath *path, char *out, size_t out_capacity);
+
+/* Reads a line the runtime wrote with nk_render_path_event_format (a trailing " t_ns=" and line
+ * end are allowed). False, with out untouched, for any other line or an unknown value. */
+bool nk_render_path_event_parse(const char *line, NkRenderPath *out);
+
 #endif
