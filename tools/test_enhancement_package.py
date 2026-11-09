@@ -3475,5 +3475,130 @@ class TestAltGateStaticChecks(unittest.TestCase):
             self.assertEqual(part(out, "on"), expect("on", "SASA" "SAAS" "SASA"))
 
 
+class TestClipXWiden(unittest.TestCase):
+    """clip_x_widen (contract section 10.8): a guest_memory_code_hook site that runs the runtime's
+    matrix widening after the call at the site returns, and nothing else."""
+
+    ENTRY = 0x1000
+    BUILD = 0x1100     # the function the hooked call enters; it returns a pointer in $v0
+    CALLER = 0x1200    # the function holding the site: its first word is the jal to BUILD
+
+    def setUp(self) -> None:
+        self.words = _program({
+            self.ENTRY: [_jal(self.CALLER), _NOP, _JR_RA, _NOP],
+            self.BUILD: [_i(0x09, _ZERO, _V0, 0x0400), _JR_RA, _NOP],       # addiu v0, zero, 0x400
+            self.CALLER: [_jal(self.BUILD), _NOP, _JR_RA, _NOP],
+        })
+        self.symbols = {"synth_entry": f"0x{self.ENTRY:08x}", "synth_scene_build": f"0x{self.BUILD:08x}",
+                        "synth_scene_cache": f"0x{self.CALLER:08x}"}
+
+    def _package(self, elf_bytes: bytes, **site: Any) -> dict[str, Any]:
+        entry = {
+            "id": "SYNTH_WIDEN",
+            "function": "synth_scene_cache",
+            "insn_offset": 0,
+            "stock_digest": compute_stock_words_digest([self.words[self.CALLER]]),
+            "transform": "clip_x_widen",
+            "clip_register": "v0",
+            "clip_offsets": [640, 448],
+        }
+        entry.update(site)
+        return {
+            "schema_version": 1,
+            "id": "synth.widen.clip",
+            "display_name": "Synthetic clip widen",
+            "version": "1.0.0",
+            "category": "guest_memory_code_hook",
+            "target_title_id": "synthetic-allegrex-v1",
+            "game_version": "1.00",
+            "executable_sha256": hashlib.sha256(elf_bytes).hexdigest(),
+            "capabilities": ["widen_visibility"],
+            "sites": [entry],
+        }
+
+    def _build(self, tmp: Path, pkg: dict[str, Any] | None, name: str) -> tuple[int, str, str]:
+        elf_path = tmp / "synth.elf"
+        if not elf_path.exists():
+            self.elf_bytes = _write_synthetic_mips_elf(elf_path, self.words, self.ENTRY)
+        out_dir = tmp / name
+        out_dir.mkdir()
+        extra = []
+        if pkg is not None:
+            (tmp / f"{name}.json").write_text(json.dumps(pkg), encoding="utf-8")
+            (tmp / f"{name}.symbols.json").write_text(json.dumps(self.symbols), encoding="utf-8")
+            extra = [f"--enhancement-package={tmp / (name + '.json')}"]
+        rc, out, files = TestEnhancementAotCodegenAndCache._run_codegen(elf_path, out_dir / "out.c", extra)
+        return rc, out, b"\n".join(files.values()).decode("utf-8")
+
+    def test_widen_runs_after_the_call_and_authentic_output_is_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            rc, out, authentic = self._build(tmp, None, "authentic")
+            self.assertEqual(rc, 0, out)
+            pkg = self._package(self.elf_bytes)
+            rc, out, widened = self._build(tmp, pkg, "widened")
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("sr_enhancement_widen_clip_x", authentic)
+            self.assertEqual(widened.count("sr_enhancement_widen_clip_x(s->r[2], _nk_clip_off, 2u);"), 1)
+            self.assertIn("_nk_clip_off[] = {640u, 448u};", widened)
+            # The stock call is still made, and the widening follows it (not the other way round).
+            call = widened.index(self._call_to(self.BUILD, widened))
+            self.assertLess(call, widened.index("sr_enhancement_widen_clip_x(s->r["))
+            # It is not the 60 Hz toggle: no gate, no logic-update counter.
+            self.assertNotIn("nk_enhancement_gate_30hz()) {", widened)
+
+    @staticmethod
+    def _call_to(target: int, text: str) -> str:
+        match = re.search(r"[A-Za-z_0-9]*%08x[A-Za-z_0-9]*\(s\);" % target, text)
+        assert match, f"no call to 0x{target:08x} in the generated C"
+        return match.group(0)
+
+    def test_a_site_that_is_not_a_call_refuses_the_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            self._build(tmp, None, "authentic")
+            bad = self._package(self.elf_bytes, function="synth_scene_build", insn_offset=0,
+                                stock_digest=compute_stock_words_digest([self.words[self.BUILD]]))
+            rc, out, files = self._build(tmp, bad, "not_a_call")
+            self.assertNotEqual(rc, 0)
+            self.assertIn("clip_x_widen takes a jal", out)
+            self.assertEqual(files, "")
+
+    def test_validation_keeps_code_hook_and_timing_transforms_apart(self) -> None:
+        pkg = self._package(b"synthetic")
+        validate_package(copy.deepcopy(pkg))
+        timing = copy.deepcopy(pkg)
+        timing["category"] = "timing_frame_presentation"
+        timing["rng_policy"] = {"mode": "rescale_probability", "reason": "synthetic"}
+        with self.assertRaisesRegex(EnhancementPackageError, "needs category 'guest_memory_code_hook'"):
+            validate_package(timing)
+        hook = copy.deepcopy(pkg)
+        hook["sites"][0]["transform"] = "count_x2"
+        with self.assertRaisesRegex(EnhancementPackageError, "is not a code-hook transform"):
+            validate_package(hook)
+        for key, value, pattern in (
+            ("clip_register", "a0", "clip_register"),
+            ("clip_offsets", [], "clip_offsets"),
+            ("clip_offsets", [641], "clip_offsets"),
+            ("clip_offsets", [640, 640], "clip_offsets"),
+        ):
+            bad = copy.deepcopy(pkg)
+            bad["sites"][0][key] = value
+            with self.assertRaisesRegex(EnhancementPackageError, pattern):
+                validate_package(bad)
+        no_regs = copy.deepcopy(pkg)
+        del no_regs["sites"][0]["clip_register"]
+        with self.assertRaisesRegex(EnhancementPackageError, "clip_register"):
+            validate_package(no_regs)
+        with_rng = copy.deepcopy(pkg)
+        with_rng["rng_policy"] = {"mode": "rescale_probability", "reason": "synthetic"}
+        with self.assertRaisesRegex(EnhancementPackageError, "not valid for category 'guest_memory_code_hook'"):
+            validate_package(with_rng)
+        timing_site = copy.deepcopy(timing)
+        timing_site["sites"][0].pop("clip_offsets")
+        with self.assertRaises(EnhancementPackageError):
+            validate_package(timing_site)
+
+
 if __name__ == "__main__":
     unittest.main()

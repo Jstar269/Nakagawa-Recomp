@@ -265,6 +265,9 @@ void     sr_perf_present_submit(void);
 void     sr_perf_present_wait(uint64_t started_ns);
 void     sr_perf_present_done(uint64_t started_ns, int result);
 void     sr_perf_present_skip(void);
+/* A game frame the presenter returned not shown because the presentation engine could not take it
+ * without waiting (SDL3VK_PRESENT_DISPLAY_BUSY); kept apart from the output-cap skips above. */
+void     sr_perf_present_busy(void);
 /* One guest framebuffer the window received, at VBLANK `vcount`. A buffer that differs from the
  * previous present's is a new game frame; the same buffer again is a re-present. Called on the
  * scheduler thread, which runs the guest, GE lists and the presenter: the CPU time that thread
