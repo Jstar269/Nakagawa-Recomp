@@ -5007,6 +5007,175 @@ static int coherence_run_color_test(void) {
     return 1;
 }
 
+/* Lines on the GPU path. hook_line runs ge.c draw_line_vtx's DDA and draws each pixel's own
+ * values, so an untextured line list must stay on the GPU (no software fallback) and leave
+ * exactly what ge.c leaves. Each list holds hashed through-mode lines over a hashed background:
+ * shallow and steep, in both directions, axis-aligned and diagonal, endpoints on pixel centres
+ * and edges, and lines shorter than a pixel. Kinds: flat and Gouraud colour on 8888, Gouraud on
+ * 5650 and 4444, Gouraud under a GEQUAL depth test with depth writes over a striped depth
+ * buffer, a line strip, and lines under the color test. A textured line samples by ge.c's line
+ * footprint, so the textured list must still take the software rasterizer, and match it. */
+enum { LTP_FLAT_8888, LTP_GOURAUD_8888, LTP_GOURAUD_5650, LTP_GOURAUD_4444, LTP_DEPTH_8888,
+       LTP_STRIP_8888, LTP_CTEST_8888, LTP_TEX_8888, LTP_KINDS };
+#define LTP_LINES 160u
+
+static uint32_t ltp_fmt(int kind) {
+    return kind == LTP_GOURAUD_5650 ? 0u : kind == LTP_GOURAUD_4444 ? 2u : 3u;
+}
+
+/* Endpoint `e` (0 or 1) of line `i`: hashed, on a 1/16 grid, with every few lines a special
+ * shape. */
+static void ltp_point(uint32_t i, int e, float *x, float *y, float *z) {
+    const uint32_t hx = wrap_hash(0x11E0u + i * 4u), hy = wrap_hash(0x11E1u + i * 4u);
+    const uint32_t hx2 = wrap_hash(0x11E2u + i * 4u), hy2 = wrap_hash(0x11E3u + i * 4u);
+    float x0 = 4.0f + (float)(hx % (468u * 16u)) / 16.0f, y0 = 4.0f + (float)(hy % (260u * 16u)) / 16.0f;
+    float x1 = 4.0f + (float)(hx2 % (468u * 16u)) / 16.0f, y1 = 4.0f + (float)(hy2 % (260u * 16u)) / 16.0f;
+    switch (i % 8u) {
+        case 1: y1 = y0; break;                                    /* horizontal */
+        case 2: x1 = x0; break;                                    /* vertical */
+        case 3: x1 = x0 + 40.0f; y1 = y0 + 40.0f; break;           /* diagonal */
+        case 4: x1 = x0 - 0.375f; y1 = y0 + 0.25f; break;          /* under a pixel */
+        case 5: x0 = floorf(x0) + 0.5f; y0 = floorf(y0) + 0.5f;    /* pixel centres */
+                x1 = floorf(x1) + 0.5f; y1 = floorf(y1) + 0.5f; break;
+        case 6: x0 = floorf(x0); y0 = floorf(y0); x1 = floorf(x1); y1 = floorf(y1); break;
+        default: break;
+    }
+    if (x1 > 475.0f) x1 = 475.0f;
+    if (y1 > 267.0f) y1 = 267.0f;
+    *x = e ? x1 : x0; *y = e ? y1 : y0;
+    *z = (float)((wrap_hash(0x11E4u + i * 2u + (uint32_t)e) >> 8) & 0xFFFFu);
+}
+
+static uint32_t ltp_list(uint32_t base, int kind) {
+    const int depth = kind == LTP_DEPTH_8888, strip = kind == LTP_STRIP_8888;
+    const int textured = kind == LTP_TEX_8888;
+    StpList l; stp_begin(&l, base, ltp_fmt(kind), depth);
+    stp_emit(&l, 0x24, 0);                               /* no stencil test */
+    stp_emit(&l, 0x21, 0);
+    uint32_t vaddr = 0x08060000u;
+    if (depth) {
+        stp_emit(&l, 0xD3, 1u | 0x400u | 0x100u);        /* fill depth and colour */
+        for (uint32_t x = 0; x < 480u; x += 4u)
+            stp_sprite(&l, &vaddr, 0xFF808080u, (float)x, 0.0f, (float)(x + 4u), (float)FB_H,
+                       (x & 4u) ? 49152.0f : 16384.0f);
+        stp_emit(&l, 0xD3, 0);
+        stp_emit(&l, 0xDE, 7u);                          /* GEQUAL */
+        stp_emit(&l, 0xE7, 0u);                          /* depth writes on */
+    }
+    stp_emit(&l, 0x50, kind == LTP_FLAT_8888 ? 0u : 1u);
+    if (kind == LTP_CTEST_8888) {
+        stp_emit(&l, 0x27, 1);
+        stp_emit(&l, 0xD8, 3u);                          /* not equal under the mask */
+        stp_emit(&l, 0xD9, 0x000080u);
+        stp_emit(&l, 0xDA, 0x000080u);                   /* drops pixels with red >= 128 */
+    }
+    if (textured) {
+        uint32_t *tex = (uint32_t *)SR_HOST(CTP_TEX);
+        for (uint32_t i = 0; i < 16u * 16u; i++) tex[i] = wrap_hash(0x7E1u + i);
+        stp_emit(&l, 0xA0, CTP_TEX & 0x00FFFFFFu);
+        stp_emit(&l, 0xA8, 16u | ((CTP_TEX & 0xFF000000u) >> 8));
+        stp_emit(&l, 0xB8, 4u | (4u << 8));
+        stp_emit(&l, 0xC0, 0); stp_emit(&l, 0xC2, 0); stp_emit(&l, 0xC3, 3);
+        stp_emit(&l, 0xC6, 0); stp_emit(&l, 0xC7, 0);
+        stp_emit(&l, 0xC9, 3u | (1u << 8));
+        stp_emit(&l, 0xCB, 0);
+        stp_emit(&l, 0x1E, 1);
+        stp_emit(&l, 0x12, 3u | (7u << 2) | (3u << 7) | (1u << 23));
+        CtpTexVtx *v = (CtpTexVtx *)SR_HOST(vaddr);
+        for (uint32_t i = 0; i < LTP_LINES; i++)
+            for (int e = 0; e < 2; e++) {
+                float x, y, z;
+                ltp_point(i, e, &x, &y, &z);
+                const uint32_t h = wrap_hash(0x7E9u + i * 2u + (uint32_t)e);
+                v[i * 2u + (uint32_t)e] = (CtpTexVtx){ (float)(h & 0xFFu) / 16.0f,
+                                                       (float)((h >> 8) & 0xFFu) / 16.0f,
+                                                       0xFFFFFFFFu, x, y, z };
+            }
+        stp_emit(&l, 0x01, vaddr & 0x00FFFFFFu);
+        stp_emit(&l, 0x04, (1u << 16) | (2u * LTP_LINES));
+        stp_emit(&l, 0x1E, 0);
+        stp_emit(&l, 0x12, (7u << 2) | (3u << 7) | (1u << 23));
+    } else {
+        ParityGuestVtx *v = (ParityGuestVtx *)SR_HOST(vaddr);
+        const uint32_t n = strip ? LTP_LINES + 1u : 2u * LTP_LINES;
+        for (uint32_t k = 0; k < n; k++) {
+            float x, y, z;
+            if (strip) ltp_point(k, 0, &x, &y, &z);
+            else ltp_point(k / 2u, (int)(k & 1u), &x, &y, &z);
+            v[k] = (ParityGuestVtx){ wrap_hash(0x5A1u + k) | 0xFF000000u, x, y, z };
+        }
+        stp_emit(&l, 0x01, vaddr & 0x00FFFFFFu);
+        stp_emit(&l, 0x04, ((strip ? 2u : 1u) << 16) | n);
+    }
+    stp_emit(&l, 0x27, 0);
+    stp_emit(&l, 0x50, 1);
+    stp_end(&l);
+    return 0x08040000u;
+}
+
+static int coherence_run_lines(void) {
+    static const char *const names[LTP_KINDS] = { "flat-8888", "gouraud-8888", "gouraud-5650",
+                                                  "gouraud-4444", "depth-8888", "strip-8888",
+                                                  "color-test-8888", "textured-8888" };
+    const uint32_t base = 0x04000000u | 0x00140000u, bytes = FB_W * FB_H * 4u;
+    uint8_t *gpu_out = (uint8_t *)malloc(bytes), *sw_out = (uint8_t *)malloc(bytes);
+    if (!gpu_out || !sw_out) { free(gpu_out); free(sw_out); return 0; }
+    GeState saved = *s_ge;
+    int ok = 1;
+    unsigned differing = 0, min_drawn = UINT32_MAX;
+    for (int kind = 0; kind < LTP_KINDS && ok; kind++) {
+        const uint32_t fmt = ltp_fmt(kind), bpp = fmt == 3u ? 4u : 2u;
+        const int textured = kind == LTP_TEX_8888;
+        const char *name = names[kind];
+        const GeGpuReplayStats before = s_replay_stats;
+        const int sync = ctp_run(base, fmt, ltp_list(base, kind), 1, gpu_out);
+        const GeGpuReplayStats after = s_replay_stats;
+        (void)ctp_run(base, fmt, ltp_list(base, kind), 0, sw_out);
+        const unsigned long long fell = after.fallback_prims - before.fallback_prims;
+        if (textured ? fell == 0u : fell != 0u) {
+            fprintf(stderr, "gpu coherence selftest [lines]: %s list took the software fallback for "
+                            "%llu primitives, want %s\n", name, fell, textured ? "all" : "0");
+            ok = 0;
+        }
+        if (!textured && sync != GEGPU_SYNC_OK) {
+            fprintf(stderr, "gpu coherence selftest [lines]: %s list: the GPU target did not sync "
+                            "(status %d)\n", name, sync);
+            ok = 0;
+            break;
+        }
+        unsigned drawn = 0;
+        for (uint32_t i = 0; i < FB_W * FB_H; i++) {
+            uint32_t g = 0, w = 0;
+            memcpy(&w, sw_out + i * bpp, bpp);
+            const uint32_t bg = fmt == 3u ? wrap_hash(0x3C1u + i * 40503u)
+                                          : (uint32_t)(uint16_t)wrap_hash(0x3C1u + i * 40503u);
+            if (w != bg) drawn++;
+            if (textured && sync != GEGPU_SYNC_OK) continue;   /* ge.c drew it: nothing to compare */
+            memcpy(&g, gpu_out + i * bpp, bpp);
+            if (i % FB_W >= 480u || g == w) continue;
+            if (!differing++)
+                fprintf(stderr, "gpu coherence selftest [lines]: %s x=%u y=%u gpu=%08x ge_c=%08x\n",
+                        name, i % FB_W, i / FB_W, g, w);
+            ok = 0;
+        }
+        if (drawn < 2000u) {
+            fprintf(stderr, "gpu coherence selftest [lines]: %s list drew only %u pixels\n", name, drawn);
+            ok = 0;
+        }
+        if (drawn < min_drawn) min_drawn = drawn;
+        coherence_reset_targets();
+    }
+    free(gpu_out); free(sw_out);
+    *s_ge = saved;
+    if (!ok) {
+        fprintf(stderr, "gpu coherence selftest [lines]: %u pixels differ from ge.c\n", differing);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %-22s lists=%d untextured: fallback_prims=0, exact; textured: "
+           "ge.c; min drawn=%u\n", "lines", LTP_KINDS, min_drawn);
+    return 1;
+}
+
 /* The fallback classifier names the first unsupported state, in the order the support
  * check always tested them, and a supported state names none. */
 static int coherence_run_fallback_reasons(void) {
@@ -7927,6 +8096,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "pipeline-cache-reject") == 0) return coherence_run_pipeline_cache_reject();
         if (strcmp(only, "rtt-scale") == 0) return coherence_run_rtt_scale();
         if (strcmp(only, "color-test") == 0) return coherence_run_color_test();
+        if (strcmp(only, "lines") == 0) return coherence_run_lines();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
     }
@@ -7987,6 +8157,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_stencil_parity()) ok = 0;
     if (!coherence_run_stencil_constant()) ok = 0;
     if (!coherence_run_color_test()) ok = 0;
+    if (!coherence_run_lines()) ok = 0;
     if (!coherence_run_tnl_parity()) ok = 0;
     /* Last: it rewrites ge.c's depth surface. */
     if (!coherence_run_scaled_upload()) ok = 0;

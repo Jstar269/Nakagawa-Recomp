@@ -5852,39 +5852,98 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
     return cpu_profile_hook_leave(1);
 }
 
-/* Lines as 1-pixel-wide quads (the software DDA's pixel set, approximately). */
+/* Lines draw ge.c draw_line_vtx's pixels exactly: its DDA runs here, and each pixel becomes a
+ * one-pixel quad carrying the values ge.c gives that pixel, constant across it (a run of pixels
+ * on one row or column with equal values shares one quad). The PSP steps the major axis one
+ * pixel at a time from the first endpoint's pixel, leaves the last endpoint's pixel out, and
+ * takes the minor coordinate at the centre of each major-axis pixel, truncated
+ * (PSP-GE-RASTER-001 e-line0..2); colour, depth and fog are interpolated at that centre with the
+ * parameter clamped to the segment and truncated; a pixel outside the depth range is dropped.
+ * psp.frag then runs the same fragment stage as for any primitive. A textured line stays on
+ * ge.c: its filter and level come from the line's footprint, and nearest sampling there
+ * truncates the coordinate where psp.frag first rounds it to 1/4096 of a texel. */
+static float line_clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
+
+typedef struct LinePx { int x, y, r, g, b, a; float z, fog; } LinePx;
+
+static void line_put_run(const LinePx *p, int xmajor, int len, int dir) {
+    float x0 = (float)p->x, y0 = (float)p->y, x1 = x0 + 1.0f, y1 = y0 + 1.0f;
+    if (xmajor) { if (dir < 0) x0 -= (float)(len - 1); else x1 += (float)(len - 1); }
+    else        { if (dir < 0) y0 -= (float)(len - 1); else y1 += (float)(len - 1); }
+    put_vert(x0, y0, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+    put_vert(x1, y0, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+    put_vert(x1, y1, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+    put_vert(x0, y0, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+    put_vert(x1, y1, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+    put_vert(x0, y1, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+}
+
+static int line_same(const LinePx *a, const LinePx *b) {
+    return a->r == b->r && a->g == b->g && a->b == b->b && a->a == b->a && a->z == b->z &&
+           a->fog == b->fog;
+}
+
 static int hook_line(const GeVtx *A, const GeVtx *B, int persp) {
     if (!s_ready) return 0;
     cpu_profile_hook_enter();
     { const GeVtx *vv[2] = { A, B };
       if (!hook_finite(vv, 2)) return cpu_profile_hook_leave(1); }
-    if (software_fallback_begin(GEGPU_FALLBACK_LINE)) return cpu_profile_hook_leave(0);
+    const int textured = s_ge->tex_enable && !s_ge->clear && s_ge->tex_addr;
+    if (software_fallback_begin(textured ? GEGPU_FALLBACK_LINE : -1))
+        return cpu_profile_hook_leave(0);
     Batch b;
     state_get(persp, 1, &b);              /* sprite semantics: no culling */
     if (!begin_target()) return cpu_profile_hook_leave(1);
-    float dx = B->x - A->x, dy = B->y - A->y;
-    float len = sqrtf(dx * dx + dy * dy);
-    if (len < 1e-6f) { dx = 1.0f; dy = 0.0f; len = 1.0f; }
-    float nx = -dy / len * 0.5f, ny = dx / len * 0.5f;   /* half-width perpendicular */
-    float ex = dx / len * 0.5f, ey = dy / len * 0.5f;    /* endpoint extension */
-    float ax = A->x + 0.5f, ay = A->y + 0.5f;            /* DDA truncates; sample centers */
-    float bx = B->x + 0.5f, by = B->y + 0.5f;
 
-    /* flat shading uses B (the provoking vertex) */
-    int flat = !s_ge->shade_gouraud;
-    const GeVtx *cA = flat ? B : A;
+    /* ge.c draw_line_vtx, expression for expression. */
+    const float dx = B->x - A->x, dy = B->y - A->y;
+    const float len = fmaxf(fabsf(dx), fabsf(dy));
+    int steps = (int)len;
+    if (steps < 1) steps = 1;
+    if (steps > 2048) steps = 2048;
+    const int use_fog = persp && s_ge->fog_enable && !s_ge->clear;
+    const int xmajor = fabsf(dx) >= fabsf(dy);
+    const float a_major = xmajor ? A->x : A->y, d_major = xmajor ? dx : dy;
+    const float a_minor = xmajor ? A->y : A->x, d_minor = xmajor ? dy : dx;
+    const int p0 = (int)floorf(a_major), dir = d_major < 0.0f ? -1 : 1;
+    const int flat = !s_ge->shade_gouraud;
 
-    ensure_room(6);
     uint64_t vertex_started = cpu_profile_now();
-    uint32_t first = s_nverts;
-    put_vert(ax - ex - nx, ay - ey - ny, A->z, A->rw, A->u, A->v, A->fog, cA->r, cA->g, cA->b, cA->a);
-    put_vert(ax - ex + nx, ay - ey + ny, A->z, A->rw, A->u, A->v, A->fog, cA->r, cA->g, cA->b, cA->a);
-    put_vert(bx + ex - nx, by + ey - ny, B->z, B->rw, B->u, B->v, B->fog, B->r, B->g, B->b, B->a);
-    put_vert(ax - ex + nx, ay - ey + ny, A->z, A->rw, A->u, A->v, A->fog, cA->r, cA->g, cA->b, cA->a);
-    put_vert(bx + ex + nx, by + ey + ny, B->z, B->rw, B->u, B->v, B->fog, B->r, B->g, B->b, B->a);
-    put_vert(bx + ex - nx, by + ey - ny, B->z, B->rw, B->u, B->v, B->fog, B->r, B->g, B->b, B->a);
-    cpu_profile_vertex_done(vertex_started, 6);
-    append(&b, first, 6);
+    unsigned verts = 0;
+    LinePx run; int run_len = 0, run_minor = 0;
+    memcpy(s_uv_box, k_uv_box_free, sizeof s_uv_box);
+    for (int i = 0; i <= steps; i++) {
+        LinePx px; int have = 0, minor = 0;
+        if (i < steps) {
+            const int p = p0 + i * dir;
+            float t = d_major != 0.0f ? ((float)p + 0.5f - a_major) / d_major : 0.0f;
+            const int q = (int)floorf(a_minor + d_minor * t);
+            t = line_clamp01(t);
+            px.x = xmajor ? p : q; px.y = xmajor ? q : p; minor = q;
+            px.r = (int)(A->r + (B->r - A->r) * t); px.g = (int)(A->g + (B->g - A->g) * t);
+            px.b = (int)(A->b + (B->b - A->b) * t); px.a = (int)(A->a + (B->a - A->a) * t);
+            if (flat) { px.r = B->r; px.g = B->g; px.b = B->b; px.a = B->a; }
+            const float lz = A->z + (B->z - A->z) * t;
+            /* ge.c zrange_ok: a transform-mode pixel outside [minz, maxz] is dropped. */
+            have = !persp || ((int)lz >= (int)s_ge->minz && (int)lz <= (int)s_ge->maxz);
+            /* The depth ge.c stores (clamp_z) and its fog factor, which psp.frag truncates
+             * back from the middle of the factor's 1/256 step. */
+            px.z = lz < 0.0f ? 0.0f : lz > 65535.0f ? 65535.0f : (float)(uint16_t)lz;
+            const int fog = use_fog ? (int)(line_clamp01(A->fog + (B->fog - A->fog) * t) * 256.0f) : 256;
+            px.fog = ((float)fog + 0.5f) / 256.0f;
+        }
+        if (run_len && have && minor == run_minor && line_same(&run, &px)) { run_len++; continue; }
+        if (run_len) {
+            ensure_room(6);
+            const uint32_t first = s_nverts;
+            line_put_run(&run, xmajor, run_len, dir);
+            append(&b, first, 6);
+            verts += 6u;
+            run_len = 0;
+        }
+        if (have) { run = px; run_len = 1; run_minor = minor; }
+    }
+    cpu_profile_vertex_done(vertex_started, verts);
     s_cnt_line++;
     return cpu_profile_hook_leave(1);
 }
