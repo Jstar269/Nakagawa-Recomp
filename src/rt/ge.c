@@ -5132,7 +5132,7 @@ static void ge_note_mip_draw(void) {
 
 /* ---- finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14) ----------------
  *
- * An Ace Mode feature: draw_patch multiplies the guest's U and V division of a triangle patch by
+ * An Ace Mode part, the tess key of the SR_ACE launch line (off by default): draw_patch multiplies the guest's U and V division of a triangle patch by
  * an integer factor F after the PSP's own vertex cap has set them, so every vertex of the PSP's
  * grid is still evaluated at bit-identical parameters ((k*F)/(n*F) rounds as k/n does), and the
  * patch edges and corners, the only vertices neighbouring patches share, are the PSP's. Line and
@@ -5140,13 +5140,19 @@ static void ge_note_mip_draw(void) {
  * surface). While the finer grid would pass GE_PATCH_TESS_MAX_VERTS, F drops along a divisor
  * chain (4, 2, 1 or 3, 1), so a draw the cap lowers still has every edge vertex of its coarser
  * grid on its finer neighbours' edges. The finer side's extra edge vertices can still leave a
- * crack against a lowered neighbour, which is why such a draw is counted (s_patch_capped).
- * The guest timing model charges a patch by its control points (ge_time_prim_begin), so it does
- * not change; the extra triangles cost host time only. Off (F = 1) is the PSP's path exactly. */
+ * crack against a lowered neighbour, which is why such a draw is counted (s_patch_capped) and the
+ * run's `PATCH_TESS: exit` line reports the count.
+ * It alters GE timing (SR_GE_TIMING): ge_time_prim_begin charges a patch's control points, and with the GE timing model on
+ * (SR_GE_TIMING) raster_tri also charges every triangle drawn, the finer ones included, so a
+ * factor F on division d costs what division d*F costs, not what the PSP's d costs: more for a
+ * small patch (one more fixed row charge per triangle), possibly less for a large one whose spans
+ * the finer grid narrows below 64 pixels. List completion, sceGeDrawSync, sceGeListSync and the
+ * finish interrupt move with it. With the model off the extra triangles cost host time only. Off (F = 1) is the PSP's path exactly. */
 #define GE_PATCH_TESS_MAX 4
 #define GE_PATCH_TESS_MAX_VERTS 262144u
 static int s_patch_tess = 1;
 static unsigned long long s_patch_quads, s_patch_capped;
+static int s_patch_exit_hooked;
 
 int ge_patch_tess_set(int factor) {
     s_patch_tess = factor >= 1 && factor <= GE_PATCH_TESS_MAX ? factor : 1;
@@ -5158,29 +5164,26 @@ void ge_patch_tess_counts(unsigned long long *quads, unsigned long long *capped)
     if (capped) *capped = s_patch_capped;
 }
 
-int ge_patch_tess_init(int enhanced) {
-    const char *v = getenv("SR_GE_PATCH_TESS");
-    int f = 1;
+/* The run's end: what the feature drew, and how many draws the vertex cap lowered (each such draw
+ * can leave a crack against a neighbour drawn at the full factor). */
+void ge_patch_tess_exit_report(void) {
+    fprintf(stderr, "PATCH_TESS: exit (quads=%llu, capped_draws=%llu)\n", s_patch_quads, s_patch_capped);
+}
+
+int ge_patch_tess_init(int factor) {
     s_patch_tess = 1;
-    if (v && v[0] && strcmp(v, "off") != 0) {
-        if (v[1] != '\0' || v[0] < '2' || v[0] > '0' + GE_PATCH_TESS_MAX) {
-            fprintf(stderr, "PATCH_TESS: refused (SR_GE_PATCH_TESS=%s: the values are off, 2, 3 and 4)\n", v);
-            return 1;
-        }
-        f = v[0] - '0';
+    if (factor < 2 || factor > GE_PATCH_TESS_MAX) return 1;
+    s_patch_tess = factor;
+    if (!s_patch_exit_hooked) {
+        s_patch_exit_hooked = 1;
+        sr_at_process_end(ge_patch_tess_exit_report);
     }
-    if (f == 1) return 1;
-    if (!enhanced) {
-        /* Authentic: a request is named, not obeyed. */
-        fprintf(stderr, "PATCH_TESS: off (finer Bezier and spline patches need Ace Mode)\n");
-        return 1;
-    }
-    s_patch_tess = f;
-    fprintf(stderr, "PATCH_TESS: on (factor=%d, at most %u vertices a patch draw)\n", f, GE_PATCH_TESS_MAX_VERTS);
-    fprintf(stderr, "PATCH_TESS: guest-visible, on through SR_GE_PATCH_TESS and not admitted under contract "
-                    "section 11.2 (each present commits the frame to guest VRAM; see the contract's \"Finer "
+    fprintf(stderr, "PATCH_TESS: on (factor=%d, at most %u vertices a patch draw)\n", factor, GE_PATCH_TESS_MAX_VERTS);
+    fprintf(stderr, "PATCH_TESS: guest-visible and alters GE timing under SR_GE_TIMING=1, on through the "
+                    "tess key of the SR_ACE launch line; off by default until the runs of contract section "
+                    "11.2 item 4 exist (each present commits the frame to guest VRAM; see the contract's \"Finer "
                     "Bezier and Spline Patches\" entry)\n");
-    return f;
+    return factor;
 }
 
 static void draw_patch(uint32_t op,int spline){

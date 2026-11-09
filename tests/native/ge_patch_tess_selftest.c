@@ -6,11 +6,11 @@
 // ge_run_list(); the harness supplies guest memory and the runtime's diagnostic globals at their
 // disabled values. No game input.
 //
-//   settings    SR_GE_PATCH_TESS: unset, off and an authentic run's request keep the PSP's
-//               division; 2, 3 and 4 are taken only when enhanced; anything else is refused.
-//   same-grid   factor F on a guest division d draws, byte for byte, what the PSP draws for
-//               the guest division d*F (Bezier and spline, varied vertex colours), and not what
-//               it draws for d: the finer surface is the PSP's own surface, finer.
+//   settings    the tess key's factor: 0 (off, and an authentic run) and 1 keep the PSP's
+//               division; 2, 3 and 4 are taken; anything else keeps the PSP's division.
+//   same-grid   factor F on a guest division d draws, byte for byte, what this renderer draws
+//               for the guest division d*F (Bezier and spline, varied vertex colours), and not
+//               what it draws for d: the finer surface is the PSP's own surface, finer.
 //   quads       each factor draws F*F times the PSP's quads.
 //   off         factor 1 is the PSP's path: the same bytes as a run that never set it.
 //   seam        two neighbouring Bezier patches (two draws sharing a curved edge) and one
@@ -20,15 +20,21 @@
 //   wire        line and point patches keep the PSP's division at every factor.
 //   cap         a draw whose finer grid would pass 262144 vertices drops along the divisor
 //               chain (4, 2, 1; 3, 1) to the first factor that fits, and is counted.
-
-#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
-#define _POSIX_C_SOURCE 200809L /* setenv/unsetenv under a strict -std */
-#endif
+//   psp-cap     a draw the PSP's own 65535-vertex cap lowers is lowered first and multiplied
+//               after: four patches at 127x127 draw 126x126 times F, not 127x127 times F.
+//   timing      with the GE timing model on, factor F on a division d costs exactly the GE clocks
+//               of the division d*F, which differ from the PSP's d: less for a patch whose spans
+//               the finer grid narrows below 64 pixels, more for a small one.
+//   exit        the run's end prints PATCH_TESS: exit with the quads drawn and the capped draws.
 
 #include "recomp.h"
 #include "debug.h"
 #include "ge_capture.h"
 #include "ge_shared.h"
+
+#ifndef SR_SELFTEST_BUILD_ROOT
+#define SR_SELFTEST_BUILD_ROOT "build"
+#endif
 
 #include <inttypes.h>
 #include <stddef.h>
@@ -102,15 +108,6 @@ static uint64_t s_clock_ns = 1000000u;
 uint64_t SDL_GetTicksNS(void) {
     s_clock_ns += 7u;
     return s_clock_ns;
-}
-
-static void env_set(const char *name, const char *value) {
-#ifdef _WIN32
-    _putenv_s(name, value ? value : "");
-#else
-    if (value) setenv(name, value, 1);
-    else unsetenv(name);
-#endif
 }
 
 /* ---- Source-owned display lists ---- */
@@ -274,28 +271,26 @@ int main(void) {
     }
     g_mem = arena + 0x08000000u;
     s_vtx = VERTS;
-    char what[160];
+    char what[512];
 
-    /* settings */
+    /* settings: the factor the run's launch line carries (the tess key, ace.c), which the driver
+     * passes from the effective Ace config: 0 (off, and an authentic run) and 1 keep the PSP's
+     * division, 2 to 4 are taken, and a value the key never carries keeps the PSP's. */
     {
-        static const struct { const char *value; int enhanced, want; } cells[] = {
-            { NULL, 1, 1 }, { "", 1, 1 }, { "off", 1, 1 }, { "2", 1, 2 }, { "3", 1, 3 }, { "4", 1, 4 },
-            { "4", 0, 1 }, { "2", 0, 1 }, { "1", 1, 1 }, { "5", 1, 1 }, { "8", 1, 1 }, { "on", 1, 1 },
-            { "22", 1, 1 }, { "-2", 1, 1 },
+        static const struct { int factor, want; } cells[] = {
+            { 0, 1 }, { 1, 1 }, { 2, 2 }, { 3, 3 }, { 4, 4 }, { 5, 1 }, { 8, 1 }, { 22, 1 }, { -2, 1 },
         };
         int ok = 1;
         for (size_t i = 0; i < sizeof cells / sizeof cells[0]; i++) {
-            env_set("SR_GE_PATCH_TESS", cells[i].value);
-            const int got = ge_patch_tess_init(cells[i].enhanced);
+            const int got = ge_patch_tess_init(cells[i].factor);
             if (got != cells[i].want) {
-                fprintf(stderr, "ge patch tess selftest: SR_GE_PATCH_TESS=%s enhanced=%d gave %d, want %d\n",
-                        cells[i].value ? cells[i].value : "(unset)", cells[i].enhanced, got, cells[i].want);
+                fprintf(stderr, "ge patch tess selftest: tess=%d gave %d, want %d\n", cells[i].factor, got,
+                        cells[i].want);
                 ok = 0;
             }
         }
-        env_set("SR_GE_PATCH_TESS", NULL);
-        (void)ge_patch_tess_init(1);
-        check(ok, "settings", "unset/off/authentic keep 1; 2-4 only when enhanced; 1, 5, 8, on, 22, -2 refused");
+        (void)ge_patch_tess_init(0);
+        check(ok, "settings", "0 and 1 keep 1; 2, 3 and 4 are taken; 5, 8, 22 and -2 keep 1");
     }
 
     const uint32_t dome = make_dome(), ribbon = make_ribbon();
@@ -418,10 +413,105 @@ int main(void) {
         check(q4 - q3 == 2ull * 127ull * 127ull && c3 - c2 == 1u, "cap", what);
     }
 
+    /* psp-cap: four Bezier patches (7x7 control points) at 127x127 are 4 * 128 * 128 = 65536
+     * vertices, past the PSP's 65535, so the PSP draws 126x126. Factor 2 multiplies that:
+     * 4 * 253 * 253 = 256036 vertices fit the host cap, 4 * 252 * 252 quads. Multiplying before
+     * the PSP's cap would draw 4 * 254 * 254. */
+    {
+        const uint32_t quad4 = s_vtx;
+        for (int v = 0; v < 7; v++)
+            for (int u = 0; u < 7; u++) vtx(60.0f + 50.0f * (float)u, 20.0f + 38.0f * (float)v, 0xFFFFFFFFu);
+        const Patch quad4_p = { quad4, 0x0707u, 0 };
+        unsigned long long q0, q1, c0, c1;
+        ge_patch_tess_set(1);
+        run_patches(&quad4_p, 1, 127, 127, 0);
+        ge_patch_tess_counts(&q0, &c0);
+        ge_patch_tess_set(2);
+        run_patches(&quad4_p, 1, 127, 127, 0);
+        ge_patch_tess_counts(&q1, &c1);
+        snprintf(what, sizeof what, "four patches at 127x127, factor 2: %llu quads (the PSP's 126x126, times 2), "
+                 "%llu capped", q1 - q0, c1 - c0);
+        check(q1 - q0 == 4ull * 252ull * 252ull && c1 == c0, "psp-cap", what);
+    }
+
+    /* timing: with the GE timing model on, factor F on division d costs exactly the GE clocks
+     * of the division d*F, and that is not the PSP's d: the model charges each triangle's rows
+     * and spans, so a finer grid costs less where it cuts a span of 64 pixels or more into
+     * narrower ones (the dome and the ribbon) and more where the spans were already narrow (a
+     * 30-pixel patch: one more fixed row charge per triangle). The contract states the change. */
+    {
+        const uint32_t tiny_at = s_vtx;
+        for (int v = 0; v < 4; v++)
+            for (int u = 0; u < 4; u++) vtx(200.0f + 10.0f * (float)u, 100.0f + 10.0f * (float)v, 0xFFFFFFFFu);
+        const Patch tiny_p = { tiny_at, 0x0404u, 0 };
+        const struct { const Patch *p; const char *name; int finer_costs_more; } shapes[] = {
+            { &dome_p, "bezier", 0 }, { &ribbon_p, "spline", 0 }, { &tiny_p, "small bezier", 1 },
+        };
+        ge_timing_set_enabled(1);
+        int ok = 1;
+        char detail[160] = "";
+        for (size_t s = 0; s < sizeof shapes / sizeof shapes[0] && ok; s++) {
+            ge_patch_tess_set(1);
+            run_patches(shapes[s].p, 1, 2, 1, 0);
+            const double psp = ge_timing_run_clk();
+            for (int f = 2; f <= 4; f++) {
+                ge_patch_tess_set(1);
+                run_patches(shapes[s].p, 1, 2 * f, f, 0);
+                const double fine = ge_timing_run_clk();
+                ge_patch_tess_set(f);
+                run_patches(shapes[s].p, 1, 2, 1, 0);
+                const double got = ge_timing_run_clk();
+                const int direction_ok = shapes[s].finer_costs_more ? got > psp : got != psp;
+                if (got != fine || !direction_ok) {
+                    snprintf(detail, sizeof detail, "%s factor %d: %.3f clocks, division %dx%d %.3f, the PSP's %.3f",
+                             shapes[s].name, f, got, 2 * f, f, fine, psp);
+                    ok = 0;
+                    break;
+                }
+            }
+        }
+        snprintf(what, sizeof what, "factors 2 to 4 on 2x1 cost the clocks of the division 2F x F, not the PSP's "
+                 "2x1 (more for a small patch)%s%s", ok ? "" : ": ", detail);
+        check(ok, "timing", what);
+        ge_timing_set_enabled(0);
+        ge_patch_tess_set(1);
+    }
+
+    /* exit: the end-of-run report. The settings cell turned the feature on, which registered it;
+     * sr_perf_shutdown runs the process-end reports, here into a file that is read back. */
+    {
+        unsigned long long q, c;
+        ge_patch_tess_counts(&q, &c);
+        char want[96], line[256];
+        snprintf(want, sizeof want, "PATCH_TESS: exit (quads=%llu, capped_draws=%llu)\n", q, c);
+        const char *path = SR_SELFTEST_BUILD_ROOT "/ge_patch_tess_selftest_exit.txt";
+        int found = 0;
+        fflush(stderr);
+        if (freopen(path, "w", stderr)) {
+            sr_perf_shutdown();
+            fflush(stderr);
+            FILE *in = fopen(path, "r");
+            if (in) {
+                while (fgets(line, sizeof line, in))
+                    if (strcmp(line, want) == 0) found = 1;
+                fclose(in);
+            }
+        }
+        /* stderr is the file from here on, so the result goes to stdout. */
+        want[strlen(want) - 1] = '\0';
+        if (found && c >= 2u) {
+            printf("ge patch tess selftest: PASS %-10s the run's end printed \"%s\"\n", "exit", want);
+        } else {
+            printf("ge patch tess selftest: FAIL %-10s no \"%s\" line at the run's end, or fewer than 2 "
+                   "capped draws\n", "exit", want);
+            s_fail++;
+        }
+    }
+
     ge_patch_tess_set(1);
     free(arena);
     if (s_fail) {
-        fprintf(stderr, "ge patch tess selftest: %d failure(s)\n", s_fail);
+        printf("ge patch tess selftest: %d failure(s)\n", s_fail);
         return 1;
     }
     puts("ge patch tess selftest: OK");

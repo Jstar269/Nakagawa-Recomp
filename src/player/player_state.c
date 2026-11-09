@@ -1429,6 +1429,9 @@ static const char *const k_part_switch_labels[] = {"On", "Off"};
 static const char *const k_part_switch_words[] = {"on", "off"};
 static const char *const k_part_smooth_words[] = {"x2", "off"};
 static const char *const k_part_sas_words[] = {"sinc", "off"};
+static const int k_part_tess_values[] = {2, 3, 4, 0};
+static const char *const k_part_tess_labels[] = {"2x", "3x", "4x", "Off"};
+static const char *const k_part_tess_words[] = {"2", "3", "4", "off"};
 static const char *const k_part_wide_words[] = {"fill", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
@@ -1459,6 +1462,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"sas", "Clean pitched sound",
      "Resamples pitched effects without aliasing. The game receives changed samples.",
      2, k_part_switch_values, k_part_switch_labels, k_part_sas_words, 0},
+    /* A guest-visible item (contract 11.3.6) that alters GE timing (SR_GE_TIMING): off by default
+       and in no preset, with its own off switch in the library and each title. */
+    {"tess", "Finer patches",
+     "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
+     4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
     /* Presentation only (contract section 2.2): the window and its recording, never the guest. */
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",

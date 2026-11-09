@@ -537,9 +537,12 @@ int main(int argc, char **argv) {
          * the mixer (the headless gate) refuses it, and ace_finish reports it as never run. */
         if (ace_effective()->sas == ACE_SAS_SINC && sr_hle_sas_set_band_limited(1))
             ace_confirm(ACE_FEATURE_SAS);
+        /* tess=2..4 (#2053): finer Bezier and spline patches, read from the line, so an
+         * authentic run (g_ace_on 0, an all-zero effective config) never gets them. */
+        if (ace_effective()->tess > 1 && ge_patch_tess_init(ace_effective()->tess) > 1)
+            ace_confirm(ACE_FEATURE_TESS);
         (void)atexit(ace_finish);
     }
-    (void)ge_patch_tess_init(g_ace_on);   /* finer patches (#2053): Ace only; an authentic request is named */
 
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--expect-u32", 12) != 0) continue;
