@@ -338,6 +338,76 @@ static void test_boot_events(void) {
           "boot path formatter clears output when the cache directory is unavailable");
 }
 
+/* #2151: each start-up outcome gives its path, and the event line the runtime writes reads
+   back as that path in the player. */
+static void test_render_path(void) {
+    static const struct {
+        bool vulkan_asked, vulkan_started, gpu_ge_asked, gpu_ge_started;
+        bool vulkan, gpu_ge;
+        NkRenderFallback fallback;
+        const char *line;
+    } cases[] = {
+        /* What the player launches with: Vulkan and the GPU GE renderer, both started. */
+        {true, true, true, true, true, true, NK_RENDER_FALLBACK_NONE,
+         "BOOT_EVENT phase=render_path presenter=vulkan ge=gpu fallback=none"},
+        /* Vulkan did not start: the GDI window, and so the software GE. */
+        {true, false, true, false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER,
+         "BOOT_EVENT phase=render_path presenter=gdi ge=software fallback=gdi_presenter"},
+        {true, false, false, false, false, false, NK_RENDER_FALLBACK_GDI_PRESENTER,
+         "BOOT_EVENT phase=render_path presenter=gdi ge=software fallback=gdi_presenter"},
+        /* The GPU GE renderer did not start in the Vulkan window. */
+        {true, true, true, false, true, false, NK_RENDER_FALLBACK_SOFTWARE_GE,
+         "BOOT_EVENT phase=render_path presenter=vulkan ge=software fallback=software_ge"},
+        /* Not asked for, so no fallback: SR_GPU_GE unset, or SR_VIDEO=gdi. */
+        {true, true, false, false, true, false, NK_RENDER_FALLBACK_NONE,
+         "BOOT_EVENT phase=render_path presenter=vulkan ge=software fallback=none"},
+        {false, false, true, false, false, false, NK_RENDER_FALLBACK_NONE,
+         "BOOT_EVENT phase=render_path presenter=gdi ge=software fallback=none"},
+    };
+    static const char *const refused[] = {
+        "BOOT_EVENT phase=window_ready backend=gdi",
+        "BOOT_EVENT phase=render_path presenter=metal ge=gpu fallback=none",
+        "BOOT_EVENT phase=render_path presenter=vulkan ge=gpu fallback=slow",
+        "BOOT_EVENT phase=render_path presenter=vulkan ge=gpu",
+        "BOOT_EVENT phase=render_path presenter=vulkan ge=gpux fallback=none",
+        "stderr: BOOT_EVENT phase=render_path presenter=vulkan ge=gpu fallback=none",
+    };
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        NkRenderPath path = nk_render_path_from_init(cases[i].vulkan_asked,
+                                                     cases[i].vulkan_started,
+                                                     cases[i].gpu_ge_asked,
+                                                     cases[i].gpu_ge_started);
+        NkRenderPath read = {false, false, NK_RENDER_FALLBACK_COUNT};
+        char line[128];
+        char timed[160];
+        CHECK(path.vulkan == cases[i].vulkan && path.gpu_ge == cases[i].gpu_ge &&
+                  path.fallback == cases[i].fallback,
+              "render path follows what was asked for and what started");
+        CHECK(nk_render_path_event_format(&path, line, sizeof(line)) ==
+                      (int)strlen(cases[i].line) &&
+                  strcmp(line, cases[i].line) == 0,
+              "render path event names the presenter, the GE path and the fallback");
+        (void)snprintf(timed, sizeof(timed), "%s t_ns=123\r\n", line);
+        CHECK(nk_render_path_event_parse(timed, &read) && read.vulkan == path.vulkan &&
+                  read.gpu_ge == path.gpu_ge && read.fallback == path.fallback,
+              "render path event reads back as the path, timestamp and line end included");
+    }
+    for (size_t i = 0u; i < sizeof(refused) / sizeof(refused[0]); ++i) {
+        NkRenderPath read = {true, true, NK_RENDER_FALLBACK_SOFTWARE_GE};
+        CHECK(!nk_render_path_event_parse(refused[i], &read) && read.vulkan && read.gpu_ge &&
+                  read.fallback == NK_RENDER_FALLBACK_SOFTWARE_GE,
+              "another line or an unknown value is not a render path");
+    }
+    {
+        NkRenderPath path = {true, true, NK_RENDER_FALLBACK_NONE};
+        char small[16] = "old";
+        CHECK(nk_render_path_event_format(&path, small, sizeof(small)) == 0 && small[0] == '\0',
+              "render path event formatter clears an output too small for it");
+        CHECK(nk_render_fallback_name(NK_RENDER_FALLBACK_COUNT) == NULL,
+              "an out-of-range fallback has no name");
+    }
+}
+
 int main(void) {
     test_path_joins();
     test_legacy_path_contracts();
@@ -345,6 +415,7 @@ int main(void) {
     test_utf8_open();
     test_size_format();
     test_boot_events();
+    test_render_path();
     if (failures != 0) {
         fprintf(stderr, "shared helper selftest: %d failure(s)\n", failures);
         return 1;
