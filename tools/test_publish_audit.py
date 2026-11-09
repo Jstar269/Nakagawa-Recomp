@@ -2603,6 +2603,13 @@ class AndroidTreeMetadataTests(unittest.TestCase):
                 self.assertEqual(disp, "included")
                 self.assertFalse(public, "metadata alone must never make a path public")
 
+    def test_a_vendored_glsl_shader_is_classified_like_other_third_party_source(self):
+        # Anime4K's upstream shader is a .glsl file under third_party/ (#1273); a path with no
+        # classification is an UNCLASSIFIED_PATH finding, so the extension must be known.
+        prov, *_rest = publish_audit._default_provenance(
+            "third_party/anime4k/Anime4K_Upscale_CNN_x2_M.glsl", None)
+        self.assertEqual(prov, "project_authored")
+
     def test_unknown_top_level_files_stay_unclassified(self):
         prov, *_rest = publish_audit._default_provenance("elsewhere/app/build.gradle.kts", None)
         self.assertEqual(prov, "unclassified")

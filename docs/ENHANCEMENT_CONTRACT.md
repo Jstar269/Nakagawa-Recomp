@@ -61,6 +61,21 @@ Presentation enhancements operate strictly after or alongside the host graphics 
   `library_sweep.py` run the runtime themselves, so they set the key `off` (a picture-gate route
   may ask for it) and record the value they used. GPU cost on an RTX 3080 (`fsr1-selftest`): 0.40 ms
   per present for 1920x1088 to 3840x2160, and 0.06 to 0.20 ms at the other preset sizes (`docs/SETUP.md`).
+- **Movie upscaling:** `SR_MOVIE_UPSCALE=off|fsr1|anime4k` (default `off`) gives CPU-presented
+  frames (decoded movies, and every frame when the software GE draws) FSR 1, or Anime4K's CNN x2 (M)
+  network, then FSR 1 to the exact size unless the doubled picture already is that size (as at the
+  default 960x544), in the window and in a recording, and overrides `SR_PRESENT_UPSCALE` for those
+  frames. It reads the shown image and writes private images only; captures still hold
+  the guest's frame, and the decoded movie, guest VRAM and every guest flight event match with it
+  off (`display-smoke-anime4k`, which needs a Vulkan device and a display, so it is a local gate).
+  A run with it on is stamped as `SR_PRESENT_UPSCALE` is (`ACE_MODE: present upscale
+  movie-anime4k`, the `phase=present_upscale` boot event and `runtime.enhancements`), so neither
+  `flight_diff.py` nor `boot_gate.py` takes it as authentic evidence. It reaches only frames the CPU
+  presents: a movie the GE presents (drawn as a texture, or decoded into a GE target) is a GE frame
+  and is not upscaled by it. An Authentic launcher session, the picture gate and the library sweep
+  run with it `off`, whatever the environment says.
+  GPU cost at 4K: 0.75 ms per present for a 480x272 frame to 3811x2160 on an RTX 3080
+  (`anime4k-selftest`).
 - **Forbidden:** Mutating GE display list commands, intercepting guest draw calls to alter gameplay geometry, or feeding host input back into the guest controller state.
 
 ### 2.3. Guest Memory and Code Hooks (`guest_memory_code_hook`)
@@ -321,6 +336,8 @@ Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`
 for an Enhanced or Ace run with the part on, and `off` otherwise, and always `off` for Authentic (section 2.2). The
 part's value is the title's own, else the graphics preset's where it sets the part (Medium, Ultra and Handheld on,
 Low and High off), else the library's; crisp text (`text`) is resolved the same way, and every preset turns it on.
+The launcher also exports `SR_MOVIE_UPSCALE=off` for an Authentic session; an Enhanced or Ace session
+keeps the inherited value, as the movie upscaler has no setting.
 
 ### 10.2. Authentic Is Untouched
 
