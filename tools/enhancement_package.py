@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 import copy
 import hashlib
 import hmac
@@ -715,6 +715,11 @@ def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
                  f"stock_value_digests must be a list of 1 to {STOCK_VALUE_DIGESTS_MAX} lowercase hex SHA-256 digests")
         if len(set(digests)) != len(digests):
             fail(f"{path}.stock_value_digests", "stock_value_digests lists a digest twice (duplicate)")
+    for key in ("stock_values", "stock_value_digests"):
+        # Only a scaling transform rewrites a store (swc1, or sw under count_x2): no other site checks values.
+        if key in site and transform not in SCALE_FACTORS:
+            fail(f"{path}.{key}", f"{key} belongs only to a store site under a scaling transform "
+                                  f"({', '.join(sorted(SCALE_FACTORS))})")
     if "requires" in site:
         required = site["requires"]
         if not isinstance(required, list) or not required or not all(isinstance(r, str) for r in required):
@@ -986,13 +991,20 @@ STOCK_VALUE_DIGESTS_MAX = 64
 DISC_ID_RE = re.compile(r"^[A-Z]{4}[0-9]{5}$")
 DISC_VERSION_RE = re.compile(r"^[0-9]{1,2}\.[0-9]{2}$")
 SITE_MAP_ADDRESS_RE = re.compile(r"^0x[0-9a-f]{8}$")
+PUBLISHED_VERSION_RE = re.compile(
+    r"^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})(?:-[0-9A-Za-z]{1,16}(?:\.[0-9A-Za-z]{1,16})?)?$")
+PUBLISHED_REASON_MAX = 1024
+ADDRESS_SUFFIX_RE = re.compile(r"_([0-9a-fA-F]{8})$")
 # The refusals a published package names (section 5.1), in the order they are checked.
 PUBLISHED_REFUSALS = ("other_disc", "other_revision", "modified_executable", "site_mismatch")
-# Free text in a published package explains; it never carries words, bytes or addresses.
-_PUBLISHED_TEXT_FIELDS = (("display_name",), ("rng_policy", "reason"))
+# No string in a published package carries words, bytes or addresses: every string and every
+# object key is checked, except the digest slots below and the site map's address values. A
+# run of more than 8 hex digits is longer than one 32-bit word or address.
+_PUBLISHED_DIGEST_SLOTS = frozenset({"executable_sha256", "stock_digest", "low_stock_digest", "sha256"})
+_PUBLISHED_DIGEST_LISTS = frozenset({"stock_value_digests"})
 _PUBLISHED_TEXT_REFUSED = (
     (re.compile(r"0[xX][0-9a-fA-F]{5,}"), "an address literal"),
-    (re.compile(r"[0-9a-fA-F]{16,}"), "a run of 16 or more hex digits"),
+    (re.compile(r"[0-9a-fA-F]{9,}"), "a run of more than 8 hex digits"),
     (re.compile(r"[A-Za-z0-9+/]{32,}={0,2}"), "a base64-like run of 32 or more characters"),
     (re.compile(r"\\x[0-9a-fA-F]{2}"), "an escaped byte"),
 )
@@ -1067,6 +1079,12 @@ def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
     declaration = validate_package({k: v for k, v in data.items() if k not in PUBLISHED_KEYS})
     if "executable_sha256" not in declaration:
         fail("executable_sha256", "A published package names the one executable it applies to")
+    # Bounded text: a version carries no build metadata and a short pre-release tag at most.
+    if not PUBLISHED_VERSION_RE.match(declaration["version"]):
+        fail("version", f"a published package's version {declaration['version']!r} must match "
+                        f"{PUBLISHED_VERSION_RE.pattern} (no build metadata)")
+    if "rng_policy" in declaration and len(declaration["rng_policy"]["reason"]) > PUBLISHED_REASON_MAX:
+        fail("rng_policy.reason", f"a published package's rng_policy.reason is at most {PUBLISHED_REASON_MAX} characters")
     for idx, site in enumerate(declaration.get("sites", ())):
         if "stock_values" in site:
             fail(f"sites[{idx}].stock_values",
@@ -1082,6 +1100,11 @@ def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
             fail(f"site_map.{name}", f"site map name {name!r} does not match required pattern {SYMBOL_RE.pattern}")
         if not isinstance(address, str) or not SITE_MAP_ADDRESS_RE.match(address) or int(address, 16) % 4:
             fail(f"site_map.{name}", f"address {address!r} must be a 4-byte-aligned 0x%08x hex string")
+        # A project-assigned name for a function no decompilation names yet ends in its own address
+        # (hst_fn_0001ea64): an 8-hex suffix is that name's address and no other value.
+        suffix = ADDRESS_SUFFIX_RE.search(name)
+        if suffix and int(suffix.group(1), 16) != int(address, 16):
+            fail(f"site_map.{name}", f"name {name!r} ends in an address other than its own ({address})")
     used = _published_names(declaration)
     missing = sorted(used - set(site_map))
     if missing:
@@ -1096,8 +1119,9 @@ def published_package_findings(data: Any) -> list[str]:
     """Why a file may not be published as a package; empty when it may (section 5.1).
 
     The declaration is validated with every property allowlisted, so a package can only
-    carry what the format defines: names, addresses, transforms and keyed digests. Free
-    text is checked separately for words, bytes or addresses written into it.
+    carry what the format defines: names, addresses, transforms and keyed digests. Every
+    string and object key outside the digest slots and the site map's addresses is then
+    checked for words, bytes or addresses written into it.
     """
     if not is_published_package(data):
         return ["not in the published form (published_package, disc_id, disc_version, "
@@ -1107,16 +1131,29 @@ def published_package_findings(data: Any) -> list[str]:
     except EnhancementPackageError as exc:
         return [str(exc)]
     findings: list[str] = []
-    for field in _PUBLISHED_TEXT_FIELDS:
-        value: Any = data
-        for part in field:
-            value = value.get(part) if isinstance(value, Mapping) else None
-        if not isinstance(value, str):
-            continue
+    for where, value in _published_strings(data, "$"):
         for pattern, what in _PUBLISHED_TEXT_REFUSED:
             if pattern.search(value):
-                findings.append(f"{'.'.join(field)} contains {what}")
+                findings.append(f"{where} contains {what}")
     return findings
+
+
+def _published_strings(value: Any, where: str, slot: str = "") -> Iterator[tuple[str, str]]:
+    """Every string and object key in a published package, with its path, except the digests
+    in its digest slots and the addresses in its site map (validated by shape already)."""
+    if isinstance(value, str):
+        if slot not in _PUBLISHED_DIGEST_SLOTS and slot not in _PUBLISHED_DIGEST_LISTS:
+            yield where, value
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            yield f"{where} key", str(key)
+            if where == "$" and key == "site_map":
+                yield from ((f"$.site_map key {name}", str(name)) for name in item)
+                continue
+            yield from _published_strings(item, f"{where}.{key}", str(key))
+    elif isinstance(value, list):
+        for idx, item in enumerate(value):
+            yield from _published_strings(item, f"{where}[{idx}]", slot)
 
 
 def _find_data_file_bytes(entry: Mapping[str, Any], data_root: Path | str,
@@ -3671,7 +3708,14 @@ def _publish_main(args: argparse.Namespace) -> int:
     symbols = load_symbol_map(sidecar) if sidecar.is_file() else {}
     data = args.elf.read_bytes()
     elf = Elf(data, base=int(args.base, 16) if args.base else None)
-    symbols = {**extract_elf_func_symbols(elf), **symbols}
+    # Names come only from the project's own symbol map (a decompilation's, or names the project
+    # chose), never from the executable's symbol table: those are strings copied from the game.
+    game_names = sorted(set(symbols) & set(extract_elf_func_symbols(elf)))
+    if game_names:
+        print(f"publish: FAIL: {len(game_names)} name(s) in {sidecar.name} are the executable's own symbols, "
+              f"such as {game_names[0]!r}; a published package names sites with project-authored names only",
+              file=sys.stderr)
+        return 1
     read_words, read_data = elf_readers(elf)
     notes: list[str] = []
     published = publish_package(

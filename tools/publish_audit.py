@@ -1827,14 +1827,26 @@ def check_enhancement_packages(content_map: dict[str, tuple[bytes | None, str | 
     findings: list[Finding] = []
     for path in sorted(content_map):
         data, read_error = content_map[path]
-        if read_error or data is None or not path.endswith(".json"):
-            continue
         name = PurePosixPath(path).name
+        lower = name.lower()
         in_dir = path.startswith(PUBLISHED_PACKAGE_DIR)
-        if name.endswith(".symbols.json"):
+        if lower.endswith(".symbols.json"):
             findings.append(Finding(
                 "ENHANCEMENT_SYMBOL_MAP", path,
                 "a package's private symbol map is never published; a published package carries its own site_map"))
+            continue
+        # The folder holds published packages and nothing else, whatever a file's extension.
+        if in_dir and ("/" in path[len(PUBLISHED_PACKAGE_DIR):] or not _PUBLISHED_PACKAGE_NAME.match(name)):
+            findings.append(Finding(
+                "ENHANCEMENT_PACKAGE_NAME", path,
+                f"{PUBLISHED_PACKAGE_DIR} holds only published packages, each named <disc id, lowercase>-<kind>.json "
+                "(for example ucus12345-60hz.json)"))
+            continue
+        if read_error or data is None:
+            if in_dir:
+                findings.append(Finding("ENHANCEMENT_PACKAGE_UNREADABLE", path, f"cannot be read: {read_error}"))
+            continue
+        if not lower.endswith(".json"):
             continue
         if not in_dir and not any(marker in data for marker in _PACKAGE_MARKERS):
             continue
@@ -1851,10 +1863,6 @@ def check_enhancement_packages(content_map: dict[str, tuple[bytes | None, str | 
                     "ENHANCEMENT_PACKAGE_OUTSIDE_DIR", path,
                     f"an enhancement package is public only as a published package under {PUBLISHED_PACKAGE_DIR}"))
             continue
-        if not _PUBLISHED_PACKAGE_NAME.match(name):
-            findings.append(Finding(
-                "ENHANCEMENT_PACKAGE_NAME", path,
-                "a published package is named <disc id, lowercase>-<kind>.json, for example ucus12345-60hz.json"))
         for problem in enhancement_package.published_package_findings(document):
             findings.append(Finding("ENHANCEMENT_PACKAGE_GAME_BYTES", path, problem))
         if (isinstance(document, dict) and isinstance(document.get("disc_id"), str)

@@ -2369,7 +2369,7 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
             with self.subTest(code):
                 with self.assertRaisesRegex(self.nk_cli.PackageBuildError, rf"refused \({code}\)") as ctx:
                     self._select_published(**kwargs)
-                self.assertIn("stays authentic", str(ctx.exception))
+                self.assertIn("Nothing was built", str(ctx.exception))
         # The disc is named before the title: another region's disc is other_disc, not a title mismatch.
         with self.assertRaisesRegex(self.nk_cli.PackageBuildError, r"refused \(other_disc\)"):
             self._select_published("ULES99999", "1.01", target_title_id="other-title")
@@ -3866,6 +3866,18 @@ class TestPublishedPackages(_SynthTimingElfFixture):
         values = copy.deepcopy(published)
         values["sites"][1]["stock_values"] = [30]
         cases["stock values"] = (values, "values read from the game")
+        not_store = copy.deepcopy(published)
+        not_store["sites"][0]["stock_value_digests"] = ["d" * 64]   # vblank_wait_2_to_1 stores nothing
+        cases["value digests on a site that stores nothing"] = (not_store, "belongs only to a store site")
+        address = site_map["synth_timer_duration"]
+        other_suffix = json.loads(json.dumps(published).replace(
+            '"synth_timer_duration"', '"synth_fn_%08x"' % (int(address, 16) + 4)))
+        cases["name ending in another address"] = (other_suffix, "ends in an address other than its own")
+        cases["build metadata"] = (broken(version="1.0.0+build"), "no build metadata")
+        cases["long pre-release"] = (broken(version="1.0.0-" + "p" * 17), "no build metadata")
+        long_reason = copy.deepcopy(published)
+        long_reason["rng_policy"]["reason"] = ("Same odds per second. " * 50).strip()
+        cases["long reason"] = (long_reason, "at most 1024 characters")
         for label, (data, message) in cases.items():
             with self.subTest(label):
                 with self.assertRaisesRegex(EnhancementPackageError, message):
@@ -3913,6 +3925,95 @@ class TestPublishedPackages(_SynthTimingElfFixture):
         # The package schema is not a package.
         schema = {"assets/enhancement_package.schema.json": (SCHEMA_PATH.read_bytes(), None)}
         self.assertEqual(publish_audit.check_enhancement_packages(schema), [])
+
+    def test_publication_gate_checks_every_string_and_every_file_in_the_folder(self) -> None:
+        import publish_audit
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            elf_bytes = _write_synthetic_mips_elf(Path(tmp_dir) / "synth.elf", self.words, self.entry)
+            published = self._publish(elf_bytes)
+        good = "assets/enhancements/ulus99999-60hz.json"
+
+        def encode(data: Any) -> tuple[bytes, None]:
+            return json.dumps(data, indent=2).encode("utf-8") + b"\n", None
+
+        def with_field(path: tuple[str | int, ...], value: Any) -> dict[str, Any]:
+            data = copy.deepcopy(published)
+            node: Any = data
+            for part in path[:-1]:
+                node = node[part]
+            node[path[-1]] = value
+            return data
+
+        def renamed(name: str) -> dict[str, Any]:
+            # Every use of one function name, the site map's key included.
+            text = json.dumps(published).replace('"synth_timer_duration"', json.dumps(name))
+            data: dict[str, Any] = json.loads(text)
+            return data
+
+        hexes = "0123456789abcdef" * 8
+        cases: dict[str, dict[str, Any]] = {
+            "version build metadata": with_field(("version",), "1.0.0+" + hexes * 32),
+            "version pre-release": with_field(("version",), "1.0.0-" + hexes[:64]),
+            "package id": with_field(("id",), "p" + hexes[:63]),
+            "game version": with_field(("game_version",), "v" + hexes[:31]),
+            "site id": with_field(("sites", 0, "id"), "s" + hexes[:63]),
+            "long function name": renamed("f" + hexes[:126]),
+            "function name stem": renamed("fn_" + hexes[:64]),
+            "nine hex digits in a name": renamed("synth_" + hexes[:9]),
+            "base64 run": with_field(("display_name",), "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY"),
+            "escaped byte": with_field(("rng_policy", "reason"), "Same odds: \\x1e per update."),
+        }
+        for label, data in cases.items():
+            with self.subTest(label):
+                codes = [f.code for f in publish_audit.check_enhancement_packages({good: encode(data)})]
+                self.assertIn("ENHANCEMENT_PACKAGE_GAME_BYTES", codes)
+        # Eight hex digits (one word or address, as the site map publishes) are not a finding.
+        own = "synth_fn_" + published["site_map"]["synth_timer_duration"][2:]
+        self.assertEqual(publish_audit.check_enhancement_packages({good: encode(renamed(own))}), [])
+
+        # The folder holds published packages only, whatever a file's extension.
+        files = {
+            "upper-case extension": ("assets/enhancements/ulus99999-60hz.JSON", encode(published)),
+            "binary blob": ("assets/enhancements/blob.bin", (bytes(range(256)), None)),
+            "second extension": ("assets/enhancements/ulus99999-60hz.json.txt", encode(published)),
+            "subfolder": ("assets/enhancements/old/ulus99999-60hz.json", encode(published)),
+            "unreadable": (good, (None, "permission denied")),
+        }
+        for label, (path, content) in files.items():
+            with self.subTest(label):
+                findings = publish_audit.check_enhancement_packages({path: content})
+                self.assertTrue(findings)
+                self.assertTrue(all(f.code in ("ENHANCEMENT_PACKAGE_NAME", "ENHANCEMENT_PACKAGE_UNREADABLE")
+                                    for f in findings), findings)
+
+    def test_publish_refuses_names_from_the_executables_symbol_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_path = tmp / "synth.elf"
+            elf_bytes = _write_synthetic_mips_elf(elf_path, self.words, self.entry)
+            private, symbols = self._make_package_and_symbols(elf_bytes)
+            priv_path = tmp / "synth-60hz.json"
+            priv_path.write_text(json.dumps(private), encoding="utf-8")
+            priv_path.with_suffix(".symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+            out = tmp / "ulus99999-60hz.json"
+            args = ["--publish", str(priv_path), "--elf", str(elf_path), "--base", "0",
+                    "--disc-id", self.DISC, "--disc-version", self.VERSION, "--out", str(out)]
+            # A synthetic symbol table that holds one of the package's names: a string from the game.
+            game_symbols = {"synth_timer_duration": int(symbols["synth_timer_duration"], 16), "other": 0x1000}
+            err = StringIO()
+            with mock.patch.object(enhancement_package, "extract_elf_func_symbols", return_value=game_symbols), \
+                    mock.patch("sys.stderr", new=err), mock.patch("sys.stdout", new=StringIO()):
+                rc = enhancement_package.main(args)
+            self.assertEqual(rc, 1)
+            self.assertIn("the executable's own symbols", err.getvalue())
+            self.assertFalse(out.exists())
+            # The names resolve only through the project's map: without it, nothing is published.
+            priv_path.with_suffix(".symbols.json").unlink()
+            with mock.patch.object(enhancement_package, "extract_elf_func_symbols", return_value=game_symbols), \
+                    mock.patch("sys.stderr", new=StringIO()), mock.patch("sys.stdout", new=StringIO()):
+                self.assertNotEqual(enhancement_package.main(args), 0)
+            self.assertFalse(out.exists())
 
 
 if __name__ == "__main__":

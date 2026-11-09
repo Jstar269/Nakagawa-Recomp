@@ -555,5 +555,25 @@
     "site_map": [
       "published_package"
     ]
+  },
+  "if": {
+    "required": [
+      "published_package"
+    ]
+  },
+  "then": {
+    "description": "A published package (docs/ENHANCEMENT_CONTRACT.md section 5.1) keeps its text short: a version without build metadata, and a bounded rng_policy reason. The publication audit also refuses an address, a run of more than 8 hex digits, a base64-like run or an escaped byte in any string outside the digest slots and site-map addresses.",
+    "properties": {
+      "version": {
+        "pattern": "^(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})(?:-[0-9A-Za-z]{1,16}(?:\\.[0-9A-Za-z]{1,16})?)?$"
+      },
+      "rng_policy": {
+        "properties": {
+          "reason": {
+            "maxLength": 1024
+          }
+        }
+      }
+    }
   }
 }

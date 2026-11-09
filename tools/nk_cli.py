@@ -2478,7 +2478,7 @@ def _check_published_package_disc(package: Mapping[str, Any], sfo_disc_id: str |
     """Refuse a published package for another disc, revision or a modified executable, by name."""
     def refuse(code: str, message: str) -> NoReturn:
         raise PackageBuildError(f"Enhancement package refused ({code}): {message}. "
-                                "The build stays authentic.")
+                                "Nothing was built; the authentic package is unchanged.")
 
     if not sfo_disc_id or not disc_version:
         raise PackageBuildError("Enhancement package refused: a published package needs the disc's "
