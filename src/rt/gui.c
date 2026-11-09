@@ -39,6 +39,7 @@
 #include "gpu_sdl3vk/ace_smooth.h" /* Ace Mode's in-between frames */
 #include "gpu_sdl3vk/ace_hud.h"    /* ... and the HUD mask and depth they read */
 #include "gpu_sdl3vk/fsr1_pass.h"  /* the presentation upscaler (SR_PRESENT_UPSCALE) */
+#include "gpu_sdl3vk/anime4k_pass.h" /* the movie upscaler (SR_MOVIE_UPSCALE) */
 #endif
 #if defined(SR_SDL3VK) && !defined(SR_GUI_PRESENT_SELFTEST)
 #include "nk_ui_theme.h"         /* the pause overlay's scrim token */
@@ -98,6 +99,17 @@ static Fsr1Pass *s_fsr1;               /* the presentation upscaler, when SR_PRE
 static Fsr1Pass *s_fsr1_rec;           /* its own instance for the recording (#2138), made at the
                                           first recorded present */
 static int s_fsr1_rec_failed;          /* that instance could not be made: said once, not retried */
+/* The movie upscaler (SR_MOVIE_UPSCALE) for CPU-presented frames: Anime4K's CNN stages, then FSR 1 to
+ * the exact size. The window and the recording each own a set, as for the presentation upscaler. */
+typedef struct {
+    Anime4kPass *anime4k;
+    Fsr1Pass *fsr1;
+    int failed;                        /* the set could not be made: said once, not retried */
+    unsigned long long presents;       /* presents it made, said at shutdown */
+    unsigned long long anime4k_presents;  /* of those, the ones Anime4K's stages made */
+} MovieUpscale;
+static int s_movie_mode;               /* MOVIE_UPSCALE_* */
+static MovieUpscale s_movie, s_movie_rec;
 #endif
 static int      s_offscreen = 0;        /* explicit host-memory presenter for headless bring-up */
 static uint32_t s_buttons = 0;
@@ -299,6 +311,31 @@ static int present_slot_due_at(uint64_t now) {
 static int present_slot_due(void) {
     return present_slot_due_at(SDL_GetTicksNS());
 }
+
+#ifdef SR_SDL3VK
+/* Whether a game-frame present may return DISPLAY_BUSY instead of waiting for the display
+ * (sdl3vk_set_present_nowait). Only while the scheduler paces the guest to real time: a
+ * deterministic-clock or turbo run has no real-time clock to protect and keeps every frame. And
+ * never for a frame an armed file or evidence capture is waiting for (SR_FBDUMP, SR_FBSNAP, the
+ * capture tools): that frame waits and is served, as before. The picture probe is not such a
+ * capture; a probe on a frame the display could not take resolves as nothing attempted. */
+static int gui_frame_may_skip_busy_display(int paced, int capture_armed, int capture_is_probe) {
+    return paced && !(capture_armed && !capture_is_probe);
+}
+
+/* What gui_present does with gegpu_present's result. Only TRY_CPU reaches the CPU path, which
+ * converts guest VRAM: a frame the display was too busy to take is not shown at all, never
+ * redrawn from guest memory the GPU frame may not have reached. */
+enum { GUI_GPU_SHOWN, GUI_GPU_CLOSED, GUI_GPU_NOT_SHOWN, GUI_GPU_TRY_CPU };
+static int gui_gpu_result_action(int res) {
+    switch (res) {
+    case GEGPU_PRESENT_SHOWN:        return GUI_GPU_SHOWN;
+    case GEGPU_PRESENT_WINDOW_CLOSED: return GUI_GPU_CLOSED;
+    case GEGPU_PRESENT_DISPLAY_BUSY: return GUI_GPU_NOT_SHOWN;
+    default:                         return GUI_GPU_TRY_CPU;   /* NOT_RESIDENT, TARGET_FAILED */
+    }
+}
+#endif
 
 #ifdef SR_SDL3VK
 /* The window's keys and typed text go to the in-window keyboard while it is open. The text
@@ -609,21 +646,27 @@ static void gui_wide_init(void) {
     }
     s_wide_on = 1;
     ace_confirm(ACE_FEATURE_WIDE);
+    ge_wide_set_cull(effective->cull);
+}
+
+static void gui_cull_sync(void) {
+    /* Confirmed only while no matrix was left alone; a full table is a partial run (contract 11.3.6). */
+    ace_set_cull_untracked(ge_wide_cull_untracked());
+    if (ge_wide_cull_untracked())
+        ace_feature_unavailable(ACE_FEATURE_CULL,
+                                "partial: the 4096-matrix table filled, later matrices were left alone");
+    else if (ge_wide_cull_calls())
+        ace_confirm(ACE_FEATURE_CULL);   /* the title's hook has run */
 }
 
 static void gui_wide_release(void) {
+    gui_cull_sync();
     if (s_wide_on) (void)ge_wide_set_wing(0);
+    ge_wide_set_cull(0);
     s_wide_on = 0;
 }
 
 static unsigned long long s_fsr1_presents;  /* presents the upscaler made, said at shutdown */
-
-static void *gui_upscale_pass(void *cmd, void *src, int w, int h, int out_w, int out_h) {
-    VkImage out = fsr1_record(s_fsr1, (VkCommandBuffer)cmd, (VkImage)src, w, h, out_w, out_h,
-                              FSR1_SHARPNESS_DEFAULT);
-    if (out) s_fsr1_presents++;
-    return (void *)out;
-}
 
 /* An FSR 1 pass on the presenter's device, or NULL with the reason in error. */
 static Fsr1Pass *gui_fsr1_make(char *error, size_t error_size) {
@@ -643,12 +686,108 @@ static Fsr1Pass *gui_fsr1_make(char *error, size_t error_size) {
     return fsr1_create(&init, error, error_size);
 }
 
+/* An Anime4K pass on the presenter's device, or NULL with the reason in error. */
+static Anime4kPass *gui_anime4k_make(char *error, size_t error_size) {
+    Sdl3VkInfo vi;
+    memset(&vi, 0, sizeof(vi));
+    if (!sdl3vk_get_vk(&vi) || !vi.get_instance_proc_addr) {
+        snprintf(error, error_size, "no Vulkan device");
+        return NULL;
+    }
+    Anime4kInit init;
+    memset(&init, 0, sizeof(init));
+    init.get_instance_proc_addr = (PFN_vkGetInstanceProcAddr)vi.get_instance_proc_addr;
+    init.instance = (VkInstance)vi.instance;
+    init.physical_device = (VkPhysicalDevice)vi.physical;
+    init.device = (VkDevice)vi.device;
+    init.queue_family = vi.queue_family;
+    return anime4k_create(&init, error, error_size);
+}
+
+/* Makes a movie set's passes, once. Said when one is missing; the set works with the other. */
+static int gui_movie_make(MovieUpscale *m, const char *where) {
+    if (m->anime4k || m->fsr1) return 1;
+    if (m->failed) return 0;
+    char error[160] = "";
+    if (s_movie_mode == MOVIE_UPSCALE_ANIME4K) {
+        m->anime4k = gui_anime4k_make(error, sizeof(error));
+        if (!m->anime4k)
+            fprintf(stderr, "sdl3vk: Anime4K is unavailable for %s (%s); its movies use FSR 1\n", where,
+                    error[0] ? error : "unknown");
+    }
+    error[0] = '\0';
+    m->fsr1 = gui_fsr1_make(error, sizeof(error));
+    if (!m->fsr1 && !m->anime4k) {
+        m->failed = 1;
+        fprintf(stderr, "sdl3vk: movie upscaling is unavailable for %s (%s)\n", where,
+                error[0] ? error : "unknown");
+        return 0;
+    }
+    return 1;
+}
+
+/* A CPU-presented frame under SR_MOVIE_UPSCALE: Anime4K's 2x stages while the picture is well below
+ * its place (anime4k), then FSR 1 to the exact size; FSR 1 alone for fsr1, or when Anime4K is
+ * unavailable. NULL leaves the frame to the presentation upscaler or the scaling. */
+static VkImage gui_movie_record(MovieUpscale *m, VkCommandBuffer cmd, VkImage src, int w, int h,
+                                int out_w, int out_h, int *anime4k) {
+    VkImage in = src;
+    int iw = w, ih = h;
+    if (m->anime4k) {
+        int stages = anime4k_stages_for(w, h, out_w, out_h);
+        VkImage doubled = stages ? anime4k_record(m->anime4k, cmd, src, w, h, stages) : VK_NULL_HANDLE;
+        if (doubled) {
+            in = doubled;
+            iw = w << stages;
+            ih = h << stages;
+        }
+    }
+    VkImage out = in;
+    if (in == src || iw != out_w || ih != out_h) {
+        /* FSR 1 takes the picture to the exact size, unless Anime4K's doubling already is it. */
+        if (!m->fsr1) return VK_NULL_HANDLE;
+        out = fsr1_record(m->fsr1, cmd, in, iw, ih, out_w, out_h, FSR1_SHARPNESS_DEFAULT);
+    }
+    if (out && in != src) {
+        m->anime4k_presents++;
+        if (anime4k) *anime4k = 1;
+    }
+    return out;
+}
+
+static void *gui_upscale_pass(void *cmd, void *src, int w, int h, int out_w, int out_h, int cpu_frame,
+                              int *anime4k) {
+    if (cpu_frame && s_movie_mode != MOVIE_UPSCALE_OFF) {
+        VkImage movie = gui_movie_record(&s_movie, (VkCommandBuffer)cmd, (VkImage)src, w, h, out_w, out_h,
+                                         anime4k);
+        if (movie) {
+            s_movie.presents++;
+            return (void *)movie;
+        }
+    }
+    if (!s_fsr1) return NULL;
+    VkImage out = fsr1_record(s_fsr1, (VkCommandBuffer)cmd, (VkImage)src, w, h, out_w, out_h,
+                              FSR1_SHARPNESS_DEFAULT);
+    if (out) s_fsr1_presents++;
+    return (void *)out;
+}
+
 static unsigned long long s_fsr1_rec_presents;  /* recorded presents the upscaler made */
 
 /* The recording's upscale (sdl3vk_set_record_upscale_pass): its own pass, so the window's size and
  * the recording's never make one rebuild its images for the other. Without it the recording is
  * scaled as SR_PRESENT_SCALING says, and record.json names the blits that made it. */
-static void *gui_record_upscale_pass(void *cmd, void *src, int w, int h, int out_w, int out_h) {
+static void *gui_record_upscale_pass(void *cmd, void *src, int w, int h, int out_w, int out_h,
+                                     int cpu_frame, int *anime4k) {
+    if (cpu_frame && s_movie_mode != MOVIE_UPSCALE_OFF && gui_movie_make(&s_movie_rec, "the recording")) {
+        VkImage movie = gui_movie_record(&s_movie_rec, (VkCommandBuffer)cmd, (VkImage)src, w, h, out_w,
+                                         out_h, anime4k);
+        if (movie) {
+            s_movie_rec.presents++;
+            return (void *)movie;
+        }
+    }
+    if (!s_fsr1 && !s_fsr1_rec) return NULL;
     if (!s_fsr1_rec && !s_fsr1_rec_failed) {
         char error[160] = "";
         s_fsr1_rec = gui_fsr1_make(error, sizeof(error));
@@ -666,42 +805,77 @@ static void *gui_record_upscale_pass(void *cmd, void *src, int w, int h, int out
     return (void *)out;
 }
 
-/* SR_PRESENT_UPSCALE=fsr1: AMD FSR 1 (EASU + RCAS) scales the shown picture to the window. It is
- * presentation only: the guest's frame, guest VRAM and captures are untouched. Off by default. */
+/* SR_PRESENT_UPSCALE=fsr1: AMD FSR 1 (EASU + RCAS) scales the shown picture to the window.
+ * SR_MOVIE_UPSCALE=fsr1|anime4k: CPU-presented frames (decoded movies) get their own upscaler,
+ * Anime4K's CNN stages then FSR 1, whatever SR_PRESENT_UPSCALE says. Both are presentation only:
+ * the guest's frame, the decoded movie, guest VRAM and captures are untouched. Both are off by
+ * default. */
 static void gui_upscale_init(void) {
     const char *value = getenv("SR_PRESENT_UPSCALE");
     int mode = fsr1_parse_mode(value);
     if (mode < 0)
         fprintf(stderr, "sdl3vk: unknown SR_PRESENT_UPSCALE '%s' (off or fsr1); upscaling stays off\n",
                 value);
-    if (mode != 1) return;
-    char error[160] = "";
-    s_fsr1 = gui_fsr1_make(error, sizeof(error));
-    if (!s_fsr1) {
-        fprintf(stderr, "sdl3vk: FSR 1 upscaling is unavailable (%s); the window scales as before\n",
-                error[0] ? error : "no Vulkan device");
-        return;
+    const char *movie = getenv("SR_MOVIE_UPSCALE");
+    s_movie_mode = anime4k_parse_movie_mode(movie);
+    if (s_movie_mode < 0) {
+        fprintf(stderr, "sdl3vk: unknown SR_MOVIE_UPSCALE '%s' (off, fsr1 or anime4k); movie upscaling "
+                "stays off\n", movie);
+        s_movie_mode = MOVIE_UPSCALE_OFF;
     }
+    if (mode != 1 && s_movie_mode == MOVIE_UPSCALE_OFF) return;
+    char error[160] = "";
+    if (mode == 1) {
+        s_fsr1 = gui_fsr1_make(error, sizeof(error));
+        if (!s_fsr1)
+            fprintf(stderr, "sdl3vk: FSR 1 upscaling is unavailable (%s); the window scales as before\n",
+                    error[0] ? error : "no Vulkan device");
+    }
+    if (s_movie_mode != MOVIE_UPSCALE_OFF && !gui_movie_make(&s_movie, "the window"))
+        s_movie_mode = MOVIE_UPSCALE_OFF;
+    if (!s_fsr1 && s_movie_mode == MOVIE_UPSCALE_OFF) return;
     sdl3vk_set_upscale_pass(gui_upscale_pass);
     /* A recording (SR_VIDEOREC_DIR) is enlarged the same way, at its own size (#2138). */
     sdl3vk_set_record_upscale_pass(gui_record_upscale_pass);
     /* Stamped like Ace Mode: the window is not the authentic picture (captures still are). */
-    sr_flight_set_present_upscale("fsr1");
-    fprintf(stderr, "ACE_MODE: present upscale fsr1 (the window and its recording; captures hold "
-                    "the guest's frame)\n");
+    /* The stamp names what runs: a movie upscaler asked for Anime4K but made without it is FSR 1. The
+     * longest is "fsr1+movie-anime4k"; flight_recorder.c's buffer is sized for it. */
+    const char *stamp = s_fsr1 ? (s_movie_mode == MOVIE_UPSCALE_OFF ? "fsr1"
+                                  : s_movie.anime4k ? "fsr1+movie-anime4k" : "fsr1+movie-fsr1")
+                               : (s_movie.anime4k ? "movie-anime4k" : "movie-fsr1");
+    sr_flight_set_present_upscale(stamp);
+    fprintf(stderr, "ACE_MODE: present upscale %s (the window and its recording; captures hold "
+                    "the guest's frame)\n", stamp);
     /* In the boot events too, so tools/boot_gate.py sees it when stderr was silenced. */
-    sr_gui_boot_event("BOOT_EVENT phase=present_upscale mode=fsr1");
-    fprintf(stderr, "sdl3vk: FSR 1 upscaling on (EASU + RCAS, presentation only)\n");
+    sr_gui_boot_event("BOOT_EVENT phase=present_upscale mode=%s", stamp);
+    if (s_fsr1) fprintf(stderr, "sdl3vk: FSR 1 upscaling on (EASU + RCAS, presentation only)\n");
+    if (s_movie_mode != MOVIE_UPSCALE_OFF)
+        fprintf(stderr, "sdl3vk: movie upscaling on (%s, presentation only)\n",
+                s_movie.anime4k ? "Anime4K CNN x2 + FSR 1" : "FSR 1");
+}
+
+static void gui_movie_release(MovieUpscale *m, const char *what) {
+    if (m->presents)
+        fprintf(stderr, "sdl3vk: the movie upscaler made %llu %spresents, %llu through Anime4K\n",
+                m->presents, what, m->anime4k_presents);
+    anime4k_destroy(m->anime4k);
+    fsr1_destroy(m->fsr1);
+    memset(m, 0, sizeof(*m));
 }
 
 static void gui_upscale_release(void) {
-    if (s_fsr1) {
+    if (s_fsr1 || s_movie_mode != MOVIE_UPSCALE_OFF) {
         sdl3vk_set_upscale_pass(NULL);
         sdl3vk_set_record_upscale_pass(NULL);
+    }
+    if (s_fsr1) {
         fprintf(stderr, "sdl3vk: FSR 1 upscaled %llu presents\n", s_fsr1_presents);
         if (s_fsr1_rec)
             fprintf(stderr, "sdl3vk: FSR 1 upscaled %llu recorded presents\n", s_fsr1_rec_presents);
     }
+    gui_movie_release(&s_movie, "");
+    gui_movie_release(&s_movie_rec, "recorded ");
+    s_movie_mode = MOVIE_UPSCALE_OFF;
     fsr1_destroy(s_fsr1_rec);
     s_fsr1_rec = NULL;
     s_fsr1_rec_failed = 0;
@@ -1035,6 +1209,7 @@ static void gui_wide_update(uint32_t fbaddr) {
     int w = 0, h = 0;
     if (!s_wide_on) return;
     if (sdl3vk_window_pixel_size(&w, &h)) (void)ge_wide_set_wing(ge_wide_wing_for(w, h));
+    gui_cull_sync();
     ge_wide_note_display(fbaddr);
 }
 
@@ -1256,6 +1431,14 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
          *    directly from its Vulkan image. GEGPU_PRESENT_SHOWN skips the CPU path;
          *    GEGPU_PRESENT_NOT_RESIDENT (CPU movie frames etc.) falls through to BGRA. */
         accepted = 0;
+        /* While the scheduler paces the guest to real time (the default), a game frame never
+         * waits for the display: a FIFO (VSync) swapchain that still holds every image returns
+         * DISPLAY_BUSY instead of holding back the guest's VBLANK clock (gui_frame_may_skip_busy_display). */
+        {
+            extern int sched_vbl_paced(void);
+            sdl3vk_set_present_nowait(gui_frame_may_skip_busy_display(sched_vbl_paced(), sr_capture_is_armed(),
+                                                         sr_capture_pending_is_probe()));
+        }
         /* While the on-screen keyboard is open the frame must pass through the host copy the
          * keyboard is drawn on, so the GPU fast path steps aside (the CPU path below). The
          * decision is taken once: osk_open also gates the guest-VRAM sync before that copy. */
@@ -1275,11 +1458,11 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
 #endif
         int res = osk_cpu ? GEGPU_PRESENT_NOT_RESIDENT : gegpu_present(fbaddr, fmt, stride);
         sync_sdl_input();
-        if (res == GEGPU_PRESENT_WINDOW_CLOSED) {
-            gui_quit_request();
-            goto pace;
-        }
-        if (res == GEGPU_PRESENT_SHOWN) {
+        const int gpu_action = gui_gpu_result_action(res);
+        if (gpu_action == GUI_GPU_CLOSED) gui_quit_request();
+        /* Not shown, not failed: the CPU path must not show it either. */
+        if (gpu_action == GUI_GPU_NOT_SHOWN && sr_perf_enabled) sr_perf_present_busy();
+        if (gpu_action == GUI_GPU_SHOWN) {
             /* The GPU fast path never reaches convert_fb, which is the only emitter of
              * the first_frame boot milestone. Without this, boot_gate.py can never pass
              * on the default renderer even while the GPU presents every frame. There is
@@ -1292,8 +1475,8 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
                 sr_gui_boot_event("BOOT_EVENT phase=first_frame source=gpu presented=1");
             }
             accepted = 1;
-            goto pace;
         }
+        if (gpu_action != GUI_GPU_TRY_CPU) goto pace;
 
         /* 2. CPU-rendered fallback: convert guest VRAM to BGRA and blit through SDL3/Vulkan. */
         if (osk_cpu) {
@@ -1354,6 +1537,7 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
         present_result = sdl3vk_present_rgba(s_px);
         sync_sdl_input();
         if (present_result == 0) gui_quit_request();
+        if (present_result == SDL3VK_PRESENT_DISPLAY_BUSY && sr_perf_enabled) sr_perf_present_busy();
         accepted = present_result == 1;
         goto pace;
     }
@@ -1393,6 +1577,9 @@ pace:
     /* Every Ace run times its presents, so a run without smooth motion is the baseline. */
     if (accepted && g_ace_on) {
         ace_smooth_note_present(s_ace_smooth ? s_ace_present_kind : ACE_PRESENT_REAL, SDL_GetTicksNS());
+        /* An in-between stays on screen until the held frame's VBLANK, so a recording keeps it
+         * for its own VBLANK and writes the held frame at the next (videorec.h). */
+        if (s_ace_smooth && s_ace_present_kind == ACE_PRESENT_BETWEEN) sr_videorec_frame_keep();
     }
 #endif
     if (accepted) {
@@ -2237,6 +2424,22 @@ static void selftest_hold_frame(int result) {
     s_stub_held_result = result;
 }
 
+/* A paced present may skip a busy display, except for a frame an armed file or evidence capture
+ * waits for; an unpaced run always waits. A busy GPU present is not shown and never falls
+ * through to the CPU path, which would redraw it from guest VRAM. */
+static void selftest_display_busy_frames(void) {
+    assert(gui_frame_may_skip_busy_display(1, 0, 0) == 1);
+    assert(gui_frame_may_skip_busy_display(1, 1, 1) == 1);   /* the picture probe */
+    assert(gui_frame_may_skip_busy_display(1, 1, 0) == 0);   /* SR_FBDUMP, SR_FBSNAP, a capture tool */
+    assert(gui_frame_may_skip_busy_display(0, 0, 0) == 0);   /* deterministic clock or turbo */
+    assert(gui_frame_may_skip_busy_display(0, 1, 1) == 0);
+    assert(gui_gpu_result_action(GEGPU_PRESENT_DISPLAY_BUSY) == GUI_GPU_NOT_SHOWN);
+    assert(gui_gpu_result_action(GEGPU_PRESENT_SHOWN) == GUI_GPU_SHOWN);
+    assert(gui_gpu_result_action(GEGPU_PRESENT_WINDOW_CLOSED) == GUI_GPU_CLOSED);
+    assert(gui_gpu_result_action(GEGPU_PRESENT_NOT_RESIDENT) == GUI_GPU_TRY_CPU);
+    assert(gui_gpu_result_action(GEGPU_PRESENT_TARGET_FAILED) == GUI_GPU_TRY_CPU);
+}
+
 /* A press and release that the held present's event read records reach the game's sample in
  * the same VBLANK; the sample then consumes it, as on any other VBLANK. */
 static void selftest_held_present_passes_a_tap_to_the_game(void) {
@@ -2312,6 +2515,7 @@ int main(void) {
     selftest_burst_presents_once();
     selftest_explicit_cap_halves_scanout_flips();
 #ifdef SR_SDL3VK
+    selftest_display_busy_frames();
     selftest_held_present_passes_a_tap_to_the_game();
     selftest_held_present_window_closed_requests_quit();
 #endif

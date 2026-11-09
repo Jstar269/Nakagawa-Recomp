@@ -809,6 +809,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
                 sr_compat_report();
                 (void)sr_videorec_finish_status("SR_FBDUMP found no trustworthy framebuffer", 1);
                 sr_perf_shutdown();
+                sr_profile_dump_final();
                 SR_VERIFY_REPORT_NOW();
                 _Exit(1);
             }
@@ -819,6 +820,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
                 sr_compat_report();
                 (void)sr_videorec_finish_status("SR_FBDUMP capture exit", capture_exit_status);
                 sr_perf_shutdown();
+                sr_profile_dump_final();
                 SR_VERIFY_REPORT_NOW();
                 _Exit(capture_exit_status);
             }
@@ -1117,6 +1119,7 @@ void sr_vblank_tick(void) {
               sr_compat_report();
               (void)sr_videorec_finish_status("SR_WATCHDOG_EXIT", 1);
               sr_perf_shutdown();
+              sr_profile_dump_final();
               SR_VERIFY_REPORT_NOW();
               _Exit(1);
           }
@@ -1196,6 +1199,7 @@ void sr_vblank_tick(void) {
             psmf_av_final("exit_at_vblank");
             sr_compat_report();
             sr_perf_shutdown();
+            sr_profile_dump_final();
             SR_VERIFY_REPORT_NOW();
             hle_state_sample_close();
             /* Ace Mode's exit stamp and report are an atexit hook too (a no-op when off). */
