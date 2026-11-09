@@ -41,6 +41,11 @@
 #define TITLE_ID_STALL_EYEBROW TITLE_ID(0x000036u)
 #define TITLE_ID_STALL_TEXT TITLE_ID(0x000037u)
 #define TITLE_ID_STALL_ACTIONS TITLE_ID(0x000038u)
+#define TITLE_ID_RENDER_NOTICE TITLE_ID(0x000070u)
+#define TITLE_ID_RENDER_HEAD TITLE_ID(0x000071u)
+#define TITLE_ID_RENDER_EYEBROW TITLE_ID(0x000072u)
+#define TITLE_ID_RENDER_PILL TITLE_ID(0x000073u)
+#define TITLE_ID_RENDER_TEXT TITLE_ID(0x000074u)
 #define TITLE_ID_START_CARD TITLE_ID(0x000039u)
 #define TITLE_ID_START_NAME TITLE_ID(0x00003Au)
 #define TITLE_ID_START_TEXT TITLE_ID(0x00003Bu)
@@ -177,7 +182,11 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
     layout.padding_bottom = NK_UI_BODY_PAD_BOTTOM;
     layout.padding_left = gutter;
     layout.padding_right = gutter;
-    layout.scroll = page_scrolls(ui);
+    /* The body always scrolls between the bars (#2245): what a game's page shows varies
+       (the Enhancements card, the disc check, the compatibility notes, the stall notice), so
+       at the design text size it can still be taller than the room, and a body that did not
+       scroll pushed the prompt bar out of the window. A page that fits does not move. */
+    layout.scroll = true;
     if (nk_ui_begin_container(ui, TITLE_ID_BODY, &layout, NULL)) {
         /* Left column: the art and what the package needs. */
         layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(aside), sizing_grow(),
@@ -298,6 +307,30 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                         model->title_index, PLAYER_UI_PRIMARY_NONE);
                     }
                     nk_ui_end_container(ui);
+                }
+                nk_ui_end_container(ui);
+            }
+            /* The render notice (#2151): the slower path the game draws with, as a fact in
+               the brand blue, never a warning colour; Hide keeps it hidden for the session.
+               Never the default focus, which stays on PLAY or STOP GAME. */
+            if (model->render_notice_heading != NULL && model->render_notice_heading[0] != '\0' &&
+                model->render_notice_text != NULL &&
+                nk_ui_card_begin(ui, TITLE_ID_RENDER_NOTICE, sizing_grow(), sizing_fit(),
+                                 NK_UI_SPACE_2)) {
+                row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_3);
+                row.align_y = NK_UI_ALIGN_CENTER;
+                if (nk_ui_begin_container(ui, TITLE_ID_RENDER_HEAD, &row, NULL)) {
+                    nk_ui_eyebrow(ui, TITLE_ID_RENDER_EYEBROW, "Picture");
+                    nk_ui_status_pill(ui, TITLE_ID_RENDER_PILL, "\xE2\x97\x8F",
+                                      model->render_notice_heading, theme->accent_dark);
+                    nk_ui_end_container(ui);
+                }
+                nk_ui_text_role(ui, TITLE_ID_RENDER_TEXT, model->render_notice_text,
+                                NK_UI_TYPE_BODY_S, theme->paper);
+                if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE, "Hide",
+                                 NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
+                    result = action(PLAYER_UI_ACTION_HIDE_RENDER_NOTICE, model->title_index,
+                                    PLAYER_UI_PRIMARY_NONE);
                 }
                 nk_ui_end_container(ui);
             }
@@ -559,26 +592,44 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                 }
                 nk_ui_end_container(ui);
             }
-            /* Report a problem, a link the user's browser opens, and Remove
-               from library (#1304), apart from the play actions: it deletes
-               what Nakagawa built, so it asks first. */
+            /* Add to Steam (#2152), which opens its own dialog; Report a
+               problem, a link the user's browser opens; and Remove from library
+               (#1304), apart from the play actions: it deletes what Nakagawa
+               built, so it asks first. A larger text size wraps the row. */
             bool can_report = title->disc_id != NULL && title->disc_id[0] != '\0';
-            if (can_report || title->can_remove) {
+            if (can_report || title->can_remove || title->can_add_to_steam) {
                 NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                              NK_UI_SPACE_3);
-                if (nk_ui_begin_container(ui, TITLE_ID_REMOVE_ROW, &row, NULL)) {
-                    if (can_report &&
-                        nk_ui_button(ui, PLAYER_UI_ID_TITLE_REPORT, "Report a problem", 0u)) {
-                        result = action(PLAYER_UI_ACTION_REPORT_PROBLEM, model->title_index,
-                                        PLAYER_UI_PRIMARY_NONE);
+                NkUiFlowRow flow;
+                if (nk_ui_flow_begin(ui, &flow, TITLE_ID_REMOVE_ROW, &row,
+                                     width - 2.0f * gutter - NK_UI_DETAIL_GAP - aside)) {
+                    if (title->can_add_to_steam) {
+                        nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Add to Steam", 0u));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_STEAM, "Add to Steam", 0u)) {
+                            result = action(PLAYER_UI_ACTION_ADD_TO_STEAM, model->title_index,
+                                            PLAYER_UI_PRIMARY_NONE);
+                        }
                     }
-                    if (title->can_remove &&
-                        nk_ui_button(ui, PLAYER_UI_ID_TITLE_REMOVE, "Remove from library",
-                                     NK_UI_BUTTON_DANGER)) {
-                        result = action(PLAYER_UI_ACTION_REMOVE_TITLE, model->title_index,
-                                        PLAYER_UI_PRIMARY_NONE);
+                    if (can_report) {
+                        nk_ui_flow_item(ui, &flow,
+                                        nk_ui_button_width(ui, "Report a problem", 0u));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REPORT, "Report a problem",
+                                         0u)) {
+                            result = action(PLAYER_UI_ACTION_REPORT_PROBLEM,
+                                            model->title_index, PLAYER_UI_PRIMARY_NONE);
+                        }
                     }
-                    nk_ui_end_container(ui);
+                    if (title->can_remove) {
+                        nk_ui_flow_item(ui, &flow,
+                                        nk_ui_button_width(ui, "Remove from library",
+                                                           NK_UI_BUTTON_DANGER));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_REMOVE, "Remove from library",
+                                         NK_UI_BUTTON_DANGER)) {
+                            result = action(PLAYER_UI_ACTION_REMOVE_TITLE, model->title_index,
+                                            PLAYER_UI_PRIMARY_NONE);
+                        }
+                    }
+                    nk_ui_flow_end(ui, &flow);
                 }
             }
             nk_ui_end_container(ui);

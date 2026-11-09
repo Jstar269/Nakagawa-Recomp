@@ -144,6 +144,7 @@
     X("SR_HLE_DIAGNOSTICS", "flag-presence", "off", "title_config.c", "When set, enables HLE diagnostics if the title config has a valid diagnostics profile.") \
     X("SR_HOST_TIME_ZONE", "string", "unset (time zone keeps its seed)", "hle.c", "Host time zone as <minutes>,<0|1> (offset and daylight flag); invalid values are ignored with a message.") \
     X("SR_HUD", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c,perf.c", "Enables the developer HUD and performance counters when set to a non-empty value other than 0.") \
+    X("SR_IDENTITY_SEED", "string", "nakagawa-deterministic-profile-v1", "hle.c", "Seed for the synthetic WLAN MAC and OpenPSID of a fresh profile under SR_DETERMINISTIC_CLOCK=1; ignored otherwise.") \
     X("SR_INLOG", "flag-presence", "off", "debug.h,gpu_sdl3vk/sdl3vk.c,hle_input.c", "Logs controller input: published button changes in the SDL backend and HLE input calls.") \
     X("SR_IOLOG", "flag-presence", "off", "debug.h,hle_data.c,hle_io.c", "When set, logs file I/O operations to stderr and enables the file-system debug category.") \
     X("SR_LAUNCHER_DISPLAY_BOUNDS", "list", "unset (primary display)", "gpu_sdl3vk/sdl3vk.c,gui.c", "Display bounds as x,y,w,h used to open the launcher window on a chosen display.") \
@@ -152,6 +153,7 @@
     X("SR_MEMSTICK", "path", "memstick", "hle_thread_selftest.c,vfs_path.h", "Host directory that serves as the guest ms0: memory stick root.") \
     X("SR_MISS_SEEDS", "path", "unset (no file written)", "perf.c", "File to which the run's distinct dispatch-miss targets are written at exit, one guest address per line, for tools/miss_seeds.py.") \
     X("SR_MODULE_DIR", "path", "place_game_here/EXTRACTED/decrypted", "hle_kernel_module.c,hle_thread_selftest.c", "Directory holding the decrypted guest modules the runtime loads.") \
+    X("SR_MOVIE_UPSCALE", "string", "off", "gui.c", "Movie upscaler for CPU-presented frames: off, fsr1 or anime4k (Anime4K CNN x2 stages, then FSR 1); presentation only.") \
     X("SR_MPEGAV", "flag-presence", "off", "hle.c", "Enables MPEG/PSMF audio-video sync logging (also enabled by SR_MPEGLOG).") \
     X("SR_MPEGLOG", "flag-presence", "off", "debug.h,h264_ffmpeg.c,h264_mf.c,hle.c,hle_mpeg.c,mpeg.c", "Enables MPEG and H.264 decoder diagnostic logging in the video and MPEG HLE code.") \
     X("SR_MSGLOG", "flag-presence", "off", "hle_kernel_sync.c", "When set, logs message pipe creation and calls to stderr.") \

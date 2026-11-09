@@ -1370,6 +1370,21 @@ A run that must give the same frames every time (the picture gate, a capture ret
 time the host took. It is not turbo: it does not run a title ahead of its own work. A pad script or
 a capture window alone does not turn it on, so existing routes keep their paced timing.
 
+Under the flag, nothing about the host machine reaches the guest through audio, the Memory Stick or
+the console profile (#2160 to #2163). Each of these answers the same on a headless runner and a
+desktop, and at any host speed:
+
+| What the guest reads | Under `SR_DETERMINISTIC_CLOCK=1` | Without it |
+| --- | --- | --- |
+| Audio queue depth and the waits of `sceAudioOutput*Blocking` | Follow a model that plays 44100 frames a second of guest time from the first push, whether the host has an output device, none, or a mixer that is full or behind. The host mixer only follows: it may drop or pad, never feeds back | The host mixer's depth; no device means open-loop pacing |
+| Host mixer drops | Logged with counts: `audio: host mixer queue is full ...` on the first drop and each time the count doubles, and `AUDIOSTAT_HOST_DROPPED: pushes=<n> frames=<n>` at exit. A host mixer that ran dry logs `audio: host mixer underrun ...` the same way, counted in `underruns=` of `AUDIOSTAT_HOST` | Same |
+| Memory Stick capacity and free space (`sceIoDevctl` `0x02425818`, the savedata size calls) | A fixed, project-chosen (not measured) virtual card: 65536 clusters of 64 sectors of 512 bytes (2 GiB), minus the clusters (32 KiB) the files under the Memory Stick folder occupy. Saves the run writes use space. The host volume is not read | The host volume's size and free space |
+| WLAN MAC address and OpenPSID on fresh user data | Derived from a seed, never random, and not saved: the MAC is unicast with the locally administered bit set (no console's own address is), the OpenPSID is non-zero. The seed is `SR_IDENTITY_SEED`, default `nakagawa-deterministic-profile-v1`. An identity already in the user data is used as it is | Random, saved on first use |
+
+None of these hides a failure: a host disk that really is full still fails the write with a host
+error, and the synthetic identity is never a console's. A console-bound value still comes only from
+the user's own overlay.
+
 `tools/nk_safety.ps1` holds the helpers whose failure modes are silent (bounded wait,
 archive reset, completeness verdict); `tools/test_visual_oracle.py` exercises them against real
 processes and directories.
@@ -2387,7 +2402,9 @@ rebuild its images ([#2138](https://github.com/Jstar269/nakagawa-recomp/issues/2
 `gpu-capture-selftest` checks a 960x544 recording against a separate FSR 1 pass's output, byte for
 byte). As in the window, FSR 1 only enlarges: a recording no larger than the picture uses the
 scaling mode. `record.json` names the scaling that made each picture, not the setting that asked
-for it: `"filter"` is `fsr1`; `sharp` (a nearest prescale to a whole multiple, then a linear
+for it: `"filter"` is `anime4k` for a CPU-presented frame the movie upscaler
+(`SR_MOVIE_UPSCALE=anime4k`) doubled once or twice, then FSR 1 took it to the recording's size unless the
+doubled picture was already that size; `fsr1`; `sharp` (a nearest prescale to a whole multiple, then a linear
 shrink); `nearest` (one nearest-neighbour blit, which is what any mode draws at an exact multiple
 such as 960x544, and what `integer` draws when a multiple fits); `linear` (one linear blit, as
 `bilinear` draws at other sizes and every mode draws when the recording is smaller than the
@@ -2482,3 +2499,11 @@ retail title is private: keep it out of the repository and every upload.
 1. Avoid `SR_DEBUG=0xFF` in production — causes massive stderr output
 2. Use specific categories: `SR_DEBUG=0x02` for HLE tracing only
 3. Set `SR_WATCHDOG_EXIT=N` to abort after N vblanks without a newly presented frame; the firing is a NO-NEW-FLIP observation, so classify it with the display counters, thread dump, and MPEG/PSMF activity the watchdog prints, not the threshold alone
+4. Check how the picture is drawn: before `window_ready`, the runtime writes one
+   `BOOT_EVENT phase=render_path presenter=<vulkan|gdi> ge=<gpu|software> fallback=<none|gdi_presenter|software_ge>`
+   line from what `gui_init` asked for and what started (`nk_render_path_from_init` in
+   `src/core/nk_shared_helpers.c`, #2151). `gdi_presenter` means SDL3/Vulkan did not start and the GDI window shows a
+   software-drawn picture; `software_ge` means `SR_GPU_GE` asked for the GPU renderer and `gegpu_init` failed. A path
+   that was not asked for (`SR_VIDEO=gdi`, `SR_GPU_GE` unset) is `fallback=none`. The native player names a fallback
+   on the game's page, with Hide for the rest of its session. Primitives the GPU renderer hands to the software
+   rasterizer during a frame (`GEGPU_FALLBACK_*`) are not part of this line.

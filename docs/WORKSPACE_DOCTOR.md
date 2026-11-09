@@ -240,7 +240,7 @@ Two boundaries remain, and both fail closed with a named message instead of a my
 
 - a `BUILD_DIR` containing a space cannot be represented by GNU Make, so the Makefile refuses it
   before any recipe runs and names the remedy (a relative `BUILD_DIR`, or `NK_BUILD_ROOT`); see
-  [SETUP.md](SETUP.md#checkout-path-and-build_dir) and #296.
+  [SETUP.md](SETUP.md#checkout-path-and-build_dir).
 - guest input pathnames keep travelling through the process environment rather than through recipe
   text, for the same reason; see [SETUP.md](SETUP.md) and the transport note in the Makefile.
 

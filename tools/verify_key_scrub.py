@@ -51,7 +51,7 @@ from enum import Enum
 try:
     from .nk_core.git_isolation import isolated_git_env
 except ImportError:
-    from nk_core.git_isolation import isolated_git_env
+    from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
 
 GIT_TIMEOUT_SECONDS = 300
 _MAX_STDERR_CHARS = 2000

@@ -52,7 +52,7 @@ def default_policy_path() -> Path:
     return ROOT / "assets" / "public_source_profile.json"
 
 
-#: Generated evidence artifact that must carry the current policy digest.
+#: Generated evidence artifact that must describe the current policy.
 def default_export_path() -> Path:
     return ROOT / "PUBLIC_EXPORT.json"
 
@@ -1286,6 +1286,7 @@ SPDX_BYTE_EXACT_IMPORT_PATHS = frozenset({
     "third_party/clay/clay.h",
     "src/rt/minimp3/minimp3.h",
     "third_party/dr_libs/dr_wav.h",
+    "third_party/anime4k/Anime4K_Upscale_CNN_x2_M.glsl",
     "third_party/portable-snippets/safe-math/safe-math.h",
     "third_party/stb/stb_image.h",
     # Monocypher declares its SPDX line below the 8-line header window.
@@ -1386,6 +1387,15 @@ SPDX_GENERATED_EMBEDDING_SOURCES = {
     "src/rt/gpu_sdl3vk/ace_compose_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_compose.comp",
     "src/rt/gpu_sdl3vk/fsr1_easu_comp.inc": "src/rt/gpu_sdl3vk/shaders/fsr1_easu.comp",
     "src/rt/gpu_sdl3vk/fsr1_rcas_comp.inc": "src/rt/gpu_sdl3vk/shaders/fsr1_rcas.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_0_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_0.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_1_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_1.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_2_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_2.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_3_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_3.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_4_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_4.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_5_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_5.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_6_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_6.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_7_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_7.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_8_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_8.comp",
 }
 
 
@@ -1999,7 +2009,7 @@ def _default_provenance(
 
     # android/ is the Android host target (#360): Gradle, NDK, Java and manifest
     # sources of the same project, admitted like any other path.
-    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1", "nk_manager.ps1"):
+    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1", ".glsl") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1", "nk_manager.ps1"):
         gen_kind = "documentation" if (rel_path.startswith("docs/") or ext == ".md") else ("data" if ext in (".json", ".jsonc", ".dat") else ("script" if ext in (".ps1", ".sh") else "source"))
         return "project_authored", "GPL-2.0-or-later", "NOTICE.md", gen_kind, "included", policy_public
 
@@ -2012,11 +2022,23 @@ def _default_provenance(
 def _export_staleness_findings(
     policy: Policy, export_path: Path | None, repo_root: Path, document: dict | None = None
 ) -> list[Finding]:
-    """The generated export must carry the *current* policy digest.
+    """The generated export must describe the *current* policy decision.
 
     ``PUBLIC_EXPORT.json`` is generated evidence, not policy. If the policy has
     changed since the export was produced, the export describes a decision nobody
     made and must not be trusted.
+
+    Two committed shapes are accepted.  A control that declares
+    ``policy_sha256`` is held to it exactly as before.  A control may instead
+    omit it: the digest is that of the policy blob itself, recomputed here as
+    ``policy.digest``, and committing it makes every two profile-changing pull
+    requests conflict.  Such a control must name ``policy_sha256`` in its
+    ``tree_derived_fields`` and still carries every field the policy decides:
+    the profile, its version and the exclusion globs are compared with the
+    policy below, and ``excluded_paths`` by the export-exclusion check, so a
+    control that a policy change would rewrite is still stale.  The exact
+    ``tree_derived_fields`` list is the attestation verifier's to check.  The policy bytes themselves are bound to the
+    externally trusted policy by ``POLICY_SOURCE_MISMATCH``.
     """
     resolved = export_path or (repo_root / "PUBLIC_EXPORT.json")
     if document is None:
@@ -2029,19 +2051,53 @@ def _export_staleness_findings(
             return [Finding("POLICY_EXPORT_UNREADABLE", str(resolved), f"cannot parse generated export: {error}")]
 
     findings: list[Finding] = []
-    recorded = document.get("policy_sha256") or document.get("profile_sha256")
-    if not recorded:
-        findings.append(Finding("POLICY_EXPORT_STALE", str(resolved),
-                                "generated export records no policy digest"))
-    elif recorded != policy.digest:
+    # The shape is chosen by key presence: an empty, null or non-string digest is
+    # a declared digest that does not match, never an omitted one.
+    digest_key = next((key for key in ("policy_sha256", "profile_sha256") if key in document), None)
+    if digest_key is not None:
+        recorded = document[digest_key]
+        if recorded != policy.digest:
+            shown = f"{recorded[:16]}..." if isinstance(recorded, str) and recorded else repr(recorded)
+            findings.append(Finding(
+                "POLICY_EXPORT_STALE", str(resolved),
+                f"generated export was produced against policy digest {shown} but the current "
+                f"policy digest is {policy.digest[:16]}...; regenerate the export and re-audit"))
+        if document.get("profile") not in (None, policy.name):
+            findings.append(Finding("POLICY_EXPORT_STALE", str(resolved),
+                                    f"generated export names profile {document.get('profile')!r}, "
+                                    f"policy is {policy.name!r}"))
+        return findings
+    derived = document.get("tree_derived_fields")
+    if not isinstance(derived, list) or "policy_sha256" not in derived:
         findings.append(Finding(
             "POLICY_EXPORT_STALE", str(resolved),
-            f"generated export was produced against policy digest {recorded[:16]}... but the current "
-            f"policy digest is {policy.digest[:16]}...; regenerate the export and re-audit"))
-    if document.get("profile") not in (None, policy.name):
-        findings.append(Finding("POLICY_EXPORT_STALE", str(resolved),
-                                f"generated export names profile {document.get('profile')!r}, "
-                                f"policy is {policy.name!r}"))
+            "generated export omits the policy digest but its tree_derived_fields does not name "
+            "policy_sha256; regenerate the export and re-audit"))
+    expected = {
+        "profile": policy.name,
+        "policy_version": policy.profile_version,
+        "excluded_globs": sorted(policy.exclude_globs),
+    }
+    for field, value in expected.items():
+        if field not in document:
+            findings.append(Finding(
+                "POLICY_EXPORT_STALE", str(resolved),
+                f"generated export records neither a policy digest nor the policy-decided field {field!r}; "
+                "regenerate the export and re-audit"))
+            continue
+        recorded_value = document[field]
+        if isinstance(recorded_value, list):
+            if not all(isinstance(item, str) for item in recorded_value):
+                findings.append(Finding(
+                    "POLICY_EXPORT_STALE", str(resolved),
+                    f"generated export field {field!r} is not a list of strings; regenerate the export and re-audit"))
+                continue
+            recorded_value = sorted(recorded_value)
+        if recorded_value != value:
+            findings.append(Finding(
+                "POLICY_EXPORT_STALE", str(resolved),
+                f"generated export field {field!r} differs from the current policy "
+                f"{policy.name!r} (digest {policy.digest[:16]}...); regenerate the export and re-audit"))
     return findings
 
 
@@ -3181,7 +3237,7 @@ def main(argv: list[str] | None = None) -> int:
         "--export",
         type=Path,
         default=None,
-        help="Path to the generated publication export whose policy digest must be current "
+        help="Path to the generated publication export that must describe the current policy "
              "(default: <audit root>/PUBLIC_EXPORT.json)",
     )
     parser.add_argument(
