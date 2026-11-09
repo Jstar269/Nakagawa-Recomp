@@ -789,6 +789,21 @@ float sr_vfpu_log2(float x) { return x; }
 float sr_vfpu_sin(float x) { return x; }
 float sr_vfpu_cos(float x) { return x; }
 float sr_vfpu_exp2(float x) { return x; }
+/* The sum-of-products adder is the real one in recomp.c, which these fixtures do not link.
+ * A plain IEEE chain stands in: the trap tests read which lanes are NaN, not the adder's
+ * rounding. */
+uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n) {
+    float acc = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float fa, fb;
+        memcpy(&fa, &a[i], 4);
+        memcpy(&fb, &b[i], 4);
+        acc += fa * fb;
+    }
+    uint32_t bits;
+    memcpy(&bits, &acc, 4);
+    return bits;
+}
 """
 
 
