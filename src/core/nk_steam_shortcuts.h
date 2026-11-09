@@ -14,12 +14,18 @@
  * downloaded: the entry carries no icon or grid image beyond what the executable has.
  *
  * Rules (each has a test in tests/native/test_steam_shortcuts.c):
- *   - The file is only ever added to. The new entry is inserted before the end of "shortcuts"
- *     and every other byte, every entry Nakagawa did not write, stays byte for byte.
+ *   - A shortcut is its executable and its launch options together: the player is one
+ *     executable, and each game's shortcut starts it with that game's launch options.
+ *   - A new entry is inserted before the end of "shortcuts" and every other byte stays byte
+ *     for byte. The one entry ever changed is this shortcut's own from an earlier Nakagawa
+ *     folder: the same non-empty launch options and the same executable name in another
+ *     folder (each update unpacks into a new folder). Only its "exe" and "StartDir" values
+ *     change; its app ID, name, play time and tags stay, so nothing is duplicated.
  *   - A file that does not parse as the layout above is NK_STEAM_ERR_CORRUPT and is left alone,
  *     with no backup and no temporary file. The parser reads untrusted bytes: every read is
  *     bounds-checked, nesting is capped and sizes are capped.
- *   - An entry whose executable is already listed is NK_STEAM_ERR_EXISTS: nothing is written.
+ *   - An entry with this executable and these launch options is NK_STEAM_ERR_EXISTS: nothing
+ *     is written.
  *   - Steam rewrites this file when it exits, so while Steam runs nothing is written
  *     (NK_STEAM_ERR_STEAM_RUNNING). Nakagawa never ends Steam.
  *   - Before a write the file is copied to `shortcuts.vdf.nakagawa-backup-<stamp>` and the copy
@@ -58,6 +64,13 @@ typedef enum {
 /* A stable name for a status, for logs and cards (never NULL). */
 const char *nk_steam_status_name(NkSteamStatus status);
 
+/* What a successful add did. */
+typedef enum {
+    NK_STEAM_CHANGE_NONE = 0,
+    NK_STEAM_CHANGE_ADDED,    /* a new entry */
+    NK_STEAM_CHANGE_UPDATED   /* this shortcut's entry from another folder now points here */
+} NkSteamChange;
+
 #define NK_STEAM_VDF_MAX_BYTES (16u * 1024u * 1024u)
 #define NK_STEAM_FIELD_MAX 4096u
 #define NK_STEAM_ACCOUNT_CAP 16u
@@ -74,10 +87,11 @@ typedef struct {
 uint32_t nk_steam_shortcut_app_id(const char *exe, const char *app_name);
 
 /* The pure edit: `in` is the current shortcuts.vdf (NULL and 0 for no file), `*out` is a new
- * buffer holding it with the entry added, released with nk_steam_free. On any status other than
- * NK_STEAM_OK, *out is NULL. The result is parsed again before it is returned. */
+ * buffer holding it with the entry added or updated, released with nk_steam_free, and `*change`
+ * (optional) says which. On any status other than NK_STEAM_OK, *out is NULL and *change NONE.
+ * The result is parsed again, and must hold the shortcut, before it is returned. */
 NkSteamStatus nk_steam_vdf_add(const uint8_t *in, size_t in_len, const NkSteamShortcut *shortcut,
-                               uint8_t **out, size_t *out_len);
+                               uint8_t **out, size_t *out_len, NkSteamChange *change);
 void nk_steam_free(void *buffer);
 
 /* Whether `in` lists an entry with this executable (compared without case, quotes ignored).
@@ -88,10 +102,10 @@ NkSteamStatus nk_steam_vdf_has_exe(const uint8_t *in, size_t in_len, const char 
  * missing and the file is created when absent). `steam_running` is the caller's answer to
  * "is Steam running"; true refuses. `stamp` is the backup suffix, 1 to 32 of [0-9A-Za-z-]
  * (the caller passes YYYYMMDD-HHMMSS). `backup_path` (optional) receives the backup's path, or
- * "" when there was no file to back up. */
+ * "" when there was no file to back up. `change` (optional) says what was written. */
 NkSteamStatus nk_steam_add_to_file(const char *vdf_path, const NkSteamShortcut *shortcut,
                                    bool steam_running, const char *stamp,
-                                   char *backup_path, size_t backup_cap);
+                                   char *backup_path, size_t backup_cap, NkSteamChange *change);
 
 /* ---- Finding Steam ---- */
 
@@ -109,6 +123,18 @@ NkSteamStatus nk_steam_find_root(char *root, size_t root_cap);
  * "0", in ascending order, at most `cap`. `*count` is set. NOT_FOUND when there are none. */
 NkSteamStatus nk_steam_list_accounts(const char *root, NkSteamAccount *accounts, size_t cap,
                                      size_t *count);
+
+/* The name an account shows in Steam, so a user with several accounts can tell them apart: the
+ * "PersonaName" of the account's entry in <root>/config/loginusers.vdf (a text KeyValues file,
+ * keyed by the 64-bit Steam ID, 76561197960265728 + the account ID). Control characters are
+ * dropped and a long name is cut at a whole UTF-8 character. NOT_FOUND when the file or the
+ * account is missing or the file does not parse; the name is then "". Shown only on this PC,
+ * never logged. */
+NkSteamStatus nk_steam_account_name(const char *root, const char *account_id, char *name,
+                                    size_t cap);
+/* The same from the file's text (at most 1 MiB); true when a name was found. */
+bool nk_steam_login_users_name(const char *text, size_t length, const char *account_id,
+                               char *name, size_t cap);
 
 /* Whether the Steam client runs now (Windows: the process ID Steam records and keeps current
  * while it runs). True when it cannot tell (fail closed: the file is only written when Steam is surely closed), false when Steam is not running; off Windows always
@@ -129,7 +155,8 @@ bool nk_steam_registry_error_means_running(unsigned long error);
 typedef bool (*NkSteamRunningFn)(void);
 NkSteamStatus nk_steam_add_for_account(const char *root, const char *account_id,
                                        const NkSteamShortcut *shortcut, NkSteamRunningFn running,
-                                       const char *stamp, char *backup_path, size_t backup_cap);
+                                       const char *stamp, char *backup_path, size_t backup_cap,
+                                       NkSteamChange *change);
 
 #ifdef __cplusplus
 }

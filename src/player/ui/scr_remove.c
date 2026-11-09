@@ -6,8 +6,8 @@
    the user ticks them: the saves, and the decrypted files and disc copy
    (#2003). Cancel holds focus first.
 
-   Saves (#1883), the title page's other dialog, is here too:
-   player_ui_screen_saves. */
+   Saves (#1883) and Add to Steam (#2152), the title page's other dialogs, are
+   here too: player_ui_screen_saves and player_ui_screen_steam. */
 
 #include "player_ui_nk.h"
 #include "nk_ui_widgets.h"
@@ -317,6 +317,133 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
             }
             nk_ui_end_container(ui);
         }
+    }
+    scr_flow_end(ui, "", prompts, 3u);
+    return result;
+}
+
+/* Add to Steam (#2152): what the shortcut starts and what Nakagawa changes, the account when
+   Steam has several, then Add to Steam and Back, and what the last add did. Add to Steam
+   holds focus first: it only adds, after a backup. */
+PlayerUiAction player_ui_screen_steam(NkUi *ui, const PlayerUiSteamModel *model) {
+    static const NkUiPromptItem prompts[] = {
+        {NK_UI_PROMPT_ACT_MOVE, "Move"}, {NK_UI_PROMPT_ACT_CONFIRM, "Select"},
+        {NK_UI_PROMPT_ACT_BACK, "Back"}
+    };
+    const NkUiTheme *theme;
+    PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
+    float inner;
+    bool blocked;
+    size_t accounts;
+    if (ui == NULL || model == NULL) return result;
+    theme = nk_ui_theme(ui);
+    blocked = model->blocked != NULL && model->blocked[0] != '\0';
+    accounts = model->accounts != NULL ? model->account_count : 0u;
+    if (accounts > PLAYER_UI_STEAM_ACCOUNT_CAP) accounts = PLAYER_UI_STEAM_ACCOUNT_CAP;
+    inner = scr_flow_begin(ui, model->logical_width > 80.0f ? model->logical_width : 1280.0f,
+                           model->logical_height > 80.0f ? model->logical_height : 800.0f,
+                           640.0f);
+    if (inner <= 0.0f) return result;
+    scr_flow_eyebrow(ui, FLOW_MARK_DIAMOND, "Add to Steam", theme->accent_dark);
+    nk_ui_text_role(ui, FLOW_ID_TITLE, safe_text(model->title, "This game"), NK_UI_TYPE_TITLE,
+                    theme->paper);
+    nk_ui_text_role(ui, FLOW_ID_LEAD,
+                    "Adds a shortcut to your Steam library that starts this game directly, for "
+                    "Steam Input and Big Picture. Nakagawa changes only Steam's list of "
+                    "non-Steam games on this PC, after saving a copy of it, and downloads "
+                    "nothing.",
+                    NK_UI_TYPE_BODY_S, theme->muted);
+    if (blocked) {
+        NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                     NK_UI_SPACE_3);
+        nk_ui_text_role(ui, FLOW_ID_NOTICE, model->blocked, NK_UI_TYPE_BODY_S, theme->warning);
+        if (nk_ui_begin_container(ui, FLOW_ID_ACTIONS, &row, NULL)) {
+            if (nk_ui_button(ui, PLAYER_UI_ID_STEAM_BACK, "Back", 0u)) {
+                result = action(PLAYER_UI_ACTION_BACK, model->title_index,
+                                PLAYER_UI_PRIMARY_NONE);
+            }
+            nk_ui_end_container(ui);
+        }
+        scr_flow_end(ui, "", prompts, 3u);
+        return result;
+    }
+    {
+        /* What the shortcut starts, and the account it goes to. */
+        NkUiLayout rows = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(), 4.0f);
+        NkUiStyle style = scr_flow_box_style(theme, theme->surface);
+        rows.padding_top = rows.padding_bottom = 8.0f;
+        rows.padding_left = rows.padding_right = 14.0f;
+        if (nk_ui_begin_container(ui, FLOW_ID_ROWS, &rows, &style)) {
+            nk_ui_text_role(ui, FLOW_ID_ITEMS, nk_ui_caps(ui, "Starts"), NK_UI_TYPE_LABEL_S,
+                            theme->muted);
+            nk_ui_text_role(ui, FLOW_ID_ITEMS + 1u, safe_text(model->command, ""),
+                            NK_UI_TYPE_DATA, theme->paper);
+            if (accounts == 1u) {
+                nk_ui_text_role(ui, FLOW_ID_ITEMS + 2u, nk_ui_caps(ui, "Steam account"),
+                                NK_UI_TYPE_LABEL_S, theme->muted);
+                nk_ui_text_role(ui, FLOW_ID_ITEMS + 3u, safe_text(model->accounts[0], ""),
+                                NK_UI_TYPE_BODY_S, theme->paper);
+            }
+            nk_ui_end_container(ui);
+        }
+    }
+    if (accounts > 1u) {
+        /* Several accounts have signed in on this PC: the user picks one. The chosen one
+           says Chosen, so colour is not the only sign. */
+        NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                     NK_UI_SPACE_3);
+        NkUiFlowRow flow;
+        nk_ui_text_role(ui, FLOW_ID_TOTAL, nk_ui_caps(ui, "Which Steam account?"),
+                        NK_UI_TYPE_LABEL_S, theme->muted);
+        if (nk_ui_flow_begin(ui, &flow, FLOW_ID_REPORT_ROW, &row, inner)) {
+            for (size_t i = 0u; i < accounts; ++i) {
+                char label[96];
+                uint32_t flags = NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT |
+                                 (i == model->chosen ? NK_UI_BUTTON_PRIMARY : 0u);
+                (void)snprintf(label, sizeof(label), "%s%s",
+                               i == model->chosen ? "Chosen: " : "",
+                               safe_text(model->accounts[i], "Steam account"));
+                nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, label, flags));
+                if (nk_ui_button(ui, (NkUiId)(PLAYER_UI_ID_STEAM_ACCOUNT_BASE + (NkUiId)i),
+                                 nk_ui_frame_text(ui, label), flags)) {
+                    result = action(PLAYER_UI_ACTION_STEAM, model->title_index,
+                                    (PlayerUiPrimaryAction)(PLAYER_UI_STEAM_ACCOUNT_BASE +
+                                                            (int)i));
+                }
+            }
+            nk_ui_flow_end(ui, &flow);
+        }
+    }
+    nk_ui_text_role(ui, FLOW_ID_DETAILS,
+                    model->portable
+                        ? "Exit Steam first: it rewrites this list when it exits. This is a "
+                          "portable copy, so if you move its folder, choose Add to Steam here "
+                          "again to update the shortcut."
+                        : "Exit Steam first: it rewrites this list when it exits.",
+                    NK_UI_TYPE_BODY_S, theme->muted);
+    {
+        NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
+                                     NK_UI_SPACE_3);
+        NkUiFlowRow flow;
+        if (nk_ui_flow_begin(ui, &flow, FLOW_ID_ACTIONS, &row, inner)) {
+            nk_ui_flow_item(ui, &flow,
+                            nk_ui_button_width(ui, "Add to Steam", NK_UI_BUTTON_PRIMARY));
+            if (nk_ui_button(ui, PLAYER_UI_ID_STEAM_ADD, "Add to Steam",
+                             NK_UI_BUTTON_PRIMARY)) {
+                result = action(PLAYER_UI_ACTION_STEAM, model->title_index,
+                                (PlayerUiPrimaryAction)PLAYER_UI_STEAM_ADD);
+            }
+            nk_ui_flow_item(ui, &flow, nk_ui_button_width(ui, "Back", 0u));
+            if (nk_ui_button(ui, PLAYER_UI_ID_STEAM_BACK, "Back", 0u)) {
+                result = action(PLAYER_UI_ACTION_BACK, model->title_index,
+                                PLAYER_UI_PRIMARY_NONE);
+            }
+            nk_ui_flow_end(ui, &flow);
+        }
+    }
+    if (model->status != NULL && model->status[0] != '\0') {
+        nk_ui_text_role(ui, FLOW_ID_STATUS, model->status, NK_UI_TYPE_BODY_S,
+                        note_rgba(theme, model->status_kind));
     }
     scr_flow_end(ui, "", prompts, 3u);
     return result;

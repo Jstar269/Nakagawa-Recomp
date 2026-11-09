@@ -2332,7 +2332,7 @@ int sr_host_data_prepare(void);
 size_t sr_host_data_entry_count(void);      /* valid after READY */
 
 void     sched_init(CpuState *cpu);                 /* CpuState the running thread reads/writes */
-void     sched_preempt_timer_start(void);          /* paced runs: a stronger due thread preempts at once (#1296) */
+void     sched_preempt_timer_start(void);          /* paced runs: a stronger due thread preempts at once; asks for high host priority (#1296) */
 int      sched_reset_for_loadexec(void);            /* retire the old guest threads after scheduler return */
 void     sched_set_guest_process_gp(uint32_t gp);    /* seed the replacement program's initial $gp */
 /* The module-start thread sched_run creates: priority, stack size (0 = the 256 KiB default),
@@ -2410,8 +2410,10 @@ uint32_t sched_pending_interrupts(void);             /* source bits not yet serv
 void     sched_delay_current(uint64_t usec);        /* block current thread for usec */
 void     sched_preempt(void);                       /* yield now if a higher-priority thread is ready */
 /* Set by the preemption timer when a stronger thread's deadline comes. A long HLE call polls it
- * between units of work and, holding nothing another guest thread could trip on, calls
- * sched_preempt_point(): that thread then runs inside the call, as it would on the PSP (#1296). */
+ * between units of work and, where the thread that runs cannot reach the call's own state (for
+ * a SAVE, its savedata state), calls sched_preempt_point(): that thread then runs inside the
+ * call, as it would on the PSP (#1296). Callers: the GE list run, and a savedata SAVE, which
+ * refuses another savedata call while parked and is released if its thread ends (savedata.c). */
 extern atomic_int_least32_t sr_preempt_due;
 void     sched_preempt_point(void);
 void     sched_block_on(uint32_t obj);              /* block current thread until sched_wake(obj) */

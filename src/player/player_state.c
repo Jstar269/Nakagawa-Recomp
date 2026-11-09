@@ -33,6 +33,7 @@
 #include "nk_title_manifest.h"
 #include "nk_user_data_schema.h"
 #include "nk_zip.h"
+#include "nk_portable.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -2465,24 +2466,47 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
     maybe_persist_settings(app);
 }
 
-/* The graphics presets (#2150), one row each. Starting values, to be tuned by
-   measurement on real titles: Low draws at the PSP's own 480x272, Medium and Handheld
-   at 2x, High and Ultra at 4x (the GPU renderer's largest scale). Ultra does not turn on
-   Sharper enlarging (the FSR 1 upscaler, #2122), and its note says so. Handheld
-   keeps a battery-friendly 2x and starts games fullscreen. No row touches frame pacing,
-   the play mode or an Enhanced part, and only Enhanced and Ace sessions use a row
-   (player_session_apply_graphics_preset). docs/PLAYER_UI_DESIGN.md lists the same values. */
+/* The graphics presets (#2150), one row each. The values are the project's choice, and
+   only FSR 1's cost is measured (an RTX 3080, docs/SETUP.md). Low draws at the PSP's own
+   480x272, Medium and Handheld at 2x, High and Ultra at 4x (the GPU renderer's largest
+   scale). Handheld keeps a battery-friendly 2x and starts games fullscreen.
+
+   A row also sets the Enhanced parts that suit it, and only presentation parts, which never
+   reach the guest (docs/ENHANCEMENT_CONTRACT.md 2.2): Crisp system text is on in every
+   preset (it draws only while the on-screen keyboard is up), and Sharper enlarging (the
+   FSR 1 upscaler, #2122) is on in Medium, Ultra and Handheld. FSR 1 runs only where the
+   window enlarges the frame on both axes, and AMD's quality modes for it span 1.3x (Ultra
+   Quality) to 2x (Performance) per axis: Medium's and Handheld's 2x frame on a 1080p or
+   handheld screen, and Ultra's 4x frame on a screen above 1080p, each for well under a
+   millisecond (fsr1-selftest's cost cell). Low turns it off:
+   its 1x frame is enlarged about 4x or more on any screen of 1080p or more, past that range, on
+   the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
+   turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
+   motion, Widescreen, texture filtering, sound, the readout or the badge: those stay the
+   library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
+   test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
+#define PRESET_PARTS(text, upscale)                                                        \
+    {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
+     [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \
+     [PLAYER_PART_SAS] = -1, [PLAYER_PART_UPSCALE] = (upscale)}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
-    [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1, false},
+    [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
+                           PRESET_PARTS(1, 0)},
     [PLAYER_PRESET_MEDIUM] = {"medium", "Medium", "Medium", 2, NK_PRESENT_SCALING_SHARP, true,
-                              -1, false},
+                              -1, PRESET_PARTS(1, 1)},
     [PLAYER_PRESET_HIGH] = {"high", "High", "High", 4, NK_PRESENT_SCALING_SHARP, true, -1,
-                            false},
-    [PLAYER_PRESET_ULTRA] = {"ultra", "Ultra", "Ultra", 4,
-                             NK_PRESENT_SCALING_SHARP, true, -1, true},
+                            PRESET_PARTS(1, 0)},
+    [PLAYER_PRESET_ULTRA] = {"ultra", "Ultra", "Ultra", 4, NK_PRESENT_SCALING_SHARP, true, -1,
+                             PRESET_PARTS(1, 1)},
     [PLAYER_PRESET_HANDHELD] = {"handheld", "Handheld", "Handheld", 2,
-                                NK_PRESENT_SCALING_SHARP, true, 1, false},
+                                NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
 };
+#undef PRESET_PARTS
+/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until PRESET_PARTS
+   gives it a value under each preset (-1 leaves it the library's); update PRESET_PARTS first,
+   then this count. The count catches a new part only; a part PRESET_PARTS leaves out reads 0
+   (off), which test_graphics_presets catches by requiring -1 for every part it does not set. */
+typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 8 ? 1 : -1];
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -2501,29 +2525,52 @@ const char *player_app_graphics_preset_label(const PlayerApp *app) {
     return row ? row->value : "Custom";
 }
 
-bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap,
-                                     bool *warns) {
+bool player_app_graphics_preset_note(const PlayerApp *app, char *out, size_t cap) {
     const PlayerGraphicsPresetRow *row = player_graphics_preset_row(player_app_graphics_preset(app));
-    if (warns) *warns = false;
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!row) return false;
-    /* A part the preset leaves off is named, never shown as set. One line, so the page still
-       fits 960 x 540 (test_player_screens.c). */
-    int n = snprintf(out, cap, "%s is used in Enhanced and Ace%s. Authentic uses your own display "
-                     "settings.", row->label,
-                     row->upscaler ? ", not turning on Sharper enlarging" : "");
+    /* The parts it sets, "with A and B on" or "with A on and B off", in short words (crisp
+       text, FSR 1): the line must stay one line, so the page fits 960 x 540 and 853 x 480
+       (test_player_screens.c). */
+    char list[2][96] = {"", ""}; /* [0] the parts it turns on, [1] those it turns off */
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+        if (row->part[p] < 0) continue;
+        char *into = list[row->part[p] != 0 ? 0 : 1];
+        size_t used = strlen(into);
+        const char *word = p == PLAYER_PART_TEXT      ? "crisp text"
+                         : p == PLAYER_PART_UPSCALE ? "FSR 1"
+                                                    : player_enhanced_part(p)->name;
+        int w = snprintf(into + used, sizeof(list[0]) - used, "%s%s", used ? " and " : "", word);
+        if (w <= 0 || (size_t)w >= sizeof(list[0]) - used) return false;
+    }
+    char with[224] = "";
+    if (list[0][0] && list[1][0]) {
+        snprintf(with, sizeof(with), ", with %s on and %s off", list[0], list[1]);
+    } else if (list[0][0] || list[1][0]) {
+        snprintf(with, sizeof(with), ", with %s %s", list[0][0] ? list[0] : list[1],
+                 list[0][0] ? "on" : "off");
+    }
+    int n = snprintf(out, cap, "%s is used in Enhanced and Ace%s. Authentic uses your settings.",
+                     row->label, with);
     if (n <= 0 || (size_t)n >= cap) {
         out[0] = '\0';
         return false;
     }
-    if (warns) *warns = row->upscaler;
     return true;
 }
 
 /* An edit to a row the chosen preset sets: the rows now apply everywhere, so the preset is
-   Custom. Each such setter calls this; nothing derives Custom from the values. */
+   Custom. Each such setter calls this; nothing derives Custom from the values. Custom keeps
+   what the pages showed: the display rows were always the user's own, and the Enhanced parts
+   the preset set (shown as "On (Ultra)") become the library's values, so an edit to one row
+   never turns another part off or on. The parts are not guest-visible in Authentic, which
+   resolves every part off, so writing them is safe where writing the rows is not. */
 static void graphics_preset_row_edited(PlayerApp *app) {
+    const PlayerGraphicsPresetRow *row = player_graphics_preset_row(app->settings.graphics_preset);
+    for (int p = 0; row && p < PLAYER_PART_COUNT; p++) {
+        if (row->part[p] >= 0) app->settings.enhanced.part[p] = row->part[p];
+    }
     app->settings.graphics_preset = PLAYER_PRESET_CUSTOM;
 }
 
@@ -2556,6 +2603,13 @@ void player_session_apply_graphics_preset(const PlayerSettings *settings, bool e
     config->present_scaling = row->present_scaling;
     config->vsync = row->vsync;
     if (row->fullscreen >= 0) config->fullscreen = row->fullscreen != 0;
+    /* The parts a row sets reach the session through player_play_resolve. */
+}
+
+int player_settings_library_part(const PlayerSettings *settings, int part) {
+    if (!settings || part < 0 || part >= PLAYER_PART_COUNT) return 0;
+    const PlayerGraphicsPresetRow *row = player_graphics_preset_row(settings->graphics_preset);
+    return row && row->part[part] >= 0 ? row->part[part] : settings->enhanced.part[part];
 }
 
 const char *player_present_scaling_label(int scaling) {
@@ -3182,7 +3236,9 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
     }
     out->on = true;
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
-        int value = title && title->part[p] >= 0 ? title->part[p] : settings->enhanced.part[p];
+        /* A game's own value, else the preset's where it sets the part, else the library's. */
+        int value = title && title->part[p] >= 0 ? title->part[p]
+                                                 : player_settings_library_part(settings, p);
         out->part[p] = enhanced_part_value_index(p, value) >= 0 ? value : 0;
     }
     out->logic_60 = out->mode == PLAYER_PLAY_ACE && (!title || title->logic_60 != 0);
@@ -3312,8 +3368,14 @@ void player_app_toggle_library_play_mode(PlayerApp *app) {
 void player_app_cycle_enhanced_part(PlayerApp *app, int part) {
     const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
     if (!app || !info) return;
-    int index = enhanced_part_value_index(part, app->settings.enhanced.part[part]);
+    /* The step starts from the value the page shows, the preset's where it sets the part.
+       Editing such a part makes the preset Custom, as for a display row it sets, and Custom
+       keeps the preset's other parts (graphics_preset_row_edited); a part no preset sets
+       leaves the preset as it is. */
+    const PlayerGraphicsPresetRow *row = player_graphics_preset_row(app->settings.graphics_preset);
+    int index = enhanced_part_value_index(part, player_settings_library_part(&app->settings, part));
     int next = index < 0 ? 0 : (index + 1) % info->value_count;
+    if (row && row->part[part] >= 0) graphics_preset_row_edited(app);
     app->settings.enhanced.part[part] = info->values[next];
     player_dev_log_add(app, "settings", "Enhanced %s for the library: %s", info->key,
                        info->words[next]);
@@ -3378,6 +3440,7 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part) {
     player_dev_log_add(app, "settings", "Enhanced %s for %s: %s", info->key, entry.key,
                        entry.part[part] < 0 ? "library default"
                                             : enhanced_part_word(part, entry.part[part]));
+    /* A game's own value wins over the preset (player_play_resolve), so the preset stays. */
     maybe_persist_settings(app);
 }
 
@@ -11154,4 +11217,377 @@ bool player_app_rebuild_card(const PlayerApp *app, const GameRecord *game,
         out->can_rebuild = true;
     }
     return true;
+}
+
+/* ---- --launch-title and Add to Steam (#2152) ---- */
+
+/* A disc ID a command line can carry as it is: letters, digits, '-' and '_'. */
+static bool launch_title_disc_ok(const char *disc_id, size_t length) {
+    if (length == 0u || length >= NK_MAX_DISC_ID_LEN) return false;
+    for (size_t i = 0u; i < length; ++i) {
+        unsigned char c = (unsigned char)disc_id[i];
+        if (!isalnum(c) && c != '-' && c != '_') return false;
+    }
+    return true;
+}
+
+static bool launch_title_sha1_ok(const char *text) {
+    if (strlen(text) != 40u) return false;
+    for (size_t i = 0u; i < 40u; ++i) {
+        if (!isxdigit((unsigned char)text[i])) return false;
+    }
+    return true;
+}
+
+/* Hex digits compared without case (the library stores lowercase). */
+static bool launch_title_same_sha1(const char *stored, const char *wanted) {
+    if (strlen(stored) != 40u) return false;
+    for (size_t i = 0u; i < 40u; ++i) {
+        if (tolower((unsigned char)stored[i]) != tolower((unsigned char)wanted[i])) return false;
+    }
+    return true;
+}
+
+/* A record of the user's own library: not a bundled demo or a sample. */
+static bool launch_title_users_game(const GameRecord *game) {
+    return !game->is_sample && !game->is_showcase_package;
+}
+
+bool player_app_launch_title_value(const PlayerApp *app, int game_index, char *out,
+                                   size_t out_size) {
+    const GameRecord *game;
+    int shared = 0;
+    int n;
+    if (out != NULL && out_size > 0u) out[0] = '\0';
+    if (app == NULL || out == NULL || out_size == 0u || game_index < 0 ||
+        game_index >= app->game_count) {
+        return false;
+    }
+    game = &app->games[game_index];
+    if (!launch_title_users_game(game) ||
+        !launch_title_disc_ok(game->disc_id, strlen(game->disc_id))) {
+        return false;
+    }
+    for (int i = 0; i < app->game_count; ++i) {
+        if (launch_title_users_game(&app->games[i]) &&
+            strcmp(app->games[i].disc_id, game->disc_id) == 0) {
+            shared++;
+        }
+    }
+    if (shared > 1) {
+        /* Another image has this disc ID: name this one by its content too. */
+        if (!launch_title_sha1_ok(game->content_sha1)) return false;
+        n = snprintf(out, out_size, "%s:%s", game->disc_id, game->content_sha1);
+    } else {
+        n = snprintf(out, out_size, "%s", game->disc_id);
+    }
+    if (n <= 0 || (size_t)n >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+PlayerLaunchTitleResult player_app_find_launch_title(const PlayerApp *app, const char *value,
+                                                     int *game_index, char *message,
+                                                     size_t message_size) {
+    char disc_id[NK_MAX_DISC_ID_LEN];
+    const char *colon;
+    const char *sha1 = NULL;
+    size_t disc_length;
+    int found = -1;
+    int matches = 0;
+    if (game_index != NULL) *game_index = -1;
+    if (message != NULL && message_size > 0u) message[0] = '\0';
+    if (app == NULL || value == NULL) return PLAYER_LAUNCH_TITLE_MALFORMED;
+    colon = strchr(value, ':');
+    disc_length = colon != NULL ? (size_t)(colon - value) : strlen(value);
+    if (colon != NULL) sha1 = colon + 1;
+    if (!launch_title_disc_ok(value, disc_length) || (sha1 != NULL && !launch_title_sha1_ok(sha1))) {
+        if (message != NULL && message_size > 0u) {
+            (void)snprintf(message, message_size,
+                           "--launch-title needs a game's disc ID, such as ULUS10041, optionally "
+                           "followed by a colon and the SHA-1 of its disc image.");
+        }
+        return PLAYER_LAUNCH_TITLE_MALFORMED;
+    }
+    memcpy(disc_id, value, disc_length);
+    disc_id[disc_length] = '\0';
+    for (int i = 0; i < app->game_count; ++i) {
+        const GameRecord *game = &app->games[i];
+        if (!launch_title_users_game(game) || strcmp(game->disc_id, disc_id) != 0) continue;
+        if (sha1 != NULL && !launch_title_same_sha1(game->content_sha1, sha1)) continue;
+        if (found < 0) found = i;
+        matches++;
+    }
+    if (matches == 0) {
+        if (message != NULL && message_size > 0u) {
+            (void)snprintf(message, message_size,
+                           "No game with disc ID %s%s is in this Nakagawa library. It may have "
+                           "been removed, or the shortcut belongs to another data folder. Add "
+                           "the game in Nakagawa, then choose Add to Steam on its page again.",
+                           disc_id, sha1 != NULL ? " and this disc image" : "");
+        }
+        return PLAYER_LAUNCH_TITLE_MISSING;
+    }
+    if (matches > 1) {
+        if (message != NULL && message_size > 0u) {
+            (void)snprintf(message, message_size,
+                           "Several disc images in this library have disc ID %s. Open Nakagawa "
+                           "and choose Add to Steam on the game's page, so the shortcut names "
+                           "its image.",
+                           disc_id);
+        }
+        return PLAYER_LAUNCH_TITLE_AMBIGUOUS;
+    }
+    if (game_index != NULL) *game_index = found;
+    return PLAYER_LAUNCH_TITLE_FOUND;
+}
+
+/* Copies text for a Steam field: control characters become spaces. */
+static void steam_field_copy(char *out, size_t out_size, const char *in) {
+    size_t n = 0u;
+    for (; in != NULL && in[n] != '\0' && n + 1u < out_size; ++n) {
+        unsigned char c = (unsigned char)in[n];
+        out[n] = (c < 0x20u || c == 0x7Fu) ? ' ' : (char)c;
+    }
+    out[n] = '\0';
+}
+
+PlayerSteamOutcome player_app_plan_steam_shortcut(const PlayerApp *app, int game_index,
+                                                  const char *steam_root, const char *exe,
+                                                  PlayerSteamPlan *plan) {
+    char value[PLAYER_LAUNCH_TITLE_VALUE_MAX];
+    const GameRecord *game;
+    size_t length;
+    NkSteamStatus status;
+    if (plan == NULL) return PLAYER_STEAM_NOT_A_GAME;
+    memset(plan, 0, sizeof(*plan));
+    plan->outcome = PLAYER_STEAM_NOT_A_GAME;
+    if (app == NULL || game_index < 0 || game_index >= app->game_count) return plan->outcome;
+    game = &app->games[game_index];
+    (void)snprintf(plan->disc_id, sizeof(plan->disc_id), "%s", game->disc_id);
+    steam_field_copy(plan->app_name, sizeof(plan->app_name),
+                     game->title_name[0] != '\0' ? game->title_name : game->disc_id);
+    if (!player_app_launch_title_value(app, game_index, value, sizeof(value)) ||
+        plan->app_name[0] == '\0') {
+        return plan->outcome;
+    }
+
+    /* This program, started in its own folder. */
+    plan->outcome = PLAYER_STEAM_NO_PROGRAM;
+    if (exe != NULL) {
+        if (snprintf(plan->exe, sizeof(plan->exe), "%s", exe) >= (int)sizeof(plan->exe)) {
+            return plan->outcome;
+        }
+    } else {
+        if (!nk_platform_get_executable_path(plan->exe, sizeof(plan->exe))) return plan->outcome;
+        plan->portable = nk_portable_in_use();
+    }
+    length = strlen(plan->exe);
+    if (length == 0u || strchr(plan->exe, '"') != NULL) return plan->outcome;
+    while (length > 0u && !nk_platform_is_path_separator(plan->exe[length - 1u])) length--;
+    if (length <= 1u || length > sizeof(plan->start_dir)) return plan->outcome;
+    memcpy(plan->start_dir, plan->exe, length - 1u);
+    plan->start_dir[length - 1u] = '\0';
+
+    /* The game, and the data folder when this process was given one. Quoted, with no
+       separator before the closing quote: Windows reads a backslash before a quote as an
+       escaped quote. */
+    if (app->user_data_root[0] != '\0') {
+        char root[MAX_PATH_LEN];
+        size_t root_length;
+        (void)snprintf(root, sizeof(root), "%s", app->user_data_root);
+        root_length = strlen(root);
+        while (root_length > 1u && nk_platform_is_path_separator(root[root_length - 1u])) {
+            root[--root_length] = '\0';
+        }
+        /* A drive root keeps its separator: a bare "C:" means the current folder on drive C.
+           A backslash before the closing quote is doubled, so Windows reads one backslash and
+           then the quote. */
+        if (root_length == 2u && root[1] == ':' && isalpha((unsigned char)root[0]) &&
+            nk_platform_is_path_separator(app->user_data_root[2])) {
+            if (app->user_data_root[2] == '\\') {
+                (void)snprintf(root + 2, sizeof(root) - 2u, "\\\\");
+            } else {
+                (void)snprintf(root + 2, sizeof(root) - 2u, "/");
+            }
+        }
+        if (strchr(root, '"') != NULL ||
+            snprintf(plan->launch_options, sizeof(plan->launch_options),
+                     PLAYER_LAUNCH_TITLE_ARG "%s \"--user-data-root=%s\"", value, root) >=
+                (int)sizeof(plan->launch_options)) {
+            plan->launch_options[0] = '\0';
+            return plan->outcome;
+        }
+    } else {
+        (void)snprintf(plan->launch_options, sizeof(plan->launch_options),
+                       PLAYER_LAUNCH_TITLE_ARG "%s", value);
+    }
+
+    /* Steam's folder and its accounts, from this PC only. */
+    if (steam_root != NULL) {
+        (void)snprintf(plan->root, sizeof(plan->root), "%s", steam_root);
+        status = plan->root[0] != '\0' && nk_platform_dir_exists(plan->root)
+                     ? NK_STEAM_OK : NK_STEAM_ERR_NOT_FOUND;
+    } else {
+        status = nk_steam_find_root(plan->root, sizeof(plan->root));
+    }
+    if (status == NK_STEAM_ERR_UNSUPPORTED) {
+        plan->outcome = PLAYER_STEAM_UNSUPPORTED;
+        return plan->outcome;
+    }
+    if (status != NK_STEAM_OK) {
+        plan->outcome = PLAYER_STEAM_NOT_FOUND;
+        return plan->outcome;
+    }
+    if (nk_steam_list_accounts(plan->root, plan->accounts, NK_STEAM_ACCOUNT_CAP,
+                               &plan->account_count) != NK_STEAM_OK ||
+        plan->account_count == 0u) {
+        plan->account_count = 0u;
+        plan->outcome = PLAYER_STEAM_NO_ACCOUNT;
+        return plan->outcome;
+    }
+    for (size_t i = 0u; i < plan->account_count; ++i) {
+        (void)nk_steam_account_name(plan->root, plan->accounts[i].id, plan->account_names[i],
+                                    sizeof(plan->account_names[i]));
+    }
+    plan->ready = true;
+    plan->outcome = PLAYER_STEAM_READY;
+    return plan->outcome;
+}
+
+PlayerSteamOutcome player_steam_add(PlayerSteamPlan *plan, size_t account,
+                                    NkSteamRunningFn running, const char *stamp) {
+    NkSteamShortcut shortcut;
+    NkSteamChange change = NK_STEAM_CHANGE_NONE;
+    NkSteamStatus status;
+    if (plan == NULL) return PLAYER_STEAM_NOT_A_GAME;
+    if (!plan->ready) return plan->outcome;
+    if (account >= plan->account_count) {
+        plan->outcome = PLAYER_STEAM_NO_ACCOUNT;
+        return plan->outcome;
+    }
+    shortcut.app_name = plan->app_name;
+    shortcut.exe = plan->exe;
+    shortcut.start_dir = plan->start_dir;
+    shortcut.launch_options = plan->launch_options;
+    status = nk_steam_add_for_account(plan->root, plan->accounts[account].id, &shortcut, running,
+                                      stamp, plan->backup_path, sizeof(plan->backup_path),
+                                      &change);
+    switch (status) {
+        case NK_STEAM_OK:
+            plan->outcome = change == NK_STEAM_CHANGE_UPDATED ? PLAYER_STEAM_UPDATED
+                                                              : PLAYER_STEAM_ADDED;
+            break;
+        case NK_STEAM_ERR_EXISTS: plan->outcome = PLAYER_STEAM_ALREADY; break;
+        case NK_STEAM_ERR_STEAM_RUNNING: plan->outcome = PLAYER_STEAM_RUNNING; break;
+        case NK_STEAM_ERR_CORRUPT:
+        case NK_STEAM_ERR_TOO_LARGE: plan->outcome = PLAYER_STEAM_UNREADABLE; break;
+        case NK_STEAM_ERR_BACKUP: plan->outcome = PLAYER_STEAM_BACKUP_FAILED; break;
+        case NK_STEAM_ERR_WRITE: plan->outcome = PLAYER_STEAM_WRITE_FAILED; break;
+        case NK_STEAM_ERR_NOT_FOUND: plan->outcome = PLAYER_STEAM_NO_ACCOUNT; break;
+        case NK_STEAM_ERR_UNSUPPORTED: plan->outcome = PLAYER_STEAM_UNSUPPORTED; break;
+        case NK_STEAM_ERR_ARGUMENT:
+        default: plan->outcome = PLAYER_STEAM_NO_PROGRAM; break;
+    }
+    return plan->outcome;
+}
+
+bool player_steam_outcome_ok(PlayerSteamOutcome outcome) {
+    return outcome == PLAYER_STEAM_ADDED || outcome == PLAYER_STEAM_UPDATED ||
+           outcome == PLAYER_STEAM_ALREADY;
+}
+
+size_t player_steam_outcome_text(const PlayerSteamPlan *plan, char *out, size_t out_size) {
+    char backup[MAX_PATH_LEN];
+    char kept[MAX_PATH_LEN + 96];
+    const char *name;
+    int n = 0;
+    if (out == NULL || out_size == 0u) return 0u;
+    out[0] = '\0';
+    if (plan == NULL) return 0u;
+    name = plan->app_name[0] != '\0' ? plan->app_name : "This game";
+    backup[0] = '\0';
+    kept[0] = '\0';
+    if (plan->backup_path[0] != '\0') {
+        (void)player_display_text(plan->backup_path, backup, sizeof(backup));
+        (void)snprintf(kept, sizeof(kept), " Steam's list from before is saved as %s.", backup);
+    }
+    switch (plan->outcome) {
+        case PLAYER_STEAM_READY:
+            n = snprintf(out, out_size, "%s", "");
+            break;
+        case PLAYER_STEAM_ADDED:
+            n = snprintf(out, out_size,
+                         "Added %s to Steam. Start Steam to find it in your library; no restart "
+                         "is needed.%s",
+                         name, kept[0] != '\0'
+                                   ? kept
+                                   : " Steam had no list of non-Steam games yet, so there was "
+                                     "nothing to back up.");
+            break;
+        case PLAYER_STEAM_UPDATED:
+            n = snprintf(out, out_size,
+                         "Updated %s in Steam: its shortcut now starts this Nakagawa folder. Its "
+                         "play time and collections stay. Start Steam to use it; no restart is "
+                         "needed.%s",
+                         name, kept);
+            break;
+        case PLAYER_STEAM_ALREADY:
+            n = snprintf(out, out_size,
+                         "%s is already in this Steam library with this shortcut. Nothing was "
+                         "changed.",
+                         name);
+            break;
+        case PLAYER_STEAM_NOT_A_GAME:
+            n = snprintf(out, out_size, "%s",
+                         "Only games you added to the library can be added to Steam, and this "
+                         "one's disc ID can't be named in a shortcut.");
+            break;
+        case PLAYER_STEAM_UNSUPPORTED:
+            n = snprintf(out, out_size, "%s",
+                         "Add to Steam works on Windows only. Nothing was changed.");
+            break;
+        case PLAYER_STEAM_NOT_FOUND:
+            n = snprintf(out, out_size, "%s",
+                         "Steam isn't installed for this Windows user, so nothing was added. "
+                         "Install Steam and sign in once, then try again.");
+            break;
+        case PLAYER_STEAM_NO_ACCOUNT:
+            n = snprintf(out, out_size, "%s",
+                         "No Steam account has signed in on this PC yet, so nothing was added. "
+                         "Start Steam, sign in, exit Steam, then try again.");
+            break;
+        case PLAYER_STEAM_RUNNING:
+            n = snprintf(out, out_size, "%s",
+                         "Steam is running, so nothing was changed: Steam rewrites its list of "
+                         "games when it exits. Exit Steam (Steam menu, Exit), then choose Add "
+                         "to Steam again. Nakagawa never closes Steam. No restart is needed "
+                         "after that: Steam reads the shortcut when it starts.");
+            break;
+        case PLAYER_STEAM_UNREADABLE:
+            n = snprintf(out, out_size, "%s",
+                         "Steam's list of non-Steam games could not be read, so it was left as "
+                         "it was. Nothing was changed.");
+            break;
+        case PLAYER_STEAM_BACKUP_FAILED:
+            n = snprintf(out, out_size, "%s",
+                         "Nakagawa could not save and check a copy of Steam's list of non-Steam "
+                         "games, so it changed nothing.");
+            break;
+        case PLAYER_STEAM_WRITE_FAILED:
+            n = snprintf(out, out_size,
+                         "Steam's new list could not be written or did not read back the same, "
+                         "so %s may not be in Steam.%s",
+                         name, kept);
+            break;
+        case PLAYER_STEAM_NO_PROGRAM:
+        default:
+            n = snprintf(out, out_size, "%s",
+                         "Nakagawa could not name its own program or folders in a Steam "
+                         "shortcut. Nothing was changed.");
+            break;
+    }
+    return n > 0 ? strlen(out) : 0u;
 }
