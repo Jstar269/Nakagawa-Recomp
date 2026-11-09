@@ -397,9 +397,12 @@ larger size is 20 ppem (nominal 648, 10.125 points at 128 dpi) and the smaller
 `--tracking`, and the sans-serif faces `--digit-advance` (tabular figures at
 the console's digit width) and `--embolden-y` (horizontal strokes as thick as
 the console's: its sans-serif letters carry 9 to 25 % more ink than the source
-faces draw without it). Every index's sentence and menu line then comes
-within 3 % of the console's, and each sans-serif face's mean ink per letter
-within 4 %.
+faces draw without it). Both sizes set round letters' overshoots of less than
+3/8 px on the face's own baseline, x-height and cap height (`--snap-overshoot
+3`, #1300), and the bold sans-serif faces, already at the largest
+`--embolden-y`, take one sub-sample more `--embolden-x` than their strike.
+Every index's sentence and menu line then comes within 3 % of the console's,
+and each sans-serif face's mean ink per letter within 2 %.
 
 The ink targets (`LETTER_INK` in `tools/test_ttf2pgf.py`) are one number per sans-serif face, measured on
 a PSP-3000's own font files that the maintainer read locally; no font bytes or glyph data are recorded. To
@@ -437,7 +440,9 @@ The header ascender and descender are the console fonts' recorded values.
 above (`docs/cleanroom/PGF_CONVERTER_SPEC.md`). It also accepts a `STAT`
 table, which the static Noto Sans JP instance carries, as static family
 members do; the variable-font tables `fvar`, `gvar`, `cvar`, `avar`, `HVAR`,
-`MVAR` and `VVAR` stay refused.
+`MVAR` and `VVAR` stay refused. Version 0.5.0 adds `--snap-overshoot`
+(section 3, rule 13 of that specification), an outline alignment measured from
+each font's own `H` and `x`; it runs no hint program.
 
 ## 7. Residual unknowns (all marked; none block the chosen route)
 
