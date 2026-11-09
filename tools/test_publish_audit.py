@@ -2637,6 +2637,7 @@ class ExportPolicyDigestTests(unittest.TestCase):
         committed = json.loads(
             (Path(__file__).resolve().parent.parent / "PUBLIC_EXPORT.json").read_text(encoding="utf-8")
         )
+        self.assertNotIn("policy_sha256", committed)
         self.assertEqual(self._codes(committed), [])
 
     def test_a_control_without_a_digest_is_current_when_its_policy_fields_match(self) -> None:
