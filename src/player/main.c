@@ -1940,6 +1940,10 @@ static void player_ui_nk_apply_action(PlayerApp *app,
         player_app_stop_stalled_game(app);
         return;
     }
+    if (action->kind == PLAYER_UI_ACTION_HIDE_RENDER_NOTICE) {
+        player_app_hide_render_notice(app);
+        return;
+    }
     if (action->kind == PLAYER_UI_ACTION_CHECK_INPUT_AGAIN) {
         /* The title page's Check again (#308): the same build check, now,
            whatever its cache holds; the disc is not added again. */

@@ -146,8 +146,9 @@ typedef enum {
     PLAYER_UI_ACTION_SAVES,             /* a Saves dialog control; .primary carries the
                                            op (PlayerUiSavesOp) */
     PLAYER_UI_ACTION_ADD_TO_STEAM,      /* the title page's Add to Steam (#2152) */
-    PLAYER_UI_ACTION_STEAM              /* an Add to Steam dialog control; .primary carries
+    PLAYER_UI_ACTION_STEAM,             /* an Add to Steam dialog control; .primary carries
                                            the op (PlayerUiSteamOp) */
+    PLAYER_UI_ACTION_HIDE_RENDER_NOTICE /* the title page's render notice: Hide (#2151) */
 } PlayerUiActionKind;
 
 /* What an Add to Steam dialog control asks for (PLAYER_UI_ACTION_STEAM). Back is
@@ -900,6 +901,10 @@ typedef struct {
     bool stalled_game_notice_visible;
     /* The notice is for frames that show nothing, not for frames that stopped. */
     bool stalled_game_dark_picture;
+    /* The render notice (#2151): the slower path this game's latest launch draws with, in
+       a heading and a sentence (player_render_notice_text), with Hide; NULL hides it. */
+    const char *render_notice_heading;
+    const char *render_notice_text;
     double now_s;           /* drives the starting bar (0 holds it still) */
     float logical_width;    /* 0 selects 1280 */
     float logical_height;   /* 0 selects 800 */
@@ -959,6 +964,7 @@ enum {
     PLAYER_UI_ID_TITLE_ACE = 0x200Au,                /* the ENHANCEMENTS card's play mode */
     PLAYER_UI_ID_TITLE_PLAY_OPTIONS = 0x200Bu,       /* the ENHANCEMENTS card's Enhanced options */
     PLAYER_UI_ID_TITLE_STEAM = 0x200Cu,              /* Add to Steam (#2152) */
+    PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE = 0x200Du, /* the render notice's Hide (#2151) */
     PLAYER_UI_ID_REMOVE_CANCEL = 0x4401u,
     PLAYER_UI_ID_REMOVE_CONFIRM = 0x4402u,
     PLAYER_UI_ID_REMOVE_SAVES = 0x4403u,

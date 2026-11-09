@@ -791,6 +791,11 @@ output directory contains spaces, the route builds in a Make-safe workspace—re
 the finished package to the destination. If neither fallback is available, or if the path contains
 characters that Make recipes cannot quote, the route stops with the named `PACKAGE_UNSUPPORTED_PATH`
 boundary.
+An enhancement data root is read in place rather than copied. When its path has a space or another
+character Make cannot take, the route uses its 8.3 short form on Windows, and stops with
+`PACKAGE_UNSUPPORTED_PATH` naming the data root when no short form exists (a volume with 8.3 names
+turned off, or any other platform). `NK_BUILD_ROOT` does not help there; move the data root to a
+location without such characters.
 
 `assets/titles/hst-ucus98701.json` is the HST title manifest, part of the repository since 2026-10-27: it carries HST's guest-address runtime bindings, and a `GAME_NAME=hst` build refuses to compile without it rather than silently producing a runtime with every title binding disabled. See [`assets/titles/README.md`](../assets/titles/README.md).
 
@@ -1150,7 +1155,7 @@ refuses such a `BUILD_DIR` before any recipe runs and names the boundary:
 BUILD_DIR 'C:/path/with spaces/build' contains a space, which GNU Make cannot represent
 in a target or prerequisite name. Use a relative BUILD_DIR under the repository
 root (the default `build/<game>`), or set NK_BUILD_ROOT to a folder without spaces
-so tools/title_codegen_plan.py can pick a Make-safe build root (issue #296).
+so tools/title_codegen_plan.py can pick a Make-safe build root.
 ```
 
 The default relative `BUILD_DIR` carries no space, so an ordinary checkout is unaffected. Every route

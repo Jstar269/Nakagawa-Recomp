@@ -419,6 +419,27 @@ class NkCoreTests(unittest.TestCase):
             self.assertIn("--register-local-compatibility-record", cli_source[start:end])
         self.assertIn("write packages under the per-user data root", plan_source)
 
+    def test_iso_inspection_size_floor_is_the_first_directory_sector(self) -> None:
+        # A small disc image is an ISO, not "too small": the floor is the end of the primary
+        # volume descriptor sector, the same bound src/core/nk_iso.c uses, not 1 MiB. A homebrew
+        # EBOOT.PBP's private disc image is about 77 KiB (#2143). No PSPDEV is needed here.
+        from test_iso_parity import build_plain_mips_elf, create_test_iso_with_executables
+
+        full = self.temp_dir / "small.iso"
+        create_test_iso_with_executables(full, build_plain_mips_elf())
+        data = full.read_bytes()
+        self.assertGreater(len(data), 34816)
+
+        small = self.temp_dir / "small-77k.iso"
+        small.write_bytes(data[: 77 * 1024])
+        inspect_iso(small)  # no IsoInspectionError
+
+        below = self.temp_dir / "below-floor.iso"
+        below.write_bytes(data[:34815])
+        with self.assertRaises(IsoInspectionError) as caught:
+            inspect_iso(below)
+        self.assertIn("too small", str(caught.exception))
+
     def test_iso_inspection_malformed(self) -> None:
         # File too small
         tiny_file = self.temp_dir / "tiny.iso"

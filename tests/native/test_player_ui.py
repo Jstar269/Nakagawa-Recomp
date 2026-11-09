@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 from nk_core import package_cache  # noqa: E402  (the package-layer epochs the fixture must spell)
 from test_player_package_route import (  # noqa: E402
+    build_homebrew_eboot,
     build_plain_mips_elf,
     build_psp_container,
     create_test_iso_with_executables,
@@ -3955,6 +3956,38 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[1]["view"], "error")
         self.assertEqual(frames[1]["error"], "PBP_PACKAGE_UNSUPPORTED")
         self.assertEqual(frames[2]["picker"], "1")
+
+    def test_homebrew_eboot_drop_shows_experimental_card_and_adds_to_library(self) -> None:
+        """#2143: a real PSPSDK EBOOT.PBP picked in the launcher is imported, not refused.
+
+        Failing before: PSPSDK writes the category MG for every homebrew and the package
+        classifier read it as a firmware updater (FIRMWARE_OUT_OF_SCOPE). The package must
+        convert to its private disc image, show the Experimental card under its own title, and
+        ADD TO LIBRARY must store an experimental record under a non-retail library key.
+        """
+        with tempfile.TemporaryDirectory(prefix=".homebrew-eboot-", dir=ROOT) as tmp:
+            eboot = build_homebrew_eboot(Path(tmp))
+            package = eboot.read_bytes()
+        events = ("WAIT_VIEW=experimental|unsupported|supported|error,20000", "WAIT_MS=100",
+                  "KEY_RETURN", "WAIT_MS=2000")
+        run = self.next_ui_run("library", events, drop_bytes=("EBOOT.PBP", package),
+                               wait_background=True)
+        frames = run["frames"]
+        stdout = run["stdout"]
+        assert isinstance(frames, list) and isinstance(stdout, str)
+        self.assertNotIn("FIRMWARE_OUT_OF_SCOPE", stdout)
+        self.assertFalse(any(frame["view"] == "error" for frame in frames), stdout)
+        self.assertTrue(any(frame["view"] == "experimental" for frame in frames), stdout)
+        self.assertEqual(frames[-1]["view"], "library", stdout)
+        library = run["library"]
+        assert isinstance(library, dict)
+        self.assertEqual(len(library["games"]), 1, library)
+        record = library["games"][0]
+        self.assertTrue(record["is_experimental"], record)
+        self.assertRegex(record["disc_id"], r"^X[A-Z]{3}[0-9]{5}$")
+        self.assertEqual(record["title_name"], "Nakagawa PSP Recompilation Oracle")
+        self.assertIn(f"next_ui_disc_badge disc={record['disc_id']} badge=Beta / unofficial",
+                      stdout, "the Experimental card labels the program Beta / unofficial")
 
     def test_damaged_compressed_and_non_psp_disc_images_get_their_own_cards(self) -> None:
         """A .cso whose block index points outside the file is a damaged compressed disc
