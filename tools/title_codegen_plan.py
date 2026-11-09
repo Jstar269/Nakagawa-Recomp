@@ -253,7 +253,7 @@ def package_build_plan(
     range.
     """
     cpus_known = bool(cpu_count and cpu_count > 0)
-    cpus = cpu_count if cpus_known else 1
+    cpus = cpu_count if cpu_count is not None and cpu_count > 0 else 1
     cpu_text = f"{cpus} logical CPUs" if cpus_known else "CPU count unknown"
     override_note = ""
     if override is not None and override.strip():
