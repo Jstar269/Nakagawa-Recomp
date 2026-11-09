@@ -750,6 +750,17 @@
       }
     },
     {
+      "path": "android/app/src/main/java/io/github/jstar269/nakagawa/TitleLibrary.java",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_host_360_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "android/app/src/main/res/values/strings.xml",
       "classification": "project_authored_attested",
       "evidence": {
@@ -16190,6 +16201,17 @@
         "upstream": "documented upstream family",
         "license": "GPL-2.0-or-later",
         "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tools/android_test_runner.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_host_360_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
       }
     },
     {
