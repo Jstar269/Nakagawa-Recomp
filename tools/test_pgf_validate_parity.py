@@ -11,6 +11,7 @@ and coverage flag must agree. The shared layout constants are pinned to their C 
 """
 
 from __future__ import annotations
+from typing import Any
 
 import random
 import re
@@ -367,7 +368,7 @@ class PgfValidatorParityTests(unittest.TestCase):
 
         mismatches = []
         accepted = 0
-        refused_by = {}
+        refused_by: dict[str, Any] = {}
         for path, line in zip(paths, lines, strict=True):
             tokens = line.split()
             native = {"refusal": fonts.REFUSAL_NAMES[int(tokens[0])], "ok": tokens[1] == "1"}

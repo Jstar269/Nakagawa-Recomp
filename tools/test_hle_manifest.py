@@ -1783,6 +1783,23 @@ class EvidenceTierTests(unittest.TestCase):
         self.assertIn("Tier E", note)
         self.assertIn("measured Tier B cells", row["invariant"])
 
+    def test_clut_mip_marks_t32_and_the_mask_order_unmeasured(self) -> None:
+        """#2031 acceptance: the ge-clut-mip cells draw no T32 texture and mask no index at or
+        above the per-level offset, so the manifest and the oracle doc name both unmeasured."""
+        document = json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))
+        row = next(test for test in document["tests"] if test["id"] == "PSP-GE-MIP-002")
+        self.assertIn("Unmeasured: T32 textures, and whether the per-level offset is added before "
+                      "or after the index mask", row["measurement_note"])
+        self.assertNotIn("t32-", " ".join(row["case_ids"]))
+        doc = (Path(__file__).resolve().parents[1] / "docs" / "HARDWARE_ORACLE.md").read_text(
+            encoding="utf-8")
+        table_row = next(line for line in doc.splitlines() if line.startswith("  | `PSP-GE-MIP-002` |"))
+        not_cited = table_row.split(" | ")[3]
+        self.assertIn("T32 textures", not_cited)
+        self.assertIn("whether the per-level offset comes before or after the index mask", not_cited)
+        self.assertIn("  - *Unmeasured:* T32 textures, and whether the per-level offset is added before or "
+                      "after the index mask\n", doc)
+
     @staticmethod
     def _measured_row(**overrides) -> dict:
         """A MEASURED row citing a committed section that really names its case."""
