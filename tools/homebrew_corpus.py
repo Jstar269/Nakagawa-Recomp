@@ -18,7 +18,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS_PATH = ROOT / "fixtures" / "homebrew_corpus" / "corpus.json"
@@ -47,7 +47,7 @@ def git_blob_sha1(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()  # noqa: S324 (a Git ID, not security)
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     raise CorpusError(message)
 
 

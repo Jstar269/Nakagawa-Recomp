@@ -32,7 +32,7 @@ REQUIRED_ENV = "NK_HOMEBREW_CORPUS_REQUIRED"
 def installed_samples_root() -> Path | None:
     for prefix in (os.environ.get("PSPDEV"), "/usr/local/pspdev"):
         if prefix:
-            candidate = Path(prefix) / homebrew_corpus.load_corpus()["source"]["delivery"]["samples_root"]
+            candidate = Path(prefix) / str(homebrew_corpus.load_corpus()["source"]["delivery"]["samples_root"])
             if candidate.is_dir():
                 return candidate
     return None
@@ -142,6 +142,7 @@ class CorpusRecordsTests(unittest.TestCase):
         for program in self.corpus["programs"]:
             row = next((line for line in page.splitlines() if line.startswith(f"| `{program['id']}` |")), None)
             self.assertIsNotNone(row, program["id"])
+            assert row is not None
             self.assertTrue(row.rstrip(" |").endswith(f"| {program['expected']['status'].lower()}"), row)
 
     def test_every_copyright_holder_is_credited(self) -> None:
