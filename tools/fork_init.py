@@ -51,7 +51,7 @@ sys.path.insert(0, str(TOOLS))
 import provenance_attest_verify  # noqa: E402
 import provenance_ledger  # noqa: E402
 
-TRUSTED_LEDGER = "docs/provenance/IMPLEMENTATION_PROVENANCE.json"
+AUTHORITY_LEDGER = "docs/provenance/IMPLEMENTATION_PROVENANCE.json"
 PUBLIC_LEDGER = "assets/public_provenance_ledger.json"
 AUTHORITY_README = "README.md"
 
@@ -156,12 +156,12 @@ def seed_records(public_ledger: dict, commit: str) -> list[dict]:
     return [records[key] for key in sorted(records)]
 
 
-def regenerated_public_ledger(repo: Path, rev: str, trusted_ledger: Path) -> bytes:
-    """The committed public ledger the trusted verifier derives for ``rev`` from ``trusted_ledger`` alone."""
+def regenerated_public_ledger(repo: Path, rev: str, authority_ledger: Path) -> bytes:
+    """The committed public ledger the trusted verifier derives for ``rev`` from ``authority_ledger`` alone."""
     with tempfile.TemporaryDirectory(prefix="nakagawa-fork-init-") as scratch:
         try:
             envelope = provenance_attest_verify.generate_authority_baseline(
-                repo=repo, base_rev=rev, trusted_ledger=trusted_ledger, workdir=Path(scratch),
+                repo=repo, base_rev=rev, trusted_ledger=authority_ledger, workdir=Path(scratch),
             )
         except provenance_attest_verify.VerifyError as error:
             raise ForkInitError(error.code, str(error)) from error
@@ -173,12 +173,12 @@ def verify(repo: Path, authority: Path, rev: str = "HEAD") -> str:
     """Check that the authority reproduces the committed public ledger at ``rev``."""
     repo = _repo_root(repo)
     sha = _commit_sha(repo, rev)
-    trusted = authority / TRUSTED_LEDGER
-    if not trusted.is_file():
-        raise ForkInitError("AUTHORITY_MISSING", f"{trusted} does not exist; run `fork_init.py init` first")
+    ledger = authority / AUTHORITY_LEDGER
+    if not ledger.is_file():
+        raise ForkInitError("AUTHORITY_MISSING", f"{ledger} does not exist; run `fork_init.py init` first")
     committed = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", f"{sha}:{PUBLIC_LEDGER}"],
                                capture_output=True, check=False).stdout
-    regenerated = regenerated_public_ledger(repo, sha, trusted)
+    regenerated = regenerated_public_ledger(repo, sha, ledger)
     if regenerated != committed:
         raise ForkInitError(
             "AUTHORITY_MISMATCH",
@@ -193,7 +193,7 @@ def _readme(commit: str) -> str:
         "# Fork provenance authority\n\n"
         "This repository is the provenance authority of a Nakagawa Recomp fork. Keep it private or\n"
         "public as you choose, but never inside the fork's own checkout.\n\n"
-        f"`tools/fork_init.py` seeded `{TRUSTED_LEDGER}` from the fork's public\n"
+        f"`tools/fork_init.py` seeded `{AUTHORITY_LEDGER}` from the fork's public\n"
         f"ledger at commit `{commit}`. Each seeded record adopts the claim published there.\n"
         "New records are your own attestations; add them with `tools/fork_init.py record`, then\n"
         "admit the paths with `tools/admit_paths.py --private-repo <this folder>`.\n\n"
@@ -218,14 +218,14 @@ def init(repo: Path, authority: Path, rev: str = "HEAD", *, assisted_by: str | N
 
     authority.mkdir(parents=True, exist_ok=True)
     _git(authority, "init", "--quiet", "--initial-branch=main")
-    ledger_path = authority / TRUSTED_LEDGER
+    ledger_path = authority / AUTHORITY_LEDGER
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     ledger_path.write_bytes(_canonical({"schema_version": 1, "records": records}))
     (authority / AUTHORITY_README).write_text(_readme(sha), encoding="utf-8", newline="\n")
 
     verify(repo, authority, sha)
 
-    _git(authority, "add", "--", TRUSTED_LEDGER, AUTHORITY_README)
+    _git(authority, "add", "--", AUTHORITY_LEDGER, AUTHORITY_README)
     message = f"Seed the fork provenance authority from the public ledger at {sha}"
     if assisted_by:
         message += f"\n\nAssisted-by: {assisted_by}"
@@ -269,7 +269,7 @@ def add_record(
     ):
         raise ForkInitError("RECORD_INVALID",
                             "an upstream-derived record needs --upstream, --upstream-revision and --upstream-license")
-    ledger_path = authority / TRUSTED_LEDGER
+    ledger_path = authority / AUTHORITY_LEDGER
     if not ledger_path.is_file():
         raise ForkInitError("AUTHORITY_MISSING", f"{ledger_path} does not exist; run `fork_init.py init` first")
     if _git(authority, "status", "--porcelain", "--", "docs/provenance").strip():
@@ -277,7 +277,7 @@ def add_record(
     document = json.loads(ledger_path.read_text(encoding="utf-8"))
     records = document.get("records")
     if not isinstance(records, list):
-        raise ForkInitError("AUTHORITY_INVALID", f"{TRUSTED_LEDGER} has no records list")
+        raise ForkInitError("AUTHORITY_INVALID", f"{AUTHORITY_LEDGER} has no records list")
     if any(record.get("id") == record_id for record in records):
         raise ForkInitError("RECORD_EXISTS", f"record {record_id!r} already exists")
     taken = {path for record in records for path in record.get("paths", [])}
@@ -292,7 +292,7 @@ def add_record(
             record[key] = value
     records.append(record)
     ledger_path.write_bytes(_canonical(document))
-    _git(authority, "add", "--", TRUSTED_LEDGER)
+    _git(authority, "add", "--", AUTHORITY_LEDGER)
     message = f"Record {record_id}"
     if assisted_by:
         message += f"\n\nAssisted-by: {assisted_by}"

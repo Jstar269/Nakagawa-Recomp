@@ -119,13 +119,13 @@ class AuthorityTest(unittest.TestCase):
                                       check=True).stdout).strip()
         self.assertEqual(git("rev-parse", "--abbrev-ref", "HEAD"), "main")
         self.assertEqual(git("status", "--porcelain"), "")
-        self.assertEqual(git("ls-files").splitlines(), ["README.md", fork_init.TRUSTED_LEDGER])
+        self.assertEqual(git("ls-files").splitlines(), ["README.md", fork_init.AUTHORITY_LEDGER])
 
     def test_a_record_missing_from_the_authority_fails_verification(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nk-fork-tamper-") as scratch:
-            copy = Path(scratch) / fork_init.TRUSTED_LEDGER
+            copy = Path(scratch) / fork_init.AUTHORITY_LEDGER
             copy.parent.mkdir(parents=True)
-            document = json.loads((self.authority / fork_init.TRUSTED_LEDGER).read_text(encoding="utf-8"))
+            document = json.loads((self.authority / fork_init.AUTHORITY_LEDGER).read_text(encoding="utf-8"))
             document["records"] = document["records"][1:]
             copy.write_text(json.dumps(document), encoding="utf-8")
             with self.assertRaises(fork_init.ForkInitError) as caught:
@@ -148,7 +148,7 @@ class AuthorityTest(unittest.TestCase):
                     statement="I wrote tools/fork_example_tool.py for this fork.",
                 )
             records = provenance_ledger._detailed_records(
-                json.loads((authority / fork_init.TRUSTED_LEDGER).read_text(encoding="utf-8")))
+                json.loads((authority / fork_init.AUTHORITY_LEDGER).read_text(encoding="utf-8")))
             origins = {path: {"origin_kind": "authored_from_scratch", "origin": "fork maintainer",
                               "license": "GPL-3.0-or-later"}}
             (statement,) = admit_paths.classify([path], records, origins)
