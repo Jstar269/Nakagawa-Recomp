@@ -1082,6 +1082,8 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         model.update_step = (PlayerUiUpdateStep)update->phase;
         model.update_failed_step = (PlayerUiUpdateStep)update->failed_step;
         model.check_updates_at_start = app->settings.check_updates_at_start;
+        model.discord_presence = app->settings.discord_presence;
+        model.discord_available = nk_discord_available();
         model.current_version = NK_PLAYER_VERSION;
         if (checked) {
             model.update_version = newest->version;
