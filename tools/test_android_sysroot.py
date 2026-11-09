@@ -9,6 +9,8 @@ the crt objects and stubs are compiled too; without it those tests are skipped.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -51,6 +53,25 @@ FILES = {
     "libdl/NOTICE": b"libdl notice\n",
     "libc/SECRET_UNUSED.txt": b"not part of the sysroot\n",
 }
+
+
+EXTRA = {
+    "system/logging/liblog/include/android/log.h": b"/* log */\n",
+    "system/logging/liblog/liblog.map.txt": b"LIBLOG {\n  global:\n    nk_log;\n};\n",
+    "system/logging/liblog/NOTICE": b"liblog notice\n",
+    "frameworks/base/native/android/libandroid.map.txt": b"LIBANDROID {\n  global:\n    nk_android;\n};\n",
+    "frameworks/base/NOTICE": b"base notice\n",
+    "frameworks/native/vulkan/libvulkan/libvulkan.map.txt": b"LIBVULKAN {\n  global:\n    nk_vulkan;\n};\n",
+    "frameworks/native/NOTICE": b"native notice\n",
+    "Vulkan-Headers/include/vulkan/vulkan.h": b"/* vulkan */\n",
+    "Vulkan-Headers/include/vk_video/vulkan_video_codecs_common.h": b"/* video */\n",
+    "Vulkan-Headers/LICENSE.md": b"licence\n",
+    "Vulkan-Headers/LICENSES/Apache-2.0.txt": b"apache\n",
+    "Vulkan-Headers/LICENSES/MIT.txt": b"mit\n",
+    "license-list-data/text/GPL-2.0-only.txt": b"gpl-2.0\n",
+    "license-list-data/text/Linux-syscall-note.txt": b"syscall note\n",
+}
+EXTRA_PINS = {path: hashlib.sha256(data).hexdigest() for path, data in EXTRA.items()}
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -165,6 +186,68 @@ class SysrootTests(_SyntheticBionic):
         self.assertEqual(sorted(notices), sorted(f"NOTICES/bionic/{p}" for p in sysroot.NOTICES))
 
 
+class ExtraInputTests(unittest.TestCase):
+    """The pinned inputs from outside bionic."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory(prefix="nk-sysroot-extra-")
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        for path, data in EXTRA.items():
+            (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / path).write_bytes(data)
+
+    def test_the_pinned_files_are_read(self) -> None:
+        self.assertEqual(sysroot.read_extra(self.root, EXTRA_PINS), EXTRA)
+
+    def test_a_changed_or_missing_input_is_refused(self) -> None:
+        (self.root / "Vulkan-Headers/LICENSE.md").write_bytes(b"other\n")
+        with self.assertRaisesRegex(sysroot.SysrootError, "LICENSE.md: sha256"):
+            sysroot.read_extra(self.root, EXTRA_PINS)
+        (self.root / "Vulkan-Headers/LICENSE.md").unlink()
+        with self.assertRaisesRegex(sysroot.SysrootError, "pinned input missing"):
+            sysroot.read_extra(self.root, EXTRA_PINS)
+
+    def test_headers_stubs_and_notices_take_the_ndk_layout(self) -> None:
+        headers = sysroot.extra_header_entries(EXTRA)
+        self.assertEqual(sorted(headers), [
+            "usr/include/android/log.h",
+            "usr/include/vk_video/vulkan_video_codecs_common.h",
+            "usr/include/vulkan/vulkan.h",
+        ])
+        stubs = sysroot.stub_inputs(FILES, EXTRA)
+        self.assertEqual([(s.library, s.unversioned) for s in stubs], [
+            ("libc.so", False), ("libm.so", False), ("libdl.so", False),
+            ("liblog.so", True), ("libandroid.so", True), ("libvulkan.so", True),
+        ])
+        notices = sysroot.notice_entries(FILES, EXTRA)
+        self.assertEqual(notices["NOTICES/linux-uapi/Linux-syscall-note.txt"].data, b"syscall note\n")
+        self.assertEqual(len(notices), len(sysroot.NOTICES) + len(sysroot.EXTRA_NOTICES))
+
+    def test_an_extra_header_bionic_also_has_is_refused(self) -> None:
+        clash = {"usr/include/stdio.h": sysroot.Entry(b"/* other */\n")}
+        with self.assertRaisesRegex(sysroot.SysrootError, "usr/include/stdio.h"):
+            sysroot.header_entries(FILES, clash)
+
+    def test_the_repository_pins_every_input_the_builder_names(self) -> None:
+        document = json.loads(sysroot.INPUTS_FILE.read_text(encoding="utf-8"))
+        names = set(document["files"])
+        wanted = {source for source, _ in sysroot.EXTRA_HEADERS}
+        wanted |= {source for _, source in sysroot.EXTRA_STUBS}
+        wanted |= {source for source, _ in sysroot.EXTRA_NOTICES}
+        self.assertLessEqual(wanted, names)
+        for tree, _ in sysroot.EXTRA_HEADER_TREES:
+            self.assertTrue(any(name.startswith(tree + "/") for name in names), tree)
+        sources = document["sources"]
+        for source in sources.values():
+            self.assertRegex(source["commit"], r"^[0-9a-f]{40}$")
+        for name, entry in document["files"].items():
+            self.assertTrue(any(name.startswith(prefix + "/") for prefix in sources), name)
+            self.assertRegex(entry["sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(entry["git_blob"], r"^[0-9a-f]{40}$")
+        self.assertEqual(sysroot.load_pins(), {n: e["sha256"] for n, e in document["files"].items()})
+
+
 def _clang() -> Path | None:
     folder = os.environ.get("NK_ANDROID_LLVM_BIN")
     if not folder:
@@ -202,6 +285,24 @@ class BuildTests(_SyntheticBionic):
         for name in ("crtbegin_dynamic.o", "crtbegin_so.o"):
             self.assertIn(b"nk_crt_marker", objects[f"{lib}/{name}"].data)
             self.assertIn((29).to_bytes(4, "little"), objects[f"{lib}/{name}"].data)
+
+    def test_the_extra_stubs_are_built_unversioned(self) -> None:
+        clang = _clang()
+        if clang is None:
+            self.skipTest("set NK_ANDROID_LLVM_BIN to an LLVM bin folder")
+        files = sysroot.read_bionic(self.repo, self.commit)
+        headers = sysroot.header_entries(files, sysroot.extra_header_entries(EXTRA))
+        with tempfile.TemporaryDirectory(prefix="nk-sysroot-build-") as tmp:
+            objects = sysroot.build_objects(files, headers, clang, 29, Path(tmp),
+                                            sysroot.stub_inputs(files, EXTRA))
+        lib = "usr/lib/aarch64-linux-android/29"
+        for library, symbol in (("liblog.so", b"nk_log"), ("libandroid.so", b"nk_android"),
+                                ("libvulkan.so", b"nk_vulkan")):
+            data = objects[f"{lib}/{library}"].data
+            self.assertIn(symbol, data, library)
+            self.assertNotIn(b"LIBLOG", data, library)  # no version names
+            self.assertNotIn(b"LIBANDROID", data, library)
+        self.assertIn(b"LIBC", objects[f"{lib}/libc.so"].data)
 
 
 if __name__ == "__main__":

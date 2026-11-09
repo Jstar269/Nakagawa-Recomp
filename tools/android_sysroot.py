@@ -16,6 +16,12 @@ nothing from the NDK ships:
 - stubs: libc.so, libm.so and libdl.so from their symbol files, through
   tools/android_stubgen.py.
 
+Beside bionic, android/toolchain/sysroot-inputs.json pins, by SHA-256, the rest of what the
+NDK's sysroot offers a C program: `android/log.h` and the liblog, libandroid and libvulkan
+symbol files from AOSP at the same tag (their stubs unversioned, as the NDK ships them), the
+Khronos Vulkan headers, and the licence texts, the kernel's GPL-2.0-only and
+Linux-syscall-note included. Every licence ships under NOTICES/.
+
 Every input is read from the bionic clone's git objects, not its working tree: a Windows
 checkout rewrites line endings, and eight kernel headers differ only in letter case
 (`ipt_TTL.h` and `ipt_ttl.h`), so one of each pair is missing there. The output is one tar
@@ -31,6 +37,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import json
 import subprocess
 import sys
 import tarfile
@@ -69,6 +76,43 @@ STUBS = (
     ("libdl.so", "libdl/libdl.map.txt"),
 )
 NOTICES = ("libc/NOTICE", "libm/NOTICE", "libdl/NOTICE")
+
+#: The pinned inputs from outside bionic: each file's SHA-256, git blob ID and source commit.
+INPUTS_FILE = Path(__file__).resolve().parent.parent / "android" / "toolchain" / "sysroot-inputs.json"
+
+#: (input path, sysroot path) for single headers, and (input folder, sysroot folder) for trees.
+EXTRA_HEADERS = (("system/logging/liblog/include/android/log.h", "usr/include/android/log.h"),)
+EXTRA_HEADER_TREES = (
+    ("Vulkan-Headers/include/vulkan", "usr/include/vulkan"),
+    ("Vulkan-Headers/include/vk_video", "usr/include/vk_video"),
+)
+#: The NDK ships these unversioned at every API level, although their symbol files name
+#: versions.
+EXTRA_STUBS = (
+    ("liblog.so", "system/logging/liblog/liblog.map.txt"),
+    ("libandroid.so", "frameworks/base/native/android/libandroid.map.txt"),
+    ("libvulkan.so", "frameworks/native/vulkan/libvulkan/libvulkan.map.txt"),
+)
+#: Licence texts, shipped beside what they cover. The kernel uapi headers are
+#: GPL-2.0-only WITH Linux-syscall-note.
+EXTRA_NOTICES = (
+    ("system/logging/liblog/NOTICE", "NOTICES/liblog/NOTICE"),
+    ("frameworks/base/NOTICE", "NOTICES/frameworks-base/NOTICE"),
+    ("frameworks/native/NOTICE", "NOTICES/frameworks-native/NOTICE"),
+    ("Vulkan-Headers/LICENSE.md", "NOTICES/Vulkan-Headers/LICENSE.md"),
+    ("Vulkan-Headers/LICENSES/Apache-2.0.txt", "NOTICES/Vulkan-Headers/LICENSES/Apache-2.0.txt"),
+    ("Vulkan-Headers/LICENSES/MIT.txt", "NOTICES/Vulkan-Headers/LICENSES/MIT.txt"),
+    ("license-list-data/text/GPL-2.0-only.txt", "NOTICES/linux-uapi/GPL-2.0-only.txt"),
+    ("license-list-data/text/Linux-syscall-note.txt", "NOTICES/linux-uapi/Linux-syscall-note.txt"),
+)
+
+
+@dataclass(frozen=True)
+class StubInput:
+    library: str
+    source: str
+    text: str
+    unversioned: bool
 
 
 class SysrootError(RuntimeError):
@@ -109,8 +153,59 @@ def read_bionic(bionic: Path, commit: str = BIONIC_COMMIT) -> dict[str, bytes]:
     return files
 
 
-def header_entries(files: dict[str, bytes]) -> dict[str, Entry]:
-    """The sysroot's usr/include, laid out as the NDK lays it out."""
+def load_pins(path: Path = INPUTS_FILE) -> dict[str, str]:
+    """{input path: SHA-256} from the pinned-input list."""
+    try:
+        files = json.loads(path.read_text(encoding="utf-8"))["files"]
+        return {name: entry["sha256"] for name, entry in files.items()}
+    except (KeyError, TypeError, ValueError) as error:
+        raise SysrootError(f"{path}: not a pinned-input list ({error})") from error
+
+
+def read_extra(root: Path, pins: dict[str, str]) -> dict[str, bytes]:
+    """Every pinned file under *root*, refused unless its SHA-256 is the pinned one."""
+    files: dict[str, bytes] = {}
+    for name, digest in sorted(pins.items()):
+        path = root / name
+        if not path.is_file():
+            raise SysrootError(f"{path}: pinned input missing")
+        data = path.read_bytes()
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != digest:
+            raise SysrootError(f"{path}: sha256 {actual}, pinned {digest}")
+        files[name] = data
+    return files
+
+
+def extra_header_entries(extra: dict[str, bytes]) -> dict[str, Entry]:
+    out: dict[str, Entry] = {}
+    for source, dest in EXTRA_HEADERS:
+        if source not in extra:
+            raise SysrootError(f"{source}: not in the pinned inputs")
+        out[dest] = Entry(extra[source])
+    for tree, dest in EXTRA_HEADER_TREES:
+        found = [p for p in extra if p.startswith(tree + "/")]
+        if not found:
+            raise SysrootError(f"{tree}: no pinned inputs under it")
+        for path in found:
+            out[f"{dest}/{path[len(tree) + 1:]}"] = Entry(extra[path])
+    return out
+
+
+def stub_inputs(files: dict[str, bytes], extra: dict[str, bytes] | None) -> list[StubInput]:
+    """Bionic's stubs, then, with *extra*, the unversioned NDK libraries."""
+    stubs = [StubInput(lib, src, files[src].decode("utf-8"), False) for lib, src in STUBS]
+    if extra is not None:
+        for library, source in EXTRA_STUBS:
+            if source not in extra:
+                raise SysrootError(f"{source}: not in the pinned inputs")
+            stubs.append(StubInput(library, source, extra[source].decode("utf-8"), True))
+    return stubs
+
+
+def header_entries(files: dict[str, bytes],
+                   extra: dict[str, Entry] | None = None) -> dict[str, Entry]:
+    """The sysroot's usr/include, laid out as the NDK lays it out, plus the *extra* headers."""
     out: dict[str, Entry] = {}
 
     def put(dest: str, data: bytes, source: str) -> None:
@@ -118,6 +213,8 @@ def header_entries(files: dict[str, bytes]) -> dict[str, Entry]:
             raise SysrootError(f"{source} and an earlier file both map to {dest}")
         out[dest] = Entry(data)
 
+    for dest, entry in sorted((extra or {}).items()):
+        put(dest, entry.data, dest)
     for path, data in sorted(files.items()):
         for tree, dest in HEADER_TREES:
             if path.startswith(tree + "/"):
@@ -152,7 +249,7 @@ def _run(command: list[str], what: str) -> None:
 
 
 def build_objects(files: dict[str, bytes], headers: dict[str, Entry], clang: Path, api: int,
-                  scratch: Path) -> dict[str, Entry]:
+                  scratch: Path, stubs: list[StubInput] | None = None) -> dict[str, Entry]:
     """crt objects and stub libraries, compiled by *clang* for aarch64-linux-android<api>."""
     skip = case_collisions(list(headers))
     sysroot = scratch / "sysroot"
@@ -195,25 +292,37 @@ def build_objects(files: dict[str, bytes], headers: dict[str, Entry], clang: Pat
     lib_dir = f"usr/lib/{TRIPLE_ARCH}-linux-android/{api}"
     out = {f"{lib_dir}/{name}": Entry(path.read_bytes()) for name, path in built.items()}
 
-    for library, map_file in STUBS:
-        text = files[map_file].decode("utf-8")
+    for stub_input in stub_inputs(files, None) if stubs is None else stubs:
+        library = stub_input.library
         versions = android_stubgen.select(
-            android_stubgen.parse_symbol_file(text, map_file), api, ARCH)
+            android_stubgen.parse_symbol_file(stub_input.text, stub_input.source), api, ARCH,
+            unversioned=stub_input.unversioned)
         stem = library.removesuffix(".so")
         c_file, script = objects / f"{stem}.c", objects / f"{stem}.map"
         c_file.write_bytes(android_stubgen.render_stub_c(versions, library).encode())
-        script.write_bytes(android_stubgen.render_version_script(versions).encode())
+        version_script = android_stubgen.render_version_script(versions)
+        script.write_bytes(version_script.encode())
+        # An unversioned library has no script: lld refuses an empty one.
+        script_flag = [f"-Wl,--version-script={script}"] if version_script else []
         stub = objects / library
         _run([str(clang), target, "-shared", "-nostdlib", "-fuse-ld=lld", "-fPIC", "-O2",
-              f"-Wl,-soname,{library}", f"-Wl,--version-script={script}", "-Wl,--build-id=sha1",
+              f"-Wl,-soname,{library}", *script_flag, "-Wl,--build-id=sha1",
               f"-ffile-prefix-map={scratch}=/sysroot-build", "-o", str(stub), str(c_file)],
              f"linking the {library} stub")
         out[f"{lib_dir}/{library}"] = Entry(stub.read_bytes(), executable=True)
     return out
 
 
-def notice_entries(files: dict[str, bytes]) -> dict[str, Entry]:
-    return {f"NOTICES/bionic/{path}": Entry(files[path]) for path in NOTICES}
+def notice_entries(files: dict[str, bytes],
+                   extra: dict[str, bytes] | None = None) -> dict[str, Entry]:
+    out = {f"NOTICES/bionic/{path}": Entry(files[path]) for path in NOTICES}
+    if extra is None:
+        return out
+    for source, dest in EXTRA_NOTICES:
+        if source not in extra:
+            raise SysrootError(f"{source}: not in the pinned inputs")
+        out[dest] = Entry(extra[source])
+    return out
 
 
 def write_archive(entries: dict[str, Entry], out: Path) -> str:
@@ -244,16 +353,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--bionic", required=True, type=Path,
                         help=f"a clone of {BIONIC_URL} holding {BIONIC_TAG} ({BIONIC_COMMIT[:12]})")
+    parser.add_argument("--extra", required=True, type=Path,
+                        help=f"the inputs {INPUTS_FILE.name} pins, under their listed paths")
     parser.add_argument("--clang", required=True, type=Path, help="the clang that builds the objects")
     parser.add_argument("--api", type=int, default=29)
     parser.add_argument("--out", required=True, type=Path, help="the sysroot tar to write")
     args = parser.parse_args(argv)
     try:
         files = read_bionic(args.bionic)
-        headers = header_entries(files)
+        extra = read_extra(args.extra, load_pins())
+        headers = header_entries(files, extra_header_entries(extra))
         with tempfile.TemporaryDirectory(prefix="nk-sysroot-") as tmp:
-            objects = build_objects(files, headers, args.clang, args.api, Path(tmp))
-        entries = {**headers, **objects, **notice_entries(files)}
+            objects = build_objects(files, headers, args.clang, args.api, Path(tmp),
+                                    stub_inputs(files, extra))
+        entries = {**headers, **objects, **notice_entries(files, extra)}
         digest = write_archive(entries, args.out)
     except (OSError, SysrootError, android_stubgen.SymbolFileError) as error:
         print(f"android_sysroot: {error}", file=sys.stderr)
