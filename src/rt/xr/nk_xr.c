@@ -19,7 +19,8 @@
 
 static void *nk_xr_lib_open(const char *name) {
 #ifdef _WIN32
-    return (void *)LoadLibraryA(name);
+    // Only the application directory and System32: never the current directory or PATH.
+    return (void *)LoadLibraryExA(name, NULL, LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
 #else
     return dlopen(name, RTLD_NOW | RTLD_LOCAL);
 #endif
@@ -124,6 +125,7 @@ int nk_xr_load_instance_fns(NkXrFns *f, XrInstance instance) {
     NK_XR_RESOLVE(gipa, instance, f, WaitFrame, bad);
     NK_XR_RESOLVE(gipa, instance, f, BeginFrame, bad);
     NK_XR_RESOLVE(gipa, instance, f, EndFrame, bad);
+    NK_XR_RESOLVE(gipa, instance, f, EnumerateEnvironmentBlendModes, bad);
     return bad == 0 ? 0 : -1;
 }
 
@@ -166,6 +168,39 @@ static int nk_xr_has_vulkan_enable2(const NkXrFns *f) {
     return found;
 }
 
+// Pick the blend mode: OPAQUE when the runtime offers it, else its first mode.
+// Returns 0 on success, -1 when the enumeration fails or reports no mode, -2 when
+// allocation fails.
+static int nk_xr_pick_blend_mode(const NkXrFns *f, XrInstance inst, XrSystemId sys, XrEnvironmentBlendMode *out) {
+    uint32_t count = 0;
+    if (XR_FAILED(f->EnumerateEnvironmentBlendModes(inst, sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &count,
+                                                    NULL)) ||
+        count == 0) {
+        return -1;
+    }
+    XrEnvironmentBlendMode *modes = (XrEnvironmentBlendMode *)calloc(count, sizeof(*modes));
+    if (modes == NULL) {
+        return -2;
+    }
+    uint32_t got = 0;
+    int rc = -1;
+    if (XR_SUCCEEDED(f->EnumerateEnvironmentBlendModes(inst, sys, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, count,
+                                                       &got, modes)) &&
+        got > 0 && got <= count) {
+        XrEnvironmentBlendMode pick = modes[0];
+        for (uint32_t i = 0; i < got; i++) {
+            if (modes[i] == XR_ENVIRONMENT_BLEND_MODE_OPAQUE) {
+                pick = modes[i];
+                break;
+            }
+        }
+        *out = pick;
+        rc = 0;
+    }
+    free(modes);
+    return rc;
+}
+
 NkXrRefusal nk_xr_probe(NkXrFns *f, const char *app_name, XrInstance *instance, XrSystemId *system) {
     if (f == NULL || instance == NULL || system == NULL || f->EnumerateInstanceExtensionProperties == NULL ||
         f->CreateInstance == NULL) {
@@ -196,7 +231,14 @@ NkXrRefusal nk_xr_probe(NkXrFns *f, const char *app_name, XrInstance *instance, 
     ci.enabledExtensionNames = extensions;
 
     XrInstance inst = XR_NULL_HANDLE;
-    if (XR_FAILED(f->CreateInstance(&ci, &inst)) || inst == XR_NULL_HANDLE) {
+    XrResult cr = f->CreateInstance(&ci, &inst);
+    if (cr == XR_ERROR_API_VERSION_UNSUPPORTED) {
+        // A 1.0 runtime refuses 1.1: ask once more for 1.0.0.
+        ci.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+        inst = XR_NULL_HANDLE;
+        cr = f->CreateInstance(&ci, &inst);
+    }
+    if (XR_FAILED(cr) || inst == XR_NULL_HANDLE) {
         return NK_XR_REFUSE_INSTANCE;
     }
     if (nk_xr_load_instance_fns(f, inst) != 0) {
@@ -215,6 +257,14 @@ NkXrRefusal nk_xr_probe(NkXrFns *f, const char *app_name, XrInstance *instance, 
         f->DestroyInstance(inst);
         return NK_XR_REFUSE_NO_HMD;
     }
+    XrEnvironmentBlendMode blend = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    int br = nk_xr_pick_blend_mode(f, inst, sys, &blend);
+    if (br != 0) {
+        f->DestroyInstance(inst);
+        return br == -2 ? NK_XR_REFUSE_OUT_OF_MEMORY : NK_XR_REFUSE_INSTANCE;
+    }
+    f->api_version = ci.applicationInfo.apiVersion;
+    f->blend_mode = blend;
     *instance = inst;
     *system = sys;
     return NK_XR_OK;
@@ -234,10 +284,12 @@ NkXrAction nk_xr_session_next(NkXrRun *run, XrSessionState new_state) {
         // Not running a frame loop; the runtime may leave this state for READY (or
         // for EXITING after an exit request).
         run->state = new_state;
+        run->session_destroyed = 0;  // a new session
         run->layers_shown = 0;
         return NK_XR_ACT_NONE;
     case XR_SESSION_STATE_READY:
         run->state = new_state;
+        run->session_destroyed = 0;
         run->layers_shown = 0;
         if (run->running) {
             return NK_XR_ACT_NONE;  // already begun; xrBeginSession twice is an error
@@ -267,6 +319,7 @@ NkXrAction nk_xr_session_next(NkXrRun *run, XrSessionState new_state) {
         run->layers_shown = 0;
         run->running = 0;
         run->may_retry = 1;
+        run->session_destroyed = 1;
         return NK_XR_ACT_DESTROY_SESSION;
     case XR_SESSION_STATE_EXITING:
         run->state = new_state;
@@ -274,6 +327,10 @@ NkXrAction nk_xr_session_next(NkXrRun *run, XrSessionState new_state) {
         run->running = 0;
         run->may_retry = 0;
         run->done = 1;
+        if (run->session_destroyed) {
+            return NK_XR_ACT_EXIT;  // LOSS_PENDING already destroyed it; never twice
+        }
+        run->session_destroyed = 1;
         return NK_XR_ACT_DESTROY_AND_EXIT;
     default:
         return NK_XR_ACT_NONE;
@@ -283,6 +340,24 @@ NkXrAction nk_xr_session_next(NkXrRun *run, XrSessionState new_state) {
 XrResult nk_xr_do_action(const NkXrFns *f, XrSession session, NkXrRun *run, NkXrAction action) {
     if (f == NULL || run == NULL) {
         return XR_ERROR_VALIDATION_FAILURE;
+    }
+    const void *needed = (const void *)f;  // actions with no OpenXR call need nothing
+    switch (action) {
+    case NK_XR_ACT_BEGIN_SESSION:
+        needed = (const void *)f->BeginSession;
+        break;
+    case NK_XR_ACT_END_SESSION:
+        needed = (const void *)f->EndSession;
+        break;
+    case NK_XR_ACT_DESTROY_SESSION:
+    case NK_XR_ACT_DESTROY_AND_EXIT:
+        needed = (const void *)f->DestroySession;
+        break;
+    default:
+        break;
+    }
+    if (needed == NULL) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
     }
     switch (action) {
     case NK_XR_ACT_BEGIN_SESSION: {
@@ -309,6 +384,7 @@ XrResult nk_xr_do_action(const NkXrFns *f, XrSession session, NkXrRun *run, NkXr
     case NK_XR_ACT_NONE:
     case NK_XR_ACT_FRAMES_HIDDEN:
     case NK_XR_ACT_FRAMES_SHOWN:
+    case NK_XR_ACT_EXIT:
         return XR_SUCCESS;  // no OpenXR call: the frame loop runs nk_xr_frame_once()
     }
     return XR_ERROR_VALIDATION_FAILURE;
@@ -321,6 +397,9 @@ XrResult nk_xr_frame_once(const NkXrFns *f, XrSession session, const NkXrRun *ru
     }
     memset(out, 0, sizeof(*out));
     out->slot = -1;
+    if (f->WaitFrame == NULL || f->BeginFrame == NULL || f->EndFrame == NULL) {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
     if (!run->running) {
         return XR_ERROR_SESSION_NOT_RUNNING;
     }
@@ -362,7 +441,7 @@ XrResult nk_xr_frame_once(const NkXrFns *f, XrSession session, const NkXrRun *ru
     memset(&ei, 0, sizeof(ei));
     ei.type = XR_TYPE_FRAME_END_INFO;
     ei.displayTime = fs.predictedDisplayTime;
-    ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    ei.environmentBlendMode = f->blend_mode != 0 ? f->blend_mode : XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     ei.layerCount = 0;
     ei.layers = NULL;
     out->layers_submitted = 0;

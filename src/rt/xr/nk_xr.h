@@ -74,6 +74,13 @@ typedef struct NkXrFns {
     PFN_xrWaitFrame WaitFrame;
     PFN_xrBeginFrame BeginFrame;
     PFN_xrEndFrame EndFrame;
+    PFN_xrEnumerateEnvironmentBlendModes EnumerateEnvironmentBlendModes;
+    // Set by nk_xr_probe(): the API version the runtime granted (XR_CURRENT_API_VERSION,
+    // or XR_MAKE_VERSION(1, 0, 0) after a runtime refused 1.1) and the blend mode the
+    // frame loop submits (OPAQUE when offered, else the runtime's first mode). Zero
+    // before a probe; nk_xr_frame_once() then submits OPAQUE.
+    XrVersion api_version;
+    XrEnvironmentBlendMode blend_mode;
 } NkXrFns;
 
 // Open the loader library (`libname`, or NK_XR_LOADER_NAME when NULL) and resolve
@@ -99,6 +106,10 @@ void nk_xr_unload(NkXrFns *f);
 // nk_xr_load_from_proc(). On NK_XR_OK, `*instance` and `*system` are set and the
 // caller owns the instance (f->DestroyInstance); on any refusal nothing is left
 // open and the outputs are untouched. `app_name` may be NULL ("Nakagawa Recomp").
+// The instance is first requested at XR_CURRENT_API_VERSION; on
+// XR_ERROR_API_VERSION_UNSUPPORTED it is requested once more at 1.0.0 (see
+// f->api_version). The environment blend modes are enumerated once here for the system;
+// a runtime that reports none refuses with NK_XR_REFUSE_INSTANCE.
 NkXrRefusal nk_xr_probe(NkXrFns *f, const char *app_name, XrInstance *instance, XrSystemId *system);
 
 // What the caller must do after a session state event.
@@ -109,7 +120,8 @@ typedef enum NkXrAction {
     NK_XR_ACT_FRAMES_SHOWN,     // run frames, submit layers (VISIBLE, FOCUSED)
     NK_XR_ACT_END_SESSION,      // stop frames, xrEndSession (STOPPING)
     NK_XR_ACT_DESTROY_SESSION,  // stop frames, xrDestroySession; a new session may be made later (LOSS_PENDING)
-    NK_XR_ACT_DESTROY_AND_EXIT  // stop frames, xrDestroySession, leave VR (EXITING)
+    NK_XR_ACT_DESTROY_AND_EXIT, // stop frames, xrDestroySession, leave VR (EXITING)
+    NK_XR_ACT_EXIT              // leave VR; the session is already destroyed, no OpenXR call (EXITING after LOSS_PENDING)
 } NkXrAction;
 
 // Session lifecycle bookkeeping, driven only by nk_xr_session_next() and
@@ -120,6 +132,7 @@ typedef struct NkXrRun {
     int layers_shown;      // frames carry layers (the state is VISIBLE or FOCUSED)
     int may_retry;         // the session was lost; creating a new one later is allowed
     int done;              // the runtime asked the application to leave VR
+    int session_destroyed; // a destroy action was returned and no new session has reached IDLE or READY since
 } NkXrRun;
 
 void nk_xr_run_init(NkXrRun *run);
@@ -133,7 +146,9 @@ void nk_xr_run_init(NkXrRun *run);
 //   VISIBLE, FOCUSED         frames run, layers are shown
 //   STOPPING                 stop frames and end the session
 //   LOSS_PENDING             destroy the session; a new one may be created later
-//   EXITING                  destroy the session and leave
+//   EXITING                  destroy the session and leave; after LOSS_PENDING the
+//                            session is already destroyed, so the action is the plain
+//                            NK_XR_ACT_EXIT (no xrDestroySession, never a second destroy)
 // A state outside XR_SESSION_STATE_IDLE..EXITING, or a NULL `run`, changes nothing
 // and returns NK_XR_ACT_NONE. Frame and end actions are returned only while the
 // session is running (a state event the runtime sends in the wrong order cannot make
@@ -144,6 +159,8 @@ NkXrAction nk_xr_session_next(NkXrRun *run, XrSessionState new_state);
 // result of the OpenXR call (XR_SUCCESS when the action has no call). When
 // xrBeginSession fails, `run->running` stays 0 and the result is returned for the
 // caller to report; after a destroy action the session handle is no longer valid.
+// Returns XR_ERROR_FUNCTION_UNSUPPORTED, making no call, when the table lacks the
+// function the action needs (a table whose instance functions were never resolved).
 XrResult nk_xr_do_action(const NkXrFns *f, XrSession session, NkXrRun *run, NkXrAction action);
 
 // What one pass of the frame loop saw.
@@ -162,7 +179,8 @@ typedef struct NkXrFrame {
 // layer (layers_submitted is 0 in every case): the quad layer that shows the slot
 // is added with the presenter tap. Returns the first failing OpenXR result;
 // XR_ERROR_SESSION_NOT_RUNNING (no call made) when `run->running` is 0 and
-// XR_ERROR_VALIDATION_FAILURE for a NULL argument. This function is the mailbox
+// XR_ERROR_VALIDATION_FAILURE for a NULL argument; XR_ERROR_FUNCTION_UNSUPPORTED (no
+// call made) when the table lacks WaitFrame, BeginFrame or EndFrame. This function is the mailbox
 // consumer: it never calls the producer's functions.
 XrResult nk_xr_frame_once(const NkXrFns *f, XrSession session, const NkXrRun *run, NkXrMailbox *mailbox,
                           NkXrFrame *out);

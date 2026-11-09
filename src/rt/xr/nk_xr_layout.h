@@ -32,7 +32,7 @@ int nk_xr_quad_pose(float distance_m, float height_m, float pos[3], float quat[4
 // `separation` is s, `convergence` is c (the clip w that stays at screen depth),
 // `eye` is -1 for the left eye and +1 for the right eye (any negative value is
 // left, any positive value is right, and 0 is mono: x unchanged). A vertex with
-// w == c is unchanged. The y, z and w coordinates are not touched by the rule.
+// w == c is unchanged. Any non-finite input gives NaN (no result is invented). The y, z and w coordinates are not touched by the rule.
 float nk_xr_eye_clip_x(float x_clip, float w_clip, float separation, float convergence, int eye);
 
 #ifdef __cplusplus

@@ -32,6 +32,9 @@ int nk_xr_quad_pose(float distance_m, float height_m, float pos[3], float quat[4
 }
 
 float nk_xr_eye_clip_x(float x_clip, float w_clip, float separation, float convergence, int eye) {
+    if (!isfinite(x_clip) || !isfinite(w_clip) || !isfinite(separation) || !isfinite(convergence)) {
+        return NAN;
+    }
     float sign = eye < 0 ? -1.0f : (eye > 0 ? 1.0f : 0.0f);
     return x_clip + sign * separation * (w_clip - convergence);
 }
