@@ -402,6 +402,22 @@ ge-cpu-profile-validate-selftest: $(RT_GE_O)
 
 native-core-tests: ge-cpu-profile-validate-selftest
 
+# ge-tnl-census-selftest -- why ge.c keeps its own T&L for a PRIM it could offer to the GPU T&L
+# route (#318): the production ge.o with SR_GPU_TNL's switch on and a backend stand-in, one
+# source-owned list per reason (clear, flat, texgen, matrix, viewport, texcoord, fog, specular,
+# light, vertex, clip, backend), each counted under its own reason only; the counts sum to
+# ge_tnl_counts' cpu, an eligible PRIM is taken, and nothing is counted with the switch off. No
+# game input, no GPU.
+GE_TNL_CENSUS_SELFTEST := $(BUILD_DIR)/ge_tnl_census_selftest$(EXE_EXT)
+
+ge-tnl-census-selftest: $(RT_GE_O)
+	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_TNL_CENSUS_SELFTEST) \
+		tests/native/ge_tnl_census_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
+		src/rt/flight_recorder.c src/rt/perf.c -lm
+	$(GE_TNL_CENSUS_SELFTEST)
+
+native-core-tests: ge-tnl-census-selftest
+
 # ge-flight-overhead -- cost of the disarmed flight recorder on the GE paths (#320): the
 # ge-cpu-profile-validate-selftest harness's --bench mode on the production ge.c, built once
 # with the recorder linked (SR_FLIGHT unset) and once with -USR_FLIGHT_RECORDER_LINKED, run
