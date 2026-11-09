@@ -871,7 +871,9 @@ asset-index-selftest:
 # checks the switch's values and its Ace gate (`--authentic`), twin-alloc-fail injects a
 # failed twin allocation, twin-drain-fail one whose drain fails too (nothing may be freed),
 # twin-soft runs the software renderer's twin (ge.c) on twin-scene's list against the twin-off
-# software run and the Vulkan twin, and gpu-timestamps runs once more with the twin shown.
+# software run and the Vulkan twin, twin-key turns the twin on through the launch line's `twin=on`
+# (`--twin-key on`) in both renderers and checks the Ace report, with the variable unset and set,
+# and gpu-timestamps runs once more with the twin shown.
 # gpu-coherence-twin-mutants (below) proves the twin cells kill the twin's mutants. The pipeline
 # cache (#2149) runs last, as three processes over one empty data root: a cold run saves the
 # cache, a warm run must start from it and draw the same frames, and a reject run re-opens it
@@ -929,6 +931,10 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --twin native --scale 2 --case twin-drain-fail --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
 	$(GPU_COHERENCE_BIN) --twin 1 --case twin-soft
 	$(GPU_COHERENCE_BIN) --twin native --case twin-soft
+	$(GPU_COHERENCE_BIN) --twin-key on --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key on --twin native --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key on --twin 0 --case twin-key
+	$(GPU_COHERENCE_BIN) --twin-key on --twin off --case twin-key
 	@rc=0; $(GPU_COHERENCE_BIN) --twin 1 --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-coherence-selftest twin gpu-timestamps (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-coherence-selftest twin gpu-timestamps (exit $$rc)"; exit $$rc; fi
@@ -986,14 +992,18 @@ gpu-coherence-selftest-snapbar-mutants: shader-verify $(RT_GE_O)
 # full-colour twin: twin-scene at scale 2 against a twin-off reference. Each
 # SR_TWIN_SELFTEST_SKIP_SITE_<site> leaves one authentic write without its mirror
 # (RENDER, UPLOAD, PATCH, DEPTH_UPLOAD, XFER, SNAPSHOT): the whole suite with `--twin native` (its
-# identity checks). Each builds its own binary, so seven are built; the target is not part of
+# identity checks). SR_TWIN_SELFTEST_GPU_KEY_REQUEST and SR_TWIN_SELFTEST_SOFT_KEY_REQUEST leave the
+# launch line's twin=on unread in ge_gpu.c and in ge.c, and the two KEY_CONFIRM mutants leave a
+# running twin unconfirmed: the twin-key case. The ge.c mutants build their own ge.o. Each builds
+# its own binary, so eleven are built; the target is not part of
 # gpu-coherence-selftest or native-core-tests. Each mutant must fail with its own message; exit 77
 # (no Vulkan device) is a SKIP, as for the selftest itself.
 gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 	@rc=0; $(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_mutant_s2.txt || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "twin mutants: SKIP (no Vulkan device)"; exit 77; fi; \
 	if [ $$rc -ne 0 ]; then echo "twin mutants: the twin-off reference run failed (exit $$rc)" >&2; exit $$rc; fi
-	@for m in NATIVE_MUTANT SKIP_SITE_RENDER SKIP_SITE_UPLOAD SKIP_SITE_PATCH SKIP_SITE_DEPTH_UPLOAD SKIP_SITE_XFER SKIP_SITE_SNAPSHOT; do \
+	@for m in NATIVE_MUTANT SKIP_SITE_RENDER SKIP_SITE_UPLOAD SKIP_SITE_PATCH SKIP_SITE_DEPTH_UPLOAD SKIP_SITE_XFER SKIP_SITE_SNAPSHOT \
+			GPU_KEY_REQUEST GPU_KEY_CONFIRM SOFT_KEY_REQUEST SOFT_KEY_CONFIRM; do \
 		case $$m in \
 			NATIVE_MUTANT) kill="the shown gradient is not full colour"; args="--twin 1 --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_mutant_s2.txt";; \
 			SKIP_SITE_RENDER) kill="twin of target 0x100000 differs in 100 pixels"; args="--twin native";; \
@@ -1001,12 +1011,19 @@ gpu-coherence-twin-mutants: $(GPU_COHERENCE_BIN)
 			SKIP_SITE_PATCH) kill="differs in 1 pixels, first (137,91)"; args="--twin native";; \
 			SKIP_SITE_DEPTH_UPLOAD) kill="twin of depth 0x080000 differs"; args="--twin native";; \
 			SKIP_SITE_XFER) kill="twin of target 0x060000 differs in 65280 pixels"; args="--twin native";; \
+			GPU_KEY_REQUEST) kill="FAIL gpu renderer: the launch line's twin=on did not turn the twin on"; args="--twin-key on --case twin-key";; \
+			GPU_KEY_CONFIRM) kill="FAIL gpu renderer: the report names the twin unavailable: did not run"; args="--twin-key on --case twin-key";; \
+			SOFT_KEY_REQUEST) kill="FAIL software renderer: the launch line's twin=on did not turn the twin on"; args="--twin-key on --case twin-key";; \
+			SOFT_KEY_CONFIRM) kill="FAIL software renderer: the report names the twin unavailable: did not run"; args="--twin-key on --case twin-key";; \
 			*) kill="twin of target 0x000000 differs in"; args="--twin native";; \
 		esac; \
+		geobj=$(RT_GE_O); \
+		case $$m in SOFT_KEY_*) geobj=$(BUILD_DIR)/ge_twin_mutant_$$m.o; \
+			$(CC) $(GE_CFLAGS) -DSR_TWIN_SELFTEST_$$m -c src/rt/ge.c -o $$geobj || exit 1;; esac; \
 		bin=$(BUILD_DIR)/gpu_coherence_twin_mutant_$$m.exe; \
 		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_TWIN_SELFTEST_$$m -ffunction-sections -fdata-sections \
 			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -Wl,--gc-sections -o $$bin \
-			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
+			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $$geobj src/rt/flight_recorder.c src/rt/perf.c \
 			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
 		$$bin $$args > $$bin.log 2>&1; result=$$?; \
 		if test $$result -eq 77; then echo "twin mutant $$m: SKIP (no Vulkan device)"; exit 77; fi; \

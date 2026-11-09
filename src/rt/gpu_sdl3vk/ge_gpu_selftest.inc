@@ -7543,6 +7543,11 @@ static int twin_soft_run(TwinSoftRun *r) {
 
 static int coherence_run_twin_soft(void) {
     const char *name = "twin-soft";
+    if (s_twin_unavailable) {
+        printf("gpu coherence selftest: SKIP %s: the host twin was requested (SR_GPU_TWIN_COLOR=%s) but this "
+               "device refused it, and the case compares against the Vulkan twin\n", name, getenv("SR_GPU_TWIN_COLOR"));
+        return 1;
+    }
     if (!s_twin || s_scale != 1) {
         fprintf(stderr, "gpu coherence selftest [%s]: needs --twin 1 or --twin native at scale 1\n", name);
         return 0;
@@ -7691,6 +7696,109 @@ static int coherence_run_twin_soft(void) {
     return ok;
 }
 
+/* twin-key (`--twin-key on`): the player's switch end to end. The harness's Ace line carries
+ * `twin=on`. With SR_GPU_TWIN_COLOR unset the line alone must turn the twin on in the GPU renderer
+ * (full colour, decided in gegpu_init) and in the software renderer (decided at its first colour
+ * write, ge_twin_set_mode(-1) first), and each must confirm it, so ace_finish's report holds no
+ * "twin" entry under "unavailable". With the variable set it wins (`--twin 0` or `off` is no twin,
+ * `--twin native` the twin with native colour), and the report then names the override. Each renderer
+ * is checked against its own freshly made Ace state. A device that refuses the GPU twin is a SKIP
+ * for the GPU half only after the report names the refusal. */
+static int twin_key_report(int *effective, char *why, size_t n) {
+    static char json[ACE_REPORT_MAX];
+    why[0] = '\0';
+    if (!ace_report_json(json, sizeof json)) return 0;
+    const char *e = strstr(json, "\"twin\": ");        /* "effective" comes first */
+    const char *u = strstr(json, "\"unavailable\": {");
+    if (!e || !u) return 0;
+    *effective = strncmp(e + 8, "true", 4) == 0;
+    const char *end = strchr(u, '}');
+    const char *r = strstr(u, "\"twin\": \"");
+    if (r && end && r < end) {
+        r += 9;
+        size_t i = 0;
+        for (; r[i] && r[i] != '"' && i + 1 < n; i++) why[i] = r[i];
+        why[i] = '\0';
+    }
+    return 1;
+}
+
+/* The report for the renderer `who`: the twin is `want_on` or not, and the reason is named. */
+static int twin_key_check_report(const char *who, int want_on, int refused_ok) {
+    int eff = -1;
+    char why[96];
+    ace_finish();
+    if (!twin_key_report(&eff, why, sizeof why)) {
+        fprintf(stderr, "gpu coherence selftest [twin-key]: FAIL %s: the Ace report could not be read\n", who);
+        return 0;
+    }
+    if (want_on && !why[0] && eff == 1) return 1;
+    if (!want_on && eff == 0 && strstr(why, "SR_GPU_TWIN_COLOR")) return 1;
+    if (refused_ok && eff == 0 && why[0]) return 1;
+    fprintf(stderr, "gpu coherence selftest [twin-key]: FAIL %s: the report names the twin %s%s (effective "
+            "twin %s), want it %s\n", who, why[0] ? "unavailable: " : "available", why,
+            eff == 1 ? "on" : "off", want_on ? "on and not unavailable" : "off, unavailable by SR_GPU_TWIN_COLOR");
+    return 0;
+}
+
+static int coherence_run_twin_key(void) {
+    const char *name = "twin-key";
+    static const char *k_line = "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;twin=on";
+    const char *env = getenv("SR_GPU_TWIN_COLOR");
+    const int overridden = env && env[0];
+    const int env_mode = twin_mode_parse(env);   /* 0, 1 or 2; -1 refused */
+    const int want = overridden ? (env_mode > 0 ? env_mode : 0) : 1;
+    int ok = 1;
+    if (!g_ace_on || !ace_requested()->twin) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL needs --twin-key on\n", name);
+        return 0;
+    }
+    /* the GPU renderer, decided by gegpu_init from this Ace line */
+    if (s_twin_unavailable) {
+        if (!twin_key_check_report("gpu renderer", 1, 1)) ok = 0;
+        printf("gpu coherence selftest: SKIP %s gpu renderer: this device refused the twin (the report names it)\n",
+               name);
+    } else {
+        if (s_twin != (want > 0) || (want > 0 && s_twin_color != (want == 1))) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL gpu renderer: the launch line's twin=on did not turn "
+                    "the twin on (SR_GPU_TWIN_COLOR=%s): twin %s, colour %s, want %s\n", name, overridden ? env : "(unset)",
+                    s_twin ? "on" : "off", s_twin_color ? "full" : "native",
+                    want == 0 ? "off" : want == 1 ? "on, full" : "on, native");
+            ok = 0;
+        }
+        if (!twin_key_check_report("gpu renderer", want > 0, 0)) ok = 0;
+    }
+    /* the software renderer: a fresh Ace state with the same line, the twin undecided */
+    if (!ace_init_spec(k_line, NULL)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the Ace line was refused\n", name);
+        return 0;
+    }
+    TwinSoftRun run = {0};
+    ge_twin_set_mode(-1);
+    if (!twin_soft_run(&run)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a software run did not run\n", name);
+        ok = 0;
+    } else {
+        const int got = ge_twin_mode();
+        if (got != want || run.presented != (want > 0 ? 3 * FB_H : 0)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL software renderer: the launch line's twin=on did not "
+                    "turn the twin on (SR_GPU_TWIN_COLOR=%s): mode %d, %d rows shown from it, want mode %d, %d rows\n",
+                    name, overridden ? env : "(unset)", got, run.presented, want, want > 0 ? 3 * FB_H : 0);
+            ok = 0;
+        }
+    }
+    if (!twin_key_check_report("software renderer", want > 0, 0)) ok = 0;
+    ge_twin_set_mode(-1);
+    twin_soft_free(&run);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    if (ok)
+        printf("gpu coherence selftest: PASS %s SR_GPU_TWIN_COLOR=%s: the launch line's twin=on gives a twin %s in "
+               "both renderers; the report is consistent\n", name, overridden ? env : "(unset)",
+               want == 0 ? "off (the override named)" : want == 1 ? "in full colour" : "with native colour");
+    return ok;
+}
+
 static int coherence_selftest_cases(void) {
     /* SR_GPU_COHERENCE_CASE=scaled-upload (the harness's --case) runs that case alone, as the
      * recipe does at render scales 2 and 4: the other fixtures expect 1x pixels (a filtered sample
@@ -7718,6 +7826,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "twin-alloc-fail") == 0) return coherence_run_twin_alloc_fail();
         if (strcmp(only, "twin-drain-fail") == 0) return coherence_run_twin_drain_fail();
         if (strcmp(only, "twin-soft") == 0) return coherence_run_twin_soft();
+        if (strcmp(only, "twin-key") == 0) return coherence_run_twin_key();
         if (strcmp(only, "pipeline-cache-cold") == 0) return coherence_run_pipeline_cache(0);
         if (strcmp(only, "pipeline-cache-warm") == 0) return coherence_run_pipeline_cache(1);
         if (strcmp(only, "pipeline-cache-reject") == 0) return coherence_run_pipeline_cache_reject();

@@ -293,8 +293,10 @@ The player offers three play modes per game (#2055):
 - **Authentic** is the standard: the game as released, recreating the PSP as closely as the project can. It is the
   default for a new library.
 - **Enhanced** turns on the project-authored improvements that work for any game: texture filtering, crisp system
-  text, the speed readout, the game badge, smooth motion, clean pitched sound and sharper enlarging (the last two off
-  by default) today. Each one is a *part* that can be turned off for the library or for a single game.
+  text, the speed readout, the game badge, widescreen fill, smooth motion, clean pitched sound, sharper enlarging and
+  full 32-bit colour (section 10.11). Texture filtering, crisp system text and the game badge are on by default; the
+  others are off by default and the player turns each on. Each one is a *part* that can be turned off for the library
+  or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.
@@ -648,7 +650,7 @@ at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_tw
   blended against, its authentic value from that pixel on. The twin's alpha is the alpha the authentic write left
   (the stencil, in the target's format, as the Vulkan twin snaps it); a stencil-only write updates it, and a write
   mask over colour bits leaves the pixel authentic. Block transfers within VRAM copy the slots with the bytes. The
-  CPU presenter shows the slots (`ge_twin_present_row`), each pixel without a valid slot as it converts it today.
+  CPU presenter shows the slots (`ge_twin_present_row`), each pixel without a valid slot as the CPU presenter converts it with the twin off.
   `gpu-coherence-selftest` twin-soft checks it on twin-scene's list: guest VRAM equals the twin-off run byte for
   byte, the shown gradients are smooth, and T1 and T3 are within one step per colour channel of the Vulkan twin.
 - **Render-to-texture in the software renderer.** Its texture fetches read guest VRAM, so a target drawn from a
@@ -668,17 +670,21 @@ at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_tw
     not follow host GPU work (section 10.3). The second draw of each render op, and the drain when a twin allocation
     fails, are host waits.
   - I/O speed: unchanged. The twin performs no guest I/O.
-- **Default.** Off. It stays off by default until section 11.2 item 4's "nothing worse" runs pass: picture-gate or
-  route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the same
-  run with it off. The launch line carries its key (`twin`, below), which follows section 11.2 item 2: a library
-  switch and a per-title switch, each off by default.
+- **Default.** Off. The player's part "Full 32-bit colour" (the launch line's `twin=on`) or `SR_GPU_TWIN_COLOR`
+  turns it on (see Setting). Turning it on by default needs section 11.2 item 4's "nothing worse" runs: picture-gate
+  or route runs on *Hot Shots Tennis* and *LittleBigPlanet*, and a library sweep, each with the twin on against the
+  same run with it off (#2050). The launch line carries its key (`twin`, below), which follows section 11.2 item 2:
+  a library switch and a per-title switch, each off by default.
 - **Setting.** The launch line's `twin=off|on` (section 10.1), a required key: `twin=on` asks for full colour. The
   player writes it from the part "Full 32-bit colour" (`"twin"`, `on` or `off`) on the library's Settings > Enhanced
   page and on each title's own page (sections 10.5 and 10.9); it is off unless the player turns it on.
   `SR_GPU_TWIN_COLOR=1` (full colour) or `native` (the twin with the authentic colour, which the identity self-tests
   use), read when the renderer starts (the software renderer: at its first colour write), stays as the developer
   override and wins whenever it is set: unset or empty leaves the choice to the launch line, `0` and `off` are off,
-  and any other value prints `TWIN: refused (...)` and leaves it off. The twin takes effect only in Ace Mode: in an
+  and any other value prints `TWIN: refused (...)` and leaves it off. When the variable turns off a twin the line
+  asked for, the run names `twin` unavailable ("SR_GPU_TWIN_COLOR overrides it") in the report. `gpu-coherence-selftest`
+  twin-key turns the twin on through `twin=on` alone, in both renderers, and checks the report, with the variable
+  unset and set. The twin takes effect only in Ace Mode: in an
   authentic run it stays off whatever the environment says, and a request prints one `TWIN: off (the host twin
   needs Ace Mode)` line. When the key asked for it and it does not come up (the `TWIN: unavailable` and `TWIN: off
   for the rest of the run` cases below), the run names `twin` unavailable on stderr and in the report; a twin that

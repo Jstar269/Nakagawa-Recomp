@@ -646,7 +646,7 @@ static unsigned long s_cnt_twin_present_auth = 0;
 static const char *s_twin_lag_cause = NULL;  /* the write that last left a twin behind */
 static unsigned long s_cnt_twin_alloc_fail = 0;  /* twin allocations that failed (each turns it off) */
 static int s_twin_unavailable = 0;         /* asked for and allowed, but this GPU refused it at init */
-static int s_twin_from_key = 0;            /* the request is the launch line's twin=on, not SR_GPU_TWIN_COLOR */
+static int s_twin_from_key = 0;            /* the launch line asks for the twin (twin=on): its report names the outcome */
 #ifdef SR_GPU_COHERENCE_SELFTEST
 static int s_twin_inject_fail = 0;         /* the selftest: fail the Nth twin allocation from now */
 static int s_twin_inject_drain_fail = 0;   /* the selftest: twin_off_for_run's drain reports a failure */
@@ -6673,10 +6673,11 @@ int gegpu_init(void) {
     {
         const char *tc = getenv("SR_GPU_TWIN_COLOR");
         twin_req = twin_mode_parse(tc);
-        if (!(tc && tc[0]) && g_ace_on && ace_effective()->twin) {
-            twin_req = 1;
-            s_twin_from_key = 1;
-        }
+        s_twin_from_key = g_ace_on && ace_effective()->twin;
+#ifdef SR_TWIN_SELFTEST_GPU_KEY_REQUEST   /* the selftest's failing-before: the line's twin=on is not read */
+        s_twin_from_key = 0;
+#endif
+        if (!(tc && tc[0]) && s_twin_from_key) twin_req = 1;
         if (twin_req < 0) {
             fprintf(stderr, "TWIN: refused (SR_GPU_TWIN_COLOR=%s: the values are 1, native, off and 0)\n", tc);
             twin_req = 0;
@@ -6684,6 +6685,8 @@ int gegpu_init(void) {
             fprintf(stderr, "TWIN: off (the host twin needs Ace Mode)\n");
             twin_req = 0;
         }
+        if (s_twin_from_key && !twin_req)
+            ace_feature_unavailable(ACE_FEATURE_TWIN, "SR_GPU_TWIN_COLOR overrides it");
         const char *cap = getenv("SR_GPU_TWIN_CAPTURE");
         s_twin_authentic_shown = cap && strcmp(cap, "authentic") == 0;
     }
@@ -6894,7 +6897,9 @@ int gegpu_init(void) {
         twin_release();
         s_twin_unavailable = 1;
     } else if (twin_req && s_twin_from_key) {
+#ifndef SR_TWIN_SELFTEST_GPU_KEY_CONFIRM   /* the selftest's failing-before: a running twin is never confirmed */
         ace_confirm(ACE_FEATURE_TWIN);
+#endif
     }
 
     /* 1x1 white texture for untextured draws */

@@ -2837,30 +2837,41 @@ static int ge_twin_decide(void) {
     s_twin_mode = 0;
 #ifndef SR_GE_VRAM_DECODER_CLI
     const char *v = getenv("SR_GPU_TWIN_COLOR");
-    int mode = 0, from_key = 0;
+    /* The launch line asks for the twin (SR_ACE's twin=on); SR_GPU_TWIN_COLOR, when set, wins. */
+    int key = g_ace_on && ace_effective()->twin;
+#ifdef SR_TWIN_SELFTEST_SOFT_KEY_REQUEST   /* the selftest's failing-before: the line's twin=on is not read */
+    key = 0;
+#endif
+    int mode = 0;
     if (!v || !v[0]) {
-        from_key = mode = g_ace_on && ace_effective()->twin;
+        mode = key;
     } else if (strcmp(v, "1") == 0) {
         mode = 1;
     } else if (strcmp(v, "native") == 0) {
         mode = 2;
     } else if (strcmp(v, "0") != 0 && strcmp(v, "off") != 0) {
         fprintf(stderr, "TWIN: refused (SR_GPU_TWIN_COLOR=%s: the values are 1, native, off and 0)\n", v);
+        if (key) ace_feature_unavailable(ACE_FEATURE_TWIN, "SR_GPU_TWIN_COLOR overrides it");
         return 0;
     }
     if (mode && !g_ace_on) {
         fprintf(stderr, "TWIN: off (the host twin needs Ace Mode)\n");
         return 0;
     }
-    if (!mode) return 0;
+    if (!mode) {
+        if (key) ace_feature_unavailable(ACE_FEATURE_TWIN, "SR_GPU_TWIN_COLOR overrides it");
+        return 0;
+    }
     const char *cap = getenv("SR_GPU_TWIN_CAPTURE");
     s_twin_show_authentic = cap && strcmp(cap, "authentic") == 0;
     if (!ge_twin_alloc()) {
         fprintf(stderr, "TWIN: unavailable (the software renderer could not allocate its twin): native colour\n");
-        if (from_key) ace_feature_unavailable(ACE_FEATURE_TWIN, "the software renderer could not allocate it");
+        if (key) ace_feature_unavailable(ACE_FEATURE_TWIN, "the software renderer could not allocate it");
         return 0;
     }
-    if (from_key) ace_confirm(ACE_FEATURE_TWIN);
+#ifndef SR_TWIN_SELFTEST_SOFT_KEY_CONFIRM   /* the selftest's failing-before: a running twin is never confirmed */
+    if (key) ace_confirm(ACE_FEATURE_TWIN);
+#endif
     fprintf(stderr, "TWIN: on (software renderer, colour=%s)\n", mode == 1 ? "full" : "native");
     s_twin_mode = mode;
 #endif

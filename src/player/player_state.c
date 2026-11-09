@@ -1464,7 +1464,7 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
      2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
     {"twin", "Full 32-bit colour",
-     "Shows 16-bit games in full colour, without dither. Uses more graphics memory.",
+     "Shows 16-bit games in full colour, without dither. Uses more memory.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
 };
 

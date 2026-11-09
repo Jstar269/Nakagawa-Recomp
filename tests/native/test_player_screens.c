@@ -50,7 +50,7 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
     {"Full 32-bit colour", "Off",
-     "Shows 16-bit games in full colour, without dither. Uses more graphics memory."},
+     "Shows 16-bit games in full colour, without dither. Uses more memory."},
 };
 typedef char player_screens_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];
