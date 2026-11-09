@@ -3162,7 +3162,8 @@ static void test_platform_seam_answers_for_this_host(void) {
                   "Nakagawa could not find your per-user data folder. "
                   "Set XDG_DATA_HOME or HOME") == 0);
     assert(strcmp(player_data_dir_unavailable_text(NK_HOST_ANDROID),
-                  player_data_dir_unavailable_text(NK_HOST_LINUX)) == 0);
+                  "Nakagawa could not find the app's data folder, which Android names in "
+                  "NK_ANDROID_DATA_DIR when the app starts. Start Nakagawa from its app icon") == 0);
     assert(strcmp(player_folder_open_failure_hint(NK_HOST_WINDOWS),
                   "Windows could not open it.") == 0);
     assert(strstr(player_folder_open_failure_hint(NK_HOST_LINUX), "xdg-utils") != NULL);
@@ -3440,10 +3441,24 @@ static void test_platform_cards_name_this_platform(void) {
     assert(app != NULL);
     nk_ps_set_env("XDG_DATA_HOME", NULL);
     nk_ps_set_env("HOME", NULL);
+#if defined(__ANDROID__)
+    /* Android's data root is only NK_ANDROID_DATA_DIR (nk_platform_posix.c), which the test
+       isolation sets; HOME and XDG are not read there. */
+    bool had_android_data = false;
+    char *saved_android_data = capture_environment_value("NK_ANDROID_DATA_DIR", &had_android_data);
+    nk_ps_set_env("NK_ANDROID_DATA_DIR", NULL);
+#endif
     assert(!player_app_open_prerequisite_about(app));
     assert(strcmp(app->last_error.error_code, "DATA_DIR_UNAVAILABLE") == 0);
     assert(strcmp(app->last_error.title, "Data folder not found") == 0); /* #1974: sentence case */
+#if defined(__ANDROID__)
+    assert(strstr(app->last_error.message, "NK_ANDROID_DATA_DIR") != NULL);
+    assert(strstr(app->last_error.message, "XDG_DATA_HOME") == NULL);
+    restore_environment_value("NK_ANDROID_DATA_DIR", saved_android_data, had_android_data);
+    free(saved_android_data);
+#else
     assert(strstr(app->last_error.message, "XDG_DATA_HOME or HOME") != NULL);
+#endif
     assert(strstr(app->last_error.message, "LOCALAPPDATA") == NULL);
     restore_environment_value("XDG_DATA_HOME", saved_xdg, had_xdg);
     restore_environment_value("HOME", saved_home, had_home);

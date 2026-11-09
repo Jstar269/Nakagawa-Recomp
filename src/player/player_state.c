@@ -4295,8 +4295,12 @@ const char *player_data_dir_unavailable_text(NkHostKind host) {
         case NK_HOST_MACOS:
             return "Nakagawa could not find your per-user data folder. "
                    "Set HOME";
-        case NK_HOST_LINUX:
         case NK_HOST_ANDROID:
+            /* nk_platform_get_app_data_dir reads only NK_ANDROID_DATA_DIR there, which the
+               app's activity sets (NakagawaHost.prepare); HOME and XDG are not used. */
+            return "Nakagawa could not find the app's data folder, which Android names in "
+                   "NK_ANDROID_DATA_DIR when the app starts. Start Nakagawa from its app icon";
+        case NK_HOST_LINUX:
         case NK_HOST_OTHER_POSIX:
         default:
             return "Nakagawa could not find your per-user data folder. "
