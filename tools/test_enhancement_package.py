@@ -3963,6 +3963,21 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             "nine hex digits in a name": renamed("synth_" + hexes[:9]),
             "base64 run": with_field(("display_name",), "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY"),
             "escaped byte": with_field(("rng_policy", "reason"), "Same odds: \\x1e per update."),
+            # Instruction words written as separated 8-hex tokens, as a disassembly paste would be.
+            "separated words in a reason": with_field(
+                ("rng_policy", "reason"), "Same odds: " + " ".join(["8c4200fe", "3c0100ff"] * 12)),
+            "separated words in a display name": with_field(("display_name",), "Words 8c4200fe 3c0100ff"),
+            "dotted words in an id": with_field(("id",), "a.8c4200fe.3c0100ff"),
+            "words in a pre-release tag": with_field(("version",), "1.0.0-8c4200fe.3c0100ff"),
+            "words in a site id": with_field(("sites", 0, "id"), "s_8c4200fe_3c0100ff"),
+            "words before a name's own address": renamed(
+                "f_8c4200fe_3c0100ff_" + published["site_map"]["synth_timer_duration"][2:]),
+            # Fixed-shape slots hold exactly their value: no trailing newline.
+            "newline after a digest": with_field(
+                ("sites", 0, "stock_digest"), published["sites"][0]["stock_digest"] + "\n"),
+            "newline after an address": with_field(
+                ("site_map", "synth_timer_duration"), published["site_map"]["synth_timer_duration"] + "\n"),
+            "control character in text": with_field(("rng_policy", "reason"), "Same odds\tper second."),
         }
         for label, data in cases.items():
             with self.subTest(label):
@@ -3971,6 +3986,9 @@ class TestPublishedPackages(_SynthTimingElfFixture):
         # Eight hex digits (one word or address, as the site map publishes) are not a finding.
         own = "synth_fn_" + published["site_map"]["synth_timer_duration"][2:]
         self.assertEqual(publish_audit.check_enhancement_packages({good: encode(renamed(own))}), [])
+        # Five hex digits in a site id (a display-list offset) are not a word.
+        self.assertEqual(publish_audit.check_enhancement_packages(
+            {good: encode(with_field(("sites", 0, "id"), "P133_disp_ee8d0"))}), [])
 
         # The folder holds published packages only, whatever a file's extension.
         files = {

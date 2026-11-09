@@ -241,20 +241,20 @@ UPDATE_BOUNDARY_KEYS = frozenset({
     "stock_digest",
 })
 
-ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}\Z")
 SEMVER_RE = re.compile(
-    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\Z"
 )
-MIN_RUNTIME_VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
-TARGET_TITLE_ID_RE = re.compile(r"^([a-zA-Z0-9][a-zA-Z0-9._-]{0,63}|\*)$")
-GAME_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$")
-SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
-CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
-SYMBOL_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,127}$")
-SITE_ID_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$")
+MIN_RUNTIME_VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+TARGET_TITLE_ID_RE = re.compile(r"^([a-zA-Z0-9][a-zA-Z0-9._-]{0,63}|\*)\Z")
+GAME_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,31}\Z")
+SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}\Z")
+CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}\Z")
+SYMBOL_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,127}\Z")
+SITE_ID_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}\Z")
 # A disc path relative to the disc root: forward slashes, no empty, '.' or '..' part.
-DATA_FILE_PATH_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$")
-CSV_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+DATA_FILE_PATH_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*\Z")
+CSV_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
 
 HEX_ADDRESS_RE = re.compile(r"^0[xX][0-9a-fA-F]+$")
 DECOMP_ADDRESS_RE = re.compile(r"^(?:sub|loc|func|fun)_[0-9a-fA-F]+$", re.IGNORECASE)
@@ -988,13 +988,13 @@ _PUBLISHED_KEY_TAG = b"nakagawa-recomp published package stock-digest key v1\x00
 # A stock value's digest message starts with this tag (keyed_stock_value_digest).
 _STOCK_VALUE_TAG = b"stock value\0"
 STOCK_VALUE_DIGESTS_MAX = 64
-DISC_ID_RE = re.compile(r"^[A-Z]{4}[0-9]{5}$")
-DISC_VERSION_RE = re.compile(r"^[0-9]{1,2}\.[0-9]{2}$")
-SITE_MAP_ADDRESS_RE = re.compile(r"^0x[0-9a-f]{8}$")
+DISC_ID_RE = re.compile(r"^[A-Z]{4}[0-9]{5}\Z")
+DISC_VERSION_RE = re.compile(r"^[0-9]{1,2}\.[0-9]{2}\Z")
+SITE_MAP_ADDRESS_RE = re.compile(r"^0x[0-9a-f]{8}\Z")
 PUBLISHED_VERSION_RE = re.compile(
     r"^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})(?:-[0-9A-Za-z]{1,16}(?:\.[0-9A-Za-z]{1,16})?)?$")
 PUBLISHED_REASON_MAX = 1024
-ADDRESS_SUFFIX_RE = re.compile(r"_([0-9a-fA-F]{8})$")
+ADDRESS_SUFFIX_RE = re.compile(r"_([0-9a-fA-F]{8})\Z")
 # The refusals a published package names (section 5.1), in the order they are checked.
 PUBLISHED_REFUSALS = ("other_disc", "other_revision", "modified_executable", "site_mismatch")
 # No string in a published package carries words, bytes or addresses: every string and every
@@ -1007,6 +1007,9 @@ _PUBLISHED_TEXT_REFUSED = (
     (re.compile(r"[0-9a-fA-F]{9,}"), "a run of more than 8 hex digits"),
     (re.compile(r"[A-Za-z0-9+/]{32,}={0,2}"), "a base64-like run of 32 or more characters"),
     (re.compile(r"\\x[0-9a-fA-F]{2}"), "an escaped byte"),
+    (re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{8}(?![0-9A-Za-z])"),
+     "an 8-hex-digit token (an instruction word, or an address outside the site map)"),
+    (re.compile(r"[\x00-\x1f\x7f]"), "a control character"),
 )
 
 
@@ -1080,7 +1083,7 @@ def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
     if "executable_sha256" not in declaration:
         fail("executable_sha256", "A published package names the one executable it applies to")
     # Bounded text: a version carries no build metadata and a short pre-release tag at most.
-    if not PUBLISHED_VERSION_RE.match(declaration["version"]):
+    if not PUBLISHED_VERSION_RE.fullmatch(declaration["version"]):
         fail("version", f"a published package's version {declaration['version']!r} must match "
                         f"{PUBLISHED_VERSION_RE.pattern} (no build metadata)")
     if "rng_policy" in declaration and len(declaration["rng_policy"]["reason"]) > PUBLISHED_REASON_MAX:
@@ -1100,7 +1103,7 @@ def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
             fail(f"site_map.{name}", f"site map name {name!r} does not match required pattern {SYMBOL_RE.pattern}")
         if not isinstance(address, str) or not SITE_MAP_ADDRESS_RE.match(address) or int(address, 16) % 4:
             fail(f"site_map.{name}", f"address {address!r} must be a 4-byte-aligned 0x%08x hex string")
-        # A project-assigned name for a function no decompilation names yet ends in its own address
+        # A project-assigned name for a function without a decompilation name ends in its own address
         # (hst_fn_0001ea64): an 8-hex suffix is that name's address and no other value.
         suffix = ADDRESS_SUFFIX_RE.search(name)
         if suffix and int(suffix.group(1), 16) != int(address, 16):
@@ -1131,7 +1134,12 @@ def published_package_findings(data: Any) -> list[str]:
     except EnhancementPackageError as exc:
         return [str(exc)]
     findings: list[str] = []
+    # The one 8-hex token allowed: a site-map name's own-address suffix (validated above), wherever
+    # that name is used. Anything else in the name is checked like any other string.
+    own_suffix = {name for name in data["site_map"] if ADDRESS_SUFFIX_RE.search(name)}
     for where, value in _published_strings(data, "$"):
+        if value in own_suffix:
+            value = value[:-len("_00000000")]
         for pattern, what in _PUBLISHED_TEXT_REFUSED:
             if pattern.search(value):
                 findings.append(f"{where} contains {what}")
