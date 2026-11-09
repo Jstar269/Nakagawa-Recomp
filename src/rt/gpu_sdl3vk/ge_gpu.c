@@ -70,6 +70,10 @@
  *    other states take the software rasterizer. A stencil state whose result depends on
  *    the stencil it overwrites (stencil_reads_own_writes) never shares a batch between
  *    primitives whose boxes meet, so each reads a snapshot holding the ones before it.
+ *    The exception is a write-once state (stencil_write_once): the first fragment to pass
+ *    at a pixel stores a stencil that rejects every later one, so the pixel is that fragment
+ *    over the destination from before the run. Its primitives share the batch and are drawn
+ *    last to first against one snapshot, which leaves ge.c's first fragment on top.
  *    An 8888 state whose test always passes and whose stored stencil is the old one or a
  *    constant (stencil_fixed_alpha) reads no destination: the colour mask keeps the
  *    stencil, the shader writes the constant as alpha, or, blended, the alpha blend factors
@@ -248,6 +252,9 @@ typedef struct {
      * twin of the same image instead. */
     struct Target *tsrc;
     uint8_t tsnap, tvar;
+    /* 1: a write-once stencil state (stencil_write_once). Primitives that overlap share the batch,
+     * and the snapshot path draws its triangles last to first (submit_range). */
+    uint8_t once;
     /* With a scaled copy bound (tex_scale.h): the entry's unscaled set, which a draw that maps one
      * texel to one pixel binds instead (xs_onetoone_plain). VK_NULL_HANDLE otherwise. */
     VkDescriptorSet dset_plain;
@@ -399,6 +406,8 @@ static VkDescriptorPool s_dpool_rmw = VK_NULL_HANDLE;
 static PipeEnt *s_rmw_pipes = NULL;
 static int s_rmw_pipe_n = 0, s_rmw_pipe_cap = 0;
 static unsigned long long s_cnt_rmw_ops = 0, s_cnt_rmw_batches = 0, s_cnt_rmw_breaks = 0;
+/* Write-once stencil batches drawn last to first, and their triangles (submit_range). */
+static unsigned long long s_cnt_once_batches = 0, s_cnt_once_tris = 0;
 static VkImageUsageFlags s_target_usage = 0;              /* the last colour target's usage */
 
 static void target_note_drawn(Target *t, int y0, int y1) {
@@ -977,6 +986,14 @@ static void to_layout(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspec
  * the rmwzfb rule's color-test line, 7 its own-target line. */
 #ifndef SR_GPU_DSTREAD_MUTANT
 #define SR_GPU_DSTREAD_MUTANT 0
+#endif
+
+/* SR_GPU_STENCIL_ONCE_MUTANT (gpu-stencil-once-mutants only; never in a product build) breaks one
+ * property of the write-once stencil batch: 1 draws it first to last, as any other batch; 2 calls
+ * every stencil state whose stencil-fail op is KEEP write-once; 3 calls a write-once state one
+ * whatever its depth test and depth writes. */
+#ifndef SR_GPU_STENCIL_ONCE_MUTANT
+#define SR_GPU_STENCIL_ONCE_MUTANT 0
 #endif
 
 #ifdef SR_GPU_COHERENCE_SELFTEST
@@ -2582,6 +2599,23 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
     uint32_t param_base = s_cmd_slot->pused > p0 ? s_cmd_slot->pused : p0;
     uint64_t memcpy_started = cpu_profile_now();
     memcpy(s_cmd_slot->vmap + vertex_base, s_vcpu + v0, (size_t)nverts * sizeof(GpuVert));
+    /* A write-once stencil batch (Batch.once) reads one snapshot, and Vulkan keeps the last fragment
+     * at a pixel where ge.c keeps the first one that passes: its triangles go into the ring last to
+     * first, each with its own vertex order (winding and the flat colour stay). The host twin's
+     * pass draws the same ring. An interlock op (rmw_op) orders the fragments itself and keeps the
+     * staged order. */
+#if SR_GPU_STENCIL_ONCE_MUTANT != 1
+    for (uint32_t i = b0; i < b1 && !rmw_op; i++) {
+        const Batch *b = &arr[i];
+        if (!b->once || b->key.tnl) continue;
+        const uint32_t ntri = b->count / 3u;
+        GpuVert *dst = s_cmd_slot->vmap + vertex_base + (b->first - v0);
+        for (uint32_t tri = 0; tri < ntri; tri++)
+            memcpy(dst + 3u * tri, s_vcpu + b->first + 3u * (ntri - 1u - tri), 3u * sizeof(GpuVert));
+        s_cnt_once_batches++;
+        s_cnt_once_tris += ntri;
+    }
+#endif
     if (ntverts) {
         memcpy(s_cmd_slot->tmap + tvertex_base, s_tnl_vcpu + tv0, (size_t)ntverts * sizeof(GeTnlVtx));
         memcpy(s_cmd_slot->pmap + param_base, s_tnl_pcpu + p0, (size_t)(p1 - p0) * sizeof(GeTnlParams));
@@ -5072,6 +5106,78 @@ static int stencil_fixed_alpha(const GeState *g) {
     return value;
 }
 
+/* psp.frag's stencil arithmetic, on the 8-bit values the shader reads and stores: quant_alpha,
+ * stencil_op, and the comparison of its stencil test. */
+static uint32_t sh_quant_alpha(uint32_t a, uint32_t fmt) {
+    if (fmt == 1u) return a >= 128u ? 255u : 0u;
+    if (fmt == 2u) return ((a >> 4) << 4) | (a >> 4);
+    if (fmt == 0u) return 255u;
+    return a;
+}
+
+static uint32_t sh_stencil_op(uint32_t op, uint32_t old, uint32_t ref, uint32_t fmt) {
+    switch (op & 7u) {
+        case 1: return 0u;
+        case 2: return ref;
+        case 3: return ~old & 0xFFu;
+        case 4:
+            if (fmt == 3u) return old < 255u ? old + 1u : old;
+            if (fmt == 1u) return 255u;
+            if (fmt == 2u) return old < 0xF0u ? old + 0x10u : old;
+            return old;
+        case 5:
+            if (fmt == 2u) return old >= 0x10u ? old - 0x10u : old;
+            if (fmt == 1u) return 0u;
+            return old > 0u ? old - 1u : old;
+        default: return old;
+    }
+}
+
+static int sh_stencil_pass(uint32_t func, uint32_t ref, uint32_t val) {
+    switch (func & 7u) {
+        case 0: return 0;
+        case 1: return 1;
+        case 2: return ref == val;
+        case 3: return ref != val;
+        case 4: return ref < val;
+        case 5: return ref <= val;
+        case 6: return ref > val;
+        default: return ref >= val;
+    }
+}
+
+/* A write-once stencil state: at a pixel, the first fragment that passes the stencil and depth
+ * tests stores a stencil that fails the same test, so every later fragment of the state leaves the
+ * pixel alone (the title's draw-once mask: NOTEQUAL against a bit, REPLACE with that bit set).
+ * `test` and `ops` are the batch's bl[2] and bl[3]: GE_STENCILTEST, and GE_STENCILOP with the alpha
+ * write mask in bits 24-31. It holds when
+ *  - the stencil-fail op is KEEP, so a fragment that fails the test changes nothing (the
+ *    depth-fail op is KEEP wherever the depth test can fail: stencil_gpu_supported); and
+ *  - for every stencil the format can hold that passes the test, the stencil the depth-pass op
+ *    stores over it, under the alpha write mask and on the format's lattice, fails the test. A
+ *    565 target reads every stencil as 0, so there a passing test passes again.
+ * Such a pixel ends as one fragment over the destination from before the run, whichever
+ * primitives overlap there: what one snapshot gives every fragment. Vulkan keeps the last
+ * fragment where ge.c keeps the first, so submit_range draws the batch last triangle first.
+ * build_state adds the depth condition and leaves out a batch that textures from its own
+ * target. */
+static int stencil_write_once(uint32_t fmt, uint32_t test, uint32_t ops) {
+    const uint32_t func = test & 7u, sref = (test >> 8) & 0xFFu, smask = (test >> 16) & 0xFFu;
+    const uint32_t zpass = (ops >> 16) & 7u;
+    if ((ops & 7u) != 0u) return 0;
+#if SR_GPU_STENCIL_ONCE_MUTANT == 2
+    return 1;
+#endif
+    const uint32_t ref = sref & smask, amask = sh_quant_alpha((ops >> 24) & 0xFFu, fmt);
+    for (uint32_t old = 0; old < 256u; old++) {
+        if (fmt == 0u ? old != 0u : sh_quant_alpha(old, fmt) != old) continue;   /* not a stored value */
+        if (!sh_stencil_pass(func, ref, old & smask)) continue;
+        const uint32_t stored = (sh_quant_alpha(sh_stencil_op(zpass, old, sref, fmt), fmt) & ~amask) | (old & amask);
+        if (sh_stencil_pass(func, ref, (fmt == 0u ? 0u : stored) & smask)) return 0;
+    }
+    return 1;
+}
+
 /* Find the target that holds VRAM offset `a` (gpu_valid not required). The GE has no buffer height
  * register, so a target's span below is its widest case, 272 rows: a title that stacks short
  * targets puts the next target's base inside that span. The nearest base at or below `a` owns the
@@ -5260,6 +5366,18 @@ static void build_state(int persp, int sprite, Batch *b) {
         flags |= F_STENCIL;
         b->pc.bl[2] = (int32_t)(g->stencil_test & 0xFFFFFFu);
         b->pc.bl[3] = (int32_t)((g->stencil_op & 0x070707u) | ((uint32_t)(g->mask_alpha & 0xFF) << 24));
+        /* Write-once (stencil_write_once), and the depth every fragment tests against is the
+         * depth from before the run: the batch writes none, or its depth test passes always, in
+         * which case the first fragment to pass the stencil test is also the last one drawn and
+         * its depth the one kept. Under another depth test with depth writes on, a fragment drawn
+         * earlier in the reversed order would hide the one ge.c keeps. */
+#if SR_GPU_STENCIL_ONCE_MUTANT == 3
+        const int depth_fixed = 1;
+#else
+        const int depth_fixed = !k->zwrite || k->zfunc == VK_COMPARE_OP_ALWAYS;
+#endif
+        b->once = (uint8_t)(depth_fixed && stencil_write_once(g->fbfmt & 3u, (uint32_t)b->pc.bl[2],
+                                                              (uint32_t)b->pc.bl[3]));
     } else if (sfix >= 0 && k->blend_on) {
         k->azero = 1;                     /* stencil_fixed_alpha: blended, the constant is 0 */
     } else if (sfix >= 0) {
@@ -5322,6 +5440,9 @@ static void build_state(int persp, int sprite, Batch *b) {
                     snapshot_refresh(src);
                     b->dset = s_snap_set[filter_variant];
                     b->tsnap = 1;
+                    /* Its texels are the destination, so a primitive may sample what an earlier
+                     * one of the run drew: not one fragment over the pre-run destination. */
+                    b->once = 0;
                 } else {
                     if (s_nbatch && src->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
                         submit_pending();
@@ -5544,7 +5665,9 @@ static void append(Batch *b, uint32_t first, uint32_t count) {
     if (g_ace_on && s_cur) ace_note_target_draw(s_cur->fba);
     if ((((uint32_t)b->pc.cfg[0] >> 8) & F_SHBLEND) && sr_perf_enabled)
         sr_perf_ge_event(SR_PERF_GE_SHBLEND_DRAW, 1);
-    const int self_dep = stencil_reads_own_writes(b);
+    /* A write-once state reads its own writes, but only to reject every fragment after the first:
+     * its primitives share the batch wherever they lie. T&L batches keep the split. */
+    const int self_dep = !(b->once && !b->key.tnl) && stencil_reads_own_writes(b);
     SnapRect prim = !self_dep ? k_snap_rect_empty
                   : b->key.tnl ? tnl_rect(b, first, count) : verts_rect(b, first, count);
     if (s_nbatch) {
