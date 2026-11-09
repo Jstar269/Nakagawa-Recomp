@@ -479,6 +479,34 @@ class NativeHostBackendTests(unittest.TestCase):
         self.assertLess(fallback.index("sr_perf_shutdown();"), fallback.index("exit(0);"),
                         "the no-scheduler capture exit skips the perf summary")
 
+    def test_every_guest_thread_hard_exit_writes_the_profile_dump_first(self) -> None:
+        """SR_PROFILE=1 prints its hot-path table from an atexit hook, and _Exit skips atexit, so a
+        repro that ends at SR_EXIT_AT_VBLANK, a capture exit, the watchdog or a refused import
+        printed no profile at all. Every _Exit reached on the guest thread in the hle sources calls
+        sr_profile_dump_final right after its perf shutdown. The final dump prints once, the
+        atexit hook uses it too, so a normal exit is not dumped twice, and it is a no-op with
+        profiling off. The periodic SR_PROFILE_DUMP_VBLANKS dump keeps sr_profile_dump."""
+        lines = hle_sources.text().splitlines()
+        found = 0
+        for index, line in enumerate(lines):
+            code = line.split("//", 1)[0]
+            if "_Exit(" not in code or code.lstrip().startswith("*"):
+                continue
+            found += 1
+            window = "\n".join(lines[max(0, index - 7):index + 1])
+            self.assertIn("sr_profile_dump_final();", window,
+                          f"hle source line {index + 1} exits without the profile dump: {line.strip()}")
+            self.assertLess(window.index("sr_perf_shutdown();"), window.index("sr_profile_dump_final();"),
+                            f"hle source line {index + 1}: the profile dump must follow the perf shutdown")
+        self.assertGreater(found, 0, "the hle sources have no _Exit site; the pin is stale")
+        recomp = (ROOT / "src" / "rt" / "recomp.c").read_text(encoding="utf-8")
+        init = _function_body(recomp, "void sr_profile_init(void) {")
+        self.assertIn("atexit(sr_profile_dump_final);", init,
+                      "the atexit hook must be the once-only final dump")
+        final = _function_body(recomp, "void sr_profile_dump_final(void) {")
+        self.assertIn("if (!g_prof_enabled || g_prof_final_dumped) return;", final,
+                      "the final dump must print once, and only with profiling on")
+
     def test_quit_requests_stop_the_scheduler_instead_of_exiting(self) -> None:
         """Closing the window (SDL3 quit, a Win32 WM_QUIT, or a presenter that reports the window
         gone) and the pause overlay's Quit are quit requests (#1377, #1392). gui.c exits nowhere:

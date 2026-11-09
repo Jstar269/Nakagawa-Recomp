@@ -623,6 +623,7 @@ int gegpu_sync_guest_fb(const GeGpuFbDescriptor *desc) {
     return 2; /* GEGPU_SYNC_NO_TARGET */
 }
 void sr_profile_dump(void) {}
+void sr_profile_dump_final(void) {}
 uint64_t SDL_GetTicksNS(void) { return 0; }
 int sr_capture_arm(const char *path) {
     s_cap_arm_calls++;
