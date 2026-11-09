@@ -7834,7 +7834,7 @@ static void graphics_preset_session(const PlayerSettings *settings, NkRuntimeCon
        preset for an Enhanced or Ace session. */
     memset(config, 0, sizeof(*config));
     player_app_apply_settings_to_session(settings, config);
-    player_play_resolve(settings, "TEST92150", r);
+    player_play_config_session(settings, "TEST92150", false, false, config, r);
     assert(player_play_launch_line(r, line, cap));
     player_session_apply_graphics_preset(settings, r->on, config);
 }
@@ -7844,7 +7844,6 @@ static void test_graphics_presets(void) {
     char cache_root[512], root[700], path[800];
     char line[192], custom_line[192];
     char note[192];
-    bool warns = true;
     PlayerPlayResolved r, custom_r;
     NkRuntimeConfig config, custom_config;
     PlayerSettings custom;
@@ -7859,8 +7858,8 @@ static void test_graphics_presets(void) {
     player_app_settings_init_default(&app->settings);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
     assert(strcmp(player_app_graphics_preset_label(app), "Custom") == 0);
-    assert(!player_app_graphics_preset_note(app, note, sizeof(note), &warns));
-    assert(note[0] == '\0' && !warns);
+    assert(!player_app_graphics_preset_note(app, note, sizeof(note)));
+    assert(note[0] == '\0');
     assert(player_graphics_preset_row(PLAYER_PRESET_CUSTOM) == NULL);
     assert(player_graphics_preset_row(PLAYER_PRESET_COUNT) == NULL);
     app->settings.graphics_preset = PLAYER_PRESET_COUNT;
@@ -7889,19 +7888,24 @@ static void test_graphics_presets(void) {
             assert(player_app_graphics_preset(app) == p);
             assert(strcmp(player_app_graphics_preset_label(app), row->value) == 0);
             assert(app->settings_notice[0] == '\0');
-            /* The note says where the preset applies, and names a value it cannot set. */
-            assert(player_app_graphics_preset_note(app, note, sizeof(note), &warns));
+            /* The note says where the preset applies and names the parts it sets, on and off. */
+            assert(player_app_graphics_preset_note(app, note, sizeof(note)));
             assert(strstr(note, row->label) != NULL &&
                    strstr(note, " is used in Enhanced and Ace") != NULL &&
-                   strstr(note, "Authentic uses your own display settings.") != NULL);
-            assert(warns == row->upscaler);
-            assert((strstr(note, "Sharper enlarging") != NULL) == row->upscaler);
-            if (row->upscaler) {
-                assert(strcmp(player_app_graphics_preset_label(app), "Ultra") == 0);
-            }
+                   strstr(note, "Authentic uses your settings.") != NULL);
+            assert(strcmp(note + strlen(row->label),
+                          row->part[PLAYER_PART_UPSCALE] == 1
+                              ? " is used in Enhanced and Ace, with crisp text and FSR 1 on. "
+                                "Authentic uses your settings."
+                              : " is used in Enhanced and Ace, with crisp text on and FSR 1 off. "
+                                "Authentic uses your settings.") == 0);
 
             /* Authentic: the session's config and launch line equal Custom's with the same
-               rows, under every preset. */
+               rows, under every preset. The library's parts are the opposite of the preset's,
+               so the Enhanced session below shows which one it took. */
+            app->settings.enhanced.part[PLAYER_PART_TEXT] = !row->part[PLAYER_PART_TEXT];
+            app->settings.enhanced.part[PLAYER_PART_UPSCALE] = !row->part[PLAYER_PART_UPSCALE];
+            custom.enhanced = app->settings.enhanced;
             graphics_preset_session(&app->settings, &config, &r, line, sizeof(line));
             graphics_preset_session(&custom, &custom_config, &custom_r, custom_line,
                                     sizeof(custom_line));
@@ -7911,38 +7915,197 @@ static void test_graphics_presets(void) {
             assert(config.resolution_scale == custom.resolution_scale &&
                    config.present_scaling == NK_PRESENT_SCALING_BILINEAR && !config.vsync &&
                    config.fullscreen == (fs != 0));
-            assert(config.present_upscale == NK_PRESENT_UPSCALE_OFF && config.ace_spec[0] == '\0');
+            assert(config.present_upscale == NK_PRESENT_UPSCALE_OFF && strcmp(config.ace_spec, "off") == 0);
 
-            /* Enhanced: the session takes the preset's values; the rest is the rows'. */
+            /* Enhanced: the session takes the preset's values and parts; the rest is the
+               rows' and the library's. */
             app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
             custom.enhanced.library = PLAYER_PLAY_ENHANCED;
             graphics_preset_session(&app->settings, &config, &r, line, sizeof(line));
             graphics_preset_session(&custom, &custom_config, &custom_r, custom_line,
                                     sizeof(custom_line));
-            assert(r.on && custom_r.on && strcmp(line, custom_line) == 0);
+            assert(r.on && custom_r.on);
             assert(config.resolution_scale == row->resolution_scale);
             assert(config.present_scaling == row->present_scaling);
             assert(config.vsync == row->vsync);
             assert(config.fullscreen == (row->fullscreen >= 0 ? row->fullscreen != 0 : fs != 0));
             assert(config.fps_cap == custom_config.fps_cap &&
-                   config.master_volume == custom_config.master_volume &&
-                   config.present_upscale == custom_config.present_upscale);
+                   config.master_volume == custom_config.master_volume);
+            for (int part = 0; part < PLAYER_PART_COUNT; part++) {
+                /* Only presentation parts; every other part is the library's. A new part
+                   needs its own choice here and in k_graphics_presets. */
+                if (part == PLAYER_PART_TEXT || part == PLAYER_PART_UPSCALE) {
+                    assert(row->part[part] == 0 || row->part[part] == 1);
+                    assert(r.part[part] == row->part[part]);
+                    assert(custom_r.part[part] == custom.enhanced.part[part]);
+                } else {
+                    assert(row->part[part] == -1);
+                    assert(r.part[part] == custom_r.part[part]);
+                }
+            }
+            assert(strstr(line, row->part[PLAYER_PART_TEXT] ? ";text=on" : ";text=off") != NULL);
+            assert(config.present_upscale == (row->part[PLAYER_PART_UPSCALE] == 1
+                                                  ? NK_PRESENT_UPSCALE_FSR1
+                                                  : NK_PRESENT_UPSCALE_OFF));
+            assert(custom_config.present_upscale == (custom.enhanced.part[PLAYER_PART_UPSCALE] == 1
+                                                         ? NK_PRESENT_UPSCALE_FSR1
+                                                         : NK_PRESENT_UPSCALE_OFF));
+            assert(player_settings_library_part(&app->settings, PLAYER_PART_UPSCALE) ==
+                   row->part[PLAYER_PART_UPSCALE]);
+            assert(player_settings_library_part(&custom, PLAYER_PART_UPSCALE) ==
+                   custom.enhanced.part[PLAYER_PART_UPSCALE]);
             assert(custom_config.resolution_scale == custom.resolution_scale &&
                    custom_config.present_scaling == NK_PRESENT_SCALING_BILINEAR &&
                    !custom_config.vsync);
+
+            /* A game's own value for a part wins over the preset. */
+            {
+                PlayerSettings own = app->settings;
+                PlayerTitlePlay *t = &own.title_play[0];
+                memset(t, 0, sizeof(*t));
+                snprintf(t->key, sizeof(t->key), "TEST92150"); /* its settings key */
+                t->mode = PLAYER_PLAY_LIBRARY;
+                for (int part = 0; part < PLAYER_PART_COUNT; part++) t->part[part] = -1;
+                t->part[PLAYER_PART_UPSCALE] = !row->part[PLAYER_PART_UPSCALE];
+                t->logic_60 = -1;
+                own.title_play_count = 1;
+                graphics_preset_session(&own, &config, &r, line, sizeof(line));
+                assert(r.on && r.part[PLAYER_PART_UPSCALE] == !row->part[PLAYER_PART_UPSCALE]);
+                assert(r.part[PLAYER_PART_TEXT] == row->part[PLAYER_PART_TEXT]);
+                assert(config.resolution_scale == row->resolution_scale);
+            }
         }
+    }
+
+    /* The table (docs/PLAYER_UI_DESIGN.md): Crisp system text on in every preset; Sharper
+       enlarging on in Medium, Ultra and Handheld, off in Low and High. */
+    for (int p = PLAYER_PRESET_LOW; p < PLAYER_PRESET_COUNT; p++) {
+        const PlayerGraphicsPresetRow *row = player_graphics_preset_row(p);
+        assert(row->part[PLAYER_PART_TEXT] == 1);
+        assert(row->part[PLAYER_PART_UPSCALE] ==
+               (p == PLAYER_PRESET_MEDIUM || p == PLAYER_PRESET_ULTRA ||
+                p == PLAYER_PRESET_HANDHELD));
+    }
+
+    /* Editing a part a preset sets, for the library, steps from the value the page shows (the
+       preset's) and makes the preset Custom; a part no preset sets leaves it as it is. */
+    player_app_settings_init_default(&app->settings);
+    app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE); /* shown On (Ultra), so Off */
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 0);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_LOW);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE); /* shown Off (Low), so On */
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_HIGH);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_TEXT);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SAS);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_FILTERING);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_SMOOTH);
+    player_app_cycle_enhanced_part(app, PLAYER_PART_WIDE);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_ULTRA);
+
+    /* Going Custom keeps what the pages showed: the preset's parts become the library's, so
+       editing a display row, or one part, never turns the other part off. */
+    for (int edit = 0; edit < 2; edit++) {
+        NkRuntimeConfig cfg;
+        PlayerPlayResolved pr;
+        char pline[192];
+        player_app_settings_init_default(&app->settings);
+        app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+        app->settings.enhanced.part[PLAYER_PART_TEXT] = 0;
+        app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
+        player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(cfg.present_upscale == NK_PRESENT_UPSCALE_FSR1 && pr.part[PLAYER_PART_TEXT] == 1);
+        if (edit == 0) {
+            player_app_cycle_resolution_scale(app, 1);
+        } else {
+            player_app_cycle_enhanced_part(app, PLAYER_PART_UPSCALE); /* FSR 1 (Ultra) -> Off */
+        }
+        assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+        assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 1);
+        assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == (edit == 0 ? 1 : 0));
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(pr.part[PLAYER_PART_TEXT] == 1 && strstr(pline, ";text=on") != NULL);
+        assert(cfg.present_upscale == (edit == 0 ? NK_PRESENT_UPSCALE_FSR1
+                                                 : NK_PRESENT_UPSCALE_OFF));
+    }
+    /* Under Handheld, toggling fullscreen (a row it sets) keeps its parts the same way. */
+    player_app_settings_init_default(&app->settings);
+    app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
+    player_app_apply_graphics_preset(app, PLAYER_PRESET_HANDHELD);
+    player_app_toggle_fullscreen(app);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+    /* A row edit while already Custom changes no part, and going Custom never touches a game's
+       own value, which keeps winning over the library's. */
+    app->settings.enhanced.part[PLAYER_PART_UPSCALE] = 0;
+    app->settings.enhanced.part[PLAYER_PART_TEXT] = 0;
+    player_app_cycle_resolution_scale(app, 1);
+    assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+    assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 0 &&
+           app->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
+    {
+        NkRuntimeConfig cfg;
+        PlayerPlayResolved pr;
+        char pline[192];
+        PlayerTitlePlay *t = &app->settings.title_play[0];
+        player_app_settings_init_default(&app->settings);
+        app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+        memset(t, 0, sizeof(*t));
+        snprintf(t->key, sizeof(t->key), "TEST92150");
+        t->mode = PLAYER_PLAY_LIBRARY;
+        for (int part = 0; part < PLAYER_PART_COUNT; part++) t->part[part] = -1;
+        t->part[PLAYER_PART_UPSCALE] = 0;
+        t->logic_60 = -1;
+        app->settings.title_play_count = 1;
+        player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
+        player_app_cycle_resolution_scale(app, 1);
+        assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
+        assert(app->settings.title_play_count == 1 &&
+               app->settings.title_play[0].part[PLAYER_PART_UPSCALE] == 0);
+        assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+        graphics_preset_session(&app->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(cfg.present_upscale == NK_PRESENT_UPSCALE_OFF);
+        app->settings.title_play_count = 0;
+    }
+
+    /* A v0.0.2 settings file keeps its preset and its library parts as written, and an
+       Enhanced session takes the preset's parts over them: High with Sharper enlarging on and
+       Crisp system text off in the library launches with FSR 1 off and crisp text on. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"graphics_preset\": \"high\", \"enhanced\": {\"default\": "
+        "\"enhanced\", \"af\": \"16\", \"text\": \"off\", \"upscale\": \"fsr1\"}}");
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(player_app_graphics_preset(back) == PLAYER_PRESET_HIGH);
+    assert(back->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
+    assert(back->settings.enhanced.part[PLAYER_PART_UPSCALE] == 1);
+    {
+        NkRuntimeConfig cfg;
+        PlayerPlayResolved pr;
+        char pline[192];
+        graphics_preset_session(&back->settings, &cfg, &pr, pline, sizeof(pline));
+        assert(pr.on && pr.part[PLAYER_PART_TEXT] == 1 && strstr(pline, ";text=on") != NULL);
+        assert(cfg.present_upscale == NK_PRESENT_UPSCALE_OFF);
+        assert(cfg.resolution_scale == 4);
     }
 
     /* Editing a row the preset sets makes it Custom, even to the same value, and the note
        goes with it. */
     player_app_settings_init_default(&app->settings);
     player_app_apply_graphics_preset(app, PLAYER_PRESET_ULTRA);
-    assert(player_app_graphics_preset_note(app, note, sizeof(note), &warns) && warns);
+    assert(player_app_graphics_preset_note(app, note, sizeof(note)));
     player_app_cycle_resolution_scale(app, 1);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
     assert(strcmp(player_app_graphics_preset_label(app), "Custom") == 0);
-    assert(!player_app_graphics_preset_note(app, note, sizeof(note), &warns));
-    assert(note[0] == '\0' && !warns);
+    assert(!player_app_graphics_preset_note(app, note, sizeof(note)));
+    assert(note[0] == '\0');
     player_app_apply_graphics_preset(app, PLAYER_PRESET_MEDIUM);
     player_app_set_resolution_scale(app, app->settings.resolution_scale);
     assert(player_app_graphics_preset(app) == PLAYER_PRESET_CUSTOM);
@@ -8005,8 +8168,8 @@ static void test_graphics_presets(void) {
     assert(player_app_graphics_preset(back) == PLAYER_PRESET_ULTRA);
     assert(back->settings.resolution_scale == 1);
     assert(strcmp(player_app_graphics_preset_label(back), "Ultra") == 0);
-    assert(player_app_graphics_preset_note(back, note, sizeof(note), &warns) && warns &&
-           strstr(note, "Sharper enlarging") != NULL);
+    assert(player_app_graphics_preset_note(back, note, sizeof(note)) &&
+           strstr(note, "FSR 1 on") != NULL);
 
     /* The rows a file holds are kept as they are beside its preset. */
     write_text_file(path,
@@ -8648,6 +8811,290 @@ static void test_enhanced_package_variants(void) {
     printf("[PLAYER_STATE_TEST] enhanced and authentic package variants validate apart PASS\n");
 }
 
+/* ---- --launch-title and Add to Steam (#2152) ---- */
+
+static void steam_test_game(GameRecord *game, const char *disc, const char *name,
+                            char sha_digit) {
+    memset(game, 0, sizeof(*game));
+    snprintf(game->disc_id, sizeof(game->disc_id), "%s", disc);
+    snprintf(game->title_name, sizeof(game->title_name), "%s", name);
+    if (sha_digit) {
+        memset(game->content_sha1, sha_digit, 40u);
+        game->content_sha1[40] = '\0';
+    }
+}
+
+/* Users' games 0 to 2 (1 and 2 share a disc ID, a retail disc and its translation), a
+   sample, a showcase demo, and a disc ID a command line can't carry as it is. */
+static PlayerApp *steam_test_app(void) {
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    steam_test_game(&app->games[0], "ULUS10001", "Synthetic Game One", 'a');
+    steam_test_game(&app->games[1], "ULUS10002", "Synthetic Retail", 'b');
+    steam_test_game(&app->games[2], "ULUS10002", "Synthetic Translation", 'c');
+    steam_test_game(&app->games[3], "TEST00005", "Synthetic Sample", 'd');
+    app->games[3].is_sample = true;
+    steam_test_game(&app->games[4], "TEST00007", "Synthetic Showcase", 'e');
+    app->games[4].is_showcase_package = true;
+    steam_test_game(&app->games[5], "BAD ID", "Synthetic Odd Disc", 'f');
+    app->game_count = 6;
+    return app;
+}
+
+static void test_launch_title_names_one_game(void) {
+    PlayerApp *app = steam_test_app();
+    char value[PLAYER_LAUNCH_TITLE_VALUE_MAX];
+    char message[512];
+    char upper[64];
+    int index = 99;
+    assert(player_app_launch_title_value(app, 0, value, sizeof(value)) &&
+           strcmp(value, "ULUS10001") == 0);
+    /* A shared disc ID is named with the image's SHA-1. */
+    assert(player_app_launch_title_value(app, 1, value, sizeof(value)) &&
+           strcmp(value, "ULUS10002:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") == 0);
+    assert(!player_app_launch_title_value(app, 3, value, sizeof(value)) && value[0] == '\0');
+    assert(!player_app_launch_title_value(app, 4, value, sizeof(value)));
+    assert(!player_app_launch_title_value(app, 5, value, sizeof(value)));
+    assert(!player_app_launch_title_value(app, 6, value, sizeof(value)));
+    assert(!player_app_launch_title_value(app, -1, value, sizeof(value)));
+    assert(!player_app_launch_title_value(app, 1, value, 20u));
+    /* Every value names its own game again. */
+    for (int i = 0; i < 3; ++i) {
+        assert(player_app_launch_title_value(app, i, value, sizeof(value)));
+        assert(player_app_find_launch_title(app, value, &index, message, sizeof(message)) ==
+                   PLAYER_LAUNCH_TITLE_FOUND &&
+               index == i && message[0] == '\0');
+    }
+    snprintf(upper, sizeof(upper), "ULUS10002:%s", "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
+    assert(player_app_find_launch_title(app, upper, &index, NULL, 0u) ==
+               PLAYER_LAUNCH_TITLE_FOUND && index == 2);
+    assert(player_app_find_launch_title(app, "ULUS10002", &index, message, sizeof(message)) ==
+               PLAYER_LAUNCH_TITLE_AMBIGUOUS &&
+           index == -1 && strstr(message, "Several disc images") != NULL);
+    assert(player_app_find_launch_title(app, "ULUS99999", &index, message, sizeof(message)) ==
+               PLAYER_LAUNCH_TITLE_MISSING &&
+           strstr(message, "ULUS99999") != NULL);
+    /* Demos and samples are not the user's games, so no shortcut names them. */
+    assert(player_app_find_launch_title(app, "TEST00005", &index, NULL, 0u) ==
+           PLAYER_LAUNCH_TITLE_MISSING);
+    assert(player_app_find_launch_title(app, "TEST00007", &index, NULL, 0u) ==
+           PLAYER_LAUNCH_TITLE_MISSING);
+    static const char *const malformed[] = {"", "../ULUS10001", "ULUS 10001", "ULUS10001:",
+                                            "ULUS10001:abc", ":aaaa", "BAD ID"};
+    for (size_t i = 0u; i < sizeof(malformed) / sizeof(malformed[0]); ++i) {
+        assert(player_app_find_launch_title(app, malformed[i], &index, message,
+                                            sizeof(message)) == PLAYER_LAUNCH_TITLE_MALFORMED &&
+               index == -1 && strstr(message, "disc ID") != NULL);
+    }
+    free(app);
+}
+
+static bool steam_test_running_yes(void) { return true; }
+static bool steam_test_running_no(void) { return false; }
+
+static size_t steam_test_count(const char *path, const char *needle) {
+    FILE *f = nk_fopen_utf8(path, "rb");
+    static char data[1u << 16];
+    size_t size;
+    size_t count = 0u;
+    size_t length = strlen(needle);
+    if (f == NULL) return 0u;
+    size = fread(data, 1u, sizeof(data), f);
+    fclose(f);
+    for (size_t i = 0u; i + length <= size; ++i) {
+        if (memcmp(data + i, needle, length) == 0) count++;
+    }
+    return count;
+}
+
+static void test_add_to_steam_outcomes(void) {
+    PlayerApp *app = steam_test_app();
+    PlayerSteamPlan plan;
+    char steam[NK_MAX_PATH];
+    char exe[NK_MAX_PATH];
+    char moved_exe[NK_MAX_PATH];
+    char path[NK_MAX_PATH * 2];
+    char vdf[NK_MAX_PATH * 2];
+    char other_vdf[NK_MAX_PATH * 2];
+    char text[NK_MAX_PATH * 3];
+    snprintf(steam, sizeof(steam), "%s/steam2152", native_test_get_root());
+    snprintf(exe, sizeof(exe), "%s/Nakagawa/bin/nakagawa_player.exe", native_test_get_root());
+    snprintf(moved_exe, sizeof(moved_exe), "%s/Nakagawa-new/bin/nakagawa_player.exe",
+             native_test_get_root());
+    snprintf(vdf, sizeof(vdf), "%s/userdata/20002/config/shortcuts.vdf", steam);
+    snprintf(other_vdf, sizeof(other_vdf), "%s/userdata/20003/config/shortcuts.vdf", steam);
+
+    /* Every outcome has a sentence, and only the three successes count as done. */
+    for (int outcome = PLAYER_STEAM_READY; outcome <= PLAYER_STEAM_NO_PROGRAM; ++outcome) {
+        memset(&plan, 0, sizeof(plan));
+        plan.outcome = (PlayerSteamOutcome)outcome;
+        snprintf(plan.app_name, sizeof(plan.app_name), "Synthetic Game One");
+        assert((player_steam_outcome_text(&plan, text, sizeof(text)) > 0u) ==
+               (outcome != PLAYER_STEAM_READY));
+        assert(player_steam_outcome_ok((PlayerSteamOutcome)outcome) ==
+               (outcome == PLAYER_STEAM_ADDED || outcome == PLAYER_STEAM_UPDATED ||
+                outcome == PLAYER_STEAM_ALREADY));
+    }
+
+    /* A demo, a sample or an odd disc ID is not offered. */
+    assert(player_app_plan_steam_shortcut(app, 3, steam, exe, &plan) == PLAYER_STEAM_NOT_A_GAME &&
+           !plan.ready);
+    assert(player_app_plan_steam_shortcut(app, 4, steam, exe, &plan) == PLAYER_STEAM_NOT_A_GAME);
+    assert(player_app_plan_steam_shortcut(app, 5, steam, exe, &plan) == PLAYER_STEAM_NOT_A_GAME);
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090000") ==
+           PLAYER_STEAM_NOT_A_GAME);
+    /* No Steam: nothing to add to, and the sentence says what to do. */
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_NOT_FOUND &&
+           !plan.ready);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "Steam isn't installed") != NULL && strstr(text, "nothing was added"));
+    /* Steam with no account yet. */
+    assert(nk_platform_mkdir_p(steam));
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_NO_ACCOUNT);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "sign in") != NULL);
+    /* A program path a shortcut can't hold. */
+    assert(player_app_plan_steam_shortcut(app, 0, steam, "nakagawa_player.exe", &plan) ==
+           PLAYER_STEAM_NO_PROGRAM);
+
+    /* Two accounts; one named in loginusers.vdf (76561197960285730 is account 20002). */
+    snprintf(path, sizeof(path), "%s/userdata/20002/config", steam);
+    assert(nk_platform_mkdir_p(path));
+    snprintf(path, sizeof(path), "%s/userdata/20003/config", steam);
+    assert(nk_platform_mkdir_p(path));
+    snprintf(path, sizeof(path), "%s/config", steam);
+    assert(nk_platform_mkdir_p(path));
+    snprintf(path, sizeof(path), "%s/config/loginusers.vdf", steam);
+    write_text_file(path, "\"users\"\n{\n\t\"76561197960285730\"\n\t{\n"
+                          "\t\t\"PersonaName\"\t\t\"Synthetic One\"\n\t}\n}\n");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_READY &&
+           plan.ready);
+    assert(plan.account_count == 2u && strcmp(plan.accounts[0].id, "20002") == 0 &&
+           strcmp(plan.account_names[0], "Synthetic One") == 0 &&
+           plan.account_names[1][0] == '\0');
+    assert(strcmp(plan.app_name, "Synthetic Game One") == 0 && strcmp(plan.exe, exe) == 0 &&
+           strstr(plan.start_dir, "/Nakagawa/bin") != NULL &&
+           strstr(exe, plan.start_dir) == exe && strlen(plan.start_dir) + 20u == strlen(exe));
+    assert(strcmp(plan.launch_options, "--launch-title=ULUS10001") == 0);
+    assert(!plan.portable);
+
+    /* Steam running: nothing is written, and the sentence says to exit Steam and that no
+       restart follows. */
+    assert(player_steam_add(&plan, 0u, steam_test_running_yes, "20261108-090000") ==
+           PLAYER_STEAM_RUNNING);
+    assert(nk_platform_path_missing(vdf));
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "Steam is running, so nothing was changed") != NULL &&
+           strstr(text, "Exit Steam") != NULL && strstr(text, "No restart is needed") != NULL);
+
+    /* Added: Steam had no list yet, so there was nothing to back up. */
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090000") ==
+           PLAYER_STEAM_ADDED);
+    assert(plan.backup_path[0] == '\0' && steam_test_count(vdf, "ULUS10001") == 1u);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "Added Synthetic Game One to Steam") != NULL &&
+           strstr(text, "no restart is needed") != NULL &&
+           strstr(text, "nothing to back up") != NULL);
+    /* Already there: reported, never duplicated, nothing written. */
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090001") ==
+           PLAYER_STEAM_ALREADY);
+    assert(plan.backup_path[0] == '\0' && steam_test_count(vdf, "ULUS10001") == 1u);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "already in this Steam library") != NULL &&
+           strstr(text, "Nothing was changed") != NULL);
+
+    /* A second game beside it: its own shortcut, after a backup of the list. */
+    assert(player_app_plan_steam_shortcut(app, 2, steam, exe, &plan) == PLAYER_STEAM_READY);
+    assert(strcmp(plan.launch_options,
+                  "--launch-title=ULUS10002:cccccccccccccccccccccccccccccccccccccccc") == 0);
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090002") ==
+           PLAYER_STEAM_ADDED);
+    assert(plan.backup_path[0] != '\0' &&
+           strstr(plan.backup_path, "shortcuts.vdf.nakagawa-backup-20261108-090002") != NULL &&
+           steam_test_count(plan.backup_path, "ULUS10002") == 0u &&
+           steam_test_count(vdf, "nakagawa_player.exe") == 2u);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "saved as") != NULL && strstr(text, "nakagawa-backup-20261108-090002"));
+
+    /* A new Nakagawa folder (each update unpacks into one): the game's shortcut is updated,
+       not duplicated. */
+    assert(player_app_plan_steam_shortcut(app, 0, steam, moved_exe, &plan) ==
+           PLAYER_STEAM_READY);
+    assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090003") ==
+           PLAYER_STEAM_UPDATED);
+    assert(steam_test_count(vdf, "ULUS10001") == 1u &&
+           steam_test_count(vdf, "Nakagawa-new/bin") == 2u &&
+           steam_test_count(vdf, "nakagawa_player.exe") == 2u && plan.backup_path[0] != '\0');
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "Updated Synthetic Game One in Steam") != NULL &&
+           strstr(text, "play time and collections stay") != NULL);
+
+    /* The other account's list does not parse: left as it was, no backup. */
+    write_text_file(other_vdf, "not a binary KeyValues file");
+    assert(player_steam_add(&plan, 1u, steam_test_running_no, "20261108-090004") ==
+           PLAYER_STEAM_UNREADABLE);
+    assert(plan.backup_path[0] == '\0' &&
+           steam_test_count(other_vdf, "not a binary KeyValues file") == 1u);
+    (void)player_steam_outcome_text(&plan, text, sizeof(text));
+    assert(strstr(text, "could not be read") != NULL && strstr(text, "Nothing was changed"));
+
+    /* No verified backup, so nothing is written: every backup name is taken. */
+    {
+        char taken[NK_MAX_PATH * 3];
+        FILE *before = nk_fopen_utf8(vdf, "rb");
+        static char original[1u << 16];
+        size_t original_size;
+        assert(before != NULL);
+        original_size = fread(original, 1u, sizeof(original), before);
+        fclose(before);
+        snprintf(taken, sizeof(taken), "%s.nakagawa-backup-20261108-090005", vdf);
+        write_text_file(taken, "x");
+        for (unsigned i = 2u; i <= 100u; ++i) {
+            snprintf(taken, sizeof(taken), "%s.nakagawa-backup-20261108-090005-%u", vdf, i);
+            write_text_file(taken, "x");
+        }
+        assert(player_app_plan_steam_shortcut(app, 1, steam, exe, &plan) == PLAYER_STEAM_READY);
+        assert(player_steam_add(&plan, 0u, steam_test_running_no, "20261108-090005") ==
+               PLAYER_STEAM_BACKUP_FAILED);
+        assert(steam_test_count(vdf, "ULUS10002:bbbb") == 0u);
+        before = nk_fopen_utf8(vdf, "rb");
+        assert(before != NULL);
+        {
+            static char now[1u << 16];
+            size_t now_size = fread(now, 1u, sizeof(now), before);
+            fclose(before);
+            assert(now_size == original_size && memcmp(now, original, now_size) == 0);
+        }
+        (void)player_steam_outcome_text(&plan, text, sizeof(text));
+        assert(strstr(text, "changed nothing") != NULL);
+    }
+    /* An account that is gone since the dialog opened. */
+    assert(player_steam_add(&plan, 5u, steam_test_running_no, "20261108-090006") ==
+           PLAYER_STEAM_NO_ACCOUNT);
+
+    /* A process started with --user-data-root passes the folder on, quoted, with no
+       separator before the closing quote. */
+    snprintf(app->user_data_root, sizeof(app->user_data_root), "C:/Synthetic data/Nakagawa/");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_READY);
+    assert(strcmp(plan.launch_options,
+                  "--launch-title=ULUS10001 \"--user-data-root=C:/Synthetic data/Nakagawa\"") ==
+           0);
+    /* A drive root keeps its separator ("C:" alone is relative to drive C's current folder);
+       a backslash before the closing quote is doubled so Windows reads one. */
+    snprintf(app->user_data_root, sizeof(app->user_data_root), "D:/");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_READY);
+    assert(strcmp(plan.launch_options, "--launch-title=ULUS10001 \"--user-data-root=D:/\"") == 0);
+#ifdef _WIN32
+    snprintf(app->user_data_root, sizeof(app->user_data_root), "D:\\");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_READY);
+    assert(strcmp(plan.launch_options,
+                  "--launch-title=ULUS10001 \"--user-data-root=D:\\\\\"") == 0);
+#endif
+    snprintf(app->user_data_root, sizeof(app->user_data_root), "C:/Odd\"Folder");
+    assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_NO_PROGRAM);
+    free(app);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -8743,6 +9190,8 @@ int main(int argc, char **argv) {
 #endif
     test_remove_from_library_deletes_what_nakagawa_built();
     test_saves_back_up_restore_and_add();
+    test_launch_title_names_one_game();
+    test_add_to_steam_outcomes();
     test_saves_backup_refuses_what_it_cannot_hold();
 #if defined(NK_SAVES_TEST_SEAMS)
     test_saves_change_nothing_without_a_whole_backup();
@@ -13203,12 +13652,13 @@ int main(int argc, char **argv) {
                     } else {
                         snprintf(expected, sizeof(expected),
                                  "SR_RESOLUTION_SCALE=%d;SR_PRESENT_SCALING=%s;SR_VSYNC=%d;"
-                                 "SR_FULLSCREEN=%d;SR_PRESENT_UPSCALE=off",
+                                 "SR_FULLSCREEN=%d;SR_PRESENT_UPSCALE=%s",
                                  row->resolution_scale,
                                  row->present_scaling == NK_PRESENT_SCALING_SHARP ? "sharp"
                                      : row->present_scaling == NK_PRESENT_SCALING_INTEGER
                                          ? "integer" : "bilinear",
-                                 row->vsync ? 1 : 0, row->fullscreen > 0 ? 1 : 0);
+                                 row->vsync ? 1 : 0, row->fullscreen > 0 ? 1 : 0,
+                                 row->part[PLAYER_PART_UPSCALE] == 1 ? "fsr1" : "off");
                     }
                     if (strcmp(report.display, expected) != 0) {
                         fprintf(stderr, "preset %s, %s: launched %s, expected %s\n", row->word,

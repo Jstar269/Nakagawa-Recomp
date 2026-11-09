@@ -2585,6 +2585,151 @@ static int coherence_run_mip_slope_change(void) {
     return ok;
 }
 
+/* Multi-CLUT mip levels (#2031). A CLUT8 chain of four levels whose level-L texel in column u
+ * holds index 0x10 + 4 L + (u & 3), through a 512-entry 4444 CLUT whose entry k is 0xF000 | k,
+ * so a pixel names the entry it read. With TEXMODE bit 8 set, level L reads entry t + 256 L
+ * wrapped in CLUT RAM (ge.c clut_index, PSP-GE-MIP-002); the Vulkan backend decodes each level
+ * through that lookup. Each cell draws one through-mode sprite at a constant level on the GPU
+ * and with the software GE, and the two framebuffers must be equal, with the first pixel the
+ * entry the rule names. off-level-1 follows on-level-1 with only the bit changed, so a texture
+ * cache that keys the chain without the bit reuses level 1 read through the wrong entries. */
+#define COH_MCLUT_TEX  0x04046000u           /* level L at COH_MCLUT_TEX + L * 0x200, width 16 */
+#define COH_MCLUT_CLUT 0x04047000u           /* 512 4444 entries (32 blocks) */
+
+static uint32_t coherence_mclut_rgb(uint32_t k) {
+    return ((k & 15u) * 17u) | ((((k >> 4) & 15u) * 17u) << 8) | ((((k >> 8) & 15u) * 17u) << 16);
+}
+
+static uint32_t coherence_mclut_list(uint32_t multi, uint32_t level) {
+    RawSpriteVtx *vtx = (RawSpriteVtx *)SR_HOST(COH_MIP_VERTS);
+    /* UV from 0: half a level-0 texel per pixel, so every texel edge of every level falls on a
+     * pixel edge and the texels, which change with u, give the same pixels at any render scale. */
+    vtx[0] = (RawSpriteVtx){ 0.0f, 0.0f, (float)COH_MIP_X, (float)COH_MIP_Y, 0.0f };
+    vtx[1] = (RawSpriteVtx){ 8.0f, 8.0f, (float)(COH_MIP_X + 16), (float)(COH_MIP_Y + 16), 0.0f };
+    uint32_t *dl = (uint32_t *)SR_HOST(COH_MIP_LIST);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    DL_EMIT(0x10, 0);
+    DL_EMIT(0x9C, 0x00160000u);
+    DL_EMIT(0x9D, 512u | (0x04000000u >> 8));
+    DL_EMIT(0x9E, 0x00080000u);
+    DL_EMIT(0x9F, 512u | (0x04000000u >> 8));
+    DL_EMIT(0xD2, 3);
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x4C, 0);
+    DL_EMIT(0x4D, 0);
+    DL_EMIT(0x23, 0);
+    DL_EMIT(0x22, 0);
+    DL_EMIT(0x21, 0);
+    DL_EMIT(0x15, 0);
+    DL_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xD4, 0);
+    DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xB0, COH_MCLUT_CLUT & 0x00FFFFFFu);                           /* CLUTADDR */
+    DL_EMIT(0xB1, (COH_MCLUT_CLUT & 0xFF000000u) >> 8);                    /* CLUTADDRUPPER */
+    DL_EMIT(0xC4, 0x20u);                                                  /* LOADCLUT: 512 entries */
+    DL_EMIT(0xC5, 2u | (0xFFu << 8));                                      /* 4444, mask 0xFF */
+    for (uint32_t l = 0; l < 4u; l++) {
+        const uint32_t addr = COH_MCLUT_TEX + l * 0x200u, log2 = 3u - l;
+        DL_EMIT(0xA0 + l, addr & 0x00FFFFFFu);
+        DL_EMIT(0xA8 + l, 16u | ((addr & 0xFF000000u) >> 8));
+        DL_EMIT(0xB8 + l, (log2 << 8) | log2);
+    }
+    DL_EMIT(0xC2, (3u << 16) | (multi << 8));           /* TEXMODE: levels 0-3, multi-CLUT */
+    DL_EMIT(0xC8, 1u | ((level << 4) << 16));           /* TEXLEVEL: constant, bias = level */
+    DL_EMIT(0xC0, 0);
+    DL_EMIT(0xC3, 5);                                   /* CLUT8 */
+    DL_EMIT(0xC6, 0x004u);                              /* nearest, nearest level */
+    DL_EMIT(0xC7, 0);
+    DL_EMIT(0xC9, 3u | (1u << 8));                      /* replace, RGBA */
+    DL_EMIT(0x1E, 1);
+    DL_EMIT(0x12, (3u << 0) | (3u << 7) | (1u << 23));  /* float UV and position, through */
+    DL_EMIT(0x01, COH_MIP_VERTS & 0x00FFFFFFu);
+    DL_EMIT(0x04, (6u << 16) | 2u);
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+    return COH_MIP_LIST;
+}
+
+static int coherence_run_mip_clut(void) {
+    static const struct { const char *name; uint32_t multi, level; } cells[] = {
+        { "on-level-1", 1u, 1u }, { "off-level-1", 0u, 1u }, { "on-level-2", 1u, 2u },
+        { "on-level-3", 1u, 3u }, { "on-level-0", 1u, 0u },
+    };
+    const uint32_t base = 0x04000000u | 0x00160000u, stride = 512u;
+    const size_t bytes = (size_t)stride * FB_H * 4u, pixels = bytes / 4u;
+    uint32_t *fb = (uint32_t *)SR_HOST(base);
+    uint32_t *gpu = (uint32_t *)malloc(bytes);
+    if (!gpu) {
+        fprintf(stderr, "gpu coherence selftest [mip-clut]: no reference buffer\n");
+        return 0;
+    }
+    for (uint32_t l = 0; l < 4u; l++) {
+        uint8_t *tex = (uint8_t *)SR_HOST(COH_MCLUT_TEX + l * 0x200u);
+        for (uint32_t v = 0; v < (8u >> l); v++)
+            for (uint32_t u = 0; u < 16u; u++) tex[v * 16u + u] = (uint8_t)(0x10u + 4u * l + (u & 3u));
+        sr_gpu_vram_dirty(COH_MCLUT_TEX + l * 0x200u, 16u * (8u >> l));
+    }
+    uint16_t *clut = (uint16_t *)SR_HOST(COH_MCLUT_CLUT);
+    for (uint32_t k = 0; k < 512u; k++) clut[k] = (uint16_t)(0xF000u | k);
+    sr_gpu_vram_dirty(COH_MCLUT_CLUT, 512u * 2u);
+    int all = 1;
+    for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
+        const uint32_t list = coherence_mclut_list(cells[i].multi, cells[i].level);
+        coherence_reset_targets();
+        memset(fb, 0, bytes);
+        sr_gpu_vram_dirty(base, (uint32_t)bytes);
+        ge_set_gpu_hooks(&k_hooks);
+        const unsigned long long fallback0 = s_replay_stats.fallback_prims;
+        ge_run_list(list, 0);
+        const unsigned long long fallbacks = s_replay_stats.fallback_prims - fallback0;
+        GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
+                                   .width = 480, .height = 272 };
+        int ok = gegpu_sync_guest_fb(&desc);
+        if (!ok) fprintf(stderr, "gpu coherence selftest [mip-clut %s]: GPU readback failed\n", cells[i].name);
+        if (ok && fallbacks != 0u) {
+            fprintf(stderr, "gpu coherence selftest [mip-clut %s]: %llu software fallback primitive(s), "
+                    "want the GPU\n", cells[i].name, fallbacks);
+            ok = 0;
+        }
+        if (ok) {
+            memcpy(gpu, fb, bytes);
+            memset(fb, 0, bytes);
+            ge_set_gpu_hooks(NULL);
+            ge_run_list(list, 0);
+            ge_set_gpu_hooks(&k_hooks);
+        }
+        /* The first pixel reads level texel 0 (a quarter level-0 texel in, at every level). */
+        const uint32_t t = 0x10u + 4u * cells[i].level;
+        const uint32_t k = cells[i].multi ? (t + 256u * cells[i].level) & 511u : t;
+        const uint32_t want = coherence_mclut_rgb(k);
+        const size_t first = (size_t)COH_MIP_Y * stride + COH_MIP_X;
+        if (ok && ((fb[first] & 0x00FFFFFFu) != want || (gpu[first] & 0x00FFFFFFu) != want)) {
+            fprintf(stderr, "gpu coherence selftest [mip-clut %s]: first pixel gpu=%06x software=%06x, "
+                    "want entry 0x%03x (%06x)\n", cells[i].name, gpu[first] & 0x00FFFFFFu,
+                    fb[first] & 0x00FFFFFFu, k, want);
+            ok = 0;
+        }
+        size_t diff = 0, at = 0;
+        for (size_t px = 0; ok && px < pixels; px++)
+            if (gpu[px] != fb[px] && diff++ == 0) at = px;
+        if (diff) {
+            fprintf(stderr, "gpu coherence selftest [mip-clut %s]: %zu GPU/software mismatches, first "
+                    "at (%zu,%zu) gpu=%08x software=%08x\n", cells[i].name, diff, at % stride,
+                    at / stride, gpu[at], fb[at]);
+            ok = 0;
+        }
+        if (ok)
+            printf("gpu coherence selftest: PASS mip-clut %-12s bit=%u level=%u entry=0x%03x\n",
+                   cells[i].name, cells[i].multi, cells[i].level, k);
+        if (!ok) all = 0;
+    }
+    free(gpu);
+    coherence_reset_targets();
+    return all;
+}
+
 static int coherence_run_mip_levels(void) {
     static const CohMipCase cases[] = {
         /* Constant mode: the bias is the level, clamped to the highest level; one half
@@ -2642,6 +2787,7 @@ static int coherence_run_mip_levels(void) {
     if (!coherence_run_mip_shadow()) ok = 0;
     if (!coherence_run_mip_lod()) ok = 0;
     if (!coherence_run_mip_slope_change()) ok = 0;
+    if (!coherence_run_mip_clut()) ok = 0;
     coherence_mip_reset_state();
     coherence_reset_targets();
     return ok;
@@ -7799,6 +7945,258 @@ static int coherence_run_twin_key(void) {
     return ok;
 }
 
+/* rtt-scale (#2052): a bloom-like pass into a quarter-size render target Q (128 x 68, stride 128,
+ * 8888) is sampled back by one sprite onto the full-size target M (512 x 272), 4x, linear (a
+ * bloom's filter), in the target's own format and stride. That is the render-to-texture bind in
+ * build_state: Q's image is bound directly, so at render scale S Q is a 128S x 68S image and each
+ * of its device pixels covers 4 device pixels of M, whatever S is. Read back through VRAM and
+ * decoded at 1x (what SR_GPU_NORTT=1 forces for every draw, or a bind the direct rule refuses)
+ * each Q texel covers 4S device pixels instead. (A nearest sample of a target takes the centre of
+ * its guest texel by design, psp.frag, so only a linear one shows the target's own resolution.)
+ *
+ * Q holds a flat white quad whose top edge is long and shallow: 10 rows of rise over 128 columns,
+ * so per device column it climbs one Q device row at most. In M's device image the edge is the
+ * first row per column whose blend weight of Q's white is at least one half (the filter's 50%
+ * crossing). The check is on the ramps' width, not on an exact colour, so the threshold sits
+ * where no blend this sprite makes can reach it. M's device pixels step 1/(4S) of a guest texel
+ * and psp.frag snaps positions to 1/16, so each weight along an axis is an odd number of eighths
+ * at 1x and 2x and a whole number of quarters at 4x. A blend of white is then 255 * j / 64; over
+ * every set of white texels in a 2x2 footprint, the values nearest one half are 119.5 and 135.5
+ * (30/64 and 34/64, at 1x and 2x, where 32/64 cannot occur) and 127.5 (32/64, at 4x). Red >= 125
+ * lies between them, more than one step from each, so a device that stores
+ * a UNORM value as either neighbouring integer (Vulkan recommends rounding to nearest but does
+ * not require it, and 127.5 is a tie) gives the same edge.
+ * The edge stays on a plateau across a Q device pixel's run of columns and climbs one Q device
+ * pixel, 4 device rows, in a ramp of the 4 columns where the filter blends two Q device columns:
+ * so every ramp rises exactly 4 rows at 1x, 2x and 4x. (At 3x a device texel is 16/3 sixteenths,
+ * the ramps are uneven, and the recipe does not run this case there.) Decoded at 1x, a Q texel is
+ * 4S device pixels and the same climb is 4S rows (16 at 4x), here split in uneven ramps (1, 13
+ * and 2 rows at 4x).
+ * The case asserts that every ramp rises exactly 4 rows and that there are about 10 * S of them
+ * (10 Q-guest rows, S device rows each, over the columns scanned); at scale 1 the two routes
+ * agree, and the same 4 rows are the 1x lattice. The picture is also checked against the
+ * software renderer running the same list: guest VRAM of M holds the top-left device sample of
+ * each guest pixel (as sprite-scaled) and equals the software picture within 2 per channel,
+ * except above 1x within 8 guest rows either side of its edge. There the scaled picture is not
+ * the 1x one by design: a Q texel is 4 guest rows, the finer device staircase and the guest one
+ * part by up to a texel, and the filter's blend reaches half a texel past that (6 rows; 8 leaves
+ * half a texel of margin). s_cnt_rtt counts every draw that samples a target, direct or decoded,
+ * so it shows only that the sprite sampled Q; the step size shows how. */
+#define RTT_Q  0x00100000u
+#define RTT_M  0x00060000u
+typedef struct { uint32_t rgba; float x, y, z; } RttCVtx;
+typedef struct { uint32_t steps, minjump, maxjump, bad, bad_x, y_first, y_last; } RttEdge;
+
+#define RTT_LIT(px) (((px) & 0xFFu) >= 125u)        /* weight at least one half: see above */
+
+/* Scan columns [x0, x1) of a w-wide image of h rows. Per column the edge is the first lit row; it
+ * must lie in [ylo, yhi) and every row below it must be lit, and it never moves up. A filtered
+ * edge climbs in ramps: runs of neighbouring columns where it rises, between plateaus where it
+ * does not. Count the ramps (steps) and measure the smallest and largest total rise of one. */
+static void rtt_scan_edge(const uint32_t *img, uint32_t w, uint32_t h, uint32_t x0, uint32_t x1,
+                          uint32_t ylo, uint32_t yhi, RttEdge *e) {
+    memset(e, 0, sizeof(*e));
+    e->minjump = 0xFFFFFFFFu;
+    uint32_t prev = 0, run = 0;
+    for (uint32_t x = x0; x < x1; x++) {
+        uint32_t y = 0;
+        while (y < h && !RTT_LIT(img[(size_t)y * w + x])) y++;
+        int bad = y < ylo || y >= yhi;
+        for (uint32_t r = y; !bad && r < h; r++) bad = !RTT_LIT(img[(size_t)r * w + x]);
+        if (bad && !e->bad++) e->bad_x = x;
+        if (x == x0) e->y_first = y;
+        if (x > x0 && y < prev && !e->bad++) e->bad_x = x;
+        if (x > x0 && y > prev) {
+            run += y - prev;
+        } else if (run) {
+            e->steps++;
+            if (run < e->minjump) e->minjump = run;
+            if (run > e->maxjump) e->maxjump = run;
+            run = 0;
+        }
+        prev = y;
+        e->y_last = y;
+    }
+    if (run) {
+        e->steps++;
+        if (run < e->minjump) e->minjump = run;
+        if (run > e->maxjump) e->maxjump = run;
+    }
+}
+
+static int coherence_run_rtt_scale(void) {
+    const char *name = "rtt-scale";
+    const uint32_t qa = 0x04000000u | RTT_Q, ma = 0x04000000u | RTT_M;
+    const uint32_t qstride = 128u, qh = 68u, mstride = 512u;
+    const uint32_t qbytes = qstride * FB_H * 4u, mbytes = mstride * FB_H * 4u;
+    const uint32_t s = (uint32_t)s_scale, w = SCL_W, h = SCL_H;
+    RttCVtx *cv = (RttCVtx *)SR_HOST(COH_SAMPLE_VERTS);
+    RawSpriteVtx *sv = (RawSpriteVtx *)(cv + 6);
+    const uint32_t cv_addr = COH_SAMPLE_VERTS, sv_addr = COH_SAMPLE_VERTS + 6u * (uint32_t)sizeof(RttCVtx);
+    const uint32_t white = 0xFFFFFFFFu;
+    /* the quad: top edge (0,30) to (128,40), as two triangles sharing the diagonal */
+    cv[0] = (RttCVtx){ white, 0.0f, 30.0f, 0.0f };   cv[1] = (RttCVtx){ white, 128.0f, 40.0f, 0.0f };
+    cv[2] = (RttCVtx){ white, 0.0f, 68.0f, 0.0f };   cv[3] = (RttCVtx){ white, 128.0f, 40.0f, 0.0f };
+    cv[4] = (RttCVtx){ white, 128.0f, 68.0f, 0.0f }; cv[5] = (RttCVtx){ white, 0.0f, 68.0f, 0.0f };
+    sv[0] = (RawSpriteVtx){ 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+    sv[1] = (RawSpriteVtx){ 128.0f, 68.0f, 512.0f, 272.0f, 0.0f };
+
+    uint32_t *dl = (uint32_t *)SR_HOST(COH_SAMPLE_LIST);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    DL_EMIT(0x10, 0);
+    DL_EMIT(0x9C, RTT_Q);                                  /* Q: 8888, stride 128, scissored to 128 x 68 */
+    DL_EMIT(0x9D, qstride | (0x04u << 16));
+    DL_EMIT(0xD2, 3);
+    DL_EMIT(0x9E, 0x000000u);                              /* ZBP: VRAM 0, below the targets */
+    DL_EMIT(0x9F, 512u | (0x04u << 16));
+    DL_EMIT(0xD3, 0);
+    DL_EMIT(0x1D, 0); DL_EMIT(0x1E, 0); DL_EMIT(0x1F, 0);
+    DL_EMIT(0x22, 0); DL_EMIT(0x23, 0); DL_EMIT(0x24, 0);  /* no alpha, depth, stencil test */
+    DL_EMIT(0x25, 0); DL_EMIT(0x27, 0); DL_EMIT(0x28, 0);  /* no AA, colour test, logic op */
+    DL_EMIT(0xE7, 1); DL_EMIT(0xE8, 0); DL_EMIT(0xE9, 0);  /* no depth write, no masks */
+    DL_EMIT(0x4C, 0); DL_EMIT(0x4D, 0); DL_EMIT(0xD6, 0); DL_EMIT(0xD7, 0xFFFFu);
+    DL_EMIT(0x15, 0); DL_EMIT(0x16, ((qh - 1u) << 10) | (qstride - 1u));
+    DL_EMIT(0xD4, 0); DL_EMIT(0xD5, ((qh - 1u) << 10) | (qstride - 1u));
+    DL_EMIT(0x50, 1);                                      /* gouraud */
+    DL_EMIT(0x20, 0);                                      /* dither off */
+    DL_EMIT(0x21, 0);                                      /* blend off */
+    DL_EMIT(0x12, (7u << 2) | (3u << 7) | (1u << 23));     /* 8888 colour, float pos, through */
+    DL_EMIT(0x01, cv_addr);
+    DL_EMIT(0x04, (3u << 16) | 6u);                        /* the two triangles */
+    DL_EMIT(0x9C, RTT_M);                                  /* M: 8888, stride 512 */
+    DL_EMIT(0x9D, mstride | (0x04u << 16));
+    DL_EMIT(0x15, 0); DL_EMIT(0x16, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0xD4, 0); DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+    DL_EMIT(0x1E, 1);                                      /* texture on: Q, its psm and stride */
+    DL_EMIT(0xA0, RTT_Q);
+    DL_EMIT(0xA8, qstride | (0x04u << 16));
+    DL_EMIT(0xB8, 7u | (7u << 8));                         /* 128 x 128 */
+    DL_EMIT(0xC0, 0); DL_EMIT(0xC8, 0);                    /* UV mapping, level 0 */
+    DL_EMIT(0xC2, 0); DL_EMIT(0xC3, 3);                    /* 8888 */
+    DL_EMIT(0xC6, 0x101u); DL_EMIT(0xC7, 0x101u);          /* linear, clamp */
+    DL_EMIT(0xC9, 3u | 0x100u);                            /* replace, RGBA */
+    DL_EMIT(0xCB, 0);
+    DL_EMIT(0x12, 3u | (3u << 7) | (1u << 23));            /* float UV and position, through */
+    DL_EMIT(0x01, sv_addr);
+    DL_EMIT(0x04, (6u << 16) | 2u);                        /* one sprite, 4x */
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+
+    uint32_t *dev = (uint32_t *)malloc((size_t)w * h * 4u);
+    uint32_t *gpu_m = (uint32_t *)malloc(mbytes), *sw_m = (uint32_t *)malloc(mbytes);
+    if (!dev || !gpu_m || !sw_m) { free(dev); free(gpu_m); free(sw_m); return 0; }
+    coherence_reset_targets();
+    coherence_reset_depths();
+    memset(SR_HOST(qa), 0, qbytes);
+    memset(SR_HOST(ma), 0, mbytes);
+    sr_gpu_vram_dirty(qa, qbytes);
+    sr_gpu_vram_dirty(ma, mbytes);
+    ge_set_gpu_hooks(&k_hooks);
+    const uint64_t rtt0 = s_cnt_rtt;
+    int ok = ge_run_list(COH_SAMPLE_LIST, 0) == 0 && (!s_nbatch || submit_pending());
+    GeGpuFbDescriptor desc = { .addr = ma, .format = 3, .stride = mstride, .width = 480, .height = FB_H };
+    ok = ok && gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
+    Target *tm = ok ? target_find_by_fba(RTT_M) : NULL;
+    ok = tm != NULL && coherence_read_device(tm->img, VK_IMAGE_ASPECT_COLOR_BIT, &tm->layout,
+                                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 4u, dev);
+    if (!ok) fprintf(stderr, "gpu coherence selftest [%s]: draw or device read failed\n", name);
+    if (ok) memcpy(gpu_m, SR_HOST(ma), mbytes);
+    const Target *tq = ok ? target_find_by_fba(RTT_Q) : NULL;
+    if (ok && (!tq || !tq->gpu_valid || s_cnt_rtt == rtt0)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL Q is %s a GPU target and the sprite %s a render "
+                "target\n", name, tq && tq->gpu_valid ? "" : "not", s_cnt_rtt != rtt0 ? "sampled" : "did not sample");
+        ok = 0;
+    }
+
+    /* The software renderer, same list, from cleared VRAM. */
+    if (ok) {
+        memset(SR_HOST(qa), 0, qbytes);
+        memset(SR_HOST(ma), 0, mbytes);
+        sr_gpu_vram_dirty(qa, qbytes);
+        sr_gpu_vram_dirty(ma, mbytes);
+        ge_set_gpu_hooks(NULL);
+        ok = ge_run_list(COH_SAMPLE_LIST, 0) == 0;
+        ge_set_gpu_hooks(&k_hooks);
+        if (ok) memcpy(sw_m, SR_HOST(ma), mbytes);
+        else fprintf(stderr, "gpu coherence selftest [%s]: the software run failed\n", name);
+    }
+
+    RttEdge e = {0}, esw = {0};
+    uint32_t steps_want = 0;
+    if (ok) {
+        /* Columns 4 to 507 of 512, away from the sprite's first and last pixel; the edge sits in
+         * guest rows 120..160 (Q rows 30..40 at 4x), 4 either side allowed. */
+        rtt_scan_edge(dev, w, h, 4u * s, 508u * s, 116u * s, 164u * s, &e);
+        rtt_scan_edge(sw_m, mstride, FB_H, 4u, 480u, 116u, 164u, &esw);
+        /* Q rises 10 rows over its 128 columns: over columns 4S..508S of M (Q columns 1..127 of 128)
+         * that is 10 * 126 / 128 Q guest rows, each S Q device rows, each one step. */
+        steps_want = (10u * 126u * s) / 128u;
+        if (e.bad || e.minjump != 4u || e.maxjump != 4u || e.steps + 1u < steps_want || e.steps > steps_want + 1u) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL scale=%u: M's edge (first row per device "
+                    "column with red at least 125, a weight of one half) %s: %u ramps rising %u..%u device rows "
+                    "(rows %u to %u), want about "
+                    "%u ramps of exactly 4 rows (one Q device pixel, stretched 4x); a 1x decode of Q climbs "
+                    "%u rows per Q texel\n",
+                    name, s, e.bad ? "is broken (a hole, out of range or moving up) from column" : "has the wrong lattice",
+                    e.steps, e.minjump, e.maxjump, e.y_first, e.y_last, steps_want, 4u * s);
+            if (e.bad) fprintf(stderr, "gpu coherence selftest [%s]: first bad device column %u\n", name, e.bad_x);
+            ok = 0;
+        }
+        if (ok && (esw.bad || esw.minjump != 4u || esw.maxjump != 4u)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the software picture's edge: %u steps of "
+                    "%u..%u rows, bad %u\n", name, esw.steps, esw.minjump, esw.maxjump, esw.bad);
+            ok = 0;
+        }
+    }
+    /* Guest VRAM of M, but for its last Q texel row (guest rows 268 to 271): there the software
+     * filter blends in the texture's unused row 68 (the texture is 128 high), which a device
+     * sample taken further from the sprite's edge reaches less. */
+    uint32_t differ = 0, outside = 0;
+    for (uint32_t gy = 0; ok && gy < FB_H - 4u; gy++) {
+        for (uint32_t gx = 0; gx < 480u; gx++) {
+            const uint32_t got = gpu_m[(size_t)gy * mstride + gx] & 0x00FFFFFFu;
+            const uint32_t top_left = dev[(size_t)(gy * s) * w + gx * s] & 0x00FFFFFFu;
+            const uint32_t sw = sw_m[(size_t)gy * mstride + gx] & 0x00FFFFFFu;
+            if (got != top_left && outside++ < 4)
+                fprintf(stderr, "gpu coherence selftest [%s]: guest pixel (%u,%u) = %06x, the top-left device "
+                        "sample is %06x\n", name, gx, gy, got, top_left);
+            uint32_t dmax = 0;
+            for (int sh = 0; sh < 24; sh += 8) {
+                const uint32_t a = (got >> sh) & 0xFFu, b = (sw >> sh) & 0xFFu;
+                if ((a > b ? a - b : b - a) > dmax) dmax = a > b ? a - b : b - a;
+            }
+            if (dmax <= 2u) continue;
+            differ++;
+            /* the software picture's edge row in this column, from the first lit row */
+            uint32_t edge = 0;
+            while (edge < FB_H && !RTT_LIT(sw_m[(size_t)edge * mstride + gx])) edge++;
+            const int in_band = gy + 8u >= edge && gy <= edge + 8u;
+            if ((s == 1u || !in_band) && outside++ < 8)
+                fprintf(stderr, "gpu coherence selftest [%s]: guest pixel (%u,%u) = %06x, software %06x "
+                        "(software edge row %u, scale %u)\n", name, gx, gy, got, sw, edge, s);
+        }
+    }
+    if (ok && outside) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL %u guest VRAM pixel(s) of M are wrong at scale %u\n",
+                name, outside, s);
+        ok = 0;
+    }
+    free(dev); free(gpu_m); free(sw_m);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    if (ok) {
+        printf("gpu coherence selftest: PASS %-22s scale=%u edge ramps %u of %u device rows (want about %u of 4; a 1x "
+               "decode climbs %u rows per Q texel), software edge ramps %u of %u rows\n", name, s, e.steps,
+               e.maxjump, steps_want, 4u * s, esw.steps, esw.maxjump);
+        printf("gpu coherence selftest: %s guest VRAM of M is its top-left device samples and equals the software "
+               "renderer's within 2 per channel (%u pixels differ more, all within 8 rows of the edge)\n",
+               name, differ);
+    }
+    return ok;
+}
+
 static int coherence_selftest_cases(void) {
     /* SR_GPU_COHERENCE_CASE=scaled-upload (the harness's --case) runs that case alone, as the
      * recipe does at render scales 2 and 4: the other fixtures expect 1x pixels (a filtered sample
@@ -7807,6 +8205,7 @@ static int coherence_selftest_cases(void) {
     if (only && *only) {
         if (strcmp(only, "scaled-upload") == 0) return coherence_run_scaled_upload();
         if (strcmp(only, "mip-lod") == 0) return coherence_run_mip_lod();
+        if (strcmp(only, "mip-clut") == 0) return coherence_run_mip_clut();
         if (strcmp(only, "readback-rows") == 0) return coherence_run_readback_rows();
         if (strcmp(only, "sprite-scaled") == 0) return coherence_run_sprite_scaled();
         if (strcmp(only, "uv-edge-clamp") == 0) return coherence_run_uv_edge_clamp();
@@ -7830,6 +8229,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "pipeline-cache-cold") == 0) return coherence_run_pipeline_cache(0);
         if (strcmp(only, "pipeline-cache-warm") == 0) return coherence_run_pipeline_cache(1);
         if (strcmp(only, "pipeline-cache-reject") == 0) return coherence_run_pipeline_cache_reject();
+        if (strcmp(only, "rtt-scale") == 0) return coherence_run_rtt_scale();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
     }
@@ -7903,6 +8303,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_twin_gate()) ok = 0;
     if (!coherence_run_twin_scene()) ok = 0;
     if (s_twin && s_tscale == s_scale && !coherence_run_twin_sync()) ok = 0;
+    if (!coherence_run_rtt_scale()) ok = 0;
     coherence_reset_targets();
     return ok;
 }
