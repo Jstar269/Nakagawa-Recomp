@@ -3379,6 +3379,77 @@ static int coherence_run_clut_format_same_palette(void) {
 /* The same palette change sent the way a title sends it: one list loads the palette, draws a
  * CLUT8 sprite, changes only CLUTFORMAT (shift 1), and draws again. Every command moves the
  * GE state serial, so the second sprite must rebuild its state and decode through index >> 1. */
+/* Through mode takes z as the GE's unsigned 16-bit depth. A title that writes float positions
+ * there may put any float in z: two triangles at z = -1.0 (a 2D overlay drawn last, with the
+ * depth test off) must still be drawn. The Vulkan path maps z / 65535 to the clip depth, so an
+ * unclamped -1.0 lies outside the depth range and every such triangle was clipped away. */
+typedef struct ThroughFloatVtx { uint32_t c; float x, y, z; } ThroughFloatVtx;
+
+static int coherence_run_through_float_z(void) {
+    const char *name = "through-float-z";
+    const uint32_t base = 0x04000000u | 0x00160000u, stride = 512u;
+    const uint32_t vaddr = 0x00101800u, list_addr = 0x00100800u;
+    const uint32_t colour = 0xFF3366CCu;               /* ABGR: opaque */
+    const float zs[2] = { -1.0f, 70000.0f };           /* below and above the 16-bit range */
+    uint32_t *guest = (uint32_t *)SR_HOST(base);
+    int ok = 1;
+    for (int k = 0; ok && k < 2; k++) {
+        coherence_reset_targets();
+        memset(guest, 0, stride * FB_H * 4u);
+        sr_gpu_vram_dirty(base, stride * FB_H * 4u);
+        memset(s_ge, 0, sizeof(*s_ge));
+        ThroughFloatVtx *vtx = (ThroughFloatVtx *)SR_HOST(vaddr);
+        const float x0 = 16.0f, y0 = 16.0f, x1 = 48.0f, y1 = 48.0f, z = zs[k];
+        vtx[0] = (ThroughFloatVtx){ colour, x0, y0, z };
+        vtx[1] = (ThroughFloatVtx){ colour, x1, y0, z };
+        vtx[2] = (ThroughFloatVtx){ colour, x0, y1, z };
+        vtx[3] = (ThroughFloatVtx){ colour, x1, y0, z };
+        vtx[4] = (ThroughFloatVtx){ colour, x1, y1, z };
+        vtx[5] = (ThroughFloatVtx){ colour, x0, y1, z };
+        uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
+        int p = 0;
+        #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+        DL_EMIT(0x10, 0);
+        DL_EMIT(0x9C, base & 0x00FFFFFFu);
+        DL_EMIT(0x9D, stride | ((base & 0xFF000000u) >> 8));
+        DL_EMIT(0xD2, 3);
+        DL_EMIT(0xD3, 0);
+        DL_EMIT(0x1E, 0);                                   /* no texture */
+        DL_EMIT(0x1D, 0);                                   /* no culling */
+        DL_EMIT(0x21, 0);
+        DL_EMIT(0x22, 0);
+        DL_EMIT(0x23, 0);                                   /* no depth test */
+        DL_EMIT(0xD4, 0);
+        DL_EMIT(0xD5, ((FB_H - 1) << 10) | (FB_W - 1));
+        DL_EMIT(0x12, (1u << 23) | (7u << 2) | (3u << 7)); /* through, 8888 colour, float pos */
+        DL_EMIT(0x01, vaddr & 0x00FFFFFFu);
+        DL_EMIT(0x04, (3u << 16) | 6u);                     /* two triangles */
+        DL_EMIT(0x0F, 0);
+        DL_EMIT(0x0C, 0);
+        #undef DL_EMIT
+        ge_set_gpu_hooks(&k_hooks);
+        ge_run_list(list_addr, 0);
+        GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
+                                   .width = 480, .height = 272 };
+        if (!gegpu_sync_guest_fb(&desc)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: GPU readback failed\n", name);
+            coherence_reset_targets();
+            return 0;
+        }
+        const uint32_t inside = guest[32u * stride + 32u], outside = guest[8u * stride + 8u];
+        /* RGB only: the alpha byte of a 32-bit target holds stencil, which this draw leaves. */
+        if ((inside & 0x00FFFFFFu) != (colour & 0x00FFFFFFu) || (outside & 0x00FFFFFFu) != 0u) {
+            fprintf(stderr, "gpu coherence selftest [%s]: z=%.1f: inside=0x%08x (want 0x%08x) "
+                            "outside=0x%08x%s\n", name, (double)z, inside, colour, outside,
+                    (inside & 0x00FFFFFFu) == 0u ? " -- the triangles were clipped away" : "");
+            ok = 0;
+        }
+    }
+    coherence_reset_targets();
+    if (ok) printf("gpu coherence selftest: PASS %-22s z=-1.0 and z=70000.0 drawn\n", name);
+    return ok;
+}
+
 static int coherence_run_clut_format_list(void) {
     const uint32_t base = 0x04000000u | 0x00160000u;
     const uint32_t tex_base = 0x04040000u, clut_base = 0x04041000u;
@@ -7722,6 +7793,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "sprite-scaled") == 0) return coherence_run_sprite_scaled();
         if (strcmp(only, "uv-edge-clamp") == 0) return coherence_run_uv_edge_clamp();
         if (strcmp(only, "undrawn-rows") == 0) return coherence_run_undrawn_rows();
+        if (strcmp(only, "through-float-z") == 0) return coherence_run_through_float_z();
         if (strcmp(only, "depth-alias-no-zwrite") == 0) return coherence_run_depth_alias_no_zwrite();
         if (strcmp(only, "wide-fill") == 0) return coherence_run_wide_fill();
         if (strcmp(only, "gpu-timestamps") == 0) return coherence_run_gpu_timestamps();
@@ -7778,6 +7850,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_texture_ram_unnotified_change()) ok = 0;
     if (!coherence_run_clut_format_same_palette()) ok = 0;
     if (!coherence_run_clut_format_list()) ok = 0;
+    if (!coherence_run_through_float_z()) ok = 0;
     if (!coherence_run_blend_parity()) ok = 0;
     if (!coherence_run_undrawn_rows()) ok = 0;
     if (!coherence_run_depth_alias_no_zwrite()) ok = 0;
