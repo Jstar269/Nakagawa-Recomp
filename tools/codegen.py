@@ -2280,9 +2280,10 @@ _VFPU9_INTERP_ROUTED = {
 }
 
 
-# vqmul.q and vcrsp.t lanes as (sign, S lane, T lane) terms, in source order. The emitted
-# lane is a left-to-right chain of sr_vf_* calls (src/rt/recomp.h), the same chain
-# sr_vfpu_interp evaluates, so both lanes return one NaN word (issue #326).
+# vqmul.q and vcrsp.t lanes as (sign, S lane, T lane) terms, in source order. Each lane is one
+# sr_vfpu_sop() call (src/rt/recomp.h) over its terms, a subtracted term negating its S operand,
+# the same call sr_vfpu_interp makes, so both lanes return the measured sum of products
+# (PSP-3000 dot/matrix read, issue #326).
 _VQMUL_TERMS = (
     ((1, 0, 3), (1, 1, 2), (-1, 2, 1), (1, 3, 0)),
     ((-1, 0, 2), (1, 1, 3), (1, 2, 0), (1, 3, 1)),
@@ -2297,13 +2298,9 @@ _VCRSP_TERMS = (
 
 
 def _vf_chain(terms):
-    sign, i, j = terms[0]
-    acc = f"sr_vf_mul({'-' if sign < 0 else ''}_s[{i}],_t[{j}])"
-    for sign, i, j in terms[1:]:
-        # Each helper is written as a call literal so tools/recomp_helper_inventory.py sees it.
-        call = "sr_vf_add(" if sign > 0 else "sr_vf_sub("
-        acc = f"{call}{acc},sr_vf_mul(_s[{i}],_t[{j}]))"
-    return acc
+    sa = ",".join(f"{'-' if sign < 0 else ''}_s[{i}]" for sign, i, _ in terms)
+    sb = ",".join(f"_t[{j}]" for _, _, j in terms)
+    return f"sr_vfpu_sop((const float[]){{{sa}}},(const float[]){{{sb}}},{len(terms)})"
 
 
 # VFPU memory forms under --lle-cpu use the same sr_cpu_guard_access() call
@@ -2982,12 +2979,12 @@ def _vfpu_matrix_scale(addr, w, options, delay_branch_pc):
     writes = [f"float _sc = s->v[{scalar_vidx}];"]
     for row in range(side - 1):
         for col in range(side):
-            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vfpu_sop(&s->v[{mreg_index(vs, side, col, row)}], &_sc, 1);")
     last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
     last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
     writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
     writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vfpu_sop(&_s[_i], &_t[_i], 1);")
     writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
                         options=options))
     writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
@@ -3082,7 +3079,7 @@ def _vfpu_dot_effect(addr, w, options, delay_branch_pc):
     dst = vreg_indices(vd, 1)[0]
     body = (f"float _s[4],_t[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-            f"float _d=0.0f; for(int _i=0;_i<{n};_i++) _d=sr_vf_add(_d,sr_vf_mul(_s[_i],_t[_i])); "
+            f"float _d=sr_vfpu_sop(_s,_t,{n}); "
             f"float _dd[1]={{_d}};"
             + _nanv(addr, "vdot.s", vd, "_dd", 1, "_s", n, "_t", n, options=options)
             + f" sr_vwrite(s,{_arr([dst])},_dd,1,s->vfpuCtrl[2]);{_EAT}")
@@ -3096,8 +3093,8 @@ def _vfpu_horizontal_dot_effect(addr, w, options, delay_branch_pc):
     dst = vreg_indices(vd, 1)[0]
     body = (f"float _s[4],_t[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-            f"float _d=0.0f; for(int _i=0;_i<{n - 1};_i++) _d=sr_vf_add(_d,sr_vf_mul(_s[_i],_t[_i])); "
-            f"_d=sr_vf_add(_d,sr_vf_mul(1.0f,_t[{n - 1}])); _d=isnan(_d)?fabsf(_d):_d; "
+            f"float _h[4]={{{','.join([f'_s[{i}]' for i in range(n - 1)] + ['1.0f'])}}}; "
+            f"float _d=sr_vfpu_sop(_h,_t,{n}); "
             f"float _dd[1]={{_d}};"
             + _nanv(addr, "vhdp.s", vd, "_dd", 1, "_s", n, "_t", n, options=options)
             + f" sr_vwrite(s,{_arr([dst])},_dd,1,s->vfpuCtrl[2]);{_EAT}")
@@ -3132,9 +3129,9 @@ def _vfpu_matrix_multiply_effect(addr, w, options, delay_branch_pc):
             # an optimiser may swap the operands of a plain + or *, so the two
             # paths could keep different NaN payloads for exotic inputs (issue
             # #40 at -O0, issue #326 at -O1/-O2). Finite results are unchanged.
-            lines.append(f"float _m{a}_{b}=0.0f;")
-            for c in range(side):
-                lines.append(f"_m{a}_{b}=sr_vf_add(_m{a}_{b},sr_vf_mul(s->v[{mreg_index(vs, side, b, c)}],s->v[{mreg_index(vt, side, a, c)}]));")
+            va = ",".join(f"s->v[{mreg_index(vs, side, b, c)}]" for c in range(side))
+            vb = ",".join(f"s->v[{mreg_index(vt, side, a, c)}]" for c in range(side))
+            lines.append(f"float _m{a}_{b}=sr_vfpu_sop((const float[]){{{va}}},(const float[]){{{vb}}},{side});")
     writes = " ".join(f"s->v[{mreg_index(vd, side, a, b)}]=_m{a}_{b};"
                       for a in range(side) for b in range(side))
     return "{ " + " ".join(lines) + " " + _nan_matrix(
@@ -3158,11 +3155,13 @@ def _vfpu_matrix_transform_effect(addr, w, options, delay_branch_pc):
     for i in range(side):
         # Same accumulate-into-local shape as sr_vfpu_interp's vtfm (see the
         # vmmul comment above for the NaN payload rationale, issue #40).
-        lines.append(f"float _v{i}=0.0f;")
-        for k in range(tn):
-            lines.append(f"_v{i}=sr_vf_add(_v{i},sr_vf_mul(s->v[{mreg_index(vs, side, i, k)}],s->v[{ti[k]}]));")
-        if ins >= n:
-            lines.append(f"_v{i}=sr_vf_add(_v{i},s->v[{mreg_index(vs, side, i, ins)}]);")
+        va = [f"s->v[{mreg_index(vs, side, i, k)}]" for k in range(tn)]
+        vb = [f"s->v[{ti[k]}]" for k in range(tn)]
+        if ins >= n:  # vhtfm: the homogeneous term is the matrix element times 1.0
+            va.append(f"s->v[{mreg_index(vs, side, i, ins)}]")
+            vb.append("1.0f")
+        lines.append(f"float _v{i}=sr_vfpu_sop((const float[]){{{','.join(va)}}},"
+                     f"(const float[]){{{','.join(vb)}}},{len(va)});")
     writes = " ".join(f"s->v[{di[i]}]=_v{i};" for i in range(side))
     return "{ " + " ".join(lines) + " " + _nan_matrix(
         addr, "vtfm", vd,
@@ -3192,12 +3191,12 @@ def _vfpu_matrix_scale_effect(addr, w, options, delay_branch_pc):
     writes.append(f"float _sc = s->v[{scalar_vidx}];")
     for row in range(side - 1):
         for col in range(side):
-            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vfpu_sop(&s->v[{mreg_index(vs, side, col, row)}], &_sc, 1);")
     last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
     last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
     writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
     writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vfpu_sop(&_s[_i], &_t[_i], 1);")
     writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
                          options=options))
     writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")

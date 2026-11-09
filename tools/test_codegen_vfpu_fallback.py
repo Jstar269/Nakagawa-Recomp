@@ -337,31 +337,31 @@ int main(void) {{
         # different addss operand order at -O0 than sr_vfpu_interp's loop, and
         # x86-64 SSE selects the *first* NaN source on NaN+NaN, so the two paths
         # kept different NaN payloads for exotic matrix inputs. The emission must
-        # stay an accumulate-into-local, term by term through the sr_vf_* helpers
-        # (issue #326: an optimiser may swap the operands of a plain + or *).
+        # stay one local per output element, each from a single sr_vfpu_sop() call over
+        # its terms (issue #326: the PSP's sum of truncated products, in src/rt/recomp.h).
         word=(0x3c<<26)|(0<<23)|(4<<16)|(2<<8)|(1<<15)  # vmmul 3x3, vs=1, vt=0, vd=0
         effect,_,_=codegen.vfpu_effect(0x5000,word)
-        self.assertIn("float _m0_0=0.0f;",effect)
-        self.assertIn("_m0_0=sr_vf_add(_m0_0,sr_vf_mul(s->v[",effect)
+        self.assertIn("float _m0_0=sr_vfpu_sop((const float[]){s->v[",effect)
+        self.assertNotIn("float _m0_0=0.0f;",effect)
         self.assertNotRegex(effect, r"float _m[0-9]_[0-9]=0\.0f\+",
                             "chained vmmul expression reintroduces the NaN payload split")
 
     def test_vtfm_accumulates_into_a_local_like_the_interpreter(self):
         word=(0x3c<<26)|(1<<23)|(1<<16)|(2<<8)|0  # vtfm3 3-lane, ins=1
         effect,_,_=codegen.vfpu_effect(0x5100,word)
-        self.assertIn("float _v0=0.0f;",effect)
-        self.assertIn("_v0=sr_vf_add(_v0,sr_vf_mul(s->v[",effect)
+        self.assertIn("float _v0=sr_vfpu_sop((const float[]){s->v[",effect)
+        self.assertNotIn("float _v0=0.0f;",effect)
         self.assertNotRegex(effect, r"float _v[0-9]=0\.0f\+",
                             "chained vtfm expression reintroduces the NaN payload split")
 
     def test_vhdp_accumulates_into_a_local_with_ordered_loop(self):
-        # Issue #40: vhdp must accumulate with an ordered loop so the host
-        # compiler cannot reassociate the sum and pick a different NaN payload.
+        # Issue #40: vhdp must not be a chained expression the host compiler can
+        # reassociate. Issue #326: it is one sr_vfpu_sop() call over a0..a(n-2) and 1.0.
         word=(0x19<<26)|(4<<23)|(0<<16)|(1<<15)|(0x20<<8)|(0x20)  # vhdp.t 3-lane, vd=0x20, vs=0x20, vt=0x00
         effect,_,_=codegen.vfpu_effect(0x5200,word)
-        self.assertIn("float _d=0.0f;",effect)
-        self.assertIn("for(int _i=0;_i<2;_i++) _d=sr_vf_add(_d,sr_vf_mul(_s[_i],_t[_i]));",effect)
-        self.assertIn("_d=sr_vf_add(_d,sr_vf_mul(1.0f,_t[2]));",effect)
+        self.assertIn("float _h[4]={_s[0],_s[1],1.0f};",effect)
+        self.assertIn("float _d=sr_vfpu_sop(_h,_t,3);",effect)
+        self.assertNotIn("float _d=0.0f;",effect)
         self.assertNotRegex(effect, r"float _d=0\.0f\+",
                             "chained vhdp expression reintroduces the NaN payload split")
 
@@ -371,8 +371,8 @@ int main(void) {{
         word=(0x3c<<26)|(4<<23)|(0<<16)|(1<<15)|(0x20<<8)|(0x20)  # vmscl.t 3x3, vd=0x20, vs=0x20, vt=0x00
         effect,_,_=codegen.vfpu_effect(0x5300,word)
         self.assertIn("float _sc = s->v[0];",effect)
-        self.assertIn("s->v[0] = sr_vf_mul(s->v[0], _sc);",effect)
-        self.assertNotIn("sr_vf_mul(s->v[0], s->v[0])",effect,
+        self.assertIn("s->v[0] = sr_vfpu_sop(&s->v[0], &_sc, 1);",effect)
+        self.assertNotIn("sr_vfpu_sop(&s->v[0], &s->v[0], 1)",effect,
                          "vmscl must not read the scalar fresh after it is overwritten")
 
     def test_vmscl_alias_snapshots_scalar_before_destructive_writes(self):
@@ -380,8 +380,8 @@ int main(void) {{
         word=(0x3c<<26)|(7<<23)|(1<<16)|(1<<15)|(0x20<<8)|(0x20)  # Matrix1 which=1, vd=0x20, vs=0x20
         effect,_,_=codegen.vfpu_effect(0x5400,word)
         self.assertIn("float _sc = s->v[4];",effect)
-        self.assertIn("s->v[0] = sr_vf_mul(s->v[0], _sc);",effect)
-        self.assertNotIn("sr_vf_mul(s->v[0], s->v[4])",effect,
+        self.assertIn("s->v[0] = sr_vfpu_sop(&s->v[0], &_sc, 1);",effect)
+        self.assertNotIn("sr_vfpu_sop(&s->v[0], &s->v[4], 1)",effect,
                          "vmscl alias must not read the scalar fresh after it is overwritten")
 
     def test_lane_arithmetic_goes_through_the_nan_rule_helpers(self):
@@ -402,7 +402,10 @@ int main(void) {{
             with self.subTest(form=name, word=f"0x{word:08x}"):
                 effect, _, _ = codegen.vfpu_effect(0x5500, word)
                 self.assertNotIn("sr_vfpu_interp", effect)
-                self.assertIn("sr_vf_", effect)
+                self.assertRegex(effect, r"sr_vf(pu)?_")
+                if name in ("vdot.q", "vhdp.t", "vcrsp.t", "vqmul.q", "vmmul.t", "vtfm2.t", "vmscl.t",
+                            "vmscl alias"):
+                    self.assertIn("sr_vfpu_sop(", effect)
                 self.assertIsNone(bare.search(effect), effect)
 
 
