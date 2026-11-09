@@ -196,6 +196,16 @@ fsr3-host-selftest:
 fsr3-mutants: fsr3-host-selftest
 	"$(PYTHON)" tools/fsr3_mutants.py --build-dir $(BUILD_DIR)/fsr3-mutants --cc "$(CC)"
 
+# dmac-mutants - prove the sceDmacMemcpy/sceDmacTryMemcpy regression in hle-thread-selftest is load-bearing
+# (#303). tools/test_dmac_semantics.py TestDmacMutationCampaign builds the real selftest against copies of
+# src/rt/hle_cache_dma.c, each with one semantic defect (a 0xC000 ceiling, a clamped GPU dirty range, a Try
+# that copies the wrong bytes, ...), and requires every one to build and fail the assertion it names. It
+# compiles the selftest once per mutant, so it is not part of native-core-tests. Set NK_DMAC_MUTANTS_ONLY
+# to a part of a mutant's name to run just that one.
+.PHONY: dmac-mutants
+dmac-mutants:
+	NK_DMAC_MUTANTS_BUILD_DIR="$(BUILD_ROOT)/dmac-mutants" NK_DMAC_MUTANTS_MAKE="$(MAKE)" "$(PYTHON)" -m unittest tools.test_dmac_semantics.TestDmacMutationCampaign
+
 # fsr3-fg-host-selftest - FSR 3 frame generation's CPU side (src/rt/fsr3_fg_host.c) against the record
 # of AMD's own frame interpolation and optical flow, driven as AMD's frame generation provider drives
 # them (tests/native/fsr3_fg_host_oracle.md): every staged constant buffer, clear, barrier, discard,
