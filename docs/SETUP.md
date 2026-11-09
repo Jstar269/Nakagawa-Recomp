@@ -50,11 +50,19 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
 | Memory | 8 GB RAM | 16 GB RAM |
 | Free disk space | 5 GB | 10 GB or more, on an SSD |
 
-- **Memory.** Building a game is the heavy part. One compiler process peaked at about 3 GB
-  while it compiled a large block of translated game code. BUILD PACKAGE keeps 4 GB free
-  for everything else and runs one compile job for each further 3 GB of available memory,
-  so a PC with 8 GB compiles one part at a time and one with 16 GB two or three, depending
-  on what else is running. Playing a built game needs far less.
+- **Memory.** Building a game is the heavy part. The translated game code is compiled in
+  parts of about 4 MB of C each, and one compiler process peaked at about 530 MB on such a
+  part. BUILD PACKAGE budgets 200 bytes of memory for each byte of C in a part, at least
+  768 MB (a 4 MB part gets 768 MB), keeps 2 GB of the available memory free for everything
+  else, and runs one compile job for each further 768 MB. With 4.2 GB available it runs
+  two jobs, with 5 GB four and with 7 GB six, so an 8 GB PC compiles several parts at once
+  depending on what else is running. A part larger than the usual size is budgeted at 256
+  bytes per byte, so a build that contains one runs fewer jobs. If less than 2.75 GB is
+  available, one job runs and the compiler may fail when memory runs out. If Windows gives
+  no memory reading, the build runs two jobs (one on a PC with a single processor). The
+  figures are in GB as Windows reports them (1024 x 1024 x 1024 bytes). The compiler is the
+  measured limit; the other build steps and the final link are not measured separately.
+  Playing a built game needs far less.
 - **Disk space.** Each game keeps three things in the player's data folder: its imported disc
   image (about 1.4 GB for Hot Shots Tennis), the built game (about 470 MB) and the build cache
   (about 400 MB). If the player downloads the build tools, they add a 102 MB download, and
@@ -63,8 +71,11 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   slower. Keep the player's data folder on an SSD if you can.
 - **Processor.** BUILD PACKAGE runs up to eight compile jobs at a time, one per logical
   processor, as far as memory allows, and the build screen counts the parts as they finish.
-  A first build takes several minutes. To choose the job count yourself, set the
-  `NK_PACKAGE_JOBS` environment variable to a number from 1 to 8 before starting the player.
+  When free memory, a single processor or `NK_PACKAGE_JOBS` limits it to one job, the build
+  screen says so and that the build will take longer. If the PC does not report its processor
+  count, the build runs one job and says nothing about processors. A first build takes several minutes. To
+  choose the job count yourself, set the `NK_PACKAGE_JOBS` environment variable to a number from
+  1 to 8 before starting the player.
 - **Texture scaling (Ace Mode, development only).** It is reachable only through the `SR_TEX_SCALE` and
   `SR_SMART_2D` environment variables, has no setting in the player, and is not admitted as an Enhanced or Ace
   item yet, because it changes the frames the game can read back
