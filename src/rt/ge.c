@@ -4976,6 +4976,25 @@ int ge_wide_set_wing(int wing) {
 
 int ge_wide_wing(void) { return s_wide_d; }
 
+void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count) {
+    const int wing = s_wide_d;
+    if (wing <= 0 || base == 0u || !offsets) return;
+    const float inv = 480.0f / (480.0f + 2.0f * (float)wing);
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t m = base + offsets[i];
+        if (!sr_guest_span_writable_at(m, 64u, "clip_x_widen")) {
+            fprintf(stderr, "clip_x_widen: matrix at 0x%08x is outside guest RAM; left alone\n", m);
+            continue;
+        }
+        for (uint32_t e = 0; e < 16u; e += 4u) {   /* the x row of a column-major matrix */
+            float v;
+            memcpy(&v, SR_HOST(m + 4u * e), sizeof v);
+            v *= inv;
+            memcpy(SR_HOST(m + 4u * e), &v, sizeof v);
+        }
+    }
+}
+
 void ge_wide_note_display(uint32_t fb_addr) {
     if (!s_wide_d || !fb_addr) return;
     const uint32_t fb = ge_wide_norm(fb_addr);

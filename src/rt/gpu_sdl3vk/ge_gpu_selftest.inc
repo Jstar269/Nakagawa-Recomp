@@ -5934,6 +5934,35 @@ static int wide_frame(int gpu, int flags, uint32_t *vram, uint32_t *canvas) {
     return ok;
 }
 
+/* clip_x_widen (docs/ENHANCEMENT_CONTRACT.md section 11.3.6): with Fill on the runtime scales the x row (elements
+ * 0, 4, 8, 12) of each column-major clip matrix by 480 / (480 + 2D) and touches nothing else; with Fill off it
+ * leaves every float alone. Two matrices at different offsets from one base, in guest RAM away from the frames. */
+static int wide_clip_x_check(int wing) {
+    const uint32_t base = 0x08f00000u;
+    const uint32_t offsets[2] = {640u, 448u};
+    for (uint32_t m = 0; m < 2; m++)
+        for (uint32_t e = 0; e < 16u; e++) {
+            const float v = 1.0f + (float)e + 100.0f * (float)m;
+            memcpy(SR_HOST(base + offsets[m] + 4u * e), &v, sizeof v);
+        }
+    sr_enhancement_widen_clip_x(base, offsets, 2u);
+    const float scale = wing ? 480.0f / (480.0f + 2.0f * (float)wing) : 1.0f;
+    int ok = 1;
+    for (uint32_t m = 0; m < 2; m++)
+        for (uint32_t e = 0; e < 16u; e++) {
+            float got;
+            memcpy(&got, SR_HOST(base + offsets[m] + 4u * e), sizeof got);
+            const float v = 1.0f + (float)e + 100.0f * (float)m;
+            const float want = (e % 4u == 0u) ? v * scale : v;
+            if (got != want) {
+                fprintf(stderr, "gpu coherence selftest [wide-fill]: clip_x_widen wing %d matrix %u element %u: "
+                                "%g, want %g\n", wing, m, e, (double)got, (double)want);
+                ok = 0;
+            }
+        }
+    return ok;
+}
+
 /* A fresh run with wing width `wing`: Fill is turned on for it and off after. */
 static int wide_run(int gpu, int wing, int flags, uint32_t *vram, uint32_t *canvas) {
     coherence_reset_targets();
@@ -6112,7 +6141,9 @@ static int wide_frames(const WideBufs *B) {
                 ok = 0;
             }
         }
+        if (ok && ge_wide_set_wing(WIDE_D) == WIDE_D) ok = wide_clip_x_check(WIDE_D);
         ge_wide_set_wing(0);
+        if (ok) ok = wide_clip_x_check(0);
         if (ok) printf("gpu coherence selftest: PASS %-22s %s frames scale=%d\n", "wide-fill", who, s_scale);
         else fprintf(stderr, "gpu coherence selftest [wide-fill]: FAIL %s frames\n", who);
         ok_all &= ok;

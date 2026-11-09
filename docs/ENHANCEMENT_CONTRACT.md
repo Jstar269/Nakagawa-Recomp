@@ -139,7 +139,7 @@ The declaration schema is kept lean and focused on core metadata and capability 
 
 - **Required root properties:** `schema_version` (must be 1), `id` (package identifier), `display_name`, `version` (semver), `category` (one of the 6 recognized categories), `target_title_id` (title ID or `*`), and `capabilities` (non-empty array of symbolic capability names).
 - **Optional root properties:** `min_runtime_version` (semver), `hooks` (array of hook objects with `symbol` and `type` only), and—for declarative frame-rate rescale packages (category `timing_frame_presentation` only)—`game_version` (exact title version string), `executable_sha256` (64-char lowercase hex SHA-256 of the stock guest ELF), `rng_policy` (`mode` and `reason`), and `sites` (non-empty array of symbolic instruction-site transform descriptors).
-- **Symbolic site descriptors (`sites`):** Each site entry declares `id` (site identifier), `function` (symbolic function name, never a raw hex address or `FUN_`/`sub_`/`loc_`/`func_` stem), `insn_offset` (non-negative 4-byte-aligned byte offset inside the function), `stock_digest` (64-char lowercase hex SHA-256 of the expected little-endian stock MIPS instruction word or words), optional `word_count` (an integer from 1 to 16, default `1`, the number of words `stock_digest` covers; only `1` has a defined rewrite, so a larger value refuses the package), and `transform` (one of the site transforms of section 9.2). A `gate_30hz_alt` site also declares `alternates`, a list of 1 to 4 distinct function symbols; every other transform refuses that field.
+- **Symbolic site descriptors (`sites`):** Each site entry declares `id` (site identifier), `function` (symbolic function name, never a raw hex address or `FUN_`/`sub_`/`loc_`/`func_` stem), `insn_offset` (non-negative 4-byte-aligned byte offset inside the function), `stock_digest` (64-char lowercase hex SHA-256 of the expected little-endian stock MIPS instruction word or words), optional `word_count` (an integer from 1 to 16, default `1`, the number of words `stock_digest` covers; only `1` has a defined rewrite, so a larger value refuses the package), and `transform` (one of the site transforms of section 9.2). A `gate_30hz_alt` site also declares `alternates`, a list of 1 to 4 distinct function symbols; every other transform refuses that field. A `clip_x_widen` site (category `guest_memory_code_hook`, section 11.3.6) also declares `clip_register` (`v0` or `v1`) and `clip_offsets` (1 to 4 distinct 16-byte-aligned byte offsets from 0 to 65536); no other transform takes them, and a `guest_memory_code_hook` package takes no other transform and carries only `game_version`, `executable_sha256` and `sites` of the timing fields.
 - **No speculative payloads:** Unimplemented category payloads (`assets`, `presentation`, `timing`, `camera`, `save_data`) remain forbidden in the schema until their respective runtime loaders land.
 
 The package loader and AOT codegen hook (`tools/enhancement_package.py` and `tools/codegen.py`) strictly adhere to fail-closed principles:
@@ -517,8 +517,9 @@ the Vulkan picture), `src/rt/gui.c` (the setting, the wing width and the softwar
 are missing from the wings or pop in at their edges. A declared symbolic `guest_memory_code_hook` (section 2.3) that
 widens that title's culling extents together with the view, resolved through its title profile and never by a raw
 address in a package (section 5), fixes that title, and the title's HUD stays inside the PSP's picture at every
-aspect. That hook changes what the guest computes, so it is a section 11 item. The Widescreen row's help text says
-that objects can pop in at the edges.
+aspect. That hook changes what the guest computes, so it is a section 11 item (11.3.6). The Widescreen row's help
+text says that objects can pop in at the edges. The `clip_x_widen` site of section 9.2 is the mechanism for a title
+that builds one clip-space matrix per camera and tests object bounds against it.
 
 ### 10.9. Settings
 
@@ -1260,3 +1261,31 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic. The private runs item 4 lists, before
   and after at render scale 4 on *Hot Shots Tennis* and *LittleBigPlanet*, and the library sweep, do not exist for
   this item, and it may not be on by default without them.
+
+#### 11.3.6. Widescreen Culling Widening (`clip_x_widen`, Not Yet Admitted)
+
+The Layer 2 mechanism of section 10.8, for a title that skips objects outside its own view before they reach the GE.
+
+- **Status: guest-visible, not admitted under section 11.2.** It is a `guest_memory_code_hook` package (section 2.3)
+  built into the title's own AOT output, and it changes guest memory.
+- **Mechanism.** A package site (`transform: "clip_x_widen"`, section 9.2) names the one `jal` where the title builds
+  a camera's clip matrices, by symbolic function and offset with the stock word's digest. The stock call runs
+  unchanged. When it returns, generated code calls `sr_enhancement_widen_clip_x` with the pointer the call returned
+  (`clip_register`) and the offsets of the title's visibility matrices (`clip_offsets`). The runtime scales the x output
+  row (elements 0, 4, 8 and 12 of each column-major 4x4 float matrix) by `480 / (480 + 2D)`, where `D` is the Widescreen
+  wing width (section 10.8), so a bounds test against `-w <= x <= w` accepts the same extra width the wings draw. The
+  matrices the GE receives are not touched, and the vertical extent and the HUD are unchanged.
+- **Key.** None yet. The function does nothing while Widescreen is off (`D` = 0). A launch-line key, a library setting
+  and a per-title setting (section 11.2, item 2) do not exist, and the launcher does not yet pick the package build.
+- **What it changes:** for the matrices at `clip_offsets`, 16 floats' worth of guest memory per camera build, only while
+  Widescreen is on; and so which objects the title submits.
+- **VRAM bytes:** differ in the wings and nowhere else, as objects the title used to skip are drawn there.
+- **Readbacks:** unchanged in the centre picture, by the same argument; the wings are host-only (section 10.8).
+- **Timing:** differs: the title submits more objects, so its own submit time and the GE list grow. The GE timing
+  model, the VBLANK schedule and the media clocks are unchanged. Measured frame times are in the pull request.
+- **I/O speed:** unchanged.
+- **Limits.** It cannot create what the title never modelled, what it places only inside the original view, or what
+  it hides by a rule that is not a horizontal clip test (a distance, a side-of-wall or a course-direction rule). The
+  wing cap of section 10.8 is unchanged.
+- **Tier:** Ace (one title). **Default:** off.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.

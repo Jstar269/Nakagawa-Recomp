@@ -4502,7 +4502,16 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
     else:
         _call_stmt = "    " + emit_checked_dispatch_call(
             G(target), G((addr + 8) & 0xFFFFFFFF))
-    if _jal_rw is not None:
+    if _jal_rw is not None and _jal_rw["kind"] == "clip_x_widen":
+        # clip_x_widen (contract section 10.8): the stock call runs unchanged; when it returns,
+        # the runtime scales the x row of the clip matrices at the offsets from the pointer the
+        # call returned, by the Widescreen factor. It does nothing while Widescreen is off.
+        out.extend(_call_stmt.split("\n"))
+        _offsets = ", ".join(f"{o}u" for o in _jal_rw["offsets"])
+        out.append(f"    {{ static const uint32_t _nk_clip_off[] = {{{_offsets}}};")
+        out.append(f"      sr_enhancement_widen_clip_x(s->r[{_jal_rw['reg']}], _nk_clip_off, "
+                   f"{len(_jal_rw['offsets'])}u); }}")
+    elif _jal_rw is not None:
         # A gate on a call (gate_30hz, gate_30hz_hold or gate_30hz_alt; no other rewrite
         # plans a call site): the delay slot above always runs; the call is gated while the
         # toggle is on. A gate_30hz_hold call returns its float argument unchanged
@@ -6162,7 +6171,7 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             for site in ENHANCEMENT_SITES.values():
                 stock = site["stock_words"][0]
                 if is_control(stock) and not (
-                    (stock >> 26) == 3 and site["rewrite"]["kind"] == "gate"
+                    (stock >> 26) == 3 and site["rewrite"]["kind"] in ("gate", "clip_x_widen")
                 ):
                     raise enhancement_package.EnhancementPackageError(
                         f"site {site['id']}: only a jal call site can be rewritten among "
