@@ -174,6 +174,10 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
         for size, suffix in ((1, "s"), (4, "q")):
             cases.append((_bin_word(op6, sub, size, 0x00, 0x04, 0x08), f"arith-{opname}-{suffix}", size))
 
+    # vmscl.q at its probe registers (PSP-VFPU-WIDEDOT-001 and vfpu-round-sep, issue #326, PSP-3000):
+    # check_vmscl_measured() finds it by name. A vmscl lane is a vmul lane.
+    cases.append((0xF2018488, "arith-vmscl-q", 4))
+
     # vmov/vabs/vneg/vidt/vzero/vone at .s, .p and .q, same probe: bitwise copies and the constant
     # fills, which write only the lanes of the width. Destination matrix 0, source matrix 1.
     for opname, optype in (("vmov", 0), ("vabs", 1), ("vneg", 2), ("vidt", 3), ("vzero", 6),

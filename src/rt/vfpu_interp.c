@@ -453,7 +453,8 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                     memcpy(&d[i], &r, 4);
                 } else {
                     /* A denormal compares as a zero, and a tie returns the second operand
-                     * unflushed (PSP-3000, W-CPU-VFPU-2 row 1, 2026-11-08). */
+                     * unflushed (unrecorded PSP read, PSP-3000, 2026-11-08, issue #326, probe case
+                     * vfpu-basic-arith). */
                     const float fa = sr_vfpu_daz(a[i]), fb = sr_vfpu_daz(b[i]);
                     d[i] = s3 == 2 ? (fa < fb ? a[i] : b[i]) : (fb < fa ? a[i] : b[i]);
                 }
@@ -1027,7 +1028,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         float scalar = s->v[sc[0]];
         for (int i = 0; i < side - 1; i++)
             for (int j = 0; j < side; j++)
-                s->v[mreg_idx(vd, side, j, i)] = sr_vf_mul(s->v[mreg_idx(vs, side, j, i)], scalar);
+                s->v[mreg_idx(vd, side, j, i)] = sr_vfpu_mul(s->v[mreg_idx(vs, side, j, i)], scalar);
         for (int j = 0; j < side; j++) {
             src[j] = (uint8_t)mreg_idx(vs, side, j, side - 1);
             dst[j] = (uint8_t)mreg_idx(vd, side, j, side - 1);
@@ -1035,7 +1036,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         }
         sr_vread(row, s, src, side, s->vfpuCtrl[0]);
         sr_vread(t, s, scv, side, s->vfpuCtrl[1]);
-        for (int j = 0; j < side; j++) d[j] = sr_vf_mul(row[j], t[j]);
+        for (int j = 0; j < side; j++) d[j] = sr_vfpu_mul(row[j], t[j]);
         VFPU_NAN("vmscl", d, side, row, side, t, side);
         sr_vwrite(s, dst, d, side, s->vfpuCtrl[2]);
         eat_prefix(s); return SR_VFPU_COMPUTE;
@@ -1070,7 +1071,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 float scalar = s->v[sc[0]];
                 for (int i = 0; i < side - 1; i++)
                     for (int j = 0; j < side; j++)
-                        s->v[mreg_idx(vd, side, j, i)] = sr_vf_mul(s->v[mreg_idx(vs, side, j, i)], scalar);
+                        s->v[mreg_idx(vd, side, j, i)] = sr_vfpu_mul(s->v[mreg_idx(vs, side, j, i)], scalar);
                 for (int j = 0; j < side; j++) {
                     src[j] = (uint8_t)mreg_idx(vs, side, j, side - 1);
                     dst[j] = (uint8_t)mreg_idx(vd, side, j, side - 1);
@@ -1078,7 +1079,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 }
                 sr_vread(row, s, src, side, s->vfpuCtrl[0]);
                 sr_vread(t, s, scv, side, s->vfpuCtrl[1]);
-                for (int j = 0; j < side; j++) d[j] = sr_vf_mul(row[j], t[j]);
+                for (int j = 0; j < side; j++) d[j] = sr_vfpu_mul(row[j], t[j]);
                 VFPU_NAN("vmscl", d, side, row, side, t, side);
                 sr_vwrite(s, dst, d, side, s->vfpuCtrl[2]);
                 eat_prefix(s); return SR_VFPU_COMPUTE;

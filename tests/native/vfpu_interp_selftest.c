@@ -2145,9 +2145,10 @@ static int check_vrexp2_measured_words(void) {
     return bad;
 }
 
-/* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-basic-arith, W-CPU-VFPU-2
- * row 1; its register entry is not in this tree yet): vadd, vsub, vmul, vscl, vdiv.s, vmin and
- * vmax over 20 operand classes, all 400 ordered pairs, identical at .s/.p/.t/.q. The reference
+/* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-basic-arith; its
+ * register entry is not in this tree yet): vadd, vsub, vmul, vscl, vdiv.s, vmin and vmax over
+ * 20 operand classes, all 400 ordered pairs, identical at .s/.p/.t/.q for every form but vdiv,
+ * which was run at .s only; its .q case here follows the same lane rule. The reference
  * below states the measured rule; it matched every one of the 400 pairs of each form in the
  * console's table (checked off-tree against the private decode). The literal cells pin
  * values quoted from that run independently of the reference. */
@@ -2266,6 +2267,14 @@ static int check_vfpu_basic_arith_measured(void) {
         {3, 0x00000001u, 0x3f800000u, 0x00000000u, "vdiv(dmin, 1) = +0"},
         {3, 0x3f800000u, 0x7f000000u, 0x00000000u, "vdiv(1, 2^127) underflows to +0"},
         {4, 0x7fc00011u, 0x3f800000u, 0x7f800001u, "vscl(NaN, 1) matches vmul"},
+        {3, 0x80000000u, 0x00000000u, 0xff800001u, "vdiv(-0, +0) takes the XOR of the signs"},
+        {3, 0x3f800000u, 0xffc00022u, 0xff800001u, "vdiv(1, -qNaN) takes the XOR of the signs"},
+        {3, 0xff800000u, 0x7f800000u, 0xff800001u, "vdiv(-inf, +inf) takes the XOR of the signs"},
+        {3, 0xffc00022u, 0x3f800000u, 0xff800001u, "vdiv(-qNaN, 1) takes the XOR of the signs"},
+        /* Derived from the rule, not console cells: the grid reaches no denormal result of
+         * vadd, vsub or vmul, so these pin the output flush that vdiv's cells imply. */
+        {1, 0x00c00000u, 0x00800000u, 0x00000000u, "derived: vsub of two normals flushes a denormal result"},
+        {2, 0x20000000u, 0x1f800000u, 0x00000000u, "derived: vmul of 2^-63 and 2^-64 flushes 2^-127"},
     };
     for (unsigned k = 0; k < sizeof(cells) / sizeof(cells[0]); k++) {
         char name[32];
@@ -2343,6 +2352,45 @@ static int check_vfpu_unary_arith_measured(void) {
                                 name, ar_ops[i], want[0], aot.vi[di[0]], interp.vi[di[0]], kind);
                 }
             }
+        }
+    }
+    return bad;
+}
+
+/* vmscl.q (0xf2018488): each lane is a vmul lane. Unrecorded PSP reads (PSP-3000, 2026-11-08 and
+ * 2026-11-09, issue #326, probe cases vfpu-wide-dot-matrix and vfpu-round-sep): a NaN operand or
+ * 0 * Inf gives 0x7f800001 with the XOR of the operand signs, and an inexact product rounds to
+ * nearest: 0x3fc00001 * 0x3fc00001 is 0x40100002, not the truncated 0x40100001. The scalar is the
+ * vt register, the matrix is at matrix 1, the result at matrix 2. */
+static int check_vmscl_measured(void) {
+    static const struct { uint32_t m, scalar, want; } cells[] = {
+        {0x3f800000u, 0x7fc00011u, 0x7f800001u}, {0xc0400000u, 0x7fc00011u, 0xff800001u},
+        {0x3f800000u, 0xffc00022u, 0xff800001u}, {0xc0400000u, 0xffc00022u, 0x7f800001u},
+        {0x3fc00001u, 0x3fc00001u, 0x40100002u}, {0xbfc00001u, 0x3fc00001u, 0xc0100002u},
+        {0x3fc00001u, 0xbfc00001u, 0xc0100002u}, {0xbfc00001u, 0xbfc00001u, 0x40100002u},
+        {0x3f800001u, 0x3f800001u, 0x3f800002u}, {0x3fc00003u, 0x3fc00001u, 0x40100003u},
+    };
+    int bad = 0;
+    const int c = find_overlap_diff_case("arith-vmscl-q");
+    CHECK(c >= 0, "arith-vmscl-q word is in the overlap-diff header");
+    if (c < 0) return 1;
+    const uint32_t w = overlap_diff_cases[c].w;
+    for (unsigned k = 0; k < sizeof(cells) / sizeof(cells[0]); k++) {
+        uint8_t ti[1];
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        vreg_idx((int)((w >> 16) & 0x7fu), 1, ti);
+        aot.vi[16] = cells[k].m;
+        aot.vi[ti[0]] = cells[k].scalar;
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, w);
+        g_checks++;
+        if (kind != SR_VFPU_COMPUTE || aot.vi[32] != cells[k].want || interp.vi[32] != cells[k].want) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: vmscl 0x%08x * 0x%08x: psp=0x%08x aot=0x%08x interp=0x%08x\n", cells[k].m,
+                    cells[k].scalar, cells[k].want, aot.vi[32], interp.vi[32]);
         }
     }
     return bad;
@@ -3006,6 +3054,7 @@ int main(void) {
     bad |= check_psp_measured_forms2();
     bad |= check_vfpu_basic_arith_measured();
     bad |= check_vfpu_unary_arith_measured();
+    bad |= check_vmscl_measured();
     bad |= check_vrndi_rule_cells();
     bad |= check_vfpu_forms_measured();
     bad |= check_cop2_control_transfers();

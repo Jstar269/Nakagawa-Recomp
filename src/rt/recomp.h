@@ -1161,10 +1161,12 @@ static inline float sr_vf_add(float a, float b) { const float r = a + b; return 
 static inline float sr_vf_sub(float a, float b) { const float r = a - b; return r == r ? r : sr_vf_nan(a, b); }
 static inline float sr_vf_mul(float a, float b) { const float r = a * b; return r == r ? r : sr_vf_nan(a, b); }
 
-/* vadd, vsub, vmul, vscl and vdiv lane arithmetic as a PSP-3000 returned it (W-CPU-VFPU-2
- * row 1, 2026-11-08, issue #326; probe case vfpu-basic-arith, 20 operand classes, all 400
- * ordered pairs, .s/.p/.t/.q identical; its register entry is not in this tree yet). IEEE
- * float32 with denormals flushed to a zero of their sign on input AND output. A NaN result
+/* vadd, vsub, vmul, vscl and vdiv lane arithmetic as a PSP-3000 returned it (unrecorded PSP
+ * read, 2026-11-08, issue #326; probe case vfpu-basic-arith, 20 operand classes, all 400
+ * ordered pairs, .s/.p/.t/.q identical). IEEE float32 with denormals flushed to a zero of
+ * their sign on input. The output flush is measured only for vdiv (1 / 2^127 and 1 / FLT_MAX
+ * give +0); the 20 classes reach no denormal result of vadd, vsub or vmul, so their output
+ * flush extends the vdiv result by rule and is pinned by derived cells, not console ones. A NaN result
  * is never an input payload: vadd and vsub give 0x7f800001 for a NaN operand or Inf - Inf,
  * and vmul, vscl and vdiv give 0x7f800001 with the sign bit XOR of the two operand signs
  * for a NaN operand, 0 * Inf, 0 / 0 or Inf / Inf. vdiv was measured at .s only; the other
