@@ -5087,8 +5087,11 @@ static int coherence_run_stencil_constant(void) {
  *    computes that colour in floating point, 1 away from ge.c's integer one at some texels, and
  *    the key turns that into a pixel kept or dropped, so this list must stay on ge.c (every
  *    primitive falls back) and still match it.
+ * Three lists of Gouraud-shaded triangles follow (ctp_gouraud_list). A triangle whose three
+ * vertices carry one colour is flat in ge.c, so it stays on the GPU; one with a vertex of another
+ * colour or alpha interpolates and stays on ge.c; a list of both does each, triangle by triangle.
  * A table of states then checks color_test_colour_inexact() directly, including the Gouraud
- * triangle and transform-mode fog cases these sprite lists cannot reach. */
+ * triangle and transform-mode fog cases these sprite lists cannot reach, and tri_colours_vary(). */
 enum { CTP_FLAT_8888, CTP_FLAT_5650, CTP_FLAT_5551, CTP_FLAT_4444, CTP_BLEND_8888,
        CTP_TEX_8888, CTP_TEXDBL_8888, CTP_TEXMOD_8888, CTP_KINDS };
 #define CTP_TEX 0x08100000u                      /* 16x16 8888 texture in main RAM */
@@ -5163,6 +5166,46 @@ static uint32_t ctp_list(uint32_t base, int kind, int on) {
     stp_emit(&l, 0x27, 0);
     stp_emit(&l, 0x21, 0);
     stp_end(&l);
+    return 0x08040000u;
+}
+
+/* 48 Gouraud-shaded triangles under the color test NOTEQUAL the key, every other one in the key
+ * colour. `mode` 0: each triangle's three vertices carry one colour. 1: one vertex of each differs,
+ * in red, in alpha or in blue by turns. 2: pairs of triangles alternate between the two. *nvary
+ * counts the triangles whose vertex colours differ. */
+static uint32_t ctp_gouraud_list(uint32_t base, int mode, int on, unsigned *ntris, unsigned *nvary) {
+    static const uint32_t flip[3] = { 0x00000040u, 0x40000000u, 0x00400000u };
+    StpList l; stp_begin(&l, base, 3u, 0);
+    stp_emit(&l, 0x24, 0);                               /* no stencil test */
+    stp_emit(&l, 0x21, 0);
+    stp_emit(&l, 0x50, 1);                               /* Gouraud shading */
+    stp_emit(&l, 0x27, on ? 1u : 0u);
+    stp_emit(&l, 0xD8, 3u);
+    stp_emit(&l, 0xD9, CTP_KEY);
+    stp_emit(&l, 0xDA, 0xFFFFFFu);
+    ParityGuestVtx *v = (ParityGuestVtx *)SR_HOST(0x08060000u);
+    unsigned n = 0;
+    *nvary = 0;
+    for (uint32_t cell = 0; cell < 48u; cell++) {
+        /* an odd number of sixteenths off the pixel grid, so no edge passes through a pixel centre */
+        const float x = (float)(STP_ORIGIN + 18u * (cell % 24u)) + 0.0625f;
+        const float y = (float)(STP_ORIGIN + 20u * (cell / 24u)) + 0.0625f;
+        const uint32_t c = ((cell & 1u) ? CTP_KEY : (wrap_hash(0x60A0u + cell) & 0x00FFFFFFu)) | 0xC0000000u;
+        uint32_t cv[3] = { c, c, c };
+        if (mode == 1 || (mode == 2 && ((cell / 2u) & 1u))) {
+            cv[cell % 3u] ^= flip[cell % 3u];
+            (*nvary)++;
+        }
+        v[n++] = (ParityGuestVtx){ cv[0], x + 1.0f, y + 1.0f, 0.0f };
+        v[n++] = (ParityGuestVtx){ cv[1], x + 15.0f, y + 2.0f, 0.0f };
+        v[n++] = (ParityGuestVtx){ cv[2], x + 3.0f, y + 17.0f, 0.0f };
+    }
+    stp_emit(&l, 0x01, 0x08060000u & 0x00FFFFFFu);
+    stp_emit(&l, 0x04, (3u << 16) | n);
+    stp_emit(&l, 0x50, 0);
+    stp_emit(&l, 0x27, 0);
+    stp_end(&l);
+    *ntris = n / 3u;
     return 0x08040000u;
 }
 
@@ -5262,16 +5305,76 @@ static int coherence_run_color_test(void) {
         if (rejected < min_rejected) min_rejected = rejected;
         coherence_reset_targets();
     }
+    /* Gouraud triangles: only those whose vertex colours differ go to ge.c. */
+    unsigned gouraud_gpu = 0;
+    for (int mode = 0; mode < 3 && ok; mode++) {
+        static const char *const gname[3] = { "gouraud-one-colour", "gouraud-varying", "gouraud-mixed" };
+        unsigned ntris = 0, nvary = 0;
+        const GeGpuReplayStats before = s_replay_stats;
+        const int sync = ctp_run(base, 3u, ctp_gouraud_list(base, mode, 1, &ntris, &nvary), 1, gpu_out);
+        const GeGpuReplayStats after = s_replay_stats;
+        (void)ctp_run(base, 3u, ctp_gouraud_list(base, mode, 1, &ntris, &nvary), 0, sw_out);
+        (void)ctp_run(base, 3u, ctp_gouraud_list(base, mode, 0, &ntris, &nvary), 0, off_out);
+        const unsigned long long fell = after.fallback_prims - before.fallback_prims;
+        if (fell != nvary || (mode == 0 && sync != GEGPU_SYNC_OK)) {
+            fprintf(stderr, "gpu coherence selftest [color-test]: %s list: %llu of %u triangles took the "
+                            "software fallback, want the %u whose vertex colours differ (sync status %d)\n",
+                    gname[mode], fell, ntris, nvary, sync);
+            ok = 0;
+        }
+        gouraud_gpu += ntris - nvary;
+        unsigned drawn = 0, rejected = 0, bad = 0;
+        for (uint32_t i = 0; i < FB_W * FB_H; i++) {
+            uint32_t g, w, o;
+            memcpy(&g, gpu_out + i * 4u, 4u);
+            memcpy(&w, sw_out + i * 4u, 4u);
+            memcpy(&o, off_out + i * 4u, 4u);
+            if (w != wrap_hash(0x3C1u + i * 40503u)) drawn++;
+            if (w != o) rejected++;
+            if (i % FB_W >= 480u || g == w) continue;
+            if (!bad++)
+                fprintf(stderr, "gpu coherence selftest [color-test]: %s x=%u y=%u gpu=%08x ge_c=%08x\n",
+                        gname[mode], i % FB_W, i / FB_W, g, w);
+        }
+        if (bad || drawn < 512u || rejected < 256u) {
+            fprintf(stderr, "gpu coherence selftest [color-test]: %s list: %u pixels differ from ge.c; it drew "
+                            "%u pixels and the test rejected %u (want 0, and at least 512 and 256)\n",
+                    gname[mode], bad, drawn, rejected);
+            ok = 0;
+        }
+        coherence_reset_targets();
+    }
     free(gpu_out); free(sw_out); free(off_out);
     *s_ge = saved;
+    /* tri_colours_vary(): one colour, then each channel of each of the first two vertices changed
+     * (the third is the one the other two are compared with, so changing it changes both). */
+    {
+        GeVtx tv[3];
+        memset(tv, 0, sizeof tv);
+        for (int k = 0; k < 3; k++) { tv[k].r = 0x80; tv[k].g = 0x30; tv[k].b = 0xC0; tv[k].a = 0xFF; }
+        int vary_bad = tri_colours_vary(&tv[0], &tv[1], &tv[2]) != 0;
+        for (int k = 0; k < 3; k++)
+            for (int ch = 0; ch < 4; ch++) {
+                GeVtx t2[3];
+                memcpy(t2, tv, sizeof t2);
+                int *field = ch == 0 ? &t2[k].r : ch == 1 ? &t2[k].g : ch == 2 ? &t2[k].b : &t2[k].a;
+                *field ^= 1;
+                if (!tri_colours_vary(&t2[0], &t2[1], &t2[2])) vary_bad++;
+            }
+        if (vary_bad) {
+            fprintf(stderr, "gpu coherence selftest [color-test]: tri_colours_vary gave %d wrong answers of 13\n",
+                    vary_bad);
+            ok = 0;
+        }
+    }
     /* color_test_colour_inexact(interp, persp) under Gouraud shading, fog, a texture function
      * (0xFFFF: untextured; bit 8 texture alpha, bit 16 colour doubling), a filter and a
      * texture format (3 8888, 0 5650, 2 4444, 5 CLUT8). */
     static const struct { int interp, persp, gouraud, fog; uint32_t tfunc, filter; int want; uint32_t fmt; } cx[] = {
         { 0, 0, 0, 0, 0xFFFFu, 0u, 0, 3u },      /* untextured flat sprite */
         { 1, 0, 0, 0, 0xFFFFu, 0u, 0, 3u },      /* untextured flat triangle */
-        { 1, 0, 1, 0, 0xFFFFu, 0u, 1, 3u },      /* Gouraud triangle */
-        { 0, 0, 1, 0, 0xFFFFu, 0u, 0, 3u },      /* Gouraud sprite: one colour */
+        { 1, 0, 1, 0, 0xFFFFu, 0u, 1, 3u },      /* Gouraud triangle whose vertex colours differ */
+        { 0, 0, 1, 0, 0xFFFFu, 0u, 0, 3u },      /* Gouraud sprite, or a triangle of one colour */
         { 0, 1, 0, 1, 0xFFFFu, 0u, 1, 3u },      /* transform-mode fog */
         { 0, 0, 0, 1, 0xFFFFu, 0u, 0, 3u },      /* fog has no effect in through mode */
         { 0, 0, 0, 0, 0x103u, 0u, 0, 3u },       /* replace, nearest */
@@ -5310,8 +5413,9 @@ static int coherence_run_color_test(void) {
     }
     printf("gpu coherence selftest: PASS %-22s lists=%d GPU lists: fallback_prims=0 unblended exact, "
            "blended rgb_max_delta=%d (bound %d) alpha exact; modulated list on ge.c; min drawn=%u "
-           "rejected=%u; exactness cells=%u\n", "color-test", CTP_KINDS, max_rgb, STP_FF_BLEND_BOUND,
-           min_drawn, min_rejected, (unsigned)(sizeof(cx) / sizeof(cx[0])));
+           "rejected=%u; Gouraud lists=3: %u one-colour triangles on the GPU, the varying ones on ge.c, "
+           "exact; exactness cells=%u\n", "color-test", CTP_KINDS, max_rgb, STP_FF_BLEND_BOUND,
+           min_drawn, min_rejected, gouraud_gpu, (unsigned)(sizeof(cx) / sizeof(cx[0])));
     return 1;
 }
 

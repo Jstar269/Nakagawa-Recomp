@@ -5750,7 +5750,9 @@ static int gpu_state_unsupported_reason(void) {
  * texture alpha) with no mip levels. Elsewhere (a Gouraud-interpolated triangle colour, fog in
  * transform mode, a modulated, blended or added texel, or a filtered one) the two can differ by 1,
  * and the colour key turns that into a pixel kept or dropped, so such draws stay on ge.c.
- * `interp`: the primitive interpolates its vertex colours (triangles); `persp`: transform mode. */
+ * `interp`: the primitive's vertex colours differ, so Gouraud shading interpolates them (a
+ * triangle: tri_colours_vary; T&L, whose colours the vertex shader computes: always);
+ * `persp`: transform mode. */
 static int color_test_colour_inexact(int interp, int persp) {
     const GeState *g = s_ge;
     if (!color_test_active(g)) return 0;
@@ -5762,6 +5764,16 @@ static int color_test_colour_inexact(int interp, int persp) {
         if (!(tf == 3u || (tf == 1u && !(g->tex_func & 0x100u)))) return 1;
     }
     return 0;
+}
+
+/* Do a triangle's vertex colours differ? One whose three vertices carry one colour is flat under
+ * either shading model: ge.c raster_tri interpolates VC + w0 (VA - VC) + w1 (VB - VC), both
+ * differences are 0, and every pixel gets the vertex colour itself. hook_tri then captures the
+ * three equal colours it captures for a flat-shaded triangle, so the GPU draws it the same way.
+ * Alpha counts too: an interpolated alpha would reach the blend rounded where ge.c truncates it. */
+static int tri_colours_vary(const GeVtx *A, const GeVtx *B, const GeVtx *C) {
+    return A->r != C->r || B->r != C->r || A->g != C->g || B->g != C->g ||
+           A->b != C->b || B->b != C->b || A->a != C->a || B->a != C->a;
 }
 
 /* `forced` is the reason a primitive kind always falls back (lines, points), or -1 for one
@@ -5987,9 +5999,8 @@ static void wing_drop(int cause) {
 /* The state of a wing primitive: the one its own draw used, with the canvas columns for the
  * scissor's and the scissor's rows. A state this backend would hand to the software
  * rasterizer is dropped here instead, with no flush or readback: the wings lack that draw. */
-static int wing_state(int persp, int sprite, Batch *b) {
-    const int reason = color_test_colour_inexact(!sprite, persp) ? GEGPU_FALLBACK_COLOR_TEST
-                     : gpu_state_unsupported_reason();
+static int wing_state(int persp, int sprite, int soft_ctest, Batch *b) {
+    const int reason = soft_ctest ? GEGPU_FALLBACK_COLOR_TEST : gpu_state_unsupported_reason();
     if (reason >= 0) { wing_drop(reason); return 0; }
     state_get(persp, sprite, b);
     if (!begin_target()) { wing_drop(-1); return 0; }
@@ -6010,15 +6021,19 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
     { const GeVtx *vv[3] = { A, B, C };
       if (!hook_finite(vv, 3)) return cpu_profile_hook_leave(1); }
     Batch b;
+    /* Under the color test the verdict depends on this triangle's vertex colours, so the cached
+     * state serves only a triangle the test can take on the GPU. */
+    const int soft_ctest = __builtin_expect(s_ge->color_test_enable != 0, 0) &&
+                           color_test_colour_inexact(tri_colours_vary(A, B, C), persp);
     if (__builtin_expect(s_wing_dst != NULL, 0)) {
-        if (!wing_state(persp, 0, &b)) return cpu_profile_hook_leave(1);
-    } else if (s_tri_state.valid && s_tri_state.persp == persp && s_cur &&
+        if (!wing_state(persp, 0, soft_ctest, &b)) return cpu_profile_hook_leave(1);
+    } else if (!soft_ctest && s_tri_state.valid && s_tri_state.persp == persp && s_cur &&
         s_tri_state.target == s_cur && s_tri_state.serial == ge_state_serial() &&
         s_tri_state.flushgen == s_flushgen) {
         b = s_tri_state.batch;
     } else {
         s_tri_state.valid = 0;
-        if (software_fallback_begin(color_test_colour_inexact(1, persp) ? GEGPU_FALLBACK_COLOR_TEST : -1))
+        if (software_fallback_begin(soft_ctest ? GEGPU_FALLBACK_COLOR_TEST : -1))
             return cpu_profile_hook_leave(0);
         static int nocull = -1;
         if (nocull < 0) nocull = getenv("SR_NOCULL") ? 1 : 0;
@@ -6169,7 +6184,7 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
       if (!hook_finite(vv, 2)) return cpu_profile_hook_leave(1); }
     Batch b;
     if (__builtin_expect(s_wing_dst != NULL, 0)) {
-        if (!wing_state(persp, 1, &b)) return cpu_profile_hook_leave(1);
+        if (!wing_state(persp, 1, color_test_colour_inexact(0, persp), &b)) return cpu_profile_hook_leave(1);
     } else {
         if (software_fallback_begin(color_test_colour_inexact(0, persp) ? GEGPU_FALLBACK_COLOR_TEST : -1))
             return cpu_profile_hook_leave(0);
