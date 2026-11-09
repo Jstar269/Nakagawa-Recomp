@@ -135,7 +135,14 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   `shaderDenormPreserveFloat32`. On other devices, NVIDIA's among them, ge.c keeps T&L and
   `SR_GPU_TNL=1` says so once. Everything else, and a draw the fragment state sends to
   software, keeps ge.c's T&L. The `tnl-parity` cells of `gpu-coherence-selftest` compare the
-  two routes byte for byte (on a device without the feature, every cell on ge.c's route). Left:
+  two routes byte for byte (on a device without the feature, every cell on ge.c's route).
+  `ge_tnl_reason_counts` counts each draw ge.c keeps under the first reason that rules the route
+  out (clear, flat, diagnostic, texgen, matrix, viewport, texcoord, fog, specular, light, alloc,
+  vertex, clip, backend). With `SR_GESTAT=1` as well, each stat window from the first
+  transform-mode triangle draw prints that window's counts as
+  `GESTAT-TNL f=N taken=N cpu=N: clear=N flat=N ... backend=N`, every reason in that order.
+  `ge-tnl-census-selftest` drives one draw per reason through ge.c and checks the line over two
+  windows. Left:
   texgen, flat shading, specular light by default, sprites, lines, points, clipped draws, and
   devices that flush fp32 subnormals.
 - `ge_powf`, the specular and powered-diffuse power, is one text in ge.c and `psp_tnl.vert`
