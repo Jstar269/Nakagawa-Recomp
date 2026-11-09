@@ -16307,7 +16307,10 @@ static void test_archive_discovery_skips_unpack_folders_only(void) {
     expect(sr_hle_test_data_entry_count() == 3u,
            "discovery mounts the three top-level one-member archives of the primary root");
     /* One lookup by path per mounted archive, its open: the mount's size checks ask
-     * the open handle, not the path, so a title's boot pays no extra name lookups. */
+     * the open handle, not the path, so a title's boot pays no extra name lookups.
+     * Limit: the counter is a marker at each lookup by path in nk_xb_open_file_lazy,
+     * not a count taken at the host file layer (nk_platform has no such seam), so a new
+     * lookup added there without its marker would not fail this check. */
     expect(nk_xb_test_lazy_path_calls() == 3u,
            "each archive mount makes one host lookup by path");
 
