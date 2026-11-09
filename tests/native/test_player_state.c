@@ -6545,12 +6545,12 @@ static const unsigned char real_kernel_prx[998] = {
     0x74, 0x72, 0x74, 0x61, 0x62, 0x00,
 };
 
-/* A PBP package of homebrew: PARAM.SFO (EG, no DISC_ID), an ICON0 section, a DATA.PSP program
-   and an empty DATA.PSAR, the form a homebrew EBOOT.PBP has. */
+/* A PBP package of homebrew: PARAM.SFO (MG, the category PSPSDK writes; no DISC_ID), an ICON0
+   section, a DATA.PSP program and an empty DATA.PSAR, the form a homebrew EBOOT.PBP has. */
 static uint8_t *homebrew_pbp(const char *title, const uint8_t *program, size_t program_len,
                              const uint8_t *icon, size_t icon_len, size_t *out_len) {
     uint8_t sfo[512];
-    size_t sfo_len = psp_seal_sfo(sfo, sizeof(sfo), "EG", "", title);
+    size_t sfo_len = psp_seal_sfo(sfo, sizeof(sfo), "MG", "", title);
     size_t icon_at = 0x28u + sfo_len;
     size_t psp_at = icon_at + icon_len;
     uint8_t *pbp = (uint8_t *)calloc(1, psp_at + program_len);
@@ -6595,6 +6595,39 @@ static void homebrew_expect_program(const char *title, const uint8_t *program, s
     }
 }
 
+/* #2145: a stop on code the program generated at run time (target-not-executable) says so for a
+   homebrew library key, never the generic "processor feature" card; a retail disc ID keeps the
+   generic card, and a network stop on homebrew names online play. Each card ends the run with
+   its boundary visible. */
+static void test_homebrew_stop_cards_name_their_limit(void) {
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    printf("[PLAYER_STATE_TEST] Subtest: homebrew stop cards name run-time code and network use\n");
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", "target-not-executable",
+                                   308u, 9, 9000u, "XABC01234", NULL);
+    assert(nk_disc_id_is_non_retail_key("XABC01234"));
+    assert(strcmp(app->last_error.title, "Game stopped early") == 0);
+    assert(strstr(app->last_error.message,
+                  "usually code a program generates while it runs") != NULL);
+    assert(strstr(app->last_error.message, "did not find before it started") != NULL);
+    assert(strstr(app->last_error.boundary_text, "not supported yet") == NULL);
+    assert(strstr(app->last_error.message, "processor feature") == NULL);
+    assert(strstr(app->last_error.boundary_text, "target-not-executable") != NULL);
+    assert(strcmp(app->last_error.stop_boundary, "target-not-executable") == 0);
+
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", "target-not-executable",
+                                   308u, 9, 9000u, "ULUS10041", NULL);
+    assert(strstr(app->last_error.message, "processor feature") != NULL);
+    assert(strstr(app->last_error.message, "usually code a program generates") == NULL);
+
+    player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY",
+                                   "unsupported-import-scenetadhocinit", 308u, 9, 9000u,
+                                   "XABC01234", NULL);
+    assert(strstr(app->last_error.message, "ad hoc wireless play") != NULL);
+    assert(strstr(app->last_error.boundary_text, "unsupported-import-scenetadhocinit") != NULL);
+    free(app);
+}
+
 /* #2143: an unencrypted homebrew EBOOT.PBP imports as a small private disc image holding its
    program (and icon) under the library key of that image: the same program and title is the
    same game, a different title is another. Encrypted and kernel-mode packages keep a named
@@ -6614,7 +6647,9 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     uint8_t icon[24];
     uint8_t *pbp;
     uint8_t *image;
-    size_t pbp_len = 0, image_len = 0;
+    uint8_t *before;
+    uint8_t *after;
+    size_t pbp_len = 0, image_len = 0, before_len = 0, after_len = 0;
     PlayerPsnPackage package;
     PlayerPsnPackage again;
     PlayerPsnPackage renamed;
@@ -6645,6 +6680,8 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     write_binary_file(pbp_path, pbp, pbp_len);
     free(pbp);
     assert(player_path_is_pbp_package(pbp_path));
+    before = psn_test_read_file(pbp_path, &before_len);
+    assert(before != NULL && before_len == pbp_len);
     assert(player_psn_package_inspect(pbp_path, &package, code, sizeof(code), message,
                                       sizeof(message)));
     assert(package.homebrew && !package.iso_ready);
@@ -6678,6 +6715,14 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
     assert(memcmp(image + 22u * 2048u, program, 88u) == 0);
     assert(memcmp(image + 23u * 2048u, icon, sizeof(icon)) == 0);
     free(image);
+
+    /* The user's own package is only read, never changed: the import writes under the data
+       folder alone. (The package's folder is not mounted as ms0:/PSP/GAME/<folder>/ for the
+       program; the disc image holds only the program, its title and its icon, #2143.) */
+    after = psn_test_read_file(pbp_path, &after_len);
+    assert(after != NULL && after_len == before_len && memcmp(after, before, before_len) == 0);
+    free(before);
+    free(after);
 
     /* Picking it again reuses the checked image; the same program under another title is
        another game, and the same package picked from another place is the same one. */
@@ -6718,6 +6763,39 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         write_binary_file(other_path, pbp, pbp_len);
         free(pbp);
         psn_test_refused(other_path, "PBP_PACKAGE_UNSUPPORTED", "Only unencrypted homebrew");
+    }
+
+    /* A homebrew program that packs extra data into its DATA.PSAR is still a program: an MG
+       package whose DATA.PSP is a plain ELF is never reported as a firmware update. The same
+       package with a signed (~PSP) DATA.PSP and data after it is refused as one. */
+    {
+        PlayerPsnPackage package;
+        char code[64];
+        char message[512];
+        uint8_t signed_head[256];
+        size_t padded_len;
+        pbp = homebrew_pbp("Packed data", program, 88u, icon, sizeof(icon), &pbp_len);
+        padded_len = pbp_len + 64u;
+        pbp = (uint8_t *)realloc(pbp, padded_len);
+        assert(pbp != NULL);
+        memset(pbp + pbp_len, 0x5A, 64u);
+        write_binary_file(other_path, pbp, padded_len);
+        free(pbp);
+        (void)player_psn_package_inspect(other_path, &package, code, sizeof(code), message,
+                                         sizeof(message));
+        assert(strcmp(code, "FIRMWARE_OUT_OF_SCOPE") != 0);
+        assert(strstr(message, "firmware") == NULL);
+
+        memset(signed_head, 0, sizeof(signed_head));
+        memcpy(signed_head, "~PSP", 4);
+        pbp = homebrew_pbp("Packed data", signed_head, sizeof(signed_head), NULL, 0, &pbp_len);
+        padded_len = pbp_len + 64u;
+        pbp = (uint8_t *)realloc(pbp, padded_len);
+        assert(pbp != NULL);
+        memset(pbp + pbp_len, 0x5A, 64u);
+        write_binary_file(other_path, pbp, padded_len);
+        free(pbp);
+        psn_test_refused(other_path, "FIRMWARE_OUT_OF_SCOPE", "never decrypts firmware");
     }
 
     /* Modules built by the real PSPSDK (see the arrays above): the user-mode ones are taken and
@@ -9079,6 +9157,7 @@ int main(int argc, char **argv) {
     test_versioned_user_data();
     test_psn_package_imports_as_its_iso();
     test_homebrew_package_becomes_a_private_disc();
+    test_homebrew_stop_cards_name_their_limit();
     test_stage_discard_removes_a_deep_tree();
     test_tree_helpers_walk_a_deep_tree();
 #if defined(_WIN32) || defined(_WIN64)
@@ -13989,6 +14068,88 @@ int main(int argc, char **argv) {
         assert(warning_stopped_game);
         assert(warning_card_has_details);
         assert(stall_log_kept);
+
+        /* #2151: a live synthetic runtime reports its render path as gui_init does. Each
+           forced start-up outcome reaches the game's page as its own notice, read from the
+           session's boot events; no fallback gives none; Hide keeps that fallback's notice
+           hidden for the rest of the session, and the next launch reads its own path. */
+        {
+            static const struct {
+                bool vulkan_started, gpu_ge_started;
+                NkRenderFallback fallback;
+                const char *names;
+            } forced[] = {
+                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, "a basic Windows window"},
+                {true, false, NK_RENDER_FALLBACK_SOFTWARE_GE, "The GPU renderer did not start"},
+                {true, true, NK_RENDER_FALLBACK_NONE, NULL},
+                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, NULL},  /* hidden by Hide */
+            };
+            bool render_ok = true;
+            for (size_t f = 0; f < sizeof(forced) / sizeof(forced[0]); ++f) {
+                const char *heading = "unset";
+                const char *text = "unset";
+                const char *want_heading = NULL;
+                const char *want_text = NULL;
+                char line[160];
+                char timed[192];
+                NkRenderPath path = nk_render_path_from_init(true, forced[f].vulkan_started,
+                                                             true, forced[f].gpu_ge_started);
+                set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "1");
+                bool launched = player_app_launch_game(rep, 0) && rep->is_game_running &&
+                                rep->boot_event_file_path[0] != '\0';
+                render_ok = render_ok && launched && path.fallback == forced[f].fallback;
+                if (launched) {
+                    (void)player_app_monitor_game_session(rep, 90000 + (uint64_t)f * 1000);
+                    /* Nothing is known before the runtime's event arrives. */
+                    render_ok = render_ok && !rep->render_path_known &&
+                        !player_app_render_notice(rep, rep->games[0].disc_id, &heading,
+                                                  &text) &&
+                        heading == NULL && text == NULL;
+                    render_ok = render_ok &&
+                        nk_render_path_event_format(&path, line, sizeof(line)) > 0;
+                    snprintf(timed, sizeof(timed), "%s t_ns=77\n", line);
+                    render_ok = render_ok &&
+                        append_runtime_event(rep->boot_event_file_path, timed);
+                    (void)player_app_monitor_game_session(rep, 90500 + (uint64_t)f * 1000);
+                    bool shown = player_app_render_notice(rep, rep->games[0].disc_id,
+                                                          &heading, &text);
+                    render_ok = render_ok && rep->render_path_known &&
+                        rep->render_path.fallback == forced[f].fallback &&
+                        rep->render_path.vulkan == path.vulkan &&
+                        rep->render_path.gpu_ge == path.gpu_ge;
+                    if (forced[f].names != NULL) {
+                        render_ok = render_ok &&
+                            player_render_notice_text(forced[f].fallback, &want_heading,
+                                                      &want_text) &&
+                            shown && heading == want_heading && text == want_text &&
+                            strcmp(heading, "Drawn in software") == 0 &&
+                            strstr(text, forced[f].names) != NULL &&
+                            strstr(text, "Internal resolution setting has no effect") != NULL;
+                        /* Another game's page has no notice for this launch. */
+                        render_ok = render_ok && rep->game_count > 1 &&
+                            !player_app_render_notice(rep, rep->games[1].disc_id, &heading,
+                                                      &text);
+                        if (forced[f].fallback == NK_RENDER_FALLBACK_GDI_PRESENTER) {
+                            player_app_hide_render_notice(rep);
+                            render_ok = render_ok &&
+                                !player_app_render_notice(rep, rep->games[0].disc_id,
+                                                          &heading, &text);
+                        }
+                    } else {
+                        render_ok = render_ok && !shown && heading == NULL && text == NULL;
+                    }
+                }
+                if (rep->is_game_running) player_app_stop_game(rep);
+                set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "");
+            }
+            assert(render_ok);
+            assert(!player_render_notice_text(NK_RENDER_FALLBACK_NONE, NULL, NULL));
+            /* Hide is for this session only: the hidden fallback is the one hidden. */
+            assert(rep->render_notice_hidden[NK_RENDER_FALLBACK_GDI_PRESENTER] &&
+                   !rep->render_notice_hidden[NK_RENDER_FALLBACK_SOFTWARE_GE]);
+            assert(dev_log_contains(rep, "render path: presenter=gdi ge=software "
+                                         "fallback=gdi_presenter"));
+        }
 
         /* #308: a live synthetic runtime keeps flipping frames that show nothing.
            The dark-picture event raises the same notice at 30 seconds, worded for
