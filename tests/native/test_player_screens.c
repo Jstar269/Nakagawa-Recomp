@@ -50,6 +50,18 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
 };
+/* Each part's words, as player_state.c's k_enhanced_parts gives them. */
+static const char *const k_enhanced_af_labels[] = {"16x", "8x", "4x", "2x", "Off"};
+static const char *const k_enhanced_switch_labels[] = {"On", "Off"};
+static const char *const k_enhanced_upscale_labels[] = {"FSR 1", "Off"};
+static const char *const k_enhanced_library_modes[] = {"Authentic", "Enhanced"};
+static const char *const k_enhanced_title_modes[] = {"Library (Enhanced)", "Authentic",
+                                                     "Enhanced", "Ace"};
+/* What the Settings > Enhanced case shows instead of the fixture: a part's value (NULL
+   keeps the fixture's) and the play mode (NULL keeps the case's). */
+static const char *g_enhanced_value[PLAYER_PART_COUNT];
+static const char *g_enhanced_mode;
+
 typedef char player_screens_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];
 
@@ -404,16 +416,28 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         settings.enhanced_title = title ? "Test Game" : NULL;
         settings.enhanced_mode = title ? "Library (Enhanced)"
                                : settings.enhanced_on ? "Enhanced" : "Authentic";
+        if (g_enhanced_mode != NULL) settings.enhanced_mode = g_enhanced_mode;
+        settings.enhanced_modes = title ? k_enhanced_title_modes : k_enhanced_library_modes;
+        settings.enhanced_mode_count = title ? 4 : 2;
         settings.enhanced_mode_sentence =
             title ? "Enhanced adds the parts below. Ace needs a package made for this game."
                   : "The default for every game; each game's page can choose its own.";
         settings.enhanced_row_count = PLAYER_PART_COUNT;
         for (int i = 0; i < PLAYER_PART_COUNT; i++) {
+            const char *value = g_enhanced_value[i] != NULL ? g_enhanced_value[i]
+                                                            : k_enhanced_parts[i].value;
             snprintf(followed[i], sizeof(followed[i]), "Library (%s)", k_enhanced_parts[i].value);
             settings.enhanced_rows[i].name = k_enhanced_parts[i].name;
-            settings.enhanced_rows[i].value = title ? followed[i] : k_enhanced_parts[i].value;
+            settings.enhanced_rows[i].value =
+                title && g_enhanced_value[i] == NULL ? followed[i] : value;
             settings.enhanced_rows[i].sentence = k_enhanced_parts[i].sentence;
-            settings.enhanced_rows[i].on = strcmp(k_enhanced_parts[i].value, "Off") != 0;
+            settings.enhanced_rows[i].on = strcmp(value, "Off") != 0;
+            settings.enhanced_rows[i].labels =
+                i == 0 ? k_enhanced_af_labels
+                : i == PLAYER_PART_COUNT - 1 ? k_enhanced_upscale_labels
+                                             : k_enhanced_switch_labels;
+            settings.enhanced_rows[i].label_count = i == 0 ? 5 : 2;
+            settings.enhanced_rows[i].library_value = title ? followed[i] : NULL;
         }
     }
     settings.pacing = "PSP timing";
@@ -3525,6 +3549,97 @@ static void test_tall_title_page_scrolls(void) {
           "the tallest title page fits a 1920 x 1200 window with nothing to scroll");
 }
 
+/* Where each Settings > Enhanced row's button is: left, right and top, in window pixels, the
+   play mode first (-1 where a row drew no box). */
+typedef struct {
+    int box[1 + PLAYER_PART_COUNT][3];
+} EnhancedRowPlaces;
+
+static EnhancedRowPlaces enhanced_row_places(FlowCase which) {
+    EnhancedRowPlaces places;
+    NkUi *ui = NULL;
+    /* As wide as the design window and tall enough that no row is scrolled away. */
+    const NkUiDrawList *draw = flow_case_layout(which, 1280, 1200, &ui);
+    memset(&places, -1, sizeof(places));
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        int row = cmd->element_id == PLAYER_UI_ID_SETTINGS_ACE_MODE ? 0
+                  : cmd->element_id >= PLAYER_UI_ID_SETTINGS_ENHANCED_PART &&
+                        cmd->element_id < PLAYER_UI_ID_SETTINGS_ENHANCED_PART + PLAYER_PART_COUNT
+                      ? 1 + (int)(cmd->element_id - PLAYER_UI_ID_SETTINGS_ENHANCED_PART)
+                      : -1;
+        if (row < 0 || (cmd->kind != NK_UI_DRAW_RECTANGLE && cmd->kind != NK_UI_DRAW_BORDER)) {
+            continue;
+        }
+        if (places.box[row][0] < 0 || cmd->bounds[0] < places.box[row][0]) {
+            places.box[row][0] = cmd->bounds[0];
+        }
+        if (cmd->bounds[2] > places.box[row][1]) places.box[row][1] = cmd->bounds[2];
+        if (places.box[row][2] < 0 || cmd->bounds[1] < places.box[row][2]) {
+            places.box[row][2] = cmd->bounds[1];
+        }
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    return places;
+}
+
+/* Settings > Enhanced keeps its rows where they are while a setting changes. Turning Smooth
+   motion on used to relabel Widescreen "Off (Smooth motion is on)": the wider button widened
+   the column past the side-by-side threshold and every row stacked its sentence under its
+   button. The column now comes from the widest value each row can show on its page, so no
+   value moves a row: Smooth motion on with Widescreen off, any part at any of its values, or
+   any play mode, on the library's page and on a game's. */
+static void test_enhanced_rows_stay_put(void) {
+    static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
+    static const char *const *const labels[PLAYER_PART_COUNT] = {
+        k_enhanced_af_labels, k_enhanced_switch_labels, k_enhanced_switch_labels,
+        k_enhanced_switch_labels, k_enhanced_switch_labels, k_enhanced_switch_labels,
+        k_enhanced_switch_labels, k_enhanced_upscale_labels};
+    for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
+        EnhancedRowPlaces base;
+        memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+        g_enhanced_mode = NULL;
+        base = enhanced_row_places(pages[g]);
+        for (int row = 0; row < 1 + PLAYER_PART_COUNT; ++row) {
+            CHECK(base.box[row][0] >= 0 && base.box[row][1] > base.box[row][0],
+                  "every Settings > Enhanced row draws its button");
+        }
+        /* -2: Smooth motion on, Widescreen off; -1 and up: the play modes, then each part
+           at each of its values. */
+        for (int step = -2; step < 4 + PLAYER_PART_COUNT * 5; ++step) {
+            EnhancedRowPlaces moved;
+            char message[160];
+            memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+            g_enhanced_mode = NULL;
+            if (step == -2) {
+                g_enhanced_value[5] = "On";
+                g_enhanced_value[4] = "Off";
+                (void)snprintf(message, sizeof(message),
+                               "page %d: Smooth motion on (Widescreen off) moves no row", (int)g);
+            } else if (step < 4) {
+                int count = pages[g] == FLOW_SETTINGS_ACE_TITLE ? 4 : 2;
+                if (step + 1 >= count) continue;
+                g_enhanced_mode = pages[g] == FLOW_SETTINGS_ACE_TITLE
+                                      ? k_enhanced_title_modes[step + 1]
+                                      : k_enhanced_library_modes[step + 1];
+                (void)snprintf(message, sizeof(message), "page %d: play mode %s moves no row",
+                               (int)g, g_enhanced_mode);
+            } else {
+                int part = (step - 4) / 5;
+                int value = (step - 4) % 5;
+                if (value >= (part == 0 ? 5 : 2)) continue;
+                g_enhanced_value[part] = labels[part][value];
+                (void)snprintf(message, sizeof(message), "page %d: %s at %s moves no row",
+                               (int)g, k_enhanced_parts[part].name, labels[part][value]);
+            }
+            moved = enhanced_row_places(pages[g]);
+            CHECK(memcmp(&moved, &base, sizeof(base)) == 0, message);
+        }
+    }
+    memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+    g_enhanced_mode = NULL;
+}
+
 static void test_every_screen_fits_the_window(void) {
     static char dump[CASE_DUMP_CAP];
     /* The default window, the minimum, a small laptop's maximised window, and
@@ -5882,6 +5997,7 @@ int main(int argc, char **argv) {
     test_error_details_fit_the_minimum_window();
     test_every_screen_fits_the_window();
     test_tall_title_page_scrolls();
+    test_enhanced_rows_stay_put();
     test_psp_fonts_page();
     test_wizard_actions();
     test_plain_cards();

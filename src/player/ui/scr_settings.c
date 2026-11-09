@@ -40,6 +40,28 @@ static PlayerUiAction settings_op(PlayerUiSettingsOp op) {
     return result;
 }
 
+/* Of a row's value now, its other values and its library value (any may be NULL), the one
+   whose button, "name: value", is widest. */
+static const char *settings_widest_value(NkUi *ui, const char *name, const char *value,
+                                         const char *const *others, int other_count,
+                                         const char *library_value) {
+    const char *widest = value;
+    float widest_width = -1.0f;
+    char label[96];
+    for (int i = -2; i < other_count; i++) {
+        const char *candidate = i == -2 ? value : i == -1 ? library_value : others[i];
+        float width;
+        if (candidate == NULL || (i >= 0 && others == NULL)) continue;
+        (void)snprintf(label, sizeof(label), "%s: %s", name, candidate);
+        width = nk_ui_button_width(ui, label, 0u);
+        if (width > widest_width) {
+            widest = candidate;
+            widest_width = width;
+        }
+    }
+    return widest;
+}
+
 static const char *settings_on_off(bool on) {
     return on ? "On" : "Off";
 }
@@ -831,7 +853,21 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             rows[i + 1].value = safe_text(model->enhanced_rows[i].value, "Off");
             rows[i + 1].sentence = safe_text(model->enhanced_rows[i].sentence, "");
         }
-        WizardColumn column = scr_wizard_column(ui, rows, (size_t)count + 1u, inner - 32.0f,
+        /* The column is sized from the widest value each row can show on this page, not
+           the one it shows now, so stepping a setting (Smooth motion turning Widescreen
+           off, say) never moves or restacks the rows. */
+        WizardRow widest[1 + PLAYER_UI_ENHANCED_ROWS];
+        memcpy(widest, rows, sizeof(rows[0]) * ((size_t)count + 1u));
+        widest[0].value = settings_widest_value(ui, rows[0].name, rows[0].value,
+                                                model->enhanced_modes,
+                                                model->enhanced_mode_count, NULL);
+        for (int i = 0; i < count; i++) {
+            const PlayerUiEnhancedRow *row = &model->enhanced_rows[i];
+            widest[i + 1].value = settings_widest_value(ui, rows[i + 1].name, rows[i + 1].value,
+                                                        row->labels, row->label_count,
+                                                        row->library_value);
+        }
+        WizardColumn column = scr_wizard_column(ui, widest, (size_t)count + 1u, inner - 32.0f,
                                                 true);
         if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, SET_ID_TEXT + 0x400u, rows[0].name,
                              rows[0].value, rows[0].sentence, model->enhanced_on, inner - 32.0f,

@@ -592,6 +592,12 @@ typedef struct {
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
     const char *sentence;
     bool on;                    /* in effect for the page: lit */
+    /* Every other value the row can show on this page: the part's own words ("16x" ... "Off")
+       and, on a title's page, the library's ("Library (16x)"). The page sizes its button
+       column from the widest of them, so changing a setting never reflows the rows. */
+    const char *const *labels;
+    int label_count;
+    const char *library_value;  /* NULL on the library's page */
 } PlayerUiEnhancedRow;
 
 #define PLAYER_UI_REPORT_LINES 24u   /* PLAYER_REPORT_MAX_FILES */
@@ -654,6 +660,9 @@ typedef struct {
     const char *enhanced_title;     /* the game's name on its own page; NULL for the library */
     const char *enhanced_mode;      /* "Enhanced", "Ace", "Library (Authentic)" */
     const char *enhanced_mode_sentence;
+    /* Every play mode the page's first row steps through, for the column's width. */
+    const char *const *enhanced_modes;
+    int enhanced_mode_count;
     bool enhanced_on;               /* Enhanced or Ace in effect: the part rows can change */
     int enhanced_row_count;
     PlayerUiEnhancedRow enhanced_rows[PLAYER_UI_ENHANCED_ROWS];
