@@ -451,6 +451,10 @@ With `smooth=x2`, a title the 30 Hz detector holds steady at 30 presents at the 
   `logic.srt` still count only the game's own flips.
 - **UI.** A pixel that did not change between the two frames is copied, so a HUD stays exact while the scene moves
   behind it.
+- **Known limit.** A figure whose pose changes a lot between two frames on a plain floor (a player serving) can
+  lose most of its pixels in the in-between: no vector carries it, and at each pixel the composition takes whichever
+  frame shows the floor there. Until the composition judges objects rather than pixels, such a figure flickers for
+  one picture in two.
 - **Cuts.** When a third of the blocks fit nothing or disagree with their neighbours, the two frames are different
   pictures: the in-between is the old frame, and the new one follows on its VBLANK.
 - **What it never touches.** The in-between and the held frame are private images blitted to the swapchain. The
