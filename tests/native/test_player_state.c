@@ -14796,13 +14796,23 @@ int main(int argc, char **argv) {
         }
 #endif
 
-        /* The reset: every folder is renamed with the stamp; logs stay. */
+        /* The reset: every folder is renamed with the stamp; logs stay. Where the logs
+           folder is inside a moved folder (a rooted layout: Android, or a data-root
+           override), it is moved back, so that folder holds the logs alone again. */
         assert(player_app_factory_reset(reset, "20261029-010205"));
         assert(reset->factory_reset_done && reset->should_quit);
         for (size_t i = 0; i < folder_count; ++i) {
             char moved[NK_MAX_PATH + 64];
             snprintf(moved, sizeof(moved), "%s-backup-20261029-010205", folders[i]);
-            assert(!nk_platform_dir_exists(folders[i]));
+            if (native_test_path_within(logs_dir, folders[i])) {
+                char moved_logs[NK_MAX_PATH * 2 + 64];
+                snprintf(moved_logs, sizeof(moved_logs), "%s%s", moved,
+                         logs_dir + strlen(folders[i]));
+                assert(nk_platform_dir_exists(folders[i]));
+                assert(!nk_platform_dir_exists(moved_logs));
+            } else {
+                assert(!nk_platform_dir_exists(folders[i]));
+            }
             assert(nk_platform_dir_exists(moved));
         }
         for (size_t i = 0; i < 4u; ++i) {
@@ -14834,15 +14844,58 @@ int main(int argc, char **argv) {
             assert(test_rmdir(moved) == 0);
         }
 
-        /* Put this test's data back for anything that runs after it. */
+        /* Put this test's data back for anything that runs after it. A folder the logs
+           were moved back into first returns them to its backup. */
         for (size_t i = 0; i < folder_count; ++i) {
             char moved[NK_MAX_PATH + 64];
             snprintf(moved, sizeof(moved), "%s-backup-20261029-010205", folders[i]);
+            if (native_test_path_within(logs_dir, folders[i])) {
+                char moved_logs[NK_MAX_PATH * 2 + 64];
+                snprintf(moved_logs, sizeof(moved_logs), "%s%s", moved,
+                         logs_dir + strlen(folders[i]));
+                assert(nk_rename_utf8(logs_dir, moved_logs) == 0);
+                assert(test_rmdir(folders[i]) == 0);
+            }
             assert(nk_rename_utf8(moved, folders[i]) == 0);
         }
         for (size_t i = 0; i < 4u; ++i) remove(marks[i]);
         free(reset);
         printf("[PLAYER_STATE_TEST] factory reset PASSED\n");
+    }
+    {
+        /* A data-root override is a rooted layout, as Android's is: the logs folder is
+           inside the data folder, which the reset moves aside, and the logs are moved
+           back so they stay where they were (#360). */
+        char rsep = nk_platform_path_separator();
+        char cache[NK_MAX_PATH];
+        char root[NK_MAX_PATH + 32];
+        char config[NK_MAX_PATH + 48];
+        char logs[NK_MAX_PATH + 48];
+        char kept_log[NK_MAX_PATH + 64];
+        char moved_root[NK_MAX_PATH + 64];
+        char moved_config[NK_MAX_PATH + 96];
+        assert(nk_platform_get_path(NK_PATH_CACHE, cache, sizeof(cache)));
+        snprintf(root, sizeof(root), "%s%creset-rooted", cache, rsep);
+        snprintf(config, sizeof(config), "%s%cconfig", root, rsep);
+        snprintf(logs, sizeof(logs), "%s%clogs", root, rsep);
+        snprintf(kept_log, sizeof(kept_log), "%s%crun.log", logs, rsep);
+        assert(nk_platform_mkdir_p(config) && nk_platform_mkdir_p(logs));
+        write_text_file(kept_log, "a run log\n");
+        PlayerApp *rooted = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        assert(rooted != NULL);
+        assert(nk_platform_set_app_data_dir_override(root));
+        bool reset_ok = player_app_factory_reset(rooted, "20261029-010206");
+        assert(nk_platform_set_app_data_dir_override(NULL));
+        assert(reset_ok);
+        snprintf(moved_root, sizeof(moved_root), "%s-backup-20261029-010206", root);
+        snprintf(moved_config, sizeof(moved_config), "%s%cconfig", moved_root, rsep);
+        assert(nk_platform_dir_exists(moved_config));
+        assert(!nk_platform_dir_exists(config));
+        assert(nk_platform_file_exists(kept_log));
+        free(rooted);
+        assert(test_remove_tree(moved_root));
+        assert(test_remove_tree(root));
+        printf("[PLAYER_STATE_TEST] factory reset of a rooted layout keeps the logs PASSED\n");
     }
 
     /* 25. The file pickers (owner, 2026-10-29): a first run opens them at the
