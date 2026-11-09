@@ -998,7 +998,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.build_speed = package_build_speed_name(app->settings.build_speed);
     switch (app->settings.build_speed) {
     case PACKAGE_BUILD_SPEED_BACKGROUND:
-        model.build_speed_sentence = "Two parts at a time at low priority, so a game you play "
+        model.build_speed_sentence = "Up to two parts at a time at low priority, so a game you play "
                                      "meanwhile stays smooth. Builds take longer.";
         break;
     case PACKAGE_BUILD_SPEED_FASTEST:

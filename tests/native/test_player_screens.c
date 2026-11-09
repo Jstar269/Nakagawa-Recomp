@@ -437,7 +437,7 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.developer_mode = true;
     settings.share_system_libraries = true;
     settings.build_speed = "Background";
-    settings.build_speed_sentence = "Two parts at a time at low priority, so a game you play "
+    settings.build_speed_sentence = "Up to two parts at a time at low priority, so a game you play "
                                     "meanwhile stays smooth. Builds take longer.";
     /* Accessibility: a size picked, high contrast following Windows (off), and
        Reduce motion turned on. */
@@ -3100,7 +3100,7 @@ static void test_settings_pages(void) {
           "build tools and cache shows the build speed at 960 x 540");
     CHECK(flow_row_sentence_is_beside_button(FLOW_SETTINGS_BUILD_CACHE,
                                              PLAYER_UI_ID_SETTINGS_BUILD_SPEED,
-                                             "Two parts at a time"),
+                                             "Up to two parts at a time"),
           "Settings > Build cache keeps the Build speed sentence beside its button");
     CHECK(flow_row_sentence_is_beside_button(FLOW_SETTINGS_BUILD_CACHE,
                                              PLAYER_UI_ID_SETTINGS_SHARE_LIBRARIES,
