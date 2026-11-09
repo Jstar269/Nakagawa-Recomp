@@ -312,8 +312,9 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off`. `tier` (`enhanced` or `ace`) only names the
-run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. Every other key is
-required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
+run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
+section 11.3.6) is the other key a line may leave out: a missing `cull` is off, and `cull=on` needs `tier=ace`. Every
+other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
 `<user data>/ace/`. Ace's 60 FPS game logic is not on this line: it selects the title's enhanced package variant
@@ -1275,8 +1276,14 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   row (elements 0, 4, 8 and 12 of each column-major 4x4 float matrix) by `480 / (480 + 2D)`, where `D` is the Widescreen
   wing width (section 10.8), so a bounds test against `-w <= x <= w` accepts the same extra width the wings draw. The
   matrices the GE receives are not touched, and the vertical extent and the HUD are unchanged.
-- **Key.** None yet. The function does nothing while Widescreen is off (`D` = 0). A launch-line key, a library setting
-  and a per-title setting (section 11.2, item 2) do not exist, and the launcher does not yet pick the package build.
+- **Key.** `cull=on` or `cull=off` on the launch line (section 10.1), an optional key: a line without it reads as
+  off, and `cull=on` is refused unless the line carries `tier=ace`. The player has a library setting and a per-title
+  setting, "Wider culling", each able to turn it off alone (section 11.2, item 2); the line carries `;cull=on` only for
+  an Ace launch with the part on, so every other line is as it was. The runtime scales only while the run asked for
+  the key and Widescreen has a wing (`D` > 0); with either missing, the stock call runs and nothing is written. The run
+  names it (`ACE_MODE: cull on (...)`, the report's `cull`), and reports it unavailable when no matrix was scaled by
+  the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
+  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is not done yet.
 - **What it changes:** for the matrices at `clip_offsets`, 16 floats' worth of guest memory per camera build, only while
   Widescreen is on; and so which objects the title submits.
 - **VRAM bytes:** differ in the wings and nowhere else, as objects the title used to skip are drawn there.

@@ -4976,9 +4976,16 @@ int ge_wide_set_wing(int wing) {
 
 int ge_wide_wing(void) { return s_wide_d; }
 
+/* The Ace cull key (contract 11.3.6): the hook scales only while the run asked for it (gui.c
+ * sets this from the effective SR_ACE line) and Widescreen has a wing. */
+static int s_cull_on;
+static unsigned long s_cull_calls;
+void ge_wide_set_cull(int on) { s_cull_on = on ? 1 : 0; }
+unsigned long ge_wide_cull_calls(void) { return s_cull_calls; }
+
 void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count) {
     const int wing = s_wide_d;
-    if (wing <= 0 || base == 0u || !offsets) return;
+    if (!s_cull_on || wing <= 0 || base == 0u || !offsets) return;
     const float inv = 480.0f / (480.0f + 2.0f * (float)wing);
     for (uint32_t i = 0; i < count; i++) {
         const uint32_t m = base + offsets[i];
@@ -4992,6 +4999,7 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
             v *= inv;
             memcpy(SR_HOST(m + 4u * e), &v, sizeof v);
         }
+        s_cull_calls++;
     }
 }
 

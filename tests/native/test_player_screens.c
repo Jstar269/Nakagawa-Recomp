@@ -47,6 +47,8 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
     {"Smooth motion", "Off", "Shows 30 FPS games at 60. Adds about 17 ms of delay."},
     {"Clean pitched sound", "Off",
      "Resamples pitched effects without aliasing. The game receives changed samples."},
+    {"Wider culling", "Off", "With Widescreen, the game draws objects it would skip at the sides. The "
+                             "game's memory changes."},
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
 };
