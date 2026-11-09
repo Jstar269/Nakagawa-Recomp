@@ -875,6 +875,21 @@ void gui_shutdown(void) {
 #endif
 }
 
+/* The render path this run set up, from what it asked for and what started, reported once
+ * before window_ready (#2151): the player reads it from the boot events and names a slower
+ * path than the one asked for. */
+#if defined(SR_SDL3VK) || defined(_WIN32)
+static void gui_report_render_path(bool vulkan_asked, bool vulkan_started, bool gpu_ge_asked,
+                                   bool gpu_ge_started) {
+    NkRenderPath path = nk_render_path_from_init(vulkan_asked, vulkan_started, gpu_ge_asked,
+                                                 gpu_ge_started);
+    char line[128];
+    if (nk_render_path_event_format(&path, line, sizeof(line)) > 0) {
+        sr_gui_boot_event("%s", line);
+    }
+}
+#endif
+
 void gui_init(const char *title) {
     (void)title;
 #if defined(SR_SDL3VK) || defined(_WIN32)
@@ -928,12 +943,19 @@ void gui_init(const char *title) {
         sr_gui_boot_event("BOOT_EVENT phase=window_ready backend=offscreen");
         return;
     }
+    /* The GPU GE renderer is asked for by SR_GPU_GE (the player always sets it). */
+    const char *gpu_ge_env = getenv("SR_GPU_GE");
+    bool gpu_ge_asked = gpu_ge_env && gpu_ge_env[0] && strcmp(gpu_ge_env, "0") != 0;
+    bool vulkan_asked = false;
+    (void)gpu_ge_asked;   /* read only by the presenters this build has */
+    (void)vulkan_asked;
 #ifdef SR_SDL3VK
     /* SDL3+Vulkan presenter (src/rt/gpu_sdl3vk, Phase 0): default in this build;
      * SR_VIDEO=gdi falls back to the classic Win32/GDI window below. */
     {
         const char *v = getenv("SR_VIDEO");
         if (!v || strcmp(v, "gdi") != 0) {
+            vulkan_asked = true;
             if (sdl3vk_init(title)) {
 #ifdef SR_PUBLIC_SAFE
                 /* Only the public audio backend exports this query; without a
@@ -968,11 +990,13 @@ void gui_init(const char *title) {
                 /* Phase 1 GPU rasterizer (opt-in): captures GE triangles/sprites and
                  * renders them on the GPU, writing results back to guest VRAM. */
                 {
-                    const char *gge = getenv("SR_GPU_GE");
-                    if (gge && gge[0] && strcmp(gge, "0") != 0) {
-                        if (!gegpu_init())
+                    bool gpu_ge_started = false;
+                    if (gpu_ge_asked) {
+                        gpu_ge_started = gegpu_init() != 0;
+                        if (!gpu_ge_started)
                             fprintf(stderr, "gui_init: GPU GE init failed; software GE active\n");
                     }
+                    gui_report_render_path(true, true, gpu_ge_asked, gpu_ge_started);
                 }
                 sr_gui_request_launcher_foreground(true, NULL,
                                                    sr_gui_raise_sdl_window,
@@ -1047,6 +1071,8 @@ void gui_init(const char *title) {
     sr_gui_request_launcher_foreground(
         s_hwnd && IsWindowVisible(s_hwnd), s_hwnd,
         sr_gui_raise_gdi_window, "gdi");
+    /* Here when SR_VIDEO=gdi asked for this window, or when Vulkan did not start. */
+    gui_report_render_path(vulkan_asked, false, gpu_ge_asked, false);
     sr_gui_boot_event("BOOT_EVENT phase=window_ready backend=gdi");
 #else /* !_WIN32: no GDI presenter on this host */
     /* No Win32/GDI window exists here, so there is no fallback to take. The

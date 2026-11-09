@@ -38,7 +38,8 @@ typedef enum {
     /* An older Nakagawa built some games: the once-per-update prompt, or the
        reminder a launch of one shows. Pushed while player_state says so. */
     PLAYER_UI_ROUTE_REBUILD = 7,
-    PLAYER_UI_ROUTE_SAVES = 8      /* a title's saves: back up, restore, add (#1883) */
+    PLAYER_UI_ROUTE_SAVES = 8,     /* a title's saves: back up, restore, add (#1883) */
+    PLAYER_UI_ROUTE_STEAM = 9      /* a title's Add to Steam (#2152) */
 } PlayerUiRoute;
 
 /* The player's version: the one place it is written. The About page shows
@@ -142,9 +143,21 @@ typedef enum {
     PLAYER_UI_ACTION_DISC_VERIFY,       /* the library's disc check line; .primary carries
                                            the op (PlayerUiDiscVerifyOp) */
     PLAYER_UI_ACTION_OPEN_SAVES,        /* the title page's Saves (#1883) */
-    PLAYER_UI_ACTION_SAVES              /* a Saves dialog control; .primary carries the
+    PLAYER_UI_ACTION_SAVES,             /* a Saves dialog control; .primary carries the
                                            op (PlayerUiSavesOp) */
+    PLAYER_UI_ACTION_ADD_TO_STEAM,      /* the title page's Add to Steam (#2152) */
+    PLAYER_UI_ACTION_STEAM,             /* an Add to Steam dialog control; .primary carries
+                                           the op (PlayerUiSteamOp) */
+    PLAYER_UI_ACTION_HIDE_RENDER_NOTICE /* the title page's render notice: Hide (#2151) */
 } PlayerUiActionKind;
+
+/* What an Add to Steam dialog control asks for (PLAYER_UI_ACTION_STEAM). Back is
+   PLAYER_UI_ACTION_BACK. */
+typedef enum {
+    PLAYER_UI_STEAM_NONE = 0,
+    PLAYER_UI_STEAM_ADD,                 /* Add to Steam: write the shortcut */
+    PLAYER_UI_STEAM_ACCOUNT_BASE = 0x100 /* + the account's row: choose that account */
+} PlayerUiSteamOp;
 
 /* What a Saves dialog control asks for (PLAYER_UI_ACTION_SAVES). Back is
    PLAYER_UI_ACTION_BACK. */
@@ -291,6 +304,9 @@ typedef struct {
        user's disc list, under the title page's tags; NULL when not checked. The
        card's badge carries the short word. */
     const char *disc_check_note;
+    /* ADD TO STEAM is offered (#2152): one of the user's own games, named by a disc
+       ID a shortcut can carry. */
+    bool can_add_to_steam;
 } PlayerUiTitle;
 
 typedef struct {
@@ -646,10 +662,8 @@ typedef struct {
     const char *saves_folder;
     const char *notice;             /* a settings notice (a failed save), or NULL */
     /* The main page's graphics preset note (#2150): where the preset applies, or NULL for
-       Custom. Drawn when there is no notice; in the warning colour when it names a value
-       the preset could not set. */
+       Custom. Drawn, in the muted colour, when there is no notice. */
     const char *preset_notice;
-    bool preset_notice_warns;
     /* Build tools and cache: builds share compiled system libraries (#1306) */
     bool share_system_libraries;
     /* Updates (VIEW_UPDATES): what the last step found, in words */
@@ -888,6 +902,10 @@ typedef struct {
     bool stalled_game_notice_visible;
     /* The notice is for frames that show nothing, not for frames that stopped. */
     bool stalled_game_dark_picture;
+    /* The render notice (#2151): the slower path this game's latest launch draws with, in
+       a heading and a sentence (player_render_notice_text), with Hide; NULL hides it. */
+    const char *render_notice_heading;
+    const char *render_notice_text;
     double now_s;           /* drives the starting bar (0 holds it still) */
     float logical_width;    /* 0 selects 1280 */
     float logical_height;   /* 0 selects 800 */
@@ -946,6 +964,8 @@ enum {
     PLAYER_UI_ID_TITLE_60FPS = 0x2009u,
     PLAYER_UI_ID_TITLE_ACE = 0x200Au,                /* the ENHANCEMENTS card's play mode */
     PLAYER_UI_ID_TITLE_PLAY_OPTIONS = 0x200Bu,       /* the ENHANCEMENTS card's Enhanced options */
+    PLAYER_UI_ID_TITLE_STEAM = 0x200Cu,              /* Add to Steam (#2152) */
+    PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE = 0x200Du, /* the render notice's Hide (#2151) */
     PLAYER_UI_ID_REMOVE_CANCEL = 0x4401u,
     PLAYER_UI_ID_REMOVE_CONFIRM = 0x4402u,
     PLAYER_UI_ID_REMOVE_SAVES = 0x4403u,
@@ -961,6 +981,9 @@ enum {
     PLAYER_UI_ID_SAVES_OLDER = 0x4427u,
     PLAYER_UI_ID_SAVES_NEWER = 0x4428u,
     PLAYER_UI_ID_SAVES_RESTORE_BASE = 0x4430u,      /* + the backup's row */
+    PLAYER_UI_ID_STEAM_ADD = 0x4441u,
+    PLAYER_UI_ID_STEAM_BACK = 0x4442u,
+    PLAYER_UI_ID_STEAM_ACCOUNT_BASE = 0x4450u,      /* + the account's row, up to 16 */
     PLAYER_UI_ID_TAB_LIBRARY = 0x0F01u,
     PLAYER_UI_ID_TAB_ABOUT = 0x0F02u,
     PLAYER_UI_ID_TAB_SETTINGS = 0x0F03u,
@@ -1195,6 +1218,29 @@ typedef struct {
 } PlayerUiSavesModel;
 
 PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model);
+
+/* Add to Steam (#2152): what the shortcut is and what Nakagawa changes, the Steam account
+   when there are several (each a button; the chosen one is marked Chosen, not by colour
+   alone), Add to Steam and Back, and what the last add did. Nothing is written until Add to
+   Steam is chosen. When Steam or an account is missing, `blocked` says so and only Back
+   remains. */
+#define PLAYER_UI_STEAM_ACCOUNT_CAP 16u
+typedef struct {
+    const char *title;          /* the game */
+    size_t title_index;
+    const char *const *accounts;   /* each account's name, or "Account <id>" */
+    size_t account_count;
+    size_t chosen;              /* the account Add to Steam writes to */
+    const char *command;        /* what the shortcut starts: "nakagawa_player.exe --launch-title=..." */
+    bool portable;              /* the shortcut breaks if this folder moves */
+    const char *blocked;        /* why nothing can be added, or NULL */
+    const char *status;         /* what the last Add to Steam did, or NULL */
+    PlayerUiNoteKind status_kind;
+    float logical_width;
+    float logical_height;
+} PlayerUiSteamModel;
+
+PlayerUiAction player_ui_screen_steam(NkUi *ui, const PlayerUiSteamModel *model);
 /* The older-build prompt (model->title NULL: Rebuild all, Later) and the launch
    reminder (Rebuild now, Play anyway). Back is the second choice. */
 PlayerUiAction player_ui_screen_rebuild(NkUi *ui, const PlayerUiRebuildModel *model);
