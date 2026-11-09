@@ -13,7 +13,7 @@ try:
 except ImportError:
     # Direct invocation
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-    from psp_threading_oracle.parser import analyze_runs, human_table
+    from psp_threading_oracle.parser import analyze_runs, human_table  # type: ignore[no-redef]
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Analyze PSP threading oracle captures")

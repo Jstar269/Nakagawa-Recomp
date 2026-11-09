@@ -37,9 +37,29 @@
 static uint64_t g_test_host_ns;
 static uint64_t test_host_ns(void);
 static void sched_selftest_delay_precise(uint64_t ns);
+static bool sched_selftest_set_priority(SDL_ThreadPriority priority);
 #define SDL_DelayPrecise sched_selftest_delay_precise
+#define SDL_SetCurrentThreadPriority sched_selftest_set_priority
 #include "sched.c"   /* white-box: statics (s_tcb, s_ntcb, s_last_pick, ...) visible */
 #undef SDL_DelayPrecise
+#undef SDL_SetCurrentThreadPriority
+
+/* Every priority request sched.c makes, by thread; the request itself is not passed on. */
+static SDL_AtomicInt g_prio_high_calls;
+static SDL_AtomicInt g_prio_other_calls;
+static SDL_AtomicInt g_prio_recorded;
+static SDL_ThreadID g_prio_first_thread, g_prio_second_thread;
+static bool sched_selftest_set_priority(SDL_ThreadPriority priority) {
+    if (priority != SDL_THREAD_PRIORITY_HIGH) {
+        SDL_AddAtomicInt(&g_prio_other_calls, 1);
+        return true;
+    }
+    const int n = SDL_AddAtomicInt(&g_prio_high_calls, 1);
+    if (n == 0) g_prio_first_thread = SDL_GetCurrentThreadID();
+    else if (n == 1) g_prio_second_thread = SDL_GetCurrentThreadID();
+    SDL_AddAtomicInt(&g_prio_recorded, 1);   /* after the ID: a reader that sees it sees the ID */
+    return true;
+}
 
 #include <stdlib.h>
 #include <time.h>
@@ -1858,6 +1878,37 @@ static void test_preempt_timer_hands_cpu_to_stronger_due_thread(void) {
     const unsigned equal = preempt_timer_run(32);
     expect(equal != UINT32_MAX && equal > PT_DUE_AT_YIELD,
            "an equal-priority waiter whose delay ran out does not take the CPU early");
+}
+
+/* #1296: the paced scheduler's thread and the preemption timer's thread each ask for high host
+ * priority; a turbo run asks for none. MUTANT: drop the raise in sched_preempt_timer_start --
+ * no request from this thread. MUTANT: drop it in sched_preempt_timer_main -- no second thread
+ * asks. The timer thread this starts stays parked on its condition (no deadline is published
+ * while the mode is restored to OFF), so main() runs this case last. */
+static void test_paced_host_threads_ask_for_high_priority(void) {
+    const int saved_pace = s_pace_on;
+    s_pace_on = 0;
+    sched_preempt_timer_start();
+    expect(SDL_GetAtomicInt(&g_prio_high_calls) == 0 && s_preempt_timer_mode == SCHED_PREEMPT_TIMER_OFF,
+           "a turbo run starts no timer and asks for no host priority");
+    s_pace_on = 1;
+    sched_preempt_timer_start();
+    const uint64_t give_up = SDL_GetTicksNS() + 5000000000ull;
+    while (SDL_GetAtomicInt(&g_prio_recorded) < 2 && SDL_GetTicksNS() < give_up) SDL_Delay(1);
+    expect(SDL_GetAtomicInt(&g_prio_recorded) == 2 && SDL_GetAtomicInt(&g_prio_high_calls) == 2 &&
+           SDL_GetAtomicInt(&g_prio_other_calls) == 0,
+           "a paced start asks for high priority twice, and for nothing else");
+    const SDL_ThreadID self = SDL_GetCurrentThreadID();
+    expect(g_prio_first_thread == self || g_prio_second_thread == self,
+           "the scheduler's own thread asks for high priority");
+    expect(g_prio_first_thread != g_prio_second_thread,
+           "the preemption timer's thread asks for itself");
+    SDL_LockMutex(s_preempt_timer_mutex);
+    s_preempt_timer_at_ns = UINT64_MAX;
+    s_preempt_timer_published = UINT64_MAX;
+    s_preempt_timer_mode = SCHED_PREEMPT_TIMER_OFF;
+    SDL_UnlockMutex(s_preempt_timer_mutex);
+    s_pace_on = saved_pace;
 }
 
 static void test_preempt_point_hands_cpu_over_inside_an_hle_call(void) {
@@ -6226,6 +6277,7 @@ int main(int argc, char **argv) {
     test_pause_s14_idle_vblank_request_enters_before_guest_resumes();
     test_pause_s15_scripted_length_with_presenter_frame();
     test_loadexec_retires_scheduler_world();
+    test_paced_host_threads_ask_for_high_priority();   /* last: leaves a parked timer thread */
 
     fprintf(stderr, "sched_selftest: title config \"%s\" (valid=0x%x)\n",
             sr_title_config()->source_id, sr_title_config()->valid);
