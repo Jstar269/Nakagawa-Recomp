@@ -4833,9 +4833,15 @@ static int coherence_run_stencil_constant(void) {
  *    colour within the fixed-function blend's bound of ge.c (STP_FF_BLEND_BOUND), alpha exact;
  *  - textured (8888): a 16x16 texture, a quarter of its texels a key colour with hashed alpha,
  *    drawn 1:1 with REPLACE under each function, with the full mask and a 5-bit-lattice one:
- *    the colour-keyed sprite a game draws with the color test. */
+ *    the colour-keyed sprite a game draws with the color test;
+ *  - modulated (8888): the same sprites with MODULATE and a non-white vertex colour. psp.frag
+ *    computes that colour in floating point, 1 away from ge.c's integer one at some texels, and
+ *    the key turns that into a pixel kept or dropped, so this list must stay on ge.c (every
+ *    primitive falls back) and still match it.
+ * A table of states then checks color_test_colour_inexact() directly, including the Gouraud
+ * triangle and transform-mode fog cases these sprite lists cannot reach. */
 enum { CTP_FLAT_8888, CTP_FLAT_5650, CTP_FLAT_5551, CTP_FLAT_4444, CTP_BLEND_8888,
-       CTP_TEX_8888, CTP_KINDS };
+       CTP_TEX_8888, CTP_TEXMOD_8888, CTP_KINDS };
 #define CTP_TEX 0x08100000u                      /* 16x16 8888 texture in main RAM */
 #define CTP_KEY 0x00C03080u                      /* the textured cells' key colour */
 
@@ -4857,7 +4863,7 @@ static uint32_t ctp_list(uint32_t base, int kind, int on) {
     stp_emit(&l, 0x24, 0);                               /* no stencil test */
     stp_emit(&l, 0x27, on ? 1u : 0u);
     uint32_t vaddr = 0x08060000u;
-    if (kind != CTP_TEX_8888) {
+    if (kind != CTP_TEX_8888 && kind != CTP_TEXMOD_8888) {
         const int blended = kind == CTP_BLEND_8888;
         stp_emit(&l, 0x21, blended ? 1u : 0u);
         for (uint32_t cell = 0; cell < 4u * 6u * 2u; cell++) {
@@ -4878,7 +4884,9 @@ static uint32_t ctp_list(uint32_t base, int kind, int on) {
         stp_emit(&l, 0xB8, 4u | (4u << 8));
         stp_emit(&l, 0xC0, 0); stp_emit(&l, 0xC2, 0); stp_emit(&l, 0xC3, 3);
         stp_emit(&l, 0xC6, 0); stp_emit(&l, 0xC7, 0);
-        stp_emit(&l, 0xC9, 3u | (1u << 8));             /* replace, texture alpha */
+        const int modulate = kind == CTP_TEXMOD_8888;
+        const uint32_t vcol = modulate ? 0xFFB06A3Du : 0xFFFFFFFFu;
+        stp_emit(&l, 0xC9, (modulate ? 0u : 3u) | (1u << 8));   /* modulate or replace, texture alpha */
         stp_emit(&l, 0xCB, 0);
         stp_emit(&l, 0x1E, 1);
         stp_emit(&l, 0x21, 0);
@@ -4886,10 +4894,13 @@ static uint32_t ctp_list(uint32_t base, int kind, int on) {
         for (uint32_t cell = 0; cell < 8u; cell++) {
             const float x = (float)(STP_ORIGIN + 20u * cell), y = (float)STP_ORIGIN;
             CtpTexVtx *v = (CtpTexVtx *)SR_HOST(vaddr);
-            v[0] = (CtpTexVtx){ 0.0f, 0.0f, 0xFFFFFFFFu, x, y, 0.0f };
-            v[1] = (CtpTexVtx){ 16.0f, 16.0f, 0xFFFFFFFFu, x + 16.0f, y + 16.0f, 0.0f };
-            stp_emit(&l, 0xD8, cell & 3u);
-            stp_emit(&l, 0xD9, CTP_KEY);
+            v[0] = (CtpTexVtx){ 0.0f, 0.0f, vcol, x, y, 0.0f };
+            v[1] = (CtpTexVtx){ 16.0f, 16.0f, vcol, x + 16.0f, y + 16.0f, 0.0f };
+            /* Modulated, only functions that test (ALWAYS is no test, so it would stay on the GPU). */
+            static const uint32_t mod_func[8] = { 0u, 2u, 3u, 2u, 0u, 3u, 2u, 3u };
+            stp_emit(&l, 0xD8, modulate ? mod_func[cell] : (cell & 3u));
+            /* Modulated, the key is the key texel times the vertex colour as ge.c truncates it. */
+            stp_emit(&l, 0xD9, modulate ? 0x0084141Fu : CTP_KEY);
             stp_emit(&l, 0xDA, cell < 4u ? 0xFFFFFFu : 0xF8F8F8u);
             stp_emit(&l, 0x01, vaddr & 0x00FFFFFFu);
             stp_emit(&l, 0x04, (6u << 16) | 2u);
@@ -4918,7 +4929,10 @@ static int ctp_run(uint32_t base, uint32_t fmt, uint32_t list, int gpu, uint8_t 
         GeGpuFbDescriptor desc = { .addr = base, .format = fmt, .stride = 512u,
                                    .width = 480, .height = FB_H };
         const int sync = gegpu_sync_guest_fb(&desc);
-        if (sync != GEGPU_SYNC_OK) return sync;
+        /* No GPU picture to sync means ge.c drew the whole list: guest VRAM holds it now, and
+         * only now, before the next run repaints the background. */
+        memcpy(out, SR_HOST(base), bytes);
+        return sync;
     }
     memcpy(out, SR_HOST(base), bytes);
     return GEGPU_SYNC_OK;
@@ -4926,7 +4940,8 @@ static int ctp_run(uint32_t base, uint32_t fmt, uint32_t list, int gpu, uint8_t 
 
 static int coherence_run_color_test(void) {
     static const char *const names[CTP_KINDS] = { "flat-8888", "flat-5650", "flat-5551",
-                                                  "flat-4444", "blended-8888", "textured-8888" };
+                                                  "flat-4444", "blended-8888", "textured-8888",
+                                                  "modulated-8888" };
     const uint32_t base = 0x04000000u | 0x00140000u, bytes = FB_W * FB_H * 4u;
     uint8_t *gpu_out = (uint8_t *)malloc(bytes), *sw_out = (uint8_t *)malloc(bytes);
     uint8_t *off_out = (uint8_t *)malloc(bytes);
@@ -4936,7 +4951,7 @@ static int coherence_run_color_test(void) {
     unsigned differing = 0, min_drawn = UINT32_MAX, min_rejected = UINT32_MAX;
     for (int kind = 0; kind < CTP_KINDS && ok; kind++) {
         const uint32_t fmt = ctp_fmt(kind), bpp = fmt == 3u ? 4u : 2u;
-        const int blended = kind == CTP_BLEND_8888;
+        const int blended = kind == CTP_BLEND_8888, stays = kind == CTP_TEXMOD_8888;
         const char *name = names[kind];
         const GeGpuReplayStats before = s_replay_stats;
         const int sync = ctp_run(base, fmt, ctp_list(base, kind, 1), 1, gpu_out);
@@ -4945,13 +4960,14 @@ static int coherence_run_color_test(void) {
         (void)ctp_run(base, fmt, ctp_list(base, kind, 0), 0, off_out);
         const unsigned long long readbacks =
             after.fallback_readbacks[GEGPU_FALLBACK_COLOR_TEST] - before.fallback_readbacks[GEGPU_FALLBACK_COLOR_TEST];
-        if (after.fallback_prims != before.fallback_prims || readbacks != 0u) {
+        const unsigned long long fell = after.fallback_prims - before.fallback_prims;
+        if (stays ? fell != 8u : (fell != 0u || readbacks != 0u)) {
             fprintf(stderr, "gpu coherence selftest [color-test]: %s list took the software fallback "
-                            "for %llu primitives (%llu color-test readbacks), want 0\n", name,
-                    after.fallback_prims - before.fallback_prims, readbacks);
+                            "for %llu primitives (%llu color-test readbacks), want %s\n", name,
+                    fell, readbacks, stays ? "all 8" : "0");
             ok = 0;
         }
-        if (sync != GEGPU_SYNC_OK) {
+        if (!stays && sync != GEGPU_SYNC_OK) {
             fprintf(stderr, "gpu coherence selftest [color-test]: %s list: the GPU target did not "
                             "sync (status %d)\n", name, sync);
             ok = 0;
@@ -4997,13 +5013,45 @@ static int coherence_run_color_test(void) {
     }
     free(gpu_out); free(sw_out); free(off_out);
     *s_ge = saved;
+    /* color_test_colour_inexact(interp, persp) under Gouraud shading, fog, a texture function
+     * (0xFFFF: untextured; bit 8 texture alpha) and a filter. */
+    static const struct { int interp, persp, gouraud, fog; uint32_t tfunc, filter; int want; } cx[] = {
+        { 0, 0, 0, 0, 0xFFFFu, 0u, 0 },      /* untextured flat sprite */
+        { 1, 0, 0, 0, 0xFFFFu, 0u, 0 },      /* untextured flat triangle */
+        { 1, 0, 1, 0, 0xFFFFu, 0u, 1 },      /* Gouraud triangle */
+        { 0, 0, 1, 0, 0xFFFFu, 0u, 0 },      /* Gouraud sprite: one colour */
+        { 0, 1, 0, 1, 0xFFFFu, 0u, 1 },      /* transform-mode fog */
+        { 0, 0, 0, 1, 0xFFFFu, 0u, 0 },      /* fog has no effect in through mode */
+        { 0, 0, 0, 0, 0x103u, 0u, 0 },       /* replace, nearest */
+        { 0, 0, 0, 0, 0x001u, 0u, 0 },       /* decal without texture alpha */
+        { 0, 0, 0, 0, 0x101u, 0u, 1 },       /* decal with texture alpha: a float mix */
+        { 0, 0, 0, 0, 0x100u, 0u, 1 },       /* modulate */
+        { 0, 0, 0, 0, 0x102u, 0u, 1 },       /* blend */
+        { 0, 0, 0, 0, 0x104u, 0u, 1 },       /* add */
+        { 0, 0, 0, 0, 0x103u, 0x101u, 1 },   /* replace, filtered */
+    };
+    for (unsigned i = 0; i < sizeof(cx) / sizeof(cx[0]); i++) {
+        s_ge->color_test_enable = 1; s_ge->color_test = 2u; s_ge->clear = 0;
+        s_ge->shade_gouraud = cx[i].gouraud; s_ge->fog_enable = cx[i].fog;
+        s_ge->tex_enable = cx[i].tfunc != 0xFFFFu; s_ge->tex_addr = s_ge->tex_enable ? CTP_TEX : 0u;
+        s_ge->tex_func = cx[i].tfunc & 0x1FFu; s_ge->tex_filter = cx[i].filter;
+        s_ge->tex_max_level = 0u;
+        const int got = color_test_colour_inexact(cx[i].interp, cx[i].persp);
+        if (got != cx[i].want) {
+            fprintf(stderr, "gpu coherence selftest [color-test]: colour-exactness cell %u gave %d, want %d\n",
+                    i, got, cx[i].want);
+            ok = 0;
+        }
+    }
+    *s_ge = saved;
     if (!ok) {
         fprintf(stderr, "gpu coherence selftest [color-test]: %u pixels outside the contract\n", differing);
         return 0;
     }
-    printf("gpu coherence selftest: PASS %-22s lists=%d fallback_prims=0 unblended exact, blended "
-           "rgb_max_delta=%d (bound %d) alpha exact; min drawn=%u rejected=%u\n", "color-test",
-           CTP_KINDS, max_rgb, STP_FF_BLEND_BOUND, min_drawn, min_rejected);
+    printf("gpu coherence selftest: PASS %-22s lists=%d GPU lists: fallback_prims=0 unblended exact, "
+           "blended rgb_max_delta=%d (bound %d) alpha exact; modulated list on ge.c; min drawn=%u "
+           "rejected=%u; exactness cells=%u\n", "color-test", CTP_KINDS, max_rgb, STP_FF_BLEND_BOUND,
+           min_drawn, min_rejected, (unsigned)(sizeof(cx) / sizeof(cx[0])));
     return 1;
 }
 
@@ -5119,7 +5167,8 @@ static int coherence_run_lines(void) {
                                                   "color-test-8888", "textured-8888" };
     const uint32_t base = 0x04000000u | 0x00140000u, bytes = FB_W * FB_H * 4u;
     uint8_t *gpu_out = (uint8_t *)malloc(bytes), *sw_out = (uint8_t *)malloc(bytes);
-    if (!gpu_out || !sw_out) { free(gpu_out); free(sw_out); return 0; }
+    uint16_t *gpu_z = (uint16_t *)malloc(FB_W * FB_H * 2u);
+    if (!gpu_out || !sw_out || !gpu_z) { free(gpu_out); free(sw_out); free(gpu_z); return 0; }
     GeState saved = *s_ge;
     int ok = 1;
     unsigned differing = 0, min_drawn = UINT32_MAX;
@@ -5130,7 +5179,28 @@ static int coherence_run_lines(void) {
         const GeGpuReplayStats before = s_replay_stats;
         const int sync = ctp_run(base, fmt, ltp_list(base, kind), 1, gpu_out);
         const GeGpuReplayStats after = s_replay_stats;
+        /* The depth list's lines write depth: read the GPU's back into s_zbuf and keep it. */
+        int zok = 1;
+        if (kind == LTP_DEPTH_8888 && sync == GEGPU_SYNC_OK) {
+            Target *t = target_find_by_fba(vram_off(base));
+            zok = t && t->dep && depth_to_cpu(t->dep);
+            if (zok) memcpy(gpu_z, s_zbuf, FB_W * FB_H * 2u);
+        }
         (void)ctp_run(base, fmt, ltp_list(base, kind), 0, sw_out);
+        if (kind == LTP_DEPTH_8888) {
+            unsigned zdiff = 0;
+            for (uint32_t i = 0; zok && i < FB_W * FB_H; i++)
+                if (i % FB_W < 480u && gpu_z[i] != s_zbuf[i]) {
+                    if (!zdiff++)
+                        fprintf(stderr, "gpu coherence selftest [lines]: depth x=%u y=%u gpu=%04x ge_c=%04x\n",
+                                i % FB_W, i / FB_W, gpu_z[i], s_zbuf[i]);
+                }
+            if (!zok || zdiff) {
+                fprintf(stderr, "gpu coherence selftest [lines]: depth-8888: %s, %u depth values differ\n",
+                        zok ? "read back" : "no GPU depth to read back", zdiff);
+                ok = 0;
+            }
+        }
         const unsigned long long fell = after.fallback_prims - before.fallback_prims;
         if (textured ? fell == 0u : fell != 0u) {
             fprintf(stderr, "gpu coherence selftest [lines]: %s list took the software fallback for "
@@ -5165,14 +5235,14 @@ static int coherence_run_lines(void) {
         if (drawn < min_drawn) min_drawn = drawn;
         coherence_reset_targets();
     }
-    free(gpu_out); free(sw_out);
+    free(gpu_out); free(sw_out); free(gpu_z);
     *s_ge = saved;
     if (!ok) {
         fprintf(stderr, "gpu coherence selftest [lines]: %u pixels differ from ge.c\n", differing);
         return 0;
     }
     printf("gpu coherence selftest: PASS %-22s lists=%d untextured: fallback_prims=0, exact; textured: "
-           "ge.c; min drawn=%u\n", "lines", LTP_KINDS, min_drawn);
+           "ge.c; depth list's depth exact; min drawn=%u\n", "lines", LTP_KINDS, min_drawn);
     return 1;
 }
 

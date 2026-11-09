@@ -184,9 +184,9 @@ typedef struct GeGpuCpuProfileStats {
     unsigned long long append_merges;
 } GeGpuCpuProfileStats;
 
-/* Why a primitive left the Vulkan batch model for ge.c's software rasterizer. psp.frag now runs
- * the color test, so nothing names COLOR_TEST; it keeps its place, and the perf CSV its
- * fallback_color_test column, which stays 0. */
+/* Why a primitive left the Vulkan batch model for ge.c's software rasterizer. psp.frag runs the
+ * color test; COLOR_TEST names only the color-test draws whose colour psp.frag computes in floating
+ * point (ge_gpu.c color_test_colour_inexact), which stay on ge.c. */
 enum {
     GEGPU_FALLBACK_STENCIL, GEGPU_FALLBACK_COLOR_TEST, GEGPU_FALLBACK_LOGIC_OP,
     GEGPU_FALLBACK_WRITE_MASK, GEGPU_FALLBACK_RAM_FB, GEGPU_FALLBACK_WIDE_STRIDE,

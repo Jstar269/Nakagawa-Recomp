@@ -5374,6 +5374,26 @@ static int gpu_state_unsupported_reason(void) {
     return -1;
 }
 
+/* psp.frag runs the color test on the colour it stores, which equals ge.c's only where that colour
+ * is not computed in floating point: a flat or per-pixel colour, no interpolated fog factor, and
+ * either no texture or a nearest-sampled texel passed through unchanged (REPLACE, or DECAL without
+ * texture alpha) with no mip levels. Elsewhere (a Gouraud-interpolated triangle colour, fog in
+ * transform mode, a modulated, blended or added texel, or a filtered one) the two can differ by 1,
+ * and the colour key turns that into a pixel kept or dropped, so such draws stay on ge.c.
+ * `interp`: the primitive interpolates its vertex colours (triangles); `persp`: transform mode. */
+static int color_test_colour_inexact(int interp, int persp) {
+    const GeState *g = s_ge;
+    if (!g->color_test_enable || g->clear || (g->color_test & 3u) == 1u) return 0;
+    if (interp && g->shade_gouraud) return 1;
+    if (persp && g->fog_enable) return 1;
+    if (g->tex_enable && g->tex_addr) {
+        const uint32_t tf = g->tex_func & 7u;
+        if (ge_tex_mip_active(g) || tex_filter_variant(g->tex_filter) != 0u) return 1;
+        if (!(tf == 3u || (tf == 1u && !(g->tex_func & 0x100u)))) return 1;
+    }
+    return 0;
+}
+
 /* `forced` is the reason a primitive kind always falls back (lines, points), or -1 for one
  * that falls back only under an unsupported state. */
 static int software_fallback_begin(int forced) {
@@ -5598,7 +5618,8 @@ static void wing_drop(int cause) {
  * scissor's and the scissor's rows. A state this backend would hand to the software
  * rasterizer is dropped here instead, with no flush or readback: the wings lack that draw. */
 static int wing_state(int persp, int sprite, Batch *b) {
-    const int reason = gpu_state_unsupported_reason();
+    const int reason = color_test_colour_inexact(!sprite, persp) ? GEGPU_FALLBACK_COLOR_TEST
+                     : gpu_state_unsupported_reason();
     if (reason >= 0) { wing_drop(reason); return 0; }
     state_get(persp, sprite, b);
     if (!begin_target()) { wing_drop(-1); return 0; }
@@ -5627,7 +5648,8 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
         b = s_tri_state.batch;
     } else {
         s_tri_state.valid = 0;
-        if (software_fallback_begin(-1)) return cpu_profile_hook_leave(0);
+        if (software_fallback_begin(color_test_colour_inexact(1, persp) ? GEGPU_FALLBACK_COLOR_TEST : -1))
+            return cpu_profile_hook_leave(0);
         static int nocull = -1;
         if (nocull < 0) nocull = getenv("SR_NOCULL") ? 1 : 0;
         state_get(persp, 0, &b);
@@ -5727,7 +5749,8 @@ static int hook_tnl_prim(const GeTnlPrim *p) {
         return 0;
     }
     cpu_profile_hook_enter();
-    if (software_fallback_begin(-1)) return cpu_profile_hook_leave(0);
+    if (software_fallback_begin(color_test_colour_inexact(1, 1) ? GEGPU_FALLBACK_COLOR_TEST : -1))
+        return cpu_profile_hook_leave(0);
     static int nocull = -1;
     if (nocull < 0) nocull = getenv("SR_NOCULL") ? 1 : 0;
     Batch b;
@@ -5778,7 +5801,8 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
     if (__builtin_expect(s_wing_dst != NULL, 0)) {
         if (!wing_state(persp, 1, &b)) return cpu_profile_hook_leave(1);
     } else {
-        if (software_fallback_begin(-1)) return cpu_profile_hook_leave(0);
+        if (software_fallback_begin(color_test_colour_inexact(0, persp) ? GEGPU_FALLBACK_COLOR_TEST : -1))
+            return cpu_profile_hook_leave(0);
         state_get(persp, 1, &b);
         if (!begin_target()) return cpu_profile_hook_leave(1);
     }
