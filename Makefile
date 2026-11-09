@@ -477,9 +477,9 @@ endif
 # rather than argv (#667).
 # tools/title_codegen_plan.py already picks a Make-safe build root
 # (NK_BUILD_ROOT, then the 8.3 short name) for every route that accepts an
-# operator-chosen output directory (#296).
+# operator-chosen output directory (#2281).
 ifneq ($(subst $(SPACE),,$(BUILD_DIR)),$(BUILD_DIR))
-$(error BUILD_DIR '$(BUILD_DIR)' contains a space, which GNU Make cannot represent in a target or prerequisite name. Use a relative BUILD_DIR under the repository root (the default `build/<game>`), or set NK_BUILD_ROOT to a folder without spaces so tools/title_codegen_plan.py can pick a Make-safe build root (issue #296).)
+$(error BUILD_DIR '$(BUILD_DIR)' contains a space, which GNU Make cannot represent in a target or prerequisite name. Use a relative BUILD_DIR under the repository root (the default `build/<game>`), or set NK_BUILD_ROOT to a folder without spaces so tools/title_codegen_plan.py can pick a Make-safe build root.)
 endif
 # No compile carries the build directory: the runtime writes its diagnostic exit artifacts
 # (crash dump, exit flag) beside its own executable, found at run time, so one compiled

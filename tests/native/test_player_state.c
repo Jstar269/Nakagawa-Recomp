@@ -14088,6 +14088,88 @@ int main(int argc, char **argv) {
         assert(warning_card_has_details);
         assert(stall_log_kept);
 
+        /* #2151: a live synthetic runtime reports its render path as gui_init does. Each
+           forced start-up outcome reaches the game's page as its own notice, read from the
+           session's boot events; no fallback gives none; Hide keeps that fallback's notice
+           hidden for the rest of the session, and the next launch reads its own path. */
+        {
+            static const struct {
+                bool vulkan_started, gpu_ge_started;
+                NkRenderFallback fallback;
+                const char *names;
+            } forced[] = {
+                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, "a basic Windows window"},
+                {true, false, NK_RENDER_FALLBACK_SOFTWARE_GE, "The GPU renderer did not start"},
+                {true, true, NK_RENDER_FALLBACK_NONE, NULL},
+                {false, false, NK_RENDER_FALLBACK_GDI_PRESENTER, NULL},  /* hidden by Hide */
+            };
+            bool render_ok = true;
+            for (size_t f = 0; f < sizeof(forced) / sizeof(forced[0]); ++f) {
+                const char *heading = "unset";
+                const char *text = "unset";
+                const char *want_heading = NULL;
+                const char *want_text = NULL;
+                char line[160];
+                char timed[192];
+                NkRenderPath path = nk_render_path_from_init(true, forced[f].vulkan_started,
+                                                             true, forced[f].gpu_ge_started);
+                set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "1");
+                bool launched = player_app_launch_game(rep, 0) && rep->is_game_running &&
+                                rep->boot_event_file_path[0] != '\0';
+                render_ok = render_ok && launched && path.fallback == forced[f].fallback;
+                if (launched) {
+                    (void)player_app_monitor_game_session(rep, 90000 + (uint64_t)f * 1000);
+                    /* Nothing is known before the runtime's event arrives. */
+                    render_ok = render_ok && !rep->render_path_known &&
+                        !player_app_render_notice(rep, rep->games[0].disc_id, &heading,
+                                                  &text) &&
+                        heading == NULL && text == NULL;
+                    render_ok = render_ok &&
+                        nk_render_path_event_format(&path, line, sizeof(line)) > 0;
+                    snprintf(timed, sizeof(timed), "%s t_ns=77\n", line);
+                    render_ok = render_ok &&
+                        append_runtime_event(rep->boot_event_file_path, timed);
+                    (void)player_app_monitor_game_session(rep, 90500 + (uint64_t)f * 1000);
+                    bool shown = player_app_render_notice(rep, rep->games[0].disc_id,
+                                                          &heading, &text);
+                    render_ok = render_ok && rep->render_path_known &&
+                        rep->render_path.fallback == forced[f].fallback &&
+                        rep->render_path.vulkan == path.vulkan &&
+                        rep->render_path.gpu_ge == path.gpu_ge;
+                    if (forced[f].names != NULL) {
+                        render_ok = render_ok &&
+                            player_render_notice_text(forced[f].fallback, &want_heading,
+                                                      &want_text) &&
+                            shown && heading == want_heading && text == want_text &&
+                            strcmp(heading, "Drawn in software") == 0 &&
+                            strstr(text, forced[f].names) != NULL &&
+                            strstr(text, "Internal resolution setting has no effect") != NULL;
+                        /* Another game's page has no notice for this launch. */
+                        render_ok = render_ok && rep->game_count > 1 &&
+                            !player_app_render_notice(rep, rep->games[1].disc_id, &heading,
+                                                      &text);
+                        if (forced[f].fallback == NK_RENDER_FALLBACK_GDI_PRESENTER) {
+                            player_app_hide_render_notice(rep);
+                            render_ok = render_ok &&
+                                !player_app_render_notice(rep, rep->games[0].disc_id,
+                                                          &heading, &text);
+                        }
+                    } else {
+                        render_ok = render_ok && !shown && heading == NULL && text == NULL;
+                    }
+                }
+                if (rep->is_game_running) player_app_stop_game(rep);
+                set_environment_value("NK_REPEAT_LAUNCH_HOLD_OPEN", "");
+            }
+            assert(render_ok);
+            assert(!player_render_notice_text(NK_RENDER_FALLBACK_NONE, NULL, NULL));
+            /* Hide is for this session only: the hidden fallback is the one hidden. */
+            assert(rep->render_notice_hidden[NK_RENDER_FALLBACK_GDI_PRESENTER] &&
+                   !rep->render_notice_hidden[NK_RENDER_FALLBACK_SOFTWARE_GE]);
+            assert(dev_log_contains(rep, "render path: presenter=gdi ge=software "
+                                         "fallback=gdi_presenter"));
+        }
+
         /* #308: a live synthetic runtime keeps flipping frames that show nothing.
            The dark-picture event raises the same notice at 30 seconds, worded for
            a black screen; a flip-watchdog resume does not clear it, a visible
