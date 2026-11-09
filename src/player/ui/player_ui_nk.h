@@ -39,7 +39,8 @@ typedef enum {
        reminder a launch of one shows. Pushed while player_state says so. */
     PLAYER_UI_ROUTE_REBUILD = 7,
     PLAYER_UI_ROUTE_SAVES = 8,     /* a title's saves: back up, restore, add (#1883) */
-    PLAYER_UI_ROUTE_STEAM = 9      /* a title's Add to Steam (#2152) */
+    PLAYER_UI_ROUTE_STEAM = 9,     /* a title's Add to Steam (#2152) */
+    PLAYER_UI_ROUTE_QUEUE = 10     /* the build queue: its order, Remove, Resume */
 } PlayerUiRoute;
 
 /* The player's version: the one place it is written. The About page shows
@@ -146,9 +147,26 @@ typedef enum {
     PLAYER_UI_ACTION_SAVES,             /* a Saves dialog control; .primary carries the
                                            op (PlayerUiSavesOp) */
     PLAYER_UI_ACTION_ADD_TO_STEAM,      /* the title page's Add to Steam (#2152) */
-    PLAYER_UI_ACTION_STEAM              /* an Add to Steam dialog control; .primary carries
+    PLAYER_UI_ACTION_STEAM,             /* an Add to Steam dialog control; .primary carries
                                            the op (PlayerUiSteamOp) */
+    PLAYER_UI_ACTION_QUEUE              /* a build queue control; .primary carries the op
+                                           (PlayerUiQueueOp), .title_index its game */
 } PlayerUiActionKind;
+
+/* What a build queue control asks for (PLAYER_UI_ACTION_QUEUE). main.c runs
+   the player_state handlers; the player UI opens the queue and turns its pages.
+   Back is PLAYER_UI_ACTION_BACK. */
+typedef enum {
+    PLAYER_UI_QUEUE_NONE = 0,
+    PLAYER_UI_QUEUE_OPEN,       /* the library's Queue: the build queue screen */
+    PLAYER_UI_QUEUE_ADD,        /* the title page's Add to queue */
+    PLAYER_UI_QUEUE_REMOVE,     /* Remove from queue (title page) or Remove (a queue row) */
+    PLAYER_UI_QUEUE_EARLIER,    /* a queue row's Up: one place earlier */
+    PLAYER_UI_QUEUE_LATER,      /* a queue row's Down: one place later */
+    PLAYER_UI_QUEUE_RESUME,     /* a paused queue goes on */
+    PLAYER_UI_QUEUE_PAGE_BACK,  /* the queue's earlier page */
+    PLAYER_UI_QUEUE_PAGE_NEXT   /* the queue's next page */
+} PlayerUiQueueOp;
 
 /* What an Add to Steam dialog control asks for (PLAYER_UI_ACTION_STEAM). Back is
    PLAYER_UI_ACTION_BACK. */
@@ -306,6 +324,11 @@ typedef struct {
     /* ADD TO STEAM is offered (#2152): one of the user's own games, named by a disc
        ID a shortcut can carry. */
     bool can_add_to_steam;
+    /* The build queue: Add to queue beside BUILD PACKAGE for a game with no
+       package, or Remove from queue while it waits (library_status_detail
+       gives its place). Last, so the fixtures' positional lists stay valid. */
+    bool queue_add_offered;
+    bool queue_remove_offered;
 } PlayerUiTitle;
 
 typedef struct {
@@ -342,6 +365,8 @@ typedef struct {
        queue runs (no Rebuild all). NULL draws nothing. */
     const char *rebuild_notice;
     bool rebuild_notice_offers_all;
+    /* Games wait in the build queue: the line offers Queue, which opens it. */
+    bool rebuild_notice_offers_queue;
     /* The art rest (#1299 launcher work): the picture of the game whose card focus
        has rested on, drawn behind the library while `backdrop_shown`, and still
        passed while it fades out after focus moves on. NULL draws nothing. */
@@ -846,6 +871,7 @@ typedef struct {
     const char *lines[4];          /* the last output lines, oldest first */
     size_t line_count;
     double now_s;                  /* drives the running bar (0 holds it still) */
+    const char *queue_line;        /* "2 more games wait in the build queue.", or NULL */
     float logical_width;
     float logical_height;
 } PlayerUiBuildModel;
@@ -1030,6 +1056,15 @@ enum {
     PLAYER_UI_ID_REBUILD_PRIMARY = 0x4532u,           /* Rebuild all / Rebuild now */
     PLAYER_UI_ID_REBUILD_SECOND = 0x4533u,            /* Later / Play anyway */
     PLAYER_UI_ID_TITLE_REBUILD = 0x2021u,             /* the title page's Rebuild */
+    PLAYER_UI_ID_TITLE_QUEUE = 0x2022u,               /* Add to / Remove from queue */
+    PLAYER_UI_ID_LIBRARY_QUEUE = 0x4A01u,             /* the queue line's Queue */
+    PLAYER_UI_ID_QUEUE_BACK = 0x4A02u,
+    PLAYER_UI_ID_QUEUE_RESUME = 0x4A03u,
+    PLAYER_UI_ID_QUEUE_PAGE_BACK = 0x4A04u,
+    PLAYER_UI_ID_QUEUE_PAGE_NEXT = 0x4A05u,
+    PLAYER_UI_ID_QUEUE_UP_BASE = 0x4A10u,             /* + the row on this page */
+    PLAYER_UI_ID_QUEUE_DOWN_BASE = 0x4A20u,           /* + the row on this page */
+    PLAYER_UI_ID_QUEUE_REMOVE_BASE = 0x4A30u,         /* + the row on this page */
     PLAYER_UI_ID_SETTINGS_FACTORY_RESET = 0x4529u,    /* Settings: opens the check */
     PLAYER_UI_ID_SETTINGS_CONFIRM_RESET = 0x452Au,    /* the check's Reset button */
     PLAYER_UI_ID_SETTINGS_PSP_FONTS = 0x452Bu,        /* Settings > PSP fonts: from a PSP */
@@ -1238,6 +1273,31 @@ PlayerUiAction player_ui_screen_steam(NkUi *ui, const PlayerUiSteamModel *model)
 /* The older-build prompt (model->title NULL: Rebuild all, Later) and the launch
    reminder (Rebuild now, Play anyway). Back is the second choice. */
 PlayerUiAction player_ui_screen_rebuild(NkUi *ui, const PlayerUiRebuildModel *model);
+
+/* The build queue: the games that wait, in the order they build, a page at a
+   time. The one building comes first with its progress; each one that waits
+   has Up, Down and Remove. A paused queue offers Resume. */
+#define PLAYER_UI_QUEUE_ROW_CAP 4u
+typedef struct {
+    const char *title;          /* the game's name */
+    const char *status;         /* "Building 40%", "Next", "Waiting" */
+    size_t title_index;         /* its library index, for the row's actions */
+    bool building;              /* the one building: no Up, Down or Remove */
+    bool can_move_up;
+    bool can_move_down;
+} PlayerUiQueueRow;
+
+typedef struct {
+    const PlayerUiQueueRow *rows;   /* this page, in queue order */
+    size_t row_count;           /* up to PLAYER_UI_QUEUE_ROW_CAP */
+    size_t first_row;           /* the page's first row, from 0 */
+    size_t total;               /* games waiting or building */
+    bool paused;                /* a build could not start: Resume goes on */
+    float logical_width;
+    float logical_height;
+} PlayerUiQueueModel;
+
+PlayerUiAction player_ui_screen_queue(NkUi *ui, const PlayerUiQueueModel *model);
 PlayerUiAction player_ui_screen_prereq(NkUi *ui, const PlayerUiPrereqModel *model);
 PlayerUiAction player_ui_screen_error(NkUi *ui, const PlayerUiErrorModel *model);
 PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *model);
