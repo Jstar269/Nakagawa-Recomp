@@ -4,6 +4,7 @@
 """Unit tests for nk_cli.py build-package --progress-json and --log-file options."""
 
 from __future__ import annotations
+from typing import Any
 
 import json
 import os
@@ -655,7 +656,7 @@ class NkCliVramTests(unittest.TestCase):
                 break
         raw = zlib.decompress(compressed)
         row_bytes = width * 4
-        pixels = []
+        pixels: list[Any] = []
         for y in range(height):
             row = raw[y * (row_bytes + 1):(y + 1) * (row_bytes + 1)]
             if row[0] != 0:

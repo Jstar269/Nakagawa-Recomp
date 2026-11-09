@@ -120,44 +120,44 @@ static const PlayerUiTitle k_titles[] = {
      "", "", "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
     {"Synthetic Showcase Breakout", "TEST00008", "Needs setup", "",
      "Showcase profile-zero acceptance remains open.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
     {"Synthetic Experimental Fixture", "TEST00006", "Experimental", "",
      "Source-owned compatibility fixture.", "", NULL, "", "", "",
      "RETRY PACKAGE CHECK", "◆", 0xC29AF4FFu,
      PLAYER_UI_PRIMARY_RETRY_PACKAGE_CHECK, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
     {"Synthetic Untested Fixture", "TEST00005", "Untested", "",
      "No compatibility record exists.", "", NULL, "", "", "",
      "BUILD PACKAGE", "?", 0xC29AF4FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
     {"Synthetic Phase Five", "TEST00004", "Needs setup", "",
      "Player launch stops at the package boundary.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_WONT_BOOT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false}
 };
 
 /* A library with the demos that come with Nakagawa among the user's games, in
@@ -168,25 +168,25 @@ static const PlayerUiTitle k_demo_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false}
 };
 
 /* The demos alone: a first start with nothing added yet. */
@@ -196,13 +196,13 @@ static const PlayerUiTitle k_demo_only_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false}
 };
 
 /* What-to-expect cards: a player tier with plain words, with known issues, the
@@ -257,6 +257,8 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_REMOVE,
                FLOW_PAGE_STOP, FLOW_PAGE_TITLE_ACE,
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
+               FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
+               FLOW_PAGE_STEAM_BLOCKED,
                FLOW_CONSENT_FULL, FLOW_COUNT } FlowCase;
 
 /* The window size the game-found and Settings cases lay out for. */
@@ -418,12 +420,11 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.scaling = "Sharp";
     settings.preset = "Medium";
     if (which == FLOW_SETTINGS_PRESET) {
-        /* Ultra chosen (#2150): the row is plain and the notice line says it does not turn on
-           Sharper enlarging; the note is player_app_graphics_preset_note's, the longest a preset writes. */
-        settings.preset = "Ultra";
-        settings.preset_notice = "Ultra is used in Enhanced and Ace, not turning on "
-                                 "Sharper enlarging. Authentic uses your own display settings.";
-        settings.preset_notice_warns = true;
+        /* High chosen (#2150): the notice line names the Enhanced parts it sets. The note is
+           player_app_graphics_preset_note's for High, the longest a preset writes. */
+        settings.preset = "High";
+        settings.preset_notice = "High is used in Enhanced and Ace, with crisp text on and FSR 1 "
+                                 "off. Authentic uses your settings.";
     }
     settings.vsync = true;
     /* The refresh-rate advisory case runs on a 144 Hz display; the rest on 60 Hz. */
@@ -899,6 +900,66 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         saves.logical_width = g_flow_width;
         saves.logical_height = g_flow_height;
         return player_ui_screen_saves(ui, &saves);
+    }
+    if (which == FLOW_PAGE_TITLE_STEAM) {
+        /* #2152: a disc's title page with all three of Add to Steam, Report a problem
+           and Remove from library, and known issues under what to expect. */
+        static PlayerUiTitle fixture;
+        PlayerUiTitleModel title;
+        fixture = k_titles[3];
+        fixture.can_remove = true;
+        fixture.can_add_to_steam = true;
+        fixture.compatibility_tier = k_compatibility_cases[1].tier;
+        fixture.compatibility_expect = k_compatibility_cases[1].expect;
+        fixture.compatibility_known_issues = k_compatibility_cases[1].known_issues;
+        memset(&title, 0, sizeof(title));
+        title.title = &fixture;
+        title.title_index = 3u;
+        title.logical_width = g_flow_width;
+        title.logical_height = g_flow_height;
+        return player_ui_screen_title(ui, &title);
+    }
+    if (which == FLOW_PAGE_STEAM || which == FLOW_PAGE_STEAM_ACCOUNTS ||
+        which == FLOW_PAGE_STEAM_BLOCKED) {
+        /* #2152: one account with the longest result (an update, with its backup, in a
+           portable copy); four accounts with long names and Steam running; and no
+           Steam at all. */
+        static const char *const one[] = {"Synthetic Player One"};
+        static const char *const four[] = {
+            "Synthetic Player With A Rather Long Steam Name", "Account 20003",
+            "Second Synthetic Player", "Synthetic Fourth"};
+        PlayerUiSteamModel steam;
+        memset(&steam, 0, sizeof(steam));
+        steam.title = "Synthetic Untested Fixture";
+        steam.title_index = 3u;
+        steam.command = "nakagawa_player.exe --launch-title=TEST00005 "
+                        "\"--user-data-root=%USERPROFILE%\\Games\\Nakagawa data\"";
+        if (which == FLOW_PAGE_STEAM) {
+            steam.accounts = one;
+            steam.account_count = 1u;
+            steam.portable = true;
+            steam.status = "Updated Synthetic Untested Fixture in Steam: its shortcut now starts "
+                           "this Nakagawa folder. Its play time and collections stay. Start "
+                           "Steam to use it; no restart is needed. Steam's list from before is "
+                           "saved as %USERPROFILE%\\Steam\\userdata\\20002\\config\\"
+                           "shortcuts.vdf.nakagawa-backup-20261108-090000.";
+            steam.status_kind = PLAYER_UI_NOTE_DONE;
+        } else if (which == FLOW_PAGE_STEAM_ACCOUNTS) {
+            steam.accounts = four;
+            steam.account_count = 4u;
+            steam.chosen = 2u;
+            steam.status = "Steam is running, so nothing was changed: Steam rewrites its list "
+                           "of games when it exits. Exit Steam (Steam menu, Exit), then choose "
+                           "Add to Steam again. Nakagawa never closes Steam. No restart is "
+                           "needed after that: Steam reads the shortcut when it starts.";
+            steam.status_kind = PLAYER_UI_NOTE_WARNING;
+        } else {
+            steam.blocked = "Steam isn't installed for this Windows user, so nothing was "
+                            "added. Install Steam and sign in once, then try again.";
+        }
+        steam.logical_width = g_flow_width;
+        steam.logical_height = g_flow_height;
+        return player_ui_screen_steam(ui, &steam);
     }
     if (which == FLOW_PAGE_STOP) {
         PlayerUiStopModel stop;
@@ -1936,7 +1997,7 @@ static void test_router(void) {
           !nk_ui_router_push(router, (PlayerUiRoute)0) &&
           !nk_ui_router_replace(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_REMOVE + 1)) &&
           !nk_ui_router_push(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_REMOVE + 1)) &&
-          !nk_ui_router_push(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_SAVES + 1)),
+          !nk_ui_router_push(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_STEAM + 1)),
           "router refuses routes it does not draw");
     CHECK(nk_ui_router_current(router) == PLAYER_UI_ROUTE_ABOUT &&
           nk_ui_router_depth(router) == 1u, "a refused route leaves the stack alone");
@@ -2864,11 +2925,11 @@ static void test_settings_pages(void) {
           "Settings on a 60 Hz display shows no refresh-rate advisory");
     CHECK(flow_case_fits(FLOW_SETTINGS_PRESET, 960, 540, dump, sizeof(dump)),
           "Settings with a graphics preset's note fits 960 x 540");
-    CHECK(strstr(dump, "Ultra is used in Enhanced and Ace, not turning on") != NULL &&
+    CHECK(strstr(dump, "High is used in Enhanced and Ace, with crisp text on and FSR 1") != NULL &&
               strstr(dump, "Changes are saved as you make them") == NULL,
           "a graphics preset's note takes the Settings notice line");
-    CHECK(strstr(dump, "\"ULTRA\"") != NULL,
-          "the graphics preset row reads Ultra");
+    CHECK(strstr(dump, "\"HIGH\"") != NULL,
+          "the graphics preset row says High");
     CHECK(dump_flow_case(FLOW_SETTINGS, dump, sizeof(dump)) &&
               strstr(dump, "Changes are saved as you make them") != NULL &&
               strstr(dump, "is used in Enhanced and Ace") == NULL,
@@ -5018,6 +5079,153 @@ static void test_saves_dialog(void) {
     nk_ui_destroy(ui);
 }
 
+static PlayerUiAction activate_steam_button(NkUiId id, const PlayerUiSteamModel *model) {
+    NkUiConfig config;
+    NkUiEvent activate;
+    NkUi *ui;
+    PlayerUiAction result = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    ui = screen_ui_create(&config);
+    if (ui == NULL) return result;
+    set_test_viewport(ui, 1280, 800);
+    nk_ui_focus(ui, id);
+    memset(&activate, 0, sizeof(activate));
+    activate.type = NK_UI_EV_ACTIVATE;
+    activate.down = true;
+    nk_ui_push_event(ui, &activate);
+    nk_ui_begin(ui, 0.0);
+    result = player_ui_screen_steam(ui, model);
+    (void)nk_ui_end(ui);
+    nk_ui_destroy(ui);
+    return result;
+}
+
+static unsigned steam_op(PlayerUiAction action) {
+    return action.kind == PLAYER_UI_ACTION_STEAM ? (unsigned)action.primary : 0u;
+}
+
+/* #2152: the title page offers Add to Steam for the user's own games, and its dialog
+   says what the shortcut starts and what changes, lets the user pick among several
+   accounts (the chosen one in words, not colour alone), writes only on Add to Steam,
+   and keeps only Back when Steam is missing. Every case fits 960 x 540. */
+static void test_add_to_steam_dialog(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const char *const accounts[] = {"Synthetic Player One", "Synthetic Player Two"};
+    NkUiConfig config;
+    NkUi *ui;
+    NkUiTextBackend text = screen_test_text_backend();
+    PlayerUiTitleModel title;
+    PlayerUiTitle fixture;
+    PlayerUiSteamModel steam;
+    PlayerUiAction action;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create the Add to Steam UI");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+
+    fixture = k_titles[3];
+    fixture.can_add_to_steam = true;
+    memset(&title, 0, sizeof(title));
+    title.title = &fixture;
+    title.title_index = 3u;
+    title.logical_width = 1280.0f;
+    title.logical_height = 800.0f;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_title(ui, &title);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "ADD TO STEAM") != NULL, "a disc's title page offers Add to Steam");
+    action = activate_title_button(PLAYER_UI_ID_TITLE_STEAM, &title);
+    CHECK(action.kind == PLAYER_UI_ACTION_ADD_TO_STEAM && action.title_index == 3u,
+          "Add to Steam asks for the dialog for that title");
+    fixture.can_add_to_steam = false;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_title(ui, &title);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "ADD TO STEAM") == NULL,
+          "a demo, or a disc ID a shortcut can't carry, offers no Add to Steam");
+
+    memset(&steam, 0, sizeof(steam));
+    steam.title = "Synthetic Untested Fixture";
+    steam.title_index = 3u;
+    steam.accounts = accounts;
+    steam.account_count = 1u;
+    steam.command = "nakagawa_player.exe --launch-title=TEST00005";
+    steam.logical_width = 1280.0f;
+    steam.logical_height = 800.0f;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_steam(ui, &steam);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "Synthetic Untested Fixture") != NULL &&
+              strstr(dump, "nakagawa_player.exe --launch-title=TEST00005") != NULL &&
+              strstr(dump, "Synthetic Player One") != NULL,
+          "the dialog names the game, what the shortcut starts and the one account");
+    CHECK(strstr(dump, "after saving a copy of it, and downloads nothing") != NULL &&
+              strstr(dump, "Exit Steam first") != NULL,
+          "it says what changes, the backup, no download, and that Steam must be closed");
+    CHECK(strstr(dump, "WHICH STEAM ACCOUNT?") == NULL && strstr(dump, "portable copy") == NULL,
+          "one account asks no question; an installed copy has no portable note");
+    action = activate_steam_button(PLAYER_UI_ID_STEAM_ADD, &steam);
+    CHECK(steam_op(action) == PLAYER_UI_STEAM_ADD && action.title_index == 3u,
+          "Add to Steam asks for the shortcut for this title");
+    action = activate_steam_button(PLAYER_UI_ID_STEAM_BACK, &steam);
+    CHECK(action.kind == PLAYER_UI_ACTION_BACK, "Back leaves the dialog");
+
+    steam.account_count = 2u;
+    steam.chosen = 1u;
+    steam.portable = true;
+    steam.status = "Synthetic Untested Fixture is already in this Steam library with this "
+                   "shortcut. Nothing was changed.";
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_steam(ui, &steam);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "WHICH STEAM ACCOUNT?") != NULL &&
+              strstr(dump, "CHOSEN: SYNTHETIC PLAYER TWO") != NULL &&
+              strstr(dump, "CHOSEN: SYNTHETIC PLAYER ONE") == NULL,
+          "several accounts are a choice, and the chosen one says so in words");
+    CHECK(strstr(dump, "portable copy") != NULL && strstr(dump, "already in this Steam") != NULL,
+          "a portable copy says moving the folder needs Add to Steam again; the result shows");
+    action = activate_steam_button(PLAYER_UI_ID_STEAM_ACCOUNT_BASE, &steam);
+    CHECK(steam_op(action) == PLAYER_UI_STEAM_ACCOUNT_BASE,
+          "an account's button chooses that account");
+    action = activate_steam_button(PLAYER_UI_ID_STEAM_ACCOUNT_BASE + 1u, &steam);
+    CHECK(steam_op(action) == PLAYER_UI_STEAM_ACCOUNT_BASE + 1u, "each account is its own row");
+
+    steam.blocked = "Steam isn't installed for this Windows user, so nothing was added.";
+    steam.status = NULL;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_steam(ui, &steam);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "Steam isn't installed") != NULL &&
+              strstr(dump, "WHICH STEAM ACCOUNT?") == NULL,
+          "without Steam the dialog says so and offers no account");
+    action = activate_steam_button(PLAYER_UI_ID_STEAM_ADD, &steam);
+    CHECK(action.kind == PLAYER_UI_ACTION_NONE, "without Steam there is no Add to Steam");
+    action = activate_steam_button(PLAYER_UI_ID_STEAM_BACK, &steam);
+    CHECK(action.kind == PLAYER_UI_ACTION_BACK, "without Steam, Back still leaves");
+    nk_ui_destroy(ui);
+
+    {
+        static const FlowCase cases[] = {FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM,
+                                         FLOW_PAGE_STEAM_ACCOUNTS, FLOW_PAGE_STEAM_BLOCKED};
+        for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+            CHECK(flow_case_fits(cases[i], 960, 540, dump, sizeof(dump)),
+                  "Add to Steam, its dialog and its results fit the 960 x 540 minimum window");
+        }
+        CHECK(flow_case_shows(FLOW_PAGE_STEAM_ACCOUNTS, 960, 540, "Steam is running") &&
+                  flow_case_shows(FLOW_PAGE_STEAM, 960, 540, "nakagawa-backup-20261108"),
+              "at 960 x 540 the result, with its backup's name, is on screen");
+    }
+}
+
 static PlayerUiAction activate_stop_button(NkUiId id, const PlayerUiStopModel *model) {
     NkUiConfig config;
     NkUiEvent activate;
@@ -5608,6 +5816,7 @@ int main(int argc, char **argv) {
     test_tier_table_matches_the_docs();
     test_remove_from_library();
     test_saves_dialog();
+    test_add_to_steam_dialog();
     test_wizard_steps_match_the_route();
     test_outcome_lines_take_their_colour();
     test_stop_game_asks_first();

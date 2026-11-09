@@ -214,6 +214,18 @@ struct PlayerUiNk {
     char saves_ask_name[72];
     char saves_status[NK_MAX_PATH + 200];
     PlayerUiNoteKind saves_status_kind;
+    /* Add to Steam (#2152): the title the dialog is for, what it found (Steam, the
+       accounts, the shortcut), the account chosen and what the last add did. */
+    int steam_index;
+    PlayerSteamPlan steam_plan;
+    size_t steam_chosen;
+    NkUiId steam_focus;                 /* focus to give next frame, or 0 */
+    char steam_account_labels[PLAYER_UI_STEAM_ACCOUNT_CAP][PLAYER_STEAM_NAME_MAX + 16];
+    const char *steam_accounts[PLAYER_UI_STEAM_ACCOUNT_CAP];
+    char steam_command[NK_MAX_PATH + PLAYER_STEAM_OPTIONS_MAX];
+    char steam_blocked[640];
+    char steam_status[NK_MAX_PATH + 400];
+    PlayerUiNoteKind steam_status_kind;
     /* STOP GAME asks first: the title page the question was asked from. */
     int stop_index;
     char stop_disc[NK_MAX_DISC_ID_LEN];
@@ -831,7 +843,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
     model->enhanced_mode_sentence =
         "The default for every game; each game's page can choose its own.";
     bool logic_60 = false;
-    bool smooth_on = settings->enhanced.part[PLAYER_PART_SMOOTH] != 0;
+    bool smooth_on = player_settings_library_part(settings, PLAYER_PART_SMOOTH) != 0;
     if (title >= 0) {
         const GameRecord *game = &app->games[title];
         PlayerPlayMode chosen = player_app_title_play_mode(app, title);
@@ -861,11 +873,20 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
         PlayerUiEnhancedRow *row = &model->enhanced_rows[model->enhanced_row_count++];
-        int library = settings->enhanced.part[p];
+        /* The library's value as a session uses it: the graphics preset's where it sets the
+           part (#2150), which the library page names, "On (Ultra)". */
+        int library = player_settings_library_part(settings, p);
+        const PlayerGraphicsPresetRow *preset =
+            player_graphics_preset_row(player_app_graphics_preset(app));
         row->name = info->name;
         row->sentence = info->sentence;
         row->value = player_enhanced_part_label(p, library);
         row->on = library != 0;
+        if (title < 0 && preset && preset->part[p] >= 0) {
+            snprintf(player->enhanced_values[p], sizeof(player->enhanced_values[p]), "%s (%s)",
+                     player_enhanced_part_label(p, library), preset->label);
+            row->value = player->enhanced_values[p];
+        }
         if (title >= 0) {
             int own = player_app_title_part(app, title, p);
             if (own < 0) {
@@ -1040,16 +1061,14 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
        it goes with Custom and is back after a restart. */
     if (model.page == PLAYER_UI_SETTINGS_PAGE_MAIN &&
         player_app_graphics_preset_note(app, player->settings_preset_note,
-                                        sizeof(player->settings_preset_note),
-                                        &model.preset_notice_warns)) {
+                                        sizeof(player->settings_preset_note))) {
         model.preset_notice = player->settings_preset_note;
     }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     if (model.page == PLAYER_UI_SETTINGS_PAGE_MAIN) {
         /* The preset row and note the main page draws; printed on change. */
         char line[sizeof(player->preset_note_reported)];
-        snprintf(line, sizeof(line), "value=%s|warns=%d|note=%s", model.preset,
-                 model.preset_notice_warns ? 1 : 0,
+        snprintf(line, sizeof(line), "value=%s|note=%s", model.preset,
                  model.preset_notice != NULL ? model.preset_notice : "");
         if (strcmp(line, player->preset_note_reported) != 0) {
             snprintf(player->preset_note_reported, sizeof(player->preset_note_reported), "%s",
@@ -1760,6 +1779,74 @@ static size_t player_ui_saves_page_rows(const PlayerUiNk *player) {
 static void player_ui_saves_status(PlayerUiNk *player, PlayerUiNoteKind kind, const char *text) {
     (void)snprintf(player->saves_status, sizeof(player->saves_status), "%s", text);
     player->saves_status_kind = kind;
+}
+
+/* Add to Steam (#2152): finds Steam, its accounts and the shortcut; writes nothing. */
+static void player_ui_open_steam(PlayerUiNk *player, const PlayerApp *app, int index) {
+    PlayerSteamPlan *plan = &player->steam_plan;
+    const char *base;
+    size_t length;
+    player->steam_index = index;
+    player->steam_chosen = 0u;
+    player->steam_status[0] = '\0';
+    player->steam_status_kind = PLAYER_UI_NOTE_NEUTRAL;
+    player->steam_blocked[0] = '\0';
+    (void)player_app_plan_steam_shortcut(app, index, NULL, NULL, plan);
+    if (!plan->ready) {
+        (void)player_steam_outcome_text(plan, player->steam_blocked,
+                                        sizeof(player->steam_blocked));
+    }
+    for (size_t i = 0u; i < plan->account_count && i < PLAYER_UI_STEAM_ACCOUNT_CAP; ++i) {
+        if (plan->account_names[i][0] != '\0') {
+            (void)snprintf(player->steam_account_labels[i],
+                           sizeof(player->steam_account_labels[i]), "%s",
+                           plan->account_names[i]);
+        } else {
+            (void)snprintf(player->steam_account_labels[i],
+                           sizeof(player->steam_account_labels[i]), "Account %s",
+                           plan->accounts[i].id);
+        }
+        player->steam_accounts[i] = player->steam_account_labels[i];
+    }
+    /* The program's file name and the launch options: what Steam starts. */
+    length = strlen(plan->exe);
+    while (length > 0u && !nk_platform_is_path_separator(plan->exe[length - 1u])) length--;
+    base = plan->exe + length;
+    {
+        char options[PLAYER_STEAM_OPTIONS_MAX];
+        (void)player_display_text(plan->launch_options, options, sizeof(options));
+        (void)snprintf(player->steam_command, sizeof(player->steam_command), "%s %s",
+                       base[0] != '\0' ? base : "nakagawa_player", options);
+    }
+    player->steam_focus = plan->ready ? PLAYER_UI_ID_STEAM_ADD : PLAYER_UI_ID_STEAM_BACK;
+}
+
+/* One Add to Steam dialog control: choose an account, or write the shortcut. */
+static void player_ui_steam_op(PlayerUiNk *player, unsigned op) {
+    PlayerSteamPlan *plan = &player->steam_plan;
+    if (!plan->ready) return;
+    if (op >= PLAYER_UI_STEAM_ACCOUNT_BASE) {
+        size_t row = (size_t)(op - PLAYER_UI_STEAM_ACCOUNT_BASE);
+        if (row < plan->account_count) {
+            player->steam_chosen = row;
+            player->steam_status[0] = '\0';
+            player->steam_focus = (NkUiId)(PLAYER_UI_ID_STEAM_ACCOUNT_BASE + (NkUiId)row);
+        }
+    } else if (op == PLAYER_UI_STEAM_ADD) {
+        char stamp[24];
+        PlayerSteamOutcome outcome;
+        player_app_save_stamp_now(stamp, sizeof(stamp));
+        outcome = player_steam_add(plan, player->steam_chosen, NULL, stamp);
+        (void)player_steam_outcome_text(plan, player->steam_status,
+                                        sizeof(player->steam_status));
+        player->steam_status_kind =
+            outcome == PLAYER_STEAM_ADDED || outcome == PLAYER_STEAM_UPDATED
+                ? PLAYER_UI_NOTE_DONE
+                : outcome == PLAYER_STEAM_ALREADY ? PLAYER_UI_NOTE_NEUTRAL
+                                                  : PLAYER_UI_NOTE_WARNING;
+        player->steam_focus = player_steam_outcome_ok(outcome) ? PLAYER_UI_ID_STEAM_BACK
+                                                               : PLAYER_UI_ID_STEAM_ADD;
+    }
 }
 
 static void player_ui_open_saves(PlayerUiNk *player, const PlayerApp *app, int index) {
@@ -2501,6 +2588,10 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
     out->save_folder_enabled = game->disc_id[0] != '\0';
     out->can_remove = player_app_removal_blocker(app, index) == NULL;
     {
+        char value[PLAYER_LAUNCH_TITLE_VALUE_MAX];
+        out->can_add_to_steam = player_app_launch_title_value(app, index, value, sizeof(value));
+    }
+    {
         const PlayerTitleEnhancement *enhancement = &app->title_enhancements[index];
         bool saved = player_app_title_60hz_saved(app, game->disc_id);
         out->enhancement_shown = enhancement->available || saved;
@@ -3238,6 +3329,13 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                     (void)nk_ui_router_push(player->router, PLAYER_UI_ROUTE_SAVES);
                 }
                 action.kind = PLAYER_UI_ACTION_NONE;
+            } else if (action.kind == PLAYER_UI_ACTION_ADD_TO_STEAM) {
+                if (player->titles[index].can_add_to_steam) {
+                    player_ui_open_steam(player, app, index);
+                    nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
+                    (void)nk_ui_router_push(player->router, PLAYER_UI_ROUTE_STEAM);
+                }
+                action.kind = PLAYER_UI_ACTION_NONE;
             } else if (action.kind == PLAYER_UI_ACTION_REMOVE_TITLE) {
                 if (player_ui_open_remove(player, app, index)) {
                     nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
@@ -3397,6 +3495,40 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 action.kind = PLAYER_UI_ACTION_NONE;
             } else if (action.kind == PLAYER_UI_ACTION_SAVES) {
                 player_ui_saves_op(player, app, index, (unsigned)action.primary, out_action);
+                action.kind = PLAYER_UI_ACTION_NONE;
+            }
+        }
+    } else if (route == PLAYER_UI_ROUTE_STEAM) {
+        int index = player->steam_index;
+        /* The dialog closes if its title left the library. */
+        if (index < 0 || index >= app->game_count ||
+            strcmp(app->games[index].disc_id, player->steam_plan.disc_id) != 0) {
+            (void)nk_ui_router_pop(player->router);
+        } else {
+            PlayerUiSteamModel model;
+            if (player->steam_focus != 0u) {
+                nk_ui_focus(player->ui, player->steam_focus);
+                player->steam_focus = 0u;
+            }
+            memset(&model, 0, sizeof(model));
+            model.title = player->steam_plan.app_name;
+            model.title_index = (size_t)index;
+            model.accounts = player->steam_accounts;
+            model.account_count = player->steam_plan.account_count;
+            model.chosen = player->steam_chosen;
+            model.command = player->steam_command;
+            model.portable = player->steam_plan.portable;
+            model.blocked = player->steam_plan.ready ? NULL : player->steam_blocked;
+            model.status = player->steam_status;
+            model.status_kind = player->steam_status_kind;
+            model.logical_width = scale.logical_w;
+            model.logical_height = scale.logical_h;
+            action = player_ui_screen_steam(player->ui, &model);
+            if (action.kind == PLAYER_UI_ACTION_BACK) {
+                (void)nk_ui_router_pop(player->router);
+                action.kind = PLAYER_UI_ACTION_NONE;
+            } else if (action.kind == PLAYER_UI_ACTION_STEAM) {
+                player_ui_steam_op(player, (unsigned)action.primary);
                 action.kind = PLAYER_UI_ACTION_NONE;
             }
         }
