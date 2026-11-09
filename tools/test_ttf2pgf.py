@@ -1575,16 +1575,15 @@ class ProjectLatinStrikeTests(unittest.TestCase):
             with self.subTest(index=index):
                 glyphs = _glyph_map(self._convert(index).glyphs)
 
-                def rows(char: str) -> tuple[int, int]:
-                    glyph = glyphs[ord(char)]
-                    return glyph.adjust_y, glyph.adjust_y - glyph.height
-
+                # Top row and bottom edge of each letter's bitmap, in pixels above the baseline.
+                rows = {char: (glyphs[ord(char)].adjust_y, glyphs[ord(char)].adjust_y - glyphs[ord(char)].height)
+                        for char in "eoacsuRNHlnxOCGS"}
                 for char in "eoacsuRNHlnx":
-                    self.assertEqual(rows(char)[1], 0, f"{char!r} ends below the baseline")
+                    self.assertEqual(rows[char][1], 0, f"{char!r} ends below the baseline")
                 for char in "eoacs":
-                    self.assertEqual(rows(char)[0], rows("x")[0], f"{char!r} rises above the x-height")
+                    self.assertEqual(rows[char][0], rows["x"][0], f"{char!r} rises above the x-height")
                 for char in "OCGS":
-                    self.assertEqual(rows(char)[0], rows("H")[0], f"{char!r} rises above the cap height")
+                    self.assertEqual(rows[char][0], rows["H"][0], f"{char!r} rises above the cap height")
                 # Ascenders are not overshoots: at 13 ppem a band of half a pixel would have set the
                 # top of l, 75 units above the cap height, on it. l is drawn as without the option.
                 strike = "PROJECT_LATIN_STRIKE_ARGS" if index < 8 else "PROJECT_LATIN_SMALL_STRIKE_ARGS"
