@@ -75,7 +75,7 @@ def evaluate(expression: str, context: dict[str, str]) -> bool:
         if match is None:
             raise AssertionError(f"cannot parse {expression[position:]!r}")
         position = match.end()
-        kind = match.lastindex
+        kind = match.lastindex or 0
         value = match.group(kind)
         tokens.append((kind, value))
     index = 0
@@ -227,6 +227,10 @@ class ModeDecisionTest(unittest.TestCase):
 
 
 class WorkflowConditionTest(unittest.TestCase):
+    text: str
+    attest: str
+    fork: str
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.text = WORKFLOW.read_text(encoding="utf-8")

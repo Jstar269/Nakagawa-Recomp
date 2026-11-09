@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from typing import Any
 import tempfile
 import unittest
 from unittest import mock
@@ -89,6 +90,10 @@ class SeedRecordsTest(unittest.TestCase):
 class AuthorityTest(unittest.TestCase):
     """Seed an authority from this checkout's own public ledger, outside the checkout."""
 
+    scratch: tempfile.TemporaryDirectory[str]
+    authority: Path
+    result: dict[str, Any]
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.scratch = tempfile.TemporaryDirectory(prefix="nk-fork-authority-")
@@ -110,8 +115,8 @@ class AuthorityTest(unittest.TestCase):
 
     def test_the_seed_is_committed_on_main(self) -> None:
         def git(*args: str) -> str:
-            return subprocess.run(["git", "-C", str(self.authority), *args], capture_output=True, text=True,
-                                  check=True).stdout.strip()
+            return str(subprocess.run(["git", "-C", str(self.authority), *args], capture_output=True, text=True,
+                                      check=True).stdout).strip()
         self.assertEqual(git("rev-parse", "--abbrev-ref", "HEAD"), "main")
         self.assertEqual(git("status", "--porcelain"), "")
         self.assertEqual(git("ls-files").splitlines(), ["README.md", fork_init.TRUSTED_LEDGER])
@@ -168,9 +173,9 @@ class RefusalTest(unittest.TestCase):
             self.assertEqual(caught.exception.code, "AUTHORITY_NOT_EMPTY")
 
     def test_record_needs_a_statement_and_exact_paths(self) -> None:
-        base = {"record_id": "r-1", "paths": ["tools/x.py"], "classification": "project-authored-independent",
+        base: dict[str, Any] = {"record_id": "r-1", "paths": ["tools/x.py"], "classification": "project-authored-independent",
                 "evidence_tier": "S", "statement": "mine"}
-        cases = {
+        cases: dict[str, dict[str, Any]] = {
             "empty statement": {"statement": "  "},
             "wildcard path": {"paths": ["tools/*.py"]},
             "parent path": {"paths": ["../x.py"]},

@@ -166,7 +166,7 @@ def regenerated_public_ledger(repo: Path, rev: str, trusted_ledger: Path) -> byt
         except provenance_attest_verify.VerifyError as error:
             raise ForkInitError(error.code, str(error)) from error
     ledger = json.loads(envelope)["ledger"]
-    return provenance_ledger.claims_ledger_bytes(ledger)
+    return bytes(provenance_ledger.claims_ledger_bytes(ledger))
 
 
 def verify(repo: Path, authority: Path, rev: str = "HEAD") -> str:
