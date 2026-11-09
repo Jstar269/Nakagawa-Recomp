@@ -437,6 +437,7 @@
     "fixtures/psp_oracle/probe_ge_sample.c",
     "fixtures/psp_oracle/probe_hle_issues.c",
     "fixtures/psp_oracle/probe_hle_measure.c",
+    "fixtures/psp_oracle/probe_hle_self_stop_helper.c",
     "fixtures/psp_oracle/probe_insn_trace.c",
     "fixtures/psp_oracle/probe_kernel_semantics.c",
     "fixtures/psp_oracle/probe_memory_edge.c",
