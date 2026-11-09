@@ -41,6 +41,11 @@
 #define TITLE_ID_STALL_EYEBROW TITLE_ID(0x000036u)
 #define TITLE_ID_STALL_TEXT TITLE_ID(0x000037u)
 #define TITLE_ID_STALL_ACTIONS TITLE_ID(0x000038u)
+#define TITLE_ID_RENDER_NOTICE TITLE_ID(0x000070u)
+#define TITLE_ID_RENDER_HEAD TITLE_ID(0x000071u)
+#define TITLE_ID_RENDER_EYEBROW TITLE_ID(0x000072u)
+#define TITLE_ID_RENDER_PILL TITLE_ID(0x000073u)
+#define TITLE_ID_RENDER_TEXT TITLE_ID(0x000074u)
 #define TITLE_ID_START_CARD TITLE_ID(0x000039u)
 #define TITLE_ID_START_NAME TITLE_ID(0x00003Au)
 #define TITLE_ID_START_TEXT TITLE_ID(0x00003Bu)
@@ -177,6 +182,10 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
     layout.padding_bottom = NK_UI_BODY_PAD_BOTTOM;
     layout.padding_left = gutter;
     layout.padding_right = gutter;
+    /* The body always scrolls between the bars (#2245): what a game's page shows varies
+       (the Enhancements card, the disc check, the compatibility notes, the stall notice), so
+       at the design text size it can still be taller than the room, and a body that did not
+       scroll pushed the prompt bar out of the window. A page that fits does not move. */
     layout.scroll = SCR_PAGE_BODY_SCROLLS;
     if (nk_ui_begin_container(ui, TITLE_ID_BODY, &layout, NULL)) {
         /* Left column: the art and what the package needs. */
@@ -298,6 +307,30 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                         model->title_index, PLAYER_UI_PRIMARY_NONE);
                     }
                     nk_ui_end_container(ui);
+                }
+                nk_ui_end_container(ui);
+            }
+            /* The render notice (#2151): the slower path the game draws with, as a fact in
+               the brand blue, never a warning colour; Hide keeps it hidden for the session.
+               Never the default focus, which stays on PLAY or STOP GAME. */
+            if (model->render_notice_heading != NULL && model->render_notice_heading[0] != '\0' &&
+                model->render_notice_text != NULL &&
+                nk_ui_card_begin(ui, TITLE_ID_RENDER_NOTICE, sizing_grow(), sizing_fit(),
+                                 NK_UI_SPACE_2)) {
+                row = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_fit(), NK_UI_SPACE_3);
+                row.align_y = NK_UI_ALIGN_CENTER;
+                if (nk_ui_begin_container(ui, TITLE_ID_RENDER_HEAD, &row, NULL)) {
+                    nk_ui_eyebrow(ui, TITLE_ID_RENDER_EYEBROW, "Picture");
+                    nk_ui_status_pill(ui, TITLE_ID_RENDER_PILL, "\xE2\x97\x8F",
+                                      model->render_notice_heading, theme->accent_dark);
+                    nk_ui_end_container(ui);
+                }
+                nk_ui_text_role(ui, TITLE_ID_RENDER_TEXT, model->render_notice_text,
+                                NK_UI_TYPE_BODY_S, theme->paper);
+                if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE, "Hide",
+                                 NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
+                    result = action(PLAYER_UI_ACTION_HIDE_RENDER_NOTICE, model->title_index,
+                                    PLAYER_UI_PRIMARY_NONE);
                 }
                 nk_ui_end_container(ui);
             }
