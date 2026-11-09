@@ -110,6 +110,17 @@ We aim to respond promptly and will remove material where appropriate.
   links `src/rt/audio_sdl3.c` instead.
 - **Vulkan** — Apache-2.0 loader/header ecosystem; this repository does not
   redistribute a Vulkan SDK or loader binary.
+- **Android on-device C toolchain (#360)** — nothing vendored; the repository holds the
+  pins, the build tools and their tests ([`android/toolchain/PROVENANCE.md`](android/toolchain/PROVENANCE.md)).
+  `tools/android_toolchain.py` builds clang, lld, compiler-rt builtins, libunwind,
+  libc++abi and libc++ from the LLVM 21.1.8 release tarball (Apache-2.0 WITH
+  LLVM-exception), and `tools/android_sysroot.py` builds the sysroot from AOSP
+  `android-16.0.0_r4` (bionic: BSD-style and Apache-2.0, its kernel uapi headers
+  GPL-2.0-only WITH Linux-syscall-note; liblog, libandroid and libvulkan symbol files
+  and `android/log.h`: Apache-2.0) and Khronos Vulkan-Headers v1.4.363 (Apache-2.0 OR
+  MIT). Every input is checked by commit or SHA-256. The sysroot archive ships each of
+  those licence texts under `NOTICES/`, including the GPL-2.0-only and
+  Linux-syscall-note texts. No Android NDK file is shipped.
 - **VFPU tables** — PPSSPP-origin lookup data with the exact source and checksums
   recorded in `assets/vfpu/PROVENANCE.json`; inclusion is a provenance decision,
   not a claim about PSP firmware ownership.

@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 the Nakagawa Recomp authors
-"""The on-device toolchain's own code (#360).
+"""The on-device toolchain's own code (#360): the build driver and the ld launcher.
+
+tools/android_toolchain.py's LLVM build takes about an hour; the tests cover the decisions
+around it: the pinned input, the configure options and the NDK check.
 
 android/toolchain/nk_ld_launcher.c is built with the host compiler and started next to a
 stand-in libnk_lld.so, a small C program that records the argv it was given and exits with
@@ -10,6 +13,7 @@ included) and is skipped elsewhere.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -20,6 +24,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "android" / "toolchain" / "nk_ld_launcher.c"
+
+sys.path.insert(0, str(ROOT / "tools"))
+
+import android_toolchain as toolchain  # noqa: E402
 
 STAND_IN = r"""
 #include <stdio.h>
@@ -101,6 +109,113 @@ class LdLauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 127)
         self.assertIn(f"libnk_ld: cannot start {self.lld}", result.stderr)
         self.assertFalse(self.record.exists())
+
+
+def _config(work: Path) -> toolchain.Config:
+    return toolchain.Config(
+        llvm_tarball=work / "llvm.tar.xz", bionic=work / "bionic", extra=work / "extra",
+        work=work, cmake="cmake", ninja="ninja", jobs=3, host_cc="gcc", host_cxx="g++")
+
+
+class PinTests(unittest.TestCase):
+    def test_the_tarball_must_match_the_pinned_sha256(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            tarball = Path(tmp) / "llvm.tar.xz"
+            with self.assertRaisesRegex(toolchain.ToolchainError, "missing"):
+                toolchain.verify_tarball(tarball)
+            tarball.write_bytes(b"not llvm")
+            with self.assertRaisesRegex(toolchain.ToolchainError, "pinned"):
+                toolchain.verify_tarball(tarball)
+            toolchain.verify_tarball(tarball, hashlib.sha256(b"not llvm").hexdigest())
+
+    def test_the_pin_names_one_release(self) -> None:
+        self.assertRegex(toolchain.LLVM_SHA256, r"^[0-9a-f]{64}$")
+        self.assertIn(f"llvmorg-{toolchain.LLVM_VERSION}/", toolchain.LLVM_URL)
+        self.assertTrue(toolchain.LLVM_URL.endswith(toolchain.LLVM_TARBALL))
+
+
+class ConfigureTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cfg = _config(Path("/w"))
+
+    def test_every_llvm_build_is_aarch64_only_and_links_one_at_a_time(self) -> None:
+        for command in (toolchain.host_configure(self.cfg), toolchain.device_configure(self.cfg)):
+            self.assertIn("-DLLVM_TARGETS_TO_BUILD=AArch64", command)
+            self.assertIn("-DLLVM_PARALLEL_LINK_JOBS=1", command)
+            self.assertIn("-DLLVM_ENABLE_ZLIB=OFF", command)
+
+    def test_build_paths_are_mapped_out_of_the_binaries(self) -> None:
+        maps = self.cfg.prefix_maps()
+        self.assertIn("=/llvm-src", maps)
+        self.assertIn("=/llvm-build", maps)
+        for command in (toolchain.host_configure(self.cfg), toolchain.runtimes_configure(self.cfg),
+                        toolchain.device_configure(self.cfg)):
+            self.assertTrue(any(maps in option for option in command if option.startswith("-DCMAKE_C_FLAGS=")))
+
+    def test_the_source_and_build_folders_do_not_nest(self) -> None:
+        # Nested folders would match both prefix maps, and which one clang applies would then
+        # decide the paths in the binaries.
+        self.assertFalse(self.cfg.build.is_relative_to(self.cfg.src))
+        self.assertFalse(self.cfg.src.is_relative_to(self.cfg.build))
+        for folder in (self.cfg.sysroot, self.cfg.resource, self.cfg.host_bin):
+            self.assertTrue(folder.is_relative_to(self.cfg.build), folder)
+
+    def test_the_device_build_uses_only_the_project_runtimes(self) -> None:
+        command = toolchain.device_configure(self.cfg)
+        link = next(o for o in command if o.startswith("-DCMAKE_EXE_LINKER_FLAGS="))
+        for flag in ("-rtlib=compiler-rt", "-unwindlib=libunwind", "-stdlib=libc++", "-static-libstdc++"):
+            self.assertIn(flag, link)
+        self.assertIn(f"-DCMAKE_SYSROOT={self.cfg.sysroot}", command)
+        self.assertIn(f"-DLLVM_NATIVE_TOOL_DIR={self.cfg.host_bin}", command)
+        compilers = [o for o in command if o.startswith("-DCMAKE_C") and "COMPILER=" in o]
+        self.assertTrue(compilers)
+        for option in compilers:
+            self.assertIn(str(self.cfg.host_bin), option)
+        self.assertFalse(any("ndk" in option.lower() for option in command))
+
+    def test_the_runtimes_are_static(self) -> None:
+        command = toolchain.runtimes_configure(self.cfg)
+        for library in ("LIBUNWIND", "LIBCXXABI", "LIBCXX"):
+            self.assertIn(f"-D{library}_ENABLE_SHARED=OFF", command)
+        self.assertIn("-DLIBCXX_STATICALLY_LINK_ABI_IN_STATIC_LIBRARY=ON", command)
+
+    def test_libraries_android_lacks_are_not_linked(self) -> None:
+        # A static-library try-compile finds every library, so libc++.a would carry
+        # dependent-library entries for pthread and rt, which no Android link can resolve.
+        command = toolchain.runtimes_configure(self.cfg)
+        for option in ("LIBCXX_HAS_PTHREAD_LIB", "LIBCXX_HAS_RT_LIB", "LIBCXX_HAS_ATOMIC_LIB",
+                       "LIBCXXABI_HAS_PTHREAD_LIB", "LIBUNWIND_HAS_PTHREAD_LIB",
+                       "COMPILER_RT_HAS_GCC_LIB"):
+            self.assertIn(f"-D{option}=OFF", command)
+
+
+class NdkCheckTests(unittest.TestCase):
+    def test_a_binary_with_the_ndk_libcxx_is_refused(self) -> None:
+        data = b"\x7fELF...NSt3__112system_errorE\0...NSt6__ndk112bad_weak_ptrE\0"
+        with self.assertRaisesRegex(toolchain.ToolchainError, "1 names from the NDK"):
+            toolchain.check_no_ndk_runtime(data, "clang")
+
+    def test_a_binary_without_the_project_libcxx_is_refused(self) -> None:
+        with self.assertRaisesRegex(toolchain.ToolchainError, "no std::__1"):
+            toolchain.check_no_ndk_runtime(b"\x7fELF...main\0", "clang")
+
+    def test_a_binary_with_the_project_libcxx_passes(self) -> None:
+        toolchain.check_no_ndk_runtime(b"\x7fELF...NSt3__112system_errorE\0", "clang")
+
+    def test_the_device_binaries_are_linked_without_a_symbol_table(self) -> None:
+        # lld writes .symtab differently from link to link; see DEVICE_LINK.
+        self.assertIn("-Wl,--strip-all", toolchain.DEVICE_LINK)
+        self.assertIn("-Wl,--build-id=sha1", toolchain.DEVICE_LINK)
+
+
+class StampTests(unittest.TestCase):
+    def test_a_finished_stage_is_not_run_again(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            cfg = _config(Path(tmp))
+            (cfg.build / "host").mkdir(parents=True)
+            toolchain._mark(cfg.build / "host")
+            # cmake is never started: a run would fail, as "cmake" here names nothing built.
+            toolchain.stage_host(toolchain.Config(**{**cfg.__dict__, "cmake": str(Path(tmp) / "none")}))
 
 
 if __name__ == "__main__":

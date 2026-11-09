@@ -64,6 +64,14 @@ Nakagawa has since substantially extended and modified that codebase. This repos
 - **Kenney "Input Prompts" and "Interface Sounds" — Kenney Vleugels ([kenney.nl](https://kenney.nl))** — CC0-1.0. The
   launcher's button prompt glyphs and its optional launcher sounds, in [`third_party/kenney/`](third_party/kenney/).
 - **Inno Setup 6.7.3 — Jordan Russell and Martijn Laan** — the Inno Setup License (a permissive, no-copyleft licence; text pinned by hash in [`assets/upstream/innosetup.lock.json`](assets/upstream/innosetup.lock.json)). A build tool for the Windows installer, not vendored: `tools/build_installer.py` runs the user's own pinned copy. The installer's `Setup.exe` embeds Inno's unmodified loader, whose copyright notice and web addresses stay intact.
+- **LLVM 21.1.8 — the LLVM Project** — Apache-2.0 WITH LLVM-exception. clang, lld, compiler-rt builtins, libunwind,
+  libc++abi and libc++, built by `tools/android_toolchain.py` from the pinned release tarball for the on-device C
+  toolchain of the Android build ([`android/toolchain/`](android/toolchain/PROVENANCE.md)). Not vendored.
+- **Android Open Source Project, `android-16.0.0_r4`** — bionic's headers, crt sources and symbol files (BSD-style
+  and Apache-2.0; the kernel uapi headers GPL-2.0-only WITH Linux-syscall-note), and the liblog, libandroid and
+  libvulkan symbol files and `android/log.h` (Apache-2.0), read by `tools/android_sysroot.py` to build that
+  toolchain's sysroot. **Khronos Vulkan-Headers v1.4.363** — Apache-2.0 OR MIT, the sysroot's Vulkan headers. None is
+  vendored; the pins and SHA-256 values are in [`android/toolchain/`](android/toolchain/PROVENANCE.md).
 - **Font fixtures** — Gudea (Agustina Mingote), Gowun Dodum (The Gowun Dodum Project Authors), M+ 1p (The M+ Project Authors) and Liberation Sans and Liberation Serif 2.1.5 (Google Corporation and Red Hat, Inc.; Reserved Font Names Arimo, Tinos, Cousine and Liberation), all SIL Open Font License 1.1 ([`fixtures/fonts/`](fixtures/fonts/)). The build converts Liberation (Latin), Gowun Dodum (Korean) and Noto Sans JP with M+ 1p (Japanese) into the project's stand-in PSP fonts; Gudea is used only by tests.
 
 The authoritative, component-by-component provenance records are [`NOTICE.md`](NOTICE.md) and the
