@@ -229,6 +229,7 @@ SITE_KEYS = frozenset({
     "low_insn_offset",
     "low_stock_digest",
     "stock_values",
+    "stock_value_digests",
     "requires",
     "alternates",
 })
@@ -704,6 +705,16 @@ def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
         if (not isinstance(values, list) or not values
                 or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values)):
             fail(f"{path}.stock_values", "stock_values must be a non-empty list of numbers")
+    if "stock_value_digests" in site:
+        digests = site["stock_value_digests"]
+        if "stock_values" in site:
+            fail(path, "a store site declares stock_values or stock_value_digests, not both")
+        if (not isinstance(digests, list) or not 1 <= len(digests) <= STOCK_VALUE_DIGESTS_MAX
+                or not all(isinstance(d, str) and SHA256_HEX_RE.match(d) for d in digests)):
+            fail(f"{path}.stock_value_digests",
+                 f"stock_value_digests must be a list of 1 to {STOCK_VALUE_DIGESTS_MAX} lowercase hex SHA-256 digests")
+        if len(set(digests)) != len(digests):
+            fail(f"{path}.stock_value_digests", "stock_value_digests lists a digest twice (duplicate)")
     if "requires" in site:
         required = site["requires"]
         if not isinstance(required, list) or not required or not all(isinstance(r, str) for r in required):
@@ -740,8 +751,9 @@ def _validate_requires(sites: Sequence[Mapping[str, Any]]) -> None:
             if name == site["id"]:
                 fail(path, f"a site cannot require its own id {name!r}")
             target = by_id.get(name)
-            if target is None or "stock_values" not in target:
-                fail(path, f"requires names sites that declare stock_values; {name!r} is not one")
+            if target is None or ("stock_values" not in target and "stock_value_digests" not in target):
+                fail(path, f"requires names sites that declare stock_values or stock_value_digests; "
+                           f"{name!r} is not one")
             if "requires" in target:
                 fail(path, f"required site {name!r} itself declares requires; chains are not allowed")
 
@@ -968,6 +980,9 @@ PUBLISHED_KEYS = frozenset({
 # The key is SHA-256 over this tag and the whole executable: never the published
 # executable_sha256, which anyone can read.
 _PUBLISHED_KEY_TAG = b"nakagawa-recomp published package stock-digest key v1\x00"
+# A stock value's digest message starts with this tag (keyed_stock_value_digest).
+_STOCK_VALUE_TAG = b"stock value\0"
+STOCK_VALUE_DIGESTS_MAX = 64
 DISC_ID_RE = re.compile(r"^[A-Z]{4}[0-9]{5}$")
 DISC_VERSION_RE = re.compile(r"^[0-9]{1,2}\.[0-9]{2}$")
 SITE_MAP_ADDRESS_RE = re.compile(r"^0x[0-9a-f]{8}$")
@@ -996,6 +1011,13 @@ class PublishedPackageRefusal(EnhancementPackageError):
 def is_published_package(data: Any) -> bool:
     """Whether a parsed package declares the published form (section 5.1)."""
     return isinstance(data, Mapping) and "published_package" in data
+
+
+def keyed_stock_value_digest(key: bytes, site_id: str, bits: int) -> str:
+    """The keyed digest of one value a store site may store, as the run-time check computes it:
+    HMAC-SHA-256 over the tag, the site id, a NUL and the value's 32 bits, little-endian."""
+    message = _STOCK_VALUE_TAG + site_id.encode("ascii") + b"\0" + struct.pack("<I", int(bits) & 0xFFFFFFFF)
+    return hmac.new(key, message, hashlib.sha256).hexdigest()
 
 
 def published_digest_key(executable: bytes) -> bytes:
@@ -1252,11 +1274,14 @@ def publish_package(
     read_words_fn: ReadFn,
     read_data_fn: ReadFn | None = None,
     data_root: Path | str | None = None,
+    notes: list[str] | None = None,
 ) -> dict[str, Any]:
     """The published form of a private declaration and its symbol map (section 5.1).
 
     Every plain stock digest is first checked against the executable, then replaced by its
-    keyed digest; the site map holds only the names the declaration uses. The result must
+    keyed digest. A store site's stock_values become stock_value_digests, and their
+    build-time notes (store_value_overlaps) are appended to ``notes``. The site map holds
+    only the names the declaration uses. The result must
     resolve back to the same declaration (resolve_published_package), and it is refused
     if published_package_findings() finds anything.
     """
@@ -1268,10 +1293,6 @@ def publish_package(
     actual = hashlib.sha256(bytes(executable)).hexdigest()
     if actual != declaration["executable_sha256"]:
         fail("executable_sha256", f"the package is for {declaration['executable_sha256']}, the executable is {actual}")
-    for idx, site in enumerate(declaration.get("sites", ())):
-        if "stock_values" in site:
-            fail(f"sites[{idx}]({site['id']}).stock_values",
-                 "stock_values are values read from the game and cannot be published (section 5.1)")
     used = sorted(_published_names(declaration))
     missing = [name for name in used if name not in symbols]
     if missing:
@@ -1285,6 +1306,18 @@ def publish_package(
         if words is None or len(words) != count or compute_stock_words_digest(words) != owner[field]:
             fail(path, f"the {field} does not match the executable's words at its site")
         owner[field] = keyed_stock_digest(key, _words_bytes(words))  # type: ignore[index]
+    for site in declaration.get("sites", ()):
+        if "stock_values" not in site:
+            continue
+        # The values the loader stores are read from the game: only their keyed digests are
+        # published. The run-time check digests the value being stored (section 5.1).
+        word = read_words_fn(int(resolved[site["function"]]) + int(site["insn_offset"]), 1)
+        rewrite = plan_site_rewrite(site, int(word[0]))
+        if notes is not None:
+            notes.extend(store_value_overlaps(site["id"], rewrite))
+        site["stock_value_digests"] = [keyed_stock_value_digest(key, site["id"], bits)
+                                       for bits, _scaled in rewrite["stock_values"]]
+        del site["stock_values"]
     for idx, site in enumerate(declaration.get("data_sites", ())):
         path = f"data_sites[{idx}]({site['id']})"
         if read_data_fn is None:
@@ -2247,8 +2280,9 @@ def verify_and_resolve_sites(
             elif site["transform"] == "count_x2_even":
                 _check_even_counter(site_path, fn_addr, site_addr, stock_words[0], read_words_fn)
         else:
-            if "stock_values" in site:
-                fail(f"{site_path}.stock_values", "stock_values belongs only to swc1 and sw store sites")
+            for key in ("stock_values", "stock_value_digests"):
+                if key in site:
+                    fail(f"{site_path}.{key}", f"{key} belongs only to swc1 and sw store sites")
             rewrites = plan_float_pair_rewrite(site, stock_words[0], stock_words[1])
         for word_index, rewrite in enumerate(rewrites):
             word_addr = site_addr + 4 * word_index
@@ -2746,7 +2780,15 @@ def store_value_overlaps(site_id: str, rewrite: Mapping[str, Any]) -> list[str]:
 def plan_site_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
     """The one defined rewrite of a verified stock word, with a store site's stock values."""
     rewrite = _plan_word_rewrite(site, w)
-    if "stock_values" in site:
+    if "stock_value_digests" in site:
+        if rewrite["kind"] not in ("scale_f_store", "scale_int_store"):
+            raise EnhancementPackageError(
+                f"site {site['id']}: stock_value_digests belongs only to swc1 and sw store sites "
+                "(fail-closed refusal)")
+        # Keyed digests of the stock values: the run-time check digests the value being stored
+        # and scales it as _store_value_pairs() does, refusing one that leaves the range.
+        rewrite["stock_value_digests"] = list(site["stock_value_digests"])
+    elif "stock_values" in site:
         if rewrite["kind"] not in ("scale_f_store", "scale_int_store"):
             raise EnhancementPackageError(
                 f"site {site['id']}: stock_values belongs only to swc1 and sw store sites "
@@ -2754,8 +2796,8 @@ def plan_site_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
         rewrite["stock_values"] = _store_value_pairs(site, rewrite)
     elif rewrite["kind"] == "scale_int_store":
         raise EnhancementPackageError(
-            f"site {site['id']}: an integer store site needs stock_values, so exactness and range "
-            "are proven at build time (fail-closed refusal)")
+            f"site {site['id']}: an integer store site needs stock_values (or stock_value_digests), "
+            "so every value it stores is checked and its double proven in range (fail-closed refusal)")
     return rewrite
 
 
@@ -3631,12 +3673,21 @@ def _publish_main(args: argparse.Namespace) -> int:
     elf = Elf(data, base=int(args.base, 16) if args.base else None)
     symbols = {**extract_elf_func_symbols(elf), **symbols}
     read_words, read_data = elf_readers(elf)
+    notes: list[str] = []
     published = publish_package(
         package, symbols, executable=data, disc_id=args.disc_id, disc_version=args.disc_version,
-        read_words_fn=read_words, read_data_fn=read_data, data_root=args.data_root)
+        read_words_fn=read_words, read_data_fn=read_data, data_root=args.data_root, notes=notes)
+    for note in notes:
+        print(f"warning: enhancement {note}", file=sys.stderr)
     resolved, _ = resolve_published_package(
         published, executable=data, read_words_fn=read_words, read_data_fn=read_data, data_root=args.data_root)
-    if compute_package_digest(resolved) != compute_package_digest(validate_package(package)):
+    # The same declaration, except that each store site's stock_values are now their keyed digests.
+    expected = validate_package(copy.deepcopy(package))
+    for idx, site in enumerate(expected.get("sites", ())):
+        if "stock_values" in site:
+            del site["stock_values"]
+            site["stock_value_digests"] = published["sites"][idx]["stock_value_digests"]
+    if compute_package_digest(resolved) != compute_package_digest(expected):
         print("publish: FAIL: the published package does not resolve back to the same declaration",
               file=sys.stderr)
         return 1

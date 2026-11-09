@@ -2763,8 +2763,9 @@ class TestEnhancementStoreSites(unittest.TestCase):
 
     # -- compile and run ---------------------------------------------------------------
 
-    def _generate(self, tmp: Path, gate_transform: str | None = None) -> dict[str, str]:
-        """Generate the store-site fixture. With ``gate_transform``, the entry also calls
+    def _generate(self, tmp: Path, gate_transform: str | None = None, published: bool = False) -> dict[str, str]:
+        """Generate the store-site fixture. With ``published``, from its published form, whose store
+        sites carry only keyed digests of their stock values. With ``gate_transform``, the entry also calls
         0x1400, whose first word begins each logic update and whose ``jal 0x1500`` at 0x1404 (an ease
         leaf, as gate_30hz_hold needs) is a gate site of that transform that requires F_STORE."""
         def jal(target: int) -> int:
@@ -2798,6 +2799,18 @@ class TestEnhancementStoreSites(unittest.TestCase):
             extra["update_boundary"] = {"function": "hgate", "insn_offset": 0,
                                         "stock_digest": compute_stock_words_digest([0x24070001])}
         pkg = self._package(sites, executable_sha256=hashlib.sha256(elf).hexdigest(), **extra)
+        overlap = ("site F_STORE: stock value 30 scales to 60, which is also a stock value; a path that "
+                   "stores an already scaled value again would scale it twice")
+        if published:
+            from analyze import Elf
+
+            read_words, read_data = enhancement_package.elf_readers(Elf(elf, base=0))
+            notes: list[str] = []
+            pkg = enhancement_package.publish_package(
+                pkg, {k: int(v, 16) for k, v in symbols.items()}, executable=elf, disc_id="ULUS99999",
+                disc_version="1.00", read_words_fn=read_words, read_data_fn=read_data, notes=notes)
+            # The overlap is found where the values are known: when the package is published.
+            self.assertEqual(notes, [overlap])
         (tmp / "store.json").write_text(json.dumps(pkg), encoding="utf-8")
         (tmp / "store.symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
         out_dir = tmp / "out"
@@ -2805,12 +2818,118 @@ class TestEnhancementStoreSites(unittest.TestCase):
         rc, output, files = TestEnhancementAotCodegenAndCache._run_codegen(
             tmp / "synth.elf", out_dir / "out.c", [f"--enhancement-package={tmp / 'store.json'}"])
         self.assertEqual(rc, 0, output)
-        # 30 scales to 60, which is also a stock value: a build-time warning, not a refusal.
-        self.assertIn("warning: enhancement site F_STORE: stock value 30 scales to 60, which is also a "
-                      "stock value; a path that stores an already scaled value again would scale it twice",
-                      output)
-        self.assertEqual(output.count("warning: enhancement site"), 1, output)
+        if not published:
+            # 30 scales to 60, which is also a stock value: a build-time warning, not a refusal.
+            self.assertIn(f"warning: enhancement {overlap}", output)
+            self.assertEqual(output.count("warning: enhancement site"), 1, output)
         return {name: data.decode("utf-8") for name, data in files.items()}
+
+    def _store_harness(self, tmp: Path, files: dict[str, str], name: str) -> dict[int, Path]:
+        """The store-site block and the three rewritten statements in a host program, built with the
+        runtime's SHA-256 (vfpu_tables.c), toggle off (0) and on (1)."""
+        main, chunk = files["out.c"], files["out_0.c"]
+        block = main[main.index("/* Enhancement store sites. */"):main.index("/* End of enhancement store sites. */")]
+        harness = (
+            "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <math.h>\n"
+            "typedef struct { uint32_t r[32]; union { float f[32]; uint32_t fi[32]; }; } CpuState;\n"
+            "static uint32_t mem[4];\n"
+            "#define sr_begin(s, pc, op) ((void)0)\n#define sr_end(s, a, n) ((void)0)\n"
+            "#define MEM_W32_PC(a, v, pc) (mem[((a) >> 2) & 3u] = (uint32_t)(v))\n"
+            "void sr_at_process_end(void (*report)(void)) { (void)report; }\n"
+            f"int nk_enhancement_on(void) {{ return NK_ON; }}\n{block}\n"
+            f"static void run_f(CpuState *s) {{\n{self._statement(chunk, 0x1100)}\n}}\n"
+            f"static void run_i(CpuState *s) {{\n{self._statement(chunk, 0x1200)}\n}}\n"
+            f"static void run_g(CpuState *s) {{\n{self._statement(chunk, 0x1300)}\n}}\n"
+            "int main(int argc, char **argv) {\n"
+            "    CpuState s; memset(&s, 0, sizeof s); s.r[4] = 4;\n"
+            "    nk_enh_sites_start();\n"
+            "    for (int i = 1; i < argc; i++) {\n"
+            "        char k = argv[i][0]; long v = k == 'G' ? 0 : strtol(argv[i] + 2, NULL, 0);\n"
+            "        mem[1] = 0xdeadbeefu;\n"
+            "        if (k == 'F') { s.fi[2] = (uint32_t)v; run_f(&s); "
+            "printf(\"F %08x %08x\\n\", mem[1], s.fi[2]); }\n"
+            "        if (k == 'I') { s.r[5] = (uint32_t)v; run_i(&s); "
+            "printf(\"I %08x %08x\\n\", mem[1], s.r[5]); }\n"
+            "        if (k == 'G') { s.r[6] = 0; run_g(&s); printf(\"G %u\\n\", s.r[6]); }\n"
+            "        fflush(stdout);\n"
+            "    }\n    return 0;\n}\n")
+        src = tmp / f"{name}_harness.c"
+        src.write_text(harness, encoding="utf-8")
+        exes = {}
+        for on in (0, 1):
+            exes[on] = tmp / f"{name}{on}.exe"
+            assert GCC is not None
+            built = subprocess.run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                                    f"-DNK_ON={on}", f"-I{ROOT / 'src' / 'rt'}", "-o", str(exes[on]), str(src),
+                                    str(ROOT / "src" / "rt" / "vfpu_tables.c"), "-lm"],
+                                   capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+        return exes
+
+    @unittest.skipUnless(GCC, "needs a host C compiler")
+    def test_published_store_sites_check_the_same_values_by_keyed_digest(self) -> None:
+        """A published package keeps no stock value; its store sites accept, scale, refuse and report
+        exactly as the private package's do, by digesting the value being stored."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            (tmp / "plain").mkdir()
+            (tmp / "published").mkdir()
+            plain = self._generate(tmp / "plain")
+            keyed = self._generate(tmp / "published", published=True)
+            published = json.loads((tmp / "published" / "store.json").read_text(encoding="utf-8"))
+            for site in published["sites"][:2]:
+                self.assertNotIn("stock_values", site)
+                self.assertEqual(len(site["stock_value_digests"]), 2)
+            self.assertEqual(enhancement_package.published_package_findings(published), [])
+            # No stock value reaches the published build's source: no table, a key and digests instead.
+            self.assertIn("nk_enh_stock_0", plain["out.c"])
+            self.assertNotIn("nk_enh_stock_", keyed["out.c"])
+            self.assertIn("static const unsigned char nk_enh_key[32]", keyed["out.c"])
+            exes = {"plain": self._store_harness(tmp, plain, "plain"),
+                    "keyed": self._store_harness(tmp, keyed, "keyed")}
+            f30, f60, f120 = (f"F:0x{_f32_bits_of(v):08x}" for v in (30.0, 60.0, 120.0))
+            runs: list[tuple[int, list[str]]] = [
+                (1, [f30, "I:9", "I:-9"]),
+                (1, [f60, f"F:0x{_f32_bits_of(1.0):08x}", f120]),   # 1.0 is no stock value: stop
+                (1, ["I:10"]),
+                (1, [*([f30] * 20), f60, f30]),
+                (1, ["G", "G", f30, "G"]),
+                (1, ["I:-9", "I:9", "I:-9", "I:9"]),
+                (1, []),
+                (0, [f30, "F:0x3f800000", "I:9", "I:10", "G"]),
+            ]
+            for on, args in runs:
+                with self.subTest(on=on, args=args):
+                    results = {name: subprocess.run([str(e[on]), *args], capture_output=True, text=True)
+                               for name, e in exes.items()}
+                    self.assertEqual(
+                        (results["keyed"].returncode, results["keyed"].stdout, results["keyed"].stderr),
+                        (results["plain"].returncode, results["plain"].stdout, results["plain"].stderr))
+            res = subprocess.run([str(exes["keyed"][1]), "I:10"], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("ENHANCEMENT_DATA_MISMATCH: site I_STORE at 0x00001200 stores 10 (0x0000000a), "
+                          "not one of the package's stock values; the run stops here", res.stderr)
+
+    def test_stock_value_digests_validation(self) -> None:
+        digest = "d" * 64
+        store = self._site("F_STORE", self.SWC1, stock_value_digests=[digest])
+        other = self._site("G_COUNT", self.ADDIU, function="synth_gate", requires=["F_STORE"])
+        validate_package(self._package([store, other]))
+        rw = self._plan(self.SW, stock_value_digests=[digest])
+        self.assertEqual(rw, {"kind": "scale_int_store", "reg": 5, "stock_value_digests": [digest]})
+        self._refused(self.ADDIU, "stock_value_digests belongs only to", stock_value_digests=[digest])
+        for bad, why in (([], "1 to 64"), (["D" * 64], "1 to 64"), ([digest, digest], "duplicate"),
+                         ([digest] * 65, "1 to 64"), (digest, "1 to 64")):
+            with self.subTest(stock_value_digests=bad):
+                with self.assertRaisesRegex(EnhancementPackageError, why):
+                    validate_package(self._package([self._site("F_STORE", self.SWC1, stock_value_digests=bad)]))
+        with self.assertRaisesRegex(EnhancementPackageError, "not both"):
+            validate_package(self._package([self._site("F_STORE", self.SWC1, stock_values=[30],
+                                                       stock_value_digests=[digest])]))
+        key = enhancement_package.published_digest_key(b"synthetic executable")
+        # The digest binds the site: the same value at another site has another digest.
+        self.assertNotEqual(enhancement_package.keyed_stock_value_digest(key, "A", 30),
+                            enhancement_package.keyed_stock_value_digest(key, "B", 30))
 
     @staticmethod
     def _statement(chunk: str, pc: int) -> str:
@@ -3682,14 +3801,31 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                     published, executable=elf_bytes, read_words_fn=read_words, read_data_fn=read_data,
                     data_root=tmp / "data")
 
-    def test_publish_refuses_values_read_from_the_game_and_wrong_digests(self) -> None:
+    def test_publish_keeps_no_values_read_from_the_game_and_refuses_wrong_digests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            elf_bytes = _write_synthetic_mips_elf(Path(tmp_dir) / "synth.elf", self.words, self.entry)
+            words = dict(self.words)
+            words[0x00001700] = 0xE4820000  # swc1 f2, 0(a0): a store site
+            words[0x00001704] = 0x03E00008
+            elf_bytes = _write_synthetic_mips_elf(Path(tmp_dir) / "synth.elf", words, self.entry)
             private, _ = self._make_package_and_symbols(elf_bytes)
             with_values = copy.deepcopy(private)
-            with_values["sites"][1]["stock_values"] = [30]
-            with self.assertRaisesRegex(EnhancementPackageError, "stock_values"):
-                self._publish(elf_bytes, with_values)
+            with_values["sites"].append({
+                "id": "SYNTH_STORE", "function": "synth_store", "insn_offset": 0,
+                "stock_digest": compute_stock_words_digest([0xE4820000]), "transform": "count_x2",
+                "stock_values": [30, 37.5]})
+            from analyze import Elf
+
+            read_words, read_data = enhancement_package.elf_readers(Elf(elf_bytes, base=0))
+            symbols = dict({k: v for k, v in self.fn_addrs.items()}, synth_store=0x00001700)
+            published = enhancement_package.publish_package(
+                with_values, symbols, executable=elf_bytes, disc_id=self.DISC, disc_version=self.VERSION,
+                read_words_fn=read_words, read_data_fn=read_data)
+            store = published["sites"][-1]
+            self.assertNotIn("stock_values", store)
+            key = enhancement_package.published_digest_key(elf_bytes)
+            self.assertEqual(store["stock_value_digests"], [
+                enhancement_package.keyed_stock_value_digest(key, "SYNTH_STORE", _f32_bits_of(v)) for v in (30.0, 37.5)])
+            self.assertEqual(enhancement_package.published_package_findings(published), [])
             wrong = copy.deepcopy(private)
             wrong["sites"][1]["stock_digest"] = compute_stock_words_digest([0x24040028])
             with self.assertRaisesRegex(EnhancementPackageError, "does not match the executable"):
