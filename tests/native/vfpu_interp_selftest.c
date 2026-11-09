@@ -778,7 +778,7 @@ static int check_vf2i_conversions(void) {
         {"vf2iu -denormal", 0x80000001u, 2u, 0u, 0x00000000u},
         {"vf2id +denormal", 0x00000001u, 3u, 0u, 0x00000000u},
         {"vf2id -denormal not floored", 0x80000001u, 3u, 0u, 0x00000000u},
-        {"vf2iu largest denormal scaled", 0x007fffffu, 2u, 31u, 0x00000000u},
+        {"vf2iu largest denormal scaled", 0x007fffffu, 2u, 31u, 0x00000000u}, /* derived from the rule, not a probe cell */
         {"vf2in negative quiet NaN", 0xffc00000u, 0u, 0u, 0x7fffffffu},
     };
     static const int host_modes[] = {

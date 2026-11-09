@@ -121,7 +121,8 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     # PSP-3000 returned.
     cases.append((_vv2_word(28, 1, 0x40, 0x00), "vrexp2-s-measured", 1))
 
-    # vcmp.q C000 against C010, all 16 conditions (VFPU_CC probe, PSP-3000, 2026-11-08, issue #326):
+    # vcmp.q C000 against C010, all 16 conditions (unrecorded PSP read, probe case vfpu-cc-cmov, PSP-3000,
+    # 2026-11-08, issue #326):
     # check_vcmp_denormal_operands() finds them by name and pins both lanes to the CC the
     # PSP read back for the signed-zero and denormal operand set.
     for cond in range(16):

@@ -143,9 +143,9 @@ static inline uint32_t sr_fpu_to_word(float x, uint32_t funct, uint32_t fcr31) {
     return sr_fp_to_s32(sr_finite_float_to_double(bits), mode);
 }
 
-/* A PSP-3000 vcmp reads a denormal operand as a zero of its sign, so +-denormal
- * compares equal to +-0 and EZ/NZ test the flushed value (operand set "signed
- * zeros and denormals" of the VFPU_CC probe, measured 2026-11-08; a quiet NaN, an
+/* A vcmp reads a denormal operand as a zero of its sign, so +-denormal compares equal to
+ * +-0 and EZ/NZ test the flushed value (unrecorded PSP read, PSP-3000, 2026-11-08, issue
+ * #326, probe case vfpu-cc-cmov, operand set "signed zeros and denormals"; a quiet NaN, an
  * infinity and every normal value pass through unchanged). */
 static inline float sr_vfpu_ftz(float x) {
     uint32_t bits = sr_float_bits(x);
@@ -162,9 +162,9 @@ static inline uint32_t sr_vfpu_to_word(float x, unsigned mode, unsigned scale) {
     const uint32_t bits = sr_float_bits(x);
     uint32_t invalid_result = 0u;
     if (sr_float_invalid_word(bits, &invalid_result)) return invalid_result;
-    /* A PSP-3000 run (2026-11-08, issue #326, probe case vfpu-convert) flushed a denormal
-     * input of either sign to zero before the conversion in all four modes: vf2iu of
-     * 0x00000001 and vf2id of 0x80000001 give 0, not 1 and -1. */
+    /* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-convert): a
+     * denormal input of either sign is flushed to zero before the conversion in all four
+     * modes, so vf2iu of 0x00000001 and vf2id of 0x80000001 give 0, not 1 and -1. */
     if (((bits >> 23) & 0xffu) == 0u) return 0u;
     return sr_fp_to_s32(
         ldexp(sr_finite_float_to_double(bits), (int)(scale & 31u)), mode
