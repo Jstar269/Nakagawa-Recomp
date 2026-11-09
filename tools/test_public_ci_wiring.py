@@ -3249,8 +3249,12 @@ class TwoTierInvariantTests(CiRunHarness):
     3. the classifier makes ``tier`` and ``allow_substantive`` from one value
        (tools/test_ci_paths.py ``TierRoutingTests``).
 
-    ``test_ci_required_is_green_only_when_every_routed_gate_ran`` is the invariant itself: it holds while
-    any one layer does, and fails only when a light run can really be reported green.
+    ``test_ci_required_is_green_only_when_every_routed_gate_ran`` is the invariant itself, over the
+    harness's model of a run: each job's real ``if:`` and job-level ``env:``, the real classifier, and
+    each aggregate as its script's decision. It holds while any one layer does. The model's last step,
+    that a job's result is its script's exit status, is pinned apart:
+    ``test_each_aggregate_job_result_is_the_script_exit_status`` here and ``ProcessExitTests`` in
+    tools/test_ci_required.py.
     """
 
     LABEL = ci_paths.FULL_TIER_LABEL
@@ -3309,6 +3313,33 @@ class TwoTierInvariantTests(CiRunHarness):
                     run = self._evaluate(event_name, payload, ref="refs/heads/main", switch=switch)
                     self.assertTrue(run.green)
                     self.assertEqual(run.routed - run.ran, set())
+
+    def test_each_aggregate_job_result_is_the_script_exit_status(self) -> None:
+        """The harness models each aggregate as its script over the job-level env; pin that model.
+
+        A step that swallows the exit status (``|| true``, ``continue-on-error``), sets its own
+        env over the job's, or runs something else would make the job green whatever the script
+        decides, and nothing else here would notice. tools/test_ci_required.py
+        ``ProcessExitTests`` checks that the script's exit status carries its decision.
+        """
+        blocks = _workflow_job_blocks("ci.yml")
+        for job, command in (("ci_required", "python tools/ci_required.py"),
+                             ("ci_quick", "python tools/ci_required.py --quick")):
+            with self.subTest(job=job):
+                block = [line for line in blocks[job] if line.strip() and not line.lstrip().startswith("#")]
+                steps = block[block.index("    steps:") + 1:]
+                header = block[:block.index("    steps:")]
+                self.assertEqual([line for line in steps if line.startswith("      - ")],
+                                 ["      - name: Check out repository", "      - name: Check the quick results"
+                                  if job == "ci_quick" else "      - name: Check applicable gate results"])
+                self.assertEqual(steps[-1], f"        run: {command}")
+                self.assertEqual([line for line in steps if re.match(r"^ +run:", line)], [steps[-1]])
+                self.assertEqual(
+                    [line for line in steps if re.match(r"^ {8}(env|shell|if|continue-on-error|working-directory|"
+                                                        r"timeout-minutes):", line)], [])
+                self.assertEqual(
+                    [line for line in header if re.match(r"^ {4}(continue-on-error|defaults|strategy):", line)], [])
+        self.assertNotRegex(_workflow_text("ci.yml"), re.compile(r"^defaults:", re.M))
 
     def test_ci_required_does_not_run_on_a_light_run(self) -> None:
         """Layer 1: on a light run the job is skipped, and the quick aggregate reports instead."""

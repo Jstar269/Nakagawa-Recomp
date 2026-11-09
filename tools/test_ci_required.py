@@ -11,6 +11,8 @@ import itertools
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -757,6 +759,49 @@ class QuickAggregateTests(unittest.TestCase):
         code, _stdout, stderr = self._quick_main(_quick_env(TIER="full"))
         self.assertEqual(code, 1)
         self.assertIn("tier full", stderr)
+
+
+class ProcessExitTests(unittest.TestCase):
+    """The script's exit status is the job's result: run it as the workflow step does.
+
+    The other tests call the functions in-process, so they would still pass if the script
+    stopped passing ``main()``'s value to ``sys.exit``. Then every aggregate step would exit 0,
+    and a run with a failed gate would report CI required green.
+    """
+
+    SCRIPT = Path(__file__).resolve().with_name("ci_required.py")
+
+    def _exit_status(self, env: dict[str, str], *args: str) -> int:
+        inherited = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT") if key in os.environ}
+        completed = subprocess.run(
+            [sys.executable, str(self.SCRIPT), *args],
+            env={**inherited, **env, "PYTHONIOENCODING": "utf-8"},
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        return completed.returncode
+
+    def test_the_full_aggregate_exits_non_zero_unless_the_run_is_green(self) -> None:
+        self.assertEqual(self._exit_status(_tier_env()), 0)
+        for name, env in (
+            ("a failed gate", _tier_env(NATIVE_RESULT="failure")),
+            ("a light run", _tier_env(TIER="light", ALLOW_SUBSTANTIVE="false")),
+            ("a suppressed gate on a pull request", _tier_env(ALLOW_SUBSTANTIVE="false")),
+            ("a Draft", _tier_env(DRAFT="true")),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(self._exit_status(env), 1)
+
+    def test_the_quick_aggregate_exits_non_zero_unless_the_quick_run_is_green(self) -> None:
+        self.assertEqual(self._exit_status(_quick_env(), "--quick"), 0)
+        for name, env in (
+            ("a failed quick job", _quick_env(QUICK_CHECKS_RESULT="failure")),
+            ("a full run", _quick_env(TIER="full")),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(self._exit_status(env, "--quick"), 1)
+        self.assertEqual(self._exit_status(_quick_env(), "--unknown"), 2)
 
 
 if __name__ == "__main__":
