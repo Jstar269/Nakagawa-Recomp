@@ -4990,13 +4990,32 @@ void player_app_set_game_stop_error(PlayerApp *app, const char *code,
     const char *where = boundary && boundary[0] ? boundary : "an unnamed boundary";
     char message[512];
     if (strcmp(code, "RUNTIME_SEMANTIC_BOUNDARY") == 0) {
-        snprintf(message, sizeof(message),
-                 "The game needed %s that this version of Nakagawa can't run yet, so it was "
-                 "stopped. %s",
-                 player_runtime_stop_feature(boundary), progress);
+        if (boundary != NULL && strcmp(boundary, "target-not-executable") == 0 &&
+            nk_disc_id_is_non_retail_key(disc_id)) {
+            /* A homebrew program or unofficial disc jumped outside the code the analyzer found.
+               Usually that is code the program generated while it ran, as an emulator's JIT
+               does (#2145), but a wild pointer or an analyzer gap stops the same way, so the
+               card says "usually". Only code found ahead of time runs (the interpreter floor,
+               AGENTS.md Section 7). */
+            snprintf(message, sizeof(message),
+                     "The program jumped to code that Nakagawa did not find before it started. "
+                     "This is usually code a program generates while it runs, as an emulator's "
+                     "dynamic recompiler does. Nakagawa only runs code it found ahead of time, "
+                     "so it was stopped. %s", progress);
+        } else {
+            snprintf(message, sizeof(message),
+                     "The game needed %s that this version of Nakagawa can't run yet, so it was "
+                     "stopped. %s",
+                     player_runtime_stop_feature(boundary), progress);
+        }
         player_app_set_error(app, code, "Game stopped early", message,
                              "Back to library", VIEW_LIBRARY);
-        if (issue != 0) {
+        if (boundary != NULL && strcmp(boundary, "target-not-executable") == 0 &&
+            nk_disc_id_is_non_retail_key(disc_id)) {
+            snprintf(app->last_error.boundary_text, sizeof(app->last_error.boundary_text),
+                     "Stopped at %s: a jump outside the code Nakagawa found before the run "
+                     "started. Tracked in issue %u.", where, issue != 0 ? issue : 308u);
+        } else if (issue != 0) {
             snprintf(app->last_error.boundary_text, sizeof(app->last_error.boundary_text),
                      "Stopped at %s (not supported yet). A known gap, tracked in issue %u.",
                      where, issue);
