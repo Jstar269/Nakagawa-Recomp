@@ -405,11 +405,11 @@ Every index's sentence and menu line then comes within 3 % of the console's,
 and each sans-serif face's mean ink per letter within 2 %.
 
 The ink targets (`LETTER_INK` in `tools/test_ttf2pgf.py`) are one number per sans-serif face, measured on
-a PSP-3000's own font files that the maintainer read locally; no font bytes or glyph data are recorded. To
+a PSP-3000's own font files, read locally; no font bytes or glyph data are recorded. To
 reproduce a number, read the console's `ltn<N>.pgf` with the project's PGF reader (`tools/nk_core/fonts.py`),
 decode each glyph's 4-bit coverage samples for the 52 letters `A-Z` and `a-z`, divide each sample by 15, sum the
 samples of each glyph, and average over the 52 glyphs. The test applies the same procedure to the generated
-stand-in and requires a result within 4 % of the recorded number. The measured values are 68.5, 68.4, 104.5 and
+stand-in and requires a result within 2 % of the recorded number. The measured values are 68.5, 68.4, 104.5 and
 104.4 (indices 0, 2, 4 and 6) and 30.8, 30.8, 46.9 and 46.9 (indices 8, 10, 12 and 14).
 
 **Japanese: Noto Sans JP, with M PLUS 1p for one point.** The Japanese input is

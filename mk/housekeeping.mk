@@ -70,10 +70,10 @@ PROJECT_LATIN_STRIKE_ARGS := --ppem 20 --snap-overshoot 3 --embolden-x 4 --embol
 PROJECT_LATIN_SMALL_STRIKE_ARGS := --ppem 13 --snap-overshoot 3 --embolden-x 2 --embolden-advance 2 --nominal-size 448 --resolution 8192 --header-ascender 576 --header-descender -131
 # Per index: source face, PGF style, then that face's spacing (--tracking, eighths of a pixel), where
 # measured its digit advance (26.6 px), and its horizontal-stroke weight (--embolden-y, eighths of a
-# pixel). The weight puts each sans-serif face's ink per letter within 4 % of the console face's (#1300);
+# pixel). The weight puts each sans-serif face's ink per letter within 2 % of the console face's (#1300);
 # the serif faces keep none, because they already carry more ink than the console's. The bold sans-serif
 # faces are already at the largest --embolden-y, so their vertical strokes take one sub-sample more
-# --embolden-x than the strike's (a later flag wins); that puts their ink within 2 % of the console's.
+# --embolden-x than the strike's (a later flag wins) to reach that.
 PROJECT_LATIN_0_FACE := LiberationSans-Regular
 PROJECT_LATIN_1_FACE := LiberationSerif-Regular
 PROJECT_LATIN_2_FACE := LiberationSans-Italic

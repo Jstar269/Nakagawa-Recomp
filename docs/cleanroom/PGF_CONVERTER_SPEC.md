@@ -269,9 +269,11 @@ manifest in memory first and writes only after every stage succeeds.
     glyph's other points are untouched, and no hint program runs.
     *Project decision* (#1300), from a measurement: Liberation's round letters
     overshoot the baseline by 4 to 31 units of 2048 and the x-height and cap
-    height by 7 to 23. At the project's Latin sizes of 13 and 20 ppem that is
-    0.10 to 0.30 px, which rule 6 turns into a whole extra row at 2 or 3 of
-    15 coverage below the baseline, so in game text such as
+    height by 7 to 23. A depth of `d` units is `d * ppem / 2048` px: the
+    deepest, 31 units, is 0.30 px at 20 ppem and 0.20 px at 13, and any
+    depth past the first sub-scanline centre (1/16 px, rule 4) covers
+    samples in the next row. Rule 6 turns that into a whole extra row at 2
+    or 3 of 15 coverage below the baseline, so in game text such as
     `Reload? No save data found.` an `e`, `o`, `a`, `s`, `d`, `t` or `u` ends
     one row below an `R`, `l` or `n`. An overshoot of `N` eighths of a pixel
     or more is kept as drawn. The project's Latin fonts use `N = 3`: the

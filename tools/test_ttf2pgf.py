@@ -1552,13 +1552,13 @@ class ProjectLatinStrikeTests(unittest.TestCase):
 
     def test_sans_faces_carry_the_console_ink_per_letter(self) -> None:
         """#1300: the stand-ins' horizontal strokes were thinner than the console's, so game text
-        drawn with a stand-in looked light. Each sans-serif face is within 4 % of the console's ink."""
+        drawn with a stand-in looked light. Each sans-serif face is within 2 % of the console's ink."""
         letters = [ord(c) for c in string.ascii_letters]
         for index, target in self.LETTER_INK.items():
             with self.subTest(index=index):
                 glyphs = _glyph_map(self._convert(index).glyphs)
                 ink = sum(sum(glyphs[code].samples) for code in letters) / 15 / len(letters)
-                self.assertLessEqual(abs(ink - target) / target, 0.04, f"ink per letter {ink:.1f}")
+                self.assertLessEqual(abs(ink - target) / target, 0.02, f"ink per letter {ink:.1f}")
 
     def test_the_ellipsis_sits_on_the_line_of_the_full_stop(self) -> None:
         # No strike passes --baseline-ellipsis: every Liberation face already draws U+2026 there.
@@ -1655,6 +1655,20 @@ class OvershootSnapTests(CliRefusalMixin):
         curve = [(0, -20, True), (250, -20, False), (500, 300, True), (250, 1030, False)]
         self.assertEqual(ttf2pgf._snap_overshoot([curve], zones, threshold, ppem, upem),
                          [[(0, 0, True), (250, 0, False), (500, 300, True), (250, 1000, False)]])
+
+    def test_the_band_ends_just_short_of_n_eighths_of_a_pixel(self) -> None:
+        # At 16 ppem and 2048 units per em, 3/8 px is exactly 48 units: depth * 16 * 8 < 3 * 2048.
+        zones, upem, ppem = (0, 1000, 1400), 2048, 16
+        for depth, moves in ((47, True), (48, False)):
+            with self.subTest(depth=depth):
+                below = [(0, -depth, True), (100, -depth, True), (100, 500, True), (0, 500, True)]
+                above = [(0, 0, True), (100, 0, True), (100, 1000 + depth, True), (0, 1000 + depth, True)]
+                snapped = ttf2pgf._snap_overshoot([below, above], zones, 3, ppem, upem)
+                self.assertEqual(min(y for _x, y, _on in snapped[0]), 0 if moves else -depth)
+                self.assertEqual(max(y for _x, y, _on in snapped[1]), 1000 if moves else 1000 + depth)
+                # One sub-sample more widens the band past the same depth.
+                wider = ttf2pgf._snap_overshoot([below], zones, 4, ppem, upem)
+                self.assertEqual(min(y for _x, y, _on in wider[0]), 0)
 
     def test_the_option_is_recorded_and_absent_when_off(self) -> None:
         conversion = self._convert(13, snap_overshoot=3)
