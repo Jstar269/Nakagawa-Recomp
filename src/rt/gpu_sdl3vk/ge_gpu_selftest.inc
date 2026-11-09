@@ -7949,6 +7949,9 @@ static int coherence_run_twin_sync(void) {
  * depth equal ge.c on every path.
  * dst-read-ctest: the same op with the color test rejecting the second sprite, the shader's other
  * kill that the interlock variant's early depth test cannot undo.
+ * dst-read-feedback: a stencil state that reads its own writes, texturing from its own target. Its
+ * second sprite copies what the first drew, so its batch must start from a destination copy that
+ * holds the first sprite, and that copy is the texture: the op keeps the snapshot path.
  * dst-read-ztest: the blended pair under the depth test GEQUAL over a depth wall, with depth writes
  * off and on, and with the second sprite hidden by the first's depth write in the same batch: the
  * depth-tested translucent draw. On the interlock path colour and depth equal ge.c and the op took
@@ -8318,6 +8321,83 @@ static int coherence_run_dst_read_ctest(void) {
     return dro_kill_cell("dst-read-ctest", &st, 1, "colour-tested");
 }
 
+typedef struct DroTexVtx { float u, v; uint32_t rgba; float x, y, z; } DroTexVtx;
+
+/* dst-read-feedback: the draw-once stencil mask (NOTEQUAL against bit 7, REPLACE on depth pass, an
+ * 8888 target) texturing from its own target, texel for texel (REPLACE, nearest). The first sprite
+ * copies columns 0-15 to columns 16-31; the second, whose box meets the first's, copies columns
+ * 16-31, the first sprite's output, to columns 32-47. */
+static uint32_t dro_feedback_list(void) {
+    StpList l;
+    stp_begin(&l, DRO_BASE, 3u, 0);
+    stp_emit(&l, 0xDC, 3u | (0x80u << 8) | (0x80u << 16));
+    stp_emit(&l, 0xDD, 2u << 16);
+    stp_emit(&l, 0xE9, 0);
+    stp_emit(&l, 0x21, 0);
+    stp_emit(&l, 0xA0, DRO_BASE & 0x00FFFFFFu);
+    stp_emit(&l, 0xA8, 512u | ((DRO_BASE & 0xFF000000u) >> 8));
+    stp_emit(&l, 0xB8, 9u | (9u << 8));
+    stp_emit(&l, 0xC0, 0); stp_emit(&l, 0xC2, 0); stp_emit(&l, 0xC3, 3);
+    stp_emit(&l, 0xC6, 0); stp_emit(&l, 0xC7, 0);
+    stp_emit(&l, 0xC9, 3u);                                /* REPLACE, colour only */
+    stp_emit(&l, 0xCB, 0);
+    stp_emit(&l, 0x1E, 1);
+    stp_emit(&l, 0x12, 3u | (7u << 2) | (3u << 7) | (1u << 23));
+    DroTexVtx *v = (DroTexVtx *)SR_HOST(DRO_VERTS);
+    v[0] = (DroTexVtx){ 0.0f, 40.0f, 0xFFFFFFFFu, 16.0f, 40.0f, 0.0f };
+    v[1] = (DroTexVtx){ 16.0f, 72.0f, 0xFFFFFFFFu, 32.0f, 72.0f, 0.0f };
+    v[2] = (DroTexVtx){ 16.0f, 40.0f, 0xFFFFFFFFu, 32.0f, 40.0f, 0.0f };
+    v[3] = (DroTexVtx){ 32.0f, 72.0f, 0xFFFFFFFFu, 48.0f, 72.0f, 0.0f };
+    stp_emit(&l, 0x01, DRO_VERTS & 0x00FFFFFFu);
+    stp_emit(&l, 0x04, (6u << 16) | 4u);
+    stp_emit(&l, 0x1E, 0);
+    stp_emit(&l, 0x12, (7u << 2) | (3u << 7) | (1u << 23));
+    stp_end(&l);
+    return DRO_LIST;
+}
+
+static int coherence_run_dst_read_feedback(void) {
+    static const DroState st = { "8888 stencil, own target as texture", 3u, 0u, 0u, 0u, 0u, 0u };
+    static const DroBox none = { 0u, 0u, 0u, 0u };
+    uint8_t *gpu_out = (uint8_t *)malloc(FB_W * FB_H * 4u);
+    int ok = gpu_out != NULL;
+    GeState saved = *s_ge;
+    DroRun run = {0};
+    if (ok && !dro_run_both(&st, dro_feedback_list(), gpu_out, NULL, NULL, &run)) ok = 0;
+    if (ok) {
+        unsigned outside = 0, kept = 0, copied = 0;
+        const unsigned diff = dro_compare("dst-read-feedback", &st, gpu_out, (const uint8_t *)SR_HOST(DRO_BASE),
+                                          &none, &outside, &kept);
+        const uint32_t *sw = (const uint32_t *)SR_HOST(DRO_BASE);
+        for (uint32_t y = 40u; y < 72u; y++)
+            for (uint32_t x = 32u; x < 48u; x++)
+                if (sw[y * FB_W + x] != wrap_hash(0x3C1u + (y * FB_W + x) * 40503u)) copied++;
+        if (diff || copied < 64u) {
+            fprintf(stderr, "gpu coherence selftest [dst-read-feedback]: %u pixels differ from ge.c; ge.c's "
+                            "second sprite changed %u pixels (want 0, and at least 64) -- the second sprite "
+                            "must read what the first one drew\n", diff, copied);
+            ok = 0;
+        }
+        if (run.rmw_ops) {
+            fprintf(stderr, "gpu coherence selftest [dst-read-feedback]: the op took the interlock (%llu ops); "
+                            "an op whose destination-reading batch samples its own target keeps the snapshot "
+                            "path\n", run.rmw_ops);
+            ok = 0;
+        }
+        if (run.fallbacks) {
+            fprintf(stderr, "gpu coherence selftest [dst-read-feedback]: %llu primitives took the software "
+                            "fallback\n", run.fallbacks);
+            ok = 0;
+        }
+    }
+    *s_ge = saved;
+    coherence_reset_targets();
+    free(gpu_out);
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s equal to ge.c; the op kept the snapshot\n", "dst-read-feedback");
+    return ok;
+}
+
 /* dst-read-ztest: depth cleared to 0, then a depth-only clear-mode wall at z 25000 across part of
  * the overlap; then the blended pair under the depth test GEQUAL, the first sprite at z 20000 (hidden
  * behind the wall). Every kill in that op is the depth test itself, so the rmwzfb rule lets it take
@@ -8527,6 +8607,7 @@ static int coherence_run_dst_read(void) {
     if (!coherence_run_dst_read_mixed()) ok = 0;
     if (!coherence_run_dst_read_depth()) ok = 0;
     if (!coherence_run_dst_read_ctest()) ok = 0;
+    if (!coherence_run_dst_read_feedback()) ok = 0;
     if (!coherence_run_dst_read_ztest()) ok = 0;
     if (!coherence_run_dst_read_pins()) ok = 0;
     return ok;
@@ -8546,6 +8627,7 @@ static int coherence_run_dst_read_one(const char *name) {
     if (strcmp(name, "dst-read-mixed") == 0) return coherence_run_dst_read_mixed();
     if (strcmp(name, "dst-read-depth") == 0) return coherence_run_dst_read_depth();
     if (strcmp(name, "dst-read-ctest") == 0) return coherence_run_dst_read_ctest();
+    if (strcmp(name, "dst-read-feedback") == 0) return coherence_run_dst_read_feedback();
     if (strcmp(name, "dst-read-ztest") == 0) return coherence_run_dst_read_ztest();
     if (strcmp(name, "dst-read-pins") == 0)
         return coherence_run_dst_read_order() && coherence_run_dst_read_pins();

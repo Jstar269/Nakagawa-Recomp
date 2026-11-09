@@ -86,7 +86,9 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   so an op whose destination-reading batch writes depth and may still kill a fragment in the
   shader keeps the snapshot path (the alpha test, the color test, the transform-mode depth range
   when it is narrower than 0–65535, or a stencil-fail KEEP). So does an op whose stencil state
-  also blends in fixed function, every op into a widescreen wing canvas (which has no RMW objects), and
+  also blends in fixed function, an op whose destination-reading batch textures from its own
+  target (the destination copy is its texture), every op into a widescreen wing canvas (which has
+  no RMW objects), and
   every op while the host twin runs. The `submit-batch` and `gpu-timestamps` cells hold the
   snapshot path on every device, since they count and time snapshot copies. The interlock path is
   taken where the device has it; `SR_GPU_DST_READ` forces a path. On the snapshot path the

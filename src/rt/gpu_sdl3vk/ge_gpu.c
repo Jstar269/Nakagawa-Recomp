@@ -2217,7 +2217,10 @@ static int batch_reads_dst(const Batch *b) {
  * for every function but ALWAYS), the transform-mode depth range
  * when it is narrower than 0-65535, or a stencil-fail KEEP that can run. A batch that also blends
  * in fixed function (a stencil state with a native blend) has no colour attachment to blend into
- * there. An op holding such a batch keeps the snapshot path. */
+ * there. A batch that textures from its own target (tsnap) samples the destination copy, and
+ * submit_list takes that copy afresh before a destination-reading batch whose box meets what the
+ * op has drawn; an interlock op takes no copy, so its texels would be older than the primitives
+ * before it. An op holding such a batch keeps the snapshot path. */
 static int rmw_refuses(const Batch *b) {
 #if SR_GPU_DSTREAD_MUTANT == 3
     (void)b;
@@ -2225,6 +2228,7 @@ static int rmw_refuses(const Batch *b) {
 #else
     const uint32_t flags = (uint32_t)b->pc.cfg[0] >> 8;
     if (b->key.blend_on) return 1;
+    if (b->tsnap) return 1;
     if (!b->key.zwrite) return 0;
     if (((uint32_t)b->pc.cfg[1] & 7u) != 1u) return 1;
     if (flags & F_CTEST) return 1;
