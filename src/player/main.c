@@ -2009,6 +2009,26 @@ static void player_ui_nk_apply_action(PlayerApp *app,
         }
         return;
     }
+    if (action->kind == PLAYER_UI_ACTION_QUEUE) {
+        /* The build queue: the title page's Add to queue and Remove from
+           queue, and the queue screen's Up, Down, Remove and Resume. */
+        PlayerUiQueueOp op = (PlayerUiQueueOp)action->primary;
+        if (op == PLAYER_UI_QUEUE_RESUME) {
+            (void)player_app_build_queue_resume(app);
+        } else if (action->title_index < (size_t)app->game_count) {
+            int index = (int)action->title_index;
+            const char *disc_id = app->games[index].disc_id;
+            if (op == PLAYER_UI_QUEUE_ADD) {
+                (void)player_app_build_queue_add(app, index);
+            } else if (op == PLAYER_UI_QUEUE_REMOVE) {
+                (void)player_app_build_queue_remove(app, disc_id);
+            } else if (op == PLAYER_UI_QUEUE_EARLIER || op == PLAYER_UI_QUEUE_LATER) {
+                (void)player_app_build_queue_move(app, disc_id,
+                                                  op == PLAYER_UI_QUEUE_EARLIER ? -1 : 1);
+            }
+        }
+        return;
+    }
     if (action->kind == PLAYER_UI_ACTION_REBUILD) {
         /* Games an older Nakagawa built: the prompt, the library banner, the
            launch reminder and the title page's Rebuild. */

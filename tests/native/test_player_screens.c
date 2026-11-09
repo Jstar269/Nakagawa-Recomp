@@ -121,44 +121,44 @@ static const PlayerUiTitle k_titles[] = {
      "", "", "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Showcase Breakout", "TEST00008", "Needs setup", "",
      "Showcase profile-zero acceptance remains open.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Experimental Fixture", "TEST00006", "Experimental", "",
      "Source-owned compatibility fixture.", "", NULL, "", "", "",
      "RETRY PACKAGE CHECK", "◆", 0xC29AF4FFu,
      PLAYER_UI_PRIMARY_RETRY_PACKAGE_CHECK, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Untested Fixture", "TEST00005", "Untested", "",
      "No compatibility record exists.", "", NULL, "", "", "",
      "BUILD PACKAGE", "?", 0xC29AF4FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Phase Five", "TEST00004", "Needs setup", "",
      "Player launch stops at the package boundary.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_WONT_BOOT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
 };
 
 /* A library with the demos that come with Nakagawa among the user's games, in
@@ -169,25 +169,25 @@ static const PlayerUiTitle k_demo_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
 };
 
 /* The demos alone: a first start with nothing added yet. */
@@ -197,13 +197,13 @@ static const PlayerUiTitle k_demo_only_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
 };
 
 /* What-to-expect cards: a player tier with plain words, with known issues, the
@@ -261,7 +261,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_TITLE_AUTHENTIC, FLOW_PAGE_TITLE_RENDER,
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
-               FLOW_PAGE_STEAM_BLOCKED,
+               FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_QUEUE, FLOW_PAGE_QUEUE_PAUSED,
                FLOW_CONSENT_FULL, FLOW_COUNT } FlowCase;
 
 /* The window size the game-found and Settings cases lay out for. */
@@ -1016,6 +1016,27 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         steam.logical_height = g_flow_height;
         return player_ui_screen_steam(ui, &steam);
     }
+    if (which == FLOW_PAGE_QUEUE || which == FLOW_PAGE_QUEUE_PAUSED) {
+        /* The build queue: the one building, a full page of games that wait,
+           the page line and its buttons, and (paused) Resume. */
+        static const PlayerUiQueueRow rows[PLAYER_UI_QUEUE_ROW_CAP] = {
+            {"Synthetic Showcase Scene with a Long Name That Has to Be Cut Short",
+             "Building 40%", 0u, true, false, false},
+            {"Synthetic Showcase Breakout", "Next", 1u, false, false, true},
+            {"Synthetic Experimental Fixture", "Waiting", 2u, false, true, true},
+            {"Synthetic Untested Fixture", "Waiting", 3u, false, true, true}
+        };
+        PlayerUiQueueModel queue;
+        memset(&queue, 0, sizeof(queue));
+        queue.rows = rows;
+        queue.row_count = PLAYER_UI_QUEUE_ROW_CAP;
+        queue.first_row = 0u;
+        queue.total = 9u;
+        queue.paused = which == FLOW_PAGE_QUEUE_PAUSED;
+        queue.logical_width = g_flow_width;
+        queue.logical_height = g_flow_height;
+        return player_ui_screen_queue(ui, &queue);
+    }
     if (which == FLOW_PAGE_STOP) {
         PlayerUiStopModel stop;
         memset(&stop, 0, sizeof(stop));
@@ -1088,6 +1109,8 @@ static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
             ? "Building uses most of your PC's power for a few minutes, so other apps "
               "may feel slower until it finishes."
             : NULL;
+        build.queue_line = which == FLOW_BUILD_PARTS
+            ? "Then 12 more games from the build queue." : NULL;
         build.elapsed_ms = 83400u;
         build.lines[0] = "[compile] 1204 of 3311 functions";
         build.lines[1] = "[compile] chunk 12 of 31";
@@ -1381,6 +1404,18 @@ static bool build_library_golden(char *out, size_t cap, size_t *used) {
     model.title_count = sizeof(k_demo_titles) / sizeof(k_demo_titles[0]);
     nk_ui_focus(ui, PLAYER_UI_ID_LIBRARY_ITEM(1u));
     if (!append_case(out, cap, used, "library-demos-with-games", ui, &model, NULL)) {
+        nk_ui_destroy(ui);
+        return false;
+    }
+    /* The build queue's line: its count and Queue, which opens it. */
+    nk_ui_focus(ui, 0u);
+    model.titles = k_titles;
+    model.title_count = sizeof(k_titles) / sizeof(k_titles[0]);
+    model.page_size = player_ui_library_page_size(1280.0f, 800.0f, &model.columns);
+    model.page_label = "Page 1 of 2";
+    model.rebuild_notice = "Building 1 of 3";
+    model.rebuild_notice_offers_queue = true;
+    if (!append_case(out, cap, used, "library-build-queue", ui, &model, NULL)) {
         nk_ui_destroy(ui);
         return false;
     }
@@ -1872,7 +1907,9 @@ static bool build_title_golden(char *out, size_t cap, size_t *used) {
             {FLOW_WIZ_VERIFY, "wizard-verify"},
             {FLOW_WIZ_EXPERIMENTAL, "wizard-experimental"},
             {FLOW_WIZ_FONTS, "wizard-fonts"}, {FLOW_WIZ_READY, "wizard-ready"},
-            {FLOW_WIZ_STAGED, "wizard-staged"}, {FLOW_WIZ_OPTIONS, "wizard-options"}
+            {FLOW_WIZ_STAGED, "wizard-staged"}, {FLOW_WIZ_OPTIONS, "wizard-options"},
+            {FLOW_PAGE_QUEUE, "flow-build-queue"},
+            {FLOW_PAGE_QUEUE_PAUSED, "flow-build-queue-paused"}
         };
         for (size_t i = 0u; i < sizeof(flows) / sizeof(flows[0]); ++i) {
             g_flow_case = flows[i].which;
@@ -1883,6 +1920,30 @@ static bool build_title_golden(char *out, size_t cap, size_t *used) {
             }
         }
         g_flow_case = FLOW_NONE;
+    }
+    {
+        /* The build queue on a game's page: Add to queue beside BUILD PACKAGE,
+           then Remove from queue and its place while it waits. */
+        PlayerUiTitle queued = k_titles[1];
+        PlayerUiTitleModel queued_model = model;
+        queued.queue_add_offered = true;
+        queued_model.title = &queued;
+        nk_ui_focus(ui, PLAYER_UI_ID_TITLE_PRIMARY);
+        if (!append_case(out, cap, used, "title-queue-add", ui, NULL, &queued_model)) {
+            nk_ui_destroy(ui);
+            return false;
+        }
+        queued.queue_add_offered = false;
+        queued.queue_remove_offered = true;
+        queued.library_status = "Queued 2 of 3";
+        queued.library_status_detail = "Place in the build queue: 2 of 3. Waiting in the "
+                                       "build queue. It builds when its turn comes.";
+        queued.status_marker = "\xE2\x97\x86";
+        queued.status_rgba = nk_ui_theme_n1()->info;
+        if (!append_case(out, cap, used, "title-queue-waiting", ui, NULL, &queued_model)) {
+            nk_ui_destroy(ui);
+            return false;
+        }
     }
     {
         /* The About page, with a fixed build date (SOURCE_DATE_EPOCH-style). */
@@ -2027,7 +2088,7 @@ static void test_router(void) {
           !nk_ui_router_push(router, (PlayerUiRoute)0) &&
           !nk_ui_router_replace(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_REMOVE + 1)) &&
           !nk_ui_router_push(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_REMOVE + 1)) &&
-          !nk_ui_router_push(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_STEAM + 1)),
+          !nk_ui_router_push(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_QUEUE + 1)),
           "router refuses routes it does not draw");
     CHECK(nk_ui_router_current(router) == PLAYER_UI_ROUTE_ABOUT &&
           nk_ui_router_depth(router) == 1u, "a refused route leaves the stack alone");
@@ -5719,6 +5780,286 @@ static void test_rebuild_prompt_reminder_and_banner(void) {
     }
 }
 
+static PlayerUiAction activate_queue_button(NkUiId id, const PlayerUiQueueModel *model) {
+    NkUiConfig config;
+    NkUiEvent activate;
+    NkUi *ui;
+    PlayerUiAction result = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    ui = screen_ui_create(&config);
+    if (ui == NULL) return result;
+    set_test_viewport(ui, 1280, 800);
+    /* One frame lays the rows out, so the focus lands on a drawn button. */
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_queue(ui, model);
+    (void)nk_ui_end(ui);
+    nk_ui_focus(ui, id);
+    memset(&activate, 0, sizeof(activate));
+    activate.type = NK_UI_EV_ACTIVATE;
+    activate.down = true;
+    nk_ui_push_event(ui, &activate);
+    nk_ui_begin(ui, 0.0);
+    result = player_ui_screen_queue(ui, model);
+    (void)nk_ui_end(ui);
+    nk_ui_destroy(ui);
+    return result;
+}
+
+static bool queue_op_is(PlayerUiAction action, PlayerUiQueueOp op, size_t title_index) {
+    return action.kind == PLAYER_UI_ACTION_QUEUE && (PlayerUiQueueOp)action.primary == op &&
+           action.title_index == title_index;
+}
+
+/* The build queue: the queue screen lists the one building first, then the
+   games that wait with Up, Down and Remove, a page at a time, and Resume when
+   paused; the library line opens it; the title page offers Add to queue beside
+   BUILD PACKAGE and Remove from queue while the game waits; the build card
+   says how many follow. */
+static void test_build_queue_screens(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const PlayerUiQueueRow rows[3] = {
+        {"Synthetic Showcase Scene", "Building 40%", 4u, true, false, false},
+        {"Synthetic Showcase Breakout", "Next", 5u, false, false, true},
+        {"Synthetic Experimental Fixture", "Waiting", 6u, false, true, false}
+    };
+    NkUiConfig config;
+    NkUi *ui;
+    NkUiTextBackend text = screen_test_text_backend();
+    PlayerUiQueueModel queue;
+    PlayerUiAction action;
+    char expect[128];
+    const NkUiTheme *theme = nk_ui_theme_n1();
+    memset(&queue, 0, sizeof(queue));
+    queue.rows = rows;
+    queue.row_count = 3u;
+    queue.total = 3u;
+    queue.logical_width = 1280.0f;
+    queue.logical_height = 800.0f;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create the build queue UI");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_queue(ui, &queue);
+        (void)nk_ui_end(ui);
+    }
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"3 games in the queue\"") != NULL, "the queue names its count");
+    {
+        const char *building = strstr(dump, "\"Synthetic Showcase Scene\"");
+        const char *next = strstr(dump, "\"Synthetic Showcase Breakout\"");
+        const char *waiting = strstr(dump, "\"Synthetic Experimental Fixture\"");
+        CHECK(building != NULL && next != NULL && waiting != NULL && building < next &&
+                  next < waiting,
+              "the queue lists the one building first, then the rest in build order");
+    }
+    (void)snprintf(expect, sizeof(expect), "%08X \"BUILDING 40%%\"",
+                   (unsigned)theme->accent_dark);
+    CHECK(strstr(dump, expect) != NULL, "the one building shows its progress in brand blue");
+    CHECK(strstr(dump, "\"NEXT\"") != NULL && strstr(dump, "\"WAITING\"") != NULL,
+          "each game that waits says whether it is next");
+    CHECK(strstr(dump, "One game builds at a time, in this order.") != NULL,
+          "the queue says it builds one game at a time");
+    CHECK(strstr(dump, "\"PAGE\"") == NULL && strstr(dump, "\"RESUME\"") == NULL &&
+              strstr(dump, "\"LATER GAMES\"") == NULL,
+          "one page and a running queue need no pager and no Resume");
+    nk_ui_destroy(ui);
+
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_DOWN_BASE + 1u, &queue),
+                      PLAYER_UI_QUEUE_LATER, 5u), "Down moves that game one place later");
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_UP_BASE + 2u, &queue),
+                      PLAYER_UI_QUEUE_EARLIER, 6u), "Up moves that game one place earlier");
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_REMOVE_BASE + 2u, &queue),
+                      PLAYER_UI_QUEUE_REMOVE, 6u), "Remove takes that game out");
+    CHECK(activate_queue_button(PLAYER_UI_ID_QUEUE_UP_BASE + 1u, &queue).kind ==
+              PLAYER_UI_ACTION_NONE,
+          "the next game cannot move past the one building");
+    CHECK(activate_queue_button(PLAYER_UI_ID_QUEUE_DOWN_BASE + 2u, &queue).kind ==
+              PLAYER_UI_ACTION_NONE, "the last game cannot move later");
+    CHECK(activate_queue_button(PLAYER_UI_ID_QUEUE_REMOVE_BASE + 0u, &queue).kind ==
+              PLAYER_UI_ACTION_NONE,
+          "the one building has no Remove (Cancel build stops it)");
+    CHECK(activate_queue_button(PLAYER_UI_ID_QUEUE_BACK, &queue).kind == PLAYER_UI_ACTION_BACK,
+          "Back leaves the queue");
+
+    /* Paused, on the second of three pages. */
+    queue.paused = true;
+    queue.first_row = 4u;
+    queue.total = 9u;
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_RESUME, &queue),
+                      PLAYER_UI_QUEUE_RESUME, 0u), "Resume starts a paused queue");
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAGE_BACK, &queue),
+                      PLAYER_UI_QUEUE_PAGE_BACK, 0u), "Earlier games turns back a page");
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAGE_NEXT, &queue),
+                      PLAYER_UI_QUEUE_PAGE_NEXT, 0u), "Later games turns on a page");
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create the paused build queue UI");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_queue(ui, &queue);
+        (void)nk_ui_end(ui);
+    }
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"GAMES 5-7 OF 9, IN BUILD ORDER\"") != NULL,
+          "a page names which games it shows");
+    (void)snprintf(expect, sizeof(expect), "%08X \"Paused: a build could not start.",
+                   (unsigned)theme->warning);
+    CHECK(strstr(dump, expect) != NULL, "a paused queue says why, in the warning colour");
+    CHECK(strstr(dump, "\"RESUME\"") != NULL, "a paused queue offers Resume");
+    nk_ui_destroy(ui);
+    {
+        NkUiRouter *router = nk_ui_router_create();
+        NkUiEvent back;
+        CHECK(router != NULL, "router allocates");
+        if (router == NULL) return;
+        memset(&back, 0, sizeof(back));
+        back.type = NK_UI_EV_BACK;
+        CHECK(nk_ui_router_current(router) == PLAYER_UI_ROUTE_LIBRARY &&
+                  nk_ui_router_push(router, PLAYER_UI_ROUTE_QUEUE) &&
+                  nk_ui_router_handle_event(router, &back) &&
+                  nk_ui_router_current(router) == PLAYER_UI_ROUTE_LIBRARY,
+              "Back (Esc or B) closes the queue over the library");
+        nk_ui_router_destroy(router);
+    }
+
+    /* The library line opens the queue, and keeps the first card's focus. */
+    {
+        PlayerUiTitle titles[1];
+        PlayerUiLibraryModel library;
+        memset(titles, 0, sizeof(titles));
+        titles[0].title = "Synthetic Showcase Breakout";
+        titles[0].disc_id = "TEST00008";
+        titles[0].library_status = "Queued 2 of 3";
+        memset(&library, 0, sizeof(library));
+        library.titles = titles;
+        library.title_count = 1u;
+        library.columns = 4u;
+        library.page_size = 8u;
+        library.logical_width = 1280.0f;
+        library.logical_height = 800.0f;
+        library.rebuild_notice = "Building 1 of 3";
+        library.rebuild_notice_offers_queue = true;
+        action = activate_library_button(PLAYER_UI_ID_LIBRARY_QUEUE, &library);
+        CHECK(queue_op_is(action, PLAYER_UI_QUEUE_OPEN, 0u), "the library's Queue opens it");
+        ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create the library queue line UI");
+        if (ui == NULL) return;
+        set_test_viewport(ui, 1280, 800);
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_library(ui, &library);
+            (void)nk_ui_end(ui);
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        CHECK(strstr(dump, "\"Building 1 of 3\"") != NULL && strstr(dump, "\"QUEUE\"") != NULL,
+              "the library line shows the queue's count and Queue");
+        CHECK(strstr(dump, "\"QUEUED 2 OF 3\"") != NULL, "a queued card shows its place");
+        CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_LIBRARY_ITEM(0u),
+              "the first card keeps the default focus");
+        nk_ui_destroy(ui);
+    }
+
+    /* The title page: BUILD PACKAGE stays the main action; Add to queue sits
+       beside it, and becomes Remove from queue while the game waits. */
+    {
+        PlayerUiTitle title = k_titles[1];
+        PlayerUiTitleModel detail;
+        title.queue_add_offered = true;
+        memset(&detail, 0, sizeof(detail));
+        detail.title = &title;
+        detail.title_index = 5u;
+        detail.logical_width = 1280.0f;
+        detail.logical_height = 800.0f;
+        action = activate_title_button(PLAYER_UI_ID_TITLE_QUEUE, &detail);
+        CHECK(queue_op_is(action, PLAYER_UI_QUEUE_ADD, 5u), "Add to queue queues that game");
+        action = activate_title_button(PLAYER_UI_ID_TITLE_PRIMARY, &detail);
+        CHECK(action.kind == PLAYER_UI_ACTION_PRIMARY &&
+                  action.primary == PLAYER_UI_PRIMARY_BUILD,
+              "BUILD PACKAGE still builds it now");
+        ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create the Add to queue title UI");
+        if (ui == NULL) return;
+        set_test_viewport(ui, 1280, 800);
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_title(ui, &detail);
+            (void)nk_ui_end(ui);
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        {
+            const char *build = strstr(dump, "\"BUILD PACKAGE\"");
+            const char *add = strstr(dump, "\"ADD TO QUEUE\"");
+            CHECK(build != NULL && add != NULL && build < add,
+                  "Add to queue sits after BUILD PACKAGE");
+        }
+        CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY,
+              "BUILD PACKAGE keeps the default focus");
+        title.queue_add_offered = false;
+        title.queue_remove_offered = true;
+        title.library_status = "Queued 2 of 3";
+        title.library_status_detail = "Place in the build queue: 2 of 3. Waiting in the "
+                                      "build queue. It builds when its turn comes.";
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_title(ui, &detail);
+            (void)nk_ui_end(ui);
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        CHECK(strstr(dump, "\"REMOVE FROM QUEUE\"") != NULL &&
+                  strstr(dump, "\"ADD TO QUEUE\"") == NULL,
+              "a game that waits offers Remove from queue");
+        CHECK(strstr(dump, "Place in the build queue: 2 of 3.") != NULL,
+              "the package card gives its place in the queue");
+        nk_ui_destroy(ui);
+        action = activate_title_button(PLAYER_UI_ID_TITLE_QUEUE, &detail);
+        CHECK(queue_op_is(action, PLAYER_UI_QUEUE_REMOVE, 5u),
+              "Remove from queue takes that game out");
+    }
+
+    /* The build card says how many games the queue builds after this one. */
+    {
+        PlayerUiBuildModel build;
+        memset(&build, 0, sizeof(build));
+        build.title_line = "Synthetic Showcase Scene (TEST00007)";
+        build.stage = 2;
+        build.fraction = 0.25f;
+        build.message = "Compiling part 4 of 12";
+        build.queue_line = "Then 2 more games from the build queue.";
+        build.logical_width = 1280.0f;
+        build.logical_height = 800.0f;
+        ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create the build card UI");
+        if (ui == NULL) return;
+        set_test_viewport(ui, 1280, 800);
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_build(ui, &build);
+            (void)nk_ui_end(ui);
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)snprintf(expect, sizeof(expect), "%08X \"Then 2 more games from the build queue.\"",
+                       (unsigned)theme->muted);
+        CHECK(strstr(dump, expect) != NULL, "the build card names what the queue builds next");
+        build.built = true;
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_build(ui, &build);
+            (void)nk_ui_end(ui);
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        CHECK(strstr(dump, "from the build queue") == NULL,
+              "a written package's card drops the queue line");
+        nk_ui_destroy(ui);
+    }
+}
+
 static bool disc_verify_op_is(PlayerUiAction action, PlayerUiDiscVerifyOp op) {
     return action.kind == PLAYER_UI_ACTION_DISC_VERIFY &&
            (PlayerUiDiscVerifyOp)action.primary == op;
@@ -6021,6 +6362,7 @@ int main(int argc, char **argv) {
     test_outcome_lines_take_their_colour();
     test_stop_game_asks_first();
     test_rebuild_prompt_reminder_and_banner();
+    test_build_queue_screens();
     test_disc_verify_line_badge_and_note();
     test_binding_labels_fit();
     test_input_chip_words();

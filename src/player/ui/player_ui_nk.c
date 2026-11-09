@@ -238,8 +238,20 @@ struct PlayerUiNk {
     char rebuild_notice[96];
     char library_notice[448];   /* the library file's notice and the drop summary together */
     char verify_notice[96];     /* the library's disc check line */
-    /* A rebuilding card's status word with its progress ("Rebuilding 40%"). */
+    /* A rebuilding card's status word with its progress ("Rebuilding 40%"),
+       or a queued card's with its place ("Queued 2 of 4"). */
     char rebuild_word[PLAYER_UI_TITLE_CAP][32];
+    /* A queued card's sentence with its place in the build queue. */
+    char queue_detail[PLAYER_UI_TITLE_CAP][160];
+    /* The build queue screen (PLAYER_UI_ROUTE_QUEUE): its page, its rows, and
+       the game whose button keeps focus after a move or a removal. */
+    size_t queue_first;
+    PlayerUiQueueRow queue_rows[PLAYER_UI_QUEUE_ROW_CAP];
+    char queue_status[PLAYER_UI_QUEUE_ROW_CAP][32];
+    char queue_follow_disc[MAX_DISC_ID_LEN];
+    NkUiId queue_follow_base;
+    bool queue_follow_back;
+    char build_queue_line[96];   /* the build card's "2 more games wait..." */
     /* After a removal the library focuses the tile that took its place. */
     bool library_focus_pending;
     size_t library_focus_index;
@@ -1383,6 +1395,150 @@ static PlayerUiAction player_ui_render_developer_log(PlayerUiNk *player, PlayerA
     return player_ui_screen_developer_log(player->ui, &model);
 }
 
+/* The build queue screen's games: the one building, then the ones that wait,
+   in queue order, as indices into app->rebuild_queue.entries. A game no longer
+   in the library is left out (the queue skips it). */
+static size_t player_ui_queue_list(const PlayerApp *app, int *list, size_t cap) {
+    const PlayerRebuildQueue *queue = &app->rebuild_queue;
+    size_t count = 0u;
+    if (!queue->active) return 0u;
+    for (int pass = 0; pass < 2; ++pass) {
+        PlayerRebuildState want = pass == 0 ? PLAYER_REBUILD_ACTIVE : PLAYER_REBUILD_PENDING;
+        for (int i = 0; i < queue->count && count < cap; ++i) {
+            if (queue->entries[i].state != want ||
+                player_app_find_game_by_disc_id(app, queue->entries[i].disc_id) < 0) {
+                continue;
+            }
+            list[count++] = i;
+        }
+    }
+    return count;
+}
+
+static size_t player_ui_queue_find(const PlayerApp *app, const int *list, size_t total,
+                                   const char *disc_id) {
+    for (size_t i = 0u; i < total; ++i) {
+        if (strcmp(app->rebuild_queue.entries[list[i]].disc_id, disc_id) == 0) return i;
+    }
+    return total;
+}
+
+/* The build queue (PLAYER_UI_ROUTE_QUEUE): a page of rows, and after Up,
+   Down or Remove the focus stays with the game it moved (or, after a
+   removal, the next game's Remove). The changes themselves go to main.c. */
+static PlayerUiAction player_ui_render_queue(PlayerUiNk *player, const PlayerApp *app,
+                                             NkUiScale scale) {
+    static int list[MAX_LIBRARY_GAMES];
+    const PlayerRebuildQueue *queue = &app->rebuild_queue;
+    PlayerUiQueueModel model;
+    PlayerUiAction result;
+    size_t total = player_ui_queue_list(app, list, MAX_LIBRARY_GAMES);
+    size_t follow = total;
+    size_t shown;
+    if (player->queue_follow_disc[0] != '\0') {
+        follow = player_ui_queue_find(app, list, total, player->queue_follow_disc);
+        if (follow < total) player->queue_first = follow - follow % PLAYER_UI_QUEUE_ROW_CAP;
+    }
+    if (player->queue_first >= total) {
+        player->queue_first = total > 0u
+            ? (total - 1u) - (total - 1u) % PLAYER_UI_QUEUE_ROW_CAP : 0u;
+    }
+    shown = total - player->queue_first;
+    if (shown > PLAYER_UI_QUEUE_ROW_CAP) shown = PLAYER_UI_QUEUE_ROW_CAP;
+    for (size_t r = 0u; r < shown; ++r) {
+        size_t at = player->queue_first + r;
+        const PlayerRebuildEntry *entry = &queue->entries[list[at]];
+        int game = player_app_find_game_by_disc_id(app, entry->disc_id);
+        PlayerUiQueueRow *row = &player->queue_rows[r];
+        bool first_waiting = at == 0u ||
+            (at == 1u && queue->entries[list[0]].state == PLAYER_REBUILD_ACTIVE);
+        memset(row, 0, sizeof(*row));
+        row->title = app->games[game].title_name[0] ? app->games[game].title_name
+                                                    : app->games[game].disc_id;
+        row->title_index = (size_t)game;
+        row->building = entry->state == PLAYER_REBUILD_ACTIVE;
+        if (row->building) {
+            float fraction = app->build_session.is_building &&
+                strcmp(app->build_session.disc_id, entry->disc_id) == 0
+                ? package_builder_compile_fraction(&app->build_session) : -1.0f;
+            if (fraction >= 0.0f) {
+                snprintf(player->queue_status[r], sizeof(player->queue_status[r]),
+                         "Building %d%%", (int)(fraction * 100.0f + 0.5f));
+            } else {
+                snprintf(player->queue_status[r], sizeof(player->queue_status[r]), "%s",
+                         "Building");
+            }
+        } else {
+            snprintf(player->queue_status[r], sizeof(player->queue_status[r]), "%s",
+                     first_waiting ? (queue->paused ? "Paused" : "Next") : "Waiting");
+        }
+        row->status = player->queue_status[r];
+        row->can_move_up = !row->building && at > 0u &&
+            queue->entries[list[at - 1u]].state == PLAYER_REBUILD_PENDING;
+        row->can_move_down = !row->building && at + 1u < total;
+    }
+    if (follow < total && follow >= player->queue_first &&
+        follow < player->queue_first + shown) {
+        const PlayerUiQueueRow *row = &player->queue_rows[follow - player->queue_first];
+        NkUiId slot = (NkUiId)(follow - player->queue_first);
+        NkUiId base = player->queue_follow_base;
+        if (base == PLAYER_UI_ID_QUEUE_UP_BASE && !row->can_move_up) {
+            base = row->can_move_down ? PLAYER_UI_ID_QUEUE_DOWN_BASE
+                                      : PLAYER_UI_ID_QUEUE_REMOVE_BASE;
+        } else if (base == PLAYER_UI_ID_QUEUE_DOWN_BASE && !row->can_move_down) {
+            base = row->can_move_up ? PLAYER_UI_ID_QUEUE_UP_BASE
+                                    : PLAYER_UI_ID_QUEUE_REMOVE_BASE;
+        }
+        nk_ui_focus(player->ui, row->building ? PLAYER_UI_ID_QUEUE_BACK : base + slot);
+    } else if (player->queue_follow_disc[0] != '\0' || player->queue_follow_back) {
+        nk_ui_focus(player->ui, PLAYER_UI_ID_QUEUE_BACK);
+    }
+    player->queue_follow_disc[0] = '\0';
+    player->queue_follow_back = false;
+    memset(&model, 0, sizeof(model));
+    model.rows = player->queue_rows;
+    model.row_count = shown;
+    model.first_row = player->queue_first;
+    model.total = total;
+    model.paused = queue->active && queue->paused;
+    model.logical_width = scale.logical_w;
+    model.logical_height = scale.logical_h;
+    result = player_ui_screen_queue(player->ui, &model);
+    if (result.kind == PLAYER_UI_ACTION_QUEUE) {
+        PlayerUiQueueOp op = (PlayerUiQueueOp)result.primary;
+        size_t at = result.title_index < (size_t)app->game_count
+            ? player_ui_queue_find(app, list, total, app->games[result.title_index].disc_id)
+            : total;
+        if (op == PLAYER_UI_QUEUE_PAGE_BACK || op == PLAYER_UI_QUEUE_PAGE_NEXT) {
+            if (op == PLAYER_UI_QUEUE_PAGE_BACK && player->queue_first >= PLAYER_UI_QUEUE_ROW_CAP) {
+                player->queue_first -= PLAYER_UI_QUEUE_ROW_CAP;
+            } else if (op == PLAYER_UI_QUEUE_PAGE_NEXT &&
+                       player->queue_first + PLAYER_UI_QUEUE_ROW_CAP < total) {
+                player->queue_first += PLAYER_UI_QUEUE_ROW_CAP;
+            }
+            result.kind = PLAYER_UI_ACTION_NONE;
+        } else if ((op == PLAYER_UI_QUEUE_EARLIER || op == PLAYER_UI_QUEUE_LATER) && at < total) {
+            snprintf(player->queue_follow_disc, sizeof(player->queue_follow_disc), "%s",
+                     queue->entries[list[at]].disc_id);
+            player->queue_follow_base = op == PLAYER_UI_QUEUE_EARLIER
+                ? PLAYER_UI_ID_QUEUE_UP_BASE : PLAYER_UI_ID_QUEUE_DOWN_BASE;
+        } else if (op == PLAYER_UI_QUEUE_REMOVE && at < total) {
+            /* The next game's Remove takes the focus, or the one before. */
+            size_t next = at + 1u < total ? at + 1u : at > 0u ? at - 1u : total;
+            if (next < total) {
+                snprintf(player->queue_follow_disc, sizeof(player->queue_follow_disc), "%s",
+                         queue->entries[list[next]].disc_id);
+                player->queue_follow_base = PLAYER_UI_ID_QUEUE_REMOVE_BASE;
+            } else {
+                player->queue_follow_back = true;
+            }
+        } else if (op == PLAYER_UI_QUEUE_RESUME) {
+            player->queue_follow_back = true;
+        }
+    }
+    return result;
+}
+
 static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
                                             NkUiScale scale, double now_s) {
     PlayerUiAction none = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
@@ -1432,6 +1588,22 @@ static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
             model.lines[model.line_count++] = package_builder_get_output_line(build, i);
         }
         model.now_s = player_app_reduce_motion(app) ? 0.0 : now_s;
+        {
+            int waiting = 0;
+            for (int i = 0; app->rebuild_queue.active && i < app->rebuild_queue.count; ++i) {
+                if (app->rebuild_queue.entries[i].state == PLAYER_REBUILD_PENDING) waiting++;
+            }
+            if (waiting > 0) {
+                if (waiting == 1) {
+                    snprintf(player->build_queue_line, sizeof(player->build_queue_line), "%s",
+                             "Then 1 more game from the build queue.");
+                } else {
+                    snprintf(player->build_queue_line, sizeof(player->build_queue_line),
+                             "Then %d more games from the build queue.", waiting);
+                }
+                model.queue_line = player->build_queue_line;
+            }
+        }
         model.logical_width = scale.logical_w;
         model.logical_height = scale.logical_h;
         return player_ui_screen_build(player->ui, &model);
@@ -2519,16 +2691,29 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
     bool older = !starting && !running && player_app_rebuild_card(app, game, &rebuild);
     out->rebuild_offered = false;
     if (older) {
+        bool queued = !rebuild.rebuilding && rebuild.queue_place > 0;
         if (rebuild.rebuilding && rebuild.fraction >= 0.0f) {
             snprintf(player->rebuild_word[index], sizeof(player->rebuild_word[index]),
                      "%s %d%%", rebuild.word, (int)(rebuild.fraction * 100.0f + 0.5f));
+            out->library_status = player->rebuild_word[index];
+        } else if (queued) {
+            snprintf(player->rebuild_word[index], sizeof(player->rebuild_word[index]),
+                     "%s %d of %d", rebuild.word, rebuild.queue_place, rebuild.queue_total);
             out->library_status = player->rebuild_word[index];
         } else {
             out->library_status = rebuild.word;
         }
         out->library_status_detail = rebuild.detail;
-        out->status_rgba = rebuild.rebuilding ? PLAYER_UI_INFO : PLAYER_UI_WARNING;
-        out->status_marker = rebuild.rebuilding ? "◆" : "▲";
+        if (queued) {
+            snprintf(player->queue_detail[index], sizeof(player->queue_detail[index]),
+                     "Place in the build queue: %d of %d. %s", rebuild.queue_place,
+                     rebuild.queue_total, rebuild.detail);
+            out->library_status_detail = player->queue_detail[index];
+        }
+        /* A first build that waits or runs is news, not a warning. */
+        bool calm = rebuild.rebuilding || (queued && rebuild.kind == PLAYER_QUEUE_BUILD);
+        out->status_rgba = calm ? PLAYER_UI_INFO : PLAYER_UI_WARNING;
+        out->status_marker = calm ? "◆" : "▲";
         if (rebuild.rebuilding) out->package_state = PLAYER_UI_PACKAGE_BUILDING;
         out->rebuild_offered = rebuild.can_rebuild && package_ready && !app->launch_pending &&
                                !app->is_game_running && !app->build_session.is_building;
@@ -2604,8 +2789,10 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         out->primary_action_enabled = true;
         primary = PLAYER_UI_PRIMARY_STOP_GAME;
     } else if (older && rebuild.rebuilding) {
-        /* Its package is about to be replaced; the package card says so. */
-        out->primary_action_label = "REBUILDING…";
+        /* Its package is about to be replaced (or written for the first time,
+           from the build queue); the package card says so. */
+        out->primary_action_label = rebuild.kind == PLAYER_QUEUE_BUILD ? "BUILDING…"
+                                                                       : "REBUILDING…";
     } else if (player_app_title_60hz_blocked(app, index)) {
         /* 60 FPS game logic is on but its package is gone: neither variant
            builds or plays until the user turns it off or brings it back. */
@@ -2642,6 +2829,17 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         out->primary_action_label = "RUNTIME REQUIRED";
     } else {
         out->primary_action_label = "PREPARATION UNAVAILABLE";
+    }
+    {
+        /* The build queue: a game BUILD PACKAGE would build can wait its turn
+           instead, and one that waits can leave. */
+        int queue_total = 0;
+        int queue_place = player_app_build_queue_place(app, game->disc_id, &queue_total);
+        bool building_this = app->build_session.is_building &&
+            strcmp(app->build_session.disc_id, game->disc_id) == 0;
+        out->queue_add_offered = queue_place == 0 && primary == PLAYER_UI_PRIMARY_BUILD &&
+                                 !building_this;
+        out->queue_remove_offered = queue_place > 0 && !(older && rebuild.rebuilding);
     }
     out->primary_action = primary;
     return primary;
@@ -3166,6 +3364,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                                                  sizeof(player->rebuild_notice),
                                                  &model.rebuild_notice_offers_all);
             model.rebuild_notice = player->rebuild_notice;
+            model.rebuild_notice_offers_queue = player_app_build_queue_has_waiting(app);
         }
         if (player_app_disc_check_line(app, player->verify_notice, sizeof(player->verify_notice),
                                        &model.verify_offers_cancel)) {
@@ -3211,6 +3410,14 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                first page; focus stays on the button. */
             player_app_cycle_library_sort(app);
             player->library_page = 0u;
+            action.kind = PLAYER_UI_ACTION_NONE;
+        } else if (action.kind == PLAYER_UI_ACTION_QUEUE &&
+                   (PlayerUiQueueOp)action.primary == PLAYER_UI_QUEUE_OPEN) {
+            player->queue_first = 0u;
+            player->queue_follow_disc[0] = '\0';
+            player->queue_follow_back = false;
+            nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
+            (void)nk_ui_router_push(player->router, PLAYER_UI_ROUTE_QUEUE);
             action.kind = PLAYER_UI_ACTION_NONE;
         }
     } else if (route == PLAYER_UI_ROUTE_TITLE) {
@@ -3520,6 +3727,12 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 player_ui_steam_op(player, (unsigned)action.primary);
                 action.kind = PLAYER_UI_ACTION_NONE;
             }
+        }
+    } else if (route == PLAYER_UI_ROUTE_QUEUE) {
+        action = player_ui_render_queue(player, app, scale);
+        if (action.kind == PLAYER_UI_ACTION_BACK) {
+            (void)nk_ui_router_pop(player->router);
+            action.kind = PLAYER_UI_ACTION_NONE;
         }
     } else if (route == PLAYER_UI_ROUTE_REBUILD) {
         PlayerUiRebuildModel model;
