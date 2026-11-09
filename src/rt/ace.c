@@ -529,6 +529,7 @@ void ace_note_host_wait(uint64_t ns) {
 }
 
 void ace_note_fast_forward(int on) {
+    if (!g_ace_on) return;
     s_ff_running = on != 0;
     s_have_view = 0;
     s_win_started = 0;   /* the first flip at normal speed starts a new window */

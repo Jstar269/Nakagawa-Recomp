@@ -11420,6 +11420,7 @@ static void test_audio_fast_forward_mutes_the_host_and_reads_the_guest_queue(voi
     expect(hle_audio_queued(0) == 0, "and is empty once guest time has played it");
 
     s_audio_push_calls = 0;
+    s_audio_queue_result = 0;   /* an output that paced against the host would return, not spin */
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, STEREO_BUF) == 64u,
            "the blocking output returns during fast forward");
     expect(s_audio_push_calls == 0u, "fast forward gives the host device no audio");
