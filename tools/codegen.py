@@ -3769,8 +3769,6 @@ _PROMO_STATE_RE = re.compile(r"s->(\w+)")
 _PROMO_FORBIDDEN_RE = re.compile(r"\b(return|goto|break|continue|_Exit|fprintf|exit)\b")
 # Writes that may not happen (movz/movn): the local must hold the old value first.
 _CONDITIONAL_WRITE_FUNCTS = (0x0A, 0x0B)
-# HST-only lines the emission loop writes itself at these addresses (see emit_function).
-_HST_INLINE_SITES = frozenset({0x0010433c, 0x0006e9bc, 0x0006ea1c, 0x00108630, 0x00000a1c})
 
 
 def promoted_line_is_safe(text):
@@ -3948,15 +3946,16 @@ SV_MAX_PER_FLUSH = 3     # checks attached to one flush point
 SV_MAX_PER_FUNC = 16     # checks per function (bounds chunk growth)
 SV_STATS = {"funcs": 0, "checks": 0}
 
-# Functions carrying hand-injected code (fastpaths, condition overrides)
-# execute semantics the simulator does not model; exclude them. 0x0010433c
-# carried the retired TOKENSCAN_DIAG probe; its entry stays so that
-# --static-verify output does not change with this cleanup.
-# The exclusion is a consequence of that injected code, so it is title-owned:
-# under a profile that emits none of it there is nothing unmodelled to exclude,
-# and suppressing the checks on a numeric-address collision alone would be an
-# HST behavior leak (see sv_plan's hst_profile parameter).
-_SV_SPECIAL = {0x0006e9bc, 0x0006ea1c, 0x00108630, 0x0010433c}
+# Functions carrying hand-injected code (condition overrides) execute semantics
+# the simulator does not model; exclude them. The four stand-alone HST entries
+# (the two retired loop fast paths, the function holding one of them, and the
+# retired TOKENSCAN_DIAG probe's function) left on 2026-11-08 (#363): those
+# bodies translate as written, so --static-verify checks them like any other.
+# The exclusion is a consequence of injected code, so it is title-owned: under
+# a profile that emits none of it there is nothing unmodelled to exclude, and
+# suppressing the checks on a numeric-address collision alone would be an HST
+# behavior leak (see sv_plan's hst_profile parameter).
+_SV_SPECIAL: set[int] = set()
 
 # GUEST_PATCHES -- reviewed, traceable per-guest instruction overrides.
 # Each entry carries a rationale + issue id so every hand-patch is auditable.
@@ -3970,7 +3969,7 @@ _GUEST_PATCH_KEYS: set[int] = set()
 # device readable in sectors, the title's own archive reader serves every asset.
 GUEST_PATCHES: dict[int, dict[str, Any]] = {
 }
-# Static-verify exclusions: the four stand-alone specials plus every patched addr.
+# Static-verify exclusions: every patched addr.
 _SV_SPECIAL |= _GUEST_PATCH_KEYS
 
 
@@ -4231,213 +4230,16 @@ def _dup_slot_skips(elf, insns, labels):
     return dup_slot_skips
 
 
-def _emit_hst_patch_site(hst_profile, addr, w, out, consumed):
-    """The ``--profile=hst`` sites that are not a plain word: a fused loop or an abort guard.
-
-    Returns True when the lines appended replace the word's own emission, False when the word
-    is still emitted normally after them. Every site tests ``hst_profile`` itself, so no
-    other profile can reach one (``test_codegen_profile_isolation`` checks the gates).
-    """
-    # LOOP_CAPS retired (F4, 2026-07-11): the table is empty and the emission block
-    # is gone. Every remaining capped loop was statically proven terminating and
-    # verified never-firing across the retained log corpus (docs/audit/F4_LOOPCAPS.md):
-    #   SCAN_CAP    0x000147e0  f_00014788: word-at-a-time strlen (0xfefefeff/0x80808080
-    #               stopword scan). Induction variable a0 increases by 4 every
-    #               iteration; MEM_R32 is bounds-checked, so the loop either finds a
-    #               NUL or traps -- no same-PC spin is possible. The 1024-iteration
-    #               cap silently corrupted strlen for any string >= 4 KiB.
-    #   RSRC_CAP    0x0001b688  f_0001b584: counted loop (s3++ vs callee-saved s0).
-    #               The guarded retry-starvation spin was an allocator-corruption
-    #               symptom. The structural fix is one retail newlib allocator
-    #               backed by its untouched UserSbrk partition block.
-    #   HASHFN_CAP  0x0001b73c  f_0001b73c: pure NUL-terminated string hash
-    #               (monotonic pointer walk) + divu by table size; terminates for
-    #               any terminated string. The cap counted *calls*, not iterations,
-    #               and forged r2=1 (phantom hash) on fire. Never fired.
-    #   RSRC2-6     0x0019357c/0x001935d0/0x00193620/0x00193678/0x001936cc
-    #               f_001934c8: five identical counted loops (s2++ vs u32 count
-    #               reloaded from a descriptor the body never writes). Bounded
-    #               unless callee-save discipline is broken -- which is exactly the
-    #               P0 recompiler chain a cap must not mask. Never fired.
-    #   SENT_CAP    0x001b9570  f_001b94f8: doubly-linked-list unlink-until-sentinel.
-    #               Terminates for any well-formed list; the known list-corruption
-    #               sources (WALKER_CAP truncation, LoadLayout runaway) are gone.
-    #               Never fired.
-    #   SCENELOOP   0x0006dc2c  f_0006dab0: begin/end iterator, r17 += 0x70 until
-    #               r17 == r16 (compiler-emitted `it != end` idiom, always aligned).
-    #               Never fired.
-    #   RESINIT_CAP 0x0005a608  f_0005a500: element-init loop, a2++ vs count in a
-    #               freshly-allocated, correctly-sized disjoint buffer. Bounded
-    #               unless the allocator aliases the descriptor (prevented by the
-    #               unified retail newlib/UserSbrk path). Never fired.
-    #   TABLEWALK/LOOKUP/STRLIST sentinels (0x00102908/0x00102734/0x0019668c): the
-    #               "dedicated blocks" the sentinels pointed at were never
-    #               implemented; the entries were dead configuration.
-    # Cooperative scheduling does not depend on any of this: codegen emits SR_YIELD
-    # on every backward branch and function entry, and the SR_YIELD macro yields on
-    # timeslice expiry, so even a genuinely stuck loop cannot starve other fibers --
-    # it is watchdog-diagnosable by its unique back-edge PC in the thread dump.
-    # If a spin reappears, root-cause it; do not re-cap.
-    #
-    # WALKER_CAP (0x0000095c, f_000008d8) REMOVED in F3: it was an absolute
-    # 2048-hit permanent sentinel on a bounded "apply callback to N elements"
-    # iterator, not a spin detector. A single legitimate table-init call
-    # (RSRC init, hst_recomp_0.c:147346-147360) needs r8=0xc005=49157 iterations
-    # in one call, so the cap tripped mid-init and permanently no-op'd the
-    # iterator, leaving dispatch tables half-populated. The historical allocator
-    # corruption it guarded is fixed at the retail newlib/UserSbrk boundary. See
-    # docs/audit/F3_LOOPCAPS.md.
-    # ARRAY_CAP (0x00100e98) and LISTWALK_CAP (0x0001038c) REMOVED in F3 (second
-    # round, 2026-07-09): both still fired on every boot after WALKER_CAP's removal.
-    # ARRAY_CAP force-broke a loop inside the 0x100xxx menu-layout/registration code
-    # region after an absolute 20000 same-PC iterations — the same "bounded init
-    # mistaken for a spin" failure mode as WALKER_CAP, and a direct candidate for
-    # why dispatch tables (0x3070c0 +0xc/+0x10) remain half-populated. LISTWALK_CAP
-    # broke f_0001034c's next-pointer chain walk on the theory the list could be
-    # circular/corrupt; the known corruption sources upstream (WALKER_CAP truncation,
-    # the LoadLayout runaway) are gone, so the guard's premise is stale. If either
-    # loop genuinely spins again, the watchdog thread-dump PC identifies it uniquely
-    # (0x00100e98 vs 0x0001038c) — root-cause that spin; do not re-cap (see
-    # docs/audit/F3_LOOPCAPS.md and docs/DESIGN_FONT_HLE.md F3 re-scope).
-
-    # MEMSET_FASTPATH: f_0006e9bc's post-alloc zero-fill loop (body 0x6ea28-0x6ea44,
-    # count/base reloaded at 0x6ea1c/0x6ea28). Confirmed by static trace of the lifted
-    # instructions: base (MEM[r16+8]) and count (MEM[r16+0]) are both read-only for the
-    # entire loop body -- nothing between 0x6ea1c and 0x6ea44 writes r16+0 or r16+8 --
-    # so `for (i=0;i<count;i++) base[i]=0` is a provably exact rewrite of the interpreted
-    # per-byte loop as one native pass. This function is called ~100x from the resource-
-    # table init loop at 0x6da44; under one-MIPS-
-    # instruction-per-dispatch interpretation the accumulated SR_YIELD/dispatch overhead
-    # per byte stalls the worker thread past the 1200-vblank watchdog before a second
-    # frame ever presents. Dead-code checked: r3/r4 are never read again after the loop
-    # (L_0006ea48's epilogue only restores r31/r17/r16 from the stack) and r2 (the
-    # function's implicit return value, set by the alloc call at 0x6ea18) is untouched
-    # by the loop, so skipping the interpreted instructions is transparent to the caller.
-    # MEM_W8/MEM_R32 are already bounds-checked (src/rt/recomp.h sr_inrange).  The
-    # fast path now rejects a non-contiguous/overflowing span before any host pointer
-    # is formed; the >1MB warning exists to flag malformed counts without attempting
-    # an unbounded scalar fallback.
-    if hst_profile and addr == 0x0006ea1c:
-        out.append(f"    sr_begin(s, 0x0006ea1cu, 0x{w:08x}u); s->r[3] = MEM_R32(s->r[16] + 0x00000000u); sr_end(s, 0u, 0);")
-        out.append(
-            "    { uint32_t _mf_cnt = s->r[3]; uint32_t _mf_base = MEM_R32(s->r[16] + 0x00000008u);\n"
-            "      if (_mf_cnt > 0x00100000u) fprintf(stderr, \"MEMSET_FASTPATH: large count=0x%x base=0x%x r16=0x%08x MEM[r16+0]=0x%08x MEM[r16+4]=0x%08x MEM[r16+8]=0x%08x ra=0x%08x\\n\", _mf_cnt, _mf_base, s->r[16], (s->r[16]<0x0c000000u?MEM_R32(s->r[16]):0xDEADu), (s->r[16]<0x0c000000u?MEM_R32(s->r[16]+4u):0xDEADu), (s->r[16]<0x0c000000u?MEM_R32(s->r[16]+8u):0xDEADu), s->r[31]);\n"
-            "      if (_mf_cnt > 0 && _mf_cnt < 0x04000000u && sr_guest_span_writable(_mf_base, _mf_cnt)) {\n"
-            "          if (g_sr_heap_watch) sr_heap_note_bulk_write(_mf_base, _mf_cnt, 0x0006ea1cu);\n"
-            "          memset(SR_HOST(SR_DATA_SPAN(_mf_base, _mf_cnt)), 0, _mf_cnt);\n"
-            "      } else {\n"
-            "          if (_mf_cnt) sr_oor(_mf_base, 0u, 1);\n"
-            "      }\n"
-            "      s->r[4] = _mf_cnt; s->r[3] = 0u; }"
-        )
-        for _skip in (0x0006ea20, 0x0006ea24, 0x0006ea28, 0x0006ea2c, 0x0006ea30,
-                      0x0006ea34, 0x0006ea38, 0x0006ea3c, 0x0006ea40, 0x0006ea44):
-            consumed.add(_skip)
-        return True
-
-    # ARRSHIFT_FASTPATH: f_001084b8's element-shift loop (setup 0x108630-0x108654,
-    # body 0x108658-0x108690). Confirmed by static trace of the lifted instructions:
-    # this is a reverse, element-by-element 8-byte block move -- the source pointer
-    # (r6) and dest pointer (r4) both start high and decrement by exactly 8 every
-    # iteration in lockstep, terminating when r6 reaches r5 (the fixed source base
-    # loaded once at 0x108634 and never written again in the loop). The trip count is
-    # exactly n = MEM[r19+4] (read once, at 0x108630, before anything in the loop body
-    # can touch r19+4). This is the classic "grow a packed array, shift n existing
-    # elements into the new buffer" pattern: the code immediately after the loop
-    # (0x108694-0x1086c8) swaps the struct's base/count/capacity fields at r19+0/+4/+8
-    # with the new ones staged on the stack and calls f_00108bf4 (frees the old
-    # buffer) -- realloc-and-shift. A reverse per-element copy over
-    # [src,src+n*8) <-> [dst-n*8,dst) is exactly what memmove() computes (memmove is
-    # correct for either overlap direction, a superset of what the hand-unrolled
-    # reverse loop covers for its one intended direction). Under one-MIPS-instruction-
-    # per-dispatch interpretation this loop was a historical bring-up blocker: the
-    # worker cycles between pc=0x0006517c (an unrelated inlined "r2=r5<<1" leaf called
-    # from elsewhere, just this loop's most recent PCSAMPLE neighbour) and this loop's
-    # own SR_YIELD checkpoint at pc=0x0010868c for the entire watchdog window without
-    # the loop ever finishing. Historical details are retained in the local archive.
-    # Two stack slots track the same trip progress in different units and both must
-    # land on the same final value as the interpreted loop would leave them: MEM[sp+
-    # 0x5c] (decrements by 1/iter) and MEM[sp+0x50] (increments by 1/iter, consumed by
-    # the caller as the new element count at 0x1086c0-0x1086c4). Registers r1-r6's
-    # loop-final values are dead: everything from 0x108694 onward reloads r2/r3 fresh
-    # from memory and overwrites r4/r5/r6 before any further read (confirmed by
-    # reading through to the f_00108bf4 call at 0x1086c8), so only the copied bytes
-    # and the two stack slots need to be reproduced. The r4==0 mid-loop edge case
-    # (dest pointer hits exactly address 0) is not special-cased in the fast path --
-    # it would require the dest range to span across address 0, which cannot happen
-    # for a legitimate guest-RAM pointer -- but the bounds-checked fallback below
-    # still reproduces it exactly if it ever did.
-    if hst_profile and addr == 0x00108630:
-        out.append(f"    sr_begin(s, 0x00108630u, 0x{w:08x}u); s->r[4] = MEM_R32(s->r[19] + 0x00000004u); sr_end(s, 0u, 0);")
-        out.append(
-            "    { uint32_t _as_n = s->r[4];\n"
-            "      uint32_t _as_src_base = MEM_R32(s->r[19] + 0x00000000u);\n"
-            "      uint32_t _as_sp5c0 = MEM_R32(s->r[29] + 0x0000005cu);\n"
-            "      uint32_t _as_sp500 = MEM_R32(s->r[29] + 0x00000050u);\n"
-            "      uint32_t _as_dst_base = MEM_R32(s->r[29] + 0x0000004cu);\n"
-            "      uint32_t _as_dst_hi = _as_dst_base + (_as_sp5c0 << 3);\n"
-            "      if (_as_n > 0x00100000u) fprintf(stderr, \"ARRSHIFT_FASTPATH: large n=0x%x src=0x%x dst_hi=0x%x at f_001084b8 (0x108630)\\n\", _as_n, _as_src_base, _as_dst_hi);\n"
-            "      if (_as_n > 0u) {\n"
-            "          uint32_t _as_dst_lo = _as_dst_hi - (_as_n << 3);\n"
-            "          uint64_t _as_nbytes = (uint64_t)_as_n << 3;\n"
-            "          if (_as_dst_lo < _as_dst_hi && _as_src_base < 0x0c000000u && _as_dst_lo < 0x0c000000u &&\n"
-            "              (uint64_t)_as_src_base + _as_nbytes <= 0x0c000000u && (uint64_t)_as_dst_lo + _as_nbytes <= 0x0c000000u) {\n"
-            "              if (g_sr_heap_watch) sr_heap_note_bulk_write(_as_dst_lo, (uint32_t)_as_nbytes, 0x00108630u);\n"
-            "              memmove(SR_HOST(SR_DATA_SPAN(_as_dst_lo, _as_nbytes)),\n"
-            "                      SR_HOST(SR_DATA_SPAN(_as_src_base, _as_nbytes)), (size_t)_as_nbytes);\n"
-            "          } else {\n"
-            "              for (uint32_t _as_i = 0; _as_i < _as_n; _as_i++) {\n"
-            "                  uint32_t _as_d = _as_dst_hi - 8u * (_as_i + 1u);\n"
-            "                  uint32_t _as_s = _as_src_base + (_as_n - 1u - _as_i) * 8u;\n"
-            "                  if (_as_d != 0u) {\n"
-            "                      MEM_W32(_as_d + 0u, MEM_R32(_as_s + 0u));\n"
-            "                      MEM_W32(_as_d + 4u, MEM_R32(_as_s + 4u));\n"
-            "                  }\n"
-            "              }\n"
-            "          }\n"
-            "      }\n"
-            "      MEM_W32(s->r[29] + 0x0000005cu, _as_sp5c0 - _as_n);\n"
-            "      MEM_W32(s->r[29] + 0x00000050u, _as_sp500 + _as_n);\n"
-            "      s->r[1] = 0u; s->r[5] = _as_src_base; s->r[6] = _as_src_base;\n"
-            "    }"
-        )
-        for _skip in (0x00108634, 0x00108638, 0x0010863c, 0x00108640, 0x00108644, 0x00108648,
-                      0x0010864c, 0x00108650, 0x00108654, 0x00108658, 0x0010865c, 0x00108660,
-                      0x00108664, 0x00108668, 0x0010866c, 0x00108670, 0x00108674, 0x00108678,
-                      0x0010867c, 0x00108680, 0x00108684, 0x00108688, 0x0010868c, 0x00108690):
-            consumed.add(_skip)
-        return True
-
-    # GUEST_ABORT: f_00000a1c is the game's own compiled abort() path -- its body
-    # (jal 0x000015ec, a diagnostic/handler-table walk, immediately followed by an
-    # unconditional self-branch at L_00000a24, with NO guard of any kind) is only
-    # ever reached indirectly: a raw jal/j word scan of the whole image confirms
-    # there is no static call site targeting this address, so it can only be
-    # entered via a function pointer / dispatch() (i.e. it is the registered
-    # abort/terminate handler). NOTE: this is address 0x00000a1c, not the adjacent
-    # 0x00000a14 -- analyze()'s static function-boundary detection recognizes BOTH
-    # as independent function starts (confirmed: both are in the `known` set with
-    # zero static jal/j callers), but they are different functions. f_00000a14 is a
-    # harmless stub whose very first instruction (`beq r0,r0`) unconditionally
-    # branches around this exact jal+loop body to a plain epilogue/return --
-    # verified to fire routinely and harmlessly during ordinary boot (regression-
-    # tested: a probe placed at 0x00000a14 false-positived on a known-good run that
-    # only reaches mode-select). f_00000a1c has no such guard: every entry
-    # unconditionally calls the diagnostic walk and then spins forever. Left alone,
-    # reaching it means the emulator silently spins forever on the guest's own
-    # infinite loop, presenting nothing, until an external timeout kills the
-    # process -- observed via both heap exhaustion and a missing character/stage
-    # asset validation failure, minutes apart in wall-clock terms. Fail fast
-    # instead, mirroring the existing unimplemented-HLE-NID convention in hle.c
-    # (search "_Exit(7)" there) with a distinct, reserved exit code so the two
-    # fatal classes are distinguishable from the process exit status alone.
-    if hst_profile and addr == 0x00000a1c:
-        out.append(
-            "    fprintf(stderr, \"GUEST_ABORT: game called abort() (f_00000a1c), "
-            "called from ra=0x%08x arg0=0x%08x -- terminating instead of silent infinite hang\\n\", "
-            "s->r[31], s->r[4]); fflush(stderr); _Exit(9);"
-        )
-    return False
+# No title-address site rewrites a guest word any more (#363). The loop caps went first (the
+# F3 and F4 audits); on 2026-11-08 the last three HST-profile sites followed.
+# MEMSET_FASTPATH and ARRSHIFT_FASTPATH replaced two of the title's own loops (a zero fill and
+# a reverse 8-byte element shift) with one native pass, a shortcut from the time those loops
+# ran one interpreted instruction per dispatch; both now translate as written, like every
+# other AOT loop. GUEST_ABORT ended the run with _Exit(9) at the title's abort() instead of
+# letting its body call its handlers and spin; it now runs as written. A thread spinning
+# there is diagnosed like any other stuck thread: the scheduler's spin watchdog dumps it when
+# no other thread is runnable, and otherwise the display's no-new-frame watchdog names it. The
+# run does not end on its own; SR_WATCHDOG_EXIT=<N> ends it after N vblanks with no new frame.
 
 
 def _emit_non_control_word(ctx, out, addr, w, sv_points):
@@ -4936,16 +4738,12 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
                 promoted = None
                 if (not is_control(w) and not _is_cop0_move(w) and addr not in sv_points
                         and addr not in continuations and addr not in ctx.sp_checks
-                        and _enhancement_rewrite(addr) is None
-                        and not (hst_profile and addr in _HST_INLINE_SITES)):
+                        and _enhancement_rewrite(addr) is None):
                     promoted = promo.try_line(addr, w, options=options)
                 if promoted is not None:
                     out.extend(promoted)
                     continue
                 out.extend(promo.flush())
-
-            if hst_profile and _emit_hst_patch_site(hst_profile, addr, w, out, consumed):
-                continue
 
             if not is_control(w):
                 _emit_non_control_word(ctx, out, addr, w, sv_points)
