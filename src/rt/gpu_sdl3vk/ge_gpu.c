@@ -45,7 +45,8 @@
  *    PSP-GE-MIP-001), which the sampler's exact log2 does not reproduce, so psp.frag
  *    computes it (F_LODFRAG) and samples with an explicit level of detail. A level list a
  *    halving chain cannot hold takes the software rasterizer (tex_mip_chain_supported).
- *    Per-level CLUTs are not modelled.
+ *    TEXMODE's multi-CLUT bit moves where each level reads CLUT RAM; the level decode
+ *    applies it (ge.c clut_index, PSP-GE-MIP-002) and the chain key holds it (#2031).
  *  - 16-bit precision (5650/5551/4444 framebuffers): the fragment shader snaps its
  *    output to the native lattice (pack-by-truncation + expand-by-bit-replication,
  *    identical to ge.c pack_fb/unpack_color) and applies the GE's 4x4 ordered dither,
@@ -255,6 +256,7 @@ typedef struct {
     float bias;                            /* TEXLEVEL bias (0 in the per-fragment modes) */
     uint32_t addr[7], bufw[7];             /* levels 1..max_level (index = level - 1) */
     uint8_t wlog2[7], hlog2[7];
+    uint32_t multi_clut;                   /* TEXMODE bit 8 on a CLUT4/CLUT8 chain (#2031) */
 } TexMipKey;
 
 typedef struct {
@@ -4285,6 +4287,8 @@ static void tex_mip_key(TexMipKey *k) {
     /* The per-fragment modes take the bias from the push constants: one chain and sampler
      * serve every bias. */
     k->bias = tex_lod_per_fragment(k->mode) ? 0.0f : g->tex_lod_bias;
+    /* ge.c's clut_index moves the levels of a CLUT4 or CLUT8 chain by the bit. */
+    k->multi_clut = (g->tex_fmt == 4u || g->tex_fmt == 5u) ? g->tex_multi_clut & 1u : 0u;
     for (uint32_t i = 0; i < k->max_level; i++) {
         k->addr[i] = g->tex_mip_addr[i];
         k->bufw[i] = g->tex_mip_bufw[i];
@@ -4745,8 +4749,9 @@ static VkDescriptorSet tex_get(void) {
     if (s_ge->tex_fmt >= 4 && s_ge->tex_fmt <= 7)
         key ^= clut_hash() | 1;        /* distinct entry per (texture, palette) pair */
     /* Mip levels (#1373): every field that shapes the chain or its sampler is compared
-     * exactly with the key; the CLUT is shared by every level, so the key's palette hash
-     * covers the levels too (the multi-CLUT bit is not modelled). */
+     * exactly with the key. Every level reads the one CLUT RAM, so the key's palette hash
+     * covers the levels too; the multi-CLUT bit, which moves where a level reads it, is in
+     * the mip key (#2031). */
     TexMipKey mip;
     uint32_t mip_bytes[7] = {0};
     tex_mip_key(&mip);
@@ -5355,7 +5360,7 @@ typedef struct {
     int tex_enable; uint32_t tex_addr, tex_bufw, tex_fmt, tex_wrap, tex_func, tex_env, tex_filter;
     int tex_w, tex_h; int tex_swizzle;
     /* Mip levels (#1373): every field tex_get keys a chain or its sampler by. */
-    uint32_t tex_max_level, tex_level_mode; float tex_lod_bias, tex_lod_slope;
+    uint32_t tex_max_level, tex_level_mode, tex_multi_clut; float tex_lod_bias, tex_lod_slope;
     uint32_t tex_mip_addr[7], tex_mip_bufw[7]; uint8_t tex_mip_wlog2[7], tex_mip_hlog2[7];
     uint32_t clut_fmt, clut_gen;
     int atest_enable; uint32_t atest;
@@ -5386,6 +5391,7 @@ static void snap_fill(StateSnap *o, int persp, int sprite) {
     o->tex_env = g->tex_env; o->tex_filter = g->tex_filter;
     o->tex_w = g->tex_w; o->tex_h = g->tex_h; o->tex_swizzle = g->tex_swizzle;
     o->tex_max_level = g->tex_max_level; o->tex_level_mode = g->tex_level_mode;
+    o->tex_multi_clut = g->tex_multi_clut;
     o->tex_lod_bias = g->tex_lod_bias; o->tex_lod_slope = g->tex_lod_slope;
     memcpy(o->tex_mip_addr, g->tex_mip_addr, sizeof(o->tex_mip_addr));
     memcpy(o->tex_mip_bufw, g->tex_mip_bufw, sizeof(o->tex_mip_bufw));

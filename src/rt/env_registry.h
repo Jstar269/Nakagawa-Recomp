@@ -145,6 +145,7 @@
     X("SR_HLE_DIAGNOSTICS", "flag-presence", "off", "title_config.c", "When set, enables HLE diagnostics if the title config has a valid diagnostics profile.") \
     X("SR_HOST_TIME_ZONE", "string", "unset (time zone keeps its seed)", "hle.c", "Host time zone as <minutes>,<0|1> (offset and daylight flag); invalid values are ignored with a message.") \
     X("SR_HUD", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c,perf.c", "Enables the developer HUD and performance counters when set to a non-empty value other than 0.") \
+    X("SR_IDENTITY_SEED", "string", "nakagawa-deterministic-profile-v1", "hle.c", "Seed for the synthetic WLAN MAC and OpenPSID of a fresh profile under SR_DETERMINISTIC_CLOCK=1; ignored otherwise.") \
     X("SR_INLOG", "flag-presence", "off", "debug.h,gpu_sdl3vk/sdl3vk.c,hle_input.c", "Logs controller input: published button changes in the SDL backend and HLE input calls.") \
     X("SR_IOLOG", "flag-presence", "off", "debug.h,hle_data.c,hle_io.c", "When set, logs file I/O operations to stderr and enables the file-system debug category.") \
     X("SR_LAUNCHER_DISPLAY_BOUNDS", "list", "unset (primary display)", "gpu_sdl3vk/sdl3vk.c,gui.c", "Display bounds as x,y,w,h used to open the launcher window on a chosen display.") \
