@@ -207,7 +207,9 @@ says so. Your `EBOOT.PBP` is only read, never changed.
 Some homebrew can't run, and the player says which kind when you pick it: an encrypted program, kernel-mode
 homebrew and custom-firmware plugins (they need the PSP's own kernel), and anything that is not a PSP program.
 A program that writes its own machine code while it runs, such as an emulator with a JIT, starts and then stops
-at the first jump into that code. [Homebrew limits](COMPATIBILITY.md#homebrew-limits) lists each kind.
+at the first jump into that code. Only the `EBOOT.PBP` is imported: files that sit beside it in the program's
+folder (data, plugins, configuration) are not available to the program, so a program that needs them stops when
+it looks for one. [Homebrew limits](COMPATIBILITY.md#homebrew-limits) lists each kind.
 
 ### Supplying title manifests
 

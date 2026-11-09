@@ -45,11 +45,39 @@ from nk_core import (
 )
 
 _ISSUE_REFERENCE_RE = re.compile(r"#[0-9]+")
+# Any conversion after "#" formats an issue number into user-facing text.
+_ISSUE_FORMAT_RE = re.compile(r"#%")
+# The known-issue link is the one issue number the player shows. It comes from
+# the code table k_known_causes through player_known_issue_for_boundary
+# (player_state.c), and only these literals format it: the error screen's
+# sentence and link, and the problem report's line. Matched by file and exact
+# literal, so neither another file nor another wording is let through.
+_KNOWN_ISSUE_LITERALS = frozenset({
+    ("src/player/ui/scr_error.c", '"This is a known issue (#%u)."'),
+    ("src/player/ui/scr_error.c", '"View issue #%u on GitHub"'),
+    ("src/player/player_state.c", '"#%u"'),
+})
 # Character literals are tokens too: an unmatched '"' would otherwise open a
 # phantom string that swallows the code after it.
 _C_TOKEN_RE = re.compile(
     r"""//[^\r\n]*|/\*.*?\*/|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\])*\"""", re.DOTALL
 )
+
+
+def _issue_number_literal_failures(rel_path: str, source: str) -> list[str]:
+    """Each C string literal in source that shows an issue number, as path:line: literal."""
+    failures: list[str] = []
+    # The old renderer drew issue links from a code table; nothing draws them now.
+    if "draw_issue_links" in source:
+        failures.append(f"{rel_path}: draw_issue_links")
+    for match in _C_TOKEN_RE.finditer(source):
+        token = match.group()
+        if not token.startswith('"') or (rel_path, token) in _KNOWN_ISSUE_LITERALS:
+            continue
+        if _ISSUE_REFERENCE_RE.search(token) or _ISSUE_FORMAT_RE.search(token):
+            line = source.count("\n", 0, match.start()) + 1
+            failures.append(f"{rel_path}:{line}: {token}")
+    return failures
 
 
 def _python_non_docstring_literals(path: Path) -> list[tuple[int, str]]:
@@ -187,22 +215,47 @@ class NkCoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def test_issue_number_guard_allows_only_the_known_issue_literals(self) -> None:
+        """The exception is the three known-issue literals, not a conversion letter."""
+        for rel, literal in sorted(_KNOWN_ISSUE_LITERALS):
+            with self.subTest(allowed=(rel, literal)):
+                self.assertEqual(_issue_number_literal_failures(rel, f"x = {literal};"), [])
+        rejected = [
+            ("src/player/ui/scr_error.c", '"see #%u"'),
+            ("src/player/ui/scr_error.c", '"#%lu"'),
+            ("src/player/ui/scr_error.c", '"#%x"'),
+            ("src/player/ui/scr_error.c", '"#%s"'),
+            ("src/player/ui/scr_error.c", '"#%d"'),
+            ("src/player/ui/scr_error.c", '"Issue #7"'),
+            ("src/player/ui/scr_library.c", '"This is a known issue (#%u)."'),
+            ("src/player/main.c", '"#%u"'),
+        ]
+        for rel, literal in rejected:
+            with self.subTest(rejected=(rel, literal)):
+                self.assertEqual(
+                    len(_issue_number_literal_failures(rel, f"x = {literal};")), 1
+                )
+        self.assertEqual(
+            _issue_number_literal_failures("src/player/x.c", "draw_issue_links();"),
+            ["src/player/x.c: draw_issue_links"],
+        )
+
     def test_user_facing_text_does_not_cite_issue_numbers(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         failures: list[str] = []
         c_paths = [
             *sorted((repo_root / "src" / "player").glob("*.c")),
+            # The nk launcher draws every view (#2071): its screens are here.
+            *sorted((repo_root / "src" / "player" / "ui").glob("*.c")),
             repo_root / "src" / "core" / "nk_font.c",
             repo_root / "src" / "core" / "nk_launch.c",
             repo_root / "src" / "core" / "nk_title_manifest.c",
         ]
         for path in c_paths:
             source = path.read_text(encoding="utf-8")
-            for match in _C_TOKEN_RE.finditer(source):
-                token = match.group()
-                if token.startswith('"') and _ISSUE_REFERENCE_RE.search(token):
-                    line = source.count("\n", 0, match.start()) + 1
-                    failures.append(f"{path.relative_to(repo_root)}:{line}: {token}")
+            failures.extend(
+                _issue_number_literal_failures(path.relative_to(repo_root).as_posix(), source)
+            )
 
         python_paths = [
             repo_root / "tools" / "nk_cli.py",
@@ -217,11 +270,6 @@ class NkCoreTests(unittest.TestCase):
                         f"{path.relative_to(repo_root)}:{line}: {literal!r}"
                     )
 
-        renderer = (repo_root / "src" / "player" / "ui_renderer.c").read_text(
-            encoding="utf-8"
-        )
-        self.assertNotIn("draw_issue_links", renderer)
-        self.assertNotRegex(renderer, r'"#%[0-9]*[du]"')
         self.assertEqual(failures, [])
 
         summary = nk_cli._bringup_human_summary(
@@ -370,6 +418,27 @@ class NkCoreTests(unittest.TestCase):
             end = cli_source.index(")\n", start)
             self.assertIn("--register-local-compatibility-record", cli_source[start:end])
         self.assertIn("write packages under the per-user data root", plan_source)
+
+    def test_iso_inspection_size_floor_is_the_first_directory_sector(self) -> None:
+        # A small disc image is an ISO, not "too small": the floor is the end of the primary
+        # volume descriptor sector, the same bound src/core/nk_iso.c uses, not 1 MiB. A homebrew
+        # EBOOT.PBP's private disc image is about 77 KiB (#2143). No PSPDEV is needed here.
+        from test_iso_parity import build_plain_mips_elf, create_test_iso_with_executables
+
+        full = self.temp_dir / "small.iso"
+        create_test_iso_with_executables(full, build_plain_mips_elf())
+        data = full.read_bytes()
+        self.assertGreater(len(data), 34816)
+
+        small = self.temp_dir / "small-77k.iso"
+        small.write_bytes(data[: 77 * 1024])
+        inspect_iso(small)  # no IsoInspectionError
+
+        below = self.temp_dir / "below-floor.iso"
+        below.write_bytes(data[:34815])
+        with self.assertRaises(IsoInspectionError) as caught:
+            inspect_iso(below)
+        self.assertIn("too small", str(caught.exception))
 
     def test_iso_inspection_malformed(self) -> None:
         # File too small

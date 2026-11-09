@@ -50,11 +50,19 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
 | Memory | 8 GB RAM | 16 GB RAM |
 | Free disk space | 5 GB | 10 GB or more, on an SSD |
 
-- **Memory.** Building a game is the heavy part. One compiler process peaked at about 3 GB
-  while it compiled a large block of translated game code. BUILD PACKAGE keeps 4 GB free
-  for everything else and runs one compile job for each further 3 GB of available memory,
-  so a PC with 8 GB compiles one part at a time and one with 16 GB two or three, depending
-  on what else is running. Playing a built game needs far less.
+- **Memory.** Building a game is the heavy part. The translated game code is compiled in
+  parts of about 4 MB of C each, and one compiler process peaked at about 530 MB on such a
+  part. BUILD PACKAGE budgets 200 bytes of memory for each byte of C in a part, at least
+  768 MB (a 4 MB part gets 768 MB), keeps 2 GB of the available memory free for everything
+  else, and runs one compile job for each further 768 MB. With 4.2 GB available it runs
+  two jobs, with 5 GB four and with 7 GB six, so an 8 GB PC compiles several parts at once
+  depending on what else is running. A part larger than the usual size is budgeted at 256
+  bytes per byte, so a build that contains one runs fewer jobs. If less than 2.75 GB is
+  available, one job runs and the compiler may fail when memory runs out. If Windows gives
+  no memory reading, the build runs two jobs (one on a PC with a single processor). The
+  figures are in GB as Windows reports them (1024 x 1024 x 1024 bytes). The compiler is the
+  measured limit; the other build steps and the final link are not measured separately.
+  Playing a built game needs far less.
 - **Disk space.** Each game keeps three things in the player's data folder: its imported disc
   image (about 1.4 GB for Hot Shots Tennis), the built game (about 470 MB) and the build cache
   (about 400 MB). If the player downloads the build tools, they add a 102 MB download, and
@@ -63,8 +71,11 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   slower. Keep the player's data folder on an SSD if you can.
 - **Processor.** BUILD PACKAGE runs up to eight compile jobs at a time, one per logical
   processor, as far as memory allows, and the build screen counts the parts as they finish.
-  A first build takes several minutes. To choose the job count yourself, set the
-  `NK_PACKAGE_JOBS` environment variable to a number from 1 to 8 before starting the player.
+  When free memory, a single processor or `NK_PACKAGE_JOBS` limits it to one job, the build
+  screen says so and that the build will take longer. If the PC does not report its processor
+  count, the build runs one job and says nothing about processors. A first build takes several minutes. To
+  choose the job count yourself, set the `NK_PACKAGE_JOBS` environment variable to a number from
+  1 to 8 before starting the player.
 - **Texture scaling (Ace Mode, development only).** It is reachable only through the `SR_TEX_SCALE` and
   `SR_SMART_2D` environment variables, has no setting in the player, and is not admitted as an Enhanced or Ace
   item yet, because it changes the frames the game can read back
@@ -366,7 +377,7 @@ tree when a user-profile path or a workspace root appears in a first-party file.
 
 ### Runtime DLLs (SDL3.dll, SDL3_ttf.dll & vulkan-1.dll)
 
-The native player (`nakagawa_player.exe`) requires `SDL3.dll` and the host Vulkan loader (`vulkan-1.dll`). It also loads `SDL3_ttf.dll` at run time for the readable UI font: `mingw32-make player` stages `SDL3_ttf.dll` and its full runtime dependency closure beside `build\nakagawa_player.exe` (`tools/stage_runtime_dlls.py`, with `SDL3_TTF_DLL` as the override in the same pattern as `SDL3_DLL`), so the same TTF font path is used whether the player is started from Explorer, a plain `cmd.exe` with no MSYS2 on `PATH`, a built title package, or the release layout. In a release archive, the matching `SDL3.dll`, `SDL3_ttf.dll` and its closure are already beside `bin/nakagawa_player.exe`; leave those files in `bin/`. In a source checkout, `tools/copy_build_assets.ps1` copies SDL3 and any imported MinGW runtime DLLs beside the built game executable and generates their third-party notices; the player target stages its own typography runtime the same way. Without `SDL3_ttf.dll` the player still runs, but falls back to the 8x8 SDL bitmap font and logs the failing step once to stderr — the fallback is never silent — and the workspace doctor reports it as `RUNTIME_SDL3_TTF`.
+The native player (`nakagawa_player.exe`) requires `SDL3.dll` and the host Vulkan loader (`vulkan-1.dll`). It also loads `SDL3_ttf.dll` at run time for the readable UI font: `mingw32-make player` stages `SDL3_ttf.dll` and its full runtime dependency closure beside `build\nakagawa_player.exe` (`tools/stage_runtime_dlls.py`, with `SDL3_TTF_DLL` as the override in the same pattern as `SDL3_DLL`), so the same TTF font path is used whether the player is started from Explorer, a plain `cmd.exe` with no MSYS2 on `PATH`, a built title package, or the release layout. In a release archive, the matching `SDL3.dll`, `SDL3_ttf.dll` and its closure are already beside `bin/nakagawa_player.exe`; leave those files in `bin/`. In a source checkout, `tools/copy_build_assets.ps1` copies SDL3 and any imported MinGW runtime DLLs beside the built game executable and generates their third-party notices; the player target stages its own typography runtime the same way. Without `SDL3_ttf.dll` the launcher cannot start: the player says why in a message box and on stderr and exits with code 4, and the workspace doctor reports it as `RUNTIME_SDL3_TTF`.
 
 #### 1. SDL3.dll
 
@@ -374,7 +385,7 @@ For a source build, install the MSYS2 UCRT64 SDL3 package described above. Do no
 
 #### 1a. SDL3_ttf.dll (UI typography)
 
-Install the MSYS2 UCRT64 `sdl3-ttf` package (with the `sdl3` package above). `mingw32-make player` then stages `SDL3_ttf.dll` and the mechanically resolved dependency closure (FreeType, HarfBuzz, Graphite2, libpng, zlib, bzip2, Brotli, GLib, libintl, libiconv, PCRE2 and the MinGW runtimes) beside `build\nakagawa_player.exe`, together with their licence texts in `THIRD_PARTY_NOTICES/`. Set `SDL3_TTF_DLL` to an explicit `SDL3_ttf.dll` file to override the toolchain copy, exactly like `SDL3_DLL`. `NK_UI_NO_TTF=1` still forces the bitmap fallback, for example on CI machines without the library.
+Install the MSYS2 UCRT64 `sdl3-ttf` package (with the `sdl3` package above). `mingw32-make player` then stages `SDL3_ttf.dll` and the mechanically resolved dependency closure (FreeType, HarfBuzz, Graphite2, libpng, zlib, bzip2, Brotli, GLib, libintl, libiconv, PCRE2 and the MinGW runtimes) beside `build\nakagawa_player.exe`, together with their licence texts in `THIRD_PARTY_NOTICES/`. Set `SDL3_TTF_DLL` to an explicit `SDL3_ttf.dll` file to override the toolchain copy, exactly like `SDL3_DLL`.
 
 #### 2. vulkan-1.dll
 
@@ -791,6 +802,11 @@ output directory contains spaces, the route builds in a Make-safe workspace—re
 the finished package to the destination. If neither fallback is available, or if the path contains
 characters that Make recipes cannot quote, the route stops with the named `PACKAGE_UNSUPPORTED_PATH`
 boundary.
+An enhancement data root is read in place rather than copied. When its path has a space or another
+character Make cannot take, the route uses its 8.3 short form on Windows, and stops with
+`PACKAGE_UNSUPPORTED_PATH` naming the data root when no short form exists (a volume with 8.3 names
+turned off, or any other platform). `NK_BUILD_ROOT` does not help there; move the data root to a
+location without such characters.
 
 `assets/titles/hst-ucus98701.json` is the HST title manifest, part of the repository since 2026-10-27: it carries HST's guest-address runtime bindings, and a `GAME_NAME=hst` build refuses to compile without it rather than silently producing a runtime with every title binding disabled. See [`assets/titles/README.md`](../assets/titles/README.md).
 
@@ -875,7 +891,8 @@ game's own value wins over the preset ([PLAYER_UI_DESIGN.md](PLAYER_UI_DESIGN.md
 `SR_PRESENT_UPSCALE=fsr1` makes the Vulkan presenter enlarge the picture to its place in the
 window with AMD FidelityFX Super Resolution 1: EASU, an edge-adaptive upscaler, then RCAS
 sharpening. `off`, the default, keeps the `SR_PRESENT_SCALING` filter. It runs only when the
-picture is enlarged on both axes, on whatever frame the presenter shows. It is presentation only:
+picture is enlarged on both axes, on every frame the presenter shows except a CPU-presented one
+while `SR_MOVIE_UPSCALE` is on. It is presentation only:
 the guest's frame, guest VRAM and captures are byte for byte what they are with it off
 (`gpu-capture-selftest` and, with a Vulkan device and a display, `display-smoke-fsr1`). A run
 recording (`SR_VIDEOREC_DIR`) is enlarged by FSR 1 too, at the recording's size, and its
@@ -890,6 +907,26 @@ compute, leaves it off with a line in the log; so does a size whose images canno
 is then not tried again. The launcher turns it off for an authentic session, and a run with it on
 is stamped as enhanced (`ACE_MODE: present upscale fsr1`), which `boot_gate.py` reads. The picture
 gate and the library sweep set it `off` for their own runs.
+
+### Movie upscaler (`SR_MOVIE_UPSCALE`)
+
+`SR_MOVIE_UPSCALE` gives frames the CPU presents, which are decoded movies (and every frame when the
+software GE draws), their own upscaler: `fsr1` scales them with FSR 1, and `anime4k` first doubles
+them once or twice with Anime4K's CNN x2 (M) network, which suits the flat colours and dark lines
+of animated and pre-rendered movies, then takes them to the window's size with FSR 1 (unless the
+doubled picture is already that size, as at the default 960x544 window). `off`, the
+default, leaves them to `SR_PRESENT_UPSCALE`. It applies in the window and in a recording
+(`SR_VIDEOREC_DIR`), each with its own passes at its own size. Use `anime4k` for line art and movies
+only: on other pictures, such as fine regular stripes, it adds a faint ripple along edges. It reaches
+only frames the CPU presents. A game whose movie the GE presents, drawn as a texture (LittleBigPlanet)
+or decoded into a GE target (Hot Shots Tennis), shows a GE frame, which this key does not upscale.
+Like `SR_PRESENT_UPSCALE` it is presentation only: the decoded movie, the guest's frame, guest VRAM
+and captures are unchanged (`display-smoke-anime4k`, which needs a Vulkan device and a display). A
+run with it on is stamped as enhanced (`ACE_MODE: present upscale movie-anime4k`, a
+`phase=present_upscale` boot event and `runtime.enhancements` in the flight bundle), so boot and
+flight evidence never takes it as authentic; an Authentic session from the launcher, the picture
+gate and the library sweep run with it `off`. A 480x272 movie frame costs 0.31 ms through two
+Anime4K stages and 0.75 ms with FSR 1 to 3811x2160 on an RTX 3080 (`anime4k-selftest`).
 
 Runtime logs are written under `logs/`. Use `SR_DEBUG=0xFF` for all categories or consult [DEBUGGING.md](DEBUGGING.md) for targeted logging.
 On Windows, runtime output redirected to a file or pipe is buffered: a line reaches the log within 50 ms,
@@ -1150,7 +1187,7 @@ refuses such a `BUILD_DIR` before any recipe runs and names the boundary:
 BUILD_DIR 'C:/path/with spaces/build' contains a space, which GNU Make cannot represent
 in a target or prerequisite name. Use a relative BUILD_DIR under the repository
 root (the default `build/<game>`), or set NK_BUILD_ROOT to a folder without spaces
-so tools/title_codegen_plan.py can pick a Make-safe build root (issue #296).
+so tools/title_codegen_plan.py can pick a Make-safe build root.
 ```
 
 The default relative `BUILD_DIR` carries no space, so an ordinary checkout is unaffected. Every route
@@ -1272,7 +1309,7 @@ outside the published repository.
 - **Preflight diagnostics:** run `.\nk.ps1 Doctor -TitleManifest C:\path\to\manifest.json -GameName game` (or `python tools/nk_doctor.py --title-manifest C:\path\to\manifest.json --game-name game`) to validate the toolchain, build dependencies, and the selected title's local inputs. Without a title selection, Doctor uses the public synthetic manifest.
 - **Missing Vulkan headers:** pass the correct `-VulkanSdk` path or `VULKAN_SDK=...` Make variable.
 - **`SDL3.dll` missing:** for the release package, keep `bin/SDL3.dll` beside `bin/nakagawa_player.exe`; for a source build, install the MSYS2 UCRT64 SDL3 package so `tools/copy_build_assets.ps1` stages it beside `build/nakagawa_player.exe`.
-- **Retro 8x8 bitmap font in the player UI:** the readable-font path needs `SDL3_ttf.dll` and its dependency closure beside `nakagawa_player.exe` (or on `PATH`). Install the MSYS2 UCRT64 `sdl3-ttf` package and re-run `mingw32-make player`, which stages the whole closure and its licence notices; the workspace doctor reports `RUNTIME_SDL3_TTF`/`RUNTIME_SDL3_TTF_CLOSURE`, and the player itself logs the failing step once to stderr when it falls back. `NK_UI_NO_TTF=1` forces the bitmap fallback on purpose.
+- **The player says its launcher cannot start (exit code 4):** the launcher needs `SDL3_ttf.dll` and its dependency closure beside `nakagawa_player.exe` (or on `PATH`), and its UI fonts in `assets/fonts/ui`. Install the MSYS2 UCRT64 `sdl3-ttf` package and re-run `mingw32-make player`, which stages the whole closure, the fonts and their licence notices; the workspace doctor reports `RUNTIME_SDL3_TTF`/`RUNTIME_SDL3_TTF_CLOSURE`, and the player names the missing part in its message.
 - **`PUBLIC_SAFE=1` active:** the runtime always compiles with `PUBLIC_SAFE=1`; the private-backend mode was retired on 2026-10-25. This mode links the public replacements — `iso_public.c` for ISO9660 lookups driven by `PSP_ISO`, `pgf_public.c` for fonts, and the SDL3 audio backend — plus `pgd_unavailable.c`. Disc routes keep working; PGD-protected data is refused in this mode, and the runtime refuses encrypted `~PSP` executables; the player decrypts them before a build (see [Encrypted executables](#encrypted-executables)).
 - **Missing ISO or missing extracted assets:** `place_game_here/ISO/<game>.iso` must be present, and `place_game_here/EXTRACTED/PSP_GAME/USRDIR/xbdata_extracted` (or configured `SR_DATAROOT`) must be populated. `SR_DATAROOT` may instead hold the read-only `<archive>.xb` archives; the runtime mounts those directly ([#298](https://github.com/Jstar269/nakagawa-recomp/issues/298)).
 - **No late PRX exports / asset lookups fail:** restore the required `place_game_here/EXTRACTED/` layout (decrypted `libfont.prx`, `scePsmf_library.prx`, `scePsmfP_library.prx`).

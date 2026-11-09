@@ -104,6 +104,9 @@ scaling.
 | `tracking-out-of-range` | `--tracking` outside -8..16 sub-samples. |
 | `digit-advance-out-of-range` / `digit-advance-unavailable` | `--digit-advance` outside 64..`MAX_EDGE * 64` (26.6), or without all of the digits 0-9 in the code set. |
 | `fallback-unused` | `--fallback` given, but the first font draws every requested code. |
+| `snap-overshoot-out-of-range` | `--snap-overshoot` outside 0..8 sub-samples. |
+| `snap-overshoot-unavailable` | `--snap-overshoot` with a drawing font that lacks an outline for `H` or `x`, or whose flat edges do not ascend (section 3, rule 13). |
+| `snap-overshoot-zones-overlap` | At the chosen ppem the band above the x-height reaches the cap height (section 3, rule 13). |
 | `glyph-too-large` | A raster exceeds the writer's 7-bit record fields (127 px). |
 | `composite-too-deep` / `composite-too-many-components` | Composite expansion bounds. |
 | `metric-targets-invalid` / `metric-target-unreachable` | Policy document is malformed / no size satisfies it. |
@@ -228,6 +231,64 @@ manifest in memory first and writes only after every stage succeeds.
     first. Both fonts pass the same input checks, and the output name must
     satisfy both pins. The codes the second font draws are recorded in the
     manifest, and a fallback that draws none is refused.
+13. **Overshoot alignment** (optional, default off). `--snap-overshoot N`
+    (1..8, in sub-samples, so eighths of a pixel; 0 is off) sets a round
+    letter's fractional-pixel overshoot on the flat height it overshoots.
+    Each font that draws a code (rule 12) supplies three flat edges in font
+    units, measured from its own outlines of two reference glyphs, looked up
+    in its character map whether or not the code set includes them: the
+    baseline `B`, the lowest point of `H` (U+0048); the x-height `X`, the
+    highest point of `x` (U+0078); and the cap height `C`, the highest point
+    of `H`. A depth `d` is *in the band* when `d > 0` and
+    `d * ppem * 8 < N * unitsPerEm`, that is, less than `N` eighths of a pixel
+    at the conversion's ppem, compared exactly in integers or rationals. A
+    contour's box is the minimum and maximum `x` and `y` over all its points;
+    a contour is *enclosed* when another contour of the same glyph has a
+    different box that contains its box (a counter, or an island inside a
+    letter). Then, for every contour of every converted glyph that is not
+    enclosed, after rule 11's shift and before rule 7's digit centring and
+    rule 1's scaling:
+    - if the contour's highest point lies above `B` and its lowest point lies
+      below `B` by a depth in the band, every point of that contour lying
+      below `B` by a depth in the band gets `y = B`;
+    - if the contour's lowest point lies below `X` and its highest point lies
+      above `X` by a depth in the band, every point of that contour lying
+      above `X` by a depth in the band gets `y = X`; likewise for `C`, with
+      the same condition on the lowest point (below `X`).
+
+    On-curve and off-curve points are treated alike and `x` never changes.
+    A contour whose extreme lies on or inside the edge, or past it by the
+    band or more (a descender, a cedilla), an enclosed contour, and a contour
+    lying wholly above the x-height (an accent, the dot of `i`) are left
+    exactly as they are. Every point of a moved
+    contour then lies on or inside the edge, and a quadratic segment stays
+    inside the hull of its points, so after rules 2 and 3 the glyph's raster
+    box starts on the same row as the reference glyph's: a round letter and a
+    flat one share their bottom row, and their top row at the x-height or cap
+    height. The edges themselves are not moved to the pixel grid, the
+    glyph's other points are untouched, and no hint program runs.
+    *Project decision* (#1300), from a measurement: Liberation's round letters
+    overshoot the baseline by 4 to 31 units of 2048 and the x-height and cap
+    height by 7 to 23. A depth of `d` units is `d * ppem / 2048` px: the
+    deepest, 31 units, is 0.30 px at 20 ppem and 0.20 px at 13, and any
+    depth past the first sub-scanline centre (1/16 px, rule 4) covers
+    samples in the next row. Rule 6 turns that into a whole extra row at 2
+    or 3 of 15 coverage below the baseline, so in game text such as
+    `Reload? No save data found.` an `e`, `o`, `a`, `s`, `d`, `t` or `u` ends
+    one row below an `R`, `l` or `n`. An overshoot of `N` eighths of a pixel
+    or more is kept as drawn. The project's Latin fonts use `N = 3`: the
+    largest of those overshoots is 0.30 px at 20 ppem, under 3/8, and the
+    nearest flat height that is not an overshoot, the top of Liberation
+    Sans `f` 73 units above the cap height, is 0.46 px at 13 ppem, over 3/8,
+    so ascenders keep their own height. The rule does not tell an overshoot
+    from a small deliberate excursion: at 13 ppem the extremes of `/`, `\`,
+    `ø`, `Ø`, `§`, `∞`, `ƒ`, `@`, `×`, `÷`, the fractions `¼` and `¾`, and
+    the spur of Liberation Serif `q`, which lie within 3/8 px of an edge,
+    are set on it as well. The Japanese and Korean fonts do not use it: an
+    ideograph has no x-height, and its strokes near those heights are not
+    overshoots. The flat edges must ascend, `B < X < C`, and at
+    the chosen ppem the band above `X` must end below `C`
+    (`(C - X) * ppem * 8 > N * unitsPerEm`), so no point is in two bands.
 
 Same pinned input plus same parameters plus same converter version therefore
 produce byte-identical `.pgf` and manifest output on every supported host,
@@ -341,7 +402,7 @@ Generated PGFs are fixtures, never an authenticity claim.
 | `code_points` | For `--codepoints`: the file's leaf name, count, and SHA-256; `null` for a range. |
 | `glyphs` | Count, zero-area codes, maximum pixel dimensions. |
 | `metric_targets` | The policy, the chosen ppem, and achieved 26.6 values - or `null`. |
-| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given. |
+| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given; `snap_overshoot` only when given: its unit, threshold `N`, and the flat edges `B`, `X` and `C` in font units of the first font (`zones`) and, with a fallback that draws codes, of the second (`fallback_zones`). |
 | `fallback` | Only with `--fallback`: the second font's `input` record (as above), its `license` block, and the ascending `codes` it draws. |
 | `license` | SPDX id, copyright line, reserved font names, the **full licence text**, its digest, and the source pin's provenance record - or `null` without a pin. |
 
@@ -392,5 +453,6 @@ Generated PGFs are fixtures, never an authenticity claim.
 | Tracking, tabular digits and the second font: effect, manifest record and refusals | `SpacingAndFallbackOptionTests` |
 | Built-in Latin, Japanese and Korean sets and the pinned fonts' coverage of them | `ProjectCodePointCoverageTests`, `JapaneseCodePointCoverageTests` |
 | Project Latin faces: one per console index, line widths, class widths and ink | `ProjectLatinStrikeTests` |
+| Overshoot alignment: round and flat letters share their rows, flat letters and deep features unchanged, manifest record and refusals | `OvershootSnapTests`, `ProjectLatinStrikeTests` |
 | Project Japanese and Korean nominal size and advances | `ProjectCjkSizeTests` |
 | Independent structural validation | `nk_core.fonts.validate_pgf_data` on the output |
