@@ -6545,8 +6545,8 @@ static const unsigned char real_kernel_prx[998] = {
     0x74, 0x72, 0x74, 0x61, 0x62, 0x00,
 };
 
-/* A PBP package of homebrew: PARAM.SFO (MG, the category PSPSDK writes; no DISC_ID), an ICON0 section, a DATA.PSP program
-   and an empty DATA.PSAR, the form a homebrew EBOOT.PBP has. */
+/* A PBP package of homebrew: PARAM.SFO (MG, the category PSPSDK writes; no DISC_ID), an ICON0
+   section, a DATA.PSP program and an empty DATA.PSAR, the form a homebrew EBOOT.PBP has. */
 static uint8_t *homebrew_pbp(const char *title, const uint8_t *program, size_t program_len,
                              const uint8_t *icon, size_t icon_len, size_t *out_len) {
     uint8_t sfo[512];
@@ -6607,7 +6607,10 @@ static void test_homebrew_stop_cards_name_their_limit(void) {
                                    308u, 9, 9000u, "XABC01234", NULL);
     assert(nk_disc_id_is_non_retail_key("XABC01234"));
     assert(strcmp(app->last_error.title, "Game stopped early") == 0);
-    assert(strstr(app->last_error.message, "generated while it was running") != NULL);
+    assert(strstr(app->last_error.message,
+                  "usually code a program generates while it runs") != NULL);
+    assert(strstr(app->last_error.message, "did not find before it started") != NULL);
+    assert(strstr(app->last_error.boundary_text, "not supported yet") == NULL);
     assert(strstr(app->last_error.message, "processor feature") == NULL);
     assert(strstr(app->last_error.boundary_text, "target-not-executable") != NULL);
     assert(strcmp(app->last_error.stop_boundary, "target-not-executable") == 0);
@@ -6615,7 +6618,7 @@ static void test_homebrew_stop_cards_name_their_limit(void) {
     player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY", "target-not-executable",
                                    308u, 9, 9000u, "ULUS10041", NULL);
     assert(strstr(app->last_error.message, "processor feature") != NULL);
-    assert(strstr(app->last_error.message, "generated while it was running") == NULL);
+    assert(strstr(app->last_error.message, "usually code a program generates") == NULL);
 
     player_app_set_game_stop_error(app, "RUNTIME_SEMANTIC_BOUNDARY",
                                    "unsupported-import-scenetadhocinit", 308u, 9, 9000u,
@@ -6760,6 +6763,39 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         write_binary_file(other_path, pbp, pbp_len);
         free(pbp);
         psn_test_refused(other_path, "PBP_PACKAGE_UNSUPPORTED", "Only unencrypted homebrew");
+    }
+
+    /* A homebrew program that packs extra data into its DATA.PSAR is still a program: an MG
+       package whose DATA.PSP is a plain ELF is never reported as a firmware update. The same
+       package with a signed (~PSP) DATA.PSP and data after it is refused as one. */
+    {
+        PlayerPsnPackage package;
+        char code[64];
+        char message[512];
+        uint8_t signed_head[256];
+        size_t padded_len;
+        pbp = homebrew_pbp("Packed data", program, 88u, icon, sizeof(icon), &pbp_len);
+        padded_len = pbp_len + 64u;
+        pbp = (uint8_t *)realloc(pbp, padded_len);
+        assert(pbp != NULL);
+        memset(pbp + pbp_len, 0x5A, 64u);
+        write_binary_file(other_path, pbp, padded_len);
+        free(pbp);
+        (void)player_psn_package_inspect(other_path, &package, code, sizeof(code), message,
+                                         sizeof(message));
+        assert(strcmp(code, "FIRMWARE_OUT_OF_SCOPE") != 0);
+        assert(strstr(message, "firmware") == NULL);
+
+        memset(signed_head, 0, sizeof(signed_head));
+        memcpy(signed_head, "~PSP", 4);
+        pbp = homebrew_pbp("Packed data", signed_head, sizeof(signed_head), NULL, 0, &pbp_len);
+        padded_len = pbp_len + 64u;
+        pbp = (uint8_t *)realloc(pbp, padded_len);
+        assert(pbp != NULL);
+        memset(pbp + pbp_len, 0x5A, 64u);
+        write_binary_file(other_path, pbp, padded_len);
+        free(pbp);
+        psn_test_refused(other_path, "FIRMWARE_OUT_OF_SCOPE", "never decrypts firmware");
     }
 
     /* Modules built by the real PSPSDK (see the arrays above): the user-mode ones are taken and

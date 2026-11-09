@@ -232,7 +232,7 @@ int nk_pbp_identify(NkPspCtx *ctx, const NkPsarSource *src, NkPbpInfo *out)
         if (rc != NK_PSP_OK) return rc;
     }
     if (strcmp(out->category, "MG") == 0 && (uint64_t)out->psar_offset < src->size &&
-        memcmp(psp_head, "" "ELF", 4) != 0) {
+        memcmp(psp_head, "\x7f" "ELF", 4) != 0) {
         out->payload = NK_PBP_PAYLOAD_FIRMWARE;
         return nk_psp_fail(ctx, NK_PSP_ERR_FIRMWARE, NULL,
                            "this package is a PSP system software update; "
