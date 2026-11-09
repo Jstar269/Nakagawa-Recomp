@@ -666,7 +666,9 @@ contributor's pull request only says where each new file came from
      either one now. A V1/V2 record binds no claim and no bytes, so one that adds a path is refused
      (`POLICY_DELTA_LEGACY_ADDS_PATHS`), and its admission needs one `--rekey`.
 3. **Push the private `main` commit.** The hosted "Trusted provenance attestation" check reads the authority from
-   `main`; local-only records fail with HTTP 404.
+   `main`; local-only records fail with HTTP 404. A head that was attested before this push failed; attest it
+   again with `gh workflow run provenance-attestation.yml -f pull_request_number=<n> -f head_sha=<head SHA>`, then
+   dispatch the verdict ([Re-running](CI.md#trusted-ci-verdict)).
 4. **Admit the new paths** with `provenance_ledger.py admit-new-reviewed`, from a clean candidate commit whose only
    change from the base is the new paths and their profile entries. Commit the generated controls and merge that
    commit into the task branch.

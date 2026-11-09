@@ -38,20 +38,33 @@ OSV = ".github/workflows/osv-scanner.yml"
 DEP = ".github/workflows/dependency-review.yml"
 PROV = ".github/workflows/provenance-attestation.yml"
 PUSHED = "2026-10-28T10:00:00Z"
+MAIN = "c" * 40                       # the default branch's tip: what a workflow_run or dispatched run reports
+D1 = "1" * 64
+D2 = "2" * 64
+LABELLED = "2026-10-28T10:30:00Z"     # Scenario.label's default
+RECORDED = "2026-10-28T10:31:00Z"     # after it: when Scenario.record's job completed
+PROVENANCE = next(producer for producer in ctv.PRODUCERS if producer.workflow == PROV)
+NAMED_TITLE = "Provenance attestation of {head}"   # the attestation workflow's run-name; see WorkflowWiringTests
 
 
 def _run(run_id: int, path: str, event: str = "pull_request", *, sha: str = HEAD, created: str = PUSHED,
-         status: str = "completed", conclusion: str | None = "success", prs: tuple[int, ...] = (PR,)) -> dict:
-    return {
+         status: str = "completed", conclusion: str | None = "success", prs: tuple[int, ...] = (PR,),
+         branch: str | None = None, title: str | None = None, actor: str | None = None) -> dict:
+    run = {
         "id": run_id, "path": path, "event": event, "head_sha": sha, "created_at": created,
         "status": status, "conclusion": conclusion, "check_suite_id": run_id * 10,
         "pull_requests": [{"number": number, "base": {"ref": "main"}} for number in prs],
+        "head_branch": branch, "display_title": title,
     }
+    if actor is not None:
+        run["actor"] = run["triggering_actor"] = {"login": actor}
+    return run
 
 
 def _job(job_id: int, name: str, *, sha: str = HEAD, status: str = "completed",
-         conclusion: str | None = "success") -> dict:
-    return {"id": job_id, "name": name, "head_sha": sha, "status": status, "conclusion": conclusion}
+         conclusion: str | None = "success", completed: str | None = RECORDED) -> dict:
+    return {"id": job_id, "name": name, "head_sha": sha, "status": status, "conclusion": conclusion,
+            "completed_at": completed if status == "completed" else None}
 
 
 def _check(job: dict, suite: int, *, app: int = ctv.GITHUB_ACTIONS_APP_ID) -> dict:
@@ -109,10 +122,39 @@ class Scenario:
     def job(self, run_id: int, name: str) -> dict:
         return next(job for job in self.raw["jobs"][str(run_id)] if job["name"] == name)
 
+    def drop_runs(self, path: str) -> None:
+        """Remove every run of one workflow, with its check runs: the workflow never ran at this head."""
+        suites = {run["check_suite_id"] for run in self.raw["workflow_runs"] if run["path"] == path}
+        self.raw["workflow_runs"] = [run for run in self.raw["workflow_runs"] if run["path"] != path]
+        self.raw["check_runs"] = [check for check in self.raw["check_runs"]
+                                  if check["check_suite"]["id"] not in suites]
+
+    def add_named(self, run_id: int, *, event: str = "workflow_run", head: str = HEAD, branch: str = "main",
+                  trusted: bool = True, job_names: tuple[str, ...] = (PROVENANCE.context,), **run_args) -> dict:
+        """An attestation run of the second route: listed under the default branch and titled for ``head``.
+
+        GitHub attaches its check runs to the default branch's commit, so none is added at the pull request head.
+        """
+        run = _run(run_id, PROV, event, sha=MAIN, prs=(), branch=branch,
+                   title=NAMED_TITLE.format(head=head), **run_args)
+        run["default_definition"] = trusted
+        self.raw["workflow_runs"].append(run)
+        self.raw["jobs"][str(run_id)] = [_job(run_id * 100 + index, name, sha=MAIN)
+                                         for index, name in enumerate(job_names)]
+        return run
+
     def change(self, path: str, kind: str = "modified") -> None:
         self.raw["protected_changes"].append({"path": path, "kind": kind})
 
-    def label(self, *, at: str = "2026-10-28T10:30:00Z", permission: str = "admin",
+    def record(self, digest: str = D1, *, at: str = RECORDED, route: str = "dispatch", head: str = HEAD,
+               head_digest: str | None = D1) -> None:
+        """An approval record as the collector reads it, and this head's own digest."""
+        self.raw["head_digest"] = head_digest
+        self.raw.setdefault("approval_records", []).append(
+            {"digest": digest, "recorded_at": at, "run_created_at": at, "route": route, "head_sha": head,
+             "actor": "maintainer"})
+
+    def label(self, *, at: str = LABELLED, permission: str = "admin",
               event: str = "labeled", actor: str = "maintainer") -> None:
         self.raw["pull_request"]["labels"] = (
             [{"name": ctv.APPROVAL_LABEL}] if event == "labeled" else []
@@ -186,6 +228,7 @@ class SameNameJobCanaryTests(VerdictAssertions):
         scenario.add_run(6, ".github/workflows/evil.yml", ["Hygiene and security"])
         scenario.change(".github/workflows/evil.yml", "added")
         scenario.label()
+        scenario.record()
         verdict = self.assertVerdict(scenario, "failure", "FOREIGN_PRODUCER")
         self.assertNotIn("CI_CHANGE_UNAPPROVED", {item.code for item in verdict.findings})
 
@@ -364,19 +407,44 @@ class ForkCanaryTests(VerdictAssertions):
 
 
 class CiToolApprovalCanaryTests(VerdictAssertions):
-    """Canary: a CI tool edit needs the maintainer label, bound to this head."""
+    """Canary: a CI tool edit needs the maintainer label and a record of this head's protected content."""
 
     def test_ci_tool_edit_without_label_fails(self) -> None:
         scenario = Scenario()
         scenario.change("tools/ci_paths.py")
         self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
 
-    def test_label_applied_after_this_head_arrived_approves(self) -> None:
+    def test_a_label_with_a_record_of_this_content_written_after_it_approves(self) -> None:
         scenario = Scenario()
         scenario.change("tools/ci_paths.py")
         scenario.label(at="2026-10-28T10:05:00Z")
+        scenario.record(at="2026-10-28T10:06:00Z")
         verdict = self.assertVerdict(scenario, "success")
         self.assertEqual([item.code for item in verdict.findings], ["CI_CHANGE_APPROVED"])
+
+    def test_a_label_alone_does_not_approve(self) -> None:
+        """Failing-before: a label applied after the head's first run approved the head with no record at all,
+        so nothing tied the approval to the bytes that were reviewed."""
+        scenario = Scenario()
+        scenario.change("tools/ci_paths.py")
+        scenario.label(at="2026-10-28T10:05:00Z")
+        self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
+
+    def test_a_label_newer_than_a_re_pushed_heads_first_run_does_not_approve(self) -> None:
+        """A pull request is pushed to HEAD (its runs start at 10:00), then to another commit, which a
+        maintainer reviews and labels at 10:30, and then back to HEAD at 10:40. HEAD's protected content was
+        never approved.
+
+        Failing-before: the verifier took the earliest pull-request run at HEAD as the head's arrival, found the
+        label newer, and approved. The synchronize handler that would have removed the label does not run while
+        GitHub blocks pull_request_target, and workflow_run and dispatch verdicts still do."""
+        scenario = Scenario()
+        scenario.change("tools/ci_paths.py")
+        for run_id, path, jobs in ((11, CI, ["Classify change", "Hygiene and security", "CI required"]),
+                                   (12, OSV, ["OSV Vulnerability Scan"]), (13, DEP, ["dependency-review"])):
+            scenario.add_run(run_id, path, jobs, created="2026-10-28T10:40:00Z")   # the push back to HEAD
+        scenario.label(at=LABELLED)
+        self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
 
     def test_label_from_an_earlier_head_does_not_approve(self) -> None:
         scenario = Scenario()
@@ -388,6 +456,7 @@ class CiToolApprovalCanaryTests(VerdictAssertions):
         scenario = Scenario()
         scenario.change("tools/ci_paths.py")
         scenario.label(at="2026-10-28T10:05:00Z")
+        scenario.record(at="2026-10-28T10:05:30Z")
         scenario.label(at="2026-10-28T10:06:00Z", event="unlabeled")
         self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
 
@@ -453,6 +522,7 @@ class DraftLightCiTests(VerdictAssertions):
         scenario = self._draft()
         scenario.change("tools/ci_paths.py")
         scenario.label(at="2026-10-28T10:05:00Z")
+        scenario.record(at="2026-10-28T10:06:00Z")
         verdict = self.assertVerdict(scenario, "failure", "DRAFT_LIGHT_CI")
         self.assertEqual(sorted({item.code for item in verdict.findings if item.fatal}), ["DRAFT_LIGHT_CI"])
 
@@ -615,7 +685,10 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", self.text)
         self.assertNotIn("head.ref", self.text)
         self.assertNotIn("github.head_ref", self.text)
-        self.assertEqual(self.text.count("actions/checkout@"), 2)   # the approval job and the verdict job
+        self.assertNotIn("workflow_run.head_branch", self.text)
+        # The two approval jobs and the verdict job, each the default branch.
+        self.assertEqual(self.text.count("actions/checkout@"), 3)
+        self.assertEqual(self.text.count("ref: ${{ github.event.repository.default_branch }}"), 3)
 
     def test_least_privilege(self) -> None:
         self.assertIn("\npermissions: {}\n", self.text)
@@ -687,8 +760,19 @@ class WorkflowWiringTests(unittest.TestCase):
             with self.subTest(context=producer.context):
                 text = (ROOT / producer.workflow).read_text(encoding="utf-8")
                 self.assertRegex(text, rf"(?m)^(    name: {re.escape(producer.context)}|  {re.escape(producer.context)}:)\s*$")
-                for event in producer.events:
+                for event in producer.events + producer.named_events:
                     self.assertRegex(text, rf"(?m)^  {event}:")
+
+    def test_the_attestation_titles_its_run_with_the_head_on_every_route(self) -> None:
+        """Failing-before: the workflow set no run name, so a workflow_run or dispatched attestation could not
+        be told from one for any other head."""
+        self.assertEqual(PROVENANCE.run_title, NAMED_TITLE)
+        text = (ROOT / PROVENANCE.workflow).read_text(encoding="utf-8")
+        title = "format('" + PROVENANCE.run_title.format(head="{0}") + "', "
+        heads = re.findall(re.escape(title) + r"([A-Za-z_.]+)\)", text[:text.index("\non:\n")])
+        self.assertEqual(heads, ["github.event.pull_request.head.sha", "github.event.workflow_run.head_sha",
+                                 "inputs.head_sha"])
+        self.assertEqual(set(PROVENANCE.named_events), {"workflow_run", "workflow_dispatch"})
 
 
 class FakeGitHub(ctv.GitHub):
@@ -720,7 +804,14 @@ class FakeGitHub(ctv.GitHub):
             returned = self.raw["label_events"]
             return returned
         if path.startswith("actions/runs?head_sha="):
-            returned = self.raw["workflow_runs"]
+            # GitHub lists a workflow_run or dispatched run under the default branch's commit, never here.
+            returned = [run for run in self.raw["workflow_runs"] if run["head_sha"] == HEAD]
+            return returned
+        if path.startswith("actions/workflows/provenance-attestation.yml/runs?"):
+            returned = [run for run in self.raw["workflow_runs"] if run["path"] == PROV and run["head_sha"] != HEAD]
+            return returned
+        if path.startswith("actions/workflows/ci-trust-verdict.yml/runs?"):
+            returned = self.raw.get("dispatch_runs", [])
             return returned
         if path.startswith("actions/runs/"):
             returned = self.raw["jobs"][path.split("/")[2]]
@@ -1032,38 +1123,71 @@ class CollectorTests(unittest.TestCase):
             self._main(gh, "--head-sha", "HEAD")
 
 
-D1 = "1" * 64
-D2 = "2" * 64
 BEFORE = "d" * 40
-LABELLED_AT = "2026-10-28T09:59:00Z"   # before PUSHED: the label predates the head, so only a carry can approve it
+LABELLED_AT = "2026-10-28T09:59:00Z"   # before PUSHED: the label predates the head, as after a push that was carried
 VERDICT_RUN_PATH = ctv.VERDICT_WORKFLOW
 
 
 def _record(run_id: int, digest: str, *, sha: str = HEAD, path: str = VERDICT_RUN_PATH,
             event: str = "pull_request_target", conclusion: str | None = "success",
             status: str = "completed", name: str | None = None, job_sha: str | None = None,
-            number: int = PR, run_prs: tuple[int, ...] = (PR,), base: str = "main") -> tuple[dict, dict]:
+            number: int = PR, run_prs: tuple[int, ...] = (PR,), base: str = "main",
+            created: str = PUSHED, completed: str = RECORDED) -> tuple[dict, dict]:
     """A run and its one job, shaped like the approval record the label workflow leaves."""
-    run = _run(run_id, path, event, sha=sha, prs=run_prs)
+    run = _run(run_id, path, event, sha=sha, prs=run_prs, created=created)
     for item in run["pull_requests"]:
         item["base"]["ref"] = base
     job = _job(run_id * 100, name or f"{ctv.APPROVAL_RECORD_PREFIX}{number} {digest}", sha=job_sha or sha,
-               status=status, conclusion=conclusion)
+               status=status, conclusion=conclusion, completed=completed)
     return run, job
 
 
 def _carried(digest: str | None = D1, records: tuple[str, ...] = (D1,), **label) -> Scenario:
-    """A head that changes a CI tool, carrying a label applied before the head arrived."""
+    """A head that changes a CI tool, carrying a label applied before the head arrived, with the records the
+    label workflow wrote at this head when the push was carried."""
     scenario = Scenario()
     scenario.change("tools/ci_paths.py")
     scenario.label(at=label.pop("at", LABELLED_AT), **label)
     scenario.raw["head_digest"] = digest
-    scenario.raw["approval_records"] = list(records)
+    scenario.raw["approval_records"] = [
+        {"digest": item, "recorded_at": PUSHED, "run_created_at": PUSHED, "route": "head", "head_sha": HEAD,
+         "actor": None}
+        for item in records
+    ]
     return scenario
 
 
 class CarriedApprovalTests(VerdictAssertions):
     """A label applied before this head arrived approves it only when its protected content is unchanged."""
+
+    def test_a_record_written_before_the_label_was_applied_does_not_approve(self) -> None:
+        """Removing the label withdraws its records: a label applied again approves nothing by itself.
+        Failing-before: a record at the head counted whenever it was written."""
+        scenario = _carried(at="2026-10-28T10:05:00Z")   # the records were written at 10:00
+        self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
+        record = scenario.raw["approval_records"][0]
+        # A job that completed in the label's own second proves nothing about which came first.
+        record.update(run_created_at="2026-10-28T10:05:00Z", recorded_at="2026-10-28T10:05:00Z")
+        self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
+        record["recorded_at"] = "2026-10-28T10:05:01Z"
+        self.assertVerdict(scenario, "success")
+
+    def test_a_run_from_before_the_label_that_finished_after_it_does_not_approve(self) -> None:
+        """A run answers the event that created it. One created before the current label (a label somebody else
+        applied, or an earlier push), then re-run or started late, would write a record dated after a label that
+        was applied for other bytes. Failing-before: nothing compared a record with the label at all."""
+        scenario = _carried(at="2026-10-28T10:05:00Z")
+        scenario.raw["approval_records"][0].update(run_created_at="2026-10-28T10:04:59Z",
+                                                   recorded_at="2026-10-28T11:00:00Z")
+        self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
+
+    def test_a_record_without_a_readable_time_does_not_approve(self) -> None:
+        for field in ("recorded_at", "run_created_at"):
+            for stamp in ("", None, "yesterday", "2026-10-28T10:00:00"):
+                with self.subTest(field=field, stamp=stamp):
+                    scenario = _carried()
+                    scenario.raw["approval_records"][0][field] = stamp
+                    self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
 
     def test_unchanged_protected_content_keeps_the_approval(self) -> None:
         verdict = self.assertVerdict(_carried(), "success")
@@ -1112,8 +1236,8 @@ class ApprovalRecordForgeryTests(unittest.TestCase):
     def digests(self, *pairs: tuple[dict, dict], head: str = HEAD) -> set[str]:
         runs = [run for run, _ in pairs]
         jobs = {run["id"]: [job] for run, job in pairs}
-        found: set[str] = ctv.record_digests(runs, lambda run_id: jobs[run_id], head, PR, "main")
-        return found
+        records = ctv.head_records(runs, lambda run_id: jobs[run_id], head, PR, "main")
+        return {record["digest"] for record in records}
 
     def test_the_genuine_record_is_read(self) -> None:
         self.assertEqual(self.digests(_record(1, D1)), {D1})
@@ -1156,11 +1280,16 @@ class ApprovalRecordForgeryTests(unittest.TestCase):
         self.assertEqual(self.digests(_record(2, D1, base="release")), set())
         self.assertEqual(self.digests(_record(3, D1, run_prs=())), {D1})   # a fork's run reports no pull requests
 
-    def test_a_retargeted_pull_request_is_never_carried(self) -> None:
+    def test_a_retargeted_pull_request_is_never_carried_from_a_label_event_record(self) -> None:
         gh = ApprovalGitHub(records=(_record(6, D1, sha=BEFORE),))
         gh.events.append({"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T10:20:00Z"})
         with mock.patch.object(ctv, "candidate_digest", return_value=D1), self.assertRaises(ctv.ApprovalRefused):
             ctv.carry_approval(gh, Path("."), PR, BEFORE, HEAD, "main")
+        # A dispatched record never came from another base's workflow, so it still carries.
+        gh.dispatches.append(_dispatched(8, created=PUSHED))
+        with mock.patch.object(ctv, "candidate_digest", return_value=D1), \
+                mock.patch.object(ctv, "default_definition", return_value=True):
+            self.assertEqual(ctv.carry_approval(gh, Path("."), PR, BEFORE, HEAD, "main"), D1)
 
     def test_a_forged_record_does_not_approve_in_the_collector(self) -> None:
         """Failing-before: there was no record to forge, and a stale label was always withdrawn by the workflow."""
@@ -1177,6 +1306,199 @@ class ApprovalRecordForgeryTests(unittest.TestCase):
         assert raw is not None
         self.assertEqual(raw["approval_records"], [])
         self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "failure")
+
+
+def _dispatched(run_id: int, digest: str = D1, *, number: int = PR, head: str = HEAD, created: str = LABELLED,
+                event: str = "workflow_dispatch", path: str = VERDICT_RUN_PATH, branch: str = "main",
+                actor: str | None = "maintainer", title: str | None = None, name: str | None = None,
+                conclusion: str | None = "success", status: str = "completed") -> tuple[dict, dict]:
+    """A dispatched approval run and its record job, as ci-trust-verdict.yml leaves them on the default branch."""
+    run = _run(run_id, path, event, sha=MAIN, created=created, prs=(), branch=branch, actor=actor,
+               title=ctv.APPROVAL_RUN_TITLE.format(number=number, head=head) if title is None else title)
+    job = _job(run_id * 100, name or f"{ctv.APPROVAL_RECORD_V2_PREFIX}{number} {head} {digest}", sha=MAIN,
+               status=status, conclusion=conclusion)
+    return run, job
+
+
+class DispatchGitHub(ctv.GitHub):
+    """The verdict workflow's dispatch runs, their jobs, and who has write access."""
+
+    def __init__(self, *pairs: tuple[dict, dict], writers: tuple[str, ...] = ("maintainer",)) -> None:
+        super().__init__("Jstar269/nakagawa-recomp", "token")
+        self.pairs = pairs
+        self.writers = writers
+        self.reads: list[str] = []
+
+    def get(self, path: str) -> object:
+        self.reads.append(path)
+        login = path.split("/")[1]
+        if login.endswith("%5Bbot%5D"):
+            raise urllib.error.HTTPError(path, 404, "not a user", {}, None)  # type: ignore[arg-type]
+        return {"permission": "write" if login in self.writers else "read"}
+
+    def paginate(self, path: str, key: str | None = None) -> list:
+        self.reads.append(path)
+        if path.startswith("actions/workflows/ci-trust-verdict.yml/runs?"):
+            return [run for run, _ in self.pairs]
+        if path.startswith("actions/runs/"):
+            return [job for run, job in self.pairs if run["id"] == int(path.split("/")[2])]
+        raise AssertionError(path)
+
+
+class DispatchedRecordTests(unittest.TestCase):
+    """The approval record that needs no pull request event: only a successful job of a workflow_dispatch run of
+    the verdict workflow, started from a commit on the default branch by a user with write access, is one.
+
+    Failing-before: no such record existed, so a head could be approved only through pull_request_target."""
+
+    def records(self, *pairs: tuple[dict, dict], on_main: bool = True, **github) -> list[dict]:
+        gh = DispatchGitHub(*pairs, **github)
+        with mock.patch.object(ctv, "default_definition", return_value=on_main) as ancestry:
+            found: list[dict] = ctv.dispatched_records(gh, Path("."), PR, "main", LABELLED)
+        self.ancestry = ancestry
+        self.gh = gh
+        return found
+
+    def test_the_genuine_record_is_read(self) -> None:
+        self.assertEqual(self.records(_dispatched(1)), [
+            {"digest": D1, "recorded_at": RECORDED, "run_created_at": LABELLED, "route": "dispatch",
+             "head_sha": HEAD, "actor": "maintainer"},
+        ])
+        self.ancestry.assert_called_once_with(Path("."), MAIN, ctv.VERDICT_WORKFLOW)
+
+    def test_only_runs_since_the_label_are_listed_and_only_titled_runs_have_their_jobs_read(self) -> None:
+        plain = _dispatched(2, title=f"Trusted CI verdict (PR #{PR})")
+        self.assertEqual(len(self.records(_dispatched(1), plain)), 1)
+        listing = self.gh.reads[0]
+        self.assertTrue(listing.startswith("actions/workflows/ci-trust-verdict.yml/runs?"), listing)
+        self.assertIn("event=workflow_dispatch", listing)
+        self.assertIn("branch=main", listing)
+        self.assertIn("created=%3E%3D2026-10-28T10%3A30%3A00Z", listing)
+        self.assertNotIn("actions/runs/2/jobs?filter=latest", self.gh.reads)
+
+    def test_a_dispatch_from_another_ref_is_ignored(self) -> None:
+        # Another branch runs that branch's copy of the workflow, which can name a job anything.
+        self.assertEqual(self.records(_dispatched(1, branch="ci/evil")), [])
+        # So does a tag named like the default branch: only the commit says whose definition ran.
+        self.assertEqual(self.records(_dispatched(1), on_main=False), [])
+
+    def test_a_run_of_another_event_or_workflow_is_ignored(self) -> None:
+        for event in ("pull_request", "pull_request_target", "workflow_run", "push"):
+            with self.subTest(event=event):
+                self.assertEqual(self.records(_dispatched(1, event=event)), [])
+        self.assertEqual(self.records(_dispatched(1, path=".github/workflows/evil.yml")), [])
+
+    def test_a_dispatch_by_an_actor_without_write_access_is_ignored(self) -> None:
+        self.assertEqual(self.records(_dispatched(1, actor="helper")), [])
+        # A workflow's own token can dispatch a workflow; its actor is a bot with no collaborator permission.
+        self.assertEqual(self.records(_dispatched(1, actor="github-actions[bot]")), [])
+        self.assertEqual(self.records(_dispatched(1, actor=None)), [])
+        # A re-run by someone without write access makes the run theirs as well.
+        run, job = _dispatched(1)
+        run["triggering_actor"] = {"login": "helper"}
+        self.assertEqual(self.records((run, job)), [])
+
+    def test_a_run_created_before_the_label_is_ignored_whatever_github_answered(self) -> None:
+        # The filter sent to GitHub is checked again here: a run from before the label answers another approval.
+        self.assertEqual(self.records(_dispatched(1, created="2026-10-28T10:29:59Z")), [])
+        self.assertEqual(len(self.records(_dispatched(1, created=LABELLED))), 1)
+
+    def test_the_dispatcher_and_whoever_re_ran_the_run_both_need_write_access(self) -> None:
+        for actor, rerun_by in (("helper", "maintainer"), ("maintainer", "helper"),
+                                ("github-actions[bot]", "maintainer")):
+            with self.subTest(actor=actor, rerun_by=rerun_by):
+                run, job = _dispatched(1, actor=actor)
+                run["triggering_actor"] = {"login": rerun_by}
+                self.assertEqual(self.records((run, job)), [])
+
+    def test_a_run_titled_for_another_pull_request_is_not_read(self) -> None:
+        other = _dispatched(1, title=ctv.APPROVAL_RUN_TITLE.format(number=PR + 1, head=HEAD))
+        self.assertEqual(self.records(other), [])
+        self.assertNotIn("actions/runs/1/jobs?filter=latest", self.gh.reads)
+
+    def test_a_record_for_another_pull_request_is_ignored(self) -> None:
+        self.assertEqual(self.records(_dispatched(1, number=PR + 1)), [])
+        # The title selects the run; the job name is the record, and it must name this pull request too.
+        mixed = _dispatched(1, name=f"{ctv.APPROVAL_RECORD_V2_PREFIX}{PR + 1} {HEAD} {D1}")
+        self.assertEqual(self.records(mixed), [])
+
+    def test_a_failed_cancelled_or_unfinished_record_is_ignored(self) -> None:
+        self.assertEqual(self.records(_dispatched(1, conclusion="failure"), _dispatched(2, conclusion="skipped"),
+                                      _dispatched(3, conclusion=None, status="in_progress")), [])
+
+    def test_malformed_names_are_ignored(self) -> None:
+        prefix = ctv.APPROVAL_RECORD_V2_PREFIX
+        for name in (f"{prefix}{PR} {HEAD} {D1[:-1]}", f"{prefix}{PR} {HEAD[:-1]} {D1}", f"{prefix}{PR} {D1}",
+                     f"{prefix}0{PR} {HEAD} {D1}", f"{prefix}{PR} {HEAD.upper()} {D1}", f"{prefix}{PR} {HEAD} {D1} ",
+                     f"{prefix}{PR} {OTHER} {D1}",   # a head the run's title does not name
+                     f"CI approval record v1 pr{PR} {D1}", f"x{prefix}{PR} {HEAD} {D1}", prefix):
+            with self.subTest(name=name):
+                self.assertEqual(self.records(_dispatched(1, name=name)), [])
+
+    def test_a_dispatched_record_approves_in_the_collector_without_any_pull_request_target_run(self) -> None:
+        scenario = Scenario()
+        scenario.drop_runs(ctv.VERDICT_WORKFLOW)
+        scenario.change("tools/ci_paths.py")
+        scenario.label(at=LABELLED, permission="write")
+        run, job = _dispatched(6)
+        scenario.raw["dispatch_runs"] = [run]
+        scenario.raw["jobs"]["6"] = [job]
+        gh = FakeGitHub(scenario)
+        with mock.patch.object(ctv, "git_facts", return_value=_facts(scenario.raw["protected_changes"])), \
+                mock.patch.object(ctv, "approval_digest", return_value=D1), \
+                mock.patch.object(ctv, "default_definition", return_value=True):
+            raw = ctv.collect(gh, Path("."), "main", HEAD, PR)
+        assert raw is not None
+        self.assertEqual([record["route"] for record in raw["approval_records"]], ["dispatch"])
+        verdict = ctv.evaluate(ctv.normalise(raw))
+        self.assertEqual(verdict.state, "success", verdict.findings)
+        self.assertIn("recorded the approval", verdict.findings[0].message)
+
+
+class DispatchedApprovalTests(VerdictAssertions):
+    """What a dispatched record approves: the digest it names, on this pull request, while the label stands."""
+
+    @staticmethod
+    def _approved(**record) -> Scenario:
+        scenario = Scenario()
+        scenario.change("tools/ci_paths.py")
+        scenario.label()
+        scenario.record(**record)
+        return scenario
+
+    def test_a_record_of_this_content_approves_a_later_head_with_the_same_content(self) -> None:
+        # The dispatch named an earlier head; a push that changed no protected file keeps the approval.
+        self.assertVerdict(self._approved(head=OTHER), "success")
+
+    def test_a_record_of_other_content_does_not_approve(self) -> None:
+        self.assertVerdict(self._approved(digest=D2), "failure", "CI_CHANGE_UNAPPROVED")
+        self.assertVerdict(self._approved(head_digest=None), "failure", "CI_CHANGE_UNAPPROVED")
+
+    def test_a_record_written_before_the_label_does_not_approve(self) -> None:
+        self.assertVerdict(self._approved(at="2026-10-28T10:29:59Z"), "failure", "CI_CHANGE_UNAPPROVED")
+        self.assertVerdict(self._approved(at=LABELLED), "failure", "CI_CHANGE_UNAPPROVED")
+
+    def test_a_record_does_not_replace_the_label_or_its_write_access(self) -> None:
+        scenario = self._approved()
+        scenario.raw["pull_request"]["labels"] = []
+        self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
+        scenario = Scenario()
+        scenario.change("tools/ci_paths.py")
+        scenario.label(permission="triage", actor="helper")
+        scenario.record()
+        self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
+
+    def test_a_retargeted_pull_request_is_approved_only_by_a_dispatched_record(self) -> None:
+        """A pull_request_target record may come from another base's workflow; a dispatched one cannot."""
+        for route, state in (("dispatch", "success"), ("head", "failure")):
+            with self.subTest(route=route):
+                scenario = self._approved(route=route)
+                scenario.raw["label_events"].append(
+                    {"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T10:20:00Z"})
+                self.assertVerdict(scenario, state)
+
+    def test_a_record_of_an_unknown_route_does_not_approve(self) -> None:
+        self.assertVerdict(self._approved(route="status"), "failure", "CI_CHANGE_UNAPPROVED")
 
 
 class CarriedApprovalCollectorTests(unittest.TestCase):
@@ -1201,7 +1523,10 @@ class CarriedApprovalCollectorTests(unittest.TestCase):
 
     def test_a_recorded_unchanged_head_is_approved(self) -> None:
         raw = self.collect(self.scenario())
-        self.assertEqual(raw["approval_records"], [D1])
+        self.assertEqual(raw["approval_records"], [
+            {"digest": D1, "recorded_at": RECORDED, "run_created_at": PUSHED, "route": "head", "head_sha": HEAD,
+             "actor": None},
+        ])
         self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "success")
 
     def test_changed_content_is_not(self) -> None:
@@ -1245,8 +1570,10 @@ class ApprovalGitHub(ctv.GitHub):
 
     def __init__(self, *, head: str = HEAD, labels: tuple[str, ...] = (ctv.APPROVAL_LABEL,),
                  permission: str | None = "write", events: list[dict] | None = None,
-                 records: tuple[tuple[dict, dict], ...] = (), broken: str | None = None) -> None:
+                 records: tuple[tuple[dict, dict], ...] = (), broken: str | None = None,
+                 dispatches: tuple[tuple[dict, dict], ...] = ()) -> None:
         super().__init__("Jstar269/nakagawa-recomp", "token")
+        self.dispatches = list(dispatches)
         self.pull = _pull_request(head=head, labels=labels)
         self.permission = permission
         self.events = events if events is not None else [{
@@ -1275,9 +1602,11 @@ class ApprovalGitHub(ctv.GitHub):
         if path.startswith("actions/runs?head_sha="):
             sha = path.split("=", 1)[1]
             return [run for run, _ in self.records if run["head_sha"] == sha]
+        if path.startswith("actions/workflows/ci-trust-verdict.yml/runs?"):
+            return [run for run, _ in self.dispatches]
         if path.startswith("actions/runs/"):
             run_id = int(path.split("/")[2])
-            return [job for run, job in self.records if run["id"] == run_id]
+            return [job for run, job in self.records + self.dispatches if run["id"] == run_id]
         raise AssertionError(path)
 
 
@@ -1324,6 +1653,34 @@ class RecordAndCarryTests(unittest.TestCase):
 
     def test_an_unchanged_digest_is_carried(self) -> None:
         self.assertEqual(self.carry(ApprovalGitHub(records=(_record(6, D1, sha=BEFORE),))), D1)
+
+    def test_a_record_written_under_an_earlier_label_is_not_carried(self) -> None:
+        """A maintainer approves one head, the label is removed, and a maintainer labels other bytes. With
+        pull_request_target blocked the pull request is pushed back to the first head, and the label stays
+        because no handler runs. The next push of unrelated files must not carry the first head's old record
+        forward under the new label. Failing-before: a carry took any record at the previous head."""
+        old = _record(6, D1, sha=BEFORE, created="2026-10-28T09:00:00Z", completed="2026-10-28T09:01:00Z")
+        with self.assertRaises(ctv.ApprovalRefused):
+            self.carry(ApprovalGitHub(records=(old,)))          # the label is from 09:59
+        # Re-running that old run after the label gives its job a later time, never its run.
+        rerun = _record(6, D1, sha=BEFORE, created="2026-10-28T09:00:00Z", completed="2026-10-28T10:30:00Z")
+        with self.assertRaises(ctv.ApprovalRefused):
+            self.carry(ApprovalGitHub(records=(rerun,)))
+        current = _record(7, D1, sha=BEFORE, created=LABELLED_AT, completed="2026-10-28T10:00:00Z")
+        self.assertEqual(self.carry(ApprovalGitHub(records=(old, current))), D1)
+
+    def test_a_dispatched_approval_is_carried_without_a_record_at_the_previous_head(self) -> None:
+        """A push that changes no protected file keeps an approval that was recorded by dispatch.
+        Failing-before: no dispatched record existed, and the push removed the label."""
+        with mock.patch.object(ctv, "default_definition", return_value=True):
+            self.assertEqual(self.carry(ApprovalGitHub(dispatches=(_dispatched(8, created=PUSHED),))), D1)
+            with self.assertRaises(ctv.ApprovalRefused):        # the new head's protected content differs
+                self.carry(ApprovalGitHub(dispatches=(_dispatched(8, created=PUSHED),)), digest=D2)
+            with self.assertRaises(ctv.ApprovalRefused):        # dispatched before the current label
+                self.carry(ApprovalGitHub(dispatches=(_dispatched(8, created="2026-10-28T09:00:00Z"),)))
+        with mock.patch.object(ctv, "default_definition", return_value=False), \
+                self.assertRaises(ctv.ApprovalRefused):         # not the default branch's copy of the workflow
+            self.carry(ApprovalGitHub(dispatches=(_dispatched(8, created=PUSHED),)))
 
     def test_a_changed_digest_is_not_carried(self) -> None:
         with self.assertRaises(ctv.ApprovalRefused):
@@ -1390,6 +1747,38 @@ class RecordAndCarryTests(unittest.TestCase):
                              (1, ""))
             self.assertEqual(self._main(ApprovalGitHub(), "--approval", "carry", "--before-sha", "nope",
                                         output=output), (2, ""))
+
+    def test_a_dispatched_approval_is_refused_unless_the_label_and_the_named_head_hold(self) -> None:
+        def dispatch(gh: ApprovalGitHub) -> str:
+            with mock.patch.object(ctv, "candidate_digest", return_value=D1):
+                digest: str = ctv.record_approval(gh, Path("."), PR, HEAD, "main", dispatched=True)
+                return digest
+
+        self.assertEqual(dispatch(ApprovalGitHub()), D1)
+        # The dispatcher names the head they reviewed; a pull request that has moved on is not that head.
+        for refused in (ApprovalGitHub(head=OTHER), ApprovalGitHub(labels=()), ApprovalGitHub(permission="triage")):
+            with self.assertRaises(ctv.ApprovalRefused):
+                dispatch(refused)
+
+    def test_a_dispatched_approval_does_not_depend_on_the_base_a_pull_request_once_had(self) -> None:
+        """A label-event record comes from the base branch's workflow, so a retargeted pull request is refused
+        one. A dispatch runs the default branch's workflow whatever the base was. Failing-before: with no
+        dispatch route a retargeted pull request could be approved only by the time of its label."""
+        gh = ApprovalGitHub()
+        gh.events.append({"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T09:00:00Z"})
+        with mock.patch.object(ctv, "candidate_digest", return_value=D1):
+            with self.assertRaises(ctv.ApprovalRefused):
+                ctv.record_approval(gh, Path("."), PR, HEAD, "main")
+            self.assertEqual(ctv.record_approval(gh, Path("."), PR, HEAD, "main", dispatched=True), D1)
+
+    def test_the_dispatch_command_writes_every_part_of_the_record_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            self.assertEqual(self._main(ApprovalGitHub(), "--approval", "dispatch", output=output),
+                             (0, f"digest={D1}\nnumber={PR}\nhead_sha={HEAD}\n"))
+            output.unlink()
+            self.assertEqual(self._main(ApprovalGitHub(labels=()), "--approval", "dispatch", output=output), (1, ""))
+            self.assertEqual(self._main(ApprovalGitHub(head=OTHER), "--approval", "dispatch", output=output), (1, ""))
 
 
 class ApprovalDigestTests(unittest.TestCase):
@@ -1554,9 +1943,58 @@ class ApprovalWorkflowWiringTests(unittest.TestCase):
         self.assertRegex(name, ctv._APPROVAL_RECORD)
         self.assertTrue(name.startswith(ctv.APPROVAL_RECORD_PREFIX))
 
+    def test_the_dispatched_record_job_name_is_what_the_verifier_reads(self) -> None:
+        """Failing-before: the workflow had no dispatched record job."""
+        outputs = "needs.approval_dispatch.outputs"
+        match = re.search(r"(?m)^    name: (CI approval record v2 pr\$\{\{ " + re.escape(outputs) + r"\.number \}\} "
+                          r"\$\{\{ " + re.escape(outputs) + r"\.head_sha \}\} "
+                          r"\$\{\{ " + re.escape(outputs) + r"\.digest \}\})$", self.text)
+        assert match is not None
+        name = match.group(1)
+        # Every part is an output of the trusted tool; a dispatch input never reaches the name as typed.
+        self.assertNotIn("inputs.", name)
+        self.assertNotIn("github.event", name)
+        for output, value in (("number", str(PR)), ("head_sha", HEAD), ("digest", D1)):
+            name = name.replace("${{ " + outputs + "." + output + " }}", value)
+        self.assertRegex(name, ctv._APPROVAL_RECORD_V2)
+        self.assertEqual(name, f"{ctv.APPROVAL_RECORD_V2_PREFIX}{PR} {HEAD} {D1}")
+
+    def test_the_approval_dispatch_is_titled_as_the_verifier_looks_it_up(self) -> None:
+        header = self.text[:self.text.index("\non:\n")]
+        title = ctv.APPROVAL_RUN_TITLE.format(number="{0}", head="{1}")
+        self.assertIn(f"format('{title}', inputs.pull_request_number, inputs.approve_head_sha)", header)
+        self.assertRegex(ctv.APPROVAL_RUN_TITLE.format(number=PR, head=HEAD), ctv._APPROVAL_RUN_TITLE)
+
+    def test_the_dispatched_approval_runs_default_branch_code_and_cannot_post_or_label(self) -> None:
+        job = self.text[self.text.index("\n  approval_dispatch:\n"):self.text.index("\n  approval_record_dispatched:\n")]
+        record = self.text[self.text.index("\n  approval_record_dispatched:\n"):self.text.index("\n  verdict:\n")]
+        self.assertIn("if: ${{ github.event_name == 'workflow_dispatch' && inputs.approve_head_sha != '' }}", job)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", job)
+        self.assertIn("persist-credentials: false", job)
+        self.assertIn('--approval dispatch --pull-request "${PR_NUMBER}" --head-sha "${HEAD_SHA}"', job)
+        self.assertIn('if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then', job)
+        self.assertNotRegex(job, r": write")
+        # The dispatch inputs reach the shell only as environment values.
+        body = job[job.index("        run: |"):]
+        self.assertNotIn("${{", body)
+        self.assertIn("permissions: {}", record)
+        self.assertNotIn("checkout", record)
+        self.assertNotIn("secrets.", record)
+        self.assertIn("if: ${{ needs.approval_dispatch.outputs.digest != '' }}", record)
+
+    def test_an_approval_dispatch_is_not_replaced_by_a_later_verdict_dispatch(self) -> None:
+        # One pending run per concurrency group: a plain dispatch for the same pull request must not share it.
+        self.assertIn("(inputs.approve_head_sha != '' && format('approval-{0}-{1}', inputs.pull_request_number, "
+                      "inputs.approve_head_sha)) || inputs.pull_request_number }}", self.text)
+
     def test_the_verdict_waits_for_the_approval_jobs(self) -> None:
-        self.assertIn("    needs: [approval, approval_record]\n", self.text)
+        self.assertIn("    needs: [approval, approval_record, approval_dispatch, approval_record_dispatched]\n",
+                      self.text)
         self.assertNotIn("clear_approval", self.text)
+        # A refused dispatch still gets a verdict: the verdict's guard names only the label jobs.
+        verdict = self.text[self.text.index("\n  verdict:\n"):]
+        guard = verdict[verdict.index("    if: >-\n"):verdict.index("    runs-on:")]
+        self.assertNotIn("approval_dispatch", guard)
 
     def test_only_a_carried_push_keeps_the_label(self) -> None:
         # The label is removed on every push or reopen unless the carry step produced a digest.
@@ -1566,13 +2004,389 @@ class ApprovalWorkflowWiringTests(unittest.TestCase):
 
     def test_the_approval_jobs_run_default_branch_code_with_the_least_they_need(self) -> None:
         approval = self.text[self.text.index("\n  approval:\n"):self.text.index("\n  approval_record:\n")]
-        record = self.text[self.text.index("\n  approval_record:\n"):self.text.index("\n  verdict:\n")]
+        record = self.text[self.text.index("\n  approval_record:\n"):self.text.index("\n  approval_dispatch:\n")]
         self.assertIn("ref: ${{ github.event.repository.default_branch }}", approval)
         self.assertIn("python tools/ci_trust_verdict.py", approval)
         self.assertNotIn("statuses: write", approval)
         self.assertIn("permissions: {}", record)
         self.assertNotIn("checkout", record)
         self.assertNotIn("secrets.", record)
+
+
+class NamedAttestationRouteTests(VerdictAssertions):
+    """The attestation's second route: a workflow_run or dispatched run on the default branch, titled for the head.
+
+    GitHub blocks pull_request_target by default in public repositories from 2026-12-02, and such a run reports
+    the default branch's commit, not the pull request head. Failing-before: the verifier read the attestation
+    only from a pull_request_target run at the head, so without one the verdict stayed pending for ever.
+    """
+
+    @staticmethod
+    def _without_the_event() -> Scenario:
+        scenario = Scenario()
+        scenario.drop_runs(PROV)
+        return scenario
+
+    def test_without_either_route_the_attestation_is_awaited(self) -> None:
+        verdict = self.assertVerdict(self._without_the_event(), "pending")
+        self.assertEqual(verdict.pending, [PROVENANCE.context])
+
+    def test_a_default_branch_workflow_run_titled_for_the_head_is_judged(self) -> None:
+        scenario = self._without_the_event()
+        scenario.add_named(6)
+        verdict = self.assertVerdict(scenario, "success")
+        self.assertEqual(verdict.findings, [])
+
+    def test_a_default_branch_dispatch_titled_for_the_head_is_judged(self) -> None:
+        scenario = self._without_the_event()
+        scenario.add_named(6, event="workflow_dispatch")
+        self.assertVerdict(scenario, "success")
+
+    def test_a_run_titled_for_another_head_is_ignored(self) -> None:
+        scenario = self._without_the_event()
+        scenario.add_named(6, head=OTHER)
+        self.assertVerdict(scenario, "pending")
+        scenario.raw["workflow_runs"][-1]["display_title"] = "Trusted provenance attestation"
+        self.assertVerdict(scenario, "pending")
+        scenario.raw["workflow_runs"][-1]["display_title"] = NAMED_TITLE.format(head=HEAD) + " "
+        self.assertVerdict(scenario, "pending")
+
+    def test_a_run_dispatched_from_another_ref_is_ignored(self) -> None:
+        # Another branch runs that branch's copy of the workflow: its job could be `exit 0`.
+        scenario = self._without_the_event()
+        scenario.add_named(6, event="workflow_dispatch", branch="ci/evil")
+        self.assertVerdict(scenario, "pending")
+        # A tag named like the default branch is told apart only by its commit and copy (default_definition).
+        scenario = self._without_the_event()
+        scenario.add_named(6, event="workflow_dispatch", trusted=False)
+        self.assertVerdict(scenario, "pending")
+
+    def test_only_the_collectors_own_check_marks_a_definition_trusted(self) -> None:
+        scenario = self._without_the_event()
+        run = scenario.add_named(6)
+        for value in ("true", 1, None):
+            with self.subTest(value=value):
+                run["default_definition"] = value
+                self.assertVerdict(scenario, "pending")
+        del run["default_definition"]
+        self.assertVerdict(scenario, "pending")
+
+    def test_a_titled_run_of_any_other_event_is_ignored(self) -> None:
+        for event in ("pull_request", "push", "schedule", "merge_group"):
+            with self.subTest(event=event):
+                scenario = self._without_the_event()
+                scenario.add_named(6, event=event)
+                self.assertVerdict(scenario, "pending")
+
+    def test_a_titled_run_of_another_workflow_is_ignored(self) -> None:
+        scenario = self._without_the_event()
+        scenario.add_named(6)["path"] = ".github/workflows/evil.yml"
+        self.assertVerdict(scenario, "pending")
+
+    def test_a_failed_or_skipped_attestation_is_not_green(self) -> None:
+        for conclusion in ("failure", "skipped"):
+            with self.subTest(conclusion=conclusion):
+                scenario = self._without_the_event()
+                scenario.add_named(6)
+                scenario.job(6, PROVENANCE.context)["conclusion"] = conclusion
+                self.assertVerdict(scenario, "failure", "JOB_FAILED")
+
+    def test_an_unfinished_run_is_awaited_and_a_finished_one_must_have_the_job_once(self) -> None:
+        scenario = self._without_the_event()
+        scenario.add_named(6, status="in_progress", conclusion=None)
+        scenario.job(6, PROVENANCE.context).update(status="in_progress", conclusion=None)
+        self.assertVerdict(scenario, "pending")
+        scenario = self._without_the_event()
+        scenario.add_named(6, job_names=())
+        self.assertVerdict(scenario, "failure", "JOB_MISSING")
+        scenario = self._without_the_event()
+        scenario.add_named(6, job_names=(PROVENANCE.context, PROVENANCE.context))
+        self.assertVerdict(scenario, "failure", "DUPLICATE_CONTEXT")
+
+    def test_a_job_that_reports_another_commit_than_its_run_is_a_replay(self) -> None:
+        scenario = self._without_the_event()
+        scenario.add_named(6)
+        scenario.job(6, PROVENANCE.context)["head_sha"] = OTHER
+        self.assertVerdict(scenario, "failure", "RUN_HEAD_MISMATCH")
+
+    def test_the_newest_run_of_either_route_decides(self) -> None:
+        # An older success cannot mask a newer failure, whichever route each came from.
+        scenario = Scenario()
+        scenario.add_named(6, created="2026-10-28T10:05:00Z")
+        scenario.job(6, PROVENANCE.context)["conclusion"] = "failure"
+        self.assertVerdict(scenario, "failure", "JOB_FAILED")
+        scenario = Scenario()
+        scenario.job(4, PROVENANCE.context)["conclusion"] = "failure"
+        scenario.add_named(6, created="2026-10-28T09:55:00Z")
+        self.assertVerdict(scenario, "failure", "JOB_FAILED")
+        # Attesting again after an admission: the dispatch is the newest run.
+        scenario.add_named(7, event="workflow_dispatch", created="2026-10-28T10:20:00Z")
+        self.assertVerdict(scenario, "success")
+
+    def test_a_cancelled_named_run_is_superseded_not_failed(self) -> None:
+        scenario = self._without_the_event()
+        scenario.add_named(6, created="2026-10-28T10:01:00Z")
+        scenario.add_named(7, created="2026-10-28T10:02:00Z", conclusion="cancelled")
+        self.assertVerdict(scenario, "success")
+        scenario = self._without_the_event()
+        scenario.add_named(7, conclusion="cancelled")
+        self.assertVerdict(scenario, "failure", "JOB_CANCELLED")
+
+    def test_a_refused_pull_request_target_event_does_not_mask_an_attestation_that_ran(self) -> None:
+        """GitHub ends a refused event's run as startup_failure with no job (2026-11-09: 18 attestation runs).
+        Failing-before: that run was the newest at the head, so the verdict failed with JOB_MISSING."""
+        scenario = Scenario()
+        scenario.raw["workflow_runs"][3].update(conclusion="startup_failure", created_at="2026-10-28T10:10:00Z")
+        scenario.raw["jobs"]["4"] = []
+        scenario.raw["check_runs"] = [check for check in scenario.raw["check_runs"] if check["check_suite"]["id"] != 40]
+        self.assertVerdict(scenario, "failure", "JOB_MISSING")       # nothing attested this head
+        scenario.add_named(6, created="2026-10-28T10:00:05Z")
+        self.assertVerdict(scenario, "success")
+        scenario.job(6, PROVENANCE.context)["conclusion"] = "failure"   # and its result is the one judged
+        self.assertVerdict(scenario, "failure", "JOB_FAILED")
+
+    def test_a_refused_event_still_fails_when_the_other_route_only_has_a_cancelled_run(self) -> None:
+        scenario = Scenario()
+        scenario.raw["workflow_runs"][3].update(conclusion="startup_failure")
+        scenario.raw["jobs"]["4"] = []
+        scenario.add_named(6, conclusion="cancelled")
+        self.assertVerdict(scenario, "failure", "JOB_MISSING")
+
+    def test_a_failed_run_of_the_event_route_is_not_dropped(self) -> None:
+        # Only a run GitHub refused to start is ignored; a real failure stays the newest result.
+        scenario = Scenario()
+        scenario.raw["workflow_runs"][3].update(created_at="2026-10-28T10:10:00Z")
+        scenario.job(4, PROVENANCE.context)["conclusion"] = "failure"
+        scenario.add_named(6, created="2026-10-28T10:00:05Z")
+        self.assertVerdict(scenario, "failure", "JOB_FAILED")
+
+    def test_only_the_attestation_has_a_named_route(self) -> None:
+        named = [producer.context for producer in ctv.PRODUCERS if producer.named_events]
+        self.assertEqual(named, [PROVENANCE.context])
+        # A pull_request workflow's definition is the candidate's: a default-branch run titled for the head
+        # must never answer for one.
+        scenario = Scenario()
+        scenario.drop_runs(OSV)
+        run = scenario.add_named(6, job_names=("OSV Vulnerability Scan",))
+        run["path"] = OSV
+        self.assertVerdict(scenario, "pending")
+
+
+class NamedRouteCollectorTests(unittest.TestCase):
+    """How the collector finds the second route's runs, and what it costs."""
+
+    def collect(self, scenario: Scenario, *, on_main: bool = True) -> tuple[dict | None, FakeGitHub]:
+        gh = FakeGitHub(scenario)
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()), \
+                mock.patch.object(ctv, "default_definition", return_value=on_main) as ancestry:
+            raw = ctv.collect(gh, Path("."), "main", HEAD, PR)
+        self.ancestry = ancestry
+        return raw, gh
+
+    @staticmethod
+    def _listing(gh: FakeGitHub) -> list[str]:
+        return [read for read in gh.reads if read.startswith("actions/workflows/")]
+
+    def test_the_named_run_is_listed_by_branch_and_time_and_judged(self) -> None:
+        """Failing-before: only the head's own runs were read, and a workflow_run attestation is not among them."""
+        scenario = Scenario()
+        scenario.drop_runs(PROV)
+        scenario.add_named(6, created="2026-10-28T10:00:05Z")
+        scenario.add_named(7, head=OTHER, created="2026-10-28T10:00:06Z")     # another head's attestation
+        raw, gh = self.collect(scenario)
+        assert raw is not None
+        self.assertEqual(self._listing(gh), [
+            "actions/workflows/provenance-attestation.yml/runs?branch=main&created=%3E%3D2026-10-28T10%3A00%3A00Z",
+        ])
+        self.assertEqual({run["id"] for run in raw["workflow_runs"] if run["path"] == PROV}, {6})
+        self.ancestry.assert_called_once_with(Path("."), MAIN, PROV)
+        self.assertIn("actions/runs/6/jobs?filter=latest", gh.reads)
+        self.assertNotIn("actions/runs/7/jobs?filter=latest", gh.reads)
+        self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "success")
+
+    def test_the_listing_starts_at_the_heads_earliest_run(self) -> None:
+        # A later start could leave out the attestation that ran when the head first arrived.
+        scenario = Scenario()
+        scenario.add_run(9, DEP, ["dependency-review"], created="2026-10-28T10:40:00Z")
+        scenario.raw["workflow_runs"][1]["created_at"] = "2026-10-28T09:30:00Z"
+        _raw, gh = self.collect(scenario)
+        self.assertEqual(self._listing(gh), [
+            "actions/workflows/provenance-attestation.yml/runs?branch=main&created=%3E%3D2026-10-28T09%3A30%3A00Z",
+        ])
+
+    def test_a_run_whose_commit_is_not_on_the_default_branch_stays_untrusted(self) -> None:
+        scenario = Scenario()
+        scenario.drop_runs(PROV)
+        scenario.add_named(6, event="workflow_dispatch")
+        raw, _gh = self.collect(scenario, on_main=False)
+        assert raw is not None
+        self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": [PROVENANCE.context]})
+
+    def test_nothing_is_listed_while_another_producer_is_unfinished(self) -> None:
+        # The listing is an API call on every judgement; a pending CI run already decides the answer.
+        scenario = Scenario()
+        scenario.drop_runs(PROV)
+        scenario.add_named(6)
+        scenario.raw["workflow_runs"][0].update(status="in_progress", conclusion=None)
+        raw, gh = self.collect(scenario)
+        assert raw is not None
+        self.assertEqual(raw["waiting_producers"], ["CI required", "Hygiene and security", PROVENANCE.context])
+        self.assertEqual(self._listing(gh), [])
+
+    def test_an_unfinished_named_run_is_waited_for(self) -> None:
+        scenario = Scenario()
+        scenario.drop_runs(PROV)
+        scenario.add_named(6, status="in_progress", conclusion=None)
+        raw, gh = self.collect(scenario)
+        assert raw is not None
+        self.assertEqual(raw["waiting_producers"], [PROVENANCE.context])
+        self.assertEqual(len(self._listing(gh)), 1)
+
+    def test_both_routes_are_read_when_the_event_route_finished(self) -> None:
+        # While pull_request_target still runs, a newer dispatch after an admission must be seen.
+        scenario = Scenario()
+        scenario.job(4, PROVENANCE.context)["conclusion"] = "failure"
+        scenario.add_named(6, event="workflow_dispatch", created="2026-10-28T10:20:00Z")
+        raw, gh = self.collect(scenario)
+        assert raw is not None
+        self.assertIn("actions/runs/6/jobs?filter=latest", gh.reads)
+        self.assertNotIn("actions/runs/4/jobs?filter=latest", gh.reads)
+        self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "success")
+
+    def test_on_default_branch_reads_ancestry_from_the_trusted_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+
+            def git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                                      text=True).stdout.strip()
+
+            git("init", "-q", "-b", "main")
+            git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "one")
+            first = git("rev-parse", "HEAD")
+            git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "two")
+            tip = git("rev-parse", "HEAD")
+            git("checkout", "-q", "-b", "topic")
+            git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "side")
+            side = git("rev-parse", "HEAD")
+            git("checkout", "-q", "main")
+            self.assertTrue(ctv.on_default_branch(repo, tip))
+            self.assertTrue(ctv.on_default_branch(repo, first))
+            self.assertFalse(ctv.on_default_branch(repo, side))        # a commit only another ref has
+            self.assertFalse(ctv.on_default_branch(repo, "e" * 40))    # an object the checkout does not have
+            for malformed in ("", "main", tip[:12], tip.upper(), f"{tip} --not"):
+                self.assertFalse(ctv.on_default_branch(repo, malformed))
+
+    def test_only_the_default_branchs_current_copy_of_a_workflow_is_a_trusted_definition(self) -> None:
+        """A rebase merge puts every commit of a pull request on the default branch, and only its last tree was
+        judged: a commit in the middle can hold a copy of the workflow that prints green. A tag named like the
+        default branch can be dispatched from there. Failing-before: there was no second route to protect."""
+        workflow = ".github/workflows/gate.yml"
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+
+            def git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c",
+                                       "user.email=t@example.invalid", *args], check=True, capture_output=True,
+                                      text=True).stdout.strip()
+
+            def commit(text: str | None, message: str) -> str:
+                path = repo / workflow
+                if text is None:
+                    path.unlink()
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(text, encoding="utf-8", newline="")
+                git("add", "-A")
+                git("commit", "-q", "--allow-empty", "-m", message)
+                return git("rev-parse", "HEAD")
+
+            git("init", "-q", "-b", "main")
+            absent = git("commit", "-q", "--allow-empty", "-m", "no workflow yet") or git("rev-parse", "HEAD")
+            honest = commit("jobs: {attest: honest}", "the gate")
+            swapped = commit("jobs: {attest: exit 0}", "first commit of a rebase-merged pull request")
+            restored = commit("jobs: {attest: honest}", "its second commit restores the file")
+            tip = commit("jobs: {attest: honest}", "unrelated work")
+            git("checkout", "-q", "-b", "topic")
+            side = commit("jobs: {attest: honest}", "the same copy on a commit only a topic branch has")
+            git("checkout", "-q", "main")
+            for sha in (tip, restored, honest):
+                self.assertTrue(ctv.default_definition(repo, sha, workflow), sha)
+            self.assertFalse(ctv.default_definition(repo, swapped, workflow))   # on main, another copy
+            self.assertFalse(ctv.default_definition(repo, side, workflow))      # the same copy, not on main
+            self.assertFalse(ctv.default_definition(repo, absent, workflow))    # no copy at that commit
+            self.assertFalse(ctv.default_definition(repo, tip, ".github/workflows/other.yml"))
+            self.assertFalse(ctv.default_definition(repo, "e" * 40, workflow))
+
+
+class AttestationTargetTests(unittest.TestCase):
+    """The pull request a workflow_run or dispatched attestation attests: exactly one, at exactly the head."""
+
+    class Pulls(ctv.GitHub):
+        def __init__(self, *pulls: dict) -> None:
+            super().__init__("Jstar269/nakagawa-recomp", "token")
+            self.pulls = list(pulls)
+            self.reads: list[str] = []
+
+        def paginate(self, path: str, key: str | None = None) -> list:
+            self.reads.append(path)
+            return self.pulls
+
+    @staticmethod
+    def _pull(number: int = PR, **args) -> dict:
+        pull = _pull_request(**args)
+        pull["number"] = number
+        pull["base"]["sha"] = MAIN
+        return pull
+
+    def test_the_one_open_pull_request_at_the_head_is_the_target(self) -> None:
+        gh = self.Pulls(self._pull(), self._pull(8, head=OTHER))
+        self.assertEqual(ctv.attestation_target(gh, "main", HEAD),
+                         {"number": PR, "head_sha": HEAD, "base_sha": MAIN})
+        self.assertEqual(gh.reads, ["pulls?state=open&base=main"])
+        self.assertEqual(ctv.attestation_target(gh, "main", HEAD, PR)["number"], PR)
+
+    def test_no_pull_request_at_the_head_is_refused(self) -> None:
+        # The head moved, or the pull request targets another branch: nothing is attested, so nothing is green.
+        for pulls in ((), (self._pull(head=OTHER),), (self._pull(base="release"),)):
+            with self.subTest(pulls=len(pulls)), self.assertRaises(ctv.TargetRefused):
+                ctv.attestation_target(self.Pulls(*pulls), "main", HEAD)
+
+    def test_two_pull_requests_with_one_head_are_refused(self) -> None:
+        with self.assertRaises(ctv.TargetRefused):
+            ctv.attestation_target(self.Pulls(self._pull(), self._pull(8)), "main", HEAD)
+
+    def test_a_dispatch_naming_another_pull_request_is_refused(self) -> None:
+        with self.assertRaises(ctv.TargetRefused):
+            ctv.attestation_target(self.Pulls(self._pull()), "main", HEAD, PR + 1)
+
+    def test_a_base_without_an_exact_sha_is_refused(self) -> None:
+        pull = self._pull()
+        pull["base"]["sha"] = "main"
+        with self.assertRaises(ctv.TargetRefused):
+            ctv.attestation_target(self.Pulls(pull), "main", HEAD)
+
+    def _main(self, gh: ctv.GitHub, *args: str) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out"
+            with mock.patch.object(ctv, "GitHub", return_value=gh), \
+                    mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t"}), \
+                    mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+                code = ctv.main(["--repository", gh.repository, "--attestation-target", "--github-output",
+                                 str(output), *args])
+            return code, output.read_text(encoding="utf-8") if output.exists() else ""
+
+    def test_the_command_writes_the_target_only_on_success(self) -> None:
+        gh = self.Pulls(self._pull())
+        self.assertEqual(self._main(gh, "--head-sha", HEAD),
+                         (0, f"number={PR}\nhead_sha={HEAD}\nbase_sha={MAIN}\n"))
+        self.assertEqual(self._main(gh, "--head-sha", HEAD, "--pull-request", str(PR))[0], 0)
+        # Fail closed: no match, another pull request, a malformed head or an API failure write nothing.
+        self.assertEqual(self._main(gh, "--head-sha", OTHER), (1, ""))
+        self.assertEqual(self._main(gh, "--head-sha", HEAD, "--pull-request", str(PR + 1)), (1, ""))
+        self.assertEqual(self._main(gh, "--head-sha", "HEAD"), (2, ""))
+        with mock.patch.object(gh, "paginate", side_effect=urllib.error.URLError("down")):
+            self.assertEqual(self._main(gh, "--head-sha", HEAD), (1, ""))
 
 
 class CommandLineTests(unittest.TestCase):
