@@ -708,23 +708,35 @@ typedef enum {
     PLAYER_REBUILD_ACTIVE,      /* its build is starting or running */
     PLAYER_REBUILD_DONE,
     PLAYER_REBUILD_NO_DISC,     /* skipped: its disc image is missing */
-    PLAYER_REBUILD_FAILED       /* the build did not finish; the old package stays */
+    PLAYER_REBUILD_FAILED       /* the build did not finish (a rebuild keeps the old package) */
 } PlayerRebuildState;
+
+/* Why a game is in the build queue. */
+typedef enum {
+    PLAYER_QUEUE_REBUILD = 0,   /* an older Nakagawa built it: Rebuild all, Rebuild now */
+    PLAYER_QUEUE_BUILD          /* it has no package yet: the title page's Add to queue */
+} PlayerQueueKind;
 
 typedef struct {
     char disc_id[MAX_DISC_ID_LEN];
     PlayerRebuildState state;
+    PlayerQueueKind kind;
 } PlayerRebuildEntry;
 
-/* The queue file, rebuild-queue.json beside settings.json:
- *   {"format": "nakagawa-rebuild-queue", "schema_version": 1,
- *    "titles": [{"disc_id": "TEST00006", "state": "pending"}, ...]}
- * state is "pending", "done", "missing_disc" or "failed"; a title whose build
- * was running when the player closed is saved as "pending" and starts again.
- * A file with a newer schema_version, another format, or an unknown member is
- * left alone and not resumed. The file goes once nothing is pending. */
+/* The build queue: one queue for Add to queue and Rebuild all, one build at a
+ * time, in its order. Its file, rebuild-queue.json beside settings.json:
+ *   {"format": "nakagawa-rebuild-queue", "schema_version": 2,
+ *    "titles": [{"disc_id": "TEST00006", "kind": "build", "state": "pending"}, ...]}
+ * The titles are in queue order. kind is "build" or "rebuild"; state is
+ * "pending", "done", "missing_disc" or "failed", and a title whose build was
+ * running when the player closed is saved as "pending" and starts again.
+ * Schema 1 had no kind: every title in it is a rebuild, and the next save
+ * writes schema 2. A file with another format or an unknown member is not
+ * resumed. A file with a newer schema_version is not resumed and never
+ * replaced or removed: this player's queue then lasts until it closes. The
+ * file goes once nothing is pending. */
 #define PLAYER_REBUILD_QUEUE_FORMAT "nakagawa-rebuild-queue"
-#define PLAYER_REBUILD_QUEUE_SCHEMA_VERSION 1
+#define PLAYER_REBUILD_QUEUE_SCHEMA_VERSION 2
 #define PLAYER_REBUILD_QUEUE_FILE "rebuild-queue.json"
 
 typedef struct {
@@ -733,10 +745,13 @@ typedef struct {
     /* Titles are pending or one is being built. */
     bool active;
     /* A build could not start for a reason outside its title (its card is up,
-       or the build tool download was cancelled); Rebuild all starts again. */
+       or the build tool download was cancelled); Resume, Rebuild all or Add to
+       queue starts it again. */
     bool paused;
     /* The build session the queue started, once the builder runs; 0 before. */
     uint64_t build_generation;
+    /* rebuild-queue.json was written by a newer Nakagawa: it stays as it is. */
+    bool file_is_newer;
 } PlayerRebuildQueue;
 
 /* Disc verification (src/core/nk_disc_verify.h): each image the player adds is
@@ -2048,6 +2063,25 @@ void player_app_rebuild_reminder_rebuild_now(PlayerApp *app);
    from a newer player is not read. */
 bool player_app_rebuild_all(PlayerApp *app);
 bool player_app_rebuild_enqueue(PlayerApp *app, const char *disc_id);
+/* The title page's Add to queue: the game goes last in the build queue (a
+   rebuild if an older Nakagawa built it), and the queue starts if it was idle.
+   False when it is already waiting or building, or its disc ID is not one the
+   queue file can hold. */
+bool player_app_build_queue_add(PlayerApp *app, int game_index);
+/* Remove from queue: a game that waits leaves the queue (the one building
+   stays; Cancel build stops it). The queue ends once nothing waits. */
+bool player_app_build_queue_remove(PlayerApp *app, const char *disc_id);
+/* Moves a waiting game one place earlier (direction < 0) or later (> 0), past
+   the next game that waits. False at either end or for the one building. */
+bool player_app_build_queue_move(PlayerApp *app, const char *disc_id, int direction);
+/* A paused queue goes on. */
+bool player_app_build_queue_resume(PlayerApp *app);
+/* The game's place in the queue, from 1 (the one building, or the next), and
+   the number of games waiting or building in *out_total; 0 when it is not
+   waiting or building. */
+int player_app_build_queue_place(const PlayerApp *app, const char *disc_id, int *out_total);
+/* The library's queue line has something to show: games wait or build. */
+bool player_app_build_queue_has_waiting(const PlayerApp *app);
 void player_app_rebuild_queue_step(PlayerApp *app);
 bool player_app_rebuild_queue_load(PlayerApp *app);
 bool player_app_rebuild_queue_save(const PlayerApp *app);
@@ -2073,6 +2107,11 @@ typedef struct {
        queue or rebuilds, and not without its disc. */
     bool can_rebuild;
     float fraction;
+    /* Its build queue entry, when it has one: a first build (not a rebuild),
+       and its place while it waits (player_app_build_queue_place). */
+    PlayerQueueKind kind;
+    int queue_place;
+    int queue_total;
 } PlayerRebuildCard;
 #define PLAYER_REBUILD_REMINDER_TEXT \
     "This game was built by an older Nakagawa. Rebuild it for the latest fixes."

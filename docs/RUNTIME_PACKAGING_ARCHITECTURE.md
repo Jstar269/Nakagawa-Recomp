@@ -449,21 +449,30 @@ What the player does (it suggests a rebuild and never forces one):
 * Each outdated card says "Built by an older Nakagawa. Rebuild for the latest
   fixes.", and the title page offers Rebuild beside PLAY. PLAY asks once a
   session (Rebuild now or Play anyway); Play anyway launches as before.
-* Rebuild all queues the outdated games and builds them one at a time, behind
-  whatever the user is doing, through the same package builder as BUILD
-  PACKAGE. The library line counts ("Rebuilding 2 of 5") and each card shows
-  its state and compile progress. A game can be played until its own rebuild
-  starts; while it runs, that game cannot launch and its card says why. A
-  game whose disc image is missing is skipped and its card asks for the disc
-  again; a failed or cancelled build is noted on its card and the queue moves
-  on.
+* Rebuild all queues the outdated games in the build queue, which builds one
+  game at a time, behind whatever the user is doing, through the same package
+  builder as BUILD PACKAGE. The library line counts ("Rebuilding 2 of 5", or
+  "Building 2 of 5" once the queue holds a first build) and each card shows
+  its state, its place in the queue and its compile progress. A game can be
+  played until its own rebuild starts; while it runs, that game cannot launch
+  and its card says why. A game whose disc image is missing is skipped and its
+  card asks for the disc again; a failed or cancelled build is noted on its
+  card and the queue moves on.
+* The same queue takes first builds: a game with no package offers Add to
+  queue beside BUILD PACKAGE on its page, and Remove from queue while it
+  waits. The library line's Queue opens the queue: the game building first,
+  then the ones that wait, each with Up, Down and Remove, and Resume when a
+  build could not start for a reason outside its game. The build card says how
+  many games follow.
 * The queue survives a restart in `rebuild-queue.json` beside `settings.json`:
-  `{"format": "nakagawa-rebuild-queue", "schema_version": 1, "titles":
-  [{"disc_id": "...", "state": "pending" | "done" | "missing_disc" |
-  "failed"}]}`. A build that was running is saved as `pending` and starts
-  again. A file with a newer `schema_version`, another format or an unknown
-  member is left in place and not resumed. The file goes when nothing is
-  pending.
+  `{"format": "nakagawa-rebuild-queue", "schema_version": 2, "titles":
+  [{"disc_id": "...", "kind": "build" | "rebuild", "state": "pending" |
+  "done" | "missing_disc" | "failed"}]}`, in queue order. A build that was
+  running is saved as `pending` and starts again. A schema 1 file (no `kind`,
+  every title a rebuild) is read as rebuilds and rewritten as schema 2. A file
+  with another format or an unknown member is left in place and not resumed;
+  a file with a newer `schema_version` is not resumed and is never replaced or
+  removed. The file goes when nothing is pending.
 
 A rebuild never removes the old package first. The build runs in the
 content-addressed cache entry, is validated, copied next to the package,

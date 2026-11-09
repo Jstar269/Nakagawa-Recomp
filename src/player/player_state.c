@@ -10454,11 +10454,16 @@ void player_app_rebuild_prompt_answer(PlayerApp *app, bool rebuild_all) {
     if (rebuild_all) (void)player_app_rebuild_all(app);
 }
 
-static int player_rebuild_find(const PlayerRebuildQueue *queue, const char *disc_id) {
-    for (int i = 0; queue && disc_id && i < queue->count; i++) {
+static int player_rebuild_find_count(const PlayerRebuildQueue *queue, int count,
+                                     const char *disc_id) {
+    for (int i = 0; queue && disc_id && i < count; i++) {
         if (strcmp(queue->entries[i].disc_id, disc_id) == 0) return i;
     }
     return -1;
+}
+
+static int player_rebuild_find(const PlayerRebuildQueue *queue, const char *disc_id) {
+    return queue ? player_rebuild_find_count(queue, queue->count, disc_id) : -1;
 }
 
 static int player_rebuild_active_index(const PlayerRebuildQueue *queue) {
@@ -10474,8 +10479,11 @@ static bool player_rebuild_queue_running(const PlayerApp *app) {
 
 bool player_app_rebuild_banner_visible(const PlayerApp *app) {
     if (!app || player_app_rebuild_prompt_visible(app)) return false;
-    /* A running queue shows its count whether or not the notice was hidden. */
-    if (player_rebuild_queue_running(app)) return true;
+    /* A running queue shows its count whether or not the notice was hidden,
+       and a paused one says it waits (its Queue button resumes it). */
+    if (player_rebuild_queue_running(app) || player_app_build_queue_has_waiting(app)) {
+        return true;
+    }
     return app->outdated.count > 0 && !app->outdated.banner_dismissed;
 }
 
@@ -10488,13 +10496,24 @@ size_t player_app_rebuild_banner_text(const PlayerApp *app, char *out, size_t ou
     int written;
     if (player_rebuild_queue_running(app)) {
         int finished = 0;
+        bool first_builds = false;
         for (int i = 0; i < app->rebuild_queue.count; i++) {
             PlayerRebuildState state = app->rebuild_queue.entries[i].state;
             if (state != PLAYER_REBUILD_PENDING && state != PLAYER_REBUILD_ACTIVE) finished++;
+            if (app->rebuild_queue.entries[i].kind == PLAYER_QUEUE_BUILD) first_builds = true;
         }
         int current = finished < app->rebuild_queue.count ? finished + 1 : finished;
-        written = snprintf(out, out_size, "Rebuilding %d of %d", current,
+        written = snprintf(out, out_size, "%s %d of %d",
+                           first_builds ? "Building" : "Rebuilding", current,
                            app->rebuild_queue.count);
+    } else if (player_app_build_queue_has_waiting(app) &&
+               (app->outdated.count == 0 || app->outdated.banner_dismissed)) {
+        /* Paused: a build could not start. Nothing builds until Resume. */
+        int total = 0;
+        (void)player_app_build_queue_place(app, "", &total);
+        written = total == 1
+            ? snprintf(out, out_size, "The build queue is paused. 1 game waits.")
+            : snprintf(out, out_size, "The build queue is paused. %d games wait.", total);
     } else {
         int count = app->outdated.count;
         written = count == 1
@@ -10620,6 +10639,18 @@ static bool player_rebuild_state_from_name(const char *name, PlayerRebuildState 
     return true;
 }
 
+static const char *player_queue_kind_name(PlayerQueueKind kind) {
+    return kind == PLAYER_QUEUE_BUILD ? "build" : "rebuild";
+}
+
+static bool player_queue_kind_from_name(const char *name, PlayerQueueKind *out) {
+    if (!name) return false;
+    if (strcmp(name, "build") == 0) *out = PLAYER_QUEUE_BUILD;
+    else if (strcmp(name, "rebuild") == 0) *out = PLAYER_QUEUE_REBUILD;
+    else return false;
+    return true;
+}
+
 static bool player_rebuild_disc_id_valid(const char *disc_id) {
     size_t length = disc_id ? strlen(disc_id) : 0u;
     if (length == 0 || length >= MAX_DISC_ID_LEN) return false;
@@ -10634,6 +10665,8 @@ bool player_app_rebuild_queue_save(const PlayerApp *app) {
     char path[MAX_PATH_LEN];
     char tmp_path[MAX_PATH_LEN + 8];
     if (!app || !player_app_rebuild_queue_path(app, path, sizeof(path))) return false;
+    /* A newer Nakagawa's queue is neither replaced nor removed. */
+    if (app->rebuild_queue.file_is_newer) return false;
     if (!app->rebuild_queue.active) {
         /* Nothing is pending: there is nothing to resume. */
         return !nk_platform_file_exists(path) || nk_remove_utf8(path) == 0;
@@ -10652,8 +10685,9 @@ bool player_app_rebuild_queue_save(const PlayerApp *app) {
     for (int i = 0; i < app->rebuild_queue.count; i++) {
         /* Disc IDs are checked to be plain letters, digits, - and _ when they
            are read back, so they need no escaping. */
-        fprintf(f, "%s\n    {\"disc_id\": \"%s\", \"state\": \"%s\"}", i ? "," : "",
-                app->rebuild_queue.entries[i].disc_id,
+        fprintf(f, "%s\n    {\"disc_id\": \"%s\", \"kind\": \"%s\", \"state\": \"%s\"}",
+                i ? "," : "", app->rebuild_queue.entries[i].disc_id,
+                player_queue_kind_name(app->rebuild_queue.entries[i].kind),
                 player_rebuild_state_name(app->rebuild_queue.entries[i].state));
     }
     fprintf(f, "\n  ]\n}\n");
@@ -10705,6 +10739,7 @@ bool player_app_rebuild_queue_load(PlayerApp *app) {
         why = "has no valid schema_version";
     } else if (schema > PLAYER_REBUILD_QUEUE_SCHEMA_VERSION) {
         why = "was written by a newer Nakagawa";
+        app->rebuild_queue.file_is_newer = true;
     } else if (!titles || titles->type != NK_JSON_ARRAY ||
                nk_json_array_count(titles) > MAX_LIBRARY_GAMES) {
         why = "has no valid title list";
@@ -10715,16 +10750,23 @@ bool player_app_rebuild_queue_load(PlayerApp *app) {
         const NkJsonNode *item = nk_json_array_get(titles, i);
         const char *disc_id = nk_json_get_string(nk_json_obj_get(item, "disc_id"));
         PlayerRebuildState state;
-        if (!item || item->type != NK_JSON_OBJECT || item->u.obj.count != 2 ||
+        /* Schema 1 queued only rebuilds and had no kind. */
+        PlayerQueueKind kind = PLAYER_QUEUE_REBUILD;
+        size_t members = schema == 1 ? 2u : 3u;
+        if (!item || item->type != NK_JSON_OBJECT || item->u.obj.count != members ||
             !player_rebuild_disc_id_valid(disc_id) ||
             !player_rebuild_state_from_name(
-                nk_json_get_string(nk_json_obj_get(item, "state")), &state)) {
+                nk_json_get_string(nk_json_obj_get(item, "state")), &state) ||
+            (schema >= 2 && !player_queue_kind_from_name(
+                nk_json_get_string(nk_json_obj_get(item, "kind")), &kind)) ||
+            player_rebuild_find_count(queue, count, disc_id) >= 0) {
             why = "has an invalid title";
             break;
         }
         snprintf(queue->entries[count].disc_id, sizeof(queue->entries[count].disc_id), "%s",
                  disc_id);
         queue->entries[count].state = state;
+        queue->entries[count].kind = kind;
         count++;
     }
     if (root) nk_json_free(root);
@@ -10742,12 +10784,23 @@ bool player_app_rebuild_queue_load(PlayerApp *app) {
     for (int i = 0; i < count; i++) {
         if (queue->entries[i].state == PLAYER_REBUILD_PENDING) queue->active = true;
     }
-    player_dev_log_add(app, "rebuild", "rebuild queue resumed with %d titles", count);
+    player_dev_log_add(app, "rebuild", "build queue resumed with %d titles%s", count,
+                       schema == 1 ? " (from a schema 1 rebuild queue)" : "");
+    /* Schema 1 becomes schema 2 on disk at once: every title a rebuild. */
+    if (schema == 1 && !player_app_rebuild_queue_save(app)) {
+        player_dev_log_add(app, "rebuild", "the schema 1 queue file could not be rewritten");
+    }
     return true;
 }
 
-/* Adds (or re-queues) one title. */
-static bool player_rebuild_queue_add(PlayerApp *app, const char *disc_id) {
+static void player_rebuild_queue_drop(PlayerRebuildQueue *queue, int index) {
+    memmove(&queue->entries[index], &queue->entries[index + 1],
+            (size_t)(queue->count - index - 1) * sizeof(queue->entries[0]));
+    queue->count--;
+}
+
+/* Adds (or re-queues) one title, last in the queue. */
+static bool player_rebuild_queue_add(PlayerApp *app, const char *disc_id, PlayerQueueKind kind) {
     PlayerRebuildQueue *queue = &app->rebuild_queue;
     if (!player_rebuild_disc_id_valid(disc_id) ||
         player_app_find_game_by_disc_id(app, disc_id) < 0) return false;
@@ -10755,13 +10808,14 @@ static bool player_rebuild_queue_add(PlayerApp *app, const char *disc_id) {
     if (index >= 0) {
         if (queue->entries[index].state == PLAYER_REBUILD_PENDING ||
             queue->entries[index].state == PLAYER_REBUILD_ACTIVE) return false;
-        queue->entries[index].state = PLAYER_REBUILD_PENDING;
-        return true;
+        /* Finished (done, skipped or failed): it waits again, behind the rest. */
+        player_rebuild_queue_drop(queue, index);
     }
     if (queue->count >= MAX_LIBRARY_GAMES) return false;
     snprintf(queue->entries[queue->count].disc_id,
              sizeof(queue->entries[queue->count].disc_id), "%s", disc_id);
     queue->entries[queue->count].state = PLAYER_REBUILD_PENDING;
+    queue->entries[queue->count].kind = kind;
     queue->count++;
     return true;
 }
@@ -10790,9 +10844,115 @@ static void player_rebuild_queue_begin_run(PlayerApp *app) {
 bool player_app_rebuild_enqueue(PlayerApp *app, const char *disc_id) {
     if (!app) return false;
     player_rebuild_queue_begin_run(app);
-    int added = player_rebuild_queue_add(app, disc_id) ? 1 : 0;
+    int added = player_rebuild_queue_add(app, disc_id, PLAYER_QUEUE_REBUILD) ? 1 : 0;
     if (added) player_dev_log_add(app, "rebuild", "%s queued for a rebuild", disc_id);
     return player_rebuild_queue_start(app, added);
+}
+
+bool player_app_build_queue_add(PlayerApp *app, int game_index) {
+    if (!app || game_index < 0 || game_index >= app->game_count) return false;
+    const GameRecord *game = &app->games[game_index];
+    PlayerQueueKind kind = player_outdated_find(app, game->disc_id) ? PLAYER_QUEUE_REBUILD
+                                                                    : PLAYER_QUEUE_BUILD;
+    player_rebuild_queue_begin_run(app);
+    if (!player_rebuild_queue_add(app, game->disc_id, kind)) return false;
+    int total = 0;
+    int place = player_app_build_queue_place(app, game->disc_id, &total);
+    player_dev_log_add(app, "rebuild", "%s added to the build queue (%d of %d)",
+                       game->disc_id, place, total);
+    return player_rebuild_queue_start(app, 1);
+}
+
+static bool player_rebuild_waiting(const PlayerRebuildEntry *entry) {
+    return entry->state == PLAYER_REBUILD_PENDING || entry->state == PLAYER_REBUILD_ACTIVE;
+}
+
+bool player_app_build_queue_has_waiting(const PlayerApp *app) {
+    if (!app || !app->rebuild_queue.active) return false;
+    for (int i = 0; i < app->rebuild_queue.count; i++) {
+        if (player_rebuild_waiting(&app->rebuild_queue.entries[i])) return true;
+    }
+    return false;
+}
+
+int player_app_build_queue_place(const PlayerApp *app, const char *disc_id, int *out_total) {
+    int place = 0;
+    int total = 0;
+    if (app && app->rebuild_queue.active) {
+        /* The one building was the first that waited when it started, and
+           nothing moves past it, so it is always first. */
+        int active = player_rebuild_active_index(&app->rebuild_queue);
+        if (active >= 0) {
+            total = 1;
+            if (disc_id && strcmp(app->rebuild_queue.entries[active].disc_id, disc_id) == 0) {
+                place = 1;
+            }
+        }
+        for (int i = 0; i < app->rebuild_queue.count; i++) {
+            const PlayerRebuildEntry *entry = &app->rebuild_queue.entries[i];
+            if (entry->state != PLAYER_REBUILD_PENDING) continue;
+            total++;
+            if (disc_id && strcmp(entry->disc_id, disc_id) == 0) place = total;
+        }
+    }
+    if (out_total) *out_total = total;
+    return place;
+}
+
+bool player_app_build_queue_remove(PlayerApp *app, const char *disc_id) {
+    if (!app || !app->rebuild_queue.active) return false;
+    PlayerRebuildQueue *queue = &app->rebuild_queue;
+    int index = player_rebuild_find(queue, disc_id);
+    if (index < 0 || queue->entries[index].state != PLAYER_REBUILD_PENDING) return false;
+    player_rebuild_queue_drop(queue, index);
+    player_dev_log_add(app, "rebuild", "%s removed from the build queue", disc_id);
+    if (!player_app_build_queue_has_waiting(app)) {
+        /* Nothing waits: the queue ends, and its file goes. */
+        queue->active = false;
+        queue->paused = false;
+        queue->build_generation = 0;
+        player_dev_log_add(app, "rebuild", "build queue emptied");
+    }
+    (void)player_app_rebuild_queue_save(app);
+    return true;
+}
+
+bool player_app_build_queue_move(PlayerApp *app, const char *disc_id, int direction) {
+    if (!app || !app->rebuild_queue.active || direction == 0) return false;
+    PlayerRebuildQueue *queue = &app->rebuild_queue;
+    int index = player_rebuild_find(queue, disc_id);
+    if (index < 0 || queue->entries[index].state != PLAYER_REBUILD_PENDING) return false;
+    int step = direction < 0 ? -1 : 1;
+    int other = index + step;
+    /* Past finished titles, and past waiting ones whose game left the library
+       (the queue screen does not show them), to the next one the screen shows;
+       never past the one building. */
+    while (other >= 0 && other < queue->count) {
+        const PlayerRebuildEntry *entry = &queue->entries[other];
+        if (entry->state == PLAYER_REBUILD_ACTIVE) break;
+        if (entry->state == PLAYER_REBUILD_PENDING &&
+            player_app_find_game_by_disc_id(app, entry->disc_id) >= 0) {
+            break;
+        }
+        other += step;
+    }
+    if (other < 0 || other >= queue->count ||
+        queue->entries[other].state != PLAYER_REBUILD_PENDING) return false;
+    PlayerRebuildEntry moved = queue->entries[index];
+    queue->entries[index] = queue->entries[other];
+    queue->entries[other] = moved;
+    int total = 0;
+    int place = player_app_build_queue_place(app, disc_id, &total);
+    player_dev_log_add(app, "rebuild", "%s moved to %d of %d in the build queue", disc_id,
+                       place, total);
+    (void)player_app_rebuild_queue_save(app);
+    return true;
+}
+
+bool player_app_build_queue_resume(PlayerApp *app) {
+    if (!app || !app->rebuild_queue.active || !app->rebuild_queue.paused) return false;
+    player_dev_log_add(app, "rebuild", "build queue resumed");
+    return player_rebuild_queue_start(app, 0);
 }
 
 bool player_app_rebuild_all(PlayerApp *app) {
@@ -10800,7 +10960,10 @@ bool player_app_rebuild_all(PlayerApp *app) {
     player_rebuild_queue_begin_run(app);
     int added = 0;
     for (int i = 0; i < app->outdated.count; i++) {
-        if (player_rebuild_queue_add(app, app->outdated.titles[i].disc_id)) added++;
+        if (player_rebuild_queue_add(app, app->outdated.titles[i].disc_id,
+                                     PLAYER_QUEUE_REBUILD)) {
+            added++;
+        }
     }
     player_dev_log_add(app, "rebuild", "Rebuild all: %d titles queued", added);
     return player_rebuild_queue_start(app, added);
@@ -10838,9 +11001,15 @@ void player_app_rebuild_queue_build_checked(PlayerApp *app, bool ok) {
     PlayerRebuildEntry *entry = &queue->entries[active];
     entry->state = ok ? PLAYER_REBUILD_DONE : PLAYER_REBUILD_FAILED;
     queue->build_generation = 0;
-    if (ok) player_outdated_remove(app, entry->disc_id);
-    player_dev_log_add(app, "rebuild", ok ? "%s rebuilt" :
-                       "%s: the rebuild did not finish; its old package stays", entry->disc_id);
+    if (entry->kind == PLAYER_QUEUE_BUILD) {
+        player_dev_log_add(app, "rebuild", ok ? "%s built" :
+                           "%s: the build did not finish; the queue goes on", entry->disc_id);
+    } else {
+        if (ok) player_outdated_remove(app, entry->disc_id);
+        player_dev_log_add(app, "rebuild", ok ? "%s rebuilt" :
+                           "%s: the rebuild did not finish; its old package stays",
+                           entry->disc_id);
+    }
     player_rebuild_queue_settle(app);
 }
 
@@ -10889,9 +11058,13 @@ void player_app_rebuild_queue_step(PlayerApp *app) {
         PlayerRebuildEntry *entry = &queue->entries[i];
         if (entry->state != PLAYER_REBUILD_PENDING) continue;
         int index = player_app_find_game_by_disc_id(app, entry->disc_id);
-        if (index < 0 || (app->outdated.scanned && app->outdated.identity_known &&
-                          !player_outdated_find(app, entry->disc_id))) {
-            /* Gone from the library, or rebuilt some other way since. */
+        bool rebuilt_since = entry->kind == PLAYER_QUEUE_REBUILD &&
+            app->outdated.scanned && app->outdated.identity_known &&
+            !player_outdated_find(app, entry->disc_id);
+        bool built_since = index >= 0 && entry->kind == PLAYER_QUEUE_BUILD &&
+            player_app_cached_game_has_runtime(app, &app->games[index]);
+        if (index < 0 || rebuilt_since || built_since) {
+            /* Gone from the library, or built some other way since. */
             entry->state = PLAYER_REBUILD_DONE;
             continue;
         }
@@ -10918,7 +11091,8 @@ void player_app_rebuild_queue_step(PlayerApp *app) {
         entry->state = PLAYER_REBUILD_ACTIVE;
         queue->build_generation = 0;
         (void)player_app_rebuild_queue_save(app);
-        player_dev_log_add(app, "rebuild", "%s: rebuild started", entry->disc_id);
+        player_dev_log_add(app, "rebuild", "%s: %s started", entry->disc_id,
+                           entry->kind == PLAYER_QUEUE_BUILD ? "build" : "rebuild");
         if (!player_app_start_package_build_view(app, index, false)) {
             entry->state = PLAYER_REBUILD_PENDING;
             queue->paused = true;
@@ -10940,6 +11114,42 @@ bool player_app_rebuild_card(const PlayerApp *app, const GameRecord *game,
     out->fraction = -1.0f;
     if (!app || !game) return false;
     const PlayerRebuildEntry *entry = player_app_rebuild_entry(app, game);
+    if (entry) {
+        out->kind = entry->kind;
+        out->queue_place = player_app_build_queue_place(app, game->disc_id, &out->queue_total);
+    }
+    if (entry && entry->kind == PLAYER_QUEUE_BUILD) {
+        /* A first build from the queue: it waits, builds, or says it did not. */
+        if (entry->state == PLAYER_REBUILD_ACTIVE && app->rebuild_queue.active) {
+            out->rebuilding = true;
+            out->word = "Building";
+            out->detail = "Building from the build queue. You can play it when the build "
+                          "ends.";
+            if (app->build_session.is_building &&
+                strcmp(app->build_session.disc_id, game->disc_id) == 0) {
+                out->fraction = package_builder_compile_fraction(&app->build_session);
+            }
+            return true;
+        }
+        if (entry->state == PLAYER_REBUILD_PENDING && app->rebuild_queue.active) {
+            out->word = "Queued";
+            out->detail = "Waiting in the build queue. It builds when its turn comes.";
+            return true;
+        }
+        if (entry->state == PLAYER_REBUILD_NO_DISC) {
+            out->word = "Disc missing";
+            out->detail = "The build queue skipped it: its disc image is missing. Add the "
+                          "disc again to build it.";
+            return true;
+        }
+        if (entry->state == PLAYER_REBUILD_FAILED) {
+            out->word = "Build failed";
+            out->detail = "The queued build did not finish, and the queue went on. Build it "
+                          "again to see what stopped it.";
+            return true;
+        }
+        return false;
+    }
     if (entry && entry->state == PLAYER_REBUILD_ACTIVE && app->rebuild_queue.active) {
         out->rebuilding = true;
         out->word = "Rebuilding";
