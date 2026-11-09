@@ -6132,25 +6132,27 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             pkg_raw = enhancement_package.load_package(enhancement_pkg_path)
             pkg_validated = enhancement_package.validate_package(pkg_raw)
             elf_sha256 = hashlib.sha256(elf.data).hexdigest()
-            sym_map = enhancement_package.extract_elf_func_symbols(elf)
-            if symbol_map_path is not None:
-                # The guest symbol map names the package's sites too, in place of the
-                # <package>.symbols.json sidecar.
-                sym_map.update(site_names_from_symbol_map(symbols))
+            # Instruction words as codegen reads them, and initialised data as the loader
+            # places it (enhancement_package.elf_readers).
+            _read_words, _read_loaded_data = enhancement_package.elf_readers(elf)
+            if enhancement_package.is_published_package(pkg_validated):
+                # A published package (ENHANCEMENT_CONTRACT.md section 5.1) resolves only
+                # through its own site map, after its keyed digests match this executable.
+                pkg_validated, sym_map = enhancement_package.resolve_published_package(
+                    pkg_validated, executable=elf.data, read_words_fn=_read_words,
+                    read_data_fn=_read_loaded_data, data_root=enhancement_data_root,
+                )
             else:
-                pkg_p = Path(enhancement_pkg_path)
-                sidecar = pkg_p.with_suffix(".symbols.json")
-                if sidecar.is_file():
-                    sym_map.update(enhancement_package.load_symbol_map(sidecar))
-
-            def _read_words(vaddr: int, count: int):
-                out_w = []
-                for idx_w in range(count):
-                    val = read32(elf, vaddr + idx_w * 4)
-                    if val is None:
-                        return None
-                    out_w.append(val)
-                return out_w
+                sym_map = enhancement_package.extract_elf_func_symbols(elf)
+                if symbol_map_path is not None:
+                    # The guest symbol map names the package's sites too, in place of the
+                    # <package>.symbols.json sidecar.
+                    sym_map.update(site_names_from_symbol_map(symbols))
+                else:
+                    pkg_p = Path(enhancement_pkg_path)
+                    sidecar = pkg_p.with_suffix(".symbols.json")
+                    if sidecar.is_file():
+                        sym_map.update(enhancement_package.load_symbol_map(sidecar))
 
             ENHANCEMENT_SITES = enhancement_package.verify_and_resolve_sites(
                 pkg_validated,
@@ -6186,20 +6188,6 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                         "update_boundary: the boundary is also a rewritten site (fail-closed refusal)"
                     )
                 ENHANCEMENT_UPDATE_BOUNDARY = boundary["site_addr"]
-
-            def _read_loaded_data(vaddr: int, count: int):
-                # Initialised bytes of one allocated, non-executable PROGBITS section
-                # as the loader places them (relocated, for a relocatable image):
-                # never code or zero-fill. Segments cannot tell, since a title may
-                # load code and data in one RWX segment.
-                rebase = elf.reloc.lo if elf.reloc is not None else 0
-                for sec in elf.sections:
-                    if sec["typ"] != 1 or not sec["flags"] & 2 or sec["flags"] & 4:
-                        continue
-                    lo = sec["addr"] + rebase
-                    if lo <= vaddr and vaddr + count <= lo + sec["size"]:
-                        return elf.read_at_vaddr(vaddr, count)
-                return None
 
             for patch in enhancement_package.verify_and_resolve_data_sites(
                 pkg_validated, symbol_to_addr=sym_map, read_data_fn=_read_loaded_data,

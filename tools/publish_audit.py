@@ -1806,6 +1806,64 @@ def check_text_hygiene(content_map: dict[str, tuple[bytes | None, str | None]]) 
     return findings
 
 
+PUBLISHED_PACKAGE_DIR = "assets/enhancements/"
+# Root keys that make a JSON document an enhancement package (or its private symbol map).
+_PACKAGE_MARKERS = (b'"sites"', b'"data_sites"', b'"site_map"', b'"executable_sha256"')
+_PUBLISHED_PACKAGE_NAME = re.compile(r"^[a-z]{4}[0-9]{5}-[a-z0-9][a-z0-9-]{0,31}\.json$")
+
+
+def check_enhancement_packages(content_map: dict[str, tuple[bytes | None, str | None]]) -> list[Finding]:
+    """Refuse any enhancement package that could carry game bytes (ENHANCEMENT_CONTRACT.md 5.1).
+
+    A package is public only as a published package under assets/enhancements/: its disc,
+    a site map of names to addresses, declared transforms and executable-keyed stock
+    digests, every property allowlisted by tools/enhancement_package.py. A private
+    declaration, a `.symbols.json` symbol map, a package elsewhere in the tree, or a
+    published package with values read from the game or bytes written into its text is a
+    finding.
+    """
+    import enhancement_package  # noqa: PLC0415 - only this check needs the package validator
+
+    findings: list[Finding] = []
+    for path in sorted(content_map):
+        data, read_error = content_map[path]
+        if read_error or data is None or not path.endswith(".json"):
+            continue
+        name = PurePosixPath(path).name
+        in_dir = path.startswith(PUBLISHED_PACKAGE_DIR)
+        if name.endswith(".symbols.json"):
+            findings.append(Finding(
+                "ENHANCEMENT_SYMBOL_MAP", path,
+                "a package's private symbol map is never published; a published package carries its own site_map"))
+            continue
+        if not in_dir and not any(marker in data for marker in _PACKAGE_MARKERS):
+            continue
+        try:
+            document = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            if in_dir:
+                findings.append(Finding("ENHANCEMENT_PACKAGE_UNREADABLE", path, f"not JSON: {error}"))
+            continue
+        if not in_dir:
+            if isinstance(document, dict) and "schema_version" in document and (
+                    "sites" in document or "data_sites" in document or "site_map" in document):
+                findings.append(Finding(
+                    "ENHANCEMENT_PACKAGE_OUTSIDE_DIR", path,
+                    f"an enhancement package is public only as a published package under {PUBLISHED_PACKAGE_DIR}"))
+            continue
+        if not _PUBLISHED_PACKAGE_NAME.match(name):
+            findings.append(Finding(
+                "ENHANCEMENT_PACKAGE_NAME", path,
+                "a published package is named <disc id, lowercase>-<kind>.json, for example ucus12345-60hz.json"))
+        for problem in enhancement_package.published_package_findings(document):
+            findings.append(Finding("ENHANCEMENT_PACKAGE_GAME_BYTES", path, problem))
+        if (isinstance(document, dict) and isinstance(document.get("disc_id"), str)
+                and not name.startswith(document["disc_id"].lower() + "-")):
+            findings.append(Finding(
+                "ENHANCEMENT_PACKAGE_NAME", path, f"the file name does not start with its disc_id {document['disc_id']}"))
+    return findings
+
+
 def check_collisions(paths: list[str]) -> list[Finding]:
     findings: list[Finding] = []
     case_map: dict[str, list[str]] = {}
@@ -2653,6 +2711,7 @@ def audit_entries_with_semantics(
             findings.extend(_policy_manifest_findings(policy, manifest_map))
 
     findings.extend(check_text_hygiene(content_map))
+    findings.extend(check_enhancement_packages(content_map))
 
     lfs_patterns, lfs_attribute_findings = _read_git_lfs_attributes(
         repo_root, entries=entries, content_map=content_map, content_source=content_source,

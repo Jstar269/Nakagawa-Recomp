@@ -137,7 +137,13 @@ class TestEnhancementPackageSchema(unittest.TestCase):
         self.assertFalse(schema.get("additionalProperties"))
         self.assertEqual(schema.get("properties", {}).get("schema_version", {}).get("const"), 1)
         self.assertEqual(set(schema.get("required", [])), REQUIRED_ROOT_KEYS)
-        self.assertEqual(set(schema.get("properties", {}).keys()), ROOT_KEYS)
+        # A published package (section 5.1) adds its own root properties, required together.
+        self.assertEqual(set(schema.get("properties", {}).keys()),
+                         ROOT_KEYS | enhancement_package.PUBLISHED_KEYS)
+        self.assertEqual(set(schema["dependentRequired"]["published_package"]),
+                         (enhancement_package.PUBLISHED_KEYS - {"published_package"}) | {"executable_sha256"})
+        self.assertEqual(schema["properties"]["digest_scheme"]["const"],
+                         enhancement_package.PUBLISHED_DIGEST_SCHEME)
 
         # Category enum must exactly match VALID_CATEGORIES
         schema_categories = set(schema["properties"]["category"]["enum"])
@@ -615,8 +621,8 @@ def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
     return raw
 
 
-class TestEnhancementAotCodegenAndCache(unittest.TestCase):
-    """Verify authentic byte-identity, all 6 transform classes, fail-closed digest rejection, and AOT cache epoch."""
+class _SynthTimingElfFixture(unittest.TestCase):
+    """A synthetic MIPS ELF with six functions, one per transform class, and its package."""
 
     def setUp(self) -> None:
         # Build a synthetic MIPS ELF with 6 functions exercising each of the 6 transform classes:
@@ -788,6 +794,10 @@ class TestEnhancementAotCodegenAndCache(unittest.TestCase):
             },
         }
         return pkg, symbols
+
+
+class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
+    """Verify authentic byte-identity, all 6 transform classes, fail-closed digest rejection, and AOT cache epoch."""
 
     def test_authentic_mode_output_and_transforms_and_fail_closed_digest(self) -> None:
         """Verify authentic output stays untouched, all 6 transforms apply when enabled, and 1 wrong digest fails closed."""
@@ -2329,6 +2339,47 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
         with self.assertRaises(package_cache.PackageCacheError):
             package_cache.enhancement_package_options({"ENHANCEMENT_PACKAGE": str(path)})
 
+    def _published(self, **changes: Any) -> dict[str, Any]:
+        return dict(self.pkg, published_package=1, disc_id=self.DISC, disc_version="1.01",
+                    digest_scheme=enhancement_package.PUBLISHED_DIGEST_SCHEME,
+                    site_map={"synth_timer_duration": "0x00001200"}, **changes)
+
+    def _select_published(self, sfo_disc_id: str | None, disc_version: str | None,
+                          executable_sha256: str | None = None, **changes: Any):
+        path = self.root / "published.json"
+        path.write_text(json.dumps(self._published(**changes)), encoding="utf-8")
+        return self.nk_cli._select_enhancement_package(
+            self.root, self.DISC, title_id=self.TITLE,
+            executable_sha256=self.EXE_SHA if executable_sha256 is None else executable_sha256,
+            enhancement_package=path, experimental_60hz=False, environment={},
+            sfo_disc_id=sfo_disc_id, disc_version=disc_version)
+
+    def test_published_package_for_this_disc_builds_its_own_directory(self) -> None:
+        selected, target = self._select_published(self.DISC, "1.01")
+        self.assertEqual(selected, (self.root / "published.json").resolve())
+        self.assertEqual(target.name, f"{self.DISC}-enhanced-synth.timing.60hz")
+
+    def test_published_package_refuses_another_disc_revision_or_image_by_name(self) -> None:
+        cases = {
+            "other_disc": dict(sfo_disc_id="ULES99999", disc_version="1.01"),
+            "other_revision": dict(sfo_disc_id=self.DISC, disc_version="1.00"),
+            "modified_executable": dict(sfo_disc_id=self.DISC, disc_version="1.01", executable_sha256="cd" * 32),
+        }
+        for code, kwargs in cases.items():
+            with self.subTest(code):
+                with self.assertRaisesRegex(self.nk_cli.PackageBuildError, rf"refused \({code}\)") as ctx:
+                    self._select_published(**kwargs)
+                self.assertIn("stays authentic", str(ctx.exception))
+        # The disc is named before the title: another region's disc is other_disc, not a title mismatch.
+        with self.assertRaisesRegex(self.nk_cli.PackageBuildError, r"refused \(other_disc\)"):
+            self._select_published("ULES99999", "1.01", target_title_id="other-title")
+
+    def test_published_package_needs_the_disc_identity(self) -> None:
+        for sfo_disc_id, disc_version in ((None, "1.01"), (self.DISC, None), ("", "")):
+            with self.subTest(sfo_disc_id=sfo_disc_id, disc_version=disc_version):
+                with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "DISC_ID and DISC_VERSION"):
+                    self._select_published(sfo_disc_id, disc_version)
+
 
 def _sample_csv(path: Path, *, hz: int, seconds: int, columns: dict[str, Any]) -> None:
     """Write a synthetic SR_SAMPLE_OUT file: one row per vblank, logic at `hz` updates a second.
@@ -3473,6 +3524,259 @@ class TestAltGateStaticChecks(unittest.TestCase):
             # Toggle on, per visit: updates 0-3 alternate; after the gap at 4-5 update 6 is stock;
             # update 7's two visits both take the alternates; after the gap at 9, update 10 is stock.
             self.assertEqual(part(out, "on"), expect("on", "SASA" "SAAS" "SASA"))
+
+
+
+class TestPublishedPackages(_SynthTimingElfFixture):
+    """Published packages (ENHANCEMENT_CONTRACT.md section 5.1): site data with no game bytes.
+
+    Every fixture is synthetic: the six-function ELF of _SynthTimingElfFixture.
+    """
+
+    DISC = "ULUS99999"
+    VERSION = "1.01"
+
+    def _readers(self, elf_bytes: bytes):
+        from analyze import Elf
+
+        return enhancement_package.elf_readers(Elf(elf_bytes, base=0))
+
+    def _publish(self, elf_bytes: bytes, pkg: dict[str, Any] | None = None) -> dict[str, Any]:
+        private, symbols = self._make_package_and_symbols(elf_bytes)
+        read_words, read_data = self._readers(elf_bytes)
+        published: dict[str, Any] = enhancement_package.publish_package(
+            private if pkg is None else pkg, {k: int(v, 16) for k, v in symbols.items()},
+            executable=elf_bytes, disc_id=self.DISC, disc_version=self.VERSION,
+            read_words_fn=read_words, read_data_fn=read_data)
+        return published
+
+    def test_published_package_builds_the_same_code_as_the_private_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_path = tmp / "synth.elf"
+            elf_bytes = _write_synthetic_mips_elf(elf_path, self.words, self.entry)
+            private, symbols = self._make_package_and_symbols(elf_bytes)
+            priv_path = tmp / "private" / "synth-60hz.json"
+            priv_path.parent.mkdir()
+            priv_path.write_text(json.dumps(private), encoding="utf-8")
+            priv_path.with_suffix(".symbols.json").write_text(json.dumps(symbols), encoding="utf-8")
+
+            # The command-line export, as a title's package is published.
+            pub_path = tmp / "public" / "ulus99999-60hz.json"
+            pub_path.parent.mkdir()
+            with mock.patch("sys.stdout", new=StringIO()):
+                rc = enhancement_package.main([
+                    "--publish", str(priv_path), "--elf", str(elf_path), "--base", "0",
+                    "--disc-id", self.DISC, "--disc-version", self.VERSION, "--out", str(pub_path)])
+            self.assertEqual(rc, 0)
+            published = json.loads(pub_path.read_text(encoding="utf-8"))
+            self.assertEqual(enhancement_package.published_package_findings(published), [])
+            self.assertEqual(published["site_map"], {
+                name: symbols[name] for name in
+                ("synth_vblank_wait", "synth_timer_duration", "synth_velocity_step", "synth_damping_decay",
+                 "synth_rng_prob_check", "synth_subtick_gate")})
+            # No published digest is the plain digest of the words it covers.
+            plain = {compute_stock_words_digest([w]) for w in self.words.values()}
+            for site in published["sites"]:
+                self.assertNotIn(site["stock_digest"], plain)
+            self.assertNotIn(published["update_boundary"]["stock_digest"], plain)
+
+            runs = {}
+            for label, path in (("private", priv_path), ("published", pub_path)):
+                out_dir = tmp / f"out-{label}"
+                out_dir.mkdir()
+                rc_run, output, files = self._run_codegen(
+                    elf_path, out_dir / "out.c", [f"--enhancement-package={path}"])
+                self.assertEqual(rc_run, 0, output)
+                runs[label] = files
+            self.assertTrue(runs["private"])
+            self.assertEqual(runs["published"], runs["private"])
+
+            # A keyed digest that does not match its site refuses the whole package, by name.
+            bad = copy.deepcopy(published)
+            bad["sites"][1]["stock_digest"] = enhancement_package.keyed_stock_digest(b"other key", b"\0" * 4)
+            bad_path = tmp / "public" / "bad.json"
+            bad_path.write_text(json.dumps(bad), encoding="utf-8")
+            bad_dir = tmp / "out-bad"
+            bad_dir.mkdir()
+            rc_bad, out_bad, files_bad = self._run_codegen(
+                elf_path, bad_dir / "out.c", [f"--enhancement-package={bad_path}"])
+            self.assertNotEqual(rc_bad, 0)
+            self.assertIn("site_mismatch: sites[1](SYNTH_COUNT)", out_bad)
+            self.assertEqual(files_bad, {})
+
+    def test_resolve_refuses_another_executable_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            elf_bytes = _write_synthetic_mips_elf(Path(tmp_dir) / "synth.elf", self.words, self.entry)
+            published = self._publish(elf_bytes)
+            patched_words = dict(self.words)
+            patched_words[0x00001200] = 0x24040028  # one stock word changed: a patched image
+            patched = _write_synthetic_mips_elf(Path(tmp_dir) / "patched.elf", patched_words, self.entry)
+            read_words, read_data = self._readers(patched)
+            with self.assertRaises(enhancement_package.PublishedPackageRefusal) as ctx:
+                enhancement_package.resolve_published_package(
+                    published, executable=patched, read_words_fn=read_words, read_data_fn=read_data)
+            self.assertEqual(ctx.exception.code, "modified_executable")
+            # Even with the right executable digest, bytes that differ at a site are refused.
+            read_words_ok, _ = self._readers(elf_bytes)
+
+            def lying_reader(vaddr: int, count: int):
+                words = read_words_ok(vaddr, count)
+                return None if words is None else [w ^ 1 for w in words]
+
+            with self.assertRaises(enhancement_package.PublishedPackageRefusal) as ctx:
+                enhancement_package.resolve_published_package(
+                    published, executable=elf_bytes, read_words_fn=lying_reader)
+            self.assertEqual(ctx.exception.code, "site_mismatch")
+            # The right executable resolves to the private declaration exactly.
+            private, _ = self._make_package_and_symbols(elf_bytes)
+            resolved, symbols = enhancement_package.resolve_published_package(
+                published, executable=elf_bytes, read_words_fn=read_words_ok)
+            self.assertEqual(resolved, validate_package(private))
+            self.assertEqual(symbols["synth_timer_duration"], 0x00001200)
+
+    def test_digest_key_is_not_derivable_from_the_published_digest(self) -> None:
+        elf_bytes = b"synthetic executable bytes"
+        key = enhancement_package.published_digest_key(elf_bytes)
+        self.assertNotEqual(key, hashlib.sha256(elf_bytes).digest())
+        self.assertNotEqual(enhancement_package.keyed_stock_digest(key, b"\x1e\x00\x04\x24"),
+                            compute_stock_words_digest([0x2404001E]))
+
+    def test_data_sites_and_files_round_trip(self) -> None:
+        words = dict(self.words)
+        words[0x00002000] = struct.unpack("<I", struct.pack("<f", 0.75))[0]
+        pkg: dict[str, Any]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_bytes = _write_synthetic_mips_elf(
+                tmp / "synth.elf", words, self.entry,
+                sections=((".text", 0x00001000, 0x700, 6), (".data", 0x00002000, 4, 3)))
+            private, symbols = self._make_package_and_symbols(elf_bytes)
+            table = b"name,frames\nidle,30\n"
+            (tmp / "data" / "PSP_GAME").mkdir(parents=True)
+            (tmp / "data" / "PSP_GAME" / "TUNE.CSV").write_bytes(table)
+            pkg = dict(private, data_sites=[{
+                "id": "TABLE", "symbol": "synth_table", "offset": 0, "type": "f32", "count": 1,
+                "stock_digest": hashlib.sha256(struct.pack("<f", 0.75)).hexdigest(),
+                "transform": "retention_m_to_sqrt(m)"}], data_files=[{
+                    "id": "TUNE", "path": "PSP_GAME/TUNE.CSV", "sha256": hashlib.sha256(table).hexdigest(),
+                    "format": "csv", "header_row": 0, "first_data_row": 1,
+                    "cells": [{"column": "frames", "transform": "count_x2"}]}])
+            all_symbols = {k: int(v, 16) for k, v in symbols.items()}
+            all_symbols["synth_table"] = 0x00002000
+            read_words, read_data = self._readers(elf_bytes)
+            published = enhancement_package.publish_package(
+                pkg, all_symbols, executable=elf_bytes, disc_id=self.DISC, disc_version=self.VERSION,
+                read_words_fn=read_words, read_data_fn=read_data, data_root=tmp / "data")
+            self.assertNotEqual(published["data_sites"][0]["stock_digest"], pkg["data_sites"][0]["stock_digest"])
+            self.assertNotEqual(published["data_files"][0]["sha256"], pkg["data_files"][0]["sha256"])
+            self.assertEqual(published["site_map"]["synth_table"], "0x00002000")
+            resolved, _ = enhancement_package.resolve_published_package(
+                published, executable=elf_bytes, read_words_fn=read_words, read_data_fn=read_data,
+                data_root=tmp / "data")
+            self.assertEqual(resolved, validate_package(copy.deepcopy(pkg)))
+            # Another file at the data file's path is refused.
+            (tmp / "data" / "PSP_GAME" / "TUNE.CSV").write_bytes(b"name,frames\nidle,31\n")
+            with self.assertRaisesRegex(EnhancementPackageError, "keyed digest"):
+                enhancement_package.resolve_published_package(
+                    published, executable=elf_bytes, read_words_fn=read_words, read_data_fn=read_data,
+                    data_root=tmp / "data")
+
+    def test_publish_refuses_values_read_from_the_game_and_wrong_digests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            elf_bytes = _write_synthetic_mips_elf(Path(tmp_dir) / "synth.elf", self.words, self.entry)
+            private, _ = self._make_package_and_symbols(elf_bytes)
+            with_values = copy.deepcopy(private)
+            with_values["sites"][1]["stock_values"] = [30]
+            with self.assertRaisesRegex(EnhancementPackageError, "stock_values"):
+                self._publish(elf_bytes, with_values)
+            wrong = copy.deepcopy(private)
+            wrong["sites"][1]["stock_digest"] = compute_stock_words_digest([0x24040028])
+            with self.assertRaisesRegex(EnhancementPackageError, "does not match the executable"):
+                self._publish(elf_bytes, wrong)
+
+    def test_validator_refuses_malformed_published_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            elf_bytes = _write_synthetic_mips_elf(Path(tmp_dir) / "synth.elf", self.words, self.entry)
+            published = self._publish(elf_bytes)
+        self.assertIs(validate_package(copy.deepcopy(published))["published_package"], 1)
+
+        def broken(**changes: Any) -> dict[str, Any]:
+            data = copy.deepcopy(published)
+            for key, value in changes.items():
+                if value is None:
+                    del data[key]
+                else:
+                    data[key] = value
+            return data
+
+        site_map = published["site_map"]
+        cases = {
+            "missing site map name": (broken(site_map={k: v for k, v in site_map.items()
+                                                       if k != "synth_timer_duration"}), "does not name"),
+            "extra address": (broken(site_map=dict(site_map, synth_other="0x00004000")), "no site uses"),
+            "address-literal name": (broken(site_map=dict(site_map, sub_00001200="0x00001200")), "Address-literal"),
+            "misaligned address": (broken(site_map=dict(site_map, synth_timer_duration="0x00001202")), "aligned"),
+            "decimal address": (broken(site_map=dict(site_map, synth_timer_duration=4608)), "aligned"),
+            "digest scheme": (broken(digest_scheme="sha256"), "digest_scheme"),
+            "disc id": (broken(disc_id="ulus99999"), "disc_id"),
+            "disc version": (broken(disc_version="1"), "disc_version"),
+            "format version": (broken(published_package=2), "published_package"),
+            "boolean format version": (broken(published_package=True), "published_package"),
+            "missing disc version": (broken(disc_version=None), "disc_version"),
+            "no executable": (broken(executable_sha256=None), "executable_sha256"),
+            "unknown key": (broken(stock_words=[0x2404001E]), "Unknown properties"),
+        }
+        values = copy.deepcopy(published)
+        values["sites"][1]["stock_values"] = [30]
+        cases["stock values"] = (values, "values read from the game")
+        for label, (data, message) in cases.items():
+            with self.subTest(label):
+                with self.assertRaisesRegex(EnhancementPackageError, message):
+                    validate_package(data)
+                self.assertTrue(enhancement_package.published_package_findings(data))
+
+    def test_publication_gate_refuses_anything_that_could_carry_game_bytes(self) -> None:
+        import publish_audit
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            elf_bytes = _write_synthetic_mips_elf(Path(tmp_dir) / "synth.elf", self.words, self.entry)
+            published = self._publish(elf_bytes)
+            private, symbols = self._make_package_and_symbols(elf_bytes)
+
+        def encode(data: Any) -> tuple[bytes, None]:
+            return json.dumps(data, indent=2).encode("utf-8") + b"\n", None
+
+        good = "assets/enhancements/ulus99999-60hz.json"
+        self.assertEqual(publish_audit.check_enhancement_packages({good: encode(published)}), [])
+        hexed = copy.deepcopy(published)
+        hexed["rng_policy"]["reason"] = "stock word 2404001e2404001e"
+        addressed = copy.deepcopy(published)
+        addressed["display_name"] = "Patch at 0x08804000"
+        valued = copy.deepcopy(published)
+        valued["sites"][1]["stock_values"] = [30]
+        cases = {
+            "private declaration in the package folder": ({good: encode(private)}, "ENHANCEMENT_PACKAGE_GAME_BYTES"),
+            "symbol map anywhere": ({"docs/synth-60hz.symbols.json": encode(symbols)}, "ENHANCEMENT_SYMBOL_MAP"),
+            "package outside the folder": ({"docs/synth-60hz.json": encode(published)},
+                                           "ENHANCEMENT_PACKAGE_OUTSIDE_DIR"),
+            "private package outside the folder": ({"tools/synth.json": encode(private)},
+                                                   "ENHANCEMENT_PACKAGE_OUTSIDE_DIR"),
+            "hex run in text": ({good: encode(hexed)}, "ENHANCEMENT_PACKAGE_GAME_BYTES"),
+            "address in text": ({good: encode(addressed)}, "ENHANCEMENT_PACKAGE_GAME_BYTES"),
+            "stock values": ({good: encode(valued)}, "ENHANCEMENT_PACKAGE_GAME_BYTES"),
+            "file name": ({"assets/enhancements/synth.json": encode(published)}, "ENHANCEMENT_PACKAGE_NAME"),
+            "other disc's name": ({"assets/enhancements/ucus12345-60hz.json": encode(published)},
+                                  "ENHANCEMENT_PACKAGE_NAME"),
+            "not JSON": ({good: (b"\x1e\x00\x04\x24", None)}, "ENHANCEMENT_PACKAGE_UNREADABLE"),
+        }
+        for label, (content, code) in cases.items():
+            with self.subTest(label):
+                codes = [f.code for f in publish_audit.check_enhancement_packages(content)]
+                self.assertIn(code, codes)
+        # The package schema is not a package.
+        schema = {"assets/enhancement_package.schema.json": (SCHEMA_PATH.read_bytes(), None)}
+        self.assertEqual(publish_audit.check_enhancement_packages(schema), [])
 
 
 if __name__ == "__main__":

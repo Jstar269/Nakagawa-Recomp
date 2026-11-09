@@ -23,14 +23,19 @@ Contract rules enforced:
   including all-letter ones like 'deadbeef', and numeric addresses) are strictly forbidden.
 - Hooks contain symbol and type only.
 - Undeclared / unknown properties fail closed.
+- A published package (ENHANCEMENT_CONTRACT.md section 5.1) adds its disc, a site map
+  and executable-keyed stock digests; it carries no game bytes and resolves only
+  against the exact executable it names (resolve_published_package).
 """
 
 from __future__ import annotations
 
 import argparse
 import bisect
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+import copy
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -367,6 +372,8 @@ def validate_package(data: Any) -> dict[str, Any]:
     """
     if not isinstance(data, dict):
         fail("$", f"Package declaration must be an object, got {type(data).__name__}")
+    if "published_package" in data:
+        return _validate_published_package(data)
 
     # Check unknown root properties (fail-closed)
     unknown = sorted(set(data.keys()) - ROOT_KEYS)
@@ -938,6 +945,374 @@ def load_symbol_map(path: Path | str) -> dict[str, int]:
                 f"Invalid address {v!r} for symbol {k!r} in {sym_path}"
             )
     return out
+
+
+# --- Published packages (docs/ENHANCEMENT_CONTRACT.md section 5.1) ---------------------------
+#
+# A published package is a package declaration plus its disc, a site map (symbolic name ->
+# address in the one executable it names) and stock digests keyed by that executable. It holds
+# no game bytes: a plain SHA-256 of one instruction word can be inverted by trying all 2^32
+# words, so every stock digest is an HMAC-SHA-256 whose key only a holder of the executable can
+# derive. resolve_published_package() checks it against the user's executable and returns the
+# ordinary declaration and symbol map that codegen verifies as before.
+
+PUBLISHED_FORMAT_VERSION = 1
+PUBLISHED_DIGEST_SCHEME = "hmac-sha256-executable-key-v1"
+PUBLISHED_KEYS = frozenset({
+    "published_package",
+    "disc_id",
+    "disc_version",
+    "digest_scheme",
+    "site_map",
+})
+# The key is SHA-256 over this tag and the whole executable: never the published
+# executable_sha256, which anyone can read.
+_PUBLISHED_KEY_TAG = b"nakagawa-recomp published package stock-digest key v1\x00"
+DISC_ID_RE = re.compile(r"^[A-Z]{4}[0-9]{5}$")
+DISC_VERSION_RE = re.compile(r"^[0-9]{1,2}\.[0-9]{2}$")
+SITE_MAP_ADDRESS_RE = re.compile(r"^0x[0-9a-f]{8}$")
+# The refusals a published package names (section 5.1), in the order they are checked.
+PUBLISHED_REFUSALS = ("other_disc", "other_revision", "modified_executable", "site_mismatch")
+# Free text in a published package explains; it never carries words, bytes or addresses.
+_PUBLISHED_TEXT_FIELDS = (("display_name",), ("rng_policy", "reason"))
+_PUBLISHED_TEXT_REFUSED = (
+    (re.compile(r"0[xX][0-9a-fA-F]{5,}"), "an address literal"),
+    (re.compile(r"[0-9a-fA-F]{16,}"), "a run of 16 or more hex digits"),
+    (re.compile(r"[A-Za-z0-9+/]{32,}={0,2}"), "a base64-like run of 32 or more characters"),
+    (re.compile(r"\\x[0-9a-fA-F]{2}"), "an escaped byte"),
+)
+
+
+class PublishedPackageRefusal(EnhancementPackageError):
+    """A published package refused by name: one of PUBLISHED_REFUSALS."""
+
+    def __init__(self, code: str, message: str) -> None:
+        if code not in PUBLISHED_REFUSALS:
+            raise ValueError(f"unknown published-package refusal {code!r}")
+        super().__init__(f"{code}: {message} (fail-closed refusal)")
+        self.code = code
+
+
+def is_published_package(data: Any) -> bool:
+    """Whether a parsed package declares the published form (section 5.1)."""
+    return isinstance(data, Mapping) and "published_package" in data
+
+
+def published_digest_key(executable: bytes) -> bytes:
+    """The stock-digest key of one executable: only its holder can derive it."""
+    return hashlib.sha256(_PUBLISHED_KEY_TAG + bytes(executable)).digest()
+
+
+def keyed_stock_digest(key: bytes, stock: bytes) -> str:
+    """HMAC-SHA-256 of stock bytes under an executable's digest key, lowercase hex."""
+    return hmac.new(key, bytes(stock), hashlib.sha256).hexdigest()
+
+
+def _words_bytes(words: Sequence[int]) -> bytes:
+    return b"".join(struct.pack("<I", int(w) & 0xFFFFFFFF) for w in words)
+
+
+def _published_names(data: Mapping[str, Any]) -> set[str]:
+    """Every symbolic name a declaration resolves: the names its site map must hold."""
+    names: set[str] = set()
+    for site in data.get("sites", ()):
+        names.add(site["function"])
+        names.update(site.get("alternates", ()))
+    if "update_boundary" in data:
+        names.add(data["update_boundary"]["function"])
+    for site in data.get("data_sites", ()):
+        names.add(site["symbol"])
+    for hook in data.get("hooks", ()):
+        names.add(hook["symbol"])
+    return names
+
+
+def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate a published package: its own fields, then its declaration (section 5.1)."""
+    for key in sorted(PUBLISHED_KEYS):
+        if key not in data:
+            fail("$", f"Published package is missing required property {key!r}")
+    version = data["published_package"]
+    if not isinstance(version, int) or isinstance(version, bool) or version != PUBLISHED_FORMAT_VERSION:
+        fail("published_package", f"published_package must be {PUBLISHED_FORMAT_VERSION}, got {version!r}")
+    if not isinstance(data["disc_id"], str) or not DISC_ID_RE.match(data["disc_id"]):
+        fail("disc_id", f"disc_id {data['disc_id']!r} must be a disc ID such as UCUS12345")
+    if not isinstance(data["disc_version"], str) or not DISC_VERSION_RE.match(data["disc_version"]):
+        fail("disc_version", f"disc_version {data['disc_version']!r} must be the SFO DISC_VERSION, such as 1.01")
+    if data["digest_scheme"] != PUBLISHED_DIGEST_SCHEME:
+        fail("digest_scheme", f"digest_scheme must be {PUBLISHED_DIGEST_SCHEME!r}, got {data['digest_scheme']!r}")
+
+    declaration = validate_package({k: v for k, v in data.items() if k not in PUBLISHED_KEYS})
+    if "executable_sha256" not in declaration:
+        fail("executable_sha256", "A published package names the one executable it applies to")
+    for idx, site in enumerate(declaration.get("sites", ())):
+        if "stock_values" in site:
+            fail(f"sites[{idx}].stock_values",
+                 "A published package carries no values read from the game (section 5.1)")
+
+    site_map = data["site_map"]
+    if not isinstance(site_map, dict) or not site_map:
+        fail("site_map", "site_map must be a non-empty object of symbolic name -> address")
+    # Two names may share an address (the decomp's name and a site's own): that publishes no other address.
+    for name, address in site_map.items():
+        check_not_address_literal(name, f"site_map.{name}", "site map name")
+        if not SYMBOL_RE.match(name):
+            fail(f"site_map.{name}", f"site map name {name!r} does not match required pattern {SYMBOL_RE.pattern}")
+        if not isinstance(address, str) or not SITE_MAP_ADDRESS_RE.match(address) or int(address, 16) % 4:
+            fail(f"site_map.{name}", f"address {address!r} must be a 4-byte-aligned 0x%08x hex string")
+    used = _published_names(declaration)
+    missing = sorted(used - set(site_map))
+    if missing:
+        fail("site_map", f"site_map does not name {missing}: a published package resolves only its own map")
+    unused = sorted(set(site_map) - used)
+    if unused:
+        fail("site_map", f"site_map names {unused}, which no site uses: publish no other addresses")
+    return data
+
+
+def published_package_findings(data: Any) -> list[str]:
+    """Why a file may not be published as a package; empty when it may (section 5.1).
+
+    The declaration is validated with every property allowlisted, so a package can only
+    carry what the format defines: names, addresses, transforms and keyed digests. Free
+    text is checked separately for words, bytes or addresses written into it.
+    """
+    if not is_published_package(data):
+        return ["not in the published form (published_package, disc_id, disc_version, "
+                "digest_scheme, site_map): a private declaration or symbol map is never published"]
+    try:
+        validate_package(data)
+    except EnhancementPackageError as exc:
+        return [str(exc)]
+    findings: list[str] = []
+    for field in _PUBLISHED_TEXT_FIELDS:
+        value: Any = data
+        for part in field:
+            value = value.get(part) if isinstance(value, Mapping) else None
+        if not isinstance(value, str):
+            continue
+        for pattern, what in _PUBLISHED_TEXT_REFUSED:
+            if pattern.search(value):
+                findings.append(f"{'.'.join(field)} contains {what}")
+    return findings
+
+
+def _find_data_file_bytes(entry: Mapping[str, Any], data_root: Path | str,
+                          matches: Callable[[bytes], bool], digest_text: str) -> bytes:
+    """The bytes of the data file at the entry's disc path whose bytes ``matches`` accepts."""
+    root = Path(data_root)
+    want = entry["path"].lower().split("/")
+    # Walk by hand: a glob matches names with the host's case rules, and the extracted
+    # tree keeps the disc's case on a case-sensitive host.
+    for folder, _dirs, files in sorted(os.walk(root)):
+        for name in sorted(files):
+            if name.lower() != want[-1]:
+                continue
+            candidate = Path(folder) / name
+            parts = [p.lower() for p in candidate.relative_to(root).parts]
+            if parts[-len(want):] != want:
+                continue
+            data = candidate.read_bytes()
+            if matches(data):
+                return data
+    fail(f"data_files({entry['id']})",
+         f"No file {entry['path']} with {digest_text} under the title's data (fail-closed refusal)")
+
+
+def _sha256_matcher(want: str) -> Callable[[bytes], bool]:
+    return lambda data: hashlib.sha256(data).hexdigest() == want
+
+
+def _keyed_matcher(key: bytes, want: str) -> Callable[[bytes], bool]:
+    return lambda data: hmac.compare_digest(keyed_stock_digest(key, data), want)
+
+
+ReadFn = Callable[[int, int], Any]
+
+
+def elf_readers(elf: Any) -> tuple[ReadFn, ReadFn]:
+    """``(read_words, read_data)`` over an ``analyze.Elf`` as codegen reads it.
+
+    ``read_words(vaddr, count)`` returns ``count`` little-endian words or ``None``;
+    ``read_data(vaddr, size)`` returns initialised bytes of one allocated,
+    non-executable PROGBITS section as the loader places them (relocated, for a
+    relocatable image), never code or zero-fill, or ``None``. Segments cannot tell,
+    since a title may load code and data in one RWX segment.
+    """
+    def read_words(vaddr: int, count: int) -> list[int] | None:
+        out: list[int] = []
+        for idx in range(count):
+            raw = elf.read_at_vaddr(vaddr + idx * 4, 4)
+            if not raw or len(raw) < 4:
+                return None
+            out.append(int.from_bytes(raw[:4], "little"))
+        return out
+
+    def read_data(vaddr: int, count: int) -> bytes | None:
+        rebase = elf.reloc.lo if elf.reloc is not None else 0
+        for sec in elf.sections:
+            if sec["typ"] != 1 or not sec["flags"] & 2 or sec["flags"] & 4:
+                continue
+            lo = sec["addr"] + rebase
+            if lo <= vaddr and vaddr + count <= lo + sec["size"]:
+                raw = elf.read_at_vaddr(vaddr, count)
+                return None if raw is None else bytes(raw)
+        return None
+
+    return read_words, read_data
+
+
+def _stock_locations(declaration: Mapping[str, Any],
+                     symbols: Mapping[str, int]) -> list[tuple[str, Mapping[str, Any], str, int, int]]:
+    """Every stock-digest field of a declaration: (path, owner, field, vaddr, word count)."""
+    out: list[tuple[str, Mapping[str, Any], str, int, int]] = []
+    for idx, site in enumerate(declaration.get("sites", ())):
+        path = f"sites[{idx}]({site['id']})"
+        fn = int(symbols[site["function"]])
+        out.append((path, site, "stock_digest", fn + int(site["insn_offset"]), int(site.get("word_count", 1))))
+        if "low_insn_offset" in site:
+            out.append((f"{path}.low", site, "low_stock_digest", fn + int(site["low_insn_offset"]), 1))
+    if "update_boundary" in declaration:
+        boundary = declaration["update_boundary"]
+        out.append(("update_boundary", boundary, "stock_digest",
+                    int(symbols[boundary["function"]]) + int(boundary["insn_offset"]), 1))
+    return out
+
+
+def _data_site_span(site: Mapping[str, Any], symbols: Mapping[str, int]) -> tuple[int, int]:
+    return (int(symbols[site["symbol"]]) + int(site["offset"]),
+            DATA_TYPES[site["type"]][0] * int(site["count"]))
+
+
+def resolve_published_package(
+    pkg_data: Mapping[str, Any],
+    *,
+    executable: bytes,
+    read_words_fn: ReadFn,
+    read_data_fn: ReadFn | None = None,
+    data_root: Path | str | None = None,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Check a published package against the user's executable and return the declaration
+    with plain stock digests and its symbol map, for verify_and_resolve_sites().
+
+    Refuses by name (PublishedPackageRefusal): ``modified_executable`` when the executable's
+    SHA-256 is not the one the package names, ``site_mismatch`` when any keyed stock digest
+    does not match the bytes at its site. Nothing is resolved by search: every name comes
+    from the package's own site map.
+    """
+    validated = validate_package(copy.deepcopy(dict(pkg_data)))
+    if not is_published_package(validated):
+        fail("published_package", "not a published package")
+    actual = hashlib.sha256(bytes(executable)).hexdigest()
+    if actual != validated["executable_sha256"]:
+        raise PublishedPackageRefusal(
+            "modified_executable",
+            f"the package is for executable {validated['executable_sha256']}, this one is {actual}")
+    key = published_digest_key(executable)
+    symbols = {name: int(address, 16) for name, address in validated["site_map"].items()}
+    declaration = {k: v for k, v in validated.items() if k not in PUBLISHED_KEYS}
+
+    for path, owner, field, vaddr, count in _stock_locations(declaration, symbols):
+        words = read_words_fn(vaddr, count)
+        if words is None or len(words) != count:
+            raise PublishedPackageRefusal("site_mismatch", f"{path}: no {count} instruction word(s) at its site")
+        if not hmac.compare_digest(keyed_stock_digest(key, _words_bytes(words)), owner[field]):
+            raise PublishedPackageRefusal("site_mismatch", f"{path}: the stock bytes at its site differ")
+        owner[field] = compute_stock_words_digest(words)  # type: ignore[index]
+
+    for idx, site in enumerate(declaration.get("data_sites", ())):
+        path = f"data_sites[{idx}]({site['id']})"
+        if read_data_fn is None:
+            fail(path, "a data site needs the executable's data (fail-closed refusal)")
+        vaddr, length = _data_site_span(site, symbols)
+        stock = read_data_fn(vaddr, length)
+        if stock is None or len(stock) != length:
+            raise PublishedPackageRefusal("site_mismatch", f"{path}: no {length} bytes of initialised data")
+        if not hmac.compare_digest(keyed_stock_digest(key, bytes(stock)), site["stock_digest"]):
+            raise PublishedPackageRefusal("site_mismatch", f"{path}: the stock data at its site differ")
+        site["stock_digest"] = hashlib.sha256(bytes(stock)).hexdigest()
+
+    for entry in declaration.get("data_files", ()):
+        if data_root is None:
+            fail(f"data_files({entry['id']})", "data_files need the title's extracted files (fail-closed refusal)")
+        want = entry["sha256"]
+        stock = _find_data_file_bytes(entry, data_root, _keyed_matcher(key, want), "its keyed digest")
+        entry["sha256"] = hashlib.sha256(stock).hexdigest()
+
+    return validate_package(declaration), symbols
+
+
+def publish_package(
+    pkg_data: Mapping[str, Any],
+    symbols: Mapping[str, int],
+    *,
+    executable: bytes,
+    disc_id: str,
+    disc_version: str,
+    read_words_fn: ReadFn,
+    read_data_fn: ReadFn | None = None,
+    data_root: Path | str | None = None,
+) -> dict[str, Any]:
+    """The published form of a private declaration and its symbol map (section 5.1).
+
+    Every plain stock digest is first checked against the executable, then replaced by its
+    keyed digest; the site map holds only the names the declaration uses. The result must
+    resolve back to the same declaration (resolve_published_package), and it is refused
+    if published_package_findings() finds anything.
+    """
+    declaration = validate_package(copy.deepcopy(dict(pkg_data)))
+    if is_published_package(declaration):
+        fail("published_package", "the package is already published")
+    if "executable_sha256" not in declaration:
+        fail("executable_sha256", "A published package names the one executable it applies to")
+    actual = hashlib.sha256(bytes(executable)).hexdigest()
+    if actual != declaration["executable_sha256"]:
+        fail("executable_sha256", f"the package is for {declaration['executable_sha256']}, the executable is {actual}")
+    for idx, site in enumerate(declaration.get("sites", ())):
+        if "stock_values" in site:
+            fail(f"sites[{idx}]({site['id']}).stock_values",
+                 "stock_values are values read from the game and cannot be published (section 5.1)")
+    used = sorted(_published_names(declaration))
+    missing = [name for name in used if name not in symbols]
+    if missing:
+        fail("site_map", f"the symbol map does not name {missing}")
+    site_map = {name: f"0x{int(symbols[name]) & 0xFFFFFFFF:08x}" for name in used}
+    resolved = {name: int(site_map[name], 16) for name in used}
+    key = published_digest_key(executable)
+
+    for path, owner, field, vaddr, count in _stock_locations(declaration, resolved):
+        words = read_words_fn(vaddr, count)
+        if words is None or len(words) != count or compute_stock_words_digest(words) != owner[field]:
+            fail(path, f"the {field} does not match the executable's words at its site")
+        owner[field] = keyed_stock_digest(key, _words_bytes(words))  # type: ignore[index]
+    for idx, site in enumerate(declaration.get("data_sites", ())):
+        path = f"data_sites[{idx}]({site['id']})"
+        if read_data_fn is None:
+            fail(path, "a data site needs the executable's data")
+        vaddr, length = _data_site_span(site, resolved)
+        stock = read_data_fn(vaddr, length)
+        if stock is None or len(stock) != length or hashlib.sha256(bytes(stock)).hexdigest() != site["stock_digest"]:
+            fail(path, "the stock_digest does not match the executable's data at its site")
+        site["stock_digest"] = keyed_stock_digest(key, bytes(stock))
+    for entry in declaration.get("data_files", ()):
+        if data_root is None:
+            fail(f"data_files({entry['id']})", "data_files need the title's extracted files")
+        want = entry["sha256"]
+        stock = _find_data_file_bytes(entry, data_root, _sha256_matcher(want), f"sha256 {want}")
+        entry["sha256"] = keyed_stock_digest(key, stock)
+
+    published = dict(declaration)
+    published.update({
+        "published_package": PUBLISHED_FORMAT_VERSION,
+        "disc_id": disc_id,
+        "disc_version": disc_version,
+        "digest_scheme": PUBLISHED_DIGEST_SCHEME,
+        "site_map": site_map,
+    })
+    findings = published_package_findings(published)
+    if findings:
+        fail("$", "the published form is refused: " + "; ".join(findings))
+    return published
 
 
 # Opcodes that write memory: sb, sh, swl, sw, swr, cache, sc, swc1, sv.s, svl.q/svr.q, sv.q.
@@ -2217,23 +2592,8 @@ def find_data_file(entry: Mapping[str, Any], data_root: Path | str) -> bytes:
     the disc's file system does) and whose bytes match ``sha256`` is the file;
     none refuses the package.
     """
-    root = Path(data_root)
-    want = entry["path"].lower().split("/")
-    # Walk by hand: a glob matches names with the host's case rules, and the extracted
-    # tree keeps the disc's case on a case-sensitive host.
-    for folder, _dirs, files in sorted(os.walk(root)):
-        for name in sorted(files):
-            if name.lower() != want[-1]:
-                continue
-            candidate = Path(folder) / name
-            parts = [p.lower() for p in candidate.relative_to(root).parts]
-            if parts[-len(want):] != want:
-                continue
-            data = candidate.read_bytes()
-            if hashlib.sha256(data).hexdigest() == entry["sha256"]:
-                return data
-    fail(f"data_files({entry['id']})",
-         f"No file {entry['path']} with sha256 {entry['sha256']} under the title's data (fail-closed refusal)")
+    want = entry["sha256"]
+    return _find_data_file_bytes(entry, data_root, _sha256_matcher(want), f"sha256 {want}")
 
 
 # Constant factor each scaling transform applies to the operand the site produces.
@@ -3260,6 +3620,32 @@ def _draft_main(args: argparse.Namespace) -> int:
     return 0
 
 
+def _publish_main(args: argparse.Namespace) -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from analyze import Elf  # noqa: PLC0415 - only the publish command reads an executable
+
+    package = load_package(args.publish)
+    sidecar = args.publish.with_suffix(".symbols.json")
+    symbols = load_symbol_map(sidecar) if sidecar.is_file() else {}
+    data = args.elf.read_bytes()
+    elf = Elf(data, base=int(args.base, 16) if args.base else None)
+    symbols = {**extract_elf_func_symbols(elf), **symbols}
+    read_words, read_data = elf_readers(elf)
+    published = publish_package(
+        package, symbols, executable=data, disc_id=args.disc_id, disc_version=args.disc_version,
+        read_words_fn=read_words, read_data_fn=read_data, data_root=args.data_root)
+    resolved, _ = resolve_published_package(
+        published, executable=data, read_words_fn=read_words, read_data_fn=read_data, data_root=args.data_root)
+    if compute_package_digest(resolved) != compute_package_digest(validate_package(package)):
+        print("publish: FAIL: the published package does not resolve back to the same declaration",
+              file=sys.stderr)
+        return 1
+    args.out.write_text(json.dumps(published, indent=2) + "\n", encoding="utf-8", newline="\n")
+    print(f"{args.out}: published {len(published.get('sites', ()))} site(s), "
+          f"{len(published['site_map'])} name(s); declaration digest {compute_package_digest(resolved)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate Nakagawa enhancement package declarations.")
     parser.add_argument("packages", nargs="*", type=Path, help="Package JSON files to validate.")
@@ -3283,7 +3669,23 @@ def main(argv: list[str] | None = None) -> int:
     rates.add_argument("--min-coverage", type=float, default=RATE_MIN_COVERAGE,
                        help="Share of the longer run's game time the shorter run must cover (0.9).")
     rates.add_argument("--json", type=Path, help="Also write the measurements and the report as JSON.")
+    publish = parser.add_argument_group("publish a package as site data (docs/ENHANCEMENT_CONTRACT.md section 5.1)")
+    publish.add_argument("--publish", type=Path, metavar="PACKAGE",
+                         help="A private package to publish; its <package>.symbols.json names its sites.")
+    publish.add_argument("--elf", type=Path, help="The decrypted executable the package names.")
+    publish.add_argument("--base", help="Load address of the executable, in hex, as codegen's --base.")
+    publish.add_argument("--disc-id", help="The disc ID (PARAM.SFO DISC_ID), for example UCUS12345.")
+    publish.add_argument("--disc-version", help="The disc version (PARAM.SFO DISC_VERSION), for example 1.01.")
+    publish.add_argument("--data-root", type=Path, help="The title's extracted files, for data_files.")
     args = parser.parse_args(argv)
+    if args.publish is not None:
+        if args.elf is None or not args.disc_id or not args.disc_version or args.out is None:
+            parser.error("--publish needs --elf, --disc-id, --disc-version and --out")
+        try:
+            return _publish_main(args)
+        except EnhancementPackageError as exc:
+            print(f"publish: FAIL: {exc}", file=sys.stderr)
+            return 1
     if args.compare_rates is not None:
         try:
             return _rates_main(args)
