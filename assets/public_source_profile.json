@@ -1260,6 +1260,7 @@
     "tests/native/ge_float24_selftest.c",
     "tests/native/ge_raster_ref_selftest.c",
     "tests/native/ge_texture_ref_selftest.c",
+    "tests/native/ge_tnl_census_selftest.c",
     "tests/native/gpu_capture_selftest.c",
     "tests/native/gpu_coherence_selftest.c",
     "tests/native/guest_printf_selftest.c",
