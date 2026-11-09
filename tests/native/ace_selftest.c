@@ -375,6 +375,7 @@ static void cell_feed(void) {
 
 static AceWindow window(double fps, double idle, uint32_t skipped, AceRate stable, int ever, AceRate last) {
     AceWindow w;
+    memset(&w, 0, sizeof(w));
     w.wall_ns = 1000000000ull;
     w.new_frames = (uint32_t)(fps + 0.5);
     w.idle_ns = (uint64_t)(idle * 1e9);
@@ -383,6 +384,108 @@ static AceWindow window(double fps, double idle, uint32_t skipped, AceRate stabl
     w.ever_stable = ever;
     w.last_rate = last;
     return w;
+}
+
+/* Smooth motion is never off without saying so: with it on, the readout ends with the pictures
+ * a second that reached the screen, or SMOOTH OFF in a window it added none in. */
+static void cell_readout_smooth(void) {
+    AceReadoutState s;
+    AceReadoutView v;
+    AceWindow w;
+
+    ace_readout_reset(&s);
+    w = window(30, 0.5, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
+    w.smooth = 1;
+    w.betweens = 30;
+    w.shown = 60;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(v.smooth_on && v.shown_fps > 59.9 && strcmp(v.text, "100%  30 FPS  SMOOTH 60") == 0,
+          "smooth engaged: '%s'", v.text);
+    /* A 60 FPS scene: nothing to add, and the readout says it added nothing. */
+    w = window(60, 0.4, 0, ACE_RATE_K1, 1, ACE_RATE_K1);
+    w.smooth = 1;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(v.smooth_on && strcmp(v.text, "100%  60 FPS  SMOOTH OFF") == 0, "60 FPS scene: '%s'", v.text);
+    /* A PC that cannot keep up: uneven frames get no in-between. */
+    ace_readout_reset(&s);
+    w = window(26, 0.0, 4, ACE_RATE_VARIABLE, 1, ACE_RATE_K2);
+    w.smooth = 1;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(strcmp(v.text, "\xE2\x96\xB2 86%  26 FPS  PC LIMITED  SMOOTH OFF") == 0,
+          "PC limited: '%s'", v.text);
+    /* Part of a second engaged: the count is what reached the screen. */
+    ace_readout_reset(&s);
+    w = window(30, 0.5, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
+    w.smooth = 1;
+    w.betweens = 12;
+    w.shown = 42;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(strcmp(v.text, "100%  30 FPS  SMOOTH 42") == 0, "part engaged: '%s'", v.text);
+    /* Flips whose present was dropped are not pictures on the screen: 30 new frames and 20
+     * in-betweens, but only 37 pictures. */
+    w = window(30, 0.5, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
+    w.smooth = 1;
+    w.betweens = 20;
+    w.shown = 37;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(v.shown_fps > 36.9 && v.shown_fps < 37.1 && strcmp(v.text, "100%  30 FPS  SMOOTH 37") == 0,
+          "pictures that reached the screen: '%s'", v.text);
+    /* Smooth motion off: the text is as before. */
+    w = window(30, 0.5, 0, ACE_RATE_K2, 1, ACE_RATE_K2);
+    ace_readout_judge(&s, &w, &v);
+    CHECK(!v.smooth_on && strcmp(v.text, "100%  30 FPS") == 0, "smooth off: '%s'", v.text);
+
+    /* The feed: a 30 Hz run with smooth motion asked for counts the pictures that reached the
+     * screen: each in-between and held frame the presenter accepted. */
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off",
+                        NULL);
+    uint64_t ns = 0;
+    for (uint32_t vc = 1; vc <= 600; vc++) {
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u;
+        ace_note_host_wait(8000000u);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+        if (ace_smooth_take() == ACE_SHOW_BETWEEN) {
+            ace_smooth_shown_between(ns);
+            ace_smooth_note_present(ACE_PRESENT_BETWEEN, ns);
+        } else {
+            ace_smooth_note_present(ACE_PRESENT_REAL, ns);   /* the held frame, re-flipped */
+        }
+    }
+    CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS  SMOOTH 60") == 0,
+          "fed 30 Hz with smooth motion: '%s'", v.text);
+    /* The same, but the presenter drops the present of every fourth VBLANK (an in-between on
+     * its flip, or a held frame): the readout counts what reached the screen, not every flip. */
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off",
+                        NULL);
+    ns = 0;
+    for (uint32_t vc = 1; vc <= 600; vc++) {
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u;
+        ace_note_host_wait(8000000u);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+        int between = ace_smooth_take() == ACE_SHOW_BETWEEN;
+        if (between) ace_smooth_shown_between(ns);
+        if (vc % 4 == 0) continue;                               /* dropped: never noted */
+        ace_smooth_note_present(between ? ACE_PRESENT_BETWEEN : ACE_PRESENT_REAL, ns);
+    }
+    CHECK(ace_readout_view(&v) && v.shown_fps > 40.0 && v.shown_fps < 50.0 &&
+              strcmp(v.text, "100%  30 FPS  SMOOTH 45") == 0,
+          "fed 30 Hz, some presents dropped: '%s'", v.text);
+    /* The same with no in-between shown (no GPU for it): SMOOTH OFF. */
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off",
+                        NULL);
+    ns = 0;
+    for (uint32_t vc = 1; vc <= 600; vc++) {
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u;
+        ace_note_host_wait(8000000u);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+        (void)ace_smooth_take();
+        ace_smooth_note_present(ACE_PRESENT_REAL, ns);
+    }
+    CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS  SMOOTH OFF") == 0,
+          "fed 30 Hz, no in-between shown: '%s'", v.text);
 }
 
 static void cell_readout(void) {
@@ -626,6 +729,22 @@ static void cell_pace(void) {
           "a re-flip of the held frame is its held present");
     CHECK(!ace_pace_vblank(&p, 21u), "a re-flipped frame is not shown again");
     CHECK(p.held_ns == 601u, "the added delay runs from the in-between's present");
+    /* An in-between is made only of consecutive frames. The frame flipped at 700 never reached
+     * a present (the presenter's slot rule dropped it): the pass still holds the one before, so
+     * the next frame is shown as it is and kept, never blended with a frame two steps back. */
+    ace_pace_reset(&p);
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 650u);
+    CHECK(ace_pace_take(&p) == ACE_SHOW_BETWEEN, "consecutive: an in-between");
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 667u);
+    CHECK(ace_pace_take(&p) == ACE_SHOW_BETWEEN && p.unpaired == 0u, "consecutive again");
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 700u);          /* its present is dropped */
+    ace_pace_flip(&p, 0, ACE_RATE_K2, 1, 717u);
+    CHECK(ace_pace_take(&p) == ACE_SHOW_REAL, "the re-flip after the drop shows the real frame");
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 733u);
+    CHECK(ace_pace_take(&p) == ACE_SHOW_KEEP && p.unpaired == 1u,
+          "after a dropped frame, no in-between: the real frame is shown and kept");
+    ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 767u);
+    CHECK(ace_pace_take(&p) == ACE_SHOW_BETWEEN && p.unpaired == 1u, "the next pair is consecutive");
     /* The report's numbers. */
     AcePaceStats st;
     memset(&st, 0, sizeof(st));
@@ -646,6 +765,7 @@ int main(int argc, char **argv) {
     cell_detector();
     cell_feed();
     cell_readout();
+    cell_readout_smooth();
     cell_fast_forward();
     cell_report(argc > 1 ? argv[1] : NULL);
     if (s_fail) {

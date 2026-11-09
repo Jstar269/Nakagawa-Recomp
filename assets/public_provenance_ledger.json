@@ -3023,6 +3023,17 @@
       }
     },
     {
+      "path": "fixtures/psp_oracle/probe_hle_self_stop_helper.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp_oracle_self_stop_helper_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "fixtures/psp_oracle/probe_insn_trace.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -5102,28 +5113,6 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "player-ui-clip-scope",
         "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "src/player/ui_renderer.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "native-player-021",
-        "evidence_tier": "N",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "src/player/ui_renderer.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "native-player-022",
-        "evidence_tier": "N",
         "authorship": "independent implementation record",
         "upstream_attribution": null
       }
@@ -7421,6 +7410,18 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "ge-shader-embeds",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "GPL-2.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/psp_frag_rmw.inc",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge-shader-embed-rmw-2109",
         "evidence_tier": "S",
         "upstream": "documented upstream family",
         "license": "GPL-2.0-or-later",
@@ -12425,6 +12426,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "ge-texture-ref-703-moved-1531",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/native/ge_tnl_census_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge-tnl-census-selftest-318",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null

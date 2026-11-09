@@ -32,6 +32,7 @@
 #include "flight_recorder.h"
 #include "ace.h"            /* Ace Mode observation counters (Ace on only) */
 #include "replay_checkpoint.h" /* sched_for_each_thread_cpu (#2147) */
+#include "cpu_lle.h"          /* sr_guest_lane_hold: the COSIM guest lane (#2201) */
 
 /* Test-only scheduler liveness instrumentation (#290). Declared here, not in recomp.h, so the
  * CPU-state ABI header (and every title's generated-code build profile) stays unchanged. */
@@ -297,8 +298,26 @@ static int sched_pause_assert_no_guest(const char *function) {
     return 0;
 }
 
+/* A fiber switch or the loss of the lane's thread inside a held COSIM guest lane (#2201).
+ * The lane's import refusal and memory rollback would then reach another thread, or never
+ * run, so the run stops by name instead. */
+#define SCHED_GUEST_LANE_YIELD_LIMIT 200000u   /* "200000" in the stop's text */
+static void sched_guest_lane_fatal(const char *what, uint32_t uid) {
+    fprintf(stderr,
+            "SR_COSIM_FATAL: %s inside the COSIM guest lane (lane thread uid 0x%x, thread uid "
+            "0x%x); the lane cannot be rolled back alone, stopping\n",
+            what, sr_guest_lane_hold.uid, uid);
+    sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, sr_guest_lane_hold.uid, uid, 0u);
+    fflush(stderr);
+    exit(1);
+}
+
 static void sched_destroy_thread_coro(TCB *t) {
     if (!t) return;
+    /* Held, the lane's fiber never parks, so nothing destroys it; if anything ever does, the
+     * lane's state would outlive it and refuse every later import (#2201). */
+    if (sr_guest_lane_hold.held && sr_guest_lane_hold.uid != 0u && t->uid == sr_guest_lane_hold.uid)
+        sched_guest_lane_fatal("the lane's thread was destroyed", t->uid);
     if (t->coro) {
         sr_coro_destroy(t->coro);
         t->coro = NULL;
@@ -3257,6 +3276,11 @@ static void switch_to_scheduler(void) {
         SCHED_LIVENESS_OWNER(s_tcb[s_cur].uid);
 #endif
     if (!s_sched_coro || sr_coro_current() == s_sched_coro) return;
+    /* The COSIM guest lane cannot block: every import it reaches, through its stub or the
+     * late-import bridge, is refused before a handler could wait, and sr_yield does not
+     * switch while it is held. Any other switch is a stop (#2201). */
+    if (sr_guest_lane_hold.held)
+        sched_guest_lane_fatal("a fiber switch", s_cur >= 0 ? s_tcb[s_cur].uid : 0u);
     if (sr_perf_enabled) sr_perf_sched_state(sched_perf_state(), sched_perf_uid());
     sr_coro_switch(s_sched_coro);
 }
@@ -3459,6 +3483,24 @@ void sr_yield(CpuState *s) {
     /* Time and source latches advance at every scheduler boundary, even when
      * the CPU's interrupt-enable bit currently suppresses delivery. */
     scheduler_progress_time();
+    /* The COSIM guest lane holds the scheduler (#2201): no fiber switch and no interrupt
+     * delivery until it ends, so no other thread or handler runs under its import refusal or
+     * is rolled back with it. Time has advanced above, and with it the sources it latched;
+     * the first yield after the lane delivers what was latched. This is a dedicated hold, not
+     * the guest-visible interrupt state below, which the lane must leave untouched.
+     *
+     * A lane that waits for another thread or an interrupt (a spin on a word a peer or a
+     * handler writes) can never finish while held, so past a bound of held yields it stops
+     * by name rather than hang. The bound is the stuck-suspension figure below; a lane is one
+     * export call, which reaches sr_yield once per TIMESLICE yield points. */
+    if (sr_guest_lane_hold.held) {
+        if (++sr_guest_lane_hold.yields >= SCHED_GUEST_LANE_YIELD_LIMIT)
+            sched_guest_lane_fatal("200000 held yields without finishing (a wait on another "
+                                   "thread or an interrupt, which the hold defers)",
+                                   s_cur >= 0 ? s_tcb[s_cur].uid : 0u);
+        atomic_store_explicit(&sr_timeslice, TIMESLICE, memory_order_relaxed);
+        return;
+    }
     /* sceKernelCpuSuspendIntr is also a scheduler lock on a real single-core
      * PSP.  Defer both fiber switches and vblank interrupts until ResumeIntr
      * restores the saved state.  A suspension that never resumes freezes the

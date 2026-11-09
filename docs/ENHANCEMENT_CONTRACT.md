@@ -342,12 +342,22 @@ keeps the inherited value, as the movie upscaler has no setting.
 ### 10.2. Authentic Is Untouched
 
 With `SR_ACE=off` (the default: players opt in) every Ace branch sits behind one switch that stays false: the Vulkan
-device is created with no features, every sampler and the texture descriptor pool are as before, the presenter
-registers no UI pass, and the observation counters do not run. Nothing is printed, except one `TEX_SCALE: off`
-line when the environment asks for texture scaling or the smart 2D filter, which names the request and does not obey
-it (section 10.10), and one `TWIN: off` or `TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes
-nothing else (section 10.11). `gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its
-image hash.
+device is created with no Ace feature (its one other feature setting is the destination-read path below), every
+sampler and the texture descriptor pool are as before, the presenter registers no UI pass, and the observation
+counters do not run. Nothing is printed, except one `TEX_SCALE: off` line when the environment asks for texture
+scaling or the smart 2D filter, which names the request and does not obey it (section 10.10), one `TWIN: off` or
+`TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes nothing else (section 10.11), one line that
+names an unknown or refused `SR_GPU_DST_READ` value, which changes nothing else, and the
+`sdl3vk: destination reads: interlock|snapshot` line that every run prints (below).
+`gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its image hash.
+
+One device feature setting outside Ace applies to every run, Authentic included, because it is a correctness fix and not an
+enhancement: the destination-read path of shader blends and the stencil test (#2109,
+[`src/rt/gpu_sdl3vk/README.md`](../src/rt/gpu_sdl3vk/README.md)). On a device with
+`VK_EXT_fragment_shader_interlock`, `fragmentShaderPixelInterlock`, `fragmentStoresAndAtomics` and RGBA8 storage
+images, the device enables that extension and those two features, unless `SR_GPU_DST_READ=snapshot` forces the
+snapshot path, so primitives of one batch blend in drawing order, as on the PSP and in `ge.c`. On the snapshot path
+the device is created with no feature outside Ace.
 
 ### 10.3. What Ace Changes, and What It Never Changes
 
@@ -452,17 +462,41 @@ With `smooth=x2`, a title the 30 Hz detector holds steady at 30 presents at the 
 - **When.** The flip of frame B shows the in-between of A and B; the next VBLANK shows B. Nothing is shown before the
   guest made it, so a frame is never predicted. The cost is one VBLANK of added delay (about 17 ms), reported in the
   run's report as `added_delay_ms`. A flip that arrives first replaces the held frame.
+- **Only consecutive frames.** An in-between is made of a frame and the one flipped just before it. When that one
+  never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed), the
+  pass still holds an older frame, and an in-between of the two would put a fast-moving object in the wrong place
+  or lose it. The new frame is then shown as it is and kept, and the report counts it in `presents.unpaired`.
 - **Only at 30.** Every other detector class, a pause and a static picture show each frame as it comes, as without
   the feature. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
   30 Hz after a second of agreement and leaves after half a second of disagreement.
+- **Never off without saying so.** The setting's description says it acts on steady 30 FPS scenes only. With the
+  speed readout on, its text ends with `SMOOTH n`, the distinct pictures a second that reached the screen (the
+  in-betweens, the held real frames and any new frame shown as it is; a present the presenter dropped is not
+  counted), or `SMOOTH OFF` for a second in which it added none: another frame rate, a PC that cannot keep up, or
+  no Vulkan device for it.
+- **Recording.** A run recording (`SR_VIDEOREC_DIR`) holds what the window shows, in-betweens included: the recorder
+  keeps each in-between for its own VBLANK and writes the held real frame at the next one. Its `frames.csv` and
+  `logic.srt` still count only the game's own flips.
 - **UI.** A pixel that did not change between the two frames is copied, so a HUD stays exact while the scene moves
   behind it.
+- **Known limit.** A figure whose pose changes a lot between two frames on a plain floor (a player serving) can
+  lose most of its pixels in the in-between: no vector carries it, and at each pixel the composition takes whichever
+  frame shows the floor there. The composition judges pixels, not objects, so such a figure flickers for one
+  picture in two.
 - **Cuts.** When a third of the blocks fit nothing or disagree with their neighbours, the two frames are different
   pictures: the in-between is the old frame, and the new one follows on its VBLANK.
+- **Where the search guesses.** In a block whose two frames differ, a vector is a guess when moving it two samples
+  fits the colours no worse (a plain floor), or when, at half or more of the changed samples, it joins content that
+  looks alike but differs and that neither it nor the coarser level's 3x3 vectors carry unchanged (a textured
+  floor). Every changed pixel within two blocks of a guess keeps the old frame. So a figure whose pose changes too
+  much for any vector (a player serving on a plain court) shows whole, as in the old frame, and never partly as
+  floor. This supersedes the earlier figure-flicker limit. Limits: in such a scene most moving pixels repeat the
+  real frame instead of moving halfway; a small fast object near a guess (a ball in hand) freezes where it was in
+  the old frame; and on strongly blocky textured floors a few pixels can still be wrong (4 to 12 in a probe).
 - **What it never touches.** The in-between and the held frame are private images blitted to the swapchain. The
   flip's own present still commits the real frame to guest VRAM and gives any capture the real frame. The VBLANK's
   present latches no input and serves no capture.
-- **Stamps.** The report adds `presents` (real, between, held, superseded) and `present_interval_ms`. Section 10.4
+- **Stamps.** The report adds `presents` (real, between, held, superseded, unpaired) and `present_interval_ms`. Section 10.4
   applies: the run is refused as evidence.
 
 ### 10.7. Band-Limited SAS Resampling

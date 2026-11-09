@@ -6,8 +6,8 @@
 
 The audit has two purposes:
 
-* full ``github.com/Jstar269/nakagawa-recomp/{issues,pull}/N`` URLs are checked
-  in every tracked Markdown document;
+* full ``github.com/Jstar269/Nakagawa-Recomp/{issues,pull}/N`` URLs, in any letter
+  case, are checked in every tracked Markdown document;
 * shorthand ``#N`` references are checked in explicitly current-facing documents
   (including ``.github/copilot-instructions.md``);
 * docs/STATUS.md ``## At a glance`` rows whose State cell is ``Open`` must not link to a
@@ -84,14 +84,17 @@ HISTORICAL_EVIDENCE_DOCS = {
     "docs/provenance/MODIFIED_FILE_NOTICES.md",
 }
 
+# GitHub resolves the owner and repository name in any letter case, so the canonical
+# ``Jstar269/Nakagawa-Recomp`` and the lowercase spelling both name this tracker.
+REPOSITORY_PAT = r"(?i:Jstar269/nakagawa-recomp)"
 FULL_URL_PAT = re.compile(
-    r"https://github\.com/Jstar269/nakagawa-recomp/(issues|pull)/(\d+)\b"
+    rf"https://github\.com/{REPOSITORY_PAT}/(issues|pull)/(\d+)\b"
 )
 # GitHub answers ``issues/N-suffix`` with a redirect to an unrelated filtered list and
 # ``issues/N/suffix`` with a 404, so those tails are malformed, not references to N.
 # ``pull/N/<path>`` (for example ``/files``) is valid GitHub and stays a PR reference.
 MALFORMED_TRACKER_URL_PAT = re.compile(
-    r"https://github\.com/Jstar269/nakagawa-recomp/"
+    rf"https://github\.com/{REPOSITORY_PAT}/"
     r"(?:issues/(?P<issue>\d+)(?:[A-Za-z_-]|/\w)|pull/(?P<pull>\d+)[A-Za-z_-])[^\s)\]>]*"
 )
 # Any GitHub issue/PR link, Markdown-labelled or bare. Such a link is checked by the URL rules
