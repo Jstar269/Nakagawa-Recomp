@@ -180,11 +180,15 @@ UNDEFINED-layout image and published a PPM under a `.png` name. It is gone. In i
 - Present pacing: while the scheduler paces the guest to real time (the default), a game-frame
   present never waits for the presentation engine (`sdl3vk_set_present_nowait`, set by
   `gui_present`). The present polls its frame slot's fence and acquires with timeout 0; when a
-  FIFO (VSync) display still holds every image it returns `SDL3VK_PRESENT_DISPLAY_BUSY`, the
+  FIFO (VSync) display still holds every image, or the frame slot's earlier submission is still
+  pending (under MAILBOX, a GPU frames behind), it returns `SDL3VK_PRESENT_DISPLAY_BUSY`. The
   window keeps the frame it has, and the guest's VBLANK clock goes on. These frames count as
-  `present_skips` in the perf summary, and shutdown prints how many there were. Deterministic-clock
-  and turbo runs (`SR_DETERMINISTIC_CLOCK=1`, `SR_NOVBPACE=1`) have no real-time clock to protect,
-  so their presents wait and keep every frame. `fbcap-selftest` covers the presenter-neutral service itself
+  `vblanks.present_busy` in the perf JSON (apart from the output cap's `present_skips`), and
+  shutdown prints how many there were, by cause. A frame not shown is not recorded either, so a
+  VSync-on video recording repeats the previous picture at that VBLANK. Two kinds of present
+  still wait: a frame an armed file or evidence capture is waiting for (the picture probe is not
+  one), and every present in a deterministic-clock or turbo run (`SR_DETERMINISTIC_CLOCK=1`,
+  `SR_NOVBPACE=1`), which has no real-time clock to protect and keeps every frame. `fbcap-selftest` covers the presenter-neutral service itself
   without a GPU.
 
 ## Widescreen Fill wings (#1881)

@@ -1261,9 +1261,16 @@ static size_t test_rec_diff(const uint8_t *pic, int pw, int x0, int y0, const ui
 #define PACE_TEST_FRAMES   12
 static int s_pace_test_busy;     /* the fake display holds every image */
 static int s_pace_test_waits;    /* acquires that were allowed to wait while it did */
+static int s_pace_test_acquires; /* every acquire the seam saw */
+static int s_pace_test_slot_pending;   /* the fake frame slot's submission has not finished */
+
+static VkResult pace_test_fence_status(VkDevice dev, VkFence fence) {
+    return s_pace_test_slot_pending ? VK_NOT_READY : vkGetFenceStatus(dev, fence);
+}
 
 static VkResult pace_test_acquire(VkDevice dev, VkSwapchainKHR swap, uint64_t timeout,
                                   VkSemaphore sem, VkFence fence, uint32_t *idx) {
+    s_pace_test_acquires++;
     if (s_pace_test_busy) {
         if (timeout == 0) return VK_NOT_READY;
         s_pace_test_waits++;
@@ -1322,6 +1329,43 @@ static int sdl3vk_present_pacing_selftest(void) {
         if (!shown) SDL_DelayPrecise(period);
     }
     if (!shown) { fprintf(stderr, "pacing: presents did not resume once the display freed\n"); ok = 0; }
+
+    /* The frame slot about to be reused is still pending (a FIFO display that has not released
+     * its acquire semaphore, or a GPU frames behind): the present returns DISPLAY_BUSY before
+     * any acquire, keeps the slot, and the next present after it signals is shown. Every slot is
+     * submitted first, so the poll reaches the fence. */
+    int submitted = 0;
+    for (int k = 0; k < 60 && submitted < PRESENT_FRAMES; k++) {
+        if (sdl3vk_present_rgba(px) == 1) submitted++;
+        else SDL_DelayPrecise(period);
+    }
+    s_pace_test_slot_pending = 1;
+    s_fence_status_fn = pace_test_fence_status;
+    const int acquires_before = s_pace_test_acquires;
+    const int cursor_before = s_frame_cursor;
+    const uint64_t slot_busy_before = s_present_busy_slot;
+    const int pending_result = sdl3vk_present_rgba(px);
+    const int slot_acquires = s_pace_test_acquires - acquires_before;
+    const int slot_cursor = s_frame_cursor;
+    const uint64_t slot_counted = s_present_busy_slot - slot_busy_before;
+    s_pace_test_slot_pending = 0;
+    int after_slot = 0;
+    for (int k = 0; k < 30 && after_slot != 1; k++) {
+        after_slot = sdl3vk_present_rgba(px);
+        if (after_slot != 1) SDL_DelayPrecise(period);
+    }
+    s_fence_status_fn = NULL;
+    if (submitted < PRESENT_FRAMES || pending_result != SDL3VK_PRESENT_DISPLAY_BUSY ||
+        slot_acquires != 0 || slot_cursor != cursor_before || slot_counted != 1u ||
+        after_slot != 1) {
+        fprintf(stderr, "pacing: with the frame slot pending (%d of %d slots submitted first), the "
+                        "present returned %d after %d acquire(s), moved the slot cursor %d -> %d, "
+                        "counted %llu slot drop(s), and the next present returned %d (want "
+                        "DISPLAY_BUSY, 0 acquires, the cursor kept, 1 counted, then 1)\n",
+                submitted, PRESENT_FRAMES, pending_result, slot_acquires, cursor_before,
+                slot_cursor, (unsigned long long)slot_counted, after_slot);
+        ok = 0;
+    }
 
     /* No-wait off: the present waits for the display and shows the frame. */
     sdl3vk_set_present_nowait(0);
