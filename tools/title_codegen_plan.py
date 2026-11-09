@@ -229,8 +229,9 @@ class PackageBuildPlan:
     ``limit`` names the real reason the count is what it is, so the player can tell the
     user: ``"override"`` (``NK_PACKAGE_JOBS``), ``"cpu"`` (the logical CPUs),
     ``"memory"`` (the free memory), ``"max"`` (``PACKAGE_BUILD_MAX_JOBS``, Balanced),
-    ``"background"`` (``PACKAGE_BUILD_BACKGROUND_JOBS``) or ``"unknown_memory"`` (no
-    memory reading, so the fixed count of two). ``speed`` is the build speed it was
+    ``"background"`` (``PACKAGE_BUILD_BACKGROUND_JOBS``), ``"unknown_memory"`` (no
+    memory reading, so the fixed count of two) or ``"unknown_cpus"`` (no CPU count, so
+    one job, which is not a statement about the PC). ``speed`` is the build speed it was
     planned for (``PACKAGE_BUILD_SPEEDS``).
     """
 
@@ -269,9 +270,11 @@ def package_build_plan(
     ``PACKAGE_BUILD_BACKGROUND_JOBS`` for Background, ``PACKAGE_BUILD_MAX_JOBS`` for
     Balanced (the default, and what an unknown speed gets), none for Fastest. No speed
     runs more jobs than the memory allows, and without a memory reading every speed
-    keeps the fixed count of two.
+    keeps the fixed count of two (one without a CPU count).
     """
-    cpus = cpu_count if cpu_count and cpu_count > 0 else 1
+    cpus_known = bool(cpu_count and cpu_count > 0)
+    cpus = cpu_count if cpu_count is not None and cpu_count > 0 else 1
+    cpu_text = f"{cpus} logical CPUs" if cpus_known else "CPU count unknown"
     notes = ""
     if speed is None or not speed.strip():
         speed = PACKAGE_BUILD_SPEED_DEFAULT
@@ -297,19 +300,23 @@ def package_build_plan(
     if available_bytes is None:
         jobs = max(1, min(cpus, 2))
         return PackageBuildPlan(
-            jobs, f"{speed} build speed, {cpus} logical CPUs, available memory unknown{notes}",
-            "cpu" if cpus <= 2 else "unknown_memory", cpus, None, speed=speed)
+            jobs, f"{speed} build speed, {cpu_text}, available memory unknown{notes}",
+            "unknown_cpus" if not cpus_known else "cpu" if cpus <= 2 else "unknown_memory",
+            cpus, None, speed=speed)
     by_memory = (available_bytes - PACKAGE_BUILD_RESERVED_BYTES) // max(1, job_bytes)
     jobs = max(1, min(cpus, by_memory) if cap is None else min(cpus, by_memory, cap))
     # The binding limit is the smallest bound; the CPUs win a tie because more memory
     # would not add a job, and the memory wins over the speed's own cap.
-    if cpus <= jobs:
+    if not cpus_known:
+        # One job is a stand-in for the missing count: name memory only when it binds too.
+        limit = "memory" if by_memory <= jobs else "unknown_cpus"
+    elif cpus <= jobs:
         limit = "cpu"
     elif by_memory <= jobs:
         limit = "memory"
     else:
         limit = "background" if speed == "background" else "max"
-    reason = (f"{speed} build speed, {cpus} logical CPUs, "
+    reason = (f"{speed} build speed, {cpu_text}, "
               f"{available_bytes / 1024**3:.1f} GB memory available{notes}")
     short = by_memory < 1
     if short:
@@ -1119,22 +1126,62 @@ def _make_unsafe(rendered: str) -> bool:
     return any(char.isspace() or char in _MAKE_UNSAFE_PATH_CHARS for char in rendered)
 
 
+def _require_make_safe(path: Path, label: str) -> Path:
+    """Refuse a path the Make recipes cannot carry, exactly as it is written.
+
+    The path is checked without resolving it. A path staged in, or derived from,
+    the Make-safe build root may be an 8.3 short-path form, and Path.resolve()
+    on Windows expands that alias back to the long name with its spaces.
+    """
+    rendered = path.as_posix()
+    if any(ord(char) < 0x20 for char in rendered):
+        raise PackageRouteError("PACKAGE_INVALID_PATH", f"{label} contains a control character")
+    if _make_unsafe(rendered):
+        raise PackageRouteError(
+            "PACKAGE_UNSUPPORTED_PATH",
+            f"{label} {rendered!r} contains spaces or characters the Make recipes cannot "
+            "quote; choose a location without them",
+        )
+    return path
+
+
 def _absolute_path(path: Path, label: str, *, make_safe: bool = True) -> Path:
     try:
         resolved = path.resolve()
     except OSError as exc:
         raise PackageRouteError("PACKAGE_INVALID_PATH", f"{label}: {exc}") from exc
-    rendered = resolved.as_posix()
-    if any(ord(char) < 0x20 for char in rendered):
+    if any(ord(char) < 0x20 for char in resolved.as_posix()):
         raise PackageRouteError("PACKAGE_INVALID_PATH", f"{label} contains a control character")
-    if make_safe and _make_unsafe(rendered):
-        raise PackageRouteError(
-            "PACKAGE_UNSUPPORTED_PATH",
-            f"{label} {rendered!r} contains spaces or characters the Make recipes cannot "
-            "quote; choose a location without them (quoting support is in the works, "
-            "issue #296)",
-        )
+    if make_safe:
+        _require_make_safe(resolved, label)
     return resolved
+
+
+def _make_safe_directory(path: Path, label: str) -> Path:
+    """Return a Make-safe name for an input directory that is read in place.
+
+    A directory is not copied the way a file input is staged, so a spaced one
+    is named by its Windows 8.3 short-path form. With no safe form it is
+    refused rather than word-split by a recipe.
+    """
+    resolved = _absolute_path(path, label, make_safe=False)
+    if not _make_unsafe(resolved.as_posix()):
+        return resolved
+    short = _windows_short_path(resolved)
+    if short is not None and not _make_unsafe(short.as_posix()):
+        # Not resolved again: that would expand the alias back to the spaced name.
+        return short
+    # 8.3 short names exist only on Windows, so name what applies on this host.
+    no_safe_form = (
+        "it has no 8.3 short name without them"
+        if os.name == "nt"
+        else "it is read in place and this platform has no short form to use instead"
+    )
+    raise PackageRouteError(
+        "PACKAGE_UNSUPPORTED_PATH",
+        f"{label} {resolved.as_posix()!r} contains spaces or characters the Make recipes "
+        f"cannot quote, and {no_safe_form}; move it to a location without them",
+    )
 
 
 def _windows_short_path(path: Path) -> Path | None:
@@ -1198,7 +1245,7 @@ def _resolve_make_safe_build_root(intended_output_dir: Path) -> Path:
         "PACKAGE_UNSUPPORTED_PATH",
         f"output-dir {rendered!r} {reason}, 8.3 short names are unavailable "
         "on this volume, and NK_BUILD_ROOT is unset or invalid; "
-        "set NK_BUILD_ROOT to a folder without spaces (issue #296)",
+        "set NK_BUILD_ROOT to a folder without spaces",
     )
 
 
@@ -2134,8 +2181,7 @@ def build_package(
         raise PackageRouteError(
             "PACKAGE_UNSUPPORTED_PATH",
             f"output-dir {output_rendered!r} contains characters the Make recipes cannot "
-            "quote; choose a location without them (quoting support is in the works, "
-            "issue #296)",
+            "quote; choose a location without them",
         )
     has_spaces = any(char.isspace() for char in output_rendered)
     is_too_long = os.name == "nt" and len(output_rendered) + 85 >= 260
@@ -2188,6 +2234,11 @@ def build_package(
                 staged_modules.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, staged_modules / module["name"])
             module_dir = staged_modules
+        if enhancement_data_root is not None and enhancement_package_path is not None:
+            # Interpolated into the codegen recipe, where a space would split it.
+            enhancement_data_root = _make_safe_directory(
+                enhancement_data_root, "enhancement data root"
+            )
         if normalized["executable"]["bss_metadata_source"] == "psp-header" and psp_header is None:
             raise PackageRouteError(
                 "PACKAGE_PSP_HEADER_REQUIRED",
@@ -2218,7 +2269,12 @@ def build_package(
                     "PACKAGE_MODULE_DIR_REQUIRED",
                     f"module_dir is required for guest PRX {module['name']}",
                 )
-            module_path = _absolute_path(module_dir / module["name"], f"guest PRX {module['name']}")
+            # module_dir is already absolute: resolved above, or staged in the
+            # build workspace, whose root may be an 8.3 short path that resolving
+            # would expand back to the spaced name the staging exists to avoid.
+            module_path = _require_make_safe(
+                module_dir / module["name"], f"guest PRX {module['name']}"
+            )
             _require_file(module_path, f"guest PRX {module['name']}")
             module_input_paths[module["name"]] = module_path
         if psp_header is not None:

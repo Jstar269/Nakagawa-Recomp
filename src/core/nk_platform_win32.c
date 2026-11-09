@@ -1440,11 +1440,6 @@ int nk_platform_last_os_error(void) {
     return (int)GetLastError();
 }
 
-const char *const *nk_platform_sdl3_ttf_library_names(void) {
-    static const char *const names[] = { "SDL3_ttf.dll", NULL };
-    return names;
-}
-
 static bool system_font_file_exists(const char *path) {
     FILE *f = nk_fopen_utf8(path, "rb");
     if (!f) return false;

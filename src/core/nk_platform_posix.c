@@ -1371,15 +1371,6 @@ int nk_platform_last_os_error(void) {
     return errno;
 }
 
-const char *const *nk_platform_sdl3_ttf_library_names(void) {
-#if defined(__APPLE__)
-    static const char *const names[] = { "libSDL3_ttf.0.dylib", "libSDL3_ttf.dylib", NULL };
-#else
-    static const char *const names[] = { "libSDL3_ttf.so.0", "libSDL3_ttf.so", NULL };
-#endif
-    return names;
-}
-
 bool nk_platform_find_system_ui_font(char *out_path, size_t out_len) {
     if (!out_path || out_len == 0) return false;
 #if defined(__APPLE__)

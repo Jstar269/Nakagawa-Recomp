@@ -196,6 +196,16 @@ fsr3-host-selftest:
 fsr3-mutants: fsr3-host-selftest
 	"$(PYTHON)" tools/fsr3_mutants.py --build-dir $(BUILD_DIR)/fsr3-mutants --cc "$(CC)"
 
+# dmac-mutants - prove the sceDmacMemcpy/sceDmacTryMemcpy regression in hle-thread-selftest is load-bearing
+# (#303). tools/test_dmac_semantics.py TestDmacMutationCampaign builds the real selftest against copies of
+# src/rt/hle_cache_dma.c, each with one semantic defect (a 0xC000 ceiling, a clamped GPU dirty range, a Try
+# that copies the wrong bytes, ...), and requires every one to build and fail the assertion it names. It
+# compiles the selftest once per mutant, so it is not part of native-core-tests. Set NK_DMAC_MUTANTS_ONLY
+# to a part of a mutant's name to run just that one.
+.PHONY: dmac-mutants
+dmac-mutants:
+	NK_DMAC_MUTANTS_BUILD_DIR="$(BUILD_ROOT)/dmac-mutants" NK_DMAC_MUTANTS_MAKE="$(MAKE)" "$(PYTHON)" -m unittest tools.test_dmac_semantics.TestDmacMutationCampaign
+
 # fsr3-fg-host-selftest - FSR 3 frame generation's CPU side (src/rt/fsr3_fg_host.c) against the record
 # of AMD's own frame interpolation and optical flow, driven as AMD's frame generation provider drives
 # them (tests/native/fsr3_fg_host_oracle.md): every staged constant buffer, clear, barrier, discard,
@@ -401,6 +411,22 @@ ge-cpu-profile-validate-selftest: $(RT_GE_O)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
 
 native-core-tests: ge-cpu-profile-validate-selftest
+
+# ge-tnl-census-selftest -- why ge.c keeps its own T&L for a PRIM it could offer to the GPU T&L
+# route (#318): the production ge.o with SR_GPU_TNL's switch on and a backend stand-in, one
+# source-owned list per reason (clear, flat, texgen, matrix, viewport, texcoord, fog, specular,
+# light, vertex, clip, backend), each counted under its own reason only; the counts sum to
+# ge_tnl_counts' cpu, an eligible PRIM is taken, and nothing is counted with the switch off. No
+# game input, no GPU.
+GE_TNL_CENSUS_SELFTEST := $(BUILD_DIR)/ge_tnl_census_selftest$(EXE_EXT)
+
+ge-tnl-census-selftest: $(RT_GE_O)
+	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_TNL_CENSUS_SELFTEST) \
+		tests/native/ge_tnl_census_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
+		src/rt/flight_recorder.c src/rt/perf.c -lm
+	$(GE_TNL_CENSUS_SELFTEST)
+
+native-core-tests: ge-tnl-census-selftest
 
 # ge-flight-overhead -- cost of the disarmed flight recorder on the GE paths (#320): the
 # ge-cpu-profile-validate-selftest harness's --bench mode on the production ge.c, built once
@@ -863,13 +889,17 @@ asset-index-selftest:
 # The scaled-upload case (#1296), the per-fragment mip level case (#1373), the readback-rows
 # case (#323, also on its SR_GPU_READBACK_FULL reference path), the undrawn-rows case and the
 # widescreen Fill case (#1881) run again alone at render scales 2 and 4; the sprite-scaled and
-# uv-edge-clamp cases (#2110) run alone at scales 2, 3 and 4. Each is selected by arguments: a
+# uv-edge-clamp cases (#2110) run alone at scales 2, 3 and 4; rtt-scale (#2052: a quarter-size
+# render target sampled back, linear, at the render scale and not at 1x) runs alone at scales 2
+# and 4 (the whole-suite run covers 1x). Each is selected by arguments: a
 # VAR=value prefix needs a POSIX shell, and cmd.exe does not take one. The host twin (#2050) runs
 # after them: twin-off runs of twin-scene write reference files that the twin-on runs at the
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
 # runs the whole suite with every twin checked against its image after each case, twin-gate
 # checks the switch's values and its Ace gate (`--authentic`), and twin-alloc-fail injects a
-# failed twin allocation, and gpu-timestamps runs once more with the twin shown. The pipeline
+# failed twin allocation, and gpu-timestamps runs once more with the twin shown. The dst-read
+# cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
+# `--dst-read interlock`; a device that refuses the interlock prints a SKIP line). The pipeline
 # cache (#2149) runs last, as three processes over one empty data root: a cold run saves the
 # cache, a warm run must start from it and draw the same frames, and a reject run re-opens it
 # over damaged, foreign and other-driver files and with the switch off or refused.
@@ -907,6 +937,8 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 2 --case uv-edge-clamp
 	$(GPU_COHERENCE_BIN) --scale 3 --case uv-edge-clamp
 	$(GPU_COHERENCE_BIN) --scale 4 --case uv-edge-clamp
+	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-scale
+	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-scale
 	$(GPU_COHERENCE_BIN) --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
 	$(GPU_COHERENCE_BIN) --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
@@ -926,12 +958,17 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	@rc=0; $(GPU_COHERENCE_BIN) --twin 1 --gpu-timestamps 1 --case gpu-timestamps || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-coherence-selftest twin gpu-timestamps (exit 77; the reason is printed above)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL gpu-coherence-selftest twin gpu-timestamps (exit $$rc)"; exit $$rc; fi
+	$(GPU_COHERENCE_BIN) --dst-read snapshot --case dst-read
+	$(GPU_COHERENCE_BIN) --dst-read snapshot --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --dst-read interlock --case dst-read
+	$(GPU_COHERENCE_BIN) --dst-read interlock --scale 4 --case dst-read
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_test', ignore_errors=True)"
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-reject
 	@$(MAKE) --no-print-directory gpu-coherence-selftest-snapbar-mutants
 	@$(MAKE) --no-print-directory gpu-coherence-pcache-mutant
+	@$(MAKE) --no-print-directory gpu-dst-read-mutants
 	@$(MAKE) --no-print-directory ge-first-bad-draw-selftest GE_FBD_SKIP_STATUS=0
 
 # gpu-coherence-pcache-mutant - pipeline-cache-cold must kill SR_PCACHE_SELFTEST_NULL_MUTANT, a
@@ -1008,6 +1045,36 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 	if ! grep -Fq 'FAIL want "present 2 ' $$log; then \
 		cat $$log; echo "vram-view-identity-selftest: the mutant failed for another reason" >&2; exit 1; fi; \
 	echo "vram-view-identity-selftest: the writing-viewer mutant is caught at the next presented frame"
+
+# gpu-dst-read-mutants — the dst-read cells must kill each SR_GPU_DSTREAD_MUTANT in ge_gpu.c (#2109):
+# 1 merges every channel from the loaded destination, so the RMW store has no effect
+# (dst-read-order), 2 swaps the RMW batches' source and destination blend factors (dst-read-order),
+# 3 lets an op the rmwzfb rule refuses take the interlock, so an alpha-rejected fragment writes depth
+# (dst-read-depth), 4 gives colour targets STORAGE_BIT on the snapshot path (dst-read-pins), and 5
+# turns the RMW pipelines' depth test off, so a sprite behind the wall blends (dst-read-ztest).
+# Mutants 1 to 3 and 5 run on the interlock path, 4 on the snapshot path. Each builds its own binary
+# and must fail with its own message. Exit 77 (no Vulkan device, or a device without the interlock
+# for 1 to 3 and 5) is a SKIP of that mutant.
+gpu-dst-read-mutants: shader-verify $(RT_GE_O)
+	@for m in 1 2 3 4 5; do \
+		case $$m in \
+			1) args="--dst-read interlock --case dst-read-order"; kill="the RMW store had no effect";; \
+			2) args="--dst-read interlock --case dst-read-order"; kill="differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
+			3) args="--dst-read interlock --case dst-read-depth"; kill="depth differs from ge.c in [1-9]";; \
+			5) args="--dst-read interlock --case dst-read-ztest"; kill="colour differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
+			*) args="--dst-read snapshot --case dst-read-pins"; kill="the snapshot path made interlock state";; \
+		esac; \
+		bin=$(BUILD_DIR)/gpu_coherence_dstread_mutant$$m.exe; \
+		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_DSTREAD_MUTANT=$$m -ffunction-sections -fdata-sections \
+			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -Wl,--gc-sections -o $$bin \
+			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
+			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
+		$$bin $$args > $$bin.log 2>&1; result=$$?; \
+		if test $$result -eq 77; then echo "dst-read mutant $$m: SKIP (no Vulkan device, or no interlock)"; continue; fi; \
+		if test $$result -eq 0; then cat $$bin.log; echo "dst-read mutant $$m unexpectedly passed" >&2; exit 1; fi; \
+		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "dst-read mutant $$m failed for another reason" >&2; exit 1; fi; \
+		echo "gpu-dst-read-mutants: mutant $$m killed ($$kill)"; \
+	done
 
 # gpu-snapsync-selftest — production-path regression for the explicit guest-VRAM
 # snapshot boundary. It proves ordinary presentation remains async, then verifies
@@ -1340,9 +1407,11 @@ ge-replay: shader-verify $(RT_GE_O)
 # data): the comparison rules without a GPU, NO_DIFFERENCE from the unchanged backend, then each
 # executed SR_GE_FBD_MUTANT (1: a blend draw 3 does not have, 2: draw 3's depth writes off) builds
 # its own binary and must be named as draw 3 in linear and bisect mode, mutant 2 in depth alone.
-# Last, a known difference no mutant made: the "overlap" capture's one PRIM of two overlapping
-# 50% blends on 5650 (#2109; shader-blend batches read one pre-batch copy of the target) must be
-# found as draw 1, its 100x100 overlap and nothing else. The #2109 fix flips this expectation.
+# Last, the "overlap" capture: one PRIM of two overlapping 50% blends on 5650 (#2109). On the
+# snapshot destination-read path every primitive of the shader-blend batch reads one pre-batch
+# copy of the target, a known difference no mutant made: it must be found as draw 1, its 100x100
+# overlap and nothing else. On the interlock path the capture must be NO_DIFFERENCE; a device
+# without the interlock refuses that path (sdl3vk prints the reason) and the leg is a SKIP.
 # Then fail-closed cells: a 512-wide scissor (ge.c rasterizes inside 480x272 only), 33 targets
 # (one past the limit) and a stride past 1024 are INCOMPLETE (exit 5), and a capture with no
 # draw is NO_DRAWS (exit 6); none is ever NO_DIFFERENCE.
@@ -1386,16 +1455,24 @@ ge-first-bad-draw-selftest: ge-replay
 		done; \
 	done
 	@$(BUILD_DIR)/ge_replay.exe --write-synthetic $(GE_FBD_DIR)/overlap.ngef overlap
-	@for mode in linear bisect; do \
-		log=$(GE_FBD_DIR)/overlap-$$mode.log; result=0; \
-		$(BUILD_DIR)/ge_replay.exe $(GE_FBD_DIR)/overlap.ngef --first-bad-draw --mode $$mode \
-			--report $(GE_FBD_DIR)/overlap-$$mode > $$log 2>&1 || result=$$?; \
+	@for path in snapshot interlock; do for mode in linear bisect; do \
+		log=$(GE_FBD_DIR)/overlap-$$path-$$mode.log; result=0; \
+		$(BUILD_DIR)/ge_replay.exe $(GE_FBD_DIR)/overlap.ngef --first-bad-draw --mode $$mode --dst-read $$path \
+			--report $(GE_FBD_DIR)/overlap-$$path-$$mode > $$log 2>&1 || result=$$?; \
 		if test $$result -eq 77; then cat $$log; echo "SKIP ge-first-bad-draw-selftest overlap (no Vulkan device)"; exit $(GE_FBD_SKIP_STATUS); fi; \
+		if ! grep -Fq "sdl3vk: destination reads: $$path" $$log; then \
+			if test $$path = interlock && grep -Fq "SR_GPU_DST_READ=interlock refused" $$log; then \
+				echo "SKIP ge-first-bad-draw-selftest overlap on the interlock path (the device refused it; $$mode)"; continue; fi; \
+			cat $$log; echo "FAIL ge-first-bad-draw-selftest: the overlap did not run on the $$path path ($$mode)" >&2; exit 1; fi; \
+		if test $$path = interlock; then \
+			if test $$result -ne 0 || ! grep -Fq "result=NO_DIFFERENCE draws=2 " $$log; then \
+				cat $$log; echo "FAIL ge-first-bad-draw-selftest: the #2109 overlap differs on the interlock path ($$mode)" >&2; exit 1; fi; \
+			echo "ge-first-bad-draw-selftest: the #2109 overlap is NO_DIFFERENCE on the interlock path ($$mode)"; continue; fi; \
 		if test $$result -ne 1 || ! grep -Fq "result=FIRST_BAD_DRAW index=1 draws=2 " $$log || \
 		   ! grep -Fq "pixels=10000 max_diff=" $$log || ! grep -Fq "bbox=140,100,239,199" $$log; then \
 			cat $$log; echo "FAIL ge-first-bad-draw-selftest: the #2109 overlap was not found as draw 1, exactly the overlap ($$mode)" >&2; exit 1; fi; \
-		echo "ge-first-bad-draw-selftest: known difference #2109 found at draw 1, the 100x100 overlap only ($$mode)"; \
-	done
+		echo "ge-first-bad-draw-selftest: known difference #2109 on the snapshot path found at draw 1, the 100x100 overlap only ($$mode)"; \
+	done; done
 	@for v in wide empty many deep; do \
 		$(BUILD_DIR)/ge_replay.exe --write-synthetic $(GE_FBD_DIR)/$$v.ngef $$v || exit 1; \
 	done

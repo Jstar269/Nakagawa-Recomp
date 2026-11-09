@@ -371,11 +371,6 @@ unsigned long nk_platform_process_id(void);
    GetLastError() on Win32, errno on POSIX. Read it straight after the failing call. */
 int nk_platform_last_os_error(void);
 
-/* The SDL3_ttf shared library's file names, most specific first, NULL-terminated:
-   SDL3_ttf.dll on Win32, libSDL3_ttf.0.dylib then libSDL3_ttf.dylib on macOS, and
-   libSDL3_ttf.so.0 then libSDL3_ttf.so elsewhere. */
-const char *const *nk_platform_sdl3_ttf_library_names(void);
-
 /* The first system UI font file found (Win32: the open-source fonts in the per-user fonts
    folder, then %WINDIR%\Fonts; macOS and Linux: a short table of system font paths).
    False when none exists. */

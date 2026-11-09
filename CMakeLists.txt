@@ -637,7 +637,6 @@ if(BUILD_PLAYER)
         src/player/input_settings.c
         src/player/iso_reader.c
         src/player/setup_staging.c
-        src/player/ui_renderer.c
         src/player/package_builder.c
         src/core/nk_disc_chd.c
         src/player/update_check.c
@@ -881,6 +880,7 @@ set(NK_RUNTIME_SOURCES
     src/rt/gpu_sdl3vk/ace_smooth.c
     src/rt/gpu_sdl3vk/ace_hud.c
     src/rt/gpu_sdl3vk/fsr1_pass.c
+    src/rt/gpu_sdl3vk/anime4k_pass.c
     src/core/nk_input_profile.c
     src/core/nk_font.c
     src/core/nk_json.c
