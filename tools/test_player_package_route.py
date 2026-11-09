@@ -581,7 +581,7 @@ def build_failure_report(
 
 class TestPlayerPackageRoute(unittest.TestCase):
     binary_dir: ClassVar[Path]  # One scratch build root is assigned for the class.
-    keep_scratch = False  # Set by run_build_action when a build fails; see _remove_scratch.
+    keep_scratch = False  # Set by build_failure_message for a build that had to pass; see _remove_scratch.
 
     @classmethod
     def setUpClass(cls):
@@ -764,14 +764,19 @@ class TestPlayerPackageRoute(unittest.TestCase):
              str(user_root / "logs")],
             cwd=ROOT, env=env, capture_output=True, text=True, timeout=1800,
         )
-        if built.returncode != 0:
-            self.keep_scratch = True
         return built
 
     def build_failure_message(
         self, built: subprocess.CompletedProcess, user_root: Path | None = None,
     ) -> str:
-        """The assertion message for a build that did not pass: output, log tail, kept directory."""
+        """The assertion message for a build that had to pass: output, log tail, kept directory.
+
+        Called where a test needs the build to succeed, so a non-zero exit there keeps the
+        scratch directory. A refusal a test expects (an encrypted or malformed input) never
+        calls it and is cleaned up like any other run.
+        """
+        if built.returncode != 0:
+            self.keep_scratch = True
         return build_failure_report(
             built, (user_root or self.user_root) / "logs", DISC_ID,
             kept_scratch=Path(self.temporary.name) if self.keep_scratch else None,
@@ -781,7 +786,9 @@ class TestPlayerPackageRoute(unittest.TestCase):
         """Delete the scratch directory, except after a failed build: its logs are the evidence."""
         if self.keep_scratch:
             # Stop tempfile's finalizer too, or it would remove the directory at interpreter exit.
-            self.temporary._finalizer.detach()  # noqa: SLF001
+            finalizer = getattr(self.temporary, "_finalizer", None)
+            if finalizer is not None:
+                finalizer.detach()
             return
         self.temporary.cleanup()
 
@@ -1773,9 +1780,9 @@ class TestBuildFailureDiagnosis(unittest.TestCase):
         self.addCleanup(shutil.rmtree, scratch.name, ignore_errors=True)
         route = self._route(scratch)
         built = self._fake_build(route, returncode=2, log_lines=200)
-        self.assertTrue(route.keep_scratch)
 
         message = route.build_failure_message(built)
+        self.assertTrue(route.keep_scratch)
         self.assertIn("make line 200", message)
         self.assertIn(f"make line {200 - BUILD_LOG_TAIL_LINES + 1}\n", message)
         self.assertNotIn(f"make line {200 - BUILD_LOG_TAIL_LINES}\n", message)
@@ -1784,6 +1791,18 @@ class TestBuildFailureDiagnosis(unittest.TestCase):
 
         route._remove_scratch()
         self.assertTrue(Path(scratch.name, "user", "logs", f"build_{DISC_ID}.log").is_file())
+
+    def test_expected_refusal_removes_scratch(self):
+        # The encrypted and malformed-input tests expect a non-zero exit and never ask for the
+        # failure message, so their scratch directory must not outlive them.
+        scratch = scratch_dir.TemporaryDirectory(prefix="nk-build-diagnosis-")
+        self.addCleanup(shutil.rmtree, scratch.name, ignore_errors=True)
+        route = self._route(scratch)
+        refused = self._fake_build(route, returncode=2, log_lines=3)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse(route.keep_scratch)
+        route._remove_scratch()
+        self.assertFalse(Path(scratch.name).exists())
 
     def test_passing_build_still_removes_scratch(self):
         scratch = scratch_dir.TemporaryDirectory(prefix="nk-build-diagnosis-")
