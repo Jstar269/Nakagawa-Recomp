@@ -408,6 +408,19 @@ class RouteTests(Base):
         self.assertEqual(seen["SR_PRESENT_UPSCALE"], "fsr1")
         side = json.loads(pg.sidecar_path(self.dir / "priv" / "ref.ppm").read_text())
         self.assertEqual(side["present_upscale"], "fsr1")
+        # the movie upscaler follows the same rules: never inherited, recorded when a route asks
+        with patch.dict(os.environ, {"SR_MOVIE_UPSCALE": "anime4k"}):
+            verdict = pg.run_route(self.route(), 2, self.dir / "work4", accept_frame=True)[1]
+        self.assertEqual(verdict.status, pg.ACCEPTED)
+        seen = json.loads((self.dir / "work4" / "run0" / "seen_env.json").read_text())
+        self.assertEqual(seen["SR_MOVIE_UPSCALE"], "off")
+        movie = self.route(env={"SR_MOVIE_UPSCALE": "anime4k"})
+        verdict = pg.run_route(movie, 2, self.dir / "work5", accept_frame=True)[1]
+        self.assertEqual(verdict.status, pg.ACCEPTED)
+        seen = json.loads((self.dir / "work5" / "run0" / "seen_env.json").read_text())
+        self.assertEqual(seen["SR_MOVIE_UPSCALE"], "anime4k")
+        side = json.loads(pg.sidecar_path(self.dir / "priv" / "ref.ppm").read_text())
+        self.assertEqual(side["present_upscale"], "off+movie-anime4k")
 
     def test_a_reference_taken_with_another_slice_says_so_when_it_differs(self):
         ref = self.dir / "priv" / "ref.ppm"
