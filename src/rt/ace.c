@@ -284,6 +284,12 @@ void ace_set_readout(int on) {
     s_eff.readout = on ? 1 : 0;
 }
 
+void ace_set_twin_running(void) {
+    if (!g_ace_on || s_unavailable[ACE_FEATURE_TWIN][0]) return;
+    s_eff.twin = 1;
+    s_confirmed[ACE_FEATURE_TWIN] = 1;
+}
+
 void ace_set_af_effective(int af, const char *reason) {
     if (!g_ace_on || !s_req.af) return;
     if (af <= 0) { ace_feature_unavailable(ACE_FEATURE_AF, reason); return; }

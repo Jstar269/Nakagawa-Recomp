@@ -2896,8 +2896,10 @@ static int ge_twin_decide(void) {
         if (key) ace_feature_unavailable(ACE_FEATURE_TWIN, "the software renderer could not allocate it");
         return 0;
     }
-#ifndef SR_TWIN_SELFTEST_SOFT_KEY_CONFIRM   /* the selftest's failing-before: a running twin is never confirmed */
-    if (key) ace_confirm(ACE_FEATURE_TWIN);
+    /* The selftest's failing-befores: a running twin is never confirmed (KEY_CONFIRM, the line asked
+     * for it), or a twin the line did not ask for is not reported (TWIN_REPORT, SR_GPU_TWIN_COLOR). */
+#if !defined(SR_TWIN_SELFTEST_SOFT_KEY_CONFIRM) && !defined(SR_TWIN_SELFTEST_SOFT_TWIN_REPORT)
+    ace_set_twin_running();
 #endif
     fprintf(stderr, "TWIN: on (software renderer, colour=%s)\n", mode == 1 ? "full" : "native");
     s_twin_mode = mode;

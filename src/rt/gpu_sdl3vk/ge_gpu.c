@@ -3052,7 +3052,7 @@ static void twin_off_for_run(const char *what) {
     if (!s_twin) return;
     fprintf(stderr, "TWIN: off for the rest of the run (%s could not be allocated): the authentic image "
             "is shown at %dx, as with the twin off\n", what, s_scale);
-    if (s_twin_from_key) {
+    if (ace_effective()->twin) {   /* the line asked for it, or SR_GPU_TWIN_COLOR ran it (ace_set_twin_running) */
         char why[96];
         snprintf(why, sizeof(why), "%s could not be allocated", what);
         ace_feature_unavailable(ACE_FEATURE_TWIN, why);
@@ -6902,9 +6902,11 @@ int gegpu_init(void) {
         if (s_twin_from_key) ace_feature_unavailable(ACE_FEATURE_TWIN, "the GPU could not make it");
         twin_release();
         s_twin_unavailable = 1;
-    } else if (twin_req && s_twin_from_key) {
-#ifndef SR_TWIN_SELFTEST_GPU_KEY_CONFIRM   /* the selftest's failing-before: a running twin is never confirmed */
-        ace_confirm(ACE_FEATURE_TWIN);
+    } else if (twin_req) {
+        /* The selftest's failing-befores: a running twin is never confirmed (KEY_CONFIRM, the line asked
+         * for it), or a twin the line did not ask for is not reported (TWIN_REPORT, SR_GPU_TWIN_COLOR). */
+#if !defined(SR_TWIN_SELFTEST_GPU_KEY_CONFIRM) && !defined(SR_TWIN_SELFTEST_GPU_TWIN_REPORT)
+        ace_set_twin_running();
 #endif
     }
 

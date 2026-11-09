@@ -95,7 +95,8 @@ extern int g_ace_on;   /* the run's switch: 1 only after a valid line with Ace o
  * sets g_ace_on. Returns g_ace_on. ace_init_spec does the same for a given value (tests). */
 int ace_init_from_env(void);
 int ace_init_spec(const char *spec, const char *report_path);
-/* The requested line, and what this host gave (a feature it cannot provide is off here). */
+/* The requested line, and what this host gave (a feature it cannot provide is off here). A host twin
+ * that SR_GPU_TWIN_COLOR turned on counts as given (ace_set_twin_running). */
 const AceConfig *ace_requested(void);
 const AceConfig *ace_effective(void);
 /* The canonical line of the run ("off" for an authentic run). */
@@ -115,6 +116,10 @@ void ace_note_af_failure(void);
 /* The pause menu's live Speed readout switch (Ace on only; a readout this host cannot draw
  * stays off). */
 void ace_set_readout(int on);
+/* A host twin (full 32-bit colour) that is running, whatever turned it on, the launch line or
+ * SR_GPU_TWIN_COLOR: the effective config and the report say so, and it counts as confirmed. A
+ * twin already named unavailable stays off. */
+void ace_set_twin_running(void);
 /* The anisotropy the device gives, at most the requested level (0 = none). */
 void ace_set_af_effective(int af, const char *reason);
 /* The active features in words, joined by " \xC2\xB7 " ("16x filtering \xC2\xB7 crisp keyboard"),

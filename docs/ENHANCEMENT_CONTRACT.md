@@ -688,7 +688,8 @@ at `s_twin`) for the Vulkan renderer, and in `src/rt/ge.c` (the comment at `s_tw
   and any other value prints `TWIN: refused (...)` and leaves it off. When the variable turns off a twin the line
   asked for, the run names `twin` unavailable ("SR_GPU_TWIN_COLOR overrides it") in the report. `gpu-coherence-selftest`
   twin-key turns the twin on through `twin=on` alone, in both renderers, and checks the report, with the variable
-  unset and set. The twin takes effect only in Ace Mode: in an
+  unset and set. A twin that runs is reported on (`effective.twin` true, and in the pause caption) whatever turned
+  it on, so `SR_GPU_TWIN_COLOR=1` with the key off reports it too; `twin-key --twin-key off --twin 1` checks that. The twin takes effect only in Ace Mode: in an
   authentic run it stays off whatever the environment says, and a request prints one `TWIN: off (the host twin
   needs Ace Mode)` line. When the key asked for it and it does not come up (the `TWIN: unavailable` and `TWIN: off
   for the rest of the run` cases below), the run names `twin` unavailable on stderr and in the report; a twin that

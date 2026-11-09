@@ -2486,8 +2486,9 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
    motion, Widescreen, texture filtering, sound, the readout, the badge or Full 32-bit colour
-   (the host twin, section 10.11): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
-   test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
+   (the host twin, section 10.11): those stay the library's and each game's own.
+   docs/PLAYER_UI_DESIGN.md lists the same values, and test_graphics_presets checks that every other part is
+   -1, so a new part needs a choice. */
 #define PRESET_PARTS(text, upscale)                                                        \
     {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
      [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \

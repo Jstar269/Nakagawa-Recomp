@@ -126,21 +126,24 @@ static int set_env(const char *name, const char *value) {
  * Ace item of its own), unless `--authentic` keeps it off to show that an authentic run
  * ignores the switch. `--twin-key on` makes that Ace line carry `twin=on` and sets no variable:
  * the twin-key case then checks the launch line's own request, in both renderers (with
- * `--twin 0|off|native` the variable overrides the line and the case checks that). `--pipeline-cache DIR` turns the pipeline cache (#2149) on and makes DIR,
+ * `--twin 0|off|native` the variable overrides the line and the case checks that).
+ * `--twin-key off` keeps the line at `twin=off`; with `--twin 1|native` the twin-key case then checks
+ * that a twin the variable turned on is reported as running. `--pipeline-cache DIR` turns the pipeline cache (#2149) on and makes DIR,
  * as an absolute path, the data root (SR_USER_DATA_ROOT), so the cache lives in DIR/cache/gegpu
  * as it would under a launcher's root; without it the harness turns the cache off, so a
  * selftest never reads or writes the user's cache folder.
  * Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe does not accept. */
 int main(int argc, char **argv) {
-    int twin_arg = 0, twin_key = 0, authentic = 0, repl_only = 0, pcache_arg = 0;
+    int twin_arg = 0, twin_key = 0, twin_key_on = 0, authentic = 0, repl_only = 0, pcache_arg = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--authentic") == 0) { authentic = 1; continue; }
         if (strcmp(argv[i], "--twin-key") == 0) {
-            if (i + 1 >= argc || strcmp(argv[++i], "on") != 0) {
-                fprintf(stderr, "gpu coherence selftest: --twin-key takes on\n");
+            if (i + 1 >= argc || (strcmp(argv[++i], "on") != 0 && strcmp(argv[i], "off") != 0)) {
+                fprintf(stderr, "gpu coherence selftest: --twin-key takes on or off\n");
                 return 2;
             }
             twin_key = 1;
+            twin_key_on = strcmp(argv[i], "on") == 0;
             continue;
         }
         if (strcmp(argv[i], "--repl-only") == 0) { repl_only = 1; continue; }
@@ -183,7 +186,7 @@ int main(int argc, char **argv) {
     }
 #else
     if ((twin_arg || twin_key) && !authentic &&
-        !ace_init_spec(twin_key ? "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;twin=on"
+        !ace_init_spec(twin_key && twin_key_on ? "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;twin=on"
                                 : "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;twin=off", NULL)) {
         fprintf(stderr, "gpu coherence selftest: FAIL the Ace line for the host twin was refused\n");
         free(arena);
