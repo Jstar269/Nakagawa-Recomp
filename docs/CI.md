@@ -20,14 +20,14 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 
 | Event/change | Jobs that run | Jobs intentionally skipped |
 | --- | --- | --- |
-| Draft pull request (opened, a push, reopened, or converted to Draft) | the quick jobs: classification, hygiene/security with its Markdown step, the public export audit, and CI required, which fails with `DRAFT_LIGHT_CI` (see [Draft pull requests](#draft-pull-requests)) | Python tooling, native/translation, the GCC 16 canary, the Android launcher build, Windows and the profile-zero fixture build, whatever the changed paths |
-| Ready pull request, docs-only | classification, hygiene/security with its Markdown step, CI required | Python/native, Windows |
-| Ready pull request, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
-| Ready pull request, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over three shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
-| Ready pull request, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
-| Ready pull request, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all three groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
-| Ready pull request, only `tools/test_*.py` modules that no native or Windows gate runs | classification, hygiene/security, Python tooling, CI required | native/translation, Windows (see [Tests-only changes](#tests-only-changes)) |
-| Marked Ready (`ready_for_review`) | the path-applicable jobs of a ready pull request, on the head the Draft run left light | only jobs irrelevant to the changed paths |
+| Pull request, quick run: a Draft, and, while `NK_CI_TIERS` is `on`, every pull request from a branch of this repository that is not a `batch/`, `carry/` or `desk/` branch and has no `ci-full-matrix` label | the quick checks: classification, hygiene/security with its Markdown step, the public export audit, `Generated files and repository lints` and `CI quick checks` (see [Quick and full checks](#quick-and-full-checks)) | Python tooling, native/translation, the GCC 16 canary, the Android launcher build, Windows, the profile-zero fixture build and `CI required`, whatever the changed paths |
+| Pull request, full run, docs-only | classification, hygiene/security with its Markdown step, CI required | Python/native, Windows |
+| Pull request, full run, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
+| Pull request, full run, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over three shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
+| Pull request, full run, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
+| Pull request, full run, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all three groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
+| Pull request, full run, only `tools/test_*.py` modules that no native or Windows gate runs | classification, hygiene/security, Python tooling, CI required | native/translation, Windows (see [Tests-only changes](#tests-only-changes)) |
+| Marked Ready (`ready_for_review`) | a new run on the head the Draft's run covered: the quick checks again when the head runs light, the path-applicable jobs when it runs full | as for that tier |
 | Workflow/CI configuration | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
 | Dependency-only metadata (`.github/dependabot.yml`) | classification, hygiene/security, CI required | Python/native, Windows |
 | Mixed documentation/native changes | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the applicable product gates |
@@ -82,7 +82,9 @@ The jobs:
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 3 groups of parts, about 10-13 min each |
 | `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
 | `android_build` ("Android launcher build") | not present | 1 job, added later |
-| `ci_required` | 1 job | unchanged |
+| `ci_required` | 1 job | unchanged on a full run; does not run on a quick one |
+| `quick_checks` ("Generated files and repository lints") | not present | 1 job, on a quick run only ([Quick and full checks](#quick-and-full-checks)) |
+| `ci_quick` ("CI quick checks") | not present | 1 job, on a quick run only, where it stands in for `ci_required` |
 
 - **Hygiene.** The check keeps its name, which the ruleset and the
   [Trusted CI verdict](#trusted-ci-verdict) require. The main smoke steps carry
@@ -125,7 +127,7 @@ The jobs:
   in place over an older synthetic release, then repeats the build and compares both SHA-256 values.
   Each install runs with Setup's `/LOG=`, and a failed one reports Setup's PrepareToInstall message
   (or the log's last lines) beside its exit code. The job requires
-  `allow_substantive == true`, so Draft-light runs skip this heavy gate.
+  `allow_substantive == true`, so quick runs skip this heavy gate.
 
 `CI required` needs `classify`, `hygiene`, `public_export`, `python_tools`, `native_tools`,
 `windows_runtime`, `windows_installer` and `android_build`. The installer result is required
@@ -266,7 +268,7 @@ provenance attestation finishes after `CI`, dispatch the verdict (see "Re-runnin
 [Trusted CI verdict](#trusted-ci-verdict)). Together they would have removed 21 of those 31 queued runs.
 They do not change the ceiling: verdict latency still follows the CI queue.
 
-### Draft pull requests
+### OpenSSF Scorecard
 
 The OpenSSF Scorecard workflow (`.github/workflows/scorecards.yml`) runs daily, and on demand from the
 Actions tab. It doesn't run on every push to `main`, because each run spends the repository's shared hourly
@@ -275,46 +277,72 @@ for the README badge.
 Triage findings through the usual issue process. The workflow does not change branch-protection
 settings.
 
-A Draft pull request runs only the quick checks: `Classify change`, `Hygiene and security`
-(with its Markdown step), the public export audit and `CI required`. For a `pull_request`
-event whose payload says `draft: true`, `tools/ci_paths.py` exports `allow_substantive=false`
-and `draft=true`. Every substantive job gates on `allow_substantive`, so Python tooling,
-native/translation, the GCC 16 canary, the Android launcher build, the Windows runtime gate, the Windows installer job and
-the profile-zero fixture build are skipped, whatever the changed paths. The path flags (`run_python`, `run_native`,
-`run_windows`, `run_installer`, `run_markdown`) are unchanged, so the Ready run routes exactly the gates a
-ready pull request gets. OSV-Scanner, Dependency Review and the provenance attestation run on
-a Draft as before. This keeps the hosted runners free for landing runs, which otherwise queue
-behind every Draft's full matrix.
+### Quick and full checks
 
-A Draft's run is never green, so no Draft can join a landing batch:
+Hosted CI has two tiers. The **quick checks** are `Classify change`, `Hygiene and security` (with its
+Markdown step), the public export audit, `Generated files and repository lints` and their aggregate,
+`CI quick checks`: about 5 runner-minutes. The **full checks** add the Python tooling gates, the native
+and translation gates, the GCC 16 canary, the Android launcher build, the Windows runtime gate, the
+Windows installer job and the profile-zero fixture build, as the changed paths route them, and their
+aggregate, `CI required`: about 144 runner-minutes for a change that routes everything. OSV-Scanner,
+Dependency Review, the provenance attestation and the Trusted CI verdict run on every push in both
+tiers.
 
-- `CI required` fails on `draft=true` with `DRAFT_LIGHT_CI`, and its log and annotation name
-  the quick jobs' results. A failing quick job is still a real failure to fix.
-- The Trusted CI verdict reads the pull request's draft state from GitHub and reports the
-  finding `DRAFT_LIGHT_CI`, whatever the candidate's CI reported. A draft state that is not
-  `false` counts as a Draft. A Draft that is also behind `main` reports both codes, so it
-  never looks like a head that fails only on `CI_DEFINITION_BEHIND`. The verdict always runs
-  the default branch's verifier, so this rule applies to every pull request once it is on
-  `main`.
+`tools/ci_paths.py` exports `tier`. Its value `light` is what this page calls a quick run, and the jobs
+of a quick run are the quick checks; `full` is a full run. A run is `full` for a manual dispatch, the
+nightly schedule, a merge group, a push to `main`, and a pull request that is not a Draft and is any
+of: a `batch/` branch of this repository, from a fork, a `carry/` or `desk/` branch (the desk's copy of
+a fork's pull request), labelled `ci-full-matrix`, or run while the repository variable `NK_CI_TIERS`
+is not `on`. Every other pull-request run is `light`. On a pull request `allow_substantive` is true
+exactly when `tier` is `full`, and every substantive job gates on it. The path flags (`run_python`,
+`run_native`, `run_windows`, `run_installer`, `run_markdown`) do not depend on the tier, so a full run
+routes exactly the gates the quick run of the same change skipped. What a push to `main` runs is
+unchanged: `allow_substantive` still narrows it there, and `CI required` still runs.
 
-The full matrix runs when the pull request is marked Ready for review. `.github/workflows/ci.yml`
-lists `ready_for_review`, which starts the full run on the same head, and every later push to a
-pull request that is not a Draft runs it through `synchronize`. It also lists
-`converted_to_draft`, which starts a light run; the shared concurrency group cancels a full run
-still in progress, so a Draft holds no substantive runner. The CI run's completion re-judges the
-verdict. `provenance-attestation.yml` lists `ready_for_review` as well. Pushes to `main`, the
-nightly schedule, manual `workflow_dispatch` runs and merge groups are never Drafts and run as
-before.
+`Generated files and repository lints` runs only on a quick run. It holds checks that a quick run
+would otherwise leave to the landing batch, each of which the full tier runs inside a longer job:
+`python -m unittest tools.test_lint_docs`, `python tools/format_portability_check.py`,
+`python tools/regen_all.py --check`, and the tools mypy baseline (`tools/mypy_baseline.py --scope
+issue-1391`, then without `--scope`, with the Python tooling job's pinned install). Five lane runs of
+2026-11-09 failed only in a heavy job; the first three checks would have turned every one of them red
+on a quick run, and the mypy baseline was the most frequent lane failure of that week.
 
-Mark a pull request Ready when you want the full checks. The cost is that a Draft learns of a
-Python, native or Windows failure only after that, so run the focused local gates for the files
-you changed first (`AGENTS.md` section 9).
+A quick run is never green for landing. `CI required` does not run on it, and `tools/ci_required.py`
+fails any pull-request run whose substantive gates were suppressed, so the
+[Trusted CI verdict](#trusted-ci-verdict), which reports `success` only when `CI required` succeeded at
+the exact head, reports `pending` with `LIGHT_CI_GREEN` instead. The landing desk batches heads in that
+state; the batch's head gets the full checks, the attestation, CodeQL and its own verdict, and only
+that head merges. `tools/test_public_ci_wiring.py` (`TwoTierInvariantTests`) evaluates the workflow's
+own conditions and fails if `CI required` can be green while a routed gate did not run.
 
-The `CI required` job is the stable aggregate status required by branch
-protection. It runs with `always()`, accepts an intentionally skipped irrelevant
-job, and fails when a classifier-applicable job fails, is cancelled, or is
-otherwise incomplete. A failed hygiene/security job or public-export job is never
-hidden by the aggregate. On a Draft it always fails (`DRAFT_LIGHT_CI`).
+**Asking for the full checks on one pull request.** A maintainer adds the `ci-full-matrix` label and
+re-runs all jobs of the newest `CI` run at the head (`gh run rerun <run-id>`); any later push runs
+them too. "Re-run failed jobs" does not change the tier, because it keeps the first attempt's
+classification. The classifier reads the label from GitHub when the run starts, because a re-run
+reuses the first attempt's event. The label is not an approval: the verdict never reads it. Removing
+it makes the next run a quick one. Do not dispatch `CI` on the branch by hand instead: a `CI required`
+check from a run that is not a pull-request run is a `FOREIGN_PRODUCER` finding until the next push.
+
+**Waiting on a pull request.** `Trusted CI verdict` stays `pending` on a quick-green head, so
+`gh pr checks --watch` does not return; watch the run instead (`gh run watch <run-id>`).
+
+**Turning it off.** Delete `NK_CI_TIERS` or set it to anything but `on`: the next push of every pull
+request runs the full checks again.
+
+#### Draft pull requests
+
+A Draft always runs the quick checks, whatever its label or the switch, and the verdict reports
+`DRAFT_LIGHT_CI` for it, so no Draft joins a landing batch. The verdict reads the draft state from
+GitHub, and a draft state that is not `false` counts as a Draft. Marking it Ready starts a run at the
+same head (`ready_for_review`), whose completion judges the head again. `converted_to_draft` starts a
+quick run, and the shared concurrency group cancels a full run still in progress, so a Draft holds no
+substantive runner. `provenance-attestation.yml` lists `ready_for_review` as well.
+
+`CI required` is the aggregate of a full run. It runs with `always()` whenever the tier is not
+`light`, accepts an intentionally skipped irrelevant job, and fails when a classifier-applicable job
+fails, is cancelled, or is otherwise incomplete. A failed hygiene/security job or public-export job is
+never hidden by the aggregate. The `main` ruleset does not name this job: it requires the
+[Trusted CI verdict](#trusted-ci-verdict), which reports `success` only when this job succeeded.
 
 ### ClusterFuzzLite C fuzzing
 
@@ -1379,6 +1407,12 @@ and each token's remaining budget.
 | `RUN_FOR_OTHER_PR`, `AMBIGUOUS_HEAD` | the intended run belongs to another pull request, or another open pull request has the same head |
 | `PR_NOT_OPEN`, `BASE_NOT_DEFAULT` | nothing to judge for a merge into `main` |
 | `DRAFT_LIGHT_CI` | the pull request is a Draft, or its draft state cannot be read: CI ran only the quick checks ([Draft pull requests](#draft-pull-requests)); mark it Ready for review |
+
+`LIGHT_CI_GREEN` is not in that table because it is not a failure. The newest CI run at the head was a
+quick one: `CI required` did not run and `CI quick checks` succeeded. The verdict is then `pending`, and its
+description starts with the code, which is how the landing desk tells a head that is ready for a batch from
+one whose checks are still running. Any other way for `CI required` not to succeed stays `JOB_FAILED`, which
+names `CI quick checks` when that is the job that failed ([Quick and full checks](#quick-and-full-checks)).
 
 Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and when, is decided by
 [`AGENTS.md` section 10](../AGENTS.md#10-pr-and-integration-authorization), as the row above states.

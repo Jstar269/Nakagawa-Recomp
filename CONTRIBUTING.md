@@ -44,6 +44,7 @@ The rules it links to decide whether a change can land, so read them once.
    change may add it. See [docs/DCO_POLICY.md](docs/DCO_POLICY.md).
 9. **Open the pull request.** Fill in the template. Use a draft only while the change is unfinished, and say what is
    left; mark it **Ready for review** as soon as it is finished, with its tests and checks run.
+   A pull request from a fork runs the full checks on every push.
    Ask questions in the [Help](https://github.com/Jstar269/nakagawa-recomp/discussions/categories/help) category
    of GitHub Discussions, or comment on the issue you are working on.
 
@@ -147,6 +148,14 @@ approves the new bytes, or re-admits a file that has not landed yet.
 
 ### What the pull-request checks mean
 
+A pull request from a fork runs every check below on each push. A branch of this repository runs the
+quick checks on each push (the first two rows, the public export audit, `Generated files and repository
+lints` and `CI quick checks`); the Python, native, Windows and Android jobs and `CI required` then show
+as skipped, and `Trusted CI verdict` stays pending with `LIGHT_CI_GREEN`. That is the normal state of a
+healthy pull request, not a failure. The full checks run when a maintainer batches it for landing, or
+earlier when a maintainer adds the `ci-full-matrix` label
+([Quick and full checks](docs/CI.md#quick-and-full-checks)).
+
 | Check | What it verifies | If it fails |
 | --- | --- | --- |
 | Classify change | Which areas your change touches, so only relevant jobs run | Rarely fails; ask a maintainer |
@@ -160,7 +169,9 @@ approves the new bytes, or re-admits a file that has not landed yet.
 | Public export audit and profile-zero fixture | The publication gates and the public-safe export candidate, which must fail closed without the trusted ledger and leave nothing at the requested path; then, when the Python or Windows gates run, the profile-zero fixture build from source, checked against its digests | Read the failing step in the job log. A provenance finding in the publication audit (a missing or unresolved claim) stops the job before the candidate audit, so the step then says it failed for a reason other than the named fail-closed candidate audit; fix that finding first |
 | Main smoke steps of Hygiene and security | The compact import and publication smoke (`tools/import_audit_gate.py`) and the provenance record gap check. They run on pushes to `main`, manual runs and merge-queue groups, and are skipped on pull requests | Run `python tools/import_audit_gate.py` and `python tools/provenance_record_gap.py --check` |
 | Android launcher build | The Android launcher builds into an APK with Gradle and the pinned NDK, and the APK carries its native libraries | Read the failing step in the log; [`docs/ANDROID_DEVELOPMENT.md`](docs/ANDROID_DEVELOPMENT.md) has the local build |
-| CI required | The aggregate of the required jobs above | Fix the failing job it names |
+| Generated files and repository lints | On a quick run: every generated file is current, the documentation lints pass, format specifiers in the portable core are 32-bit clean, and the tools mypy baseline holds | Run `python tools/regen_all.py --check`, `python -m unittest tools.test_lint_docs`, `python tools/format_portability_check.py` or `python tools/mypy_baseline.py`, whichever the log names |
+| CI quick checks | The aggregate of the quick checks | Fix the failing job it names |
+| CI required | The aggregate of the full checks; skipped on a quick run | Fix the failing job it names |
 
 Kilo Code Review is an advisory AI review and never blocks a merge.
 
@@ -223,8 +234,9 @@ Two more routes also need no game:
   [docs/SETUP.md](docs/SETUP.md#showcase-demos-on-windows-wsl-2-and-pspdev)). They need no disc either.
 
 The full Python suite (`python -m unittest discover -s tools -p "test_*.py"`) takes about 77 minutes on this
-machine because it also runs heavy native fixtures. Hosted CI runs it in shards on every Ready pull request
-and push, so run only the modules for the files you changed.
+machine because it also runs heavy native fixtures. Hosted CI runs it in shards before a change lands: on the
+landing batch, and on a pull request that runs the full checks. So run only the modules for the files you
+changed.
 
 What does need your own copy of a game: building or running a title (`nk_manager.ps1 -Action BuildFull` with a
 title manifest, the library sweep, `make verify` and the private-title routes) and matching work in a
@@ -271,7 +283,8 @@ stand in for:
 - **CodeQL, dependency-review and OSV** — the hosted static and dependency security scans.
 - **Trusted provenance attestation** — your head commit checked against the private trusted
   ledger, which only a maintainer can run.
-- **CI required** — the aggregate status that branch protection actually requires.
+- **CI required** and **Trusted CI verdict** — the aggregate of the full checks, and the status the
+  `main` ruleset requires.
 
 `contrib-check` is a `Makefile` target, not a workflow: no hosted job invokes it (the pull-request
 template points contributors at it instead). The evidence a pull request needs is the hosted check
@@ -322,8 +335,9 @@ focused gate for each changed surface first:
 | LLE CPU / domain modes | `tools/test_cpu_lle.py`, `tools/test_domain_mode.py`, then `mingw32-make native-core-tests` |
 
 The whole Python suite
-(`python -m unittest discover -s tools -p "test_*.py"`) is not on this list: hosted CI runs it in shards on
-every Ready pull request and push, so run it locally only when hosted CI cannot
+(`python -m unittest discover -s tools -p "test_*.py"`) is not on this list: hosted CI runs it in shards before a
+change lands (on the landing batch, and on a pull request that runs the full checks), so run it locally only
+when hosted CI cannot
 ([what hosted CI does not run](docs/CI.md#what-hosted-ci-does-not-run)).
 
 To rebuild a game you own, pass its local title manifest:
