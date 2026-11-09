@@ -553,26 +553,28 @@ def validate_package(data: Any) -> dict[str, Any]:
             )
 
         # Validate rng_policy
-        rng = data.get("rng_policy", {"mode": "rescale_probability", "reason": "n/a"}) if not code_hook else {"mode": "rescale_probability", "reason": "n/a"}
-        if not isinstance(rng, dict):
-            fail("rng_policy", f"rng_policy must be an object, got {type(rng).__name__}")
-        unknown_rng_keys = sorted(set(rng.keys()) - RNG_POLICY_KEYS)
-        if unknown_rng_keys:
-            fail("rng_policy", f"Unknown properties forbidden in rng_policy: {unknown_rng_keys}")
-        for req_rng in ("mode", "reason"):
-            if req_rng not in rng:
-                fail("rng_policy", f"Missing required property {req_rng!r} in rng_policy")
-        rng_mode = rng["mode"]
-        if not isinstance(rng_mode, str) or rng_mode not in RNG_POLICY_MODES:
-            fail(
-                "rng_policy.mode",
-                f"Unknown rng_policy mode: {rng_mode!r}; must be one of {sorted(RNG_POLICY_MODES)}",
-            )
-        rng_reason = rng["reason"]
-        if not isinstance(rng_reason, str) or not rng_reason.strip():
-            fail("rng_policy.reason", "rng_policy.reason must be a non-empty string")
-        if rng_reason != rng_reason.strip():
-            fail("rng_policy.reason", "rng_policy.reason must not have leading or trailing whitespace")
+        # A guest_memory_code_hook package carries no rng_policy (its keys are refused above).
+        if not code_hook:
+            rng = data["rng_policy"]
+            if not isinstance(rng, dict):
+                fail("rng_policy", f"rng_policy must be an object, got {type(rng).__name__}")
+            unknown_rng_keys = sorted(set(rng.keys()) - RNG_POLICY_KEYS)
+            if unknown_rng_keys:
+                fail("rng_policy", f"Unknown properties forbidden in rng_policy: {unknown_rng_keys}")
+            for req_rng in ("mode", "reason"):
+                if req_rng not in rng:
+                    fail("rng_policy", f"Missing required property {req_rng!r} in rng_policy")
+            rng_mode = rng["mode"]
+            if not isinstance(rng_mode, str) or rng_mode not in RNG_POLICY_MODES:
+                fail(
+                    "rng_policy.mode",
+                    f"Unknown rng_policy mode: {rng_mode!r}; must be one of {sorted(RNG_POLICY_MODES)}",
+                )
+            rng_reason = rng["reason"]
+            if not isinstance(rng_reason, str) or not rng_reason.strip():
+                fail("rng_policy.reason", "rng_policy.reason must be a non-empty string")
+            if rng_reason != rng_reason.strip():
+                fail("rng_policy.reason", "rng_policy.reason must not have leading or trailing whitespace")
 
         # Validate sites
         sites = data["sites"]

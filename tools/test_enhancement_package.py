@@ -3594,8 +3594,6 @@ class TestClipXWiden(unittest.TestCase):
         with_rng["rng_policy"] = {"mode": "rescale_probability", "reason": "synthetic"}
         with self.assertRaisesRegex(EnhancementPackageError, "not valid for category 'guest_memory_code_hook'"):
             validate_package(with_rng)
-        stray = copy.deepcopy(pkg)
-        stray["sites"][0]["transform"] = "clip_x_widen"
         timing_site = copy.deepcopy(timing)
         timing_site["sites"][0].pop("clip_offsets")
         with self.assertRaises(EnhancementPackageError):

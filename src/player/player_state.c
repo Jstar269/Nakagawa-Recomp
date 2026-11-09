@@ -1463,7 +1463,7 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
-     "With Widescreen, the game draws objects it would skip at the sides. The game's memory changes.",
+     "Ace only, with Widescreen, in games that have a culling build. The game's memory changes.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
     /* Presentation only (contract section 2.2): the window and its recording, never the guest. */
     {"upscale", "Sharper enlarging",

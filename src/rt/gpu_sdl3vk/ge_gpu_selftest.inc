@@ -5940,29 +5940,36 @@ static int wide_frame(int gpu, int flags, uint32_t *vram, uint32_t *canvas) {
 static int wide_clip_x_check(int wing, int cull) {
     const uint32_t base = SR_RAM_BASE + 0x00f00000u;
     const uint32_t offsets[2] = {640u, 448u};
-    for (uint32_t m = 0; m < 2; m++)
-        for (uint32_t e = 0; e < 16u; e++) {
-            const float v = 1.0f + (float)e + 100.0f * (float)m;
-            memcpy(SR_HOST(base + offsets[m] + 4u * e), &v, sizeof v);
-        }
-    ge_wide_set_cull(cull);
-    sr_enhancement_widen_clip_x(base, offsets, 2u);
-    ge_wide_set_cull(0);
-    /* Scaled only with a wing and the cull key on; any other pair leaves the matrices alone. */
-    const float scale = (wing && cull) ? 480.0f / (480.0f + 2.0f * (float)wing) : 1.0f;
+    /* A stock matrix pair: what the title's call leaves each time it rebuilds them. */
+    const int rebuilds = 2;   /* call, call again with no rebuild, then rebuild and call */
     int ok = 1;
-    for (uint32_t m = 0; m < 2; m++)
-        for (uint32_t e = 0; e < 16u; e++) {
-            float got;
-            memcpy(&got, SR_HOST(base + offsets[m] + 4u * e), sizeof got);
-            const float v = 1.0f + (float)e + 100.0f * (float)m;
-            const float want = (e % 4u == 0u) ? v * scale : v;
-            if (got != want) {
-                fprintf(stderr, "gpu coherence selftest [wide-fill]: clip_x_widen wing %d cull %d matrix %u element %u: "
-                                "%g, want %g\n", wing, cull, m, e, (double)got, (double)want);
-                ok = 0;
-            }
+    for (int pass = 0; pass < rebuilds + 1; pass++) {
+        if (pass != 1) {   /* pass 1 is the call that finds the matrices as the last call left them */
+            for (uint32_t m = 0; m < 2; m++)
+                for (uint32_t e = 0; e < 16u; e++) {
+                    const float v = 1.0f + (float)e + 100.0f * (float)m;
+                    memcpy(SR_HOST(base + offsets[m] + 4u * e), &v, sizeof v);
+                }
         }
+        ge_wide_set_cull(cull);
+        sr_enhancement_widen_clip_x(base, offsets, 2u);
+        ge_wide_set_cull(0);
+        /* Scaled once with a wing and the key on, whatever the pass; any other pair leaves them alone. */
+        const float scale = (wing && cull) ? 480.0f / (480.0f + 2.0f * (float)wing) : 1.0f;
+        for (uint32_t m = 0; m < 2; m++)
+            for (uint32_t e = 0; e < 16u; e++) {
+                float got;
+                memcpy(&got, SR_HOST(base + offsets[m] + 4u * e), sizeof got);
+                const float v = 1.0f + (float)e + 100.0f * (float)m;
+                const float want = (e % 4u == 0u) ? v * scale : v;
+                if (got != want) {
+                    fprintf(stderr, "gpu coherence selftest [wide-fill]: clip_x_widen wing %d cull %d pass %d "
+                                    "matrix %u element %u: %g, want %g\n", wing, cull, pass, m, e, (double)got,
+                            (double)want);
+                    ok = 0;
+                }
+            }
+    }
     return ok;
 }
 

@@ -4983,6 +4983,11 @@ static unsigned long s_cull_calls;
 void ge_wide_set_cull(int on) { s_cull_on = on ? 1 : 0; }
 unsigned long ge_wide_cull_calls(void) { return s_cull_calls; }
 
+/* A matrix the hook scaled is remembered with the four x-row words it left, so a call that finds
+ * those words unchanged (the title did not rebuild the matrix since) does not scale it again. */
+#define GE_CULL_SEEN 4096u
+static struct { uint32_t addr; uint32_t row[4]; } s_cull_seen[GE_CULL_SEEN];
+
 void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count) {
     const int wing = s_wide_d;
     if (!s_cull_on || wing <= 0 || base == 0u || !offsets) return;
@@ -4990,15 +4995,28 @@ void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_
     for (uint32_t i = 0; i < count; i++) {
         const uint32_t m = base + offsets[i];
         if (!sr_guest_span_writable_at(m, 64u, "clip_x_widen")) {
-            fprintf(stderr, "clip_x_widen: matrix at 0x%08x is outside guest RAM; left alone\n", m);
+            static int reported;
+            if (!reported) {
+                reported = 1;
+                fprintf(stderr, "clip_x_widen: matrix at 0x%08x is outside guest RAM; left alone "
+                                "(said once)\n", m);
+            }
             continue;
         }
-        for (uint32_t e = 0; e < 16u; e += 4u) {   /* the x row of a column-major matrix */
+        uint32_t row[4];   /* the x output row of a column-major matrix: elements 0, 4, 8 and 12 */
+        for (uint32_t k = 0; k < 4u; k++) memcpy(&row[k], SR_HOST(m + 16u * k), sizeof row[k]);
+        const uint32_t slot = ((m >> 4) * 2654435761u) >> 20;   /* 12 bits */
+        if (s_cull_seen[slot].addr == m && memcmp(s_cull_seen[slot].row, row, sizeof row) == 0)
+            continue;   /* still the words this hook wrote: not rebuilt since, already widened */
+        for (uint32_t k = 0; k < 4u; k++) {
             float v;
-            memcpy(&v, SR_HOST(m + 4u * e), sizeof v);
+            memcpy(&v, &row[k], sizeof v);
             v *= inv;
-            memcpy(SR_HOST(m + 4u * e), &v, sizeof v);
+            memcpy(&row[k], &v, sizeof v);
+            memcpy(SR_HOST(m + 16u * k), &row[k], sizeof row[k]);
         }
+        s_cull_seen[slot].addr = m;
+        memcpy(s_cull_seen[slot].row, row, sizeof row);
         s_cull_calls++;
     }
 }

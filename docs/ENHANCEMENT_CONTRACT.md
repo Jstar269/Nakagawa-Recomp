@@ -138,7 +138,7 @@ Enhancement packages are declared as versioned JSON manifests adhering to `asset
 The declaration schema is kept lean and focused on core metadata and capability requests:
 
 - **Required root properties:** `schema_version` (must be 1), `id` (package identifier), `display_name`, `version` (semver), `category` (one of the 6 recognized categories), `target_title_id` (title ID or `*`), and `capabilities` (non-empty array of symbolic capability names).
-- **Optional root properties:** `min_runtime_version` (semver), `hooks` (array of hook objects with `symbol` and `type` only), and—for declarative frame-rate rescale packages (category `timing_frame_presentation` only)—`game_version` (exact title version string), `executable_sha256` (64-char lowercase hex SHA-256 of the stock guest ELF), `rng_policy` (`mode` and `reason`), and `sites` (non-empty array of symbolic instruction-site transform descriptors).
+- **Optional root properties:** `min_runtime_version` (semver), `hooks` (array of hook objects with `symbol` and `type` only), and—for declarative frame-rate rescale packages (category `timing_frame_presentation`, and the `game_version`, `executable_sha256` and `sites` of a `guest_memory_code_hook` package, section 11.3.6)—`game_version` (exact title version string), `executable_sha256` (64-char lowercase hex SHA-256 of the stock guest ELF), `rng_policy` (`mode` and `reason`), and `sites` (non-empty array of symbolic instruction-site transform descriptors).
 - **Symbolic site descriptors (`sites`):** Each site entry declares `id` (site identifier), `function` (symbolic function name, never a raw hex address or `FUN_`/`sub_`/`loc_`/`func_` stem), `insn_offset` (non-negative 4-byte-aligned byte offset inside the function), `stock_digest` (64-char lowercase hex SHA-256 of the expected little-endian stock MIPS instruction word or words), optional `word_count` (an integer from 1 to 16, default `1`, the number of words `stock_digest` covers; only `1` has a defined rewrite, so a larger value refuses the package), and `transform` (one of the site transforms of section 9.2). A `gate_30hz_alt` site also declares `alternates`, a list of 1 to 4 distinct function symbols; every other transform refuses that field. A `clip_x_widen` site (category `guest_memory_code_hook`, section 11.3.6) also declares `clip_register` (`v0` or `v1`) and `clip_offsets` (1 to 4 distinct 16-byte-aligned byte offsets from 0 to 65536); no other transform takes them, and a `guest_memory_code_hook` package takes no other transform and carries only `game_version`, `executable_sha256` and `sites` of the timing fields.
 - **No speculative payloads:** Unimplemented category payloads (`assets`, `presentation`, `timing`, `camera`, `save_data`) remain forbidden in the schema until their respective runtime loaders land.
 
@@ -1283,14 +1283,26 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   the key and Widescreen has a wing (`D` > 0); with either missing, the stock call runs and nothing is written. The run
   names it (`ACE_MODE: cull on (...)`, the report's `cull`), and reports it unavailable when no matrix was scaled by
   the end of the run: the title's build has no culling package, or Widescreen is off. The package build is chosen by
-  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is not done yet.
-- **What it changes:** for the matrices at `clip_offsets`, 16 floats' worth of guest memory per camera build, only while
-  Widescreen is on; and so which objects the title submits.
-- **VRAM bytes:** differ in the wings and nowhere else, as objects the title used to skip are drawn there.
-- **Readbacks:** unchanged in the centre picture, by the same argument; the wings are host-only (section 10.8).
+  the title's own data (section 5); the launcher picking it for an Ace launch with the part on is a separate change.
+- **What it changes:** for the matrices at `clip_offsets`, 4 floats per listed matrix (its x output row) of guest memory
+  per call, only while Widescreen is on and the key is on; and so which objects the title submits, and any logic the
+  title gates on the same visibility test (animation or AI updates on visible objects, fixed object or display-list
+  budgets), which can change what the guest computes or draw objects in the centre that were skipped before.
+- **VRAM bytes:** differ in the wings and nowhere else, as objects the title used to skip are drawn there, provided
+  the package names matrices that only the title's own visibility test reads (below).
+- **Readbacks:** unchanged in the centre picture on that same condition; the wings are host-only (section 10.8).
 - **Timing:** differs: the title submits more objects, so its own submit time and the GE list grow. The GE timing
-  model, the VBLANK schedule and the media clocks are unchanged. Measured frame times are in the pull request.
+  model, the VBLANK schedule and the media clocks are unchanged. The one private run so far (a single title, the GPU
+  renderer) measured +31% to +34% guest primitives in the wings and between +0.6 and +1.2 ms of mean frame time, with
+  one aspect showing a 30 Hz-class tail on a shared host; that tail has not been re-run, so no frame-cost figure
+  is claimed.
 - **I/O speed:** unchanged.
+- **Package obligations.** The mechanism cannot check these, so the package author shows them for the title: (1) the
+  call at the site leaves every listed matrix describing the camera it was built for, either rewritten at each call or
+  unchanged since the last one (the runtime does not scale a matrix whose x row still holds the words it wrote, so a
+  matrix the call does not rebuild is not scaled twice); (2) the listed offsets are matrices only the title's visibility
+  test reads, so the matrices the GE receives, and with them the centre picture, are untouched; (3) the title's logic
+  that depends on what is visible is not a behaviour change to guard against, or is guarded.
 - **Limits.** It cannot create what the title never modelled, what it places only inside the original view, or what
   it hides by a rule that is not a horizontal clip test (a distance, a side-of-wall or a course-direction rule). The
   wing cap of section 10.8 is unchanged.
