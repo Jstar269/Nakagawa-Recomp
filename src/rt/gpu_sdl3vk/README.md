@@ -174,8 +174,17 @@ UNDEFINED-layout image and published a PPM under a `.png` name. It is gone. In i
   `src/rt/fbcap_policy.{h,c}`; the hle.c integration is `fbcap_arm_for_present`.
 - `sdl3vk_capture_selftest()` (standalone binary via the Makefile `gpu-capture-selftest` target)
   exercises policy, CPU- and GPU-source captures, cancel, scale, and byte-checks the published
-  PPMs; under `SR_VULKAN_VALIDATION=1` it also asserts zero validation-layer errors. Exit 77
-  means SKIP (Vulkan unavailable). `fbcap-selftest` covers the presenter-neutral service itself
+  PPMs; under `SR_VULKAN_VALIDATION=1` it also asserts zero validation-layer errors. It also
+  checks present pacing (below) against a fake display that holds every image. Exit 77
+  means SKIP (Vulkan unavailable).
+- Present pacing: while the scheduler paces the guest to real time (the default), a game-frame
+  present never waits for the presentation engine (`sdl3vk_set_present_nowait`, set by
+  `gui_present`). The present polls its frame slot's fence and acquires with timeout 0; when a
+  FIFO (VSync) display still holds every image it returns `SDL3VK_PRESENT_DISPLAY_BUSY`, the
+  window keeps the frame it has, and the guest's VBLANK clock goes on. These frames count as
+  `present_skips` in the perf summary, and shutdown prints how many there were. Deterministic-clock
+  and turbo runs (`SR_DETERMINISTIC_CLOCK=1`, `SR_NOVBPACE=1`) have no real-time clock to protect,
+  so their presents wait and keep every frame. `fbcap-selftest` covers the presenter-neutral service itself
   without a GPU.
 
 ## Widescreen Fill wings (#1881)

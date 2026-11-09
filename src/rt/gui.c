@@ -1256,6 +1256,14 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
          *    directly from its Vulkan image. GEGPU_PRESENT_SHOWN skips the CPU path;
          *    GEGPU_PRESENT_NOT_RESIDENT (CPU movie frames etc.) falls through to BGRA. */
         accepted = 0;
+        /* While the scheduler paces the guest to real time (the default), a game frame never
+         * waits for the display: a FIFO (VSync) swapchain that still holds every image returns
+         * DISPLAY_BUSY instead of holding back the guest's VBLANK clock. Deterministic-clock and
+         * turbo runs have no real-time clock to protect and keep every frame. */
+        {
+            extern int sched_vbl_paced(void);
+            sdl3vk_set_present_nowait(sched_vbl_paced());
+        }
         /* While the on-screen keyboard is open the frame must pass through the host copy the
          * keyboard is drawn on, so the GPU fast path steps aside (the CPU path below). The
          * decision is taken once: osk_open also gates the guest-VRAM sync before that copy. */
@@ -1277,6 +1285,11 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
         sync_sdl_input();
         if (res == GEGPU_PRESENT_WINDOW_CLOSED) {
             gui_quit_request();
+            goto pace;
+        }
+        if (res == GEGPU_PRESENT_DISPLAY_BUSY) {
+            /* Not shown, not failed: the CPU path must not show it either. */
+            if (sr_perf_enabled) sr_perf_present_skip();
             goto pace;
         }
         if (res == GEGPU_PRESENT_SHOWN) {
@@ -1354,6 +1367,7 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
         present_result = sdl3vk_present_rgba(s_px);
         sync_sdl_input();
         if (present_result == 0) gui_quit_request();
+        if (present_result == SDL3VK_PRESENT_DISPLAY_BUSY && sr_perf_enabled) sr_perf_present_skip();
         accepted = present_result == 1;
         goto pace;
     }

@@ -196,6 +196,9 @@ static const uint32_t k_tnl_vert_spv[] =
  * pipe_create gives it. */
 _Static_assert(sizeof(GeTnlParams) == 247u * 4u, "psp_tnl.vert P_WORDS");
 _Static_assert(sizeof(GeTnlVtx) == 72u, "psp_tnl.vert vertex layout");
+_Static_assert(GEGPU_PRESENT_DISPLAY_BUSY == SDL3VK_PRESENT_DISPLAY_BUSY &&
+               GEGPU_PRESENT_SHOWN == 1 && GEGPU_PRESENT_WINDOW_CLOSED == 0,
+               "gegpu_present passes sdl3vk_present_image_ex results through");
 
 /* ---- captured vertex (must match psp.vert input layout) ------------------------------ */
 /* box: the texture coordinates (u0, v0, u1, v1) a primitive's 1x pixel centres sample, for the
@@ -6419,8 +6422,9 @@ int gegpu_present(uint32_t fbaddr, int fmt, uint32_t stride) {
      * Presenting it again before then keeps its wings. */
     if (pr == GEGPU_PRESENT_SHOWN) ge_wide_shown(fbaddr);
     /* Only SDL's -1 is remapped: it is a present that failed after the target was prepared, so
-     * the target's newest pixels may exist only in its image. SDL's 0 (user close) and 1 (shown)
-     * are GEGPU_PRESENT_WINDOW_CLOSED and GEGPU_PRESENT_SHOWN and pass through unchanged. */
+     * the target's newest pixels may exist only in its image. SDL's 0 (user close), 1 (shown)
+     * and 2 (display busy) are GEGPU_PRESENT_WINDOW_CLOSED, GEGPU_PRESENT_SHOWN and
+     * GEGPU_PRESENT_DISPLAY_BUSY and pass through unchanged. */
     if (pr == -1) return GEGPU_PRESENT_TARGET_FAILED;
     return pr;
 }

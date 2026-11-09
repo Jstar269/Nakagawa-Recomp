@@ -1251,6 +1251,96 @@ static size_t test_rec_diff(const uint8_t *pic, int pw, int x0, int y0, const ui
 }
 #endif
 
+/* ---- present pacing: the guest clock never waits for the display ------------------------
+ * A fake display (the acquire seam) holds every swapchain image: an acquire that may wait blocks
+ * for PACE_TEST_BLOCK_MS, as a full FIFO queue does, and one that may not returns VK_NOT_READY.
+ * Presents paced to the guest's 59.94 Hz VBLANK must keep that cadence: none may wait, each is
+ * reported DISPLAY_BUSY and counted, and presents resume once the display frees. With no-wait
+ * off (deterministic-clock and turbo runs) the present still waits and shows the frame. */
+#define PACE_TEST_BLOCK_MS 50u
+#define PACE_TEST_FRAMES   12
+static int s_pace_test_busy;     /* the fake display holds every image */
+static int s_pace_test_waits;    /* acquires that were allowed to wait while it did */
+
+static VkResult pace_test_acquire(VkDevice dev, VkSwapchainKHR swap, uint64_t timeout,
+                                  VkSemaphore sem, VkFence fence, uint32_t *idx) {
+    if (s_pace_test_busy) {
+        if (timeout == 0) return VK_NOT_READY;
+        s_pace_test_waits++;
+        SDL_Delay(PACE_TEST_BLOCK_MS);
+    }
+    return vkAcquireNextImageKHR(dev, swap, timeout, sem, fence, idx);
+}
+
+static int sdl3vk_present_pacing_selftest(void) {
+    static uint32_t px[PSP_W * PSP_H];
+    const uint64_t period = 16683333u;   /* one guest VBLANK, 1001/60000 s */
+    int ok = 1;
+    sdl3vk_set_present_nowait(1);
+    s_acquire_fn = pace_test_acquire;
+
+    /* The real display may be busy too, so the warm-up only requires no failure. */
+    for (int k = 0; k < PRESENT_FRAMES; k++) {
+        int r = sdl3vk_present_rgba(px);
+        if (r != 1 && r != SDL3VK_PRESENT_DISPLAY_BUSY) {
+            fprintf(stderr, "pacing: warm-up present %d returned %d\n", k, r); ok = 0;
+        }
+    }
+
+    s_pace_test_busy = 1;
+    s_pace_test_waits = 0;
+    const uint64_t busy_before = sdl3vk_present_busy_count();
+    int busy = 0, late = 0;
+    uint64_t worst = 0;
+    const uint64_t t0 = SDL_GetTicksNS();
+    for (int k = 0; k < PACE_TEST_FRAMES; k++) {
+        const uint64_t due = t0 + (uint64_t)k * period;
+        uint64_t now = SDL_GetTicksNS();
+        if (now < due) SDL_DelayPrecise(due - now);
+        if (sdl3vk_present_rgba(px) == SDL3VK_PRESENT_DISPLAY_BUSY) busy++;
+        now = SDL_GetTicksNS();
+        /* The guest's next VBLANK is due one period after this one; past it, it is late. */
+        if (now > due + period) late++;
+        if (now > due && now - due > worst) worst = now - due;
+    }
+    const uint64_t counted = sdl3vk_present_busy_count() - busy_before;
+    if (s_pace_test_waits != 0 || late != 0 || busy != PACE_TEST_FRAMES ||
+        counted != (uint64_t)PACE_TEST_FRAMES) {
+        fprintf(stderr, "pacing: with the display holding every image, %d of %d present(s) waited "
+                        "for it, %d guest VBLANK(s) were late (worst %.1f ms after its slot), %d "
+                        "present(s) reported DISPLAY_BUSY and %llu were counted (want 0, 0, %d, "
+                        "%d)\n", s_pace_test_waits, PACE_TEST_FRAMES, late, (double)worst / 1e6,
+                busy, (unsigned long long)counted, PACE_TEST_FRAMES, PACE_TEST_FRAMES);
+        ok = 0;
+    }
+
+    /* The display frees: presents are shown again (the real display may still need a VBLANK). */
+    s_pace_test_busy = 0;
+    int shown = 0;
+    for (int k = 0; k < 30 && !shown; k++) {
+        shown = sdl3vk_present_rgba(px) == 1;
+        if (!shown) SDL_DelayPrecise(period);
+    }
+    if (!shown) { fprintf(stderr, "pacing: presents did not resume once the display freed\n"); ok = 0; }
+
+    /* No-wait off: the present waits for the display and shows the frame. */
+    sdl3vk_set_present_nowait(0);
+    s_pace_test_busy = 1;
+    s_pace_test_waits = 0;
+    int r = sdl3vk_present_rgba(px);
+    if (r != 1 || s_pace_test_waits != 1) {
+        fprintf(stderr, "pacing: with no-wait off the present returned %d after %d wait(s) "
+                        "(want 1 after 1)\n", r, s_pace_test_waits);
+        ok = 0;
+    }
+    s_pace_test_busy = 0;
+    s_acquire_fn = NULL;
+    if (ok) printf("gpu capture selftest: present pacing OK (%d presents, none waited for a busy "
+                   "display; worst %.1f ms after its VBLANK)\n", PACE_TEST_FRAMES,
+                   (double)worst / 1e6);
+    return ok;
+}
+
 static int sdl3vk_capture_selftest_body(void) {
     int ok = 1;
 
@@ -2306,6 +2396,8 @@ static int sdl3vk_capture_selftest_body(void) {
         }
         s_quit_requested = 0;
     }
+
+    if (!sdl3vk_present_pacing_selftest()) ok = 0;
 
     int errors = sdl3vk_validation_error_count();
     if (errors != 0) {

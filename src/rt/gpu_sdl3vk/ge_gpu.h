@@ -47,7 +47,11 @@ void gegpu_flush(const char *reason);
  * GEGPU_PRESENT_TARGET_FAILED: a GPU-valid target exists, but preparing or presenting it failed,
  *   so its newest pixels may exist only in the GPU image. The caller must make guest VRAM current
  *   with gegpu_sync_guest_fb() before converting it, or decline the frame.
- * SHOWN and WINDOW_CLOSED keep the values sdl3vk_present_image_ex() returns for them. */
+ * GEGPU_PRESENT_DISPLAY_BUSY: the display still holds every image and the present did not wait
+ *   (SDL3VK_PRESENT_DISPLAY_BUSY); the frame is not shown and nothing failed.
+ * SHOWN, WINDOW_CLOSED and DISPLAY_BUSY keep the values sdl3vk_present_image_ex() returns for
+ * them. */
+#define GEGPU_PRESENT_DISPLAY_BUSY 2
 #define GEGPU_PRESENT_SHOWN 1
 #define GEGPU_PRESENT_WINDOW_CLOSED 0
 #define GEGPU_PRESENT_NOT_RESIDENT (-1)
