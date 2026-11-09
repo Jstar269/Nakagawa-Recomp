@@ -335,7 +335,7 @@ retail inputs, or hardware.
 ### Project website (GitHub Pages)
 
 `.github/workflows/pages.yml` publishes the project website,
-<https://jstar269.github.io/nakagawa-recomp/>, from [`docs/index.html`](index.html). The
+<https://jstar269.github.io/Nakagawa-Recomp/>, from [`docs/index.html`](index.html). The
 repository's Pages source is "GitHub Actions". The page is one static file with inline CSS and
 two small inline scripts (the theme picker, remembered in the visitor's own browser, and the phone
 menu), and no web fonts, external scripts or third-party requests. It shows two launcher screenshots,

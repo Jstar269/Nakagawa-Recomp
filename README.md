@@ -10,7 +10,7 @@
 
 **Play PSP games you own as native Windows programs.**
 
-**[Download](https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.2) · [Website](https://jstar269.github.io/nakagawa-recomp/) · [Compatibility](docs/COMPATIBILITY.md) · [Discussions](https://github.com/Jstar269/nakagawa-recomp/discussions)**
+**[Download](https://github.com/Jstar269/nakagawa-recomp/releases/tag/v0.0.2) · [Website](https://jstar269.github.io/Nakagawa-Recomp/) · [Compatibility](docs/COMPATIBILITY.md) · [Discussions](https://github.com/Jstar269/nakagawa-recomp/discussions)**
 
 [![CI](https://github.com/Jstar269/nakagawa-recomp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Jstar269/nakagawa-recomp/actions/workflows/ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
@@ -22,9 +22,9 @@ Nakagawa Recomp is a static recompiler for the PlayStation Portable. It translat
 you play, and compiles it into a Windows program. You supply the game from your own disc. The project is early: one
 game is playable, one plays a stage, a dozen more start and get part of the way in, and the rest are untested.
 
-[![A rally in Hot Shots Tennis: Get a Grip, running natively in Nakagawa Recomp; play the clip](docs/media/hst-rally-poster.png)](https://jstar269.github.io/nakagawa-recomp/media/hst-rally.mp4)
+[![A rally in Hot Shots Tennis: Get a Grip, running natively in Nakagawa Recomp; play the clip](docs/media/hst-rally-poster.png)](https://jstar269.github.io/Nakagawa-Recomp/media/hst-rally.mp4)
 
-[Watch a 28-second rally with sound](https://jstar269.github.io/nakagawa-recomp/media/hst-rally.mp4) (MP4, 4.5 MB).
+[Watch a 28-second rally with sound](https://jstar269.github.io/Nakagawa-Recomp/media/hst-rally.mp4) (MP4, 4.5 MB).
 
 <div align="center"><sub>Hot Shots Tennis: Get a Grip belongs to its publisher. This repository contains no game data: you need your own copy of the game, and nothing here downloads one.</sub></div>
 

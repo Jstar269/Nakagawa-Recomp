@@ -74,7 +74,7 @@ STATES = (
 STORAGE_KEY = "nk-theme"
 MIN_TARGET_PX = 44
 # The site's own address. An absolute link under it (the share-card image, the canonical URL) names a published file.
-SITE_URL = "https://jstar269.github.io/nakagawa-recomp/"
+SITE_URL = "https://jstar269.github.io/Nakagawa-Recomp/"
 # The deep-blue top bar stays deep blue in both themes; its luminance must stay at or under DARK_MAX_LUMINANCE.
 BAR = "body > header.bar"
 # Filled blocks that deliberately keep a blue fill in both themes: the top bar, the blue buttons, the picked theme
