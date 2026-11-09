@@ -82,7 +82,7 @@ CENSUS_GAP_WORDS: tuple[int, ...] = (
 )
 
 
-# The probe words of PSP-VFPU-WIDEDOT-001, by the name check_vfpu_wide_dot_measured() looks up.
+# The probe words of the unrecorded vfpu-wide-dot-matrix read, by the name check_vfpu_wide_dot_measured() looks up.
 WIDE_DOT_WORDS: tuple[tuple[str, int], ...] = (
     ("vdot-p", 0x64810088), ("vdot-q", 0x64818088), ("vhdp-q", 0x66018088),
     ("vcrsp-t", 0xF2818008), ("vqmul-q", 0xF2818088), ("vtfm-q", 0xF1808488),
@@ -176,7 +176,7 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     cmp_range = (cmp_first, len(cases) - cmp_first)
 
     # Dot, cross, quaternion and matrix forms (issue #326, probe case vfpu-wide-dot-matrix,
-    # PSP-VFPU-WIDEDOT-001, PSP-3000, 2026-11-08): check_vfpu_wide_dot_measured() finds each
+    # unrecorded PSP read, PSP-3000, 2026-11-08): check_vfpu_wide_dot_measured() finds each
     # word by name and runs the console's cells through both lanes. The registers are the
     # probe's: vectors at columns 0 and 1 of matrix 0, the matrix operand at matrix 1, the
     # destination at matrix 2.

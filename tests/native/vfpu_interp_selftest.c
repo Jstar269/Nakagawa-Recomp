@@ -2689,13 +2689,14 @@ static int check_vf_nan_rule(void) {
     return bad;
 }
 
-/* PSP-3000 reads of the dot, cross, quaternion and matrix forms (PSP-VFPU-WIDEDOT-001,
+/* PSP-3000 reads of the dot, cross, quaternion and matrix forms (unrecorded PSP read,
  * 2026-11-08, issue #326, probe case vfpu-wide-dot-matrix: vdot.p/.q, vhdp.q, vcrsp.t, vqmul.q,
  * vtfm4.q, vhtfm4.q, vmmul.q at identity prefixes, plus vmmov, vrot and the constant fills).
  * wd_stream holds cells of that run, each the form index, the source words, then the result
  * words, the console's own values (synthetic operands, no game data). Selected: the cells
  * whose result is a NaN, an infinity or a negative zero first, then an even spread of the rest;
- * the run had 549 such cells and sr_vfpu_dot_bits returned all of them. Every cell runs
+ * the run had 521 sum-of-products cells (549 with vmmov, vrot and the constant fills) and
+ * sr_vfpu_dot_bits returned every sum. Every cell runs
  * through the AOT body (via the overlap-diff header) and sr_vfpu_interp. Image words are
  * m*16 + c*4 + r: vectors at the probe word's own registers, a matrix operand at matrix 1
  * (vmmul: vt at matrix 0 and vs at matrix 1), the destination at matrix 2. */
@@ -3056,7 +3057,7 @@ static int check_vfpu_wide_dot_quoted_cells(void) {
         {{0x3f800000u, 0xccbebc20u, 0x3f800000u, 0x4cbebc20u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
          0x00000000u, "the same terms in another order = 0"},
         /* Carry-out into the next binade rounds to nearest even (probe case vfpu-round-sep,
-         * unrecorded PSP read, PSP-3000, 2026-11-09, b = (1, 1, 1, 1) with the last lane of a
+         * also an unrecorded PSP read, PSP-3000, 2026-11-09, b = (1, 1, 1, 1) with the last lane of a
          * zero unless listed). */
         {{0x3f800003u, 0x3f800000u, 0x00000000u, 0x00000000u}, {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
          0x40000002u, "(1 + 3 ulp) + 1 rounds to nearest even at the carry-out"},

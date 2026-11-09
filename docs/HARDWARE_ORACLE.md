@@ -89,8 +89,8 @@ proposals. Each claim covers only the exact fixture named:
   route and date. Bulk random differential fuzz (Loop A) remains unbuilt, and
   the PPSSPP-derived-table warning stands for every unmeasured encoding. The
   NaN words and flushed-sum zero signs of the vdot, vhdp, vmmul.t and vtfm3.t
-  cells are superseded by PSP-VFPU-FUNNEL-001 and PSP-VFPU-WIDEDOT-001, which
-  returned 0x7f800001 and +0 for them.
+  cells are superseded by PSP-VFPU-FUNNEL-001 and an unrecorded read of probe
+  case `vfpu-wide-dot-matrix`, which returned 0x7f800001 and +0 for them.
 - **Out-of-domain transcendental arguments** (issue #69): `HARDWARE_MEASURED`
   for these 14 exact raw words on the authorized PSP-3000-series / 6.61 /
   ARK-5.1.0 route (2026-09-30). Fixture: `fixtures/vfpu_oracle/vfpu_probe.c`

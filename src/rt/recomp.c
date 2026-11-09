@@ -3188,10 +3188,11 @@ void sr_end_impl(CpuState *s, uint32_t mem_addr, int mem_size) {
  * rounded (to nearest, ties to even) as it is normalised. A denormal operand counts as
  * zero, a zero or underflowing sum is +0, and a NaN operand, Inf * 0 or Inf - Inf gives the
  * canonical 0x7f800001. So 2^24 - 1 sums to 2^24 - 2, and 1 - 2^-24 to 1 - 2^-23.
- * PSP-VFPU-WIDEDOT-001 (PSP-3000, 2026-11-08, issue #326) returned the same words for every
- * sum-of-products cell it ran: vdot.p, vdot.q, vhdp.q, vcrsp.t, vqmul.q, vtfm4.q, vhtfm4.q
+ * Only two FUNNEL-001 cells separate two guard bits from one, so the width rests on them.
+ * An unrecorded PSP read (probe case vfpu-wide-dot-matrix, PSP-3000, 2026-11-08, issue #326)
+ * returned the same words for every sum-of-products cell it ran: vdot.p, vdot.q, vhdp.q, vcrsp.t, vqmul.q, vtfm4.q, vhtfm4.q
  * and vmmul.q (identity prefixes, finite and special operands, 521 cells), and so did the
- * carry-out cells of probe case vfpu-round-sep (unrecorded PSP read, 2026-11-09: vdot.q
+ * carry-out cells of probe case vfpu-round-sep (also unrecorded, 2026-11-09: vdot.q
  * (1 + 3 ulp) + 1 gives 2 + 2 ulp, rounded to nearest even, where truncation gives 2 + 1 ulp).
  * The other widths of those forms and every non-identity prefix are not measured. */
 uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n) {

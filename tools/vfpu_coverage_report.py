@@ -668,7 +668,7 @@ def _hardware_evidence(record: Record, vector_size: int | None) -> list[dict[str
                 "kind": "semantic",
                 "coverage": (
                     "measured vdot/vhdp cells; its NaN words and the zero sign of a flushed sum "
-                    "are superseded by PSP-VFPU-WIDEDOT-001 (PSP-3000, 2026-11-08)"
+                    "are superseded by the unrecorded vfpu-wide-dot-matrix read (PSP-3000, 2026-11-08)"
                 ),
             }
         )
@@ -689,7 +689,7 @@ def _hardware_evidence(record: Record, vector_size: int | None) -> list[dict[str
             }
         )
     # The issue #40 vmmul.t / vtfm3.t NaN cells (sNaN quieted to 0x7FC00001, inf*0 to 0x7FC00000) are
-    # superseded: PSP-VFPU-WIDEDOT-001 and PSP-VFPU-FUNNEL-001 returned 0x7F800001 for every NaN
+    # superseded: the unrecorded vfpu-wide-dot-matrix read and PSP-VFPU-FUNNEL-001 returned 0x7F800001 for every NaN
     # operand and 0 * Inf. Those rows no longer claim hardware evidence from them.
     immediate_vfpu = op == 0x37 and ((word >> 24) & 3) == 3
     uses_vector_addressing = op in VECTOR_SIZE_OPS or op == 0x12 or immediate_vfpu

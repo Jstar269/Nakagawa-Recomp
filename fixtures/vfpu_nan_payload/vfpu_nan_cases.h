@@ -28,9 +28,9 @@
  *   - default invalid NaN: 0x7FC00000 (invalid inf*0 product);
  *   - FTZ: subnormal products are flushed to signed zero;
  *   - zero sign and inf/nan propagation preserved across all vectors.
- * Superseded for the sum-of-products forms: PSP-VFPU-FUNNEL-001 (vfad, vavg) and
- * PSP-VFPU-WIDEDOT-001 (vdot, vhdp, vcrsp, vqmul, vtfm, vhtfm, vmmul; PSP-3000, 2026-11-08,
- * issue #326) returned 0x7F800001 for a NaN operand and for 0 * Inf, and +0 for a flushed
+ * Superseded for the sum-of-products forms: PSP-VFPU-FUNNEL-001 (vfad, vavg) and an
+ * unrecorded read of probe case vfpu-wide-dot-matrix (vdot, vhdp, vcrsp, vqmul, vtfm, vhtfm,
+ * vmmul; PSP-3000, 2026-11-08, issue #326) returned 0x7F800001 for a NaN operand and for 0 * Inf, and +0 for a flushed
  * sum, so the NaN words and the signed zero above do not describe those forms. The runtime
  * follows the newer reads (sr_vfpu_dot_bits in src/rt/recomp.c).
  *

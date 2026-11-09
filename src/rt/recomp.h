@@ -1127,7 +1127,7 @@ void sr_vread(float *r, const CpuState *s, const uint8_t *idx, int n, uint32_t p
 void sr_vwrite(CpuState *s, const uint8_t *idx, float *d, int n, uint32_t dprefix);
 
 /* The VFPU sum-of-products adder (sr_vfpu_dot_bits in recomp.c, PSP-VFPU-FUNNEL-001 and
- * PSP-VFPU-WIDEDOT-001): sum(a[i] * b[i]) for i < n <= 4, with the products aligned and
+ * the unrecorded vfpu-wide-dot-matrix read): sum(a[i] * b[i]) for i < n <= 4, with the products aligned and
  * summed in integers, not as a chain of float adds. sr_vfpu_interp and the generated code
  * call it for vdot, vhdp, vcrsp, vqmul, vmmul, vtfm and vhtfm; vfad and vavg run on it too.
  * The caller negates an operand for a subtracted term. It is out of line: inlined, a
