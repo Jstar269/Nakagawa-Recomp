@@ -70,6 +70,9 @@ CODENAMES = {
 }
 FUTURE_API = 10000
 
+#: Marks a pattern from a nested `extern "C++" { ... };` block (only platform blocks have them).
+EXTERN_CXX_TAG = "<extern-c++>"
+
 PLATFORM_TAGS = frozenset({"platform-only", "apex", "systemapi", "llndk", "future"})
 PLATFORM_BLOCK_SUFFIXES = ("_PRIVATE", "_PLATFORM")
 
@@ -132,10 +135,26 @@ def parse_symbol_file(text: str, source: str = "<symbol file>") -> list[Block]:
     blocks: list[Block] = []
     current: Block | None = None
     scope: str | None = None
+    in_extern = False
     for number, raw in enumerate(text.splitlines(), start=1):
         where = f"{source}:{number}"
         code, tags = _split_comment(raw)
         if not code:
+            continue
+        if in_extern:
+            # Mangled-name patterns of a nested extern "C++" { ... }; block.
+            if code == "};":
+                in_extern = False
+            elif code.endswith(";"):
+                assert current is not None
+                current.symbols.append(Symbol(name=code[:-1].strip(), tags=(*tags, EXTERN_CXX_TAG)))
+            else:
+                raise SymbolFileError(f"{where}: expected a pattern ending in ';', found {code!r}")
+            continue
+        if current is not None and code == 'extern "C++" {':
+            if scope != "global":
+                raise SymbolFileError(f"{where}: extern \"C++\" is outside a global scope")
+            in_extern = True
             continue
         if current is None:
             match = _BLOCK_OPEN.match(code)
@@ -165,6 +184,8 @@ def parse_symbol_file(text: str, source: str = "<symbol file>") -> list[Block]:
         current.symbols.append(Symbol(name=match.group(1), tags=tags))
     if current is not None:
         raise SymbolFileError(f"{source}: block {current.name!r} is not closed")
+    if in_extern:
+        raise SymbolFileError(f"{source}: an extern \"C++\" block is not closed")
     names = [block.name for block in blocks]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -196,8 +217,13 @@ def _is_platform(tags: tuple[str, ...]) -> bool:
     return any(tag in PLATFORM_TAGS for tag in tags)
 
 
-def select(blocks: list[Block], api: int, arch: str) -> list[StubVersion]:
-    """The versions and symbols a stub for `api` on `arch` exports, in file order."""
+def select(blocks: list[Block], api: int, arch: str, unversioned: bool = False) -> list[StubVersion]:
+    """The versions and symbols a stub for `api` on `arch` exports, in file order.
+
+    With *unversioned*, the same symbols are exported without any version: the NDK ships
+    liblog, libandroid and libvulkan that way (their platform build marks them unversioned
+    for every released API level), although their symbol files name versions.
+    """
     if arch not in ARCHES:
         raise SymbolFileError(f"unknown architecture {arch!r}; expected one of {', '.join(ARCHES)}")
     versions: list[StubVersion] = []
@@ -213,7 +239,7 @@ def select(blocks: list[Block], api: int, arch: str) -> list[StubVersion]:
             continue
         block_versioned = _tag_value(block.tags, "versioned")
         kept: list[StubSymbol] = []
-        unversioned: list[StubSymbol] = []
+        bare: list[StubSymbol] = []
         for symbol in block.symbols:
             if _is_platform(symbol.tags) or not _arch_allows(symbol.tags, arch):
                 continue
@@ -222,6 +248,11 @@ def select(blocks: list[Block], api: int, arch: str) -> list[StubVersion]:
                 introduced = block_introduced
             if introduced is not None and introduced > api:
                 continue
+            if EXTERN_CXX_TAG in symbol.tags:
+                raise SymbolFileError(
+                    f"{where}: the extern \"C++\" pattern {symbol.name!r} would be exported, "
+                    "and a C stub cannot define it"
+                )
             if not _IDENT.match(symbol.name):
                 raise SymbolFileError(f"{where}: {symbol.name!r} cannot be a C identifier in a stub")
             if symbol.name in seen:
@@ -231,14 +262,16 @@ def select(blocks: list[Block], api: int, arch: str) -> list[StubVersion]:
             seen[symbol.name] = block.name
             stub = StubSymbol(symbol.name, "var" in symbol.tags, "weak" in symbol.tags)
             versioned = _tag_value(symbol.tags, "versioned") or block_versioned
-            if versioned is not None and api < parse_api(versioned, f"{where}, symbol {symbol.name}"):
-                unversioned.append(stub)
+            if unversioned or (
+                versioned is not None and api < parse_api(versioned, f"{where}, symbol {symbol.name}")
+            ):
+                bare.append(stub)
             else:
                 kept.append(stub)
-        if kept or not unversioned:
+        if kept or not bare:
             versions.append(StubVersion(block.name, block.base, tuple(kept)))
-        if unversioned:
-            versions.append(StubVersion(None, None, tuple(unversioned)))
+        if bare:
+            versions.append(StubVersion(None, None, tuple(bare)))
     return versions
 
 
@@ -284,11 +317,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--library", required=True, help="the stub's name, such as libc.so")
     parser.add_argument("--out-c", required=True, type=Path)
     parser.add_argument("--out-version-script", required=True, type=Path)
+    parser.add_argument("--unversioned", action="store_true",
+                        help="export the symbols without versions (liblog, libandroid, libvulkan)")
     args = parser.parse_args(argv)
     try:
         api = parse_api(args.api, "--api")
         text = args.symbol_file.read_text(encoding="utf-8")
-        versions = select(parse_symbol_file(text, str(args.symbol_file)), api, args.arch)
+        versions = select(parse_symbol_file(text, str(args.symbol_file)), api, args.arch,
+                          unversioned=args.unversioned)
     except (OSError, SymbolFileError) as error:
         print(f"android_stubgen: {error}", file=sys.stderr)
         return 1

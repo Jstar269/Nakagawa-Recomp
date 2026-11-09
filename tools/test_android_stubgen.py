@@ -127,6 +127,35 @@ class SelectTests(unittest.TestCase):
         script = stubgen.render_version_script(stubgen.select(blocks, 28, "arm64"))
         self.assertNotIn("y_sdk", script)
 
+    def test_unversioned_exports_the_same_symbols_without_versions(self) -> None:
+        versions = stubgen.select(self.blocks, 29, "arm64", unversioned=True)
+        self.assertEqual({version.name for version in versions}, {None})
+        self.assertEqual(
+            [symbol.name for version in versions for symbol in version.symbols],
+            ["x_open", "x_errno", "x_hook", "x_both", "x_q", "x_late"],
+        )
+        self.assertEqual(stubgen.render_version_script(versions), "")
+
+    def test_extern_cxx_patterns_in_a_platform_block_are_skipped(self) -> None:
+        text = (
+            "LIBZ {\n  global:\n    z_open;\n};\n"
+            "LIBZ_PLATFORM { # platform-only\n  global:\n    z_internal;\n"
+            '    extern "C++" {\n        Z_register*;\n        Z_other*;\n    };\n} LIBZ;\n'
+        )
+        self.assertEqual(
+            _names(stubgen.select(stubgen.parse_symbol_file(text), 29, "arm64")), {"LIBZ": ["z_open"]}
+        )
+
+    def test_an_exported_extern_cxx_pattern_is_refused(self) -> None:
+        text = 'LIBZ {\n  global:\n    extern "C++" {\n        Z_register*;\n    };\n};\n'
+        with self.assertRaisesRegex(stubgen.SymbolFileError, "a C stub cannot define it"):
+            stubgen.select(stubgen.parse_symbol_file(text), 29, "arm64")
+
+    def test_an_unclosed_extern_cxx_block_is_refused(self) -> None:
+        text = 'LIBZ {\n  global:\n    extern "C++" {\n        Z_register*;\n'
+        with self.assertRaisesRegex(stubgen.SymbolFileError, "block 'LIBZ' is not closed"):
+            stubgen.parse_symbol_file(text)
+
     def test_var_and_weak_shape_the_c_stub(self) -> None:
         text = stubgen.render_stub_c(stubgen.select(self.blocks, 29, "arm64"), "libx.so")
         self.assertIn("void x_open(void) {}", text)
