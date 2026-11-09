@@ -148,6 +148,7 @@ int main(int argc, char **argv) {
                          : strcmp(argv[i], "--case") == 0  ? "SR_GPU_COHERENCE_CASE"
                          : strcmp(argv[i], "--readback-full") == 0 ? "SR_GPU_READBACK_FULL"
                          : strcmp(argv[i], "--tex-scale") == 0 ? "SR_TEX_SCALE"
+                         : strcmp(argv[i], "--glyphs") == 0 ? "SR_GLYPHS"
                          : strcmp(argv[i], "--gpu-timestamps") == 0 ? "SR_GPU_TIMESTAMPS"
                          : strcmp(argv[i], "--twin") == 0 ? "SR_GPU_TWIN_COLOR"
                          : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF" : NULL;
@@ -181,6 +182,17 @@ int main(int argc, char **argv) {
 #ifdef SR_GPU_TEXSCALE_SELFTEST
     /* Texture scaling and the smart 2D filter take effect only in Ace Mode (tex_scale.h). The
      * factor defaults to 2; `--tex-scale N` picks another. */
+#ifdef SR_GPU_GLYPH_SELFTEST
+    /* Sharp game text (glyph_recon.h) alone: Ace Mode with no texture scaling, and SR_GLYPHS on
+     * unless `--glyphs VALUE` says otherwise. `--authentic` leaves Ace Mode off. */
+    if ((!authentic && !ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off", NULL)) ||
+        !set_env("SR_TEX_SCALE", "off") || !set_env("SR_SMART_2D", "off") ||
+        (!authentic && !getenv("SR_GLYPHS") && !set_env("SR_GLYPHS", "on"))) {
+        fprintf(stderr, "gpu glyph selftest: FAIL the Ace line or the settings were refused\n");
+        free(arena);
+        return 1;
+    }
+#else
     if (repl_only) {
         /* SR_TEX_REPLACE alone (the documented default use): no texture scaling, no smart 2D, and
          * the pack written and named before the renderer reads it. */
@@ -197,6 +209,7 @@ int main(int argc, char **argv) {
         free(arena);
         return 1;
     }
+#endif
 #endif
 
     if (!sdl3vk_init("Nakagawa GPU coherence selftest") || !gegpu_init()) {
@@ -217,6 +230,8 @@ int main(int argc, char **argv) {
     }
 #elif defined(SR_GPU_SNAPSHOT_SYNC_SELFTEST)
     ok = gegpu_snapshot_sync_selftest();
+#elif defined(SR_GPU_GLYPH_SELFTEST)
+    ok = authentic ? gegpu_glyph_authentic_selftest() : gegpu_glyph_selftest();
 #elif defined(SR_GPU_TEXSCALE_SELFTEST)
     ok = repl_only ? gegpu_texrepl_only_selftest() : gegpu_texscale_selftest();
 #else
@@ -252,6 +267,8 @@ int main(int argc, char **argv) {
     puts("gpu ace selftest: OK");
 #elif defined(SR_GPU_SNAPSHOT_SYNC_SELFTEST)
     puts("gpu snapshot sync selftest: OK");
+#elif defined(SR_GPU_GLYPH_SELFTEST)
+    puts("gpu glyph selftest: OK");
 #elif defined(SR_GPU_TEXSCALE_SELFTEST)
     puts("gpu texscale selftest: OK");
 #else

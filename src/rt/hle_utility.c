@@ -1083,7 +1083,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     }
     memset(s_fpls, 0, sizeof(s_fpls));
     for (unsigned i = 0; i < VPL_MAX; i++) vpl_release(&s_vpls[i]);
-    memset(s_sync, 0, sizeof(s_sync));
+    hle_sync_reset();
     memset(s_mbx, 0, sizeof(s_mbx));
     mutex_reset_all();
 
@@ -1122,6 +1122,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     memset(s_atrac_slot_codec, 0, sizeof(s_atrac_slot_codec));
     hle_audio_guest_reset();
     hle_sas_guest_reset();
+    hle_videocodec_guest_reset();     /* sceVideocodec, sceAudiocodec and the ME RAM model */
 
     osk_abandon_request();
     s_osk_status = OSK_NONE;

@@ -77,6 +77,16 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   uploads per frame, which can make a busy game drop frames. The scaler builds no lookup table, so it adds no fixed
   memory cost. The rules are in
   [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1010-texture-scaling-and-the-smart-2d-filter).
+- **Sharp game text (Ace Mode, development only).** It is reachable only through the `SR_GLYPHS` environment
+  variable (`on`), has no setting in the player, and is not an admitted Enhanced item, because it
+  changes the frames the game can read back
+  ([section 11.3.5](ENHANCEMENT_CONTRACT.md#1135-sharp-game-text-not-admitted)). At a render scale of 2 to 4, a
+  small sprite that maps one texel to one pixel over a page of anti-aliased text is redrawn from a version of just
+  that rectangle rebuilt at the render scale, checked against the game's own bytes. A page with a rebuilt rectangle
+  costs the page's GPU memory times the render scale squared (a 256x256 page at 4x is 4 MB), taken from the
+  same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
+  frame, on the game's thread. Text drawn as triangles, or from a page in VRAM, is drawn as the game made it. The
+  rules are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1013-sharp-game-text).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
@@ -84,9 +94,9 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
 
 ## Install, update and uninstall (Windows)
 
-Nakagawa is a portable ZIP ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)); there is no
-installer. The unpacked folder is the program and holds nothing you create, so installing and removing it
-never touches your games or saves.
+Nakagawa is a portable ZIP ([#324](https://github.com/Jstar269/nakagawa-recomp/issues/324)), and a release can also
+carry a per-user installer, [`Setup.exe`](#windows-installer-setupexe). The unpacked folder, or the installed
+program, holds nothing you create, so installing and removing it never touches your games or saves.
 
 **Install.** Unpack `nakagawa-recomp-<version>-windows-x64.zip` into a folder of your choice (a read-only folder
 works) and start `bin\nakagawa_player.exe`. For a Start-menu or Desktop entry, right-click the executable and
@@ -95,20 +105,29 @@ choose **Pin to Start**, or send a shortcut to the Desktop. From a source checko
 both shortcuts with the player's taskbar identity, so the launcher and the games it starts share one taskbar
 button. The ZIP itself writes no shortcut.
 
-**Add to Steam** ([#2152](https://github.com/Jstar269/nakagawa-recomp/issues/2152)). The code that adds Nakagawa to a
-Steam library as a non-Steam game is in `src/core/nk_steam_shortcuts.c`; the player has no button that calls it,
-so add the executable in Steam by hand. It works on your PC only and makes no network call or
-download. It edits the binary `shortcuts.vdf` in the `userdata\<account>\config` folder of the Steam account you pick
-(Steam's folder comes from the current user's own registry setting on Windows). It adds one entry with the app name,
-the executable and its start-in folder, and no launch options, and it only adds: entries it did not write are copied
-byte for byte, an entry for the same executable is reported and nothing is written, and a file it cannot read is left
-untouched. Before it writes, it copies the file to `shortcuts.vdf.nakagawa-backup-<date>-<time>` and reads the copy
-back; if that fails it writes nothing. It writes a temporary file and renames it over the original. Steam rewrites
-this file when it exits, so while Steam runs nothing is written: close Steam first (Nakagawa never closes it). In
-portable mode the entry points at the executable's current folder, so moving the folder breaks the shortcut.
-Other platforms are unsupported and say so.
+**Add to Steam** ([#2152](https://github.com/Jstar269/nakagawa-recomp/issues/2152)). To start a game from Steam
+(for Steam Input, Big Picture or a handheld), exit Steam, open the game's page in the player, and choose
+**Add to Steam**. Choose the Steam account if more than one has signed in on this PC, then **Add to Steam** again.
+The shortcut starts `nakagawa_player.exe --launch-title=<disc ID>` from the player's own folder, which starts that
+game without the launcher window and waits for it to end, so Steam shows it as running. When two images in your
+library share a disc ID (a retail disc and its translation), the value also names the image, `<disc ID>:<SHA-1>`; a
+player started with `--user-data-root` passes that folder on too. Start Steam afterwards to find the game in your
+library; no restart is needed.
 
-**Update.** Check for updates unpacks the new version into a new folder next to the running one and leaves the old
+It works on your PC only and makes no network call or download. Steam's folder comes from the current user's own
+registry setting (Windows only; on other systems the dialog says it is unsupported and writes nothing), and the
+account names come from Steam's own `config\loginusers.vdf`. It edits the binary `shortcuts.vdf` in that
+account's `userdata\<account>\config` folder. Before it writes, it copies the file to
+`shortcuts.vdf.nakagawa-backup-<date>-<time>` and reads the copy back; if that fails it writes nothing. It writes a
+temporary file and renames it over the original. Steam rewrites this file when it exits, so while Steam runs
+nothing is written: exit Steam first (Nakagawa never closes it). Entries Nakagawa did not write are copied byte for
+byte, and a file it cannot read is left untouched. Choosing **Add to Steam** again for a game already there changes
+nothing. After an update, which unpacks into a new folder, or after moving a portable copy, choosing it again updates
+that game's shortcut to the new folder instead of adding a second one: only its program and start-in folder change,
+and its play time and collections stay. The shortcut has no picture of its own (the player keeps disc art in memory
+only), so Steam shows the player's icon until you set one in Steam.
+
+**Update.** A copy `Setup.exe` installed updates by running the next release's Setup (see [below](#windows-installer-setupexe)). For a ZIP copy, Check for updates unpacks the new version into a new folder next to the running one and leaves the old
 one. Your data is in the per-user folders below, so the new version finds it. Delete the old folder when you
 are done with it.
 
@@ -542,6 +561,34 @@ On start-up, `nakagawa_player.exe` automatically scans `<user data>/manifests` a
 
 Similarly, `python tools/nk_cli.py build-package` searches `assets/titles` first and then `<user data>/manifests`, resolving title manifests identically to the native player so user-configured titles build without command-line overlay arguments.
 
+### Windows installer (`Setup.exe`)
+
+A release can also carry `nakagawa-recomp-<version>-windows-x64-setup.exe`
+([#2208](https://github.com/Jstar269/nakagawa-recomp/issues/2208)), a per-user installer with the same files as the
+ZIP. It needs no administrator and installs to `%LOCALAPPDATA%\Programs\Nakagawa Recomp` (you can choose another
+folder). It adds a Start-menu entry and, if you tick it, a Desktop one, both with the player's taskbar identity, and
+an entry under Apps & features. It makes no network call.
+
+- **Update:** run the next release's Setup; it uses the same folder. It replaces the program files with the new
+  release's, then deletes each file the previous release installed there (as listed in that install's own
+  `SHA256SUMS.txt`) that the new release no longer carries, but only if the file is unchanged since Setup installed
+  it, and removes the folders that leaves empty. Files you added or changed in the install folder, a portable
+  `bin\data` and `bin\portable.txt` are kept, nothing is deleted through a junction or symbolic link, and
+  `%LOCALAPPDATA%\Nakagawa` (your games, saves and settings) is not touched. The player's Settings page offers the
+  release page for a copy Setup installed, not a ZIP download.
+- **Uninstall:** Apps & features, or `unins000.exe` in the install folder. It removes the program and keeps
+  `%LOCALAPPDATA%\Nakagawa` (the `config`, `data`, `cache`, `logs` and `saves` folders) unless you tick "Also delete my
+  games, saves and settings" on the uninstall page and confirm a second time; a silent uninstall never deletes them. A
+  junction or symbolic link inside those folders is removed as a link and what it points to is left alone. Close the
+  player first: the uninstaller does not close it, and stops without changing anything while it runs.
+- **One copy per shortcut name:** the installer and `tools/stage_install.py` write the same Start-menu shortcut, so
+  Setup refuses to install while a shortcut of that name starts another copy (for example one made by
+  `stage_install.py`), and `stage_install.py --shortcut`, `--start-menu-shortcut` and `--desktop-shortcut` refuse to
+  replace a shortcut that starts another existing copy (a shortcut whose program is gone is replaced). Uninstall or
+  delete that copy and its shortcut first. The two also never share a folder: Setup refuses a folder
+  `stage_install.py` set up, and `stage_install.py` refuses a folder with Setup's `unins000.exe`
+  (`INSTALL_DESTINATION_INSTALLER_OWNED`).
+
 ### Portable mode (`portable.txt`)
 
 By default every per-user folder lives under the per-user data root (on Windows,
@@ -820,8 +867,10 @@ long-run present rate never exceeds the cap (`gui-present-selftest`).
 
 ### Presentation upscaler (`SR_PRESENT_UPSCALE`)
 
-In the player this is **Sharper enlarging** on Settings > Enhanced and on each game's page, off by
-default; the launcher sets `SR_PRESENT_UPSCALE` from it for an Enhanced or Ace run.
+In the player this is **Sharper enlarging** on Settings > Enhanced and on each game's page, off for a
+new library. The Medium, Ultra and Handheld graphics presets turn it on and Low and High turn it off; a
+game's own value wins over the preset ([PLAYER_UI_DESIGN.md](PLAYER_UI_DESIGN.md)). The launcher sets
+`SR_PRESENT_UPSCALE` from the result for an Enhanced or Ace run.
 
 `SR_PRESENT_UPSCALE=fsr1` makes the Vulkan presenter enlarge the picture to its place in the
 window with AMD FidelityFX Super Resolution 1: EASU, an edge-adaptive upscaler, then RCAS
@@ -832,8 +881,11 @@ the guest's frame, guest VRAM and captures are byte for byte what they are with 
 recording (`SR_VIDEOREC_DIR`) is enlarged by FSR 1 too, at the recording's size, and its
 `record.json` names the filter ([DEBUGGING.md](DEBUGGING.md)). The pause
 overlay is drawn at the window's size on the CPU, so the paused picture is not upscaled and looks
-softer than the running one. Its cost is small: from 1920x1088 to 3840x2160, EASU and RCAS took
-0.40 ms per present on an RTX 3080 (`fsr1-selftest`). An unknown value, or a device without
+softer than the running one. Its cost is small. On an RTX 3080, EASU and RCAS took 0.40 ms per
+present from 1920x1088 to 3840x2160, 0.20 ms to 2560x1440, 0.11 ms from 960x544 to 1920x1080, 0.06 ms
+to 1280x800 and 0.11 ms from 480x272 to 1920x1080 (`fsr1-selftest`, which times each graphics preset's
+sizes, median of 15; measured on 2026-11-08 for #2150, and a second, independent run matched within
+0.01 ms). No low-end or handheld GPU has been measured. An unknown value, or a device without
 compute, leaves it off with a line in the log; so does a size whose images cannot be made, which
 is then not tried again. The launcher turns it off for an authentic session, and a run with it on
 is stamped as enhanced (`ACE_MODE: present upscale fsr1`), which `boot_gate.py` reads. The picture
@@ -1137,7 +1189,7 @@ the issue #1391 import/VFPU scope. Before this work, the full `tools/` scan used
 `python -m mypy --no-incremental --no-error-summary --no-pretty --python-version 3.15 --platform linux --explicit-package-bases tools`
 and reported 353 errors in 120 modules. The full-tree per-module ratchet remains in
 `tools/mypy_baseline.json`; its entries outside the clean scope are existing typing debt, not
-suppressed errors. The current full-tree residual is 318 errors in 106 modules; their per-module
+suppressed errors. The current full-tree residual is 246 errors in 92 modules; their per-module
 counts are listed in `tools/mypy_baseline.json` and remain guarded by that ratchet. The clean scope
 directly checks `tools/verify_vfpu_provenance.py`,
 `tools/hle_manifest.py`, `tools/psp_import_table.py`, `tools/import_audit_gate.py`,

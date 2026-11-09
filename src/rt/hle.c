@@ -1480,6 +1480,44 @@ static int console_random_bytes(uint8_t *out, size_t n) {
 #endif
 }
 
+/* The seed a deterministic run (SR_DETERMINISTIC_CLOCK=1) derives a fresh profile identity from:
+ * SR_IDENTITY_SEED when set and non-empty, else this fixed default. Not secret, not a console's. */
+#define CONSOLE_IDENTITY_DEFAULT_SEED "nakagawa-deterministic-profile-v1"
+static const char *console_identity_seed(void) {
+    const char *seed = getenv("SR_IDENTITY_SEED");
+    return seed && seed[0] ? seed : CONSOLE_IDENTITY_DEFAULT_SEED;
+}
+
+/* A synthetic identity: SHA-256 of "<field>:<seed>" fills each field. The MAC is unicast with the
+ * locally administered bit set, which no console's own address has (a console's is universally
+ * administered), so it can never be mistaken for a real one; the OpenPSID is never all zero.
+ * A profile the user configured in the overlay, and one persisted by a normal run, are used
+ * as they are and never reach here. */
+static void console_synthetic_identity(uint8_t mac[6], uint8_t psid[16]) {
+    const char *seed = console_identity_seed();
+    size_t seed_len = strlen(seed);
+    uint8_t digest[32];
+    char *buf = (char *)malloc(seed_len + 16u);
+    if (!buf) {   /* cannot happen for a few dozen bytes; keep the values fixed rather than random */
+        memset(mac, 0, 6);
+        memset(psid, 0, 16);
+        mac[0] = 0x02u;
+        psid[15] = 1u;
+        return;
+    }
+    int n = snprintf(buf, seed_len + 16u, "wlan-mac:%s", seed);
+    sr_vfpu_sha256((const uint8_t *)buf, (size_t)n, digest);
+    memcpy(mac, digest, 6);
+    mac[0] = (uint8_t)((mac[0] & 0xfcu) | 0x02u);   /* unicast (bit 0 clear), local (bit 1 set) */
+    n = snprintf(buf, seed_len + 16u, "open-psid:%s", seed);
+    sr_vfpu_sha256((const uint8_t *)buf, (size_t)n, digest);
+    memcpy(psid, digest, 16);
+    int set = 0;
+    for (int i = 0; i < 16; i++) set |= psid[i] != 0u;
+    if (!set) psid[15] = 1u;
+    free(buf);
+}
+
 /* Apply a parsed overlay onto the defaults. Returns 1, or 0 with *why set; the caller discards a
  * partial application and serves the defaults. */
 static int sreg_overlay_apply(const NkJsonNode *doc, char *why, size_t why_len) {
@@ -1772,7 +1810,7 @@ static void sreg_overlay_render(SregText *t) {
         first = 0;
     }
     sreg_text_str(t, "\n  ]");
-    if (s_console.have_identity) {
+    if (s_console.have_identity && !s_console.synthetic) {   /* a derived identity is never saved */
         static const char digits[] = "0123456789abcdef";
         sreg_text_str(t, ",\n  \"console\": {\"wlan_mac_hex\": \"");
         for (size_t b = 0; b < sizeof(s_console.mac); b++) {
@@ -2346,8 +2384,13 @@ static uint64_t s_quit_stop_deadline_us;
  * running inside that window, so a quit does not cut off a save in progress (the pause
  * overlay's Quit is refused for the same reason). Returns 1 once the run should end; the window
  * bounds the wait, so a guest that never finishes cannot hold the player open. The stop lands
- * only between guest slices, never inside the sceUtilitySavedataUpdate call that writes the
- * save (sr_savedata_execute_sized runs within it), so no write is cut off halfway. */
+ * only between guest slices. A SAVE that hands the CPU over at one of its preemption points
+ * (#1296) is parked inside the sceUtilitySavedataUpdate call that writes it; the driver holds a
+ * stop while that SAVE is parked, for up to its own window of guest time
+ * (sr_savedata_stop_deferred, the same length as this one). Past it the run stops with the SAVE
+ * half done, and the next savedata call rolls it back or finishes it from its journal. A quit
+ * can therefore wait this window and then that one, at most 10 s of guest time. A LoadExec is
+ * not held: it ends the parked SAVE through sr_hle_release_thread_resources. */
 int sr_exit_request_stop_due(void) {
     if (!s_quit_stop_armed) {
         s_quit_stop_armed = 1;
@@ -2568,6 +2611,18 @@ int console_profile_identity(void) {
     if (s_console.have_identity) return 1;
     PspConsoleProfile next;
     memset(&next, 0, sizeof(next));
+    if (sched_clock_deterministic()) {
+        /* #2162: under SR_DETERMINISTIC_CLOCK=1 a fresh profile is derived from a named seed,
+         * never from the host's random source, and is not saved: the run leaves the user's
+         * profile as it found it, and the next run derives the same values again. */
+        console_synthetic_identity(next.mac, next.psid);
+        next.have_identity = 1;
+        next.synthetic = 1;
+        s_console = next;
+        fprintf(stderr, "system profile: deterministic run: derived a synthetic WLAN MAC address "
+                        "and OpenPSID from seed '%s'; not saved\n", console_identity_seed());
+        return 1;
+    }
     if (!console_random_bytes(next.mac, sizeof(next.mac)) ||
         !console_random_bytes(next.psid, sizeof(next.psid)))
         return 0;
@@ -2644,9 +2699,30 @@ static void mbx_remove_thread_waiters(uint32_t thread_uid);
 static void io_cwd_release_thread(uint32_t thread_uid);
 
 
+uint32_t sr_savedata_release_thread(uint32_t thread_uid);   /* savedata.c: a SAVE it left parked */
+
+/* #1296: the thread whose sceUtilitySavedataUpdate was running the dialog's SAVE ended while the
+ * SAVE was parked, so that Update never returns to record a result (hle_utility.c). Finish the
+ * dialog's work with the abandoned SAVE's result (its mode's savedata_access_error code), so the
+ * next Update reports FINISHED and the game can shut the dialog down; the pause overlay's Quit
+ * stays refused until it does (sr_savedata_pause_busy counts FINISHED as busy). On a PSP the
+ * utility's own thread does the save and finishes it whatever happens to the caller; what the
+ * dialog then reports is UNMEASURED. */
+static void savedata_dialog_work_abandoned(uint32_t result) {
+    dialog_lock();
+    if (s_utility_slot == UTILITY_SLOT_SAVEDATA && s_dlg_status == 2 && s_dlg_work_started &&
+        !s_dlg_work_done) {
+        s_dlg_result = result;
+        s_dlg_work_done = 1u;
+    }
+    dialog_unlock();
+}
+
 void sr_hle_release_thread_resources(uint32_t thread_uid) {
     sr_mutex_release_thread(thread_uid);
     if (thread_uid) {
+        const uint32_t abandoned = sr_savedata_release_thread(thread_uid);
+        if (abandoned) savedata_dialog_work_abandoned(abandoned);
         io_cwd_release_thread(thread_uid);
         mbx_remove_thread_waiters(thread_uid);
 
@@ -3517,7 +3593,53 @@ static void mbx_remove_thread_waiters(uint32_t thread_uid) {
         if (s_mbx[i].used) mbx_remove_waiter(&s_mbx[i], thread_uid);
     }
 }
-Sync s_sync[128];
+/* Semaphores, event flags and LwMutexes: one Sync each, tagged with its kind. The PSP has no
+ * fixed number of them: it creates 1024 event flags in a row (PSPAutotests
+ * tests/threads/events/create/create.expected at 2ed7c9c5, "Create 1024: OK"), and a title's
+ * loader can need more than a small fixed table holds (#1892). The table grows by whole chunks
+ * that never move, so a Sync pointer a handler holds across a reschedule stays valid while
+ * another thread creates objects. */
+#define HLE_SYNC_CHUNK 128u
+static Sync **s_sync_chunks = NULL;
+static size_t s_sync_chunk_count = 0u;
+
+size_t hle_sync_slot_count(void) {
+    return s_sync_chunk_count * HLE_SYNC_CHUNK;
+}
+
+Sync *hle_sync_slot(size_t index) {
+    return &s_sync_chunks[index / HLE_SYNC_CHUNK][index % HLE_SYNC_CHUNK];
+}
+
+/* The create then returns its unmeasured 0x80020000; say why on stderr, so the
+ * failure is never silent. */
+static Sync *hle_sync_grow_failed(void) {
+    fprintf(stderr, "HLE: the semaphore/event-flag/LwMutex table cannot grow past %zu objects: "
+            "the host could not allocate more memory\n", hle_sync_slot_count());
+    return NULL;
+}
+
+Sync *hle_sync_grow(void) {
+    if (s_sync_chunk_count >= SIZE_MAX / sizeof(*s_sync_chunks) / HLE_SYNC_CHUNK)
+        return hle_sync_grow_failed();
+    Sync *chunk = (Sync *)calloc(HLE_SYNC_CHUNK, sizeof(Sync));
+    if (!chunk) return hle_sync_grow_failed();
+    Sync **grown = (Sync **)realloc(s_sync_chunks, (s_sync_chunk_count + 1u) * sizeof(*grown));
+    if (!grown) {
+        free(chunk);
+        return hle_sync_grow_failed();
+    }
+    s_sync_chunks = grown;
+    s_sync_chunks[s_sync_chunk_count++] = chunk;
+    return chunk;
+}
+
+void hle_sync_reset(void) {
+    for (size_t i = 0; i < s_sync_chunk_count; i++) free(s_sync_chunks[i]);
+    free(s_sync_chunks);
+    s_sync_chunks = NULL;
+    s_sync_chunk_count = 0u;
+}
 
 /* Measured on a PSP-3000, firmware 6.61 (PSP-B2-01 / PSP-B3-01,
  * docs/HARDWARE_ORACLE.md): cancel/release family, measured by
@@ -3722,7 +3844,6 @@ static void hle_register_unregistered_import_batch(void) {
      * is not established here and it is refused under its name rather than guessed. */
     hle_register_unregistered_import_rtc();
     hle_register_unregistered_import_network_2();
-    hle_register_unregistered_import_audio_codec();
 }
 
 /* What a stalled thread's object wait is on, for the watchdog's thread dump: the kernel
@@ -3730,8 +3851,10 @@ static void hle_register_unregistered_import_batch(void) {
  * has the uid (a thread left waiting on a deleted object, or a wait the HLE does not own). */
 static int hle_describe_wait_object(uint32_t thread_uid, uint32_t obj, char *out, size_t cap) {
     Sync *y = NULL;
-    for (int i = 0; i < (int)(sizeof(s_sync) / sizeof(s_sync[0])); i++)
-        if (s_sync[i].used && s_sync[i].uid == obj) { y = &s_sync[i]; break; }
+    for (size_t i = 0, n = hle_sync_slot_count(); i < n; i++) {
+        Sync *slot = hle_sync_slot(i);
+        if (slot->used && slot->uid == obj) { y = slot; break; }
+    }
     if (y && y->kind == SYNC_KIND_SEMA) {
         snprintf(out, cap, "semaphore 0x%x '%s' count=%d max=%d", obj, y->name, y->count, y->maxc);
         return 1;
@@ -3960,6 +4083,7 @@ void sr_hle_init(void) {
     hle_register_atrac_handlers();
     hle_register_mp3_handlers();
     hle_register_sas_handlers();
+    hle_register_videocodec_handlers();
 #endif
 #ifndef SR_MPEG_MEDIA_SELFTEST
     /* Opt-in GE completion timing: the hooks report nothing unless SR_GE_TIMING=1. */

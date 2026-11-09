@@ -79,6 +79,9 @@ src/rt/h264_ffmpeg_sub/libavcodec/h264_mc_template.c -whitespace
 # (third_party/dr_libs/PROVENANCE.md): exempt it from the trailing-space check
 # so `git diff --check` and the staged-whitespace hook keep its bytes intact.
 third_party/dr_libs/dr_wav.h          whitespace=-blank-at-eol
+# The Khronos OpenXR header (src/rt/xr/openxr/PROVENANCE.md) is byte-identical upstream and
+# ends one blank line in spaces: exempt it the same way.
+src/rt/xr/openxr/openxr.h             whitespace=-blank-at-eol
 # libchdr and the codecs it carries (third_party/libchdr/PROVENANCE.md) keep their
 # upstream bytes apart from LF line endings, and upstream ends some lines in spaces
 # and mixes tabs and spaces: exempt the imported files from the whitespace checks so
@@ -91,3 +94,15 @@ third_party/libchdr/PROVENANCE.md     whitespace=blank-at-eol,blank-at-eof,space
 # checks; the project-authored manifest keeps the normal rules.
 third_party/fidelityfx_sdk/**             whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,-indent-with-non-tab
 third_party/fidelityfx_sdk/PROVENANCE.md  whitespace=blank-at-eol,blank-at-eof,space-before-tab
+
+# Parallel additions to these hand-maintained lists merge without a conflict (docs/CI.md, "Merging
+# parallel additions"): tools/merge_append.py keeps both sides when each only inserted lines at the same
+# spot, and leaves the ordinary conflict markers when either side changed or removed a line. Only files whose
+# conflicts are independent items (self-test blocks, targets, sources, table rows) belong here: never C, a
+# generated file or prose (tools/test_merge_append.py pins this). Git uses the driver only after the clone
+# sets merge.nk-append.driver; without it the attribute is ignored and the merge is the ordinary one.
+mk/selftests.mk                       merge=nk-append
+mk/public_targets.mk                  merge=nk-append
+mk/runtime_sources.mk                 merge=nk-append
+CMakeLists.txt                        merge=nk-append
+docs/DEBUGGING.md                     merge=nk-append

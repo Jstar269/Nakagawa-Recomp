@@ -612,16 +612,18 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract",
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode",
+            "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_modes_2_and_3",
         ],
-        "limitation": "writes the MEASURED mode-1 header (eight plane pointers into the buffer) and leaves the planes; modes 2 and 3 and an odd number of 16-pixel strips are refused as not measured, and the query's mode-1 limits stand in for Init's own (#302)",
+        "limitation": "writes the MEASURED mode-1 header (eight plane pointers into the buffer) and leaves the planes; mode 2 returns 0 for the measured 128-byte buffer (its bytes before a decode are zeroed, unmeasured) and mode 3 returns 0 and writes nothing (its effect is unmeasured); an odd number of 16-pixel strips is refused as not measured, and the query's mode-1 limits stand in for Init's own, applied to modes 2 and 3 too (only 480x272 was passed to Init there) (#302)",
     },
     "h_MpegAvcDecodeYCbCr": {
         "status": "partial",
         "evidence": [
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract",
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode",
+            "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_mode2_decode",
         ],
-        "limitation": "runs one access unit behind as MEASURED (PSP-MPEG-001: the first call returns 0 with init 0 and no picture, each later call the picture of the unit before it); writes the decoder's samples into the MEASURED mode-1 strip layout through the header's plane pointers and sets words 0 and 1; a picture larger than its InitYCbCr allocation or than 480x272 is refused as not measured, and the strip length from the decoded height rests on one measured geometry (#302)",
+        "limitation": "runs one access unit behind as MEASURED (PSP-MPEG-001: the first call returns 0 with init 0 and no picture, each later call the picture of the unit before it); writes the decoder's samples into the MEASURED mode-1 strip layout through the header's plane pointers and sets words 0 and 1, or, into a mode-2 buffer, only the MEASURED 128-byte header (a mode-2 buffer holds no picture); a decode into a mode-3 buffer is refused (the PSP's first call returned 0 and wrote a 16-byte {h/16, w/16, 0, 0} header over a black 4:2:0 frame, its second call never returned, PSP-MPEG-001 boots 145 and 152, so the picture layout stays unmeasured); a picture larger than its InitYCbCr allocation or than 480x272 is refused as not measured, and the strip length from the decoded height rests on one measured geometry (#302)",
     },
     "h_MpegAvcDecodeStopYCbCr": {
         "status": "partial",
@@ -630,7 +632,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode",
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_restart_after_stop",
         ],
-        "limitation": "takes the address of the buffer pointer and hands over the picture the decoder still holds with status 1, as MEASURED after the last access unit (PSP-MPEG-001); that held picture is the one the decoder runs behind by (sceMpegAvcDecodeYCbCr), the decoder is drained only once the whole stream was fed, and a stop in mid-stream is not measured (#302); after a stop the decoder holds no earlier unit's picture, and one a host decoder still owes is dropped as it comes (an unmeasured model, #279)",
+        "limitation": "takes the address of the buffer pointer and hands over the picture the decoder still holds with status 1, as MEASURED after the last access unit (PSP-MPEG-001); that held picture is the one the decoder runs behind by (sceMpegAvcDecodeYCbCr), the decoder is drained only once the whole stream was fed, and a stop in mid-stream is not measured, nor is a stop on a mode-3 buffer, which is refused (#302); after a stop the decoder holds no earlier unit's picture, and one a host decoder still owes is dropped as it comes (an unmeasured model, #279)",
     },
     "h_MpegAvcCopyYCbCr": {
         "status": "partial",
@@ -646,8 +648,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_measured_contract",
             "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_guest_decode",
             "tests/native/psmf_media_selftest.c:test_mpeg_csc_swizzled_vram_mirrors",
+            "tests/native/psmf_media_selftest.c:test_mpeg_csc_measured_range_and_16bit",
+            "tests/native/psmf_media_selftest.c:test_mpeg_ycbcr_modes_2_and_3",
         ],
-        "limitation": "converts the guest planes, read through the header's pointers, with the MEASURED PSP matrix and gives the MEASURED range refusals; the destination is written from its first pixel with rows from the top of the picture (one measured sub-range), and the 16-bit pixel modes are not measured (#302)",
+        "limitation": "converts the guest planes, read through the header's pointers, with the MEASURED PSP matrix and gives the MEASURED range refusals (including the y and h cells: y 1, 161, 200 and an odd h are invalid values); the destination is written from its first pixel with rows from the top of the picture (y never selects rows); the 16-bit modes use the MEASURED packing with alpha 0 and 32-pixel blocks 64 pixels apart (block origin at x 0 only measured, and only a 64-pixel-wide range at stride 512 was captured: a wider 16-bit range, or one whose block spacing passes the stride, is refused as not measured); a mode-2 buffer converts to zero pixels in 8888 (MEASURED) and is refused in 16-bit; that y must be a multiple of 16 is inferred from three refused values (#302)",
     },
     "h_MpegQueryPcmEsSize": {
         "status": "partial",
@@ -760,7 +764,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     # command pairs remain visible per pair and are tracked under issue #341.
     "h_IoDevctl": {
         "status": "partial",
-        "limitation": "Memory Stick insert/eject callbacks, including the mscmhc0: 0x02015804/0x02015805 forms, are notified once, with argument 1, when registered; no later insert or eject event exists, and the 32-entry bound, duplicate entries and 0x80010016 refusals follow PPSSPP's model, not a hardware measurement (#1378)",
+        "limitation": "Memory Stick insert/eject callbacks, including the mscmhc0: 0x02015804/0x02015805 forms, are notified once, with argument 1, when registered; no later insert or eject event exists, and the 32-entry bound, duplicate entries and 0x80010016 refusals follow PPSSPP's model, not a hardware measurement (#1378); the GETDEV capacity under SR_DETERMINISTIC_CLOCK=1 is a project-chosen virtual card (2 GiB, 32 KiB clusters, minus the Memory Stick folder's files), not a measured one (#2161)",
     },
     "h_NetEtherNtostr": {
         "status": "partial",
@@ -2059,10 +2063,11 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     "h_CreateEventFlag": {
         "status": "partial",
         "evidence": [
-            "PSPAutotests tests/threads/events/create/create.expected at 2ed7c9c5 (NULL name 0x80020001, attr 0x100/0x122/0x300/0x900/0x1200 refused with 0x80020191, long names cut to 31 bytes)",
+            "PSPAutotests tests/threads/events/create/create.expected at 2ed7c9c5 (NULL name 0x80020001, attr 0x100/0x122/0x300/0x900/0x1200 refused with 0x80020191, long names cut to 31 bytes, 1024 flags created in a row)",
             "tests/native/hle_thread_selftest.c:test_evf_create_and_refer",
+            "tests/native/hle_thread_selftest.c:test_sync_objects_past_the_old_table",
         ],
-        "limitation": "the name, attribute and pattern cells match; the shared semaphore/event-flag/LwMutex table holds 128 objects, while the same PSP-recorded output shows 1024 event flags created, and the exhaustion code 0x80020000 is not measured; the option struct is ignored",
+        "limitation": "the name, attribute, pattern and 1024-flag cells match; the shared semaphore/event-flag/LwMutex table grows with no fixed cap, and the code 0x80020000 it returns when the host cannot allocate more (and names on stderr) is not measured (the PSP's own limit is not measured); the option struct is ignored",
     },
     "h_DeleteEventFlag": {
         "status": "partial",
@@ -2258,6 +2263,155 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_ctrl_read_buffer_contract",
         ],
         "limitation": "the positive peek contract with the button word inverted, from the public pspctrl.h description; no hardware cell measures the negative variants, and the positive-peek limitations apply (#341)",
+    },
+    # sceVideocodec and sceMpegbase: the Media Engine video boundary under a disc mpeg.prx (#286).
+    "h_VideocodecOpen": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_context_words",
+        ],
+        "limitation": "words synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (zeroed context): type 0 writes +0 = 0x05100601, +8 = 1 and +24 = 0x8344 and returns 0; type 1 writes +0, +8 = 0x80000000 and +24 = 0x264C and returns 0x80628001, and the later calls on a type 1 context are refused; other types are refused",
+    },
+    "h_VideocodecInit": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_context_words",
+        ],
+        "limitation": "words synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (type 0): writes +12 = +20 and +8 = 0 and nothing else",
+    },
+    "h_VideocodecGetEDRAM": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_context_words",
+        ],
+        "limitation": "writes +92 = the raw ME address and +20 = it aligned to 64 bytes, the rule synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (type 0); allocates ((+24) + 63) | 0x3F bytes of a host 2 MiB ME RAM model, low-first, first 0x10000 reserved, so the addresses themselves differ from the PSP's",
+    },
+    "h_VideocodecReleaseEDRAM": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_teardown",
+        ],
+        "limitation": "clears +20 and +92 and leaves +12, the rule synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet (type 0), and frees the host ME RAM allocation",
+    },
+    "h_VideocodecSetMemory": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_context_words",
+        ],
+        "limitation": "accepts the call and writes nothing; no context word changed in that read either (synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet; type 0, zeroed +64..+76); the meaning of words +64..+76 is not modelled",
+    },
+    "h_VideocodecStop": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_teardown",
+        ],
+        "limitation": "before any decode returns 0x806201FE and changes nothing (synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet; type 0); after a decode drops the host decoder and returns 0 (JPCSP, synthetic pending W-LLE-1); whether the PSP drains pending pictures is not measured",
+    },
+    "h_VideocodecDelete": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_teardown",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; frees the decoder and ME memory and closes the context; returns at once (JPCSP notes about 40 ms on a PSP)",
+    },
+    "h_VideocodecDecode": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_decode",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; type 0 (AVC) only; synchronous host H.264 decode; reads the access unit and writes the ME info blocks through JPCSP's ME memory view (ME RAM, else guest memory); writes the picture into its ME band buffers in JPCSP's band layout; buffer2, YUV struct, ME info blocks, buffer3 and SEI words are JPCSP's; a decoded size that is not whole macroblocks (a cropped 480 x 270, for example) is refused; fails closed without an H.264 backend",
+    },
+    "h_MpegBaseCscInit": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_csc",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; records the default row width only; the coefficient table the PSP writes is not reproduced (conversion is the measured sr_h264_psp_rgb)",
+    },
+    "h_MpegBaseCscAvc": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_csc",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; reads the eight bands through JPCSP's ME memory view (ME RAM, else guest memory) in JPCSP's band layout and converts the struct's whole picture, up to 720 x 576; band addresses are converted as given, so a zeroed struct converts ME RAM from offset 0 (the ME memory view) and returns 0, and a picture never decoded is no longer refused; 16-bit pixel modes and alpha follow sceMpegAvcCsc and are not measured",
+    },
+    "h_MpegBasePESpacketCopy": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_packet_copy",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; checks the whole packet list (sources, destinations, lengths, cycles) before copying; destinations go through JPCSP's ME memory view (ME RAM, else guest memory); refusal codes other than the zero-length one are project-chosen",
+    },
+    "h_Mpegbase_0530BE4E": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_csc",
+        ],
+        "limitation": "synthetic context words from JPCSP pending W-LLE-1; mode mapping 0=8888, 1=5650, 2=5551, 3=4444 from JPCSP; unknown modes return -1",
+    },
+    "h_VideocodecGetVersion": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_version_sei",
+        ],
+        "limitation": "synthetic context word from JPCSP pending W-LLE-1 (JPCSP cites its own JpcspTrace record); writes context +4 = 0x78 and returns 0; codec type 0 only",
+    },
+    "h_VideocodecGetSEI": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_version_sei",
+        ],
+        "limitation": "synthetic word from JPCSP pending W-LLE-1; clears word +28 of the SEI block named by context +80 and nothing else; a context without a writable SEI block is refused",
+    },
+    "h_MpegBaseCscAvcRange": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_copy_range",
+        ],
+        "limitation": "synthetic layout from JPCSP pending W-LLE-1; the range words are 16-pixel units and the rectangle's top-left lands at the destination, as JPCSP writes it; otherwise the CscAvc limitations apply",
+    },
+    "h_MpegBaseYCrCbCopy": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_copy_range",
+        ],
+        "limitation": "synthetic band split from JPCSP pending W-LLE-1; flags bit 0 copies bands 0, 1, 4 and 5 and bit 1 bands 2, 3, 6 and 7 from the source buffers (ME memory view) into the guest buffers, byte for byte; other bits are refused; the byte counts are the decoder's band sizes, not JPCSP's handler counts (16-pixel units; buffer 5 given band 1's count and buffer 6 band 4's); every span is checked before the first byte moves",
+    },
+    # sceAudiocodec: the Media Engine audio half under a disc mpeg.prx (#286), in hle_videocodec.c.
+    "h_AudiocodecCheckNeedMem": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_audiocodec",
+        ],
+        "limitation": "codec 0x1000 (ATRAC3plus) only; the wrapper checks follow uofw, except that an in-range codec other than 0x1000 (0x1001-0x1005) is refused with 0x80000004, a project-chosen synthetic code (uofw goes on; the W-LLE-1 read returned 0 for 0x1001 and 0x1002, synthetic); every call writes +0 = 0x05100601 as uofw does; the words are synthetic, from a W-LLE-1 read PSP-VCODEC-001 does not record yet, for the three halfwords at +40 it was given: 0x5C28 (+16 = 0x7BC0, +52 = 44100, +60 = 2, +64 = 0x2E8), 0x5C5C (+16 = 0x1F6C0, +52 = 48000, +60 = 7, +64 = 0x2E8), and 0 (0x807F00FD; +8 = 0x20F, +52 = 0x7D00, +64 = 8); any other halfword is refused",
+    },
+    "h_AudiocodecGetEDRAM": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_audiocodec",
+        ],
+        "limitation": "codec 0x1000 only; allocates ((+16) + 0x3F) | 0x3F bytes of the host ME RAM model, owned by the work area, as uofw sizes it; a work area whose +104 still names its allocation is refused with 0x807F0003 (uofw allocates again and orphans the first; the refusal is synthetic pending W-LLE-1); one whose +104 no longer names it (recycled without a release) gets a new allocation and the stale one is freed; the addresses are not PSP-measured",
+    },
+    "h_AudiocodecReleaseEDRAM": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_audiocodec",
+        ],
+        "limitation": "frees only the host ME RAM allocation the work area owns: a +104 naming any other allocation (another work area's, a video context's) is refused with 0x807F0004 and nothing is freed; clears +104 and +12 and drops the host decoder as JPCSP does",
+    },
+    "h_AudiocodecInit": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_audiocodec",
+        ],
+        "limitation": "codec 0x1000 only; as in uofw, any work area may name the EDRAM at +12 (a disc mpeg.prx initialises a work area other than the one it allocated with); refuses a +12 that is not an EDRAM sceAudiocodecGetEDRAM published, or a +16 larger than it (project-chosen code 0x807F00FF, synthetic pending W-LLE-1)",
+    },
+    "h_AudiocodecDecode": {
+        "status": "partial",
+        "evidence": [
+            "tests/native/videocodec_selftest.c:test_audiocodec",
+        ],
+        "limitation": "codec 0x1000 only, PSMF frames with the 0x0FD0 header only; mono or stereo input into one stereo 16-bit block of 2048 samples (JPCSP's sceAudiocodecInit output; a mono frame is duplicated); uofw's +56/+72 size rule is written at +36 and does not choose the layout; synchronous decode; the +28 and +36 words and the refusal code are synthetic pending W-LLE-1",
     },
     # #341 graduations (2026-11-06): handlers that already reproduce every pspautotests cell the
     # runtime can replay. Cells are from the pinned pspautotests clone at 70e7239 unless an entry
@@ -3007,6 +3161,7 @@ SUBSYSTEMS = frozenset({
     "system",
     "umd",
     "utility",
+    "videocodec",
 })
 
 SUBSYSTEM_BY_PREFIX = {
@@ -3016,7 +3171,6 @@ SUBSYSTEM_BY_PREFIX = {
     "sceVaudio": "audio",
     # --- compressed-audio decoders ---
     "sceAtrac": "audio_codec",
-    "sceAudiocodec": "audio_codec",
     "sceMp3": "audio_codec",
     # --- CPU caches and DMA copies ---
     "sceDmac": "cache_dma",
@@ -3034,6 +3188,12 @@ SUBSYSTEM_BY_PREFIX = {
     # --- video and stream demux ---
     "sceMpeg": "mpeg",
     "scePsmf": "mpeg",
+    # --- the Media Engine video boundary under a disc mpeg.prx (#286) ---
+    "sceMpegBase": "videocodec",
+    "sceMpegbase": "videocodec",
+    "sceVideocodec": "videocodec",
+    # sceAudiocodec is the Media Engine's audio codec, served beside the video one (#286).
+    "sceAudiocodec": "videocodec",
     # --- network (fail-closed stubs) ---
     "sceHttp": "network",
     "sceNet": "network",

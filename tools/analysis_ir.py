@@ -25,6 +25,7 @@ an annotation never adds, removes or renames an analyzer fact.
 """
 
 from __future__ import annotations
+from typing import Any
 
 import argparse
 import hashlib
@@ -273,7 +274,7 @@ def build_ir(report: dict) -> dict:
 
     blocks_by_start = {block["start"]: block for block in blocks}
     callgraph = []
-    xrefs = {}
+    xrefs: dict[str, Any] = {}
     for edge in sorted(edges, key=lambda e: (e["source"], -1 if e.get("target") is None else e["target"],
                                              e.get("kind", ""), e.get("detail") or "")):
         kind, source, target = edge.get("kind"), edge["source"], edge.get("target")
