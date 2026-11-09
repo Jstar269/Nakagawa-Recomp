@@ -2488,7 +2488,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 150)
+        self.assertEqual(len(routes), 151)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -7289,7 +7289,8 @@ class HleIssuesProbeTests(unittest.TestCase):
         head = ("#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 "
                 "|| PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 "
                 "|| PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 "
-                "|| PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173\n")
+                "|| PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 "
+                "|| PSP_ORACLE_CASE == 174\n")
         self.assertIn(head, self.probe)
         attr = self.probe[self.probe.index(head):]
         attr = attr[:attr.index("#endif") + len("#endif")]
@@ -9634,7 +9635,7 @@ class VfpuWideDotProbeTests(unittest.TestCase):
                       "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
                       self.makefile)
         self.assertIn("#define HLE_CASE_VFPU_WIDE_DOT 173\n", self.probe)
-        self.assertIn("PSP_ORACLE_CASE == 173\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 173 ||", self.probe)
         self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-wide-dot-matrix"\n'
                       '#define HLE_TEST_ID "PSP-VFPU-WIDEDOT-001"\n'
                       '#define HLE_LOG "host0:/vfpu_wide_dot_matrix_log.txt"', self.probe)
@@ -9747,6 +9748,125 @@ class VfpuWideDotProbeTests(unittest.TestCase):
         self.assertEqual(row["hardware_evidence"], "NOT_RUN")
         self.assertNotIn("evidence_cases", row)
         self.assertEqual(row["case_ids"][-1], "vfpu-wide-dot-matrix-done")
+
+
+class VfpuMfvMtvProbeTests(unittest.TestCase):
+    """CASE=vfpu-mfv-mtv (174, PSP-VFPU-MFVMTV-001) in probe_hle_issues.c: the #326 mtv.s/mfv.s word round trip. Register-only: no system call
+    in the section beyond the shared writer, bounded loops, a step before the cells, no
+    control-register write, a fixed-shape stream that matches the registry, and no hardware
+    result claimed (NOT_RUN)."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-MFVMTV-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_MFV_MTV\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_MFV_MTV */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-mfv-mtv)\nCASE_ID = 174\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-mfv-mtv)\nTARGET = $(BUILD_DIR)/vfpu_mfv_mtv\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_MFV_MTV 174\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 174\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-mfv-mtv"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-MFVMTV-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_mfv_mtv_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-mfv-mtv").name,
+                         "vfpu_mfv_mtv_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-mfv-mtv"), "strict-golden-sequence")
+        self.assertNotIn("vfpu-mfv-mtv", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-mfv-mtv", parse_golden.HLE_OBSERVATION_CASES)
+        self.assertIn("| `vfpu-mfv-mtv` | `PSP-VFPU-MFVMTV-001` |", self.readme)
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl", "TN_PFX_P1",
+                       "TN_PFX_P2"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 2)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(header, r"^unsigned \w+ = [\w *]+; \w+ < ")
+        # No control register is written: no mtvc word (COP2 rs 7 with bit 7 of the immediate set).
+        for word in re.findall(r"0x([0-9a-f]{8})", self.section):
+            value = int(word, 16)
+            self.assertFalse((value >> 21) == 0x247 and value & 0x80, word)
+
+    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_mfv_mtv.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-mfv-mtv"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["case_ids"][-1], "vfpu-mfv-mtv-done")
+
+    def test_the_encodings_match_the_forms(self) -> None:
+        for word, text in ((0x48e80000, "mtv $t0, S000"), (0x48690000, "mfv $t1, S000"),
+                           (0x48e8007f, "mtv $t0, S733"), (0x4869007f, "mfv $t1, S733")):
+            with self.subTest(form=text):
+                self.assertIn(f'".word 0x{word:08x}\\n\\t"', self.section, text)
+        # mtv: COP2 rs 7, rt $t0 (8); mfv: COP2 rs 3, rt $t1 (9); vd index in the low 7 bits.
+        self.assertEqual(0x48000000 | (7 << 21) | (8 << 16) | 0x00, 0x48e80000)
+        self.assertEqual(0x48000000 | (3 << 21) | (9 << 16) | 0x7f, 0x4869007f)
+
+    def test_the_input_words(self) -> None:
+        ops = re.search(r"s_mm_in\[MM_WORDS\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(ops)
+        words = [int(w, 16) for w in re.findall(r"0x([0-9a-f]{8})u", _matched(ops).group(1))]
+        self.assertEqual(words, [
+            0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x007fffff, 0x807fffff, 0x7fc00011,
+            0xffc00022, 0x7f800033, 0xff800044, 0x7f800000, 0xff800000, 0x7f7fffff, 0x3f800000,
+            0xdeadbeef, 0xffffffff, 0x00000000])
+        self.assertIn("#define MM_WORDS 17u", self.section)
+        for word in words[6:8]:
+            self.assertTrue(word & 0x00400000)
+        for word in words[8:10]:
+            self.assertFalse(word & 0x00400000)
+            self.assertTrue(word & 0x003fffff)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-mfv-mtv"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-MFVMTV-001")
+        self.assertEqual(spec.terminal_case, "vfpu-mfv-mtv-done")
+        self.assertEqual(parse_golden.VFPU_MFV_MTV_CASES,
+                         ("mtv-mfv-p0", "mtv-mfv2-p0", "mtv-mfv-p1", "mtv-mfv2-p1"))
+        for case in parse_golden.VFPU_MFV_MTV_CASES:
+            self.assertEqual(counts[case], 17)
+        bodies = _c_function_bodies(self.section)
+        self.assertLess(bodies["mm_pass"].index("hle_step(name);"),
+                        bodies["mm_pass"].index("hle_record("))
+        self.assertIn("pass < 2u", bodies["hle_run"])
 
 
 class VfpuCcCmovProbeTests(unittest.TestCase):

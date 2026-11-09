@@ -35,6 +35,9 @@
 //   CASE=vfpu-wide-dot-matrix (PSP-VFPU-WIDEDOT-001): #326 raw result words of vdot, vhdp, vcrsp,
 //     vqmul, vtfm, vhtfm, vmmul, vmscl, vmzero, vmidt, vmone, vmmov and vrot over special lanes
 //     and order-sensitive four-term sums, register-only.
+//   CASE=vfpu-mfv-mtv (PSP-VFPU-MFVMTV-001): #326 raw words read back by mfv.s after mtv.s for 17 chosen words
+//     (zeros, denormals, qNaN/sNaN of both signs, infinities, FLT_MAX, 1.0, patterns) through two
+//     VFPU registers, register-only.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -64,8 +67,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i and vfpu-wide-dot-matrix run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 || PSP_ORACLE_CASE == 174
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i, vfpu-wide-dot-matrix and vfpu-mfv-mtv run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -90,6 +93,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_VUS2I 171
 #define HLE_CASE_VFPU_BASIC_ARITH 168
 #define HLE_CASE_VFPU_WIDE_DOT 173
+#define HLE_CASE_VFPU_MFV_MTV 174
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -147,6 +151,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-wide-dot-matrix"
 #define HLE_TEST_ID "PSP-VFPU-WIDEDOT-001"
 #define HLE_LOG "host0:/vfpu_wide_dot_matrix_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_MFV_MTV
+#define HLE_CAMPAIGN_ID "vfpu-mfv-mtv"
+#define HLE_TEST_ID "PSP-VFPU-MFVMTV-001"
+#define HLE_LOG "host0:/vfpu_mfv_mtv_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -3341,6 +3349,83 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_WIDE_DOT */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_MFV_MTV
+
+/* #326 mtv.s then mfv.s (PSP-VFPU-MFVMTV-001), one launch, register-only: whether any bit of a
+   general-register word changes on the way into a VFPU register and back out. For each of 17
+   words (+0, -0, +smallest denormal 0x00000001, -smallest denormal 0x80000001, +/-largest
+   denormal, quiet NaNs 0x7fc00011 and 0xffc00022, signalling NaNs 0x7f800033 and 0xff800044,
+   +/-inf, FLT_MAX, 1.0, 0xdeadbeef, 0xffffffff and a closing +0) $t0 is moved into a VFPU
+   register with mtv and read back into $t1 with mfv, through two registers: S000 (mtv word
+   0x48e80000, mfv word 0x48690000) and S733 (0x48e8007f and 0x4869007f). The four words were
+   checked against psp-as (mtv $t0,S000; mfv $t1,S000; mtv $t0,S733; mfv $t1,S733) and are
+   emitted as words. The closing +0 follows 0xffffffff so a stale-state effect would show.
+   Row mtv-mfv-p<pass>: result = the mtv S000 word, out0..16 = the S000 read-back words in the
+   input order; row mtv-mfv2-p<pass>: result = the mtv S733 word, out0..16 = the S733 read-back
+   words. No control register is written (mtvc is already measured) and no memory is written
+   beyond the probe's scratch words. */
+
+#define MM_WORDS 17u
+
+static const uint32_t s_mm_in[MM_WORDS] = {
+    0x00000000u, 0x80000000u,   /* +0, -0 */
+    0x00000001u, 0x80000001u,   /* +-smallest denormal */
+    0x007fffffu, 0x807fffffu,   /* +-largest denormal */
+    0x7fc00011u, 0xffc00022u,   /* quiet NaN, both signs */
+    0x7f800033u, 0xff800044u,   /* signalling NaN, both signs */
+    0x7f800000u, 0xff800000u,   /* +-inf */
+    0x7f7fffffu, 0x3f800000u,   /* FLT_MAX, 1.0 */
+    0xdeadbeefu, 0xffffffffu,   /* patterns */
+    0x00000000u,                /* closing +0 */
+};
+
+/* out[0] = the word through S000, out[1] = through S733. */
+static void mm_cell(uint32_t word, uint32_t *out)
+{
+    __asm__ volatile(
+        "move $t0, %[w]\n\t"
+        ".word 0x48e80000\n\t" /* mtv $t0, S000 */
+        ".word 0x48690000\n\t" /* mfv $t1, S000 */
+        "sw $t1, 0(%[out])\n\t"
+        ".word 0x48e8007f\n\t" /* mtv $t0, S733 */
+        ".word 0x4869007f\n\t" /* mfv $t1, S733 */
+        "sw $t1, 4(%[out])\n\t"
+        :
+        : [w] "r"(word), [out] "r"(out)
+        : "t0", "t1", "memory");
+}
+
+static void mm_pass(unsigned pass)
+{
+    char name[64];
+    uint32_t a[MM_WORDS];
+    uint32_t b[MM_WORDS];
+    snprintf(name, sizeof(name), "mtv-mfv-p%u", pass);
+    hle_step(name);
+    for (unsigned i = 0; i < MM_WORDS; i++) {
+        uint32_t pair[2] = {0u, 0u};
+        mm_cell(s_mm_in[i], pair);
+        a[i] = pair[0];
+        b[i] = pair[1];
+    }
+    hle_record(name, "PASS", 0x48e80000u, a, MM_WORDS);
+    snprintf(name, sizeof(name), "mtv-mfv2-p%u", pass);
+    hle_record(name, "PASS", 0x48e8007fu, b, MM_WORDS);
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        mm_pass(pass);
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_MFV_MTV */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV

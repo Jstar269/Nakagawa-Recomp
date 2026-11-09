@@ -2225,6 +2225,45 @@
         "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
       },
       {
+        "id": "PSP-VFPU-MFVMTV-001",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as case 174, the mtv.s/mfv.s word round trip. No hardware run is cited.",
+        "group": "cpu",
+        "source": "fixtures/psp_oracle/probe_hle_issues.c",
+        "prx": "vfpu_mfv_mtv.prx",
+        "apis": [
+          "sceIoClose",
+          "sceIoOpen",
+          "sceIoRead",
+          "sceIoWrite",
+          "sceKernelDeleteThread",
+          "sceKernelExitThread",
+          "sceKernelGetThreadId",
+          "sceKernelSleepThread",
+          "sceKernelWaitThreadEnd",
+          "sceKernelWakeupThread",
+          "Allegrex VFPU mtv.s",
+          "Allegrex VFPU mfv.s"
+        ],
+        "diagnostic_case_ids": [
+          "vfpu-mfv-mtv"
+        ],
+        "case_ids": [
+          "mtv-mfv-p0",
+          "mtv-mfv2-p0",
+          "mtv-mfv-p1",
+          "mtv-mfv2-p1",
+          "vfpu-mfv-mtv-done"
+        ],
+        "invariant": "#326, two passes, register-only: the general-register word read back by mfv.s after mtv.s for 17 words (+-0, +-smallest and largest denormal, quiet and signalling NaNs of both signs with payloads, +-inf, FLT_MAX, 1.0, 0xdeadbeef, 0xffffffff, a closing +0), through VFPU registers S000 and S733. No control register is written. No memory or host I/O runs inside a measured span.",
+        "issues": [
+          326
+        ],
+        "risk": "low but unmeasured; register-only VFPU cells on the main thread (VFPU attribute) with documented mtv.s/mfv.s forms that psp-as emits; no handler, timer, kernel call or device state is installed or changed; run with the owner present",
+        "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
+      },
+      {
         "id": "PSP-VFPU-BASICARITH-001",
         "status": "implemented",
         "hardware_evidence": "MEASURED",
