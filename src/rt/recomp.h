@@ -1474,6 +1474,16 @@ int sr_enhancement_file_register(const char *disc_path, const uint8_t stock_sha2
  * sr_enhancement_logic_slowed() may be called from the presenter thread. */
 void sr_enhancement_register_updates(const volatile uint32_t *counter);
 int sr_enhancement_logic_slowed(unsigned *rate);
+/* A clip_x_widen site (section 10.8), from generated code right after the call at the site
+ * returns: the guest pointer `base` plus each of the `count` offsets addresses a column-major 4x4
+ * float clip matrix, and its x output row (elements 0, 4, 8, 12) is scaled by 480 / (480 + 2 * wing),
+ * so a title's own visibility test accepts the same extra width the Widescreen wings draw. It does
+ * nothing while Widescreen is off (wing 0) or the run's cull key is off, so the guest sees its stock
+ * matrices; a matrix outside guest RAM is reported once on stderr and left alone. A matrix whose x
+ * row still holds the words this function wrote is not scaled again, so a title that does not rebuild
+ * a matrix at every call cannot be scaled twice; the call at the site must leave each listed matrix
+ * describing the camera it was built for (rewritten, or unchanged since the last call). */
+void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count);
 
 /* The kernel's record of the main module, emitted by tools/codegen.py from the ELF (PT_LOAD
  * segments, SceModuleInfo, section or program headers, and the syslib's
