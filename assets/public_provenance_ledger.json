@@ -5107,28 +5107,6 @@
       }
     },
     {
-      "path": "src/player/ui_renderer.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "native-player-021",
-        "evidence_tier": "N",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "src/player/ui_renderer.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "native-player-022",
-        "evidence_tier": "N",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
       "path": "src/player/update_check.c",
       "classification": "project_authored_attested",
       "evidence": {
