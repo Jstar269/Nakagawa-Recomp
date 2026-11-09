@@ -116,6 +116,9 @@ static VkSemaphore    s_swap_sem_done[8];
 
 static int      s_renderer_terminal = 0;
 static int      s_denorm_preserve_f32 = 0;   /* see sdl3vk_init: VK_KHR_shader_float_controls */
+static int      s_dst_read = SDL3VK_DST_READ_SNAPSHOT;   /* see sdl3vk_init: SR_GPU_DST_READ */
+static uint32_t s_dev_extensions = 0;        /* what vkCreateDevice was given (sdl3vk_get_vk) */
+static int      s_dev_features = 0, s_dev_features2 = 0;
 /* A quit request (window close, SDL_EVENT_QUIT, ESC) is sticky. Two call sites drain
  * the SDL event queue -- gui_pump's sdl3vk_poll() and every present -- and only the
  * former exits the process. When a present consumed the quit (the common case: it
@@ -150,6 +153,31 @@ static VkResult pstep_after(int step, VkResult r) {
 }
 
 #define PSTEP_VK(step, expr) (pstep_skips(step) ? s_pstep_fault_result : pstep_after((step), (expr)))
+
+/* Game-frame presents never wait for the presentation engine while this is set
+ * (sdl3vk_set_present_nowait); the s_present_busy_* counts are the frames returned not shown. */
+static int      s_present_nowait = 0;
+static uint64_t s_present_busy_image = 0;  /* acquire: the presentation engine held every image */
+static uint64_t s_present_busy_slot = 0;   /* the frame slot's submission was still pending */
+
+/* Fence-status seam for the same selftest: it stands in a frame slot whose submission is still
+ * pending. NULL in production, like s_acquire_fn below. */
+static VkResult (*s_fence_status_fn)(VkDevice, VkFence) = NULL;
+
+/* Acquire seam for the present-pacing selftest, which stands in a display that holds every
+ * image. File-static with no exported setter: only sdl3vk_selftest.inc, included below, sets it,
+ * and the production path is the NULL branch. */
+typedef VkResult (*Sdl3VkAcquireFn)(VkDevice, VkSwapchainKHR, uint64_t, VkSemaphore, VkFence,
+                                    uint32_t *);
+static Sdl3VkAcquireFn s_acquire_fn = NULL;
+
+static VkResult present_acquire(uint64_t timeout, VkSemaphore sem, uint32_t *idx) {
+    return s_acquire_fn ? s_acquire_fn(s_dev, s_swap, timeout, sem, VK_NULL_HANDLE, idx)
+                        : vkAcquireNextImageKHR(s_dev, s_swap, timeout, sem, VK_NULL_HANDLE, idx);
+}
+
+void sdl3vk_set_present_nowait(int on) { s_present_nowait = on ? 1 : 0; }
+uint64_t sdl3vk_present_busy_count(void) { return s_present_busy_image + s_present_busy_slot; }
 
 int sdl3vk_renderer_terminal(void) {
     return s_renderer_terminal;
@@ -329,6 +357,27 @@ static int wait_present_frame(PresentFrame *f) {
         }
     }
     return 1;
+}
+
+/* The no-wait form of wait_present_frame for a game-frame present under
+ * sdl3vk_set_present_nowait: 1 when the frame is free (its bookkeeping done as the wait does),
+ * 0 while its submission is still pending, -1 on failure (the renderer is terminal). The
+ * submission waited on its acquire semaphore, which a FIFO display may signal only at its own
+ * vblank, so a pending frame can be the display holding the guest back; under MAILBOX or
+ * IMMEDIATE it is the GPU running PRESENT_FRAMES presents behind. Either way the guest does
+ * not wait for it. */
+static int poll_present_frame(PresentFrame *f) {
+    if (!f->submitted || s_pstep_fault == PSTEP_FRAME_WAIT) return wait_present_frame(f) ? 1 : -1;
+    VkResult r = s_fence_status_fn ? s_fence_status_fn(s_dev, f->fence)
+                                   : vkGetFenceStatus(s_dev, f->fence);
+    if (r == VK_NOT_READY) return 0;
+    if (r != VK_SUCCESS) {
+        fprintf(stderr, "sdl3vk: present frame fence status failed: %d; the renderer is terminal\n",
+                (int)r);
+        s_renderer_terminal = 1;
+        return -1;
+    }
+    return wait_present_frame(f) ? 1 : -1;
 }
 
 static int wait_all_present_frames(void) {
@@ -851,11 +900,48 @@ int sdl3vk_init(const char *title) {
         VkExtensionProperties *xs = NULL;
         if (vkEnumerateDeviceExtensionProperties(s_pdev, NULL, &nx, NULL) == VK_SUCCESS && nx)
             xs = (VkExtensionProperties *)calloc(nx, sizeof(*xs));
-        int have = 0;
+        int have = 0, have_interlock = 0;
         if (xs && vkEnumerateDeviceExtensionProperties(s_pdev, NULL, &nx, xs) == VK_SUCCESS)
-            for (uint32_t i = 0; i < nx; i++)
+            for (uint32_t i = 0; i < nx; i++) {
                 if (strcmp(xs[i].extensionName, VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME) == 0) have = 1;
+                if (strcmp(xs[i].extensionName, VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME) == 0)
+                    have_interlock = 1;
+            }
         free(xs);
+        /* The destination-read path (#2109, sdl3vk.h). A forced path the device lacks is refused
+         * with its reason, and the snapshot runs. */
+        s_dst_read = SDL3VK_DST_READ_SNAPSHOT;
+        const char *dst_env = getenv("SR_GPU_DST_READ");
+        int dst_want = sdl3vk_parse_dst_read(dst_env);
+        if (dst_want == -1) {
+            fprintf(stderr, "sdl3vk: unknown SR_GPU_DST_READ '%s' (snapshot or interlock); using the "
+                            "default: the interlock where the device has it\n", dst_env);
+            dst_want = -2;
+        }
+        if (dst_want != SDL3VK_DST_READ_SNAPSHOT) {
+            const char *why = NULL;
+            if (!have_interlock) {
+                why = "no VK_EXT_fragment_shader_interlock";
+            } else {
+                VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT il = {
+                    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT };
+                VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                                 .pNext = &il };
+                VkFormatProperties fp;
+                vkGetPhysicalDeviceFeatures2(s_pdev, &f2);
+                vkGetPhysicalDeviceFormatProperties(s_pdev, VK_FORMAT_R8G8B8A8_UNORM, &fp);
+                if (!il.fragmentShaderPixelInterlock) why = "no fragmentShaderPixelInterlock";
+                else if (!f2.features.fragmentStoresAndAtomics) why = "no fragmentStoresAndAtomics";
+                else if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+                    why = "no RGBA8 storage image";
+            }
+            if (!why) s_dst_read = SDL3VK_DST_READ_INTERLOCK;
+            else if (dst_want == SDL3VK_DST_READ_INTERLOCK)
+                fprintf(stderr, "sdl3vk: SR_GPU_DST_READ=interlock refused (%s); destination reads use "
+                                "the snapshot\n", why);
+        }
+        fprintf(stderr, "sdl3vk: destination reads: %s\n",
+                s_dst_read == SDL3VK_DST_READ_INTERLOCK ? "interlock" : "snapshot");
         if (have) {
             VkPhysicalDeviceFloatControlsPropertiesKHR fc = {
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES_KHR };
@@ -865,17 +951,21 @@ int sdl3vk_init(const char *title) {
             s_denorm_preserve_f32 = fc.shaderDenormPreserveFloat32 == VK_TRUE;
         }
     }
-    const char *dev_ext[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                              VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME };
+    const char *dev_ext[3] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    uint32_t dev_ext_n = 1u;
+    if (s_denorm_preserve_f32) dev_ext[dev_ext_n++] = VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME;
+    if (s_dst_read == SDL3VK_DST_READ_INTERLOCK)
+        dev_ext[dev_ext_n++] = VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME;
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = s_denorm_preserve_f32 ? 2u : 1u;
+    dci.enabledExtensionCount = dev_ext_n;
     dci.ppEnabledExtensionNames = dev_ext;
-    /* Ace Mode's texture filtering (ace.h) is the only device feature the player ever asks
-     * for, and only in an Ace run that wants it: an authentic run creates the device with no
-     * features, as before. A device without it, or with less than 2x, runs without filtering
-     * and the run says why; a lower maximum clamps the level. */
+    /* Ace Mode's texture filtering (ace.h) is the only Ace device feature, asked for only in an
+     * Ace run that wants it. The other device features are the interlock path's (below), in every
+     * run where the device has them (docs/ENHANCEMENT_CONTRACT.md section 10.2); on the snapshot
+     * path an authentic run creates the device with no features. A device without filtering, or
+     * with less than 2x, runs without it and the run says why; a lower maximum clamps the level. */
     VkPhysicalDeviceFeatures ace_features = {0};
     if (g_ace_on && ace_effective()->af > 0) {
         VkPhysicalDeviceFeatures have;
@@ -893,6 +983,22 @@ int sdl3vk_init(const char *title) {
             ace_set_af_effective(0, "this GPU has no anisotropic filtering");
         }
     }
+    /* The interlock path's features go in one VkPhysicalDeviceFeatures2 chain with Ace's. The
+     * snapshot path keeps the form above: pEnabledFeatures or nothing, and no chain. */
+    VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT il_on = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT };
+    VkPhysicalDeviceFeatures2 f2_on = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+    if (s_dst_read == SDL3VK_DST_READ_INTERLOCK) {
+        il_on.fragmentShaderPixelInterlock = VK_TRUE;
+        f2_on.features = ace_features;
+        f2_on.features.fragmentStoresAndAtomics = VK_TRUE;
+        f2_on.pNext = &il_on;
+        dci.pNext = &f2_on;
+        dci.pEnabledFeatures = NULL;
+    }
+    s_dev_extensions = dci.enabledExtensionCount;
+    s_dev_features = dci.pEnabledFeatures != NULL;
+    s_dev_features2 = dci.pNext != NULL;
     INIT_VK(vkCreateDevice(s_pdev, &dci, NULL, &s_dev));
     vkGetDeviceQueue(s_dev, s_qfam, 0, &s_queue);
 
@@ -1482,6 +1588,10 @@ int sdl3vk_get_vk(Sdl3VkInfo *out) {
     out->queue_family = s_qfam;
     out->denorm_preserve_f32 = s_denorm_preserve_f32;
     out->get_instance_proc_addr = (void *)vkGetInstanceProcAddr;
+    out->dst_read = s_dst_read;
+    out->device_extensions = s_dev_extensions;
+    out->device_features = s_dev_features;
+    out->device_features2 = s_dev_features2;
     return 1;
 }
 
@@ -1870,6 +1980,13 @@ int sdl3vk_parse_present_scaling(const char *value) {
     if (!value || !value[0] || strcmp(value, "sharp") == 0) return SDL3VK_SCALING_SHARP;
     if (strcmp(value, "integer") == 0) return SDL3VK_SCALING_INTEGER;
     if (strcmp(value, "bilinear") == 0) return SDL3VK_SCALING_BILINEAR;
+    return -1;
+}
+
+int sdl3vk_parse_dst_read(const char *value) {
+    if (!value || !value[0]) return -2;
+    if (strcmp(value, "snapshot") == 0) return SDL3VK_DST_READ_SNAPSHOT;
+    if (strcmp(value, "interlock") == 0) return SDL3VK_DST_READ_INTERLOCK;
     return -1;
 }
 
@@ -2331,7 +2448,13 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
     poll_input(&quit);
     if (quit) { why = "window closed during present"; goto fail_quit; }
     PresentFrame *f = &s_frame[s_frame_cursor];
-    if (!wait_present_frame(f)) { why = "present frame fence wait failed"; goto fail; }
+    if (s_present_nowait) {
+        /* The guest's clock must not wait for the display (sdl3vk_set_present_nowait): a frame
+         * slot the display still holds means the display cannot take this frame now. */
+        int free_slot = poll_present_frame(f);
+        if (free_slot < 0) { why = "present frame fence wait failed"; goto fail; }
+        if (free_slot == 0) { s_present_busy_slot++; goto display_busy; }
+    } else if (!wait_present_frame(f)) { why = "present frame fence wait failed"; goto fail; }
     /* A picture probe read back by an earlier present is published once its frame's fence
      * has signalled; never waited for here, and always before this slot is reused. */
     (void)cap_probe_resolve(0);
@@ -2344,8 +2467,15 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
 
     for (int attempt = 0; attempt < 2; attempt++) {
         uint32_t idx = 0;
-        VkResult ar = PSTEP_VK(PSTEP_ACQUIRE, vkAcquireNextImageKHR(s_dev, s_swap, UINT64_MAX,
-                                                                    f->sem_acq, VK_NULL_HANDLE, &idx));
+        /* Under no-wait, timeout 0: VK_NOT_READY (or VK_TIMEOUT) means every image is still
+         * held by the presentation engine. Nothing was acquired and f->sem_acq will not be
+         * signalled, so returning leaves no image or semaphore behind (#1377). */
+        VkResult ar = PSTEP_VK(PSTEP_ACQUIRE, present_acquire(s_present_nowait ? 0 : UINT64_MAX,
+                                                              f->sem_acq, &idx));
+        if (s_present_nowait && (ar == VK_NOT_READY || ar == VK_TIMEOUT)) {
+            s_present_busy_image++;
+            goto display_busy;
+        }
         if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
             if (!create_swapchain()) { why = "swapchain recreation failed"; goto fail; }
             continue;
@@ -2666,10 +2796,12 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         break;
     }
     if (!presented) { why = "swapchain still out of date after recreation"; goto fail; }
-    /* Only a picture that reached the screen is recorded; the recorder reads it at its VBLANK. */
+    /* Only a picture that reached the screen is recorded; the recorder reads it at its VBLANK.
+     * Registering first lets the recorder read a kept picture still pending (an in-between,
+     * sr_videorec_frame_keep) through s_rec_pending before this one takes its place. */
     if (rec_in_submit) {
-        s_rec_pending = f;
         sr_videorec_frame_pending(rec_resolve);
+        s_rec_pending = f;
     }
 
     /* Complete the armed capture only now that this frame is known to have reached the
@@ -2702,6 +2834,11 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
             sr_capture_publish_recorded(s_cap.map, s_cap_w * 4u, s_cap_order);
     }
     return 1;
+
+display_busy:
+    /* Not shown and not a failure: the window keeps the frame the display already has, and an
+     * armed capture stays unserviced, so the caller resolves it as nothing attempted (fbcap.h). */
+    return SDL3VK_PRESENT_DISPLAY_BUSY;
 
 fail_acquired:
     /* Between a successful acquire and the submit: the image stays acquired and f->sem_acq
@@ -3109,6 +3246,15 @@ int sdl3vk_present_overlay(const void *px, int pitch) {
  * SDL_Init is undone with SDL_QuitSubSystem, not SDL_Quit, so the audio backend's subsystem
  * (audio_sdl3.c) stays up until that backend's own cleanup. */
 void sdl3vk_shutdown(void) {
+    if (s_present_busy_image || s_present_busy_slot) {
+        fprintf(stderr, "sdl3vk: %llu game frame(s) not shown rather than waited for: %llu with "
+                        "every swapchain image still held by the presentation engine, %llu with "
+                        "the frame slot's earlier submission still pending\n",
+                (unsigned long long)(s_present_busy_image + s_present_busy_slot),
+                (unsigned long long)s_present_busy_image, (unsigned long long)s_present_busy_slot);
+        s_present_busy_image = 0;
+        s_present_busy_slot = 0;
+    }
     sdl3vk_overlay_release();
     if (s_dev) {
         (void)wait_all_present_frames();

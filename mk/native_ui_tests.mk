@@ -111,7 +111,7 @@ nk-ui-player-screens-capture: export SDL_RENDER_DRIVER := software
 nk-ui-player-screens-capture:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -DNK_UI_WITH_SDL -DNK_UI_WITH_SDL_TTF -DNK_UI_SCREEN_CAPTURE \
-		-Isrc/ui -Isrc/player/ui -Ithird_party/clay $(SDL3_TTF_CFLAGS) \
+		-Isrc/core -Isrc/player -Isrc/ui -Isrc/player/ui -Ithird_party/clay $(SDL3_TTF_CFLAGS) \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		$(NK_UI_CORE_SRCS) src/ui/nk_ui_ttf.c src/ui/backend/nk_ui_sdlr.c \
 		src/player/ui/ui_router.c src/player/ui/scr_library.c $(NK_UI_PLAYER_TITLE_SRCS) \

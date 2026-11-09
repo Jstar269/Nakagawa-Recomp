@@ -18,6 +18,12 @@
  *   depth-band      a band that matches the scene behind it in the old frame: only depth tells the
  *                   band's vector from the scene's at its edge; the depth image is only read
  *   aux-neutral     an empty mask gives the same bytes as no mask
+ *   figure-kept     a figure that stands still while its pose changes stays whole: a plain
+ *                   floor's vector never wipes out what both frames show
+ *   figure-posed    a figure whose two poses hardly overlap is whole in the in-between, as the
+ *                   old frame or the new: where the search can only guess, the in-between repeats
+ *                   the old frame. A limit: a small fast shape near a guess stays where it was
+ *   figure-textured the same figure on a textured floor, where a floor's vector fits only nearly
  *
  * Exit 77 (SKIP) without a Vulkan loader or device.
  */
@@ -941,6 +947,181 @@ static void cell_aux_neutral(void) {
     free(first);
 }
 
+/* A figure that stands still on a plain floor while its pose changes (a player serving): no
+ * vector carries it, and on a plain floor a vector that carries the floor fits as well as any.
+ * Both frames show the figure here, so the in-between must too: before the search marked such a
+ * vector as a guess, the floor's vector wiped most of it out for one picture. A shape moving beside
+ * it keeps the search busy, as a ball does. */
+#define FIG_X 300
+#define FIG_Y 120
+#define FIG_W 24
+#define FIG_H 48
+#define FLOOR_PX 0xFF6A4A30u
+
+static void paint_figure(int w, int h, int pose, int shape_x) {
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            uint32_t v = FLOOR_PX;
+            if (x >= shape_x && x < shape_x + 16 && y >= 40 && y < 56) v = 0xFF20C0F0u;
+            if (x >= FIG_X && x < FIG_X + FIG_W && y >= FIG_Y && y < FIG_Y + FIG_H) {
+                /* Bands that shift with the pose, so no single vector carries the figure. */
+                int band = ((y - FIG_Y) + pose * 5 + ((x - FIG_X) * pose) / 7) / 6;
+                v = (band & 1) ? 0xFFE0E0E0u : 0xFF2030C0u;
+            }
+            g.map[y * w + x] = v;
+        }
+    }
+}
+
+static void cell_figure_kept(void) {
+    int w = 480, h = 272;
+    Source src;
+    memset(&src, 0, sizeof(src));
+    AceBetween *s = smooth_new();
+    if (!s || !source_make(&src, w, h)) { CHECK(0, "figure setup failed"); ace_smooth_destroy(s); return; }
+    paint_figure(w, h, 0, 100);
+    source_fill(&src, w, h, 1);
+    (void)feed(s, &src, w, h, 0);
+    paint_figure(w, h, 3, 124);
+    source_fill(&src, w, h, 0);
+    VkImage mid = feed(s, &src, w, h, 1);
+    CHECK(mid != VK_NULL_HANDLE, "figure: no in-between");
+    if (mid) {
+        image_read(mid, w, h);
+        int on_floor = 0, total = 0;
+        for (int y = FIG_Y; y < FIG_Y + FIG_H; y++) {
+            for (int x = FIG_X; x < FIG_X + FIG_W; x++) {
+                uint32_t v = g.map[y * w + x];
+                int dr = abs((int)(v & 255u) - (int)(FLOOR_PX & 255u));
+                int dg = abs((int)((v >> 8) & 255u) - (int)((FLOOR_PX >> 8) & 255u));
+                int db = abs((int)((v >> 16) & 255u) - (int)((FLOOR_PX >> 16) & 255u));
+                if (dr < 24 && dg < 24 && db < 24) on_floor++;
+                total++;
+            }
+        }
+        printf("  figure-kept: %d of %d figure px show the floor\n", on_floor, total);
+        CHECK(on_floor == 0, "figure-kept: %d of %d figure px show the floor", on_floor, total);
+    }
+    DeviceWaitIdle(g.device);
+    ace_smooth_destroy(s);
+    DestroyImage(g.device, src.image, NULL);
+    FreeMemory(g.device, src.memory, NULL);
+}
+
+/* A figure whose pose changes so much that its two pictures hardly overlap (a player swinging
+ * into a serve): standing in the old frame, crouched with an arm up in the new one, on a plain
+ * floor, while a small shape crosses the floor further than its own width. Each pixel of the
+ * figure is floor in one of the two frames, so a vector that carries the floor fits everywhere on
+ * it, and taking whichever frame shows floor wiped the figure out as a whole. The in-between must
+ * show the figure whole, as one frame or the other. The shape shows a limit of that fallback: its
+ * blocks guess too, so it stays whole where it was in the old frame instead of moving halfway.
+ * On the textured floor of the other cells a vector that carries the floor fits only nearly, and
+ * the search must tell it from one that carries the figure (no shape there). Run at four
+ * positions against the search's blocks. */
+#define POSE_Y 120
+#define POSE_SHAPE 0xFF20C0F0u
+
+static uint32_t posed_px(int x, int y, int pose, int pose_x) {
+    int fx = x - pose_x, fy = y - POSE_Y;
+    if (pose == 0) {
+        if (fx >= 0 && fx < 10 && fy >= 0 && fy < 48)
+            return (fy / 6) & 1 ? 0xFFE0E0E0u : 0xFF2030C0u;
+    } else {
+        if (fx >= 8 && fx < 30 && fy >= 26 && fy < 48)
+            return (fx / 5) & 1 ? 0xFFE0E0E0u : 0xFFC03020u;
+        if (fx >= 24 && fx < 28 && fy >= 2 && fy < 26) return 0xFF80B0F0u;
+    }
+    return 0;
+}
+
+/* The floor under the posed figure: plain, or the textured floor of the other cells. */
+static uint32_t posed_floor(int x, int y, int textured) {
+    if (!textured) return FLOOR_PX;
+    return floor_px(x, y, 0);
+}
+
+/* shape_x < 0: no shape. */
+static void paint_posed(int w, int h, int pose, int pose_x, int shape_x, int textured) {
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            uint32_t v = posed_floor(x, y, textured);
+            if (shape_x >= 0 && x >= shape_x && x < shape_x + 16 && y >= 40 && y < 56) v = POSE_SHAPE;
+            uint32_t f = posed_px(x, y, pose, pose_x);
+            g.map[y * w + x] = f ? f : v;
+        }
+    }
+}
+
+/* Any channel 24 or more away. */
+static int px_off(uint32_t got, uint32_t want) {
+    for (int c = 0; c < 24; c += 8)
+        if (abs((int)((got >> c) & 255u) - (int)((want >> c) & 255u)) >= 24) return 1;
+    return 0;
+}
+
+static void posed_run(int textured) {
+    const char *name = textured ? "figure-textured" : "figure-posed";
+    int w = 480, h = 272;
+    for (int at = 0; at < 4; at++) {
+        int pose_x = 300 + at;
+        Source src;
+        memset(&src, 0, sizeof(src));
+        AceBetween *s = smooth_new();
+        if (!s || !source_make(&src, w, h)) { CHECK(0, "%s setup failed", name); ace_smooth_destroy(s); return; }
+        paint_posed(w, h, 0, pose_x, textured ? -1 : 100, textured);
+        source_fill(&src, w, h, 1);
+        (void)feed(s, &src, w, h, 0);
+        paint_posed(w, h, 1, pose_x, textured ? -1 : 124, textured);
+        source_fill(&src, w, h, 0);
+        VkImage mid = feed(s, &src, w, h, 1);
+        CHECK(mid != VK_NULL_HANDLE, "%s: no in-between", name);
+        if (mid) {
+            image_read(mid, w, h);
+            /* Over both pictures of the figure: the pixels unlike the old frame, and unlike the new. */
+            int off_a = 0, off_b = 0, total = 0;
+            for (int y = POSE_Y; y < POSE_Y + 48; y++) {
+                for (int x = pose_x; x < pose_x + 30; x++) {
+                    uint32_t a = posed_px(x, y, 0, pose_x), b = posed_px(x, y, 1, pose_x);
+                    if (!a && !b) continue;
+                    uint32_t got = g.map[y * w + x], fl = posed_floor(x, y, textured);
+                    off_a += px_off(got, a ? a : fl);
+                    off_b += px_off(got, b ? b : fl);
+                    total++;
+                }
+            }
+            printf("  %s at %d: %d of %d figure px unlike the old frame, %d unlike the new\n", name, pose_x,
+                   off_a, total, off_b);
+            CHECK(off_a == 0 || off_b == 0, "%s at %d: %d of %d px unlike the old frame, %d unlike the new", name,
+                  pose_x, off_a, total, off_b);
+            if (!textured) {
+                /* The shape crossed more than its width, so its midpoint is partly floor in both
+                 * frames, which the in-between copies: it cannot be drawn there. Beside a guess it
+                 * keeps the old frame instead, whole where it was: 256 px there, none elsewhere. */
+                int there = 0, elsewhere = 0;
+                for (int y = 32; y < 64; y++) {
+                    for (int x = 80; x < 160; x++) {
+                        if (px_off(g.map[y * w + x], POSE_SHAPE)) continue;
+                        if (x >= 100 && x < 116 && y >= 40 && y < 56) there++;
+                        else elsewhere++;
+                    }
+                }
+                printf("  %s at %d: shape %d of 256 px where it was in the old frame, %d px elsewhere\n", name,
+                       pose_x, there, elsewhere);
+                CHECK(there == 256 && elsewhere == 0, "%s at %d: shape %d of 256 px at its old place, %d elsewhere",
+                      name, pose_x, there, elsewhere);
+            }
+        }
+        DeviceWaitIdle(g.device);
+        ace_smooth_destroy(s);
+        DestroyImage(g.device, src.image, NULL);
+        FreeMemory(g.device, src.memory, NULL);
+    }
+}
+
+static void cell_figure_posed(void) { posed_run(0); }
+static void cell_figure_textured(void) { posed_run(1); }
+
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     char why[128] = "";
@@ -959,6 +1140,9 @@ int main(int argc, char **argv) {
     cell_depth_band(1);
     cell_depth_band(2);
     cell_aux_neutral();
+    cell_figure_kept();
+    cell_figure_posed();
+    cell_figure_textured();
     gpu_close();
     printf(s_fail ? "ace-smooth-selftest: FAIL\n" : "ace-smooth-selftest: PASS\n");
     return s_fail ? 1 : 0;

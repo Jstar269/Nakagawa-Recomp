@@ -128,6 +128,8 @@ static int set_env(const char *name, const char *value) {
  * as an absolute path, the data root (SR_USER_DATA_ROOT), so the cache lives in DIR/cache/gegpu
  * as it would under a launcher's root; without it the harness turns the cache off, so a
  * selftest never reads or writes the user's cache folder.
+ * `--dst-read snapshot|interlock` sets SR_GPU_DST_READ (#2109), which sdl3vk_init reads before it
+ * makes the device.
  * Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe does not accept. */
 int main(int argc, char **argv) {
     int twin_arg = 0, authentic = 0, repl_only = 0, pcache_arg = 0;
@@ -151,7 +153,8 @@ int main(int argc, char **argv) {
                          : strcmp(argv[i], "--glyphs") == 0 ? "SR_GLYPHS"
                          : strcmp(argv[i], "--gpu-timestamps") == 0 ? "SR_GPU_TIMESTAMPS"
                          : strcmp(argv[i], "--twin") == 0 ? "SR_GPU_TWIN_COLOR"
-                         : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF" : NULL;
+                         : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF"
+                         : strcmp(argv[i], "--dst-read") == 0 ? "SR_GPU_DST_READ" : NULL;
         if (!name || i + 1 >= argc || !set_env(name, argv[++i])) {
             fprintf(stderr, "usage: gpu_coherence_selftest [--scale N] [--case scaled-upload|mip-lod]\n");
             return 2;

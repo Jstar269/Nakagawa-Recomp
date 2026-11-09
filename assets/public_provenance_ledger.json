@@ -750,6 +750,17 @@
       }
     },
     {
+      "path": "android/app/src/main/java/io/github/jstar269/nakagawa/TitleLibrary.java",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "android_host_360_20261029",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "android/app/src/main/res/values/strings.xml",
       "classification": "project_authored_attested",
       "evidence": {
@@ -805,39 +816,6 @@
       }
     },
     {
-      "path": "android/toolchain/PROVENANCE.md",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "android_toolchain_360_20261109",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "android/toolchain/nk_ld_launcher.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "android_toolchain_360_20261109",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "android/toolchain/sysroot-inputs.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "android_toolchain_360_20261109",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
       "path": "assets/README.md",
       "classification": "reviewed_documentation",
       "evidence": {
@@ -884,6 +862,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "enhancement-package-schema-327",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "assets/enhancements/ucus98701-60hz.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ace_public_hst_60hz_20261109",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -3056,6 +3045,17 @@
       }
     },
     {
+      "path": "fixtures/psp_oracle/probe_hle_self_stop_helper.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "psp_oracle_self_stop_helper_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "fixtures/psp_oracle/probe_insn_trace.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -5135,28 +5135,6 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "player-ui-clip-scope",
         "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "src/player/ui_renderer.c",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "native-player-021",
-        "evidence_tier": "N",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "src/player/ui_renderer.h",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "native-player-022",
-        "evidence_tier": "N",
         "authorship": "independent implementation record",
         "upstream_attribution": null
       }
@@ -7454,6 +7432,18 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "ge-shader-embeds",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "GPL-2.0-or-later",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "src/rt/gpu_sdl3vk/psp_frag_rmw.inc",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge-shader-embed-rmw-2109",
         "evidence_tier": "S",
         "upstream": "documented upstream family",
         "license": "GPL-2.0-or-later",
@@ -12464,6 +12454,17 @@
       }
     },
     {
+      "path": "tests/native/ge_tnl_census_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge-tnl-census-selftest-318",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/gpu_capture_selftest.c",
       "classification": "project_authored_attested",
       "evidence": {
@@ -16226,33 +16227,11 @@
       }
     },
     {
-      "path": "tools/android_stubgen.py",
+      "path": "tools/android_test_runner.py",
       "classification": "project_authored_attested",
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "android_toolchain_360_20261109",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "tools/android_sysroot.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "android_toolchain_360_20261109",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "tools/android_toolchain.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "android_toolchain_360_20261109",
+        "record_id": "android_host_360_20261029",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
@@ -18288,39 +18267,6 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "android_host_360_20261029",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "tools/test_android_stubgen.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "android_toolchain_360_20261109",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "tools/test_android_sysroot.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "android_toolchain_360_20261109",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
-      "path": "tools/test_android_toolchain.py",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "android_toolchain_360_20261109",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
