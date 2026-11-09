@@ -342,12 +342,22 @@ keeps the inherited value, as the movie upscaler has no setting.
 ### 10.2. Authentic Is Untouched
 
 With `SR_ACE=off` (the default: players opt in) every Ace branch sits behind one switch that stays false: the Vulkan
-device is created with no features, every sampler and the texture descriptor pool are as before, the presenter
-registers no UI pass, and the observation counters do not run. Nothing is printed, except one `TEX_SCALE: off`
-line when the environment asks for texture scaling or the smart 2D filter, which names the request and does not obey
-it (section 10.10), and one `TWIN: off` or `TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes
-nothing else (section 10.11). `gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its
-image hash.
+device is created with no Ace feature (its one other feature setting is the destination-read path below), every
+sampler and the texture descriptor pool are as before, the presenter registers no UI pass, and the observation
+counters do not run. Nothing is printed, except one `TEX_SCALE: off` line when the environment asks for texture
+scaling or the smart 2D filter, which names the request and does not obey it (section 10.10), one `TWIN: off` or
+`TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes nothing else (section 10.11), one line that
+names an unknown or refused `SR_GPU_DST_READ` value, which changes nothing else, and the
+`sdl3vk: destination reads: interlock|snapshot` line that every run prints (below).
+`gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its image hash.
+
+One device feature setting outside Ace applies to every run, Authentic included, because it is a correctness fix and not an
+enhancement: the destination-read path of shader blends and the stencil test (#2109,
+[`src/rt/gpu_sdl3vk/README.md`](../src/rt/gpu_sdl3vk/README.md)). On a device with
+`VK_EXT_fragment_shader_interlock`, `fragmentShaderPixelInterlock`, `fragmentStoresAndAtomics` and RGBA8 storage
+images, the device enables that extension and those two features, unless `SR_GPU_DST_READ=snapshot` forces the
+snapshot path, so primitives of one batch blend in drawing order, as on the PSP and in `ge.c`. On the snapshot path
+the device is created with no feature outside Ace.
 
 ### 10.3. What Ace Changes, and What It Never Changes
 
