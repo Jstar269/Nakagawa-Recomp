@@ -442,6 +442,14 @@ With `smooth=x2`, a title the 30 Hz detector holds steady at 30 presents at the 
   behind it.
 - **Cuts.** When a third of the blocks fit nothing or disagree with their neighbours, the two frames are different
   pictures: the in-between is the old frame, and the new one follows on its VBLANK.
+- **Where the search guesses.** In a block whose two frames differ, a vector is a guess when moving it two samples
+  fits the colours no worse (a plain floor), or when, at half or more of the changed samples, it joins content that
+  looks alike but differs and that neither it nor the coarser level's 3x3 vectors carry unchanged (a textured
+  floor). Every changed pixel within two blocks of a guess keeps the old frame. So a figure whose pose changes too
+  much for any vector (a player serving on a plain court) shows whole, as in the old frame, and never partly as
+  floor. This supersedes the earlier figure-flicker limit. Limits: in such a scene most moving pixels repeat the
+  real frame instead of moving halfway; a small fast object near a guess (a ball in hand) freezes where it was in
+  the old frame; and on strongly blocky textured floors a few pixels can still be wrong (4 to 12 in a probe).
 - **What it never touches.** The in-between and the held frame are private images blitted to the swapchain. The
   flip's own present still commits the real frame to guest VRAM and gives any capture the real frame. The VBLANK's
   present latches no input and serves no capture.
