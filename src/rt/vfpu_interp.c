@@ -452,7 +452,10 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                     else r = (ai < 0 && bi < 0) ? (ai < bi ? ai : bi) : (bi < ai ? ai : bi);
                     memcpy(&d[i], &r, 4);
                 } else {
-                    d[i] = s3 == 2 ? (a[i] < b[i] ? a[i] : b[i]) : (b[i] < a[i] ? a[i] : b[i]);
+                    /* A denormal compares as a zero, and a tie returns the second operand
+                     * unflushed (PSP-3000, W-CPU-VFPU-2 row 1, 2026-11-08). */
+                    const float fa = sr_vfpu_daz(a[i]), fb = sr_vfpu_daz(b[i]);
+                    d[i] = s3 == 2 ? (fa < fb ? a[i] : b[i]) : (fb < fa ? a[i] : b[i]);
                 }
             }
             VFPU_NAN(s3 == 2 ? "vmin.s" : "vmax.s", d, n, a, n, b, n);
@@ -913,8 +916,8 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         sr_vread(a, s, si, n, s->vfpuCtrl[0]);
         sr_vread(b, s, ti, n, s->vfpuCtrl[1]);
         for (int i = 0; i < n; i++)
-            d[i] = op == 0x19 ? sr_vf_mul(a[i], b[i])
-                  : sub == 0 ? sr_vf_add(a[i], b[i]) : sub == 1 ? sr_vf_sub(a[i], b[i]) : sr_vf_div(a[i], b[i]);
+            d[i] = op == 0x19 ? sr_vfpu_mul(a[i], b[i])
+                  : sub == 0 ? sr_vfpu_add(a[i], b[i]) : sub == 1 ? sr_vfpu_sub(a[i], b[i]) : sr_vfpu_div(a[i], b[i]);
         VFPU_NAN(op == 0x19 ? "vmul.s" : sub == 0 ? "vadd.s"
                  : sub == 1 ? "vsub.s" : "vdiv.s", d, n, a, n, b, n);
         sr_vwrite(s, di, d, n, s->vfpuCtrl[2]); eat_prefix(s); return SR_VFPU_COMPUTE;
@@ -963,7 +966,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         vreg_idx(vd, n, di); vreg_idx(vs, n, si);
         sr_vread(a, s, si, n, s->vfpuCtrl[0]);
         float scalar = s->v[sc[0]];
-        for (int i = 0; i < n; i++) d[i] = sr_vf_mul(a[i], scalar);
+        for (int i = 0; i < n; i++) d[i] = sr_vfpu_mul(a[i], scalar);
         VFPU_NAN("vscl.s", d, n, a, n, (const float *)&scalar, 1);
         sr_vwrite(s, di, d, n, s->vfpuCtrl[2]); eat_prefix(s); return SR_VFPU_COMPUTE;
     }

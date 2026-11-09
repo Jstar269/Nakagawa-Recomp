@@ -388,7 +388,7 @@ int main(void) {{
         # Issue #326: C leaves the NaN a NaN-producing + - * / returns to the host, and an
         # optimiser may swap the operands of + and *. The generated code and sr_vfpu_interp
         # disagreed on NaN words at -O1/-O2 until every lane operation went through the
-        # sr_vf_* helpers in src/rt/recomp.h, so no form may emit a bare float operator.
+        # sr_vf_* and sr_vfpu_* helpers in src/rt/recomp.h, so no form may emit a bare float operator.
         words = {
             "vadd.q": 0x60048800 | 0x8080, "vsub.t": 0x60848800 | 0x8000, "vdiv.p": 0x63848880,
             "vmul.s": 0x64048800, "vdot.q": 0x64848880 | 0x8000, "vhdp.t": 0x66048800 | 0x8000,
@@ -402,7 +402,12 @@ int main(void) {{
             with self.subTest(form=name, word=f"0x{word:08x}"):
                 effect, _, _ = codegen.vfpu_effect(0x5500, word)
                 self.assertNotIn("sr_vfpu_interp", effect)
-                self.assertIn("sr_vf_", effect)
+                self.assertRegex(effect, r"sr_vf(pu)?_")
+                if name in ("vadd.q", "vsub.t", "vdiv.p", "vmul.s", "vscl.q"):
+                    # The measured PSP-3000 lane rule (W-CPU-VFPU-2 row 1, 2026-11-08), not the
+                    # project NaN rule the unmeasured forms still use.
+                    self.assertIn("sr_vfpu_", effect)
+                    self.assertNotIn("sr_vf_", effect)
                 self.assertIsNone(bare.search(effect), effect)
 
 

@@ -2145,6 +2145,209 @@ static int check_vrexp2_measured_words(void) {
     return bad;
 }
 
+/* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-basic-arith, W-CPU-VFPU-2
+ * row 1; its register entry is not in this tree yet): vadd, vsub, vmul, vscl, vdiv.s, vmin and
+ * vmax over 20 operand classes, all 400 ordered pairs, identical at .s/.p/.t/.q. The reference
+ * below states the measured rule; it matched every one of the 400 pairs of each form in the
+ * console's table (checked off-tree against the private decode). The literal cells pin
+ * values quoted from that run independently of the reference. */
+static const uint32_t ar_ops[20] = {
+    0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u, 0x007fffffu, 0x807fffffu, 0x00800000u,
+    0x80800000u, 0x3f800000u, 0xbf800000u, 0x7f000000u, 0xff000000u, 0x7f7fffffu, 0xff7fffffu,
+    0x7f800000u, 0xff800000u, 0x7fc00011u, 0xffc00022u, 0x7f800033u, 0xff800044u};
+static const char *const ar_opname[7] = {"vadd", "vsub", "vmul", "vdiv", "vscl", "vmin", "vmax"};
+
+static uint32_t ar_daz(uint32_t b) { return (b & 0x7f800000u) == 0u ? (b & 0x80000000u) : b; }
+static int ar_isnan(uint32_t b) { return (b & 0x7fffffffu) > 0x7f800000u; }
+static int ar_isinf(uint32_t b) { return (b & 0x7fffffffu) == 0x7f800000u; }
+static int ar_iszero(uint32_t b) { return (b & 0x7fffffffu) == 0u; }
+static float ar_f(uint32_t b) { float f; memcpy(&f, &b, 4); return f; }
+static uint32_t ar_b(float f) { uint32_t b; memcpy(&b, &f, 4); return b; }
+static int64_t ar_key(uint32_t b) {
+    b = ar_daz(b);
+    return (b >> 31) ? -(int64_t)(b & 0x7fffffffu) : (int64_t)(b & 0x7fffffffu);
+}
+
+/* op: 0 vadd, 1 vsub, 2 vmul, 3 vdiv, 4 vscl (a lane times the scalar b), 5 vmin, 6 vmax. */
+static uint32_t ar_ref(int op, uint32_t a, uint32_t b) {
+    if (op == 5) return ar_key(a) < ar_key(b) ? a : b;
+    if (op == 6) return ar_key(b) < ar_key(a) ? a : b;
+    a = ar_daz(a);
+    b = ar_daz(b);
+    const int nan_in = ar_isnan(a) || ar_isnan(b);
+    const uint32_t xs = (a ^ b) & 0x80000000u;
+    uint32_t r;
+    if (op == 0 || op == 1) {
+        /* inf + (-inf) and inf - inf are the invalid operations. */
+        if (nan_in || (ar_isinf(a) && ar_isinf(b) && (((a ^ b) >> 31) != (uint32_t)op)))
+            return 0x7f800001u;
+        r = ar_b(op == 0 ? ar_f(a) + ar_f(b) : ar_f(a) - ar_f(b));
+    } else if (op == 3) {
+        if (nan_in || (ar_isinf(a) && ar_isinf(b)) || (ar_iszero(a) && ar_iszero(b)))
+            return 0x7f800001u | xs;
+        r = ar_b(ar_f(a) / ar_f(b));
+    } else {
+        if (nan_in || (ar_isinf(a) && ar_iszero(b)) || (ar_iszero(a) && ar_isinf(b)))
+            return 0x7f800001u | xs;
+        r = ar_b(ar_f(a) * ar_f(b));
+    }
+    return ar_daz(r);
+}
+
+static int check_vfpu_basic_arith_measured(void) {
+    int bad = 0, reported = 0;
+    for (int op = 0; op < 7; op++) {
+        for (int wide = 0; wide < 2; wide++) {
+            char name[32];
+            snprintf(name, sizeof(name), "arith-%s-%c", ar_opname[op], wide ? 'q' : 's');
+            const int c = find_overlap_diff_case(name);
+            CHECK(c >= 0, "basic-arith word is in the overlap-diff header");
+            if (c < 0) { bad = 1; continue; }
+            const uint32_t w = overlap_diff_cases[c].w;
+            const int n = wide ? 4 : 1;
+            for (int ia = 0; ia < 20; ia++) {
+                for (int ib = 0; ib < 20; ib++) {
+                    uint8_t si[4], ti[4], di[4];
+                    uint32_t av[4], bv[4], want[4];
+                    CpuState aot, interp;
+                    setup_identity_compute(&aot);
+                    for (int i = 0; i < 128; i++) aot.vi[i] = 0x7a5a5a00u + (uint32_t)i;
+                    vreg_idx((int)((w >> 8) & 0x7fu), n, si);
+                    vreg_idx((int)((w >> 16) & 0x7fu), op == 4 ? 1 : n, ti);
+                    vreg_idx((int)(w & 0x7fu), n, di);
+                    for (int k = 0; k < n; k++) {
+                        av[k] = ar_ops[(ia + k) % 20];
+                        bv[k] = op == 4 ? ar_ops[ib] : ar_ops[(ib + 3 * k) % 20];
+                        want[k] = ar_ref(op, av[k], bv[k]);
+                        aot.vi[si[k]] = av[k];
+                        if (op != 4) aot.vi[ti[k]] = bv[k];
+                    }
+                    if (op == 4) aot.vi[ti[0]] = ar_ops[ib];
+                    interp = aot;
+                    overlap_diff_run_codegen(&aot, c);
+                    const int kind = sr_vfpu_interp(&interp, w);
+                    int ok = kind == SR_VFPU_COMPUTE && memcmp(aot.vi, interp.vi, sizeof(aot.vi)) == 0;
+                    for (int k = 0; k < n; k++)
+                        ok &= aot.vi[di[k]] == want[k] && interp.vi[di[k]] == want[k];
+                    g_checks++;
+                    if (!ok) {
+                        g_failures++;
+                        bad = 1;
+                        if (reported++ < 12)
+                            fprintf(stderr,
+                                    "FAIL: %s a=0x%08x b=0x%08x psp=0x%08x aot=0x%08x interp=0x%08x\n",
+                                    name, av[0], bv[0], want[0], aot.vi[di[0]], interp.vi[di[0]]);
+                    }
+                }
+            }
+        }
+    }
+    /* Literal cells quoted from the console's run (all at .s, lane 0). */
+    static const struct { int op; uint32_t a, b, want; const char *what; } cells[] = {
+        {5, 0x00000001u, 0x3f800000u, 0x00000001u, "vmin(+dmin, +1) keeps the denormal raw"},
+        {5, 0x00000001u, 0x00000000u, 0x00000000u, "vmin(+dmin, +0): tie, second operand"},
+        {6, 0x00000000u, 0x00000001u, 0x00000001u, "vmax(+0, +dmin): tie, second operand"},
+        {5, 0x00000000u, 0x80000000u, 0x80000000u, "vmin(+0, -0) = -0"},
+        {5, 0x80000000u, 0x00000000u, 0x00000000u, "vmin(-0, +0) = +0"},
+        {6, 0x00000000u, 0x80000000u, 0x80000000u, "vmax(+0, -0) = -0"},
+        {6, 0x80000000u, 0x00000000u, 0x00000000u, "vmax(-0, +0) = +0"},
+        {6, 0x7f800000u, 0x7fc00011u, 0x7fc00011u, "vmax(+inf, +qNaN) = the NaN, payload kept"},
+        {5, 0x7f800000u, 0x7fc00011u, 0x7f800000u, "vmin(+inf, +qNaN) = +inf"},
+        {5, 0x3f800000u, 0xffc00022u, 0xffc00022u, "vmin(+1, -qNaN) = the NaN"},
+        {0, 0x7fc00011u, 0x3f800000u, 0x7f800001u, "vadd with a NaN operand is 0x7f800001"},
+        {1, 0x7f800000u, 0x7f800000u, 0x7f800001u, "vsub(inf, inf) is 0x7f800001"},
+        {2, 0x00000000u, 0x7f800000u, 0x7f800001u, "vmul(+0, +inf) is 0x7f800001"},
+        {2, 0x00000000u, 0xff800000u, 0xff800001u, "vmul(+0, -inf) is 0xff800001"},
+        {2, 0xffc00022u, 0x3f800000u, 0xff800001u, "vmul(-qNaN, 1) takes the XOR of the signs"},
+        {2, 0x00000001u, 0x3f800000u, 0x00000000u, "vmul(dmin, 1) = +0"},
+        {3, 0x3f800000u, 0x00000000u, 0x7f800000u, "vdiv(1, +0) = +inf"},
+        {3, 0x00000000u, 0x00000000u, 0x7f800001u, "vdiv(0, 0) = 0x7f800001"},
+        {3, 0x3f800000u, 0x00000001u, 0x7f800000u, "vdiv(1, dmin): a denormal divisor is zero"},
+        {3, 0x00000001u, 0x3f800000u, 0x00000000u, "vdiv(dmin, 1) = +0"},
+        {3, 0x3f800000u, 0x7f000000u, 0x00000000u, "vdiv(1, 2^127) underflows to +0"},
+        {4, 0x7fc00011u, 0x3f800000u, 0x7f800001u, "vscl(NaN, 1) matches vmul"},
+    };
+    for (unsigned k = 0; k < sizeof(cells) / sizeof(cells[0]); k++) {
+        char name[32];
+        snprintf(name, sizeof(name), "arith-%s-s", ar_opname[cells[k].op]);
+        const int c = find_overlap_diff_case(name);
+        if (c < 0) { bad = 1; continue; }
+        const uint32_t w = overlap_diff_cases[c].w;
+        uint8_t si[1], ti[1], di[1];
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        vreg_idx((int)((w >> 8) & 0x7fu), 1, si);
+        vreg_idx((int)((w >> 16) & 0x7fu), 1, ti);
+        vreg_idx((int)(w & 0x7fu), 1, di);
+        aot.vi[si[0]] = cells[k].a;
+        aot.vi[ti[0]] = cells[k].b;
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, w);
+        g_checks++;
+        if (kind != SR_VFPU_COMPUTE || aot.vi[di[0]] != cells[k].want ||
+            interp.vi[di[0]] != cells[k].want) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: %s: psp=0x%08x aot=0x%08x interp=0x%08x\n", cells[k].what,
+                    cells[k].want, aot.vi[di[0]], interp.vi[di[0]]);
+        }
+    }
+    return bad;
+}
+
+/* Unrecorded PSP read (same probe as above): vmov, vabs and vneg are bitwise (NaN payloads, denormals
+ * and -0 pass unchanged; vabs clears bit 31, vneg flips it), and vzero, vone and vidt write only the
+ * lanes of the width (vidt.s wrote lane 0 = 1.0 without a fault; vidt.p = (1, 0); vidt.q =
+ * (1, 0, 0, 0) for destination row 0), leaving the other lanes alone. */
+static int check_vfpu_unary_arith_measured(void) {
+    static const char *const names[6] = {"vmov", "vabs", "vneg", "vidt", "vzero", "vone"};
+    static const char suffix[3] = {'s', 'p', 'q'};
+    static const int sizes[3] = {1, 2, 4};
+    int bad = 0, reported = 0;
+    for (int op = 0; op < 6; op++) {
+        for (int f = 0; f < 3; f++) {
+            char name[32];
+            snprintf(name, sizeof(name), "arith-%s-%c", names[op], suffix[f]);
+            const int c = find_overlap_diff_case(name);
+            CHECK(c >= 0, "unary basic-arith word is in the overlap-diff header");
+            if (c < 0) { bad = 1; continue; }
+            const uint32_t w = overlap_diff_cases[c].w;
+            const int n = sizes[f];
+            for (int i = 0; i < 20; i++) {
+                uint8_t si[4], di[4];
+                uint32_t want[4];
+                CpuState aot, interp;
+                setup_identity_compute(&aot);
+                for (int k = 0; k < 128; k++) aot.vi[k] = 0x7a5a5a00u + (uint32_t)k;
+                vreg_idx((int)((w >> 8) & 0x7fu), n, si);
+                vreg_idx((int)(w & 0x7fu), n, di);
+                for (int k = 0; k < n; k++) {
+                    const uint32_t x = ar_ops[(i + k) % 20];
+                    aot.vi[si[k]] = x;
+                    want[k] = op == 0 ? x : op == 1 ? (x & 0x7fffffffu) : op == 2 ? (x ^ 0x80000000u)
+                            : op == 3 ? (k == 0 ? 0x3f800000u : 0u) : op == 4 ? 0u : 0x3f800000u;
+                }
+                interp = aot;
+                overlap_diff_run_codegen(&aot, c);
+                const int kind = sr_vfpu_interp(&interp, w);
+                int ok = kind == SR_VFPU_COMPUTE && memcmp(aot.vi, interp.vi, sizeof(aot.vi)) == 0;
+                for (int k = 0; k < n; k++)
+                    ok &= aot.vi[di[k]] == want[k] && interp.vi[di[k]] == want[k];
+                g_checks++;
+                if (!ok) {
+                    g_failures++;
+                    bad = 1;
+                    if (reported++ < 12)
+                        fprintf(stderr, "FAIL: %s in=0x%08x psp=0x%08x aot=0x%08x interp=0x%08x kind=%d\n",
+                                name, ar_ops[i], want[0], aot.vi[di[0]], interp.vi[di[0]], kind);
+                }
+            }
+        }
+    }
+    return bad;
+}
+
 /* RCX0-7 image of a random-unit state as probe_hle_issues.c writes it: Ck split into
  * the low halves of RCXk and RCX(k+4), carry nibble k in bits 16-19 of RCXk, 0x3f8 above. */
 static void vrndi_probe_image(uint32_t *rcx, const uint32_t c[4], uint32_t carry) {
@@ -2655,32 +2858,31 @@ static int sweep_diff(const CpuState *a, const CpuState *b, char *where, size_t 
  * operation. Swapping two NaN operands swaps the result, whatever the host compiler does with
  * a plain + or *. Project semantics, not PSP evidence. */
 static int check_vf_nan_rule(void) {
-    static const struct { uint32_t a, b, add, sub, mul, div; } cells[] = {
-        {0x7fc12345u, 0xffc00001u, 0x7fc12345u, 0x7fc12345u, 0x7fc12345u, 0x7fc12345u},
-        {0xffc00001u, 0x7fc12345u, 0xffc00001u, 0xffc00001u, 0xffc00001u, 0xffc00001u},
-        {0x7f800001u, 0x3f800000u, 0x7fc00001u, 0x7fc00001u, 0x7fc00001u, 0x7fc00001u}, /* sNaN quieted */
-        {0x3f800000u, 0xff800002u, 0xffc00002u, 0xffc00002u, 0xffc00002u, 0xffc00002u},
-        {0x7f800000u, 0xff800000u, 0xffc00000u, 0x7f800000u, 0xff800000u, 0xffc00000u}, /* Inf, -Inf */
-        {0x00000000u, 0x7f800000u, 0x7f800000u, 0xff800000u, 0xffc00000u, 0x00000000u}, /* 0, Inf */
-        {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0xffc00000u}, /* 0 / 0 */
-        {0x3fc00000u, 0x40000000u, 0x40600000u, 0xbf000000u, 0x40400000u, 0x3f400000u}, /* 1.5, 2 */
+    static const struct { uint32_t a, b, add, sub, mul; } cells[] = {
+        {0x7fc12345u, 0xffc00001u, 0x7fc12345u, 0x7fc12345u, 0x7fc12345u},
+        {0xffc00001u, 0x7fc12345u, 0xffc00001u, 0xffc00001u, 0xffc00001u},
+        {0x7f800001u, 0x3f800000u, 0x7fc00001u, 0x7fc00001u, 0x7fc00001u}, /* sNaN quieted */
+        {0x3f800000u, 0xff800002u, 0xffc00002u, 0xffc00002u, 0xffc00002u},
+        {0x7f800000u, 0xff800000u, 0xffc00000u, 0x7f800000u, 0xff800000u}, /* Inf, -Inf */
+        {0x00000000u, 0x7f800000u, 0x7f800000u, 0xff800000u, 0xffc00000u}, /* 0, Inf */
+        {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, /* 0 / 0 */
+        {0x3fc00000u, 0x40000000u, 0x40600000u, 0xbf000000u, 0x40400000u}, /* 1.5, 2 */
     };
     int bad = 0;
     for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
-        float a, b, r[4];
-        uint32_t got[4];
+        float a, b, r[3];
+        uint32_t got[3];
         memcpy(&a, &cells[i].a, 4);
         memcpy(&b, &cells[i].b, 4);
         r[0] = sr_vf_add(a, b);
         r[1] = sr_vf_sub(a, b);
         r[2] = sr_vf_mul(a, b);
-        r[3] = sr_vf_div(a, b);
         memcpy(got, r, sizeof(got));
-        const uint32_t want[4] = {cells[i].add, cells[i].sub, cells[i].mul, cells[i].div};
-        for (int k = 0; k < 4; k++) {
+        const uint32_t want[3] = {cells[i].add, cells[i].sub, cells[i].mul};
+        for (int k = 0; k < 3; k++) {
             if (got[k] != want[k]) {
                 fprintf(stderr, "FAIL: sr_vf_%s(0x%08x, 0x%08x) = 0x%08x, want 0x%08x\n",
-                        (const char *[]){"add", "sub", "mul", "div"}[k], cells[i].a, cells[i].b, got[k], want[k]);
+                        (const char *[]){"add", "sub", "mul"}[k], cells[i].a, cells[i].b, got[k], want[k]);
                 bad = 1;
             }
         }
@@ -2802,6 +3004,8 @@ int main(void) {
     bad |= check_psp_measured_funnel();
     bad |= check_psp_measured_sort();
     bad |= check_psp_measured_forms2();
+    bad |= check_vfpu_basic_arith_measured();
+    bad |= check_vfpu_unary_arith_measured();
     bad |= check_vrndi_rule_cells();
     bad |= check_vfpu_forms_measured();
     bad |= check_cop2_control_transfers();

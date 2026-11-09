@@ -1131,8 +1131,9 @@ void sr_vwrite(CpuState *s, const uint8_t *idx, float *d, int n, uint32_t dprefi
  * source, and an optimiser may swap the operands of a commutative + or *. So the
  * generated code and sr_vfpu_interp, each compiled on its own, kept different NaNs when
  * two met (the alias-edge sweep in tests/native/vfpu_interp_selftest.c, built at -O1 or
- * -O2). Both lanes call these helpers for every lane operation of vadd, vsub, vmul, vdiv,
- * vscl, vdot, vhdp, vcrs, vcrsp, vqmul, vmmul, vtfm and vmscl. The rule: the first NaN
+ * -O2). Both lanes call these helpers for every lane operation of vdot, vhdp, vcrs, vcrsp,
+ * vqmul, vmmul, vtfm and vmscl (vadd, vsub, vmul, vscl and vdiv use the measured sr_vfpu_*
+ * rule below). The rule: the first NaN
  * operand, quieted, else the invalid-operation NaN 0xFFC00000 (Inf - Inf, 0 * Inf, 0 / 0,
  * Inf / Inf). That is what x86-64 SSE returns for the operands in source order, but it is a
  * change for default builds too: even at -O0 (RECOMP_OPT, the Makefile default) GCC may
@@ -1159,7 +1160,53 @@ static inline float sr_vf_nan(float a, float b) {
 static inline float sr_vf_add(float a, float b) { const float r = a + b; return r == r ? r : sr_vf_nan(a, b); }
 static inline float sr_vf_sub(float a, float b) { const float r = a - b; return r == r ? r : sr_vf_nan(a, b); }
 static inline float sr_vf_mul(float a, float b) { const float r = a * b; return r == r ? r : sr_vf_nan(a, b); }
-static inline float sr_vf_div(float a, float b) { const float r = a / b; return r == r ? r : sr_vf_nan(a, b); }
+
+/* vadd, vsub, vmul, vscl and vdiv lane arithmetic as a PSP-3000 returned it (W-CPU-VFPU-2
+ * row 1, 2026-11-08, issue #326; probe case vfpu-basic-arith, 20 operand classes, all 400
+ * ordered pairs, .s/.p/.t/.q identical; its register entry is not in this tree yet). IEEE
+ * float32 with denormals flushed to a zero of their sign on input AND output. A NaN result
+ * is never an input payload: vadd and vsub give 0x7f800001 for a NaN operand or Inf - Inf,
+ * and vmul, vscl and vdiv give 0x7f800001 with the sign bit XOR of the two operand signs
+ * for a NaN operand, 0 * Inf, 0 / 0 or Inf / Inf. vdiv was measured at .s only; the other
+ * widths use the same lane rule. The other forms that call sr_vf_* keep the project rule
+ * above until they are measured. */
+static inline uint32_t sr_vfpu_bits(float x) {
+    uint32_t u;
+    memcpy(&u, &x, 4);
+    return u;
+}
+static inline float sr_vfpu_from_bits(uint32_t u) {
+    float x;
+    memcpy(&x, &u, 4);
+    return x;
+}
+static inline float sr_vfpu_daz(float x) {
+    const uint32_t u = sr_vfpu_bits(x);
+    return (u & 0x7f800000u) == 0u ? sr_vfpu_from_bits(u & 0x80000000u) : x;
+}
+static inline float sr_vfpu_nan_signed(float a, float b) {
+    return sr_vfpu_from_bits(0x7f800001u | ((sr_vfpu_bits(a) ^ sr_vfpu_bits(b)) & 0x80000000u));
+}
+static inline float sr_vfpu_add(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a + b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_from_bits(0x7f800001u);
+}
+static inline float sr_vfpu_sub(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a - b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_from_bits(0x7f800001u);
+}
+static inline float sr_vfpu_mul(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a * b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_nan_signed(a, b);
+}
+static inline float sr_vfpu_div(float a, float b) {
+    a = sr_vfpu_daz(a); b = sr_vfpu_daz(b);
+    const float r = a / b;
+    return r == r ? sr_vfpu_daz(r) : sr_vfpu_nan_signed(a, b);
+}
 
 /* VFPU transcendentals, exact ports of PPSSPP's table-based kernels (the PSP hardware does
  * not compute these with IEEE math). The lookup tables are loaded once from assets/vfpu/
