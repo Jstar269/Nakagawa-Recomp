@@ -133,12 +133,12 @@ Enhancements must follow the same strict rule:
 
 I publish a title's packages as site data, so that a user who builds from source gets the same enhancements as a user of my own builds. A published package is data about one exact executable, not a piece of it. It holds only:
 
-- the disc ID, the disc version and the SHA-256 of the decrypted executable (`EBOOT.BIN`) it was made for;
+- the disc ID, the disc version and the SHA-256 of the decrypted executable the title profile selects (usually `EBOOT.BIN`) it was made for;
 - a site map: each symbolic function name the package uses and its address in that executable;
-- each site's change: one of the declared transforms of section 9.2, or replacement code the project wrote;
+- each site's change: one of the declared transforms of section 9.2, never code or values;
 - for each byte range a site reads or replaces, a digest of the stock bytes, keyed by the executable (below).
 
-It holds no game bytes: no instruction words, data, tables, strings or values copied from the disc, and no patched code. A store site that checks the values the game's loader stores publishes only keyed digests of them (`stock_value_digests`, never `stock_values`): when the game stores a value, the runtime digests it, compares, and scales the value it observed, and on a mismatch it stops the run, naming the site. A replacement the project writes is its own value and may be published; where it is a function of the stock value (such as twice it), the package publishes the rule, never the result.
+It holds no game bytes: no instruction words, data, tables, strings or values copied from the disc, and no patched code. Every symbolic name is project-authored (from a decompilation or named by the project), never taken from the executable's own symbol table. A disc file path and a CSV column name appear only as locators, naming where a data transform applies. A store site that checks the values the game's loader stores publishes only keyed digests of them (`stock_value_digests`, never `stock_values`): when the game stores a value, the runtime digests it, compares, and scales the value it observed, and on a mismatch it stops the run, naming the site. Where a transform's result depends on the stock value (such as twice it), the package publishes the rule, never the result.
 
 **Keyed digests.** A plain SHA-256 of one 32-bit instruction word can be inverted by trying all $2^{32}$ words, so it would publish the word. Every stock digest in a published package is therefore an HMAC-SHA-256 whose key is derived from the whole executable (a different hash from the published executable digest, so that digest does not give the key away). Only someone who holds the executable can compute or check it, and they already have the bytes.
 
@@ -146,7 +146,7 @@ It holds no game bytes: no instruction words, data, tables, strings or values co
 
 **Why this is publishable.** It is the same practice as decompilation projects that publish symbol maps (function names and addresses for one ROM checksum) and emulator patch and cheat databases that publish addresses and their own replacement values for a named game ID. In each case the game comes only from the user's own copy, and the published file is useless without it.
 
-**Where they live.** Published packages are separate data files, one per title and package, and pass the publication audit's no-game-bytes check before they enter the public tree.
+**Where they live.** Published packages are separate data files in `assets/enhancements/`, one per disc and package, and pass the publication audit's no-game-bytes check before they enter the public tree. That check sees only the file: it refuses any field that could carry bytes, but it cannot tell a keyed digest from 32 raw bytes. The export command holds the executable, computes every digest from it, and is what makes each digest a digest.
 
 ---
 
