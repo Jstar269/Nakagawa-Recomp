@@ -154,8 +154,14 @@ extern int sr_audio_queued(int ch);
  * waits out the same lead again, guest time races ahead of the work, and the title sits in its
  * music while its clock runs. Under the deterministic clock the queue the guest sees is the
  * device the PSP has: it plays 44100 frames a second of GUEST time from the first push. The
- * host mixer still plays what it is given, and its own depth is only consulted for "is there an
- * output at all" (-1 stays -1, so a run without audio keeps its open-loop pacing). */
+ * host mixer still plays what it is given and follows the guest: it may drop or pad, and it
+ * counts both (AUDIOSTAT_HOST), but nothing it does reaches the guest.
+ *
+ * The device is an optional sink (#2160, #2163). The model answers the same whether the host has
+ * an output device, none, or a mixer that is full or starved: a run on a headless runner and a
+ * run on a desktop give the guest the same queue depth, the same blocking waits and the same
+ * sample counters, at any host speed. Only a run without the deterministic clock reads the host
+ * mixer's depth, and there -1 (no output) still gives open-loop pacing. */
 static uint32_t s_vq_frames[9];
 static uint64_t s_vq_last_us[9];
 static uint64_t s_vq_carry[9];   /* microsecond-frames not yet a whole frame, denominator 1e6 */
@@ -172,10 +178,11 @@ static void audio_vq_drain(uint32_t slot) {
     else s_vq_frames[slot] -= (uint32_t)drained;
 }
 
-/* The queue depth in frames the guest sees on `ch`, or -1 when the host has no output for it. */
+/* The queue depth in frames the guest sees on `ch`. Under the deterministic clock it is the
+ * guest-time model's, whatever the host has; otherwise the host mixer's, or -1 when the host has no
+ * output for it. */
 int hle_audio_queued(int ch) {
-    int host = sr_audio_queued(ch);
-    if (host < 0 || ch < 0 || ch > 8 || !sched_clock_deterministic()) return host;
+    if (!sched_clock_deterministic() || ch < 0 || ch > 8) return sr_audio_queued(ch);
     audio_vq_drain((uint32_t)ch);
     return s_vq_frames[ch] > (uint32_t)INT_MAX ? INT_MAX : (int)s_vq_frames[ch];
 }
@@ -328,6 +335,25 @@ int sr_hle_test_audio_volume(uint32_t ch, uint32_t *left, uint32_t *right) {
 }
 #endif
 
+/* The one place a blocking output parks the guest. The test build also totals what was asked
+ * for, because sched_delay_current() is inert without a scheduler thread and a fixture could
+ * otherwise not see how long the guest would have waited (#2160, #2163). */
+#ifdef SR_HLE_THREAD_SELFTEST
+static uint64_t s_audio_wait_total_us;
+static void (*s_audio_wait_hook)(uint32_t us);
+/* A fixture without a scheduler thread cannot advance guest time by waiting; the hook lets it. */
+void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us)) { s_audio_wait_hook = hook; }
+void sr_hle_test_audio_wait_reset(void) { s_audio_wait_total_us = 0u; }
+uint64_t sr_hle_test_audio_wait_total_us(void) { return s_audio_wait_total_us; }
+#endif
+static void audio_wait(uint32_t us) {
+#ifdef SR_HLE_THREAD_SELFTEST
+    s_audio_wait_total_us += us;
+    if (s_audio_wait_hook) s_audio_wait_hook(us);
+#endif
+    sched_delay_current(us);
+}
+
 static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, int volr) {
     (void)s;
     uint32_t n = ch < 9 ? s_audio_len[ch] : 1024;
@@ -363,7 +389,7 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
     }
     int q = hle_audio_queued((int)ch);
     if (q < 0 || n == 0) {                 /* no host audio: open-loop pacing as before */
-        sched_delay_current(n ? audio_frames_to_us(ch, n) : 1000u);
+        audio_wait(n ? audio_frames_to_us(ch, n) : 1000u);
         return n;
     }
     /* sr_audio_queued() is signed only so the backend can report -1. Once that
@@ -382,7 +408,7 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
      * device's real drain; n is bounded by the reserve/SetChannelDataLen
      * contracts (<= 65536 frames), so 2u * n cannot wrap. */
     while ((q = hle_audio_queued((int)ch)) >= 0 && (uint32_t)q > 2u * n)
-        sched_delay_current(audio_frames_to_us(ch, (uint32_t)q - 2u * n));
+        audio_wait(audio_frames_to_us(ch, (uint32_t)q - 2u * n));
     audio_note_lead((int)ch, q);
     return n;
 }
