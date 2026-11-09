@@ -2281,6 +2281,17 @@ int sr_vblank_quantum_due(void);
 /* True when guest time is deterministic (SR_DETERMINISTIC_CLOCK, #2037): a function of the guest's
  * own work, never of the host clock. The RTC then starts at a fixed date. */
 int sched_clock_deterministic(void);
+/* Fast forward (docs/ENHANCEMENT_CONTRACT.md section 10.14). While the game window's keys ask
+ * for it (ace_ff_requested(), ace.h) in an Enhanced or Ace run on the paced clock, guest time,
+ * VBLANKs and timed waits run SCHED_FAST_FORWARD_SPEED times as fast as the host clock, and the
+ * host audio device is given no audio. It is off during the pause, and it never runs in an
+ * Authentic run or under the deterministic or turbo clocks: there the keys change nothing and
+ * pacing is as before. The scheduler applies a change at its next VBLANK. */
+#define SCHED_FAST_FORWARD_SPEED 3u
+/* 1 while guest time runs fast. */
+int sched_fast_forward_on(void);
+/* How many times fast forward has started in this run (0 before the first). */
+uint32_t sched_fast_forward_epoch(void);
 /* f_00065c60 field-writer intercept: the container walker reads count from
  * r18+0x04 but f_0005a500's control block init puts count at r18+0x00 and
  * cursor at r18+0x04.  Since both functions are called directly (not via

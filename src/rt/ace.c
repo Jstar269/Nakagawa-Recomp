@@ -826,3 +826,13 @@ void ace_finish(void) {
         fprintf(stderr, "ACE_MODE: report not written (%s)\n", "write failed");
     }
 }
+
+/* ---- fast forward's keys (ace.h) ----------------------------------------------------------- */
+/* Set by the presenter's event pump and read by the scheduler's VBLANK, both on the thread that
+ * runs the guest, so plain flags are enough. */
+static int s_ff_hold;
+static int s_ff_toggle;
+
+void ace_ff_hold(int on) { s_ff_hold = on != 0; }
+void ace_ff_toggle(void) { s_ff_toggle = !s_ff_toggle; }
+int ace_ff_requested(void) { return s_ff_hold || s_ff_toggle; }

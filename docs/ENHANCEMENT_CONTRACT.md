@@ -886,6 +886,28 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   with `SR_GLYPHS` unset and on. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
   cache's sampled content hash instead of its generation, removes the per-present count, and the VRAM, hard-edge, colour and Ace guards, each of which must fail its own cell.
 
+### 10.14. Fast Forward
+
+A speed control for Enhanced and Ace runs, the way emulators offer one. It is not a part on the launch line: the game
+window's keys turn it on, and it never runs in an Authentic run.
+
+- **Keys.** `Tab` held, unless the input profile binds `Tab` to a PSP button, and `F9` to turn it on or off. The
+  scheduler applies a change at its next VBLANK (`src/rt/sched.c`, `sched_fast_forward_*` in `src/rt/recomp.h`).
+- **What runs fast.** The paced clock samples guest time from the host monotonic clock run at
+  `SCHED_FAST_FORWARD_SPEED` (3) times its rate, re-anchored at each change so guest time is continuous. VBLANKs, timed
+  waits and the RTC all follow that one clock, so the guest sees the events it always sees, in the same order and at
+  the same guest times, only sooner in wall time. A host that cannot keep up skips VBLANK slots, as it does at normal
+  speed.
+- **What the guest sees differently.** Its clock runs ahead of wall time by twice the time fast forward was on (two
+  extra seconds of guest time for each second at 3x). The host audio device is given no audio while it runs. The
+  blocking audio outputs and the queue depth the guest reads come from the same guest-time model as under the
+  deterministic clock, seeded with the host queue's depth when fast forward starts, so the game paces its sound as it
+  would on a PSP. When it stops, the guest reads the host queue again, which drained while nothing was pushed.
+- **Never.** It is off in an Authentic run, under the deterministic clock (`SR_DETERMINISTIC_CLOCK`, and with it
+  recordings and replays), on the turbo clock (`SR_NOVBPACE=1`) and during the pause. Until it first starts, the paced
+  clock is the host clock exactly. `sched-selftest` pins the rate, the continuity, the VBLANK wait, the pause and
+  each refusal. Each start and stop prints one `FAST_FORWARD: on` or `FAST_FORWARD: off` line.
+
 ## 11. Guest-Visible Items
 
 Sections 10.3, 10.6, 10.8 and 10.11 describe host-only features: what the guest reads, in its registers, memory and timing, is the

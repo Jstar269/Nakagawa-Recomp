@@ -339,4 +339,11 @@ size_t ace_report_json(char *out, size_t cap);
  * empty SR_ACE_REPORT writes no file. Ace off: does nothing. Safe to call more than once. */
 void ace_finish(void);
 
+/* ---- fast forward's keys (recomp.h, sched_fast_forward_on) ---------------------------------- */
+/* The game window sets these: a hold (Tab while it is held) and a toggle (F9). They only ask;
+ * the scheduler decides at each VBLANK whether this run may fast forward. */
+void ace_ff_hold(int on);
+void ace_ff_toggle(void);
+int ace_ff_requested(void);   /* 1 while the hold or the toggle is on */
+
 #endif /* SR_ACE_H */
