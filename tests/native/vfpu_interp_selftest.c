@@ -1987,15 +1987,16 @@ static int check_psp_measured_vfpu9(void) {
         {"vsgn.s -0", 0xd04a0405u, 0xe4u, {0x80000000u}, {0x00000000u}, 1, 1},
         {"vsgn.s -denormal", 0xd04a0020u, 0xe4u, {0x80000001u}, {0x00000000u}, 1, 0},
         {"vsgn.s -Inf", 0xd04a0020u, 0xe4u, {0xff800000u}, {0xbf800000u}, 1, 0},
-        /* vsgn.p/.t/.q (probe case vfpu-vus2i, PSP-3000, 2026-11-08, issue #326; its
-         * register entry is not in this tree yet): the same rule at every width. */
+        /* vsgn.p/.t/.q (unrecorded PSP read, probe case vfpu-vus2i, PSP-3000, 2026-11-08,
+         * issue #326): the same rule at every width. The .p row is a probe cell; the .t and
+         * .q rows mix lanes of different probe images and follow the rule (measured=0). */
         {"vsgn.p 2.5 -3.5", 0xd04a0088u, 0xe4u, {0x40200000u, 0xc0600000u},
          {0x3f800000u, 0xbf800000u}, 2, 1},
         {"vsgn.t specials", 0xd04a8008u, 0xe4u, {0x7f800001u, 0x80000001u, 0x00000000u},
-         {0x3f800000u, 0x00000000u, 0x00000000u}, 3, 1},
+         {0x3f800000u, 0x00000000u, 0x00000000u}, 3, 0},
         {"vsgn.q specials", 0xd04a8088u, 0xe4u,
          {0x80000000u, 0x00000001u, 0xffc00000u, 0x7f800000u},
-         {0x00000000u, 0x00000000u, 0xbf800000u, 0x3f800000u}, 4, 1},
+         {0x00000000u, 0x00000000u, 0xbf800000u, 0x3f800000u}, 4, 0},
         /* vbfy1.q: inf - inf and NaN operands give the canonical 0x7f800001. */
         {"vbfy1.q specials", 0xd0428080u, 0xe4u,
          {0x7f800000u, 0xff800000u, 0x7fc00000u, 0x00000000u},
