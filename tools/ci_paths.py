@@ -223,7 +223,9 @@ def _is_build_system(path: str) -> bool:
         logical_path in {"Makefile", "GNUmakefile", "CMakeLists.txt"}
         or logical_path.startswith("mk/")
         or logical_path.startswith("cmake/")
-        or logical_path.startswith("tools/build")
+        # tools/build_installer.py builds only the Windows Setup.exe: it routes the
+        # installer gate (_is_installer), not the native build.
+        or (logical_path.startswith("tools/build") and not _is_installer(logical_path))
         or logical_path.startswith("tools/hst_")
         or logical_path in {
             "tools/nk_doctor.py",
@@ -815,6 +817,9 @@ def _is_recognised(path: str) -> bool:
             _is_build_system,
             _is_native_runtime,
             _is_python_tool,
+            # The Inno script and lock route the installer gate; unrecognised they
+            # would force the full matrix the installer-inputs row skips.
+            _is_installer,
         )
     )
 
