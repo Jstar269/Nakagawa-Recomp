@@ -14,6 +14,7 @@
 #include "nk_steam_shortcuts.h"
 #include "nk_font.h"
 #include "nk_nickname.h"
+#include "nk_shared_helpers.h"
 #include "input_settings.h"
 #include "package_builder.h"
 #include "update_check.h"
@@ -972,6 +973,14 @@ struct PlayerApp {
     bool launch_running_check_logged;
     bool child_boot_event_seen;
     bool child_boot_wait_noted;
+    /* How the latest launch draws its picture, from its render_path boot event (#2151):
+       known once the event is read, for the disc that launch started. Cleared by each
+       launch. Hide on the game's page hides that fallback's notice for the rest of this
+       player session. */
+    bool render_path_known;
+    NkRenderPath render_path;
+    char render_path_disc[MAX_DISC_ID_LEN];
+    bool render_notice_hidden[NK_RENDER_FALLBACK_COUNT];
     bool close_confirmation_pending;
     char boot_event_file_path[MAX_PATH_LEN];
     bool should_quit;
@@ -1832,6 +1841,19 @@ bool player_app_launch_game(PlayerApp *app, int game_index);
 void player_app_stop_game(PlayerApp *app);
 void player_app_stop_stalled_game(PlayerApp *app);
 void player_app_keep_waiting_for_stalled_game(PlayerApp *app);
+
+/* The render notice (#2151): a heading and a sentence that name the slower path a fallback
+   takes, and what may fix it. False, with both NULL, for no fallback. */
+bool player_render_notice_text(NkRenderFallback fallback, const char **heading,
+                               const char **text);
+/* The notice for disc_id's page: the latest launch's fallback when that launch started this
+   disc, its render_path event has been read, and its notice is not hidden. */
+bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const char **heading,
+                              const char **text);
+/* Hide: that fallback's notice stays hidden for the rest of this player session. */
+void player_app_hide_render_notice(PlayerApp *app);
+/* Reads one line of the session's boot events for the render_path event. */
+void player_app_consume_render_path_line(PlayerApp *app, const char *line);
 
 /* One PLAY, split so its slow part can leave the UI thread (#1298). Checking a
  * package hashes every artifact it lists (hundreds of MB for a retail title),
