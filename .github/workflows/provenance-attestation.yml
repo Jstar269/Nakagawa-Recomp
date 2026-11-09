@@ -69,7 +69,16 @@ jobs:
     # Only the default branch is ruleset-protected, and only its content is
     # trusted. A pull request targeting any other branch gets no verdict rather
     # than a verdict computed from a base the author may control.
-    if: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == github.event.repository.default_branch }}
+    #
+    # It runs only in the upstream repository, matched by its numeric ID (which
+    # survives a rename or a transfer) or by its name, and in any run whose ID is
+    # empty, which fails closed to this strict job. A fork runs the Fork
+    # provenance check below instead; nothing a pull request or a repository
+    # variable controls can move the upstream onto that path
+    # (tools/provenance_mode.py, docs/FORKING.md).
+    if: >-
+      ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == github.event.repository.default_branch &&
+          (github.repository_id == '' || github.repository_id == '1330183186' || github.repository == 'Jstar269/Nakagawa-Recomp') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -397,6 +406,85 @@ jobs:
             cat "${RUNNER_TEMP}/verify/report.txt" 2>/dev/null || echo 'the verifier did not produce a report'
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  fork_check:
+    # A fork of the upstream has no access to the upstream's private trusted
+    # ledger, so the job above cannot run there (docs/FORKING.md). This job is
+    # its exact complement: it runs only where the job above does not, never
+    # reads a secret, and never contacts the private authority. Like the job
+    # above it runs the default branch's tools on the candidate's objects as
+    # data, so a pull request cannot replace the check with its own code:
+    #
+    #   * the candidate's workflows may not answer to either check's name;
+    #   * the trusted publication audit runs on the candidate's exact tree with
+    #     --public-scope --provenance-self-consistency, which refuses game data,
+    #     keys, private and user paths, unclassified paths and an inconsistent
+    #     public ledger exactly as on the upstream;
+    #   * the paths the pull request adds to the publication profile are listed:
+    #     on a fork, the fork maintainer's admission (tools/fork_init.py,
+    #     tools/admit_paths.py) and review are the provenance authority.
+    name: Fork provenance check
+    if: >-
+      ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.ref == github.event.repository.default_branch &&
+          (github.repository_id != '' && github.repository_id != '1330183186' && github.repository != 'Jstar269/Nakagawa-Recomp') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+
+      # A second guard behind the job condition: the trusted tool refuses to run
+      # the fork check for the upstream repository, by ID or by name.
+      - name: Confirm this repository is a fork
+        run: python tools/provenance_mode.py --require fork
+
+      # The same data-only fetch as the job above.
+      # codeql[actions/untrusted-checkout/critical]
+      - name: Fetch the candidate objects without checking them out
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          case "${PR_NUMBER}" in
+            ''|*[!0-9]*) echo "pull request number is not numeric" >&2; exit 1 ;;
+          esac
+          for value in "${HEAD_SHA}" "${BASE_SHA}"; do
+            case "${value}" in
+              [0-9a-f]*) [ "${#value}" -eq 40 ] || { echo "sha malformed" >&2; exit 1; } ;;
+              *) echo "sha malformed" >&2; exit 1 ;;
+            esac
+          done
+          git fetch --no-tags --no-recurse-submodules --quiet             "https://github.com/${GITHUB_REPOSITORY}.git"             "+refs/pull/${PR_NUMBER}/head:refs/candidate/head"
+          fetched="$(git rev-parse refs/candidate/head)"
+          if [ "${fetched}" != "${HEAD_SHA}" ]; then
+            echo "candidate head moved during this run: event named ${HEAD_SHA}, fetched ${fetched}" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${BASE_SHA}" HEAD; then
+            echo "event base ${BASE_SHA} is not an ancestor of the default branch" >&2
+            exit 1
+          fi
+
+      - name: Check the candidate with the trusted publication audit
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          python tools/provenance_mode.py fork-check --repo "${GITHUB_WORKSPACE}"             --base "${BASE_SHA}" --candidate "${HEAD_SHA}" --summary "${GITHUB_STEP_SUMMARY}"
 
   showcase_prx:
     name: Showcase demo PRXs (PSPDEV)
