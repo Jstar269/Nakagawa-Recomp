@@ -80,6 +80,10 @@ uint32_t sched_current_uid(void) { return 0u; }
 // so the recorder has a clock here. No scheduler runs, so it reports the paced clock, and a
 // requested recording is refused for needing SR_DETERMINISTIC_CLOCK=1.
 int      sched_clock_deterministic(void) { return 0; }
+/* driver.c's stop check asks whether a parked SAVE holds a stop, at the guest time (#1296). The
+ * gate runs no guest thread and no savedata, so guest time stays 0 and nothing holds a stop. */
+uint64_t sched_vtime_us(void) { return 0u; }
+int      sr_savedata_stop_deferred(uint64_t now_us) { (void)now_us; return 0; }
 /* The headless gate has no scheduler, so no thread role is ever captured. Reporting the
  * historical HST UIDs here would hand the gate a role identity it cannot have earned.
  * This file deliberately declares its own symbols instead of including recomp.h, so the

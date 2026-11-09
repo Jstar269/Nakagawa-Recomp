@@ -40,9 +40,9 @@ try:
     from .psp_oracle.parse_golden import parse_dmac_invalid_tail_output
     from .psp_oracle.protocol import ProtocolError
 except ImportError:
-    import scratch_dir
-    from psp_oracle.parse_golden import parse_dmac_invalid_tail_output
-    from psp_oracle.protocol import ProtocolError
+    import scratch_dir  # type: ignore[no-redef]
+    from psp_oracle.parse_golden import parse_dmac_invalid_tail_output  # type: ignore[no-redef]
+    from psp_oracle.protocol import ProtocolError  # type: ignore[no-redef]
 
 
 ROOT = Path(__file__).resolve().parent.parent

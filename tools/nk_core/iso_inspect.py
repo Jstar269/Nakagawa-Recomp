@@ -921,7 +921,10 @@ def inspect_iso(
         if header[: len(PBP_MAGIC)] == PBP_MAGIC:
             _reject_pbp_package(probe, size_bytes, header)
 
-    if size_bytes < 1024 * 1024:  # Under 1 MiB is not a valid PSP UMD image
+    # An image without a volume descriptor cannot be a disc. The floor is the descriptor's own
+    # sector, as in nk_iso_inspect (src/core/nk_iso.c): the private disc image made from an
+    # imported homebrew package (#2143) is a few hundred KiB, far under a UMD's size.
+    if size_bytes < (PVD_SECTOR + 1) * SECTOR_SIZE:
         raise IsoInspectionError(f"File is too small to be a valid PSP ISO: {size_bytes} bytes")
 
     reg = registry or get_default_registry()
