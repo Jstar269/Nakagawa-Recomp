@@ -50507,6 +50507,7 @@ void sr_recomp_test_unused_dispatch_tail_step(CpuState *s, uint32_t target);
 int sr_recomp_test_unused_dispatch_call_try(CpuState *s, uint32_t target, uint32_t resume_pc);
 void sr_recomp_test_unused_dispatch_from_host(CpuState *s, uint32_t entry);
 void sr_recomp_test_unused_profile_dump(void);
+void sr_recomp_test_unused_profile_dump_final(void);
 void sr_recomp_test_unused_profile_block(uint32_t target_pc);
 void sr_recomp_test_unused_oor(uint32_t addr, uint32_t value, int store);
 void sr_recomp_test_unused_heap_note_write(uint32_t addr, uint32_t width,
@@ -50522,6 +50523,7 @@ void sr_recomp_test_unused_trace_close(void);
 #define dispatch_tail_step sr_recomp_test_unused_dispatch_tail_step
 #define dispatch_from_host sr_recomp_test_unused_dispatch_from_host
 #define sr_profile_dump sr_recomp_test_unused_profile_dump
+#define sr_profile_dump_final sr_recomp_test_unused_profile_dump_final
 #define sr_profile_block sr_recomp_test_unused_profile_block
 #define sr_oor sr_recomp_test_unused_oor
 #define sr_heap_note_write sr_recomp_test_unused_heap_note_write
@@ -50543,6 +50545,7 @@ void sr_recomp_test_unused_trace_close(void);
 #undef sr_heap_note_write
 #undef sr_oor
 #undef sr_profile_block
+#undef sr_profile_dump_final
 #undef sr_profile_dump
 #undef dispatch_from_host
 #undef dispatch_tail_step
