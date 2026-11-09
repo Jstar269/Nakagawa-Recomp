@@ -863,7 +863,9 @@ asset-index-selftest:
 # The scaled-upload case (#1296), the per-fragment mip level case (#1373), the readback-rows
 # case (#323, also on its SR_GPU_READBACK_FULL reference path), the undrawn-rows case and the
 # widescreen Fill case (#1881) run again alone at render scales 2 and 4; the sprite-scaled and
-# uv-edge-clamp cases (#2110) run alone at scales 2, 3 and 4. Each is selected by arguments: a
+# uv-edge-clamp cases (#2110) run alone at scales 2, 3 and 4; rtt-scale (#2052: a quarter-size
+# render target sampled back, linear, at the render scale and not at 1x) runs alone at scales 2
+# and 4 (the whole-suite run covers 1x). Each is selected by arguments: a
 # VAR=value prefix needs a POSIX shell, and cmd.exe does not take one. The host twin (#2050) runs
 # after them: twin-off runs of twin-scene write reference files that the twin-on runs at the
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
@@ -887,6 +889,7 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 4 --case scaled-upload
 	$(GPU_COHERENCE_BIN) --scale 2 --case mip-lod
 	$(GPU_COHERENCE_BIN) --scale 4 --case mip-lod
+	$(GPU_COHERENCE_BIN) --scale 4 --case mip-clut
 	$(GPU_COHERENCE_BIN) --scale 2 --case readback-rows
 	$(GPU_COHERENCE_BIN) --scale 4 --case readback-rows
 	$(GPU_COHERENCE_BIN) --scale 4 --case readback-rows --readback-full 1
@@ -906,6 +909,8 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 2 --case uv-edge-clamp
 	$(GPU_COHERENCE_BIN) --scale 3 --case uv-edge-clamp
 	$(GPU_COHERENCE_BIN) --scale 4 --case uv-edge-clamp
+	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-scale
+	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-scale
 	$(GPU_COHERENCE_BIN) --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
 	$(GPU_COHERENCE_BIN) --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
@@ -1042,6 +1047,56 @@ tex-scale-selftest:
 
 native-core-tests: tex-scale-selftest
 
+# glyph-recon-selftest - sharp game text's CPU side (src/rt/gpu_sdl3vk/glyph_recon.h, #2110) on
+# synthetic glyphs only: the setting and its Ace gate, every source the rebuild refuses by name (VRAM,
+# a 4-bit reversed buffer, a 24-bit buffer, a mip chain, render scale 1, formats with no usable
+# coverage), the rectangle classifier, the rebuild at every factor for every accepted pixel format,
+# and the downsample check against tampered and stale tiles. No GPU and no SDL3.
+glyph-recon-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
+	$(CC) $(CFLAGS) -O2 -ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections \
+		-o $(BUILD_DIR)/glyph_recon_selftest$(EXE_EXT) \
+		src/rt/gpu_sdl3vk/glyph_recon_selftest.c src/rt/gpu_sdl3vk/glyph_recon.c -lm
+	$(BUILD_DIR)/glyph_recon_selftest$(EXE_EXT)
+
+native-core-tests: glyph-recon-selftest glyph-recon-mutant
+
+# glyph-recon-mutant - the selftest above built once per removed guard, each with a macro that
+# generates a glyph_recon.c without that guard. A build passes only when the run fails and prints the
+# named cell's FAIL line: the Ace gate, the VRAM refusal, the render scale 1 refusal, the mip chain
+# refusal, the two buffer refusals, the downsample check, the colour check, the hard-edge check, the
+# size check, a rebuild that steepens every block (a ribbed gradient), a rebuild that treats soft art as text
+# (a two-texel ramp becomes two edges), a soft-art threshold of 1.0 (real text with strokes goes smooth), and a
+# rebuild that does not keep each block's mean.
+GLYPH_RECON_MUTANTS := \
+	NO_ACE_GATE:"FAIL settings: SR_GLYPHS=on with Ace Mode off" \
+	ALLOW_VRAM:"FAIL refuse-vram: a page in VRAM is refused" \
+	ALLOW_SCALE1:"FAIL refuse-scale: render scale 1 is refused" \
+	ALLOW_MIP:"FAIL refuse-mip: a mip chain is refused" \
+	ALLOW_BUFFERS:"FAIL refuse-reversed: a 4-bit reversed buffer is refused" \
+	NO_DOWNSAMPLE_CHECK:"FAIL downsample: a tampered tile (a block blanked)" \
+	NO_COLOUR_CHECK:"FAIL refuse-colour: two inked colours" \
+	NO_HARD_EDGE_CHECK:"FAIL refuse-hard-edge: a bitmap font" \
+	NO_SIZE_CHECK:"FAIL refuse-size: 3 texels wide" \
+	NO_SMOOTH_MODE:"FAIL gradient: fade bar at factor 3" \
+	NO_SOFT_RECT:"FAIL gradient: 2-texel fade at factor" \
+	SOFT_RATIO_LOW:"FAIL text: only " \
+	PLAIN_BICUBIC:"FAIL rebuild: 4444 glyph 0 at factor 2: downsample"
+glyph-recon-mutant:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
+	@for m in $(GLYPH_RECON_MUTANTS); do \
+		name=$${m%%:*}; want=$${m#*:}; rc=0; \
+		$(CC) $(CFLAGS) -O2 -DNK_GLYPH_MUTANT_$$name \
+			-o $(BUILD_DIR)/glyph_recon_mutant_$$name$(EXE_EXT) \
+			src/rt/gpu_sdl3vk/glyph_recon_selftest.c src/rt/gpu_sdl3vk/glyph_recon.c -lm || exit 1; \
+		$(BUILD_DIR)/glyph_recon_mutant_$$name$(EXE_EXT) > $(BUILD_DIR)/glyph_recon_mutant_$$name.log 2>&1 || rc=$$?; \
+		if [ $$rc -eq 0 ]; then echo "FAIL glyph-recon-mutant $$name (the mutant passed: the guard is untested)"; exit 1; \
+		elif ! grep -q "$$want" $(BUILD_DIR)/glyph_recon_mutant_$$name.log; then \
+			cat $(BUILD_DIR)/glyph_recon_mutant_$$name.log; \
+			echo "FAIL glyph-recon-mutant $$name (exit $$rc, but not from the intended check)"; exit 1; \
+		else echo "PASS glyph-recon-mutant $$name (killed by the intended check, exit $$rc)"; fi; \
+	done
+
 # pipeline-cache-selftest - the checks a Vulkan pipeline cache file passes before its data reaches
 # the driver (src/rt/gpu_sdl3vk/pipeline_cache.h, #2149), with no GPU: another device, driver,
 # cache UUID, shader set or schema, foreign, short, truncated, oversized and corrupt files, and the
@@ -1154,7 +1209,68 @@ gpu-texscale-mutant: shader-verify $(RT_GE_O)
 	elif ! grep -q "FAIL rewrite: stale scaled copy" $(BUILD_DIR)/gpu_texscale_mutant.log; then \
 		echo "FAIL gpu-texscale-mutant (exit $$rc, but not from the stale-copy check)"; exit 1; \
 	else echo "PASS gpu-texscale-mutant (killed by the stale-copy check, exit $$rc)"; fi
-	@$(MAKE) --no-print-directory texrepl-mutant gpu-texrepl-mutant
+	@$(MAKE) --no-print-directory texrepl-mutant gpu-texrepl-mutant gpu-glyph-selftest gpu-glyph-mutant
+
+# gpu-glyph-selftest - sharp game text (glyph_recon.h, glyph_gpu.inc, #2110) on the Vulkan GE renderer's
+# production path, at render scales 2, 3 and 4 (the renderer's most): a 1:1 sprite over a glyph cell draws the rebuilt tile
+# and nothing beside it changes it; a page in VRAM, a hard-edged or two-colour page, a magnified sprite
+# and a too-small or off-page rectangle draw exactly as without the feature and make no image; fade bars of
+# one colour (shallow, steep, four texels, two) draw without a ribbed row; a rewritten page draws its
+# new tile, never the old, also when the rewrite misses the bytes the cache's content hash samples; more new rectangles than the per-present count are rebuilt over two presents;
+# no guest byte changes. At render scale 1 the setting is idle. An authentic run (Ace Mode off) rebuilds
+# nothing and draws byte for byte the same picture with SR_GLYPHS unset and on. In an Ace run with the
+# setting off (`--glyphs off`) the sharp cell must fail, which shows it is not vacuous. Exit 77 (SKIP)
+# without Vulkan.
+GPU_GLYPH_BUILD = $(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_TEXSCALE_SELFTEST -DSR_GPU_GLYPH_SELFTEST \
+		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" -ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections \
+		tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
+		$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS)
+gpu-glyph-selftest: shader-verify $(RT_GE_O)
+	$(GPU_GLYPH_BUILD) -o $(BUILD_DIR)/gpu_glyph_selftest.exe
+	@for args in "--scale 4" "--scale 2" "--scale 3" "--scale 1"; do \
+		rc=0; $(BUILD_DIR)/gpu_glyph_selftest.exe $$args || rc=$$?; \
+		if [ $$rc -eq 77 ]; then echo "SKIP gpu-texscale gpu-glyph-selftest $$args (exit 77; the reason is printed above)"; exit 0; \
+		elif [ $$rc -ne 0 ]; then echo "FAIL gpu-glyph-selftest $$args (exit $$rc)"; exit $$rc; fi; \
+	done
+	@rc=0; $(BUILD_DIR)/gpu_glyph_selftest.exe --glyphs off --scale 4 > $(BUILD_DIR)/gpu_glyph_off.log 2>&1 || rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP gpu-texscale gpu-glyph-selftest --glyphs off (exit 77; the reason is printed above)"; exit 0; \
+	elif [ $$rc -eq 0 ]; then echo "FAIL gpu-glyph-selftest --glyphs off (the sharp cell passes without the feature: it is vacuous)"; exit 1; \
+	elif ! grep -aq "FAIL sharp: " $(BUILD_DIR)/gpu_glyph_off.log; then cat $(BUILD_DIR)/gpu_glyph_off.log; echo "FAIL gpu-glyph-selftest --glyphs off (exit $$rc, but not from the sharp cell)"; exit 1; \
+	else grep -a "FAIL sharp: " $(BUILD_DIR)/gpu_glyph_off.log; echo "PASS gpu-glyph-selftest --glyphs off (the sharp cell fails without the feature, exit $$rc)"; fi
+	@rc=0; $(BUILD_DIR)/gpu_glyph_selftest.exe --authentic --scale 4 > $(BUILD_DIR)/gpu_glyph_auth_unset.log 2>&1 || rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP gpu-texscale gpu-glyph-selftest --authentic (exit 77; the reason is printed above)"; exit 0; \
+	elif [ $$rc -ne 0 ]; then cat $(BUILD_DIR)/gpu_glyph_auth_unset.log; echo "FAIL gpu-glyph-selftest --authentic (exit $$rc)"; exit $$rc; fi; \
+	rc=0; $(BUILD_DIR)/gpu_glyph_selftest.exe --authentic --scale 4 --glyphs on > $(BUILD_DIR)/gpu_glyph_auth_on.log 2>&1 || rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP gpu-texscale gpu-glyph-selftest --authentic --glyphs on (exit 77; the reason is printed above)"; exit 0; \
+	elif [ $$rc -ne 0 ]; then cat $(BUILD_DIR)/gpu_glyph_auth_on.log; echo "FAIL gpu-glyph-selftest --authentic --glyphs on (exit $$rc)"; exit $$rc; fi; \
+	a=$$(grep -a '^GLYPH-AUTH-HASH' $(BUILD_DIR)/gpu_glyph_auth_unset.log); b=$$(grep -a '^GLYPH-AUTH-HASH' $(BUILD_DIR)/gpu_glyph_auth_on.log); \
+	if [ -z "$$a" ] || [ "$$a" != "$$b" ]; then echo "FAIL gpu-glyph-selftest authentic: the picture differs with SR_GLYPHS set ('$$a' against '$$b')"; exit 1; fi; \
+	grep -aq 'GLYPHS: off (sharp game text needs Ace Mode)' $(BUILD_DIR)/gpu_glyph_auth_on.log || { echo "FAIL gpu-glyph-selftest authentic: an authentic run did not name the request it ignored"; exit 1; }; \
+	echo "PASS gpu-glyph-selftest authentic: the same picture with SR_GLYPHS unset and on ($$a)"
+
+# gpu-glyph-mutant - the selftest above built with one guard removed per build, each of which must fail
+# the cell that names it: no entry-content check on a bound tile (rewrite), tiles keyed on the cache's sampled
+# content hash instead of its generation (rewrite-gap), no per-present count (cap), no
+# VRAM refusal, no hard-edge check, no colour check (refuse), and the Ace gate removed (authentic).
+GPU_GLYPH_MUTANTS := \
+	NK_GLYPH_GPU_MUTANT_NO_HASH_CHECK@--scale,4@"FAIL rewrite:" \
+	NK_GLYPH_GPU_MUTANT_KEY_ON_HASH@--scale,4@"FAIL rewrite-gap:" \
+	NK_GLYPH_GPU_MUTANT_NO_CAP@--scale,4@"FAIL cap:" \
+	NK_GLYPH_MUTANT_ALLOW_VRAM@--scale,4@"FAIL refuse: a page in VRAM" \
+	NK_GLYPH_MUTANT_NO_HARD_EDGE_CHECK@--scale,4@"FAIL refuse: a hard-edged page" \
+	NK_GLYPH_MUTANT_NO_COLOUR_CHECK@--scale,4@"FAIL refuse: a two-colour page" \
+	NK_GLYPH_MUTANT_NO_ACE_GATE@--authentic,--glyphs,on,--scale,4@"FAIL authentic:"
+gpu-glyph-mutant: shader-verify $(RT_GE_O)
+	@for m in $(GPU_GLYPH_MUTANTS); do \
+		macro=$${m%%@*}; rest=$${m#*@}; args=$$(echo "$${rest%%@*}" | tr ',' ' '); want=$${rest#*@}; rc=0; \
+		$(GPU_GLYPH_BUILD) -D$$macro -o $(BUILD_DIR)/gpu_glyph_mutant_$$macro.exe || exit 1; \
+		$(BUILD_DIR)/gpu_glyph_mutant_$$macro.exe $$args > $(BUILD_DIR)/gpu_glyph_mutant_$$macro.log 2>&1 || rc=$$?; \
+		if [ $$rc -eq 77 ]; then echo "SKIP gpu-texscale gpu-glyph-mutant $$macro (exit 77; the reason is printed above)"; \
+		elif [ $$rc -eq 0 ]; then echo "FAIL gpu-glyph-mutant $$macro (the mutant passed: the guard is untested)"; exit 1; \
+		elif ! grep -aq "$$want" $(BUILD_DIR)/gpu_glyph_mutant_$$macro.log; then \
+			cat $(BUILD_DIR)/gpu_glyph_mutant_$$macro.log; echo "FAIL gpu-glyph-mutant $$macro (exit $$rc, but not from the intended check)"; exit 1; \
+		else echo "PASS gpu-glyph-mutant $$macro (killed by the intended check, exit $$rc)"; fi; \
+	done
 
 gpu-snapsync-selftest: shader-verify $(RT_GE_O)
 	$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_SNAPSHOT_SYNC_SELFTEST -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
@@ -1304,3 +1420,19 @@ selftest:
 		-DSR_SELFTEST_ONLY -fno-exceptions
 	$(BUILD_DIR)/selftest.exe
 	@echo "selftest passed"
+
+# videocodec-selftest -- the Media Engine boundary a disc mpeg.prx calls as LLE (#286):
+# sceVideocodec, sceMpegbase and sceAudiocodec (ATRAC3plus) in src/rt/hle_videocodec.c, over the host ME RAM model and the
+# H.264 backend seam. The harness #includes recomp.c, cpu_lle.c and hle_videocodec.c, so a scratch
+# copy of hle_videocodec.c earlier on the include path replaces it for a mutation run, and links
+# the backend this build selects: Media Foundation on Windows, the FFmpeg subset where
+# H264_FFMPEG=1. With neither, h264_null.c fails closed and the decode cases report SKIP.
+videocodec-selftest: $(GENERIC_TITLE_CONFIG_HEADER) $(H264_SUB_OBJS)
+	$(CC) $(CFLAGS) $(HLE_INCLUDES) -I$(GENERIC_TITLE_CONFIG_DIR) $(LDFLAGS) -o $(BUILD_DIR)/videocodec_selftest.exe \
+		tests/native/videocodec_selftest.c src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/guest_interp.c src/rt/domain_mode.c src/rt/stale_code.c src/rt/vfpu_tables.c src/rt/title_config.c src/rt/perf.c \
+		src/rt/psmf_producer.c src/rt/h264_null.c src/rt/h264_mf.c src/rt/h264_ffmpeg.c $(H264_SUB_OBJS) \
+		src/rt/atrac3p_bridge.c $(ATRAC3P_SRCS) $(PSMF_MEDIA_LIBS) -lm
+	$(BUILD_DIR)/videocodec_selftest.exe
+
+# The hosted gate for the boundary: native-core-tests runs on every pull request.
+native-core-tests: videocodec-selftest

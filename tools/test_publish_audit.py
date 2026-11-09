@@ -16,6 +16,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import publication_policy
+import public_export
 import publish_audit
 from nk_core.git_isolation import isolated_git_env, run_git
 
@@ -2607,7 +2608,6 @@ class AndroidTreeMetadataTests(unittest.TestCase):
         self.assertEqual(prov, "unclassified")
 
 
-
 class ExportPolicyDigestTests(unittest.TestCase):
     """A committed export control may declare ``policy_sha256`` or omit it.
 
@@ -2624,6 +2624,7 @@ class ExportPolicyDigestTests(unittest.TestCase):
             "policy_version": self.policy.profile_version,
             "excluded_paths": sorted(self.policy.exclude_paths),
             "excluded_globs": sorted(self.policy.exclude_globs),
+            "tree_derived_fields": list(public_export.EXPORT_TREE_DERIVED_FIELDS_WITH_POLICY_DIGEST),
         }
 
     def _codes(self, document: dict) -> list[str]:
@@ -2655,7 +2656,7 @@ class ExportPolicyDigestTests(unittest.TestCase):
             control = dict(self.control)
             del control[field]
             self.assertEqual(self._codes(control), ["POLICY_EXPORT_STALE"], field)
-        self.assertEqual(self._codes({}), ["POLICY_EXPORT_STALE"] * 3)
+        self.assertEqual(self._codes({}), ["POLICY_EXPORT_STALE"] * 4)
 
     def test_a_control_that_declares_the_current_digest_verifies(self) -> None:
         self.assertEqual(self._codes(dict(self.control, policy_sha256=self.policy.digest)), [])
@@ -2664,6 +2665,27 @@ class ExportPolicyDigestTests(unittest.TestCase):
         codes = self._codes(dict(self.control, policy_sha256="0" * 64))
         self.assertEqual(codes, ["POLICY_EXPORT_STALE"])
         self.assertIn("POLICY_EXPORT_STALE", publish_audit.STALE_CONTROL_CODES)
+
+    def test_a_falsy_declared_digest_is_stale(self) -> None:
+        # Shape is decided by key presence: an empty, null or numeric digest is a
+        # declared digest that does not match, not an omitted one.
+        for value in ("", None, 0):
+            for key in ("policy_sha256", "profile_sha256"):
+                self.assertEqual(self._codes(dict(self.control, **{key: value})), ["POLICY_EXPORT_STALE"],
+                                 f"{key}={value!r}")
+
+    def test_an_omitted_digest_needs_tree_derived_fields_to_name_it(self) -> None:
+        for derived in (None, list(public_export.EXPORT_TREE_DERIVED_FIELDS_WITHOUT_POLICY_DIGEST), "policy_sha256"):
+            control = dict(self.control)
+            if derived is None:
+                del control["tree_derived_fields"]
+            else:
+                control["tree_derived_fields"] = derived
+            self.assertEqual(self._codes(control), ["POLICY_EXPORT_STALE"], repr(derived))
+
+    def test_unorderable_excluded_globs_are_stale_not_a_crash(self) -> None:
+        self.assertEqual(self._codes(dict(self.control, excluded_globs=[1, "a"])), ["POLICY_EXPORT_STALE"])
+
 
 if __name__ == "__main__":
     unittest.main()

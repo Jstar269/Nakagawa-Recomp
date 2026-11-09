@@ -163,8 +163,7 @@ static void settings_main(NkUi *ui, const PlayerUiSettingsModel *model, float wi
                                          : "Changes are saved as you make them. Game settings "
                                            "apply the next time a game starts.",
                             NK_UI_TYPE_BODY_S,
-                            has_notice || (has_preset && model->preset_notice_warns)
-                                ? theme->warning : theme->muted);
+                            has_notice ? theme->warning : theme->muted);
             if (advisory[0] != '\0') {
                 nk_ui_text_role(ui, SET_ID_TEXT + 2u, advisory, NK_UI_TYPE_BODY_S,
                                 theme->warning);
@@ -564,6 +563,11 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
                     (void)snprintf(line, sizeof(line),
                                    "This release has no Windows download. Its page on GitHub "
                                    "lists what it offers.");
+                } else if (model->update_installed_by_setup) {
+                    (void)snprintf(line, sizeof(line),
+                                   "This copy was installed with Setup. Download the new "
+                                   "Setup from the release page on GitHub and run it: it "
+                                   "updates this copy and keeps your games and saves.");
                 } else if (model->update_unverifiable) {
                     (void)snprintf(line, sizeof(line),
                                    "This build can't check update signatures, so it doesn't "

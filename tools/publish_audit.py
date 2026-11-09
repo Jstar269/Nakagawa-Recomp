@@ -2022,10 +2022,12 @@ def _export_staleness_findings(
     ``policy_sha256`` is held to it exactly as before.  A control may instead
     omit it: the digest is that of the policy blob itself, recomputed here as
     ``policy.digest``, and committing it makes every two profile-changing pull
-    requests conflict.  Such a control still carries every field the policy
-    decides -- the profile, its version and both exclusion lists -- and each is
-    compared with the policy below, so a control that a policy change would
-    rewrite is still stale.  The policy bytes themselves are bound to the
+    requests conflict.  Such a control must name ``policy_sha256`` in its
+    ``tree_derived_fields`` and still carries every field the policy decides:
+    the profile, its version and the exclusion globs are compared with the
+    policy below, and ``excluded_paths`` by the export-exclusion check, so a
+    control that a policy change would rewrite is still stale.  The exact
+    ``tree_derived_fields`` list is the attestation verifier's to check.  The policy bytes themselves are bound to the
     externally trusted policy by ``POLICY_SOURCE_MISMATCH``.
     """
     resolved = export_path or (repo_root / "PUBLIC_EXPORT.json")
@@ -2039,18 +2041,28 @@ def _export_staleness_findings(
             return [Finding("POLICY_EXPORT_UNREADABLE", str(resolved), f"cannot parse generated export: {error}")]
 
     findings: list[Finding] = []
-    recorded = document.get("policy_sha256") or document.get("profile_sha256")
-    if recorded:
+    # The shape is chosen by key presence: an empty, null or non-string digest is
+    # a declared digest that does not match, never an omitted one.
+    digest_key = next((key for key in ("policy_sha256", "profile_sha256") if key in document), None)
+    if digest_key is not None:
+        recorded = document[digest_key]
         if recorded != policy.digest:
+            shown = f"{recorded[:16]}..." if isinstance(recorded, str) and recorded else repr(recorded)
             findings.append(Finding(
                 "POLICY_EXPORT_STALE", str(resolved),
-                f"generated export was produced against policy digest {recorded[:16]}... but the current "
+                f"generated export was produced against policy digest {shown} but the current "
                 f"policy digest is {policy.digest[:16]}...; regenerate the export and re-audit"))
         if document.get("profile") not in (None, policy.name):
             findings.append(Finding("POLICY_EXPORT_STALE", str(resolved),
                                     f"generated export names profile {document.get('profile')!r}, "
                                     f"policy is {policy.name!r}"))
         return findings
+    derived = document.get("tree_derived_fields")
+    if not isinstance(derived, list) or "policy_sha256" not in derived:
+        findings.append(Finding(
+            "POLICY_EXPORT_STALE", str(resolved),
+            "generated export omits the policy digest but its tree_derived_fields does not name "
+            "policy_sha256; regenerate the export and re-audit"))
     expected = {
         "profile": policy.name,
         "policy_version": policy.profile_version,
@@ -2062,7 +2074,16 @@ def _export_staleness_findings(
                 "POLICY_EXPORT_STALE", str(resolved),
                 f"generated export records neither a policy digest nor the policy-decided field {field!r}; "
                 "regenerate the export and re-audit"))
-        elif (sorted(document[field]) if isinstance(document[field], list) else document[field]) != value:
+            continue
+        recorded_value = document[field]
+        if isinstance(recorded_value, list):
+            if not all(isinstance(item, str) for item in recorded_value):
+                findings.append(Finding(
+                    "POLICY_EXPORT_STALE", str(resolved),
+                    f"generated export field {field!r} is not a list of strings; regenerate the export and re-audit"))
+                continue
+            recorded_value = sorted(recorded_value)
+        if recorded_value != value:
             findings.append(Finding(
                 "POLICY_EXPORT_STALE", str(resolved),
                 f"generated export field {field!r} differs from the current policy "

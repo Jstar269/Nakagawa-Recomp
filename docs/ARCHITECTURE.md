@@ -113,8 +113,8 @@ entry set without silently selecting a winner. `canonical_cfg_json()` is stable 
 fixtures and build-cache comparisons. The CFG gate rejects an owned in-range edge whose
 target has no owner, plus ownership conflicts and unmapped entries. Non-padding words
 outside known control-flow remain listed as unowned; this records uncertainty and does
-not prove that no dynamic entry exists. Dynamic-entry ownership remains in the works
-(issue #291); the gate keeps such words visible as unowned instead of assuming the image
+not prove that no dynamic entry exists. Dynamic-entry ownership is not
+modelled; the gate keeps such words visible as unowned instead of assuming the image
 is complete. File adjacency after an unconditional transfer
 does not make a word a callable. The opt-in `codegen.py --stack-census` flag
 also requires the CFG gate and wraps generated callable entries to compare guest
@@ -252,7 +252,7 @@ These tools run on the development host before the native compiler.
   passes, but on HST at `-O1` the guest time outside the GE fell by only about 1.3% (two runs per
   build). The software GE takes 80% of guest time on that route, so frames sped up by about 0.25%.
   Chunk objects grew by 0.03%, and PAC-MAN CE at `-O0` was about 11% slower. The option therefore
-  stays off by default; dropping write-backs of dead locals (liveness) is the next step to measure.
+  stays off by default. It does not drop write-backs of dead locals.
 
 ### Verification tools
 
@@ -608,7 +608,14 @@ one recorded in its chain: the value the nested returns used to leave. A compute
 runs at the live SP. An interpreted body entered by a computed step leaves the same way
 (`sr_guest_interp_run_tail_step`): its handoff to native code is a recorded transfer, with the
 entry-SP restore a native body entered there would record, so both tiers give the chain the same
-restore (#1935).
+restore (#1935). A body whose `$sp` load left its frame, a context switch or a longjmp, may have
+moved the guest out of frames entered before it: its record releases them (`SR_TAIL_RELEASES`),
+bounded by the `$sp` it loaded. A load below where `$sp` was leaves every frame. A load at or
+above the body's entry `$sp` leaves only the frames whose restore is at or below that `$sp`, so an
+alloca free in a piece keeps the restore of the body that handed it the frame. Once a restore is
+void, the first restore recorded after the release is the chain's. A body that leaves that way by
+returning tells the drain that ran it (`sr_tail_note_exit`), and so does a computed step's chain,
+for the enclosing drain and for an interpreted caller's continuation.
 
 The slot is never live across a yield, syscall, dispatch entry or unwind; each of those refuses a
 live transfer with a named `TAIL_TRANSFER_FAULT`.
@@ -628,7 +635,7 @@ refuses a body whose slot label has no owned successor. `cosim-selftest` covers 
 taken, used to carry the body into the other entry's code and translate a copy of it. In a large
 branch-connected region every entry then holds a copy of the whole region (one title: 6,539
 entries in a region of 1.33 million instructions). A body whose walk exceeds
-`OPTIONS.region_split_threshold` instructions (`tools/codegen.py`, `--region-split-threshold=N|off`)
+`CodegenOptions.region_split_threshold` instructions (`tools/codegen.py`, `--region-split-threshold=N|off`)
 instead stops at every other entry. A conditional branch into one records a TAIL transfer to that
 entry's own body after the delay slot (annulled on the not-taken path of a branch-likely), and a
 not-taken successor that is one is a continuation, exactly as straight-line fall-through is. A
@@ -808,10 +815,10 @@ Clock ownership:
   or stick still held as the overlay closes stays hidden from the guest until it is let go, so
   the press that resumed never reaches the game as a fresh press (`NkInputGate`,
   `src/core/nk_input_profile.h`). Guide is the pause button only; a profile binding to it has no
-  effect in game. Builds after v0.0.1 draw the overlay's pages (resume, settings, controls, quit to
-  library) inside the runtime with nk_ui (`src/rt/overlay/`,
-  [#1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159)); in v0.0.1, `Esc`, `F1`,
-  Guide or the controller's back button (East) only resumes.
+  effect in game. The runtime draws the overlay's pages (resume, settings, controls, quit to
+  library) with nk_ui (`src/rt/overlay/`,
+  [#1159](https://github.com/Jstar269/nakagawa-recomp/issues/1159)); v0.0.1 had no pages, and `Esc`, `F1`,
+  Guide or the controller's back button (East) only resumed.
 - **libc time/gettimeofday** — seconds/usec since the standard Unix epoch, converted from the RTC
   tick. The PSP timezone is a console setting, not the host process timezone. It lives in the
   virtual system registry (`/CONFIG/DATE/time_zone_offset` and `summer_time`), the same keys
@@ -868,9 +875,10 @@ re-qualified under `SR_DETERMINISTIC_CLOCK=1` before it is recorded, and a recor
 real-time, so it cannot be played live
 ([Recording a video of a run](DEBUGGING.md#recording-a-video-of-a-run)). Guest time and the RTC
 are then a function of the guest's own work, so two runs with the same inputs give the same
-frames. Host inputs that remain: whether the host has an audio device, the Memory Stick volume's
-free space, a random console MAC and PSID on fresh user data, and the mixer's 262144-frame cap,
-which drops audio when a run is faster than real time.
+frames. Audio (with or without a host device, whatever the mixer holds), the Memory Stick's
+size and free space, and a fresh profile's console MAC and PSID no longer come from the host:
+[Where `SR_EXIT_AT_VBLANK` actually stops](DEBUGGING.md#where-sr_exit_at_vblank-actually-stops)
+lists what the guest reads instead.
 
 **Runtime host-thread audit.** Guest threads, HLE handlers, the window's event pump and the
 pause loop all run on the runtime thread. Work that runs elsewhere, and why a paused guest
@@ -882,7 +890,7 @@ cannot observe it ([#1159](https://github.com/Jstar269/nakagawa-recomp/issues/11
 | Diagnostic stream drain (`src/rt/debug.c`, [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) | A native thread, Windows only, started when stdout or stderr is redirected | Every 50 ms it writes the C runtime's buffered stdout and stderr text to the log. It reads no guest memory and writes nothing the guest reads, so a paused guest observes nothing. |
 | Android output pump (`src/core/nk_platform_posix.c`, [#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)) | A native thread, Android only, started by `nk_platform_host_startup` | An app process's stdout and stderr go nowhere on Android, so it copies their text, line by line, to the system log and to the run log. It reads no guest memory and writes nothing the guest reads, so a paused guest observes nothing. |
 | Texture-scaling workers (`src/rt/gpu_sdl3vk/tex_scale.c`, [#1273](https://github.com/Jstar269/nakagawa-recomp/issues/1273)) | Two native threads, started at the first scaling job of an Ace Mode run with `SR_TEX_SCALE` on | They scale a host copy of texels the renderer already decoded and write only a host buffer. The runtime thread takes a finished copy at a later texture lookup, so nothing reaches guest memory except through the GE rendering row below, and a paused guest observes nothing. |
-| Preemption timer (`src/rt/sched.c`, [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) | A native thread, paced runs started by the driver | It sleeps until the earliest timed wait of a thread stronger than the running one runs out, then ends the running slice so the next yield point enters the scheduler. It reads no guest memory and writes only the slice counter, which the runtime thread resets at every switch, so a paused guest observes nothing. |
+| Preemption timer (`src/rt/sched.c`, [#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) | A native thread, paced runs started by the driver | It sleeps until the earliest timed wait of a thread stronger than the running one runs out, then ends the running slice so the next yield point enters the scheduler. It reads no guest memory and writes only the slice counter, which the runtime thread resets at every switch, so a paused guest observes nothing. The timer's thread and the runtime thread that starts it ask the host for high priority. On Windows that needs no privilege; on Linux it means nice -10, which an ordinary session refuses (and which threads the runtime thread creates later inherit when it is granted). A refusal leaves normal priority and is logged once, with its cause. |
 | SDL audio output (`src/rt/audio_sdl3.c`) | SDL's audio device thread consumes the bound channel streams | The guest reads only the queue depth, on its own calls. A pause stashes each queue and puts back exactly that depth on resume. If the stash fails, the device is paused, so nothing is consumed (`audio-selftest`). |
 | Audio dump (`SR_AUDIODUMP`, postmix callback) | SDL's audio device thread | It writes the mixed output to a host WAV file and reads no guest memory. |
 | Asynchronous file I/O (`sceIoReadAsync` and related calls) | The runtime thread | A request completes in `io_async_dispatch_tick`, which runs at guest syscall entry and counts syscalls, not host time. A paused guest makes no syscalls. |

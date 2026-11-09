@@ -139,10 +139,13 @@ uint32_t sr_hle_test_psmf_summary_count(void) { return s_psmf_summary_count; }
  * submitted to the decoder and the last audio block staged for delivery -- while vts/ats
  * are the two presentation points a guest actually receives (the displaypts written into
  * the getter's video struct, and the pts of the audio block copied to the guest).  avgap
- * is therefore the A/V separation measured at comparable presentation points, and vlead
- * the video pipeline lead (submitted minus delivered, in ticks) -- both on the same
- * 90 kHz timeline, which is what separates queue/interleave distance from synchronization
- * error in a run.  -1 means the pair has not been measured yet.  vlost is the number of
+ * is therefore the A/V separation measured at comparable presentation points.  vlead is the
+ * time of the last submitted access unit minus the last displaypts, on the same 90 kHz
+ * timeline: when the decoder returns pictures in submit order it is the video pipeline lead
+ * (submitted minus delivered, in ticks); when it reorders, the submitted end is a display time
+ * taken in decode order, so vlead differs from that lead by up to the stream's reorder depth in
+ * picture steps.  Together they separate queue/interleave distance from synchronization error
+ * in a run.  -1 means the pair has not been measured yet.  vlost is the number of
  * presentation times the ring was forced to discard; the submit gate in psmf_video_pump()
  * keeps it at zero, so vlost > 0 on a run means that rule was violated. */
 static int psmf_format_summary(char *line, size_t line_size, unsigned vbl,
@@ -419,10 +422,14 @@ void psmf_player_release(SrPsmfPlayer *p) {
 
 /* Presentation time of one submitted picture.  A packet that carried a PTS sets the clock;
  * a packet that did not advances it by exactly one frame, and until the first PTS arrives the
- * picture's time stays unknown (-1) rather than invented. */
-static void psmf_video_clock_push(SrPsmfPlayer *p, int has_pts, int64_t pts) {
-    int64_t value = sr_psmf_pts_advance(&p->videoClock, &p->videoClockValid,
-                                        has_pts, pts, PSMF_VIDEO_PTS_STEP);
+ * picture's time stays unknown (-1) rather than invented.  Advances the clock and returns the
+ * time; psmf_video_ring_push records it once the access unit is accepted. */
+static int64_t psmf_video_clock_advance(SrPsmfPlayer *p, int has_pts, int64_t pts) {
+    return sr_psmf_pts_advance(&p->videoClock, &p->videoClockValid,
+                               has_pts, pts, PSMF_VIDEO_PTS_STEP);
+}
+
+static void psmf_video_ring_push(SrPsmfPlayer *p, int64_t value) {
     if ((uint32_t)p->auPtsCount < PSMF_OUT_PTS_CAPACITY) {
         p->auPts[(p->auPtsHead + p->auPtsCount) % PSMF_OUT_PTS_CAPACITY] = value;
         p->auPtsCount++;
@@ -445,8 +452,10 @@ static uint32_t psmf_video_submit_limit(int producer_eof) {
  * actually displayed -- a vpts/vts divergence with no stream-side explanation (#279).
  * With it, normal submitted-minus-delivered lead is bounded by PSMF_OUT_PTS_RING. At EOF,
  * the bounded producer/player tail may use the extra PSMF_OUT_PTS_EOS_TAIL entries so all
- * compressed input reaches the backend before EOS closes it. Every submitted picture's time
- * survives to its own getter call, and a guest that stops pulling throttles normal demux. */
+ * compressed input reaches the backend before EOS closes it. No submitted time is displaced
+ * before a getter call pops it, and a guest that stops pulling throttles normal demux.  The
+ * time the guest is handed is the decoder's own time for the picture when the backend reports
+ * one, and the ring head only when it does not (psmf_video_take). */
 static void psmf_video_pump(SrPsmfPlayer *p) {
     if (!p) return;
     SrPsmfQueue *q = &p->q[PSMF_TRACK_VIDEO][PSMF_Q_AU];
@@ -462,18 +471,26 @@ static void psmf_video_pump(SrPsmfPlayer *p) {
             }
         }
         if (p->h264 >= 0) {
+            const int64_t clock_before = p->videoClock;
+            const int valid_before = p->videoClockValid;
+            const int64_t value = psmf_video_clock_advance(p, (slot->flags & 1u) != 0, slot->pts);
             if (slot->hostData && slot->bytes) {
                 sr_psmf_producer_media_stage(p->producer, SR_PSMF_AU_VIDEO,
                                              SR_PSMF_MEDIA_SUBMITTED);
+                /* The decoder carries the player's own time for the unit (extrapolated when the
+                 * packet had none), so a picture it returns out of submit order is still handed
+                 * to the guest with its own time (#279). */
                 if (sr_h264_submit_au_timed(p->h264, (const uint8_t *)slot->hostData,
-                                            slot->bytes, slot->pts,
-                                            (slot->flags & 1u) != 0) < 0) {
+                                            slot->bytes, value >= 0 ? value : slot->pts,
+                                            value >= 0) < 0) {
                     p->videoErrors++;
+                    p->videoClock = clock_before;
+                    p->videoClockValid = valid_before;
                 } else {
-                    psmf_video_clock_push(p, (slot->flags & 1u) != 0, slot->pts);
+                    psmf_video_ring_push(p, value);
                 }
             } else {
-                psmf_video_clock_push(p, (slot->flags & 1u) != 0, slot->pts);
+                psmf_video_ring_push(p, value);
             }
         }
         free(slot->hostData);
@@ -546,6 +563,11 @@ static int psmf_video_take(SrPsmfPlayer *p, uint32_t displaybuf, int bufw,
         p->auPtsHead = (p->auPtsHead + 1) % PSMF_OUT_PTS_CAPACITY;
         p->auPtsCount--;
     }
+    /* The decoder reports the time of the access unit the picture came from.  A decoder that
+     * reorders (output order differs from submit order) gives each picture its own time, where
+     * the submit-order ring above would hand the guest another picture's (#279).  The ring is
+     * popped either way, so its bound on submitted-minus-delivered still holds. */
+    if (info.has_pts && info.pts >= 0) value = info.pts;
     if (value < 0) value = p->displayPts + PSMF_VIDEO_PTS_STEP;
     p->displayPts = value;
     p->displayPtsValid = 1;
@@ -580,8 +602,7 @@ static int psmf_audio_fill(SrPsmfPlayer *p) {
         SrPsmfQueueSlot *slot = &q->slot[q->head];
         const uint8_t *frame = (const uint8_t *)slot->hostData;
         if (frame && slot->bytes > 8u && frame[0] == 0x0fu && frame[1] == 0xd0u) {
-            uint32_t frame_size = (uint32_t)(((frame[2] & 3u) << 8) |
-                                             ((uint32_t)frame[3] * 8u)) + 0x10u;
+            uint32_t frame_size = sr_psmf_audio_frame_bytes(frame);
             if (frame_size == slot->bytes) {
                 uint32_t data = frame_size - 8u;
                 int channels = (int)p->audioChannels;

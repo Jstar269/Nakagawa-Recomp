@@ -22,18 +22,19 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 | --- | --- | --- |
 | Draft pull request (opened, a push, reopened, or converted to Draft) | the quick jobs: classification, hygiene/security with its Markdown step, the public export audit, and CI required, which fails with `DRAFT_LIGHT_CI` (see [Draft pull requests](#draft-pull-requests)) | Python tooling, native/translation, the GCC 16 canary, the Android launcher build, Windows and the profile-zero fixture build, whatever the changed paths |
 | Ready pull request, docs-only | classification, hygiene/security with its Markdown step, CI required | Python/native, Windows |
-| Ready pull request, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, CI required | none of the substantive public gates |
-| Ready pull request, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over three shards, native/translation, Windows, CI required | the Python modules that cannot observe a Makefile recipe |
+| Ready pull request, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
+| Ready pull request, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over three shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
 | Ready pull request, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
+| Ready pull request, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all three groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
 | Ready pull request, only `tools/test_*.py` modules that no native or Windows gate runs | classification, hygiene/security, Python tooling, CI required | native/translation, Windows (see [Tests-only changes](#tests-only-changes)) |
 | Marked Ready (`ready_for_review`) | the path-applicable jobs of a ready pull request, on the head the Draft run left light | only jobs irrelevant to the changed paths |
-| Workflow/CI configuration | classification, hygiene/security, Python tooling, native/translation, Windows, CI required | none of the substantive public gates |
+| Workflow/CI configuration | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
 | Dependency-only metadata (`.github/dependabot.yml`) | classification, hygiene/security, CI required | Python/native, Windows |
-| Mixed documentation/native changes | classification, hygiene/security, Python tooling, native/translation, Windows, CI required | none of the applicable product gates |
-| Ordinary push to `main` after a validated merge | classification, hygiene/security with its Markdown step when needed and its compact main smoke steps, CI required | expensive platform matrix; the merged PR carried it |
-| Workflow push to `main` | the full applicable validation above plus the main smoke steps | none of the substantive public gates |
-| Manual `workflow_dispatch` | the full matrix and full Python tier, regardless of paths | none |
-| Nightly schedule (`17 3 * * *` UTC) | the full matrix and full Python tier | none |
+| Mixed documentation/native changes | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the applicable product gates |
+| Ordinary push to `main` after a validated merge, including one with a path the classifier does not recognise | classification, hygiene/security with its Markdown step when needed and its compact main smoke steps, CI required | expensive platform matrix; the merged PR (or batch) carried it, and an unrecognised path already forced the full matrix there |
+| Workflow push to `main` (a changed workflow, action, CI classifier, aggregate or shard planner), or a push whose change set cannot be read | the full applicable validation above plus the main smoke steps | none of the substantive public gates |
+| Manual `workflow_dispatch` | the full matrix, Windows installer, and full Python tier, regardless of paths | none |
+| Nightly schedule (`17 3 * * *` UTC) | the full matrix, Windows installer, and full Python tier | none |
 | Merge-queue group (`merge_group`, `checks_requested`) | the full matrix, as for a manual dispatch, regardless of paths; every required check reports on the group commit | none |
 
 ### What else starts on a pull request push
@@ -53,9 +54,11 @@ of 2026-11-02, whole history, hosted runners):
 
 GitHub's free plan runs about 20 jobs at once for this repository. A full `CI` run (a workflow
 change, a manual run, the nightly schedule, a merge group) used to need 23 jobs, so a second
-pull request's run waited for runners while the first ran. The same checks now run in 14
-jobs. Nothing was dropped and no command changed; jobs were merged and their steps run one
-after another. Three things differ in when or how a step runs, and none of them skips a step
+pull request's run waited for runners while the first ran. The same checks then ran in 14
+jobs; the Android launcher build (`android_build`), added later, makes 15, and installer and
+Windows-runtime changes add one path-gated Windows installer job. Nothing was dropped and no
+command changed; jobs were merged and their steps run one after another. Three things differ in
+when or how a step runs, and none of them skips a step
 where it ran before:
 
 - The main smoke steps no longer wait for the public-export job. The old `main_smoke` job
@@ -77,6 +80,8 @@ The jobs:
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
 | `python_tools` | 6 shards, 4.2-18.2 min | 3 shards, about 16.5 min each |
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 3 groups of parts, about 10-13 min each |
+| `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
+| `android_build` ("Android launcher build") | not present | 1 job, added later |
 | `ci_required` | 1 job | unchanged |
 
 - **Hygiene.** The check keeps its name, which the ruleset and the
@@ -106,10 +111,25 @@ The jobs:
   (routes) and the player targets (smoke) share `build/` through selftest targets that have no
   output file, so their recipes compile and run every time. The compiler cache is keyed on
   the group, so the first runs after this change restore no entry until a run on `main` has
-  saved one per group.
+  saved one per group. When `run_installer` applies, the smoke group stages the already-built
+  player and its runtime closure into a package artifact; an installer-only change therefore
+  runs all three Windows groups, and a failed staging or upload step fails `windows_runtime`.
+  The separate `windows_installer`
+  job downloads that artifact, downloads the locked Inno Setup (up to three attempts) and checks its
+  SHA-256 before a silent `/CURRENTUSER` install under the runner temp folder, and runs
+  `tools/test_installer.py` with `NK_INSTALLER_REQUIRE_COMPILER=1`, so the compiler-backed tests
+  (reproducible builds, and `RealProbeTests`, which run the script's uninstall-data and upgrade
+  delete routines on temp folders with junctions, symbolic links and a read-only file, and its path
+  compare on the 8.3 short and long spellings of one folder) fail instead of skipping. It then builds
+  `Setup.exe` and runs `tools/verify_installer.py`, which installs, uninstalls and checks an upgrade
+  in place over an older synthetic release, then repeats the build and compares both SHA-256 values.
+  Each install runs with Setup's `/LOG=`, and a failed one reports Setup's PrepareToInstall message
+  (or the log's last lines) beside its exit code. The job requires
+  `allow_substantive == true`, so Draft-light runs skip this heavy gate.
 
 `CI required` needs `classify`, `hygiene`, `public_export`, `python_tools`, `native_tools`,
-`windows_runtime` and `android_build`. The Markdown lint, the main smoke and the fixture build reach it through the
+`windows_runtime`, `windows_installer` and `android_build`. The installer result is required
+only when `run_installer` is true. The Markdown lint, the main smoke and the fixture build reach it through the
 two always-required jobs they now belong to, so `tools/ci_required.py` no longer takes a result
 or run flag of their own. Each merged job's `timeout-minutes` covers its parts: hygiene 35
 (15 + 10 + 10), public export 30 (15 + 15), each Windows group 25 per part (50, 75 and
@@ -259,9 +279,9 @@ A Draft pull request runs only the quick checks: `Classify change`, `Hygiene and
 (with its Markdown step), the public export audit and `CI required`. For a `pull_request`
 event whose payload says `draft: true`, `tools/ci_paths.py` exports `allow_substantive=false`
 and `draft=true`. Every substantive job gates on `allow_substantive`, so Python tooling,
-native/translation, the GCC 16 canary, the Android launcher build, the Windows runtime gate and
+native/translation, the GCC 16 canary, the Android launcher build, the Windows runtime gate, the Windows installer job and
 the profile-zero fixture build are skipped, whatever the changed paths. The path flags (`run_python`, `run_native`,
-`run_windows`, `run_markdown`) are unchanged, so the Ready run routes exactly the gates a
+`run_windows`, `run_installer`, `run_markdown`) are unchanged, so the Ready run routes exactly the gates a
 ready pull request gets. OSV-Scanner, Dependency Review and the provenance attestation run on
 a Draft as before. This keeps the hosted runners free for landing runs, which otherwise queue
 behind every Draft's full matrix.
@@ -534,7 +554,7 @@ or a compiler that is not the pinned one, fails it. Then `ge-first-bad-draw-self
 (`SR_GE_FBD_MUTANT`) must each be named as that draw, in linear and bisect mode. A second generated
 capture holds one PRIM of two overlapping translucent sprites on a 16-bit target, and the tool must
 find exactly its overlap as the first bad draw: the known shader-blend batch-order difference
-(#2109), which that fix turns into `NO_DIFFERENCE`. Four more generated captures check that the
+(#2109, open). Four more generated captures check that the
 tool fails closed: a 512-wide scissor (ge.c rasterizes inside 480x272), 33 targets or a stride of
 1088 are `INCOMPLETE`, and a capture with no draw is `NO_DRAWS`. The same step then runs
 `vram-view-identity-selftest` (#314): the GE decoders the pause menu's VRAM viewer calls, run at
@@ -558,7 +578,7 @@ suite as four parallel shards (`PLAYER_UI_SHARDS`, `NAKAGAWA_PLAYER_UI_SHARD`) t
 every test exactly once; each test already uses its own temporary data roots. The CMake player is configured with CMake's default, unoptimized build type, so
 the gate covers only that configuration: an optimized Release configuration fails under the global
 `-Werror` on existing truncation warnings in `src/core/nk_launch.c`, a separate defect, and this
-job does not claim that configuration builds. Consumer ISO compatibility remains in the works
+job does not claim that configuration builds. Consumer ISO compatibility on Linux is not supported
 (#306); these checks do not establish PSP hardware acceptance or interactive desktop presentation.
 
 ### GCC 16 canary
@@ -992,7 +1012,19 @@ tooling and therefore skipping a native or Windows gate. These invariants exist
 to prevent that, and `tools/test_ci_paths.py` asserts each one:
 
 - **Unknown paths fail closed.** Any path matching no predicate forces the full
-  matrix. Adding a new kind of file makes CI more expensive, never less.
+  matrix. Adding a new kind of file makes CI more expensive, never less. The one
+  exception is a push to `main`: it lands a tree whose pull request (or batch) already
+  ran that full matrix because of the same path, so the push keeps its compact run.
+  Only a changed CI definition (`_is_workflow_ci`) or a change set that cannot be read
+  (no paths, or `<history-unavailable>`) re-runs the matrix on a main push. Here a CI definition
+  means exactly these paths: anything under `.github/workflows/` or `.github/actions/`, and
+  `tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py` and their
+  `tools/test_` modules (`test_ci_paths.py`, `test_ci_required.py`, `test_ci_test_shards.py`).
+  Other files that configure CI, such as `tools/requirements-lock.txt`, are not in that set. Unknown paths
+  made 32 of 79 main pushes repeat the matrix from 2026-11-02 to 2026-11-07 (and 28 of 77
+  from 2026-10-31 to 2026-11-05, when three of those 28 failed: two on a tree that had
+  passed on its batch head, the third with no same-tree pull request run in the sampled
+  window). The nightly schedule still runs the full matrix on `main`.
 - **Every change type counts.** The changed-file query uses name-status without
   a narrowing diff filter, and retains both sides of a rename. Filtering to
   `ACMR` or keeping only a rename's new name can drop a build-affecting source,
@@ -1083,8 +1115,11 @@ once per smoke). Between runs it is persisted with the Actions cache:
   compile, and Make still decides what to build.
 - Only a run of `main` on `main` saves it: a push, the nightly schedule or a manual
   dispatch (`save_compiler_cache` from `tools/ci_paths.py`). Pull requests and merge
-  groups restore it and never write it. Before a save, entries the run did not
-  use are evicted, so the saved cache holds exactly that run's compiles.
+  groups restore it and never write it. A push runs the Windows gates only when it
+  changes a CI definition (see [Classifier invariants](#classifier-invariants)), so most
+  saves come from the nightly run; in ladder parts sampled on 2026-11-05, hit rates from
+  92% to 100% made no measurable difference to the step time. Before a save, entries
+  the run did not use are evicted, so the saved cache holds exactly that run's compiles.
 
 `gcc` is a native symlink to the UCRT64 toolchain's `ccache.exe`, so `CC` stays
 `gcc`, and SDL3 discovery and the toolchain check (`tools/nk_doctor_checks.py`)
@@ -1207,6 +1242,82 @@ default branch, because a group's parent may be an earlier group that never land
 is observation only and not a required check; the hosted `Trusted provenance
 attestation` remains the pull-request gate.
 
+## Merging parallel additions
+
+Some files get a new item from almost every pull request: a self-test block in `mk/selftests.mk`, a
+target in `mk/public_targets.mk`, a source in `mk/runtime_sources.mk` or `CMakeLists.txt`, a row in a
+`docs/DEBUGGING.md` table. Two pull requests that add at the same place conflict in Git although
+neither touches the other's lines. `.gitattributes` marks those five files `merge=nk-append`, and
+`tools/merge_append.py` is the merge driver behind that name. It runs the ordinary three-way merge and
+reads each conflict. It keeps ours and then theirs only when all of these hold:
+
+- The common ancestor has nothing there: both sides only inserted lines. If one side changed or
+  removed a line, the ordinary conflict markers stay.
+- The two insertions share no non-blank line. Git's diff3 output does not factor out lines both sides
+  inserted, so a union would repeat them (ours `X` against theirs `X`, `Y` would give `X X Y`).
+- No tab-indented line of either insertion belongs to a rule header outside that insertion. The driver
+  finds each such line's owner by walking up the merged text and skipping blank lines and `#` comments
+  (make ignores both inside a recipe); the first other non-tab line is the owner. The order of recipe
+  lines matters (`rm -f x` before `gen x`), and the union order would depend on which side is "ours", so a
+  person decides, also when the insertion starts with a comment or blank line. Inserts between targets,
+  new target blocks that bring their own header and tab-indented items of a variable such as
+  `PUBLIC_TARGETS` still merge by themselves.
+
+Git's own `merge=union` is not used because it keeps both versions of a line that both sides edited and
+leaves no marker.
+
+The driver only acts on the five paths named in `ALLOWED_PATHS` inside `tools/merge_append.py` itself.
+`.gitattributes` is read from the tree being merged, so a pull request that edits it could otherwise attach
+the driver to a code file. For any other path the driver exits 1 and leaves the ordinary conflict.
+
+The driver runs Git by an absolute path that it finds itself on `PATH`, skipping empty, `.` and relative
+entries and any entry in or equal to the working directory (the root of the tree being merged), so a
+`git.exe` at that root cannot run on Windows. If it finds no Git it writes nothing and exits 1. For its
+own analysis it asks Git for conflict markers longer than any run of `<`, `|`, `=` or `>` that starts a
+line in the three files, so a content line such as `=======` cannot pass for a marker. The conflict
+written for a person keeps the marker size Git asked for.
+
+`docs/ENHANCEMENT_CONTRACT.md` conflicts often too, but it stays out. Its additions are not independent
+items: 18 of the 22 commits that changed it from 2026-11-01 to 2026-11-07 edited existing lines (49 of their
+74 hunks), so most of its conflicts are edits the driver would leave anyway. The rest add numbered sections
+(`10.12`, `11.3.4`), and two pull requests that each add the next number would merge into two sections with
+one number and no marker.
+
+Turn it on once per clone (worktrees of a clone share the setting). In a contributor's own clone:
+
+```bash
+git config merge.nk-append.name "append-only list merge"
+git config merge.nk-append.driver "python tools/merge_append.py %O %A %B %L %P"
+```
+
+**The landing desk must not use that relative form.** `tools/merge_append.py` would then be the file in the
+tree being merged, and an earlier pull request in the batch that edits it would run its own code on the
+desk's machine. The desk sets the driver in its own clone's config to an absolute path to a reviewed copy
+outside every worktree, and runs it with `-I` so the current directory and the user site are ignored:
+
+```bash
+git config merge.nk-append.driver "python -I /path/to/reviewed/merge_append.py %O %A %B %L %P"
+```
+
+That copy is refreshed only from a reviewed `origin/main` commit (never from a worktree during a batch), and
+the desk compares it with `origin/main:tools/merge_append.py` at the start of each batch.
+
+Without the setting, Git ignores the attribute and merges as usual. The driver runs wherever Git
+merges on that machine (`git merge`, `git merge --squash`, `git cherry-pick`, `git rebase`). GitHub's
+own mergeability check and its **Update branch** button do not run it, so a pull request can still show
+a conflict on GitHub that a local merge resolves. The rest of the conflict-prone files stay out on
+purpose, and `tools/test_merge_append.py` keeps the list honest:
+
+- `docs/ENHANCEMENT_CONTRACT.md`, `docs/CI.md` and `docs/COMPATIBILITY.md` are prose. Parallel edits
+  there rewrite the same paragraph or renumber a section, and the driver would only leave them as
+  conflicts. Keep a change to a shared paragraph small, and put a new item in its own bullet or row.
+- `src/rt/gpu_sdl3vk/ge_gpu_selftest.inc`, `src/player/player_state.c`, `tools/codegen.py` and every other
+  C or Python file are code. Two insertions at one spot there can need an order or a shared brace.
+- The root `Makefile` only includes the `mk/` files, so it is no longer an append point.
+
+Add a file to the list only when every conflict it can have is two independent items, and add it to
+`ALLOWED_PATHS`, `.gitattributes` and the test together.
+
 ## Trusted CI verdict
 
 `.github/workflows/ci-trust-verdict.yml` and `tools/ci_trust_verdict.py` (#373, which also
@@ -1242,7 +1353,7 @@ and each token's remaining budget.
 | Code | Fails when |
 | --- | --- |
 | `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`) or any `tools/` file a default-branch workflow runs, without a current `ci-change-approved` label |
-| `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; merge `main` (no label waives it) |
+| `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; the integrator merges `main` when it lands the pull request; the author merges it only for a real conflict in content that is not generated, or when asked (`AGENTS.md` section 10). No label waives it |
 | `CI_CONTEXT_COLLISION` | another workflow names `Trusted CI verdict`, or a check run uses that name |
 | `FOREIGN_PRODUCER` | a check run or status under an intended context is not from the intended workflow path and event at this head |
 | `JOB_MISSING`, `JOB_FAILED`, `JOB_CANCELLED`, `DUPLICATE_CONTEXT` | the latest non-cancelled intended run lacks the job, the job did not succeed, every run was cancelled, or two jobs share the name |
@@ -1250,6 +1361,9 @@ and each token's remaining budget.
 | `RUN_FOR_OTHER_PR`, `AMBIGUOUS_HEAD` | the intended run belongs to another pull request, or another open pull request has the same head |
 | `PR_NOT_OPEN`, `BASE_NOT_DEFAULT` | nothing to judge for a merge into `main` |
 | `DRAFT_LIGHT_CI` | the pull request is a Draft, or its draft state cannot be read: CI ran only the quick checks ([Draft pull requests](#draft-pull-requests)); mark it Ready for review |
+
+Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and when, is decided by
+[`AGENTS.md` section 10](../AGENTS.md#10-pr-and-integration-authorization), as the row above states.
 
 The intended producers are `CI required` and `Hygiene and security` from `ci.yml`, `OSV
 Vulnerability Scan` from `osv-scanner.yml`, `dependency-review` from `dependency-review.yml`
@@ -1428,15 +1542,21 @@ reads the candidate tree as data (`build-mode: none`), and it takes the pool onl
 it was woken by one of the owner's own pull requests above or a merge group, or for a
 push to `main`. Every other pull request's analysis stays on `ubuntu-26.04`.
 
-Every other run, a fork's pull request above all, gets the job's hosted image (`ubuntu-24.04`
-or `ubuntu-26.04`, whichever that job names when it is not on the pool). Two repository
-variables, which only the maintainer can set, gate it further: `NK_SELF_HOSTED_LINUX`
-must be `on` and `NK_SELF_HOSTED_HEARTBEAT` must be a Unix time less than ten minutes
-old. The pool's supervisor refreshes the heartbeat every two minutes while the pool is
-healthy and turns the switch `off` when it stops or the pool fails, so a sleeping PC or
-a dead pool sends trusted runs back to hosted runners within minutes instead of leaving
-them queued. Only `runs-on` changes: every step, check name, `CI required` and the
-Trusted CI verdict are the same on either runner.
+Every other run, a fork's pull request above all, gets the job's hosted image
+(`ubuntu-24.04` or `ubuntu-26.04`, whichever that job names when it is not on the pool). Two
+repository variables, which only the maintainer can set, gate it further:
+`NK_SELF_HOSTED_LINUX` must be `on` or `landing` and `NK_SELF_HOSTED_HEARTBEAT` must be a
+Unix time less than ten minutes old. `on` sends every trusted run above to the pool.
+`landing` sends only the trusted runs that land work: a push to `main`, a merge group, a
+desk batch branch (`batch/`) and a Ready pull request; for Trusted CodeQL, a push to `main`
+and a wake of a merge group or a batch. A Draft pull request's CI then stays hosted, so a
+small pool is kept for landings. Either value only narrows the trusted runs above, never
+widens them, and any other value is off. The pool's supervisor refreshes the heartbeat every
+two minutes while the pool is healthy, sets the switch to the mode it was started with (`on`
+or `landing`), and turns it `off` when it stops or the pool fails, so a sleeping PC or a
+dead pool sends trusted runs back to hosted runners within minutes instead of leaving them
+queued. Only `runs-on` changes: every step, check name, `CI required` and the Trusted CI
+verdict are the same on either runner.
 
 **The routing is not the security boundary.** On a `pull_request` event, `ci.yml` and
 `tools/ci_paths.py` both come from the candidate's own tree, so a fork could edit either

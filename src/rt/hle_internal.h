@@ -204,6 +204,7 @@ typedef struct {
     uint8_t mac[6];
     uint8_t psid[16];
     int wlan_switch_set;     /* the overlay set the switch */
+    int synthetic;           /* derived for a deterministic run (#2162): never written to the overlay */
     uint32_t wlan_switch;
 } PspConsoleProfile;
 
@@ -1445,7 +1446,13 @@ extern Mbx s_mbx[MBX_MAX];
 Mbx *mbx_find(uint32_t uid);
 void mbx_remove_waiter(Mbx *m, uint32_t thid);
 void hle_register_mbx_handlers(void);
-extern Sync s_sync[128];
+/* The semaphore, event-flag and LwMutex table (hle.c): slots 0..hle_sync_slot_count()-1, each
+ * at a fixed address for the table's lifetime. hle_sync_grow adds a zeroed chunk and returns its
+ * first slot, or NULL when the host cannot allocate one; hle_sync_reset frees every chunk. */
+size_t hle_sync_slot_count(void);
+Sync *hle_sync_slot(size_t index);
+Sync *hle_sync_grow(void);
+void hle_sync_reset(void);
 extern Mutex **s_mutexes;
 extern size_t s_mutex_len;
 extern size_t s_mutex_cap;
@@ -1460,6 +1467,8 @@ void hle_register_ge_handlers(void);
 void hle_register_mp3_handlers(void);
 void hle_register_atrac_handlers(void);
 void hle_register_sas_handlers(void);
+void hle_register_videocodec_handlers(void);
+void hle_videocodec_guest_reset(void);
 void hle_register_utility_module_handlers(void);
 void hle_register_exit_game_handler(void);
 void hle_register_devkit_version_handler(void);
@@ -1514,7 +1523,6 @@ void hle_register_unregistered_import_utility(void);
 void hle_register_unregistered_import_network_1(void);
 void hle_register_unregistered_import_rtc(void);
 void hle_register_unregistered_import_network_2(void);
-void hle_register_unregistered_import_audio_codec(void);
 void hle_register_wait_conformance_kernel_thread(void);
 void hle_register_wait_conformance_display(void);
 void hle_register_wait_conformance_kernel_sync_1(void);

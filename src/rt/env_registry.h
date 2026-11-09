@@ -112,6 +112,7 @@
     X("SR_GE_STRIP_CACHE_DISABLE", "flag-nonzero", "off (strip cache enabled)", "ge.c", "When nonzero, disables the GE strip cache.") \
     X("SR_GE_TIMING", "string", "off (enabled only when exactly \"1\")", "hle.c", "Set to 1 to turn on the measured GE time model and print a GE_TIMING banner.") \
     X("SR_GE_TRANSITION_TRACE", "path", "off", "ge.c", "Writes a GE transition trace to this file; 1 uses a default log path and 0 or empty disables it.") \
+    X("SR_GLYPHS", "string", "off", "gpu_sdl3vk/glyph_recon.c", "on redraws text as sharp glyphs rebuilt at the render scale (scale 2 to 4) from the game's own anti-aliased texels; Ace Mode only.") \
     X("SR_GPU_CAPTURE_TERMINAL_CASE", "string", "unset: lifecycle self-test runs", "gpu_sdl3vk/sdl3vk.c", "Names a terminal-fault case for the GPU capture self-test; when set, the lifecycle self-test is skipped.") \
     X("SR_GPU_COHERENCE_CASE", "string", "unset (run all cases)", "gpu_sdl3vk/ge_gpu.c", "Restricts the GPU coherence self-test to one case; scaled-upload, mip-lod or readback-rows.") \
     X("SR_GPU_CPU_PROFILE", "flag-nonzero", "off", "ge.c,ge_replay.c,gpu_sdl3vk/ge_gpu.c", "Enables CPU-side profiling of GPU and GE replay paths, with wall-phase stats in replay.") \
@@ -143,6 +144,7 @@
     X("SR_HLE_DIAGNOSTICS", "flag-presence", "off", "title_config.c", "When set, enables HLE diagnostics if the title config has a valid diagnostics profile.") \
     X("SR_HOST_TIME_ZONE", "string", "unset (time zone keeps its seed)", "hle.c", "Host time zone as <minutes>,<0|1> (offset and daylight flag); invalid values are ignored with a message.") \
     X("SR_HUD", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c,perf.c", "Enables the developer HUD and performance counters when set to a non-empty value other than 0.") \
+    X("SR_IDENTITY_SEED", "string", "nakagawa-deterministic-profile-v1", "hle.c", "Seed for the synthetic WLAN MAC and OpenPSID of a fresh profile under SR_DETERMINISTIC_CLOCK=1; ignored otherwise.") \
     X("SR_INLOG", "flag-presence", "off", "debug.h,gpu_sdl3vk/sdl3vk.c,hle_input.c", "Logs controller input: published button changes in the SDL backend and HLE input calls.") \
     X("SR_IOLOG", "flag-presence", "off", "debug.h,hle_data.c,hle_io.c", "When set, logs file I/O operations to stderr and enables the file-system debug category.") \
     X("SR_LAUNCHER_DISPLAY_BOUNDS", "list", "unset (primary display)", "gpu_sdl3vk/sdl3vk.c,gui.c", "Display bounds as x,y,w,h used to open the launcher window on a chosen display.") \

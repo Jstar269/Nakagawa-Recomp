@@ -174,32 +174,33 @@ try:
         validate_ledger, verify_derived_policy_delta,
     )
     from .public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS
-    from .public_export import (
-        EXPORT_TREE_DERIVED_FIELDS_WITH_POLICY_DIGEST as _TREE_DERIVED_WITH_POLICY_DIGEST,
-        EXPORT_TREE_DERIVED_FIELDS_WITHOUT_POLICY_DIGEST as _TREE_DERIVED_WITHOUT_POLICY_DIGEST,
-        POLICY_DIGEST_FIELD as _POLICY_DIGEST_FIELD,
-    )
     from .public_export import build_control_document as _build_control_document
     from .public_export import build_document as _build_export_document
     from .publication_policy import PolicyError, load_policy
 except ImportError:
-    from nk_core.git_isolation import isolated_git_env
-    from provenance_ledger import (
+    from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
+    from provenance_ledger import (  # type: ignore[no-redef]
         ALLOWED_CLASSES as ALLOWED_CLASSES, RefreshError, _admission_requires_implementation,
         _canonical_json_bytes, _class_for, _classify_policy_delta, _read_policy_delta_authority,
         admission_claim, claims_ledger, claims_ledger_bytes, derive_policy_delta_v3, is_claims_ledger,
         is_derived_policy_delta, policy_delta_v3_bytes, policy_delta_v3_name, policy_delta_v4_key,
         validate_ledger, verify_derived_policy_delta,
     )
-    from public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS
-    from public_export import (
-        EXPORT_TREE_DERIVED_FIELDS_WITH_POLICY_DIGEST as _TREE_DERIVED_WITH_POLICY_DIGEST,
-        EXPORT_TREE_DERIVED_FIELDS_WITHOUT_POLICY_DIGEST as _TREE_DERIVED_WITHOUT_POLICY_DIGEST,
-        POLICY_DIGEST_FIELD as _POLICY_DIGEST_FIELD,
-    )
-    from public_export import build_control_document as _build_control_document
-    from public_export import build_document as _build_export_document
-    from publication_policy import PolicyError, load_policy
+    from public_export import EXPORT_TREE_DERIVED_FIELDS as _EXPORT_TREE_DERIVED_FIELDS  # type: ignore[no-redef]
+    from public_export import build_control_document as _build_control_document  # type: ignore[no-redef]
+    from public_export import build_document as _build_export_document  # type: ignore[no-redef]
+    from publication_policy import PolicyError, load_policy  # type: ignore[no-redef]
+
+#: The policy digest and the two ``tree_derived_fields`` lists a committed
+#: control may record, derived as ``public_export`` derives them (its
+#: ``POLICY_DIGEST_FIELD`` and ``EXPORT_TREE_DERIVED_FIELDS_WITH(OUT)_POLICY_DIGEST``;
+#: a test pins them equal).  They are built here from the one imported list so
+#: the dual import above stays as it is.
+_POLICY_DIGEST_FIELD = "policy_sha256"
+_TREE_DERIVED_WITH_POLICY_DIGEST = tuple(sorted(set(_EXPORT_TREE_DERIVED_FIELDS) | {_POLICY_DIGEST_FIELD}))
+_TREE_DERIVED_WITHOUT_POLICY_DIGEST = tuple(
+    field for field in _EXPORT_TREE_DERIVED_FIELDS if field != _POLICY_DIGEST_FIELD
+)
 
 #: Paths the ledger deliberately carries without a content hash: they are the
 #: generated outputs whose own bytes depend on the ledger.

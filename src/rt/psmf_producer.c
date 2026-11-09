@@ -51,15 +51,17 @@
 /* Access-unit delimiter NAL unit type inside the H.264 elementary stream. */
 #define H264_NAL_AUD 9u
 /* PSP audio frame header signature and its size field encoding.  A frame is
- * ((code1 & 3) << 8 | code2 * 8) + PSMF_AUDIO_SIZE_BASE bytes in total,
- * PSMF_AUDIO_HDR_BYTES of which are the header.  The two constants must stay
- * distinct: using the header length as the size base truncates every frame by
- * eight bytes and desynchronizes the whole stream. */
+ * (((code1 & 3) << 8 | code2) * 8) + PSMF_AUDIO_SIZE_BASE bytes in total
+ * (sr_psmf_audio_frame_bytes), PSMF_AUDIO_HDR_BYTES of which are the header.
+ * The two constants must stay distinct: using the header length as the size
+ * base truncates every frame by eight bytes and desynchronizes the whole stream. */
 #define PSMF_AUDIO_HDR_0 0x0Fu
 #define PSMF_AUDIO_HDR_1 0xD0u
 #define PSMF_AUDIO_HDR_BYTES 8u
-#define PSMF_AUDIO_SIZE_BASE 0x10u
+#define PSMF_AUDIO_SIZE_BASE 0x10u /* the constant inside sr_psmf_audio_frame_bytes */
 #define PSMF_AUDIO_MIN_FRAME 0x10u
+/* The largest frame the producer accepts.  The size field itself reaches 0x2008 bytes; this cap is a
+ * parser bound that has not been measured on a PSP. */
 #define PSMF_AUDIO_MAX_FRAME 0x0B08u
 /* Bounded resync window when the audio stream does not start on a frame header
  * (chapter transitions can leave a few bytes behind). */
@@ -399,7 +401,7 @@ static int audio_frame_at_head(Track *t, uint32_t *skip, uint32_t *au_len) {
     }
 have_header:;
     const uint8_t *h = b + *skip;
-    uint32_t size = (uint32_t)(((h[2] & 0x03u) << 8) | ((uint32_t)h[3] * 8u)) + PSMF_AUDIO_SIZE_BASE;
+    uint32_t size = sr_psmf_audio_frame_bytes(h);
     if (size < PSMF_AUDIO_MIN_FRAME || size > PSMF_AUDIO_MAX_FRAME) return -1;
     if (len - *skip < size) return 0;
     *au_len = size;

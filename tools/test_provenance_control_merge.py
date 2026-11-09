@@ -345,6 +345,13 @@ class TamperStillFailsTests(unittest.TestCase):
     def test_the_committed_control_shape_is_accepted(self) -> None:
         self.assertEqual(self._codes(self.declared), [])
 
+    def test_the_verifier_derives_the_accepted_lists_as_the_writer_does(self) -> None:
+        self.assertEqual(verifier._POLICY_DIGEST_FIELD, public_export.POLICY_DIGEST_FIELD)
+        self.assertEqual(verifier._TREE_DERIVED_WITH_POLICY_DIGEST,
+                         public_export.EXPORT_TREE_DERIVED_FIELDS_WITH_POLICY_DIGEST)
+        self.assertEqual(verifier._TREE_DERIVED_WITHOUT_POLICY_DIGEST,
+                         public_export.EXPORT_TREE_DERIVED_FIELDS_WITHOUT_POLICY_DIGEST)
+
     def test_a_declared_but_stale_tree_derived_field_is_refused(self) -> None:
         forged = dict(self.declared, included_content_sha256="0" * 64)
         self.assertIn("EXPORT_FIELD_MISMATCH", self._codes(forged))

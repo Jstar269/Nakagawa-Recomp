@@ -233,19 +233,32 @@ The committed control omits the fields listed in its `tree_derived_fields`: the
 tree-wide digests and counts, and `policy_sha256`. Committing them made every
 merge, and every admitted path, rewrite the same lines, so every open pull request
 conflicted. Omission is not trust. The gate recomputes each one, and a declared
-value must still match. `policy_sha256` is the digest of the candidate's own
-`assets/public_source_profile.json`. It was never where the policy was trusted:
-the gate binds those policy bytes to the trusted base policy, or to the
-maintainer's policy-delta authority (`POLICY_SUBSTITUTION`,
-`CANDIDATE_POLICY_MISMATCH`, `POLICY_DELTA_UNAUTHORIZED`). It then rebuilds the export from them. Every field
-the policy decides (profile, policy version, exclusion lists, schema version)
-stays committed and compared. A control generated against a different policy
-therefore still fails with `EXPORT_FIELD_MISMATCH`, unless its bytes equal the
-current policy's output. A control written before `policy_sha256` joined the
-list still verifies: it declares the older `tree_derived_fields` and the digest,
-and the digest is compared, so a stale one fails with `EXPORT_FIELD_MISMATCH`.
-The older list without the digest is refused with the fix in the message:
-`make contrib-refresh` or `python tools/regen_all.py`.
+value must still match. Every field the policy decides (profile, policy version,
+exclusion lists, schema version) stays committed and compared, so a control
+generated against a different policy still fails with `EXPORT_FIELD_MISMATCH`,
+unless its bytes equal the current policy's output.
+
+The fields that `tree_derived_fields` lists are recomputed, so the committed
+control may omit them. `policy_sha256` is the digest of the candidate's own
+policy blob, which the gate has already bound to the trusted base policy or to
+the maintainer's policy-delta authority, so it may be omitted on the same
+terms, but only by a control whose `tree_derived_fields` names it. Two committed
+shapes are accepted:
+
+* `tree_derived_fields` without `policy_sha256`, and the digest declared: the
+  declared digest is compared with the recomputed one;
+* `tree_derived_fields` naming `policy_sha256`, and the digest omitted (a
+  declared one is still compared).
+
+A control whose list does not name `policy_sha256` and that declares no digest
+is refused with `EXPORT_FIELD_MISMATCH`, and the message names
+`make contrib-refresh` (`mingw32-make` on Windows) and
+`python tools/regen_all.py`. The publication audit (`tools/publish_audit.py`)
+runs a staleness check of its own: a declared digest, even an empty or null
+one, must equal the policy digest, and a control without one must name
+`policy_sha256` in `tree_derived_fields` and match the policy's profile,
+version and exclusion lists, else `POLICY_EXPORT_STALE`. It does not compare the
+whole `tree_derived_fields` list; that is the verifier's check above.
 
 `candidate_tree` and `source_tree` are the two advisory exceptions: the release
 process records the pre-export tree there, so they are informational. The real
@@ -502,7 +515,7 @@ access token scoped to the private authority repository only, with
 gate fails closed rather than skipping. The token is only ever held by a job
 that does not execute a single byte of candidate code.
 
-**3. Required status check — DO NOT ADD IT YET.**
+**3. Required status check — do not add it.**
 
 The gate ships in **observation mode**. It runs on every pull request, fails
 closed, and publishes its findings, but it is deliberately **not** a required
@@ -533,7 +546,7 @@ chosen for #364. It does not make this context required. It requires a
 workflow, event or app (`FOREIGN_PRODUCER`). Since 2026-10-29 the ruleset requires
 `Trusted CI verdict` and `CodeQL` only.
 
-When the day comes, the ruleset already carries a `pull_request` rule,
+If this context is ever made required, the ruleset already carries a `pull_request` rule,
 `required_linear_history`, and an empty `bypass_actors` list; its
 `strict_required_status_checks_policy` is already `true` (live value read from
 the ruleset, 2026-10-29). Whatever context

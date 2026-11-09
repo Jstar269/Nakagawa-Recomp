@@ -18,9 +18,9 @@ Title-specific HST configuration and private engineering/review documents are
 excluded by `assets/public_source_profile.json`.
 
 The current public source profile also excludes the lineage-sensitive PGF/font and PGD/amctrl
-surfaces, plus the reviewed-but-not-yet-cleared sal063-derived ISO/VFS and SDL
-audio implementations. Public-safe builds link explicit unavailable boundaries;
-they reject the capability and do not fabricate success.
+surfaces, plus the sal063-derived ISO/VFS and SDL audio implementations. Public builds link the
+project-authored PGF reader, ISO backend and SDL3 audio backend; the PGD/amctrl boundary is an
+explicit unavailable stub that rejects the capability and does not fabricate success.
 
 ### Public channels outside the source tree
 
