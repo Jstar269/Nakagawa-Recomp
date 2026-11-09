@@ -201,7 +201,7 @@ The **Where** column of each table names the places a code can appear:
 | `PACKAGE_REUSE_REFUSED` | route | The reusable package's cache key differs from this build's, so its generated C is not reused. |
 | `PACKAGE_REVALIDATION_FAILED` | player | The installed package failed its check. |
 | `PACKAGE_ROUTE_FAILED` | route | The package route stopped on a file-system or value error that carries no more specific route code. |
-| `PACKAGE_UNSUPPORTED_PATH` | route | A path has spaces or characters the Make recipes cannot quote, and no short-name or `NK_BUILD_ROOT` alternative exists. |
+| `PACKAGE_UNSUPPORTED_PATH` | route | A path has spaces or characters the Make recipes cannot quote, and no short-name form exists. The output directory can also use `NK_BUILD_ROOT`; an enhancement data root is read in place, so only its short form or a move to another location helps. |
 | `RUNTIME_PACKAGE_NOT_READY` | player | The game's package has not been built yet. |
 
 ## run

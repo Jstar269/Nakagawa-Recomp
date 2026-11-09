@@ -71,7 +71,7 @@ it agree with every other artifact.
 | T32 | Add an exclusion covering a changed implementation path | `TRUSTED_SCOPE_VIOLATION` — the same rule; removing a path from coverage is removing a path from coverage |
 | T33 | Add a new implementation file and simply leave it out of the policy | `TRUSTED_SCOPE_VIOLATION` — a new implementation path must enter the universe unless the **trusted** policy excludes it |
 | T34 | Relabel an implementation path as documentation, configuration or a fixture to escape content gating | `CLASSIFICATION_DOWNGRADE` — measured against trusted derivation, so correcting a genuine over-claim is still allowed |
-| T35 | Forge `policy_sha256`, `included_content_sha256`, counts or exclusion lists while keeping `provenance_ledger_sha256` correct | `EXPORT_FIELD_MISMATCH` — the whole export is recomputed and compared field by field |
+| T35 | Forge `policy_sha256`, `included_content_sha256`, counts or exclusion lists while keeping `provenance_ledger_sha256` correct | `EXPORT_FIELD_MISMATCH` — the whole export is recomputed and compared field by field; a declared `policy_sha256` is compared even where the control may omit it |
 | T36 | Repeat a JSON object key so the verifier and a downstream reader disagree about which value wins | the strict parser refuses any duplicate key in the ledger, policy, export or authority before semantics run |
 | T37 | Spell a path in NFD, or with a backslash, control character or dot component, so two Git paths collapse to one identity | `TREE_INVALID` — paths must be canonical NFC POSIX relative, and ambiguity is refused rather than normalized |
 | T38 | Probe which private record ids exist by watching whether the gate says "absent" or "does not cover" | one `TRUSTED_RECORD_UNRESOLVED` code with one wording, and the claimed id is not echoed |
@@ -228,6 +228,28 @@ rebuilds the entire export with `public_export.build_document` — the same
 generator the release process uses — from the candidate tree and the policy,
 and compares **every field**, reporting `EXPORT_FIELD_MISMATCH` for any
 difference, any missing field and any invented one.
+
+The fields that `tree_derived_fields` lists are recomputed, so the committed
+control may omit them. `policy_sha256` is the digest of the candidate's own
+policy blob, which the gate has already bound to the trusted base policy or to
+the maintainer's policy-delta authority, so it may be omitted on the same
+terms, but only by a control whose `tree_derived_fields` names it. Two committed
+shapes are accepted:
+
+* `tree_derived_fields` without `policy_sha256`, and the digest declared: the
+  declared digest is compared with the recomputed one;
+* `tree_derived_fields` naming `policy_sha256`, and the digest omitted (a
+  declared one is still compared).
+
+A control whose list does not name `policy_sha256` and that declares no digest
+is refused with `EXPORT_FIELD_MISMATCH`, and the message names
+`make contrib-refresh` (`mingw32-make` on Windows) and
+`python tools/regen_all.py`. The publication audit (`tools/publish_audit.py`)
+runs a staleness check of its own: a declared digest, even an empty or null
+one, must equal the policy digest, and a control without one must name
+`policy_sha256` in `tree_derived_fields` and match the policy's profile,
+version and exclusion lists, else `POLICY_EXPORT_STALE`. It does not compare the
+whole `tree_derived_fields` list; that is the verifier's check above.
 
 `candidate_tree` and `source_tree` are the two advisory exceptions: the release
 process records the pre-export tree there, so they are informational. The real
