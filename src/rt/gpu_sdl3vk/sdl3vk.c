@@ -233,6 +233,7 @@ static void (*s_ui_pass)(const Sdl3VkUiPass *frame);
 static Sdl3VkShowPass s_show_pass;
 static Sdl3VkUpscalePass s_upscale_pass;
 static Sdl3VkUpscalePass s_rec_upscale_pass;  /* the recording's own upscaler (#2138) */
+static int s_upscale_cpu_frame;  /* the last source present's kind, for the held presents */
 /* What the last present's frame blit read: its source image and size, its place in the window and
  * its filter. The capture selftest checks the presentation upscaler's image is what reaches the
  * window. */
@@ -2095,9 +2096,10 @@ static int rec_record(VkCommandBuffer cmd, PresentFrame *f, VkImage show, int sh
      * every size change between the two). The blit below then copies the result 1:1. Only an
      * enlargement, as in the window: EASU is not a downscaler. */
     VkImage upscaled = VK_NULL_HANDLE;
+    int by_anime4k = 0;
     if (s_rec_upscale_pass && plan.w >= showw && plan.h >= showh && (plan.w > showw || plan.h > showh))
         upscaled = (VkImage)s_rec_upscale_pass((void *)cmd, (void *)show, showw, showh, plan.w,
-                                               plan.h);
+                                               plan.h, s_upscale_cpu_frame, &by_anime4k);
     int prescaled = 0;
     if (upscaled) {
         blit_src = upscaled;
@@ -2127,7 +2129,7 @@ static int rec_record(VkCommandBuffer cmd, PresentFrame *f, VkImage show, int sh
     /* What record.json says made this picture: the blits issued here, never the scaling
      * setting's name. Sharp at an exact multiple, and bilinear there too, are one nearest blit;
      * sharp shrinking, or without its prescale image, is one linear blit. A 1:1 copy is none. */
-    int filter = upscaled ? SR_VIDEOREC_FILTER_FSR1
+    int filter = upscaled ? (by_anime4k ? SR_VIDEOREC_FILTER_ANIME4K : SR_VIDEOREC_FILTER_FSR1)
                : prescaled ? SR_VIDEOREC_FILTER_SHARP
                : plan.nearest ? SR_VIDEOREC_FILTER_NEAREST
                : SR_VIDEOREC_FILTER_LINEAR;
@@ -2344,6 +2346,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
     if (s_rec_pending == f) sr_videorec_resolve_pending();
     int rec_in_submit = 0;
     if (upload) { memcpy(f->staging_map, upload, (size_t)srcw * (size_t)srch * 4u); src = f->fbimg; }
+    if (src) s_upscale_cpu_frame = upload != NULL;
     VkCommandBuffer cmd = f->cmd;
 
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -2448,7 +2451,8 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         /* Only a place at least as large on both axes and larger on one: EASU enlarges, it is not a
          * downscaler. */
         if (s_upscale_pass && plan.w >= showw && plan.h >= showh && (plan.w > showw || plan.h > showh))
-            upscaled = (VkImage)s_upscale_pass((void *)cmd, (void *)show, showw, showh, plan.w, plan.h);
+            upscaled = (VkImage)s_upscale_pass((void *)cmd, (void *)show, showw, showh, plan.w, plan.h,
+                                               s_upscale_cpu_frame, NULL);
         if (upscaled) {
             blit_src = upscaled;
             bw = plan.w;
