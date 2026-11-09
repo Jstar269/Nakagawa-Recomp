@@ -228,9 +228,58 @@ validation layer on, and expects no leaked object and no validation error from e
 - an init failure at each step;
 - a failure at each checked present step, through a one-shot present-step fault seam.
 
+## Render scale and render targets read as textures (#2052)
+
+At a render scale above 1x (`SR_GPU_SCALE`, the player's Internal Render Resolution) every render
+target and its depth buffer are allocated at that scale. Guest VRAM keeps the 1x frame: a CPU
+readback takes the top-left device pixel of each guest pixel (`readback-rows`). Effects that draw
+into one target and read it back as a texture keep the scale in these cases:
+
+- **A target sampled as a texture** is bound directly: the draw samples the target's own image at
+  render scale, with no readback and no decode. A draw that samples the target it renders into
+  reads a snapshot copy of it. Sample positions keep the PSP's lattice in guest texels
+  (`psp.frag`):
+  - Linear filtering steps in sixteenths of a guest texel and blends the device texels around
+    each position. A bloom-like pass into a quarter-size buffer, sampled back with linear
+    filtering, keeps its render-scale detail (`rtt-scale` in `gpu-coherence-selftest`, at 1x, 2x
+    and 4x). At 3x a device texel is not a whole number of sixteenths (16/3), so the sample
+    positions fall unevenly across device texels and the detail is finer than 1x but uneven.
+  - Nearest filtering takes the centre of each guest texel, as the PSP does, so a nearest read of
+    a target shows one device texel per guest texel at any render scale.
+- **A block transfer between targets** copies at render scale (`hook_xfer`).
+
+A texture is a render-target read when its address lies inside the span of a colour target the
+GPU has drawn (one whose image is valid): from the target's base address, its stride times 272
+rows (`target_containing` in `ge_gpu.c`). The direct
+bind then needs all of these: the texture format equals the target's pixel format, the texture is
+not swizzled and mipmapping is not active (a mipmap filter with a maximum level above 0), its
+buffer width equals the target's stride (or is 0), the texture address is pixel-aligned inside the
+target, and the target's image holds the guest's latest CPU writes. Any other read of a render
+target reads the target back to guest VRAM and decodes it there at 1x, the way the GE drew it, so
+the effect shows 1x detail at any render scale. Those reads include:
+
+- a read in any texture format other than the target's pixel format: CLUT4, CLUT8, CLUT16,
+  CLUT32, DXT, or another direct-colour format (a 16-bit target read as 8888 or as another 16-bit
+  format, an 8888 target read as 16-bit);
+- a swizzled read;
+- a read with mipmapping active;
+- a read with another buffer width;
+- a read of a target whose CPU writes could not be copied into its image.
+
+Depth is matched by address like any texture. A depth buffer read as a texture decodes guest VRAM
+at 1x when its address lies outside every colour target's span. If it lies inside one and the read
+passes the rules above, that colour target's image is bound instead: the renderer does not detect
+depth aliasing.
+
+`SR_GPU_NORTT=1` sends every render-target read through that 1x path, for bisecting.
+
 ## Environment variables
 
 - `SR_GPU_GE=1` — enable the GPU rasterizer (SDL3 build only; default off).
+- `SR_GPU_SCALE=1..4` — the integer render scale (`SR_RESOLUTION_SCALE` is the other spelling);
+  default 1. See [Render scale and render targets read as textures](#render-scale-and-render-targets-read-as-textures-2052).
+- `SR_GPU_NORTT=1` — read every render target used as a texture back through guest VRAM at 1x,
+  instead of binding the target image (debug bisect).
 - `SR_GPU_LOG=1` — one line per flush (reason, batches, verts, target).
 - `SR_GPU_SUBMIT_BATCH=1..128` — recorded GE ops (render batches, destination snapshot
   copies, ring uploads) that share one `vkQueueSubmit`; default 128, out-of-range values keep
