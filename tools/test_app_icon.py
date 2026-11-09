@@ -162,7 +162,7 @@ class BuildWiringTests(unittest.TestCase):
 
     def test_windows_player_and_titles_link_the_icon(self) -> None:
         makefile = read_makefile(ROOT)
-        windows = makefile.split("ifeq ($(OS),Windows_NT)\nPLAYER_PLATFORM_SRC", 1)[1].split("\nelse\n", 1)
+        windows = makefile.split("ifeq ($(NK_TARGET_OS),windows)\nPLAYER_PLATFORM_SRC", 1)[1].split("\nelse\n", 1)
         self.assertIn("PLAYER_ICON_OBJ     := $(BUILD_ROOT)/nakagawa_icon.o", windows[0])
         self.assertIn("TITLE_ICON_OBJ      = $(BUILD_DIR)/nakagawa_icon.o", windows[0])
         self.assertIn("PLAYER_ICON_OBJ     :=\nTITLE_ICON_OBJ      :=\n", windows[1])

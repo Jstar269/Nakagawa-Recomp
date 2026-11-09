@@ -181,6 +181,11 @@ CODEGEN_TEMPORARY_PATCH_TEST = (
 # 0x00048320 (force single-iteration pass) and 0x00010950 (bypass worker frame-init spin
 # loop) were retired under #363. 0x00010950 sat inside the retail allocator body that the
 # runtime host-bridges, so its patched branch was never emitted into the title C.
+# The uninventoried HST emission sites went with them on 2026-11-08: MEMSET_FASTPATH
+# (0x0006ea1c) and ARRSHIFT_FASTPATH (0x00108630), which replaced two guest loops with one
+# native pass, GUEST_ABORT (0x00000a1c), which ended the run with _Exit(9) before the
+# title's abort() body ran, and the four stand-alone --static-verify exclusions. Each now
+# translates as written (tools/test_codegen_profile_isolation.py RetiredLoopSiteTests).
 GUEST_PATCHES: list[dict[str, Any]] = [
 ]
 

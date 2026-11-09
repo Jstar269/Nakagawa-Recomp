@@ -1482,6 +1482,16 @@ int sr_enhancement_file_register(const char *disc_path, const uint8_t stock_sha2
  * sr_enhancement_logic_slowed() may be called from the presenter thread. */
 void sr_enhancement_register_updates(const volatile uint32_t *counter);
 int sr_enhancement_logic_slowed(unsigned *rate);
+/* A clip_x_widen site (section 10.8), from generated code right after the call at the site
+ * returns: the guest pointer `base` plus each of the `count` offsets addresses a column-major 4x4
+ * float clip matrix, and its x output row (elements 0, 4, 8, 12) is scaled by 480 / (480 + 2 * wing),
+ * so a title's own visibility test accepts the same extra width the Widescreen wings draw. It does
+ * nothing while Widescreen is off (wing 0) or the run's cull key is off, so the guest sees its stock
+ * matrices; a matrix outside guest RAM is reported once on stderr and left alone. A matrix whose x
+ * row still holds the words this function wrote is not scaled again, so a title that does not rebuild
+ * a matrix at every call cannot be scaled twice; the call at the site must leave each listed matrix
+ * describing the camera it was built for (rewritten, or unchanged since the last call). */
+void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count);
 
 /* The kernel's record of the main module, emitted by tools/codegen.py from the ELF (PT_LOAD
  * segments, SceModuleInfo, section or program headers, and the syslib's
@@ -1598,9 +1608,16 @@ void     dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc);
  * call's own return boundary, as a direct call has. Returns 1 when the caller must
  * return without running its continuation (sr_aot_return_boundary_end). */
 int      dispatch_call_checked(CpuState *s, uint32_t target, uint32_t resume_pc);
+/* The interpreter's linked call (guest_interp.c): 1 when the COSIM guest lane refused an
+ * import under it and the interpreter must return with that fatal flow, else 0 (#2196). */
+int      dispatch_call_interp(CpuState *s, uint32_t target, uint32_t resume_pc);
 /* Set only by the COSIM guest lane (domain_mode.c): its refused import unwinds through
- * dispatch_call_checked and dispatch_call_continue instead of ending the run. */
+ * dispatch_call_checked, dispatch_call_continue, dispatch_call_interp, dispatch_tail_step
+ * and dispatch instead of ending the run. */
 extern volatile int sr_dispatch_unwind_requested;
+/* The COSIM guest lane's import refusal (recomp.c, #2201): 1 when the lane holds and the
+ * import `nid` was refused (fatal flow and the unwind flag set), else 0 and nothing changes. */
+int      sr_guest_lane_refuse_import(CpuState *s, uint32_t nid);
 
 /* A computed jr/jalr whose target register holds 0 is a null code pointer (#1375): report
  * it and stop the run. Generated code tests the latched target before the transfer's link
@@ -2298,6 +2315,10 @@ int sched_clock_deterministic(void);
 extern int g_prof_enabled;
 void sr_profile_init(void);
 void sr_profile_dump(void);
+/* The end-of-run SR_PROFILE dump, printed once: from atexit, and from every hard exit (_Exit)
+ * that skips atexit, such as SR_EXIT_AT_VBLANK. A no-op when profiling is off. The periodic
+ * SR_PROFILE_DUMP_VBLANKS dumps call sr_profile_dump. */
+void sr_profile_dump_final(void);
 void sr_profile_block(uint32_t target_pc);
 /* Test accessors: defined only in SR_PROFILER_SELFTEST builds (recomp.c), but
  * declared unconditionally so no translation unit ever sees an implicit
