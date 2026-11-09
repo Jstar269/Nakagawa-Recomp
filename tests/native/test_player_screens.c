@@ -258,7 +258,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_STOP, FLOW_PAGE_TITLE_ACE,
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
-               FLOW_PAGE_STEAM_BLOCKED,
+               FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_TITLE_TALL,
                FLOW_CONSENT_FULL, FLOW_COUNT } FlowCase;
 
 /* The window size the game-found and Settings cases lay out for. */
@@ -912,6 +912,41 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         memset(&title, 0, sizeof(title));
         title.title = &fixture;
         title.title_index = 3u;
+        title.logical_width = g_flow_width;
+        title.logical_height = g_flow_height;
+        return player_ui_screen_title(ui, &title);
+    }
+    if (which == FLOW_PAGE_TITLE_TALL) {
+        /* The title page at its tallest: the game starting (its progress card),
+           the disc check's note, what to expect with known issues, the
+           ENHANCEMENTS card at its fullest and the Add to Steam, Report and
+           Remove row. It is taller than the room between the bars of a
+           1280 x 720 window at 100% text, so its body scrolls. */
+        static PlayerUiTitle fixture;
+        PlayerUiTitleModel title;
+        fixture = k_titles[6];
+        fixture.package_state = PLAYER_UI_PACKAGE_STARTING;
+        fixture.disc_check_note = "Verified retail: this image matches a known good dump "
+                                  "of the disc, byte for byte.";
+        fixture.compatibility_tier = k_compatibility_cases[1].tier;
+        fixture.compatibility_expect = k_compatibility_cases[1].expect;
+        fixture.compatibility_known_issues = k_compatibility_cases[1].known_issues;
+        fixture.ace_shown = true;
+        fixture.ace_label = "Play mode: Ace";
+        fixture.ace_in_effect = true;
+        fixture.ace_enabled = true;
+        fixture.ace_line =
+            "Ace for this game: 60 FPS game logic, 16x texture filtering, crisp system text.";
+        fixture.options_shown = true;
+        fixture.options_enabled = true;
+        fixture.ace_last_session = "Last session: 16x filtering; the game ran at 30 Hz.";
+        fixture.enhancement_shown = true;
+        fixture.enhancement_enabled = true;
+        fixture.can_remove = true;
+        fixture.can_add_to_steam = true;
+        memset(&title, 0, sizeof(title));
+        title.title = &fixture;
+        title.title_index = 6u;
         title.logical_width = g_flow_width;
         title.logical_height = g_flow_height;
         return player_ui_screen_title(ui, &title);
@@ -3395,11 +3430,101 @@ static void test_controller_keyboard_page(void) {
 }
 
 /* Every screen fits the default 1280 x 720 window and the 960 x 540 minimum
-   (logical px): no text outside the window, no text painted over, and so the
-   buttons are all on screen. A wrapped paragraph used to be laid out one line
-   tall when its page was overfull, and the next block painted over its later
-   lines (launcher review B2). The same holds at every text size: at Large
-   (125%) and Larger (150%) the type grows and the screens reflow around it. */
+   (logical px): no text outside the window and no text painted over. A page
+   taller than the room between the bars scrolls there at any text size, so
+   what its body clips away is not on screen and the bars stay in the window;
+   test_tall_title_page_scrolls holds such a page's controls reachable. A
+   wrapped paragraph used to be laid out one line tall when its page was
+   overfull, and the next block painted over its later lines (launcher review
+   B2). The same holds at every text size: at Large (125%) and Larger (150%)
+   the type grows and the screens reflow around it. */
+/* Lays FLOW_PAGE_TITLE_TALL out at 100% text in a width x height window, then
+   moves focus to `focus` (0: leave it) and lays it out again. Sets
+   *body_scrolls when the title body has content taller than its room, and says
+   whether the prompt bar's labels are on screen and the focused control's
+   label is drawn whole: below the top bar, above the prompt bar and not cut by
+   the scroll container. */
+static bool tall_title_shows(int width, int height, NkUiId focus, bool *body_scrolls) {
+    NkUi *ui = NULL;
+    NkUiScrollState state;
+    const NkUiDrawList *draw;
+    NkUiViewport viewport = launcher_viewport(width, height, 1.0f);
+    NkUiScale scale = nk_ui_scale_for_viewport(&viewport);
+    int saved_text_size_pct = g_flow_text_size_pct;
+    /* The draw list is in window pixels: the bars' edges at the layout density. */
+    int top_bar_bottom = (int)(NK_UI_TOP_BAR_HEIGHT * scale.density);
+    int prompt_bar_top = height - (int)(NK_UI_PROMPT_BAR_HEIGHT * scale.density + 0.5f);
+    bool whole = focus == 0u;
+    g_flow_text_size_pct = 100;
+    draw = flow_case_layout(FLOW_PAGE_TITLE_TALL, width, height, &ui);
+    *body_scrolls = false;
+    if (ui == NULL) {
+        g_flow_text_size_pct = saved_text_size_pct;
+        return false;
+    }
+    if (focus != 0u) {
+        size_t labels = 0u;
+        g_flow_width = scale.logical_w;
+        g_flow_height = scale.logical_h;
+        nk_ui_focus(ui, focus);
+        for (int frame = 0; frame < 3; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)draw_flow_case(ui, FLOW_PAGE_TITLE_TALL);
+            draw = nk_ui_end(ui);
+        }
+        g_flow_width = 1280.0f;
+        g_flow_height = 800.0f;
+        for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+            const NkUiDrawCmd *cmd = &draw->cmd[i];
+            if (cmd->element_id != focus || cmd->kind != NK_UI_DRAW_TEXT) continue;
+            ++labels;
+            whole = (labels == 1u || whole) && cmd->clip[0] == cmd->bounds[0] &&
+                    cmd->clip[1] == cmd->bounds[1] && cmd->clip[2] == cmd->bounds[2] &&
+                    cmd->clip[3] == cmd->bounds[3] && cmd->bounds[1] >= top_bar_bottom &&
+                    cmd->bounds[3] <= prompt_bar_top;
+        }
+        whole = whole && labels > 0u && nk_ui_focused(ui) == focus;
+    }
+    *body_scrolls = nk_ui_scroll_state(ui, NK_UI_ID(NK_UI_ID_SCREEN_TITLE, 0x000020u), &state) &&
+                    state.max_offset > 0.0f;
+    whole = whole && draw_shows(draw, "MOVE") && draw_shows(draw, "BACK");
+    nk_ui_destroy(ui);
+    g_flow_text_size_pct = saved_text_size_pct;
+    return whole;
+}
+
+/* The title page with the game starting, what to expect and the full
+   ENHANCEMENTS card ran past the bottom of a 1280 x 720 window at 100% text:
+   its body scrolled only at a larger text size, so the Enhancements controls
+   could not be reached. Its body now scrolls at any text size, the prompt bar
+   stays on screen, and each control focus moves to is brought into view. */
+static void test_tall_title_page_scrolls(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const NkUiId reach[] = {
+        PLAYER_UI_ID_TITLE_ACE, PLAYER_UI_ID_TITLE_PLAY_OPTIONS, PLAYER_UI_ID_TITLE_60FPS,
+        PLAYER_UI_ID_TITLE_REMOVE, PLAYER_UI_ID_TITLE_BACK
+    };
+    static const struct { int w; int h; } sizes[] = {{1280, 720}, {960, 540}, {1366, 705}};
+    bool scrolls = false;
+    for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+        CHECK(tall_title_shows(sizes[s].w, sizes[s].h, 0u, &scrolls) && scrolls,
+              "the tallest title page scrolls in a short window at 100% text, under its bars");
+        CHECK(flow_case_fits(FLOW_PAGE_TITLE_TALL, sizes[s].w, sizes[s].h, dump, sizeof(dump)),
+              "the tallest title page draws nothing off the window and no text over text");
+        for (size_t i = 0u; i < sizeof(reach) / sizeof(reach[0]); ++i) {
+            char message[160];
+            (void)snprintf(message, sizeof(message),
+                           "title control %04X comes into view when focused at %d x %d",
+                           (unsigned)reach[i], sizes[s].w, sizes[s].h);
+            CHECK(tall_title_shows(sizes[s].w, sizes[s].h, reach[i], &scrolls) && scrolls,
+                  message);
+        }
+    }
+    /* A tall window has room for all of it: nothing to scroll. */
+    CHECK(tall_title_shows(1920, 1200, 0u, &scrolls) && !scrolls,
+          "the tallest title page fits a 1920 x 1200 window with nothing to scroll");
+}
+
 static void test_every_screen_fits_the_window(void) {
     static char dump[CASE_DUMP_CAP];
     /* The default window, the minimum, a small laptop's maximised window, and
@@ -5756,6 +5881,7 @@ int main(int argc, char **argv) {
     test_refresh_advice_classifier();
     test_error_details_fit_the_minimum_window();
     test_every_screen_fits_the_window();
+    test_tall_title_page_scrolls();
     test_psp_fonts_page();
     test_wizard_actions();
     test_plain_cards();

@@ -869,8 +869,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         {NK_UI_PROMPT_ACT_BACK, "Back to settings"}
     };
     const NkUiTheme *theme = nk_ui_theme(ui);
-    float inner = scr_flow_begin_with_scroll(
-        ui, width, height, 760.0f, model->page == PLAYER_UI_SETTINGS_PAGE_ACE);
+    float inner = scr_flow_begin(ui, width, height, 760.0f);
     if (inner <= 0.0f) return;
     switch (model->page) {
     case PLAYER_UI_SETTINGS_PAGE_ONLINE:
@@ -1211,7 +1210,7 @@ PlayerUiAction player_ui_screen_settings(NkUi *ui, const PlayerUiSettingsModel *
     layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_grow(), 0.0f);
     layout.align_x = NK_UI_ALIGN_CENTER;
     layout.padding_top = height >= 680.0f ? NK_UI_SPACE_7 : NK_UI_SPACE_4;
-    layout.scroll = page_scrolls(ui);
+    layout.scroll = SCR_PAGE_BODY_SCROLLS;
     if (nk_ui_begin_container(ui, SET_ID_BODY, &layout, NULL)) {
         settings_main(ui, model, width, height, &result);
         nk_ui_end_container(ui);

@@ -177,7 +177,7 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
     layout.padding_bottom = NK_UI_BODY_PAD_BOTTOM;
     layout.padding_left = gutter;
     layout.padding_right = gutter;
-    layout.scroll = page_scrolls(ui);
+    layout.scroll = SCR_PAGE_BODY_SCROLLS;
     if (nk_ui_begin_container(ui, TITLE_ID_BODY, &layout, NULL)) {
         /* Left column: the art and what the package needs. */
         layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(aside), sizing_grow(),

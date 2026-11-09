@@ -696,10 +696,10 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
     layout.padding_left = gutter;
     layout.padding_right = gutter;
     /* A page holds as many cards as fit at the text size, at least one row. In a
-       window too short for even that at a larger text size, the body scrolls
-       instead of pushing the prompt bar off the window; at the design text size
-       every page fits. */
-    layout.scroll = nk_ui_text_scale(ui) > 1.0f;
+       window too short for even that, the body scrolls instead of pushing the
+       prompt bar off the window, at any text size (the other pages do the same:
+       SCR_PAGE_BODY_SCROLLS in scr_shared.h). */
+    layout.scroll = true;
     if (nk_ui_begin_container(ui, LIBRARY_ID_BODY, &layout, NULL)) {
         size_t columns = model->columns > 0u ? model->columns : 1u;
         size_t page_size;
