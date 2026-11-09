@@ -211,6 +211,7 @@
     "assets/brand/nakagawa.rc",
     "assets/bringup_report.schema.json",
     "assets/enhancement_package.schema.json",
+    "assets/enhancements/ucus98701-60hz.json",
     "assets/failure_codes.json",
     "assets/flight_recorder_schema.json",
     "assets/fonts/ui/chakra-petch/ChakraPetch-Bold.ttf",
