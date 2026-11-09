@@ -158,8 +158,11 @@ at once. The budget comes from measurement: one cc1 at `-O1` on 4 MB generated u
 485 to 531 MiB (189 MiB for a 0.9 MB unit, #2284), so 768 MiB keeps a margin of 1.45 times. The
 planner keeps 2 GiB for the player and the OS. When even one job does not fit beside that
 reserve, the build still runs one job and its log says the compiler may fail; the compile
-progress file names what bound the job count (`limit`: `memory`, `cpu`, `override`, `max`), and
-a one-job build tells the user in the player why it compiles one part at a time.
+progress file names what bound the job count (`limit`: `memory`, `cpu`, `override`, `max`,
+`unknown_memory` for the fixed two jobs when the host gives no memory reading, and
+`unknown_cpus` for one job when it gives no CPU count), and a one-job build tells the user in the
+player why it compiles one part at a time, except for `unknown_cpus`, which names no cause.
+The memory figures are GiB (1024^3 bytes), which is what Windows reports as GB.
 
 Only a single body can make its unit larger than the target (#1730). Codegen gives every body
 over `BODY_FALLBACK_BYTES` (4,000,000 bytes of C, the same in every build) a unit of its own

@@ -218,8 +218,9 @@ class PackageBuildPlan:
 
     ``limit`` names the real reason the count is what it is, so the player can tell the
     user: ``"override"`` (``NK_PACKAGE_JOBS``), ``"cpu"`` (the logical CPUs),
-    ``"memory"`` (the free memory), ``"max"`` (``PACKAGE_BUILD_MAX_JOBS``) or
-    ``"unknown_memory"`` (no memory reading, so the fixed count of two).
+    ``"memory"`` (the free memory), ``"max"`` (``PACKAGE_BUILD_MAX_JOBS``),
+    ``"unknown_memory"`` (no memory reading, so the fixed count of two) or
+    ``"unknown_cpus"`` (no CPU count, so one job, which is not a statement about the PC).
     """
 
     jobs: int
@@ -251,7 +252,9 @@ def package_build_plan(
     (``NK_PACKAGE_JOBS``) replaces the computed count but is still clamped to the same
     range.
     """
-    cpus = cpu_count if cpu_count and cpu_count > 0 else 1
+    cpus_known = bool(cpu_count and cpu_count > 0)
+    cpus = cpu_count if cpus_known else 1
+    cpu_text = f"{cpus} logical CPUs" if cpus_known else "CPU count unknown"
     override_note = ""
     if override is not None and override.strip():
         try:
@@ -266,19 +269,23 @@ def package_build_plan(
     if available_bytes is None:
         jobs = max(1, min(cpus, 2, PACKAGE_BUILD_MAX_JOBS))
         return PackageBuildPlan(
-            jobs, f"{cpus} logical CPUs, available memory unknown{override_note}",
-            "cpu" if cpus <= 2 else "unknown_memory", cpus, None)
+            jobs, f"{cpu_text}, available memory unknown{override_note}",
+            "unknown_cpus" if not cpus_known else "cpu" if cpus <= 2 else "unknown_memory",
+            cpus, None)
     by_memory = (available_bytes - PACKAGE_BUILD_RESERVED_BYTES) // max(1, job_bytes)
     jobs = max(1, min(cpus, by_memory, PACKAGE_BUILD_MAX_JOBS))
     # The binding limit is the smallest bound; the CPUs win a tie because more memory
     # would not add a job.
-    if cpus <= jobs:
+    if not cpus_known:
+        # One job is a stand-in for the missing count: name memory only when it binds too.
+        limit = "memory" if by_memory <= jobs else "unknown_cpus"
+    elif cpus <= jobs:
         limit = "cpu"
     elif by_memory <= jobs:
         limit = "memory"
     else:
         limit = "max"
-    reason = (f"{cpus} logical CPUs, {available_bytes / 1024**3:.1f} GB memory available"
+    reason = (f"{cpu_text}, {available_bytes / 1024**3:.1f} GB memory available"
               f"{override_note}")
     short = by_memory < 1
     if short:
