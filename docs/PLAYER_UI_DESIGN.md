@@ -1,6 +1,7 @@
 # Player UI design system
 
-The visual spec for the native player's launcher UI (the only launcher since v0.0.1; the old renderer survives only in the regression-test build). It is the reference every
+The visual spec for the native player's launcher UI (the only launcher since v0.0.1; the old renderer was removed
+in #2071). It is the reference every
 screen lane builds against: Library and Title detail (C5, built), Settings (C6), first run (C7) and error dialogs
 (C8). The tokens and components it names live in code:
 
@@ -702,7 +703,7 @@ developer mode ends. The screens keep their width, so the panel covers their rig
 Built now: the setup wizard's four steps (Welcome, Options, Game, Verify) on the existing wizard state, in the
 dialog card the build and error screens use. Copying the disc's files at Verify ends on the library card, where the
 game is built and played, and the PSP fonts are imported in Settings > PSP fonts, so the step chips name only those
-four steps. The older Fonts and Ready step states remain only for state-only callers and the old renderer.
+four steps. The older Fonts and Ready step states remain only for state-only callers.
 Options ("Online and developer options", [`ONLINE_FEATURES.md`](ONLINE_FEATURES.md)) comes right after Welcome because it needs no game: one plain line that online features aren't built (an Online mode switch shows only when a stored setting has online mode on), one switch row (a 220 px button reading "Developer mode: On" or "Off",
 accent while on, with its sentence beside it), then CONTINUE (the default focus, so Enter never flips a switch), SKIP and BACK. A strip of step chips sits at the top (current: accent fill; done:
 `ready` edge and a check); each step has one primary action first, then Back and Cancel. Every control returns

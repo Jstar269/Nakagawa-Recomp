@@ -121,6 +121,9 @@ struct PlayerUiNk {
     char status_text[PLAYER_UI_TITLE_CAP][256];
     char library_page_label[64];
     char flow_title[NK_MAX_TITLE_LEN + NK_MAX_DISC_ID_LEN + 16];
+    /* The build screen's model on this frame: 1 the package is written, 0 it is
+       building, -1 the frame drew no build screen. */
+    int build_built;
     PlayerUiPrereqItem prereq_items[PLAYER_UI_PREREQ_CAP];
     char version_line[64];
     char data_root_line[NK_MAX_PATH + 48]; /* About: which data folder is in use */
@@ -417,8 +420,8 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
     memset(&config, 0, sizeof(config));
     config.host = NK_UI_HOST_LAUNCHER;
     config.text = &player->text;
-    /* The launcher's display rules, as the old renderer applied them to every
-       string it drew: the profile folder shows as "~". */
+    /* The launcher's display rules, applied to every string it draws: the
+       profile folder shows as "~". */
     config.display_text = player_display_text;
     config.report_error = player_ui_report_layout_error;
     config.report_user = app;
@@ -612,8 +615,7 @@ static PlayerUiNoteKind player_ui_note_kind(PlayerNoteKind kind) {
     }
 }
 
-/* The setup wizard's model, from the same wizard state the existing renderer
-   reads. */
+/* The setup wizard's model, from the player's wizard state. */
 static bool player_ui_unrecorded_experimental(const GameRecord *game);
 
 static PlayerUiAction player_ui_render_wizard(PlayerUiNk *player, PlayerApp *app,
@@ -939,7 +941,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
 #endif
 }
 
-/* The Settings pages' model, from the settings the existing renderer shows. */
+/* The Settings pages' model, from the player's settings. */
 static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *app,
                                                 NkUiScale scale) {
     PlayerUiSettingsModel model;
@@ -1031,8 +1033,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.online_reports = app->settings.online_reports;
     model.developer_mode = app->settings.developer_mode;
     model.share_system_libraries = app->settings.share_system_libraries;
-    /* The build tools and cache page says what its clear button did, as the
-       existing renderer's page does. */
+    /* The build tools and cache page says what its clear button did. */
     if (model.page == PLAYER_UI_SETTINGS_PAGE_BUILD_CACHE && app->settings_notice[0] != '\0') {
         model.notice = app->settings_notice;
     }
@@ -1194,8 +1195,7 @@ static PlayerUiBindingGlyph player_ui_binding_glyph(const InputBindingGlyph *gly
     return out;
 }
 
-/* The controller settings model, from the same input_settings state the
-   existing renderer reads. */
+/* The controller settings model, from the player's input_settings state. */
 static PlayerUiAction player_ui_render_controller(PlayerUiNk *player, PlayerApp *app,
                                                   NkUiScale scale) {
     const InputSettingsState *input = &app->input_settings;
@@ -1414,6 +1414,7 @@ static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
         }
         model.title_line = player->flow_title;
         model.built = build->is_complete && !build->is_failed;
+        player->build_built = model.built ? 1 : 0;
         switch (build->current_stage) {
             case PACKAGE_BUILD_STAGE_EXTRACT: model.stage = 1; break;
             case PACKAGE_BUILD_STAGE_COMPILE: model.stage = 2; break;
@@ -1652,6 +1653,10 @@ const PlayerUiTitle *player_ui_nk_test_title(const PlayerUiNk *player, size_t in
 
 int player_ui_nk_test_route(const PlayerUiNk *player) {
     return player != NULL ? (int)nk_ui_router_current(player->router) : 0;
+}
+
+int player_ui_nk_test_build_built(const PlayerUiNk *player) {
+    return player != NULL ? player->build_built : -1;
 }
 
 unsigned player_ui_nk_test_focus(const PlayerUiNk *player) {
@@ -2467,10 +2472,12 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         out->package_state = PLAYER_UI_PACKAGE_BUILDING;
     } else if (package_ready) {
         out->package_state = PLAYER_UI_PACKAGE_READY;
+    } else if (check_failed && !checking) {
+        /* A failed check leaves the status unknown: it is the failure, with
+           its retry, not a check still running (#2071). */
+        out->package_state = PLAYER_UI_PACKAGE_CHECK_FAILED;
     } else if (checking || package_status == NK_RUNTIME_PACKAGE_UNKNOWN) {
         out->package_state = PLAYER_UI_PACKAGE_CHECKING;
-    } else if (check_failed) {
-        out->package_state = PLAYER_UI_PACKAGE_CHECK_FAILED;
     } else {
         out->package_state = PLAYER_UI_PACKAGE_MISSING;
     }
@@ -2612,12 +2619,12 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         out->primary_action_label = "PLAY";
         out->primary_action_enabled = true;
         primary = PLAYER_UI_PRIMARY_PLAY;
-    } else if (checking || package_status == NK_RUNTIME_PACKAGE_UNKNOWN) {
-        out->primary_action_label = "CHECKING PACKAGE";
-    } else if (check_failed) {
+    } else if (check_failed && !checking) {
         out->primary_action_label = "RETRY PACKAGE CHECK";
         out->primary_action_enabled = true;
         primary = PLAYER_UI_PRIMARY_RETRY_PACKAGE_CHECK;
+    } else if (checking || package_status == NK_RUNTIME_PACKAGE_UNKNOWN) {
+        out->primary_action_label = "CHECKING PACKAGE";
     } else if (package_status == NK_RUNTIME_PACKAGE_STALE) {
         out->primary_action_label = "REBUILD PACKAGE";
         if (!build_blocker) {
@@ -2890,6 +2897,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         window == NULL) {
         return false;
     }
+    player->build_built = -1;
     if (!SDL_GetRenderOutputSize(renderer, &pixel_w, &pixel_h) ||
         pixel_w <= 0 || pixel_h <= 0) {
         return false;

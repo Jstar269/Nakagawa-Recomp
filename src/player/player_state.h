@@ -112,14 +112,6 @@ typedef struct {
 #define PLAYER_UI_MIN_SCALE 0.25f
 #define PLAYER_UI_MAX_SCALE 8.0f
 
-/* Where the launcher UI is laid out and how it reaches the output: `width` by
-   `height` layout units, each drawn as `scale` output pixels. */
-typedef struct {
-    int width;
-    int height;
-    float scale;
-} PlayerUiCanvas;
-
 typedef enum {
     PLAYER_CLOSE_QUIT = 0,
     PLAYER_CLOSE_CONFIRM_REQUIRED
@@ -893,14 +885,7 @@ struct PlayerApp {
     bool launch_pending;
     char launch_pending_disc_id[NK_MAX_DISC_ID_LEN];
 
-    /* Index of the leftmost visible card in the library strip. The strip
-       lays cards out horizontally and a 1280-wide window fits about four, so
-       without this every entry past the fourth was drawn outside the window
-       with no way to reach it. */
-    int library_scroll_index;
-
     /* Navigation & Focus */
-    int focus_index; /* current focused UI element index for gamepad/keyboard */
     int active_tab;   /* for settings: 0=Display, 1=Audio, 2=Controller, 3=Logs */
 
     /* Controller settings and live input monitor (#357) */
@@ -951,8 +936,6 @@ struct PlayerApp {
     /* Window & layout metrics */
     int window_width;
     int window_height;
-    float dpi_scale;
-    bool logical_ui;
     bool enable_focus_handoff;
     bool child_window_ready;
     /* Start watch for the running launch (#1290): the first running check was
@@ -1034,18 +1017,6 @@ bool player_app_disc_check_line(const PlayerApp *app, char *out, size_t out_size
  * dump") and the title page's sentence about it; NULL when it is not checked. */
 const char *player_disc_tier_badge(uint32_t tier);
 const char *player_disc_tier_note(uint32_t tier);
-
-/* Display-only text rules. They change what is drawn, never a stored value.
- *
- * player_bitmap_glyph: one display unit of UTF-8 text for the bitmap font
- * (SDL_RenderDebugText, ASCII only). Writes its replacement to out (NUL-terminated,
- * at most two bytes) and returns the input bytes it covers (at least one). The
- * trademark sign becomes "TM"; any other non-ASCII code point, and any malformed
- * byte, becomes "?"; tabs and line breaks become spaces.
- * player_text_for_bitmap_font: applies that to a whole string. The output never
- * exceeds out_size and is cut at a whole glyph; returns its length. */
-size_t player_bitmap_glyph(const char *in, char out[3]);
-size_t player_text_for_bitmap_font(const char *in, char *out, size_t out_size);
 
 /* Privacy: the user's profile folder is shown as "~" wherever text is drawn, so
  * a screenshot or screen share does not show the account name. Only whole path
@@ -1267,7 +1238,7 @@ void player_app_set_library_write_error(PlayerApp *app);
    user can paste it into a browser, and returns to the view it was raised
    from (the library when raised from a card). */
 void player_app_set_link_open_error(PlayerApp *app, const char *url, const char *reason);
-/* The error card's words, shared by both launchers. The badge is a plain word
+/* The error card's words. The badge is a plain word
    for the kind of problem; an unknown code gets "Problem", never the code. */
 const char *player_error_badge(const ErrorState *error);
 /* The card title for a picked file refused at a named format boundary
@@ -1368,14 +1339,6 @@ void player_app_populate_sample_games(PlayerApp *app);
 void player_app_sync_library(PlayerApp *app);
 bool player_app_discover_showcase(PlayerApp *app, const char *executable_directory);
 
-/* Maximum SDL3_ttf load candidates from player_app_ttf_library_candidates. */
-#define PLAYER_APP_TTF_MAX_CANDIDATES 4
-
-/* Ordered SDL3_ttf library candidates for a player running from exe_dir: the
- * library beside the executable first, then the platform loader's default
- * bare-name search (PATH on Windows). Pure: no filesystem or loader calls. */
-int player_app_ttf_library_candidates(const char *exe_dir,
-                                      char out[][MAX_PATH_LEN], int max_out);
 /* True when a disc directory entry name is safe to write under the private
  * per-title folder (the tooling's FILENAME_RE and WINDOWS_RESERVED rules). */
 bool player_module_name_is_safe(const char *name);
@@ -1446,10 +1409,6 @@ void player_app_runtime_package_cache_store(
  * so it has no new reason to give. */
 void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
                                                  const char *reason);
-/* The title's validated status is known (a check has finished and is not
- * pending). Until then a card must say it is checking, not "Not prepared". */
-bool player_app_runtime_package_status_known(const PlayerApp *app,
-                                             const GameRecord *game);
 /* The validator's reason for the title's current package state, or NULL. */
 const char *player_app_runtime_package_reason(const PlayerApp *app,
                                               const GameRecord *game);
@@ -1606,17 +1565,6 @@ bool player_window_fit_to_display(PlayerWindowRect requested,
                                   PlayerWindowFrame frame,
                                   bool requested_position_valid,
                                   PlayerWindowRect *out);
-/* Fit the launcher UI to a window whose drawable area is `pixel_width` x
- * `pixel_height` output pixels (#1129). The design keeps the proportions the
- * letterboxed 1280x720 canvas gave it: the scale is the one the letterbox
- * used, so the screens never lay out smaller than the design. Instead of
- * leaving bars, the canvas grows along the window's longer axis, and instead
- * of stretching a finished picture, the UI is drawn straight into the output
- * pixels with a uniform scale and no offset, so text is rasterised at exactly
- * `scale` and lands on whole pixels. A high-DPI window has more pixels and
- * therefore a larger scale. */
-bool player_ui_canvas_fit(int pixel_width, int pixel_height,
-                          PlayerUiCanvas *out);
 void player_app_toggle_vsync(PlayerApp *app);
 /* Settings > Accessibility. Each choice cycles Automatic, On, Off; the interface
  * size cycles Automatic, 100, 125, 150 and 200%; the text size cycles Standard
@@ -1756,7 +1704,6 @@ void player_app_enhanced_page_cycle_mode(PlayerApp *app);
 void player_app_enhanced_page_cycle_part(PlayerApp *app, int part);
 void player_app_toggle_share_system_libraries(PlayerApp *app);
 void player_app_adjust_volume(PlayerApp *app, int delta);
-void player_app_move_focus(PlayerApp *app, int delta, int focus_count);
 
 /* Index of the library entry carrying this disc ID, or -1 if there is none.
    nk_library_add_or_update updates an existing record IN PLACE, so the entry
@@ -1786,23 +1733,6 @@ int player_app_find_game_by_image(const PlayerApp *app, const char *disc_id,
    per-title controller mapping choice (#520) needs one to name. */
 const char *player_app_selected_disc_id(const PlayerApp *app);
 
-/* Move the library selection by `delta` entries, clamped to the library. */
-void player_app_move_selection(PlayerApp *app, int delta);
-
-/* How many library cards fit in the current window, at least one. */
-int player_app_visible_library_cards(const PlayerApp *app);
-
-/* Whether the settings renderer has enough client width and height for its
- * two-column layout. This is pure state logic so the threshold is tested
- * independently of SDL and the renderer cannot drift from the layout contract. */
-bool player_settings_uses_two_columns(int window_width, int window_height);
-
-/* Horizontal offset, from the card's left edge, where the settings right
- * column begins. It is never left of the end of the launcher fullscreen
- * control plus a gutter, so the columns cannot overlap at any card width the
- * two-column layout accepts. */
-float player_settings_second_column_offset(float card_width);
-
 /* Whether the event loop should attempt the launcher-to-game focus handoff on
  * this frame. Pure state logic so the once-per-launch contract is tested
  * without SDL: the launcher stays open behind the game and hands it the
@@ -1817,12 +1747,6 @@ bool player_app_should_attempt_window_handoff(bool interactive_window,
  * consuming the sequence. Pure naming so tests can build a filesystem seam at
  * the exact path production will choose instead of assuming a sequence. */
 void player_app_next_boot_event_path(char *out, size_t out_size);
-
-/* How many keyboard/gamepad focus stops the current view offers, at least
- * one. Pure state logic (no SDL): the renderer draws its buttons in this
- * exact order, so the event loop can clamp focus_index and tests can pin
- * the contract without opening a window. */
-int player_app_focus_count(const PlayerApp *app);
 
 /* Process launch integration */
 bool player_app_launch_game(PlayerApp *app, int game_index);

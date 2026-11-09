@@ -85,7 +85,7 @@ list is not evidence that a distributable installer or title package exists:
 * `src/core/nk_platform_win32.c`: Win32 `CreateProcessW` with UTF-16 executable/command-line conversion, environment block generation, and wait handles.
 * `src/core/nk_platform_posix.c`: POSIX `fork` + `execv` with environment configuration.
 * `src/core/nk_launch.h` & `src/core/nk_launch.c`: typed `NkLaunchSession` candidate resolution, environment construction, and process lifecycle management.
-* `src/player/ui/player_ui_nk.c`: the default launcher's "PLAY" / "STOP GAME" action triggers; the older `src/player/ui_renderer.c`, kept only in the regression-test build (`--ui=legacy`), keeps its "PLAY NOW" trigger and active PID indicators.
+* `src/player/ui/player_ui_nk.c`: the launcher's "PLAY" / "STOP GAME" action triggers.
 
 ---
 
@@ -272,12 +272,11 @@ unresolved, it names it. The player target then fails. A package build still
 succeeds with its required SDL3, libiconv and Vulkan runtimes, and prints the
 unresolved import as a warning. The prerequisite installer pins SDL3_ttf and its
 closure (`assets/prereq_manifest.json`), so this happens only on a host without
-them; that player draws with the bitmap fallback and logs why. Licence texts for
+them; that player's launcher cannot start, and it says why and exits with code 4. Licence texts for
 every staged DLL are copied beside them as `THIRD_PARTY_NOTICES/` by `tools/package_notices.py`, driven by
 `assets/third_party_components.json`. Because the closure sits beside the
 executable, launching from Explorer or a plain `cmd.exe` without MSYS2 on `PATH`
-uses the readable TTF font; the 8x8 SDL bitmap font remains only as a logged
-last-resort fallback (`NK_UI_NO_TTF=1` forces it), and the workspace doctor
+uses the launcher's TTF fonts; there is no bitmap-font fallback, and the workspace doctor
 reports `RUNTIME_SDL3_TTF`/`RUNTIME_SDL3_TTF_CLOSURE`.
 
 ## 6. Private content-addressed cache contract (#316)

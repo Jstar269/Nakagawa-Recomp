@@ -183,7 +183,6 @@ void player_app_init(PlayerApp *app) {
     app->selected_game_index = -1;
     app->window_width = 1280;
     app->window_height = 720;
-    app->dpi_scale = 1.0f;
     app->should_quit = false;
 
     /* Initialize settings from disk or defaults */
@@ -461,13 +460,6 @@ void player_app_runtime_package_cache_set_reason(PlayerApp *app, int game_index,
              sizeof(app->runtime_package_cache[game_index].reason), "%s", reason);
 }
 
-bool player_app_runtime_package_status_known(const PlayerApp *app,
-                                             const GameRecord *game) {
-    const PlayerRuntimePackageCacheEntry *entry =
-        player_runtime_cache_for_game(app, game);
-    return entry && entry->status_valid && !entry->validation_pending;
-}
-
 const char *player_app_runtime_package_reason(const PlayerApp *app,
                                               const GameRecord *game) {
     const PlayerRuntimePackageCacheEntry *entry =
@@ -670,7 +662,6 @@ void player_app_sync_library(PlayerApp *app) {
     }
     if (app->game_count <= 0) {
         app->selected_game_index = -1;
-        app->library_scroll_index = 0;
     } else {
         if (app->selected_game_index < 0) app->selected_game_index = 0;
         if (app->selected_game_index >= app->game_count) {
@@ -715,30 +706,6 @@ bool player_merge_readded_game(const GameRecord *existing, GameRecord *incoming)
         merged = true;
     }
     return merged;
-}
-
-int player_app_ttf_library_candidates(const char *exe_dir,
-                                      char out[][MAX_PATH_LEN], int max_out) {
-    if (!out || max_out <= 0) return 0;
-
-    const char *const *kLibs = nk_platform_sdl3_ttf_library_names();
-
-    int count = 0;
-    /* 1. Beside the executable: a user can drop the library next to the player
-     *    (the release does not ship it), and that beats any PATH hit. */
-    if (exe_dir && exe_dir[0] && count < max_out) {
-        size_t len = strlen(exe_dir);
-        bool has_sep = exe_dir[len - 1] == '/' || exe_dir[len - 1] == '\\';
-        snprintf(out[count], MAX_PATH_LEN, "%s%s%s", exe_dir, has_sep ? "" : "/", kLibs[0]);
-        count++;
-    }
-    /* 2. Bare names: the platform loader's default search (PATH on Windows,
-     *    the loader path elsewhere). */
-    for (int i = 0; kLibs[i] && count < max_out; i++) {
-        snprintf(out[count], MAX_PATH_LEN, "%s", kLibs[i]);
-        count++;
-    }
-    return count;
 }
 
 static const char *player_showcase_package_status_word(NkRuntimePackageStatus status) {
@@ -907,60 +874,6 @@ size_t player_display_text(const char *in, char *out, size_t out_size) {
         home_ready = true;
     }
     return player_display_text_with_home(in, home, out, out_size);
-}
-
-size_t player_bitmap_glyph(const char *in, char out[3]) {
-    unsigned char lead = (unsigned char)in[0];
-    if (lead < 0x80) {
-        if (lead >= 0x20 && lead < 0x7F) {
-            out[0] = (char)lead;
-        } else if (lead == '\t' || lead == '\n' || lead == '\r') {
-            out[0] = ' ';
-        } else {
-            out[0] = '?';
-        }
-        out[1] = '\0';
-        return 1;
-    }
-    size_t seq = (lead >= 0xC2 && lead <= 0xDF) ? 2u
-               : (lead >= 0xE0 && lead <= 0xEF) ? 3u
-               : (lead >= 0xF0 && lead <= 0xF4) ? 4u
-               : 0u;
-    /* nk_json_validate_utf8 reads only the seq bytes given, so a NUL inside the
-     * sequence (or a missing continuation byte) fails here without overrun. */
-    if (seq == 0 || !nk_json_validate_utf8((const uint8_t *)in, seq)) {
-        out[0] = '?';
-        out[1] = '\0';
-        return 1;
-    }
-    if (lead == 0xE2 && (unsigned char)in[1] == 0x84 && (unsigned char)in[2] == 0xA2) {
-        out[0] = 'T';
-        out[1] = 'M';
-        out[2] = '\0';
-        return 3;
-    }
-    out[0] = '?';
-    out[1] = '\0';
-    return seq;
-}
-
-size_t player_text_for_bitmap_font(const char *in, char *out, size_t out_size) {
-    if (!out || out_size == 0) return 0;
-    out[0] = '\0';
-    if (!in) return 0;
-    size_t used = 0;
-    const char *p = in;
-    while (*p) {
-        char glyph[3];
-        size_t advance = player_bitmap_glyph(p, glyph);
-        size_t glyph_len = strlen(glyph);
-        if (used + glyph_len + 1 > out_size) break;
-        memcpy(out + used, glyph, glyph_len);
-        used += glyph_len;
-        p += advance;
-    }
-    out[used] = '\0';
-    return used;
 }
 
 bool player_app_add_game(PlayerApp *app, const GameRecord *game) {
@@ -1264,159 +1177,6 @@ const char *player_app_selected_disc_id(const PlayerApp *app) {
     if (app->selected_game_index < 0 || app->selected_game_index >= app->game_count) return NULL;
     if (!app->games[app->selected_game_index].disc_id[0]) return NULL;
     return app->games[app->selected_game_index].disc_id;
-}
-
-int player_app_visible_library_cards(const PlayerApp *app) {
-    if (!app) return 1;
-    /* Cards are 260 wide on a 280 pitch, inset 32 from the left edge and given
-       the same margin on the right. */
-    int usable = app->window_width - 64;
-    int fit = usable / 280;
-    return fit < 1 ? 1 : fit;
-}
-
-int player_app_focus_count(const PlayerApp *app) {
-    if (!app) return 1;
-    switch (app->active_view) {
-        case VIEW_LIBRARY:
-        case PLAYER_VIEW_READY_LIBRARY:
-            if (app->game_count <= 0) return 1;
-            {
-                /* Order matches render_loaded_library: primary action
-                 * (PLAY/STOP/BUILD/REBUILD or a pending package check), add, remove, the
-                 * per-title controller mapping choice, then the paging stops
-                 * when the library overflows. The unavailable pill is never a
-                 * stop. */
-                int count = 0;
-                const GameRecord *game = (app->selected_game_index >= 0 &&
-                                          app->selected_game_index < app->game_count)
-                    ? &app->games[app->selected_game_index]
-                    : NULL;
-                NkRuntimePackageStatus pkg_status = game ?
-                    player_app_cached_runtime_package_status(app, game) :
-                    NK_RUNTIME_PACKAGE_MISSING;
-                bool game_ready =
-                    game && player_app_cached_game_has_runtime(app, game);
-                bool checking = game &&
-                    player_app_runtime_package_check_pending(app, game);
-                bool check_failed = game &&
-                    player_app_runtime_package_check_failed(app, game);
-                bool can_build = game && !game_ready && !checking &&
-                                 !check_failed &&
-                                 (pkg_status == NK_RUNTIME_PACKAGE_MISSING ||
-                                  pkg_status == NK_RUNTIME_PACKAGE_STALE ||
-                                  pkg_status == NK_RUNTIME_PACKAGE_INCOMPATIBLE);
-                if (game && (game_ready || app->is_game_running || can_build ||
-                             check_failed || checking)) count++;
-                count += player_game_is_showcase(game) ? 1 : 2; /* add + optional remove */
-                count += game ? 1 : 0; /* global / this-game controller mapping */
-                if (app->game_count > player_app_visible_library_cards(app)) count += 2;
-                return count < 1 ? 1 : count;
-            }
-        case VIEW_BUILDING_PACKAGE:
-        case VIEW_PREREQ_PROGRESS:
-            return 1;
-        case VIEW_PREREQ_CONSENT:
-            return 2;
-        case VIEW_PREREQ_ABOUT:
-            return app->prerequisites.item_count > 0 ? 2 : 1;
-        case VIEW_CONFIRM_REMOVE_TOOLS:
-        case VIEW_CONFIRM_FACTORY_RESET: /* keep everything, reset */
-            return 2;
-        case VIEW_INSPECTING:
-            return 1;
-        case VIEW_SUPPORTED_TITLE:
-        case VIEW_EXPERIMENTAL_TITLE:
-            return 2;
-        case VIEW_UNSUPPORTED_TITLE:
-            return 1;
-        case VIEW_SETTINGS:
-            /* Resolution (3) + presentation pacing (2) + game display toggles (4: vsync,
-             * fullscreen, scaling, reduce-motion) + launcher fullscreen (1) + volume stepper (2) +
-             * controller settings (1) + notices and remove-tools controls (2) + close (1),
-             * then online and developer options (1), in draw order, and last the
-             * launcher sounds toggle (1), so the earlier stops keep their places.
-             * The 8x preset is not offered (GPU scale caps at 4x). */
-            return 18;
-        case VIEW_BUILD_CACHE:
-            return 4; /* share switch, clear cache, remove tools, back */
-        case VIEW_ACCESSIBILITY_SETTINGS:
-            return 4; /* interface size, high contrast, reduce motion, back */
-        case VIEW_ACE_SETTINGS:
-            return PLAYER_PART_COUNT + 2; /* play mode, each Enhanced part, done */
-        case VIEW_PROBLEM_REPORT:
-            return 3; /* create, open folder, back */
-        case VIEW_ONLINE_SETTINGS:
-            /* online switch (+ news, reports while it is on), developer
-               switch (+ open log while it is on), back */
-            return 1 + (app->settings.online_mode ? 2 : 0) + 1 +
-                   (app->settings.developer_mode ? 1 : 0) + 1;
-        case VIEW_DEVELOPER_LOG:
-            return 3; /* copy, save, close */
-        case VIEW_PSP_FONTS:
-            return 3; /* import, remove, back */
-        case VIEW_CONTROLLER_SETTINGS:
-            if (input_settings_is_calibrating(&app->input_settings)) {
-                switch (input_settings_get_calibration_stage(&app->input_settings)) {
-                    case CALIBRATION_STAGE_REST:
-                        return 1;
-                    case CALIBRATION_STAGE_EXTREMES:
-                    case CALIBRATION_STAGE_RESULT:
-                        return 2;
-                    default:
-                        return 1;
-                }
-            }
-            /* 14 digital controls rebind buttons + deadzone [-]/[+] (2) +
-             * trigger threshold [-]/[+] (2) + guided calibration (1) + save (1) + reset (1) + back (1),
-             * in draw order, plus the global / this-game mapping choice when a
-             * library disc is available to name. */
-            return player_app_selected_disc_id(app) ? 23 : 22;
-        case VIEW_ERROR:
-            return 1;
-        case VIEW_SETUP_WIZARD:
-            switch (app->wizard.step) {
-                case WIZARD_STEP_WELCOME:
-                    return 2;
-                case WIZARD_STEP_SELECT_GAME:
-                    return app->wizard.iso_selected ? 4 : 3;
-                case WIZARD_STEP_INSPECT_VERIFY:
-                    if (app->wizard.is_extracting) return 1;
-                    return 3;
-                case WIZARD_STEP_SYSTEM_FONTS:
-                    return 6;
-                case WIZARD_STEP_ONLINE_OPTIONS:
-                    /* online switch, developer switch, continue, skip, back */
-                    return 5;
-                case WIZARD_STEP_READY_LAUNCH:
-                    return 3;
-                default:
-                    return 1;
-            }
-        default:
-            return 1;
-    }
-}
-
-void player_app_move_selection(PlayerApp *app, int delta) {
-    if (!app || app->game_count <= 0) return;
-    int index = app->selected_game_index;
-    if (index < 0) {
-        index = 0;
-    } else {
-        index += delta;
-    }
-    if (index < 0) index = 0;
-    if (index >= app->game_count) index = app->game_count - 1;
-    app->selected_game_index = index;
-}
-
-void player_app_move_focus(PlayerApp *app, int delta, int focus_count) {
-    if (!app || focus_count <= 0) return;
-    int focus = app->focus_index + delta;
-    if (focus < 0) focus = 0;
-    if (focus >= focus_count) focus = focus_count - 1;
-    app->focus_index = focus;
 }
 
 /* ---- The play modes' parts (#2055) ----
@@ -2707,32 +2467,6 @@ bool player_app_quit_confirmation_message(const PlayerApp *app, char *out,
     return true;
 }
 
-bool player_settings_uses_two_columns(int window_width, int window_height) {
-    float width = (float)window_width;
-    float card_width = width - 64.0f;
-    if (card_width < 340.0f) {
-        card_width = width > 32.0f ? width - 32.0f : width;
-    }
-    if (card_width > 1216.0f) card_width = 1216.0f;
-    /* The wide settings controls reserve 220 px plus a 310 px button in the
-       first column and the right column starts at
-       player_settings_second_column_offset(), which never sits inside them,
-       so the two columns are disjoint from the first card width the layout
-       can hold (980 px). The single-column flow needs far more height than
-       the narrow windows that reach it, so it must stay the exception. The
-       management row sits below the launcher toggle; 620 px is the first raw
-       client height where the compressed card keeps those rows disjoint. */
-    return card_width >= 980.0f && window_height >= 620;
-}
-
-float player_settings_second_column_offset(float card_width) {
-    /* The launcher control and its hint end 562 px into the card; keep a
-       24 px gutter before the right column, which otherwise starts at half
-       the card. */
-    float half = card_width * 0.5f;
-    return half > 586.0f ? half : 586.0f;
-}
-
 bool player_app_boot_event_is_window_ready(const char *line) {
     return line && (strstr(line, "BOOT_EVENT phase=window_ready") != NULL ||
                     strstr(line, "BOOT_EVENT phase=first_frame") != NULL);
@@ -2914,28 +2648,6 @@ bool player_window_fit_to_display(PlayerWindowRect requested,
     out->y = (int)y;
     out->width = width;
     out->height = height;
-    return true;
-}
-
-bool player_ui_canvas_fit(int pixel_width, int pixel_height,
-                          PlayerUiCanvas *out) {
-    if (!out || pixel_width <= 0 || pixel_height <= 0) return false;
-    double fit_x = (double)pixel_width / PLAYER_UI_DESIGN_WIDTH;
-    double fit_y = (double)pixel_height / PLAYER_UI_DESIGN_HEIGHT;
-    double scale = fit_x < fit_y ? fit_x : fit_y;
-    if (scale < PLAYER_UI_MIN_SCALE) scale = PLAYER_UI_MIN_SCALE;
-    if (scale > PLAYER_UI_MAX_SCALE) scale = PLAYER_UI_MAX_SCALE;
-    /* Round down so the canvas never extends past the output; the slack
-       absorbs division error, so 800 px at 800/720 is 720 units, not 719.
-       What is left at the right and bottom edges is under one unit wide and
-       shows the cleared background. */
-    int width = (int)((double)pixel_width / scale + 1e-6);
-    int height = (int)((double)pixel_height / scale + 1e-6);
-    if (width < 1) width = 1;
-    if (height < 1) height = 1;
-    out->width = width;
-    out->height = height;
-    out->scale = (float)scale;
     return true;
 }
 
@@ -3720,7 +3432,6 @@ bool player_app_open_developer_log(PlayerApp *app) {
         app->dev_log.return_view = app->active_view;
         app->dev_log.notice[0] = '\0';
         app->active_view = VIEW_DEVELOPER_LOG;
-        app->focus_index = 0;
     }
     return true;
 }
@@ -3729,7 +3440,6 @@ void player_app_close_developer_log(PlayerApp *app) {
     if (!app || app->active_view != VIEW_DEVELOPER_LOG) return;
     app->active_view = app->dev_log.return_view == VIEW_DEVELOPER_LOG ? VIEW_LIBRARY
                                                                        : app->dev_log.return_view;
-    app->focus_index = 0;
 }
 
 void player_app_adjust_volume(PlayerApp *app, int delta) {
@@ -3771,14 +3481,11 @@ bool player_app_remove_game(PlayerApp *app, int game_index) {
     player_app_sync_library(app);
     if (app->game_count <= 0) {
         app->selected_game_index = -1;
-        app->library_scroll_index = 0;
     } else {
         if (app->selected_game_index >= app->game_count) {
             app->selected_game_index = app->game_count - 1;
         }
-        if (app->library_scroll_index < 0) app->library_scroll_index = 0;
     }
-    app->focus_index = 0;
     return true;
 }
 
@@ -4094,7 +3801,6 @@ void player_app_set_view(PlayerApp *app, PlayerView view) {
     }
     if (view != VIEW_ACE_SETTINGS) app->enhanced_page_disc[0] = '\0';
     app->active_view = view;
-    app->focus_index = 0;
 }
 
 /* ---- Files dropped together (#2007) ---- */
@@ -5668,7 +5374,6 @@ bool player_app_register_staged_game(PlayerApp *app) {
     app->selected_game_index = index;
     app->wizard.step = WIZARD_STEP_READY_LAUNCH;
     app->active_view = PLAYER_VIEW_READY_LIBRARY;
-    app->focus_index = 0;
     return true;
 }
 
@@ -6364,7 +6069,6 @@ bool player_app_prereq_begin(PlayerApp *app, int game_index,
     app->prerequisite_bootstrap_ready = false;
     app->prerequisite_cancel_sent = false;
     app->active_view = VIEW_PREREQ_CONSENT;
-    app->focus_index = 0;
     return true;
 }
 
@@ -6374,7 +6078,6 @@ void player_app_prereq_accept(PlayerApp *app, bool bootstrap_python) {
     app->prerequisites.phase = bootstrap_python
         ? PLAYER_PREREQ_BOOTSTRAP : PLAYER_PREREQ_DOWNLOAD;
     app->active_view = VIEW_PREREQ_PROGRESS;
-    app->focus_index = 0;
 }
 
 void player_app_prereq_update_progress(PlayerApp *app, const char *item,
@@ -6454,7 +6157,6 @@ void player_app_prereq_finish_cancel(PlayerApp *app) {
     app->prerequisite_bootstrap_ready = false;
     app->prerequisite_cancel_sent = false;
     app->active_view = VIEW_LIBRARY;
-    app->focus_index = 0;
 }
 
 bool player_app_prereq_take_resume(PlayerApp *app) {
@@ -7735,7 +7437,6 @@ void player_app_start_setup_wizard(PlayerApp *app) {
     /* The status line stays empty until something happens: the Game step
        draws it as the reason no disc is chosen. */
     app->active_view = VIEW_SETUP_WIZARD;
-    app->focus_index = 0;
 }
 
 void player_app_wizard_next(PlayerApp *app) {
@@ -7743,11 +7444,9 @@ void player_app_wizard_next(PlayerApp *app) {
     switch (app->wizard.step) {
         case WIZARD_STEP_WELCOME:
             app->wizard.step = WIZARD_STEP_ONLINE_OPTIONS;
-            app->focus_index = 0;
             break;
         case WIZARD_STEP_ONLINE_OPTIONS:
             app->wizard.step = WIZARD_STEP_SELECT_GAME;
-            app->focus_index = 0;
             break;
         case WIZARD_STEP_SELECT_GAME:
             if (app->inspecting_game.iso_path[0] != '\0') {
@@ -7756,7 +7455,6 @@ void player_app_wizard_next(PlayerApp *app) {
             } else {
                 app->request_file_picker = true;
             }
-            app->focus_index = 0;
             break;
         case WIZARD_STEP_INSPECT_VERIFY:
             if (app->wizard.extraction_complete) {
@@ -7772,12 +7470,10 @@ void player_app_wizard_next(PlayerApp *app) {
                 app->wizard.step = WIZARD_STEP_SELECT_GAME;
                 app->request_file_picker = true;
             }
-            app->focus_index = 0;
             break;
         case WIZARD_STEP_SYSTEM_FONTS:
             app->wizard.font_confirmed = true;
             app->wizard.step = WIZARD_STEP_READY_LAUNCH;
-            app->focus_index = 0;
             break;
         case WIZARD_STEP_READY_LAUNCH:
             if (app->inspecting_game.disc_id[0] != '\0') {
@@ -7788,7 +7484,6 @@ void player_app_wizard_next(PlayerApp *app) {
                 }
             }
             app->active_view = VIEW_LIBRARY;
-            app->focus_index = 0;
             break;
         default:
             break;
@@ -7812,7 +7507,6 @@ void player_app_wizard_begin_extraction(PlayerApp *app) {
     app->wizard.extraction_error[0] = '\0';
     snprintf(app->wizard.status_message, sizeof(app->wizard.status_message),
              "Extracting game assets into local application data…");
-    app->focus_index = 0;
 }
 
 void player_app_wizard_back(PlayerApp *app) {
@@ -7823,11 +7517,9 @@ void player_app_wizard_back(PlayerApp *app) {
             break;
         case WIZARD_STEP_ONLINE_OPTIONS:
             app->wizard.step = WIZARD_STEP_WELCOME;
-            app->focus_index = 0;
             break;
         case WIZARD_STEP_SELECT_GAME:
             app->wizard.step = WIZARD_STEP_ONLINE_OPTIONS;
-            app->focus_index = 0;
             break;
         case WIZARD_STEP_INSPECT_VERIFY:
             if (app->wizard.is_extracting) {
@@ -7839,16 +7531,13 @@ void player_app_wizard_back(PlayerApp *app) {
                 break;
             }
             app->wizard.step = WIZARD_STEP_SELECT_GAME;
-            app->focus_index = 0;
             break;
         case WIZARD_STEP_SYSTEM_FONTS:
             app->wizard.step = WIZARD_STEP_INSPECT_VERIFY;
-            app->focus_index = 0;
             break;
         case WIZARD_STEP_READY_LAUNCH:
             app->wizard.step = WIZARD_STEP_SYSTEM_FONTS;
             app->active_view = VIEW_SETUP_WIZARD;
-            app->focus_index = 0;
             break;
         default:
             break;
@@ -7860,7 +7549,6 @@ void player_app_wizard_skip_options(PlayerApp *app) {
     if (app->settings.online_mode) player_app_set_online_mode(app, false);
     if (app->settings.developer_mode) player_app_set_developer_mode(app, false);
     app->wizard.step = WIZARD_STEP_SELECT_GAME;
-    app->focus_index = 0;
 }
 
 void player_app_wizard_cancel(PlayerApp *app) {
@@ -7873,7 +7561,6 @@ void player_app_wizard_cancel(PlayerApp *app) {
         return;
     }
     app->active_view = VIEW_LIBRARY;
-    app->focus_index = 0;
 }
 
 void player_app_wizard_reset_extraction(PlayerApp *app) {
@@ -7955,7 +7642,6 @@ void player_app_wizard_finish_extraction(PlayerApp *app, NkResult result,
         } else {
             app->wizard.step = WIZARD_STEP_SYSTEM_FONTS;
         }
-        app->focus_index = 0;
     } else {
         app->wizard.extraction_complete = false;
         app->wizard.extraction_failed = true;
@@ -8917,7 +8603,6 @@ void player_app_psn_conversion_begin(PlayerApp *app, const PlayerPsnPackage *pac
                  "Converting %.120s (%s) from its PSN package into a disc image on this PC…",
                  package->title[0] ? package->title : "the game", package->disc_id);
     }
-    app->focus_index = 0;
 }
 
 bool player_app_psn_conversion_take_request(PlayerApp *app) {
@@ -8946,7 +8631,6 @@ void player_app_psn_conversion_finish(PlayerApp *app) {
         app->wizard.step = WIZARD_STEP_SELECT_GAME;
         app->wizard.iso_selected = false;
     }
-    app->focus_index = 0;
 }
 
 static PlayerDecryptedEbootState player_find_decrypted_eboot(

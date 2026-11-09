@@ -525,7 +525,7 @@ typedef enum {
 } PlayerUiSettingsPage;
 
 /* What a Settings control asks for (PLAYER_UI_ACTION_SETTINGS). main.c runs the
-   same player_state handlers the existing renderer's Settings buttons call. */
+   player_state handler for each. */
 typedef enum {
     PLAYER_UI_SETTINGS_NONE = 0,
     PLAYER_UI_SETTINGS_CYCLE_RESOLUTION,
@@ -742,8 +742,7 @@ typedef enum {
 } PlayerUiControllerPage;
 
 /* What a controller settings control asks for (PLAYER_UI_ACTION_CONTROLLER).
-   main.c runs the same input_settings handlers the existing renderer's
-   controller buttons call. */
+   main.c runs the input_settings handler for each. */
 typedef enum {
     PLAYER_UI_CONTROLLER_NONE = 0,
     PLAYER_UI_CONTROLLER_REBIND,             /* wait for a press for .title_index, or stop */
@@ -1327,6 +1326,9 @@ size_t player_ui_nk_shown_titles(const PlayerUiNk *player, int *out, size_t cap)
 const PlayerUiTitle *player_ui_nk_test_title(const PlayerUiNk *player, size_t index);
 /* Test only: the route the next UI shows, or 0 when it has none. */
 int player_ui_nk_test_route(const PlayerUiNk *player);
+/* Test only: what the last frame's build screen drew: 1 a written package
+   ("Package built", Back to library), 0 a build running, -1 no build screen. */
+int player_ui_nk_test_build_built(const PlayerUiNk *player);
 /* Test only: the control the next UI focuses, or 0. */
 unsigned player_ui_nk_test_focus(const PlayerUiNk *player);
 /* Test only: the game whose picture is behind the library (the art rest), -1 for
