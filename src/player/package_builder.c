@@ -2224,23 +2224,6 @@ bool package_builder_toolchain_missing(
         "its bin directory on PATH.";
     const char *source =
         "Use the player's build tools download prompt to install the Windows build tools.";
-#elif defined(__ANDROID__)
-    /* package_builder_find_python looks only for the app's own libnk_python.so in the
-       native library folder here (PYTHON and PATH are not searched), and the app ships
-       no CPython, compiler or make; gcc and make are still looked up on PATH. */
-    const char *python_fix =
-        "Android runs only the programs an app ships in its native library folder, and "
-        "this build of the app ships no CPython 3.15 there. PYTHON and PATH are not "
-        "searched for it.";
-    const char *gcc_fix =
-        "This build of the app ships no compiler, and Android has no package to install "
-        "one from. gcc is looked for on PATH only.";
-    const char *make_fix =
-        "This build of the app ships no make, and Android has no package to install one "
-        "from. make is looked for on PATH only.";
-    const char *source =
-        "Nakagawa downloads build tools only on Windows.";
-    const char *python_where = "in the app's native library folder (libnk_python.so)";
 #else
     const char *python_fix =
         "Install CPython 3.15 or 3.14 (on Ubuntu 24.04, python3.15 from the deadsnakes PPA; "
@@ -2256,12 +2239,30 @@ bool package_builder_toolchain_missing(
         "Nakagawa downloads build tools only on Windows; here it uses the ones your system "
         "provides.";
 #endif
+    /* Android text is chosen at run time (nk_platform_host_kind), so it compiles on every host. */
+    const char *python_where = where;
+    if (nk_platform_host_kind() == NK_HOST_ANDROID) {
+        /* package_builder_find_python looks only for the app's own libnk_python.so in the
+           native library folder here (PYTHON and PATH are not searched), and the app ships
+           no CPython, compiler or make; gcc and make are still looked up on PATH. */
+        python_fix =
+            "Android runs only the programs an app ships in its native library folder, and "
+            "this build of the app ships no CPython 3.15 there. PYTHON and PATH are not "
+            "searched for it.";
+        gcc_fix =
+            "This build of the app ships no compiler, and Android has no package to install "
+            "one from. gcc is looked for on PATH only.";
+        make_fix =
+            "This build of the app ships no make, and Android has no package to install one "
+            "from. make is looked for on PATH only.";
+        source =
+            "Nakagawa downloads build tools only on Windows.";
+        python_where = "in the app's native library folder (libnk_python.so)";
+    }
     if (!have_python) {
         tool = "python";
         fix = python_fix;
-#if defined(__ANDROID__)
         where = python_where;
-#endif
     } else if (!have_gcc) {
         tool = "gcc";
         fix = gcc_fix;
