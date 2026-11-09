@@ -38,6 +38,9 @@
 //   CASE=vfpu-mfv-mtv (PSP-VFPU-MFVMTV-001): #326 raw words read back by mfv.s after mtv.s for 17 chosen words
 //     (zeros, denormals, qNaN/sNaN of both signs, infinities, FLT_MAX, 1.0, patterns) through two
 //     VFPU registers, register-only.
+//   CASE=vfpu-constants (PSP-VFPU-CONSTANTS-001): #326 raw destination words of vcst.s and vcst.q for constant
+//     indices 0-31 over a sentinel background (indices 20-31 are reserved and run last),
+//     register-only; a reserved index may raise an exception.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -67,8 +70,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 || PSP_ORACLE_CASE == 174
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i, vfpu-wide-dot-matrix and vfpu-mfv-mtv run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 || PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i, vfpu-wide-dot-matrix, vfpu-mfv-mtv and vfpu-constants run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -94,6 +97,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_BASIC_ARITH 168
 #define HLE_CASE_VFPU_WIDE_DOT 173
 #define HLE_CASE_VFPU_MFV_MTV 174
+#define HLE_CASE_VFPU_CONSTANTS 175
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -155,6 +159,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-mfv-mtv"
 #define HLE_TEST_ID "PSP-VFPU-MFVMTV-001"
 #define HLE_LOG "host0:/vfpu_mfv_mtv_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_CONSTANTS
+#define HLE_CAMPAIGN_ID "vfpu-constants"
+#define HLE_TEST_ID "PSP-VFPU-CONSTANTS-001"
+#define HLE_LOG "host0:/vfpu_constants_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -3426,6 +3434,192 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_MFV_MTV */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_CONSTANTS
+
+/* #326 VFPU constants (PSP-VFPU-CONSTANTS-001), two passes, register-only: the raw destination
+   words of vcst.s and vcst.q for every constant index 0-31. Encoding 0xd0600000 | index << 16,
+   size bits 0x0008 (.s, vd S200) or 0x8088 (.q, vd C200). psp-as accepts only the named
+   constants VFPU_HUGE .. VFPU_SQRT3_2 (indices 1-19) and refuses a numeric index; the words it
+   emits for those 19 names match these encodings, so every cell (index 0 and the reserved
+   indices 20-31 included) is emitted as a word. Every cell runs over an image whose 128 words
+   are all the sentinel 0x7a5a5a5a (TN_SENTINEL), so a destination lane the instruction leaves
+   unwritten reads back as the sentinel. Rows: vcst-<s|q>-p<pass> (indices 0-19: result = the
+   instruction word of index 0, out = lane 0 of C200 (.s) or lanes 0-3 (.q) per index in order,
+   then one guard word, the first destination word past the written lanes, read after the last
+   index) and vcst-<s|q>-res-p<pass> (indices 20-31, same layout, result = the instruction word
+   of index 20). The reserved indices run after both passes of the rest, one step marker each,
+   in the order p0 .s, p0 .q, p1 .s, p1 .q. POWER RISK: a reserved index may raise a
+   reserved-instruction exception that stops the launch (nothing here catches it); it needs the
+   owner present. No control register is written. */
+
+#include "hle_vfpu_cells.h"
+
+#define VC_INDICES 32u
+#define VC_CORE 20u
+#define VC_DST 32u
+#define VC_MAX_WORDS 96u
+
+typedef void (*vc_fn)(const uint32_t *in, uint32_t *out, uint32_t *cc);
+
+/* Destination C200 (image 32..35); vd 0x08, no source operand. */
+TN_CELL_FN(vc_s_0, TN_PFX_NONE, "0xd0600008")
+TN_CELL_FN(vc_s_1, TN_PFX_NONE, "0xd0610008")
+TN_CELL_FN(vc_s_2, TN_PFX_NONE, "0xd0620008")
+TN_CELL_FN(vc_s_3, TN_PFX_NONE, "0xd0630008")
+TN_CELL_FN(vc_s_4, TN_PFX_NONE, "0xd0640008")
+TN_CELL_FN(vc_s_5, TN_PFX_NONE, "0xd0650008")
+TN_CELL_FN(vc_s_6, TN_PFX_NONE, "0xd0660008")
+TN_CELL_FN(vc_s_7, TN_PFX_NONE, "0xd0670008")
+TN_CELL_FN(vc_s_8, TN_PFX_NONE, "0xd0680008")
+TN_CELL_FN(vc_s_9, TN_PFX_NONE, "0xd0690008")
+TN_CELL_FN(vc_s_10, TN_PFX_NONE, "0xd06a0008")
+TN_CELL_FN(vc_s_11, TN_PFX_NONE, "0xd06b0008")
+TN_CELL_FN(vc_s_12, TN_PFX_NONE, "0xd06c0008")
+TN_CELL_FN(vc_s_13, TN_PFX_NONE, "0xd06d0008")
+TN_CELL_FN(vc_s_14, TN_PFX_NONE, "0xd06e0008")
+TN_CELL_FN(vc_s_15, TN_PFX_NONE, "0xd06f0008")
+TN_CELL_FN(vc_s_16, TN_PFX_NONE, "0xd0700008")
+TN_CELL_FN(vc_s_17, TN_PFX_NONE, "0xd0710008")
+TN_CELL_FN(vc_s_18, TN_PFX_NONE, "0xd0720008")
+TN_CELL_FN(vc_s_19, TN_PFX_NONE, "0xd0730008")
+TN_CELL_FN(vc_s_20, TN_PFX_NONE, "0xd0740008")
+TN_CELL_FN(vc_s_21, TN_PFX_NONE, "0xd0750008")
+TN_CELL_FN(vc_s_22, TN_PFX_NONE, "0xd0760008")
+TN_CELL_FN(vc_s_23, TN_PFX_NONE, "0xd0770008")
+TN_CELL_FN(vc_s_24, TN_PFX_NONE, "0xd0780008")
+TN_CELL_FN(vc_s_25, TN_PFX_NONE, "0xd0790008")
+TN_CELL_FN(vc_s_26, TN_PFX_NONE, "0xd07a0008")
+TN_CELL_FN(vc_s_27, TN_PFX_NONE, "0xd07b0008")
+TN_CELL_FN(vc_s_28, TN_PFX_NONE, "0xd07c0008")
+TN_CELL_FN(vc_s_29, TN_PFX_NONE, "0xd07d0008")
+TN_CELL_FN(vc_s_30, TN_PFX_NONE, "0xd07e0008")
+TN_CELL_FN(vc_s_31, TN_PFX_NONE, "0xd07f0008")
+TN_CELL_FN(vc_q_0, TN_PFX_NONE, "0xd0608088")
+TN_CELL_FN(vc_q_1, TN_PFX_NONE, "0xd0618088")
+TN_CELL_FN(vc_q_2, TN_PFX_NONE, "0xd0628088")
+TN_CELL_FN(vc_q_3, TN_PFX_NONE, "0xd0638088")
+TN_CELL_FN(vc_q_4, TN_PFX_NONE, "0xd0648088")
+TN_CELL_FN(vc_q_5, TN_PFX_NONE, "0xd0658088")
+TN_CELL_FN(vc_q_6, TN_PFX_NONE, "0xd0668088")
+TN_CELL_FN(vc_q_7, TN_PFX_NONE, "0xd0678088")
+TN_CELL_FN(vc_q_8, TN_PFX_NONE, "0xd0688088")
+TN_CELL_FN(vc_q_9, TN_PFX_NONE, "0xd0698088")
+TN_CELL_FN(vc_q_10, TN_PFX_NONE, "0xd06a8088")
+TN_CELL_FN(vc_q_11, TN_PFX_NONE, "0xd06b8088")
+TN_CELL_FN(vc_q_12, TN_PFX_NONE, "0xd06c8088")
+TN_CELL_FN(vc_q_13, TN_PFX_NONE, "0xd06d8088")
+TN_CELL_FN(vc_q_14, TN_PFX_NONE, "0xd06e8088")
+TN_CELL_FN(vc_q_15, TN_PFX_NONE, "0xd06f8088")
+TN_CELL_FN(vc_q_16, TN_PFX_NONE, "0xd0708088")
+TN_CELL_FN(vc_q_17, TN_PFX_NONE, "0xd0718088")
+TN_CELL_FN(vc_q_18, TN_PFX_NONE, "0xd0728088")
+TN_CELL_FN(vc_q_19, TN_PFX_NONE, "0xd0738088")
+TN_CELL_FN(vc_q_20, TN_PFX_NONE, "0xd0748088")
+TN_CELL_FN(vc_q_21, TN_PFX_NONE, "0xd0758088")
+TN_CELL_FN(vc_q_22, TN_PFX_NONE, "0xd0768088")
+TN_CELL_FN(vc_q_23, TN_PFX_NONE, "0xd0778088")
+TN_CELL_FN(vc_q_24, TN_PFX_NONE, "0xd0788088")
+TN_CELL_FN(vc_q_25, TN_PFX_NONE, "0xd0798088")
+TN_CELL_FN(vc_q_26, TN_PFX_NONE, "0xd07a8088")
+TN_CELL_FN(vc_q_27, TN_PFX_NONE, "0xd07b8088")
+TN_CELL_FN(vc_q_28, TN_PFX_NONE, "0xd07c8088")
+TN_CELL_FN(vc_q_29, TN_PFX_NONE, "0xd07d8088")
+TN_CELL_FN(vc_q_30, TN_PFX_NONE, "0xd07e8088")
+TN_CELL_FN(vc_q_31, TN_PFX_NONE, "0xd07f8088")
+
+static const vc_fn s_vc_s[VC_INDICES] = {
+    vc_s_0, vc_s_1, vc_s_2, vc_s_3,
+    vc_s_4, vc_s_5, vc_s_6, vc_s_7,
+    vc_s_8, vc_s_9, vc_s_10, vc_s_11,
+    vc_s_12, vc_s_13, vc_s_14, vc_s_15,
+    vc_s_16, vc_s_17, vc_s_18, vc_s_19,
+    vc_s_20, vc_s_21, vc_s_22, vc_s_23,
+    vc_s_24, vc_s_25, vc_s_26, vc_s_27,
+    vc_s_28, vc_s_29, vc_s_30, vc_s_31,
+};
+static const vc_fn s_vc_q[VC_INDICES] = {
+    vc_q_0, vc_q_1, vc_q_2, vc_q_3,
+    vc_q_4, vc_q_5, vc_q_6, vc_q_7,
+    vc_q_8, vc_q_9, vc_q_10, vc_q_11,
+    vc_q_12, vc_q_13, vc_q_14, vc_q_15,
+    vc_q_16, vc_q_17, vc_q_18, vc_q_19,
+    vc_q_20, vc_q_21, vc_q_22, vc_q_23,
+    vc_q_24, vc_q_25, vc_q_26, vc_q_27,
+    vc_q_28, vc_q_29, vc_q_30, vc_q_31,
+};
+
+static uint32_t s_vc_in[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+static uint32_t s_vc_out[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+
+/* One execution over the sentinel image: the first n destination words go to dst, the guard
+   word (the one after them) is returned. */
+static uint32_t vc_exec(vc_fn fn, uint32_t *dst, unsigned n)
+{
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        s_vc_in[i] = TN_SENTINEL;
+    }
+    uint32_t cc[2] = {0u, 0u};
+    fn(s_vc_in, s_vc_out, cc);
+    for (unsigned i = 0; i < n; i++) {
+        dst[i] = s_vc_out[VC_DST + i];
+    }
+    return s_vc_out[VC_DST + n];
+}
+
+/* Row <name>: nidx indices from first, n lanes each, then the guard word. */
+static void vc_record(const char *name, const vc_fn *fns, uint32_t base_word, unsigned first,
+                      unsigned nidx, unsigned n)
+{
+    uint32_t w[VC_MAX_WORDS];
+    unsigned count = 0;
+    uint32_t guard = 0;
+    for (unsigned k = 0; k < nidx; k++) {
+        guard = vc_exec(fns[first + k], &w[count], n);
+        count += n;
+    }
+    w[count] = guard;
+    hle_record(name, "PASS", base_word | (first << 16), w, count + 1u);
+}
+
+static void vc_core(unsigned pass)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "vcst-s-p%u", pass);
+    hle_step(name);
+    vc_record(name, s_vc_s, 0xd0600008u, 0u, VC_CORE, 1u);
+    snprintf(name, sizeof(name), "vcst-q-p%u", pass);
+    hle_step(name);
+    vc_record(name, s_vc_q, 0xd0608088u, 0u, VC_CORE, 4u);
+}
+
+static void vc_reserved(unsigned pass)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "vcst-s-res-p%u", pass);
+    hle_step(name);
+    vc_record(name, s_vc_s, 0xd0600008u, VC_CORE, VC_INDICES - VC_CORE, 1u);
+    snprintf(name, sizeof(name), "vcst-q-res-p%u", pass);
+    hle_step(name);
+    vc_record(name, s_vc_q, 0xd0608088u, VC_CORE, VC_INDICES - VC_CORE, 4u);
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        vc_core(pass);
+    }
+    /* The reserved indices run last, in both passes. */
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        vc_reserved(pass);
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_CONSTANTS */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV

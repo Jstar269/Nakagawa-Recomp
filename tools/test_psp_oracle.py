@@ -2488,7 +2488,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 151)
+        self.assertEqual(len(routes), 152)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174, 175},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -7290,7 +7290,7 @@ class HleIssuesProbeTests(unittest.TestCase):
                 "|| PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 "
                 "|| PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 "
                 "|| PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 "
-                "|| PSP_ORACLE_CASE == 174\n")
+                "|| PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175\n")
         self.assertIn(head, self.probe)
         attr = self.probe[self.probe.index(head):]
         attr = attr[:attr.index("#endif") + len("#endif")]
@@ -7310,7 +7310,7 @@ class HleIssuesProbeTests(unittest.TestCase):
         ]))
         for banned in ("for (;;)", "do {", "goto ", "malloc(", "sceKernelAllocPartitionMemory"):
             self.assertNotIn(banned, code)
-        bound = r"(?:\d+u?|[A-Z][A-Z0-9_]*|sizeof\(\w+\)|first \+ n && k < 16u|count && .*|n|nexec|s_end|BA_OPERANDS / n|nin|nout|nrec|last|c0|c1)"
+        bound = r"(?:\d+u?|[A-Z][A-Z0-9_]*|sizeof\(\w+\)|first \+ n && k < 16u|count && .*|n|nexec|s_end|BA_OPERANDS / n|nin|nout|nrec|last|c0|c1|nidx)"
         # The one variable bound: the stored handler calls, capped at IC_TCALLS.
         self.assertIn("const uint32_t n = s_ic_tcount < IC_TCALLS ? s_ic_tcount : IC_TCALLS;", code)
         headers = [code[loop.end():_c_close(code, loop.end() - 1)]
@@ -9793,7 +9793,7 @@ class VfpuMfvMtvProbeTests(unittest.TestCase):
                       "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
                       self.makefile)
         self.assertIn("#define HLE_CASE_VFPU_MFV_MTV 174\n", self.probe)
-        self.assertIn("PSP_ORACLE_CASE == 174\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 174 ||", self.probe)
         self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-mfv-mtv"\n'
                       '#define HLE_TEST_ID "PSP-VFPU-MFVMTV-001"\n'
                       '#define HLE_LOG "host0:/vfpu_mfv_mtv_log.txt"', self.probe)
@@ -9867,6 +9867,135 @@ class VfpuMfvMtvProbeTests(unittest.TestCase):
         self.assertLess(bodies["mm_pass"].index("hle_step(name);"),
                         bodies["mm_pass"].index("hle_record("))
         self.assertIn("pass < 2u", bodies["hle_run"])
+
+
+class VfpuConstantsProbeTests(unittest.TestCase):
+    """CASE=vfpu-constants (175, PSP-VFPU-CONSTANTS-001) in probe_hle_issues.c: the #326 vcst.s/vcst.q constants. Register-only: no system call
+    in the section beyond the shared writer, bounded loops, a step before the cells, no
+    control-register write, a fixed-shape stream that matches the registry, and no hardware
+    result claimed (NOT_RUN)."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-CONSTANTS-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_CONSTANTS\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_CONSTANTS */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-constants)\nCASE_ID = 175\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-constants)\nTARGET = $(BUILD_DIR)/vfpu_constants\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_CONSTANTS 175\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 175\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-constants"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-CONSTANTS-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_constants_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-constants").name,
+                         "vfpu_constants_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-constants"), "strict-golden-sequence")
+        self.assertNotIn("vfpu-constants", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-constants", parse_golden.HLE_OBSERVATION_CASES)
+        self.assertIn("| `vfpu-constants` | `PSP-VFPU-CONSTANTS-001` |", self.readme)
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl", "TN_PFX_P1",
+                       "TN_PFX_P2"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 2)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(header, r"^unsigned \w+ = [\w *]+; \w+ < ")
+        # No control register is written: no mtvc word (COP2 rs 7 with bit 7 of the immediate set).
+        for word in re.findall(r"0x([0-9a-f]{8})", self.section):
+            value = int(word, 16)
+            self.assertFalse((value >> 21) == 0x247 and value & 0x80, word)
+
+    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_constants.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-constants"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["case_ids"][-1], "vfpu-constants-done")
+
+    def test_the_encodings_match_the_forms(self) -> None:
+        # vcst: 0xd0600000 | index << 16, .s vd S200 0x0008, .q vd C200 0x8088. psp-as accepts the
+        # named constants for indices 1-19 and its words equal these (VFPU_HUGE .s 0xd0610008,
+        # VFPU_SQRT3_2 .q 0xd0738088).
+        for index in range(32):
+            for size, bits in (("s", 0x0008), ("q", 0x8088)):
+                word = 0xd0600000 | (index << 16) | bits
+                with self.subTest(index=index, size=size):
+                    self.assertIn(f'TN_CELL_FN(vc_{size}_{index}, TN_PFX_NONE, "0x{word:08x}")',
+                                  self.section)
+        self.assertEqual(0xd0600000 | (1 << 16) | 0x0008, 0xd0610008)
+        self.assertEqual(0xd0600000 | (19 << 16) | 0x8088, 0xd0738088)
+        self.assertIn("vc_s_28, vc_s_29, vc_s_30, vc_s_31,", self.section)
+        self.assertIn("vc_q_28, vc_q_29, vc_q_30, vc_q_31,", self.section)
+
+    def test_sentinel_background_reserved_last_and_steps(self) -> None:
+        bodies = _c_function_bodies(self.section)
+        self.assertIn("s_vc_in[i] = TN_SENTINEL;", bodies["vc_exec"])
+        header = (Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+                  / "hle_vfpu_cells.h").read_text(encoding="utf-8")
+        self.assertIn("#define TN_SENTINEL 0x7a5a5a5au", header)
+        for group in ("vc_core", "vc_reserved"):
+            with self.subTest(group=group):
+                self.assertLess(bodies[group].index("hle_step(name);"),
+                                bodies[group].index("vc_record("))
+        run = bodies["hle_run"]
+        self.assertLess(run.index("vc_core(pass)"), run.index("vc_reserved(pass)"))
+        self.assertEqual(run.count("pass < 2u"), 2)
+        self.assertIn("#define VC_CORE 20u", self.section)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-constants"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-CONSTANTS-001")
+        self.assertEqual(spec.terminal_case, "vfpu-constants-done")
+        self.assertEqual(parse_golden.VFPU_CONSTANTS_CASES, (
+            "vcst-s-p0", "vcst-q-p0", "vcst-s-p1", "vcst-q-p1",
+            "vcst-s-res-p0", "vcst-q-res-p0", "vcst-s-res-p1", "vcst-q-res-p1"))
+        self.assertEqual(counts["vcst-s-p0"], 21)
+        self.assertEqual(counts["vcst-q-p1"], 81)
+        self.assertEqual(counts["vcst-s-res-p0"], 13)
+        self.assertEqual(counts["vcst-q-res-p1"], 49)
+        # The log line buffer (1536 bytes) holds at most 94 words of 16 bytes.
+        self.assertLessEqual(max(counts.values()), 94)
+
+    def test_manifest_row_names_the_power_risk(self) -> None:
+        self.assertIn("POWER RISK", self.rows[0]["risk"])
 
 
 class VfpuCcCmovProbeTests(unittest.TestCase):

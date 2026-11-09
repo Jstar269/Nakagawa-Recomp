@@ -2264,6 +2264,49 @@
         "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
       },
       {
+        "id": "PSP-VFPU-CONSTANTS-001",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as case 175, the vcst.s/vcst.q constants for indices 0-31. No hardware run is cited.",
+        "group": "cpu",
+        "source": "fixtures/psp_oracle/probe_hle_issues.c",
+        "prx": "vfpu_constants.prx",
+        "apis": [
+          "sceIoClose",
+          "sceIoOpen",
+          "sceIoRead",
+          "sceIoWrite",
+          "sceKernelDeleteThread",
+          "sceKernelExitThread",
+          "sceKernelGetThreadId",
+          "sceKernelSleepThread",
+          "sceKernelWaitThreadEnd",
+          "sceKernelWakeupThread",
+          "Allegrex VFPU vcst.s",
+          "Allegrex VFPU vcst.q"
+        ],
+        "diagnostic_case_ids": [
+          "vfpu-constants"
+        ],
+        "case_ids": [
+          "vcst-s-p0",
+          "vcst-q-p0",
+          "vcst-s-p1",
+          "vcst-q-p1",
+          "vcst-s-res-p0",
+          "vcst-q-res-p0",
+          "vcst-s-res-p1",
+          "vcst-q-res-p1",
+          "vfpu-constants-done"
+        ],
+        "invariant": "#326, two passes, register-only: the raw destination words of vcst.s (lane 0) and vcst.q (lanes 0-3) for constant indices 0-31 over an image of sentinel words so an unwritten lane is visible; the reserved indices 20-31 run last. No memory or host I/O runs inside a measured span.",
+        "issues": [
+          326
+        ],
+        "risk": "POWER RISK: the reserved vcst indices 20-31 are vcst encodings that psp-as cannot emit and may raise a reserved-instruction exception that stops the launch under PSPLink (nothing in the probe catches it); they run last behind durable step markers; run only with the owner present and never followed by an unattended reset",
+        "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
+      },
+      {
         "id": "PSP-VFPU-BASICARITH-001",
         "status": "implemented",
         "hardware_evidence": "MEASURED",

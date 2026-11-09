@@ -2394,6 +2394,21 @@ _register_campaign_probe(
     "vfpu-mfv-mtv", "PSP-VFPU-MFVMTV-001", VFPU_MFV_MTV_CASES, dict(VFPU_MFV_MTV_ROWS),
 )
 
+
+# vfpu-constants (175, probe_hle_issues.c): the #326 vcst.s/vcst.q constants, two passes, register-only.
+# Per pass: vcst-s-p<pass> (indices 0-19, 20 words + a guard word) and vcst-q-p<pass> (80 words +
+# a guard word); after both passes, vcst-s-res-p<pass> (indices 20-31, 12 words + a guard word)
+# and vcst-q-res-p<pass> (48 words + a guard word), p0 .s, p0 .q, p1 .s, p1 .q. The reserved
+# indices may raise an exception (POWER RISK).
+VFPU_CONSTANTS_ROWS = tuple(
+    [(f"vcst-{size}-p{p}", lanes * 20 + 1) for p in range(2) for size, lanes in (("s", 1), ("q", 4))]
+    + [(f"vcst-{size}-res-p{p}", lanes * 12 + 1)
+       for p in range(2) for size, lanes in (("s", 1), ("q", 4))])
+VFPU_CONSTANTS_CASES = tuple(case for case, _count in VFPU_CONSTANTS_ROWS)
+_register_campaign_probe(
+    "vfpu-constants", "PSP-VFPU-CONSTANTS-001", VFPU_CONSTANTS_CASES, dict(VFPU_CONSTANTS_ROWS),
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -3080,7 +3095,7 @@ VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
                                    "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov", "vfpu-vus2i", "vfpu-basic-arith",
                                    "hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-wide-dot-matrix",
-                                   "vfpu-mfv-mtv"})
+                                   "vfpu-mfv-mtv", "vfpu-constants"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (

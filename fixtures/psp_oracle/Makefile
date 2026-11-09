@@ -348,6 +348,10 @@ CASE_ID = 173
 # 174: #326 mtv.s/mfv.s word round trip through two VFPU registers (probe_hle_issues.c); register-only.
 else ifeq ($(CASE),vfpu-mfv-mtv)
 CASE_ID = 174
+# 175: #326 vcst.s/vcst.q for indices 0-31 (probe_hle_issues.c); register-only. POWER RISK: the
+# reserved indices 20-31 may raise an exception; they run last.
+else ifeq ($(CASE),vfpu-constants)
+CASE_ID = 175
 else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
@@ -665,6 +669,9 @@ TARGET = $(BUILD_DIR)/vfpu_wide_dot_matrix
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),vfpu-mfv-mtv)
 TARGET = $(BUILD_DIR)/vfpu_mfv_mtv
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-constants)
+TARGET = $(BUILD_DIR)/vfpu_constants
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
 # same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.
