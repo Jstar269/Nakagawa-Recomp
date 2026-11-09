@@ -87,6 +87,22 @@ enum {
  * value -1. */
 int sdl3vk_parse_present_scaling(const char *value);
 
+/* How the GE backend reads the destination of a shader-blend or stencil draw (#2109), chosen
+ * once before the device is made, because the interlock path enables a device extension and
+ * features: the destination snapshot (a copy of the target taken before the batch; every device),
+ * or a fragment-shader interlock read-modify-write of the target itself
+ * (VK_EXT_fragment_shader_interlock, fragmentShaderPixelInterlock, fragmentStoresAndAtomics).
+ * SR_GPU_DST_READ=snapshot|interlock forces one; unset or unknown, the interlock is taken where
+ * the device has it. */
+enum {
+    SDL3VK_DST_READ_SNAPSHOT = 0,
+    SDL3VK_DST_READ_INTERLOCK = 1,
+};
+
+/* The path an SR_GPU_DST_READ value asks for: NULL or empty is -2 (the default order), an
+ * unknown value -1. */
+int sdl3vk_parse_dst_read(const char *value);
+
 typedef struct {
     int x, y, w, h;  /* destination rectangle in the swapchain image; w == 0 means draw nothing */
     int prescale;    /* > 1: nearest blit into a (prescale*srcw x prescale*srch) image first */
@@ -156,10 +172,14 @@ int sdl3vk_present_held(void);
  * present whose shown image (w x h, in TRANSFER_SRC_OPTIMAL) is smaller than its place in the
  * window, after the show pass and before the frame blit. It may record into the command buffer,
  * and returns an image of exactly out_w x out_h, in TRANSFER_SRC_OPTIMAL, that is copied 1:1 into
- * that place, or NULL to scale as SR_PRESENT_SCALING says. A capture always reads the guest's
- * frame, so what it returns is never captured. Registered only when SR_PRESENT_UPSCALE asks for
- * it; NULL removes it. Handles are Vulkan's, passed as void pointers. */
-typedef void *(*Sdl3VkUpscalePass)(void *cmd, void *src, int w, int h, int out_w, int out_h);
+ * that place, or NULL to scale as SR_PRESENT_SCALING says. `cpu_frame` is 1 when the picture is
+ * a CPU-presented frame (a movie, or any frame of a software-GE run; a held present repeats the
+ * last one's kind). `*anime4k` (NULL when the caller does not ask) is set to 1 when Anime4K's
+ * stages made the returned image, so record.json can name them. A capture always reads the
+ * guest's frame, so what it returns is never captured. Registered only when SR_PRESENT_UPSCALE or
+ * SR_MOVIE_UPSCALE asks for it; NULL removes it. Handles are Vulkan's, passed as void pointers. */
+typedef void *(*Sdl3VkUpscalePass)(void *cmd, void *src, int w, int h, int out_w, int out_h,
+                                   int cpu_frame, int *anime4k);
 void sdl3vk_set_upscale_pass(Sdl3VkUpscalePass pass);
 /* The same for the recording (SR_VIDEOREC_DIR, #2138): called with the recording's place for a
  * recorded present whose shown image is smaller than it, so a recording made with the upscaler
@@ -359,6 +379,12 @@ typedef struct Sdl3VkInfo {
      * declaring DenormPreserve keeps fp32 subnormals, as GPU T&L needs (#318). */
     int      denorm_preserve_f32;
     void    *get_instance_proc_addr;   /* PFN_vkGetInstanceProcAddr */
+    /* SDL3VK_DST_READ_*: the path the device was made for. */
+    int      dst_read;
+    /* What vkCreateDevice was given, for the selftests' fallback pins: the extension count,
+     * whether pEnabledFeatures was set, and whether a VkPhysicalDeviceFeatures2 chain was. */
+    uint32_t device_extensions;
+    int      device_features, device_features2;
 } Sdl3VkInfo;
 int sdl3vk_get_vk(Sdl3VkInfo *out);
 

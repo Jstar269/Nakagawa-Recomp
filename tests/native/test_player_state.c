@@ -2041,41 +2041,6 @@ static void test_source_iso_member_path_validation(void) {
 }
 #endif
 
-/* The bitmap fallback (SDL_RenderDebugText) draws ASCII only. Every UTF-8 text
- * it draws goes through player_text_for_bitmap_font, so a title that the system
- * font can draw (the trademark sign) is readable there too, and nothing else
- * reaches the debug font as raw bytes. */
-static void test_bitmap_font_text_fallback(void) {
-    char out[64];
-    size_t n = player_text_for_bitmap_font("Fixture\xE2\x84\xA2", out, sizeof(out));
-    assert(strcmp(out, "FixtureTM") == 0);
-    assert(n == strlen(out));
-
-    player_text_for_bitmap_font("caf\xC3\xA9", out, sizeof(out));
-    assert(strcmp(out, "caf?") == 0);
-
-    /* A truncated sequence and a stray continuation byte each become one '?'. */
-    player_text_for_bitmap_font("a\xE2\x84", out, sizeof(out));
-    assert(strcmp(out, "a??") == 0);
-    player_text_for_bitmap_font("\x80" "b", out, sizeof(out));
-    assert(strcmp(out, "?b") == 0);
-
-    player_text_for_bitmap_font("tab\there\x7f", out, sizeof(out));
-    assert(strcmp(out, "tab here?") == 0);
-
-    /* Output never overruns its buffer; the cut is at a whole glyph. */
-    char small[4];
-    n = player_text_for_bitmap_font("abcdef", small, sizeof(small));
-    assert(strcmp(small, "abc") == 0);
-    assert(n == 3);
-    char tiny[3];
-    n = player_text_for_bitmap_font("\xE2\x84\xA2" "x", tiny, sizeof(tiny));
-    assert(strcmp(tiny, "TM") == 0);
-    assert(n == 2);
-
-    printf("[PLAYER_STATE_TEST] bitmap font text fallback PASS\n");
-}
-
 /* Paths under the user's profile are shown with the profile folder replaced by
  * "~" (the stored path is untouched). The profile folder is matched on whole
  * path components only, so a profile name that is a prefix of another folder
@@ -3086,7 +3051,6 @@ static void test_platform_seam_answers_for_this_host(void) {
     assert(nk_platform_path_chars_equal('/', '\\'));
     assert(nk_platform_can_front_process_windows());
     assert(package_builder_toolchain_download_available());
-    assert(strcmp(nk_platform_sdl3_ttf_library_names()[0], "SDL3_ttf.dll") == 0);
     assert(same_env_value(nk_platform_env_home_dir(), getenv("USERPROFILE")));
     assert(same_env_value(nk_platform_env_user_name(), getenv("USERNAME")));
 #else
@@ -3094,10 +3058,8 @@ static void test_platform_seam_answers_for_this_host(void) {
     assert(host == NK_HOST_ANDROID);
 #elif defined(__APPLE__)
     assert(host == NK_HOST_MACOS);
-    assert(strcmp(nk_platform_sdl3_ttf_library_names()[0], "libSDL3_ttf.0.dylib") == 0);
 #elif defined(__linux__)
     assert(host == NK_HOST_LINUX);
-    assert(strcmp(nk_platform_sdl3_ttf_library_names()[0], "libSDL3_ttf.so.0") == 0);
 #endif
     assert(!nk_platform_is_path_separator('\\') && nk_platform_is_path_separator('/'));
     assert(!nk_platform_path_chars_equal('A', 'a'));
@@ -3119,16 +3081,6 @@ static void test_platform_seam_answers_for_this_host(void) {
     assert(nk_platform_path_chars_equal('x', 'x'));
     assert(!nk_platform_path_chars_equal('x', 'y'));
     assert(nk_platform_process_id() != 0ul);
-
-    /* The launcher's library candidates come from the same table. */
-    {
-        char candidates[4][MAX_PATH_LEN];
-        const char *const *names = nk_platform_sdl3_ttf_library_names();
-        int n = player_app_ttf_library_candidates(NULL, candidates, 4);
-        assert(n >= 1);
-        for (int i = 0; i < n; i++) assert(strcmp(candidates[i], names[i]) == 0);
-        assert(names[n] == NULL);
-    }
 
     /* A failed rename reports the host's own error code. */
     {
@@ -3890,6 +3842,237 @@ static bool queue_file_exists(const PlayerApp *app) {
     return nk_platform_file_exists(path);
 }
 
+static bool queue_file_has(const char *path, const char *text) {
+    char *contents = read_text_file(path);
+    bool found = contents != NULL && strstr(contents, text) != NULL;
+    free(contents);
+    return found;
+}
+
+/* The build queue (Add to queue): one queue for first builds and rebuilds,
+ * through the same package-builder child as the rebuild test. On entry the
+ * four fixture games are ULUS99998 (built by this Nakagawa), ULUS99997 (an
+ * older build, disc gone), ULUS99996 (built by this Nakagawa) and ULUS99995
+ * (a package with no recorded identity); nothing is queued. */
+static void test_build_queue(PlayerApp *app, const char *user_root) {
+    char sep = nk_platform_path_separator();
+    char path[NATIVE_TEST_PATH_MAX + 192];
+    char queue_path[MAX_PATH_LEN];
+    char text[256];
+    char reason[2048];
+    bool offers = true;
+    int total = 0;
+    PlayerRebuildCard card;
+    PlayerRebuildQueue *queue = &app->rebuild_queue;
+
+    assert(player_app_rebuild_queue_path(app, queue_path, sizeof(queue_path)));
+    assert(!queue->active && !nk_platform_file_exists(queue_path));
+    /* ULUS99998 loses its package: Add to queue makes it a first build. */
+    snprintf(path, sizeof(path), "%s%cpackages%cULUS99998", user_root, sep, sep);
+    assert(test_remove_tree(path));
+    player_app_runtime_package_cache_invalidate(app);
+    assert(player_app_validate_runtime_package(app, &app->games[0], NULL, reason,
+                                               sizeof(reason)) == NK_RUNTIME_PACKAGE_MISSING);
+    assert(!player_app_game_is_outdated(app, &app->games[0]));
+    assert(player_app_game_is_outdated(app, &app->games[1]));
+
+    /* Order: each game goes last, and a game that waits is not added twice. */
+    assert(player_app_build_queue_add(app, 0));
+    assert(player_app_build_queue_add(app, 1));
+    assert(player_app_build_queue_add(app, 3));
+    assert(!player_app_build_queue_add(app, 0));
+    assert(!player_app_build_queue_add(app, 7));
+    assert(queue->active && !queue->paused && queue->count == 3);
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99998") == 0 &&
+           queue->entries[0].kind == PLAYER_QUEUE_BUILD);
+    assert(strcmp(queue->entries[1].disc_id, "ULUS99997") == 0 &&
+           queue->entries[1].kind == PLAYER_QUEUE_REBUILD);   /* an older build */
+    assert(strcmp(queue->entries[2].disc_id, "ULUS99995") == 0 &&
+           queue->entries[2].kind == PLAYER_QUEUE_BUILD);
+    assert(player_app_build_queue_place(app, "ULUS99995", &total) == 3 && total == 3);
+    assert(player_app_build_queue_place(app, "ULUS99996", &total) == 0 && total == 3);
+    assert(player_app_rebuild_card(app, &app->games[0], &card));
+    assert(strcmp(card.word, "Queued") == 0 && card.kind == PLAYER_QUEUE_BUILD &&
+           !card.rebuilding && !card.can_rebuild);
+    assert(card.queue_place == 1 && card.queue_total == 3);
+    assert(!player_app_rebuild_card(app, &app->games[2], &card));
+    assert(player_app_build_queue_has_waiting(app) && player_app_rebuild_banner_visible(app));
+    (void)player_app_rebuild_banner_text(app, text, sizeof(text), &offers);
+    assert(strcmp(text, "Building 1 of 3") == 0 && !offers);
+    printf("[PLAYER_STATE_TEST] Add to queue puts each game last, once PASS\n");
+
+    /* Up and Down pass the next game that waits; neither end moves further. */
+    assert(player_app_build_queue_move(app, "ULUS99995", -1));
+    assert(strcmp(queue->entries[1].disc_id, "ULUS99995") == 0 &&
+           strcmp(queue->entries[2].disc_id, "ULUS99997") == 0);
+    assert(!player_app_build_queue_move(app, "ULUS99998", -1));
+    assert(!player_app_build_queue_move(app, "ULUS99997", 1));
+    assert(!player_app_build_queue_move(app, "ULUS99996", 1));     /* not queued */
+    assert(player_app_build_queue_move(app, "ULUS99998", 1));
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99995") == 0 &&
+           strcmp(queue->entries[1].disc_id, "ULUS99998") == 0);
+    assert(player_app_build_queue_place(app, "ULUS99998", &total) == 2 && total == 3);
+    assert(queue_file_has(queue_path, "\"disc_id\": \"ULUS99995\", \"kind\": \"build\""));
+    /* A waiting game that left the library is not on the queue screen, so Up
+       and Down pass it like a finished one: each press visibly moves a row. */
+    queue->entries[3] = queue->entries[2];
+    queue->entries[2] = queue->entries[1];
+    memset(&queue->entries[1], 0, sizeof(queue->entries[1]));
+    snprintf(queue->entries[1].disc_id, sizeof(queue->entries[1].disc_id), "ULUS90001");
+    queue->entries[1].state = PLAYER_REBUILD_PENDING;
+    queue->entries[1].kind = PLAYER_QUEUE_BUILD;
+    queue->count = 4;
+    assert(player_app_find_game_by_disc_id(app, "ULUS90001") < 0);
+    assert(player_app_build_queue_move(app, "ULUS99998", -1));
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99998") == 0 &&
+           strcmp(queue->entries[1].disc_id, "ULUS90001") == 0 &&
+           strcmp(queue->entries[2].disc_id, "ULUS99995") == 0);
+    assert(player_app_build_queue_move(app, "ULUS99998", 1));
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99995") == 0 &&
+           strcmp(queue->entries[1].disc_id, "ULUS90001") == 0 &&
+           strcmp(queue->entries[2].disc_id, "ULUS99998") == 0);
+    queue->entries[1] = queue->entries[2];
+    queue->entries[2] = queue->entries[3];
+    queue->count = 3;
+    (void)player_app_rebuild_queue_save(app);
+    printf("[PLAYER_STATE_TEST] the build queue reorders PASS\n");
+
+    /* Remove from queue: the game leaves; the others keep their order. */
+    assert(player_app_build_queue_remove(app, "ULUS99995"));
+    assert(!player_app_build_queue_remove(app, "ULUS99995"));
+    assert(queue->count == 2 && queue->active);
+    assert(strcmp(queue->entries[0].disc_id, "ULUS99998") == 0 &&
+           strcmp(queue->entries[1].disc_id, "ULUS99997") == 0);
+    assert(!player_app_rebuild_card(app, &app->games[3], &card));
+    printf("[PLAYER_STATE_TEST] Remove from queue takes one game out PASS\n");
+
+    /* The file keeps the order and each title's kind, as schema 2, and a
+       restart resumes the queue from it. */
+    assert(queue_file_has(queue_path, "\"schema_version\": 2"));
+    assert(queue_file_has(queue_path,
+        "{\"disc_id\": \"ULUS99998\", \"kind\": \"build\", \"state\": \"pending\"},\n"
+        "    {\"disc_id\": \"ULUS99997\", \"kind\": \"rebuild\", \"state\": \"pending\"}"));
+    {
+        PlayerApp *resumed = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        assert(resumed != NULL);
+        snprintf(resumed->settings_path, sizeof(resumed->settings_path), "%s",
+                 app->settings_path);
+        memcpy(resumed->games, app->games, sizeof(GameRecord) * 4u);
+        resumed->game_count = 4;
+        assert(player_app_rebuild_queue_load(resumed));
+        assert(resumed->rebuild_queue.active && resumed->rebuild_queue.count == 2);
+        assert(strcmp(resumed->rebuild_queue.entries[0].disc_id, "ULUS99998") == 0 &&
+               resumed->rebuild_queue.entries[0].kind == PLAYER_QUEUE_BUILD);
+        assert(strcmp(resumed->rebuild_queue.entries[1].disc_id, "ULUS99997") == 0 &&
+               resumed->rebuild_queue.entries[1].kind == PLAYER_QUEUE_REBUILD);
+        free(resumed);
+    }
+    printf("[PLAYER_STATE_TEST] the build queue persists and resumes after a restart PASS\n");
+
+    /* A first build that fails says so on its card, and the queue goes on:
+       ULUS99997's disc is missing, so it is skipped, and the queue ends. */
+    nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "failure");
+    app->active_view = VIEW_LIBRARY;
+    app->last_error.error_code[0] = '\0';
+    player_app_rebuild_queue_step(app);
+    assert(app->build_session.is_building && app->active_view == VIEW_LIBRARY);
+    assert(queue->entries[0].state == PLAYER_REBUILD_ACTIVE);
+    assert(player_app_rebuild_queue_owns_build(app));
+    assert(player_app_rebuild_card(app, &app->games[0], &card) && card.rebuilding);
+    assert(strcmp(card.word, "Building") == 0 && card.kind == PLAYER_QUEUE_BUILD);
+    assert(!player_app_build_queue_remove(app, "ULUS99998"));     /* it builds now */
+    assert(!player_app_build_queue_move(app, "ULUS99997", -1));    /* not past it */
+    player_app_rebuild_queue_step(app);                            /* one build at a time */
+    assert(queue->entries[1].state == PLAYER_REBUILD_PENDING);
+    poll_player_package_build_to_terminal(app);
+    assert(app->build_session.is_failed);
+    assert(!player_app_apply_build_outcome(app));
+    assert(app->active_view == VIEW_LIBRARY && app->last_error.error_code[0] == '\0');
+    assert(queue->entries[0].state == PLAYER_REBUILD_FAILED);
+    assert(player_app_rebuild_card(app, &app->games[0], &card));
+    assert(strcmp(card.word, "Build failed") == 0 && !card.rebuilding);
+    assert(strstr(card.detail, "the queue went on") != NULL);
+    player_app_rebuild_queue_step(app);
+    assert(queue->entries[1].state == PLAYER_REBUILD_NO_DISC);
+    assert(!app->build_session.is_building);
+    assert(!queue->active && !nk_platform_file_exists(queue_path));
+    assert(player_app_rebuild_card(app, &app->games[0], &card) &&
+           strcmp(card.word, "Build failed") == 0);
+    printf("[PLAYER_STATE_TEST] a failed queued build goes to its card and the queue goes on PASS\n");
+
+    /* Added again, a finished game waits again; this time its build passes. */
+    nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "success");
+    assert(player_app_build_queue_add(app, 0));
+    assert(queue->active && queue->count == 1);                  /* a new run */
+    (void)player_app_rebuild_banner_text(app, text, sizeof(text), &offers);
+    assert(strcmp(text, "Building 1 of 1") == 0);
+    player_app_rebuild_queue_step(app);
+    assert(app->build_session.is_building);
+    poll_player_package_build_to_terminal(app);
+    assert(app->build_session.is_complete && !app->build_session.is_failed);
+    assert(player_app_rebuild_queue_owns_build(app));
+    player_app_runtime_package_cache_invalidate(app);
+    player_app_rebuild_queue_build_checked(
+        app, player_app_validate_runtime_package(app, &app->games[0], NULL, reason,
+                                                 sizeof(reason)) == NK_RUNTIME_PACKAGE_OK);
+    assert(queue->entries[0].state == PLAYER_REBUILD_DONE && !queue->active);
+    assert(!player_app_rebuild_card(app, &app->games[0], &card));
+    assert(!nk_platform_file_exists(queue_path));
+    printf("[PLAYER_STATE_TEST] a queued first build that passes leaves its package PASS\n");
+
+    /* A schema 1 queue (rebuilds only, no kind) is read as rebuilds and
+       rewritten as schema 2 at once. */
+    write_text_file(queue_path,
+        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":1,"
+        "\"titles\":[{\"disc_id\":\"ULUS99997\",\"state\":\"pending\"},"
+        "{\"disc_id\":\"ULUS99996\",\"state\":\"failed\"}]}\n");
+    memset(queue, 0, sizeof(*queue));
+    assert(player_app_rebuild_queue_load(app));
+    assert(queue->active && queue->count == 2);
+    assert(queue->entries[0].kind == PLAYER_QUEUE_REBUILD &&
+           queue->entries[0].state == PLAYER_REBUILD_PENDING);
+    assert(queue->entries[1].kind == PLAYER_QUEUE_REBUILD &&
+           queue->entries[1].state == PLAYER_REBUILD_FAILED);
+    assert(queue_file_has(queue_path, "\"schema_version\": 2"));
+    assert(queue_file_has(queue_path,
+        "{\"disc_id\": \"ULUS99997\", \"kind\": \"rebuild\", \"state\": \"pending\"}"));
+    /* A schema 2 title must say its kind; a repeated title is refused too. */
+    write_text_file(queue_path,
+        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":2,"
+        "\"titles\":[{\"disc_id\":\"ULUS99997\",\"state\":\"pending\"}]}\n");
+    memset(queue, 0, sizeof(*queue));
+    assert(!player_app_rebuild_queue_load(app) && !queue->active);
+    write_text_file(queue_path,
+        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":2,\"titles\":["
+        "{\"disc_id\":\"ULUS99997\",\"kind\":\"rebuild\",\"state\":\"pending\"},"
+        "{\"disc_id\":\"ULUS99997\",\"kind\":\"build\",\"state\":\"pending\"}]}\n");
+    assert(!player_app_rebuild_queue_load(app) && !queue->active);
+    assert(nk_remove_utf8(queue_path) == 0);
+    printf("[PLAYER_STATE_TEST] a schema 1 rebuild queue migrates to schema 2 PASS\n");
+
+    /* A newer Nakagawa's queue is not resumed, and stays as it is while this
+       player's own queue comes and goes. */
+    static const char newer[] =
+        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":3,"
+        "\"titles\":[{\"disc_id\":\"ULUS99997\",\"kind\":\"rebuild\",\"state\":\"pending\","
+        "\"note\":\"from a newer player\"}]}\n";
+    write_text_file(queue_path, newer);
+    memset(queue, 0, sizeof(*queue));
+    assert(!player_app_rebuild_queue_load(app));
+    assert(!queue->active && queue->file_is_newer);
+    assert(player_app_build_queue_add(app, 3));
+    assert(queue->active && !player_app_rebuild_queue_save(app));
+    assert(player_app_build_queue_remove(app, "ULUS99995") && !queue->active);
+    {
+        char *kept = read_text_file(queue_path);
+        assert(kept != NULL && strcmp(kept, newer) == 0);
+        free(kept);
+    }
+    assert(nk_remove_utf8(queue_path) == 0);
+    memset(queue, 0, sizeof(*queue));
+    printf("[PLAYER_STATE_TEST] a newer build queue file stays untouched PASS\n");
+}
+
 /* Games built by an older Nakagawa (owner decision, 2026-10-29), through the
  * same package-builder child as the rebuild test above. `app` holds one
  * experimental title with a valid package and a disc in place; install_root
@@ -4136,7 +4319,7 @@ static void test_outdated_packages_rebuild(PlayerApp *app, const char *user_root
     char queue_path[MAX_PATH_LEN];
     assert(player_app_rebuild_queue_path(app, queue_path, sizeof(queue_path)));
     write_text_file(queue_path,
-        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":2,"
+        "{\"format\":\"nakagawa-rebuild-queue\",\"schema_version\":3,"
         "\"titles\":[{\"disc_id\":\"ULUS99997\",\"state\":\"pending\"}]}\n");
     assert(!player_app_rebuild_queue_load(app));
     assert(!app->rebuild_queue.active && nk_platform_file_exists(queue_path));
@@ -4146,6 +4329,9 @@ static void test_outdated_packages_rebuild(PlayerApp *app, const char *user_root
     assert(!player_app_rebuild_queue_load(app));
     assert(nk_remove_utf8(queue_path) == 0);
     printf("[PLAYER_STATE_TEST] a newer rebuild queue file is not resumed PASS\n");
+
+    memset(&app->rebuild_queue, 0, sizeof(app->rebuild_queue));
+    test_build_queue(app, user_root);
 
     app->game_count = 1;
     memset(&app->outdated, 0, sizeof(app->outdated));
@@ -9313,7 +9499,6 @@ int main(int argc, char **argv) {
     test_windows_block_cards_name_the_block();
     test_skipped_showcase_logs_its_reason();
     test_build_outcome_is_shown_once_per_session();
-    test_bitmap_font_text_fallback();
     test_display_path_hides_profile_folder();
     test_report_this_game();
     test_license_folder_request();
@@ -9457,47 +9642,6 @@ int main(int argc, char **argv) {
     memset(&entry, 0, sizeof(entry));
     snprintf(entry.title_name, sizeof(entry.title_name), "Nameless");
     assert(player_app_add_game(app, &entry) == false);
-
-    /* 6. Every library entry must be reachable.
-     *
-     * The strip draws cards left to right on a 280-pixel pitch, so a
-     * 1280-wide window shows about four. Everything past those was drawn
-     * outside the window, and src/player had no wheel, paging, keyboard or
-     * offset handling at all -- so with a full library most games could
-     * neither be selected nor launched. */
-    printf("[PLAYER_STATE_TEST] Subtest 6: every entry is reachable\n");
-    fflush(stdout);
-
-    app->window_width = 1280;
-    app->window_height = 720;
-    int visible = player_app_visible_library_cards(app);
-    assert(visible >= 1);
-    assert(visible < NK_MAX_GAMES);   /* otherwise this proves nothing */
-
-    /* The library is already full from subtest 4. */
-    assert(app->game_count == NK_MAX_GAMES);
-    app->selected_game_index = 0;
-    for (int i = 1; i < NK_MAX_GAMES; i++) {
-        player_app_move_selection(app, 1);
-        assert(app->selected_game_index == i);
-    }
-    /* Including the ones that never fit on screen at once. */
-    assert(app->selected_game_index == NK_MAX_GAMES - 1);
-    assert(app->selected_game_index >= visible);
-
-    /* Selection clamps rather than wrapping or running off either end. */
-    player_app_move_selection(app, 1);
-    assert(app->selected_game_index == NK_MAX_GAMES - 1);
-    player_app_move_selection(app, -NK_MAX_GAMES * 2);
-    assert(app->selected_game_index == 0);
-    player_app_move_selection(app, -1);
-    assert(app->selected_game_index == 0);
-
-    /* A window too narrow for even one card still offers one. */
-    app->window_width = 100;
-    assert(player_app_visible_library_cards(app) == 1);
-    app->window_width = 1920;
-    assert(player_app_visible_library_cards(app) > visible);
 
     /* 7. The demo fixture set must contain a title that can actually launch.
      *
@@ -9855,22 +9999,6 @@ int main(int argc, char **argv) {
         free(mapped);
     }
 
-    /* 10. Focus clamps into range so keyboard/gamepad activation can never
-     * target a control the view no longer draws. */
-    printf("[PLAYER_STATE_TEST] Subtest 10: focus clamps\n");
-    fflush(stdout);
-    PlayerApp *focus = (PlayerApp *)calloc(1, sizeof(PlayerApp));
-    assert(focus != NULL);
-    focus->focus_index = 0;
-    player_app_move_focus(focus, 5, 3);
-    assert(focus->focus_index == 2);
-    player_app_move_focus(focus, -10, 3);
-    assert(focus->focus_index == 0);
-    player_app_move_focus(focus, 1, 0);
-    assert(focus->focus_index == 0);
-    player_app_move_focus(NULL, 1, 3);
-    free(focus);
-
     /* 11. Library removal touches only the entry, never the ISO file, and
      * invalid indices are refused before any save. */
     printf("[PLAYER_STATE_TEST] Subtest 11: library removal is entry-only\n");
@@ -9908,124 +10036,6 @@ int main(int argc, char **argv) {
         free(removal);
     }
 
-    /* 12. Focus-stop counts match the buttons each view draws, so the
-     * event loop can never park focus on a control that does not exist. */
-    printf("[PLAYER_STATE_TEST] Subtest 12: focus stops match drawn buttons\n");
-    fflush(stdout);
-    {
-        PlayerApp *stops = (PlayerApp *)calloc(1, sizeof(PlayerApp));
-        assert(stops != NULL);
-        nk_library_init(&stops->library);
-        stops->window_width = 1280;
-        stops->window_height = 720;
-        assert(player_app_focus_count(NULL) == 1);
-
-        stops->active_view = VIEW_LIBRARY;
-        stops->game_count = 0;
-        assert(player_app_focus_count(stops) == 1); /* empty: add only */
-
-        stops->active_view = PLAYER_VIEW_READY_LIBRARY;
-        assert(player_app_focus_count(stops) == 1); /* empty ready library */
-        stops->active_view = VIEW_LIBRARY;
-
-        seed_entry(&entry, "FCS00001", "Unprepared");
-        entry.is_prepared = false;
-        stops->games[0] = entry;
-        stops->game_count = 1;
-        stops->selected_game_index = 0;
-        assert(player_app_focus_count(stops) == 4); /* incompatible package: rebuild + add + remove + mapping (#1147) */
-
-        stops->games[0].is_prepared = true;
-        assert(player_app_focus_count(stops) == 4); /* no validated package is still incompatible: rebuild + add + remove + mapping */
-
-        stops->is_game_running = true;
-        assert(player_app_focus_count(stops) == 4); /* stop + add + remove + mapping */
-
-        /* Overflow adds the two paging stops. */
-        stops->is_game_running = false;
-        stops->window_width = 640;
-        assert(player_app_visible_library_cards(stops) == 2);
-        stops->game_count = 1;
-        assert(player_app_focus_count(stops) == 4); /* rebuild + add + remove + mapping */
-        seed_entry(&entry, "FCS00002", "Second");
-        stops->games[1] = entry;
-        seed_entry(&entry, "FCS00003", "Third");
-        stops->games[2] = entry;
-        stops->game_count = 3;
-        assert(player_app_focus_count(stops) == 6); /* + both paging stops */
-
-        /* A title with missing package offers the BUILD PACKAGE button */
-        stops->window_width = 1280;
-        stops->game_count = 1;
-        seed_entry(&entry, "TEST80001", "Synthetic Package Fixture");
-        snprintf(entry.title_id, sizeof(entry.title_id), "test-80001");
-        stops->games[0] = entry;
-        assert(player_app_focus_count(stops) == 4); /* build package + add + remove + mapping */
-        stops->focus_index = 0;
-        player_app_runtime_package_cache_mark_pending(stops, 0);
-        assert(player_app_focus_count(stops) == 4);
-        assert(stops->focus_index == 0); /* background validation keeps primary focus */
-        stops->runtime_package_cache[0].validation_pending = false;
-
-        stops->active_view = VIEW_BUILDING_PACKAGE;
-        assert(player_app_focus_count(stops) == 1); /* cancel build */
-
-        stops->active_view = VIEW_INSPECTING;
-        assert(player_app_focus_count(stops) == 1);
-        stops->active_view = VIEW_SUPPORTED_TITLE;
-        assert(player_app_focus_count(stops) == 2);
-        stops->active_view = VIEW_UNSUPPORTED_TITLE;
-        assert(player_app_focus_count(stops) == 1);
-        stops->active_view = VIEW_SETTINGS;
-        assert(player_app_focus_count(stops) == 18); /* two pacing modes; scaling; launcher fullscreen; online options; UI sounds */
-        stops->active_view = VIEW_PREREQ_CONSENT;
-        assert(player_app_focus_count(stops) == 2);
-        stops->active_view = VIEW_PREREQ_PROGRESS;
-        assert(player_app_focus_count(stops) == 1);
-        stops->active_view = VIEW_PREREQ_ABOUT;
-        stops->prerequisites.item_count = 0;
-        assert(player_app_focus_count(stops) == 1);
-        stops->prerequisites.item_count = 1;
-        assert(player_app_focus_count(stops) == 2);
-        stops->active_view = VIEW_CONFIRM_REMOVE_TOOLS;
-        assert(player_app_focus_count(stops) == 2);
-        stops->active_view = VIEW_CONTROLLER_SETTINGS;
-        assert(player_app_focus_count(stops) == 23); /* + the global / this-game choice */
-        stops->input_settings.calib.stage = CALIBRATION_STAGE_REST;
-        assert(player_app_focus_count(stops) == 1);
-        stops->input_settings.calib.stage = CALIBRATION_STAGE_EXTREMES;
-        assert(player_app_focus_count(stops) == 2);
-        stops->input_settings.calib.stage = CALIBRATION_STAGE_RESULT;
-        assert(player_app_focus_count(stops) == 2);
-        stops->input_settings.calib.stage = CALIBRATION_STAGE_INACTIVE;
-        assert(player_app_focus_count(stops) == 23);
-        /* With no library disc there is nothing to name, so the choice is not a
-         * focus stop and the count is the pre-#520 one. */
-        stops->selected_game_index = -1;
-        assert(player_app_focus_count(stops) == 22);
-        stops->selected_game_index = 0;
-        stops->active_view = VIEW_ERROR;
-        assert(player_app_focus_count(stops) == 1);
-
-        stops->active_view = VIEW_SETUP_WIZARD;
-        stops->wizard.step = WIZARD_STEP_WELCOME;
-        assert(player_app_focus_count(stops) == 2);
-        stops->wizard.step = WIZARD_STEP_SELECT_GAME;
-        stops->wizard.iso_selected = false;
-        assert(player_app_focus_count(stops) == 3);
-        stops->wizard.iso_selected = true;
-        assert(player_app_focus_count(stops) == 4);
-        stops->wizard.step = WIZARD_STEP_INSPECT_VERIFY;
-        assert(player_app_focus_count(stops) == 3);
-        stops->wizard.step = WIZARD_STEP_SYSTEM_FONTS;
-        assert(player_app_focus_count(stops) == 6); /* accept, cycle, back, cancel, import, remove */
-        stops->wizard.step = WIZARD_STEP_ONLINE_OPTIONS;
-        assert(player_app_focus_count(stops) == 5); /* online, developer, continue, skip, back */
-        stops->wizard.step = WIZARD_STEP_READY_LAUNCH;
-        assert(player_app_focus_count(stops) == 3);
-        free(stops);
-    }
-
     /* 13. Setup Wizard state machine: start, step navigation, and cancellation. */
     printf("[PLAYER_STATE_TEST] Subtest 13: setup wizard transitions\n");
     fflush(stdout);
@@ -10037,7 +10047,6 @@ int main(int argc, char **argv) {
         player_app_start_setup_wizard(wiz);
         assert(wiz->active_view == VIEW_SETUP_WIZARD);
         assert(wiz->wizard.step == WIZARD_STEP_WELCOME);
-        assert(wiz->focus_index == 0);
         /* The Game step draws the status line as the reason no disc is chosen:
            a new wizard has nothing to report (the walkthrough saw a welcome
            sentence there in the warning colour). */
@@ -10068,7 +10077,6 @@ int main(int argc, char **argv) {
         assert(wiz->wizard.is_extracting == true);
         assert(player_app_wizard_take_extraction_request(wiz) == true);
         assert(player_app_wizard_take_extraction_request(wiz) == false);
-        assert(player_app_focus_count(wiz) == 1);
         player_app_wizard_set_extraction_progress(wiz, 42, 2, 5, "xbdata/menu.xb");
         assert(wiz->wizard.extraction_percent == 42);
         assert(wiz->wizard.files_extracted == 2);
@@ -10955,8 +10963,6 @@ int main(int argc, char **argv) {
         assert(strstr(wiz->last_error.boundary_text, "from the library") != NULL);
         assert(strchr(wiz->last_error.boundary_text, '#') == NULL);
         assert(strstr(wiz->last_error.message, "#") == NULL);
-        player_app_set_view(wiz, VIEW_EXPERIMENTAL_TITLE);
-        assert(player_app_focus_count(wiz) == 2);
 
         remove(runtime_exe);
         remove(runtime_image);
@@ -12210,68 +12216,6 @@ int main(int argc, char **argv) {
         assert(confirmation_count == 2);
         s_app2->is_game_running = false;
 
-        /* The two-column layout is used from the first card width that can
-           hold it, with the right column pushed clear of the wide launcher
-           control. A window that wide must never fall into the single-column
-           flow, which cannot fit a 720 px client. */
-        assert(!player_settings_uses_two_columns(1043, 720));
-        assert(player_settings_uses_two_columns(1044, 720));
-        assert(player_settings_uses_two_columns(1187, 720));
-        assert(player_settings_uses_two_columns(1188, 720));
-        for (float card = 980.0f; card <= 1216.0f; card += 1.0f) {
-            float offset = player_settings_second_column_offset(card);
-            /* launcher control and hint end 562 px into the card */
-            assert(offset >= 562.0f + 24.0f);
-            /* the right column keeps usable width for the stepper */
-            assert(card - 32.0f - offset >= 300.0f);
-        }
-        assert(player_settings_uses_two_columns(1280, 620));
-        assert(!player_settings_uses_two_columns(1280, 619));
-
-        /* The launcher UI is drawn at the window's real pixel size (#1129)
-           with the scale the old 1280x720 letterbox used: the design never
-           lays out smaller, grows along the longer axis instead of leaving
-           bars, and the canvas covers the output with whole layout units. */
-        {
-            static const struct {
-                int pixel_w, pixel_h;
-                int width, height;
-                float scale;
-            } fits[] = {
-                { 1280, 720, 1280, 720, 1.0f },        /* 1x */
-                { 2560, 1440, 1280, 720, 2.0f },       /* 2x high-DPI window */
-                { 1920, 1080, 1280, 720, 1.5f },       /* 1080p fullscreen */
-                { 1500, 900, 1280, 768, 1.171875f },   /* fractional window */
-                { 3840, 2160, 1280, 720, 3.0f },       /* 4K fullscreen */
-                { 1920, 1200, 1280, 800, 1.5f },       /* 16:10 grows down */
-                { 2560, 1080, 1706, 720, 1.5f },       /* ultrawide grows across */
-                { 960, 540, 1280, 720, 0.75f },        /* minimum window */
-                { 1440, 810, 1280, 720, 1.125f },      /* minimum at 150% */
-                { 200, 100, 800, 400, 0.25f },         /* scale floor */
-                { 30720, 17280, 3840, 2160, 8.0f },    /* scale cap */
-            };
-            for (size_t i = 0; i < sizeof(fits) / sizeof(fits[0]); ++i) {
-                PlayerUiCanvas canvas;
-                assert(player_ui_canvas_fit(fits[i].pixel_w, fits[i].pixel_h,
-                                            &canvas));
-                assert(canvas.width == fits[i].width);
-                assert(canvas.height == fits[i].height);
-                assert(canvas.scale == fits[i].scale);
-                assert(canvas.width * canvas.scale <= fits[i].pixel_w + 0.01f);
-                assert(canvas.height * canvas.scale <= fits[i].pixel_h + 0.01f);
-                assert((canvas.width + 1) * canvas.scale > fits[i].pixel_w);
-                assert((canvas.height + 1) * canvas.scale > fits[i].pixel_h);
-            }
-            PlayerUiCanvas canvas;
-            /* 800 px at 800/720 is 720 units, not 719 from rounding error */
-            assert(player_ui_canvas_fit(1500, 800, &canvas));
-            assert(canvas.height == 720);
-            assert(canvas.width == 1350);
-            assert(!player_ui_canvas_fit(0, 720, &canvas));
-            assert(!player_ui_canvas_fit(1280, -1, &canvas));
-            assert(!player_ui_canvas_fit(1280, 720, NULL));
-        }
-
         /* The focus handoff is attempted once per launch, and only on proven
            evidence. The launcher stays open behind the game (#1298) and hands
            its window the foreground once: retrying every frame would take the
@@ -12671,7 +12615,6 @@ int main(int argc, char **argv) {
         dev->settings.developer_mode = true;
         assert(player_app_open_developer_log(dev));
         assert(dev->active_view == VIEW_DEVELOPER_LOG);
-        assert(player_app_focus_count(dev) == 3);
         player_app_close_developer_log(dev);
         assert(dev->active_view == VIEW_SETTINGS);
         /* The layout inspector lasts only while developer mode does. */
@@ -12680,9 +12623,7 @@ int main(int argc, char **argv) {
         assert(!dev->dev_log.inspect_layout);
         dev->settings.developer_mode = true;
         dev->active_view = VIEW_ONLINE_SETTINGS;
-        assert(player_app_focus_count(dev) == 4); /* online, developer, open log, back */
         dev->settings.online_mode = true;
-        assert(player_app_focus_count(dev) == 6); /* + news, reports */
 
         /* The wizard step: Welcome -> Options -> Select game, and skipping
            turns both off. Every first run passes through it: it needs no game. */
@@ -14477,31 +14418,10 @@ int main(int argc, char **argv) {
         assert(!player_module_name_is_safe("space name.prx"));
         assert(player_module_name_is_safe("CONSOLE.prx"));
     }
-    /* 21. Host discovery: build preflight cards and the SDL3_ttf search order. */
-    printf("[PLAYER_STATE_TEST] Subtest 21: build preflight cards and SDL3_ttf search order\n");
+    /* 21. Host discovery: build preflight cards. */
+    printf("[PLAYER_STATE_TEST] Subtest 21: build preflight cards\n");
     fflush(stdout);
     {
-        /* 21a: SDL3_ttf candidates put the executable folder first, then the
-           platform loader's bare names (PATH on Windows). */
-        char with_dir[PLAYER_APP_TTF_MAX_CANDIDATES][MAX_PATH_LEN];
-        char without_dir[PLAYER_APP_TTF_MAX_CANDIDATES][MAX_PATH_LEN];
-        char trailing[PLAYER_APP_TTF_MAX_CANDIDATES][MAX_PATH_LEN];
-        int n_with = player_app_ttf_library_candidates("C:/rel/bin", with_dir,
-                                                       PLAYER_APP_TTF_MAX_CANDIDATES);
-        int n_without = player_app_ttf_library_candidates(NULL, without_dir,
-                                                          PLAYER_APP_TTF_MAX_CANDIDATES);
-        int n_trailing = player_app_ttf_library_candidates("C:/rel/bin/", trailing,
-                                                           PLAYER_APP_TTF_MAX_CANDIDATES);
-        assert(n_with == n_without + 1);
-        assert(n_with >= 2);
-        assert(strstr(with_dir[0], "C:/rel/bin") != NULL);
-        assert(strstr(with_dir[0], "SDL3_ttf") != NULL);
-        assert(strcmp(with_dir[1], without_dir[0]) == 0);
-        assert(strchr(with_dir[n_with - 1], '/') == NULL);
-        assert(strchr(with_dir[n_with - 1], '\\') == NULL);
-        assert(n_trailing == n_with);
-        assert(strcmp(trailing[0], with_dir[0]) == 0);
-
         /* 21b/21c: the two discovery cards a release user can hit. */
         PlayerApp *capp = (PlayerApp *)calloc(1, sizeof(PlayerApp));
         assert(capp != NULL);

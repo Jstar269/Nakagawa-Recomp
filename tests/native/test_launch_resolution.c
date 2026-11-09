@@ -174,6 +174,7 @@ static int write_launch_environment_probe(void) {
     const char *scale = getenv("SR_RESOLUTION_SCALE");
     const char *present_scaling = getenv("SR_PRESENT_SCALING");
     const char *present_upscale = getenv("SR_PRESENT_UPSCALE");
+    const char *movie_upscale = getenv("SR_MOVIE_UPSCALE");
     const char *fullscreen = getenv("SR_FULLSCREEN");
     const char *launcher_display = getenv("SR_LAUNCHER_DISPLAY_BOUNDS");
     const char *volume = getenv("SR_MASTER_VOLUME");
@@ -201,6 +202,7 @@ static int write_launch_environment_probe(void) {
                      "SR_RESOLUTION_SCALE=%s\n"
                      "SR_PRESENT_SCALING=%s\n"
                      "SR_PRESENT_UPSCALE=%s\n"
+                     "SR_MOVIE_UPSCALE=%s\n"
                      "SR_FULLSCREEN=%s\n"
                      "SR_LAUNCHER_DISPLAY_BOUNDS=%s\n"
                      "SR_MASTER_VOLUME=%s\n"
@@ -226,6 +228,7 @@ static int write_launch_environment_probe(void) {
                      scale ? scale : "<unset>",
                      present_scaling ? present_scaling : "<unset>",
                      present_upscale ? present_upscale : "<unset>",
+                     movie_upscale ? movie_upscale : "<unset>",
                      fullscreen ? fullscreen : "<unset>",
                      launcher_display ? launcher_display : "<unset>",
                      volume ? volume : "<unset>",
@@ -431,6 +434,10 @@ static void test_no_iso_child_environment(const char *test_executable,
     bool had_upscale;
     char *old_upscale = capture_environment_value("SR_PRESENT_UPSCALE", &had_upscale);
     set_environment_value("SR_PRESENT_UPSCALE", "fsr1");
+    /* Nor an inherited movie upscaler: authentic runs it off, an enhanced session keeps it. */
+    bool had_movie;
+    char *old_movie = capture_environment_value("SR_MOVIE_UPSCALE", &had_movie);
+    set_environment_value("SR_MOVIE_UPSCALE", "anime4k");
     bool had_ace;
     char *old_ace = capture_environment_value("SR_ACE", &had_ace);
     set_environment_value("SR_ACE", "v1;af=16;text=on;readout=on;notice=on;wide=off;smooth=off;sas=off");
@@ -564,6 +571,7 @@ static void test_no_iso_child_environment(const char *test_executable,
     /* Authentic: off, though the parent says fsr1 and the setting asks for it. */
     assert(session.config.present_upscale == NK_PRESENT_UPSCALE_FSR1);
     assert(strstr(observed, "SR_PRESENT_UPSCALE=off\n") != NULL);
+    assert(strstr(observed, "SR_MOVIE_UPSCALE=off\n") != NULL);
     assert(strstr(observed, "SR_FULLSCREEN=1\n") != NULL);
     assert(strstr(observed, "SR_MASTER_VOLUME=55\n") != NULL);
     /* The launcher's display reaches the child, windowed or fullscreen, and the
@@ -684,8 +692,9 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_REDUCE_MOTION=off\n") != NULL);
     assert(strstr(observed, "SR_NICKNAME=Kaz \xE3\x83\x8A\n") != NULL);
     assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off\n") != NULL);
-    /* An enhanced session follows the setting. */
+    /* An enhanced session follows the setting, and keeps the inherited movie upscaler. */
     assert(strstr(observed, "SR_PRESENT_UPSCALE=fsr1\n") != NULL);
+    assert(strstr(observed, "SR_MOVIE_UPSCALE=anime4k\n") != NULL);
     {
         char expected_report[1200];
         snprintf(expected_report, sizeof(expected_report), "SR_ACE_REPORT=%s\n",
@@ -739,6 +748,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     free(old_ace);
     restore_environment_value("SR_PRESENT_UPSCALE", old_upscale, had_upscale);
     free(old_upscale);
+    restore_environment_value("SR_MOVIE_UPSCALE", old_movie, had_movie);
+    free(old_movie);
     restore_environment_value("SR_ACE_REPORT", old_ace_report, had_ace_report);
     free(old_ace_report);
     restore_environment_value("SR_EXPERIMENTAL_60HZ", old_60hz, had_60hz);

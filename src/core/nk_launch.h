@@ -46,7 +46,9 @@ enum {
 
 /* The presentation upscaler (SR_PRESENT_UPSCALE, #1273). Always exported: "off" for an authentic
    session whatever the setting, so neither the setting nor an inherited value can turn it on
-   there; an enhanced or Ace Mode session exports the setting. */
+   there; an enhanced or Ace Mode session exports the setting. The movie upscaler
+   (SR_MOVIE_UPSCALE, anime4k_pass.h) has no setting: an authentic session exports it "off", and
+   any other session keeps the inherited value. */
 enum {
     NK_PRESENT_UPSCALE_OFF = 0,   /* SR_PRESENT_UPSCALE=off: the frame scaling alone */
     NK_PRESENT_UPSCALE_FSR1 = 1,  /* SR_PRESENT_UPSCALE=fsr1: AMD FSR 1 EASU + RCAS */

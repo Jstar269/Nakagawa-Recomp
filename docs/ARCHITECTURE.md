@@ -676,8 +676,15 @@ that starts a channel transfer stays blocked in the call for the transfer's meas
 and destination differ modulo 16); meanwhile another thread's `sceDmacTryMemcpy` returns BUSY
 (`0x80000021`) and its blocking `sceDmacMemcpy` queues, and queued callers get the channel in
 arrival order. A body of at most 0x100 bytes whose source and destination share their phase
-modulo 16 bypasses the channel. All of this was measured on a PSP-3000 (#303, `PSP-DMAC-001` and
-`PSP-DMAC-002`); the unmeasured choices are listed above `h_DmacMemcpy` in `src/rt/hle.c`.
+modulo 16 bypasses the channel. A copy into VRAM tells the GPU about every byte it writes: one dirty
+notification covers the whole destination range, whatever the size (the selftest pins this for
+RAM-to-VRAM copies of `0xC001`, `0x10000` and `0x100000` bytes; other directions are pinned at 64
+bytes). A VRAM-source copy that crosses the end of VRAM goes through a 4 KiB bounce buffer and
+dirties its destination one piece at a time instead. All of this was measured on a PSP-3000 (#303,
+`PSP-DMAC-001` and `PSP-DMAC-002`); the unmeasured choices are listed above the DMAC handlers in
+`src/rt/hle_cache_dma.c`. `make dmac-mutants` shows the selftest is load-bearing: it builds
+`hle-thread-selftest` against copies of that file with one defect each (a `0xC000` ceiling, a clamped
+dirty range, a wrong BUSY copy, ...) and requires every one to fail the assertion it names.
 
 ### Scheduler / coroutines
 
@@ -920,7 +927,8 @@ the maintained references for exact behavior.
 | `SR_GPU_LOG` | present/unset | GPU diagnostics where implemented |
 | `SR_VIDEO` | e.g. `gdi` | Select host fallback video path |
 | `SR_PRESENT_SCALING` | `sharp` (default) / `integer` / `bilinear` | How the Vulkan presenter scales game frames into the window: sharp bilinear (nearest to the next integer multiple, then linear), the largest integer multiple letterboxed, or plain linear; an exact integer fit is a nearest blit in every mode ([#1129](https://github.com/Jstar269/nakagawa-recomp/issues/1129)). The player's Settings set it |
-| `SR_PRESENT_UPSCALE` | `off` (default) / `fsr1` | The presentation upscaler: with `fsr1` the Vulkan presenter scales the shown picture to its place in the window with AMD FidelityFX Super Resolution 1 (EASU, then RCAS sharpening; `src/rt/gpu_sdl3vk/fsr1_pass.c`, the FidelityFX SDK v2.4.0 MIT headers in `third_party/fidelityfx_sdk/`) in place of `SR_PRESENT_SCALING`'s filter, on whatever frame the presenter shows: movies are not a separate path ([#2111](https://github.com/Jstar269/nakagawa-recomp/issues/2111)). Presentation only: the guest's frame, guest VRAM and captures are untouched. Used only when the picture is enlarged |
+| `SR_PRESENT_UPSCALE` | `off` (default) / `fsr1` | The presentation upscaler: with `fsr1` the Vulkan presenter scales the shown picture to its place in the window with AMD FidelityFX Super Resolution 1 (EASU, then RCAS sharpening; `src/rt/gpu_sdl3vk/fsr1_pass.c`, the FidelityFX SDK v2.4.0 MIT headers in `third_party/fidelityfx_sdk/`) in place of `SR_PRESENT_SCALING`'s filter, on every frame the presenter shows except CPU-presented frames while `SR_MOVIE_UPSCALE` is on. Presentation only: the guest's frame, guest VRAM and captures are untouched. Used only when the picture is enlarged |
+| `SR_MOVIE_UPSCALE` | `off` (default) / `fsr1` / `anime4k` | The movie upscaler, for frames the CPU presents (decoded movies; every frame when the software GE draws): `fsr1` scales them with FSR 1 as `SR_PRESENT_UPSCALE` does, and `anime4k` first doubles them once or twice with Anime4K's CNN x2 (M) upscaler (`src/rt/gpu_sdl3vk/anime4k_pass.c`, the MIT shader in `third_party/anime4k/`), then takes them to the window's size with FSR 1 unless the doubled picture already is that size. It overrides `SR_PRESENT_UPSCALE` for those frames. Presentation only: the decoded movie, the guest's frame, guest VRAM and captures are untouched. Used only when the picture is enlarged |
 | `SR_LAUNCHER_DISPLAY_BOUNDS` | `<x>,<y>,<w>,<h>` or empty | Desktop bounds of the display that holds the launcher window, set by the launcher. The game window, windowed or fullscreen, opens on the display that contains the centre of that rectangle; empty, malformed or off-screen values use the primary display, and the last two are reported on stderr |
 | `SR_FBSNAP` | positive integer | Rotating PPM snapshot interval |
 | `SR_HLELOG` | present/unset | HLE dispatch diagnostics |

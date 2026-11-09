@@ -30059,6 +30059,27 @@ static void test_dmac_hardware_semantics(uint32_t nid, const char *who) {
                "a transfer writes nothing past its requested size");
     }
 
+    /* The GPU is told about every byte a large copy writes, not a 0xC000-byte prefix of them:
+     * the size matrix proved the whole request lands, so the whole destination range is dirty
+     * (#303 acceptance: the dirty notification covers exactly the bytes the semantics imply). */
+    {
+        static const uint32_t dirty_sizes[] = {0xC001u, 0x10000u, 0x100000u};
+        for (unsigned i = 0; i < sizeof(dirty_sizes) / sizeof(dirty_sizes[0]); i++) {
+            const uint32_t n = dirty_sizes[i];
+            const uint32_t vram = 0x04000000u;
+            dmac_fill(src, n);
+            dmac_clear(vram, n, 0u);
+            gpu_dirty_reset();
+            expect(bulk_call(nid, vram, src, n) == 0u,
+                   "a large DMA into VRAM returns success");
+            expect(dmac_span_matches(vram, n, 0u),
+                   "a large DMA into VRAM copies every byte");
+            expect(s_gpu_dirty_calls == 1u && s_gpu_dirty_addr == vram && s_gpu_dirty_bytes == n,
+                   "a large DMA reports its whole destination range to the GPU");
+        }
+        gpu_dirty_reset();
+    }
+
     /* --- coherency matrix: RAM/VRAM directions and aliases ------------------
      * The HLE entry must use the unified SR_HOST mapping for every source and
      * destination class. The real GPU hook decides whether a dirty range is
@@ -50655,6 +50676,7 @@ void sr_recomp_test_unused_trace_close(void);
 #define sr_lookup sr_recomp_test_unused_lookup
 #define dispatch sr_recomp_test_unused_dispatch
 #define dispatch_call sr_recomp_test_unused_dispatch_call
+#define dispatch_call_interp sr_recomp_test_unused_dispatch_call_interp
 #define dispatch_call_try sr_recomp_test_unused_dispatch_call_try
 #define dispatch_tail_step sr_recomp_test_unused_dispatch_tail_step
 #define dispatch_from_host sr_recomp_test_unused_dispatch_from_host
@@ -50684,24 +50706,26 @@ void sr_recomp_test_unused_trace_close(void);
 #undef dispatch_from_host
 #undef dispatch_tail_step
 #undef dispatch_call_try
+#undef dispatch_call_interp
 #undef dispatch_call
 #undef dispatch
 #undef sr_lookup
 
 /* A live-frame continuation (sr_aot_return_boundary_end) reaches recomp.c's dispatcher,
  * which links the interpreter floor in. This variant runs no interpreted code: its VFPU
- * entry and the interpreter's linked-call dispatch only have to exist, and the call
- * dispatch stops the run by name if it is ever reached. */
+ * entry and the interpreter's linked call (dispatch_call_interp) only have to exist, and
+ * the linked call stops the run by name if it is ever reached. */
 int sr_vfpu_interp(CpuState *s, uint32_t op) {
     (void)s;
     (void)op;
     return SR_VFPU_OTHER;
 }
 
-void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc) {
+int dispatch_call_interp(CpuState *s, uint32_t target, uint32_t resume_pc) {
     fprintf(stderr, "hle_thread_selftest: the AOT boundary variant has no interpreted "
                     "linked call (target 0x%08x, resume 0x%08x)\n", target, resume_pc);
     s->flow_kind = SR_FLOW_FATAL;
     s->flow_target = target;
+    return 1;
 }
 #endif /* SR_HLE_AOT_BOUNDARY_TEST */
