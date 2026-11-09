@@ -34,6 +34,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include "recomp.h"
+#include "cpu_lle.h"   /* sr_guest_lane_hold (#2201) */
 #include "nested_frames.h"
 #include "dispatch_table.h"   /* guest code-address table + primitives (issue #45) */
 #include "guest_interp.h"     /* executable-span interpreter floor (issue #116) */
@@ -2155,15 +2156,16 @@ static int dispatch_run_interp(
         ? sr_guest_interp_run_with_boundary(s, target, call_boundary, &fault)
         : drain == SR_DRAIN_SEGMENT ? sr_guest_interp_run_tail_step(s, target, &fault)
         : sr_guest_interp_run(s, target, &fault);
+    /* The COSIM guest lane refused an import under one of the interpreter's transfers: the
+     * run stopped with that refusal's fatal flow, which goes back to the lane's entry. Its
+     * result says so however the run ended (a handoff that returned with the flow pending
+     * included), as dispatch_after_aot does for a native body, and it is not a rejection of
+     * the guest code, so nothing is reported or recorded as one (#2196). */
+    if (sr_dispatch_unwind_requested && s->flow_kind == SR_FLOW_FATAL) {
+        return SR_GUEST_INTERP_FLOW_FATAL;
+    }
     if (interp_result == SR_GUEST_INTERP_AOT_HANDOFF ||
         interp_result == SR_GUEST_INTERP_CALL_RETURN) {
-        return (int)interp_result;
-    }
-    /* The COSIM guest lane refused an import under one of the interpreter's transfers: the
-     * run stopped with that refusal's fatal flow, which goes back to the lane's entry. It is
-     * not a rejection of the guest code, so nothing is reported or recorded as one (#2196). */
-    if (interp_result == SR_GUEST_INTERP_FLOW_FATAL &&
-        sr_dispatch_unwind_requested && s->flow_kind == SR_FLOW_FATAL) {
         return (int)interp_result;
     }
     if (interp_result == SR_GUEST_INTERP_EXCEPTION ||
@@ -2841,6 +2843,9 @@ static int dispatch_try_with_boundary(
     if (!fn) {
         uint32_t late = sr_hle_resolve_late_import(target);
         if (late == SR_HLE_LATE_BUILTIN) {
+            /* A built-in handler reached by the COSIM guest lane is an import like any other:
+             * refused, so its host-side effect happens only in the HLE lane (#2201). */
+            if (sr_guest_lane_refuse_import(s, target)) return SR_GUEST_INTERP_FLOW_FATAL;
             static int late_hle_n = 0;
             if (late_hle_n < 20) {
                 fprintf(stderr, "LATE_IMPORT_HLE: target=0x%08" PRIx32 " from pc=0x%08" PRIx32 " -> sr_syscall\n",
@@ -3008,6 +3013,21 @@ void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc) {
  * dispatch and the interpreter's result above, the call boundaries below) return through
  * that refusal to the lane's entry instead of ending the run. 0 everywhere else. */
 volatile int sr_dispatch_unwind_requested;
+
+/* The COSIM guest lane's import refusal (#2148, #2201): while the lane holds
+ * (sr_guest_lane_hold), an import it reaches -- through its stub (sr_import_call) or the
+ * late-import bridge (dispatch) -- runs no handler. Running one would apply a host-side
+ * effect the HLE lane applies again, and a handler that blocks would switch fibers inside
+ * the held lane. The lane unwinds instead, through the boundaries that honour the flag, and
+ * the call is reported NOT_COMPARED with the first refused NID. Returns 1 when refused. */
+int sr_guest_lane_refuse_import(CpuState *s, uint32_t nid) {
+    if (!sr_guest_lane_hold.held) return 0;
+    if (sr_guest_lane_hold.nested_nid == 0u) sr_guest_lane_hold.nested_nid = nid;
+    sr_dispatch_unwind_requested = 1;
+    s->flow_kind = SR_FLOW_FATAL;
+    s->flow_target = nid;
+    return 1;
+}
 
 /* The interpreter's linked call into a native body (guest_interp.c): dispatch_call, except
  * that a COSIM guest-lane refusal under the call returns 1, and the interpreter then returns

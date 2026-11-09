@@ -1337,16 +1337,19 @@ static void test_guest_lane_hold_defers_switches_and_interrupts(void) {
            "guest lane: the first yield after the lane delivers the VBLANKs that came due");
 }
 
-/* The two named stops (#2201), each in a child process because each ends the run: a fiber
+/* The three named stops (#2201), each in a child process because each ends the run: a fiber
  * switch inside a held lane (here the lane's thread blocks in a delay, which a lane cannot
- * reach since its imports are refused), and destroying the lane's thread while the lane is
- * held (its fiber never parks, so nothing can; the backstop covers anything that ever does).
+ * reach since its imports are refused), a held lane that spins on a word only a ready peer
+ * writes (it can never finish), and destroying the lane's thread while the lane is held (its
+ * fiber never parks, so nothing can; the backstop covers anything that ever does).
  * Without the stops the switch would run another thread under the lane's refusal, and a
  * destroyed lane would leave its state set for every later import.
  *
  * MUTANT: drop the stop in switch_to_scheduler -- the child's lane blocks and runs on.
  * MUTANT: drop the backstop in sched_destroy_thread_coro -- the child destroys the lane's
- *   thread and runs on. */
+ *   thread and runs on.
+ * MUTANT: drop the held-yield bound in sr_yield -- the spinning child's lane never finishes;
+ *   the child gives up at twice the bound and runs on. */
 static const char *g_self_path;
 static int g_glc_ran_on;
 static void guest_lane_switch_body(CpuState *s) {
@@ -1359,6 +1362,30 @@ static void guest_lane_switch_body(CpuState *s) {
 }
 static int guest_lane_switch_stop(void) { return g_glc_ran_on; }
 
+/* A held lane that waits for a ready peer: the flag it spins on is set only by the peer,
+ * which the hold never runs. The child spins to twice the bound, so a missing bound shows as
+ * the child running on rather than as a hang. */
+enum { GL_SPIN_PEER = 0x09370200u };
+static volatile int g_glc_peer_flag;
+static unsigned g_glc_spins;
+static void guest_lane_spin_body(CpuState *s) {
+    if (s_tcb[s_cur].entry == GL_SPIN_PEER) {
+        g_glc_peer_flag = 1;
+        return;
+    }
+    const uint32_t peer = sched_create_thread(GL_SPIN_PEER, 32, 0x4000u);
+    sched_start_thread(peer, 0u, 0u);
+    sr_guest_lane_hold.uid = s_tcb[s_cur].uid;
+    sr_guest_lane_hold.yields = 0u;
+    sr_guest_lane_hold.held = 1;
+    for (g_glc_spins = 0; !g_glc_peer_flag && g_glc_spins < 2u * SCHED_GUEST_LANE_YIELD_LIMIT;
+         g_glc_spins++)
+        sr_yield(s);
+    sr_guest_lane_hold.held = 0;
+    g_glc_ran_on = 1;
+}
+static int guest_lane_spin_stop(void) { return g_glc_ran_on; }
+
 static int guest_lane_child(const char *mode) {
     if (strcmp(mode, "switch") == 0) {
         reset_sched();
@@ -1367,6 +1394,16 @@ static int guest_lane_child(const char *mode) {
         sr_sched_stop_requested = guest_lane_switch_stop;
         sched_run(GL_ENTRY, 0u, 0u);
         fprintf(stderr, "guest lane child: the held lane switched fibers and ran on\n");
+        return 0;
+    }
+    if (strcmp(mode, "spin") == 0) {
+        reset_sched();
+        begin_clock_fixture(0, 0u);
+        g_test_body = guest_lane_spin_body;
+        sr_sched_stop_requested = guest_lane_spin_stop;
+        sched_run(GL_ENTRY, 0u, 0u);
+        fprintf(stderr, "guest lane child: the held lane spun %u yields and ran on\n",
+                g_glc_spins);
         return 0;
     }
     if (strcmp(mode, "destroy") == 0) {
@@ -1413,9 +1450,26 @@ static int run_guest_lane_child(const char *mode, char *log, size_t log_size) {
 
 static void test_guest_lane_stops_by_name(void) {
     char log[8192];
+    /* A lane entered with no current thread records uid 0, which every never-used TCB slot
+     * also has: destroying such a slot (sched_create_thread's reuse path) is not the lane's
+     * thread and must not stop the run. */
+    reset_sched();
+    sr_guest_lane_hold.uid = 0u;
+    sr_guest_lane_hold.held = 1;
+    TCB unused_slot;
+    memset(&unused_slot, 0, sizeof unused_slot);
+    sched_destroy_thread_coro(&unused_slot);
+    sr_guest_lane_hold.held = 0;
+    expect(1, "guest lane: destroying a never-used slot under a threadless lane is no stop");
     int code = run_guest_lane_child("switch", log, sizeof log);
     expect(code == 1 && strstr(log, "SR_COSIM_FATAL: a fiber switch inside the COSIM guest lane"),
            "guest lane: a fiber switch inside the held lane stops the run by name");
+    code = run_guest_lane_child("spin", log, sizeof log);
+    expect(code == 1 &&
+               strstr(log, "SR_COSIM_FATAL: 200000 held yields without finishing (a wait on "
+                           "another thread or an interrupt, which the hold defers) inside the "
+                           "COSIM guest lane"),
+           "guest lane: a held lane that waits on a peer stops by name instead of hanging");
     code = run_guest_lane_child("destroy", log, sizeof log);
     expect(code == 1 &&
                strstr(log, "SR_COSIM_FATAL: the lane's thread was destroyed inside the COSIM "

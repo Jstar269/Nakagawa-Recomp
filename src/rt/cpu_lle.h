@@ -162,13 +162,16 @@ int sr_cpu_poll(struct CpuState *s, uint32_t resume_pc);
 
 /* The COSIM guest lane's hold (#2201). domain_mode.c sets it only while a cosim call's
  * guest lane runs, with the uid of the thread the lane runs on (0 with no thread). While it
- * is held no interrupt is taken -- the sources stay latched, so the first safe point after
- * the lane delivers them -- and the scheduler switches no fiber (sr_yield returns at once,
- * and a switch or a destroyed lane thread is a named stop, sched.c). The lane's import
- * refusal and memory rollback then touch only that lane. */
+ * is held every import the lane reaches is refused (sr_guest_lane_refuse_import, recomp.c),
+ * no interrupt is taken -- the sources stay latched, so the first safe point after the lane
+ * delivers them -- and the scheduler switches no fiber (sr_yield returns once time has
+ * advanced; a switch, a destroyed lane thread or a lane that never finishes is a named stop,
+ * sched.c). The lane's import refusal and memory rollback then touch only that lane. */
 typedef struct SrGuestLaneHold {
     volatile int held;
     uint32_t uid;
+    uint32_t nested_nid;   /* the first import the lane reached, 0 for none */
+    uint32_t yields;       /* sr_yield calls while held, for the lane's bound */
 } SrGuestLaneHold;
 extern SrGuestLaneHold sr_guest_lane_hold;
 
