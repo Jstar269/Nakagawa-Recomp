@@ -23,9 +23,9 @@ For one API level and one architecture, a symbol is kept when its block and its 
 tags allow both, and dropped when either is for the platform alone (`platform-only`,
 `apex`, `systemapi`, `llndk`, `future`, or a block named `*_PRIVATE` or
 `*_PLATFORM`). `introduced-<arch>=` wins over `introduced=`, and a symbol's own tag wins
-over its block's. `var` makes a data symbol, `weak` a weak one. A block tagged
-`versioned=N` carries its version node only from API N; below that its symbols are
-unversioned. A block whose base is not exported names no base.
+over its block's. `var` makes a data symbol, `weak` a weak one. A symbol tagged
+`versioned=N`, or one in a block tagged so, has its version only from API N; below that
+it is exported unversioned. A block whose base is not exported names no base.
 
 The output is a C file whose functions and variables have those names, and the
 version script that gives them their versions. `clang -shared -nostdlib` builds the
@@ -211,7 +211,9 @@ def select(blocks: list[Block], api: int, arch: str) -> list[StubVersion]:
         block_introduced = _introduced(block.tags, arch, where)
         if block_introduced is not None and block_introduced > api:
             continue
+        block_versioned = _tag_value(block.tags, "versioned")
         kept: list[StubSymbol] = []
+        unversioned: list[StubSymbol] = []
         for symbol in block.symbols:
             if _is_platform(symbol.tags) or not _arch_allows(symbol.tags, arch):
                 continue
@@ -227,12 +229,16 @@ def select(blocks: list[Block], api: int, arch: str) -> list[StubVersion]:
                     f"{where}: {symbol.name!r} is already exported by {seen[symbol.name]}"
                 )
             seen[symbol.name] = block.name
-            kept.append(StubSymbol(symbol.name, "var" in symbol.tags, "weak" in symbol.tags))
-        versioned = _tag_value(block.tags, "versioned")
-        unversioned = versioned is not None and api < parse_api(versioned, where)
-        versions.append(
-            StubVersion(None if unversioned else block.name, block.base, tuple(kept))
-        )
+            stub = StubSymbol(symbol.name, "var" in symbol.tags, "weak" in symbol.tags)
+            versioned = _tag_value(symbol.tags, "versioned") or block_versioned
+            if versioned is not None and api < parse_api(versioned, f"{where}, symbol {symbol.name}"):
+                unversioned.append(stub)
+            else:
+                kept.append(stub)
+        if kept or not unversioned:
+            versions.append(StubVersion(block.name, block.base, tuple(kept)))
+        if unversioned:
+            versions.append(StubVersion(None, None, tuple(unversioned)))
     return versions
 
 

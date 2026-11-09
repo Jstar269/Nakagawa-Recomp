@@ -110,6 +110,23 @@ class SelectTests(unittest.TestCase):
         for name in ("x_platform", "x_apex", "x_systemapi", "x_private"):
             self.assertNotIn(name, exported)
 
+    def test_a_symbol_tagged_versioned_is_unversioned_below_that_level(self) -> None:
+        text = (
+            "LIBY {\n  global:\n    y_old;\n};\n"
+            "LIBY_N { # introduced=24\n  global:\n    y_sdk; # versioned=29\n    y_new;\n} LIBY;\n"
+        )
+        blocks = stubgen.parse_symbol_file(text)
+        self.assertEqual(
+            _names(stubgen.select(blocks, 28, "arm64")),
+            {"LIBY": ["y_old"], "LIBY_N": ["y_new"], None: ["y_sdk"]},
+        )
+        self.assertEqual(
+            _names(stubgen.select(blocks, 29, "arm64")),
+            {"LIBY": ["y_old"], "LIBY_N": ["y_sdk", "y_new"]},
+        )
+        script = stubgen.render_version_script(stubgen.select(blocks, 28, "arm64"))
+        self.assertNotIn("y_sdk", script)
+
     def test_var_and_weak_shape_the_c_stub(self) -> None:
         text = stubgen.render_stub_c(stubgen.select(self.blocks, 29, "arm64"), "libx.so")
         self.assertIn("void x_open(void) {}", text)
