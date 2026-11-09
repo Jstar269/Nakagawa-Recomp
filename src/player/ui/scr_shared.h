@@ -56,10 +56,11 @@ static inline const char *safe_text(const char *text, const char *fallback) {
 }
 
 /* Whether a page's body between the top bar and the prompt bar scrolls. At the
-   design text size every page fits the window, and the screen tests hold it to
-   that; a larger text size can make one taller than the room, and then its
-   body scrolls (with the focused control brought into view) instead of pushing
-   the prompt bar off the window. */
+   design text size these pages fit the window, and the screen tests hold it to
+   that (and that every prompt bar stays whole); a larger text size can make one
+   taller than the room, and then its body scrolls (with the focused control
+   brought into view) instead of pushing the prompt bar off the window. A game's
+   page, whose rows vary with the game, always scrolls (scr_title.c). */
 static inline bool page_scrolls(const NkUi *ui) {
     return nk_ui_text_scale(ui) > 1.0f;
 }

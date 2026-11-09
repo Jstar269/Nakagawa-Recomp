@@ -3450,6 +3450,9 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 player->titles[index].package_state == PLAYER_UI_PACKAGE_RUNNING &&
                 app->stalled_game_notice_visible;
             model.stalled_game_dark_picture = app->stalled_game_dark_picture;
+            (void)player_app_render_notice(app, app->games[index].disc_id,
+                                           &model.render_notice_heading,
+                                           &model.render_notice_text);
             model.now_s = player_app_reduce_motion(app) ? 0.0 : now_s;
             model.logical_width = scale.logical_w;
             model.logical_height = scale.logical_h;
