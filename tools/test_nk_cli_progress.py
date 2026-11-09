@@ -389,9 +389,25 @@ class NkCliProgressTests(unittest.TestCase):
         self.assertIn("NK_PACKAGE_JOBS=3 overrides its job count", overridden)
 
     def test_build_package_takes_a_build_speed(self) -> None:
-        source = CLI_PATH.read_text(encoding="utf-8")
-        self.assertIn('p_build.add_argument("--build-speed", choices=_BUILD_SPEEDS, '
-                      'default=_BUILD_SPEED_DEFAULT,', source)
+        import nk_cli
+        from unittest.mock import patch
+
+        parsed: list[object] = []
+
+        def record(args: Any) -> int:
+            parsed.append(args.build_speed)
+            return 0
+
+        for argv, expected in (
+            ([], "balanced"),
+            (["--build-speed", "background"], "background"),
+            (["--build-speed", "fastest"], "fastest"),
+        ):
+            with patch.object(sys, "argv", ["nk_cli.py", "build-package", "ULUS10000", *argv]), \
+                 patch.object(nk_cli, "_use_utf8_standard_streams"), \
+                 patch.object(nk_cli, "cmd_build_package", side_effect=record):
+                self.assertEqual(nk_cli.main(), 0)
+            self.assertEqual(parsed.pop(), expected)
         refused = subprocess.run(
             [sys.executable, str(CLI_PATH), "build-package", "ULUS10000", "--build-speed", "turbo"],
             capture_output=True, text=True, timeout=120, check=False)

@@ -2219,7 +2219,8 @@ def lower_build_priority() -> bool:
     a terminal low as well. A process already at a lower priority keeps it. True when the
     process now runs below normal.
     """
-    if os.name == "nt":
+    # sys.platform, not os.name, so that type checkers narrow the platform-only calls.
+    if sys.platform == "win32":
         import ctypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
