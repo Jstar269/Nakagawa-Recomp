@@ -970,7 +970,8 @@ static void to_layout(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspec
  * of the interlock path (#2109): 1 merges every channel from the loaded destination (the store has
  * no effect), 2 swaps the source and destination blend factors of the RMW batches, 3 lets an op
  * holding a batch the rmwzfb rule refuses take the interlock, 4 gives every colour target
- * STORAGE_BIT on the snapshot path too, 5 turns the depth test of the RMW pipelines off. */
+ * STORAGE_BIT on the snapshot path too, 5 turns the depth test of the RMW pipelines off, 6 drops
+ * the rmwzfb rule's color-test line, 7 its own-target line. */
 #ifndef SR_GPU_DSTREAD_MUTANT
 #define SR_GPU_DSTREAD_MUTANT 0
 #endif
@@ -2228,10 +2229,14 @@ static int rmw_refuses(const Batch *b) {
 #else
     const uint32_t flags = (uint32_t)b->pc.cfg[0] >> 8;
     if (b->key.blend_on) return 1;
+#if SR_GPU_DSTREAD_MUTANT != 7
     if (b->tsnap) return 1;
+#endif
     if (!b->key.zwrite) return 0;
     if (((uint32_t)b->pc.cfg[1] & 7u) != 1u) return 1;
+#if SR_GPU_DSTREAD_MUTANT != 6
     if (flags & F_CTEST) return 1;
+#endif
     if ((flags & F_PERSP) && (b->pc.cfg[2] > 0 || b->pc.cfg[3] < 65535)) return 1;
     if ((flags & F_STENCIL) && ((uint32_t)b->pc.bl[3] & 7u) == 0u && ((uint32_t)b->pc.bl[2] & 7u) != 1u)
         return 1;

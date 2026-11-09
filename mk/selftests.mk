@@ -1050,18 +1050,23 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 # 1 merges every channel from the loaded destination, so the RMW store has no effect
 # (dst-read-order), 2 swaps the RMW batches' source and destination blend factors (dst-read-order),
 # 3 lets an op the rmwzfb rule refuses take the interlock, so an alpha-rejected fragment writes depth
-# (dst-read-depth), 4 gives colour targets STORAGE_BIT on the snapshot path (dst-read-pins), and 5
-# turns the RMW pipelines' depth test off, so a sprite behind the wall blends (dst-read-ztest).
-# Mutants 1 to 3 and 5 run on the interlock path, 4 on the snapshot path. Each builds its own binary
-# and must fail with its own message. Exit 77 (no Vulkan device, or a device without the interlock
-# for 1 to 3 and 5) is a SKIP of that mutant.
+# (dst-read-depth), 4 gives colour targets STORAGE_BIT on the snapshot path (dst-read-pins), 5
+# turns the RMW pipelines' depth test off, so a sprite behind the wall blends (dst-read-ztest), 6
+# drops the rmwzfb rule's color-test line, so a fragment the color test rejects writes depth
+# (dst-read-ctest), and 7 drops its own-target line, so a sprite that textures from its own target
+# samples texels older than the sprite before it (dst-read-feedback).
+# Mutants 1 to 3 and 5 to 7 run on the interlock path, 4 on the snapshot path. Each builds its own
+# binary and must fail with its own message. Exit 77 (no Vulkan device, or a device without the
+# interlock for 1 to 3 and 5 to 7) is a SKIP of that mutant.
 gpu-dst-read-mutants: shader-verify $(RT_GE_O)
-	@for m in 1 2 3 4 5; do \
+	@for m in 1 2 3 4 5 6 7; do \
 		case $$m in \
 			1) args="--dst-read interlock --case dst-read-order"; kill="the RMW store had no effect";; \
 			2) args="--dst-read interlock --case dst-read-order"; kill="differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
 			3) args="--dst-read interlock --case dst-read-depth"; kill="depth differs from ge.c in [1-9]";; \
 			5) args="--dst-read interlock --case dst-read-ztest"; kill="colour differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
+			6) args="--dst-read interlock --case dst-read-ctest"; kill="dst-read-ctest\]: colour differs from ge.c in [0-9]+ pixels, depth differs from ge.c in [1-9]";; \
+			7) args="--dst-read interlock --case dst-read-feedback"; kill="dst-read-feedback\]: [1-9][0-9]* pixels differ from ge.c";; \
 			*) args="--dst-read snapshot --case dst-read-pins"; kill="the snapshot path made interlock state";; \
 		esac; \
 		bin=$(BUILD_DIR)/gpu_coherence_dstread_mutant$$m.exe; \
