@@ -73,17 +73,22 @@ The command does the mechanical parts and nothing else:
    valid in any landing order, with no batch-size cap;
 5. builds a clean candidate commit holding only the base, the new paths and
    their profile entries, runs ``admit-new-reviewed`` on it, and commits the
-   generated controls on a local ``admit/<slug>-<date>`` branch;
-6. prints exactly what is left: the private push, the merge and the refresh.
+   generated controls on a local ``admit/<slug>-<date>`` branch, which shows
+   the admitted result; the pull request does not need to merge it;
+6. prints exactly what is left: the private push and one refresh on the pull
+   request's branch, which finds the V4 delta beside the trusted ledger.
 
-``--rekey`` is for a pull request admitted before V4 deltas existed: a V3 delta
+``--rekey`` is only for a pull request admitted before V4 deltas existed: a V3 delta
 binds every added path to its bytes, and a nested V1/V2 delta expires when
 another path-adding pull request lands first. It reuses the admission already
 recorded for exactly these paths (with the recorded bytes for a byte-bound
 path), records no new decision, and writes the V4 delta, so no later edit or
 landing needs another re-key. ``--batch-resume`` does the same for a list of
-entries. Run ``--merge-profile`` during a merge to write the three-way merge of
-the path lists before staging the profile.
+entries. A V4 admission never needs it, whatever lands first.
+
+Run ``--merge-profile`` when Git conflicts on the profile to write the three-way
+merge of the path lists before staging it. It reads the sides from the index
+stages, so it works in a merge, a squash merge, a cherry-pick or a rebase.
 
 It pushes nothing unless ``--push`` is given, and then only the private
 ``main``. The approval basis is the human decision and is taken verbatim from
@@ -94,7 +99,9 @@ the caller; the command never invents one, a record, an identity, or a
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import datetime
+import functools
 import hashlib
 import json
 import os
@@ -1332,28 +1339,65 @@ def compose_policy_delta_v4(
     }
 
 
+def _profile_merge_sides(repo: Path) -> list[tuple[str, Callable[[], bytes]]]:
+    """The merge base, ours and theirs of the profile, each as (label, reader of its bytes)."""
+    listed = _git(repo, "ls-files", "--unmerged", "-z", "--", POLICY).decode("utf-8")
+    stages: dict[str, str] = {}
+    for record in filter(None, listed.split("\0")):
+        meta, _, path = record.partition("\t")
+        fields = meta.split()
+        if path != POLICY or len(fields) != 3 or fields[2] in stages:
+            raise AdmitError("MERGE_PROFILE_INPUT_INVALID", f"unexpected unmerged index entry for {POLICY}")
+        stages[fields[2]] = fields[1]
+    if stages:
+        if set(stages) != {"1", "2", "3"}:
+            raise AdmitError(
+                "MERGE_PROFILE_INPUT_INVALID",
+                f"{POLICY} must be unmerged with a merge base, ours and theirs (index stages 1, 2 and 3)",
+            )
+        return [
+            (f"index stage {stage} ({name})", functools.partial(_git, repo, "cat-file", "blob", stages[stage]))
+            for stage, name in (("1", "merge base"), ("2", "ours"), ("3", "theirs"))
+        ]
+    try:
+        head = _text(repo, "rev-parse", "--verify", "HEAD")
+        merge_head = _text(repo, "rev-parse", "--verify", "MERGE_HEAD")
+    except AdmitError as error:
+        raise AdmitError(
+            "MERGE_PROFILE_NOT_IN_PROGRESS",
+            f"--merge-profile needs {POLICY} unmerged in the index (a merge, squash merge, cherry-pick or "
+            "rebase that conflicts on it) or an active git merge",
+        ) from error
+    try:
+        merge_base = _text(repo, "merge-base", head, merge_head)
+    except AdmitError as error:
+        raise AdmitError("MERGE_PROFILE_INPUT_INVALID", "the merge sides have no merge base") from error
+    return [
+        (revision[:12], functools.partial(_git, repo, "show", f"{revision}:{POLICY}"))
+        for revision in (merge_base, head, merge_head)
+    ]
+
+
 def merge_profile(worktree: Path) -> dict:
     """Write the three-way merge of both sides' include and exclude path lists.
 
     Each list keeps the merge base's paths, adds what either side added and drops what
     either side removed, so a path one side moved between the lists or dropped is not
-    brought back by the other side's copy of the list."""
+    brought back by the other side's copy of the list.
+
+    The three sides come from the index stages Git leaves for the unmerged profile (``:1:`` the
+    merge base, ``:2:`` ours, ``:3:`` theirs), so this works the same under ``git merge``,
+    ``git merge --squash``, ``git cherry-pick`` and ``git rebase``. When Git merged the profile
+    cleanly during a real merge, the sides are read from ``HEAD``, ``MERGE_HEAD`` and their
+    merge base instead."""
     repo = Path(_text(worktree, "rev-parse", "--show-toplevel"))
-    try:
-        head = _text(repo, "rev-parse", "--verify", "HEAD")
-        merge_head = _text(repo, "rev-parse", "--verify", "MERGE_HEAD")
-    except AdmitError as error:
-        raise AdmitError("MERGE_PROFILE_NOT_IN_PROGRESS", "--merge-profile requires an active git merge") from error
-    try:
-        merge_base = _text(repo, "merge-base", head, merge_head)
-    except AdmitError as error:
-        raise AdmitError("MERGE_PROFILE_INPUT_INVALID", "the merge sides have no merge base") from error
+    sides = _profile_merge_sides(repo)
     side_documents = []
-    for revision in (merge_base, head, merge_head):
+    for label, read in sides:
         try:
-            document = json.loads(_git(repo, "show", f"{revision}:{POLICY}").decode("utf-8"))
+            document = json.loads(read().decode("utf-8"))
         except (AdmitError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise AdmitError("MERGE_PROFILE_INPUT_INVALID", f"cannot read {POLICY} from merge side {revision[:12]}") from error
+            raise AdmitError("MERGE_PROFILE_INPUT_INVALID", f"cannot read {POLICY} from merge side {label}") from error
         if not isinstance(document, dict):
             raise AdmitError("MERGE_PROFILE_INPUT_INVALID", f"{POLICY} must be a JSON object on both merge sides")
         for field in ("include_paths", "exclude_paths"):
@@ -1406,15 +1450,27 @@ def _read_batch_file(path: Path) -> object:
     return document
 
 
+#: What to do when main moves under an admitted pull request and Git conflicts on its controls.
+CONFLICT_PROCEDURE = (
+    "If main moves and Git conflicts on the profile, ledger or export: merge origin/main; run "
+    f"python tools/admit_paths.py --merge-profile <worktree> and git add {POLICY}; take main's ledger and export "
+    f"(git checkout origin/main -- assets/public_provenance_ledger.json {EXPORT}); commit the merge; then run the "
+    "same refresh and commit it. No --rekey and no private push: the V4 delta holds on the new base."
+)
+
+
 def remaining_steps(result: dict) -> list[str]:
-    """The exact commands left after ``admit``, in order."""
+    """The exact commands left after ``admit``, in order.
+
+    One refresh on the pull request's own branch: it finds the V4 delta just written beside the
+    trusted ledger, on whatever base the branch has merged, so neither the ``admit/`` branch nor
+    its admission commit is needed."""
     pr = result["pr_worktree"]
     steps = []
     if not result["pushed"]:
         steps.append(f'git -C "{result["authority_root"]}" push origin main')
     steps += [
-        f'git -C "{pr}" merge --no-edit {result["admit_branch"]}',
-        f'cd "{pr}" && python tools/provenance_refresh.py --base {result["admission_commit"]} '
+        f'cd "{pr}" && python tools/provenance_refresh.py '
         f'--trusted-ledger "{result["authority_root"] / TRUSTED_LEDGER}"',
         f'git -C "{pr}" commit -m "provenance: refresh controls after admitting {", ".join(result["paths"])}"',
         f'git -C "{pr}" push',
@@ -1576,19 +1632,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f'  {number}. git -C "{authority_root}" push origin main')
                 number += 1
             for entry in result["entries"]:
-                print(f'  {number}. git -C "{entry["pr_worktree"]}" merge --no-edit {entry["admit_branch"]}')
-                number += 1
-                print(f'  {number}. cd "{entry["pr_worktree"]}" && python tools/provenance_refresh.py '
-                      f'--base {entry["admission_commit"]} --trusted-ledger '
-                      f'"{entry["authority_root"] / TRUSTED_LEDGER}"')
-                number += 1
-                print(f'  {number}. git -C "{entry["pr_worktree"]}" commit -m '
-                      f'"provenance: refresh controls after admitting {", ".join(entry["paths"])}"')
-                number += 1
-                print(f'  {number}. git -C "{entry["pr_worktree"]}" push')
-                number += 1
-            print("During each merge to main, run python tools/admit_paths.py --merge-profile <worktree>, then git add "
-                  "assets/public_source_profile.json.")
+                for step in remaining_steps({**entry, "pushed": True}):
+                    print(f"  {number}. {step}")
+                    number += 1
+            print(CONFLICT_PROCEDURE)
             return 0
 
         if args.pr_worktree is None or not args.paths:
@@ -1617,8 +1664,7 @@ def main(argv: list[str] | None = None) -> int:
     print("\nLeft to do, in order:")
     for number, step in enumerate(remaining_steps(result), 1):
         print(f"  {number}. {step}")
-    print("If the merge conflicts only in the generated ledger, export or profile, take the admission branch's copy "
-          f"(git checkout {result['admit_branch']} -- <file>); the refresh regenerates them.")
+    print(CONFLICT_PROCEDURE)
     return 0
 
 

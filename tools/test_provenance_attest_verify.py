@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 from nk_core.git_isolation import run_git  # noqa: E402
+import admit_paths  # noqa: E402
 import provenance_attest_verify as verifier  # noqa: E402
 import provenance_ledger  # noqa: E402
 import provenance_refresh  # noqa: E402
@@ -3674,14 +3675,8 @@ class PolicyDeltaV3Tests(_PolicyDeltaFixture):
         self.assertIn("POLICY_DELTA_EMPTY", err.getvalue())
 
 
-class PolicyDeltaV4Tests(_PolicyDeltaFixture):
-    """V4 policy-delta authority: an admission binds each added path to its origin claim.
-
-    The claim is what the trusted record says (class, record id, record classification,
-    upstream, revision, licence). Bytes stay bound only for a byte-identical import. Each case
-    builds the document ``admit_paths.py`` writes and hands it to the verifier, as the workflow
-    does after looking it up under ``--policy-delta-key-v4``.
-    """
+class _PolicyDeltaV4Fixture(_PolicyDeltaFixture):
+    """Synthetic V4 admissions: the records, the vendored manifest and the authority document."""
 
     TOOL = "tools/new_tool.py"
     LIB = "third_party/lib/lib.h"
@@ -3737,6 +3732,16 @@ class PolicyDeltaV4Tests(_PolicyDeltaFixture):
         for path, raw in files.items():
             self.repo.write(path, raw)
         return self.repo.commit(message)
+
+
+class PolicyDeltaV4Tests(_PolicyDeltaV4Fixture):
+    """V4 policy-delta authority: an admission binds each added path to its origin claim.
+
+    The claim is what the trusted record says (class, record id, record classification,
+    upstream, revision, licence). Bytes stay bound only for a byte-identical import. Each case
+    builds the document ``admit_paths.py`` writes and hands it to the verifier, as the workflow
+    does after looking it up under ``--policy-delta-key-v4``.
+    """
 
     def _vendored_pr(self, branch: str = "pr-lib") -> str:
         return self._change(branch, self.base, {self.LIB: self.LIB_BYTES, self.MANIFEST: self._manifest()},
@@ -3930,6 +3935,196 @@ class PolicyDeltaV4Tests(_PolicyDeltaFixture):
         self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
         verdict = self._attest(repinned, landed, None)
         self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+
+
+class LocalRefreshHostedRuleTests(_PolicyDeltaV4Fixture):
+    """``provenance_refresh`` follows the hosted rule for an admitted pull request on a moved base.
+
+    Two pull requests are admitted against the same base with their own V4 deltas, at adjacent
+    sort positions so Git conflicts on the profile. One lands; the other merges the new main
+    (``admit_paths.merge_profile`` for the profile, main's ledger), then refreshes with main as
+    its base. Before the hosted rule the refresh refused any added path
+    (``REFRESH_NEW_PATH_REQUIRES_ADMISSION``) and needed an admission commit as its base.
+    """
+
+    def _authority_snapshot(self) -> dict[str, bytes]:
+        """Every file of the stand-in authority checkout: the trusted ledger and the V4 deltas."""
+        return {
+            path.relative_to(self.outside).as_posix(): path.read_bytes()
+            for path in sorted(self.outside.rglob("*"))
+            if path.is_file() and path.relative_to(self.outside).parts[0] in {
+                self.trusted_ledger.name, "policy-deltas-v4",
+            }
+        }
+
+    def _beside(self, authority: Path) -> Path:
+        """Store ``authority`` where the refresh looks it up: ``policy-deltas-v4/<key>.json`` beside the ledger."""
+        target = self.outside / "policy-deltas-v4" / f"{self._key(authority)}.json"
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(authority.read_bytes())
+        return target
+
+    @staticmethod
+    def _key(authority: Path) -> str:
+        """The selector key ``_v4`` put at the end of the file name."""
+        return authority.stem.rsplit("-", 1)[1]
+
+    def _merge_main(self, branch: str, head: str, main: str, *, conflict: bool) -> str:
+        """Merge ``main`` into the pull request as the documented conflict procedure does."""
+        self.repo.branch(branch, head)
+        merge = run_git(["merge", "--no-commit", "--no-ff", main], cwd=self.repo.root,
+                        capture_output=True, text=True, check=False)
+        self.assertIn(merge.returncode, (0, 1), merge.stderr)
+        unmerged = run_git(["diff", "--name-only", "--diff-filter=U"], cwd=self.repo.root,
+                           capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(verifier.POLICY_PATH in unmerged, conflict, unmerged)
+        if conflict:
+            admit_paths.merge_profile(self.repo.root)
+        for path in (verifier.LEDGER_PATH, verifier.EXPORT_PATH):
+            run_git(["checkout", main, "--", path], cwd=self.repo.root, check=True, capture_output=True)
+        hook, self.repo.before_commit = self.repo.before_commit, None
+        merged = self.repo.commit(f"merge main into {branch}")
+        self.repo.before_commit = hook
+        return merged
+
+    def _refresh(self, candidate: str, base: str, authority: Path | None = None,
+                 label: str = "refresh") -> verifier.EphemeralControls:
+        return cast(verifier.EphemeralControls, provenance_refresh.generate_controls(
+            repo=self.repo.root,
+            base_rev=base,
+            candidate_tree=verifier._rev_tree(self.repo.root, candidate),
+            trusted_ledger=self.trusted_ledger,
+            workdir=self.outside / label,
+            policy_delta_authority=authority,
+        ))
+
+    def _commit_controls(self, controls: verifier.EphemeralControls) -> str:
+        hook, self.repo.before_commit = self.repo.before_commit, None
+        self.repo.write(verifier.LEDGER_PATH, controls.committed_ledger_bytes)
+        self.repo.write(verifier.EXPORT_PATH, controls.generated_export_bytes)
+        refreshed = self.repo.commit("provenance: refresh controls after merging main")
+        self.repo.before_commit = hook
+        return refreshed
+
+    def _refused(self, code: str, head: str, base: str, authority: Path | None, **kwargs) -> None:
+        before = self._authority_snapshot()
+        label = f"refused-{len(list(self.outside.glob('refused-*')))}"
+        with self.assertRaises(verifier.VerifyError) as caught:
+            self._refresh(head, base, authority, label=label)
+        self.assertEqual(caught.exception.code, code, str(caught.exception))
+        self.assertEqual(self._authority_snapshot(), before)
+
+    def _second_on_moved_base(self, first_files: dict[str, bytes], second_files: dict[str, bytes], tag: str,
+                              *, bindings: dict[str, str] | None = None,
+                              conflict: bool = True) -> tuple[str, str, Path]:
+        """Admit both pull requests on the same base, land the first, merge main into the second."""
+        head_1 = self._change(f"first-{tag}", self.base, first_files, include=list(first_files))
+        head_2 = self._change(f"second-{tag}", self.base, second_files, include=list(second_files))
+        v4_1 = self._v4(self.base, head_1, f"first-{tag}")
+        v4_2 = self._v4(self.base, head_2, f"second-{tag}", bindings)
+        main_1 = self._land(head_1, self.base, v4_1)
+        return main_1, self._merge_main(f"second-{tag}-merged", head_2, main_1, conflict=conflict), v4_2
+
+    # -- must pass ------------------------------------------------------------
+
+    def test_two_admitted_prs_commute_through_a_refresh_on_a_moved_base(self) -> None:
+        results = {}
+        for first, second in ((self.NEW_A, self.NEW_B), (self.NEW_B, self.NEW_A)):
+            tag = first.rsplit("/", 1)[-1].split(".")[0]
+            with self.subTest(first=first):
+                # Each path carries the same bytes in both orders, so the final trees must agree.
+                main_1, merged, v4_2 = self._second_on_moved_base(
+                    {first: f"# {first}\n".encode()}, {second: f"# {second}\n".encode()}, tag)
+                authority_before = self._authority_snapshot()
+                # The second pull request's own V4 delta, issued against the old base.
+                controls = self._refresh(merged, main_1, v4_2, label=f"explicit-{tag}")
+                assert controls.policy_delta is not None
+                self.assertEqual(controls.policy_delta["include_added"], [second])
+                # The same file found by its key beside the trusted ledger: no argument needed.
+                self._beside(v4_2)
+                looked_up = self._refresh(merged, main_1, label=f"lookup-{tag}")
+                self.assertEqual(looked_up.committed_ledger_bytes, controls.committed_ledger_bytes)
+                self.assertEqual(looked_up.generated_export_bytes, controls.generated_export_bytes)
+                refreshed = self._commit_controls(controls)
+                verdict = self._attest(refreshed, main_1, v4_2)
+                self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+                ledger_paths = {entry["path"] for entry in json.loads(controls.committed_ledger_bytes)["entries"]}
+                self.assertLessEqual({self.NEW_A, self.NEW_B}, ledger_paths)
+                self.assertEqual(self._authority_snapshot(), {
+                    **authority_before, f"policy-deltas-v4/{self._key(v4_2)}.json": v4_2.read_bytes(),
+                })
+                results[first] = (
+                    verifier._rev_tree(self.repo.root, refreshed),
+                    controls.committed_ledger_bytes,
+                    run_git(["show", f"{refreshed}:{verifier.POLICY_PATH}"], cwd=self.repo.root,
+                            capture_output=True, check=True).stdout,
+                )
+                for path in self.outside.glob("policy-deltas-v4/*.json"):
+                    path.unlink()
+        (tree_ab, ledger_ab, profile_ab), (tree_ba, ledger_ba, profile_ba) = results.values()
+        self.assertEqual((ledger_ab, profile_ab), (ledger_ba, profile_ba), "the landing order changes no byte")
+        self.assertEqual(tree_ab, tree_ba)
+
+    # -- must still refuse ------------------------------------------------------
+
+    def test_a_refresh_without_an_authority_refuses(self) -> None:
+        main_1, merged, _v4_2 = self._second_on_moved_base({self.NEW_A: b"# a\n"}, {self.NEW_B: b"# b\n"}, "none")
+        self._refused("POLICY_DELTA_AUTHORITY_REQUIRED", merged, main_1, None)
+
+    def test_a_v4_delta_for_another_path_set_refuses(self) -> None:
+        head_1 = self._change("first-other", self.base, {self.NEW_A: b"# a\n"}, include=[self.NEW_A])
+        head_2 = self._change("second-other", self.base, {self.NEW_B: b"# b\n"}, include=[self.NEW_B])
+        head_3 = self._change("third-other", self.base, {self.TOOL: b"x = 1\n"}, include=[self.TOOL])
+        v4_1 = self._v4(self.base, head_1, "first-other")
+        self._v4(self.base, head_2, "second-other")
+        v4_3 = self._v4(self.base, head_3, "third-other")
+        main_1 = self._land(head_1, self.base, v4_1)
+        merged = self._merge_main("second-other-merged", head_2, main_1, conflict=True)
+        key = verifier.policy_delta_key_v4(repo=self.repo.root, base_rev=main_1, candidate_rev=merged)
+        misnamed = self.outside / "policy-deltas-v4" / f"{key}.json"
+        misnamed.parent.mkdir(exist_ok=True)
+        for code, other in (("POLICY_DELTA_PATH_EXISTS", v4_1), ("POLICY_DELTA_UNAUTHORIZED", v4_3)):
+            with self.subTest(other=other.name):
+                # Passed explicitly, another admission's delta approves only its own path ...
+                self._refused(code, merged, main_1, other)
+                # ... and stored under this change's name it is still not the document derived for it.
+                misnamed.write_bytes(other.read_bytes())
+                self._refused(code, merged, main_1, None)
+
+    def test_one_extra_unadmitted_path_refuses(self) -> None:
+        main_1, merged, v4_2 = self._second_on_moved_base({self.NEW_A: b"# a\n"}, {self.NEW_B: b"# b\n"}, "extra")
+        self._beside(v4_2)
+        # In the profile too: the change has another name, so the admitted delta is not selected,
+        # and passed anyway it does not approve the extra path.
+        widened = self._change("extra-in-profile", merged, {self.TOOL: b"x = 1\n"}, include=[self.TOOL])
+        self._refused("POLICY_DELTA_AUTHORITY_REQUIRED", widened, main_1, None)
+        self._refused("POLICY_DELTA_UNAUTHORIZED", widened, main_1, v4_2)
+        # In the tree alone: the profile change is the admitted one, the extra file is not in it.
+        self.repo.branch("extra-in-tree", merged)
+        hook, self.repo.before_commit = self.repo.before_commit, None
+        self.repo.write("docs/unadmitted.md", b"# not admitted\n")
+        extra = self.repo.commit("an extra file without an admission")
+        self.repo.before_commit = hook
+        self._refused("REFRESH_NEW_PATH_REQUIRES_ADMISSION", extra, main_1, None)
+
+    def test_a_changed_byte_bound_import_refuses(self) -> None:
+        main_1, merged, v4_lib = self._second_on_moved_base(
+            {self.NEW_A: b"# a\n"}, {self.LIB: self.LIB_BYTES, self.MANIFEST: self._manifest()}, "lib",
+            bindings={self.LIB: "bytes"}, conflict=False,
+        )
+        self._beside(v4_lib)
+        self._refresh(merged, main_1, label="lib-unchanged")
+        edited = self._edit({self.LIB: self.LIB_BYTES.rstrip(b"\n")}, "a formatter drops the final newline")
+        self._refused("POLICY_DELTA_ADDED_BYTES_MISMATCH", edited, main_1, None)
+
+    def test_a_hosted_finding_on_the_refreshed_tree_refuses(self) -> None:
+        """The generator accepts a claim-bound import, but its manifest row says byte-identical."""
+        drifted = self.LIB_BYTES + b"/* local fix */\n"
+        main_1, merged, v4_lib = self._second_on_moved_base(
+            {self.NEW_A: b"# a\n"}, {self.LIB: drifted, self.MANIFEST: self._manifest()}, "drift", conflict=False,
+        )
+        self._beside(v4_lib)
+        self._refused("REFRESH_HOSTED_VERDICT_FAIL", merged, main_1, None)
 
 
 class VendoredManifestTests(unittest.TestCase):
