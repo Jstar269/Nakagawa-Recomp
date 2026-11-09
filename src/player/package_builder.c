@@ -2342,7 +2342,10 @@ bool package_builder_resolve_toolchain_bin(const char *prerequisites_root,
             found = n > 0 && (size_t)n < sizeof(bin) && builder_root_bin_has_gcc(bin);
         }
         /* A system MSYS2 UCRT64 install: a UCRT64 gcc already on PATH, then an
-           explicit hint, then the default prefix, in nk_doctor_checks.py's order. */
+           explicit hint, then the default prefix, the order nk_doctor_checks.py
+           uses. The PATH test is stricter than the doctor's: the doctor accepts
+           any resolved gcc path containing "ucrt64", while this needs a bin folder
+           whose parent folder is named exactly ucrt64. */
         if (!found && path_env && path_env[0]) {
 #if defined(_WIN32) || defined(_WIN64)
             const char list_sep = ';';
@@ -2476,9 +2479,9 @@ NkResult package_builder_start(
     const char *msys_hint = NULL;
     const char *msys_default = NULL;
 #if defined(_WIN32) || defined(_WIN64)
-    /* The places tools/nk_doctor_checks.py looks for MSYS2 UCRT64: an explicit
-       MSYS_PATH, a UCRT64 gcc already on PATH, then the default install
-       (docs/SETUP.md, "Deliberate path conventions"). */
+    /* The system MSYS2 UCRT64 candidates, in the order the resolver tries them:
+       a UCRT64 bin already on PATH, then an explicit MSYS_PATH, then the default
+       install (docs/SETUP.md, "PATH order"). */
     msys_hint = getenv("MSYS_PATH");
     msys_default = "C:/msys64/ucrt64";
 #endif

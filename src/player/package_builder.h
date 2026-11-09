@@ -401,8 +401,9 @@ bool package_builder_toolchain_missing(
  * bin on path_env whose parent folder is named ucrt64, msys_hint (a prefix or its
  * bin, as MSYS_PATH), then msys_default_prefix (NULL off Windows). A candidate
  * counts only when its bin/gcc.exe exists and, for a system install, so does
- * include/SDL3/SDL.h. Returns false, with out empty, when no complete toolchain is
- * found: PATH is then left alone and sdl3-check names the problem. */
+ * include/SDL3/SDL.h. A bin on path_env counts only when its parent folder is
+ * named exactly ucrt64. Returns false, with out empty, when no complete toolchain
+ * is found: PATH is then left alone and sdl3-check names the problem. */
 bool package_builder_resolve_toolchain_bin(const char *prerequisites_root,
                                            const char *data_root,
                                            const char *path_env,
@@ -411,7 +412,11 @@ bool package_builder_resolve_toolchain_bin(const char *prerequisites_root,
                                            char *out, size_t out_size);
 
 /* Compose "<toolchain_bin><list separator><path_env>" for the build child's
- * PATH. False, with out empty, when it does not fit. */
+ * PATH. False, with out empty, when toolchain_bin is NULL or empty or the result
+ * does not fit out_size; package_builder_start then passes no PATH override, so
+ * the child inherits PATH unchanged. The buffer there is 32768 bytes, the Windows
+ * variable limit, so composing fails only when PATH plus the toolchain folder and
+ * its separator would pass 32767 characters. */
 bool package_builder_compose_build_path(const char *toolchain_bin, const char *path_env,
                                         char *out, size_t out_size);
 

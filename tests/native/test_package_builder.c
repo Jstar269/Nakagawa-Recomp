@@ -824,7 +824,7 @@ static void toolchain_path_child_path(const char *data_root, const char *log_dir
 }
 
 static void test_build_path_leads_with_ucrt64(void) {
-    printf("[PACKAGE_BUILDER_TEST] Subtest: a UCRT64 toolchain leads the build child's PATH (#2278)\n");
+    printf("[PACKAGE_BUILDER_TEST] Subtest 7b: a UCRT64 toolchain leads the build child's PATH (#2278)\n");
     const char sep = nk_platform_path_separator();
 #if defined(_WIN32) || defined(_WIN64)
     const char list_sep = ';';
@@ -867,6 +867,28 @@ static void test_build_path_leads_with_ucrt64(void) {
     assert(package_builder_compose_build_path(found, path_env, composed, sizeof(composed)));
     assert(strncmp(composed, ucrt_bin, strlen(ucrt_bin)) == 0);
     assert(composed[strlen(ucrt_bin)] == list_sep);
+
+    /* Composing: an empty or missing PATH gives the toolchain bin alone, a missing
+       toolchain bin gives nothing, and an overflow gives nothing with out emptied. */
+    assert(package_builder_compose_build_path(ucrt_bin, NULL, composed, sizeof(composed)));
+    assert(strcmp(composed, ucrt_bin) == 0);
+    assert(package_builder_compose_build_path(ucrt_bin, "", composed, sizeof(composed)));
+    assert(strcmp(composed, ucrt_bin) == 0);
+    assert(!package_builder_compose_build_path(NULL, path_env, composed, sizeof(composed)));
+    assert(composed[0] == '\0');
+    assert(!package_builder_compose_build_path("", path_env, composed, sizeof(composed)));
+    assert(composed[0] == '\0');
+    {
+        char small[8];
+        memset(small, 'x', sizeof(small));
+        small[sizeof(small) - 1] = '\0';
+        assert(!package_builder_compose_build_path(ucrt_bin, path_env, small, sizeof(small)));
+        assert(small[0] == '\0');
+        /* The bin alone also needs room for its terminator. */
+        assert(!package_builder_compose_build_path(ucrt_bin, NULL, composed, strlen(ucrt_bin)));
+        assert(composed[0] == '\0');
+        assert(package_builder_compose_build_path(ucrt_bin, NULL, composed, strlen(ucrt_bin) + 1));
+    }
 
     /* The same toolchain named by MSYS_PATH (a prefix or its bin) or the default
        prefix, while PATH holds only the stray gcc. */
