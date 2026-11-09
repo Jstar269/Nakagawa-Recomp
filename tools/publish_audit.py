@@ -1286,6 +1286,7 @@ SPDX_BYTE_EXACT_IMPORT_PATHS = frozenset({
     "third_party/clay/clay.h",
     "src/rt/minimp3/minimp3.h",
     "third_party/dr_libs/dr_wav.h",
+    "third_party/anime4k/Anime4K_Upscale_CNN_x2_M.glsl",
     "third_party/portable-snippets/safe-math/safe-math.h",
     "third_party/stb/stb_image.h",
     # Monocypher declares its SPDX line below the 8-line header window.
@@ -1386,6 +1387,15 @@ SPDX_GENERATED_EMBEDDING_SOURCES = {
     "src/rt/gpu_sdl3vk/ace_compose_comp.inc": "src/rt/gpu_sdl3vk/shaders/ace_compose.comp",
     "src/rt/gpu_sdl3vk/fsr1_easu_comp.inc": "src/rt/gpu_sdl3vk/shaders/fsr1_easu.comp",
     "src/rt/gpu_sdl3vk/fsr1_rcas_comp.inc": "src/rt/gpu_sdl3vk/shaders/fsr1_rcas.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_0_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_0.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_1_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_1.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_2_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_2.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_3_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_3.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_4_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_4.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_5_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_5.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_6_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_6.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_7_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_7.comp",
+    "src/rt/gpu_sdl3vk/anime4k_cnn_x2_m_8_comp.inc": "src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_8.comp",
 }
 
 
@@ -2065,7 +2075,7 @@ def _default_provenance(
 
     # android/ is the Android host target (#360): Gradle, NDK, Java and manifest
     # sources of the same project, admitted like any other path.
-    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1", "nk_manager.ps1"):
+    if rel_path.startswith(("src/", "tools/", "mk/", "assets/", "fixtures/", "docs/", "android/")) or ext in SOURCE_EXTENSIONS or ext in (".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".ps1", ".glsl") or rel_path in ("Makefile", "pyproject.toml", "nk.ps1", "nk_manager.ps1"):
         gen_kind = "documentation" if (rel_path.startswith("docs/") or ext == ".md") else ("data" if ext in (".json", ".jsonc", ".dat") else ("script" if ext in (".ps1", ".sh") else "source"))
         return "project_authored", "GPL-2.0-or-later", "NOTICE.md", gen_kind, "included", policy_public
 

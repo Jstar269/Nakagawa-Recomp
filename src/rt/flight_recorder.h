@@ -280,7 +280,9 @@ void sr_flight_init(void);
  * "enhancements": {"ace": "<line>"}, and tools/flight_diff.py refuses to compare it. NULL or ""
  * clears it; an authentic run never calls this, so its bundle is unchanged. */
 void sr_flight_set_enhancements(const char *ace_line);
-/* Marks the run's window as upscaled (SR_PRESENT_UPSCALE, gpu_sdl3vk/fsr1_pass.h): the runtime
+/* Marks the run's window as upscaled (SR_PRESENT_UPSCALE, gpu_sdl3vk/fsr1_pass.h, and/or
+ * SR_MOVIE_UPSCALE, gpu_sdl3vk/anime4k_pass.h; the mode is up to 31 characters, e.g.
+ * "fsr1+movie-anime4k"): the runtime
  * block then carries "enhancements": {"present_upscale": "<mode>"} (beside "ace" when Ace Mode is
  * on too), and tools/flight_diff.py refuses to compare it. NULL or "" clears it. */
 void sr_flight_set_present_upscale(const char *mode);
