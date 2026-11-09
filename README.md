@@ -93,7 +93,8 @@ for the PSP's system software, graphics and sound. The player is written in C wi
   and each one can be turned off.
 - When a game needs something that isn't supported yet, the player stops and names the missing piece.
 - No games, firmware or Sony system fonts ship here, and no game data is ever downloaded. Games show the project's
-  own open fonts unless you import the fonts from your own PSP in Settings > **PSP FONTS**
+  own open fonts ([#313](https://github.com/Jstar269/nakagawa-recomp/issues/313)) unless you import the fonts from
+  your own PSP in Settings > **PSP FONTS**, or with `python tools/nk_cli.py fonts import <folder>`
   ([how to copy them](docs/SETUP.md#copying-the-fonts-from-your-psp)).
 - The player works offline. It connects to the internet only when you agree: to fetch build tools when they
   aren't already present, and to check for updates when you ask ([network use](docs/SETUP.md#network-use)).
