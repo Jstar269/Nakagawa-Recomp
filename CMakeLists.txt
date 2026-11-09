@@ -283,6 +283,12 @@ add_test(NAME player_state_test COMMAND test_player_state)
 set_tests_properties(player_state_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     ENVIRONMENT "NK_TEST_SCRATCH_DIR=${CMAKE_CURRENT_BINARY_DIR}/build")
+if(ANDROID)
+    # On Android the package rebuild steps need a libnk_python.so in the app's native library
+    # folder, which the test folder does not have (#360); the test runs everything else and
+    # exits 77.
+    set_tests_properties(player_state_test PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 
 # The nk_ui core and its C3a reserved stubs stay SDL and Vulkan free. Keep this
 # explicit source inventory in sync with mk/nk_ui.mk.

@@ -2210,6 +2210,8 @@ bool package_builder_toolchain_missing(
     const char *tool = NULL;
     const char *fix = NULL;
     const char *make_tool = package_builder_make_tool_name();
+    /* Where the missing tool was looked for; the same card text on every host but Android. */
+    const char *where = "on PATH";
 #if defined(_WIN32) || defined(_WIN64)
     const char *python_fix =
         "Install CPython 3.15 or 3.14 (see docs/SETUP.md) or set the PYTHON environment "
@@ -2222,6 +2224,23 @@ bool package_builder_toolchain_missing(
         "its bin directory on PATH.";
     const char *source =
         "Use the player's build tools download prompt to install the Windows build tools.";
+#elif defined(__ANDROID__)
+    /* package_builder_find_python looks only for the app's own libnk_python.so in the
+       native library folder here (PYTHON and PATH are not searched), and the app ships
+       no CPython, compiler or make; gcc and make are still looked up on PATH. */
+    const char *python_fix =
+        "Android runs only the programs an app ships in its native library folder, and "
+        "this build of the app ships no CPython 3.15 there. PYTHON and PATH are not "
+        "searched for it.";
+    const char *gcc_fix =
+        "This build of the app ships no compiler, and Android has no package to install "
+        "one from. gcc is looked for on PATH only.";
+    const char *make_fix =
+        "This build of the app ships no make, and Android has no package to install one "
+        "from. make is looked for on PATH only.";
+    const char *source =
+        "Nakagawa downloads build tools only on Windows.";
+    const char *python_where = "in the app's native library folder (libnk_python.so)";
 #else
     const char *python_fix =
         "Install CPython 3.15 or 3.14 (on Ubuntu 24.04, python3.15 from the deadsnakes PPA; "
@@ -2240,6 +2259,9 @@ bool package_builder_toolchain_missing(
     if (!have_python) {
         tool = "python";
         fix = python_fix;
+#if defined(__ANDROID__)
+        where = python_where;
+#endif
     } else if (!have_gcc) {
         tool = "gcc";
         fix = gcc_fix;
@@ -2255,9 +2277,9 @@ bool package_builder_toolchain_missing(
     if (out_tool && out_tool_size) snprintf(out_tool, out_tool_size, "%s", tool);
     if (out_message && out_message_size) {
         snprintf(out_message, out_message_size,
-                 "BUILD_TOOLCHAIN_MISSING: %s was not found on PATH. The package build "
+                 "BUILD_TOOLCHAIN_MISSING: %s was not found %s. The package build "
                  "runs python, gcc and %s, so it cannot start. %s %s",
-                 tool, make_tool, fix, source);
+                 tool, where, make_tool, fix, source);
     }
     return true;
 }

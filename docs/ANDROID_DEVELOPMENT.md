@@ -21,7 +21,8 @@ This page covers building and running the Android app from source. The plan it b
   process ends when the run ends, as a desktop child's does. The guest sees no difference.
 - **A title's runtime library** is the package's generated C compiled with the runtime for the
   device's ABI (`nk_add_title_runtime` in `CMakeLists.txt`). Packages are built on a PC by the
-  ordinary route; the phone does not run the recompiler or a C compiler yet.
+  ordinary route; the APK contains no C compiler, Make or CPython
+  ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
 - **A title built by the package route** is the same library, linked by Make with
   `NK_TARGET=android` ([below](#a-title-library-from-the-package-route)). `TitleActivity` loads a
   library the APK ships by its name, or a built one by its absolute path in the app's files
@@ -102,7 +103,7 @@ id> --target android` (the default when nk_cli itself runs on Android). The pack
 A build on the phone also needs a C compiler, GNU Make and CPython in the APK. Android lets an
 app run only the programs it ships in its native library folder, so those would ship there as
 `lib*.so` files. `nk_platform_spawn_tool` starts only programs in that folder, and on Android the
-package builder's Python is the APK's `libnk_python.so` there. None of the three is bundled yet
+package builder's Python is the APK's `libnk_python.so` there. The APK bundles none of the three
 ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
 
 ## Run in the emulator
@@ -245,10 +246,13 @@ closed there and the subtests that need it report SKIP with the reason. Tools ar
 `nk_platform_spawn_tool` starts a program directly, but only one that is a regular file directly
 in the folder holding the app's native libraries (`nativeLibraryDir` in the app, the test's own
 folder under `adb shell`), because Android lets an app run programs it ships there and nothing it
-wrote itself. `posix_process_test` runs its child processes through that route. Two tests fail
-there, so `ctest` exits non-zero on every device run:
-`package_builder_test`, and the package-rebuild subtest of `player_state_test`. Both build a
-package on the device, which Android does not support ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
+wrote itself. `posix_process_test` runs its child processes through that route. On Android the
+package builder's Python is only `libnk_python.so` in that folder, and the test folder has none.
+`package_builder_test` passes there. `player_state_test` asserts the Android toolchain card
+(it names `libnk_python.so` and gives no `PATH` or PPA advice), runs every other subtest, and skips
+only its package-rebuild steps, which need a runnable Python: it prints a `SKIP` line naming
+[#360](https://github.com/Jstar269/nakagawa-recomp/issues/360) and exits 77, which CTest reports as
+skipped.
 
 ## Storage
 

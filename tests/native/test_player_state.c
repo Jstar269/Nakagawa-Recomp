@@ -4198,6 +4198,9 @@ static void test_build_outcome_is_shown_once_per_session(void) {
     printf("[PLAYER_STATE_TEST] build failure and cancel are shown once per session PASS\n");
 }
 
+/* Set when test_package_build_lifecycle skips its package rebuild steps (Android only). */
+static bool s_package_rebuild_skipped = false;
+
 static void test_package_build_lifecycle(const char *self_executable) {
     assert(self_executable && self_executable[0]);
     char sep = nk_platform_path_separator();
@@ -4395,7 +4398,49 @@ static void test_package_build_lifecycle(const char *self_executable) {
     }
     assert(rebuild_status == NK_RUNTIME_PACKAGE_INCOMPATIBLE);
     nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "success");
-#if !defined(_WIN32) && !defined(_WIN64)
+#if defined(__ANDROID__)
+    /* On Android the package build's Python is only the app's libnk_python.so in its native
+       library folder (package_builder_find_python); the PYTHON stub above and PATH are not
+       searched, so python is the first tool missing and the card says where it looked. It
+       must not give the Linux advice: no PATH search for python, no PPA, no build-essential. */
+    assert(!player_app_rebuild_package(rebuild_app, 0));
+    assert(rebuild_app->active_view == VIEW_ERROR);
+    assert(strcmp(rebuild_app->last_error.error_code, "BUILD_TOOLCHAIN_MISSING") == 0);
+    assert(strstr(rebuild_app->last_error.message,
+                  "python was not found in the app's native library folder (libnk_python.so)") != NULL);
+    assert(strstr(rebuild_app->last_error.message, "ships no CPython 3.15") != NULL);
+    assert(strstr(rebuild_app->last_error.message, "downloads build tools only on Windows") != NULL);
+    assert(strstr(rebuild_app->last_error.message, "was not found on PATH") == NULL);
+    assert(strstr(rebuild_app->last_error.message, "deadsnakes") == NULL);
+    assert(strstr(rebuild_app->last_error.message, "build-essential") == NULL);
+    assert(!rebuild_app->build_session.is_building);
+    printf("[PLAYER_STATE_TEST] Android build tools: the card names libnk_python.so, no PATH or PPA advice PASS\n");
+    /* Every later step starts a package build, which needs a runnable Python from the tool
+       folder; the test's own PYTHON stub cannot be one there (#360). The rest of this
+       function is skipped and main() exits 77 after the other subtests have run. */
+    printf("SKIP player_state_test package rebuild lifecycle (exit 77): no libnk_python.so in the "
+           "app's native library folder (#360)\n");
+    s_package_rebuild_skipped = true;
+    free(rebuild_app);
+    assert(test_remove_tree(rebuild_root));
+    restore_environment_value("PYTHON", saved_python, had_python);
+    restore_environment_value("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE",
+                              saved_build_mode, had_build_mode);
+    restore_environment_value("NAKAGAWA_TEST_PACKAGE_REBUILD_TITLE_ID",
+                              saved_title_id, had_title_id);
+    restore_environment_value("NAKAGAWA_TEST_PACKAGE_REBUILD_SOURCE_MEDIA",
+                              saved_source_media, had_source_media);
+    restore_environment_value("NK_INSTALL_ROOT", saved_install_override,
+                              had_install_override);
+    restore_environment_value("PATH", saved_path, had_path);
+    free(saved_path);
+    free(saved_python);
+    free(saved_build_mode);
+    free(saved_title_id);
+    free(saved_source_media);
+    free(saved_install_override);
+    return;
+#elif !defined(_WIN32) && !defined(_WIN64)
     /* gcc alone: the card names make and the package that provides it, and says
        nothing is downloaded here. It used to say only that Linux build-tool
        installation was in the works, even with every tool installed. */
@@ -14354,7 +14399,12 @@ int main(int argc, char **argv) {
     test_game_build_check_names_the_executable_build();
 
     free(app);
-    printf("[PLAYER_STATE_TEST] ALL PLAYER STATE TESTS PASSED!\n");
     native_test_assert_real_config_untouched();
+    if (s_package_rebuild_skipped) {
+        printf("[PLAYER_STATE_TEST] SKIP: every subtest ran except the package rebuild steps "
+               "(exit 77, #360)\n");
+        return 77;
+    }
+    printf("[PLAYER_STATE_TEST] ALL PLAYER STATE TESTS PASSED!\n");
     return 0;
 }
