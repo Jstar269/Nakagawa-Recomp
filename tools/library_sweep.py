@@ -566,6 +566,7 @@ def _route_environment() -> dict[str, str]:
     # A sweep is authentic evidence: a presentation upscaler left in the shell (#1273) must not
     # enhance its windows, so the value is set, not inherited, and the private report records it.
     environment["SR_PRESENT_UPSCALE"] = SWEEP_PRESENT_UPSCALE
+    environment["SR_MOVIE_UPSCALE"] = SWEEP_PRESENT_UPSCALE  # the movie upscaler, likewise
     return environment
 
 
