@@ -85,6 +85,66 @@ DISPLAY_SMOKE_BASE = 0x08810000
 LOW_FIXED_ADDRESS_BASE = 0x08804000
 
 
+HOMEBREW_REQUIRED = "NK_HOMEBREW_E2E_REQUIRED"
+HOMEBREW_FIXTURE = ROOT / "fixtures" / "pspdev_phase5"
+
+
+def build_homebrew_eboot(out_dir: Path) -> Path:
+    """Build the project's own PSPSDK program (fixtures/pspdev_phase5) into a real EBOOT.PBP.
+
+    PSPDEV's make and ``pack-pbp`` write the package, so its PARAM.SFO is the one every
+    PSPSDK homebrew has (category MG), not one a test author guessed (#2143). With no PSPDEV
+    the caller's test is skipped, or failed when NK_HOMEBREW_E2E_REQUIRED=1.
+    """
+    from test_profile_zero_e2e import _pspdev_backend, _wsl_path  # noqa: E402
+
+    def unavailable(reason: str) -> None:
+        if os.environ.get(HOMEBREW_REQUIRED) == "1":
+            raise AssertionError(f"{HOMEBREW_REQUIRED}=1, but the build did not run: {reason}")
+        raise unittest.SkipTest(f"NOT_RUN: {reason}")
+
+    backend = _pspdev_backend()
+    if backend is None:
+        unavailable("PSPDEV/PSPSDK is absent (psp-gcc, pack-pbp)")
+    assert backend is not None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    makefile = HOMEBREW_FIXTURE / "Makefile"
+    if backend[0] == "wsl":
+        wsl = backend[1]
+        assert wsl is not None
+        command = [
+            wsl, "-d", "Ubuntu", "--", "/usr/bin/env", "PSPDEV=/usr/local/pspdev",
+            "PATH=/usr/local/pspdev/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "make", "--no-print-directory", "-B", "-f", _wsl_path(wsl, makefile),
+            "-C", _wsl_path(wsl, out_dir), f"VPATH={_wsl_path(wsl, HOMEBREW_FIXTURE)}",
+            "EBOOT.PBP",
+        ]
+        environment = None
+    else:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            unavailable("PSPDEV is installed but GNU Make is unavailable")
+        assert make is not None
+        command = [
+            make, "--no-print-directory", "-B", "-f", str(makefile), "-C", str(out_dir),
+            f"VPATH={HOMEBREW_FIXTURE}", "EBOOT.PBP",
+        ]
+        environment = os.environ.copy()
+        for key in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES"):
+            environment.pop(key, None)
+    completed = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True,
+                               text=True, timeout=300, check=False)
+    if completed.returncode:
+        raise AssertionError(
+            f"PSPDEV build of {HOMEBREW_FIXTURE.name} failed (exit {completed.returncode}):\n"
+            f"{completed.stdout}\n{completed.stderr}"
+        )
+    eboot = out_dir / "EBOOT.PBP"
+    if not eboot.is_file():
+        raise AssertionError(f"PSPDEV did not produce {eboot}")
+    return eboot
+
+
 def synthetic_manifest() -> dict:
     """The hand-written title manifest this route binds the imported disc to.
 
@@ -873,6 +933,67 @@ class TestPlayerPackageRoute(unittest.TestCase):
         self.assertNotIn("Nothing was changed", completed.stderr)
         self.assertIn("add the disc from the player's library", completed.stderr)
         self.assertTrue((self.user_root / "experimental" / DISC_ID / "profile.json").is_file())
+
+    def test_homebrew_eboot_imports_and_builds_as_experimental(self):
+        """#2143: a real PSPSDK EBOOT.PBP imports, builds a package, and stays Experimental.
+
+        Failing before: PSPSDK writes the category MG for every homebrew, and the package
+        classifier read MG as a firmware updater, so the import ended FIRMWARE_OUT_OF_SCOPE;
+        and the small private disc image the import makes was refused by the build route's
+        1 MiB floor. This runs the production path: the player's own --iso import (package
+        inspect, conversion, disc inspection, experimental profile), the library record the
+        card's ADD TO LIBRARY writes, and the player's own BUILD PACKAGE action. The card's
+        click is covered by tests/native/test_player_ui.py.
+        """
+        self.skip_if_toolchain_unavailable()
+        eboot = build_homebrew_eboot(self.root / "homebrew")
+        environment = os.environ.copy()
+        environment["LOCALAPPDATA"] = str(self.local_appdata)
+        environment["APPDATA"] = str(self.root / "appdata")
+        environment["USERPROFILE"] = str(self.root / "userprofile")
+        imported = subprocess.run(
+            [str(self.player), f"--user-data-root={self.user_root}", f"--iso={eboot}",
+             "--stage-only"],
+            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=120,
+        )
+        output = imported.stdout + imported.stderr
+        self.assertNotIn("FIRMWARE_OUT_OF_SCOPE", output)
+        self.assertNotIn("PBP_PACKAGE_UNSUPPORTED", output)
+        # An uncatalogued program stops --stage-only at the title list, as an ISO does; the
+        # import itself is what ran and what recorded the profile.
+        self.assertEqual(imported.returncode, 3, output)
+        found = re.search(r"Disc ID: (X[A-Z]{3}\d{5}), Title: ([^,\r\n]+), Supported: 0",
+                          imported.stdout)
+        self.assertIsNotNone(found, output)
+        assert found is not None
+        key, title = found.group(1), found.group(2)
+        self.assertEqual(title, "Nakagawa PSP Recompilation Oracle")
+        profile_path = self.user_root / "experimental" / key / "profile.json"
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        self.assertEqual(profile["manifest"]["verification_profile"], "experimental-unverified")
+        self.assertEqual(profile["manifest"]["display_name"], title)
+        iso_path = next((self.user_root / "discs" / key).glob("*.iso"))
+
+        # ADD TO LIBRARY on the Experimental card stores the record the build reads.
+        (self.user_root / "library.json").write_text(json.dumps({
+            "schema_version": 1,
+            "games": [{
+                "disc_id": key, "title_id": profile["manifest"]["id"], "title_name": title,
+                "iso_path": str(iso_path), "selected_executable": "EBOOT.BIN",
+                "is_experimental": True,
+            }],
+        }), encoding="utf-8")
+        environment["SDL_VIDEODRIVER"] = "dummy"
+        environment["SDL_AUDIODRIVER"] = "dummy"
+        environment["NK_BUILD_ROOT"] = str(self.root / "b")
+        built = subprocess.run(
+            [str(self.harness), "--build-package", str(ROOT), str(self.user_root), key,
+             str(self.user_root / "logs")],
+            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=1800,
+        )
+        self.assertEqual(built.returncode, 0, built.stdout[-4000:] + built.stderr[-4000:])
+        self.assertIn("PACKAGE_BUILD_ROUTE status=PASS", built.stdout)
+        self.assertTrue((self.user_root / "packages" / key).is_dir())
 
     def test_uncatalogued_player_route_builds_with_generic_profile(self):
         """The package action upgrades the native profile through bring-up's writer."""
