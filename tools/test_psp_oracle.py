@@ -5641,9 +5641,8 @@ class HleMeasureProbeTests(unittest.TestCase):
         pairs = re.findall(r"else ifeq \(\$\(CASE\),(hle-[a-z0-9-]+)\)\nCASE_ID = (\d+)",
                            self.makefile)
         # The HLE issue cells (106-107) are routed too, from their own source.
-        registered = self.ALL_FAMILIES + HleIssuesProbeTests.CASES
         # The self stop-unload helper PRX (case 172) is built from its own source, not a family.
-        registered = registered + (("hle-self-stop-helper", 172),)
+        registered = (*self.ALL_FAMILIES, *HleIssuesProbeTests.CASES, ("hle-self-stop-helper", 172))
         self.assertEqual(sorted(pairs),
                          sorted((case, str(case_id)) for case, case_id, *_ in registered))
         all_ids = re.findall(r"^CASE_ID = (\d+)$", self.makefile, re.MULTILINE)
@@ -8883,9 +8882,9 @@ class VfpuUnmodeledProbeTests(unittest.TestCase):
         # VFPU op 0x34, jump field 2, op field 0x19 / 2 / 3, vd C200 (0x08), vs C000, size bits.
         for name, op, size in (("t4444_p", 0x19, 0x80), ("t4444_t", 0x19, 0x8000),
                                ("bfy1_s", 2, 0), ("bfy1_t", 2, 0x8000), ("bfy2_p", 3, 0x80)):
-            word = (0x34 << 26) | (2 << 21) | (op << 16) | size | 0x08
+            encoded = (0x34 << 26) | (2 << 21) | (op << 16) | size | 0x08
             with self.subTest(form=name):
-                self.assertIn(f'UM_CELL_FN(um_{name}_none, TN_PFX_NONE, "0x{word:08x}")',
+                self.assertIn(f'UM_CELL_FN(um_{name}_none, TN_PFX_NONE, "0x{encoded:08x}")',
                               self.section)
         # Identity prefixes except the negate-all form of the width cells.
         self.assertEqual(self.section.count("TN_PFX_P1,"), 6)
