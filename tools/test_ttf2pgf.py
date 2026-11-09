@@ -1618,7 +1618,7 @@ class OvershootSnapTests(CliRefusalMixin):
 
     @staticmethod
     def _bottom(glyph: Glyph) -> int:
-        return glyph.adjust_y - glyph.height
+        return int(glyph.adjust_y - glyph.height)
 
     def test_e_o_and_r_share_a_bottom_row_at_the_psp_sizes(self) -> None:
         for ppem in self.SIZES:
