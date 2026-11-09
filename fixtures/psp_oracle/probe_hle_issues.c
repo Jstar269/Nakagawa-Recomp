@@ -32,6 +32,9 @@
 //   CASE=vfpu-basic-arith (PSP-VFPU-BASICARITH-001): #326 raw result words of vadd, vsub, vmul,
 //     vmin, vmax, vscl, vdiv.s, vneg, vabs, vmov, vzero, vone and vidt over 20 operand classes
 //     (all ordered pairs for the binary forms), register-only; vidt.s may raise an exception.
+//   CASE=vfpu-wide-dot-matrix (PSP-VFPU-WIDEDOT-001): #326 raw result words of vdot, vhdp, vcrsp,
+//     vqmul, vtfm, vhtfm, vmmul, vmscl, vmzero, vmidt, vmone, vmmov and vrot over special lanes
+//     and order-sensitive four-term sums, register-only.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -61,8 +64,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert and vfpu-vus2i run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i and vfpu-wide-dot-matrix run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -86,6 +89,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_CC_CMOV 169
 #define HLE_CASE_VFPU_VUS2I 171
 #define HLE_CASE_VFPU_BASIC_ARITH 168
+#define HLE_CASE_VFPU_WIDE_DOT 173
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -139,6 +143,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-basic-arith"
 #define HLE_TEST_ID "PSP-VFPU-BASICARITH-001"
 #define HLE_LOG "host0:/vfpu_basic_arith_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_WIDE_DOT
+#define HLE_CAMPAIGN_ID "vfpu-wide-dot-matrix"
+#define HLE_TEST_ID "PSP-VFPU-WIDEDOT-001"
+#define HLE_LOG "host0:/vfpu_wide_dot_matrix_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -3002,6 +3010,337 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_BASIC_ARITH */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_WIDE_DOT
+
+/* #326 wide dot-product and matrix VFPU forms (PSP-VFPU-WIDEDOT-001), two passes, register-only:
+   the raw result words of vdot.p, vdot.q, vhdp.q, vcrsp.t, vqmul.q, vtfm4.q, vhtfm4.q, vmmul.q (two
+   source-matrix encodings), vmscl.q, vmzero.q, vmidt.q, vmone.q, vmmov.q and vrot.q. Every cell
+   is one instruction word run over the whole register image with no prefix word issued (the
+   prefixes stay identity), emitted as a word. Every word was assembled with psp-as from the
+   mnemonic named here and none was refused: vdot.p S200, C000, C010 (0x64810088); vdot.q
+   (0x64818088); vhdp.q (0x66018088); vcrsp.t C200, C000, C010 (0xf2818008); vqmul.q C200, C000,
+   C010 (0xf2818088); vtfm4.q C200, M100, C000 (0xf1808488); vhtfm4.q C200, M100, C000 (0xf1808408;
+   the vector is .t, the matrix 4x4); vmmul.q M200, E100, M000 (0xf0008488) and vmmul.q M200, M100,
+   M000 (0xf000a488, the transposed first-source encoding); vmscl.q M200, M100, S010 (0xf2018488);
+   vmzero.q M200 (0xf3868088); vmidt.q M200 (0xf3838088); vmone.q M200 (0xf3878088); vmmov.q M200,
+   M100 (0xf3808488); vrot.q C200, S000, [c,s,0,0] (0xf3a48088). Image layout (word m*16 + c*4 + r):
+   vector sources C000 (a, image 0-3) and C010 (b, image 4-7), the matrix of vtfm/vhtfm/vmscl/vmmov
+   M100 (image 16-31), vmmul vs = M100 and vt = M000 (image 0-15), the destination S200/C200/M200
+   (image 32..). The 80-word limit of a record (the writer's 1536-byte line) bounds a record.
+   Operands. Base vectors a = (1.5, -2.25, 3.0, 0.625), b = (0.75, 4.0, -1.5, 2.5), base matrix a
+   fixed 16-word finite table (the vmmul vt matrix a fixed permutation of it). Special words: +qNaN
+   0x7fc00011, -NaN 0xffc00022, sNaN 0x7f800033, +inf, -inf, +denormal 0x00000001, -denormal
+   0x80000001 and -0, each placed in one lane at a time of a, then of b (vdot, vhdp, vcrsp, vqmul),
+   in one lane at a time of the vector and in each of the four diagonal matrix elements (vtfm,
+   vhtfm), and in each of the four diagonal elements of each source matrix (vmmul). The matrix
+   sweep is the diagonal positions only (16 positions x 8 values x 2 matrices would need many times
+   the records); vmscl takes the specials in the scalar and in matrix element 0, vmmov in element
+   5. Order-sensitive four-term sums (b or the matrix all ones, the sum shown by the rounding):
+   (1, 2^-24, 2^-24, 2^-24), the same reversed, (2^24, 1, 1, 1), the same reversed, (1e8, 1,
+   -1e8, 1), (1, 1e8, 1, -1e8), (1e8, -1e8, 1, 1) and (1, 1, 1e8, -1e8); for vmmul four of the
+   vectors fill every column of one matrix while the other is all ones, in both arrangements; vdot.p
+   has no order cells (a two-term sum is order free); vcrsp.t takes the first three lanes. vrot:
+   sixteen angle words (0, -0, 0.25, 0.5, 1, 1.5, 2, 3, 4, 100, -0.5, -1, +inf, -inf, qNaN and the
+   smallest denormal).
+   Row <form>-<size>-p<pass>[-<record>] (one record when the cells fit, else numbered): result =
+   the instruction word; per cell in order, the recorded source image words (a then b for the
+   vector forms, vector then matrix for vtfm/vhtfm, image 0-31 for vmmul, scalar then matrix for
+   vmscl, the matrix for vmmov, the angle for vrot) followed by the destination words. A durable
+   step marker comes before every form group. Nothing here writes memory outside the probe's
+   own image and output buffers, no control register is written, and no reserved word is run. */
+
+#include "hle_vfpu_cells.h"
+
+#define WD_MAX_WORDS 80u
+#define WD_SPECIALS 8u
+#define WD_ORDERS 8u
+#define WD_FORMS 15u
+#define WD_DST 32u
+#define WD_ONE 0x3f800000u
+
+enum { WD_VEC, WD_TFM, WD_MMUL, WD_MSCL, WD_MMOV, WD_CONST, WD_ROT };
+
+typedef void (*wd_fn)(const uint32_t *in, uint32_t *out, uint32_t *cc);
+
+TN_CELL_FN(wd_vdot_p, TN_PFX_NONE, "0x64810088")
+TN_CELL_FN(wd_vdot_q, TN_PFX_NONE, "0x64818088")
+TN_CELL_FN(wd_vhdp_q, TN_PFX_NONE, "0x66018088")
+TN_CELL_FN(wd_vcrsp_t, TN_PFX_NONE, "0xf2818008")
+TN_CELL_FN(wd_vqmul_q, TN_PFX_NONE, "0xf2818088")
+TN_CELL_FN(wd_vtfm_q, TN_PFX_NONE, "0xf1808488")
+TN_CELL_FN(wd_vhtfm_q, TN_PFX_NONE, "0xf1808408")
+TN_CELL_FN(wd_vmmul_q, TN_PFX_NONE, "0xf0008488")
+TN_CELL_FN(wd_vmmul_qt, TN_PFX_NONE, "0xf000a488")
+TN_CELL_FN(wd_vmscl_q, TN_PFX_NONE, "0xf2018488")
+TN_CELL_FN(wd_vmzero_q, TN_PFX_NONE, "0xf3868088")
+TN_CELL_FN(wd_vmidt_q, TN_PFX_NONE, "0xf3838088")
+TN_CELL_FN(wd_vmone_q, TN_PFX_NONE, "0xf3878088")
+TN_CELL_FN(wd_vmmov_q, TN_PFX_NONE, "0xf3808488")
+TN_CELL_FN(wd_vrot_q, TN_PFX_NONE, "0xf3a48088")
+
+struct wd_form {
+    const char *stem;
+    uint32_t word;
+    wd_fn fn;
+    unsigned kind;
+    unsigned lanes;   /* vector lanes (WD_VEC, WD_TFM) */
+    unsigned nscen;   /* cells */
+    unsigned nout;    /* destination words recorded per cell */
+    unsigned pos0, cnt0, pos1, cnt1; /* recorded source image words: two runs */
+};
+
+static const struct wd_form s_wd_forms[WD_FORMS] = {
+    {"vdot-p", 0x64810088u, wd_vdot_p, WD_VEC, 2, 33, 1, 0, 2, 4, 2},
+    {"vdot-q", 0x64818088u, wd_vdot_q, WD_VEC, 4, 73, 1, 0, 4, 4, 4},
+    {"vhdp-q", 0x66018088u, wd_vhdp_q, WD_VEC, 4, 73, 1, 0, 4, 4, 4},
+    {"vcrsp-t", 0xf2818008u, wd_vcrsp_t, WD_VEC, 3, 57, 3, 0, 3, 4, 3},
+    {"vqmul-q", 0xf2818088u, wd_vqmul_q, WD_VEC, 4, 73, 4, 0, 4, 4, 4},
+    {"vtfm-q", 0xf1808488u, wd_vtfm_q, WD_TFM, 4, 73, 4, 0, 4, 16, 16},
+    {"vhtfm-q", 0xf1808408u, wd_vhtfm_q, WD_TFM, 3, 65, 4, 0, 3, 16, 16},
+    {"vmmul-q", 0xf0008488u, wd_vmmul_q, WD_MMUL, 0, 73, 16, 0, 16, 16, 16},
+    {"vmmul-qt", 0xf000a488u, wd_vmmul_qt, WD_MMUL, 0, 1, 16, 0, 16, 16, 16},
+    {"vmscl-q", 0xf2018488u, wd_vmscl_q, WD_MSCL, 0, 17, 16, 4, 1, 16, 16},
+    {"vmzero-q", 0xf3868088u, wd_vmzero_q, WD_CONST, 0, 1, 16, 0, 0, 0, 0},
+    {"vmidt-q", 0xf3838088u, wd_vmidt_q, WD_CONST, 0, 1, 16, 0, 0, 0, 0},
+    {"vmone-q", 0xf3878088u, wd_vmone_q, WD_CONST, 0, 1, 16, 0, 0, 0, 0},
+    {"vmmov-q", 0xf3808488u, wd_vmmov_q, WD_MMOV, 0, 9, 16, 16, 16, 0, 0},
+    {"vrot-q", 0xf3a48088u, wd_vrot_q, WD_ROT, 0, 16, 4, 0, 1, 0, 0},
+};
+
+/* +qNaN, -NaN, sNaN (quiet bit clear, non-zero payload), +inf, -inf, +-smallest denormal, -0. */
+static const uint32_t s_wd_spec[WD_SPECIALS] = {
+    0x7fc00011u, 0xffc00022u, 0x7f800033u, 0x7f800000u,
+    0xff800000u, 0x00000001u, 0x80000001u, 0x80000000u,
+};
+static const uint32_t s_wd_va[4] = {0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u};
+static const uint32_t s_wd_vb[4] = {0x3f400000u, 0x40800000u, 0xbfc00000u, 0x40200000u};
+/* 1, 2, -3, 0.5, -1.5, 4, 0.25, -2, 3.5, -0.75, 1.25, 6, -4.5, 0.125, 2.75, -1. */
+static const uint32_t s_wd_mat[16] = {
+    0x3f800000u, 0x40000000u, 0xc0400000u, 0x3f000000u, 0xbfc00000u, 0x40800000u,
+    0x3e800000u, 0xc0000000u, 0x40600000u, 0xbf400000u, 0x3fa00000u, 0x40c00000u,
+    0xc0900000u, 0x3e000000u, 0x40300000u, 0xbf800000u,
+};
+/* 2^-24 = 0x33800000, 2^24 = 0x4b800000, 1e8 = 0x4cbebc20. */
+static const uint32_t s_wd_ord[WD_ORDERS][4] = {
+    {0x3f800000u, 0x33800000u, 0x33800000u, 0x33800000u},
+    {0x33800000u, 0x33800000u, 0x33800000u, 0x3f800000u},
+    {0x4b800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u},
+    {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x4b800000u},
+    {0x4cbebc20u, 0x3f800000u, 0xccbebc20u, 0x3f800000u},
+    {0x3f800000u, 0x4cbebc20u, 0x3f800000u, 0xccbebc20u},
+    {0x4cbebc20u, 0xccbebc20u, 0x3f800000u, 0x3f800000u},
+    {0x3f800000u, 0x3f800000u, 0x4cbebc20u, 0xccbebc20u},
+};
+static const uint32_t s_wd_angle[16] = {
+    0x00000000u, 0x80000000u, 0x3e800000u, 0x3f000000u, 0x3f800000u, 0x3fc00000u,
+    0x40000000u, 0x40400000u, 0x40800000u, 0x42c80000u, 0xbf000000u, 0xbf800000u,
+    0x7f800000u, 0xff800000u, 0x7fc00011u, 0x00000001u,
+};
+
+static uint32_t s_wd_in[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+static uint32_t s_wd_out[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+
+/* Overlays the cell's operands on the background image s_wd_in (word i = 0x3f800000 | i << 16).
+   Cell 0 is the finite base; the sweep and order cells follow as the comment above lists them. */
+static void wd_build(const struct wd_form *f, unsigned idx)
+{
+    uint32_t *img = s_wd_in;
+    const unsigned n = f->lanes;
+    switch (f->kind) {
+    case WD_VEC: {
+        uint32_t a[4] = {WD_ONE, WD_ONE, WD_ONE, WD_ONE};
+        uint32_t b[4] = {WD_ONE, WD_ONE, WD_ONE, WD_ONE};
+        for (unsigned l = 0; l < n; l++) {
+            a[l] = s_wd_va[l];
+            b[l] = s_wd_vb[l];
+        }
+        if (idx >= 1u + 16u * n) {
+            const unsigned o = idx - 1u - 16u * n;
+            for (unsigned l = 0; l < n; l++) {
+                a[l] = s_wd_ord[o][l];
+                b[l] = WD_ONE;
+            }
+        } else if (idx >= 1u) {
+            const unsigned k = idx - 1u;
+            const unsigned lane = (k / 8u) % n;
+            if (k / (8u * n) == 0u) {
+                a[lane] = s_wd_spec[k % 8u];
+            } else {
+                b[lane] = s_wd_spec[k % 8u];
+            }
+        }
+        for (unsigned l = 0; l < n; l++) {
+            img[l] = a[l];
+            img[4u + l] = b[l];
+        }
+        break;
+    }
+    case WD_TFM: {
+        uint32_t v[4] = {WD_ONE, WD_ONE, WD_ONE, WD_ONE};
+        uint32_t m[16];
+        for (unsigned l = 0; l < n; l++) {
+            v[l] = s_wd_va[l];
+        }
+        for (unsigned i = 0; i < 16u; i++) {
+            m[i] = s_wd_mat[i];
+        }
+        if (idx >= 1u + 8u * n + 32u) {
+            const unsigned o = idx - 1u - 8u * n - 32u;
+            for (unsigned l = 0; l < n; l++) {
+                v[l] = s_wd_ord[o][l];
+            }
+            for (unsigned i = 0; i < 16u; i++) {
+                m[i] = WD_ONE;
+            }
+        } else if (idx >= 1u + 8u * n) {
+            const unsigned k = idx - 1u - 8u * n;
+            m[5u * (k / 8u)] = s_wd_spec[k % 8u];
+        } else if (idx >= 1u) {
+            const unsigned k = idx - 1u;
+            v[k / 8u] = s_wd_spec[k % 8u];
+        }
+        for (unsigned l = 0; l < n; l++) {
+            img[l] = v[l];
+        }
+        for (unsigned i = 0; i < 16u; i++) {
+            img[16u + i] = m[i];
+        }
+        break;
+    }
+    case WD_MMUL: {
+        /* vt = image 0-15 (mb), vs = image 16-31 (ma). */
+        uint32_t ma[16];
+        uint32_t mb[16];
+        for (unsigned i = 0; i < 16u; i++) {
+            ma[i] = s_wd_mat[i];
+            mb[i] = s_wd_mat[(5u * i + 3u) & 15u];
+        }
+        if (idx >= 65u) {
+            const unsigned j = idx - 65u;
+            const uint32_t *vec = s_wd_ord[(j % 4u) * 2u];
+            for (unsigned i = 0; i < 16u; i++) {
+                if (j / 4u == 0u) {
+                    ma[i] = WD_ONE;
+                    mb[i] = vec[i % 4u];
+                } else {
+                    mb[i] = WD_ONE;
+                    ma[i] = vec[i % 4u];
+                }
+            }
+        } else if (idx >= 33u) {
+            const unsigned k = idx - 33u;
+            mb[5u * (k / 8u)] = s_wd_spec[k % 8u];
+        } else if (idx >= 1u) {
+            const unsigned k = idx - 1u;
+            ma[5u * (k / 8u)] = s_wd_spec[k % 8u];
+        }
+        for (unsigned i = 0; i < 16u; i++) {
+            img[i] = mb[i];
+            img[16u + i] = ma[i];
+        }
+        break;
+    }
+    case WD_MSCL: {
+        uint32_t m[16];
+        uint32_t scalar = 0x40200000u;
+        for (unsigned i = 0; i < 16u; i++) {
+            m[i] = s_wd_mat[i];
+        }
+        if (idx >= 9u) {
+            m[0] = s_wd_spec[idx - 9u];
+        } else if (idx >= 1u) {
+            scalar = s_wd_spec[idx - 1u];
+        }
+        img[4] = scalar;
+        for (unsigned i = 0; i < 16u; i++) {
+            img[16u + i] = m[i];
+        }
+        break;
+    }
+    case WD_MMOV: {
+        for (unsigned i = 0; i < 16u; i++) {
+            img[16u + i] = s_wd_mat[i];
+        }
+        if (idx >= 1u) {
+            img[16u + 5u] = s_wd_spec[idx - 1u];
+        }
+        break;
+    }
+    case WD_ROT:
+        img[0] = s_wd_angle[idx];
+        break;
+    default:
+        break;
+    }
+}
+
+/* One cell: background image, operand overlay, the word; dst gets the recorded source words and
+   then the destination words (image 32..), and the number of words is returned. */
+static unsigned wd_exec(const struct wd_form *f, unsigned idx, uint32_t *dst)
+{
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        s_wd_in[i] = 0x3f800000u | (i << 16);
+    }
+    wd_build(f, idx);
+    const unsigned c0 = f->cnt0;
+    const unsigned c1 = f->cnt1;
+    const unsigned nout = f->nout;
+    unsigned count = 0;
+    for (unsigned i = 0; i < c0; i++) {
+        dst[count++] = s_wd_in[f->pos0 + i];
+    }
+    for (unsigned i = 0; i < c1; i++) {
+        dst[count++] = s_wd_in[f->pos1 + i];
+    }
+    uint32_t cc[2] = {0u, 0u};
+    f->fn(s_wd_in, s_wd_out, cc);
+    for (unsigned i = 0; i < nout; i++) {
+        dst[count++] = s_wd_out[WD_DST + i];
+    }
+    return count;
+}
+
+/* One durable step per form group, then its records: as many cells as fit in WD_MAX_WORDS. */
+static void wd_group(unsigned pass, const struct wd_form *f)
+{
+    char name[64];
+    uint32_t w[WD_MAX_WORDS];
+    const unsigned per = WD_MAX_WORDS / (f->cnt0 + f->cnt1 + f->nout);
+    const unsigned nrec = (f->nscen + per - 1u) / per;
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    for (unsigned rec = 0; rec < nrec; rec++) {
+        const unsigned first = rec * per;
+        unsigned last = first + per;
+        if (last > f->nscen) {
+            last = f->nscen;
+        }
+        unsigned count = 0;
+        for (unsigned s = first; s < last; s++) {
+            count += wd_exec(f, s, &w[count]);
+        }
+        if (nrec > 1u) {
+            snprintf(name, sizeof(name), "%s-p%u-%u", f->stem, pass, rec);
+        }
+        hle_record(name, "PASS", f->word, w, count);
+    }
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < WD_FORMS; form++) {
+            wd_group(pass, &s_wd_forms[form]);
+        }
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_WIDE_DOT */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV

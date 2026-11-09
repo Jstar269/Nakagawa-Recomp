@@ -2344,6 +2344,44 @@ _register_campaign_probe(
     dict(VFPU_BASIC_ARITH_ROWS),
 )
 
+# vfpu-wide-dot-matrix (173, probe_hle_issues.c): the #326 wide dot-product and matrix VFPU forms,
+# two passes, register-only. Every row is emitted on every run, so the stream is fixed-shape. Per
+# pass, in the order the probe runs them, each form is a run of cells packed into records of at
+# most 80 words; a cell is its recorded source image words followed by its destination words.
+# A form with one record is <stem>-p<pass>, else <stem>-p<pass>-<record>.
+VFPU_WIDE_DOT_PASSES = 2
+VFPU_WIDE_DOT_MAX_WORDS = 80
+#: (stem, source words per cell, destination words per cell, cells).
+VFPU_WIDE_DOT_FORMS = (
+    ("vdot-p", 4, 1, 33), ("vdot-q", 8, 1, 73), ("vhdp-q", 8, 1, 73), ("vcrsp-t", 6, 3, 57),
+    ("vqmul-q", 8, 4, 73), ("vtfm-q", 20, 4, 73), ("vhtfm-q", 19, 4, 65),
+    ("vmmul-q", 32, 16, 73), ("vmmul-qt", 32, 16, 1), ("vmscl-q", 17, 16, 17),
+    ("vmzero-q", 0, 16, 1), ("vmidt-q", 0, 16, 1), ("vmone-q", 0, 16, 1),
+    ("vmmov-q", 16, 16, 9), ("vrot-q", 1, 4, 16),
+)
+
+
+def _vfpu_wide_dot_pass_rows(p: int) -> list[tuple[str, int]]:
+    rows: list[tuple[str, int]] = []
+    for stem, nin, nout, cells in VFPU_WIDE_DOT_FORMS:
+        width = nin + nout
+        per = VFPU_WIDE_DOT_MAX_WORDS // width
+        records = -(-cells // per)
+        for rec in range(records):
+            count = min(per, cells - rec * per)
+            name = f"{stem}-p{p}" if records == 1 else f"{stem}-p{p}-{rec}"
+            rows.append((name, count * width))
+    return rows
+
+
+VFPU_WIDE_DOT_ROWS = tuple(
+    row for p in range(VFPU_WIDE_DOT_PASSES) for row in _vfpu_wide_dot_pass_rows(p))
+VFPU_WIDE_DOT_CASES = tuple(case for case, _count in VFPU_WIDE_DOT_ROWS)
+_register_campaign_probe(
+    "vfpu-wide-dot-matrix", "PSP-VFPU-WIDEDOT-001", VFPU_WIDE_DOT_CASES,
+    dict(VFPU_WIDE_DOT_ROWS),
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -3029,7 +3067,7 @@ VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: with either is not a measurement of the cells it names.
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
                                    "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov", "vfpu-vus2i", "vfpu-basic-arith",
-                                   "hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload"})
+                                   "hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-wide-dot-matrix"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (
