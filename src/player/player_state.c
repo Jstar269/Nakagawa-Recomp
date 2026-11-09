@@ -5185,6 +5185,8 @@ static bool player_prepare_boot_event_file(PlayerApp *app) {
     app->boot_event_read_offset = 0;
     player_clear_stalled_game_notice(app, false);
     app->stalled_game_restore_game_front_requested = false;
+    app->render_path_known = false;
+    app->render_path_disc[0] = '\0';
 
     ++player_boot_event_sequence;
     if (!player_format_boot_event_path(app->boot_event_file_path,
@@ -5288,6 +5290,7 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
     }
     snprintf(work->boot_event_file_path, sizeof(work->boot_event_file_path), "%s",
              app->boot_event_file_path);
+    snprintf(app->render_path_disc, sizeof(app->render_path_disc), "%s", game->disc_id);
     (void)player_resolve_input_profile(app, game, work->input_profile_path,
                                        sizeof(work->input_profile_path));
     return true;
@@ -5834,6 +5837,71 @@ static bool player_read_semantic_stop(const char *path, char *boundary,
 #define PLAYER_STALLED_NOTICE_SECONDS 30u
 #define PLAYER_BOOT_EVENT_LINE_MAX 1024u
 
+/* ---- Render notice (#2151) --------------------------------------------------
+   The runtime reports how it draws the picture (nk_render_path_event_format); a slower
+   path than the one it asked for is named on the game's page, as a fact with what may fix
+   it, never as a failure. */
+
+bool player_render_notice_text(NkRenderFallback fallback, const char **heading,
+                               const char **text) {
+    const char *h = NULL;
+    const char *t = NULL;
+    switch (fallback) {
+        case NK_RENDER_FALLBACK_GDI_PRESENTER:
+            h = "Drawn in software";
+            t = "Vulkan did not start on this PC, so this game is drawn in software and shown "
+                "in a basic Windows window. The Internal resolution setting has no effect, and "
+                "the game may run slower. Updating the graphics driver may help.";
+            break;
+        case NK_RENDER_FALLBACK_SOFTWARE_GE:
+            h = "Drawn in software";
+            t = "The GPU renderer did not start on this PC, so this game is drawn in software. "
+                "The Internal resolution setting has no effect, and the game may run slower. "
+                "Updating the graphics driver may help.";
+            break;
+        case NK_RENDER_FALLBACK_NONE:
+        case NK_RENDER_FALLBACK_COUNT:
+        default:
+            break;
+    }
+    if (heading) *heading = h;
+    if (text) *text = t;
+    return h != NULL;
+}
+
+bool player_app_render_notice(const PlayerApp *app, const char *disc_id, const char **heading,
+                              const char **text) {
+    if (heading) *heading = NULL;
+    if (text) *text = NULL;
+    if (!app || !disc_id || !disc_id[0] || !app->render_path_known ||
+        strcmp(app->render_path_disc, disc_id) != 0 ||
+        (unsigned)app->render_path.fallback >= NK_RENDER_FALLBACK_COUNT ||
+        app->render_notice_hidden[app->render_path.fallback]) {
+        return false;
+    }
+    return player_render_notice_text(app->render_path.fallback, heading, text);
+}
+
+void player_app_hide_render_notice(PlayerApp *app) {
+    if (!app || !app->render_path_known ||
+        (unsigned)app->render_path.fallback >= NK_RENDER_FALLBACK_COUNT) {
+        return;
+    }
+    app->render_notice_hidden[app->render_path.fallback] = true;
+    player_dev_log_add(app, "runtime", "render notice hidden for this session: %s",
+                       nk_render_fallback_name(app->render_path.fallback));
+}
+
+void player_app_consume_render_path_line(PlayerApp *app, const char *line) {
+    NkRenderPath path;
+    if (!app || app->render_path_known || !nk_render_path_event_parse(line, &path)) return;
+    app->render_path = path;
+    app->render_path_known = true;
+    player_dev_log_add(app, "runtime", "render path: presenter=%s ge=%s fallback=%s",
+                       path.vulkan ? "vulkan" : "gdi", path.gpu_ge ? "gpu" : "software",
+                       nk_render_fallback_name(path.fallback));
+}
+
 static void player_consume_stall_event_line(PlayerApp *app, const char *line) {
     static const char stalled_prefix[] =
         "BOOT_EVENT phase=stalled observation=no_new_flip ";
@@ -5933,6 +6001,7 @@ static void player_monitor_stalled_game_events(PlayerApp *app) {
             if (!overflow) {
                 line[used] = '\0';
                 player_consume_stall_event_line(app, line);
+                player_app_consume_render_path_line(app, line);
             }
             app->boot_event_read_offset = offset;
             used = 0u;
