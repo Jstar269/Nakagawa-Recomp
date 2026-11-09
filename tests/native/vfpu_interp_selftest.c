@@ -2273,6 +2273,7 @@ static int check_vfpu_basic_arith_measured(void) {
         {3, 0xffc00022u, 0x3f800000u, 0xff800001u, "vdiv(-qNaN, 1) takes the XOR of the signs"},
         /* Derived from the rule, not console cells: the grid reaches no denormal result of
          * vadd, vsub or vmul, so these pin the output flush that vdiv's cells imply. */
+        {0, 0x00c00000u, 0x80800000u, 0x00000000u, "derived: vadd of two normals flushes a denormal result"},
         {1, 0x00c00000u, 0x00800000u, 0x00000000u, "derived: vsub of two normals flushes a denormal result"},
         {2, 0x20000000u, 0x1f800000u, 0x00000000u, "derived: vmul of 2^-63 and 2^-64 flushes 2^-127"},
     };
