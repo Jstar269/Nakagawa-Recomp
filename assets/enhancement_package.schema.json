@@ -188,9 +188,31 @@
               "argument_x2",
               "count_x2_even",
               "gate_30hz_hold",
-              "gate_30hz_alt"
+              "gate_30hz_alt",
+              "clip_x_widen"
             ],
-            "description": "Declarative frame-rate rescale transform class."
+            "description": "Declarative site transform class: a frame-rate rescale, or (clip_x_widen, category guest_memory_code_hook only) a widening of the title's own visibility test (contract section 10.8)."
+          },
+          "clip_register": {
+            "type": "string",
+            "enum": [
+              "v0",
+              "v1"
+            ],
+            "description": "clip_x_widen only: the result register that holds the guest pointer the call at the site returns."
+          },
+          "clip_offsets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536,
+              "multipleOf": 16
+            },
+            "description": "clip_x_widen only: byte offsets from that pointer of the column-major 4x4 float clip matrices whose x output row the runtime scales."
           },
           "arguments": {
             "type": "array",

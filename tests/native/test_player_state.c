@@ -3114,7 +3114,8 @@ static void test_platform_seam_answers_for_this_host(void) {
                   "Nakagawa could not find your per-user data folder. "
                   "Set XDG_DATA_HOME or HOME") == 0);
     assert(strcmp(player_data_dir_unavailable_text(NK_HOST_ANDROID),
-                  player_data_dir_unavailable_text(NK_HOST_LINUX)) == 0);
+                  "Nakagawa could not find the app's data folder, which Android names in "
+                  "NK_ANDROID_DATA_DIR when the app starts. Start Nakagawa from its app icon") == 0);
     assert(strcmp(player_folder_open_failure_hint(NK_HOST_WINDOWS),
                   "Windows could not open it.") == 0);
     assert(strstr(player_folder_open_failure_hint(NK_HOST_LINUX), "xdg-utils") != NULL);
@@ -3392,10 +3393,24 @@ static void test_platform_cards_name_this_platform(void) {
     assert(app != NULL);
     nk_ps_set_env("XDG_DATA_HOME", NULL);
     nk_ps_set_env("HOME", NULL);
+#if defined(__ANDROID__)
+    /* Android's data root is only NK_ANDROID_DATA_DIR (nk_platform_posix.c), which the test
+       isolation sets; HOME and XDG are not read there. */
+    bool had_android_data = false;
+    char *saved_android_data = capture_environment_value("NK_ANDROID_DATA_DIR", &had_android_data);
+    nk_ps_set_env("NK_ANDROID_DATA_DIR", NULL);
+#endif
     assert(!player_app_open_prerequisite_about(app));
     assert(strcmp(app->last_error.error_code, "DATA_DIR_UNAVAILABLE") == 0);
     assert(strcmp(app->last_error.title, "Data folder not found") == 0); /* #1974: sentence case */
+#if defined(__ANDROID__)
+    assert(strstr(app->last_error.message, "NK_ANDROID_DATA_DIR") != NULL);
+    assert(strstr(app->last_error.message, "XDG_DATA_HOME") == NULL);
+    restore_environment_value("NK_ANDROID_DATA_DIR", saved_android_data, had_android_data);
+    free(saved_android_data);
+#else
     assert(strstr(app->last_error.message, "XDG_DATA_HOME or HOME") != NULL);
+#endif
     assert(strstr(app->last_error.message, "LOCALAPPDATA") == NULL);
     restore_environment_value("XDG_DATA_HOME", saved_xdg, had_xdg);
     restore_environment_value("HOME", saved_home, had_home);
@@ -4384,6 +4399,9 @@ static void test_build_outcome_is_shown_once_per_session(void) {
     printf("[PLAYER_STATE_TEST] build failure and cancel are shown once per session PASS\n");
 }
 
+/* Set when test_package_build_lifecycle skips its package rebuild steps (Android only). */
+static bool s_package_rebuild_skipped = false;
+
 static void test_package_build_lifecycle(const char *self_executable) {
     assert(self_executable && self_executable[0]);
     char sep = nk_platform_path_separator();
@@ -4581,7 +4599,49 @@ static void test_package_build_lifecycle(const char *self_executable) {
     }
     assert(rebuild_status == NK_RUNTIME_PACKAGE_INCOMPATIBLE);
     nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "success");
-#if !defined(_WIN32) && !defined(_WIN64)
+#if defined(__ANDROID__)
+    /* On Android the package build's Python is only the app's libnk_python.so in its native
+       library folder (package_builder_find_python); the PYTHON stub above and PATH are not
+       searched, so python is the first tool missing and the card says where it looked. It
+       must not give the Linux advice: no PATH search for python, no PPA, no build-essential. */
+    assert(!player_app_rebuild_package(rebuild_app, 0));
+    assert(rebuild_app->active_view == VIEW_ERROR);
+    assert(strcmp(rebuild_app->last_error.error_code, "BUILD_TOOLCHAIN_MISSING") == 0);
+    assert(strstr(rebuild_app->last_error.message,
+                  "python was not found in the app's native library folder (libnk_python.so)") != NULL);
+    assert(strstr(rebuild_app->last_error.message, "ships no CPython 3.15") != NULL);
+    assert(strstr(rebuild_app->last_error.message, "downloads build tools only on Windows") != NULL);
+    assert(strstr(rebuild_app->last_error.message, "was not found on PATH") == NULL);
+    assert(strstr(rebuild_app->last_error.message, "deadsnakes") == NULL);
+    assert(strstr(rebuild_app->last_error.message, "build-essential") == NULL);
+    assert(!rebuild_app->build_session.is_building);
+    printf("[PLAYER_STATE_TEST] Android build tools: the card names libnk_python.so, no PATH or PPA advice PASS\n");
+    /* Every later step starts a package build, which needs a runnable Python from the tool
+       folder; the test's own PYTHON stub cannot be one there (#360). The rest of this
+       function is skipped and main() exits 77 after the other subtests have run. */
+    printf("SKIP player_state_test package rebuild lifecycle (exit 77): no libnk_python.so in the "
+           "app's native library folder (#360)\n");
+    s_package_rebuild_skipped = true;
+    free(rebuild_app);
+    assert(test_remove_tree(rebuild_root));
+    restore_environment_value("PYTHON", saved_python, had_python);
+    restore_environment_value("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE",
+                              saved_build_mode, had_build_mode);
+    restore_environment_value("NAKAGAWA_TEST_PACKAGE_REBUILD_TITLE_ID",
+                              saved_title_id, had_title_id);
+    restore_environment_value("NAKAGAWA_TEST_PACKAGE_REBUILD_SOURCE_MEDIA",
+                              saved_source_media, had_source_media);
+    restore_environment_value("NK_INSTALL_ROOT", saved_install_override,
+                              had_install_override);
+    restore_environment_value("PATH", saved_path, had_path);
+    free(saved_path);
+    free(saved_python);
+    free(saved_build_mode);
+    free(saved_title_id);
+    free(saved_source_media);
+    free(saved_install_override);
+    return;
+#elif !defined(_WIN32) && !defined(_WIN64)
     /* gcc alone: the card names make and the package that provides it, and says
        nothing is downloaded here. It used to say only that Linux build-tool
        installation was in the works, even with every tool installed. */
@@ -6122,6 +6182,20 @@ static void test_bundled_prerequisite_build(const char *self_executable) {
     nk_ps_set_env("NK_INSTALL_ROOT", NULL);
     nk_ps_set_env("NAKAGAWA_TEST_PACKAGE_REBUILD_MODE", "reuse");
 
+#if defined(__ANDROID__)
+    /* On Android the build's Python is only the app's libnk_python.so (#360); a bundle's
+       python.exe is never used there, so the bundled build is refused by name instead. */
+    (void)prereqs;
+    (void)path;
+    (void)sep;
+    assert(!player_app_start_package_build(app, 0));
+    assert(strcmp(app->last_error.error_code, "BUILD_TOOLCHAIN_MISSING") == 0);
+    assert(strstr(app->last_error.message, "(libnk_python.so)") != NULL);
+    assert(!app->build_session.is_building);
+    printf("SKIP player_state_test bundled prerequisites (exit 77): the bundle's Python is not "
+           "used on Android (#360)\n");
+    s_package_rebuild_skipped = true;
+#else
     bool started = player_app_start_package_build(app, 0);
     if (!started) {
         fprintf(stderr, "bundled build refused: %s: %s\n", app->last_error.error_code,
@@ -6162,6 +6236,8 @@ static void test_bundled_prerequisite_build(const char *self_executable) {
     assert(app->prerequisites.phase != PLAYER_PREREQ_CONSENT);
     assert(!app->build_session.is_building);
 
+#endif
+
     restore_environment_value("PATH", saved_path, had_path);
     restore_environment_value("PYTHON", saved_python, had_python);
     restore_environment_value("NK_INSTALL_ROOT", saved_override, had_override);
@@ -6172,7 +6248,9 @@ static void test_bundled_prerequisite_build(const char *self_executable) {
     free(saved_mode);
     free(app);
     assert(native_test_remove_tree(root));
+#if !defined(__ANDROID__)
     printf("[PLAYER_STATE_TEST] bundled prerequisites PASS\n");
+#endif
 }
 
 /* ---- PSN releases of UMD games (#295 phase 2) ---------------------------- */
@@ -7836,7 +7914,7 @@ static void test_play_mode_settings(void) {
                                       "\"text\": \"off\", \"readout\": \"off\", "
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"upscale\": \"off\"},") != NULL);
+                                      "\"cull\": \"off\", \"upscale\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8033,7 +8111,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
-                                      "\"upscale\": \"off\"}") != NULL);
+                                      "\"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8059,7 +8137,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"upscale\": \"off\"}") != NULL);
+                                      "\"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8086,6 +8164,70 @@ static void test_play_mode_sas_settings(void) {
     free(back);
     free(app);
     printf("PASS: clean pitched sound is read, resolved and saved at both levels\n");
+}
+
+/* Wider culling (contract 11.3.6, 11.2 item 2): a library "cull" and a title's own "cull" are read,
+ * the title's wins, both survive a save and a load, only an Ace launch carries the key, and a file
+ * without it leaves it off. */
+static void test_play_mode_cull_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_cull_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* The library on; Ace is a title's own choice. One Ace title turns it off, another follows. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"cull\": \"on\"},"
+        " \"title_play\": {\"TEST92001\": {\"mode\": \"ace\", \"cull\": \"off\"},"
+        " \"TEST92002\": {\"mode\": \"ace\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_CULL] == 1);
+    player_play_resolve(&app->settings, "TEST92001", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_CULL] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "cull") == NULL);
+    player_play_resolve(&app->settings, "TEST92002", &r);       /* follows the library */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_CULL] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strcmp(line + strlen(line) - 8, ";cull=on") == 0);
+    player_play_resolve(&app->settings, "TEST92003", &r);       /* Enhanced: read, never launched */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_CULL] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "cull") == NULL);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_CULL] == 1);
+    player_play_resolve(&back->settings, "TEST92001", &r);
+    assert(r.on && r.part[PLAYER_PART_CULL] == 0);
+
+    /* A file that never had the key leaves it off. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"},"
+        " \"title_play\": {\"TEST92001\": {\"mode\": \"ace\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_CULL] == 0);
+    player_play_resolve(&app->settings, "TEST92001", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_CULL] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "cull") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: wider culling is read, resolved and saved at both levels, and only Ace launches it\n");
 }
 
 /* Graphics presets (#2150), an overlay: choosing one changes no row, an Enhanced or Ace
@@ -8705,7 +8847,7 @@ static void test_play_mode_upscale_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"upscale\": \"fsr1\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"cull\": \"off\", \"upscale\": \"fsr1\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9380,6 +9522,7 @@ int main(int argc, char **argv) {
     test_play_mode_settings_mapping();
     test_play_mode_smooth_motion();
     test_play_mode_sas_settings();
+    test_play_mode_cull_settings();
     test_graphics_presets();
     test_play_mode_line_parses_in_runtime();
     test_play_mode_upscale_settings();
@@ -13323,6 +13466,26 @@ int main(int argc, char **argv) {
      * retained child handle -- and no repository-tracked file changes across
      * all runs. The staged executable is a self-copy of this test binary
      * standing in for a recompiled runtime; the package is synthetic. */
+#if defined(__ANDROID__)
+    /* Every launch in this block spawns the runtime, which Android does only through the
+       app's TitleActivity over JNI; a program run from adb shell has no Java VM for it, and
+       nk_launch_start fails closed there (launch_resolution_test skips its spawning subtests
+       for the same reason). It runs inside the app instead. */
+    printf("SKIP player_state_test subtest 20 (exit 77): a launch needs the app's TitleActivity "
+           "(#360)\n");
+    s_package_rebuild_skipped = true;
+    /* Helpers only this block uses. */
+    (void)write_iso_with_fixture_eboot;
+    (void)set_environment_value;
+    (void)path_is_within;
+    (void)get_working_directory;
+    (void)git_status_snapshot;
+    (void)files_identical;
+    (void)read_repeat_launch_report;
+    (void)run_log_contains;
+    (void)append_runtime_event;
+    (void)repeat_launch_and_settle;
+#else
     printf("[PLAYER_STATE_TEST] Subtest 20: repeat launch through the player session path\n");
     fflush(stdout);
     {
@@ -14261,6 +14424,7 @@ int main(int argc, char **argv) {
         test_rmdir(user_root);
         test_rmdir(scratch);
     }
+#endif
     /* 20b. A crafted disc controls module directory names; only plain names
        may be written under the private per-title folder. */
     {
@@ -14386,6 +14550,17 @@ int main(int argc, char **argv) {
         player_app_prereq_cancel(capp);
         assert(capp->prerequisites.phase == PLAYER_PREREQ_CANCELLED);
         assert(capp->active_view == VIEW_LIBRARY);
+#elif defined(__ANDROID__)
+        /* No download on Android either (#306), and its Python is only the app's
+           libnk_python.so (#360): the card names that folder, not a PATH search. */
+        assert(!player_app_start_package_build(capp, 0));
+        assert(strcmp(capp->last_error.error_code, "BUILD_TOOLCHAIN_MISSING") == 0);
+        assert(strstr(capp->last_error.message, "(libnk_python.so)") != NULL);
+        assert(strstr(capp->last_error.message, "was not found on PATH") == NULL);
+        assert(strstr(capp->last_error.message, "downloads build tools only on Windows") != NULL);
+        assert(strstr(capp->last_error.message, "in the works") == NULL);
+        assert(strstr(capp->last_error.message, "#") == NULL);
+        assert(capp->prerequisites.phase != PLAYER_PREREQ_CONSENT);
 #else
         /* Only Windows has a pinned download: other hosts use the system's own
            tools, so the card names the first missing one and its package, and
@@ -14767,13 +14942,23 @@ int main(int argc, char **argv) {
         }
 #endif
 
-        /* The reset: every folder is renamed with the stamp; logs stay. */
+        /* The reset: every folder is renamed with the stamp; logs stay. Where the logs
+           folder is inside a moved folder (a rooted layout: Android, or a data-root
+           override), it is moved back, so that folder holds the logs alone again. */
         assert(player_app_factory_reset(reset, "20261029-010205"));
         assert(reset->factory_reset_done && reset->should_quit);
         for (size_t i = 0; i < folder_count; ++i) {
             char moved[NK_MAX_PATH + 64];
             snprintf(moved, sizeof(moved), "%s-backup-20261029-010205", folders[i]);
-            assert(!nk_platform_dir_exists(folders[i]));
+            if (native_test_path_within(logs_dir, folders[i])) {
+                char moved_logs[NK_MAX_PATH * 2 + 64];
+                snprintf(moved_logs, sizeof(moved_logs), "%s%s", moved,
+                         logs_dir + strlen(folders[i]));
+                assert(nk_platform_dir_exists(folders[i]));
+                assert(!nk_platform_dir_exists(moved_logs));
+            } else {
+                assert(!nk_platform_dir_exists(folders[i]));
+            }
             assert(nk_platform_dir_exists(moved));
         }
         for (size_t i = 0; i < 4u; ++i) {
@@ -14805,15 +14990,58 @@ int main(int argc, char **argv) {
             assert(test_rmdir(moved) == 0);
         }
 
-        /* Put this test's data back for anything that runs after it. */
+        /* Put this test's data back for anything that runs after it. A folder the logs
+           were moved back into first returns them to its backup. */
         for (size_t i = 0; i < folder_count; ++i) {
             char moved[NK_MAX_PATH + 64];
             snprintf(moved, sizeof(moved), "%s-backup-20261029-010205", folders[i]);
+            if (native_test_path_within(logs_dir, folders[i])) {
+                char moved_logs[NK_MAX_PATH * 2 + 64];
+                snprintf(moved_logs, sizeof(moved_logs), "%s%s", moved,
+                         logs_dir + strlen(folders[i]));
+                assert(nk_rename_utf8(logs_dir, moved_logs) == 0);
+                assert(test_rmdir(folders[i]) == 0);
+            }
             assert(nk_rename_utf8(moved, folders[i]) == 0);
         }
         for (size_t i = 0; i < 4u; ++i) remove(marks[i]);
         free(reset);
         printf("[PLAYER_STATE_TEST] factory reset PASSED\n");
+    }
+    {
+        /* A data-root override is a rooted layout, as Android's is: the logs folder is
+           inside the data folder, which the reset moves aside, and the logs are moved
+           back so they stay where they were (#360). */
+        char rsep = nk_platform_path_separator();
+        char cache[NK_MAX_PATH];
+        char root[NK_MAX_PATH + 32];
+        char config[NK_MAX_PATH + 48];
+        char logs[NK_MAX_PATH + 48];
+        char kept_log[NK_MAX_PATH + 64];
+        char moved_root[NK_MAX_PATH + 64];
+        char moved_config[NK_MAX_PATH + 96];
+        assert(nk_platform_get_path(NK_PATH_CACHE, cache, sizeof(cache)));
+        snprintf(root, sizeof(root), "%s%creset-rooted", cache, rsep);
+        snprintf(config, sizeof(config), "%s%cconfig", root, rsep);
+        snprintf(logs, sizeof(logs), "%s%clogs", root, rsep);
+        snprintf(kept_log, sizeof(kept_log), "%s%crun.log", logs, rsep);
+        assert(nk_platform_mkdir_p(config) && nk_platform_mkdir_p(logs));
+        write_text_file(kept_log, "a run log\n");
+        PlayerApp *rooted = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        assert(rooted != NULL);
+        assert(nk_platform_set_app_data_dir_override(root));
+        bool reset_ok = player_app_factory_reset(rooted, "20261029-010206");
+        assert(nk_platform_set_app_data_dir_override(NULL));
+        assert(reset_ok);
+        snprintf(moved_root, sizeof(moved_root), "%s-backup-20261029-010206", root);
+        snprintf(moved_config, sizeof(moved_config), "%s%cconfig", moved_root, rsep);
+        assert(nk_platform_dir_exists(moved_config));
+        assert(!nk_platform_dir_exists(config));
+        assert(nk_platform_file_exists(kept_log));
+        free(rooted);
+        assert(test_remove_tree(moved_root));
+        assert(test_remove_tree(root));
+        printf("[PLAYER_STATE_TEST] factory reset of a rooted layout keeps the logs PASSED\n");
     }
 
     /* 25. The file pickers (owner, 2026-10-29): a first run opens them at the
@@ -14885,7 +15113,12 @@ int main(int argc, char **argv) {
     test_game_build_check_names_the_executable_build();
 
     free(app);
-    printf("[PLAYER_STATE_TEST] ALL PLAYER STATE TESTS PASSED!\n");
     native_test_assert_real_config_untouched();
+    if (s_package_rebuild_skipped) {
+        printf("[PLAYER_STATE_TEST] SKIP: every subtest ran except the package rebuild steps "
+               "(exit 77, #360)\n");
+        return 77;
+    }
+    printf("[PLAYER_STATE_TEST] ALL PLAYER STATE TESTS PASSED!\n");
     return 0;
 }
