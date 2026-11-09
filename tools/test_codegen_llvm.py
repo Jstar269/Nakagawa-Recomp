@@ -454,5 +454,36 @@ class RuntimeAbiTests(unittest.TestCase):
         self.assertEqual(shims, declared)
 
 
+class MutantAnchorTests(unittest.TestCase):
+    """Every cosimulation mutant must still apply to the source it damages (#2227).
+
+    Hosted CI runs only the default campaign, so a stale LLVM mutant would otherwise
+    surface only when someone ran ``cosim-mutants-llvm``. ``Mutant.apply`` raises when
+    a pattern matches a different number of times than declared.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "cosim_mutate", ROOT / "fixtures" / "cosim" / "mutate.py")
+        cls.mutate = importlib.util.module_from_spec(spec)
+        sys.modules["cosim_mutate"] = cls.mutate
+        spec.loader.exec_module(cls.mutate)
+
+    def test_every_mutant_pattern_matches_its_source(self):
+        m = self.mutate
+        paths = {
+            "interpreter": m.INTERPRETER, "fp-convert": m.FP_CONVERT,
+            "fpu-reference": m.FPU_REFERENCE, "generator": m.GENERATOR,
+            "split-generator": m.GENERATOR, "scheduler": m.SCHEDULER,
+            "llvm-backend": m.LLVM_BACKEND,
+        }
+        for mutant in (*m.MUTANTS, *m.LLVM_MUTANTS):
+            with self.subTest(mutant=mutant.name):
+                source = paths[mutant.target].read_text(encoding="utf-8")
+                self.assertNotEqual(mutant.apply(source), source)
+
+
 if __name__ == "__main__":
     unittest.main()
