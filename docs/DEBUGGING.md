@@ -611,7 +611,7 @@ coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COV
 | `SR_GEMATW=1` | Log GE matrix writes |
 | `SR_NO2DZ=1` | Disable 2D Z-buffer |
 | `SR_GPU_STATS=1` | Emit bounded Vulkan submission/batch/texture/snapshot counters without per-submit logging |
-| `SR_GPU_TIMESTAMPS=1` | Measure GPU time with Vulkan timestamp queries: each GE command buffer split by op kind (render batch, snapshot copy, upload, readback, other), printed as a `GEGPU_TS` line every 60 presents and a `GEGPU_TS_TOTAL` line at exit, and the presentation blit; with `SR_PERF_FRAMES` the times also fill the `gpu_*` columns. Ops overlap on the GPU, so the split is an attribution and the sum is the whole execution span. It changes no rendering, guest memory or wait |
+| `SR_GPU_TIMESTAMPS=1` | Measure GPU time with Vulkan timestamp queries: each GE command buffer split by op kind (render batch, snapshot copy, upload, readback, other), printed as a `GEGPU_TS` line every 60 presents and a `GEGPU_TS_TOTAL` line at exit, and the presentation blit; with `SR_PERF_FRAMES` the times also fill the `gpu_*` columns. An op on the interlock destination-read path (#2109) takes no snapshot copy, and its time counts as render batch. Ops overlap on the GPU, so the split is an attribution and the sum is the whole execution span. It changes no rendering, guest memory or wait |
 | `SR_GPU_TWIN_COLOR=1\|native` | Host twin (#2050), Ace Mode only: `1` presents full 32-bit colour without dither, `native` keeps the authentic colour (for identity checks). Any other value except `0` and `off` is refused. Guest VRAM is unchanged ([ENHANCEMENT_CONTRACT.md 10.11](ENHANCEMENT_CONTRACT.md#1011-full-32-bit-colour-the-host-twin)). Prints `TWIN:` lines at start and exit |
 | `SR_GPU_TWIN_CAPTURE=authentic` | With the twin on, present and capture the authentic image instead of the twin |
 | `SR_GPU_TWIN_DUMP=PREFIX` | `gpu-coherence-selftest` twin-scene: write each shown image as `PREFIX_t<n>_s<scale>.raw` (RGBA) |
@@ -619,7 +619,7 @@ coverage classes, such as `unverified` and `synthetic`, are defined in [`HLE_COV
 | `SR_GEDUMP=1` | Per-primitive `GE PRIM` lines (through and transform), bounded to the first ~40 |
 | `SR_GE_ENQUEUE_TRACE=1` | Trace GE enqueue/stall-update provenance without enabling the broader GE dump |
 | `SR_GE_ENQUEUE_TRACE_WINDOWS=a-b[,c-d]` | Restrict enqueue trace output to up to eight inclusive vblank ranges; malformed ranges fail closed |
-| `SR_GESTAT=1` | 60-vblank stat windows: `GESTAT` totals, `GE3D` distinct 3D draw signatures, `ASHADE`/`ACLUT` alpha-test-failure decode. A window closes on the first delivered vblank at or past each multiple of 60 and `f=` names that vblank, which is later than the multiple (61, not 60) when VCOUNT stepped over it on a busy host; read the label with `tools/ge_stat_windows.py` instead of matching `f=60` |
+| `SR_GESTAT=1` | 60-vblank stat windows: `GESTAT` totals, `GE3D` distinct 3D draw signatures, `ASHADE`/`ACLUT` alpha-test-failure decode, and with `SR_GPU_GE=1 SR_GPU_TNL=1`, from the first window after a transform-mode triangle draw, a `GESTAT-TNL f=N taken=N cpu=N: clear=N flat=N diagnostic=N texgen=N matrix=N viewport=N texcoord=N fog=N specular=N light=N alloc=N vertex=N clip=N backend=N` line: the window's transform-mode triangle draws the GPU T&L route took (`taken=`) and, per reason, why each other one kept ge.c's T&L (`cpu=`, which the reasons sum to). A window closes on the first delivered vblank at or past each multiple of 60 and `f=` names that vblank, which is later than the multiple (61, not 60) when VCOUNT stepped over it on a busy host; read the label with `tools/ge_stat_windows.py` instead of matching `f=60` |
 | `SR_RTRACE=1` | Exhaustive render trace: one `TRIDRW` line per 3D draw with the complete GE state (render target `fbp`/`zbp`, texture address/format/`bufw`/swizzle, texture function, blend, alpha test, cull, scissor, viewport), plus per-triangle `TRIDEC` lines |
 | `SR_RTRACE_FRAMES=N` | Frames traced per stat window (default 2) |
 | `SR_TEXDUMP=1` | Write each distinct sampled texture from transform- or through-mode draws once as `tex_ADDR_fF_WxH.ppm` decoded through the real sampler (swizzle + CLUT), and log its CLUT address/format. First 32 distinct addresses per run |
@@ -2357,7 +2357,9 @@ player and game behave as they do for everyone ([#314](https://github.com/Jstar2
   (exit 6): neither is ever `NO_DIFFERENCE`. A capture of a title is private, and so are its report
   and crops.
   `mingw32-make ge-first-bad-draw-selftest` checks the tool on generated captures against two
-  executed Vulkan mutants and the known overlapping-blend difference (#2109).
+  executed Vulkan mutants and the overlapping-blend capture (#2109): a known difference on the
+  snapshot destination-read path, `NO_DIFFERENCE` on the interlock path. `--dst-read
+  snapshot|interlock` picks the path for a replay (`SR_GPU_DST_READ`, `src/rt/gpu_sdl3vk/README.md`).
   `ge_replay --write-synthetic <path> [basic|overlap|wide|empty|many|deep]` writes those captures.
 - **Capture frames unattended.** Set `SR_NOINPUT=1` so the automatic START pulse does not reach the game, bound the run
   with `SR_EXIT_AT_VBLANK` ([where it stops](#where-sr_exit_at_vblank-actually-stops)), and capture with
@@ -2395,14 +2397,22 @@ The deterministic clock changes the run itself, not only the recording:
   `SR_DETERMINISTIC_CLOCK=1`, without recording, before recording it.
 
 On the Vulkan presenter the recorded picture is the one the window shows (Ace Mode's smooth motion
-included), scaled with the window's own scaling mode (`SR_PRESENT_SCALING`) into a fixed-size
+included). An in-between stays on screen until its held real frame's VBLANK, so the recorder keeps
+it for its own VBLANK and writes the real frame, presented before that VBLANK's write, at the next
+one (`carried_frames` in `record.json`); with smooth motion on, the recorded real frames land one VBLANK
+later than without it, as on screen. Pictures behind a carried one queue, three at most, and a full queue
+replaces its newest picture and counts it (`replaced_frames`). Without that rule the real frame replaced
+the in-between unread, and a 30 FPS game with smooth motion recorded at 30 pictures a second. The picture is
+scaled with the window's own scaling mode (`SR_PRESENT_SCALING`) into a fixed-size
 target. With `SR_PRESENT_UPSCALE=fsr1` the recording is enlarged by FSR 1 as the window is, at the
 recording's own size and through its own pass, so `SR_VIDEOREC_SIZE` never makes the window's pass
 rebuild its images ([#2138](https://github.com/Jstar269/nakagawa-recomp/issues/2138);
 `gpu-capture-selftest` checks a 960x544 recording against a separate FSR 1 pass's output, byte for
 byte). As in the window, FSR 1 only enlarges: a recording no larger than the picture uses the
 scaling mode. `record.json` names the scaling that made each picture, not the setting that asked
-for it: `"filter"` is `fsr1`; `sharp` (a nearest prescale to a whole multiple, then a linear
+for it: `"filter"` is `anime4k` for a CPU-presented frame the movie upscaler
+(`SR_MOVIE_UPSCALE=anime4k`) doubled once or twice, then FSR 1 took it to the recording's size unless the
+doubled picture was already that size; `fsr1`; `sharp` (a nearest prescale to a whole multiple, then a linear
 shrink); `nearest` (one nearest-neighbour blit, which is what any mode draws at an exact multiple
 such as 960x544, and what `integer` draws when a multiple fits); `linear` (one linear blit, as
 `bilinear` draws at other sizes and every mode draws when the recording is smaller than the

@@ -39,8 +39,9 @@ Important exclusions/limits include:
 
 - operations or states the abstract interpreter does not model precisely degrade to Unknown and are
   not asserted;
-- functions containing identified hand-injected/special codegen blocks are excluded through the
-  generator's `_SV_SPECIAL` handling;
+- functions containing a hand-injected `GUEST_PATCHES` override are excluded through the
+  generator's `_SV_SPECIAL` set under the HST profile; no such override remains, so the set is
+  empty and every function is checked;
 - coverage is execution-dependent: an emitted assertion provides no runtime evidence until its path
   is actually executed;
 - the check compares two implementations/representations inside this project, so shared assumptions

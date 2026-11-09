@@ -17,7 +17,9 @@
 // (PSP-HLE-SAVEDATA-GETSIZE-001), plus hle-utility-none (PSP-HLE-UTILITY-NONE-001), which
 // imports no InitStart call, and hle-utility-dialogs (PSP-HLE-UTILITY-DIALOG-001), which opens
 // the savedata, gamedata install, netconf and game sharing dialogs in game context and never
-// answers them. Cases 97-101 have recorded PSP-3000 runs from
+// answers them, and hle-nickname-limit (PSP-HLE-NICKNAME-001, case 164), which reads the owner_name
+// key's type and size and the system-parameter string's length refusals and records no value bytes.
+// Cases 97-101 have recorded PSP-3000 runs from
 // 2026-10-15: the VTimer and power cases were measured; pool-bounds was captured
 // only in its earlier revision, and the revised form has not run; null-out was
 // captured incomplete. Case 104 was measured on 2026-11-02 (docs/HARDWARE_ORACLE.md).
@@ -53,6 +55,7 @@
 #include <pspdisplay.h>
 #include <pspsuspend.h>
 #include <pspstdio.h>
+#include <pspreg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -83,7 +86,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_UTILITY_NONE 140
 #define HLE_CASE_STD_HANDLES 156
 #define HLE_CASE_AUDIO_REST 159
+#define HLE_CASE_SELF_STOP 167
 #define HLE_CASE_UTILITY_DIALOGS 161
+#define HLE_CASE_IO_SEEK 162
+#define HLE_CASE_NICKNAME_LIMIT 164
 
 #if PSP_ORACLE_CASE == HLE_CASE_KERNEL_STATUS
 #define HLE_CAMPAIGN_ID "hle-kernel-status"
@@ -153,6 +159,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "hle-std-handles"
 #define HLE_TEST_ID "PSP-HLE-STDIO-001"
 #define HLE_LOG "host0:/hle_std_handles_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_SELF_STOP
+#define HLE_CAMPAIGN_ID "hle-self-stop-unload"
+#define HLE_TEST_ID "PSP-HLE-SELFSTOP-001"
+#define HLE_LOG "host0:/hle_self_stop_unload_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_AUDIO_REST
 #define HLE_CAMPAIGN_ID "hle-audio-rest"
 #define HLE_TEST_ID "PSP-HLE-AUDIO-REST-001"
@@ -161,6 +171,14 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "hle-utility-dialogs"
 #define HLE_TEST_ID "PSP-HLE-UTILITY-DIALOG-001"
 #define HLE_LOG "host0:/hle_utility_dialogs_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_IO_SEEK
+#define HLE_CAMPAIGN_ID "hle-io-seek"
+#define HLE_TEST_ID "PSP-HLE-IO-SEEK-001"
+#define HLE_LOG "host0:/hle_io_seek_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_NICKNAME_LIMIT
+#define HLE_CAMPAIGN_ID "hle-nickname-limit"
+#define HLE_TEST_ID "PSP-HLE-NICKNAME-001"
+#define HLE_LOG "host0:/hle_nickname_limit_log.txt"
 #else
 #error probe_hle_measure.c has no family for this PSP_ORACLE_CASE
 #endif
@@ -2304,6 +2322,125 @@ static int hle_run(void)
 #endif /* HLE_CASE_STD_HANDLES */
 
 /* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_SELF_STOP
+
+/* #341 (W-HLE-2, part 2): sceKernelSelfStopUnloadModule called by a helper module's own
+   thread. The helper (probe_hle_self_stop_helper.c, CASE=hle-self-stop-helper, loaded from
+   host0:/hle_self_stop_helper.prx) is loaded and started once per form; the probe passes it
+   the address of an 8-word marker buffer and the mode as argument strings. The helper's main
+   thread calls the function, so the caller that may or may not survive is the helper's, never
+   this probe's. module_stop returns 0 and writes a marker into the buffer.
+
+   Forms, in the order run (the one most likely to fault the launch is last, each with a step
+   written durably before it):
+   - self-stop-arg0: (0, 0, NULL)
+   - self-stop-arg1: (1, 0, NULL), the first argument nonzero
+   - self-stop-argp-past-ram: (0, 4, 0x0C000000), argp past the 64 MB of RAM
+
+   Per form two records. self-stop-<form> (12 words, result: the call's return value as the
+   helper saw it, or HLE_SENTINEL when it never returned): LoadModule, StartModule, start
+   status, entered marker, call return, continued marker, module_stop marker, module_stop
+   args, module_stop argp, module_stop call count, anchor address, GetModuleIdByAddress(anchor)
+   after the poll. The poll waits at most 2 s with sceKernelDelayThread for the continued
+   marker, then 100 ms more. self-stop-<form>-cleanup (3 words, result: the StopModule
+   answer; HLE_SENTINEL when the module was already gone): StopModule, UnloadModule,
+   GetModuleIdByAddress again. The cleanup runs after the first record, so its module_stop
+   call cannot change it. */
+
+#define SS_WORDS 8u
+#define SS_OUT_WORDS 12u
+#define SS_PATH "host0:/hle_self_stop_helper.prx"
+
+static uint32_t s_ss_words[SS_WORDS] __attribute__((aligned(64)));
+
+static void hle_ss_form(const char *case_id, const char *cleanup_id, const char *name,
+                        unsigned mode)
+{
+    char step[64];
+    for (unsigned i = 0; i < SS_WORDS; i++) {
+        s_ss_words[i] = HLE_SENTINEL;
+    }
+    s_ss_words[7] = 0;
+    uint32_t out[SS_OUT_WORDS];
+    for (unsigned i = 0; i < SS_OUT_WORDS; i++) {
+        out[i] = HLE_SENTINEL;
+    }
+
+    snprintf(step, sizeof(step), "self-stop-%s-load", name);
+    hle_step(step);
+    const SceUID modid = sceKernelLoadModule(SS_PATH, 0, NULL);
+    out[0] = (uint32_t)modid;
+    if (modid < 0) {
+        hle_record(case_id, "FAIL", HLE_SENTINEL, out, SS_OUT_WORDS);
+        return;
+    }
+
+    /* argv[0] module path, argv[1] marker buffer address in hex, argv[2] mode. */
+    char args[96];
+    size_t used = 0;
+    used += (size_t)snprintf(args + used, sizeof(args) - used, "%s", SS_PATH) + 1u;
+    used += (size_t)snprintf(args + used, sizeof(args) - used, "0x%08x",
+                             (unsigned int)(uintptr_t)s_ss_words) + 1u;
+    used += (size_t)snprintf(args + used, sizeof(args) - used, "%u", mode) + 1u;
+
+    snprintf(step, sizeof(step), "self-stop-%s-call", name);
+    hle_step(step);
+    int status = (int)HLE_SENTINEL;
+    const int start_rc = sceKernelStartModule(modid, (SceSize)used, args, &status, NULL);
+    out[1] = (uint32_t)start_rc;
+    out[2] = (uint32_t)status;
+
+    volatile uint32_t *w = s_ss_words;
+    snprintf(step, sizeof(step), "self-stop-%s-poll", name);
+    hle_step(step);
+    for (unsigned i = 0; i < HLE_POLL_ITERATIONS && w[6] == HLE_SENTINEL; i++) {
+        sceKernelDelayThread(HLE_POLL_DELAY_US);
+    }
+    hle_step(step);
+    sceKernelDelayThread(100000u);
+
+    out[3] = w[0];
+    out[4] = w[5];
+    out[5] = w[6];
+    out[6] = w[2];
+    out[7] = w[3];
+    out[8] = w[4];
+    out[9] = w[7];
+    out[10] = w[1];
+    snprintf(step, sizeof(step), "self-stop-%s-query", name);
+    hle_step(step);
+    const int after = (w[1] == HLE_SENTINEL) ? (int)HLE_SENTINEL
+                                             : (int)sceKernelGetModuleIdByAddress((const void *)(uintptr_t)w[1]);
+    out[11] = (uint32_t)after;
+    hle_record(case_id, "PASS", out[4], out, SS_OUT_WORDS);
+
+    uint32_t clean[3] = {HLE_SENTINEL, HLE_SENTINEL, HLE_SENTINEL};
+    uint32_t clean_result = HLE_SENTINEL;
+    if (after >= 0) {
+        snprintf(step, sizeof(step), "self-stop-%s-cleanup", name);
+        hle_step(step);
+        int stop_status = 0;
+        const int stop_rc = sceKernelStopModule(modid, 0, NULL, &stop_status, NULL);
+        const int unload_rc = sceKernelUnloadModule(modid);
+        clean[0] = (uint32_t)stop_rc;
+        clean[1] = (uint32_t)unload_rc;
+        clean[2] = (uint32_t)sceKernelGetModuleIdByAddress((const void *)(uintptr_t)w[1]);
+        clean_result = (uint32_t)stop_rc;
+    }
+    hle_record(cleanup_id, "PASS", clean_result, clean, 3);
+}
+
+static int hle_run(void)
+{
+    hle_ss_form("self-stop-arg0", "self-stop-arg0-cleanup", "arg0", 0u);
+    hle_ss_form("self-stop-arg1", "self-stop-arg1-cleanup", "arg1", 1u);
+    hle_ss_form("self-stop-argp-past-ram", "self-stop-argp-past-ram-cleanup", "argp-past-ram", 2u);
+    return 1;
+}
+
+#endif /* HLE_CASE_SELF_STOP */
+
+/* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_AUDIO_REST
 
 /* #279 (W-MEDIA-2): how much a regular audio channel still holds when sceAudioOutputBlocking
@@ -3424,6 +3561,554 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_UTILITY_DIALOGS */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_IO_SEEK
+
+/* #1380 (I1380-1): seeks on a flash0: file, sceIoIoctl file commands on a probe-owned ms0: file
+   and on disc0:/UMD_DATA.BIN, and sceIoWrite on a descriptor opened without PSP_O_WRONLY.
+
+   Read-only on flash0: and disc0:. The only writes are to ms0:/NKIOSK01, a directory the probe
+   creates and removes (every ms0: row is SKIP when it already exists, so nothing that is not
+   the probe's is touched): the 16-byte synthetic file the ioctl cells use, and two 4-byte
+   writes on descriptors opened without PSP_O_WRONLY. Every value recorded is a return value,
+   a 64-bit position as (low, high) words, a flag or a word of the probe's own synthetic data;
+   no byte of a flash0: or disc0: file is recorded. Every row is emitted on every run with a
+   fixed word count; a word that does not apply is HLE_SENTINEL. Before each seek the position
+   is set to 8, so a refused seek's effect on the position is visible.
+
+   Order: flash0: rows, ms0: rows, then the disc0: ioctl rows last. sceIoIoctl cannot be
+   bounded, and a UMD driver call that waits on the drive would be the one that could hang a
+   kernel wait, so it runs after everything else is recorded (POWER RISK, low: PSP-IO-EOF-002
+   already seeks on disc0: without a hang). The only loop is a read-to-end of the flash0: file,
+   bounded to HLE_IS_READ_CAP chunks. */
+
+#define HLE_IS_FLASH "flash0:/font/ltn0.pgf"
+#define HLE_IS_UMD "disc0:/UMD_DATA.BIN"
+#define HLE_IS_DIR "ms0:/NKIOSK01"
+#define HLE_IS_FILE HLE_IS_DIR "/e.bin"
+#define HLE_IS_MISSING HLE_IS_DIR "/missing.bin"
+#define HLE_IS_FILE_SIZE 16u
+#define HLE_IS_READ_CHUNK 4096u
+#define HLE_IS_READ_CAP 512u
+#define HLE_IS_PRE 8
+#define HLE_IS_IOCTL_SEEK 0x01010005u
+#define HLE_IS_IOCTL_GETPOS 0x01020004u
+#define HLE_IS_IOCTL_SECTOR 0x01020003u
+#define HLE_IS_IOCTL_START 0x01020006u
+#define HLE_IS_IOCTL_SIZE 0x01020007u
+#define HLE_IS_IOCTL_READ 0x01030008u
+
+typedef struct {
+    uint64_t offset;
+    uint32_t unknown;
+    uint32_t whence;
+} hle_is_seek_args;
+
+static uint8_t s_hle_is_buf[HLE_IS_READ_CHUNK] __attribute__((aligned(64)));
+static uint32_t s_hle_is_out[16] __attribute__((aligned(64)));
+
+static void hle_is_pair(uint32_t *w, SceOff r)
+{
+    w[0] = (uint32_t)((uint64_t)r & 0xffffffffu);
+    w[1] = (uint32_t)((uint64_t)r >> 32);
+}
+
+static void hle_is_skip(const char *row, uint32_t count, uint32_t result)
+{
+    uint32_t w[HLE_MAX_WORDS];
+    for (uint32_t i = 0; i < count; i++) w[i] = HLE_SENTINEL;
+    hle_record(row, "SKIP", result, w, count);
+}
+
+/* One flash0: seek row, 5 words: the seek's return (low, high; high is HLE_SENTINEL for the
+   32-bit call), the position after it (SEEK_CUR 0, low, high) and the return of the SET 8
+   that preceded it. kind 0 = literal offset, 1 = size + 16, 2 = -(size + 1). */
+static void hle_is_flash_seek(const char *row, SceUID fd, int wide, int whence, int kind,
+                              int64_t literal, int64_t size)
+{
+    uint32_t w[5];
+    hle_step(row);
+    int64_t offset = literal;
+    if (kind == 1) offset = size + 16;
+    if (kind == 2) offset = -(size + 1);
+    w[4] = (uint32_t)sceIoLseek(fd, HLE_IS_PRE, PSP_SEEK_SET);
+    if (wide) {
+        hle_is_pair(&w[0], sceIoLseek(fd, offset, whence));
+    } else {
+        w[0] = (uint32_t)sceIoLseek32(fd, (int)offset, whence);
+        w[1] = HLE_SENTINEL;
+    }
+    hle_is_pair(&w[2], sceIoLseek(fd, 0, PSP_SEEK_CUR));
+    hle_record(row, "PASS", w[0], w, 5u);
+}
+
+static void hle_is_flash(void)
+{
+    uint32_t w[5];
+    hle_step("io-seek-flash-open");
+    const SceUID fd = sceIoOpen(HLE_IS_FLASH, PSP_O_RDONLY, 0);
+    if (fd < 0) {
+        static const char *const flash_rows[10] = {
+            "io-seek-flash-s64-set-neg1", "io-seek-flash-s64-set-past",
+            "io-seek-flash-s64-end-plus16", "io-seek-flash-s64-end-minus-size1",
+            "io-seek-flash-s64-set-2p32", "io-seek-flash-s64-set-ffffffff",
+            "io-seek-flash-s32-set-neg1", "io-seek-flash-s32-set-past",
+            "io-seek-flash-s32-end-plus16", "io-seek-flash-s32-end-minus-size1",
+        };
+        hle_is_skip("io-seek-flash-open", 3u, (uint32_t)fd);
+        for (unsigned i = 0; i < 10u; i++) hle_is_skip(flash_rows[i], 5u, (uint32_t)fd);
+        hle_is_skip("io-seek-flash-close", 1u, (uint32_t)fd);
+        return;
+    }
+    /* The size comes from SEEK_END; the file is then read to its end (bytes discarded) and the
+       two are compared, so the record says only whether they match. */
+    const int64_t size = sceIoLseek(fd, 0, PSP_SEEK_END);
+    (void)sceIoLseek(fd, 0, PSP_SEEK_SET);
+    int64_t total = 0;
+    for (uint32_t i = 0; i < HLE_IS_READ_CAP; i++) {
+        const int got = sceIoRead(fd, s_hle_is_buf, HLE_IS_READ_CHUNK);
+        if (got <= 0) break;
+        total += got;
+    }
+    w[0] = (uint32_t)fd;
+    w[1] = (size > 0 && total == size) ? 1u : 0u;
+    w[2] = (uint32_t)sceIoLseek32(fd, 0, PSP_SEEK_SET);
+    hle_record("io-seek-flash-open", "PASS", (uint32_t)fd, w, 3u);
+
+    hle_is_flash_seek("io-seek-flash-s64-set-neg1", fd, 1, PSP_SEEK_SET, 0, -1, size);
+    hle_is_flash_seek("io-seek-flash-s64-set-past", fd, 1, PSP_SEEK_SET, 1, 0, size);
+    hle_is_flash_seek("io-seek-flash-s64-end-plus16", fd, 1, PSP_SEEK_END, 0, 16, size);
+    hle_is_flash_seek("io-seek-flash-s64-end-minus-size1", fd, 1, PSP_SEEK_END, 2, 0, size);
+    hle_is_flash_seek("io-seek-flash-s64-set-2p32", fd, 1, PSP_SEEK_SET, 0, 0x100000000ll, size);
+    hle_is_flash_seek("io-seek-flash-s64-set-ffffffff", fd, 1, PSP_SEEK_SET, 0, 0xffffffffll,
+                      size);
+    hle_is_flash_seek("io-seek-flash-s32-set-neg1", fd, 0, PSP_SEEK_SET, 0, -1, size);
+    hle_is_flash_seek("io-seek-flash-s32-set-past", fd, 0, PSP_SEEK_SET, 1, 0, size);
+    hle_is_flash_seek("io-seek-flash-s32-end-plus16", fd, 0, PSP_SEEK_END, 0, 16, size);
+    hle_is_flash_seek("io-seek-flash-s32-end-minus-size1", fd, 0, PSP_SEEK_END, 2, 0, size);
+
+    hle_step("io-seek-flash-close");
+    w[0] = (uint32_t)sceIoClose(fd);
+    hle_record("io-seek-flash-close", "PASS", w[0], w, 1u);
+}
+
+/* ioctl seek to `offset` from SEEK_SET. Returns the ioctl's result. */
+static int hle_is_ioctl_seek(SceUID fd, uint64_t offset)
+{
+    hle_is_seek_args args;
+    args.offset = offset;
+    args.unknown = 0;
+    args.whence = PSP_SEEK_SET;
+    return sceIoIoctl(fd, HLE_IS_IOCTL_SEEK, &args, (int)sizeof(args), NULL, 0);
+}
+
+/* A query ioctl with no input and an out buffer pre-filled with HLE_SENTINEL, from a position
+   of 8 (0 for the read). w = [result, out0, out1, position low, position high]. */
+static void hle_is_ioctl_query(uint32_t *w, SceUID fd, uint32_t cmd)
+{
+    (void)sceIoLseek(fd, cmd == HLE_IS_IOCTL_READ ? 0 : HLE_IS_PRE, PSP_SEEK_SET);
+    s_hle_is_out[0] = HLE_SENTINEL;
+    s_hle_is_out[1] = HLE_SENTINEL;
+    w[0] = (uint32_t)sceIoIoctl(fd, cmd, NULL, 0, s_hle_is_out, cmd == HLE_IS_IOCTL_READ ? 4 : 8);
+    w[1] = s_hle_is_out[0];
+    w[2] = s_hle_is_out[1];
+    hle_is_pair(&w[3], sceIoLseek(fd, 0, PSP_SEEK_CUR));
+}
+
+static const char *const k_hle_is_seek_rows[4] = {
+    "io-seek-ms-ioctl-set-neg1", "io-seek-ms-ioctl-set-8", "io-seek-ms-ioctl-set-16",
+    "io-seek-ms-ioctl-set-32",
+};
+static const char *const k_hle_is_query_rows[5] = {
+    "io-seek-ms-ioctl-getpos", "io-seek-ms-ioctl-sector", "io-seek-ms-ioctl-startsector",
+    "io-seek-ms-ioctl-size", "io-seek-ms-ioctl-read4",
+};
+
+/* Rows from the ioctl seeks on (everything after the setup row) as SKIP. */
+static void hle_is_ms_skip_rest(uint32_t result)
+{
+    for (unsigned i = 0; i < 4u; i++) hle_is_skip(k_hle_is_seek_rows[i], 3u, result);
+    for (unsigned i = 0; i < 5u; i++) hle_is_skip(k_hle_is_query_rows[i], 5u, result);
+    hle_is_skip("io-seek-ms-write-rdonly", 4u, result);
+    hle_is_skip("io-seek-ms-write-rdonly-creat", 4u, result);
+    hle_is_skip("io-seek-ms-cleanup", 4u, result);
+}
+
+static void hle_is_ms(void)
+{
+    static const uint64_t seek_to[4] = {0xffffffffffffffffull, 8u, 16u, 32u};
+    static const uint32_t query_cmds[5] = {
+        HLE_IS_IOCTL_GETPOS, HLE_IS_IOCTL_SECTOR, HLE_IS_IOCTL_START, HLE_IS_IOCTL_SIZE,
+        HLE_IS_IOCTL_READ,
+    };
+    uint32_t w[8];
+    uint8_t pattern[HLE_IS_FILE_SIZE];
+    for (unsigned i = 0; i < HLE_IS_FILE_SIZE; i++) pattern[i] = (uint8_t)(0x40u + i);
+
+    /* If the directory exists it is not the probe's, so nothing below may touch it. */
+    hle_step("io-seek-ms-setup");
+    const SceUID pre = sceIoDopen(HLE_IS_DIR);
+    if (pre >= 0) {
+        (void)sceIoDclose(pre);
+        hle_is_skip("io-seek-ms-setup", 4u, (uint32_t)pre);
+        hle_is_ms_skip_rest((uint32_t)pre);
+        return;
+    }
+    const int made = sceIoMkdir(HLE_IS_DIR, 0777);
+    SceUID fd = sceIoOpen(HLE_IS_FILE, PSP_O_RDWR | PSP_O_CREAT | PSP_O_EXCL, 0777);
+    int wrote = -1;
+    if (fd >= 0) {
+        wrote = sceIoWrite(fd, pattern, HLE_IS_FILE_SIZE);
+        (void)sceIoClose(fd);
+    }
+    w[0] = (uint32_t)pre;
+    w[1] = (uint32_t)made;
+    w[2] = (uint32_t)fd;
+    w[3] = (uint32_t)wrote;
+    hle_record("io-seek-ms-setup", "PASS", (uint32_t)fd, w, 4u);
+    if (fd < 0 || wrote != (int)HLE_IS_FILE_SIZE) {
+        hle_step("io-seek-ms-setup-abort");
+        (void)sceIoRemove(HLE_IS_FILE);
+        (void)sceIoRmdir(HLE_IS_DIR);
+        hle_is_ms_skip_rest((uint32_t)fd);
+        return;
+    }
+
+    fd = sceIoOpen(HLE_IS_FILE, PSP_O_RDWR, 0777);
+    if (fd < 0) {
+        for (unsigned i = 0; i < 4u; i++) hle_is_skip(k_hle_is_seek_rows[i], 3u, (uint32_t)fd);
+        for (unsigned i = 0; i < 5u; i++) hle_is_skip(k_hle_is_query_rows[i], 5u, (uint32_t)fd);
+    } else {
+        for (unsigned i = 0; i < 4u; i++) {
+            hle_step(k_hle_is_seek_rows[i]);
+            (void)sceIoLseek(fd, 0, PSP_SEEK_SET);
+            w[0] = (uint32_t)hle_is_ioctl_seek(fd, seek_to[i]);
+            hle_is_pair(&w[1], sceIoLseek(fd, 0, PSP_SEEK_CUR));
+            hle_record(k_hle_is_seek_rows[i], "PASS", w[0], w, 3u);
+        }
+        for (unsigned i = 0; i < 5u; i++) {
+            hle_step(k_hle_is_query_rows[i]);
+            hle_is_ioctl_query(w, fd, query_cmds[i]);
+            hle_record(k_hle_is_query_rows[i], "PASS", w[0], w, 5u);
+        }
+        (void)sceIoClose(fd);
+    }
+
+    /* io-seek-ms-write-rdonly: a 4-byte write on a descriptor opened PSP_O_RDONLY. w = open,
+       write, close, and 1 when a fresh read of the first 4 bytes differs from the synthetic
+       pattern (HLE_SENTINEL when the read-back failed). */
+    hle_step("io-seek-ms-write-rdonly");
+    fd = sceIoOpen(HLE_IS_FILE, PSP_O_RDONLY, 0777);
+    w[0] = (uint32_t)fd;
+    w[1] = HLE_SENTINEL;
+    w[2] = HLE_SENTINEL;
+    w[3] = HLE_SENTINEL;
+    if (fd >= 0) {
+        static const uint8_t bytes[4] = {0xd0, 0xd1, 0xd2, 0xd3};
+        w[1] = (uint32_t)sceIoWrite(fd, bytes, 4);
+        w[2] = (uint32_t)sceIoClose(fd);
+        const SceUID rd = sceIoOpen(HLE_IS_FILE, PSP_O_RDONLY, 0777);
+        if (rd >= 0) {
+            uint8_t back[4] = {0, 0, 0, 0};
+            const int got = sceIoRead(rd, back, 4);
+            (void)sceIoClose(rd);
+            if (got == 4) w[3] = memcmp(back, pattern, 4) != 0 ? 1u : 0u;
+        }
+    }
+    hle_record("io-seek-ms-write-rdonly", fd >= 0 ? "PASS" : "FAIL", (uint32_t)fd, w, 4u);
+
+    /* io-seek-ms-write-rdonly-creat: PSP_O_RDONLY | PSP_O_CREAT on a missing file, a 4-byte
+       write, the close, then whether the file exists (the getstat's result). */
+    hle_step("io-seek-ms-write-rdonly-creat");
+    fd = sceIoOpen(HLE_IS_MISSING, PSP_O_RDONLY | PSP_O_CREAT, 0777);
+    w[0] = (uint32_t)fd;
+    w[1] = HLE_SENTINEL;
+    w[2] = HLE_SENTINEL;
+    if (fd >= 0) {
+        static const uint8_t bytes[4] = {0xe0, 0xe1, 0xe2, 0xe3};
+        w[1] = (uint32_t)sceIoWrite(fd, bytes, 4);
+        w[2] = (uint32_t)sceIoClose(fd);
+    }
+    SceIoStat st;
+    memset(&st, 0, sizeof(st));
+    hle_step("io-seek-ms-write-rdonly-creat-stat");
+    w[3] = (uint32_t)sceIoGetstat(HLE_IS_MISSING, &st);
+    hle_record("io-seek-ms-write-rdonly-creat", "PASS", (uint32_t)fd, w, 4u);
+
+    hle_step("io-seek-ms-cleanup");
+    w[0] = (uint32_t)sceIoRemove(HLE_IS_FILE);
+    w[1] = (uint32_t)sceIoRemove(HLE_IS_MISSING);
+    w[2] = (uint32_t)sceIoRmdir(HLE_IS_DIR);
+    hle_step("io-seek-ms-cleanup-check");
+    const SceUID post = sceIoDopen(HLE_IS_DIR);
+    w[3] = (uint32_t)post;
+    if (post >= 0) (void)sceIoDclose(post);
+    hle_record("io-seek-ms-cleanup", "PASS", 0u, w, 4u);
+}
+
+/* disc0:/UMD_DATA.BIN, read-only: the ioctl seek to -1, to the size and to size + 1, each from
+   a position of 8. w = ioctl seek result, position ioctl result, its out words (low, high),
+   SEEK_CUR 0 (low, high). */
+static void hle_is_umd(void)
+{
+    static const char *const umd_rows[3] = {
+        "io-seek-umd-ioctl-neg1", "io-seek-umd-ioctl-size", "io-seek-umd-ioctl-size1",
+    };
+    uint32_t w[8];
+    hle_step("io-seek-umd-open");
+    const SceUID fd = sceIoOpen(HLE_IS_UMD, PSP_O_RDONLY, 0);
+    int64_t size = 0;
+    if (fd >= 0) size = sceIoLseek(fd, 0, PSP_SEEK_END);
+    if (fd < 0 || size <= 0) {
+        hle_is_skip("io-seek-umd-open", 2u, (uint32_t)fd);
+        for (unsigned i = 0; i < 3u; i++) hle_is_skip(umd_rows[i], 6u, (uint32_t)fd);
+        if (fd >= 0) (void)sceIoClose(fd);
+        hle_is_skip("io-seek-umd-close", 1u, (uint32_t)fd);
+        return;
+    }
+    w[0] = (uint32_t)fd;
+    w[1] = 1u;
+    hle_record("io-seek-umd-open", "PASS", (uint32_t)fd, w, 2u);
+    const uint64_t targets[3] = {0xffffffffffffffffull, (uint64_t)size, (uint64_t)size + 1u};
+    for (unsigned i = 0; i < 3u; i++) {
+        hle_step(umd_rows[i]);
+        (void)sceIoLseek(fd, HLE_IS_PRE, PSP_SEEK_SET);
+        w[0] = (uint32_t)hle_is_ioctl_seek(fd, targets[i]);
+        s_hle_is_out[0] = HLE_SENTINEL;
+        s_hle_is_out[1] = HLE_SENTINEL;
+        w[1] = (uint32_t)sceIoIoctl(fd, HLE_IS_IOCTL_GETPOS, NULL, 0, s_hle_is_out, 8);
+        w[2] = s_hle_is_out[0];
+        w[3] = s_hle_is_out[1];
+        hle_is_pair(&w[4], sceIoLseek(fd, 0, PSP_SEEK_CUR));
+        hle_record(umd_rows[i], "PASS", w[0], w, 6u);
+    }
+    hle_step("io-seek-umd-close");
+    w[0] = (uint32_t)sceIoClose(fd);
+    hle_record("io-seek-umd-close", "PASS", w[0], w, 1u);
+}
+
+static int hle_run(void)
+{
+    hle_is_flash();
+    hle_is_ms();
+    hle_is_umd();
+    return 1;
+}
+
+#endif /* HLE_CASE_IO_SEEK */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_NICKNAME_LIMIT
+
+/* W-NET-1 (#2197): how long the PSP's nickname can be. Read-only: the registry lives in flash1,
+   so this section calls only the seven read calls the Makefile gate pins (open and close of the
+   registry and of a category, GetKeysNum, GetKeys, GetKeyInfo). It never calls
+   sceRegGetKeyValue, and no buffer that a call filled with the nickname is ever written to the
+   log, a file or any record: the system-parameter string is read into a static buffer, only its
+   NUL position (a number) is kept, and the buffer is zeroed at once. A record carries returns,
+   the key's type and size, and counts, nothing else.
+
+   On PSP-3000 6.6.1 sceRegOpenCategory on a category that does not exist creates it (see
+   registry_walk.h), so "/CONFIG/SYSTEM" is opened only after /CONFIG listed a key named SYSTEM
+   and sceRegGetKeyInfo reported it as a directory. "/CONFIG" is the one category measured to
+   exist (PSP-REGISTRY-001). sceRegGetKeyInfo of a missing key name returns an error and creates
+   nothing, so the owner_name query cannot write either. Every loop is bounded. */
+
+#define HLE_NICK_KEYS_MAX 64u
+#define HLE_NICK_BUFFER_BYTES 0x90u
+#define HLE_NICK_LENGTH_COUNT 8u
+
+static struct RegParam s_nick_param;
+static char s_nick_keys[HLE_NICK_KEYS_MAX * REG_KEYNAME_SIZE];
+static uint8_t s_nick_buffer[HLE_NICK_BUFFER_BYTES];
+static const int s_nick_lengths[HLE_NICK_LENGTH_COUNT] = {0x10, 0x11, 0x20, 0x21, 0x40, 0x41, 0x80, 0x81};
+static const char *const s_nick_length_cases[HLE_NICK_LENGTH_COUNT] = {
+    "nick-len-0x10", "nick-len-0x11", "nick-len-0x20", "nick-len-0x21",
+    "nick-len-0x40", "nick-len-0x41", "nick-len-0x80", "nick-len-0x81",
+};
+
+static uint32_t s_nick_key_size;
+static int s_nick_key_known;
+
+static void hle_nick_registry(void)
+{
+    REGHANDLE registry = 0;
+    REGHANDLE config = 0;
+    REGHANDLE system = 0;
+    int registry_open = 0;
+    int config_open = 0;
+    int system_open = 0;
+    int guard_ok = 0;
+
+    memset(&s_nick_param, 0, sizeof(s_nick_param));
+    s_nick_param.regtype = 1u;
+    memcpy(s_nick_param.name, SYSTEM_REGISTRY, sizeof(SYSTEM_REGISTRY));
+    s_nick_param.namelen = sizeof(SYSTEM_REGISTRY) - 1u;
+    s_nick_param.unk2 = 1u;
+    s_nick_param.unk3 = 1u;
+
+    hle_step("reg-open-registry");
+    const int open_rc = sceRegOpenRegistry(&s_nick_param, 1, &registry);
+    registry_open = open_rc == 0;
+    const uint32_t open_out[1] = {registry_open && registry != 0 ? 1u : 0u};
+    hle_record("reg-open-registry", "PASS", (uint32_t)open_rc, open_out, 1);
+
+    if (registry_open) {
+        hle_step("reg-config-open");
+        const int config_rc = sceRegOpenCategory(registry, "/CONFIG", 1, &config);
+        config_open = config_rc == 0;
+        const uint32_t out[1] = {config_open && config != 0 ? 1u : 0u};
+        hle_record("reg-config-open", "PASS", (uint32_t)config_rc, out, 1);
+    } else {
+        hle_skip("reg-config-open", 1);
+    }
+
+    /* The guard: SYSTEM must be listed by /CONFIG and be a directory before it is opened. */
+    if (config_open) {
+        uint32_t guard_out[5] = {HLE_SENTINEL, 0u, 0u, HLE_SENTINEL, 0u};
+        int count = 0;
+        hle_step("reg-system-guard");
+        const int num_rc = sceRegGetKeysNum(config, &count);
+        int keys_rc = num_rc;
+        guard_out[0] = (uint32_t)num_rc;
+        guard_out[1] = (uint32_t)count;
+        if (num_rc == 0 && count > 0 && (uint32_t)count <= HLE_NICK_KEYS_MAX) {
+            uint32_t found = 0;
+            memset(s_nick_keys, 0, sizeof(s_nick_keys));
+            keys_rc = sceRegGetKeys(config, s_nick_keys, count);
+            if (keys_rc == 0) {
+                for (int i = 0; i < count; i++) {
+                    const char *name = s_nick_keys + (size_t)i * REG_KEYNAME_SIZE;
+                    if (memchr(name, '\0', REG_KEYNAME_SIZE) != NULL && strcmp(name, "SYSTEM") == 0) {
+                        found = 1u;
+                    }
+                }
+            }
+            guard_out[2] = found;
+            if (found) {
+                REGHANDLE key = 0;
+                unsigned int type = 0;
+                SceSize size = 0;
+                const int info_rc = sceRegGetKeyInfo(config, "SYSTEM", &key, &type, &size);
+                guard_out[3] = (uint32_t)info_rc;
+                guard_out[4] = (uint32_t)type;
+                guard_ok = info_rc == 0 && type == REG_TYPE_DIR;
+            }
+        }
+        hle_record("reg-system-guard", "PASS", (uint32_t)keys_rc, guard_out, 5);
+    } else {
+        hle_skip("reg-system-guard", 5);
+    }
+
+    if (guard_ok) {
+        hle_step("reg-system-open");
+        const int system_rc = sceRegOpenCategory(registry, "/CONFIG/SYSTEM", 1, &system);
+        system_open = system_rc == 0;
+        const uint32_t out[1] = {system_open && system != 0 ? 1u : 0u};
+        hle_record("reg-system-open", "PASS", (uint32_t)system_rc, out, 1);
+    } else {
+        hle_skip("reg-system-open", 1);
+    }
+
+    /* The query: return, type and size only. The key handle it returns is never used. */
+    if (system_open) {
+        REGHANDLE key = 0;
+        unsigned int type = HLE_SENTINEL;
+        SceSize size = HLE_SENTINEL;
+        hle_step("reg-owner-name-info");
+        const int info_rc = sceRegGetKeyInfo(system, "owner_name", &key, &type, &size);
+        const uint32_t out[2] = {(uint32_t)type, (uint32_t)size};
+        hle_record("reg-owner-name-info", "PASS", (uint32_t)info_rc, out, 2);
+        if (info_rc == 0) {
+            s_nick_key_known = 1;
+            s_nick_key_size = (uint32_t)size;
+        }
+    } else {
+        hle_skip("reg-owner-name-info", 2);
+    }
+
+    /* Release in reverse order; HLE_SENTINEL marks a handle that was never opened. */
+    uint32_t close_out[3] = {HLE_SENTINEL, HLE_SENTINEL, HLE_SENTINEL};
+    hle_step("reg-close");
+    if (system_open) {
+        close_out[0] = (uint32_t)sceRegCloseCategory(system);
+    }
+    if (config_open) {
+        close_out[1] = (uint32_t)sceRegCloseCategory(config);
+    }
+    if (registry_open) {
+        close_out[2] = (uint32_t)sceRegCloseRegistry(registry);
+    }
+    hle_record("reg-close", "PASS", 0, close_out, 3);
+}
+
+/* The return is the only thing kept of each call. The one number taken from the bytes is the
+   NUL position of the 0x80 call (the nickname's length in bytes); the buffer is zeroed before
+   the next call and again before this function returns. */
+static void hle_nick_lengths(void)
+{
+    uint32_t success_mask = 0;
+    uint32_t stored_length = HLE_SENTINEL;
+    int results[HLE_NICK_LENGTH_COUNT];
+    for (uint32_t i = 0; i < HLE_NICK_LENGTH_COUNT; i++) {
+        const int length = s_nick_lengths[i];
+        memset(s_nick_buffer, 0xA5, sizeof(s_nick_buffer));
+        hle_step(s_nick_length_cases[i]);
+        const int rc = sceUtilityGetSystemParamString(PSP_SYSTEMPARAM_ID_STRING_NICKNAME,
+                                                      (char *)s_nick_buffer, length);
+        results[i] = rc;
+        if (rc == 0) {
+            success_mask |= 1u << i;
+            if (length == 0x80) {
+                for (uint32_t j = 0; j < (uint32_t)length; j++) {
+                    if (s_nick_buffer[j] == 0) {
+                        stored_length = j;
+                        break;
+                    }
+                }
+            }
+        }
+        memset(s_nick_buffer, 0, sizeof(s_nick_buffer));
+        const uint32_t out[1] = {(uint32_t)length};
+        hle_record(s_nick_length_cases[i], "PASS", (uint32_t)rc, out, 1);
+    }
+
+    /* How the refusals line up with the numbers just measured: how many of the eight lengths
+       have a result that agrees with "accepted when length >= the key's size", and with
+       "accepted when length > the nickname's byte length" (room for the terminator). Each stays
+       0xA5A5A5A5 when the number it needs was not obtained. */
+    uint32_t agree_key_size = HLE_SENTINEL;
+    uint32_t agree_string = HLE_SENTINEL;
+    if (s_nick_key_known) {
+        agree_key_size = 0;
+        for (uint32_t i = 0; i < HLE_NICK_LENGTH_COUNT; i++) {
+            const int accepted = results[i] == 0;
+            agree_key_size += accepted == ((uint32_t)s_nick_lengths[i] >= s_nick_key_size) ? 1u : 0u;
+        }
+    }
+    if (stored_length != HLE_SENTINEL) {
+        agree_string = 0;
+        for (uint32_t i = 0; i < HLE_NICK_LENGTH_COUNT; i++) {
+            const int accepted = results[i] == 0;
+            agree_string += accepted == ((uint32_t)s_nick_lengths[i] > stored_length) ? 1u : 0u;
+        }
+    }
+    const uint32_t summary[5] = {
+        s_nick_key_known ? s_nick_key_size : HLE_SENTINEL, stored_length, success_mask,
+        agree_key_size, agree_string,
+    };
+    hle_record("nick-len-summary", "PASS", 0, summary, 5);
+}
+
+static int hle_run(void)
+{
+    hle_nick_registry();
+    hle_nick_lengths();
+    return 1;
+}
+
+#endif /* HLE_CASE_NICKNAME_LIMIT */
 
 /* ------------------------------------------------------------------------- */
 

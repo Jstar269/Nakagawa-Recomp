@@ -423,6 +423,26 @@
         ]
       },
       {
+        "id": "anime4k",
+        "name": "Anime4K",
+        "spdx_id": "MIT",
+        "upstream_origin": "https://github.com/bloc97/Anime4K",
+        "upstream_revision": "4029bf701ecaa15f163cdc49cffe5501c1acf410",
+        "disposition": "statically_linked_subset",
+        "notice_file": "anime4k.txt",
+        "copyright_notices": [
+          "Copyright (c) 2019-2021 bloc97"
+        ],
+        "note": "The byte-identical mpv shader third_party/anime4k/Anime4K_Upscale_CNN_x2_M.glsl (third_party/anime4k/PROVENANCE.md), wrapped pass by pass by tools/anime4k_port.py into src/rt/gpu_sdl3vk/shaders/anime4k_cnn_x2_m_0.comp to anime4k_cnn_x2_m_8.comp and compiled into the native player's SPIR-V as the opt-in movie upscaler.",
+        "license_texts": [
+          {
+            "file": "third_party/anime4k/LICENSE.txt",
+            "copied_from": "Anime4K LICENSE at commit 4029bf701ecaa15f163cdc49cffe5501c1acf410, imported byte-identical",
+            "sha256": "5bad448b737378e3d0c977ad0d0521fa37ad279a7e76ea9a31d9257eeb6953f5"
+          }
+        ]
+      },
+      {
         "id": "libchdr",
         "name": "libchdr",
         "spdx_id": "BSD-3-Clause",
