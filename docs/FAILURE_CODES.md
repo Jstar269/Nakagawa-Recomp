@@ -188,6 +188,7 @@ The **Where** column of each table names the places a code can appear:
 | `PACKAGE_INVALID_MANIFEST` | route | The title manifest is invalid. |
 | `PACKAGE_INVALID_PATH` | route | A path given to the build is invalid. |
 | `PACKAGE_INVALID_PLAN` | route | The build plan is invalid. |
+| `PACKAGE_INVALID_TARGET` | route | The package target is not one the build supports (the host or an Android ABI). |
 | `PACKAGE_LICENSE_RECORD_MISSING` | route | A bundled component has no licence record. |
 | `PACKAGE_LICENSE_TEXT_MISSING` | route | A bundled component's licence text is missing. |
 | `PACKAGE_OUTPUT_CONFLICT` | route | The output folder holds files from a different build. |
