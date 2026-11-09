@@ -1367,7 +1367,8 @@ One console is one data point; see §11. Nothing here closes issue #70
   with an argp past the 64 MB of RAM (run last). All three behaved the same: the call did not return to its caller
   and the module was unloaded. The helper's thread reached the call and never resumed after it, its `module_stop`
   ran exactly once, and `sceKernelGetModuleIdByAddress` on the helper's code afterwards answered `0x8002012e` (the
-  module is gone); the cleanup stop and unload calls found nothing left to do. `module_stop` saw argument size 0
+  module is gone). Because that answer was below zero, the probe did not call `sceKernelStopModule` or
+  `sceKernelUnloadModule`; the three `-cleanup` records hold only their preset sentinels. `module_stop` saw argument size 0
   and argp 0 for the first two forms; for the third it saw size 4 and an argp that was not the caller's
   out-of-RAM pointer, and the call was neither refused nor faulted. So a helper thread's self stop-unload runs
   `module_stop`, unloads the module and never returns to the calling thread.
@@ -1411,8 +1412,9 @@ One console is one data point; see §11. Nothing here closes issue #70
 - **PSP-3000 single-case runs of six probes (2026-11-08)**: system software 6.6.0 as reported by `pspver`,
   operator-declared model PSP-3000, XMB context, one launch per case, each after the `transport-write` preflight
   (PSP-TRANSPORT-001 is not re-cited). The runs of cases 162-165 and 170 and the boot-159 run of case 169 are
-  acceptance-eligible with harness verdict ok, all PASS and no exception; the boot-161 vcmp re-run is recorded as
-  complete with no exception (its harness verdict is not cited here): `hle-io-seek` (case 162, boot 156, `59520eb0`,
+  acceptance-eligible with harness verdict ok and all PASS, and none raised an exception, but the PSP needed its
+  watchdog after case 163; the boot-161 vcmp re-run is recorded as complete with no exception (its harness verdict
+  is not cited here): `hle-io-seek` (case 162, boot 156, `59520eb0`,
   30 records), `vfpu-unmodeled` (case 163, boot 157, `d1d8558a`, 115 records), `hle-nickname-limit` (case 164, boot 155,
   `07e58170`, 16 records), `vfpu-quad-wb` (case 165, boot 159, `ecc203af`, 19 records), `vfpu-convert` (case 170,
   boot 160, `266552d0`, 229 records) and `vfpu-cc-cmov` (case 169: boot 159, `750c5fb1`, 217 records, and the

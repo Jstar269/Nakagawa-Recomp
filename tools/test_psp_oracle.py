@@ -7573,6 +7573,21 @@ class HleIssuesProbeTests(unittest.TestCase):
         truncated = "\n".join(text.splitlines()[:-200]) + "\n"
         self.assertFalse(_campaign_stream_complete(truncated, "hle-issues-batch"))
 
+    def test_pass_only_cases_reject_fail_and_skip_rows(self) -> None:
+        helper = HleMeasureProbeTests("test_case_ids_are_registered_once_and_match_the_families")
+        for case in ("hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-quad-wb"):
+            spec, counts = CAMPAIGN_PROBE_CASES[case]
+            clean = helper._stream(case)
+            self.assertTrue(parse_campaign_probe_output(helper._body(clean), case).complete)
+            # The first row, a middle row and the last row before the terminal.
+            cells = spec.semantic_cases
+            for row in (cells[0], cells[len(cells) // 2], cells[-1]):
+                for status in ("FAIL", "SKIP"):
+                    with self.subTest(case=case, row=row, status=status):
+                        text = helper._stream(case, {row: (status, 0, [0] * counts[row])})
+                        with self.assertRaisesRegex(ProtocolError, "unconditional observation"):
+                            parse_campaign_probe_output(helper._body(text), case)
+
     @staticmethod
     def _intr_records(calls=(6, 5, 4, 6, 5), failed_vtimers=(), register="enabled"):
         records = []
