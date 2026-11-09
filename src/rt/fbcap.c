@@ -118,10 +118,148 @@ static void cap_finish(int ok, const char *why) {
     }
 }
 
-/* Publish w x h pixels as a P6 PPM whose name ends in .ppm: the header matches the
- * extension and exactly w*h*3 colour bytes follow, in R,G,B order whatever the source byte
- * order. Publication is atomic: a unique temp sibling is written completely and then renamed
- * over the destination, so a reader never observes a half-written file. */
+/* ---- PNG publication (screenshots) --------------------------------------------------------
+ * A path ending in ".png" (any case) is published as a PNG: 8-bit RGB, no interlace, filter
+ * type 0 on every row, and a zlib stream of stored (uncompressed) deflate blocks with its
+ * Adler-32. Stored blocks keep the writer small and exact; the file is about as large as the
+ * PPM would be. Chunk CRCs are the PNG CRC-32 (polynomial 0xEDB88320). */
+static int cap_path_is_png(const char *path) {
+    size_t n = strlen(path);
+    if (n < 4u) return 0;
+    const char *e = path + n - 4u;
+    return e[0] == '.' && (e[1] == 'p' || e[1] == 'P') && (e[2] == 'n' || e[2] == 'N') &&
+           (e[3] == 'g' || e[3] == 'G');
+}
+
+static uint32_t png_crc_update(uint32_t crc, const uint8_t *p, size_t n) {
+    static uint32_t table[256];
+    static int table_ready;
+    if (!table_ready) {
+        for (uint32_t i = 0; i < 256u; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++) c = (c & 1u) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+        table_ready = 1;
+    }
+    for (size_t i = 0; i < n; i++) crc = table[(crc ^ p[i]) & 0xFFu] ^ (crc >> 8);
+    return crc;
+}
+
+typedef struct {
+    FILE *f;
+    uint32_t crc;         /* running CRC of the IDAT chunk (type and data), pre-inverted */
+    uint32_t adler_a;
+    uint32_t adler_b;
+    uint32_t left_total;  /* image bytes (filter bytes included) still to store */
+    uint32_t left_block;  /* bytes still to store in the open deflate block */
+    int ok;
+} PngOut;
+
+static void png_be32(uint8_t *out, uint32_t v) {
+    out[0] = (uint8_t)(v >> 24);
+    out[1] = (uint8_t)(v >> 16);
+    out[2] = (uint8_t)(v >> 8);
+    out[3] = (uint8_t)v;
+}
+
+static void png_put(PngOut *z, const uint8_t *p, size_t n) {
+    if (!z->ok) return;
+    z->crc = png_crc_update(z->crc, p, n);
+    if (fwrite(p, 1, n, z->f) != n) z->ok = 0;
+}
+
+/* One whole chunk with its length and CRC (IHDR, IEND). */
+static int png_chunk(FILE *f, const char type[4], const uint8_t *data, uint32_t len) {
+    uint8_t head[8];
+    png_be32(head, len);
+    memcpy(head + 4, type, 4u);
+    uint32_t crc = png_crc_update(0xFFFFFFFFu, head + 4, 4u);
+    if (len) crc = png_crc_update(crc, data, len);
+    uint8_t tail[4];
+    png_be32(tail, crc ^ 0xFFFFFFFFu);
+    return fwrite(head, 1, 8u, f) == 8u && (len == 0u || fwrite(data, 1, len, f) == len) &&
+           fwrite(tail, 1, 4u, f) == 4u;
+}
+
+/* Signature, IHDR, and the head of the one IDAT chunk. cap_pixels_valid bounds w*4*h by
+ * UINT32_MAX, so the stored image (h * (1 + 3w) bytes) and the IDAT length fit in 32 bits. */
+static int png_begin(PngOut *z, FILE *f, uint32_t w, uint32_t h) {
+    static const uint8_t sig[8] = {0x89u, 'P', 'N', 'G', 0x0Du, 0x0Au, 0x1Au, 0x0Au};
+    uint8_t ihdr[13];
+    png_be32(ihdr, w);
+    png_be32(ihdr + 4, h);
+    ihdr[8] = 8u;    /* bit depth */
+    ihdr[9] = 2u;    /* colour type: RGB */
+    ihdr[10] = 0u;   /* deflate */
+    ihdr[11] = 0u;   /* filter method 0 */
+    ihdr[12] = 0u;   /* no interlace */
+    uint64_t raw = (uint64_t)h * (1u + 3u * (uint64_t)w);
+    uint64_t blocks = (raw + 65534u) / 65535u;
+    uint64_t idat = 2u + 5u * blocks + raw + 4u;
+    if (raw == 0u || idat > 0x7FFFFFFFu) return 0;   /* PNG chunk lengths are at most 2^31 - 1 */
+    if (fwrite(sig, 1, 8u, f) != 8u || !png_chunk(f, "IHDR", ihdr, 13u)) return 0;
+    uint8_t len[4];
+    png_be32(len, (uint32_t)idat);
+    if (fwrite(len, 1, 4u, f) != 4u) return 0;
+    z->f = f;
+    z->crc = 0xFFFFFFFFu;
+    z->adler_a = 1u;
+    z->adler_b = 0u;
+    z->left_total = (uint32_t)raw;
+    z->left_block = 0u;
+    z->ok = 1;
+    static const uint8_t zhead[2] = {0x78u, 0x01u};   /* deflate, 32K window, no dictionary */
+    png_put(z, (const uint8_t *)"IDAT", 4u);
+    png_put(z, zhead, 2u);
+    return z->ok;
+}
+
+/* Store n image bytes, opening a stored block (at most 65535 bytes) whenever one is full. */
+static void png_z_data(PngOut *z, const uint8_t *p, size_t n) {
+    while (z->ok && n) {
+        if (n > z->left_total) { z->ok = 0; return; }
+        if (z->left_block == 0u) {
+            uint32_t blk = z->left_total < 65535u ? z->left_total : 65535u;
+            uint8_t hdr[5];
+            hdr[0] = blk == z->left_total ? 1u : 0u;   /* BFINAL on the last block, BTYPE 00 */
+            hdr[1] = (uint8_t)blk;
+            hdr[2] = (uint8_t)(blk >> 8);
+            hdr[3] = (uint8_t)~blk;
+            hdr[4] = (uint8_t)(~blk >> 8);
+            png_put(z, hdr, 5u);
+            z->left_block = blk;
+        }
+        size_t take = n < z->left_block ? n : z->left_block;
+        for (size_t i = 0; i < take; i++) {
+            z->adler_a = (z->adler_a + p[i]) % 65521u;
+            z->adler_b = (z->adler_b + z->adler_a) % 65521u;
+        }
+        png_put(z, p, take);
+        z->left_block -= (uint32_t)take;
+        z->left_total -= (uint32_t)take;
+        p += take;
+        n -= take;
+    }
+}
+
+/* The Adler-32, the IDAT CRC and IEND. Every image byte must have been stored. */
+static int png_end(PngOut *z) {
+    if (!z->ok || z->left_total != 0u) return 0;
+    uint8_t adler[4];
+    png_be32(adler, (z->adler_b << 16) | z->adler_a);
+    png_put(z, adler, 4u);
+    if (!z->ok) return 0;
+    uint8_t crc[4];
+    png_be32(crc, z->crc ^ 0xFFFFFFFFu);
+    return fwrite(crc, 1, 4u, z->f) == 4u && png_chunk(z->f, "IEND", NULL, 0u);
+}
+
+/* Publish w x h pixels as a P6 PPM whose name ends in .ppm, or as the PNG above for a name
+ * ending in .png: the header matches the extension and exactly w*h*3 colour bytes follow, in
+ * R,G,B order whatever the source byte order. Publication is atomic: a unique temp sibling is
+ * written completely and then renamed over the destination, so a reader never observes a
+ * half-written file. */
 static int cap_write_file(const uint8_t *px, uint32_t row_bytes, sr_cap_order order) {
     if (!cap_ensure_parent_dir(s_path)) return 0;
     static unsigned long s_tmp_seq;
@@ -132,7 +270,9 @@ static int cap_write_file(const uint8_t *px, uint32_t row_bytes, sr_cap_order or
     if (!rgb) return 0;
     FILE *f = fopen(tmp, "wb");
     if (!f) { free(rgb); return 0; }
-    int ok = fprintf(f, "P6\n%u %u\n255\n", s_w, s_h) > 0;
+    const int png = cap_path_is_png(s_path);
+    PngOut z;
+    int ok = png ? png_begin(&z, f, s_w, s_h) : fprintf(f, "P6\n%u %u\n255\n", s_w, s_h) > 0;
     /* Byte offsets of R, G, B inside one pixel for the source byte order. */
     const int ir = order == SR_CAP_ORDER_RGBX ? 0 : 2;
     const int ib = order == SR_CAP_ORDER_RGBX ? 2 : 0;
@@ -144,8 +284,16 @@ static int cap_write_file(const uint8_t *px, uint32_t row_bytes, sr_cap_order or
             rgb[x * 3u + 1u] = p[1];
             rgb[x * 3u + 2u] = p[ib];
         }
-        ok = fwrite(rgb, 1, (size_t)s_w * 3u, f) == (size_t)s_w * 3u;
+        if (png) {
+            static const uint8_t filter_none = 0u;   /* every PNG row starts with its filter type */
+            png_z_data(&z, &filter_none, 1u);
+            png_z_data(&z, rgb, (size_t)s_w * 3u);
+            ok = z.ok;
+        } else {
+            ok = fwrite(rgb, 1, (size_t)s_w * 3u, f) == (size_t)s_w * 3u;
+        }
     }
+    if (ok && png) ok = png_end(&z);
     if (ok && fflush(f) != 0) ok = 0;
     if (fclose(f) != 0) ok = 0;
     free(rgb);
