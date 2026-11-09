@@ -13381,6 +13381,26 @@ int main(int argc, char **argv) {
      * retained child handle -- and no repository-tracked file changes across
      * all runs. The staged executable is a self-copy of this test binary
      * standing in for a recompiled runtime; the package is synthetic. */
+#if defined(__ANDROID__)
+    /* Every launch in this block spawns the runtime, which Android does only through the
+       app's TitleActivity over JNI; a program run from adb shell has no Java VM for it, and
+       nk_launch_start fails closed there (launch_resolution_test skips its spawning subtests
+       for the same reason). It runs inside the app instead. */
+    printf("SKIP player_state_test subtest 20 (exit 77): a launch needs the app's TitleActivity "
+           "(#360)\n");
+    s_package_rebuild_skipped = true;
+    /* Helpers only this block uses. */
+    (void)write_iso_with_fixture_eboot;
+    (void)set_environment_value;
+    (void)path_is_within;
+    (void)get_working_directory;
+    (void)git_status_snapshot;
+    (void)files_identical;
+    (void)read_repeat_launch_report;
+    (void)run_log_contains;
+    (void)append_runtime_event;
+    (void)repeat_launch_and_settle;
+#else
     printf("[PLAYER_STATE_TEST] Subtest 20: repeat launch through the player session path\n");
     fflush(stdout);
     {
@@ -14237,6 +14257,7 @@ int main(int argc, char **argv) {
         test_rmdir(user_root);
         test_rmdir(scratch);
     }
+#endif
     /* 20b. A crafted disc controls module directory names; only plain names
        may be written under the private per-title folder. */
     {
