@@ -120,7 +120,12 @@ We aim to respond promptly and will remove material where appropriate.
   and `android/log.h`: Apache-2.0) and Khronos Vulkan-Headers v1.4.363 (Apache-2.0 OR
   MIT). Every input is checked by commit or SHA-256. The sysroot archive ships each of
   those licence texts under `NOTICES/`, including the GPL-2.0-only and
-  Linux-syscall-note texts. No Android NDK file is shipped.
+  Linux-syscall-note texts. No Android NDK file is shipped. The toolchain assets ship
+  each LLVM project's `LICENSE.TXT` and the notices of the third-party code inside the
+  binaries: Henry Spencer's regex (BSD-3-Clause), BLAKE3 (CC0-1.0 or Apache-2.0), Ryu
+  (Boost Software License 1.0), the Unicode conversion code and name tables (Unicode
+  licence), MD5 (public domain or cut-down BSD), `strlcpy` (ISC) and xxHash
+  (BSD-2-Clause).
 - **VFPU tables** — PPSSPP-origin lookup data with the exact source and checksums
   recorded in `assets/vfpu/PROVENANCE.json`; inclusion is a provenance decision,
   not a claim about PSP firmware ownership.

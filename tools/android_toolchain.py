@@ -16,7 +16,8 @@ checked against its pinned SHA-256, is built three times:
 and `libnk_ld.so` (android/toolchain/nk_ld_launcher.c; Android runs only lib*.so files from an
 app's native library folder), and `assets/toolchain/sysroot.tar` and `clang-resource.tar`,
 with `toolchain-manifest.json` listing every file's SHA-256 and, under
-`assets/toolchain/NOTICES/llvm/`, the LICENSE.TXT of each LLVM project the binaries hold.
+`assets/toolchain/NOTICES/llvm/`, the LICENSE.TXT of each LLVM project the binaries hold and
+the notices of the third-party code inside them (LLVM_THIRD_PARTY_FILES and _EXCERPTS).
 
 Each stage writes into its own folder under --work and runs only when that folder has no
 `.done` stamp, so an interrupted build resumes. `--jobs` caps the compile jobs; links run one
@@ -92,6 +93,25 @@ RUNTIMES = (
 )
 #: The LLVM projects whose code the shipped binaries hold; each LICENSE.TXT ships with them.
 LLVM_LICENSED = ("llvm", "clang", "lld", "compiler-rt", "libunwind", "libcxxabi", "libcxx")
+#: Third-party code inside those binaries that keeps its own licence: whole licence files,
+#: shipped under the same relative path.
+LLVM_THIRD_PARTY_FILES = (
+    "llvm/lib/Support/COPYRIGHT.regex",  # Henry Spencer's regex (regcomp/regexec/regerror/regfree)
+    "llvm/lib/Support/BLAKE3/LICENSE",  # BLAKE3: CC0-1.0, or Apache-2.0
+)
+#: ... and notices that live only in a compiled source file's header: (path, first line,
+#: last line, text the excerpt must hold). They are joined into THIRD-PARTY-NOTICES.txt.
+LLVM_THIRD_PARTY_EXCERPTS = (
+    ("libcxx/src/charconv.cpp", 29, 33, "Copyright (c) Microsoft Corporation."),
+    ("libcxx/src/ryu/d2fixed.cpp", 9, 37, "Copyright 2018 Ulf Adams"),
+    ("libcxx/src/ryu/d2s.cpp", 9, 37, "Copyright 2018 Ulf Adams"),
+    ("libcxx/src/ryu/f2s.cpp", 9, 37, "Copyright 2018 Ulf Adams"),
+    ("llvm/lib/Support/ConvertUTF.cpp", 9, 44, "Unicode, Inc."),
+    ("llvm/lib/Support/MD5.cpp", 1, 38, "Alexander Peslyak"),
+    ("llvm/lib/Support/regstrlcpy.c", 1, 17, "Todd C. Miller"),
+    ("llvm/lib/Support/UnicodeNameToCodepointGenerated.cpp", 16, 63, "Unicode, Inc."),
+    ("llvm/lib/Support/xxhash.cpp", 1, 33, "Yann Collet"),
+)
 #: The device binaries are linked stripped. lld 21.1.8 does not write .symtab the same way twice:
 #: in each link, one local `$x` mapping symbol beside the Cortex-A53 erratum 843419 patches
 #: gets a different st_shndx (SHN_UNDEF or .text), with one thread or many. Nothing else
@@ -341,6 +361,19 @@ def _tree_entries(root: Path, prefix: str) -> dict[str, android_sysroot.Entry]:
             for path in sorted(root.rglob("*")) if path.is_file()}
 
 
+def third_party_notices(src: Path) -> str:
+    """The licence notices held only in compiled files' headers, each under its source path."""
+    parts = [f"Third-party notices inside the LLVM {LLVM_VERSION} code in libnk_clang.so, libnk_lld.so\n"
+             "and the runtimes, copied from the headers of the files that hold that code.\n"]
+    for relative, first, last, marker in LLVM_THIRD_PARTY_EXCERPTS:
+        lines = (src / relative).read_text(encoding="utf-8").splitlines()
+        excerpt = "\n".join(lines[first - 1:last])
+        if last > len(lines) or marker not in excerpt:
+            raise ToolchainError(f"{relative} lines {first}-{last} no longer hold the notice {marker!r}")
+        parts.append(f"\n==== {relative}, lines {first}-{last} ====\n\n{excerpt}\n")
+    return "".join(parts)
+
+
 def stage_output(cfg: Config, out: Path) -> dict[str, str]:
     """The APK's files under *out*; returns {path: sha256}."""
     libs = out / "jniLibs" / "arm64-v8a"
@@ -360,6 +393,11 @@ def stage_output(cfg: Config, out: Path) -> dict[str, str]:
     for project in LLVM_LICENSED:
         (notices / project).mkdir(parents=True, exist_ok=True)
         shutil.copyfile(cfg.src / project / "LICENSE.TXT", notices / project / "LICENSE.TXT")
+    for relative in LLVM_THIRD_PARTY_FILES:
+        (notices / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(cfg.src / relative, notices / relative)
+    (notices / "THIRD-PARTY-NOTICES.txt").write_text(third_party_notices(cfg.src),
+                                                    encoding="utf-8", newline="\n")
     resource = _tree_entries(device / "lib" / "clang" / CLANG_MAJOR / "include", "include")
     resource.update(_tree_entries(cfg.resource / "lib", "lib"))
     android_sysroot.write_archive(resource, assets / "clang-resource.tar")

@@ -60,8 +60,17 @@ only `libc.so`, `libm.so` and `libdl.so`.
 What the APK carries, from `tools/android_toolchain.py`'s staging step:
 
 - `jniLibs/arm64-v8a/libnk_clang.so` and `libnk_lld.so` (the device binaries, linked without a symbol table so that
-  two builds give the same bytes) and `libnk_ld.so` (the launcher);
+  two builds give the same bytes; a crash trace from them therefore shows only addresses, and symbolizing one needs a
+  relink of the same build folder without `--strip-all`) and `libnk_ld.so` (the launcher);
 - `assets/toolchain/sysroot.tar` (above) and `clang-resource.tar` (clang's own headers, the builtins and libunwind);
 - `assets/toolchain/NOTICES/llvm/<project>/LICENSE.TXT` for llvm, clang, lld, compiler-rt, libunwind, libcxxabi and
   libcxx, copied from the checked tarball;
+- the notices of the third-party code compiled into those binaries, from the same tarball:
+  `NOTICES/llvm/llvm/lib/Support/COPYRIGHT.regex` (Henry Spencer's regex library, BSD-3-Clause),
+  `NOTICES/llvm/llvm/lib/Support/BLAKE3/LICENSE` (BLAKE3, CC0-1.0 or Apache-2.0), and
+  `NOTICES/llvm/THIRD-PARTY-NOTICES.txt`, the licence headers of the files that carry their own notice: libc++'s
+  Ryu and `charconv.cpp` (Ulf Adams, Boost Software License 1.0; Microsoft, Apache-2.0 WITH LLVM-exception),
+  `ConvertUTF.cpp` and `UnicodeNameToCodepointGenerated.cpp` (Unicode licence), `MD5.cpp` (Alexander Peslyak, public
+  domain or a cut-down BSD licence), `regstrlcpy.c` (Todd C. Miller, ISC) and `xxhash.cpp` (Yann Collet,
+  BSD-2-Clause). The build refuses a tarball whose pinned lines no longer hold those notices;
 - `toolchain-manifest.json`, the SHA-256 of every staged file.

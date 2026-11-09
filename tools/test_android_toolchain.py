@@ -128,6 +128,14 @@ class PinTests(unittest.TestCase):
                 toolchain.verify_tarball(tarball)
             toolchain.verify_tarball(tarball, hashlib.sha256(b"not llvm").hexdigest())
 
+    def test_the_source_is_extracted_only_from_a_checked_tarball(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            cfg = _config(Path(tmp))
+            cfg.llvm_tarball.write_bytes(b"not llvm")
+            with self.assertRaisesRegex(toolchain.ToolchainError, "pinned"):
+                toolchain.extract_source(cfg)
+            self.assertFalse(cfg.src.exists())
+
     def test_the_pin_names_one_release(self) -> None:
         self.assertRegex(toolchain.LLVM_SHA256, r"^[0-9a-f]{64}$")
         self.assertIn(f"llvmorg-{toolchain.LLVM_VERSION}/", toolchain.LLVM_URL)
@@ -206,6 +214,41 @@ class NdkCheckTests(unittest.TestCase):
         # lld writes .symtab differently from link to link; see DEVICE_LINK.
         self.assertIn("-Wl,--strip-all", toolchain.DEVICE_LINK)
         self.assertIn("-Wl,--build-id=sha1", toolchain.DEVICE_LINK)
+
+
+class ThirdPartyNoticeTests(unittest.TestCase):
+    def write_sources(self, src: Path, *, drop: str | None = None) -> None:
+        for relative, _first, last, marker in toolchain.LLVM_THIRD_PARTY_EXCERPTS:
+            lines = [f"line {n}" for n in range(1, last + 6)]
+            if relative != drop:
+                lines[last - 1] = f"line {last} {marker}"
+            (src / relative).parent.mkdir(parents=True, exist_ok=True)
+            (src / relative).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_each_header_notice_is_copied_with_its_source_path_and_lines(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            src = Path(tmp)
+            self.write_sources(src)
+            text = toolchain.third_party_notices(src)
+            for relative, first, last, marker in toolchain.LLVM_THIRD_PARTY_EXCERPTS:
+                self.assertIn(f"==== {relative}, lines {first}-{last} ====", text)
+                self.assertIn(f"line {last} {marker}", text)
+                self.assertNotIn(f"line {last + 1}\n", text.split(f"==== {relative},")[1].split("====")[1])
+
+    def test_a_notice_that_moved_is_refused(self) -> None:
+        relative = toolchain.LLVM_THIRD_PARTY_EXCERPTS[0][0]
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            self.write_sources(Path(tmp), drop=relative)
+            with self.assertRaisesRegex(toolchain.ToolchainError, "no longer hold"):
+                toolchain.third_party_notices(Path(tmp))
+
+    def test_the_known_third_party_code_is_covered(self) -> None:
+        covered = {path for path, *_ in toolchain.LLVM_THIRD_PARTY_EXCERPTS}
+        covered.update(toolchain.LLVM_THIRD_PARTY_FILES)
+        for path in ("llvm/lib/Support/COPYRIGHT.regex", "llvm/lib/Support/BLAKE3/LICENSE",
+                     "llvm/lib/Support/xxhash.cpp", "llvm/lib/Support/ConvertUTF.cpp",
+                     "llvm/lib/Support/MD5.cpp", "libcxx/src/ryu/d2s.cpp"):
+            self.assertIn(path, covered)
 
 
 class StampTests(unittest.TestCase):
