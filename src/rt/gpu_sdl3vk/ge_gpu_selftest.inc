@@ -5938,7 +5938,7 @@ static int wide_frame(int gpu, int flags, uint32_t *vram, uint32_t *canvas) {
  * 0, 4, 8, 12) of each column-major clip matrix by 480 / (480 + 2D) and touches nothing else; with Fill off it
  * leaves every float alone. Two matrices at different offsets from one base, in guest RAM away from the frames. */
 static int wide_clip_x_check(int wing) {
-    const uint32_t base = 0x08f00000u;
+    const uint32_t base = SR_RAM_BASE + 0x00f00000u;
     const uint32_t offsets[2] = {640u, 448u};
     for (uint32_t m = 0; m < 2; m++)
         for (uint32_t e = 0; e < 16u; e++) {
