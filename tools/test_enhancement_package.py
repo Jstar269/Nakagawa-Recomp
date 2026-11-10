@@ -4403,6 +4403,8 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             ("a caller-saved register", {"CALL": {"phase_time": {"register": "a0", "offset": 20}}},
              "needs phase_time"),
             ("an unaligned time", {"CALL": {"phase_time": {"register": "s0", "offset": 22}}}, "needs phase_time"),
+            ("a register that is no name", {"CALL": {"phase_time": {"register": ["s0"], "offset": 20}}},
+             "needs phase_time"),
             ("an extra phase field", {"CALL": {"phase_time": {"register": "s0", "offset": 20, "scale": 2}}},
              "needs phase_time"),
             ("a condition that is no boolean", {"COMPARE": {"odd_phase_condition": 0}}, "must be true or false"),
@@ -4960,6 +4962,89 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         with_factor["sites"][4]["factor"] = kappa
         self.assertTrue(enhancement_package.published_package_findings(with_factor))
 
+    @unittest.skipUnless(GCC, "needs a host C compiler")
+    def test_kappa_scale_is_one_rounding_in_every_form(self) -> None:
+        """Compile the emitted scale of each velocity_source_x_kappa form and run it.
+
+        A loaded FPU register, a loaded VFPU register, each of the four lanes an lv.q loads and the
+        copy an unchecked swc1 stores are all the value times kappa in double, rounded to single
+        precision once: the bits a checked store's stock-value table holds for the same value. The
+        constant scales keep their single-precision multiply."""
+        kappa = self._factors()[0]
+        rng = random.Random(1931)
+        values = [0.0, -0.0, 1.0, -4.0, 0.125, 1.0e-3, 3.0e38, _f32_of(0x00000001), _f32_of(0x007FFFFF),
+                  _f32_of(0x00800000), float("inf")]
+        values += [rng.uniform(-10.0, 10.0) for _ in range(2000)]
+        values += [2.0 ** rng.uniform(-149, 127) for _ in range(500)]
+        values = [_f32_round(v) for v in values]
+        lanes = codegen.vreg_indices(0, 4)
+        single = codegen.vreg_indices(39, 1)[0]
+        forms: tuple[tuple[str, int, dict[str, Any], list[str]], ...] = (
+            ("lwc1", _lwc1(3, 0x10, V0), {"kind": "scale_f_reg", "reg": 3}, ["s->f[3]"]),
+            ("lv.s", _lvs(39, 0x10, V0), {"kind": "scale_v_reg", "vreg": 39}, [f"s->v[{single}]"]),
+            ("lv.q", _lvq(0, 0x40, A0), {"kind": "scale_vq_reg", "vreg": 0}, [f"s->v[{v}]" for v in lanes]),
+            ("swc1", _swc1(4, 0x10, A1), {"kind": "scale_f_store", "reg": 4}, ["_nk_f"]),
+        )
+        scale = re.compile(r"(?:s->[fv]\[\d+\] = |float _nk_f = )\(float\)\(\(double\)s->[fv]\[\d+\] \* [^;]+\);")
+        blocks: list[str] = []
+        saved = codegen.ENHANCEMENT_SITES
+        try:
+            for name, word, rewrite, cells in forms:
+                codegen.ENHANCEMENT_SITES = {0x1300: {"id": "K", "rewrite": dict(rewrite, factor=kappa)}}
+                codegen.ENHANCEMENT_APPLIED.clear()
+                enhanced = codegen.normal_line(0x1300, word, lle_cpu=False).rsplit("else", 1)[0]
+                statements = scale.findall(enhanced)
+                self.assertEqual(len(statements), len(cells), f"{name}: {enhanced}")
+                self.assertTrue(all(f"* {kappa!r});" in stmt for stmt in statements), statements)
+                prints = " ".join(f"show({cell});" for cell in cells)
+                blocks.append(f"        {{ {' '.join(statements)} {prints} }}")
+                # The same forms under a constant scale are the single-precision multiply they were.
+                codegen.ENHANCEMENT_SITES = {0x1300: {"id": "K", "rewrite": dict(rewrite, factor=0.5)}}
+                codegen.ENHANCEMENT_APPLIED.clear()
+                halved = codegen.normal_line(0x1300, word, lle_cpu=False).rsplit("else", 1)[0]
+                self.assertEqual(scale.findall(halved), [])
+                self.assertEqual(halved.count("0.5f"), len(cells), halved)
+        finally:
+            codegen.ENHANCEMENT_SITES = saved
+            codegen.ENHANCEMENT_APPLIED.clear()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            (tmp / "v.txt").write_text("\n".join(struct.pack("<f", v).hex() for v in values), encoding="utf-8")
+            harness = tmp / "scale.c"
+            harness.write_text(
+                "#include <math.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n"
+                "typedef struct { float f[32]; float v[128]; } S;\n"
+                "static void show(float x) { uint32_t b; memcpy(&b, &x, 4); printf(\"%08x\\n\", (unsigned)b); }\n"
+                "int main(int argc, char **argv) {\n"
+                "    FILE *in = fopen(argv[1], \"r\"); char hex[16]; S st, *s = &st;\n"
+                "    if (argc < 2 || !in) return 1;\n"
+                "    while (fscanf(in, \"%15s\", hex) == 1) {\n"
+                "        uint8_t b[4]; float x;\n"
+                "        for (int i = 0; i < 4; i++) sscanf(hex + 2 * i, \"%2hhx\", &b[i]);\n"
+                "        memcpy(&x, b, 4);\n"
+                "        for (int i = 0; i < 32; i++) s->f[i] = x;\n"
+                "        for (int i = 0; i < 128; i++) s->v[i] = x;\n"
+                + "\n".join(blocks) + "\n"
+                "    }\n"
+                "    fclose(in); return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            exe = tmp / "scale.exe"
+            subprocess.run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe), str(harness), "-lm"],
+                           check=True, capture_output=True, text=True)
+            out = subprocess.run([str(exe), str(tmp / "v.txt")], check=True, capture_output=True,
+                                 text=True).stdout.split()
+        per_value = sum(len(cells) for _name, _word, _rewrite, cells in forms)
+        self.assertEqual(len(out), per_value * len(values))
+        finite = list({_f32_bits_of(v): v for v in values if math.isfinite(v)}.values())
+        table = dict(plan_site_rewrite({"id": "K", "transform": "velocity_source_x_kappa", "stock_values": finite},
+                                       _swc1(4, 0x10, A1), {"kappa": kappa})["stock_values"])
+        for i, value in enumerate(values):
+            want = _f32_bits_of(value * kappa)
+            self.assertEqual({int(got, 16) for got in out[per_value * i:per_value * (i + 1)]}, {want}, f"{value!r}")
+            if math.isfinite(value):
+                self.assertEqual(table[_f32_bits_of(value)], want)
 
 if __name__ == "__main__":
     unittest.main()

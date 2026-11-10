@@ -276,7 +276,8 @@ def _scaled_store_line(rw: dict, stock_line: str) -> str:
     if "stock_values" in rw or "stock_value_digests" in rw:
         return (f"{{ uint32_t _nk_bits = nk_enh_store({rw['site_index']}u, {stored}); "
                 f"{stock.replace(stored, '_nk_bits')} }}")
-    return (f"{{ float _nk_f = {_scaled_float(f's->f[{r}]', rw['factor'])}; uint32_t _nk_bits; "
+    scaled = _scaled_float(f"s->f[{r}]", rw["factor"])
+    return (f"{{ float _nk_f = {scaled}; uint32_t _nk_bits; "
             f"memcpy(&_nk_bits, &_nk_f, sizeof _nk_bits); "
             f"{stock.replace(stored, '_nk_bits')} }}")
 
@@ -363,13 +364,15 @@ def _enhanced_line(rw: dict, stock_line: str, word_line: str | None, site_id: st
     elif kind == "scale_int_args":
         enh = " ".join([stock_line.strip()] + [f"s->r[{r}] <<= 1;" for r in rw["regs"]])
     elif kind == "scale_f_reg":
-        enh = f"{stock_line.strip()} {_scale_stmt(f's->f[{rw['reg']}]', rw['factor'])}"
+        cell = f"s->f[{rw['reg']}]"
+        enh = f"{stock_line.strip()} {_scale_stmt(cell, rw['factor'])}"
     elif kind == "map_f_reg":
         cell = f"s->f[{rw['reg']}]"
         enh = f"{stock_line.strip()} {_mapped_factor_stmt(rw['map'], cell, site_id, addr)}"
     elif kind == "scale_v_reg":
         v = vreg_indices(rw["vreg"], 1)[0]
-        enh = f"{stock_line.strip()} {_scale_stmt(f's->v[{v}]', rw['factor'])}"
+        cell = f"s->v[{v}]"
+        enh = f"{stock_line.strip()} {_scale_stmt(cell, rw['factor'])}"
     elif kind == "map_v_reg":
         v = vreg_indices(rw["vreg"], 1)[0]
         enh = f"{stock_line.strip()} {_mapped_factor_stmt(rw['map'], f's->v[{v}]', site_id, addr)}"
@@ -6309,8 +6312,9 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
             "}",
             "/* The phase of a gate_30hz_phase site (docs/ENHANCEMENT_CONTRACT.md section 9.2): 1 when the",
             " * state's own time is an odd number of half steps, 0 on an even one. A time more than a",
-            " * quarter of a half step from a whole number of them, negative or not a number reads as 0,",
-            " * so the site runs its stock instruction, and is reported once per site. */",
+            " * quarter of a half step from a whole number of them, below zero by more than that, too large",
+            " * to count or not a number reads as 0, so the site runs its stock instruction, and is reported",
+            " * once per site. */",
             "int nk_enhancement_phase_odd(int *reported, const char *site, uint32_t pc, uint32_t time_bits,",
             "                             double half_step) {",
             "    float t;",

@@ -852,7 +852,7 @@ def _validate_two_update_extras(site: Mapping[str, Any], path: str) -> None:
     if transform == "gate_30hz_phase":
         phase = site.get("phase_time")
         if (not isinstance(phase, dict) or set(phase) != {"register", "offset"}
-                or phase["register"] not in PHASE_REGISTERS
+                or not isinstance(phase["register"], str) or phase["register"] not in PHASE_REGISTERS
                 or not _is_int(phase["offset"]) or not 0 <= phase["offset"] <= 65532 or phase["offset"] % 4):
             fail(f"{path}.phase_time",
                  f"gate_30hz_phase needs phase_time, an object with register (one of {sorted(PHASE_REGISTERS)}) "

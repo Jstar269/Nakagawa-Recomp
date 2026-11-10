@@ -1356,7 +1356,8 @@ Admitted under this section by its own entry.
 - **Tier and default.** Ace, off by default, as section 11.3.2.
 - **Authentic stays byte-identical.** As section 11.3.2. `test_emitted_forms` in `tools/test_enhancement_package.py`
   checks that a build without the package holds none of the rewrite and that each site's toggle-off statement is the
-  Authentic one.
+  Authentic one. `test_kappa_scale_is_one_rounding_in_every_form` compiles the emitted scale of each form, runs it,
+  and checks its bits against the rule and against a checked store's table.
 - **Sampled checking.** As section 11.3.2.
 - **"Nothing worse".** `test_two_updates_reproduce_one_stock_update_at_the_end_of_every_pair` pins what the factor is
   for: with it, and the transforms of sections 11.3.2.2, 11.3.2.4 and 11.3.2.5, a modelled arc meets the stock arc at
