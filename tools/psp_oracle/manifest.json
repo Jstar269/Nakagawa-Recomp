@@ -1061,8 +1061,20 @@
       {
         "id": "PSP-HLE-KERNEL-STATUS-002",
         "status": "implemented",
-        "hardware_evidence": "NOT_RUN",
-        "evidence_note": "No hardware capture of this revision exists. The earlier revision ran on 2026-10-15 (public commit b5d6fc5b) and was captured only: both FPL creates were refused, so its two fixed-pool delete cells were SKIP and the envelope could not be acceptance-eligible. In this revision such a delete cell is PASS with out0 0 and issues no delete, and out0 is 1 when a delete was issued. It is built from fixtures/psp_oracle/probe_hle_measure.c and its stream is strictly parsed. Its cells are machinery-only: PASS when the calls completed and were recorded, SKIP only when the VPL a cell needs was not obtained. Every returned value is an observation and is UNMEASURED for the console. Runs as a single launch, not in the campaign queue.",
+        "hardware_evidence": "MEASURED",
+        "evidence_ref": "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize",
+        "evidence_cases": [
+          "fpl-create-size-0x00",
+          "fpl-delete-size-0x00",
+          "fpl-create-size-0x7fffffff",
+          "fpl-delete-size-0x7fffffff",
+          "vpl-create",
+          "vpl-try-alloc-refusal",
+          "vpl-free-all",
+          "vpl-delete",
+          "hle-kernel-pool-bounds-done"
+        ],
+        "measurement_note": "Measured by the 2026-11-10 PSP-3000 single-case launch of commit 979c6a1dd, case hle-kernel-pool-bounds after the transport-write preflight: boot 173, XMB context, one launch on its own boot, single launch, not in the campaign queue; 9 records (8 cells and the done record, out0 8), all PASS, harness verdict ok, acceptance-eligible with 0 blockers. Firmware identity: console PSP-3000 (kuKernelGetModel returned 3 on boot 172 of the same session); system software 6.61 (flash0:/vsh/etc/version.txt: release:6.61:, system:58401@release_661,0x06060110:); the same session's probe read 0x06060110 from user-mode sceKernelDevkitVersion(); PSPLink pspver printed 0x06060010 (\"6.6.0\") in the XMB context on these boots and prints 0x06060110 in the game context; custom firmware ARK-5 with cIPL, version 5.1.0 (the version was not read by a tool; the modules SystemControl, ARKCompatLayer and VshCtrl were loaded). Measured, partition 2, attribute 0, NULL option pointer: sceKernelCreateFpl with block size 0 and 1 block returned 0x800201b7, and with block size 0x7fffffff and 1 block returned 0x80020190; neither created a pool, so neither delete cell issued a call (result 0, out0 0). sceKernelCreateVpl of a 0x1000-byte pool returned a UID; sceKernelTryAllocateVpl of 0x100 bytes succeeded 15 times and the 16th call returned 0x80020190; the 15 sceKernelFreeVpl calls were issued and the first returned 0; sceKernelDeleteVpl returned 0. Not measured: the size at which an FPL create starts to fail, other block counts, other partitions, and the VPL's per-block overhead beyond the 15-block count. The raw envelope and host0 log stay in the private campaign directory.",
         "group": "kernel",
         "source": "fixtures/psp_oracle/probe_hle_measure.c",
         "prx": "hle_kernel_pool_bounds.prx",
@@ -1359,8 +1371,27 @@
       {
         "id": "PSP-HLE-ISSUES-001",
         "status": "implemented",
-        "hardware_evidence": "NOT_RUN",
-        "evidence_note": "No acceptance-eligible capture exists: the 2026-10-24 PSP-3000 launch of public commit da97b2c0 went through a PSPLink driver without a runner envelope, so its observed values (docs/HARDWARE_ORACLE.md) are not cited as MEASURED. It is built from fixtures/psp_oracle/probe_hle_issues.c as hle_issues_batch.prx and runs as a single launch, not in the campaign queue. Its stream is fixed-shape and strictly parsed (1858 records and the done record); every cell is an unconditional observation recorded PASS, and no returned value is compared with an expected PSP value.",
+        "hardware_evidence": "MEASURED",
+        "evidence_ref": "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize",
+        "evidence_cases": [
+          "model-ku-get-model",
+          "model-sce-get-model",
+          "model-ku-get-model-again",
+          "model-sce-get-model-again",
+          "model-kernel-get-model-07c586a1",
+          "model-kernel-get-model-6373995d",
+          "vscmp-p0-*",
+          "rcar-p0-*",
+          "rcbig-p0-*",
+          "vscmp-p1-*",
+          "rcar-p1-*",
+          "rcbig-p1-*"
+        ],
+        "uncited_cases": [
+          "hle-issues-batch-done"
+        ],
+        "measurement_note": "Measured by the 2026-11-10 PSP-3000 single-case launch of commit 979c6a1dd, case hle-issues-batch after the transport-write preflight: boot 172, XMB context, one launch on its own boot; 1858 result records and the done record (out0 0x742), all PASS, harness verdict ok, acceptance-eligible with 0 blockers. Firmware identity: console PSP-3000 (kuKernelGetModel returned 3 in this run); system software 6.61 (flash0:/vsh/etc/version.txt: release:6.61:, system:58401@release_661,0x06060110:); the probe's own user-mode sceKernelDevkitVersion() returned 0x06060110; PSPLink pspver printed 0x06060010 (\"6.6.0\") in the XMB context on these boots and prints 0x06060110 in the game context; custom firmware ARK-5 with cIPL, version 5.1.0 (the version was not read by a tool; the modules SystemControl, ARKCompatLayer and VshCtrl were loaded). Measured (#356): kuKernelGetModel returned 3 on both calls and its stub was linked (first word 0x03e00008, jr $ra; the second word is the per-boot syscall word and is not cited); the SysMemUserForUser sceKernelGetModel import (NID 0x6373995d) stayed unlinked (stub words 0x0000054c and 0) and both calls returned 0x8002013a; sctrlHENFindFunction found the SysMemForKernel NIDs 0x07c586a1 and 0x6373995d at the same kernel-RAM address, kuKernelCall returned 0 and the getter returned 3 for both. Measured (#326): all 60 vscmp cells give, per lane at every width, -1, 0 or +1 in sign-magnitude integer order of the raw words with denormals flushed to a zero of their sign, leave the lanes past the width, the VFPU_CC preset 0x15 and every other register-file word unchanged; all 1792 rcar and rcbig rows read RCX0-7 back as written and reproduce the vrndi.s step rule in docs/HARDWARE_ORACLE.md, with C000 lanes 1-3 keeping their sentinel. Passes 0 and 1 are identical record for record. These are the rules the 2026-10-24 observation of da97b2c0 showed; that launch had no runner envelope and is not cited. The raw envelope and host0 log stay in the private campaign directory.",
+        "evidence_note": "It is built from fixtures/psp_oracle/probe_hle_issues.c as hle_issues_batch.prx and runs as a single launch, not in the campaign queue. Its stream is fixed-shape and strictly parsed (1858 records and the done record); every cell is an unconditional observation recorded PASS, and no returned value is compared with an expected PSP value.",
         "group": "cpu",
         "source": "fixtures/psp_oracle/probe_hle_issues.c",
         "prx": "hle_issues_batch.prx",
