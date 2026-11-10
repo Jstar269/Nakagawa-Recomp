@@ -1851,6 +1851,10 @@ unsigned player_ui_nk_test_focus(const PlayerUiNk *player) {
     return player != NULL && player->ui != NULL ? (unsigned)nk_ui_focused(player->ui) : 0u;
 }
 
+bool player_ui_nk_test_laid_out(const PlayerUiNk *player) {
+    return player != NULL && player->ui != NULL && nk_ui_laid_out(player->ui);
+}
+
 int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown) {
     if (shown != NULL) *shown = false;
     if (player == NULL || player->backdrop_index == SIZE_MAX) return -1;

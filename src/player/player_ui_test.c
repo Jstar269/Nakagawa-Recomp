@@ -232,6 +232,18 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
         event->user.windowID = (Uint32)duration;
         return 1;
     }
+    /* WAIT_LAID_OUT=<timeout ms>: until a frame drawn after this step leaves the
+       next UI's focus graph laid out, so a move or Tab that follows runs in its
+       own frame instead of waiting one with the input after it. */
+    if (strncmp(token, "WAIT_LAID_OUT=", 14) == 0) {
+        uint64_t timeout = 0;
+        if (!player_ui_test_parse_positive_u64(token + 14, &timeout) ||
+            timeout > UINT32_MAX) return -1;
+        event->type = SDL_EVENT_USER;
+        event->user.code = PLAYER_UI_TEST_ACTION_WAIT_LAID_OUT;
+        event->user.timestamp = timeout;
+        return 1;
+    }
     if (strncmp(token, "WAIT_VIEW=", 10) == 0) {
         char *comma = strchr(token + 10, ',');
         if (!comma) return -1;
@@ -1169,6 +1181,21 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
             ui_test_block_script = true;
         }
     }
+    if (t->waiting_for_layout) {
+        if (t->frame > t->wait_layout_frame && g_ui_test_next_ui != NULL &&
+            player_ui_nk_test_laid_out(g_ui_test_next_ui)) {
+            printf("[PLAYER_UI_TEST] wait_laid_out result=PASS frame=%d\n", t->frame);
+            t->waiting_for_layout = false;
+        } else if (ui_test_now >= t->wait_deadline) {
+            fprintf(stderr, "[PLAYER_UI_TEST] wait_laid_out result=FAIL frame=%d\n",
+                    t->frame);
+            t->failed = true;
+            t->quit_queued = true;
+            *running = false;
+        } else {
+            ui_test_block_script = true;
+        }
+    }
     if (t->waiting_for_report) {
         if ((t->wait_report_mask >> (unsigned)app->report.phase) & 1u) {
             printf("[PLAYER_UI_TEST] wait_report phase=%d result=PASS\n", (int)app->report.phase);
@@ -1261,6 +1288,11 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
             t->waiting_for_time = true;
             printf("[PLAYER_UI_TEST] wait_ms=%u started\n",
                    scripted_event.user.windowID);
+        } else if (scripted_event.type == SDL_EVENT_USER &&
+                   scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_LAID_OUT) {
+            t->wait_layout_frame = t->frame;
+            t->wait_deadline = ui_test_now + scripted_event.user.timestamp;
+            t->waiting_for_layout = true;
         } else if (scripted_event.type == SDL_EVENT_USER &&
                    scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_VIEW) {
             t->wait_view_mask = scripted_event.user.windowID;

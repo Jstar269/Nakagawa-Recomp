@@ -1397,6 +1397,9 @@ int player_ui_nk_test_route(const PlayerUiNk *player);
 int player_ui_nk_test_build_built(const PlayerUiNk *player);
 /* Test only: the control the next UI focuses, or 0. */
 unsigned player_ui_nk_test_focus(const PlayerUiNk *player);
+/* Test only: the next UI's last frame was laid out (nk_ui_laid_out), so the
+   next frame takes a move at once; false without a next UI. */
+bool player_ui_nk_test_laid_out(const PlayerUiNk *player);
 /* Test only: the game whose picture is behind the library (the art rest), -1 for
    none; *shown tells it fading in or whole from fading out. */
 int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown);
