@@ -2395,6 +2395,10 @@ uint32_t sdl3vk_consume_button_pulses(void) {
 }
 void sdl3vk_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = 128; if (ly) *ly = 128; }
 int sdl3vk_pad_present(void) { return 1; }
+/* Each input poll stamps the host clock (late pad sampling's latency measure); the stub clock is
+ * what the test sets. */
+static uint64_t s_stub_now_ns;
+uint64_t sched_host_now_ns(void) { return s_stub_now_ns; }
 void sdl3vk_set_text_claim(int on) { if (on) selftest_unexpected("sdl3vk_set_text_claim(1)"); }
 int sdl3vk_take_key_events(Sdl3VkKeyEvent *out, int max) { (void)out; (void)max; return 0; }
 int sdl3vk_take_pause_request(void) { return SDL3VK_PAUSE_REQUEST_NONE; }
@@ -2464,9 +2468,11 @@ static void selftest_held_present_passes_a_tap_to_the_game(void) {
     AcePaceStats before, after;
     ace_pace_stats(&before);
     s_stub_tap = cross;
+    s_stub_now_ns = 123456789ull;
     unsigned calls = s_stub_held_calls;
     gui_ace_vblank(1u);
     assert(s_stub_held_calls == calls + 1u);
+    assert(gui_input_poll_ns() == 123456789ull);   /* the poll behind the sample is stamped */
     assert((selftest_game_sample() & cross) != 0u);
     assert((selftest_game_sample() & cross) == 0u);
     ace_pace_stats(&after);
