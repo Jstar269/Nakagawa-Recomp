@@ -1335,6 +1335,7 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->share_system_libraries = true;
     settings->build_speed = PACKAGE_BUILD_SPEED_BALANCED;
     settings->check_updates_at_start = false;
+    settings->discord_presence = false;
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
     settings->developer_mode = false;
@@ -1910,6 +1911,14 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.check_updates_at_start = update_val;
     }
 
+    /* Discord status: off unless the file says true. A build without a Discord application
+       ID keeps the stored choice but never acts on it (player_app_discord_tick). */
+    NkJsonNode *discord_node = nk_json_obj_get(root, "discord_presence");
+    bool discord_val = false;
+    if (discord_node && nk_json_get_bool(discord_node, &discord_val)) {
+        app->settings.discord_presence = discord_val;
+    }
+
     /* A folder that no longer fits is dropped, not cut short. */
     const char *picker_folder = nk_json_get_string(nk_json_obj_get(root, "picker_folder"));
     if (picker_folder && strlen(picker_folder) < sizeof(app->settings.picker_folder)) {
@@ -2163,6 +2172,8 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
             package_build_speed_key(app->settings.build_speed));
     fprintf(f, "  \"check_updates_at_start\": %s,\n",
             app->settings.check_updates_at_start ? "true" : "false");
+    fprintf(f, "  \"discord_presence\": %s,\n",
+            app->settings.discord_presence ? "true" : "false");
     player_settings_write_string(f, "picker_folder", app->settings.picker_folder);
     player_settings_write_string(f, "rebuild_prompt_version",
                                  app->settings.rebuild_prompt_version);
@@ -3291,6 +3302,47 @@ void player_app_toggle_update_check_at_start(PlayerApp *app) {
     player_dev_log_add(app, "settings", "check for updates at start %s",
                        app->settings.check_updates_at_start ? "on" : "off");
     maybe_persist_settings(app);
+}
+
+void player_app_toggle_discord_presence(PlayerApp *app) {
+    if (!app) return;
+    /* Fail closed: without an application ID (or local pipes) the switch cannot turn on. */
+    if (!app->settings.discord_presence && !nk_discord_available()) return;
+    app->settings.discord_presence = !app->settings.discord_presence;
+    player_dev_log_add(app, "settings", "Discord status %s",
+                       app->settings.discord_presence ? "on" : "off");
+    maybe_persist_settings(app);
+}
+
+bool player_app_discord_activity(const PlayerApp *app, NkDiscordActivity *out) {
+    if (out) memset(out, 0, sizeof(*out));
+    if (!app || !out || !app->is_game_running) return false;
+    PlayerPlayMode mode = app->running_play_mode == PLAYER_PLAY_ENHANCED ||
+                                  app->running_play_mode == PLAYER_PLAY_ACE
+                              ? app->running_play_mode
+                              : PLAYER_PLAY_AUTHENTIC;
+    return nk_discord_activity_make(out, app->running_title, player_play_mode_name(mode),
+                                    app->running_start_ms);
+}
+
+void player_app_discord_tick(PlayerApp *app, uint64_t now_ms) {
+    if (!app) return;
+    if (!app->settings.discord_presence || !nk_discord_available()) {
+        player_app_discord_shutdown(app);
+        return;
+    }
+    if (!app->discord_ready) {
+        nk_discord_client_init(&app->discord, NK_DISCORD_APPLICATION_ID, NULL, NULL);
+        app->discord_ready = true;
+    }
+    NkDiscordActivity activity;
+    bool show = player_app_discord_activity(app, &activity);
+    nk_discord_client_update(&app->discord, show ? &activity : NULL, now_ms);
+}
+
+void player_app_discord_shutdown(PlayerApp *app) {
+    if (!app || !app->discord_ready) return;
+    nk_discord_client_shutdown(&app->discord);
 }
 
 void player_app_toggle_share_system_libraries(PlayerApp *app) {
@@ -5177,6 +5229,7 @@ void player_launch_work_run(PlayerLaunchWork *work) {
                                    game->enhancement_package_id[0] != '\0',
                                    work->headless_accept_presented_frames > 0u, &session->config,
                                    &ace);
+        work->play_mode = ace.on ? ace.mode : PLAYER_PLAY_AUTHENTIC;
         /* The graphics preset (#2150) overlays the display rows for Enhanced and Ace only:
            an Authentic run keeps the user's own rows, since a render scale above 1x reaches
            guest VRAM (docs/ENHANCEMENT_CONTRACT.md 10.3). */
@@ -5291,6 +5344,11 @@ bool player_app_launch_finish(PlayerApp *app, PlayerLaunchWork *work) {
 
     app->is_game_running = true;
     app->launch_time_ms = 0;
+    /* What Discord status shows while it runs (#2259): the title from the disc's own
+       metadata, the play mode and the start time; nothing else about the game or the PC. */
+    snprintf(app->running_title, sizeof(app->running_title), "%s", work->game.title_name);
+    app->running_play_mode = work->play_mode;
+    app->running_start_ms = (int64_t)time(NULL) * 1000;
     /* The library may have changed while the work ran: find the game again. */
     if (game_index < 0 || game_index >= app->game_count ||
         strcmp(app->games[game_index].disc_id, work->game.disc_id) != 0) {

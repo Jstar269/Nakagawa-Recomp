@@ -284,6 +284,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_DISC_CHECKING, FLOW_DISC_SUPPORTED,
                FLOW_DISC_UNTESTED, FLOW_DISC_FONTS, FLOW_DISC_BLOCKED, FLOW_DISC_UNSUPPORTED,
                FLOW_DISC_GUIDED, FLOW_SETTINGS, FLOW_SETTINGS_ONLINE, FLOW_SETTINGS_ONLINE_ON,
+               FLOW_SETTINGS_ONLINE_DISCORD_ON,
                FLOW_SETTINGS_NOTICES,
                FLOW_SETTINGS_REMOVE, FLOW_SETTINGS_BUILD_CACHE, FLOW_SETTINGS_FONTS,
                FLOW_SETTINGS_UPDATES, FLOW_SETTINGS_UPDATE_FAILED,
@@ -424,7 +425,8 @@ static const char *const k_settings_tools[] = {
 static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     PlayerUiSettingsModel settings;
     memset(&settings, 0, sizeof(settings));
-    settings.page = which == FLOW_SETTINGS_ONLINE || which == FLOW_SETTINGS_ONLINE_ON
+    settings.page = which == FLOW_SETTINGS_ONLINE || which == FLOW_SETTINGS_ONLINE_ON ||
+                    which == FLOW_SETTINGS_ONLINE_DISCORD_ON
         ? PLAYER_UI_SETTINGS_PAGE_ONLINE
         : which == FLOW_SETTINGS_NOTICES ? PLAYER_UI_SETTINGS_PAGE_NOTICES
         : which == FLOW_SETTINGS_REMOVE ? PLAYER_UI_SETTINGS_PAGE_REMOVE_TOOLS
@@ -496,6 +498,11 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.saves_folder = "C:/synthetic/Nakagawa/saves";
     /* Off, the default; its own case has the stored setting On (#2007). */
     settings.online_mode = which == FLOW_SETTINGS_ONLINE_ON;
+    /* Discord status (#2259): a build that can show it on the plain page; the stored online
+       mode case is a build that cannot, where the row is hidden; and a build that cannot with
+       Discord status stored On, where the row stays so it can be turned off. */
+    settings.discord_available = which == FLOW_SETTINGS_ONLINE;
+    settings.discord_presence = which == FLOW_SETTINGS_ONLINE_DISCORD_ON;
     settings.developer_mode = true;
     settings.share_system_libraries = true;
     settings.build_speed = "Background";
@@ -3147,6 +3154,8 @@ static void test_settings_pages(void) {
          PLAYER_UI_SETTINGS_OPEN_DEVELOPER_LOG, "developer mode offers the developer log"},
         {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
          "Back returns to Settings"},
+        {FLOW_SETTINGS_ONLINE, PLAYER_UI_ID_SETTINGS_DISCORD, PLAYER_UI_SETTINGS_TOGGLE_DISCORD,
+         "the Discord status switch toggles it"},
         {FLOW_SETTINGS_NOTICES, PLAYER_UI_ID_SETTINGS_LICENSE_TEXTS,
          PLAYER_UI_SETTINGS_OPEN_LICENSE_TEXTS, "Open licence texts opens the folder"},
         {FLOW_SETTINGS_NOTICES, PLAYER_UI_ID_SETTINGS_BACK, PLAYER_UI_SETTINGS_BACK,
@@ -3294,6 +3303,24 @@ static void test_settings_pages(void) {
               activate_flow_button(PLAYER_UI_ID_SETTINGS_ONLINE_MODE, FLOW_SETTINGS_ONLINE).kind ==
                   PLAYER_UI_ACTION_NONE,
           "Online and developer shows one plain line instead of an inert online switch");
+    /* Discord status (#2259): off, with what it does, in a build that can show it; no row in
+       a build that cannot; and a stored On there keeps its row so it can be turned off. */
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "\"DISCORD STATUS: OFF\"") != NULL &&
+              strstr(dump, "through the Discord app on this") != NULL,
+          "Online and developer offers Discord status, off, and says how it works");
+    CHECK(dump_flow_case(FLOW_SETTINGS_ONLINE_ON, dump, sizeof(dump)) &&
+              strstr(dump, "DISCORD STATUS") == NULL &&
+              activate_flow_button(PLAYER_UI_ID_SETTINGS_DISCORD, FLOW_SETTINGS_ONLINE_ON).kind ==
+                  PLAYER_UI_ACTION_NONE,
+          "a build that can't show Discord status has no row for it");
+    CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_DISCORD_ON, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "\"DISCORD STATUS: ON\"") != NULL &&
+              strstr(dump, "this build can't show it") != NULL &&
+              settings_op_is(activate_flow_button(PLAYER_UI_ID_SETTINGS_DISCORD,
+                                                  FLOW_SETTINGS_ONLINE_DISCORD_ON),
+                             PLAYER_UI_SETTINGS_TOGGLE_DISCORD),
+          "a stored On keeps its Discord status row, so it can be turned off");
     /* A stored online_mode of On still shows its switch, so it can be turned off. */
     CHECK(flow_case_fits(FLOW_SETTINGS_ONLINE_ON, 960, 540, dump, sizeof(dump)) &&
               strstr(dump, "Online mode is on in your settings") != NULL &&
