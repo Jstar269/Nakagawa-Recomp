@@ -1459,7 +1459,7 @@ def _merged_ledger(sides: list[tuple[str, Callable[[], bytes]]]) -> bytes:
         provenance_ledger.claims_ledger(document)
         for document in _read_sides(sides, path=LEDGER, code="MERGE_LEDGER_INPUT_INVALID")
     ]
-    for (label, _read), document in zip(sides, documents):
+    for (label, _read), document in zip(sides, documents, strict=True):
         if provenance_ledger.validate_ledger(document):
             raise AdmitError(
                 "MERGE_LEDGER_INPUT_INVALID", f"{LEDGER} on merge side {label} is not a valid claims ledger",

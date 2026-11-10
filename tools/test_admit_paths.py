@@ -852,7 +852,7 @@ class BatchAdmitPathsTest(unittest.TestCase):
     @staticmethod
     def _ledger_sides(*documents: dict) -> list:
         raws = [(json.dumps(document, indent=2) + "\n").encode("utf-8") for document in documents]
-        return [(label, (lambda raw=raw: raw)) for label, raw in zip(("base", "ours", "theirs"), raws)]
+        return [(label, (lambda raw=raw: raw)) for label, raw in zip(("base", "ours", "theirs"), raws, strict=True)]
 
     @staticmethod
     def _claims(*entries: tuple[str, str]) -> dict:
