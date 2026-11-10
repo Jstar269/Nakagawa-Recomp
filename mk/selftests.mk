@@ -922,7 +922,12 @@ asset-index-selftest:
 # widescreen Fill case (#1881) run again alone at render scales 2 and 4; the sprite-scaled and
 # uv-edge-clamp cases (#2110) run alone at scales 2, 3 and 4; rtt-scale (#2052: a quarter-size
 # render target sampled back, linear, at the render scale and not at 1x) runs alone at scales 2
-# and 4 (the whole-suite run covers 1x). Each is selected by arguments: a
+# and 4 (the whole-suite run covers 1x). soft-shadow (Ace's shadow=soft) runs alone at scale 4 three
+# times: without the key (`--soft-shadow off`, which writes its stock frames' hashes to a reference
+# file), with a synthetic disc declared (`on`: soft edges, stock interior, stock for an undeclared
+# disc and with the part off, guest VRAM untouched) and with the key but nothing declared
+# (`undeclared`: the part unavailable); both later runs draw the off run's stock frames. Each is
+# selected by arguments: a
 # VAR=value prefix needs a POSIX shell, and cmd.exe does not take one. The host twin (#2050) runs
 # after them: twin-off runs of twin-scene write reference files that the twin-on runs at the
 # same scale check (guest VRAM always, the shown images for the native twin), `--twin native`
@@ -970,6 +975,9 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --scale 4 --case uv-edge-clamp
 	$(GPU_COHERENCE_BIN) --scale 2 --case rtt-scale
 	$(GPU_COHERENCE_BIN) --scale 4 --case rtt-scale
+	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow off --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow on --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
+	$(GPU_COHERENCE_BIN) --scale 4 --soft-shadow undeclared --soft-ref $(BUILD_DIR)/soft_shadow_ref.txt --case soft-shadow
 	$(GPU_COHERENCE_BIN) --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s1.txt
 	$(GPU_COHERENCE_BIN) --scale 2 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s2.txt
 	$(GPU_COHERENCE_BIN) --scale 4 --case twin-scene --twin-ref $(BUILD_DIR)/twin_ref_s4.txt
@@ -1133,7 +1141,9 @@ gpu-ace-selftest: shader-verify $(RT_GE_O)
 
 # tex-scale-selftest - texture scaling's CPU side (src/rt/gpu_sdl3vk/tex_scale.h): the C port of
 # xBRZ 1.9 (third_party/xbrz) against goldens from the pinned upstream C++ (xbrz_golden.cpp), the
-# wrap and clamp borders, the job queue, the settings and the smart 2D classifier. No GPU; the
+# wrap and clamp borders, the job queue, the settings and the smart 2D classifier, and soft
+# shadows' copy (exact texels of a synthetic disc, the interior and mass rules, the bounds) and
+# their texture digest (RFC 4231 HMAC-SHA-256 vectors, then the match rule). No GPU; the
 # worker threads need SDL3, so without it the recipe reports SKIP.
 TEX_SCALE_SDL_READY := $(and $(filter-out none,$(SDL3_PROVIDER)),$(if $(strip $(SDL3_ERROR)),,yes))
 tex-scale-selftest:
@@ -1141,7 +1151,7 @@ tex-scale-selftest:
 	@if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-selftest (SDL3 not found by build discovery)"; exit 0; fi; \
 	$(CC) $(CFLAGS) -O2 -ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections \
 		-o $(BUILD_DIR)/tex_scale_selftest$(EXE_EXT) \
-		src/rt/gpu_sdl3vk/tex_scale_selftest.c src/rt/gpu_sdl3vk/tex_scale.c third_party/xbrz/xbrz.c \
+		src/rt/gpu_sdl3vk/tex_scale_selftest.c src/rt/gpu_sdl3vk/tex_scale.c third_party/xbrz/xbrz.c src/rt/vfpu_tables.c \
 		$(LIBS) -lm && $(BUILD_DIR)/tex_scale_selftest$(EXE_EXT)
 
 native-core-tests: tex-scale-selftest
@@ -1246,7 +1256,7 @@ tex-scale-gate-mutant:
 	@if [ -z "$(TEX_SCALE_SDL_READY)" ]; then echo "SKIP tex-scale-gate-mutant (SDL3 not found by build discovery)"; exit 0; fi; \
 	$(CC) $(CFLAGS) -O2 -ffunction-sections -fdata-sections $(LDFLAGS) -Wl,--gc-sections -DNK_TEX_SCALE_MUTANT_NO_ACE_GATE \
 		-o $(BUILD_DIR)/tex_scale_gate_mutant$(EXE_EXT) \
-		src/rt/gpu_sdl3vk/tex_scale_selftest.c src/rt/gpu_sdl3vk/tex_scale.c third_party/xbrz/xbrz.c \
+		src/rt/gpu_sdl3vk/tex_scale_selftest.c src/rt/gpu_sdl3vk/tex_scale.c third_party/xbrz/xbrz.c src/rt/vfpu_tables.c \
 		$(LIBS) -lm || exit 1; \
 	rc=0; $(BUILD_DIR)/tex_scale_gate_mutant$(EXE_EXT) > $(BUILD_DIR)/tex_scale_gate_mutant.log 2>&1 || rc=$$?; \
 	if [ $$rc -eq 0 ]; then echo "FAIL tex-scale-gate-mutant (the mutant passed: the Ace gate is untested)"; exit 1; \

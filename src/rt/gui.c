@@ -1035,6 +1035,9 @@ void gui_init(const char *title) {
                             fprintf(stderr, "gui_init: GPU GE init failed; software GE active\n");
                     }
                     gui_report_render_path(true, true, gpu_ge_asked, gpu_ge_started);
+                    /* Soft shadows (shadow=soft) are made only by the Vulkan GE renderer. */
+                    if (!gpu_ge_started && g_ace_on && ace_effective()->shadow)
+                        ace_feature_unavailable(ACE_FEATURE_SHADOW, ACE_SOFT_SHADOW_SOFTWARE);
                 }
                 sr_gui_request_launcher_foreground(true, NULL,
                                                    sr_gui_raise_sdl_window,

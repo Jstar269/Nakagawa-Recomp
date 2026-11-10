@@ -140,6 +140,52 @@ void nk_tex_scale_report(void);
 int nk_tex_scale_image(const uint32_t *rgba, int w, int h, int factor, int clamp_u, int clamp_v,
                        uint32_t *out);
 
+/* ---- soft shadows (Ace part shadow=soft, docs/ENHANCEMENT_CONTRACT.md section 10.20) ------- */
+/* A title's blob shadow is a small textured quad whose alpha is a hard-edged disc. Ace's soft
+ * shadows draw such a texture, when its package declares it, from a host-made copy with a softer
+ * alpha edge, through the same scaled-copy path as a texture replacement. The copy is made here,
+ * on the CPU, in integer arithmetic, so every renderer that draws it samples the same texels. */
+#define NK_TEX_SOFT_MAX_DIM 64      /* only textures of at most 64x64 (one mip level) are hashed */
+#define NK_TEX_SOFT_FACTOR 4        /* the factor the renderer makes its copies at */
+#define NK_TEX_SOFT_FACTOR_MIN 2
+#define NK_TEX_SOFT_FACTOR_MAX 4
+#define NK_TEX_SOFT_EDGE_MIN 1
+#define NK_TEX_SOFT_EDGE_MAX 4
+
+/* The softened copy of `src` (w x h, R in the low byte) into `dst` ((w*factor) x (h*factor)).
+ * Accepts 1 <= w, h <= NK_TEX_SOFT_MAX_DIM, factor NK_TEX_SOFT_FACTOR_MIN..MAX and edge_texels
+ * NK_TEX_SOFT_EDGE_MIN..MAX; returns 0 for anything else, or when scratch memory runs out (dst is
+ * then untouched), and 1 when dst is written.
+ *
+ * Each axis samples the source bilinearly at the centre of each output texel: X maps to source
+ * coordinate (X + 0.5) / factor - 0.5, between texels floor() and floor() + 1, each clamped to
+ * the texture (clamp-to-edge), weighted in steps of 1 / (2 * factor).
+ *   Colour: R, G and B are that bilinear value, rounded half up to 8 bits.
+ *   Alpha: the bilinear value, kept unrounded, then a separable box blur of radius
+ *     r = edge_texels * factor output texels (a (2r + 1)-texel window on each axis, the window
+ *     clamped to the image), rounded half up to 8 bits once, at the end.
+ * Only integers are used: the same input gives the same bytes on every host.
+ *
+ * Interior: an output texel at (X, Y) keeps alpha a exactly when every source texel within
+ * Chebyshev distance edge_texels + 1 of source texel (X / factor, Y / factor) (integer division,
+ * neighbours clamped to the texture) has alpha a. The flat interior of a disc keeps its alpha,
+ * and so does the flat outside.
+ * Mass: when every source texel within edge_texels + 1 texels of the border has alpha 0, the
+ * output's alpha sum differs from factor * factor times the source's by at most half the number
+ * of output texels (one rounding per texel; the filters themselves lose and add nothing). */
+int nk_tex_soften_alpha_edge(const uint32_t *src, uint32_t w, uint32_t h, uint32_t factor,
+                             uint32_t edge_texels, uint32_t *dst);
+
+/* The digest that names a soft-shadow texture: HMAC-SHA-256 (RFC 2104, vfpu_tables.h) under the
+ * package's 32-byte `key` of the message
+ *     "soft shadow texture v1" and its terminating zero byte (23 bytes),
+ *     width as u16 little-endian, height as u16 little-endian,
+ *     the decoded level-0 texels, row by row, each as the four bytes R, G, B, A.
+ * Width and height sit inside the message, so a published digest gives away no size, palette or
+ * texel. Returns 0 (digest untouched) for a size outside 1..NK_TEX_SOFT_MAX_DIM, else 1. Pure. */
+int nk_tex_soft_shadow_digest(const uint8_t key[32], const uint32_t *rgba, uint32_t w, uint32_t h,
+                              uint8_t digest[32]);
+
 /* ---- smart 2D filter ------------------------------------------------------------------- */
 /* Whether a draw maps texels to pixels 1:1: one texel per guest pixel along each axis (either
  * direction), no rotation, no perspective, and every pixel centre on a texel centre or at most

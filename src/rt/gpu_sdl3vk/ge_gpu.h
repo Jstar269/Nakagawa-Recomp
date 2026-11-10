@@ -269,6 +269,8 @@ int gegpu_texrepl_only_prepare(const char *build_root); /* --repl-only: write th
 int gegpu_texrepl_only_selftest(void); /* --repl-only: SR_TEX_REPLACE with no texture scaling */
 int gegpu_glyph_selftest(void);         /* sharp game text (glyph_recon.h) */
 int gegpu_glyph_authentic_selftest(void); /* --authentic: the scene, no glyph rebuilt, a hash of the picture */
+/* --soft-shadow on|off|undeclared: the soft-shadow case's declaration, before gegpu_init. */
+int gegpu_soft_shadow_prepare(const char *mode);
 
 void gegpu_shutdown(void);
 

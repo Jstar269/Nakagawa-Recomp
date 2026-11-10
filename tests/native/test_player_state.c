@@ -7707,7 +7707,8 @@ static void test_play_mode_settings(void) {
            app->settings.enhanced.part[PLAYER_PART_WIDE] == 0 &&
            app->settings.enhanced.part[PLAYER_PART_SMOOTH] == 0 &&
            app->settings.enhanced.part[PLAYER_PART_SAS] == 0 &&
-           app->settings.enhanced.part[PLAYER_PART_TESS] == 0);
+           app->settings.enhanced.part[PLAYER_PART_TESS] == 0 &&
+           app->settings.enhanced.part[PLAYER_PART_SHADOW] == 0);
     assert(app->settings.title_play_count == 0);
     player_play_resolve(&app->settings, "TEST90001", &r);
     assert(!r.on && r.mode == PLAYER_PLAY_AUTHENTIC && r.chosen == PLAYER_PLAY_LIBRARY);
@@ -7915,7 +7916,7 @@ static void test_play_mode_settings(void) {
                                       "\"text\": \"off\", \"readout\": \"off\", "
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"},") != NULL);
+                                      "\"tess\": \"off\", \"shadow\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8112,7 +8113,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
-                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"shadow\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8138,7 +8139,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"shadow\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8204,7 +8205,7 @@ static void test_play_mode_cull_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"shadow\": \"off\", \"cull\": \"on\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8229,6 +8230,84 @@ static void test_play_mode_cull_settings(void) {
     free(back);
     free(app);
     printf("PASS: wider culling is read, resolved and saved at both levels, and only Ace launches it\n");
+}
+
+/* Soft shadows (contract 11.3.12, 11.2 item 2): off in a fresh file and in every preset, a library
+ * "shadow" and a title's own are read, the title's wins, both survive a save and a load, only an Ace
+ * launch carries ";shadow=soft", and a file without it leaves it off. */
+static void test_play_mode_shadow_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_shadow_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(PLAYER_PART_SHADOW);
+    assert(info && strcmp(info->key, "shadow") == 0 && strcmp(info->name, "Soft shadows") == 0 &&
+           info->fresh == 0 && strstr(info->sentence, "Ace only") != NULL &&
+           strstr(info->sentence, "Changes what the frame shows") != NULL);
+    assert(strcmp(player_enhanced_part_label(PLAYER_PART_SHADOW, 1), "On") == 0 &&
+           strcmp(player_enhanced_part_label(PLAYER_PART_SHADOW, 0), "Off") == 0);
+    for (int preset = PLAYER_PRESET_CUSTOM + 1; preset < PLAYER_PRESET_COUNT; preset++)
+        assert(player_graphics_preset_row(preset)->part[PLAYER_PART_SHADOW] == -1);
+
+    /* The library on; Ace is a title's own choice. One Ace title turns it off, another follows. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"shadow\": \"soft\"},"
+        " \"title_play\": {\"TEST93001\": {\"mode\": \"ace\", \"shadow\": \"off\"},"
+        " \"TEST93002\": {\"mode\": \"ace\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_SHADOW] == 1);
+    player_play_resolve(&app->settings, "TEST93001", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_SHADOW] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "shadow") == NULL);
+    player_play_resolve(&app->settings, "TEST93002", &r);       /* follows the library */
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_SHADOW] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strcmp(line + strlen(line) - 12, ";shadow=soft") == 0);
+    r.part[PLAYER_PART_CULL] = 1;                                /* both Ace items: cull last */
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 20, ";shadow=soft;cull=on") == 0);
+    player_play_resolve(&app->settings, "TEST93003", &r);       /* Enhanced: read, never launched */
+    assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_SHADOW] == 1);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "shadow") == NULL);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"shadow\": \"soft\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST93001\": {\"mode\": \"ace\", \"shadow\": \"off\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_SHADOW] == 1);
+    player_play_resolve(&back->settings, "TEST93001", &r);
+    assert(r.on && r.part[PLAYER_PART_SHADOW] == 0);
+
+    /* A file that never had the key, or a value the part does not know, leaves it off. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"},"
+        " \"title_play\": {\"TEST93001\": {\"mode\": \"ace\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_SHADOW] == 0);
+    player_play_resolve(&app->settings, "TEST93001", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_SHADOW] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "shadow") == NULL);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: soft shadows are off by default and in every preset, read, resolved and saved at both "
+           "levels, and only Ace launches them\n");
 }
 
 /* Finer patches (contract 10.14, 11.3.7) at both levels: off in a fresh file and in no graphics
@@ -8281,7 +8360,7 @@ static void test_play_mode_tess_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"shadow\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
@@ -8940,7 +9019,7 @@ static void test_play_mode_upscale_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"shadow\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"fsr1\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
         free(saved);
@@ -9617,6 +9696,7 @@ int main(int argc, char **argv) {
     test_play_mode_smooth_motion();
     test_play_mode_sas_settings();
     test_play_mode_cull_settings();
+    test_play_mode_shadow_settings();
     test_play_mode_tess_settings();
     test_graphics_presets();
     test_play_mode_line_parses_in_runtime();

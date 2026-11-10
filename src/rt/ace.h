@@ -11,8 +11,9 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. cull is the other key a line may leave out: a missing cull
- * reads as off (section 11.2 item 2), and a line that writes cull=off means the same. Every other
+ * line without it is an Enhanced run. shadow and cull are the other keys a line may leave out: a
+ * missing shadow or cull reads as off (section 11.2 item 2), and a line that writes shadow=off or
+ * cull=off means the same; shadow=soft and cull=on need tier=ace. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -45,6 +46,7 @@
 #define ACE_HAS_SMOOTH_MATCH 0  /* smooth=match: the monitor's rate */
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
 #define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
+#define ACE_HAS_SHADOW 1        /* shadow=soft: soft edges on a title's declared blob shadows (11.3.12) */
 #define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
@@ -57,6 +59,7 @@ static inline int ace_wide_fill_blocked_by_smooth(int wide_requested, int smooth
 /* The play mode a run is: Enhanced, or Ace (Enhanced plus the game's own package). */
 typedef enum { ACE_TIER_ENHANCED = 0, ACE_TIER_ACE = 1 } AceTier;
 typedef enum { ACE_SAS_OFF = 0, ACE_SAS_SINC = 1 } AceSas;
+typedef enum { ACE_SHADOW_OFF = 0, ACE_SHADOW_SOFT = 1 } AceShadow;
 
 typedef struct {
     int on;          /* 0: authentic (off, unset or refused); every field below is then 0 */
@@ -69,6 +72,7 @@ typedef struct {
     int tier;        /* AceTier */
     int sas;         /* AceSas: SAS voices mix through a band-limited resampler (host-only) */
     int tess;        /* finer patches (#2053): 0 off, or the factor 2, 3 or 4 on the guest's division */
+    int shadow;      /* AceShadow: declared blob-shadow textures drawn with soft edges (guest-visible, 11.3.12) */
     int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
 } AceConfig;
 
@@ -81,6 +85,7 @@ typedef enum {
     ACE_FEATURE_SMOOTH,
     ACE_FEATURE_SAS,
     ACE_FEATURE_TESS,
+    ACE_FEATURE_SHADOW,
     ACE_FEATURE_CULL,
     ACE_FEATURE_COUNT
 } AceFeature;
@@ -119,6 +124,37 @@ void ace_feature_unavailable(AceFeature feature, const char *reason);
 void ace_confirm(AceFeature feature);
 /* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
 void ace_set_cull_untracked(unsigned long n);
+/* ---- soft shadows: the package's declaration (contract sections 10.20 and 11.3.12) ----------- */
+
+/* Textures one declaration may name. */
+#define ACE_SOFT_SHADOW_MAX 256u
+/* Why shadow=soft is unavailable when no declaration is in force. */
+#define ACE_SOFT_SHADOW_NONE_DECLARED \
+    "nothing declared: this build's package carries no ace_parts.soft_shadows textures"
+/* Why it is unavailable on a renderer other than the Vulkan GE one. */
+#define ACE_SOFT_SHADOW_SOFTWARE \
+    "the software renderer does not soften shadows; only the Vulkan GE renderer does"
+
+typedef struct {
+    uint8_t key[32];                          /* the package's HMAC key */
+    uint32_t count;                           /* 0: nothing declared */
+    uint8_t digest[ACE_SOFT_SHADOW_MAX][32];  /* nk_tex_soft_shadow_digest of each texture */
+    uint8_t edge[ACE_SOFT_SHADOW_MAX];        /* its edge width in texels, 1 to 4 */
+} AceSoftShadows;
+
+/* The package's soft-shadow textures (ace_parts.soft_shadows.textures), which generated code
+ * passes once at start, before the renderer starts: a 32-byte HMAC `key`, `count` digests and,
+ * for each, its edge width in source texels (1 to 4). The data is copied. A later call replaces
+ * the earlier one; count 0 declares nothing. A declaration with more than ACE_SOFT_SHADOW_MAX
+ * textures, a NULL pointer or an edge outside 1..4 is refused whole (nothing is declared) and
+ * one "ACE_MODE: soft shadow declaration refused (<reason>)" line says why. Until a declaration
+ * arrives shadow=soft reports itself unavailable. Kept apart from SR_ACE: ace_init_spec does not
+ * clear it. Returns 1 when the declaration is in force. */
+int nk_ace_soft_shadows_declare(const uint8_t key[32], const uint8_t (*digests)[32], uint32_t count,
+                                const uint8_t *edge_texels);
+/* The declaration in force (count 0 when there is none). */
+const AceSoftShadows *nk_ace_soft_shadows(void);
+
 /* An anisotropic sampler the renderer could not make: that draw kept the plain one. */
 void ace_note_af_failure(void);
 /* The pause menu's live Speed readout switch (Ace on only; a readout this host cannot draw

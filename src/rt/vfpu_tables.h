@@ -61,6 +61,11 @@ const SrVfpuTableSpec *sr_vfpu_table_manifest(size_t *count_out);
 
 /* FIPS-180-4 SHA-256 over a buffer (exported for the selftest). */
 void sr_vfpu_sha256(const uint8_t *data, size_t size, uint8_t digest[32]);
+/* RFC 2104 HMAC-SHA-256 over that SHA-256: `key` (any length; one longer than 64 bytes is hashed
+ * first) and the message given as `part_count` pieces, hashed in order as if joined, so a caller
+ * builds no joined copy. Pure. The soft-shadow texture match (gpu_sdl3vk/tex_scale.h) uses it. */
+void sr_vfpu_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *const *parts,
+                         const size_t *part_lens, size_t part_count, uint8_t mac[32]);
 
 /* Value-domain validators (exported for the selftest; the loader calls them
  * before publication). Return 0 when the data satisfies the invariant.

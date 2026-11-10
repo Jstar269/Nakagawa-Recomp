@@ -129,11 +129,23 @@ static int set_env(const char *name, const char *value) {
  * as it would under a launcher's root; without it the harness turns the cache off, so a
  * selftest never reads or writes the user's cache folder.
  * `--dst-read snapshot|interlock` sets SR_GPU_DST_READ (#2109), which sdl3vk_init reads before it
- * makes the device.
+ * makes the device. `--soft-shadow on|off|undeclared` turns Ace Mode on as an Ace run, with
+ * shadow=soft for on and undeclared, and makes the soft-shadow case's declaration (none for
+ * undeclared) before the renderer starts; `--soft-ref PATH` sets SR_GPU_SOFT_SHADOW_REF, the file
+ * the off run writes its stock frames' hashes to and the others compare against.
  * Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe does not accept. */
 int main(int argc, char **argv) {
     int twin_arg = 0, authentic = 0, repl_only = 0, pcache_arg = 0;
+    const char *soft_mode = NULL;
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--soft-shadow") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "gpu coherence selftest: --soft-shadow takes on, off or undeclared\n");
+                return 2;
+            }
+            soft_mode = argv[++i];
+            continue;
+        }
         if (strcmp(argv[i], "--authentic") == 0) { authentic = 1; continue; }
         if (strcmp(argv[i], "--repl-only") == 0) { repl_only = 1; continue; }
         if (strcmp(argv[i], "--twin") == 0) twin_arg = 1;
@@ -154,6 +166,7 @@ int main(int argc, char **argv) {
                          : strcmp(argv[i], "--gpu-timestamps") == 0 ? "SR_GPU_TIMESTAMPS"
                          : strcmp(argv[i], "--twin") == 0 ? "SR_GPU_TWIN_COLOR"
                          : strcmp(argv[i], "--twin-ref") == 0 ? "SR_GPU_TWIN_REF"
+                         : strcmp(argv[i], "--soft-ref") == 0 ? "SR_GPU_SOFT_SHADOW_REF"
                          : strcmp(argv[i], "--dst-read") == 0 ? "SR_GPU_DST_READ" : NULL;
         if (!name || i + 1 >= argc || !set_env(name, argv[++i])) {
             fprintf(stderr, "usage: gpu_coherence_selftest [--scale N] [--case scaled-upload|mip-lod]\n");
@@ -175,7 +188,20 @@ int main(int argc, char **argv) {
         return 1;
     }
 #else
-    if (twin_arg && !authentic &&
+    if (soft_mode) {
+        /* An Ace run (shadow=soft needs tier=ace) with or without the key, and the declaration. */
+        const int key = strcmp(soft_mode, "off") != 0;
+        if (!ace_init_spec(key ? "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
+                                 "tess=off;shadow=soft"
+                               : "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
+                                 "tess=off", NULL) ||
+            !gegpu_soft_shadow_prepare(soft_mode)) {
+            fprintf(stderr, "gpu coherence selftest: FAIL --soft-shadow %s: the Ace line or the declaration was refused\n",
+                    soft_mode);
+            free(arena);
+            return 1;
+        }
+    } else if (twin_arg && !authentic &&
         !ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off", NULL)) {
         fprintf(stderr, "gpu coherence selftest: FAIL the Ace line for the host twin was refused\n");
         free(arena);

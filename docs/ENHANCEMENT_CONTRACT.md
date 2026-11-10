@@ -347,10 +347,11 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
-run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
-section 11.3.6) is the other key a line may leave out: a missing `cull` is off, and `cull=on` needs `tier=ace`. Every
-other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
-refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
+run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `shadow` (`soft` or `off`,
+section 11.3.12) and `cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave out, written in that
+order after `tess`: a missing `shadow` or `cull` is off, and `shadow=soft` and `cull=on` need `tier=ace`. Every other
+key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`) refuses
+the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
 `<user data>/ace/`. Ace's 60 FPS game logic is not on this line: it selects the title's enhanced package variant
 (section 9.4). Nor is sharper enlarging (`"upscale"`, #2122): the launcher exports it as `SR_PRESENT_UPSCALE`, `fsr1`
@@ -1019,6 +1020,69 @@ both renderers share, so the software renderer and the Vulkan renderer draw the 
     than d for a small patch, and different from d for a large one;
   - the exit line, with the quads drawn and the capped draws.
 
+### 10.20. Soft Shadows
+
+Many PSP games draw a character's shadow as one small texture, a dark disc or blob whose alpha falls from opaque to
+clear over a few texels, stretched across a quad under the character. Above 1x those few texels become a hard,
+stepped rim. This feature draws the textures a title's package names as its shadows with a smooth edge. It is
+guest-visible (section 11.1): section 11.3.12 is its entry and says what the guest can observe; this section says how
+it draws. The code is `tex_soft_init`, `tex_soft_match` and `tex_xs_offer` in `src/rt/gpu_sdl3vk/ge_gpu.c`, with the
+filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in `src/rt/gpu_sdl3vk/tex_scale.c`.
+
+- **Declaration.** The runtime softens only what a package declares, through
+  `nk_ace_soft_shadows_declare(key, digests, count, edge_texels)` (`src/rt/ace.h`) before the renderer starts: a
+  32-byte key, at most 256 digests, and for each one an edge width of 1 to 4 source texels. A declaration with a
+  missing key, more than 256 digests or an edge outside that range is refused whole and says why on one
+  `ACE_MODE: soft shadow declaration refused (...)` line. The declaration's source is the package field
+  `ace_parts.soft_shadows`, which is not in this build's package schema, so nothing declares a texture yet and the
+  part reports itself unavailable (section 11.3.12).
+- **Match.** A texture is a candidate only when it has one mip level and is at most 64 x 64 texels, and no
+  replacement pack image (section 10.12) is found for it. Its digest is HMAC-SHA-256 (RFC 2104, on the runtime's
+  SHA-256) under the declared key, over the bytes `soft shadow texture v1`, a zero byte, the width and height as
+  16-bit little-endian integers, and the decoded level-0 texels as RGBA8888, red first. Each content is hashed once:
+  the answer is kept on the texture cache entry for its content, so later draws and retries of the same content do
+  not hash it again. A texture whose digest is not declared is drawn as before.
+- **Softened copy.** A match takes a 4x copy through the scaled-copy machinery of section 10.10: its VRAM budget
+  (512 MiB when `SR_TEX_SCALE` sets none), its reclaim, retry and stale rules, and the texture's own filter and wrap
+  state as the copy's sampler. The copy is made on the renderer thread and stored at once, as a replacement image is,
+  so the draw that found it is the first to show it. It is made in integer arithmetic: colour and alpha are each
+  interpolated bilinearly with clamp-to-edge, and the alpha is then box-blurred over a square of radius
+  `edge x 4` output texels, also clamped to the copy's edges. The header states two guarantees and
+  `tex-scale-selftest` checks both: an output texel whose source neighbourhood (every texel within `edge + 1` source
+  texels) has one alpha keeps that alpha, so the opaque core and the clear surround are unchanged; and, for a
+  texture whose border band of `edge + 1` texels is clear, the copy's total alpha is 16 times the source's within
+  half an alpha step per output texel. The guest texture in VRAM is never written, and a texture that is also a
+  render target is never softened.
+- **Renderers.** Only the Vulkan GE renderer softens. The software renderer draws the stock texture, and a run with
+  the part on there reports it unavailable with that reason.
+- **Setting.** The `shadow` key of the `SR_ACE` launch line (section 10.1): `shadow=soft` or `shadow=off`, an
+  optional key; a missing one is off, `shadow=soft` needs `tier=ace`, and any other value refuses the line. In the
+  player it is the part "Soft shadows" (`"shadow"`: `soft` or `off`) on the library's Settings > Enhanced page and
+  on each game's own page (section 10.9), off in a fresh settings file and in no graphics preset; the launch line
+  carries `;shadow=soft` only for an Ace launch with the part on, just before `;cull=on`.
+- **Stamps.** `ACE_MODE: shadow soft (...)` at start, then
+  `SOFT_SHADOWS: on (declared=<n>, factor=4, budget_mb=<n>)` from the renderer, and
+  `SOFT_SHADOWS: exit (hashed=<n>, matched=<n>, queued=<n>, bound_draws=<n>)` when the run ends. The first draw
+  that binds a softened copy confirms the part in the report (`"shadow": "soft"`, `"shadow_declared"`); a run that
+  never binds one reports it unavailable, with the reason.
+- **Tests.**
+  - `tex-scale-selftest` checks the filter against a direct, unseparated reference on a synthetic disc, pins one
+    output row at edge 1, and checks the interior and alpha-mass guarantees, a monotone ramp and determinism for every
+    edge width, and the size refusals. It also checks HMAC-SHA-256 against RFC 4231 test cases 1, 2 and 6 and pins
+    the match rule's digest for a synthetic 2 x 1 texture.
+  - `ace-selftest` pins the key, its values, its Ace gate, the declaration's refusals and the report fields.
+  - `gpu-coherence-selftest --case soft-shadow` draws two synthetic CLUT4 discs magnified at render scale 4 with the
+    part on, off and undeclared. The declared disc gets a smooth ramp and keeps its interior, and the undeclared one
+    is drawn exactly as stock. Guest VRAM outside the frame is unchanged, and the counts on the exit line match.
+  - `test_player_state` and the player screens test pin the part, its settings, presets and launch line.
+
+**Next layer: real shadow maps.** Softening a blob keeps the title's own shadow shape. Shadows cast by the scene's
+geometry need a light-space depth pass over the title's shadow casters. That pass needs a GE scene seam that knows
+which draws are casters, and that knowledge has to come from package-declared draw classification. The renderer
+also needs a shadow-compare sampler and a receiver pass, and must suppress the title's own blob quads once real
+shadows draw. That is GE scene-level work, comparable to the RTX Remix seam (#1330), not a texture change, and this
+feature does not start it.
+
 ## 11. Guest-Visible Items
 
 Sections 10.3, 10.6, 10.8 and 10.11 describe host-only features: what the guest reads, in its registers, memory and timing, is the
@@ -1485,3 +1549,48 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
   It is in no graphics preset, because it changes GE timing.
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
   exist.
+
+#### 11.3.12. Soft Shadows (`shadow=soft`, Not Yet Admitted)
+
+The feature of section 10.20. How it draws is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
+  so a frame drawn with a softened shadow is the frame the guest keeps. Its key, its library and per-title settings
+  and this entry are in place (section 11.2, items 2, 3 and 6). Its declaration arrives through the package's
+  `ace_parts.soft_shadows`, which is not in this build yet, so every run with the part on reports it unavailable
+  (`ACE_MODE: shadow unavailable (nothing declared: this build's package carries no ace_parts.soft_shadows
+  textures)`), and the runs of item 4 do not exist.
+- **Mechanism.** A one-level texture of at most 64 x 64 texels whose keyed digest the package declares is drawn from
+  a 4x copy whose alpha edge is widened and smoothed (section 10.20). The guest's texture, its CLUT and every other
+  draw are unchanged.
+- **Key and off switch.** `shadow=soft` or `shadow=off` on the launch line (section 10.1), an optional key: a line
+  without it reads as off, `shadow=soft` is refused unless the line carries `tier=ace`, and any other value refuses
+  the line. The player has a library setting and a per-title setting, "Soft shadows", each able to turn it off alone
+  (section 11.2, item 2); an unknown value in a settings file reads as off. The line carries `;shadow=soft` only for an
+  Ace launch with the part on, so every other line is as it was.
+- **Never silent.** A run with it on prints `ACE_MODE: shadow soft (...)`, naming the committed frame as changed, and
+  the renderer's `SOFT_SHADOWS: on` and `SOFT_SHADOWS: exit` lines. The report confirms the part on the first
+  draw that binds a softened copy, and otherwise reports it unavailable with one of three reasons: nothing declared,
+  the software renderer, or no declared texture drawn by the Vulkan GE renderer.
+- **What it changes:** the pixels a declared texture covers, in the frame a present commits: around the shadow's rim,
+  the stepped alpha becomes a smooth ramp. The interior and the clear surround keep their alpha (section 10.20).
+- **VRAM bytes:** differ in those frames, at the pixels of draws that use a declared texture, where the softened rim
+  blends differently from the stock one. Host memory holds the copy: at most 256 x 256 RGBA8888 texels (256 KiB) a
+  texture, inside the scaled-copy budget.
+- **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them, and
+  for a render-to-texture pass that draws a declared texture. Texture readbacks are unchanged: the guest's texture is
+  never written.
+- **Timing:** differs in host time only. A candidate's digest is computed once per content on the renderer thread, the
+  thread the guest runs on, over at most 16 KiB of texels, and a match's copy is made and uploaded there the first
+  time it is drawn. Not measured on a title. The GE timing model, the VBLANK schedule and the media clocks are
+  unchanged.
+- **I/O speed:** unchanged.
+- **Package obligations.** The package declares only textures that are shadows: a texture drawn for anything else
+  would be softened too. The published digest is keyed, so it names a texture without revealing it: the package
+  publishes no size, palette or texel data. The edge width it declares is the width of the stock ramp, in source
+  texels.
+- **Limits.** It changes a shadow's edge, not its shape, position or the geometry it falls on. A shadow drawn as
+  several textures, drawn with mip levels, larger than 64 x 64, or drawn by the software renderer is not softened.
+  Real cast shadows are a separate, scene-level layer (section 10.20, "Next layer").
+- **Tier:** Ace (one title). **Default:** off, and in no graphics preset.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.

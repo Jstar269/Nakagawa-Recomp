@@ -1194,6 +1194,7 @@ static const int k_part_tess_values[] = {2, 3, 4, 0};
 static const char *const k_part_tess_labels[] = {"2x", "3x", "4x", "Off"};
 static const char *const k_part_tess_words[] = {"2", "3", "4", "off"};
 static const char *const k_part_wide_words[] = {"fill", "off"};
+static const char *const k_part_shadow_words[] = {"soft", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
 
@@ -1228,6 +1229,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"tess", "Finer patches",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
      4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
+    /* A guest-visible item (contract 11.3.12): off by default; it matters only for a title whose own
+       package declares its shadow textures. The softened shadows reach the frame the game reads. */
+    {"shadow", "Soft shadows",
+     "Ace only, in games whose package names their shadows. Changes what the frame shows.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_shadow_words, 0},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
@@ -2262,14 +2268,14 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    its 1x frame is enlarged about 4x or more on any screen of 1080p or more, past that range, on
    the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
-   motion, Widescreen, texture filtering, sound, the readout, the badge or Finer patches
+   motion, Widescreen, texture filtering, sound, the readout, the badge, Soft shadows or Finer patches
    (which changes GE timing, section 11.3.7): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
    test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
 #define PRESET_PARTS(text, upscale)                                                        \
     {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
      [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \
-     [PLAYER_PART_SAS] = -1, [PLAYER_PART_TESS] = -1, [PLAYER_PART_CULL] = -1,              \
-     [PLAYER_PART_UPSCALE] = (upscale)}
+     [PLAYER_PART_SAS] = -1, [PLAYER_PART_TESS] = -1, [PLAYER_PART_SHADOW] = -1,            \
+     [PLAYER_PART_CULL] = -1, [PLAYER_PART_UPSCALE] = (upscale)}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
     [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
                            PRESET_PARTS(1, 0)},
@@ -2283,11 +2289,12 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
                                 NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
 };
 #undef PRESET_PARTS
-/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until PRESET_PARTS
-   gives it a value under each preset (-1 leaves it the library's); update PRESET_PARTS first,
-   then this count. The count catches a new part only; a part PRESET_PARTS leaves out reads 0
-   (off), which test_graphics_presets catches by requiring -1 for every part it does not set. */
-typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 10 ? 1 : -1];
+/* PRESET_PARTS's last argument sets the last part: a new PLAYER_PART_* goes before Sharper
+   enlarging, at its place in the key order, so this fails to compile ("size of array is negative")
+   only when that order breaks. A new part PRESET_PARTS leaves out reads 0 (off), which
+   test_graphics_presets catches by requiring -1 for every part a preset does not set: give it -1
+   under each preset (the library's) or a value. */
+typedef char k_graphics_presets_upscale_is_last[PLAYER_PART_UPSCALE + 1 == PLAYER_PART_COUNT ? 1 : -1];
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -3003,7 +3010,9 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
            launcher exports for every session; the runtime's SR_ACE line has no such key. */
         if (p == PLAYER_PART_UPSCALE) continue;
-        /* A missing cull is off (contract 11.2 item 2): the line carries the key only when it is on. */
+        /* Soft shadows (contract 11.3.12) and wider culling are Ace items, and a missing one is off
+           (contract 11.2 item 2): the line carries the key only when it is on, shadow before cull. */
+        if (p == PLAYER_PART_SHADOW && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
         if (p == PLAYER_PART_CULL && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
