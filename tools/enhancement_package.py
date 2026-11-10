@@ -82,6 +82,7 @@ SITE_TRANSFORMS = frozenset({
     "count_x2_even",
     "gate_30hz_hold",
     "gate_30hz_alt",
+    "gate_30hz_store",
     "clip_x_widen",
     "gate_30hz_phase",
     "velocity_source_x_kappa",
@@ -736,7 +737,8 @@ def validate_package(data: Any) -> dict[str, Any]:
         elif any(site["transform"] in GATE_TRANSFORMS for site in sites):
             fail(
                 "update_boundary",
-                "A package with gate_30hz, gate_30hz_hold or gate_30hz_alt sites must declare update_boundary: "
+                "A package with gate_30hz, gate_30hz_hold, gate_30hz_alt or gate_30hz_store sites must declare "
+                "update_boundary: "
                 "gated sites run on "
                 "alternate logic updates, counted where each update begins",
             )
@@ -805,7 +807,8 @@ def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
         if len(set(digests)) != len(digests):
             fail(f"{path}.stock_value_digests", "stock_value_digests lists a digest twice (duplicate)")
     for key in ("stock_values", "stock_value_digests"):
-        # Only a scaling transform rewrites a store (swc1, or sw under count_x2): no other site checks values.
+        # Only a scaling transform rewrites a stored value (swc1, or sw under count_x2): no other site
+        # checks values. gate_30hz_store gates a store but never changes the value it stores.
         if key in site and transform not in STORE_VALUE_TRANSFORMS:
             fail(f"{path}.{key}", f"{key} belongs only to a store site under a scaling transform "
                                   f"({', '.join(sorted(STORE_VALUE_TRANSFORMS))})")
@@ -850,6 +853,8 @@ def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
             fail(f"{path}.word_count", "gate_30hz_alt names one jal (word_count 1)")
     elif "alternates" in site:
         fail(f"{path}.alternates", "alternates belongs only to gate_30hz_alt")
+    if transform == "gate_30hz_store" and site["word_count"] != 1:
+        fail(f"{path}.word_count", "gate_30hz_store names one store (word_count 1)")
 
 
 def _is_int(value: Any) -> bool:
@@ -1818,7 +1823,7 @@ def _check_even_counter(site_path: str, fn_addr: int, site_addr: int, word: int,
 # Registers are numbered in one space here: general registers 0-31, FPU registers 64-95, HI 96,
 # LO 97 and the FPU condition flag 98. VFPU registers are not tracked.
 ALT_GATE_MAX_ALTERNATES = 4
-GATE_TRANSFORMS = frozenset(("gate_30hz", "gate_30hz_hold", "gate_30hz_alt"))
+GATE_TRANSFORMS = frozenset(("gate_30hz", "gate_30hz_hold", "gate_30hz_alt", "gate_30hz_store"))
 ALT_GATE_MAX_FUNCTION_WORDS = 8192
 ALT_GATE_MAX_TREE_FUNCTIONS = 64
 ALT_GATE_MAX_TABLE_ENTRIES = 256
@@ -3290,6 +3295,7 @@ STORE_VALUE_TRANSFORMS = frozenset(SCALE_FACTORS) | {"velocity_source_x_kappa"}
 
 _IMM_ARITH_OPS = (0x08, 0x09, 0x0A, 0x0B)  # addi, addiu, slti, sltiu
 _INT_LOAD_OPS = (0x20, 0x21, 0x23, 0x24, 0x25)  # lb, lh, lw, lbu, lhu
+_GATE_STORE_OPS = (0x28, 0x29, 0x2B, 0x39)  # sb, sh, sw, swc1
 _FPU_RESULT_FUNCS = (0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x07)  # add sub mul div abs mov neg
 _FPU_ARITHMETIC_FUNCS = (0x00, 0x01, 0x02, 0x03)  # add.s sub.s mul.s div.s
 
@@ -3550,15 +3556,15 @@ def plan_site_rewrite(site: Mapping[str, Any], w: int,
     if "stock_value_digests" in site:
         if rewrite["kind"] not in ("scale_f_store", "scale_int_store"):
             raise EnhancementPackageError(
-                f"site {site['id']}: stock_value_digests belongs only to swc1 and sw store sites "
-                "(fail-closed refusal)")
+                f"site {site['id']}: stock_value_digests belongs only to a scaled swc1 or sw store "
+                "site (fail-closed refusal)")
         # Keyed digests of the stock values: the run-time check digests the value being stored
         # and scales it as _store_value_pairs() does, refusing one that leaves the range.
         rewrite["stock_value_digests"] = list(site["stock_value_digests"])
     elif "stock_values" in site:
         if rewrite["kind"] not in ("scale_f_store", "scale_int_store"):
             raise EnhancementPackageError(
-                f"site {site['id']}: stock_values belongs only to swc1 and sw store sites "
+                f"site {site['id']}: stock_values belongs only to a scaled swc1 or sw store site "
                 "(fail-closed refusal)")
         rewrite["stock_values"] = _store_value_pairs(site, rewrite)
     elif rewrite["kind"] == "scale_int_store":
@@ -3709,6 +3715,18 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int,
             _refuse(site, w, "clip_x_widen takes a jal: it acts after the call returns")
         return {"kind": "clip_x_widen", "reg": RESULT_REGISTERS[site["clip_register"]],
                 "offsets": [int(o) for o in site["clip_offsets"]]}
+
+    if tf == "gate_30hz_store":
+        # The store of a value the code advances by one update from what it loaded: run on
+        # even updates only, it does not happen on the odd ones, so each 30 Hz value shows for
+        # two updates. A store through $sp writes a slot of the function's own frame, which does
+        # not keep its value from one update to the next, so it refuses. Only the base register
+        # is read: a frame store through $fp or a copy of $sp is not seen (contract section 9.2).
+        if op not in _GATE_STORE_OPS:
+            _refuse(site, w, "gate_30hz_store takes an sb, sh, sw or swc1")
+        if rs == 29:
+            _refuse(site, w, "gate_30hz_store refuses a store to the stack frame ($sp base)")
+        return {"kind": "gate"}
 
     if tf == "value_reference":
         # No rewrite. The resolver reads the float this instruction loads, or builds with its

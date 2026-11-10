@@ -189,6 +189,7 @@
               "count_x2_even",
               "gate_30hz_hold",
               "gate_30hz_alt",
+              "gate_30hz_store",
               "clip_x_widen",
               "gate_30hz_phase",
               "velocity_source_x_kappa",
