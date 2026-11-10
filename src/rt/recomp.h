@@ -1559,10 +1559,13 @@ int sr_enhancement_logic_slowed(unsigned *rate);
  * describing the camera it was built for (rewritten, or unchanged since the last call). */
 void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count);
 /* A vblank_wait_skip site of a package's Ace load part (section 9.8), from generated code at the
- * site's jal to sceDisplayWaitVblankStart, after its delay slot: nonzero only while the run's Ace
- * line carries load=fast (src/rt/ace.c), and then that call is skipped and $v0 = 0. It counts each
- * skip it allows. Never gated by SR_EXPERIMENTAL_60HZ. */
-int nk_ace_load_fast(void);
+ * site's jal to sceDisplayWaitVblankStart, after its delay slot (src/rt/hle_display.c): nonzero
+ * only while the run's Ace line carries load=fast (nk_ace_load_fast(), src/rt/ace.c, which counts
+ * each skip) and waits are permitted, and then that call is skipped, the thread blocks for 1 us
+ * (sceKernelDelayThread(1)'s delay wait, so threads of any priority run) and $v0 = 0. Where waits are
+ * not permitted it returns 0, so the stock call runs and returns CAN_NOT_WAIT. Never gated by
+ * SR_EXPERIMENTAL_60HZ. */
+int nk_ace_load_skip_wait(CpuState *s);
 
 /* The kernel's record of the main module, emitted by tools/codegen.py from the ELF (PT_LOAD
  * segments, SceModuleInfo, section or program headers, and the syslib's

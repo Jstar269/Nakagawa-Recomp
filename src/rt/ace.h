@@ -123,9 +123,10 @@ void ace_feature_unavailable(AceFeature feature, const char *reason);
 void ace_confirm(AceFeature feature);
 /* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
 void ace_set_cull_untracked(unsigned long n);
-/* A vblank_wait_skip site of the title's Ace load part (contract 9.8 and 11.3.10), from generated
- * code (also declared in recomp.h): nonzero only while load=fast is in effect, and then the site's
- * call to sceDisplayWaitVblankStart is skipped. Each nonzero return is one skipped wait, counted
+/* A vblank_wait_skip site of the title's Ace load part (contract 9.8 and 11.3.10), asked by
+ * nk_ace_load_skip_wait() (recomp.h, src/rt/hle_display.c) once that call would block: nonzero
+ * only while load=fast is in effect, and then the site's call to sceDisplayWaitVblankStart is
+ * skipped. Each nonzero return is one skipped wait, counted
  * for the report (load_waits_skipped), and confirms the part. A run that asked for load=fast and
  * never reached a site reports it unavailable at exit: the title's build has no load part, or
  * none of its declared waits ran. */

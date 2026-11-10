@@ -299,7 +299,8 @@ static void cell_switch(void) {
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
 
-    /* load=fast (contract 11.3.10): the gate generated code calls at a declared wait. Off, and in an
+    /* load=fast (contract 11.3.10): the switch nk_ace_load_skip_wait() asks at a declared wait that
+       would block (src/rt/hle_display.c, tested in hle-thread-selftest). Off, and in an
        Enhanced or authentic run, it never skips; on, each call skips one wait, counted in the
        report, and a run that never reached a wait reports the part unavailable at exit. */
     CHECK(ace_init_spec("off", NULL) == 0 && nk_ace_load_fast() == 0, "an authentic run skips no wait");

@@ -4162,7 +4162,7 @@ class TestPublishedPackages(_SynthTimingElfFixture):
 _ACE_BASE = 0x08804000
 _ACE_WAIT_NID = 0x984C27E7    # sceDisplayWaitVblankStart
 _ACE_OTHER_NID = 0x7A000001   # a synthetic NID no transform knows
-_ACE_SLOT_WORD = 0x24040007   # addiu a0, zero, 7: a delay slot that does something
+_ACE_SLOT_WORD = 0x24840007   # addiu a0, a0, 7: a delay slot whose every run shows in $a0
 
 
 class TestAcePartsLoad(unittest.TestCase):
@@ -4196,10 +4196,12 @@ class TestAcePartsLoad(unittest.TestCase):
         return int(struct.unpack_from("<I", self.elf, self._off(addr))[0])
 
     def _site(self, offset: int, site_id: str = "SYNTH_LOAD_WAIT", function: str = "synth_loader") -> dict[str, Any]:
-        fn = {"synth_loader": self.loader, "synth_callee": self.callee}[function]
         return {"id": site_id, "function": function, "insn_offset": offset,
-                "stock_digest": compute_stock_words_digest([self.word(fn + offset)]),
-                "transform": "vblank_wait_skip"}
+                "stock_digest": self._digest(function, offset), "transform": "vblank_wait_skip"}
+
+    def _digest(self, function: str, offset: int, words: int = 1) -> str:
+        fn = {"synth_loader": self.loader, "synth_loader_alias": self.loader, "synth_callee": self.callee}[function]
+        return compute_stock_words_digest([self.word(fn + offset + 4 * i) for i in range(words)])
 
     def package(self, *, ace: bool = True, offset: int = 8) -> dict[str, Any]:
         pkg: dict[str, Any] = {
@@ -4216,13 +4218,21 @@ class TestAcePartsLoad(unittest.TestCase):
             "sites": [{"id": "SYNTH_COUNT", "function": "synth_callee", "insn_offset": 0,
                        "stock_digest": compute_stock_words_digest([self.word(self.callee)]),
                        "transform": "count_x2"}],
+            # A load part needs the boundary (section 9.8); the callee's last word is the one
+            # non-control word the fixture has left outside the loader.
+            "update_boundary": {"function": "synth_callee", "insn_offset": 8,
+                                "stock_digest": self._digest("synth_callee", 8)},
         }
         if ace:
             pkg["ace_parts"] = {"load": {"sites": [self._site(offset)]}}
         return pkg
 
-    def symbols(self) -> dict[str, str]:
-        return {"synth_loader": f"0x{self.loader:08x}", "synth_callee": f"0x{self.callee:08x}"}
+    def symbols(self, alias: bool = False) -> dict[str, str]:
+        names = {"synth_loader": f"0x{self.loader:08x}", "synth_callee": f"0x{self.callee:08x}"}
+        if alias:
+            # A second name for the loader, as a symbol map or a site map may give one address.
+            names["synth_loader_alias"] = f"0x{self.loader:08x}"
+        return names
 
     def _codegen(self, tmp: Path, name: str, pkg: dict[str, Any] | None,
                  symbols: dict[str, str] | None = None) -> tuple[int, str, dict[str, str]]:
@@ -4290,14 +4300,25 @@ class TestAcePartsLoad(unittest.TestCase):
         def _(p):
             p["ace_parts"]["load"]["sites"].append(dict(ace(p), insn_offset=16))
 
-        @case("a word a 60 Hz site covers", "duplicate site target ('synth_callee', insn_offset=0)")
+        @case("a word a 60 Hz site covers", "may not cover a word site 'SYNTH_COUNT' already covers "
+                                            "('synth_callee', insn_offset=0, compared by name)")
         def _(p):
             ace(p).update(function="synth_callee", insn_offset=0)
 
-        @case("the update_boundary's word", "may not cover the update_boundary")
+        @case("the second word of a two-word 60 Hz site", "may not cover a word site 'SYNTH_COUNT' (its word 2) "
+                                                         "already covers ('synth_loader', insn_offset=8")
+        def _(p):
+            p["sites"][0].update(function="synth_loader", insn_offset=4, word_count=2,
+                                 stock_digest=self._digest("synth_loader", 4, 2))
+
+        @case("the update_boundary's word", "may not cover a word the update_boundary already covers")
         def _(p):
             p.update(self._boundary_pkg())
             p["update_boundary"].update(function="synth_loader", insn_offset=8)
+
+        @case("a load part without update_boundary", "A package with ace_parts.load must declare update_boundary")
+        def _(p):
+            del p["update_boundary"]
 
         @case("requires on an ace_parts site", "an ace_parts site cannot declare requires")
         def _(p):
@@ -4349,13 +4370,14 @@ class TestAcePartsLoad(unittest.TestCase):
         def _(p):
             p["category"] = "guest_memory_code_hook"
             del p["rng_policy"]
+            del p["update_boundary"]
             p["sites"] = [{"id": "SYNTH_CLIP", "function": "synth_loader", "insn_offset": 24,
                            "stock_digest": compute_stock_words_digest([self.word(self.loader + 24)]),
                            "transform": "clip_x_widen", "clip_register": "v0", "clip_offsets": [0]}]
 
         @case("a presentation package", "only valid for category 'timing_frame_presentation'")
         def _(p):
-            for key in ("game_version", "executable_sha256", "rng_policy", "sites"):
+            for key in ("game_version", "executable_sha256", "rng_policy", "sites", "update_boundary"):
                 del p[key]
             p["category"] = "presentation_only"
 
@@ -4450,6 +4472,33 @@ class TestAcePartsLoad(unittest.TestCase):
             self.assertEqual(rc_pub, 0, out_pub)
             self.assertEqual(files_pub, files_priv)
 
+    def test_published_form_compares_aliases_by_address(self) -> None:
+        """A site map may give one address two names, so the namespace of section 9.8 is checked
+        by address there: the publish gate refuses what codegen would."""
+        published = self._publish(self.package())
+        loader = published["site_map"]["synth_loader"]
+        digest = published["ace_parts"]["load"]["sites"][0]["stock_digest"]
+
+        def findings(change) -> list[str]:
+            pkg = copy.deepcopy(published)
+            pkg["site_map"]["synth_loader_alias"] = loader
+            change(pkg)
+            return enhancement_package.published_package_findings(pkg)
+
+        def boundary_in_alias(pkg: dict[str, Any]) -> None:
+            pkg["update_boundary"] = {"function": "synth_loader_alias", "insn_offset": 4, "stock_digest": digest}
+
+        def gate_on_the_jal(pkg: dict[str, Any]) -> None:
+            pkg["sites"].append({"id": "SYNTH_GATE", "function": "synth_loader_alias", "insn_offset": 8,
+                                 "stock_digest": digest, "transform": "gate_30hz"})
+
+        got = findings(boundary_in_alias)
+        self.assertTrue(any("may not be in the update_boundary's function 'synth_loader_alias' "
+                            "(compared by site-map address)" in f for f in got), got)
+        got = findings(gate_on_the_jal)
+        self.assertTrue(any("may not cover a word site 'SYNTH_GATE' already covers ('synth_loader', "
+                            "insn_offset=8, compared by site-map address)" in f for f in got), got)
+
     # ---- codegen ---------------------------------------------------------------------------------
 
     def test_codegen_gates_the_wait_with_the_load_part_only(self) -> None:
@@ -4461,15 +4510,15 @@ class TestAcePartsLoad(unittest.TestCase):
             self.assertEqual(rc0, 0, output0)
         body = "\n".join(files.values())
         stub = f"f_{self.stub_wait:08x}(s)"
-        slot = f"sr_begin(s, 0x{self.loader + 12:08x}u, 0x{_ACE_SLOT_WORD:08x}u); s->r[4] = (0u + 0x00000007u);"
-        gate = "    if (!nk_ace_load_fast()) {"
-        skipped = "    } else { s->r[2] = 0u; }"
-        self.assertEqual(body.count("nk_ace_load_fast"), 1)
+        slot = f"sr_begin(s, 0x{self.loader + 12:08x}u, 0x{_ACE_SLOT_WORD:08x}u); s->r[4] = (s->r[4] + 0x00000007u);"
+        gate = "    if (!nk_ace_load_skip_wait(s)) {"
+        skipped = "    }"
+        self.assertEqual(body.count("nk_ace_load"), 1)
         lines = body.split("\n")
         at = lines.index(gate)
         self.assertIn(slot, lines[at - 1], "the delay slot runs as stock, before the gate")
         self.assertIn(stub, lines[at + 1], "the stock call to the wait's import stub")
-        self.assertEqual(lines[at + 2], skipped, "a skipped wait returns 0 in $v0")
+        self.assertEqual(lines[at + 2], skipped, "the runtime, not the gate, sets $v0 for a skip")
         # Gated only by the Ace load part: never by the 60 Hz toggle or its update count.
         self.assertNotIn("nk_enhancement", "\n".join(lines[at - 1:at + 3]))
 
@@ -4486,6 +4535,87 @@ class TestAcePartsLoad(unittest.TestCase):
         self.assertEqual(changed["out_0.c"], ["+ " + gate, "+ " + skipped])
         self.assertEqual(len(changed["out.c"]), 2)
         self.assertTrue(all("AOT Enhancement Epoch" in d and "sites=1 " in d for d in changed["out.c"]))
+
+    def test_codegen_refuses_by_resolved_address(self) -> None:
+        """The private form names functions through a symbol map, which may give one address two
+        names; codegen compares the resolved addresses (section 9.8, "One namespace")."""
+        def boundary_in_alias(pkg: dict[str, Any]) -> None:
+            pkg["update_boundary"] = {"function": "synth_loader", "insn_offset": 4,
+                                      "stock_digest": self._digest("synth_loader", 4)}
+            pkg["ace_parts"]["load"]["sites"][0] = self._site(8, function="synth_loader_alias")
+
+        def gate_on_the_jal(pkg: dict[str, Any]) -> None:
+            pkg["sites"].append({"id": "SYNTH_GATE", "function": "synth_loader_alias", "insn_offset": 8,
+                                 "stock_digest": self._digest("synth_loader_alias", 8),
+                                 "transform": "gate_30hz"})
+
+        cases = (
+            ("boundary function alias", boundary_in_alias,
+             f"its function 'synth_loader_alias' resolves to 0x{self.loader:08x}, the update_boundary's function"),
+            ("60 Hz site alias on the jal", gate_on_the_jal,
+             "its word is also a 60 Hz site or the update_boundary"),
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            for name, change, why in cases:
+                with self.subTest(name):
+                    pkg = self.package()
+                    change(pkg)
+                    validate_package(copy.deepcopy(pkg))   # the names differ, so only codegen can tell
+                    rc, output, files = self._codegen(tmp, name.replace(" ", "-"), pkg, self.symbols(alias=True))
+                    self.assertEqual(rc, 1, output)
+                    self.assertIn("enhancement package refused (fail-closed)", output)
+                    self.assertIn(why, output)
+                    self.assertEqual(files, {})
+
+    @unittest.skipUnless(GCC, "needs a host C compiler")
+    def test_codegen_gate_runs_the_stock_call_or_skips_it(self) -> None:
+        """Compile the emitted statement and run it with the runtime's skip answering 0, then 1."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            rc, output, files = self._codegen(tmp, "ace", self.package(), self.symbols())
+            self.assertEqual(rc, 0, output)
+            lines = "\n".join(files.values()).split("\n")
+            at = next(i for i, line in enumerate(lines) if f"sr_begin(s, 0x{self.loader + 8:08x}u" in line)
+            gate = lines.index("    if (!nk_ace_load_skip_wait(s)) {")
+            self.assertEqual(lines[gate + 2], "    }")
+            statement = "\n".join(lines[at:gate + 3])
+            stub = f"f_{self.stub_wait:08x}"
+            harness = tmp / "gate.c"
+            harness.write_text(
+                "#include \"recomp.h\"\n"
+                "/* The real CpuState and trace hooks; the statement runs alone, with no caller frame to\n"
+                " * return through, so only the return boundary is stubbed. */\n"
+                "#undef SR_TAIL_DRAIN\n#define SR_TAIL_DRAIN(s) ((void)0)\n"
+                "#define sr_aot_return_boundary_begin(s, r, c, k) 0\n"
+                "#define sr_aot_return_boundary_end(s) 0\n"
+                "static int skip; static unsigned asked, waited;\n"
+                "/* As src/rt/hle_display.c: a skip leaves $v0 = 0. */\n"
+                "int nk_ace_load_skip_wait(CpuState *s) { asked++; if (skip) s->r[2] = 0u; return skip; }\n"
+                f"static void {stub}(CpuState *s) {{ waited++; s->r[2] = 0x5au; }}\n"
+                f"static void site(CpuState *s) {{\n{statement}\n}}\n"
+                "int main(void) {\n"
+                "    for (skip = 0; skip < 2; skip++) {\n"
+                "        CpuState st; CpuState *s = &st; memset(&st, 0, sizeof st);\n"
+                "        s->r[2] = 0xdeadu; asked = waited = 0; site(s);\n"
+                "        printf(\"%d %u %u %u 0x%x 0x%08x\\n\", skip, asked, waited, s->r[4], s->r[2], s->r[31]);\n"
+                "    }\n"
+                "    return 0;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            exe = tmp / "gate.exe"
+            assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
+            built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                                    "-Wno-misleading-indentation", "-Wno-unused-variable",
+                                    f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
+                                   capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+        ra = f"0x{self.loader + 16:08x}"
+        # Off: the stock call runs once and its $v0 stands. On: it never runs and $v0 is 0. Either
+        # way the runtime is asked once, the delay slot ran once (a0 += 7) and $ra = site + 8.
+        self.assertEqual(run.stdout.split("\n")[:2], [f"0 1 1 7 0x5a {ra}", f"1 1 0 7 0x0 {ra}"])
 
     def test_codegen_refuses_a_jal_to_anything_but_the_wait(self) -> None:
         cases = (

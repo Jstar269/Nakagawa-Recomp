@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **482** (declared in `recomp.h`: 410)
-- reach class: emitter-reached 85, production-runtime-only 359, selftest-only 0, address-only 8, none 30
-- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 443
+- helpers: **483** (declared in `recomp.h`: 411)
+- reach class: emitter-reached 86, production-runtime-only 359, selftest-only 0, address-only 8, none 30
+- provenance class of the home definition: declared-only 1, project_authored_attested 38, upstream_derived 444
 
 ## Helpers
 
@@ -110,6 +110,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `gui_quit_requested` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
 | `gui_shutdown` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
 | `gui_stop_requested` | `rt/gui.c` | yes | production-runtime-only | `rt/gui.c`: upstream_derived |
+| `nk_ace_load_skip_wait` | `rt/hle_display.c` | yes | emitter-reached (direct) | `rt/hle_display.c`: upstream_derived |
 | `prof_find` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `prof_lookup` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sched_alarm_cancel` | `rt/sched.c` | yes | production-runtime-only | `rt/sched.c`: upstream_derived |

@@ -4420,11 +4420,11 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
             raise enhancement_package.EnhancementPackageError(
                 f"ace_parts site at 0x{addr:08x} has no rewrite here (fail-closed refusal)")
         # vblank_wait_skip (contract section 9.8): the delay slot above ran as stock. The call to
-        # sceDisplayWaitVblankStart runs unless the run's Ace load part is on (nk_ace_load_fast(),
-        # never nk_enhancement_on()); a skipped call leaves $v0 = 0, the stock function's return.
-        out.append("    if (!nk_ace_load_fast()) {")
+        # sceDisplayWaitVblankStart runs unless the runtime skips it (nk_ace_load_skip_wait(), on
+        # the run's Ace load part only, never nk_enhancement_on()); a skip sets $v0 itself.
+        out.append("    if (!nk_ace_load_skip_wait(s)) {")
         out.extend(_call_stmt.split("\n"))
-        out.append("    } else { s->r[2] = 0u; }")
+        out.append("    }")
     elif _jal_rw is not None and _jal_rw["kind"] == "clip_x_widen":
         # clip_x_widen (contract section 10.8): the stock call runs unchanged; when it returns,
         # the runtime scales the x row of the clip matrices at the offsets from the pointer the
@@ -6121,7 +6121,8 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                         "update_boundary: the boundary is also a rewritten site (fail-closed refusal)"
                     )
                 ENHANCEMENT_UPDATE_BOUNDARY = boundary["site_addr"]
-            ENHANCEMENT_ACE_SITES = _verified_ace_part_sites(elf, pkg_validated, sym_map, _read_words, known)
+            ENHANCEMENT_ACE_SITES = _verified_ace_part_sites(elf, pkg_validated, sym_map, _read_words, known,
+                                                             boundary)
 
             for patch in enhancement_package.verify_and_resolve_data_sites(
                 pkg_validated, symbol_to_addr=sym_map, read_data_fn=_read_loaded_data,
@@ -6152,11 +6153,13 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             raise _Refusal(1, f"codegen: enhancement package refused (fail-closed): {exc}\n") from None
 
 
-def _verified_ace_part_sites(elf, pkg_validated, sym_map, read_words, known):
+def _verified_ace_part_sites(elf, pkg_validated, sym_map, read_words, known, boundary):
     """The package's ace_parts sites, verified (contract section 9.8). A vblank_wait_skip site is
-    a jal whose target is the primary image's import stub of sceDisplayWaitVblankStart; any other
-    target, a word another site or the update boundary rewrites, or a jal codegen leaves
-    unrelocated refuses the package."""
+    a jal whose target is the primary image's import stub of sceDisplayWaitVblankStart, in a
+    function other than the resolved update boundary's; any other target, a word another site
+    or the update boundary rewrites, a package with no boundary, or a site in the boundary's
+    function by address (whatever name the package gives it) refuses the package. ``boundary``
+    is verify_and_resolve_update_boundary's result."""
     sites = enhancement_package.verify_and_resolve_ace_parts(
         pkg_validated, symbol_to_addr=sym_map, read_words_fn=read_words, known_functions=sorted(known),
     )
@@ -6168,6 +6171,14 @@ def _verified_ace_part_sites(elf, pkg_validated, sym_map, read_words, known):
         if addr in ENHANCEMENT_SITES or addr == ENHANCEMENT_UPDATE_BOUNDARY:
             raise enhancement_package.EnhancementPackageError(
                 f"{where}: its word is also a 60 Hz site or the update_boundary (fail-closed refusal)")
+        if boundary is None:
+            raise enhancement_package.EnhancementPackageError(
+                f"{where}: an ace_parts.load site needs the package's update_boundary (fail-closed refusal)")
+        if site["fn_addr"] == boundary["fn_addr"]:
+            raise enhancement_package.EnhancementPackageError(
+                f"{where}: its function {site['function']!r} resolves to 0x{site['fn_addr']:08x}, the "
+                f"update_boundary's function: skipping that wait would run logic updates unpaced "
+                f"(fail-closed refusal)")
         if site["rewrite"]["kind"] != "vblank_wait_skip":
             raise enhancement_package.EnhancementPackageError(
                 f"{where}: transform {site['rewrite']['kind']!r} has no rewrite (fail-closed refusal)")

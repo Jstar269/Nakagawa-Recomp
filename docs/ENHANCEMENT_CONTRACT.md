@@ -339,11 +339,13 @@ that a player turns on or off apart from the 60 FPS game logic. The field is an 
   stock instruction word, an optional `word_count` that may only be 1, and a `transform` from the parts' own list
   (below). A site resolves and is verified like a `sites` entry (section 9.2), fail-closed, and in a published
   package (section 5.1) its function is in the site map and its digest is keyed, as for `sites`.
-- **One namespace.** Site ids and instruction positions are shared by `sites`, every part's sites and the
-  `update_boundary`. The validator refuses a duplicate id, an Ace part site on a word a `sites` entry or the
-  `update_boundary` already covers (the same `function` and `insn_offset`), an Ace part site that declares `requires`,
-  and any `requires` that names an Ace part site. Codegen also refuses a part site whose resolved address is a 60 Hz
-  site or the boundary.
+- **One namespace.** Site ids and instruction words are shared by `sites`, every part's sites and the
+  `update_boundary`. The validator refuses a duplicate id, an Ace part site on a word a `sites` entry (any of its
+  `word_count` words), another part site or the `update_boundary` already covers, an Ace part site that declares
+  `requires`, and any `requires` that names an Ace part site. It compares words by `function` and `insn_offset` in a
+  private declaration, and again by site-map address in a published package (section 5.1), whose site map may give
+  one address two names; the publish gate runs the same check. Codegen compares the resolved addresses, whatever
+  the names: it refuses a part site whose word is a 60 Hz site's word or the boundary's.
 - **Their own transforms.** The parts' transforms are a set of their own, disjoint from the transforms of section
   9.2: a 60 Hz transform in `ace_parts`, or a part transform in `sites`, is an unknown transform and refuses the
   package.
@@ -355,7 +357,7 @@ that a player turns on or off apart from the 60 FPS game logic. The field is an 
 
 | Transform | Instructions with a defined rewrite | Rewrite |
 | --- | --- | --- |
-| `vblank_wait_skip` | `jal` whose target is the executable's import stub of `sceDisplayWaitVblankStart` (NID `0x984C27E7`); any other target refuses the package | the delay slot runs as stock; the call runs unless the run's `load=fast` is in effect (`nk_ace_load_fast()`), and a skipped call leaves `$v0` = 0, the stock function's return. The site may not be in the `update_boundary`'s function |
+| `vblank_wait_skip` | `jal` whose target is the executable's import stub of `sceDisplayWaitVblankStart` (NID `0x984C27E7`); any other target refuses the package | the delay slot runs as stock; the call runs unless the runtime skips it (`nk_ace_load_skip_wait()`), which it does only while the run's `load=fast` is in effect and waits are permitted, that is, where the stock call would block. A skipped call still blocks the thread, for 1 µs, the shortest delay wait the scheduler has (that of `sceKernelDelayThread(1)`), so ready threads of any priority run as during the stock wait, and it leaves `$v0` = 0, the stock function's return there. Where waits are not permitted the stock call runs and returns `CAN_NOT_WAIT`. A package with a `load` part must declare an `update_boundary`, and the site may not be in its function, compared by name, by site-map address in a published package, and by resolved address in codegen |
 
 ## 10. Play Modes: Authentic, Enhanced and Ace
 
@@ -1425,16 +1427,7 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
 - **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run it stays off whatever the environment says.
   Turning it on by default, or putting it in a preset, needs the owner's decision first, because of the trade-off in
   section 10.13 (some small, dense or filtered text is drawn smooth, and some soft art can still rib).
-- **Measured (Hot Shots Tennis, UCUS98701, one declared wait, 60 FPS package, Vulkan GE, hidden window, Windows 11,
-  other builds running on the machine).** The title follows each file-binder open on its main thread with three
-  passes of a fade step and a plain display wait; the open has completed before them. On a scripted 12,000-VBLANK
-  route from boot through the menus, a match load and a rally, `load=fast` skipped 261 waits (87 opens). The
-  route's picture checkpoints were reached earlier and at the same picture distance as without it: the title screen
-  at VBLANK 1,290 instead of 1,346, the main menu at 2,359 instead of 2,427 and the match-type menu at 3,736 instead
-  of 3,804, about 1.1 s sooner. All 216 steps ran in both runs. The fade step still runs three times per open, so
-  each screen the route checks after a load shows the stock picture. The title's frame-pacing wait (its package's
-  `vblank_wait_2_to_1` site) is not a load site and still paces every logic update.
-- **Nothing worse (section 11.2, item 4):** the run above, which has not been reviewed. The private runs item 4 lists, before
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic. The private runs item 4 lists, before
   and after at render scale 4 on *Hot Shots Tennis* and *LittleBigPlanet*, and the library sweep, do not exist for
   this item, and it may not be on by default without them.
 
@@ -1491,16 +1484,7 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   addresses can fill it, after which new matrices are left unscaled (said once on stderr, counted in the
   report's `cull_untracked`) instead of being scaled without a record.
 - **Tier:** Ace (one title). **Default:** off.
-- **Measured (Hot Shots Tennis, UCUS98701, one declared wait, 60 FPS package, Vulkan GE, hidden window, Windows 11,
-  other builds running on the machine).** The title follows each file-binder open on its main thread with three
-  passes of a fade step and a plain display wait; the open has completed before them. On a scripted 12,000-VBLANK
-  route from boot through the menus, a match load and a rally, `load=fast` skipped 261 waits (87 opens). The
-  route's picture checkpoints were reached earlier and at the same picture distance as without it: the title screen
-  at VBLANK 1,290 instead of 1,346, the main menu at 2,359 instead of 2,427 and the match-type menu at 3,736 instead
-  of 3,804, about 1.1 s sooner. All 216 steps ran in both runs. The fade step still runs three times per open, so
-  each screen the route checks after a load shows the stock picture. The title's frame-pacing wait (its package's
-  `vblank_wait_2_to_1` site) is not a load site and still paces every logic update.
-- **Nothing worse (section 11.2, item 4):** the run above, which has not been reviewed.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.
 
 #### 11.3.7. Finer Bezier and Spline Patches (`tess`)
 
@@ -1549,9 +1533,18 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   not been reviewed.
 - **Mechanism.** Each `vblank_wait_skip` site in `ace_parts.load` names one `jal` to the executable's
   `sceDisplayWaitVblankStart` import stub, by symbolic function and offset with the stock word's digest (section 9.8).
-  The site's delay slot runs as stock. Generated code then asks `nk_ace_load_fast()` (`src/rt/ace.c`): while the run's
-  line carries `load=fast` it returns nonzero, the call is not made and `$v0` is 0, which is what the stock function
-  returns; otherwise the stock call runs. Nothing else in the title's code changes.
+  The site's delay slot runs as stock. Generated code then asks `nk_ace_load_skip_wait()` (`src/rt/hle_display.c`). It
+  skips the call only where the stock call would block: waits are permitted (interrupts and thread dispatch are
+  enabled), and the run's line carries `load=fast` (`nk_ace_load_fast()`, `src/rt/ace.c`, which counts the skip).
+  Then the call is not made. The thread instead blocks for 1 µs, the shortest delay wait the scheduler has (that of
+  `sceKernelDelayThread(1)`); for that moment it is visibly in a delay wait, not a display wait. Ready threads of any
+  priority, lower ones included, can then run as they would during the stock wait, and the waiter resumes at its
+  next scheduling point instead of the next VBLANK. A zero delay or a ready-queue rotation would not do this: on the
+  PSP, `sceKernelDelayThread(0)` returns without yielding even to a thread of equal priority (#340), and a rotation
+  yields only to threads of equal or higher priority, so a lower-priority thread would not run. `$v0` is then 0,
+  which is what the stock function returns after its wait. With the key
+  off, or where waits are not permitted (the stock call then returns `SCE_KERNEL_ERROR_CAN_NOT_WAIT` without
+  blocking), the skip steps aside and the stock call runs. Nothing else in the title's code changes.
 - **Key.** `load=fast` or `load=off` on the launch line (section 10.1), an optional key: a line without it reads as
   off, any other value is refused, and `load=fast` is refused unless the line carries `tier=ace`. The player has a
   library setting and a per-title setting, "Short loads", each able to turn it off alone (section 11.2,
@@ -1560,8 +1553,9 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   `load` and `load_waits_skipped`), and confirms it the first time a declared wait is skipped. A run that asked for
   it and never reached a site reports it unavailable at exit (`ACE_MODE: load unavailable (...)`, the report's
   `unavailable.load`): the title's build has no load part, or none of its declared waits ran.
-- **What it changes:** only the declared display waits, and only while the key is on: each returns at once, with 0,
-  instead of blocking until the next VBLANK starts. The code before and after a wait runs as stock, including any fade
+- **What it changes:** only the declared display waits, and only while the key is on and the wait would block: each
+  returns with 0 after the 1 µs delay wait above, instead of blocking until the next VBLANK starts. A wait called where waits are not
+  permitted runs as stock and returns `CAN_NOT_WAIT`, as it would without the key. The code before and after a wait runs as stock, including any fade
   or progress step the loading loop runs between waits. VBLANK interrupts, sub-interrupt handlers,
   `sceDisplayGetVcount` and the audio threads keep running on host time. So fewer VBLANKs pass during the shortened
   stretch, and the frames the wait would have shown are not presented: a fade or a progress bar can jump or finish
@@ -1573,14 +1567,15 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   advances sees fewer VBLANKs per pass of the loop.
 - **Timing:** differs: each skipped wait shortens its pass of the loop by up to one VBLANK of guest time, and the
   loading stretch ends sooner in host time. The VBLANK schedule, the RTC and system time, the media clocks and the GE
-  timing model are unchanged. The logic update counter of section 9.5 is unaffected, because a site may not sit in the
-  `update_boundary`'s function. Limit: that check is static and covers only that function; a wait in a loop that
+  timing model are unchanged. The logic update counter of section 9.5 is unaffected, because a package with a load part must
+  declare an `update_boundary` and a site may not sit in its function, under any name for that function's address.
+  Limit: that check is static and covers only that function; a wait in a loop that
   reaches the boundary through its callees cannot be checked statically, so the package author shows that each
   declared wait paces only a loading screen (below).
 - **I/O speed:** unchanged. Reads take what they take; only the display waits between them are shorter.
 - **Package obligations.** The mechanism cannot check these, so the package author shows them for the title: (1)
   each declared wait paces a loading screen only, not a loop that runs or reaches a logic update; (2) the loop makes
-  progress without the wait (it polls the load's own completion, not a count of VBLANKs it waited for); (3) nothing
+  progress without a VBLANK: it ends on the load's own completion, not on a count of VBLANKs it waited for; (3) nothing
   the title keeps after the load depends on how many VBLANKs passed during it.
 - **Limits.** It skips only the waits a package declares: a loading screen paced by another wait
   (`sceDisplayWaitVblankStartCB`, a semaphore its VBLANK handler signals, or a thread delay) is unchanged. It does
@@ -1590,10 +1585,12 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
 - **Measured (Hot Shots Tennis, UCUS98701, one declared wait, 60 FPS package, Vulkan GE, hidden window, Windows 11,
   other builds running on the machine).** The title follows each file-binder open on its main thread with three
   passes of a fade step and a plain display wait; the open has completed before them. On a scripted 12,000-VBLANK
-  route from boot through the menus, a match load and a rally, `load=fast` skipped 261 waits (87 opens). The
-  route's picture checkpoints were reached earlier and at the same picture distance as without it: the title screen
-  at VBLANK 1,290 instead of 1,346, the main menu at 2,359 instead of 2,427 and the match-type menu at 3,736 instead
-  of 3,804, about 1.1 s sooner. All 216 steps ran in both runs. The fade step still runs three times per open, so
-  each screen the route checks after a load shows the stock picture. The title's frame-pacing wait (its package's
-  `vblank_wait_2_to_1` site) is not a load site and still paces every logic update.
+  route from boot through the menus, a match load and a rally, `load=fast` skipped 261 waits (87 opens). Only the
+  route's picture checkpoints were compared, and they stop at the match-type menu. Each was reached earlier and at
+  the same picture distance as without it: the title screen at VBLANK 1,290 instead of 1,346 (56 VBLANKs, about
+  0.93 s sooner), the main menu at 2,359 instead of 2,427 and the match-type menu at 3,736 instead of 3,804 (68
+  VBLANKs each, about 1.13 s sooner). The match load and the rally were not compared by checkpoint. Both runs
+  executed all 216 route steps, which does not show that they stayed in step. The fade step still runs three times
+  per open, so each screen the route checks after a load shows the stock picture. The title's frame-pacing wait (its
+  package's `vblank_wait_2_to_1` site) is not a load site and still paces every logic update.
 - **Nothing worse (section 11.2, item 4):** the run above, which has not been reviewed.

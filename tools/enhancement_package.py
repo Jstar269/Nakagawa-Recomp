@@ -715,17 +715,21 @@ def validate_package(data: Any) -> dict[str, Any]:
         if "data_files" in data:
             _validate_data_files(data["data_files"])
         if "ace_parts" in data:
-            _validate_ace_parts(data, seen_site_ids, seen_positions)
+            _validate_ace_parts(data, seen_site_ids)
 
     return data
 
 
-def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str], positions: set[tuple[str, int]]) -> None:
+def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str]) -> None:
     """``ace_parts`` (contract section 9.8): named parts, each a list of one-word sites.
 
-    Site ids and instruction positions share one namespace with ``sites`` and the
+    Site ids and instruction words share one namespace with ``sites`` and the
     ``update_boundary``: an ace_parts site may not reuse an id or cover a word either
-    already covers, may not declare ``requires``, and no ``requires`` may name it.
+    already covers, may not declare ``requires``, and no ``requires`` may name it. A
+    ``load`` part needs an ``update_boundary``, and none of its sites may be in that
+    function. Here words and functions are compared by name; a published package's are
+    compared again by site-map address (:func:`_check_ace_part_namespace`), and codegen
+    compares the resolved addresses.
     """
     parts = data["ace_parts"]
     if not isinstance(parts, dict) or not parts:
@@ -733,9 +737,11 @@ def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str], positions: 
     unknown_parts = sorted(set(parts) - ACE_PART_NAMES)
     if unknown_parts:
         fail("ace_parts", f"Unknown ace part {unknown_parts}; must be one of {sorted(ACE_PART_NAMES)}")
-    boundary = data.get("update_boundary")
-    boundary_pos = (boundary["function"], boundary["insn_offset"]) if boundary is not None else None
-    ace_ids: set[str] = set()
+    if "load" in parts and "update_boundary" not in data:
+        # The boundary marks the logic update's function, which no skipped wait may pace;
+        # without it nothing would keep a load site out of the update loop.
+        fail("update_boundary", "A package with ace_parts.load must declare update_boundary: no "
+                                "vblank_wait_skip site may be in the function where a logic update begins")
     for name in sorted(parts):
         part_path = f"ace_parts.{name}"
         part = parts[name]
@@ -751,15 +757,7 @@ def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str], positions: 
             _check_keys(site, path, ACE_PART_SITE_KEYS,
                         ("id", "function", "insn_offset", "stock_digest", "transform"), "ace part site")
             _check_id(site["id"], f"{path}.id", site_ids, "site")
-            ace_ids.add(site["id"])
             _check_instruction_location(site, path, "site")
-            pos = (site["function"], site["insn_offset"])
-            if pos == boundary_pos:
-                fail(path, "an ace_parts site may not cover the update_boundary's instruction")
-            if pos in positions:
-                fail(path, f"duplicate site target ({pos[0]!r}, insn_offset={pos[1]}): another site "
-                           "already covers this word")
-            positions.add(pos)
             if "word_count" in site:
                 word_count = site["word_count"]
                 if not isinstance(word_count, int) or isinstance(word_count, bool) or word_count != 1:
@@ -771,12 +769,41 @@ def _validate_ace_parts(data: Mapping[str, Any], site_ids: set[str], positions: 
             if not isinstance(transform, str) or transform not in ACE_PART_TRANSFORMS:
                 fail(f"{path}.transform", f"Unknown ace part transform: {transform!r}; must be one of "
                                           f"{sorted(ACE_PART_TRANSFORMS)}")
-            if (transform == "vblank_wait_skip" and boundary is not None
-                    and site["function"] == boundary["function"]):
-                # The wait would sit in the loop that runs the logic update: skipping it would run
-                # updates unpaced, so game time and the update counter would run fast.
-                fail(path, f"a vblank_wait_skip site may not be in the update_boundary's function "
-                           f"{boundary['function']!r}: skipping that wait would run logic updates unpaced")
+    _check_ace_part_namespace(data, lambda fn: fn, "by name")
+
+
+def _check_ace_part_namespace(data: Mapping[str, Any], fn_key: Any, how: str) -> None:
+    """Refuse an ``ace_parts`` site on a word that a ``sites`` entry (any of its ``word_count``
+    words) or the ``update_boundary`` covers, or on another part site's word, and a
+    ``vblank_wait_skip`` site in the boundary's function. ``fn_key`` maps a function name to
+    what identifies the function: the name itself, or a published site map's address, so that
+    two names for one address are one function."""
+    def word(fn: str, offset: int) -> tuple[Any, int]:
+        key = fn_key(fn)
+        # An address names the word itself; a name stays paired with its offset.
+        return (None, key + offset) if isinstance(key, int) else (key, offset)
+
+    covered: dict[tuple[Any, int], str] = {}
+    for site in data.get("sites", ()):
+        for i in range(int(site.get("word_count", 1))):
+            covered.setdefault(word(site["function"], int(site["insn_offset"]) + 4 * i),
+                               f"site {site['id']!r}" + (f" (its word {i + 1})" if i else ""))
+    boundary = data.get("update_boundary")
+    if boundary is not None:
+        covered.setdefault(word(boundary["function"], int(boundary["insn_offset"])), "the update_boundary")
+    for path, site in ace_part_sites(data):
+        pos = word(site["function"], int(site["insn_offset"]))
+        if pos in covered:
+            fail(path, f"an ace_parts site may not cover a word {covered[pos]} already covers "
+                       f"({site['function']!r}, insn_offset={site['insn_offset']}, compared {how})")
+        covered[pos] = f"site {site['id']!r}"
+        if (site["transform"] == "vblank_wait_skip" and boundary is not None
+                and fn_key(site["function"]) == fn_key(boundary["function"])):
+            # The wait would sit in the loop that runs the logic update: skipping it would run
+            # updates unpaced, so game time and the update counter would run fast.
+            fail(path, f"a vblank_wait_skip site may not be in the update_boundary's function "
+                       f"{boundary['function']!r} (compared {how}): skipping that wait would run "
+                       f"logic updates unpaced")
 
 
 def _ace_part_ids(data: Mapping[str, Any]) -> set[str]:
@@ -1279,6 +1306,9 @@ def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
     unused = sorted(set(site_map) - used)
     if unused:
         fail("site_map", f"site_map names {unused}, which no site uses: publish no other addresses")
+    if "ace_parts" in declaration:
+        # Two names may share an address, so the namespace is checked again by address.
+        _check_ace_part_namespace(declaration, lambda fn: int(site_map[fn], 16), "by site-map address")
     return data
 
 

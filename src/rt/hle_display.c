@@ -900,6 +900,28 @@ static uint32_t h_DisplayWaitVblankStart(CpuState *s) {
     return 0;
 }
 
+/* A vblank_wait_skip site of a package's Ace load part (ENHANCEMENT_CONTRACT.md sections 9.8 and
+ * 11.3.10), from generated code at the site's jal to sceDisplayWaitVblankStart, after its delay
+ * slot. Nonzero means the call is skipped and $v0 is 0. It skips only a call the stock handler
+ * above would block in: where waits are not permitted that handler returns CAN_NOT_WAIT without
+ * blocking, so it returns 0 and the stock call runs, unskipped and uncounted. Otherwise it skips
+ * while the run's load=fast is in effect (nk_ace_load_fast(), which counts the skip).
+ *
+ * A skipped wait still blocks, for the shortest delay that does: 1 us, sceKernelDelayThread(1)'s
+ * wait (sched_delay_current). Ready threads of any priority, lower ones included, run then, as
+ * during the stock wait, and the caller resumes at its next scheduling point instead of the next
+ * VBLANK. Neither a zero delay nor a ready-queue rotation would do: on the PSP (#340, h_DelayThread
+ * in hle_kernel_thread.c) sceKernelDelayThread(0) does not yield, and a rotation yields only to
+ * threads of equal or higher priority, so a loading loop that waits for a lower-priority loader
+ * would spin. $v0 is then the 0 the stock call returns after its wait. */
+int nk_ace_load_skip_wait(CpuState *s) {
+    if (!sched_wait_permitted()) return 0;
+    if (!nk_ace_load_fast()) return 0;
+    sched_delay_current(1u);
+    s->r[2] = 0u;
+    return 1;
+}
+
 /* The public multi-wait contract blocks through the requested number of
  * vertical periods, then returns at the following VBLANK start. The CB form
  * also services the caller's callbacks in each period. */
