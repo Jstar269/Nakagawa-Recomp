@@ -174,7 +174,7 @@ The **Where** column of each table names the places a code can appear:
 | --- | --- | --- |
 | `BUILD_PACKAGE_FAILED` | report | The package could not be assembled. |
 | `ENHANCEMENT_UNAVAILABLE` | player | 60 FPS game logic is on for the game, but its enhancement package is missing or not valid. |
-| `TEXTURE_PACK_REFUSED` | player | The texture pack chosen for the game was not kept or not used: its folder or `textures.ini` cannot be read, its `[games]` section lists other games only, its path is not a full UTF-8 path under 512 bytes, or 256 games already have one. A game whose stored pack no longer reads is not started with it until the pack is fixed, chosen again, removed or turned off. |
+| `TEXTURE_PACK_REFUSED` | player | The texture pack chosen for the game was not kept or not used: its folder or `textures.ini` cannot be read, its `[games]` section lists other games only or more than 64, its path is not a full UTF-8 path under 512 bytes, or 256 games already have one. A game whose stored pack no longer reads is never started with it: **Play without the pack** starts that run without it and keeps the choice. |
 | `PACKAGE_AMBIENT_ENHANCEMENT` | route | An enhancement setting from the environment would change the package; it must be explicit. |
 | `PACKAGE_BUILD_FAILED` | route, player | The package build failed; the problem report's reason gives the tool's message. |
 | `PACKAGE_BUILD_INCOMPLETE` | route | The build finished without every file the package needs. |

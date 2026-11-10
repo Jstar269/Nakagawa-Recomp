@@ -84,8 +84,8 @@ typedef enum {
     ACE_FEATURE_SMOOTH,
     ACE_FEATURE_SAS,
     ACE_FEATURE_TESS,
-    ACE_FEATURE_TEXPACK,
     ACE_FEATURE_CULL,
+    ACE_FEATURE_TEXPACK,   /* appended: this enum only grows at its end */
     ACE_FEATURE_COUNT
 } AceFeature;
 

@@ -216,9 +216,10 @@ typedef enum {
     PLAYER_PLAY_ACE            /* offered only for a title with a usable package */
 } PlayerPlayMode;
 
-/* Enhanced's parts. Each is one row of player_enhanced_part(): a new part is one more enum
-   value and one more row, and settings, the launch line and both settings pages take it with
-   no other change. A part's value 0 is off. */
+/* Enhanced's parts. Each is one row of player_enhanced_part(), and the enum's order is the
+   Enhanced pages' row order and the settings file's order, so a new part is appended at the end.
+   The SR_ACE line has its own fixed key order (k_launch_line_order in player_state.c), where a
+   part that the line carries takes its place. A part's value 0 is off. */
 typedef enum {
     PLAYER_PART_FILTERING = 0, /* texture filtering: 0, 2, 4, 8 or 16 */
     PLAYER_PART_TEXT,          /* crisp system text (the on-screen keyboard): 0 or 1 */
@@ -229,16 +230,15 @@ typedef enum {
     PLAYER_PART_SAS,           /* band-limited SAS resampling (#2054, section 11.3.1): 0 off, 1 sinc */
     PLAYER_PART_TESS,          /* finer Bezier and spline patches (#2053, section 11.3.7): 0 off, or the
                                   factor 2, 3 or 4. Off in a fresh file; alters GE timing */
+    PLAYER_PART_CULL,          /* wider culling (section 11.3.6): 0 off, 1 on. A title's own culling is
+                                  widened to Widescreen's wings; a title without a package ignores it */
+    PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
+                                  runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
+                                  not in the SR_ACE line */
     PLAYER_PART_TEXPACK,       /* the title's texture pack (#1880, contract 11.3.4): 0 off, 1 on. In
                                   effect only for a title with a pack chosen (PlayerTitlePack); the
                                   line carries texpack=on and the folder reaches the runtime as
                                   SR_TEX_REPLACE (NkRuntimeConfig.texpack_dir) */
-    PLAYER_PART_CULL,          /* wider culling (section 11.3.6): 0 off, 1 on. A title's own culling is
-                                  widened to Widescreen's wings; a title without a package ignores it.
-                                  Last of the line's keys */
-    PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
-                                  runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
-                                  not in the SR_ACE line */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -460,7 +460,9 @@ typedef struct {
 typedef enum {
     PLAYER_ERROR_RETRY_NONE = 0,
     PLAYER_ERROR_RETRY_RESTART_GAME,  /* "Restart game": launch subject_disc_id again */
-    PLAYER_ERROR_RETRY_BUILD          /* "Try again": build subject_disc_id again */
+    PLAYER_ERROR_RETRY_BUILD,         /* "Try again": build subject_disc_id again */
+    PLAYER_ERROR_RETRY_WITHOUT_PACK   /* "Play without the pack": launch subject_disc_id once with
+                                         its texture pack left out; the stored choice is kept */
 } PlayerErrorRetry;
 
 typedef struct {
@@ -919,6 +921,10 @@ struct PlayerApp {
        a pick that completes after the page closed or moved still reaches that game alone. */
     bool request_texpack_folder_picker;
     char texpack_pick_disc[PLAYER_DISC_ID_KEY_LEN];
+    /* The game (normalised disc ID) whose next launch leaves its texture pack out, set by the
+       refusal card's "Play without the pack" and taken by that launch alone
+       (player_app_launch_begin), whether it starts or not. */
+    char launch_without_pack[PLAYER_DISC_ID_KEY_LEN];
     /* The pack of the title whose Enhanced page is open, read when the page opens or the pack
        changes (player_app_title_pack_info), so the page never scans a folder each frame. */
     char texpack_page_key[PLAYER_DISC_ID_KEY_LEN];
@@ -1747,6 +1753,9 @@ bool player_app_set_enhanced_page_pack(PlayerApp *app, const char *path);
 /* The folder dialog for the open title page's pack: asks main.c to open it and remembers the
  * game. Nothing on the library's page. */
 void player_app_begin_texpack_pick(PlayerApp *app);
+/* The dialog closed without a folder (cancelled, or it could not open): the next CHOOSE may open
+   one again. */
+void player_app_cancel_texpack_pick(PlayerApp *app);
 /* The dialog's folder, for the game it was opened for, wherever the player is now; a game gone
  * from the library meanwhile takes nothing (and the developer log says so). */
 bool player_app_take_texpack_pick(PlayerApp *app, const char *path);

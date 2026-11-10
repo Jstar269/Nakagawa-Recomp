@@ -319,19 +319,30 @@ int nk_texrepl_diag_take(NkTexRepl *p, char *out, size_t cap) {
     return 0;
 }
 
-/* A [games] key that reads as a disc ID (1 to NK_TEXREPL_GAME_ID_MAX - 1 of A-Z, 0-9, '-', '_',
-   compared without case) is kept; any other key is only counted. */
+/* A disc ID in one normal form, so ULUS-10515, ulus10515 and ULUS_10515 are the same game: upper
+   case, with '-' and '_' dropped. Returns its length, or 0 when `key` is not a disc ID (another
+   character, or no letter or digit) or its normal form does not fit NK_TEXREPL_GAME_ID_MAX. */
+static size_t game_id_normal(const char *key, char id[NK_TEXREPL_GAME_ID_MAX]) {
+    size_t n = 0;
+    for (; key && *key; key++) {
+        const unsigned char c = (unsigned char)*key;
+        if (c == '-' || c == '_') continue;
+        if (!isalnum(c) || n + 1u >= NK_TEXREPL_GAME_ID_MAX) return 0;
+        id[n++] = (char)toupper(c);
+    }
+    id[n] = '\0';
+    return n;
+}
+
+/* A [games] key that reads as a disc ID is kept in its normal form, once; any other key is only
+   counted. Returns 0 when memory runs out and -1 past NK_TEXREPL_GAMES_MAX kept IDs, which bounds
+   the duplicate check (a 4 MiB ini could otherwise list some 350 000 IDs). */
 static int game_push(NkTexRepl *p, const char *key) {
     char id[NK_TEXREPL_GAME_ID_MAX];
-    size_t n = 0;
-    for (; key[n]; n++) {
-        const unsigned char c = (unsigned char)key[n];
-        if (n + 1u >= sizeof(id) || !(isalnum(c) || c == '-' || c == '_')) return 1;
-        id[n] = (char)toupper(c);
-    }
+    const size_t n = game_id_normal(key, id);
     if (n == 0) return 1;
-    id[n] = '\0';
     for (size_t i = 0; i < p->games_n; i++) if (strcmp(p->games[i], id) == 0) return 1;
+    if (p->games_n >= NK_TEXREPL_GAMES_MAX) return -1;
     if (p->games_n == p->games_cap) {
         const size_t cap = p->games_cap ? p->games_cap * 2u : 4u;
         char (*grown)[NK_TEXREPL_GAME_ID_MAX] = realloc(p->games, cap * sizeof(*grown));
@@ -349,11 +360,9 @@ const char *nk_texrepl_game(const NkTexRepl *p, size_t i) {
 }
 int nk_texrepl_names_game(const NkTexRepl *p, const char *disc_id) {
     if (!p || p->games_n == 0) return -1;
-    for (size_t i = 0; disc_id && i < p->games_n; i++) {
-        size_t k = 0;
-        while (disc_id[k] && p->games[i][k] && toupper((unsigned char)disc_id[k]) == p->games[i][k]) k++;
-        if (!disc_id[k] && !p->games[i][k]) return 1;
-    }
+    char id[NK_TEXREPL_GAME_ID_MAX];
+    if (game_id_normal(disc_id, id) == 0) return 0;
+    for (size_t i = 0; i < p->games_n; i++) if (strcmp(p->games[i], id) == 0) return 1;
     return 0;
 }
 
@@ -684,7 +693,13 @@ static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
         case SEC_INDEXED: indexed++; break;
         case SEC_GAMES:
             games++;
-            if (!game_push(p, key)) { snprintf(err, err_cap, "out of memory"); return 0; }
+            switch (game_push(p, key)) {
+            case 0: snprintf(err, err_cap, "out of memory"); return 0;
+            case -1:
+                snprintf(err, err_cap, "[games] lists more than %d games", NK_TEXREPL_GAMES_MAX);
+                return 0;
+            default: break;
+            }
             break;
         default: break;
         }

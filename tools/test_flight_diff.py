@@ -87,6 +87,19 @@ def event(sequence, event_class, kind=1, arg0=0, arg1=0, arg2=0, arg3=0, version
     return record
 
 
+def _ace_line_longest() -> str:
+    """The longest SR_ACE line: "v1" and every key of src/rt/ace.c's k_ace_keys table at its
+    longest value, as ace_line_longest() writes it."""
+    text = (ROOT / "src" / "rt" / "ace.c").read_text(encoding="utf-8")
+    table = re.search(r"k_ace_keys\[\]\s*=\s*\{(.*?)\n\};", text, re.DOTALL)
+    if table is None:
+        raise AssertionError("k_ace_keys not found in src/rt/ace.c")
+    keys = re.findall(r'\{"([a-z0-9_]+)",\s*ACE_KEY_\w+,\s*[01],\s*"([^"]+)"\}', table.group(1))
+    if not keys:
+        raise AssertionError("k_ace_keys names no key with its longest value")
+    return "v1" + "".join(f";{name}={value}" for name, value in keys)
+
+
 class ComparabilityContractTests(unittest.TestCase):
     """The #320 comparator contract: MATCH only for comparable, agreeing pairs.
 
@@ -342,8 +355,9 @@ class ComparabilityContractTests(unittest.TestCase):
 
     # Every key at its longest value (src/rt/ace.c ace_line_longest): past the 95 characters the
     # field used to keep.
-    ACE_LINE_LONGEST = ("v1;af=16;text=off;readout=off;notice=off;wide=fill;smooth=match;"
-                        "sas=sinc;tess=off;tier=enhanced;texpack=off;cull=off")
+    # The longest line the runtime's key table allows, derived from that table as
+    # ace_line_longest() in src/rt/ace.c builds it (ace_selftest checks the C side).
+    ACE_LINE_LONGEST = _ace_line_longest()
 
     def test_ace_mode_block_is_schema_valid_and_closed(self):
         _, candidate = self._comparable_pair()

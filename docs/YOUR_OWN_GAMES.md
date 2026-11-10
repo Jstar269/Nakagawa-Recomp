@@ -262,10 +262,11 @@ ships no pack and downloads none: a pack is a folder you made yourself or got fr
    **Texture pack** turns on for that game.
 3. Play the game in Enhanced or Ace. In Authentic, the pack is not used.
 
-If Nakagawa cannot read the pack's list (a folder that has gone, or a `textures.ini` with a line it does not
-understand), or the pack says it is made for another game (its `[games]` section lists other games only), it says
-why and does not use the pack, and it does not start the game with it. Fix the pack, choose it again, or remove it or
-turn **Texture pack** off to play without it. **Remove texture pack** forgets the folder for that game and does not
+If Nakagawa cannot read the pack's list (a folder that has gone, or a `textures.ini` with a line that is not a
+section, a comment or `key = value`, or no hash type), or the pack says it is made for another game (its `[games]` section lists other games only), it says
+why and does not use the pack. When that happens as you start the game, **Play without the pack** starts it without
+the pack this time and keeps your choice. To use the pack again, fix it and choose it again; **Remove texture pack**
+or turning **Texture pack** off stops Nakagawa asking. **Remove texture pack** forgets the folder for that game and does not
 delete it. An image the pack lists that is missing or cannot be decoded is skipped on its own: that texture is drawn
 as the game made it, and the rest of the pack is used.
 

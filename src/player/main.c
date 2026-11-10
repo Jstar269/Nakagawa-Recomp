@@ -393,6 +393,7 @@ static void player_take_texpack_folder_pick(PlayerApp *app) {
     int state = SDL_GetAtomicInt(&s_texpack_pick_state);
     if (state == 0) return;
     SDL_SetAtomicInt(&s_texpack_pick_state, 0);
+    if (state != 1) player_app_cancel_texpack_pick(app);
     if (state == 1) {
         /* Read and refused with its reason, or stored for the game the dialog was opened for. */
         (void)player_app_take_texpack_pick(app, s_texpack_pick);

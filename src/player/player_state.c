@@ -1229,11 +1229,6 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"tess", "Finer patches",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
      4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
-    /* A guest-visible item (contract 11.3.4): off by default, in no preset, and in effect only for
-       a title with a pack of the player's own chosen on its page. */
-    {"texpack", "Texture pack",
-     "Draws the texture pack chosen on a game's page. The game receives changed pictures.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
@@ -1242,7 +1237,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     /* Presentation only (contract section 2.2): the window and its recording, never the guest. */
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
-     2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
+     2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},    /* A guest-visible item (contract 11.3.4): off by default, in no preset, and in effect only for
+       a title with a pack of the player's own chosen on its page. */
+    {"texpack", "Texture pack",
+     "Draws the texture pack chosen on a game's page. The game receives changed pictures.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -3132,6 +3131,21 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60) {
     play->part[PLAYER_PART_SMOOTH] = 0;
 }
 
+/* The SR_ACE line's keys in the project's one fixed order, as ace_format writes them: af, text,
+   readout, notice, wide, smooth, sas, tess, then the later Enhanced keys at their places, texpack,
+   and cull last. The enum's order is the pages' row order and grows at its end, so the line keeps
+   this table instead. Every part but the upscaler is here once: the upscaler travels as
+   SR_PRESENT_UPSCALE (player_play_present_upscale), which the launcher exports for every
+   session, and the runtime's SR_ACE line has no such key. */
+static const PlayerEnhancedPart k_launch_line_order[] = {
+    PLAYER_PART_FILTERING, PLAYER_PART_TEXT, PLAYER_PART_READOUT, PLAYER_PART_NOTICE,
+    PLAYER_PART_WIDE, PLAYER_PART_SMOOTH, PLAYER_PART_SAS, PLAYER_PART_TESS,
+    PLAYER_PART_TEXPACK, PLAYER_PART_CULL,
+};
+/* A part added to the enum needs its place here (or, like the upscaler, a reason to be absent). */
+typedef char launch_line_order_has_every_line_part[
+    sizeof(k_launch_line_order) / sizeof(k_launch_line_order[0]) == PLAYER_PART_COUNT - 1 ? 1 : -1];
+
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap) {
     if (!out || cap == 0) return false;
     out[0] = '\0';
@@ -3144,10 +3158,8 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     n = snprintf(out, cap, "v1;tier=%s", play->mode == PLAYER_PLAY_ACE ? "ace" : "enhanced");
     if (n <= 0 || (size_t)n >= cap) { out[0] = '\0'; return false; }
     used = (size_t)n;
-    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
-        /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
-           launcher exports for every session; the runtime's SR_ACE line has no such key. */
-        if (p == PLAYER_PART_UPSCALE) continue;
+    for (size_t i = 0; i < sizeof(k_launch_line_order) / sizeof(k_launch_line_order[0]); i++) {
+        const int p = (int)k_launch_line_order[i];
         /* A missing cull is off (contract 11.2 item 2): the line carries the key only when it is on. */
         if (p == PLAYER_PART_CULL && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
         /* texpack likewise (11.3.4): written only when on, before cull, as the runtime formats it. */
@@ -3262,6 +3274,14 @@ static void player_app_refresh_pack_page(PlayerApp *app, const char *key) {
     (void)player_texture_pack_inspect(app->texpack_page_path, key, &app->texpack_page_info);
 }
 
+/* After a title's pack changes: refreshes the page's cache when it holds that title or none, and
+   leaves it alone while another title's page shows its own (a pick that completes after its page
+   closed must not replace the open page's pack with a "Refused"). */
+static void player_app_refresh_pack_page_if_shown(PlayerApp *app, const char *key) {
+    if (!app->texpack_page_key[0] || strcmp(app->texpack_page_key, key) == 0)
+        player_app_refresh_pack_page(app, key);
+}
+
 const PlayerTexturePackInfo *player_app_title_pack_info(const PlayerApp *app, int game_index) {
     char key[PLAYER_DISC_ID_KEY_LEN];
     if (!app || game_index < 0 || game_index >= app->game_count ||
@@ -3304,7 +3324,7 @@ bool player_app_set_title_pack(PlayerApp *app, int game_index, const char *path)
     player_dev_log_add(app, "settings", "texture pack for %s: %s (%llu textures)", entry.key,
                        info.name, (unsigned long long)info.textures);
     maybe_persist_settings(app);
-    player_app_refresh_pack_page(app, entry.key);
+    player_app_refresh_pack_page_if_shown(app, entry.key);
     return true;
 }
 
@@ -3317,7 +3337,7 @@ void player_app_clear_title_pack(PlayerApp *app, int game_index) {
     title_play_store(&app->settings, &entry);
     player_dev_log_add(app, "settings", "texture pack for %s removed", entry.key);
     maybe_persist_settings(app);
-    player_app_refresh_pack_page(app, entry.key);
+    player_app_refresh_pack_page_if_shown(app, entry.key);
 }
 
 bool player_ace_report_path(const char *user_root, const char *disc_id, char *out, size_t cap) {
@@ -3521,6 +3541,12 @@ bool player_app_set_enhanced_page_pack(PlayerApp *app, const char *path) {
 void player_app_begin_texpack_pick(PlayerApp *app) {
     int title = player_app_enhanced_page_title(app);
     if (title < 0) return;
+    /* One dialog at a time: a second CHOOSE while one is open would retarget the first's pick. */
+    if (app->texpack_pick_disc[0]) {
+        player_dev_log_add(app, "settings", "texture pack folder dialog already open for %s",
+                           app->texpack_pick_disc);
+        return;
+    }
     memcpy(app->texpack_pick_disc, app->enhanced_page_disc, sizeof(app->texpack_pick_disc));
     app->request_texpack_folder_picker = true;
 }
@@ -3541,6 +3567,10 @@ bool player_app_take_texpack_pick(PlayerApp *app, const char *path) {
     }
     app->texpack_pick_disc[0] = '\0';
     return player_app_set_title_pack(app, title, path);
+}
+
+void player_app_cancel_texpack_pick(PlayerApp *app) {
+    if (app) app->texpack_pick_disc[0] = '\0';
 }
 
 void player_app_clear_enhanced_page_pack(PlayerApp *app) {
@@ -4558,6 +4588,7 @@ const char *player_error_retry_label(const ErrorState *error) {
     switch (error->retry) {
         case PLAYER_ERROR_RETRY_RESTART_GAME: return "Restart game";
         case PLAYER_ERROR_RETRY_BUILD: return "Try again";
+        case PLAYER_ERROR_RETRY_WITHOUT_PACK: return "Play without the pack";
         case PLAYER_ERROR_RETRY_NONE:
         default: return NULL;
     }
@@ -4569,10 +4600,18 @@ bool player_app_retry_from_error(PlayerApp *app) {
     if (index < 0) return false;
     PlayerErrorRetry retry = app->last_error.retry;
     player_dev_log_add(app, "error", "%s: %s for %s", app->last_error.error_code,
-                       retry == PLAYER_ERROR_RETRY_RESTART_GAME ? "restart" : "build again",
+                       retry == PLAYER_ERROR_RETRY_RESTART_GAME   ? "restart"
+                       : retry == PLAYER_ERROR_RETRY_WITHOUT_PACK ? "play without the texture pack"
+                                                                  : "build again",
                        app->last_error.subject_disc_id);
     app->selected_game_index = index;
     player_app_set_view(app, VIEW_LIBRARY);
+    if (retry == PLAYER_ERROR_RETRY_WITHOUT_PACK) {
+        /* This one launch leaves the pack out; the stored choice stays for the next. */
+        if (!player_disc_id_key(app->games[index].disc_id, app->launch_without_pack)) return false;
+        player_app_request_launch(app, index);
+        return true;
+    }
     if (retry == PLAYER_ERROR_RETRY_RESTART_GAME) {
         /* The same launch PLAY runs, on the event loop's launch worker. */
         player_app_request_launch(app, index);
@@ -5325,6 +5364,12 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
     const char *root = player_package_root(app, game);
     memset(work, 0, sizeof(*work));
     app->close_confirmation_pending = false;
+    /* "Play without the pack" covers this launch only, so it is taken now, whatever follows. */
+    char game_key[PLAYER_DISC_ID_KEY_LEN];
+    const bool have_key = player_disc_id_key(game->disc_id, game_key);
+    const bool without_pack = have_key && app->launch_without_pack[0] &&
+                              strcmp(app->launch_without_pack, game_key) == 0;
+    app->launch_without_pack[0] = '\0';
     if (player_app_title_60hz_blocked(app, game_index)) {
         /* 60 FPS game logic is on and its package is gone: the original game
            is not started in its place. */
@@ -5337,10 +5382,10 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
         return false;
     }
     /* The texture pack is read now, as the runtime will read it: a pack that has gone or no
-       longer reads is refused here with its reason, and the game is not started without it or
-       with part of it (contract section 6). The acceptance checkpoint runs authentic, so it has
-       no pack. */
-    if (app->headless_accept_presented_frames == 0u) {
+       longer reads is never used, whole or in part (contract section 6). The card says why and
+       offers "Play without the pack", which starts this run with the pack left out and keeps the
+       stored choice. The acceptance checkpoint runs authentic, so it has no pack. */
+    if (app->headless_accept_presented_frames == 0u && !without_pack) {
         PlayerPlayResolved play;
         player_play_resolve(&app->settings, game->disc_id, &play);
         const char *pack = play.on && play.part[PLAYER_PART_TEXPACK] == 1
@@ -5349,12 +5394,17 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
         if (pack && !player_texture_pack_inspect(pack, game->disc_id, &info)) {
             char message[640];
             snprintf(message, sizeof(message),
-                     "The texture pack chosen for this game was refused: %s. Nakagawa does not "
-                     "start a game with a pack whose list it cannot read. Fix or choose the pack "
-                     "again, or remove it or turn Texture pack off on the game's Enhanced page to "
-                     "play without it.", info.error);
+                     "The texture pack chosen for this game cannot be used: %s. Play without the "
+                     "pack starts the game without it this time and keeps your choice. To fix it, "
+                     "choose the pack again on the game's Enhanced page, or remove it or turn "
+                     "Texture pack off there.", info.error);
             player_app_set_error(app, "TEXTURE_PACK_REFUSED", "Texture pack not used", message,
                                  "Back to library", VIEW_LIBRARY);
+            if (have_key) {
+                snprintf(app->last_error.subject_disc_id, sizeof(app->last_error.subject_disc_id),
+                         "%s", game->disc_id);
+                app->last_error.retry = PLAYER_ERROR_RETRY_WITHOUT_PACK;
+            }
             return false;
         }
     }
@@ -5368,6 +5418,13 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
         work->has_package_root = true;
     }
     work->settings = app->settings;
+    if (without_pack && player_settings_title_pack(&work->settings, game->disc_id)) {
+        /* Only this launch's copy forgets the pack, so the runtime gets no folder and texpack is
+           off on its line; the stored choice is unchanged. */
+        (void)title_pack_store(&work->settings, game_key, NULL);
+        player_dev_log_add(app, "launch", "%s: started without its texture pack, which cannot be used",
+                           game_key);
+    }
     work->launch_headless = app->launch_headless;
     work->headless_accept_presented_frames = app->headless_accept_presented_frames;
     /* The runtime's pause overlay draws with the UI fonts in the player's folder. */

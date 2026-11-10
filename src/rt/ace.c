@@ -220,7 +220,7 @@ static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "texpack", "cull"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "cull", "texpack"
 };
 
 /* The run's observation state. */
@@ -298,9 +298,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
             "smooth=%s, sas=%s, tess=%s)\n", tier_word(s_req.tier), s_req.af, on_off(s_req.text),
             on_off(s_req.readout), on_off(s_req.notice), wide_word(s_req.wide),
             smooth_word(s_req.smooth), sas_word(s_req.sas), tess_word(s_req.tess));
+    if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
     if (s_req.texpack)
         fprintf(stderr, "ACE_MODE: texpack on (the title's texture pack replaces the textures it lists)\n");
-    if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
     return 1;
 }
 
@@ -379,8 +379,8 @@ size_t ace_feature_words(char *out, size_t cap) {
     }
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
-    if (s_eff.texpack) used = words_add(out, cap, used, "texture pack");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
+    if (s_eff.texpack) used = words_add(out, cap, used, "texture pack");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
     if (s_eff.tess) {
@@ -809,9 +809,9 @@ size_t ace_report_json(char *out, size_t cap) {
             s_eff.af, s_eff.text ? "true" : "false", s_eff.readout ? "true" : "false",
             s_eff.notice ? "true" : "false", wide_word(s_eff.wide), smooth_word(s_eff.smooth),
             sas_word(s_eff.sas), tess_word(s_eff.tess));
-    if (s_req.texpack) ACE_PUT("  \"texpack\": %s,\n", s_eff.texpack ? "true" : "false");
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
+    if (s_req.texpack) ACE_PUT("  \"texpack\": %s,\n", s_eff.texpack ? "true" : "false");
     ACE_PUT("  \"unavailable\": {");
     int first = 1;
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
@@ -889,10 +889,10 @@ void ace_finish(void) {
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_TEXPACK, ACE_HAS_CULL };
+                                                ACE_HAS_CULL, ACE_HAS_TEXPACK };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
-                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.texpack,
-                                        s_eff.cull };
+                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.cull,
+                                        s_eff.texpack };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL

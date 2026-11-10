@@ -7916,7 +7916,7 @@ static void test_play_mode_settings(void) {
                                       "\"text\": \"off\", \"readout\": \"off\", "
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"texpack\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"},") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", \"texpack\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8113,7 +8113,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
-                                      "\"tess\": \"off\", \"texpack\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8139,7 +8139,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"texpack\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8205,7 +8205,7 @@ static void test_play_mode_cull_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"texpack\": \"off\", \"cull\": \"on\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", \"texpack\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8282,8 +8282,8 @@ static void test_play_mode_tess_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"texpack\": \"off\", "
-                                      "\"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
+                                      "\"upscale\": \"off\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -8842,6 +8842,32 @@ static void test_play_mode_line_parses_in_runtime(void) {
         for (int p = 0; p < PLAYER_PART_COUNT; p++) own->part[p] = 0;  /* every part off */
         player_play_resolve(&settings, "TEST93001", &r);
         expect_line_parses_in_runtime(&r);
+        /* Every part at its largest value, with a pack stored so texpack is in effect. In Ace every key
+           the line can carry is then on, so the line's own key order (k_launch_line_order), not the
+           enum's row order, decides where each lands: texpack before cull, and cull last. */
+        settings.title_pack_count = 1;
+        memcpy(settings.title_packs[0].key, "TEST93001", sizeof("TEST93001"));
+        snprintf(settings.title_packs[0].path, sizeof(settings.title_packs[0].path), "%s",
+                 "/packs/every-part");
+        for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+            const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+            int top = info->values[0];   /* the largest value: on, or the highest factor */
+            for (int i = 1; i < info->value_count; i++) if (info->values[i] > top) top = info->values[i];
+            own->part[p] = top;
+        }
+        player_play_resolve(&settings, "TEST93001", &r);
+        assert(r.part[PLAYER_PART_TEXPACK] == 1);
+        expect_line_parses_in_runtime(&r);
+        {
+            char line[ACE_SPEC_MAX];
+            assert(player_play_launch_line(&r, line, sizeof(line)));
+            const size_t n = strlen(line);
+            if (modes[m] == PLAYER_PLAY_ACE)
+                assert(n > 19u && strcmp(line + n - 19u, ";texpack=on;cull=on") == 0);
+            else
+                assert(n > 11u && strcmp(line + n - 11u, ";texpack=on") == 0 && !strstr(line, "cull"));
+        }
+        settings.title_pack_count = 0;
         own->mode = PLAYER_PLAY_AUTHENTIC;                            /* the title's Authentic */
         player_play_resolve(&settings, "TEST93001", &r);
         assert(!r.on);
@@ -8942,8 +8968,8 @@ static void test_play_mode_upscale_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"texpack\": \"off\", "
-                                      "\"cull\": \"off\", \"upscale\": \"fsr1\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
+                                      "\"upscale\": \"fsr1\", \"texpack\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9186,7 +9212,7 @@ static void test_play_mode_texpack_settings(void) {
 #undef TEXPACK_JSON_FULL
 #undef TEXPACK_FULL
 
-    /* At launch the pack is read again: one that stopped reading refuses the launch. */
+    /* At launch the pack is read again: one that stopped reading is not used. */
     snprintf(file, sizeof(file), "%s%ctextures.ini", good, sep);
     write_text_file(file, "[options]\nhash = quick\n[hashes\n");
     {
@@ -9195,6 +9221,40 @@ static void test_play_mode_texpack_settings(void) {
         assert(!player_app_launch_begin(app, 0, work));
         assert(strcmp(app->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0);
         assert(strcmp(app->last_error.title, "Texture pack not used") == 0);
+        /* The card offers to play this run without the pack: that launch leaves the pack out of
+           its copy of the settings (no folder, no texpack on the line), the stored choice stays,
+           and the launch after it reads the pack again. */
+        assert(player_error_retry_label(&app->last_error) &&
+               strcmp(player_error_retry_label(&app->last_error), "Play without the pack") == 0);
+        app->request_launch = false;
+        assert(player_app_retry_from_error(app));
+        assert(app->request_launch && app->request_launch_index == 0);
+        assert(strcmp(app->launch_without_pack, "TEST95001") == 0);
+        memset(work, 0, sizeof(*work));
+        (void)player_app_launch_begin(app, 0, work);
+        assert(app->launch_without_pack[0] == '\0');
+        assert(player_settings_title_pack(&work->settings, "TEST95001") == NULL);
+        assert(player_settings_title_pack(&app->settings, "TEST95001") != NULL);
+        {
+            NkRuntimeConfig *config = (NkRuntimeConfig *)calloc(1, sizeof(*config));
+            PlayerPlayResolved played;
+            assert(config);
+            player_play_config_session(&work->settings, "TEST95001", false, false, config, &played);
+            assert(played.on && played.part[PLAYER_PART_TEXPACK] == 0);
+            assert(strstr(config->ace_spec, "texpack") == NULL && config->texpack_dir[0] == '\0');
+            free(config);
+        }
+        app->request_launch = false;
+        app->last_error.error_code[0] = '\0';
+        memset(work, 0, sizeof(*work));
+        assert(!player_app_launch_begin(app, 0, work));
+        assert(strcmp(app->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0);
+        /* Another game's launch does not take a "without the pack" meant for this one. */
+        snprintf(app->launch_without_pack, sizeof(app->launch_without_pack), "TEST95002");
+        memset(work, 0, sizeof(*work));
+        assert(!player_app_launch_begin(app, 0, work));
+        assert(strcmp(app->last_error.error_code, "TEXTURE_PACK_REFUSED") == 0 &&
+               app->launch_without_pack[0] == '\0');
         app->last_error.error_code[0] = '\0';
         free(work);
     }
@@ -9230,9 +9290,20 @@ static void test_play_mode_texpack_settings(void) {
     assert(app->request_texpack_folder_picker && strcmp(app->texpack_pick_disc, "TEST95001") == 0);
     app->request_texpack_folder_picker = false;
     player_app_open_title_enhanced(app, 1);
+    /* While that dialog is open, CHOOSE on another game's page opens no second one. */
+    player_app_begin_texpack_pick(app);
+    assert(!app->request_texpack_folder_picker && strcmp(app->texpack_pick_disc, "TEST95001") == 0);
     assert(player_app_take_texpack_pick(app, good));
     assert(player_settings_title_pack(&app->settings, "TEST95001") != NULL &&
            player_settings_title_pack(&app->settings, "TEST95002") == NULL);
+    /* The open page (the second game's) keeps its own pack line: the pick did not replace it. */
+    assert(strcmp(app->texpack_page_key, "TEST95002") == 0);
+    /* A dialog closed without a folder lets the next CHOOSE open one. */
+    player_app_begin_texpack_pick(app);
+    assert(strcmp(app->texpack_pick_disc, "TEST95002") == 0);
+    player_app_cancel_texpack_pick(app);
+    assert(app->texpack_pick_disc[0] == '\0');
+    app->request_texpack_folder_picker = false;
     player_app_begin_texpack_pick(app);
     assert(strcmp(app->texpack_pick_disc, "TEST95002") == 0);
     app->request_texpack_folder_picker = false;

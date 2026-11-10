@@ -126,7 +126,7 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   turns **Texture pack** on for it; the row shows the folder's name and how many textures it lists. Packs use the
   layout PSP emulators read (a `textures.ini` and hash-named PNG files), and Nakagawa ships none. A pack whose folder
   or `textures.ini` cannot be read, or whose `[games]` section lists other games only, is refused with the reason,
-  before it is stored and again before each launch. An image the pack lists that is missing or does not decode is
+  before it is stored and again before each launch, where **Play without the pack** starts that run without it. An image the pack lists that is missing or does not decode is
   skipped on its own, and that texture is drawn as the game made it.
   The launch line carries `texpack=on` and the folder travels as `SR_TEX_REPLACE`. It changes the frames the game
   can read back ([section 11.3.4](ENHANCEMENT_CONTRACT.md#1134-texture-replacement-texpackon)); the rules are in

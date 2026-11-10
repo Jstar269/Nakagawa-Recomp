@@ -782,9 +782,10 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   skipped on its own when the game first draws its texture, which is then drawn as the game made it; the pack's other
   images are used. The player reads the pack the same way when it is chosen and again before each launch, and
   refuses it with its reason (`TEXTURE_PACK_REFUSED`), as it does a pack whose `[games]` section lists other games
-  only (`nk_texrepl_names_game`) and a folder that is not a full UTF-8 path under 512 bytes: a refused pack is never
-  stored, and a stored pack that no longer reads stops the launch until it is fixed, chosen again, removed or turned
-  off.
+  only (`nk_texrepl_names_game`; disc IDs compare in one form, upper case without `-` or `_`) or more than 64, and a
+  folder that is not a full UTF-8 path under 512 bytes. A refused pack is never stored. A stored pack that no longer
+  reads is never used, whole or in part: the card says why and offers **Play without the pack**, which starts that
+  run with the pack left out and keeps the stored choice.
 - **The pack.** The project ships none and never downloads one: it is a folder the user made or took from a
   community, kept locally. A `textures.ini` is optional. `[options]` takes `hash = quick | xxh32 | xxh64` (required
   when the file exists; a folder with no ini reads as `quick`), `ignoreAddress`, `reduceHash`,
