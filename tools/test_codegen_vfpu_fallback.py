@@ -292,6 +292,37 @@ int main(void) {{
         self.assertIn("s->r[4] + 0x00000000u",effect)
         self.assertNotIn("s->r[4] + 0x00000001u",effect)
 
+    def test_quad_write_back_flag_leaves_the_base_register_alone(self):
+        # An unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-quad-wb;
+        # its register entry, PSP-VFPU-QUADWB-001, is not in this tree yet): bit 1 of an
+        # aligned lv.q/sv.q, the write-back flag, did not change the base register in any
+        # form (offsets 0, +16, +32, -16; four in a row from one base did not drift), and
+        # the access used base + offset. The generated code therefore emits the same access
+        # as the plain word and never assigns the base register. Not hardware evidence until
+        # the register entry lands.
+        for op, plain_word in ((0x36, 0xD9400000), (0x3E, 0xF9400000)):
+            for offset in (0x0000, 0x0010, 0x0020, 0xFFF0):
+                for lle_cpu in (False, True):
+                    with self.subTest(op=hex(op), offset=hex(offset), lle_cpu=lle_cpu):
+                        plain = plain_word | offset
+                        base, _, _ = codegen.vfpu_effect(0x3000, plain, lle_cpu=lle_cpu)
+                        wb, _, _ = codegen.vfpu_effect(0x3000, plain | 2, lle_cpu=lle_cpu)
+                        # The unaligned fallback names its own word; everything else is equal.
+                        self.assertEqual(wb.replace(f"{plain | 2:08x}", "W"), base.replace(f"{plain:08x}", "W"))
+                        self.assertNotRegex(wb, r"s->r\[\d+\]\s*=[^=]")
+                        self.assertIn("s->r[10] + ", wb)
+
+    def test_mtvc_to_the_condition_code_register_keeps_six_bits(self):
+        # Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
+        # register entry is not in this tree yet): mtvc then mfvc on VFPU_CC read back the
+        # written value and 0x3f in every cell. Only control register 3 is masked here.
+        mtvc = lambda reg: (0x12 << 26) | (7 << 21) | (5 << 16) | (128 + reg)
+        effect, _, _ = codegen.vfpu_effect(0x3000, mtvc(3))
+        self.assertEqual(effect, "s->vfpuCtrl[3] = s->r[5] & 0x3fu;")
+        for reg in (0, 1, 2, 8):
+            other, _, _ = codegen.vfpu_effect(0x3000, mtvc(reg))
+            self.assertEqual(other, f"s->vfpuCtrl[{reg}] = s->r[5];")
+
     def test_vrot_overlap_recomputes_cosine_from_written_lane(self):
         # vt/op subfields select vrot; choose vd/vs in one matrix with scalar vs
         # present in the destination vector.
