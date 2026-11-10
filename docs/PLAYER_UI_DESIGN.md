@@ -557,9 +557,9 @@ PLAY MODE closes the GAME card (the play modes, docs/ENHANCEMENT_CONTRACT.md sec
 default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), and it opens Settings > Enhanced, a
 dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
 FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
-PITCHED SOUND; FINER PATCHES; SOFT SHADOWS, Ace only, which draws the shadows a game's package names with soft
-edges and changes the frame the game reads, docs/ENHANCEMENT_CONTRACT.md section 11.3.12; WIDER CULLING; SHARPER
-ENLARGING; a new library has 16x filtering, crisp text and the
+PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; SOFT SHADOWS, Ace only, which draws the shadows a
+game's package names with soft edges and changes the frame the game reads, docs/ENHANCEMENT_CONTRACT.md section
+11.3.12; a new library has 16x filtering, crisp text and the
 badge on and the rest off, and a graphics preset sets SHARPER ENLARGING and CRISP SYSTEM TEXT in Enhanced and Ace,
 below), each beside a sentence
 that says what it does and what it costs. A new part is a new row with no change to the page. While the mode is

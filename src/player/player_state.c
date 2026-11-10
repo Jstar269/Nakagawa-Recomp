@@ -1229,11 +1229,6 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"tess", "Finer patches",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
      4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
-    /* A guest-visible item (contract 11.3.12): off by default; it matters only for a title whose own
-       package declares its shadow textures. The softened shadows reach the frame the game reads. */
-    {"shadow", "Soft shadows",
-     "Ace only, in games whose package names their shadows. Changes what the frame shows.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_shadow_words, 0},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
@@ -1243,6 +1238,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
      2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
+    /* A guest-visible item (contract 11.3.12): off by default; it matters only for a title whose own
+       package declares its shadow textures. The softened shadows reach the frame the game reads. */
+    {"shadow", "Soft shadows",
+     "Ace only, in games whose package names their shadows. Changes what the frame shows.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_shadow_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2271,11 +2271,12 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    motion, Widescreen, texture filtering, sound, the readout, the badge, Soft shadows or Finer patches
    (which changes GE timing, section 11.3.7): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
    test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
-#define PRESET_PARTS(text, upscale)                                                        \
-    {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
-     [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \
-     [PLAYER_PART_SAS] = -1, [PLAYER_PART_TESS] = -1, [PLAYER_PART_SHADOW] = -1,            \
-     [PLAYER_PART_CULL] = -1, [PLAYER_PART_UPSCALE] = (upscale)}
+#define PRESET_PART_LIST(X, text, upscale)                                                \
+    X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
+    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(SHADOW, -1)
+#define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
+#define PRESET_PART_ONE(part, value) + 1
+#define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
     [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
                            PRESET_PARTS(1, 0)},
@@ -2289,12 +2290,15 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
                                 NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
 };
 #undef PRESET_PARTS
-/* PRESET_PARTS's last argument sets the last part: a new PLAYER_PART_* goes before Sharper
-   enlarging, at its place in the key order, so this fails to compile ("size of array is negative")
-   only when that order breaks. A new part PRESET_PARTS leaves out reads 0 (off), which
-   test_graphics_presets catches by requiring -1 for every part a preset does not set: give it -1
-   under each preset (the library's) or a value. */
-typedef char k_graphics_presets_upscale_is_last[PLAYER_PART_UPSCALE + 1 == PLAYER_PART_COUNT ? 1 : -1];
+/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until
+   PRESET_PART_LIST gives it a value under each preset (-1 leaves it the library's): the list's
+   length is checked against the enum. A part the list leaves out would read 0 (off), which
+   test_graphics_presets also catches by requiring -1 for every part it does not set. */
+typedef char k_graphics_presets_name_every_part[
+    (0 PRESET_PART_LIST(PRESET_PART_ONE, 0, 0)) == PLAYER_PART_COUNT ? 1 : -1];
+#undef PRESET_PART_ONE
+#undef PRESET_PART_SET
+#undef PRESET_PART_LIST
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -3011,13 +3015,19 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
            launcher exports for every session; the runtime's SR_ACE line has no such key. */
         if (p == PLAYER_PART_UPSCALE) continue;
         /* Soft shadows (contract 11.3.12) and wider culling are Ace items, and a missing one is off
-           (contract 11.2 item 2): the line carries the key only when it is on, shadow before cull. */
+           (contract 11.2 item 2): the line carries the key only when it is on, shadow before cull.
+           Cull is written after the loop: the Ace line ends with it whatever the enum order. */
         if (p == PLAYER_PART_SHADOW && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
-        if (p == PLAYER_PART_CULL && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
+        if (p == PLAYER_PART_CULL) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
+    }
+    if (play->part[PLAYER_PART_CULL] == 1 && play->mode == PLAYER_PLAY_ACE) {
+        n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_CULL].key,
+                     enhanced_part_word(PLAYER_PART_CULL, play->part[PLAYER_PART_CULL]));
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
     }
     return true;
 }
