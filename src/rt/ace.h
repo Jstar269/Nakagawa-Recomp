@@ -140,7 +140,11 @@ int ace_stick_host_counts(int deadzone_inner_x, int deadzone_inner_y);
  * m * (G - 1) / D up to it; both axes scale by that over m, rounded to nearest, signs kept, and
  * go back to bytes through the inverse of the title's centring (x >= 1: x + 128, else x + 127).
  * A sample at rest (m == 0), an axis at rest and a game_counts out of range are left as they
- * are; m == 127 maps to 127, so full throw is unchanged. Pure: no state, no I/O. */
+ * are; m == 127 maps to 127, so full throw is unchanged. With D < G no moved axis comes out at
+ * rest. With D >= G an axis can: up to D (a mouse) the target is 0 when m * (G - 1) < D (G 10, D 100,
+ * m 5), and past D the minor axis of a push can scale below half a count (G 10, D 30, (31, 1));
+ * such an axis becomes byte 127, which the title reads as 0 (rest, 128, reads +1), inside its dead
+ * zone either way. Pure: no state, no I/O. */
 void ace_stick_remap(uint8_t *lx, uint8_t *ly, int game_counts, int host_counts);
 /* The run's remap of one live host sample: does nothing unless Ace is on with stick=<counts>.
  * Counts the samples off rest it passed through the curve (the report's samples_remapped),

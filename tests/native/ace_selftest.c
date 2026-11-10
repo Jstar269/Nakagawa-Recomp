@@ -420,7 +420,7 @@ static void cell_stick_curve(void) {
         ace_stick_remap(&lx, &ly, 64, 30);
         CHECK(lx == 0u, "h=-127 is the game's -127 (byte %u)", lx);
     }
-    /* D clamps: below 0 or 127 and above reads as 0, above G - 1 as G - 1; G out of range does nothing. */
+    /* D clamps: below 0 or 127 and above reads as 0; G out of range does nothing. */
     CHECK(remap_x(1, 64, 0) == 64 && remap_x(1, 64, -5) == 64 && remap_x(1, 64, 127) == 64,
           "D=0, D<0 and D>=127 start the game's live range at the first count");
     CHECK(remap_x(63, 64, 63) == 63 && remap_x(64, 64, 63) == 64, "D=G-1: the first live count is G");
