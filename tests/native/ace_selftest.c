@@ -67,7 +67,7 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;cull=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate cull");
     }
-    /* load (contract 11.3.8): optional like cull; load=fast needs an Ace line, any other value
+    /* load (contract 11.3.10): optional like cull; load=fast needs an Ace line, any other value
        is refused, and a line without it formats as before. */
     {
         static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
@@ -81,8 +81,8 @@ static void cell_parse(void) {
         CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 10, ";load=fast") == 0 &&
               strstr(out, "tier=ace;") == out + 3, "an Ace line with load=fast formats with the key last (%s)", out);
         c.cull = 1;
-        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 18, ";cull=on;load=fast") == 0,
-              "cull then load (%s)", out);
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 18, ";load=fast;cull=on") == 0,
+              "load then cull, which stays last (%s)", out);
         c.cull = 0;
         c.load = 0;
         CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "load") == NULL, "off writes no load key (%s)", out);
@@ -299,7 +299,7 @@ static void cell_switch(void) {
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
 
-    /* load=fast (contract 11.3.8): the gate generated code calls at a declared wait. Off, and in an
+    /* load=fast (contract 11.3.10): the gate generated code calls at a declared wait. Off, and in an
        Enhanced or authentic run, it never skips; on, each call skips one wait, counted in the
        report, and a run that never reached a wait reports the part unavailable at exit. */
     CHECK(ace_init_spec("off", NULL) == 0 && nk_ace_load_fast() == 0, "an authentic run skips no wait");

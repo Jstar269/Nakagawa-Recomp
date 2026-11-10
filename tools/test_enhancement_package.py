@@ -4167,7 +4167,7 @@ _ACE_SLOT_WORD = 0x24040007   # addiu a0, zero, 7: a delay slot that does someth
 
 class TestAcePartsLoad(unittest.TestCase):
     """ace_parts.load and its vblank_wait_skip transform (ENHANCEMENT_CONTRACT.md sections 9.8 and
-    11.3.8). Every fixture is synthetic: tools/import_fixtures.build_text_stub_run_elf with two
+    11.3.10). Every fixture is synthetic: tools/import_fixtures.build_text_stub_run_elf with two
     import stubs (sceDisplayWaitVblankStart and a synthetic NID) and a plain callee.
     """
 

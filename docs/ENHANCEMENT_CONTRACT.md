@@ -333,7 +333,7 @@ that a player turns on or off apart from the 60 FPS game logic. The field is an 
                                   "transform": "vblank_wait_skip"}]}}
 ```
 
-- **Names.** The part names are a closed list: today only `load` (section 11.3.8). Any other name refuses the
+- **Names.** The part names are a closed list: today only `load` (section 11.3.10). Any other name refuses the
   package, as does an empty `ace_parts` or a part with no sites.
 - **Sites.** Each site has an `id`, a symbolic `function`, a 4-byte-aligned `insn_offset`, the `stock_digest` of one
   stock instruction word, an optional `word_count` that may only be 1, and a `transform` from the parts' own list
@@ -381,9 +381,9 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
-run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
-section 11.3.6) and `load` (`fast` or `off`, section 11.3.8) are the other keys a line may leave out: a missing `cull`
-or `load` is off, `cull=on` and `load=fast` need `tier=ace`, and the launcher writes `;cull=on` and `;load=fast` only
+run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `load` (`fast` or `off`,
+section 11.3.10) and `cull` (`on` or `off`, section 11.3.6) are the other keys a line may leave out: a missing `load`
+or `cull` is off, `load=fast` and `cull=on` need `tier=ace`, and the launcher writes `;load=fast` and `;cull=on` only
 for an Ace launch with that part on. Every other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -1425,7 +1425,16 @@ The feature of section 10.13 (#2110). Its presentation is described there; this 
 - **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run it stays off whatever the environment says.
   Turning it on by default, or putting it in a preset, needs the owner's decision first, because of the trade-off in
   section 10.13 (some small, dense or filtered text is drawn smooth, and some soft art can still rib).
-- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic. The private runs item 4 lists, before
+- **Measured (Hot Shots Tennis, UCUS98701, one declared wait, 60 FPS package, Vulkan GE, hidden window, Windows 11,
+  other builds running on the machine).** The title follows each file-binder open on its main thread with three
+  passes of a fade step and a plain display wait; the open has completed before them. On a scripted 12,000-VBLANK
+  route from boot through the menus, a match load and a rally, `load=fast` skipped 261 waits (87 opens). The
+  route's picture checkpoints were reached earlier and at the same picture distance as without it: the title screen
+  at VBLANK 1,290 instead of 1,346, the main menu at 2,359 instead of 2,427 and the match-type menu at 3,736 instead
+  of 3,804, about 1.1 s sooner. All 216 steps ran in both runs. The fade step still runs three times per open, so
+  each screen the route checks after a load shows the stock picture. The title's frame-pacing wait (its package's
+  `vblank_wait_2_to_1` site) is not a load site and still paces every logic update.
+- **Nothing worse (section 11.2, item 4):** the run above, which has not been reviewed. The private runs item 4 lists, before
   and after at render scale 4 on *Hot Shots Tennis* and *LittleBigPlanet*, and the library sweep, do not exist for
   this item, and it may not be on by default without them.
 
@@ -1482,7 +1491,16 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   addresses can fill it, after which new matrices are left unscaled (said once on stderr, counted in the
   report's `cull_untracked`) instead of being scaled without a record.
 - **Tier:** Ace (one title). **Default:** off.
-- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.
+- **Measured (Hot Shots Tennis, UCUS98701, one declared wait, 60 FPS package, Vulkan GE, hidden window, Windows 11,
+  other builds running on the machine).** The title follows each file-binder open on its main thread with three
+  passes of a fade step and a plain display wait; the open has completed before them. On a scripted 12,000-VBLANK
+  route from boot through the menus, a match load and a rally, `load=fast` skipped 261 waits (87 opens). The
+  route's picture checkpoints were reached earlier and at the same picture distance as without it: the title screen
+  at VBLANK 1,290 instead of 1,346, the main menu at 2,359 instead of 2,427 and the match-type menu at 3,736 instead
+  of 3,804, about 1.1 s sooner. All 216 steps ran in both runs. The fade step still runs three times per open, so
+  each screen the route checks after a load shows the stock picture. The title's frame-pacing wait (its package's
+  `vblank_wait_2_to_1` site) is not a load site and still paces every logic update.
+- **Nothing worse (section 11.2, item 4):** the run above, which has not been reviewed.
 
 #### 11.3.7. Finer Bezier and Spline Patches (`tess`)
 
@@ -1521,13 +1539,14 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
   exist.
 
-#### 11.3.8. Short Loads (`load=fast`, Not Yet Admitted)
+#### 11.3.10. Short Loads (`load=fast`, Not Yet Admitted)
 
 The `load` Ace part of section 9.8, for a title that paces a loading screen with display waits of its own.
 
 - **Status: guest-visible, not admitted under section 11.2.** It changes guest timing. It is an Ace part of the
   title's own timing package, built into that title's AOT output; its key, its library and per-title settings and
-  this entry are in place (section 11.2, items 2, 3 and 6), and the runs of item 4 do not exist.
+  this entry are in place (section 11.2, items 2, 3 and 6); the runs of item 4 exist for one title (below) and have
+  not been reviewed.
 - **Mechanism.** Each `vblank_wait_skip` site in `ace_parts.load` names one `jal` to the executable's
   `sceDisplayWaitVblankStart` import stub, by symbolic function and offset with the stock word's digest (section 9.8).
   The site's delay slot runs as stock. Generated code then asks `nk_ace_load_fast()` (`src/rt/ace.c`): while the run's
@@ -1568,4 +1587,13 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   not make a read faster. The section adds no code and changes no word when a package has no `ace_parts`, and with
   the key off the stock call runs.
 - **Tier:** Ace (one title). **Default:** off, and in no graphics preset.
-- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.
+- **Measured (Hot Shots Tennis, UCUS98701, one declared wait, 60 FPS package, Vulkan GE, hidden window, Windows 11,
+  other builds running on the machine).** The title follows each file-binder open on its main thread with three
+  passes of a fade step and a plain display wait; the open has completed before them. On a scripted 12,000-VBLANK
+  route from boot through the menus, a match load and a rally, `load=fast` skipped 261 waits (87 opens). The
+  route's picture checkpoints were reached earlier and at the same picture distance as without it: the title screen
+  at VBLANK 1,290 instead of 1,346, the main menu at 2,359 instead of 2,427 and the match-type menu at 3,736 instead
+  of 3,804, about 1.1 s sooner. All 216 steps ran in both runs. The fade step still runs three times per open, so
+  each screen the route checks after a load shows the stock picture. The title's frame-pacing wait (its package's
+  `vblank_wait_2_to_1` site) is not a load site and still paces every logic update.
+- **Nothing worse (section 11.2, item 4):** the run above, which has not been reviewed.

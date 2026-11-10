@@ -11,9 +11,9 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. cull and load are the other keys a line may leave out: a
- * missing cull or load reads as off (section 11.2 item 2), and a line that writes cull=off or
- * load=off means the same; cull=on and load=fast need tier=ace. Every other
+ * line without it is an Enhanced run. load and cull are the other keys a line may leave out: a
+ * missing load or cull reads as off (section 11.2 item 2), and a line that writes load=off or
+ * cull=off means the same; load=fast and cull=on need tier=ace. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -47,7 +47,7 @@
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
 #define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
 #define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
-#define ACE_HAS_LOAD 1          /* load=fast: a title's declared loading waits return at once (11.3.8) */
+#define ACE_HAS_LOAD 1          /* load=fast: a title's declared loading waits return at once (11.3.10) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
 typedef enum { ACE_SMOOTH_OFF = 0, ACE_SMOOTH_MATCH = 1, ACE_SMOOTH_X2 = 2 } AceSmooth;
@@ -72,7 +72,7 @@ typedef struct {
     int sas;         /* AceSas: SAS voices mix through a band-limited resampler (host-only) */
     int tess;        /* finer patches (#2053): 0 off, or the factor 2, 3 or 4 on the guest's division */
     int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
-    int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.8) */
+    int load;        /* load=fast: the waits a title's load part declares are skipped (guest timing, 11.3.10) */
 } AceConfig;
 
 typedef enum {
@@ -84,8 +84,8 @@ typedef enum {
     ACE_FEATURE_SMOOTH,
     ACE_FEATURE_SAS,
     ACE_FEATURE_TESS,
-    ACE_FEATURE_CULL,
     ACE_FEATURE_LOAD,
+    ACE_FEATURE_CULL,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -123,7 +123,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason);
 void ace_confirm(AceFeature feature);
 /* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
 void ace_set_cull_untracked(unsigned long n);
-/* A vblank_wait_skip site of the title's Ace load part (contract 9.8 and 11.3.8), from generated
+/* A vblank_wait_skip site of the title's Ace load part (contract 9.8 and 11.3.10), from generated
  * code (also declared in recomp.h): nonzero only while load=fast is in effect, and then the site's
  * call to sceDisplayWaitVblankStart is skipped. Each nonzero return is one skipped wait, counted
  * for the report (load_waits_skipped), and confirms the part. A run that asked for load=fast and

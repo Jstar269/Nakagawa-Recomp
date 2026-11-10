@@ -1229,16 +1229,16 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"tess", "Finer patches",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
      4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
+    /* A guest-visible item (contract 11.3.10) that changes guest timing: off by default and in no
+       preset; it matters only for a title whose own package declares a load part, and only in Ace. */
+    {"load", "Short loads",
+     "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
      "Ace only, with Widescreen, in games that have a culling build. The game's memory changes.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
-    /* A guest-visible item (contract 11.3.8) that changes guest timing: off by default and in no
-       preset; it matters only for a title whose own package declares a load part, and only in Ace. */
-    {"load", "Short loads",
-     "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0},
     /* Presentation only (contract section 2.2): the window and its recording, never the guest. */
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
@@ -2270,13 +2270,14 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
    motion, Widescreen, texture filtering, sound, the readout, the badge, Finer patches
    (which changes GE timing, section 11.3.7) or Short loads (which changes guest
-   timing, section 11.3.8): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
+   timing, section 11.3.10): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
    test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
-#define PRESET_PARTS(text, upscale)                                                        \
-    {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
-     [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \
-     [PLAYER_PART_SAS] = -1, [PLAYER_PART_TESS] = -1, [PLAYER_PART_CULL] = -1,              \
-     [PLAYER_PART_LOAD] = -1, [PLAYER_PART_UPSCALE] = (upscale)}
+#define PRESET_PART_LIST(X, text, upscale)                                                \
+    X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
+    X(SAS, -1) X(TESS, -1) X(LOAD, -1) X(CULL, -1) X(UPSCALE, (upscale))
+#define PRESET_PART_SET(part, value) [PLAYER_PART_##part] = value,
+#define PRESET_PART_ONE(part, value) + 1
+#define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_SET, text, upscale)}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
     [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
                            PRESET_PARTS(1, 0)},
@@ -2290,11 +2291,15 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
                                 NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
 };
 #undef PRESET_PARTS
-/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until PRESET_PARTS
-   gives it a value under each preset (-1 leaves it the library's); update PRESET_PARTS first,
-   then this count. The count catches a new part only; a part PRESET_PARTS leaves out reads 0
-   (off), which test_graphics_presets catches by requiring -1 for every part it does not set. */
-typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 11 ? 1 : -1];
+/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until
+   PRESET_PART_LIST gives it a value under each preset (-1 leaves it the library's): the list's
+   length is checked against the enum. A part the list leaves out would read 0 (off), which
+   test_graphics_presets also catches by requiring -1 for every part it does not set. */
+typedef char k_graphics_presets_name_every_part[
+    (0 PRESET_PART_LIST(PRESET_PART_ONE, 0, 0)) == PLAYER_PART_COUNT ? 1 : -1];
+#undef PRESET_PART_ONE
+#undef PRESET_PART_SET
+#undef PRESET_PART_LIST
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -3010,10 +3015,11 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
            launcher exports for every session; the runtime's SR_ACE line has no such key. */
         if (p == PLAYER_PART_UPSCALE) continue;
-        /* A missing cull is off (contract 11.2 item 2): the line carries the key only when it is on. */
-        if (p == PLAYER_PART_CULL && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
-        /* Likewise load (contract 11.3.8): only an Ace launch with the part on writes load=fast. */
+        /* A missing load is off (contract 11.3.10, 11.2 item 2): only an Ace launch with the part
+           on writes load=fast. */
         if (p == PLAYER_PART_LOAD && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
+        /* Likewise cull: the line carries the key only when it is on. */
+        if (p == PLAYER_PART_CULL && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }

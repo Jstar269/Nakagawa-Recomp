@@ -538,7 +538,7 @@
           "required": [
             "sites"
           ],
-          "description": "Short loads (SR_ACE load=fast, section 11.3.8): display waits that only pace a loading screen.",
+          "description": "Short loads (SR_ACE load=fast, section 11.3.10): display waits that only pace a loading screen.",
           "properties": {
             "sites": {
               "type": "array",
