@@ -425,9 +425,18 @@ def _aot_structure(body: str) -> str:
     return " ".join(normalized.split())
 
 
-def _classify_aot(word: int, *, lle_cpu: bool = False) -> Record:
+def _classify_aot(word: int, *, lle_cpu: bool = False, route: bool = False) -> Record:
     routed, controls = production_vfpu_opcodes()
     op = word >> 26
+    if route and op == 0x12 and ((word >> 21) & 31) == 8:
+        # A route lists the bc2f/bc2t/bc2fl/bc2tl words it emits: they read VFPU_CC and the
+        # branch emitter owns them, not the VFPU decoder. The systematic sweep keeps them out.
+        return {
+            "aot_disposition": "aot-direct",
+            "aot_source": "effect-direct-control",
+            "aot_reason": "",
+            "aot_emitted": codegen.cond_expr(word),
+        }
     if op in controls:
         body, _, _ = codegen.effect(0x1000, word)
         return {
@@ -462,12 +471,14 @@ def _classify_aot(word: int, *, lle_cpu: bool = False) -> Record:
     }
 
 
-def classify_words(words: Iterable[int], *, lle_cpu: bool = False) -> list[Record]:
+def classify_words(
+    words: Iterable[int], *, lle_cpu: bool = False, route: bool = False
+) -> list[Record]:
     ordered = tuple(sorted(set(words)))
     probe = _run_interpreter_probe(ordered)
     records: list[Record] = []
     for word in ordered:
-        record = _classify_aot(word, lle_cpu=lle_cpu)
+        record = _classify_aot(word, lle_cpu=lle_cpu, route=route)
         record["aot_structure"] = _aot_structure(str(record["aot_emitted"]))
         kind, return_line = probe[word]
         record.update(
@@ -1306,7 +1317,7 @@ def build_route_report(
     failures: list[str] = []
     records: list[Record] = []
     if counts:
-        records = classify_words(tuple(sorted(counts)), lle_cpu=lle_cpu)
+        records = classify_words(tuple(sorted(counts)), lle_cpu=lle_cpu, route=True)
         if any(record["aot_source"] is None for record in records):
             raise CensusError("route contains a word outside the production VFPU decoders")
         validate_agreement(records)
