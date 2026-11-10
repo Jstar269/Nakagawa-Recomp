@@ -2979,7 +2979,7 @@ class TrustedTreeAuditTests(unittest.TestCase):
 
         root = Path(publish_audit.__file__).resolve().parents[1]
         loaded: set[str] = set()
-        for name, result in self.results.items():
+        for result in self.results.values():
             (line,) = [line for line in result.stderr.splitlines() if line.startswith("LOADED ")]
             loaded |= set(json.loads(line[len("LOADED "):]))
         self.assertIn("tools/publish_audit.py", loaded)
