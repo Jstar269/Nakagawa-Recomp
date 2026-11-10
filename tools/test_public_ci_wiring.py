@@ -18,8 +18,8 @@ import sys
 import tempfile
 import unittest
 from types import ModuleType
-from typing import ClassVar, TypedDict, cast
-from collections.abc import Mapping
+from typing import ClassVar, NamedTuple, TypedDict, cast
+from collections.abc import Mapping, Sequence
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2955,9 +2955,14 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
         self.assertIn("NK_TEST_TIER:", python_tools)
         self.assertIn("github.event_name == 'schedule'", python_tools)
         self.assertIn("github.event_name == 'workflow_dispatch'", python_tools)
-        for job in ("classify", "hygiene", "windows_runtime", "ci_required"):
+        for job in ("classify", "hygiene", "windows_runtime"):
             with self.subTest(job=job):
                 self.assertNotIn("github.event_name", "\n".join(blocks[job]))
+        # ci_required names the event once, and not to select anything: it hands GitHub's own event name
+        # to the aggregate, which lets only a push count a suppressed gate as passed.
+        required = [line.strip() for line in blocks["ci_required"] if "github.event_name" in line
+                    and not line.lstrip().startswith("#")]
+        self.assertEqual(required, ["EVENT_NAME: ${{ github.event_name }}"])
         # native_tools names the event in exactly one place: the nightly repeat step (#1846).
         self.assertEqual("\n".join(blocks["native_tools"]).count("github.event_name"), 1)
 
@@ -3026,63 +3031,128 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
                 self.assertNotIn(forbidden, self.ci)
 
 
-class DraftLightCiWiringTests(unittest.TestCase):
-    """A Draft pull request runs only the quick CI jobs; every other event runs as before.
+class CiRun(NamedTuple):
+    """One evaluated CI run: which jobs ran, and what each aggregate would say of it."""
 
-    Each case runs the classifier on a real event payload, evaluates every ci.yml job's
-    ``if:`` against its outputs, then feeds the resulting job results to the
-    ``CI required`` aggregate, as the workflow does.
-    """
+    ran: set[str]
+    outputs: dict[str, str]
+    #: ``CI required`` ran and passed: the only thing that can make the Trusted CI verdict ``success``.
+    green: bool
+    #: What tools/ci_required.py says of this run's results, whether or not the workflow starts the job.
+    aggregate: bool
+    #: ``CI quick checks`` ran and passed.
+    quick_green: bool
+    #: The substantive jobs the changed paths route: those that run once ``allow_substantive`` is true.
+    routed: set[str]
 
-    #: Paths that route every substantive gate, so only the Draft rule can skip one.
+
+class CiRunHarness(unittest.TestCase):
+    """Runs the classifier on a real event payload, evaluates every ci.yml job's ``if:`` against its
+    outputs, then feeds the resulting job results to the two aggregates, as the workflow does."""
+
+    #: Paths that route every substantive gate, so only the tier can skip one.
     PATHS = ["src/rt/driver.c", "tools/codegen.py", "docs/CI.md"]
-    QUICK = frozenset({"hygiene", "public_export", "ci_required"})
+    #: The jobs of every run, of a light run only, and of every run that is not light.
+    QUICK = frozenset({"hygiene", "public_export"})
+    LIGHT_ONLY = frozenset({"quick_checks", "ci_quick"})
+    FULL_ONLY = frozenset({"ci_required"})
     HEAVY = frozenset({"python_tools", "native_tools", "linux_gcc16", "android_build", "windows_runtime",
                        "windows_installer"})
+    LIGHT = QUICK | LIGHT_ONLY
+    FULL = QUICK | FULL_ONLY
+    JOBS = QUICK | LIGHT_ONLY | FULL_ONLY | HEAVY
     RESULT_KEYS = {
         "hygiene": "HYGIENE_RESULT", "public_export": "PUBLIC_EXPORT_RESULT",
         "python_tools": "PYTHON_RESULT", "native_tools": "NATIVE_RESULT", "android_build": "ANDROID_RESULT",
         "windows_runtime": "WINDOWS_RESULT", "windows_installer": "INSTALLER_RESULT",
+        "quick_checks": "QUICK_CHECKS_RESULT",
     }
 
-    def _classify(self, event_name: str, event: Mapping[str, object], ref: str) -> dict[str, str]:
+    def _classify(self, event_name: str, event: Mapping[str, object], ref: str, switch: str = "",
+                  paths: Sequence[str] | None = None) -> dict[str, str]:
         with tempfile.TemporaryDirectory() as scratch:
             event_path = Path(scratch) / "event.json"
             event_path.write_text(json.dumps(event), encoding="utf-8")
             output = Path(scratch) / "github_output"
-            with mock.patch.dict(os.environ, {"GITHUB_REF": ref}), mock.patch("sys.stdout"):
+            environment = {"GITHUB_REF": ref, "NK_CI_TIERS": switch, ci_paths.LABEL_TOKEN_VARIABLE: ""}
+            with mock.patch.dict(os.environ, environment), mock.patch("sys.stdout"):
                 self.assertEqual(ci_paths.main([
                     "--event-name", event_name, "--event-path", str(event_path),
-                    "--github-output", str(output), "--files", *self.PATHS,
+                    "--github-output", str(output), "--files", *(self.PATHS if paths is None else paths),
                 ]), 0)
             return dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
 
-    def _run(self, event_name: str, event: Mapping[str, object], ref: str = "refs/pull/7/merge"
-             ) -> tuple[set[str], dict[str, str], bool]:
-        outputs = self._classify(event_name, event, ref)
-        blocks = _workflow_job_blocks("ci.yml")
-        self.assertEqual(set(blocks) - {"classify"}, self.QUICK | self.HEAVY, "a ci.yml job is unclassified here")
-        needs: dict[str, object] = {"classify": {"result": "success", "outputs": outputs},
+    def _jobs_that_run(self, blocks: Mapping[str, list[str]], event_name: str, event: Mapping[str, object],
+                       outputs: Mapping[str, str]) -> set[str]:
+        needs: dict[str, object] = {"classify": {"result": "success", "outputs": dict(outputs)},
                                     "public_export": {"result": "success"}}
         context = {"github": {"event_name": event_name, "event": event}, "needs": needs}
-        ran = {job for job in self.QUICK | self.HEAVY if _actions_eval(_job_if(blocks[job]), context)}
+        ran = {job for job in self.JOBS if _actions_eval(_job_if(blocks[job]), context)}
         # A job that reads another job's result (the installer reads windows_runtime's) is
         # settled once the results it needs are known.
         while True:
-            needs.update({job: {"result": "success" if job in ran else "skipped"}
-                          for job in self.QUICK | self.HEAVY})
-            settled = {job for job in self.QUICK | self.HEAVY if _actions_eval(_job_if(blocks[job]), context)}
+            needs.update({job: {"result": "success" if job in ran else "skipped"} for job in self.JOBS})
+            settled = {job for job in self.JOBS if _actions_eval(_job_if(blocks[job]), context)}
             if settled == ran:
-                break
+                return ran
             ran = settled
-        environment = {key: ("success" if job in ran else "skipped") for job, key in self.RESULT_KEYS.items()}
-        environment["CLASSIFY_RESULT"] = "success"
-        for line in blocks["ci_required"]:
-            match = re.match(r"^\s+([A-Z_]+): \$\{\{ needs\.classify\.outputs\.([a-z_]+) \}\}$", line)
-            if match:
-                environment[match.group(1)] = outputs[match.group(2)]
-        self.assertEqual(environment["DRAFT"], outputs["draft"])
-        return ran, outputs, ci_required.evaluate_environment(environment)
+
+    def _environment(self, block: list[str], ran: set[str], outputs: Mapping[str, str], event_name: str
+                     ) -> dict[str, str]:
+        """An aggregate job's ``env:``, resolved as the workflow resolves it."""
+        environment = {}
+        for line in block:
+            match = re.match(r"^ {6}([A-Z_]+): \$\{\{ (.+?) \}\}$", line)
+            if not match:
+                continue
+            name, expression = match.groups()
+            output = re.fullmatch(r"needs\.classify\.outputs\.([a-z_]+)", expression)
+            result = re.fullmatch(r"needs\.([a-z_0-9]+)\.result", expression)
+            if output:
+                environment[name] = outputs[output.group(1)]
+            elif result and result.group(1) == "classify":
+                environment[name] = "success"
+            elif result:
+                self.assertIn(result.group(1), self.JOBS)
+                environment[name] = "success" if result.group(1) in ran else "skipped"
+            elif expression == "github.event_name":
+                environment[name] = event_name
+            else:
+                self.fail(f"unreadable env line in an aggregate job: {line.strip()}")
+        return environment
+
+    #: Evaluated runs, by their inputs: several tests walk the same cases, and each costs a classifier run.
+    _EVALUATED: ClassVar[dict[tuple[object, ...], CiRun]] = {}
+
+    def _evaluate(self, event_name: str, event: Mapping[str, object], ref: str = "refs/pull/7/merge",
+                  switch: str = "", paths: Sequence[str] | None = None) -> CiRun:
+        key = (event_name, json.dumps(event, sort_keys=True), ref, switch, tuple(self.PATHS if paths is None else paths))
+        if key not in self._EVALUATED:
+            self._EVALUATED[key] = self._evaluate_uncached(event_name, event, ref, switch, paths)
+        return self._EVALUATED[key]
+
+    def _evaluate_uncached(self, event_name: str, event: Mapping[str, object], ref: str, switch: str,
+                           paths: Sequence[str] | None) -> CiRun:
+        outputs = self._classify(event_name, event, ref, switch, paths)
+        blocks = _workflow_job_blocks("ci.yml")
+        self.assertEqual(set(blocks) - {"classify"}, self.JOBS, "a ci.yml job is unclassified here")
+        ran = self._jobs_that_run(blocks, event_name, event, outputs)
+        routed = self._jobs_that_run(blocks, event_name, event, dict(outputs, allow_substantive="true")) & self.HEAVY
+        required = self._environment(blocks["ci_required"], ran, outputs, event_name)
+        for job, key in self.RESULT_KEYS.items():
+            if job not in self.LIGHT_ONLY:
+                self.assertIn(key, required, f"ci_required does not read {job}'s result")
+        self.assertEqual((required["DRAFT"], required["TIER"], required["EVENT_NAME"]),
+                         (outputs["draft"], outputs["tier"], event_name))
+        aggregate = ci_required.evaluate_environment(required)
+        quick = self._environment(blocks["ci_quick"], ran, outputs, event_name)
+        return CiRun(ran, outputs, "ci_required" in ran and aggregate, aggregate,
+                     "ci_quick" in ran and ci_required.quick_checks_pass(quick), routed)
+
+    def _run(self, event_name: str, event: Mapping[str, object], ref: str = "refs/pull/7/merge", switch: str = ""
+             ) -> tuple[set[str], dict[str, str], bool]:
+        run = self._evaluate(event_name, event, ref, switch)
+        return run.ran, run.outputs, run.green
 
     @staticmethod
     def _pull_request(action: str, draft: bool) -> dict[str, object]:
@@ -3093,17 +3163,22 @@ class DraftLightCiWiringTests(unittest.TestCase):
         expression = _matched(re.search(r"BUILD_PROFILE_ZERO: >-\s*\$\{\{(.*?)\}\}", block, re.S)).group(1)
         return _actions_eval(expression, {"needs": {"classify": {"outputs": outputs}}})
 
+
+class DraftLightCiWiringTests(CiRunHarness):
+    """A Draft pull request runs only the quick CI jobs; with the tier switch unset every other event
+    runs as before."""
+
     def test_a_draft_runs_only_the_quick_jobs_and_is_never_green(self) -> None:
         for action in ("opened", "synchronize", "reopened", "converted_to_draft"):
             with self.subTest(action=action):
                 ran, outputs, green = self._run("pull_request", self._pull_request(action, True))
-                self.assertEqual(ran, set(self.QUICK))
+                self.assertEqual(ran, set(self.LIGHT))
                 self.assertFalse(self._profile_zero(outputs))
                 self.assertFalse(green, "a Draft's light run must never be green")
 
     def test_ready_for_review_runs_the_full_matrix(self) -> None:
         ran, outputs, green = self._run("pull_request", self._pull_request("ready_for_review", False))
-        self.assertEqual(ran, set(self.QUICK | self.HEAVY))
+        self.assertEqual(ran, set(self.FULL | self.HEAVY))
         self.assertTrue(self._profile_zero(outputs))
         self.assertTrue(green)
 
@@ -3111,23 +3186,26 @@ class DraftLightCiWiringTests(unittest.TestCase):
         for action in ("opened", "synchronize", "reopened"):
             with self.subTest(action=action):
                 ran, _outputs, green = self._run("pull_request", self._pull_request(action, False))
-                self.assertEqual(ran, set(self.QUICK | self.HEAVY))
+                self.assertEqual(ran, set(self.FULL | self.HEAVY))
                 self.assertTrue(green)
 
     def test_merge_group_schedule_and_dispatch_run_the_full_matrix(self) -> None:
         group = {"merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40}}
         for event_name, event in (("merge_group", group), ("schedule", {}), ("workflow_dispatch", {})):
-            with self.subTest(event=event_name):
-                ran, outputs, green = self._run(event_name, event, ref="refs/heads/main")
-                self.assertEqual(ran, set(self.QUICK | self.HEAVY))
-                self.assertEqual(outputs["run_main_smoke"], "true")
-                self.assertTrue(green)
+            for switch in ("", "on"):
+                with self.subTest(event=event_name, switch=switch):
+                    ran, outputs, green = self._run(event_name, event, ref="refs/heads/main", switch=switch)
+                    self.assertEqual(ran, set(self.FULL | self.HEAVY))
+                    self.assertEqual(outputs["run_main_smoke"], "true")
+                    self.assertTrue(green)
 
     def test_a_push_to_main_keeps_its_smoke_only_policy(self) -> None:
-        ran, outputs, green = self._run("push", {"before": "a" * 40}, ref="refs/heads/main")
-        self.assertEqual(ran, set(self.QUICK))
-        self.assertEqual(outputs["run_main_smoke"], "true")
-        self.assertTrue(green, "a main push skips the substantive jobs by policy and stays green")
+        for switch in ("", "on"):
+            with self.subTest(switch=switch):
+                ran, outputs, green = self._run("push", {"before": "a" * 40}, ref="refs/heads/main", switch=switch)
+                self.assertEqual(ran, set(self.FULL))
+                self.assertEqual(outputs["run_main_smoke"], "true")
+                self.assertTrue(green, "a main push skips the substantive jobs by policy and stays green")
 
     def test_heavy_jobs_are_skipped_through_the_classifier_alone(self) -> None:
         """One switch: every heavy job gates on allow_substantive, and none reads the draft flag itself."""
@@ -3136,6 +3214,294 @@ class DraftLightCiWiringTests(unittest.TestCase):
             with self.subTest(job=job):
                 self.assertIn("needs.classify.outputs.allow_substantive == 'true'", _job_if(blocks[job]))
                 self.assertNotIn("draft", _job_if(blocks[job]))
+                self.assertNotIn("tier", _job_if(blocks[job]))
+
+
+def _tier_pull_request(*, draft: bool = False, head_ref: str = "fix/thing-20261109", fork: bool = False,
+                       labels: tuple[str, ...] = (), action: str = "synchronize") -> dict[str, object]:
+    """A pull-request payload with the fields the tier rule reads, shaped as GitHub sends them."""
+    base_repo = {"full_name": "Jstar269/Nakagawa-Recomp", "fork": False}
+    head_repo = {"full_name": "someone/Nakagawa-Recomp", "fork": True} if fork else dict(base_repo)
+    return {
+        "action": action,
+        "pull_request": {
+            "number": 7, "draft": draft,
+            "head": {"ref": head_ref, "sha": "b" * 40, "repo": head_repo},
+            "base": {"ref": "main", "sha": "a" * 40, "repo": base_repo},
+            "labels": [{"name": name} for name in labels],
+        },
+    }
+
+
+class TwoTierInvariantTests(CiRunHarness):
+    """The two-tier invariant (docs/CI.md, "Quick and full checks"): a run that suppressed a substantive
+    gate never turns ``CI required`` green.
+
+    The Trusted CI verdict reports ``success`` only when ``CI required`` succeeded at the exact head
+    (tools/test_ci_trust_verdict.py ``LightTierVerdictTests``), so this is what keeps a head that only had
+    the quick checks from ever being mergeable. Three layers hold it, and each has its own test here or
+    beside its code:
+
+    1. the workflow does not start ``CI required`` on a light run
+       (``test_ci_required_does_not_run_on_a_light_run``);
+    2. tools/ci_required.py fails such a run if it is started anyway
+       (``test_the_aggregate_alone_refuses_a_run_that_suppressed_a_gate``, and ``TierTests`` beside it);
+    3. the classifier makes ``tier`` and ``allow_substantive`` from one value
+       (tools/test_ci_paths.py ``TierRoutingTests``).
+
+    ``test_ci_required_is_green_only_when_every_routed_gate_ran`` is the invariant itself, over the
+    harness's model of a run: each job's real ``if:`` and job-level ``env:``, the real classifier, and
+    each aggregate as its script's decision. It holds while any one layer does. The model's last step,
+    that a job's result is its script's exit status, is pinned apart:
+    ``test_each_aggregate_job_result_is_the_script_exit_status`` here and ``ProcessExitTests`` in
+    tools/test_ci_required.py.
+    """
+
+    LABEL = ci_paths.FULL_TIER_LABEL
+    PATH_SETS: ClassVar[dict[str, list[str]]] = {
+        "everything": ["src/rt/driver.c", "tools/codegen.py", "docs/CI.md"],
+        "python only": ["tools/codegen.py"],
+        "native only": ["src/rt/driver.c"],
+        "docs only": ["docs/CI.md"],
+        "a CI definition": [".github/workflows/ci.yml"],
+    }
+
+    def _pull_request_cases(self) -> list[tuple[str, dict[str, object], str]]:
+        cases = []
+        for switch in ("", "on", "off"):
+            for draft in (False, True):
+                for fork in (False, True):
+                    for head_ref in ("fix/thing-20261109", "batch/desk-20261109T2000Z", "carry/pr-9"):
+                        for labels in ((), (self.LABEL,)):
+                            name = f"switch={switch!r} draft={draft} fork={fork} head={head_ref} labels={labels}"
+                            cases.append((name, _tier_pull_request(draft=draft, fork=fork, head_ref=head_ref,
+                                                                   labels=labels), switch))
+        # The payloads the older tests use: no head, no base repository, no labels.
+        for switch in ("", "on"):
+            for draft in (False, True):
+                cases.append((f"bare payload switch={switch!r} draft={draft}",
+                              self._pull_request("synchronize", draft), switch))
+        return cases
+
+    def test_ci_required_is_green_only_when_every_routed_gate_ran(self) -> None:
+        """The invariant. For every pull-request run, and every other event but a push: if ``CI required``
+        is green, every substantive job the changed paths route ran."""
+        light = full = 0
+        for name, event, switch in self._pull_request_cases():
+            for paths_name, paths in self.PATH_SETS.items():
+                with self.subTest(case=name, paths=paths_name):
+                    run = self._evaluate("pull_request", event, switch=switch, paths=paths)
+                    suppressed = run.routed - run.ran
+                    if run.green:
+                        self.assertEqual(suppressed, set(), "CI required is green over a gate that did not run")
+                        self.assertEqual(run.outputs["tier"], "full")
+                        full += 1
+                    if suppressed or run.outputs["tier"] == "light":
+                        self.assertFalse(run.green, "a run that suppressed a gate reported CI required green")
+                        light += 1
+                    # A light run suppresses whatever the paths route, and a full one nothing.
+                    self.assertEqual(suppressed, run.routed if run.outputs["tier"] == "light" else set())
+        self.assertGreater(light, 50, "the cases must include light runs")
+        self.assertGreater(full, 50, "the cases must include full runs")
+        others: tuple[tuple[str, dict[str, object]], ...] = (
+            ("merge_group", {"merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40}}),
+            ("schedule", {}), ("workflow_dispatch", {}),
+        )
+        for event_name, payload in others:
+            for switch in ("", "on"):
+                with self.subTest(event=event_name, switch=switch):
+                    run = self._evaluate(event_name, payload, ref="refs/heads/main", switch=switch)
+                    self.assertTrue(run.green)
+                    self.assertEqual(run.routed - run.ran, set())
+
+    def test_each_aggregate_job_result_is_the_script_exit_status(self) -> None:
+        """The harness models each aggregate as its script over the job-level env; pin that model.
+
+        A step that swallows the exit status (``|| true``, ``continue-on-error``), sets its own
+        env over the job's, or runs something else would make the job green whatever the script
+        decides, and nothing else here would notice. tools/test_ci_required.py
+        ``ProcessExitTests`` checks that the script's exit status carries its decision.
+        """
+        blocks = _workflow_job_blocks("ci.yml")
+        for job, command in (("ci_required", "python tools/ci_required.py"),
+                             ("ci_quick", "python tools/ci_required.py --quick")):
+            with self.subTest(job=job):
+                block = [line for line in blocks[job] if line.strip() and not line.lstrip().startswith("#")]
+                steps = block[block.index("    steps:") + 1:]
+                header = block[:block.index("    steps:")]
+                self.assertEqual([line for line in steps if line.startswith("      - ")],
+                                 ["      - name: Check out repository", "      - name: Check the quick results"
+                                  if job == "ci_quick" else "      - name: Check applicable gate results"])
+                self.assertEqual(steps[-1], f"        run: {command}")
+                self.assertEqual([line for line in steps if re.match(r"^ +run:", line)], [steps[-1]])
+                self.assertEqual(
+                    [line for line in steps if re.match(r"^ {8}(env|shell|if|continue-on-error|working-directory|"
+                                                        r"timeout-minutes):", line)], [])
+                self.assertEqual(
+                    [line for line in header if re.match(r"^ {4}(continue-on-error|defaults|strategy):", line)], [])
+        self.assertNotRegex(_workflow_text("ci.yml"), re.compile(r"^defaults:", re.M))
+
+    def test_ci_required_does_not_run_on_a_light_run(self) -> None:
+        """Layer 1: on a light run the job is skipped, and the quick aggregate reports instead."""
+        seen = set()
+        for name, event, switch in self._pull_request_cases():
+            with self.subTest(case=name):
+                run = self._evaluate("pull_request", event, switch=switch)
+                tier = run.outputs["tier"]
+                seen.add(tier)
+                self.assertEqual("ci_required" in run.ran, tier == "full")
+                self.assertEqual(self.LIGHT_ONLY <= run.ran, tier == "light")
+                self.assertEqual(bool(self.LIGHT_ONLY & run.ran), tier == "light")
+                self.assertEqual(run.ran, set(self.LIGHT) if tier == "light" else set(self.FULL | self.HEAVY))
+                self.assertEqual(run.quick_green, tier == "light")
+                self.assertEqual(run.green, tier == "full")
+                self.assertFalse(run.green and run.quick_green)
+        self.assertEqual(seen, {"light", "full"})
+        blocks = _workflow_job_blocks("ci.yml")
+        self.assertEqual(_job_if(blocks["ci_required"]), "always() && needs.classify.outputs.tier != 'light'")
+        self.assertEqual(_job_if(blocks["ci_quick"]), "always() && needs.classify.outputs.tier == 'light'")
+        self.assertEqual(
+            _job_if(blocks["quick_checks"]),
+            "always() && needs.classify.result == 'success' && needs.classify.outputs.tier == 'light'",
+        )
+
+    def test_a_failed_classifier_still_runs_and_fails_ci_required(self) -> None:
+        # No outputs at all: the tier is empty, which is not 'light', so the job runs; it then fails on the
+        # classifier's result, and the quick aggregate does not run to say otherwise.
+        blocks = _workflow_job_blocks("ci.yml")
+        needs = {"classify": {"result": "failure", "outputs": {}}}
+        context = {"github": {"event_name": "pull_request"}, "needs": needs}
+        self.assertTrue(_actions_eval(_job_if(blocks["ci_required"]), context))
+        self.assertFalse(_actions_eval(_job_if(blocks["ci_quick"]), context))
+        self.assertFalse(_actions_eval(_job_if(blocks["quick_checks"]), context))
+        environment = self._environment(blocks["ci_required"], set(), {
+            "run_markdown": "", "run_main_smoke": "", "run_python": "", "run_native": "", "run_windows": "",
+            "run_installer": "", "allow_substantive": "", "draft": "", "tier": "",
+        }, "pull_request")
+        self.assertFalse(ci_required.evaluate_environment(dict(environment, CLASSIFY_RESULT="failure")))
+        self.assertFalse(ci_required.evaluate_environment(environment))
+
+    def test_the_aggregate_alone_refuses_a_run_that_suppressed_a_gate(self) -> None:
+        """Layer 2: whatever the workflow's conditions, tools/ci_required.py fails a pull-request run in
+        which a routed gate did not run, and any light run."""
+        refused = 0
+        for name, event, switch in self._pull_request_cases():
+            for paths_name, paths in self.PATH_SETS.items():
+                with self.subTest(case=name, paths=paths_name):
+                    run = self._evaluate("pull_request", event, switch=switch, paths=paths)
+                    if run.outputs["tier"] == "light" or run.routed - run.ran:
+                        self.assertFalse(run.aggregate)
+                        refused += 1
+                    else:
+                        self.assertTrue(run.aggregate)
+        self.assertGreater(refused, 50)
+        required = "\n".join(_workflow_job_blocks("ci.yml")["ci_required"])
+        self.assertIn("      TIER: ${{ needs.classify.outputs.tier }}", required)
+        self.assertIn("      EVENT_NAME: ${{ github.event_name }}", required)
+
+    def test_a_light_run_of_a_change_that_routes_nothing_is_light_all_the_same(self) -> None:
+        # Documentation only: no substantive job is routed, and still the run is light, CI required does
+        # not run, and the aggregate would refuse it. "Light" is a property of the run, not of its paths.
+        run = self._evaluate("pull_request", _tier_pull_request(), switch="on", paths=self.PATH_SETS["docs only"])
+        self.assertEqual((run.outputs["tier"], run.outputs["docs_only"], run.routed), ("light", "true", set()))
+        self.assertEqual(run.ran, set(self.LIGHT))
+        self.assertFalse(run.green)
+        self.assertFalse(run.aggregate)
+        self.assertTrue(run.quick_green)
+
+    def test_the_label_and_the_outside_code_rules_give_the_full_run(self) -> None:
+        for name, event in (
+            ("label", _tier_pull_request(labels=(self.LABEL,))),
+            ("batch", _tier_pull_request(head_ref="batch/desk-20261109T2000Z")),
+            ("fork", _tier_pull_request(fork=True)),
+            ("carry", _tier_pull_request(head_ref="carry/pr-9")),
+        ):
+            with self.subTest(case=name):
+                run = self._evaluate("pull_request", event, switch="on")
+                self.assertEqual(run.ran, set(self.FULL | self.HEAVY))
+                self.assertTrue(run.green)
+                self.assertTrue(self._profile_zero(run.outputs))
+        light = self._evaluate("pull_request", _tier_pull_request(), switch="on")
+        self.assertEqual(light.ran, set(self.LIGHT))
+        self.assertFalse(self._profile_zero(light.outputs))
+
+    def test_the_tiers_are_inert_until_the_switch_is_on(self) -> None:
+        for switch in ("", "off", "landing"):
+            with self.subTest(switch=switch):
+                run = self._evaluate("pull_request", _tier_pull_request(), switch=switch)
+                self.assertEqual(run.ran, set(self.FULL | self.HEAVY))
+                self.assertTrue(run.green)
+
+    def test_classify_reads_the_switch_and_the_label_with_a_read_only_token(self) -> None:
+        classify = _workflow_job_blocks("ci.yml")["classify"]
+        text = "\n".join(classify)
+        self.assertIn("          NK_CI_TIERS: ${{ vars.NK_CI_TIERS }}", text)
+        self.assertIn(f"          {ci_paths.LABEL_TOKEN_VARIABLE}: ${{{{ github.token }}}}", text)
+        self.assertIn("      tier: ${{ steps.paths.outputs.tier }}", text)
+        start = classify.index("    permissions:")
+        granted = []
+        for line in classify[start + 1:]:
+            if not line.startswith("      "):
+                break
+            granted.append(line.strip())
+        self.assertEqual(granted, ["contents: read", "pull-requests: read"])
+        # The token and the variable go to the classify step alone.
+        ci = _workflow_text("ci.yml")
+        self.assertEqual(ci.count("vars.NK_CI_TIERS"), 1)
+        self.assertEqual(ci.count(ci_paths.LABEL_TOKEN_VARIABLE), 1)
+
+    def test_no_label_event_starts_ci(self) -> None:
+        # GitHub cannot filter pull_request events by label name: `labeled` would start a run for every
+        # label on every pull request and cancel the one in progress. The classifier reads the label live.
+        types = _matched(re.search(r"^  pull_request:\n    types: \[([^\]]*)\]$", _workflow_text("ci.yml"), re.M))
+        self.assertEqual({item.strip() for item in types.group(1).split(",")},
+                         {"opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"})
+
+    def test_the_aggregates_carry_the_names_the_verifier_reads(self) -> None:
+        blocks = _workflow_job_blocks("ci.yml")
+        verifier = (ROOT / "tools" / "ci_trust_verdict.py").read_text(encoding="utf-8")
+        for job, constant in (("ci_required", "FULL_AGGREGATE"), ("ci_quick", "QUICK_AGGREGATE")):
+            with self.subTest(job=job):
+                name = _matched(re.search(r"^    name: (.+)$", "\n".join(blocks[job]), re.M)).group(1)
+                self.assertIn(f'{constant} = "{name}"', verifier)
+        self.assertEqual(_matched(re.search(r"^    name: (.+)$", "\n".join(blocks["ci_quick"]), re.M)).group(1),
+                         "CI quick checks")
+        self.assertIn("run: python tools/ci_required.py --quick", "\n".join(blocks["ci_quick"]))
+        self.assertIn("    needs: [classify, hygiene, public_export, quick_checks]", blocks["ci_quick"])
+
+    def test_quick_checks_runs_what_a_light_run_would_otherwise_hide(self) -> None:
+        block = _workflow_job_blocks("ci.yml")["quick_checks"]
+        text = "\n".join(block)
+        for command in (
+            "python -m pip install --disable-pip-version-check --require-hashes -r tools/requirements-lock.txt",
+            "python -m unittest tools.test_lint_docs",
+            "python tools/format_portability_check.py",
+            'python tools/regen_all.py --check --base "${BASE_SHA}"',
+            "python tools/mypy_baseline.py --scope issue-1391",
+            "python tools/mypy_baseline.py",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(any(line.strip().removeprefix("run: ") == command for line in block), command)
+        self.assertIn("    runs-on: ubuntu-24.04", block)
+        self.assertIn("libc6-dev-i386", text)
+        self.assertNotIn("continue-on-error", text)
+        # The provenance step of regen_all needs the history and the event's exact base.
+        self.assertIn("          fetch-depth: 0", block)
+        self.assertIn("          BASE_SHA: ${{ github.event.pull_request.base.sha }}", block)
+
+    def test_the_two_mypy_steps_are_the_same(self) -> None:
+        """A pin or a command changed in one must change in the other: both run the tools mypy baseline."""
+        blocks = _workflow_job_blocks("ci.yml")
+        bodies = []
+        for job in ("python_tools", "quick_checks"):
+            step = _ci_step(blocks[job], "Enforce tools mypy baseline")
+            self.assertIsNotNone(step, job)
+            assert step is not None
+            start = next(index for index, line in enumerate(step) if line.strip() == "run: |")
+            bodies.append([line.strip() for line in step[start:] if line.strip()])
+        self.assertEqual(bodies[0], bodies[1])
+        self.assertIn("python tools/mypy_baseline.py --scope issue-1391", bodies[0])
+        self.assertIn("python tools/mypy_baseline.py", bodies[0])
 
 
 class MergeQueueDependencyReviewWiringTests(unittest.TestCase):
