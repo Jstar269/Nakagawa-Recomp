@@ -719,7 +719,7 @@ One console is one data point; see §11. Nothing here closes issue #70
   | `PSP-HLE-POWER-002` | `pll-clock-float-v0`, `cpu-clock-float-v0`, `bus-clock-float-v0`, `hle-power-float-v0-done` (APIs `scePowerGetPllClockFrequencyFloat`, `scePowerGetCpuClockFrequencyFloat`, `scePowerGetBusClockFrequencyFloat`), one call each through a raw `jal` wrapper that presets `$f0` to 0xA5A5A5A5. `$f0` holds 0x435E0000 (222.0) after the PLL and CPU getters and 0x42DE0000 (111.0) after the bus getter. `$v0` holds 0x088043A0, 0x088043E0 and 0x08804420: neither 0 nor the clock, and a different user-memory-range word after each call | Whether a getter writes `$v0` or leaves the caller's value, because the wrapper does not preset `$v0`. The runtime does not model `$v0` for these getters | MEASURED: 3 records and the done record, PASS |
 
 - **Captured only, not acceptance-eligible (2026-10-15, `b5d6fc5b`)**: these establish nothing about PSP behaviour.
-  - `PSP-HLE-KERNEL-STATUS-002`, case `hle-kernel-pool-bounds`: the stream was complete, with 7 records PASS and 2 SKIP (`fpl-delete-size-0x00` and `fpl-delete-size-0x7fffffff`). Both FPL creates were refused, so the probe had no pool to delete and recorded those delete cells SKIP, and a SKIP record makes the envelope ineligible. The probe has since been revised: such a delete cell is now PASS with out0 0 and issues no delete, and the revised form has not run.
+  - `PSP-HLE-KERNEL-STATUS-002`, case `hle-kernel-pool-bounds`: the stream was complete, with 7 records PASS and 2 SKIP (`fpl-delete-size-0x00` and `fpl-delete-size-0x7fffffff`). Both FPL creates were refused, so the probe had no pool to delete and recorded those delete cells SKIP, and a SKIP record makes the envelope ineligible. The probe has since been revised: such a delete cell is now PASS with out0 0 and issues no delete. The revised form was measured on 2026-11-10 from `979c6a1dd` (see the 2026-11-10 entry below).
   - `PSP-HLE-NULL-OUT-001`, case `hle-null-out-pointers`: incomplete, not measured. `null-vtimer-create` was recorded PASS. The stream then stopped after the step marker `null-sys-status`, which the probe writes just before its first NULL call (`sceKernelReferSystemStatus(NULL)`), 0.9 s after launch. No record for that cell or any later one arrived, no completion arrived within the 240 s case timeout, the module was not proven unloaded, and the console needed a power cycle. The capture itself does not establish whether that call faulted, hung or returned. Maintainer retirement: the kernel pointer check rejects kernel-space addresses but not address 0, so `ReferSystemStatus(NULL)` writes through NULL and faults; the VTimer getters also write through their out pointers. No game can rely on these results. This case is retired and must never be scheduled.
 
 - **PSP-3000 single-case runs of public commits `1a3d3d22` and `eded11ac` (2026-11-02)**: firmware 6.6.1, ARK-5.1.0, PSPLink 3.2.1, operator-declared model PSP-3000, game context (standalone PSPLink after a PSPLink soft reset), boots 106 and 107. `eded11ac` added the shortfall cell, and the three cells both builds share agreed. Each launch followed the `transport-write` preflight, and the `eded11ac` envelope is acceptance-eligible with 0 blockers. The raw envelopes and host0 logs stay private.
@@ -789,13 +789,12 @@ One console is one data point; see §11. Nothing here closes issue #70
   watchdog armed around each launch. Each case was one `ldstart` of the PRX built from `da97b2c0` (the
   pre-merge head of the change that added `probe_hle_issues.c`), after a PSPLink soft reset, through a
   private PSPLink driver rather than `run_psplink.py`. There is no runner envelope and no
-  `transport-write` preflight, so neither stream is acceptance-eligible and both manifest rows stay
-  `NOT_RUN`. Both host0 logs pass the runner's own completeness contract for their case
+  `transport-write` preflight, so neither stream is acceptance-eligible and neither is cited. Both host0 logs pass the runner's own completeness contract for their case
   (`strict-golden-sequence`). The same cells ran earlier that night from private pre-PR revisions
   of the same code, with the same results except where noted. Raw logs stay in the private campaign
   directory. A `run_psplink.py` campaign launch of each PRX would promote the cited cells; the
   2026-10-29 launch of `hle-intr-cells` from `77a1a5e3` did so for `PSP-HLE-INTR-001` (see the #325 entry
-  above).
+  above), and the 2026-11-10 launch of `hle-issues-batch` from `979c6a1dd` did so for `PSP-HLE-ISSUES-001`.
 
   | Evidence id | Cells cited | Not cited | Outcome (2026-10-24, `da97b2c0`, not acceptance-eligible) |
   | --- | --- | --- | --- |
@@ -1353,6 +1352,56 @@ One console is one data point; see §11. Nothing here closes issue #70
   - *Unmeasured:* T32 textures, and whether the per-level offset is added before or after the index mask
     (every index the cells mask is below the offset). The software sampler (`clut_index` in `src/rt/ge.c`)
     reads t at every level of a T32 texture, as for T16, and adds the offset after the mask.
+
+- **PSP-3000 single-case runs of `hle-issues-batch`, `hle-kernel-pool-bounds` and `registry-font` (2026-11-10)**:
+  one PSP-3000, all three PRXs built from `979c6a1dd`, XMB context, one launch per boot (boots 172, 173 and 174),
+  each after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Firmware identity: console
+  PSP-3000 (`kuKernelGetModel` returned 3 in the boot-172 run); system software 6.61 (`flash0:/vsh/etc/version.txt`:
+  `release:6.61:`, `system:58401@release_661,0x06060110:`); the probe's own user-mode `sceKernelDevkitVersion()`
+  returned `0x06060110`; PSPLink `pspver` printed `0x06060010` ("6.6.0") in the XMB context on these boots and prints
+  `0x06060110` in the game context; custom firmware ARK-5 with cIPL, version 5.1.0 (the version was not read by a
+  tool; the modules SystemControl, ARKCompatLayer and VshCtrl were loaded). The `hle-issues-batch` and
+  `hle-kernel-pool-bounds` envelopes are acceptance-eligible with 0 blockers (evidence class `PSP_HARDWARE`, source
+  commit binding `MATCH` on a clean committed tree, harness verdict ok). The `registry-font` stream is complete but
+  not acceptance-eligible: one scalar record is FAIL. The raw envelopes, host0 logs and decoded tables stay in the
+  private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-10, `979c6a1dd`) |
+  | --- | --- | --- | --- |
+  | `PSP-HLE-ISSUES-001` | `model-ku-get-model`, `model-sce-get-model`, `model-ku-get-model-again`, `model-sce-get-model-again`, `model-kernel-get-model-07c586a1`, `model-kernel-get-model-6373995d`, `vscmp-p0-*`, `rcar-p0-*`, `rcbig-p0-*`, `vscmp-p1-*`, `rcar-p1-*`, `rcbig-p1-*` (boot 172) | `hle-issues-batch-done`; the `kuKernelGetModel` stub's syscall word (a per-boot number); the kernel getter's address | MEASURED: 1858 records and the done record, all PASS |
+  | `PSP-HLE-KERNEL-STATUS-002` | `fpl-create-size-0x00`, `fpl-delete-size-0x00`, `fpl-create-size-0x7fffffff`, `fpl-delete-size-0x7fffffff`, `vpl-create`, `vpl-try-alloc-refusal`, `vpl-free-all`, `vpl-delete`, `hle-kernel-pool-bounds-done` (boot 173) | the size at which an FPL create starts to fail; other block counts and partitions; the UID values; the return of each `sceKernelFreeVpl` after the first | MEASURED: 8 records and the done record, all PASS |
+  | `PSP-REGISTRY-002` | none (boot 174) | every cell: `font-category-0000` is FAIL, so the envelope is not acceptance-eligible | CAPTURED: 3 records, 2 PASS and 1 FAIL |
+
+  What the cells establish, for these exact words only:
+  - *Model getters (`PSP-HLE-ISSUES-001`, #356).* `kuKernelGetModel` returned 3 on both calls; its stub was linked
+    (first word `0x03E00008`, `jr $ra`; the second is the per-boot syscall word). The `SysMemUserForUser`
+    `sceKernelGetModel` import (NID `0x6373995D`) stayed unlinked (stub words `0x0000054C` and 0) and both calls
+    returned `0x8002013A`. `sctrlHENFindFunction` found the `SysMemForKernel` NIDs `0x07C586A1` and `0x6373995D` at
+    the same kernel-RAM address; `kuKernelCall` returned 0 and the getter returned 3 for both. Every model row read
+    `0x06060110` from `sceKernelDevkitVersion()`.
+  - *`vscmp` (`PSP-HLE-ISSUES-001`, #326).* In all 60 cells (six operand sets, `.s`, `.p`, `.t`, `.q` and the
+    same-register `.q`, two passes), each lane is -1, 0 or +1 in sign-magnitude integer order of the raw words, with
+    a denormal flushed to a zero of its sign (+0 equals -0) and a NaN ordered by its bit pattern beyond the
+    infinities. Lanes past the width keep their old words, the VFPU_CC preset `0x15` is unchanged, and no other
+    register-file word changes.
+  - *Random-unit step (`PSP-HLE-ISSUES-001`, #326).* In all 1792 `rcar` and `rcbig` rows, RCX0-7 read back as
+    written, the step rule of the 2026-10-24 entry above reproduces the returned word and RCX0-7 after the step,
+    and C000 lanes 1-3 keep their sentinel. Passes 0 and 1 are identical record for record.
+  - *Fixed and variable pools (`PSP-HLE-KERNEL-STATUS-002`).* Partition 2, attribute 0, NULL option pointer:
+    `sceKernelCreateFpl` with block size 0 and one block returned `0x800201B7`, and with block size `0x7FFFFFFF` and
+    one block returned `0x80020190`. Neither created a pool, so neither delete cell issued a call (result 0, out0 0).
+    `sceKernelCreateVpl` of a `0x1000`-byte pool returned a UID. `sceKernelTryAllocateVpl` of `0x100` bytes
+    succeeded 15 times and the 16th call returned `0x80020190`. The 15 `sceKernelFreeVpl` calls were issued and
+    the first returned 0, and `sceKernelDeleteVpl` returned 0.
+  - *Font registry walk (`PSP-REGISTRY-002`, captured only).* `sceRegOpenRegistry` (mode 1, regtype 1) returned 0
+    (`font-registry-open`). `sceRegGetKeysNum` on the registry handle returned `0x8008272E`, the bad-handle code
+    `registry-readonly` measured for a forged handle, and left the count at the probe's preset -1, so
+    `sceRegGetKeys` was not called (`font-category-0000`: result 0, because the root is never opened; out0
+    `0x8008272E`; out1 and out2 `0xFFFFFFFF`). The walk therefore opened no category and read no key, and
+    `sceRegCloseRegistry` returned 0 (`font-registry-done`: 1 category record, 0 keys, 0 opened, 0 refused, root
+    not listed). Nothing about `/DATA/FONT` or `/SYSPROFILE/RESOLUTION` was learned. In the XMB context on this
+    firmware the registry handle does not list the root through `sceRegGetKeysNum`; whether another context or
+    handle does is not measured.
 
 - **PSP-3000 single-case run of `hle-self-stop-unload` (2026-11-08)**: system software 6.6.0 as reported by
   `pspver`, operator-declared model PSP-3000, XMB context, one launch on its own boot (boot 165) at `935f225d`,
@@ -3382,14 +3431,15 @@ captured-only runs; `llsc-link`, `vfpu-compare` and `fpu-cc` were measured on
 2026-10-15 from `e45e667b`. The five initial single-launch HLE cases (97-101)
 ran on 2026-10-15 from `b5d6fc5b`: the two VTimer cases and power-float case
 were measured, the earlier pool-bounds revision was captured only (the revised
-form has not run), and null-out was captured incomplete. The added HLE timer-order
+form was measured on 2026-11-10 from `979c6a1dd`), and null-out was captured incomplete. The added HLE timer-order
 case (103) and the VFPU transcendental corpus were measured on 2026-10-15 from
 `22b027f6`, and the HLE audio case (102) from `7fc1641e` after a first run from
 `22b027f6` was captured only.
 The HLE issue cells `hle-issues-batch` (106) and `hle-intr-cells` (107),
 built from `probe_hle_issues.c`, were observed from `da97b2c0` on 2026-10-24
 without a runner envelope, so they were not acceptance-eligible; `hle-intr-cells`
-was measured on 2026-10-29 from `77a1a5e3`, together with the new `intr-cause` (120).
+was measured on 2026-10-29 from `77a1a5e3`, together with the new `intr-cause` (120), and
+`hle-issues-batch` on 2026-11-10 from `979c6a1dd`.
 These ten probes run as single launches outside the campaign queue
 (`CAMPAIGN_QUEUE_CASES`); the manifest distinguishes measured, captured and
 not-run states. Their parsers check record order, scalar fields and completion,
@@ -3409,18 +3459,18 @@ not expected PSP values.
 | `vfpu-compare` | `PSP-VFPU-CMP-001` | `MEASURED` (2026-10-15, `e45e667b`) | `vscmp.s`, `vsge.s`, and `vslt.s` on 15 operand pairs: less-than, equal, greater, signed zeros in both orders, quiet, signalling, and negative NaN on each side, and infinities. Each record is the raw result word against the project's model at the time; the five `vscmp` NaN words differed from it, and the model now returns the measured words. |
 | `fpu-cc` | `PSP-FPU-CC-001` | `MEASURED` (2026-10-15, `e45e667b`) | COP1 condition codes: which FCR31 condition bits exist, which bit `c.eq.s` sets for each condition code 0..7, and whether `bc1t`/`bc1f` with each code are taken under FCC0, no flag, and that code's own flag. Condition code 0 is the control. Only FCC0 exists; every code writes and tests it. |
 | `vfpu-transcendental-corpus` | `PSP-VFPU-TRANSCENDENTAL-001` | `MEASURED` (2026-10-15, `22b027f6`; single launch, not in the campaign queue) | Raw single-lane result words for vsin, vcos, vexp2, vlog2, vrsq, vrcp, vsqrt, vasin, vnrcp, vnsin, and vrexp2. Each operation uses 63 raw-word inputs: 20 special encodings and 43 evenly spaced domain constants. VASIN substitutes three in-domain words for its previously measured edge inputs. Eight-word chunks produce 88 data records plus one completion record (89 result records total); parsing checks format only and asserts no hardware values. |
-| `registry-font` | `PSP-REGISTRY-002` | `NOT_RUN` | Whether the registry handle lists the root, then the `/DATA/FONT` and `/SYSPROFILE/RESOLUTION` subtrees: every key's name, type, size, value and enumeration order, reached only through categories the console listed first. |
+| `registry-font` | `PSP-REGISTRY-002` | `CAPTURED` (2026-11-10, PSP-3000, boot 174, `979c6a1dd`; 3 records, `font-category-0000` FAIL, so not acceptance-eligible: `sceRegGetKeysNum` on the registry handle returned `0x8008272E` and no subtree was walked) | Whether the registry handle lists the root, then the `/DATA/FONT` and `/SYSPROFILE/RESOLUTION` subtrees: every key's name, type, size, value and enumeration order, reached only through categories the console listed first. |
 | `umd-io` | `PSP-UMDIO-001` | `MEASURED` (2026-10-17, PSP-3000 / 6.61 / ARK CFW; `e2180970`) | `sceIoOpen` and `sceIoDopen` results for bare UMD devices, disc paths, the two extra-flag opens, and `msstor0p1:/`; successful descriptors were closed with result 0. The UMD remained inserted and was not activated or changed. |
 | `umd-raw-read` | `PSP-UMDRAW-001` | `CAPTURED` (2026-10-17 and 2026-10-18, incomplete; source commits `6a9a39aa`, `97ccbf87`, `61574d37`) | Three attempts used 360 s, 900 s and 1800 s host case timeouts. The two 2026-10-18 runs emitted 31 complete records through `size-4096-read`, then no 32 KiB read result. On the 1800 s run, `usbipd` reported the PSP absent at 3m46, before the 1800-second deadline; L1 reattach and three `ver` retries failed. Teardown/unload remains unverified. This records USB loss before the host timeout but does not distinguish a PSP-side read hang from PSPLink/USB transport failure. No raw UMD read or seek semantics are inferred; a fresh physical power-cycle is required before another launch. |
 | `hle-vtimer-unit` | `PSP-HLE-VTIMER-002` | `MEASURED` (2026-10-15, `b5d6fc5b`; single launch, not in the campaign queue) | One VTimer: start; a `sceKernelGetVTimerTime` and a system-clock reading either side of a bounded 20 ms delay; the VTimer base and Refer base field while running and after stop; stop; delete. Each 64-bit clock is recorded as its low word then its high word. |
 | `hle-vtimer-errors` | `PSP-HLE-VTIMER-003` | `MEASURED` (2026-10-15, `b5d6fc5b`; single launch, not in the campaign queue) | Start, stop, and `sceKernelGetVTimerTime` on a deleted UID, then a cleanup delete of that UID after its last use; a live timer created and deleted; up to 64 creates; out1 records whether a refusal occurred; every created timer deleted. The NULL option pointer of `sceKernelCreateVTimer` is the optional argument. |
-| `hle-kernel-pool-bounds` | `PSP-HLE-KERNEL-STATUS-002` | `NOT_RUN` (revised form; single launch, not in the campaign queue; the earlier revision's 2026-10-15 `b5d6fc5b` run was captured only) | FPL creation with block size 0 and with a 0x7fffffff-byte block, each deleted when its create returned a pool; a refused create gives a PASS delete cell with out0 0 and no delete call; VPL allocation: up to 64 allocations; out1 records whether a refusal occurred; every block freed and the VPL deleted. The NULL option pointers of the pool creates are the optional argument. |
+| `hle-kernel-pool-bounds` | `PSP-HLE-KERNEL-STATUS-002` | `MEASURED` (2026-11-10, PSP-3000, boot 173, `979c6a1dd`; 9 records; single launch, not in the campaign queue; the earlier revision's 2026-10-15 `b5d6fc5b` run was captured only) | FPL creation with block size 0 and with a 0x7fffffff-byte block, each deleted when its create returned a pool; a refused create gives a PASS delete cell with out0 0 and no delete call; VPL allocation: up to 64 allocations; out1 records whether a refusal occurred; every block freed and the VPL deleted. The NULL option pointers of the pool creates are the optional argument. |
 | `hle-power-float-v0` | `PSP-HLE-POWER-002` | `MEASURED` (2026-10-15, `b5d6fc5b`; single launch, not in the campaign queue) | Raw `$v0` and `$f0` bits of `scePowerGetPllClockFrequencyFloat`, `scePowerGetCpuClockFrequencyFloat`, and `scePowerGetBusClockFrequencyFloat`, one call each, through a short assembly wrapper. |
 | `hle-null-out-pointers` | `PSP-HLE-NULL-OUT-001` | `CAPTURED` (2026-10-15, `b5d6fc5b`; incomplete, not measured; retired, never to be scheduled) | The existing capture stopped at the first mandatory NULL output, `sceKernelReferSystemStatus(NULL)`, and the console needed a power cycle. The kernel pointer check rejects kernel-space addresses but not address 0, so that call writes through NULL and faults; the VTimer getters also write through their output pointers. No game can rely on these results. |
 | `hle-audio-src` | `PSP-HLE-AUDIO-SRC-001` | `MEASURED` (2026-10-15, `7fc1641e`; the earlier run of `22b027f6` was captured only; single launch, not in the campaign queue) | Unreserved SRC release and silent output; reserve 1024 samples at 44100 Hz stereo; second reserve; one silent blocking output; release after the blocking drain and release again; six invalid reserve shapes, immediately releasing any unexpected success; Output2-then-SRC and SRC-then-Output2 reservation attempts with cleanup. 18 result records. No SRC rest-sample query exists in the public NID corpus. Risk high: two silent blocking SRC calls, at most one block per call; schedule after the other new probes. |
 | `hle-timer-order` | `PSP-HLE-TIMER-ORDER-001` | `MEASURED` (2026-10-15, `22b027f6`; single launch, not in the campaign queue) | Two equal-delay alarms set A then B; long-delay then short-delay alarm; nominally equal VTimer handler and alarm; SetAlarm(0). Each callback stores a shared sequence number and system-time low/high words. Every wait has an elapsed-time deadline; cancel all alarms and stop/delete the VTimer. Ordering only, no absolute-time claim; 18 result records. |
 | `hle-savedata-getsize` | `PSP-HLE-SAVEDATA-GETSIZE-001` | `MEASURED` (2026-11-02, `eded11ac`, boot 107; single launch, not in the campaign queue) | #308: savedata mode 22 for a save that does not exist, under the probe-owned names `NKPROBE01` and `GETSIZE`: one secure entry that fits, no entries, one secure entry larger than the Memory Stick, and a NULL `sizeInfo` last, each dialog polled once a vblank at most 1200 times, recording InitStart's return, the common result word, the bind word, the status sequence and the 15 `sizeInfo` words; `sceIoGetstat` of the save directory around each dialog, where any return but 0x80010002 makes COMPLETE report FAIL and the host contract refuse the stream, because the cells then measured nothing. The recorded stream predates that check and passes it. Read-only on the Memory Stick; needs game context and a runner `--timeout` of at least 120 s. |
-| `hle-issues-batch` | `PSP-HLE-ISSUES-001` | `NOT_RUN` (observed 2026-10-24 from `da97b2c0` without a runner envelope, so not acceptance-eligible; single launch, not in the campaign queue) | #356 model getters: `kuKernelGetModel` and the `SysMemUserForUser` `sceKernelGetModel` import (NID `0x6373995d`), each twice with `$v0` preset to `0xA5A5A5A5`, with the import stub's words after loading; the `SysMemForKernel` getter through `sctrlHENFindFunction` and `kuKernelCall` (only for a kernel-RAM address). #326, two passes: `vscmp.s/p/t/q` and the same-register form over six NaN/infinity/signed-zero/denormal operand sets (C200 lanes, VFPU_CC, changed-word census), and one `vrndi.s` step from each of 2 x 448 written RCX states (RCX0-7 after the write and after the step). 1858 result records; register-only VFPU cells and read-only getters. |
+| `hle-issues-batch` | `PSP-HLE-ISSUES-001` | `MEASURED` (2026-11-10, PSP-3000, boot 172, `979c6a1dd`; 1858 records and the done record; observed earlier from `da97b2c0` without a runner envelope; single launch, not in the campaign queue) | #356 model getters: `kuKernelGetModel` and the `SysMemUserForUser` `sceKernelGetModel` import (NID `0x6373995d`), each twice with `$v0` preset to `0xA5A5A5A5`, with the import stub's words after loading; the `SysMemForKernel` getter through `sctrlHENFindFunction` and `kuKernelCall` (only for a kernel-RAM address). #326, two passes: `vscmp.s/p/t/q` and the same-register form over six NaN/infinity/signed-zero/denormal operand sets (C200 lanes, VFPU_CC, changed-word census), and one `vrndi.s` step from each of 2 x 448 written RCX states (RCX0-7 after the write and after the step). 1858 result records; register-only VFPU cells and read-only getters. |
 | `hle-intr-cells` | `PSP-HLE-INTR-001` | `MEASURED` (2026-10-29, `77a1a5e3`, boot 66; observed earlier from `da97b2c0` without a runner envelope; single launch, not in the campaign queue) | #325: VTimer and alarm handlers returning a reschedule interval then 0 (20 ms series, 1 us series, mixed series): the sequence number, scheduled and actual VTimer time and system time of every call, and whether a call follows a return of 0; a VBLANK sub-interrupt handler in the first free slot of 0..15, counted while free, across 20 ms, 50 ms and 20 ms `sceKernelCpuSuspendIntr` windows, and while one entry holds for 25 ms. Every VTimer is stopped and deleted, every alarm cancelled, every suspension resumed, and the handler disabled and released whenever a slot was registered. Risk medium: interrupts suspended for at most 50 ms. |
 | `intr-cause` | `PSP-INTR-CAUSE-001` | `MEASURED` (2026-10-29, `2c199df8`, boot 67; single launch, not in the campaign queue) | #325: COP0 Cause, Status and Count and the Allegrex interrupt-enable word, read in kernel mode by one `kuKernelCall` each, with the system time and `sceDisplayGetVcount`: four reads with interrupts enabled after a VBLANK start, then per pass (two passes) a read every 1 ms through a 24 ms `sceKernelCpuSuspendIntr` window, one read 200 us after the resume and the window summary. Read-only; nothing is installed. 58 result records. |
 | `thread-k0-block` | `PSP-THREAD-K0-001` | `MEASURED` (2026-10-28, PSP-3000 / PSPLink `pspver` 6.6.0; `96cbbf9c`; single launch, not in the campaign queue; acceptance-eligible, 9 of 9 records) | The probe thread's k0, its stack span and k0+4; a new thread's k0, stack span, sp at entry, k0+4, its two lowest stack words and the 64 words from k0; then, for thread attributes 0, NO_FILLSTACK (0x00100000) and CLEAR_STACK (0x00200000), a thread that fills its stack between the lowest 16 words and sp, and its k0+4, with 0xa5a5a5a5 exits and is deleted, and a new thread of the same size and attribute reports its stack base, k0, k0+4 and the surviving fill words. 9 records. Answers whether the kernel hands every new thread a block with k0+4 == 0 (#363, launcher reent ownership). Risk low: user-mode thread calls only; writes stay inside the probe's own threads' stacks. Result: k0 is the top 0x100 bytes of the thread's own stack (the probe's thread, stack 0x40000, and a new 0x4000-byte thread); the probe's main thread, which its module_start created, held [0x09f80000, 0x09fc0000) and the new thread got [0x09ffc000, 0x0a000000): the module-start thread's default 0x40000-byte stack above the main thread had been released when module_start returned, and the new stack was carved from the top of that highest free block, not from below the main thread; the block is zero except the thread UID at +0xc0, the stack base at +0xc8 and 0xffffffff at +0xf8 and +0xfc, so k0+4 is 0. A thread created with the same size and attribute after a thread that dirtied the same memory got the same stack base and again k0+4 == 0 for attribute 0, NO_FILLSTACK (the dirty words below sp survived: no fill) and CLEAR_STACK; only the UID word of the block differed. With attribute 0 the stack below k0 reads 0xff except its lowest word, which holds the UID. An earlier launch of `10114d86` that also overwrote the lowest stack words hung after its sixth record; its first six records match the ones above. |
@@ -3961,7 +4011,9 @@ registry handle does not list the root, or its listing does not show the
 measured `CONFIG` category as a directory, the probe opens nothing below it and
 records that result. It enters only `/DATA`, `/DATA/FONT`, `/SYSPROFILE` and
 `/SYSPROFILE/RESOLUTION` and what lies below the last two, and reads values only
-there. The build pins the probe's `sceReg` imports to the eight read calls.
+there. The build pins the probe's `sceReg` imports to the eight read calls. On the
+2026-11-10 PSP-3000 launch (XMB context, captured only) `sceRegGetKeysNum` on the
+registry handle returned `0x8008272E`, so the probe opened nothing below the root.
 
 The `font-files` case (`PSP-FONTFILES-001`, `fixtures/psp_oracle/font_files.h`)
 is not in the campaign queue; it runs only when the maintainer asks for it. It

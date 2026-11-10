@@ -128,6 +128,19 @@ MEASURED_COMMIT = "b" * 40
 STAGED_PRX = b"synthetic PSP oracle probe"
 STAGED_SHA = hashlib.sha256(STAGED_PRX).hexdigest()
 
+# The firmware identity every 2026-11-10 PSP-3000 measurement note states in full: pspver's
+# "6.6.0" in the XMB context is not the system software version.
+PSP_3000_FIRMWARE_IDENTITY_20261110 = (
+    "2026-11-10", "console PSP-3000", "system software 6.61",
+    "release:6.61:", "system:58401@release_661,0x06060110:",
+    "sceKernelDevkitVersion()", "0x06060110",
+    "pspver printed 0x06060010 (\"6.6.0\") in the XMB context",
+    "prints 0x06060110 in the game context",
+    "ARK-5 with cIPL, version 5.1.0 (the version was not read by a tool",
+    "SystemControl, ARKCompatLayer and VshCtrl",
+    "acceptance-eligible with 0 blockers",
+)
+
 # PSP-VRAM-MIRROR-001 measured rules, from the PSP-3000 runs on 2026-10-16
 # (commits 24c1472e, fd3efc64, and df41dba2). These are algorithmic constants;
 # tests synthesize their own result words and contain no captured PSP words.
@@ -3482,6 +3495,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 "PSP-VFPU-BASICARITH-001", "PSP-VFPU-VUS2I-001",
                 # The 2026-11-08 acceptance-eligible hle-self-stop-unload (#341, boot 165) run.
                 "PSP-HLE-SELFSTOP-001",
+                # The 2026-11-10 acceptance-eligible hle-issues-batch (#326, #356, boot 172) and
+                # hle-kernel-pool-bounds (boot 173) runs of 979c6a1dd.
+                "PSP-HLE-ISSUES-001", "PSP-HLE-KERNEL-STATUS-002",
             },
         )
         self.assertEqual(
@@ -3490,7 +3506,7 @@ class PspDmacProbeTests(unittest.TestCase):
                 # Captured only: the runner classified its envelope as not acceptance-eligible.
                 "PSP-TEARDOWN-001",
                 # b5d6fc5b, 2026-10-15: an incomplete NULL-pointer stream. (The pool-bounds
-                # capture of the same day belongs to a revision since replaced; NOT_RUN.)
+                # capture of the same day belongs to a revision since replaced and measured.)
                 "PSP-HLE-NULL-OUT-001",
                 # 2026-10-17: raw UMD capture stopped before the 32768-byte seek/read result.
                 "PSP-UMDRAW-001",
@@ -6263,12 +6279,12 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
     h: ClassVar[HleMeasureProbeTests]
 
     SINGLE = HleMeasureProbeTests.SINGLE_LAUNCH_FAMILIES
-    # Manifest hardware_evidence per case after the 2026-10-15 runs. The pool-bounds probe was
-    # revised after its captured run, so its revised form is NOT_RUN.
+    # Manifest hardware_evidence per case. The pool-bounds probe was revised after its captured
+    # 2026-10-15 run; the revised form was measured on 2026-11-10 (boot 173, 979c6a1dd).
     HARDWARE = {
         "hle-vtimer-unit": "MEASURED",
         "hle-vtimer-errors": "MEASURED",
-        "hle-kernel-pool-bounds": "NOT_RUN",
+        "hle-kernel-pool-bounds": "MEASURED",
         "hle-power-float-v0": "MEASURED",
         "hle-null-out-pointers": "CAPTURED",
         "hle-audio-src": "MEASURED",
@@ -6283,6 +6299,12 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
         "hle-audio-src": "7fc1641e",
         "hle-timer-order": "22b027f6",
         "hle-savedata-getsize": "eded11ac",
+        "hle-kernel-pool-bounds": "979c6a1dd",
+    }
+    # The date of each MEASURED case's cited run, where it is not 2026-10-15.
+    RUN_DATE = {
+        "hle-savedata-getsize": "2026-11-02",
+        "hle-kernel-pool-bounds": "2026-11-10",
     }
     # The pending-campaign status cell each case carries in docs/HARDWARE_ORACLE.md.
     DOC_STATUS = {
@@ -6290,9 +6312,9 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                            "campaign queue)",
         "hle-vtimer-errors": "`MEASURED` (2026-10-15, `b5d6fc5b`; single launch, not in the "
                              "campaign queue)",
-        "hle-kernel-pool-bounds": "`NOT_RUN` (revised form; single launch, not in the campaign "
-                                  "queue; the earlier revision's 2026-10-15 `b5d6fc5b` run was "
-                                  "captured only)",
+        "hle-kernel-pool-bounds": "`MEASURED` (2026-11-10, PSP-3000, boot 173, `979c6a1dd`; 9 "
+                                  "records; single launch, not in the campaign queue; the earlier "
+                                  "revision's 2026-10-15 `b5d6fc5b` run was captured only)",
         "hle-power-float-v0": "`MEASURED` (2026-10-15, `b5d6fc5b`; single launch, not in the "
                               "campaign queue)",
         "hle-null-out-pointers": "`CAPTURED` (2026-10-15, `b5d6fc5b`; incomplete, not measured; "
@@ -6673,7 +6695,7 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                                      list(spec.ordered_cases))
                     self.assertNotIn("uncited_cases", row)
                     self.assertNotIn("evidence_note", row)
-                    run_date = "2026-11-02" if case == "hle-savedata-getsize" else "2026-10-15"
+                    run_date = self.RUN_DATE.get(case, "2026-10-15")
                     for word in (run_date, self.RUN_COMMIT[case],
                                  "acceptance-eligible with 0 blockers"):
                         self.assertIn(word, row["measurement_note"])
@@ -6688,9 +6710,6 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                         for word in ("2026-10-15", "b5d6fc5b",
                                      "establishes nothing about PSP behaviour"):
                             self.assertIn(word, row["evidence_note"])
-                    elif case == "hle-kernel-pool-bounds":
-                        self.assertIn("No hardware capture of this revision exists",
-                                      row["evidence_note"])
                     else:
                         self.assertIn("No hardware capture exists",
                                       row["evidence_note"])
@@ -6709,6 +6728,23 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                 listed = {api for api in row["apis"] if api.startswith("sce")}
                 self.assertEqual(sorted(listed), sorted(self.h._probe_calls(macro)))
                 self.assertNotIn("until refusal", json.dumps(row))
+
+    def test_pool_bounds_row_records_the_2026_11_10_measured_cells(self) -> None:
+        """The revised pool-bounds form ran on 2026-11-10 (boot 173, 979c6a1dd): both FPL creates
+        were refused, so no delete was issued, and the 0x1000-byte VPL gave 15 blocks of 0x100
+        bytes before refusing. The note names the full firmware identity, never a bare 6.6.0."""
+        row = next(test for test in self.h.manifest["tests"]
+                   if test["id"] == "PSP-HLE-KERNEL-STATUS-002")
+        note = row["measurement_note"]
+        for word in PSP_3000_FIRMWARE_IDENTITY_20261110 + (
+                "boot 173", "XMB context", "979c6a1dd", "9 records",
+                "block size 0 and 1 block returned 0x800201b7",
+                "block size 0x7fffffff and 1 block returned 0x80020190",
+                "neither delete cell issued a call (result 0, out0 0)",
+                "succeeded 15 times and the 16th call returned 0x80020190",
+                "sceKernelDeleteVpl returned 0"):
+            self.assertIn(word, note)
+        self.assertEqual(row["issues"], [])
 
     def test_vtimer_unit_row_does_not_claim_a_precise_rate(self) -> None:
         """The VTimer and system-clock intervals are offset by host0 writes, so the unit is
@@ -7527,7 +7563,7 @@ class HleIssuesProbeTests(unittest.TestCase):
                   for target in self.WRAPPER_RE.findall(text)}
         return calls
 
-    def test_manifest_rows_are_not_run_and_name_every_import(self) -> None:
+    def test_manifest_rows_are_measured_and_name_every_import(self) -> None:
         by_id = {test["id"]: test for test in self.manifest["tests"]}
         for case, _cid, stem, macro, test_id, _log in self.CASES:
             with self.subTest(case=case):
@@ -7544,11 +7580,16 @@ class HleIssuesProbeTests(unittest.TestCase):
                     self.assertEqual(row["evidence_cases"], row["case_ids"][:-1])
                     hle_manifest.measured_evidence_section(row)
                 else:
-                    self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-                    for absent in ("evidence_ref", "evidence_cases", "measurement_note"):
-                        self.assertNotIn(absent, row)
-                    self.assertIn("No acceptance-eligible capture exists",
-                                  row["evidence_note"])
+                    # Measured by the 2026-11-10 run of 979c6a1dd (boot 172); everything but the
+                    # done record is cited.
+                    self.assertEqual(row["hardware_evidence"], "MEASURED")
+                    for word in PSP_3000_FIRMWARE_IDENTITY_20261110 + (
+                            "979c6a1dd", "boot 172", "XMB context",
+                            "1858 result records and the done record"):
+                        self.assertIn(word, row["measurement_note"])
+                    self.assertEqual(row["uncited_cases"], [f"{case}-done"])
+                    self.assertEqual(row["evidence_cases"], row["case_ids"][:-1])
+                    hle_manifest.measured_evidence_section(row)
                 self.assertIn("not in the campaign queue", row["evidence_note"])
                 self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
                 self.assertEqual(row["prx"], f"{stem}.prx")
@@ -7559,6 +7600,22 @@ class HleIssuesProbeTests(unittest.TestCase):
                 self.assertEqual(row["case_ids"][-1], f"{case}-done")
         self.assertEqual(by_id["PSP-HLE-ISSUES-001"]["issues"], [326, 356])
         self.assertEqual(by_id["PSP-HLE-INTR-001"]["issues"], [325])
+
+    def test_issues_batch_row_records_the_2026_11_10_measured_cells(self) -> None:
+        """The 2026-11-10 run (boot 172, 979c6a1dd): the model getters, the vscmp order rule and
+        the vrndi.s step rule, with both passes identical; the per-boot syscall word and the
+        kernel getter's address are not cited."""
+        row = next(test for test in self.manifest["tests"] if test["id"] == "PSP-HLE-ISSUES-001")
+        note = row["measurement_note"]
+        for word in ("kuKernelGetModel returned 3 on both calls",
+                     "first word 0x03e00008", "per-boot syscall word and is not cited",
+                     "stub words 0x0000054c and 0) and both calls returned 0x8002013a",
+                     "kuKernelCall returned 0 and the getter returned 3 for both",
+                     "all 60 vscmp cells", "VFPU_CC preset 0x15",
+                     "all 1792 rcar and rcbig rows", "Passes 0 and 1 are identical record for record",
+                     "da97b2c0 showed; that launch had no runner envelope and is not cited"):
+            self.assertIn(word, note)
+        self.assertNotIn("0x8800", note)
 
     def test_manifest_case_patterns_cover_each_stream_in_order(self) -> None:
         by_id = {test["id"]: test for test in self.manifest["tests"]}
@@ -7705,7 +7762,7 @@ class HleIssuesProbeTests(unittest.TestCase):
 
     # ---- docs -----------------------------------------------------------------------------
 
-    def test_docs_list_both_cases_as_observed_but_not_acceptance_eligible(self) -> None:
+    def test_docs_list_both_cases_as_measured(self) -> None:
         hardware = (self.root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
         readme = (self.fixture / "README.md").read_text(encoding="utf-8")
         for case, _cid, _stem, _macro, test_id, _log in self.CASES:
@@ -7715,8 +7772,9 @@ class HleIssuesProbeTests(unittest.TestCase):
                                   "boot 66; observed earlier from `da97b2c0` without a runner "
                                   "envelope; single launch, not in the campaign queue) |", hardware)
                 else:
-                    self.assertIn(f"| `{case}` | `{test_id}` | `NOT_RUN` (observed 2026-10-24 from "
-                                  "`da97b2c0` without a runner envelope, so not acceptance-eligible; "
+                    self.assertIn(f"| `{case}` | `{test_id}` | `MEASURED` (2026-11-10, PSP-3000, "
+                                  "boot 172, `979c6a1dd`; 1858 records and the done record; "
+                                  "observed earlier from `da97b2c0` without a runner envelope; "
                                   "single launch, not in the campaign queue) |", hardware)
                 self.assertIn(f"| `{case}` | `{test_id}` |", readme)
         self.assertIn("probe_hle_issues.c", readme)
@@ -13282,6 +13340,22 @@ class RegistryFontSourceTests(unittest.TestCase):
         self.assertIn("$(BUILD_DIR)/probe.o: probe.c registry_walk.h", self.makefile)
         self.assertRegex(self.makefile, r"(?m)^else ifeq \(\$\(CASE\),registry-font\)\nCASE_ID = 72$")
         self.assertIn('#define PROBE_HOST0_LOG "host0:/registry_font_log.txt"', self.probe)
+
+    def test_the_2026_11_10_capture_is_recorded_as_captured_not_measured(self) -> None:
+        """Boot 174 (979c6a1dd): sceRegGetKeysNum on the registry handle returned the bad-handle
+        code, font-category-0000 is FAIL and no subtree was walked, so nothing is cited."""
+        hardware = (self.root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        readme = (self.fixture / "README.md").read_text(encoding="utf-8")
+        self.assertIn("| `registry-font` | `PSP-REGISTRY-002` | `CAPTURED` (2026-11-10, PSP-3000, "
+                      "boot 174, `979c6a1dd`; 3 records, `font-category-0000` FAIL, so not "
+                      "acceptance-eligible: `sceRegGetKeysNum` on the registry handle returned "
+                      "`0x8008272E` and no subtree was walked) |", hardware)
+        self.assertIn("| `PSP-REGISTRY-002` | none (boot 174) |", hardware)
+        self.assertIn("Nothing about `/DATA/FONT` or `/SYSPROFILE/RESOLUTION` was learned.", hardware)
+        self.assertIn("**CAPTURED** on 2026-11-10 (PSP-3000, boot 174, `979c6a1dd`", readme)
+        manifest = json.loads((self.root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        self.assertNotIn("PSP-REGISTRY-002", [test["id"] for test in manifest["tests"]])
 
     def _gate(self, libs: list[tuple[str, list[int]]], *extra: str,
               module_attributes: int = 0) -> tuple[int, str, str]:
