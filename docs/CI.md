@@ -585,15 +585,21 @@ alpha-tested and a colour-tested op that write depth, must keep the snapshot pat
 software GE in colour and depth. `dst-read-feedback`, a stencil state that textures from its own target, must
 keep it too: the destination copy is the texture its second sprite samples. On
 the snapshot path, the known difference must stay inside each overlap, and the device must hold no interlock
-state. A device that refuses the interlock prints one SKIP line for each interlock leg. The lavapipe step prints
+state. `stencil-once` runs alone too, at scales 1 and 4 on the snapshot path and at scale 1 on the interlock
+path: a write-once stencil state (the first fragment to pass at a pixel stores a stencil that rejects the later
+ones) must draw overlapping primitives in one batch with no split and equal the software GE bit for bit, over a
+triangle mesh, a 7200-state matrix in each framebuffer format and three depth legs. A device that refuses the
+interlock prints one SKIP line for each interlock leg. The lavapipe step prints
 the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
-pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Three
+pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Four
 mutant targets follow, and each broken variant must fail its case with its own message:
 `gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
 (`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
 pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths seven ways
 (`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 7 run on the interlock path and are a SKIP on a device without it,
-the hosted lavapipe device included).
+the hosted lavapipe device included),
+and `gpu-stencil-once-mutants` breaks the write-once stencil batch three ways (`SR_GPU_STENCIL_ONCE_MUTANT`: no
+reordering, every state called write-once, no depth condition).
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on
 lavapipe, headless, under the validation layer with synchronisation validation of shader accesses,
 and an exit 77 skip fails it, including one for synchronisation validation that is not active.
