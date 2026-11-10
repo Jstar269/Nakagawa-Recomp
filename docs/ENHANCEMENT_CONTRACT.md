@@ -153,7 +153,7 @@ I publish a title's packages as site data, so that a user who builds from source
 - each site's change: one of the declared transforms of section 9.2, never code or values;
 - for each byte range a site reads or replaces, a digest of the stock bytes, keyed by the executable (below).
 
-It holds no game bytes: no instruction words, data, tables, strings or values copied from the disc, and no patched code. Every symbolic name is project-authored (from a decompilation or named by the project), never taken from the executable's own symbol table. A disc file path and a CSV column name appear only as locators, naming where a data transform applies. A store site that checks the values the game's loader stores publishes only keyed digests of them (`stock_value_digests`, never `stock_values`): when the game stores a value, the runtime digests it, compares, and scales the value it observed, and on a mismatch it stops the run, naming the site. Where a transform's result depends on the stock value (such as twice it), the package publishes the rule, never the result.
+It holds no game bytes: no instruction words, data, tables, strings or values copied from the disc, and no patched code. Every symbolic name is project-authored (from a decompilation or named by the project), never taken from the executable's own symbol table. A disc file path and a CSV column name appear only as locators, naming where a data transform applies. A store site that checks the values the game's loader stores publishes only keyed digests of them (`stock_value_digests`, never `stock_values`): when the game stores a value, the runtime digests it, compares, and scales the value it observed, and on a mismatch it stops the run, naming the site. Where a transform's result depends on the stock value (such as twice it), the package publishes the rule, never the result. The same holds for a transform whose rule is built from other stock values (the site references of section 9.2): the package names the sites that pin them, each with its keyed digest, and the values and every factor computed from them are read and computed from the user's executable when the package is built.
 
 **Keyed digests.** A plain SHA-256 of one 32-bit instruction word can be inverted by trying all $2^{32}$ words, so it would publish the word. Every stock digest in a published package is therefore an HMAC-SHA-256 whose key is derived from the whole executable (a different hash from the published executable digest, so that digest does not give the key away). Only someone who holds the executable can compute or check it, and they already have the bytes.
 
@@ -250,12 +250,20 @@ Each `sites` entry names a symbolic `function`, a 4-byte-aligned `insn_offset`, 
 | `count_x2_even` | `slti`/`sltiu rt, rs, n` with $0 < n \le$ `0x3FFF` and `rt` neither `$zero` nor `rs` | a bound on a counter of logic updates since an event: true while `rs` $< 2n$ and `rs` is even, so the $n$ events of the stock window still happen, one every second update, at the stock instants (`count_x2` would make $2n$ of them, twice as dense). Under `slti` a negative `rs` stays true, as in stock, so an inactive value such as $-1$ keeps its meaning; under `sltiu` it is a large unsigned value, false in both forms. The resolver refuses the site unless `rs` is loaded from memory (`lb`, `lbu`, `lh`, `lhu` or `lw`) within the 16 instructions before the compare, with no branch, jump or call in between, and not in the delay slot of a jump, a call or a branch-likely. The check reads backward in address order and does not see a branch from elsewhere into those instructions. The site's evidence shows the rest: that the stored count advances by one every update |
 | `step_x0.5`, `probability_per_update_x0.5` | as `count_x2` except integer loads, plus accumulating `+1`/`-1`/`addu`/`subu` updates | the produced value is halved (exactly, or by gating a unit or register step); `add.s fd, fd, ft` halves the addend `ft` |
 | `decay_k_to_1-sqrt(1-k)` | `lui` of a float $k \in (0, 1)$; `lwc1` or `lv.s` of the factor | $k \to 1 - \sqrt{1-k}$, evaluated as $k / (1 + \sqrt{1-k})$ in double so that a small $k$ does not cancel to 0, and rounded to the upper half; after an `lwc1` or `lv.s` the loaded register is mapped at run time, and a value outside $(0, 1)$ keeps its stock value and is reported once per site (`ENHANCEMENT_FACTOR_KEPT`) |
-| `retention_m_to_sqrt(m)` | `lui` of a float $m \in (0, 1)$; `lwc1` or `lv.s` of the factor | $m \to \sqrt{m}$, rounded to the upper half; after an `lwc1` or `lv.s` as for `decay_k_to_1-sqrt(1-k)` |
+| `retention_m_to_sqrt(m)` | `lui` of a float $m \in (0, 1)$; `lwc1` or `lv.s` of the factor; `add.s`, `sub.s`, `mul.s` or `div.s` whose result is the factor (such as $1 - cL$) | $m \to \sqrt{m}$, rounded to the upper half; after an `lwc1` or `lv.s` as for `decay_k_to_1-sqrt(1-k)`, and likewise after the arithmetic instruction, whose result register is mapped at run time |
 | `accel_x0.25` | `lui` of a float (or a `lui`/`ori` pair) | the per-update acceleration is divided by 4 (two exponent steps on a lone `lui`) |
 | `launch_velocity_x0.5` | a `lui`/`ori` float pair with `acceleration_site` | the launch velocity $v_0 \to v_0/2 + g/8$, where $g$ is the stock value of the named `accel_x0.25` site |
 | `offset_x2` | `addi`/`addiu` with a nonzero immediate, also when the destination is a source | an additive offset counted in updates (a lookahead, a delay added to a base) doubles: $n \to 2n$ |
 | `window_start_x2` | `addi`/`addiu` with an immediate of $-2$ or less | the start of a window that ends one before a per-update counter: $k \to 2k+1$, so the window spans twice as many updates |
 | `argument_x2` | the instruction at a function's entry (`insn_offset` 0), with `arguments` naming the registers (`a0`-`a3`, `t0`-`t3`) | a helper that takes durations in updates from every caller doubles them once per call, after its stock entry instruction, which may not write them; a function that branches back to its entry is refused |
+| `value_reference` | `lwc1` or `lv.s` of initialised data; a `lui`/`ori` float pair (`word_count: 2`, or a lone `lui` with `low_insn_offset`) | none: the instruction keeps its one stock form. The site pins one stock float, digest-checked like every site, for the site references below. It takes no `requires` and no `stock_values` |
+| `gate_30hz_phase` | `jal`; a single-precision compare (`c.cond.s`) with `odd_phase_condition`; each with `phase_time` (a `register`, `s0`-`s7`, and a 4-byte-aligned `offset`) and `step_site` | the site keeps the stock instants of one state, by that state's own time: the float $t$ at `offset` from the register, read through the guest accessors when the site runs (for a call, after its delay slot). With $h$ the stock step and $n$ the whole number nearest $t / (h/2)$: on an even $n$ the stock instruction runs; on an odd $n$ a call is skipped (its delay slot still runs), and a compare runs and then the FPU condition flag takes `odd_phase_condition`. When $t / (h/2)$ is more than $1/4$ from $n$, below $-1/4$, not a number, or $2^{31}$ or more, the stock instruction runs and the site reports once (`ENHANCEMENT_PHASE_KEPT`). The resolver refuses the site unless: of the instructions that can run before it, along every path of its function, exactly one writes the register, and no path from the entry reaches the site without running that write (the graph is read as for `gate_30hz_alt`, and calls are taken to preserve `s0`-`s7`); a gated call's delay slot does not write the register; for a call, no path of the caller reads `$v0`, `$v1`, `f0`-`f3`, HI or LO before writing it, up to its next call, as for `gate_30hz_alt`; for a compare, it is not in a delay slot, and a `bc1f` or `bc1t` (or their likely forms) follows within 4 instructions, with no call, jump, other branch, other compare or `ctc1` in between. VFPU registers are not tracked. The site's evidence shows the rest: that the field is the state's time, zero when the state is entered and advanced by the step once per update; that the step is fixed; that the gated call is a per-update effect with no step in it; and that `odd_phase_condition` is the compare's no-event direction |
+| `velocity_source_x_kappa` | `lwc1`; `lv.s`; `lv.q`; `swc1` (which may declare `stock_values`, §9.6); each with `damping_site` and `damping_step_site` | a source of velocity change (an acceleration, the size of an impulse) is multiplied by $\kappa$ (below), in double, and rounded to single precision once: after an `lwc1` or `lv.s` the loaded register, after an `lv.q` each of the four loaded lanes; a `swc1` stores the scaled copy. An `lv.q` site in a delay slot is refused |
+| `launch_from_rest_60hz` | `jal`, with `velocity_offset` (4-byte-aligned), `gravity_axis` (0 or 1), `gravity_site`, `damping_site`, `damping_step_site` and `step_site` | the stock call runs unchanged. After it, the two floats at `velocity_offset` and `velocity_offset + 4` from `$a0`, as it was at the site after its delay slot, are each multiplied by $\kappa$, and $q g$ (below) is added to the one `gravity_axis` names: in double, the sum as one fused multiply-add, rounded to single precision once. They are read and written through the guest accessors, so a bad pointer faults as the guest's own access would. The map belongs to the statement that makes the call: when the runtime does not continue the caller there (the callee did not return in the same host frame), it is not applied. The site's evidence shows the rest: that `$a0` is the body and the offset its velocity; that gravity acts on that axis only and the body takes the damping the sites name; that the callee cannot block; and that the site is reached once per launch, from rest (a launch in flight that is already mapped would add the offset twice) |
+
+**Damped motion: the two-update image.** A stock update that runs $v \leftarrow (v + g h + I)\,m$, then $x \leftarrow x + v h$, with retention $m = 1 - cL$, has an exact image in two updates of half a step, $w \leftarrow (w + a + I')\,\mu$, then $x \leftarrow x + w h/2$. Writing $v^* = g h m / (1 - m)$ for stock's terminal velocity, the two reach the same $x$ at the end of every pair exactly when $\mu = \sqrt{m}$, $a = \kappa\, g\, h/2$ and $w - v^* = \kappa\,(v - v^*)$, with $\kappa = 2\mu / (1 + \mu)$. Each rule follows. `retention_m_to_sqrt(m)` gives $\mu$. `velocity_source_x_kappa` on the gravity the integrator loads gives $a$, with the step site halved as usual. An impulse in flight scales by $\kappa$ and goes wholly into the first update of its pair, which is what `velocity_source_x_kappa` on its size and `gate_30hz_phase` on its call declare. A velocity that is set from rest, where the map does not hold, becomes $\kappa V + q g$ with $q = h \mu^2 / (1 + \mu)^2$, which is `launch_from_rest_60hz`. The parts go together: `tools/test_enhancement_package.py` runs a model of one launch with timed impulses both ways and checks that the pair ends agree to rounding with all of them and differ by far more without any one. At the end of a pair the velocity is the image $w$, not stock's $v$, so code that reads the body's velocity in flight sees that.
+
+**Site references.** $g$, $c$, $L$ and $h$ are stock values, named by `gravity_site`, `damping_site`, `damping_step_site` and `step_site`: each holds the id of another site of the package, of any transform, whose instruction pins one float, as `acceleration_site` does for `launch_velocity_x0.5`. That site is a `lui`/`ori` pair (or a lone `lui` with `low_insn_offset`), or an `lwc1` or `lv.s` whose base register is a constant: within the 16 instructions before the load, a `lui` of that register and at most one `addiu` or `ori` of it, with no branch, jump or call in between and not in a delay slot. The resolver then reads the word from an allocated, non-executable `PROGBITS` section of the executable, as for a data site (§9.6). The check reads backward in address order and does not see a branch from elsewhere into those instructions. A site that is not rewritten is declared `value_reference`. The resolver refuses the package unless every referenced value is finite, $0 < cL < 1$ and $h > 0$, and computes $\kappa$ and $q$ in double from the stock single-precision values. A package holds none of these numbers, published or not: it holds the rule and the sites.
 
 A semi-implicit Euler motion (`v += g`, then `x += v`, once per update) reaches $x_n = n v_0 + g\,n(n+1)/2$. With $g/4$ per 60 Hz update and $v_0/2 + g/8$ at launch it reaches the same $x$ at every second update, which is what `accel_x0.25` and `launch_velocity_x0.5` declare together. The acceleration site must pin its whole float: a two-word site, or `low_insn_offset` and `low_stock_digest` naming the `ori` that completes a lone `lui` (read, never rewritten). A site with `operand: f64_high` is the `lui` of a double's upper word: `count_x2`, `step_x0.5`, `probability_per_update_x0.5` and `accel_x0.25` step its 11-bit exponent exactly, and other transforms refuse it.
 
@@ -274,7 +282,7 @@ Every frame-rate rescale package declares `rng_policy`. Under `rescale_probabili
 
 ### 9.5. Update Boundary: Gating Counts Logic Updates
 
-A gated statement (a `gate_30hz` or `gate_30hz_hold` site, and the unit steps and countdowns whose rewrite is a gate) runs when the number of logic updates begun so far is even. A `gate_30hz_alt` site keeps its own phase on the same count instead (section 9.2): it makes its alternates only in an update right after one in which it made the stock call, and otherwise makes the stock call (a second run in the same update repeats that update's choice), so a function reached again after a scene change runs before its alternates. The package says where an update begins with `update_boundary`: a symbolic `function`, a 4-byte-aligned `insn_offset` and the `stock_digest` of one instruction that runs exactly once per logic update, usually the first instruction of the title's per-frame body. While `SR_EXPERIMENTAL_60HZ=1`, that instruction first advances the counter `nk_enhancement_updates` and then runs its stock statement unchanged; with the toggle off nothing is counted.
+A gated statement (a `gate_30hz` or `gate_30hz_hold` site, and the unit steps and countdowns whose rewrite is a gate) runs when the number of logic updates begun so far is even. A `gate_30hz_alt` site keeps its own phase on the same count instead (section 9.2): it makes its alternates only in an update right after one in which it made the stock call, and otherwise makes the stock call (a second run in the same update repeats that update's choice), so a function reached again after a scene change runs before its alternates. The package says where an update begins with `update_boundary`: a symbolic `function`, a 4-byte-aligned `insn_offset` and the `stock_digest` of one instruction that runs exactly once per logic update, usually the first instruction of the title's per-frame body. While `SR_EXPERIMENTAL_60HZ=1`, that instruction first advances the counter `nk_enhancement_updates` and then runs its stock statement unchanged; with the toggle off nothing is counted. A `gate_30hz_phase` site does not use this count and needs no `update_boundary`: its phase is its state's own time (section 9.2), which starts with the state and stops while the state does, whatever the parity of the update the state was entered on.
 
 1. **Required when anything gates.** The validator refuses a package with a `gate_30hz`, `gate_30hz_hold` or `gate_30hz_alt` site and no `update_boundary`, and codegen refuses one whose planned rewrites include any gate without it.
 2. **Verified like a site.** The boundary's function resolves and its stock word is checked against `stock_digest` the same way, fail-closed. It may not be a control transfer or a rewritten site, and a package whose boundary is never emitted is refused like an unemitted site.
@@ -302,7 +310,7 @@ Some titles parse a table from disc at load time and store each field into RAM w
 - **A store site that never runs.** With the toggle on, when the process ends, each site with `stock_values` that stored no value prints `ENHANCEMENT_DATA_SITE_NOT_REACHED: site <id> at 0x<pc> stored no value in this run; whatever it should have rescaled stayed stock`: the title filled the field on another path, and its readers saw stock values. A run stopped by `ENHANCEMENT_DATA_MISMATCH` prints only the mismatch. The line is printed at an ordinary exit and on the runtime's `_Exit` paths (the headless end of run, a route failure, a capture exit, an unsupported import, a guest fault), through `sr_at_process_end()` in `src/rt/perf.h`. It is a report and leaves the exit status as it is: those statuses already mean something (a route result, a capture code), and the site may legitimately not have run yet when the run ends early. A tool that accepts a 60 Hz run checks for the line.
 - **Choosing the store.** The site must be the last store of the value: after any clamp or range check the title applies to the field, or a scaled value the title clamps afterwards is lost without a line. If a later store cannot be ruled out, keep the scaled values inside the clamp.
 - **A scaled value that is also a stock value.** The check compares the stored value with the stock list, so it cannot tell a stock value from an already scaled value that equals another stock value (stock values 30 and 60 with `count_x2`: a re-stored 60 that was a scaled 30 is scaled again to 120). The package is not refused, because one table can hold both v and 2v, but codegen prints `warning: enhancement site <id>: stock value <v> scales to <w>, which is also a stock value; ...` once per such value. The package author checks that no path stores an already scaled value again through that instruction.
-- **`requires`** is a non-empty list of site ids, each another site of the package that declares `stock_values`. The site runs its rewrite only after every required site has applied at least once in the run; until then it runs its stock statement, and the first time that happens it prints `ENHANCEMENT_SITE_GATED: site <id> at 0x<pc> runs stock: <required id> has not applied` once. It works for every rewrite kind; on a gated call (`gate_30hz`, `gate_30hz_hold` or `gate_30hz_alt` on a `jal`) the stock statement is the call made on every update, with no alternates. The package refuses an unknown id, the site's own id, a duplicate, an id that names a data site or data file, and a required site that itself declares `requires`.
+- **`requires`** is a non-empty list of site ids, each another site of the package that declares `stock_values`. The site runs its rewrite only after every required site has applied at least once in the run; until then it runs its stock statement, and the first time that happens it prints `ENHANCEMENT_SITE_GATED: site <id> at 0x<pc> runs stock: <required id> has not applied` once. It works for every rewrite kind; on a gated call (`gate_30hz`, `gate_30hz_hold`, `gate_30hz_alt` or `gate_30hz_phase` on a `jal`) the stock statement is the call made on every update, with no alternates, and on a `launch_from_rest_60hz` site it is the call with no map after it. The package refuses an unknown id, the site's own id, a duplicate, an id that names a data site or data file, and a required site that itself declares `requires`.
 - **"In the run" means the process.** Application counts and the gate are kept for the life of the process, including after an in-process `LoadExec`: a site that applied before it still counts as applied.
 
 ### 9.7. Side-by-Side Timing Check
@@ -1287,6 +1295,122 @@ The third section 9 transform admitted under this section, by its own entry as s
   alternate as its target, never the target the site's own `jal` names. A skipped stock call starts no check.
 - **"Nothing worse".** Not shown here: the private comparison runs of section 11.2, item 4 come with the pull request
   that turns a title's 60 FPS game logic on by default.
+
+##### 11.3.2.2. The 60 FPS logic transform `gate_30hz_phase`
+
+Admitted under this section by its own entry, as section 11.3.2 asks.
+
+- **Key and off switch.** Those of section 11.3.2: the title's "60 FPS game logic" setting, which launches the
+  enhanced package with `SR_EXPERIMENTAL_60HZ=1`, and per title the same setting off, which runs every stock statement.
+  A package leaves the transform out for its title by not naming it.
+- **What it changes.** At a `gate_30hz_phase` site the stock instruction keeps the stock instants of one state: a call
+  is skipped, and a compare reads as its `odd_phase_condition`, when the state's own time is an odd number of half
+  stock steps (section 9.2).
+- **What it reads.** One float of guest memory, at the declared offset from the declared register, each time the site
+  runs: through the guest accessors, as a load at the site would read it. No transform before this one reads guest
+  memory at a declared register and offset to decide what a 60 Hz site does; `clip_x_widen` (section 11.3.6) does so
+  for another class of package. The argument for allowing it here is that the read replaces a counter the runtime
+  would otherwise keep beside the guest (the update count of section 9.5) with the title's own record of the same
+  thing, which is right where the count is wrong: after a state entered on an odd update, and across a pause that
+  stops the state and not the count. The resolver proves the register holds one known value at the site, and the
+  generated code refuses to guess when the float is not on the half-step grid: it runs stock and reports. What the
+  field means is the author's evidence, as for every site.
+- **What the guest can observe.**
+  - Guest registers and memory: nothing is written. On an odd phase a skipped call's work does not happen, and
+    `$v0`, `$v1`, `f0`-`f3`, HI and LO keep their earlier values; the resolver refuses a site whose caller reads them.
+    After a gated compare on an odd phase the FPU condition flag (`fpcond` and bit 23 of FCR31) holds
+    `odd_phase_condition` and not the compare's result, for every later reader of the flag.
+  - VRAM bytes: no transform writes VRAM; the frames drawn follow the logic.
+  - Readbacks: unchanged.
+  - Timing the guest can measure: no VBLANK, DMA, GE list or media clock changes. An odd phase does less work, by
+    the skipped call.
+  - I/O speed: unchanged.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2: without `--enhancement-package` codegen output is unchanged,
+  and with the package built in and the toggle off the site runs its stock statement, with no read.
+  `test_generated_statements_match_the_rules_when_run` in `tools/test_enhancement_package.py` builds a fixture with
+  the package and without it, runs both, and checks that the toggle-off output equals the Authentic output byte for
+  byte, and the toggle-on run time by time against the rule.
+- **Sampled checking.** As section 11.3.2: a sampled call whose body holds the site reports a mismatch there with the
+  toggle on. A skipped call starts no check.
+- **"Nothing worse".** Not shown here: the private comparison runs of section 11.2, item 4 come with the pull request
+  that turns a title's 60 FPS game logic on by default.
+
+##### 11.3.2.3. The 60 FPS logic transform `velocity_source_x_kappa`
+
+Admitted under this section by its own entry.
+
+- **Key and off switch.** Those of section 11.3.2. A package leaves the transform out for its title by not naming it.
+- **What it changes.** The value a site loads or stores, a source of velocity change, is multiplied by
+  $\kappa = 2\mu / (1 + \mu)$, $\mu = \sqrt{1 - cL}$, where $c$ and $L$ are stock values of the title read from its
+  executable (section 9.2). For a lightly damped body $\kappa$ is just below 1.
+- **What the guest can observe.**
+  - Guest registers and memory: after an `lwc1`, `lv.s` or `lv.q` site the loaded FPU register, VFPU register or
+    four VFPU lanes hold the stock value times $\kappa$; the memory they were loaded from is unchanged, so every
+    other reader of it sees the stock value. A `swc1` site stores the scaled value and leaves its register alone, so
+    every later reader of the stored field sees the scaled value. Everything computed from these follows.
+  - VRAM bytes: no transform writes VRAM; the frames drawn follow the logic.
+  - Readbacks: unchanged.
+  - Timing the guest can measure: unchanged.
+  - I/O speed: unchanged.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2. `test_emitted_forms` in `tools/test_enhancement_package.py`
+  checks that a build without the package holds none of the rewrite and that each site's toggle-off statement is the
+  Authentic one.
+- **Sampled checking.** As section 11.3.2.
+- **"Nothing worse".** `test_two_updates_reproduce_one_stock_update_at_the_end_of_every_pair` pins what the factor is
+  for: with it, and the transforms of sections 11.3.2.2, 11.3.2.4 and 11.3.2.5, a modelled arc meets the stock arc at
+  the end of every pair of updates, and without it the arc differs. The private comparison runs come with the pull
+  request that turns a title's 60 FPS game logic on by default.
+
+##### 11.3.2.4. The 60 FPS logic transform `launch_from_rest_60hz`
+
+Admitted under this section by its own entry.
+
+- **Key and off switch.** Those of section 11.3.2. A package leaves the transform out for its title by not naming it.
+- **What it changes.** After the call at the site returns, the velocity the callee left on the body in `$a0` is mapped
+  to its two-update image: both floats times $\kappa$, and $q g$ added on the gravity axis (section 9.2).
+- **What it reads and writes.** Two floats of guest memory, at `velocity_offset` and `velocity_offset + 4` from the
+  site's `$a0`, read and then written through the guest accessors once per run of the site. It is the first site
+  transform of section 9.2 that writes guest memory other than through the title's own store instruction (the data
+  sites of section 9.6 rewrite loaded data once, at start-up). The argument for allowing it: a launch from rest is
+  the one point where no scaling of a constant gives the image, because the image of a velocity that is set, not
+  accumulated, has an additive term ($q g$, about a quarter of a step of gravity); the write is to the one field the
+  callee has just written, with values computed from that field and from stock values read from the executable; and
+  it is declared, digest-checked and fail-closed like every site. That `$a0` is the body and the offset its velocity
+  is the author's evidence.
+- **What the guest can observe.**
+  - Guest registers and memory: the two floats differ from stock's as above; no register differs. Everything the
+    logic computes from the velocity follows, as section 9.2 says of the velocity in flight.
+  - VRAM bytes: no transform writes VRAM; the frames drawn follow the logic.
+  - Readbacks: unchanged.
+  - Timing the guest can measure: unchanged.
+  - I/O speed: unchanged.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2. `test_generated_statements_match_the_rules_when_run` checks
+  that the toggle-off statement leaves the body's floats, the words beside them and `$a0` as the Authentic statement
+  does, byte for byte, and the toggle-on result bit for bit against the rule.
+- **Sampled checking.** As section 11.3.2: a sampled call whose body holds the site reports a mismatch there with the
+  toggle on.
+- **"Nothing worse".** As section 11.3.2.3.
+
+##### 11.3.2.5. `retention_m_to_sqrt(m)` on an Arithmetic Result
+
+`retention_m_to_sqrt(m)` on a `lui`, an `lwc1` or an `lv.s` predates this section. Its form on `add.s`, `sub.s`,
+`mul.s` or `div.s` is admitted here by its own entry.
+
+- **Key and off switch.** Those of section 11.3.2. A package leaves the form out for its title by not naming it.
+- **What it changes.** The result register of the arithmetic instruction, a per-update retention the title computes
+  (such as $1 - cL$), is replaced by its square root when it lies in $(0, 1)$; outside that range it keeps its stock
+  value and the site reports once (`ENHANCEMENT_FACTOR_KEPT`), as the `lwc1` form does.
+- **What the guest can observe.**
+  - Guest registers and memory: the one FPU register, and everything computed from it. No memory is written.
+  - VRAM bytes, readbacks, timing the guest can measure and I/O speed: unchanged, as section 11.3.2.3.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2; `test_emitted_forms` checks the emitted statement.
+- **Sampled checking.** As section 11.3.2.
+- **"Nothing worse".** As section 11.3.2.3: the model's arc differs from stock's when the retention of half a step
+  is $1 - cL/2$ in place of the square root.
 
 #### 11.3.3. Texture Scaling and the Smart 2D Filter (Not Yet Admitted)
 

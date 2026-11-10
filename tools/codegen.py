@@ -239,6 +239,30 @@ def _enhancement_boundary(addr: int) -> bool:
     return True
 
 
+def _float_holds(factor: float) -> bool:
+    return bool(struct.unpack("<f", struct.pack("<f", factor))[0] == factor)
+
+
+def _scaled_float(cell: str, factor: float) -> str:
+    """``cell`` times a scale factor, as a float expression. A factor a float holds exactly (the
+    constant scales, 2 and 0.5) is a single-precision multiply. Any other (kappa) is multiplied
+    in double and rounded once, which is what a store site's stock-value table and its run-time
+    check compute (enhancement_package._store_value_pairs, nk_enh_scale); for a factor a float
+    holds, the two forms give the same bits."""
+    factor = float(factor)
+    if _float_holds(factor):
+        return f"{cell} * {factor!r}f"
+    return f"(float)((double){cell} * {factor!r})"
+
+
+def _scale_stmt(cell: str, factor: float) -> str:
+    """Scale ``cell`` in place by a scale factor (see _scaled_float)."""
+    factor = float(factor)
+    if _float_holds(factor):
+        return f"{cell} *= {factor!r}f;"
+    return f"{cell} = {_scaled_float(cell, factor)};"
+
+
 def _scaled_store_line(rw: dict, stock_line: str) -> str:
     """A swc1 or sw site that stores its register scaled: the store reads a scaled copy, and
     the register is never written, so an access fault that leaves the statement early
@@ -252,7 +276,7 @@ def _scaled_store_line(rw: dict, stock_line: str) -> str:
     if "stock_values" in rw or "stock_value_digests" in rw:
         return (f"{{ uint32_t _nk_bits = nk_enh_store({rw['site_index']}u, {stored}); "
                 f"{stock.replace(stored, '_nk_bits')} }}")
-    return (f"{{ float _nk_f = s->f[{r}] * {rw['factor']!r}f; uint32_t _nk_bits; "
+    return (f"{{ float _nk_f = {_scaled_float(f's->f[{r}]', rw['factor'])}; uint32_t _nk_bits; "
             f"memcpy(&_nk_bits, &_nk_f, sizeof _nk_bits); "
             f"{stock.replace(stored, '_nk_bits')} }}")
 
@@ -269,7 +293,51 @@ def _mapped_factor_stmt(mapping: str, cell: str, site_id: str, addr: int) -> str
             f'nk_enhancement_factor_kept(&nk_kept, "{site_id}", 0x{addr:08x}u, {cell}); }}')
 
 
-def _enhanced_line(rw: dict, stock_line: str, word_line: str | None, site_id: str, addr: int) -> str:
+def _guest_word_read(var: str, address: str, addr: int, lle_cpu: bool) -> str:
+    """Declare ``uint32_t var``, the guest word at ``address``, read as a guest load at the site
+    reads it: through MEM_R32, after the LLE CPU's access check when that is on."""
+    if lle_cpu:
+        return (f"uint32_t {var}_ea = {address}; "
+                f"if (sr_cpu_guard_access(s, {var}_ea, 4u, 0, {G(addr)}, 0u, 0u)) return; "
+                f"uint32_t {var} = MEM_R32({var}_ea);")
+    return f"uint32_t {var} = MEM_R32({address});"
+
+
+def _phase_odd_stmt(rw: dict, site_id: str, addr: int, lle_cpu: bool) -> str:
+    """Declare ``int _nk_odd`` for a gate_30hz_phase site: 1 when the state's own time, the float
+    at the declared offset from the declared register, is an odd number of half steps. A time
+    that is not a whole number of them reads as even and is reported once per site."""
+    read = _guest_word_read("_nk_time", f"s->r[{rw['reg']}] + {rw['offset']}u", addr, lle_cpu)
+    return (f"static int nk_kept; {read} "
+            f'int _nk_odd = nk_enhancement_phase_odd(&nk_kept, "{site_id}", 0x{addr:08x}u, _nk_time, '
+            f"{float(rw['half_step'])!r});")
+
+
+def _launch_from_rest_lines(rw: dict, addr: int, lle_cpu: bool, ready: str) -> list[str]:
+    """After a launch_from_rest_60hz call returns: v -> kappa*v for the two floats at the declared
+    offset from the site's $a0 (_nk_a0), plus q*g on the gravity axis, each computed in double and
+    rounded to float once, read and written as a guest load and store at the site."""
+    lines = [f"      if (nk_enhancement_on(){ready}) {{"]
+    for i in (0, 1):
+        var = f"_nk_v{i}"
+        address = f"_nk_a0 + {rw['offset'] + 4 * i}u"
+        mapped = f"(double)_nk_f * {float(rw['kappa'])!r}"
+        if i == rw["axis"]:
+            # One correctly rounded kappa*v + q*g, whether or not the host compiler contracts.
+            mapped = f"fma((double)_nk_f, {float(rw['kappa'])!r}, {float(rw['gravity_offset'])!r})"
+        store = f"MEM_W32_PC({address}, {var}, {G(addr)});"
+        if lle_cpu:
+            store = (f"if (sr_cpu_guard_access(s, {var}_ea, 4u, 1, {G(addr)}, 0u, 0u)) return; "
+                     f"MEM_W32_PC({var}_ea, {var}, {G(addr)});")
+        lines.append(f"        {{ {_guest_word_read(var, address, addr, lle_cpu)} float _nk_f; "
+                     f"memcpy(&_nk_f, &{var}, sizeof _nk_f); _nk_f = (float)({mapped}); "
+                     f"memcpy(&{var}, &_nk_f, sizeof {var}); {store} }}")
+    lines.append("      }")
+    return lines
+
+
+def _enhanced_line(rw: dict, stock_line: str, word_line: str | None, site_id: str, addr: int,
+                   lle_cpu: bool = False) -> str:
     """Both forms of one rewritten site: the stock statement runs unless the
     experimental toggle is on at run time (nk_enhancement_on())."""
     kind = rw["kind"]
@@ -295,16 +363,24 @@ def _enhanced_line(rw: dict, stock_line: str, word_line: str | None, site_id: st
     elif kind == "scale_int_args":
         enh = " ".join([stock_line.strip()] + [f"s->r[{r}] <<= 1;" for r in rw["regs"]])
     elif kind == "scale_f_reg":
-        enh = f"{stock_line.strip()} s->f[{rw['reg']}] *= {rw['factor']!r}f;"
+        enh = f"{stock_line.strip()} {_scale_stmt(f's->f[{rw['reg']}]', rw['factor'])}"
     elif kind == "map_f_reg":
         cell = f"s->f[{rw['reg']}]"
         enh = f"{stock_line.strip()} {_mapped_factor_stmt(rw['map'], cell, site_id, addr)}"
     elif kind == "scale_v_reg":
         v = vreg_indices(rw["vreg"], 1)[0]
-        enh = f"{stock_line.strip()} s->v[{v}] *= {rw['factor']!r}f;"
+        enh = f"{stock_line.strip()} {_scale_stmt(f's->v[{v}]', rw['factor'])}"
     elif kind == "map_v_reg":
         v = vreg_indices(rw["vreg"], 1)[0]
         enh = f"{stock_line.strip()} {_mapped_factor_stmt(rw['map'], f's->v[{v}]', site_id, addr)}"
+    elif kind == "scale_vq_reg":
+        scaled = " ".join(_scale_stmt(f"s->v[{v}]", rw["factor"]) for v in vreg_indices(rw["vreg"], 4))
+        enh = f"{stock_line.strip()} {scaled}"
+    elif kind == "gate_phase_cond":
+        # The compare runs; half a stock step after a stock instant its flag reads as declared.
+        enh = (f"{stock_line.strip()} {{ {_phase_odd_stmt(rw, site_id, addr, lle_cpu)} "
+               f"if (_nk_odd) {{ s->fpcond = {int(rw['condition'])}u; "
+               f"s->fcr31 = (s->fcr31 & ~0x00800000u) | (s->fpcond << 23); }} }}")
     elif kind in ("scale_f_store", "scale_int_store"):
         enh = _scaled_store_line(rw, stock_line)
     elif kind == "scale_f_addend":
@@ -1224,6 +1300,8 @@ def write_funcs_header(path, emitted, resume_owners=None, runtime_modules=(), re
                     "{ return (nk_enhancement_updates & 1u) == 0u; }\n")
             f.write("void nk_enhancement_factor_kept(int *reported, const char *site, uint32_t pc, "
                     "float value);\n")
+            f.write("int nk_enhancement_phase_odd(int *reported, const char *site, uint32_t pc, "
+                    "uint32_t time_bits, double half_step);\n")
             if ENHANCEMENT_STORE_SITES:
                 f.write("uint32_t nk_enh_store(unsigned site, uint32_t bits);\n")
                 f.write("int nk_enh_ready(unsigned site);\n")
@@ -3838,7 +3916,8 @@ def normal_line(addr, w, lle_cpu=None, delay_branch_pc=None, options=None):
         # The trace hook keeps the stock word: guest memory still holds it.
         word_line = _plain_line(addr, rw["word"], w, delay_branch_pc=delay_branch_pc,
                                 options=options)
-    return _enhanced_line(rw, line, word_line, ENHANCEMENT_SITES[addr]["id"], addr)
+    return _enhanced_line(rw, line, word_line, ENHANCEMENT_SITES[addr]["id"], addr,
+                          lle_cpu=bool(options.lle_cpu))
 
 class _PromotedLine:
     """GPRs one instruction reads and writes while it is translated with promotion."""
@@ -4403,6 +4482,26 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
         out.append(f"    {{ static const uint32_t _nk_clip_off[] = {{{_offsets}}};")
         out.append(f"      sr_enhancement_widen_clip_x(s->r[{_jal_rw['reg']}], _nk_clip_off, "
                    f"{len(_jal_rw['offsets'])}u); }}")
+    elif _jal_rw is not None and _jal_rw["kind"] in ("gate_phase", "launch_from_rest"):
+        # A site with ``requires`` runs stock until each required site has applied (section 9.6).
+        _ready = f" && nk_enh_ready({_jal_rw['site_index']}u)" if "requires" in _jal_rw else ""
+        _site_id = ENHANCEMENT_SITES[addr]["id"]
+        if _jal_rw["kind"] == "gate_phase":
+            # gate_30hz_phase (contract section 9.2): the delay slot above always runs; the call
+            # is skipped when the state's own time is an odd number of half steps.
+            out.append("    { int _nk_run = 1;")
+            out.append(f"      if (nk_enhancement_on(){_ready}) {{ "
+                       f"{_phase_odd_stmt(_jal_rw, _site_id, addr, bool(lle_cpu))} _nk_run = !_nk_odd; }}")
+            out.append("      if (_nk_run) {")
+            out.extend(_call_stmt.split("\n"))
+            out.append("      } }")
+        else:
+            # launch_from_rest_60hz (contract section 9.2): the stock call runs unchanged; when
+            # it returns, the velocity it left is mapped, with $a0 as it was after the delay slot.
+            out.append("    { uint32_t _nk_a0 = s->r[4];")
+            out.extend(_call_stmt.split("\n"))
+            out.extend(_launch_from_rest_lines(_jal_rw, addr, bool(lle_cpu), _ready))
+            out.append("    }")
     elif _jal_rw is not None:
         # A gate on a call (gate_30hz, gate_30hz_hold or gate_30hz_alt; no other rewrite
         # plans a call site): the delay slot above always runs; the call is gated while the
@@ -6058,11 +6157,17 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                 symbol_to_addr=sym_map,
                 read_words_fn=_read_words,
                 known_functions=sorted(known),
+                read_data_fn=_read_loaded_data,
             )
+            # A value_reference site pins a stock value for other sites and rewrites nothing:
+            # it is resolved and checked above, and no statement is emitted for it.
+            ENHANCEMENT_SITES = {a: site for a, site in ENHANCEMENT_SITES.items()
+                                 if site["rewrite"]["kind"] != "reference"}
             for site in ENHANCEMENT_SITES.values():
                 stock = site["stock_words"][0]
                 if is_control(stock) and not (
-                    (stock >> 26) == 3 and site["rewrite"]["kind"] in ("gate", "clip_x_widen")
+                    (stock >> 26) == 3 and site["rewrite"]["kind"] in (
+                        "gate", "clip_x_widen", "gate_phase", "launch_from_rest")
                 ):
                     raise enhancement_package.EnhancementPackageError(
                         f"site {site['id']}: only a jal call site can be rewritten among "
@@ -6201,6 +6306,26 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
             "    *reported = 1;",
             '    fprintf(stderr, "ENHANCEMENT_FACTOR_KEPT: site %s at 0x%08x loaded %.9g, outside (0, 1); "',
             '            "it keeps its stock value\\n", site, (unsigned)pc, (double)value);',
+            "}",
+            "/* The phase of a gate_30hz_phase site (docs/ENHANCEMENT_CONTRACT.md section 9.2): 1 when the",
+            " * state's own time is an odd number of half steps, 0 on an even one. A time more than a",
+            " * quarter of a half step from a whole number of them, negative or not a number reads as 0,",
+            " * so the site runs its stock instruction, and is reported once per site. */",
+            "int nk_enhancement_phase_odd(int *reported, const char *site, uint32_t pc, uint32_t time_bits,",
+            "                             double half_step) {",
+            "    float t;",
+            "    double x, n;",
+            "    memcpy(&t, &time_bits, sizeof t);",
+            "    x = (double)t / half_step;",
+            "    n = floor(x + 0.5);",
+            "    if (x >= -0.25 && x < 2147483648.0 && fabs(x - n) <= 0.25) return (int)((uint32_t)n & 1u);",
+            "    if (!*reported) {",
+            "        *reported = 1;",
+            '        fprintf(stderr, "ENHANCEMENT_PHASE_KEPT: site %s at 0x%08x read the time %.9g, not a whole "',
+            '                "number of half steps of %.9g; it runs its stock instruction\\n", site, (unsigned)pc,',
+            "                (double)t, half_step);",
+            "    }",
+            "    return 0;",
             "}",
             "",
         ]

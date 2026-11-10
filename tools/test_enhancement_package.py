@@ -22,6 +22,7 @@ import hashlib
 import itertools
 from io import StringIO
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -4156,5 +4157,809 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                     mock.patch("sys.stderr", new=StringIO()), mock.patch("sys.stdout", new=StringIO()):
                 self.assertNotEqual(enhancement_package.main(args), 0)
             self.assertFalse(out.exists())
+
+
+def _lui(rt: int, imm: int) -> int:
+    return _i(0x0F, 0, rt, imm)
+
+
+def _lvs(vt: int, off: int, base: int) -> int:
+    return _i(0x32, base, vt & 31, (off & 0xFFFC) | (vt >> 5))
+
+
+def _lvq(vt: int, off: int, base: int) -> int:
+    return _i(0x36, base, vt & 31, (off & 0xFFFC) | (vt >> 5))
+
+
+def _fpu_s(fn: int, fd: int, fs: int, ft: int) -> int:
+    return (0x11 << 26) | (0x10 << 21) | (ft << 16) | (fs << 11) | (fd << 6) | fn
+
+
+def _bc1f(pc: int, to: int) -> int:
+    return _i(0x11, 0x08, 0, (to - pc - 4) >> 2)
+
+
+def _f32_round(value: float) -> float:
+    rounded: float = struct.unpack("<f", struct.pack("<f", value))[0]
+    return rounded
+
+
+class TestTwoUpdateTransforms(unittest.TestCase):
+    """gate_30hz_phase, velocity_source_x_kappa, launch_from_rest_60hz, value_reference and
+    retention_m_to_sqrt(m) on an arithmetic result (contract section 9.2), on a synthetic guest.
+
+    WORLD loads an acceleration g and a damping coefficient c from data. INTEGRATE loads the step
+    h, a gravity column, and computes the retention 1 - c*L. STATE compares its own time, the
+    float at 20 from its state pointer in $s0, with a threshold and calls IMPULSE. LAUNCH calls
+    IMPULSE on a body in $a0 whose velocity is the two floats at 0x70. TUNE stores an impulse size.
+    Every value is made up for this fixture."""
+
+    ENTRY, WORLD, INTEGRATE, STATE, IMPULSE, LAUNCH, TUNE, END = (
+        0x1000, 0x1100, 0x1200, 0x1300, 0x1400, 0x1500, 0x1600, 0x1700)
+    DATA = 0x2000
+    GRAVITY, DAMPING, DAMPING_STEP, STEP = -4.0, 0.25, 0.0625, _f32_round(1.0 / 30.0)
+    BOOST = 0.125
+    COMPARE_AT, CALL_AT, LAUNCH_AT = 0x18, 0x28, 0x08
+    F0, F1, F2, F3, F4, F13 = 0, 1, 2, 3, 4, 13
+
+    def _world(self) -> list[int]:
+        return [_lui(V0, 0), _lvs(1, self.DATA, V0), _lui(V0, 0), _lwc1(self.F0, self.DATA + 4, V0), JR_RA, NOP]
+
+    def _integrate(self) -> list[int]:
+        return [_lui(V0, 0), _lwc1(self.F13, self.DATA + 0xC, V0), _lvq(0, 0x40, A0), _lwc1(self.F2, 0x50, A0),
+                _lwc1(self.F4, self.DATA + 8, V0), _fpu_s(0x02, self.F2, self.F2, self.F4),
+                _lwc1(self.F0, self.DATA + 0x10, V0), _fpu_s(0x01, self.F3, self.F0, self.F2), JR_RA, NOP]
+
+    def _state(self) -> list[int]:
+        s = self.STATE
+        return [_addiu(SP, SP, -16), _sw(RA, 12, SP), _sw(S0, 8, SP), _move(S0, A0),
+                _lwc1(self.F1, 20, S0), _lwc1(self.F0, 124, S0), _fpu_s(0x3E, 0, self.F0, self.F1), NOP,
+                _bc1f(s + 0x20, s + 0x30), NOP, _jal(self.IMPULSE), _move(A0, S0),
+                _lw(V0, 24, S0), _lw(V1, 28, S0), _lwc1(self.F0, 32, S0), _lw(S0, 8, SP), _lw(RA, 12, SP),
+                JR_RA, _addiu(SP, SP, 16)]
+
+    def _impulse(self) -> list[int]:
+        return [JR_RA, NOP]
+
+    def _launch(self) -> list[int]:
+        return [_addiu(SP, SP, -8), _sw(RA, 4, SP), _jal(self.IMPULSE), NOP, _lw(RA, 4, SP), JR_RA,
+                _addiu(SP, SP, 8)]
+
+    def _tune(self) -> list[int]:
+        return [_swc1(self.F0, 140, A0), JR_RA, NOP]
+
+    def _entry(self) -> list[int]:
+        calls: list[int] = []
+        for target in (self.WORLD, self.INTEGRATE, self.STATE, self.LAUNCH, self.TUNE):
+            calls += [_jal(target), NOP]
+        return calls + [JR_RA, NOP]
+
+    def _words(self, **parts: list[int]) -> dict[int, int]:
+        layout = {"entry": self.ENTRY, "world": self.WORLD, "integrate": self.INTEGRATE, "state": self.STATE,
+                  "impulse": self.IMPULSE, "launch": self.LAUNCH, "tune": self.TUNE}
+        words: dict[int, int] = {}
+        for name, base in layout.items():
+            code = parts.get(name) or getattr(self, f"_{name}")()
+            words.update({base + 4 * i: w for i, w in enumerate(code)})
+        for addr in range(self.ENTRY, self.END, 4):
+            words.setdefault(addr, NOP)
+        return words
+
+    def _data(self, **values: float) -> bytes:
+        floats = {"gravity": self.GRAVITY, "damping": self.DAMPING, "damping_step": self.DAMPING_STEP,
+                  "step": self.STEP, "one": 1.0}
+        floats.update(values)
+        return b"".join(struct.pack("<f", floats[k]) for k in ("gravity", "damping", "damping_step", "step", "one"))
+
+    def _symbols(self) -> dict[str, int]:
+        return {"synth_entry": self.ENTRY, "synth_world": self.WORLD, "synth_integrate": self.INTEGRATE,
+                "synth_state": self.STATE, "synth_impulse": self.IMPULSE, "synth_launch": self.LAUNCH,
+                "synth_tune": self.TUNE}
+
+    def _sites(self, words: dict[int, int]) -> dict[str, dict[str, Any]]:
+        def site(name: str, function: str, offset: int, transform: str, **extra: Any) -> dict[str, Any]:
+            addr = self._symbols()[function] + offset
+            return {"id": name, "function": function, "insn_offset": offset,
+                    "stock_digest": compute_stock_words_digest([words[addr]]), "transform": transform, **extra}
+
+        damping = {"damping_site": "C", "damping_step_site": "DSTEP"}
+        phase = {"phase_time": {"register": "s0", "offset": 20}, "step_site": "STEP"}
+        sites = [
+            site("G", "synth_world", 4, "value_reference"),
+            site("C", "synth_world", 0xC, "value_reference"),
+            site("STEP", "synth_integrate", 4, "step_x0.5"),
+            site("DSTEP", "synth_integrate", 0x10, "value_reference"),
+            site("GRAVITY", "synth_integrate", 8, "velocity_source_x_kappa", **damping),
+            site("RETAIN", "synth_integrate", 0x1C, "retention_m_to_sqrt(m)"),
+            site("COMPARE", "synth_state", self.COMPARE_AT, "gate_30hz_phase", **phase, odd_phase_condition=False),
+            site("CALL", "synth_state", self.CALL_AT, "gate_30hz_phase", **phase),
+            site("LAUNCH", "synth_launch", self.LAUNCH_AT, "launch_from_rest_60hz", velocity_offset=0x70,
+                 gravity_axis=1, gravity_site="G", step_site="STEP", **damping),
+            site("BOOST", "synth_tune", 0, "velocity_source_x_kappa", stock_values=[self.BOOST], **damping),
+        ]
+        return {s["id"]: s for s in sites}
+
+    def _package(self, words: dict[int, int], sha256: str, **changes: Any) -> dict[str, Any]:
+        """The fixture's package. ``changes`` maps a site id to the fields to set on it (None removes a
+        field), or to None to leave the site out."""
+        sites = self._sites(words)
+        for name, fields in changes.items():
+            if fields is None:
+                del sites[name]
+                continue
+            site = sites.setdefault(name, {"id": name})
+            site.update(fields)
+            for key in [k for k, v in site.items() if v is None]:
+                del site[key]
+            if "stock_digest" not in fields:
+                at = self._symbols()[site["function"]] + site["insn_offset"]
+                site["stock_digest"] = compute_stock_words_digest(
+                    [words[at + 4 * i] for i in range(site.get("word_count", 1))])
+        return {
+            "schema_version": 1, "id": "synth.two-update", "display_name": "Synthetic two-update motion",
+            "version": "1.0.0", "category": "timing_frame_presentation",
+            "target_title_id": "synthetic-allegrex-v1", "game_version": "1.00",
+            "executable_sha256": sha256, "capabilities": ["two_update_motion"],
+            "rng_policy": {"mode": "subtick_30hz", "reason": "No random rolls in this fixture."},
+            "sites": list(sites.values()),
+        }
+
+    def _resolve(self, words: dict[int, int] | None = None, *, data: bytes | None = None,
+                 with_data: bool = True, known: bool = True, **changes: Any) -> dict[str, Any]:
+        """Resolve the package over dictionary readers; returns the rewrites by site id."""
+        words = self._words() if words is None else words
+        blob = self._data() if data is None else data
+
+        def read_words(addr: int, count: int) -> list[int] | None:
+            if all(addr + 4 * i in words for i in range(count)):
+                return [words[addr + 4 * i] for i in range(count)]
+            return None
+
+        def read_data(addr: int, count: int) -> bytes | None:
+            lo = addr - self.DATA
+            return blob[lo:lo + count] if 0 <= lo and lo + count <= len(blob) else None
+
+        resolved = verify_and_resolve_sites(
+            self._package(words, "a" * 64, **changes), executable_sha256="a" * 64,
+            symbol_to_addr=self._symbols(), read_words_fn=read_words,
+            read_data_fn=read_data if with_data else None,
+            known_functions=[self.ENTRY, self.WORLD, self.INTEGRATE, self.STATE, self.IMPULSE, self.LAUNCH,
+                             self.TUNE, self.END] if known else [])
+        return {entry["id"]: entry["rewrite"] for entry in resolved.values()}
+
+    def _factors(self) -> tuple[float, float]:
+        kappa, q = enhancement_package.two_update_factors(self.DAMPING, self.DAMPING_STEP, self.STEP)
+        assert q is not None
+        return kappa, q
+
+    def test_resolved_rewrites_come_from_the_referenced_stock_values(self) -> None:
+        """kappa, q*g and h/2 are computed from the floats the referenced sites load: nothing in the
+        package holds them."""
+        rewrites = self._resolve()
+        kappa, q = self._factors()
+        mu = math.sqrt(1.0 - self.DAMPING * self.DAMPING_STEP)
+        self.assertEqual(kappa, 2.0 * mu / (1.0 + mu))
+        self.assertEqual(q, self.STEP * mu * mu / (1.0 + mu) ** 2)
+        phase = {"reg": 16, "offset": 20, "half_step": self.STEP / 2}
+        self.assertEqual(rewrites, {
+            "G": {"kind": "reference"}, "C": {"kind": "reference"}, "DSTEP": {"kind": "reference"},
+            "STEP": {"kind": "scale_f_reg", "reg": 13, "factor": 0.5},
+            "GRAVITY": {"kind": "scale_vq_reg", "vreg": 0, "factor": kappa},
+            "RETAIN": {"kind": "map_f_reg", "reg": 3, "map": "retention"},
+            "COMPARE": {"kind": "gate_phase_cond", **phase, "condition": False},
+            "CALL": {"kind": "gate_phase", **phase},
+            "LAUNCH": {"kind": "launch_from_rest", "offset": 0x70, "axis": 1, "kappa": kappa,
+                       "gravity_offset": q * self.GRAVITY},
+            "BOOST": {"kind": "scale_f_store", "reg": 0, "factor": kappa,
+                      "stock_values": [[_f32_bits_of(self.BOOST), _f32_bits_of(self.BOOST * kappa)]]},
+        })
+        # Other stock values give other factors: the rule is published, never its result.
+        other = self._resolve(data=self._data(damping=0.5, gravity=-8.0))
+        kappa2, q2 = enhancement_package.two_update_factors(0.5, self.DAMPING_STEP, self.STEP)
+        assert q2 is not None
+        self.assertNotEqual(kappa2, kappa)
+        self.assertEqual(other["GRAVITY"]["factor"], kappa2)
+        self.assertEqual(other["LAUNCH"]["gravity_offset"], q2 * -8.0)
+        # A float built by a lui/ori pair is a reference too (word_count 2), and so is a lone lui
+        # with its pinned low word.
+        bits = _f32_bits_of(0.5)
+        pair = [_lui(V1, bits >> 16), _i(0x0D, V1, V1, bits & 0xFFFF)]
+        words = self._words(world=self._world()[:2] + pair + [JR_RA, NOP])
+        as_pair = self._resolve(words, C={"insn_offset": 8, "word_count": 2})
+        self.assertEqual(as_pair["GRAVITY"]["factor"], kappa2)
+        self.assertEqual(as_pair["C"], {"kind": "reference"})
+        as_low = self._resolve(words, C={"insn_offset": 8, "low_insn_offset": 0xC,
+                                         "low_stock_digest": compute_stock_words_digest(pair[1:])})
+        self.assertEqual(as_low["GRAVITY"]["factor"], kappa2)
+
+    def test_plans_without_resolved_values_are_refused(self) -> None:
+        words = self._words()
+        sites = self._sites(words)
+        for name in ("GRAVITY", "COMPARE", "CALL", "LAUNCH"):
+            site = dict(sites[name], word_count=1)
+            addr = self._symbols()[site["function"]] + site["insn_offset"]
+            with self.subTest(name), self.assertRaisesRegex(EnhancementPackageError, "resolve the package"):
+                plan_site_rewrite(site, words[addr])
+        retain = {"id": "R", "transform": "retention_m_to_sqrt(m)"}
+        for fn in (0x00, 0x01, 0x02, 0x03):
+            self.assertEqual(plan_site_rewrite(retain, _fpu_s(fn, 3, 0, 2)),
+                             {"kind": "map_f_reg", "reg": 3, "map": "retention"})
+        # A move, a compare, and the decay transform on arithmetic keep their refusals.
+        for word in (_fpu_s(0x06, 3, 0, 0), _fpu_s(0x3E, 0, 0, 1)):
+            with self.assertRaisesRegex(EnhancementPackageError, "or single-precision arithmetic"):
+                plan_site_rewrite(retain, word)
+        with self.assertRaisesRegex(EnhancementPackageError, r"an lwc1 or an lv\.s\) \(fail-closed"):
+            plan_site_rewrite({"id": "D", "transform": "decay_k_to_1-sqrt(1-k)"}, _fpu_s(0x01, 3, 0, 2))
+
+    def test_schema_refusals(self) -> None:
+        words = self._words()
+        cases: tuple[tuple[str, dict[str, Any], str], ...] = (
+            ("no step site", {"CALL": {"step_site": None}}, "gate_30hz_phase needs step_site"),
+            ("unknown site", {"CALL": {"step_site": "NOWHERE"}}, "must name another site of this package"),
+            ("its own id", {"GRAVITY": {"damping_site": "GRAVITY"}}, "must name another site of this package"),
+            ("a foreign reference", {"STEP": {"step_site": "C"}}, "step_site belongs only to gate_30hz_phase, "),
+            ("gravity on a gate", {"CALL": {"gravity_site": "G"}}, "gravity_site belongs only to launch_from_rest"),
+            ("no phase time", {"CALL": {"phase_time": None}}, "needs phase_time"),
+            ("a caller-saved register", {"CALL": {"phase_time": {"register": "a0", "offset": 20}}},
+             "needs phase_time"),
+            ("an unaligned time", {"CALL": {"phase_time": {"register": "s0", "offset": 22}}}, "needs phase_time"),
+            ("an extra phase field", {"CALL": {"phase_time": {"register": "s0", "offset": 20, "scale": 2}}},
+             "needs phase_time"),
+            ("a condition that is no boolean", {"COMPARE": {"odd_phase_condition": 0}}, "must be true or false"),
+            ("a phase time elsewhere", {"STEP": {"phase_time": {"register": "s0", "offset": 20}}},
+             "phase_time belongs only to gate_30hz_phase"),
+            ("an unaligned velocity", {"LAUNCH": {"velocity_offset": 0x72}}, "needs velocity_offset"),
+            ("a third axis", {"LAUNCH": {"gravity_axis": 2}}, "needs gravity_axis"),
+            ("a boolean axis", {"LAUNCH": {"gravity_axis": True}}, "needs gravity_axis"),
+            ("an axis elsewhere", {"STEP": {"gravity_axis": 1}}, "gravity_axis belongs only to launch_from_rest"),
+            ("two words", {"CALL": {"word_count": 2}}, "names one instruction"),
+            ("a reference held back", {"G": {"requires": ["BOOST"]}}, "no rewrite for requires to hold back"),
+            ("values on a reference", {"G": {"stock_values": [1.0]}}, "belongs only to a store site"),
+        )
+        for name, changes, why in cases:
+            with self.subTest(name), self.assertRaisesRegex(EnhancementPackageError, why):
+                validate_package(self._package(words, "a" * 64, **changes))
+        validate_package(self._package(words, "a" * 64))
+
+    def test_instruction_refusals(self) -> None:
+        cases: tuple[tuple[str, dict[str, Any], str], ...] = (
+            ("a gate on a load", {"CALL": {"insn_offset": 0x10}},
+             "gate_30hz_phase takes a jal or a single-precision compare"),
+            ("a compare with no condition", {"COMPARE": {"odd_phase_condition": None}},
+             "compare needs odd_phase_condition"),
+            ("a call with a condition", {"CALL": {"odd_phase_condition": True}},
+             "odd_phase_condition belongs to a compare site"),
+            ("a launch that is no call", {"LAUNCH": {"insn_offset": 0}}, "launch_from_rest_60hz takes a jal"),
+            ("kappa on arithmetic", {"GRAVITY": {"insn_offset": 0x14}},
+             "velocity_source_x_kappa takes an lwc1, an lv.s, an lv.q or a swc1"),
+            ("a reference to no load", {"X": {"function": "synth_launch", "insn_offset": 0xC,
+                                             "transform": "value_reference"}},
+             "value_reference pins the float"),
+            ("a lone lui", {"X": {"function": "synth_world", "insn_offset": 8, "transform": "value_reference"}},
+             "value_reference pins the float"),
+            ("a reference that pins no float", {"GRAVITY": {"damping_site": "CALL"}},
+             "site 'CALL' does not pin a float"),
+        )
+        for name, changes, why in cases:
+            with self.subTest(name), self.assertRaisesRegex(EnhancementPackageError, why):
+                self._resolve(**changes)
+
+    def test_referenced_values_are_read_and_checked(self) -> None:
+        cases: tuple[tuple[str, dict[str, Any], str], ...] = (
+            ("damping of one or more", {"data": self._data(damping=16.0)}, r"c\*L = 1\.0, is outside \(0, 1\)"),
+            ("no damping", {"data": self._data(damping=0.0)}, r"is outside \(0, 1\)"),
+            ("negative damping", {"data": self._data(damping_step=-0.0625)}, r"is outside \(0, 1\)"),
+            ("no step", {"data": self._data(step=0.0)}, "h = 0.0 is not a positive number"),
+            ("a backward step", {"data": self._data(step=-0.03125)}, "is not a positive number"),
+            ("a step that is no number", {"data": self._data(step=float("nan"))}, "pins a float that is not finite"),
+            ("no data reader", {"with_data": False}, "which this resolver was not given"),
+            ("data that ends early", {"data": self._data()[:6]}, "is not initialised data of the executable"),
+            ("a computed base", {"words": self._words(world=[_lui(V0, 0), _lvs(1, self.DATA, V0), _move(V0, A0),
+                                                               _lwc1(0, self.DATA + 4, V0), JR_RA, NOP])},
+             "the base register of its load is computed at 0x00001108"),
+            ("a base from a call", {"words": self._words(world=[_lui(V0, 0), _lvs(1, self.DATA, V0),
+                                                                 _jal(self.IMPULSE), NOP,
+                                                                 _lwc1(0, self.DATA + 4, V0), JR_RA, NOP]),
+                                     "C": {"insn_offset": 0x10}},
+             "does not load from a constant address"),
+            ("a base set in a delay slot", {"words": self._words(world=[
+                _lui(V0, 0), _lvs(1, self.DATA, V0), _beq(ZERO, ZERO, self.WORLD + 8, self.WORLD + 0x10),
+                _lui(V0, 0), _lwc1(0, self.DATA + 4, V0), JR_RA, NOP]), "C": {"insn_offset": 0x10}},
+             "does not load from a constant address"),
+        )
+        for name, kwargs, why in cases:
+            with self.subTest(name), self.assertRaisesRegex(EnhancementPackageError, why):
+                self._resolve(**kwargs)
+        # A lui then an addiu of the same register is a constant base too.
+        split = [_lui(V0, 0), _lvs(1, self.DATA, V0), _lui(V0, 0), _addiu(V0, V0, self.DATA),
+                 _lwc1(0, 4, V0), JR_RA, NOP]
+        rewrites = self._resolve(self._words(world=split), C={"insn_offset": 0x10})
+        self.assertEqual(rewrites["GRAVITY"]["factor"], self._factors()[0])
+        # The gate reads only the step: it needs no damping, and refuses a step it cannot halve.
+        with self.assertRaisesRegex(EnhancementPackageError, r"sites\[\d\]\(COMPARE\).*not a positive number"):
+            self._resolve(data=self._data(step=0.0), GRAVITY=None, LAUNCH=None, BOOST=None)
+
+    def _state_with(self, at: int, new: list[int]) -> dict[int, int]:
+        body = self._state()
+        body[at // 4:at // 4 + len(new)] = new
+        return self._words(state=body)
+
+    def test_phase_register_is_written_once_before_the_site(self) -> None:
+        s = self.STATE
+        # The epilogue restores $s0 after both sites: that write comes before neither, and is accepted.
+        self.assertEqual(self._resolve()["CALL"]["kind"], "gate_phase")
+        skip_the_move = self._state()
+        skip_the_move[1:3] = [_beq(A1, ZERO, s + 4, s + 0x10), NOP]     # one path keeps the caller's $s0
+        second_move = self._state_with(0x1C, [_move(S0, A1)])           # between the compare and the call
+        loop = self._state()
+        loop[12:14] = [_beq(V0, ZERO, s + 0x30, s + 0x10), _addiu(S0, S0, 4)]   # steps $s0, then back
+        cases: tuple[tuple[str, dict[int, int], str], ...] = (
+            ("a path without the write", self._words(state=skip_the_move),
+             r"on a path that does not write \$s0 first, at 0x0000130c"),
+            ("no write at all", self._state_with(0x0C, [NOP]), r"writes \$s0 0 times on its paths to the site"),
+            ("a second write before the call", second_move,
+             r"\(CALL\).*writes \$s0 2 times on its paths to the site \(0x0000130c, 0x0000131c\)"),
+            ("a write in the call's delay slot", self._state_with(0x2C, [_move(S0, A0)]),
+             r"delay slot of the gated call writes \$s0"),
+            ("a write on a loop back", self._words(state=loop),
+             r"writes \$s0 2 times on its paths to the site \(0x0000130c, 0x00001334\)"),
+            ("an unreadable word before the site", self._state_with(0x1C, [0x70000000]),
+             r"has a word this check cannot read at 0x0000131c"),
+        )
+        for name, words, why in cases:
+            with self.subTest(name), self.assertRaisesRegex(EnhancementPackageError, why):
+                self._resolve(words)
+        # The second move follows the compare, so the compare alone is accepted.
+        self.assertEqual(self._resolve(second_move, CALL=None)["COMPARE"]["reg"], 16)
+        with self.assertRaisesRegex(EnhancementPackageError, "is not a known function start"):
+            self._resolve(known=False)
+
+    def test_gated_call_and_compare_refusals(self) -> None:
+        s = self.STATE
+        compare_in_slot = self._state()
+        compare_in_slot[5:8] = [_beq(A1, ZERO, s + 0x14, s + 0x20), _fpu_s(0x3E, 0, self.F0, self.F1), NOP]
+        cases: tuple[tuple[str, dict[int, int], dict[str, Any], str], ...] = (
+            ("the caller reads the result", self._state_with(0x30, [_addiu(V0, V0, 1)]), {},
+             r"gate_30hz_phase caller 0x00001300 reads \$v0 at 0x00001330 after the gated call"),
+            ("the caller returns the result", self._state_with(0x30, [NOP]), {},
+             r"gate_30hz_phase caller 0x00001300 returns after the gated call without writing \$v0"),
+            ("no branch reads the flag", self._state_with(0x20, [NOP] * 4), {"CALL": None},
+             "no bc1f or bc1t reads the compare's flag in the 4 instructions"),
+            ("a call before the branch", self._state_with(0x1C, [_jal(self.IMPULSE), NOP, NOP]), {"CALL": None},
+             "a call, jump or branch at 0x0000131c follows the compare"),
+            ("another compare first", self._state_with(0x1C, [_fpu_s(0x3C, 0, self.F0, self.F1)]), {"CALL": None},
+             "0x0000131c writes the FPU condition flag before"),
+            ("a compare in a delay slot", self._words(state=compare_in_slot), {"CALL": None},
+             "does not reach the site at 0x00001318 as an instruction of its own"),
+        )
+        for name, words, changes, why in cases:
+            with self.subTest(name), self.assertRaisesRegex(EnhancementPackageError, why):
+                self._resolve(words, **changes)
+        # An lv.q in a delay slot is refused: the column is scaled where straight-line code loads it.
+        base = self.INTEGRATE
+        slot = [_lui(V0, 0), _lwc1(self.F13, self.DATA + 0xC, V0), _beq(ZERO, ZERO, base + 8, base + 0x10),
+                _lvq(0, 0x40, A0), _lui(V0, 0), _lwc1(self.F4, self.DATA + 8, V0), JR_RA, NOP]
+        with self.assertRaisesRegex(EnhancementPackageError, "an lv.q site is in the delay slot of"):
+            self._resolve(self._words(integrate=slot), GRAVITY={"insn_offset": 0xC}, DSTEP={"insn_offset": 0x14},
+                          RETAIN=None)
+
+
+    def _build(self, tmp: Path, name: str, *, with_package: bool, extra: list[str] | None = None,
+               **changes: Any) -> str:
+        """Generate the fixture with the package (or without, the Authentic build); returns the C."""
+        words = self._words()
+        image = dict(words)
+        image.update({self.DATA + 4 * i: w for i, w in enumerate(struct.unpack("<5I", self._data()))})
+        elf_path = tmp / "two_update.elf"
+        self.elf_bytes = _write_synthetic_mips_elf(
+            elf_path, image, self.ENTRY,
+            sections=((".text", self.ENTRY, self.END - self.ENTRY, 6), (".data", self.DATA, 20, 3)))
+        args = list(extra or [])
+        if with_package:
+            pkg_path = tmp / f"{name}.json"
+            pkg = self._package(words, hashlib.sha256(self.elf_bytes).hexdigest(), **changes)
+            pkg_path.write_text(json.dumps(pkg), encoding="utf-8")
+            (tmp / f"{name}.symbols.json").write_text(
+                json.dumps({k: f"0x{v:08x}" for k, v in self._symbols().items()}), encoding="utf-8")
+            args.append(f"--enhancement-package={pkg_path}")
+        out_dir = tmp / name
+        out_dir.mkdir()
+        rc, output, files = TestEnhancementAotCodegenAndCache._run_codegen(elf_path, out_dir / "out.c", args)
+        self.assertEqual(rc, 0, output)
+        return b"\n".join(files.values()).decode("utf-8")
+
+    def _statements(self, text: str, with_package: bool) -> dict[str, str]:
+        """The generated statements of the compare, the gated call and the launch call."""
+        lines = text.splitlines()
+
+        def at(addr: int) -> int:
+            return next(i for i, line in enumerate(lines) if f"sr_begin(s, 0x{addr:08x}u" in line)
+
+        def upto(start: int, last: Any) -> str:
+            end = next(i for i in range(start, len(lines)) if last(lines[i]))
+            return "\n".join(lines[start:end + 1])
+
+        compare = at(self.STATE + self.COMPARE_AT)
+        call, launch = at(self.STATE + self.CALL_AT), at(self.LAUNCH + self.LAUNCH_AT)
+        if with_package:
+            return {"compare": "\n".join(lines[compare:compare + 2]),
+                    "call": upto(call, lambda line: line == "      } }"),
+                    "launch": upto(launch, lambda line: line == "    }")}
+        returned = lambda line: "sr_aot_return_boundary_end" in line  # noqa: E731
+        return {"compare": lines[compare], "call": upto(call, returned), "launch": upto(launch, returned)}
+
+    def test_emitted_forms(self) -> None:
+        """Each site is emitted in both forms, and a build without the package is untouched."""
+        kappa, q = self._factors()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            authentic = self._build(tmp, "authentic", with_package=False)
+            text = self._build(tmp, "pkg", with_package=True)
+            lle = self._build(tmp, "lle", with_package=True, extra=["--lle-cpu"])
+            requires = {"requires": ["BOOST"]}
+            waits = self._build(tmp, "waits", with_package=True, CALL=requires, LAUNCH=requires, COMPARE=requires)
+        self.assertNotIn("nk_enhancement", authentic)
+        self.assertNotIn("_nk_", authentic)
+        stock = self._statements(authentic, False)
+        both = self._statements(text, True)
+        # Toggle off, every site runs the Authentic statement.
+        self.assertIn(f"else {{ {stock['compare'].strip()} }}", both["compare"])
+        self.assertIn(stock["call"].splitlines()[-1], both["call"])
+        self.assertIn(stock["launch"].splitlines()[-1], both["launch"])
+        # The gate reads the state's own time through the guest accessor; no update count is used.
+        read = "uint32_t _nk_time = MEM_R32(s->r[16] + 20u);"
+        self.assertIn(read, both["compare"])
+        self.assertIn(read, both["call"])
+        self.assertIn(f'nk_enhancement_phase_odd(&nk_kept, "CALL", 0x{self.STATE + self.CALL_AT:08x}u, _nk_time, '
+                      f"{self.STEP / 2!r});", both["call"])
+        self.assertIn("if (_nk_odd) { s->fpcond = 0u; s->fcr31 = (s->fcr31 & ~0x00800000u) | (s->fpcond << 23); }",
+                      both["compare"])
+        self.assertNotIn("nk_enhancement_gate_30hz()) {", text)
+        self.assertNotIn("nk_enhancement_updates++", text)
+        # The launch map follows the call, on the $a0 the site had.
+        launch = both["launch"]
+        self.assertLess(launch.index("uint32_t _nk_a0 = s->r[4];"), launch.index("sr_aot_return_boundary_begin"))
+        self.assertLess(launch.index("sr_aot_return_boundary_end"), launch.index("MEM_R32(_nk_a0 + 112u)"))
+        self.assertIn(f"_nk_f = (float)((double)_nk_f * {kappa!r});", launch)
+        self.assertIn(f"_nk_f = (float)(fma((double)_nk_f, {kappa!r}, {q * self.GRAVITY!r}));", launch)
+        self.assertIn(f"MEM_W32_PC(_nk_a0 + 116u, _nk_v1, 0x{self.LAUNCH + self.LAUNCH_AT:08x}u);", launch)
+        # The loaded gravity column is scaled after the load, lane by lane; the computed retention
+        # is mapped after the subtraction; the stored impulse goes through the stock-value check.
+        lanes = " ".join(f"s->v[{v}] = (float)((double)s->v[{v}] * {kappa!r});"
+                         for v in codegen.vreg_indices(0, 4))
+        gravity = next(line for line in text.splitlines()
+                       if f"if (nk_enhancement_on()) {{ sr_begin(s, 0x{self.INTEGRATE + 8:08x}u" in line)
+        self.assertLess(gravity.index("MEM_R32(_a + 12);"), gravity.index(lanes))
+        self.assertIn("s->f[3] = sr_fpu_sub_s(_a,_b,s->fcr31); } sr_end(s, 0u, 0); "
+                      "if (s->f[3] > 0.0f && s->f[3] < 1.0f) { s->f[3] = sqrtf(s->f[3]); }", text)
+        self.assertIn("uint32_t _nk_bits = nk_enh_store(0u, s->fi[0]);", text)
+        self.assertIn(f"0x{_f32_bits_of(self.BOOST * kappa):08x}u", text)
+        # A value_reference site is checked and emits nothing: its instruction has one form.
+        world = [line for line in text.splitlines() if f"sr_begin(s, 0x{self.WORLD + 4:08x}u" in line]
+        self.assertEqual(len(world), 1)
+        self.assertNotIn("nk_enhancement_on()", world[0])
+        # A site that requires a store site runs stock until that site has applied (section 9.6).
+        held = self._statements(waits, True)
+        self.assertIn("if (nk_enhancement_on() && nk_enh_ready(1u)) { static int nk_kept;", held["call"])
+        self.assertIn("      if (nk_enhancement_on() && nk_enh_ready(2u)) {\n", held["launch"])
+        self.assertIn("if (nk_enh_ready(0u)) { sr_begin(s, 0x00001318u", held["compare"])
+        # Under the LLE CPU each access is checked first, as a guest load or store at the site is.
+        guarded = self._statements(lle, True)
+        site = self.STATE + self.CALL_AT
+        self.assertIn(f"uint32_t _nk_time_ea = s->r[16] + 20u; if (sr_cpu_guard_access(s, _nk_time_ea, 4u, 0, "
+                      f"0x{site:08x}u, 0u, 0u)) return; uint32_t _nk_time = MEM_R32(_nk_time_ea);", guarded["call"])
+        site = self.LAUNCH + self.LAUNCH_AT
+        self.assertIn(f"if (sr_cpu_guard_access(s, _nk_v1_ea, 4u, 1, 0x{site:08x}u, 0u, 0u)) return; "
+                      f"MEM_W32_PC(_nk_v1_ea, _nk_v1, 0x{site:08x}u);", guarded["launch"])
+
+    def test_a_reference_the_executable_cannot_supply_refuses_the_build(self) -> None:
+        """Codegen reads the referenced values from the executable's data: without that data, or
+        with stock values the rule does not cover, the package is refused and nothing is written."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            self._build(tmp, "authentic", with_package=False)
+            for name, values, why in (("stiff", {"damping": 16.0}, "is outside (0, 1)"),
+                                      ("still", {"step": 0.0}, "is not a positive number")):
+                with self.subTest(name):
+                    image = dict(self._words())
+                    image.update({self.DATA + 4 * i: w
+                                  for i, w in enumerate(struct.unpack("<5I", self._data(**values)))})
+                    elf_path = tmp / f"{name}.elf"
+                    elf = _write_synthetic_mips_elf(
+                        elf_path, image, self.ENTRY,
+                        sections=((".text", self.ENTRY, self.END - self.ENTRY, 6), (".data", self.DATA, 20, 3)))
+                    pkg_path = tmp / f"{name}.json"
+                    pkg_path.write_text(json.dumps(self._package(self._words(), hashlib.sha256(elf).hexdigest())),
+                                        encoding="utf-8")
+                    (tmp / f"{name}.symbols.json").write_text(
+                        json.dumps({k: f"0x{v:08x}" for k, v in self._symbols().items()}), encoding="utf-8")
+                    (tmp / name).mkdir()
+                    rc, output, files = TestEnhancementAotCodegenAndCache._run_codegen(
+                        elf_path, tmp / name / "out.c", [f"--enhancement-package={pkg_path}"])
+                    self.assertNotEqual(rc, 0)
+                    self.assertIn("enhancement package refused (fail-closed)", output)
+                    self.assertIn(why, output)
+                    self.assertEqual(files, {})
+
+    #: Guest addresses of the harness's state and body, inside its one page of memory.
+    STATE_AT, BODY_AT = 0x4100, 0x4200
+
+    def _phase_times(self) -> list[float]:
+        """Times a state may read: the f32 sum of 0 to 600 half steps, as the guest accumulates it,
+        then values off the half-step grid, negative, too large to count and not a number."""
+        half = _f32_round(self.STEP / 2)
+        times, t = [], 0.0
+        for _ in range(601):
+            times.append(t)
+            t = _f32_round(t + half)
+        grid = self.STEP / 2
+        times += [_f32_round(k * grid) for k in (2.2, 2.3, 2.5, 2.7, 2.8, 7.26, 7.74, -0.2, -0.3, -1.0, -2.0)]
+        times += [1.0e30, float("inf"), float("-inf"), float("nan")]
+        return times
+
+    @unittest.skipUnless(GCC, "needs a host C compiler")
+    def test_generated_statements_match_the_rules_when_run(self) -> None:
+        """Compile the generated statements with the generated phase function and run them.
+
+        Toggle on: the gated call is made, and the compare keeps its result, exactly when the
+        state's time is a whole number of stock steps; half a step later the call is skipped and
+        the compare reads false; off the grid both run stock and each site reports once. The
+        launch statement leaves kappa*v and kappa*v + q*g where the callee left v, bit for bit,
+        on the body the site passed. Toggle off, it prints what the Authentic build prints.
+        """
+        kappa, q = self._factors()
+        times = self._phase_times()
+        velocities = [(0.0, 1.5), (0.25, -0.75), (-3.0, 0.0), (1.0e-3, 2.5), (0.0, 0.0), (-0.0, 123.456)]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            authentic = self._statements(self._build(tmp, "authentic", with_package=False), False)
+            text = self._build(tmp, "pkg", with_package=True)
+            both = self._statements(text, True)
+            lines = text.splitlines()
+            start = next(i for i, line in enumerate(lines)
+                         if line.startswith("int nk_enhancement_phase_odd(") and not line.endswith(";"))
+            end = next(i for i in range(start, len(lines)) if lines[i] == "}")
+            phase_function = "\n".join(lines[start:end + 1])
+
+            def program(name: str, statements: dict[str, str], phase: str) -> tuple[list[str], list[str]]:
+                callee_match = re.search(r"(\w+)\(s\); SR_TAIL_DRAIN", statements["call"])
+                assert callee_match is not None, statements["call"]
+                harness = tmp / f"{name}.c"
+                harness.write_text(
+                    "#include \"recomp.h\"\n#include <math.h>\n"
+                    "/* The real CpuState and trace hooks. The return boundary is stubbed, and guest\n"
+                    " * memory is one page of this harness, reached through the accessors the\n"
+                    " * statements use. The callee counts its calls, adds an impulse to the velocity of\n"
+                    " * the body in $a0 and clobbers $a0, as a real callee may. */\n"
+                    "#undef SR_TAIL_DRAIN\n#define SR_TAIL_DRAIN(s) ((void)0)\n"
+                    "#define sr_aot_return_boundary_begin(s, r, c, k) 0\n"
+                    "#define sr_aot_return_boundary_end(s) 0\n"
+                    "static uint32_t page[1024];\n"
+                    "#undef MEM_R32\n#undef MEM_W32_PC\n"
+                    "#define MEM_R32(a) (page[((a) - 0x4000u) / 4u])\n"
+                    "#define MEM_W32_PC(a, v, pc) (page[((a) - 0x4000u) / 4u] = (v))\n"
+                    "static int on;\nint nk_enhancement_on(void) { return on; }\n"
+                    f"{phase}\n"
+                    "static int calls; static float impulse[2];\n"
+                    f"static void {callee_match.group(1)}(CpuState *s) {{\n"
+                    "    calls++;\n"
+                    "    for (int i = 0; i < 2; i++) {\n"
+                    "        float v; uint32_t at = (s->r[4] + 0x70u + 4u * (uint32_t)i - 0x4000u) / 4u;\n"
+                    "        memcpy(&v, &page[at], 4); v += impulse[i]; memcpy(&page[at], &v, 4);\n"
+                    "    }\n"
+                    "    s->r[4] = 0x4300u;\n"
+                    "}\n"
+                    f"static void compare(CpuState *s) {{\n{statements['compare']}\n}}\n"
+                    f"static void call(CpuState *s) {{\n{statements['call']}\n}}\n"
+                    f"static void launch(CpuState *s) {{\n{statements['launch']}\n}}\n"
+                    f"static const uint32_t times[] = {{{', '.join(f'0x{_f32_bits_of(t):08x}u' for t in times)}}};\n"
+                    "static const float velocities[][2] = {"
+                    + ", ".join(f"{{{x!r}f, {y!r}f}}" for x, y in velocities) + "};\n"
+                    "int main(void) {\n"
+                    "    CpuState st; CpuState *s = &st; memset(&st, 0, sizeof st);\n"
+                    "    for (on = 0; on < 2; on++) {\n"
+                    "        for (unsigned i = 0; i < sizeof times / sizeof times[0]; i++) {\n"
+                    f"            s->r[16] = 0x{self.STATE_AT:x}u; page[(s->r[16] + 20u - 0x4000u) / 4u] = times[i];\n"
+                    "            s->fi[1] = times[i]; s->f[0] = 0.0f; s->fpcond = 2u; s->fcr31 = 0x01000000u;\n"
+                    "            compare(s);\n"
+                    "            calls = 0; s->r[4] = s->r[16]; call(s);\n"
+                    "            printf(\"%s time %u flag %u fcr31 %08x calls %d\\n\", on ? \"on\" : \"off\", i,\n"
+                    "                   (unsigned)s->fpcond, (unsigned)s->fcr31, calls);\n"
+                    "        }\n"
+                    "        for (unsigned i = 0; i < sizeof velocities / sizeof velocities[0]; i++) {\n"
+                    f"            uint32_t at = (0x{self.BODY_AT:x}u + 0x70u - 0x4000u) / 4u;\n"
+                    "            page[at - 1u] = 0x11111111u; page[at] = 0u; page[at + 1u] = 0u; page[at + 2u] = 0x22222222u;\n"
+                    "            impulse[0] = velocities[i][0]; impulse[1] = velocities[i][1];\n"
+                    f"            calls = 0; s->r[4] = 0x{self.BODY_AT:x}u; launch(s);\n"
+                    "            printf(\"%s launch %u calls %d %08x %08x guard %08x %08x a0 %x\\n\", on ? \"on\" : \"off\", i,\n"
+                    "                   calls, (unsigned)page[at], (unsigned)page[at + 1u], (unsigned)page[at - 1u],\n"
+                    "                   (unsigned)page[at + 2u], (unsigned)s->r[4]);\n"
+                    "        }\n"
+                    "    }\n"
+                    "    return 0;\n"
+                    "}\n",
+                    encoding="utf-8",
+                )
+                exe = tmp / f"{name}.exe"
+                assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
+                built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                                        "-Wno-misleading-indentation", "-Wno-unused-variable",
+                                        f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness), "-lm"],
+                                       capture_output=True, text=True)
+                self.assertEqual(built.returncode, 0, built.stderr)
+                run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+                return run.stdout.splitlines(), run.stderr.splitlines()
+
+            out, err = program("pkg", both, phase_function)
+            stock_out, stock_err = program(
+                "authentic", authentic, "/* an Authentic build has no phase function */")
+
+        # Section 11.2, item 1: toggle off is the Authentic statements' output, byte for byte.
+        off = [line for line in out if line.startswith("off ")]
+        self.assertEqual(off, [line for line in stock_out if line.startswith("off ")])
+        self.assertEqual(len(off), len(times) + len(velocities))
+        self.assertEqual(stock_err, [])
+        half_step = self.STEP / 2
+        phases = [enhancement_package.phase_of_time(t, half_step) for t in times]
+        # The accumulated times sit on the grid, alternating; the others include both phases and
+        # every way of being off it.
+        self.assertEqual(phases[:601], [n & 1 for n in range(601)])
+        self.assertEqual(phases[601:], [0, None, None, None, 1, None, None, 0, None, None, None,
+                                        None, None, None, None])
+        for i, (t, phase) in enumerate(zip(times, phases, strict=True)):
+            stock_flag = 1 if 0.0 <= t else 0            # c.le.s 0.0, t: false for a NaN
+            self.assertEqual(off[i], f"off time {i} flag {stock_flag} fcr31 {0x01000000 | stock_flag << 23:08x} "
+                                     f"calls 1")
+            flag, calls = (0, 0) if phase == 1 else (stock_flag, 1)
+            self.assertEqual(out[len(off) + i], f"on time {i} flag {flag} fcr31 {0x01000000 | flag << 23:08x} "
+                                                f"calls {calls}", f"time {t!r}")
+        # Off the grid each site runs stock and reports its first such time, once.
+        first = times[next(i for i, phase in enumerate(phases) if phase is None)]
+        self.assertEqual(err, [
+            f"ENHANCEMENT_PHASE_KEPT: site {name} at 0x{self.STATE + at:08x} read the time {first:.9g}, not a whole "
+            f"number of half steps of {half_step:.9g}; it runs its stock instruction"
+            for name, at in (("COMPARE", self.COMPARE_AT), ("CALL", self.CALL_AT))])
+        for i, (vx, vy) in enumerate(velocities):
+            x, y = _f32_round(0.0 + vx), _f32_round(0.0 + vy)   # what the callee leaves: 0 + impulse
+            guard = "guard 11111111 22222222 a0 4300"
+            self.assertEqual(off[len(times) + i],
+                             f"off launch {i} calls 1 {_f32_bits_of(x):08x} {_f32_bits_of(y):08x} {guard}")
+            want_x = _f32_bits_of(x * kappa)
+            want_y = _f32_bits_of(math.fma(y, kappa, q * self.GRAVITY))
+            self.assertEqual(out[len(off) + len(times) + i],
+                             f"on launch {i} calls 1 {want_x:08x} {want_y:08x} {guard}")
+
+    def _arc(self, updates: int, step: float, *, half_steps: bool, kappa: float = 1.0, launch_offset: float = 0.0,
+             retention: float, gate_compare: bool = False, gate_call: bool = False,
+             impulse_scale: float = 1.0) -> list[float]:
+        """A model of the fixture's guest, in double: positions after each of ``updates`` updates.
+
+        Each update the state logic runs, then the integrator. The state's time is the f32 sum of
+        the steps so far. Update 0 launches from rest. Once the time passes a threshold a window
+        opens, and while it is open every update counts it down by the step and adds an impulse.
+        The integrator adds gravity over the step, applies the retention, then moves by the
+        velocity over the step. ``half_steps`` runs the package's form: the phase of the state's
+        time gates the compare and the call as gate_30hz_phase does."""
+        launch, impulse, threshold, window = 1.5, 0.125, 0.17, 0.11
+        half_step = self.STEP / 2
+        velocity, position, positions = 0.0, 0.0, []
+        time, remaining, opened = 0.0, 0.0, False
+        for update in range(updates):
+            phase = enhancement_package.phase_of_time(time, half_step) if half_steps else 0
+            if update == 0:
+                velocity = (velocity + launch) * (kappa if half_steps else 1.0) + launch_offset
+            passed = threshold <= time and not (gate_compare and phase == 1)
+            if passed and not opened:
+                opened, remaining = True, window
+            if remaining > 0.0:
+                remaining -= step
+                if not (gate_call and phase == 1):
+                    velocity += impulse * impulse_scale
+            velocity = (velocity + self.GRAVITY * (kappa if half_steps else 1.0) * step) * retention
+            position += velocity * step
+            positions.append(position)
+            time = _f32_round(time + _f32_round(step))
+        return positions
+
+    def test_two_updates_reproduce_one_stock_update_at_the_end_of_every_pair(self) -> None:
+        """The numeric property behind the transforms, on the values the resolver planned.
+
+        With the gravity and the impulses scaled by kappa, the launch mapped to kappa*v + q*g, the
+        retention mapped to its square root and the state's compare and call gated on its own
+        phase, two updates of half a step reach the position of one stock update at the end of
+        every pair, through the launch, the timed impulses and the fall. Without any one of them
+        they do not."""
+        rewrites = self._resolve()
+        kappa = rewrites["GRAVITY"]["factor"]
+        self.assertEqual(rewrites["LAUNCH"]["kappa"], kappa)
+        self.assertEqual(rewrites["BOOST"]["factor"], kappa)
+        self.assertEqual(rewrites["CALL"]["half_step"], self.STEP / 2)
+        m = 1.0 - self.DAMPING * self.DAMPING_STEP
+        stock_updates = 90
+        stock = self._arc(stock_updates, self.STEP, half_steps=False, retention=m)
+        full: dict[str, Any] = {
+            "half_steps": True, "kappa": kappa, "launch_offset": rewrites["LAUNCH"]["gravity_offset"],
+            "retention": _scale_value("retention_m_to_sqrt(m)", m), "gate_compare": True, "gate_call": True,
+            "impulse_scale": kappa}
+
+        def worst(**changes: Any) -> float:
+            package = self._arc(2 * stock_updates, self.STEP / 2, **{**full, **changes})
+            return max(abs(package[2 * k + 1] - stock[k]) for k in range(stock_updates))
+
+        height = max(stock) - min(stock)
+        self.assertGreater(height, 1.0)
+        self.assertLess(worst(), 1e-12 * height)
+        # Each part is needed: without it the arc leaves the stock one by far more than rounding.
+        for name, changes, least in (
+            ("no launch offset", {"launch_offset": 0.0}, 1e-3),
+            ("no kappa on the impulses", {"impulse_scale": 1.0}, 1e-5),
+            ("the plain half-step retention", {"retention": 1.0 - self.DAMPING * self.DAMPING_STEP / 2}, 1e-6),
+            ("the compare not gated", {"gate_compare": False}, 1e-3),
+            ("the call not gated", {"gate_call": False}, 1e-2),
+        ):
+            with self.subTest(name):
+                self.assertGreater(worst(**changes), least * height)
+        # The gates put the impulses on the stock instants: the window opens on an odd update
+        # without the compare's gate, and one update early is one impulse short.
+        self.assertEqual(_f32_round(11 * (self.STEP / 2)) >= 0.17, True)
+        self.assertEqual(enhancement_package.phase_of_time(_f32_round(11 * (self.STEP / 2)), self.STEP / 2), 1)
+
+    def test_published_form_keeps_rules_and_site_names_only(self) -> None:
+        """Published, the package holds the rules, the site references and keyed digests: no
+        factor, no stock value. Resolved against the executable it plans the same rewrites."""
+        from analyze import Elf
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            self._build(tmp, "authentic", with_package=False)
+            elf_bytes = self.elf_bytes
+        sha256 = hashlib.sha256(elf_bytes).hexdigest()
+        private = self._package(self._words(), sha256)
+        read_words, read_data = enhancement_package.elf_readers(Elf(elf_bytes, base=0))
+        notes: list[str] = []
+        published = enhancement_package.publish_package(
+            private, self._symbols(), executable=elf_bytes, disc_id="ULUS99999", disc_version="1.01",
+            read_words_fn=read_words, read_data_fn=read_data, notes=notes)
+        self.assertEqual(notes, [])
+        self.assertEqual(enhancement_package.published_package_findings(published), [])
+        by_id = {site["id"]: site for site in published["sites"]}
+        self.assertNotIn("stock_values", by_id["BOOST"])
+        key = enhancement_package.published_digest_key(elf_bytes)
+        self.assertEqual(by_id["BOOST"]["stock_value_digests"],
+                         [enhancement_package.keyed_stock_value_digest(key, "BOOST", _f32_bits_of(self.BOOST))])
+        self.assertEqual({k: v for k, v in by_id["LAUNCH"].items() if k not in ("stock_digest",)}, {
+            "id": "LAUNCH", "function": "synth_launch", "insn_offset": self.LAUNCH_AT, "word_count": 1,
+            "transform": "launch_from_rest_60hz", "velocity_offset": 0x70, "gravity_axis": 1,
+            "gravity_site": "G", "step_site": "STEP", "damping_site": "C", "damping_step_site": "DSTEP"})
+        self.assertEqual(by_id["CALL"]["phase_time"], {"register": "s0", "offset": 20})
+        # No number in the file is a stock value or a factor computed from one.
+        kappa, q = self._factors()
+        def numbers(value: Any) -> list[Any]:
+            if isinstance(value, dict):
+                return [n for item in value.values() for n in numbers(item)]
+            if isinstance(value, list):
+                return [n for item in value for n in numbers(item)]
+            return [value] if isinstance(value, (int, float)) and not isinstance(value, bool) else []
+
+        self.assertEqual(sorted(set(numbers(published))), [0, 1, 4, 8, 12, 16, 20, 24, 28, 40, 0x70])
+        self.assertTrue(all(isinstance(n, int) for n in numbers(published)))
+        declaration, symbols = enhancement_package.resolve_published_package(
+            published, executable=elf_bytes, read_words_fn=read_words, read_data_fn=read_data)
+        known = [self.ENTRY, self.WORLD, self.INTEGRATE, self.STATE, self.IMPULSE, self.LAUNCH, self.TUNE, self.END]
+        resolved = verify_and_resolve_sites(
+            declaration, executable_sha256=sha256, symbol_to_addr=symbols, read_words_fn=read_words,
+            read_data_fn=read_data, known_functions=known)
+        rewrites = {entry["id"]: entry["rewrite"] for entry in resolved.values()}
+        expected = self._resolve()
+        expected["BOOST"] = {"kind": "scale_f_store", "reg": 0, "factor": kappa,
+                             "stock_value_digests": by_id["BOOST"]["stock_value_digests"]}
+        self.assertEqual(rewrites, expected)
+        self.assertEqual(rewrites["LAUNCH"]["gravity_offset"], q * self.GRAVITY)
+        # A published file that carried a factor would not be a package: the format has no slot for one.
+        with_factor = copy.deepcopy(published)
+        with_factor["sites"][4]["factor"] = kappa
+        self.assertTrue(enhancement_package.published_package_findings(with_factor))
+
+
 if __name__ == "__main__":
     unittest.main()
