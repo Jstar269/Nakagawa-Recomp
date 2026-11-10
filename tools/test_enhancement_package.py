@@ -5585,9 +5585,14 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             same = sum(_f32_bits_of(package[2 * k + 1][axis]) == _f32_bits_of(stock[k][axis])
                        for k in range(stock_updates))
             measured[name] = (worst / height, same)
+            largest = max(abs(position) for position in travelled)
+            one_step = _f32_of(_f32_bits_of(largest) + 1) - largest
             with self.subTest(axis=name):
                 self.assertLess(worst, 1e-6 * height, f"worst {worst / height:.2e} of the travel; {same} identical")
                 self.assertGreater(worst, 0.0)      # float32 rounds: agreement in most bits, not in all
+                # It is accumulated rounding: a few float32 steps of the largest position reached,
+                # so a larger share of a small arc than of a large one.
+                self.assertLessEqual(worst, 6 * one_step)
         # The figures the contract quotes.
         self.assertAlmostEqual(measured["y"][0], 3.2e-7, delta=0.1e-7)
         self.assertAlmostEqual(measured["x"][0], 4.6e-7, delta=0.1e-7)
