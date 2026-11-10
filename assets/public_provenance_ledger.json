@@ -912,17 +912,6 @@
       }
     },
     {
-      "path": "assets/enhancements/ucus98744-60hz.json",
-      "classification": "project_authored_attested",
-      "evidence": {
-        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
-        "record_id": "ace_public_lbp_60hz_20261110",
-        "evidence_tier": "S",
-        "authorship": "independent implementation record",
-        "upstream_attribution": null
-      }
-    },
-    {
       "path": "assets/failure_codes.json",
       "classification": "reviewed_configuration",
       "evidence": {
