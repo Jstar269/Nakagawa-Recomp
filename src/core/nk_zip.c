@@ -222,12 +222,15 @@ static bool zip_utf8_valid(const unsigned char *s, size_t n) {
 
 static char zip_upper(char c) { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; }
 
-/* A Windows device name, alone or before an extension ("NUL", "con.txt"). */
+/* A Windows device name, alone or before an extension ("NUL", "con.txt"), with the blanks
+   Windows drops before the extension ignored ("CON .png" is CON). The name rule is a first
+   line only: a reader that opens files checks the handle it gets, which is the real guard. */
 static bool zip_reserved_device(const char *seg, size_t n) {
     static const char *const names[] = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"};
     char stem[8];
     size_t len = 0;
     while (len < n && seg[len] != '.') ++len;
+    while (len > 0 && seg[len - 1] == ' ') --len;
     if (len < 3 || len > 7) return false;
     for (size_t i = 0; i < len; ++i) stem[i] = zip_upper(seg[i]);
     stem[len] = '\0';
@@ -321,9 +324,43 @@ static bool zip_folded_prefix(const ZipNameRef *a, const ZipNameRef *b, size_t n
     return true;
 }
 
+/* Heapsort: at most about 2 n log2 n comparisons whatever the order, so an archive or a pack
+   cannot choose an order that makes sorting it quadratic, as it can with a C library's qsort
+   (UCRT's is a median-of-three quicksort with no fallback). Not stable; the callers' keys break
+   their own ties. */
+static void zip_sort_swap(unsigned char *a, unsigned char *b, size_t size) {
+    while (size--) {
+        unsigned char t = *a;
+        *a++ = *b;
+        *b++ = t;
+    }
+}
+
+static void zip_sort_sift(unsigned char *base, size_t root, size_t n, size_t size,
+                          int (*compare)(const void *, const void *)) {
+    for (;;) {
+        size_t child = 2u * root + 1u;
+        if (child >= n) return;
+        if (child + 1u < n && compare(base + child * size, base + (child + 1u) * size) < 0) ++child;
+        if (compare(base + root * size, base + child * size) >= 0) return;
+        zip_sort_swap(base + root * size, base + child * size, size);
+        root = child;
+    }
+}
+
+void nk_zip_sort(void *items, size_t count, size_t size, int (*compare)(const void *, const void *)) {
+    unsigned char *base = (unsigned char *)items;
+    if (!items || count < 2u || size == 0u || !compare) return;
+    for (size_t i = count / 2u; i-- > 0u;) zip_sort_sift(base, i, count, size, compare);
+    for (size_t end = count - 1u; end > 0u; --end) {
+        zip_sort_swap(base, base + end * size, size);
+        zip_sort_sift(base, 0u, end, size, compare);
+    }
+}
+
 static NkZipStatus zip_names_distinct(ZipNameRef *refs, size_t count, NkZipError *err) {
     if (count < 2) return NK_ZIP_OK;
-    qsort(refs, count, sizeof(refs[0]), zip_name_compare);
+    nk_zip_sort(refs, count, sizeof(refs[0]), zip_name_compare);
     for (size_t k = 0; k + 1 < count; ++k) {
         const ZipNameRef *a = &refs[k];
         const ZipNameRef *b = &refs[k + 1];
@@ -620,6 +657,13 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
             status = zip_fail(err, NK_ZIP_ERR_SIZE_MISMATCH, e->name, e->name_size);
             goto done;
         }
+        /* DEFLATE never needs much more room than the data: stored blocks cost 5 bytes in 65,535.
+           A packed size far above the unpacked one is padding (empty blocks, bytes after the end)
+           that would be read whole for nothing, so it is refused. */
+        if (method == ZIP_METHOD_DEFLATE && (uint64_t)packed > (uint64_t)size + size / 8u + 64u) {
+            status = zip_fail(err, NK_ZIP_ERR_SIZE_MISMATCH, e->name, e->name_size);
+            goto done;
+        }
         if (folder && crc != 0u) {
             status = zip_fail(err, NK_ZIP_ERR_CRC, e->name, e->name_size);
             goto done;
@@ -722,7 +766,7 @@ static NkZipStatus zip_reader_parse(NkZipReader *r, NkZipError *err) {
     /* No two entries share bytes: each one's header and data end before the
        next one's header starts. */
     if (r->count > 1) {
-        qsort(by_offset, r->count, sizeof(by_offset[0]), zip_entry_offset_compare);
+        nk_zip_sort(by_offset, r->count, sizeof(by_offset[0]), zip_entry_offset_compare);
         for (size_t i = 0; i + 1 < r->count; ++i) {
             if (by_offset[i]->data_offset + by_offset[i]->packed > by_offset[i + 1]->local_offset) {
                 status = zip_fail(err, NK_ZIP_ERR_OVERLAP, by_offset[i + 1]->name,
@@ -1499,7 +1543,7 @@ static NkZipStatus zip_write_tree(NkZipWriter *w, const char *host, const char *
         zip_listing_free(&list);
         return zip_writer_fail(w, err, NK_ZIP_ERR_LEFT_OUT, relative, strlen(relative));
     }
-    qsort(list.items, list.count, sizeof(list.items[0]), zip_listed_compare);
+    nk_zip_sort(list.items, list.count, sizeof(list.items[0]), zip_listed_compare);
     for (size_t i = 0; i < list.count && status == NK_ZIP_OK; ++i) {
         char name[NK_ZIP_MAX_NAME_BYTES + 2];
         char path[NK_ZIP_MAX_NAME_BYTES + 4096];

@@ -259,7 +259,7 @@ folder that holds a `textures.zip` is read from that ZIP.
 
 When Nakagawa starts the game it reads the pack's list: the folder or ZIP and its `textures.ini`. If it cannot read
 that list (the folder or ZIP has gone, a file in its place is not an ordinary file, the ZIP is damaged, or the
-`textures.ini` has a line it does not understand), it does not use the pack at all, says why, and the game plays
+`textures.ini` has a line it does not understand or more hash-range lines than it reads), it does not use the pack at all, says why, and the game plays
 without it. An image the pack lists is read the first time the game draws its texture. An image that is missing,
 damaged, too large, linked to a place outside the pack's folder, or the wrong size is skipped on its own: that
 texture is drawn as the game made it, and the rest of the pack is used.

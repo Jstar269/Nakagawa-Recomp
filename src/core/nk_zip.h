@@ -119,6 +119,11 @@ const char *nk_zip_status_message(NkZipStatus status);
 /* CRC-32 (ISO 3309 / ITU-T V.42, the ZIP checksum); start with crc 0. */
 uint32_t nk_zip_crc32(uint32_t crc, const void *data, size_t size);
 
+/* Sorts `count` items of `size` bytes with at most about 2 n log2 n comparisons
+   whatever their order (a heapsort, not stable), for keys whose order an archive or
+   a pack chooses. The ZIP reader sorts with it, and texture packs do. */
+void nk_zip_sort(void *items, size_t count, size_t size, int (*compare)(const void *, const void *));
+
 /* Checks one entry name by the reader's rules. `size` is its byte count (it
    need not be NUL-terminated). A trailing '/' marks a folder: *is_folder says
    so when given. */

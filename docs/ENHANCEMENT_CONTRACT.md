@@ -798,8 +798,11 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
     `reduceHash`, `skipLastDXT1Blocks128x64`, `skipLastDXT1Blocks128x128`, `ignoreMipmap` (which PPSSPP uses only
     when dumping) and `version`; the first line of each counts, and a value that is not a bool or a number leaves
     the option at its default, as PPSSPP's reader does, with a note. `[hashranges]` (`addr,w,h = newW,newH`; a
-    range larger than its texture or empty is not read) and `[reducehashranges]` (`w,h = fraction`; 0 is not
-    read) are read as PPSSPP reads them, a later line for the same texture replacing an earlier one.
+    range larger than its texture or empty is not read) and `[reducehashranges]` (`w,h = fraction`; 0 or a value
+    that is not a finite number is not read) are read as PPSSPP reads them, a later line for the same texture
+    replacing an earlier one. The lines are sorted once at open and looked up by binary search. Each section takes
+    at most 16,384 lines (`NK_TEXREPL_MAX_RANGES`) and a pack with more is refused: a line is needed only for a
+    texture whose hashed area differs from its size, PPSSPP's dumps write none, and packs list them by hand.
   - *`[hashes]` keys* are read as PPSSPP reads them, with the C library's `sscanf("%16llx%8x_%d")` and at least
     its first field matched: up to 16 hex digits of key, up to 8 of data hash, then `_<level>`; a field not
     matched is 0. So every form PPSSPP takes is taken: the full `<16><8>` name, `<16><8>_<level>`, a 16-digit
@@ -868,10 +871,15 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
     `textures.zip` that is not a valid ZIP refuses the pack (PPSSPP falls back to the folder). A ZIP with ZIP64
     (more than 65,534 entries or 4 GiB), encryption, a method other than stored or DEFLATE, or a name
     `nk_zip.c` refuses (a Windows-reserved name or character, a `.` or `..` folder, two names equal when case is
-    ignored) is refused; PPSSPP's ZIP library may read it. A `textures.ini` over 4 MiB refuses the pack. Images
+    ignored) is refused; PPSSPP's ZIP library may read it. So is a DEFLATE entry, `textures.ini` included, packed
+    in more than its declared size plus an eighth plus 64 bytes: DEFLATE never needs that much (stored blocks
+    cost 5 bytes in 65,535), so the rest is padding a reader would have to work through. A `textures.ini` over
+    4 MiB refuses the pack. Images
     PPSSPP may still read are skipped here: a folder file that is a link or junction leading out of the pack, a
-    device or FIFO, a name the ZIP reader refuses (`CON.png`, `a.png.`), a file over 64 MiB, and a PNG with any
-    chunk's CRC wrong (libpng, which PPSSPP uses, by default only warns about a bad CRC in an ancillary chunk).
+    device or FIFO, a name the ZIP reader refuses (`CON.png`, `CON .png`, `a.png.`), a file over 64 MiB, a PNG with
+    any chunk's CRC wrong (libpng, which PPSSPP uses, by default only warns about a bad CRC in an ancillary chunk),
+    and a PNG whose image data unpacks to more or less than its `IHDR` implies or whose Adler-32 is wrong (libpng
+    ignores extra data and, by default, a bad Adler-32).
   - *The skip-last-DXT1 options* (`skipLastDXT1Blocks128x64`, `skipLastDXT1Blocks128x128`) are applied as
     PPSSPP applies them, so they are not a difference.
 - **How it draws.** The image is stored as the entry's scaled copy: an image `factor` times the guest texture,
@@ -897,18 +905,27 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   a regular disk file (Windows: `GetFileType` is `FILE_TYPE_DISK` and it is no folder; POSIX: `fstat` says
   `S_ISREG`, the file opened without blocking so a FIFO is refused at once) whose final path, links and junctions
   resolved (`GetFinalPathNameByHandleW`; `/proc/self/fd` or `realpath`), is inside the folder's own final path.
-  A name the ZIP reader refuses (a device name such as `CON.png` or `COM1.png`, a trailing dot or space, a
-  character Windows refuses) is not opened at all. Reads are capped: `textures.ini` at 4 MiB, an image at 64 MiB,
+  A name the ZIP reader refuses (a device name such as `CON.png`, `COM1.png` or `CON .png`, blanks before the
+  extension dropped as Windows drops them; a trailing dot or space; a character Windows refuses) is not opened at
+  all. That rule is a first line only; the handle check above is the guard. Reads are capped: `textures.ini` at 4 MiB, an image at 64 MiB,
   in a folder or a ZIP alike; a ZIP image's data is unpacked only up to the size it declares, and a ZIP whose
   entries declare more than 8 GiB unpacked in all (`NK_TEXREPL_MAX_PACK_BYTES`) or hold more than 65,534 entries is
   refused whole. What a pack holds in memory is its index (about 80 bytes an entry, from the bench below) and the
   decoded images, which the budget bounds. A folder's `textures.zip`, and a ZIP named as the pack, is opened only when it is a
-  regular file (the folder's inside the folder); the ZIP reader then opens it by name, so a file swapped in that
-  moment is not caught by the handle check, though the ZIP's own checks still apply. A PNG is checked before
-  any pixel memory is allocated: the signature, `IHDR` first with 1 to 2048 texels a side and a pixel format the
-  PNG standard defines, every chunk whole with its CRC right, an `IDAT` and `IEND`; its pixels (width x height x
-  4 bytes) must fit the budget. What the image data inflates to is then left to stb_image, whose output that size
-  bounds (`nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own).
+  regular file (the folder's inside the folder); the ZIP reader then opens it again by name, on every platform,
+  so a file swapped in that moment is not caught by the handle check, though the ZIP's own checks still apply. A
+  PNG is checked before any pixel memory is allocated: the signature, `IHDR` first with 1 to 2048 texels a side
+  and a pixel format the PNG standard defines, every chunk whole with its CRC right, `PLTE` and `tRNS` where and as
+  long as the format allows, the `IDAT` chunks one after another, and `IEND`; its pixels (width x height x 4 bytes)
+  must fit the budget. The reader decodes PNG itself: the image data is unpacked by the project's inflater
+  (`nk_psp_inflate.c`) into a buffer of exactly the size `IHDR` implies (each row's filter byte and bytes, each
+  Adam7 pass's rows), and data that would unpack past it stops there and refuses the image, so a small PNG cannot
+  make the reader allocate or work beyond its own size. The memory one decode takes, at most that buffer plus the
+  larger of the joined image data and the pixels plus the file, is recorded in the pack's statistics
+  (`decode_peak`). `nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own.
+- **Sorting.** The index, the hash ranges and the ZIP reader's name and offset checks sort with one project heapsort
+  (`nk_zip_sort`, at most about 2n log2 n comparisons whatever the order), not the C library's `qsort`, which
+  some C libraries make quadratic for a crafted order.
 - **Stamps.** `TEX_REPLACE: on (hash=, entries=, notes=, budget_mb=)` at start, followed by the line section 11.3.4
   describes and one `TEX_REPLACE: note:` line for each thing read and not applied (a file that cannot be read or decoded is
   noted at its first use, when it is found, not only counted), and at exit `TEX_REPLACE: exit
@@ -938,11 +955,22 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   and names equal but for case, ZIP64, encryption, a local header that disagrees with the central directory,
   overlapping entries, a central directory outside the file, the archive cut at every length, entries declaring
   12 GiB, and an image declaring 100 MiB or unpacking past its declared size (skipped, the rest of the pack used).
-  The PNG cells are fixed and seeded mutations, not coverage-guided fuzzing; the selftest also runs under
+  The selftest also writes PNGs of its own (stored and fixed-Huffman DEFLATE, one or several `IDAT` chunks, every
+  filter, Adam7, palette and `tRNS`, 1- to 16-bit) and decodes each with this reader and with stb_image
+  (`third_party/stb`, used only by the test), which must agree to the byte; image data longer than the image is
+  refused, and 60,000 seeded mutations of those seeds must be refused by both or decoded alike. A 1x1 PNG whose
+  data unpacks to 64 MiB, listed under 81 wildcard keys, is skipped 81 times within the time bound, nothing cached,
+  `decode_peak` within the file's size and 4 KiB; a ZIP image and a `textures.ini` behind 1 MiB of empty DEFLATE
+  blocks are refused at open; the sort is checked on every order up to 7 items, against its comparison bound on
+  McIlroy's adversary, on the order that costs the C library's `qsort` most, and through a 200,000-line
+  `textures.ini` and a 16,384-entry ZIP in that order, each opened within 10 s; `[hashranges]` lines are checked for
+  the last line winning, a non-finite fraction noted, 16,384 lines in reverse order and a pack with one more
+  refused. These cells are fixed and seeded mutations, not coverage-guided fuzzing; the selftest also runs under
   AddressSanitizer and UndefinedBehaviorSanitizer on Linux. A file link needs Developer Mode on Windows, so that
   check is skipped there, and said, without it. `test_nk_zip` checks the
-  reader's options: DEFLATE read only when asked, its level bits, damaged, short and long streams, data
-  descriptors and the caps. `texrepl_selftest --bench N` measures an N-texture synthetic pack as a folder and as
+  reader's options: DEFLATE read only when asked, its level bits, damaged, short and long streams, a stream that
+  stops at its declared size before a bad block, empty-block padding at and past its limit, data descriptors, device
+  names with blanks before the extension, and the caps. `texrepl_selftest --bench N` measures an N-texture synthetic pack as a folder and as
   a ZIP (open, lookup and first-use times, index size and process memory). `gpu-texscale-selftest`'s `replace` cell runs the production path on a Vulkan device: a
   listed texture drawn from the pack's image from the draw that finds it, even with the 1:1 rule on, with
   `SR_TEX_REPLACE` alone and with xBRZ also on; a rewrite to unlisted

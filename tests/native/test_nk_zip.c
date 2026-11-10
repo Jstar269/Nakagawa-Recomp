@@ -376,6 +376,8 @@ static void test_name_refusals(void) {
     expect_name("PSP/CON", 0, NK_ZIP_ERR_NAME_RESERVED, "a device name");
     expect_name("PSP/nul.txt", 0, NK_ZIP_ERR_NAME_RESERVED, "a device name with an extension");
     expect_name("PSP/COM1", 0, NK_ZIP_ERR_NAME_RESERVED, "COM1");
+    expect_name("PSP/CON .png", 0, NK_ZIP_ERR_NAME_RESERVED, "a device name with a blank before its extension");
+    expect_name("PSP/com1  .txt", 0, NK_ZIP_ERR_NAME_RESERVED, "COM1 with blanks before its extension");
     expect_name("PSP/COM\xC2\xB9", 0, NK_ZIP_ERR_NAME_RESERVED, "COM with a superscript 1");
     expect_name("PSP/lpt\xC2\xB3.txt", 0, NK_ZIP_ERR_NAME_RESERVED,
                 "LPT with a superscript 3 and an extension");
@@ -799,6 +801,39 @@ static void test_read_options(void) {
     tzip_build_packed(&z, 8u, 0u, deflated, sizeof(deflated), size - 1u, crc, false);
     CHECK(tzip_open_with(&z, &deflate, out, sizeof(out), &got) == NK_ZIP_ERR_SIZE_MISMATCH,
           "a stream that runs past its declared size");
+    {
+        /* 1,000 bytes declared, a stored block of 1,100, then a reserved block: the unpacking stops
+           at the declared size (ZIP_SIZE_MISMATCH); going on would reach the bad block (ZIP_INFLATE). */
+        uint8_t over[5 + 1100 + 1];
+        uint8_t big[1100];
+        memset(over, 'z', sizeof(over));
+        over[0] = 0u;
+        put16(over + 1, 1100u);
+        put16(over + 3, (uint16_t)~1100u);
+        over[5 + 1100] = 0x07u;
+        memset(big, 'z', sizeof(big));
+        tzip_build_packed(&z, 8u, 0u, over, sizeof(over), 1000u, nk_zip_crc32(0u, big, 1000u), false);
+        CHECK(tzip_open_with(&z, &deflate, big, sizeof(big), &got) == NK_ZIP_ERR_SIZE_MISMATCH,
+              "unpacking stops at the declared size");
+        /* One byte declared, packed behind empty stored blocks: at most 1 + 1/8 + 64 packed bytes
+           are taken (11 empty blocks and the final one, 61 bytes), 13 empty blocks (71) are refused
+           at open, and so is 10,000 bytes of them. */
+        static const unsigned kEmpties[3] = {11u, 13u, 2000u};
+        for (int k = 0; k < 3; ++k) {
+            uint8_t *blocks = (uint8_t *)calloc(1, kEmpties[k] * 5u + 6u);
+            size_t bn = 0;
+            for (unsigned b = 0; b < kEmpties[k]; ++b) { blocks[bn + 3] = 0xffu; blocks[bn + 4] = 0xffu; bn += 5u; }
+            blocks[bn] = 1u; blocks[bn + 1] = 1u; blocks[bn + 2] = 0u; blocks[bn + 3] = 0xfeu; blocks[bn + 4] = 0xffu;
+            blocks[bn + 5] = 'x';
+            tzip_build_packed(&z, 8u, 0u, blocks, (uint32_t)(bn + 6u), 1u, nk_zip_crc32(0u, "x", 1u), false);
+            const NkZipStatus st = tzip_open_with(&z, &deflate, out, sizeof(out), &got);
+            if (k == 0)
+                CHECK(st == NK_ZIP_OK && got == 1u && out[0] == 'x', "one byte behind 11 empty DEFLATE blocks is read");
+            else
+                CHECK(st == NK_ZIP_ERR_SIZE_MISMATCH, "one byte behind 13 or more empty DEFLATE blocks is refused");
+            free(blocks);
+        }
+    }
     memcpy(bad, deflated, sizeof(bad));
     bad[0] = 0x07u; /* final block, type 3: reserved */
     tzip_build_packed(&z, 8u, 0u, bad, sizeof(bad), size, crc, false);

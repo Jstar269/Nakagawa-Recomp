@@ -20,7 +20,11 @@
  *     flips with their CRC made right, and IHDR sizes over 2048 or over an allocation cap; bad
  *     images in a pack skipped, noted and counted;
  *   - files read only through a handle that is a regular file inside the pack folder: device names,
- *     trailing dots, links and junctions out of the pack, FIFOs (POSIX) and a textures.ini over 4 MiB.
+ *     trailing dots, links and junctions out of the pack, FIFOs (POSIX) and a textures.ini over 4 MiB;
+ *   - the reader's own PNG decoder against stb_image on every pixel format, Adam7, tRNS, Huffman and
+ *     several IDAT chunks, and image data that unpacks past the image (a 64 MiB bomb under 81 keys);
+ *   - the project sort on McIlroy's adversary, with packs in the order that costs qsort most;
+ *   - [hashranges] indexed and capped; DEFLATE padding refused.
  * With "--bench N" it writes an N-texture pack as a folder and as a ZIP and prints open, lookup,
  * first-decode and memory figures instead.
  */
@@ -36,6 +40,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* stb_image (vendored under third_party/stb) as a second, independent PNG decoder: the pack reader
+ * decodes PNG itself, and the seed corpus checks the two agree. */
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO
+#define STBI_NO_LINEAR
+#define STBI_NO_HDR
+#define STBI_NO_FAILURE_STRINGS
+#define STBI_NO_THREAD_LOCALS
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wpedantic"
+#if !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+#endif
+#include "../../third_party/stb/stb_image.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 #ifndef SR_SELFTEST_BUILD_ROOT
 #define SR_SELFTEST_BUILD_ROOT "."
@@ -1114,7 +1142,8 @@ static void test_zip_refusals(void) {
     }
 
     /* Per image: one declaring 100 MiB is skipped before any unpacking (its data is not even
-     * DEFLATE); one whose data unpacks past the 100 bytes it declares stops at 100 and is skipped. */
+     * DEFLATE); one whose data unpacks past the 1,000 bytes it declares stops there and is skipped:
+     * past them the stream turns invalid, so unpacking on would say ZIP_INFLATE, not ZIP_SIZE_MISMATCH. */
     {
         Zw z;
         memset(&z, 0, sizeof(z));
@@ -1124,13 +1153,14 @@ static void test_zip_refusals(void) {
         static const uint8_t junk[4] = { 0xff, 0xff, 0xff, 0xff };
         const ZwOpt big = { 8, 0, junk, sizeof(junk), 0, 100u << 20 };
         zw_add(&z, "big.png", "x", 1, big);
-        uint8_t *stream = (uint8_t *)calloc(1, 5u + 4096u);
-        stream[0] = 1u;                          /* one final stored block of 4096 zero bytes */
-        le16(stream + 1, 4096u);
-        le16(stream + 3, (uint32_t)(~4096u & 0xffffu));
-        uint8_t zeros[100];
+        uint8_t *stream = (uint8_t *)calloc(1, 5u + 1100u + 1u);
+        stream[0] = 0u;                          /* a stored block of 1,100 bytes, not final */
+        le16(stream + 1, 1100u);
+        le16(stream + 3, (uint32_t)(~1100u & 0xffffu));
+        stream[5 + 1100] = 0x07u;                /* then a final block of the reserved type 3 */
+        uint8_t zeros[1000];
         memset(zeros, 0, sizeof(zeros));
-        const ZwOpt bomb = { 8, 0, stream, 5u + 4096u, 0, 0 };
+        const ZwOpt bomb = { 8, 0, stream, 5u + 1100u + 1u, 0, 0 };
         zw_add(&z, "bomb.png", zeros, sizeof(zeros), bomb);
         free(stream);
         zw_add_file(&z, "a.png", pngp, stored);
@@ -1171,7 +1201,228 @@ static void png_fix_crc(uint8_t *d, size_t at) {
     put_be32(d + at + 8 + len, nk_zip_crc32(0, d + at + 4, (size_t)len + 4u));
 }
 
-/* Truncated, flipped, bad-CRC and oversized PNGs are refused before stb_image sees them, and every
+/* ------------------------------------------------------------------ PNG writer for the corpus */
+
+/* A byte buffer and a DEFLATE bit writer (LSB first, Huffman codes MSB first, RFC 1951). */
+typedef struct { uint8_t *d; size_t n, cap; uint32_t acc; int bits; } Bw;
+static void bw_byte(Bw *b, uint8_t v) { zbuf(&b->d, &b->n, &b->cap, &v, 1); }
+static void bw_bits(Bw *b, uint32_t v, int n) {
+    for (int i = 0; i < n; i++) {
+        b->acc |= ((v >> i) & 1u) << b->bits;
+        if (++b->bits == 8) { bw_byte(b, (uint8_t)b->acc); b->acc = 0; b->bits = 0; }
+    }
+}
+static void bw_code(Bw *b, uint32_t code, int len) {   /* a Huffman code, its first bit the code's top bit */
+    for (int i = len - 1; i >= 0; i--) bw_bits(b, (code >> i) & 1u, 1);
+}
+static void bw_flush(Bw *b) { if (b->bits) { bw_byte(b, (uint8_t)b->acc); b->acc = 0; b->bits = 0; } }
+static void fixed_sym(Bw *b, unsigned sym) {   /* the fixed literal/length code (RFC 1951 3.2.6) */
+    if (sym < 144) bw_code(b, 0x30u + sym, 8);
+    else if (sym < 256) bw_code(b, 0x190u + sym - 144u, 9);
+    else if (sym < 280) bw_code(b, sym - 256u, 7);
+    else bw_code(b, 0xc0u + sym - 280u, 8);
+}
+/* A match of `len` (3 to 10, or 258) at distance 1. */
+static void fixed_match(Bw *b, unsigned len) {
+    fixed_sym(b, len == 258 ? 285u : 254u + len);
+    bw_code(b, 0, 5);   /* distance code 0: distance 1 */
+}
+
+/* `data` as one fixed-Huffman block (runs of a byte as matches at distance 1) or as stored blocks. */
+static void deflate_into(Bw *b, const uint8_t *data, size_t n, int huffman) {
+    if (!huffman) {
+        size_t at = 0;
+        do {
+            size_t len = n - at > 65535u ? 65535u : n - at;
+            bw_bits(b, at + len == n ? 1u : 0u, 1);
+            bw_bits(b, 0, 2);
+            bw_flush(b);
+            uint8_t h[4];
+            le16(h, (uint32_t)len);
+            le16(h + 2, (uint32_t)(~len & 0xffffu));
+            zbuf(&b->d, &b->n, &b->cap, h, 4);
+            zbuf(&b->d, &b->n, &b->cap, data + at, len);
+            at += len;
+        } while (at < n);
+        return;
+    }
+    bw_bits(b, 1, 1);   /* final */
+    bw_bits(b, 1, 2);   /* fixed Huffman */
+    size_t i = 0;
+    while (i < n) {
+        fixed_sym(b, data[i]);
+        size_t run = 0;
+        while (i + 1 + run < n && data[i + 1 + run] == data[i]) run++;
+        i++;
+        while (run >= 3) {
+            const unsigned len = run >= 258 ? 258u : run > 10 ? 10u : (unsigned)run;
+            fixed_match(b, len);
+            run -= len;
+            i += len;
+        }
+    }
+    fixed_sym(b, 256);
+    bw_flush(b);
+}
+
+static uint32_t t_adler32(const uint8_t *d, size_t n) {
+    uint32_t a = 1, b = 0;
+    for (size_t i = 0; i < n; i++) { a = (a + d[i]) % 65521u; b = (b + a) % 65521u; }
+    return b << 16 | a;
+}
+
+static void png_chunk_out(Bw *o, const char *type, const uint8_t *data, size_t n) {
+    uint8_t h[8];
+    put_be32(h, (uint32_t)n);
+    memcpy(h + 4, type, 4);
+    zbuf(&o->d, &o->n, &o->cap, h, 8);
+    if (n) zbuf(&o->d, &o->n, &o->cap, data, n);
+    uint32_t crc = nk_zip_crc32(nk_zip_crc32(0, type, 4), data, n);
+    put_be32(h, crc);
+    zbuf(&o->d, &o->n, &o->cap, h, 4);
+}
+
+typedef struct {
+    int w, h, depth, color, interlace, trns, huffman, idat_parts;
+    size_t extra;        /* bytes of image data past the image's end */
+    uint32_t seed;
+} PngSpec;
+
+static uint32_t t_rand(uint32_t *s) { *s = *s * 1103515245u + 12345u; return *s >> 8; }
+
+static void put_sample(uint8_t *row, size_t i, unsigned depth, unsigned v) {
+    if (depth == 16) { row[2 * i] = (uint8_t)(v >> 8); row[2 * i + 1] = (uint8_t)v; return; }
+    if (depth == 8) { row[i] = (uint8_t)v; return; }
+    const size_t bit = i * depth;
+    row[bit / 8] |= (uint8_t)(v << (8u - depth - (unsigned)(bit % 8u)));
+}
+
+static unsigned t_paeth(unsigned a, unsigned b, unsigned c) {
+    const int p = (int)a + (int)b - (int)c;
+    const int pa = abs(p - (int)a), pb = abs(p - (int)b), pc = abs(p - (int)c);
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+}
+
+/* Writes a PNG of the given form with random samples (seeded), every filter type in turn, Adam7 if
+ * asked, palette and tRNS as the format allows, the image data in `idat_parts` chunks. */
+static uint8_t *png_build(const PngSpec *sp, size_t *out_n) {
+    static const unsigned char adam7[7][4] = {
+        { 0, 0, 8, 8 }, { 4, 0, 8, 8 }, { 0, 4, 4, 8 }, { 2, 0, 4, 4 }, { 0, 2, 2, 4 }, { 1, 0, 2, 2 }, { 0, 1, 1, 2 },
+    };
+    const unsigned ch = sp->color == 2 ? 3u : sp->color == 4 ? 2u : sp->color == 6 ? 4u : 1u;
+    const unsigned maxv = sp->depth == 16 ? 0xffffu : (1u << sp->depth) - 1u;
+    uint32_t seed = sp->seed;
+    const unsigned pal_n = sp->color == 3 ? 1u + t_rand(&seed) % (maxv + 1u) : 0u;
+    /* every pixel's samples, full image */
+    unsigned *px = (unsigned *)malloc((size_t)sp->w * sp->h * ch * sizeof(unsigned));
+    for (size_t i = 0; i < (size_t)sp->w * sp->h; i++)
+        for (unsigned c = 0; c < ch; c++) px[i * ch + c] = sp->color == 3 ? t_rand(&seed) % pal_n : t_rand(&seed) & maxv;
+    unsigned key[3] = { 0, 0, 0 };
+    if (sp->trns && sp->color != 3) for (unsigned c = 0; c < ch; c++) key[c] = px[c];   /* the first pixel's colour */
+    Bw raw = { 0 };
+    int row_no = 0;
+    for (int k = 0; k < (sp->interlace ? 7 : 1); k++) {
+        const unsigned x0 = sp->interlace ? adam7[k][0] : 0, y0 = sp->interlace ? adam7[k][1] : 0;
+        const unsigned dx = sp->interlace ? adam7[k][2] : 1, dy = sp->interlace ? adam7[k][3] : 1;
+        const unsigned pw = (unsigned)sp->w > x0 ? ((unsigned)sp->w - x0 + dx - 1) / dx : 0;
+        const unsigned ph = (unsigned)sp->h > y0 ? ((unsigned)sp->h - y0 + dy - 1) / dy : 0;
+        if (!pw || !ph) continue;
+        const size_t rb = ((size_t)pw * sp->depth * ch + 7) / 8, bpp = (sp->depth * ch + 7) / 8;
+        uint8_t *prev = (uint8_t *)calloc(rb + 1, 1), *cur = (uint8_t *)calloc(rb + 1, 1);
+        for (unsigned y = 0; y < ph; y++) {
+            memset(cur, 0, rb);
+            for (unsigned x = 0; x < pw; x++)
+                for (unsigned c = 0; c < ch; c++)
+                    put_sample(cur, (size_t)x * ch + c, (unsigned)sp->depth,
+                               px[(((size_t)(y0 + y * dy)) * sp->w + x0 + x * dx) * ch + c]);
+            const unsigned f = (unsigned)(row_no++ % 5);
+            bw_byte(&raw, (uint8_t)f);
+            for (size_t i = 0; i < rb; i++) {
+                const unsigned a = i >= bpp ? cur[i - bpp] : 0, b = y ? prev[i] : 0, c = (y && i >= bpp) ? prev[i - bpp] : 0;
+                const unsigned pred = f == 1 ? a : f == 2 ? b : f == 3 ? (a + b) / 2 : f == 4 ? t_paeth(a, b, c) : 0;
+                bw_byte(&raw, (uint8_t)(cur[i] - pred));
+            }
+            memcpy(prev, cur, rb);
+        }
+        free(prev);
+        free(cur);
+    }
+    for (size_t i = 0; i < sp->extra; i++) bw_byte(&raw, (uint8_t)(i * 7u));
+    Bw z = { 0 };
+    bw_byte(&z, 0x78);
+    bw_byte(&z, 0x01);
+    deflate_into(&z, raw.d, raw.n, sp->huffman);
+    uint8_t ad[4];
+    put_be32(ad, t_adler32(raw.d, raw.n));
+    zbuf(&z.d, &z.n, &z.cap, ad, 4);
+    Bw o = { 0 };
+    static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+    zbuf(&o.d, &o.n, &o.cap, sig, 8);
+    uint8_t ihdr[13];
+    put_be32(ihdr, (uint32_t)sp->w);
+    put_be32(ihdr + 4, (uint32_t)sp->h);
+    ihdr[8] = (uint8_t)sp->depth;
+    ihdr[9] = (uint8_t)sp->color;
+    ihdr[10] = ihdr[11] = 0;
+    ihdr[12] = (uint8_t)sp->interlace;
+    png_chunk_out(&o, "IHDR", ihdr, 13);
+    if (sp->color == 3) {
+        uint8_t pal[768];
+        for (unsigned i = 0; i < pal_n * 3; i++) pal[i] = (uint8_t)t_rand(&seed);
+        png_chunk_out(&o, "PLTE", pal, pal_n * 3);
+        if (sp->trns) {
+            uint8_t t[256];
+            const unsigned tn = 1 + t_rand(&seed) % pal_n;
+            for (unsigned i = 0; i < tn; i++) t[i] = (uint8_t)t_rand(&seed);
+            png_chunk_out(&o, "tRNS", t, tn);
+        }
+    } else if (sp->trns && (sp->color == 0 || sp->color == 2)) {
+        uint8_t t[6];
+        for (unsigned c = 0; c < ch; c++) { t[2 * c] = (uint8_t)(key[c] >> 8); t[2 * c + 1] = (uint8_t)key[c]; }
+        png_chunk_out(&o, "tRNS", t, ch * 2);
+    }
+    const int parts = sp->idat_parts > 0 ? sp->idat_parts : 1;
+    size_t at = 0;
+    for (int k = 0; k < parts; k++) {
+        const size_t len = k == parts - 1 ? z.n - at : z.n / (size_t)parts;
+        png_chunk_out(&o, "IDAT", z.d + at, len);
+        at += len;
+    }
+    png_chunk_out(&o, "IEND", NULL, 0);
+    free(px);
+    free(raw.d);
+    free(z.d);
+    *out_n = o.n;
+    return o.d;
+}
+
+/* A 1x1 RGBA PNG whose image data unpacks to `mib` MiB: a filter byte, then runs of zeros. */
+static uint8_t *png_bomb(unsigned mib, size_t *out_n) {
+    Bw z = { 0 };
+    bw_byte(&z, 0x78);
+    bw_byte(&z, 0x01);
+    bw_bits(&z, 1, 1);
+    bw_bits(&z, 1, 2);
+    fixed_sym(&z, 0);
+    const uint64_t total = (uint64_t)mib << 20;
+    for (uint64_t made = 1; made + 258 <= total; made += 258) fixed_match(&z, 258);
+    fixed_sym(&z, 256);
+    bw_flush(&z);
+    uint8_t ad[4] = { 0, 0, 0, 1 };
+    zbuf(&z.d, &z.n, &z.cap, ad, 4);
+    Bw o = { 0 };
+    static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+    zbuf(&o.d, &o.n, &o.cap, sig, 8);
+    uint8_t ihdr[13] = { 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0 };
+    png_chunk_out(&o, "IHDR", ihdr, 13);
+    png_chunk_out(&o, "IDAT", z.d, z.n);
+    png_chunk_out(&o, "IEND", NULL, 0);
+    free(z.d);
+    *out_n = o.n;
+    return o.d;
+}
+
+/* Truncated, flipped, bad-CRC and oversized PNGs are refused before decoding, and every
  * byte of the image data flipped with its CRC made right again decodes or is refused, never more. */
 static void test_png_corpus(void) {
     char dir[512], path[600], why[96];
@@ -1252,8 +1503,14 @@ static void test_png_corpus(void) {
                 m[28] = (uint8_t)lace;
                 png_fix_crc(m, 8);
                 rgba = NULL;
-                if (nk_texrepl_decode_png(m, n, 0, &rgba, &w, &h, why, sizeof(why)) && (w != 8 || h != 8 || !rgba))
-                    wrong++;
+                const int fmt_ok = nk_texrepl_decode_png(m, n, 0, &rgba, &w, &h, why, sizeof(why));
+                if (fmt_ok && (w != 8 || h != 8 || !rgba)) wrong++;
+                const int defined = (color == 0 && (depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16)) ||
+                                    (color == 3 && depth <= 8) || ((color == 2 || color == 4 || color == 6) && depth >= 8);
+                if (!defined && (fmt_ok || !strstr(why, "IHDR names no PNG pixel format"))) wrong++;
+                if (color == 1 || color == 5) {   /* not PNG colour types at all */
+                    if (fmt_ok || !strstr(why, "IHDR names no PNG pixel format")) wrong++;
+                }
                 free(rgba);
                 formats++;
             }
@@ -1464,13 +1721,13 @@ static void test_file_checks(void) {
                      "0880400000000202d0000005 = flink.png\n0880400000000202d0000006 = inlink.png\n"
                      "0880400000000202d0000007 = fifo.png\n0880400000000202d0000008 = in.png\n"
                      "0880400000000202d0000009 = sub\n0880400000000202d000000a = NUL.png\n"
-                     "0880400000000202d000000b = folder.png\n");
+                     "0880400000000202d000000b = folder.png\n0880400000000202d000000c = CON .png\n");
     NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
     CHECK(p != NULL, "file-check pack: %s", err);
     if (p) {
         NkTexReplHit hit;
-        int expect[12] = { 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0 };
-        for (uint32_t i = 1; i <= 11; i++) {
+        int expect[13] = { 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0 };
+        for (uint32_t i = 1; i <= 12; i++) {
             if ((i == 4 && !have_dir_link) || ((i == 5 || i == 6) && (!have_file_link || !have_in_link))) continue;
 #if defined(_WIN32)
             if (i == 7) continue;
@@ -1486,6 +1743,7 @@ static void test_file_checks(void) {
         CHECK(has_diag(p, "sub/COM1.png: not a file name this module opens (ZIP_NAME_RESERVED"), "COM1.png not refused");
         CHECK(has_diag(p, "sub./in.png: not a file name this module opens (ZIP_NAME_CHARACTER"), "trailing dot not refused");
         CHECK(has_diag(p, "NUL.png: not a file name this module opens (ZIP_NAME_RESERVED"), "NUL.png not refused");
+        CHECK(has_diag(p, "CON .png: not a file name this module opens (ZIP_NAME_RESERVED"), "CON .png not refused");
 #if defined(_WIN32)
         /* A folder does not open as a file without backup semantics, so it is never read. */
         CHECK(has_diag(p, "folder.png: not used: it is missing or cannot be opened"), "a folder image not refused");
@@ -1570,6 +1828,483 @@ static void test_file_checks(void) {
               strstr(err, "'texrepl_no_such_pack'") && !strchr(err, '/') && !strchr(err, '\\'),
           "a missing pack's message: '%s'", err);
     free(px);
+}
+
+/* ----------------------------------------------------------- PNG seeds, decoded two ways */
+
+/* Every PNG pixel format, plain and Adam7, with and without tRNS, in stored and fixed-Huffman
+ * DEFLATE, the image data in one to three IDAT chunks, every filter type: the pack reader's own
+ * decoder and stb_image (vendored, used here only as a second decoder) must give the same pixels.
+ * Image data longer than the image is refused here (stb_image takes it). Then a seeded mutation
+ * pass over all of them: wherever both decode, they must agree. */
+/* stb_image v2.30 reads a zero-length first IDAT with memcpy into a buffer it has not allocated
+ * yet, a NULL pointer (stbi__getn), which UndefinedBehaviorSanitizer stops on. Such an input is not
+ * given to it: `*not_run` is set and NULL returned. The pack reader decodes no PNG with stb_image. */
+static unsigned char *stb_png(const uint8_t *d, size_t n, int *w, int *h, int *not_run) {
+    int comp = 0;
+    *not_run = 0;
+    for (size_t at = 8; at + 12u <= n;) {
+        const uint32_t len = be32_at(d + at);
+        if (len == 0 && memcmp(d + at + 4, "IDAT", 4) == 0) { *not_run = 1; return NULL; }
+        if (len > n - at - 12u) break;
+        at += (size_t)len + 12u;
+    }
+    return stbi_load_from_memory(d, (int)n, w, h, &comp, 4);
+}
+
+static void test_png_seeds(void) {
+    static const int kForms[][2] = { { 0, 1 }, { 0, 2 }, { 0, 4 }, { 0, 8 }, { 0, 16 }, { 2, 8 }, { 2, 16 }, { 3, 1 },
+                                     { 3, 2 }, { 3, 4 }, { 3, 8 }, { 4, 8 }, { 4, 16 }, { 6, 8 }, { 6, 16 } };
+    static const int kSizes[][2] = { { 1, 1 }, { 7, 5 }, { 33, 9 } };
+    enum { kMaxSeeds = 200 };
+    uint8_t *seed[kMaxSeeds];
+    size_t seed_n[kMaxSeeds];
+    int seeds = 0, agree = 0;
+    char why[96];
+    for (size_t f = 0; f < sizeof(kForms) / sizeof(kForms[0]); f++) {
+        const int color = kForms[f][0], depth = kForms[f][1];
+        const int trns_ok = color == 0 || color == 2 || color == 3;
+        for (int lace = 0; lace <= 1; lace++) {
+            for (size_t s = 0; s < sizeof(kSizes) / sizeof(kSizes[0]); s++) {
+                for (int trns = 0; trns <= trns_ok; trns++) {
+                    PngSpec sp = { kSizes[s][0], kSizes[s][1], depth, color, lace, trns, seeds % 2, 1 + seeds % 3, 0,
+                                   0x9e3779b9u * (uint32_t)(seeds + 1) };
+                    size_t n = 0;
+                    uint8_t *png = png_build(&sp, &n);
+                    uint32_t *ours = NULL;
+                    int w = 0, h = 0, sw = 0, sh = 0, not_run = 0;
+                    const int ok = nk_texrepl_decode_png(png, n, 0, &ours, &w, &h, why, sizeof(why));
+                    unsigned char *theirs = stb_png(png, n, &sw, &sh, &not_run);
+                    const int same = ok && theirs && w == sw && h == sh && w == sp.w && h == sp.h &&
+                                     memcmp(ours, theirs, (size_t)w * h * 4) == 0;
+                    CHECK(same, "seed colour %d depth %d %s %dx%d tRNS %d %s: ours %d (%s), stb %d", color, depth,
+                          lace ? "Adam7" : "plain", sp.w, sp.h, trns, sp.huffman ? "Huffman" : "stored", ok, why,
+                          theirs != NULL);
+                    agree += same;
+                    free(ours);
+                    if (theirs) stbi_image_free(theirs);
+                    if (seeds < kMaxSeeds) { seed[seeds] = png; seed_n[seeds] = n; seeds++; }
+                    else free(png);
+                }
+            }
+        }
+    }
+    /* Image data longer than the image: refused, however little longer. */
+    int longer = 0, stb_took_longer = 0;
+    static const size_t kExtra[] = { 1, 7, 1000, 100000 };
+    for (size_t i = 0; i < sizeof(kExtra) / sizeof(kExtra[0]); i++) {
+        PngSpec sp = { 7, 5, 8, 6, 0, 0, (int)(i % 2), 1, kExtra[i], 77u + (uint32_t)i };
+        size_t n = 0;
+        uint8_t *png = png_build(&sp, &n);
+        uint32_t *ours = NULL;
+        int w = 0, h = 0, sw = 0, sh = 0, not_run = 0;
+        if (!nk_texrepl_decode_png(png, n, 0, &ours, &w, &h, why, sizeof(why)) && strstr(why, "unpacks to more than the image"))
+            longer++;
+        free(ours);
+        unsigned char *theirs = stb_png(png, n, &sw, &sh, &not_run);
+        if (theirs) { stb_took_longer++; stbi_image_free(theirs); }
+        free(png);
+    }
+    CHECK(longer == 4, "image data longer than the image: %d of 4 refused", longer);
+    printf("png seeds: %d formats x layouts, %d decoded the same by both decoders; longer image data refused 4 of 4 "
+           "(stb_image took %d)\n", seeds, agree, stb_took_longer);
+
+    /* The mutation pass: 1 to 8 bytes after the signature set at random, every CRC made right. */
+    uint32_t rs = 0x2365u;
+    const int kRuns = 60000;
+    int both = 0, only_ours = 0, only_stb = 0, neither = 0, differ = 0, bounds = 0, stb_not_run = 0;
+    size_t biggest = 0;
+    for (int k = 0; k < seeds; k++) if (seed_n[k] > biggest) biggest = seed_n[k];
+    uint8_t *m = (uint8_t *)malloc(biggest);
+    for (int r = 0; r < kRuns; r++) {
+        const int k = r % seeds;
+        const size_t n = seed_n[k];
+        memcpy(m, seed[k], n);
+        const int flips = 1 + (int)(t_rand(&rs) % 8u);
+        for (int j = 0; j < flips; j++) m[8u + t_rand(&rs) % (n - 8u)] = (uint8_t)t_rand(&rs);
+        for (size_t at = 8; at + 12u <= n;) {
+            const uint32_t len = be32_at(m + at);
+            if (len > n - at - 12u) break;
+            png_fix_crc(m, at);
+            at += (size_t)len + 12u;
+        }
+        uint32_t *ours = NULL;
+        int w = 0, h = 0, sw = 0, sh = 0, not_run = 0;
+        const int ok = nk_texrepl_decode_png(m, n, 0, &ours, &w, &h, why, sizeof(why));
+        if (ok && (!ours || w < 1 || h < 1 || w > 2048 || h > 2048)) bounds++;
+        unsigned char *theirs = stb_png(m, n, &sw, &sh, &not_run);
+        if (not_run) {
+            stb_not_run++;
+        } else if (ok && theirs) {
+            both++;
+            if (w != sw || h != sh || memcmp(ours, theirs, (size_t)w * h * 4) != 0) differ++;
+        } else if (ok) only_ours++;
+        else if (theirs) only_stb++;
+        else neither++;
+        free(ours);
+        if (theirs) stbi_image_free(theirs);
+    }
+    CHECK(differ == 0 && bounds == 0, "mutations: %d decoded differently, %d out of bounds", differ, bounds);
+    CHECK(only_ours == 0, "mutations: %d decoded here that stb_image refused", only_ours);
+    printf("png mutations: %d runs over %d seeds (seed 0x2365): %d decoded by both and the same, %d refused here only, "
+           "%d refused by both, %d differ, %d with an empty IDAT not given to stb_image, no crash\n", kRuns, seeds,
+           both, only_stb, neither, differ, stb_not_run);
+    free(m);
+    for (int k = 0; k < seeds; k++) free(seed[k]);
+}
+
+/* A 1x1 PNG whose image data unpacks to 64 MiB, listed under 81 keys that every texture of up to
+ * 256 texels a side reaches by the "size only" wildcard: each lookup refuses it after unpacking
+ * at most 5 bytes, nothing is held, and the most one decode held is about the file. */
+static void test_png_bomb(void) {
+    char dir[512], path[600], err[256] = "", why[96];
+    size_t n = 0;
+    uint8_t *png = png_bomb(64, &n);
+    double t0 = wall_s();
+    uint32_t *rgba = NULL;
+    int w = 0, h = 0;
+    CHECK(!nk_texrepl_decode_png(png, n, 0, &rgba, &w, &h, why, sizeof(why)) && !rgba &&
+              strstr(why, "unpacks to more than the image"),
+          "a 64 MiB image data bomb: '%s'", why);
+    const double t_one = wall_s() - t0;
+    make_pack(dir, sizeof(dir), "texrepl_png_bomb");
+    pack_path(path, sizeof(path), "texrepl_png_bomb", "bomb.png");
+    file_save(path, png, n);
+    char ini[4096];
+    size_t at = (size_t)snprintf(ini, sizeof(ini), "[options]\nhash = quick\n[hashes]\n");
+    for (unsigned hh = 1; hh <= 9; hh++)
+        for (unsigned ww = 1; ww <= 9; ww++)
+            at += (size_t)snprintf(ini + at, sizeof(ini) - at, "%016llx = bomb.png\n", (unsigned long long)(hh << 8 | ww));
+    pack_path(path, sizeof(path), "texrepl_png_bomb", "textures.ini");
+    write_text(path, ini);
+    NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    CHECK(p != NULL, "the bomb pack: %s", err);
+    if (p) {
+        t0 = wall_s();
+        int hits = 0;
+        for (unsigned hh = 1; hh <= 9; hh++) {
+            for (unsigned ww = 1; ww <= 9; ww++) {
+                NkTexReplHit hit;
+                NkTexReplId id = { 0x08804000u, 3u, hh << 8 | ww, 0u, 0x12345678u + hh * 16u + ww };
+                if (nk_texrepl_lookup(p, &id, &hit)) { hits++; nk_texrepl_unpin(p, &hit); }
+            }
+        }
+        const double t_all = wall_s() - t0;
+        NkTexReplStats st;
+        nk_texrepl_stats(p, &st);
+        CHECK(hits == 0 && st.skipped == 81 && st.cache_peak == 0, "bomb pack: hits %d skipped %llu cache_peak %llu", hits,
+              (unsigned long long)st.skipped, (unsigned long long)st.cache_peak);
+        CHECK(st.decode_peak <= (uint64_t)n + 4096u, "one decode held %llu bytes for a %zu-byte file",
+              (unsigned long long)st.decode_peak, n);
+        CHECK(has_diag(p, "bomb.png: not a PNG this module decodes (its image data unpacks to more than the image)"),
+              "the bomb not noted");
+        CHECK(t_all < 10.0, "81 bomb lookups took %.2f s", t_all);
+        printf("png bomb: %zu-byte 1x1 PNG unpacking to 64 MiB refused in %.1f ms; 81 wildcard lookups %.1f ms, "
+               "most held by one decode %llu bytes, cache peak %llu\n",
+               n, t_one * 1e3, t_all * 1e3, (unsigned long long)st.decode_peak, (unsigned long long)st.cache_peak);
+        nk_texrepl_close(p);
+    }
+    free(png);
+}
+
+/* McIlroy's adversary ("A Killer Adversary for Quicksort", 1999) run against this C library's own
+ * qsort gives the order that costs it most; the pack's sorts must not care. The order is a function
+ * of n and the C library, so it is kept under the build folder once made. */
+static int *g_adv_val;
+static int g_adv_solid, g_adv_candidate, g_adv_gas;
+static unsigned long long g_cmps;
+static int adv_cmp(const void *px, const void *py) {
+    const int x = *(const int *)px, y = *(const int *)py;
+    g_cmps++;
+    if (g_adv_val[x] == g_adv_gas && g_adv_val[y] == g_adv_gas) {
+        if (x == g_adv_candidate) g_adv_val[x] = g_adv_solid++;
+        else g_adv_val[y] = g_adv_solid++;
+    }
+    if (g_adv_val[x] == g_adv_gas) g_adv_candidate = x;
+    else if (g_adv_val[y] == g_adv_gas) g_adv_candidate = y;
+    return (g_adv_val[x] > g_adv_val[y]) - (g_adv_val[x] < g_adv_val[y]);
+}
+static int int_cmp(const void *a, const void *b) {
+    g_cmps++;
+    return (*(const int *)a > *(const int *)b) - (*(const int *)a < *(const int *)b);
+}
+/* The adversary's values for n, against `sorter` (the C library's qsort, or the project's sort). */
+static int *adversary(int n, void (*sorter)(void *, size_t, size_t, int (*)(const void *, const void *)),
+                      unsigned long long *cmps) {
+    int *ptr = (int *)malloc(sizeof(int) * (size_t)n);
+    g_adv_val = (int *)malloc(sizeof(int) * (size_t)n);
+    g_adv_gas = n - 1;
+    g_adv_solid = 0;
+    g_adv_candidate = 0;
+    for (int i = 0; i < n; i++) { ptr[i] = i; g_adv_val[i] = g_adv_gas; }
+    g_cmps = 0;
+    sorter(ptr, (size_t)n, sizeof(int), adv_cmp);
+    *cmps = g_cmps;
+    free(ptr);
+    return g_adv_val;
+}
+static int *libc_adversary(int n) {
+    char path[600];
+    snprintf(path, sizeof(path), "%s/texrepl_adversary_%d.txt", SR_SELFTEST_BUILD_ROOT, n);
+    int *v = (int *)malloc(sizeof(int) * (size_t)n);
+    FILE *f = nk_fopen_utf8(path, "rb");
+    int got = 0;
+    if (f) {
+        while (got < n && fscanf(f, "%d", &v[got]) == 1) got++;
+        fclose(f);
+    }
+    if (got == n) return v;
+    free(v);
+    unsigned long long cmps = 0;
+    const double t0 = wall_s();
+    v = adversary(n, qsort, &cmps);
+    printf("adversary: n=%d costs this C library's qsort %llu comparisons (n*n/4 = %llu), made in %.1f s\n", n, cmps,
+           (unsigned long long)n * (unsigned long long)n / 4u, wall_s() - t0);
+    f = nk_fopen_utf8(path, "wb");
+    if (f) {
+        for (int i = 0; i < n; i++) fprintf(f, "%d\n", v[i]);
+        fclose(f);
+    }
+    return v;
+}
+
+/* The project sort: at most 2 n log2 n + 2 n comparisons on the worst orders it can be given, and
+ * right on every order of up to 7 items; then packs in the order that costs qsort most open in
+ * time far below what qsort takes on Windows (30 s for the ini, over 2 minutes for the ZIP). */
+static void test_sort_adversary(void) {
+    /* every permutation of up to 7 items */
+    for (int n = 0; n <= 7; n++) {
+        int perm[7], fact = 1;
+        for (int i = 2; i <= n; i++) fact *= i;
+        for (int k = 0; k < fact; k++) {
+            int left[7], c = k;
+            for (int i = 0; i < n; i++) left[i] = i;
+            for (int i = 0; i < n; i++) {
+                const int pick = c % (n - i);
+                c /= n - i;
+                perm[i] = left[pick];
+                memmove(left + pick, left + pick + 1, sizeof(int) * (size_t)(n - i - pick - 1));
+            }
+            nk_zip_sort(perm, (size_t)n, sizeof(int), int_cmp);
+            for (int i = 0; i < n; i++) CHECK(perm[i] == i, "nk_zip_sort on a permutation of %d", n);
+        }
+    }
+    const int kN = 200000;
+    int lg = 0;
+    while ((1 << lg) < kN) lg++;
+    const double bound = 2.0 * kN * lg + 2.0 * kN;
+    unsigned long long cmps = 0;
+    free(adversary(kN, nk_zip_sort, &cmps));
+    CHECK((double)cmps <= bound, "the adversary against nk_zip_sort: %llu comparisons", cmps);
+    int *v = libc_adversary(kN);
+    int *copy = (int *)malloc(sizeof(int) * (size_t)kN);
+    memcpy(copy, v, sizeof(int) * (size_t)kN);
+    g_cmps = 0;
+    nk_zip_sort(copy, (size_t)kN, sizeof(int), int_cmp);
+    const unsigned long long cmps_libc_order = g_cmps;
+    for (int i = 0; i < kN; i++) if (copy[i] != i) { CHECK(0, "nk_zip_sort left the adversary's order unsorted"); break; }
+    CHECK((double)g_cmps <= bound, "qsort's worst order through nk_zip_sort: %llu comparisons", g_cmps);
+    for (int i = 0; i < kN; i++) copy[i] = kN - i;
+    g_cmps = 0;
+    nk_zip_sort(copy, (size_t)kN, sizeof(int), int_cmp);
+    CHECK((double)g_cmps <= bound, "a reversed order: %llu comparisons", g_cmps);
+    for (int i = 0; i < kN; i++) copy[i] = 5;
+    g_cmps = 0;
+    nk_zip_sort(copy, (size_t)kN, sizeof(int), int_cmp);
+    CHECK((double)g_cmps <= bound, "all equal: %llu comparisons", g_cmps);
+    free(copy);
+    printf("sort: n=%d, at most %.0f comparisons allowed; McIlroy's adversary against nk_zip_sort %llu, qsort's worst "
+           "order %llu\n", kN, bound, cmps, cmps_libc_order);
+
+    /* A 200,000-line textures.ini in that order. */
+    char dir[512], path[600], err[256] = "";
+    make_pack(dir, sizeof(dir), "texrepl_adv_ini");
+    size_t cap = (size_t)kN * 12u + 64u, at = 0;
+    char *ini = (char *)malloc(cap);
+    at += (size_t)snprintf(ini, cap, "[options]\nhash=quick\n[hashes]\n");
+    for (int i = 0; i < kN; i++) at += (size_t)snprintf(ini + at, cap - at, "%x=a\n", (unsigned)v[i]);
+    pack_path(path, sizeof(path), "texrepl_adv_ini", "textures.ini");
+    write_text(path, ini);
+    free(ini);
+    double t0 = wall_s();
+    NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    const double t_ini = wall_s() - t0;
+    CHECK(p && nk_texrepl_entry_count(p) == (size_t)kN, "the adversary's ini: %s", err);
+    CHECK(t_ini < 10.0, "the adversary's 200,000-line ini took %.2f s to open", t_ini);
+    if (p) nk_texrepl_close(p);
+    free(v);
+
+    /* A 16,384-entry ZIP in that order: 200-byte names, local headers laid out in value order too
+     * so the offset sort sees it, textures.ini the greatest name. */
+    const int zn = 16384;
+    int *zv = libc_adversary(zn);
+    static const char kZini[] = "[options]\nhash = quick\n";
+    char (*names)[201] = (char (*)[201])malloc((size_t)zn * 201u);
+    uint32_t *offs = (uint32_t *)malloc(sizeof(uint32_t) * (size_t)zn);
+    int *order = (int *)malloc(sizeof(int) * (size_t)zn);
+    for (int i = 0; i < zn; i++) {
+        if (zv[i] == zn - 1) snprintf(names[i], 201, "textures.ini");
+        else {
+            memset(names[i], 'a', 191);
+            snprintf(names[i] + 191, 10, "%05d.png", zv[i]);
+        }
+        order[zv[i]] = i;
+    }
+    Bw body = { 0 }, cd = { 0 };
+    for (int k = 0; k < zn; k++) {
+        const int i = order[k];
+        const int is_ini = zv[i] == zn - 1;
+        const size_t dl = is_ini ? sizeof(kZini) - 1 : 0, nl = strlen(names[i]);
+        const uint32_t crc = nk_zip_crc32(0, kZini, dl);
+        uint8_t h[30];
+        memset(h, 0, sizeof(h));
+        le32(h, 0x04034b50u);
+        le16(h + 4, 20u);
+        le16(h + 12, 0x21u);
+        le32(h + 14, crc);
+        le32(h + 18, (uint32_t)dl);
+        le32(h + 22, (uint32_t)dl);
+        le16(h + 26, (uint32_t)nl);
+        offs[i] = (uint32_t)body.n;
+        zbuf(&body.d, &body.n, &body.cap, h, 30);
+        zbuf(&body.d, &body.n, &body.cap, names[i], nl);
+        if (dl) zbuf(&body.d, &body.n, &body.cap, kZini, dl);
+    }
+    for (int i = 0; i < zn; i++) {
+        const int is_ini = zv[i] == zn - 1;
+        const size_t dl = is_ini ? sizeof(kZini) - 1 : 0, nl = strlen(names[i]);
+        uint8_t h[46];
+        memset(h, 0, sizeof(h));
+        le32(h, 0x02014b50u);
+        le16(h + 4, 20u);
+        le16(h + 6, 20u);
+        le16(h + 14, 0x21u);
+        le32(h + 16, nk_zip_crc32(0, kZini, dl));
+        le32(h + 20, (uint32_t)dl);
+        le32(h + 24, (uint32_t)dl);
+        le16(h + 28, (uint32_t)nl);
+        le32(h + 42, offs[i]);
+        zbuf(&cd.d, &cd.n, &cd.cap, h, 46);
+        zbuf(&cd.d, &cd.n, &cd.cap, names[i], nl);
+    }
+    uint8_t e[22];
+    memset(e, 0, sizeof(e));
+    le32(e, 0x06054b50u);
+    le16(e + 8, (uint32_t)zn);
+    le16(e + 10, (uint32_t)zn);
+    le32(e + 12, (uint32_t)cd.n);
+    le32(e + 16, (uint32_t)body.n);
+    zbuf(&body.d, &body.n, &body.cap, cd.d, cd.n);
+    zbuf(&body.d, &body.n, &body.cap, e, 22);
+    char zip[600];
+    snprintf(zip, sizeof(zip), "%s/texrepl_adv.zip", SR_SELFTEST_BUILD_ROOT);
+    file_save(zip, body.d, body.n);
+    free(body.d);
+    free(cd.d);
+    free(names);
+    free(offs);
+    free(order);
+    free(zv);
+    err[0] = '\0';
+    t0 = wall_s();
+    p = nk_texrepl_open(zip, 0, err, sizeof(err));
+    const double t_zip = wall_s() - t0;
+    CHECK(p != NULL, "the adversary's ZIP: %s", err);
+    CHECK(t_zip < 10.0, "the adversary's 16,384-entry ZIP took %.2f s to open", t_zip);
+    if (p) nk_texrepl_close(p);
+    printf("sort: qsort's worst order opens in %.3f s as a 200,000-line ini and %.3f s as a 16,384-entry ZIP\n", t_ini,
+           t_zip);
+}
+
+/* [hashranges]: the last line for a texture wins after the sort; 16,384 lines in reverse order
+ * open and hash quickly; one more refuses the pack. [reducehashranges] NaN and infinity are not read. */
+static void test_hashranges_index(void) {
+    char dir[512], path[600], err[256] = "";
+    make_pack(dir, sizeof(dir), "texrepl_ranges");
+    pack_path(path, sizeof(path), "texrepl_ranges", "textures.ini");
+    write_text(path, "[options]\nhash = xxh32\n[hashranges]\n08804000,16,16 = 16,16\n"
+                     "08804000,16,16 = 16,8\n[reducehashranges]\n128,64 = nan\n64,64 = inf\n32,32 = -nan\n");
+    NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    CHECK(p != NULL, "ranges pack: %s", err);
+    uint8_t mem[16 * 16 * 4];
+    for (size_t i = 0; i < sizeof(mem); i++) mem[i] = (uint8_t)(i * 7 + 3);
+    if (p) {
+        CHECK(nk_texrepl_hash_texture(p, mem, sizeof(mem), 0x08804000u, 16, 16, 16, 3, 0) ==
+                  nk_texrepl_xxh32(mem, 16 * 8 * 4, 0xBACD7814u),
+              "the later [hashranges] line for a texture did not win");
+        CHECK(has_diag(p, "line for '128' is not a finite number") && has_diag(p, "line for '64' is not a finite number"),
+              "NaN or infinity in [reducehashranges] not refused");
+        nk_texrepl_close(p);
+    }
+    /* NK_TEXREPL_MAX_RANGES lines, addresses descending, then one more. */
+    const unsigned n = NK_TEXREPL_MAX_RANGES;
+    size_t cap = (size_t)(n + 1) * 64u + 256u, at = 0;
+    char *ini = (char *)malloc(cap);
+    at += (size_t)snprintf(ini, cap, "[options]\nhash = xxh32\n[hashranges]\n");
+    for (unsigned i = 0; i < n; i++)
+        at += (size_t)snprintf(ini + at, cap - at, "%08x,16,16 = 16,8\n", 0x08ffc000u - i * 0x40u);
+    at += (size_t)snprintf(ini + at, cap - at, "[reducehashranges]\n");
+    for (unsigned i = 0; i < 64; i++) at += (size_t)snprintf(ini + at, cap - at, "%u,%u = 0.5\n", 512u - i, 4u);
+    write_text(path, ini);
+    double t0 = wall_s();
+    p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    const double t_open = wall_s() - t0;
+    CHECK(p != NULL && t_open < 5.0, "%u [hashranges] lines: %s, %.2f s", n, err, t_open);
+    double t_hash = 0;
+    if (p) {
+        t0 = wall_s();
+        uint32_t acc = 0;
+        for (unsigned i = 0; i < 1000; i++)
+            acc ^= nk_texrepl_hash_texture(p, mem, sizeof(mem), 0x08ffc000u - (i * 13u % n) * 0x40u, 16, 16, 16, 3, 0);
+        t_hash = wall_s() - t0;
+        CHECK(nk_texrepl_hash_texture(p, mem, sizeof(mem), 0x08ffc000u - 77u * 0x40u, 16, 16, 16, 3, 0) ==
+                  nk_texrepl_xxh32(mem, 16 * 8 * 4, 0xBACD7814u),
+              "a range found by the index");
+        (void)acc;
+        nk_texrepl_close(p);
+    }
+    at = (size_t)snprintf(ini, cap, "[options]\nhash = xxh32\n[hashranges]\n");
+    for (unsigned i = 0; i <= n; i++)
+        at += (size_t)snprintf(ini + at, cap - at, "%08x,16,16 = 16,8\n", 0x08ffc000u - i * 0x40u);
+    write_text(path, ini);
+    err[0] = '\0';
+    t0 = wall_s();
+    p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    const double t_refuse = wall_s() - t0;
+    CHECK(p == NULL && strstr(err, "more than 16384 [hashranges] lines"), "%u [hashranges] lines: '%s'", n + 1, err);
+    if (p) nk_texrepl_close(p);
+    free(ini);
+    printf("hashranges: %u lines open in %.1f ms, 1000 hashes %.2f ms; %u refused in %.1f ms\n", n, t_open * 1e3,
+           t_hash * 1e3, n + 1, t_refuse * 1e3);
+}
+
+/* DEFLATE padding: an entry declaring 1 byte packed as 1 MiB of empty stored blocks is refused at
+ * open, as an image and as textures.ini. */
+static void test_zip_padding(void) {
+    char dir[512], zip[600], err[300];
+    make_pack(dir, sizeof(dir), "texrepl_zip_pad");
+    const size_t pad = 1u << 20;
+    uint8_t *blocks = (uint8_t *)malloc(pad + 6);
+    for (size_t i = 0; i + 5 <= pad; i += 5) { blocks[i] = 0; blocks[i + 1] = 0; blocks[i + 2] = 0; blocks[i + 3] = 0xff; blocks[i + 4] = 0xff; }
+    const size_t bn = pad / 5 * 5;
+    blocks[bn] = 1; blocks[bn + 1] = 1; blocks[bn + 2] = 0; blocks[bn + 3] = 0xfe; blocks[bn + 4] = 0xff; blocks[bn + 5] = 'x';
+    for (int as_ini = 0; as_ini <= 1; as_ini++) {
+        Zw z;
+        memset(&z, 0, sizeof(z));
+        const ZwOpt padded = { 8, 0, blocks, bn + 6, 0, 0 };
+        if (as_ini) zw_add(&z, "textures.ini", "x", 1, padded);
+        else {
+            zw_add_text(&z, "textures.ini", "[options]\nhash = quick\n[hashes]\n088040000000020211223344 = a.png\n", 0);
+            zw_add(&z, "a.png", "x", 1, padded);
+        }
+        pack_path(zip, sizeof(zip), "texrepl_zip_pad", as_ini ? "pad_ini.zip" : "pad_png.zip");
+        zw_finish(&z, zip, 0);
+        err[0] = '\0';
+        NkTexRepl *p = nk_texrepl_open(zip, 0, err, sizeof(err));
+        CHECK(p == NULL && strstr(err, "ZIP_SIZE_MISMATCH"), "1 byte packed in 1 MiB (%s): '%s'", as_ini ? "ini" : "image", err);
+        if (p) nk_texrepl_close(p);
+    }
+    free(blocks);
 }
 
 /* --bench N: a synthetic pack of N textures (32x32 PNGs, one textures.ini line each, files in a
@@ -1696,6 +2431,11 @@ int main(int argc, char **argv) {
     test_zip_packs();
     test_zip_refusals();
     test_png_corpus();
+    test_png_seeds();
+    test_png_bomb();
+    test_zip_padding();
+    test_hashranges_index();
+    test_sort_adversary();
     test_file_checks();
     if (g_failures) {
         fprintf(stderr, "texrepl selftest: %d check(s) failed\n", g_failures);

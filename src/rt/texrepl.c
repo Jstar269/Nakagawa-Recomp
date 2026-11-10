@@ -30,6 +30,7 @@
 
 #include <ctype.h>
 #include <limits.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,28 +53,7 @@
 #include <unistd.h>
 #endif
 
-#define STBI_ONLY_PNG
-#define STBI_NO_STDIO
-#define STBI_NO_LINEAR
-#define STBI_NO_HDR
-#define STBI_NO_FAILURE_STRINGS
-#define STBI_NO_THREAD_LOCALS
-#define STBI_MAX_DIMENSIONS NK_TEXREPL_MAX_DIM
-#define STB_IMAGE_STATIC
-#define STB_IMAGE_IMPLEMENTATION
-#if defined(__GNUC__)
-#pragma GCC diagnostic ignored "-Wunused-function"
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#pragma GCC diagnostic ignored "-Wpedantic"
-#if !defined(__clang__)
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif
-#endif
-#include "../../third_party/stb/stb_image.h"
-#if defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
+#include "nk_psp_inflate.h"
 
 /* ===================================================================================== hashes */
 
@@ -315,8 +295,8 @@ typedef struct {
     uint8_t mode;
 } IndexedKey;
 
-typedef struct { uint32_t addr, w, h, new_w, new_h; } HashRange;
-typedef struct { uint32_t w, h; float value; } ReduceRange;
+typedef struct { uint32_t addr, w, h, new_w, new_h, seq; } HashRange;
+typedef struct { uint32_t w, h; float value; uint32_t seq; } ReduceRange;
 
 /* A ZIP pack's file, by its name under the pack's root (the reader owns the name). */
 typedef struct { const char *rel; size_t index; uint32_t size; } ZipName;
@@ -493,7 +473,7 @@ static int build_chain(NkTexRepl *p, const Record *first, size_t n, Alias *a) {
 }
 
 static int aliases_build(NkTexRepl *p) {
-    if (p->record_n) qsort(p->records, p->record_n, sizeof(Record), record_cmp);
+    nk_zip_sort(p->records, p->record_n, sizeof(Record), record_cmp);
     size_t keys = 0;
     for (size_t i = 0; i < p->record_n; i++)
         if (i == 0 || p->records[i].cachekey != p->records[i - 1].cachekey || p->records[i].hash != p->records[i - 1].hash)
@@ -537,7 +517,7 @@ static int indexed_cmp(const void *x, const void *y) {
 /* Sorts the [indexed] lines and keeps the last line of each key. */
 static void indexed_finish(NkTexRepl *p) {
     if (p->indexed_n < 2) return;
-    qsort(p->indexed, p->indexed_n, sizeof(IndexedKey), indexed_cmp);
+    nk_zip_sort(p->indexed, p->indexed_n, sizeof(IndexedKey), indexed_cmp);
     size_t out = 0;
     for (size_t i = 0; i < p->indexed_n; i++) {
         if (i + 1 < p->indexed_n && p->indexed[i + 1].cachekey == p->indexed[i].cachekey &&
@@ -633,13 +613,10 @@ static int parse_hash_name(const char *name, uint64_t *cachekey, uint32_t *hash,
 typedef enum { SEC_NONE, SEC_OPTIONS, SEC_HASHES, SEC_HASHRANGES, SEC_REDUCE, SEC_FILTERING,
                SEC_INDEXED, SEC_GAMES, SEC_UNKNOWN, SEC_REPEATED, SEC_COUNT } Section;
 
+/* [hashranges] and [reducehashranges] lines are kept in file order, at most NK_TEXREPL_MAX_RANGES
+ * of each, then sorted once (ranges_finish) with the last line for each texture kept, as PPSSPP's map
+ * keeps it, and looked up by binary search. */
 static int range_push(NkTexRepl *p, HashRange r) {
-    for (size_t i = 0; i < p->range_n; i++) {
-        if (p->ranges[i].addr == r.addr && p->ranges[i].w == r.w && p->ranges[i].h == r.h) {
-            p->ranges[i] = r;   /* a later line for the same texture replaces it */
-            return 1;
-        }
-    }
     if (p->range_n == p->range_cap) {
         size_t cap = p->range_cap ? p->range_cap * 2 : 16;
         HashRange *g = (HashRange *)realloc(p->ranges, cap * sizeof(*g));
@@ -647,13 +624,11 @@ static int range_push(NkTexRepl *p, HashRange r) {
         p->ranges = g;
         p->range_cap = cap;
     }
+    r.seq = (uint32_t)p->range_n;
     p->ranges[p->range_n++] = r;
     return 1;
 }
 static int reduce_push(NkTexRepl *p, ReduceRange r) {
-    for (size_t i = 0; i < p->reduce_n; i++) {
-        if (p->reduce[i].w == r.w && p->reduce[i].h == r.h) { p->reduce[i] = r; return 1; }
-    }
     if (p->reduce_n == p->reduce_cap) {
         size_t cap = p->reduce_cap ? p->reduce_cap * 2 : 16;
         ReduceRange *g = (ReduceRange *)realloc(p->reduce, cap * sizeof(*g));
@@ -661,8 +636,49 @@ static int reduce_push(NkTexRepl *p, ReduceRange r) {
         p->reduce = g;
         p->reduce_cap = cap;
     }
+    r.seq = (uint32_t)p->reduce_n;
     p->reduce[p->reduce_n++] = r;
     return 1;
+}
+
+static int range_key_cmp(const HashRange *a, uint32_t addr, uint32_t w, uint32_t h) {
+    if (a->addr != addr) return a->addr < addr ? -1 : 1;
+    if (a->w != w) return a->w < w ? -1 : 1;
+    if (a->h != h) return a->h < h ? -1 : 1;
+    return 0;
+}
+static int range_cmp(const void *x, const void *y) {
+    const HashRange *a = (const HashRange *)x, *b = (const HashRange *)y;
+    const int c = range_key_cmp(a, b->addr, b->w, b->h);
+    return c ? c : (a->seq < b->seq ? -1 : (a->seq > b->seq));
+}
+static int reduce_key_cmp(const ReduceRange *a, uint32_t w, uint32_t h) {
+    if (a->w != w) return a->w < w ? -1 : 1;
+    if (a->h != h) return a->h < h ? -1 : 1;
+    return 0;
+}
+static int reduce_cmp(const void *x, const void *y) {
+    const ReduceRange *a = (const ReduceRange *)x, *b = (const ReduceRange *)y;
+    const int c = reduce_key_cmp(a, b->w, b->h);
+    return c ? c : (a->seq < b->seq ? -1 : (a->seq > b->seq));
+}
+
+static void ranges_finish(NkTexRepl *p) {
+    nk_zip_sort(p->ranges, p->range_n, sizeof(HashRange), range_cmp);
+    size_t out = 0;
+    for (size_t i = 0; i < p->range_n; i++) {
+        if (i + 1 < p->range_n && !range_key_cmp(&p->ranges[i + 1], p->ranges[i].addr, p->ranges[i].w, p->ranges[i].h))
+            continue;   /* a later line for the same texture replaces this one */
+        p->ranges[out++] = p->ranges[i];
+    }
+    p->range_n = out;
+    nk_zip_sort(p->reduce, p->reduce_n, sizeof(ReduceRange), reduce_cmp);
+    out = 0;
+    for (size_t i = 0; i < p->reduce_n; i++) {
+        if (i + 1 < p->reduce_n && !reduce_key_cmp(&p->reduce[i + 1], p->reduce[i].w, p->reduce[i].h)) continue;
+        p->reduce[out++] = p->reduce[i];
+    }
+    p->reduce_n = out;
 }
 
 /* Splits `s` at commas into at most `max` parts; returns how many there were (more than max: max + 1). */
@@ -881,6 +897,10 @@ static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
                 diag_add(p, "textures.ini: [hashranges] line for '%s' is larger than its texture or empty; not read", kp[0]);
                 break;
             }
+            if (p->range_n >= NK_TEXREPL_MAX_RANGES) {
+                snprintf(err, err_cap, "textures.ini: more than %u [hashranges] lines", (unsigned)NK_TEXREPL_MAX_RANGES);
+                return 0;
+            }
             if (!range_push(p, r)) { snprintf(err, err_cap, "out of memory"); return 0; }
             break;
         }
@@ -897,9 +917,18 @@ static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
                 diag_add(p, "textures.ini: [reducehashranges] line for '%s' has a bad number; not read", kp[0]);
                 break;
             }
+            if (!isfinite(r.value)) {   /* NaN or infinity would not convert to a size */
+                diag_add(p, "textures.ini: [reducehashranges] line for '%s' is not a finite number; not read", kp[0]);
+                break;
+            }
             if (r.value == 0.0f) {
                 diag_add(p, "textures.ini: [reducehashranges] line for '%s' is 0; not read", kp[0]);
                 break;
+            }
+            if (p->reduce_n >= NK_TEXREPL_MAX_RANGES) {
+                snprintf(err, err_cap, "textures.ini: more than %u [reducehashranges] lines",
+                         (unsigned)NK_TEXREPL_MAX_RANGES);
+                return 0;
             }
             if (!reduce_push(p, r)) { snprintf(err, err_cap, "out of memory"); return 0; }
             break;
@@ -1255,7 +1284,7 @@ static int open_zip(NkTexRepl *p, const char *path, char *err, size_t err_cap) {
         z->index = i;
         z->size = e.size;
     }
-    qsort(p->zip_names, p->zip_name_n, sizeof(ZipName), zip_name_cmp);
+    nk_zip_sort(p->zip_names, p->zip_name_n, sizeof(ZipName), zip_name_cmp);
     for (size_t i = 0; i < p->zip_name_n; i++) {
         if (strchr(p->zip_names[i].rel, '/')) continue;   /* only the root's files are scanned */
         if (!scan_name(p, p->zip_names[i].rel)) { snprintf(err, err_cap, "out of memory"); return 0; }
@@ -1382,6 +1411,7 @@ NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, s
     }
     if (!aliases_build(p)) { snprintf(err, err_cap, "out of memory"); return open_fail(p); }
     indexed_finish(p);
+    ranges_finish(p);
     if (p->nonpng_listed)
         diag_add(p, "%zu hash-named DDS, KTX2 or ZIM files listed; only PNG replacements are decoded in this version",
                  p->nonpng_listed);
@@ -1415,13 +1445,17 @@ void nk_texrepl_close(NkTexRepl *p) {
 /* ----------------------------------------------------------------------------- hashing */
 
 static int find_range(const NkTexRepl *p, uint32_t addr, int w, int h, int *nw, int *nh) {
-    for (size_t i = 0; i < p->range_n; i++) {
-        const HashRange *r = &p->ranges[i];
-        if (r->addr == addr && r->w == (uint32_t)w && r->h == (uint32_t)h) {
-            *nw = (int)r->new_w;
-            *nh = (int)r->new_h;
+    size_t lo = 0, hi = p->range_n;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        const int c = range_key_cmp(&p->ranges[mid], addr, (uint32_t)w, (uint32_t)h);
+        if (c == 0) {
+            *nw = (int)p->ranges[mid].new_w;
+            *nh = (int)p->ranges[mid].new_h;
             return 1;
         }
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
     }
     *nw = w;
     *nh = h;
@@ -1429,8 +1463,14 @@ static int find_range(const NkTexRepl *p, uint32_t addr, int w, int h, int *nw, 
 }
 
 static float reduce_for(const NkTexRepl *p, int w, int h) {
-    for (size_t i = 0; i < p->reduce_n; i++)
-        if (p->reduce[i].w == (uint32_t)w && p->reduce[i].h == (uint32_t)h) return p->reduce[i].value;
+    size_t lo = 0, hi = p->reduce_n;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        const int c = reduce_key_cmp(&p->reduce[mid], (uint32_t)w, (uint32_t)h);
+        if (c == 0) return p->reduce[mid].value;
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
     return p->reduce_global;
 }
 
@@ -1541,19 +1581,58 @@ static uint32_t png_be32(const unsigned char *b) {
     return (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 8 | (uint32_t)b[3];
 }
 
-/* PNG bytes checked before anything is allocated for their pixels: the signature, IHDR first with a
- * size of 1 to NK_TEXREPL_MAX_DIM a side and a pixel format the PNG standard defines, every chunk
- * whole with its CRC right, at least one IDAT, and IEND. Bytes after IEND are ignored, as decoders
- * ignore them. What the IDAT data inflates to is left to stb_image, whose output the size bounds. */
-static int png_check(const unsigned char *d, size_t n, int *w, int *h, char *why, size_t why_cap) {
+/* What png_check found: the header, where PLTE and tRNS are, and the image data's chunks. */
+typedef struct {
+    int w, h;
+    unsigned depth, color, interlace, channels;
+    const unsigned char *plte, *trns;
+    uint32_t plte_len, trns_len;
+    const unsigned char *idat;   /* the first IDAT's data */
+    size_t idat_total;           /* all IDAT data, which follow one another */
+    size_t idat_count;
+    size_t raw_size;             /* what the image data must unpack to: every row with its filter byte */
+} PngInfo;
+
+static const unsigned char kAdam7[7][4] = {   /* x0, y0, dx, dy */
+    { 0, 0, 8, 8 }, { 4, 0, 8, 8 }, { 0, 4, 4, 8 }, { 2, 0, 4, 4 }, { 0, 2, 2, 4 }, { 1, 0, 2, 2 }, { 0, 1, 1, 2 },
+};
+
+static size_t png_row_bytes(const PngInfo *g, uint32_t w) {
+    return ((size_t)w * g->depth * g->channels + 7u) / 8u;
+}
+
+static uint32_t png_pass_extent(uint32_t full, unsigned origin, unsigned step) {
+    return full > origin ? (full - origin + step - 1u) / step : 0u;
+}
+
+/* The unpacked size the header implies: each row of each pass with its filter byte. */
+static size_t png_raw_size(const PngInfo *g) {
+    if (!g->interlace) return (size_t)g->h * (1u + png_row_bytes(g, (uint32_t)g->w));
+    size_t total = 0;
+    for (int k = 0; k < 7; k++) {
+        const uint32_t pw = png_pass_extent((uint32_t)g->w, kAdam7[k][0], kAdam7[k][2]);
+        const uint32_t ph = png_pass_extent((uint32_t)g->h, kAdam7[k][1], kAdam7[k][3]);
+        if (pw && ph) total += (size_t)ph * (1u + png_row_bytes(g, pw));
+    }
+    return total;
+}
+
+/* PNG bytes checked before anything is allocated for them: the signature; IHDR first, once, with a
+ * size of 1 to NK_TEXREPL_MAX_DIM a side and a pixel format the PNG standard defines; every chunk
+ * whole with its CRC right; PLTE (required for a palette image, refused for a grey one) and tRNS in
+ * their place and of a length their format allows; the IDAT chunks one after another; IEND. Bytes
+ * after IEND are ignored, as decoders ignore them. The image data's unpacked size is fixed here
+ * (raw_size), and png_decode unpacks it with that as the hard limit. */
+static int png_check(const unsigned char *d, size_t n, PngInfo *g, char *why, size_t why_cap) {
     static const unsigned char sig[8] = { 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+    memset(g, 0, sizeof(*g));
     if (n < 8 || memcmp(d, sig, 8) != 0) { snprintf(why, why_cap, "no PNG signature"); return 0; }
     size_t at = 8;
-    int chunks = 0, idat = 0;
+    int chunks = 0, idat_done = 0;
     while (at < n) {
         if (n - at < 12) { snprintf(why, why_cap, "cut short in a chunk header"); return 0; }
         uint32_t len = png_be32(d + at);
-        const unsigned char *type = d + at + 4;
+        const unsigned char *type = d + at + 4, *c = type + 4;
         if (len > 0x7fffffffu || len > n - at - 12) { snprintf(why, why_cap, "cut short in a chunk"); return 0; }
         for (int k = 0; k < 4; k++) {
             if (!((type[k] >= 'A' && type[k] <= 'Z') || (type[k] >= 'a' && type[k] <= 'z'))) {
@@ -1565,10 +1644,10 @@ static int png_check(const unsigned char *d, size_t n, int *w, int *h, char *why
             snprintf(why, why_cap, "chunk %.4s has a wrong CRC", (const char *)type);
             return 0;
         }
-        const int is_ihdr = !memcmp(type, "IHDR", 4);
+        const int is_ihdr = !memcmp(type, "IHDR", 4), is_idat = !memcmp(type, "IDAT", 4);
         if ((chunks == 0) != is_ihdr) { snprintf(why, why_cap, "IHDR is not the first chunk, or not the only one"); return 0; }
+        if (g->idat_count && !is_idat) idat_done = 1;
         if (is_ihdr) {
-            const unsigned char *c = type + 4;
             if (len != 13) { snprintf(why, why_cap, "IHDR is not 13 bytes"); return 0; }
             uint32_t pw = png_be32(c), ph = png_be32(c + 4);
             if (pw == 0 || ph == 0 || pw > NK_TEXREPL_MAX_DIM || ph > NK_TEXREPL_MAX_DIM) {
@@ -1584,14 +1663,55 @@ static int png_check(const unsigned char *d, size_t n, int *w, int *h, char *why
                 snprintf(why, why_cap, "IHDR names no PNG pixel format");
                 return 0;
             }
-            *w = (int)pw;
-            *h = (int)ph;
+            g->w = (int)pw;
+            g->h = (int)ph;
+            g->depth = depth;
+            g->color = color;
+            g->interlace = c[12];
+            g->channels = color == 2 ? 3u : color == 4 ? 2u : color == 6 ? 4u : 1u;
+        } else if (!memcmp(type, "PLTE", 4)) {
+            if (g->plte || g->trns || g->idat_count || len == 0 || len % 3u || len / 3u > 256u ||
+                g->color == 0 || g->color == 4 || (g->color == 3 && len / 3u > (1u << g->depth))) {
+                snprintf(why, why_cap, "PLTE is out of place or of a wrong length");
+                return 0;
+            }
+            g->plte = c;
+            g->plte_len = len;
+        } else if (!memcmp(type, "tRNS", 4)) {
+            const int fits = g->color == 3 ? (g->plte && len >= 1 && len <= g->plte_len / 3u)
+                             : g->color == 0 ? len == 2
+                             : g->color == 2 ? len == 6
+                                             : 0;
+            if (g->trns || g->idat_count || !fits) {
+                snprintf(why, why_cap, "tRNS is out of place or of a wrong length");
+                return 0;
+            }
+            if (g->color != 3) {   /* each key sample within the image's depth */
+                for (uint32_t k = 0; k < len; k += 2) {
+                    if (g->depth < 16 && (((uint32_t)c[k] << 8) | c[k + 1]) >> g->depth) {
+                        snprintf(why, why_cap, "tRNS names a sample the image cannot hold");
+                        return 0;
+                    }
+                }
+            }
+            g->trns = c;
+            g->trns_len = len;
+        } else if (is_idat) {
+            if (idat_done) { snprintf(why, why_cap, "the IDAT chunks do not follow one another"); return 0; }
+            if (g->color == 3 && !g->plte) { snprintf(why, why_cap, "a palette image with no PLTE before its data"); return 0; }
+            if (!g->idat_count) g->idat = c;
+            g->idat_count++;
+            g->idat_total += len;
+        } else if (!(type[0] & 0x20u) && memcmp(type, "IEND", 4) != 0) {
+            /* An unknown chunk whose ancillary bit is 0: PNG says it cannot be skipped safely. */
+            snprintf(why, why_cap, "chunk %.4s is critical and not known here", (const char *)type);
+            return 0;
         }
-        if (!memcmp(type, "IDAT", 4)) idat = 1;
         chunks++;
         at += (size_t)len + 12u;
         if (!memcmp(type, "IEND", 4)) {
-            if (!idat) { snprintf(why, why_cap, "no IDAT before IEND"); return 0; }
+            if (!g->idat_count) { snprintf(why, why_cap, "no IDAT before IEND"); return 0; }
+            g->raw_size = png_raw_size(g);
             return 1;
         }
     }
@@ -1599,20 +1719,156 @@ static int png_check(const unsigned char *d, size_t n, int *w, int *h, char *why
     return 0;
 }
 
-/* Decodes checked PNG bytes to R, G, B, A (malloc'd), or NULL. */
-static uint32_t *png_decode(const unsigned char *d, size_t n, int w, int h) {
-    if (n > (size_t)INT_MAX) return NULL;
-    int dw = 0, dh = 0, ch = 0;
-    unsigned char *px = stbi_load_from_memory(d, (int)n, &dw, &dh, &ch, 4);
-    if (!px) return NULL;
-    uint32_t *out = NULL;
-    if (dw == w && dh == h) {
-        const size_t bytes = (size_t)w * (size_t)h * 4u;
-        out = (uint32_t *)malloc(bytes);
-        if (out) memcpy(out, px, bytes);   /* R, G, B, A bytes: R in the low byte on a little-endian host */
+static uint32_t png_adler32(const unsigned char *d, size_t n) {
+    uint32_t a = 1, b = 0;
+    while (n) {
+        size_t run = n > 5552u ? 5552u : n;   /* the most bytes before b can pass 2^32 */
+        n -= run;
+        while (run--) { a += *d++; b += a; }
+        a %= 65521u;
+        b %= 65521u;
     }
-    stbi_image_free(px);
-    return out;
+    return b << 16 | a;
+}
+
+static unsigned png_paeth(unsigned a, unsigned b, unsigned c) {
+    const int p = (int)a + (int)b - (int)c;
+    const int pa = abs(p - (int)a), pb = abs(p - (int)b), pc = abs(p - (int)c);
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+}
+
+/* One sample of a row, at the image's depth. */
+static unsigned png_sample(const unsigned char *row, size_t i, unsigned depth) {
+    switch (depth) {
+    case 16: return (unsigned)row[2 * i] << 8 | row[2 * i + 1];
+    case 8: return row[i];
+    default: {
+        const size_t bit = i * depth;
+        return (row[bit / 8u] >> (8u - depth - (unsigned)(bit % 8u))) & ((1u << depth) - 1u);
+    }
+    }
+}
+
+/* Decodes PNG bytes png_check passed, to R, G, B, A (malloc'd). The image data is unpacked by the
+ * project's own inflater with g->raw_size as its hard limit, so a stream that unpacks to more is
+ * refused after at most that many bytes, whatever its length; one that unpacks to less, or whose
+ * zlib header or Adler-32 is wrong, is refused too. `*scratch` is the most memory the decode held
+ * at once (the joined image data, the unpacked rows and the result). */
+static uint32_t *png_decode(const unsigned char *d, size_t n, const PngInfo *g, uint64_t *scratch, char *why,
+                            size_t why_cap) {
+    (void)d;
+    (void)n;
+    *scratch = 0;
+    const unsigned char *z = g->idat;
+    unsigned char *joined = NULL;
+    size_t joined_bytes = 0;
+    if (g->idat_count > 1) {   /* the chunks follow one another: copy each one's data out */
+        joined = (unsigned char *)malloc(g->idat_total);
+        if (!joined) { snprintf(why, why_cap, "out of memory"); return NULL; }
+        size_t got = 0;
+        const unsigned char *c = g->idat - 8;
+        for (size_t k = 0; k < g->idat_count; k++) {
+            const uint32_t len = png_be32(c);
+            memcpy(joined + got, c + 8, len);
+            got += len;
+            c += (size_t)len + 12u;
+        }
+        z = joined;
+        joined_bytes = g->idat_total;
+    }
+    const size_t zn = g->idat_total;
+    if (zn < 6 || (z[0] & 0x0fu) != 8u || (z[0] >> 4) > 7u || ((unsigned)z[0] << 8 | z[1]) % 31u || (z[1] & 0x20u)) {
+        free(joined);
+        snprintf(why, why_cap, "its image data has no zlib header PNG allows");
+        return NULL;
+    }
+    uint8_t *raw = NULL;
+    size_t raw_n = 0;
+    const int rc = nk_psp_inflate_raw(z + 2, zn - 2, &raw, &raw_n, g->raw_size, g->raw_size, NULL, 0);
+    const uint32_t adler = png_be32(z + zn - 4);
+    free(joined);
+    if (rc != NK_INFLATE_OK || raw_n != g->raw_size) {
+        free(raw);
+        snprintf(why, why_cap, "%s", rc == NK_INFLATE_ERR_OVERFLOW ? "its image data unpacks to more than the image"
+                                     : rc == NK_INFLATE_ERR_MEMORY ? "out of memory"
+                                     : rc == NK_INFLATE_OK         ? "its image data unpacks to less than the image"
+                                                                   : "its image data does not unpack");
+        return NULL;
+    }
+    if (png_adler32(raw, raw_n) != adler) {
+        free(raw);
+        snprintf(why, why_cap, "its image data's Adler-32 is wrong");
+        return NULL;
+    }
+    const size_t out_bytes = (size_t)g->w * (size_t)g->h * 4u;
+    unsigned char *out = (unsigned char *)malloc(out_bytes);
+    if (!out) { free(raw); snprintf(why, why_cap, "out of memory"); return NULL; }
+    /* While unpacking, the joined data and the rows were held; now the rows and the result. */
+    *scratch = (uint64_t)raw_n + (joined_bytes > out_bytes ? joined_bytes : out_bytes);
+    const size_t bpp = (g->depth * g->channels + 7u) / 8u;   /* bytes back the filters look */
+    const unsigned max = (1u << (g->depth < 16 ? g->depth : 16u)) - 1u;
+    unsigned char *row = raw;
+    for (int k = 0; k < (g->interlace ? 7 : 1); k++) {
+        const unsigned x0 = g->interlace ? kAdam7[k][0] : 0u, y0 = g->interlace ? kAdam7[k][1] : 0u;
+        const unsigned dx = g->interlace ? kAdam7[k][2] : 1u, dy = g->interlace ? kAdam7[k][3] : 1u;
+        const uint32_t pw = png_pass_extent((uint32_t)g->w, x0, dx), ph = png_pass_extent((uint32_t)g->h, y0, dy);
+        if (!pw || !ph) continue;
+        const size_t rb = png_row_bytes(g, pw);
+        const unsigned char *prev = NULL;
+        for (uint32_t y = 0; y < ph; y++) {
+            const unsigned f = row[0];
+            unsigned char *s = row + 1;
+            if (f > 4) {
+                free(raw);
+                free(out);
+                snprintf(why, why_cap, "a row has filter type %u", f);
+                return NULL;
+            }
+            for (size_t i = 0; i < rb; i++) {   /* undo the row's filter in place */
+                const unsigned a = i >= bpp ? s[i - bpp] : 0u, b = prev ? prev[i] : 0u;
+                const unsigned c = (prev && i >= bpp) ? prev[i - bpp] : 0u;
+                const unsigned pred = f == 1 ? a : f == 2 ? b : f == 3 ? (a + b) / 2u : f == 4 ? png_paeth(a, b, c) : 0u;
+                s[i] = (unsigned char)(s[i] + pred);
+            }
+            for (uint32_t x = 0; x < pw; x++) {
+                unsigned char *o = out + (((size_t)(y0 + y * dy) * (size_t)g->w) + x0 + (size_t)x * dx) * 4u;
+                unsigned v[4] = { 0, 0, 0, 0 };
+                for (unsigned ch = 0; ch < g->channels; ch++) v[ch] = png_sample(s, (size_t)x * g->channels + ch, g->depth);
+                unsigned alpha = 255u;
+                if (g->color == 3) {
+                    if (v[0] >= g->plte_len / 3u) {
+                        free(raw);
+                        free(out);
+                        snprintf(why, why_cap, "a pixel names palette entry %u, which PLTE does not have", v[0]);
+                        return NULL;
+                    }
+                    o[0] = g->plte[3 * v[0]];
+                    o[1] = g->plte[3 * v[0] + 1];
+                    o[2] = g->plte[3 * v[0] + 2];
+                    o[3] = (g->trns && v[0] < g->trns_len) ? g->trns[v[0]] : 255u;
+                    continue;
+                }
+                if (g->trns) {   /* the one colour tRNS names is transparent */
+                    int same = 1;
+                    for (unsigned ch = 0; ch < g->channels; ch++)
+                        if (v[ch] != ((unsigned)g->trns[2 * ch] << 8 | g->trns[2 * ch + 1])) same = 0;
+                    if (same) alpha = 0u;
+                }
+                /* To 8 bits as stb_image converts: 16-bit samples by their high byte, 1, 2 and 4 bits
+                 * scaled up to 255. */
+                for (unsigned ch = 0; ch < g->channels; ch++)
+                    v[ch] = g->depth == 16 ? v[ch] >> 8 : g->depth == 8 ? v[ch] : v[ch] * (255u / max);
+                if (g->color == 0) { o[0] = o[1] = o[2] = (unsigned char)v[0]; o[3] = (unsigned char)alpha; }
+                else if (g->color == 4) { o[0] = o[1] = o[2] = (unsigned char)v[0]; o[3] = (unsigned char)v[1]; }
+                else if (g->color == 2) { o[0] = (unsigned char)v[0]; o[1] = (unsigned char)v[1]; o[2] = (unsigned char)v[2]; o[3] = (unsigned char)alpha; }
+                else { o[0] = (unsigned char)v[0]; o[1] = (unsigned char)v[1]; o[2] = (unsigned char)v[2]; o[3] = (unsigned char)v[3]; }
+            }
+            prev = s;
+            row += 1u + rb;
+        }
+    }
+    free(raw);
+    return (uint32_t *)(void *)out;
 }
 
 int nk_texrepl_decode_png(const void *data, size_t size, uint64_t max_bytes, uint32_t **rgba, int *w, int *h,
@@ -1623,19 +1879,20 @@ int nk_texrepl_decode_png(const void *data, size_t size, uint64_t max_bytes, uin
     if (!rgba || !w || !h) { snprintf(why, why_cap, "no place for the image"); return 0; }
     *rgba = NULL;
     *w = *h = 0;
-    int pw = 0, ph = 0;
-    if (!data || !png_check((const unsigned char *)data, size, &pw, &ph, why, why_cap)) return 0;
-    const uint64_t bytes = (uint64_t)pw * (uint64_t)ph * 4u;
+    PngInfo g;
+    if (!data || !png_check((const unsigned char *)data, size, &g, why, why_cap)) return 0;
+    const uint64_t bytes = (uint64_t)g.w * (uint64_t)g.h * 4u;
     if (max_bytes && bytes > max_bytes) {
-        snprintf(why, why_cap, "%dx%d needs %llu KiB, more than the %llu KiB allowed", pw, ph,
+        snprintf(why, why_cap, "%dx%d needs %llu KiB, more than the %llu KiB allowed", g.w, g.h,
                  (unsigned long long)(bytes >> 10), (unsigned long long)(max_bytes >> 10));
         return 0;
     }
-    uint32_t *px = png_decode((const unsigned char *)data, size, pw, ph);
-    if (!px) { snprintf(why, why_cap, "its image data does not decode"); return 0; }
+    uint64_t scratch = 0;
+    uint32_t *px = png_decode((const unsigned char *)data, size, &g, &scratch, why, why_cap);
+    if (!px) return 0;
     *rgba = px;
-    *w = pw;
-    *h = ph;
+    *w = g.w;
+    *h = g.h;
     return 1;
 }
 
@@ -1685,14 +1942,15 @@ static int load_level(NkTexRepl *p, Alias *a, uint32_t level, int decode) {
         p->stats.load_failed++;
         return skip_level(p, v);
     }
-    int w = 0, h = 0;
+    PngInfo g;
     char bad[96];
-    if (!png_check(file, size, &w, &h, bad, sizeof(bad))) {
+    if (!png_check(file, size, &g, bad, sizeof(bad))) {
         free(file);
         diag_add(p, "%s: not a PNG this module decodes (%s); not used", v->file, bad);
         p->stats.load_failed++;
         return skip_level(p, v);
     }
+    const int w = g.w, h = g.h;
     v->w = w;
     v->h = h;
     if (!level_size_ok(p, a, level, v)) { free(file); p->stats.load_failed++; return skip_level(p, v); }
@@ -1713,10 +1971,13 @@ static int load_level(NkTexRepl *p, Alias *a, uint32_t level, int decode) {
         p->stats.over_budget++;
         return 0;
     }
-    v->rgba = png_decode(file, size, w, h);
+    uint64_t scratch = 0;
+    v->rgba = png_decode(file, size, &g, &scratch, bad, sizeof(bad));
+    scratch += size;   /* the file was held throughout */
+    if (scratch > p->stats.decode_peak) p->stats.decode_peak = scratch;
     free(file);
     if (!v->rgba) {
-        diag_add(p, "%s: not a PNG this module decodes (its image data does not decode); not used", v->file);
+        diag_add(p, "%s: not a PNG this module decodes (%s); not used", v->file, bad);
         p->stats.load_failed++;
         return skip_level(p, v);
     }

@@ -63,6 +63,10 @@ extern "C" {
 /* A ZIP pack's entries may declare at most this many unpacked bytes in all (more is refused whole);
  * each image read is capped at 64 MiB and textures.ini at 4 MiB, in a ZIP or a folder. */
 #define NK_TEXREPL_MAX_PACK_BYTES ((uint64_t)8u << 30)
+/* [hashranges] lines, and [reducehashranges] lines, a textures.ini may hold at most (more refuses the
+ * pack). A line is needed only for a texture whose hashed area differs from its size; PPSSPP's own
+ * dumps write none, and packs list them by hand, one per such texture. */
+#define NK_TEXREPL_MAX_RANGES 16384u
 /* Mip levels a texture's chain holds at most (PPSSPP's MAX_REPLACEMENT_MIP_LEVELS). */
 #define NK_TEXREPL_MAX_LEVELS 12
 
@@ -162,8 +166,10 @@ void nk_texrepl_unpin(NkTexRepl *pack, NkTexReplHit *hit);
 /* Decodes PNG bytes as a pack image is decoded: refused, with a reason in `why`, unless the bytes
  * are a whole PNG (signature, IHDR first, every chunk's CRC right, an IDAT, IEND), 1 to
  * NK_TEXREPL_MAX_DIM texels a side and, when `max_bytes` is not 0, at most that many bytes of
- * R, G, B, A pixels. All is checked before any pixel memory is allocated. On success `*rgba` is
- * malloc'd (free it with free) and 1 is returned. */
+ * R, G, B, A pixels. All is checked before any pixel memory is allocated. The image data is then
+ * unpacked by nk_psp_inflate_raw into a buffer of exactly the size IHDR implies, and refused if it
+ * would unpack to more or less, or its Adler-32 is wrong. On success `*rgba` is malloc'd (free it
+ * with free) and 1 is returned. */
 int nk_texrepl_decode_png(const void *data, size_t size, uint64_t max_bytes, uint32_t **rgba, int *w, int *h,
                           char *why, size_t why_cap);
 /* The whole-number factor a hit is larger than a w x h texture by, the same on both axes, or 0
@@ -184,6 +190,7 @@ typedef struct NkTexReplStats {
     uint64_t index_bytes;     /* what the open pack's own index holds (not the ZIP reader's directory) */
     uint64_t skipped;         /* images found unusable and skipped from then on, each counted once */
     uint64_t list_ns;         /* the part of open_ns spent listing the folder, or opening and indexing the ZIP */
+    uint64_t decode_peak;     /* the most memory one image's read and decode held at once (file, rows, result) */
 } NkTexReplStats;
 void nk_texrepl_stats(const NkTexRepl *pack, NkTexReplStats *out);
 void nk_texrepl_note_bad_factor(NkTexRepl *pack);
