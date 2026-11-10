@@ -2129,7 +2129,8 @@ class _BuildProgressReporter:
 
     def report(self, stage: str, status: str, message: str,
                detail: str | None = None, *, completed: int | None = None,
-               total: int | None = None, notice: str | None = None) -> None:
+               total: int | None = None, notice: str | None = None,
+               speed: str | None = None) -> None:
         self.current_stage = stage
         if status == "FAIL":
             self._failed = True
@@ -2141,6 +2142,8 @@ class _BuildProgressReporter:
             payload["total"] = total
         if notice:
             payload["notice"] = notice
+        if speed:
+            payload["speed"] = speed
         line = json.dumps(payload, ensure_ascii=False) + "\n"
         if self._out_stream is not None:
             self._out_stream.write(line)
@@ -2193,6 +2196,90 @@ _OBJECT_CACHE_ROOT_PARTS = ("cache", "objects")
 # (SHARED_LIBRARY_CACHE_DIR_ENV / SHARED_LIBRARY_CACHE_ROOT_PARTS there).
 _SHARED_LIBRARY_CACHE_DIR_ENV = "NK_SHARED_LIBRARY_CACHE_DIR"
 _SHARED_LIBRARY_CACHE_ROOT_PARTS = ("cache", "shared-libraries")
+# The player's Settings > Build speed (--build-speed), passed to the planner, which sizes
+# the Make jobs from it (title_codegen_plan.PACKAGE_BUILD_SPEEDS and
+# PACKAGE_BUILD_SPEED_ENV). NK_PACKAGE_JOBS (PACKAGE_BUILD_JOBS_ENV there) stays the
+# expert override of the job count.
+_BUILD_SPEEDS = ("background", "balanced", "fastest")
+_BUILD_SPEED_DEFAULT = "balanced"
+_BUILD_SPEED_ENV = "NK_PACKAGE_BUILD_SPEED"
+_PACKAGE_JOBS_ENV = "NK_PACKAGE_JOBS"
+# Win32 priority classes (GetPriorityClass / SetPriorityClass).
+_WIN32_IDLE_PRIORITY_CLASS = 0x40
+_WIN32_BELOW_NORMAL_PRIORITY_CLASS = 0x4000
+# The nice value a Background build runs at on POSIX (NK_PLATFORM_LOW_PRIORITY_NICE in
+# src/core/nk_platform.h, which the player starts the build at).
+_LOW_PRIORITY_NICE = 10
+
+
+def lower_build_priority() -> bool:
+    """Run this process, and every process it starts, below normal priority.
+
+    A Background build from the player already starts low; this makes one started from
+    a terminal low as well. A process already at a lower priority keeps it. True when the
+    process now runs below normal.
+    """
+    # sys.platform, not os.name, so that type checkers narrow the platform-only calls.
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel32.GetPriorityClass.argtypes = [ctypes.c_void_p]
+        kernel32.GetPriorityClass.restype = ctypes.c_uint32
+        kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.SetPriorityClass.restype = ctypes.c_int
+        process = kernel32.GetCurrentProcess()
+        if kernel32.GetPriorityClass(process) in (_WIN32_IDLE_PRIORITY_CLASS,
+                                                  _WIN32_BELOW_NORMAL_PRIORITY_CLASS):
+            return True
+        return bool(kernel32.SetPriorityClass(process, _WIN32_BELOW_NORMAL_PRIORITY_CLASS))
+    try:
+        if os.getpriority(os.PRIO_PROCESS, 0) < _LOW_PRIORITY_NICE:
+            os.setpriority(os.PRIO_PROCESS, 0, _LOW_PRIORITY_NICE)
+        return True
+    except OSError:
+        return False
+
+
+def build_speed_log_line(speed: str, override: str | None) -> str:
+    """The build log's line naming the build speed, and NK_PACKAGE_JOBS when it overrides."""
+    what = {
+        "background": "at most 2 jobs, below normal priority",
+        "balanced": "jobs sized to the free memory and the CPUs, at most 8",
+        "fastest": "a job for every logical CPU the free memory allows",
+    }[speed]
+    line = f"BUILD_SPEED: {speed} ({what})"
+    if override is not None and override.strip():
+        line += (f"; {_PACKAGE_JOBS_ENV}={override.strip()} overrides its job count "
+                 "(the planner ignores a value that is not a number)")
+    return line + "\n"
+
+
+def compile_speed_line(speed: str | None, jobs: int | None, limit: str | None = None,
+                       free_gb: float | None = None) -> str | None:
+    """The build card's line naming the build speed, the job count and what bound it.
+
+    ``limit`` is the planner's (``PackageBuildPlan.limit``). A row from a planner that
+    names no speed gets no line, and the card keeps the speed's bare name.
+    """
+    if speed not in _BUILD_SPEEDS or not jobs or jobs < 1:
+        return None
+    name = speed.capitalize()
+    parts = "1 part at a time" if jobs == 1 else f"{jobs} parts at a time"
+    if limit == "override":
+        return f"Build speed: {name}, but {_PACKAGE_JOBS_ENV} sets {parts}."
+    free = f" ({free_gb:.1f} GB free)" if free_gb is not None else ""
+    why = {
+        "cpu": " because your PC reports one processor" if jobs == 1 else
+               ", one for each processor",
+        "memory": f", as many as the free memory allows{free}",
+        "max": ", the most Balanced runs; Fastest can run more",
+        "background": "",
+        "unknown_memory": ", because the free memory is unknown",
+    }.get(limit or "", "")
+    low = " at low priority" if speed == "background" else ""
+    return f"Build speed: {name}. {parts}{low}{why}."
 
 
 def compile_progress_message(completed: int, total: int) -> str:
@@ -2203,8 +2290,12 @@ def compile_progress_message(completed: int, total: int) -> str:
 
 
 def compile_load_notice(jobs: int | None, cpus: int | None, limit: str | None = None,
-                        free_gb: float | None = None) -> str | None:
+                        free_gb: float | None = None,
+                        speed: str | None = None) -> str | None:
     """A calm note about how the build uses the PC.
+
+    A Background build (``speed``) runs below normal priority, so its note says games and
+    other apps come first instead, unless one job runs for want of memory.
 
     Several jobs get a note that other apps may slow down, sized to the share of the PC in
     use. One job gets a note that parts compile one at a time and the build takes longer,
@@ -2214,6 +2305,9 @@ def compile_load_notice(jobs: int | None, cpus: int | None, limit: str | None = 
     """
     if not jobs:
         return None
+    if speed == "background" and not (jobs <= 1 and limit == "memory"):
+        return ("The build runs at low priority, so games and other apps come first. "
+                "It takes longer while they are busy.")
     if jobs <= 1:
         if limit == "memory":
             how = (f"only {free_gb:.1f} GB of memory is free" if free_gb is not None
@@ -2286,14 +2380,18 @@ class _CompileProgressRelay:
             self.last = (completed, total)
             jobs, cpus = row.get("jobs"), row.get("cpus")
             limit, free_gb = row.get("limit"), row.get("free_gb")
+            speed = row.get("speed")
+            jobs = jobs if isinstance(jobs, int) else None
+            limit = limit if isinstance(limit, str) else None
+            free_gb = free_gb if isinstance(free_gb, (int, float)) else None
+            speed = speed if isinstance(speed, str) else None
             self.reporter.report("compile", "RUNNING",
                                  compile_progress_message(completed, total),
                                  completed=completed, total=total,
                                  notice=compile_load_notice(
-                                     jobs if isinstance(jobs, int) else None,
-                                     cpus if isinstance(cpus, int) else None,
-                                     limit if isinstance(limit, str) else None,
-                                     free_gb if isinstance(free_gb, (int, float)) else None))
+                                     jobs, cpus if isinstance(cpus, int) else None,
+                                     limit, free_gb, speed),
+                                 speed=compile_speed_line(speed, jobs, limit, free_gb))
 
 
 _BUILD_DIAGNOSTIC_MARKERS = ("error:", "cannot find", "undefined reference")
@@ -2399,6 +2497,9 @@ def _package_build_lock(user_root: Path, disc_id: str):
 def cmd_build_package(args: argparse.Namespace, stage_observer=None) -> int:
     reporter = _BuildProgressReporter(getattr(args, "progress_json", None),
                                       getattr(args, "log_file", None))
+    if getattr(args, "build_speed", None) == "background" and not lower_build_priority():
+        reporter.log("BUILD_SPEED: background, but the build could not lower its own "
+                     "priority, so it runs at the priority it was started at\n")
     try:
         disc_id = str(args.disc_id).upper()
         try:
@@ -3062,6 +3163,9 @@ def _package_codegen(st):
     build_environment = _runtime_build_environment(
         instruction_trace=bool(getattr(args, "instruction_trace", False))
     )
+    speed = getattr(args, "build_speed", None) or _BUILD_SPEED_DEFAULT
+    build_environment[_BUILD_SPEED_ENV] = speed
+    reporter.log(build_speed_log_line(speed, build_environment.get(_PACKAGE_JOBS_ENV)))
     command = planner_command(build_dir)
     if reuse_source is not None:
         command.extend(("--reuse-aot-from", str(reuse_source)))
@@ -6054,6 +6158,11 @@ def main() -> int:
     p_build.add_argument("--no-shared-libraries", action="store_true",
                          help="compile the disc's system libraries for this game only, "
                               "without the shared library cache")
+    p_build.add_argument("--build-speed", choices=_BUILD_SPEEDS, default=_BUILD_SPEED_DEFAULT,
+                         help="background: at most 2 jobs at low priority; balanced (default): "
+                              "jobs sized to the free memory and the CPUs, at most 8; fastest: "
+                              "a job for every logical CPU the free memory allows. "
+                              f"{_PACKAGE_JOBS_ENV} overrides the job count")
     p_build.add_argument("--target", choices=("host", "android"), default=None,
                          help="system the package runs on: host, or android for the "
                               "shared library the Android app loads (default: android "
