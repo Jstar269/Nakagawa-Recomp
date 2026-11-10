@@ -3504,6 +3504,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # The 2026-11-10 acceptance-eligible vfpu-prefix-state (boot 175, 48cea955),
                 # vfpu-wider-ops (boot 176) and vfpu-constants (boot 178, both 9426722a) runs (#326).
                 "PSP-VFPU-PREFIX-001", "PSP-VFPU-WIDEROPS-001", "PSP-VFPU-CONSTANTS-001",
+                # The 2026-11-10 acceptance-eligible ge-through-z (boot 180, e4e6a3a2) and
+                # vfpu-reserved-widths (#326, boot 182, c6abab53) runs.
+                "PSP-GE-THROUGHZ-001", "PSP-VFPU-RESERVED-001",
             },
         )
         self.assertEqual(
@@ -3531,6 +3534,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # 2026-11-10: ge-signal (80e7c9eb, boot 179, XMB context): 37 records, 12 of 14
                 # cells; it stalled at rjump-un and the console needed a power cycle.
                 "PSP-GE-SIGNAL-001",
+                # 2026-11-10: hle-savedata-nodata (dbb47db4, boot 183, game context): 34 PASS and
+                # 1 SKIP; nodir-load stayed VISIBLE to its bound and the console needed a power cycle.
+                "PSP-HLE-SAVEDATA-NODATA-001",
             },
         )
 
@@ -10721,7 +10727,7 @@ class VfpuReservedWidthsProbeTests(unittest.TestCase):
     vus2i/vs2i words at the reserved widths .t and .q, hand-encoded because psp-as refuses them.
     Register-only: no system call in the section beyond the shared writer, bounded loops, a step
     before every cell, identity prefixes, a fixed-shape stream that matches the registry, the power
-    risk named, and no hardware result claimed (NOT_RUN)."""
+    risk named, and the 2026-11-10 hardware result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -10823,11 +10829,34 @@ class VfpuReservedWidthsProbeTests(unittest.TestCase):
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-reserved-widths"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertNotIn("No hardware result is claimed", row["invariant"])
         self.assertEqual(row["case_ids"][-1], "vfpu-reserved-widths-done")
         self.assertIn("POWER RISK: reserved encodings; owner present", row["risk"])
-        self.assertIn("POWER RISK: reserved encodings; owner present", row["evidence_note"])
+        self.assertIn("POWER RISK: reserved encodings; owner present", row["measurement_note"])
+
+    def test_measurement_note_names_the_run_and_every_word(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 182", "XMB context", "c6abab53",
+                     "identical to this tree's", "system software 6.61",
+                     "release:6.61:, system:58401@release_661,0x06060110:", "0x06060010 (\"6.6.0\")",
+                     "ARK-5 with cIPL, version 5.1.0", "9 records",
+                     "acceptance-eligible with 0 blockers",
+                     "none of the four reserved words raised an exception",
+                     "passes 0 and 1 agree record for record", "refused by the PC-side controller"):
+            self.assertIn(term, note)
+        # vus2i: each half << 15, low half to the even lane; vs2i: each half << 16; at .t and .q
+        # both write four lanes from S000 and S001, as .p, and leave the rest of M200 alone.
+        for cell in ("vus2i.t (0xd03a8008) and vus2i.q (0xd03a8088) both wrote C200 = "
+                     "(0x3fff8000, 0x40008000, 0x7fff8000, 0x00000000)",
+                     "vs2i.t (0xd03b8008) and vs2i.q (0xd03b8088) both wrote (0x7fff0000, "
+                     "0x80010000, 0xffff0000, 0x00000000)",
+                     "The other 12 words of M200 kept the sentinel 0x7a5a5a5a and C000 was unchanged"):
+            self.assertIn(cell, note)
+        self.assertIn("**MEASURED** on 2026-11-10 UTC (PSP-3000, boot 182, `c6abab53`; 9 records",
+                      self.readme)
 
 
 class VfpuCcCmovProbeTests(unittest.TestCase):
@@ -11724,7 +11753,7 @@ class GeThroughZProbeTests(unittest.TestCase):
     """CASE=ge-through-z (185, PSP-GE-THROUGHZ-001) in probe_ge_sample.c: through-mode vertex z
     outside 0..65535, fractional, infinite and NaN. One bounded list per cell into the ge-raster
     and ge-rtt VRAM blocks, the depth test ALWAYS with writes on, a fixed-shape stream that
-    matches the registry, and no hardware result claimed (NOT_RUN)."""
+    matches the registry, and the 2026-11-10 hardware result recorded as MEASURED."""
 
     probe: ClassVar[str]
     makefile: ClassVar[str]
@@ -11772,7 +11801,8 @@ class GeThroughZProbeTests(unittest.TestCase):
         self.assertEqual(_campaign_completeness_contract("ge-through-z"), "strict-golden-sequence")
         self.assertNotIn("ge-through-z", CAMPAIGN_QUEUE_CASES)
         self.assertIn("| `ge-through-z` | `PSP-GE-THROUGHZ-001` |", self.readme)
-        self.assertIn("| `ge-through-z` | `PSP-GE-THROUGHZ-001` | `NOT_RUN`", self.doc)
+        self.assertIn("| `ge-through-z` | `PSP-GE-THROUGHZ-001` | `MEASURED` (2026-11-10, PSP-3000, "
+                      "boot 180, XMB context, `e4e6a3a2`; 23 records) |", self.doc)
 
     def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:
         self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
@@ -11833,15 +11863,41 @@ class GeThroughZProbeTests(unittest.TestCase):
         self.assertIn("hle_record(row, \"PASS\", 0, s_gtz_row, GTZ_SIDE);", self.section)
         self.assertIn("#define GTZ_SIDE 16u", self.section)
 
-    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+    def test_manifest_row_is_a_measured_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "ge_through_z.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_ge_sample.c")
         self.assertEqual(row["diagnostic_case_ids"], ["ge-through-z"])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
         self.assertEqual(row["case_ids"][-1], "ge-through-z-done")
+
+    def test_measurement_note_names_the_run_and_what_it_does_not_show(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 180", "XMB context", "e4e6a3a2",
+                     "identical to this tree's", "system software 6.61",
+                     "release:6.61:, system:58401@release_661,0x06060110:", "0x06060010 (\"6.6.0\")",
+                     "ARK-5 with cIPL, version 5.1.0", "23 records",
+                     "acceptance-eligible with 0 blockers"):
+            self.assertIn(term, note)
+        # Every z drew the sprite; no depth word of the block read linearly changed, so the read
+        # does not decide clamp or wrap.
+        for cell in ("Every cell wrote all 256 colour pixels", "the infinity and the NaN included",
+                     "146 us for +inf", "changed from 0x1234 in any cell",
+                     "does not decide clamp, wrap or truncation", "an inference",
+                     "none appeared"):
+            self.assertIn(cell, note)
+        self.assertNotIn("6.6.0)", note)  # the identity is never a bare 6.6.0
+        start = self.doc.index("- **PSP-3000 single-case run of `ge-through-z` (2026-11-10 UTC)**")
+        section = " ".join(self.doc[start:self.doc.index("\n- **", start + 1)].split())
+        for term in ("`PSP-GE-THROUGHZ-001` | `z*-draw`, `z*-z`, `ge-through-z-done` (boot 180)",
+                     "*The draw is never dropped.*", "*No depth word in the block changed.*",
+                     "*XMB context.*", "does not decide clamp, wrap or truncation"):
+            self.assertIn(term, section)
+        self.assertIn("**MEASURED** on 2026-11-10 UTC (PSP-3000, boot 180, XMB context, "
+                      "`e4e6a3a2`; 23 records", self.readme)
 
 
 class GeRasterProbeTests(unittest.TestCase):
@@ -12578,18 +12634,30 @@ class HleSavedataNodataProbeTests(unittest.TestCase):
     savedata modes on a save that does not exist, a save directory without PARAM.SFO and a
     probe-made save. These pin the Memory Stick rules (probe-owned names only, nothing touched
     when an NKPROBE01* directory is already there, cleanup of what the case made), the dialog
-    bounds and the record shape; no PSP value is asserted."""
+    bounds and the record shape; no PSP value is asserted. The 2026-11-10 capture is recorded as
+    CAPTURED, claiming no hardware result."""
 
     probe: ClassVar[str]
     section: ClassVar[str]
     code: ClassVar[str]
     makefile: ClassVar[str]
+    readme: ClassVar[str]
+    doc: ClassVar[str]
+    row: ClassVar[dict[str, Any]]
 
     @classmethod
     def setUpClass(cls) -> None:
-        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
         cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        cls.doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        rows = [t for t in manifest["tests"] if t["id"] == "PSP-HLE-SAVEDATA-NODATA-001"]
+        assert len(rows) == 1
+        cls.row = rows[0]
         start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_SAVEDATA_NODATA\n\n")
         cls.section = cls.probe[start:cls.probe.index("#endif /* HLE_CASE_SAVEDATA_NODATA */")]
         cls.code = _c_code(cls.section)
@@ -12597,6 +12665,46 @@ class HleSavedataNodataProbeTests(unittest.TestCase):
     def _function(self, signature: str) -> str:
         start = self.code.index(signature)
         return self.code[start:self.code.index("\n}\n", start)]
+
+    def test_the_capture_is_captured_with_its_stuck_dialog_and_cleanup(self) -> None:
+        row = self.row
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        self.assertNotIn("measurement_note", row)
+        self.assertNotIn("evidence_cases", row)
+        note = row["evidence_note"]
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 183", "game context", "dbb47db4",
+                     "only in how the synthetic 16-byte key is spelled", "NKPROBE01KEY0001",
+                     "the bytes the probe passes at +0x5dc are the same", "system software 6.61",
+                     "release:6.61:, system:58401@release_661,0x06060110:", "0x06060110",
+                     "ARK-5 with cIPL, version 5.1.0", "not in the campaign queue", "35 records",
+                     "34 PASS and 1 SKIP", "COMPLETE FAIL", "Not acceptance-eligible",
+                     "loaded module was not proven unloaded", "PHYSICAL_INTERVENTION_REQUIRED",
+                     "stayed VISIBLE for its whole 1790-poll bound", "0x80110001",
+                     "manual power cycle", "establishes nothing about PSP behaviour"):
+            self.assertIn(term, note)
+        self.assertNotIn("6.6.1)", note)  # the identity is never a bare 6.6.1
+        # What the capture shows, for a rerun to confirm: the codes of a missing save, of a
+        # directory without PARAM.SFO and of a real save, the FILES counts left at the preset,
+        # and no probe directory left behind.
+        for cell in ("AUTOLOAD 0x80110307", "AUTODELETE 0x80110347", "SIZES 0x801103c7",
+                     "FILES 0x80110327 with all three counts and every entry left at the preset",
+                     "AUTOLOAD 0x80110306", "FILES and ERASE 0x80110326",
+                     "DELETEDATA 0, after which DATA.BIN and the directory were gone",
+                     "ERASE of a file not in the save 0x80110329", "0x10000-byte cluster",
+                     "no probe directory was left on the Memory Stick", "Not shown: mode 10 DELETE"):
+            self.assertIn(cell, note)
+        self.assertIn("| `hle-savedata-nodata` | `PSP-HLE-SAVEDATA-NODATA-001` | `CAPTURED` "
+                      "(2026-11-10, PSP-3000, boot 183, game context, `dbb47db4`;", self.doc)
+        self.assertIn("(#psp-hle-savedata-nodata-001-capture-2026-11-10)", self.doc)
+        start = self.doc.index("### PSP-HLE-SAVEDATA-NODATA-001 capture 2026-11-10")
+        section = " ".join(self.doc[start:self.doc.index("\n### ", start + 1)].split())
+        for term in ("*No save (`NODIR`):*", "*A directory without PARAM.SFO (`NOSFO`",
+                     "*A save AUTOSAVE made (`DATA`):*", "*Cleanup:*",
+                     "no probe directory was left on the Memory Stick",
+                     "establishes nothing about PSP behaviour", "Not shown:"):
+            self.assertIn(term, section)
+        self.assertIn("**CAPTURED** on 2026-11-10 UTC (PSP-3000, boot 183, game context, "
+                      "`dbb47db4`; 35 records, 34 PASS and 1 SKIP;", self.readme)
 
     def test_route_and_registry(self) -> None:
         self.assertIn("else ifeq ($(CASE),hle-savedata-nodata)\nCASE_ID = 180\n", self.makefile)
@@ -15689,6 +15797,9 @@ class Record20261015Tests(unittest.TestCase):
             ("vfpu-prefix-state", "PSP-VFPU-PREFIX-001", "MEASURED"),
             ("vfpu-wider-ops", "PSP-VFPU-WIDEROPS-001", "MEASURED"),
             ("vfpu-constants", "PSP-VFPU-CONSTANTS-001", "MEASURED"),
+            ("ge-through-z", "PSP-GE-THROUGHZ-001", "MEASURED"),
+            ("vfpu-reserved-widths", "PSP-VFPU-RESERVED-001", "MEASURED"),
+            ("hle-savedata-nodata", "PSP-HLE-SAVEDATA-NODATA-001", "CAPTURED"),
             ("sas-adsr", "PSP-SAS-002", "NOT_RUN"),
             ("sas-mix", "PSP-SAS-003", "CAPTURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
