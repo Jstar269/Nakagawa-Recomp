@@ -2445,6 +2445,37 @@ _register_campaign_probe(
     dict(VFPU_ROUND_SEP_ROWS),
 )
 
+
+# vfpu-prefix-state (182, probe_hle_issues.c): the #326 VFPU prefix state, two passes,
+# register-only. Every row is emitted on every run, so the stream is fixed-shape. Per pass p, in
+# run order: operands-p<p> (the three operand sets, 24 words); <pfxs|pfxt|pfxd>-<form>-<k>-p<p>
+# (the instruction word, then C200 lanes 0-3 for each operand set, 13 words); life-<cell>-p<p>
+# (PFXS/PFXT/PFXD before, between and after, S200, S201: 11 words); vfim-<d>-p<p> (8 immediates x
+# word and S200, 16 words) and viim-<d>-p<p> (5 x 2, 10 words) for each pending vpfxd d.
+VFPU_PREFIX_STATE_SFORMS = ("vadd-q", "vmul-q", "vdot-q", "vmin-q", "vmov-q")
+VFPU_PREFIX_STATE_DFORMS = ("vadd-q", "vmov-q", "vneg-q", "vzero-q", "vidt-q")
+VFPU_PREFIX_STATE_ARITH = tuple(
+    [f"pfxs-{form}-{k}" for form in VFPU_PREFIX_STATE_SFORMS for k in range(6)]
+    + [f"pfxt-{form}-{k}" for form in VFPU_PREFIX_STATE_SFORMS for k in range(5)]
+    + [f"pfxd-{form}-{k}" for form in VFPU_PREFIX_STATE_DFORMS for k in range(4)])
+VFPU_PREFIX_STATE_LIFE = (
+    "s-direct", "s-vnop", "s-vsync", "s-vflush", "s-branch", "s-adds", "s-mtv", "s-mfv", "s-lvq",
+    "s-vpfxt", "s-mfvc", "d-direct", "d-vnop", "d-vsync", "d-vflush",
+)
+VFPU_PREFIX_STATE_IMMD = ("none", "sat01", "sat11", "mask")
+VFPU_PREFIX_STATE_ROWS = tuple(
+    row for p in range(2) for row in (
+        [(f"operands-p{p}", 24)]
+        + [(f"{cell}-p{p}", 13) for cell in VFPU_PREFIX_STATE_ARITH]
+        + [(f"life-{cell}-p{p}", 11) for cell in VFPU_PREFIX_STATE_LIFE]
+        + [(f"vfim-{d}-p{p}", 16) for d in VFPU_PREFIX_STATE_IMMD]
+        + [(f"viim-{d}-p{p}", 10) for d in VFPU_PREFIX_STATE_IMMD]))
+VFPU_PREFIX_STATE_CASES = tuple(case for case, _count in VFPU_PREFIX_STATE_ROWS)
+_register_campaign_probe(
+    "vfpu-prefix-state", "PSP-VFPU-PREFIX-001", VFPU_PREFIX_STATE_CASES,
+    dict(VFPU_PREFIX_STATE_ROWS),
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -3131,7 +3162,8 @@ VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause", "vfpu-forms2",
                                    "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov", "vfpu-vus2i", "vfpu-basic-arith",
                                    "hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-wide-dot-matrix",
-                                   "vfpu-mfv-mtv", "vfpu-constants", "vfpu-round-sep"})
+                                   "vfpu-mfv-mtv", "vfpu-constants", "vfpu-round-sep",
+                                   "vfpu-prefix-state"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (

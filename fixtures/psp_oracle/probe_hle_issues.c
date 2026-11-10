@@ -44,6 +44,9 @@
 //   CASE=vfpu-round-sep (PSP-VFPU-ROUNDSEP-001): #326 raw result words of vdot.q, vmscl.q,
 //     vmul.s, vadd.s and vsub.s over operands that separate round-to-nearest-even from
 //     truncation, register-only.
+//   CASE=vfpu-prefix-state (PSP-VFPU-PREFIX-001): #326 non-identity vpfxs/vpfxt/vpfxd on measured
+//     forms, prefix lifetime across vnop/vsync/vflush/branch/FPU/mtv/mfv/lv.q/vpfxt/mfvc, and
+//     vfim.s/viim.s under a pending vpfxd, with the prefix control words, register-only.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -73,8 +76,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 || PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175 || PSP_ORACLE_CASE == 176
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i, vfpu-wide-dot-matrix, vfpu-mfv-mtv, vfpu-constants and vfpu-round-sep run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 || PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175 || PSP_ORACLE_CASE == 176 || PSP_ORACLE_CASE == 182
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i, vfpu-wide-dot-matrix, vfpu-mfv-mtv, vfpu-constants, vfpu-round-sep and vfpu-prefix-state run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -102,6 +105,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_MFV_MTV 174
 #define HLE_CASE_VFPU_CONSTANTS 175
 #define HLE_CASE_VFPU_ROUND_SEP 176
+#define HLE_CASE_VFPU_PREFIX_STATE 182
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -171,6 +175,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-round-sep"
 #define HLE_TEST_ID "PSP-VFPU-ROUNDSEP-001"
 #define HLE_LOG "host0:/vfpu_round_sep_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_PREFIX_STATE
+#define HLE_CAMPAIGN_ID "vfpu-prefix-state"
+#define HLE_TEST_ID "PSP-VFPU-PREFIX-001"
+#define HLE_LOG "host0:/vfpu_prefix_state_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -3826,6 +3834,490 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_ROUND_SEP */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_PREFIX_STATE
+
+/* #326 VFPU prefix state (PSP-VFPU-PREFIX-001), two passes, register-only: what a non-identity
+   vpfxs, vpfxt or vpfxd does to the measured arithmetic forms, how long a pending prefix lives,
+   and the raw result words of vfim.s and viim.s with and without a pending vpfxd. Every word was
+   assembled with psp-as from the mnemonic named here and none was refused; each is emitted as a
+   word so no assembler decides it at build time. Each cell loads the whole register image (32
+   lv.q), issues the identity prefixes vpfxs x,y,z,w (0xdc0000e4), vpfxt x,y,z,w (0xdd0000e4) and
+   vpfxd ,,, (0xde000000), reads VFPU_PFXS, VFPU_PFXT and VFPU_PFXD with mfvc $t1 (controls 0-2,
+   imm 128-130: 0x48690080-0x48690082, the encoding hle_vfpu_cells.h uses for VFPU_CC, control 3),
+   runs its words, reads the three control words again, stores the image (32 sv.q) and issues the
+   identity prefixes once more, so no prefix carries into the next cell. Background image word i =
+   0x3f800000 | i << 16; the destination C200 (image 32-35) starts as the sentinel 0x7a5a5a5a.
+   a. Prefixed forms: vadd.q, vmul.q, vdot.q (S200), vmin.q, vmov.q under the vpfxs words y,x,w,z
+      (0xdc0000b1), |x|,|y|,|z|,|w| (0xdc000fe4), -x,-y,-z,-w (0xdc0f00e4), the constants 0,1,2,1/2
+      (0xdc00f0e4) and 3,1/3,1/4,1/6 (0xdc00ffe4), and -|x|,-0,-1,-1/2 (0xdc0fe1d0); the same five
+      forms under vpfxt y,x,w,z (0xdd0000b1), |x|,|y|,|z|,|w| (0xdd000fe4), -x,-y,-z,-w
+      (0xdd0f00e4), 0,1,2,1/2 (0xdd00f0e4) and 3,1/3,1/4,1/6 (0xdd00ffe4); vadd.q, vmov.q, vneg.q,
+      vzero.q and vidt.q under vpfxd ,m,,m (0xde000a00), [0:1] on every lane (0xde000055), [-1:1]
+      on every lane (0xde0000ff) and [0:1],m,[-1:1], (0xde000231). Each runs over three operand
+      sets (A = C000, B = C010): a finite set, (-qNaN, +inf, +denormal, -0) against (1, -inf,
+      -denormal, +0), and (+0, +sNaN, -largest denormal, -1) against (-0, 2, +inf, +qNaN), so the
+      order of the prefix and the flush/NaN rules is visible (abs of a negative NaN, negate of +0,
+      saturate of NaN, inf and a denormal).
+   b. Prefix lifetime: S000 = -2. vpfxs -x,y,z,w (0xdc0100e4), then nothing, vnop (0xffff0000),
+      vsync (0xffff0320), vflush (0xffff040d), a taken branch b 1f with a nop delay slot, add.s
+      $f0, $f0, $f0 (0x46000000), mtv $t1, S733 (0x48e9007f), mfv $t1, S733 (0x4869007f), lv.q C730,
+      vpfxt -x,-y,-z,-w (0xdd0f00e4) or the three mfvc reads, then vmov.s S200, S000 (0xd0000008)
+      and vmov.s S201, S000 (0xd0000028): the first shows whether the prefix survived the
+      instruction between, the second whether one VFPU instruction consumed it. The same for vpfxd
+      [0:1],,, (0xde000001) before nothing, vnop, vsync and vflush.
+   c. vfim.s S200 with the half images 0, 1.0, -2.0, +inf, NaN (0x7c01), -0, the smallest normal
+      half (0x0400) and 65504 (0xdf880000 | half), and viim.s S200 with 0, 1, -1, 32767 and -32768
+      (0x8000; 0xdf080000 | imm), each with no vpfxd, vpfxd [0:1],,, (0xde000001), [-1:1],,,
+      (0xde000003) and m,,, (0xde000100) pending. The assembler rounds a subnormal half literal to
+      +0, so no denormal half image is run.
+   Rows per pass p: operands-p<p> (result 0; the three sets, A then B, 24 words);
+   <pfxs|pfxt|pfxd>-<form>-<k>-p<p> (result = the prefix word; out0 = the instruction word, then
+   C200 lanes 0-3 for each set, 13 words); life-<cell>-p<p> (result = the prefix word; PFXS, PFXT,
+   PFXD before, the three mfvc words read between (the sentinel except in the mfvc cell), the
+   three after, S200, S201: 11 words); vfim-<d>-p<p> and viim-<d>-p<p> (result = the vpfxd word,
+   0 for none; per immediate the instruction word and S200, 16 and 10 words). A durable step
+   marker comes before every record. Nothing here writes memory outside the probe's own image,
+   output and control buffers, no control register is written, and no reserved word is run. */
+
+#include "hle_vfpu_cells.h"
+
+#define PS_DST 32u
+#define PS_SETS 3u
+#define PS_ARITH 75u
+#define PS_LIFE 15u
+#define PS_VFIM 8u
+#define PS_VIIM 5u
+#define PS_IMMD 4u
+#define PS_CTL 9u
+#define PS_MAX_WORDS 24u
+
+/* The identity prefixes vpfxs x,y,z,w, vpfxt x,y,z,w and vpfxd ,,,. */
+#define PS_RESET ".word 0xdc0000e4\n\t.word 0xdd0000e4\n\t.word 0xde000000\n\t"
+/* mfvc $t1 of VFPU_PFXS, VFPU_PFXT and VFPU_PFXD, stored at three byte offsets of ctl. */
+#define PS_CTL_READ(o0, o1, o2)                                                                  \
+    ".word 0x48690080\n\tsw $t1, " o0 "(%[ctl])\n\t.word 0x48690081\n\tsw $t1, " o1 "(%[ctl])\n\t" \
+    ".word 0x48690082\n\tsw $t1, " o2 "(%[ctl])\n\t"
+
+typedef void (*ps_fn)(const uint32_t *in, uint32_t *out, uint32_t *ctl);
+
+#define PS_CELL_FN(fname, body)                                                    \
+    static void fname(const uint32_t *in, uint32_t *out, uint32_t *ctl)            \
+    {                                                                              \
+        __asm__ volatile(                                                          \
+            TN_LOAD_ALL                                                            \
+            PS_RESET                                                               \
+            PS_CTL_READ("0", "4", "8")                                             \
+            body                                                                   \
+            PS_CTL_READ("24", "28", "32")                                          \
+            TN_STORE_ALL                                                           \
+            PS_RESET                                                               \
+            :                                                                      \
+            : [in] "r"(in), [out] "r"(out), [ctl] "r"(ctl)                         \
+            : "t1", "$f0", "memory");                                              \
+    }
+
+struct ps_arith {
+    const char *name;
+    uint32_t pfx;
+    uint32_t word;
+    ps_fn fn;
+};
+
+struct ps_life {
+    const char *name;
+    uint32_t pfx;
+    ps_fn fn;
+};
+
+PS_CELL_FN(ps_a0, ".word 0xdc0000b1\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a1, ".word 0xdc000fe4\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a2, ".word 0xdc0f00e4\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a3, ".word 0xdc00f0e4\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a4, ".word 0xdc00ffe4\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a5, ".word 0xdc0fe1d0\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a6, ".word 0xdc0000b1\n\t.word 0x64018088\n\t")
+PS_CELL_FN(ps_a7, ".word 0xdc000fe4\n\t.word 0x64018088\n\t")
+PS_CELL_FN(ps_a8, ".word 0xdc0f00e4\n\t.word 0x64018088\n\t")
+PS_CELL_FN(ps_a9, ".word 0xdc00f0e4\n\t.word 0x64018088\n\t")
+PS_CELL_FN(ps_a10, ".word 0xdc00ffe4\n\t.word 0x64018088\n\t")
+PS_CELL_FN(ps_a11, ".word 0xdc0fe1d0\n\t.word 0x64018088\n\t")
+PS_CELL_FN(ps_a12, ".word 0xdc0000b1\n\t.word 0x64818088\n\t")
+PS_CELL_FN(ps_a13, ".word 0xdc000fe4\n\t.word 0x64818088\n\t")
+PS_CELL_FN(ps_a14, ".word 0xdc0f00e4\n\t.word 0x64818088\n\t")
+PS_CELL_FN(ps_a15, ".word 0xdc00f0e4\n\t.word 0x64818088\n\t")
+PS_CELL_FN(ps_a16, ".word 0xdc00ffe4\n\t.word 0x64818088\n\t")
+PS_CELL_FN(ps_a17, ".word 0xdc0fe1d0\n\t.word 0x64818088\n\t")
+PS_CELL_FN(ps_a18, ".word 0xdc0000b1\n\t.word 0x6d018088\n\t")
+PS_CELL_FN(ps_a19, ".word 0xdc000fe4\n\t.word 0x6d018088\n\t")
+PS_CELL_FN(ps_a20, ".word 0xdc0f00e4\n\t.word 0x6d018088\n\t")
+PS_CELL_FN(ps_a21, ".word 0xdc00f0e4\n\t.word 0x6d018088\n\t")
+PS_CELL_FN(ps_a22, ".word 0xdc00ffe4\n\t.word 0x6d018088\n\t")
+PS_CELL_FN(ps_a23, ".word 0xdc0fe1d0\n\t.word 0x6d018088\n\t")
+PS_CELL_FN(ps_a24, ".word 0xdc0000b1\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a25, ".word 0xdc000fe4\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a26, ".word 0xdc0f00e4\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a27, ".word 0xdc00f0e4\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a28, ".word 0xdc00ffe4\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a29, ".word 0xdc0fe1d0\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a30, ".word 0xdd0000b1\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a31, ".word 0xdd000fe4\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a32, ".word 0xdd0f00e4\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a33, ".word 0xdd00f0e4\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a34, ".word 0xdd00ffe4\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a35, ".word 0xdd0000b1\n\t.word 0x64018088\n\t")
+PS_CELL_FN(ps_a36, ".word 0xdd000fe4\n\t.word 0x64018088\n\t")
+PS_CELL_FN(ps_a37, ".word 0xdd0f00e4\n\t.word 0x64018088\n\t")
+PS_CELL_FN(ps_a38, ".word 0xdd00f0e4\n\t.word 0x64018088\n\t")
+PS_CELL_FN(ps_a39, ".word 0xdd00ffe4\n\t.word 0x64018088\n\t")
+PS_CELL_FN(ps_a40, ".word 0xdd0000b1\n\t.word 0x64818088\n\t")
+PS_CELL_FN(ps_a41, ".word 0xdd000fe4\n\t.word 0x64818088\n\t")
+PS_CELL_FN(ps_a42, ".word 0xdd0f00e4\n\t.word 0x64818088\n\t")
+PS_CELL_FN(ps_a43, ".word 0xdd00f0e4\n\t.word 0x64818088\n\t")
+PS_CELL_FN(ps_a44, ".word 0xdd00ffe4\n\t.word 0x64818088\n\t")
+PS_CELL_FN(ps_a45, ".word 0xdd0000b1\n\t.word 0x6d018088\n\t")
+PS_CELL_FN(ps_a46, ".word 0xdd000fe4\n\t.word 0x6d018088\n\t")
+PS_CELL_FN(ps_a47, ".word 0xdd0f00e4\n\t.word 0x6d018088\n\t")
+PS_CELL_FN(ps_a48, ".word 0xdd00f0e4\n\t.word 0x6d018088\n\t")
+PS_CELL_FN(ps_a49, ".word 0xdd00ffe4\n\t.word 0x6d018088\n\t")
+PS_CELL_FN(ps_a50, ".word 0xdd0000b1\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a51, ".word 0xdd000fe4\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a52, ".word 0xdd0f00e4\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a53, ".word 0xdd00f0e4\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a54, ".word 0xdd00ffe4\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a55, ".word 0xde000a00\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a56, ".word 0xde000055\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a57, ".word 0xde0000ff\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a58, ".word 0xde000231\n\t.word 0x60018088\n\t")
+PS_CELL_FN(ps_a59, ".word 0xde000a00\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a60, ".word 0xde000055\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a61, ".word 0xde0000ff\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a62, ".word 0xde000231\n\t.word 0xd0008088\n\t")
+PS_CELL_FN(ps_a63, ".word 0xde000a00\n\t.word 0xd0028088\n\t")
+PS_CELL_FN(ps_a64, ".word 0xde000055\n\t.word 0xd0028088\n\t")
+PS_CELL_FN(ps_a65, ".word 0xde0000ff\n\t.word 0xd0028088\n\t")
+PS_CELL_FN(ps_a66, ".word 0xde000231\n\t.word 0xd0028088\n\t")
+PS_CELL_FN(ps_a67, ".word 0xde000a00\n\t.word 0xd0068088\n\t")
+PS_CELL_FN(ps_a68, ".word 0xde000055\n\t.word 0xd0068088\n\t")
+PS_CELL_FN(ps_a69, ".word 0xde0000ff\n\t.word 0xd0068088\n\t")
+PS_CELL_FN(ps_a70, ".word 0xde000231\n\t.word 0xd0068088\n\t")
+PS_CELL_FN(ps_a71, ".word 0xde000a00\n\t.word 0xd0038088\n\t")
+PS_CELL_FN(ps_a72, ".word 0xde000055\n\t.word 0xd0038088\n\t")
+PS_CELL_FN(ps_a73, ".word 0xde0000ff\n\t.word 0xd0038088\n\t")
+PS_CELL_FN(ps_a74, ".word 0xde000231\n\t.word 0xd0038088\n\t")
+PS_CELL_FN(ps_l0, ".word 0xdc0100e4\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l1, ".word 0xdc0100e4\n\t" ".word 0xffff0000\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l2, ".word 0xdc0100e4\n\t" ".word 0xffff0320\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l3, ".word 0xdc0100e4\n\t" ".word 0xffff040d\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l4, ".word 0xdc0100e4\n\t" ".set push\n\t.set noreorder\n\tb 1f\n\tnop\n1:\n\t.set pop\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l5, ".word 0xdc0100e4\n\t" ".word 0x46000000\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l6, ".word 0xdc0100e4\n\t" ".word 0x48e9007f\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l7, ".word 0xdc0100e4\n\t" ".word 0x4869007f\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l8, ".word 0xdc0100e4\n\t" "lv.q C730, 496(%[in])\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l9, ".word 0xdc0100e4\n\t" ".word 0xdd0f00e4\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l10, ".word 0xdc0100e4\n\t" PS_CTL_READ("12", "16", "20") ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l11, ".word 0xde000001\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l12, ".word 0xde000001\n\t" ".word 0xffff0000\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l13, ".word 0xde000001\n\t" ".word 0xffff0320\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_l14, ".word 0xde000001\n\t" ".word 0xffff040d\n\t" ".word 0xd0000008\n\t.word 0xd0000028\n\t")
+PS_CELL_FN(ps_f0_0, ".word 0xdf880000\n\t")
+PS_CELL_FN(ps_f0_1, ".word 0xdf883c00\n\t")
+PS_CELL_FN(ps_f0_2, ".word 0xdf88c000\n\t")
+PS_CELL_FN(ps_f0_3, ".word 0xdf887c00\n\t")
+PS_CELL_FN(ps_f0_4, ".word 0xdf887c01\n\t")
+PS_CELL_FN(ps_f0_5, ".word 0xdf888000\n\t")
+PS_CELL_FN(ps_f0_6, ".word 0xdf880400\n\t")
+PS_CELL_FN(ps_f0_7, ".word 0xdf887bff\n\t")
+PS_CELL_FN(ps_i0_0, ".word 0xdf080000\n\t")
+PS_CELL_FN(ps_i0_1, ".word 0xdf080001\n\t")
+PS_CELL_FN(ps_i0_2, ".word 0xdf08ffff\n\t")
+PS_CELL_FN(ps_i0_3, ".word 0xdf087fff\n\t")
+PS_CELL_FN(ps_i0_4, ".word 0xdf088000\n\t")
+PS_CELL_FN(ps_f1_0, ".word 0xde000001\n\t.word 0xdf880000\n\t")
+PS_CELL_FN(ps_f1_1, ".word 0xde000001\n\t.word 0xdf883c00\n\t")
+PS_CELL_FN(ps_f1_2, ".word 0xde000001\n\t.word 0xdf88c000\n\t")
+PS_CELL_FN(ps_f1_3, ".word 0xde000001\n\t.word 0xdf887c00\n\t")
+PS_CELL_FN(ps_f1_4, ".word 0xde000001\n\t.word 0xdf887c01\n\t")
+PS_CELL_FN(ps_f1_5, ".word 0xde000001\n\t.word 0xdf888000\n\t")
+PS_CELL_FN(ps_f1_6, ".word 0xde000001\n\t.word 0xdf880400\n\t")
+PS_CELL_FN(ps_f1_7, ".word 0xde000001\n\t.word 0xdf887bff\n\t")
+PS_CELL_FN(ps_i1_0, ".word 0xde000001\n\t.word 0xdf080000\n\t")
+PS_CELL_FN(ps_i1_1, ".word 0xde000001\n\t.word 0xdf080001\n\t")
+PS_CELL_FN(ps_i1_2, ".word 0xde000001\n\t.word 0xdf08ffff\n\t")
+PS_CELL_FN(ps_i1_3, ".word 0xde000001\n\t.word 0xdf087fff\n\t")
+PS_CELL_FN(ps_i1_4, ".word 0xde000001\n\t.word 0xdf088000\n\t")
+PS_CELL_FN(ps_f2_0, ".word 0xde000003\n\t.word 0xdf880000\n\t")
+PS_CELL_FN(ps_f2_1, ".word 0xde000003\n\t.word 0xdf883c00\n\t")
+PS_CELL_FN(ps_f2_2, ".word 0xde000003\n\t.word 0xdf88c000\n\t")
+PS_CELL_FN(ps_f2_3, ".word 0xde000003\n\t.word 0xdf887c00\n\t")
+PS_CELL_FN(ps_f2_4, ".word 0xde000003\n\t.word 0xdf887c01\n\t")
+PS_CELL_FN(ps_f2_5, ".word 0xde000003\n\t.word 0xdf888000\n\t")
+PS_CELL_FN(ps_f2_6, ".word 0xde000003\n\t.word 0xdf880400\n\t")
+PS_CELL_FN(ps_f2_7, ".word 0xde000003\n\t.word 0xdf887bff\n\t")
+PS_CELL_FN(ps_i2_0, ".word 0xde000003\n\t.word 0xdf080000\n\t")
+PS_CELL_FN(ps_i2_1, ".word 0xde000003\n\t.word 0xdf080001\n\t")
+PS_CELL_FN(ps_i2_2, ".word 0xde000003\n\t.word 0xdf08ffff\n\t")
+PS_CELL_FN(ps_i2_3, ".word 0xde000003\n\t.word 0xdf087fff\n\t")
+PS_CELL_FN(ps_i2_4, ".word 0xde000003\n\t.word 0xdf088000\n\t")
+PS_CELL_FN(ps_f3_0, ".word 0xde000100\n\t.word 0xdf880000\n\t")
+PS_CELL_FN(ps_f3_1, ".word 0xde000100\n\t.word 0xdf883c00\n\t")
+PS_CELL_FN(ps_f3_2, ".word 0xde000100\n\t.word 0xdf88c000\n\t")
+PS_CELL_FN(ps_f3_3, ".word 0xde000100\n\t.word 0xdf887c00\n\t")
+PS_CELL_FN(ps_f3_4, ".word 0xde000100\n\t.word 0xdf887c01\n\t")
+PS_CELL_FN(ps_f3_5, ".word 0xde000100\n\t.word 0xdf888000\n\t")
+PS_CELL_FN(ps_f3_6, ".word 0xde000100\n\t.word 0xdf880400\n\t")
+PS_CELL_FN(ps_f3_7, ".word 0xde000100\n\t.word 0xdf887bff\n\t")
+PS_CELL_FN(ps_i3_0, ".word 0xde000100\n\t.word 0xdf080000\n\t")
+PS_CELL_FN(ps_i3_1, ".word 0xde000100\n\t.word 0xdf080001\n\t")
+PS_CELL_FN(ps_i3_2, ".word 0xde000100\n\t.word 0xdf08ffff\n\t")
+PS_CELL_FN(ps_i3_3, ".word 0xde000100\n\t.word 0xdf087fff\n\t")
+PS_CELL_FN(ps_i3_4, ".word 0xde000100\n\t.word 0xdf088000\n\t")
+
+static const struct ps_arith s_ps_arith[PS_ARITH] = {
+    {"pfxs-vadd-q-0", 0xdc0000b1u, 0x60018088u, ps_a0},
+    {"pfxs-vadd-q-1", 0xdc000fe4u, 0x60018088u, ps_a1},
+    {"pfxs-vadd-q-2", 0xdc0f00e4u, 0x60018088u, ps_a2},
+    {"pfxs-vadd-q-3", 0xdc00f0e4u, 0x60018088u, ps_a3},
+    {"pfxs-vadd-q-4", 0xdc00ffe4u, 0x60018088u, ps_a4},
+    {"pfxs-vadd-q-5", 0xdc0fe1d0u, 0x60018088u, ps_a5},
+    {"pfxs-vmul-q-0", 0xdc0000b1u, 0x64018088u, ps_a6},
+    {"pfxs-vmul-q-1", 0xdc000fe4u, 0x64018088u, ps_a7},
+    {"pfxs-vmul-q-2", 0xdc0f00e4u, 0x64018088u, ps_a8},
+    {"pfxs-vmul-q-3", 0xdc00f0e4u, 0x64018088u, ps_a9},
+    {"pfxs-vmul-q-4", 0xdc00ffe4u, 0x64018088u, ps_a10},
+    {"pfxs-vmul-q-5", 0xdc0fe1d0u, 0x64018088u, ps_a11},
+    {"pfxs-vdot-q-0", 0xdc0000b1u, 0x64818088u, ps_a12},
+    {"pfxs-vdot-q-1", 0xdc000fe4u, 0x64818088u, ps_a13},
+    {"pfxs-vdot-q-2", 0xdc0f00e4u, 0x64818088u, ps_a14},
+    {"pfxs-vdot-q-3", 0xdc00f0e4u, 0x64818088u, ps_a15},
+    {"pfxs-vdot-q-4", 0xdc00ffe4u, 0x64818088u, ps_a16},
+    {"pfxs-vdot-q-5", 0xdc0fe1d0u, 0x64818088u, ps_a17},
+    {"pfxs-vmin-q-0", 0xdc0000b1u, 0x6d018088u, ps_a18},
+    {"pfxs-vmin-q-1", 0xdc000fe4u, 0x6d018088u, ps_a19},
+    {"pfxs-vmin-q-2", 0xdc0f00e4u, 0x6d018088u, ps_a20},
+    {"pfxs-vmin-q-3", 0xdc00f0e4u, 0x6d018088u, ps_a21},
+    {"pfxs-vmin-q-4", 0xdc00ffe4u, 0x6d018088u, ps_a22},
+    {"pfxs-vmin-q-5", 0xdc0fe1d0u, 0x6d018088u, ps_a23},
+    {"pfxs-vmov-q-0", 0xdc0000b1u, 0xd0008088u, ps_a24},
+    {"pfxs-vmov-q-1", 0xdc000fe4u, 0xd0008088u, ps_a25},
+    {"pfxs-vmov-q-2", 0xdc0f00e4u, 0xd0008088u, ps_a26},
+    {"pfxs-vmov-q-3", 0xdc00f0e4u, 0xd0008088u, ps_a27},
+    {"pfxs-vmov-q-4", 0xdc00ffe4u, 0xd0008088u, ps_a28},
+    {"pfxs-vmov-q-5", 0xdc0fe1d0u, 0xd0008088u, ps_a29},
+    {"pfxt-vadd-q-0", 0xdd0000b1u, 0x60018088u, ps_a30},
+    {"pfxt-vadd-q-1", 0xdd000fe4u, 0x60018088u, ps_a31},
+    {"pfxt-vadd-q-2", 0xdd0f00e4u, 0x60018088u, ps_a32},
+    {"pfxt-vadd-q-3", 0xdd00f0e4u, 0x60018088u, ps_a33},
+    {"pfxt-vadd-q-4", 0xdd00ffe4u, 0x60018088u, ps_a34},
+    {"pfxt-vmul-q-0", 0xdd0000b1u, 0x64018088u, ps_a35},
+    {"pfxt-vmul-q-1", 0xdd000fe4u, 0x64018088u, ps_a36},
+    {"pfxt-vmul-q-2", 0xdd0f00e4u, 0x64018088u, ps_a37},
+    {"pfxt-vmul-q-3", 0xdd00f0e4u, 0x64018088u, ps_a38},
+    {"pfxt-vmul-q-4", 0xdd00ffe4u, 0x64018088u, ps_a39},
+    {"pfxt-vdot-q-0", 0xdd0000b1u, 0x64818088u, ps_a40},
+    {"pfxt-vdot-q-1", 0xdd000fe4u, 0x64818088u, ps_a41},
+    {"pfxt-vdot-q-2", 0xdd0f00e4u, 0x64818088u, ps_a42},
+    {"pfxt-vdot-q-3", 0xdd00f0e4u, 0x64818088u, ps_a43},
+    {"pfxt-vdot-q-4", 0xdd00ffe4u, 0x64818088u, ps_a44},
+    {"pfxt-vmin-q-0", 0xdd0000b1u, 0x6d018088u, ps_a45},
+    {"pfxt-vmin-q-1", 0xdd000fe4u, 0x6d018088u, ps_a46},
+    {"pfxt-vmin-q-2", 0xdd0f00e4u, 0x6d018088u, ps_a47},
+    {"pfxt-vmin-q-3", 0xdd00f0e4u, 0x6d018088u, ps_a48},
+    {"pfxt-vmin-q-4", 0xdd00ffe4u, 0x6d018088u, ps_a49},
+    {"pfxt-vmov-q-0", 0xdd0000b1u, 0xd0008088u, ps_a50},
+    {"pfxt-vmov-q-1", 0xdd000fe4u, 0xd0008088u, ps_a51},
+    {"pfxt-vmov-q-2", 0xdd0f00e4u, 0xd0008088u, ps_a52},
+    {"pfxt-vmov-q-3", 0xdd00f0e4u, 0xd0008088u, ps_a53},
+    {"pfxt-vmov-q-4", 0xdd00ffe4u, 0xd0008088u, ps_a54},
+    {"pfxd-vadd-q-0", 0xde000a00u, 0x60018088u, ps_a55},
+    {"pfxd-vadd-q-1", 0xde000055u, 0x60018088u, ps_a56},
+    {"pfxd-vadd-q-2", 0xde0000ffu, 0x60018088u, ps_a57},
+    {"pfxd-vadd-q-3", 0xde000231u, 0x60018088u, ps_a58},
+    {"pfxd-vmov-q-0", 0xde000a00u, 0xd0008088u, ps_a59},
+    {"pfxd-vmov-q-1", 0xde000055u, 0xd0008088u, ps_a60},
+    {"pfxd-vmov-q-2", 0xde0000ffu, 0xd0008088u, ps_a61},
+    {"pfxd-vmov-q-3", 0xde000231u, 0xd0008088u, ps_a62},
+    {"pfxd-vneg-q-0", 0xde000a00u, 0xd0028088u, ps_a63},
+    {"pfxd-vneg-q-1", 0xde000055u, 0xd0028088u, ps_a64},
+    {"pfxd-vneg-q-2", 0xde0000ffu, 0xd0028088u, ps_a65},
+    {"pfxd-vneg-q-3", 0xde000231u, 0xd0028088u, ps_a66},
+    {"pfxd-vzero-q-0", 0xde000a00u, 0xd0068088u, ps_a67},
+    {"pfxd-vzero-q-1", 0xde000055u, 0xd0068088u, ps_a68},
+    {"pfxd-vzero-q-2", 0xde0000ffu, 0xd0068088u, ps_a69},
+    {"pfxd-vzero-q-3", 0xde000231u, 0xd0068088u, ps_a70},
+    {"pfxd-vidt-q-0", 0xde000a00u, 0xd0038088u, ps_a71},
+    {"pfxd-vidt-q-1", 0xde000055u, 0xd0038088u, ps_a72},
+    {"pfxd-vidt-q-2", 0xde0000ffu, 0xd0038088u, ps_a73},
+    {"pfxd-vidt-q-3", 0xde000231u, 0xd0038088u, ps_a74},
+};
+
+static const struct ps_life s_ps_life[PS_LIFE] = {
+    {"s-direct", 0xdc0100e4u, ps_l0},
+    {"s-vnop", 0xdc0100e4u, ps_l1},
+    {"s-vsync", 0xdc0100e4u, ps_l2},
+    {"s-vflush", 0xdc0100e4u, ps_l3},
+    {"s-branch", 0xdc0100e4u, ps_l4},
+    {"s-adds", 0xdc0100e4u, ps_l5},
+    {"s-mtv", 0xdc0100e4u, ps_l6},
+    {"s-mfv", 0xdc0100e4u, ps_l7},
+    {"s-lvq", 0xdc0100e4u, ps_l8},
+    {"s-vpfxt", 0xdc0100e4u, ps_l9},
+    {"s-mfvc", 0xdc0100e4u, ps_l10},
+    {"d-direct", 0xde000001u, ps_l11},
+    {"d-vnop", 0xde000001u, ps_l12},
+    {"d-vsync", 0xde000001u, ps_l13},
+    {"d-vflush", 0xde000001u, ps_l14},
+};
+
+static const uint32_t s_ps_vfim_words[PS_VFIM] = {
+    0xdf880000u, 0xdf883c00u, 0xdf88c000u, 0xdf887c00u, 0xdf887c01u, 0xdf888000u, 0xdf880400u, 0xdf887bffu,
+};
+static const uint32_t s_ps_viim_words[PS_VIIM] = {
+    0xdf080000u, 0xdf080001u, 0xdf08ffffu, 0xdf087fffu, 0xdf088000u,
+};
+static const uint32_t s_ps_imm_pfx[PS_IMMD] = {
+    0x00000000u, 0xde000001u, 0xde000003u, 0xde000100u,
+};
+static const char *const s_ps_imm_names[PS_IMMD] = {"none", "sat01", "sat11", "mask"};
+static const ps_fn s_ps_vfim_fns[PS_IMMD][PS_VFIM] = {
+    {ps_f0_0, ps_f0_1, ps_f0_2, ps_f0_3, ps_f0_4, ps_f0_5, ps_f0_6, ps_f0_7},
+    {ps_f1_0, ps_f1_1, ps_f1_2, ps_f1_3, ps_f1_4, ps_f1_5, ps_f1_6, ps_f1_7},
+    {ps_f2_0, ps_f2_1, ps_f2_2, ps_f2_3, ps_f2_4, ps_f2_5, ps_f2_6, ps_f2_7},
+    {ps_f3_0, ps_f3_1, ps_f3_2, ps_f3_3, ps_f3_4, ps_f3_5, ps_f3_6, ps_f3_7},
+};
+static const ps_fn s_ps_viim_fns[PS_IMMD][PS_VIIM] = {
+    {ps_i0_0, ps_i0_1, ps_i0_2, ps_i0_3, ps_i0_4},
+    {ps_i1_0, ps_i1_1, ps_i1_2, ps_i1_3, ps_i1_4},
+    {ps_i2_0, ps_i2_1, ps_i2_2, ps_i2_3, ps_i2_4},
+    {ps_i3_0, ps_i3_1, ps_i3_2, ps_i3_3, ps_i3_4},
+};
+
+/* Operand sets, A (C000) then B (C010). qNaN 0x7fc00011/0xffc00022, sNaN 0x7f800033. */
+static const uint32_t s_ps_sets[PS_SETS][8] = {
+    {0x3fc00000u, 0xc0100000u, 0x40400000u, 0x3f200000u,    /* 1.5, -2.25, 3, 0.625 */
+     0x3f400000u, 0x40800000u, 0xbfc00000u, 0x40200000u},   /* 0.75, 4, -1.5, 2.5 */
+    {0xffc00022u, 0x7f800000u, 0x00000001u, 0x80000000u,    /* -qNaN, +inf, +denormal, -0 */
+     0x3f800000u, 0xff800000u, 0x80000001u, 0x00000000u},   /* 1, -inf, -denormal, +0 */
+    {0x00000000u, 0x7f800033u, 0x807fffffu, 0xbf800000u,    /* +0, +sNaN, -largest denormal, -1 */
+     0x80000000u, 0x40000000u, 0x7f800000u, 0x7fc00011u},   /* -0, 2, +inf, +qNaN */
+};
+
+static uint32_t s_ps_in[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+static uint32_t s_ps_out[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+static uint32_t s_ps_ctl[PS_CTL] __attribute__((aligned(16)));
+
+/* Background image, the destination C200 as the sentinel, the control buffer as the sentinel. */
+static void ps_image(void)
+{
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        s_ps_in[i] = 0x3f800000u | (i << 16);
+    }
+    for (unsigned i = 0; i < 4u; i++) {
+        s_ps_in[PS_DST + i] = TN_SENTINEL;
+    }
+    for (unsigned i = 0; i < PS_CTL; i++) {
+        s_ps_ctl[i] = TN_SENTINEL;
+    }
+}
+
+static void ps_operands(unsigned pass)
+{
+    char name[64];
+    uint32_t w[PS_MAX_WORDS];
+    snprintf(name, sizeof(name), "operands-p%u", pass);
+    hle_step(name);
+    for (unsigned s = 0; s < PS_SETS; s++) {
+        for (unsigned i = 0; i < 8u; i++) {
+            w[s * 8u + i] = s_ps_sets[s][i];
+        }
+    }
+    hle_record(name, "PASS", 0u, w, PS_SETS * 8u);
+}
+
+/* Row <name>-p<pass>: the instruction word, then C200 lanes 0-3 for each operand set. */
+static void ps_arith_record(unsigned pass, const struct ps_arith *a)
+{
+    char name[64];
+    uint32_t w[PS_MAX_WORDS];
+    snprintf(name, sizeof(name), "%s-p%u", a->name, pass);
+    hle_step(name);
+    unsigned count = 0;
+    w[count++] = a->word;
+    for (unsigned s = 0; s < PS_SETS; s++) {
+        ps_image();
+        for (unsigned i = 0; i < 8u; i++) {
+            s_ps_in[i] = s_ps_sets[s][i];
+        }
+        a->fn(s_ps_in, s_ps_out, s_ps_ctl);
+        for (unsigned i = 0; i < 4u; i++) {
+            w[count++] = s_ps_out[PS_DST + i];
+        }
+    }
+    hle_record(name, "PASS", a->pfx, w, count);
+}
+
+/* Row life-<name>-p<pass>: S000 = -2, S200 and S201 the sentinel; the nine control words, S200,
+   S201. */
+static void ps_life_record(unsigned pass, const struct ps_life *l)
+{
+    char name[64];
+    uint32_t w[PS_MAX_WORDS];
+    snprintf(name, sizeof(name), "life-%s-p%u", l->name, pass);
+    hle_step(name);
+    ps_image();
+    s_ps_in[0] = 0xc0000000u;
+    l->fn(s_ps_in, s_ps_out, s_ps_ctl);
+    unsigned count = 0;
+    for (unsigned i = 0; i < PS_CTL; i++) {
+        w[count++] = s_ps_ctl[i];
+    }
+    w[count++] = s_ps_out[PS_DST];
+    w[count++] = s_ps_out[PS_DST + 1u];
+    hle_record(name, "PASS", l->pfx, w, count);
+}
+
+/* Row <stem>-<d>-p<pass>: per immediate word, the word and S200 (sentinel before). */
+static void ps_imm_record(unsigned pass, const char *stem, unsigned d, const uint32_t *words,
+                          const ps_fn *fns, unsigned n)
+{
+    char name[64];
+    uint32_t w[PS_MAX_WORDS];
+    snprintf(name, sizeof(name), "%s-%s-p%u", stem, s_ps_imm_names[d], pass);
+    hle_step(name);
+    unsigned count = 0;
+    for (unsigned j = 0; j < n; j++) {
+        ps_image();
+        fns[j](s_ps_in, s_ps_out, s_ps_ctl);
+        w[count++] = words[j];
+        w[count++] = s_ps_out[PS_DST];
+    }
+    hle_record(name, "PASS", s_ps_imm_pfx[d], w, count);
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        ps_operands(pass);
+        for (unsigned i = 0; i < PS_ARITH; i++) {
+            ps_arith_record(pass, &s_ps_arith[i]);
+        }
+        for (unsigned i = 0; i < PS_LIFE; i++) {
+            ps_life_record(pass, &s_ps_life[i]);
+        }
+        for (unsigned d = 0; d < PS_IMMD; d++) {
+            ps_imm_record(pass, "vfim", d, s_ps_vfim_words, s_ps_vfim_fns[d], PS_VFIM);
+        }
+        for (unsigned d = 0; d < PS_IMMD; d++) {
+            ps_imm_record(pass, "viim", d, s_ps_viim_words, s_ps_viim_fns[d], PS_VIIM);
+        }
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_PREFIX_STATE */
 
 #if PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV
 
