@@ -279,6 +279,11 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
             if (imm < 128) {
                 vreg_idx(imm, 1, vi_idx);
                 s->vi[vi_idx[0]] = value;
+            } else if (imm == 131) {
+                /* VFPU_CC keeps only bits 0..5 (unrecorded PSP read, PSP-3000, 2026-11-08,
+                 * issue #326, probe case vfpu-cc-cmov: mtvc then mfvc read back written & 0x3f
+                 * in every cell). */
+                s->vfpuCtrl[3] = value & 0x3fu;
             } else s->vfpuCtrl[imm - 128] = value;
             return SR_VFPU_COMPUTE;
         }
@@ -420,7 +425,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
             sr_vread(b, s, ti, n, s->vfpuCtrl[1]);
             int cc = 0, orv = 0, andv = 1, affected = (1 << 4) | (1 << 5);
             for (int i = 0; i < n; i++) {
-                float x = a[i], y = b[i];
+                float x = sr_vfpu_ftz(a[i]), y = sr_vfpu_ftz(b[i]);
                 int c;
                 switch (cond) {
                     case 0: c = 0; break;            case 1: c = x == y; break;
