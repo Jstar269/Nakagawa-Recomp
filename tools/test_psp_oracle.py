@@ -3498,6 +3498,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # The 2026-11-10 acceptance-eligible hle-issues-batch (#326, #356, boot 172) and
                 # hle-kernel-pool-bounds (boot 173) runs of 979c6a1dd.
                 "PSP-HLE-ISSUES-001", "PSP-HLE-KERNEL-STATUS-002",
+                # The 2026-11-09 (UTC) acceptance-eligible vfpu-mfv-mtv (boot 167),
+                # vfpu-wide-dot-matrix (boot 168) and vfpu-round-sep (boot 169) runs (#326).
+                "PSP-VFPU-MFVMTV-001", "PSP-VFPU-WIDEDOT-001", "PSP-VFPU-ROUNDSEP-001",
             },
         )
         self.assertEqual(
@@ -3519,6 +3522,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # 2026-11-02: memory-edge (bb3f36e4): 33 PASS and 42 intentional SKIP records
                 # (no bottom-of-RAM edge, no scratchpad or VRAM file call, no unproven overrun).
                 "PSP-MEMEDGE-001",
+                # 2026-11-07: sas-mix (979de58f, boot 146, game context): a complete all-PASS
+                # stream whose envelope is blocked by "loaded module was not proven unloaded".
+                "PSP-SAS-003",
             },
         )
 
@@ -9655,8 +9661,8 @@ class VfpuWideDotProbeTests(unittest.TestCase):
     """CASE=vfpu-wide-dot-matrix (173, PSP-VFPU-WIDEDOT-001) in probe_hle_issues.c: the #326 wide
     dot-product and matrix VFPU forms. Register-only: no system call in the section beyond the
     shared writer, bounded loops, a step before each form group, identity prefixes, records within
-    the writer's line, a fixed-shape stream that matches the registry, and no hardware result
-    claimed (NOT_RUN)."""
+    the writer's line, a fixed-shape stream that matches the registry, and the 2026-11-09 hardware
+    result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -9799,23 +9805,38 @@ class VfpuWideDotProbeTests(unittest.TestCase):
         for fragment in ("#define WD_FORMS 15u", "pass < 2u", "form < WD_FORMS"):
             self.assertIn(fragment, self.section)
 
-    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+    def test_manifest_row_is_a_measured_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_wide_dot_matrix.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-wide-dot-matrix"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
         self.assertEqual(row["case_ids"][-1], "vfpu-wide-dot-matrix-done")
+
+    def test_measurement_note_names_the_run_and_its_exact_cells(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        # The 2026-11-09 (UTC) launch: boot 168, XMB context, pspver 0x06060010, from a
+        # pre-publication commit of this case whose case code matches this tree.
+        for term in ("2026-11-09 (UTC)", "PSP-3000", "boot 168", "XMB context", "b2271c93",
+                     "pre-publication commit", "identical to this tree's", "system software 6.61",
+                     "0x06060010", "ARK-5 with cIPL, version 5.1.0", "367 records",
+                     "acceptance-eligible with 0 blockers", "537 cells"):
+            self.assertIn(term, note)
+        # Aligned truncation in the frame of the largest term; vrot NaN and infinity words.
+        for cell in ("= 0x3f800001", "= 0x4b800001", "(0, 0xbf7ffffe, 0x3f7ffffe)",
+                     "0.25 (0x3f6c835c, 0x3ec3ef14)", "-inf (0x7f800001, 0xff800001)"):
+            self.assertIn(cell, note)
 
 
 class VfpuMfvMtvProbeTests(unittest.TestCase):
     """CASE=vfpu-mfv-mtv (174, PSP-VFPU-MFVMTV-001) in probe_hle_issues.c: the #326 mtv.s/mfv.s word round trip. Register-only: no system call
     in the section beyond the shared writer, bounded loops, a step before the cells, no
-    control-register write, a fixed-shape stream that matches the registry, and no hardware
-    result claimed (NOT_RUN)."""
+    control-register write, a fixed-shape stream that matches the registry, and the 2026-11-09
+    hardware result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -9881,16 +9902,30 @@ class VfpuMfvMtvProbeTests(unittest.TestCase):
             value = int(word, 16)
             self.assertFalse((value >> 21) == 0x247 and value & 0x80, word)
 
-    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+    def test_manifest_row_is_a_measured_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_mfv_mtv.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-mfv-mtv"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
         self.assertEqual(row["case_ids"][-1], "vfpu-mfv-mtv-done")
+
+    def test_measurement_note_names_the_run_and_every_word(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-09 (UTC)", "PSP-3000", "boot 167", "XMB context", "1301371e",
+                     "pre-publication commit", "identical to this tree's", "system software 6.61",
+                     "0x06060010", "ARK-5 with cIPL, version 5.1.0", "5 records",
+                     "acceptance-eligible with 0 blockers", "bit for bit"):
+            self.assertIn(term, note)
+        # Every input word came back unchanged through both registers.
+        for word in (0x80000000, 0x00000001, 0x80000001, 0x007FFFFF, 0x807FFFFF, 0x7FC00011,
+                     0xFFC00022, 0x7F800033, 0xFF800044, 0x7F800000, 0xFF800000, 0x7F7FFFFF,
+                     0x3F800000, 0xDEADBEEF, 0xFFFFFFFF):
+            self.assertIn(f"0x{word:08x}", note)
 
     def test_the_encodings_match_the_forms(self) -> None:
         for word, text in ((0x48e80000, "mtv $t0, S000"), (0x48690000, "mfv $t1, S000"),
@@ -10064,7 +10099,7 @@ class VfpuRoundSepProbeTests(unittest.TestCase):
     separation of vdot.q, vmscl.q, vmul.s, vadd.s and vsub.s. Register-only: no system call in the
     section beyond the shared writer, bounded loops, a step before each form group, identity
     prefixes, records within the writer's line, a fixed-shape stream that matches the registry,
-    and no hardware result claimed (NOT_RUN)."""
+    and the 2026-11-09 hardware result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -10197,16 +10232,35 @@ class VfpuRoundSepProbeTests(unittest.TestCase):
         for fragment in ("#define RS_FORMS 5u", "pass < 2u", "form < RS_FORMS"):
             self.assertIn(fragment, self.section)
 
-    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+    def test_manifest_row_is_a_measured_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_round_sep.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-round-sep"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertNotIn("No hardware result is claimed", row["invariant"])
         self.assertEqual(row["case_ids"][-1], "vfpu-round-sep-done")
+
+    def test_measurement_note_separates_rounding_from_truncation(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-09 (UTC)", "PSP-3000", "boot 169", "XMB context", "f50333e8",
+                     "pre-publication commit", "identical to this tree's", "system software 6.61",
+                     "0x06060010", "ARK-5 with cIPL, version 5.1.0", "15 records",
+                     "acceptance-eligible with 0 blockers"):
+            self.assertIn(term, note)
+        # A carry-out sum rounds to nearest even; single products round to nearest.
+        for cell in ("(0x3f800003, 0x3f800000) gives 0x40000002",
+                     "(0x3f800007, 0x3f800000) gives 0x40000004",
+                     "(0x40000001, 0x40000000) gives 0x40800000",
+                     "0x3fc00001 * 0x3fc00001 = 0x40100002",
+                     "0x3fc00003 * 0x3fc00001 = 0x40100003",
+                     "0x3f800001 + 0x3f000000 = 0x3fc00001",
+                     "0x3f800003 - 0xbf800000 = 0x40000002"):
+            self.assertIn(cell, note)
 
 
 class VfpuPrefixStateProbeTests(unittest.TestCase):
@@ -15061,8 +15115,11 @@ class Record20261015Tests(unittest.TestCase):
             ("vfpu-basic-arith", "PSP-VFPU-BASICARITH-001", "MEASURED"),
             ("vfpu-vus2i", "PSP-VFPU-VUS2I-001", "MEASURED"),
             ("hle-self-stop-unload", "PSP-HLE-SELFSTOP-001", "MEASURED"),
+            ("vfpu-mfv-mtv", "PSP-VFPU-MFVMTV-001", "MEASURED"),
+            ("vfpu-wide-dot-matrix", "PSP-VFPU-WIDEDOT-001", "MEASURED"),
+            ("vfpu-round-sep", "PSP-VFPU-ROUNDSEP-001", "MEASURED"),
             ("sas-adsr", "PSP-SAS-002", "NOT_RUN"),
-            ("sas-mix", "PSP-SAS-003", "NOT_RUN"),
+            ("sas-mix", "PSP-SAS-003", "CAPTURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
@@ -15076,6 +15133,21 @@ class Record20261015Tests(unittest.TestCase):
                 self.assertEqual(readme[case][1], test_id)
                 self.assertIn(status, readme[case][2])
                 self.assertEqual(self.rows[test_id]["hardware_evidence"], status)
+
+    def test_the_sas_mix_capture_is_captured_with_its_blocker(self) -> None:
+        row = self.rows["PSP-SAS-003"]
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
+        self.assertNotIn("measurement_note", row)
+        self.assertNotIn("evidence_cases", row)
+        note = row["evidence_note"]
+        for term in ("2026-11-07", "PSP-3000", "boot 146", "game context", "979de58f",
+                     "pre-publication commit", "identical to this tree's", "system software 6.61",
+                     "0x06060110", "ARK-5 with cIPL, version 5.1.0", "205 records",
+                     "not acceptance-eligible", "loaded module was not proven unloaded",
+                     "establishes nothing about PSP behaviour", "0x80420018", "0x80000004"):
+            self.assertIn(term, note)
+        self.assertIn("### PSP-SAS-003 capture 2026-11-07", self.doc)
+        self.assertIn("(#psp-sas-003-capture-2026-11-07)", self.doc)
 
     def test_the_audio_src_and_timer_comparisons_are_recorded_and_pinned(self) -> None:
         for name in ("test_audio_src_matches_the_measured_contract",
