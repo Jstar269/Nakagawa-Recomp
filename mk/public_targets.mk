@@ -99,6 +99,7 @@ PUBLIC_TARGETS := \
 	clay-layout-selftest \
 	ed25519-verify-selftest \
 	achievements-selftest \
+	nk-nickname-selftest \
 	nk-ui-core-selftest \
 	nk-ui-player-screens-selftest \
 	nk-ui-player-screens-capture \
@@ -175,6 +176,7 @@ PUBLIC_TARGETS := \
 	gpu-coherence-pcache-mutant \
 	vram-view-identity-selftest \
 	gpu-dst-read-mutants \
+	gpu-stencil-once-mutants \
 	gpu-snapsync-selftest \
 	gpu-ace-selftest \
 	gpu-mips-selftest \
@@ -311,6 +313,7 @@ HELP_DESCRIPTION_gui-present-selftest := run the host present pacing selftest
 HELP_DESCRIPTION_clay-layout-selftest := build and run the vendored Clay layout selftest
 HELP_DESCRIPTION_achievements-selftest := run the RetroAchievements bridge (vendored rcheevos) against an in-process fake server, with no network
 HELP_DESCRIPTION_ed25519-verify-selftest := check nk_ed25519_verify (vendored Monocypher) against the RFC 8032 vectors and nk_minisign_verify against real minisign output
+HELP_DESCRIPTION_nk-nickname-selftest := check the console nickname rule (src/core/nk_nickname.h): the Player default, the 32-byte cap and the refused values
 HELP_DESCRIPTION_nk-ui-player-screens-selftest := build and run nk_ui Library, Title detail and router snapshots
 HELP_DESCRIPTION_nk-ui-player-screens-capture := save offscreen synthetic Library and Title detail captures (set NK_UI_CAPTURE_DIR)
 HELP_DESCRIPTION_nk-ui-overlay-host-selftest := build and run the in-game overlay host on SDL3_ttf, real key events and the SDL_Renderer backend (#1159)
@@ -387,6 +390,7 @@ HELP_DESCRIPTION_gpu-coherence-selftest-snapbar-mutants := prove the GPU coheren
 HELP_DESCRIPTION_gpu-coherence-pcache-mutant := prove pipeline-cache-cold fails when pipelines bypass the Vulkan pipeline cache
 HELP_DESCRIPTION_vram-view-identity-selftest := check that the GE decoders the pause menu's VRAM viewer calls leave later frames, guest memory and the GE state unchanged (#314; needs a Vulkan device and fails without one)
 HELP_DESCRIPTION_gpu-dst-read-mutants := prove the GPU coherence dst-read cells kill seven broken destination-read variants
+HELP_DESCRIPTION_gpu-stencil-once-mutants := prove the GPU coherence stencil-once case kills three broken write-once stencil batch variants
 HELP_DESCRIPTION_gpu-snapsync-selftest := run the GPU snapshot-sync selftest
 HELP_DESCRIPTION_gpu-ace-selftest := run Ace Mode's texture filtering selftest on a real Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_gpu-mips-selftest := run the host-built mip chain selftest (Enhanced mips=on) on a real Vulkan device (SKIPs without one)

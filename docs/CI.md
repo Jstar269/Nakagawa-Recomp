@@ -20,14 +20,14 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 
 | Event/change | Jobs that run | Jobs intentionally skipped |
 | --- | --- | --- |
-| Draft pull request (opened, a push, reopened, or converted to Draft) | the quick jobs: classification, hygiene/security with its Markdown step, the public export audit, and CI required, which fails with `DRAFT_LIGHT_CI` (see [Draft pull requests](#draft-pull-requests)) | Python tooling, native/translation, the GCC 16 canary, the Android launcher build, Windows and the profile-zero fixture build, whatever the changed paths |
-| Ready pull request, docs-only | classification, hygiene/security with its Markdown step, CI required | Python/native, Windows |
-| Ready pull request, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
-| Ready pull request, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over three shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
-| Ready pull request, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
-| Ready pull request, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all three groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
-| Ready pull request, only `tools/test_*.py` modules that no native or Windows gate runs | classification, hygiene/security, Python tooling, CI required | native/translation, Windows (see [Tests-only changes](#tests-only-changes)) |
-| Marked Ready (`ready_for_review`) | the path-applicable jobs of a ready pull request, on the head the Draft run left light | only jobs irrelevant to the changed paths |
+| Pull request, quick run: a Draft, and, while `NK_CI_TIERS` is `on`, every pull request from a branch of this repository that is not a `batch/`, `carry/` or `desk/` branch and has no `ci-full-matrix` label | the quick checks: classification, hygiene/security with its Markdown step, the public export audit, `Generated files and repository lints` and `CI quick checks` (see [Quick and full checks](#quick-and-full-checks)) | Python tooling, native/translation, the GCC 16 canary, the Android launcher build, Windows, the profile-zero fixture build and `CI required`, whatever the changed paths |
+| Pull request, full run, docs-only | classification, hygiene/security with its Markdown step, CI required | Python/native, Windows |
+| Pull request, full run, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
+| Pull request, full run, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over three shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
+| Pull request, full run, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
+| Pull request, full run, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all three groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
+| Pull request, full run, only `tools/test_*.py` modules that no native or Windows gate runs | classification, hygiene/security, Python tooling, CI required | native/translation, Windows (see [Tests-only changes](#tests-only-changes)) |
+| Marked Ready (`ready_for_review`) | a new run on the head the Draft's run covered: the quick checks again when the head runs light, the path-applicable jobs when it runs full | as for that tier |
 | Workflow/CI configuration | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
 | Dependency-only metadata (`.github/dependabot.yml`) | classification, hygiene/security, CI required | Python/native, Windows |
 | Mixed documentation/native changes | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the applicable product gates |
@@ -82,7 +82,9 @@ The jobs:
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 3 groups of parts, about 10-13 min each |
 | `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
 | `android_build` ("Android launcher build") | not present | 1 job, added later |
-| `ci_required` | 1 job | unchanged |
+| `ci_required` | 1 job | unchanged on a full run; does not run on a quick one |
+| `quick_checks` ("Generated files and repository lints") | not present | 1 job, on a quick run only ([Quick and full checks](#quick-and-full-checks)) |
+| `ci_quick` ("CI quick checks") | not present | 1 job, on a quick run only, where it stands in for `ci_required` |
 
 - **Hygiene.** The check keeps its name, which the ruleset and the
   [Trusted CI verdict](#trusted-ci-verdict) require. The main smoke steps carry
@@ -125,7 +127,7 @@ The jobs:
   in place over an older synthetic release, then repeats the build and compares both SHA-256 values.
   Each install runs with Setup's `/LOG=`, and a failed one reports Setup's PrepareToInstall message
   (or the log's last lines) beside its exit code. The job requires
-  `allow_substantive == true`, so Draft-light runs skip this heavy gate.
+  `allow_substantive == true`, so quick runs skip this heavy gate.
 
 `CI required` needs `classify`, `hygiene`, `public_export`, `python_tools`, `native_tools`,
 `windows_runtime`, `windows_installer` and `android_build`. The installer result is required
@@ -266,7 +268,7 @@ provenance attestation finishes after `CI`, dispatch the verdict (see "Re-runnin
 [Trusted CI verdict](#trusted-ci-verdict)). Together they would have removed 21 of those 31 queued runs.
 They do not change the ceiling: verdict latency still follows the CI queue.
 
-### Draft pull requests
+### OpenSSF Scorecard
 
 The OpenSSF Scorecard workflow (`.github/workflows/scorecards.yml`) runs daily, and on demand from the
 Actions tab. It doesn't run on every push to `main`, because each run spends the repository's shared hourly
@@ -275,46 +277,81 @@ for the README badge.
 Triage findings through the usual issue process. The workflow does not change branch-protection
 settings.
 
-A Draft pull request runs only the quick checks: `Classify change`, `Hygiene and security`
-(with its Markdown step), the public export audit and `CI required`. For a `pull_request`
-event whose payload says `draft: true`, `tools/ci_paths.py` exports `allow_substantive=false`
-and `draft=true`. Every substantive job gates on `allow_substantive`, so Python tooling,
-native/translation, the GCC 16 canary, the Android launcher build, the Windows runtime gate, the Windows installer job and
-the profile-zero fixture build are skipped, whatever the changed paths. The path flags (`run_python`, `run_native`,
-`run_windows`, `run_installer`, `run_markdown`) are unchanged, so the Ready run routes exactly the gates a
-ready pull request gets. OSV-Scanner, Dependency Review and the provenance attestation run on
-a Draft as before. This keeps the hosted runners free for landing runs, which otherwise queue
-behind every Draft's full matrix.
+### Quick and full checks
 
-A Draft's run is never green, so no Draft can join a landing batch:
+Hosted CI has two tiers. The **quick checks** are `Classify change`, `Hygiene and security` (with its
+Markdown step), the public export audit, `Generated files and repository lints` and their aggregate,
+`CI quick checks`: about 5 runner-minutes. The **full checks** add the Python tooling gates, the native
+and translation gates, the GCC 16 canary, the Android launcher build, the Windows runtime gate, the
+Windows installer job and the profile-zero fixture build, as the changed paths route them, and their
+aggregate, `CI required`: about 144 runner-minutes for a change that routes everything. OSV-Scanner,
+Dependency Review, the provenance attestation and the Trusted CI verdict run on every push in both
+tiers.
 
-- `CI required` fails on `draft=true` with `DRAFT_LIGHT_CI`, and its log and annotation name
-  the quick jobs' results. A failing quick job is still a real failure to fix.
-- The Trusted CI verdict reads the pull request's draft state from GitHub and reports the
-  finding `DRAFT_LIGHT_CI`, whatever the candidate's CI reported. A draft state that is not
-  `false` counts as a Draft. A Draft that is also behind `main` reports both codes, so it
-  never looks like a head that fails only on `CI_DEFINITION_BEHIND`. The verdict always runs
-  the default branch's verifier, so this rule applies to every pull request once it is on
-  `main`.
+The repository variable `NK_CI_TIERS` switches the tiers. While it is not `on`, only a Draft runs the
+quick checks: every other pull request runs the full checks on each push, its head lands on its own
+`success` or in a batch, and the `ci-full-matrix` label changes nothing. While it is `on`, a pull
+request from a branch of this repository runs the quick checks on each push and gets the full checks
+when it is batched for landing or labelled. The rest of this section says which rules apply only
+while it is `on`.
 
-The full matrix runs when the pull request is marked Ready for review. `.github/workflows/ci.yml`
-lists `ready_for_review`, which starts the full run on the same head, and every later push to a
-pull request that is not a Draft runs it through `synchronize`. It also lists
-`converted_to_draft`, which starts a light run; the shared concurrency group cancels a full run
-still in progress, so a Draft holds no substantive runner. The CI run's completion re-judges the
-verdict. `provenance-attestation.yml` lists `ready_for_review` as well. Pushes to `main`, the
-nightly schedule, manual `workflow_dispatch` runs and merge groups are never Drafts and run as
-before.
+`tools/ci_paths.py` exports `tier`. Its value `light` is what this page calls a quick run, and the jobs
+of a quick run are the quick checks; `full` is a full run. A run is `full` for a manual dispatch, the
+nightly schedule, a merge group, a push to `main`, and a pull request that is not a Draft and is any
+of: a `batch/` branch of this repository, from a fork, a `carry/` or `desk/` branch (the desk's copy of
+a fork's pull request), labelled `ci-full-matrix`, or run while the repository variable `NK_CI_TIERS`
+is not `on`. Every other pull-request run is `light`. On a pull request `allow_substantive` is true
+exactly when `tier` is `full`, and every substantive job gates on it. The path flags (`run_python`,
+`run_native`, `run_windows`, `run_installer`, `run_markdown`) do not depend on the tier, so a full run
+routes exactly the gates the quick run of the same change skipped. What a push to `main` runs is
+unchanged: `allow_substantive` still narrows it there, and `CI required` still runs.
 
-Mark a pull request Ready when you want the full checks. The cost is that a Draft learns of a
-Python, native or Windows failure only after that, so run the focused local gates for the files
-you changed first (`AGENTS.md` section 9).
+`Generated files and repository lints` runs only on a quick run. It holds checks that a quick run
+would otherwise leave to the landing batch, each of which the full tier runs inside a longer job:
+`python -m unittest tools.test_lint_docs`, `python tools/format_portability_check.py`,
+`python tools/regen_all.py --check`, and the tools mypy baseline (`tools/mypy_baseline.py --scope
+issue-1391`, then without `--scope`, with the Python tooling job's pinned install). Five lane runs of
+2026-11-09 failed only in a heavy job; the first three checks would have turned every one of them red
+on a quick run, and the mypy baseline was the most frequent lane failure of that week.
 
-The `CI required` job is the stable aggregate status required by branch
-protection. It runs with `always()`, accepts an intentionally skipped irrelevant
-job, and fails when a classifier-applicable job fails, is cancelled, or is
-otherwise incomplete. A failed hygiene/security job or public-export job is never
-hidden by the aggregate. On a Draft it always fails (`DRAFT_LIGHT_CI`).
+A quick run is never green for landing. `CI required` does not run on it, and `tools/ci_required.py`
+fails any pull-request run whose substantive gates were suppressed, so the
+[Trusted CI verdict](#trusted-ci-verdict), which reports `success` only when `CI required` succeeded at
+the exact head, reports `pending` with `LIGHT_CI_GREEN` instead (a Draft gets `DRAFT_LIGHT_CI`). While
+`NK_CI_TIERS` is `on`, the landing desk batches heads in that state; the batch's head gets the full checks, the attestation, CodeQL and its own verdict, and only
+that head merges. `tools/test_public_ci_wiring.py` (`TwoTierInvariantTests`) evaluates the workflow's
+own conditions and fails if `CI required` can be green while a routed gate did not run.
+
+**Asking for the full checks on one pull request.** While `NK_CI_TIERS` is `on`, a maintainer adds the
+`ci-full-matrix` label and
+re-runs all jobs of the newest `CI` run at the head (`gh run rerun <run-id>`); any later push runs
+them too. "Re-run failed jobs" does not change the tier, because it keeps the first attempt's
+classification. The classifier reads the label from GitHub when the run starts, because a re-run
+reuses the first attempt's event. The label is not an approval: the verdict never reads it. Removing
+it makes the next run a quick one. Do not dispatch `CI` on the branch by hand instead: a `CI required`
+check from a run that is not a pull-request run is a `FOREIGN_PRODUCER` finding until the next push.
+
+**Waiting on a pull request.** While `NK_CI_TIERS` is `on`, `Trusted CI verdict` stays `pending` on a
+quick-green head, so
+`gh pr checks --watch` does not return; watch the run instead (`gh run watch <run-id>`).
+
+**Turning it off.** Delete `NK_CI_TIERS` or set it to anything but `on`: the next push of every pull
+request runs the full checks again.
+
+#### Draft pull requests
+
+A Draft always runs the quick checks, whatever its label or the switch, and the verdict reports
+`DRAFT_LIGHT_CI` for it, so no Draft joins a landing batch. The verdict reads the draft state from
+GitHub, and a draft state that is not `false` counts as a Draft. Marking it Ready starts a run at the
+same head (`ready_for_review`), whose completion judges the head again. `converted_to_draft` starts a
+quick run, and the shared concurrency group cancels a full run still in progress, so a Draft holds no
+substantive runner. `provenance-attestation.yml` lists `ready_for_review` as well.
+
+`CI required` is the aggregate of a full run. It runs with `always()` whenever the tier is not
+`light`, accepts an intentionally skipped irrelevant job, and fails when a classifier-applicable job
+fails, is cancelled, or is otherwise incomplete. A failed hygiene/security job or public-export job is
+never hidden by the aggregate. The `main` ruleset does not name this job: it requires the
+[Trusted CI verdict](#trusted-ci-verdict), which reports `success` only when this job succeeded.
 
 ### ClusterFuzzLite C fuzzing
 
@@ -548,15 +585,21 @@ alpha-tested and a colour-tested op that write depth, must keep the snapshot pat
 software GE in colour and depth. `dst-read-feedback`, a stencil state that textures from its own target, must
 keep it too: the destination copy is the texture its second sprite samples. On
 the snapshot path, the known difference must stay inside each overlap, and the device must hold no interlock
-state. A device that refuses the interlock prints one SKIP line for each interlock leg. The lavapipe step prints
+state. `stencil-once` runs alone too, at scales 1 and 4 on the snapshot path and at scale 1 on the interlock
+path: a write-once stencil state (the first fragment to pass at a pixel stores a stencil that rejects the later
+ones) must draw overlapping primitives in one batch with no split and equal the software GE bit for bit, over a
+triangle mesh, a 7200-state matrix in each framebuffer format and three depth legs. A device that refuses the
+interlock prints one SKIP line for each interlock leg. The lavapipe step prints
 the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
-pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Three
+pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Four
 mutant targets follow, and each broken variant must fail its case with its own message:
 `gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
 (`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
 pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths seven ways
 (`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 7 run on the interlock path and are a SKIP on a device without it,
-the hosted lavapipe device included).
+the hosted lavapipe device included),
+and `gpu-stencil-once-mutants` breaks the write-once stencil batch three ways (`SR_GPU_STENCIL_ONCE_MUTANT`: no
+reordering, every state called write-once, no depth condition).
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on
 lavapipe, headless, under the validation layer with synchronisation validation of shader accesses,
 and an exit 77 skip fails it, including one for synchronisation validation that is not active.
@@ -1356,11 +1399,19 @@ intended job from a candidate's.
 **The gate.** The workflow runs only the default branch's copy: `pull_request_target`
 (opened, synchronize, reopened, labeled, unlabeled), a `workflow_run` when
 `CI` completes (CI finishes last; a cancelled first attempt, a superseded head, starts no
-verdict job), and a manual `workflow_dispatch` naming a pull request. It checks out the default branch, fetches `refs/pull/<n>/head` as
+verdict job), and a manual `workflow_dispatch` naming a pull request. GitHub blocks
+`pull_request_target` by default in public repositories from 2026-12-02 (it stopped every
+landing for two hours in the brownout of 2026-11-09), so judging a head and approving a change
+do not depend on that event: `CI`'s completion and a dispatch judge a head, a dispatch records
+an approval, and the provenance attestation has its own second route (below). One thing still
+does: removing the approval label re-judges the head only through that event's `unlabeled`.
+It checks out the
+default branch, fetches `refs/pull/<n>/head` as
 objects only, and never checks out or runs candidate files. The verdict job has `actions`,
-`checks`, `contents`, `issues` and `pull-requests` read, and `statuses: write`; a separate
-job, with `pull-requests: write` and no way to post a status, records, carries or withdraws
-the approval label (see "Approving a CI change"). The verifier
+`checks`, `contents`, `issues` and `pull-requests` read, and `statuses: write`; separate
+jobs with no way to post a status record an approval: one with `pull-requests: write`
+records, carries or withdraws it on label events and pushes, and a read-only one records it
+for a dispatch (see "Approving a CI change"). The verifier
 reads the head's workflow runs, latest-attempt jobs, check runs, statuses and label events
 from GitHub's API and posts `success`, `pending` or `failure` (or `error` if it cannot judge
 the head, which replaces an older success).
@@ -1375,7 +1426,7 @@ and each token's remaining budget.
 
 | Code | Fails when |
 | --- | --- |
-| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`) or any `tools/` file a default-branch workflow runs, without a current `ci-change-approved` label |
+| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
 | `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; the integrator merges `main` when it lands the pull request; the author merges it only for a real conflict in content that is not generated, or when asked (`AGENTS.md` section 10). No label waives it |
 | `CI_CONTEXT_COLLISION` | another workflow names `Trusted CI verdict`, or a check run uses that name |
 | `FOREIGN_PRODUCER` | a check run or status under an intended context is not from the intended workflow path and event at this head |
@@ -1385,13 +1436,19 @@ and each token's remaining budget.
 | `PR_NOT_OPEN`, `BASE_NOT_DEFAULT` | nothing to judge for a merge into `main` |
 | `DRAFT_LIGHT_CI` | the pull request is a Draft, or its draft state cannot be read: CI ran only the quick checks ([Draft pull requests](#draft-pull-requests)); mark it Ready for review |
 
+`LIGHT_CI_GREEN` is not in that table because it is not a failure. The newest CI run at the head was a
+quick one: `CI required` did not run and `CI quick checks` succeeded. The verdict is then `pending`, and its
+description starts with the code, which is how the landing desk tells a head that is ready for a batch from
+one whose checks are still running. Any other way for `CI required` not to succeed stays `JOB_FAILED`, which
+names `CI quick checks` when that is the job that failed ([Quick and full checks](#quick-and-full-checks)).
+
 Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and when, is decided by
 [`AGENTS.md` section 10](../AGENTS.md#10-pr-and-integration-authorization), as the row above states.
 
 The intended producers are `CI required` and `Hygiene and security` from `ci.yml`, `OSV
 Vulnerability Scan` from `osv-scanner.yml`, `dependency-review` from `dependency-review.yml`
-(all `pull_request`), and the provenance attestation from `provenance-attestation.yml`
-(`pull_request_target`). A run still in progress gives `pending`. While any producer has
+(all `pull_request`), and the provenance attestation from `provenance-attestation.yml`.
+A run still in progress gives `pending`. While any producer has
 no run at the head yet, or its newest run is unfinished, the verifier reads only the head's
 workflow runs and posts `pending`. The full read, about a dozen API calls, waits for the
 last producer to finish. Running it on every completion exhausted the repository's
@@ -1400,18 +1457,156 @@ only when the `ci-change-approved` label is on the pull request. The protected `
 list is derived on each run from the default branch's workflows (a path named outside a
 comment line), so it follows the workflows as they change.
 
-**Approving a CI change.** A maintainer reviews the change and applies the
-`ci-change-approved` label. The label counts only when its latest event is `labeled` and the
-user who applied it has write, maintain or admin permission. It counts for a head in one of
-two ways: it was applied after the head's first pull-request run, or it was carried to the
-head (next paragraph). A reopen, and any push that is not carried, removes the label, so the
-label approves one reviewed head, or later heads whose protected files are byte-identical to
-it. The label waives only `CI_CHANGE_UNAPPROVED`: an approved change still needs every
-intended job, once, green, from its intended workflow.
+**The attestation's two routes.** The provenance attestation is accepted from either of:
 
-**Carried approval.** A push that changes no CI-relevant file keeps the label, so a
-maintainer does not re-apply it for a documentation line, a test entry or a merge of `main`
-that left the protected files alone. "CI-relevant" is the same classification the verdict
+- a `pull_request_target` run at the exact head, as for the other producers;
+- a `workflow_run` or `workflow_dispatch` run of `provenance-attestation.yml`. The workflow
+  starts one when a `CI` run is requested for a pull request, and a maintainer dispatches one to
+  attest again (see "Re-running"). GitHub lists such a run under the default branch, not under
+  the pull request head, so it is bound to the head by its run name,
+  `Provenance attestation of <head SHA>`, which the workflow's `run-name` sets from the head it
+  attests; its job fails
+  unless exactly one open pull request into the default branch has that head. The verifier lists
+  the workflow's default-branch runs created since the head's first run and takes one only when
+  its branch is the default branch and it ran the default branch's current copy of the workflow:
+  the commit it started from is on the default branch (`git merge-base --is-ancestor` in the
+  trusted checkout) and that commit's copy of the file is byte-identical to the trusted
+  checkout's. A dispatch from another branch runs that branch's copy and is ignored. So is one
+  from a tag named like the default branch, unless the tag's commit passes the same two tests.
+  A commit on the default branch is not enough by itself: a rebase merge lands every commit of a
+  pull request, and only the pull request's last tree was judged. An attestation made under an
+  older copy of the workflow therefore stops counting when the workflow changes; such a head is
+  `CI_DEFINITION_BEHIND` in any case and is attested again once `main` is merged into it.
+
+The newest run of either route decides, and a run is as new as its latest attempt: the order is
+by when that attempt started, then by run id. Re-running a run therefore makes it the newest,
+whichever route it came from. That matters because the pull request's check list shows only the
+`pull_request_target` run, while the `workflow_run` run, created a few seconds later, is listed
+under `main`: re-running the check a person can see has to count. Only a user with write access
+can re-run, and a re-run attests the same head again with the same definition. One exception to
+"newest": a `pull_request_target` run that ended `startup_failure`, which is how GitHub ends a
+run whose event it refused, is ignored when the second route has a run that was not cancelled.
+So is a `pull_request_target` run that completed without starting any job, which is how GitHub
+ended some refused runs on 2026-11-09 (`failure`, "workflow file issue"). Neither kind attested
+or failed anything; with no run of the second route either one still fails the head.
+
+**How long a second-route run stays findable.** GitHub answers a filtered run list with its
+newest 1,000 runs. Every `CI` run starts one attestation run (pushes to `main` and the nightly
+run included; those only skip), about 185 a day in early November 2026, so a `workflow_run`
+attestation leaves the list after about five days. A dispatched attestation is in a separate,
+far shorter list and practically never leaves it. The verifier compares the list's
+`total_count` with what it received. A truncated list has lost every run created before the
+oldest run it returned; that time is the list's horizon. The run that would be judged for the
+head must have started at or after the horizon, so that nothing the list lost could be newer.
+Otherwise the attestation is reported as not found on **both** routes and the head is `pending`
+("not among its workflow's newest 1000 runs; dispatch it again"): a lost run may have been a
+failure, so no older result is judged in its place, whether it is a `pull_request_target` run
+or a run from the other event's complete list. One dispatch of the attestation recovers the
+head, and so does re-running a run of the head that is still listed. A run that has left the
+list is never read, so re-running *it* changes nothing.
+
+The list of approval dispatches (next section) has the same limit, counted from the label:
+about 1,000 verdict dispatches, roughly a month in November 2026. A record that has left it
+is not seen and the head is `CI_CHANGE_UNAPPROVED`; the finding then says the list was
+truncated, and the remedy is to dispatch the approval again.
+
+**Known limits of the second route.**
+
+- *A second pull request at the same head.* The resolver needs exactly one open pull request
+  at the head, so while two are open the `workflow_run` attestation of that head fails for both
+  (and a run still going for the first is cancelled, because the concurrency group is per
+  head). Anyone can open such a duplicate. The verdict already reports `AMBIGUOUS_HEAD` while
+  both are open; the difference is that the failed run is still the head's newest after the
+  duplicate is gone. Remedy: close the duplicate, then dispatch the attestation for the head.
+- *Runs on `main`.* A `workflow_run` attestation's check run is attached to the tip of `main`,
+  not to the pull request. `main`'s commit list therefore shows a red
+  `Trusted provenance attestation` whenever some pull request's attestation fails, which is
+  expected before an admission. It says nothing about `main`.
+- *A pull request into another branch* gets a failed run where the `pull_request_target` route
+  skips: the resolver finds no pull request into the default branch.
+
+**Approving a CI change.** Two steps, always both, in this order. A maintainer reviews the
+change and applies the `ci-change-approved` label, then records which head was reviewed, from
+the default branch:
+
+```bash
+gh workflow run ci-trust-verdict.yml -f pull_request_number=<n> -f approve_head_sha=<reviewed head SHA>
+```
+
+The label counts only when its latest event is `labeled` and the user who applied it has write,
+maintain or admin permission. It names no bytes, so by itself it approves nothing: a head is
+approved when a record of its protected content (next paragraph) was written under that
+`labeled` event: by a run created at or after it, in a job that completed after it. Removing
+the label withdraws every earlier record. The label waives only
+`CI_CHANGE_UNAPPROVED`: an approved change still needs every intended job, once, green, from
+its intended workflow.
+
+**After any push, the label is removed and applied again, after reading the new head.** The
+label names no commit. While every push ran the handler that removes it, "the label is on"
+meant "this head was read"; once GitHub refuses `pull_request_target` nothing removes it, and a
+label given for one head is still on the pull request at the next. The dispatch therefore
+refuses a label that is not newer than the head it is asked to approve
+(`LABEL_PREDATES_HEAD`): the label's latest `labeled` event must be later than the push that
+made that commit the head. The one case that needs no new label is a push that left the
+protected files' digest unchanged: the existing record still approves it, and no dispatch is
+needed.
+
+What the dispatch compares the label with, and what each refusal means:
+
+| Refusal | The label is not later than | Remedy |
+| --- | --- | --- |
+| `LABEL_PREDATES_HEAD` | the push that made the commit the tip of the head branch, or a `head_ref_force_pushed`, `head_ref_restored` or `reopened` event of the pull request | remove the label, read the head, apply the label, dispatch |
+| `LABEL_PREDATES_BASE` | a `base_ref_changed` event: the pull request was retargeted after the label | the same |
+| `HEAD_NOT_NEWEST_PUSH` | (the branch's newest push record is for another commit, so the list does not show when this one became the tip) | push the branch again, then label and dispatch |
+| `HEAD_TIME_UNREADABLE` | (no dated record: a deleted fork, a fork the token may not read, a list that cannot be read) | for a fork that cannot be read, land the change through a branch of this repository |
+
+- The push time comes from GitHub's repository activity for the head branch: its records of the
+  branch's updates, each with the commit before, the commit after and the time. The branch's
+  newest record must be for the commit being approved. A force push back to an earlier commit is
+  thus dated by its latest arrival, not by the commit's first runs.
+- That list is not a complete log. It can lag a push, and it has been seen to lack a record. So
+  a record of the commit somewhere in the list is not enough, and when the newest record is
+  another commit's the dispatch is refused instead of dating the head by an older arrival.
+- The branch's records date the branch, not the pull request. GitHub leaves a closed pull
+  request's head where it was, and commits pushed meanwhile arrive when it is re-opened; a
+  retarget changes what the head is compared with. So the label must also be later than every
+  such event of the pull request.
+- Times are compared to the second, and the pull request shows a new head a second or two after
+  the activity time of its push. A label in the same second as the push or event is refused; a
+  label applied in the gap just after it is not. Apply the label after reading the head on the
+  pull request's page, not from a script racing the push.
+
+The dispatch is the step to rely on, not an extra. Applying the label also starts a
+`pull_request_target` run that writes a record, but that run cannot be counted on: GitHub
+refuses the event in a brownout and by default from 2026-12-02; on 2026-11-09 one label's run
+ended with no job at all and another wrote its record 45 minutes after the label; and a label
+run waiting in its head's concurrency group is replaced by any later run for that head and then
+writes nothing. The label-event record also approves whatever head is current when the label
+is clicked, so a push seconds before the click is recorded; only the dispatch names the bytes
+that were reviewed. The approval dispatch has its own concurrency group, so nothing replaces
+it, and it judges the head when it has written the record.
+
+**Withdrawing an approval.** Rule: removing the label is always followed by a verdict dispatch
+for that pull request, as one action:
+
+```bash
+gh workflow run ci-trust-verdict.yml -f pull_request_number=<n>
+```
+
+Removing the label withdraws the approval in the verifier at once, but a status is only what the
+last verdict run posted. The only event that re-judges a head when a label is removed is
+`pull_request_target`'s `unlabeled`, and when GitHub refuses that event nothing runs: the head's
+last `success` stands, and the ruleset accepts it, until a verdict is dispatched. Nobody merges
+a pull request whose `Trusted CI verdict` status is older than the last event of its
+`ci-change-approved` label.
+
+The verifier used to accept a label applied after the head's first pull-request run. That was
+unsound: a pull request can be pushed back to a commit that ran before the label, and when
+`pull_request_target` is blocked nothing removes the label on that push.
+
+**Approval records.** A record binds an approval to bytes, so a push that changes no CI-relevant
+file keeps it, and a maintainer does not approve again for a documentation line, a test entry or
+a merge of `main` that left the protected files alone. "CI-relevant" is the same classification the verdict
 uses for `CI_CHANGE_UNAPPROVED`: the protected paths above, listed by `protected_paths` in
 `tools/ci_trust_verdict.py` from the default branch's workflows. There is no second list.
 
@@ -1425,13 +1620,29 @@ uses for `CI_CHANGE_UNAPPROVED`: the protected paths above, listed by `protected
   changes it. The candidate's copy of `tools/ci_trust_verdict.py`, `tools/ci_paths.py`, the
   verdict workflow and the other gate files are protected paths, so changing the
   classification itself changes it. Changing a protected file and reverting it gives the
-  original digest again, but only the head-to-head comparison below ever carries, and a
-  head in between whose digest differs has already withdrawn the label.
-- *The record.* The workflow's `approval` job runs the default branch's copy of the tool,
-  with the candidate fetched as objects only. On a `labeled` event it hashes the labelled
-  head, provided the label's latest event is `labeled` by a user with write access, the pull
-  request is open against the default branch, and `refs/pull/<n>/head` still is the head the
-  event named, before and after hashing. The next job, `approval_record`, is named `CI approval
+  original digest again. While the same label stands, a dispatched record then approves the
+  head once more, because the bytes are the ones that were approved; a label-event record does
+  so only at the very head it was written at.
+- *The dispatched record.* The dispatch above runs the `approval_dispatch` job: the default
+  branch's copy of the tool, with the candidate fetched as objects only. It hashes the head the
+  dispatch names, provided the label's latest event is `labeled` by a user with write access,
+  the pull request is open against the default branch, and `refs/pull/<n>/head` still is that
+  head, before and after hashing; a pull request that has moved on is refused, so nobody
+  approves bytes they did not name, and so is a label older than that head
+  (`LABEL_PREDATES_HEAD`, above), so nobody approves bytes under a label given for others. The
+  next job is named
+  `CI approval record v2 pr<number> <head> <digest>`, every part an output of the tool. The
+  record is read back only from a
+  successful job of that name in a `workflow_dispatch` run of
+  `.github/workflows/ci-trust-verdict.yml` whose branch is the default branch, that ran the
+  default branch's current copy of that workflow (the same two tests as for the attestation),
+  and whose actors (the dispatcher, and whoever re-ran it) have write
+  access. A dispatch from any other ref runs that ref's copy of the workflow and is ignored. A
+  workflow's own token can dispatch a workflow, and its actor is a bot with no collaborator
+  permission, so a workflow run cannot approve. The record counts for any head of that pull
+  request whose digest it names.
+- *The label-event record.* On a `labeled` event the workflow's `approval` job does the same for
+  the head the event named. The next job, `approval_record`, is named `CI approval
   record v1 pr<number> <digest>`; the pull request number and the digest are the job's name.
   The record is read back only from a successful job of that name, in a `pull_request_target`
   run of `.github/workflows/ci-trust-verdict.yml`, at exactly the head being judged and for
@@ -1440,20 +1651,28 @@ uses for `CI_CHANGE_UNAPPROVED`: the protected paths above, listed by `protected
   the pull request, so a pull request cannot produce such a job. That base is the default
   branch only for a pull request that targets it: a run GitHub reports for another base or
   another pull request is ignored, and a pull request that was ever retargeted (a
-  `base_ref_changed` event) never carries an approval, because GitHub does not report a fork
-  pull request's runs against it. A job in a `pull_request` run, another workflow, another
+  `base_ref_changed` event) gets no label-event record, because GitHub does not report a fork
+  pull request's runs against it; approve it by dispatch, which never takes its workflow from a
+  pull request's base. A job in a `pull_request` run, another workflow, another
   head or a failed job is ignored.
-- *The carry.* On a `synchronize` event the `approval` job reads the digest recorded at the
-  push's previous head (`github.event.before`), recomputes it for the new head with trusted
-  code, and succeeds only on an exact match, with the label still on the pull request from a
+- *The carry.* On a `synchronize` event the `approval` job reads the digests the current label
+  already approved: those recorded at the push's previous head (`github.event.before`) and
+  those recorded by dispatch, in both cases under the label's latest `labeled` event. It
+  recomputes the digest for the new head with trusted code and succeeds only on an exact
+  match, with the label still on the pull request from a
   write-access user and the head still current. It then writes a record for the new head, so
-  the next push compares with this one. Any other outcome (no record, a different digest, an
+  the next push compares with this one. Any other outcome (no record, a record from before the
+  current label, a different digest, an
   API or git failure, a head that moved, a reopen) removes the label; the step failing is the
   same as the step not running.
-- *The verdict.* A label older than the head approves it only if the verdict recomputes the
-  digest itself and finds the same digest recorded at this head. A label that no longer has a
-  record, or a record whose digest the head no longer has, fails with `CI_CHANGE_UNAPPROVED`
-  whether or not the workflow removed the label.
+- *The verdict.* The verdict recomputes the head's digest itself and approves the head only when
+  a record with that digest was written under the label's latest `labeled` event: a dispatched
+  record for this pull request, or a label-event record at this very head. "Under" means the
+  record's run was created at or after the event and its job completed after it. A run answers
+  the event that created it, and re-running it does not change when it was created, so a run
+  from before the label cannot write a record for it. A label with no such record, or a record
+  whose digest the head no longer has, fails with `CI_CHANGE_UNAPPROVED` whether or not the
+  workflow removed the label.
 
 The digest covers the same boundary `protected_paths` draws and nothing wider: it does not hash a helper
 module that a gate tool imports, or a script outside `tools/` that a workflow runs, so review those
@@ -1463,8 +1682,10 @@ A force-push of an unrelated history is judged by content alone: the previous he
 push's `before`, whatever its ancestry, and an identical digest is identical bytes. Two pushes
 in quick succession can find no record yet at the first one's head and withdraw the label;
 so can a labeling run that a newer pending run replaced (the workflow's concurrency group
-keeps one pending run per head). Both fail closed: re-apply the label after reviewing the
-head. A merge of `main` that changes a protected file also changes the digest; re-review it.
+keeps one pending run per head). Both fail closed: record the approval by dispatch after
+reviewing the head. An approval dispatch has its own concurrency group, so a later dispatch
+for the same pull request cannot replace it before the record is written. A merge of `main`
+that changes a protected file also changes the digest; re-review it.
 
 **Re-running.** Every run reads GitHub's state afresh. Only `CI` is a `workflow_run`
 trigger. The provenance workflow cannot be one, because its verifier refuses any other
@@ -1478,13 +1699,30 @@ after an admission), the verdict stays `pending`; run:
 gh workflow run ci-trust-verdict.yml -f pull_request_number=<n>
 ```
 
+To attest a head again, for example after its admission reached the private authority's
+`main`, dispatch the attestation from the default branch, then the verdict as above:
+
+```bash
+gh workflow run provenance-attestation.yml -f pull_request_number=<n> -f head_sha=<head SHA>
+```
+
+The dispatch is the newest run for that head, so its result replaces an earlier failure.
+Re-running an attestation run of the head works too, the one on the pull request's check list
+included: the run whose latest attempt started last decides. The exception is a run that has
+left GitHub's run list (see "How long a second-route run stays findable"); dispatch instead.
+The dispatched run is listed under the default branch, so the pull request's check list does
+not show it; `gh run list --workflow provenance-attestation.yml --branch main` does, by its
+title.
+
 **What stays outside it.** Candidate tests and build files are still candidate code: the
 gate proves the intended jobs ran from trusted definitions, not that the tests are honest.
 A workflow on a same-repository branch could post a commit status under `Trusted CI
 verdict` with its own token; fork pull requests get a read-only token and cannot. The
 approval record is not a status for that reason: a same-repository workflow can post a status
-with any text, but it cannot make a job of the default branch's `pull_request_target` run carry
-a name. A GitHub
+with any text, but it cannot make a job of a default-branch run of the verdict workflow carry
+a name. A dispatched verdict and one an event started are in different concurrency groups (a
+dispatch names a pull request, not a head), so two verdict jobs can post out of order; each
+reads GitHub's state afresh, and the window is one job's read-to-post time. A GitHub
 App that posts the status, pinned by `integration_id` in the ruleset, would close that (see
 [`PROVENANCE_MERGE_GATE.md`](PROVENANCE_MERGE_GATE.md#required-check-identity-what-github-can-and-cannot-enforce-here)).
 A closed pull request with the same head and an older base branch could leave a later run
