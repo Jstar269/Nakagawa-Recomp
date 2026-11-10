@@ -108,6 +108,18 @@ strbuf-selftest:
 		-o $(BUILD_DIR)/strbuf_selftest.exe tests/native/strbuf_selftest.c
 	$(BUILD_DIR)/strbuf_selftest.exe
 
+# xr-selftest — the OpenXR (VR) module in src/rt/xr/ against a fake OpenXR runtime (issue
+# #791): named refusals, the session state machine, the latest-frame mailbox, frame-loop
+# decoupling from the producer, and the layout maths. No headset, loader or game needed;
+# not reachable from the player.
+xr-selftest:
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Isrc/rt \
+		-o $(BUILD_DIR)/xr_selftest.exe tests/native/xr_selftest.c \
+		src/rt/xr/nk_xr.c src/rt/xr/nk_xr_mailbox.c src/rt/xr/nk_xr_layout.c -lm
+	$(BUILD_DIR)/xr_selftest.exe
+
+native-core-tests: xr-selftest
+
 watchpoints-file-selftest:
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/watchpoints_file_selftest.exe \
 		tests/native/watchpoints_file_selftest.c src/rt/watchpoints_file.c $(LIBS)
@@ -427,6 +439,25 @@ ge-tnl-census-selftest: $(RT_GE_O)
 	$(GE_TNL_CENSUS_SELFTEST)
 
 native-core-tests: ge-tnl-census-selftest
+
+# ge-patch-tess-selftest - finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14)
+# on the production GE object's software renderer: the factor the tess launch-line key carries
+# (ace-selftest pins the key and its Ace gate); factor F on a guest division d draws byte for byte what this renderer draws at division
+# d*F; F*F times the quads; factor 1 is the default path; no background pixel between neighbouring
+# patches at every factor, and a crack the check finds when the two are drawn at different
+# factors; line and point patches keep the PSP's division; the vertex cap lowers the factor
+# along its divisor chain, after the PSP's own cap; with the GE timing model on, factor F costs
+# the clocks of division d*F, not the PSP's d; the PATCH_TESS: exit line. It writes one scratch file under
+# BUILD_ROOT. No game input.
+GE_PATCH_TESS_SELFTEST := $(BUILD_DIR)/ge_patch_tess_selftest$(EXE_EXT)
+
+ge-patch-tess-selftest: $(RT_GE_O)
+	$(CC) $(CFLAGS) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -o $(GE_PATCH_TESS_SELFTEST) \
+		tests/native/ge_patch_tess_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
+		src/rt/flight_recorder.c src/rt/perf.c -lm
+	$(GE_PATCH_TESS_SELFTEST)
+
+native-core-tests: ge-patch-tess-selftest
 
 # ge-flight-overhead -- cost of the disarmed flight recorder on the GE paths (#320): the
 # ge-cpu-profile-validate-selftest harness's --bench mode on the production ge.c, built once
@@ -1050,18 +1081,23 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 # 1 merges every channel from the loaded destination, so the RMW store has no effect
 # (dst-read-order), 2 swaps the RMW batches' source and destination blend factors (dst-read-order),
 # 3 lets an op the rmwzfb rule refuses take the interlock, so an alpha-rejected fragment writes depth
-# (dst-read-depth), 4 gives colour targets STORAGE_BIT on the snapshot path (dst-read-pins), and 5
-# turns the RMW pipelines' depth test off, so a sprite behind the wall blends (dst-read-ztest).
-# Mutants 1 to 3 and 5 run on the interlock path, 4 on the snapshot path. Each builds its own binary
-# and must fail with its own message. Exit 77 (no Vulkan device, or a device without the interlock
-# for 1 to 3 and 5) is a SKIP of that mutant.
+# (dst-read-depth), 4 gives colour targets STORAGE_BIT on the snapshot path (dst-read-pins), 5
+# turns the RMW pipelines' depth test off, so a sprite behind the wall blends (dst-read-ztest), 6
+# drops the rmwzfb rule's color-test line, so a fragment the color test rejects writes depth
+# (dst-read-ctest), and 7 drops its own-target line, so a sprite that textures from its own target
+# samples texels older than the sprite before it (dst-read-feedback).
+# Mutants 1 to 3 and 5 to 7 run on the interlock path, 4 on the snapshot path. Each builds its own
+# binary and must fail with its own message. Exit 77 (no Vulkan device, or a device without the
+# interlock for 1 to 3 and 5 to 7) is a SKIP of that mutant.
 gpu-dst-read-mutants: shader-verify $(RT_GE_O)
-	@for m in 1 2 3 4 5; do \
+	@for m in 1 2 3 4 5 6 7; do \
 		case $$m in \
 			1) args="--dst-read interlock --case dst-read-order"; kill="the RMW store had no effect";; \
 			2) args="--dst-read interlock --case dst-read-order"; kill="differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
 			3) args="--dst-read interlock --case dst-read-depth"; kill="depth differs from ge.c in [1-9]";; \
 			5) args="--dst-read interlock --case dst-read-ztest"; kill="colour differs from ge.c in [0-9]+ pixels .* on the interlock path";; \
+			6) args="--dst-read interlock --case dst-read-ctest"; kill="dst-read-ctest\]: colour differs from ge.c in [0-9]+ pixels, depth differs from ge.c in [1-9]";; \
+			7) args="--dst-read interlock --case dst-read-feedback"; kill="dst-read-feedback\]: [1-9][0-9]* pixels differ from ge.c";; \
 			*) args="--dst-read snapshot --case dst-read-pins"; kill="the snapshot path made interlock state";; \
 		esac; \
 		bin=$(BUILD_DIR)/gpu_coherence_dstread_mutant$$m.exe; \

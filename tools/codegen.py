@@ -186,6 +186,10 @@ ENHANCEMENT_DATA_FILES: list[tuple[str, str, bytes, str]] = []
 # Sites that keep run-time state (stock_values, requires), numbered by the index their
 # rewrites carry: {"id", "pc", "float", "pairs", "requires"}.
 ENHANCEMENT_STORE_SITES: list[dict] = []
+# The executable's stock-digest key (enhancement_package.published_digest_key) when a store
+# site declares stock_value_digests: the run-time check digests each stored value with it.
+# It is derived from the user's own executable and lives only in their generated build.
+ENHANCEMENT_STORE_KEY: bytes | None = None
 # Callable entries whose body loads $sp (guest_owns_entry_sp): no exit restores their entry
 # $sp, so the stack census leaves them unwrapped, as it leaves resume bodies.
 GUEST_SP_ENTRIES: set[int] = set()
@@ -245,7 +249,7 @@ def _scaled_store_line(rw: dict, stock_line: str) -> str:
     stock = stock_line.strip()
     if stock.count(stored) != 1:
         raise ValueError(f"{rw['kind']}: expected one read of {stored} in {stock!r}")
-    if "stock_values" in rw:
+    if "stock_values" in rw or "stock_value_digests" in rw:
         return (f"{{ uint32_t _nk_bits = nk_enh_store({rw['site_index']}u, {stored}); "
                 f"{stock.replace(stored, '_nk_bits')} }}")
     return (f"{{ float _nk_f = s->f[{r}] * {rw['factor']!r}f; uint32_t _nk_bits; "
@@ -998,11 +1002,24 @@ def _enhancement_store_lines() -> list[str]:
         "    unsigned nstock; const uint32_t *stock; const uint32_t *scaled;",
         "    unsigned nreq; const unsigned *req;",
         "    uint32_t applied; int gated;",
+        "    unsigned ndigest; const unsigned char (*digest)[32]; double factor;",
+        "    int has_last; uint32_t last_bits, last_scaled;",
         "} NkEnhSite;",
     ]
+    keyed = any(row["digests"] for row in ENHANCEMENT_STORE_SITES)
+    if keyed:
+        if ENHANCEMENT_STORE_KEY is None:
+            raise ValueError("stock_value_digests need the executable's digest key")
+        out.append("static const unsigned char nk_enh_key[32] = {"
+                   + ", ".join(f"0x{b:02x}" for b in ENHANCEMENT_STORE_KEY) + "};")
     rows = []
     for i, row in enumerate(ENHANCEMENT_STORE_SITES):
-        stock, scaled, req = "0", "0", "0"
+        stock, scaled, req, digest = "0", "0", "0", "0"
+        if row["digests"]:
+            digest = f"nk_enh_digest_{i}"
+            out.append(f"static const unsigned char {digest}[][32] = {{"
+                       + ", ".join("{" + ", ".join(f"0x{b:02x}" for b in bytes.fromhex(d)) + "}"
+                                   for d in row["digests"]) + "};")
         if row["pairs"]:
             stock, scaled = f"nk_enh_stock_{i}", f"nk_enh_scaled_{i}"
             out.append(f"static const uint32_t {stock}[] = "
@@ -1014,8 +1031,51 @@ def _enhancement_store_lines() -> list[str]:
             out.append(f"static const unsigned {req}[] = "
                        f"{{{', '.join(f'{index[name]}u' for name in row['requires'])}}};")
         rows.append(f'    {{"{row["id"]}", 0x{row["pc"]:08x}u, {int(row["float"])}, {len(row["pairs"])}u, '
-                    f'{stock}, {scaled}, {len(row["requires"])}u, {req}, 0u, 0}},')
+                    f'{stock}, {scaled}, {len(row["requires"])}u, {req}, 0u, 0, '
+                    f'{len(row["digests"])}u, {digest}, {row["factor"]!r}, 0, 0u, 0u}},')
     out += ["static NkEnhSite nk_enh_sites[] = {", *rows, "};"]
+    if keyed:
+        out += [
+            "/* A published package keeps only keyed digests of the values a store site may store",
+            " * (docs/ENHANCEMENT_CONTRACT.md section 5.1): HMAC-SHA-256 under the executable's key over",
+            " * the tag \"stock value\" and a NUL, the site id and a NUL, and the stored 32 bits, little-endian. */",
+            "void sr_vfpu_sha256(const uint8_t *data, size_t size, uint8_t digest[32]);",
+            "static int nk_enh_digest_match(const NkEnhSite *e, uint32_t bits) {",
+            "    unsigned char inner[64 + 96], outer[64 + 32], mac[32];",
+            "    size_t n = 12u, id = strlen(e->id), i;",
+            "    unsigned k;",
+            "    if (id > 64u) return 0;",
+            "    for (i = 0; i < 64u; i++) {",
+            "        unsigned char b = i < 32u ? nk_enh_key[i] : 0u;",
+            "        inner[i] = (unsigned char)(b ^ 0x36u); outer[i] = (unsigned char)(b ^ 0x5cu);",
+            "    }",
+            "    memcpy(inner + 64, \"stock value\", 11); inner[64 + 11] = 0;",
+            "    memcpy(inner + 64 + n, e->id, id); n += id; inner[64 + n++] = 0;",
+            "    for (i = 0; i < 4u; i++) inner[64 + n++] = (unsigned char)(bits >> (8u * i));",
+            "    sr_vfpu_sha256(inner, 64u + n, outer + 64);",
+            "    sr_vfpu_sha256(outer, sizeof outer, mac);",
+            "    for (k = 0; k < e->ndigest; k++) if (memcmp(mac, e->digest[k], 32) == 0) return 1;",
+            "    return 0;",
+            "}",
+            "/* The stored value scaled as the package builder scales a declared stock value: an f32",
+            " * times the site's factor, rounded once; an s32 doubled. 0 when the result leaves the range. */",
+            "static int nk_enh_scale(const NkEnhSite *e, uint32_t bits, uint32_t *out) {",
+            "    if (e->is_float) {",
+            "        float f, g;",
+            "        memcpy(&f, &bits, sizeof f);",
+            "        g = (float)((double)f * e->factor);",
+            "        if (!isfinite(f) || !isfinite(g)) return 0;",
+            "        memcpy(out, &g, sizeof g);",
+            "        return 1;",
+            "    }",
+            "    {",
+            "        int64_t v = (int64_t)(int32_t)bits * 2;",
+            "        if (v < -2147483648LL || v > 2147483647LL) return 0;",
+            "        *out = (uint32_t)(int32_t)v;",
+            "        return 1;",
+            "    }",
+            "}",
+        ]
     out += [
         "static int nk_enh_stopped;",
         "static void nk_enh_text(const NkEnhSite *e, uint32_t bits, char *out, size_t n) {",
@@ -1025,9 +1085,22 @@ def _enhancement_store_lines() -> list[str]:
         "uint32_t nk_enh_store(unsigned site, uint32_t bits) {",
         "    NkEnhSite *e = &nk_enh_sites[site];",
         "    char a[40], b[40];",
-        "    unsigned k;",
-        "    for (k = 0; k < e->nstock; k++) if (e->stock[k] == bits) break;",
-        "    if (k == e->nstock) {",
+        "    unsigned k = 0;",
+        "    uint32_t scaled = 0;",
+        "    int stock = 0;",
+        *([
+            "    if (e->ndigest > 0u) {",
+            "        if (e->has_last && e->last_bits == bits) { stock = 1; scaled = e->last_scaled; }",
+            "        else if (nk_enh_digest_match(e, bits) && nk_enh_scale(e, bits, &scaled)) {",
+            "            stock = 1; e->has_last = 1; e->last_bits = bits; e->last_scaled = scaled;",
+            "        }",
+            "    } else",
+        ] if keyed else []),
+        "    {",
+        "        for (k = 0; k < e->nstock; k++) if (e->stock[k] == bits) break;",
+        "        if (k < e->nstock) { stock = 1; scaled = e->scaled[k]; }",
+        "    }",
+        "    if (!stock) {",
         "        nk_enh_text(e, bits, a, sizeof a);",
         '        fprintf(stderr, "ENHANCEMENT_DATA_MISMATCH: site %s at 0x%08x stores %s (0x%08x), '
         "not one of the package's stock values; the run stops here\\n\", "
@@ -1037,14 +1110,14 @@ def _enhancement_store_lines() -> list[str]:
         "    }",
         "    if (e->applied < 16u) {",
         "        nk_enh_text(e, bits, a, sizeof a);",
-        "        nk_enh_text(e, e->scaled[k], b, sizeof b);",
+        "        nk_enh_text(e, scaled, b, sizeof b);",
         '        fprintf(stderr, "ENHANCEMENT_DATA_APPLIED: site %s at 0x%08x: %s -> %s\\n", '
         "e->id, (unsigned)e->pc, a, b);",
         "    } else if (e->applied == 16u) {",
         '        fprintf(stderr, "ENHANCEMENT_DATA_APPLIED: site %s: later applications are not logged\\n", e->id);',
         "    }",
         "    if (e->applied != 0xffffffffu) e->applied++;",
-        "    return e->scaled[k];",
+        "    return scaled;",
         "}",
         "int nk_enh_ready(unsigned site) {",
         "    NkEnhSite *e = &nk_enh_sites[site];",
@@ -1069,7 +1142,7 @@ def _enhancement_store_lines() -> list[str]:
         "    reported = 1;",
         "    for (i = 0; i < sizeof nk_enh_sites / sizeof nk_enh_sites[0]; i++) {",
         "        const NkEnhSite *e = &nk_enh_sites[i];",
-        "        if (e->nstock > 0u && e->applied == 0u)",
+        "        if ((e->nstock > 0u || e->ndigest > 0u) && e->applied == 0u)",
         '            fprintf(stderr, "ENHANCEMENT_DATA_SITE_NOT_REACHED: site %s at 0x%08x stored no value '
         'in this run; whatever it should have rescaled stayed stock\\n", e->id, (unsigned)e->pc);',
         "    }",
@@ -1097,7 +1170,7 @@ def _number_enhancement_store_sites() -> None:
     index: dict[str, int] = {}
     for addr, site in sorted(ENHANCEMENT_SITES.items()):
         rw = site["rewrite"]
-        if "stock_values" not in rw and "requires" not in rw:
+        if "stock_values" not in rw and "stock_value_digests" not in rw and "requires" not in rw:
             continue
         if site["id"] not in index:
             index[site["id"]] = len(ENHANCEMENT_STORE_SITES)
@@ -1105,6 +1178,8 @@ def _number_enhancement_store_sites() -> None:
                 "id": site["id"], "pc": addr, "float": rw["kind"] == "scale_f_store",
                 "pairs": [tuple(pair) for pair in rw.get("stock_values", ())],
                 "requires": list(rw.get("requires", ())),
+                "digests": list(rw.get("stock_value_digests", ())),
+                "factor": float(rw.get("factor", 2.0)),
             })
             for note in enhancement_package.store_value_overlaps(site["id"], rw):
                 sys.stderr.write(f"warning: enhancement {note}\n")
@@ -2235,6 +2310,16 @@ def _vfpu_form_vh2f(addr, w):
     return _vfpu_forms_stmt(addr, w, f"vh2f.{'sp'[n - 1]}", f"{reads} {writes}")
 
 
+def _vfpu_form_vus2i(addr, w):
+    n = vec_size(w)
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    si, di = vreg_indices(vs, n), vreg_indices(vd, 2 * n)
+    reads = " ".join(f"uint32_t _s{i}=s->vi[{si[i]}];" for i in range(n))
+    writes = " ".join(f"s->vi[{di[2 * i]}]=sr_vfpu_us2i(_s{i}); "
+                      f"s->vi[{di[2 * i + 1]}]=sr_vfpu_us2i(_s{i}>>16);" for i in range(n))
+    return _vfpu_forms_stmt(addr, w, f"vus2i.{'sp'[n - 1]}", f"{reads} {writes}")
+
+
 def _vfpu_form_vuc2i(addr, w):
     vd, vs = w & 0x7F, (w >> 8) & 0x7F
     s0, di = vreg_indices(vs, 1)[0], vreg_indices(vd, 4)
@@ -2258,6 +2343,7 @@ _VFPU_SPECIAL_FORM_TABLE: dict[tuple[int, int | None, int], Any] = {
     (1, 2, 1): _vfpu_form_vrndf, (1, 3, 1): _vfpu_form_vrndf,
     (1, 19, 1): _vfpu_form_vh2f, (1, 19, 2): _vfpu_form_vh2f,
     (1, 24, 1): _vfpu_form_vuc2i,
+    (1, 26, 1): _vfpu_form_vus2i, (1, 26, 2): _vfpu_form_vus2i,
     (2, 5, 1): _vfpu_form_vsocp, (2, 5, 2): _vfpu_form_vsocp,
 }
 
@@ -2280,9 +2366,10 @@ _VFPU9_INTERP_ROUTED = {
 }
 
 
-# vqmul.q and vcrsp.t lanes as (sign, S lane, T lane) terms, in source order. The emitted
-# lane is a left-to-right chain of sr_vf_* calls (src/rt/recomp.h), the same chain
-# sr_vfpu_interp evaluates, so both lanes return one NaN word (issue #326).
+# vqmul.q and vcrsp.t lanes as (sign, S lane, T lane) terms, in source order. Each lane is one
+# sr_vfpu_sop() call (src/rt/recomp.h) over its terms, a subtracted term negating its S operand,
+# the same call sr_vfpu_interp makes, so both lanes return the measured sum of products
+# (PSP-3000 dot/matrix read, issue #326).
 _VQMUL_TERMS = (
     ((1, 0, 3), (1, 1, 2), (-1, 2, 1), (1, 3, 0)),
     ((-1, 0, 2), (1, 1, 3), (1, 2, 0), (1, 3, 1)),
@@ -2297,13 +2384,9 @@ _VCRSP_TERMS = (
 
 
 def _vf_chain(terms):
-    sign, i, j = terms[0]
-    acc = f"sr_vf_mul({'-' if sign < 0 else ''}_s[{i}],_t[{j}])"
-    for sign, i, j in terms[1:]:
-        # Each helper is written as a call literal so tools/recomp_helper_inventory.py sees it.
-        call = "sr_vf_add(" if sign > 0 else "sr_vf_sub("
-        acc = f"{call}{acc},sr_vf_mul(_s[{i}],_t[{j}]))"
-    return acc
+    sa = ",".join(f"{'-' if sign < 0 else ''}_s[{i}]" for sign, i, _ in terms)
+    sb = ",".join(f"_t[{j}]" for _, _, j in terms)
+    return f"sr_vfpu_sop((const float[]){{{sa}}},(const float[]){{{sb}}},{len(terms)})"
 
 
 # VFPU memory forms under --lle-cpu use the same sr_cpu_guard_access() call
@@ -2828,6 +2911,10 @@ def _vfpu_cop2_effect(addr, w, options, delay_branch_pc):
     handler = _VFPU_COP2_MOVE_FORMS.get(sub)
     if handler is None:
         raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
+    if sub == 7 and imm == 131:
+        # VFPU_CC keeps only bits 0..5: mtvc then mfvc read back written & 0x3f in every cell
+        # (unrecorded PSP read, PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov).
+        return f"{dst} = {R(rt(w))} & 0x3fu;", None, 0
     return handler(w, src, dst)
 
 
@@ -2863,7 +2950,7 @@ def _vfpu3_vcmp(addr, w, options, delay_branch_pc):
     body = (f"float _a[4],_b[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_b,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
             f"int _cc=0,_or=0,_and=1,_aff=(1<<4)|(1<<5); "
-            f"for(int _i=0;_i<{n};_i++){{ float _x=_a[_i],_y=_b[_i]; (void)_x; (void)_y; int _c=({_C}); "
+            f"for(int _i=0;_i<{n};_i++){{ float _x=sr_vfpu_ftz(_a[_i]),_y=sr_vfpu_ftz(_b[_i]); (void)_x; (void)_y; int _c=({_C}); "
             f"_cc|=(_c<<_i);_or|=_c;_and&=_c;_aff|=1<<_i; }} "
             f"s->vfpuCtrl[3]=(s->vfpuCtrl[3]&~_aff)|((_cc|(_or<<4)|(_and<<5))&_aff);{_EAT}")
     return "{ " + body + " }", None, 0
@@ -2880,7 +2967,8 @@ def _vfpu3_minmax(addr, w, options, delay_branch_pc):
             f"if(_an||_bn){{ int32_t _ai,_bi,_r; memcpy(&_ai,&_a[_i],4); memcpy(&_bi,&_b[_i],4); "
             f"if({ismin}) _r=(_ai<0&&_bi<0)?(_bi<_ai?_ai:_bi):(_ai<_bi?_ai:_bi); "
             f"else _r=(_ai<0&&_bi<0)?(_ai<_bi?_ai:_bi):(_bi<_ai?_ai:_bi); memcpy(&_d[_i],&_r,4); }} "
-            f"else _d[_i]={ismin}?(_a[_i]<_b[_i]?_a[_i]:_b[_i]):(_b[_i]<_a[_i]?_a[_i]:_b[_i]); }} "
+            f"else {{ float _fa=sr_vfpu_daz(_a[_i]),_fb=sr_vfpu_daz(_b[_i]); "
+            f"_d[_i]={ismin}?(_fa<_fb?_a[_i]:_b[_i]):(_fb<_fa?_a[_i]:_b[_i]); }} }} "
             + _nanv(addr, "vmin.s" if ismin == "1" else "vmax.s", vd, "_d", n,
                     "_a", n, "_b", n, options=options)
             + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
@@ -2982,12 +3070,12 @@ def _vfpu_matrix_scale(addr, w, options, delay_branch_pc):
     writes = [f"float _sc = s->v[{scalar_vidx}];"]
     for row in range(side - 1):
         for col in range(side):
-            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vfpu_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
     last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
     last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
     writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
     writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vfpu_mul(_s[_i], _t[_i]);")
     writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
                         options=options))
     writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
@@ -3063,8 +3151,8 @@ def _vfpu_binary_arithmetic(addr, w, options, delay_branch_pc):
     di, si = vreg_indices(vd, n), vreg_indices(vs, n)
     ti = vreg_indices(vt, n)
     # Call literals, so tools/recomp_helper_inventory.py sees every helper the emitter writes.
-    call = {(0x18, 0): "sr_vf_add(", (0x18, 1): "sr_vf_sub(", (0x18, 7): "sr_vf_div(",
-            (0x19, 0): "sr_vf_mul("}[(op, sub)]
+    call = {(0x18, 0): "sr_vfpu_add(", (0x18, 1): "sr_vfpu_sub(", (0x18, 7): "sr_vfpu_div(",
+            (0x19, 0): "sr_vfpu_mul("}[(op, sub)]
     body = (f"float _s[4],_t[4],_d[4]; "
             f"sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
@@ -3082,7 +3170,7 @@ def _vfpu_dot_effect(addr, w, options, delay_branch_pc):
     dst = vreg_indices(vd, 1)[0]
     body = (f"float _s[4],_t[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-            f"float _d=0.0f; for(int _i=0;_i<{n};_i++) _d=sr_vf_add(_d,sr_vf_mul(_s[_i],_t[_i])); "
+            f"float _d=sr_vfpu_sop(_s,_t,{n}); "
             f"float _dd[1]={{_d}};"
             + _nanv(addr, "vdot.s", vd, "_dd", 1, "_s", n, "_t", n, options=options)
             + f" sr_vwrite(s,{_arr([dst])},_dd,1,s->vfpuCtrl[2]);{_EAT}")
@@ -3096,8 +3184,8 @@ def _vfpu_horizontal_dot_effect(addr, w, options, delay_branch_pc):
     dst = vreg_indices(vd, 1)[0]
     body = (f"float _s[4],_t[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-            f"float _d=0.0f; for(int _i=0;_i<{n - 1};_i++) _d=sr_vf_add(_d,sr_vf_mul(_s[_i],_t[_i])); "
-            f"_d=sr_vf_add(_d,sr_vf_mul(1.0f,_t[{n - 1}])); _d=isnan(_d)?fabsf(_d):_d; "
+            f"float _h[4]={{{','.join([f'_s[{i}]' for i in range(n - 1)] + ['1.0f'])}}}; "
+            f"float _d=sr_vfpu_sop(_h,_t,{n}); "
             f"float _dd[1]={{_d}};"
             + _nanv(addr, "vhdp.s", vd, "_dd", 1, "_s", n, "_t", n, options=options)
             + f" sr_vwrite(s,{_arr([dst])},_dd,1,s->vfpuCtrl[2]);{_EAT}")
@@ -3132,9 +3220,9 @@ def _vfpu_matrix_multiply_effect(addr, w, options, delay_branch_pc):
             # an optimiser may swap the operands of a plain + or *, so the two
             # paths could keep different NaN payloads for exotic inputs (issue
             # #40 at -O0, issue #326 at -O1/-O2). Finite results are unchanged.
-            lines.append(f"float _m{a}_{b}=0.0f;")
-            for c in range(side):
-                lines.append(f"_m{a}_{b}=sr_vf_add(_m{a}_{b},sr_vf_mul(s->v[{mreg_index(vs, side, b, c)}],s->v[{mreg_index(vt, side, a, c)}]));")
+            va = ",".join(f"s->v[{mreg_index(vs, side, b, c)}]" for c in range(side))
+            vb = ",".join(f"s->v[{mreg_index(vt, side, a, c)}]" for c in range(side))
+            lines.append(f"float _m{a}_{b}=sr_vfpu_sop((const float[]){{{va}}},(const float[]){{{vb}}},{side});")
     writes = " ".join(f"s->v[{mreg_index(vd, side, a, b)}]=_m{a}_{b};"
                       for a in range(side) for b in range(side))
     return "{ " + " ".join(lines) + " " + _nan_matrix(
@@ -3158,11 +3246,13 @@ def _vfpu_matrix_transform_effect(addr, w, options, delay_branch_pc):
     for i in range(side):
         # Same accumulate-into-local shape as sr_vfpu_interp's vtfm (see the
         # vmmul comment above for the NaN payload rationale, issue #40).
-        lines.append(f"float _v{i}=0.0f;")
-        for k in range(tn):
-            lines.append(f"_v{i}=sr_vf_add(_v{i},sr_vf_mul(s->v[{mreg_index(vs, side, i, k)}],s->v[{ti[k]}]));")
-        if ins >= n:
-            lines.append(f"_v{i}=sr_vf_add(_v{i},s->v[{mreg_index(vs, side, i, ins)}]);")
+        va = [f"s->v[{mreg_index(vs, side, i, k)}]" for k in range(tn)]
+        vb = [f"s->v[{ti[k]}]" for k in range(tn)]
+        if ins >= n:  # vhtfm: the homogeneous term is the matrix element times 1.0
+            va.append(f"s->v[{mreg_index(vs, side, i, ins)}]")
+            vb.append("1.0f")
+        lines.append(f"float _v{i}=sr_vfpu_sop((const float[]){{{','.join(va)}}},"
+                     f"(const float[]){{{','.join(vb)}}},{len(va)});")
     writes = " ".join(f"s->v[{di[i]}]=_v{i};" for i in range(side))
     return "{ " + " ".join(lines) + " " + _nan_matrix(
         addr, "vtfm", vd,
@@ -3177,7 +3267,7 @@ def _vfpu_scale_effect(addr, w, options, delay_branch_pc):
     scalar = vreg_indices(vt, 1)[0]
     body = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"float _sc=s->v[{scalar}]; "
-            f"for(int _i=0;_i<{n};_i++) _d[_i]=sr_vf_mul(_s[_i],_sc); "
+            f"for(int _i=0;_i<{n};_i++) _d[_i]=sr_vfpu_mul(_s[_i],_sc); "
             + _nanv(addr, "vscl.s", vd, "_d", n, "_s", n, "(&_sc)", 1, options=options)
             + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
     return "{ " + body + " }", None, 0
@@ -3192,12 +3282,12 @@ def _vfpu_matrix_scale_effect(addr, w, options, delay_branch_pc):
     writes.append(f"float _sc = s->v[{scalar_vidx}];")
     for row in range(side - 1):
         for col in range(side):
-            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vfpu_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
     last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
     last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
     writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
     writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vfpu_mul(_s[_i], _t[_i]);")
     writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
                          options=options))
     writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
@@ -4304,7 +4394,16 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
     else:
         _call_stmt = "    " + emit_checked_dispatch_call(
             G(target), G((addr + 8) & 0xFFFFFFFF))
-    if _jal_rw is not None:
+    if _jal_rw is not None and _jal_rw["kind"] == "clip_x_widen":
+        # clip_x_widen (contract section 10.8): the stock call runs unchanged; when it returns,
+        # the runtime scales the x row of the clip matrices at the offsets from the pointer the
+        # call returned, by the Widescreen factor. It does nothing while Widescreen is off.
+        out.extend(_call_stmt.split("\n"))
+        _offsets = ", ".join(f"{o}u" for o in _jal_rw["offsets"])
+        out.append(f"    {{ static const uint32_t _nk_clip_off[] = {{{_offsets}}};")
+        out.append(f"      sr_enhancement_widen_clip_x(s->r[{_jal_rw['reg']}], _nk_clip_off, "
+                   f"{len(_jal_rw['offsets'])}u); }}")
+    elif _jal_rw is not None:
         # A gate on a call (gate_30hz, gate_30hz_hold or gate_30hz_alt; no other rewrite
         # plans a call site): the delay slot above always runs; the call is gated while the
         # toggle is on. A gate_30hz_hold call returns its float argument unchanged
@@ -5915,8 +6014,9 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
     The tables are reset first, so a run without a package starts empty. A package that fails
     verification refuses the run (fail closed).
     """
-    global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY
+    global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
     ENHANCEMENT_SITES = {}
+    ENHANCEMENT_STORE_KEY = None
     ENHANCEMENT_PKG_META = None
     ENHANCEMENT_UPDATE_BOUNDARY = None
     ENHANCEMENT_APPLIED.clear()
@@ -5930,25 +6030,27 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             pkg_raw = enhancement_package.load_package(enhancement_pkg_path)
             pkg_validated = enhancement_package.validate_package(pkg_raw)
             elf_sha256 = hashlib.sha256(elf.data).hexdigest()
-            sym_map = enhancement_package.extract_elf_func_symbols(elf)
-            if symbol_map_path is not None:
-                # The guest symbol map names the package's sites too, in place of the
-                # <package>.symbols.json sidecar.
-                sym_map.update(site_names_from_symbol_map(symbols))
+            # Instruction words as codegen reads them, and initialised data as the loader
+            # places it (enhancement_package.elf_readers).
+            _read_words, _read_loaded_data = enhancement_package.elf_readers(elf)
+            if enhancement_package.is_published_package(pkg_validated):
+                # A published package (ENHANCEMENT_CONTRACT.md section 5.1) resolves only
+                # through its own site map, after its keyed digests match this executable.
+                pkg_validated, sym_map = enhancement_package.resolve_published_package(
+                    pkg_validated, executable=elf.data, read_words_fn=_read_words,
+                    read_data_fn=_read_loaded_data, data_root=enhancement_data_root,
+                )
             else:
-                pkg_p = Path(enhancement_pkg_path)
-                sidecar = pkg_p.with_suffix(".symbols.json")
-                if sidecar.is_file():
-                    sym_map.update(enhancement_package.load_symbol_map(sidecar))
-
-            def _read_words(vaddr: int, count: int):
-                out_w = []
-                for idx_w in range(count):
-                    val = read32(elf, vaddr + idx_w * 4)
-                    if val is None:
-                        return None
-                    out_w.append(val)
-                return out_w
+                sym_map = enhancement_package.extract_elf_func_symbols(elf)
+                if symbol_map_path is not None:
+                    # The guest symbol map names the package's sites too, in place of the
+                    # <package>.symbols.json sidecar.
+                    sym_map.update(site_names_from_symbol_map(symbols))
+                else:
+                    pkg_p = Path(enhancement_pkg_path)
+                    sidecar = pkg_p.with_suffix(".symbols.json")
+                    if sidecar.is_file():
+                        sym_map.update(enhancement_package.load_symbol_map(sidecar))
 
             ENHANCEMENT_SITES = enhancement_package.verify_and_resolve_sites(
                 pkg_validated,
@@ -5960,13 +6062,15 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             for site in ENHANCEMENT_SITES.values():
                 stock = site["stock_words"][0]
                 if is_control(stock) and not (
-                    (stock >> 26) == 3 and site["rewrite"]["kind"] == "gate"
+                    (stock >> 26) == 3 and site["rewrite"]["kind"] in ("gate", "clip_x_widen")
                 ):
                     raise enhancement_package.EnhancementPackageError(
                         f"site {site['id']}: only a jal call site can be rewritten among "
                         "control transfers (fail-closed refusal)"
                     )
             _number_enhancement_store_sites()
+            if any(row["digests"] for row in ENHANCEMENT_STORE_SITES):
+                ENHANCEMENT_STORE_KEY = enhancement_package.published_digest_key(elf.data)
             boundary = enhancement_package.verify_and_resolve_update_boundary(
                 pkg_validated,
                 symbol_to_addr=sym_map,
@@ -5984,20 +6088,6 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                         "update_boundary: the boundary is also a rewritten site (fail-closed refusal)"
                     )
                 ENHANCEMENT_UPDATE_BOUNDARY = boundary["site_addr"]
-
-            def _read_loaded_data(vaddr: int, count: int):
-                # Initialised bytes of one allocated, non-executable PROGBITS section
-                # as the loader places them (relocated, for a relocatable image):
-                # never code or zero-fill. Segments cannot tell, since a title may
-                # load code and data in one RWX segment.
-                rebase = elf.reloc.lo if elf.reloc is not None else 0
-                for sec in elf.sections:
-                    if sec["typ"] != 1 or not sec["flags"] & 2 or sec["flags"] & 4:
-                        continue
-                    lo = sec["addr"] + rebase
-                    if lo <= vaddr and vaddr + count <= lo + sec["size"]:
-                        return elf.read_at_vaddr(vaddr, count)
-                return None
 
             for patch in enhancement_package.verify_and_resolve_data_sites(
                 pkg_validated, symbol_to_addr=sym_map, read_data_fn=_read_loaded_data,

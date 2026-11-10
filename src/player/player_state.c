@@ -1190,6 +1190,9 @@ static const char *const k_part_switch_labels[] = {"On", "Off"};
 static const char *const k_part_switch_words[] = {"on", "off"};
 static const char *const k_part_smooth_words[] = {"x2", "off"};
 static const char *const k_part_sas_words[] = {"sinc", "off"};
+static const int k_part_tess_values[] = {2, 3, 4, 0};
+static const char *const k_part_tess_labels[] = {"2x", "3x", "4x", "Off"};
+static const char *const k_part_tess_words[] = {"2", "3", "4", "off"};
 static const char *const k_part_wide_words[] = {"fill", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
@@ -1220,6 +1223,16 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"sas", "Clean pitched sound",
      "Resamples pitched effects without aliasing. The game receives changed samples.",
      2, k_part_switch_values, k_part_switch_labels, k_part_sas_words, 0},
+    /* A guest-visible item (contract 11.3.7) that alters GE timing (SR_GE_TIMING): off by default
+       and in no preset, with its own off switch in the library and each title. */
+    {"tess", "Finer patches",
+     "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
+     4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
+    /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
+       package carries the culling hook, and only with Widescreen on. */
+    {"cull", "Wider culling",
+     "Ace only, with Widescreen, in games that have a culling build. The game's memory changes.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
     /* Presentation only (contract section 2.2): the window and its recording, never the guest. */
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
@@ -1315,6 +1328,7 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->online_news = true;
     settings->online_reports = true;
     settings->share_system_libraries = true;
+    settings->build_speed = PACKAGE_BUILD_SPEED_BALANCED;
     settings->check_updates_at_start = false;
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
@@ -1877,6 +1891,10 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.share_system_libraries = share_val;
     }
 
+    /* A speed this build does not know keeps the default, Balanced. */
+    (void)package_build_speed_from_key(
+        nk_json_get_string(nk_json_obj_get(root, "build_speed")), &app->settings.build_speed);
+
     /* Off unless the file says true: a missing or non-boolean value keeps the
        check at start off. */
     NkJsonNode *update_node = nk_json_obj_get(root, "check_updates_at_start");
@@ -2121,6 +2139,8 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
                                  ? app->settings.library_sort : PLAYER_LIBRARY_SORT_PLAYED]);
     fprintf(f, "  \"share_system_libraries\": %s,\n",
             app->settings.share_system_libraries ? "true" : "false");
+    fprintf(f, "  \"build_speed\": \"%s\",\n",
+            package_build_speed_key(app->settings.build_speed));
     fprintf(f, "  \"check_updates_at_start\": %s,\n",
             app->settings.check_updates_at_start ? "true" : "false");
     player_settings_write_string(f, "picker_folder", app->settings.picker_folder);
@@ -2242,13 +2262,14 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    its 1x frame is enlarged about 4x or more on any screen of 1080p or more, past that range, on
    the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
-   motion, Widescreen, texture filtering, sound, the readout or the badge: those stay the
-   library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
+   motion, Widescreen, texture filtering, sound, the readout, the badge or Finer patches
+   (which changes GE timing, section 11.3.7): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
    test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
 #define PRESET_PARTS(text, upscale)                                                        \
     {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
      [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \
-     [PLAYER_PART_SAS] = -1, [PLAYER_PART_UPSCALE] = (upscale)}
+     [PLAYER_PART_SAS] = -1, [PLAYER_PART_TESS] = -1, [PLAYER_PART_CULL] = -1,              \
+     [PLAYER_PART_UPSCALE] = (upscale)}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
     [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
                            PRESET_PARTS(1, 0)},
@@ -2266,7 +2287,7 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
    gives it a value under each preset (-1 leaves it the library's); update PRESET_PARTS first,
    then this count. The count catches a new part only; a part PRESET_PARTS leaves out reads 0
    (off), which test_graphics_presets catches by requiring -1 for every part it does not set. */
-typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 8 ? 1 : -1];
+typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 10 ? 1 : -1];
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -2982,6 +3003,8 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
            launcher exports for every session; the runtime's SR_ACE line has no such key. */
         if (p == PLAYER_PART_UPSCALE) continue;
+        /* A missing cull is off (contract 11.2 item 2): the line carries the key only when it is on. */
+        if (p == PLAYER_PART_CULL && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
@@ -3223,6 +3246,14 @@ void player_app_toggle_update_check_at_start(PlayerApp *app) {
 void player_app_toggle_share_system_libraries(PlayerApp *app) {
     if (!app) return;
     app->settings.share_system_libraries = !app->settings.share_system_libraries;
+    maybe_persist_settings(app);
+}
+
+void player_app_cycle_build_speed(PlayerApp *app) {
+    if (!app) return;
+    app->settings.build_speed = package_build_speed_next(app->settings.build_speed);
+    player_dev_log_add(app, "settings", "build speed %s",
+                       package_build_speed_key(app->settings.build_speed));
     maybe_persist_settings(app);
 }
 
@@ -4001,8 +4032,12 @@ const char *player_data_dir_unavailable_text(NkHostKind host) {
         case NK_HOST_MACOS:
             return "Nakagawa could not find your per-user data folder. "
                    "Set HOME";
-        case NK_HOST_LINUX:
         case NK_HOST_ANDROID:
+            /* nk_platform_get_app_data_dir reads only NK_ANDROID_DATA_DIR there, which the
+               app's activity sets (NakagawaHost.prepare); HOME and XDG are not used. */
+            return "Nakagawa could not find the app's data folder, which Android names in "
+                   "NK_ANDROID_DATA_DIR when the app starts. Start Nakagawa from its app icon";
+        case NK_HOST_LINUX:
         case NK_HOST_OTHER_POSIX:
         default:
             return "Nakagawa could not find your per-user data folder. "
@@ -5984,6 +6019,7 @@ static bool player_app_start_package_build_view(PlayerApp *app, int game_index,
     }
 
     app->build_session.no_shared_libraries = !app->settings.share_system_libraries;
+    app->build_session.build_speed = app->settings.build_speed;
     NkResult res = package_builder_start(&app->build_session, python_path, cli_path, user_data_root, log_dir);
     if (res != NK_OK) {
         if (res == NK_ERROR_ALREADY_EXISTS) {
@@ -6398,6 +6434,34 @@ bool player_app_factory_reset(PlayerApp *app, const char *stamp) {
             return false;
         }
         printf("[PLAYER] Factory reset: moved %s to %s\n", folders[i], moved[i]);
+    }
+    /* Logs stay where they are (the confirm dialog says so). Where the data folder is the
+       root of a rooted layout (a data-root override, or Android's NK_ANDROID_DATA_DIR), the
+       logs folder is inside it and moved with it, so it is moved back. The reset is already
+       done if that fails: the logs are then in the backup, and stderr and the developer log say so. */
+    char logs[NK_MAX_PATH];
+    if (nk_platform_resolve_path(NK_PATH_LOGS, logs, sizeof(logs))) {
+        for (size_t i = 0; i < count; ++i) {
+            if (!player_path_within(logs, folders[i]) || player_path_within(folders[i], logs))
+                continue;
+            size_t n = strlen(folders[i]);
+            while (n > 0 && (folders[i][n - 1] == '/' || folders[i][n - 1] == '\\')) --n;
+            char moved_logs[NK_MAX_PATH + 64 + NK_MAX_PATH];
+            char parent[NK_MAX_PATH];
+            int w = snprintf(moved_logs, sizeof(moved_logs), "%s%s", moved[i], logs + n);
+            if (w <= 0 || (size_t)w >= sizeof(moved_logs) || !nk_platform_dir_exists(moved_logs))
+                break;
+            if (player_path_parent_folder(logs, parent, sizeof(parent)) &&
+                nk_platform_mkdir_p(parent) && nk_rename_utf8(moved_logs, logs) == 0) {
+                printf("[PLAYER] Factory reset: kept the logs at %s\n", logs);
+            } else {
+                player_dev_log_add(app, "settings", "factory reset: the logs stayed in %s",
+                                   moved_logs);
+                /* The player quits after a reset, so the developer log goes with it. */
+                fprintf(stderr, "[PLAYER] Factory reset: the logs stayed in %s\n", moved_logs);
+            }
+            break;
+        }
     }
     app->factory_reset_done = true;
     app->should_quit = true;

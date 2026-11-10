@@ -1490,9 +1490,11 @@ class NativePlayerUiTests(unittest.TestCase):
     def test_build_cache_page_leads_to_tool_removal_and_back(self) -> None:
         """#1306: Settings > Build tools and cache holds the shared-library switch, the
         clear button and tool removal; cancelling a removal returns to the page."""
+        # Build speed sits between the switch and the clear button, one more Tab before
+        # Remove build tools.
         run = self.run_player(
             "build-cache",
-            ("KEY_TAB", "KEY_TAB", "KEY_RETURN", "KEY_ESCAPE", "KEY_ESCAPE"),
+            ("KEY_TAB", "KEY_TAB", "KEY_TAB", "KEY_RETURN", "KEY_ESCAPE", "KEY_ESCAPE"),
         )
         frames = run["frames"]
         assert isinstance(frames, list)
@@ -2058,6 +2060,7 @@ class NativePlayerUiTests(unittest.TestCase):
         "resolution": str(0x4501), "pacing": str(0x4502), "done": str(0x450C),
         "online": str(0x450D), "notices": str(0x450E), "remove_tools": str(0x450F),
         "build_cache": str(0x451A), "share_libraries": str(0x451B),
+        "build_speed": str(0x4555),
         "developer": str(0x4515), "back": str(0x4517), "confirm_remove": str(0x4519),
         "controller": str(0x450B), "scaling": str(0x4505),
         "launcher_fullscreen": str(0x450A), "accessibility": str(0x452C),
@@ -2385,11 +2388,12 @@ class NativePlayerUiTests(unittest.TestCase):
                          ["settings", "prereq_about"])
         self.assertEqual(self.focus_trail(notices)[-1], focus["back"])
 
-        # Build tools and cache opens on its switch; Tab reaches Remove build tools.
+        # Build tools and cache opens on its switch; Tab passes Build speed and the
+        # clear button and reaches Remove build tools.
         # Right comes straight after the removal card opens, before its buttons are
         # laid out; nk_ui holds it a frame instead of losing it (a slow CI runner did).
         to_removal = ("KEY_RIGHT", "KEY_RETURN", "WAIT_MS=100", "KEY_TAB", "KEY_TAB",
-                      "KEY_RETURN")
+                      "KEY_TAB", "KEY_RETURN")
         removal = self.next_ui_run(
             "settings",
             ("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS + to_removal +
@@ -2401,6 +2405,7 @@ class NativePlayerUiTests(unittest.TestCase):
         trail = self.focus_trail(removal)
         self.assertIn(focus["build_cache"], trail)
         self.assertIn(focus["share_libraries"], trail, "the page opens on its switch")
+        self.assertIn(focus["build_speed"], trail, "Build speed is the next stop")
         self.assertIn(focus["remove_tools"], trail)
         self.assertIn(focus["confirm_remove"], trail)
         self.assertFalse(removal["downloaded_tool_marker_exists"])

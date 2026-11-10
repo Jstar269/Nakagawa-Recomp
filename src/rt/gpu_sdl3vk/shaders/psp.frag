@@ -76,7 +76,10 @@ layout(set = 2, binding = 0) uniform sampler2D u_dst;
  * snapping it to the 5650/5551/4444 lattice. Its alpha, which holds the stencil, is still
  * snapped, so stencil tests and destination-alpha blending see the authentic values. ge_gpu.c
  * clears bit 512 for the same draws: no dither.
- * Bits 17-19 = factor - 1 of a scaled texture copy (ge_gpu.c, tex_scale.h); 0 otherwise. */
+ * Bits 17-19 = factor - 1 of a scaled texture copy (ge_gpu.c, tex_scale.h); 0 otherwise.
+ * 1048576 (bit 20) color test, bits 21-22 its function (GE_COLORTEST: 0 never, 2 equal,
+ * 3 not equal; ge_gpu.c leaves the test off for 1, always): fixa.a = GE_COLORREF &
+ * GE_COLORTESTMASK, fixb.a = GE_COLORTESTMASK, each a whole number. */
 layout(push_constant) uniform PC {
     ivec4 cfg;      /* x = texfunc | flags<<8, y = alpha test (func|ref<<8|mask<<16),
                        z = minz, w = maxz */
@@ -300,6 +303,19 @@ void main() {
                 ivec3 c = ivec3(col.rgb), fc = ivec3(pc.fogcol.rgb * 255.0 + 0.5);
                 col.rgb = vec3(((c + 1) * f + (fc + 1) * (255 - f)) >> 8);
             }
+        }
+
+        /* Color test (ge.c color_test, which shade() runs after fog): the colour this pixel
+         * stores, rounded as the attachment and the shader blend round it, against
+         * GE_COLORREF under GE_COLORTESTMASK. The masked reference and the mask ride in
+         * fixa.a and fixb.a as whole numbers below 2^24, which a float holds exactly. */
+        if ((flags & 1048576) != 0) {
+            int cfunc = (flags >> 21) & 3;
+            ivec3 c = ivec3(col.rgb + 0.5);
+            int cmask = int(pc.fixb.a), cref = int(pc.fixa.a);
+            int cval = (c.r | (c.g << 8) | (c.b << 16)) & cmask;
+            if (cfunc == 0 || (cfunc == 2 && cval != cref) || (cfunc == 3 && cval == cref))
+                discard;
         }
 
         /* doubled-src-alpha blend factors folded into the source color */

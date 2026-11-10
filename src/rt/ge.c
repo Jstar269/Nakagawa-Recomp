@@ -1319,6 +1319,22 @@ static void read_pos_one(uint32_t addr, const VFmt *v, float *x, float *y, float
     if (v->pos_fmt == 3) {
         uint32_t xi = vtx_r32(a), yi = vtx_r32(a+4), zi = vtx_r32(a+8);
         memcpy(x, &xi, 4); memcpy(y, &yi, 4); memcpy(z, &zi, 4);
+        /* A float z in through mode is saturated to 0..65535 and loses its fraction, so
+         * both renderers take one integer depth: the Vulkan path clips depth outside the
+         * 16-bit range and rounds a fraction to the nearest step, where the software path
+         * truncates it. A title may write any float there (a 2D overlay at z = -1.0 with
+         * the depth test off). NOT MEASURED on a PSP: this is the rule PPSSPP's
+         * through-mode float decoder applies, and which depth the hardware stores for
+         * such a z is an open probe. An infinite z saturates as well (+inf to 65535, -inf
+         * to 0), so its primitive is drawn, where the non-finite vertex rule dropped it
+         * before. PPSSPP draws a NaN z too, at depth 0; here a NaN stays NaN and the
+         * non-finite vertex rule still drops the primitive. Transform mode is untouched:
+         * its z is a model coordinate. */
+        if (v->through) {
+            if (*z >= 65535.0f) *z = 65535.0f;
+            else if (*z > 0.0f) *z = (float)(int)*z;
+            else if (*z <= 0.0f) *z = 0.0f;
+        }
     } else if (v->pos_fmt == 2) {
         if (v->through) {
             *x = (float)(int16_t)vtx_r16(a);
@@ -4979,6 +4995,71 @@ int ge_wide_set_wing(int wing) {
 
 int ge_wide_wing(void) { return s_wide_d; }
 
+/* The Ace cull key (contract 11.3.6): the hook scales only while the run asked for it (gui.c
+ * sets this from the effective SR_ACE line) and Widescreen has a wing. */
+static int s_cull_on;
+static unsigned long s_cull_calls;
+static unsigned long s_cull_untracked;
+void ge_wide_set_cull(int on) { s_cull_on = on ? 1 : 0; }
+unsigned long ge_wide_cull_calls(void) { return s_cull_calls; }
+unsigned long ge_wide_cull_untracked(void) { return s_cull_untracked; }
+
+/* A matrix the hook scaled is remembered with the four x-row words it left, so a call that finds
+ * those words unchanged (the title did not rebuild the matrix since) does not scale it again. The
+ * table is open-addressed by the matrix's full address and never evicts, so two matrices cannot
+ * share an entry; when it is full a new matrix is left alone (said once, and counted in
+ * s_cull_untracked for the run report), never scaled untracked. */
+#define GE_CULL_SEEN 4096u
+static struct { uint32_t addr; uint32_t row[4]; } s_cull_seen[GE_CULL_SEEN];
+
+void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count) {
+    const int wing = s_wide_d;
+    if (!s_cull_on || wing <= 0 || base == 0u || !offsets) return;
+    const float inv = 480.0f / (480.0f + 2.0f * (float)wing);
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t m = base + offsets[i];
+        if (!sr_guest_span_writable_at(m, 64u, "clip_x_widen")) {
+            static int reported;
+            if (!reported) {
+                reported = 1;
+                fprintf(stderr, "clip_x_widen: matrix at 0x%08" PRIx32 " is outside guest RAM; left alone "
+                                "(said once)\n", m);
+            }
+            continue;
+        }
+        uint32_t row[4];   /* the x output row of a column-major matrix: elements 0, 4, 8 and 12 */
+        for (uint32_t k = 0; k < 4u; k++) memcpy(&row[k], SR_HOST(m + 16u * k), sizeof row[k]);
+        uint32_t slot = ((m >> 4) * 2654435761u) >> 20;   /* 12 bits */
+        uint32_t probes = 0;
+        while (probes < GE_CULL_SEEN && s_cull_seen[slot].addr != 0u && s_cull_seen[slot].addr != m) {
+            slot = (slot + 1u) % GE_CULL_SEEN;
+            probes++;
+        }
+        if (probes == GE_CULL_SEEN) {
+            static int full_reported;
+            if (!full_reported) {
+                full_reported = 1;
+                fprintf(stderr, "clip_x_widen: more than %u distinct matrices; the rest are left alone "
+                                "(said once)\n", GE_CULL_SEEN);
+            }
+            s_cull_untracked++;
+            continue;
+        }
+        if (s_cull_seen[slot].addr == m && memcmp(s_cull_seen[slot].row, row, sizeof row) == 0)
+            continue;   /* still the words this hook wrote: not rebuilt since, already widened */
+        for (uint32_t k = 0; k < 4u; k++) {
+            float v;
+            memcpy(&v, &row[k], sizeof v);
+            v *= inv;
+            memcpy(&row[k], &v, sizeof v);
+            memcpy(SR_HOST(m + 16u * k), &row[k], sizeof row[k]);
+        }
+        s_cull_seen[slot].addr = m;
+        memcpy(s_cull_seen[slot].row, row, sizeof row);
+        s_cull_calls++;
+    }
+}
+
 void ge_wide_note_display(uint32_t fb_addr) {
     if (!s_wide_d || !fb_addr) return;
     const uint32_t fb = ge_wide_norm(fb_addr);
@@ -5160,6 +5241,64 @@ static void ge_note_mip_draw(void) {
             (int)(ge.tex_lod_bias * 16.0f));
 }
 
+/* ---- finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14) ----------------
+ *
+ * An Ace Mode part, the tess key of the SR_ACE launch line (off by default): draw_patch multiplies the guest's U and V division of a triangle patch by
+ * an integer factor F after the PSP's own vertex cap has set them, so every vertex of the PSP's
+ * grid is still evaluated at bit-identical parameters ((k*F)/(n*F) rounds as k/n does), and the
+ * patch edges and corners, the only vertices neighbouring patches share, are the PSP's. Line and
+ * point patches keep the PSP's division (a finer wireframe or point grid is not a smoother
+ * surface). While the finer grid would pass GE_PATCH_TESS_MAX_VERTS, F drops along a divisor
+ * chain (4, 2, 1 or 3, 1), so a draw the cap lowers still has every edge vertex of its coarser
+ * grid on its finer neighbours' edges. The finer side's extra edge vertices can still leave a
+ * crack against a lowered neighbour, which is why such a draw is counted (s_patch_capped) and the
+ * run's `PATCH_TESS: exit` line reports the count.
+ * It alters GE timing (SR_GE_TIMING): ge_time_prim_begin charges a patch's control points, and with the GE timing model on
+ * (SR_GE_TIMING) raster_tri also charges every triangle drawn, the finer ones included, so a
+ * factor F on division d costs what division d*F costs, not what the PSP's d costs: on 8888
+ * without depth test (untextured or fill-rate textured spans) a span under 48 pixels carries a fixed row
+ * charge, so a small patch costs more (one more per triangle) and a large one whose spans the finer grid
+ * cuts below 48 pixels can cost less; depth-tested, 16-bit and most textured spans are charged per
+ * pixel, so the cost follows the finer surface's coverage in either direction. List completion, sceGeDrawSync, sceGeListSync and the
+ * finish interrupt move with it. With the model off the extra triangles cost host time only. Off (F = 1) is the PSP's path exactly. */
+#define GE_PATCH_TESS_MAX 4
+#define GE_PATCH_TESS_MAX_VERTS 262144u
+static int s_patch_tess = 1;
+static unsigned long long s_patch_quads, s_patch_capped;
+static int s_patch_exit_hooked;
+
+int ge_patch_tess_set(int factor) {
+    s_patch_tess = factor >= 1 && factor <= GE_PATCH_TESS_MAX ? factor : 1;
+    return s_patch_tess;
+}
+
+void ge_patch_tess_counts(unsigned long long *quads, unsigned long long *capped) {
+    if (quads) *quads = s_patch_quads;
+    if (capped) *capped = s_patch_capped;
+}
+
+/* The run's end: what the feature drew, and how many draws the vertex cap lowered (each such draw
+ * can leave a crack against a neighbour drawn at the full factor). */
+void ge_patch_tess_exit_report(void) {
+    fprintf(stderr, "PATCH_TESS: exit (quads=%llu, capped_draws=%llu)\n", s_patch_quads, s_patch_capped);
+}
+
+int ge_patch_tess_init(int factor) {
+    s_patch_tess = 1;
+    if (factor < 2 || factor > GE_PATCH_TESS_MAX) return 1;
+    s_patch_tess = factor;
+    if (!s_patch_exit_hooked) {
+        s_patch_exit_hooked = 1;
+        sr_at_process_end(ge_patch_tess_exit_report);
+    }
+    fprintf(stderr, "PATCH_TESS: on (factor=%d, at most %u vertices a patch draw)\n", factor, GE_PATCH_TESS_MAX_VERTS);
+    fprintf(stderr, "PATCH_TESS: guest-visible and alters GE timing under SR_GE_TIMING=1, on through the "
+                    "tess key of the SR_ACE launch line; off by default until the runs of contract section "
+                    "11.2 item 4 exist (each present commits the frame to guest VRAM; see the contract's \"Finer "
+                    "Bezier and Spline Patches\" entry)\n");
+    return factor;
+}
+
 static void draw_patch(uint32_t op,int spline){
     int nu=(int)(op&255),nv=(int)((op>>8)&255);
     VFmt vf;decode_vtype(ge.vtype,&vf);int idxfmt=(int)((ge.vtype>>11)&3),count=nu*nv;
@@ -5177,6 +5316,16 @@ static void draw_patch(uint32_t op,int spline){
         if(tv>1)tv--;
     }
     int prim=(int)(ge.patch_primitive&3),typeu=(int)((op>>16)&3),typev=(int)((op>>18)&3);
+    /* #2053: the host factor, on the PSP's capped division, for triangle patches only. */
+    if(s_patch_tess>1&&prim==0){
+        int f=s_patch_tess;
+        for(;f>1;f=(f&1)?1:f/2){uint64_t fu=(uint64_t)tu*(uint64_t)f,fv=(uint64_t)tv*(uint64_t)f;
+            uint64_t n=spline?((uint64_t)pu*fu+1u)*((uint64_t)pv*fv+1u):(fu+1u)*(fv+1u)*(uint64_t)pu*(uint64_t)pv;
+            if(n<=GE_PATCH_TESS_MAX_VERTS)break;}
+        if(f<s_patch_tess)s_patch_capped++;
+        tu*=f;tv*=f;
+    }
+    s_patch_quads+=(unsigned long long)pu*(unsigned long long)pv*(unsigned long long)tu*(unsigned long long)tv;
     for(int py=0;py<pv;py++)for(int px=0;px<pu;px++){
         int base=(spline?py:py*3)*nu+(spline?px:px*3);
         for(int y=0;y<tv;y++)for(int x=0;x<tu;x++){

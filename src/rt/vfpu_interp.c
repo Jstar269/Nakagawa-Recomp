@@ -144,72 +144,6 @@ static uint32_t vfpu_add_bits(uint32_t a, uint32_t b) {
     return vfpu_daz(r);
 }
 
-/* The VFPU dot-product adder, as a PSP-3000 measured it through vfad and vavg
- * (PSP-VFPU-FUNNEL-001, 2026-10-29, issue #326: 936 cells over .p/.t/.q, 26 operand
- * sets, three S prefixes, two identical passes). sum(a[i] * b[i]) is not a chain of IEEE
- * operations. Each product keeps two guard bits below its 24-bit mantissa; the products are
- * aligned to the largest exponent by truncating their magnitudes, summed as signed
- * integers, the guard bits are dropped by truncation, and only a sum wider than 24 bits is
- * rounded (to nearest, ties to even) as it is normalised. A denormal operand counts as
- * zero, a zero or underflowing sum is +0, and a NaN operand, Inf * 0 or Inf - Inf gives the
- * canonical 0x7f800001. So 2^24 - 1 sums to 2^24 - 2, and 1 - 2^-24 to 1 - 2^-23. */
-static uint32_t vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n) {
-    enum { GUARD = 2 };
-    int32_t ex[4];
-    uint64_t mt[4];
-    int sg[4], inf_sign = -1, emax = 0;
-    for (int i = 0; i < n; i++) {
-        const uint32_t ae = (a[i] >> 23) & 0xffu, be = (b[i] >> 23) & 0xffu;
-        sg[i] = (int)(((a[i] ^ b[i]) >> 31) & 1u);
-        ex[i] = 0;
-        mt[i] = 0;
-        if (ae == 255u || be == 255u) {
-            if ((ae == 255u && ((a[i] & 0x7fffffu) || be == 0u)) ||
-                (be == 255u && ((b[i] & 0x7fffffu) || ae == 0u)))
-                return 0x7f800001u;
-            if (inf_sign >= 0 && inf_sign != sg[i]) return 0x7f800001u;
-            inf_sign = sg[i];
-            continue;
-        }
-        if (ae == 0u || be == 0u) continue;
-        const uint64_t am = (uint64_t)((a[i] & 0x7fffffu) | 0x800000u) << GUARD;
-        const uint64_t bm = (uint64_t)((b[i] & 0x7fffffu) | 0x800000u) << GUARD;
-        mt[i] = (am * bm) >> (23 + GUARD);
-        ex[i] = (int32_t)ae + (int32_t)be - 127;
-    }
-    if (inf_sign >= 0) return 0x7f800000u | ((uint32_t)inf_sign << 31);
-    for (int i = 0; i < n; i++)
-        if (mt[i] && ex[i] > emax) emax = ex[i];
-    int64_t total = 0;
-    for (int i = 0; i < n; i++) {
-        const int d = emax - ex[i];
-        const int64_t m = d >= 32 ? 0 : (int64_t)(mt[i] >> d);
-        total += sg[i] ? -m : m;
-    }
-    uint32_t sign = 0u;
-    if (total < 0) {
-        sign = 0x80000000u;
-        total = -total;
-    }
-    uint64_t mag = (uint64_t)total >> GUARD;
-    if (mag == 0u || emax <= 0) return 0u;
-    int width = 64 - __builtin_clzll(mag);
-    if (width > 24) {
-        const int sh = width - 24;
-        const uint64_t half = 1ull << (sh - 1), low = mag & ((1ull << sh) - 1u);
-        if (low > half || (low == half && ((mag >> sh) & 1u))) mag += half;
-        width = 64 - __builtin_clzll(mag);
-        mag >>= width - 24;
-        emax += width - 24;
-    } else {
-        mag <<= 24 - width;
-        emax -= 24 - width;
-    }
-    if (emax >= 255) return sign | 0x7f800000u;
-    if (emax <= 0) return 0u;
-    return sign | ((uint32_t)emax << 23) | ((uint32_t)mag & 0x7fffffu);
-}
-
 /* Write raw result words through the D prefix: saturation clamps a non-NaN lane
  * (the D prefix is UNMEASURED for these forms), then the write mask applies. Raw
  * words keep the canonical NaN bit-exact where a float store might quiet it. */
@@ -279,6 +213,11 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
             if (imm < 128) {
                 vreg_idx(imm, 1, vi_idx);
                 s->vi[vi_idx[0]] = value;
+            } else if (imm == 131) {
+                /* VFPU_CC keeps only bits 0..5 (unrecorded PSP read, PSP-3000, 2026-11-08,
+                 * issue #326, probe case vfpu-cc-cmov: mtvc then mfvc read back written & 0x3f
+                 * in every cell). */
+                s->vfpuCtrl[3] = value & 0x3fu;
             } else s->vfpuCtrl[imm - 128] = value;
             return SR_VFPU_COMPUTE;
         }
@@ -420,7 +359,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
             sr_vread(b, s, ti, n, s->vfpuCtrl[1]);
             int cc = 0, orv = 0, andv = 1, affected = (1 << 4) | (1 << 5);
             for (int i = 0; i < n; i++) {
-                float x = a[i], y = b[i];
+                float x = sr_vfpu_ftz(a[i]), y = sr_vfpu_ftz(b[i]);
                 int c;
                 switch (cond) {
                     case 0: c = 0; break;            case 1: c = x == y; break;
@@ -452,7 +391,11 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                     else r = (ai < 0 && bi < 0) ? (ai < bi ? ai : bi) : (bi < ai ? ai : bi);
                     memcpy(&d[i], &r, 4);
                 } else {
-                    d[i] = s3 == 2 ? (a[i] < b[i] ? a[i] : b[i]) : (b[i] < a[i] ? a[i] : b[i]);
+                    /* A denormal compares as a zero, and a tie returns the second operand
+                     * unflushed (unrecorded PSP read, PSP-3000, 2026-11-08, issue #326, probe case
+                     * vfpu-basic-arith). */
+                    const float fa = sr_vfpu_daz(a[i]), fb = sr_vfpu_daz(b[i]);
+                    d[i] = s3 == 2 ? (fa < fb ? a[i] : b[i]) : (fb < fa ? a[i] : b[i]);
                 }
             }
             VFPU_NAN(s3 == 2 ? "vmin.s" : "vmax.s", d, n, a, n, b, n);
@@ -635,7 +578,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
             if ((op9 == 6 || op9 == 7) && n >= 2) {
                 /* vfad (6) and vavg (7) at .p/.t/.q: d = the VFPU dot adder over S and a T
                  * of 1.0 (vfad) or 1/n (vavg: 0.5, 0x3eaaaaab, 0.25), as PSP-VFPU-FUNNEL-001
-                 * measured (2026-10-29, issue #326, vfpu_dot_bits above). The S prefix was
+                 * measured (2026-10-29, issue #326, sr_vfpu_dot_bits in recomp.c). The S prefix was
                  * measured as negation on any lane and swizzles inside the width (no prefix,
                  * negate-all, and wzyx with lanes 0/2 negated at .q). Abs and constant lanes
                  * take the S prefix read every other form uses (sr_vread), not a reading of
@@ -654,7 +597,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 vreg_idx(vs, n, si);
                 sr_vread((float *)sv, s, si, n, sp);
                 vreg_idx(vd, 1, di);
-                s->vi[di[0]] = vfpu_dot_bits(sv, tv, n);
+                s->vi[di[0]] = sr_vfpu_dot_bits(sv, tv, n);
                 eat_prefix(s); return SR_VFPU_COMPUTE;
             }
             if (op9 == 0x19 && n == 4) {  /* vt4444.q: four 32-bit colours -> a pair of
@@ -824,7 +767,22 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 for (int i = 0; i < 4; i++) s->vi[di[i]] = sr_vfpu_uc2i(x >> (8 * i));
                 return SR_VFPU_COMPUTE;
             }
-            /* vf2h.s/.t, the other vuc2i/vc2i widths, vus2i and the forms above outside
+            if (idx7 == 26 && n <= 2 && forms_identity) {
+                /* vus2i.s/.p: each source word's low then high half, zero-extended and
+                 * shifted left by 15, to a double-width result (.s -> pair, .p -> quad).
+                 * Sources are read first, so the in-place form is the same as a disjoint
+                 * one. vus2i.t/.q are unmeasured (fail closed). */
+                uint32_t sv[2], d[4];
+                vreg_idx(vs, n, si); vreg_idx(vd, 2 * n, di);
+                for (int i = 0; i < n; i++) sv[i] = s->vi[si[i]];
+                for (int i = 0; i < n; i++) {
+                    d[2 * i] = sr_vfpu_us2i(sv[i]);
+                    d[2 * i + 1] = sr_vfpu_us2i(sv[i] >> 16);
+                }
+                for (int i = 0; i < 2 * n; i++) s->vi[di[i]] = d[i];
+                return SR_VFPU_COMPUTE;
+            }
+            /* vf2h.s/.t, the other vuc2i/vc2i widths, vus2i.t/.q and the forms above outside
              * their measured widths or prefixes: docs/HARDWARE_ORACLE.md records no rule
              * for them. */
             return SR_VFPU_OTHER;
@@ -913,8 +871,8 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         sr_vread(a, s, si, n, s->vfpuCtrl[0]);
         sr_vread(b, s, ti, n, s->vfpuCtrl[1]);
         for (int i = 0; i < n; i++)
-            d[i] = op == 0x19 ? sr_vf_mul(a[i], b[i])
-                  : sub == 0 ? sr_vf_add(a[i], b[i]) : sub == 1 ? sr_vf_sub(a[i], b[i]) : sr_vf_div(a[i], b[i]);
+            d[i] = op == 0x19 ? sr_vfpu_mul(a[i], b[i])
+                  : sub == 0 ? sr_vfpu_add(a[i], b[i]) : sub == 1 ? sr_vfpu_sub(a[i], b[i]) : sr_vfpu_div(a[i], b[i]);
         VFPU_NAN(op == 0x19 ? "vmul.s" : sub == 0 ? "vadd.s"
                  : sub == 1 ? "vsub.s" : "vdiv.s", d, n, a, n, b, n);
         sr_vwrite(s, di, d, n, s->vfpuCtrl[2]); eat_prefix(s); return SR_VFPU_COMPUTE;
@@ -925,9 +883,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         uint8_t dst[1]; vreg_idx(vd, 1, dst);
         sr_vread(a, s, si, n, s->vfpuCtrl[0]);
         sr_vread(b, s, ti, n, s->vfpuCtrl[1]);
-        float acc = 0.0f;
-        for (int i = 0; i < n; i++) acc = sr_vf_add(acc, sr_vf_mul(a[i], b[i]));
-        dd[0] = acc;
+        dd[0] = sr_vfpu_sop(a, b, n);
         VFPU_NAN("vdot.s", dd, 1, a, n, b, n);
         sr_vwrite(s, dst, dd, 1, s->vfpuCtrl[2]); eat_prefix(s); return SR_VFPU_COMPUTE;
     }
@@ -937,10 +893,10 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         uint8_t dst[1]; vreg_idx(vd, 1, dst);
         sr_vread(a, s, si, n, s->vfpuCtrl[0]);
         sr_vread(b, s, ti, n, s->vfpuCtrl[1]);
-        float acc = 0.0f;
-        for (int i = 0; i < n - 1; i++) acc = sr_vf_add(acc, sr_vf_mul(a[i], b[i]));
-        acc = sr_vf_add(acc, sr_vf_mul(1.0f, b[n - 1]));
-        dd[0] = isnan(acc) ? fabsf(acc) : acc;
+        float h[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (int i = 0; i < n - 1; i++) h[i] = a[i];
+        h[n - 1] = 1.0f;  /* a[n-1] is not read: vhdp ends in 1.0 * b[n-1] */
+        dd[0] = sr_vfpu_sop(h, b, n);
         VFPU_NAN("vhdp.s", dd, 1, a, n, b, n);
         sr_vwrite(s, dst, dd, 1, s->vfpuCtrl[2]); eat_prefix(s); return SR_VFPU_COMPUTE;
     }
@@ -963,7 +919,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         vreg_idx(vd, n, di); vreg_idx(vs, n, si);
         sr_vread(a, s, si, n, s->vfpuCtrl[0]);
         float scalar = s->v[sc[0]];
-        for (int i = 0; i < n; i++) d[i] = sr_vf_mul(a[i], scalar);
+        for (int i = 0; i < n; i++) d[i] = sr_vfpu_mul(a[i], scalar);
         VFPU_NAN("vscl.s", d, n, a, n, (const float *)&scalar, 1);
         sr_vwrite(s, di, d, n, s->vfpuCtrl[2]); eat_prefix(s); return SR_VFPU_COMPUTE;
     }
@@ -973,10 +929,12 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         float r[16];
         for (int a = 0; a < side; a++)
             for (int b = 0; b < side; b++) {
-                float sum = 0.0f;
-                for (int c = 0; c < side; c++)
-                    sum = sr_vf_add(sum, sr_vf_mul(s->v[mreg_idx(vs, side, b, c)], s->v[mreg_idx(vt, side, a, c)]));
-                r[a * 4 + b] = sum;
+                float ta[4], tb[4];
+                for (int c = 0; c < side; c++) {
+                    ta[c] = s->v[mreg_idx(vs, side, b, c)];
+                    tb[c] = s->v[mreg_idx(vt, side, a, c)];
+                }
+                r[a * 4 + b] = sr_vfpu_sop(ta, tb, side);
             }
 #ifdef SR_NAN_TRAP
         {   float _nt_in[32]; int _nt_n = 0;
@@ -996,10 +954,17 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         vreg_idx(vt, side, ti); vreg_idx(vd, side, di);
         float r[4];
         for (int i = 0; i < side; i++) {
-            float sum = 0.0f;
-            for (int k = 0; k < tn; k++) sum = sr_vf_add(sum, sr_vf_mul(s->v[mreg_idx(vs, side, i, k)], s->v[ti[k]]));
-            if (ins >= n) sum = sr_vf_add(sum, s->v[mreg_idx(vs, side, i, ins)]);
-            r[i] = sum;
+            float ta[4], tb[4];
+            int tc = tn;
+            for (int k = 0; k < tn; k++) {
+                ta[k] = s->v[mreg_idx(vs, side, i, k)];
+                tb[k] = s->v[ti[k]];
+            }
+            if (ins >= n) {  /* vhtfm: the homogeneous term is the matrix element times 1.0 */
+                ta[tc] = s->v[mreg_idx(vs, side, i, ins)];
+                tb[tc++] = 1.0f;
+            }
+            r[i] = sr_vfpu_sop(ta, tb, tc);
         }
 #ifdef SR_NAN_TRAP
         /* Two operand groups, matrix then vector: the vector lanes are consumed
@@ -1024,7 +989,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         float scalar = s->v[sc[0]];
         for (int i = 0; i < side - 1; i++)
             for (int j = 0; j < side; j++)
-                s->v[mreg_idx(vd, side, j, i)] = sr_vf_mul(s->v[mreg_idx(vs, side, j, i)], scalar);
+                s->v[mreg_idx(vd, side, j, i)] = sr_vfpu_mul(s->v[mreg_idx(vs, side, j, i)], scalar);
         for (int j = 0; j < side; j++) {
             src[j] = (uint8_t)mreg_idx(vs, side, j, side - 1);
             dst[j] = (uint8_t)mreg_idx(vd, side, j, side - 1);
@@ -1032,7 +997,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         }
         sr_vread(row, s, src, side, s->vfpuCtrl[0]);
         sr_vread(t, s, scv, side, s->vfpuCtrl[1]);
-        for (int j = 0; j < side; j++) d[j] = sr_vf_mul(row[j], t[j]);
+        for (int j = 0; j < side; j++) d[j] = sr_vfpu_mul(row[j], t[j]);
         VFPU_NAN("vmscl", d, side, row, side, t, side);
         sr_vwrite(s, dst, d, side, s->vfpuCtrl[2]);
         eat_prefix(s); return SR_VFPU_COMPUTE;
@@ -1067,7 +1032,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 float scalar = s->v[sc[0]];
                 for (int i = 0; i < side - 1; i++)
                     for (int j = 0; j < side; j++)
-                        s->v[mreg_idx(vd, side, j, i)] = sr_vf_mul(s->v[mreg_idx(vs, side, j, i)], scalar);
+                        s->v[mreg_idx(vd, side, j, i)] = sr_vfpu_mul(s->v[mreg_idx(vs, side, j, i)], scalar);
                 for (int j = 0; j < side; j++) {
                     src[j] = (uint8_t)mreg_idx(vs, side, j, side - 1);
                     dst[j] = (uint8_t)mreg_idx(vd, side, j, side - 1);
@@ -1075,7 +1040,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 }
                 sr_vread(row, s, src, side, s->vfpuCtrl[0]);
                 sr_vread(t, s, scv, side, s->vfpuCtrl[1]);
-                for (int j = 0; j < side; j++) d[j] = sr_vf_mul(row[j], t[j]);
+                for (int j = 0; j < side; j++) d[j] = sr_vfpu_mul(row[j], t[j]);
                 VFPU_NAN("vmscl", d, side, row, side, t, side);
                 sr_vwrite(s, dst, d, side, s->vfpuCtrl[2]);
                 eat_prefix(s); return SR_VFPU_COMPUTE;
@@ -1133,19 +1098,23 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         sr_vread(a, s, si, n, s->vfpuCtrl[0]);
         sr_vread(b, s, ti, n, s->vfpuCtrl[1]);
         if (n == 3) {
-            /* Left-to-right sr_vf_* chains, the ones codegen.py emits (issue #326). */
-            d[0] = sr_vf_sub(sr_vf_mul(a[1], b[2]), sr_vf_mul(a[2], b[1]));
-            d[1] = sr_vf_sub(sr_vf_mul(a[2], b[0]), sr_vf_mul(a[0], b[2]));
-            d[2] = sr_vf_sub(sr_vf_mul(a[0], b[1]), sr_vf_mul(a[1], b[0]));
+            /* Each lane is a signed sum of products under sr_vfpu_sop, the terms codegen.py's
+             * _VCRSP_TERMS emits: a subtracted term negates its first operand. */
+            const float c0[2] = {a[1], -a[2]}, c1[2] = {b[2], b[1]};
+            const float e0[2] = {a[2], -a[0]}, e1[2] = {b[0], b[2]};
+            const float f0[2] = {a[0], -a[1]}, f1[2] = {b[1], b[0]};
+            d[0] = sr_vfpu_sop(c0, c1, 2);
+            d[1] = sr_vfpu_sop(e0, e1, 2);
+            d[2] = sr_vfpu_sop(f0, f1, 2);
         } else if (n == 4) {
-            d[0] = sr_vf_add(sr_vf_sub(sr_vf_add(sr_vf_mul(a[0], b[3]), sr_vf_mul(a[1], b[2])),
-                                       sr_vf_mul(a[2], b[1])), sr_vf_mul(a[3], b[0]));
-            d[1] = sr_vf_add(sr_vf_add(sr_vf_add(sr_vf_mul(-a[0], b[2]), sr_vf_mul(a[1], b[3])),
-                                       sr_vf_mul(a[2], b[0])), sr_vf_mul(a[3], b[1]));
-            d[2] = sr_vf_add(sr_vf_add(sr_vf_sub(sr_vf_mul(a[0], b[1]), sr_vf_mul(a[1], b[0])),
-                                       sr_vf_mul(a[2], b[3])), sr_vf_mul(a[3], b[2]));
-            d[3] = sr_vf_add(sr_vf_sub(sr_vf_sub(sr_vf_mul(-a[0], b[0]), sr_vf_mul(a[1], b[1])),
-                                       sr_vf_mul(a[2], b[2])), sr_vf_mul(a[3], b[3]));
+            const float p0[4] = {a[0], a[1], -a[2], a[3]}, q0[4] = {b[3], b[2], b[1], b[0]};
+            const float p1[4] = {-a[0], a[1], a[2], a[3]}, q1[4] = {b[2], b[3], b[0], b[1]};
+            const float p2[4] = {a[0], -a[1], a[2], a[3]}, q2[4] = {b[1], b[0], b[3], b[2]};
+            const float p3[4] = {-a[0], -a[1], -a[2], a[3]}, q3[4] = {b[0], b[1], b[2], b[3]};
+            d[0] = sr_vfpu_sop(p0, q0, 4);
+            d[1] = sr_vfpu_sop(p1, q1, 4);
+            d[2] = sr_vfpu_sop(p2, q2, 4);
+            d[3] = sr_vfpu_sop(p3, q3, 4);
         } else {
             return SR_VFPU_OTHER;
         }

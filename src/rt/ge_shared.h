@@ -456,6 +456,12 @@ int       ge_wide_wing_for(int window_w, int window_h);
 /* Turn Fill on with wing width `wing` (rounded down to a multiple of 4, capped), or off with 0.
  * A change clears every canvas. Returns the width in use. */
 int       ge_wide_set_wing(int wing);
+/* Whether the clip_x_widen hook may scale (the run's Ace cull key, after Widescreen is up), and how
+ * many matrices it has scaled so far (the run reports the key as confirmed once that is above 0). */
+void      ge_wide_set_cull(int on);
+unsigned long ge_wide_cull_calls(void);
+/* Matrix uses left unscaled because the hook's 4096-entry table was full (contract 11.3.6). */
+unsigned long ge_wide_cull_untracked(void);
 int       ge_wide_wing(void);
 /* The display was given framebuffer `fb_addr`: its canvas exists from now on. The last two
  * distinct addresses keep canvases (double buffering). No effect while Fill is off. */
@@ -516,6 +522,19 @@ typedef enum GeTnlReason {
 } GeTnlReason;
 void        ge_tnl_reason_counts(unsigned long long out[GE_TNL_WHY_COUNT], int reset);
 const char *ge_tnl_reason_name(int why);   /* "clear", "flat", ...; NULL out of range */
+/* Finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14): a host factor on the
+ * guest's PATCHDIVISION for triangle patches, from the tess key of the SR_ACE launch line (off,
+ * 2, 3 or 4; an authentic run has none). It alters GE timing under SR_GE_TIMING=1.
+ * ge_patch_tess_init(factor) is called with the run's effective factor: 0 or 1 leave the PSP's
+ * division, 2..4 turn the feature on, print its start lines and register ge_patch_tess_exit_report
+ * with sr_at_process_end, which prints the run's `PATCH_TESS: exit (quads=, capped_draws=)` line.
+ * It returns the factor in use (1: the PSP's division). ge_patch_tess_set is the selftest seam
+ * (1..4, anything else is 1). The counts are since the run started: patch quads drawn, and
+ * draws whose factor was lowered to stay within the vertex cap. */
+int       ge_patch_tess_init(int factor);
+int       ge_patch_tess_set(int factor);
+void      ge_patch_tess_counts(unsigned long long *quads, unsigned long long *capped);
+void      ge_patch_tess_exit_report(void);
 /* The specular and powered-diffuse power light_vertex uses: 0 (the default) the C library's
  * powf, 1 ge_powf, the integer power psp_tnl.vert repeats bit for bit, which also lets the GPU
  * T&L take those lights. The selftest seams give ge_powf and its 64 x 64-bit high product

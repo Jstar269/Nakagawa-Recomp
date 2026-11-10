@@ -8,11 +8,12 @@
  * value can never opt a launch in:
  *
  *     SR_ACE=off
- *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off
+ *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. Every other key is required in v1, in any order, each
- * once. A key or value for a feature this build
+ * line without it is an Enhanced run. cull is the other key a line may leave out: a missing cull
+ * reads as off (section 11.2 item 2), and a line that writes cull=off means the same. Every other
+ * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
  * the run and one "ACE_MODE: refused (<reason>)" line says why. Unset is off and says nothing.
@@ -20,7 +21,9 @@
  * Off is authentic: every Ace branch in the runtime sits behind g_ace_on, which stays 0, so the
  * Vulkan device, every sampler, the guest shaders, the presents and the observation counters
  * are today's, and nothing is printed. With Ace on, guest logic and the guest timing model are
- * unchanged; host presentation changes (and, with sas=sinc, the mixed SAS sample values), and
+ * unchanged; host presentation changes (and, with sas=sinc, the mixed SAS sample values; with
+ * tess=2..4, the pixels of every triangle patch and the GE timing model's clocks under
+ * SR_GE_TIMING=1), and
  * the run says so ("ACE_MODE: on (...)" at start, an exit line, and the flight recorder's
  * runtime.enhancements block).
  *
@@ -41,6 +44,8 @@
 #define ACE_HAS_SMOOTH 1        /* smooth=x2: one in-between per 30 Hz frame */
 #define ACE_HAS_SMOOTH_MATCH 0  /* smooth=match: the monitor's rate */
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
+#define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
+#define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
 typedef enum { ACE_SMOOTH_OFF = 0, ACE_SMOOTH_MATCH = 1, ACE_SMOOTH_X2 = 2 } AceSmooth;
@@ -63,6 +68,8 @@ typedef struct {
     int smooth;      /* AceSmooth */
     int tier;        /* AceTier */
     int sas;         /* AceSas: SAS voices mix through a band-limited resampler (host-only) */
+    int tess;        /* finer patches (#2053): 0 off, or the factor 2, 3 or 4 on the guest's division */
+    int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
 } AceConfig;
 
 typedef enum {
@@ -73,6 +80,8 @@ typedef enum {
     ACE_FEATURE_WIDE,
     ACE_FEATURE_SMOOTH,
     ACE_FEATURE_SAS,
+    ACE_FEATURE_TESS,
+    ACE_FEATURE_CULL,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -108,6 +117,8 @@ void ace_feature_unavailable(AceFeature feature, const char *reason);
  * confirmed is reported unavailable (its renderer or presenter did not start), so the report
  * never claims what did not happen. */
 void ace_confirm(AceFeature feature);
+/* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
+void ace_set_cull_untracked(unsigned long n);
 /* An anisotropic sampler the renderer could not make: that draw kept the plain one. */
 void ace_note_af_failure(void);
 /* The pause menu's live Speed readout switch (Ace on only; a readout this host cannot draw

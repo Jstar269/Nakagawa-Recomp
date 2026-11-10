@@ -974,12 +974,26 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         if (scr_wizard_box_begin(ui, 0u)) {
             NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                          NK_UI_SPACE_3);
+            const WizardRow rows[] = {
+                {"Share libraries", settings_on_off(model->share_system_libraries),
+                 "Builds keep each compiled library and reuse it for another game "
+                 "with the same one, so those builds finish sooner."},
+                {"Build speed", safe_text(model->build_speed, "Balanced"),
+                 safe_text(model->build_speed_sentence, "")}
+            };
+            /* The two buttons line up on one column at every text size. */
+            WizardColumn column = scr_wizard_column(ui, rows, sizeof(rows) / sizeof(rows[0]),
+                                                    inner - 32.0f, false);
             if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_SHARE_LIBRARIES, SET_ID_TEXT + 0xC0u,
-                              "Share libraries",
-                              "Builds keep each compiled library and reuse it for another game "
-                              "with the same one, so those builds finish sooner.",
-                              model->share_system_libraries, inner - 32.0f, NULL)) {
+                              rows[0].name, rows[0].sentence,
+                              model->share_system_libraries, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_SHARE_LIBRARIES);
+            }
+            /* How much of the PC a game build takes: Background keeps a game smooth. */
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_BUILD_SPEED, SET_ID_TEXT + 0xC4u,
+                                 rows[1].name, rows[1].value, rows[1].sentence, false,
+                                 inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED);
             }
             if (nk_ui_begin_container(ui, SET_ID_TEXT + 0xC8u, &row, NULL)) {
                 if (nk_ui_button(ui, PLAYER_UI_ID_SETTINGS_CLEAR_LIBRARIES,
