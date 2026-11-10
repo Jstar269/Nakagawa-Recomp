@@ -14000,7 +14000,8 @@ class Record20261015Tests(unittest.TestCase):
         selftest = (self.root / "tests" / "native" / "vfpu_interp_selftest.c").read_text(
             encoding="utf-8")
         start = selftest.index("static int check_vrexp2_measured_words(void)")
-        body = selftest[start:selftest.index("\nint main(void)", start)]
+        # The function alone: other measured-word tables follow it in the file.
+        body = selftest[start:selftest.index("\n}\n", start)]
         pairs = re.findall(r"\{0x([0-9a-f]{8})u, 0x([0-9a-f]{8})u\}", body)
         self.assertEqual(len(pairs), 63)
         # exp2(-x): 1.0 for zero (the first special), 2.0 for -1.0 and just under 0.5 for +1.0.

@@ -72,13 +72,21 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   more once unpacked.
 - **SSD.** Builds read and write thousands of small files, so a hard disk makes them much
   slower. Keep the player's data folder on an SSD if you can.
-- **Processor.** BUILD PACKAGE runs up to eight compile jobs at a time, one per logical
-  processor, as far as memory allows, and the build screen counts the parts as they finish.
-  When free memory, a single processor or `NK_PACKAGE_JOBS` limits it to one job, the build
-  screen says so and that the build will take longer. If the PC does not report its processor
-  count, the build runs one job and says nothing about processors. A first build takes several minutes. To
+- **Processor.** Settings > Build tools and cache > Build speed sets how much of the PC a
+  build takes. Balanced, the default, runs up to eight compile jobs at a time, one per logical
+  processor, as far as memory allows. Background runs at most two, with the whole build at low
+  priority, so a game you play meanwhile stays smooth and the build takes longer. Fastest runs
+  one per logical processor, as far as memory allows. No speed runs more jobs than the free
+  memory allows. The build screen names the speed, the job count and what limited it, and counts
+  the parts as they finish; the build log names them too. When free memory, a single processor
+  or `NK_PACKAGE_JOBS` limits it to one job, the build screen says so and that the build will
+  take longer. If Windows gives no memory reading, every speed runs two jobs (one on a PC with a
+  single processor). If the PC does not report its processor count, every speed runs one job
+  and the build screen says nothing about processors. A first build takes several minutes. To
   choose the job count yourself, set the `NK_PACKAGE_JOBS` environment variable to a number from
-  1 to 8 before starting the player.
+  1 to 8 before starting the player: it replaces the speed's job count (a Background build stays
+  at low priority), and the build log and screen say so. `nk_cli.py build-package` takes the
+  same speeds as `--build-speed`.
 - **Texture scaling (Ace Mode, development only).** It is reachable only through the `SR_TEX_SCALE` and
   `SR_SMART_2D` environment variables, has no setting in the player, and is not admitted as an Enhanced or Ace
   item yet, because it changes the frames the game can read back
@@ -101,6 +109,18 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
   frame, on the game's thread. Text drawn as triangles, or from a page in VRAM, is drawn as the game made it. The
   rules are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1013-sharp-game-text).
+- **Finer Bezier and spline patches (Finer patches).** A part of Enhanced and Ace, off by default and in no graphics
+  preset: Settings > Enhanced offers it as **Finer patches** (2x, 3x, 4x or Off), for the library or for one game,
+  and the launch line carries it as `tess=`. It is not on by choosing Enhanced or Ace, because it changes the frames
+  the game can read back and alters the GE timing model's clocks
+  ([section 11.3.7](ENHANCEMENT_CONTRACT.md#1137-finer-bezier-and-spline-patches-tess)). Each curved patch is drawn
+  with factor x factor times the triangles, on the game's thread, up to 262144 vertices a draw, so a scene with many
+  patches takes longer to draw. With the GE timing model on (`SR_GE_TIMING=1`) the extra triangles also change
+  when the game's display lists complete and when `sceGeDrawSync` returns in game time: on 8888 targets without
+  depth test, later for small patches and possibly earlier for large ones; elsewhere by the finer surface's
+  coverage, in either direction. A run's log ends with a `PATCH_TESS: exit` line
+  that counts the draws the vertex cap lowered. The rules are in
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1014-finer-bezier-and-spline-patches).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release

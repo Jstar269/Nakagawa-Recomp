@@ -1190,6 +1190,9 @@ static const char *const k_part_switch_labels[] = {"On", "Off"};
 static const char *const k_part_switch_words[] = {"on", "off"};
 static const char *const k_part_smooth_words[] = {"x2", "off"};
 static const char *const k_part_sas_words[] = {"sinc", "off"};
+static const int k_part_tess_values[] = {2, 3, 4, 0};
+static const char *const k_part_tess_labels[] = {"2x", "3x", "4x", "Off"};
+static const char *const k_part_tess_words[] = {"2", "3", "4", "off"};
 static const char *const k_part_wide_words[] = {"fill", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
@@ -1220,6 +1223,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"sas", "Clean pitched sound",
      "Resamples pitched effects without aliasing. The game receives changed samples.",
      2, k_part_switch_values, k_part_switch_labels, k_part_sas_words, 0},
+    /* A guest-visible item (contract 11.3.7) that alters GE timing (SR_GE_TIMING): off by default
+       and in no preset, with its own off switch in the library and each title. */
+    {"tess", "Finer patches",
+     "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
+     4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
@@ -1272,7 +1280,7 @@ const char *player_enhanced_part_label(int part, int value) {
 const char *player_enhanced_part_unavailable_label(int part, int value, int smooth) {
     if (part == PLAYER_PART_WIDE &&
         ace_wide_fill_blocked_by_smooth(value != 0, smooth != 0)) {
-        return "Off (Smooth motion is on)";
+        return "Off";
     }
     return NULL;
 }
@@ -1320,10 +1328,13 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->online_news = true;
     settings->online_reports = true;
     settings->share_system_libraries = true;
+    settings->build_speed = PACKAGE_BUILD_SPEED_BALANCED;
     settings->check_updates_at_start = false;
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
     settings->developer_mode = false;
+    snprintf(settings->nickname, sizeof(settings->nickname), "%s", NK_NICKNAME_DEFAULT);
+    settings->nickname_asked = false;
     /* Authentic until the player chooses Enhanced; the parts keep their values while it
        is not chosen. */
     player_enhanced_defaults(&settings->enhanced);
@@ -1882,6 +1893,10 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.share_system_libraries = share_val;
     }
 
+    /* A speed this build does not know keeps the default, Balanced. */
+    (void)package_build_speed_from_key(
+        nk_json_get_string(nk_json_obj_get(root, "build_speed")), &app->settings.build_speed);
+
     /* Off unless the file says true: a missing or non-boolean value keeps the
        check at start off. */
     NkJsonNode *update_node = nk_json_obj_get(root, "check_updates_at_start");
@@ -1915,6 +1930,19 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         strlen(prompt_version) < sizeof(app->settings.rebuild_prompt_version)) {
         snprintf(app->settings.rebuild_prompt_version,
                  sizeof(app->settings.rebuild_prompt_version), "%s", prompt_version);
+    }
+
+    /* Optional (#2197): a file without them keeps the neutral nickname and has
+       not answered the first-launch prompt. A nickname that breaks the rule is
+       dropped, not cut short. */
+    const char *nickname = nk_json_get_string(nk_json_obj_get(root, "nickname"));
+    if (nk_nickname_valid(nickname)) {
+        snprintf(app->settings.nickname, sizeof(app->settings.nickname), "%s", nickname);
+    }
+    NkJsonNode *asked_node = nk_json_obj_get(root, "nickname_asked");
+    bool asked_val = false;
+    if (asked_node && nk_json_get_bool(asked_node, &asked_val)) {
+        app->settings.nickname_asked = asked_val;
     }
 
     NkJsonNode *sounds_node = nk_json_obj_get(root, "ui_sounds");
@@ -2126,11 +2154,15 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
                                  ? app->settings.library_sort : PLAYER_LIBRARY_SORT_PLAYED]);
     fprintf(f, "  \"share_system_libraries\": %s,\n",
             app->settings.share_system_libraries ? "true" : "false");
+    fprintf(f, "  \"build_speed\": \"%s\",\n",
+            package_build_speed_key(app->settings.build_speed));
     fprintf(f, "  \"check_updates_at_start\": %s,\n",
             app->settings.check_updates_at_start ? "true" : "false");
     player_settings_write_string(f, "picker_folder", app->settings.picker_folder);
     player_settings_write_string(f, "rebuild_prompt_version",
                                  app->settings.rebuild_prompt_version);
+    player_settings_write_string(f, "nickname", app->settings.nickname);
+    fprintf(f, "  \"nickname_asked\": %s,\n", app->settings.nickname_asked ? "true" : "false");
     fprintf(f, "  \"master_volume\": %d\n", app->settings.master_volume);
     fprintf(f, "}\n");
 
@@ -2247,13 +2279,14 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    its 1x frame is enlarged about 4x or more on any screen of 1080p or more, past that range, on
    the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
-   motion, Widescreen, texture filtering, sound, the readout or the badge: those stay the
-   library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
+   motion, Widescreen, texture filtering, sound, the readout, the badge or Finer patches
+   (which changes GE timing, section 11.3.7): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
    test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
 #define PRESET_PARTS(text, upscale)                                                        \
     {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
      [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \
-     [PLAYER_PART_SAS] = -1, [PLAYER_PART_CULL] = -1, [PLAYER_PART_UPSCALE] = (upscale)}
+     [PLAYER_PART_SAS] = -1, [PLAYER_PART_TESS] = -1, [PLAYER_PART_CULL] = -1,              \
+     [PLAYER_PART_UPSCALE] = (upscale)}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
     [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
                            PRESET_PARTS(1, 0)},
@@ -2271,7 +2304,7 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
    gives it a value under each preset (-1 leaves it the library's); update PRESET_PARTS first,
    then this count. The count catches a new part only; a part PRESET_PARTS leaves out reads 0
    (off), which test_graphics_presets catches by requiring -1 for every part it does not set. */
-typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 9 ? 1 : -1];
+typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 10 ? 1 : -1];
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -3230,6 +3263,14 @@ void player_app_toggle_update_check_at_start(PlayerApp *app) {
 void player_app_toggle_share_system_libraries(PlayerApp *app) {
     if (!app) return;
     app->settings.share_system_libraries = !app->settings.share_system_libraries;
+    maybe_persist_settings(app);
+}
+
+void player_app_cycle_build_speed(PlayerApp *app) {
+    if (!app) return;
+    app->settings.build_speed = package_build_speed_next(app->settings.build_speed);
+    player_dev_log_add(app, "settings", "build speed %s",
+                       package_build_speed_key(app->settings.build_speed));
     maybe_persist_settings(app);
 }
 
@@ -5469,6 +5510,7 @@ void player_app_apply_settings_to_session(const PlayerSettings *settings,
     config->fullscreen = settings->fullscreen;
     config->master_volume = settings->master_volume;
     config->developer_mode = settings->developer_mode;
+    snprintf(config->nickname, sizeof(config->nickname), "%s", settings->nickname);
     config->reduce_motion = settings->reduce_motion_choice == PLAYER_SYSTEM_CHOICE_ON
         ? NK_REDUCE_MOTION_ON
         : settings->reduce_motion_choice == PLAYER_SYSTEM_CHOICE_OFF ? NK_REDUCE_MOTION_OFF
@@ -5995,6 +6037,7 @@ static bool player_app_start_package_build_view(PlayerApp *app, int game_index,
     }
 
     app->build_session.no_shared_libraries = !app->settings.share_system_libraries;
+    app->build_session.build_speed = app->settings.build_speed;
     NkResult res = package_builder_start(&app->build_session, python_path, cli_path, user_data_root, log_dir);
     if (res != NK_OK) {
         if (res == NK_ERROR_ALREADY_EXISTS) {
@@ -11218,6 +11261,40 @@ bool player_app_rebuild_card(const PlayerApp *app, const GameRecord *game,
         out->detail = PLAYER_OUTDATED_CARD_TEXT;
         out->can_rebuild = true;
     }
+    return true;
+}
+
+bool player_app_nickname_prompt_visible(const PlayerApp *app) {
+    return app && !app->settings.nickname_asked && !app->settings_newer_schema &&
+           !app->nickname_prompt_held;
+}
+
+bool player_app_nickname_prompt_answer(PlayerApp *app, const char *nickname) {
+    if (!app) return false;
+    if (nickname && !nk_nickname_valid(nickname)) {
+        player_dev_log_add(app, "settings", "the nickname was refused: it is not 1 to %u bytes "
+                           "of UTF-8 without control characters, or is only spaces",
+                           NK_NICKNAME_MAX_BYTES);
+        return false;
+    }
+    if (nickname) snprintf(app->settings.nickname, sizeof(app->settings.nickname), "%s", nickname);
+    app->settings.nickname_asked = true;
+    player_dev_log_add(app, "settings", "nickname prompt answered: %s", nickname ? "Save" : "Skip");
+    maybe_persist_settings(app);
+    return true;
+}
+
+bool player_app_set_nickname(PlayerApp *app, const char *nickname) {
+    if (!app) return false;
+    if (!nk_nickname_valid(nickname)) {
+        player_dev_log_add(app, "settings", "the nickname was refused: it is not 1 to %u bytes "
+                           "of UTF-8 without control characters, or is only spaces",
+                           NK_NICKNAME_MAX_BYTES);
+        return false;
+    }
+    snprintf(app->settings.nickname, sizeof(app->settings.nickname), "%s", nickname);
+    player_dev_log_add(app, "settings", "nickname changed");
+    maybe_persist_settings(app);
     return true;
 }
 

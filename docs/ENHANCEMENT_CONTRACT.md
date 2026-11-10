@@ -246,6 +246,7 @@ Each `sites` entry names a symbolic `function`, a 4-byte-aligned `insn_offset`, 
 | `gate_30hz` | `jal`; accumulating `addiu rt, rt, imm`, `addu`/`subu`/`add`/`sub` with the destination as a source, `add.s`/`sub.s` likewise | the statement runs only on even logic updates (§9.5), so every instance runs on the same alternate updates |
 | `gate_30hz_hold` | `jal` | the call runs only on even logic updates, as `gate_30hz`; on a skipped update `f0` takes the value of `f12`. It is for a helper that returns its first float argument advanced by one update (an ease toward a target): a skipped update holds the value, so each 30 Hz value shows for two updates. The resolver refuses the site unless the callee, read from its entry to its `jr $ra` and that delay slot, makes no call, jump or trap, writes no memory, `$ra`, `$sp` or FPU control register, branches only to words up to that `jr $ra`, reads `f12` before it writes it, and writes `f0`: skipping it then drops nothing but its result. The check reads the body in address order, not along each path, and does not look at VFPU registers. The site's evidence shows the rest: that the result is stored back as the value the call advances, and that nothing reads the helper's other outputs |
 | `gate_30hz_alt` | `jal`, with `alternates` naming 1 to 4 functions | the gated call keeps its stock instants, and on the updates it skips the named functions run in its place, so work the gated function does every update (a model's pose tick) runs at 60 Hz while the rest of it keeps its 30 Hz cadence. The site keeps its own phase: it makes its alternates only in an update right after one in which it made the stock call, and otherwise the stock call, so the gated function always runs first when it is reached again. On an alternate update each alternate is called in list order with `$a0` as it was at the site after its delay slot and `$ra` set to the site + 8; nothing else is set up. The resolver refuses the site unless: the gated function calls each alternate directly, exactly once on every path that returns, in list order, and passes it its own entry `$a0` (read along every path of its graph; a table switch, `sltiu`, `beq`/`beql` to the out-of-range case, then a `lui`/`addiu` table address loaded with `lw` and `jr`, is followed, and any other jump through a register refuses); after the site, no path of the caller reads `$v0`, `$v1`, `f0`-`f3`, HI or LO before writing it, up to its next call, and a return counts as reading `$v0`, `$v1` and `f0`; no alternate reads `$a1`-`$a3`, `$t0`-`$t3`, `f12`-`f15` or the FPU condition flag as its caller left them, read along every path of the alternate and of each function it calls while one of them may still hold that value, three calls deep, and an alternate that calls through a register while one may refuses; and no function an alternate reaches through direct calls is the gated function, the caller, or a function that holds another gated site. Limits of the check: below the alternate's own body, a call through a register, and a call more than three deep, are taken to read only the arguments their caller set (the PSP ABI); the re-entry check does not follow calls through a register; VFPU registers are not tracked. The site's evidence shows the rest: that the alternates touch no state the skipped work reads or writes in a way that depends on the order (no random rolls, no shared counters), and that the state they read is what the gated function left for them |
+| `gate_30hz_store` | `sb`, `sh`, `sw`, `swc1` (word_count 1) whose base is not `$sp` | the store runs only on even logic updates (§9.5); on an odd update the store does not happen, so a field the code advances by one update from what it read (an inline ease, a step toward a target) takes the 30 Hz values, each for two updates, as long as no other writer stores to it in that update. It is for a step with no exact per-update form at 60 Hz, where gating the arithmetic would store a wrong value (a gated `addu` whose destination is the step, not the field). A store through `$sp` writes a stack slot, which does not keep its value from one update to the next, so holding it would expose what another call left there; the resolver refuses it. Limits of the check: it reads the base register only, so a frame store through `$fp` or through a register that holds an `$sp` address is not seen, and it cannot see where the store writes. The site's evidence shows the rest: that the store writes a logic field in main RAM or the scratchpad, not VRAM, a hardware register or a display list; that the stored value is the next value of the same field, computed from what the code read from it this update; that every later reader in the update reads the field back from memory (or is itself gated); and that nothing needs the unheld value. Fields written together (a position and the copy derived from it) are gated together |
 | `count_x2` | positive `addi`/`addiu`/`slti`/`sltiu` immediate; `andi` mask $2^n-1$; `lui` of a normal float; `sll`; integer loads; `lwc1`/`swc1`; `sw` (only with `stock_values`, §9.6); `lv.s` (the loaded VFPU register is scaled); single-precision arithmetic and `cvt.s.w`; a unit countdown `addiu rt, rt, -1` | the produced value is doubled (a countdown is gated) |
 | `count_x2_even` | `slti`/`sltiu rt, rs, n` with $0 < n \le$ `0x3FFF` and `rt` neither `$zero` nor `rs` | a bound on a counter of logic updates since an event: true while `rs` $< 2n$ and `rs` is even, so the $n$ events of the stock window still happen, one every second update, at the stock instants (`count_x2` would make $2n$ of them, twice as dense). Under `slti` a negative `rs` stays true, as in stock, so an inactive value such as $-1$ keeps its meaning; under `sltiu` it is a large unsigned value, false in both forms. The resolver refuses the site unless `rs` is loaded from memory (`lb`, `lbu`, `lh`, `lhu` or `lw`) within the 16 instructions before the compare, with no branch, jump or call in between, and not in the delay slot of a jump, a call or a branch-likely. The check reads backward in address order and does not see a branch from elsewhere into those instructions. The site's evidence shows the rest: that the stored count advances by one every update |
 | `step_x0.5`, `probability_per_update_x0.5` | as `count_x2` except integer loads, plus accumulating `+1`/`-1`/`addu`/`subu` updates | the produced value is halved (exactly, or by gating a unit or register step); `add.s fd, fd, ft` halves the addend `ft` |
@@ -274,9 +275,9 @@ Every frame-rate rescale package declares `rng_policy`. Under `rescale_probabili
 
 ### 9.5. Update Boundary: Gating Counts Logic Updates
 
-A gated statement (a `gate_30hz` or `gate_30hz_hold` site, and the unit steps and countdowns whose rewrite is a gate) runs when the number of logic updates begun so far is even. A `gate_30hz_alt` site keeps its own phase on the same count instead (section 9.2): it makes its alternates only in an update right after one in which it made the stock call, and otherwise makes the stock call (a second run in the same update repeats that update's choice), so a function reached again after a scene change runs before its alternates. The package says where an update begins with `update_boundary`: a symbolic `function`, a 4-byte-aligned `insn_offset` and the `stock_digest` of one instruction that runs exactly once per logic update, usually the first instruction of the title's per-frame body. While `SR_EXPERIMENTAL_60HZ=1`, that instruction first advances the counter `nk_enhancement_updates` and then runs its stock statement unchanged; with the toggle off nothing is counted.
+A gated statement (a `gate_30hz`, `gate_30hz_hold` or `gate_30hz_store` site, and the unit steps and countdowns whose rewrite is a gate) runs when the number of logic updates begun so far is even. A `gate_30hz_alt` site keeps its own phase on the same count instead (section 9.2): it makes its alternates only in an update right after one in which it made the stock call, and otherwise makes the stock call (a second run in the same update repeats that update's choice), so a function reached again after a scene change runs before its alternates. The package says where an update begins with `update_boundary`: a symbolic `function`, a 4-byte-aligned `insn_offset` and the `stock_digest` of one instruction that runs exactly once per logic update, usually the first instruction of the title's per-frame body. While `SR_EXPERIMENTAL_60HZ=1`, that instruction first advances the counter `nk_enhancement_updates` and then runs its stock statement unchanged; with the toggle off nothing is counted.
 
-1. **Required when anything gates.** The validator refuses a package with a `gate_30hz`, `gate_30hz_hold` or `gate_30hz_alt` site and no `update_boundary`, and codegen refuses one whose planned rewrites include any gate without it.
+1. **Required when anything gates.** The validator refuses a package with a `gate_30hz`, `gate_30hz_hold`, `gate_30hz_alt` or `gate_30hz_store` site and no `update_boundary`, and codegen refuses one whose planned rewrites include any gate without it.
 2. **Verified like a site.** The boundary's function resolves and its stock word is checked against `stock_digest` the same way, fail-closed. It may not be a control transfer or a rewritten site, and a package whose boundary is never emitted is refused like an unemitted site.
 3. **Correct under frame drops.** The count advances once per update however many display VBLANKs that update takes, so gated statements keep alternating when an update overruns a VBLANK or a stock two-VBLANK wait still runs. `tools/test_enhancement_package.py` compiles the generated gate and runs updates of one to three VBLANKs to check it.
 4. **Slowdown is reported.** An update that takes longer than one VBLANK of host time is followed by the title's own wait for the next VBLANK, so the logic runs below 60 updates per second while every per-update step stays halved: the game plays slower than the original. The generated start-up hands `nk_enhancement_updates` to the runtime (`sr_enhancement_register_updates()`), which compares it once a second. Logic that runs but stays under 57 updates per second for three seconds in a row is logged as `ENHANCEMENT_LOGIC_SLOWED` and shown in the game window as a red `60 FPS logic: <n>/s - SLOWED` line, with or without the F3 HUD. A second with no update at all (a load or a pause) clears the count.
@@ -330,10 +331,10 @@ The player offers three play modes per game (#2055):
 - **Authentic** is the standard: the game as released, recreating the PSP as closely as the project can. It is the
   default for a new library.
 - **Enhanced** turns on the project-authored improvements that work for any game: texture filtering, crisp system
-  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound and sharper enlarging. A new
-  library starts with texture filtering, crisp system text and the game badge on and the rest off, and a graphics
-  preset sets crisp system text and sharper enlarging (section 10.1). Each one is a *part* that can be turned off for
-  the library or for a single game.
+  text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches and sharper
+  enlarging. A new library starts with texture filtering, crisp system text and the game badge on and the rest off,
+  and a graphics preset sets crisp system text and sharper enlarging (section 10.1); finer patches are in no preset.
+  Each one is a *part* that can be turned off for the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
   for that game too.
@@ -346,7 +347,7 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 ### 10.1. The Launch Line
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
-`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off`. `tier` (`enhanced` or `ace`) only names the
+`v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
 section 11.3.6) is the other key a line may leave out: a missing `cull` is off, and `cull=on` needs `tier=ace`. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
@@ -369,7 +370,8 @@ counters do not run. Nothing is printed, except one `TEX_SCALE: off` line when t
 scaling or the smart 2D filter, which names the request and does not obey it (section 10.10), one `TWIN: off` or
 `TWIN: refused` line when `SR_GPU_TWIN_COLOR` is set, which changes nothing else (section 10.11), one line that
 names an unknown or refused `SR_GPU_DST_READ` value, which changes nothing else, and the
-`sdl3vk: destination reads: interlock|snapshot` line that every run prints (below).
+`sdl3vk: destination reads: interlock|snapshot` line that every run prints (below). Finer patches (section 10.14)
+have no environment variable, so an authentic run prints nothing for them.
 `gpu-coherence-selftest` checks the samplers and the pool; `display-smoke` keeps its image hash.
 
 One device feature setting outside Ace applies to every run, Authentic included, because it is a correctness fix and not an
@@ -395,6 +397,9 @@ the device is created with no feature outside Ace.
   do Smooth motion's in-between frames (section 10.6).
 - **Sound:** `sas=sinc` writes band-limited sample values into the guest's SAS output buffer, so it is a
   guest-visible item. Its entry is section 11.3.1.
+- **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
+  present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
+  guest-visible item. Its entry is section 11.3.7.
 
 ### 10.4. Stamps and Evidence
 
@@ -599,7 +604,7 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 
 ```json
 "enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
-            "smooth": "off", "sas": "off", "upscale": "off"},
+            "smooth": "off", "sas": "off", "tess": "off", "upscale": "off"},
 "title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}}
 ```
 
@@ -959,6 +964,62 @@ and not admitted under section 11.2: section 11.3.5 is its entry, and this secti
   with `SR_GLYPHS` unset and on. `gpu-glyph-mutant` removes the content check of a bound tile, keys the tiles on the
   cache's sampled content hash instead of its generation, removes the per-present count, and the VRAM, hard-edge, colour and Ace guards, each of which must fail its own cell.
 
+### 10.14. Finer Bezier and Spline Patches
+
+The GE draws Bezier and spline patches by cutting them into triangles at the division the game sets with
+`PATCHDIVISION` (#2053). Games keep it low, so curved surfaces show facets, the more so above 1x. This feature
+multiplies that division on the host for every game, with no per-title data. It is guest-visible (section 11.1) and
+alters the GE timing model's clocks under `SR_GE_TIMING=1`: section 11.3.7 is its entry and says what the guest can
+observe; this section says how it draws. The code is `draw_patch` and `ge_patch_tess_init` in `src/rt/ge.c`, which
+both renderers share, so the software renderer and the Vulkan renderer draw the same finer triangles.
+
+- **Setting.** The `tess` key of the `SR_ACE` launch line (section 10.1): `tess=off`, or the factor `tess=2`,
+  `tess=3` or `tess=4`, a required key like every key but `tier`. In the player it is the part "Finer patches"
+  (`"tess"`: `2`, `3`, `4` or `off`) on the library's Settings > Enhanced page and on each game's own page
+  (section 10.9). It is off in a fresh settings file, is in no graphics preset and is not turned on by choosing
+  Enhanced or Ace: a player turns it on, for the library or for one game. It takes effect only in Ace Mode: an
+  authentic run has no launch line, so its factor is never read, and a line with any other value is refused whole
+  (`ACE_MODE: refused (bad value)`). The runtime reads the factor once when it starts, and there is no environment
+  variable for it.
+- **Only triangle patches.** A line or point patch (`PATCHPRIMITIVE` 1 or 2) keeps the PSP's division: a finer
+  wireframe or point grid is a denser picture, not a smoother surface.
+- **Cap.** While the finer grid would have more than 262144 vertices, F drops along a divisor chain (4, 2, 1 or
+  3, 1), so every edge vertex of a lowered draw's grid lies on its neighbours' finer grid. The cap is per draw: where
+  a lowered draw meets a neighbour drawn at the full factor, the neighbour's extra edge vertices lie on the curve and
+  the lowered draw's edge between them is straight, which can leave a crack up to a pixel or so wide. The PSP's own
+  cap does the same for neighbours whose divisions differ. Each lowered draw is counted, and the run's exit line
+  reports the count.
+- **Guest memory.** The vertex and index data in guest memory and the GE state the game reads back are unchanged.
+  What a present commits to guest VRAM does change, which makes the feature guest-visible (section 11.3.7).
+- **GE timing.** With the GE timing model off (the default) the extra triangles cost host time only. With
+  `SR_GE_TIMING=1` the model charges a patch's control points and then the rows and spans of every triangle drawn,
+  the finer ones included, so factor F on a division d costs exactly the GE time of the division d x F, which is not
+  the time of the PSP's division d. On 8888 targets without depth test, for untextured spans and textures that run
+  at fill rate, each added triangle adds a fixed row charge on spans under 48 pixels, so a small patch costs
+  more and a patch whose wide spans the finer grid cuts below 48 pixels can cost less. Elsewhere (depth-tested,
+  16-bit targets, most textured spans) a span is charged per pixel, and the cost changes only with the coverage
+  of the finer surface, in either direction. List completion, `sceGeDrawSync`,
+  `sceGeListSync` and the finish interrupt move with it (section 11.3.7).
+- **Stamps.** `PATCH_TESS: on (factor=<F>, at most 262144 vertices a patch draw)` at start, followed by the line
+  section 11.3.7 describes, and `PATCH_TESS: exit (quads=<n>, capped_draws=<n>)` when the run ends, through
+  `sr_at_process_end()`. `ACE_MODE: on (...)` carries `tess=`, the flight recorder's `runtime.enhancements` carries
+  the launch line, and the report's `effective` block has `"tess"`. Section 10.4 applies: the run is an Ace run.
+- **Tests.** `ge-patch-tess-selftest` runs the production `ge.c` software renderer:
+  - the factor the `tess` key carries (`ace-selftest` pins the key, its values and its Ace gate);
+  - factor F on a division d against the PSP's own division d x F, for a Bezier and a four-patch spline surface with
+    a colour per control point, at factors 2 to 4, and against division d to show it is finer;
+  - F x F times the quads;
+  - factor 1 against the default run;
+  - two Bezier patches that share a curved edge, and a four-patch spline, with no background pixel between their
+    outer edges at factors 1 to 4, and a control that draws the two halves at factors 4 and 1 and requires the check
+    to find the crack;
+  - line and point patches unchanged;
+  - the vertex cap and its divisor chain;
+  - a draw the PSP's own 65535-vertex cap lowers, which is lowered first and multiplied after;
+  - with the GE timing model on, factor F on a division d costing exactly the GE clocks of the division d x F: more
+    than d for a small patch, and different from d for a large one;
+  - the exit line, with the quads drawn and the capped draws.
+
 ## 11. Guest-Visible Items
 
 Sections 10.3, 10.6, 10.8 and 10.11 describe host-only features: what the guest reads, in its registers, memory and timing, is the
@@ -1228,6 +1289,40 @@ The third section 9 transform admitted under this section, by its own entry as s
 - **"Nothing worse".** Not shown here: the private comparison runs of section 11.2, item 4 come with the pull request
   that turns a title's 60 FPS game logic on by default.
 
+##### 11.3.2.2. The 60 FPS logic transform `gate_30hz_store`
+
+The fourth section 9 transform admitted under this section, by its own entry as section 11.3.2 asks.
+
+- **Key and off switch.** Those of section 11.3.2: the title's "60 FPS game logic" setting, which launches the
+  enhanced package with `SR_EXPERIMENTAL_60HZ=1`, and per title the same setting off, which runs every stock statement.
+  A package leaves the transform out for its title by not naming it.
+- **What it changes.** A `gate_30hz_store` site runs its store (`sb`, `sh`, `sw` or `swc1`, never through `$sp`) on
+  even logic updates only (section 9.5). On an odd update the store does not happen, so the field keeps the value
+  it held unless another writer stores to it. The rest of the update runs as stock. The promises below rest on the
+  site's evidence that the store writes a logic field in main RAM or the scratchpad (section 9.2): the resolver
+  cannot see the store's address.
+- **What the guest can observe.**
+  - Guest registers and memory: on an odd update the stored field holds its earlier value; the register that would
+    have been stored keeps the value the stock code computed. Everything the logic computes from the field, and so
+    what it draws, follows the held value, as for every site of a 60 Hz package. Under `--lle-cpu`, a store that
+    would fault (a misaligned address) does not fault on an odd update, because the whole statement is skipped, as
+    for the `add`/`sub` forms of `gate_30hz`.
+  - VRAM bytes: the store writes a logic field, never VRAM; the frames drawn follow the logic.
+  - Readbacks: unchanged.
+  - Timing the guest can measure: no VBLANK, DMA, GE list or media clock changes. An odd update does one store less.
+  - I/O speed: unchanged.
+- **Tier and default.** Ace, off by default, as section 11.3.2.
+- **Authentic stays byte-identical.** As section 11.3.2: without `--enhancement-package` codegen output is unchanged,
+  and with the package built in and the toggle off the site runs its stock store.
+  `test_gate_30hz_store_holds_each_30hz_value_for_two_updates` in `tools/test_enhancement_package.py` builds a
+  fixture with the package and without it, checks the toggle-off statement against the Authentic one byte for byte,
+  runs both builds, and checks that the toggle-off run prints what the Authentic run prints and that the toggle-on
+  run holds each 30 Hz value for two updates.
+- **Sampled checking.** As section 11.3.2: a sampled call whose body holds the site reports a mismatch there while
+  the toggle is on; run the verifier with the toggle off, or read such a mismatch as expected.
+- **"Nothing worse".** Not shown here: the private comparison runs of section 11.2, item 4 come with the pull request
+  that turns a title's 60 FPS game logic on by default.
+
 #### 11.3.3. Texture Scaling and the Smart 2D Filter (Not Yet Admitted)
 
 The two features of section 10.10 (#1273). Their presentation is described there; this entry is what the guest can
@@ -1388,3 +1483,40 @@ The Layer 2 mechanism of section 10.8, for a title that skips objects outside it
   report's `cull_untracked`) instead of being scaled without a record.
 - **Tier:** Ace (one title). **Default:** off.
 - **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.
+
+#### 11.3.7. Finer Bezier and Spline Patches (`tess`)
+
+The feature of section 10.14 (#2053). How it draws is described there; this entry is what the guest can observe.
+
+- **Status: guest-visible, and it alters GE timing under `SR_GE_TIMING=1`.** Each present commits the frame it shows
+  to guest VRAM, so a frame with a finer patch is the frame the guest keeps. Its key, its library and per-title
+  settings and this entry are in place (section 11.2, items 2, 3 and 6). The runs of item 4 do not exist, so it stays
+  off by default and in no preset.
+- **Key and off switch.** `tess=off`, `tess=2`, `tess=3` or `tess=4` on the launch line (section 10.1), a required
+  key. A line without it, or with any other value, is refused, and the run is Authentic. Its off switch is `tess=off`
+  in a run, and `"tess": "off"` for the library or for one game (section 10.9); an unknown value in a settings
+  file reads as off, an unset value in the library block is off, an unset value for one game follows the library
+  setting, and an authentic run, which has no line, never has a factor. Section 11.3.5 lists what
+  adding a key to the `SR_ACE` launch line costs.
+- **Never silent.** A run with it on prints, after its `PATCH_TESS: on` line, one line naming the feature as
+  guest-visible and as altering GE timing under `SR_GE_TIMING=1`, and at its end a `PATCH_TESS: exit` line with the
+  quads drawn and the draws the vertex cap lowered, each of which can leave a crack (section 10.14).
+- **What it changes:** the pixels of every triangle patch the game draws, in the frame a present commits: the curved
+  surface is drawn with F x F times the triangles.
+- **VRAM bytes:** differ in those frames, at the pixels where the finer surface differs from the PSP's facets.
+- **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them, and
+  for a render-to-texture pass that draws patches.
+- **Timing:** differs with the GE timing model on. With `SR_GE_TIMING=1` every finer triangle's rows and spans are
+  charged, so factor F on a division d costs what the division d x F costs, not what the PSP's division d costs
+  (section 10.14). Where the fixed row charge applies (8888 without depth test, spans under 48 pixels),
+  a list with small patches completes later in guest time, and `sceGeDrawSync`, `sceGeListSync` and the finish
+  interrupt wait longer, and a list with large patches can complete earlier; elsewhere the change follows the
+  finer surface's coverage, in either direction. With the model off (the
+  default) the GE timing is the PSP path's. The VBLANK schedule and the media clocks are unchanged either way. The
+  finer triangles are host work on the GE thread, the thread the guest runs on, so a guest frame with many patches
+  can take longer in host time. Not measured on a title.
+- **I/O speed:** unchanged.
+- **Tier:** Enhanced. **Default:** off, and Ace-only: an authentic run has no launch line, so it is never on there.
+  It is in no graphics preset, because it changes GE timing.
+- **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
+  exist.

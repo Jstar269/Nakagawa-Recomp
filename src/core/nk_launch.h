@@ -7,6 +7,7 @@
 #include "nk_types.h"
 #include "nk_platform.h"
 #include "nk_title_manifest.h"
+#include "nk_nickname.h"
 #include "generated/nk_title_catalog.h"
 #include <stdbool.h>
 
@@ -96,6 +97,10 @@ typedef struct {
        the player creates its folder. */
     char ace_spec[192];  /* SR_ACE, as long as src/rt/ace.h ACE_SPEC_MAX */
     char ace_report_path[NK_MAX_PATH];
+    /* The console nickname the player chose (#2197, src/core/nk_nickname.h), always exported as
+       SR_NICKNAME so an inherited value cannot name the console. The runtime re-validates it
+       and serves NK_NICKNAME_DEFAULT, with a log line, for an empty or invalid value. */
+    char nickname[NK_NICKNAME_MAX_BYTES + 1u];
 } NkRuntimeConfig;
 
 typedef struct {
