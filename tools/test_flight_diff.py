@@ -388,10 +388,17 @@ class ComparabilityContractTests(unittest.TestCase):
             ace["runtime"]["enhancements"] = {"ace": line}
             return ace
 
-        # The longest line ace_format writes today, then a line padded to the limit
-        # with a later key whose name carries a digit.
-        longest_now = ("v1;tier=enhanced;af=16;text=off;readout=off;notice=off;wide=fill;"
-                       "smooth=match;sas=sinc;tess=off;twin=off;cull=on")
+        # The longest line, built as ace_longest_line builds it from ace.c's key table
+        # (each key at its longest value), so a part that adds a key moves it here too;
+        # then a line padded to the limit with a later key whose name carries a digit.
+        ace_c = (ROOT / "src" / "rt" / "ace.c").read_text(encoding="utf-8")
+        table = re.search(r"\} k_ace_keys\[\] = \{(.*?)\n\};", ace_c, re.S)
+        assert table is not None
+        rows = re.findall(r'\{"([a-z][a-z0-9]*)", ACE_KEY_[A-Z0-9_]+, [01], "([a-z0-9]+)"\}',
+                          table.group(1))
+        self.assertEqual(len(rows), table.group(1).count("ACE_KEY_"),
+                         "every key table row names its longest value")
+        longest_now = "v1" + "".join(f";{name}={value}" for name, value in rows)
         flight_diff.validate_bundle(bundle_with(longest_now))
         pad = spec_max - 1 - len(longest_now) - len(";s2d=")
         self.assertGreater(pad, 0)

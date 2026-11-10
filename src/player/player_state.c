@@ -2288,11 +2288,9 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
                                 NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
 };
 #undef PRESET_PARTS
-/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until PRESET_PARTS
-   gives it a value under each preset (-1 leaves it the library's); update PRESET_PARTS first,
-   then this count. The count catches a new part only; a part PRESET_PARTS leaves out reads 0
-   (off), which test_graphics_presets catches by requiring -1 for every part it does not set. */
-typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 11 ? 1 : -1];
+/* A new PLAYER_PART_* needs a value in PRESET_PARTS (-1 leaves it the library's): a part it
+   leaves out reads 0 (off), and test_graphics_presets, which walks every part up to
+   PLAYER_PART_COUNT, requires -1 for each part a row does not set. */
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;

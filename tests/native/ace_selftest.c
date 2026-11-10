@@ -198,19 +198,31 @@ static void cell_parse(void) {
     /* The longest line ace_format writes fits in ACE_SPEC_MAX, the buffer the flight
      * recorder keeps it in; the parser refuses a line of ACE_SPEC_MAX characters for its
      * length and reads one of ACE_SPEC_MAX - 1 (the bundle schema's maxLength) on. */
+    /* The longest line comes from the parser's key table (each key at its longest value), so a
+     * part that adds a key moves it without an edit here. The config below gives each field its
+     * longest word; a field it leaves out is 0, whose word ("off") a new key's table row names
+     * unless it has a longer one, and then the two lengths differ here. (The parser refuses
+     * smooth=match in a build without it, so the config is not parsed from the line.) */
     {
-        AceConfig l = { 1, 16, 0, 0, 0, ACE_WIDE_FILL, ACE_SMOOTH_MATCH, ACE_TIER_ENHANCED,
-                        ACE_SAS_SINC, 0, 1, 0 };
-        static const char longest[] = "v1;tier=enhanced;af=16;text=off;readout=off;notice=off;"
-                                      "wide=fill;smooth=match;sas=sinc;tess=off;twin=off;cull=on";
+        const AceConfig l = { .on = 1, .af = 16, .wide = ACE_WIDE_FILL,
+                              .smooth = ACE_SMOOTH_MATCH, .tier = ACE_TIER_ENHANCED,
+                              .sas = ACE_SAS_SINC, .cull = 1 };
+        char longest[512];
+        const size_t longest_len = ace_longest_line(longest, sizeof(longest));
         char edge[ACE_SPEC_MAX + 1];
-        CHECK(ace_format(&l, line, sizeof(line)) && strcmp(line, longest) == 0 &&
-              strlen(line) < ACE_SPEC_MAX, "the longest line formats and fits (%s)", line);
-        CHECK(ace_format(&l, line, sizeof(longest) - 1) == 0,
+        CHECK(longest_len > 0 && ace_format(&l, line, sizeof(line)) &&
+              strlen(line) == longest_len,
+              "ace_format writes the key table's longest line at its length (%s; %s, %zu)", line,
+              longest, longest_len);
+        CHECK(longest_len < ACE_SPEC_MAX, "the longest line (%zu characters) fits in ACE_SPEC_MAX",
+              longest_len);
+        CHECK(ace_format(&l, line, longest_len) == 0,
               "a buffer one short of the longest line is refused");
+        CHECK(longest_len + 5 < ACE_SPEC_MAX, "a later key still has room after the longest line");
+        if (longest_len + 5 >= ACE_SPEC_MAX) return;
         memset(edge, 'a', sizeof(edge));
-        memcpy(edge, longest, sizeof(longest) - 1);
-        memcpy(edge + sizeof(longest) - 1, ";s2d=", 5);
+        memcpy(edge, longest, longest_len);
+        memcpy(edge + longest_len, ";s2d=", 5);
         edge[ACE_SPEC_MAX] = '\0';
         why[0] = '\0';
         CHECK(ace_parse(edge, &b, why, sizeof(why)) == 0 && strcmp(why, "line too long") == 0,

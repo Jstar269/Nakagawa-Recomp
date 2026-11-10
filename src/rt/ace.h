@@ -95,6 +95,10 @@ typedef enum {
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap);
 /* Writes the canonical line for a config ("off" when !c->on). Returns 0 when it does not fit. */
 int ace_format(const AceConfig *c, char *out, size_t cap);
+/* Writes a line that gives every key of the parser's table its longest value, in the table's
+   order, and returns its length (0 when it does not fit). ace_format writes the same length
+   for the config it parses to: the longest line there is, whatever keys later parts add. */
+size_t ace_longest_line(char *out, size_t cap);
 
 /* ---- the run's switch ----------------------------------------------------------------------- */
 

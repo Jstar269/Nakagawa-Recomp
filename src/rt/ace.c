@@ -26,7 +26,9 @@ static int value_on_off(const char *v, int *out) {
 }
 
 /* The line's keys. Each says whether a line must carry it, so the order of the table decides
-   nothing: tier is the one key a line may leave out (an Enhanced run). */
+   nothing for the parser: tier is the one key a line may leave out (an Enhanced run). Each
+   also names the longest value ace_format writes for it, so ace_longest_line builds the
+   longest line from this table alone. */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
     ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TWIN, ACE_KEY_TIER, ACE_KEY_CULL
@@ -36,19 +38,36 @@ static const struct {
     const char *name;
     AceKey key;
     int required;
+    const char *longest;
 } k_ace_keys[] = {
-    {"af", ACE_KEY_AF, 1},
-    {"text", ACE_KEY_TEXT, 1},
-    {"readout", ACE_KEY_READOUT, 1},
-    {"notice", ACE_KEY_NOTICE, 1},
-    {"wide", ACE_KEY_WIDE, 1},
-    {"smooth", ACE_KEY_SMOOTH, 1},
-    {"sas", ACE_KEY_SAS, 1},
-    {"tess", ACE_KEY_TESS, 1},
-    {"twin", ACE_KEY_TWIN, 1},
-    {"tier", ACE_KEY_TIER, 0},
-    {"cull", ACE_KEY_CULL, 0},
+    {"af", ACE_KEY_AF, 1, "16"},
+    {"text", ACE_KEY_TEXT, 1, "off"},
+    {"readout", ACE_KEY_READOUT, 1, "off"},
+    {"notice", ACE_KEY_NOTICE, 1, "off"},
+    {"wide", ACE_KEY_WIDE, 1, "fill"},
+    {"smooth", ACE_KEY_SMOOTH, 1, "match"},
+    {"sas", ACE_KEY_SAS, 1, "sinc"},
+    {"tess", ACE_KEY_TESS, 1, "off"},
+    {"twin", ACE_KEY_TWIN, 1, "off"},
+    {"tier", ACE_KEY_TIER, 0, "enhanced"},
+    {"cull", ACE_KEY_CULL, 0, "on"},
 };
+
+size_t ace_longest_line(char *out, size_t cap) {
+    size_t used = 0;
+    int n;
+    if (!out || !cap) return 0;
+    n = snprintf(out, cap, "v1");
+    if (n < 0 || (size_t)n >= cap) { out[0] = '\0'; return 0; }
+    used = (size_t)n;
+    for (size_t i = 0; i < sizeof(k_ace_keys) / sizeof(k_ace_keys[0]); i++) {
+        if (!k_ace_keys[i].longest) { out[0] = '\0'; return 0; }
+        n = snprintf(out + used, cap - used, ";%s=%s", k_ace_keys[i].name, k_ace_keys[i].longest);
+        if (n < 0 || (size_t)n >= cap - used) { out[0] = '\0'; return 0; }
+        used += (size_t)n;
+    }
+    return used;
+}
 
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
     enum { KEYS = (int)(sizeof(k_ace_keys) / sizeof(k_ace_keys[0])) };
