@@ -46,6 +46,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/test_shared_helpers",
     "build/mygame/heap_selftest",
     "build/mygame/profiler_selftest",
+    "build/mygame/xr_selftest",
     "build/mygame/ge_texture_ref_selftest",
     "build/mygame/fbcap_selftest build/mygame/fbcap_selftest",
     "build/mygame/videorec_selftest build/mygame/videorec_selftest",

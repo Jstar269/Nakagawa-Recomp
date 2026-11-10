@@ -108,6 +108,18 @@ strbuf-selftest:
 		-o $(BUILD_DIR)/strbuf_selftest.exe tests/native/strbuf_selftest.c
 	$(BUILD_DIR)/strbuf_selftest.exe
 
+# xr-selftest — the OpenXR (VR) module in src/rt/xr/ against a fake OpenXR runtime (issue
+# #791): named refusals, the session state machine, the latest-frame mailbox, frame-loop
+# decoupling from the producer, and the layout maths. No headset, loader or game needed;
+# not reachable from the player.
+xr-selftest:
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Isrc/rt \
+		-o $(BUILD_DIR)/xr_selftest.exe tests/native/xr_selftest.c \
+		src/rt/xr/nk_xr.c src/rt/xr/nk_xr_mailbox.c src/rt/xr/nk_xr_layout.c -lm
+	$(BUILD_DIR)/xr_selftest.exe
+
+native-core-tests: xr-selftest
+
 watchpoints-file-selftest:
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/watchpoints_file_selftest.exe \
 		tests/native/watchpoints_file_selftest.c src/rt/watchpoints_file.c $(LIBS)
