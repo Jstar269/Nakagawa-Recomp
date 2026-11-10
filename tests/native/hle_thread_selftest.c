@@ -44865,7 +44865,7 @@ static void test_ace_load_skip_wait_only_where_the_stock_call_blocks(void) {
 
     expect(ace_init_spec("off", NULL) == 0, "ace load skip: an authentic run");
     cpu.r[2] = 0x5au;
-    expect(nk_ace_load_skip_wait(&cpu) == 0 && cpu.r[2] == 0x5au,
+    expect(nk_ace_load_skip_wait(&cpu, "T", 0x08800000u) == 0 && cpu.r[2] == 0x5au,
            "ace load skip: an authentic run skips no wait and leaves $v0 alone");
 
     expect(ace_init_spec(k_load_fast, NULL) == 1 && ace_effective()->load == 1, "ace load skip: load=fast is on");
@@ -44877,7 +44877,7 @@ static void test_ace_load_skip_wait_only_where_the_stock_call_blocks(void) {
                ctx ? "ace load skip (dispatch disabled): the stock call returns CAN_NOT_WAIT without blocking"
                    : "ace load skip (interrupts disabled): the stock call returns CAN_NOT_WAIT without blocking");
         cpu.r[2] = 0x5au;
-        expect(nk_ace_load_skip_wait(&cpu) == 0 && cpu.r[2] == 0x5au && ace_load_waits_skipped() == 0,
+        expect(nk_ace_load_skip_wait(&cpu, "T", 0x08800000u) == 0 && cpu.r[2] == 0x5au && ace_load_waits_skipped() == 0,
                ctx ? "ace load skip (dispatch disabled): no skip, so the stock call runs"
                    : "ace load skip (interrupts disabled): no skip, so the stock call runs");
     }
@@ -44926,7 +44926,7 @@ static void ace_skip_waiter_guest_fn(CpuState *cpu) {
      * failing run; a passing one leaves at its first skip. */
     while (!s_ace_skip_loaded && s_ace_skip_iterations < ACE_SKIP_LOOP_BOUND) {
         cpu->r[2] = 0x5au;
-        expect(nk_ace_load_skip_wait(cpu) == 1, "ace load skip yield: each wait in the loop is skipped");
+        expect(nk_ace_load_skip_wait(cpu, "T", 0x08800000u) == 1, "ace load skip yield: each wait in the loop is skipped");
         s_ace_skip_v0 = cpu->r[2];
         s_ace_skip_iterations++;
         SR_YIELD(cpu, ACE_SKIP_WAITER_ENTRY);
@@ -44964,6 +44964,94 @@ static void test_ace_load_skip_wait_lets_a_lower_priority_thread_run(void) {
            "ace load skip yield: the waiter was in a delay wait while the loader ran");
     expect(s_ace_skip_v0 == 0u, "ace load skip yield: a skipped wait returns 0 in $v0");
     expect(ace_load_waits_skipped() == 1u, "ace load skip yield: the one skip is counted");
+    (void)ace_init_spec("off", NULL);
+    sr_test_guest_fn_reset();
+}
+
+/* The pacing guard (ENHANCEMENT_CONTRACT.md 11.3.10), through the real skip on a running
+ * scheduler: generated code calls nk_ace_load_update() where each logic update begins. A load
+ * tail (skips in three updates in a row, then updates without one) leaves the guard alone; a
+ * wait skipped in every update fires it once its run reaches ACE_LOAD_PACING_UPDATES, after
+ * which the skip steps aside (the stock call runs, $v0 untouched), nothing more is counted, and
+ * one ENHANCEMENT_LOAD_PACING line names the site. */
+enum { ACE_PACING_ENTRY = 0x08990380u, ACE_PACING_SITE_PC = 0x08804010u, ACE_PACING_TAIL = 3u };
+static volatile unsigned s_ace_pacing_skips[ACE_LOAD_PACING_UPDATES * 2u + ACE_PACING_TAIL];
+static volatile unsigned s_ace_pacing_tail_skips;
+static volatile unsigned s_ace_pacing_tail_run;
+static volatile int s_ace_pacing_tail_paced;
+static volatile int s_ace_pacing_v0_kept;
+
+static void ace_pacing_guest_fn(CpuState *cpu) {
+    /* The load tail: three waits in each of three updates, then updates without a skip. */
+    for (unsigned u = 0; u < ACE_PACING_TAIL; u++) {
+        nk_ace_load_update();
+        for (unsigned w = 0; w < 3u; w++)
+            s_ace_pacing_tail_skips += (unsigned)nk_ace_load_skip_wait(cpu, "SYNTH_LOAD_WAIT", ACE_PACING_SITE_PC);
+        SR_YIELD(cpu, ACE_PACING_ENTRY);
+    }
+    for (unsigned u = 0; u < 2u * ACE_LOAD_PACING_UPDATES; u++) nk_ace_load_update();
+    s_ace_pacing_tail_run = ace_load_skip_max_run();
+    s_ace_pacing_tail_paced = ace_load_paced();
+    /* The pacing wait: one skip asked in every update. */
+    s_ace_pacing_v0_kept = 1;
+    for (unsigned u = 0; u < sizeof(s_ace_pacing_skips) / sizeof(s_ace_pacing_skips[0]); u++) {
+        nk_ace_load_update();
+        cpu->r[2] = 0x5au;
+        s_ace_pacing_skips[u] = (unsigned)nk_ace_load_skip_wait(cpu, "SYNTH_LOAD_WAIT", ACE_PACING_SITE_PC);
+        if (!s_ace_pacing_skips[u] && cpu->r[2] != 0x5au) s_ace_pacing_v0_kept = 0;
+        SR_YIELD(cpu, ACE_PACING_ENTRY);
+    }
+    cpu->r[2] = 0u;
+}
+
+static void test_ace_load_skip_wait_stops_once_it_paces_updates(void) {
+    static const char k_load_fast[] =
+        "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;load=fast";
+    enum { UPDATES = (int)(sizeof(s_ace_pacing_skips) / sizeof(s_ace_pacing_skips[0])) };
+    char captured[4096];
+    FILE *capture = NULL;
+    int saved_fd = -1;
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    s_ace_pacing_tail_skips = 0u;
+    s_ace_pacing_tail_run = 0u;
+    s_ace_pacing_tail_paced = -1;
+    s_ace_pacing_v0_kept = 0;
+    for (int u = 0; u < UPDATES; u++) s_ace_pacing_skips[u] = 2u;
+    expect(ace_init_spec(k_load_fast, NULL) == 1, "ace load pacing: load=fast is on");
+    sr_test_register_guest_fn(ACE_PACING_ENTRY, ace_pacing_guest_fn);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+
+    int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    sched_run(ACE_PACING_ENTRY, 0u, 0u);
+    captured[0] = '\0';
+    if (capturing) hle_data_stderr_capture_end(capture, saved_fd, captured, sizeof(captured));
+
+    expect(s_ace_pacing_tail_skips == 3u * ACE_PACING_TAIL && s_ace_pacing_tail_run == ACE_PACING_TAIL &&
+               s_ace_pacing_tail_paced == 0,
+           "ace load pacing: a load tail skips every wait and leaves the guard alone");
+    int skipped = 0, stock_after = 1;
+    for (int u = 0; u < UPDATES; u++) {
+        if (u < (int)ACE_LOAD_PACING_UPDATES) skipped += s_ace_pacing_skips[u] == 1u;
+        else if (s_ace_pacing_skips[u] != 0u) stock_after = 0;
+    }
+    expect(skipped == (int)ACE_LOAD_PACING_UPDATES,
+           "ace load pacing: the pacing wait is skipped until its run reaches the threshold");
+    expect(stock_after && s_ace_pacing_v0_kept,
+           "ace load pacing: after the guard fired every wait runs its stock call, $v0 untouched");
+    expect(ace_load_paced() && ace_load_skip_max_run() == ACE_LOAD_PACING_UPDATES,
+           "ace load pacing: the guard fired at a run of the threshold");
+    expect(ace_load_waits_skipped() == 3u * ACE_PACING_TAIL + ACE_LOAD_PACING_UPDATES,
+           "ace load pacing: nothing is counted after the guard fired");
+    if (capturing) {
+        expect(count_occurrences(captured, "ENHANCEMENT_LOAD_PACING:") == 1 &&
+                   strstr(captured, "ENHANCEMENT_LOAD_PACING: site SYNTH_LOAD_WAIT at 0x08804010 ") != NULL,
+               "ace load pacing: one ENHANCEMENT_LOAD_PACING line names the site");
+    } else {
+        expect(0, "ace load pacing: stderr could be captured");
+    }
     (void)ace_init_spec("off", NULL);
     sr_test_guest_fn_reset();
 }
@@ -50605,6 +50693,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_wc_display_getmode_and_start_cb();
     test_ace_load_skip_wait_only_where_the_stock_call_blocks();
     test_ace_load_skip_wait_lets_a_lower_priority_thread_run();
+    test_ace_load_skip_wait_stops_once_it_paces_updates();
     test_psmf_rejected_stream_names_the_boundary();
     test_psmf_get_current_pts_after_stop_stops_by_name();
     test_psmf_start_reads_init_pts_from_the_third_argument();

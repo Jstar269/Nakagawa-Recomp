@@ -3030,6 +3030,7 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_CULL].key,
                      enhanced_part_word(PLAYER_PART_CULL, play->part[PLAYER_PART_CULL]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
     }
     return true;
 }

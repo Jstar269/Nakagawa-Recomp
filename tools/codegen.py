@@ -3846,7 +3846,11 @@ def normal_line(addr, w, lle_cpu=None, delay_branch_pc=None, options=None):
     line = _plain_line(addr, w, w, delay_branch_pc=delay_branch_pc,
                        options=options)
     if w is not None and _enhancement_boundary(addr):
-        # One logic update begins here: count it before the stock statement runs.
+        # One logic update begins here: count it before the stock statement runs. A package with
+        # an Ace load part also tells the runtime, ungated, so the part's pacing guard sees every
+        # update (contract 11.3.10); the call changes nothing unless the run's load=fast is on.
+        if ENHANCEMENT_ACE_SITES:
+            line = f"    nk_ace_load_update();\n{line}"
         line = f"    if (nk_enhancement_on()) {{ nk_enhancement_updates++; }}\n{line}"
     rw = _enhancement_rewrite(addr) if w is not None else None
     if rw is None:
@@ -4421,8 +4425,11 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
                 f"ace_parts site at 0x{addr:08x} has no rewrite here (fail-closed refusal)")
         # vblank_wait_skip (contract section 9.8): the delay slot above ran as stock. The call to
         # sceDisplayWaitVblankStart runs unless the runtime skips it (nk_ace_load_skip_wait(), on
-        # the run's Ace load part only, never nk_enhancement_on()); a skip sets $v0 itself.
-        out.append("    if (!nk_ace_load_skip_wait(s)) {")
+        # the run's Ace load part only, never nk_enhancement_on()); a skip sets $v0 itself. The
+        # site's id (SITE_ID_RE: no quote or backslash) and address name it in the pacing guard's
+        # line.
+        _ace_id = ENHANCEMENT_ACE_SITES[addr]["id"]
+        out.append(f'    if (!nk_ace_load_skip_wait(s, "{_ace_id}", {G(addr)})) {{')
         out.extend(_call_stmt.split("\n"))
         out.append("    }")
     elif _jal_rw is not None and _jal_rw["kind"] == "clip_x_widen":
@@ -6158,8 +6165,9 @@ def _verified_ace_part_sites(elf, pkg_validated, sym_map, read_words, known, bou
     a jal whose target is the primary image's import stub of sceDisplayWaitVblankStart, in a
     function other than the resolved update boundary's; any other target, a word another site
     or the update boundary rewrites, a package with no boundary, or a site in the boundary's
-    function by address (whatever name the package gives it) refuses the package. ``boundary``
-    is verify_and_resolve_update_boundary's result."""
+    function by address (whatever name the package gives it) refuses the package. No other
+    function is checked (a caller or callee of the boundary's passes; contract 11.3.10).
+    ``boundary`` is verify_and_resolve_update_boundary's result."""
     sites = enhancement_package.verify_and_resolve_ace_parts(
         pkg_validated, symbol_to_addr=sym_map, read_words_fn=read_words, known_functions=sorted(known),
     )

@@ -4511,9 +4511,11 @@ class TestAcePartsLoad(unittest.TestCase):
         body = "\n".join(files.values())
         stub = f"f_{self.stub_wait:08x}(s)"
         slot = f"sr_begin(s, 0x{self.loader + 12:08x}u, 0x{_ACE_SLOT_WORD:08x}u); s->r[4] = (s->r[4] + 0x00000007u);"
-        gate = "    if (!nk_ace_load_skip_wait(s)) {"
+        gate = f'    if (!nk_ace_load_skip_wait(s, "SYNTH_LOAD_WAIT", 0x{self.loader + 8:08x}u)) {{'
         skipped = "    }"
-        self.assertEqual(body.count("nk_ace_load"), 1)
+        hook = "    nk_ace_load_update();"
+        self.assertEqual(body.count("nk_ace_load_skip_wait"), 1)
+        self.assertEqual(body.count("nk_ace_load_update"), 1)
         lines = body.split("\n")
         at = lines.index(gate)
         self.assertIn(slot, lines[at - 1], "the delay slot runs as stock, before the gate")
@@ -4522,8 +4524,14 @@ class TestAcePartsLoad(unittest.TestCase):
         # Gated only by the Ace load part: never by the 60 Hz toggle or its update count.
         self.assertNotIn("nk_enhancement", "\n".join(lines[at - 1:at + 3]))
 
-        # The generated C differs from the build without the section only at that statement and in
-        # the declaration digest of the epoch stamp.
+        # The pacing guard's hook (section 11.3.10) sits at the update boundary, ungated, after the
+        # boundary's own count and before its stock statement.
+        at = lines.index(hook)
+        self.assertEqual(lines[at - 1], "    if (nk_enhancement_on()) { nk_enhancement_updates++; }")
+        self.assertIn(f"sr_begin(s, 0x{self.callee + 8:08x}u", lines[at + 1])
+
+        # The generated C differs from the build without the section only at that statement, at
+        # the boundary's hook and in the declaration digest of the epoch stamp.
         self.assertEqual(set(files), set(files0))
         changed: dict[str, list[str]] = {}
         for name in files:
@@ -4532,9 +4540,46 @@ class TestAcePartsLoad(unittest.TestCase):
             if delta:
                 changed[name] = delta
         self.assertEqual(set(changed), {"out.c", "out_0.c"}, changed)
-        self.assertEqual(changed["out_0.c"], ["+ " + gate, "+ " + skipped])
+        self.assertEqual(changed["out_0.c"], ["+ " + gate, "+ " + skipped, "+ " + hook])
         self.assertEqual(len(changed["out.c"]), 2)
         self.assertTrue(all("AOT Enhancement Epoch" in d and "sites=1 " in d for d in changed["out.c"]))
+
+    def test_a_wait_in_a_caller_of_the_boundary_is_accepted_and_counted_at_run_time(self) -> None:
+        """The static rule covers only the boundary's own function (section 11.3.10, "What the
+        tools check"). The fixture's loader calls the boundary's function, as a main loop calls
+        its update, and its wait is accepted by the validator and by codegen; what catches a site
+        that does pace updates is the run-time guard, fed by the boundary's ungated hook."""
+        pkg = self.package()
+        self.assertNotEqual(pkg["ace_parts"]["load"]["sites"][0]["function"], pkg["update_boundary"]["function"])
+        validate_package(copy.deepcopy(pkg))
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc, output, files = self._codegen(Path(tmp_dir), "caller", pkg, self.symbols())
+        self.assertEqual(rc, 0, output)
+        lines = "\n".join(files.values()).split("\n")
+        loader = next(i for i, line in enumerate(lines) if f"sr_begin(s, 0x{self.loader + 8:08x}u" in line)
+        self.assertTrue(any(f"f_{self.callee:08x}(s)" in line for line in lines[loader:]),
+                        "the loader calls the boundary's function")
+        self.assertEqual(sum(line == "    nk_ace_load_update();" for line in lines), 1)
+        # A package without ace_parts gets no hook: its build is unchanged.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc0, output0, files0 = self._codegen(Path(tmp_dir), "plain", self.package(ace=False), self.symbols())
+        self.assertEqual(rc0, 0, output0)
+        self.assertNotIn("nk_ace_load", "\n".join(files0.values()))
+
+    def test_contract_names_the_pacing_threshold_the_runtime_uses(self) -> None:
+        """Section 11.3.10 states the guard's threshold once, as src/rt/ace.h defines it, and no
+        longer claims the update counter is unaffected because of the static rule."""
+        header = (ROOT / "src" / "rt" / "ace.h").read_text(encoding="utf-8")
+        defined = re.search(r"^#define ACE_LOAD_PACING_UPDATES (\d+)u\b", header, re.M)
+        self.assertIsNotNone(defined, "ace.h defines ACE_LOAD_PACING_UPDATES")
+        assert defined is not None
+        contract = (ROOT / "docs" / "ENHANCEMENT_CONTRACT.md").read_text(encoding="utf-8")
+        section = contract[contract.index("#### 11.3.10."):]
+        following = re.search(r"\n#{1,4} ", section)
+        section = section[:following.start()] if following else section
+        stated = re.findall(r"`ACE_LOAD_PACING_UPDATES` \(`src/rt/ace\.h`, provisionally (\d+) updates", section)
+        self.assertEqual(stated, [defined.group(1)])
+        self.assertNotIn("is unaffected, because", " ".join(section.split()))
 
     def test_codegen_refuses_by_resolved_address(self) -> None:
         """The private form names functions through a symbol map, which may give one address two
@@ -4570,14 +4615,21 @@ class TestAcePartsLoad(unittest.TestCase):
 
     @unittest.skipUnless(GCC, "needs a host C compiler")
     def test_codegen_gate_runs_the_stock_call_or_skips_it(self) -> None:
-        """Compile the emitted statement and run it with the runtime's skip answering 0, then 1."""
+        """Compile the emitted statement and run it with the runtime's skip answering 0, then 1.
+
+        The harness stubs nk_ace_load_skip_wait itself, so this covers only the emitted statement.
+        The real one (its context check, 1 us delay wait, $v0 and the pacing guard) is covered in
+        tests/native/hle_thread_selftest.c (test_ace_load_skip_wait_only_where_the_stock_call_blocks,
+        test_ace_load_skip_wait_lets_a_lower_priority_thread_run and
+        test_ace_load_skip_wait_stops_once_it_paces_updates), and the guard's counting in
+        tests/native/ace_selftest.c."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
             rc, output, files = self._codegen(tmp, "ace", self.package(), self.symbols())
             self.assertEqual(rc, 0, output)
             lines = "\n".join(files.values()).split("\n")
             at = next(i for i, line in enumerate(lines) if f"sr_begin(s, 0x{self.loader + 8:08x}u" in line)
-            gate = lines.index("    if (!nk_ace_load_skip_wait(s)) {")
+            gate = lines.index(f'    if (!nk_ace_load_skip_wait(s, "SYNTH_LOAD_WAIT", 0x{self.loader + 8:08x}u)) {{')
             self.assertEqual(lines[gate + 2], "    }")
             statement = "\n".join(lines[at:gate + 3])
             stub = f"f_{self.stub_wait:08x}"
@@ -4591,7 +4643,9 @@ class TestAcePartsLoad(unittest.TestCase):
                 "#define sr_aot_return_boundary_end(s) 0\n"
                 "static int skip; static unsigned asked, waited;\n"
                 "/* As src/rt/hle_display.c: a skip leaves $v0 = 0. */\n"
-                "int nk_ace_load_skip_wait(CpuState *s) { asked++; if (skip) s->r[2] = 0u; return skip; }\n"
+                "int nk_ace_load_skip_wait(CpuState *s, const char *site, uint32_t pc) {\n"
+                "    (void)site; (void)pc; asked++; if (skip) s->r[2] = 0u; return skip;\n"
+                "}\n"
                 f"static void {stub}(CpuState *s) {{ waited++; s->r[2] = 0x5au; }}\n"
                 f"static void site(CpuState *s) {{\n{statement}\n}}\n"
                 "int main(void) {\n"

@@ -352,12 +352,13 @@ that a player turns on or off apart from the 60 FPS game logic. The field is an 
 - **Their own switch.** A part site is gated at run time only by its part's `SR_ACE` key (section 10.1), never by
   `SR_EXPERIMENTAL_60HZ` or the update count. With the key off the stock statement runs. A package without
   `ace_parts` generates exactly the code it generated before; with them, the generated C differs only at each part
-  site's statement and in the declaration digest, which covers `ace_parts` like every other field, so the AOT cache
-  key changes with it.
+  site's statement, at the `update_boundary`'s statement, which also calls `nk_ace_load_update()` for the `load`
+  part's pacing guard (section 11.3.10), and in the declaration digest, which covers `ace_parts` like every other
+  field, so the AOT cache key changes with it.
 
 | Transform | Instructions with a defined rewrite | Rewrite |
 | --- | --- | --- |
-| `vblank_wait_skip` | `jal` whose target is the executable's import stub of `sceDisplayWaitVblankStart` (NID `0x984C27E7`); any other target refuses the package | the delay slot runs as stock; the call runs unless the runtime skips it (`nk_ace_load_skip_wait()`), which it does only while the run's `load=fast` is in effect and waits are permitted, that is, where the stock call would block. A skipped call still blocks the thread, for 1 µs, the shortest delay wait the scheduler has (that of `sceKernelDelayThread(1)`), so ready threads of any priority run as during the stock wait, and it leaves `$v0` = 0, the stock function's return there. Where waits are not permitted the stock call runs and returns `CAN_NOT_WAIT`. A package with a `load` part must declare an `update_boundary`, and the site may not be in its function, compared by name, by site-map address in a published package, and by resolved address in codegen |
+| `vblank_wait_skip` | `jal` whose target is the executable's import stub of `sceDisplayWaitVblankStart` (NID `0x984C27E7`); any other target refuses the package | the delay slot runs as stock; the call runs unless the runtime skips it (`nk_ace_load_skip_wait()`), which it does only while the run's `load=fast` is in effect and waits are permitted, that is, where the stock call would block. A skipped call still blocks the thread, for 1 µs, the shortest delay wait the scheduler has (that of `sceKernelDelayThread(1)`), so ready threads of any priority run as during the stock wait, and it leaves `$v0` = 0, the stock function's return there. Where waits are not permitted the stock call runs and returns `CAN_NOT_WAIT`. A package with a `load` part must declare an `update_boundary`, and the site may not be in its function, compared by name, by site-map address in a published package, and by resolved address in codegen. Nothing else about where the site sits is checked: a wait in a caller or a callee of the boundary's function is accepted, and the site's own evidence must show it is reached only while loading (section 11.3.10) |
 
 ## 10. Play Modes: Authentic, Enhanced and Ace
 
@@ -1535,8 +1536,8 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   `sceDisplayWaitVblankStart` import stub, by symbolic function and offset with the stock word's digest (section 9.8).
   The site's delay slot runs as stock. Generated code then asks `nk_ace_load_skip_wait()` (`src/rt/hle_display.c`). It
   skips the call only where the stock call would block: waits are permitted (interrupts and thread dispatch are
-  enabled), and the run's line carries `load=fast` (`nk_ace_load_fast()`, `src/rt/ace.c`, which counts the skip).
-  Then the call is not made. The thread instead blocks for 1 µs, the shortest delay wait the scheduler has (that of
+  enabled), the run's line carries `load=fast` (`nk_ace_load_fast()`, `src/rt/ace.c`, which counts the skip), and
+  the pacing guard (below) has not fired. Then the call is not made. The thread instead blocks for 1 µs, the shortest delay wait the scheduler has (that of
   `sceKernelDelayThread(1)`); for that moment it is visibly in a delay wait, not a display wait. Ready threads of any
   priority, lower ones included, can then run as they would during the stock wait, and the waiter resumes at its
   next scheduling point instead of the next VBLANK. A zero delay or a ready-queue rotation would not do this: on the
@@ -1549,8 +1550,9 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   off, any other value is refused, and `load=fast` is refused unless the line carries `tier=ace`. The player has a
   library setting and a per-title setting, "Short loads", each able to turn it off alone (section 11.2,
   item 2); the line carries `;load=fast` only for an Ace launch with the part on, so every other line is as it was.
-  The run names it (`ACE_MODE: load fast (...)` at start, `ACE_MODE: load waits skipped <n>` at exit, the report's
-  `load` and `load_waits_skipped`), and confirms it the first time a declared wait is skipped. A run that asked for
+  The run names it (`ACE_MODE: load fast (...)` at start, `ACE_MODE: load waits skipped <n> (longest run <m> logic
+  updates; ...)` at exit, the report's `load`, `load_waits_skipped`, `load_skip_max_run` and `load_paced`), and
+  confirms it the first time a declared wait is skipped. A run that asked for
   it and never reached a site reports it unavailable at exit (`ACE_MODE: load unavailable (...)`, the report's
   `unavailable.load`): the title's build has no load part, or none of its declared waits ran.
 - **What it changes:** only the declared display waits, and only while the key is on and the wait would block: each
@@ -1567,14 +1569,31 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   advances sees fewer VBLANKs per pass of the loop.
 - **Timing:** differs: each skipped wait shortens its pass of the loop by up to one VBLANK of guest time, and the
   loading stretch ends sooner in host time. The VBLANK schedule, the RTC and system time, the media clocks and the GE
-  timing model are unchanged. The logic update counter of section 9.5 is unaffected, because a package with a load part must
-  declare an `update_boundary` and a site may not sit in its function, under any name for that function's address.
-  Limit: that check is static and covers only that function; a wait in a loop that
-  reaches the boundary through its callees cannot be checked statically, so the package author shows that each
-  declared wait paces only a loading screen (below).
+  timing model are unchanged. A skipped wait that paced logic updates would run them unpaced, so the logic update
+  counter of section 9.5 is unaffected only if each declared wait is reached only while loading.
+- **What the tools check.** A package with a load part must declare an `update_boundary`, and no site may sit in
+  the boundary's own function: the validator compares function names, and site-map addresses in a published
+  package, and codegen compares resolved addresses, so a second name for that function does not pass. That is all
+  they check. Nothing walks the call graph: a wait in a function that calls the boundary's function (a main loop
+  that calls the update) or in one that function calls in every update (a present or flip helper) is accepted.
+  Keeping such waits out rests on the site's own evidence (package obligation 1, below); the pacing guard only
+  limits the damage at run time.
+- **Pacing guard.** A package with a load part also calls `nk_ace_load_update()` at its `update_boundary`, ungated;
+  it does nothing unless the run's `load=fast` is in effect, so every other run is unchanged. The runtime counts the
+  consecutive logic updates in each of which at least one declared wait was skipped. When that run reaches
+  `ACE_LOAD_PACING_UPDATES` (`src/rt/ace.h`, provisionally 8 updates, not yet set against a measured run of the
+  title), the site paces updates, not a load: nothing is skipped for the rest of the run, so every declared wait
+  runs its stock call, and one `ENHANCEMENT_LOAD_PACING:` line names the site, by id and by its `jal`'s address,
+  whose skip reached the threshold. The report's `load_skip_max_run` is the longest run seen and `load_paced` says
+  whether the guard fired; the exit line names both. Until it fires, a pacing site runs that many updates unpaced,
+  so the guard does not replace the evidence of obligation 1.
 - **I/O speed:** unchanged. Reads take what they take; only the display waits between them are shorter.
 - **Package obligations.** The mechanism cannot check these, so the package author shows them for the title: (1)
-  each declared wait paces a loading screen only, not a loop that runs or reaches a logic update; (2) the loop makes
+  each declared wait paces a loading screen only, not a loop that runs or reaches a logic update. The tools check
+  only the boundary's own function (above), so the declaration shows that each wait is reached only while loading:
+  the site's callers up to the title's main loop, from its decompilation or disassembly, and a run with `load=fast`
+  through the title's loads and play whose report shows `load_paced` false and a `load_skip_max_run` below the
+  guard's threshold; (2) the loop makes
   progress without a VBLANK: it ends on the load's own completion, not on a count of VBLANKs it waited for; (3) nothing
   the title keeps after the load depends on how many VBLANKs passed during it.
 - **Limits.** It skips only the waits a package declares: a loading screen paced by another wait

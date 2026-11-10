@@ -204,6 +204,10 @@ static int s_confirmed[ACE_FEATURE_COUNT];
 static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
 static unsigned long long s_load_skipped;
+static unsigned s_load_run;          /* consecutive logic updates with a skip, this one included */
+static unsigned s_load_run_max;
+static int s_load_update_skipped;    /* a wait was skipped since the last update began */
+static int s_load_paced;             /* the guard fired: nothing is skipped for the rest of the run */
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
     "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "load", "cull"
@@ -266,6 +270,10 @@ int ace_init_spec(const char *spec, const char *report_path) {
     s_af_failures = 0;
     s_cull_untracked = 0;
     s_load_skipped = 0;
+    s_load_run = 0;
+    s_load_run_max = 0;
+    s_load_update_skipped = 0;
+    s_load_paced = 0;
     s_af_device = 0;
     s_report_path[0] = '\0';
     snprintf(s_spec, sizeof(s_spec), "off");
@@ -325,14 +333,33 @@ void ace_set_cull_untracked(unsigned long n) {
     if (g_ace_on) s_cull_untracked = n;
 }
 
-int nk_ace_load_fast(void) {
+int nk_ace_load_fast(const char *site, uint32_t pc) {
     if (!g_ace_on || !s_eff.load) return 0;
     s_confirmed[ACE_FEATURE_LOAD] = 1;   /* a declared wait was reached with the part on */
+    if (s_load_paced) return 0;          /* the guard fired: the stock call runs */
+    if (!s_load_update_skipped) {
+        s_load_update_skipped = 1;
+        if (++s_load_run > s_load_run_max) s_load_run_max = s_load_run;
+    }
     s_load_skipped++;
+    if (s_load_run >= ACE_LOAD_PACING_UPDATES) {
+        s_load_paced = 1;
+        fprintf(stderr, "ENHANCEMENT_LOAD_PACING: site %s at 0x%08x was skipped in %u logic updates in a row, "
+                        "so it paces logic updates, not a load; every load wait runs as stock for the rest "
+                        "of the run\n", site ? site : "?", (unsigned)pc, s_load_run);
+    }
     return 1;
 }
 
+void nk_ace_load_update(void) {
+    if (!g_ace_on || !s_eff.load || s_load_paced) return;
+    if (!s_load_update_skipped) s_load_run = 0;   /* the update that ended skipped nothing */
+    s_load_update_skipped = 0;
+}
+
 unsigned long long ace_load_waits_skipped(void) { return s_load_skipped; }
+unsigned ace_load_skip_max_run(void) { return s_load_run_max; }
+int ace_load_paced(void) { return s_load_paced; }
 
 void ace_confirm(AceFeature feature) {
     if (g_ace_on && (unsigned)feature < ACE_FEATURE_COUNT) s_confirmed[feature] = 1;
@@ -806,8 +833,10 @@ size_t ace_report_json(char *out, size_t cap) {
             s_eff.af, s_eff.text ? "true" : "false", s_eff.readout ? "true" : "false",
             s_eff.notice ? "true" : "false", wide_word(s_eff.wide), smooth_word(s_eff.smooth),
             sas_word(s_eff.sas), tess_word(s_eff.tess));
-    if (s_req.load) ACE_PUT("  \"load\": %s,\n  \"load_waits_skipped\": %llu,\n",
-                            s_eff.load ? "true" : "false", s_load_skipped);
+    if (s_req.load) ACE_PUT("  \"load\": %s,\n  \"load_waits_skipped\": %llu,\n  \"load_skip_max_run\": %u,\n"
+                            "  \"load_paced\": %s,\n",
+                            s_eff.load ? "true" : "false", s_load_skipped, s_load_run_max,
+                            s_load_paced ? "true" : "false");
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
     ACE_PUT("  \"unavailable\": {");
@@ -901,7 +930,9 @@ void ace_finish(void) {
     }
     size_t len = ace_report_json(json, sizeof(json));
     fprintf(stderr, "ACE_MODE: exit (%s; rate %s)\n", s_spec, ace_rate_name(dominant_rate()));
-    if (s_req.load) fprintf(stderr, "ACE_MODE: load waits skipped %llu\n", s_load_skipped);
+    if (s_req.load) fprintf(stderr, "ACE_MODE: load waits skipped %llu (longest run %u logic updates; %s)\n",
+                            s_load_skipped, s_load_run_max,
+                            s_load_paced ? "paced updates, skipping stopped" : "no pacing seen");
     if (s_req.smooth && s_have_aux_stats) {
         const AceSmoothAuxStats *a = &s_aux_stats;
         fprintf(stderr, "ACE_MODE: smooth inputs (pairs %llu: HUD mask %llu, depth %llu; HUD boxes kept "

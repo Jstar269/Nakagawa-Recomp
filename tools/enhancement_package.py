@@ -777,7 +777,9 @@ def _check_ace_part_namespace(data: Mapping[str, Any], fn_key: Any, how: str) ->
     words) or the ``update_boundary`` covers, or on another part site's word, and a
     ``vblank_wait_skip`` site in the boundary's function. ``fn_key`` maps a function name to
     what identifies the function: the name itself, or a published site map's address, so that
-    two names for one address are one function."""
+    two names for one address are one function. Only that function is checked: nothing walks
+    the call graph, so a wait in a caller or a callee of it passes here and rests on the site's
+    own evidence (contract section 11.3.10, "What the tools check")."""
     def word(fn: str, offset: int) -> tuple[Any, int]:
         key = fn_key(fn)
         # An address names the word itself; a name stays paired with its offset.

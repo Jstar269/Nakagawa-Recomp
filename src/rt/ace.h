@@ -129,10 +129,27 @@ void ace_set_cull_untracked(unsigned long n);
  * skipped. Each nonzero return is one skipped wait, counted
  * for the report (load_waits_skipped), and confirms the part. A run that asked for load=fast and
  * never reached a site reports it unavailable at exit: the title's build has no load part, or
- * none of its declared waits ran. */
-int nk_ace_load_fast(void);
+ * none of its declared waits ran. site and pc name the declared site (its id and the jal's
+ * address) in the guard's line below.
+ *
+ * The pacing guard (contract 11.3.10): a load wait is skipped in a loading screen, not in every
+ * logic update, so the run counts consecutive logic updates (nk_ace_load_update(), which
+ * generated code calls where each one begins) in each of which at least one wait was skipped.
+ * When that run reaches ACE_LOAD_PACING_UPDATES, the skipped wait paces updates, not a load: from
+ * then on nothing is skipped for the rest of the run, so every declared wait runs its stock call,
+ * and one "ENHANCEMENT_LOAD_PACING:" line names the site whose skip reached it. The report carries
+ * the longest run seen (load_skip_max_run) and whether the guard fired (load_paced). */
+#define ACE_LOAD_PACING_UPDATES 8u
+int nk_ace_load_fast(const char *site, uint32_t pc);
+/* One logic update begins (the package's update_boundary): ends the previous update's part of
+ * the guard's run. Does nothing unless load=fast is in effect. */
+void nk_ace_load_update(void);
 /* The waits nk_ace_load_fast() has skipped in this run. */
 unsigned long long ace_load_waits_skipped(void);
+/* The longest run of consecutive logic updates with a skipped wait, and whether it reached
+ * ACE_LOAD_PACING_UPDATES (skipping then stopped for the rest of the run). */
+unsigned ace_load_skip_max_run(void);
+int ace_load_paced(void);
 /* An anisotropic sampler the renderer could not make: that draw kept the plain one. */
 void ace_note_af_failure(void);
 /* The pause menu's live Speed readout switch (Ace on only; a readout this host cannot draw

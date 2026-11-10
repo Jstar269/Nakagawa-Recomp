@@ -214,6 +214,9 @@ static void cell_parse(void) {
 
 /* ---- the run's switch and its silence ------------------------------------------------------- */
 
+/* One declared load wait, as generated code names it to nk_ace_load_skip_wait(). */
+static int load_fast(void) { return nk_ace_load_fast("SYNTH_LOAD_WAIT", 0x08804010u); }
+
 static void cell_switch(void) {
     AceCounters n;
     CHECK(ace_init_spec(NULL, NULL) == 0 && g_ace_on == 0, "unset is off");
@@ -303,8 +306,8 @@ static void cell_switch(void) {
        would block (src/rt/hle_display.c, tested in hle-thread-selftest). Off, and in an
        Enhanced or authentic run, it never skips; on, each call skips one wait, counted in the
        report, and a run that never reached a wait reports the part unavailable at exit. */
-    CHECK(ace_init_spec("off", NULL) == 0 && nk_ace_load_fast() == 0, "an authentic run skips no wait");
-    CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->load == 0 && nk_ace_load_fast() == 0 &&
+    CHECK(ace_init_spec("off", NULL) == 0 && load_fast() == 0, "an authentic run skips no wait");
+    CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->load == 0 && load_fast() == 0 &&
           ace_load_waits_skipped() == 0, "an Enhanced run without load skips no wait");
     CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"load") == NULL,
           "a run without load reports none:\n%s", json);
@@ -315,7 +318,7 @@ static void cell_switch(void) {
           "the stamp's line carries load=fast: '%s'", ace_spec_text());
     CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "short loads") == 0,
           "load feature words: '%s'", words);
-    CHECK(nk_ace_load_fast() == 1 && nk_ace_load_fast() == 1 && nk_ace_load_fast() == 1 &&
+    CHECK(load_fast() == 1 && load_fast() == 1 && load_fast() == 1 &&
           ace_load_waits_skipped() == 3, "each call skips one wait and is counted");
     CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"load\": true") != NULL &&
           strstr(json, "\"load_waits_skipped\": 3") != NULL, "the report counts skipped waits:\n%s", json);
@@ -323,7 +326,7 @@ static void cell_switch(void) {
     CHECK(ace_effective()->load == 1 && ace_report_json(json, sizeof(json)) > 0 &&
           strstr(json, "\"unavailable\": {}") != NULL, "a load run that skipped waits is not unavailable:\n%s", json);
     ace_feature_unavailable(ACE_FEATURE_LOAD, "test");
-    CHECK(ace_effective()->load == 0 && ace_requested()->load == 1 && nk_ace_load_fast() == 0 &&
+    CHECK(ace_effective()->load == 0 && ace_requested()->load == 1 && load_fast() == 0 &&
           ace_load_waits_skipped() == 3, "an unavailable load skips no more waits");
     CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;"
                         "load=fast", NULL) == 1 && ace_load_waits_skipped() == 0, "a new run counts from 0");
@@ -332,6 +335,60 @@ static void cell_switch(void) {
           strstr(json, "\"load\": false") != NULL && strstr(json, "\"load_waits_skipped\": 0") != NULL &&
           strstr(json, "\"load\": \"did not run: this title's build declares no load part") != NULL,
           "a load run that reached no wait reports it unavailable:\n%s", json);
+
+    /* The pacing guard (contract 11.3.10): nk_ace_load_update() marks where each logic update
+       begins. A load tail skips waits in a few updates in a row and then none; a wait that paces
+       updates is skipped in every one, and once that run reaches ACE_LOAD_PACING_UPDATES nothing
+       more is skipped or counted for the rest of the run. */
+    {
+        const unsigned k = ACE_LOAD_PACING_UPDATES;
+        CHECK(k >= 2u, "the threshold leaves room for a load tail");
+        CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;"
+                            "tier=ace;load=fast", NULL) == 1 && ace_load_skip_max_run() == 0 && !ace_load_paced(),
+              "a new run starts with no run and the guard unfired");
+        for (unsigned u = 0; u < 3u; u++) {
+            nk_ace_load_update();
+            CHECK(load_fast() == 1 && load_fast() == 1 && load_fast() == 1,
+                  "load tail: update %u skips its three waits", u);
+        }
+        for (unsigned u = 0; u < 4u * k; u++) nk_ace_load_update();
+        CHECK(ace_load_skip_max_run() == 3u && !ace_load_paced() && ace_load_waits_skipped() == 9u,
+              "load tail: three updates with skips, then none: run %u, paced %d",
+              ace_load_skip_max_run(), ace_load_paced());
+        for (unsigned u = 0; u + 1u < k; u++) {
+            nk_ace_load_update();
+            CHECK(load_fast() == 1, "a run one short of the threshold skips its waits (update %u)", u);
+        }
+        nk_ace_load_update();
+        nk_ace_load_update();
+        CHECK(ace_load_skip_max_run() == k - 1u && !ace_load_paced(),
+              "a run one update short of the threshold does not fire the guard: run %u", ace_load_skip_max_run());
+        const unsigned long long before = ace_load_waits_skipped();
+        for (unsigned u = 0; u < k; u++) {
+            nk_ace_load_update();
+            CHECK(load_fast() == 1, "pacing: update %u still skips before the run reaches the threshold", u);
+        }
+        CHECK(ace_load_paced() && ace_load_skip_max_run() == k && ace_load_waits_skipped() == before + k,
+              "pacing: a skip in each of %u updates in a row fires the guard: run %u, paced %d",
+              k, ace_load_skip_max_run(), ace_load_paced());
+        for (unsigned u = 0; u < k; u++) {
+            nk_ace_load_update();
+            CHECK(load_fast() == 0, "after the guard fired the stock call runs (update %u)", u);
+        }
+        CHECK(ace_load_waits_skipped() == before + k && ace_load_skip_max_run() == k,
+              "after the guard fired nothing more is skipped or counted");
+        CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"load\": true") != NULL &&
+              strstr(json, "\"load_paced\": true") != NULL,
+              "the report says the guard fired:\n%s", json);
+        char want[48];
+        snprintf(want, sizeof(want), "\"load_skip_max_run\": %u,", k);
+        CHECK(strstr(json, want) != NULL, "the report carries the longest run (%s):\n%s", want, json);
+        CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;"
+                            "tier=ace;load=fast", NULL) == 1 && !ace_load_paced() && ace_load_skip_max_run() == 0 &&
+              load_fast() == 1, "a new run clears the guard");
+        CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"load_skip_max_run\": 1,") != NULL &&
+              strstr(json, "\"load_paced\": false") != NULL, "an unfired guard is reported:\n%s", json);
+    }
 
     /* tess=4 (#2053): named in the words, the stamp's line and the report; off with its feature;
        off in the canonical line and in an authentic run. */
