@@ -6100,6 +6100,117 @@ static void test_loadexec_retires_scheduler_world(void) {
            "replacement root starts with its own module $gp");
 }
 
+/* ---- fast forward (recomp.h) ----------------------------------------------------------- */
+
+static void ff_reset(void) {
+    s_ff_speed = 1u;
+    s_ff_host_anchor_ns = 0u;
+    s_ff_pace_anchor_ns = 0u;
+    s_ff_epoch = 0u;
+    ace_ff_hold(0);
+    if (ace_ff_requested()) ace_ff_toggle();
+}
+
+/* The keys change nothing in an Authentic run or on the turbo clock. In an Enhanced or Ace run
+ * on the paced clock, guest time runs SCHED_FAST_FORWARD_SPEED times the host clock from the
+ * VBLANK that applies it, continuous across each change, VBLANK waits take that share of host
+ * time, and the pause and a released key bring it back to the host rate. */
+static void test_fast_forward_paces_the_guest_clock(void) {
+    const int ace_was = g_ace_on;
+    reset_sched();
+    ff_reset();
+    begin_clock_fixture(1, 0u);
+    disable_vblank_sources();
+    s_det_clock = 0;
+    s_pause_active = 0;
+
+    g_ace_on = 0;
+    ace_ff_hold(1);
+    ace_ff_toggle();
+    set_host_us(1000u);
+    vblank_pace();
+    expect(!sched_fast_forward_on() && sched_fast_forward_epoch() == 0u,
+           "fast forward: an Authentic run ignores the hold and the toggle");
+    expect(pace_ns() == g_test_host_ns,
+           "fast forward: never used, the paced clock is the host clock exactly");
+    ace_ff_toggle();
+    ace_ff_hold(0);
+
+    g_ace_on = 1;
+    vblank_pace();
+    expect(!sched_fast_forward_on(), "fast forward: no key, no fast forward in an Ace run");
+
+    /* Hold: applied at the next VBLANK, which then waits a third of the host time. */
+    const uint64_t deadline = s_vbl_next_ns;
+    const uint64_t host_at_switch = g_test_host_ns;
+    ace_ff_hold(1);
+    vblank_pace();
+    expect(sched_fast_forward_on() && sched_fast_forward_epoch() == 1u,
+           "fast forward: the hold starts it at the next VBLANK");
+    expect(s_ff_pace_anchor_ns == host_at_switch,
+           "fast forward: guest time is continuous where it starts");
+    expect(g_test_host_ns - host_at_switch ==
+               (deadline - host_at_switch) / SCHED_FAST_FORWARD_SPEED,
+           "fast forward: the VBLANK wait takes the fast-forward share of host time");
+    const uint64_t p0 = pace_ns();
+    const uint64_t h0 = g_test_host_ns;
+    g_test_host_ns = h0 + 3000000u;
+    expect(pace_ns() - p0 == 3000000u * SCHED_FAST_FORWARD_SPEED,
+           "fast forward: 3 ms of host time is SCHED_FAST_FORWARD_SPEED times that of guest time");
+    vtime_refresh();
+    expect(s_vtime_us == (pace_ns() - s_clock_epoch_ns) / 1000u,
+           "fast forward: guest virtual time samples the paced clock");
+
+    /* The pause runs at the host rate: its entry drops to speed 1 where guest time stands, and
+     * its exit shifts the anchors by the host interval, so no guest time passes while paused. */
+    const uint64_t p_pause = pace_ns();
+    const uint64_t vtime_pause = host_us();
+    const uint64_t t0 = sched_pause_begin();
+    expect(!sched_fast_forward_on(), "fast forward: off while paused");
+    expect(s_ff_pace_anchor_ns == p_pause, "fast forward: guest time is continuous into the pause");
+    g_test_host_ns += 2000000u;
+    sched_pause_end(t0, SR_PAUSE_EXIT_RESUME);
+    expect(host_us() == vtime_pause, "fast forward: no guest time passes while paused");
+
+    /* Released, then the toggle: a second start counts. */
+    ace_ff_hold(0);
+    vblank_pace();
+    expect(!sched_fast_forward_on(), "fast forward: releasing the hold stops it");
+    ace_ff_toggle();
+    vblank_pace();
+    expect(sched_fast_forward_on() && sched_fast_forward_epoch() == 2u,
+           "fast forward: the toggle starts it again");
+    ace_ff_toggle();
+    vblank_pace();
+    expect(!sched_fast_forward_on(), "fast forward: the toggle stops it");
+
+    /* A run on the deterministic clock has no paced clock, so its VBLANK returns where the turbo
+     * clock's does (below); the gate's own deterministic term refuses it even on a paced clock. */
+    reset_sched();
+    ff_reset();
+    begin_clock_fixture(1, 0u);
+    disable_vblank_sources();
+    s_det_clock = 1;
+    ace_ff_hold(1);
+    vblank_pace();
+    expect(!sched_fast_forward_on() && sched_fast_forward_epoch() == 0u,
+           "fast forward: the deterministic clock ignores the hold");
+    s_det_clock = 0;
+
+    /* The turbo clock never fast forwards: the VBLANK returns before the paced clock. */
+    reset_sched();
+    ff_reset();
+    begin_clock_fixture(0, 0u);
+    disable_vblank_sources();
+    ace_ff_hold(1);
+    vblank_pace();
+    expect(!sched_fast_forward_on(), "fast forward: the turbo clock ignores the hold");
+
+    ff_reset();
+    s_host_ns_fn = NULL;
+    g_ace_on = ace_was;
+}
+
 int main(int argc, char **argv) {
     g_self_path = argv[0];
     if (argc > 1 && strcmp(argv[1], "--test-pace-setup") == 0) {
@@ -6212,6 +6323,7 @@ int main(int argc, char **argv) {
     test_module_start_thread_uses_declared_parameters();
     test_module_start_thread_is_deleted_on_return();
     test_paced_vtime_is_host_anchored();
+    test_fast_forward_paces_the_guest_clock();
     test_idle_wait_runs_a_wait_that_came_due();
     test_paced_vblank_has_one_authority();
     test_busy_guest_observes_every_display_period();

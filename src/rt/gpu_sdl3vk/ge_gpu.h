@@ -35,7 +35,7 @@ extern "C" {
  * failure nothing is registered and the software rasterizer runs unchanged. */
 int  gegpu_init(void);
 
-/* GE sync points ("listend", "loadclut"); the backend decides what each requires.
+/* GE sync points ("listend", "xfersrc"); the backend decides what each requires.
  * Safe to call when idle/uninitialized. */
 void gegpu_flush(const char *reason);
 

@@ -189,6 +189,7 @@
               "count_x2_even",
               "gate_30hz_hold",
               "gate_30hz_alt",
+              "gate_30hz_store",
               "clip_x_widen"
             ],
             "description": "Declarative site transform class: a frame-rate rescale, or (clip_x_widen, category guest_memory_code_hook only) a widening of the title's own visibility test (contract section 10.8)."

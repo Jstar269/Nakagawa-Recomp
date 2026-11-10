@@ -7204,9 +7204,9 @@ static int ge_cmd_texture(uint32_t cmd, uint32_t data) {
                 ge_cpu_profile_end(GE_CPU_CLUT_LOAD, profile_started);
                 break;
             }
-            /* CLUT sourced from VRAM may read pixels the GPU backend hasn't written back. */
-            if (s_gpu && s_gpu->flush && (ge.clut_addr & 0x0F000000u) == 0x04000000u)
-                s_gpu->flush("loadclut");
+            /* A CLUT in VRAM may lie under pixels the GPU backend has not written back. Both
+             * reads below materialize exactly the `bytes` they read, as a CPU read does:
+             * ge_read_span for the span, MEM_R32 for each word. */
             const uint8_t *clut_src = ge_read_span(ge.clut_addr, bytes);
             if (clut_src) {
                 memcpy(ge.clutram, clut_src, bytes);

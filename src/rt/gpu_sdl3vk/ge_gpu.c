@@ -70,6 +70,10 @@
  *    other states take the software rasterizer. A stencil state whose result depends on
  *    the stencil it overwrites (stencil_reads_own_writes) never shares a batch between
  *    primitives whose boxes meet, so each reads a snapshot holding the ones before it.
+ *    The exception is a write-once state (stencil_write_once): the first fragment to pass
+ *    at a pixel stores a stencil that rejects every later one, so the pixel is that fragment
+ *    over the destination from before the run. Its primitives share the batch and are drawn
+ *    last to first against one snapshot, which leaves ge.c's first fragment on top.
  *    An 8888 state whose test always passes and whose stored stencil is the old one or a
  *    constant (stencil_fixed_alpha) reads no destination: the colour mask keeps the
  *    stencil, the shader writes the constant as alpha, or, blended, the alpha blend factors
@@ -249,6 +253,9 @@ typedef struct {
      * twin of the same image instead. */
     struct Target *tsrc;
     uint8_t tsnap, tvar;
+    /* 1: a write-once stencil state (stencil_write_once). Primitives that overlap share the batch,
+     * and the snapshot path draws its triangles last to first (submit_range). */
+    uint8_t once;
     /* With a scaled copy bound (tex_scale.h): the entry's unscaled set, which a draw that maps one
      * texel to one pixel binds instead (xs_onetoone_plain). VK_NULL_HANDLE otherwise. */
     VkDescriptorSet dset_plain;
@@ -370,10 +377,12 @@ typedef struct Target {
      * [lo, hi) VRAM-offset byte spans (target_note_cpu_write, target_sync_cpu_writes). */
     uint32_t cpu_lo[TARGET_CPU_SPANS], cpu_hi[TARGET_CPU_SPANS];
     int cpu_n;
-    /* Rows [draw_y0, draw_y1) the GPU drew since guest VRAM last matched. The GE has no buffer
-     * height: FB_H is the image's, and what a title keeps below its target, vertices for one,
-     * is not the target's. Every other row of the image equals guest VRAM. */
-    int draw_y0, draw_y1;
+    /* The box [draw_x0, draw_x1) x [draw_y0, draw_y1) the GPU drew since guest VRAM last
+     * matched. The GE has no buffer height: FB_H is the image's, and what a title keeps below its
+     * target, vertices for one, is not the target's. Nor are the columns beside the box: a title
+     * may keep palettes in the stride padding of the rows it draws. Every pixel of the image
+     * outside the box equals guest VRAM. */
+    int draw_x0, draw_y0, draw_x1, draw_y1;
     /* The host twin (s_twin only): a host-only image at the twin's scale that every write to
      * `img` also reaches, drawn with the Enhanced picture options; the presenter shows it.
      * Guest VRAM is read from and written to `img` alone. wgen counts img's writes, tgen the
@@ -403,25 +412,53 @@ static VkDescriptorPool s_dpool_rmw = VK_NULL_HANDLE;
 static PipeEnt *s_rmw_pipes = NULL;
 static int s_rmw_pipe_n = 0, s_rmw_pipe_cap = 0;
 static unsigned long long s_cnt_rmw_ops = 0, s_cnt_rmw_batches = 0, s_cnt_rmw_breaks = 0;
+/* Write-once stencil batches drawn last to first, and their triangles (submit_range). */
+static unsigned long long s_cnt_once_batches = 0, s_cnt_once_tris = 0;
 static VkImageUsageFlags s_target_usage = 0;              /* the last colour target's usage */
 
-static void target_note_drawn(Target *t, int y0, int y1) {
-    if (y0 >= y1) return;
-    if (t->draw_y0 >= t->draw_y1) { t->draw_y0 = y0; t->draw_y1 = y1; return; }
+static void target_note_drawn(Target *t, int x0, int y0, int x1, int y1) {
+    if (x0 >= x1 || y0 >= y1) return;
+    if (t->draw_x0 >= t->draw_x1 || t->draw_y0 >= t->draw_y1) {
+        t->draw_x0 = x0; t->draw_y0 = y0; t->draw_x1 = x1; t->draw_y1 = y1;
+        return;
+    }
+    if (x0 < t->draw_x0) t->draw_x0 = x0;
     if (y0 < t->draw_y0) t->draw_y0 = y0;
+    if (x1 > t->draw_x1) t->draw_x1 = x1;
     if (y1 > t->draw_y1) t->draw_y1 = y1;
 }
 
 static void target_note_clean(Target *t) {
     t->clean_gen = t->render_gen;
-    t->draw_y0 = t->draw_y1 = 0;
+    t->draw_x0 = t->draw_y0 = t->draw_x1 = t->draw_y1 = 0;
 }
 
-/* Whether rows [y0, y1) of `t` hold any byte of the VRAM-offset span [off0, off1). */
-static int target_rows_hit(const Target *t, int y0, int y1, uint64_t off0, uint64_t off1) {
-    if (y0 >= y1) return 0;
-    const uint64_t row = (uint64_t)t->stride * (t->fmt == 3u ? 4u : 2u);
-    return off0 < t->fba + (uint64_t)y1 * row && t->fba + (uint64_t)y0 * row < off1;
+/* Whether the pixels [x0, x1) x [y0, y1) of `t` hold any byte of the VRAM-offset span
+ * [off0, off1). A row reaches guest VRAM only in its first min(stride, FB_W) pixels
+ * (write_guest_fb), so the box's bytes in each row are [x0 * bpp, x1 * bpp) of the row, clamped
+ * to those. The span covers the rows ya to yb of the box, and only the first and last partly. */
+static int target_box_hit(const Target *t, int x0, int y0, int x1, int y1,
+                          uint64_t off0, uint64_t off1) {
+    const uint64_t bpp = t->fmt == 3u ? 4u : 2u, row = (uint64_t)t->stride * bpp;
+    const int width = t->stride < FB_W ? (int)t->stride : FB_W;
+    if (x0 < 0) x0 = 0;
+    if (x1 > width) x1 = width;
+    if (x0 >= x1 || y0 >= y1 || off0 >= off1 || row == 0) return 0;
+    const uint64_t c0 = (uint64_t)x0 * bpp, c1 = (uint64_t)x1 * bpp;
+    const uint64_t top = t->fba + (uint64_t)y0 * row, rows = (uint64_t)(y1 - y0);
+    if (off1 <= top + c0 || off0 >= top + (rows - 1u) * row + c1) return 0;
+    const uint64_t a = off0 > top ? off0 - top : 0u, b = off1 - top;   /* from row y0's start */
+    const uint64_t ya = a / row;
+    uint64_t yb = (b - 1u) / row, end = b - yb * row;                  /* end: within row yb */
+    if (yb >= rows) { yb = rows - 1u; end = row; }
+    if (yb > ya + 1u) return 1;                          /* a whole box row lies in the span */
+    const uint64_t start = a - ya * row;                 /* within row ya */
+    if (ya == yb) return start < c1 && c0 < end;
+    return start < c1 || c0 < end;
+}
+
+static int target_drawn_hit(const Target *t, uint64_t off0, uint64_t off1) {
+    return target_box_hit(t, t->draw_x0, t->draw_y0, t->draw_x1, t->draw_y1, off0, off1);
 }
 
 /* Presentation readbacks use their own command buffer, fence, and persistently mapped
@@ -981,6 +1018,14 @@ static void to_layout(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspec
  * the rmwzfb rule's color-test line, 7 its own-target line. */
 #ifndef SR_GPU_DSTREAD_MUTANT
 #define SR_GPU_DSTREAD_MUTANT 0
+#endif
+
+/* SR_GPU_STENCIL_ONCE_MUTANT (gpu-stencil-once-mutants only; never in a product build) breaks one
+ * property of the write-once stencil batch: 1 draws it first to last, as any other batch; 2 calls
+ * every stencil state whose stencil-fail op is KEEP write-once; 3 calls a write-once state one
+ * whatever its depth test and depth writes. */
+#ifndef SR_GPU_STENCIL_ONCE_MUTANT
+#define SR_GPU_STENCIL_ONCE_MUTANT 0
 #endif
 
 #ifdef SR_GPU_COHERENCE_SELFTEST
@@ -2196,9 +2241,9 @@ static SnapRect batch_rect(const Batch *b) {
     return b->key.tnl ? tnl_rect(b, b->first, b->count) : verts_rect(b, b->first, b->count);
 }
 
-/* The rows the queued batches draw, in [y0, y1). A title reading its VRAM between draws asks once
- * per vertex, so each call covers only what was queued since the last one. */
-static void pending_rows(int *y0, int *y1) {
+/* The box the queued batches draw. A title reading its VRAM between draws asks once per vertex,
+ * so each call covers only what was queued since the last one. */
+static SnapRect pending_box(void) {
     for (uint32_t i = s_pend_batches ? s_pend_batches - 1u : 0u; i < s_nbatch; i++) {
         const Batch *b = &s_batch[i];
         const uint32_t done = i + 1u == s_pend_batches ? s_pend_count : 0u;
@@ -2211,8 +2256,7 @@ static void pending_rows(int *y0, int *y1) {
         s_pend_batches = s_nbatch;
         s_pend_count = s_batch[s_nbatch - 1u].count;
     }
-    *y0 = s_pend_box.y0;
-    *y1 = s_pend_box.y1;
+    return s_pend_box;
 }
 
 static int batch_reads_dst(const Batch *b) {
@@ -2586,6 +2630,23 @@ static int submit_range(Target *t, const Batch *arr, uint32_t b0, uint32_t b1, i
     uint32_t param_base = s_cmd_slot->pused > p0 ? s_cmd_slot->pused : p0;
     uint64_t memcpy_started = cpu_profile_now();
     memcpy(s_cmd_slot->vmap + vertex_base, s_vcpu + v0, (size_t)nverts * sizeof(GpuVert));
+    /* A write-once stencil batch (Batch.once) reads one snapshot, and Vulkan keeps the last fragment
+     * at a pixel where ge.c keeps the first one that passes: its triangles go into the ring last to
+     * first, each with its own vertex order (winding and the flat colour stay). The host twin's
+     * pass draws the same ring. An interlock op (rmw_op) orders the fragments itself and keeps the
+     * staged order. */
+#if SR_GPU_STENCIL_ONCE_MUTANT != 1
+    for (uint32_t i = b0; i < b1 && !rmw_op; i++) {
+        const Batch *b = &arr[i];
+        if (!b->once || b->key.tnl) continue;
+        const uint32_t ntri = b->count / 3u;
+        GpuVert *dst = s_cmd_slot->vmap + vertex_base + (b->first - v0);
+        for (uint32_t tri = 0; tri < ntri; tri++)
+            memcpy(dst + 3u * tri, s_vcpu + b->first + 3u * (ntri - 1u - tri), 3u * sizeof(GpuVert));
+        s_cnt_once_batches++;
+        s_cnt_once_tris += ntri;
+    }
+#endif
     if (ntverts) {
         memcpy(s_cmd_slot->tmap + tvertex_base, s_tnl_vcpu + tv0, (size_t)ntverts * sizeof(GeTnlVtx));
         memcpy(s_cmd_slot->pmap + param_base, s_tnl_pcpu + p0, (size_t)(p1 - p0) * sizeof(GeTnlParams));
@@ -2696,7 +2757,7 @@ static int submit_list(Target *t, const Batch *arr, uint32_t n) {
         }
         const int tracked = s_snap_src == t && s_snap_tracked && s_snap_dirty_gen == t->render_gen;
         int ok = submit_range(t, arr, 0, n, 1);
-        target_note_drawn(t, drawn.y0, drawn.y1);
+        target_note_drawn(t, drawn.x0, drawn.y0, drawn.x1, drawn.y1);
         if (ok && tracked) {
             snap_rect_union(&s_snap_dirty, &drawn);
             s_snap_dirty_gen = t->render_gen;
@@ -2728,7 +2789,7 @@ static int submit_list(Target *t, const Batch *arr, uint32_t n) {
         }
         const int tracked = s_snap_src == t && s_snap_tracked && s_snap_dirty_gen == t->render_gen;
         ok = submit_range(t, arr, i, j, 0);
-        target_note_drawn(t, drawn.y0, drawn.y1);
+        target_note_drawn(t, drawn.x0, drawn.y0, drawn.x1, drawn.y1);
         if (ok && tracked) {
             /* Outside what this op drew, the snapshot still holds the target. */
             snap_rect_union(&s_snap_dirty, &drawn);
@@ -2841,14 +2902,14 @@ static int target_readback(Target *t) {
 }
 
 /* Write back what `t` holds of the VRAM-offset span [off, off + bytes), which is nothing unless
- * the GPU drew one of the rows the span lies in. */
+ * the GPU drew a pixel whose bytes the span holds. */
 static int target_readback_span(Target *t, uint32_t off, uint32_t bytes) {
     if (t == s_cur && s_nbatch) {
-        int y0, y1;
-        pending_rows(&y0, &y1);
-        if (target_rows_hit(t, y0, y1, off, (uint64_t)off + bytes) && !submit_pending()) return 0;
+        const SnapRect q = pending_box();
+        if (target_box_hit(t, q.x0, q.y0, q.x1, q.y1, off, (uint64_t)off + bytes) &&
+            !submit_pending()) return 0;
     }
-    if (!target_rows_hit(t, t->draw_y0, t->draw_y1, off, (uint64_t)off + bytes)) return 1;
+    if (!target_drawn_hit(t, off, (uint64_t)off + bytes)) return 1;
     return target_readback(t);
 }
 
@@ -5434,6 +5495,78 @@ static int stencil_fixed_alpha(const GeState *g) {
     return value;
 }
 
+/* psp.frag's stencil arithmetic, on the 8-bit values the shader reads and stores: quant_alpha,
+ * stencil_op, and the comparison of its stencil test. */
+static uint32_t sh_quant_alpha(uint32_t a, uint32_t fmt) {
+    if (fmt == 1u) return a >= 128u ? 255u : 0u;
+    if (fmt == 2u) return ((a >> 4) << 4) | (a >> 4);
+    if (fmt == 0u) return 255u;
+    return a;
+}
+
+static uint32_t sh_stencil_op(uint32_t op, uint32_t old, uint32_t ref, uint32_t fmt) {
+    switch (op & 7u) {
+        case 1: return 0u;
+        case 2: return ref;
+        case 3: return ~old & 0xFFu;
+        case 4:
+            if (fmt == 3u) return old < 255u ? old + 1u : old;
+            if (fmt == 1u) return 255u;
+            if (fmt == 2u) return old < 0xF0u ? old + 0x10u : old;
+            return old;
+        case 5:
+            if (fmt == 2u) return old >= 0x10u ? old - 0x10u : old;
+            if (fmt == 1u) return 0u;
+            return old > 0u ? old - 1u : old;
+        default: return old;
+    }
+}
+
+static int sh_stencil_pass(uint32_t func, uint32_t ref, uint32_t val) {
+    switch (func & 7u) {
+        case 0: return 0;
+        case 1: return 1;
+        case 2: return ref == val;
+        case 3: return ref != val;
+        case 4: return ref < val;
+        case 5: return ref <= val;
+        case 6: return ref > val;
+        default: return ref >= val;
+    }
+}
+
+/* A write-once stencil state: at a pixel, the first fragment that passes the stencil and depth
+ * tests stores a stencil that fails the same test, so every later fragment of the state leaves the
+ * pixel alone (the title's draw-once mask: NOTEQUAL against a bit, REPLACE with that bit set).
+ * `test` and `ops` are the batch's bl[2] and bl[3]: GE_STENCILTEST, and GE_STENCILOP with the alpha
+ * write mask in bits 24-31. It holds when
+ *  - the stencil-fail op is KEEP, so a fragment that fails the test changes nothing (the
+ *    depth-fail op is KEEP wherever the depth test can fail: stencil_gpu_supported); and
+ *  - for every stencil the format can hold that passes the test, the stencil the depth-pass op
+ *    stores over it, under the alpha write mask and on the format's lattice, fails the test. A
+ *    565 target reads every stencil as 0, so there a passing test passes again.
+ * Such a pixel ends as one fragment over the destination from before the run, whichever
+ * primitives overlap there: what one snapshot gives every fragment. Vulkan keeps the last
+ * fragment where ge.c keeps the first, so submit_range draws the batch last triangle first.
+ * build_state adds the depth condition and leaves out a batch that textures from its own
+ * target. */
+static int stencil_write_once(uint32_t fmt, uint32_t test, uint32_t ops) {
+    const uint32_t func = test & 7u, sref = (test >> 8) & 0xFFu, smask = (test >> 16) & 0xFFu;
+    const uint32_t zpass = (ops >> 16) & 7u;
+    if ((ops & 7u) != 0u) return 0;
+#if SR_GPU_STENCIL_ONCE_MUTANT == 2
+    return 1;
+#endif
+    const uint32_t ref = sref & smask, amask = sh_quant_alpha((ops >> 24) & 0xFFu, fmt);
+    for (uint32_t old = 0; old < 256u; old++) {
+        if (fmt == 0u ? old != 0u : sh_quant_alpha(old, fmt) != old) continue;   /* not a stored value */
+        if (!sh_stencil_pass(func, ref, old & smask)) continue;
+        const uint32_t stored = (sh_quant_alpha(sh_stencil_op(zpass, old, sref, fmt), fmt) & ~amask) | (old & amask);
+        if (sh_stencil_pass(func, ref, (fmt == 0u ? 0u : stored) & smask)) return 0;
+    }
+    return 1;
+}
+
 /* Find the target that holds VRAM offset `a` (gpu_valid not required). The GE has no buffer height
  * register, so a target's span below is its widest case, 272 rows: a title that stacks short
  * targets puts the next target's base inside that span. The nearest base at or below `a` owns the
@@ -5622,6 +5755,18 @@ static void build_state(int persp, int sprite, Batch *b) {
         flags |= F_STENCIL;
         b->pc.bl[2] = (int32_t)(g->stencil_test & 0xFFFFFFu);
         b->pc.bl[3] = (int32_t)((g->stencil_op & 0x070707u) | ((uint32_t)(g->mask_alpha & 0xFF) << 24));
+        /* Write-once (stencil_write_once), and the depth every fragment tests against is the
+         * depth from before the run: the batch writes none, or its depth test passes always, in
+         * which case the first fragment to pass the stencil test is also the last one drawn and
+         * its depth the one kept. Under another depth test with depth writes on, a fragment drawn
+         * earlier in the reversed order would hide the one ge.c keeps. */
+#if SR_GPU_STENCIL_ONCE_MUTANT == 3
+        const int depth_fixed = 1;
+#else
+        const int depth_fixed = !k->zwrite || k->zfunc == VK_COMPARE_OP_ALWAYS;
+#endif
+        b->once = (uint8_t)(depth_fixed && stencil_write_once(g->fbfmt & 3u, (uint32_t)b->pc.bl[2],
+                                                              (uint32_t)b->pc.bl[3]));
     } else if (sfix >= 0 && k->blend_on) {
         k->azero = 1;                     /* stencil_fixed_alpha: blended, the constant is 0 */
     } else if (sfix >= 0) {
@@ -5684,6 +5829,9 @@ static void build_state(int persp, int sprite, Batch *b) {
                     snapshot_refresh(src);
                     b->dset = s_snap_set[filter_variant];
                     b->tsnap = 1;
+                    /* Its texels are the destination, so a primitive may sample what an earlier
+                     * one of the run drew: not one fragment over the pre-run destination. */
+                    b->once = 0;
                 } else {
                     if (s_nbatch && src->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
                         submit_pending();
@@ -5906,7 +6054,9 @@ static void append(Batch *b, uint32_t first, uint32_t count) {
     if (g_ace_on && s_cur) ace_note_target_draw(s_cur->fba);
     if ((((uint32_t)b->pc.cfg[0] >> 8) & F_SHBLEND) && sr_perf_enabled)
         sr_perf_ge_event(SR_PERF_GE_SHBLEND_DRAW, 1);
-    const int self_dep = stencil_reads_own_writes(b);
+    /* A write-once state reads its own writes, but only to reject every fragment after the first:
+     * its primitives share the batch wherever they lie. T&L batches keep the split. */
+    const int self_dep = !(b->once && !b->key.tnl) && stencil_reads_own_writes(b);
     SnapRect prim = !self_dep ? k_snap_rect_empty
                   : b->key.tnl ? tnl_rect(b, first, count) : verts_rect(b, first, count);
     if (s_nbatch) {
@@ -5989,7 +6139,9 @@ static int gpu_state_unsupported_reason(void) {
  * texture alpha) with no mip levels. Elsewhere (a Gouraud-interpolated triangle colour, fog in
  * transform mode, a modulated, blended or added texel, or a filtered one) the two can differ by 1,
  * and the colour key turns that into a pixel kept or dropped, so such draws stay on ge.c.
- * `interp`: the primitive interpolates its vertex colours (triangles); `persp`: transform mode. */
+ * `interp`: the primitive's vertex colours differ, so Gouraud shading interpolates them (a
+ * triangle: tri_colours_vary; T&L, whose colours the vertex shader computes: always);
+ * `persp`: transform mode. */
 static int color_test_colour_inexact(int interp, int persp) {
     const GeState *g = s_ge;
     if (!color_test_active(g)) return 0;
@@ -6001,6 +6153,16 @@ static int color_test_colour_inexact(int interp, int persp) {
         if (!(tf == 3u || (tf == 1u && !(g->tex_func & 0x100u)))) return 1;
     }
     return 0;
+}
+
+/* Do a triangle's vertex colours differ? One whose three vertices carry one colour is flat under
+ * either shading model: ge.c raster_tri interpolates VC + w0 (VA - VC) + w1 (VB - VC), both
+ * differences are 0, and every pixel gets the vertex colour itself. hook_tri then captures the
+ * three equal colours it captures for a flat-shaded triangle, so the GPU draws it the same way.
+ * Alpha counts too: an interpolated alpha would reach the blend rounded where ge.c truncates it. */
+static int tri_colours_vary(const GeVtx *A, const GeVtx *B, const GeVtx *C) {
+    return A->r != C->r || B->r != C->r || A->g != C->g || B->g != C->g ||
+           A->b != C->b || B->b != C->b || A->a != C->a || B->a != C->a;
 }
 
 /* `forced` is the reason a primitive kind always falls back (lines, points), or -1 for one
@@ -6226,9 +6388,8 @@ static void wing_drop(int cause) {
 /* The state of a wing primitive: the one its own draw used, with the canvas columns for the
  * scissor's and the scissor's rows. A state this backend would hand to the software
  * rasterizer is dropped here instead, with no flush or readback: the wings lack that draw. */
-static int wing_state(int persp, int sprite, Batch *b) {
-    const int reason = color_test_colour_inexact(!sprite, persp) ? GEGPU_FALLBACK_COLOR_TEST
-                     : gpu_state_unsupported_reason();
+static int wing_state(int persp, int sprite, int soft_ctest, Batch *b) {
+    const int reason = soft_ctest ? GEGPU_FALLBACK_COLOR_TEST : gpu_state_unsupported_reason();
     if (reason >= 0) { wing_drop(reason); return 0; }
     state_get(persp, sprite, b);
     if (!begin_target()) { wing_drop(-1); return 0; }
@@ -6249,15 +6410,19 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
     { const GeVtx *vv[3] = { A, B, C };
       if (!hook_finite(vv, 3)) return cpu_profile_hook_leave(1); }
     Batch b;
+    /* Under the color test the verdict depends on this triangle's vertex colours, so the cached
+     * state serves only a triangle the test can take on the GPU. */
+    const int soft_ctest = __builtin_expect(s_ge->color_test_enable != 0, 0) &&
+                           color_test_colour_inexact(tri_colours_vary(A, B, C), persp);
     if (__builtin_expect(s_wing_dst != NULL, 0)) {
-        if (!wing_state(persp, 0, &b)) return cpu_profile_hook_leave(1);
-    } else if (s_tri_state.valid && s_tri_state.persp == persp && s_cur &&
+        if (!wing_state(persp, 0, soft_ctest, &b)) return cpu_profile_hook_leave(1);
+    } else if (!soft_ctest && s_tri_state.valid && s_tri_state.persp == persp && s_cur &&
         s_tri_state.target == s_cur && s_tri_state.serial == ge_state_serial() &&
         s_tri_state.flushgen == s_flushgen) {
         b = s_tri_state.batch;
     } else {
         s_tri_state.valid = 0;
-        if (software_fallback_begin(color_test_colour_inexact(1, persp) ? GEGPU_FALLBACK_COLOR_TEST : -1))
+        if (software_fallback_begin(soft_ctest ? GEGPU_FALLBACK_COLOR_TEST : -1))
             return cpu_profile_hook_leave(0);
         static int nocull = -1;
         if (nocull < 0) nocull = getenv("SR_NOCULL") ? 1 : 0;
@@ -6408,7 +6573,7 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
       if (!hook_finite(vv, 2)) return cpu_profile_hook_leave(1); }
     Batch b;
     if (__builtin_expect(s_wing_dst != NULL, 0)) {
-        if (!wing_state(persp, 1, &b)) return cpu_profile_hook_leave(1);
+        if (!wing_state(persp, 1, color_test_colour_inexact(0, persp), &b)) return cpu_profile_hook_leave(1);
     } else {
         if (software_fallback_begin(color_test_colour_inexact(0, persp) ? GEGPU_FALLBACK_COLOR_TEST : -1))
             return cpu_profile_hook_leave(0);
@@ -6691,9 +6856,8 @@ static int hook_vram_read(uint32_t addr, uint32_t bytes) {
     if (s_nbatch) {
         int queued_overlap = 0;
         if (s_cur && s_cur->used && s_cur->gpu_valid) {
-            int y0, y1;
-            pending_rows(&y0, &y1);
-            queued_overlap = target_rows_hit(s_cur, y0, y1, off0, off1);
+            const SnapRect q = pending_box();
+            queued_overlap = target_box_hit(s_cur, q.x0, q.y0, q.x1, q.y1, off0, off1);
         }
         if (!queued_overlap && s_cur && s_cur->dep)
             queued_overlap = depth_span_overlaps(s_cur->dep, addr, bytes);
@@ -6702,7 +6866,7 @@ static int hook_vram_read(uint32_t addr, uint32_t bytes) {
     for (int i = 0; i < MAX_TGT; i++) {
         Target *t = &s_tgts[i];
         if (!t->used || !t->gpu_valid || t->clean_gen == t->render_gen) continue;
-        if (target_rows_hit(t, t->draw_y0, t->draw_y1, off0, off1) && !target_readback(t)) return 0;
+        if (target_drawn_hit(t, off0, off1) && !target_readback(t)) return 0;
     }
     for (int i = 0; i < MAX_DEP; i++) {
         DepthEnt *d = &s_deps[i];
@@ -6807,7 +6971,7 @@ static int hook_xfer(uint32_t startdata) {
 #endif
     if (!cmd_submit_wait(SR_PERF_GE_TRANSFER_BLIT)) return 0;
     dst->render_gen++;                       /* content changed (snapshot/present tracking) */
-    target_note_drawn(dst, (int)dy, (int)(dy + h));
+    target_note_drawn(dst, (int)dx, (int)dy, (int)(dx + w), (int)(dy + h));
     if (g_ace_on) ace_note_target_draw(dst->fba);
     sr_vram_mark_renderer_pending();
     dst->lru = s_lru++;
@@ -6836,7 +7000,7 @@ int gegpu_replay_reset(void) {
     for (int i = 0; i < MAX_TGT; i++) {
         s_tgts[i].gpu_valid = 0;
         s_tgts[i].clean_gen = 0;
-        s_tgts[i].draw_y0 = s_tgts[i].draw_y1 = 0;
+        s_tgts[i].draw_x0 = s_tgts[i].draw_y0 = s_tgts[i].draw_x1 = s_tgts[i].draw_y1 = 0;
     }
     for (int i = 0; i < MAX_DEP; i++) s_deps[i].cpu_dirty = 1;
     for (int i = 0; i < s_tex_n; i++) s_tex[i].content_valid = 0;
@@ -6905,16 +7069,6 @@ void gegpu_flush(const char *reason) {
         for (int i = 0; i < MAX_TGT; i++) {
             Target *t = &s_tgts[i];
             if (t->used && t->gpu_valid) (void)target_readback_span(t, a0, bytes);
-        }
-        return;
-    }
-    if (reason && strcmp(reason, "loadclut") == 0) {
-        /* the CLUT loader is about to READ guest VRAM: materialize any target there */
-        if (!is_vram(s_ge->clut_addr)) return;
-        uint32_t ca = vram_off(s_ge->clut_addr);
-        for (int i = 0; i < MAX_TGT; i++) {
-            Target *t = &s_tgts[i];
-            if (t->used && t->gpu_valid) (void)target_readback_span(t, ca, 2048u);
         }
         return;
     }
