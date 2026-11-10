@@ -4190,8 +4190,8 @@ class TestTwoUpdateTransforms(unittest.TestCase):
 
     WORLD loads an acceleration g and a damping coefficient c from data. INTEGRATE loads the step
     h, a gravity column, and computes the retention 1 - c*L. STATE compares its own time, the
-    float at 20 from its state pointer in $s0, with a threshold and calls IMPULSE. LAUNCH calls
-    IMPULSE on a body in $a0 whose velocity is the two floats at 0x70. TUNE stores an impulse size.
+    float at 0x24 from its state pointer in $s0, with a threshold and calls IMPULSE. LAUNCH calls
+    IMPULSE on a body in $a0 whose velocity is the two floats at 0x30. TUNE stores an impulse size.
     Every value is made up for this fixture."""
 
     ENTRY, WORLD, INTEGRATE, STATE, IMPULSE, LAUNCH, TUNE, END = (
@@ -4200,7 +4200,8 @@ class TestTwoUpdateTransforms(unittest.TestCase):
     GRAVITY, DAMPING, DAMPING_STEP, STEP = -4.0, 0.25, 0.0625, _f32_round(1.0 / 30.0)
     BOOST = 0.125
     COMPARE_AT, CALL_AT, LAUNCH_AT = 0x18, 0x28, 0x08
-    F0, F1, F2, F3, F4, F13 = 0, 1, 2, 3, 4, 13
+    F0, F2, F3, F4, F6, F8, F13 = 0, 2, 3, 4, 6, 8, 13
+    TIME_AT, VELOCITY_AT = 0x24, 0x30       # the state's time; the body's two velocity floats
 
     def _world(self) -> list[int]:
         return [_lui(V0, 0), _lvs(1, self.DATA, V0), _lui(V0, 0), _lwc1(self.F0, self.DATA + 4, V0), JR_RA, NOP]
@@ -4213,9 +4214,9 @@ class TestTwoUpdateTransforms(unittest.TestCase):
     def _state(self) -> list[int]:
         s = self.STATE
         return [_addiu(SP, SP, -16), _sw(RA, 12, SP), _sw(S0, 8, SP), _move(S0, A0),
-                _lwc1(self.F1, 20, S0), _lwc1(self.F0, 124, S0), _fpu_s(0x3E, 0, self.F0, self.F1), NOP,
+                _lwc1(self.F6, self.TIME_AT, S0), _lwc1(self.F8, 0x28, S0), _fpu_s(0x3E, 0, self.F8, self.F6), NOP,
                 _bc1f(s + 0x20, s + 0x30), NOP, _jal(self.IMPULSE), _move(A0, S0),
-                _lw(V0, 24, S0), _lw(V1, 28, S0), _lwc1(self.F0, 32, S0), _lw(S0, 8, SP), _lw(RA, 12, SP),
+                _lw(V0, 0x40, S0), _lw(V1, 0x44, S0), _lwc1(self.F0, 0x48, S0), _lw(S0, 8, SP), _lw(RA, 12, SP),
                 JR_RA, _addiu(SP, SP, 16)]
 
     def _impulse(self) -> list[int]:
@@ -4226,7 +4227,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                 _addiu(SP, SP, 8)]
 
     def _tune(self) -> list[int]:
-        return [_swc1(self.F0, 140, A0), JR_RA, NOP]
+        return [_swc1(self.F0, 0x58, A0), JR_RA, NOP]
 
     def _entry(self) -> list[int]:
         calls: list[int] = []
@@ -4263,7 +4264,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                     "stock_digest": compute_stock_words_digest([words[addr]]), "transform": transform, **extra}
 
         damping = {"damping_site": "C", "damping_step_site": "DSTEP"}
-        phase = {"phase_time": {"register": "s0", "offset": 20}, "step_site": "STEP"}
+        phase = {"phase_time": {"register": "s0", "offset": self.TIME_AT}, "step_site": "STEP"}
         sites = [
             site("G", "synth_world", 4, "value_reference"),
             site("C", "synth_world", 0xC, "value_reference"),
@@ -4273,7 +4274,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             site("RETAIN", "synth_integrate", 0x1C, "retention_m_to_sqrt(m)"),
             site("COMPARE", "synth_state", self.COMPARE_AT, "gate_30hz_phase", **phase, odd_phase_condition=False),
             site("CALL", "synth_state", self.CALL_AT, "gate_30hz_phase", **phase),
-            site("LAUNCH", "synth_launch", self.LAUNCH_AT, "launch_from_rest_60hz", velocity_offset=0x70,
+            site("LAUNCH", "synth_launch", self.LAUNCH_AT, "launch_from_rest_60hz", velocity_offset=self.VELOCITY_AT,
                  gravity_axis=1, gravity_site="G", step_site="STEP", **damping),
             site("BOOST", "synth_tune", 0, "velocity_source_x_kappa", stock_values=[self.BOOST], **damping),
         ]
@@ -4340,7 +4341,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         mu = math.sqrt(1.0 - self.DAMPING * self.DAMPING_STEP)
         self.assertEqual(kappa, 2.0 * mu / (1.0 + mu))
         self.assertEqual(q, self.STEP * mu * mu / (1.0 + mu) ** 2)
-        phase = {"reg": 16, "offset": 20, "half_step": self.STEP / 2}
+        phase = {"reg": 16, "offset": self.TIME_AT, "half_step": self.STEP / 2}
         self.assertEqual(rewrites, {
             "G": {"kind": "reference"}, "C": {"kind": "reference"}, "DSTEP": {"kind": "reference"},
             "STEP": {"kind": "scale_f_reg", "reg": 13, "factor": 0.5},
@@ -4348,7 +4349,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             "RETAIN": {"kind": "map_f_reg", "reg": 3, "map": "retention"},
             "COMPARE": {"kind": "gate_phase_cond", **phase, "condition": False},
             "CALL": {"kind": "gate_phase", **phase},
-            "LAUNCH": {"kind": "launch_from_rest", "offset": 0x70, "axis": 1, "kappa": kappa,
+            "LAUNCH": {"kind": "launch_from_rest", "offset": self.VELOCITY_AT, "axis": 1, "kappa": kappa,
                        "gravity_offset": q * self.GRAVITY},
             "BOOST": {"kind": "scale_f_store", "reg": 0, "factor": kappa,
                       "stock_values": [[_f32_bits_of(self.BOOST), _f32_bits_of(self.BOOST * kappa)]]},
@@ -4400,17 +4401,17 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             ("a foreign reference", {"STEP": {"step_site": "C"}}, "step_site belongs only to gate_30hz_phase, "),
             ("gravity on a gate", {"CALL": {"gravity_site": "G"}}, "gravity_site belongs only to launch_from_rest"),
             ("no phase time", {"CALL": {"phase_time": None}}, "needs phase_time"),
-            ("a caller-saved register", {"CALL": {"phase_time": {"register": "a0", "offset": 20}}},
+            ("a caller-saved register", {"CALL": {"phase_time": {"register": "a0", "offset": 0x24}}},
              "needs phase_time"),
-            ("an unaligned time", {"CALL": {"phase_time": {"register": "s0", "offset": 22}}}, "needs phase_time"),
-            ("a register that is no name", {"CALL": {"phase_time": {"register": ["s0"], "offset": 20}}},
+            ("an unaligned time", {"CALL": {"phase_time": {"register": "s0", "offset": 0x26}}}, "needs phase_time"),
+            ("a register that is no name", {"CALL": {"phase_time": {"register": ["s0"], "offset": 0x24}}},
              "needs phase_time"),
-            ("an extra phase field", {"CALL": {"phase_time": {"register": "s0", "offset": 20, "scale": 2}}},
+            ("an extra phase field", {"CALL": {"phase_time": {"register": "s0", "offset": 0x24, "scale": 2}}},
              "needs phase_time"),
             ("a condition that is no boolean", {"COMPARE": {"odd_phase_condition": 0}}, "must be true or false"),
-            ("a phase time elsewhere", {"STEP": {"phase_time": {"register": "s0", "offset": 20}}},
+            ("a phase time elsewhere", {"STEP": {"phase_time": {"register": "s0", "offset": 0x24}}},
              "phase_time belongs only to gate_30hz_phase"),
-            ("an unaligned velocity", {"LAUNCH": {"velocity_offset": 0x72}}, "needs velocity_offset"),
+            ("an unaligned velocity", {"LAUNCH": {"velocity_offset": 0x32}}, "needs velocity_offset"),
             ("a third axis", {"LAUNCH": {"gravity_axis": 2}}, "needs gravity_axis"),
             ("a boolean axis", {"LAUNCH": {"gravity_axis": True}}, "needs gravity_axis"),
             ("an axis elsewhere", {"STEP": {"gravity_axis": 1}}, "gravity_axis belongs only to launch_from_rest"),
@@ -4519,7 +4520,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
     def test_gated_call_and_compare_refusals(self) -> None:
         s = self.STATE
         compare_in_slot = self._state()
-        compare_in_slot[5:8] = [_beq(A1, ZERO, s + 0x14, s + 0x20), _fpu_s(0x3E, 0, self.F0, self.F1), NOP]
+        compare_in_slot[5:8] = [_beq(A1, ZERO, s + 0x14, s + 0x20), _fpu_s(0x3E, 0, self.F8, self.F6), NOP]
         cases: tuple[tuple[str, dict[int, int], dict[str, Any], str], ...] = (
             ("the caller reads the result", self._state_with(0x30, [_addiu(V0, V0, 1)]), {},
              r"gate_30hz_phase caller 0x00001300 reads \$v0 at 0x00001330 after the gated call"),
@@ -4529,7 +4530,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
              "no bc1f or bc1t reads the compare's flag in the 4 instructions"),
             ("a call before the branch", self._state_with(0x1C, [_jal(self.IMPULSE), NOP, NOP]), {"CALL": None},
              "a call, jump or branch at 0x0000131c follows the compare"),
-            ("another compare first", self._state_with(0x1C, [_fpu_s(0x3C, 0, self.F0, self.F1)]), {"CALL": None},
+            ("another compare first", self._state_with(0x1C, [_fpu_s(0x3C, 0, self.F8, self.F6)]), {"CALL": None},
              "0x0000131c writes the FPU condition flag before"),
             ("a compare in a delay slot", self._words(state=compare_in_slot), {"CALL": None},
              "does not reach the site at 0x00001318 as an instruction of its own"),
@@ -4609,7 +4610,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         self.assertIn(stock["call"].splitlines()[-1], both["call"])
         self.assertIn(stock["launch"].splitlines()[-1], both["launch"])
         # The gate reads the state's own time through the guest accessor; no update count is used.
-        read = "uint32_t _nk_time = MEM_R32(s->r[16] + 20u);"
+        read = "uint32_t _nk_time = MEM_R32(s->r[16] + 36u);"
         self.assertIn(read, both["compare"])
         self.assertIn(read, both["call"])
         self.assertIn(f'nk_enhancement_phase_odd(&nk_kept, "CALL", 0x{self.STATE + self.CALL_AT:08x}u, _nk_time, '
@@ -4621,10 +4622,10 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         # The launch map follows the call, on the $a0 the site had.
         launch = both["launch"]
         self.assertLess(launch.index("uint32_t _nk_a0 = s->r[4];"), launch.index("sr_aot_return_boundary_begin"))
-        self.assertLess(launch.index("sr_aot_return_boundary_end"), launch.index("MEM_R32(_nk_a0 + 112u)"))
+        self.assertLess(launch.index("sr_aot_return_boundary_end"), launch.index("MEM_R32(_nk_a0 + 48u)"))
         self.assertIn(f"_nk_f = (float)((double)_nk_f * {kappa!r});", launch)
         self.assertIn(f"_nk_f = (float)(fma((double)_nk_f, {kappa!r}, {q * self.GRAVITY!r}));", launch)
-        self.assertIn(f"MEM_W32_PC(_nk_a0 + 116u, _nk_v1, 0x{self.LAUNCH + self.LAUNCH_AT:08x}u);", launch)
+        self.assertIn(f"MEM_W32_PC(_nk_a0 + 52u, _nk_v1, 0x{self.LAUNCH + self.LAUNCH_AT:08x}u);", launch)
         # The loaded gravity column is scaled after the load, lane by lane; the computed retention
         # is mapped after the subtraction; the stored impulse goes through the stock-value check.
         lanes = " ".join(f"s->v[{v}] = (float)((double)s->v[{v}] * {kappa!r});"
@@ -4648,7 +4649,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         # Under the LLE CPU each access is checked first, as a guest load or store at the site is.
         guarded = self._statements(lle, True)
         site = self.STATE + self.CALL_AT
-        self.assertIn(f"uint32_t _nk_time_ea = s->r[16] + 20u; if (sr_cpu_guard_access(s, _nk_time_ea, 4u, 0, "
+        self.assertIn(f"uint32_t _nk_time_ea = s->r[16] + 36u; if (sr_cpu_guard_access(s, _nk_time_ea, 4u, 0, "
                       f"0x{site:08x}u, 0u, 0u)) return; uint32_t _nk_time = MEM_R32(_nk_time_ea);", guarded["call"])
         site = self.LAUNCH + self.LAUNCH_AT
         self.assertIn(f"if (sr_cpu_guard_access(s, _nk_v1_ea, 4u, 1, 0x{site:08x}u, 0u, 0u)) return; "
@@ -4746,7 +4747,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                     f"static void {callee_match.group(1)}(CpuState *s) {{\n"
                     "    calls++;\n"
                     "    for (int i = 0; i < 2; i++) {\n"
-                    "        float v; uint32_t at = (s->r[4] + 0x70u + 4u * (uint32_t)i - 0x4000u) / 4u;\n"
+                    "        float v; uint32_t at = (s->r[4] + 0x30u + 4u * (uint32_t)i - 0x4000u) / 4u;\n"
                     "        memcpy(&v, &page[at], 4); v += impulse[i]; memcpy(&page[at], &v, 4);\n"
                     "    }\n"
                     "    s->r[4] = 0x4300u;\n"
@@ -4761,15 +4762,15 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                     "    CpuState st; CpuState *s = &st; memset(&st, 0, sizeof st);\n"
                     "    for (on = 0; on < 2; on++) {\n"
                     "        for (unsigned i = 0; i < sizeof times / sizeof times[0]; i++) {\n"
-                    f"            s->r[16] = 0x{self.STATE_AT:x}u; page[(s->r[16] + 20u - 0x4000u) / 4u] = times[i];\n"
-                    "            s->fi[1] = times[i]; s->f[0] = 0.0f; s->fpcond = 2u; s->fcr31 = 0x01000000u;\n"
+                    f"            s->r[16] = 0x{self.STATE_AT:x}u; page[(s->r[16] + 0x24u - 0x4000u) / 4u] = times[i];\n"
+                    "            s->fi[6] = times[i]; s->f[8] = 0.0f; s->fpcond = 2u; s->fcr31 = 0x01000000u;\n"
                     "            compare(s);\n"
                     "            calls = 0; s->r[4] = s->r[16]; call(s);\n"
                     "            printf(\"%s time %u flag %u fcr31 %08x calls %d\\n\", on ? \"on\" : \"off\", i,\n"
                     "                   (unsigned)s->fpcond, (unsigned)s->fcr31, calls);\n"
                     "        }\n"
                     "        for (unsigned i = 0; i < sizeof velocities / sizeof velocities[0]; i++) {\n"
-                    f"            uint32_t at = (0x{self.BODY_AT:x}u + 0x70u - 0x4000u) / 4u;\n"
+                    f"            uint32_t at = (0x{self.BODY_AT:x}u + 0x30u - 0x4000u) / 4u;\n"
                     "            page[at - 1u] = 0x11111111u; page[at] = 0u; page[at + 1u] = 0u; page[at + 2u] = 0x22222222u;\n"
                     "            impulse[0] = velocities[i][0]; impulse[1] = velocities[i][1];\n"
                     f"            calls = 0; s->r[4] = 0x{self.BODY_AT:x}u; launch(s);\n"
@@ -4931,9 +4932,9 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                          [enhancement_package.keyed_stock_value_digest(key, "BOOST", _f32_bits_of(self.BOOST))])
         self.assertEqual({k: v for k, v in by_id["LAUNCH"].items() if k not in ("stock_digest",)}, {
             "id": "LAUNCH", "function": "synth_launch", "insn_offset": self.LAUNCH_AT, "word_count": 1,
-            "transform": "launch_from_rest_60hz", "velocity_offset": 0x70, "gravity_axis": 1,
+            "transform": "launch_from_rest_60hz", "velocity_offset": self.VELOCITY_AT, "gravity_axis": 1,
             "gravity_site": "G", "step_site": "STEP", "damping_site": "C", "damping_step_site": "DSTEP"})
-        self.assertEqual(by_id["CALL"]["phase_time"], {"register": "s0", "offset": 20})
+        self.assertEqual(by_id["CALL"]["phase_time"], {"register": "s0", "offset": self.TIME_AT})
         # No number in the file is a stock value or a factor computed from one.
         kappa, q = self._factors()
         def numbers(value: Any) -> list[Any]:
@@ -4943,7 +4944,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                 return [n for item in value for n in numbers(item)]
             return [value] if isinstance(value, (int, float)) and not isinstance(value, bool) else []
 
-        self.assertEqual(sorted(set(numbers(published))), [0, 1, 4, 8, 12, 16, 20, 24, 28, 40, 0x70])
+        self.assertEqual(sorted(set(numbers(published))), [0, 1, 4, 8, 12, 16, 24, 28, 0x24, 40, 0x30])
         self.assertTrue(all(isinstance(n, int) for n in numbers(published)))
         declaration, symbols = enhancement_package.resolve_published_package(
             published, executable=elf_bytes, read_words_fn=read_words, read_data_fn=read_data)
