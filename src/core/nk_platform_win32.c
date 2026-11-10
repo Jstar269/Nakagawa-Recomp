@@ -29,6 +29,10 @@ char nk_platform_path_separator(void) {
     return '\\';
 }
 
+char nk_platform_path_list_separator(void) {
+    return ';';
+}
+
 /* Bounded UTF-8 -> UTF-16 conversion */
 static bool utf8_to_wide(const char *utf8, WCHAR *out_wide, size_t max_wide_chars) {
     if (!utf8 || !out_wide || max_wide_chars == 0) return false;
@@ -922,10 +926,22 @@ static WCHAR *build_controlled_unicode_environment(const char * const *envp) {
 
     if (envp && !failed) {
         for (int i = 0; envp[i]; i++) {
-            WCHAR witem[4096];
-            /* A requested variable that cannot be represented must not silently
-             * fall back to the parent's value. */
-            if (!utf8_to_wide(envp[i], witem, sizeof(witem) / sizeof(WCHAR))) {
+            /* Size each entry from its own length: a PATH with a toolchain folder
+             * prepended can run to the 32767-character variable limit. A requested
+             * variable that cannot be represented must not silently fall back to
+             * the parent's value. */
+            int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, envp[i], -1, NULL, 0);
+            if (wlen <= 0) {
+                failed = true;
+                break;
+            }
+            WCHAR *witem = (WCHAR *)malloc((size_t)wlen * sizeof(WCHAR));
+            if (!witem) {
+                failed = true;
+                break;
+            }
+            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, envp[i], -1, witem, wlen) != wlen) {
+                free(witem);
                 failed = true;
                 break;
             }
@@ -948,11 +964,12 @@ static WCHAR *build_controlled_unicode_environment(const char * const *envp) {
                     vars[found_idx] = vars[count - 1];
                     count--;
                 }
+                free(witem);
                 continue;
             }
 
-            WCHAR *dup = _wcsdup(witem);
-            if (!dup) { failed = true; break; }
+            /* The converted entry becomes the stored string. */
+            WCHAR *dup = witem;
             if (found_idx >= 0) {
                 free(vars[found_idx].str);
                 vars[found_idx].str = dup;
@@ -1251,6 +1268,27 @@ bool nk_platform_describe_os_error(int os_error, char *out, size_t out_size) {
     return true;
 }
 
+/* Windows runs any tool program the way it runs any other (nk_platform.h). */
+bool nk_platform_spawn_tool(const char *executable_path, const char * const *argv,
+                            const char * const *envp, const char *working_directory,
+                            const char *output_log_path, NkProcessHandle *out_process) {
+    return nk_platform_spawn_process(executable_path, argv, envp, working_directory,
+                                     output_log_path, out_process);
+}
+
+/* The desktop finds its tools on PATH or in the prerequisites folder, not in one bundled folder. */
+bool nk_platform_get_tool_dir(char *out_path, size_t max_len) {
+    if (out_path && max_len) out_path[0] = '\0';
+    return false;
+}
+
+/* No bundled tool folder, so no program is in one. */
+bool nk_platform_path_is_tool_in_dir(const char *dir, const char *path) {
+    (void)dir;
+    (void)path;
+    return false;
+}
+
 bool nk_platform_is_process_running(NkProcessHandle *process) {
     if (!process || !process->native_handle || !process->is_active) return false;
     DWORD res = WaitForSingleObject((HANDLE)process->native_handle, 0);
@@ -1405,11 +1443,6 @@ unsigned long nk_platform_process_id(void) {
 
 int nk_platform_last_os_error(void) {
     return (int)GetLastError();
-}
-
-const char *const *nk_platform_sdl3_ttf_library_names(void) {
-    static const char *const names[] = { "SDL3_ttf.dll", NULL };
-    return names;
 }
 
 static bool system_font_file_exists(const char *path) {

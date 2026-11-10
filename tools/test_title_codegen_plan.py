@@ -88,7 +88,9 @@ class TitleCodegenPlanTests(unittest.TestCase):
             (24, 64 * gib, 8),
             (4, 64 * gib, 4),           # CPU bound
             (24, 10 * gib, 2),
-            (24, 10 * gib - 1, 1),      # floor((10 GiB - 1 - 4 GiB) / 3 GiB) = 1
+            (24, 11 * gib, 3),
+            (24, 11 * gib - 1, 2),      # floor((11 GiB - 1 - 2 GiB) / 3 GiB) = 2
+            (24, 5 * gib, 1),           # exactly one job beside the reserve
             (24, 6 * gib, 1),           # never below one job
             (24, 3 * gib, 1),           # less than the reserve
             (1, 64 * gib, 1),
@@ -132,30 +134,34 @@ class TitleCodegenPlanTests(unittest.TestCase):
     def test_package_job_bytes_follow_the_chunk_target(self) -> None:
         job_bytes = title_codegen_plan.package_job_bytes
         gib = 1024**3
-        self.assertEqual(job_bytes("4000000"), gib)            # floor
-        self.assertEqual(job_bytes("8000000"), 8_000_000 * 256)
+        self.assertEqual(job_bytes("4000000"), 768 * 1024**2)  # floor, 1.45x the 531 MiB peak
+        self.assertEqual(job_bytes("8000000"), 8_000_000 * 200)
         self.assertEqual(job_bytes("50000000"), 3 * gib)       # ceiling
         for unbounded in (None, "", "0", "-1", "many"):
             with self.subTest(target=unbounded):
                 self.assertEqual(job_bytes(unbounded), title_codegen_plan.PACKAGE_BUILD_JOB_BYTES)
 
     def test_size_bounded_chunks_let_a_loaded_host_run_more_jobs(self) -> None:
-        # 7.6 GB free (measured on a busy host): one 3 GB job for count-based chunks, three
-        # 1 GB jobs for 4 MB chunks.
+        # 7.6 GB free (measured on a busy host): one 3 GB job for count-based chunks, seven
+        # 768 MiB jobs for 4 MB chunks.
         jobs = title_codegen_plan.package_build_jobs
         free = int(7.6 * 1024**3)
         self.assertEqual(jobs(cpu_count=24, available_bytes=free)[0], 1)
         self.assertEqual(jobs(cpu_count=24, available_bytes=free,
-                              job_bytes=title_codegen_plan.package_job_bytes("4000000"))[0], 3)
+                              job_bytes=title_codegen_plan.package_job_bytes("4000000"))[0], 7)
 
     def test_an_oversized_unit_raises_the_compile_job_budget(self) -> None:
         # #1730: a body over the unit budget is a unit of its own; its job is budgeted from
         # its own size, past the 3 GiB cap, so a host runs fewer such jobs at once.
         job_bytes = title_codegen_plan.compile_job_bytes
-        per_byte = title_codegen_plan.PACKAGE_BUILD_JOB_BYTES_PER_CHUNK_BYTE
+        per_byte = title_codegen_plan.PACKAGE_BUILD_OVERSIZED_UNIT_BYTES_PER_BYTE
         target = title_codegen_plan.package_job_bytes("4000000")
         self.assertEqual(job_bytes("4000000", 0), target)
         self.assertEqual(job_bytes("4000000", 3_900_000), target)
+        # A chunk ends with the function that crosses its target: 4.04 MB is an ordinary unit.
+        self.assertEqual(job_bytes("4000000", 4_040_000), target)
+        self.assertEqual(job_bytes("4000000", 5_000_000), target)
+        self.assertEqual(job_bytes("4000000", 5_000_001), 5_000_001 * per_byte)
         self.assertEqual(job_bytes("4000000", 20_000_000), 20_000_000 * per_byte)
         self.assertGreater(job_bytes("4000000", 20_000_000), title_codegen_plan.PACKAGE_BUILD_JOB_BYTES)
         jobs = title_codegen_plan.package_build_jobs
@@ -255,6 +261,163 @@ class TitleCodegenPlanTests(unittest.TestCase):
         completed = [row["completed"] for row in rows]
         self.assertEqual(completed, sorted(set(completed)), "each count is written once, in order")
         self.assertTrue(all(row["total"] == 3 for row in rows))
+
+    def test_make_with_progress_records_what_bound_the_job_count(self) -> None:
+        gib = 1024**3
+        plan = title_codegen_plan.package_build_plan(
+            cpu_count=24, available_bytes=4 * gib, job_bytes=title_codegen_plan.package_job_bytes("4000000"))
+        self.assertEqual(plan.jobs, 2)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            progress = root / "progress.jsonl"
+            returncode = title_codegen_plan._run_make_with_progress(
+                [sys.executable, "-c", "pass"],
+                cwd=root,
+                env=os.environ.copy(),
+                counter=title_codegen_plan.CompileProgressCounter([root / "part.o"]),
+                progress_file=progress,
+                jobs=plan.jobs,
+                cpus=24,
+                plan=plan,
+                poll_seconds=0.05,
+            )
+            first = json.loads(progress.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(returncode, 0)
+        self.assertEqual(first, {"completed": 0, "total": 1, "jobs": 2, "cpus": 24,
+                                 "limit": "memory", "free_gb": 4.0})
+
+    def test_plan_names_what_bound_the_job_count(self) -> None:
+        gib = 1024**3
+        plan = title_codegen_plan.package_build_plan
+        job = title_codegen_plan.package_job_bytes("4000000")
+        cases = (
+            # (cpus, available, override, job bytes, jobs, limit)
+            (24, 4 * gib, None, job, 2, "memory"),
+            (24, 2 * gib, None, job, 1, "memory"),      # not even one job beside the reserve
+            (24, 64 * gib, None, job, 8, "max"),
+            (4, 64 * gib, None, job, 4, "cpu"),
+            (1, 2 * gib, None, job, 1, "cpu"),          # more memory would not add a job
+            (1, 64 * gib, None, job, 1, "cpu"),
+            (24, None, None, job, 2, "unknown_memory"),
+            (2, None, None, job, 2, "cpu"),
+            (24, 64 * gib, "1", job, 1, "override"),
+            (24, 64 * gib, "99", job, 8, "override"),
+        )
+        for cpus, available, override, job_bytes, jobs, limit in cases:
+            with self.subTest(cpus=cpus, available=available, override=override):
+                chosen = plan(cpu_count=cpus, available_bytes=available, override=override,
+                              job_bytes=job_bytes)
+                self.assertEqual((chosen.jobs, chosen.limit), (jobs, limit))
+                self.assertEqual(chosen.cpus, cpus)
+                self.assertEqual(chosen.available_bytes, available)
+                self.assertEqual((chosen.jobs, chosen.reason),
+                                 title_codegen_plan.package_build_jobs(
+                                     cpu_count=cpus, available_bytes=available,
+                                     override=override, job_bytes=job_bytes))
+
+    def test_a_host_too_short_of_memory_for_one_job_says_so(self) -> None:
+        gib = 1024**3
+        job = title_codegen_plan.package_job_bytes("4000000")
+        short = title_codegen_plan.package_build_plan(
+            cpu_count=24, available_bytes=2 * gib, job_bytes=job)
+        self.assertTrue(short.memory_short)
+        self.assertEqual(short.jobs, 1)
+        self.assertIn("one job runs and the compiler may fail if memory runs out", short.reason)
+        fits = title_codegen_plan.package_build_plan(
+            cpu_count=24, available_bytes=3 * gib, job_bytes=job)
+        self.assertFalse(fits.memory_short)
+        self.assertNotIn("may fail", fits.reason)
+
+    def test_job_budget_keeps_a_margin_over_the_measured_compile_peak(self) -> None:
+        # #2284: cc1 at -O1 on 4 MB generated units peaked at 485 to 531 MiB (commit).
+        mib = 1024**2
+        measured_peak = 531 * mib
+        budget = title_codegen_plan.package_job_bytes("4000000")
+        self.assertGreaterEqual(budget, measured_peak * 1.4)
+        self.assertLess(budget, 1024 * mib, "the earlier 1 GiB budget was the cause of one job")
+
+    def test_a_loaded_24_cpu_pc_runs_more_than_one_job(self) -> None:
+        # #2284: 24 logical CPUs and 4 to 7 GB free planned a single job for 172 parts.
+        gib = 1024**3
+        job = title_codegen_plan.package_job_bytes("4000000")
+        # floor((free - 2 GiB reserve) / 0.75 GiB): 2.2 / 0.75, 3 / 0.75 and 5 / 0.75.
+        for free_gb, expected_jobs in ((4.2, 2), (5.0, 4), (7.0, 6)):
+            with self.subTest(free_gb=free_gb):
+                chosen = title_codegen_plan.package_build_plan(
+                    cpu_count=24, available_bytes=int(free_gb * gib), job_bytes=job)
+                self.assertEqual(chosen.jobs, expected_jobs)
+                self.assertEqual(chosen.limit, "memory")
+
+    def test_a_missing_cpu_count_is_not_reported_as_a_single_processor(self) -> None:
+        gib = 1024**3
+        plan = title_codegen_plan.package_build_plan
+        job = title_codegen_plan.package_job_bytes("4000000")
+        for cpus in (None, 0):
+            with self.subTest(cpus=cpus, memory="ample"):
+                chosen = plan(cpu_count=cpus, available_bytes=64 * gib, job_bytes=job)
+                self.assertEqual((chosen.jobs, chosen.limit), (1, "unknown_cpus"))
+                self.assertIn("CPU count unknown", chosen.reason)
+                self.assertNotIn("1 logical CPUs", chosen.reason)
+            with self.subTest(cpus=cpus, memory="unknown"):
+                chosen = plan(cpu_count=cpus, available_bytes=None, job_bytes=job)
+                self.assertEqual((chosen.jobs, chosen.limit), (1, "unknown_cpus"))
+            with self.subTest(cpus=cpus, memory="short"):
+                # Memory binds as well, so the user is told about memory.
+                chosen = plan(cpu_count=cpus, available_bytes=2 * gib, job_bytes=job)
+                self.assertEqual((chosen.jobs, chosen.limit), (1, "memory"))
+
+    def test_build_package_hands_the_compile_phase_its_own_job_plan(self) -> None:
+        # The compile phase is sized again once the generated units exist (#2284): a 9 MB
+        # unit is over the chunk target, so its budget (256 bytes per byte) allows fewer
+        # jobs than the target-only plan, and the plan, not just the count, reaches
+        # _run_compile_phase so the progress rows can say what bound it.
+        gib = 1024**3
+        compile_calls: list[dict] = []
+
+        class Stop(Exception):
+            pass
+
+        def record_compile(*args, **kwargs):
+            compile_calls.append(kwargs)
+            raise Stop
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "manifest.json").write_text("{}", encoding="utf-8")
+            (root / "game.elf").write_bytes(b"ELF")
+            out = root / "out"
+            out.mkdir()
+            (out / "synthetic_recomp_0.c").write_bytes(b"x" * 9_000_000)
+            environment = {"CHUNK_TARGET_BYTES": "4000000",
+                           title_codegen_plan.COMPILE_PROGRESS_FILE_ENV: str(root / "progress.jsonl")}
+            captured = io.StringIO()
+            with mock.patch.dict(os.environ, environment),                     mock.patch.object(title_codegen_plan, "_make_input_images",
+                                      return_value=({}, {}, [], [])),                     mock.patch.object(title_codegen_plan, "_make_build_targets",
+                                      return_value=("compile",)),                     mock.patch.object(title_codegen_plan, "_cache_key_for_build",
+                                      return_value={}),                     mock.patch.object(title_codegen_plan, "_version_identity",
+                                      return_value=("tool", "tool 1")),                     mock.patch.object(title_codegen_plan.shutil, "which",
+                                      side_effect=lambda name: name),                     mock.patch.object(title_codegen_plan, "available_physical_memory",
+                                      return_value=16 * gib),                     mock.patch.object(title_codegen_plan.os, "process_cpu_count",
+                                      return_value=24),                     mock.patch.object(title_codegen_plan, "_run_compile_phase",
+                                      side_effect=record_compile),                     contextlib.redirect_stdout(captured):
+                os.environ.pop("NK_PACKAGE_JOBS", None)
+                with self.assertRaises(Stop):
+                    title_codegen_plan.build_package(
+                        self.synthetic,
+                        manifest_path=root / "manifest.json",
+                        game_elf=root / "game.elf",
+                        output_dir=out,
+                        game_name="synthetic",
+                    )
+        self.assertEqual(len(compile_calls), 1)
+        call = compile_calls[0]
+        # 16 GiB free: the target-only plan allows eight jobs, the 9 MB unit allows six.
+        self.assertIn("PACKAGE_BUILD_JOBS: 8 (", captured.getvalue())
+        self.assertIn("PACKAGE_BUILD_JOBS: 6 for compile, largest unit 9000000 bytes",
+                      captured.getvalue())
+        self.assertIsInstance(call.get("plan"), title_codegen_plan.PackageBuildPlan)
+        self.assertEqual((call["plan"].jobs, call["plan"].limit), (6, "memory"))
+        self.assertEqual(call["jobs"], 6)
 
     def test_unconfigured_data_root_has_no_invalid_local_asset_record(self) -> None:
         manifest = copy.deepcopy(self.synthetic)

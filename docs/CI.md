@@ -335,10 +335,12 @@ retail inputs, or hardware.
 ### Project website (GitHub Pages)
 
 `.github/workflows/pages.yml` publishes the project website,
-<https://jstar269.github.io/nakagawa-recomp/>, from [`docs/index.html`](index.html). The
-repository's Pages source is "GitHub Actions". The page is one static file with inline CSS and
-two small inline scripts (the theme picker, remembered in the visitor's own browser, and the phone
-menu), and no web fonts, external scripts or third-party requests. It shows two launcher screenshots,
+<https://jstar269.github.io/Nakagawa-Recomp/>, from [`docs/index.html`](index.html). Pages paths
+are case-sensitive, so the lowercase address returns 404. The repository's Pages source is "GitHub
+Actions". The page is one static file with inline CSS and two small inline scripts (one applies a
+remembered theme before the first paint; the other is the theme picker, which keeps a choice in the
+visitor's own browser), and no web fonts, external scripts or third-party requests. It shows two
+launcher screenshots,
 `docs/media/launcher-library.png` and `docs/media/launcher-building.png`, with their notice, and link
 previews show the share card `docs/images/brand/og-card.png`. The artifact also carries the presentation
 clip `docs/media/hst-rally.mp4` for the README's link. The build job copies an explicit list of
@@ -538,9 +540,21 @@ each device pixel's own position, and so does its uv-edge-clamp case (also at sc
 device pixels outside a screen-aligned strip's or sprite's first and last pixel centres must show
 that edge pixel's 1x sample, with linear and nearest filtering and with repeat and clamp wrapping,
 while a sheared strip stays unclamped.
-Last, `gpu-coherence-selftest-snapbar-mutants` builds three broken variants of
-the destination-snapshot copy's barriers (`SR_GPU_SNAPBAR_MUTANT`), and the submit-batch case must
-fail each one with its own message. `fsr3-pass-selftest` runs FSR 3's eight compute passes on
+The dst-read cells (#2109: order, mask, alpha, mixed, depth, ztest and pins) run alone at render scales 1 and 4,
+once forced to the snapshot destination-read path and once to the interlock path (`--dst-read`). On the
+interlock path, overlapping shader-blend primitives must equal the software GE in colour with no snapshot copy,
+and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-read-depth`, an alpha-tested op
+that writes depth, must keep the snapshot path on both paths and equal the software GE in colour and depth. On
+the snapshot path, the known difference must stay inside each overlap, and the device must hold no interlock
+state. A device that refuses the interlock prints one SKIP line for each interlock leg. The lavapipe step prints
+the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
+pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Three
+mutant targets follow, and each broken variant must fail its case with its own message:
+`gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
+(`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
+pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths five ways
+(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 run on the interlock path and are a SKIP on a device without it).
+`fsr3-pass-selftest` runs FSR 3's eight compute passes on
 lavapipe, headless, under the validation layer with synchronisation validation of shader accesses,
 and an exit 77 skip fails it, including one for synchronisation validation that is not active.
 `fsr3-fg-pass-selftest` runs frame generation's device refusal (G-R) there: lavapipe's subgroups
@@ -553,8 +567,9 @@ or a compiler that is not the pinned one, fails it. Then `ge-first-bad-draw-self
 `NO_DIFFERENCE`, and two executed mutants that change one draw's Vulkan blend or depth state
 (`SR_GE_FBD_MUTANT`) must each be named as that draw, in linear and bisect mode. A second generated
 capture holds one PRIM of two overlapping translucent sprites on a 16-bit target, and the tool must
-find exactly its overlap as the first bad draw: the known shader-blend batch-order difference
-(#2109, open). Four more generated captures check that the
+find exactly its overlap as the first bad draw on the snapshot destination-read path (the known
+shader-blend batch-order difference, #2109), and report `NO_DIFFERENCE` on the interlock path. On a
+device that refuses the interlock, the interlock leg is a `SKIP`. Four more generated captures check that the
 tool fails closed: a 512-wide scissor (ge.c rasterizes inside 480x272), 33 targets or a stride of
 1088 are `INCOMPLETE`, and a capture with no draw is `NO_DRAWS`. The same step then runs
 `vram-view-identity-selftest` (#314): the GE decoders the pause menu's VRAM viewer calls, run at
@@ -955,6 +970,9 @@ and `tools/test_stage_install.py`. A change under `tools/`, `src/core/`, `src/pl
 on Windows. The full local suite builds the native fixtures and takes over an hour on
 Windows. Make-based tests need a POSIX `sh` on `PATH` (MSYS2 `usr/bin` or Git for Windows
 `bin`).
+
+`make dmac-mutants` is also left to local runs: it builds `hle-thread-selftest` against each mutated copy
+of `src/rt/hle_cache_dma.c`, one selftest build per mutant (`NK_DMAC_MUTANTS_ONLY=<part of a name>` runs one).
 
 ## Coverage
 
@@ -1547,15 +1565,18 @@ push to `main`. Every other pull request's analysis stays on `ubuntu-26.04`.
 Every other run, a fork's pull request above all, gets the job's hosted image
 (`ubuntu-24.04` or `ubuntu-26.04`, whichever that job names when it is not on the pool). Two
 repository variables, which only the maintainer can set, gate it further:
-`NK_SELF_HOSTED_LINUX` must be `on` or `landing` and `NK_SELF_HOSTED_HEARTBEAT` must be a
-Unix time less than ten minutes old. `on` sends every trusted run above to the pool.
-`landing` sends only the trusted runs that land work: a push to `main`, a merge group, a
-desk batch branch (`batch/`) and a Ready pull request; for Trusted CodeQL, a push to `main`
+`NK_SELF_HOSTED_LINUX` must be `on`, `landing` or `batch`, and `NK_SELF_HOSTED_HEARTBEAT`
+must be a Unix time less than ten minutes old. `on` sends every trusted run above to the
+pool. `landing` sends only the trusted runs that land work: a push to `main`, a merge group,
+a desk batch branch (`batch/`) and a Ready pull request; for Trusted CodeQL, a push to `main`
 and a wake of a merge group or a batch. A Draft pull request's CI then stays hosted, so a
-small pool is kept for landings. Either value only narrows the trusted runs above, never
-widens them, and any other value is off. The pool's supervisor refreshes the heartbeat every
-two minutes while the pool is healthy, sets the switch to the mode it was started with (`on`
-or `landing`), and turns it `off` when it stops or the pool fails, so a sleeping PC or a
+small pool is kept for landings. `batch` is narrower still: a push to `main`, a merge group
+and a desk batch branch, so a Ready pull request's own CI stays hosted as well (the desk
+tests it again in its batch) and the pool runs only the batches; Trusted CodeQL takes the
+same targets as in `landing`. Each value only narrows the trusted runs above, never widens
+them, and any other value is off. The pool's supervisor refreshes the heartbeat every
+two minutes while the pool is healthy, sets the switch to the mode it was started with (`on`,
+`landing` or `batch`), and turns it `off` when it stops or the pool fails, so a sleeping PC or a
 dead pool sends trusted runs back to hosted runners within minutes instead of leaving them
 queued. Only `runs-on` changes: every step, check name, `CI required` and the Trusted CI
 verdict are the same on either runner.
@@ -1579,8 +1600,9 @@ keeps this repository's own runs where they belong. What stops a fork is:
   discarded, has no access to the PC's files, Docker or local network, and holds no
   secrets (its one-job registration comes from the GitHub API when it starts).
 
-`tools/test_ci_paths.py` (`SelfHostedRunnerRoutingTests`, `CodeqlRunnerRoutingTests`)
-fails if a fork or ordinary pull request could route to the pool, and
+`tools/test_ci_paths.py` (`SelfHostedRunnerRoutingTests`, `CodeqlRunnerRoutingTests`,
+`LandingOnlyPoolRoutingTests`, `BatchOnlyPoolRoutingTests`) fails if a fork or ordinary
+pull request could route to the pool, or a mode took more than it names, and
 `tools/test_public_ci_wiring.py` (`SelfHostedRunnerWiringTests`) fails if any workflow
 names the pool's labels directly or a job other than the listed ones reads
 `linux_runner` or CodeQL's `analyze_runner`.

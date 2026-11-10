@@ -181,6 +181,47 @@ int main(int argc, char *argv[]) {
     assert(!refused.is_active);
     printf("[PROCESS_TEST] Invalid UTF-8 working directory and environment refused.\n");
 
+    /* One variable far longer than a fixed conversion buffer must reach the child
+     * intact: the package build prepends a toolchain folder to a PATH that can run
+     * to the 32767-character variable limit. */
+    {
+        enum { LONG_VALUE_LEN = 20000 };
+        const char *long_out_file = SR_SELFTEST_BUILD_ROOT "\\argv_echo_long_env.txt";
+        char long_out_arg[1024];
+        int long_out_arg_len = snprintf(long_out_arg, sizeof(long_out_arg), "--output=%s", long_out_file);
+        assert(long_out_arg_len > 0 && (size_t)long_out_arg_len < sizeof(long_out_arg));
+        char *long_env_item = (char *)malloc(sizeof("TEST_ENV_KEY=") + LONG_VALUE_LEN);
+        char *long_expected = (char *)malloc(sizeof("\nTEST_ENV_KEY=") + LONG_VALUE_LEN + 2);
+        assert(long_env_item && long_expected);
+        char *long_value = long_env_item + sizeof("TEST_ENV_KEY=") - 1;
+        for (int i = 0; i < LONG_VALUE_LEN; i++) long_value[i] = (char)('A' + (i % 26));
+        long_value[LONG_VALUE_LEN] = '\0';
+        memcpy(long_env_item, "TEST_ENV_KEY=", sizeof("TEST_ENV_KEY=") - 1);
+        snprintf(long_expected, sizeof("\nTEST_ENV_KEY=") + LONG_VALUE_LEN + 2, "\nTEST_ENV_KEY=%s\n", long_value);
+
+        const char *long_env[] = {long_env_item, NULL};
+        const char *long_argv[] = {helper_exe, long_out_arg, NULL};
+        remove(long_out_file);
+        NkProcessHandle long_proc;
+        assert(nk_platform_spawn_process(helper_exe, long_argv, long_env, NULL, NULL, &long_proc));
+        assert(nk_platform_wait_process(&long_proc, 5000) == 0);
+        nk_platform_close_process(&long_proc);
+
+        FILE *long_f = fopen(long_out_file, "rb");
+        assert(long_f != NULL);
+        char *long_output = (char *)malloc(LONG_VALUE_LEN + 8192);
+        assert(long_output != NULL);
+        size_t long_size = fread(long_output, 1, LONG_VALUE_LEN + 8192 - 1, long_f);
+        fclose(long_f);
+        long_output[long_size] = '\0';
+        assert(strstr(long_output, long_expected) != NULL);
+        free(long_output);
+        free(long_expected);
+        free(long_env_item);
+        remove(long_out_file);
+    }
+    printf("[PROCESS_TEST] A 20000-character environment entry reached the child intact.\n");
+
     /* A refused start keeps the code CreateProcessW gave, which is the only
      * thing a Windows Security block reaches the player as. A folder is refused
      * with ERROR_ACCESS_DENIED, the code an attack surface reduction rule gives;
