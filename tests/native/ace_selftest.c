@@ -1139,7 +1139,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "ace-selftest: %d check(s) FAILED\n", s_fail);
         return 1;
     }
-    printf("ace-selftest: PASS (parse, stick, switch, detector, feed, readout, fast forward, report)
-");
+    printf("ace-selftest: PASS (parse, stick, switch, detector, feed, readout, fast forward, report)\n");
     return 0;
 }
