@@ -2272,7 +2272,7 @@ class MergePathTamperTests(GateCase):
             "quoted item of a flow sequence continued in column 0": (
                 head + b"    workflows: [\"CI\nenv: x\"]\n    types: [requested]\n" + dispatch + tail),
             "U+2028 inside a quoted scalar": (
-                head + plain + dispatch + "        description: \"Full SHA env: x\"\n".encode() + tail),
+                head + plain + dispatch + "        description: \"Full SHA\u2028env: x\"\n".encode() + tail),
         }
         for name, on_block in forms.items():
             with self.subTest(form=name):
@@ -2287,7 +2287,7 @@ class MergePathTamperTests(GateCase):
 
     def test_a_line_break_yaml_and_python_disagree_on_is_refused(self) -> None:
         # str.splitlines breaks at these and YAML does not, so a reader using it sees lines that are not there.
-        for separator in (" ", " ", "\x85", "\x0c", "\x0b", "\x1c", "\x1d", "\x1e"):
+        for separator in ("\u2028", "\u2029", "\x85", "\x0c", "\x0b", "\x1c", "\x1d", "\x1e"):
             with self.subTest(separator=repr(separator)):
                 raw = self._gate(("on:\n  pull_request_target:\n# a comment" + separator + "env: x\n").encode())
                 self.assertIsNone(verifier._workflow_events(raw))
@@ -2398,6 +2398,19 @@ class LiveRepositoryTests(unittest.TestCase):
         raw = (ROOT / TRUSTED_WORKFLOW).read_bytes()
         self.assertIn(b"pull_request_target", raw)
         self.assertNotIn(b"\non:\n  pull_request:\n", raw)
+
+    def test_the_trust_tools_and_workflows_hold_no_invisible_characters(self) -> None:
+        """A line or paragraph separator, a bidirectional control or a zero-width character does not show in a
+        diff and can change what a reader, an editor or a parser takes a line to be. They are written as
+        escapes. Failing-before: the reader's own list of separators held two of them as raw characters."""
+        invisible = {0x85, 0xFEFF, *range(0x200B, 0x2010), *range(0x2028, 0x202F), *range(0x2066, 0x206A)}
+        for name in ("tools/provenance_attest_verify.py", "tools/test_provenance_attest_verify.py",
+                     "tools/ci_trust_verdict.py", "tools/test_ci_trust_verdict.py",
+                     ".github/workflows/provenance-attestation.yml", ".github/workflows/ci-trust-verdict.yml"):
+            with self.subTest(file=name):
+                text = (ROOT / name).read_text(encoding="utf-8")
+                found = sorted({f"U+{ord(char):04X}" for char in text if ord(char) in invisible})
+                self.assertEqual(found, [])
 
     def test_the_trusted_workflow_passes_the_trigger_check_it_is_held_to(self) -> None:
         """Failing-before: the workflow had no workflow_run trigger, so it could not run once GitHub blocks

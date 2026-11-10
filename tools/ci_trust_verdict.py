@@ -342,6 +342,7 @@ def normalise(raw: dict) -> dict:
             } for record in raw.get("approval_records") or [] if isinstance(record, dict)),
             key=lambda record: (record["recorded_at"], str(record["digest"]), str(record["route"])),
         ),
+        "approval_list_truncated": raw.get("approval_list_truncated") is True,
         "retargeted": any(event.get("event") == "base_ref_changed" for event in raw.get("label_events") or []),
         "workflow_runs": [
             {
@@ -355,6 +356,8 @@ def normalise(raw: dict) -> dict:
                 "display_title": run.get("display_title"),
                 # A git fact, not GitHub's: only the collector's own check sets it (``named_runs``).
                 "default_definition": run.get("default_definition") is True,
+                # Also the collector's own finding: the run completed without starting any job.
+                "jobless": run.get("jobless") is True,
                 "created_at": run.get("created_at") or "",
                 "run_started_at": run.get("run_started_at") or "",
                 "check_suite_id": run.get("check_suite_id"),
@@ -451,8 +454,12 @@ def _approval(snapshot: dict) -> tuple[bool, str]:
         if record["route"] == "head" and not snapshot["retargeted"]:
             return True, (f"{APPROVAL_LABEL!r} applied by {event['actor']!r} and recorded at this head: its "
                           f"protected content is byte-identical to the approved head's (digest {digest[:12]})")
-    return False, (f"{APPROVAL_LABEL!r} is on the pull request, but no approval record written after it matches "
-                   "this head's protected content; review this head and record the approval for it")
+    reason = (f"{APPROVAL_LABEL!r} is on the pull request, but no approval record written after it matches "
+              "this head's protected content; review this head and record the approval for it")
+    if snapshot["approval_list_truncated"]:
+        reason += (f" (GitHub returned only its newest {RUN_LIST_LIMIT} approval dispatches since the label, so "
+                   "an older record cannot be seen: dispatch the approval again)")
+    return False, reason
 
 
 def _check_pull_request(snapshot: dict) -> list[Finding]:
@@ -554,9 +561,11 @@ def producer_runs(runs: list[dict], producer: Producer, head_sha: str, default_b
     head, started from another ref or another copy of the workflow, or of any other event is not a candidate.
 
     A head-attached run that ended ``startup_failure`` started no job: GitHub refused its event, as it does for
-    ``pull_request_target`` during the 2026 brownouts and by default from 2026-12-02. It is dropped when the named
-    route has a run that was not cancelled, so a refused event cannot mask an attestation that ran. With no such
-    run it stays, and the head fails for want of any attestation.
+    ``pull_request_target`` during the 2026 brownouts and by default from 2026-12-02. GitHub ended some refused
+    runs as ``failure`` with no job instead ("workflow file issue", 2026-11-09); the collector marks a completed
+    run that has no job at all ``jobless``. Either kind attested nothing and failed nothing, and is dropped when
+    the named route has a run that was not cancelled, so a refused event cannot mask an attestation that ran.
+    With no such run it stays, and the head fails for want of any attestation.
     """
     mine = [run for run in runs if run.get("path") == producer.workflow]
     attached = [run for run in mine if run.get("event") in producer.events and run.get("head_sha") == head_sha]
@@ -566,7 +575,8 @@ def producer_runs(runs: list[dict], producer: Producer, head_sha: str, default_b
              and run.get("head_branch") == default_branch and run.get("default_definition") is True
              and run.get("display_title") == title]
     if any(run.get("conclusion") != "cancelled" for run in named):
-        attached = [run for run in attached if run.get("conclusion") != "startup_failure"]
+        attached = [run for run in attached
+                    if run.get("conclusion") != "startup_failure" and run.get("jobless") is not True]
     return attached + named
 
 
@@ -1026,8 +1036,10 @@ def _has_write(gh: "GitHub", login: str, known: dict[str, bool]) -> bool:
     return known[login]
 
 
-def dispatched_records(gh: "GitHub", repo: Path, number: int, default_branch: str, since: str) -> list[dict]:
-    """Records for pull request ``number`` written by a dispatch of the verdict workflow created since ``since``.
+def dispatched_records(gh: "GitHub", repo: Path, number: int, default_branch: str,
+                       since: str) -> tuple[list[dict], bool]:
+    """Records for pull request ``number`` written by a dispatch of the verdict workflow created since ``since``,
+    and whether GitHub's list of those dispatches came back truncated.
 
     A record is a successful job named ``CI approval record v2 pr<N> <head> <digest>``. It is read only from a
     ``workflow_dispatch`` run of the verdict workflow that started from the default branch and ran the trusted
@@ -1037,12 +1049,16 @@ def dispatched_records(gh: "GitHub", repo: Path, number: int, default_branch: st
     approve on a maintainer's behalf. The run name only selects whose jobs are read; the pull request number,
     the head and the digest are taken from the job name, which the trusted tool's outputs fill in. ``since`` is
     checked here as well as sent to GitHub, so the answer to the filter is not taken on trust.
+
+    A truncated list (``list_cut``) can only hide a record, which leaves the head unapproved; the flag lets the
+    verdict say why, so the approval is dispatched again instead of searched for.
     """
     query = urllib.parse.urlencode({"event": "workflow_dispatch", "branch": default_branch, "created": f">={since}"})
     workflow = urllib.parse.quote(VERDICT_WORKFLOW.rsplit("/", 1)[1])
     found: list[dict] = []
     permissions: dict[str, bool] = {}
-    for run in gh.paginate(f"actions/workflows/{workflow}/runs?{query}", "workflow_runs"):
+    runs, total = gh.counted(f"actions/workflows/{workflow}/runs?{query}", "workflow_runs")
+    for run in runs:
         title = _APPROVAL_RUN_TITLE.fullmatch(run.get("display_title") or "")
         if (title is None or int(title.group(1)) != number or run.get("path") != VERDICT_WORKFLOW
                 or run.get("event") != "workflow_dispatch" or run.get("head_branch") != default_branch
@@ -1060,17 +1076,24 @@ def dispatched_records(gh: "GitHub", repo: Path, number: int, default_branch: st
                               "run_created_at": run.get("created_at") or "",
                               "route": "dispatch", "head_sha": match.group(2),
                               "actor": (run.get("triggering_actor") or run.get("actor") or {}).get("login")})
-    return found
+    return found, list_cut(runs, total)
 
 
 # GitHub answers a filtered run list with at most this many runs, its newest.
 RUN_LIST_LIMIT = 1000
+# The horizon of a truncated list that returned nothing to date it by: later than any run.
+UNBOUNDED = "9999-12-31T23:59:59Z"
+
+
+def list_cut(runs: list, total: int | None) -> bool:
+    """Whether a run list may be missing runs: no count, more runs than were returned, or a full list."""
+    return total is None or total > len(runs) or len(runs) >= RUN_LIST_LIMIT
 
 
 def named_runs(gh: "GitHub", repo: Path, default_branch: str, head_sha: str,
-               since: str) -> tuple[list[dict], list[str]]:
-    """Default-branch runs named for ``head_sha``, for every producer with a named route, and the contexts whose
-    list came back truncated.
+               since: str) -> tuple[list[dict], dict[str, str]]:
+    """Default-branch runs named for ``head_sha``, for every producer with a named route, and for each context
+    with a truncated list its horizon: the time before which runs are missing.
 
     GitHub lists a ``workflow_run`` or ``workflow_dispatch`` run under the default branch, so the head's own run
     list cannot contain it. The workflow's default-branch runs created since ``since`` are listed, one list per
@@ -1080,26 +1103,29 @@ def named_runs(gh: "GitHub", repo: Path, default_branch: str, head_sha: str,
 
     A list is truncated when GitHub reports more runs than it returned (``RUN_LIST_LIMIT``; every ``CI`` run
     starts one, so at the 2026-11 rate a ``workflow_run`` attestation leaves the list after about five days, and
-    a dispatched one, in its own far shorter list, practically never). A truncated list can have lost this
-    head's newest run, and ``collect`` then refuses to let an older result stand in for it.
+    a dispatched one, in its own far shorter list, practically never). The runs it lost are the ones created
+    before the oldest run it returned; that time is the list's horizon, and a context's horizon is the latest
+    among its truncated lists. A list that returned nothing to date it by has the horizon ``UNBOUNDED``.
+    ``collect`` judges a run for the head only when it is newer than the horizon, so nothing that a lost run
+    could have superseded stands in for it, whichever list or route it came from.
     """
     found: list[dict] = []
-    truncated: list[str] = []
+    horizons: dict[str, str] = {}
     for producer in PRODUCERS:
         title = producer.run_title.format(head=head_sha) if producer.named_events else ""
         workflow = urllib.parse.quote(producer.workflow.rsplit("/", 1)[1])
         for event in producer.named_events:
             query = urllib.parse.urlencode({"event": event, "branch": default_branch, "created": f">={since}"})
             runs, total = gh.counted(f"actions/workflows/{workflow}/runs?{query}", "workflow_runs")
-            # No count, more runs than were returned, or a full list: each means runs may be missing.
-            cut = total is None or total > len(runs) or len(runs) >= RUN_LIST_LIMIT
-            if cut and producer.context not in truncated:
-                truncated.append(producer.context)
+            if list_cut(runs, total):
+                created = [run.get("created_at") or "" for run in runs]
+                horizon = min(created) if created and all(created) else UNBOUNDED
+                horizons[producer.context] = max(horizons.get(producer.context, ""), horizon)
             for run in runs:
                 if run.get("event") == event and run.get("display_title") == title:
                     trusted = default_definition(repo, run.get("head_sha") or "", producer.workflow)
                     found.append(run | {"default_definition": trusted})
-    return found, truncated
+    return found, horizons
 
 
 def unfinished_producers(workflow_runs: list[dict], head_sha: str, default_branch: str = "main") -> list[str]:
@@ -1145,15 +1171,18 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
         return {"head_sha": head_sha, "waiting_producers": waiting}
     since = min((run["created_at"] for run in workflow_runs if run.get("created_at")), default=None)
     if since:
-        named, truncated = named_runs(gh, repo, default_branch, head_sha, since)
+        named, horizons = named_runs(gh, repo, default_branch, head_sha, since)
         workflow_runs = workflow_runs + named
-        # A truncated list may have lost this head's newest named run, which could be a failure. Unless a named
-        # run that was not cancelled is among what GitHub did return, nothing older is judged in its place, on
-        # either route: the head waits until it is attested again, and that dispatch is in the list.
+        # A truncated list has lost every run created before its horizon, and one of them may be this head's
+        # newest attestation and a failure. The run that would be judged must therefore be newer than the
+        # horizon: started at or after it, so nothing lost could have come later. An older one, from either
+        # route or from the other event's complete list, is not judged in its place; the head waits until it
+        # is attested again, and that run is newer than any horizon. (A lost run that someone re-runs is the
+        # one case this cannot see.)
         for producer in PRODUCERS:
-            if producer.context in truncated and not any(
-                    run.get("event") in producer.named_events and run.get("conclusion") != "cancelled"
-                    for run in producer_runs(workflow_runs, producer, head_sha, default_branch)):
+            horizon = horizons.get(producer.context)
+            latest = latest_live_run(workflow_runs, producer, head_sha, default_branch)
+            if horizon is not None and (latest is None or run_order(latest)[0] < horizon):
                 return {"head_sha": head_sha, "waiting_producers": [
                     f"{producer.context} (not among its workflow's newest {RUN_LIST_LIMIT} runs; dispatch it again)",
                 ]}
@@ -1190,13 +1219,19 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
                 raw["label_actor_permission"] = None
     # The rules read jobs only from each producer's newest live run at this head (``_check_producer``), so only
     # those runs' jobs are fetched: one call per run, and superseded or cancelled runs used to cost one each.
-    latest_ids = {run["id"] for run in (latest_live_run(workflow_runs, producer, head_sha, default_branch)
-                                        for producer in PRODUCERS)
-                  if run is not None}
-    raw["jobs"] = {
-        str(run["id"]): gh.paginate(f"actions/runs/{run['id']}/jobs?filter=latest", "jobs")
-        for run in raw["workflow_runs"] if run["id"] in latest_ids
-    }
+    jobs: dict[str, list] = {}
+    for producer in PRODUCERS:
+        while (run := latest_live_run(workflow_runs, producer, head_sha, default_branch)) is not None:
+            key = str(run["id"])
+            if key not in jobs:
+                jobs[key] = gh.paginate(f"actions/runs/{run['id']}/jobs?filter=latest", "jobs")
+            # A head-attached run that completed without any job never ran the gate (``producer_runs``). It
+            # is marked, and when that lets a named run take its place, that run's jobs are read instead.
+            if (jobs[key] or run.get("status") != "completed" or run.get("event") not in producer.events
+                    or not producer.named_events or run.get("jobless") is True):
+                break
+            run["jobless"] = True
+    raw["jobs"] = jobs
     facts = git_facts(repo, gh.repository, number, head_sha)
     raw |= facts
     # An approval is judged only when a label is on and some protected path changed.
@@ -1206,7 +1241,9 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
             records = head_records(workflow_runs, _jobs_of(gh), head_sha, number, default_branch)
             # A dispatched record counts only when written after the label, so only runs since then are listed.
             if last_label.get("event") == "labeled" and last_label.get("created_at"):
-                records += dispatched_records(gh, repo, number, default_branch, last_label["created_at"])
+                dispatched, cut = dispatched_records(gh, repo, number, default_branch, last_label["created_at"])
+                records += dispatched
+                raw["approval_list_truncated"] = cut
             raw["approval_records"] = records
         except (subprocess.CalledProcessError, urllib.error.URLError, KeyError, ValueError) as error:
             print(f"approval records unavailable ({type(error).__name__}); this head is not approved",
@@ -1341,7 +1378,7 @@ def carry_approval(gh: GitHub, repo: Path, number: int, before_sha: str, head_sh
         records += head_records(gh.paginate(f"actions/runs?head_sha={before_sha}", "workflow_runs"), _jobs_of(gh),
                                 before_sha, number, default_branch)
     if label["created_at"]:
-        records += dispatched_records(gh, repo, number, default_branch, label["created_at"])
+        records += dispatched_records(gh, repo, number, default_branch, label["created_at"])[0]
     recorded = {record["digest"] for record in records if under_label(record, _when(label["created_at"]))}
     if not recorded:
         raise ApprovalRefused(f"the current label has no approval record at the previous head {before_sha} "

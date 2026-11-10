@@ -248,7 +248,7 @@ _WORKFLOW_KEYS = frozenset({"name", "run-name", "on", "permissions", "concurrenc
 # A lone carriage return, which YAML reads as a line break, and the characters ``str.splitlines``
 # breaks at and YAML does not. A file with any of them is refused, so this reader and a YAML
 # reader agree on where each line ends.
-_FOREIGN_LINE_BREAKS = ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ")
+_FOREIGN_LINE_BREAKS = ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
 # A whole ``key:`` line whose value, if any, ends on the same line: a plain scalar, a quoted scalar
 # that is closed, or a flow sequence that is closed. A value left open (a quote, a bracket, a block
 # scalar) continues on later lines, and such a line in column 0 can read like a key.

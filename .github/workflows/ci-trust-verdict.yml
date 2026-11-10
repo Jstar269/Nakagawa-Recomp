@@ -61,7 +61,7 @@ run-name: "${{ (github.event_name == 'workflow_dispatch' && inputs.approve_head_
 # event: CI's completion and a dispatch judge a head, and a dispatch records an
 # approval. Withdrawing an approval still does: only its `unlabeled` re-judges
 # the head, so without the event the verdict is dispatched after the label is
-# removed (docs/CI.md, "Approving a CI change").
+# removed (docs/CI.md, "Withdrawing an approval").
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled, unlabeled]

@@ -1432,18 +1432,29 @@ under `main`: re-running the check a person can see has to count. Only a user wi
 can re-run, and a re-run attests the same head again with the same definition. One exception to
 "newest": a `pull_request_target` run that ended `startup_failure`, which is how GitHub ends a
 run whose event it refused, is ignored when the second route has a run that was not cancelled.
+So is a `pull_request_target` run that completed without starting any job, which is how GitHub
+ended some refused runs on 2026-11-09 (`failure`, "workflow file issue"). Neither kind attested
+or failed anything; with no run of the second route either one still fails the head.
 
 **How long a second-route run stays findable.** GitHub answers a filtered run list with its
 newest 1,000 runs. Every `CI` run starts one attestation run (pushes to `main` and the nightly
 run included; those only skip), about 185 a day in early November 2026, so a `workflow_run`
 attestation leaves the list after about five days. A dispatched attestation is in a separate,
 far shorter list and practically never leaves it. The verifier compares the list's
-`total_count` with what it received. When a list is truncated and holds no run for the head
-that was not cancelled, the attestation is reported as not found on **both** routes and the
-head is `pending` ("not among its workflow's newest 1000 runs; dispatch it again"): the run
-that left the list may have been a failure, so an older `pull_request_target` result is not
-judged in its place. One dispatch of the attestation recovers the head. A run that has left
-the list is never read, so re-running it changes nothing.
+`total_count` with what it received. A truncated list has lost every run created before the
+oldest run it returned; that time is the list's horizon. The run that would be judged for the
+head must have started at or after the horizon, so that nothing the list lost could be newer.
+Otherwise the attestation is reported as not found on **both** routes and the head is `pending`
+("not among its workflow's newest 1000 runs; dispatch it again"): a lost run may have been a
+failure, so no older result is judged in its place, whether it is a `pull_request_target` run
+or a run from the other event's complete list. One dispatch of the attestation recovers the
+head, and so does re-running a run of the head that is still listed. A run that has left the
+list is never read, so re-running *it* changes nothing.
+
+The list of approval dispatches (next section) has the same limit, counted from the label:
+about 1,000 verdict dispatches, roughly a month in November 2026. A record that has left it
+is not seen and the head is `CI_CHANGE_UNAPPROVED`; the finding then says the list was
+truncated, and the remedy is to dispatch the approval again.
 
 **Known limits of the second route.**
 
@@ -1486,10 +1497,19 @@ is clicked, so a push seconds before the click is recorded; only the dispatch na
 that were reviewed. The approval dispatch has its own concurrency group, so nothing replaces
 it, and it judges the head when it has written the record.
 
-To withdraw an approval, remove the label. The `unlabeled` event re-judges the head. When GitHub
-blocks `pull_request_target` that event does not run, and the head keeps its last status until
-the verdict is dispatched (`gh workflow run ci-trust-verdict.yml -f pull_request_number=<n>`),
-so dispatch it after removing the label.
+**Withdrawing an approval.** Rule: removing the label is always followed by a verdict dispatch
+for that pull request, as one action:
+
+```bash
+gh workflow run ci-trust-verdict.yml -f pull_request_number=<n>
+```
+
+Removing the label withdraws the approval in the verifier at once, but a status is only what the
+last verdict run posted. The only event that re-judges a head when a label is removed is
+`pull_request_target`'s `unlabeled`, and when GitHub refuses that event nothing runs: the head's
+last `success` stands, and the ruleset accepts it, until a verdict is dispatched. Nobody merges
+a pull request whose `Trusted CI verdict` status is older than the last event of its
+`ci-change-approved` label.
 
 The verifier used to accept a label applied after the head's first pull-request run. That was
 unsound: a pull request can be pushed back to a commit that ran before the label, and when

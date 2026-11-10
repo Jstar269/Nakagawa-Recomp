@@ -830,9 +830,20 @@ class FakeGitHub(ctv.GitHub):
         raise AssertionError(path)
 
     def counted(self, path: str, key: str | None = None) -> tuple[list, int | None]:
-        """A list with the total GitHub reports for it; ``listed_total`` makes the list look truncated."""
+        """A list with the total GitHub reports for it.
+
+        ``listed_total`` is the total of the attestation's lists (one value for both events, or a dict by
+        event) and ``dispatch_total`` that of the verdict's dispatch list; a total above what is returned makes
+        the list look truncated.
+        """
         items = self.paginate(path, key)
-        total: int | None = self.raw.get("listed_total", len(items))
+        total: int | None = len(items)
+        if path.startswith("actions/workflows/provenance-attestation.yml/runs?"):
+            listed = self.raw.get("listed_total", {})
+            event = path.split("event=", 1)[1].split("&", 1)[0]
+            total = listed.get(event, total) if isinstance(listed, dict) else listed
+        elif path.startswith("actions/workflows/ci-trust-verdict.yml/runs?"):
+            total = self.raw.get("dispatch_total", total)
         return items, total
 
     def post(self, path: str, body: dict) -> object:
@@ -1334,11 +1345,17 @@ def _dispatched(run_id: int, digest: str = D1, *, number: int = PR, head: str = 
 class DispatchGitHub(ctv.GitHub):
     """The verdict workflow's dispatch runs, their jobs, and who has write access."""
 
-    def __init__(self, *pairs: tuple[dict, dict], writers: tuple[str, ...] = ("maintainer",)) -> None:
+    def __init__(self, *pairs: tuple[dict, dict], writers: tuple[str, ...] = ("maintainer",),
+                 total: int | None | str = "all") -> None:
         super().__init__("Jstar269/nakagawa-recomp", "token")
         self.pairs = pairs
         self.writers = writers
+        self.total = total
         self.reads: list[str] = []
+
+    def counted(self, path: str, key: str | None = None) -> tuple[list, int | None]:
+        items = self.paginate(path, key)
+        return items, len(items) if isinstance(self.total, str) else self.total
 
     def get(self, path: str) -> object:
         self.reads.append(path)
@@ -1365,7 +1382,7 @@ class DispatchedRecordTests(unittest.TestCase):
     def records(self, *pairs: tuple[dict, dict], on_main: bool = True, **github) -> list[dict]:
         gh = DispatchGitHub(*pairs, **github)
         with mock.patch.object(ctv, "default_definition", return_value=on_main) as ancestry:
-            found: list[dict] = ctv.dispatched_records(gh, Path("."), PR, "main", LABELLED)
+            found, self.cut = ctv.dispatched_records(gh, Path("."), PR, "main", LABELLED)
         self.ancestry = ancestry
         self.gh = gh
         return found
@@ -1408,6 +1425,35 @@ class DispatchedRecordTests(unittest.TestCase):
         run, job = _dispatched(1)
         run["triggering_actor"] = {"login": "helper"}
         self.assertEqual(self.records((run, job)), [])
+
+    def test_a_truncated_dispatch_list_is_reported(self) -> None:
+        """GitHub returns the newest 1,000 dispatches since the label. A record older than that is not seen,
+        which leaves the head unapproved; the flag lets the verdict say so. Failing-before: the list was read
+        with no count, and such a head was CI_CHANGE_UNAPPROVED with no hint why."""
+        for total, cut in (("all", False), (1, False), (2, True), (5000, True), (None, True)):
+            with self.subTest(total=total):
+                self.assertEqual(len(self.records(_dispatched(1), total=total)), 1)
+                self.assertIs(self.cut, cut)
+        self.assertTrue(ctv.list_cut([0] * ctv.RUN_LIST_LIMIT, ctv.RUN_LIST_LIMIT))    # a full list, whatever the count
+        self.assertFalse(ctv.list_cut([0] * 3, 3))
+
+    def test_the_verdict_names_a_truncated_dispatch_list(self) -> None:
+        scenario = Scenario()
+        scenario.change("tools/ci_paths.py")
+        scenario.label(at=LABELLED, permission="write")
+        hint = "dispatch the approval again"
+        for total, hinted in ((5000, True), (0, False)):
+            with self.subTest(total=total):
+                scenario.raw["dispatch_total"] = total
+                gh = FakeGitHub(scenario)
+                with mock.patch.object(ctv, "git_facts", return_value=_facts(scenario.raw["protected_changes"])), \
+                        mock.patch.object(ctv, "approval_digest", return_value=D1):
+                    raw = ctv.collect(gh, Path("."), "main", HEAD, PR)
+                assert raw is not None
+                self.assertIs(raw["approval_list_truncated"], hinted)
+                verdict = ctv.evaluate(ctv.normalise(raw))
+                self.assertEqual(verdict.state, "failure")
+                self.assertEqual(hint in verdict.findings[0].message, hinted, verdict.findings[0].message)
 
     def test_a_run_created_before_the_label_is_ignored_whatever_github_answered(self) -> None:
         # The filter sent to GitHub is checked again here: a run from before the label answers another approval.
@@ -1586,6 +1632,7 @@ class ApprovalGitHub(ctv.GitHub):
         super().__init__("Jstar269/nakagawa-recomp", "token")
         self.dispatches = list(dispatches)
         self.pull = _pull_request(head=head, labels=labels)
+        self.reads: list[str] = []
         self.permission = permission
         self.events = events if events is not None else [{
             "id": 1, "event": "labeled", "created_at": LABELLED_AT, "actor": {"login": "maintainer"},
@@ -1597,6 +1644,10 @@ class ApprovalGitHub(ctv.GitHub):
     def _check(self, path: str) -> None:
         if self.broken and path.startswith(self.broken):
             raise urllib.error.URLError("down")
+
+    def counted(self, path: str, key: str | None = None) -> tuple[list, int | None]:
+        items = self.paginate(path, key)
+        return items, len(items)
 
     def get(self, path: str) -> object:
         self._check(path)
@@ -2190,6 +2241,26 @@ class NamedAttestationRouteTests(VerdictAssertions):
         scenario.job(6, PROVENANCE.context)["conclusion"] = "failure"   # and its result is the one judged
         self.assertVerdict(scenario, "failure", "JOB_FAILED")
 
+    def test_a_run_that_completed_without_any_job_does_not_mask_an_attestation_that_ran(self) -> None:
+        """GitHub ended some refused pull_request_target runs as `failure` with no job at all (2026-11-09,
+        "workflow file issue"). Such a run attested nothing and failed nothing. Failing-before: when it was
+        the newest run the head was JOB_MISSING although the other route had attested it."""
+        scenario = Scenario()
+        scenario.raw["workflow_runs"][3].update(conclusion="failure", created_at="2026-10-28T10:10:00Z")
+        scenario.raw["jobs"]["4"] = []
+        scenario.raw["check_runs"] = [check for check in scenario.raw["check_runs"] if check["check_suite"]["id"] != 40]
+        scenario.add_named(6, created="2026-10-28T10:00:05Z")
+        self.assertVerdict(scenario, "failure", "JOB_MISSING")      # only the collector says a run had no job
+        scenario.raw["workflow_runs"][3]["jobless"] = "yes"
+        self.assertVerdict(scenario, "failure", "JOB_MISSING")
+        scenario.raw["workflow_runs"][3]["jobless"] = True
+        self.assertVerdict(scenario, "success")
+        scenario.job(6, PROVENANCE.context)["conclusion"] = "failure"
+        self.assertVerdict(scenario, "failure", "JOB_FAILED")
+        # With no run of the other route, or only a cancelled one, nothing attested the head.
+        scenario.raw["workflow_runs"][-1]["conclusion"] = "cancelled"
+        self.assertVerdict(scenario, "failure", "JOB_MISSING")
+
     def test_a_refused_event_still_fails_when_the_other_route_only_has_a_cancelled_run(self) -> None:
         scenario = Scenario()
         scenario.raw["workflow_runs"][3].update(conclusion="startup_failure")
@@ -2315,12 +2386,95 @@ class NamedRouteCollectorTests(unittest.TestCase):
         for conclusion, state in (("success", "success"), ("failure", "failure")):
             with self.subTest(conclusion=conclusion):
                 scenario = Scenario()
-                scenario.raw["listed_total"] = 5000
+                scenario.raw["listed_total"] = {"workflow_run": 5000}
+                scenario.add_named(8, head=OTHER, created="2026-10-28T10:10:00Z")   # the oldest run returned
                 scenario.add_named(6, event="workflow_dispatch", created="2026-10-28T10:20:00Z")
                 scenario.job(6, PROVENANCE.context)["conclusion"] = conclusion
                 raw, _gh = self.collect(scenario)
                 assert raw is not None
                 self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, state)
+
+    def test_a_run_older_than_a_truncated_lists_horizon_does_not_stand_in(self) -> None:
+        """A dispatched attestation succeeded at 10:20; a workflow_run attestation of the same head failed at
+        11:00 and has since left the truncated workflow_run list, whose oldest returned run is from 12:00. The
+        dispatch list is complete and still holds the success. Failing-before: any live named run that was
+        returned excused the truncation, so the older success was judged and the verdict was `success` where
+        the complete list gives JOB_FAILED."""
+        note = f"{PROVENANCE.context} (not among its workflow's newest 1000 runs; dispatch it again)"
+
+        def scenario(lost: bool) -> Scenario:
+            built = Scenario()
+            built.add_named(6, event="workflow_dispatch", created="2026-10-28T10:20:00Z")
+            if lost:
+                built.raw["listed_total"] = {"workflow_run": 5000}
+                built.add_named(8, head=OTHER, created="2026-10-28T12:00:00Z")
+            else:
+                built.add_named(7, created="2026-10-28T11:00:00Z")
+                built.job(7, PROVENANCE.context)["conclusion"] = "failure"
+            return built
+
+        raw, _gh = self.collect(scenario(lost=False))
+        assert raw is not None
+        self.assertEqual(ctv.evaluate(ctv.normalise(raw)).description(), "1 finding(s): JOB_FAILED")
+        raw, _gh = self.collect(scenario(lost=True))
+        self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": [note]})
+        # A run started at or after the horizon is newer than anything the list lost, whichever route it is:
+        # a new dispatch, or a re-run of the run on the pull request's check list.
+        recovered = scenario(lost=True)
+        recovered.add_named(9, event="workflow_dispatch", created="2026-10-28T12:00:00Z")
+        raw, _gh = self.collect(recovered)
+        assert raw is not None
+        self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "success")
+        rerun = scenario(lost=True)
+        rerun.raw["workflow_runs"][3]["run_started_at"] = "2026-10-28T13:00:00Z"
+        raw, _gh = self.collect(rerun)
+        assert raw is not None
+        self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "success")
+        # One second before the horizon is not.
+        early = scenario(lost=True)
+        early.add_named(9, event="workflow_dispatch", created="2026-10-28T11:59:59Z")
+        raw, _gh = self.collect(early)
+        self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": [note]})
+
+    def test_the_horizon_of_a_context_is_the_latest_of_its_truncated_lists(self) -> None:
+        title = NAMED_TITLE.format(head=OTHER)
+
+        class Lists(ctv.GitHub):
+            def counted(self, path: str, key: str | None = None) -> tuple[list, int | None]:
+                if "event=workflow_run" in path:
+                    return [_run(1, PROV, "workflow_run", created="2026-10-28T12:00:00Z", title=title),
+                            _run(2, PROV, "workflow_run", created="2026-10-28T11:00:00Z", title=title)], 5000
+                return [_run(3, PROV, "workflow_dispatch", created="2026-10-28T09:00:00Z", title=title)], 5000
+
+        _found, horizons = ctv.named_runs(Lists("o/r", "t"), Path("."), "main", HEAD, PUSHED)
+        self.assertEqual(horizons, {PROVENANCE.context: "2026-10-28T11:00:00Z"})
+
+    def test_a_jobless_run_is_found_by_the_collector_and_the_other_routes_jobs_are_read(self) -> None:
+        def scenario(named: bool) -> Scenario:
+            built = Scenario()
+            built.raw["workflow_runs"][3].update(conclusion="failure", created_at="2026-10-28T10:10:00Z")
+            built.raw["jobs"]["4"] = []
+            built.raw["check_runs"] = [check for check in built.raw["check_runs"] if check["check_suite"]["id"] != 40]
+            if named:
+                built.add_named(6, created="2026-10-28T10:00:05Z")
+            return built
+
+        raw, gh = self.collect(scenario(named=True))
+        assert raw is not None
+        self.assertIs(raw["workflow_runs"][3]["jobless"], True)
+        self.assertIn("actions/runs/6/jobs?filter=latest", gh.reads)
+        self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "success")
+        raw, _gh = self.collect(scenario(named=False))
+        assert raw is not None
+        self.assertEqual(ctv.evaluate(ctv.normalise(raw)).description(), "1 finding(s): JOB_MISSING")
+        # Only a producer with a second route is treated so: a CI run without jobs is a missing job.
+        ci = Scenario()
+        ci.raw["jobs"]["1"] = []
+        ci.raw["check_runs"] = [check for check in ci.raw["check_runs"] if check["check_suite"]["id"] != 10]
+        raw, _gh = self.collect(ci)
+        assert raw is not None
+        self.assertNotIn("jobless", raw["workflow_runs"][0])
+        self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "failure")
 
     def test_a_complete_run_list_leaves_the_event_route_to_decide(self) -> None:
         raw, _gh = self.collect(Scenario())
@@ -2334,8 +2488,9 @@ class NamedRouteCollectorTests(unittest.TestCase):
                         for index in range(ctv.RUN_LIST_LIMIT)]
                 return runs, ctv.RUN_LIST_LIMIT
 
-        found, truncated = ctv.named_runs(Full("o/r", "t"), Path("."), "main", HEAD, PUSHED)
-        self.assertEqual((found, truncated), ([], [PROVENANCE.context]))
+        found, horizons = ctv.named_runs(Full("o/r", "t"), Path("."), "main", HEAD, PUSHED)
+        # The runs carry no time to date the list by, so nothing bounds what is missing.
+        self.assertEqual((found, horizons), ([], {PROVENANCE.context: ctv.UNBOUNDED}))
 
     def test_a_run_is_taken_only_from_the_list_of_its_own_event(self) -> None:
         # Each event has its own list. A run GitHub returned under the other event's filter is not taken there,
@@ -2350,9 +2505,9 @@ class NamedRouteCollectorTests(unittest.TestCase):
                 return runs, len(runs)
 
         with mock.patch.object(ctv, "default_definition", return_value=True):
-            found, truncated = ctv.named_runs(Unfiltered("o/r", "t"), Path("."), "main", HEAD, PUSHED)
+            found, horizons = ctv.named_runs(Unfiltered("o/r", "t"), Path("."), "main", HEAD, PUSHED)
         self.assertEqual([run["id"] for run in found], [6, 7])
-        self.assertEqual(truncated, [])
+        self.assertEqual(horizons, {})
 
     def test_counted_reports_the_first_pages_total(self) -> None:
         gh = ctv.GitHub("owner/repo", "token")
