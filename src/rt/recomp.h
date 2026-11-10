@@ -1558,6 +1558,11 @@ int sr_enhancement_logic_slowed(unsigned *rate);
  * a matrix at every call cannot be scaled twice; the call at the site must leave each listed matrix
  * describing the camera it was built for (rewritten, or unchanged since the last call). */
 void sr_enhancement_widen_clip_x(uint32_t base, const uint32_t *offsets, uint32_t count);
+/* A vblank_wait_skip site of a package's Ace load part (section 9.8), from generated code at the
+ * site's jal to sceDisplayWaitVblankStart, after its delay slot: nonzero only while the run's Ace
+ * line carries load=fast (src/rt/ace.c), and then that call is skipped and $v0 = 0. It counts each
+ * skip it allows. Never gated by SR_EXPERIMENTAL_60HZ. */
+int nk_ace_load_fast(void);
 
 /* The kernel's record of the main module, emitted by tools/codegen.py from the ELF (PT_LOAD
  * segments, SceModuleInfo, section or program headers, and the syslib's

@@ -29,7 +29,7 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_CULL
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_CULL, ACE_KEY_LOAD
 } AceKey;
 
 static const struct {
@@ -47,6 +47,7 @@ static const struct {
     {"tess", ACE_KEY_TESS, 1},
     {"tier", ACE_KEY_TIER, 0},
     {"cull", ACE_KEY_CULL, 0},
+    {"load", ACE_KEY_LOAD, 0},
 };
 
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
@@ -104,6 +105,13 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "cull is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_LOAD:
+                if (strcmp(v, "off") == 0) { c.load = 0; ok = 1; }
+                else if (strcmp(v, "fast") == 0) { c.load = 1; ok = 1; }
+                if (ok && c.load && !ACE_HAS_LOAD) {
+                    why_set(why, why_cap, "load is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_TIER:
                 if (strcmp(v, "enhanced") == 0) { c.tier = ACE_TIER_ENHANCED; ok = 1; }
                 else if (strcmp(v, "ace") == 0) { c.tier = ACE_TIER_ACE; ok = 1; }
@@ -143,6 +151,8 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
         if (k_ace_keys[i].required && !seen[i]) { why_set(why, why_cap, "missing key"); return 0; }
     /* An Ace item (contract 11.3.6): only an Ace-tier line may turn it on. */
     if (c.cull && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "cull needs tier=ace"); return 0; }
+    /* An Ace item (contract 11.3.8): it changes guest timing, for one title's declared waits. */
+    if (c.load && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "load needs tier=ace"); return 0; }
     c.on = 1;
     if (out) *out = c;
     why_set(why, why_cap, "");
@@ -172,6 +182,11 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
         n = m < 0 ? -1 : n + m;
     }
+    /* Likewise load: a missing load is off. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->load) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";load=fast");
+        n = m < 0 ? -1 : n + m;
+    }
     if (n < 0 || (size_t)n >= cap) { out[0] = '\0'; return 0; }
     return 1;
 }
@@ -188,9 +203,10 @@ static int s_af_device;          /* the device's level when lower than the reque
 static int s_confirmed[ACE_FEATURE_COUNT];
 static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
+static unsigned long long s_load_skipped;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "cull"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "cull", "load"
 };
 
 /* The run's observation state. */
@@ -249,6 +265,7 @@ int ace_init_spec(const char *spec, const char *report_path) {
     memset(s_confirmed, 0, sizeof(s_confirmed));
     s_af_failures = 0;
     s_cull_untracked = 0;
+    s_load_skipped = 0;
     s_af_device = 0;
     s_report_path[0] = '\0';
     snprintf(s_spec, sizeof(s_spec), "off");
@@ -269,6 +286,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
             on_off(s_req.readout), on_off(s_req.notice), wide_word(s_req.wide),
             smooth_word(s_req.smooth), sas_word(s_req.sas), tess_word(s_req.tess));
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
+    if (s_req.load)
+        fprintf(stderr, "ACE_MODE: load fast (a title's declared loading waits return at once; "
+                        "guest timing changes)\n");
     return 1;
 }
 
@@ -295,6 +315,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_SMOOTH: s_eff.smooth = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
+    case ACE_FEATURE_LOAD: s_eff.load = 0; break;
     default: s_eff.tess = 0; break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
@@ -303,6 +324,15 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
 void ace_set_cull_untracked(unsigned long n) {
     if (g_ace_on) s_cull_untracked = n;
 }
+
+int nk_ace_load_fast(void) {
+    if (!g_ace_on || !s_eff.load) return 0;
+    s_confirmed[ACE_FEATURE_LOAD] = 1;   /* a declared wait was reached with the part on */
+    s_load_skipped++;
+    return 1;
+}
+
+unsigned long long ace_load_waits_skipped(void) { return s_load_skipped; }
 
 void ace_confirm(AceFeature feature) {
     if (g_ace_on && (unsigned)feature < ACE_FEATURE_COUNT) s_confirmed[feature] = 1;
@@ -347,6 +377,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
+    if (s_eff.load) used = words_add(out, cap, used, "short loads");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
     if (s_eff.tess) {
@@ -777,6 +808,8 @@ size_t ace_report_json(char *out, size_t cap) {
             sas_word(s_eff.sas), tess_word(s_eff.tess));
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
+    if (s_req.load) ACE_PUT("  \"load\": %s,\n  \"load_waits_skipped\": %llu,\n",
+                            s_eff.load ? "true" : "false", s_load_skipped);
     ACE_PUT("  \"unavailable\": {");
     int first = 1;
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
@@ -854,17 +887,21 @@ void ace_finish(void) {
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_CULL };
+                                                ACE_HAS_CULL, ACE_HAS_LOAD };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
-                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.cull };
+                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.cull,
+                                        s_eff.load };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
                 ? "did not run: this title has no culling package in its build, or Widescreen is off"
+                : f == ACE_FEATURE_LOAD
+                ? "did not run: this title's build declares no load part, or none of its waits was reached"
                 : "did not run: its renderer or presenter did not start");
     }
     size_t len = ace_report_json(json, sizeof(json));
     fprintf(stderr, "ACE_MODE: exit (%s; rate %s)\n", s_spec, ace_rate_name(dominant_rate()));
+    if (s_req.load) fprintf(stderr, "ACE_MODE: load waits skipped %llu\n", s_load_skipped);
     if (s_req.smooth && s_have_aux_stats) {
         const AceSmoothAuxStats *a = &s_aux_stats;
         fprintf(stderr, "ACE_MODE: smooth inputs (pairs %llu: HUD mask %llu, depth %llu; HUD boxes kept "

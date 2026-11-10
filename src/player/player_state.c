@@ -1194,6 +1194,7 @@ static const int k_part_tess_values[] = {2, 3, 4, 0};
 static const char *const k_part_tess_labels[] = {"2x", "3x", "4x", "Off"};
 static const char *const k_part_tess_words[] = {"2", "3", "4", "off"};
 static const char *const k_part_wide_words[] = {"fill", "off"};
+static const char *const k_part_load_words[] = {"fast", "off"};
 static const char *const k_part_upscale_labels[] = {"FSR 1", "Off"};
 static const char *const k_part_upscale_words[] = {"fsr1", "off"};
 
@@ -1233,6 +1234,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"cull", "Wider culling",
      "Ace only, with Widescreen, in games that have a culling build. The game's memory changes.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+    /* A guest-visible item (contract 11.3.8) that changes guest timing: off by default and in no
+       preset; it matters only for a title whose own package declares a load part, and only in Ace. */
+    {"load", "Short loads",
+     "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0},
     /* Presentation only (contract section 2.2): the window and its recording, never the guest. */
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
@@ -2262,14 +2268,15 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    its 1x frame is enlarged about 4x or more on any screen of 1080p or more, past that range, on
    the weakest GPUs (Medium's and Handheld's frame passes it too on 1440p and 4K); High
    turns it off as Ultra without it, the plain 4x picture. No row sets frame pacing, Smooth
-   motion, Widescreen, texture filtering, sound, the readout, the badge or Finer patches
-   (which changes GE timing, section 11.3.7): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
+   motion, Widescreen, texture filtering, sound, the readout, the badge, Finer patches
+   (which changes GE timing, section 11.3.7) or Short loads (which changes guest
+   timing, section 11.3.8): those stay the library's and each game's own. docs/PLAYER_UI_DESIGN.md lists the same values, and
    test_graphics_presets checks that every other part is -1, so a new part needs a choice. */
 #define PRESET_PARTS(text, upscale)                                                        \
     {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
      [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \
      [PLAYER_PART_SAS] = -1, [PLAYER_PART_TESS] = -1, [PLAYER_PART_CULL] = -1,              \
-     [PLAYER_PART_UPSCALE] = (upscale)}
+     [PLAYER_PART_LOAD] = -1, [PLAYER_PART_UPSCALE] = (upscale)}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
     [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
                            PRESET_PARTS(1, 0)},
@@ -2287,7 +2294,7 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
    gives it a value under each preset (-1 leaves it the library's); update PRESET_PARTS first,
    then this count. The count catches a new part only; a part PRESET_PARTS leaves out reads 0
    (off), which test_graphics_presets catches by requiring -1 for every part it does not set. */
-typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 10 ? 1 : -1];
+typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 11 ? 1 : -1];
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -3005,6 +3012,8 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
         if (p == PLAYER_PART_UPSCALE) continue;
         /* A missing cull is off (contract 11.2 item 2): the line carries the key only when it is on. */
         if (p == PLAYER_PART_CULL && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
+        /* Likewise load (contract 11.3.8): only an Ace launch with the part on writes load=fast. */
+        if (p == PLAYER_PART_LOAD && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }

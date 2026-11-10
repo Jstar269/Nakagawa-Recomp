@@ -67,6 +67,40 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;cull=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate cull");
     }
+    /* load (contract 11.3.8): optional like cull; load=fast needs an Ace line, any other value
+       is refused, and a line without it formats as before. */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.load == 0, "a missing load is off");
+        snprintf(spec, sizeof(spec), "%s;tier=ace;load=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.load == 0 && c.tier == ACE_TIER_ACE,
+              "load=off is off");
+        snprintf(spec, sizeof(spec), "%s;tier=ace;load=fast", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.load == 1, "load=fast in an Ace line");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 10, ";load=fast") == 0 &&
+              strstr(out, "tier=ace;") == out + 3, "an Ace line with load=fast formats with the key last (%s)", out);
+        c.cull = 1;
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 18, ";cull=on;load=fast") == 0,
+              "cull then load (%s)", out);
+        c.cull = 0;
+        c.load = 0;
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "load") == NULL, "off writes no load key (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;load=fast", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "load needs tier=ace") == 0 &&
+              c.on == 0 && c.load == 0, "load=fast without tier=ace is refused (%s)", why);
+        snprintf(spec, sizeof(spec), "%s;tier=enhanced;load=fast", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "load needs tier=ace") == 0,
+              "load=fast in an Enhanced line is refused (%s)", why);
+        static const char *const bad[] = { "on", "1", "x2", "faster", "FAST" };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            snprintf(spec, sizeof(spec), "%s;tier=ace;load=%s", base, bad[i]);
+            CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 && c.on == 0,
+                  "load=%s is a bad value (%s)", bad[i], why);
+        }
+        snprintf(spec, sizeof(spec), "%s;tier=ace;load=fast;load=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate load");
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {
@@ -144,7 +178,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -264,6 +298,39 @@ static void cell_switch(void) {
     CHECK(ace_effective()->cull == 0 && ace_requested()->cull == 1 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
+
+    /* load=fast (contract 11.3.8): the gate generated code calls at a declared wait. Off, and in an
+       Enhanced or authentic run, it never skips; on, each call skips one wait, counted in the
+       report, and a run that never reached a wait reports the part unavailable at exit. */
+    CHECK(ace_init_spec("off", NULL) == 0 && nk_ace_load_fast() == 0, "an authentic run skips no wait");
+    CHECK(ace_init_spec(k_good, NULL) == 1 && ace_effective()->load == 0 && nk_ace_load_fast() == 0 &&
+          ace_load_waits_skipped() == 0, "an Enhanced run without load skips no wait");
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"load") == NULL,
+          "a run without load reports none:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;"
+                        "load=fast", NULL) == 1 && ace_effective()->load == 1, "load=fast with tier=ace turns load on");
+    CHECK(strcmp(ace_spec_text(), "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;"
+                                  "sas=off;tess=off;load=fast") == 0,
+          "the stamp's line carries load=fast: '%s'", ace_spec_text());
+    CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "short loads") == 0,
+          "load feature words: '%s'", words);
+    CHECK(nk_ace_load_fast() == 1 && nk_ace_load_fast() == 1 && nk_ace_load_fast() == 1 &&
+          ace_load_waits_skipped() == 3, "each call skips one wait and is counted");
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"load\": true") != NULL &&
+          strstr(json, "\"load_waits_skipped\": 3") != NULL, "the report counts skipped waits:\n%s", json);
+    ace_finish();   /* reached: confirmed, stays on */
+    CHECK(ace_effective()->load == 1 && ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "\"unavailable\": {}") != NULL, "a load run that skipped waits is not unavailable:\n%s", json);
+    ace_feature_unavailable(ACE_FEATURE_LOAD, "test");
+    CHECK(ace_effective()->load == 0 && ace_requested()->load == 1 && nk_ace_load_fast() == 0 &&
+          ace_load_waits_skipped() == 3, "an unavailable load skips no more waits");
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;"
+                        "load=fast", NULL) == 1 && ace_load_waits_skipped() == 0, "a new run counts from 0");
+    ace_finish();   /* never reached: no load part in this build, or no declared wait ran */
+    CHECK(ace_effective()->load == 0 && ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "\"load\": false") != NULL && strstr(json, "\"load_waits_skipped\": 0") != NULL &&
+          strstr(json, "\"load\": \"did not run: this title's build declares no load part") != NULL,
+          "a load run that reached no wait reports it unavailable:\n%s", json);
 
     /* tess=4 (#2053): named in the words, the stamp's line and the report; off with its feature;
        off in the canonical line and in an authentic run. */

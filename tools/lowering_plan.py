@@ -298,6 +298,8 @@ def plan_function(cg, elf, start, ranges, known, *, resume_owners=None, resumabl
         raise Unsupported("loads $sp, so its exits leave $sp to the guest (kept in C)")
     if cg.ENHANCEMENT_SITES and insns & set(cg.ENHANCEMENT_SITES):
         raise Unsupported("enhancement-package rewrite site")
+    if cg.ENHANCEMENT_ACE_SITES and insns & set(cg.ENHANCEMENT_ACE_SITES):
+        raise Unsupported("enhancement-package ace_parts site")
     if profile == "hst":
         hit = sorted(insns & hst_emission_sites(cg))
         if hit:

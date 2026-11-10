@@ -323,6 +323,40 @@ python tools/enhancement_package.py --compare-rates stock/samples.csv enhanced/s
 
 Sample specs and routes name guest addresses, so they stay private with the package; the check itself is generic.
 
+### 9.8. Ace Parts (`ace_parts`)
+
+A timing package may also carry Ace parts: items for its one title that belong to the Ace tier (section 10) and
+that a player turns on or off apart from the 60 FPS game logic. The field is an object of named parts:
+
+```json
+"ace_parts": {"load": {"sites": [{"id": "...", "function": "...", "insn_offset": 0, "stock_digest": "...",
+                                  "transform": "vblank_wait_skip"}]}}
+```
+
+- **Names.** The part names are a closed list: today only `load` (section 11.3.8). Any other name refuses the
+  package, as does an empty `ace_parts` or a part with no sites.
+- **Sites.** Each site has an `id`, a symbolic `function`, a 4-byte-aligned `insn_offset`, the `stock_digest` of one
+  stock instruction word, an optional `word_count` that may only be 1, and a `transform` from the parts' own list
+  (below). A site resolves and is verified like a `sites` entry (section 9.2), fail-closed, and in a published
+  package (section 5.1) its function is in the site map and its digest is keyed, as for `sites`.
+- **One namespace.** Site ids and instruction positions are shared by `sites`, every part's sites and the
+  `update_boundary`. The validator refuses a duplicate id, an Ace part site on a word a `sites` entry or the
+  `update_boundary` already covers (the same `function` and `insn_offset`), an Ace part site that declares `requires`,
+  and any `requires` that names an Ace part site. Codegen also refuses a part site whose resolved address is a 60 Hz
+  site or the boundary.
+- **Their own transforms.** The parts' transforms are a set of their own, disjoint from the transforms of section
+  9.2: a 60 Hz transform in `ace_parts`, or a part transform in `sites`, is an unknown transform and refuses the
+  package.
+- **Their own switch.** A part site is gated at run time only by its part's `SR_ACE` key (section 10.1), never by
+  `SR_EXPERIMENTAL_60HZ` or the update count. With the key off the stock statement runs. A package without
+  `ace_parts` generates exactly the code it generated before; with them, the generated C differs only at each part
+  site's statement and in the declaration digest, which covers `ace_parts` like every other field, so the AOT cache
+  key changes with it.
+
+| Transform | Instructions with a defined rewrite | Rewrite |
+| --- | --- | --- |
+| `vblank_wait_skip` | `jal` whose target is the executable's import stub of `sceDisplayWaitVblankStart` (NID `0x984C27E7`); any other target refuses the package | the delay slot runs as stock; the call runs unless the run's `load=fast` is in effect (`nk_ace_load_fast()`), and a skipped call leaves `$v0` = 0, the stock function's return. The site may not be in the `update_boundary`'s function |
+
 ## 10. Play Modes: Authentic, Enhanced and Ace
 
 The player offers three play modes per game (#2055):
@@ -348,8 +382,9 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
-section 11.3.6) is the other key a line may leave out: a missing `cull` is off, and `cull=on` needs `tier=ace`. Every
-other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
+section 11.3.6) and `load` (`fast` or `off`, section 11.3.8) are the other keys a line may leave out: a missing `cull`
+or `load` is off, `cull=on` and `load=fast` need `tier=ace`, and the launcher writes `;cull=on` and `;load=fast` only
+for an Ace launch with that part on. Every other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
 `<user data>/ace/`. Ace's 60 FPS game logic is not on this line: it selects the title's enhanced package variant
@@ -1485,3 +1520,52 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
   It is in no graphics preset, because it changes GE timing.
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
   exist.
+
+#### 11.3.8. Short Loads (`load=fast`, Not Yet Admitted)
+
+The `load` Ace part of section 9.8, for a title that paces a loading screen with display waits of its own.
+
+- **Status: guest-visible, not admitted under section 11.2.** It changes guest timing. It is an Ace part of the
+  title's own timing package, built into that title's AOT output; its key, its library and per-title settings and
+  this entry are in place (section 11.2, items 2, 3 and 6), and the runs of item 4 do not exist.
+- **Mechanism.** Each `vblank_wait_skip` site in `ace_parts.load` names one `jal` to the executable's
+  `sceDisplayWaitVblankStart` import stub, by symbolic function and offset with the stock word's digest (section 9.8).
+  The site's delay slot runs as stock. Generated code then asks `nk_ace_load_fast()` (`src/rt/ace.c`): while the run's
+  line carries `load=fast` it returns nonzero, the call is not made and `$v0` is 0, which is what the stock function
+  returns; otherwise the stock call runs. Nothing else in the title's code changes.
+- **Key.** `load=fast` or `load=off` on the launch line (section 10.1), an optional key: a line without it reads as
+  off, any other value is refused, and `load=fast` is refused unless the line carries `tier=ace`. The player has a
+  library setting and a per-title setting, "Short loads", each able to turn it off alone (section 11.2,
+  item 2); the line carries `;load=fast` only for an Ace launch with the part on, so every other line is as it was.
+  The run names it (`ACE_MODE: load fast (...)` at start, `ACE_MODE: load waits skipped <n>` at exit, the report's
+  `load` and `load_waits_skipped`), and confirms it the first time a declared wait is skipped. A run that asked for
+  it and never reached a site reports it unavailable at exit (`ACE_MODE: load unavailable (...)`, the report's
+  `unavailable.load`): the title's build has no load part, or none of its declared waits ran.
+- **What it changes:** only the declared display waits, and only while the key is on: each returns at once, with 0,
+  instead of blocking until the next VBLANK starts. The code before and after a wait runs as stock, including any fade
+  or progress step the loading loop runs between waits. VBLANK interrupts, sub-interrupt handlers,
+  `sceDisplayGetVcount` and the audio threads keep running on host time. So fewer VBLANKs pass during the shortened
+  stretch, and the frames the wait would have shown are not presented: a fade or a progress bar can jump or finish
+  before it is seen.
+- **VRAM bytes:** the loop draws what it draws in stock, but fewer of its frames reach the screen, and a step the
+  title counts in VBLANKs elsewhere (a fade timed by `sceDisplayGetVcount` or a VBLANK handler) can show fewer of its
+  stages in the frames that are drawn.
+- **Readbacks:** unchanged for a frame the loop draws; a readback of the display or of a counter the VBLANK handler
+  advances sees fewer VBLANKs per pass of the loop.
+- **Timing:** differs: each skipped wait shortens its pass of the loop by up to one VBLANK of guest time, and the
+  loading stretch ends sooner in host time. The VBLANK schedule, the RTC and system time, the media clocks and the GE
+  timing model are unchanged. The logic update counter of section 9.5 is unaffected, because a site may not sit in the
+  `update_boundary`'s function. Limit: that check is static and covers only that function; a wait in a loop that
+  reaches the boundary through its callees cannot be checked statically, so the package author shows that each
+  declared wait paces only a loading screen (below).
+- **I/O speed:** unchanged. Reads take what they take; only the display waits between them are shorter.
+- **Package obligations.** The mechanism cannot check these, so the package author shows them for the title: (1)
+  each declared wait paces a loading screen only, not a loop that runs or reaches a logic update; (2) the loop makes
+  progress without the wait (it polls the load's own completion, not a count of VBLANKs it waited for); (3) nothing
+  the title keeps after the load depends on how many VBLANKs passed during it.
+- **Limits.** It skips only the waits a package declares: a loading screen paced by another wait
+  (`sceDisplayWaitVblankStartCB`, a semaphore its VBLANK handler signals, or a thread delay) is unchanged. It does
+  not make a read faster. The section adds no code and changes no word when a package has no `ace_parts`, and with
+  the key off the stock call runs.
+- **Tier:** Ace (one title). **Default:** off, and in no graphics preset.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic.

@@ -231,6 +231,9 @@ typedef enum {
                                   factor 2, 3 or 4. Off in a fresh file; alters GE timing */
     PLAYER_PART_CULL,          /* wider culling (section 11.3.6): 0 off, 1 on. A title's own culling is
                                   widened to Widescreen's wings; a title without a package ignores it */
+    PLAYER_PART_LOAD,          /* short loads (section 11.3.8): 0 off, 1 fast. The display waits
+                                  a title's package declares return at once; guest timing changes. Ace
+                                  only; a title without a load part ignores it */
     PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
                                   runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
                                   not in the SR_ACE line */
@@ -1674,6 +1677,7 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off" (tier=ace for Ace; smooth=match is never written).
  * ";cull=on" follows only for Ace with the Wider culling part on; a missing cull is off.
+ * ";load=fast" follows only for Ace with the Short loads part on; a missing load is off.
  * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);
 /* The presentation upscaler a resolution asks for (NkRuntimeConfig.present_upscale, exported as

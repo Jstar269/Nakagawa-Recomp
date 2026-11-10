@@ -173,6 +173,9 @@ PROMOTION_STATS = {"functions": 0, "promoted": 0, "spans": 0, "loads": 0, "write
 # Empty (the default) keeps authentic emission byte-identical.
 ENHANCEMENT_SITES: dict[int, dict] = {}
 ENHANCEMENT_PKG_META: dict | None = None
+# Verified ace_parts sites (contract section 9.8; addr -> resolved site dict with its "rewrite").
+# Each runs only on its own SR_ACE key at run time, never on SR_EXPERIMENTAL_60HZ.
+ENHANCEMENT_ACE_SITES: dict[int, dict] = {}
 # The sites whose rewrite has been emitted. A package is refused unless every
 # verified site is in it when the translation is written.
 ENHANCEMENT_APPLIED: set[int] = set()
@@ -213,6 +216,21 @@ def _enhancement_rewrite(addr: int) -> dict | None:
         raise enhancement_package.EnhancementPackageError(
             f"enhancement site at 0x{addr:08x} has a non-object rewrite"
         )
+    ENHANCEMENT_APPLIED.add(addr)
+    return rewrite
+
+
+def _enhancement_ace_rewrite(addr: int) -> dict | None:
+    """The planned rewrite of a verified ace_parts site of the main executable, or None.
+
+    Callers emit the rewrite they are given, so the site is recorded as applied.
+    """
+    if not ENHANCEMENT_ACE_SITES or ADDRESS_SPACE.runtime_module:
+        return None
+    site = ENHANCEMENT_ACE_SITES.get(addr)
+    if site is None:
+        return None
+    rewrite: dict = site["rewrite"]
     ENHANCEMENT_APPLIED.add(addr)
     return rewrite
 
@@ -4183,6 +4201,8 @@ def sv_plan(elf, insns, labels, hst_profile=False, options=None):
         return {}
     if ENHANCEMENT_SITES and (insns & set(ENHANCEMENT_SITES.keys())):
         return {}
+    if ENHANCEMENT_ACE_SITES and (insns & set(ENHANCEMENT_ACE_SITES.keys())):
+        return {}
     points, total = {}, 0
     regs: list[int | None] = [None] * 32
     regs[0] = 0
@@ -4384,6 +4404,7 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
     lle_cpu, resumable = ctx.lle_cpu, ctx.resumable
     target = jump_target(addr, w)
     _jal_rw = _enhancement_rewrite(addr)
+    _ace_rw = _enhancement_ace_rewrite(addr)
     out.append(f"    sr_begin(s, {G(addr)}, 0x{w:08x}u); s->r[31] = {G((addr + 8) & 0xFFFFFFFF)}; sr_end(s, 0u, 0);")
     out.extend(delay_slot_lines(ds, dsw, addr, resumable=resumable,
                                 options=ctx.options))
@@ -4394,7 +4415,17 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
     else:
         _call_stmt = "    " + emit_checked_dispatch_call(
             G(target), G((addr + 8) & 0xFFFFFFFF))
-    if _jal_rw is not None and _jal_rw["kind"] == "clip_x_widen":
+    if _ace_rw is not None:
+        if _jal_rw is not None or _ace_rw["kind"] != "vblank_wait_skip":
+            raise enhancement_package.EnhancementPackageError(
+                f"ace_parts site at 0x{addr:08x} has no rewrite here (fail-closed refusal)")
+        # vblank_wait_skip (contract section 9.8): the delay slot above ran as stock. The call to
+        # sceDisplayWaitVblankStart runs unless the run's Ace load part is on (nk_ace_load_fast(),
+        # never nk_enhancement_on()); a skipped call leaves $v0 = 0, the stock function's return.
+        out.append("    if (!nk_ace_load_fast()) {")
+        out.extend(_call_stmt.split("\n"))
+        out.append("    } else { s->r[2] = 0u; }")
+    elif _jal_rw is not None and _jal_rw["kind"] == "clip_x_widen":
         # clip_x_widen (contract section 10.8): the stock call runs unchanged; when it returns,
         # the runtime scales the x row of the clip matrices at the offsets from the pointer the
         # call returned, by the Widescreen factor. It does nothing while Widescreen is off.
@@ -5939,7 +5970,7 @@ def _refuse_unemitted_enhancement_sites():
     if ENHANCEMENT_PKG_META is None:
         return
     missing = sorted(
-        site["id"] for addr, site in ENHANCEMENT_SITES.items()
+        site["id"] for addr, site in (*ENHANCEMENT_SITES.items(), *ENHANCEMENT_ACE_SITES.items())
         if addr not in ENHANCEMENT_APPLIED
     )
     if (ENHANCEMENT_UPDATE_BOUNDARY is not None
@@ -5951,7 +5982,7 @@ def _refuse_unemitted_enhancement_sites():
         # it: refuse before anything is written.
         raise _Refusal(
             1, "codegen: enhancement package refused (fail-closed): "
-               f"{len(missing)} of {len(ENHANCEMENT_SITES)} sites were not emitted: "
+               f"{len(missing)} of {len(ENHANCEMENT_SITES) + len(ENHANCEMENT_ACE_SITES)} sites were not emitted: "
                + ", ".join(missing) + "\n")
 
 
@@ -6015,7 +6046,9 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
     verification refuses the run (fail closed).
     """
     global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
+    global ENHANCEMENT_ACE_SITES
     ENHANCEMENT_SITES = {}
+    ENHANCEMENT_ACE_SITES = {}
     ENHANCEMENT_STORE_KEY = None
     ENHANCEMENT_PKG_META = None
     ENHANCEMENT_UPDATE_BOUNDARY = None
@@ -6088,6 +6121,7 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                         "update_boundary: the boundary is also a rewritten site (fail-closed refusal)"
                     )
                 ENHANCEMENT_UPDATE_BOUNDARY = boundary["site_addr"]
+            ENHANCEMENT_ACE_SITES = _verified_ace_part_sites(elf, pkg_validated, sym_map, _read_words, known)
 
             for patch in enhancement_package.verify_and_resolve_data_sites(
                 pkg_validated, symbol_to_addr=sym_map, read_data_fn=_read_loaded_data,
@@ -6116,6 +6150,37 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             }
         except enhancement_package.EnhancementPackageError as exc:
             raise _Refusal(1, f"codegen: enhancement package refused (fail-closed): {exc}\n") from None
+
+
+def _verified_ace_part_sites(elf, pkg_validated, sym_map, read_words, known):
+    """The package's ace_parts sites, verified (contract section 9.8). A vblank_wait_skip site is
+    a jal whose target is the primary image's import stub of sceDisplayWaitVblankStart; any other
+    target, a word another site or the update boundary rewrites, or a jal codegen leaves
+    unrelocated refuses the package."""
+    sites = enhancement_package.verify_and_resolve_ace_parts(
+        pkg_validated, symbol_to_addr=sym_map, read_words_fn=read_words, known_functions=sorted(known),
+    )
+    if not sites:
+        return {}
+    impmap = primary_import_map(elf)
+    for addr, site in sites.items():
+        where = f"site {site['id']}"
+        if addr in ENHANCEMENT_SITES or addr == ENHANCEMENT_UPDATE_BOUNDARY:
+            raise enhancement_package.EnhancementPackageError(
+                f"{where}: its word is also a 60 Hz site or the update_boundary (fail-closed refusal)")
+        if site["rewrite"]["kind"] != "vblank_wait_skip":
+            raise enhancement_package.EnhancementPackageError(
+                f"{where}: transform {site['rewrite']['kind']!r} has no rewrite (fail-closed refusal)")
+        target = jump_target(addr, site["stock_words"][0])
+        import_ = impmap.get(target)
+        if import_ is None or import_[1] != enhancement_package.VBLANK_WAIT_SKIP_NID:
+            called = (f"import NID 0x{import_[1]:08x}" if import_ is not None
+                      else "no import stub")
+            raise enhancement_package.EnhancementPackageError(
+                f"{where}: vblank_wait_skip needs a jal to the "
+                f"{enhancement_package.VBLANK_WAIT_SKIP_IMPORT} import stub; its jal reaches "
+                f"0x{target:08x}, {called} (fail-closed refusal)")
+    return sites
 
 
 def _symbol_names(symbol_map_path, name_imports, symbols, import_nids, emitted, resume_owners, func_texts):
@@ -6623,7 +6688,8 @@ def _translate(argv):
             func_texts.append(text)
             emitted.append(a)
             continue
-        applied_before = set(ENHANCEMENT_APPLIED) if ENHANCEMENT_SITES else None
+        applied_before = (set(ENHANCEMENT_APPLIED) if ENHANCEMENT_SITES or ENHANCEMENT_ACE_SITES
+                          else None)
         try:
             func_texts.append(llvm_body("\n".join(emit_function(
                 elf, a, ranges, known, resume_owners=resume_owners,
