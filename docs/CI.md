@@ -540,11 +540,13 @@ each device pixel's own position, and so does its uv-edge-clamp case (also at sc
 device pixels outside a screen-aligned strip's or sprite's first and last pixel centres must show
 that edge pixel's 1x sample, with linear and nearest filtering and with repeat and clamp wrapping,
 while a sheared strip stays unclamped.
-The dst-read cells (#2109: order, mask, alpha, mixed, depth, ztest and pins) run alone at render scales 1 and 4,
+The dst-read cells (#2109: order, mask, alpha, mixed, depth, ctest, feedback, ztest and pins) run alone at render scales 1 and 4,
 once forced to the snapshot destination-read path and once to the interlock path (`--dst-read`). On the
 interlock path, overlapping shader-blend primitives must equal the software GE in colour with no snapshot copy,
-and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-read-depth`, an alpha-tested op
-that writes depth, must keep the snapshot path on both paths and equal the software GE in colour and depth. On
+and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-read-depth` and `dst-read-ctest`, an
+alpha-tested and a colour-tested op that write depth, must keep the snapshot path on both paths and equal the
+software GE in colour and depth. `dst-read-feedback`, a stencil state that textures from its own target, must
+keep it too: the destination copy is the texture its second sprite samples. On
 the snapshot path, the known difference must stay inside each overlap, and the device must hold no interlock
 state. A device that refuses the interlock prints one SKIP line for each interlock leg. The lavapipe step prints
 the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
@@ -552,8 +554,9 @@ pipeline cache (#2149) runs next, as three processes over one empty data root: c
 mutant targets follow, and each broken variant must fail its case with its own message:
 `gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
 (`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
-pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths five ways
-(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 run on the interlock path and are a SKIP on a device without it).
+pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths seven ways
+(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 7 run on the interlock path and are a SKIP on a device without it,
+the hosted lavapipe device included).
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on
 lavapipe, headless, under the validation layer with synchronisation validation of shader accesses,
 and an exit 77 skip fails it, including one for synchronisation validation that is not active.
