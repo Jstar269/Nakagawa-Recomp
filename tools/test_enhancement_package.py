@@ -4812,7 +4812,8 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                          for n0, count, a0, a1, delta in enhancement_package.phase_runs(self.STEP / 2))
         self.assertIn(f"nk_enh_phase_runs_0[] = {{{rows}}};", text)
         # The lookup matches the time exactly: inside a row, and a whole number of its steps from its start.
-        self.assertIn("        if (x >= runs[i].a0 && x <= runs[i].a1) {\n"
+        self.assertIn("    for (i = 0; i < nk_enh_phase_tables[table].count; i++) {\n"
+                      "        if (x >= runs[i].a0 && x <= runs[i].a1) {\n"
                       "            double k = (x - runs[i].a0) / runs[i].delta;\n"
                       "            if (k == floor(k)) return (int)((runs[i].n0 + (uint32_t)k) & 1u);\n"
                       "            break;\n", text)
@@ -4972,6 +4973,8 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             t = _f32_round(t + half)
         times += [_f32_of(_f32_bits_of(times[3]) + 1), _f32_round(2.5 * half), -half, 1.0e30, float("inf"),
                   float("nan"), -0.0]
+        # The last time the sum reaches, where adding the step no longer changes it: the last row.
+        times.append(enhancement_package.phase_runs(half)[-1][3])
         return times
 
     def _harness(self, tmp: Path, name: str, statements: dict[str, str], runtime: str,
@@ -5131,7 +5134,8 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         half = self.STEP / 2
         phases = [enhancement_package.phase_of_time(t, half) for t in times]
         self.assertEqual(phases[:121], [n & 1 for n in range(121)])
-        self.assertEqual(phases[121:], [1, 0, None, None, None, None, None, None, 0])
+        last_row = enhancement_package.phase_runs(half)[-1]
+        self.assertEqual(phases[121:], [1, 0, None, None, None, None, None, None, 0, (last_row[0] + last_row[1]) & 1])
         size = _f32_bits_of(self.SIZE)
 
         def time_lines(forced_flag: int, gated: bool) -> list[str]:
