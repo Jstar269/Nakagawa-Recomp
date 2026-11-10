@@ -1241,7 +1241,7 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
        as texture filtering does. Off by default until its "nothing worse" runs exist (11.2 item 4),
        with its own off switch in the library and each title (item 2). */
     {"mips", "Smooth far textures",
-     "Stops far textures shimmering at high resolution. Save pictures keep the smoothing.",
+     "Slightly less shimmer on far textures. Uses CPU; may stutter on new textures.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
 };
 

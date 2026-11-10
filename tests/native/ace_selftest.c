@@ -235,18 +235,51 @@ static void cell_switch(void) {
                  "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off") == 0,
           "an Ace run is called Ace, and its line is canonical");
     {
-        /* Every part on, each at its longest word: the words fit ACE_WORDS_MAX and the line
-           ACE_SPEC_MAX, so a part added without room fails here. A new key adds itself here. */
-        static const char k_every[] = "v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;"
-                                      "smooth=x2;sas=sinc;tess=4;mips=on;cull=on";
-        char all[1024], fit[ACE_WORDS_MAX], line[1024];
-        CHECK(ace_init_spec(k_every, NULL) == 1 && ace_requested()->mips && ace_requested()->cull,
-              "every part on is a valid Ace line");
-        const size_t n_all = ace_feature_words(all, sizeof(all));
-        CHECK(n_all > 0 && ace_feature_words(fit, sizeof(fit)) == n_all && strcmp(fit, all) == 0,
-              "every part's words fit ACE_WORDS_MAX (%zu bytes: '%s')", n_all + 1u, all);
-        CHECK(ace_format(ace_requested(), line, sizeof(line)) && strlen(line) < ACE_SPEC_MAX &&
-              strcmp(line, k_every) == 0, "every part's line fits ACE_SPEC_MAX and is canonical (%s)", line);
+        /* The longest line the key table allows, every key at its longest value, parses and fits
+           ACE_SPEC_MAX (and so the flight recorder's ace field): a key added without room, or
+           without a longest value, fails here. */
+        char longest[2 * ACE_SPEC_MAX], lspec[ACE_SPEC_MAX], lwhy[64];
+        AceConfig lc;
+        const size_t n = ace_line_longest(longest, sizeof(longest));
+        CHECK(n > 0u && n == strlen(longest), "the longest line is computed from every key (%s)", longest);
+        CHECK(n < (size_t)ACE_SPEC_MAX, "the longest line (%u characters) fits ACE_SPEC_MAX (%d)",
+              (unsigned)n, ACE_SPEC_MAX);
+        /* smooth=match is a word the parser knows that this build refuses (ACE_HAS_SMOOTH_MATCH
+           is 0), so the line is parsed with smooth=off in its place: every other key keeps its
+           longest value, and each must be one the parser takes. */
+        const char *match = strstr(longest, ";smooth=match");
+        CHECK(match != NULL, "the longest line carries smooth=match (%s)", longest);
+        if (match && n < (size_t)ACE_SPEC_MAX) {
+            snprintf(lspec, sizeof(lspec), "%.*s;smooth=%s%s", (int)(match - longest), longest,
+                     ACE_HAS_SMOOTH_MATCH ? "match" : "off", match + strlen(";smooth=match"));
+            CHECK(ace_parse(lspec, &lc, lwhy, sizeof(lwhy)) == 1 && lc.on,
+                  "each key's longest value is one the parser takes (%s: %s)", lspec, lwhy);
+            /* Every part on: each key of that line takes the first of these values the parser
+               accepts in its place, so a new part is turned on with no edit here, and the run's
+               words must fit ACE_WORDS_MAX. */
+            static const char *const k_on[] = {"on", "fill", "x2", "sinc", "16", "4", "ace"};
+            char every[ACE_SPEC_MAX], trial[ACE_SPEC_MAX];
+            snprintf(every, sizeof(every), "%s", lspec);
+            for (char *key = strchr(every, ';'); key != NULL; key = strchr(key + 1, ';')) {
+                char *eq = strchr(key, '=');
+                if (eq == NULL) break;
+                const char *rest = strchr(eq, ';');
+                for (size_t v = 0; v < sizeof(k_on) / sizeof(k_on[0]); v++) {
+                    snprintf(trial, sizeof(trial), "%.*s%s%s", (int)(eq + 1 - every), every, k_on[v],
+                             rest ? rest : "");
+                    if (ace_parse(trial, &lc, NULL, 0) == 1) {
+                        snprintf(every, sizeof(every), "%s", trial);
+                        break;
+                    }
+                }
+            }
+            char all[1024], fit[ACE_WORDS_MAX];
+            CHECK(ace_init_spec(every, NULL) == 1 && ace_requested()->mips && ace_requested()->cull,
+                  "every part on is a valid line (%s)", every);
+            const size_t n_all = ace_feature_words(all, sizeof(all));
+            CHECK(n_all > 0 && ace_feature_words(fit, sizeof(fit)) == n_all && strcmp(fit, all) == 0,
+                  "every part's words fit ACE_WORDS_MAX (%zu bytes: '%s')", n_all + 1u, all);
+        }
     }
     CHECK(ace_init_spec(k_good, NULL) == 1 && strcmp(ace_tier_name(), "Enhanced") == 0,
           "the next Enhanced run is called Enhanced again");

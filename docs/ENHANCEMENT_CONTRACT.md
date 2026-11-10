@@ -1042,23 +1042,36 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
   graphics preset and is not turned on by choosing Enhanced or Ace. An authentic run has no launch line, so the
   chain code never runs there: no buffer, no chain, no extra descriptor set, and the shader branch is never taken.
 - **Which textures.** A cache entry gets a chain when the game gives it one level (no `TEXMODE` maximum level), its
-  minifying filter is linear, both sides are powers of two from 2 to 512 texels, and no byte of it lies in a live
-  render target. A texture the game mips keeps the game's own chain (#1373) and gets none of these. A render
+  minifying filter is linear, both sides are powers of two up to 512 texels with the longer at least 2, and no byte
+  of it lies in a live render target. A texture the game mips keeps the game's own chain (#1373) and gets none of these. A render
   target, read back as a texture, never gets one: its contents are guest drawing, not texture data. A texture that
   changes every frame, from a CPU write or a DMA, is decoded again as before, and its chain follows it: built again
   for contents the renderer has not seen, or taken from the chain cache (below) for contents it has.
-- **When a chain is built.** At the first bind after a decode that the chain applies to (the next item), not at the
-  decode: a decode uploads level 0 alone and marks the chain stale. The bind builds it from the texels that decode
-  left, or, when the texture was decoded for an earlier draw, decodes level 0 again first. Contents that only
-  through-mode draws, alpha-unused draws or render targets ever meet, such as a loading screen's or a menu's
-  textures, cost no build.
   A CLUT texture's palette is part of its cache key, so each palette has its own entry and its own chain, and a
   palette animation that comes back to a palette finds the chain it built the first time.
+- **When a chain is built.** At the first bind after a decode that the chain applies to (the next item), not at the
+  decode: a decode uploads level 0 alone and marks the chain stale. The bind builds it from the texels that decode
+  left, or, when the texture was decoded for an earlier draw, decodes level 0 again first. The chain's view,
+  sampler and descriptor set are made at the first such bind too. Contents that only through-mode draws,
+  alpha-unused or alpha-tested draws, 1:1 draws or render targets ever meet, such as a loading screen's or a menu's
+  textures, cost no build. Two limits keep builds off the frames that cannot afford them, and a draw either limit
+  stops binds level 0, as with the part off:
+  - **The build budget.** The builds started in one present stop once they have taken 2 ms, an eighth of a 60 Hz
+    frame; one build may run past it by its own cost. A later bind builds the chain.
+  - **Streaming textures.** A texture address whose contents are decoded anew in three presents in a row, each
+    within two presents of the last (a movie on a surface, a palette fade, which makes a new entry at each step, a
+    texture rewritten every frame), would build chains that are replaced before they are seen again. Its draws keep
+    level 0 until the address holds still for longer than two presents.
 - **Which draws.** A draw binds the chain only when it is transformed (through-mode HUDs, menus and text keep
   level 0, as texture filtering's rule has it), its minifying filter is linear, and, for a texture with any alpha
-  under 255, the texture's alpha is used: the texture function is RGBA and the alpha test is on or a blend factor
-  reads source or destination alpha. A draw that shows a keyed texel's colour as it is would show the fill colour
-  described below instead, so it keeps level 0. A colour-tested draw with a linear filter is drawn by the software
+  under 255, the draw blends by the texture's alpha and does not alpha-test it: the texture function is RGBA, the
+  source or the destination blend factor reads the source alpha, and the alpha test is off. A draw that shows a
+  keyed texel's colour as it is would show the fill colour described below instead, so it keeps level 0. An
+  alpha-tested draw keeps level 0 because the chain's alpha is a plain mean: a far cut-out (foliage, a fence, hair)
+  would thin out under a high reference or fill in under a low one, and the depth and stencil it writes would
+  follow; with level 0 its coverage stays the game's own. A draw that maps texels 1:1 onto guest pixels (the smart
+  2D test of section 10.10), or a sprite that magnifies its texture, is never minified at any render scale, so it
+  binds level 0 too, and sharp game text (10.13) and the smart 2D filter take it as they do with the part off. A colour-tested draw with a linear filter is drawn by the software
   renderer, as with the part off, so it never samples a chain (the colour test keys on the game's own texels). Each
   rule is rechecked at every bind, and the exit stamp counts the binds each rule kept at level 0.
 - **How a level is built.** After the palette lookup, from the RGBA8 texels the renderer uploads as level 0, which
@@ -1082,19 +1095,25 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
 - **Memory and cost.** A chain adds a third of level 0's bytes or less (a 64x64 texture: 1365 texels on top of
   4096), in the same image as level 0, plus one descriptor set an entry. The chain is freed with its entry at
   eviction and at shutdown. The builder's two buffers, made once when the part is on, hold a 512x512 chain (1.33 MiB)
-  and its float work area (2.25 MiB). A build is CPU work on the GE thread. A game that streams several textures
+  and its float work area (2.25 MiB). A build is CPU work on the GE thread, bounded per present by the build
+  budget above. A game that streams several textures
   through one VRAM slot in turn decodes each of them again and again, so the renderer keeps built chains in a host
   cache keyed by a 64-bit hash of every decoded level-0 texel and the size: contents it has seen upload their kept
   chain instead of building it (the hash costs about a fifteenth of a build). The cache holds at most 32 MiB, about
   two and a half times the chains Hot Shots Tennis keeps resident at 4x, and drops the least recently used chain
   first. The exit stamp gives the builds, the reuses, the level-0 decodes a late build repeated, the time of all
-  three and the cache's peak.
+  three and the cache's peak. On LittleBigPlanet's first story level at 4x the cache saved 59 of about 9,000
+  builds, as nearly all of that title's contents are new; on Hot Shots Tennis it saved more builds than were made.
+  A 3D texture atlas also bleeds between its cells at far levels, as any mip chain does: the key fill covers only
+  texels with alpha 0.
 - **Stamps.** `ACE_MODE: mips on (textures with one level get host-built mip chains)` after the `ACE_MODE: on` line;
   `HOST_MIPS: on (filter=box in linear light, alpha-weighted, key fill; bias=0 at <S>x; anisotropy=<A>)` and the
-  guest-visible line section 11.3.8 describes when the renderer starts; `HOST_MIPS: exit (entries=, builds=, reused=,
-  redecodes=, texels=, build_ms=, bound=, plain_alpha_unused=, plain_target=, set_failures=, chain_peak_kib=,
-  cache_peak_kib=)` (`build_ms` is the time of the repeated decodes, the hash, the cache lookup and the builds;
-  `texels` counts built ones) when it
+  guest-visible line section 11.3.8 describes when the renderer starts; `HOST_MIPS: exit (entries=, sets=, builds=,
+  reused=, redecodes=, texels=, build_ms=, bound=, plain_alpha_unused=, plain_alpha_test=, plain_onetoone=,
+  plain_budget=, plain_stream=, plain_target=, set_failures=, chain_peak_kib=, cache_peak_kib=)` (`entries` are the
+  images with a chain, `sets` the ones a draw has bound; `build_ms` is the time of the repeated decodes, the hash,
+  the cache lookup and the builds; `texels` counts built ones; `plain_onetoone` counts draws, the other `plain_`
+  fields binds) when it
   stops, or, on the `SR_EXIT_AT_VBLANK` path that skips the renderer's shutdown, from `ace_finish` (once either
   way). The report's `effective` block has `"mips"`, the game badge lists "smooth far textures", and the flight
   recorder's `runtime.enhancements` carries the launch line. Section 10.4 applies: the run is an Enhanced run. If the
@@ -1112,12 +1131,19 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
     grey at 1x; a second palette builds a second chain and the first palette, back again, finds its own; a rewrite
     of the texels rebuilds the chain, and the checker written back takes its cached chain with no build; new
     contents drawn in through mode build nothing, and the first minified draw of them decodes level 0 again and
-    builds once; a colour-keyed edge blended over black takes no key colour; through-mode and alpha-unused draws keep level 0, and a
-    colour-tested draw stays with the software renderer; the chain bytes are 1365 texels an entry. It runs at render
+    builds once, after a submit that closes the command buffer; an alpha-tested draw of a texture with alpha, and a
+    transformed draw at 1:1, bind level 0; past the build budget a draw binds level 0 and builds nothing, and with
+    budget it builds; new contents at the address in three presents in a row stop the builds at the third, and the
+    address held still builds again; a colour-keyed edge blended over black takes no key colour; through-mode and
+    alpha-unused draws keep level 0, and a colour-tested draw stays with the software renderer; the chain bytes
+    are 1365 texels an entry. It runs at render
     scales 4, 2 and 1, with 16x texture filtering, and with the part off, where the minified draw must show level
-    0's aliasing and no entry may have a chain.
+    0's aliasing and no entry may have a chain. `gpu-mips-mutant` builds it twice, once recording the late build's
+    barrier before a command buffer begins and once building at every decode, and requires the deferred cell to
+    kill each.
   - `ace-selftest` pins the key: optional, `on` or `off`, in an Enhanced or Ace line, written only when on, after
-    `tess` and before `cull`; a line with every part on fits `ACE_SPEC_MAX` and its badge words `ACE_WORDS_MAX`;
+    `tess` and before `cull`; the longest line the key table allows (`ace_line_longest`) fits `ACE_SPEC_MAX`, and so
+    the flight recorder's field, and every part on, found from that table, has badge words that fit `ACE_WORDS_MAX`;
     `ace_finish` runs a part's exit stamp once. `test_play_mode_mips_settings` in `tests/native/test_player_state.c`
     checks the part at both levels, its save and load, and the launch line, with `cull` after `mips`.
     `gpu-coherence-selftest`'s authentic run requires no entry to have a chain.
@@ -1641,9 +1667,11 @@ The feature of section 10.16 (#1273). How it draws is described there; this entr
   line with the entries, builds and binds, and the binds each rule kept at level 0 (section 10.16).
 - **What it changes:** the pixels of transformed draws that minify a single-level texture with a linear filter, in
   the frames a present commits: they show the chain's filtered colour instead of a bilinear sample of level 0.
-  Through-mode draws, colour-tested draws, alpha-unused draws of a keyed texture, render targets and textures the
-  game mips are unchanged.
-- **VRAM bytes:** differ in those frames, at the pixels of those draws.
+  Through-mode draws, colour-tested and alpha-tested draws, alpha-unused draws of a keyed texture, 1:1 draws,
+  render targets and textures the game mips are unchanged.
+- **VRAM bytes:** differ in those frames, at the colour of those draws' pixels. Depth and stencil do not change: a
+  draw that binds the chain is not alpha-tested (section 10.16) and not colour-tested, so the chain decides no
+  fragment's coverage. CLUT loads and CPU reads of VRAM see the changed colour like any other reader.
 - **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them, and
   for a render-to-texture pass that draws such a texture minified.
 - **Timing:** unchanged in guest time: the GE timing model (on or off) charges the draw by its texture and

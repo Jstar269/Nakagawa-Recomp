@@ -22,6 +22,13 @@
  *  - deferred: new contents (one-texel stripes) drawn in through mode only build nothing; the
  *    first transformed, minified draw of them, after everything recorded is submitted, decodes
  *    level 0 again and builds the chain once, and samples the same grey.
+ *  - alpha-test: an alpha-tested draw of a texture with alpha binds level 0 (coverage, depth and
+ *    stencil stay the game's own).
+ *  - one-to-one: a transformed draw that maps texels 1:1 onto guest pixels binds level 0.
+ *  - budget: past the present's build budget a draw binds level 0 and builds nothing; with
+ *    budget it builds.
+ *  - stream: new contents at the texture's address in three presents in a row stop the builds
+ *    (the third draw binds level 0); after the address holds still, the next draw builds.
  *  - key-edge: opaque red beside the colour key (entry 2, magenta, alpha 0), blended by source
  *    alpha over black: no device pixel takes any blue, at the edge or anywhere.
  *  - gates: a through-mode draw and a draw whose texture function ignores the alpha of a
@@ -46,7 +53,9 @@ static void hm_fill(int kind) {
     for (uint32_t v = 0; v < 64u; v++)
         for (uint32_t u = 0; u < 64u; u++)
             t[v * 64u + u] = kind == 0 ? (uint8_t)((u ^ v) & 1u) : kind == 1 ? (uint8_t)1u
-                           : kind == 3 ? (uint8_t)(v & 1u) : (uint8_t)(u < 32u ? 3u : 2u);
+                           : kind == 3 ? (uint8_t)(v & 1u)
+                           : kind >= 10 ? (uint8_t)(((u * 7u + v * 13u + (uint32_t)kind) % 5u) == 0u)
+                           : (uint8_t)(u < 32u ? 3u : 2u);
     sr_gpu_vram_dirty(HM_TEX, 64u * 64u);
 }
 
@@ -61,6 +70,9 @@ static void hm_palette(uint32_t c0, uint32_t c1) {
 
 /* The state, no draw: TEXFUNC `tfunc` (bit 8 RGBA), blending by source alpha when `blend`, the
  * color test when `ctest`, and the palette loaded from HM_CLUT. */
+static int s_hm_atest;                       /* hm_state: the alpha test, GREATER than 128 */
+static float s_hm_u0 = 0.25f;                /* hm_quad: the texel coordinate at the quad's left/top */
+
 static void hm_state(uint32_t tfunc, int blend, int ctest) {
     uint32_t *dl = (uint32_t *)SR_HOST(HM_LIST);
     int p = 0;
@@ -73,7 +85,8 @@ static void hm_state(uint32_t tfunc, int blend, int ctest) {
     DL_EMIT(0x4C, 0);
     DL_EMIT(0x4D, 0);
     DL_EMIT(0x23, 0);
-    DL_EMIT(0x22, 0);
+    DL_EMIT(0x22, s_hm_atest ? 1u : 0u);                /* alpha test */
+    DL_EMIT(0xDB, 6u | (128u << 8) | (0xFFu << 16));    /* greater than 128, every bit */
     DL_EMIT(0x21, blend ? 1u : 0u);
     DL_EMIT(0xDF, 2u | (3u << 4));                      /* src alpha, 1 - src alpha, add */
     DL_EMIT(0x24, 0);                                   /* stencil test off */
@@ -115,7 +128,7 @@ static void hm_state(uint32_t tfunc, int blend, int ctest) {
 static int hm_quad(int x, int size, float span, int through) {
     if (through) s_ge->vtype |= 1u << 23; else s_ge->vtype &= ~(1u << 23);
     const float x0 = (float)x, y0 = (float)HM_Y, x1 = x0 + (float)size, y1 = y0 + (float)size;
-    const float u0 = 0.25f, u1 = 0.25f + span;
+    const float u0 = s_hm_u0, u1 = s_hm_u0 + span;
     GeVtx a = { x0, y0, 1.0f, 1.0f, u0, u0, 1.0f, 255, 255, 255, 255 };
     GeVtx b = { x1, y0, 1.0f, 1.0f, u1, u0, 1.0f, 255, 255, 255, 255 };
     GeVtx d = { x0, y1, 1.0f, 1.0f, u0, u1, 1.0f, 255, 255, 255, 255 };
@@ -186,6 +199,9 @@ int gegpu_mips_selftest(void) {
     memset(SR_HOST(base), 0, 512u * FB_H * 4u);
     sr_gpu_vram_dirty(base, 512u * FB_H * 4u);
     ge_set_gpu_hooks(&k_hooks);
+    /* Every cell but budget builds without a budget, so the cells do not depend on the host's
+       speed; the budget cell sets its own. */
+    s_hm_budget_ns = UINT64_MAX;
     const uint32_t grey = hm_rgba(188, 188, 188, 0);
     int ok = 1;
     HmRange r;
@@ -326,6 +342,85 @@ int gegpu_mips_selftest(void) {
         }
         if (ok) printf("gpu mips selftest: PASS deferred   through mode builds nothing; the first minified draw "
                        "builds once\n");
+    }
+
+    /* alpha-test: the keyed texture, alpha-tested, minified. */
+    if (ok) {
+        const uint64_t at0 = s_hm_stats.plain_alpha_test, bound0 = s_hm_stats.bound;
+        hm_fill(2);
+        s_hm_atest = 1;
+        hm_state(3u | (1u << 8), 0, 0);
+        ok = hm_quad(170, 5, 64.0f, 0) && !s_tex_bound_hm;
+        s_hm_atest = 0;
+        if (!ok || s_hm_stats.plain_alpha_test != at0 + 1u || s_hm_stats.bound != bound0) {
+            fprintf(stderr, "gpu mips selftest [alpha-test]: want level 0 for an alpha-tested draw (plain_alpha_test "
+                            "+%llu, bound +%llu)\n", (unsigned long long)(s_hm_stats.plain_alpha_test - at0),
+                    (unsigned long long)(s_hm_stats.bound - bound0));
+            ok = 0;
+        }
+        if (ok) printf("gpu mips selftest: PASS alpha-test  an alpha-tested draw keeps level 0\n");
+    }
+
+    /* one-to-one: the checker drawn 64 pixels wide from texel 0, transformed. */
+    if (ok) {
+        const uint64_t one0 = s_hm_stats.plain_onetoone;
+        hm_fill(0);
+        hm_state(3u | (1u << 8), 0, 0);
+        s_hm_u0 = 0.0f;
+        ok = hm_quad(200, 64, 64.0f, 0) && !s_tex_bound_hm && s_hm_stats.plain_onetoone > one0;
+        s_hm_u0 = 0.25f;
+        if (!ok) {
+            fprintf(stderr, "gpu mips selftest [one-to-one]: want level 0 for a 1:1 draw (plain_onetoone +%llu)\n",
+                    (unsigned long long)(s_hm_stats.plain_onetoone - one0));
+        } else {
+            printf("gpu mips selftest: PASS one-to-one a transformed 1:1 draw binds level 0\n");
+        }
+    }
+
+    /* budget: no budget left, then the budget back. */
+    if (ok) {
+        const uint64_t builds0 = s_hm_stats.builds, pb0 = s_hm_stats.plain_budget;
+        hm_fill(10);
+        hm_state(3u | (1u << 8), 0, 0);
+        s_hm_budget_ns = 0u;
+        const int held = hm_quad(270, 5, 64.0f, 0) && !s_tex_bound_hm && s_hm_stats.builds == builds0 &&
+                         s_hm_stats.plain_budget == pb0 + 1u;
+        s_hm_budget_ns = UINT64_MAX;
+        ok = held && hm_quad(270, 5, 64.0f, 0) && s_tex_bound_hm && s_hm_stats.builds == builds0 + 1u;
+        if (!ok) {
+            fprintf(stderr, "gpu mips selftest [budget]: want level 0 and no build past the budget (%s), then one "
+                            "build (builds +%llu, plain_budget +%llu)\n", held ? "ok" : "BAD",
+                    (unsigned long long)(s_hm_stats.builds - builds0),
+                    (unsigned long long)(s_hm_stats.plain_budget - pb0));
+        } else {
+            printf("gpu mips selftest: PASS budget     past the budget level 0, then one build\n");
+        }
+    }
+
+    /* stream: new contents in three presents in a row, then the address holds still. */
+    if (ok) {
+        const uint64_t builds0 = s_hm_stats.builds, ps0 = s_hm_stats.plain_stream;
+        int binds = 0;
+        s_cnt_present_cpu += HM_STREAM_GAP;   /* the earlier cells' decodes are past the gap */
+        for (int k = 0; k < 3 && ok; k++) {
+            s_cnt_present_cpu++;
+            hm_fill(11 + k);
+            hm_state(3u | (1u << 8), 0, 0);
+            ok = hm_quad(280, 5, 64.0f, 0);
+            binds += s_tex_bound_hm;
+        }
+        const int stopped = ok && binds == 2 && s_hm_stats.builds == builds0 + 2u &&
+                            s_hm_stats.plain_stream == ps0 + 1u;
+        s_cnt_present_cpu += HM_STREAM_GAP + 1u;
+        ok = stopped && hm_quad(280, 5, 64.0f, 0) && s_tex_bound_hm && s_hm_stats.builds == builds0 + 3u;
+        if (!ok) {
+            fprintf(stderr, "gpu mips selftest [stream]: want two builds, then level 0 at the third present (%s), then "
+                            "a build once it holds still (builds +%llu, plain_stream +%llu, binds %d)\n",
+                    stopped ? "ok" : "BAD", (unsigned long long)(s_hm_stats.builds - builds0),
+                    (unsigned long long)(s_hm_stats.plain_stream - ps0), binds);
+        } else {
+            printf("gpu mips selftest: PASS stream     the third changing present binds level 0; still, it builds\n");
+        }
     }
 
     /* key-edge: red beside the key, blended over black. */

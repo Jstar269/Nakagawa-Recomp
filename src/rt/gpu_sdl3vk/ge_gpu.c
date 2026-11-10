@@ -335,6 +335,8 @@ typedef struct {
     uint32_t hm_levels;
     int hm_alpha;                          /* some level-0 texel has alpha below 255 */
     int hm_ready;                          /* levels 1.. hold the chain of level 0's content */
+    uint8_t hm_mag, hm_clamp_u, hm_clamp_v; /* the entry's filter and wrap, for hm_smp */
+    uint8_t hm_made;                       /* hm_view, hm_smp and hm_set were attempted */
     VkImageView hm_view; VkSampler hm_smp;
     VkDescriptorSet hm_set;
 } TexEnt;
@@ -542,7 +544,7 @@ static float *s_hm_work;
 static int s_tex_bound_hm;                 /* the last tex_get bound a chain */
 static struct {
     uint64_t entries, builds, reused, redecodes, texels, build_ns, bound, plain_alpha, plain_target,
-             set_failures, bytes, bytes_peak, cache_peak;
+             plain_alpha_test, plain_onetoone, plain_budget, plain_stream, sets, set_failures, bytes, bytes_peak, cache_peak;
 } s_hm_stats;
 /* Built chains by the content of their level 0 (a full 64-bit hash of the decoded texels and the
  * size), so a texture whose contents come back, as when a game streams several textures through
@@ -4343,6 +4345,63 @@ static void tex_hm_cache_put(uint64_t hash, uint32_t w, uint32_t h, int alpha, s
  * decoded and any other bind decodes level 0 again. */
 static const TexEnt *s_hm_scratch;
 
+#ifndef SR_GPU_MIPS_MUTANT
+#define SR_GPU_MIPS_MUTANT 0      /* gpu-mips-mutant only; never in a product build */
+#endif
+
+/* The build budget: chain builds run on the GE thread, the guest's, so the builds started in one
+ * present stop once they have taken HM_BUILD_BUDGET_NS. A draw past it binds level 0, as with
+ * the part off, and a later bind builds the chain. 2 ms is an eighth of a 60 Hz frame; one build
+ * may run past it by its own cost (a 256x256 texture's is about 1 ms on the measured host).
+ * s_hm_budget_ns is a variable for gpu-mips-selftest's budget cell. */
+#define HM_BUILD_BUDGET_NS 2000000u
+static uint64_t s_hm_budget_ns = HM_BUILD_BUDGET_NS;
+static uint64_t s_hm_budget_present = UINT64_MAX, s_hm_budget_used_ns;
+static int tex_hm_objects(TexEnt *e);
+
+static int tex_hm_budget_left(void) {
+    const uint64_t now = xs_now();
+    if (now != s_hm_budget_present) { s_hm_budget_present = now; s_hm_budget_used_ns = 0; }
+    return s_hm_budget_used_ns < s_hm_budget_ns;
+}
+
+/* Streaming textures: a texture address whose contents are decoded anew in HM_STREAM_PRESENTS
+ * presents in a row, each within HM_STREAM_GAP presents of the last (a movie drawn on a surface,
+ * a palette fade, which makes a new entry at each step, a texture the game rewrites each frame),
+ * would build a chain that is replaced before it is seen again. Its draws bind level 0 until it
+ * holds still for longer than the gap. A small table by address, the least recently decoded
+ * dropped first. */
+#define HM_STREAM_SLOTS 64
+#define HM_STREAM_PRESENTS 3u
+#define HM_STREAM_GAP 2u
+static struct { uint32_t addr; uint32_t streak; uint64_t last; } s_hm_stream[HM_STREAM_SLOTS];
+
+static void tex_hm_note_decode(uint32_t addr) {
+    const uint64_t now = xs_now();
+    int victim = 0;
+    for (int i = 0; i < HM_STREAM_SLOTS; i++) {
+        if (s_hm_stream[i].streak && s_hm_stream[i].addr == addr) {
+            if (s_hm_stream[i].last == now) return;
+            s_hm_stream[i].streak = now - s_hm_stream[i].last <= HM_STREAM_GAP ? s_hm_stream[i].streak + 1u : 1u;
+            s_hm_stream[i].last = now;
+            return;
+        }
+        if (!s_hm_stream[victim].streak) continue;
+        if (!s_hm_stream[i].streak || s_hm_stream[i].last < s_hm_stream[victim].last) victim = i;
+    }
+    s_hm_stream[victim].addr = addr;
+    s_hm_stream[victim].streak = 1u;
+    s_hm_stream[victim].last = now;
+}
+
+static int tex_hm_streaming(uint32_t addr) {
+    const uint64_t now = xs_now();
+    for (int i = 0; i < HM_STREAM_SLOTS; i++)
+        if (s_hm_stream[i].streak && s_hm_stream[i].addr == addr)
+            return s_hm_stream[i].streak >= HM_STREAM_PRESENTS && now - s_hm_stream[i].last <= HM_STREAM_GAP;
+    return 0;
+}
+
 /* Whether any of the `n` texels has alpha below 255 (a decode's cheap scan: the draw rule needs it
  * before the chain is built). */
 static int tex_hm_any_alpha(const uint32_t *t, size_t n) {
@@ -4383,14 +4442,22 @@ static int tex_hm_build(TexEnt *e) {
     if (!chain) {
         const uint32_t built = nk_tex_mips_build(&s_hm_curve, s_texscratch, w, h, s_hm_work, s_hm_out,
                                                  &e->hm_alpha);
-        if (built + 1u != e->hm_levels) { s_hm_stats.build_ns += SDL_GetTicksNS() - t0; return 0; }
+        if (built + 1u != e->hm_levels) {
+            s_hm_stats.build_ns += SDL_GetTicksNS() - t0;
+            s_hm_budget_used_ns += SDL_GetTicksNS() - t0;
+            return 0;
+        }
         s_hm_stats.builds++;
         s_hm_stats.texels += texels;
         tex_hm_cache_put(hash, w, h, e->hm_alpha, texels);
         chain = s_hm_out;
     }
-    s_hm_stats.build_ns += SDL_GetTicksNS() - t0;
     VkImageLayout lay = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+#if SR_GPU_MIPS_MUTANT == 1
+    /* gpu-mips-mutant 1: the first late build's order, a barrier before any reservation began a
+     * command buffer (the deferred cell submits first, so it finds s_cmd closed). */
+    to_layout(s_cmd, e->img, VK_IMAGE_ASPECT_COLOR_BIT, &lay, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+#endif
     size_t off = 0;
     for (uint32_t l = 1; l < e->hm_levels; l++) {
         const uint32_t lw = nk_tex_mips_dim(w, l), lh = nk_tex_mips_dim(h, l);
@@ -4400,10 +4467,15 @@ static int tex_hm_build(TexEnt *e) {
              * TRANSFER_DST, in a command buffer that is still open. */
             if (lay != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && s_cmd != VK_NULL_HANDLE)
                 to_layout(s_cmd, e->img, VK_IMAGE_ASPECT_COLOR_BIT, &lay, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            s_hm_stats.build_ns += SDL_GetTicksNS() - t0;
+            s_hm_budget_used_ns += SDL_GetTicksNS() - t0;
             return 0;
         }
         off += (size_t)lw * lh;
     }
+    const uint64_t spent = SDL_GetTicksNS() - t0;
+    s_hm_stats.build_ns += spent;
+    s_hm_budget_used_ns += spent;
     e->hm_ready = 1;
     return 1;
 }
@@ -4439,6 +4511,12 @@ static int tex_decode_upload(VkImage img, int w, int h, uint32_t levels, TexEnt 
         hm->hm_ready = 0;
         hm->hm_alpha = tex_hm_any_alpha(s_texscratch, (size_t)w * (size_t)h);
         s_hm_scratch = hm;
+        tex_hm_note_decode(s_ge->tex_addr);
+#if SR_GPU_MIPS_MUTANT == 2
+        /* gpu-mips-mutant 2: the eager build at every decode, which the deferred cell refuses. */
+        if (!hm->hm_made) (void)tex_hm_objects(hm);
+        if (hm->hm_set) (void)tex_hm_build(hm);
+#endif
     }
     return 1;
 }
@@ -4973,16 +5051,28 @@ static uint32_t tex_hm_levels_for(int w, int h, uint32_t levels, int min_linear)
     return n > 1u ? n : 0u;
 }
 
-/* The chain's view (every level) and its sampler: the entry's own filters and wrap, linear
- * between levels, the level of detail from the draw's own gradients with no bias (psp.frag
- * passes them per device pixel, so the render scale is in them), and texture filtering's
- * anisotropy when that part is on. A failure leaves the entry without a chain set: every draw
- * then binds level 0, as without the part. */
-static void tex_hm_make(TexEnt *e, int mag_linear, int clamp_u, int clamp_v) {
+/* A new entry with a chain: its image already holds every level (tex_make), so its bytes count
+ * from here; the view, sampler and set wait for the first bind the chain applies to. */
+static void tex_hm_note(TexEnt *e, int mag_linear, int clamp_u, int clamp_v) {
+    e->hm_mag = (uint8_t)(mag_linear != 0);
+    e->hm_clamp_u = (uint8_t)(clamp_u != 0);
+    e->hm_clamp_v = (uint8_t)(clamp_v != 0);
+    s_hm_stats.entries++;
+    s_hm_stats.bytes += tex_hm_bytes(e);
+    if (s_hm_stats.bytes > s_hm_stats.bytes_peak) s_hm_stats.bytes_peak = s_hm_stats.bytes;
+}
+
+/* The chain's view (every level) and its sampler, made at the first bind the chain applies to:
+ * the entry's own filters and wrap, linear between levels, the level of detail from the draw's
+ * own gradients with no bias (psp.frag passes them per device pixel, so the render scale is in
+ * them), and texture filtering's anisotropy when that part is on. A failure leaves the entry
+ * without a chain set, once: every draw then binds level 0, as without the part. */
+static int tex_hm_objects(TexEnt *e) {
+    e->hm_made = 1;
     TexMipKey none;
     memset(&none, 0, sizeof(none));
     VkSamplerCreateInfo sci;
-    tex_sampler_info(1, mag_linear, clamp_u, clamp_v, &none, &sci);
+    tex_sampler_info(1, e->hm_mag, e->hm_clamp_u, e->hm_clamp_v, &none, &sci);
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     sci.minLod = 0.0f;
     sci.maxLod = (float)(e->hm_levels - 1u);
@@ -4990,17 +5080,17 @@ static void tex_hm_make(TexEnt *e, int mag_linear, int clamp_u, int clamp_v) {
         sci.anisotropyEnable = VK_TRUE;
         sci.maxAnisotropy = (float)s_ace_af;
     }
-    s_hm_stats.entries++;
-    s_hm_stats.bytes += tex_hm_bytes(e);
-    if (s_hm_stats.bytes > s_hm_stats.bytes_peak) s_hm_stats.bytes_peak = s_hm_stats.bytes;
     if (make_view_levels(e->img, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, e->hm_levels, &e->hm_view) &&
         vkCreateSampler(s_dev, &sci, NULL, &e->hm_smp) == VK_SUCCESS &&
-        (e->hm_set = make_descriptor(e->hm_view, e->hm_smp, s_dpool_tex)) != VK_NULL_HANDLE)
-        return;
+        (e->hm_set = make_descriptor(e->hm_view, e->hm_smp, s_dpool_tex)) != VK_NULL_HANDLE) {
+        s_hm_stats.sets++;
+        return 1;
+    }
     if (e->hm_smp) vkDestroySampler(s_dev, e->hm_smp, NULL);
     if (e->hm_view) vkDestroyImageView(s_dev, e->hm_view, NULL);
     e->hm_smp = VK_NULL_HANDLE; e->hm_view = VK_NULL_HANDLE; e->hm_set = VK_NULL_HANDLE;
     s_hm_stats.set_failures++;
+    return 0;
 }
 
 /* Whether the draw's colour depends on the texture's alpha: the texture function takes it
@@ -5023,21 +5113,50 @@ static int tex_alpha_used(const GeState *g) {
  * the guest's own texels. Rechecked at each bind for a render target that has since met the
  * texture. */
 static int tex_hm_applies(const TexEnt *e) {
-    if (!e->hm_set || s_tex_noscale || (s_ge->vtype & (1u << 23)) || !(tex_filter_variant(s_ge->tex_filter) & 2u))
+    if (e->hm_levels < 2u || (e->hm_made && !e->hm_set) || s_tex_noscale || (s_ge->vtype & (1u << 23)) ||
+        !(tex_filter_variant(s_ge->tex_filter) & 2u))
         return 0;
     if (color_test_active(s_ge)) return 0;
+    /* The alpha test keeps or drops each fragment by the sampled alpha, and the chain's alpha is a
+     * plain mean: a far cut-out (foliage, a fence) would thin out or fill in, and the depth and
+     * stencil it writes with it. Such a draw keeps level 0, so coverage is the game's own. */
+    if (e->hm_alpha && s_ge->atest_enable && (s_ge->tex_func & 0x100u)) { s_hm_stats.plain_alpha_test++; return 0; }
     if (e->hm_alpha && !tex_alpha_used(s_ge)) { s_hm_stats.plain_alpha++; return 0; }
     if (tex_vram_meets_target(e->addr, e->bytes)) { s_hm_stats.plain_target++; return 0; }
     return 1;
 }
 
+/* The chain for a draw it applies to, when it is ready or can be made now: a streaming texture,
+ * or a build past this present's budget, binds level 0 for this draw instead. */
 static VkDescriptorSet tex_hm_or_entry_set(TexEnt *e) {
-    if (s_hm && tex_hm_applies(e) && (e->hm_ready || tex_hm_build(e))) {
-        s_tex_bound_hm = 1;
-        s_hm_stats.bound++;
-        return e->hm_set;
+    if (s_hm && tex_hm_applies(e)) {
+        int ready = e->hm_ready;
+        if (!ready) {
+            if (tex_hm_streaming(e->addr)) s_hm_stats.plain_stream++;
+            else if (!tex_hm_budget_left()) s_hm_stats.plain_budget++;
+            else ready = (e->hm_set || (!e->hm_made && tex_hm_objects(e))) && tex_hm_build(e);
+        }
+        if (ready) {
+            s_tex_bound_hm = 1;
+            s_hm_stats.bound++;
+            return e->hm_set;
+        }
     }
     return tex_entry_set(e);
+}
+
+/* A draw that bound a chain but maps its texels 1:1 onto guest pixels, or magnifies them (a
+ * sprite), is never minified at any render scale: it binds the entry's level-0 set, so sharp
+ * game text and the smart 2D filter take it as they do with the part off. */
+static int hm_level0_candidate(const Batch *b) {
+    return ((((uint32_t)b->pc.cfg[0] >> 8) & F_HOSTMIP) != 0u) && s_tex_cur && b->dset == s_tex_cur->hm_set;
+}
+
+static void hm_level0_apply(Batch *b) {
+    b->dset = tex_entry_set(s_tex_cur);
+    b->pc.cfg[0] = (int32_t)((uint32_t)b->pc.cfg[0] & ~((uint32_t)F_HOSTMIP << 8));
+    s_tex_bound_hm = 0;
+    s_hm_stats.plain_onetoone++;
 }
 
 static int s_hm_reported;
@@ -5047,13 +5166,17 @@ static int s_hm_reported;
 static void tex_hm_report(void) {
     if (!s_hm || s_hm_reported) return;
     s_hm_reported = 1;
-    fprintf(stderr, "HOST_MIPS: exit (entries=%llu, builds=%llu, reused=%llu, redecodes=%llu, texels=%llu, build_ms=%.1f, "
-                    "bound=%llu, plain_alpha_unused=%llu, plain_target=%llu, set_failures=%llu, "
+    fprintf(stderr, "HOST_MIPS: exit (entries=%llu, sets=%llu, builds=%llu, reused=%llu, redecodes=%llu, texels=%llu, "
+                    "build_ms=%.1f, bound=%llu, plain_alpha_unused=%llu, plain_alpha_test=%llu, plain_onetoone=%llu, "
+                    "plain_budget=%llu, plain_stream=%llu, plain_target=%llu, set_failures=%llu, "
                     "chain_peak_kib=%llu, cache_peak_kib=%llu)\n",
-            (unsigned long long)s_hm_stats.entries, (unsigned long long)s_hm_stats.builds,
+            (unsigned long long)s_hm_stats.entries, (unsigned long long)s_hm_stats.sets,
+            (unsigned long long)s_hm_stats.builds,
             (unsigned long long)s_hm_stats.reused, (unsigned long long)s_hm_stats.redecodes,
             (unsigned long long)s_hm_stats.texels, (double)s_hm_stats.build_ns / 1e6,
             (unsigned long long)s_hm_stats.bound, (unsigned long long)s_hm_stats.plain_alpha,
+            (unsigned long long)s_hm_stats.plain_alpha_test, (unsigned long long)s_hm_stats.plain_onetoone,
+            (unsigned long long)s_hm_stats.plain_budget, (unsigned long long)s_hm_stats.plain_stream,
             (unsigned long long)s_hm_stats.plain_target,
             (unsigned long long)s_hm_stats.set_failures,
             (unsigned long long)(s_hm_stats.bytes_peak >> 10),
@@ -5064,6 +5187,9 @@ static void tex_hm_init(void) {
     s_hm = 0;
     s_hm_reported = 0;
     memset(&s_hm_stats, 0, sizeof(s_hm_stats));
+    memset(s_hm_stream, 0, sizeof(s_hm_stream));
+    s_hm_budget_present = UINT64_MAX;
+    s_hm_budget_used_ns = 0;
     if (!g_ace_on || !ace_effective()->mips) return;
     const size_t texels = nk_tex_mips_chain_texels(NK_TEX_MIPS_MAX_DIM, NK_TEX_MIPS_MAX_DIM);
     s_hm_out = (uint32_t *)malloc(texels * sizeof(uint32_t));
@@ -5244,7 +5370,7 @@ static VkDescriptorSet tex_get(void) {
                   &e->img, &e->mem, &e->view, &e->smp))
         return s_white_set;
     e->w = w; e->h = h;
-    if (e->hm_levels > 1u) tex_hm_make(e, mag_linear, clamp_u, clamp_v);
+    if (e->hm_levels > 1u) tex_hm_note(e, mag_linear, clamp_u, clamp_v);
     if (!tex_decode_upload(e->img, w, h, levels, e)) { tex_hm_free(e); return s_white_set; }
     e->set = make_descriptor(e->view, e->smp, s_dpool_tex);
     if (!e->set) { tex_hm_free(e); return s_white_set; }
@@ -6411,6 +6537,12 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
         s_tri_state.target = s_cur;
         s_tri_state.batch = b;
     }
+    if (hm_level0_candidate(&b)) {
+        const float x[3] = { A->x, B->x, C->x }, y[3] = { A->y, B->y, C->y };
+        const float u[3] = { A->u, B->u, C->u }, v[3] = { A->v, B->v, C->v };
+        const float rw[3] = { A->rw, B->rw, C->rw };
+        if (nk_smart2d_triangle(x, y, u, v, rw)) hm_level0_apply(&b);
+    }
     const int s2d = smart2d_candidate(&b), xs1 = xs_onetoone_candidate(&b);
     if (s2d || xs1) {
         const float x[3] = { A->x, B->x, C->x }, y[3] = { A->y, B->y, C->y };
@@ -6577,6 +6709,10 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
      * pixel (sprite_nearest_axis), so its readback stays exact whatever its origin. */
     float ul = (p0->x <= p1->x) ? u0 : u1, ur = (p0->x <= p1->x) ? u1 : u0;
     float vt = (p0->y <= p1->y) ? v0 : v1, vbm = (p0->y <= p1->y) ? v1 : v0;
+    if (hm_level0_candidate(&b) &&
+        (nk_smart2d_sprite(xa, ya, xb, yb, ul, vt, ur, vbm) ||
+         (fabsf(ur - ul) <= fabsf(xb - xa) && fabsf(vbm - vt) <= fabsf(yb - ya))))
+        hm_level0_apply(&b);
     {
         const int s2d = smart2d_candidate(&b), xs1 = xs_onetoone_candidate(&b);
         if ((s2d || xs1) && nk_smart2d_sprite(xa, ya, xb, yb, ul, vt, ur, vbm)) {

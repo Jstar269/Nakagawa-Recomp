@@ -54,8 +54,8 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
                              "memory changes."},
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
-    {"Smooth far textures", "Off", "Stops far textures shimmering at high resolution. Save "
-                                    "pictures keep the smoothing."},
+    {"Smooth far textures", "Off", "Slightly less shimmer on far textures. Uses CPU; may stutter "
+                                    "on new textures."},
 };
 /* Each part's words, as player_state.c's k_enhanced_parts gives them. */
 static const char *const k_enhanced_af_labels[] = {"16x", "8x", "4x", "2x", "Off"};
