@@ -692,6 +692,62 @@ static void cell_readout(void) {
 
 /* ---- the per-run report --------------------------------------------------------------------- */
 
+/* Fast forward (ENHANCEMENT_CONTRACT.md section 10.15): a second of wall time at 3x holds three
+ * seconds of frames, and a host that cannot keep up skips slots. Neither reaches the readout or
+ * the report: the readout hides while it runs and returns after a full second at normal speed.
+ *
+ * MUTANT: drop the s_ff_running branch in ace_flip -- windows are judged during fast forward, so
+ *   the readout shows and the window count moves.
+ * MUTANT: ace_note_skipped_slots counts during fast forward -- the skipped-slot counter moves.
+ * Both together also make the windows PC LIMITED, and pc_limited_seconds is not 0. */
+static void cell_fast_forward(void) {
+    AceReadoutView v;
+    AceCounters c0, c1;
+    char json[ACE_REPORT_MAX];
+    (void)ace_init_spec(k_good, NULL);
+    uint64_t ns = 0;
+    uint32_t vc = 1;
+    for (; vc <= 300; vc++) {
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u;
+        ace_note_host_wait(8000000u);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+    }
+    CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS") == 0, "before fast forward '%s'", v.text);
+    ace_counters(&c0);
+    ace_note_fast_forward(1);
+    CHECK(!ace_readout_view(&v), "the readout hides while fast forward runs");
+    for (uint32_t end = vc + 900; vc < end; vc++) {
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u / 3u;
+        if (vc % 10 == 0) ace_note_skipped_slots(1u);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+    }
+    ace_counters(&c1);
+    CHECK(!ace_readout_view(&v), "five seconds of fast forward judge no window");
+    CHECK(c1.windows == c0.windows && c1.skipped_slots == c0.skipped_slots,
+          "fast forward adds no window (%llu to %llu) and no skipped slot (%llu to %llu)",
+          (unsigned long long)c0.windows, (unsigned long long)c1.windows,
+          (unsigned long long)c0.skipped_slots, (unsigned long long)c1.skipped_slots);
+    ace_note_fast_forward(0);
+    for (uint32_t end = vc + 30; vc < end; vc++) {
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u;
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+    }
+    CHECK(!ace_readout_view(&v), "half a second after fast forward the readout is still hidden");
+    for (uint32_t end = vc + 60; vc < end; vc++) {
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u;
+        ace_note_host_wait(8000000u);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+    }
+    CHECK(ace_readout_view(&v) && strcmp(v.text, "100%  30 FPS") == 0,
+          "a full second at normal speed brings the readout back: '%s'", v.text);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"pc_limited_seconds\": 0\n"),
+          "fast forward adds no PC LIMITED second to the report:\n%s", json);
+}
+
 static void cell_report(const char *dir) {
     char json[ACE_REPORT_MAX];
     (void)ace_init_spec(k_good, NULL);
@@ -982,11 +1038,12 @@ int main(int argc, char **argv) {
     cell_feed();
     cell_readout();
     cell_readout_smooth();
+    cell_fast_forward();
     cell_report(argc > 1 ? argv[1] : NULL);
     if (s_fail) {
         fprintf(stderr, "ace-selftest: %d check(s) FAILED\n", s_fail);
         return 1;
     }
-    printf("ace-selftest: PASS (parse, pad plan, switch, detector, feed, readout, report)\n");
+    printf("ace-selftest: PASS (parse, pad plan, switch, detector, feed, readout, fast forward, report)\n");
     return 0;
 }

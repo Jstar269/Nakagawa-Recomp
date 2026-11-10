@@ -1461,6 +1461,44 @@ static uint64_t host_now_ns(void) {
     return s_host_ns_fn ? s_host_ns_fn() : SDL_GetTicksNS();
 }
 
+/* ---- fast forward (recomp.h) -----------------------------------------------------------
+ * The paced clock samples guest time from pace_ns(): the host monotonic clock, run at
+ * s_ff_speed since the last speed change. Until fast forward first starts both anchors are 0
+ * and pace_ns() is host_now_ns() exactly, so a run that never uses it paces as before. A
+ * speed change re-anchors at the current paced time, so guest time stays continuous and only
+ * its rate changes. The pause runs at speed 1, so its host-interval anchor shifts stay exact.
+ * Waits convert a paced interval back to host time with pace_to_host_ns(). */
+static uint32_t s_ff_speed = 1u;
+static uint64_t s_ff_host_anchor_ns;
+static uint64_t s_ff_pace_anchor_ns;
+static uint32_t s_ff_epoch;
+
+static uint64_t pace_ns_at(uint64_t host_ns) {
+    if (s_ff_speed == 1u && s_ff_pace_anchor_ns == s_ff_host_anchor_ns) return host_ns;
+    const uint64_t since = host_ns > s_ff_host_anchor_ns ? host_ns - s_ff_host_anchor_ns : 0u;
+    return s_ff_pace_anchor_ns + since * s_ff_speed;
+}
+
+static uint64_t pace_ns(void) { return pace_ns_at(host_now_ns()); }
+
+static uint64_t pace_to_host_ns(uint64_t pace_interval_ns) {
+    return pace_interval_ns / s_ff_speed;
+}
+
+static void pace_set_speed(uint32_t speed) {
+    if (speed == s_ff_speed) return;
+    const uint64_t host = host_now_ns();
+    s_ff_pace_anchor_ns = pace_ns_at(host);
+    s_ff_host_anchor_ns = host;
+    if (speed > 1u && s_ff_speed == 1u) s_ff_epoch++;
+    s_ff_speed = speed;
+    ace_note_fast_forward(speed > 1u);
+    fprintf(stderr, "FAST_FORWARD: %s\n", speed > 1u ? "on" : "off");
+}
+
+int sched_fast_forward_on(void) { return s_ff_speed > 1u; }
+uint32_t sched_fast_forward_epoch(void) { return s_ff_epoch; }
+
 /* SR_DETERMINISTIC_CLOCK: unset, empty or '0' = off; '1' = on. There is no automatic choice: a
  * scripted run keeps the clock it always had unless its caller names this one (#2037).
  * SR_DETERMINISTIC_SLICE_US (1..100000, default SCHED_DET_SLICE_US_DEFAULT) is read only when the
@@ -1525,7 +1563,7 @@ static void pace_setup(void) {
         fprintf(stderr, "pace_setup: s_pace_on = %d (SR_NOVBPACE = %s) deterministic_clock = 0\n",
                 s_pace_on, e ? e : "<unset>");
     fflush(stderr);
-    s_clock_epoch_ns = host_now_ns();
+    s_clock_epoch_ns = pace_ns();
     s_vbl_next_ns = s_clock_epoch_ns;
     s_vbl_period_rem = 0;
     s_vtime_period_rem = 0;
@@ -1568,7 +1606,7 @@ uint64_t sched_vblank_deadline_ns(void) {
 }
 
 static uint64_t host_us(void) {
-    return (host_now_ns() - s_clock_epoch_ns) / 1000u;
+    return (pace_ns() - s_clock_epoch_ns) / 1000u;
 }
 
 /* Observe host time without manufacturing guest time in deterministic mode.  All
@@ -1784,7 +1822,7 @@ static void sleep_until_us(uint64_t target_us) {
     for (;;) {
         uint64_t now = host_us();
         if (now >= target_us) break;
-        SDL_DelayPrecise((target_us - now) * 1000u);
+        SDL_DelayPrecise(pace_to_host_ns((target_us - now) * 1000u));
     }
     if (g_ace_on) ace_note_host_wait(host_now_ns() - ace_from);
     sr_rt_phase = SR_RT_PHASE_SCHED;
@@ -1808,18 +1846,21 @@ static void vblank_pace(void) {
         }
         return;
     }
-    uint64_t now = host_now_ns();
+    /* Fast forward (recomp.h): an Enhanced or Ace run on this paced clock, outside the pause. */
+    pace_set_speed(g_ace_on && !s_det_clock && !s_pause_active && ace_ff_requested()
+                       ? SCHED_FAST_FORWARD_SPEED : 1u);
+    uint64_t now = pace_ns();
     if (s_vbl_next_ns > now) {
         uint64_t wait_started = sr_perf_now_ns();
         uint64_t exec_wait_started = sr_exec_now_ns();
         sr_rt_phase = SR_RT_PHASE_HOST_WAIT;
-        SDL_DelayPrecise(s_vbl_next_ns - now);
+        const uint64_t host_from = g_ace_on ? host_now_ns() : 0u;
+        SDL_DelayPrecise(pace_to_host_ns(s_vbl_next_ns - now));
         sr_perf_guest_idle_wait(wait_started);
         sr_exec_idle(exec_wait_started);
         sr_rt_phase = SR_RT_PHASE_SCHED;
-        uint64_t waited_from = now;
-        now = host_now_ns();
-        if (g_ace_on) ace_note_host_wait(now - waited_from);
+        now = pace_ns();
+        if (g_ace_on) ace_note_host_wait(host_now_ns() - host_from);
     }
     uint32_t slots = 0u;
     /* 59.94 Hz is 60000/1001 Hz. Carry the fractional nanoseconds so the
@@ -1913,7 +1954,7 @@ static void sched_pump_host_window(void) {
 static uint64_t vblank_due_us(void) {
     pace_setup();
     if (!s_pace_on) return 0;
-    uint64_t now = host_now_ns();
+    uint64_t now = pace_ns();
     if (now >= s_vbl_next_ns) return 0;
     return (s_vbl_next_ns - now) / 1000u;
 }
@@ -5283,6 +5324,7 @@ extern int sr_savedata_pause_busy(void);
 
 static uint64_t sched_pause_begin(void) {
     pace_setup();
+    pace_set_speed(1u);
     const uint64_t t0 = host_now_ns();
     const uint64_t latency_us = t0 >= s_pause_request_ns
         ? (t0 - s_pause_request_ns) / 1000u : 0u;
