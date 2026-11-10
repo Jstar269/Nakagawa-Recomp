@@ -2356,10 +2356,9 @@ static const char *const k_hle_nd_dir[3] = {HLE_ND_NODIR_DIR, HLE_ND_NOSFO_DIR, 
 static const char *const k_hle_nd_data_path[3] = {
     HLE_ND_NODIR_DIR "/DATA.BIN", HLE_ND_NOSFO_DIR "/DATA.BIN", HLE_ND_DATA_DIR "/DATA.BIN",
 };
-/* The synthetic key: "NKPROBE01KEY0001". */
-static const uint8_t k_hle_nd_key[16] = {
-    0x4e, 0x4b, 0x50, 0x52, 0x4f, 0x42, 0x45, 0x30, 0x31, 0x4b, 0x45, 0x59, 0x30, 0x30, 0x30, 0x31,
-};
+/* The synthetic key is 16 characters of probe-owned ASCII text, not a real key. */
+#define HLE_ND_KEY_BYTES 16u
+static const char k_hle_nd_key[HLE_ND_KEY_BYTES + 1u] = "NKPROBE01KEY0001";
 /* State B's own file: "NKPROBE01NOSFO" and two NULs. */
 static const uint8_t k_hle_nd_nosfo_bytes[HLE_ND_FILE_BYTES] = {
     0x4e, 0x4b, 0x50, 0x52, 0x4f, 0x42, 0x45, 0x30, 0x31, 0x4e, 0x4f, 0x53, 0x46, 0x4f, 0x00, 0x00,
@@ -2479,7 +2478,7 @@ static void hle_nd_param(uint32_t mode, uint32_t save)
     hle_nd_put_text(0x4cu, 20u, k_hle_nd_save[save]);
     hle_nd_put_text(0x64u, 13u, HLE_ND_DATA_FILE);
     hle_nd_put32(0x7cu, HLE_SENTINEL);       /* dataSize */
-    memcpy(s_nd_param + 0x5dcu, k_hle_nd_key, sizeof(k_hle_nd_key));
+    memcpy(s_nd_param + 0x5dcu, k_hle_nd_key, HLE_ND_KEY_BYTES);
 }
 
 static uint32_t hle_nd_nibble(int status)
