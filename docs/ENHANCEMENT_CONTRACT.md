@@ -350,7 +350,7 @@ The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch 
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
 section 11.3.6) and `texpack` (`on` or `off`, section 11.3.4) are the other keys a line may leave out: a missing one
 is off, `cull=on` needs `tier=ace`, and either tier may carry `texpack=on`. The player writes each only when it is on,
-`cull` then `texpack`, last. With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the title's pack folder;
+`texpack` then `cull`, last. With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the title's pack folder;
 it always exports that variable, empty for any other line, so an inherited folder never reaches a run. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
@@ -778,9 +778,13 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   reads it. A folder that cannot be read, or whose `textures.ini` is malformed (a line that is no comment, section or
   `key = value`, no `hash` type, an unknown one), prints `TEX_REPLACE: refused (<reason>)` and loads nothing, and the
   run's report names `texpack` unavailable: a half-read pack would replace some textures and not others in a way
-  nobody asked for. The player reads the pack the same way when it is chosen and again before each launch, and
-  refuses it with its reason (`TEXTURE_PACK_REFUSED`): a refused pack is never stored, and a stored pack that no
-  longer reads stops the launch until it is fixed, chosen again or turned off.
+  nobody asked for. An image the list names that is missing, does not decode or has a size the pack cannot use is
+  skipped on its own when the game first draws its texture, which is then drawn as the game made it; the pack's other
+  images are used. The player reads the pack the same way when it is chosen and again before each launch, and
+  refuses it with its reason (`TEXTURE_PACK_REFUSED`), as it does a pack whose `[games]` section lists other games
+  only (`nk_texrepl_names_game`) and a folder that is not a full UTF-8 path under 512 bytes: a refused pack is never
+  stored, and a stored pack that no longer reads stops the launch until it is fixed, chosen again, removed or turned
+  off.
 - **The pack.** The project ships none and never downloads one: it is a folder the user made or took from a
   community, kept locally. A `textures.ini` is optional. `[options]` takes `hash = quick | xxh32 | xxh64` (required
   when the file exists; a folder with no ini reads as `quick`), `ignoreAddress`, `reduceHash`,
@@ -1360,7 +1364,8 @@ The feature of section 10.12 (#1880). Its presentation is described there; this 
   for scaled copies; a replacement is normally stored in the draw that finds it, so a pack of large images can
   lengthen the frames that first draw them). Not measured on a title. The VBLANK schedule, the GE timing model and the media
   clocks are unchanged.
-- **I/O speed:** unchanged for the guest. The host reads the pack's files from its own disk, inside the folder only.
+- **I/O speed:** unchanged for the guest. The host reads the pack's files from its own disk, by names inside the
+  pack's folder (a name with `..` or a drive is refused); a link or junction inside the folder is followed today.
 - **Tier:** Enhanced: Enhanced and Ace runs alike. **Default:** off, and in no graphics preset. In an authentic run
   the pack is not read whatever the environment says.
 - **Authentic stays byte-identical (section 11.2, item 1).** With the line `off`, `g_ace_on` stays 0 and

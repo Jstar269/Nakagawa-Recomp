@@ -394,18 +394,18 @@ static void player_take_texpack_folder_pick(PlayerApp *app) {
     if (state == 0) return;
     SDL_SetAtomicInt(&s_texpack_pick_state, 0);
     if (state == 1) {
-        /* Read and refused with its reason, or stored for the page's game. */
-        (void)player_app_set_enhanced_page_pack(app, s_texpack_pick);
+        /* Read and refused with its reason, or stored for the game the dialog was opened for. */
+        (void)player_app_take_texpack_pick(app, s_texpack_pick);
     } else if (state == 3) {
         fprintf(stderr, "[PLAYER] The folder picker could not open: %s\n", s_texpack_pick_error);
         player_app_set_error_with_details(
-            app, "TEXTURE_PACK_REFUSED", "The folder picker didn't open",
+            app, "TEXTURE_PACK_PICKER_FAILED", "The folder picker didn't open",
             "Nakagawa couldn't show a folder picker, so no texture pack was chosen.",
             s_texpack_pick_error, "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY
                                                                         : app->active_view);
     } else if (state == 4) {
         player_app_set_error(
-            app, "TEXTURE_PACK_REFUSED", "Texture pack not used",
+            app, "TEXTURE_PACK_PICKER_FAILED", "Texture pack not used",
             "The folder you picked is too deep in other folders for Nakagawa to read, so no "
             "texture pack was chosen. Move it somewhere shorter and choose it from there.",
             "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY : app->active_view);
@@ -1792,7 +1792,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             player_app_toggle_share_system_libraries(app);
             break;
         case PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED: player_app_cycle_build_speed(app); break;
-        case PLAYER_UI_SETTINGS_CHOOSE_TEXPACK: app->request_texpack_folder_picker = true; break;
+        case PLAYER_UI_SETTINGS_CHOOSE_TEXPACK: player_app_begin_texpack_pick(app); break;
         case PLAYER_UI_SETTINGS_REMOVE_TEXPACK: player_app_clear_enhanced_page_pack(app); break;
         case PLAYER_UI_SETTINGS_CLEAR_SHARED_LIBRARIES:
             player_app_clear_shared_library_cache(app);

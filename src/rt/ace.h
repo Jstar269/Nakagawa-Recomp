@@ -84,8 +84,8 @@ typedef enum {
     ACE_FEATURE_SMOOTH,
     ACE_FEATURE_SAS,
     ACE_FEATURE_TESS,
-    ACE_FEATURE_CULL,
     ACE_FEATURE_TEXPACK,
+    ACE_FEATURE_CULL,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -97,6 +97,10 @@ typedef enum {
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap);
 /* Writes the canonical line for a config ("off" when !c->on). Returns 0 when it does not fit. */
 int ace_format(const AceConfig *c, char *out, size_t cap);
+/* The longest line the parser accepts, computed from its key table: "v1" and every key at its
+ * longest value. Returns its length (0 when a key names no longest value) and writes the line to
+ * `line` when given. ACE_SPEC_MAX, and so the flight recorder's ace field, must hold it. */
+size_t ace_line_longest(char *line, size_t cap);
 
 /* ---- the run's switch ----------------------------------------------------------------------- */
 

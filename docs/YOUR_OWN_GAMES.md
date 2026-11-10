@@ -262,9 +262,12 @@ ships no pack and downloads none: a pack is a folder you made yourself or got fr
    **Texture pack** turns on for that game.
 3. Play the game in Enhanced or Ace. In Authentic, the pack is not used.
 
-If Nakagawa cannot read the pack (a folder that has gone, or a `textures.ini` with a line it does not understand),
-it says why and does not use any of it; it will not start the game with part of a pack. Fix the pack, choose it
-again, or turn **Texture pack** off. **Remove texture pack** forgets the folder for that game and does not delete it.
+If Nakagawa cannot read the pack's list (a folder that has gone, or a `textures.ini` with a line it does not
+understand), or the pack says it is made for another game (its `[games]` section lists other games only), it says
+why and does not use the pack, and it does not start the game with it. Fix the pack, choose it again, or remove it or
+turn **Texture pack** off to play without it. **Remove texture pack** forgets the folder for that game and does not
+delete it. An image the pack lists that is missing or cannot be decoded is skipped on its own: that texture is drawn
+as the game made it, and the rest of the pack is used.
 
 Today a replacement image must be 2 to 6 times the size of the texture it replaces, the same on both sides, and at
 most 2048 pixels on a side; other images are skipped and the texture is drawn as the game made it. Only PNG files

@@ -229,15 +229,16 @@ typedef enum {
     PLAYER_PART_SAS,           /* band-limited SAS resampling (#2054, section 11.3.1): 0 off, 1 sinc */
     PLAYER_PART_TESS,          /* finer Bezier and spline patches (#2053, section 11.3.7): 0 off, or the
                                   factor 2, 3 or 4. Off in a fresh file; alters GE timing */
-    PLAYER_PART_CULL,          /* wider culling (section 11.3.6): 0 off, 1 on. A title's own culling is
-                                  widened to Widescreen's wings; a title without a package ignores it */
-    PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
-                                  runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
-                                  not in the SR_ACE line */
     PLAYER_PART_TEXPACK,       /* the title's texture pack (#1880, contract 11.3.4): 0 off, 1 on. In
                                   effect only for a title with a pack chosen (PlayerTitlePack); the
                                   line carries texpack=on and the folder reaches the runtime as
                                   SR_TEX_REPLACE (NkRuntimeConfig.texpack_dir) */
+    PLAYER_PART_CULL,          /* wider culling (section 11.3.6): 0 off, 1 on. A title's own culling is
+                                  widened to Widescreen's wings; a title without a package ignores it.
+                                  Last of the line's keys */
+    PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
+                                  runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
+                                  not in the SR_ACE line */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -285,6 +286,7 @@ typedef struct {
     size_t textures;       /* the textures it lists, replacements and "leave alone" lines alike */
     size_t notes;          /* what it holds that this build reads and does not apply */
     char error[256];       /* why it was refused, when !ok */
+    char other_game[16];   /* refused as made for another game: the first disc ID its [games] lists */
 } PlayerTexturePackInfo;
 
 /* What a title launches with (player_play_resolve). */
@@ -911,9 +913,12 @@ struct PlayerApp {
        main.c opens it, and the folder picked waits in saves_picked (saves_pick_ready) until
        the Saves dialog takes it. A cancelled dialog leaves nothing. */
     bool request_save_folder_picker;
-    /* A title's Enhanced page asks for the host folder dialog to choose its texture pack; main.c
-       opens it and hands the folder to player_app_set_enhanced_page_pack. */
+    /* A title's Enhanced page asks for the host folder dialog to choose its texture pack
+       (player_app_begin_texpack_pick); main.c opens it and hands the folder to
+       player_app_take_texpack_pick. texpack_pick_disc is the game the dialog was opened for, so
+       a pick that completes after the page closed or moved still reaches that game alone. */
     bool request_texpack_folder_picker;
+    char texpack_pick_disc[PLAYER_DISC_ID_KEY_LEN];
     /* The pack of the title whose Enhanced page is open, read when the page opens or the pack
        changes (player_app_title_pack_info), so the page never scans a folder each frame. */
     char texpack_page_key[PLAYER_DISC_ID_KEY_LEN];
@@ -1707,8 +1712,8 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off" (tier=ace for Ace; smooth=match is never written).
- * ";cull=on" follows only for Ace with the Wider culling part on; a missing cull is off.
- * ";texpack=on" follows, last, only with the Texture pack part on for a title that has a pack.
+ * ";texpack=on" follows only with the Texture pack part on for a title that has a pack, then
+ * ";cull=on", last, only for Ace with the Wider culling part on; a missing key is off.
  * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);
 /* The presentation upscaler a resolution asks for (NkRuntimeConfig.present_upscale, exported as
@@ -1725,9 +1730,12 @@ void player_play_config_session(const PlayerSettings *settings, const char *disc
 /* The folder chosen as a disc's texture pack, or NULL when it has none. */
 const char *player_settings_title_pack(const PlayerSettings *settings, const char *disc_id);
 /* Reads the pack at `path` as the runtime will (src/rt/texrepl.h) and fills *out. Returns out->ok:
- * false, with out->error saying why, for a folder that cannot be read or a malformed
- * textures.ini. It decodes no image. */
-bool player_texture_pack_inspect(const char *path, PlayerTexturePackInfo *out);
+ * false, with out->error saying why, for a path that is not a full UTF-8 path under 512 bytes, a
+ * folder that cannot be read, a malformed textures.ini, or, with disc_id given, a pack whose
+ * [games] section names other games only (out->other_game names the first). It decodes no
+ * image: an image that is missing or does not decode is skipped when the game draws it. */
+bool player_texture_pack_inspect(const char *path, const char *disc_id,
+                                 PlayerTexturePackInfo *out);
 /* A title's texture pack (its Enhanced page). Choosing reads the pack first: one that fails is
  * refused with a TEXTURE_PACK_REFUSED message and nothing changes; one that reads is stored and
  * the title's Texture pack part is set On. Returns whether it was stored. Removing forgets the
@@ -1736,6 +1744,12 @@ bool player_app_set_title_pack(PlayerApp *app, int game_index, const char *path)
 void player_app_clear_title_pack(PlayerApp *app, int game_index);
 /* The same for the title whose Enhanced page is open; nothing for the library's page. */
 bool player_app_set_enhanced_page_pack(PlayerApp *app, const char *path);
+/* The folder dialog for the open title page's pack: asks main.c to open it and remembers the
+ * game. Nothing on the library's page. */
+void player_app_begin_texpack_pick(PlayerApp *app);
+/* The dialog's folder, for the game it was opened for, wherever the player is now; a game gone
+ * from the library meanwhile takes nothing (and the developer log says so). */
+bool player_app_take_texpack_pick(PlayerApp *app, const char *path);
 void player_app_clear_enhanced_page_pack(PlayerApp *app);
 /* The pack of the title whose page is open, as last read, or NULL when it has none. */
 const PlayerTexturePackInfo *player_app_title_pack_info(const PlayerApp *app, int game_index);

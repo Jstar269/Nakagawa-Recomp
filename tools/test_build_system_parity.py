@@ -64,6 +64,8 @@ class BuildSystemParityTests(unittest.TestCase):
             "src/player/iso_reader.c",
             "src/player/package_builder.c",
             "src/player/update_check.c",
+            # The texture pack reader the player shares with the runtime (#1880).
+            "src/rt/texrepl.c",
         ]
         for src in expected_player:
             self.assertIn(src, self.makefile_text, f"Missing {src} in Makefile")

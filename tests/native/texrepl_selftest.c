@@ -487,6 +487,36 @@ static void test_budget(void) {
     nk_texrepl_close(p);
 }
 
+/* The games a pack is made for: its [games] keys that read as disc IDs, upper case, each once;
+   none listed answers -1 (the pack does not say). */
+static void test_games(void) {
+    char dir[512], path[600], err[256] = "";
+    make_pack(dir, sizeof(dir), "texrepl_pack_games");
+    pack_path(path, sizeof(path), "texrepl_pack_games", "textures.ini");
+    write_text(path, "[options]\nhash = quick\n[games]\nulus10515 = textures.ini\nULUS10515 = x.ini\n"
+                     "NPJH-50001 = textures.ini\nnot a disc id = x\nWAYTOOLONGFORADISCID = x\n");
+    NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    CHECK(p != NULL, "games: open: %s", err);
+    if (!p) return;
+    CHECK(nk_texrepl_game_count(p) == 2u, "games: %u kept, want 2", (unsigned)nk_texrepl_game_count(p));
+    CHECK(nk_texrepl_game(p, 0) && strcmp(nk_texrepl_game(p, 0), "ULUS10515") == 0, "games: first is ULUS10515");
+    CHECK(nk_texrepl_game(p, 1) && strcmp(nk_texrepl_game(p, 1), "NPJH-50001") == 0, "games: second is NPJH-50001");
+    CHECK(nk_texrepl_game(p, 2) == NULL, "games: no third");
+    CHECK(nk_texrepl_names_game(p, "ulus10515") == 1 && nk_texrepl_names_game(p, "ULUS10515") == 1,
+          "games: the listed game, any case");
+    CHECK(nk_texrepl_names_game(p, "ULUS1051") == 0 && nk_texrepl_names_game(p, "ULUS105150") == 0 &&
+          nk_texrepl_names_game(p, "ULES00001") == 0 && nk_texrepl_names_game(p, NULL) == 0,
+          "games: another game, a prefix or a longer ID is not listed");
+    CHECK(has_diag(p, "[games] entries not applied"), "games: the per-game overrides are still reported");
+    nk_texrepl_close(p);
+    pack_path(path, sizeof(path), "texrepl_pack_games", "textures.ini");
+    write_text(path, "[options]\nhash = quick\n");
+    p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    CHECK(p && nk_texrepl_game_count(p) == 0u && nk_texrepl_names_game(p, "ULUS10515") == -1,
+          "games: a pack with no [games] does not say");
+    if (p) nk_texrepl_close(p);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     test_hashes();
@@ -497,6 +527,7 @@ int main(void) {
     test_palette_identity();
     test_texture_hash();
     test_budget();
+    test_games();
     if (g_failures) {
         fprintf(stderr, "texrepl selftest: %d check(s) failed\n", g_failures);
         return 1;

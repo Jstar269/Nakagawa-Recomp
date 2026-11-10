@@ -1204,6 +1204,51 @@ int gegpu_texrepl_only_selftest(void) {
     if (!ok || !xst_report("replace-only", 100, 140, b, "with SR_TEX_REPLACE alone, an unlisted texture is not drawn as made")) return 0;
     printf("gpu texscale selftest: PASS %-12s SR_TEX_REPLACE alone replaces a listed texture, leaves an unlisted one\n",
            "replace-only");
+
+    /* The refusals of a texpack=on start (tex_repl_init): no folder named, a budget outside 1 to
+     * 8192 MB, and a folder whose textures.ini names no hash each read no pack, so the run draws the
+     * game's own textures; the pack this cell drew from is put back afterwards. */
+    if (!ace_requested()->texpack) {
+        fprintf(stderr, "gpu texscale selftest: FAIL replace-only: the harness line has no texpack=on\n");
+        return 0;
+    }
+    char bad[400], ini[480];
+    snprintf(bad, sizeof(bad), "%s/texrepl_gpu_bad_pack", SR_SELFTEST_BUILD_ROOT);
+    snprintf(ini, sizeof(ini), "%s/textures.ini", bad);
+    FILE *fini = nk_platform_mkdir_p(bad) ? fopen(ini, "wb") : NULL;
+    const int ini_ok = fini && fputs("[options]\nversion = 1\n", fini) >= 0;
+    if (fini) fclose(fini);
+    const char *pack_dir = getenv("SR_TEX_REPLACE");
+    char pack_copy[400];
+    snprintf(pack_copy, sizeof(pack_copy), "%s", pack_dir ? pack_dir : "");
+    NkTexRepl *drawn = s_repl;
+    s_repl = NULL;
+    xst_setenv("SR_TEX_REPLACE", NULL);
+    tex_repl_init(1);
+    const int unnamed_read = s_repl != NULL;
+    tex_repl_shutdown();
+    xst_setenv("SR_TEX_REPLACE", pack_copy);
+    xst_setenv("SR_TEX_REPLACE_BUDGET_MB", "0");
+    tex_repl_init(1);
+    const int budget_read = s_repl != NULL;
+    tex_repl_shutdown();
+    xst_setenv("SR_TEX_REPLACE_BUDGET_MB", NULL);
+    xst_setenv("SR_TEX_REPLACE", bad);
+    tex_repl_init(1);
+    const int malformed_read = s_repl != NULL;
+    tex_repl_shutdown();
+    xst_setenv("SR_TEX_REPLACE", pack_copy);
+    s_repl = drawn;
+    if (!ini_ok || unnamed_read || budget_read || malformed_read) {
+        fprintf(stderr, "gpu texscale selftest: FAIL replace-only: %s\n",
+                !ini_ok ? "cannot write the malformed pack"
+                : unnamed_read ? "texpack=on with no SR_TEX_REPLACE read a pack"
+                : budget_read ? "SR_TEX_REPLACE_BUDGET_MB=0 read a pack"
+                : "a textures.ini with no hash type read a pack");
+        return 0;
+    }
+    printf("gpu texscale selftest: PASS %-12s texpack=on with no folder, a bad budget or a malformed pack reads none\n",
+           "replace-only");
     return 1;
 }
 

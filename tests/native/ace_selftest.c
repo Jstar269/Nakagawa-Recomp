@@ -79,14 +79,38 @@ static void cell_parse(void) {
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.texpack == 1 &&
               c.tier == ACE_TIER_ENHANCED, "texpack=on in an Enhanced line");
         CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 11, ";texpack=on") == 0,
-              "texpack=on formats with the key last (%s)", out);
+              "texpack=on formats with the key last in a line without cull (%s)", out);
         c.texpack = 0;
         CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "texpack") == NULL,
               "off writes no texpack key (%s)", out);
+        /* The project's one key order: texpack before cull, cull last, whatever order a line uses. */
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;texpack=on", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.cull == 1 && c.texpack == 1 &&
-              ace_format(&c, out, sizeof(out)) && strstr(out, ";cull=on;texpack=on") != NULL,
-              "cull and texpack together (%s)", out);
+              ace_format(&c, out, sizeof(out)) &&
+              strcmp(out + strlen(out) - 19, ";texpack=on;cull=on") == 0,
+              "cull and texpack together format texpack first and cull last (%s)", out);
+        /* The longest line the key table allows, every key at its longest value, parses and fits
+           ACE_SPEC_MAX (and so the flight recorder's ace field): a key added without room, or
+           without a longest value, fails here. */
+        {
+            char longest[2 * ACE_SPEC_MAX];
+            const size_t n = ace_line_longest(longest, sizeof(longest));
+            CHECK(n > 0u && n == strlen(longest), "the longest line is computed from every key (%s)",
+                  longest);
+            CHECK(n < (size_t)ACE_SPEC_MAX, "the longest line (%u characters) fits ACE_SPEC_MAX (%d)",
+                  (unsigned)n, ACE_SPEC_MAX);
+            /* smooth=match is a word the parser knows that this build refuses (ACE_HAS_SMOOTH_MATCH
+               is 0), so the line is parsed with smooth=off in its place: every other key keeps
+               its longest value, and each must be one the parser takes. */
+            const char *match = strstr(longest, ";smooth=match");
+            CHECK(match != NULL, "the longest line carries smooth=match (%s)", longest);
+            if (match && n < (size_t)ACE_SPEC_MAX) {
+                snprintf(spec, sizeof(spec), "%.*s;smooth=%s%s", (int)(match - longest), longest,
+                         ACE_HAS_SMOOTH_MATCH ? "match" : "off", match + strlen(";smooth=match"));
+                CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on,
+                      "each key's longest value is one the parser takes (%s: %s)", spec, why);
+            }
+        }
         snprintf(spec, sizeof(spec), "%s;texpack=yes", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 && c.on == 0,
               "texpack=yes is a bad value");

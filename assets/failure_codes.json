@@ -1279,6 +1279,12 @@
         "player"
       ]
     },
+    "TEXTURE_PACK_PICKER_FAILED": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
     "SIZE_MISMATCH": {
       "stage": "host",
       "in": [

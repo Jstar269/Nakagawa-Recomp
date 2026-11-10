@@ -1229,6 +1229,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"tess", "Finer patches",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
      4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
+    /* A guest-visible item (contract 11.3.4): off by default, in no preset, and in effect only for
+       a title with a pack of the player's own chosen on its page. */
+    {"texpack", "Texture pack",
+     "Draws the texture pack chosen on a game's page. The game receives changed pictures.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
@@ -1238,11 +1243,6 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
      2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
-    /* A guest-visible item (contract 11.3.4): off by default, in no preset, and in effect only for
-       a title with a pack of the player's own chosen on its page. */
-    {"texpack", "Texture pack",
-     "Draws the texture pack chosen on a game's page. The game receives changed pictures.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -1611,17 +1611,77 @@ static bool title_pack_store(PlayerSettings *settings, const char *key, const ch
     return true;
 }
 
-/* Reads "texture_packs": {"<disc ID>": "<folder>"}. A member that is not a disc ID and a folder
-   string is skipped. */
-static void texture_packs_read(PlayerSettings *settings, const NkJsonNode *packs) {
-    if (!packs || !nk_json_is_object(packs)) return;
+/* Strict UTF-8: no overlong form, surrogate or code point past U+10FFFF. */
+static bool texpack_utf8_valid(const char *s) {
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        unsigned c = *p++;
+        int more;
+        unsigned cp, min;
+        if (c < 0x80u) continue;
+        if ((c & 0xE0u) == 0xC0u) { more = 1; cp = c & 0x1Fu; min = 0x80u; }
+        else if ((c & 0xF0u) == 0xE0u) { more = 2; cp = c & 0x0Fu; min = 0x800u; }
+        else if ((c & 0xF8u) == 0xF0u) { more = 3; cp = c & 0x07u; min = 0x10000u; }
+        else return false;
+        for (int k = 0; k < more; k++, p++) {
+            if ((*p & 0xC0u) != 0x80u) return false;
+            cp = (cp << 6) | (*p & 0x3Fu);
+        }
+        if (cp < min || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) return false;
+    }
+    return true;
+}
+
+/* Cuts `s` back so it does not end inside a UTF-8 sequence (a fixed buffer filled by snprintf
+   can stop mid-character), so a page never shows half a glyph. */
+static void texpack_utf8_trim(char *s) {
+    size_t n = strlen(s), start = n;
+    while (start > 0 && ((unsigned char)s[start - 1] & 0xC0u) == 0x80u) start--;
+    if (start == 0) return;
+    const unsigned char lead = (unsigned char)s[start - 1];
+    const size_t want = (lead & 0xE0u) == 0xC0u ? 2u : (lead & 0xF0u) == 0xE0u ? 3u
+                      : (lead & 0xF8u) == 0xF0u ? 4u : 1u;
+    if (lead >= 0x80u && n - (start - 1) < want) s[start - 1] = '\0';
+}
+
+/* A full path on this host: a relative one would be read against the game's working folder,
+   not the player's, and so could name another folder. */
+static bool texpack_path_full(const char *p) {
+#if defined(_WIN32)
+    return (isalpha((unsigned char)p[0]) && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) ||
+           ((p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/'));
+#else
+    return p[0] == '/';
+#endif
+}
+
+/* Why a folder cannot be kept as a texture pack, or NULL when it can: settings.json holds UTF-8
+   only (a file the loader refuses would lose every setting), the folder must be a full path, and
+   it must fit PlayerTitlePack.path. */
+static const char *texpack_path_problem(const char *path) {
+    if (!path || !path[0]) return "no folder was chosen";
+    if (!texpack_utf8_valid(path)) return "the folder's path is not valid UTF-8";
+    if (!texpack_path_full(path)) return "the folder's path is not a full path";
+    if (strlen(path) >= sizeof(((PlayerTitlePack *)0)->path))
+        return "the folder's path is 512 characters or longer";
+    return NULL;
+}
+
+/* Reads "texture_packs": {"<disc ID>": "<folder>"}. A member that is not a disc ID and a usable
+   folder (texpack_path_problem) is not kept; the return says how many, so the player is told. */
+static int texture_packs_read(PlayerSettings *settings, const NkJsonNode *packs) {
+    int dropped = 0;
+    if (!packs || !nk_json_is_object(packs)) return 0;
     for (size_t i = 0; i < packs->u.obj.count; i++) {
         const NkJsonMember *member = &packs->u.obj.members[i];
         char key[PLAYER_DISC_ID_KEY_LEN];
         const char *path = nk_json_get_string(member->val);
-        if (!member->key || !path || !path[0] || !player_disc_id_key(member->key, key)) continue;
-        (void)title_pack_store(settings, key, path);
+        if (!member->key || !player_disc_id_key(member->key, key) || texpack_path_problem(path) ||
+            !title_pack_store(settings, key, path)) {
+            dropped++;
+        }
     }
+    return dropped;
 }
 
 static void play_settings_write(FILE *f, const PlayerSettings *settings) {
@@ -1713,6 +1773,7 @@ static const PlayerSettingsMigration kSettingsMigrations[NK_PLAYER_SETTINGS_SCHE
 NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
     if (!app) return NK_ERROR_GENERIC;
     app->settings_newer_schema = false;
+    int packs_dropped = 0;   /* "texture_packs" members not kept (texture_packs_read) */
 
     char resolved_path[MAX_PATH_LEN];
     const char *target = file_path;
@@ -1927,7 +1988,7 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         } else {
             play_settings_read_legacy(&app->settings, root);
         }
-        texture_packs_read(&app->settings, nk_json_obj_get(root, "texture_packs"));
+        packs_dropped = texture_packs_read(&app->settings, nk_json_obj_get(root, "texture_packs"));
     }
 
     /* Reduce motion was a plain switch, saved as "reduce_motion", until it could
@@ -2025,6 +2086,14 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
 
     nk_json_free(root);
     app->settings_notice[0] = '\0';
+    if (packs_dropped > 0) {
+        snprintf(app->settings_notice, sizeof(app->settings_notice),
+                 "%d texture pack choice%s in settings.json could not be kept. Choose %s again.",
+                 packs_dropped, packs_dropped == 1 ? "" : "s", packs_dropped == 1 ? "it" : "them");
+        player_dev_log_add(app, "settings", "texture_packs: %d entr%s not kept (not a disc ID, "
+                           "or a folder that is not a full UTF-8 path under 512 bytes)",
+                           packs_dropped, packs_dropped == 1 ? "y" : "ies");
+    }
     return NK_OK;
 }
 
@@ -2359,11 +2428,9 @@ static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
                                 NK_PRESENT_SCALING_SHARP, true, 1, PRESET_PARTS(1, 1)},
 };
 #undef PRESET_PARTS
-/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until PRESET_PARTS
-   gives it a value under each preset (-1 leaves it the library's); update PRESET_PARTS first,
-   then this count. The count catches a new part only; a part PRESET_PARTS leaves out reads 0
-   (off), which test_graphics_presets catches by requiring -1 for every part it does not set. */
-typedef char k_graphics_presets_name_every_part[PLAYER_PART_COUNT == 11 ? 1 : -1];
+/* A new PLAYER_PART_* needs a value under each preset in PRESET_PARTS (-1 leaves it the
+   library's). A part PRESET_PARTS leaves out reads 0 (off), which test_graphics_presets catches by
+   requiring -1 for every part it does not set, so no part count is written here. */
 
 const PlayerGraphicsPresetRow *player_graphics_preset_row(int preset) {
     if (preset <= PLAYER_PRESET_CUSTOM || preset >= PLAYER_PRESET_COUNT) return NULL;
@@ -3083,7 +3150,7 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
         if (p == PLAYER_PART_UPSCALE) continue;
         /* A missing cull is off (contract 11.2 item 2): the line carries the key only when it is on. */
         if (p == PLAYER_PART_CULL && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
-        /* texpack likewise (11.3.4): written only when on, last, as the runtime formats it. */
+        /* texpack likewise (11.3.4): written only when on, before cull, as the runtime formats it. */
         if (p == PLAYER_PART_TEXPACK && play->part[p] != 1) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
@@ -3131,7 +3198,8 @@ const char *player_settings_title_pack(const PlayerSettings *settings, const cha
                                                               : NULL;
 }
 
-bool player_texture_pack_inspect(const char *path, PlayerTexturePackInfo *out) {
+bool player_texture_pack_inspect(const char *path, const char *disc_id,
+                                 PlayerTexturePackInfo *out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     if (!path || !path[0]) {
@@ -3145,10 +3213,32 @@ bool player_texture_pack_inspect(const char *path, PlayerTexturePackInfo *out) {
     while (start > 0 && path[start - 1] != '/' && path[start - 1] != '\\') start--;
     snprintf(out->name, sizeof(out->name), "%.*s", (int)(end - start), path + start);
     if (!out->name[0]) snprintf(out->name, sizeof(out->name), "%s", path);
+    texpack_utf8_trim(out->name);
+    const char *problem = texpack_path_problem(path);
+    if (problem) {
+        if (!texpack_utf8_valid(out->name)) snprintf(out->name, sizeof(out->name), "?");
+        snprintf(out->error, sizeof(out->error), "%s", problem);
+        return false;
+    }
     /* Read as the runtime reads it (texrepl.h): the same refusals, and no image decoded. */
     NkTexRepl *pack = nk_texrepl_open(path, 0, out->error, sizeof(out->error));
     if (!pack) {
         if (!out->error[0]) snprintf(out->error, sizeof(out->error), "the pack could not be read");
+        texpack_utf8_trim(out->error);
+        return false;
+    }
+    /* A pack names the games it is made for in [games] (PPSSPP's list). One that names other
+       games only is made for another game, whose textures would be drawn in this one wherever the
+       two share a texture's address and data: refused, naming the first game it lists. A pack that
+       names no game does not say, and is read. */
+    if (disc_id && nk_texrepl_names_game(pack, disc_id) == 0) {
+        const size_t count = nk_texrepl_game_count(pack);
+        snprintf(out->other_game, sizeof(out->other_game), "%s", nk_texrepl_game(pack, 0));
+        snprintf(out->error, sizeof(out->error),
+                 "it is made for %s%s, not this game (its textures.ini lists %s in [games])",
+                 out->other_game, count > 1 ? " and other games" : "",
+                 count > 1 ? "those games" : "that game only");
+        nk_texrepl_close(pack);
         return false;
     }
     out->textures = nk_texrepl_entry_count(pack);
@@ -3169,7 +3259,7 @@ static void player_app_refresh_pack_page(PlayerApp *app, const char *key) {
     }
     snprintf(app->texpack_page_path, sizeof(app->texpack_page_path), "%s",
              app->settings.title_packs[index].path);
-    (void)player_texture_pack_inspect(app->texpack_page_path, &app->texpack_page_info);
+    (void)player_texture_pack_inspect(app->texpack_page_path, key, &app->texpack_page_info);
 }
 
 const PlayerTexturePackInfo *player_app_title_pack_info(const PlayerApp *app, int game_index) {
@@ -3189,7 +3279,7 @@ bool player_app_set_title_pack(PlayerApp *app, int game_index, const char *path)
     if (!title_play_entry(app, game_index, &entry)) return false;
     PlayerTexturePackInfo info;
     char message[512];
-    if (!player_texture_pack_inspect(path, &info)) {
+    if (!player_texture_pack_inspect(path, entry.key, &info)) {
         snprintf(message, sizeof(message),
                  "Nakagawa read the folder you chose as a texture pack and refused it: %s. Nothing "
                  "was changed. Choose the folder that holds the pack's textures.ini or its PNG "
@@ -3426,6 +3516,31 @@ void player_app_enhanced_page_cycle_mode(PlayerApp *app) {
 bool player_app_set_enhanced_page_pack(PlayerApp *app, const char *path) {
     int title = player_app_enhanced_page_title(app);
     return title >= 0 && player_app_set_title_pack(app, title, path);
+}
+
+void player_app_begin_texpack_pick(PlayerApp *app) {
+    int title = player_app_enhanced_page_title(app);
+    if (title < 0) return;
+    memcpy(app->texpack_pick_disc, app->enhanced_page_disc, sizeof(app->texpack_pick_disc));
+    app->request_texpack_folder_picker = true;
+}
+
+bool player_app_take_texpack_pick(PlayerApp *app, const char *path) {
+    if (!app || !app->texpack_pick_disc[0]) return false;
+    int title = -1;
+    for (int i = 0; i < app->game_count && title < 0; i++) {
+        char key[PLAYER_DISC_ID_KEY_LEN];
+        if (player_disc_id_key(app->games[i].disc_id, key) && strcmp(key, app->texpack_pick_disc) == 0)
+            title = i;
+    }
+    if (title < 0) {
+        player_dev_log_add(app, "settings", "texture pack picked for %s, which is no longer in the "
+                           "library: not kept", app->texpack_pick_disc);
+        app->texpack_pick_disc[0] = '\0';
+        return false;
+    }
+    app->texpack_pick_disc[0] = '\0';
+    return player_app_set_title_pack(app, title, path);
 }
 
 void player_app_clear_enhanced_page_pack(PlayerApp *app) {
@@ -4380,6 +4495,7 @@ static const struct { const char *code; const char *badge; } k_error_badges[] = 
     {"SAVES_BACKUP_FAILED", "Not backed up"},
     {"SAVES_PICKER_FAILED", "Picker not shown"},
     {"SAVES_RESTORE_FAILED", "Not restored"},
+    {"TEXTURE_PACK_PICKER_FAILED", "Picker not shown"},
     {"LAUNCH_DETAILS_UNAVAILABLE", "Game not started"},
     {"ENHANCEMENT_UNAVAILABLE", "Enhancement unavailable"},
     {"TEXTURE_PACK_REFUSED", "Texture pack refused"},
@@ -5230,12 +5346,13 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
         const char *pack = play.on && play.part[PLAYER_PART_TEXPACK] == 1
             ? player_settings_title_pack(&app->settings, game->disc_id) : NULL;
         PlayerTexturePackInfo info;
-        if (pack && !player_texture_pack_inspect(pack, &info)) {
+        if (pack && !player_texture_pack_inspect(pack, game->disc_id, &info)) {
             char message[640];
             snprintf(message, sizeof(message),
                      "The texture pack chosen for this game was refused: %s. Nakagawa does not "
-                     "start a game with part of a pack. Fix or choose the pack again, or turn "
-                     "Texture pack off on the game's Enhanced page.", info.error);
+                     "start a game with a pack whose list it cannot read. Fix or choose the pack "
+                     "again, or remove it or turn Texture pack off on the game's Enhanced page to "
+                     "play without it.", info.error);
             player_app_set_error(app, "TEXTURE_PACK_REFUSED", "Texture pack not used", message,
                                  "Back to library", VIEW_LIBRARY);
             return false;

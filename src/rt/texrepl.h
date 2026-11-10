@@ -87,6 +87,14 @@ size_t nk_texrepl_entry_count(const NkTexRepl *pack);
 /* What was read but not applied, one line each; the last line says how many more were dropped. */
 size_t nk_texrepl_diag_count(const NkTexRepl *pack);
 const char *nk_texrepl_diag(const NkTexRepl *pack, size_t index);
+/* The games a pack says it is made for: the disc IDs its textures.ini [games] section lists
+ * (PPSSPP's per-game list), upper case, each once, in file order. A key that is not a disc ID
+ * is not kept. nk_texrepl_names_game returns 1 when disc_id (any case) is one of them, 0 when the
+ * pack names other games only, and -1 when it names none, so it does not say. */
+#define NK_TEXREPL_GAME_ID_MAX 16
+size_t nk_texrepl_game_count(const NkTexRepl *pack);
+const char *nk_texrepl_game(const NkTexRepl *pack, size_t index);
+int nk_texrepl_names_game(const NkTexRepl *pack, const char *disc_id);
 /* Take the oldest note not yet taken, so a caller can print notes as they appear (a file that
  * fails to load shows up at its first use, long after the pack opened). Copies it to `out` and
  * returns 1, or returns 0 when there are none. Taken notes leave the list and free its room, so

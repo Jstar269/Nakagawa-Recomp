@@ -217,9 +217,11 @@ static uint64_t s_flight_recorded;
 static uint64_t s_flight_last_sequence;
 static uint32_t s_flight_last_kind;
 static int s_flight_init_state;
-/* Ace Mode's line for an enhanced run, else empty. ACE_SPEC_MAX (src/rt/ace.h, 192) is the parser's
- * limit, so any line the runtime accepts is kept whole; the bundle schema's maxLength is 191. A line
- * with cull=on and texpack=on passes the 95 characters this used to keep. */
+/* Ace Mode's line for an enhanced run, else empty. Its size is ACE_SPEC_MAX (src/rt/ace.h, which
+ * the recorder does not include), the parser's limit, so any line the runtime accepts is kept
+ * whole. tools/test_flight_diff.py checks this size and the bundle schema's maxLength against
+ * ACE_SPEC_MAX, and ace_selftest that the longest line the key table allows fits ACE_SPEC_MAX, so
+ * a key added without room fails a test. */
 static char s_flight_ace[192];
 /* The window's upscale stamp (gui.c gui_upscale_init): "fsr1", "movie-anime4k", "movie-fsr1",
  * "fsr1+movie-anime4k" or "fsr1+movie-fsr1". 32 holds the longest (18) with room to spare. */

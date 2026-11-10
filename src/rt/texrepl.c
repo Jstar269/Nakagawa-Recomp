@@ -284,6 +284,8 @@ struct NkTexRepl {
     char diag_last[64];
     uint64_t budget, used, clock;
     NkTexReplStats stats;
+    char (*games)[NK_TEXREPL_GAME_ID_MAX];   /* [games] keys: the disc IDs the pack is made for */
+    size_t games_n, games_cap;
 };
 
 static void diag_add(NkTexRepl *p, const char *fmt, ...) {
@@ -313,6 +315,44 @@ int nk_texrepl_diag_take(NkTexRepl *p, char *out, size_t cap) {
         snprintf(out, cap, "... and %zu more not listed", p->diag_dropped);
         p->diag_dropped = 0;
         return 1;
+    }
+    return 0;
+}
+
+/* A [games] key that reads as a disc ID (1 to NK_TEXREPL_GAME_ID_MAX - 1 of A-Z, 0-9, '-', '_',
+   compared without case) is kept; any other key is only counted. */
+static int game_push(NkTexRepl *p, const char *key) {
+    char id[NK_TEXREPL_GAME_ID_MAX];
+    size_t n = 0;
+    for (; key[n]; n++) {
+        const unsigned char c = (unsigned char)key[n];
+        if (n + 1u >= sizeof(id) || !(isalnum(c) || c == '-' || c == '_')) return 1;
+        id[n] = (char)toupper(c);
+    }
+    if (n == 0) return 1;
+    id[n] = '\0';
+    for (size_t i = 0; i < p->games_n; i++) if (strcmp(p->games[i], id) == 0) return 1;
+    if (p->games_n == p->games_cap) {
+        const size_t cap = p->games_cap ? p->games_cap * 2u : 4u;
+        char (*grown)[NK_TEXREPL_GAME_ID_MAX] = realloc(p->games, cap * sizeof(*grown));
+        if (!grown) return 0;
+        p->games = grown;
+        p->games_cap = cap;
+    }
+    memcpy(p->games[p->games_n++], id, n + 1u);
+    return 1;
+}
+
+size_t nk_texrepl_game_count(const NkTexRepl *p) { return p ? p->games_n : 0u; }
+const char *nk_texrepl_game(const NkTexRepl *p, size_t i) {
+    return p && i < p->games_n ? p->games[i] : NULL;
+}
+int nk_texrepl_names_game(const NkTexRepl *p, const char *disc_id) {
+    if (!p || p->games_n == 0) return -1;
+    for (size_t i = 0; disc_id && i < p->games_n; i++) {
+        size_t k = 0;
+        while (disc_id[k] && p->games[i][k] && toupper((unsigned char)disc_id[k]) == p->games[i][k]) k++;
+        if (!disc_id[k] && !p->games[i][k]) return 1;
     }
     return 0;
 }
@@ -642,7 +682,10 @@ static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
         }
         case SEC_FILTERING: filtering++; break;
         case SEC_INDEXED: indexed++; break;
-        case SEC_GAMES: games++; break;
+        case SEC_GAMES:
+            games++;
+            if (!game_push(p, key)) { snprintf(err, err_cap, "out of memory"); return 0; }
+            break;
         default: break;
         }
     }
@@ -791,6 +834,7 @@ void nk_texrepl_close(NkTexRepl *p) {
     free(p->aliases);
     free(p->ranges);
     free(p->reduce);
+    free(p->games);
     free(p->dir);
     free(p);
 }

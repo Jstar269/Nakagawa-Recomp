@@ -340,10 +340,18 @@ class ComparabilityContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, flight_diff.EXIT_INCOMPARABLE, result.stdout)
         self.assertIn("not authentic evidence", result.stdout)
 
+    # Every key at its longest value (src/rt/ace.c ace_line_longest): past the 95 characters the
+    # field used to keep.
+    ACE_LINE_LONGEST = ("v1;af=16;text=off;readout=off;notice=off;wide=fill;smooth=match;"
+                        "sas=sinc;tess=off;tier=enhanced;texpack=off;cull=off")
+
     def test_ace_mode_block_is_schema_valid_and_closed(self):
         _, candidate = self._comparable_pair()
         ace = copy.deepcopy(candidate)
         ace["runtime"]["enhancements"] = {"ace": self.ACE_LINE}
+        flight_diff.validate_bundle(ace)
+        self.assertGreater(len(self.ACE_LINE_LONGEST), 95)
+        ace["runtime"]["enhancements"] = {"ace": self.ACE_LINE_LONGEST}
         flight_diff.validate_bundle(ace)
         # The presentation upscaler's stamp, alone or beside Ace Mode's line (#1273).
         # ... and the movie upscaler's (SR_MOVIE_UPSCALE), alone or with the presentation upscaler's:
@@ -1481,6 +1489,40 @@ class RecorderTimingTests(unittest.TestCase):
                  "/* never sleep() or sched_yield() here */\n"
                  'static void f(void) { fprintf(stderr, "SDL_Delay(1)\\n"); } // Sleep(0)\n')
         self.assertEqual(recorder_timing_findings(clean), [])
+
+
+class AceFieldLengthTests(unittest.TestCase):
+    """The bundle's ace field holds any line the runtime accepts (src/rt/flight_recorder.c)."""
+
+    def test_schema_max_length_is_the_parser_limit(self):
+        header = (ROOT / "src" / "rt" / "ace.h").read_text(encoding="utf-8")
+        found = re.search(r"^#define ACE_SPEC_MAX (\d+)\b", header, re.MULTILINE)
+        self.assertIsNotNone(found, "ACE_SPEC_MAX is defined in src/rt/ace.h")
+        spec_max = int(found.group(1))
+        recorder = (ROOT / "src" / "rt" / "flight_recorder.c").read_text(encoding="utf-8")
+        field = re.search(r"^static char s_flight_ace\[(\d+)\];", recorder, re.MULTILINE)
+        self.assertIsNotNone(field, "flight_recorder.c keeps the ace line in s_flight_ace")
+        self.assertEqual(int(field.group(1)), spec_max,
+                         "the recorder's ace field holds a line of ACE_SPEC_MAX, terminator included")
+        schema = json.loads(flight_diff.SCHEMA_PATH.read_text(encoding="utf-8"))
+        found_ace = []
+
+        def walk(node):
+            if isinstance(node, dict):
+                props = node.get("properties")
+                if isinstance(props, dict) and "ace" in props:
+                    found_ace.append(props["ace"])
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(schema)
+        self.assertEqual(len(found_ace), 1, "the schema has one ace property")
+        ace = found_ace[0]
+        # ACE_SPEC_MAX counts the terminator; the field keeps every character before it.
+        self.assertEqual(ace["maxLength"], spec_max - 1)
 
 
 if __name__ == "__main__":
