@@ -82,7 +82,7 @@ def _pull_request(*, head: str = HEAD, base: str = "main", fork: bool = False,
     owner = "someone/nakagawa-recomp" if fork else "Jstar269/nakagawa-recomp"
     return {
         "number": PR, "state": "open", "draft": draft,
-        "head": {"sha": head, "repo": {"full_name": owner}},
+        "head": {"sha": head, "ref": "ci/topic", "repo": {"full_name": owner}},
         "base": {"ref": base, "repo": {"full_name": "Jstar269/nakagawa-recomp"}},
         "labels": [{"name": name} for name in labels],
     }
@@ -1623,15 +1623,22 @@ class CarriedApprovalCollectorTests(unittest.TestCase):
             digest.assert_not_called()
 
 
+def _push(after: str, at: str | None, *, kind: str = "push", ref: str = "refs/heads/ci/topic") -> dict:
+    """One record of GitHub's repository activity: a branch was moved to ``after`` at ``at``."""
+    return {"id": 1, "ref": ref, "before": "0" * 40, "after": after, "timestamp": at, "activity_type": kind}
+
+
 class ApprovalGitHub(ctv.GitHub):
     """The label workflow's reads: the pull request, its label events, a user's permission and recorded runs."""
 
     def __init__(self, *, head: str = HEAD, labels: tuple[str, ...] = (ctv.APPROVAL_LABEL,),
                  permission: str | None = "write", events: list[dict] | None = None,
                  records: tuple[tuple[dict, dict], ...] = (), broken: str | None = None,
-                 dispatches: tuple[tuple[dict, dict], ...] = ()) -> None:
+                 dispatches: tuple[tuple[dict, dict], ...] = (), pushes: list[dict] | None = None) -> None:
         super().__init__("Jstar269/nakagawa-recomp", "token")
         self.dispatches = list(dispatches)
+        # GitHub's activity of the head branch: by default one push, an hour before the label, made HEAD the head.
+        self.pushes = pushes if pushes is not None else [_push(HEAD, "2026-10-28T09:00:00Z")]
         self.pull = _pull_request(head=head, labels=labels)
         self.reads: list[str] = []
         self.permission = permission
@@ -1670,6 +1677,9 @@ class ApprovalGitHub(ctv.GitHub):
         if path.startswith("actions/runs/"):
             run_id = int(path.split("/")[2])
             return [job for run, job in self.records + self.dispatches if run["id"] == run_id]
+        if path.startswith("https://api.github.com/repos/") and "/activity?" in path:
+            self.reads.append(path)
+            return self.pushes
         raise AssertionError(path)
 
 
@@ -1822,6 +1832,123 @@ class RecordAndCarryTests(unittest.TestCase):
         for refused in (ApprovalGitHub(head=OTHER), ApprovalGitHub(labels=()), ApprovalGitHub(permission="triage")):
             with self.assertRaises(ctv.ApprovalRefused):
                 dispatch(refused)
+
+    def _dispatch(self, gh: ApprovalGitHub) -> str:
+        with mock.patch.object(ctv, "candidate_digest", return_value=D1):
+            digest: str = ctv.record_approval(gh, Path("."), PR, HEAD, "main", dispatched=True)
+            return digest
+
+    def _refused(self, gh: ApprovalGitHub, code: str) -> None:
+        with self.assertRaises(ctv.ApprovalRefused) as refusal:
+            self._dispatch(gh)
+        self.assertTrue(str(refusal.exception).startswith(code + ": "), str(refusal.exception))
+
+    @staticmethod
+    def _label(event_id: int, event: str, at: str) -> dict:
+        return {"id": event_id, "event": event, "created_at": at, "actor": {"login": "maintainer"},
+                "label": {"name": ctv.APPROVAL_LABEL}}
+
+    def test_a_label_older_than_the_head_is_refused(self) -> None:
+        """A label is applied for one head and the pull request is pushed. With pull_request_target refused
+        nothing removes the label, and a dispatch that names the new head finds "the label is on, and this is
+        the head". Failing-before: it recorded an approval of a head nobody had read."""
+        stale = ApprovalGitHub(pushes=[_push(OTHER, "2026-10-28T09:00:00Z"), _push(HEAD, "2026-10-28T10:00:00Z")])
+        self._refused(stale, "LABEL_PREDATES_HEAD")          # the label is from 09:59
+        self.assertEqual(stale.reads, [
+            "https://api.github.com/repos/Jstar269/nakagawa-recomp/activity?ref=refs%2Fheads%2Fci%2Ftopic",
+        ])
+        # A label in the push's own second cannot be ordered against it.
+        self._refused(ApprovalGitHub(pushes=[_push(HEAD, LABELLED_AT)]), "LABEL_PREDATES_HEAD")
+        self._refused(ApprovalGitHub(pushes=[_push(HEAD, "2026-10-28T09:59:00.400Z")]), "LABEL_PREDATES_HEAD")
+        self.assertEqual(self._dispatch(ApprovalGitHub(pushes=[_push(HEAD, "2026-10-28T09:58:59Z")])), D1)
+
+    def test_a_label_applied_again_after_the_push_is_accepted(self) -> None:
+        pushes = [_push(HEAD, "2026-10-28T10:00:00Z")]
+        events = [self._label(1, "labeled", LABELLED_AT), self._label(2, "unlabeled", "2026-10-28T10:05:00Z"),
+                  self._label(3, "labeled", "2026-10-28T10:06:00Z")]
+        self.assertEqual(self._dispatch(ApprovalGitHub(pushes=pushes, events=events)), D1)
+        # Removed and applied again in one second: the events are ordered by time, then id.
+        same_second = [self._label(1, "labeled", LABELLED_AT), self._label(2, "unlabeled", "2026-10-28T10:06:00Z"),
+                       self._label(3, "labeled", "2026-10-28T10:06:00Z")]
+        self.assertEqual(self._dispatch(ApprovalGitHub(pushes=pushes, events=same_second)), D1)
+        reversed_ids = [self._label(1, "labeled", LABELLED_AT), self._label(3, "unlabeled", "2026-10-28T10:06:00Z"),
+                        self._label(2, "labeled", "2026-10-28T10:06:00Z")]
+        with self.assertRaises(ctv.ApprovalRefused):
+            self._dispatch(ApprovalGitHub(pushes=pushes, events=reversed_ids))
+
+    def test_a_force_push_back_to_an_earlier_commit_is_dated_by_its_latest_arrival(self) -> None:
+        """HEAD is pushed at 09:00, replaced at 09:30, the replacement is labelled at 09:59, and the pull
+        request is force-pushed back to HEAD at 10:10. HEAD's first arrival and its earliest runs predate the
+        label; its latest arrival does not."""
+        pushes = [_push(HEAD, "2026-10-28T10:10:00Z", kind="force_push"), _push(OTHER, "2026-10-28T09:30:00Z"),
+                  _push(HEAD, "2026-10-28T09:00:00Z")]
+        self._refused(ApprovalGitHub(pushes=pushes), "LABEL_PREDATES_HEAD")
+        self._refused(ApprovalGitHub(pushes=list(reversed(pushes))), "LABEL_PREDATES_HEAD")   # whatever the order
+        # The pull request's own events are a second witness: a force push after the label, even where the
+        # activity list shows only the first arrival.
+        witnessed = ApprovalGitHub()
+        witnessed.events.append({"id": 5, "event": "head_ref_force_pushed", "created_at": "2026-10-28T10:10:00Z"})
+        self._refused(witnessed, "LABEL_PREDATES_HEAD")
+        earlier = ApprovalGitHub()
+        earlier.events.append({"id": 5, "event": "head_ref_force_pushed", "created_at": "2026-10-28T09:30:00Z"})
+        self.assertEqual(self._dispatch(earlier), D1)
+        undated = ApprovalGitHub()
+        undated.events.append({"id": 5, "event": "head_ref_force_pushed", "created_at": None})
+        self._refused(undated, "HEAD_TIME_UNREADABLE")
+
+    def test_an_unreadable_push_time_is_refused(self) -> None:
+        cases = {
+            "no record for this commit": ApprovalGitHub(pushes=[_push(OTHER, "2026-10-28T09:00:00Z")]),
+            "no records at all": ApprovalGitHub(pushes=[]),
+            "a record without a time": ApprovalGitHub(pushes=[_push(HEAD, None)]),
+            "a record with an unreadable time": ApprovalGitHub(pushes=[_push(HEAD, "09:00 yesterday")]),
+            "one dated and one undated record": ApprovalGitHub(
+                pushes=[_push(HEAD, "2026-10-28T09:00:00Z"), _push(HEAD, None)]),
+            "a record of another branch": ApprovalGitHub(
+                pushes=[_push(HEAD, "2026-10-28T09:00:00Z", ref="refs/heads/other")]),
+            "the list cannot be read": ApprovalGitHub(broken="https://api.github.com/repos/"),
+            "an error document instead of a list": ApprovalGitHub(pushes=["message"]),   # type: ignore[list-item]
+        }
+        for name, gh in cases.items():
+            with self.subTest(case=name):
+                self._refused(gh, "HEAD_TIME_UNREADABLE")
+        for head in ({"sha": HEAD, "ref": "ci/topic", "repo": None}, {"sha": HEAD, "repo": {"full_name": "a/b"}},
+                     {"sha": HEAD, "ref": "ci/topic", "repo": {"full_name": "a/b/../c"}}):
+            with self.subTest(head=head):
+                gh = ApprovalGitHub()
+                gh.pull["head"] = head
+                self._refused(gh, "HEAD_TIME_UNREADABLE")
+
+    def test_a_fork_pull_requests_push_is_read_from_the_fork(self) -> None:
+        gh = ApprovalGitHub(pushes=[_push(HEAD, "2026-10-28T09:00:00Z", ref="refs/heads/fix #1")])
+        gh.pull["head"] = {"sha": HEAD, "ref": "fix #1", "repo": {"full_name": "someone/nakagawa-recomp"}}
+        self.assertEqual(self._dispatch(gh), D1)
+        # The branch name is the author's text: it reaches the request only as an encoded query value.
+        self.assertEqual(gh.reads, [
+            "https://api.github.com/repos/someone/nakagawa-recomp/activity?ref=refs%2Fheads%2Ffix+%231",
+        ])
+
+    def test_a_label_event_record_is_not_dated_against_the_push(self) -> None:
+        # On a `labeled` event the event itself names the head; only a dispatch has to prove the label is newer.
+        gh = ApprovalGitHub(pushes=[])
+        with mock.patch.object(ctv, "candidate_digest", return_value=D1):
+            self.assertEqual(ctv.record_approval(gh, Path("."), PR, HEAD, "main"), D1)
+        self.assertEqual(gh.reads, [])
+
+    def test_the_dispatch_command_names_a_stale_label(self) -> None:
+        gh = ApprovalGitHub(pushes=[_push(HEAD, "2026-10-28T10:00:00Z")])
+        errors: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ctv, "GitHub", return_value=gh), \
+                mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t"}), \
+                mock.patch.object(ctv, "candidate_digest", return_value=D1), mock.patch("sys.stdout"), \
+                mock.patch("sys.stderr") as stderr:
+            output = Path(tmp) / "out"
+            code = ctv.main(["--repository", gh.repository, "--pull-request", str(PR), "--head-sha", HEAD,
+                             "--github-output", str(output), "--approval", "dispatch"])
+            errors = [str(call.args[0]) for call in stderr.write.call_args_list if call.args]
+            self.assertFalse(output.exists())
+        self.assertEqual(code, 1)
+        self.assertIn("approval not recorded by dispatch: ApprovalRefused: LABEL_PREDATES_HEAD: ", "".join(errors))
 
     def test_a_dispatched_approval_does_not_depend_on_the_base_a_pull_request_once_had(self) -> None:
         """A label-event record comes from the base branch's workflow, so a retargeted pull request is refused

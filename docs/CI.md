@@ -1490,6 +1490,23 @@ the label withdraws every earlier record. The label waives only
 `CI_CHANGE_UNAPPROVED`: an approved change still needs every intended job, once, green, from
 its intended workflow.
 
+**After any push, the label is removed and applied again, after reading the new head.** The
+label names no commit. While every push ran the handler that removes it, "the label is on"
+meant "this head was read"; once GitHub refuses `pull_request_target` nothing removes it, and a
+label given for one head is still on the pull request at the next. The dispatch therefore
+refuses a label that is not newer than the head it is asked to approve
+(`LABEL_PREDATES_HEAD`): the label's latest `labeled` event must be later than the push that
+made that commit the head. The push time comes from GitHub's repository activity for the head
+branch, its own log of every branch update, taking the newest record whose result is that
+commit; a force push back to an earlier commit is thus dated by its latest arrival, not by the
+commit's first runs. Every force push the pull request's events record must also be older than
+the label. A label in the same second as the push cannot be ordered and is refused. If the
+push time cannot be read (a deleted fork, a fork the token may not read, no dated record for
+the commit) the dispatch is refused as `HEAD_TIME_UNREADABLE`; such a change lands through a
+branch of this repository. The one case that needs no new label is a push that left the
+protected files' digest unchanged: the existing record still approves it, and no dispatch is
+needed.
+
 The dispatch is the step to rely on, not an extra. Applying the label also starts a
 `pull_request_target` run that writes a record, but that run cannot be counted on: GitHub
 refuses the event in a brownout and by default from 2026-12-02; on 2026-11-09 one label's run
@@ -1542,7 +1559,9 @@ uses for `CI_CHANGE_UNAPPROVED`: the protected paths above, listed by `protected
   dispatch names, provided the label's latest event is `labeled` by a user with write access,
   the pull request is open against the default branch, and `refs/pull/<n>/head` still is that
   head, before and after hashing; a pull request that has moved on is refused, so nobody
-  approves bytes they did not name. The next job is named
+  approves bytes they did not name, and so is a label older than that head
+  (`LABEL_PREDATES_HEAD`, above), so nobody approves bytes under a label given for others. The
+  next job is named
   `CI approval record v2 pr<number> <head> <digest>`, every part an output of the tool. The
   record is read back only from a
   successful job of that name in a `workflow_dispatch` run of

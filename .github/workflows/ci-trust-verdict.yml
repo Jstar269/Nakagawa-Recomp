@@ -221,7 +221,9 @@ jobs:
     # this workflow from the default branch with that head's SHA. The default
     # branch's tools/ci_trust_verdict.py hashes the head's protected paths, read
     # as objects only, provided the label's latest event is `labeled` by a user
-    # with write access and the pull request still has exactly that head. The
+    # with write access, the pull request still has exactly that head, and the
+    # label was applied after that head arrived (LABEL_PREDATES_HEAD otherwise:
+    # nothing removes a label on a push once pull_request_target is refused). The
     # hash is recorded by the next job's name. The inputs reach a shell only
     # through env:, and the tool checks their form before it uses them.
     name: Record a dispatched CI-change approval

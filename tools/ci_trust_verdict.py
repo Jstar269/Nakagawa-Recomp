@@ -78,8 +78,10 @@ definition from the default branch can produce:
   run from the default branch that ran the default branch's current copy of the
   workflow and whose actor has write access
   (``dispatched_records``). The dispatch names the pull request and the head
-  that was reviewed; ``--approval dispatch`` refuses unless the label is valid
-  and that head still is the pull request's. This route needs no pull request
+  that was reviewed; ``--approval dispatch`` refuses unless the label is valid,
+  that head still is the pull request's, and the label was applied after that
+  head arrived (``label_covers_head``: a label names no commit, and nothing
+  removes it on a push once ``pull_request_target`` is refused). This route needs no pull request
   event. The record counts for any head with the same digest, so a push that
   changes no protected content keeps the approval.
 * ``CI approval record v1 pr<N> <digest>``, in a ``pull_request_target`` run at
@@ -1324,7 +1326,69 @@ def label_state(gh: GitHub, number: int, pr: dict) -> dict:
     if permission not in WRITE_PERMISSIONS:
         raise ApprovalRefused(f"{actor!r} has permission {permission!r}, not write")
     return {"actor": actor, "created_at": last.get("created_at") or "",
-            "retargeted": any(event.get("event") == "base_ref_changed" for event in all_events)}
+            "retargeted": any(event.get("event") == "base_ref_changed" for event in all_events),
+            "force_pushed_at": [event.get("created_at") or "" for event in all_events
+                                if event.get("event") == "head_ref_force_pushed"]}
+
+
+_REPOSITORY_NAME = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+
+def head_pushed_at(gh: GitHub, pr: dict, head_sha: str) -> datetime:
+    """When ``head_sha`` last became the pull request's head: the newest record of its head branch, in GitHub's
+    repository activity, whose result is that commit.
+
+    The activity list is GitHub's own log of every update of a branch (push, force push, creation), with the
+    commit before and after and the time. It is the one source that dates the *latest* arrival of a commit: a
+    pull request can be force-pushed back to a commit it had before, and then every run and every check of that
+    commit predates the moment it became the head again. The earliest run at the commit, which the verifier
+    once used, says when the commit first arrived, and a label applied in between passed for a head nobody had
+    read. Nothing here is taken from the candidate: the branch name only selects the list, as a query value.
+
+    Refused as ``HEAD_TIME_UNREADABLE`` when the head repository or branch is not named (a deleted fork), the
+    list cannot be read (a fork this token may not read), or it holds no dated record for this commit.
+    """
+    head = pr.get("head") or {}
+    repository = (head.get("repo") or {}).get("full_name") or ""
+    branch = head.get("ref") or ""
+    if not _REPOSITORY_NAME.fullmatch(repository) or not branch:
+        raise ApprovalRefused("HEAD_TIME_UNREADABLE: the pull request's head repository or branch is not named")
+    ref = f"refs/heads/{branch}"
+    try:
+        records = gh.paginate(f"{API_ROOT}/repos/{repository}/activity?" + urllib.parse.urlencode({"ref": ref}))
+    except (urllib.error.URLError, TimeoutError, KeyError, TypeError, ValueError) as error:
+        raise ApprovalRefused(f"HEAD_TIME_UNREADABLE: the activity of {repository} {ref} cannot be read "
+                              f"({type(error).__name__})") from error
+    stamps = [_when(record.get("timestamp")) for record in records
+              if isinstance(record, dict) and record.get("ref") == ref and record.get("after") == head_sha]
+    dated = [stamp for stamp in stamps if stamp is not None]
+    if not dated or len(dated) != len(stamps):
+        raise ApprovalRefused(f"HEAD_TIME_UNREADABLE: {repository} {ref} has no dated push record for {head_sha}")
+    return max(dated)
+
+
+def label_covers_head(gh: GitHub, number: int, pr: dict, head_sha: str) -> None:
+    """Refuse a dispatched approval unless the current label was applied after ``head_sha`` became the head.
+
+    The label names no commit. While every push ran the handler that removes it, "the label is on" meant "this
+    head was read"; once GitHub refuses ``pull_request_target`` nothing removes it, and a label applied for one
+    head is still there at the next. A dispatch for that next head would then record bytes nobody read. So the
+    label's latest ``labeled`` event must be later than the push that made this commit the head
+    (``head_pushed_at``) and later than every force push the pull request's events record, which is a second,
+    independent witness that the head moved. A label in the same second as the push cannot be ordered and is
+    refused. The remedy is always the same: remove the label, read the head, apply the label again.
+    """
+    state = label_state(gh, number, pr)
+    labelled = _when(state["created_at"])
+    moved = [head_pushed_at(gh, pr, head_sha), *(_when(stamp) for stamp in state["force_pushed_at"])]
+    if labelled is None or any(stamp is None for stamp in moved):
+        raise ApprovalRefused(f"HEAD_TIME_UNREADABLE: a label or force-push event of #{number} has no readable time")
+    newest = max(stamp for stamp in moved if stamp is not None)
+    if labelled <= newest:
+        raise ApprovalRefused(
+            f"LABEL_PREDATES_HEAD: {APPROVAL_LABEL!r} was applied at {state['created_at']}, not after {head_sha} "
+            f"became the head of #{number} ({newest.isoformat()}); remove the label, read this head, apply the "
+            "label again, then dispatch again")
 
 
 def label_approver(gh: GitHub, number: int, pr: dict, *, refuse_retargeted: bool = True) -> str:
@@ -1351,10 +1415,14 @@ def record_approval(gh: GitHub, repo: Path, number: int, head_sha: str, default_
 
     On a ``labeled`` event ``head_sha`` is the head the event named. For a dispatch (``dispatched``) it is the head
     the dispatcher reviewed and typed: a pull request whose head has moved since is refused, so nobody approves
-    bytes they did not name.
+    bytes they did not name, and so is a label that was applied before that head arrived
+    (``label_covers_head``), so nobody approves bytes under a label that was given for others.
     """
-    label_approver(gh, number, _open_pull_request(gh, number, head_sha, default_branch),
-                   refuse_retargeted=not dispatched)
+    pr = _open_pull_request(gh, number, head_sha, default_branch)
+    if dispatched:
+        label_covers_head(gh, number, pr, head_sha)
+    else:
+        label_approver(gh, number, pr)
     digest = candidate_digest(gh, repo, number, head_sha, remote)
     # The head must not have moved while it was hashed, or the digest would describe a head nobody approved.
     label_approver(gh, number, _open_pull_request(gh, number, head_sha, default_branch),
