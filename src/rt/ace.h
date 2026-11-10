@@ -139,7 +139,8 @@ void ace_set_cull_untracked(unsigned long n);
  * then on nothing is skipped for the rest of the run, so every declared wait runs its stock call,
  * and one "ENHANCEMENT_LOAD_PACING:" line names the site whose skip reached it. The report carries
  * the longest run seen (load_skip_max_run) and whether the guard fired (load_paced). 8 is four
- * times the longest run measured through one title's loads (2 updates, contract 11.3.10). */
+ * times the longest run measured through one title's loads (2 updates, contract 11.3.10), and
+ * provisional until a second title is measured. */
 #define ACE_LOAD_PACING_UPDATES 8u
 int nk_ace_load_fast(const char *site, uint32_t pc);
 /* One logic update begins (the package's update_boundary): ends the previous update's part of

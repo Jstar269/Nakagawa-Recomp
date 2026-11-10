@@ -1656,7 +1656,12 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   runs its stock call, and one `ENHANCEMENT_LOAD_PACING:` line names the site, by id and by its `jal`'s address,
   whose skip reached the threshold. The report's `load_skip_max_run` is the longest run seen and `load_paced` says
   whether the guard fired; the exit line names both. Until it fires, a pacing site runs that many updates unpaced,
-  so the guard does not replace the evidence of obligation 1.
+  so the guard does not replace the evidence of obligation 1. It sees only waits skipped in consecutive updates
+  that reach the boundary: a wait in a loop that never reaches it (a menu loop with its own logic) or one skipped
+  only every other update does not fire it, and a real load that spans the threshold's updates (a loading loop
+  that calls the update, or a loader thread) does, which turns the part off for the run and costs nothing else.
+  The threshold is one value for every title, set from one title's loads; it is provisional until a second title
+  is measured.
 - **I/O speed:** unchanged. Reads take what they take; only the display waits between them are shorter.
 - **Package obligations.** The mechanism cannot check these, so the package author shows them for the title: (1)
   each declared wait paces a loading screen only, not a loop that runs or reaches a logic update. The tools check
@@ -1670,18 +1675,18 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   (`sceDisplayWaitVblankStartCB`, a semaphore its VBLANK handler signals, or a thread delay) is unchanged. It does
   not make a read faster. The section adds no code and changes no word when a package has no `ace_parts`, and with
   the key off the stock call runs.
-- **Tier:** Ace (one title). **Default:** off, and in no grap- **Measured (Hot Shots Tennis, UCUS98701, one declared wait, 60 FPS package, Vulkan GE, hidden window, Windows 11,
+- **Tier:** Ace (one title). **Default:** off, and in no graphics preset.
+- **Measured (Hot Shots Tennis, UCUS98701, one declared wait, 60 FPS package, Vulkan GE, hidden window, Windows 11,
   other builds running on the machine), at the head with the shortest-delay skip and the pacing guard.** The title
   follows each file-binder open on its main thread with three passes of a fade step and a plain display wait; the
   open has completed before them. On a scripted 12,000-VBLANK route from boot through the menus, a match load and a
   rally, `load=fast` skipped 261 waits (87 opens). The longest run of consecutive logic updates with a skip was 2
   (`load_skip_max_run`), and the guard did not fire (`load_paced` false). Only the route's picture checkpoints were
-  compared, and they stop at the difficulty menu. Each was reached earlier, within its checkpoint's tolerance: the
+  compared, and they stop at the match-type menu. Each was reached earlier, within its checkpoint's tolerance: the
   title screen at VBLANK 1,281 instead of 1,321 (40 VBLANKs, about 0.67 s sooner), the load dialog at 2,206 instead
   of 2,250, the main menu at 2,342 instead of 2,398 (56 VBLANKs, about 0.93 s), the single-player menu at 2,638
   instead of 2,686 and the match-type menu at 3,719 instead of 3,771 (52 VBLANKs, about 0.87 s). The match load and
   the rally were not compared by checkpoint. The fade step still runs three times per open, so each screen the route
   checks after a load shows the stock picture. The title's frame-pacing wait (its package's `vblank_wait_2_to_1`
   site) is not a load site and still paces every logic update.
-ogic update.
 - **Nothing worse (section 11.2, item 4):** the run above, which has not been reviewed.
