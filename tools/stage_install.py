@@ -26,7 +26,7 @@ Windows installer set up (it holds ``unins000.exe``) is refused for staging and 
 different existing copy is never replaced (``INSTALL_SHORTCUT_OTHER_COPY``, checked for
 every requested shortcut before anything is staged). A
 shortcut is a Windows ``.lnk`` written through ``WScript.Shell``; it starts the
-player with ``--ui=next`` by default, the way Explorer would start it, and
+player with no arguments by default, the way Explorer would start it, and
 carries the player's AppUserModelID (``APP_USER_MODEL_ID``, #2006), so a pinned
 shortcut, the launcher and every game it starts share one taskbar group.
 ``--desktop-shortcut`` puts one on the Desktop and ``--start-menu-shortcut`` one
@@ -96,6 +96,7 @@ if str(ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(ROOT / "tools"))
 
 import make_app_icon  # noqa: E402
+from nk_powershell import powershell_exe  # noqa: E402
 import stage_runtime_dlls  # noqa: E402
 
 IS_WINDOWS = os.name == "nt"
@@ -109,7 +110,7 @@ APP_USER_MODEL_ID = "Nakagawa.Recomp"
 APP_DESKTOP_ID = "nakagawa-recomp"
 DESKTOP_ENTRY_NAME = f"{APP_DESKTOP_ID}.desktop"
 DESKTOP_ICON_NAME = "nakagawa-recomp.png"
-DEFAULT_ARGUMENTS = "--ui=next"
+DEFAULT_ARGUMENTS = ""
 
 
 class InstallError(RuntimeError):
@@ -334,7 +335,7 @@ def write_desktop_entry(dest: Path, arguments: str = DEFAULT_ARGUMENTS) -> list[
 
 def _special_folder(name: str, code: str) -> Path:
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command",
          f"[Environment]::GetFolderPath('{name}')"],
         capture_output=True, text=True, check=False)
     folder = result.stdout.strip()
@@ -444,7 +445,7 @@ def read_shortcut_app_id(shortcut: Path) -> str:
         raise InstallError("INSTALL_SHORTCUT_UNSUPPORTED: shortcuts are read on Windows only")
     environment = {**os.environ, "NK_LNK": _shell_path(shortcut), "NK_APP_ID_CS": _APP_ID_CSHARP}
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _READ_APP_ID_SCRIPT],
+        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", _READ_APP_ID_SCRIPT],
         capture_output=True, text=True, env=environment, check=False)
     if result.returncode != 0:
         raise InstallError(
@@ -463,7 +464,7 @@ def read_shortcut_target(shortcut: Path) -> str:
     if os.name != "nt":
         raise InstallError("INSTALL_SHORTCUT_UNSUPPORTED: shortcuts are read on Windows only")
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _READ_TARGET_SCRIPT],
+        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", _READ_TARGET_SCRIPT],
         capture_output=True, text=True, env={**os.environ, "NK_LNK": _shell_path(shortcut)}, check=False)
     return result.stdout.strip() if result.returncode == 0 else ""
 
@@ -507,7 +508,7 @@ def write_shortcut(shortcut: Path, dest: Path, arguments: str = DEFAULT_ARGUMENT
         "NK_APP_ID_CS": _APP_ID_CSHARP,
     })
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _SHORTCUT_SCRIPT],
+        [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", _SHORTCUT_SCRIPT],
         capture_output=True, text=True, env=environment, check=False)
     if result.returncode != 0 or not shortcut.is_file():
         raise InstallError(
@@ -976,7 +977,7 @@ def main(argv=None) -> int:
     parser.add_argument("--shortcut", type=Path,
                         help="write the Windows shortcut at this exact .lnk path instead")
     parser.add_argument("--arguments", default=DEFAULT_ARGUMENTS,
-                        help=f"player arguments in the shortcut (default: {DEFAULT_ARGUMENTS})")
+                        help="player arguments in the shortcut (default: none)")
     parser.add_argument("--uninstall", action="store_true",
                         help="remove the install in --dest and the shortcuts and desktop entries "
                              "it recorded; never the per-user data folders")

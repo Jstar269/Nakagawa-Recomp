@@ -2,19 +2,30 @@ name: CI
 
 on:
   # Pull-request events that can carry a new head: opened (the first head),
-  # synchronize (new commits), reopened. On a Draft pull request these run only
-  # the quick jobs (classify, hygiene, public_export, ci_required):
-  # tools/ci_paths.py sets allow_substantive false for a Draft, which skips
-  # python_tools, native_tools, linux_gcc16, windows_runtime and the
-  # profile-zero fixture build, and tools/ci_required.py never reports a
-  # Draft's run green (DRAFT_LIGHT_CI). docs/CI.md, "Draft pull requests".
+  # synchronize (new commits), reopened. A pull-request run is one of two
+  # tiers, which tools/ci_paths.py exports as `tier` (docs/CI.md, "Quick and
+  # full checks"):
+  #   * light, the quick checks: classify, hygiene, public_export,
+  #     quick_checks and their aggregate ci_quick. allow_substantive is false,
+  #     which skips python_tools, native_tools, linux_gcc16, android_build,
+  #     windows_runtime, windows_installer and the profile-zero fixture build.
+  #     ci_required does not run, and tools/ci_required.py would fail it if it
+  #     did, so a light run never turns `CI required` green.
+  #   * full: every gate the changed paths route, and ci_required.
+  # A Draft is always light. While the repository variable NK_CI_TIERS is `on`,
+  # so is every other pull request except a batch/ head, outside code (a fork,
+  # or a carry/ or desk/ branch) and one labelled ci-full-matrix; with the
+  # variable unset every pull request that is not a Draft is full.
   #
-  # The status transitions are listed because they change what a run covers.
-  # ready_for_review starts the full matrix on the head the Draft run left
-  # light; converted_to_draft starts a light run, and the shared concurrency
-  # group cancels a full run still in progress, so a Draft holds no
-  # substantive runner. Every later push to a pull request that is not a
-  # Draft runs the full matrix through synchronize.
+  # The status transitions are listed because they start a run whose
+  # completion makes the trusted verdict judge the head again:
+  # ready_for_review after a Draft's run, converted_to_draft the reverse, where
+  # the shared concurrency group also cancels a full run still in progress, so
+  # a Draft holds no substantive runner. Label events are deliberately not
+  # listed: GitHub cannot filter them by label name, so every label on every
+  # pull request would start a run and cancel the one in progress. The
+  # classifier reads the label from GitHub when a run starts instead, so a
+  # maintainer adds ci-full-matrix and re-runs all jobs.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   # Feature-branch commits are covered by pull_request.  A normal main push
@@ -58,6 +69,11 @@ jobs:
     name: Classify change
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    # pull-requests: read is for one request, the pull request's current labels
+    # (tools/ci_paths.py live_labels). contents: read restates the workflow's own.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       docs_only: ${{ steps.paths.outputs.docs_only }}
       python_tools: ${{ steps.paths.outputs.python_tools }}
@@ -80,6 +96,7 @@ jobs:
       save_compiler_cache: ${{ steps.paths.outputs.save_compiler_cache }}
       allow_substantive: ${{ steps.paths.outputs.allow_substantive }}
       draft: ${{ steps.paths.outputs.draft }}
+      tier: ${{ steps.paths.outputs.tier }}
       linux_runner: ${{ steps.paths.outputs.linux_runner }}
       linux_runner_2604: ${{ steps.paths.outputs.linux_runner_2604 }}
     steps:
@@ -99,6 +116,13 @@ jobs:
           # other run gets the hosted image (tools/ci_paths.py linux_runner, docs/CI.md).
           NK_SELF_HOSTED_LINUX: ${{ vars.NK_SELF_HOSTED_LINUX }}
           NK_SELF_HOSTED_HEARTBEAT: ${{ vars.NK_SELF_HOSTED_HEARTBEAT }}
+          # The tier switch: only `on` lets a pull request that is not a Draft run
+          # light. GitHub does not pass repository variables to a fork's run; the
+          # classifier gives a fork the full checks by its own rule, not by that.
+          NK_CI_TIERS: ${{ vars.NK_CI_TIERS }}
+          # The job's read-only token, for the label read. A re-run reuses the
+          # first attempt's event, so the payload's labels may be out of date.
+          NK_CI_LABEL_TOKEN: ${{ github.token }}
         run: python tools/ci_paths.py --github-output "$GITHUB_OUTPUT"
 
   hygiene:
@@ -404,6 +428,84 @@ jobs:
         # calls, so a build that could remove, rename or control a file fails here. Nothing is
         # uploaded: the EBOOT is not published by CI.
         run: make --no-print-directory -C src/psp_companion BUILD_DIR="$RUNNER_TEMP/fontcopy"
+
+  quick_checks:
+    # Light runs only. Each check here is one the full tier already runs inside a
+    # long job, and each was a real failure that a light run would otherwise hide
+    # until the landing batch (docs/CI.md, "Quick and full checks"): the tools mypy
+    # baseline and the generated-file and documentation-lint tests run in the Python
+    # tooling job, and the format check in the native core part.
+    name: Generated files and repository lints
+    # Always hosted: a light run never needs the self-hosted pool. ubuntu-24.04, not
+    # 26.04, because it is the hosted image of the Python tooling and native jobs whose
+    # checks this job runs early (the same GCC 13.3 for the -m32 format check), so a
+    # quick run and the later full run judge them on the same system.
+    runs-on: ubuntu-24.04
+    needs: classify
+    if: >-
+      ${{ always() && needs.classify.result == 'success' &&
+          needs.classify.outputs.tier == 'light' }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history: the provenance step of regen_all diffs against the
+          # event's base commit, as the trusted attestation does.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            tools/requirements-lock.txt
+
+      - name: Install Python tooling dependencies
+        # The same hashed lock the Python tooling job installs.
+        run: python -m pip install --disable-pip-version-check --require-hashes -r tools/requirements-lock.txt
+
+      - name: Run the documentation lint tests
+        run: python -m unittest tools.test_lint_docs
+
+      - name: Check 32-bit format specifier portability across portable core
+        # libc6-dev-i386 supplies the 32-bit C library headers for the syntax-only
+        # -m32 build (tools/format_portability_check.py); the native job installs
+        # it with its other packages.
+        run: |
+          set -euo pipefail
+          sudo timeout 180 apt-get update
+          sudo timeout 300 apt-get install -y --no-install-recommends libc6-dev-i386
+          python tools/format_portability_check.py
+
+      - name: Check that every generated file is current
+        # This job runs only on a light pull request run, so the event always names a base.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          test -n "${BASE_SHA}"
+          python tools/regen_all.py --check --base "${BASE_SHA}"
+
+      - name: Enforce tools mypy baseline
+        # The Python tooling job's step, with the same pins and commands
+        # (tools/test_public_ci_wiring.py keeps the two step bodies equal).
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/mypy-requirements.txt" <<'LOCK'
+          mypy==2.4.1 --hash=sha256:a2d4a51db92059eecc2c33b2a5194b28585ebfd917292c015fe87a77dbff6cd2
+          ast-serialize==0.13.1 --hash=sha256:121e1d08d58b75c15491cc3003609cbad71ac2b0016043c36d30a6b2032b6605
+          librt==0.16.0 --hash=sha256:e56aaf8c167548dc8e5d6f3bd0f48dcdd299a23c73be3f744aab79d99e9c7f5d
+          mypy-extensions==1.2.0 --hash=sha256:993e7a20aa5671eb41a7132cf555af30062da99729601601b9a8382b11cae768
+          pathspec==1.1.1 --hash=sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189
+          typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+          LOCK
+          python -m pip install --disable-pip-version-check --require-hashes -r "$RUNNER_TEMP/mypy-requirements.txt"
+          python tools/mypy_baseline.py --scope issue-1391
+          python tools/mypy_baseline.py
 
   python_tools:
     name: Python tooling gates
@@ -1049,6 +1151,10 @@ jobs:
           export VK_ICD_FILENAMES="$lvp_icd"
           vulkaninfo --summary | tee "$RUNNER_TEMP/vulkan-summary.txt"
           grep -qi llvmpipe "$RUNNER_TEMP/vulkan-summary.txt"
+          # Report only: whether lavapipe offers the interlock destination-read path (#2109).
+          # Without it, the interlock legs of gpu-coherence-selftest print SKIP lines.
+          { vulkaninfo 2>/dev/null || true; } | grep -E "VK_EXT_fragment_shader_interlock|fragmentShaderPixelInterlock" || \
+            echo "no VK_EXT_fragment_shader_interlock: the interlock legs SKIP"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
             make CC=gcc gpu-capture-selftest
 
@@ -2314,6 +2420,33 @@ jobs:
             throw 'The two Setup.exe builds are not byte-identical.'
           }
 
+  ci_quick:
+    # The aggregate of a light run (docs/CI.md, "Quick and full checks"). Green means
+    # the quick checks passed and nothing more: `CI required` below does not run on a
+    # light run, so the trusted verdict reads this job's result and reports
+    # LIGHT_CI_GREEN, never success (tools/ci_trust_verdict.py). The name is the one
+    # that verifier looks for.
+    name: CI quick checks
+    runs-on: ubuntu-26.04
+    needs: [classify, hygiene, public_export, quick_checks]
+    if: ${{ always() && needs.classify.outputs.tier == 'light' }}
+    timeout-minutes: 5
+    env:
+      CLASSIFY_RESULT: ${{ needs.classify.result }}
+      HYGIENE_RESULT: ${{ needs.hygiene.result }}
+      PUBLIC_EXPORT_RESULT: ${{ needs.public_export.result }}
+      QUICK_CHECKS_RESULT: ${{ needs.quick_checks.result }}
+      TIER: ${{ needs.classify.outputs.tier }}
+      DRAFT: ${{ needs.classify.outputs.draft }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the quick results
+        run: python tools/ci_required.py --quick
+
   ci_required:
     name: CI required
     # The classifier picks the runner (docs/CI.md, "Self-hosted Linux runners"):
@@ -2322,7 +2455,13 @@ jobs:
     # The Markdown lint and the main smoke are steps of hygiene, and the profile-zero
     # fixture build is a step of public_export, so those jobs' results carry them.
     needs: [classify, hygiene, public_export, python_tools, native_tools, android_build, windows_runtime, windows_installer]
-    if: ${{ always() }}
+    # Not on a light run: it suppressed the substantive gates, so this job could only
+    # fail there (tools/ci_required.py refuses it by TIER and by EVENT_NAME), and a
+    # red mark on every healthy pull request would read as a broken one. Skipped is
+    # not success: the ruleset requires the trusted verdict, not this job, and the
+    # verdict reports success only when this job succeeded. A failed classifier gives
+    # an empty tier, so the job still runs and fails.
+    if: ${{ always() && needs.classify.outputs.tier != 'light' }}
     timeout-minutes: 5
     env:
       CLASSIFY_RESULT: ${{ needs.classify.result }}
@@ -2343,6 +2482,10 @@ jobs:
       RUN_INSTALLER: ${{ needs.classify.outputs.run_installer }}
       ALLOW_SUBSTANTIVE: ${{ needs.classify.outputs.allow_substantive }}
       DRAFT: ${{ needs.classify.outputs.draft }}
+      TIER: ${{ needs.classify.outputs.tier }}
+      # GitHub's own value, not the classifier's: only a push may count a suppressed
+      # gate as passed (tools/ci_required.py).
+      EVENT_NAME: ${{ github.event_name }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

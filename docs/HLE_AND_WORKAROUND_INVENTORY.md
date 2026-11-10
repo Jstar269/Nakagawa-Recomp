@@ -1364,9 +1364,10 @@ Semantic handler census: **584** handlers across **30** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-SYSPARAM-001: int-id-2..int-id-9, int-unknown-0, int-unknown-10, int-unknown-64)
   - Evidence: tests/native/hle_thread_selftest.c:test_sysreg_virtual_registry
 - **`h_GetSystemParamString`** (`sceUtility`): `sceUtilityGetSystemParamString` (0x34b78343)
-  - Limitation: the nickname (id 1) copy with its NUL and the short-buffer 0x80110102 refusal that writes nothing are measured; other string ids, a null buffer and len <= 0 return 0x80110103 without a measurement, and the nickname is the registry value (empty by default), not the console's
+  - Limitation: the nickname (id 1) copy with its NUL, which writes the string and its NUL only and nothing past them in the 128-byte field, and the short-buffer 0x80110102 refusal that writes nothing are measured; other string ids, a null buffer and len <= 0 return 0x80110103 without a measurement; the nickname is the registry value, by default the user-chosen SR_NICKNAME or the neutral "Player" (never derived from the OS), not the console's; the player's 32-byte cap is the project's setting limit (PPSSPP's Nickname editor also caps at 32), below the PSP's 128-byte field (127 characters and the NUL), and how long a nickname the PSP's own System Settings accepts is unmeasured
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-SYSPARAM-001: string-id-1-len-0x80, string-id-1-len-0x04)
   - Evidence: tests/native/hle_thread_selftest.c:test_sysparam_nickname_string
+  - Evidence: tests/native/hle_thread_selftest.c:test_sysparam_nickname_from_launcher
 - **`h_HtmlViewerStatus`** (`sceUtility`): `sceUtilityHtmlViewerGetStatus` (0xbda7d894)
   - Limitation: always WRONG_TYPE: the runtime has no HTML viewer dialog, and its InitStart import is not registered
   - Evidence: tests/native/hle_thread_selftest.c:test_imports_20261102_measured_contracts
@@ -1624,13 +1625,14 @@ never carries. For the same reason HLE is the only path for `sceMpeg` in titles 
 `mpeg.prx`.
 
 **Comparing the two forms.** Where both forms exist, the HLE handler can be checked against the
-disc module by running both on the same call. That check belongs to the standing LLE lane, as
-the dual-execution mode `SR_MODE_COSIM` reserved in `src/rt/domain_mode.h`. Its pull request
-for #2148 documents what it compares and how it reports. A pair can be compared only after its HLE
-handler has been read for host-side state. A handler that keeps any state (an object table, a
-file position, a decoder, the scheduler) cannot run beside the export, because later calls would
-then get different answers. Every `sceLibFont` handler keeps a host library or font handle, so
-those calls are reported as not compared.
+disc module by running both on the same call. That check is the `SR_MODE_COSIM` lane of the
+import seam (`src/rt/domain_mode.c`); `docs/LLE_FIDELITY_ARCHITECTURE.md` section 3.6 says what it
+compares, how it reports, and its limits. It is selected only through the C API, and no title
+registers a pair yet. A pair can be compared only after its HLE handler has been read for
+host-side state. A handler that keeps any state (an object table, a file position, a decoder, the
+scheduler) cannot run beside the export, because later calls would then get different answers.
+Every `sceLibFont` handler keeps a host library or font handle, so `sceLibFont` is not a candidate
+until that state is accounted for.
 
 **What a match proves.** Only that the compared call, with those arguments and that guest memory,
 gave the same result in both forms. It says nothing about other inputs, and a private title's

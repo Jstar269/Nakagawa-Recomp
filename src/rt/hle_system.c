@@ -49,9 +49,11 @@
  *    copied from the console except the six measured non-personal ones. The integer keys
  *    sceUtilityGetSystemParamInt shares take their values from systemparam_int_value(), and the
  *    getter reads the registry back through sreg_systemparam_int(), so the two surfaces agree after
- *    a game writes a setting. Every other key holds a neutral placeholder (INT 0, an empty string,
- *    or zero bytes); personal keys (owner_name, passwords, network and account keys) never hold a
- *    real value. Reading a placeholder logs once, naming the key. RegParam regtype and name are
+ *    a game writes a setting. The nickname, owner_name, is user-chosen (#2197): SR_NICKNAME, else
+ *    the neutral "Player", and never derived from the operating system. Every other key holds a
+ *    neutral placeholder (INT 0, an empty string, or zero bytes); the other personal keys
+ *    (passwords, network and account keys) never hold a real value. Reading a placeholder logs
+ *    once, naming the key. RegParam regtype and name are
  *    not checked; every open serves the one system registry.
  *  - An open of a missing category creates it in either mode (measured for mode 1), cutting each
  *    new name to 26 bytes; lookups compare whole names, so a longer name never matches a stored

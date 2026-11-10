@@ -241,6 +241,8 @@ extern void sr_hle_test_data_mark_guest_start(void);
 extern unsigned long sr_hle_test_data_walk_calls(void);
 extern unsigned long long sr_hle_test_data_scan_names(void);
 extern unsigned long long sr_hle_test_data_scan_probes(void);
+extern unsigned long long nk_xb_test_lazy_path_calls(void);
+extern void nk_xb_test_reset_lazy_path_calls(void);
 extern unsigned long sr_hle_test_data_build_attempts(void);
 extern unsigned long sr_hle_test_data_builds_after_guest(void);
 extern int sr_hle_test_data_state(void);
@@ -623,6 +625,7 @@ int gegpu_sync_guest_fb(const GeGpuFbDescriptor *desc) {
     return 2; /* GEGPU_SYNC_NO_TARGET */
 }
 void sr_profile_dump(void) {}
+void sr_profile_dump_final(void) {}
 uint64_t SDL_GetTicksNS(void) { return 0; }
 int sr_capture_arm(const char *path) {
     s_cap_arm_calls++;
@@ -6556,6 +6559,14 @@ static uint32_t sysreg_get_by_name(uint32_t cat, const char *key, uint32_t buf_s
     return sysreg_call(NID_SCE_REG_GET_KEY_VALUE_BY_NAME, cat, SYSREG_NAME2, SYSREG_VAL, buf_size, 0u);
 }
 
+/* True when guest memory at addr holds text and its NUL. */
+static int sysreg_guest_str_is(uint32_t addr, const char *text) {
+    size_t n = strlen(text);
+    for (size_t i = 0; i <= n; i++)
+        if (MEM_R8(addr + (uint32_t)i) != (uint8_t)text[i]) return 0;
+    return 1;
+}
+
 static uint32_t sysreg_get_int(uint32_t cat, const char *key) {
     return sysreg_get_by_name(cat, key, 4u) == 0u ? MEM_R32(SYSREG_VAL) : 0xdeadbeefu;
 }
@@ -7007,15 +7018,17 @@ static void test_sysreg_virtual_registry(void) {
                "sceRegCloseCategory closes the PREMO category");
     }
 
-    /* Personal keys are present with neutral values: no nickname is invented. */
+    /* Personal keys are present with neutral values: no nickname is invented. With no
+       SR_NICKNAME the nickname is the neutral "Player" (#2197). */
     cat3 = sysreg_open_category(reg, "/CONFIG/SYSTEM", 1u, &r);
     expect(r == 0u && sysreg_key_info(cat3, "nickname") == SYSREG_E_NOT_FOUND,
            "/CONFIG/SYSTEM has no key named nickname");
     r = sysreg_key_info(cat3, "owner_name");
-    expect(r == 0u && MEM_R32(SYSREG_TYPE) == 3u && MEM_R32(SYSREG_SIZE) == 1u &&
-               sysreg_get_by_name(cat3, "owner_name", 64u) == 0u && MEM_R8(SYSREG_VAL) == 0u &&
-               MEM_R8(SYSREG_VAL + 1u) == 0xaau,
-           "owner_name (the nickname) is a STR holding only the neutral empty string");
+    expect(r == 0u && MEM_R32(SYSREG_TYPE) == 3u && MEM_R32(SYSREG_SIZE) == 7u &&
+               sysreg_get_by_name(cat3, "owner_name", 64u) == 0u &&
+               sysreg_guest_str_is(SYSREG_VAL, "Player") &&
+               MEM_R8(SYSREG_VAL + 7u) == 0xaau,
+           "owner_name (the nickname) is a STR holding the neutral \"Player\"");
 
     cat4 = sysreg_open_category(reg, "/CONFIG/SYSTEM/CHARACTER_SET", 1u, &r);
     r |= sysreg_key_info(cat4, "oem");
@@ -7415,9 +7428,9 @@ static void test_ge_edram_addr_translation(void) {
 }
 
 /* sceUtilityGetSystemParamString (0x34b78343), nickname id 1: the value is the registry's
- * /CONFIG/SYSTEM/owner_name. The default is the neutral empty string; the test writes a fixture
- * value through the registry (a test value, not a user's name) to show the source, then restores
- * the default. Covers the copy and its NUL, the short-buffer failure, the unknown-id, null-buffer and
+ * /CONFIG/SYSTEM/owner_name. With no SR_NICKNAME the default is the neutral "Player" (#2197); the
+ * test writes a fixture value through the registry (a test value, not a user's name) to show the
+ * source, then restores the default. Covers the copy and its NUL, the short-buffer failure, the unknown-id, null-buffer and
  * zero-length failures (PSPSDK PSP_SYSTEMPARAM_RETVAL_FAIL 0x80110103). */
 #define NID_SYSPARAM_STRING 0x34b78343u
 #define SYSPARAM_STR_OUT    0x00241c00u
@@ -7432,20 +7445,39 @@ static uint32_t sysparam_string(uint32_t id, uint32_t out, uint32_t len) {
 
 static void test_sysparam_nickname_string(void) {
     static const uint8_t fixture_value[8] = { 'f', 'i', 'x', 't', 'u', 'r', 'e', 0 };
-    static const uint8_t neutral[1] = { 0 };
+    static const uint8_t neutral[7] = { 'P', 'l', 'a', 'y', 'e', 'r', 0 };
     uint32_t r = 0u, reg2, cat3;
 
     reset_fixture();
     sr_hle_init();
+    hle_test_setenv("SR_NICKNAME", NULL);
     sysreg_scratch_clean();
     sysreg_restart();
 
-    /* Default: the neutral empty string, a single NUL and nothing more. */
+    /* Default: the neutral "Player" and its NUL, and nothing more. */
     for (uint32_t i = 0u; i < 16u; i++) MEM_W8(SYSPARAM_STR_OUT + i, 0xaau);
     expect(sysparam_string(1u, SYSPARAM_STR_OUT, 16u) == 0u,
            "sceUtilityGetSystemParamString(nickname) succeeds on the default registry");
-    expect(MEM_R8(SYSPARAM_STR_OUT) == 0u && MEM_R8(SYSPARAM_STR_OUT + 1u) == 0xaau,
-           "the default nickname writes only its NUL terminator");
+    expect(sysreg_guest_str_is(SYSPARAM_STR_OUT, "Player") && MEM_R8(SYSPARAM_STR_OUT + 7u) == 0xaau,
+           "the default nickname writes \"Player\" and its NUL terminator only");
+
+    /* A read into the PSP's full 0x80-byte nickname field (measured on a PSP-3000 with the
+       probe's 0xA5 fill: the extent written is the string and its NUL, nothing past it) writes
+       the string and its NUL only. The rest of the field, and the byte after it, keep what the
+       game had there: the read does not zero-pad. */
+    for (uint32_t i = 0u; i <= 0x80u; i++) MEM_W8(SYSPARAM_STR_OUT + i, 0xaau);
+    expect(sysparam_string(1u, SYSPARAM_STR_OUT, 0x80u) == 0u &&
+               sysreg_guest_str_is(SYSPARAM_STR_OUT, "Player"),
+           "the 0x80-byte nickname read succeeds and holds \"Player\"");
+    {
+        uint32_t untouched = 0u;
+        for (uint32_t i = 7u; i <= 0x80u; i++) {
+            if (MEM_R8(SYSPARAM_STR_OUT + i) == 0xaau) untouched++;
+        }
+        expect(MEM_R8(SYSPARAM_STR_OUT + 6u) == 0u && untouched == 0x80u - 7u + 1u,
+               "the 0x80-byte nickname read writes the string and its NUL only: every byte "
+               "after the NUL, through the end of the field and one past, is untouched");
+    }
 
     /* A registry write is what the utility reports. */
     reg2 = sysreg_open_registry(2u, &r);
@@ -7475,15 +7507,123 @@ static void test_sysparam_nickname_string(void) {
            "a zero-length buffer fails with PSP_SYSTEMPARAM_RETVAL_FAIL");
 
     /* Restore the neutral default so later registry tests see it. */
-    expect(sysreg_set(cat3, "owner_name", neutral, 1u) == 0u,
-           "owner_name test: the neutral empty string is restored");
+    expect(sysreg_set(cat3, "owner_name", neutral, 7u) == 0u,
+           "owner_name test: the neutral \"Player\" is restored");
+    sysreg_restart();
+}
+
+/* Occurrences of word in text. */
+static unsigned sysreg_count_word(const char *text, const char *word) {
+    unsigned count = 0u;
+    for (const char *at = strstr(text, word); at; at = strstr(at + 1, word)) count++;
+    return count;
+}
+
+/* #2197: the nickname default is SR_NICKNAME, the nickname the user chose in the player, when it
+ * is 1 to 32 bytes of UTF-8 with no control character; otherwise the neutral "Player" is served
+ * and stderr names SR_NICKNAME once, saying whether it is missing, empty or invalid. The default is a modeled value, so its read names no
+ * placeholder, and it is never recorded in the overlay: the next run serves the next SR_NICKNAME.
+ * Malformed UTF-8 cannot pass through the Windows environment, so test_nk_nickname covers it. */
+static void test_sysparam_nickname_from_launcher(void) {
+    char long_ok[33], long_bad[34], log[1024];
+    const char *const refused[] = { long_bad, "a\x01" "b", "tab\tname", "   " };
+    uint32_t r = 0u, reg, xmb;
+    FILE *capture = NULL;
+    int saved_fd = -1, capturing;
+    char *text;
+
+    memset(long_ok, 'n', 32u);
+    long_ok[32] = '\0';
+    memset(long_bad, 'n', 33u);
+    long_bad[33] = '\0';
+    reset_fixture();
+    sr_hle_init();
+    sysreg_scratch_clean();
+
+    /* The launcher's value is the nickname, and its read names nothing. */
+    hle_test_setenv("SR_NICKNAME", "Nickname 7");
+    sysreg_restart();
+    log[0] = '\0';
+    capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    for (uint32_t i = 0u; i < 0x80u; i++) MEM_W8(SYSPARAM_STR_OUT + i, 0xaau);
+    r = sysparam_string(1u, SYSPARAM_STR_OUT, 0x80u);
+    if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+    expect(r == 0u && sysreg_guest_str_is(SYSPARAM_STR_OUT, "Nickname 7") &&
+               MEM_R8(SYSPARAM_STR_OUT + 11u) == 0xaau,
+           "sceUtilityGetSystemParamString(1) returns SR_NICKNAME and its NUL");
+    expect(capturing && !strstr(log, "SR_NICKNAME") && !strstr(log, "owner_name"),
+           "a valid SR_NICKNAME is served with no log line and no placeholder note");
+
+    /* The default is not written to the overlay, so it is never frozen there. */
+    reg = sysreg_open_registry(2u, &r);
+    xmb = sysreg_open_category(reg, "/CONFIG/SYSTEM/XMB", 2u, &r);
+    expect(r == 0u && sysreg_set_int(xmb, "language", 5u) == 0u &&
+               sysreg_call(NID_SCE_REG_FLUSH_REGISTRY, reg, 0u, 0u, 0u, 0u) == 0u,
+           "SR_NICKNAME test: a changed setting is flushed");
+    text = sysreg_read_file(SYSREG_SCRATCH_FILE);
+    expect(text && strstr(text, "\"language\"") && !strstr(text, "owner_name"),
+           "the overlay records the changed setting and not the SR_NICKNAME default");
+    free(text);
+    hle_test_setenv("SR_NICKNAME", long_ok);
+    sysreg_restart();
+    expect(sysparam_string(1u, SYSPARAM_STR_OUT, 0x80u) == 0u &&
+               sysreg_guest_str_is(SYSPARAM_STR_OUT, long_ok),
+           "the next run serves the next SR_NICKNAME, here 32 bytes, the longest the player keeps");
+
+    /* Missing or invalid: "Player", and one line naming SR_NICKNAME. */
+    hle_test_setenv("SR_NICKNAME", NULL);
+    sysreg_restart();
+    log[0] = '\0';
+    capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    r = sysparam_string(1u, SYSPARAM_STR_OUT, 0x80u);
+    (void)sysparam_string(1u, SYSPARAM_STR_OUT, 0x80u);
+    if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+    expect(r == 0u && sysreg_guest_str_is(SYSPARAM_STR_OUT, "Player"),
+           "with no SR_NICKNAME the nickname is \"Player\"");
+    expect(capturing && strstr(log, "SR_NICKNAME is not set") && sysreg_count_word(log, "SR_NICKNAME") == 1u,
+           "a missing SR_NICKNAME is named once on stderr, however often the nickname is read");
+    for (size_t i = 0u; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        char what[96];
+        hle_test_setenv("SR_NICKNAME", refused[i]);
+        sysreg_restart();
+        log[0] = '\0';
+        capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+        r = sysparam_string(1u, SYSPARAM_STR_OUT, 0x80u);
+        if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+        snprintf(what, sizeof(what), "invalid SR_NICKNAME case %u serves \"Player\"", (unsigned)i);
+        expect(r == 0u && sysreg_guest_str_is(SYSPARAM_STR_OUT, "Player"), what);
+        snprintf(what, sizeof(what), "invalid SR_NICKNAME case %u is named on stderr", (unsigned)i);
+        expect(capturing && strstr(log, "SR_NICKNAME is not 1 to 32 bytes of UTF-8") != NULL &&
+                   !strstr(log, "is empty") && !strstr(log, "is not set"), what);
+    }
+
+    /* Present but empty (a launcher that names no nickname): "Player" too, and the line says
+       empty, not invalid. hle_test_setenv unsets an empty value, so it is set directly. */
+#ifdef _WIN32
+    expect(SetEnvironmentVariableW(L"SR_NICKNAME", L"") != 0, "SR_NICKNAME is set to an empty value");
+#else
+    expect(setenv("SR_NICKNAME", "", 1) == 0, "SR_NICKNAME is set to an empty value");
+#endif
+    sysreg_restart();
+    log[0] = '\0';
+    capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    r = sysparam_string(1u, SYSPARAM_STR_OUT, 0x80u);
+    if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+    expect(r == 0u && sysreg_guest_str_is(SYSPARAM_STR_OUT, "Player"),
+           "an empty SR_NICKNAME serves \"Player\"");
+    expect(capturing && strstr(log, "SR_NICKNAME is empty") != NULL && !strstr(log, "is not 1 to") &&
+               sysreg_count_word(log, "SR_NICKNAME") == 1u,
+           "an empty SR_NICKNAME is named once as empty, not as invalid");
+
+    hle_test_setenv("SR_NICKNAME", NULL);
+    sysreg_scratch_clean();
     sysreg_restart();
 }
 
 static void test_sysreg_persistence_round_trip(void) {
     static const uint8_t abc[4] = { 'a', 'b', 'c', 0 };
     static const uint8_t ann[4] = { 'A', 'n', 'n', 0 };
-    static const uint8_t empty[1] = { 0 };
+    static const uint8_t neutral[7] = { 'P', 'l', 'a', 'y', 'e', 'r', 0 };
     static const uint8_t bytes3[3] = { 0x00, 0xff, 0x10 };
     uint32_t r, reg, xmb, made, sys;
     char *text;
@@ -7548,7 +7688,7 @@ static void test_sysreg_persistence_round_trip(void) {
     reg = sysreg_open_registry(2u, &r);
     xmb = sysreg_open_category(reg, "/CONFIG/SYSTEM/XMB", 2u, &r);
     sys = sysreg_open_category(reg, "/CONFIG/SYSTEM", 2u, &r);
-    expect(sysreg_set_int(xmb, "language", 1u) == 0u && sysreg_set(sys, "owner_name", empty, 1u) == 0u &&
+    expect(sysreg_set_int(xmb, "language", 1u) == 0u && sysreg_set(sys, "owner_name", neutral, 7u) == 0u &&
                sysreg_call(NID_SCE_REG_FLUSH_REGISTRY, reg, 0u, 0u, 0u, 0u) == 0u,
            "sceRegFlushRegistry persists values set back to their defaults");
     text = sysreg_read_file(SYSREG_SCRATCH_FILE);
@@ -16299,8 +16439,18 @@ static void test_archive_discovery_skips_unpack_folders_only(void) {
     hle_test_setenv("SR_DATAROOT", dataroot);
     hle_test_setenv("SR_LOOSE_CONTENT_ROOTS", loose);
     sr_hle_test_data_reset(0);
+    nk_xb_test_reset_lazy_path_calls();
     expect(sr_host_data_prepare() == SR_DATA_TEST_STATE_READY,
            "a primary root with unpack folders and a loose root reaches READY");
+    expect(sr_hle_test_data_entry_count() == 3u,
+           "discovery mounts the three top-level one-member archives of the primary root");
+    /* One lookup by path per mounted archive, its open: the mount's size checks ask
+     * the open handle, not the path, so a title's boot pays no extra name lookups.
+     * Limit: the counter is a marker at each lookup by path in nk_xb_open_file_lazy,
+     * not a count taken at the host file layer (nk_platform has no such seam), so a new
+     * lookup added there without its marker would not fail this check. */
+    expect(nk_xb_test_lazy_path_calls() == 3u,
+           "each archive mount passes its one marked lookup by path");
 
     expect(hle_archive_route_file_matches("disc0:/PSP_GAME/USRDIR/data/menu/inpack.to",
                                           "outer-archive"),
@@ -29920,6 +30070,27 @@ static void test_dmac_hardware_semantics(uint32_t nid, const char *who) {
                "PSP: a hardware-verified transfer size copies every byte");
         expect(MEM_R8(dst + n) == 0u,
                "a transfer writes nothing past its requested size");
+    }
+
+    /* The GPU is told about every byte a large copy writes, not a 0xC000-byte prefix of them:
+     * the size matrix proved the whole request lands, so the whole destination range is dirty
+     * (#303 acceptance: the dirty notification covers exactly the bytes the semantics imply). */
+    {
+        static const uint32_t dirty_sizes[] = {0xC001u, 0x10000u, 0x100000u};
+        for (unsigned i = 0; i < sizeof(dirty_sizes) / sizeof(dirty_sizes[0]); i++) {
+            const uint32_t n = dirty_sizes[i];
+            const uint32_t vram = 0x04000000u;
+            dmac_fill(src, n);
+            dmac_clear(vram, n, 0u);
+            gpu_dirty_reset();
+            expect(bulk_call(nid, vram, src, n) == 0u,
+                   "a large DMA into VRAM returns success");
+            expect(dmac_span_matches(vram, n, 0u),
+                   "a large DMA into VRAM copies every byte");
+            expect(s_gpu_dirty_calls == 1u && s_gpu_dirty_addr == vram && s_gpu_dirty_bytes == n,
+                   "a large DMA reports its whole destination range to the GPU");
+        }
+        gpu_dirty_reset();
     }
 
     /* --- coherency matrix: RAM/VRAM directions and aliases ------------------
@@ -50119,6 +50290,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_console_profile_identity_is_deterministic_under_the_deterministic_clock();
     test_sysreg_write_model();
     test_sysparam_nickname_string();
+    test_sysparam_nickname_from_launcher();
     test_ge_edram_addr_translation();
     test_named_refusals();
     test_net_core_without_network();
@@ -50506,6 +50678,7 @@ void sr_recomp_test_unused_dispatch_tail_step(CpuState *s, uint32_t target);
 int sr_recomp_test_unused_dispatch_call_try(CpuState *s, uint32_t target, uint32_t resume_pc);
 void sr_recomp_test_unused_dispatch_from_host(CpuState *s, uint32_t entry);
 void sr_recomp_test_unused_profile_dump(void);
+void sr_recomp_test_unused_profile_dump_final(void);
 void sr_recomp_test_unused_profile_block(uint32_t target_pc);
 void sr_recomp_test_unused_oor(uint32_t addr, uint32_t value, int store);
 void sr_recomp_test_unused_heap_note_write(uint32_t addr, uint32_t width,
@@ -50517,10 +50690,12 @@ void sr_recomp_test_unused_trace_close(void);
 #define sr_lookup sr_recomp_test_unused_lookup
 #define dispatch sr_recomp_test_unused_dispatch
 #define dispatch_call sr_recomp_test_unused_dispatch_call
+#define dispatch_call_interp sr_recomp_test_unused_dispatch_call_interp
 #define dispatch_call_try sr_recomp_test_unused_dispatch_call_try
 #define dispatch_tail_step sr_recomp_test_unused_dispatch_tail_step
 #define dispatch_from_host sr_recomp_test_unused_dispatch_from_host
 #define sr_profile_dump sr_recomp_test_unused_profile_dump
+#define sr_profile_dump_final sr_recomp_test_unused_profile_dump_final
 #define sr_profile_block sr_recomp_test_unused_profile_block
 #define sr_oor sr_recomp_test_unused_oor
 #define sr_heap_note_write sr_recomp_test_unused_heap_note_write
@@ -50542,28 +50717,31 @@ void sr_recomp_test_unused_trace_close(void);
 #undef sr_heap_note_write
 #undef sr_oor
 #undef sr_profile_block
+#undef sr_profile_dump_final
 #undef sr_profile_dump
 #undef dispatch_from_host
 #undef dispatch_tail_step
 #undef dispatch_call_try
+#undef dispatch_call_interp
 #undef dispatch_call
 #undef dispatch
 #undef sr_lookup
 
 /* A live-frame continuation (sr_aot_return_boundary_end) reaches recomp.c's dispatcher,
  * which links the interpreter floor in. This variant runs no interpreted code: its VFPU
- * entry and the interpreter's linked-call dispatch only have to exist, and the call
- * dispatch stops the run by name if it is ever reached. */
+ * entry and the interpreter's linked call (dispatch_call_interp) only have to exist, and
+ * the linked call stops the run by name if it is ever reached. */
 int sr_vfpu_interp(CpuState *s, uint32_t op) {
     (void)s;
     (void)op;
     return SR_VFPU_OTHER;
 }
 
-void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc) {
+int dispatch_call_interp(CpuState *s, uint32_t target, uint32_t resume_pc) {
     fprintf(stderr, "hle_thread_selftest: the AOT boundary variant has no interpreted "
                     "linked call (target 0x%08x, resume 0x%08x)\n", target, resume_pc);
     s->flow_kind = SR_FLOW_FATAL;
     s->flow_target = target;
+    return 1;
 }
 #endif /* SR_HLE_AOT_BOUNDARY_TEST */

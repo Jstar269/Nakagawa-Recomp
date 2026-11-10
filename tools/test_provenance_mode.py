@@ -133,10 +133,17 @@ def evaluate(expression: str, context: dict[str, str]) -> bool:
     return value
 
 
-def _context(repository: str, repository_id: str) -> dict[str, str]:
+ROUTES = ("pull_request_target", "workflow_run", "workflow_dispatch")
+
+
+def _context(repository: str, repository_id: str, route: str = "pull_request_target") -> dict[str, str]:
+    """The context of a run that judges a pull request, by one of the three routes (docs/CI.md)."""
     return {
-        "github.event_name": "pull_request_target",
-        "github.event.pull_request.base.ref": "main",
+        "github.event_name": route,
+        # GitHub reads a missing context value as the empty string.
+        "github.event.pull_request.base.ref": "main" if route == "pull_request_target" else "",
+        "github.event.workflow_run.event": "pull_request" if route == "workflow_run" else "",
+        "inputs.pull_request_number": "7" if route == "workflow_dispatch" else "",
         "github.event.repository.default_branch": "main",
         "github.repository": repository,
         "github.repository_id": repository_id,
@@ -246,27 +253,61 @@ class WorkflowConditionTest(unittest.TestCase):
     def test_exactly_one_job_runs_and_the_upstream_always_runs_the_attestation(self) -> None:
         attest = _job_condition(self.attest)
         fork = _job_condition(self.fork)
-        for repository, repository_id in UPSTREAM_RUNS:
-            with self.subTest(repository=repository, repository_id=repository_id):
-                context = _context(repository, repository_id)
-                self.assertTrue(evaluate(attest, context))
-                self.assertFalse(evaluate(fork, context))
-        for repository, repository_id in FORK_RUNS:
-            with self.subTest(repository=repository):
-                context = _context(repository, repository_id)
-                self.assertFalse(evaluate(attest, context))
-                self.assertTrue(evaluate(fork, context))
-        for repository, repository_id in UNKNOWN_ID_RUNS:
-            with self.subTest(repository=repository, repository_id="(empty)"):
-                context = _context(repository, repository_id)
-                self.assertTrue(evaluate(attest, context))
-                self.assertFalse(evaluate(fork, context))
+        # On every route: pull_request_target, a requested CI run, and a dispatch naming a pull request.
+        for route in ROUTES:
+            for repository, repository_id in UPSTREAM_RUNS:
+                with self.subTest(route=route, repository=repository, repository_id=repository_id):
+                    context = _context(repository, repository_id, route)
+                    self.assertTrue(evaluate(attest, context))
+                    self.assertFalse(evaluate(fork, context))
+            for repository, repository_id in FORK_RUNS:
+                with self.subTest(route=route, repository=repository):
+                    context = _context(repository, repository_id, route)
+                    self.assertFalse(evaluate(attest, context))
+                    self.assertTrue(evaluate(fork, context))
+            for repository, repository_id in UNKNOWN_ID_RUNS:
+                with self.subTest(route=route, repository=repository, repository_id="(empty)"):
+                    context = _context(repository, repository_id, route)
+                    self.assertTrue(evaluate(attest, context))
+                    self.assertFalse(evaluate(fork, context))
 
     def test_neither_job_runs_for_another_base_branch(self) -> None:
         for repository, repository_id in UPSTREAM_RUNS + FORK_RUNS:
             context = _context(repository, repository_id) | {"github.event.pull_request.base.ref": "evil-base"}
             self.assertFalse(evaluate(_job_condition(self.attest), context))
             self.assertFalse(evaluate(_job_condition(self.fork), context))
+
+    def test_neither_job_runs_when_no_pull_request_is_named(self) -> None:
+        # CI's own push, schedule and merge-group runs arrive as workflow_run events, and a dispatch without a
+        # pull request number builds candidate binaries: neither is a pull request to judge.
+        for repository, repository_id in UPSTREAM_RUNS + FORK_RUNS + UNKNOWN_ID_RUNS:
+            for change in ({"github.event_name": "workflow_run", "github.event.workflow_run.event": "push"},
+                           {"github.event_name": "workflow_run", "github.event.workflow_run.event": "merge_group"},
+                           {"github.event_name": "workflow_dispatch", "inputs.pull_request_number": ""},
+                           {"github.event_name": "push"}):
+                with self.subTest(repository=repository, change=change):
+                    context = _context(repository, repository_id, "workflow_dispatch") | {
+                        "inputs.pull_request_number": "", "github.event.workflow_run.event": ""} | change
+                    self.assertFalse(evaluate(_job_condition(self.attest), context))
+                    self.assertFalse(evaluate(_job_condition(self.fork), context))
+
+    def test_the_fork_job_resolves_its_target_exactly_as_the_attestation_does(self) -> None:
+        # The step that turns an event, a requested CI run or a dispatch into one pull request, head and base
+        # is the same text in both jobs, and every later step of the fork job reads its outputs.
+        def resolver(block: str) -> str:
+            start = block.index("      - name: Resolve the pull request at the named head\n")
+            return block[start:block.index("\n\n", start)]
+
+        self.assertEqual(resolver(self.fork), resolver(self.attest))
+        self.assertIn("--attestation-target)", resolver(self.fork))
+        code = _code(self.fork)
+        after = code[code.index("refs/candidate/head") - 600:]
+        self.assertEqual(code.count("github.event.pull_request."), 4)   # the condition and the resolver's env
+        self.assertEqual(code.count("${{ steps.target.outputs.head_sha }}"), 2)
+        self.assertEqual(code.count("${{ steps.target.outputs.base_sha }}"), 2)
+        self.assertEqual(code.count("${{ steps.target.outputs.number }}"), 1)
+        self.assertNotIn("github.event.", after)
+        self.assertIn("      pull-requests: read\n", code)
 
     def test_upstream_job_still_requires_the_private_authority(self) -> None:
         block = _code(self.attest)
@@ -292,8 +333,11 @@ class WorkflowConditionTest(unittest.TestCase):
         self.assertIn("ref: ${{ github.event.repository.default_branch }}", block)
         self.assertIn("python tools/provenance_mode.py --require fork", block)
         self.assertIn("python tools/provenance_mode.py fork-check", block)
-        # The guard runs before the candidate is fetched or checked.
+        # The guard runs before the pull request is looked up and before the candidate is fetched or checked.
+        self.assertLess(block.index("--require fork"), block.index("--attestation-target"))
         self.assertLess(block.index("--require fork"), block.index("refs/candidate/head"))
+        # The one token is the job's own read-only one, for the lookup.
+        self.assertEqual(re.findall(r"\$\{\{ *(github\.token|secrets\.[A-Z_]+) *\}\}", block), ["github.token"])
 
     def test_check_names_are_unique_in_the_workflow(self) -> None:
         self.assertEqual(self.text.count(f"    name: {pm.UPSTREAM_CONTEXT}\n"), 1)

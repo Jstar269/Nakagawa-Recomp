@@ -186,7 +186,7 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
        (the Enhancements card, the disc check, the compatibility notes, the stall notice), so
        at the design text size it can still be taller than the room, and a body that did not
        scroll pushed the prompt bar out of the window. A page that fits does not move. */
-    layout.scroll = true;
+    layout.scroll = SCR_PAGE_BODY_SCROLLS;
     if (nk_ui_begin_container(ui, TITLE_ID_BODY, &layout, NULL)) {
         /* Left column: the art and what the package needs. */
         layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(aside), sizing_grow(),
@@ -371,6 +371,22 @@ PlayerUiAction player_ui_screen_title(NkUi *ui,
                                          NK_UI_BUTTON_LARGE | NK_UI_BUTTON_NOT_DEFAULT)) {
                             result = action(PLAYER_UI_ACTION_REBUILD, model->title_index,
                                             (PlayerUiPrimaryAction)PLAYER_UI_REBUILD_TITLE);
+                        }
+                    }
+                    /* The build queue: Add to queue beside BUILD PACKAGE, or
+                       Remove from queue while it waits (the package card says
+                       its place). */
+                    if (title->queue_add_offered || title->queue_remove_offered) {
+                        const char *queue = title->queue_add_offered ? "Add to queue"
+                                                                     : "Remove from queue";
+                        nk_ui_flow_item(ui, &flow,
+                                        nk_ui_button_width(ui, queue, NK_UI_BUTTON_LARGE));
+                        if (nk_ui_button(ui, PLAYER_UI_ID_TITLE_QUEUE, queue,
+                                         NK_UI_BUTTON_LARGE | NK_UI_BUTTON_NOT_DEFAULT)) {
+                            result = action(PLAYER_UI_ACTION_QUEUE, model->title_index,
+                                            (PlayerUiPrimaryAction)(title->queue_add_offered
+                                                ? PLAYER_UI_QUEUE_ADD
+                                                : PLAYER_UI_QUEUE_REMOVE));
                         }
                     }
                     /* Saves (#1883): back up, restore, add a save, open the folder. */

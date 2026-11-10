@@ -188,9 +188,32 @@
               "argument_x2",
               "count_x2_even",
               "gate_30hz_hold",
-              "gate_30hz_alt"
+              "gate_30hz_alt",
+              "gate_30hz_store",
+              "clip_x_widen"
             ],
-            "description": "Declarative frame-rate rescale transform class."
+            "description": "Declarative site transform class: a frame-rate rescale, or (clip_x_widen, category guest_memory_code_hook only) a widening of the title's own visibility test (contract section 10.8)."
+          },
+          "clip_register": {
+            "type": "string",
+            "enum": [
+              "v0",
+              "v1"
+            ],
+            "description": "clip_x_widen only: the result register that holds the guest pointer the call at the site returns."
+          },
+          "clip_offsets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65536,
+              "multipleOf": 16
+            },
+            "description": "clip_x_widen only: byte offsets from that pointer of the column-major 4x4 float clip matrices whose x output row the runtime scales."
           },
           "arguments": {
             "type": "array",
@@ -263,6 +286,17 @@
               "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,127}$"
             },
             "description": "gate_30hz_alt only: the functions called in place of the gated call on the updates it skips, in the order the gated function calls them (contract section 9.2)."
+          },
+          "stock_value_digests": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "description": "swc1 or sw store sites only, in place of stock_values (a published package's form, docs/ENHANCEMENT_CONTRACT.md section 5.1): HMAC-SHA-256 under the executable's digest key of the tag \"stock value\" and a NUL, the site id and a NUL, and each stock value's 32 bits, little-endian. The run-time check digests the value being stored; any other value stops the run."
           }
         }
       }
@@ -489,6 +523,77 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "published_package": {
+      "const": 1,
+      "description": "Present only in a published package (docs/ENHANCEMENT_CONTRACT.md section 5.1): the published format version (must be 1). A published package carries no game bytes: its stock digests are keyed by the executable, and it may not declare stock_values."
+    },
+    "disc_id": {
+      "type": "string",
+      "pattern": "^[A-Z]{4}[0-9]{5}$",
+      "description": "Published package only: the PARAM.SFO DISC_ID of the one disc it applies to. Another disc is refused as other_disc."
+    },
+    "disc_version": {
+      "type": "string",
+      "pattern": "^[0-9]{1,2}\\.[0-9]{2}$",
+      "description": "Published package only: the PARAM.SFO DISC_VERSION it applies to. Another version is refused as other_revision; a matching disc ID and version with another executable_sha256 is refused as modified_executable."
+    },
+    "digest_scheme": {
+      "const": "hmac-sha256-executable-key-v1",
+      "description": "Published package only: every stock digest (stock_digest, low_stock_digest, a data site's stock_digest, a data file's sha256) is HMAC-SHA-256 of the stock bytes under a key derived from the whole executable, so it reveals nothing without the executable. A mismatch is refused as site_mismatch."
+    },
+    "site_map": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,127}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^0x[0-9a-f]{8}$"
+      },
+      "description": "Published package only: each symbolic name the package uses and its 4-byte-aligned address in the executable, as codegen loads it. It names every used symbol and no other."
+    }
+  },
+  "dependentRequired": {
+    "published_package": [
+      "disc_id",
+      "disc_version",
+      "digest_scheme",
+      "site_map",
+      "executable_sha256"
+    ],
+    "disc_id": [
+      "published_package"
+    ],
+    "disc_version": [
+      "published_package"
+    ],
+    "digest_scheme": [
+      "published_package"
+    ],
+    "site_map": [
+      "published_package"
+    ]
+  },
+  "if": {
+    "required": [
+      "published_package"
+    ]
+  },
+  "then": {
+    "description": "A published package (docs/ENHANCEMENT_CONTRACT.md section 5.1) keeps its text short: a version without build metadata, and a bounded rng_policy reason. The publication audit also refuses an address, a run of more than 8 hex digits, a base64-like run or an escaped byte in any string outside the digest slots and site-map addresses.",
+    "properties": {
+      "version": {
+        "pattern": "^(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})(?:-[0-9A-Za-z]{1,16}(?:\\.[0-9A-Za-z]{1,16})?)?$"
+      },
+      "rng_policy": {
+        "properties": {
+          "reason": {
+            "maxLength": 1024
           }
         }
       }

@@ -157,6 +157,13 @@ with its own code. It reads no secret and never contacts any authority. It:
   profile's rules change. Those lines are your review prompt: in your fork, your admission and your
   review are the provenance authority.
 
+The job starts three ways, as the attestation does upstream ([Trusted CI verdict](CI.md#trusted-ci-verdict)):
+from `pull_request_target`, when a `CI` run is requested for a pull request (`workflow_run`), and from
+a dispatch that names a pull request and its head. GitHub blocks `pull_request_target` by default in
+public repositories from 2026-12-02. Your fork needs no Actions policy for it: the `workflow_run` route
+checks each pushed head, and the verdict judges the run titled `Provenance attestation of <head>` on
+your default branch.
+
 `tools/provenance_mode.py` decides which job runs. A repository is the upstream when its numeric ID
 is the upstream's or its name is `Jstar269/Nakagawa-Recomp`, so renaming or transferring the upstream
 cannot switch it to the fork check, and no variable, secret or pull request takes part in the

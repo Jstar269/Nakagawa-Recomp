@@ -111,7 +111,7 @@ nk-ui-player-screens-capture: export SDL_RENDER_DRIVER := software
 nk-ui-player-screens-capture:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -DNK_UI_WITH_SDL -DNK_UI_WITH_SDL_TTF -DNK_UI_SCREEN_CAPTURE \
-		-Isrc/ui -Isrc/player/ui -Ithird_party/clay $(SDL3_TTF_CFLAGS) \
+		-Isrc/core -Isrc/player -Isrc/ui -Isrc/player/ui -Ithird_party/clay $(SDL3_TTF_CFLAGS) \
 		-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		$(NK_UI_CORE_SRCS) src/ui/nk_ui_ttf.c src/ui/backend/nk_ui_sdlr.c \
 		src/player/ui/ui_router.c src/player/ui/scr_library.c $(NK_UI_PLAYER_TITLE_SRCS) \
@@ -154,6 +154,19 @@ endef
 ed25519-verify-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call ED25519_VERIFY_SELFTEST_CMD)
+
+# The console nickname rule (#2197, src/core/nk_nickname.h) that the player's Nickname setting
+# and the runtime's SR_NICKNAME share: the default, the 32-byte cap and the refused values.
+define NK_NICKNAME_SELFTEST_CMD
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" -Isrc/core tests/native/test_nk_nickname.c \
+		-o $(BUILD_ROOT)/test_nk_nickname$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_nickname$(EXE_EXT)
+endef
+
+.PHONY: nk-nickname-selftest
+nk-nickname-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call NK_NICKNAME_SELFTEST_CMD)
 
 # The RetroAchievements bridge (src/core/nk_achievements.c, #1316) on the vendored rcheevos
 # rc_client, against an in-process fake server: login, game load, a softcore unlock on synthetic
@@ -356,6 +369,30 @@ fsr1-selftest: shader-verify
 	elif [ $$rc -eq 77 ]; then echo "SKIP fsr1-selftest (exit 77)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL fsr1-selftest (exit $$rc)"; exit $$rc; fi
 
+# anime4k-selftest - the movie upscaler (src/rt/gpu_sdl3vk/anime4k_pass.c, Anime4K CNN x2 M from
+# third_party/anime4k) on a headless Vulkan device, beside FSR 1: one stage at 2x lands closer to a
+# supersampled line-art truth than FSR 1 at 2x by a measured margin; a flat colour stays within 2
+# through two stages; the source image is never written; the stage rule and SR_MOVIE_UPSCALE values
+# hold; a size past the device's image limit is refused without building images and the last good
+# size is kept; a size whose images cannot be made is built once, not tried again. Linked from the two passes, the C library and libm alone. No Vulkan headers, loader or
+# device: SKIP (exit 77), visible in the log; NK_UI_VK_REQUIRE=1 makes a skip fail.
+native-core-tests: anime4k-selftest
+.PHONY: anime4k-selftest
+anime4k-selftest: shader-verify
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	@if ! printf '%s\n' '#include <vulkan/vulkan.h>' | $(CC) -E -x c $(VULKAN_INC_FLAGS) - >/dev/null 2>&1; then \
+		echo "SKIP anime4k-selftest (the Vulkan headers were not found)"; \
+		if [ "$(NK_UI_VK_REQUIRE)" = 1 ]; then exit 1; fi; exit 0; \
+	fi; \
+	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt -Isrc/rt/gpu_sdl3vk $(VULKAN_INC_FLAGS) \
+		src/rt/gpu_sdl3vk/fsr1_pass.c src/rt/gpu_sdl3vk/anime4k_pass.c src/rt/gpu_sdl3vk/anime4k_pass_selftest.c \
+		$(NK_UI_VK_SELFTEST_LIBS) -lm -o $(BUILD_ROOT)/anime4k_selftest$(EXE_EXT) || exit 1; \
+	rc=0; $(BUILD_ROOT_RUN)/anime4k_selftest$(EXE_EXT) || rc=$$?; \
+	if [ $$rc -eq 77 ] && [ "$(NK_UI_VK_REQUIRE)" = 1 ]; then \
+		echo "FAIL anime4k-selftest (skipped, but NK_UI_VK_REQUIRE=1 requires a Vulkan device)"; exit 1; \
+	elif [ $$rc -eq 77 ]; then echo "SKIP anime4k-selftest (exit 77)"; \
+	elif [ $$rc -ne 0 ]; then echo "FAIL anime4k-selftest (exit $$rc)"; exit $$rc; fi
+
 # ace-ui-selftest - Ace Mode's in-game UI (src/rt/gpu_sdl3vk/ace_ui.c): the readout, the launch
 # notice and the crisp keyboard laid out at the overlay's sizes and two ultrawide windows (inside
 # the 16 px safe area, apart from each other), then drawn on a headless Vulkan device over a
@@ -432,6 +469,7 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_launch_resolution.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_launch_resolution$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_launch_resolution$(EXE_EXT)
+	$(call NK_NICKNAME_SELFTEST_CMD)
 	$(call PLAYER_STATE_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_player_state$(EXE_EXT)
 	$(call INPUT_SETTINGS_TEST_BIN_CMD)
