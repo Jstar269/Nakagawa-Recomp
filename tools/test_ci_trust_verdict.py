@@ -2337,6 +2337,23 @@ class NamedRouteCollectorTests(unittest.TestCase):
         found, truncated = ctv.named_runs(Full("o/r", "t"), Path("."), "main", HEAD, PUSHED)
         self.assertEqual((found, truncated), ([], [PROVENANCE.context]))
 
+    def test_a_run_is_taken_only_from_the_list_of_its_own_event(self) -> None:
+        # Each event has its own list. A run GitHub returned under the other event's filter is not taken there,
+        # so no run is counted twice and none enters through a list it does not belong to.
+        title = NAMED_TITLE.format(head=HEAD)
+        runs = [_run(6, PROV, "workflow_run", sha=MAIN, branch="main", title=title),
+                _run(7, PROV, "workflow_dispatch", sha=MAIN, branch="main", title=title),
+                _run(8, PROV, "pull_request_target", sha=MAIN, branch="main", title=title)]
+
+        class Unfiltered(ctv.GitHub):
+            def counted(self, path: str, key: str | None = None) -> tuple[list, int | None]:
+                return runs, len(runs)
+
+        with mock.patch.object(ctv, "default_definition", return_value=True):
+            found, truncated = ctv.named_runs(Unfiltered("o/r", "t"), Path("."), "main", HEAD, PUSHED)
+        self.assertEqual([run["id"] for run in found], [6, 7])
+        self.assertEqual(truncated, [])
+
     def test_counted_reports_the_first_pages_total(self) -> None:
         gh = ctv.GitHub("owner/repo", "token")
         pages = {
