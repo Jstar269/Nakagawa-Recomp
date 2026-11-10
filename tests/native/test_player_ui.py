@@ -2677,11 +2677,14 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(self.focus_trail(notices)[-1], focus["back"])
 
         # Build tools and cache opens on its switch; Tab passes Build speed and the
-        # clear button and reaches Remove build tools.
+        # clear button and reaches Remove build tools. The Tabs wait for the page's
+        # laid-out frame: on its first frame nk_ui holds a Tab one frame and runs it
+        # with the next, so Build speed would be focused in no frame the trail reads
+        # (a slow CI runner's WAIT_MS=100 ended before that second frame).
         # Right comes straight after the removal card opens, before its buttons are
         # laid out; nk_ui holds it a frame instead of losing it (a slow CI runner did).
-        to_removal = ("KEY_RIGHT", "KEY_RETURN", "WAIT_MS=100", "KEY_TAB", "KEY_TAB",
-                      "KEY_TAB", "KEY_RETURN")
+        to_removal = ("KEY_RIGHT", "KEY_RETURN", "WAIT_VIEW=build_cache,5000",
+                      "WAIT_LAID_OUT=5000", "KEY_TAB", "KEY_TAB", "KEY_TAB", "KEY_RETURN")
         removal = self.next_ui_run(
             "settings",
             ("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS + to_removal +
