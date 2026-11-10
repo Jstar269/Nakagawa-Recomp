@@ -57,7 +57,8 @@ enum {
     PLAYER_UI_TEST_ACTION_WAIT_PACKAGE_STATUS = -20261009,
     PLAYER_UI_TEST_ACTION_WAIT_REPORT = -20261010,
     PLAYER_UI_TEST_ACTION_GAME_EXIT = -20261011,
-    PLAYER_UI_TEST_ACTION_WAIT_UPDATE = -20261012
+    PLAYER_UI_TEST_ACTION_WAIT_UPDATE = -20261012,
+    PLAYER_UI_TEST_ACTION_WAIT_LAID_OUT = -20261110
 };
 
 #define UI_TEST_MAX_PACKAGE_STATUS_THREAD_CREATE_FAILURES 8
@@ -113,6 +114,8 @@ typedef struct PlayerUiTest {
     uint32_t wait_report_mask;   /* bit n set: PlayerReportPhase n ends the wait */
     bool waiting_for_update;     /* WAIT_UPDATE: until app->update.phase is the target */
     PlayerUpdatePhase wait_update_target;
+    bool waiting_for_layout;     /* WAIT_LAID_OUT: until a frame after it is laid out */
+    int wait_layout_frame;       /* the frame count when WAIT_LAID_OUT began */
     uint64_t wait_deadline;
     uint32_t wait_view_mask;
     bool fake_game_running;
