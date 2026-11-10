@@ -2800,7 +2800,7 @@ static void busy_check_report(const char *want) {
     char json[ACE_REPORT_MAX];
     assert(ace_report_json(json, sizeof(json)) > 0);
     if (!strstr(json, want)) {
-        fprintf(stderr, "gui-present-selftest: the report lacks %s:\n%s", want, json);
+        fprintf(stderr, "gui-present-selftest: the report lacks %s. The report:\n%s", want, json);
         abort();
     }
 }
