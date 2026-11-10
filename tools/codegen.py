@@ -186,6 +186,10 @@ ENHANCEMENT_DATA_FILES: list[tuple[str, str, bytes, str]] = []
 # Sites that keep run-time state (stock_values, requires), numbered by the index their
 # rewrites carry: {"id", "pc", "float", "pairs", "requires"}.
 ENHANCEMENT_STORE_SITES: list[dict] = []
+# The executable's stock-digest key (enhancement_package.published_digest_key) when a store
+# site declares stock_value_digests: the run-time check digests each stored value with it.
+# It is derived from the user's own executable and lives only in their generated build.
+ENHANCEMENT_STORE_KEY: bytes | None = None
 # Callable entries whose body loads $sp (guest_owns_entry_sp): no exit restores their entry
 # $sp, so the stack census leaves them unwrapped, as it leaves resume bodies.
 GUEST_SP_ENTRIES: set[int] = set()
@@ -245,7 +249,7 @@ def _scaled_store_line(rw: dict, stock_line: str) -> str:
     stock = stock_line.strip()
     if stock.count(stored) != 1:
         raise ValueError(f"{rw['kind']}: expected one read of {stored} in {stock!r}")
-    if "stock_values" in rw:
+    if "stock_values" in rw or "stock_value_digests" in rw:
         return (f"{{ uint32_t _nk_bits = nk_enh_store({rw['site_index']}u, {stored}); "
                 f"{stock.replace(stored, '_nk_bits')} }}")
     return (f"{{ float _nk_f = s->f[{r}] * {rw['factor']!r}f; uint32_t _nk_bits; "
@@ -998,11 +1002,24 @@ def _enhancement_store_lines() -> list[str]:
         "    unsigned nstock; const uint32_t *stock; const uint32_t *scaled;",
         "    unsigned nreq; const unsigned *req;",
         "    uint32_t applied; int gated;",
+        "    unsigned ndigest; const unsigned char (*digest)[32]; double factor;",
+        "    int has_last; uint32_t last_bits, last_scaled;",
         "} NkEnhSite;",
     ]
+    keyed = any(row["digests"] for row in ENHANCEMENT_STORE_SITES)
+    if keyed:
+        if ENHANCEMENT_STORE_KEY is None:
+            raise ValueError("stock_value_digests need the executable's digest key")
+        out.append("static const unsigned char nk_enh_key[32] = {"
+                   + ", ".join(f"0x{b:02x}" for b in ENHANCEMENT_STORE_KEY) + "};")
     rows = []
     for i, row in enumerate(ENHANCEMENT_STORE_SITES):
-        stock, scaled, req = "0", "0", "0"
+        stock, scaled, req, digest = "0", "0", "0", "0"
+        if row["digests"]:
+            digest = f"nk_enh_digest_{i}"
+            out.append(f"static const unsigned char {digest}[][32] = {{"
+                       + ", ".join("{" + ", ".join(f"0x{b:02x}" for b in bytes.fromhex(d)) + "}"
+                                   for d in row["digests"]) + "};")
         if row["pairs"]:
             stock, scaled = f"nk_enh_stock_{i}", f"nk_enh_scaled_{i}"
             out.append(f"static const uint32_t {stock}[] = "
@@ -1014,8 +1031,51 @@ def _enhancement_store_lines() -> list[str]:
             out.append(f"static const unsigned {req}[] = "
                        f"{{{', '.join(f'{index[name]}u' for name in row['requires'])}}};")
         rows.append(f'    {{"{row["id"]}", 0x{row["pc"]:08x}u, {int(row["float"])}, {len(row["pairs"])}u, '
-                    f'{stock}, {scaled}, {len(row["requires"])}u, {req}, 0u, 0}},')
+                    f'{stock}, {scaled}, {len(row["requires"])}u, {req}, 0u, 0, '
+                    f'{len(row["digests"])}u, {digest}, {row["factor"]!r}, 0, 0u, 0u}},')
     out += ["static NkEnhSite nk_enh_sites[] = {", *rows, "};"]
+    if keyed:
+        out += [
+            "/* A published package keeps only keyed digests of the values a store site may store",
+            " * (docs/ENHANCEMENT_CONTRACT.md section 5.1): HMAC-SHA-256 under the executable's key over",
+            " * the tag \"stock value\" and a NUL, the site id and a NUL, and the stored 32 bits, little-endian. */",
+            "void sr_vfpu_sha256(const uint8_t *data, size_t size, uint8_t digest[32]);",
+            "static int nk_enh_digest_match(const NkEnhSite *e, uint32_t bits) {",
+            "    unsigned char inner[64 + 96], outer[64 + 32], mac[32];",
+            "    size_t n = 12u, id = strlen(e->id), i;",
+            "    unsigned k;",
+            "    if (id > 64u) return 0;",
+            "    for (i = 0; i < 64u; i++) {",
+            "        unsigned char b = i < 32u ? nk_enh_key[i] : 0u;",
+            "        inner[i] = (unsigned char)(b ^ 0x36u); outer[i] = (unsigned char)(b ^ 0x5cu);",
+            "    }",
+            "    memcpy(inner + 64, \"stock value\", 11); inner[64 + 11] = 0;",
+            "    memcpy(inner + 64 + n, e->id, id); n += id; inner[64 + n++] = 0;",
+            "    for (i = 0; i < 4u; i++) inner[64 + n++] = (unsigned char)(bits >> (8u * i));",
+            "    sr_vfpu_sha256(inner, 64u + n, outer + 64);",
+            "    sr_vfpu_sha256(outer, sizeof outer, mac);",
+            "    for (k = 0; k < e->ndigest; k++) if (memcmp(mac, e->digest[k], 32) == 0) return 1;",
+            "    return 0;",
+            "}",
+            "/* The stored value scaled as the package builder scales a declared stock value: an f32",
+            " * times the site's factor, rounded once; an s32 doubled. 0 when the result leaves the range. */",
+            "static int nk_enh_scale(const NkEnhSite *e, uint32_t bits, uint32_t *out) {",
+            "    if (e->is_float) {",
+            "        float f, g;",
+            "        memcpy(&f, &bits, sizeof f);",
+            "        g = (float)((double)f * e->factor);",
+            "        if (!isfinite(f) || !isfinite(g)) return 0;",
+            "        memcpy(out, &g, sizeof g);",
+            "        return 1;",
+            "    }",
+            "    {",
+            "        int64_t v = (int64_t)(int32_t)bits * 2;",
+            "        if (v < -2147483648LL || v > 2147483647LL) return 0;",
+            "        *out = (uint32_t)(int32_t)v;",
+            "        return 1;",
+            "    }",
+            "}",
+        ]
     out += [
         "static int nk_enh_stopped;",
         "static void nk_enh_text(const NkEnhSite *e, uint32_t bits, char *out, size_t n) {",
@@ -1025,9 +1085,22 @@ def _enhancement_store_lines() -> list[str]:
         "uint32_t nk_enh_store(unsigned site, uint32_t bits) {",
         "    NkEnhSite *e = &nk_enh_sites[site];",
         "    char a[40], b[40];",
-        "    unsigned k;",
-        "    for (k = 0; k < e->nstock; k++) if (e->stock[k] == bits) break;",
-        "    if (k == e->nstock) {",
+        "    unsigned k = 0;",
+        "    uint32_t scaled = 0;",
+        "    int stock = 0;",
+        *([
+            "    if (e->ndigest > 0u) {",
+            "        if (e->has_last && e->last_bits == bits) { stock = 1; scaled = e->last_scaled; }",
+            "        else if (nk_enh_digest_match(e, bits) && nk_enh_scale(e, bits, &scaled)) {",
+            "            stock = 1; e->has_last = 1; e->last_bits = bits; e->last_scaled = scaled;",
+            "        }",
+            "    } else",
+        ] if keyed else []),
+        "    {",
+        "        for (k = 0; k < e->nstock; k++) if (e->stock[k] == bits) break;",
+        "        if (k < e->nstock) { stock = 1; scaled = e->scaled[k]; }",
+        "    }",
+        "    if (!stock) {",
         "        nk_enh_text(e, bits, a, sizeof a);",
         '        fprintf(stderr, "ENHANCEMENT_DATA_MISMATCH: site %s at 0x%08x stores %s (0x%08x), '
         "not one of the package's stock values; the run stops here\\n\", "
@@ -1037,14 +1110,14 @@ def _enhancement_store_lines() -> list[str]:
         "    }",
         "    if (e->applied < 16u) {",
         "        nk_enh_text(e, bits, a, sizeof a);",
-        "        nk_enh_text(e, e->scaled[k], b, sizeof b);",
+        "        nk_enh_text(e, scaled, b, sizeof b);",
         '        fprintf(stderr, "ENHANCEMENT_DATA_APPLIED: site %s at 0x%08x: %s -> %s\\n", '
         "e->id, (unsigned)e->pc, a, b);",
         "    } else if (e->applied == 16u) {",
         '        fprintf(stderr, "ENHANCEMENT_DATA_APPLIED: site %s: later applications are not logged\\n", e->id);',
         "    }",
         "    if (e->applied != 0xffffffffu) e->applied++;",
-        "    return e->scaled[k];",
+        "    return scaled;",
         "}",
         "int nk_enh_ready(unsigned site) {",
         "    NkEnhSite *e = &nk_enh_sites[site];",
@@ -1069,7 +1142,7 @@ def _enhancement_store_lines() -> list[str]:
         "    reported = 1;",
         "    for (i = 0; i < sizeof nk_enh_sites / sizeof nk_enh_sites[0]; i++) {",
         "        const NkEnhSite *e = &nk_enh_sites[i];",
-        "        if (e->nstock > 0u && e->applied == 0u)",
+        "        if ((e->nstock > 0u || e->ndigest > 0u) && e->applied == 0u)",
         '            fprintf(stderr, "ENHANCEMENT_DATA_SITE_NOT_REACHED: site %s at 0x%08x stored no value '
         'in this run; whatever it should have rescaled stayed stock\\n", e->id, (unsigned)e->pc);',
         "    }",
@@ -1097,7 +1170,7 @@ def _number_enhancement_store_sites() -> None:
     index: dict[str, int] = {}
     for addr, site in sorted(ENHANCEMENT_SITES.items()):
         rw = site["rewrite"]
-        if "stock_values" not in rw and "requires" not in rw:
+        if "stock_values" not in rw and "stock_value_digests" not in rw and "requires" not in rw:
             continue
         if site["id"] not in index:
             index[site["id"]] = len(ENHANCEMENT_STORE_SITES)
@@ -1105,6 +1178,8 @@ def _number_enhancement_store_sites() -> None:
                 "id": site["id"], "pc": addr, "float": rw["kind"] == "scale_f_store",
                 "pairs": [tuple(pair) for pair in rw.get("stock_values", ())],
                 "requires": list(rw.get("requires", ())),
+                "digests": list(rw.get("stock_value_digests", ())),
+                "factor": float(rw.get("factor", 2.0)),
             })
             for note in enhancement_package.store_value_overlaps(site["id"], rw):
                 sys.stderr.write(f"warning: enhancement {note}\n")
@@ -2235,6 +2310,16 @@ def _vfpu_form_vh2f(addr, w):
     return _vfpu_forms_stmt(addr, w, f"vh2f.{'sp'[n - 1]}", f"{reads} {writes}")
 
 
+def _vfpu_form_vus2i(addr, w):
+    n = vec_size(w)
+    vd, vs = w & 0x7F, (w >> 8) & 0x7F
+    si, di = vreg_indices(vs, n), vreg_indices(vd, 2 * n)
+    reads = " ".join(f"uint32_t _s{i}=s->vi[{si[i]}];" for i in range(n))
+    writes = " ".join(f"s->vi[{di[2 * i]}]=sr_vfpu_us2i(_s{i}); "
+                      f"s->vi[{di[2 * i + 1]}]=sr_vfpu_us2i(_s{i}>>16);" for i in range(n))
+    return _vfpu_forms_stmt(addr, w, f"vus2i.{'sp'[n - 1]}", f"{reads} {writes}")
+
+
 def _vfpu_form_vuc2i(addr, w):
     vd, vs = w & 0x7F, (w >> 8) & 0x7F
     s0, di = vreg_indices(vs, 1)[0], vreg_indices(vd, 4)
@@ -2258,6 +2343,7 @@ _VFPU_SPECIAL_FORM_TABLE: dict[tuple[int, int | None, int], Any] = {
     (1, 2, 1): _vfpu_form_vrndf, (1, 3, 1): _vfpu_form_vrndf,
     (1, 19, 1): _vfpu_form_vh2f, (1, 19, 2): _vfpu_form_vh2f,
     (1, 24, 1): _vfpu_form_vuc2i,
+    (1, 26, 1): _vfpu_form_vus2i, (1, 26, 2): _vfpu_form_vus2i,
     (2, 5, 1): _vfpu_form_vsocp, (2, 5, 2): _vfpu_form_vsocp,
 }
 
@@ -2280,9 +2366,10 @@ _VFPU9_INTERP_ROUTED = {
 }
 
 
-# vqmul.q and vcrsp.t lanes as (sign, S lane, T lane) terms, in source order. The emitted
-# lane is a left-to-right chain of sr_vf_* calls (src/rt/recomp.h), the same chain
-# sr_vfpu_interp evaluates, so both lanes return one NaN word (issue #326).
+# vqmul.q and vcrsp.t lanes as (sign, S lane, T lane) terms, in source order. Each lane is one
+# sr_vfpu_sop() call (src/rt/recomp.h) over its terms, a subtracted term negating its S operand,
+# the same call sr_vfpu_interp makes, so both lanes return the measured sum of products
+# (PSP-3000 dot/matrix read, issue #326).
 _VQMUL_TERMS = (
     ((1, 0, 3), (1, 1, 2), (-1, 2, 1), (1, 3, 0)),
     ((-1, 0, 2), (1, 1, 3), (1, 2, 0), (1, 3, 1)),
@@ -2297,13 +2384,9 @@ _VCRSP_TERMS = (
 
 
 def _vf_chain(terms):
-    sign, i, j = terms[0]
-    acc = f"sr_vf_mul({'-' if sign < 0 else ''}_s[{i}],_t[{j}])"
-    for sign, i, j in terms[1:]:
-        # Each helper is written as a call literal so tools/recomp_helper_inventory.py sees it.
-        call = "sr_vf_add(" if sign > 0 else "sr_vf_sub("
-        acc = f"{call}{acc},sr_vf_mul(_s[{i}],_t[{j}]))"
-    return acc
+    sa = ",".join(f"{'-' if sign < 0 else ''}_s[{i}]" for sign, i, _ in terms)
+    sb = ",".join(f"_t[{j}]" for _, _, j in terms)
+    return f"sr_vfpu_sop((const float[]){{{sa}}},(const float[]){{{sb}}},{len(terms)})"
 
 
 # VFPU memory forms under --lle-cpu use the same sr_cpu_guard_access() call
@@ -2828,6 +2911,10 @@ def _vfpu_cop2_effect(addr, w, options, delay_branch_pc):
     handler = _VFPU_COP2_MOVE_FORMS.get(sub)
     if handler is None:
         raise Unsupported(f"cop2 sub {sub} or register {imm} at 0x{addr:08x}")
+    if sub == 7 and imm == 131:
+        # VFPU_CC keeps only bits 0..5: mtvc then mfvc read back written & 0x3f in every cell
+        # (unrecorded PSP read, PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov).
+        return f"{dst} = {R(rt(w))} & 0x3fu;", None, 0
     return handler(w, src, dst)
 
 
@@ -2863,7 +2950,7 @@ def _vfpu3_vcmp(addr, w, options, delay_branch_pc):
     body = (f"float _a[4],_b[4]; sr_vread(_a,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_b,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
             f"int _cc=0,_or=0,_and=1,_aff=(1<<4)|(1<<5); "
-            f"for(int _i=0;_i<{n};_i++){{ float _x=_a[_i],_y=_b[_i]; (void)_x; (void)_y; int _c=({_C}); "
+            f"for(int _i=0;_i<{n};_i++){{ float _x=sr_vfpu_ftz(_a[_i]),_y=sr_vfpu_ftz(_b[_i]); (void)_x; (void)_y; int _c=({_C}); "
             f"_cc|=(_c<<_i);_or|=_c;_and&=_c;_aff|=1<<_i; }} "
             f"s->vfpuCtrl[3]=(s->vfpuCtrl[3]&~_aff)|((_cc|(_or<<4)|(_and<<5))&_aff);{_EAT}")
     return "{ " + body + " }", None, 0
@@ -2880,7 +2967,8 @@ def _vfpu3_minmax(addr, w, options, delay_branch_pc):
             f"if(_an||_bn){{ int32_t _ai,_bi,_r; memcpy(&_ai,&_a[_i],4); memcpy(&_bi,&_b[_i],4); "
             f"if({ismin}) _r=(_ai<0&&_bi<0)?(_bi<_ai?_ai:_bi):(_ai<_bi?_ai:_bi); "
             f"else _r=(_ai<0&&_bi<0)?(_ai<_bi?_ai:_bi):(_bi<_ai?_ai:_bi); memcpy(&_d[_i],&_r,4); }} "
-            f"else _d[_i]={ismin}?(_a[_i]<_b[_i]?_a[_i]:_b[_i]):(_b[_i]<_a[_i]?_a[_i]:_b[_i]); }} "
+            f"else {{ float _fa=sr_vfpu_daz(_a[_i]),_fb=sr_vfpu_daz(_b[_i]); "
+            f"_d[_i]={ismin}?(_fa<_fb?_a[_i]:_b[_i]):(_fb<_fa?_a[_i]:_b[_i]); }} }} "
             + _nanv(addr, "vmin.s" if ismin == "1" else "vmax.s", vd, "_d", n,
                     "_a", n, "_b", n, options=options)
             + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
@@ -2982,12 +3070,12 @@ def _vfpu_matrix_scale(addr, w, options, delay_branch_pc):
     writes = [f"float _sc = s->v[{scalar_vidx}];"]
     for row in range(side - 1):
         for col in range(side):
-            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vfpu_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
     last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
     last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
     writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
     writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vfpu_mul(_s[_i], _t[_i]);")
     writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
                         options=options))
     writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
@@ -3063,8 +3151,8 @@ def _vfpu_binary_arithmetic(addr, w, options, delay_branch_pc):
     di, si = vreg_indices(vd, n), vreg_indices(vs, n)
     ti = vreg_indices(vt, n)
     # Call literals, so tools/recomp_helper_inventory.py sees every helper the emitter writes.
-    call = {(0x18, 0): "sr_vf_add(", (0x18, 1): "sr_vf_sub(", (0x18, 7): "sr_vf_div(",
-            (0x19, 0): "sr_vf_mul("}[(op, sub)]
+    call = {(0x18, 0): "sr_vfpu_add(", (0x18, 1): "sr_vfpu_sub(", (0x18, 7): "sr_vfpu_div(",
+            (0x19, 0): "sr_vfpu_mul("}[(op, sub)]
     body = (f"float _s[4],_t[4],_d[4]; "
             f"sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
@@ -3082,7 +3170,7 @@ def _vfpu_dot_effect(addr, w, options, delay_branch_pc):
     dst = vreg_indices(vd, 1)[0]
     body = (f"float _s[4],_t[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-            f"float _d=0.0f; for(int _i=0;_i<{n};_i++) _d=sr_vf_add(_d,sr_vf_mul(_s[_i],_t[_i])); "
+            f"float _d=sr_vfpu_sop(_s,_t,{n}); "
             f"float _dd[1]={{_d}};"
             + _nanv(addr, "vdot.s", vd, "_dd", 1, "_s", n, "_t", n, options=options)
             + f" sr_vwrite(s,{_arr([dst])},_dd,1,s->vfpuCtrl[2]);{_EAT}")
@@ -3096,8 +3184,8 @@ def _vfpu_horizontal_dot_effect(addr, w, options, delay_branch_pc):
     dst = vreg_indices(vd, 1)[0]
     body = (f"float _s[4],_t[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
-            f"float _d=0.0f; for(int _i=0;_i<{n - 1};_i++) _d=sr_vf_add(_d,sr_vf_mul(_s[_i],_t[_i])); "
-            f"_d=sr_vf_add(_d,sr_vf_mul(1.0f,_t[{n - 1}])); _d=isnan(_d)?fabsf(_d):_d; "
+            f"float _h[4]={{{','.join([f'_s[{i}]' for i in range(n - 1)] + ['1.0f'])}}}; "
+            f"float _d=sr_vfpu_sop(_h,_t,{n}); "
             f"float _dd[1]={{_d}};"
             + _nanv(addr, "vhdp.s", vd, "_dd", 1, "_s", n, "_t", n, options=options)
             + f" sr_vwrite(s,{_arr([dst])},_dd,1,s->vfpuCtrl[2]);{_EAT}")
@@ -3132,9 +3220,9 @@ def _vfpu_matrix_multiply_effect(addr, w, options, delay_branch_pc):
             # an optimiser may swap the operands of a plain + or *, so the two
             # paths could keep different NaN payloads for exotic inputs (issue
             # #40 at -O0, issue #326 at -O1/-O2). Finite results are unchanged.
-            lines.append(f"float _m{a}_{b}=0.0f;")
-            for c in range(side):
-                lines.append(f"_m{a}_{b}=sr_vf_add(_m{a}_{b},sr_vf_mul(s->v[{mreg_index(vs, side, b, c)}],s->v[{mreg_index(vt, side, a, c)}]));")
+            va = ",".join(f"s->v[{mreg_index(vs, side, b, c)}]" for c in range(side))
+            vb = ",".join(f"s->v[{mreg_index(vt, side, a, c)}]" for c in range(side))
+            lines.append(f"float _m{a}_{b}=sr_vfpu_sop((const float[]){{{va}}},(const float[]){{{vb}}},{side});")
     writes = " ".join(f"s->v[{mreg_index(vd, side, a, b)}]=_m{a}_{b};"
                       for a in range(side) for b in range(side))
     return "{ " + " ".join(lines) + " " + _nan_matrix(
@@ -3158,11 +3246,13 @@ def _vfpu_matrix_transform_effect(addr, w, options, delay_branch_pc):
     for i in range(side):
         # Same accumulate-into-local shape as sr_vfpu_interp's vtfm (see the
         # vmmul comment above for the NaN payload rationale, issue #40).
-        lines.append(f"float _v{i}=0.0f;")
-        for k in range(tn):
-            lines.append(f"_v{i}=sr_vf_add(_v{i},sr_vf_mul(s->v[{mreg_index(vs, side, i, k)}],s->v[{ti[k]}]));")
-        if ins >= n:
-            lines.append(f"_v{i}=sr_vf_add(_v{i},s->v[{mreg_index(vs, side, i, ins)}]);")
+        va = [f"s->v[{mreg_index(vs, side, i, k)}]" for k in range(tn)]
+        vb = [f"s->v[{ti[k]}]" for k in range(tn)]
+        if ins >= n:  # vhtfm: the homogeneous term is the matrix element times 1.0
+            va.append(f"s->v[{mreg_index(vs, side, i, ins)}]")
+            vb.append("1.0f")
+        lines.append(f"float _v{i}=sr_vfpu_sop((const float[]){{{','.join(va)}}},"
+                     f"(const float[]){{{','.join(vb)}}},{len(va)});")
     writes = " ".join(f"s->v[{di[i]}]=_v{i};" for i in range(side))
     return "{ " + " ".join(lines) + " " + _nan_matrix(
         addr, "vtfm", vd,
@@ -3177,7 +3267,7 @@ def _vfpu_scale_effect(addr, w, options, delay_branch_pc):
     scalar = vreg_indices(vt, 1)[0]
     body = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"float _sc=s->v[{scalar}]; "
-            f"for(int _i=0;_i<{n};_i++) _d[_i]=sr_vf_mul(_s[_i],_sc); "
+            f"for(int _i=0;_i<{n};_i++) _d[_i]=sr_vfpu_mul(_s[_i],_sc); "
             + _nanv(addr, "vscl.s", vd, "_d", n, "_s", n, "(&_sc)", 1, options=options)
             + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
     return "{ " + body + " }", None, 0
@@ -3192,12 +3282,12 @@ def _vfpu_matrix_scale_effect(addr, w, options, delay_branch_pc):
     writes.append(f"float _sc = s->v[{scalar_vidx}];")
     for row in range(side - 1):
         for col in range(side):
-            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vfpu_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
     last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
     last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
     writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
     writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vfpu_mul(_s[_i], _t[_i]);")
     writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
                          options=options))
     writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
@@ -3769,8 +3859,6 @@ _PROMO_STATE_RE = re.compile(r"s->(\w+)")
 _PROMO_FORBIDDEN_RE = re.compile(r"\b(return|goto|break|continue|_Exit|fprintf|exit)\b")
 # Writes that may not happen (movz/movn): the local must hold the old value first.
 _CONDITIONAL_WRITE_FUNCTS = (0x0A, 0x0B)
-# HST-only lines the emission loop writes itself at these addresses (see emit_function).
-_HST_INLINE_SITES = frozenset({0x0010433c, 0x0006e9bc, 0x0006ea1c, 0x00108630, 0x00000a1c})
 
 
 def promoted_line_is_safe(text):
@@ -3948,15 +4036,16 @@ SV_MAX_PER_FLUSH = 3     # checks attached to one flush point
 SV_MAX_PER_FUNC = 16     # checks per function (bounds chunk growth)
 SV_STATS = {"funcs": 0, "checks": 0}
 
-# Functions carrying hand-injected code (fastpaths, condition overrides)
-# execute semantics the simulator does not model; exclude them. 0x0010433c
-# carried the retired TOKENSCAN_DIAG probe; its entry stays so that
-# --static-verify output does not change with this cleanup.
-# The exclusion is a consequence of that injected code, so it is title-owned:
-# under a profile that emits none of it there is nothing unmodelled to exclude,
-# and suppressing the checks on a numeric-address collision alone would be an
-# HST behavior leak (see sv_plan's hst_profile parameter).
-_SV_SPECIAL = {0x0006e9bc, 0x0006ea1c, 0x00108630, 0x0010433c}
+# Functions carrying hand-injected code (condition overrides) execute semantics
+# the simulator does not model; exclude them. The four stand-alone HST entries
+# (the two retired loop fast paths, the function holding one of them, and the
+# retired TOKENSCAN_DIAG probe's function) left on 2026-11-08 (#363): those
+# bodies translate as written, so --static-verify checks them like any other.
+# The exclusion is a consequence of injected code, so it is title-owned: under
+# a profile that emits none of it there is nothing unmodelled to exclude, and
+# suppressing the checks on a numeric-address collision alone would be an HST
+# behavior leak (see sv_plan's hst_profile parameter).
+_SV_SPECIAL: set[int] = set()
 
 # GUEST_PATCHES -- reviewed, traceable per-guest instruction overrides.
 # Each entry carries a rationale + issue id so every hand-patch is auditable.
@@ -3970,7 +4059,7 @@ _GUEST_PATCH_KEYS: set[int] = set()
 # device readable in sectors, the title's own archive reader serves every asset.
 GUEST_PATCHES: dict[int, dict[str, Any]] = {
 }
-# Static-verify exclusions: the four stand-alone specials plus every patched addr.
+# Static-verify exclusions: every patched addr.
 _SV_SPECIAL |= _GUEST_PATCH_KEYS
 
 
@@ -4231,213 +4320,16 @@ def _dup_slot_skips(elf, insns, labels):
     return dup_slot_skips
 
 
-def _emit_hst_patch_site(hst_profile, addr, w, out, consumed):
-    """The ``--profile=hst`` sites that are not a plain word: a fused loop or an abort guard.
-
-    Returns True when the lines appended replace the word's own emission, False when the word
-    is still emitted normally after them. Every site tests ``hst_profile`` itself, so no
-    other profile can reach one (``test_codegen_profile_isolation`` checks the gates).
-    """
-    # LOOP_CAPS retired (F4, 2026-07-11): the table is empty and the emission block
-    # is gone. Every remaining capped loop was statically proven terminating and
-    # verified never-firing across the retained log corpus (docs/audit/F4_LOOPCAPS.md):
-    #   SCAN_CAP    0x000147e0  f_00014788: word-at-a-time strlen (0xfefefeff/0x80808080
-    #               stopword scan). Induction variable a0 increases by 4 every
-    #               iteration; MEM_R32 is bounds-checked, so the loop either finds a
-    #               NUL or traps -- no same-PC spin is possible. The 1024-iteration
-    #               cap silently corrupted strlen for any string >= 4 KiB.
-    #   RSRC_CAP    0x0001b688  f_0001b584: counted loop (s3++ vs callee-saved s0).
-    #               The guarded retry-starvation spin was an allocator-corruption
-    #               symptom. The structural fix is one retail newlib allocator
-    #               backed by its untouched UserSbrk partition block.
-    #   HASHFN_CAP  0x0001b73c  f_0001b73c: pure NUL-terminated string hash
-    #               (monotonic pointer walk) + divu by table size; terminates for
-    #               any terminated string. The cap counted *calls*, not iterations,
-    #               and forged r2=1 (phantom hash) on fire. Never fired.
-    #   RSRC2-6     0x0019357c/0x001935d0/0x00193620/0x00193678/0x001936cc
-    #               f_001934c8: five identical counted loops (s2++ vs u32 count
-    #               reloaded from a descriptor the body never writes). Bounded
-    #               unless callee-save discipline is broken -- which is exactly the
-    #               P0 recompiler chain a cap must not mask. Never fired.
-    #   SENT_CAP    0x001b9570  f_001b94f8: doubly-linked-list unlink-until-sentinel.
-    #               Terminates for any well-formed list; the known list-corruption
-    #               sources (WALKER_CAP truncation, LoadLayout runaway) are gone.
-    #               Never fired.
-    #   SCENELOOP   0x0006dc2c  f_0006dab0: begin/end iterator, r17 += 0x70 until
-    #               r17 == r16 (compiler-emitted `it != end` idiom, always aligned).
-    #               Never fired.
-    #   RESINIT_CAP 0x0005a608  f_0005a500: element-init loop, a2++ vs count in a
-    #               freshly-allocated, correctly-sized disjoint buffer. Bounded
-    #               unless the allocator aliases the descriptor (prevented by the
-    #               unified retail newlib/UserSbrk path). Never fired.
-    #   TABLEWALK/LOOKUP/STRLIST sentinels (0x00102908/0x00102734/0x0019668c): the
-    #               "dedicated blocks" the sentinels pointed at were never
-    #               implemented; the entries were dead configuration.
-    # Cooperative scheduling does not depend on any of this: codegen emits SR_YIELD
-    # on every backward branch and function entry, and the SR_YIELD macro yields on
-    # timeslice expiry, so even a genuinely stuck loop cannot starve other fibers --
-    # it is watchdog-diagnosable by its unique back-edge PC in the thread dump.
-    # If a spin reappears, root-cause it; do not re-cap.
-    #
-    # WALKER_CAP (0x0000095c, f_000008d8) REMOVED in F3: it was an absolute
-    # 2048-hit permanent sentinel on a bounded "apply callback to N elements"
-    # iterator, not a spin detector. A single legitimate table-init call
-    # (RSRC init, hst_recomp_0.c:147346-147360) needs r8=0xc005=49157 iterations
-    # in one call, so the cap tripped mid-init and permanently no-op'd the
-    # iterator, leaving dispatch tables half-populated. The historical allocator
-    # corruption it guarded is fixed at the retail newlib/UserSbrk boundary. See
-    # docs/audit/F3_LOOPCAPS.md.
-    # ARRAY_CAP (0x00100e98) and LISTWALK_CAP (0x0001038c) REMOVED in F3 (second
-    # round, 2026-07-09): both still fired on every boot after WALKER_CAP's removal.
-    # ARRAY_CAP force-broke a loop inside the 0x100xxx menu-layout/registration code
-    # region after an absolute 20000 same-PC iterations — the same "bounded init
-    # mistaken for a spin" failure mode as WALKER_CAP, and a direct candidate for
-    # why dispatch tables (0x3070c0 +0xc/+0x10) remain half-populated. LISTWALK_CAP
-    # broke f_0001034c's next-pointer chain walk on the theory the list could be
-    # circular/corrupt; the known corruption sources upstream (WALKER_CAP truncation,
-    # the LoadLayout runaway) are gone, so the guard's premise is stale. If either
-    # loop genuinely spins again, the watchdog thread-dump PC identifies it uniquely
-    # (0x00100e98 vs 0x0001038c) — root-cause that spin; do not re-cap (see
-    # docs/audit/F3_LOOPCAPS.md and docs/DESIGN_FONT_HLE.md F3 re-scope).
-
-    # MEMSET_FASTPATH: f_0006e9bc's post-alloc zero-fill loop (body 0x6ea28-0x6ea44,
-    # count/base reloaded at 0x6ea1c/0x6ea28). Confirmed by static trace of the lifted
-    # instructions: base (MEM[r16+8]) and count (MEM[r16+0]) are both read-only for the
-    # entire loop body -- nothing between 0x6ea1c and 0x6ea44 writes r16+0 or r16+8 --
-    # so `for (i=0;i<count;i++) base[i]=0` is a provably exact rewrite of the interpreted
-    # per-byte loop as one native pass. This function is called ~100x from the resource-
-    # table init loop at 0x6da44; under one-MIPS-
-    # instruction-per-dispatch interpretation the accumulated SR_YIELD/dispatch overhead
-    # per byte stalls the worker thread past the 1200-vblank watchdog before a second
-    # frame ever presents. Dead-code checked: r3/r4 are never read again after the loop
-    # (L_0006ea48's epilogue only restores r31/r17/r16 from the stack) and r2 (the
-    # function's implicit return value, set by the alloc call at 0x6ea18) is untouched
-    # by the loop, so skipping the interpreted instructions is transparent to the caller.
-    # MEM_W8/MEM_R32 are already bounds-checked (src/rt/recomp.h sr_inrange).  The
-    # fast path now rejects a non-contiguous/overflowing span before any host pointer
-    # is formed; the >1MB warning exists to flag malformed counts without attempting
-    # an unbounded scalar fallback.
-    if hst_profile and addr == 0x0006ea1c:
-        out.append(f"    sr_begin(s, 0x0006ea1cu, 0x{w:08x}u); s->r[3] = MEM_R32(s->r[16] + 0x00000000u); sr_end(s, 0u, 0);")
-        out.append(
-            "    { uint32_t _mf_cnt = s->r[3]; uint32_t _mf_base = MEM_R32(s->r[16] + 0x00000008u);\n"
-            "      if (_mf_cnt > 0x00100000u) fprintf(stderr, \"MEMSET_FASTPATH: large count=0x%x base=0x%x r16=0x%08x MEM[r16+0]=0x%08x MEM[r16+4]=0x%08x MEM[r16+8]=0x%08x ra=0x%08x\\n\", _mf_cnt, _mf_base, s->r[16], (s->r[16]<0x0c000000u?MEM_R32(s->r[16]):0xDEADu), (s->r[16]<0x0c000000u?MEM_R32(s->r[16]+4u):0xDEADu), (s->r[16]<0x0c000000u?MEM_R32(s->r[16]+8u):0xDEADu), s->r[31]);\n"
-            "      if (_mf_cnt > 0 && _mf_cnt < 0x04000000u && sr_guest_span_writable(_mf_base, _mf_cnt)) {\n"
-            "          if (g_sr_heap_watch) sr_heap_note_bulk_write(_mf_base, _mf_cnt, 0x0006ea1cu);\n"
-            "          memset(SR_HOST(SR_DATA_SPAN(_mf_base, _mf_cnt)), 0, _mf_cnt);\n"
-            "      } else {\n"
-            "          if (_mf_cnt) sr_oor(_mf_base, 0u, 1);\n"
-            "      }\n"
-            "      s->r[4] = _mf_cnt; s->r[3] = 0u; }"
-        )
-        for _skip in (0x0006ea20, 0x0006ea24, 0x0006ea28, 0x0006ea2c, 0x0006ea30,
-                      0x0006ea34, 0x0006ea38, 0x0006ea3c, 0x0006ea40, 0x0006ea44):
-            consumed.add(_skip)
-        return True
-
-    # ARRSHIFT_FASTPATH: f_001084b8's element-shift loop (setup 0x108630-0x108654,
-    # body 0x108658-0x108690). Confirmed by static trace of the lifted instructions:
-    # this is a reverse, element-by-element 8-byte block move -- the source pointer
-    # (r6) and dest pointer (r4) both start high and decrement by exactly 8 every
-    # iteration in lockstep, terminating when r6 reaches r5 (the fixed source base
-    # loaded once at 0x108634 and never written again in the loop). The trip count is
-    # exactly n = MEM[r19+4] (read once, at 0x108630, before anything in the loop body
-    # can touch r19+4). This is the classic "grow a packed array, shift n existing
-    # elements into the new buffer" pattern: the code immediately after the loop
-    # (0x108694-0x1086c8) swaps the struct's base/count/capacity fields at r19+0/+4/+8
-    # with the new ones staged on the stack and calls f_00108bf4 (frees the old
-    # buffer) -- realloc-and-shift. A reverse per-element copy over
-    # [src,src+n*8) <-> [dst-n*8,dst) is exactly what memmove() computes (memmove is
-    # correct for either overlap direction, a superset of what the hand-unrolled
-    # reverse loop covers for its one intended direction). Under one-MIPS-instruction-
-    # per-dispatch interpretation this loop was a historical bring-up blocker: the
-    # worker cycles between pc=0x0006517c (an unrelated inlined "r2=r5<<1" leaf called
-    # from elsewhere, just this loop's most recent PCSAMPLE neighbour) and this loop's
-    # own SR_YIELD checkpoint at pc=0x0010868c for the entire watchdog window without
-    # the loop ever finishing. Historical details are retained in the local archive.
-    # Two stack slots track the same trip progress in different units and both must
-    # land on the same final value as the interpreted loop would leave them: MEM[sp+
-    # 0x5c] (decrements by 1/iter) and MEM[sp+0x50] (increments by 1/iter, consumed by
-    # the caller as the new element count at 0x1086c0-0x1086c4). Registers r1-r6's
-    # loop-final values are dead: everything from 0x108694 onward reloads r2/r3 fresh
-    # from memory and overwrites r4/r5/r6 before any further read (confirmed by
-    # reading through to the f_00108bf4 call at 0x1086c8), so only the copied bytes
-    # and the two stack slots need to be reproduced. The r4==0 mid-loop edge case
-    # (dest pointer hits exactly address 0) is not special-cased in the fast path --
-    # it would require the dest range to span across address 0, which cannot happen
-    # for a legitimate guest-RAM pointer -- but the bounds-checked fallback below
-    # still reproduces it exactly if it ever did.
-    if hst_profile and addr == 0x00108630:
-        out.append(f"    sr_begin(s, 0x00108630u, 0x{w:08x}u); s->r[4] = MEM_R32(s->r[19] + 0x00000004u); sr_end(s, 0u, 0);")
-        out.append(
-            "    { uint32_t _as_n = s->r[4];\n"
-            "      uint32_t _as_src_base = MEM_R32(s->r[19] + 0x00000000u);\n"
-            "      uint32_t _as_sp5c0 = MEM_R32(s->r[29] + 0x0000005cu);\n"
-            "      uint32_t _as_sp500 = MEM_R32(s->r[29] + 0x00000050u);\n"
-            "      uint32_t _as_dst_base = MEM_R32(s->r[29] + 0x0000004cu);\n"
-            "      uint32_t _as_dst_hi = _as_dst_base + (_as_sp5c0 << 3);\n"
-            "      if (_as_n > 0x00100000u) fprintf(stderr, \"ARRSHIFT_FASTPATH: large n=0x%x src=0x%x dst_hi=0x%x at f_001084b8 (0x108630)\\n\", _as_n, _as_src_base, _as_dst_hi);\n"
-            "      if (_as_n > 0u) {\n"
-            "          uint32_t _as_dst_lo = _as_dst_hi - (_as_n << 3);\n"
-            "          uint64_t _as_nbytes = (uint64_t)_as_n << 3;\n"
-            "          if (_as_dst_lo < _as_dst_hi && _as_src_base < 0x0c000000u && _as_dst_lo < 0x0c000000u &&\n"
-            "              (uint64_t)_as_src_base + _as_nbytes <= 0x0c000000u && (uint64_t)_as_dst_lo + _as_nbytes <= 0x0c000000u) {\n"
-            "              if (g_sr_heap_watch) sr_heap_note_bulk_write(_as_dst_lo, (uint32_t)_as_nbytes, 0x00108630u);\n"
-            "              memmove(SR_HOST(SR_DATA_SPAN(_as_dst_lo, _as_nbytes)),\n"
-            "                      SR_HOST(SR_DATA_SPAN(_as_src_base, _as_nbytes)), (size_t)_as_nbytes);\n"
-            "          } else {\n"
-            "              for (uint32_t _as_i = 0; _as_i < _as_n; _as_i++) {\n"
-            "                  uint32_t _as_d = _as_dst_hi - 8u * (_as_i + 1u);\n"
-            "                  uint32_t _as_s = _as_src_base + (_as_n - 1u - _as_i) * 8u;\n"
-            "                  if (_as_d != 0u) {\n"
-            "                      MEM_W32(_as_d + 0u, MEM_R32(_as_s + 0u));\n"
-            "                      MEM_W32(_as_d + 4u, MEM_R32(_as_s + 4u));\n"
-            "                  }\n"
-            "              }\n"
-            "          }\n"
-            "      }\n"
-            "      MEM_W32(s->r[29] + 0x0000005cu, _as_sp5c0 - _as_n);\n"
-            "      MEM_W32(s->r[29] + 0x00000050u, _as_sp500 + _as_n);\n"
-            "      s->r[1] = 0u; s->r[5] = _as_src_base; s->r[6] = _as_src_base;\n"
-            "    }"
-        )
-        for _skip in (0x00108634, 0x00108638, 0x0010863c, 0x00108640, 0x00108644, 0x00108648,
-                      0x0010864c, 0x00108650, 0x00108654, 0x00108658, 0x0010865c, 0x00108660,
-                      0x00108664, 0x00108668, 0x0010866c, 0x00108670, 0x00108674, 0x00108678,
-                      0x0010867c, 0x00108680, 0x00108684, 0x00108688, 0x0010868c, 0x00108690):
-            consumed.add(_skip)
-        return True
-
-    # GUEST_ABORT: f_00000a1c is the game's own compiled abort() path -- its body
-    # (jal 0x000015ec, a diagnostic/handler-table walk, immediately followed by an
-    # unconditional self-branch at L_00000a24, with NO guard of any kind) is only
-    # ever reached indirectly: a raw jal/j word scan of the whole image confirms
-    # there is no static call site targeting this address, so it can only be
-    # entered via a function pointer / dispatch() (i.e. it is the registered
-    # abort/terminate handler). NOTE: this is address 0x00000a1c, not the adjacent
-    # 0x00000a14 -- analyze()'s static function-boundary detection recognizes BOTH
-    # as independent function starts (confirmed: both are in the `known` set with
-    # zero static jal/j callers), but they are different functions. f_00000a14 is a
-    # harmless stub whose very first instruction (`beq r0,r0`) unconditionally
-    # branches around this exact jal+loop body to a plain epilogue/return --
-    # verified to fire routinely and harmlessly during ordinary boot (regression-
-    # tested: a probe placed at 0x00000a14 false-positived on a known-good run that
-    # only reaches mode-select). f_00000a1c has no such guard: every entry
-    # unconditionally calls the diagnostic walk and then spins forever. Left alone,
-    # reaching it means the emulator silently spins forever on the guest's own
-    # infinite loop, presenting nothing, until an external timeout kills the
-    # process -- observed via both heap exhaustion and a missing character/stage
-    # asset validation failure, minutes apart in wall-clock terms. Fail fast
-    # instead, mirroring the existing unimplemented-HLE-NID convention in hle.c
-    # (search "_Exit(7)" there) with a distinct, reserved exit code so the two
-    # fatal classes are distinguishable from the process exit status alone.
-    if hst_profile and addr == 0x00000a1c:
-        out.append(
-            "    fprintf(stderr, \"GUEST_ABORT: game called abort() (f_00000a1c), "
-            "called from ra=0x%08x arg0=0x%08x -- terminating instead of silent infinite hang\\n\", "
-            "s->r[31], s->r[4]); fflush(stderr); _Exit(9);"
-        )
-    return False
+# No title-address site rewrites a guest word any more (#363). The loop caps went first (the
+# F3 and F4 audits); on 2026-11-08 the last three HST-profile sites followed.
+# MEMSET_FASTPATH and ARRSHIFT_FASTPATH replaced two of the title's own loops (a zero fill and
+# a reverse 8-byte element shift) with one native pass, a shortcut from the time those loops
+# ran one interpreted instruction per dispatch; both now translate as written, like every
+# other AOT loop. GUEST_ABORT ended the run with _Exit(9) at the title's abort() instead of
+# letting its body call its handlers and spin; it now runs as written. A thread spinning
+# there is diagnosed like any other stuck thread: the scheduler's spin watchdog dumps it when
+# no other thread is runnable, and otherwise the display's no-new-frame watchdog names it. The
+# run does not end on its own; SR_WATCHDOG_EXIT=<N> ends it after N vblanks with no new frame.
 
 
 def _emit_non_control_word(ctx, out, addr, w, sv_points):
@@ -4502,7 +4394,16 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
     else:
         _call_stmt = "    " + emit_checked_dispatch_call(
             G(target), G((addr + 8) & 0xFFFFFFFF))
-    if _jal_rw is not None:
+    if _jal_rw is not None and _jal_rw["kind"] == "clip_x_widen":
+        # clip_x_widen (contract section 10.8): the stock call runs unchanged; when it returns,
+        # the runtime scales the x row of the clip matrices at the offsets from the pointer the
+        # call returned, by the Widescreen factor. It does nothing while Widescreen is off.
+        out.extend(_call_stmt.split("\n"))
+        _offsets = ", ".join(f"{o}u" for o in _jal_rw["offsets"])
+        out.append(f"    {{ static const uint32_t _nk_clip_off[] = {{{_offsets}}};")
+        out.append(f"      sr_enhancement_widen_clip_x(s->r[{_jal_rw['reg']}], _nk_clip_off, "
+                   f"{len(_jal_rw['offsets'])}u); }}")
+    elif _jal_rw is not None:
         # A gate on a call (gate_30hz, gate_30hz_hold or gate_30hz_alt; no other rewrite
         # plans a call site): the delay slot above always runs; the call is gated while the
         # toggle is on. A gate_30hz_hold call returns its float argument unchanged
@@ -4936,16 +4837,12 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
                 promoted = None
                 if (not is_control(w) and not _is_cop0_move(w) and addr not in sv_points
                         and addr not in continuations and addr not in ctx.sp_checks
-                        and _enhancement_rewrite(addr) is None
-                        and not (hst_profile and addr in _HST_INLINE_SITES)):
+                        and _enhancement_rewrite(addr) is None):
                     promoted = promo.try_line(addr, w, options=options)
                 if promoted is not None:
                     out.extend(promoted)
                     continue
                 out.extend(promo.flush())
-
-            if hst_profile and _emit_hst_patch_site(hst_profile, addr, w, out, consumed):
-                continue
 
             if not is_control(w):
                 _emit_non_control_word(ctx, out, addr, w, sv_points)
@@ -6117,8 +6014,9 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
     The tables are reset first, so a run without a package starts empty. A package that fails
     verification refuses the run (fail closed).
     """
-    global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY
+    global ENHANCEMENT_SITES, ENHANCEMENT_PKG_META, ENHANCEMENT_UPDATE_BOUNDARY, ENHANCEMENT_STORE_KEY
     ENHANCEMENT_SITES = {}
+    ENHANCEMENT_STORE_KEY = None
     ENHANCEMENT_PKG_META = None
     ENHANCEMENT_UPDATE_BOUNDARY = None
     ENHANCEMENT_APPLIED.clear()
@@ -6132,25 +6030,27 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             pkg_raw = enhancement_package.load_package(enhancement_pkg_path)
             pkg_validated = enhancement_package.validate_package(pkg_raw)
             elf_sha256 = hashlib.sha256(elf.data).hexdigest()
-            sym_map = enhancement_package.extract_elf_func_symbols(elf)
-            if symbol_map_path is not None:
-                # The guest symbol map names the package's sites too, in place of the
-                # <package>.symbols.json sidecar.
-                sym_map.update(site_names_from_symbol_map(symbols))
+            # Instruction words as codegen reads them, and initialised data as the loader
+            # places it (enhancement_package.elf_readers).
+            _read_words, _read_loaded_data = enhancement_package.elf_readers(elf)
+            if enhancement_package.is_published_package(pkg_validated):
+                # A published package (ENHANCEMENT_CONTRACT.md section 5.1) resolves only
+                # through its own site map, after its keyed digests match this executable.
+                pkg_validated, sym_map = enhancement_package.resolve_published_package(
+                    pkg_validated, executable=elf.data, read_words_fn=_read_words,
+                    read_data_fn=_read_loaded_data, data_root=enhancement_data_root,
+                )
             else:
-                pkg_p = Path(enhancement_pkg_path)
-                sidecar = pkg_p.with_suffix(".symbols.json")
-                if sidecar.is_file():
-                    sym_map.update(enhancement_package.load_symbol_map(sidecar))
-
-            def _read_words(vaddr: int, count: int):
-                out_w = []
-                for idx_w in range(count):
-                    val = read32(elf, vaddr + idx_w * 4)
-                    if val is None:
-                        return None
-                    out_w.append(val)
-                return out_w
+                sym_map = enhancement_package.extract_elf_func_symbols(elf)
+                if symbol_map_path is not None:
+                    # The guest symbol map names the package's sites too, in place of the
+                    # <package>.symbols.json sidecar.
+                    sym_map.update(site_names_from_symbol_map(symbols))
+                else:
+                    pkg_p = Path(enhancement_pkg_path)
+                    sidecar = pkg_p.with_suffix(".symbols.json")
+                    if sidecar.is_file():
+                        sym_map.update(enhancement_package.load_symbol_map(sidecar))
 
             ENHANCEMENT_SITES = enhancement_package.verify_and_resolve_sites(
                 pkg_validated,
@@ -6162,13 +6062,15 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
             for site in ENHANCEMENT_SITES.values():
                 stock = site["stock_words"][0]
                 if is_control(stock) and not (
-                    (stock >> 26) == 3 and site["rewrite"]["kind"] == "gate"
+                    (stock >> 26) == 3 and site["rewrite"]["kind"] in ("gate", "clip_x_widen")
                 ):
                     raise enhancement_package.EnhancementPackageError(
                         f"site {site['id']}: only a jal call site can be rewritten among "
                         "control transfers (fail-closed refusal)"
                     )
             _number_enhancement_store_sites()
+            if any(row["digests"] for row in ENHANCEMENT_STORE_SITES):
+                ENHANCEMENT_STORE_KEY = enhancement_package.published_digest_key(elf.data)
             boundary = enhancement_package.verify_and_resolve_update_boundary(
                 pkg_validated,
                 symbol_to_addr=sym_map,
@@ -6186,20 +6088,6 @@ def _load_enhancement_package(elf, known, symbols, enhancement_pkg_path, enhance
                         "update_boundary: the boundary is also a rewritten site (fail-closed refusal)"
                     )
                 ENHANCEMENT_UPDATE_BOUNDARY = boundary["site_addr"]
-
-            def _read_loaded_data(vaddr: int, count: int):
-                # Initialised bytes of one allocated, non-executable PROGBITS section
-                # as the loader places them (relocated, for a relocatable image):
-                # never code or zero-fill. Segments cannot tell, since a title may
-                # load code and data in one RWX segment.
-                rebase = elf.reloc.lo if elf.reloc is not None else 0
-                for sec in elf.sections:
-                    if sec["typ"] != 1 or not sec["flags"] & 2 or sec["flags"] & 4:
-                        continue
-                    lo = sec["addr"] + rebase
-                    if lo <= vaddr and vaddr + count <= lo + sec["size"]:
-                        return elf.read_at_vaddr(vaddr, count)
-                return None
 
             for patch in enhancement_package.verify_and_resolve_data_sites(
                 pkg_validated, symbol_to_addr=sym_map, read_data_fn=_read_loaded_data,

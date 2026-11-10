@@ -269,6 +269,38 @@ static int gst_cell_refuse(void) {
     return 1;
 }
 
+/* A color-test sprite over a glyph page (#2318): the test keys on the guest's texels, so the draw
+ * never binds the rebuilt tile. Nearest REPLACE, which psp.frag tests exactly; the same draw with
+ * the test off binds the tile, so the cell is not vacuous. */
+static int gst_cell_color_test(void) {
+    static uint32_t page[GST_W * GST_H];
+    gst_reset();
+    gst_page(page, 0, 1, 0x00FFFFFFu);
+    gst_put(GST_PAGE, page);
+    gst_state(GST_PAGE, GST_W, GST_H);
+    s_ge->tex_filter = 0u;
+    ge_state_note_external_write();
+    const uint64_t bound0 = s_cnt_gl_bound;
+    if (!gst_cell(0, 20.0f, 20.0f)) return gst_fail("color-test", "draw failed");
+    if (s_cnt_gl_bound == bound0)
+        return gst_fail("color-test", "the nearest draw with the test off bound no tile (vacuous)");
+    s_ge->color_test_enable = 1;
+    s_ge->color_test = 3u;                   /* NOTEQUAL a colour the page lacks: every texel passes */
+    s_ge->color_ref = 0x123456u;
+    s_ge->color_test_mask = 0x00FFFFFFu;
+    ge_state_note_external_write();
+    const uint64_t fell0 = s_replay_stats.fallback_prims;
+    int ok = gst_refused_draw("a color-tested sprite", gst_draw_default);
+    const uint64_t fell = s_replay_stats.fallback_prims - fell0;
+    s_ge->color_test_enable = 0;
+    ge_state_note_external_write();
+    if (!ok) return 0;
+    if (fell) return gst_fail("color-test", "%llu primitives took the software fallback (want 0)", (unsigned long long)fell);
+    printf("gpu glyph selftest: PASS %-12s scale %d: a color-tested sprite draws the guest's texels, never the tile\n",
+           "color-test", s_scale);
+    return 1;
+}
+
 static int gst_cell_rewrite(void) {
     static uint32_t page[GST_W * GST_H], want0[GST_CW * 6 * GST_CH * 6], want1[GST_CW * 6 * GST_CH * 6];
     gst_reset();
@@ -552,7 +584,7 @@ int gegpu_glyph_selftest(void) {
         if (s_glyphs_asked) return gst_fail("setup", "SR_GLYPHS is on but the feature is off at render scale %d", s_scale);
         return gst_cell_sharp();
     }
-    int ok = gst_cell_pool() && gst_cell_sharp() && gst_cell_refuse() && gst_cell_rewrite() && gst_cell_rewrite_gap() && gst_cell_gradient() &&
+    int ok = gst_cell_pool() && gst_cell_sharp() && gst_cell_refuse() && gst_cell_color_test() && gst_cell_rewrite() && gst_cell_rewrite_gap() && gst_cell_gradient() &&
              gst_cell_cap();
     if (ok) {
         /* No guest byte moved: the page and the CLUT are what the CPU left. */

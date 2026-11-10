@@ -974,7 +974,7 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
         # The Windows build keeps Media Foundation as its decoder: the FFmpeg subset is off
         # there by default and the media selftest links the Media Foundation libraries.
         makefile = read_makefile(ROOT)
-        self.assertIn("ifeq ($(OS),Windows_NT)\nH264_FFMPEG ?= 0\nelse\nH264_FFMPEG ?= 1\nendif", makefile)
+        self.assertIn("ifeq ($(NK_TARGET_OS),windows)\nH264_FFMPEG ?= 0\nelse\nH264_FFMPEG ?= 1\nendif", makefile)
         self.assertIn("ifeq ($(OS),Windows_NT)\nPSMF_MEDIA_LIBS := -lmfplat -lole32", makefile)
 
     def test_ffmpeg_h264_subset_builds_and_decodes_on_windows(self) -> None:
@@ -2821,7 +2821,7 @@ class SelfHostedRunnerWiringTests(unittest.TestCase):
         section = _markdown_section((ROOT / "docs" / "CI.md").read_text(encoding="utf-8"),
                                     "## Self-hosted Linux runners")
         for fact in ("`NK_SELF_HOSTED_LINUX`", "`NK_SELF_HOSTED_HEARTBEAT`", "`carry/pr-<N>`", "job-started hook",
-                     "fork", "`linux_runner`", "The routing is not the security boundary",
+                     "fork", "`linux_runner`", "`landing`", "`batch`", "The routing is not the security boundary",
                      "which is the boundary", "`all_external_contributors`", "`gh run rerun <run>`"):
             with self.subTest(fact=fact):
                 self.assertIn(fact, section)

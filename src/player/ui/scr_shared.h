@@ -56,10 +56,11 @@ static inline const char *safe_text(const char *text, const char *fallback) {
 }
 
 /* Whether a page's body between the top bar and the prompt bar scrolls. At the
-   design text size every page fits the window, and the screen tests hold it to
-   that; a larger text size can make one taller than the room, and then its
-   body scrolls (with the focused control brought into view) instead of pushing
-   the prompt bar off the window. */
+   design text size these pages fit the window, and the screen tests hold it to
+   that (and that every prompt bar stays whole); a larger text size can make one
+   taller than the room, and then its body scrolls (with the focused control
+   brought into view) instead of pushing the prompt bar off the window. A game's
+   page, whose rows vary with the game, always scrolls (scr_title.c). */
 static inline bool page_scrolls(const NkUi *ui) {
     return nk_ui_text_scale(ui) > 1.0f;
 }
@@ -93,6 +94,8 @@ static inline uint32_t note_rgba(const NkUiTheme *theme, PlayerUiNoteKind kind) 
 #define FLOW_ID_MESSAGE FLOW_ID(0x000042u)
 #define FLOW_ID_ELAPSED FLOW_ID(0x000043u)
 #define FLOW_ID_NOTICE FLOW_ID(0x000044u)
+#define FLOW_ID_SPEED FLOW_ID(0x000045u)          /* the build card's Build speed line */
+#define FLOW_ID_QUEUE_LINE FLOW_ID(0x000046u)  /* the build card's build queue line */
 #define FLOW_ID_LOG FLOW_ID(0x000050u)
 #define FLOW_ID_LOG_SPAN 0x10u
 #define FLOW_ID_ROWS FLOW_ID(0x000060u)

@@ -44,9 +44,14 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
     {"Game badge", "On", "Names the mode for a few seconds when a game starts."},
     {"Widescreen", "Off", "Shows more 3D space; HUD stays shaped. Some objects pop in. Smooth "
                             "motion disables it."},
-    {"Smooth motion", "Off", "Shows 30 FPS games at 60. Adds about 17 ms of delay."},
+    {"Smooth motion", "Off", "Shows steady 30 FPS scenes at 60, others as they are. Adds about 17 "
+                              "ms of delay."},
     {"Clean pitched sound", "Off",
      "Resamples pitched effects without aliasing. The game receives changed samples."},
+    {"Finer patches", "Off",
+     "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures."},
+    {"Wider culling", "Off", "Ace only, with Widescreen, in games that have a culling build. The game's "
+                             "memory changes."},
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
     {"Full 32-bit colour", "Off",
@@ -122,44 +127,44 @@ static const PlayerUiTitle k_titles[] = {
      "", "", "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Showcase Breakout", "TEST00008", "Needs setup", "",
      "Showcase profile-zero acceptance remains open.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PLAYABLE, false, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Experimental Fixture", "TEST00006", "Experimental", "",
      "Source-owned compatibility fixture.", "", NULL, "", "", "",
      "RETRY PACKAGE CHECK", "◆", 0xC29AF4FFu,
      PLAYER_UI_PRIMARY_RETRY_PACKAGE_CHECK, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Untested Fixture", "TEST00005", "Untested", "",
      "No compatibility record exists.", "", NULL, "", "", "",
      "BUILD PACKAGE", "?", 0xC29AF4FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_NONE, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Phase Five", "TEST00004", "Needs setup", "",
      "Player launch stops at the package boundary.", "", NULL, "",
      "", "", "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_WONT_BOOT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
 };
 
 /* A library with the demos that come with Nakagawa among the user's games, in
@@ -170,25 +175,25 @@ static const PlayerUiTitle k_demo_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Title Two", "TEST00002", "Needs setup", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "BUILD PACKAGE", "▲", 0xDBB024FFu, PLAYER_UI_PRIMARY_BUILD, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_MISSING,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Profile", "TEST00001", "Ready", "",
      "Source-owned runtime fixture.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      0u, NULL, NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PERFECT, true, false, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
 };
 
 /* The demos alone: a first start with nothing added yet. */
@@ -198,13 +203,13 @@ static const PlayerUiTitle k_demo_only_titles[] = {
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_BREAKOUT, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false},
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false},
     {"Synthetic Scene Demo", "TEST00007", "Ready", "",
      "Shows a synthetic cube with sound.", "", NULL, "", "", "",
      "PLAY", "●", 0x2DD4BFFFu, PLAYER_UI_PRIMARY_PLAY, true, true,
      NK_UI_ART_SHOWCASE_SCENE, "Showcase demo", NULL, NULL, PLAYER_UI_PACKAGE_READY,
      PLAYER_UI_TIER_PLAYABLE, false, true, false, false, false, false, false, "",
-     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false}
+     false, NULL, false, false, NULL, NULL, NULL, false, false, NULL, false, false, false}
 };
 
 /* What-to-expect cards: a player tier with plain words, with known issues, the
@@ -234,7 +239,7 @@ static const PlayerUiPrereqItem k_prereqs[] = {
 };
 
 typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CONSENT,
-               FLOW_PROGRESS, FLOW_ERROR, FLOW_WIZ_WELCOME, FLOW_WIZ_CHOOSE,
+               FLOW_PROGRESS, FLOW_ERROR, FLOW_ERROR_LONG, FLOW_WIZ_WELCOME, FLOW_WIZ_CHOOSE,
                FLOW_WIZ_BAD_DISC, FLOW_WIZ_CHOSEN,
                FLOW_WIZ_COPYING, FLOW_WIZ_VERIFY, FLOW_WIZ_EXPERIMENTAL, FLOW_WIZ_FONTS,
                FLOW_WIZ_READY, FLOW_WIZ_STAGED, FLOW_WIZ_OPTIONS, FLOW_WIZ_OPTIONS_ON, FLOW_WIZ_BLOCKED,
@@ -257,10 +262,11 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                /* Whole pages for the window-fit sweep only. */
                FLOW_PAGE_LIBRARY, FLOW_PAGE_LIBRARY_FIND, FLOW_PAGE_TITLE, FLOW_PAGE_ABOUT,
                FLOW_PAGE_REMOVE,
-               FLOW_PAGE_STOP, FLOW_PAGE_TITLE_ACE,
+               FLOW_PAGE_STOP, FLOW_PAGE_TITLE_ACE, FLOW_PAGE_TITLE_ENHANCED,
+               FLOW_PAGE_TITLE_AUTHENTIC, FLOW_PAGE_TITLE_RENDER,
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
-               FLOW_PAGE_STEAM_BLOCKED,
+               FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_QUEUE, FLOW_PAGE_QUEUE_PAUSED,
                FLOW_CONSENT_FULL, FLOW_COUNT } FlowCase;
 
 /* The window size the game-found and Settings cases lay out for. */
@@ -438,6 +444,9 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     settings.online_mode = which == FLOW_SETTINGS_ONLINE_ON;
     settings.developer_mode = true;
     settings.share_system_libraries = true;
+    settings.build_speed = "Background";
+    settings.build_speed_sentence = "Up to two parts at a time at low priority, so a game you play "
+                                    "meanwhile stays smooth. Builds take longer.";
     /* Accessibility: a size picked, high contrast following Windows (off), and
        Reduce motion turned on. */
     settings.interface_size = "125%";
@@ -838,6 +847,55 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         title.logical_height = g_flow_height;
         return player_ui_screen_title(ui, &title);
     }
+    if (which == FLOW_PAGE_TITLE_ENHANCED || which == FLOW_PAGE_TITLE_AUTHENTIC ||
+        which == FLOW_PAGE_TITLE_RENDER) {
+        /* #2245: a game's page as the player fills it for the user's own disc on Enhanced (or
+           Authentic): every Enhanced part on, the longest last-session line the runtime's
+           report gives, the disc check, the compatibility notes with the developer view, and
+           Rebuild beside PLAY. On main the page did not scroll at the design text size, so
+           this page pushed the prompt bar off the window. The render case adds #2151's notice
+           with the longer of its two sentences (player_render_notice_text). */
+        static PlayerUiTitle fixture;
+        PlayerUiTitleModel title;
+        bool enhanced = which != FLOW_PAGE_TITLE_AUTHENTIC;
+        fixture = k_titles[6];
+        fixture.library_status_detail = "Built by an older Nakagawa. It still plays; rebuild "
+                                        "it to use this version's fixes.";
+        fixture.rebuild_offered = true;
+        fixture.compatibility_tier = k_compatibility_cases[1].tier;
+        fixture.compatibility_expect = k_compatibility_cases[1].expect;
+        fixture.compatibility_known_issues = k_compatibility_cases[1].known_issues;
+        fixture.compatibility_category = "Playable";
+        fixture.disc_check_note = "Disc check: a changed copy of a retail disc in your "
+                                  "library, such as a fan translation or a patch.";
+        fixture.ace_shown = true;
+        fixture.ace_label = enhanced ? "Play mode: Enhanced" : "Play mode: Authentic";
+        fixture.ace_in_effect = enhanced;
+        fixture.ace_enabled = true;
+        fixture.ace_line = enhanced
+            ? "Enhanced for this game: 16x texture filtering, crisp system text, speed "
+              "readout, game badge, widescreen, smooth motion, clean pitched sound, sharper "
+              "enlarging."
+            : "Authentic: plays exactly as released, with nothing added.";
+        fixture.ace_last_session = enhanced ? "Last session: 16x filtering, crisp keyboard; "
+                                              "the game ran at 30 Hz."
+                                            : "";
+        fixture.options_shown = true;
+        fixture.options_enabled = true;
+        memset(&title, 0, sizeof(title));
+        title.title = &fixture;
+        title.title_index = 6u;
+        title.logical_width = g_flow_width;
+        title.logical_height = g_flow_height;
+        if (which == FLOW_PAGE_TITLE_RENDER) {
+            title.render_notice_heading = "Drawn in software";
+            title.render_notice_text =
+                "Vulkan did not start on this PC, so this game is drawn in software and shown "
+                "in a basic Windows window. The Internal resolution setting has no effect, and "
+                "the game may run slower. Updating the graphics driver may help.";
+        }
+        return player_ui_screen_title(ui, &title);
+    }
     if (which == FLOW_PAGE_ABOUT) {
         static char line[64];
         PlayerUiAboutModel about;
@@ -960,6 +1018,27 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         steam.logical_height = g_flow_height;
         return player_ui_screen_steam(ui, &steam);
     }
+    if (which == FLOW_PAGE_QUEUE || which == FLOW_PAGE_QUEUE_PAUSED) {
+        /* The build queue: the one building, a full page of games that wait,
+           the page line and its buttons, and (paused) Resume. */
+        static const PlayerUiQueueRow rows[PLAYER_UI_QUEUE_ROW_CAP] = {
+            {"Synthetic Showcase Scene with a Long Name That Has to Be Cut Short",
+             "Building 40%", 0u, true, false, false},
+            {"Synthetic Showcase Breakout", "Next", 1u, false, false, true},
+            {"Synthetic Experimental Fixture", "Waiting", 2u, false, true, true},
+            {"Synthetic Untested Fixture", "Waiting", 3u, false, true, true}
+        };
+        PlayerUiQueueModel queue;
+        memset(&queue, 0, sizeof(queue));
+        queue.rows = rows;
+        queue.row_count = PLAYER_UI_QUEUE_ROW_CAP;
+        queue.first_row = 0u;
+        queue.total = 9u;
+        queue.paused = which == FLOW_PAGE_QUEUE_PAUSED;
+        queue.logical_width = g_flow_width;
+        queue.logical_height = g_flow_height;
+        return player_ui_screen_queue(ui, &queue);
+    }
     if (which == FLOW_PAGE_STOP) {
         PlayerUiStopModel stop;
         memset(&stop, 0, sizeof(stop));
@@ -1032,6 +1111,12 @@ static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
             ? "Building uses most of your PC's power for a few minutes, so other apps "
               "may feel slower until it finishes."
             : NULL;
+        build.speed_line = which == FLOW_BUILD_PARTS
+            ? "Build speed: Balanced. 6 parts at a time, as many as the free memory allows "
+              "(14.2 GB free)."
+            : NULL;
+        build.queue_line = which == FLOW_BUILD_PARTS
+            ? "Then 12 more games from the build queue." : NULL;
         build.elapsed_ms = 83400u;
         build.lines[0] = "[compile] 1204 of 3311 functions";
         build.lines[1] = "[compile] chunk 12 of 31";
@@ -1066,6 +1151,27 @@ static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
         error.details = "Synthetic details: a source-owned fixture error, shown as data.";
         error.log_path = "C:/synthetic/logs/build.log";
         error.recovery_label = "BACK TO LIBRARY";
+        error.logical_width = g_flow_width;
+        error.logical_height = g_flow_height;
+        return player_ui_screen_error(ui, &error);
+    }
+    if (which == FLOW_ERROR_LONG) {
+        /* A message of about 600 characters, more than four lines on the card
+           (#2071 moved this case here from the old renderer's tests). */
+        static const char long_message[] =
+            "Build setup could not continue because a required file was missing. "
+            "Check the message, follow the suggested recovery steps, and try again. "
+            "If the application files are incomplete, reinstall the app and keep "
+            "its folder together. Return to the library after correcting the issue. "
+            "This final sentence confirms the full message remains visible beyond "
+            "the old four-line limit. Keep every recovery step on this card so the "
+            "player can read the complete instruction before leaving this screen.";
+        PlayerUiErrorModel error;
+        memset(&error, 0, sizeof(error));
+        error.badge = "Problem";
+        error.title = "Synthetic Long Error";
+        error.message = long_message;
+        error.recovery_label = "Back to library";
         error.logical_width = g_flow_width;
         error.logical_height = g_flow_height;
         return player_ui_screen_error(ui, &error);
@@ -1203,6 +1309,25 @@ static void test_build_bar_shows_compiled_parts(void) {
             CHECK(notice_y > bar_y, "the note sits under the progress bar");
         }
     }
+    {
+        /* Settings > Build speed: the card names the speed, the job count and what bound
+           it, in the muted colour, between the bar and the note. */
+        const char *speed = strstr(out, "60000045 TEXT ");
+        const char *notice = strstr(out, "60000044 TEXT ");
+        const char *elapsed = strstr(out, "60000043 TEXT ");
+        CHECK(speed != NULL && strstr(speed, "Build speed: Balanced. 6 parts at a time") != NULL,
+              "the build card names the build speed and its job count");
+        if (speed != NULL && notice != NULL && elapsed != NULL) {
+            int speed_y = 0, notice_y = 0;
+            char speed_rgba[9] = "", elapsed_rgba[9] = "";
+            CHECK(sscanf(speed + 14, "%*d %d %*d %*d %8s", &speed_y, speed_rgba) == 2 &&
+                  sscanf(notice + 14, "%*d %d", &notice_y) == 1 &&
+                  sscanf(elapsed + 14, "%*d %*d %*d %*d %8s", elapsed_rgba) == 1,
+                  "read the speed line's, the note's and the elapsed time's rows");
+            CHECK(strcmp(speed_rgba, elapsed_rgba) == 0, "the speed line is muted");
+            CHECK(speed_y < notice_y, "the speed line comes before the note");
+        }
+    }
     used = 0u;
     out[0] = '\0';
     {
@@ -1217,6 +1342,8 @@ static void test_build_bar_shows_compiled_parts(void) {
             nk_ui_destroy(plain);
             CHECK(strstr(out, "60000044 TEXT ") == NULL,
                   "a build without a note draws none");
+            CHECK(strstr(out, "60000045 TEXT ") == NULL,
+                  "a build without a speed line draws none");
         }
     }
 }
@@ -1325,6 +1452,18 @@ static bool build_library_golden(char *out, size_t cap, size_t *used) {
     model.title_count = sizeof(k_demo_titles) / sizeof(k_demo_titles[0]);
     nk_ui_focus(ui, PLAYER_UI_ID_LIBRARY_ITEM(1u));
     if (!append_case(out, cap, used, "library-demos-with-games", ui, &model, NULL)) {
+        nk_ui_destroy(ui);
+        return false;
+    }
+    /* The build queue's line: its count and Queue, which opens it. */
+    nk_ui_focus(ui, 0u);
+    model.titles = k_titles;
+    model.title_count = sizeof(k_titles) / sizeof(k_titles[0]);
+    model.page_size = player_ui_library_page_size(1280.0f, 800.0f, &model.columns);
+    model.page_label = "Page 1 of 2";
+    model.rebuild_notice = "Building 1 of 3";
+    model.rebuild_notice_offers_queue = true;
+    if (!append_case(out, cap, used, "library-build-queue", ui, &model, NULL)) {
         nk_ui_destroy(ui);
         return false;
     }
@@ -1816,7 +1955,9 @@ static bool build_title_golden(char *out, size_t cap, size_t *used) {
             {FLOW_WIZ_VERIFY, "wizard-verify"},
             {FLOW_WIZ_EXPERIMENTAL, "wizard-experimental"},
             {FLOW_WIZ_FONTS, "wizard-fonts"}, {FLOW_WIZ_READY, "wizard-ready"},
-            {FLOW_WIZ_STAGED, "wizard-staged"}, {FLOW_WIZ_OPTIONS, "wizard-options"}
+            {FLOW_WIZ_STAGED, "wizard-staged"}, {FLOW_WIZ_OPTIONS, "wizard-options"},
+            {FLOW_PAGE_QUEUE, "flow-build-queue"},
+            {FLOW_PAGE_QUEUE_PAUSED, "flow-build-queue-paused"}
         };
         for (size_t i = 0u; i < sizeof(flows) / sizeof(flows[0]); ++i) {
             g_flow_case = flows[i].which;
@@ -1827,6 +1968,30 @@ static bool build_title_golden(char *out, size_t cap, size_t *used) {
             }
         }
         g_flow_case = FLOW_NONE;
+    }
+    {
+        /* The build queue on a game's page: Add to queue beside BUILD PACKAGE,
+           then Remove from queue and its place while it waits. */
+        PlayerUiTitle queued = k_titles[1];
+        PlayerUiTitleModel queued_model = model;
+        queued.queue_add_offered = true;
+        queued_model.title = &queued;
+        nk_ui_focus(ui, PLAYER_UI_ID_TITLE_PRIMARY);
+        if (!append_case(out, cap, used, "title-queue-add", ui, NULL, &queued_model)) {
+            nk_ui_destroy(ui);
+            return false;
+        }
+        queued.queue_add_offered = false;
+        queued.queue_remove_offered = true;
+        queued.library_status = "Queued 2 of 3";
+        queued.library_status_detail = "Place in the build queue: 2 of 3. Waiting in the "
+                                       "build queue. It builds when its turn comes.";
+        queued.status_marker = "\xE2\x97\x86";
+        queued.status_rgba = nk_ui_theme_n1()->info;
+        if (!append_case(out, cap, used, "title-queue-waiting", ui, NULL, &queued_model)) {
+            nk_ui_destroy(ui);
+            return false;
+        }
     }
     {
         /* The About page, with a fixed build date (SOURCE_DATE_EPOCH-style). */
@@ -1971,7 +2136,7 @@ static void test_router(void) {
           !nk_ui_router_push(router, (PlayerUiRoute)0) &&
           !nk_ui_router_replace(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_REMOVE + 1)) &&
           !nk_ui_router_push(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_REMOVE + 1)) &&
-          !nk_ui_router_push(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_STEAM + 1)),
+          !nk_ui_router_push(router, (PlayerUiRoute)(PLAYER_UI_ROUTE_QUEUE + 1)),
           "router refuses routes it does not draw");
     CHECK(nk_ui_router_current(router) == PLAYER_UI_ROUTE_ABOUT &&
           nk_ui_router_depth(router) == 1u, "a refused route leaves the stack alone");
@@ -2289,7 +2454,9 @@ static bool flow_row_sentence_is_beside_button(FlowCase which, NkUiId button_id,
     draw = flow_case_layout(which, 1280, 800, &ui);
     for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
         const NkUiDrawCmd *cmd = &draw->cmd[i];
-        if (cmd->element_id == button_id && cmd->kind == NK_UI_DRAW_RECTANGLE) {
+        /* A button that is on is filled; one that is off has only its border. */
+        if (cmd->element_id == button_id &&
+            (cmd->kind == NK_UI_DRAW_RECTANGLE || cmd->kind == NK_UI_DRAW_BORDER)) {
             button = cmd;
         }
         if (cmd->kind == NK_UI_DRAW_TEXT && cmd->custom != NULL) {
@@ -2849,6 +3016,9 @@ static void test_settings_pages(void) {
          "Build tools and cache opens its page"},
         {FLOW_SETTINGS_BUILD_CACHE, PLAYER_UI_ID_SETTINGS_SHARE_LIBRARIES,
          PLAYER_UI_SETTINGS_TOGGLE_SHARE_LIBRARIES, "the share switch toggles library sharing"},
+        {FLOW_SETTINGS_BUILD_CACHE, PLAYER_UI_ID_SETTINGS_BUILD_SPEED,
+         PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED,
+         "the build speed button steps Background, Balanced, Fastest"},
         {FLOW_SETTINGS_BUILD_CACHE, PLAYER_UI_ID_SETTINGS_CLEAR_LIBRARIES,
          PLAYER_UI_SETTINGS_CLEAR_SHARED_LIBRARIES, "Clear shared library cache clears it"},
         {FLOW_SETTINGS_BUILD_CACHE, PLAYER_UI_ID_SETTINGS_REMOVE_TOOLS,
@@ -3047,6 +3217,26 @@ static void test_settings_pages(void) {
     CHECK(activate_flow_button(PLAYER_UI_ID_TITLE_PLAY_OPTIONS, FLOW_PAGE_TITLE_ACE).kind ==
               PLAYER_UI_ACTION_OPEN_PLAY_OPTIONS,
           "Enhanced options opens the game's own Enhanced page");
+    /* #2151: the render notice names the slower path on the game's page, with Hide, and
+       leaves the first focus on PLAY. */
+    CHECK(flow_case_fits(FLOW_PAGE_TITLE_RENDER, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "Vulkan did not start on this PC, so this game is drawn in "
+                           "software") != NULL &&
+              strstr(dump, "\"DRAWN IN SOFTWARE\"") != NULL && strstr(dump, "\"HIDE\"") != NULL,
+          "the render notice shows its heading, its sentence and Hide on the game's page");
+    CHECK(dump_flow_case(FLOW_PAGE_TITLE_ENHANCED, dump, sizeof(dump)) &&
+              strstr(dump, "DRAWN IN SOFTWARE") == NULL && strstr(dump, "\"HIDE\"") == NULL,
+          "without a fallback the game's page has no render notice");
+    CHECK(activate_flow_button(PLAYER_UI_ID_TITLE_RENDER_NOTICE_HIDE, FLOW_PAGE_TITLE_RENDER)
+                  .kind == PLAYER_UI_ACTION_HIDE_RENDER_NOTICE,
+          "the render notice's Hide asks to hide it");
+    {
+        NkUi *ui = NULL;
+        (void)flow_case_layout(FLOW_PAGE_TITLE_RENDER, 1280, 720, &ui);
+        CHECK(ui != NULL && nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY,
+              "the render notice is never the first focus: PLAY is");
+        if (ui != NULL) nk_ui_destroy(ui);
+    }
     CHECK(dump_flow_case(FLOW_SETTINGS_NOTICES, dump, sizeof(dump)) &&
               strstr(dump, "synthetic-compiler 14.2") != NULL &&
               strstr(dump, "GPL-3.0-or-later; see LICENSE") != NULL,
@@ -3064,6 +3254,13 @@ static void test_settings_pages(void) {
               strstr(dump, "\"REMOVE BUILD TOOLS\"") != NULL &&
               strstr(dump, "Shared library cache cleared.") != NULL,
           "build tools and cache shows the switch, tool removal and the clear notice");
+    CHECK(flow_case_fits(FLOW_SETTINGS_BUILD_CACHE, 960, 540, dump, sizeof(dump)) &&
+              strstr(dump, "\"BUILD SPEED: BACKGROUND\"") != NULL,
+          "build tools and cache shows the build speed at 960 x 540");
+    CHECK(flow_row_sentence_is_beside_button(FLOW_SETTINGS_BUILD_CACHE,
+                                             PLAYER_UI_ID_SETTINGS_BUILD_SPEED,
+                                             "Up to two parts at a time"),
+          "Settings > Build cache keeps the Build speed sentence beside its button");
     CHECK(flow_row_sentence_is_beside_button(FLOW_SETTINGS_BUILD_CACHE,
                                              PLAYER_UI_ID_SETTINGS_SHARE_LIBRARIES,
                                              "Builds keep each compiled library"),
@@ -3143,7 +3340,7 @@ static bool developer_log_op_is(PlayerUiAction action, PlayerUiDeveloperLogOp op
 }
 
 /* Controller settings and the developer log in the next UI. Every control
-   returns the op main.c runs with the existing renderer's handlers, and each
+   returns the op main.c runs with the player's handlers, and each
    page fits the 960 x 540 minimum window with no text over other text. */
 static void test_controller_and_developer_log_pages(void) {
     static char dump[CASE_DUMP_CAP];
@@ -3443,9 +3640,150 @@ static void test_every_screen_fits_the_window(void) {
                                      sizeof(dump)),
                       message);
             }
+            /* A long error message is wrapped, never cut: its last sentence shows. */
+            CHECK(flow_case_shows(FLOW_ERROR_LONG, sizes[s].w, sizes[s].h, "screen."),
+                  "a long error message keeps its last sentence in the window");
         }
     }
     g_flow_text_size_pct = 100;
+}
+
+/* Whether a screen's prompt bar is whole in a width x height window: the bar is drawn
+   unclipped along the window's bottom edge, and each of its prompt words that the screen
+   shows is painted whole inside it. A page taller than the room between the bars used to
+   push its bar out of the window, where it was not drawn at all, so the fit checks (which
+   look only at what is drawn) passed (#2245). */
+static bool hint_bar_whole(FlowCase which, int width, int height) {
+    /* Every screen's prompt bar has offset 0x40 in its own screen's ids; one-card flows
+       share the flow screen's. */
+    static const NkUiId bars[] = {
+        NK_UI_ID(NK_UI_ID_SCREEN_LIBRARY, 0x000040u), NK_UI_ID(NK_UI_ID_SCREEN_TITLE, 0x000040u),
+        NK_UI_ID(NK_UI_ID_SCREEN_ABOUT, 0x000040u), NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000040u),
+        NK_UI_ID(NK_UI_ID_SCREEN_CONTROLS, 0x000040u),
+        NK_UI_ID(NK_UI_ID_SCREEN_DEVELOPER_LOG, 0x000040u), FLOW_ID_PROMPTS
+    };
+    static const char *const labels[] = {"MOVE", "SELECT", "BACK"};
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    const NkUiDrawCmd *bar = NULL;
+    uint32_t after_bar = 0u;
+    bool whole = draw != NULL;
+    for (uint32_t i = 0u; whole && i < draw->ncmd && bar == NULL; ++i) {
+        for (size_t b = 0u; b < sizeof(bars) / sizeof(bars[0]); ++b) {
+            if (draw->cmd[i].kind == NK_UI_DRAW_RECTANGLE && draw->cmd[i].element_id == bars[b]) {
+                bar = &draw->cmd[i];
+                after_bar = i + 1u;
+            }
+        }
+    }
+    whole = whole && bar != NULL && memcmp(bar->clip, bar->bounds, sizeof(bar->clip)) == 0 &&
+            bar->bounds[0] >= 0 && bar->bounds[1] >= 0 && bar->bounds[2] <= width &&
+            bar->bounds[3] <= height && bar->bounds[3] >= height - 1;
+    /* The bar's own words are drawn after its fill. A card's controls scrolled out of its
+       view can lie under the bar too; they are not shown, so they are not the bar's. */
+    for (uint32_t i = after_bar; whole && i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        const NkUiTextRun *run = cmd->kind == NK_UI_DRAW_TEXT ? (const NkUiTextRun *)cmd->custom
+                                                              : NULL;
+        if (run == NULL || run->text == NULL || cmd->bounds[1] < bar->bounds[1] ||
+            !command_shows(cmd)) {
+            continue;
+        }
+        for (size_t l = 0u; l < sizeof(labels) / sizeof(labels[0]); ++l) {
+            if (run->length == strlen(labels[l]) &&
+                memcmp(run->text, labels[l], run->length) == 0 &&
+                (memcmp(cmd->clip, cmd->bounds, sizeof(cmd->clip)) != 0 ||
+                 cmd->bounds[3] > bar->bounds[3])) {
+                whole = false;
+            }
+        }
+    }
+    if (!whole) {
+        fprintf(stderr, "  prompt bar of case %d at %d x %d: %s\n", (int)which, width, height,
+                bar == NULL ? "not drawn (pushed out of the window)" : "cut off");
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    return whole;
+}
+
+/* Whether a game's page, scrolled to the end of its body, shows the text run `label`
+   whole and above the prompt bar: what the page scrolls away is still reachable. */
+static bool title_end_shows_after_scroll(FlowCase which, int width, int height,
+                                         const char *label, bool *scrolled) {
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    NkUiScrollState state;
+    NkUiScale scale;
+    NkUiViewport viewport = launcher_viewport(width, height, 1.0f);
+    size_t length = strlen(label);
+    bool shown = false;
+    *scrolled = false;
+    if (draw == NULL || ui == NULL) {
+        if (ui != NULL) nk_ui_destroy(ui);
+        return false;
+    }
+    viewport.text_size_pct = g_flow_text_size_pct;
+    scale = nk_ui_scale_for_viewport(&viewport);
+    *scrolled = nk_ui_scroll_state(ui, NK_UI_ID(NK_UI_ID_SCREEN_TITLE, 0x000020u), &state) &&
+                state.max_offset > 0.0f;
+    nk_ui_scroll_to(ui, NK_UI_ID(NK_UI_ID_SCREEN_TITLE, 0x000020u), 1.0e6f);
+    g_flow_width = scale.logical_w;
+    g_flow_height = scale.logical_h;
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)draw_flow_case(ui, which);
+        draw = nk_ui_end(ui);
+    }
+    g_flow_width = 1280.0f;
+    g_flow_height = 800.0f;
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd && !shown; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        const NkUiTextRun *run = cmd->kind == NK_UI_DRAW_TEXT ? (const NkUiTextRun *)cmd->custom
+                                                              : NULL;
+        shown = run != NULL && run->text != NULL && run->length == length &&
+                memcmp(run->text, label, length) == 0 &&
+                memcmp(cmd->clip, cmd->bounds, sizeof(cmd->clip)) == 0 &&
+                cmd->bounds[3] <= height;
+    }
+    nk_ui_destroy(ui);
+    return shown;
+}
+
+/* #2245: every screen keeps its prompt bar whole at every window size the launcher
+   supports and at every text size: a game's page in each play mode, with the fullest
+   Enhancements card, included. What does not fit scrolls between the bars. */
+static void test_prompt_bar_stays_whole(void) {
+    /* The default window, the minimum, a small laptop's maximised window, the
+       1280 x 720 pixels of a 150% display (853 x 480 at 1x), and a large window. */
+    static const struct { int w; int h; } sizes[] = {
+        {1280, 720}, {960, 540}, {1366, 705}, {853, 480}, {1920, 1080}
+    };
+    static const int text_sizes[] = {100, 125, 150};
+    int saved = g_flow_text_size_pct;
+    for (size_t t = 0u; t < sizeof(text_sizes) / sizeof(text_sizes[0]); ++t) {
+        g_flow_text_size_pct = text_sizes[t];
+        for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+            for (int which = FLOW_BUILD; which < FLOW_COUNT; ++which) {
+                char message[160];
+                (void)snprintf(message, sizeof(message),
+                               "screen case %d keeps its prompt bar whole at %d x %d, %d%% text",
+                               which, sizes[s].w, sizes[s].h, text_sizes[t]);
+                CHECK(hint_bar_whole((FlowCase)which, sizes[s].w, sizes[s].h), message);
+            }
+        }
+    }
+    g_flow_text_size_pct = 100;
+    for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+        bool scrolled = false;
+        CHECK(title_end_shows_after_scroll(FLOW_PAGE_TITLE_ENHANCED, sizes[s].w, sizes[s].h,
+                                           "REPORT A PROBLEM", &scrolled),
+              "a game's page scrolled to its end shows its last row, Report a problem");
+        if (sizes[s].h <= 720) {
+            CHECK(scrolled, "the fullest Enhanced page is taller than the room at the design "
+                            "size, so its body scrolls (#2245)");
+        }
+    }
+    g_flow_text_size_pct = saved;
 }
 
 static void test_refresh_advice_classifier(void) {
@@ -4211,7 +4549,10 @@ static int capture_screens(const char *directory) {
              PLAYER_UI_ID_CONTROLLER_CALIBRATION_PRIMARY},
             {FLOW_CALIBRATE_RESULT, "controller-calibrate-result",
              PLAYER_UI_ID_CONTROLLER_CALIBRATION_PRIMARY},
-            {FLOW_DEVLOG, "developer-log", PLAYER_UI_ID_DEVELOPER_LOG_CLOSE}
+            {FLOW_DEVLOG, "developer-log", PLAYER_UI_ID_DEVELOPER_LOG_CLOSE},
+            /* #2245 and #2151: the fullest Enhanced page, and with the render notice. */
+            {FLOW_PAGE_TITLE_ENHANCED, "title-enhanced-full", PLAYER_UI_ID_TITLE_PRIMARY},
+            {FLOW_PAGE_TITLE_RENDER, "title-render-notice", PLAYER_UI_ID_TITLE_PRIMARY}
         };
         for (size_t i = 0u; i < sizeof(flows) / sizeof(flows[0]); ++i) {
             g_flow_case = flows[i].which;
@@ -5482,6 +5823,286 @@ static void test_rebuild_prompt_reminder_and_banner(void) {
     }
 }
 
+static PlayerUiAction activate_queue_button(NkUiId id, const PlayerUiQueueModel *model) {
+    NkUiConfig config;
+    NkUiEvent activate;
+    NkUi *ui;
+    PlayerUiAction result = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    ui = screen_ui_create(&config);
+    if (ui == NULL) return result;
+    set_test_viewport(ui, 1280, 800);
+    /* One frame lays the rows out, so the focus lands on a drawn button. */
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_queue(ui, model);
+    (void)nk_ui_end(ui);
+    nk_ui_focus(ui, id);
+    memset(&activate, 0, sizeof(activate));
+    activate.type = NK_UI_EV_ACTIVATE;
+    activate.down = true;
+    nk_ui_push_event(ui, &activate);
+    nk_ui_begin(ui, 0.0);
+    result = player_ui_screen_queue(ui, model);
+    (void)nk_ui_end(ui);
+    nk_ui_destroy(ui);
+    return result;
+}
+
+static bool queue_op_is(PlayerUiAction action, PlayerUiQueueOp op, size_t title_index) {
+    return action.kind == PLAYER_UI_ACTION_QUEUE && (PlayerUiQueueOp)action.primary == op &&
+           action.title_index == title_index;
+}
+
+/* The build queue: the queue screen lists the one building first, then the
+   games that wait with Up, Down and Remove, a page at a time, and Resume when
+   paused; the library line opens it; the title page offers Add to queue beside
+   BUILD PACKAGE and Remove from queue while the game waits; the build card
+   says how many follow. */
+static void test_build_queue_screens(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const PlayerUiQueueRow rows[3] = {
+        {"Synthetic Showcase Scene", "Building 40%", 4u, true, false, false},
+        {"Synthetic Showcase Breakout", "Next", 5u, false, false, true},
+        {"Synthetic Experimental Fixture", "Waiting", 6u, false, true, false}
+    };
+    NkUiConfig config;
+    NkUi *ui;
+    NkUiTextBackend text = screen_test_text_backend();
+    PlayerUiQueueModel queue;
+    PlayerUiAction action;
+    char expect[128];
+    const NkUiTheme *theme = nk_ui_theme_n1();
+    memset(&queue, 0, sizeof(queue));
+    queue.rows = rows;
+    queue.row_count = 3u;
+    queue.total = 3u;
+    queue.logical_width = 1280.0f;
+    queue.logical_height = 800.0f;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create the build queue UI");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_queue(ui, &queue);
+        (void)nk_ui_end(ui);
+    }
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"3 games in the queue\"") != NULL, "the queue names its count");
+    {
+        const char *building = strstr(dump, "\"Synthetic Showcase Scene\"");
+        const char *next = strstr(dump, "\"Synthetic Showcase Breakout\"");
+        const char *waiting = strstr(dump, "\"Synthetic Experimental Fixture\"");
+        CHECK(building != NULL && next != NULL && waiting != NULL && building < next &&
+                  next < waiting,
+              "the queue lists the one building first, then the rest in build order");
+    }
+    (void)snprintf(expect, sizeof(expect), "%08X \"BUILDING 40%%\"",
+                   (unsigned)theme->accent_dark);
+    CHECK(strstr(dump, expect) != NULL, "the one building shows its progress in brand blue");
+    CHECK(strstr(dump, "\"NEXT\"") != NULL && strstr(dump, "\"WAITING\"") != NULL,
+          "each game that waits says whether it is next");
+    CHECK(strstr(dump, "One game builds at a time, in this order.") != NULL,
+          "the queue says it builds one game at a time");
+    CHECK(strstr(dump, "\"PAGE\"") == NULL && strstr(dump, "\"RESUME\"") == NULL &&
+              strstr(dump, "\"LATER GAMES\"") == NULL,
+          "one page and a running queue need no pager and no Resume");
+    nk_ui_destroy(ui);
+
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_DOWN_BASE + 1u, &queue),
+                      PLAYER_UI_QUEUE_LATER, 5u), "Down moves that game one place later");
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_UP_BASE + 2u, &queue),
+                      PLAYER_UI_QUEUE_EARLIER, 6u), "Up moves that game one place earlier");
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_REMOVE_BASE + 2u, &queue),
+                      PLAYER_UI_QUEUE_REMOVE, 6u), "Remove takes that game out");
+    CHECK(activate_queue_button(PLAYER_UI_ID_QUEUE_UP_BASE + 1u, &queue).kind ==
+              PLAYER_UI_ACTION_NONE,
+          "the next game cannot move past the one building");
+    CHECK(activate_queue_button(PLAYER_UI_ID_QUEUE_DOWN_BASE + 2u, &queue).kind ==
+              PLAYER_UI_ACTION_NONE, "the last game cannot move later");
+    CHECK(activate_queue_button(PLAYER_UI_ID_QUEUE_REMOVE_BASE + 0u, &queue).kind ==
+              PLAYER_UI_ACTION_NONE,
+          "the one building has no Remove (Cancel build stops it)");
+    CHECK(activate_queue_button(PLAYER_UI_ID_QUEUE_BACK, &queue).kind == PLAYER_UI_ACTION_BACK,
+          "Back leaves the queue");
+
+    /* Paused, on the second of three pages. */
+    queue.paused = true;
+    queue.first_row = 4u;
+    queue.total = 9u;
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_RESUME, &queue),
+                      PLAYER_UI_QUEUE_RESUME, 0u), "Resume starts a paused queue");
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAGE_BACK, &queue),
+                      PLAYER_UI_QUEUE_PAGE_BACK, 0u), "Earlier games turns back a page");
+    CHECK(queue_op_is(activate_queue_button(PLAYER_UI_ID_QUEUE_PAGE_NEXT, &queue),
+                      PLAYER_UI_QUEUE_PAGE_NEXT, 0u), "Later games turns on a page");
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create the paused build queue UI");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_queue(ui, &queue);
+        (void)nk_ui_end(ui);
+    }
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"GAMES 5-7 OF 9, IN BUILD ORDER\"") != NULL,
+          "a page names which games it shows");
+    (void)snprintf(expect, sizeof(expect), "%08X \"Paused: a build could not start.",
+                   (unsigned)theme->warning);
+    CHECK(strstr(dump, expect) != NULL, "a paused queue says why, in the warning colour");
+    CHECK(strstr(dump, "\"RESUME\"") != NULL, "a paused queue offers Resume");
+    nk_ui_destroy(ui);
+    {
+        NkUiRouter *router = nk_ui_router_create();
+        NkUiEvent back;
+        CHECK(router != NULL, "router allocates");
+        if (router == NULL) return;
+        memset(&back, 0, sizeof(back));
+        back.type = NK_UI_EV_BACK;
+        CHECK(nk_ui_router_current(router) == PLAYER_UI_ROUTE_LIBRARY &&
+                  nk_ui_router_push(router, PLAYER_UI_ROUTE_QUEUE) &&
+                  nk_ui_router_handle_event(router, &back) &&
+                  nk_ui_router_current(router) == PLAYER_UI_ROUTE_LIBRARY,
+              "Back (Esc or B) closes the queue over the library");
+        nk_ui_router_destroy(router);
+    }
+
+    /* The library line opens the queue, and keeps the first card's focus. */
+    {
+        PlayerUiTitle titles[1];
+        PlayerUiLibraryModel library;
+        memset(titles, 0, sizeof(titles));
+        titles[0].title = "Synthetic Showcase Breakout";
+        titles[0].disc_id = "TEST00008";
+        titles[0].library_status = "Queued 2 of 3";
+        memset(&library, 0, sizeof(library));
+        library.titles = titles;
+        library.title_count = 1u;
+        library.columns = 4u;
+        library.page_size = 8u;
+        library.logical_width = 1280.0f;
+        library.logical_height = 800.0f;
+        library.rebuild_notice = "Building 1 of 3";
+        library.rebuild_notice_offers_queue = true;
+        action = activate_library_button(PLAYER_UI_ID_LIBRARY_QUEUE, &library);
+        CHECK(queue_op_is(action, PLAYER_UI_QUEUE_OPEN, 0u), "the library's Queue opens it");
+        ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create the library queue line UI");
+        if (ui == NULL) return;
+        set_test_viewport(ui, 1280, 800);
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_library(ui, &library);
+            (void)nk_ui_end(ui);
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        CHECK(strstr(dump, "\"Building 1 of 3\"") != NULL && strstr(dump, "\"QUEUE\"") != NULL,
+              "the library line shows the queue's count and Queue");
+        CHECK(strstr(dump, "\"QUEUED 2 OF 3\"") != NULL, "a queued card shows its place");
+        CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_LIBRARY_ITEM(0u),
+              "the first card keeps the default focus");
+        nk_ui_destroy(ui);
+    }
+
+    /* The title page: BUILD PACKAGE stays the main action; Add to queue sits
+       beside it, and becomes Remove from queue while the game waits. */
+    {
+        PlayerUiTitle title = k_titles[1];
+        PlayerUiTitleModel detail;
+        title.queue_add_offered = true;
+        memset(&detail, 0, sizeof(detail));
+        detail.title = &title;
+        detail.title_index = 5u;
+        detail.logical_width = 1280.0f;
+        detail.logical_height = 800.0f;
+        action = activate_title_button(PLAYER_UI_ID_TITLE_QUEUE, &detail);
+        CHECK(queue_op_is(action, PLAYER_UI_QUEUE_ADD, 5u), "Add to queue queues that game");
+        action = activate_title_button(PLAYER_UI_ID_TITLE_PRIMARY, &detail);
+        CHECK(action.kind == PLAYER_UI_ACTION_PRIMARY &&
+                  action.primary == PLAYER_UI_PRIMARY_BUILD,
+              "BUILD PACKAGE still builds it now");
+        ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create the Add to queue title UI");
+        if (ui == NULL) return;
+        set_test_viewport(ui, 1280, 800);
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_title(ui, &detail);
+            (void)nk_ui_end(ui);
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        {
+            const char *build = strstr(dump, "\"BUILD PACKAGE\"");
+            const char *add = strstr(dump, "\"ADD TO QUEUE\"");
+            CHECK(build != NULL && add != NULL && build < add,
+                  "Add to queue sits after BUILD PACKAGE");
+        }
+        CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY,
+              "BUILD PACKAGE keeps the default focus");
+        title.queue_add_offered = false;
+        title.queue_remove_offered = true;
+        title.library_status = "Queued 2 of 3";
+        title.library_status_detail = "Place in the build queue: 2 of 3. Waiting in the "
+                                      "build queue. It builds when its turn comes.";
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_title(ui, &detail);
+            (void)nk_ui_end(ui);
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        CHECK(strstr(dump, "\"REMOVE FROM QUEUE\"") != NULL &&
+                  strstr(dump, "\"ADD TO QUEUE\"") == NULL,
+              "a game that waits offers Remove from queue");
+        CHECK(strstr(dump, "Place in the build queue: 2 of 3.") != NULL,
+              "the package card gives its place in the queue");
+        nk_ui_destroy(ui);
+        action = activate_title_button(PLAYER_UI_ID_TITLE_QUEUE, &detail);
+        CHECK(queue_op_is(action, PLAYER_UI_QUEUE_REMOVE, 5u),
+              "Remove from queue takes that game out");
+    }
+
+    /* The build card says how many games the queue builds after this one. */
+    {
+        PlayerUiBuildModel build;
+        memset(&build, 0, sizeof(build));
+        build.title_line = "Synthetic Showcase Scene (TEST00007)";
+        build.stage = 2;
+        build.fraction = 0.25f;
+        build.message = "Compiling part 4 of 12";
+        build.queue_line = "Then 2 more games from the build queue.";
+        build.logical_width = 1280.0f;
+        build.logical_height = 800.0f;
+        ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create the build card UI");
+        if (ui == NULL) return;
+        set_test_viewport(ui, 1280, 800);
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_build(ui, &build);
+            (void)nk_ui_end(ui);
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)snprintf(expect, sizeof(expect), "%08X \"Then 2 more games from the build queue.\"",
+                       (unsigned)theme->muted);
+        CHECK(strstr(dump, expect) != NULL, "the build card names what the queue builds next");
+        build.built = true;
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)player_ui_screen_build(ui, &build);
+            (void)nk_ui_end(ui);
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        CHECK(strstr(dump, "from the build queue") == NULL,
+              "a written package's card drops the queue line");
+        nk_ui_destroy(ui);
+    }
+}
+
 static bool disc_verify_op_is(PlayerUiAction action, PlayerUiDiscVerifyOp op) {
     return action.kind == PLAYER_UI_ACTION_DISC_VERIFY &&
            (PlayerUiDiscVerifyOp)action.primary == op;
@@ -5758,6 +6379,7 @@ int main(int argc, char **argv) {
     test_refresh_advice_classifier();
     test_error_details_fit_the_minimum_window();
     test_every_screen_fits_the_window();
+    test_prompt_bar_stays_whole();
     test_psp_fonts_page();
     test_wizard_actions();
     test_plain_cards();
@@ -5783,6 +6405,7 @@ int main(int argc, char **argv) {
     test_outcome_lines_take_their_colour();
     test_stop_game_asks_first();
     test_rebuild_prompt_reminder_and_banner();
+    test_build_queue_screens();
     test_disc_verify_line_badge_and_note();
     test_binding_labels_fit();
     test_input_chip_words();

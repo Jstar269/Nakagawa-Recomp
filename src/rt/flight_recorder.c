@@ -221,7 +221,11 @@ static int s_flight_init_state;
  * parser's limit, so any line the runtime accepts is kept whole; the bundle schema's maxLength
  * is 191. tools/test_flight_diff.py holds the three together. */
 static char s_flight_ace[192];
-static char s_flight_upscale[16];      /* SR_PRESENT_UPSCALE's mode when the window is upscaled */
+/* The window's upscale stamp (gui.c gui_upscale_init): "fsr1", "movie-anime4k", "movie-fsr1",
+ * "fsr1+movie-anime4k" or "fsr1+movie-fsr1". 32 holds the longest (18) with room to spare. */
+static char s_flight_upscale[32];
+/* The longest stamp gui.c writes must fit (C99 has no _Static_assert): a negative size fails the build. */
+typedef char s_flight_upscale_fits[sizeof "fsr1+movie-anime4k" <= sizeof(s_flight_upscale) ? 1 : -1];
 static int s_flight_exit_registered;
 static int s_flight_dumped;
 static uint32_t s_flight_dump_count;
@@ -483,7 +487,9 @@ void sr_flight_set_present_upscale(const char *mode) {
     size_t n = 0;
     for (; mode && mode[n] && n + 1 < sizeof(s_flight_upscale); n++) {
         char ch = mode[n];
-        int plain = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9');
+        /* A stamp such as "fsr1+movie-anime4k" joins its parts with '+' and '-'; both are
+         * plain in a JSON string. */
+        int plain = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '+' || ch == '-';
         s_flight_upscale[n] = plain ? ch : '?';
     }
     s_flight_upscale[n] = '\0';

@@ -212,12 +212,24 @@ CASE_ID = 140
 # 156: #341's standard handles, a write to each and a write after closing Stdout.
 else ifeq ($(CASE),hle-std-handles)
 CASE_ID = 156
+# 167: #341's sceKernelSelfStopUnloadModule from a helper PRX the probe loads (case 172, the helper).
+else ifeq ($(CASE),hle-self-stop-unload)
+CASE_ID = 167
+else ifeq ($(CASE),hle-self-stop-helper)
+CASE_ID = 172
 # 159: #279's audio channel rest length at each blocking-output return (1024, 2048, 4096).
 else ifeq ($(CASE),hle-audio-rest)
 CASE_ID = 159
 # 161: #1386's utility dialog status timing and wrong-state answers, in game context.
 else ifeq ($(CASE),hle-utility-dialogs)
 CASE_ID = 161
+# 162: #1380's flash0:/ms0:/disc0: seek cells and sceIoIoctl file commands (probe_hle_measure.c).
+else ifeq ($(CASE),hle-io-seek)
+CASE_ID = 162
+# 164: W-NET-1's nickname limit: owner_name key info and the system-parameter string length
+# refusals, read-only (probe_hle_measure.c, PSP-HLE-NICKNAME-001).
+else ifeq ($(CASE),hle-nickname-limit)
+CASE_ID = 164
 # 106-108: the HLE issue cells (probe_hle_issues.c). 106 is the #356 model-getter and
 # #326 vrnd carry / vscmp batch; 107 the #325 interrupt and timer delivery cells; 108 the
 # #326 VFPU form words (vh2f, vuc2i, vsocp, vwbn, vrndf1/2).
@@ -303,6 +315,32 @@ CASE_ID = 125
 # probe_hle_issues.c).
 else ifeq ($(CASE),vfpu-forms2)
 CASE_ID = 121
+# 163: the #326 VFPU forms the runtime refuses as unmodeled (vcrs widths, vcmov imm3 7,
+# mfvc/mtvc of control 255, rejected VFPU9 widths; probe_hle_issues.c). POWER RISK: a refused
+# form may raise an exception that stops the launch.
+else ifeq ($(CASE),vfpu-unmodeled)
+CASE_ID = 163
+# 165: #326 lv.q/sv.q with the write-back flag, in a probe-owned buffer (probe_hle_issues.c).
+# POWER RISK: nothing catches an exception the flag may raise.
+else ifeq ($(CASE),vfpu-quad-wb)
+CASE_ID = 165
+# 170: the #326 VFPU float/integer conversions (vf2iz/vf2in/vf2iu/vf2id, vi2f, vi2s/vi2us/vi2c/vi2uc;
+# probe_hle_issues.c), register-only.
+else ifeq ($(CASE),vfpu-convert)
+CASE_ID = 170
+# 169: the #326 VFPU condition codes and conditional moves (vcmp, vcmovt/vcmovf, mfvc/mtvc of
+# VFPU_CC; probe_hle_issues.c). Owner present.
+else ifeq ($(CASE),vfpu-cc-cmov)
+CASE_ID = 169
+# 171: the #326 vus2i/vs2i double-width unpack, vsgn and vflush cells (probe_hle_issues.c),
+# register-only.
+else ifeq ($(CASE),vfpu-vus2i)
+CASE_ID = 171
+# 168: the #326 basic VFPU arithmetic forms (vadd/vsub/vmul/vmin/vmax .s-.q, vscl, vdiv.s, vneg/vabs/
+# vmov/vzero/vone/vidt; probe_hle_issues.c). POWER RISK: vidt.s is not an assembler form and may
+# raise a reserved-instruction exception; it runs last.
+else ifeq ($(CASE),vfpu-basic-arith)
+CASE_ID = 168
 else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
@@ -553,11 +591,25 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(
 else ifeq ($(CASE),hle-std-handles)
 TARGET = $(BUILD_DIR)/hle_std_handles
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-self-stop-unload)
+TARGET = $(BUILD_DIR)/hle_self_stop_unload
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+# The helper PRX that case loads from host0 (probe_hle_self_stop_helper.c); built as its own CASE,
+# so build_probe_batch.sh copies it as hle_self_stop_helper.prx next to the probe.
+else ifeq ($(CASE),hle-self-stop-helper)
+TARGET = $(BUILD_DIR)/hle_self_stop_helper
+OBJS = $(BUILD_DIR)/probe_hle_self_stop_helper.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-audio-rest)
 TARGET = $(BUILD_DIR)/hle_audio_rest
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-utility-dialogs)
 TARGET = $(BUILD_DIR)/hle_utility_dialogs
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-io-seek)
+TARGET = $(BUILD_DIR)/hle_io_seek
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),hle-nickname-limit)
+TARGET = $(BUILD_DIR)/hle_nickname_limit
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 # HLE issue cells: their own source, which installs and removes interrupt and timer
 # handlers (107) and reaches a kernel getter through the kernel bridge (106), so they
@@ -582,6 +634,24 @@ TARGET = $(BUILD_DIR)/vfpu_sort
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),vfpu-forms2)
 TARGET = $(BUILD_DIR)/vfpu_forms2
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-unmodeled)
+TARGET = $(BUILD_DIR)/vfpu_unmodeled
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-quad-wb)
+TARGET = $(BUILD_DIR)/vfpu_quad_wb
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-convert)
+TARGET = $(BUILD_DIR)/vfpu_convert
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-cc-cmov)
+TARGET = $(BUILD_DIR)/vfpu_cc_cmov
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-vus2i)
+TARGET = $(BUILD_DIR)/vfpu_vus2i
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-basic-arith)
+TARGET = $(BUILD_DIR)/vfpu_basic_arith
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
 # same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.
@@ -861,6 +931,16 @@ ifneq ($(filter $(REGISTRY_CASES),$(CASE)),)
 LIBS += -lpspreg
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceReg=0x92E41280,0xFA8A5739,0x1D8A762E,0x0CAE832B,0x2C0DB9DD,0x2D211135,0xD4475AA8,0x28A8E98A
 endif
+# hle-nickname-limit: the two system-parameter Get calls only (the nickname string is read for its
+# return and length, never written), and from the registry exactly the seven read calls the guarded
+# walk makes: open and close of the registry and of a category, GetKeysNum, GetKeys and GetKeyInfo.
+# sceRegGetKeyValue (the nickname bytes) and every set, create, remove and flush call are not
+# importable: the gate fails the build on any other sceReg NID.
+ifeq ($(CASE),hle-nickname-limit)
+LIBS += -lpspreg
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceReg=0x92E41280,0xFA8A5739,0x1D8A762E,0x0CAE832B,0x2C0DB9DD,0x2D211135,0xD4475AA8
+endif
 # The UMD case reads the drive state only: exactly sceUmdCheckMedium and sceUmdGetDriveStat,
 # so a build that imported sceUmdActivate (or any other UMD call) fails the gate.
 ifeq ($(CASE),umd-io)
@@ -934,6 +1014,10 @@ PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
 endif
 # And the instruction trace (probe_insn_trace.c).
 ifneq ($(filter $(BUILD_DIR)/probe_insn_trace.o,$(OBJS)),)
+PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
+endif
+# The self stop-unload helper (probe_hle_self_stop_helper.c) exports module_stop too.
+ifneq ($(filter $(BUILD_DIR)/probe_hle_self_stop_helper.o,$(OBJS)),)
 PRX_EXPORTS = $(BUILD_DIR)/probe_exports.exp
 endif
 # And the module_start thread cell (probe_module_start.c), which defines its own module_stop.
@@ -1014,6 +1098,9 @@ $(BUILD_DIR)/probe_dmac_timing.o: probe_dmac_timing.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/probe_insn_trace.o: probe_insn_trace.c insn_trace_fixtures.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/probe_hle_self_stop_helper.o: probe_hle_self_stop_helper.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/probe_module_start.o: probe_module_start.c
