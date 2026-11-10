@@ -4201,7 +4201,7 @@ class TestAcePartsLoad(unittest.TestCase):
 
     def _digest(self, function: str, offset: int, words: int = 1) -> str:
         fn = {"synth_loader": self.loader, "synth_loader_alias": self.loader, "synth_callee": self.callee}[function]
-        return compute_stock_words_digest([self.word(fn + offset + 4 * i) for i in range(words)])
+        return str(compute_stock_words_digest([self.word(fn + offset + 4 * i) for i in range(words)]))
 
     def package(self, *, ace: bool = True, offset: int = 8) -> dict[str, Any]:
         pkg: dict[str, Any] = {
@@ -4483,7 +4483,7 @@ class TestAcePartsLoad(unittest.TestCase):
             pkg = copy.deepcopy(published)
             pkg["site_map"]["synth_loader_alias"] = loader
             change(pkg)
-            return enhancement_package.published_package_findings(pkg)
+            return list(enhancement_package.published_package_findings(pkg))
 
         def boundary_in_alias(pkg: dict[str, Any]) -> None:
             pkg["update_boundary"] = {"function": "synth_loader_alias", "insn_offset": 4, "stock_digest": digest}
