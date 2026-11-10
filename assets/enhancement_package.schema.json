@@ -252,22 +252,22 @@
           "step_site": {
             "type": "string",
             "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$",
-            "description": "gate_30hz_phase and launch_from_rest_60hz only: the site that pins h, the stock logic step (a lui/ori pair, or an lwc1 or lv.s of initialised data). The resolver reads the value from the executable."
+            "description": "gate_30hz_phase and launch_from_rest_60hz only: the site that pins h, the stock logic step: a value_reference site, or the step_x0.5 site that halves the step (a lui/ori pair, or an lwc1 or lv.s of read-only data). The resolver reads the value from the executable."
           },
           "gravity_site": {
             "type": "string",
             "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$",
-            "description": "launch_from_rest_60hz only: the site that pins g, the stock acceleration on gravity_axis."
+            "description": "launch_from_rest_60hz only: the value_reference site that pins g, the stock acceleration on gravity_axis."
           },
           "damping_site": {
             "type": "string",
             "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$",
-            "description": "velocity_source_x_kappa and launch_from_rest_60hz only: the site that pins c, the stock damping coefficient."
+            "description": "velocity_source_x_kappa and launch_from_rest_60hz only: the value_reference site that pins c, the stock damping coefficient."
           },
           "damping_step_site": {
             "type": "string",
             "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$",
-            "description": "velocity_source_x_kappa and launch_from_rest_60hz only: the site that pins L, the step the stock damping multiplies c by; the stock retention per update is 1 - c*L, which must lie in (0, 1)."
+            "description": "velocity_source_x_kappa and launch_from_rest_60hz only: the value_reference site that pins L, the step the stock damping multiplies c by; the stock retention per update is 1 - c*L, which must lie in (0, 1)."
           },
           "phase_time": {
             "type": "object",
@@ -297,7 +297,7 @@
                 "multipleOf": 4
               }
             },
-            "description": "gate_30hz_phase only: where the state's own time is read, a float at offset from the pointer in a callee-saved register."
+            "description": "gate_30hz_phase only: where the state's own time is read, a float at offset from the pointer in a callee-saved register. The phase is the number of updates since that time was zero, found by matching the float against the state's own float32 sum of the 60 Hz step."
           },
           "odd_phase_condition": {
             "type": "boolean",
@@ -308,7 +308,7 @@
             "minimum": 0,
             "maximum": 65528,
             "multipleOf": 4,
-            "description": "launch_from_rest_60hz only: the offset from the pointer in $a0 of the body's two velocity floats."
+            "description": "launch_from_rest_60hz only: the offset from the pointer in $a0 of the body's two velocity floats, which the called function must store itself. A package with such a site names the capability launch_velocity_write."
           },
           "gravity_axis": {
             "type": "integer",
