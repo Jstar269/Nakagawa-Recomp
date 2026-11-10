@@ -231,6 +231,8 @@ typedef enum {
                                   factor 2, 3 or 4. Off in a fresh file; alters GE timing */
     PLAYER_PART_CULL,          /* wider culling (section 11.3.6): 0 off, 1 on. A title's own culling is
                                   widened to Widescreen's wings; a title without a package ignores it */
+    PLAYER_PART_STICK,         /* stick dead-zone remap (section 11.3.8): 0 off, 1 on. Acts only for a
+                                  title whose catalog entry declares a stick dead zone */
     PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
                                   runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
                                   not in the SR_ACE line */
@@ -270,6 +272,8 @@ typedef struct {
     bool on;                   /* Enhanced or Ace: the launch line is not "off" */
     int part[PLAYER_PART_COUNT];
     bool logic_60;             /* Ace with its 60 FPS game logic on (the package may be gone) */
+    int stick_counts;          /* the square stick dead zone the title's catalog entry declares
+                                  (NkTitleEntry.analog_dead_zone_counts), 0 when none */
 } PlayerPlayResolved;
 
 typedef struct {
@@ -1674,6 +1678,8 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off" (tier=ace for Ace; smooth=match is never written).
  * ";cull=on" follows only for Ace with the Wider culling part on; a missing cull is off.
+ * ";stick=<counts>" follows only for Ace with the Stick dead zone part on and a title whose
+ * catalog entry declares a dead zone (stick_counts > 0); a missing stick is off.
  * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);
 /* The presentation upscaler a resolution asks for (NkRuntimeConfig.present_upscale, exported as

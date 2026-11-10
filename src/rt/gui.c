@@ -114,6 +114,8 @@ static MovieUpscale s_movie, s_movie_rec;
 static int      s_offscreen = 0;        /* explicit host-memory presenter for headless bring-up */
 static uint32_t s_buttons = 0;
 static uint8_t  s_lx = 128, s_ly = 128;   /* live left-stick (0..255, 128=centre), latched each present */
+static int      s_stick_dead_zone = 0;     /* the input profile's stick dead zone in centred counts,
+                                              latched with the stick; 0 without an SDL3 presenter */
 static int      s_pad_present = 0;         /* a controller is currently connected */
 #endif /* SR_GUI_INPUT_PATH */
 #ifndef SR_GUI_PRESENT_SELFTEST
@@ -373,6 +375,12 @@ static void sr_gui_take_pause_request(void) {
 static void sync_sdl_input(void) {
     s_buttons = sdl3vk_buttons();
     sdl3vk_analog(&s_lx, &s_ly);
+    {
+        const NkInputProfile *prof = sdl3vk_get_input_profile();
+        s_stick_dead_zone = prof ? ace_stick_host_counts(prof->axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner,
+                                                         prof->axes[NK_PSP_AXIS_ANALOG_Y].deadzone_inner)
+                                 : 0;
+    }
     s_pad_present = sdl3vk_pad_present();
     sr_gui_feed_keyboard();
     sr_gui_take_pause_request();
@@ -1141,6 +1149,7 @@ int gui_interactive(void) {
 #ifdef SR_GUI_INPUT_PATH
 uint32_t gui_buttons(void) { return s_buttons; }
 void gui_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = s_lx; if (ly) *ly = s_ly; }
+int gui_stick_dead_zone(void) { return s_stick_dead_zone; }
 int gui_pad_present(void) { return s_pad_present; }
 void gui_consume_button_pulses(void) {
 #ifdef SR_SDL3VK

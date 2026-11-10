@@ -348,7 +348,8 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
-section 11.3.6) is the other key a line may leave out: a missing `cull` is off, and `cull=on` needs `tier=ace`. Every
+section 11.3.6) and `stick` (the title's stick dead zone, 1 to 126, section 11.3.8) are the other keys a line may
+leave out: a missing `cull` or `stick` is off, and `cull=on` and `stick=<counts>` need `tier=ace`. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -399,6 +400,8 @@ the device is created with no feature outside Ace.
 - **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
   present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
   guest-visible item. Its entry is section 11.3.7.
+- **Input:** `stick=<counts>` (Ace only) changes the left-stick values of the live host samples the guest latches,
+  never when they are latched. It is a guest-visible item. Its entry is section 11.3.8.
 
 ### 10.4. Stamps and Evidence
 
@@ -1485,3 +1488,63 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
   It is in no graphics preset, because it changes GE timing.
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
   exist.
+
+#### 11.3.8. Stick Dead-Zone Remap (`stick`)
+
+For a title whose stick reading ignores part of the stick's throw. *Hot Shots Tennis* (UCUS98701) centres each stick
+byte `b` (0 to 255) as `x = b - (b > 128) - 127`, so 128 reads +1, 127 reads 0, 0 reads -127 and 255 reads +127. It
+counts an axis only when `|x| >= 64`, and it moves the player by the direction of `(x, y)` scaled by `(m - 64) / 63`
+with `m = max(|x|, |y|)`, nothing while `m <= 64`: a square dead zone of 64 counts, with 64 to 127 as its live range.
+The host has its own dead zone (the input profile's per-axis `deadzone_inner`, 7849 of 32767 by default, inside which
+the byte is 128, outside which the value is not rescaled), so a gamepad had to be pushed past half its throw before
+the player moved. The remap starts the host's live range at the edge of the game's dead zone.
+
+- **Status: guest-visible, not admitted under section 11.2.** The guest reads changed stick values. Its key, its
+  library and per-title settings and this entry are in place (section 11.2, items 2, 3 and 6); the runs of item 4 do
+  not exist.
+- **Mechanism.** The dead zone is the title's own data: its public title manifest's optional
+  `"input": {"analog_dead_zone": {"shape": "square", "counts": G}}` (`assets/title_manifest.schema.json`; `shape` is
+  only `square`, `counts` an integer from 1 to 126), checked by `tools/title_manifest.py` and the native manifest
+  parser alike and carried into the generated catalog as `NkTitleEntry.analog_dead_zone_counts` (0 when none is
+  declared). A title's private overlay manifest is checked the same way and does not carry it. The runtime remaps the
+  live host stick where the controller ring latches a sample in analog mode (`src/rt/hle_route.c`), before the sample
+  is stored or recorded. `D` is the host's dead zone in centred counts: the larger of the X and Y axes'
+  `deadzone_inner * 255 / 65535` (integer) from the active input profile, 30 by default, and 0 without an SDL3
+  presenter; a `D` of 127 or more reads as 0 and a `D` above `G - 1` as `G - 1`. With `h = b - 128` per axis, clamped
+  to -127..127, and `m = max(|hx|, |hy|)`:
+  - `m = 0` (rest) leaves both bytes as they are, and an axis at rest keeps its byte;
+  - past the host's dead zone, `m > D`: the target magnitude is `m' = G + (m - D) * (127 - G) / (127 - D)` (integer);
+  - up to it, `0 < m <= D` (a source with less dead zone than the host's, such as the mouse): `m' = m * (G - 1) / D`,
+    still inside the game's dead zone;
+  - both axes scale by `m' / m`, rounded to nearest, keep their signs (the direction is kept) and are clamped to 127,
+    then go back to bytes through the exact inverse of the title's centring: `x >= 1` is `x + 128`, `x <= 0` is
+    `x + 127`.
+
+  So `m = 127` maps to 127 (bytes 0 and 255 are unchanged, and with them the keyboard's and the digital edges), a push
+  just past `D` reaches the game at 64 (scale 0), and the game's movement scale becomes `(m - D) / (127 - D)` within
+  one count. With `G = 64` and `D = 30`: `m` 0, 30, 31, 40, 64, 96 and 127 give the game 1 (rest, untouched), 63, 64,
+  70, 86, 106 and 127, a scale of 0, 0, 0, 0.095, 0.349, 0.667 and 1.0 against the ideal 0, 0, 0.010, 0.103, 0.351,
+  0.680 and 1.0. The curve is `ace_stick_remap` in `src/rt/ace.c`, a pure function.
+- **Key.** `stick=<counts>` on the launch line (section 10.1), an optional key with the title's `G` as its value, 1 to
+  126 in plain decimal: a line without it reads as off, any other value is refused, and `stick=<counts>` is refused
+  unless the line carries `tier=ace`. The player has a library setting and a per-title setting, "Stick dead
+  zone", each able to turn it off alone (section 11.2, item 2), off in a fresh file and in no graphics preset; the
+  line carries `;stick=<counts>` only for an Ace launch with the part on of a title whose catalog entry declares a
+  dead zone, so every other line is as it was. The run names it (`ACE_MODE: stick remap <counts> (...)`, the
+  report's `"stick": {"counts", "host_dead_zone", "samples_remapped"}`), and reports it unavailable when no live
+  sample off rest was remapped by the end of the run.
+- **What it changes:** the left-stick bytes of every live host sample off rest that the guest latches in analog mode,
+  and so how far the player moves for a given push, and which small pushes count in the title's menus.
+- **What it never changes:** an Authentic run, an Enhanced run and an Ace run without the key latch the bytes the
+  window gave, byte for byte. A sample in digital mode is not touched. A route's stick (`SR_PADSCRIPT`) and a
+  replay's recorded sample (`SR_REPLAY`) are already the guest's bytes and pass through unchanged, so a pad script
+  and a replay give the same samples with the item on or off; a recording made with it on records the remapped
+  bytes, which its replay hands back as they are.
+- **VRAM bytes:** unchanged by the item itself; the frames differ only where the game moves differently.
+- **Readbacks:** unchanged by the item itself, as for VRAM.
+- **Timing:** unchanged. The sample is latched at the same time; only its stick bytes differ. The VBLANK schedule,
+  the GE timing model and the media clocks are unchanged.
+- **I/O speed:** unchanged.
+- **Tier:** Ace (one title). **Default:** off.
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`'s stick cells, the
+  player's `test_play_mode_stick_settings`, and the manifest tests).

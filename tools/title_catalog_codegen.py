@@ -345,6 +345,7 @@ def generate_header(digest: str, titles: List[Dict[str, Any]]) -> str:
         "    bool requires_psmf;",
         "    const NkModuleDefinition *modules;",
         "    int module_count;",
+        "    uint8_t analog_dead_zone_counts;    /* input.analog_dead_zone.counts (square): the left-stick dead zone the title ignores, in its centred counts; 0: none declared */",
         "} NkTitleEntry;",
         "",
         "/* An owned title snapshot remains valid across overlay reloads until released. */",
@@ -819,6 +820,9 @@ def generate_source(digest: str, titles: List[Dict[str, Any]]) -> str:
         req_font = "true" if ("font-firmware" in feats or "font" in feats) else "false"
         req_psmf = "true" if ("psmf" in feats) else "false"
 
+        # The validator admits only the square shape, so the counts alone describe it.
+        dead_zone_counts = t.get("input", {}).get("analog_dead_zone", {}).get("counts", 0)
+
         num_mods = len(t.get("modules", []))
         mod_ref = f"s_modules_title_{idx}" if num_mods > 0 else "NULL"
         compat_ref = f"s_compat_discs_{idx}" if t.get("disc", {}).get("compatible_revisions") else "NULL"
@@ -848,7 +852,8 @@ def generate_source(digest: str, titles: List[Dict[str, Any]]) -> str:
         lines.append(f"        {req_font},")
         lines.append(f"        {req_psmf},")
         lines.append(f"        {mod_ref},")
-        lines.append(f"        {num_mods}")
+        lines.append(f"        {num_mods},")
+        lines.append(f"        {dead_zone_counts}U")
         lines.append("    },")
 
     lines.append("};")

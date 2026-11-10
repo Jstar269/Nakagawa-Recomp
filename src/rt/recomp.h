@@ -2182,6 +2182,8 @@ void     gui_consume_button_pulses(void);          /* after one PSP VBLANK sampl
  * when no SDL3 presenter is up (the GDI and offscreen presenters have no SDL3 gamepad). */
 uint32_t gui_pad_pulses_take(void);
 void     gui_analog(uint8_t *lx, uint8_t *ly);   /* live left-stick (0..255, 128=centre) */
+int      gui_stick_dead_zone(void);              /* the input profile's stick dead zone in centred
+                                                    counts (ace_stick_host_counts); 0 without one */
 int      gui_pad_present(void);                  /* 1 when a game controller is connected */
 void     gui_ace_vblank(uint32_t vcount);        /* Ace Mode's smooth motion: a held frame's VBLANK */
 /* Returns 1 only when the selected presenter accepted the validated frame. */

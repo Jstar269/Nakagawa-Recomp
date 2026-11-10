@@ -52,6 +52,8 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures."},
     {"Wider culling", "Off", "Ace only, with Widescreen, in games that have a culling build. The game's "
                              "memory changes."},
+    {"Stick dead zone", "Off", "Ace only, in games that ignore part of the stick. Small pushes count; "
+                               "the feel changes."},
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
 };
