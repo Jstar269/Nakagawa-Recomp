@@ -110,9 +110,16 @@ verifier.
 
 The boundary is enforced structurally, not by convention:
 
-* the workflow is `pull_request_target`, so its definition is the base
-  branch's. A `pull_request` workflow would hand the definition to the
-  candidate, who could keep the required check's name and replace its body;
+* the workflow runs only on events whose definition the candidate does not
+  control: `pull_request_target` (the base branch's copy), `workflow_run` when a
+  `CI` run is requested for a pull request (always the default branch's copy),
+  and a `workflow_dispatch` naming a pull request and its head, which the CI
+  verdict accepts only from the default branch. A `pull_request` workflow would
+  hand the definition to the candidate, who could keep the required check's
+  name and replace its body. GitHub blocks `pull_request_target` by default in
+  public repositories from 2026-12-02, so the gate does not depend on that
+  event; the verifier holds the workflow's `on:` block to those three events
+  (`TRUSTED_WORKFLOW_WEAKENED`);
 * the candidate is **never checked out**. Its objects are fetched into the
   trusted checkout and read with `git cat-file`, so no candidate hook, build
   file, workflow, or Python module can execute in the job that holds the
@@ -541,10 +548,13 @@ enforcement without the property. Do not do it.
 
 The trusted CI verdict ([`docs/CI.md`](CI.md#trusted-ci-verdict), #373) is the route
 chosen for #364. It does not make this context required. It requires a
-`Trusted provenance attestation` job, once, green, from a `pull_request_target` run of
-`provenance-attestation.yml` at the exact head, and refuses the context from any other
-workflow, event or app (`FOREIGN_PRODUCER`). Since 2026-10-29 the ruleset requires
-`Trusted CI verdict` and `CodeQL` only.
+`Trusted provenance attestation` job, once, green, from a run of
+`provenance-attestation.yml` that used a trusted definition: a `pull_request_target` run at
+the exact head, or a `workflow_run` or dispatched run of the default branch's current copy
+of the workflow whose run name carries the head
+([the attestation's two routes](CI.md#trusted-ci-verdict)). It refuses the context at the
+head from any other workflow, event or app (`FOREIGN_PRODUCER`). Since 2026-10-29 the
+ruleset requires `Trusted CI verdict` and `CodeQL` only.
 
 If this context is ever made required, the ruleset already carries a `pull_request` rule,
 `required_linear_history`, and an empty `bypass_actors` list; its
@@ -559,7 +569,7 @@ described as enforcement.**
 
 GitHub evaluates a required status check by context *name*, taking the most
 recent result for that name on the head commit. Both the trusted
-`pull_request_target` workflow and any workflow the candidate adds run as the
+workflow and any workflow the candidate adds run as the
 same app — GitHub Actions, `integration_id` 15368 — so pinning `integration_id`
 does not separate them. A candidate can declare a job named
 `Trusted provenance attestation`, have it `exit 0`, and delay it (a `sleep` is
