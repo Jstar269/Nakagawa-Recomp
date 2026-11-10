@@ -1213,6 +1213,9 @@ extern int s_psmf_av_test_queue;
 #endif
 int64_t psmf_av_now_us(void);
 int psmf_av_queue_frames(int ch);
+/* One PSP display period in microseconds (60000/1001 Hz, rounded down): the period sched.c
+ * delivers VBLANKs at, and the longest it ordinarily runs between scheduler boundaries. */
+#define HLE_DISPLAY_PERIOD_US 16683u
 /* The audio queue depth in frames the guest sees on `ch` (-1: no host output). Under the
  * deterministic clock it is a model that drains in guest time (#2037), not the host mixer's.
  * Otherwise it leaves out what the host mixer holds for its device (hle_audio.c). */

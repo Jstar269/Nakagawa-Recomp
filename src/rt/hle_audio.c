@@ -183,38 +183,61 @@ static void audio_vq_drain(uint32_t slot) {
  * The PSP plays a channel's buffer as it is handed over, so a guest that keeps two periods queued
  * never runs its channel dry. A host output device does not drain like that: it takes a whole
  * block from the mixer at a time (441 frames from WASAPI and 1024 from DirectSound on the
- * reference PC, read from the device with SDL_GetAudioDeviceFormat), and the guest thread that
- * refills the queue is woken by a host scheduler that can be late. Held to two periods of a
- * 256-frame channel (512 frames), the queue is smaller than one 1024-frame pull: every pull came
- * up short, and Warship Gunner 2 Portable's 256-frame channel delivered three periods per pull,
- * 75% of its audio, with the queue empty at 2491 of its pushes in 59 seconds. With 441-frame
- * pulls the two periods cover a pull and nothing more, so each late wake was a dropout.
+ * reference PC), and the guest thread that refills the queue learns of a pull only when its wait
+ * ends, from a host scheduler that can be late. Held to two periods of a 256-frame channel (512
+ * frames), the queue is smaller than one 1024-frame pull: every pull came up short, and Warship
+ * Gunner 2 Portable's 256-frame channel delivered three periods per pull, 75% of its audio, with
+ * the queue empty at 2491 of its pushes in 59 seconds. With 441-frame pulls the two periods cover
+ * a pull and nothing more, so each late wake was a dropout.
  *
- * The mixer therefore holds, for a channel of period n:
- *   one device pull              what the device takes at once;
- *   one period                   the blocking output only finds a pull has happened when its wait
- *                                ends, and it waits up to one period at a time;
- *   one display period           a wake that is late by up to one VBLANK, the longest stretch the
- *                                scheduler ordinarily runs without reaching a boundary (#67);
- * and the guest's own two periods count towards it. Only the frames beyond those two periods are
- * hidden: the guest still sees and paces against at most its two periods, as on the PSP, and a
- * channel whose two periods already cover the sum (2048 frames on both devices above) is paced
- * exactly as before. The hold is filled by the first outputs of a channel returning at once, the
- * same way the two periods are, and refilled the same way after the queue ran dry.
+ * So the queue holds one device pull and one display period, P + W frames, where the guest's view
+ * of it is two periods: P is the largest block the device was seen to take at once
+ * (sr_audio_host_pull_frames) and W one VBLANK period, the longest the scheduler ordinarily runs
+ * without reaching a boundary, which is how late a wait can end (#67). That covers the blocking
+ * output as it waits now: for as long as the frames it sees above two periods take to play. Say
+ * y of them are left when the pull comes that takes its view to two periods or under. That pull
+ * leaves 2n + hold - P + y frames, and the guest finds out when its wait ends, at most y + W
+ * frames of play time later. floor((y + W) / P) more pulls can come before it refills, each
+ * taking P, and 2n + hold - P + y >= floor((y + W) / P) * P for every y when
+ * hold >= P + W - 2n. No period is added for the wait: a wait is only as long as the queue is
+ * deep.
+ *
+ * The guest's own two periods count towards the sum, and only the frames beyond them are hidden:
+ * the guest sees and paces against at most its two periods, as on the PSP, and a channel whose
+ * two periods already cover the sum (768 frames and up against 441-frame pulls, 1024 and up
+ * against 1024-frame pulls) is paced exactly as before. A channel left at two periods less a
+ * display period by a guest that is busy elsewhere still fills a pull.
+ *
+ * A channel the device has played dry, at its start or after its queue ran out, gets the hold as
+ * silence ahead of its next push (audio_host_hold_prime): the guest then sees its own frames from
+ * the first one, and as many outputs return at once as on the PSP. A queue that is only partly
+ * drained, after a late wake the hold absorbed, is refilled by the guest's next outputs returning
+ * at once.
  *
  * Under the deterministic clock the guest sees the guest-time model instead and none of this
  * applies: the host mixer only follows there. */
 extern int sr_audio_host_pull_frames(void);
+extern int sr_audio_played_dry(int ch);
+extern void sr_audio_push_silence(int ch, int nframes);
 
-#define AUDIO_WAKE_ALLOWANCE_FRAMES 736u   /* one display period at 44100 Hz: 44100 * 1001 / 60000 */
+/* One display period in mixer frames, rounded up (736). */
+#define AUDIO_LATE_WAKE_FRAMES ((HLE_DISPLAY_PERIOD_US * 44100u + 999999u) / 1000000u)
 
 static uint32_t audio_host_hold_frames(uint32_t n) {
     if (!n) return 0u;   /* no period reserved: nothing paces against this queue */
     const int pull = sr_audio_host_pull_frames();
     if (pull <= 0) return 0u;   /* no device takes blocks from this queue: there is nothing to cover */
-    const uint64_t need = (uint64_t)(uint32_t)pull + n + AUDIO_WAKE_ALLOWANCE_FRAMES;
+    const uint64_t need = (uint64_t)(uint32_t)pull + AUDIO_LATE_WAKE_FRAMES;
     const uint64_t seen = 2u * (uint64_t)n;
     return need > seen ? (uint32_t)(need - seen) : 0u;
+}
+
+/* Before a push: a channel the device has played dry gets its hold as silence, so the frames about
+ * to be pushed are the first the guest sees queued. */
+static void audio_host_hold_prime(int ch, uint32_t n) {
+    if (sched_clock_deterministic() || !sr_audio_played_dry(ch)) return;
+    const uint32_t hold = audio_host_hold_frames(n);
+    if (hold) sr_audio_push_silence(ch, (int)hold);
 }
 
 /* The frames of `ch` the host has not played yet: what a listener is still to hear. Under the
@@ -257,8 +280,9 @@ static uint32_t audio_frames_to_us(uint32_t ch, uint32_t frames) {
 
 /* SR_AUDIOSTAT: the audio drift the guest actually felt, read where it is felt.
  *
- * sr_audio_queued() is the value the blocking output below paces against -- the audio the
- * host mixer still owes the guest -- so it is also the honest place to measure drift. Counting
+ * hle_audio_queued() is the value the blocking output below paces against -- the audio the
+ * guest sees queued, which is the host mixer's less what it holds for its device (above; a
+ * listener hears the hold too) -- so it is also the honest place to measure drift. Counting
  * pushed frames cannot: a guest that submits exactly what it consumes and one that submits
  * twice as much both push frames, and only the queue depth tells them apart. A queue that only
  * grows is drift a consumer hears as lag building over minutes while nothing is dropped; once
@@ -394,6 +418,8 @@ static void (*s_audio_wait_hook)(uint32_t us);
 void sr_hle_test_audio_wait_hook(void (*hook)(uint32_t us)) { s_audio_wait_hook = hook; }
 void sr_hle_test_audio_wait_reset(void) { s_audio_wait_total_us = 0u; }
 uint64_t sr_hle_test_audio_wait_total_us(void) { return s_audio_wait_total_us; }
+/* The late wake the host hold covers, for a fixture that ends every wait that late. */
+uint32_t sr_hle_test_audio_late_wake_us(void) { return HLE_DISPLAY_PERIOD_US; }
 #endif
 static void audio_wait(uint32_t us) {
 #ifdef SR_HLE_THREAD_SELFTEST
@@ -429,6 +455,7 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
          * not inside a host audio backend. A backend that does not instrument itself made
          * audio_output_calls/frames read zero for a run whose music was plainly audible,
          * which is exactly the case the counters exist to describe. */
+        audio_host_hold_prime((int)ch, n);
         psmf_av_audio_submit((int)ch, buf, bytes, mono ? 2u : 4u, 44100u);   /* queue lead read before the push */
         uint64_t out_started = sr_perf_now_ns();
         sr_videorec_audio((int)ch, lr, (int)n, voll, volr, sched_vtime_us());
@@ -441,7 +468,7 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
         audio_wait(n ? audio_frames_to_us(ch, n) : 1000u);
         return n;
     }
-    /* sr_audio_queued() is signed only so the backend can report -1. Once that
+    /* hle_audio_queued() is signed only so the backend can report -1. Once that
      * sentinel is excluded, keep the frame comparison/subtraction unsigned;
      * never narrow the guest-derived frame count into the signed queue domain.
      * This form is defense in depth, not a repaired defect: with the reserve and

@@ -1559,11 +1559,16 @@ publish is reported as absent.
 reads the queue depth the blocking output paces against in `src/rt/hle_audio.c`
 (`hle_audio_queued()`), in the same place it computes the delay from it, and prints one reading per
 300 delivered vblanks (about five seconds) behind `SR_AUDIOSTAT`. That depth is the host mixer's
-queue less what the mixer holds for its output device: one device pull (the start-up line
-`audio: the host device takes N frames at R Hz per pull` gives it), one channel period and one
-display period, so far as the channel's own two periods do not already cover them. A 2048-frame
-channel holds nothing back; a 256-frame one holds 921 frames against 441-frame pulls. `queued=` in
-`AUDIOSTAT_HOST` and `q_max_ms` in `PERF_AUDIO` are the mixer's whole queue, the hold included:
+queue less what the mixer holds for its output device: one device pull and one display period (736
+frames), so far as the channel's own two periods do not already cover them. Against the 441-frame
+pulls of WASAPI and the 1024-frame pulls of DirectSound on the reference PC, a 1024-frame or
+2048-frame channel holds nothing back, and a 256-frame one holds 665 or 1248 frames. A channel
+the device has played dry gets the hold as silence ahead of its next push. The start-up line
+`audio: the host device takes N frames at R Hz per pull (T ms, M mixer frames)` gives SDL's chunk
+size at the device's rate and the same in 44.1 kHz mixer frames; the hold uses the mixer-frame
+figure, or the larger pull the device was measured to take. `queued=` in `AUDIOSTAT_HOST` is the
+mixer's whole queue, the hold included, and so are `q_min_ms` and `q_max_ms` in `PERF_AUDIO`,
+which leave out only silence queued for the push that reports them:
 
 ```text
 AUDIOSTAT_LEAD: vbl=9300 ch=8 outputs=268 queued=8820 lead_ms=200

@@ -107,6 +107,107 @@ static int s_reported_unavailable = 0;
 static int s_reported_init = 0;
 static int s_cleanup_registered = 0;
 
+/* ---- what the device takes from a channel per pull ---------------------------------------------
+ *
+ * The blocking output sizes its queue against the largest block the device takes at once
+ * (hle_audio.c). SDL names a chunk size for the open device, but that is what SDL feeds the
+ * hardware, not what a stream was seen to lose: a stream that converts the sample rate gives up
+ * a different count and keeps a few frames back, and a back end can take several chunks in a
+ * row. So channel 0's stream reports every pull as it is made (SDL's get-callback, on the device
+ * thread, in the stream's own 44.1 kHz frames):
+ *   - pulls that come in less than half the time the one before them takes to play are one
+ *     burst, and count as one pull of their sum;
+ *   - the result is the largest burst of the current and the previous second of pulled audio, so
+ *     a device change is followed within two seconds;
+ *   - a pull that came up short tells how many queued frames the stream could not give
+ *     (7 on the reference PC when it converts 44.1 to 48 kHz); the largest seen is added. */
+typedef struct {
+    uint64_t last_ns;        /* when the last pull came */
+    uint32_t last_frames;    /* how much it took */
+    uint32_t burst_frames;   /* the burst it belongs to, summed */
+    uint32_t window_frames;  /* frames pulled in the current second */
+    uint32_t window_max;     /* largest burst in it */
+    uint32_t prev_max;       /* largest burst in the second before */
+    uint32_t kept_back;      /* queued frames a short pull could not take: largest seen */
+} AudioPullMeter;
+
+static AudioPullMeter s_pull_meter;           /* written on the device thread only */
+static SDL_AtomicInt s_pull_measured_frames;  /* its result, read on the scheduler thread */
+static SDL_AtomicInt s_pull_chunk_stale;      /* time to ask SDL for its chunk size again */
+static int s_pull_chunk_frames;               /* SDL's chunk size in mixer frames (scheduler thread) */
+
+static uint32_t audio_pull_add(uint32_t a, uint32_t b) {
+    return a > (uint32_t)INT32_MAX - b ? (uint32_t)INT32_MAX : a + b;
+}
+
+/* One pull of `frames`, made at `now_ns`, that left `kept_back` queued frames untaken. Returns the
+ * pull size to queue against; *second_ended is set when this pull completed a second. */
+static uint32_t audio_pull_note(AudioPullMeter *m, uint32_t frames, uint32_t kept_back, uint64_t now_ns,
+                                int *second_ended) {
+    *second_ended = 0;
+    if (frames > (uint32_t)INT32_MAX) frames = (uint32_t)INT32_MAX;
+    const uint64_t last_play_ns = (uint64_t)m->last_frames * 1000000000ull / SR_AUDIO_SAMPLE_RATE;
+    const int same_burst = m->last_frames && now_ns >= m->last_ns && now_ns - m->last_ns < last_play_ns / 2u;
+    m->burst_frames = same_burst ? audio_pull_add(m->burst_frames, frames) : frames;
+    m->last_ns = now_ns;
+    m->last_frames = frames;
+    if (m->burst_frames > m->window_max) m->window_max = m->burst_frames;
+    if (kept_back > m->kept_back) m->kept_back = kept_back;
+    m->window_frames = audio_pull_add(m->window_frames, frames);
+    const uint32_t largest = m->window_max > m->prev_max ? m->window_max : m->prev_max;
+    if (m->window_frames >= SR_AUDIO_SAMPLE_RATE) {
+        m->prev_max = m->window_max;
+        m->window_max = 0;
+        m->window_frames = 0;
+        *second_ended = 1;
+    }
+    return audio_pull_add(largest, m->kept_back);
+}
+
+/* A channel the device has played dry: a pull found less in its stream than it asked for, or
+ * nothing was ever pushed. Set on the device thread, cleared by the next push. */
+static SDL_AtomicInt s_played_dry[SR_AUDIO_CHANNELS];
+static SDL_AtomicInt s_pull_kept_back;        /* the meter's kept_back, for the scheduler thread */
+
+/* SDL's get-callback for a channel's stream (userdata: the channel): `total_amount` bytes of the
+ * stream's input format are about to be taken, and `additional_amount` of them are not there.
+ * Both figures were checked against the dummy driver at 44.1 and 48 kHz. Channel 0 feeds the
+ * meter; one stream is enough, the device takes the same from each. */
+static void SDLCALL sr_audio_pull_callback(void *userdata, SDL_AudioStream *stream, int additional_amount,
+                                           int total_amount) {
+    const int ch = (int)(intptr_t)userdata;
+    if (total_amount <= 0 || ch < 0 || ch >= SR_AUDIO_CHANNELS) return;
+    if (additional_amount > 0) SDL_SetAtomicInt(&s_played_dry[ch], 1);
+    if (ch != 0) return;
+    uint32_t kept_back = 0;
+    if (additional_amount > 0) {
+        const int queued = SDL_GetAudioStreamQueued(stream);
+        const int64_t beyond = (int64_t)queued + additional_amount - total_amount;
+        if (queued > 0 && beyond > 0) kept_back = (uint32_t)((beyond + 3) / 4);
+    }
+    int second_ended;
+    const uint32_t frames = audio_pull_note(&s_pull_meter, (uint32_t)total_amount / 4u, kept_back,
+                                            SDL_GetTicksNS(), &second_ended);
+    SDL_SetAtomicInt(&s_pull_measured_frames, (int)frames);
+    SDL_SetAtomicInt(&s_pull_kept_back, (int)s_pull_meter.kept_back);
+    if (second_ended) SDL_SetAtomicInt(&s_pull_chunk_stale, 1);
+}
+
+/* Silence queued ahead of a guest push since that channel's last push: the blocking output's hold
+ * for a channel the device played dry (hle_audio.c). The push that follows reports the depth it
+ * found without it, so a queue that ran dry is still counted as one. */
+static uint32_t s_primed_frames[SR_AUDIO_CHANNELS];
+
+static void sr_audio_pull_reset(void) {
+    memset(&s_pull_meter, 0, sizeof(s_pull_meter));
+    SDL_SetAtomicInt(&s_pull_measured_frames, 0);
+    SDL_SetAtomicInt(&s_pull_kept_back, 0);
+    for (int i = 0; i < SR_AUDIO_CHANNELS; i++) SDL_SetAtomicInt(&s_played_dry[i], 1);
+    SDL_SetAtomicInt(&s_pull_chunk_stale, 1);
+    s_pull_chunk_frames = 0;
+}
+
+
 #ifdef SR_AUDIO_SELFTEST
 static int s_test_fail_pause_stash_alloc;
 static int s_test_pause_failure_messages;
@@ -357,6 +458,8 @@ static void sr_audio_cleanup(void) {
         free(s_shadow_queues[i].samples);
         memset(&s_shadow_queues[i], 0, sizeof(s_shadow_queues[i]));
     }
+    sr_audio_pull_reset();
+    memset(s_primed_frames, 0, sizeof(s_primed_frames));
     s_pause_active = 0;
     s_pause_device_fallback = 0;
     s_pause_device_was_paused = 0;
@@ -470,6 +573,16 @@ static int sr_audio_shadow_copy(int ch, int16_t *out, uint32_t frames) {
     return 1;
 }
 
+/* A device block of `device_frames` at `device_freq`, in mixer frames (SR_AUDIO_SAMPLE_RATE),
+ * rounded up: a pull takes that many frames from each channel's stream. 0 for an unknown block. */
+static uint32_t sr_audio_pull_in_mixer_frames(int device_frames, int device_freq) {
+    if (device_frames <= 0 || device_freq <= 0) return 0u;
+    const uint64_t scaled = (uint64_t)(uint32_t)device_frames * SR_AUDIO_SAMPLE_RATE +
+                            (uint32_t)device_freq - 1u;
+    const uint64_t frames = scaled / (uint32_t)device_freq;
+    return frames > (uint64_t)INT32_MAX ? (uint32_t)INT32_MAX : (uint32_t)frames;
+}
+
 int sr_audio_init(void) {
     if (s_audio_state == AUDIO_STATE_ACTIVE) {
         return 0;
@@ -514,6 +627,7 @@ int sr_audio_init(void) {
     spec.channels = 2;
     spec.freq = SR_AUDIO_SAMPLE_RATE;
 
+    sr_audio_pull_reset();
     s_device_id = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec);
     if (!s_device_id) {
         s_audio_state = AUDIO_STATE_UNAVAILABLE;
@@ -525,8 +639,17 @@ int sr_audio_init(void) {
         return -1;
     }
 
+    int pulls_unmeasured = 0;
     for (int i = 0; i < SR_AUDIO_CHANNELS; i++) {
         s_streams[i] = SDL_CreateAudioStream(&spec, &spec);
+        /* Each stream reports the device's pulls (sr_audio_pull_callback). Without the report the
+         * queue is sized against SDL's chunk size alone and no channel is ever seen played dry. */
+        if (s_streams[i] &&
+            !SDL_SetAudioStreamGetCallback(s_streams[i], sr_audio_pull_callback, (void *)(intptr_t)i) &&
+            !pulls_unmeasured) {
+            fprintf(stderr, "audio: device pulls are not measured (%s): SDL's chunk size stands in\n", SDL_GetError());
+            pulls_unmeasured = 1;
+        }
         if (!s_streams[i] || !SDL_BindAudioStream(s_device_id, s_streams[i])) {
             s_audio_state = AUDIO_STATE_UNAVAILABLE;
             if (!s_reported_unavailable) {
@@ -555,13 +678,15 @@ int sr_audio_init(void) {
         const char *driver = SDL_GetCurrentAudioDriver();
         fprintf(stderr, "audio: initialized SDL3 audio output (driver: %s, %uHz stereo 16-bit)\n",
                 driver ? driver : "unknown", SR_AUDIO_SAMPLE_RATE);
-        /* What the blocking output sizes its queue against (sr_audio_host_pull_frames). */
+        /* What the blocking output sizes its queue against, until pulls are measured
+         * (sr_audio_host_pull_frames). */
         SDL_AudioSpec device_spec;
         int device_frames = 0;
         if (SDL_GetAudioDeviceFormat(s_device_id, &device_spec, &device_frames) && device_frames > 0 &&
             device_spec.freq > 0)
-            fprintf(stderr, "audio: the host device takes %d frames at %d Hz per pull (%.1f ms)\n",
-                    device_frames, device_spec.freq, 1000.0 * device_frames / device_spec.freq);
+            fprintf(stderr, "audio: the host device takes %d frames at %d Hz per pull (%.1f ms, %u mixer frames)\n",
+                    device_frames, device_spec.freq, 1000.0 * device_frames / device_spec.freq,
+                    sr_audio_pull_in_mixer_frames(device_frames, device_spec.freq));
         else
             fprintf(stderr, "audio: the host device does not report how many frames it takes per pull\n");
         s_reported_init = 1;
@@ -573,6 +698,50 @@ int sr_audio_init(void) {
     }
 
     return 0;
+}
+
+/* 1 when the device has played `ch` dry and nothing has been pushed since: its stream holds no
+ * frame a pull can take. A queue restored after a pause is not dry, whatever the device asked for
+ * while it was held. Opens the device like a first push, so a channel's first output asks a live
+ * one. 0 with no host output. */
+int sr_audio_played_dry(int ch) {
+    if (ch < 0 || ch >= SR_AUDIO_CHANNELS) {
+        return 0;
+    }
+    if (s_audio_state == AUDIO_STATE_UNINITIALIZED) {
+        sr_audio_init();
+    }
+    if (s_audio_state != AUDIO_STATE_ACTIVE || !SDL_GetAtomicInt(&s_played_dry[ch])) {
+        return 0;
+    }
+    const int queued_bytes = SDL_GetAudioStreamQueued(s_streams[ch]);
+    return queued_bytes >= 0 && queued_bytes / 4 <= SDL_GetAtomicInt(&s_pull_kept_back);
+}
+
+void sr_audio_push_silence(int ch, int nframes) {
+    static const int16_t zeros[1024 * 2];
+    if (ch < 0 || ch >= SR_AUDIO_CHANNELS || nframes <= 0 || s_audio_state != AUDIO_STATE_ACTIVE) {
+        return;
+    }
+    const int queued_bytes = SDL_GetAudioStreamQueued(s_streams[ch]);
+    if (queued_bytes < 0) {
+        return;
+    }
+    sr_audio_shadow_sync(ch, (uint32_t)(queued_bytes / 4));
+    if (queued_bytes / 4 >= SR_AUDIO_MAX_QUEUED_FRAMES - nframes) {
+        return;   /* a hold the mixer cannot take: the pushes that follow are refused and counted */
+    }
+    while (nframes > 0) {
+        const int chunk = nframes < 1024 ? nframes : 1024;
+        if (!SDL_PutAudioStreamData(s_streams[ch], zeros, chunk * 4)) {
+            fprintf(stderr, "audio: SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
+            return;
+        }
+        (void)sr_audio_shadow_append(ch, zeros, chunk);
+        s_primed_frames[ch] += (uint32_t)chunk;
+        nframes -= chunk;
+    }
+    SDL_SetAtomicInt(&s_played_dry[ch], 0);
 }
 
 /* A push the full mixer drops is host playback falling behind the guest (a run faster than real
@@ -620,9 +789,13 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     }
     int cur_queued_frames = queued_bytes / 4;
     sr_audio_shadow_sync(ch, (uint32_t)cur_queued_frames);
+    /* What this push found queued: not the silence sr_audio_push_silence() put there for it. */
+    const int found_frames = (uint32_t)cur_queued_frames > s_primed_frames[ch]
+                                 ? cur_queued_frames - (int)s_primed_frames[ch] : 0;
+    s_primed_frames[ch] = 0;
 
     /* Instrumentation: underrun detection (queue had completely dried up after previous activity) */
-    if (cur_queued_frames == 0 && s_stats.channel_pushed_frames[ch] > 0) {
+    if (found_frames == 0 && s_stats.channel_pushed_frames[ch] > 0) {
         s_stats.underrun_events++;
         audio_note_underrun(ch);
     }
@@ -671,12 +844,13 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
         (void)sr_audio_shadow_append(ch, submitted, nframes);
     s_stats.total_pushed_frames += (uint64_t)nframes;
     s_stats.channel_pushed_frames[ch] += (uint64_t)nframes;
+    SDL_SetAtomicInt(&s_played_dry[ch], 0);
 
     const uint64_t now_ns = SDL_GetTicksNS();
     int underrun;
-    const uint64_t starved_ns = audio_starved_ns(&s_push_marks[ch], now_ns, cur_queued_frames,
+    const uint64_t starved_ns = audio_starved_ns(&s_push_marks[ch], now_ns, found_frames,
                                                  &underrun);
-    sr_perf_audio_queue(ch, (uint32_t)cur_queued_frames, starved_ns, underrun);
+    sr_perf_audio_queue(ch, (uint32_t)found_frames, starved_ns, underrun);
     s_push_marks[ch].push_ns = now_ns;
     s_push_marks[ch].queued_frames = (uint32_t)(cur_queued_frames + nframes);
 
@@ -948,33 +1122,28 @@ int sr_audio_queued(int ch) {
     return frames;
 }
 
-/* A device block of `device_frames` at `device_freq`, in mixer frames (SR_AUDIO_SAMPLE_RATE),
- * rounded up: a pull takes that many frames from each channel's stream. 0 for an unknown block. */
-static uint32_t sr_audio_pull_in_mixer_frames(int device_frames, int device_freq) {
-    if (device_frames <= 0 || device_freq <= 0) return 0u;
-    const uint64_t scaled = (uint64_t)(uint32_t)device_frames * SR_AUDIO_SAMPLE_RATE +
-                            (uint32_t)device_freq - 1u;
-    const uint64_t frames = scaled / (uint32_t)device_freq;
-    return frames > (uint64_t)INT32_MAX ? (uint32_t)INT32_MAX : (uint32_t)frames;
-}
-
-/* The frames the host output device takes from the mixer in one pull, in mixer frames: 441 from
- * WASAPI and 1024 from DirectSound on the reference PC. The device is asked each time, because a
- * default device that changes mid-run brings its own block size. 0 when there is no host output
- * or the device does not say. The blocking output keeps at least this much queued (hle_audio.c). */
+/* The frames the host output device takes from a channel in one pull, in mixer frames: 441 from
+ * WASAPI and 1024 from DirectSound on the reference PC. It is the larger of what the pulls were
+ * measured to take (above) and SDL's chunk size for the device, which stands alone until the
+ * first pull and is asked for again once a second of audio has been pulled, so a default device
+ * that changes mid-run brings its own. 0 when there is no host output or nothing is known. The
+ * blocking output keeps whole pulls of this size queued (hle_audio.c). */
 int sr_audio_host_pull_frames(void) {
-    if (s_audio_state == AUDIO_STATE_UNINITIALIZED) {
-        sr_audio_init();
-    }
     if (s_audio_state != AUDIO_STATE_ACTIVE) {
         return 0;
     }
-    SDL_AudioSpec spec;
-    int device_frames = 0;
-    if (!SDL_GetAudioDeviceFormat(s_device_id, &spec, &device_frames)) {
-        return 0;
+    if (SDL_CompareAndSwapAtomicInt(&s_pull_chunk_stale, 1, 0)) {
+        SDL_AudioSpec spec;
+        int device_frames = 0;
+        const int chunk = SDL_GetAudioDeviceFormat(s_device_id, &spec, &device_frames)
+                              ? (int)sr_audio_pull_in_mixer_frames(device_frames, spec.freq) : 0;
+        if (chunk != s_pull_chunk_frames && s_pull_chunk_frames > 0)
+            fprintf(stderr, "audio: the host device now takes %d frames at %d Hz per pull (%d mixer frames, was %d)\n",
+                    device_frames, spec.freq, chunk, s_pull_chunk_frames);
+        s_pull_chunk_frames = chunk;
     }
-    return (int)sr_audio_pull_in_mixer_frames(device_frames, spec.freq);
+    const int measured = SDL_GetAtomicInt(&s_pull_measured_frames);
+    return measured > s_pull_chunk_frames ? measured : s_pull_chunk_frames;
 }
 
 /* SR_AUDIOSTAT: the value the blocking output paces against, and the drift it is accumulating.
@@ -1270,22 +1439,131 @@ static void test_host_pull_frames(void) {
     assert(sr_audio_pull_in_mixer_frames(-1, 44100) == 0u);
     assert(sr_audio_pull_in_mixer_frames(512, 0) == 0u);
 
-    static const struct { const char *hint; int frames; } blocks[] = { { "441", 441 }, { "1024", 1024 } };
-    for (size_t i = 0; i < sizeof(blocks) / sizeof(blocks[0]); i++) {
+    /* The pull meter, fed as a device thread feeds it: 441-frame pulls 10 ms apart. */
+    const uint64_t ms = 1000000ull;
+    AudioPullMeter m;
+    int ended;
+    memset(&m, 0, sizeof(m));
+    assert(audio_pull_note(&m, 441, 0, 100 * ms, &ended) == 441u && !ended);
+    assert(audio_pull_note(&m, 441, 0, 110 * ms, &ended) == 441u);    /* steady pulls are not a burst */
+    assert(audio_pull_note(&m, 441, 0, 112 * ms, &ended) == 882u);    /* 2 ms behind: the same burst */
+    assert(audio_pull_note(&m, 441, 0, 113 * ms, &ended) == 1323u);   /* and a third */
+    assert(audio_pull_note(&m, 441, 0, 118 * ms, &ended) == 1323u);   /* 5 ms is half its play time: a new pull */
+    assert(audio_pull_note(&m, 441, 7, 128 * ms, &ended) == 1330u);   /* 7 queued frames a short pull kept back */
+    uint64_t t = 128 * ms;
+    uint32_t got = 0;
+    for (int seconds = 0; seconds < 2; seconds += ended) {             /* the burst is remembered for the */
+        t += 10 * ms;                                                  /* second it came in and the next */
+        got = audio_pull_note(&m, 441, 0, t, &ended);
+        assert(got == 1330u);
+    }
+    assert(audio_pull_note(&m, 441, 0, t + 10 * ms, &ended) == 448u);  /* then forgotten; the 7 stay */
+    assert(audio_pull_note(&m, 1024, 0, t + 20 * ms, &ended) == 1031u);/* a larger device is seen at once */
+    assert(audio_pull_note(&m, 0xffffffffu, 0, t + 9000 * ms, &ended) == (uint32_t)INT32_MAX);
+
+    /* The dummy device: nothing is known before it opens; then SDL's chunk size stands until the
+     * stream's own pulls are measured, and they agree with it (no conversion, no bursts). The
+     * hint asks for two sizes; whatever SDL gives is what is compared. */
+    static const char *const hints[] = { "441", "1024" };
+    for (size_t i = 0; i < sizeof(hints) / sizeof(hints[0]); i++) {
         test_reset();
         SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
-        SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, blocks[i].hint, SDL_HINT_OVERRIDE);
-        assert(sr_audio_host_pull_frames() == blocks[i].frames);   /* opens the device, as a first push does */
-        assert(s_audio_state == AUDIO_STATE_ACTIVE);
+        SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, hints[i], SDL_HINT_OVERRIDE);
+        assert(sr_audio_host_pull_frames() == 0);   /* it does not open the device */
+        assert(s_audio_state == AUDIO_STATE_UNINITIALIZED);
+        assert(sr_audio_init() == 0);
+        SDL_AudioSpec spec;
+        int device_frames = 0;
+        assert(SDL_GetAudioDeviceFormat(s_device_id, &spec, &device_frames) && device_frames > 0);
+        const int chunk = (int)sr_audio_pull_in_mixer_frames(device_frames, spec.freq);
+        assert(sr_audio_host_pull_frames() == chunk);
+        const Uint64 deadline = SDL_GetTicks() + 5000;
+        while (SDL_GetAtomicInt(&s_pull_measured_frames) == 0 && SDL_GetTicks() < deadline) SDL_Delay(2);
+        assert(SDL_GetAtomicInt(&s_pull_measured_frames) == chunk);
+        assert(sr_audio_host_pull_frames() == chunk);
     }
     test_reset();
+    assert(SDL_GetAtomicInt(&s_pull_measured_frames) == 0);   /* a closed device leaves nothing behind */
     SDL_ResetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES);
 
     SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "nonexistent_driver_xyz", SDL_HINT_OVERRIDE);
+    assert(sr_audio_init() == -1);
     assert(sr_audio_host_pull_frames() == 0);
     assert(s_audio_state == AUDIO_STATE_UNAVAILABLE);
     test_reset();
     printf("test_host_pull_frames: PASS\n");
+}
+
+/* sr_audio_push_silence queues the blocking output's hold ahead of a push: it is in the queue and
+ * in the pause copy, it is not counted as guest audio, and the push behind it still reports the
+ * empty queue it found. sr_audio_played_dry says when that hold is due: a channel never pushed,
+ * or one the device has since taken a short pull from, and not one that still has frames. */
+static void test_push_silence_is_not_a_push(void) {
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    assert(sr_audio_played_dry(0) == 1);         /* opens the device, as a first push does */
+    assert(s_audio_state == AUDIO_STATE_ACTIVE);
+    assert(SDL_PauseAudioDevice(s_device_id));   /* exact depths need a device that does not drain */
+
+    int16_t tone[256 * 2];
+    for (int i = 0; i < 256 * 2; i++) tone[i] = (int16_t)(1000 + i);
+    static int16_t held[1756 * 2];
+
+    sr_audio_push_silence(0, 1500);              /* more than one 1024-frame piece */
+    assert(sr_audio_queued(0) == 1500);
+    assert(sr_audio_played_dry(0) == 0);
+    assert(s_stats.total_pushed_frames == 0 && s_stats.channel_pushed_frames[0] == 0);
+    sr_audio_push(0, tone, 256, 0x8000, 0x8000);
+    assert(sr_audio_queued(0) == 1756);
+    assert(s_stats.channel_pushed_frames[0] == 256);
+    assert(s_stats.underrun_events == 0);        /* a channel's first push is a start */
+    assert(sr_audio_shadow_copy(0, held, 1756));
+    for (int i = 0; i < 1500 * 2; i++) assert(held[i] == 0);
+    assert(held[1500 * 2] == tone[0] && held[1755 * 2 + 1] == tone[255 * 2 + 1]);
+
+    assert(SDL_ClearAudioStream(s_streams[0]));  /* as if the device had played it all */
+    assert(sr_audio_queued(0) == 0);
+    sr_audio_push_silence(0, 500);
+    sr_audio_push(0, tone, 256, 0x8000, 0x8000);
+    assert(sr_audio_queued(0) == 756);
+    assert(s_stats.underrun_events == 1);        /* the queue ran dry: counted, silence or not */
+    sr_audio_push(0, tone, 256, 0x8000, 0x8000);
+    assert(s_stats.underrun_events == 1);        /* only the push right behind the silence is told */
+
+    sr_audio_push_silence(1, 0);
+    sr_audio_push_silence(9, 64);
+    sr_audio_push_silence(-1, 64);
+    for (int ch = 1; ch < SR_AUDIO_CHANNELS; ch++) assert(sr_audio_queued(ch) == 0);
+    sr_audio_push_silence(1, SR_AUDIO_MAX_QUEUED_FRAMES);   /* more than the mixer takes: refused whole */
+    assert(sr_audio_queued(1) == 0);
+    assert(sr_audio_played_dry(1) == 1 && sr_audio_played_dry(9) == 0 && sr_audio_played_dry(-1) == 0);
+
+    /* A pushed channel is not dry until the device takes a pull it cannot fill. */
+    sr_audio_push(2, tone, 64, 0x8000, 0x8000);
+    assert(sr_audio_played_dry(2) == 0);
+    assert(SDL_ClearAudioStream(s_streams[2]));  /* emptied behind the device's back: no pull saw it */
+    assert(sr_audio_played_dry(2) == 0);
+    sr_audio_push(2, tone, 64, 0x8000, 0x8000);
+    assert(SDL_ResumeAudioDevice(s_device_id));
+    const Uint64 deadline = SDL_GetTicks() + 5000;
+    while (!sr_audio_played_dry(2) && SDL_GetTicks() < deadline) SDL_Delay(2);
+    assert(sr_audio_played_dry(2) == 1);
+    assert(sr_audio_queued(2) == 0);
+
+    /* A queue that has frames is not dry whatever the device asked for while it was held back
+     * (a pause puts the queue back after the device ran on without it). */
+    assert(SDL_PauseAudioDevice(s_device_id));
+    assert(SDL_PutAudioStreamData(s_streams[2], tone, 64 * 4));
+    assert(SDL_GetAtomicInt(&s_played_dry[2]) == 1);
+    assert(sr_audio_played_dry(2) == 0);
+
+    test_reset();
+    sr_audio_push_silence(0, 64);                /* no open device: nothing happens, nothing opens */
+    assert(s_audio_state == AUDIO_STATE_UNINITIALIZED);
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "nonexistent_driver_xyz", SDL_HINT_OVERRIDE);
+    assert(sr_audio_played_dry(0) == 0);         /* no host output: nothing to prime */
+    test_reset();
+    printf("test_push_silence_is_not_a_push: PASS\n");
 }
 
 /* Master-volume gain mapping (SR_MASTER_VOLUME): pure, window-free. */
@@ -1806,6 +2084,7 @@ int main(int argc, char **argv) {
     test_no_device_path();
     test_null_backend_env();
     test_host_pull_frames();
+    test_push_silence_is_not_a_push();
     test_pause_stash_failure_is_visible();
     test_dump_conversion();
     test_dump_wav_header();
