@@ -722,11 +722,12 @@ static void cell_fast_forward_smooth(void) {
     (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off",
                         NULL);
     uint64_t ns = 0;
-    uint32_t vc = 1, betweens = 0, keeps = 0, reals = 0;
+    uint32_t vc = 1, betweens = 0, keeps = 0, reals = 0, k2_frames = 0;
     for (; vc <= 300; vc++) {
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
         ns += 16683333u;
         (void)ace_flip(0x0u, 0x22000u, vc, ns);
+        if (vc % 2 == 0 && ace_rate_stable() == ACE_RATE_K2) k2_frames++;
         AceShow show = ace_smooth_take();
         if (show == ACE_SHOW_BETWEEN) {
             ace_smooth_shown_between(ns);
@@ -736,7 +737,12 @@ static void cell_fast_forward_smooth(void) {
             ace_smooth_note_present(ACE_PRESENT_REAL, ns);
         }
     }
-    CHECK(betweens > 100u, "30 Hz at normal speed makes in-betweens (%u)", betweens);
+    /* The detector holds 30 once its window is full (ACE_DET_WINDOW intervals of two VBLANKs)
+     * and has agreed for ACE_DET_ENTER_VBLANKS; from then on every new frame is an in-between. */
+    CHECK(ace_rate_stable() == ACE_RATE_K2 && betweens == k2_frames &&
+              k2_frames >= (300u - 2u * ACE_DET_WINDOW - ACE_DET_ENTER_VBLANKS) / 2u,
+          "30 Hz at normal speed makes an in-between of every new frame once 30 is held (%u of %u)",
+          betweens, k2_frames);
     ace_pace_stats(&st0);
     ace_note_fast_forward(1);
     betweens = 0;
