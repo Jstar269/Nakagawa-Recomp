@@ -1169,8 +1169,8 @@ native-core-tests: tex-mips-selftest tex-mips-mutant
 # gpu-mips-selftest - host-built mip chains (mips=on) through ge_gpu.c's own hooks on a real Vulkan
 # device, read at device resolution (tex_mips_gpu_selftest.inc): a minified single-level CLUT texture
 # samples the chain, the level of detail follows the render scale, a second palette gets its own
-# chain, a rewrite rebuilds it, a colour-keyed edge takes no key colour, and through-mode, color-test
-# and alpha-unused draws keep level 0. It runs at render scales 4, 2 and 1, with 16x texture
+# chain, a rewrite rebuilds it, a colour-keyed edge takes no key colour, through-mode and
+# alpha-unused draws keep level 0, and a color-tested draw stays with the software renderer. It runs at render scales 4, 2 and 1, with 16x texture
 # filtering, and once with mips off, where the minified cell must show level 0's aliasing and no
 # chain may exist. Exit 77 (SKIP) without Vulkan.
 GPU_MIPS_LINE := v1;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off

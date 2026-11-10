@@ -1047,10 +1047,11 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
   A CLUT texture's palette is part of its cache key, so each palette has its own entry and its own chain, and a
   palette animation that comes back to a palette finds the chain it built the first time.
 - **Which draws.** A draw binds the chain only when it is transformed (through-mode HUDs, menus and text keep
-  level 0, as texture filtering's rule has it), its minifying filter is linear, the colour test is off (it keys on
-  the game's own texels), and, for a texture with any alpha under 255, the texture's alpha is used: the texture
-  function is RGBA and the alpha test is on or a blend factor reads source or destination alpha. A draw that shows
-  a keyed texel's colour as it is would show the fill colour described below instead, so it keeps level 0. Each
+  level 0, as texture filtering's rule has it), its minifying filter is linear, and, for a texture with any alpha
+  under 255, the texture's alpha is used: the texture function is RGBA and the alpha test is on or a blend factor
+  reads source or destination alpha. A draw that shows a keyed texel's colour as it is would show the fill colour
+  described below instead, so it keeps level 0. A colour-tested draw with a linear filter is drawn by the software
+  renderer, as with the part off, so it never samples a chain (the colour test keys on the game's own texels). Each
   rule is rechecked at every bind, and the exit stamp counts the binds each rule kept at level 0.
 - **How a level is built.** After the palette lookup, from the RGBA8 texels the renderer uploads as level 0, which
   it never changes. Each texel of the next level is the mean of a 2x2 block of the level above in linear light (the
@@ -1078,7 +1079,7 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
 - **Stamps.** `ACE_MODE: mips on (textures with one level get host-built mip chains)` after the `ACE_MODE: on` line;
   `HOST_MIPS: on (filter=box in linear light, alpha-weighted, key fill; bias=0 at <S>x; anisotropy=<A>)` and the
   guest-visible line section 11.3.8 describes when the renderer starts; `HOST_MIPS: exit (entries=, builds=, texels=,
-  build_ms=, bound=, plain_alpha_unused=, plain_color_test=, plain_target=, set_failures=, chain_peak_kib=)` when it
+  build_ms=, bound=, plain_alpha_unused=, plain_target=, set_failures=, chain_peak_kib=)` when it
   stops. The report's `effective` block has `"mips"`, the game badge lists "smooth distant textures", and the flight
   recorder's `runtime.enhancements` carries the launch line. Section 10.4 applies: the run is an Enhanced run. If the
   builder's buffers cannot be made, the part is unavailable for the run and the report says so.
@@ -1092,7 +1093,8 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
     64x64 single-level CLUT checker drawn 5 pixels wide samples the chain's grey, not level 0's aliasing; a draw at
     two texels per guest pixel keeps level 0's detail from 2x; a second palette builds a second chain and the first
     palette, back again, finds its own; a rewrite of the texels rebuilds the chain; a colour-keyed edge blended over
-    black takes no key colour; through-mode, colour-test and alpha-unused draws keep level 0; the chain bytes are
+    black takes no key colour; through-mode and alpha-unused draws keep level 0, and a colour-tested draw stays
+    with the software renderer; the chain bytes are
     1365 texels an entry. It runs at render scales 4, 2 and 1, with 16x texture filtering, and with the part off,
     where the minified draw must show level 0's aliasing and no entry may have a chain.
   - `ace-selftest` pins the key: optional, `on` or `off`, in an Enhanced or Ace line, written last and only when on.

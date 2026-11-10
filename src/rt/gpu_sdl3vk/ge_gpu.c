@@ -501,7 +501,7 @@ static uint32_t *s_hm_out;                 /* levels 1.. of the chain being buil
 static float *s_hm_work;
 static int s_tex_bound_hm;                 /* the last tex_get bound a chain */
 static struct {
-    uint64_t entries, builds, texels, build_ns, bound, plain_alpha, plain_ctest, plain_target,
+    uint64_t entries, builds, texels, build_ns, bound, plain_alpha, plain_target,
              set_failures, bytes, bytes_peak;
 } s_hm_stats;
 /* The texture-replacement pack in force (texrepl.h), opened once at init: NULL in an authentic run
@@ -4836,12 +4836,15 @@ static int tex_alpha_used(const GeState *g) {
 
 /* Whether this draw binds entry `e`'s chain: a transformed draw (through-mode HUDs, menus and
  * text keep level 0, as texture filtering's rule has it) that filters linearly when minified,
- * without the color test (it keys on the guest's texels), and whose texture alpha, if it has
- * any, is used. Rechecked at each bind for a render target that has since met the texture. */
+ * without the color test, and whose texture alpha, if it has any, is used. A color-tested draw
+ * with a linear filter is drawn by the software renderer (color_test_colour_inexact), so the
+ * color test rule only keeps that true if the GPU path ever takes such a draw: the test keys on
+ * the guest's own texels. Rechecked at each bind for a render target that has since met the
+ * texture. */
 static int tex_hm_applies(const TexEnt *e) {
     if (!e->hm_set || s_tex_noscale || (s_ge->vtype & (1u << 23)) || !(tex_filter_variant(s_ge->tex_filter) & 2u))
         return 0;
-    if (color_test_active(s_ge)) { s_hm_stats.plain_ctest++; return 0; }
+    if (color_test_active(s_ge)) return 0;
     if (e->hm_alpha && !tex_alpha_used(s_ge)) { s_hm_stats.plain_alpha++; return 0; }
     if (tex_vram_meets_target(e->addr, e->bytes)) { s_hm_stats.plain_target++; return 0; }
     return 1;
@@ -4881,12 +4884,12 @@ static void tex_hm_init(void) {
 static void tex_hm_shutdown(void) {
     if (s_hm)
         fprintf(stderr, "HOST_MIPS: exit (entries=%llu, builds=%llu, texels=%llu, build_ms=%.1f, bound=%llu, "
-                        "plain_alpha_unused=%llu, plain_color_test=%llu, plain_target=%llu, set_failures=%llu, "
+                        "plain_alpha_unused=%llu, plain_target=%llu, set_failures=%llu, "
                         "chain_peak_kib=%llu)\n",
                 (unsigned long long)s_hm_stats.entries, (unsigned long long)s_hm_stats.builds,
                 (unsigned long long)s_hm_stats.texels, (double)s_hm_stats.build_ns / 1e6,
                 (unsigned long long)s_hm_stats.bound, (unsigned long long)s_hm_stats.plain_alpha,
-                (unsigned long long)s_hm_stats.plain_ctest, (unsigned long long)s_hm_stats.plain_target,
+                (unsigned long long)s_hm_stats.plain_target,
                 (unsigned long long)s_hm_stats.set_failures,
                 (unsigned long long)(s_hm_stats.bytes_peak >> 10));
     free(s_hm_out); free(s_hm_work);

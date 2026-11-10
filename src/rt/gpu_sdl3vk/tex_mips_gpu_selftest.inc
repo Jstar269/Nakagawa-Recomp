@@ -17,8 +17,9 @@
  *  - rewrite: guest bytes rewritten under the same palette rebuild the chain at the next decode.
  *  - key-edge: opaque red beside the colour key (entry 2, magenta, alpha 0), blended by source
  *    alpha over black: no device pixel takes any blue, at the edge or anywhere.
- *  - gates: a through-mode draw, a color-test draw and a draw whose texture function ignores
- *    the alpha of a texture that has some bind level 0 alone.
+ *  - gates: a through-mode draw and a draw whose texture function ignores the alpha of a
+ *    texture that has some bind level 0 alone, and a color-tested draw stays with the software
+ *    renderer, which has no chain.
  * With mips off (`--ace` with a line that has no mips) the run checks the other side: no chain
  * is made, nothing is bound, and the minified cell shows the aliasing the chain removes.
  */
@@ -258,19 +259,25 @@ int gegpu_mips_selftest(void) {
     /* gates: each binds level 0 alone. */
     if (ok) {
         hm_fill(0);
-        const uint64_t bound0 = s_hm_stats.bound, ct0 = s_hm_stats.plain_ctest, al0 = s_hm_stats.plain_alpha;
+        const uint64_t bound0 = s_hm_stats.bound, al0 = s_hm_stats.plain_alpha;
         hm_state(3u | (1u << 8), 0, 0);
-        int g = hm_quad(140, 5, 64.0f, 1) && !s_tex_bound_hm;                       /* through mode */
-        hm_state(3u | (1u << 8), 0, 1);
-        g = g && hm_quad(150, 5, 64.0f, 0) && !s_tex_bound_hm && s_hm_stats.plain_ctest == ct0 + 1u;
+        const int g1 = hm_quad(140, 5, 64.0f, 1) && !s_tex_bound_hm;                /* through mode */
+        const unsigned long long fb0 = s_replay_stats.fallback_prims;
+        hm_state(3u | (1u << 8), 0, 1);                                             /* color test */
+        const int g2 = !hm_quad(150, 5, 64.0f, 0) && s_replay_stats.fallback_prims > fb0 &&
+                       s_hm_stats.bound == bound0;
         hm_fill(2);
         hm_state(3u, 1, 0);                                                         /* RGB: alpha unused */
-        g = g && hm_quad(160, 5, 64.0f, 0) && !s_tex_bound_hm && s_hm_stats.plain_alpha == al0 + 1u;
-        if (!g || s_hm_stats.bound != bound0) {
-            fprintf(stderr, "gpu mips selftest [gates]: a through-mode, color-test or alpha-unused draw bound the chain\n");
+        const int g3 = hm_quad(160, 5, 64.0f, 0) && !s_tex_bound_hm && s_hm_stats.plain_alpha == al0 + 1u;
+        if (!g1 || !g2 || !g3 || s_hm_stats.bound != bound0) {
+            fprintf(stderr, "gpu mips selftest [gates]: through mode %s, color test %s, alpha unused %s (bound +%llu, "
+                            "fallbacks +%llu)\n", g1 ? "ok" : "BAD", g2 ? "ok" : "BAD", g3 ? "ok" : "BAD",
+                    (unsigned long long)(s_hm_stats.bound - bound0),
+                    (unsigned long long)(s_replay_stats.fallback_prims - fb0));
             ok = 0;
         } else {
-            printf("gpu mips selftest: PASS gates      through mode, color test, unused alpha keep level 0\n");
+            printf("gpu mips selftest: PASS gates      through mode and unused alpha keep level 0, color test "
+                   "stays in software\n");
         }
     }
 
