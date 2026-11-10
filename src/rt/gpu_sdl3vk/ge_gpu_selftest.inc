@@ -59,7 +59,9 @@ static uint32_t coherence_gbatch(uint32_t fmt) {
 /* The fixture's image is newer than guest VRAM in every row, as if the GPU had drawn them all. */
 static void coherence_image_newer(Target *t) {
     t->clean_gen = 0;
+    t->draw_x0 = 0;
     t->draw_y0 = 0;
+    t->draw_x1 = FB_W;
     t->draw_y1 = FB_H;
 }
 
@@ -625,6 +627,108 @@ static int coherence_run_undrawn_rows(void) {
     if (!ok || kept != pixel) {
         fprintf(stderr, "gpu coherence selftest [%s]: the readback of a target overwrote the "
                         "target below it (0x%08x, expected 0x%08x)\n", name, kept, pixel);
+        coherence_reset_targets();
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %-22s fmt=%u stride=%u scale=%d\n",
+           name, fmt, stride, s_scale);
+    coherence_reset_targets();
+    return 1;
+}
+
+/* A title may keep its palettes in the stride padding of its own render target: a 16-bit target
+ * at stride 512 that the GPU draws 480 pixels wide leaves x = 480 to 511 of every row to the CPU.
+ * A CLUT load, or a CPU read, of those columns reads plain guest VRAM, so it must neither submit
+ * the queued batches nor read the target back, however many drawn rows lie around it. A palette
+ * under the pixels the GPU drew is read back, and the load gets those pixels. */
+static int coherence_draw_480_wide(uint32_t base, uint32_t stride, uint32_t fmt) {
+    memset(s_ge, 0, sizeof(*s_ge));
+    s_ge->fbp = base;
+    s_ge->fbw = stride;
+    s_ge->fbfmt = fmt;
+    s_ge->zbp = 0x04180000u;
+    s_ge->zbw = stride;
+    s_ge->scis_x2 = 479;
+    s_ge->scis_y2 = (int)FB_H - 1;
+    s_ge->maxz = 65535;
+    s_ge->clear = 1;
+    s_ge->clear_mode = 0x301;
+    uint32_t rgba = fb_unpack(coherence_gbatch(fmt), fmt);
+    GeVtx p0 = { 0.0f, 0.0f, 1.0f, 1.0f, 0, 0, 1.0f,
+                 rgba & 0xff, (rgba >> 8) & 0xff, (rgba >> 16) & 0xff, rgba >> 24 };
+    GeVtx p1 = p0;
+    p1.x = 480.0f;
+    p1.y = (float)FB_H;
+    return hook_sprite(&p0, &p1, 0) && s_nbatch;
+}
+
+/* Load `blocks` 32-byte blocks of 5551 palette from `clut` with a GE list. */
+static void coherence_load_clut(uint32_t clut, uint32_t blocks) {
+    const uint32_t list_addr = 0x00100800u;
+    uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    DL_EMIT(0xB0, clut & 0x00FFFFFFu);
+    DL_EMIT(0xB1, (clut & 0xFF000000u) >> 8);
+    DL_EMIT(0xC5, 1u | (0xFFu << 8));                   /* 5551, shift 0, mask 0xFF */
+    DL_EMIT(0xC4, blocks);
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+    ge_set_gpu_hooks(&k_hooks);
+    ge_run_list(list_addr, 0);
+}
+
+static int coherence_run_clut_stride_padding(void) {
+    const char *name = "clut-stride-padding";
+    const uint32_t stride = 512u, fmt = 1u, row = stride * 2u, bytes = 64u;
+    const uint32_t fba = 0x00100000u, base = 0x04000000u | fba;
+    const uint32_t pad = base + 5u * row + 480u * 2u;   /* row 5, x = 480 to 511 */
+    const uint32_t drawn = base + 6u * row;             /* row 6, x = 0 to 31 */
+    const uint16_t pixel = (uint16_t)coherence_gbatch(fmt);
+    uint8_t palette[64];
+    for (uint32_t i = 0; i < bytes; i++) palette[i] = (uint8_t)(0x3du + i * 7u);
+    coherence_reset_targets();
+    memset(SR_HOST(base), 0, FB_H * row);
+    sr_gpu_vram_dirty(base, FB_H * row);
+    g_sr_vram_read_pending = 0;
+
+    /* Every row drawn 480 wide, then the palette written by the CPU into the padding. */
+    int ok = coherence_draw_480_wide(base, stride, fmt);
+    ok = submit_pending() && ok;
+    Target *t = target_find_by_fba(fba);
+    memcpy(SR_HOST(pad), palette, bytes);
+    sr_gpu_vram_dirty(pad, bytes);
+    ok = ok && t && t->gpu_valid && t->clean_gen != t->render_gen;
+    /* Queue more drawing, so a needless overlap would also submit it. */
+    ok = ok && coherence_draw_480_wide(base, stride, fmt);
+    const unsigned long readbacks = s_cnt_readback;
+    coherence_load_clut(pad, bytes / 32u);
+    const int kept_queued = s_nbatch != 0;
+    const uint32_t word = MEM_R32(pad + 8u);
+    uint32_t want_word = 0;
+    memcpy(&want_word, palette + 8, sizeof want_word);
+    if (!ok || !kept_queued || s_cnt_readback != readbacks || !t || t->clean_gen == t->render_gen ||
+        memcmp(s_ge->clutram, palette, bytes) != 0 || word != want_word) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a palette in the stride padding read back "
+                        "the target (ok=%d queued=%d readbacks=%lu palette=%s word=0x%08x)\n", name,
+                ok, kept_queued, s_cnt_readback - readbacks,
+                memcmp(s_ge->clutram, palette, bytes) == 0 ? "match" : "MISMATCH", word);
+        coherence_reset_targets();
+        return 0;
+    }
+    /* A palette under drawn pixels is read back, queued batches included. */
+    coherence_load_clut(drawn, bytes / 32u);
+    int under = s_nbatch == 0 && s_cnt_readback == readbacks + 1u && t->clean_gen == t->render_gen;
+    for (uint32_t i = 0; under && i < bytes / 2u; i++) {
+        uint16_t v;
+        memcpy(&v, s_ge->clutram + i * 2u, sizeof v);
+        under = v == pixel;
+    }
+    if (!under) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a palette under drawn pixels was not read "
+                        "back (pending=%u readbacks=%lu)\n", name, (unsigned)s_nbatch,
+                s_cnt_readback - readbacks);
         coherence_reset_targets();
         return 0;
     }
@@ -5087,8 +5191,11 @@ static int coherence_run_stencil_constant(void) {
  *    computes that colour in floating point, 1 away from ge.c's integer one at some texels, and
  *    the key turns that into a pixel kept or dropped, so this list must stay on ge.c (every
  *    primitive falls back) and still match it.
+ * Three lists of Gouraud-shaded triangles follow (ctp_gouraud_list). A triangle whose three
+ * vertices carry one colour is flat in ge.c, so it stays on the GPU; one with a vertex of another
+ * colour or alpha interpolates and stays on ge.c; a list of both does each, triangle by triangle.
  * A table of states then checks color_test_colour_inexact() directly, including the Gouraud
- * triangle and transform-mode fog cases these sprite lists cannot reach. */
+ * triangle and transform-mode fog cases these sprite lists cannot reach, and tri_colours_vary(). */
 enum { CTP_FLAT_8888, CTP_FLAT_5650, CTP_FLAT_5551, CTP_FLAT_4444, CTP_BLEND_8888,
        CTP_TEX_8888, CTP_TEXDBL_8888, CTP_TEXMOD_8888, CTP_KINDS };
 #define CTP_TEX 0x08100000u                      /* 16x16 8888 texture in main RAM */
@@ -5163,6 +5270,46 @@ static uint32_t ctp_list(uint32_t base, int kind, int on) {
     stp_emit(&l, 0x27, 0);
     stp_emit(&l, 0x21, 0);
     stp_end(&l);
+    return 0x08040000u;
+}
+
+/* 48 Gouraud-shaded triangles under the color test NOTEQUAL the key, every other one in the key
+ * colour. `mode` 0: each triangle's three vertices carry one colour. 1: one vertex of each differs,
+ * in red, in alpha or in blue by turns. 2: pairs of triangles alternate between the two. *nvary
+ * counts the triangles whose vertex colours differ. */
+static uint32_t ctp_gouraud_list(uint32_t base, int mode, int on, unsigned *ntris, unsigned *nvary) {
+    static const uint32_t flip[3] = { 0x00000040u, 0x40000000u, 0x00400000u };
+    StpList l; stp_begin(&l, base, 3u, 0);
+    stp_emit(&l, 0x24, 0);                               /* no stencil test */
+    stp_emit(&l, 0x21, 0);
+    stp_emit(&l, 0x50, 1);                               /* Gouraud shading */
+    stp_emit(&l, 0x27, on ? 1u : 0u);
+    stp_emit(&l, 0xD8, 3u);
+    stp_emit(&l, 0xD9, CTP_KEY);
+    stp_emit(&l, 0xDA, 0xFFFFFFu);
+    ParityGuestVtx *v = (ParityGuestVtx *)SR_HOST(0x08060000u);
+    unsigned n = 0;
+    *nvary = 0;
+    for (uint32_t cell = 0; cell < 48u; cell++) {
+        /* an odd number of sixteenths off the pixel grid, so no edge passes through a pixel centre */
+        const float x = (float)(STP_ORIGIN + 18u * (cell % 24u)) + 0.0625f;
+        const float y = (float)(STP_ORIGIN + 20u * (cell / 24u)) + 0.0625f;
+        const uint32_t c = ((cell & 1u) ? CTP_KEY : (wrap_hash(0x60A0u + cell) & 0x00FFFFFFu)) | 0xC0000000u;
+        uint32_t cv[3] = { c, c, c };
+        if (mode == 1 || (mode == 2 && ((cell / 2u) & 1u))) {
+            cv[cell % 3u] ^= flip[cell % 3u];
+            (*nvary)++;
+        }
+        v[n++] = (ParityGuestVtx){ cv[0], x + 1.0f, y + 1.0f, 0.0f };
+        v[n++] = (ParityGuestVtx){ cv[1], x + 15.0f, y + 2.0f, 0.0f };
+        v[n++] = (ParityGuestVtx){ cv[2], x + 3.0f, y + 17.0f, 0.0f };
+    }
+    stp_emit(&l, 0x01, 0x08060000u & 0x00FFFFFFu);
+    stp_emit(&l, 0x04, (3u << 16) | n);
+    stp_emit(&l, 0x50, 0);
+    stp_emit(&l, 0x27, 0);
+    stp_end(&l);
+    *ntris = n / 3u;
     return 0x08040000u;
 }
 
@@ -5262,16 +5409,76 @@ static int coherence_run_color_test(void) {
         if (rejected < min_rejected) min_rejected = rejected;
         coherence_reset_targets();
     }
+    /* Gouraud triangles: only those whose vertex colours differ go to ge.c. */
+    unsigned gouraud_gpu = 0;
+    for (int mode = 0; mode < 3 && ok; mode++) {
+        static const char *const gname[3] = { "gouraud-one-colour", "gouraud-varying", "gouraud-mixed" };
+        unsigned ntris = 0, nvary = 0;
+        const GeGpuReplayStats before = s_replay_stats;
+        const int sync = ctp_run(base, 3u, ctp_gouraud_list(base, mode, 1, &ntris, &nvary), 1, gpu_out);
+        const GeGpuReplayStats after = s_replay_stats;
+        (void)ctp_run(base, 3u, ctp_gouraud_list(base, mode, 1, &ntris, &nvary), 0, sw_out);
+        (void)ctp_run(base, 3u, ctp_gouraud_list(base, mode, 0, &ntris, &nvary), 0, off_out);
+        const unsigned long long fell = after.fallback_prims - before.fallback_prims;
+        if (fell != nvary || (mode == 0 && sync != GEGPU_SYNC_OK)) {
+            fprintf(stderr, "gpu coherence selftest [color-test]: %s list: %llu of %u triangles took the "
+                            "software fallback, want the %u whose vertex colours differ (sync status %d)\n",
+                    gname[mode], fell, ntris, nvary, sync);
+            ok = 0;
+        }
+        gouraud_gpu += ntris - nvary;
+        unsigned drawn = 0, rejected = 0, bad = 0;
+        for (uint32_t i = 0; i < FB_W * FB_H; i++) {
+            uint32_t g, w, o;
+            memcpy(&g, gpu_out + i * 4u, 4u);
+            memcpy(&w, sw_out + i * 4u, 4u);
+            memcpy(&o, off_out + i * 4u, 4u);
+            if (w != wrap_hash(0x3C1u + i * 40503u)) drawn++;
+            if (w != o) rejected++;
+            if (i % FB_W >= 480u || g == w) continue;
+            if (!bad++)
+                fprintf(stderr, "gpu coherence selftest [color-test]: %s x=%u y=%u gpu=%08x ge_c=%08x\n",
+                        gname[mode], i % FB_W, i / FB_W, g, w);
+        }
+        if (bad || drawn < 512u || rejected < 256u) {
+            fprintf(stderr, "gpu coherence selftest [color-test]: %s list: %u pixels differ from ge.c; it drew "
+                            "%u pixels and the test rejected %u (want 0, and at least 512 and 256)\n",
+                    gname[mode], bad, drawn, rejected);
+            ok = 0;
+        }
+        coherence_reset_targets();
+    }
     free(gpu_out); free(sw_out); free(off_out);
     *s_ge = saved;
+    /* tri_colours_vary(): one colour, then each channel of each of the first two vertices changed
+     * (the third is the one the other two are compared with, so changing it changes both). */
+    {
+        GeVtx tv[3];
+        memset(tv, 0, sizeof tv);
+        for (int k = 0; k < 3; k++) { tv[k].r = 0x80; tv[k].g = 0x30; tv[k].b = 0xC0; tv[k].a = 0xFF; }
+        int vary_bad = tri_colours_vary(&tv[0], &tv[1], &tv[2]) != 0;
+        for (int k = 0; k < 3; k++)
+            for (int ch = 0; ch < 4; ch++) {
+                GeVtx t2[3];
+                memcpy(t2, tv, sizeof t2);
+                int *field = ch == 0 ? &t2[k].r : ch == 1 ? &t2[k].g : ch == 2 ? &t2[k].b : &t2[k].a;
+                *field ^= 1;
+                if (!tri_colours_vary(&t2[0], &t2[1], &t2[2])) vary_bad++;
+            }
+        if (vary_bad) {
+            fprintf(stderr, "gpu coherence selftest [color-test]: tri_colours_vary gave %d wrong answers of 13\n",
+                    vary_bad);
+            ok = 0;
+        }
+    }
     /* color_test_colour_inexact(interp, persp) under Gouraud shading, fog, a texture function
      * (0xFFFF: untextured; bit 8 texture alpha, bit 16 colour doubling), a filter and a
      * texture format (3 8888, 0 5650, 2 4444, 5 CLUT8). */
     static const struct { int interp, persp, gouraud, fog; uint32_t tfunc, filter; int want; uint32_t fmt; } cx[] = {
         { 0, 0, 0, 0, 0xFFFFu, 0u, 0, 3u },      /* untextured flat sprite */
         { 1, 0, 0, 0, 0xFFFFu, 0u, 0, 3u },      /* untextured flat triangle */
-        { 1, 0, 1, 0, 0xFFFFu, 0u, 1, 3u },      /* Gouraud triangle */
-        { 0, 0, 1, 0, 0xFFFFu, 0u, 0, 3u },      /* Gouraud sprite: one colour */
+        { 1, 0, 1, 0, 0xFFFFu, 0u, 1, 3u },      /* Gouraud triangle whose vertex colours differ */
+        { 0, 0, 1, 0, 0xFFFFu, 0u, 0, 3u },      /* Gouraud sprite, or a triangle of one colour */
         { 0, 1, 0, 1, 0xFFFFu, 0u, 1, 3u },      /* transform-mode fog */
         { 0, 0, 0, 1, 0xFFFFu, 0u, 0, 3u },      /* fog has no effect in through mode */
         { 0, 0, 0, 0, 0x103u, 0u, 0, 3u },       /* replace, nearest */
@@ -5310,8 +5517,9 @@ static int coherence_run_color_test(void) {
     }
     printf("gpu coherence selftest: PASS %-22s lists=%d GPU lists: fallback_prims=0 unblended exact, "
            "blended rgb_max_delta=%d (bound %d) alpha exact; modulated list on ge.c; min drawn=%u "
-           "rejected=%u; exactness cells=%u\n", "color-test", CTP_KINDS, max_rgb, STP_FF_BLEND_BOUND,
-           min_drawn, min_rejected, (unsigned)(sizeof(cx) / sizeof(cx[0])));
+           "rejected=%u; Gouraud lists=3: %u one-colour triangles on the GPU, the varying ones on ge.c, "
+           "exact; exactness cells=%u\n", "color-test", CTP_KINDS, max_rgb, STP_FF_BLEND_BOUND,
+           min_drawn, min_rejected, gouraud_gpu, (unsigned)(sizeof(cx) / sizeof(cx[0])));
     return 1;
 }
 
@@ -9273,6 +9481,485 @@ static int coherence_run_dst_read_one(const char *name) {
     return 0;
 }
 
+/* stencil-once: write-once stencil states (ge_gpu.c stencil_write_once). At a pixel, the first
+ * fragment of such a state that passes its tests stores a stencil that rejects every later one, so
+ * the pixel is that fragment over the destination from before the run, however the primitives
+ * overlap. They share one batch (no stencil_splits), and the snapshot path draws the batch last
+ * triangle first; the interlock path keeps the staged order. Four parts, each against ge.c bit for
+ * bit with no software fallback:
+ *  - mesh (1x only: its edges cross pixels at fractions a higher scale samples elsewhere): the
+ *    draw-once mask a game draws translucent shapes with (NOTEQUAL against bit 7, REPLACE on depth
+ *    pass, alpha-blended, flat-shaded, 8888) over a hashed background, in one TRIANGLES command: a
+ *    16x6 grid of jittered triangles that share their edges, a fan of seven, the same grid again
+ *    moved by a fraction of a cell (every pixel of it lies under the first grid or beside it), and
+ *    two triangles that meet at a pixel centre. No split at all;
+ *  - matrix: every test function with every depth-pass op, six test masks, five alpha write masks
+ *    and five references (7200 states) in each framebuffer format, the stencil-fail op KEEP, as two
+ *    overlapping sprites over a background whose stencil takes every value the format holds inside
+ *    the overlap. A state called write-once that is not one leaves the second sprite out where
+ *    ge.c draws it, and the other way round;
+ *  - anchors: states whose answer is known from the definition must merge (no split) or split once;
+ *  - depth legs: the draw-once state under the depth test, over a depth wall that hides the first
+ *    sprite in part of the overlap. With depth writes off, or the depth test ALWAYS and depth writes
+ *    on, it merges, and colour and depth equal ge.c. Under GEQUAL with depth writes on it must
+ *    split: drawn last to first, the second sprite's depth would hide the first;
+ *  - kill legs: the alpha test rejects the first sprite of the pair, then the second: the pair
+ *    still merges, and the sprite that is left shows in the overlap;
+ *  - feedback leg (dro_feedback_list): the state textures from its own target, and the second
+ *    sprite copies what the first drew. That pair is not write-once: it must split, and read the
+ *    first sprite's pixels.
+ * The mesh is drawn with back-face culling on, so a triangle whose vertices were reordered would
+ * vanish. */
+#define SON_BASE (0x04000000u | 0x00140000u)
+#define SON_LIST 0x08040000u
+#define SON_VERTS 0x08060000u
+#define SON_PITCH 28u
+#define SON_COLS 17u
+#define SON_ROWS 9u
+#define SON_PER_LIST (SON_COLS * SON_ROWS)
+#define SON_STATES (8u * 6u * 6u * 5u * 5u)
+#define SON_MESH_FRONT 1u                    /* GE_FRONTFACE for the mesh's winding */
+
+static const uint32_t k_son_smask[6] = { 0xFFu, 0xF0u, 0x0Fu, 0x80u, 0x81u, 0x00u };
+static const uint32_t k_son_amask[5] = { 0x00u, 0xF0u, 0x0Fu, 0x80u, 0xFFu };
+static const uint32_t k_son_ref[5] = { 0x00u, 0x80u, 0xFFu, 0x5Au, 0x0Fu };
+
+typedef struct SonRun {
+    unsigned long long splits, once_batches, once_tris, fallbacks, rmw_ops;
+} SonRun;
+
+/* The stencil state of a cell: the stencil-fail and depth-fail ops are KEEP. */
+static void son_state(StpList *l, uint32_t func, uint32_t ref, uint32_t smask, uint32_t zpass,
+                      uint32_t amask, int blend) {
+    stp_emit(l, 0xDC, func | (ref << 8) | (smask << 16));
+    stp_emit(l, 0xDD, zpass << 16);
+    stp_emit(l, 0xE9, amask);
+    stp_emit(l, 0x21, blend ? 1u : 0u);
+}
+
+/* A hashed background whose stencil (the alpha) takes every value the format holds inside any
+ * 16 x 16 pixels: all 256 on 8888, the 16 of 4444, both of 5551. */
+static void son_fill_background(uint32_t fmt) {
+    for (uint32_t i = 0; i < FB_W * FB_H; i++) {
+        const uint32_t x = i % FB_W, y = i / FB_W, h = wrap_hash(0x50Eu + i * 40503u);
+        if (fmt == 3u) {
+            ((uint32_t *)SR_HOST(SON_BASE))[i] = (h & 0x00FFFFFFu) | (((x & 15u) | ((y & 15u) << 4)) << 24);
+        } else {
+            uint16_t px = (uint16_t)h;
+            if (fmt == 2u) px = (uint16_t)((h & 0x0FFFu) | ((x & 15u) << 12));
+            else if (fmt == 1u) px = (uint16_t)((h & 0x7FFFu) | ((x & 1u) << 15));
+            ((uint16_t *)SR_HOST(SON_BASE))[i] = px;
+        }
+    }
+    sr_gpu_vram_dirty(SON_BASE, FB_W * FB_H * (fmt == 3u ? 4u : 2u));
+}
+
+/* Run `list` through the production hooks and then through ge.c alone, from the same background
+ * (`structured`: son_fill_background, else stp_fill_background). gpu_out takes the backend's
+ * picture and guest VRAM is left holding ge.c's; gpu_z and sw_z take the depth when given. */
+static int son_run_both(uint32_t fmt, uint32_t list, int structured, uint8_t *gpu_out,
+                        uint16_t *gpu_z, uint16_t *sw_z, SonRun *run) {
+    const uint32_t bytes = FB_W * FB_H * (fmt == 3u ? 4u : 2u);
+    coherence_reset_targets();
+    if (structured) son_fill_background(fmt); else stp_fill_background(SON_BASE, fmt);
+    const unsigned long long s0 = s_replay_stats.stencil_splits, b0 = s_cnt_once_batches;
+    const unsigned long long t0 = s_cnt_once_tris, f0 = s_replay_stats.fallback_prims, o0 = s_cnt_rmw_ops;
+    ge_set_gpu_hooks(&k_hooks);
+    ge_run_list(list, 0);
+    GeGpuFbDescriptor desc = { .addr = SON_BASE, .format = fmt, .stride = 512u,
+                               .width = 480, .height = FB_H };
+    if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) return 0;
+    memcpy(gpu_out, SR_HOST(SON_BASE), bytes);
+    if (gpu_z) {
+        if (s_nbatch && !submit_pending()) return 0;
+        for (int i = 0; i < MAX_DEP; i++)
+            if (s_deps[i].used && s_deps[i].zba == 0u && !depth_to_cpu(&s_deps[i])) return 0;
+        dro_depth(gpu_z);
+    }
+    run->splits = s_replay_stats.stencil_splits - s0;
+    run->once_batches = s_cnt_once_batches - b0;
+    run->once_tris = s_cnt_once_tris - t0;
+    run->fallbacks = s_replay_stats.fallback_prims - f0;
+    run->rmw_ops = s_cnt_rmw_ops - o0;
+    coherence_reset_targets();
+    if (structured) son_fill_background(fmt); else stp_fill_background(SON_BASE, fmt);
+    ge_set_gpu_hooks(NULL);
+    ge_run_list(list, 0);
+    ge_set_gpu_hooks(&k_hooks);
+    if (sw_z) dro_depth(sw_z);
+    return 1;
+}
+
+/* Pixels of the visible 480 columns where `gpu` differs from guest VRAM (ge.c's picture); the
+ * first one goes to *at (x | y << 16) with both values. */
+static unsigned son_differing(uint32_t fmt, const uint8_t *gpu, uint32_t *at, uint32_t *g, uint32_t *w) {
+    const uint32_t bpp = fmt == 3u ? 4u : 2u;
+    const uint8_t *sw = (const uint8_t *)SR_HOST(SON_BASE);
+    unsigned n = 0;
+    for (uint32_t i = 0; i < FB_W * FB_H; i++) {
+        if (i % FB_W >= 480u || !memcmp(gpu + i * bpp, sw + i * bpp, bpp)) continue;
+        if (!n++) {
+            *at = (i % FB_W) | ((i / FB_W) << 16);
+            *g = *w = 0;
+            memcpy(g, gpu + i * bpp, bpp); memcpy(w, sw + i * bpp, bpp);
+        }
+    }
+    return n;
+}
+
+static float son_jitter(uint32_t h) {
+    return (float)((int)(h % 13u) - 6) * 0.125f + 0.0625f;   /* eighths of a pixel, plus 1/16 */
+}
+
+static void son_grid(ParityGuestVtx *v, int *n, float ox, float oy, uint32_t seed) {
+    enum { COLS = 16, ROWS = 6 };
+    const float cell = 12.0f;
+    float gx[ROWS + 1][COLS + 1], gy[ROWS + 1][COLS + 1];
+    for (int j = 0; j <= ROWS; j++)
+        for (int i = 0; i <= COLS; i++) {
+            const uint32_t h = wrap_hash(seed + (uint32_t)(j * 97 + i));
+            gx[j][i] = ox + cell * (float)i + son_jitter(h);
+            gy[j][i] = oy + cell * (float)j + son_jitter(h >> 8);
+        }
+    for (int j = 0; j < ROWS; j++)
+        for (int i = 0; i < COLS; i++) {
+            const uint32_t c0 = (wrap_hash(seed ^ (uint32_t)(j * 131 + i * 7)) & 0x00FFFFFFu) | 0x80000000u;
+            const uint32_t c1 = (wrap_hash(seed ^ (uint32_t)(j * 131 + i * 7 + 3)) & 0x00FFFFFFu) | 0x60000000u;
+            const float ax = gx[j][i], ay = gy[j][i], bx = gx[j][i + 1], by = gy[j][i + 1];
+            const float cx = gx[j + 1][i + 1], cy = gy[j + 1][i + 1], ex = gx[j + 1][i], ey = gy[j + 1][i];
+            const int diag = (i + j) & 1;   /* which diagonal splits the cell */
+            v[(*n)++] = (ParityGuestVtx){ c0, ax, ay, 0.0f };
+            v[(*n)++] = (ParityGuestVtx){ c0, bx, by, 0.0f };
+            v[(*n)++] = diag ? (ParityGuestVtx){ c0, cx, cy, 0.0f } : (ParityGuestVtx){ c0, ex, ey, 0.0f };
+            v[(*n)++] = diag ? (ParityGuestVtx){ c1, ax, ay, 0.0f } : (ParityGuestVtx){ c1, bx, by, 0.0f };
+            v[(*n)++] = (ParityGuestVtx){ c1, cx, cy, 0.0f };
+            v[(*n)++] = (ParityGuestVtx){ c1, ex, ey, 0.0f };
+        }
+}
+
+static uint32_t son_mesh_list(int *ntris) {
+    StpList l;
+    stp_begin(&l, SON_BASE, 3u, 0);
+    stp_emit(&l, 0x50, 0);                                 /* flat shading */
+    stp_emit(&l, 0x9B, SON_MESH_FRONT);                    /* every triangle of the mesh faces front */
+    stp_emit(&l, 0x1D, 1);                                 /* back-face culling */
+    son_state(&l, 3u, 0x80u, 0x80u, 2u, 0x00u, 1);         /* NOTEQUAL bit 7, REPLACE, blended */
+    ParityGuestVtx *v = (ParityGuestVtx *)SR_HOST(SON_VERTS);
+    int n = 0;
+    son_grid(v, &n, 24.0f, 40.0f, 0x51u);
+    /* the fan: seven rim points at hashed radii and angles around an off-sample centre */
+    const float fx = 300.0625f, fy = 120.1875f;
+    float rx[7], ry[7];
+    for (int k = 0; k < 7; k++) {
+        const uint32_t h = wrap_hash(0x7A11u + (uint32_t)k);
+        const float a = 6.2831853f * ((float)k + 0.1f + 0.3f * (float)(h & 7u) / 8.0f) / 7.0f;
+        const float r = 18.0f + (float)((h >> 4) & 7u);
+        rx[k] = floorf((fx + r * cosf(a)) * 8.0f) / 8.0f + 0.0625f;
+        ry[k] = floorf((fy + r * sinf(a)) * 8.0f) / 8.0f + 0.0625f;
+    }
+    for (int k = 0; k < 7; k++) {
+        const uint32_t c = (wrap_hash(0x7B00u + (uint32_t)k) & 0x00FFFFFFu) | 0x90000000u;
+        v[n++] = (ParityGuestVtx){ c, fx, fy, 0.0f };
+        v[n++] = (ParityGuestVtx){ c, rx[k], ry[k], 0.0f };
+        v[n++] = (ParityGuestVtx){ c, rx[(k + 1) % 7], ry[(k + 1) % 7], 0.0f };
+    }
+    son_grid(v, &n, 24.0f + 5.25f, 40.0f + 4.125f, 0x52u);
+    /* two triangles that meet only at the pixel centre (400.5, 180.5) */
+    v[n++] = (ParityGuestVtx){ 0xA0336699u, 390.0625f, 172.0625f, 0.0f };
+    v[n++] = (ParityGuestVtx){ 0xA0336699u, 400.5f, 180.5f, 0.0f };
+    v[n++] = (ParityGuestVtx){ 0xA0336699u, 390.0625f, 190.0625f, 0.0f };
+    v[n++] = (ParityGuestVtx){ 0xB0996633u, 400.5f, 180.5f, 0.0f };
+    v[n++] = (ParityGuestVtx){ 0xB0996633u, 410.0625f, 172.0625f, 0.0f };
+    v[n++] = (ParityGuestVtx){ 0xB0996633u, 410.0625f, 190.0625f, 0.0f };
+    stp_emit(&l, 0x01, SON_VERTS & 0x00FFFFFFu);
+    stp_emit(&l, 0x04, (3u << 16) | (uint32_t)n);
+    stp_emit(&l, 0x1D, 0);
+    stp_end(&l);
+    *ntris = n / 3;
+    return SON_LIST;
+}
+
+/* Two overlapping sprites in one primitive command: the first over [1, 21) of the cell at (x, y),
+ * the second over [5, 25), so they overlap in 16 x 16 pixels. */
+static void son_pair(StpList *l, uint32_t *vaddr, float x, float y, uint32_t ca, uint32_t cb,
+                     float za, float zb) {
+    ParityGuestVtx *v = (ParityGuestVtx *)SR_HOST(*vaddr);
+    v[0] = (ParityGuestVtx){ ca, x + 1.0f, y + 1.0f, za };
+    v[1] = (ParityGuestVtx){ ca, x + 21.0f, y + 21.0f, za };
+    v[2] = (ParityGuestVtx){ cb, x + 5.0f, y + 5.0f, zb };
+    v[3] = (ParityGuestVtx){ cb, x + 25.0f, y + 25.0f, zb };
+    stp_emit(l, 0x01, *vaddr & 0x00FFFFFFu);
+    stp_emit(l, 0x04, (6u << 16) | 4u);
+    *vaddr += 4u * (uint32_t)sizeof(ParityGuestVtx);
+}
+
+/* Matrix state `s`: function, depth-pass op, test mask, alpha write mask, reference. A test that
+ * always passes stays unblended: blended, its 8888 state may take the fixed-function stencil path,
+ * whose colour is only within the fixed-function blend's bound of ge.c (stencil-parity). */
+static void son_matrix_state(StpList *l, uint32_t s) {
+    const uint32_t func = s % 8u;
+    son_state(l, func, k_son_ref[(s / 1440u) % 5u], k_son_smask[(s / 48u) % 6u], (s / 8u) % 6u,
+              k_son_amask[(s / 288u) % 5u], func != 1u && ((s / 7u) & 1u));
+}
+
+static uint32_t son_matrix_list(uint32_t fmt, uint32_t first) {
+    StpList l;
+    stp_begin(&l, SON_BASE, fmt, 0);
+    uint32_t vaddr = SON_VERTS;
+    for (uint32_t c = 0; c < SON_PER_LIST && first + c < SON_STATES; c++) {
+        const uint32_t s = first + c;
+        son_matrix_state(&l, s);
+        son_pair(&l, &vaddr, (float)(2u + SON_PITCH * (c % SON_COLS)), (float)(2u + SON_PITCH * (c / SON_COLS)),
+                 wrap_hash(0x50E1u + s * 2u), wrap_hash(0x50E2u + s * 2u), 0.0f, 0.0f);
+    }
+    stp_end(&l);
+    return SON_LIST;
+}
+
+typedef struct SonAnchor {
+    const char *name;
+    uint32_t fmt, func, ref, smask, zpass, amask;
+    int blend, once;
+} SonAnchor;
+
+static const SonAnchor k_son_anchors[] = {
+    { "8888 NOTEQUAL bit 7, REPLACE, blended", 3u, 3u, 0x80u, 0x80u, 2u, 0x00u, 1, 1 },
+    { "5551 NOTEQUAL bit 7, REPLACE, blended", 1u, 3u, 0x80u, 0x80u, 2u, 0x00u, 1, 1 },
+    { "4444 NOTEQUAL 0xF0, REPLACE", 2u, 3u, 0xF0u, 0xF0u, 2u, 0x00u, 0, 1 },
+    { "8888 EQUAL 0, INCR, blended", 3u, 2u, 0x00u, 0xFFu, 4u, 0x00u, 1, 1 },
+    { "8888 NOTEQUAL 0, ZERO", 3u, 3u, 0x00u, 0xFFu, 1u, 0x00u, 0, 1 },
+    /* 0x80 >= stencil passes again after the increment */
+    { "8888 GEQUAL 0x80, INCR, blended", 3u, 7u, 0x80u, 0xFFu, 4u, 0x00u, 1, 0 },
+    /* the alpha write mask keeps bit 7, so the stored stencil passes again */
+    { "8888 NOTEQUAL bit 7, REPLACE, bit 7 write-protected", 3u, 3u, 0x80u, 0x80u, 2u, 0x80u, 1, 0 },
+    /* a 565 pixel's stencil reads 0 whatever was stored */
+    { "5650 NOTEQUAL bit 7, REPLACE, blended", 0u, 3u, 0x80u, 0x80u, 2u, 0x00u, 1, 0 },
+};
+
+static uint32_t son_anchor_list(const SonAnchor *a) {
+    StpList l;
+    stp_begin(&l, SON_BASE, a->fmt, 0);
+    uint32_t vaddr = SON_VERTS;
+    son_state(&l, a->func, a->ref, a->smask, a->zpass, a->amask, a->blend);
+    son_pair(&l, &vaddr, 64.0f, 64.0f, 0x803050F0u, 0x60E0C020u, 0.0f, 0.0f);
+    stp_end(&l);
+    return SON_LIST;
+}
+
+typedef struct SonZLeg {
+    const char *name;
+    uint32_t zfunc;
+    int zwrite, once;
+} SonZLeg;
+
+static const SonZLeg k_son_zlegs[3] = {
+    { "GEQUAL, depth writes off", 7u, 0, 1 },
+    { "ALWAYS, depth writes on", 1u, 1, 1 },
+    { "GEQUAL, depth writes on", 7u, 1, 0 },
+};
+
+/* Depth cleared to 0 and a depth-only wall at z 25000 across the left part of the pair's overlap,
+ * both in clear mode; then the draw-once pair, the first sprite at z 20000 (behind the wall) and
+ * the second at z 30000 (in front of it). */
+static uint32_t son_depth_list(uint32_t fmt, const SonZLeg *leg) {
+    StpList l;
+    stp_begin(&l, SON_BASE, fmt, 1);
+    uint32_t vaddr = SON_VERTS;
+    stp_emit(&l, 0xD3, 1u | 0x400u);                       /* clear mode: depth only */
+    stp_sprite(&l, &vaddr, 0u, 0.0f, 0.0f, 480.0f, 272.0f, 0.0f);
+    stp_sprite(&l, &vaddr, 0u, 66.0f, 60.0f, 78.0f, 100.0f, 25000.0f);
+    stp_emit(&l, 0xD3, 0);
+    son_state(&l, 3u, 0x80u, 0x80u, 2u, 0x00u, 1);
+    stp_emit(&l, 0xDE, leg->zfunc);
+    stp_emit(&l, 0xE7, leg->zwrite ? 0u : 1u);
+    son_pair(&l, &vaddr, 64.0f, 64.0f, 0x803050F0u, 0x60E0C020u, 20000.0f, 30000.0f);
+    stp_end(&l);
+    return SON_LIST;
+}
+
+/* The draw-once pair under the alpha test GREATER 0x40: `killed` (0 or 1) is the sprite whose
+ * alpha 0x20 the test rejects, so the other one, alpha 0x80, must show in the overlap. */
+static uint32_t son_kill_list(int killed) {
+    StpList l;
+    stp_begin(&l, SON_BASE, 3u, 0);
+    uint32_t vaddr = SON_VERTS;
+    son_state(&l, 3u, 0x80u, 0x80u, 2u, 0x00u, 1);
+    stp_emit(&l, 0x22, 1);
+    stp_emit(&l, 0xDB, 6u | (0x40u << 8) | (0xFFu << 16));
+    son_pair(&l, &vaddr, 64.0f, 64.0f, killed == 0 ? 0x203050F0u : 0x803050F0u,
+             killed == 1 ? 0x20E0C020u : 0x80E0C020u, 0.0f, 0.0f);
+    stp_emit(&l, 0x22, 0);
+    stp_end(&l);
+    return SON_LIST;
+}
+
+static int coherence_run_stencil_once(void) {
+    if (dro_interlock_refused()) {
+        printf("gpu coherence selftest: SKIP stencil-once (SR_GPU_DST_READ=interlock was refused; the "
+               "reason is printed above)\n");
+        return 1;
+    }
+    uint8_t *gpu_out = (uint8_t *)malloc(FB_W * FB_H * 4u);
+    uint16_t *gz = (uint16_t *)malloc(480u * FB_H * 2u), *wz = (uint16_t *)malloc(480u * FB_H * 2u);
+    if (!gpu_out || !gz || !wz) { free(gpu_out); free(gz); free(wz); return 0; }
+    GeState saved = *s_ge;
+    const int ordered = dro_ordered();
+    int ok = 1, ntris = 0;
+    uint32_t at = 0, g = 0, w = 0;
+    SonRun run = {0};
+
+    /* mesh */
+    unsigned mesh_drawn = 0;
+    if (s_scale == 1) {
+        const uint32_t list = son_mesh_list(&ntris);
+        if (!son_run_both(3u, list, 0, gpu_out, NULL, NULL, &run)) {
+            fprintf(stderr, "gpu coherence selftest [stencil-once]: mesh: the GPU run failed\n");
+            ok = 0;
+        } else {
+            const unsigned differing = son_differing(3u, gpu_out, &at, &g, &w);
+            const uint32_t *sw = (const uint32_t *)SR_HOST(SON_BASE);
+            unsigned replaced = 0;
+            for (uint32_t i = 0; i < FB_W * FB_H; i++) {
+                const uint32_t bg = wrap_hash(0x3C1u + i * 40503u);
+                if (i % FB_W >= 480u) continue;
+                if (sw[i] != bg) mesh_drawn++;
+                if ((bg & 0x80000000u) == 0u && (sw[i] >> 24) == 0x80u) replaced++;
+            }
+            if (differing) {
+                fprintf(stderr, "gpu coherence selftest [stencil-once]: mesh: %u pixels differ from ge.c, the "
+                                "first at x=%u y=%u gpu=%08x ge_c=%08x\n", differing, at & 0xFFFFu, at >> 16, g, w);
+                ok = 0;
+            }
+            if (mesh_drawn < 4096u || replaced == 0u) {
+                fprintf(stderr, "gpu coherence selftest [stencil-once]: mesh: the list changed %u pixels, %u "
+                                "of them by REPLACE (want at least 4096, and some)\n", mesh_drawn, replaced);
+                ok = 0;
+            }
+            if (run.splits || run.fallbacks) {
+                fprintf(stderr, "gpu coherence selftest [stencil-once]: mesh: %llu stencil splits and %llu "
+                                "software fallback primitives over %d triangles (want 0 and 0)\n",
+                        run.splits, run.fallbacks, ntris);
+                ok = 0;
+            }
+            if (ordered ? run.rmw_ops == 0 || run.once_tris != 0
+                        : run.once_tris != (unsigned long long)ntris) {
+                fprintf(stderr, "gpu coherence selftest [stencil-once]: mesh: %llu triangles drawn last to "
+                                "first in %llu batches, %llu interlock ops (want %s)\n", run.once_tris,
+                        run.once_batches, run.rmw_ops,
+                        ordered ? "none reversed, in an interlock op" : "every triangle reversed");
+                ok = 0;
+            }
+        }
+    }
+
+    /* matrix */
+    unsigned long long matrix_splits = 0, matrix_once = 0;
+    unsigned matrix_bad = 0;
+    for (uint32_t fmt = 0; fmt < 4u; fmt++)
+        for (uint32_t first = 0; first < SON_STATES; first += SON_PER_LIST) {
+            if (!son_run_both(fmt, son_matrix_list(fmt, first), 1, gpu_out, NULL, NULL, &run)) {
+                fprintf(stderr, "gpu coherence selftest [stencil-once]: matrix fmt=%u states from %u: the "
+                                "GPU run failed\n", fmt, first);
+                ok = 0;
+                continue;
+            }
+            matrix_splits += run.splits;
+            matrix_once += run.once_batches;
+            const unsigned differing = son_differing(fmt, gpu_out, &at, &g, &w);
+            if (differing || run.fallbacks) {
+                const uint32_t x = at & 0xFFFFu, y = at >> 16;
+                const uint32_t s = first + (y - 2u) / SON_PITCH * SON_COLS + (x - 2u) / SON_PITCH;
+                if (matrix_bad++ < 4u)
+                    fprintf(stderr, "gpu coherence selftest [stencil-once]: matrix fmt=%u: %u pixels differ "
+                                    "from ge.c, %llu fallback primitives; the first at x=%u y=%u gpu=%0*x ge_c=%0*x, "
+                                    "state %u (func %u, depth-pass op %u, test mask %02x, alpha mask %02x, "
+                                    "ref %02x)\n", fmt, differing, run.fallbacks, x, y, fmt == 3u ? 8 : 4, g,
+                            fmt == 3u ? 8 : 4, w, s, s % 8u, (s / 8u) % 6u, k_son_smask[(s / 48u) % 6u],
+                            k_son_amask[(s / 288u) % 5u], k_son_ref[(s / 1440u) % 5u]);
+                ok = 0;
+            }
+        }
+    if (matrix_splits == 0u || (!ordered && matrix_once == 0u)) {
+        fprintf(stderr, "gpu coherence selftest [stencil-once]: matrix: %llu splits and %llu batches drawn "
+                        "last to first (want some of each: it holds states of both kinds)\n",
+                matrix_splits, matrix_once);
+        ok = 0;
+    }
+
+    /* anchors */
+    for (unsigned i = 0; i < sizeof k_son_anchors / sizeof k_son_anchors[0]; i++) {
+        const SonAnchor *a = &k_son_anchors[i];
+        if (!son_run_both(a->fmt, son_anchor_list(a), 1, gpu_out, NULL, NULL, &run)) { ok = 0; continue; }
+        const unsigned differing = son_differing(a->fmt, gpu_out, &at, &g, &w);
+        if (differing || run.fallbacks || run.splits != (a->once ? 0u : 1u)) {
+            fprintf(stderr, "gpu coherence selftest [stencil-once]: anchor '%s': %llu splits (want %u), %u "
+                            "pixels differ from ge.c, %llu fallback primitives\n", a->name, run.splits,
+                    a->once ? 0u : 1u, differing, run.fallbacks);
+            ok = 0;
+        }
+    }
+
+    /* depth legs */
+    for (uint32_t r = 0; r < 6u; r++) {
+        const SonZLeg *leg = &k_son_zlegs[r % 3u];
+        const uint32_t fmt = r < 3u ? 3u : 1u;
+        if (!son_run_both(fmt, son_depth_list(fmt, leg), 0, gpu_out, gz, wz, &run)) { ok = 0; continue; }
+        const unsigned differing = son_differing(fmt, gpu_out, &at, &g, &w);
+        unsigned zdiff = 0;
+        for (uint32_t i = 0; i < 480u * FB_H; i++) zdiff += gz[i] != wz[i];
+        if (differing || zdiff || run.fallbacks || run.splits != (leg->once ? 0u : 1u)) {
+            fprintf(stderr, "gpu coherence selftest [stencil-once]: depth leg '%s' fmt=%u: colour differs "
+                            "from ge.c in %u pixels, depth in %u; %llu splits (want %u), %llu fallback "
+                            "primitives\n", leg->name, fmt, differing, zdiff, run.splits,
+                    leg->once ? 0u : 1u, run.fallbacks);
+            if (differing)
+                fprintf(stderr, "gpu coherence selftest [stencil-once]: the first at x=%u y=%u gpu=%0*x "
+                                "ge_c=%0*x\n", at & 0xFFFFu, at >> 16, fmt == 3u ? 8 : 4, g, fmt == 3u ? 8 : 4, w);
+            ok = 0;
+        }
+    }
+
+    /* kill legs */
+    for (int killed = 0; killed < 2; killed++) {
+        if (!son_run_both(3u, son_kill_list(killed), 0, gpu_out, NULL, NULL, &run)) { ok = 0; continue; }
+        const unsigned differing = son_differing(3u, gpu_out, &at, &g, &w);
+        if (differing || run.fallbacks || run.splits) {
+            fprintf(stderr, "gpu coherence selftest [stencil-once]: kill leg (the alpha test rejects sprite "
+                            "%d): %u pixels differ from ge.c, %llu splits (want 0), %llu fallback primitives\n",
+                    killed + 1, differing, run.splits, run.fallbacks);
+            ok = 0;
+        }
+    }
+
+    /* feedback leg */
+    if (!son_run_both(3u, dro_feedback_list(), 0, gpu_out, NULL, NULL, &run)) {
+        ok = 0;
+    } else {
+        const unsigned differing = son_differing(3u, gpu_out, &at, &g, &w);
+        if (differing || run.fallbacks || run.splits != 1u) {
+            fprintf(stderr, "gpu coherence selftest [stencil-once]: feedback leg: %u pixels differ from ge.c "
+                            "(the first at x=%u y=%u gpu=%08x ge_c=%08x), %llu splits (want 1: the second "
+                            "sprite reads the first one's pixels), %llu fallback primitives\n", differing,
+                    at & 0xFFFFu, at >> 16, g, w, run.splits, run.fallbacks);
+            ok = 0;
+        }
+    }
+
+    *s_ge = saved;
+    coherence_reset_targets();
+    free(gpu_out); free(gz); free(wz);
+    if (ok)
+        printf("gpu coherence selftest: PASS %-22s %s; matrix states=%u x 4 formats exact, %llu batches "
+               "reversed, %llu splits; anchors=%u; depth legs=6 colour and depth exact; kill legs=2; "
+               "feedback leg splits (%s path)\n",
+               "stencil-once",
+               s_scale == 1 ? "mesh exact with no split" : "mesh not run above 1x", SON_STATES, matrix_once,
+               matrix_splits, (unsigned)(sizeof k_son_anchors / sizeof k_son_anchors[0]),
+               ordered ? "interlock" : "snapshot");
+    (void)mesh_drawn;
+    return ok;
+}
+
 /* twin-soft (`--twin 1` or `--twin native`, scale 1): the software renderer's host twin (ge.c,
  * ge_twin_*, #2050) on twin-scene's list with no GPU hooks, run with the twin off, then on in the
  * run's colour (ge_twin_set_mode), then off again. Checks:
@@ -9856,6 +10543,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "uv-edge-clamp") == 0) return coherence_run_uv_edge_clamp();
         if (strcmp(only, "undrawn-rows") == 0) return coherence_run_undrawn_rows();
         if (strcmp(only, "through-float-z") == 0) return coherence_run_through_float_z();
+        if (strcmp(only, "clut-stride-padding") == 0) return coherence_run_clut_stride_padding();
         if (strcmp(only, "depth-alias-no-zwrite") == 0) return coherence_run_depth_alias_no_zwrite();
         if (strcmp(only, "wide-fill") == 0) return coherence_run_wide_fill();
         if (strcmp(only, "patch-tess") == 0) return coherence_run_patch_tess();
@@ -9878,6 +10566,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "pipeline-cache-reject") == 0) return coherence_run_pipeline_cache_reject();
         if (strcmp(only, "dst-read") == 0) return coherence_run_dst_read();
         if (strncmp(only, "dst-read-", 9) == 0) return coherence_run_dst_read_one(only);
+        if (strcmp(only, "stencil-once") == 0) return coherence_run_stencil_once();
         if (strcmp(only, "rtt-scale") == 0) return coherence_run_rtt_scale();
         if (strcmp(only, "color-test") == 0) return coherence_run_color_test();
         if (strcmp(only, "lines") == 0) return coherence_run_lines();
@@ -9923,6 +10612,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_through_float_z()) ok = 0;
     if (!coherence_run_blend_parity()) ok = 0;
     if (!coherence_run_undrawn_rows()) ok = 0;
+    if (!coherence_run_clut_stride_padding()) ok = 0;
     if (!coherence_run_depth_alias_no_zwrite()) ok = 0;
     if (!coherence_run_scalar_vram_read(0x04080000u)) ok = 0;
     /* zbp 0x0a2000: bit 13 set, so the absolute XOR differs from the within-buffer form (0x0a6854 vs
@@ -9944,6 +10634,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_color_test()) ok = 0;
     if (!coherence_run_lines()) ok = 0;
     if (!coherence_run_dst_read()) ok = 0;
+    if (!coherence_run_stencil_once()) ok = 0;
     if (!coherence_run_tnl_parity()) ok = 0;
     /* Last: it rewrites ge.c's depth surface. */
     if (!coherence_run_scaled_upload()) ok = 0;
