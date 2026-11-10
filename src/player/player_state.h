@@ -13,6 +13,7 @@
 #include "nk_launch.h"
 #include "nk_steam_shortcuts.h"
 #include "nk_font.h"
+#include "nk_nickname.h"
 #include "nk_shared_helpers.h"
 #include "input_settings.h"
 #include "package_builder.h"
@@ -339,6 +340,13 @@ typedef struct {
     /* Save locations are not a setting: nk_launch_prepare_session resolves a
        writable per-disc Memory Stick root at launch (SR_MEMSTICK). The settings
        screen shows that real root instead of a configurable dead field. */
+    /* The console nickname games read (#2197, src/core/nk_nickname.h): the
+       neutral NK_NICKNAME_DEFAULT until the user chooses one, and never taken
+       from the PC's user name. Kept only in settings.json. nickname_asked
+       records that the first-launch prompt was answered (Save or Skip), so it
+       is shown once. */
+    char nickname[NK_NICKNAME_MAX_BYTES + 1];
+    bool nickname_asked;
 } PlayerSettings;
 
 /* Check for updates (update_check.h). Each step runs on its own worker thread,
@@ -940,6 +948,10 @@ struct PlayerApp {
      * session runs on the defaults, and settings_notice says so on every
      * Settings page (player_app_load_settings). */
     bool settings_newer_schema;
+    /* This run keeps the first-launch nickname prompt down (#2197): a --screenshot, --view
+       or scripted run shows the page it names. Memory only: nickname_asked and settings.json
+       are left as they are. */
+    bool nickname_prompt_held;
     /* Why the library shows no saved games although library.json exists (a newer
      * player wrote it), or an empty string. Shown on the Library screen. */
     char library_notice[192];
@@ -2056,6 +2068,18 @@ bool player_app_rebuild_banner_visible(const PlayerApp *app);
 size_t player_app_rebuild_banner_text(const PlayerApp *app, char *out, size_t out_size,
                                       bool *offers_rebuild_all);
 void player_app_rebuild_banner_dismiss(PlayerApp *app);
+
+/* The console nickname (#2197). The first-launch prompt asks for a nickname or
+   user name once: it shows until it is answered, and not while settings.json
+   is a newer player's, which this session cannot save. Its answer is the
+   nickname to save, or NULL for Skip, which keeps the current one (on a first
+   launch, NK_NICKNAME_DEFAULT). A nickname nk_nickname_valid refuses is not
+   taken: the answer returns false and the prompt stays. */
+bool player_app_nickname_prompt_visible(const PlayerApp *app);
+bool player_app_nickname_prompt_answer(PlayerApp *app, const char *nickname);
+/* Settings > Nickname: saves a new nickname at once. A value nk_nickname_valid
+   refuses changes nothing and returns false, so the old nickname stays. */
+bool player_app_set_nickname(PlayerApp *app, const char *nickname);
 
 /* PLAY for a game. An outdated game whose disc is in place asks first (the
    reminder: Rebuild now or Play anyway) unless Play anyway was chosen for it
