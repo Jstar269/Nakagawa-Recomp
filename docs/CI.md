@@ -25,7 +25,7 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 | Pull request, full run, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
 | Pull request, full run, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over four shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
 | Pull request, full run, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
-| Pull request, full run, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all three groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
+| Pull request, full run, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all four groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
 | Pull request, full run, only `tools/test_*.py` modules that no native or Windows gate runs | classification, hygiene/security, Python tooling, CI required | native/translation, Windows (see [Tests-only changes](#tests-only-changes)) |
 | Marked Ready (`ready_for_review`) | a new run on the head the Draft's run covered: the quick checks again when the head runs light, the path-applicable jobs when it runs full | as for that tier |
 | Workflow/CI configuration | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
@@ -56,8 +56,8 @@ GitHub's free plan runs about 20 jobs at once for this repository. A full `CI` r
 change, a manual run, the nightly schedule, a merge group) used to need 23 jobs, so a second
 pull request's run waited for runners while the first ran. The same checks then ran in 14
 jobs; the Android launcher build (`android_build`), added later, makes 15, a fourth Python
-shard makes 16, and installer and Windows-runtime changes add one path-gated Windows installer
-job. Nothing was dropped and no
+shard makes 16, a fourth Windows group makes 17, and installer and Windows-runtime changes add
+one path-gated Windows installer job. Nothing was dropped and no
 command changed; jobs were merged and their steps run one after another. Three things differ in
 when or how a step runs, and none of them skips a step
 where it ran before:
@@ -80,7 +80,7 @@ The jobs:
 | `linux_gcc16` | 1 job, 3.3 min | unchanged (not required, a container job on a hosted runner) |
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
 | `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
-| `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 3 groups of parts, about 10-13 min each |
+| `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 4 groups of parts, about 10-14 min each |
 | `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
 | `android_build` ("Android launcher build") | not present | 1 job, added later |
 | `ci_required` | 1 job | unchanged on a full run; does not run on a quick one |
@@ -104,19 +104,21 @@ The jobs:
   (see [Python test sharding](#python-test-sharding)). `test_production_smoke` alone takes
   about 16 minutes and has a shard to itself, so a fifth shard would not shorten the job.
 - **Windows.** The six parts keep their steps and conditions (`contains(matrix.parts, '<part>')`)
-  and run in three matrix groups: `smoke-routes` (smoke, routes), `ladder-fuzz` (ladder,
-  fuzz-0, fuzz-1) and `selftests`. A group runs the shared setup and the runtime-object
+  and run in four matrix groups: `smoke`, `routes`, `ladder-fuzz` (ladder, fuzz-0, fuzz-1)
+  and `selftests`. A group runs the shared setup and the runtime-object
   compile gate once, then its parts in the workflow's step order. Parts in one group share the
   checkout and its build tree. The ladder builds under `build/platform-ladder`. The two fuzz
   shards used to run on separate runners and now share `build/windows-runtime`; that is
   harmless, because each regenerates its cases header and `vfpu_fuzz_build` has no output
-  file, so it always relinks and reruns the fuzzer. In `smoke-routes`, `native-core-tests`
-  (routes) and the player targets (smoke) share `build/` through selftest targets that have no
-  output file, so their recipes compile and run every time. The compiler cache is keyed on
+  file, so it always relinks and reruns the fuzzer. `smoke` and `routes` ran as one group
+  until run 42870221118 measured it at 20 minutes, the longest job of a full run: the shared
+  setup about 2.3 minutes, smoke's steps about 7 and routes' about 10.6 (`native-core-tests`
+  alone 6.7). Apart they plan to about 9.5 and 13 minutes. `routes` uses nothing `smoke`
+  builds: `native-core-tests` and `profile-zero-e2e` build their own inputs. The compiler cache is keyed on
   the group, so the first runs after this change restore no entry until a run on `main` has
   saved one per group. When `run_installer` applies, the smoke group stages the already-built
   player and its runtime closure into a package artifact; an installer-only change therefore
-  runs all three Windows groups, and a failed staging or upload step fails `windows_runtime`.
+  runs all four Windows groups, and a failed staging or upload step fails `windows_runtime`.
   The separate `windows_installer`
   job downloads that artifact, downloads the locked Inno Setup (up to three attempts) and checks its
   SHA-256 before a silent `/CURRENTUSER` install under the runner temp folder, and runs
@@ -1775,7 +1777,7 @@ repository guarantee.
 ## Self-hosted Linux runners
 
 GitHub's free plan runs about 20 jobs at once for this repository, and one full CI run
-needs 16 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
+needs 17 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
 maintainer runs a small pool of self-hosted Linux runners, labelled `nk-wsl`, on their
 own PC. Contributors need nothing from it: every run they can start uses GitHub's
 hosted images, exactly as before.
@@ -1962,7 +1964,7 @@ developer runs locally, without private inputs:
   validates the guest ProgramImage, generates a public AOT package, launches it
   through the headless production runtime, and checks all seven named
   guest-service cases for each manifest. It runs in the `routes` part, in the
-  `smoke-routes` group (50 minutes) of the `windows_runtime` job, and took about 123 seconds locally for both package
+  `routes` group (25 minutes) of the `windows_runtime` job, and took about 123 seconds locally for both package
   builds and runtime launches. The guest bytes are built from the fixture's own
   `main.c` and `Makefile` by the profile-zero steps of the `public_export` job (pinned PSPDEV, checked
   against the committed `fixtures/profile_zero/prebuilt/SHA256SUMS`) and downloaded

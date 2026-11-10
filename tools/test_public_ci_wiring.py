@@ -837,7 +837,8 @@ _WINDOWS_MAIN_SAVE_CONDITION = (
 #: run"). Parts in one group share the build tree; the fuzz shards, which used to run on
 #: separate runners, share build/windows-runtime, and each rebuilds and reruns there.
 _WINDOWS_GROUPS = {
-    "smoke-routes": ["smoke", "routes"],
+    "smoke": ["smoke"],
+    "routes": ["routes"],
     "ladder-fuzz": ["ladder", "fuzz-0", "fuzz-1"],
     "selftests": ["selftests"],
 }

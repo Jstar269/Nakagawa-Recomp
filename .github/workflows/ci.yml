@@ -536,8 +536,8 @@ jobs:
     # Python (#702) -- four shards over the modules that can observe that edit.
     # test_production_smoke alone takes about 16 minutes and has a shard to itself;
     # the other three plan to about 14 minutes each, and a fifth shard would not
-    # shorten the job. Four keep a full run at 16 jobs, inside the free plan's 20
-    # concurrent jobs (docs/CI.md, "Jobs per run").
+    # shorten the job. Four keep a full run inside the free plan's 20 concurrent
+    # jobs (docs/CI.md, "Jobs per run").
     strategy:
       fail-fast: false
       matrix:
@@ -1710,17 +1710,21 @@ jobs:
     #   selftests: cosimulation + mutants, scheduler, dispatch, FP, strbuf, HLE thread,
     #              Media Foundation H.264 media
     #   fuzz-0/1:  synthetic VFPU fuzzer, its cases split between two shards (FUZZ_CASE_SHARD)
-    # The six parts run on three runners (docs/CI.md, "Jobs per run"): each matrix
+    # The six parts run on four runners (docs/CI.md, "Jobs per run"): each matrix
     # group runs its parts one after another, in this file's step order, after one
-    # copy of the shared setup and the runtime-object compile gate. The groups are
-    # balanced on the step times of runs 42270920833 and 42258417250 (about 10-13
-    # minutes each). Parts in one group share the checkout and its build tree. The
+    # copy of the shared setup and the runtime-object compile gate (about 2.3
+    # minutes). smoke and routes ran as one group until run 42870221118 measured it
+    # at 20 minutes, the longest job of a full run (smoke's steps about 7 minutes,
+    # routes' about 10.6, native-core-tests 6.7 of them); apart they plan to about
+    # 9.5 and 13 minutes, beside ladder-fuzz (13.3) and selftests (14.0). Parts in
+    # one group share the checkout and its build tree. The
     # ladder builds under build/platform-ladder; the two fuzz shards, which used to
     # run on separate runners, now share build/windows-runtime, which is harmless
     # because each regenerates its cases header and vfpu_fuzz_build always relinks
-    # and reruns the fuzzer. In smoke-routes, native-core-tests (routes) and the
-    # player targets (smoke) share build/ through selftest targets that have no
-    # output file, so their recipes compile and run every time.
+    # and reruns the fuzzer. routes uses nothing smoke builds: native-core-tests and
+    # profile-zero-e2e build their own inputs, and when the two shared build/, the
+    # selftest targets they had in common had no output file, so their recipes
+    # compiled and ran every time anyway.
     # needs.windows_runtime.result aggregates all groups, and a failing step fails
     # its group's job.
     # A group's timeout is the sum of its parts' former 25-minute limits.
@@ -1728,9 +1732,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - group: smoke-routes
-            parts: [smoke, routes]
-            timeout: 50
+          - group: smoke
+            parts: [smoke]
+            timeout: 25
+          - group: routes
+            parts: [routes]
+            timeout: 25
           - group: ladder-fuzz
             parts: [ladder, fuzz-0, fuzz-1]
             timeout: 75
