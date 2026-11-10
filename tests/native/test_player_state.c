@@ -8994,9 +8994,9 @@ static void test_play_mode_texpack_settings(void) {
     PlayerTexturePackInfo pack;
     assert(player_texture_pack_inspect(good, &pack) && pack.ok && pack.textures == 2u &&
            strcmp(pack.name, "HD pack") == 0);
+    assert(!player_texture_pack_inspect("", &pack) && !pack.ok);
     assert(!player_texture_pack_inspect(bad, &pack) && !pack.ok && pack.error[0] &&
            strcmp(pack.name, "broken") == 0);
-    assert(!player_texture_pack_inspect("", &pack) && !pack.ok);
 
     PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
