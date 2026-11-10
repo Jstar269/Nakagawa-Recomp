@@ -1023,7 +1023,7 @@ void ace_finish(void) {
     fprintf(stderr, "ACE_MODE: exit (%s; rate %s)\n", s_spec, ace_rate_name(dominant_rate()));
     if (s_latency.count || s_latency.without_read)
         fprintf(stderr, "ACE_MODE: input latency (%llu frames: mean %.2f ms, p50 %.1f ms, p95 %.1f ms, "
-                        "max %.2f ms; %llu frames set with no pad read since the previous present)\n",
+                        "max %.2f ms; %llu presents repeating a frame or with no new pad read)\n",
                 (unsigned long long)s_latency.count,
                 s_latency.count ? (double)s_latency.sum_ns / (double)s_latency.count / 1e6 : 0.0,
                 (double)ace_latency_percentile_ns(&s_latency, 50) / 1e6,

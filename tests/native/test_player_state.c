@@ -7915,7 +7915,7 @@ static void test_play_mode_settings(void) {
                                       "\"text\": \"off\", \"readout\": \"off\", "
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"pad\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"},") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", \"pad\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8112,7 +8112,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
-                                      "\"tess\": \"off\", \"pad\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", \"pad\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8138,7 +8138,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"pad\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", \"pad\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8204,7 +8204,7 @@ static void test_play_mode_cull_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"pad\": \"off\", \"cull\": \"on\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", \"pad\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8271,7 +8271,7 @@ static void test_play_mode_pad_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"pad\": \"late\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"pad\": \"late\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8347,8 +8347,8 @@ static void test_play_mode_tess_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"pad\": \"off\", "
-                                      "\"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
+                                      "\"upscale\": \"off\", \"pad\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -8927,8 +8927,8 @@ static void test_play_mode_line_parses_in_runtime(void) {
         assert(!r.on);
         expect_line_parses_in_runtime(&r);
     }
-    /* Ace with every part at its longest word: the runtime takes the line, in the parts' order
-       with cull last, and it is no longer than the bound the part table gives. */
+    /* Ace with every part at its longest word: the runtime takes the line, in the line's key order
+       (pad before cull, though the part table has pad last), and it is no longer than the bound the part table gives. */
     {
         PlayerTitlePlay *own = &settings.title_play[0];
         own->mode = PLAYER_PLAY_ACE;
@@ -9043,8 +9043,8 @@ static void test_play_mode_upscale_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"pad\": \"off\", "
-                                      "\"cull\": \"off\", \"upscale\": \"fsr1\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
+                                      "\"upscale\": \"fsr1\", \"pad\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }

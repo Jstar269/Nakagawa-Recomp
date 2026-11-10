@@ -44222,6 +44222,87 @@ static void pad_late_teardown(void) {
     sr_hle_test_ctrl_ring_reset();
 }
 
+/* The input latency measure charges each pad read to the first new frame set after it (S5). A
+ * guest that sets each frame twice, or sets it latched and reads its pad before the VBLANK that
+ * shows it, must still have its new frames measured; a present that repeats the frame shown is
+ * counted apart. Fails if a present clears the read for the frame set after it, or if a repeat
+ * present is measured. */
+static int pad_latency_counts(unsigned long long *frames, unsigned long long *without, double *mean) {
+    static char json[16384];
+    *frames = 0u; *without = 0u; *mean = 0.0;
+    if (!ace_report_json(json, sizeof(json))) return 0;
+    const char *at = strstr(json, "\"input_latency_ms\": {\"frames\": ");
+    return at && sscanf(at, "\"input_latency_ms\": {\"frames\": %llu, \"frames_without_read\": %llu, \"mean\": %lf",
+                        frames, without, mean) == 3;
+}
+
+static void pad_setfb(uint32_t addr, uint32_t sync) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = addr; cpu.r[5] = 512; cpu.r[6] = 3; cpu.r[7] = sync;
+    expect(sr_syscall(&cpu, 0x289d82feu) == 0u, "latency: SetFrameBuf accepts the frame");
+}
+
+static void test_pad_latency_charges_reads_to_new_frames(void) {
+    static const uint32_t VRAM_A = 0x04000000u;
+    static const uint32_t VRAM_B = 0x04044000u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+    sr_ctrl_test_reset_live_input();
+    expect(ace_init_spec(PAD_LATE_LINE, NULL) == 1, "latency: Ace is on");
+    s_host_ns_fn = pad_host_clock;
+    unsigned long long f0, w0, f, w;
+    double mean0, mean;
+
+    s_pad_host_ns = 100u * PAD_MS;
+    pad_setfb(VRAM_A, 0u);                       /* whatever earlier reads it is charged with */
+    expect(pad_latency_counts(&f0, &w0, &mean0), "latency: the first present is in the report");
+
+    /* An update reads one sample, then the frame shown is presented again, then the update's
+     * new frame: only the new frame is measured, from that sample's poll. */
+    s_pad_host_ns = 200u * PAD_MS;
+    sr_ctrl_sample();
+    s_pad_host_ns = 205u * PAD_MS;
+    (void)ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 1u);
+    s_pad_host_ns = 210u * PAD_MS;
+    pad_setfb(VRAM_A, 0u);
+    expect(pad_latency_counts(&f, &w, &mean) && f == f0 && w == w0 + 1u,
+           "latency: a present repeating the frame shown is counted apart, not measured");
+    s_pad_host_ns = 220u * PAD_MS;
+    pad_setfb(VRAM_B, 0u);
+    expect(pad_latency_counts(&f, &w, &mean) && f == f0 + 1u && w == w0 + 1u,
+           "latency: the new frame set after the read is measured");
+    expect(mean * (double)f - mean0 * (double)f0 > 19.95 && mean * (double)f - mean0 * (double)f0 < 20.05,
+           "latency: measured from the read sample's poll to the present");
+
+    /* A latched frame set before the read (a peek of the latch) is not that read's frame; the
+     * next new frame is, though a present came between them. */
+    s_pad_host_ns = 230u * PAD_MS;
+    pad_setfb(VRAM_A, 1u);
+    s_pad_host_ns = 232u * PAD_MS;
+    sr_ctrl_sample();
+    s_pad_host_ns = 235u * PAD_MS;
+    (void)ctrlc_call(NID_CTRL_PEEK_LATCH, CTRL_OK_BUF, 0u);
+    s_pad_host_ns = 240u * PAD_MS;
+    sr_display_advance_vcount(1u);
+    sr_vblank_tick();
+    expect(pad_latency_counts(&f, &w, &mean) && f == f0 + 1u && w == w0 + 2u,
+           "latency: a latched frame set before the read is not measured from it");
+    s_pad_host_ns = 250u * PAD_MS;
+    pad_setfb(VRAM_B, 0u);
+    expect(pad_latency_counts(&f, &w, &mean) && f == f0 + 2u && w == w0 + 2u,
+           "latency: the read is charged to the next new frame, across the present between");
+    expect(mean * (double)f - mean0 * (double)f0 > 37.95 && mean * (double)f - mean0 * (double)f0 < 38.05,
+           "latency: the peeked sample's poll times that frame (20 + 18 ms)");
+    s_pad_host_ns = 260u * PAD_MS;
+    pad_setfb(VRAM_A, 0u);
+    expect(pad_latency_counts(&f, &w, &mean) && f == f0 + 2u && w == w0 + 3u,
+           "latency: a new frame with no read since the last measured one is not measured");
+    pad_late_teardown();
+}
+
 static int s_pad_body_done;
 static void pad_update_body(void *arg) {
     (void)arg;
@@ -50921,6 +51002,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ctrl_late_refresh();
     test_pad_vblank_deadline();
     test_pad_late_through_the_boundary();
+    test_pad_latency_charges_reads_to_new_frames();
     test_volatile_partition_allocator();
     test_late_prx_unload_keeps_module_owned_objects();
     test_power_unregister_callback_slots();

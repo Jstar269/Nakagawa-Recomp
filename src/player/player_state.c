@@ -1229,11 +1229,6 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"tess", "Finer patches",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
      4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
-    /* A guest-visible item (contract 11.3.9): it moves when each logic update starts, so it is off
-       by default and matters only for a title running its 60 FPS game logic package. */
-    {"pad", "Late pad sampling",
-     "Ace only, with 60 FPS logic. Reads the pad later in each frame; the game's timing changes.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_pad_words, 0},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
@@ -1243,6 +1238,11 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
      2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
+    /* A guest-visible item (contract 11.3.9): it moves when each logic update starts, so it is off
+       by default and matters only for a title running its 60 FPS game logic package. */
+    {"pad", "Late pad sampling",
+     "Ace only, with 60 FPS logic. Reads the pad later in each frame; the game's timing changes.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_pad_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2275,7 +2275,7 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
    the check below the table the set of parts it names. */
 #define PRESET_PART_LIST(X, text, upscale)                                                  \
     X(FILTERING, -1) X(TEXT, (text)) X(READOUT, -1) X(NOTICE, -1) X(WIDE, -1) X(SMOOTH, -1) \
-    X(SAS, -1) X(TESS, -1) X(PAD, -1) X(CULL, -1) X(UPSCALE, (upscale))
+    X(SAS, -1) X(TESS, -1) X(CULL, -1) X(UPSCALE, (upscale)) X(PAD, -1)
 #define PRESET_PART_VALUE(part, value) [PLAYER_PART_##part] = (value),
 #define PRESET_PART_BIT(part, value) | (1ull << PLAYER_PART_##part)
 #define PRESET_PARTS(text, upscale) {PRESET_PART_LIST(PRESET_PART_VALUE, text, upscale)}
@@ -3000,6 +3000,25 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60) {
     play->part[PLAYER_PART_SMOOTH] = 0;
 }
 
+/* The parts on the SR_ACE line, in the line's own key order (src/rt/ace.c), which is not the
+   part table's: the table fixes the Settings > Enhanced rows and the saved order, and a new part
+   is appended there. The upscaler is not on the line (player_play_present_upscale). */
+#define LAUNCH_LINE_PARTS(X)     X(FILTERING) X(TEXT) X(READOUT) X(NOTICE) X(WIDE) X(SMOOTH) X(SAS) X(TESS) X(PAD) X(CULL)
+#define LAUNCH_LINE_PART(part) PLAYER_PART_##part,
+#define LAUNCH_LINE_BIT(part) | (1ull << PLAYER_PART_##part)
+static const int k_launch_line_parts[] = {LAUNCH_LINE_PARTS(LAUNCH_LINE_PART)};
+/* A new PLAYER_PART_* fails to compile here ("size of array is negative") until
+   LAUNCH_LINE_PARTS puts it in its place on the line, or until it is left off the line like the
+   upscaler: the list names every part but PLAYER_PART_UPSCALE exactly once. */
+typedef char k_launch_line_names_every_part[
+    (0ull LAUNCH_LINE_PARTS(LAUNCH_LINE_BIT)) ==
+            (((1ull << PLAYER_PART_COUNT) - 1ull) & ~(1ull << PLAYER_PART_UPSCALE)) &&
+        sizeof(k_launch_line_parts) / sizeof(k_launch_line_parts[0]) == PLAYER_PART_COUNT - 1
+        ? 1 : -1];
+#undef LAUNCH_LINE_BIT
+#undef LAUNCH_LINE_PART
+#undef LAUNCH_LINE_PARTS
+
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap) {
     if (!out || cap == 0) return false;
     out[0] = '\0';
@@ -3012,10 +3031,11 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
     n = snprintf(out, cap, "v1;tier=%s", play->mode == PLAYER_PLAY_ACE ? "ace" : "enhanced");
     if (n <= 0 || (size_t)n >= cap) { out[0] = '\0'; return false; }
     used = (size_t)n;
-    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+    for (size_t i = 0; i < sizeof(k_launch_line_parts) / sizeof(k_launch_line_parts[0]); i++) {
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
-           launcher exports for every session; the runtime's SR_ACE line has no such key. */
-        if (p == PLAYER_PART_UPSCALE) continue;
+           launcher exports for every session; the runtime's SR_ACE line has no such key, so the
+           list leaves it out. */
+        const int p = k_launch_line_parts[i];
         /* A missing pad or cull is off (contract 11.2 item 2): the line carries the key only for an
            Ace launch with the part on (late pad sampling, 11.3.9; wider culling, 11.3.6). */
         if ((p == PLAYER_PART_PAD || p == PLAYER_PART_CULL) &&

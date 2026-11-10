@@ -1560,8 +1560,11 @@ so the pad sample it reads is younger when its frame reaches the screen.
     outside the 99th percentile (34 ms in both).
   - These runs predate two corrections, so they are to be repeated before review. The measure then also timed a frame
     the guest set with no pad read since the previous present, from the last read however old, which is the likely
-    source of that 1,275 ms frame; it now counts such frames apart (`frames_without_read`) and times only frames set
-    after a read. The latch reads did not yet count as reads, and a tap latched at a VBLANK could be dropped.
+    source of that 1,275 ms frame. It now times a present only when it shows a new frame set after a pad read, by
+    any read path, that no earlier measured frame was charged with, and counts every other present apart
+    (`frames_without_read`): a repeated frame, or a new frame with no such read. A read made after a frame was set
+    is charged to the next new frame, which is the one it can reach. The latch reads did not yet count as reads, and
+    a tap latched at a VBLANK could be dropped.
   On a scripted menu, match load and rally route of 12,000 VBLANKs (a route's samples are not refreshed, so it shows
   the hold's cost, not its gain), 8,744 updates off and 8,958 on, with 2,678 late updates off and 2,701 on, three and
   four slowed-logic notices, and latency percentiles within 1 ms. These runs share the machine with other work, so

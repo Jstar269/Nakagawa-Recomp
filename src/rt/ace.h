@@ -435,25 +435,25 @@ int ace_pad_plan_wait(AcePadPlan *p, uint64_t now_ns);
 /* The run's plan (Ace on: the runtime's boundary hook drives it). */
 AcePadPlan *ace_pad_plan(void);
 
-/* Input latency, the runtime's own measure: for each presented guest frame the guest set after
- * reading a pad sample since the previous frame's present, the host time from the input poll
- * behind the newest sample it read to the runtime's present of the frame. A frame set with no pad
- * read since the previous present is counted in without_read and not measured: the age of an
- * older read is not the latency of that frame. Half-millisecond bins; the last bin holds
- * everything above. */
+/* Input latency, the runtime's own measure: for each presented new guest frame the guest set
+ * after a pad read (any read path, peeks and latches included) that no earlier measured frame was
+ * charged with, the host time from the input poll behind the newest sample read to the runtime's
+ * present of the frame. Every other present, a repeat of the frame already shown or a new frame
+ * set with no such read, is counted in without_read and not measured: the age of an older read is
+ * not the latency of that frame. Half-millisecond bins; the last bin holds everything above. */
 #define ACE_LAT_BIN_NS 500000ull
 #define ACE_LAT_BINS 160u
 typedef struct {
     uint64_t count, sum_ns, max_ns;
-    uint64_t without_read;          /* presented frames set with no pad read since the last one */
+    uint64_t without_read;          /* presents of a repeat or with no read since the last measured */
     uint64_t bin[ACE_LAT_BINS];
 } AceLatency;
 void ace_latency_reset(AceLatency *l);
 void ace_latency_note(AceLatency *l, uint64_t ns);
 /* The upper edge of the bin that holds the pct-th percentile, in ns (0 with no samples). */
 uint64_t ace_latency_percentile_ns(const AceLatency *l, unsigned pct);
-/* One presented frame's latency into the run's measure, or a presented frame with no pad read
- * since the previous one (Ace on only). */
+/* One presented frame's latency into the run's measure, or a present that is not measured: a
+ * repeated frame, or a new one with no pad read since the last measured frame (Ace on only). */
 void ace_note_input_latency(uint64_t ns);
 void ace_note_frame_without_read(void);
 

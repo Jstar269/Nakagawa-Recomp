@@ -199,18 +199,17 @@ static uint64_t s_ctrl_ring_poll_ns[CTRL_RING];
 static uint32_t s_ctrl_newest_taps;
 static int s_ctrl_newest_refreshable;
 static int s_ctrl_newest_delivered;
-static int s_ctrl_read_since_present;
+static uint64_t s_ctrl_read_seq;   /* guest calls handed the newest sample; never reset */
 static uint64_t s_ctrl_last_read_poll_ns;
 
 uint64_t ctrl_last_read_poll_ns(void) { return s_ctrl_last_read_poll_ns; }
-int ctrl_read_since_present(void) { return s_ctrl_read_since_present; }
-void ctrl_note_present(void) { s_ctrl_read_since_present = 0; }
+uint64_t ctrl_read_seq(void) { return s_ctrl_read_seq; }
 
 /* A guest call was handed the newest sample, or computed from it: a buffer read or peek, or a
  * latch read or peek. From here on it is never refreshed. */
 static void ctrl_newest_handed(void) {
     s_ctrl_newest_delivered = 1;
-    s_ctrl_read_since_present = 1;
+    s_ctrl_read_seq++;
     s_ctrl_last_read_poll_ns = s_ctrl_ring_poll_ns[(s_ctrl_w - 1 + CTRL_RING) % CTRL_RING];
 }
 
@@ -486,7 +485,6 @@ void sr_hle_test_ctrl_ring_reset(void) {
     s_ctrl_newest_taps = 0u;
     s_ctrl_newest_refreshable = 0;
     s_ctrl_newest_delivered = 0;
-    s_ctrl_read_since_present = 0;
     s_ctrl_last_read_poll_ns = 0u;
     s_ctrl_live_poll_ns = 0u;
     s_ctrl_live_taps = 0u;

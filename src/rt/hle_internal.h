@@ -1555,8 +1555,10 @@ extern uint64_t s_ctrl_live_poll_ns;
 extern uint32_t s_ctrl_live_taps;
 extern int s_ctrl_live_keyboard;
 uint64_t ctrl_last_read_poll_ns(void);
-int ctrl_read_since_present(void);
-void ctrl_note_present(void);
+/* How many guest calls, of every read path (buffer reads and peeks, latch reads and peeks),
+ * have been handed the newest sample; monotonic, so a reader that kept an earlier value can tell
+ * whether a read came since. */
+uint64_t ctrl_read_seq(void);
 int ctrl_refresh_allowed(void);
 int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_ns, uint32_t taps);
 
