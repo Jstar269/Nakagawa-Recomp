@@ -225,6 +225,7 @@ static uint32_t s_last_flip_vcount, s_last_flip_fb;
 static int s_have_flip;
 static uint64_t s_rate_vblanks[ACE_RATE_COUNT];
 static uint64_t s_limited_windows;
+static int s_ff_running;   /* ace_note_fast_forward: set by the scheduler, not by a run reset */
 static AcePace s_pace;
 static AcePaceStats s_pace_stats;
 static uint32_t s_pace_vcount;
@@ -624,8 +625,15 @@ void ace_note_host_wait(uint64_t ns) {
     s_counters.host_wait_ns += ns;
 }
 
+void ace_note_fast_forward(int on) {
+    if (!g_ace_on) return;
+    s_ff_running = on != 0;
+    s_have_view = 0;
+    s_win_started = 0;   /* the first flip at normal speed starts a new window */
+}
+
 void ace_note_skipped_slots(uint32_t slots) {
-    if (!g_ace_on || !slots) return;
+    if (!g_ace_on || !slots || s_ff_running) return;
     s_win_skipped += slots;
     s_counters.skipped_slots += slots;
 }
@@ -650,7 +658,9 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
     s_pace_vcount = vcount;
     if (s_pace.held && new_frame) s_pace_stats.superseded++;
     ace_pace_flip(&s_pace, new_frame, s_det.stable, s_eff.smooth, now_ns);
-    if (!s_win_started) {
+    if (s_ff_running) {
+        /* Fast forward: no window is judged (ace_note_fast_forward). */
+    } else if (!s_win_started) {
         s_win_started = 1;
         s_win_start_ns = now_ns;
         s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
@@ -954,3 +964,13 @@ void ace_finish(void) {
         fprintf(stderr, "ACE_MODE: report not written (%s)\n", "write failed");
     }
 }
+
+/* ---- fast forward's keys (ace.h) ----------------------------------------------------------- */
+/* Set by the presenter's event pump and read by the scheduler's VBLANK, both on the thread that
+ * runs the guest, so plain flags are enough. */
+static int s_ff_hold;
+static int s_ff_toggle;
+
+void ace_ff_hold(int on) { s_ff_hold = on != 0; }
+void ace_ff_toggle(void) { s_ff_toggle = !s_ff_toggle; }
+int ace_ff_requested(void) { return s_ff_hold || s_ff_toggle; }

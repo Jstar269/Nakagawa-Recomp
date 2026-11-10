@@ -8847,7 +8847,9 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.on && r.part[PLAYER_PART_WIDE] == 1 && r.part[PLAYER_PART_SMOOTH] == 1);
     const char *unavailable = player_enhanced_part_unavailable_label(
         PLAYER_PART_WIDE, r.part[PLAYER_PART_WIDE], r.part[PLAYER_PART_SMOOTH]);
-    assert(unavailable && strcmp(unavailable, "Off (Smooth motion is on)") == 0);
+    /* Just "Off": the row's sentence says Smooth motion disables it, and a longer word
+       here widened Settings > Enhanced's button column and reflowed every row. */
+    assert(unavailable && strcmp(unavailable, "Off") == 0);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_WIDE, 1, 0) == NULL);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_WIDE, 0, 1) == NULL);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_SMOOTH, 1, 1) == NULL);
@@ -9286,6 +9288,134 @@ static void test_enhanced_package_variants(void) {
     printf("[PLAYER_STATE_TEST] enhanced and authentic package variants validate apart PASS\n");
 }
 
+/* The console nickname (#2197): "Player" until the user chooses one, and never the PC's user
+ * name; the first-launch prompt shows until it is answered, and Skip keeps "Player" and is not
+ * asked again after a reload; Settings saves a new nickname that a reload reads back; and a
+ * value the rule refuses (128 bytes, empty, a control character, malformed UTF-8) changes
+ * nothing, in Settings, in the prompt and in a hand-edited settings file. */
+static void test_player_nickname(void) {
+    static const char *const refused[] = {
+        "", "a\x01" "b", "tab\tname", "del\x7F", "c1 \xC2\x85", "\xC3\x28", "\xED\xA0\x80",
+    };
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800], text[400];
+    char long_ok[33], long_bad[34], straddle[34];
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    char *saved;
+    assert(app && back);
+    /* The 32-byte cap, one byte past it, and a two-byte character that ends past it. */
+    memset(long_ok, 'n', 32u);
+    long_ok[32] = '\0';
+    memset(long_bad, 'n', 33u);
+    long_bad[33] = '\0';
+    memset(straddle, 'n', 31u);
+    memcpy(straddle + 31, "\xC3\xA9", 3u);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cnickname_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+
+    /* The default is "Player", whatever the PC's user name is. */
+    {
+        const char *names[] = {"USERNAME", "USER"};
+        for (size_t i = 0u; i < 2u; i++) {
+            const char *was = getenv(names[i]);
+            char kept[256];
+            snprintf(kept, sizeof(kept), "%s", was ? was : "");
+            nk_ps_set_env(names[i], "nk-os-user-name");
+            player_app_settings_init_default(&app->settings);
+            assert(strcmp(app->settings.nickname, "Player") == 0);
+            assert(!app->settings.nickname_asked);
+            nk_ps_set_env(names[i], was ? kept : NULL);
+        }
+    }
+
+    /* A settings file without the keys (an older player's) asks once. */
+    write_text_file(path, "{\"schema_version\": 2}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    assert(player_app_nickname_prompt_visible(app));
+
+    /* Skip keeps "Player", and the prompt does not come back after a reload. */
+    assert(player_app_nickname_prompt_answer(app, NULL));
+    assert(!player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    saved = read_text_file(path);
+    assert(saved && strstr(saved, "\"nickname\": \"Player\"") != NULL &&
+           strstr(saved, "\"nickname_asked\": true") != NULL);
+    free(saved);
+    player_app_init(back);
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(!player_app_nickname_prompt_visible(back));
+    assert(strcmp(back->settings.nickname, "Player") == 0);
+
+    /* Settings: a new nickname is saved at once and a reload reads it back, 32 bytes too. */
+    assert(player_app_set_nickname(back, "Ren\xC3\xA9 7"));
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Ren\xC3\xA9 7") == 0);
+    assert(player_app_set_nickname(app, long_ok));
+    player_app_init(back);
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(strcmp(back->settings.nickname, long_ok) == 0);
+
+    /* A refused value changes nothing: the old nickname stays, in memory and on disk. */
+    assert(!player_app_set_nickname(back, long_bad));
+    assert(!player_app_set_nickname(back, straddle));
+    assert(!player_app_set_nickname(back, NULL));
+    for (size_t i = 0u; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        assert(!player_app_set_nickname(back, refused[i]));
+        assert(strcmp(back->settings.nickname, long_ok) == 0);
+    }
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, long_ok) == 0);
+
+    /* The prompt refuses the same values and stays up; a valid answer closes it. */
+    app->settings.nickname_asked = false;
+    assert(!player_app_nickname_prompt_answer(app, long_bad));
+    assert(!player_app_nickname_prompt_answer(app, "a\x01" "b"));
+    assert(player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, long_ok) == 0);
+    assert(player_app_nickname_prompt_answer(app, "Tester"));
+    assert(!player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, "Tester") == 0);
+
+    /* A hand-edited nickname the rule refuses is dropped for the default, not cut short. */
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"\\u0001x\", \"nickname_asked\": true}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0 && app->settings.nickname_asked);
+    snprintf(text, sizeof(text), "{\"schema_version\": 2, \"nickname\": \"%s\"}", long_bad);
+    write_text_file(path, text);
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"\"}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    /* Only spaces is no name (nk_nickname_valid): it degrades to the default too. */
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"   \", \"nickname_asked\": true}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0 && app->settings.nickname_asked);
+
+    /* A true first run, with no settings.json at all: "Player", and the prompt asks. */
+    nk_remove_utf8(path);
+    player_app_init(app);
+    (void)player_app_load_settings(app, path);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    assert(!app->settings.nickname_asked);
+    assert(player_app_nickname_prompt_visible(app));
+
+    nk_remove_utf8(path);
+    free(app);
+    free(back);
+}
+
 /* ---- --launch-title and Add to Steam (#2152) ---- */
 
 static void steam_test_game(GameRecord *game, const char *disc, const char *name,
@@ -9698,6 +9828,7 @@ int main(int argc, char **argv) {
     test_play_mode_cull_settings();
     test_play_mode_shadow_settings();
     test_play_mode_tess_settings();
+    test_player_nickname();
     test_graphics_presets();
     test_play_mode_line_parses_in_runtime();
     test_play_mode_upscale_settings();
@@ -10092,6 +10223,16 @@ int main(int argc, char **argv) {
         player_app_apply_settings_to_session(&applied, &cfg);
         assert(cfg.reduce_motion == NK_REDUCE_MOTION_SYSTEM);
         assert(cfg.gui_mode == true);   /* untouched by the mapping */
+        /* The nickname reaches the session whole, and its copy always ends in a NUL (#2197). */
+        snprintf(applied.nickname, sizeof(applied.nickname), "%s", "Kaz \xE3\x83\x8A");
+        memset(cfg.nickname, 'x', sizeof(cfg.nickname));
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(strcmp(cfg.nickname, "Kaz \xE3\x83\x8A") == 0);
+        memset(applied.nickname, 'n', sizeof(applied.nickname) - 1u);
+        applied.nickname[sizeof(applied.nickname) - 1u] = '\0';
+        memset(cfg.nickname, 'x', sizeof(cfg.nickname));
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(strlen(cfg.nickname) == NK_NICKNAME_MAX_BYTES);
         /* NULL arguments are safe no-ops. */
         player_app_apply_settings_to_session(NULL, &cfg);
         player_app_apply_settings_to_session(&applied, NULL);
