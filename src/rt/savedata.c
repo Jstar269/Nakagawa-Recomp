@@ -2177,12 +2177,12 @@ static uint32_t do_load(uint32_t param, const char *game, const char *save, int 
     /* An unfinished SAVE is settled before anything is read: no read ever sees half of one. */
     if (!savedata_recover(dir)) return ERR_LOAD_ACCESS_ERROR_UNMEASURED;
     if (fileName[0] && savedata_encrypted(dir, "LOAD")) return ERR_LOAD_DATA_BROKEN_UNMEASURED;
-    /* dataSize is zeroed whenever the save directory exists, before any error from inside it,
-     * as PPSSPP documents for LoadSaveData; no PSP recording covers the field (UNMEASURED). */
-    MEM_W32(param + SDP_dataSize, 0);
-    /* No PARAM.SFO: a damaged save, whether or not the data file is there (PSP, loadbroken). */
+    /* No PARAM.SFO: a damaged save, whether or not the data file is there (PSP, loadbroken),
+     * and dataSize is left as the game wrote it (PSP-HLE-SAVEDATA-NODATA-001, CAPTURED on a
+     * PSP-3000: AUTOLOAD, READDATA and READDATASECURE left it at its preset). */
     if (savedata_member_state(dir, "PARAM.SFO") == 0)
         return rw ? ERR_RW_DATA_BROKEN : ERR_LOAD_DATA_BROKEN;
+    MEM_W32(param + SDP_dataSize, 0);
     /* Blank fileName means success without reading data (PPSSPP LoadSaveData); the SFO and
      * icon blobs are still handed back. */
     if (fileName[0]) {
@@ -2246,11 +2246,11 @@ static uint32_t do_delete(const char *game, const char *save) {
     char rel[SR_CD_REL_MAX], dir[PATH_MAX];
     if (!save_rel(rel, sizeof(rel), game, save) || !save_dir(dir, sizeof(dir), game, save))
         return ERR_DELETE_NO_DATA;
-    /* No save: nothing to delete. The code is the runtime's no-data answer; what a PSP returns
-     * for a DELETE of a save that does not exist is UNMEASURED (pspautotests deletes only saves
-     * it made). A directory without PARAM.SFO is deleted like any other (PSP, deletebroken:
-     * result 0). Anything at that name that is not known to be a directory is refused, and
-     * nothing is deleted. */
+    /* No save: nothing to delete. AUTODELETE returns DELETE_NO_DATA and DELETEDATA RW_NO_DATA
+     * there (PSP-HLE-SAVEDATA-NODATA-001, CAPTURED on a PSP-3000); what DELETE (mode 10)
+     * returns is UNMEASURED and follows AUTODELETE. A directory without PARAM.SFO is deleted
+     * like any other (PSP, deletebroken: result 0). Anything at that name that is not known to
+     * be a directory is refused, and nothing is deleted. */
     const int state = save_dir_state(dir);
     if (state == 0) return ERR_DELETE_NO_DATA;
     if (state < 0) return ERR_DELETE_ACCESS_ERROR_UNMEASURED;
@@ -2277,8 +2277,9 @@ static uint32_t do_erase(uint32_t param, const char *game, const char *save) {
         return ERR_RW_NO_DATA;
     if (!save_rel(rel, sizeof(rel), game, save) || !save_dir(dir, sizeof(dir), game, save))
         return ERR_RW_NO_DATA;
-    /* No save: RW_NO_DATA, as PPSSPP's DeleteData answers; UNMEASURED on a PSP. Anything at
-     * that name that is not known to be a directory is refused, and nothing is erased. */
+    /* No save: RW_NO_DATA for ERASE and ERASESECURE (PSP-HLE-SAVEDATA-NODATA-001, CAPTURED on a
+     * PSP-3000). Anything at that name that is not known to be a directory is refused, and
+     * nothing is erased. */
     const int state = save_dir_state(dir);
     if (state == 0) return ERR_RW_NO_DATA;
     if (state < 0) return ERR_RW_NO_MEMSTICK_UNMEASURED;
@@ -2425,14 +2426,13 @@ static uint32_t do_files(uint32_t param, uint32_t size, const char *game, const 
     /* The directory's state, once: dir_exists, inside it, refuses a directory that resolves
      * outside the Memory Stick root (a junction), which then reads as not known. */
     const int state = save_dir(dir, sizeof(dir), game, save) ? save_dir_state(dir) : 0;
-    /* No such save: RW_NO_DATA (PSP, deletedata), with the counts written as 0 (UNMEASURED: no
-     * recording tells a written 0 from one left there). */
-    if (state == 0) {
-        MEM_W32(fl + 12, 0); MEM_W32(fl + 16, 0); MEM_W32(fl + 20, 0);
-        return ERR_RW_NO_DATA;
-    }
+    /* No such save: RW_NO_DATA (PSP, deletedata), and the counts, entries and list pointers are
+     * left as the game wrote them (PSP-HLE-SAVEDATA-NODATA-001, CAPTURED on a PSP-3000). */
+    if (state == 0) return ERR_RW_NO_DATA;
     /* Something at that name that is not known to be a directory, or a directory that cannot
-     * be settled or listed: an access error, not "no save". */
+     * be settled or listed: an access error, not "no save". What a PSP returns for a directory
+     * it cannot read is UNMEASURED; the code is the LOAD-family access error main returned when
+     * the directory could not be settled. */
     if (state < 0 || !savedata_recover(dir)) {
         MEM_W32(fl + 12, 0); MEM_W32(fl + 16, 0); MEM_W32(fl + 20, 0);
         return ERR_LOAD_ACCESS_ERROR_UNMEASURED;

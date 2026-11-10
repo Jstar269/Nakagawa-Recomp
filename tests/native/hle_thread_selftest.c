@@ -10790,8 +10790,10 @@ static void sdt_unlink_link(const char *path) {
 
 /* A Memory Stick with no save yet, a save directory without its PARAM.SFO, one with only its
  * PARAM.SFO, and a whole save. The results are the ones pspautotests records from a PSP
- * (tests/utility/savedata at 26a3dd01: deletedata, deletebroken, loadbroken, loaddata), except
- * those marked UNMEASURED, which no recording covers and which follow the runtime's own codes.
+ * (tests/utility/savedata at 26a3dd01: deletedata, deletebroken, loadbroken, loaddata) and the
+ * ones PSP-HLE-SAVEDATA-NODATA-001 shows (docs/HARDWARE_ORACLE.md: CAPTURED once on a PSP-3000,
+ * marked NODATA-001 below), except those marked UNMEASURED, which no recording covers and which
+ * follow the runtime's own codes.
  * Valkyria Chronicles II checks its save with FILES at boot and read the old LOAD-family answer
  * as a damaged save. */
 static void test_savedata_empty_stick_and_broken_saves(void) {
@@ -10809,34 +10811,35 @@ static void test_savedata_empty_stick_and_broken_saves(void) {
             nk_platform_mkdir_p(dir);
         }
         snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA/NKEMPTYSLOT", root);
-        expect(sdt_files("NKEMPTY", "SLOT") == 0x80110327u && sdt_files_counts_are(0u),
-               "FILES of a save that does not exist is RW_NO_DATA (PSP: deletedata), counts 0");
+        expect(sdt_files("NKEMPTY", "SLOT") == 0x80110327u && sdt_files_counts_are(0x7fu),
+               "FILES of a save that does not exist is RW_NO_DATA (PSP: deletedata) and leaves "
+               "the counts as they were (NODATA-001)");
         static const uint32_t load_modes[] = { 2u /* LOAD */, 0u /* AUTOLOAD */ };
         for (size_t i = 0; i < 2; i++)
             expect(sdt_run(load_modes[i], "NKEMPTY", "SLOT") == 0x80110307u &&
                        MEM_R8(SDT_BUF) == 0xeeu && MEM_R32(SDT_PARAM + 0x7cu) == 0x40u,
                    "LOAD and AUTOLOAD of a save that does not exist are LOAD_NO_DATA and write "
-                   "nothing (PSP: loaddata)");
+                   "nothing (PSP: loaddata; NODATA-001 for AUTOLOAD)");
         expect(sdt_run_listload("EMPTY") != 0u && MEM_R8(SDT_BUF) == 0xeeu,
                "LISTLOAD of a listed save that does not exist fails and writes nothing");
         static const uint32_t rd_modes[] = { 16u /* READDATA */, 15u /* READDATASECURE */ };
         for (size_t i = 0; i < 2; i++)
             expect(sdt_run(rd_modes[i], "NKEMPTY", "SLOT") == 0x80110327u &&
-                       MEM_R8(SDT_BUF) == 0xeeu,
-                   "READDATA and READDATASECURE of a save that does not exist are RW_NO_DATA "
-                   "(PSP: loaddata)");
-        static const uint32_t del_modes[] = { 10u /* DELETE */, 9u /* AUTODELETE */ };
-        for (size_t i = 0; i < 2; i++)
-            expect(sdt_run(del_modes[i], "NKEMPTY", "SLOT") == 0x80110347u,
-                   "DELETE and AUTODELETE of a save that does not exist are DELETE_NO_DATA, not an "
-                   "access error (UNMEASURED value)");
+                       MEM_R8(SDT_BUF) == 0xeeu && MEM_R32(SDT_PARAM + 0x7cu) == 0x40u,
+                   "READDATA and READDATASECURE of a save that does not exist are RW_NO_DATA and "
+                   "write nothing (PSP: loaddata, NODATA-001)");
+        expect(sdt_run(9u /* AUTODELETE */, "NKEMPTY", "SLOT") == 0x80110347u,
+               "AUTODELETE of a save that does not exist is DELETE_NO_DATA (NODATA-001)");
+        expect(sdt_run(10u /* DELETE */, "NKEMPTY", "SLOT") == 0x80110347u,
+               "DELETE of a save that does not exist is DELETE_NO_DATA, not an access error "
+               "(UNMEASURED value, as AUTODELETE)");
         expect(sdt_run(21u /* DELETEDATA */, "NKEMPTY", "SLOT") == 0x80110327u,
-               "DELETEDATA of a save that does not exist is RW_NO_DATA (UNMEASURED value)");
+               "DELETEDATA of a save that does not exist is RW_NO_DATA (NODATA-001)");
         static const uint32_t erase_modes[] = { 20u /* ERASE */, 19u /* ERASESECURE */ };
         for (size_t i = 0; i < 2; i++)
             expect(sdt_run(erase_modes[i], "NKEMPTY", "SLOT") == 0x80110327u,
                    "ERASE and ERASESECURE in a save that does not exist are RW_NO_DATA "
-                   "(UNMEASURED value)");
+                   "(NODATA-001)");
         expect(!nk_platform_dir_exists(dir), "no read or delete of a missing save creates it");
     }
 
@@ -10861,15 +10864,17 @@ static void test_savedata_empty_stick_and_broken_saves(void) {
                 static const uint32_t load_modes[] = { 2u /* LOAD */, 0u /* AUTOLOAD */ };
                 for (size_t i = 0; i < 2; i++)
                     expect(sdt_run(load_modes[i], "NKBROKEN", save) == 0x80110306u &&
-                               MEM_R8(SDT_BUF) == 0xeeu && MEM_R32(SDT_PARAM + 0x7cu) == 0u,
+                               MEM_R8(SDT_BUF) == 0xeeu && MEM_R32(SDT_PARAM + 0x7cu) == 0x40u,
                            "LOAD and AUTOLOAD of a save without PARAM.SFO are LOAD_DATA_BROKEN "
-                           "(PSP: loadbroken), read nothing and zero dataSize (UNMEASURED)");
+                           "(PSP: loadbroken) and leave the buffer and dataSize as they were "
+                           "(NODATA-001 for AUTOLOAD)");
                 static const uint32_t rd_modes[] = { 16u /* READDATA */, 15u /* READDATASECURE */ };
                 for (size_t i = 0; i < 2; i++)
                     expect(sdt_run(rd_modes[i], "NKBROKEN", save) == 0x80110326u &&
-                               MEM_R8(SDT_BUF) == 0xeeu && MEM_R32(SDT_PARAM + 0x7cu) == 0u,
+                               MEM_R8(SDT_BUF) == 0xeeu && MEM_R32(SDT_PARAM + 0x7cu) == 0x40u,
                            "READDATA and READDATASECURE of a save without PARAM.SFO are "
-                           "RW_DATA_BROKEN (PSP: loadbroken), read nothing and zero dataSize");
+                           "RW_DATA_BROKEN (PSP: loadbroken) and leave the buffer and dataSize as "
+                           "they were (NODATA-001)");
                 static const uint32_t erase_modes[] = { 20u /* ERASE */, 19u /* ERASESECURE */ };
                 for (size_t i = 0; i < 2; i++)
                     expect(sdt_run(erase_modes[i], "NKBROKEN", save) == 0x80110326u &&
@@ -10938,7 +10943,7 @@ static void test_savedata_empty_stick_and_broken_saves(void) {
             }
             expect(sdt_run(del_modes[i], "NKWHOLE", "SLOT") == 0u && !nk_platform_dir_exists(dir),
                    "DELETE, AUTODELETE and DELETEDATA of a whole save succeed and remove it");
-            expect(sdt_files("NKWHOLE", "SLOT") == 0x80110327u && sdt_files_counts_are(0u),
+            expect(sdt_files("NKWHOLE", "SLOT") == 0x80110327u && sdt_files_counts_are(0x7fu),
                    "FILES after the delete is RW_NO_DATA (PSP: deletedata)");
         }
     }

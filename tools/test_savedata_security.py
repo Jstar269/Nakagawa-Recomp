@@ -468,6 +468,10 @@ static void check_open_cases(const char *base) {
     snprintf(root, sizeof(root), "%s/final", base);
     snprintf(outside, sizeof(outside), "%s/final-outside", base);
     CHECK(make_savedata_tree(root) && make_dir(outside), "final-link fixture");
+    /* A whole save first, so the save has its PARAM.SFO: a save without one is reported as
+     * damaged before its data file is opened (pspautotests loadbroken), and the LOAD below
+     * must reach the data file's open to prove that open does not follow the link. */
+    CHECK(run_save(root, "SEED.BIN", "SEED") == 0, "final-link fixture SAVE writes PARAM.SFO");
     snprintf(target, sizeof(target), "%s/target.bin", outside);
     snprintf(path, sizeof(path), "%s/PSP/SAVEDATA/ULUS99999SLOT00/DATA.BIN", root);
     CHECK(write_file(target, "OUTSIDE") && symlink(target, path) == 0, "final-link setup");
