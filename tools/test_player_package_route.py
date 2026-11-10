@@ -886,6 +886,11 @@ class TestPlayerPackageRoute(unittest.TestCase):
         environment.pop("SR_VIDEO", None)
         environment.pop("SDL_VIDEODRIVER", None)
         environment.pop("SDL_VIDEO_DRIVER", None)
+        # The same presenter with its window hidden (SR_WINDOW_HIDDEN, sdl3vk.c):
+        # nobody watches this run. Shown, the child's window joined the taskbar
+        # group of any Nakagawa player open on the PC as a blank "Nakagawa
+        # Recomp" window for the length of the launch.
+        environment["SR_WINDOW_HIDDEN"] = "1"
         # The opt-in child evidence channels. SR_PERF_CSV is how a launcher
         # proves the guest consumed vblanks without reading the child's stderr,
         # which is not a stable API of either process backend.
