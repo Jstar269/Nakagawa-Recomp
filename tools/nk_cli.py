@@ -27,7 +27,7 @@ import tempfile
 import threading
 import traceback
 import time
-from typing import Any
+from typing import Any, NoReturn
 import zlib
 
 
@@ -2436,6 +2436,8 @@ def _select_enhancement_package(
     enhancement_package: Path | None,
     experimental_60hz: bool,
     environment: Mapping[str, str],
+    sfo_disc_id: str | None = None,
+    disc_version: str | None = None,
 ) -> tuple[Path | None, Path]:
     """The enhancement package a build applies and the package directory it writes.
 
@@ -2445,6 +2447,12 @@ def _select_enhancement_package(
     Makefile would read it, and it would otherwise enhance the authentic package or
     override the package checked here. An enhanced build gets its own directory, never
     the authentic `packages/<disc_id>`.
+
+    A published package (docs/ENHANCEMENT_CONTRACT.md section 5.1) names its disc. It is
+    refused by name before any site is read: `other_disc` when the disc's PARAM.SFO
+    DISC_ID differs, `other_revision` when its DISC_VERSION differs, and
+    `modified_executable` when both match but the executable's SHA-256 does not. Codegen
+    then checks every keyed stock digest (`site_mismatch`).
     """
     ambient = package_cache.ambient_enhancement_package(environment)
     if ambient is not None:
@@ -2471,6 +2479,8 @@ def _select_enhancement_package(
         package = enhancement_package_module.load_and_validate_package(package_path)
     except (OSError, ValueError) as exc:
         raise PackageBuildError(f"Enhancement package rejected: {exc}") from exc
+    if enhancement_package_module.is_published_package(package):
+        _check_published_package_disc(package, sfo_disc_id, disc_version, executable_sha256)
     if package["target_title_id"] != title_id:
         raise PackageBuildError(
             f"Enhancement package target_title_id {package['target_title_id']!r} "
@@ -2482,6 +2492,28 @@ def _select_enhancement_package(
             f"does not match selected executable SHA-256 {executable_sha256}."
         )
     return package_path, user_root / "packages" / f"{disc_id}-enhanced-{package['id']}"
+
+
+def _check_published_package_disc(package: Mapping[str, Any], sfo_disc_id: str | None,
+                                  disc_version: str | None, executable_sha256: str) -> None:
+    """Refuse a published package for another disc, revision or a modified executable, by name."""
+    def refuse(code: str, message: str) -> NoReturn:
+        raise PackageBuildError(f"Enhancement package refused ({code}): {message}. "
+                                "Nothing was built; the authentic package is unchanged.")
+
+    if not sfo_disc_id or not disc_version:
+        raise PackageBuildError("Enhancement package refused: a published package needs the disc's "
+                                "PARAM.SFO DISC_ID and DISC_VERSION, and this disc does not give both.")
+    if sfo_disc_id.upper() != package["disc_id"]:
+        refuse("other_disc", f"the package is for {package['disc_id']}, this disc is {sfo_disc_id.upper()} "
+                             "(another region or another game)")
+    if disc_version != package["disc_version"]:
+        refuse("other_revision", f"the package is for {package['disc_id']} version {package['disc_version']}, "
+                                 f"this disc is version {disc_version}")
+    if executable_sha256 != package["executable_sha256"]:
+        refuse("modified_executable", f"the disc ID and version match, but the executable's SHA-256 "
+                                      f"{executable_sha256} is not {package['executable_sha256']} "
+                                      "(a patched or re-encoded image)")
 
 
 @dataclass
@@ -2871,6 +2903,8 @@ def _package_cache_check(st):
         enhancement_package=getattr(args, "enhancement_package", None),
         experimental_60hz=bool(getattr(args, "experimental_60hz", False)),
         environment=os.environ,
+        sfo_disc_id=title_input_identity["disc"]["id"],
+        disc_version=title_input_identity["disc"]["disc_version"],
     )
     _require_child(user_root, target_dir, "Package destination")
     if target_dir.is_symlink() or (target_dir.exists() and not target_dir.is_dir()):
