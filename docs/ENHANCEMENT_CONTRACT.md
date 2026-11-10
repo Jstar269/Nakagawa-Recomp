@@ -1581,8 +1581,8 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
 - **Pacing guard.** A package with a load part also calls `nk_ace_load_update()` at its `update_boundary`, ungated;
   it does nothing unless the run's `load=fast` is in effect, so every other run is unchanged. The runtime counts the
   consecutive logic updates in each of which at least one declared wait was skipped. When that run reaches
-  `ACE_LOAD_PACING_UPDATES` (`src/rt/ace.h`, provisionally 8 updates, not yet set against a measured run of the
-  title), the site paces updates, not a load: nothing is skipped for the rest of the run, so every declared wait
+  `ACE_LOAD_PACING_UPDATES` (`src/rt/ace.h`, 8 updates: four times the longest run measured on the title's loads,
+  2 updates, below), the site paces updates, not a load: nothing is skipped for the rest of the run, so every declared wait
   runs its stock call, and one `ENHANCEMENT_LOAD_PACING:` line names the site, by id and by its `jal`'s address,
   whose skip reached the threshold. The report's `load_skip_max_run` is the longest run seen and `load_paced` says
   whether the guard fired; the exit line names both. Until it fires, a pacing site runs that many updates unpaced,
@@ -1600,16 +1600,18 @@ The `load` Ace part of section 9.8, for a title that paces a loading screen with
   (`sceDisplayWaitVblankStartCB`, a semaphore its VBLANK handler signals, or a thread delay) is unchanged. It does
   not make a read faster. The section adds no code and changes no word when a package has no `ace_parts`, and with
   the key off the stock call runs.
-- **Tier:** Ace (one title). **Default:** off, and in no graphics preset.
-- **Measured (Hot Shots Tennis, UCUS98701, one declared wait, 60 FPS package, Vulkan GE, hidden window, Windows 11,
-  other builds running on the machine).** The title follows each file-binder open on its main thread with three
-  passes of a fade step and a plain display wait; the open has completed before them. On a scripted 12,000-VBLANK
-  route from boot through the menus, a match load and a rally, `load=fast` skipped 261 waits (87 opens). Only the
-  route's picture checkpoints were compared, and they stop at the match-type menu. Each was reached earlier and at
-  the same picture distance as without it: the title screen at VBLANK 1,290 instead of 1,346 (56 VBLANKs, about
-  0.93 s sooner), the main menu at 2,359 instead of 2,427 and the match-type menu at 3,736 instead of 3,804 (68
-  VBLANKs each, about 1.13 s sooner). The match load and the rally were not compared by checkpoint. Both runs
-  executed all 216 route steps, which does not show that they stayed in step. The fade step still runs three times
-  per open, so each screen the route checks after a load shows the stock picture. The title's frame-pacing wait (its
-  package's `vblank_wait_2_to_1` site) is not a load site and still paces every logic update.
+- **Tier:** Ace (one title). **Default:** off, and in no grap- **Measured (Hot Shots Tennis, UCUS98701, one declared wait, 60 FPS package, Vulkan GE, hidden window, Windows 11,
+  other builds running on the machine), at the head with the shortest-delay skip and the pacing guard.** The title
+  follows each file-binder open on its main thread with three passes of a fade step and a plain display wait; the
+  open has completed before them. On a scripted 12,000-VBLANK route from boot through the menus, a match load and a
+  rally, `load=fast` skipped 261 waits (87 opens). The longest run of consecutive logic updates with a skip was 2
+  (`load_skip_max_run`), and the guard did not fire (`load_paced` false). Only the route's picture checkpoints were
+  compared, and they stop at the difficulty menu. Each was reached earlier, within its checkpoint's tolerance: the
+  title screen at VBLANK 1,281 instead of 1,321 (40 VBLANKs, about 0.67 s sooner), the load dialog at 2,206 instead
+  of 2,250, the main menu at 2,342 instead of 2,398 (56 VBLANKs, about 0.93 s), the single-player menu at 2,638
+  instead of 2,686 and the match-type menu at 3,719 instead of 3,771 (52 VBLANKs, about 0.87 s). The match load and
+  the rally were not compared by checkpoint. The fade step still runs three times per open, so each screen the route
+  checks after a load shows the stock picture. The title's frame-pacing wait (its package's `vblank_wait_2_to_1`
+  site) is not a load site and still paces every logic update.
+ogic update.
 - **Nothing worse (section 11.2, item 4):** the run above, which has not been reviewed.

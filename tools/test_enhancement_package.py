@@ -4577,7 +4577,7 @@ class TestAcePartsLoad(unittest.TestCase):
         section = contract[contract.index("#### 11.3.10."):]
         following = re.search(r"\n#{1,4} ", section)
         section = section[:following.start()] if following else section
-        stated = re.findall(r"`ACE_LOAD_PACING_UPDATES` \(`src/rt/ace\.h`, provisionally (\d+) updates", section)
+        stated = re.findall(r"`ACE_LOAD_PACING_UPDATES` \(`src/rt/ace\.h`, (\d+) updates", section)
         self.assertEqual(stated, [defined.group(1)])
         self.assertNotIn("is unaffected, because", " ".join(section.split()))
 
