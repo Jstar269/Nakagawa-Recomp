@@ -24,6 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Smooth motion's value on a game's page while that game runs its 60 FPS game logic. */
+#define ENHANCED_SMOOTH_AT_60_VALUE "Off (this game runs at 60 FPS)"
+
 /* Status colours, from the theme's tokens. */
 #define PLAYER_UI_READY (nk_ui_theme_n1()->ready)
 #define PLAYER_UI_WARNING (nk_ui_theme_n1()->warning)
@@ -153,7 +156,9 @@ struct PlayerUiNk {
     /* Settings > Enhanced: the title's name and the rows' "Library (16x)" words. */
     char enhanced_title[160];
     char enhanced_mode[48];
+    const char *enhanced_modes[4];
     char enhanced_values[PLAYER_UI_ENHANCED_ROWS][48];
+    char enhanced_library_values[PLAYER_UI_ENHANCED_ROWS][48];
     char settings_tools[PLAYER_UI_SETTINGS_TOOLS][192];
     /* The factory reset check's folders, looked up when the check opens. */
     char reset_folders[PLAYER_UI_RESET_FOLDERS][NK_MAX_PATH];
@@ -856,6 +861,10 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
     model->enhanced_mode = library_on ? "Enhanced" : "Authentic";
     model->enhanced_mode_sentence =
         "The default for every game; each game's page can choose its own.";
+    player->enhanced_modes[0] = player_play_mode_name(PLAYER_PLAY_AUTHENTIC);
+    player->enhanced_modes[1] = player_play_mode_name(PLAYER_PLAY_ENHANCED);
+    model->enhanced_modes = player->enhanced_modes;
+    model->enhanced_mode_count = 2;
     bool logic_60 = false;
     bool smooth_on = player_settings_library_part(settings, PLAYER_PART_SMOOTH) != 0;
     if (title >= 0) {
@@ -872,13 +881,16 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                  game->title_name[0] ? game->title_name : game->disc_id);
         model->enhanced_title = player->enhanced_title;
         model->enhanced_on = play.on;
-        if (chosen == PLAYER_PLAY_LIBRARY) {
-            snprintf(player->enhanced_mode, sizeof(player->enhanced_mode),
-                     "Library (%s)", library_on ? "Enhanced" : "Authentic");
-            model->enhanced_mode = player->enhanced_mode;
-        } else {
-            model->enhanced_mode = player_play_mode_name(chosen);
-        }
+        /* A title's page steps Library, Authentic, Enhanced and (with a package) Ace. */
+        snprintf(player->enhanced_mode, sizeof(player->enhanced_mode), "Library (%s)",
+                 library_on ? "Enhanced" : "Authentic");
+        model->enhanced_mode = chosen == PLAYER_PLAY_LIBRARY ? player->enhanced_mode
+                                                             : player_play_mode_name(chosen);
+        player->enhanced_modes[0] = player->enhanced_mode;
+        player->enhanced_modes[1] = player_play_mode_name(PLAYER_PLAY_AUTHENTIC);
+        player->enhanced_modes[2] = player_play_mode_name(PLAYER_PLAY_ENHANCED);
+        player->enhanced_modes[3] = player_play_mode_name(PLAYER_PLAY_ACE);
+        model->enhanced_mode_count = 4;
         model->enhanced_mode_sentence = app->title_enhancements[title].available
             ? "Ace is Enhanced plus this game's own 60 FPS game logic."
             : "Enhanced adds the parts below. " PLAYER_UI_ACE_NEEDS_PACKAGE;
@@ -894,6 +906,11 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             player_graphics_preset_row(player_app_graphics_preset(app));
         row->name = info->name;
         row->sentence = info->sentence;
+        row->labels = info->labels;
+        row->label_count = info->value_count;
+        row->library_value = NULL;
+        row->other_value = title >= 0 && p == PLAYER_PART_SMOOTH ? ENHANCED_SMOOTH_AT_60_VALUE
+                                                                  : NULL;
         row->value = player_enhanced_part_label(p, library);
         row->on = library != 0;
         if (title < 0 && preset && preset->part[p] >= 0) {
@@ -903,6 +920,9 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         }
         if (title >= 0) {
             int own = player_app_title_part(app, title, p);
+            snprintf(player->enhanced_library_values[p], sizeof(player->enhanced_library_values[p]),
+                     "Library (%s)", player_enhanced_part_label(p, library));
+            row->library_value = player->enhanced_library_values[p];
             if (own < 0) {
                 snprintf(player->enhanced_values[p], sizeof(player->enhanced_values[p]),
                          "Library (%s)", player_enhanced_part_label(p, library));
@@ -919,7 +939,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                          sizeof(player->enhanced_smooth_sentence),
                          "This build smooths only 30 FPS games. The choice here (%s) applies "
                          "when this game's 60 FPS game logic is off.", row->value);
-                row->value = "Off (this game runs at 60 FPS)";
+                row->value = ENHANCED_SMOOTH_AT_60_VALUE;
                 row->sentence = player->enhanced_smooth_sentence;
                 row->on = false;
             }
