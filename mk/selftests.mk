@@ -440,6 +440,25 @@ ge-tnl-census-selftest: $(RT_GE_O)
 
 native-core-tests: ge-tnl-census-selftest
 
+# ge-patch-tess-selftest - finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14)
+# on the production GE object's software renderer: the factor the tess launch-line key carries
+# (ace-selftest pins the key and its Ace gate); factor F on a guest division d draws byte for byte what this renderer draws at division
+# d*F; F*F times the quads; factor 1 is the default path; no background pixel between neighbouring
+# patches at every factor, and a crack the check finds when the two are drawn at different
+# factors; line and point patches keep the PSP's division; the vertex cap lowers the factor
+# along its divisor chain, after the PSP's own cap; with the GE timing model on, factor F costs
+# the clocks of division d*F, not the PSP's d; the PATCH_TESS: exit line. It writes one scratch file under
+# BUILD_ROOT. No game input.
+GE_PATCH_TESS_SELFTEST := $(BUILD_DIR)/ge_patch_tess_selftest$(EXE_EXT)
+
+ge-patch-tess-selftest: $(RT_GE_O)
+	$(CC) $(CFLAGS) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -o $(GE_PATCH_TESS_SELFTEST) \
+		tests/native/ge_patch_tess_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
+		src/rt/flight_recorder.c src/rt/perf.c -lm
+	$(GE_PATCH_TESS_SELFTEST)
+
+native-core-tests: ge-patch-tess-selftest
+
 # ge-flight-overhead -- cost of the disarmed flight recorder on the GE paths (#320): the
 # ge-cpu-profile-validate-selftest harness's --bench mode on the production ge.c, built once
 # with the recorder linked (SR_FLIGHT unset) and once with -USR_FLIGHT_RECORDER_LINKED, run
