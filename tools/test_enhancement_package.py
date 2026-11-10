@@ -908,7 +908,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             self.assertEqual(rc, 0, output)
             combined = b"\n".join(files.values()).decode("utf-8")
             self.assertEqual(combined.count("nk_enhancement_updates++"), 1)
-            # Then the runtime's hook (late pad sampling, contract 11.3.8), inside the same toggle.
+            # Then the runtime's hook (late pad sampling, contract 11.3.9), inside the same toggle.
             self.assertIn("if (nk_enhancement_on()) { nk_enhancement_updates++; "
                           "sr_enhancement_update_begin(); }", combined)
             self.assertIn("uint32_t nk_enhancement_updates;", combined)
@@ -1009,7 +1009,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             runs, alternations, begins = (int(v) for v in out.split())
             self.assertEqual(runs, 600)
             self.assertEqual(alternations, 1200)
-            # The runtime's boundary hook (late pad sampling, contract 11.3.8) runs once per update.
+            # The runtime's boundary hook (late pad sampling, contract 11.3.9) runs once per update.
             self.assertEqual(begins, 1200)
 
     def test_data_sites_and_files_reach_the_generated_start_up(self) -> None:

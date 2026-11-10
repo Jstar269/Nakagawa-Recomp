@@ -585,11 +585,18 @@ static int s_test_gui_interactive;
 int gui_interactive(void) { return s_test_gui_interactive; }
 void gui_pump(void) {}
 int gui_headless_acceptance_complete(void) { return 0; }
-/* The live pad: the keyboard tests hold a button on it for one frame; zero elsewhere. */
+/* The live pad: the keyboard tests hold a button on it for one frame; zero elsewhere. The pulse
+ * is sdl3vk's: presses since the last VBLANK sample, in gui_buttons() until consumed. */
 static uint32_t s_test_gui_buttons;
-uint32_t gui_buttons(void) { return s_test_gui_buttons; }
-void gui_consume_button_pulses(void) {}
-uint64_t gui_input_poll_ns(void) { return 0u; }
+static uint32_t s_test_gui_pulse;
+static uint64_t s_test_gui_poll_ns;
+uint32_t gui_buttons(void) { return s_test_gui_buttons | s_test_gui_pulse; }
+uint32_t gui_consume_button_pulses(void) {
+    const uint32_t pulses = s_test_gui_pulse;
+    s_test_gui_pulse = 0u;
+    return pulses;
+}
+uint64_t gui_input_poll_ns(void) { return s_test_gui_poll_ns; }
 /* The keyboard's scripted pad: the integration test queues one press per VBLANK sample. */
 static uint32_t s_osk_test_pulse;
 uint32_t gui_pad_pulses_take(void) {
@@ -8629,6 +8636,9 @@ static void test_osk_overlay_through_hle_scripted_pad(void) {
  * the frame that confirms the field; the title's controller ring must not see that START (the
  * keyboard was open when the sample was taken), and the sample counts as read so a scripted
  * route moves on. Before the fix the ring carried the START and the title acted on it. */
+int ctrl_refresh_allowed(void);   /* hle_internal.h, late pad sampling */
+uint64_t ctrl_last_read_poll_ns(void);
+int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_ns, uint32_t taps);
 static void test_osk_overlay_closing_press_stays_with_keyboard(void) {
     CpuState cpu;
     sr_hle_init();
@@ -8656,6 +8666,10 @@ static void test_osk_overlay_closing_press_stays_with_keyboard(void) {
     s_test_gui_buttons = NK_PSP_BTN_START_BIT;
     s_osk_test_pulse = NK_PSP_BTN_START_BIT;
     sr_ctrl_sample();
+    /* Late pad sampling (contract 11.3.9) never rewrites that sample, though the keyboard is
+     * closed by now and START is still held. */
+    expect(!ctrl_refresh_allowed() && !ctrl_refresh_newest(NK_PSP_BTN_START_BIT, 128u, 128u, 1u, 0u),
+           "late pad sampling leaves the keyboard's closing sample alone");
     expect(!sr_osk_overlay_active() && osk_poll(&cpu) == 2u && osk_poll(&cpu) == 3u,
            "the held START confirms the keyboard");
     expect(osk_latched_buttons(&cpu) == 0u,
@@ -11117,6 +11131,8 @@ static void reset_fixture(void) {
     s_oracle_thread_action = ORACLE_THREAD_ACTION_EXIT;
     s_cpu = &s_cpu_store;
     s_test_gui_on = 0;
+    s_test_gui_pulse = 0u;
+    s_test_gui_poll_ns = 0u;
     s_test_gui_present_calls = 0;
     s_test_gui_last_addr = 0;
     s_test_gui_last_fmt = 0;
@@ -44027,7 +44043,7 @@ static void ctrlc_read_waiter(void *arg) {
     selftest_park_on_scheduler();
 }
 
-/* Late pad sampling (ace.h, contract 11.3.8): when a hold ends, the newest sample takes the host's
+/* Late pad sampling (ace.h, contract 11.3.9): when a hold ends, the newest sample takes the host's
  * input of that moment, only while no read or peek has been handed it. Its timestamp stays, no
  * sample is added, and the latency measure carries the refresh's poll time to the next read. */
 static void test_ctrl_late_refresh(void) {
@@ -44037,21 +44053,21 @@ static void test_ctrl_late_refresh(void) {
     sr_hle_test_ctrl_ring_reset();
     expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 1u,
            "late refresh: the power-on sample is read first");
-    expect(!ctrl_refresh_newest(0x2000u, 10u, 20u, 111u),
+    expect(!ctrl_refresh_newest(0x2000u, 10u, 20u, 111u, 0u),
            "late refresh: a sample a read was handed is never refreshed");
 
     sr_hle_test_ctrl_push_sample(0x4000u);
     expect(ctrlc_call(NID_SCE_CTRL_PEEK_BUFFER_POSITIVE, CTRL_OK_BUF, 1u) == 1u,
            "late refresh: a peek sees the latched sample");
     const uint32_t stamp = MEM_R32(CTRL_OK_BUF);
-    expect(!ctrl_refresh_newest(0x2000u, 10u, 20u, 222u) && MEM_R32(CTRL_OK_BUF + 4u) == 0x4000u,
+    expect(!ctrl_refresh_newest(0x2000u, 10u, 20u, 222u, 0u) && MEM_R32(CTRL_OK_BUF + 4u) == 0x4000u,
            "late refresh: a sample a peek was handed is never refreshed either");
     expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 1u &&
                MEM_R32(CTRL_OK_BUF + 4u) == 0x4000u && MEM_R32(CTRL_OK_BUF) == stamp,
            "late refresh: the read then returns the sample as latched");
 
     sr_hle_test_ctrl_push_sample(0x4000u);
-    expect(ctrl_refresh_newest(0x2000u, 10u, 20u, 333u),
+    expect(ctrl_refresh_newest(0x2000u, 10u, 20u, 333u, 0u),
            "late refresh: an unread newest sample is refreshed");
     expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 1u &&
                MEM_R32(CTRL_OK_BUF + 4u) == 0x2000u && MEM_R8(CTRL_OK_BUF + 8u) == 10u &&
@@ -44059,13 +44075,32 @@ static void test_ctrl_late_refresh(void) {
            "late refresh: the read returns one sample with the refreshed buttons and stick");
     expect(ctrl_last_read_poll_ns() == 333u,
            "late refresh: the latency measure carries the refresh's poll time");
-    expect(!ctrl_refresh_newest(0x1000u, 1u, 2u, 444u),
+    expect(!ctrl_refresh_newest(0x1000u, 1u, 2u, 444u, 0u),
            "late refresh: once read it is not refreshed again");
+
+    /* A latch read or peek is handed the newest sample too (B2): the latch and the buffer reads
+     * never disagree about it. */
+    sr_hle_test_ctrl_latch_reset();
+    sr_hle_test_ctrl_push_sample(0x4000u);
+    expect(ctrlc_call(CTRLC_NID_READ_LATCH, 0x00241d00u, 0u) == 1u && MEM_R32(0x00241d00u) == 0x4000u,
+           "late refresh: the latch reports the press");
+    expect(!ctrl_refresh_newest(0x0u, 128u, 128u, 445u, 0u) &&
+               ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 1u &&
+               MEM_R32(CTRL_OK_BUF + 4u) == 0x4000u,
+           "late refresh: a sample a latch read was handed is never refreshed");
+    sr_hle_test_ctrl_push_sample(0x0u);
+    expect(ctrlc_call(NID_CTRL_PEEK_LATCH, 0x00241d00u, 0u) == 1u &&
+               !ctrl_refresh_newest(0x4000u, 128u, 128u, 446u, 0u),
+           "late refresh: nor one a latch peek was handed");
+    expect(ctrlc_call(CTRLC_NID_READ_LATCH, 0x00241d00u, 0u) == 1u && MEM_R32(0x00241d00u + 4u) == 0x4000u &&
+               MEM_R32(0x00241d00u + 8u) == 0u,
+           "late refresh: the latch read after the peek sees the same release");
+    (void)ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u);
 
     /* Two unread samples: only the newest changes, the older one keeps its latch. */
     sr_hle_test_ctrl_push_sample(0x1u);
     sr_hle_test_ctrl_push_sample(0x2u);
-    expect(ctrl_refresh_newest(0x8u, 128u, 128u, 555u), "late refresh: the newest of two is refreshed");
+    expect(ctrl_refresh_newest(0x8u, 128u, 128u, 555u, 0u), "late refresh: the newest of two is refreshed");
     expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 2u &&
                MEM_R32(CTRL_OK_BUF + 4u) == 0x1u && MEM_R32(CTRL_OK_BUF + 16u + 4u) == 0x8u,
            "late refresh: the older sample keeps its latch, the count stays 2");
@@ -44073,10 +44108,368 @@ static void test_ctrl_late_refresh(void) {
     /* With a sampling cycle the controller is not sampled per VBLANK: no refresh. */
     expect(ctrlc_call(NID_SCE_CTRL_SET_SAMPLING_CYCLE, 5555u, 0u) == 0u, "late refresh: cycle 5555 is set");
     sr_hle_test_ctrl_push_sample(0x4000u);
-    expect(!ctrl_refresh_newest(0x2000u, 10u, 20u, 666u), "late refresh: none under a sampling cycle");
-    expect(ctrlc_call(NID_SCE_CTRL_SET_SAMPLING_CYCLE, 0u, 0u) == 0u, "late refresh: cycle 0 again");
+    expect(!ctrl_refresh_newest(0x2000u, 10u, 20u, 666u, 0u), "late refresh: none under a sampling cycle");
+    expect(ctrlc_call(NID_SCE_CTRL_SET_SAMPLING_CYCLE, 0u, 0u) == 5555u, "late refresh: cycle 0 again");
     sr_hle_test_ctrl_sampling_reset();
     sr_hle_test_ctrl_ring_reset();
+}
+
+/* Late pad sampling through the real path (ace.h, contract 11.3.9): sched_vblank_deadline_ns on a
+ * controlled host clock, then sr_enhancement_update_begin on a guest thread with the paced
+ * scheduler: the plan warms on ACE_PAD_WARM measured updates, the thread is held in a delay wait,
+ * the test runs as another thread during the hold, and the thread resumes into pad_refresh_live.
+ * Each case fails if its fix is reverted: a tap the VBLANK latched survives a release in the hold
+ * (B1), a latch read in the hold blocks the refresh (B2), the deadline and so the hold stay
+ * within one period of the last VBLANK when the paced clock runs ahead (B3), there is no hold
+ * where no refresh can follow (S1), a pause in the hold blocks the refresh (S2). The keyboard's
+ * closing sample is in test_osk_overlay_closing_press_stays_with_keyboard (S3). */
+#define PAD_MS 1000000ull
+#define PAD_PERIOD_NS 16683333ull
+#define PAD_LATE_LINE "v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;pad=late"
+static uint64_t s_pad_host_ns;
+static uint64_t pad_host_clock(void) { return s_pad_host_ns; }
+
+static void test_pad_vblank_deadline(void) {
+    reset_fixture();
+    s_host_ns_fn = pad_host_clock;
+    s_pad_host_ns = 5000u * PAD_MS;
+    s_clock_epoch_ns = 1000u * PAD_MS;
+    s_vbl_next_us = 4000000u + 16683u;              /* the next source event, in guest time */
+    s_vbl_latch_ns = 5000u * PAD_MS;                /* the last VBLANK latch, on the host clock */
+    expect(sched_vblank_period_ns() == PAD_PERIOD_NS, "deadline: one period is 1001/60 ms");
+    s_pace_on = 0;
+    expect(sched_vblank_deadline_ns() == 0u, "deadline: none when VBLANKs are not paced to the host clock");
+    s_pace_on = 1;
+    expect(sched_vblank_deadline_ns() == 1000u * PAD_MS + (4000000u + 16683u) * 1000u,
+           "deadline: the source deadline on the host clock, which is the earlier");
+    /* A paced clock running ahead of the host's (fast forward): the source deadline is ten
+     * seconds out, the deadline one period after the last real VBLANK. */
+    s_vbl_next_us = 14000000u;
+    expect(sched_vblank_deadline_ns() == 5000u * PAD_MS + PAD_PERIOD_NS,
+           "deadline: never more than one period after the last VBLANK latch");
+    s_vbl_latch_ns = 0u;
+    expect(sched_vblank_deadline_ns() == 0u, "deadline: none before the first VBLANK latch");
+    s_vbl_latch_ns = 5000u * PAD_MS;
+    s_vbl_next_us = UINT64_MAX;
+    expect(sched_vblank_deadline_ns() == 0u, "deadline: none on a saturated source");
+    s_pace_on = 0;
+    s_host_ns_fn = NULL;
+    s_vbl_latch_ns = 0u;
+    s_vbl_next_us = 0u;
+    s_clock_epoch_ns = 0u;
+}
+
+static uint64_t s_pad_vblank_ns;   /* the host time of the latest VBLANK the fixture ran */
+
+/* A VBLANK at host time `at`: the scheduler's latch stamp and next source deadline, then that
+ * VBLANK's controller sample through sr_ctrl_sample. */
+static void pad_vblank(uint64_t at) {
+    s_pad_host_ns = at;
+    s_pad_vblank_ns = at;
+    s_vbl_latch_ns = at;
+    s_vbl_next_us = (at + PAD_PERIOD_NS) / 1000u;
+    s_vtime_us = at / 1000u;
+    sr_ctrl_sample();
+}
+
+/* Ace with pad=late on the paced clock, a window with a person at it, and a warm plan: the
+ * test's own context passes ACE_PAD_WARM boundaries, each followed 2 ms later by its VBLANK wait
+ * (measured, never held: it is no guest thread). Then the VBLANK of the update under test, and
+ * the host clock 1 ms into its period, where the boundary is reached. */
+static void pad_late_fixture(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+    sr_ctrl_test_reset_live_input();
+    expect(ace_init_spec(PAD_LATE_LINE, NULL) == 1 && ace_effective()->pad == 1, "pad: pad=late is on");
+    s_pace_on = 1;
+    s_host_ns_fn = pad_host_clock;
+    s_clock_epoch_ns = 0u;
+    s_test_gui_on = 1;
+    s_test_gui_interactive = 1;
+    s_test_gui_buttons = 0u;
+    s_test_gui_pulse = 0u;
+    uint64_t t = 10000u * PAD_MS;
+    for (uint32_t i = 0; i < ACE_PAD_WARM; i++, t += PAD_PERIOD_NS) {
+        pad_vblank(t);
+        s_pad_host_ns = t + PAD_MS;
+        sr_enhancement_update_begin();
+        s_pad_host_ns = t + 3u * PAD_MS;
+        sr_enhancement_update_waits();
+    }
+    expect(ace_pad_plan()->measured == ACE_PAD_WARM && ace_pad_plan()->held_updates == 0u,
+           "pad: the warm-up updates were measured, none held");
+    (void)ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u);   /* the warm-up's samples */
+    pad_vblank(t);
+    s_pad_host_ns = t + PAD_MS;
+}
+
+static void pad_late_teardown(void) {
+    (void)ace_init_spec("off", NULL);
+    s_pace_on = 0;
+    s_host_ns_fn = NULL;
+    s_vbl_latch_ns = 0u;
+    s_vbl_next_us = 0u;
+    s_test_gui_on = 0;
+    s_test_gui_interactive = 0;
+    s_test_gui_buttons = 0u;
+    s_test_gui_pulse = 0u;
+    s_test_gui_poll_ns = 0u;
+    s_cur = -1;
+    sr_ctrl_test_reset_live_input();
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+}
+
+static int s_pad_body_done;
+static void pad_update_body(void *arg) {
+    (void)arg;
+    sr_enhancement_update_begin();
+    s_pad_body_done = 1;
+    s_ctrlc_parks++;
+    selftest_park_on_scheduler();
+}
+
+/* The update's thread reaches its boundary. Returns it held in its delay wait, or done. */
+static TCB *pad_update_start(void) {
+    s_pad_body_done = 0;
+    TCB *t = liveness_start_waiter(pad_update_body, 0x2d10u, 30);
+    s_cur = -1;   /* the test is another thread from here */
+    return t;
+}
+
+static int pad_update_held(const TCB *t) {
+    return t && t->state == TH_WAIT_DELAY && !s_pad_body_done;
+}
+
+/* The hold ends: the thread resumes into the refresh and finishes its boundary. */
+static void pad_update_resume(TCB *t, uint64_t at) {
+    s_pad_host_ns = at;
+    vm_run(t);
+    liveness_finish_waiter(t);
+}
+
+/* An update the gates refuse to hold: it passes its boundary at once, and then its thread's
+ * VBLANK wait closes it 2 ms later, so the plan stays warm for the next one. */
+static void pad_expect_no_hold(const char *what) {
+    const uint64_t held = ace_pad_plan()->held_updates;
+    expect(ace_pad_plan()->warm == ACE_PAD_WARM && !ace_pad_plan()->backoff, "pad: the plan is warm");
+    TCB *t = pad_update_start();
+    char msg[160];
+    snprintf(msg, sizeof msg, "pad: no hold %s", what);
+    expect(t && s_pad_body_done && t->state != TH_WAIT_DELAY && ace_pad_plan()->held_updates == held, msg);
+    s_cur = (int)(t - s_tcb);
+    s_pad_host_ns += 2u * PAD_MS;
+    sr_enhancement_update_waits();
+    liveness_finish_waiter(t);
+}
+
+static uint32_t pad_read_newest(void) {
+    const uint32_t n = ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u);
+    return n >= 1u && n <= 64u ? MEM_R32(CTRL_OK_BUF + (n - 1u) * 16u + 4u) : 0xffffffffu;
+}
+
+static void test_pad_late_through_the_boundary(void) {
+    /* Live input: the hold ends shortly before the deadline, and the newest sample takes the
+     * window's input of that moment, keeping its count and its timestamp. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns;
+        const uint64_t deadline = sched_vblank_deadline_ns();
+        expect(deadline <= t + PAD_PERIOD_NS && deadline + 1000u > t + PAD_PERIOD_NS,
+               "pad: the deadline is the next VBLANK");
+        TCB *u = pad_update_start();
+        const AcePadPlan *plan = ace_pad_plan();
+        expect(pad_update_held(u) && plan->held_updates == 1u, "pad: a warm update is held in a delay wait");
+        /* Reserve: the longest work (2 ms), a quarter of it again, and the margin. */
+        expect(plan->hold_ns_max == deadline - (t + PAD_MS) - (2u * PAD_MS + PAD_MS / 2u + ACE_PAD_MARGIN_NS) &&
+                   plan->hold_ns_max < PAD_PERIOD_NS,
+               "pad: the hold ends the reserve before the deadline, inside one period");
+        expect(u->wake > s_vtime_us && u->wake - s_vtime_us <= plan->hold_ns_max / 1000u + 1u,
+               "pad: the delay wakes after the hold");
+        s_test_gui_buttons = NK_PSP_BTN_CROSS_BIT;     /* pressed during the hold */
+        s_test_gui_poll_ns = t + 12u * PAD_MS;
+        pad_update_resume(u, t + 12u * PAD_MS);
+        expect(s_pad_body_done && plan->refreshed == 1u, "pad: the sample is refreshed when the hold ends");
+        expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 1u &&
+                   MEM_R32(CTRL_OK_BUF + 4u) == NK_PSP_BTN_CROSS_BIT && MEM_R32(CTRL_OK_BUF) == (uint32_t)(t / 1000u),
+               "pad: one sample, with the press of the hold and the VBLANK's timestamp");
+        expect(ctrl_last_read_poll_ns() == t + 12u * PAD_MS, "pad: the latency measure takes the refresh's poll");
+    }
+    pad_late_teardown();
+
+    /* B1: presses the VBLANK latched from button pulses stay. CIRCLE was tapped (pressed and
+     * released) since the previous sample, SQUARE pressed since it and still held at the
+     * VBLANK, then released during the hold; CROSS is pressed during the hold. A run without
+     * the part delivers CIRCLE and SQUARE in this sample, so the refreshed sample must too. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns + PAD_PERIOD_NS;
+        s_test_gui_buttons = NK_PSP_BTN_SQUARE_BIT;
+        s_test_gui_pulse = NK_PSP_BTN_CIRCLE_BIT | NK_PSP_BTN_SQUARE_BIT;
+        pad_vblank(t);
+        expect(s_test_gui_pulse == 0u, "pad: the VBLANK sample consumed the pulses");
+        s_pad_host_ns = t + PAD_MS;
+        s_ctrlc_ret = 0u;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: the update after the taps is held");
+        s_test_gui_buttons = NK_PSP_BTN_CROSS_BIT;     /* held at the end of the hold */
+        s_test_gui_pulse = NK_PSP_BTN_LTRIGGER_BIT;     /* tapped during the hold */
+        pad_update_resume(u, t + 12u * PAD_MS);
+        expect(ace_pad_plan()->refreshed == 1u, "pad: the tapped sample is refreshed");
+        expect(pad_read_newest() == (NK_PSP_BTN_CROSS_BIT | NK_PSP_BTN_CIRCLE_BIT | NK_PSP_BTN_SQUARE_BIT |
+                                     NK_PSP_BTN_LTRIGGER_BIT),
+               "pad: the refreshed sample keeps the VBLANK's taps and adds the hold's press and tap");
+        /* The refresh consumed the hold's tap: the next VBLANK does not deliver it again. */
+        expect(s_test_gui_pulse == 0u, "pad: the refresh consumed the hold's pulse");
+        s_test_gui_buttons = 0u;
+        pad_vblank(t + PAD_PERIOD_NS);
+        expect(pad_read_newest() == 0u, "pad: the next sample has only what is held");
+    }
+    pad_late_teardown();
+
+    /* B2: a latch read during the hold was handed the sample, so the refresh leaves it, and the
+     * latch and the buffer reads agree. Likewise a latch peek, and a buffer peek. */
+    static const uint32_t latch_nids[] = { CTRLC_NID_READ_LATCH, NID_CTRL_PEEK_LATCH,
+                                           NID_SCE_CTRL_PEEK_BUFFER_POSITIVE };
+    for (size_t i = 0; i < sizeof latch_nids / sizeof latch_nids[0]; i++) {
+        pad_late_fixture();
+        const uint64_t t = s_pad_vblank_ns + PAD_PERIOD_NS;
+        s_test_gui_buttons = NK_PSP_BTN_TRIANGLE_BIT;
+        pad_vblank(t);
+        s_pad_host_ns = t + PAD_MS;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: held before the other thread's read");
+        const uint32_t out = 0x00241d00u;
+        (void)ctrlc_call(latch_nids[i], latch_nids[i] == NID_SCE_CTRL_PEEK_BUFFER_POSITIVE ? CTRL_OK_BUF : out,
+                         1u);
+        s_test_gui_buttons = 0u;                       /* released during the hold */
+        pad_update_resume(u, t + 12u * PAD_MS);
+        char msg[128];
+        snprintf(msg, sizeof msg, "pad: a guest call in the hold (NID 0x%08x) blocks the refresh", latch_nids[i]);
+        expect(ace_pad_plan()->refreshed == 0u && pad_read_newest() == NK_PSP_BTN_TRIANGLE_BIT, msg);
+        pad_late_teardown();
+    }
+
+    /* B3: a paced clock running ahead of the host's (fast forward) puts the source deadline ten
+     * seconds out; the deadline, and so the hold, stay within one period of the last VBLANK. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns;
+        s_vbl_next_us = (t + 10000u * PAD_MS) / 1000u;
+        expect(sched_vblank_deadline_ns() == t + PAD_PERIOD_NS, "pad: the deadline is bound to the last VBLANK");
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u) && ace_pad_plan()->hold_ns_max < PAD_PERIOD_NS &&
+                   u->wake - s_vtime_us < PAD_PERIOD_NS / 1000u,
+               "pad: a far source deadline still gives a hold shorter than one period");
+        pad_update_resume(u, t + 12u * PAD_MS);
+    }
+    pad_late_teardown();
+
+    /* S1: no hold where no refresh can follow. */
+    pad_late_fixture();
+    s_test_gui_on = 0;
+    pad_expect_no_hold("with no window");
+    pad_late_teardown();
+
+    pad_late_fixture();
+    {
+        /* The headless START pulse owns the pad: no window a person is at, no SR_NOINPUT and no
+         * live input seen yet. */
+        const char *was = getenv("SR_NOINPUT");
+        const int noinput = was && was[0];
+        ctrl_env("", "", "", "");
+        s_test_gui_interactive = 0;
+        pad_expect_no_hold("while the headless START pulse owns the pad");
+        ctrl_env(noinput ? "1" : "", "", "", "");
+    }
+    pad_late_teardown();
+
+    pad_late_fixture();
+    (void)ctrlc_call(NID_SCE_CTRL_PEEK_BUFFER_POSITIVE, CTRL_OK_BUF, 1u);
+    pad_expect_no_hold("once the newest sample was handed to a peek");
+    pad_late_teardown();
+
+    pad_late_fixture();
+    s_pause_requested = 1;
+    pad_expect_no_hold("with a pause requested");
+    s_pause_requested = 0;
+    pad_late_teardown();
+
+    pad_late_fixture();
+    expect(ctrlc_call(NID_SCE_CTRL_SET_SAMPLING_CYCLE, 5555u, 0u) == 0u, "pad: cycle 5555 is set");
+    pad_expect_no_hold("under a sampling cycle");
+    s_pad_host_ns += 6u * PAD_MS;                      /* one cycle sample falls due, then cycle 0 */
+    s_vtime_us += 6000u;
+    expect(ctrlc_call(NID_SCE_CTRL_SET_SAMPLING_CYCLE, 0u, 0u) == 5555u, "pad: cycle 0 again");
+    pad_expect_no_hold("on a sample a sampling cycle latched, once the cycle is 0 again");
+    pad_late_teardown();
+
+    pad_late_fixture();
+    {
+        sr_route_reset();
+        rt_write("PRESS 4000 16\nEND\n");
+        expect(sr_route_load(RT_PATH) == 1 && sr_route_status() == RT_RUNNING, "pad: a route is loaded");
+        pad_expect_no_hold("under a route");
+        sr_route_reset();
+        remove(RT_PATH);
+    }
+    pad_late_teardown();
+
+    pad_late_fixture();
+    {
+        CpuState cpu;
+        osk_env("SR_OSK_SCRIPT", NULL);
+        osk_env("SR_OSK_TEXT", NULL);
+        osk_person_reset();
+        sr_osk_overlay_abandon();
+        s_osk_overlay_mode = 1;
+        s_osk_test_pulse = 0u;
+        osk_overlay_field(4u, 0u, 1);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = OSK_PARAM_ADDR;
+        expect(sr_syscall(&cpu, NID_OSK_INIT) == 0u && osk_poll(&cpu) == 1u && osk_frame(&cpu, 0u) == 2u &&
+                   sr_osk_overlay_active(),
+               "pad: the on-screen keyboard is open");
+        pad_expect_no_hold("while the on-screen keyboard is open");
+        expect(osk_frame(&cpu, NK_PSP_BTN_CIRCLE_BIT) == 2u && osk_poll(&cpu) == 3u, "pad: the keyboard is cancelled");
+        memset(&cpu, 0, sizeof(cpu));
+        expect(sr_syscall(&cpu, NID_OSK_SHUTDOWN) == 0u && osk_poll(&cpu) == 4u && osk_poll(&cpu) == 0u,
+               "pad: the keyboard winds down");
+        s_osk_overlay_mode = 0;
+        sr_osk_overlay_abandon();
+    }
+    pad_late_teardown();
+
+    /* S2: a pause requested by the end of the hold, or one that opened and closed during it,
+     * leaves the sample as the VBLANK latched it. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: held before the pause request");
+        s_test_gui_buttons = NK_PSP_BTN_CROSS_BIT;
+        s_pause_requested = 1;
+        pad_update_resume(u, t + 12u * PAD_MS);
+        s_pause_requested = 0;
+        expect(ace_pad_plan()->refreshed == 0u && pad_read_newest() == 0u,
+               "pad: a pause requested during the hold blocks the refresh");
+    }
+    pad_late_teardown();
+
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: held before the pause");
+        s_test_gui_buttons = NK_PSP_BTN_CROSS_BIT;
+        s_pause_count++;                                /* a pause opened and closed in the hold */
+        pad_update_resume(u, t + 12u * PAD_MS);
+        expect(ace_pad_plan()->refreshed == 0u && pad_read_newest() == 0u,
+               "pad: a pause that opened during the hold blocks the refresh");
+    }
+    pad_late_teardown();
 }
 
 static void test_ctrl_sampling_contract(void) {
@@ -50526,6 +50919,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_volatile_mem_lock_departures_and_type();
     test_ctrl_sampling_contract();
     test_ctrl_late_refresh();
+    test_pad_vblank_deadline();
+    test_pad_late_through_the_boundary();
     test_volatile_partition_allocator();
     test_late_prx_unload_keeps_module_owned_objects();
     test_power_unregister_callback_slots();

@@ -67,7 +67,7 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;cull=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate cull");
     }
-    /* pad (contract 11.3.8): optional like cull; a missing key and pad=off are off, pad=late needs an
+    /* pad (contract 11.3.9): optional like cull; a missing key and pad=off are off, pad=late needs an
      * Ace line, and the canonical line writes the key only when it is on. */
     {
         const char *base = "v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off";
@@ -90,8 +90,8 @@ static void cell_parse(void) {
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate pad");
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;pad=late", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.cull && c.pad &&
-              ace_format(&c, out, sizeof(out)) && strstr(out, ";cull=on;pad=late") != NULL,
-              "cull and pad together (%s)", out);
+              ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 17, ";pad=late;cull=on") == 0,
+              "cull and pad together, in the parts' order with cull last (%s)", out);
     }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
@@ -291,18 +291,42 @@ static void cell_switch(void) {
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
 
-    /* pad=late (contract 11.3.8): stamped, reported with the plan's counts, and a run whose boundary
+    /* pad=late (contract 11.3.9): stamped, reported with the plan's counts, and a run whose boundary
      * never ran reports it unavailable instead of claiming it. */
     CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;"
                         "pad=late", NULL) == 1 && ace_effective()->pad == 1, "pad=late turns pad on");
     ace_pad_plan()->updates = 5;
     ace_pad_plan()->held_updates = 4;
     ace_pad_plan()->hold_ns_sum = 4u * 8000000u;
+    ace_pad_plan()->far_deadlines = 2;
     ace_note_input_latency(12000000u);
+    ace_note_frame_without_read();
+    ace_note_frame_without_read();
     CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"pad\": {\"late\": true, \"updates\": 5") &&
-          strstr(json, "\"held\": 4, \"hold_mean_ms\": 8.00") &&
-          strstr(json, "\"input_latency_ms\": {\"frames\": 1, \"mean\": 12.00, \"p50\": 12.5"),
-          "the report carries the pad plan and the latency:\n%s", json);
+          strstr(json, "\"held\": 4, \"hold_mean_ms\": 8.00") && strstr(json, "\"far_deadline\": 2}") &&
+          strstr(json, "\"input_latency_ms\": {\"frames\": 1, \"frames_without_read\": 2, \"mean\": 12.00, "
+                       "\"p50\": 12.5"),
+          "the report carries the pad plan and the latency, frames with no read counted apart:\n%s", json);
+    /* Only frames with no read: counted, nothing measured. */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;"
+                        "pad=late", NULL) == 1, "pad=late again");
+    ace_note_frame_without_read();
+    CHECK(ace_report_json(json, sizeof(json)) > 0 &&
+          strstr(json, "\"input_latency_ms\": {\"frames\": 0, \"frames_without_read\": 1, \"mean\": 0.00, "),
+          "a run whose frames all lacked a read reports no measure:\n%s", json);
+    /* With cull too, pad comes first in the words and the report, as in the line. */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tess=off;tier=ace;"
+                        "cull=on;pad=late", NULL) == 1 && ace_effective()->pad == 1 && ace_effective()->cull == 1,
+          "pad=late with cull=on");
+    {
+        char words[256];
+        CHECK(ace_feature_words(words, sizeof(words)) > 0 && strstr(words, "late pad sampling") &&
+              strstr(words, "wider culling") && strstr(words, "late pad sampling") < strstr(words, "wider culling"),
+              "the words name pad before cull (%s)", words);
+        CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"pad\": {") && strstr(json, "\"cull\": ") &&
+              strstr(json, "\"pad\": {") < strstr(json, "\"cull\": "),
+              "the report has pad before cull:\n%s", json);
+    }
     CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;tier=ace;"
                         "pad=late", NULL) == 1 && ace_pad_plan()->updates == 0, "a new run starts a new plan");
     ace_finish();
@@ -819,7 +843,7 @@ static void cell_pace(void) {
           "intervals fall in 1 ms bins, the last open-ended");
 }
 
-/* ---- late pad sampling: the hold plan (contract 11.3.8) ------------------------------------ */
+/* ---- late pad sampling: the hold plan (contract 11.3.9) ------------------------------------ */
 
 #define MS(x) ((uint64_t)((x) * 1000000.0))
 #define PERIOD MS(16.683333)
@@ -827,7 +851,7 @@ static void cell_pace(void) {
 /* One update of the plan: the boundary at `at` with the next deadline `deadline`, then `work` of
  * work after whatever hold the plan asks for. Returns the hold, and sets *late. */
 static uint64_t plan_update(AcePadPlan *p, uint64_t at, uint64_t deadline, uint64_t work, int allow, int *late) {
-    const uint64_t hold = ace_pad_plan_begin(p, at, deadline, allow);
+    const uint64_t hold = ace_pad_plan_begin(p, at, deadline, PERIOD, allow);
     ace_pad_plan_release(p, at + hold);
     const int miss = ace_pad_plan_wait(p, at + hold + work);
     if (late) *late = (deadline && at + hold + work > deadline) || miss;
@@ -896,7 +920,7 @@ static void cell_pad_plan(void) {
     ace_pad_plan_reset(&p);
     t = MS(1000);
     for (uint32_t i = 0; i < 200; i++, t += PERIOD)
-        CHECK(ace_pad_plan_begin(&p, t, t + PERIOD, 1) == 0, "an update with no wait is never held");
+        CHECK(ace_pad_plan_begin(&p, t, t + PERIOD, PERIOD, 1) == 0, "an update with no wait is never held");
     CHECK(p.unmeasured == 199 && p.measured == 0, "unmeasured updates are counted (%llu)",
           (unsigned long long)p.unmeasured);
     ace_pad_plan_release(&p, t);
@@ -911,6 +935,30 @@ static void cell_pad_plan(void) {
     CHECK(plan_update(&p, t, t + MS(5), MS(3), 1, &late) == 0, "5 ms to the deadline: no hold");
     CHECK(plan_update(&p, t + MS(6), t + MS(5), MS(3), 1, &late) == 0 && late && p.late_unheld >= 1,
           "a boundary past its deadline is late without a hold");
+
+    /* Every hold is shorter than one period. A deadline more than a period ahead (a paced clock
+       running ahead of the host's) is not planned against: no hold, not judged late, and the plan
+       warms up again; so is any deadline when no period is known. */
+    ace_pad_plan_reset(&p);
+    t = MS(1000);
+    for (uint32_t i = 0; i < ACE_PAD_WARM; i++, t += PERIOD) (void)plan_update(&p, t, t + PERIOD, MS(1), 1, &late);
+    hold = plan_update(&p, t, t + PERIOD, MS(1), 1, &late);
+    t += PERIOD;
+    CHECK(hold > 0 && hold < PERIOD, "a deadline one period ahead: a hold shorter than the period (%llu)",
+          (unsigned long long)hold);
+    CHECK(plan_update(&p, t, t + PERIOD + 1u, MS(1), 1, &late) == 0 && p.far_deadlines == 1 && p.warm == 1 && !p.late_held &&
+              !p.late_unheld,
+          "a deadline 1 ns more than a period ahead: no hold, counted, the warm count restarted (%u)", p.warm);
+    t += PERIOD;
+    CHECK(ace_pad_plan_begin(&p, t, t + 600u * PERIOD, PERIOD, 1) == 0 && p.far_deadlines == 2 && p.warm == 0,
+          "a deadline ten seconds ahead: no hold");
+    ace_pad_plan_release(&p, t);
+    CHECK(ace_pad_plan_wait(&p, t + 2u * PERIOD) == 0 && p.late_unheld == 0,
+          "an update planned against no deadline is never late");
+    t += 3u * PERIOD;
+    CHECK(plan_update(&p, t, t + PERIOD, MS(1), 1, &late) == 0, "after a far deadline the plan warms up again");
+    CHECK(ace_pad_plan_begin(&p, t + 4u * PERIOD, t + 5u * PERIOD, 0u, 1) == 0 && p.far_deadlines == 3,
+          "no period known: no hold");
 
     /* The latency histogram: half-millisecond bins, percentiles at a bin's upper edge. */
     AceLatency l;

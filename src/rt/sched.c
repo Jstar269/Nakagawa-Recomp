@@ -1542,15 +1542,29 @@ int sched_vbl_paced(void) { pace_setup(); return s_pace_on > 0; }
  * the host's calendar, so two identical runs see the same time of day. */
 int sched_clock_deterministic(void) { pace_setup(); return s_det_clock; }
 
-/* Late pad sampling (ace.h, contract 11.3.8) plans on the host clock: this clock, and the host
- * time at which the next VBLANK source event falls due, 0 when VBLANKs are not paced to it. */
+/* Late pad sampling (ace.h, contract 11.3.9) plans on the host clock: this clock, one VBLANK
+ * period on it, and the host time at which the next VBLANK source event falls due, 0 when
+ * VBLANKs are not paced to it or no VBLANK has been latched yet.
+ *
+ * The scheduler keeps no VBLANK deadline on a clock that a change of the paced clock's rate
+ * cannot move: the source deadline is s_clock_epoch_ns plus s_vbl_next_us, and that sum is a
+ * host time only while the paced clock runs at the host's rate. s_vbl_latch_ns is a reading of
+ * the host clock itself at the last VBLANK latch (shifted only by a pause, which stops guest
+ * time too), so one period after it bounds the deadline whatever the paced clock does. The
+ * deadline is the earlier of the two: on a host-rate paced clock the source deadline is exact
+ * and never later than that bound (a latch comes at or after its own deadline); on a paced
+ * clock that runs ahead, the bound is at most one period after the last real VBLANK. */
 uint64_t sched_host_now_ns(void) { return host_now_ns(); }
+uint64_t sched_vblank_period_ns(void) { return 16683333u; }   /* 1001/60 ms, 59.94 Hz */
 uint64_t sched_vblank_deadline_ns(void) {
     pace_setup();
-    if (s_pace_on <= 0 || s_vbl_next_us == UINT64_MAX ||
+    if (s_pace_on <= 0 || !s_vbl_latch_ns || s_vbl_next_us == UINT64_MAX ||
         s_vbl_next_us > (UINT64_MAX - s_clock_epoch_ns) / 1000u)
         return 0u;
-    return s_clock_epoch_ns + s_vbl_next_us * 1000u;
+    const uint64_t paced = s_clock_epoch_ns + s_vbl_next_us * 1000u;
+    const uint64_t period = sched_vblank_period_ns();
+    const uint64_t bound = s_vbl_latch_ns > UINT64_MAX - period ? UINT64_MAX : s_vbl_latch_ns + period;
+    return paced < bound ? paced : bound;
 }
 
 static uint64_t host_us(void) {
@@ -5122,6 +5136,7 @@ int sched_pause_active(void) { return s_pause_active; }
 SrPauseSource sched_pause_source(void) { return s_pause_source; }
 int sched_pause_pending(void) { return s_pause_requested || s_pause_active; }
 uint64_t sched_pause_total_ns(void) { return s_pause_total_ns; }
+uint64_t sched_pause_count(void) { return s_pause_count; }
 
 static int sched_pause_parse_decimal(const char *begin, const char *end,
                                      uint64_t maximum, uint64_t *value_out) {

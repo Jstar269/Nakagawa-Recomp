@@ -1515,9 +1515,12 @@ void sr_ctrl_sample(void) {
      * the VBLANK itself latches none. */
     if (s_ctrl_sampling_cycle) ctrl_cycle_catch_up();
     s_ctrl_live = (CtrlSample){ buttons, 0u, lx, ly, input_id };
-    /* Host-side only: when the host input behind this sample was polled (ace.h input latency). */
+    /* Host-side only (late pad sampling, ace.h): when the host input behind this sample was
+     * polled, whether the keyboard took it, and the buttons it carries from the pulses consumed
+     * here, which a refresh of this sample must keep. */
     s_ctrl_live_poll_ns = gui_on() ? gui_input_poll_ns() : sched_host_now_ns();
-    if (gui_on()) gui_consume_button_pulses();
+    s_ctrl_live_keyboard = keyboard_took_sample;
+    s_ctrl_live_taps = gui_on() ? buttons & gui_consume_button_pulses() : 0u;
     if (s_ctrl_sampling_cycle) return;
     /* Stamped with the low 32 bits of the guest microsecond clock at latch. */
     ctrl_push(&s_ctrl_live, (uint32_t)sched_vtime_us());
@@ -1816,7 +1819,7 @@ static uint32_t s_enh_vblank_mark;
 static uint32_t s_enh_slow_seconds;
 static atomic_uint s_enh_slow_rate;   /* updates in the last second while slowed, else 0 */
 
-/* Late pad sampling (docs/ENHANCEMENT_CONTRACT.md section 11.3.8, ace.h). The generated update
+/* Late pad sampling (docs/ENHANCEMENT_CONTRACT.md section 11.3.9, ace.h). The generated update
  * boundary calls sr_enhancement_update_begin() once per logic update while 60 FPS game logic is
  * on. With Ace on the plan measures every update: from the end of the boundary to its thread's
  * first VBLANK wait (sr_enhancement_update_waits, from the scheduler). With pad=late it may hold
@@ -1825,25 +1828,38 @@ static atomic_uint s_enh_slow_rate;   /* updates in the last second while slowed
  * which no read has been handed yet, takes the host's input of that moment.
  *
  * The refresh is for a person's input only. Under a pad script or route, SR_RECORD or
- * SR_REPLAY, the headless START pulse, a sampling cycle or the on-screen keyboard the sample
- * keeps what the VBLANK latched, so a scripted run hands the guest the same samples with the
- * part on or off; only the hold's timing differs. */
+ * SR_REPLAY, the headless START pulse, a sampling cycle, the on-screen keyboard (also the sample
+ * whose press closed it), with no window or with a pause requested, the sample keeps what the
+ * VBLANK latched. Those are checked before the hold too: where no refresh can follow, the
+ * update is not held at all, so a scripted run keeps the timing it has with the part off. */
 static uint32_t s_pad_update_uid;   /* the thread that passed the boundary; 0: no update open */
 
-static int pad_refresh_live(void) {
+/* Whether a refresh could take live input now. ctrl_pulse_suppressed is the same evidence gate
+ * the VBLANK sample runs on these buttons: false while the headless START pulse owns the pad. */
+static int pad_refresh_possible(void) {
     route_load_once();
-    if (s_route_state != ROUTE_OFF || !gui_on() || !sr_replay_pad_live() || sr_osk_overlay_active())
-        return 0;
+    return s_route_state == ROUTE_OFF && gui_on() && sr_replay_pad_live() && !sr_osk_overlay_active() &&
+           !sched_pause_pending() && ctrl_refresh_allowed() && ctrl_pulse_suppressed(gui_buttons());
+}
+
+static int pad_refresh_live(void) {
+    if (!pad_refresh_possible()) return 0;
     gui_pump();
+    /* The pump can take a pause request (gui.c): the sample is then left as the VBLANK latched
+     * it, as sr_ctrl_sample commits none at a pause request. Then every gate again on the
+     * buttons the pump read. */
+    if (!pad_refresh_possible()) return 0;
     const uint32_t buttons = gui_buttons();
-    if (!ctrl_pulse_suppressed(buttons)) return 0;   /* the headless START pulse owns the pad */
     uint8_t lx = 128u, ly = 128u;
     if (s_ctrl_sampling_mode == 1u) gui_analog(&lx, &ly);
-    if (!ctrl_refresh_newest(buttons, lx, ly, gui_input_poll_ns())) return 0;
-    gui_consume_button_pulses();
+    const uint64_t poll_ns = gui_input_poll_ns();
+    /* The pulses in these buttons go to this sample, as they would to the next one without the
+     * part, and it keeps them if it is refreshed again. */
+    const uint32_t taps = buttons & gui_consume_button_pulses();
+    if (!ctrl_refresh_newest(buttons, lx, ly, poll_ns, taps)) return 0;
     if (hle_inlog_on())
-        fprintf(stderr, "ctrl_refresh: vcount=%u buttons 0x%04x lx=%u ly=%u\n", s_vcount_fwd, buttons,
-                lx, ly);
+        fprintf(stderr, "ctrl_refresh: vcount=%u buttons 0x%04x lx=%u ly=%u\n", s_vcount_fwd,
+                s_ctrl_live.btn, lx, ly);
     return 1;
 }
 
@@ -1853,15 +1869,20 @@ void sr_enhancement_update_begin(void) {
     const int late = ace_effective()->pad != 0;
     if (late) ace_confirm(ACE_FEATURE_PAD);   /* the title's boundary runs */
     const uint32_t uid = sched_current_uid();
-    /* A delay is an ordinary thread wait: only where the thread could wait anyway. */
+    /* A delay is an ordinary thread wait: only where the thread could wait anyway, and only
+     * where a refresh could follow it. */
     const int can_wait = late && uid != 0u && sched_wait_permitted() && !sched_is_intr_context() &&
-                         !sr_tail_transfer.pending && !sched_pause_pending();
+                         !sr_tail_transfer.pending && !sched_pause_pending() && pad_refresh_possible();
     uint64_t now = sched_host_now_ns();
-    const uint64_t hold = ace_pad_plan_begin(plan, now, sched_vblank_deadline_ns(), can_wait);
+    const uint64_t hold = ace_pad_plan_begin(plan, now, sched_vblank_deadline_ns(), sched_vblank_period_ns(),
+                                             can_wait);
     s_pad_update_uid = uid ? uid : UINT32_MAX;
     if (hold >= 1000u) {
+        const uint64_t pauses = sched_pause_count();
         sched_delay_current(hold / 1000u);
-        if (pad_refresh_live()) plan->refreshed++;
+        /* A pause that opened and closed during the hold leaves the sample as latched: its input
+         * would be from after the pause, in a sample stamped before it. */
+        if (sched_pause_count() == pauses && pad_refresh_live()) plan->refreshed++;
         now = sched_host_now_ns();
     }
     ace_pad_plan_release(plan, now);

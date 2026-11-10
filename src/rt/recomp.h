@@ -1551,7 +1551,7 @@ void sr_enhancement_register_updates(const volatile uint32_t *counter);
  * while SR_EXPERIMENTAL_60HZ=1. With Ace off it returns at once. With Ace on it measures the
  * update, and with pad=late it may hold the calling thread in a delay until shortly before the
  * next VBLANK deadline and then refresh the newest pad sample the guest has not read
- * (docs/ENHANCEMENT_CONTRACT.md section 11.3.8). */
+ * (docs/ENHANCEMENT_CONTRACT.md section 11.3.9). */
 void sr_enhancement_update_begin(void);
 /* From the scheduler when a thread blocks on a VBLANK wait: the update's work is done if it is
  * the thread that passed the boundary. */
@@ -2185,7 +2185,7 @@ void     gui_init(const char *title);
 int      gui_on(void);
 int      gui_interactive(void);                  /* 1 when a person is at a real window: not offscreen, headless or acceptance */
 uint32_t gui_buttons(void);
-void     gui_consume_button_pulses(void);          /* after one PSP VBLANK sample */
+uint32_t gui_consume_button_pulses(void);          /* after one PSP VBLANK sample: the pulses it cleared */
 uint64_t gui_input_poll_ns(void);                  /* host clock of the last input poll (ace.h) */
 /* Gamepad buttons that went down since the last call, as PSP button bits: the on-screen
  * keyboard's pad input (osk_overlay.h). Taken every VBLANK whether or not it is open. Returns 0
@@ -2282,6 +2282,7 @@ int      sched_pause_active(void);
 SrPauseSource sched_pause_source(void);
 int      sched_pause_pending(void);
 uint64_t sched_pause_total_ns(void);
+uint64_t sched_pause_count(void);                  /* pauses that have ended */
 uint32_t sr_display_vcount(void);
 
 typedef uint32_t (*HleFn)(CpuState *s);
@@ -2568,9 +2569,11 @@ void     sr_hle_release_thread_resources(uint32_t thread_uid); /* release HLE re
 /* Wait-object ids shared between hle.c (wait side) and sched.c (thread-dump side). */
 #define CTRL_WAIT_OBJ 0xC471D000u                   /* sceCtrl blocking reads park on this object */
 uint64_t sched_vtime_us(void);
-/* The host clock the scheduler paces VBLANKs to, and the host time of the next VBLANK source
- * event on it (0 when VBLANKs are not paced to the host clock): late pad sampling (ace.h). */
+/* Late pad sampling (ace.h): the host clock, one VBLANK period on it, and the host time of the
+ * next VBLANK source event, never more than one period after the last VBLANK latch (0 when
+ * VBLANKs are not paced to the host clock or none has been latched). */
 uint64_t sched_host_now_ns(void);
+uint64_t sched_vblank_period_ns(void);
 uint64_t sched_vblank_deadline_ns(void);
 uint64_t sched_vtime_deadline_after(uint64_t delta); /* saturating guest-time deadline */
 void     sched_vtime_refresh(void);

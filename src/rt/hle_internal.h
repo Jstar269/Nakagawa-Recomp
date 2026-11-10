@@ -1552,8 +1552,13 @@ int sr_callback_table_unregister(uint32_t uid);
 void sr_ctrl_sample(void);
 /* Late pad sampling and its latency measure (hle_input.c, ace.h); host-side only. */
 extern uint64_t s_ctrl_live_poll_ns;
+extern uint32_t s_ctrl_live_taps;
+extern int s_ctrl_live_keyboard;
 uint64_t ctrl_last_read_poll_ns(void);
-int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_ns);
+int ctrl_read_since_present(void);
+void ctrl_note_present(void);
+int ctrl_refresh_allowed(void);
+int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_ns, uint32_t taps);
 
 
 /* Success-result exceptions named in the end-of-run summary. sceKernelVolatileMemUnlock is absent:

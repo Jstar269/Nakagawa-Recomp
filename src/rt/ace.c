@@ -29,7 +29,7 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_CULL, ACE_KEY_PAD
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_PAD, ACE_KEY_CULL
 } AceKey;
 
 static const struct {
@@ -46,8 +46,8 @@ static const struct {
     {"sas", ACE_KEY_SAS, 1},
     {"tess", ACE_KEY_TESS, 1},
     {"tier", ACE_KEY_TIER, 0},
-    {"cull", ACE_KEY_CULL, 0},
     {"pad", ACE_KEY_PAD, 0},
+    {"cull", ACE_KEY_CULL, 0},
 };
 
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
@@ -151,7 +151,7 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
         if (k_ace_keys[i].required && !seen[i]) { why_set(why, why_cap, "missing key"); return 0; }
     /* An Ace item (contract 11.3.6): only an Ace-tier line may turn it on. */
     if (c.cull && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "cull needs tier=ace"); return 0; }
-    /* Late pad sampling acts at a title package's update boundary (contract 11.3.8): Ace only. */
+    /* Late pad sampling acts at a title package's update boundary (contract 11.3.9): Ace only. */
     if (c.pad && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "pad needs tier=ace"); return 0; }
     c.on = 1;
     if (out) *out = c;
@@ -177,14 +177,14 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
                       tier_word(c->tier), c->af, on_off(c->text), on_off(c->readout),
                       on_off(c->notice), wide_word(c->wide), smooth_word(c->smooth),
                       sas_word(c->sas), tess_word(c->tess));
-    /* Written only when on: a missing cull is off, so every line without it keeps its text. */
-    if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
-        const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
-        n = m < 0 ? -1 : n + m;
-    }
-    /* Likewise pad: a missing pad is off. */
+    /* Written only when on: a missing pad or cull is off, so every line without it keeps its
+     * text. They follow the parts' order, cull last. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->pad) {
         const int m = snprintf(out + n, cap - (size_t)n, ";pad=late");
+        n = m < 0 ? -1 : n + m;
+    }
+    if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
         n = m < 0 ? -1 : n + m;
     }
     if (n < 0 || (size_t)n >= cap) { out[0] = '\0'; return 0; }
@@ -207,7 +207,7 @@ static AcePadPlan s_pad_plan;
 static AceLatency s_latency;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "cull", "pad"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "pad", "cull"
 };
 
 /* The run's observation state. */
@@ -369,8 +369,8 @@ size_t ace_feature_words(char *out, size_t cap) {
     }
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
-    if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.pad) used = words_add(out, cap, used, "late pad sampling");
+    if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
     if (s_eff.tess) {
@@ -790,7 +790,8 @@ void ace_pad_plan_reset(AcePadPlan *p) {
     if (p) memset(p, 0, sizeof(*p));
 }
 
-uint64_t ace_pad_plan_begin(AcePadPlan *p, uint64_t now_ns, uint64_t deadline_ns, int allow) {
+uint64_t ace_pad_plan_begin(AcePadPlan *p, uint64_t now_ns, uint64_t deadline_ns, uint64_t period_ns,
+                            int allow) {
     if (!p) return 0;
     if (p->open) {             /* the previous update never waited for a VBLANK */
         p->unmeasured++;
@@ -801,16 +802,26 @@ uint64_t ace_pad_plan_begin(AcePadPlan *p, uint64_t now_ns, uint64_t deadline_ns
     p->held = 0;
     p->release_ns = now_ns;
     p->deadline_ns = deadline_ns;
+    /* A deadline more than one period ahead is not the next VBLANK on this clock (with no
+     * period known, every deadline counts as one): no hold, the update is not judged late
+     * against it, and the plan warms up again before it holds. */
+    const int too_far = deadline_ns && deadline_ns > now_ns && (!period_ns || deadline_ns - now_ns > period_ns);
+    if (too_far) {
+        p->far_deadlines++;
+        p->warm = 0;
+        p->deadline_ns = 0;
+    }
     if (p->backoff) {
         p->backoff--;
         return 0;
     }
-    if (!allow || !deadline_ns || p->warm < ACE_PAD_WARM || !p->ncost) return 0;
+    if (too_far || !allow || !deadline_ns || p->warm < ACE_PAD_WARM || !p->ncost) return 0;
     uint64_t work = 0;
     for (uint32_t i = 0; i < p->ncost; i++)
         if (p->cost[i] > work) work = p->cost[i];
     const uint64_t reserve = work + work / 4u + ACE_PAD_MARGIN_NS + p->extra_margin_ns;
     if (deadline_ns <= now_ns || deadline_ns - now_ns <= reserve + ACE_PAD_MIN_HOLD_NS) return 0;
+    /* The deadline is at most one period ahead here, so every hold is shorter than a period. */
     const uint64_t hold = deadline_ns - now_ns - reserve;
     p->held = 1;
     p->held_updates++;
@@ -877,6 +888,10 @@ void ace_note_input_latency(uint64_t ns) {
     if (g_ace_on) ace_latency_note(&s_latency, ns);
 }
 
+void ace_note_frame_without_read(void) {
+    if (g_ace_on) s_latency.without_read++;
+}
+
 size_t ace_report_json(char *out, size_t cap) {
     size_t used = 0;
     int n;
@@ -892,24 +907,26 @@ size_t ace_report_json(char *out, size_t cap) {
             s_eff.af, s_eff.text ? "true" : "false", s_eff.readout ? "true" : "false",
             s_eff.notice ? "true" : "false", wide_word(s_eff.wide), smooth_word(s_eff.smooth),
             sas_word(s_eff.sas), tess_word(s_eff.tess));
-    if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
-                            s_eff.cull ? "true" : "false", s_cull_untracked);
     if (s_req.pad || s_pad_plan.updates) {
         const AcePadPlan *pp = &s_pad_plan;
         ACE_PUT("  \"pad\": {\"late\": %s, \"updates\": %llu, \"measured\": %llu, \"unmeasured\": %llu, "
                 "\"held\": %llu, \"hold_mean_ms\": %.2f, \"hold_max_ms\": %.2f, \"late_held\": %llu, "
-                "\"late_unheld\": %llu, \"refreshed\": %llu},\n",
+                "\"late_unheld\": %llu, \"refreshed\": %llu, \"far_deadline\": %llu},\n",
                 s_eff.pad ? "true" : "false", (unsigned long long)pp->updates,
                 (unsigned long long)pp->measured, (unsigned long long)pp->unmeasured,
                 (unsigned long long)pp->held_updates,
                 pp->held_updates ? (double)pp->hold_ns_sum / (double)pp->held_updates / 1e6 : 0.0,
                 (double)pp->hold_ns_max / 1e6, (unsigned long long)pp->late_held,
-                (unsigned long long)pp->late_unheld, (unsigned long long)pp->refreshed);
+                (unsigned long long)pp->late_unheld, (unsigned long long)pp->refreshed,
+                (unsigned long long)pp->far_deadlines);
     }
-    if (s_latency.count)
-        ACE_PUT("  \"input_latency_ms\": {\"frames\": %llu, \"mean\": %.2f, \"p50\": %.1f, \"p95\": %.1f, "
-                "\"p99\": %.1f, \"max\": %.2f},\n",
-                (unsigned long long)s_latency.count, (double)s_latency.sum_ns / (double)s_latency.count / 1e6,
+    if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
+                            s_eff.cull ? "true" : "false", s_cull_untracked);
+    if (s_latency.count || s_latency.without_read)
+        ACE_PUT("  \"input_latency_ms\": {\"frames\": %llu, \"frames_without_read\": %llu, \"mean\": %.2f, "
+                "\"p50\": %.1f, \"p95\": %.1f, \"p99\": %.1f, \"max\": %.2f},\n",
+                (unsigned long long)s_latency.count, (unsigned long long)s_latency.without_read,
+                s_latency.count ? (double)s_latency.sum_ns / (double)s_latency.count / 1e6 : 0.0,
                 (double)ace_latency_percentile_ns(&s_latency, 50) / 1e6,
                 (double)ace_latency_percentile_ns(&s_latency, 95) / 1e6,
                 (double)ace_latency_percentile_ns(&s_latency, 99) / 1e6, (double)s_latency.max_ns / 1e6);
@@ -990,10 +1007,10 @@ void ace_finish(void) {
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_CULL, ACE_HAS_PAD };
+                                                ACE_HAS_PAD, ACE_HAS_CULL };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
-                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.cull,
-                                        s_eff.pad };
+                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.pad,
+                                        s_eff.cull };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
@@ -1004,12 +1021,14 @@ void ace_finish(void) {
     }
     size_t len = ace_report_json(json, sizeof(json));
     fprintf(stderr, "ACE_MODE: exit (%s; rate %s)\n", s_spec, ace_rate_name(dominant_rate()));
-    if (s_latency.count)
+    if (s_latency.count || s_latency.without_read)
         fprintf(stderr, "ACE_MODE: input latency (%llu frames: mean %.2f ms, p50 %.1f ms, p95 %.1f ms, "
-                        "max %.2f ms)\n", (unsigned long long)s_latency.count,
-                (double)s_latency.sum_ns / (double)s_latency.count / 1e6,
+                        "max %.2f ms; %llu frames set with no pad read since the previous present)\n",
+                (unsigned long long)s_latency.count,
+                s_latency.count ? (double)s_latency.sum_ns / (double)s_latency.count / 1e6 : 0.0,
                 (double)ace_latency_percentile_ns(&s_latency, 50) / 1e6,
-                (double)ace_latency_percentile_ns(&s_latency, 95) / 1e6, (double)s_latency.max_ns / 1e6);
+                (double)ace_latency_percentile_ns(&s_latency, 95) / 1e6, (double)s_latency.max_ns / 1e6,
+                (unsigned long long)s_latency.without_read);
     if (s_pad_plan.updates)
         fprintf(stderr, "ACE_MODE: pad %s (%llu updates: %llu held, mean hold %.2f ms; %llu unmeasured; "
                         "late after a hold %llu, late without one %llu; %llu samples refreshed)\n",

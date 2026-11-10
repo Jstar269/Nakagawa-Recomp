@@ -216,19 +216,28 @@ static void picture_probe_collect(int block) {
     picture_probe_resumed(verdict, brightest);
 }
 
+/* Ace input latency (ace.h), host-side only: a frame was set since the last present, whether
+ * the guest had read a pad sample since the previous frame's present when it set it, and the
+ * poll time of the newest sample it read. */
+static int s_flip_set;
+static int s_flip_read;
+static uint64_t s_flip_input_ns;
+
 /* Present the active framebuffer, then close this frame's capture (fbcap.h): the presenter
  * that showed the frame has already serviced an armed capture, and an arm nobody serviced
  * (a skipped output slot, a presenter that declined the frame) resolves here as "nothing
  * attempted", so a later present can never publish this frame's path with newer pixels. */
-/* Ace input latency (ace.h): the poll time of the newest pad sample the guest had read when it
- * set the frame now waiting to be presented; 0 when none. Host-side only. */
-static uint64_t s_flip_input_ns;
-
 static void display_present_active(void) {
-    if (g_ace_on && s_flip_input_ns) {
+    if (g_ace_on && s_flip_set) {
+        /* A frame set with no read since the previous present is counted, not measured: the
+         * age of an older read is not that frame's latency. */
         const uint64_t now = sched_host_now_ns();
-        if (now > s_flip_input_ns) ace_note_input_latency(now - s_flip_input_ns);
+        if (!s_flip_read) ace_note_frame_without_read();
+        else if (now > s_flip_input_ns) ace_note_input_latency(now - s_flip_input_ns);
+        s_flip_set = 0;
+        s_flip_read = 0;
         s_flip_input_ns = 0u;
+        ctrl_note_present();
     }
     /* Dark-picture watch (fbcap.h): every SR_PICTURE_PROBE_EVERY VBLANKs, a present no file
      * capture wanted carries a picture probe. A presenter that serves it from host memory
@@ -681,7 +690,11 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
         return display_setframebuf_reject(0x80000107u, addr, stride, fmt, sync);
 
     DisplayFrameState requested = { addr, stride, fmt };
-    if (g_ace_on) s_flip_input_ns = ctrl_last_read_poll_ns();
+    if (g_ace_on) {
+        s_flip_set = 1;
+        s_flip_read = ctrl_read_since_present();
+        s_flip_input_ns = s_flip_read ? ctrl_last_read_poll_ns() : 0u;
+    }
     if (sync == 0u) {
         s_setfb.immediate++;
         /* PSP names sync=0 IMMEDIATE.  The host has no scanline clock, so this

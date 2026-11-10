@@ -7915,7 +7915,7 @@ static void test_play_mode_settings(void) {
                                       "\"text\": \"off\", \"readout\": \"off\", "
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"cull\": \"off\", \"pad\": \"off\", \"upscale\": \"off\"},") != NULL);
+                                      "\"tess\": \"off\", \"pad\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8112,7 +8112,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
-                                      "\"tess\": \"off\", \"cull\": \"off\", \"pad\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"pad\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8138,7 +8138,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"cull\": \"off\", \"pad\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"pad\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8204,7 +8204,7 @@ static void test_play_mode_cull_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"cull\": \"on\", \"pad\": \"off\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"pad\": \"off\", \"cull\": \"on\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8231,7 +8231,7 @@ static void test_play_mode_cull_settings(void) {
     printf("PASS: wider culling is read, resolved and saved at both levels, and only Ace launches it\n");
 }
 
-/* Late pad sampling (contract 11.3.8, 11.2 item 2): read at both levels, the title's value wins, it
+/* Late pad sampling (contract 11.3.9, 11.2 item 2): read at both levels, the title's value wins, it
  * survives a save and a load, only an Ace launch carries the key, and a file without it is off. */
 static void test_play_mode_pad_settings(void) {
     char sep = nk_platform_path_separator();
@@ -8260,13 +8260,18 @@ static void test_play_mode_pad_settings(void) {
     assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_PAD] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
            strcmp(line + strlen(line) - 9, ";pad=late") == 0);
+    app->settings.enhanced.part[PLAYER_PART_CULL] = 1;           /* with cull too: cull stays last */
+    player_play_resolve(&app->settings, "TEST92002", &r);
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 17, ";pad=late;cull=on") == 0);
+    app->settings.enhanced.part[PLAYER_PART_CULL] = 0;
     player_play_resolve(&app->settings, "TEST92003", &r);       /* Enhanced: read, never launched */
     assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_PAD] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "pad") == NULL);
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"cull\": \"off\", \"pad\": \"late\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"pad\": \"late\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8342,8 +8347,8 @@ static void test_play_mode_tess_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
-                                      "\"pad\": \"off\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"pad\": \"off\", "
+                                      "\"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -8771,6 +8776,22 @@ static void test_graphics_presets(void) {
            "Custom on an edit, save and load\n");
 }
 
+/* The longest SR_ACE line the player can write, from its part table: the longer tier word, then
+ * ";key=word" for every part on the line at its longest word (the upscaler is not on it). An
+ * upper bound: pad and cull are written only for Ace, the shorter tier. */
+static size_t longest_launch_line_len(void) {
+    size_t n = strlen("v1;tier=enhanced");
+    for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+        if (p == PLAYER_PART_UPSCALE) continue;
+        const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+        size_t word = 0;
+        for (int i = 0; i < info->value_count; i++)
+            if (strlen(info->words[i]) > word) word = strlen(info->words[i]);
+        n += 2u + strlen(info->key) + word;
+    }
+    return n;
+}
+
 /* Smooth motion (#1272) as an Enhanced part: off by default, x2 on the launch line and never
  * match, and refused by the true 60 FPS game logic build whatever the settings say. */
 static void test_play_mode_smooth_motion(void) {
@@ -8793,8 +8814,8 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.part[PLAYER_PART_SMOOTH] == 0 && r.on && r.part[PLAYER_PART_FILTERING] == 16 &&
            r.part[PLAYER_PART_TEXT] == 1 && r.part[PLAYER_PART_NOTICE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "smooth=off") != NULL);
-    /* The line fits the runtime's buffer (src/rt/ace.h ACE_SPEC_MAX 192) with room to spare. */
-    assert(strlen(line) < 96u);
+    /* The longest line the part table allows fits the runtime's buffer (src/rt/ace.h ACE_SPEC_MAX). */
+    assert(strlen(line) <= longest_launch_line_len() && longest_launch_line_len() < ACE_SPEC_MAX);
     assert(!player_play_launch_line(&r, line, 20u) && line[0] == '\0');
     /* Clean pitched sound (contract 11.3.1) is off by default, reaches the line as sinc when
        the library turns it on, and the 60 FPS game logic leaves it alone. */
@@ -8906,6 +8927,27 @@ static void test_play_mode_line_parses_in_runtime(void) {
         assert(!r.on);
         expect_line_parses_in_runtime(&r);
     }
+    /* Ace with every part at its longest word: the runtime takes the line, in the parts' order
+       with cull last, and it is no longer than the bound the part table gives. */
+    {
+        PlayerTitlePlay *own = &settings.title_play[0];
+        own->mode = PLAYER_PLAY_ACE;
+        for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+            const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+            int longest = 0;
+            for (int i = 1; i < info->value_count; i++)
+                if (strlen(info->words[i]) > strlen(info->words[longest])) longest = i;
+            own->part[p] = info->values[longest];
+        }
+        own->part[PLAYER_PART_PAD] = 1;
+        own->part[PLAYER_PART_CULL] = 1;
+        player_play_resolve(&settings, "TEST93001", &r);
+        player_play_apply_logic_60(&r, false);
+        expect_line_parses_in_runtime(&r);
+        char line[ACE_SPEC_MAX];
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strlen(line) <= longest_launch_line_len() &&
+               strcmp(line + strlen(line) - 17, ";pad=late;cull=on") == 0);
+    }
     printf("[PLAYER_STATE_TEST] play mode lines parse in the runtime PASSED\n");
 }
 
@@ -9001,8 +9043,8 @@ static void test_play_mode_upscale_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
-                                      "\"pad\": \"off\", \"upscale\": \"fsr1\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"pad\": \"off\", "
+                                      "\"cull\": \"off\", \"upscale\": \"fsr1\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }

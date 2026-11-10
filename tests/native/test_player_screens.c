@@ -50,10 +50,10 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
      "Resamples pitched effects without aliasing. The game receives changed samples."},
     {"Finer patches", "Off",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures."},
-    {"Wider culling", "Off", "Ace only, with Widescreen, in games that have a culling build. The game's "
-                             "memory changes."},
     {"Late pad sampling", "Off", "Ace only, with 60 FPS logic. Reads the pad later in each frame; the "
                                   "game's timing changes."},
+    {"Wider culling", "Off", "Ace only, with Widescreen, in games that have a culling build. The game's "
+                             "memory changes."},
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
 };

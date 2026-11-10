@@ -1147,13 +1147,15 @@ uint32_t gui_buttons(void) { return s_buttons; }
 uint64_t gui_input_poll_ns(void) { return s_input_poll_ns; }
 void gui_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = s_lx; if (ly) *ly = s_ly; }
 int gui_pad_present(void) { return s_pad_present; }
-void gui_consume_button_pulses(void) {
+uint32_t gui_consume_button_pulses(void) {
+    uint32_t pulses = 0u;
 #ifdef SR_SDL3VK
     if (s_sdl3) {
-        sdl3vk_consume_button_pulses();
+        pulses = sdl3vk_consume_button_pulses();
         sync_sdl_input();
     }
 #endif
+    return pulses;
 }
 #endif /* SR_GUI_INPUT_PATH */
 #ifndef SR_GUI_PRESENT_SELFTEST
@@ -2386,7 +2388,11 @@ static unsigned s_stub_held_calls;
 static unsigned s_stub_stop_due_calls;
 
 uint32_t sdl3vk_buttons(void) { return s_stub_held | s_stub_pulse; }
-void sdl3vk_consume_button_pulses(void) { s_stub_pulse = 0; }
+uint32_t sdl3vk_consume_button_pulses(void) {
+    const uint32_t pulses = s_stub_pulse;
+    s_stub_pulse = 0;
+    return pulses;
+}
 void sdl3vk_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = 128; if (ly) *ly = 128; }
 int sdl3vk_pad_present(void) { return 1; }
 void sdl3vk_set_text_claim(int on) { if (on) selftest_unexpected("sdl3vk_set_text_claim(1)"); }
