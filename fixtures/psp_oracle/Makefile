@@ -206,6 +206,9 @@ else ifeq ($(CASE),hle-timer-order)
 CASE_ID = 103
 else ifeq ($(CASE),hle-savedata-getsize)
 CASE_ID = 104
+# 180: savedata modes on a missing save, a directory without PARAM.SFO and a probe-made save.
+else ifeq ($(CASE),hle-savedata-nodata)
+CASE_ID = 180
 # 140: #1386's utility dialog calls at NONE (no InitStart is imported).
 else ifeq ($(CASE),hle-utility-none)
 CASE_ID = 140
@@ -612,6 +615,9 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),hle-savedata-getsize)
 TARGET = $(BUILD_DIR)/hle_savedata_getsize
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-savedata-nodata)
+TARGET = $(BUILD_DIR)/hle_savedata_nodata
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 else ifeq ($(CASE),hle-utility-none)
 TARGET = $(BUILD_DIR)/hle_utility_none
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
@@ -929,13 +935,16 @@ USER_MODE_IMPORT_GATE_ARGS += --exact-library Kernel_Library=0x092968F4,0x5F10D4
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager --forbid-library SystemCtrlForUser
 endif
 # hle_utility_imports.S declares the two system-parameter Get calls (the CRT's timezone
-# setup calls the Int one in every PRX) and, for hle-savedata-getsize (case 104) only, the
-# four savedata dialog calls. Each build is pinned to exactly its own sceUtility set, so
+# setup calls the Int one in every PRX) and, for hle-savedata-getsize (case 104) and
+# hle-savedata-nodata (case 180) only, the four savedata dialog calls. Each build is pinned to exactly its own sceUtility set, so
 # hle-sysparam cannot import a savedata call and neither can import a Set call.
 ifeq ($(CASE),hle-sysparam)
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343
 endif
 ifeq ($(CASE),hle-savedata-getsize)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C
+endif
+ifeq ($(CASE),hle-savedata-nodata)
 USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C
 endif
 # hle-utility-none: GetStatus, Update and ShutdownStart of five dialogs and no InitStart, so no
