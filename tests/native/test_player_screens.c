@@ -1761,6 +1761,81 @@ static void test_library_find_box(void) {
     nk_ui_destroy(ui);
 }
 
+/* The action of a library frame of `model` that gets one press of `type` (a pad
+   shortcut, not a focused control's activation). */
+static PlayerUiAction library_shortcut(NkUi *ui, const PlayerUiLibraryModel *model,
+                                       NkUiEventType type, NkUiNavDir dir) {
+    PlayerUiAction action;
+    NkUiEvent press;
+    (void)library_frame_dump(ui, model, NULL);
+    memset(&press, 0, sizeof(press));
+    press.type = type;
+    press.dir = dir;
+    press.down = true;
+    nk_ui_push_event(ui, &press);
+    (void)library_frame_dump(ui, model, &action);
+    return action;
+}
+
+/* #2206: the find box's keys are the player's shared on-screen keyboard (ui_keyboard.h),
+   the nickname editor's: letters in the case Shift picks, the symbol row, SHIFT, SPACE and
+   DELETE, and the pad's shortcuts, which the keyboard answers although the library's top
+   bar is drawn first: L / R is Shift, not the next tab, and Start is Done, not Settings.
+   With the box closed both still go to the top bar. Failing-before: the box drew its own
+   grid of upper-case letters with no Shift, and L / R and Start left the library. */
+static void test_library_find_box_is_the_shared_keyboard(void) {
+    NkUiConfig config;
+    NkUi *ui;
+    PlayerUiLibraryModel model;
+    PlayerUiAction action;
+    NkUiTextBackend text = screen_test_text_backend();
+    static const size_t matches[] = {0u, 2u, 4u};
+    const char *dump;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create a context for the find box's keyboard");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    memset(&model, 0, sizeof(model));
+    model.titles = k_titles;
+    model.title_count = sizeof(k_titles) / sizeof(k_titles[0]);
+    model.page_size = player_ui_library_page_size(1280.0f, 800.0f, &model.columns);
+    model.logical_width = 1280.0f;
+    model.logical_height = 800.0f;
+    action = library_shortcut(ui, &model, NK_UI_EV_TAB, NK_UI_DIR_RIGHT);
+    CHECK(action.kind == PLAYER_UI_ACTION_OPEN_ABOUT,
+          "with the box closed, R is the top bar's next tab");
+    action = library_shortcut(ui, &model, NK_UI_EV_MENU, NK_UI_DIR_NONE);
+    CHECK(action.kind == PLAYER_UI_ACTION_OPEN_SETTINGS,
+          "with the box closed, Start opens Settings");
+
+    model.find_open = true;
+    model.find_query = "";
+    model.game_total = model.title_count;
+    model.grid = matches;
+    model.grid_count = 3u;
+    model.page_size = player_ui_library_page_size_finding(1280.0f, 800.0f, &model.columns);
+    dump = library_frame_dump(ui, &model, NULL);
+    CHECK(strstr(dump, "\"q\"") != NULL && strstr(dump, "\"Q\"") == NULL,
+          "the find box's letters show the case they type, lower case first");
+    CHECK(strstr(dump, "\"!\"") != NULL && strstr(dump, "\"SHIFT\"") != NULL &&
+              strstr(dump, "\"SPACE\"") != NULL && strstr(dump, "\"DELETE\"") != NULL &&
+              strstr(dump, "\"DONE\"") != NULL,
+          "the find box has the shared keyboard's symbol row, Shift, Space, Delete and Done");
+    action = library_shortcut(ui, &model, NK_UI_EV_TAB, NK_UI_DIR_RIGHT);
+    CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY,
+          "with the box open, R is the keyboard's Shift, not the top bar's next tab");
+    dump = library_frame_dump(ui, &model, NULL);
+    CHECK(strstr(dump, "\"Q\"") != NULL && strstr(dump, "\"q\"") == NULL,
+          "Shift turns the find box's letters to upper case");
+    action = library_shortcut(ui, &model, NK_UI_EV_MENU, NK_UI_DIR_NONE);
+    CHECK(action.kind == PLAYER_UI_ACTION_FIND_KEY && action.title_index == PLAYER_UI_FIND_DONE,
+          "with the box open, Start is the keyboard's Done, not Settings");
+    nk_ui_destroy(ui);
+}
+
 static void push_nav(NkUi *ui, NkUiNavDir dir) {
     NkUiEvent move;
     memset(&move, 0, sizeof(move));
@@ -6972,6 +7047,7 @@ int main(int argc, char **argv) {
     test_library_centres_in_a_wide_window();
     test_library_sort_button();
     test_library_find_box();
+    test_library_find_box_is_the_shared_keyboard();
     test_nickname_keyboard();
     CHECK(build_library_golden(library, sizeof(library), &library_size),
           "build Library screen dumps");
