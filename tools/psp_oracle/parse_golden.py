@@ -1758,6 +1758,32 @@ _register_campaign_probe(
         "volatile-lock-before": 2,
     },
 )
+# hle-savedata-nodata (180, probe_hle_measure.c): savedata modes on a save that does not exist
+# (nodir), a save directory without PARAM.SFO (nosfo) and a probe-made save (data), then LOAD
+# and DELETE of the missing save last. Each dialog cell carries InitStart's return and 11
+# driver words plus its mode's output words; a cell skipped by the precheck or after a TIMEOUT
+# keeps its word count. Every word is an observation; no PSP value is asserted.
+HLE_SAVEDATA_NODATA_ROWS = (
+    ("nodata-precheck", 4),
+    ("nodir-autoload", 15), ("nodir-sizes", 24), ("nodir-list", 22), ("nodir-files", 24),
+    ("nodir-readsecure", 15), ("nodir-read", 15), ("nodir-erasesecure", 13),
+    ("nodir-erase", 13), ("nodir-deletedata", 13), ("nodir-autodelete", 13),
+    ("nodir-getsize", 19),
+    ("nosfo-setup", 5),
+    ("nosfo-autoload", 15), ("nosfo-sizes", 24), ("nosfo-list", 22), ("nosfo-files", 24),
+    ("nosfo-readsecure", 15), ("nosfo-read", 15), ("nosfo-erase", 13),
+    ("nosfo-deletedata", 13), ("nosfo-autodelete", 13),
+    ("nosfo-cleanup", 3),
+    ("data-autosave", 14), ("data-autoload", 15), ("data-sizes", 24), ("data-list", 22),
+    ("data-files", 24), ("data-readsecure", 15), ("data-erase-missing", 13),
+    ("data-autodelete", 13),
+    ("data-cleanup", 8),
+    ("nodir-load", 15), ("nodir-delete", 13),
+)
+_register_campaign_probe(
+    "hle-savedata-nodata", "PSP-HLE-SAVEDATA-NODATA-001",
+    tuple(row for row, _ in HLE_SAVEDATA_NODATA_ROWS), dict(HLE_SAVEDATA_NODATA_ROWS),
+)
 _HLE_TIMER_ORDER_CASES = (
     "alarm-same-delay-set", "alarm-same-delay-a", "alarm-same-delay-b",
     "alarm-long-then-short-set", "alarm-long-event", "alarm-short-event",
@@ -3058,6 +3084,7 @@ def validate_hle_edram_restore(text: str) -> None:
 HLE_MACHINERY_STATUS_CASES = frozenset({
     "hle-vtimer-unit", "hle-vtimer-errors", "hle-kernel-pool-bounds", "hle-power-float-v0",
     "hle-null-out-pointers", "hle-audio-src", "hle-timer-order", "hle-savedata-getsize",
+    "hle-savedata-nodata",
 })
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS. hle-io-seek,

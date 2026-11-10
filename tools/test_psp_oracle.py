@@ -2488,12 +2488,12 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 150)
+        self.assertEqual(len(routes), 151)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(set(range(1, 79)) | set(range(90, 105)) | {106, 107, 108, 109}
+        self.assertEqual(set(range(1, 79)) | set(range(90, 105)) | {180} | {106, 107, 108, 109}
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
@@ -5375,6 +5375,10 @@ class HleMeasureProbeTests(unittest.TestCase):
     # Families added after the 2026-10-15 single-launch set, with literal record calls; the
     # single-launch class pins only cases 97-104.
     LATER_FAMILIES = (
+        # Case 180: savedata modes on a missing save, a save without PARAM.SFO and a probe-made
+        # save; HleSavedataNodataProbeTests pins its Memory Stick rules.
+        ("hle-savedata-nodata", 180, "hle_savedata_nodata", "hle_utility_imports.S",
+         "HLE_CASE_SAVEDATA_NODATA", "PSP-HLE-SAVEDATA-NODATA-001"),
         ("hle-std-handles", 156, "hle_std_handles", None,
          "HLE_CASE_STD_HANDLES", "PSP-HLE-STDIO-001"),
         ("hle-utility-dialogs", 161, "hle_utility_dialogs", "hle_utility_imports.S",
@@ -5425,6 +5429,13 @@ class HleMeasureProbeTests(unittest.TestCase):
     # dialog calls for hle-savedata-getsize (104) alone, so hle-sysparam keeps exactly its Get pair.
     CASE_EXTRA_PINS = {
         ("hle_utility_imports.S", 104): {
+            "sceUtilitySavedataInitStart": 0x50C4CD57,
+            "sceUtilitySavedataGetStatus": 0x8874DBE0,
+            "sceUtilitySavedataUpdate": 0xD4B95FFB,
+            "sceUtilitySavedataShutdownStart": 0x9790B33C,
+        },
+        # hle-savedata-nodata (180) declares the same four savedata dialog calls.
+        ("hle_utility_imports.S", 180): {
             "sceUtilitySavedataInitStart": 0x50C4CD57,
             "sceUtilitySavedataGetStatus": 0x8874DBE0,
             "sceUtilitySavedataUpdate": 0xD4B95FFB,
@@ -5710,14 +5721,14 @@ class HleMeasureProbeTests(unittest.TestCase):
         hle-sysparam can import no savedata call."""
         block = "hle_utility_imports.S"
         self.assertEqual(re.findall(r"^#if PSP_ORACLE_CASE == (\d+)$", self._block_text(block),
-                                    re.MULTILINE), ["104", "140", "161"])
+                                    re.MULTILINE), ["104", "180", "140", "161"])
         self.assertIn("#define HLE_CASE_SAVEDATA_GETSIZE 104\n", self.probe)
         self.assertIn("else ifeq ($(CASE),hle-savedata-getsize)\nCASE_ID = 104\n", self.makefile)
         users = [(case, case_id) for case, case_id, _stem, linked, _macro, _test
                  in self.ALL_FAMILIES if linked == block]
         self.assertEqual(users, [("hle-sysparam", 95), ("hle-savedata-getsize", 104),
-                                 ("hle-utility-none", 140), ("hle-utility-dialogs", 161),
-                                 ("hle-nickname-limit", 164)])
+                                 ("hle-utility-none", 140), ("hle-savedata-nodata", 180),
+                                 ("hle-utility-dialogs", 161), ("hle-nickname-limit", 164)])
         for case, case_id in users:
             with self.subTest(case=case):
                 gate = self.makefile.split(f"\nifeq ($(CASE),{case})\n", 1)[1].split("endif", 1)[0]
@@ -5925,7 +5936,11 @@ class HleMeasureProbeTests(unittest.TestCase):
         # Removal is this file's alone on host0; the only other removal is hle-utility-dialogs'
         # cleanup of its own gamedata directory on ms0: (HleUtilityDialogsProbeTests).
         self.assertEqual(re.findall(r"\bsceIoRemove\s*\(([^)]*)\)", self.probe),
-                         ["HLE_PRIVATE_STRINGS_PATH", "s_ud_path",
+                         ["HLE_PRIVATE_STRINGS_PATH",
+                          # hle-savedata-nodata: its own state-B file, then each regular file
+                          # its data-cleanup finds in the probe-owned NKPROBE01DATA directory.
+                          "HLE_ND_NOSFO_FILE", "s_nd_path",
+                          "s_ud_path",
                           # hle-io-seek: the probe-owned ms0: file, the same file once more on
                           # its setup failure, and the file its RDONLY|CREAT cell may create.
                           "HLE_IS_FILE", "HLE_IS_FILE", "HLE_IS_MISSING"])
@@ -11168,6 +11183,175 @@ class HleNicknameLimitProbeTests(unittest.TestCase):
         run = self.section[self.section.index("static int hle_run(void)"):]
         self.assertEqual(re.findall(r"\b(hle_nick_\w+)\(", run),
                          ["hle_nick_registry", "hle_nick_lengths"])
+
+
+class HleSavedataNodataProbeTests(unittest.TestCase):
+    """CASE=hle-savedata-nodata (180, PSP-HLE-SAVEDATA-NODATA-001) in probe_hle_measure.c:
+    savedata modes on a save that does not exist, a save directory without PARAM.SFO and a
+    probe-made save. These pin the Memory Stick rules (probe-owned names only, nothing touched
+    when an NKPROBE01* directory is already there, cleanup of what the case made), the dialog
+    bounds and the record shape; no PSP value is asserted."""
+
+    probe: ClassVar[str]
+    section: ClassVar[str]
+    code: ClassVar[str]
+    makefile: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_SAVEDATA_NODATA\n\n")
+        cls.section = cls.probe[start:cls.probe.index("#endif /* HLE_CASE_SAVEDATA_NODATA */")]
+        cls.code = _c_code(cls.section)
+
+    def _function(self, signature: str) -> str:
+        start = self.code.index(signature)
+        return self.code[start:self.code.index("\n}\n", start)]
+
+    def test_route_and_registry(self) -> None:
+        self.assertIn("else ifeq ($(CASE),hle-savedata-nodata)\nCASE_ID = 180\n", self.makefile)
+        self.assertIn("#define HLE_CASE_SAVEDATA_NODATA 180\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "hle-savedata-nodata"\n'
+                      '#define HLE_TEST_ID "PSP-HLE-SAVEDATA-NODATA-001"\n'
+                      '#define HLE_LOG "host0:/hle_savedata_nodata_log.txt"', self.probe)
+        spec, counts = CAMPAIGN_PROBE_CASES["hle-savedata-nodata"]
+        rows = tuple(row for row, _ in parse_golden.HLE_SAVEDATA_NODATA_ROWS)
+        self.assertEqual(spec.ordered_cases[:-1], rows)
+        self.assertEqual(len(rows), 34)
+        self.assertEqual(spec.terminal_case, "hle-savedata-nodata-done")
+        self.assertTrue(all(counts[row] <= 24 for row in rows))
+        self.assertIn("hle-savedata-nodata", parse_golden.HLE_MACHINERY_STATUS_CASES)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "hle-savedata-nodata").name,
+                         "hle_savedata_nodata_log.txt")
+        gate = self.makefile.split("\nifeq ($(CASE),hle-savedata-nodata)\n", 1)[1]
+        gate = gate.split("endif", 1)[0]
+        self.assertEqual(
+            gate.strip(),
+            "USER_MODE_IMPORT_GATE_ARGS += --exact-library "
+            "sceUtility=0xA5DA2406,0x34B78343,0x50C4CD57,0x8874DBE0,0xD4B95FFB,0x9790B33C")
+
+    def test_only_probe_owned_memory_stick_paths_are_written(self) -> None:
+        paths = set(re.findall(r'"(ms0:[^"]*)"', self.code))
+        self.assertEqual(paths, {"ms0:/PSP/SAVEDATA"})
+        for define in ('#define HLE_ND_GAME "NKPROBE01"\n',
+                       '#define HLE_ND_NODIR_DIR HLE_ND_ROOT "/" HLE_ND_GAME "NODIR"\n',
+                       '#define HLE_ND_NOSFO_DIR HLE_ND_ROOT "/" HLE_ND_GAME "NOSFO"\n',
+                       '#define HLE_ND_DATA_DIR HLE_ND_ROOT "/" HLE_ND_GAME "DATA"\n',
+                       '#define HLE_ND_NOSFO_FILE HLE_ND_NOSFO_DIR "/DATA.BIN"\n'):
+            self.assertIn(define, self.section)
+        self.assertEqual(re.findall(r"\bsceIoMkdir\s*\(([^,]*),", self.code), ["HLE_ND_NOSFO_DIR"])
+        self.assertEqual(re.findall(r"\bsceIoRemove\s*\(([^)]*)\)", self.code),
+                         ["HLE_ND_NOSFO_FILE", "s_nd_path"])
+        self.assertEqual(re.findall(r"\bsceIoRmdir\s*\(([^)]*)\)", self.code),
+                         ["HLE_ND_NOSFO_DIR", "HLE_ND_DATA_DIR"])
+        self.assertEqual(re.findall(r"\bsceIoOpen\s*\(([^,]*),", self.code), ["HLE_ND_NOSFO_FILE"])
+        self.assertNotRegex(self.code, r"\bsceIo(?:Rename|Chstat|Ioctl|Devctl)\s*\(")
+        # The fallback removal path is built only inside NKPROBE01DATA, from a name its own
+        # listing of that directory returned (a regular file, no '/').
+        path = self._function("static void hle_nd_data_path(")
+        self.assertIn("memcpy(s_nd_path, HLE_ND_DATA_DIR, dir);", path)
+        cleanup = self._function("static void hle_nd_data_cleanup(void)")
+        self.assertIn("sceIoDopen(HLE_ND_DATA_DIR)", cleanup)
+        self.assertIn("FIO_S_ISREG(s_nd_dirent.d_stat.st_mode)", cleanup)
+        self.assertIn("strchr(name, '/') == NULL", cleanup)
+        self.assertLess(cleanup.index("if (out[0] != HLE_ND_ABSENT)"), cleanup.index("sceIoDopen("))
+
+    def test_an_existing_probe_directory_makes_every_cell_skip(self) -> None:
+        precheck = self._function("static void hle_nd_precheck(void)")
+        self.assertIn("sceIoDopen(HLE_ND_ROOT)", precheck)
+        self.assertIn("i < HLE_ND_ROOT_READS", precheck)
+        self.assertIn("s_nd_skip = (dfd < 0 || !complete || matches) ? HLE_ND_SKIP_PRESENT : 0u;",
+                      " ".join(precheck.split()))
+        run = self._function("static int hle_run(void)")
+        self.assertLess(run.index("hle_nd_precheck();"), run.index("hle_nd_load_cell("))
+        reason = self._function("static uint32_t hle_nd_reason(uint32_t save)")
+        self.assertLess(reason.index("s_nd_skip"), reason.index("s_nd_stuck"))
+        cells = re.findall(r"^static void (hle_nd_\w+_cell)\(", self.code, re.MULTILINE)
+        self.assertEqual(len(cells), 7)
+        for cell in cells:
+            with self.subTest(cell=cell):
+                body = self._function(f"static void {cell}(")
+                self.assertLess(body.index("hle_nd_reason("), body.index("hle_nd_param("))
+                self.assertLess(body.index('"SKIP"'), body.index("hle_nd_dialog("))
+        for writer in ("hle_nd_nosfo_setup", "hle_nd_data_cleanup"):
+            body = self._function(f"static void {writer}(void)")
+            self.assertLess(body.index("if (s_nd_skip)"), body.index("sce"))
+        cleanup = self._function("static void hle_nd_nosfo_cleanup(void)")
+        self.assertLess(cleanup.index("if (!s_nd_nosfo_made)"), cleanup.index("sceIoRemove("))
+        setup = self._function("static void hle_nd_nosfo_setup(void)")
+        self.assertLess(setup.index("if (made >= 0) {"), setup.index("s_nd_nosfo_made = 1u;"))
+
+    def test_dialogs_are_bounded_and_a_timeout_stops_the_savedata_calls(self) -> None:
+        self.assertIn("#define HLE_ND_POLL_VBLANKS 1200u\n", self.section)
+        self.assertIn("#define HLE_ND_DIALOG_POLL_VBLANKS 1790u\n", self.section)
+        self.assertLess(1790 / 59.94, 30.0)
+        runner = self._function("static int hle_nd_run(")
+        self.assertIn("for (uint32_t i = 0; i < bound; i++) {", runner)
+        self.assertEqual(runner.count("sceUtilitySavedataShutdownStart()"), 2)
+        timeout = runner[runner.index("if (outcome == HLE_ND_OUTCOME_TIMEOUT) {"):]
+        self.assertIn("s_nd_stuck = 1u;", timeout)
+        self.assertIn("if (last == HLE_ND_STATUS_VISIBLE && !shutdown_called) {", timeout)
+        self.assertEqual(self.code.count("sceUtilitySavedataInitStart("), 1)
+        run = self._function("static int hle_run(void)")
+        calls = re.findall(r'hle_nd_\w+\("([a-z-]+)"', run)
+        rows = [row for row, _ in parse_golden.HLE_SAVEDATA_NODATA_ROWS]
+        self.assertEqual(calls, [row for row in rows if row not in (
+            "nodata-precheck", "nosfo-setup", "nosfo-cleanup", "data-cleanup")])
+        # The two modes that may show a system dialog run last, with the 30-second bound;
+        # every other dialog uses the 1200-vblank bound.
+        self.assertEqual(rows[-2:], ["nodir-load", "nodir-delete"])
+        head, tail = run.split('"nodir-load"', 1)
+        self.assertIn("PSP_UTILITY_SAVEDATA_LOAD,", tail)
+        self.assertIn("SCE_UTILITY_SAVEDATA_DELETE,", tail)
+        self.assertEqual(tail.count("HLE_ND_DIALOG_POLL_VBLANKS"), 2)
+        self.assertNotIn("HLE_ND_DIALOG_POLL_VBLANKS", head)
+        self.assertNotIn("PSP_UTILITY_SAVEDATA_LOAD,", head)
+        self.assertNotIn("SCE_UTILITY_SAVEDATA_DELETE,", head)
+        # Destructive modes come last in each state, and the real save is deleted last of all.
+        for state in ("nodir-", "nosfo-", "data-"):
+            names = [row for row in calls if row.startswith(state) and row not in (
+                "nodir-load", "nodir-delete")]
+            first = min(i for i, row in enumerate(names)
+                        if "erase" in row or "delete" in row)
+            self.assertTrue(all("erase" in row or "delete" in row or row == "nodir-getsize"
+                                for row in names[first:]), state)
+        self.assertEqual([row for row in calls if row.startswith("data-")][-1], "data-autodelete")
+
+    def test_offsets_are_pinned_to_the_sdk_header(self) -> None:
+        for field, offset in (("mode", "0x30u"), ("bind", "0x34u"), ("saveNameList", "0x60u"),
+                              ("fileName", "0x64u"), ("dataSize", "0x7cu"), ("msFree", "0x5d0u"),
+                              ("msData", "0x5d4u"), ("utilityData", "0x5d8u"), ("key", "0x5dcu"),
+                              ("idList", "0x5f4u"), ("fileList", "0x5f8u"),
+                              ("sizeInfo", "0x5fcu")):
+            self.assertIn(f"offsetof(SceUtilitySavedataParam, {field}) == {offset}", self.code)
+        self.assertIn("offsetof(SceUtilitySavedataIdListEntry, name) == HLE_ND_ID_NAME_OFFSET",
+                      self.code)
+        self.assertIn("offsetof(SceUtilitySavedataFileListEntry, st_size) == "
+                      "HLE_ND_FILE_SIZE_OFFSET", self.code)
+        self.assertIn("#define HLE_ND_ID_NAME_OFFSET 52u\n", self.section)
+        self.assertIn("#define HLE_ND_FILE_SIZE_OFFSET 8u\n", self.section)
+
+    def test_a_skipped_stream_parses_with_its_shape(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["hle-savedata-nodata"]
+        lines = ["NAKAGAWA_PSP_META schema=1 source=psp model=unknown firmware=unknown "
+                 "binary_sha256=" + "0" * 64 + " source_commit=" + "b" * 40 + " fixture=hle-measure"]
+        for row in spec.semantic_cases:
+            status = "PASS" if row == "nodata-precheck" else "SKIP"
+            fields = " ".join(f"out{i}=0xa5a5a5a5" for i in range(counts[row]))
+            lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} case_id={row} "
+                         f"status={status} result=0x1 {fields}")
+        lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} "
+                     f"case_id={spec.terminal_case} status=PASS result=0x0 out0=0x22")
+        text = "\n".join(lines) + "\n"
+        self.assertTrue(parse_campaign_probe_output(text, "hle-savedata-nodata").complete)
+        failed = text.replace("case_id=nodir-list status=SKIP", "case_id=nodir-list status=FAIL")
+        with self.assertRaises(ProtocolError):
+            parse_campaign_probe_output(failed, "hle-savedata-nodata")
+        short = text.replace(" out23=0xa5a5a5a5", "", 1)
+        with self.assertRaises(ProtocolError):
+            parse_campaign_probe_output(short, "hle-savedata-nodata")
 
 
 class GeMipProbeTests(unittest.TestCase):
