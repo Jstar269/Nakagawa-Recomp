@@ -46,6 +46,7 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/test_shared_helpers",
     "build/mygame/heap_selftest",
     "build/mygame/profiler_selftest",
+    "build/mygame/xr_selftest",
     "build/mygame/ge_texture_ref_selftest",
     "build/mygame/fbcap_selftest build/mygame/fbcap_selftest",
     "build/mygame/videorec_selftest build/mygame/videorec_selftest",
@@ -59,6 +60,8 @@ _RUNS_BEFORE_PROCESS_TEST = (
     "build/mygame/ge_float24_selftest",
     "build/mygame/ge_cpu_profile_validate_selftest",
     "build/mygame/ge_cpu_profile_validate_selftest --strip-cache-disabled",
+    "build/mygame/ge_tnl_census_selftest",
+    "build/mygame/ge_patch_tess_selftest",
     "build/mygame/coro_selftest",
 ) + (
     # The stack-switch backend Android uses runs only on POSIX hosts (the Makefile's

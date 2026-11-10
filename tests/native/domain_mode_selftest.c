@@ -56,6 +56,7 @@ void sr_ge_vram_write_commit(uint32_t addr, uint32_t width) {
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ---- stubs for runtime symbols recomp.c references -------------------------------- */
 
@@ -93,7 +94,12 @@ void sched_set_current_join_target(uint32_t uid) { (void)uid; }
 void sched_clear_current_join_target(void) {}
 int sched_take_current_join_result(uint32_t uid, uint32_t *result_out) { (void)uid; (void)result_out; return 0; }
 uint32_t sr_get_ge_status(void) { return 0u; }
-uint32_t sr_hle_resolve_late_import(uint32_t nid) { (void)nid; return 0u; }
+/* The late-import registry stand-in: one runtime-bound target resolves to a built-in HLE
+ * handler (SR_HLE_LATE_BUILTIN), which recomp.c's sr_hle_call runs through sr_syscall. */
+static uint32_t s_late_builtin_target;
+uint32_t sr_hle_resolve_late_import(uint32_t nid) {
+    return (s_late_builtin_target != 0u && nid == s_late_builtin_target) ? SR_HLE_LATE_BUILTIN : 0u;
+}
 void sr_yield(CpuState *s) { (void)s; }
 int sr_vfpu_interp(CpuState *s, uint32_t op) { (void)s; (void)op; return 0; }
 uint64_t SDL_GetTicksNS(void) { return 0u; }
@@ -374,6 +380,16 @@ static void test_cosim_lane(void) {
 #define EXP_CHECKED  (TEST_EXPORT + 0x70u)
 #define EXP_HELPER   (TEST_EXPORT + 0x80u)
 #define EXP_CONTINUE (TEST_EXPORT + 0x90u)
+#define EXP_TAIL     (TEST_EXPORT + 0xA0u)
+#define EXP_NOBOUND  (TEST_EXPORT + 0xB0u)
+/* Interpreted exports: guest words in the export span with no native body, so dispatch
+ * runs them on the interpreter floor (#2196). */
+#define EXP_MARK     (TEST_EXPORT + 0xC0u)
+#define EXP_VECTOR   (TEST_EXPORT + 0xD0u)
+#define EXP_LATE     (TEST_EXPORT + 0xE0u)
+#define LATE_TARGET  0x08830000u   /* a runtime-bound stub target: no body, no span */
+#define EXP_INTERP_JAL (TEST_EXPORT + 0x200u)  /* calls EXP_HELPER, then EXP_MARK, returns */
+#define EXP_INTERP_J   (TEST_EXPORT + 0x240u)  /* j EXP_HELPER; nop */
 #define COSIM_VRAM_A 0x04000100u   /* the renderer holds a newer byte here */
 #define COSIM_VRAM_B 0x04001000u   /* both lanes store here */
 
@@ -456,6 +472,70 @@ static void exp_continue(CpuState *s) {
     s->r[2] = s_syscall_canned;
 }
 
+/* A computed TAIL out of the export (emit_tail_transfer in tools/codegen.py records it
+ * with no body): the enclosing drain runs it as a step (dispatch_tail_step), and the
+ * body it reaches calls an import (#2196). */
+static void exp_tail(CpuState *s) {
+    s_export_ran++;
+    MEM_W8(COSIM_DATA, 0xEEu);
+    sr_tail_record(s, EXP_HELPER, NULL, 0u, 0u);
+}
+
+/* A transfer with no call boundary into interpreted code (dispatch), which then runs on
+ * into a native body that calls an import: the interpreter enters it with dispatch(s, pc)
+ * (#2196). */
+static int s_nobound_returned;
+
+static int s_nobound_result;
+
+static void exp_nobound(CpuState *s) {
+    s_export_ran++;
+    MEM_W8(COSIM_DATA, 0xEEu);
+    /* dispatch() is this call plus the fail-closed stop; the result is what every boundary
+     * above it sees (the interpreter's own dispatch(s, pc) inside is the boundary under test). */
+    s_nobound_result = dispatch_try(s, EXP_INTERP_J);
+    s_nobound_returned++;
+    if (s->flow_kind != 0u) {
+        return;
+    }
+    s->r[2] = s_syscall_canned;
+}
+
+/* The interpreted caller's continuation after its call to EXP_HELPER: it must never run
+ * once the call's import was refused. */
+static int s_interp_continued;
+
+static void exp_mark(CpuState *s) {
+    (void)s;
+    s_interp_continued++;
+}
+
+/* An export that calls a runtime-bound import: a generated jalr site to a target the
+ * late-import registry resolves to a built-in HLE handler (recomp.c, SR_HLE_LATE_BUILTIN). */
+static int s_late_result;
+
+static void exp_late(CpuState *s) {
+    s_export_ran++;
+    MEM_W8(COSIM_DATA, 0xEEu);
+    s_late_result = dispatch_call_checked(s, LATE_TARGET, EXP_LATE + 8u);
+    if (s_late_result) {
+        return;
+    }
+    s->r[2] = s_syscall_canned;
+}
+
+/* The interrupt vector of the held-lane cell: it must never run inside the guest lane. */
+static int s_vector_ran;
+
+static void exp_vector(CpuState *s) {
+    (void)s;
+    s_vector_ran++;
+}
+
+static uint32_t enc_jump(uint32_t op, uint32_t target) {
+    return (op << 26) | ((target >> 2) & 0x03FFFFFFu);
+}
+
 /* Same VRAM store as the HLE stand-in, made while the renderer holds newer bytes. */
 static void exp_vram(CpuState *s) {
     s_export_ran++;
@@ -475,7 +555,10 @@ static void cosim_fixture(CpuState *s, uint32_t export_addr) {
     s_export_ran = 0;
     s_helper_ran = 0;
     s_helper_continued = 0;
+    s_nobound_returned = 0;
+    s_interp_continued = 0;
     s->pc = STUB_PC;
+    s->r[31] = STUB_PC;   /* the stub's resume: an interpreted export returns there */
     s->r[29] = COSIM_SP;
     s->r[16] = COSIM_S0;
     s->r[4] = COSIM_A0;
@@ -495,6 +578,20 @@ static void test_cosim_dual_run(void) {
     sr_register(EXP_CHECKED, exp_checked);
     sr_register(EXP_HELPER, exp_helper);
     sr_register(EXP_CONTINUE, exp_continue);
+    sr_register(EXP_TAIL, exp_tail);
+    sr_register(EXP_NOBOUND, exp_nobound);
+    sr_register(EXP_MARK, exp_mark);
+    sr_register(EXP_VECTOR, exp_vector);
+    sr_register(EXP_LATE, exp_late);
+    MEM_W32(EXP_INTERP_JAL + 0u, 0x03E04025u);               /* or $t0, $ra, $zero */
+    MEM_W32(EXP_INTERP_JAL + 4u, enc_jump(3u, EXP_HELPER));  /* jal EXP_HELPER */
+    MEM_W32(EXP_INTERP_JAL + 8u, 0u);                        /* nop */
+    MEM_W32(EXP_INTERP_JAL + 12u, enc_jump(3u, EXP_MARK));   /* jal EXP_MARK */
+    MEM_W32(EXP_INTERP_JAL + 16u, 0u);                       /* nop */
+    MEM_W32(EXP_INTERP_JAL + 20u, 0x01000008u);              /* jr $t0 */
+    MEM_W32(EXP_INTERP_JAL + 24u, 0u);                       /* nop */
+    MEM_W32(EXP_INTERP_J + 0u, enc_jump(2u, EXP_HELPER));    /* j EXP_HELPER */
+    MEM_W32(EXP_INTERP_J + 4u, 0u);                          /* nop */
 
     /* MATCH: both lanes run from the same input, the HLE lane is kept. */
     cosim_fixture(&s, EXP_SAME);
@@ -661,6 +758,125 @@ static void test_cosim_dual_run(void) {
           "the HLE lane runs once after the handoff and its result is kept (%u calls)",
           s_syscall_calls);
     CHECK(sr_dispatch_unwind_requested == 0, "the unwind flag is clear after the handoff lane");
+
+    /* The three remaining interpreter boundaries (#2196). Each reaches the import under a
+     * different one; the refusal unwinds through it to the lane's entry, the call is
+     * NOT_COMPARED nested-import, and the HLE lane runs once. Before the fix each boundary
+     * ended the process (exit 1). A refusal is not a rejection of the guest code, so no
+     * semantic-boundary stop is written to the boot-event file the player reads. */
+    {
+        char events_path[512];
+        const char *tmp = getenv("TEMP") ? getenv("TEMP") : getenv("TMPDIR");
+        snprintf(events_path, sizeof events_path, "%s/nk_domain_mode_events_%lu.txt",
+                 tmp ? tmp : ".", (unsigned long)time(NULL));
+        remove(events_path);
+#ifdef _WIN32
+        _putenv_s("SR_BOOT_EVENT_FILE", events_path);
+#else
+        setenv("SR_BOOT_EVENT_FILE", events_path, 1);
+#endif
+        static const struct { uint32_t export_addr; const char *what; } cells[] = {
+            { EXP_INTERP_JAL, "an interpreted jal to a stub (the interpreter's linked call)" },
+            { EXP_TAIL, "a computed TAIL to a body that calls a stub (dispatch_tail_step)" },
+            { EXP_NOBOUND, "an interpreted transfer with no call boundary (dispatch)" },
+        };
+        for (unsigned c = 0; c < sizeof cells / sizeof cells[0]; c++) {
+            cosim_fixture(&s, cells[c].export_addr);
+            rc = sr_import_call(&s, NID_PAIR, STUB_PC);
+            sr_domain_cosim_last_result(&r);
+            CHECK(s_helper_ran == 1 && s_helper_continued == 0,
+                  "%s: the body runs once and stops at the refused import (%d, %d)",
+                  cells[c].what, s_helper_ran, s_helper_continued);
+            CHECK(s_interp_continued == 0,
+                  "%s: the interpreted caller does not run on past the refused call",
+                  cells[c].what);
+            CHECK(r.outcome == SR_COSIM_OUTCOME_NOT_COMPARED &&
+                      r.reason == SR_COSIM_REASON_NESTED_IMPORT && r.nested_nid == NID_HLE,
+                  "%s: NOT_COMPARED nested-import (outcome %d reason %d nid 0x%08x)",
+                  cells[c].what, (int)r.outcome, (int)r.reason, r.nested_nid);
+            CHECK(s_syscall_calls == 1u && s_syscall_last_nid == NID_PAIR &&
+                      rc == (int)s_syscall_canned && s.flow_kind == SR_FLOW_NONE &&
+                      MEM_R8(COSIM_DATA) == 0xA5u,
+                  "%s: the HLE lane runs once and its result is kept (%u calls)",
+                  cells[c].what, s_syscall_calls);
+            CHECK(sr_dispatch_unwind_requested == 0 && !sr_tail_transfer.pending,
+                  "%s: the unwind flag and the tail record are clear after the lane",
+                  cells[c].what);
+        }
+        CHECK(s_nobound_result == SR_GUEST_INTERP_FLOW_FATAL,
+              "a no-boundary interpreter run reports the refusal as FLOW_FATAL (got %d)",
+              s_nobound_result);
+        CHECK(s_nobound_returned == 1,
+              "dispatch returns to its native caller with the refusal pending (%d)",
+              s_nobound_returned);
+        FILE *events = fopen(events_path, "rb");
+        CHECK(events == NULL, "a refused import records no semantic-boundary stop (%s)",
+              events_path);
+        if (events) fclose(events);
+        remove(events_path);
+#ifdef _WIN32
+        _putenv_s("SR_BOOT_EVENT_FILE", "");
+#else
+        unsetenv("SR_BOOT_EVENT_FILE");
+#endif
+    }
+
+    /* A built-in handler reached through the late-import bridge is refused like a stub's
+     * import (#2201 review S2): before, it ran inside the guest lane, so its host-side effect
+     * happened in both lanes and the call could still be compared. */
+    cosim_fixture(&s, EXP_LATE);
+    s_late_builtin_target = LATE_TARGET;
+    s_late_result = 0;
+    rc = sr_import_call(&s, NID_PAIR, STUB_PC);
+    sr_domain_cosim_last_result(&r);
+    s_late_builtin_target = 0u;
+    CHECK(s_syscall_calls == 1u && s_syscall_last_nid == NID_PAIR,
+          "a late-bound built-in reached by the guest lane runs no handler (%u calls, last "
+          "0x%08x)", s_syscall_calls, s_syscall_last_nid);
+    CHECK(r.outcome == SR_COSIM_OUTCOME_NOT_COMPARED &&
+              r.reason == SR_COSIM_REASON_NESTED_IMPORT && r.nested_nid == LATE_TARGET,
+          "a late-bound built-in is NOT_COMPARED nested-import and named (outcome %d reason %d "
+          "nid 0x%08x)", (int)r.outcome, (int)r.reason, r.nested_nid);
+    CHECK(s_late_result == 1 && rc == (int)s_syscall_canned && s.flow_kind == SR_FLOW_NONE &&
+              MEM_R8(COSIM_DATA) == 0xA5u && sr_dispatch_unwind_requested == 0,
+          "the late bridge's refusal unwinds through the checked call and the HLE lane's "
+          "result is kept");
+
+    /* An interrupt that comes due inside the guest lane (#2201, widened by #2166): with the
+     * LLE CPU on, an INTC configured and its source raised and enabled, the interpreter's
+     * safe-point poll would take it at the lane's first instruction and run its handler
+     * under the lane's import refusal and rollback. The lane holds delivery instead: the
+     * handler does not run in the lane, the source stays pending, and the first safe point
+     * after the lane takes it. */
+    {
+        const SrIntcConfig intc = { .source_count = 8u, .cpu_ip_bit = 2u };
+        cosim_fixture(&s, EXP_INTERP_JAL);
+        s_vector_ran = 0;
+        sr_cpu_lle_set_enabled(1);
+        sr_cpu_lle_set_vectors(EXP_VECTOR, EXP_VECTOR, EXP_VECTOR);
+        CHECK(sr_intc_init(&intc) == 0 && sr_intc_set_enable_mask(1u) == 0 &&
+                  sr_intc_raise(0u) == 0,
+              "configure the synthetic INTC and raise its source");
+        s.cop0[SR_CP0_STATUS] = SR_STATUS_IE | (1u << 10);   /* IE, IM2 */
+        rc = sr_import_call(&s, NID_PAIR, STUB_PC);
+        sr_domain_cosim_last_result(&r);
+        CHECK(s_vector_ran == 0, "no interrupt handler runs inside the guest lane (%d ran)",
+              s_vector_ran);
+        CHECK(r.outcome == SR_COSIM_OUTCOME_NOT_COMPARED &&
+                  r.reason == SR_COSIM_REASON_NESTED_IMPORT && s_syscall_calls == 1u &&
+                  rc == (int)s_syscall_canned,
+              "the held lane still reports its nested import and keeps the HLE lane "
+              "(outcome %d reason %d)", (int)r.outcome, (int)r.reason);
+        CHECK(!sr_guest_lane_hold.held && sr_guest_lane_hold.uid == 0u,
+              "the hold is released when the guest lane ends");
+        CHECK((sr_intc_pending_mask() & 1u) != 0u, "the source stays pending across the lane");
+        CHECK(sr_cpu_poll(&s, STUB_PC) == -1 && s.flow_kind == SR_FLOW_EXCEPTION,
+              "the first safe point after the lane takes the interrupt");
+        sr_cpu_clear_flow(&s);
+        sr_intc_reset();
+        sr_cpu_lle_set_enabled(0);
+        sr_cpu_lle_set_vectors(0u, 0u, 0u);
+    }
 
     /* Dispatch refuses the guest export: NOT_COMPARED, never fatal, HLE kept. */
     cosim_fixture(&s, EXP_SAME);

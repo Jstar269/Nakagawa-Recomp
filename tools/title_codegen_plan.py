@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import dataclasses
 import hashlib
 import json
 import os
@@ -65,20 +66,40 @@ PACKAGE_SCHEMA_VERSION = 2
 BUILD_REPORT_SCHEMA_VERSION = 1
 PACKAGE_FORMAT = "nakagawa-aot-package"
 BUILD_REPORT_FORMAT = "nakagawa-build-report"
-#: Package builds never run more than this many Make jobs.
+#: Balanced package builds never run more than this many Make jobs; Fastest lifts it.
 PACKAGE_BUILD_MAX_JOBS = 8
+#: The player's Settings > Build speed, passed to the planner in
+#: ``PACKAGE_BUILD_SPEED_ENV``: ``background`` runs at most
+#: ``PACKAGE_BUILD_BACKGROUND_JOBS`` jobs (the player also starts the build at low
+#: priority), ``balanced`` is the automatic sizing, and ``fastest`` runs a job for every
+#: logical CPU the free memory allows. Every speed keeps the memory budget.
+PACKAGE_BUILD_SPEEDS = ("background", "balanced", "fastest")
+PACKAGE_BUILD_SPEED_DEFAULT = "balanced"
+PACKAGE_BUILD_SPEED_ENV = "NK_PACKAGE_BUILD_SPEED"
+PACKAGE_BUILD_BACKGROUND_JOBS = 2
 #: Memory one compile job may need: one cc1 compiling a large generated chunk peaked
 #: at about 2.9 GB working set on the measured Hot Shots Tennis build.
 PACKAGE_BUILD_JOB_BYTES = 3 * 1024**3
 #: With size-bounded chunks (``CHUNK_TARGET_BYTES``) a job needs memory in proportion to
-#: the chunk size: Hot Shots Tennis chunks of at most 4 MB of C peaked at 440 MB at -O1, so
-#: a job is given 256 bytes per byte of chunk target (about 1 GiB for 4 MB), no less than
-#: PACKAGE_BUILD_MIN_JOB_BYTES and no more than PACKAGE_BUILD_JOB_BYTES.
-PACKAGE_BUILD_JOB_BYTES_PER_CHUNK_BYTE = 256
-PACKAGE_BUILD_MIN_JOB_BYTES = 1024**3
-#: Memory left for the player, the OS and everything else while a package builds.
-PACKAGE_BUILD_RESERVED_BYTES = 4 * 1024**3
-#: Overrides the computed job count (still clamped to 1..PACKAGE_BUILD_MAX_JOBS).
+#: the chunk size. Measured on 4 MB generated units compiled at the package's -O1 (#2284,
+#: gcc 16.2, peak commit of the one cc1 process): 485 to 531 MiB for five units of 4.01 to
+#: 4.04 MB, and 189 MiB for a 0.9 MB unit, about 110 bytes per byte of C over a base near
+#: 90 MiB. A job is given 200 bytes per byte of chunk target (763 MiB for 4 MB, 1.4 times
+#: the largest measured), no less than PACKAGE_BUILD_MIN_JOB_BYTES (768 MiB, 1.45 times)
+#: and no more than PACKAGE_BUILD_JOB_BYTES.
+PACKAGE_BUILD_JOB_BYTES_PER_CHUNK_BYTE = 200
+PACKAGE_BUILD_MIN_JOB_BYTES = 768 * 1024**2
+#: A unit of its own for a body over the unit budget (#1730) grows at about 170 bytes per
+#: byte of C (a body chained to 4 MB compiles at -O2 in 670 MB); it is budgeted at 256, with
+#: no upper cap, when it exceeds the chunk target by this share (a chunk ends with the
+#: function that crosses its target, so ordinary units run slightly over).
+PACKAGE_BUILD_OVERSIZED_UNIT_BYTES_PER_BYTE = 256
+PACKAGE_BUILD_OVERSIZED_UNIT_PERCENT = 125
+#: Memory left for the player, the OS and everything else while a package builds. The
+#: available-memory reading already excludes what other running programs hold.
+PACKAGE_BUILD_RESERVED_BYTES = 2 * 1024**3
+#: Overrides the computed job count and the build speed's (still clamped to
+#: 1..PACKAGE_BUILD_MAX_JOBS).
 PACKAGE_BUILD_JOBS_ENV = "NK_PACKAGE_JOBS"
 #: Object-cache keys are taken by preprocessing each object's source, which peaked at
 #: about 80 MB for the largest generated Hot Shots Tennis chunk: keying is bounded by
@@ -175,13 +196,22 @@ def package_job_bytes(chunk_target_bytes: str | None) -> int:
 def compile_job_bytes(chunk_target_bytes: str | None, largest_unit_bytes: int) -> int:
     """Memory to allow one compile job once the generated units exist.
 
-    A unit is normally within ``CHUNK_TARGET_BYTES``, but codegen gives a body larger than
-    its unit budget a unit of its own (#1730), and gcc's memory grows with that unit at
-    every level. Such a unit raises the budget to its own size at the same rate, with no
-    upper cap: past the host's free memory, the build runs one job.
+    A unit is normally within ``CHUNK_TARGET_BYTES`` (plus the function that crosses it),
+    but codegen gives a body larger than its unit budget a unit of its own (#1730), and
+    gcc's memory grows with that unit at every level. Such a unit, clearly over the
+    target, raises the budget to its own size at its own, higher rate, with no upper
+    cap: past the host's free memory, the build runs one job.
     """
-    return max(package_job_bytes(chunk_target_bytes),
-               largest_unit_bytes * PACKAGE_BUILD_JOB_BYTES_PER_CHUNK_BYTE)
+    budget = package_job_bytes(chunk_target_bytes)
+    try:
+        target = int(str(chunk_target_bytes or "").strip())
+    except ValueError:
+        target = 0
+    if target <= 0:
+        target = 4_000_000
+    if largest_unit_bytes * 100 > target * PACKAGE_BUILD_OVERSIZED_UNIT_PERCENT:
+        budget = max(budget, largest_unit_bytes * PACKAGE_BUILD_OVERSIZED_UNIT_BYTES_PER_BYTE)
+    return budget
 
 
 def _largest_generated_unit(build_dir: Path, game_name: str) -> int:
@@ -192,26 +222,67 @@ def _largest_generated_unit(build_dir: Path, game_name: str) -> int:
     return max(sizes, default=0)
 
 
-def package_build_jobs(
+@dataclasses.dataclass(frozen=True)
+class PackageBuildPlan:
+    """The Make job count for a package build, why, and what bound it.
+
+    ``limit`` names the real reason the count is what it is, so the player can tell the
+    user: ``"override"`` (``NK_PACKAGE_JOBS``), ``"cpu"`` (the logical CPUs),
+    ``"memory"`` (the free memory), ``"max"`` (``PACKAGE_BUILD_MAX_JOBS``, Balanced),
+    ``"background"`` (``PACKAGE_BUILD_BACKGROUND_JOBS``), ``"unknown_memory"`` (no
+    memory reading, so the fixed count of two) or ``"unknown_cpus"`` (no CPU count, so
+    one job, which is not a statement about the PC). ``speed`` is the build speed it was
+    planned for (``PACKAGE_BUILD_SPEEDS``).
+    """
+
+    jobs: int
+    reason: str
+    limit: str
+    cpus: int
+    available_bytes: int | None
+    #: True when not even one job fits beside the reserve: the build still runs one job.
+    memory_short: bool = False
+    speed: str = PACKAGE_BUILD_SPEED_DEFAULT
+
+
+def package_build_plan(
     *,
     cpu_count: int | None,
     available_bytes: int | None,
     override: str | None = None,
     job_bytes: int = PACKAGE_BUILD_JOB_BYTES,
-) -> tuple[int, str]:
-    """Choose the Make job count for a package build and say why.
+    speed: str | None = None,
+) -> PackageBuildPlan:
+    """Choose the Make job count for a package build and say why and what bound it.
 
     Each job compiles one object, and the largest objects are generated chunks of
-    translated game code: one cc1 compiling such a chunk peaked at about 2.9 GB, and the
-    whole toolchain at about 3.1 GB at ``-j2``. Running out of memory would page or fail
-    the build, so the count is what the available physical memory allows after keeping
-    ``PACKAGE_BUILD_RESERVED_BYTES`` for everything else, at ``job_bytes`` per job
+    translated game code. The count is what the available physical memory allows after
+    keeping ``PACKAGE_BUILD_RESERVED_BYTES`` for everything else, at ``job_bytes`` per job
     (``package_job_bytes``; ``PACKAGE_BUILD_JOB_BYTES`` for count-based chunks), bounded by
-    the logical CPUs and by
-    ``PACKAGE_BUILD_MAX_JOBS``, and never below one job. Unknown memory keeps the
-    earlier fixed count of two. ``override`` (``NK_PACKAGE_JOBS``) replaces the computed
-    count but is still clamped to the same range.
+    the logical CPUs and by ``PACKAGE_BUILD_MAX_JOBS``, and never below one job. When even
+    one job does not fit, the build still runs one job and the plan says so
+    (``memory_short``): a real shortage then shows as a compiler failure, not a silent
+    skip. Unknown memory keeps the earlier fixed count of two. ``override``
+    (``NK_PACKAGE_JOBS``) replaces the computed count but is still clamped to the same
+    range.
+
+    ``speed`` (``PACKAGE_BUILD_SPEEDS``) sets the cap on top of the memory and the CPUs:
+    ``PACKAGE_BUILD_BACKGROUND_JOBS`` for Background, ``PACKAGE_BUILD_MAX_JOBS`` for
+    Balanced (the default, and what an unknown speed gets), none for Fastest. No speed
+    runs more jobs than the memory allows, and without a memory reading every speed
+    keeps the fixed count of two (one without a CPU count).
     """
+    cpus_known = bool(cpu_count and cpu_count > 0)
+    cpus = cpu_count if cpu_count is not None and cpu_count > 0 else 1
+    cpu_text = f"{cpus} logical CPUs" if cpus_known else "CPU count unknown"
+    notes = ""
+    if speed is None or not speed.strip():
+        speed = PACKAGE_BUILD_SPEED_DEFAULT
+    elif speed.strip() not in PACKAGE_BUILD_SPEEDS:
+        notes += f"; ignored {PACKAGE_BUILD_SPEED_ENV}={speed.strip()!r}"
+        speed = PACKAGE_BUILD_SPEED_DEFAULT
+    else:
+        speed = speed.strip()
     if override is not None and override.strip():
         try:
             requested = int(override.strip())
@@ -219,20 +290,54 @@ def package_build_jobs(
             requested = None
         if requested is not None:
             jobs = max(1, min(requested, PACKAGE_BUILD_MAX_JOBS))
-            return jobs, f"{PACKAGE_BUILD_JOBS_ENV}={override.strip()}"
-        override_note = f"; ignored {PACKAGE_BUILD_JOBS_ENV}={override.strip()!r}"
-    else:
-        override_note = ""
-    cpus = cpu_count if cpu_count and cpu_count > 0 else 1
+            return PackageBuildPlan(
+                jobs, f"{PACKAGE_BUILD_JOBS_ENV}={override.strip()} overrides the {speed} "
+                f"build speed's job count{notes}", "override", cpus, available_bytes,
+                speed=speed)
+        notes += f"; ignored {PACKAGE_BUILD_JOBS_ENV}={override.strip()!r}"
+    cap = {"background": PACKAGE_BUILD_BACKGROUND_JOBS,
+           "balanced": PACKAGE_BUILD_MAX_JOBS}.get(speed)
     if available_bytes is None:
-        jobs = max(1, min(cpus, 2, PACKAGE_BUILD_MAX_JOBS))
-        return jobs, f"{cpus} logical CPUs, available memory unknown{override_note}"
+        jobs = max(1, min(cpus, 2))
+        return PackageBuildPlan(
+            jobs, f"{speed} build speed, {cpu_text}, available memory unknown{notes}",
+            "unknown_cpus" if not cpus_known else "cpu" if cpus <= 2 else "unknown_memory",
+            cpus, None, speed=speed)
     by_memory = (available_bytes - PACKAGE_BUILD_RESERVED_BYTES) // max(1, job_bytes)
-    jobs = max(1, min(cpus, by_memory, PACKAGE_BUILD_MAX_JOBS))
-    return jobs, (
-        f"{cpus} logical CPUs, {available_bytes / 1024**3:.1f} GB memory available"
-        f"{override_note}"
-    )
+    jobs = max(1, min(cpus, by_memory) if cap is None else min(cpus, by_memory, cap))
+    # The binding limit is the smallest bound; the CPUs win a tie because more memory
+    # would not add a job, and the memory wins over the speed's own cap.
+    if not cpus_known:
+        # One job is a stand-in for the missing count: name memory only when it binds too.
+        limit = "memory" if by_memory <= jobs else "unknown_cpus"
+    elif cpus <= jobs:
+        limit = "cpu"
+    elif by_memory <= jobs:
+        limit = "memory"
+    else:
+        limit = "background" if speed == "background" else "max"
+    reason = (f"{speed} build speed, {cpu_text}, "
+              f"{available_bytes / 1024**3:.1f} GB memory available{notes}")
+    short = by_memory < 1
+    if short:
+        reason += (f"; below the {(PACKAGE_BUILD_RESERVED_BYTES + job_bytes) / 1024**3:.1f} GB "
+                   "one job needs beside the reserve, so one job runs and the compiler may "
+                   "fail if memory runs out")
+    return PackageBuildPlan(jobs, reason, limit, cpus, available_bytes, short, speed)
+
+
+def package_build_jobs(
+    *,
+    cpu_count: int | None,
+    available_bytes: int | None,
+    override: str | None = None,
+    job_bytes: int = PACKAGE_BUILD_JOB_BYTES,
+    speed: str | None = None,
+) -> tuple[int, str]:
+    """``package_build_plan``'s job count and reason."""
+    plan = package_build_plan(cpu_count=cpu_count, available_bytes=available_bytes,
+                              override=override, job_bytes=job_bytes, speed=speed)
+    return plan.jobs, plan.reason
 
 
 def object_key_workers(cpu_count: int | None) -> int:
@@ -246,14 +351,21 @@ def object_key_workers(cpu_count: int | None) -> int:
     return max(1, min(cpus, OBJECT_KEY_MAX_WORKERS))
 
 
-def _host_package_build_jobs(chunk_target_bytes: str | None = None,
-                             largest_unit_bytes: int = 0) -> tuple[int, str]:
-    return package_build_jobs(
+def _host_package_build_plan(chunk_target_bytes: str | None = None,
+                             largest_unit_bytes: int = 0) -> PackageBuildPlan:
+    return package_build_plan(
         cpu_count=os.process_cpu_count(),
         available_bytes=available_physical_memory(),
         override=os.environ.get(PACKAGE_BUILD_JOBS_ENV),
         job_bytes=compile_job_bytes(chunk_target_bytes, largest_unit_bytes),
+        speed=os.environ.get(PACKAGE_BUILD_SPEED_ENV),
     )
+
+
+def _host_package_build_jobs(chunk_target_bytes: str | None = None,
+                             largest_unit_bytes: int = 0) -> tuple[int, str]:
+    plan = _host_package_build_plan(chunk_target_bytes, largest_unit_bytes)
+    return plan.jobs, plan.reason
 
 
 def _make_build_targets(*, native_only: bool, aot_stage: bool = False) -> tuple[str, ...]:
@@ -335,7 +447,7 @@ class CompileProgressCounter:
 
 
 def _write_compile_progress(
-    progress_file: Path, completed: int, total: int, load: dict[str, int]
+    progress_file: Path, completed: int, total: int, load: dict[str, Any]
 ) -> None:
     row = {"completed": completed, "total": total, **load}
     with progress_file.open("a", encoding="utf-8") as stream:
@@ -351,14 +463,21 @@ def _run_make_with_progress(
     progress_file: Path,
     jobs: int,
     cpus: int,
+    plan: PackageBuildPlan | None = None,
     poll_seconds: float = COMPILE_PROGRESS_POLL_SECONDS,
 ) -> int:
     """Run Make, appending a progress line each time the finished-object count changes.
 
-    Each line also carries the job count and the logical CPUs, so the player can say
-    how much of the PC the build is using.
+    Each line also carries the job count and the logical CPUs, and, from ``plan``, the
+    build speed, what bound the job count (``limit``) and the free memory then, so the
+    player can say how much of the PC the build is using and why.
     """
-    load = {"jobs": jobs, "cpus": cpus}
+    load: dict[str, Any] = {"jobs": jobs, "cpus": cpus}
+    if plan is not None:
+        load["limit"] = plan.limit
+        load["speed"] = plan.speed
+        if plan.available_bytes is not None:
+            load["free_gb"] = round(plan.available_bytes / 1024**3, 1)
     last = 0
     _write_compile_progress(progress_file, 0, counter.total, load)
     process = subprocess.Popen(command, cwd=cwd, env=env)
@@ -572,6 +691,7 @@ def _run_compile_phase(
     build_dir: str,
     library_cache: Any = None,
     cwd: Path = ROOT,
+    plan: PackageBuildPlan | None = None,
 ) -> int:
     """Run ``make compile``, reusing cached objects and counting the ones it compiles."""
     from nk_core import package_cache
@@ -621,6 +741,7 @@ def _run_compile_phase(
             progress_file=progress_file,
             jobs=jobs,
             cpus=os.process_cpu_count() or 1,
+            plan=plan,
         )
     else:
         returncode = subprocess.run(command, cwd=cwd, env=env, check=False).returncode
@@ -1973,6 +2094,24 @@ def _build_report_text(report: dict[str, Any]) -> str:
     return text
 
 
+#: The systems a package can be built for (``build_package``'s ``target``).
+PACKAGE_TARGETS = ("host", "android")
+
+
+def default_package_target() -> str:
+    """``android`` when this interpreter runs on Android (CPython reports
+    ``sys.platform == "android"`` there), otherwise ``host``."""
+    return "android" if sys.platform == "android" else "host"
+
+
+def package_executable_name(game_name: str, target: str) -> str:
+    """The file the compile goal links (Make's TITLE_OUTPUT): an executable for this
+    host, or the shared library TitleActivity loads on Android."""
+    if target == "android":
+        return f"lib{game_name}.so"
+    return f"{game_name}{'.exe' if os.name == 'nt' else ''}"
+
+
 def build_package(
     manifest: dict[str, Any],
     *,
@@ -1994,8 +2133,14 @@ def build_package(
     reuse_aot_stage: Path | None = None,
     enhancement_package_path: Path | None = None,
     enhancement_data_root: Path | None = None,
+    target: str = "host",
 ) -> dict[str, Any]:
     """Run the canonical two-phase Make build and emit package/report JSON.
+
+    ``target`` is the system the title runs on: ``host`` (this machine) or ``android``,
+    which links the title as the shared library ``lib<game>.so`` TitleActivity loads
+    (Make's ``NK_TARGET=android``). An Android build needs ``CC`` naming an Android Clang
+    and ``ANDROID_SDL3_INCLUDE`` and ``ANDROID_SDL3_LIBDIR`` naming the APK's SDL3.
 
     ``aot_stage`` runs only the generation phase into an empty ``output_dir`` and
     records it with the package completion discipline (the cache key and the digest
@@ -2007,6 +2152,11 @@ def build_package(
     """
     from nk_core import package_cache
 
+    if target not in PACKAGE_TARGETS:
+        raise PackageRouteError(
+            "PACKAGE_INVALID_TARGET",
+            f"target {target!r} is not one of {', '.join(PACKAGE_TARGETS)}",
+        )
     # The Makefile reads ENHANCEMENT_PACKAGE and CODEGEN_USER_ARGS from the environment,
     # so an inherited one would enhance an authentic package or override the explicit
     # package. A package build names its package with enhancement_package_path only.
@@ -2251,7 +2401,13 @@ def build_package(
             raise PackageRouteError(
                 "PACKAGE_TOOLCHAIN_MISSING", f"{make_name} is not available on PATH"
             )
-        cc_name = os.environ.get("CC", "gcc")
+        cc_name = os.environ.get("CC", "gcc" if target == "host" else "")
+        if not cc_name:
+            raise PackageRouteError(
+                "PACKAGE_TOOLCHAIN_MISSING",
+                "an Android build needs CC naming an Android Clang "
+                "(aarch64-linux-android<api>-clang from the NDK, or the APK's own)",
+            )
         cc_executable = shutil.which(cc_name)
         if cc_executable is None:
             raise PackageRouteError(
@@ -2335,15 +2491,17 @@ def build_package(
             "LINK_MAP": link_map.as_posix(),
             "PUBLIC_SAFE": "1",
             "NK_AOT_PREGENERATED": "1" if pregenerated else "0",
+            # Set either way, so an inherited NK_TARGET never retargets a host build.
+            "NK_TARGET": "" if target == "host" else target,
         })
         if enhancement_package_path is not None:
             build_environment["ENHANCEMENT_PACKAGE"] = enhancement_package_path.as_posix()
             if enhancement_data_root is not None:
                 build_environment["ENHANCEMENT_DATA_ROOT"] = enhancement_data_root.as_posix()
-        build_jobs, build_jobs_reason = _host_package_build_jobs(
-            build_environment["CHUNK_TARGET_BYTES"]
-        )
-        print(f"PACKAGE_BUILD_JOBS: {build_jobs} ({build_jobs_reason})", flush=True)
+        jobs_plan = _host_package_build_plan(build_environment["CHUNK_TARGET_BYTES"])
+        build_jobs = jobs_plan.jobs
+        print(f"PACKAGE_BUILD_JOBS: {build_jobs} ({jobs_plan.reason}; "
+              f"limit: {jobs_plan.limit})", flush=True)
         progress_text = os.environ.get(COMPILE_PROGRESS_FILE_ENV, "")
         progress_file = Path(progress_text) if progress_text else None
         build_environment.pop(COMPILE_PROGRESS_FILE_ENV, None)
@@ -2355,6 +2513,7 @@ def build_package(
         )
         for target in _make_build_targets(native_only=pregenerated, aot_stage=aot_stage):
             jobs = build_jobs
+            job_plan = jobs_plan
             if target == "compile":
                 # Make executes the per-unit levels: refuse content codegen did not write. A
                 # missing file runs nothing, and is refused with the other missing outputs.
@@ -2363,11 +2522,12 @@ def build_package(
                     _read_unit_fallbacks(opt_makefile)
                 # The units exist now: one larger than the chunk target needs its own budget.
                 largest = _largest_generated_unit(build_workspace, selected_name)
-                jobs, jobs_reason = _host_package_build_jobs(
+                job_plan = _host_package_build_plan(
                     build_environment["CHUNK_TARGET_BYTES"], largest)
-                if jobs != build_jobs:
+                jobs = job_plan.jobs
+                if jobs != build_jobs or job_plan.memory_short:
                     print(f"PACKAGE_BUILD_JOBS: {jobs} for compile, largest unit {largest} bytes "
-                          f"({jobs_reason})", flush=True)
+                          f"({job_plan.reason}; limit: {job_plan.limit})", flush=True)
             command = _make_build_command(make_executable, target, jobs=jobs)
             try:
                 if target == "compile" and (progress_file is not None or object_cache is not None):
@@ -2379,6 +2539,7 @@ def build_package(
                         object_cache=object_cache,
                         library_cache=library_cache,
                         build_dir=build_workspace.as_posix(),
+                        plan=job_plan,
                     )
                 else:
                     returncode = subprocess.run(
@@ -2408,8 +2569,7 @@ def build_package(
                 title_input_identity,
             )
 
-        executable_suffix = ".exe" if os.name == "nt" else ""
-        executable_name = f"{selected_name}{executable_suffix}"
+        executable_name = package_executable_name(selected_name, target)
         compiled_executable = build_workspace / executable_name
         image_path = build_workspace / f"{selected_name}_image.bin"
         funcs_header = build_workspace / f"{selected_name}_recomp_funcs.h"
@@ -2593,6 +2753,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--psp-header", type=Path)
     parser.add_argument("--title-input-identity-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--make-command", help="Make executable (default: mingw32-make on Windows, make elsewhere)")
+    parser.add_argument(
+        "--target", choices=PACKAGE_TARGETS, default=None,
+        help="system the package runs on: host, or android for the shared library "
+             "TitleActivity loads (default: android on Android, else host)",
+    )
     parser.add_argument("--public-safe", action="store_true", help="accepted for compatibility: packages always build with the public runtime backends")
     parser.add_argument("--reuse-aot-from", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--native-only", action="store_true", help=argparse.SUPPRESS)
@@ -2668,10 +2833,12 @@ def main(argv: list[str] | None = None) -> int:
                 reuse_aot_stage=args.reuse_aot_stage,
                 enhancement_package_path=args.enhancement_package,
                 enhancement_data_root=args.enhancement_data_root,
+                target=args.target or default_package_target(),
             )
             return 0
-        if args.output_dir is not None or args.make_command is not None or args.public_safe:
-            parser.error("--output-dir, --make-command, and --public-safe require --package")
+        if (args.output_dir is not None or args.make_command is not None or args.public_safe
+                or args.target is not None):
+            parser.error("--output-dir, --make-command, --target and --public-safe require --package")
         if args.aot_stage or args.reuse_aot_stage is not None:
             parser.error("--aot-stage and --reuse-aot-stage require --package")
         if args.print_protected_digest:

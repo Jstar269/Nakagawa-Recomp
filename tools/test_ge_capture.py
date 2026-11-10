@@ -411,10 +411,16 @@ class TestGeFirstBadDrawWiring(unittest.TestCase):
         self.assertIn("--fbd-self-check", self.rule)
 
     def test_known_overlap_difference_is_pinned(self):
-        # #2109: the generated overlap capture must be found at draw 1, the overlap only.
+        # #2109: on the snapshot path the generated overlap capture must be found at draw 1, the
+        # overlap only; on the interlock path it must be NO_DIFFERENCE, and each leg must have
+        # run on the path it asked for.
         self.assertIn("--write-synthetic $(GE_FBD_DIR)/overlap.ngef overlap", self.rule)
+        self.assertIn("for path in snapshot interlock; do", self.rule)
+        self.assertIn("--dst-read $$path", self.rule)
+        self.assertIn('"sdl3vk: destination reads: $$path"', self.rule)
         self.assertIn('"result=FIRST_BAD_DRAW index=1 draws=2 "', self.rule)
         self.assertIn('"bbox=140,100,239,199"', self.rule)
+        self.assertIn('"result=NO_DIFFERENCE draws=2 "', self.rule)
 
     def test_replay_stops_before_a_draw_and_restores_no_observer(self):
         ge = (RT / "ge.c").read_text(encoding="utf-8")

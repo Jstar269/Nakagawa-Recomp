@@ -241,6 +241,8 @@ extern void sr_hle_test_data_mark_guest_start(void);
 extern unsigned long sr_hle_test_data_walk_calls(void);
 extern unsigned long long sr_hle_test_data_scan_names(void);
 extern unsigned long long sr_hle_test_data_scan_probes(void);
+extern unsigned long long nk_xb_test_lazy_path_calls(void);
+extern void nk_xb_test_reset_lazy_path_calls(void);
 extern unsigned long sr_hle_test_data_build_attempts(void);
 extern unsigned long sr_hle_test_data_builds_after_guest(void);
 extern int sr_hle_test_data_state(void);
@@ -623,6 +625,7 @@ int gegpu_sync_guest_fb(const GeGpuFbDescriptor *desc) {
     return 2; /* GEGPU_SYNC_NO_TARGET */
 }
 void sr_profile_dump(void) {}
+void sr_profile_dump_final(void) {}
 uint64_t SDL_GetTicksNS(void) { return 0; }
 int sr_capture_arm(const char *path) {
     s_cap_arm_calls++;
@@ -16299,8 +16302,18 @@ static void test_archive_discovery_skips_unpack_folders_only(void) {
     hle_test_setenv("SR_DATAROOT", dataroot);
     hle_test_setenv("SR_LOOSE_CONTENT_ROOTS", loose);
     sr_hle_test_data_reset(0);
+    nk_xb_test_reset_lazy_path_calls();
     expect(sr_host_data_prepare() == SR_DATA_TEST_STATE_READY,
            "a primary root with unpack folders and a loose root reaches READY");
+    expect(sr_hle_test_data_entry_count() == 3u,
+           "discovery mounts the three top-level one-member archives of the primary root");
+    /* One lookup by path per mounted archive, its open: the mount's size checks ask
+     * the open handle, not the path, so a title's boot pays no extra name lookups.
+     * Limit: the counter is a marker at each lookup by path in nk_xb_open_file_lazy,
+     * not a count taken at the host file layer (nk_platform has no such seam), so a new
+     * lookup added there without its marker would not fail this check. */
+    expect(nk_xb_test_lazy_path_calls() == 3u,
+           "each archive mount passes its one marked lookup by path");
 
     expect(hle_archive_route_file_matches("disc0:/PSP_GAME/USRDIR/data/menu/inpack.to",
                                           "outer-archive"),
@@ -29920,6 +29933,27 @@ static void test_dmac_hardware_semantics(uint32_t nid, const char *who) {
                "PSP: a hardware-verified transfer size copies every byte");
         expect(MEM_R8(dst + n) == 0u,
                "a transfer writes nothing past its requested size");
+    }
+
+    /* The GPU is told about every byte a large copy writes, not a 0xC000-byte prefix of them:
+     * the size matrix proved the whole request lands, so the whole destination range is dirty
+     * (#303 acceptance: the dirty notification covers exactly the bytes the semantics imply). */
+    {
+        static const uint32_t dirty_sizes[] = {0xC001u, 0x10000u, 0x100000u};
+        for (unsigned i = 0; i < sizeof(dirty_sizes) / sizeof(dirty_sizes[0]); i++) {
+            const uint32_t n = dirty_sizes[i];
+            const uint32_t vram = 0x04000000u;
+            dmac_fill(src, n);
+            dmac_clear(vram, n, 0u);
+            gpu_dirty_reset();
+            expect(bulk_call(nid, vram, src, n) == 0u,
+                   "a large DMA into VRAM returns success");
+            expect(dmac_span_matches(vram, n, 0u),
+                   "a large DMA into VRAM copies every byte");
+            expect(s_gpu_dirty_calls == 1u && s_gpu_dirty_addr == vram && s_gpu_dirty_bytes == n,
+                   "a large DMA reports its whole destination range to the GPU");
+        }
+        gpu_dirty_reset();
     }
 
     /* --- coherency matrix: RAM/VRAM directions and aliases ------------------
@@ -50506,6 +50540,7 @@ void sr_recomp_test_unused_dispatch_tail_step(CpuState *s, uint32_t target);
 int sr_recomp_test_unused_dispatch_call_try(CpuState *s, uint32_t target, uint32_t resume_pc);
 void sr_recomp_test_unused_dispatch_from_host(CpuState *s, uint32_t entry);
 void sr_recomp_test_unused_profile_dump(void);
+void sr_recomp_test_unused_profile_dump_final(void);
 void sr_recomp_test_unused_profile_block(uint32_t target_pc);
 void sr_recomp_test_unused_oor(uint32_t addr, uint32_t value, int store);
 void sr_recomp_test_unused_heap_note_write(uint32_t addr, uint32_t width,
@@ -50517,10 +50552,12 @@ void sr_recomp_test_unused_trace_close(void);
 #define sr_lookup sr_recomp_test_unused_lookup
 #define dispatch sr_recomp_test_unused_dispatch
 #define dispatch_call sr_recomp_test_unused_dispatch_call
+#define dispatch_call_interp sr_recomp_test_unused_dispatch_call_interp
 #define dispatch_call_try sr_recomp_test_unused_dispatch_call_try
 #define dispatch_tail_step sr_recomp_test_unused_dispatch_tail_step
 #define dispatch_from_host sr_recomp_test_unused_dispatch_from_host
 #define sr_profile_dump sr_recomp_test_unused_profile_dump
+#define sr_profile_dump_final sr_recomp_test_unused_profile_dump_final
 #define sr_profile_block sr_recomp_test_unused_profile_block
 #define sr_oor sr_recomp_test_unused_oor
 #define sr_heap_note_write sr_recomp_test_unused_heap_note_write
@@ -50542,28 +50579,31 @@ void sr_recomp_test_unused_trace_close(void);
 #undef sr_heap_note_write
 #undef sr_oor
 #undef sr_profile_block
+#undef sr_profile_dump_final
 #undef sr_profile_dump
 #undef dispatch_from_host
 #undef dispatch_tail_step
 #undef dispatch_call_try
+#undef dispatch_call_interp
 #undef dispatch_call
 #undef dispatch
 #undef sr_lookup
 
 /* A live-frame continuation (sr_aot_return_boundary_end) reaches recomp.c's dispatcher,
  * which links the interpreter floor in. This variant runs no interpreted code: its VFPU
- * entry and the interpreter's linked-call dispatch only have to exist, and the call
- * dispatch stops the run by name if it is ever reached. */
+ * entry and the interpreter's linked call (dispatch_call_interp) only have to exist, and
+ * the linked call stops the run by name if it is ever reached. */
 int sr_vfpu_interp(CpuState *s, uint32_t op) {
     (void)s;
     (void)op;
     return SR_VFPU_OTHER;
 }
 
-void dispatch_call(CpuState *s, uint32_t target, uint32_t resume_pc) {
+int dispatch_call_interp(CpuState *s, uint32_t target, uint32_t resume_pc) {
     fprintf(stderr, "hle_thread_selftest: the AOT boundary variant has no interpreted "
                     "linked call (target 0x%08x, resume 0x%08x)\n", target, resume_pc);
     s->flow_kind = SR_FLOW_FATAL;
     s->flow_target = target;
+    return 1;
 }
 #endif /* SR_HLE_AOT_BOUNDARY_TEST */

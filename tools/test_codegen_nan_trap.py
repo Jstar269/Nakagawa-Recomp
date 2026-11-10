@@ -789,6 +789,21 @@ float sr_vfpu_log2(float x) { return x; }
 float sr_vfpu_sin(float x) { return x; }
 float sr_vfpu_cos(float x) { return x; }
 float sr_vfpu_exp2(float x) { return x; }
+/* The sum-of-products adder is the real one in recomp.c, which these fixtures do not link.
+ * A plain IEEE chain stands in: the trap tests read which lanes are NaN, not the adder's
+ * rounding. */
+uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n) {
+    float acc = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float fa, fb;
+        memcpy(&fa, &a[i], 4);
+        memcpy(&fb, &b[i], 4);
+        acc += fa * fb;
+    }
+    uint32_t bits;
+    memcpy(&bits, &acc, 4);
+    return bits;
+}
 """
 
 
@@ -889,7 +904,9 @@ int main(void) {{
 
     def test_origin_is_one_fault_class_event_between_the_scheduler_marks(self):
         result, reports, bundle = self._run("00000000", "00000000", self.SPEC)
-        self.assertEqual(result.stdout.strip(), "RESULT=0xffc00000", result.stderr)
+        # vdiv(0, 0) gives 0x7f800001 on a PSP-3000 (sign = XOR of the operand signs), not the
+        # host default NaN; tests/native/vfpu_interp_selftest.c pins the console cells.
+        self.assertEqual(result.stdout.strip(), "RESULT=0x7f800001", result.stderr)
         self.assertEqual(len(reports), 1, result.stderr)
         self.assertIsNotNone(bundle, "the recorder writes its bundle at exit")
         classes = [(event["class"], event["kind"]) for event in bundle["events"]]
@@ -1037,7 +1054,8 @@ int main(void) {{
 
     def test_finite_operands_producing_nan_are_reported(self):
         result, reports = self.run_exe(self.exe, {"NUM": "00000000", "DEN": "00000000"})
-        self.assertEqual(result.stdout.strip(), "RC=1 RESULT=0xffc00000")
+        # The interpreter follows the same PSP-3000 vdiv rule as codegen: 0 / 0 is 0x7f800001.
+        self.assertEqual(result.stdout.strip(), "RC=1 RESULT=0x7f800001")
         self.assertEqual(reports, [f"NAN_TRAP pc=0x{self.PC:08x} op=vdiv.s dst=v3 vbl=4711 in=[0,0] out=[nan]"])
 
     def _finite_result_case(self):

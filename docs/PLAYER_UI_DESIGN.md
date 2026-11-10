@@ -1,6 +1,7 @@
 # Player UI design system
 
-The visual spec for the native player's launcher UI (the only launcher since v0.0.1; the old renderer survives only in the regression-test build). It is the reference every
+The visual spec for the native player's launcher UI (the only launcher since v0.0.1; the old renderer was removed
+in #2071). It is the reference every
 screen lane builds against: Library and Title detail (C5, built), Settings (C6), first run (C7) and error dialogs
 (C8). The tokens and components it names live in code:
 
@@ -556,8 +557,9 @@ PLAY MODE closes the GAME card (the play modes, docs/ENHANCEMENT_CONTRACT.md sec
 default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), and it opens Settings > Enhanced, a
 dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
 FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
-PITCHED SOUND; SHARPER ENLARGING; a new library has 16x filtering, crisp text and the badge on and the rest off, and
-a graphics preset sets SHARPER ENLARGING and CRISP SYSTEM TEXT in Enhanced and Ace, below), each beside a sentence
+PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; a new library has 16x filtering, crisp text and the
+badge on and the rest off, and a graphics preset sets SHARPER ENLARGING and CRISP SYSTEM TEXT in Enhanced and Ace,
+below), each beside a sentence
 that says what it does and what it costs. A new part is a new row with no change to the page. While the mode is
 Authentic the part rows are disabled (`dim`, not focusable) and keep their values. The title page's ENHANCEMENTS
 card shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable
@@ -604,7 +606,8 @@ about 4x or more on any screen of 1080p or more, past that range everywhere, and
 every pass counts. HIGH turns it off as ULTRA without it, the plain 4x picture. Where the GPU renderer cannot run FSR
 1, the normal scaling filter stays, as for the part. `fsr1-selftest` reports the pass's cost at each of these sizes
 (`docs/SETUP.md`). No preset sets frame pacing, the play mode, SMOOTH MOTION, WIDESCREEN, TEXTURE FILTERING, CLEAN
-PITCHED SOUND, the SPEED READOUT or the GAME BADGE: they change timing, framing, guest-visible output or the HUD, or
+PITCHED SOUND, FINER PATCHES, WIDER CULLING, the SPEED READOUT or the GAME BADGE: they change timing, framing,
+guest-visible output or the HUD, or
 have no measured cost on low-end GPUs, so they stay the library's and each game's.
 
 The parts a preset sets are resolved with the rest (`player_play_resolve`): a game's own value, else the preset's,
@@ -702,7 +705,7 @@ developer mode ends. The screens keep their width, so the panel covers their rig
 Built now: the setup wizard's four steps (Welcome, Options, Game, Verify) on the existing wizard state, in the
 dialog card the build and error screens use. Copying the disc's files at Verify ends on the library card, where the
 game is built and played, and the PSP fonts are imported in Settings > PSP fonts, so the step chips name only those
-four steps. The older Fonts and Ready step states remain only for state-only callers and the old renderer.
+four steps. The older Fonts and Ready step states remain only for state-only callers.
 Options ("Online and developer options", [`ONLINE_FEATURES.md`](ONLINE_FEATURES.md)) comes right after Welcome because it needs no game: one plain line that online features aren't built (an Online mode switch shows only when a stored setting has online mode on), one switch row (a 220 px button reading "Developer mode: On" or "Off",
 accent while on, with its sentence beside it), then CONTINUE (the default focus, so Enter never flips a switch), SKIP and BACK. A strip of step chips sits at the top (current: accent fill; done:
 `ready` edge and a check); each step has one primary action first, then Back and Cancel. Every control returns

@@ -15,6 +15,23 @@
 //     .p, .t and .q, register-only;
 //   CASE=vfpu-sort (PSP-VFPU-SORT-001): #326 raw result words of vsrt1.q to vsrt4.q,
 //     register-only.
+//   CASE=vfpu-unmodeled (PSP-VFPU-UNMODELED-001): #326 raw words of the VFPU forms the runtime
+//     refuses (vcrs .s/.p/.q, vcmov imm3 7, mfvc/mtvc of control 255, the rejected VFPU9
+//     widths), register-only; a refused form may raise an exception that stops the launch.
+//   CASE=vfpu-quad-wb (PSP-VFPU-QUADWB-001): #326 lv.q/sv.q with the write-back flag (word bit 1):
+//     the base register after each form and the lanes and buffer words moved, in a probe-owned
+//     buffer; POWER RISK: nothing catches an exception.
+//   CASE=vfpu-convert (PSP-VFPU-CONVERT-001): #326 raw result words of the VFPU float/integer
+//     conversions (vf2iz .s/.q over scales 0-31, vf2in/vf2iu/vf2id .s, vi2f .s/.p/.t/.q,
+//     vi2s/vi2us/vi2c/vi2uc .q), register-only, owner present.
+//   CASE=vfpu-cc-cmov (PSP-VFPU-CCCMOV-001): #326 raw VFPU_CC words of vcmp (16 conditions,
+//     .s/.q, VFPU_CC read three ways and through a vcmovt), vcmovt/vcmovf imm3 0-6 under nine VFPU_CC presets and mfvc/mtvc of
+//     VFPU_CC, register-only.
+//   CASE=vfpu-vus2i (PSP-VFPU-VUS2I-001): #326 raw result words of vus2i/vs2i .s/.p, vsgn .p/.t/.q
+//     and a vflush cell (pending S prefix), register-only, owner present.
+//   CASE=vfpu-basic-arith (PSP-VFPU-BASICARITH-001): #326 raw result words of vadd, vsub, vmul,
+//     vmin, vmax, vscl, vdiv.s, vneg, vabs, vmov, vzero, vone and vidt over 20 operand classes
+//     (all ordered pairs for the binary forms), register-only; vidt.s may raise an exception.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -44,8 +61,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort and vfpu-forms2 run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert and vfpu-vus2i run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -63,6 +80,12 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_FUNNEL 122
 #define HLE_CASE_VFPU_SORT 125
 #define HLE_CASE_VFPU_FORMS2 121
+#define HLE_CASE_VFPU_UNMODELED 163
+#define HLE_CASE_VFPU_QUAD_WB 165
+#define HLE_CASE_VFPU_CONVERT 170
+#define HLE_CASE_VFPU_CC_CMOV 169
+#define HLE_CASE_VFPU_VUS2I 171
+#define HLE_CASE_VFPU_BASIC_ARITH 168
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -92,6 +115,30 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-forms2"
 #define HLE_TEST_ID "PSP-VFPU-FORMS2-001"
 #define HLE_LOG "host0:/vfpu_forms2_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_UNMODELED
+#define HLE_CAMPAIGN_ID "vfpu-unmodeled"
+#define HLE_TEST_ID "PSP-VFPU-UNMODELED-001"
+#define HLE_LOG "host0:/vfpu_unmodeled_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_QUAD_WB
+#define HLE_CAMPAIGN_ID "vfpu-quad-wb"
+#define HLE_TEST_ID "PSP-VFPU-QUADWB-001"
+#define HLE_LOG "host0:/vfpu_quad_wb_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_CONVERT
+#define HLE_CAMPAIGN_ID "vfpu-convert"
+#define HLE_TEST_ID "PSP-VFPU-CONVERT-001"
+#define HLE_LOG "host0:/vfpu_convert_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV
+#define HLE_CAMPAIGN_ID "vfpu-cc-cmov"
+#define HLE_TEST_ID "PSP-VFPU-CCCMOV-001"
+#define HLE_LOG "host0:/vfpu_cc_cmov_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_VUS2I
+#define HLE_CAMPAIGN_ID "vfpu-vus2i"
+#define HLE_TEST_ID "PSP-VFPU-VUS2I-001"
+#define HLE_LOG "host0:/vfpu_vus2i_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_BASIC_ARITH
+#define HLE_CAMPAIGN_ID "vfpu-basic-arith"
+#define HLE_TEST_ID "PSP-VFPU-BASICARITH-001"
+#define HLE_LOG "host0:/vfpu_basic_arith_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -1569,6 +1616,1680 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_FORMS2 */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_UNMODELED
+
+/* #326 VFPU forms the runtime refuses as unmodeled (PSP-VFPU-UNMODELED-001), one launch,
+   register-only: no memory or host I/O runs between a cell's register seeding and its readback.
+   POWER RISK: a refused form may raise a reserved-instruction or coprocessor exception. Nothing
+   here can catch it: under PSPLink an exception stops the launch, and the console must then be
+   recovered by a person, never by an unattended reset. Each form group writes a durable step
+   marker first, and the forms most likely to fault run last in each pass (the mfvc/mtvc words
+   with control 255 run at the very end, the mtvc ones after the mfvc one). Rows:
+   - image cells run the exact word over a seeded register image and record VFPU_CC before and
+     after, the count of changed image words, the prefix word, the operand set and the first 12
+     changed (index, word) pairs;
+   - control cells run an mfvc/mtvc word, preset VFPU_CC, and record the GPR $v0 (sentinel
+     0xa5a5a5a5 before) and controls 0-15 before and after. Encodings are the census rows of
+     the brief (vcrs 0x66800000/0x66810190/0x66808090, vcmov imm3 7 0xd2a70000/0xd2a701ff/
+     0xd2a7808f/0xd2bfff00, mfvc 0x486200ff, mtvc 0x48e000ff) plus mtvc 0x48e900ff, the same
+     control with $t1 = 0x2b so a changed control shows the value. Everything else is the VFPU
+     op 0x34 (0xd0...) vsgn (op 0x0a), vbfy1 (2), vbfy2 (3) and vt4444 (0x19) layout of the
+     2026-10-24 cells, vd C200 (0x08), vs C000. */
+
+#include "hle_vfpu_cells.h"
+
+#define UM_SENTINEL 0xa5a5a5a5u
+#define UM_PAIRS 12u
+#define UM_IMAGE_WORDS_OUT 29u
+#define UM_CTL_WORDS_OUT 33u
+#define UM_MTVC_VALUE 0x2bu
+
+typedef void (*um_img_fn)(const uint32_t *in, uint32_t *out, uint32_t *cc, uint32_t pre);
+typedef void (*um_ctl_fn)(uint32_t *before, uint32_t *after, uint32_t *gpr, uint32_t pre,
+                          uint32_t val);
+
+/* The TN_CELL_FN shape with the VFPU_CC preset as an argument. */
+#define UM_CELL_FN(fname, pfx, word)                                                   \
+    static void fname(const uint32_t *in, uint32_t *out, uint32_t *cc, uint32_t pre)   \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "move $t0, %[pre]\n\t"                                                     \
+            ".word 0x48e80083\n\t" /* mtvc $t0, VFPU_CC */                             \
+            TN_LOAD_ALL                                                                \
+            ".word 0x48690083\n\t" /* mfvc $t1, VFPU_CC */                             \
+            "sw $t1, 0(%[cc])\n\t"                                                     \
+            pfx                                                                        \
+            ".word " word "\n\t"                                                       \
+            TN_STORE_ALL                                                               \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 4(%[cc])\n\t"                                                     \
+            :                                                                          \
+            : [in] "r"(in), [out] "r"(out), [cc] "r"(cc), [pre] "r"(pre)              \
+            : "t0", "t1", "memory");                                                   \
+    }
+
+/* mfvc $t1, control 0-15 (0x48690080 + control) stored to dst[0..15]. */
+#define UM_CTL_READ(dst)                                                                       \
+    ".word 0x48690080\n\tsw $t1, 0(" dst ")\n\t.word 0x48690081\n\tsw $t1, 4(" dst ")\n\t"   \
+    ".word 0x48690082\n\tsw $t1, 8(" dst ")\n\t.word 0x48690083\n\tsw $t1, 12(" dst ")\n\t"  \
+    ".word 0x48690084\n\tsw $t1, 16(" dst ")\n\t.word 0x48690085\n\tsw $t1, 20(" dst ")\n\t" \
+    ".word 0x48690086\n\tsw $t1, 24(" dst ")\n\t.word 0x48690087\n\tsw $t1, 28(" dst ")\n\t" \
+    ".word 0x48690088\n\tsw $t1, 32(" dst ")\n\t.word 0x48690089\n\tsw $t1, 36(" dst ")\n\t" \
+    ".word 0x4869008a\n\tsw $t1, 40(" dst ")\n\t.word 0x4869008b\n\tsw $t1, 44(" dst ")\n\t" \
+    ".word 0x4869008c\n\tsw $t1, 48(" dst ")\n\t.word 0x4869008d\n\tsw $t1, 52(" dst ")\n\t" \
+    ".word 0x4869008e\n\tsw $t1, 56(" dst ")\n\t.word 0x4869008f\n\tsw $t1, 60(" dst ")\n\t"
+
+/* Presets VFPU_CC, reads controls 0-15, sets $v0 to the sentinel and $t1 to val, runs the word,
+   stores $v0, reads controls 0-15 again. */
+#define UM_CTL_FN(fname, word)                                                         \
+    static void fname(uint32_t *before, uint32_t *after, uint32_t *gpr, uint32_t pre,  \
+                      uint32_t val)                                                    \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "move $t0, %[pre]\n\t"                                                     \
+            ".word 0x48e80083\n\t" /* mtvc $t0, VFPU_CC */                             \
+            UM_CTL_READ("%[before]")                                                   \
+            "move $t1, %[val]\n\t"                                                     \
+            "move $v0, %[sent]\n\t"                                                    \
+            ".word " word "\n\t"                                                       \
+            "sw $v0, 0(%[gpr])\n\t"                                                    \
+            UM_CTL_READ("%[after]")                                                    \
+            :                                                                          \
+            : [before] "r"(before), [after] "r"(after), [gpr] "r"(gpr), [pre] "r"(pre), \
+              [val] "r"(val), [sent] "r"(UM_SENTINEL)                                  \
+            : "t0", "t1", "v0", "memory");                                             \
+    }
+
+/* Source C000 (image 0-3) and C010 (image 4-7), destinations wherever the word names. */
+UM_CELL_FN(um_vsgn_q_none, TN_PFX_NONE, "0xd04a80ff")   /* vsgn.q */
+UM_CELL_FN(um_vsgn_q_p1, TN_PFX_P1, "0xd04a80ff")
+UM_CELL_FN(um_t4444_p_none, TN_PFX_NONE, "0xd0590088")  /* vt4444.p */
+UM_CELL_FN(um_t4444_p_p1, TN_PFX_P1, "0xd0590088")
+UM_CELL_FN(um_t4444_t_none, TN_PFX_NONE, "0xd0598008")  /* vt4444.t */
+UM_CELL_FN(um_t4444_t_p1, TN_PFX_P1, "0xd0598008")
+UM_CELL_FN(um_bfy1_s_none, TN_PFX_NONE, "0xd0420008")   /* vbfy1.s */
+UM_CELL_FN(um_bfy1_s_p1, TN_PFX_P1, "0xd0420008")
+UM_CELL_FN(um_bfy1_t_none, TN_PFX_NONE, "0xd0428008")   /* vbfy1.t */
+UM_CELL_FN(um_bfy1_t_p1, TN_PFX_P1, "0xd0428008")
+UM_CELL_FN(um_bfy2_p_none, TN_PFX_NONE, "0xd0430088")   /* vbfy2.p */
+UM_CELL_FN(um_bfy2_p_p1, TN_PFX_P1, "0xd0430088")
+UM_CELL_FN(um_vcrs_s, TN_PFX_NONE, "0x66800000")        /* vcrs.s */
+UM_CELL_FN(um_vcrs_p, TN_PFX_NONE, "0x66810190")        /* vcrs.p */
+UM_CELL_FN(um_vcrs_q, TN_PFX_NONE, "0x66808090")        /* vcrs.q */
+UM_CELL_FN(um_cmov0, TN_PFX_NONE, "0xd2a70000")         /* vcmov imm3 7 */
+UM_CELL_FN(um_cmov1, TN_PFX_NONE, "0xd2a701ff")
+UM_CELL_FN(um_cmov2, TN_PFX_NONE, "0xd2a7808f")
+UM_CELL_FN(um_cmov3, TN_PFX_NONE, "0xd2bfff00")
+UM_CTL_FN(um_mfvc255, "0x486200ff")                     /* mfvc $v0, control 255 */
+UM_CTL_FN(um_mtvc255_zero, "0x48e000ff")                /* mtvc $zero, control 255 */
+UM_CTL_FN(um_mtvc255_val, "0x48e900ff")                 /* mtvc $t1, control 255 */
+
+/* Two operand sets: lanes 0-3 (C000) then 4-7 (C010). 1.0, 2.0, -3.5, +0, -0, +inf, qNaN,
+   smallest denormal. The second set swaps the two quads. */
+static const uint32_t s_um_sets[2][8] = {
+    {0x3f800000u, 0x40000000u, 0xc0600000u, 0x00000000u,
+     0x80000000u, 0x7f800000u, 0x7fc00000u, 0x00000001u},
+    {0x80000000u, 0x7f800000u, 0x7fc00000u, 0x00000001u,
+     0x3f800000u, 0x40000000u, 0xc0600000u, 0x00000000u},
+};
+
+struct um_wide {
+    const char *stem;
+    uint32_t word;
+    um_img_fn none;
+    um_img_fn p1;
+};
+static const struct um_wide s_um_wide[6] = {
+    {"vsgn-q", 0xd04a80ffu, um_vsgn_q_none, um_vsgn_q_p1},
+    {"vt4444-p", 0xd0590088u, um_t4444_p_none, um_t4444_p_p1},
+    {"vt4444-t", 0xd0598008u, um_t4444_t_none, um_t4444_t_p1},
+    {"vbfy1-s", 0xd0420008u, um_bfy1_s_none, um_bfy1_s_p1},
+    {"vbfy1-t", 0xd0428008u, um_bfy1_t_none, um_bfy1_t_p1},
+    {"vbfy2-p", 0xd0430088u, um_bfy2_p_none, um_bfy2_p_p1},
+};
+static const char *const s_um_pfx_names[2] = {"none", "p1"};
+static const uint32_t s_um_pfx_words[2] = {TN_PFXW_NONE, TN_PFXW_P1};
+
+struct um_plain {
+    const char *stem;
+    uint32_t word;
+    um_img_fn fn;
+};
+static const struct um_plain s_um_vcrs[3] = {
+    {"vcrs-s", 0x66800000u, um_vcrs_s},
+    {"vcrs-p", 0x66810190u, um_vcrs_p},
+    {"vcrs-q", 0x66808090u, um_vcrs_q},
+};
+static const struct um_plain s_um_cmov[4] = {
+    {"cmov0", 0xd2a70000u, um_cmov0},
+    {"cmov1", 0xd2a701ffu, um_cmov1},
+    {"cmov2", 0xd2a7808fu, um_cmov2},
+    {"cmov3", 0xd2bfff00u, um_cmov3},
+};
+static const uint32_t s_um_cmov_cc[3] = {0x00u, 0x3fu, 0x15u};
+static const char *const s_um_cmov_cc_names[3] = {"cc00", "cc3f", "cc15"};
+
+static uint32_t s_um_in[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+static uint32_t s_um_out[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+
+/* One image cell: background image word i = 0x3f800000 | i << 16, operand set over image 0-7,
+   then the word. Row <name>: result = the instruction word; out0/out1 = VFPU_CC after the preset
+   / after the word; out2 = number of image words that changed; out3 = the vpfxs word issued
+   before it (0 = none); out4 = the operand set; out5.. = up to 12 changed (image index, word)
+   pairs in index order, 0xffffffff where fewer changed. */
+static void um_image_cell(const char *name, um_img_fn fn, uint32_t word, uint32_t pfx,
+                          uint32_t pre, unsigned set)
+{
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        s_um_in[i] = 0x3f800000u | (i << 16);
+    }
+    for (unsigned i = 0; i < 8u; i++) {
+        s_um_in[i] = s_um_sets[set][i];
+    }
+    uint32_t cc[2] = {0u, 0u};
+    fn(s_um_in, s_um_out, cc, pre);
+    uint32_t w[UM_IMAGE_WORDS_OUT];
+    for (unsigned i = 0; i < UM_IMAGE_WORDS_OUT; i++) {
+        w[i] = 0xffffffffu;
+    }
+    uint32_t changed = 0u;
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        if (s_um_out[i] != s_um_in[i]) {
+            if (changed < UM_PAIRS) {
+                w[5u + 2u * changed] = i;
+                w[6u + 2u * changed] = s_um_out[i];
+            }
+            changed++;
+        }
+    }
+    w[0] = cc[0];
+    w[1] = cc[1];
+    w[2] = changed;
+    w[3] = pfx;
+    w[4] = set;
+    hle_record(name, "PASS", word, w, UM_IMAGE_WORDS_OUT);
+}
+
+/* One control cell. Row <name>: result = the instruction word; out0 = $v0 after the word;
+   out1-16 = controls 0-15 before; out17-32 = controls 0-15 after. */
+static void um_ctl_cell(const char *name, um_ctl_fn fn, uint32_t word, uint32_t val)
+{
+    uint32_t before[16], after[16], gpr = UM_SENTINEL;
+    for (unsigned i = 0; i < 16u; i++) {
+        before[i] = 0xffffffffu;
+        after[i] = 0xffffffffu;
+    }
+    fn(before, after, &gpr, TN_CC_PRESET, val);
+    uint32_t w[UM_CTL_WORDS_OUT];
+    w[0] = gpr;
+    for (unsigned i = 0; i < 16u; i++) {
+        w[1u + i] = before[i];
+        w[17u + i] = after[i];
+    }
+    hle_record(name, "PASS", word, w, UM_CTL_WORDS_OUT);
+}
+
+/* Rows <stem>-p<pass>-<set>-<none|p1>, one step <stem>-p<pass> first. */
+static void um_wide_group(unsigned pass, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", s_um_wide[form].stem, pass);
+    hle_step(name);
+    for (unsigned set = 0; set < 2u; set++) {
+        for (unsigned f = 0; f < 2u; f++) {
+            snprintf(name, sizeof(name), "%s-p%u-%u-%s", s_um_wide[form].stem, pass, set,
+                     s_um_pfx_names[f]);
+            um_image_cell(name, f == 0u ? s_um_wide[form].none : s_um_wide[form].p1,
+                          s_um_wide[form].word, s_um_pfx_words[f], TN_CC_PRESET, set);
+        }
+    }
+}
+
+/* Rows <stem>-p<pass>-<set>, one step <stem>-p<pass> first. */
+static void um_vcrs_group(unsigned pass, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", s_um_vcrs[form].stem, pass);
+    hle_step(name);
+    for (unsigned set = 0; set < 2u; set++) {
+        snprintf(name, sizeof(name), "%s-p%u-%u", s_um_vcrs[form].stem, pass, set);
+        um_image_cell(name, s_um_vcrs[form].fn, s_um_vcrs[form].word, TN_PFXW_NONE, TN_CC_PRESET,
+                      set);
+    }
+}
+
+/* Rows cmov<k>-p<pass>-cc<hh>-<set>, one step cmov<k>-p<pass> first. */
+static void um_cmov_group(unsigned pass, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", s_um_cmov[form].stem, pass);
+    hle_step(name);
+    for (unsigned c = 0; c < 3u; c++) {
+        for (unsigned set = 0; set < 2u; set++) {
+            snprintf(name, sizeof(name), "%s-p%u-%s-%u", s_um_cmov[form].stem, pass,
+                     s_um_cmov_cc_names[c], set);
+            um_image_cell(name, s_um_cmov[form].fn, s_um_cmov[form].word, TN_PFXW_NONE,
+                          s_um_cmov_cc[c], set);
+        }
+    }
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < 6u; form++) {
+            um_wide_group(pass, form);
+        }
+        for (unsigned form = 0; form < 3u; form++) {
+            um_vcrs_group(pass, form);
+        }
+        for (unsigned form = 0; form < 4u; form++) {
+            um_cmov_group(pass, form);
+        }
+        char name[64];
+        snprintf(name, sizeof(name), "mfvc255-p%u", pass);
+        hle_step(name);
+        um_ctl_cell(name, um_mfvc255, 0x486200ffu, 0u);
+        snprintf(name, sizeof(name), "mtvc255-zero-p%u", pass);
+        hle_step(name);
+        um_ctl_cell(name, um_mtvc255_zero, 0x48e000ffu, 0u);
+        snprintf(name, sizeof(name), "mtvc255-val-p%u", pass);
+        hle_step(name);
+        um_ctl_cell(name, um_mtvc255_val, 0x48e900ffu, UM_MTVC_VALUE);
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_UNMODELED */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_QUAD_WB
+
+/* #326 lv.q / sv.q with the write-back flag (PSP-VFPU-QUADWB-001), one launch, two passes. The
+   word is op 0x36 (lv.q, 0xd8000000) or 0x3e (sv.q, 0xf8000000), rs in bits 21-25, vt in bits
+   16-20 (bit 5 of the register in word bit 0), a 14-bit offset in bits 2-15 and the write-back
+   flag in word bit 1. rs is always $t2 (10) and the seed/readback moves use $t3 (11).
+   Everything stays inside s_qw_buf (1024 bytes, 64-byte aligned); the base is its middle
+   (byte 512, non-zero, 16-byte aligned), so the +/-48 byte forms and a drifting base stay
+   inside it. Rows:
+   - lvq-wb-<off>-p<pass> and svq-wb-<off>-p<pass>, off o0, o16, o32, om16: one wb form, the
+     result is the word; out0 = base before, out1 = base after, out2 = buffer start address,
+     out3-6 = C000 lanes after the form (lv.q: the lanes loaded, read back with a plain sv.q;
+     sv.q: the lanes that were stored), out7 = number of changed buffer words, out8/out9 =
+     first/last changed word index relative to the base (0xffffffff if none), out10-13 = the
+     four buffer words at base + offset after the form;
+   - svq-wb-run-p<pass>: four back-to-back wb sv.q at +0/+16/+32/+48 of one base from C000,
+     C010, C020 and C030; out0 = base before, out1-4 = $t2 after each, out5 = buffer start,
+     out6 = changed buffer words, out7.. = up to 16 (relative word index, word) pairs.
+   POWER RISK: the effect of the write-back flag on the console is unknown; an exception
+   (reserved instruction, address error) cannot be caught here and stops the launch, and the
+   console must then be recovered by a person, never by an unattended reset. Order: the loads
+   first (no memory writes), then the single stores, the run of four last; each form is its own
+   step, written durably first. */
+
+#define QW_BUF_WORDS 256u
+#define QW_MID_WORD 128u
+#define QW_PAIRS 16u
+#define QW_FORM_WORDS_OUT 14u
+#define QW_RUN_WORDS_OUT 39u
+#define QW_MISSING 0xffffffffu
+
+static uint32_t s_qw_buf[QW_BUF_WORDS] __attribute__((aligned(64)));
+static uint32_t s_qw_res[4] __attribute__((aligned(16)));
+static uint32_t s_qw_after[4];
+/* Four quads, C000..C030 seeds: 0xc0de0000 | quad << 8 | lane. */
+static const uint32_t s_qw_pat[16] __attribute__((aligned(16))) = {
+    0xc0de0000u, 0xc0de0001u, 0xc0de0002u, 0xc0de0003u,
+    0xc0de0100u, 0xc0de0101u, 0xc0de0102u, 0xc0de0103u,
+    0xc0de0200u, 0xc0de0201u, 0xc0de0202u, 0xc0de0203u,
+    0xc0de0300u, 0xc0de0301u, 0xc0de0302u, 0xc0de0303u,
+};
+
+typedef uint32_t (*qw_fn)(uint32_t base, const uint32_t *pat, uint32_t *res);
+
+/* Seed C000 from pat, run the wb word on $t2 = base, read $t2 back, read C000 back to res. */
+#define QW_FORM_FN(fname, word)                                                        \
+    static uint32_t fname(uint32_t base, const uint32_t *pat, uint32_t *res)           \
+    {                                                                                  \
+        uint32_t after;                                                                \
+        __asm__ volatile(                                                              \
+            "move $t2, %[base]\n\t"                                                    \
+            "move $t3, %[pat]\n\t"                                                     \
+            ".word 0xd9600000\n\t" /* lv.q C000, 0($t3) */                             \
+            ".word " word "\n\t"                                                       \
+            "move %[after], $t2\n\t"                                                   \
+            "move $t3, %[res]\n\t"                                                     \
+            ".word 0xf9600000\n\t" /* sv.q C000, 0($t3) */                             \
+            : [after] "=&r"(after)                                                     \
+            : [base] "r"(base), [pat] "r"(pat), [res] "r"(res)                         \
+            : "t2", "t3", "memory");                                                   \
+        return after;                                                                  \
+    }
+
+/* lv.q C000, off($t2), wb: 0xd8000000 | 10 << 21 | off & 0xfffc | 2. */
+QW_FORM_FN(qw_lv_o0, "0xd9400002")
+QW_FORM_FN(qw_lv_o16, "0xd9400012")
+QW_FORM_FN(qw_lv_o32, "0xd9400022")
+QW_FORM_FN(qw_lv_om16, "0xd940fff2")
+/* sv.q C000, off($t2), wb: 0xf8000000 | 10 << 21 | off & 0xfffc | 2. */
+QW_FORM_FN(qw_sv_o0, "0xf9400002")
+QW_FORM_FN(qw_sv_o16, "0xf9400012")
+QW_FORM_FN(qw_sv_o32, "0xf9400022")
+QW_FORM_FN(qw_sv_om16, "0xf940fff2")
+
+struct qw_form {
+    const char *name;
+    uint32_t word;
+    int32_t off;
+    qw_fn fn;
+};
+static const struct qw_form s_qw_lv[4] = {
+    {"lvq-wb-o0", 0xd9400002u, 0, qw_lv_o0},
+    {"lvq-wb-o16", 0xd9400012u, 16, qw_lv_o16},
+    {"lvq-wb-o32", 0xd9400022u, 32, qw_lv_o32},
+    {"lvq-wb-om16", 0xd940fff2u, -16, qw_lv_om16},
+};
+static const struct qw_form s_qw_sv[4] = {
+    {"svq-wb-o0", 0xf9400002u, 0, qw_sv_o0},
+    {"svq-wb-o16", 0xf9400012u, 16, qw_sv_o16},
+    {"svq-wb-o32", 0xf9400022u, 32, qw_sv_o32},
+    {"svq-wb-om16", 0xf940fff2u, -16, qw_sv_om16},
+};
+
+/* Four wb sv.q from one base, seeded C000, C010, C020, C030, $t2 stored after each. */
+static void qw_run4(uint32_t base, const uint32_t *pat, uint32_t *after)
+{
+    __asm__ volatile(
+        "move $t2, %[base]\n\t"
+        "move $t3, %[pat]\n\t"
+        ".word 0xd9600000\n\t" /* lv.q C000, 0($t3) */
+        ".word 0xd9640010\n\t" /* lv.q C010, 16($t3) */
+        ".word 0xd9680020\n\t" /* lv.q C020, 32($t3) */
+        ".word 0xd96c0030\n\t" /* lv.q C030, 48($t3) */
+        ".word 0xf9400002\n\t" /* sv.q C000, 0($t2), wb */
+        "sw $t2, 0(%[after])\n\t"
+        ".word 0xf9440012\n\t" /* sv.q C010, 16($t2), wb */
+        "sw $t2, 4(%[after])\n\t"
+        ".word 0xf9480022\n\t" /* sv.q C020, 32($t2), wb */
+        "sw $t2, 8(%[after])\n\t"
+        ".word 0xf94c0032\n\t" /* sv.q C030, 48($t2), wb */
+        "sw $t2, 12(%[after])\n\t"
+        :
+        : [base] "r"(base), [pat] "r"(pat), [after] "r"(after)
+        : "t2", "t3", "memory");
+}
+
+static void qw_fill(void)
+{
+    for (unsigned i = 0; i < QW_BUF_WORDS; i++) {
+        s_qw_buf[i] = 0x51000000u | i;
+    }
+}
+
+/* Changed-word census of the buffer against the fill: count, first and last relative index. */
+static uint32_t qw_census(uint32_t *first, uint32_t *last)
+{
+    uint32_t changed = 0u;
+    *first = QW_MISSING;
+    *last = QW_MISSING;
+    for (unsigned i = 0; i < QW_BUF_WORDS; i++) {
+        if (s_qw_buf[i] != (0x51000000u | i)) {
+            if (changed == 0u) {
+                *first = i - QW_MID_WORD;
+            }
+            *last = i - QW_MID_WORD;
+            changed++;
+        }
+    }
+    return changed;
+}
+
+static void qw_form_cell(const char *name, const struct qw_form *form)
+{
+    qw_fill();
+    for (unsigned i = 0; i < 4u; i++) {
+        s_qw_res[i] = QW_MISSING;
+    }
+    const uint32_t base = (uint32_t)(uintptr_t)&s_qw_buf[QW_MID_WORD];
+    const uint32_t after = form->fn(base, s_qw_pat, s_qw_res);
+    uint32_t w[QW_FORM_WORDS_OUT];
+    w[0] = base;
+    w[1] = after;
+    w[2] = (uint32_t)(uintptr_t)s_qw_buf;
+    for (unsigned i = 0; i < 4u; i++) {
+        w[3u + i] = s_qw_res[i];
+    }
+    w[7] = qw_census(&w[8], &w[9]);
+    const unsigned at = QW_MID_WORD + (unsigned)(form->off / 4);
+    for (unsigned i = 0; i < 4u; i++) {
+        w[10u + i] = s_qw_buf[at + i];
+    }
+    hle_record(name, "PASS", form->word, w, QW_FORM_WORDS_OUT);
+}
+
+static void qw_run_cell(const char *name)
+{
+    qw_fill();
+    for (unsigned i = 0; i < 4u; i++) {
+        s_qw_after[i] = QW_MISSING;
+    }
+    const uint32_t base = (uint32_t)(uintptr_t)&s_qw_buf[QW_MID_WORD];
+    qw_run4(base, s_qw_pat, s_qw_after);
+    uint32_t w[QW_RUN_WORDS_OUT];
+    for (unsigned i = 0; i < QW_RUN_WORDS_OUT; i++) {
+        w[i] = QW_MISSING;
+    }
+    w[0] = base;
+    for (unsigned i = 0; i < 4u; i++) {
+        w[1u + i] = s_qw_after[i];
+    }
+    w[5] = (uint32_t)(uintptr_t)s_qw_buf;
+    uint32_t changed = 0u;
+    for (unsigned i = 0; i < QW_BUF_WORDS; i++) {
+        if (s_qw_buf[i] != (0x51000000u | i)) {
+            if (changed < QW_PAIRS) {
+                w[7u + 2u * changed] = i - QW_MID_WORD;
+                w[8u + 2u * changed] = s_qw_buf[i];
+            }
+            changed++;
+        }
+    }
+    w[6] = changed;
+    hle_record(name, "PASS", 0xf9400002u, w, QW_RUN_WORDS_OUT);
+}
+
+/* Rows <lvq|svq>-wb-<off>-p<pass>, one step of the same name first. */
+static void qw_group(unsigned pass, const struct qw_form *forms, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", forms[form].name, pass);
+    hle_step(name);
+    qw_form_cell(name, &forms[form]);
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < 4u; form++) {
+            qw_group(pass, s_qw_lv, form);
+        }
+        for (unsigned form = 0; form < 4u; form++) {
+            qw_group(pass, s_qw_sv, form);
+        }
+        char name[64];
+        snprintf(name, sizeof(name), "svq-wb-run-p%u", pass);
+        hle_step(name);
+        qw_run_cell(name);
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_QUAD_WB */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_CONVERT
+
+/* #326 VFPU float/integer conversion forms the second title executes (PSP-VFPU-CONVERT-001),
+   two passes, register-only: no memory or host I/O runs between a cell's register seeding and
+   its readback, every instruction is a legal Allegrex word, and no prefix is issued (identity
+   prefixes). POWER RISK is low but unmeasured, so run it with the owner present. A step marker
+   is written durably before each form group.
+   One cell loads sixteen words (eight operands in C000 and C010, a sentinel background in C200
+   and C210), runs the form's words so that all eight operands are converted, and stores C200
+   and C210 back. A .q form converts four operands per word (two words), .t the first three of
+   each quad, .p two per word (four words), .s one per word (eight words). vi2s and vi2us .q
+   write a pair, vi2c and vi2uc .q one word, at the first lane of C200 and C210. Row
+   <stem>-p<pass>-<image>: result = the form's first instruction word, out0-3 = C200 and
+   out4-7 = C210 after the words.
+   Operand images (three per kind, eight words each) hold the float classes (+-0, +-0.5, +-1.5,
+   +-2.5, +-1.0, the neighbours of +-2^31, +-inf, quiet NaNs of both signs, a signalling
+   pattern, +-smallest denormal, FLT_MAX) or the integer edge words (0, 1, 2, 0x7fffffff,
+   0x80000000, 0xffffffff, 16-bit and byte boundary patterns). The words are the Allegrex VFPU
+   encodings (vf2in 0xd200, vf2iz 0xd220, vf2iu 0xd240, vf2id 0xd260, vi2f 0xd280 in the top
+   half, 0xd03c-0xd03f for vi2uc/vi2c/vi2us/vi2s), scale in bits 20:16, size in bits 15 and 7,
+   source in bits 14:8 and destination in bits 6:0. */
+
+#define CV_IMAGES 3u
+#define CV_IN_WORDS 16u
+#define CV_OUT_WORDS 8u
+#define CV_BACKGROUND 0x7a5a5a00u
+
+typedef void (*cv_fn)(const uint32_t *in, uint32_t *out);
+
+#define CV_CELL_FN(fname, body)                                                        \
+    static void fname(const uint32_t *in, uint32_t *out)                               \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "lv.q C000, 0(%[in])\n\t"                                                  \
+            "lv.q C010, 16(%[in])\n\t"                                                 \
+            "lv.q C200, 32(%[in])\n\t"                                                 \
+            "lv.q C210, 48(%[in])\n\t"                                                 \
+            body                                                                       \
+            "sv.q C200, 0(%[out])\n\t"                                                 \
+            "sv.q C210, 16(%[out])\n\t"                                                \
+            :                                                                          \
+            : [in] "r"(in), [out] "r"(out)                                             \
+            : "memory");                                                               \
+    }
+
+CV_CELL_FN(cv_vf2iz_s_sc0,
+    ".word 0xd2200008\n\t"
+    ".word 0xd2202028\n\t"
+    ".word 0xd2204048\n\t"
+    ".word 0xd2206068\n\t"
+    ".word 0xd2200109\n\t"
+    ".word 0xd2202129\n\t"
+    ".word 0xd2204149\n\t"
+    ".word 0xd2206169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc1,
+    ".word 0xd2210008\n\t"
+    ".word 0xd2212028\n\t"
+    ".word 0xd2214048\n\t"
+    ".word 0xd2216068\n\t"
+    ".word 0xd2210109\n\t"
+    ".word 0xd2212129\n\t"
+    ".word 0xd2214149\n\t"
+    ".word 0xd2216169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc8,
+    ".word 0xd2280008\n\t"
+    ".word 0xd2282028\n\t"
+    ".word 0xd2284048\n\t"
+    ".word 0xd2286068\n\t"
+    ".word 0xd2280109\n\t"
+    ".word 0xd2282129\n\t"
+    ".word 0xd2284149\n\t"
+    ".word 0xd2286169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc15,
+    ".word 0xd22f0008\n\t"
+    ".word 0xd22f2028\n\t"
+    ".word 0xd22f4048\n\t"
+    ".word 0xd22f6068\n\t"
+    ".word 0xd22f0109\n\t"
+    ".word 0xd22f2129\n\t"
+    ".word 0xd22f4149\n\t"
+    ".word 0xd22f6169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc16,
+    ".word 0xd2300008\n\t"
+    ".word 0xd2302028\n\t"
+    ".word 0xd2304048\n\t"
+    ".word 0xd2306068\n\t"
+    ".word 0xd2300109\n\t"
+    ".word 0xd2302129\n\t"
+    ".word 0xd2304149\n\t"
+    ".word 0xd2306169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc23,
+    ".word 0xd2370008\n\t"
+    ".word 0xd2372028\n\t"
+    ".word 0xd2374048\n\t"
+    ".word 0xd2376068\n\t"
+    ".word 0xd2370109\n\t"
+    ".word 0xd2372129\n\t"
+    ".word 0xd2374149\n\t"
+    ".word 0xd2376169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc30,
+    ".word 0xd23e0008\n\t"
+    ".word 0xd23e2028\n\t"
+    ".word 0xd23e4048\n\t"
+    ".word 0xd23e6068\n\t"
+    ".word 0xd23e0109\n\t"
+    ".word 0xd23e2129\n\t"
+    ".word 0xd23e4149\n\t"
+    ".word 0xd23e6169\n\t")
+CV_CELL_FN(cv_vf2iz_s_sc31,
+    ".word 0xd23f0008\n\t"
+    ".word 0xd23f2028\n\t"
+    ".word 0xd23f4048\n\t"
+    ".word 0xd23f6068\n\t"
+    ".word 0xd23f0109\n\t"
+    ".word 0xd23f2129\n\t"
+    ".word 0xd23f4149\n\t"
+    ".word 0xd23f6169\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc0,
+    ".word 0xd2208088\n\t"
+    ".word 0xd2208189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc1,
+    ".word 0xd2218088\n\t"
+    ".word 0xd2218189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc8,
+    ".word 0xd2288088\n\t"
+    ".word 0xd2288189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc15,
+    ".word 0xd22f8088\n\t"
+    ".word 0xd22f8189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc16,
+    ".word 0xd2308088\n\t"
+    ".word 0xd2308189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc23,
+    ".word 0xd2378088\n\t"
+    ".word 0xd2378189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc30,
+    ".word 0xd23e8088\n\t"
+    ".word 0xd23e8189\n\t")
+CV_CELL_FN(cv_vf2iz_q_sc31,
+    ".word 0xd23f8088\n\t"
+    ".word 0xd23f8189\n\t")
+CV_CELL_FN(cv_vf2in_s_sc0,
+    ".word 0xd2000008\n\t"
+    ".word 0xd2002028\n\t"
+    ".word 0xd2004048\n\t"
+    ".word 0xd2006068\n\t"
+    ".word 0xd2000109\n\t"
+    ".word 0xd2002129\n\t"
+    ".word 0xd2004149\n\t"
+    ".word 0xd2006169\n\t")
+CV_CELL_FN(cv_vf2in_s_sc8,
+    ".word 0xd2080008\n\t"
+    ".word 0xd2082028\n\t"
+    ".word 0xd2084048\n\t"
+    ".word 0xd2086068\n\t"
+    ".word 0xd2080109\n\t"
+    ".word 0xd2082129\n\t"
+    ".word 0xd2084149\n\t"
+    ".word 0xd2086169\n\t")
+CV_CELL_FN(cv_vf2iu_s_sc0,
+    ".word 0xd2400008\n\t"
+    ".word 0xd2402028\n\t"
+    ".word 0xd2404048\n\t"
+    ".word 0xd2406068\n\t"
+    ".word 0xd2400109\n\t"
+    ".word 0xd2402129\n\t"
+    ".word 0xd2404149\n\t"
+    ".word 0xd2406169\n\t")
+CV_CELL_FN(cv_vf2iu_s_sc8,
+    ".word 0xd2480008\n\t"
+    ".word 0xd2482028\n\t"
+    ".word 0xd2484048\n\t"
+    ".word 0xd2486068\n\t"
+    ".word 0xd2480109\n\t"
+    ".word 0xd2482129\n\t"
+    ".word 0xd2484149\n\t"
+    ".word 0xd2486169\n\t")
+CV_CELL_FN(cv_vf2id_s_sc0,
+    ".word 0xd2600008\n\t"
+    ".word 0xd2602028\n\t"
+    ".word 0xd2604048\n\t"
+    ".word 0xd2606068\n\t"
+    ".word 0xd2600109\n\t"
+    ".word 0xd2602129\n\t"
+    ".word 0xd2604149\n\t"
+    ".word 0xd2606169\n\t")
+CV_CELL_FN(cv_vf2id_s_sc8,
+    ".word 0xd2680008\n\t"
+    ".word 0xd2682028\n\t"
+    ".word 0xd2684048\n\t"
+    ".word 0xd2686068\n\t"
+    ".word 0xd2680109\n\t"
+    ".word 0xd2682129\n\t"
+    ".word 0xd2684149\n\t"
+    ".word 0xd2686169\n\t")
+CV_CELL_FN(cv_vi2f_s_sc0,
+    ".word 0xd2800008\n\t"
+    ".word 0xd2802028\n\t"
+    ".word 0xd2804048\n\t"
+    ".word 0xd2806068\n\t"
+    ".word 0xd2800109\n\t"
+    ".word 0xd2802129\n\t"
+    ".word 0xd2804149\n\t"
+    ".word 0xd2806169\n\t")
+CV_CELL_FN(cv_vi2f_s_sc8,
+    ".word 0xd2880008\n\t"
+    ".word 0xd2882028\n\t"
+    ".word 0xd2884048\n\t"
+    ".word 0xd2886068\n\t"
+    ".word 0xd2880109\n\t"
+    ".word 0xd2882129\n\t"
+    ".word 0xd2884149\n\t"
+    ".word 0xd2886169\n\t")
+CV_CELL_FN(cv_vi2f_s_sc31,
+    ".word 0xd29f0008\n\t"
+    ".word 0xd29f2028\n\t"
+    ".word 0xd29f4048\n\t"
+    ".word 0xd29f6068\n\t"
+    ".word 0xd29f0109\n\t"
+    ".word 0xd29f2129\n\t"
+    ".word 0xd29f4149\n\t"
+    ".word 0xd29f6169\n\t")
+CV_CELL_FN(cv_vi2f_p_sc0,
+    ".word 0xd2800088\n\t"
+    ".word 0xd28040c8\n\t"
+    ".word 0xd2800189\n\t"
+    ".word 0xd28041c9\n\t")
+CV_CELL_FN(cv_vi2f_p_sc8,
+    ".word 0xd2880088\n\t"
+    ".word 0xd28840c8\n\t"
+    ".word 0xd2880189\n\t"
+    ".word 0xd28841c9\n\t")
+CV_CELL_FN(cv_vi2f_p_sc31,
+    ".word 0xd29f0088\n\t"
+    ".word 0xd29f40c8\n\t"
+    ".word 0xd29f0189\n\t"
+    ".word 0xd29f41c9\n\t")
+CV_CELL_FN(cv_vi2f_t_sc0,
+    ".word 0xd2808008\n\t"
+    ".word 0xd2808109\n\t")
+CV_CELL_FN(cv_vi2f_t_sc8,
+    ".word 0xd2888008\n\t"
+    ".word 0xd2888109\n\t")
+CV_CELL_FN(cv_vi2f_t_sc31,
+    ".word 0xd29f8008\n\t"
+    ".word 0xd29f8109\n\t")
+CV_CELL_FN(cv_vi2f_q_sc0,
+    ".word 0xd2808088\n\t"
+    ".word 0xd2808189\n\t")
+CV_CELL_FN(cv_vi2f_q_sc8,
+    ".word 0xd2888088\n\t"
+    ".word 0xd2888189\n\t")
+CV_CELL_FN(cv_vi2f_q_sc31,
+    ".word 0xd29f8088\n\t"
+    ".word 0xd29f8189\n\t")
+CV_CELL_FN(cv_vi2s_q,
+    ".word 0xd03f8088\n\t"
+    ".word 0xd03f8189\n\t")
+CV_CELL_FN(cv_vi2us_q,
+    ".word 0xd03e8088\n\t"
+    ".word 0xd03e8189\n\t")
+CV_CELL_FN(cv_vi2c_q,
+    ".word 0xd03d8088\n\t"
+    ".word 0xd03d8189\n\t")
+CV_CELL_FN(cv_vi2uc_q,
+    ".word 0xd03c8088\n\t"
+    ".word 0xd03c8189\n\t")
+
+/* Float operand images: zeros and halves, ties and the 2^31 neighbours, infinities, NaNs,
+   denormals and FLT_MAX. */
+static const uint32_t s_cv_float[CV_IMAGES][8] = {
+    {0x00000000u, 0x80000000u, 0x3f000000u, 0x3fc00000u,
+     0x40200000u, 0xbf000000u, 0xbfc00000u, 0xc0200000u},
+    {0x3f800000u, 0x4effffffu, 0x4f000000u, 0x4f000001u,
+     0xcf000000u, 0xcf000001u, 0xceffffffu, 0xbf800000u},
+    {0x7f800000u, 0xff800000u, 0x7fc00000u, 0xffc00000u,
+     0x7f800001u, 0x00000001u, 0x80000001u, 0x7f7fffffu},
+};
+
+/* Integer edge-word images: the 32-bit edges, the 16-bit boundaries, byte patterns. */
+static const uint32_t s_cv_int[CV_IMAGES][8] = {
+    {0x00000000u, 0x00000001u, 0x00000002u, 0x7fffffffu,
+     0x80000000u, 0xffffffffu, 0xfffffffeu, 0x00007fffu},
+    {0x00008000u, 0x0000ffffu, 0x00010000u, 0xffff8000u,
+     0xffff0000u, 0x12345678u, 0x80008000u, 0x7fff7fffu},
+    {0x01020304u, 0x7f7f7f7fu, 0x80808080u, 0xff00ff00u,
+     0x00ff00ffu, 0x80000001u, 0x0f1e2d3cu, 0xfedcba98u},
+};
+
+struct cv_form {
+    const char *stem;
+    uint32_t word;
+    uint32_t kind; /* 0 = float images, 1 = integer images */
+    cv_fn fn;
+};
+static const struct cv_form s_cv_forms[38] = {
+    {"vf2iz-s-sc0", 0xd2200008u, 0u, cv_vf2iz_s_sc0},
+    {"vf2iz-s-sc1", 0xd2210008u, 0u, cv_vf2iz_s_sc1},
+    {"vf2iz-s-sc8", 0xd2280008u, 0u, cv_vf2iz_s_sc8},
+    {"vf2iz-s-sc15", 0xd22f0008u, 0u, cv_vf2iz_s_sc15},
+    {"vf2iz-s-sc16", 0xd2300008u, 0u, cv_vf2iz_s_sc16},
+    {"vf2iz-s-sc23", 0xd2370008u, 0u, cv_vf2iz_s_sc23},
+    {"vf2iz-s-sc30", 0xd23e0008u, 0u, cv_vf2iz_s_sc30},
+    {"vf2iz-s-sc31", 0xd23f0008u, 0u, cv_vf2iz_s_sc31},
+    {"vf2iz-q-sc0", 0xd2208088u, 0u, cv_vf2iz_q_sc0},
+    {"vf2iz-q-sc1", 0xd2218088u, 0u, cv_vf2iz_q_sc1},
+    {"vf2iz-q-sc8", 0xd2288088u, 0u, cv_vf2iz_q_sc8},
+    {"vf2iz-q-sc15", 0xd22f8088u, 0u, cv_vf2iz_q_sc15},
+    {"vf2iz-q-sc16", 0xd2308088u, 0u, cv_vf2iz_q_sc16},
+    {"vf2iz-q-sc23", 0xd2378088u, 0u, cv_vf2iz_q_sc23},
+    {"vf2iz-q-sc30", 0xd23e8088u, 0u, cv_vf2iz_q_sc30},
+    {"vf2iz-q-sc31", 0xd23f8088u, 0u, cv_vf2iz_q_sc31},
+    {"vf2in-s-sc0", 0xd2000008u, 0u, cv_vf2in_s_sc0},
+    {"vf2in-s-sc8", 0xd2080008u, 0u, cv_vf2in_s_sc8},
+    {"vf2iu-s-sc0", 0xd2400008u, 0u, cv_vf2iu_s_sc0},
+    {"vf2iu-s-sc8", 0xd2480008u, 0u, cv_vf2iu_s_sc8},
+    {"vf2id-s-sc0", 0xd2600008u, 0u, cv_vf2id_s_sc0},
+    {"vf2id-s-sc8", 0xd2680008u, 0u, cv_vf2id_s_sc8},
+    {"vi2f-s-sc0", 0xd2800008u, 1u, cv_vi2f_s_sc0},
+    {"vi2f-s-sc8", 0xd2880008u, 1u, cv_vi2f_s_sc8},
+    {"vi2f-s-sc31", 0xd29f0008u, 1u, cv_vi2f_s_sc31},
+    {"vi2f-p-sc0", 0xd2800088u, 1u, cv_vi2f_p_sc0},
+    {"vi2f-p-sc8", 0xd2880088u, 1u, cv_vi2f_p_sc8},
+    {"vi2f-p-sc31", 0xd29f0088u, 1u, cv_vi2f_p_sc31},
+    {"vi2f-t-sc0", 0xd2808008u, 1u, cv_vi2f_t_sc0},
+    {"vi2f-t-sc8", 0xd2888008u, 1u, cv_vi2f_t_sc8},
+    {"vi2f-t-sc31", 0xd29f8008u, 1u, cv_vi2f_t_sc31},
+    {"vi2f-q-sc0", 0xd2808088u, 1u, cv_vi2f_q_sc0},
+    {"vi2f-q-sc8", 0xd2888088u, 1u, cv_vi2f_q_sc8},
+    {"vi2f-q-sc31", 0xd29f8088u, 1u, cv_vi2f_q_sc31},
+    {"vi2s-q", 0xd03f8088u, 1u, cv_vi2s_q},
+    {"vi2us-q", 0xd03e8088u, 1u, cv_vi2us_q},
+    {"vi2c-q", 0xd03d8088u, 1u, cv_vi2c_q},
+    {"vi2uc-q", 0xd03c8088u, 1u, cv_vi2uc_q},
+};
+
+static uint32_t s_cv_in[CV_IN_WORDS] __attribute__((aligned(64)));
+static uint32_t s_cv_out[CV_OUT_WORDS] __attribute__((aligned(64)));
+
+static void cv_cell(const char *name, const struct cv_form *form, unsigned image)
+{
+    const uint32_t *ops = form->kind == 0u ? s_cv_float[image] : s_cv_int[image];
+    for (unsigned i = 0; i < 8u; i++) {
+        s_cv_in[i] = ops[i];
+        s_cv_in[8u + i] = CV_BACKGROUND | i;
+    }
+    for (unsigned i = 0; i < CV_OUT_WORDS; i++) {
+        s_cv_out[i] = 0xffffffffu;
+    }
+    form->fn(s_cv_in, s_cv_out);
+    uint32_t w[CV_OUT_WORDS];
+    for (unsigned i = 0; i < CV_OUT_WORDS; i++) {
+        w[i] = s_cv_out[i];
+    }
+    hle_record(name, "PASS", form->word, w, CV_OUT_WORDS);
+}
+
+/* Rows <stem>-p<pass>-<image>, one step <stem>-p<pass> first. */
+static void cv_group(unsigned pass, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", s_cv_forms[form].stem, pass);
+    hle_step(name);
+    for (unsigned image = 0; image < CV_IMAGES; image++) {
+        snprintf(name, sizeof(name), "%s-p%u-%u", s_cv_forms[form].stem, pass, image);
+        cv_cell(name, &s_cv_forms[form], image);
+    }
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < 38u; form++) {
+            cv_group(pass, form);
+        }
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_CONVERT */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_VUS2I
+
+/* #326 vus2i/vs2i (double-width unpack), vsgn and vflush (PSP-VFPU-VUS2I-001), two passes,
+   register-only: no memory or host I/O runs between a cell's register seeding and its
+   readback, and every instruction is a legal Allegrex word. No prefix word is issued before a
+   vus2i, vs2i or vsgn cell (identity prefixes); only the vflush cells issue one. POWER RISK
+   is low but unmeasured, so run it with the owner present. A step marker is written durably
+   before each form group.
+   One cell loads twelve words (C000 = in0-3, C010 = in4-7, C200 = in8-11, a sentinel
+   background), runs the form's words, then stores C200 to out0-3 and C000 to out4-7. Row
+   <stem>-p<pass>-<index>: result = the form's instruction word, out0-3 = C200 after the words
+   and out4-7 = C000 after the words (the source operand lanes, which also records the inputs).
+   vus2i.s/vs2i.s: source S000 (lane 0 of C000), dest the pair C200 lanes 0-1 (the output is
+   double width: one source lane makes two words, the low half of the lane going to the even
+   output lane). vus2i.p/vs2i.p: source the pair C000 lanes 0-1, dest the quad C200. Records
+   <form>-p<pass>-<k>, k = 0..11, the source lanes of cell k being the twelve source words
+   rotated by k: C000 = w[k], w[k+1], w[k+2], w[k+3] (indices mod 12), so every source word
+   appears as lane 0 (.s) and as a pair (word, next word) (.p).
+   vsgn.p/.t/.q: C000 into C200, one record per image (<stem>-p<pass>-<image>, three images of
+   four float lanes: 1.0, -1.0, +0, -0 / 2.5, -3.5, qNaN, +inf / smallest denormal, its
+   negative, a negative qNaN and a signalling NaN); the lanes past the width keep the
+   sentinel in out0-3.
+   vflush cells (names vflush-*, droppable as one group): the prefix word 0xdc0100e4 (negate
+   lane 0, identity swizzle), then vflush 0xffff040d, then vmov.s S200,S000 and vmov.s S201,S000
+   (vflush-vmov), or vadd.s S200,S000,S010 and vadd.s S201,S000,S010 (vflush-vadd); the
+   control vflush-ctrl runs the prefix and the two vmov.s without the vflush. The prefix
+   applied if C200 lane 0 is the negation of C000 lane 0 (vmov) and C200 lane 1 is its plain
+   value (the prefix is consumed by the first instruction). C000 = 3, 5, 7, 9 and
+   C010 = 11, 13, 15, 17 as floats. result = the vflush word 0xffff040d for all three.
+   Words: vus2i 0xd03a, vs2i 0xd03b, vsgn 0xd04a in the top half, size in bits 15 and 7,
+   source in bits 14:8 and destination in bits 6:0. */
+
+#define VU_IN_WORDS 12u
+#define VU_OUT_WORDS 8u
+#define VU_BACKGROUND 0x7a5a5a00u
+#define VU_SRC_WORDS 12u
+#define VU_IMAGES 3u
+#define VU_VFLUSH_WORD 0xffff040du
+
+typedef void (*vu_fn)(const uint32_t *in, uint32_t *out);
+
+#define VU_CELL_FN(fname, body)                                                        \
+    static void fname(const uint32_t *in, uint32_t *out)                               \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "lv.q C000, 0(%[in])\n\t"                                                  \
+            "lv.q C010, 16(%[in])\n\t"                                                 \
+            "lv.q C200, 32(%[in])\n\t"                                                 \
+            body                                                                       \
+            "sv.q C200, 0(%[out])\n\t"                                                 \
+            "sv.q C000, 16(%[out])\n\t"                                                \
+            :                                                                          \
+            : [in] "r"(in), [out] "r"(out)                                             \
+            : "memory");                                                               \
+    }
+
+VU_CELL_FN(vu_vus2i_s,
+    ".word 0xd03a0008\n\t")
+VU_CELL_FN(vu_vus2i_p,
+    ".word 0xd03a0088\n\t")
+VU_CELL_FN(vu_vs2i_s,
+    ".word 0xd03b0008\n\t")
+VU_CELL_FN(vu_vs2i_p,
+    ".word 0xd03b0088\n\t")
+VU_CELL_FN(vu_vsgn_p,
+    ".word 0xd04a0088\n\t")
+VU_CELL_FN(vu_vsgn_t,
+    ".word 0xd04a8008\n\t")
+VU_CELL_FN(vu_vsgn_q,
+    ".word 0xd04a8088\n\t")
+VU_CELL_FN(vu_vflush_vmov,
+    ".word 0xdc0100e4\n\t"
+    ".word 0xffff040d\n\t"
+    ".word 0xd0000008\n\t"
+    ".word 0xd0000028\n\t")
+VU_CELL_FN(vu_vflush_vadd,
+    ".word 0xdc0100e4\n\t"
+    ".word 0xffff040d\n\t"
+    ".word 0x60040008\n\t"
+    ".word 0x60040028\n\t")
+VU_CELL_FN(vu_vflush_ctrl,
+    ".word 0xdc0100e4\n\t"
+    ".word 0xd0000008\n\t"
+    ".word 0xd0000028\n\t")
+
+/* The twelve source words (one record per word, per form). */
+static const uint32_t s_vu_src[VU_SRC_WORDS] = {
+    0x00000000u, 0x00000001u, 0x00008000u, 0x0000ffffu, 0xffff0000u, 0x80000000u,
+    0x7fff8001u, 0xffff0001u, 0x12345678u, 0xffffffffu, 0x00010000u, 0x80008000u,
+};
+
+/* Float lanes for vsgn: the ten requested classes plus a negative qNaN, a signalling NaN. */
+static const uint32_t s_vu_float[VU_IMAGES][4] = {
+    {0x3f800000u, 0xbf800000u, 0x00000000u, 0x80000000u},
+    {0x40200000u, 0xc0600000u, 0x7fc00000u, 0x7f800000u},
+    {0x00000001u, 0x80000001u, 0xffc00000u, 0x7f800001u},
+};
+
+/* The vflush cell operands as floats: 3, 5, 7, 9 (C000) and 11, 13, 15, 17 (C010). */
+static const uint32_t s_vu_flush[8] = {
+    0x40400000u, 0x40a00000u, 0x40e00000u, 0x41100000u,
+    0x41300000u, 0x41500000u, 0x41700000u, 0x41880000u,
+};
+
+struct vu_form {
+    const char *stem;
+    uint32_t word;
+    uint32_t kind;  /* 0 = rotated source words, 1 = float images, 2 = vflush operands */
+    uint32_t count; /* records per pass */
+    vu_fn fn;
+};
+static const struct vu_form s_vu_forms[10] = {
+    {"vus2i-s", 0xd03a0008u, 0u, 12u, vu_vus2i_s},
+    {"vus2i-p", 0xd03a0088u, 0u, 12u, vu_vus2i_p},
+    {"vs2i-s", 0xd03b0008u, 0u, 12u, vu_vs2i_s},
+    {"vs2i-p", 0xd03b0088u, 0u, 12u, vu_vs2i_p},
+    {"vsgn-p", 0xd04a0088u, 1u, 3u, vu_vsgn_p},
+    {"vsgn-t", 0xd04a8008u, 1u, 3u, vu_vsgn_t},
+    {"vsgn-q", 0xd04a8088u, 1u, 3u, vu_vsgn_q},
+    {"vflush-vmov", VU_VFLUSH_WORD, 2u, 1u, vu_vflush_vmov},
+    {"vflush-vadd", VU_VFLUSH_WORD, 2u, 1u, vu_vflush_vadd},
+    {"vflush-ctrl", VU_VFLUSH_WORD, 2u, 1u, vu_vflush_ctrl},
+};
+
+static uint32_t s_vu_in[VU_IN_WORDS] __attribute__((aligned(64)));
+static uint32_t s_vu_out[VU_OUT_WORDS] __attribute__((aligned(64)));
+
+static void vu_cell(const char *name, const struct vu_form *form, unsigned index)
+{
+    for (unsigned i = 0; i < 4u; i++) {
+        if (form->kind == 0u) {
+            s_vu_in[i] = s_vu_src[(index + i) % VU_SRC_WORDS];
+        } else if (form->kind == 1u) {
+            s_vu_in[i] = s_vu_float[index][i];
+        } else {
+            s_vu_in[i] = s_vu_flush[i];
+        }
+        s_vu_in[4u + i] = form->kind == 2u ? s_vu_flush[4u + i] : (VU_BACKGROUND | (4u + i));
+        s_vu_in[8u + i] = VU_BACKGROUND | (8u + i);
+    }
+    for (unsigned i = 0; i < VU_OUT_WORDS; i++) {
+        s_vu_out[i] = 0xffffffffu;
+    }
+    form->fn(s_vu_in, s_vu_out);
+    uint32_t w[VU_OUT_WORDS];
+    for (unsigned i = 0; i < VU_OUT_WORDS; i++) {
+        w[i] = s_vu_out[i];
+    }
+    hle_record(name, "PASS", form->word, w, VU_OUT_WORDS);
+}
+
+/* Rows <stem>-p<pass>-<index>, one step <stem>-p<pass> first. */
+static void vu_group(unsigned pass, unsigned form)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", s_vu_forms[form].stem, pass);
+    hle_step(name);
+    const unsigned n = s_vu_forms[form].count;
+    for (unsigned index = 0; index < n; index++) {
+        snprintf(name, sizeof(name), "%s-p%u-%u", s_vu_forms[form].stem, pass, index);
+        vu_cell(name, &s_vu_forms[form], index);
+    }
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < 10u; form++) {
+            vu_group(pass, form);
+        }
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_VUS2I */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_BASIC_ARITH
+
+/* #326 basic VFPU arithmetic (PSP-VFPU-BASICARITH-001), one launch, register-only: the raw
+   result words of vadd, vsub, vmul, vmin and vmax at .s/.p/.t/.q, vscl.p/.q, vdiv.s, vneg,
+   vabs and vmov at .s/.p/.q, and the constant forms vzero, vone and vidt, over 20 operand
+   classes: +-0, +-smallest denormal, +-largest denormal, +-smallest normal, +-1, +-2^127,
+   +-FLT_MAX, +-inf, and a quiet and a signalling NaN of each sign with distinct payloads.
+   Every cell is one instruction word run over the whole register image with no prefix
+   (identity), emitted as a word; encodings are VFPU op 0x60 (vadd 0x00, vsub 0x80, vdiv 0x380
+   in bits 23-31), 0x64 (vmul), 0x65 (vscl), 0x6d (vmin 0x00, vmax 0x80) and 0xd0 (op field in
+   bits 16-22: vmov 0, vabs 1, vneg 2, vidt 3, vzero 6, vone 7), vd C200 (0x08), vs C000 (0),
+   vt C010 or S010 (1), size bit 7 (.p), bit 15 (.t) or both (.q); all were checked against
+   psp-as except vidt.s, which the assembler refuses (its word is the vidt pattern with no
+   size bits). Binary forms: all 400 ordered pairs (A, B) of the 20 operands, A-major, run
+   lane-packed (n lanes of one instruction per execution, the last execution of a record
+   padded with its final pair); a record holds up to 60 pairs (7 records). vscl: one scalar B
+   per execution, A packed across the lanes, 3 scalars per record (7 records). Unary forms:
+   the 20 operands in order, one record. Constant forms: the four words C200 lanes 0-3 after
+   the word, over a background image. Row <form>-<size>-p<pass>[-<record>]: result = the
+   instruction word, out0.. = the destination words of each execution in order (n per
+   execution). POWER RISK: vidt.s may raise a reserved-instruction exception that stops the
+   launch (nothing here catches it); it runs after everything else in both passes, behind a
+   durable step marker, and needs the owner present. */
+
+#include "hle_vfpu_cells.h"
+
+#define BA_OPERANDS 20u
+#define BA_PAIRS (BA_OPERANDS * BA_OPERANDS)
+#define BA_PAIRS_PER_REC 60u
+#define BA_BIN_RECORDS 7u
+#define BA_SCL_PER_REC 3u
+#define BA_MAX_WORDS 64u
+#define BA_DST 32u
+
+typedef void (*ba_fn)(const uint32_t *in, uint32_t *out, uint32_t *cc);
+
+/* Source C000 (image 0-3), second operand C010/S010 (image 4-7), destination C200 (image 32). */
+TN_CELL_FN(ba_vadd_s, TN_PFX_NONE, "0x60010008")
+TN_CELL_FN(ba_vadd_p, TN_PFX_NONE, "0x60010088")
+TN_CELL_FN(ba_vadd_t, TN_PFX_NONE, "0x60018008")
+TN_CELL_FN(ba_vadd_q, TN_PFX_NONE, "0x60018088")
+TN_CELL_FN(ba_vsub_s, TN_PFX_NONE, "0x60810008")
+TN_CELL_FN(ba_vsub_p, TN_PFX_NONE, "0x60810088")
+TN_CELL_FN(ba_vsub_t, TN_PFX_NONE, "0x60818008")
+TN_CELL_FN(ba_vsub_q, TN_PFX_NONE, "0x60818088")
+TN_CELL_FN(ba_vmul_s, TN_PFX_NONE, "0x64010008")
+TN_CELL_FN(ba_vmul_p, TN_PFX_NONE, "0x64010088")
+TN_CELL_FN(ba_vmul_t, TN_PFX_NONE, "0x64018008")
+TN_CELL_FN(ba_vmul_q, TN_PFX_NONE, "0x64018088")
+TN_CELL_FN(ba_vmin_s, TN_PFX_NONE, "0x6d010008")
+TN_CELL_FN(ba_vmin_p, TN_PFX_NONE, "0x6d010088")
+TN_CELL_FN(ba_vmin_t, TN_PFX_NONE, "0x6d018008")
+TN_CELL_FN(ba_vmin_q, TN_PFX_NONE, "0x6d018088")
+TN_CELL_FN(ba_vmax_s, TN_PFX_NONE, "0x6d810008")
+TN_CELL_FN(ba_vmax_p, TN_PFX_NONE, "0x6d810088")
+TN_CELL_FN(ba_vmax_t, TN_PFX_NONE, "0x6d818008")
+TN_CELL_FN(ba_vmax_q, TN_PFX_NONE, "0x6d818088")
+TN_CELL_FN(ba_vscl_p, TN_PFX_NONE, "0x65010088")
+TN_CELL_FN(ba_vscl_q, TN_PFX_NONE, "0x65018088")
+TN_CELL_FN(ba_vdiv_s, TN_PFX_NONE, "0x63810008")
+TN_CELL_FN(ba_vmov_s, TN_PFX_NONE, "0xd0000008")
+TN_CELL_FN(ba_vmov_p, TN_PFX_NONE, "0xd0000088")
+TN_CELL_FN(ba_vmov_q, TN_PFX_NONE, "0xd0008088")
+TN_CELL_FN(ba_vabs_s, TN_PFX_NONE, "0xd0010008")
+TN_CELL_FN(ba_vabs_p, TN_PFX_NONE, "0xd0010088")
+TN_CELL_FN(ba_vabs_q, TN_PFX_NONE, "0xd0018088")
+TN_CELL_FN(ba_vneg_s, TN_PFX_NONE, "0xd0020008")
+TN_CELL_FN(ba_vneg_p, TN_PFX_NONE, "0xd0020088")
+TN_CELL_FN(ba_vneg_q, TN_PFX_NONE, "0xd0028088")
+TN_CELL_FN(ba_vzero_s, TN_PFX_NONE, "0xd0060008")
+TN_CELL_FN(ba_vzero_p, TN_PFX_NONE, "0xd0060088")
+TN_CELL_FN(ba_vzero_q, TN_PFX_NONE, "0xd0068088")
+TN_CELL_FN(ba_vone_s, TN_PFX_NONE, "0xd0070008")
+TN_CELL_FN(ba_vone_p, TN_PFX_NONE, "0xd0070088")
+TN_CELL_FN(ba_vone_q, TN_PFX_NONE, "0xd0078088")
+TN_CELL_FN(ba_vidt_s, TN_PFX_NONE, "0xd0030008")
+TN_CELL_FN(ba_vidt_p, TN_PFX_NONE, "0xd0030088")
+TN_CELL_FN(ba_vidt_q, TN_PFX_NONE, "0xd0038088")
+
+/* The 20 operand classes. Quiet NaNs 0x7fc00011 and 0xffc00022, signalling NaNs 0x7f800033 and
+   0xff800044 (quiet bit clear, non-zero payload). */
+static const uint32_t s_ba_ops[BA_OPERANDS] = {
+    0x00000000u, 0x80000000u,   /* +0, -0 */
+    0x00000001u, 0x80000001u,   /* +-smallest denormal */
+    0x007fffffu, 0x807fffffu,   /* +-largest denormal */
+    0x00800000u, 0x80800000u,   /* +-smallest normal */
+    0x3f800000u, 0xbf800000u,   /* +-1 */
+    0x7f000000u, 0xff000000u,   /* +-2^127 */
+    0x7f7fffffu, 0xff7fffffu,   /* +-FLT_MAX */
+    0x7f800000u, 0xff800000u,   /* +-inf */
+    0x7fc00011u, 0xffc00022u,   /* quiet NaN, both signs */
+    0x7f800033u, 0xff800044u,   /* signalling NaN, both signs */
+};
+
+struct ba_form {
+    const char *stem;
+    uint32_t word;
+    ba_fn fn;
+    unsigned lanes;
+};
+
+/* Binary forms, five operations at four widths, in run order. */
+static const struct ba_form s_ba_bin[20] = {
+    {"vadd-s", 0x60010008u, ba_vadd_s, 1}, {"vadd-p", 0x60010088u, ba_vadd_p, 2},
+    {"vadd-t", 0x60018008u, ba_vadd_t, 3}, {"vadd-q", 0x60018088u, ba_vadd_q, 4},
+    {"vsub-s", 0x60810008u, ba_vsub_s, 1}, {"vsub-p", 0x60810088u, ba_vsub_p, 2},
+    {"vsub-t", 0x60818008u, ba_vsub_t, 3}, {"vsub-q", 0x60818088u, ba_vsub_q, 4},
+    {"vmul-s", 0x64010008u, ba_vmul_s, 1}, {"vmul-p", 0x64010088u, ba_vmul_p, 2},
+    {"vmul-t", 0x64018008u, ba_vmul_t, 3}, {"vmul-q", 0x64018088u, ba_vmul_q, 4},
+    {"vmin-s", 0x6d010008u, ba_vmin_s, 1}, {"vmin-p", 0x6d010088u, ba_vmin_p, 2},
+    {"vmin-t", 0x6d018008u, ba_vmin_t, 3}, {"vmin-q", 0x6d018088u, ba_vmin_q, 4},
+    {"vmax-s", 0x6d810008u, ba_vmax_s, 1}, {"vmax-p", 0x6d810088u, ba_vmax_p, 2},
+    {"vmax-t", 0x6d818008u, ba_vmax_t, 3}, {"vmax-q", 0x6d818088u, ba_vmax_q, 4},
+};
+/* vdiv.s (one lane) and vscl.p/.q (scalar second operand). */
+static const struct ba_form s_ba_div = {"vdiv-s", 0x63810008u, ba_vdiv_s, 1};
+static const struct ba_form s_ba_scl[2] = {
+    {"vscl-p", 0x65010088u, ba_vscl_p, 2}, {"vscl-q", 0x65018088u, ba_vscl_q, 4},
+};
+/* vmov, vabs, vneg at .s/.p/.q over the 20 operands. */
+static const struct ba_form s_ba_unary[9] = {
+    {"vmov-s", 0xd0000008u, ba_vmov_s, 1}, {"vmov-p", 0xd0000088u, ba_vmov_p, 2},
+    {"vmov-q", 0xd0008088u, ba_vmov_q, 4}, {"vabs-s", 0xd0010008u, ba_vabs_s, 1},
+    {"vabs-p", 0xd0010088u, ba_vabs_p, 2}, {"vabs-q", 0xd0018088u, ba_vabs_q, 4},
+    {"vneg-s", 0xd0020008u, ba_vneg_s, 1}, {"vneg-p", 0xd0020088u, ba_vneg_p, 2},
+    {"vneg-q", 0xd0028088u, ba_vneg_q, 4},
+};
+/* vzero, vone, vidt: vidt.s is run apart from the rest, last (POWER RISK). */
+static const struct ba_form s_ba_const[8] = {
+    {"vzero-s", 0xd0060008u, ba_vzero_s, 1}, {"vzero-p", 0xd0060088u, ba_vzero_p, 2},
+    {"vzero-q", 0xd0068088u, ba_vzero_q, 4}, {"vone-s", 0xd0070008u, ba_vone_s, 1},
+    {"vone-p", 0xd0070088u, ba_vone_p, 2},   {"vone-q", 0xd0078088u, ba_vone_q, 4},
+    {"vidt-p", 0xd0030088u, ba_vidt_p, 2},   {"vidt-q", 0xd0038088u, ba_vidt_q, 4},
+};
+static const struct ba_form s_ba_vidt_s = {"vidt-s", 0xd0030008u, ba_vidt_s, 1};
+
+static uint32_t s_ba_in[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+static uint32_t s_ba_out[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+
+/* One execution: background image word i = 0x3f800000 | i << 16, A over image 0-3, B over
+   image 4-7, then the word; the first n destination words (image 32..) go to dst. */
+static void ba_exec(ba_fn fn, const uint32_t *a, const uint32_t *b, uint32_t *dst, unsigned n)
+{
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        s_ba_in[i] = 0x3f800000u | (i << 16);
+    }
+    for (unsigned i = 0; i < 4u; i++) {
+        s_ba_in[i] = a[i];
+        s_ba_in[4u + i] = b[i];
+    }
+    uint32_t cc[2] = {0u, 0u};
+    fn(s_ba_in, s_ba_out, cc);
+    for (unsigned i = 0; i < n; i++) {
+        dst[i] = s_ba_out[BA_DST + i];
+    }
+}
+
+/* Row <form>-p<pass>-<rec>: pairs 60*rec .. (A-major k = 20 * a + b) of the 400, lane l of
+   execution e taking pair 60*rec + e*n + l, clamped to the last pair of the record. */
+static void ba_binary_record(const char *name, const struct ba_form *f, unsigned rec)
+{
+    uint32_t w[BA_MAX_WORDS];
+    const unsigned first = rec * BA_PAIRS_PER_REC;
+    unsigned len = BA_PAIRS - first;
+    if (len > BA_PAIRS_PER_REC) {
+        len = BA_PAIRS_PER_REC;
+    }
+    const unsigned n = f->lanes;
+    const unsigned nexec = (len + n - 1u) / n;
+    unsigned count = 0;
+    for (unsigned e = 0; e < nexec; e++) {
+        uint32_t a[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+        uint32_t b[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+        for (unsigned l = 0; l < n; l++) {
+            unsigned k = e * n + l;
+            if (k >= len) {
+                k = len - 1u;
+            }
+            k += first;
+            a[l] = s_ba_ops[k / BA_OPERANDS];
+            b[l] = s_ba_ops[k % BA_OPERANDS];
+        }
+        ba_exec(f->fn, a, b, &w[count], n);
+        count += n;
+    }
+    hle_record(name, "PASS", f->word, w, count);
+}
+
+/* Row vscl-<size>-p<pass>-<rec>: scalars 3*rec .. 3*rec + 2 (operand index), each over the 20
+   operands A packed n to an execution. */
+static void ba_scale_record(const char *name, const struct ba_form *f, unsigned rec)
+{
+    uint32_t w[BA_MAX_WORDS];
+    const unsigned n = f->lanes;
+    unsigned count = 0;
+    unsigned s_end = (rec + 1u) * BA_SCL_PER_REC;
+    if (s_end > BA_OPERANDS) {
+        s_end = BA_OPERANDS;
+    }
+    for (unsigned s = rec * BA_SCL_PER_REC; s < s_end; s++) {
+        for (unsigned e = 0; e < BA_OPERANDS / n; e++) {
+            uint32_t a[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+            uint32_t b[4] = {s_ba_ops[s], 0x3f800000u, 0x3f800000u, 0x3f800000u};
+            for (unsigned l = 0; l < n; l++) {
+                a[l] = s_ba_ops[e * n + l];
+            }
+            ba_exec(f->fn, a, b, &w[count], n);
+            count += n;
+        }
+    }
+    hle_record(name, "PASS", f->word, w, count);
+}
+
+/* Row <form>-p<pass>: the 20 operands in order over the lanes, n to an execution. */
+static void ba_unary_record(const char *name, const struct ba_form *f)
+{
+    uint32_t w[BA_MAX_WORDS];
+    const unsigned n = f->lanes;
+    unsigned count = 0;
+    for (unsigned e = 0; e < BA_OPERANDS / n; e++) {
+        uint32_t a[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+        const uint32_t b[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+        for (unsigned l = 0; l < n; l++) {
+            a[l] = s_ba_ops[e * n + l];
+        }
+        ba_exec(f->fn, a, b, &w[count], n);
+        count += n;
+    }
+    hle_record(name, "PASS", f->word, w, count);
+}
+
+/* Row <form>-p<pass>: C200 lanes 0-3 after the word over the background image. */
+static void ba_const_record(const char *name, const struct ba_form *f)
+{
+    uint32_t w[4];
+    const uint32_t a[4] = {0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+    ba_exec(f->fn, a, a, w, 4u);
+    hle_record(name, "PASS", f->word, w, 4u);
+}
+
+/* One durable step per form group (form-p<pass>) before its first cell. */
+static void ba_binary_group(unsigned pass, const struct ba_form *f)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    for (unsigned rec = 0; rec < BA_BIN_RECORDS; rec++) {
+        snprintf(name, sizeof(name), "%s-p%u-%u", f->stem, pass, rec);
+        ba_binary_record(name, f, rec);
+    }
+}
+
+static void ba_scale_group(unsigned pass, const struct ba_form *f)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    for (unsigned rec = 0; rec < BA_BIN_RECORDS; rec++) {
+        snprintf(name, sizeof(name), "%s-p%u-%u", f->stem, pass, rec);
+        ba_scale_record(name, f, rec);
+    }
+}
+
+static void ba_unary_group(unsigned pass, const struct ba_form *f)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    ba_unary_record(name, f);
+}
+
+static void ba_const_group(unsigned pass, const struct ba_form *f)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    ba_const_record(name, f);
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < 20u; form++) {
+            ba_binary_group(pass, &s_ba_bin[form]);
+        }
+        for (unsigned form = 0; form < 2u; form++) {
+            ba_scale_group(pass, &s_ba_scl[form]);
+        }
+        ba_binary_group(pass, &s_ba_div);
+        for (unsigned form = 0; form < 9u; form++) {
+            ba_unary_group(pass, &s_ba_unary[form]);
+        }
+        for (unsigned form = 0; form < 8u; form++) {
+            ba_const_group(pass, &s_ba_const[form]);
+        }
+    }
+    /* The one form the assembler refuses runs last, in both passes. */
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        ba_const_group(pass, &s_ba_vidt_s);
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_BASIC_ARITH */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV
+
+/* #326 VFPU condition codes and conditional moves (PSP-VFPU-CCCMOV-001), two passes,
+   register-only: no memory or host I/O runs between a cell's register seeding and its readback.
+   Every VFPU word is a valid form (vcmp conditions 0-15, vcmovt/vcmovf imm3 0-6, mfvc/mtvc of
+   VFPU_CC), so no exception is expected; a fault would still stop the launch (POWER RISK, owner
+   present). An identity vpfxs (and vpfxt for vcmp) is issued right before every word. Each form
+   group writes a durable step marker first. Rows:
+   - vcmp-c<hh>-<s|q>-p<pass>: result = the word; out0/out1 = VFPU_CC read back after the
+     preset 0x00 / 0x3f; then for each of 4 operand sets (C000 = a, C010 = b) and each preset
+     (0x00 then 0x3f) seven words: VFPU_CC at once after the word, after a vsync, after a vflush,
+     and the four C200 words after a dependent vcmovt.q imm3 6 from C020 (a lane moves when its
+     own CC bit is set). A lane beyond the width that keeps its old bit shows as 0 under 0x00 and
+     1 under 0x3f; bits 4 (OR) and 5 (AND) are recomputed;
+   - vcmov<t|f><imm>-<s|p|q>-p<pass>: result = the word; for each of nine preset VFPU_CC values
+     the readback before, VFPU_CC after, and the four words of C200 after the word (source C000,
+     C200 preloaded with distinct words so a lane that is not moved keeps them);
+   - cc-roundtrip-p<pass>: mtvc VFPU_CC with twelve words, each read back with mfvc;
+   - cc-initial-p<pass>: mfvc VFPU_CC with no write first (pass 0: state at launch). */
+
+#define CM_SETS 4u
+#define CM_PRESETS 9u
+#define CM_RT_VALUES 12u
+#define CM_CMP_WORDS_OUT 58u
+#define CM_CMOV_WORDS_OUT 54u
+#define CM_PASSES 2u
+
+typedef void (*cm_cmp_fn)(const uint32_t *a, const uint32_t *b, const uint32_t *src,
+                          const uint32_t *dst, uint32_t *out, uint32_t *cc, uint32_t pre);
+typedef void (*cm_cmov_fn)(const uint32_t *src, const uint32_t *dst, uint32_t *out, uint32_t *cc,
+                           uint32_t pre);
+
+#define CM_SIZE_S 0x0u
+#define CM_SIZE_P 0x80u
+#define CM_SIZE_T 0x8000u
+#define CM_SIZE_Q 0x8080u
+/* vcmp: op 0x6c, cond in bits 0-3, vs = C000 / S000 (0), vt = C010 / S010 (1 << 16). */
+#define CM_CMP_WORD(c, size) (0x6c000000u | (c) | 0x10000u | (size))
+/* The dependent readout after a vcmp: vcmovt.q imm3 6 (each lane moves when its own CC bit is set,
+   whatever the preset) from C020 into C200, so the CC bits show through the data path. */
+#define CM_RD_WORD (CM_CMOV_WORD(0u, 6u, CM_SIZE_Q) | (2u << 8))
+/* vcmovt 0xd2a00000, vcmovf 0xd2a80000, imm3 in bits 16-18, vs = C000 / S000, vd = C200 / S200. */
+#define CM_CMOV_WORD(f, imm, size) \
+    (0xd2a00000u | ((f) ? 0x80000u : 0u) | ((imm) << 16) | (size) | 0x08u)
+
+/* mtvc $t0, VFPU_CC; lv.q a, b, source C020 and destination C200; mfvc readback; identity vpfxs and
+   vpfxt; the vcmp word; then VFPU_CC three ways: mfvc at once (cc[1]), mfvc after a vsync
+   0xffff0320 (cc[2]), mfvc after a vflush 0xffff040d (cc[3]); then the dependent vcmovt.q imm3 6
+   and the four words of C200 stored to out. */
+#define CM_CMP_FN(fname, word)                                                         \
+    static void fname(const uint32_t *a, const uint32_t *b, const uint32_t *src,       \
+                      const uint32_t *dst, uint32_t *out, uint32_t *cc, uint32_t pre)  \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "move $t0, %[pre]\n\t"                                                     \
+            ".word 0x48e80083\n\t" /* mtvc $t0, VFPU_CC */                             \
+            "lv.q C000, 0(%[a])\n\t"                                                   \
+            "lv.q C010, 0(%[b])\n\t"                                                   \
+            "lv.q C020, 0(%[src])\n\t"                                                 \
+            "lv.q C200, 0(%[dst])\n\t"                                                 \
+            ".word 0x48690083\n\t" /* mfvc $t1, VFPU_CC */                             \
+            "sw $t1, 0(%[cc])\n\t"                                                     \
+            ".word 0xdc0000e4\n\t" /* vpfxs identity */                                \
+            ".word 0xdd0000e4\n\t" /* vpfxt identity */                                \
+            ".word %[w]\n\t"                                                           \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 4(%[cc])\n\t"                                                     \
+            ".word 0xffff0320\n\t" /* vsync */                                         \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 8(%[cc])\n\t"                                                     \
+            ".word 0xffff040d\n\t" /* vflush */                                        \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 12(%[cc])\n\t"                                                    \
+            ".word %[rd]\n\t"                                                          \
+            "sv.q C200, 0(%[out])\n\t"                                                 \
+            :                                                                          \
+            : [a] "r"(a), [b] "r"(b), [src] "r"(src), [dst] "r"(dst), [out] "r"(out),  \
+              [cc] "r"(cc), [pre] "r"(pre), [w] "i"(word), [rd] "i"(CM_RD_WORD)        \
+            : "t0", "t1", "memory");                                                   \
+    }
+
+#define CM_CMOV_FN(fname, word)                                                        \
+    static void fname(const uint32_t *src, const uint32_t *dst, uint32_t *out,         \
+                      uint32_t *cc, uint32_t pre)                                      \
+    {                                                                                  \
+        __asm__ volatile(                                                              \
+            "move $t0, %[pre]\n\t"                                                     \
+            ".word 0x48e80083\n\t"                                                     \
+            "lv.q C000, 0(%[src])\n\t"                                                 \
+            "lv.q C200, 0(%[dst])\n\t"                                                 \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 0(%[cc])\n\t"                                                     \
+            ".word 0xdc0000e4\n\t" /* vpfxs identity */                                \
+            ".word %[w]\n\t"                                                           \
+            ".word 0x48690083\n\t"                                                     \
+            "sw $t1, 4(%[cc])\n\t"                                                     \
+            "sv.q C200, 0(%[out])\n\t"                                                 \
+            :                                                                          \
+            : [src] "r"(src), [dst] "r"(dst), [out] "r"(out), [cc] "r"(cc),            \
+              [pre] "r"(pre), [w] "i"(word)                                            \
+            : "t0", "t1", "memory");                                                   \
+    }
+
+#define CM_DEF_CMP(c)                                          \
+    CM_CMP_FN(cm_cmp##c##_s, CM_CMP_WORD(c, CM_SIZE_S))        \
+    CM_CMP_FN(cm_cmp##c##_q, CM_CMP_WORD(c, CM_SIZE_Q))
+#define CM_DEF_CMOV(f, imm)                                                   \
+    CM_CMOV_FN(cm_cmov##f##imm##_s, CM_CMOV_WORD(f, imm, CM_SIZE_S))          \
+    CM_CMOV_FN(cm_cmov##f##imm##_p, CM_CMOV_WORD(f, imm, CM_SIZE_P))          \
+    CM_CMOV_FN(cm_cmov##f##imm##_q, CM_CMOV_WORD(f, imm, CM_SIZE_Q))
+
+CM_DEF_CMP(0)  CM_DEF_CMP(1)  CM_DEF_CMP(2)  CM_DEF_CMP(3)
+CM_DEF_CMP(4)  CM_DEF_CMP(5)  CM_DEF_CMP(6)  CM_DEF_CMP(7)
+CM_DEF_CMP(8)  CM_DEF_CMP(9)  CM_DEF_CMP(10) CM_DEF_CMP(11)
+CM_DEF_CMP(12) CM_DEF_CMP(13) CM_DEF_CMP(14) CM_DEF_CMP(15)
+CM_DEF_CMOV(0, 0) CM_DEF_CMOV(0, 1) CM_DEF_CMOV(0, 2) CM_DEF_CMOV(0, 3)
+CM_DEF_CMOV(0, 4) CM_DEF_CMOV(0, 5) CM_DEF_CMOV(0, 6)
+CM_DEF_CMOV(1, 0) CM_DEF_CMOV(1, 1) CM_DEF_CMOV(1, 2) CM_DEF_CMOV(1, 3)
+CM_DEF_CMOV(1, 4) CM_DEF_CMOV(1, 5) CM_DEF_CMOV(1, 6)
+
+#define CM_CMP_ROW(c) {cm_cmp##c##_s, cm_cmp##c##_q}
+static const cm_cmp_fn s_cm_cmp[16][2] = {
+    CM_CMP_ROW(0),  CM_CMP_ROW(1),  CM_CMP_ROW(2),  CM_CMP_ROW(3),
+    CM_CMP_ROW(4),  CM_CMP_ROW(5),  CM_CMP_ROW(6),  CM_CMP_ROW(7),
+    CM_CMP_ROW(8),  CM_CMP_ROW(9),  CM_CMP_ROW(10), CM_CMP_ROW(11),
+    CM_CMP_ROW(12), CM_CMP_ROW(13), CM_CMP_ROW(14), CM_CMP_ROW(15),
+};
+#define CM_CMOV_ROW(f, imm) {cm_cmov##f##imm##_s, cm_cmov##f##imm##_p, cm_cmov##f##imm##_q}
+static const cm_cmov_fn s_cm_cmov[2][7][3] = {
+    {CM_CMOV_ROW(0, 0), CM_CMOV_ROW(0, 1), CM_CMOV_ROW(0, 2), CM_CMOV_ROW(0, 3),
+     CM_CMOV_ROW(0, 4), CM_CMOV_ROW(0, 5), CM_CMOV_ROW(0, 6)},
+    {CM_CMOV_ROW(1, 0), CM_CMOV_ROW(1, 1), CM_CMOV_ROW(1, 2), CM_CMOV_ROW(1, 3),
+     CM_CMOV_ROW(1, 4), CM_CMOV_ROW(1, 5), CM_CMOV_ROW(1, 6)},
+};
+static const char s_cm_widths[4] = {'s', 'p', 't', 'q'};
+
+/* Operand sets: a lanes 0-3 then b lanes 0-3. Finite orderings, signed zeros and denormals,
+   infinities, quiet and signalling NaNs of both signs. */
+static const uint32_t s_cm_sets[4][8] = {
+    {0x3f800000u, 0x40000000u, 0x40400000u, 0x40800000u,
+     0x40000000u, 0x40000000u, 0x3f800000u, 0x40a00000u}, /* lt eq gt lt */
+    {0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u,
+     0x80000000u, 0x00000000u, 0x00000000u, 0x00000001u}, /* signed zeros and denormals */
+    {0x7f800000u, 0xff800000u, 0x7f800000u, 0xff800000u,
+     0x7f800000u, 0x7f800000u, 0x3f800000u, 0xbf800000u}, /* infinities */
+    {0x7fc00000u, 0x7f800001u, 0xffc00000u, 0x3f800000u,
+     0x3f800000u, 0x7fc00000u, 0x7fc00000u, 0x3f800000u}, /* quiet, signalling, negative NaN */
+};
+static const uint32_t s_cm_presets[CM_PRESETS] = {0x00u, 0x3fu, 0x15u, 0x01u, 0x02u,
+                                                  0x04u, 0x08u, 0x10u, 0x20u};
+static const uint32_t s_cm_rt[CM_RT_VALUES] = {0x00u, 0x3fu, 0x15u, 0x2au, 0x01u, 0x10u,
+                                               0x20u, 0x40u, 0x80u, 0xffu, 0x100u, 0xffffffffu};
+/* cmov source: 1.0, -0, qNaN, smallest denormal; destination preload: four other words. */
+static const uint32_t s_cm_cmov_src[4] __attribute__((aligned(16))) = {
+    0x3f800000u, 0x80000000u, 0x7fc00000u, 0x00000001u};
+static const uint32_t s_cm_cmov_dst[4] __attribute__((aligned(16))) = {
+    0xbf800000u, 0x40400000u, 0xc0800000u, 0x41200000u};
+static uint32_t s_cm_a[4] __attribute__((aligned(16)));
+static uint32_t s_cm_b[4] __attribute__((aligned(16)));
+static uint32_t s_cm_out[4] __attribute__((aligned(16)));
+
+static void cm_cmp_group(unsigned pass, unsigned cond)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "vcmp-c%02x-p%u", cond, pass);
+    hle_step(name);
+    for (unsigned w = 0; w < 2u; w++) {
+        const uint32_t sizes[2] = {CM_SIZE_S, CM_SIZE_Q};
+        const uint32_t word = CM_CMP_WORD(cond, sizes[w]);
+        uint32_t rec[CM_CMP_WORDS_OUT];
+        for (unsigned i = 0; i < CM_CMP_WORDS_OUT; i++) {
+            rec[i] = 0xffffffffu;
+        }
+        for (unsigned set = 0; set < CM_SETS; set++) {
+            for (unsigned i = 0; i < 4u; i++) {
+                s_cm_a[i] = s_cm_sets[set][i];
+                s_cm_b[i] = s_cm_sets[set][4u + i];
+            }
+            for (unsigned p = 0; p < 2u; p++) {
+                uint32_t cc[4] = {0u, 0u, 0u, 0u};
+                s_cm_out[0] = s_cm_out[1] = s_cm_out[2] = s_cm_out[3] = 0xffffffffu;
+                s_cm_cmp[cond][w](s_cm_a, s_cm_b, s_cm_cmov_src, s_cm_cmov_dst, s_cm_out, cc,
+                                  p == 0u ? 0x00u : 0x3fu);
+                rec[p] = cc[0];
+                const unsigned base = 2u + 14u * set + 7u * p;
+                rec[base] = cc[1];
+                rec[base + 1u] = cc[2];
+                rec[base + 2u] = cc[3];
+                for (unsigned i = 0; i < 4u; i++) {
+                    rec[base + 3u + i] = s_cm_out[i];
+                }
+            }
+        }
+        snprintf(name, sizeof(name), "vcmp-c%02x-%c-p%u", cond, s_cm_widths[w == 1u ? 3u : w],
+                 pass);
+        hle_record(name, "PASS", word, rec, CM_CMP_WORDS_OUT);
+    }
+}
+
+static void cm_cmov_group(unsigned pass, unsigned f, unsigned imm)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "vcmov%c%u-p%u", f ? 'f' : 't', imm, pass);
+    hle_step(name);
+    for (unsigned w = 0; w < 3u; w++) {
+        const uint32_t sizes[3] = {CM_SIZE_S, CM_SIZE_P, CM_SIZE_Q};
+        const uint32_t word = CM_CMOV_WORD(f, imm, sizes[w]);
+        uint32_t rec[CM_CMOV_WORDS_OUT];
+        for (unsigned i = 0; i < CM_CMOV_WORDS_OUT; i++) {
+            rec[i] = 0xffffffffu;
+        }
+        for (unsigned p = 0; p < CM_PRESETS; p++) {
+            uint32_t cc[2] = {0u, 0u};
+            s_cm_out[0] = s_cm_out[1] = s_cm_out[2] = s_cm_out[3] = 0xffffffffu;
+            s_cm_cmov[f][imm][w](s_cm_cmov_src, s_cm_cmov_dst, s_cm_out, cc, s_cm_presets[p]);
+            rec[6u * p] = cc[0];
+            rec[6u * p + 1u] = cc[1];
+            for (unsigned i = 0; i < 4u; i++) {
+                rec[6u * p + 2u + i] = s_cm_out[i];
+            }
+        }
+        snprintf(name, sizeof(name), "vcmov%c%u-%c-p%u", f ? 'f' : 't', imm,
+                 s_cm_widths[w == 2u ? 3u : w], pass);
+        hle_record(name, "PASS", word, rec, CM_CMOV_WORDS_OUT);
+    }
+}
+
+/* mtvc $t1, VFPU_CC; mfvc $t1, VFPU_CC. */
+static uint32_t cm_cc_roundtrip(uint32_t value)
+{
+    uint32_t back;
+    __asm__ volatile(
+        "move $t1, %[v]\n\t"
+        ".word 0x48e90083\n\t"
+        ".word 0x48690083\n\t"
+        "move %[o], $t1\n\t"
+        : [o] "=&r"(back)
+        : [v] "r"(value)
+        : "t1", "memory");
+    return back;
+}
+
+static uint32_t cm_cc_read(void)
+{
+    uint32_t back;
+    __asm__ volatile(
+        ".word 0x48690083\n\t"
+        "move %[o], $t1\n\t"
+        : [o] "=&r"(back)
+        :
+        : "t1", "memory");
+    return back;
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < CM_PASSES; pass++) {
+        char name[64];
+        for (unsigned cond = 0; cond < 16u; cond++) {
+            cm_cmp_group(pass, cond);
+        }
+        for (unsigned f = 0; f < 2u; f++) {
+            for (unsigned imm = 0; imm < 7u; imm++) {
+                cm_cmov_group(pass, f, imm);
+            }
+        }
+        snprintf(name, sizeof(name), "cc-initial-p%u", pass);
+        hle_step(name);
+        uint32_t init[1];
+        init[0] = cm_cc_read();
+        hle_record(name, "PASS", 0x48690083u, init, 1u);
+        snprintf(name, sizeof(name), "cc-roundtrip-p%u", pass);
+        hle_step(name);
+        uint32_t rt[CM_RT_VALUES];
+        for (unsigned i = 0; i < CM_RT_VALUES; i++) {
+            rt[i] = cm_cc_roundtrip(s_cm_rt[i]);
+        }
+        (void)cm_cc_roundtrip(0u);
+        hle_record(name, "PASS", 0x48e90083u, rt, CM_RT_VALUES);
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_CC_CMOV */
 
 /* ------------------------------------------------------------------------- */
 #if PSP_ORACLE_CASE == HLE_CASE_INTR_CELLS

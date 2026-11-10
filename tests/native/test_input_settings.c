@@ -822,36 +822,26 @@ static void test_per_title_scope_and_atomic_save(void) {
         assert(bf != NULL);
         fputs("not a directory\n", bf);
         fclose(bf);
+        /* The variable the host's per-user config folder is under: Android roots every
+         * per-user folder at NK_ANDROID_DATA_DIR and has no XDG folders. */
 #if defined(_WIN32) || defined(_WIN64)
-        const char *saved = getenv("LOCALAPPDATA");
-        char saved_copy[1024];
-        if (saved) snprintf(saved_copy, sizeof(saved_copy), "%s", saved);
-        test_setenv("LOCALAPPDATA", blocker_file);
+        const char *config_root_env = "LOCALAPPDATA";
+#elif defined(__ANDROID__)
+        const char *config_root_env = "NK_ANDROID_DATA_DIR";
 #else
-        const char *saved = getenv("XDG_CONFIG_HOME");
+        const char *config_root_env = "XDG_CONFIG_HOME";
+#endif
+        const char *saved = getenv(config_root_env);
         char saved_copy[1024];
         if (saved) snprintf(saved_copy, sizeof(saved_copy), "%s", saved);
-        test_setenv("XDG_CONFIG_HOME", blocker_file);
-#endif
+        test_setenv(config_root_env, blocker_file);
         char blocked_path[NK_MAX_PATH];
         blocked_path[0] = 'x';
         assert(input_settings_write_disc_profile(&after_failed, "UCUS98701", blocked_path,
                                                  sizeof(blocked_path), diag, sizeof(diag)) != NK_OK);
         assert(blocked_path[0] == '\0');
         assert(diag[0] != '\0');
-        if (saved) {
-#if defined(_WIN32) || defined(_WIN64)
-            test_setenv("LOCALAPPDATA", saved_copy);
-#else
-            test_setenv("XDG_CONFIG_HOME", saved_copy);
-#endif
-        } else {
-#if defined(_WIN32) || defined(_WIN64)
-            test_setenv("LOCALAPPDATA", NULL);
-#else
-            test_setenv("XDG_CONFIG_HOME", NULL);
-#endif
-        }
+        test_setenv(config_root_env, saved ? saved_copy : NULL);
         remove(blocker_file);
         native_test_assert_config_root_isolated();
         native_test_assert_real_config_untouched();

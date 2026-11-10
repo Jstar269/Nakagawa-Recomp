@@ -319,7 +319,7 @@ class ComparabilityContractTests(unittest.TestCase):
         reasons = flight_diff._comparability_reasons(left, right)
         self.assertTrue(any("runtime" in reason for reason in reasons))
 
-    ACE_LINE = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off"
+    ACE_LINE = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off"
 
     def test_ace_mode_bundle_is_never_comparable(self):
         # An Ace Mode run (src/rt/ace.h) carries runtime.enhancements. It is refused
@@ -346,14 +346,20 @@ class ComparabilityContractTests(unittest.TestCase):
         ace["runtime"]["enhancements"] = {"ace": self.ACE_LINE}
         flight_diff.validate_bundle(ace)
         # The presentation upscaler's stamp, alone or beside Ace Mode's line (#1273).
-        for good in ({"present_upscale": "fsr1"}, {"ace": self.ACE_LINE, "present_upscale": "fsr1"}):
+        # ... and the movie upscaler's (SR_MOVIE_UPSCALE), alone or with the presentation upscaler's:
+        # such a bundle is an enhanced run (incomparable), never a malformed one.
+        goods = [{"present_upscale": stamp} for stamp in
+                 ("fsr1", "movie-fsr1", "movie-anime4k", "fsr1+movie-fsr1", "fsr1+movie-anime4k")]
+        for good in (*goods, {"ace": self.ACE_LINE, "present_upscale": "fsr1"}):
             upscaled = copy.deepcopy(candidate)
             upscaled["runtime"]["enhancements"] = good
             flight_diff.validate_bundle(upscaled)
             with self.assertRaises(flight_diff.BundleIncomparable):
                 flight_diff.diff_bundles(candidate, upscaled, "sequence")
         for bad in ({"ace": "off"}, {"ace": self.ACE_LINE, "extra": 1}, {},
-                    {"present_upscale": "bilinear"}, {"present_upscale": "off"}):
+                    {"present_upscale": "bilinear"}, {"present_upscale": "off"},
+                    {"present_upscale": "movie-off"}, {"present_upscale": "anime4k"},
+                    {"present_upscale": "fsr1+fsr1"}):
             broken = copy.deepcopy(candidate)
             broken["runtime"]["enhancements"] = bad
             with self.assertRaises(ValueError):
