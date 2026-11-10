@@ -374,13 +374,14 @@ void ace_stick_remap(uint8_t *lx, uint8_t *ly, int game_counts, int host_counts)
     int d = host_counts;
     if (!lx || !ly || g < 1 || g > ACE_STICK_COUNTS_MAX) return;
     if (d < 0 || d >= 127) d = 0;
-    if (d > g - 1) d = g - 1;
     const int hx = stick_offset(*lx), hy = stick_offset(*ly);
     const int ax = hx < 0 ? -hx : hx, ay = hy < 0 ? -hy : hy;
     const int m = ax > ay ? ax : ay;
     if (m == 0) return;
     /* Past the host's dead zone the host's live range maps onto the game's, G..127; up to it
-       (a source with a smaller dead zone than the host's, such as a mouse) it stays below G. */
+       (a source with a smaller dead zone than the host's, such as a mouse) it stays below G.
+       Both hold for any D in 0..126, larger than G or not: 127 - D is at least 1, and the
+       second branch runs only with D >= 1. */
     int target = m > d ? g + (m - d) * (127 - g) / (127 - d) : m * (g - 1) / d;
     if (target > 127) target = 127;
     *lx = stick_scale_axis(*lx, hx, target, m);
@@ -391,7 +392,6 @@ void ace_stick_sample(uint8_t *lx, uint8_t *ly, int host_counts) {
     if (!g_ace_on || !s_eff.stick || !lx || !ly) return;
     int d = host_counts;
     if (d < 0 || d >= 127) d = 0;
-    if (d > s_eff.stick - 1) d = s_eff.stick - 1;
     s_stick_host = d;
     if (*lx == 128u && *ly == 128u) return;
     ace_stick_remap(lx, ly, s_eff.stick, d);

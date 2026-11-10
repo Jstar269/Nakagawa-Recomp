@@ -328,6 +328,13 @@ static void cell_switch(void) {
 static int game_x(uint8_t b) { return (int)b - (b > 128 ? 1 : 0) - 127; }
 static int iabs(int v) { return v < 0 ? -v : v; }
 
+/* x / y = hx / hy within each axis's rounding to nearest: x = hx * t / m + ex with |ex| <= 1/2,
+   and the same for y, so |x * hy - y * hx| = |ex * hy - ey * hx| <= (|hx| + |hy|) / 2. */
+static int stick_direction_kept(int hx, int hy, int x, int y) {
+    const long cross = (long)x * hy - (long)y * hx;
+    return 2L * (cross < 0 ? -cross : cross) <= (long)(iabs(hx) + iabs(hy));
+}
+
 /* The game's magnitude for a host push of m counts along +x (byte 128 + m), y at rest. */
 static int remap_x(int m, int g, int d) {
     uint8_t lx = (uint8_t)(128 + m), ly = 128u;
@@ -381,7 +388,7 @@ static void cell_stick_curve(void) {
        a push past its dead zone exactly when the host's push is past D. */
     {
         const int g = 64;
-        static const int ds[] = {0, 30, 63};
+        static const int ds[] = {0, 30, 63, 100};
         for (size_t k = 0; k < sizeof(ds) / sizeof(ds[0]); k++) {
             const int d = ds[k];
             for (int hx = -127; hx <= 127; hx += 3) {
@@ -395,11 +402,7 @@ static void cell_stick_curve(void) {
                     CHECK((mx >= 64) == (m > d), "D=%d %d,%d: game magnitude %d", d, hx, hy, mx);
                     CHECK((hx < 0 ? x <= 0 : x >= 0) && (hy < 0 ? y <= 0 : y >= 0),
                           "D=%d %d,%d: a sign flipped (%d,%d)", d, hx, hy, x, y);
-                    /* x / y = hx / hy within rounding: |x*hy - y*hx| <= (|hx| + |hy|) / 2 * mx / m + 1 */
-                    const long cross = (long)x * hy - (long)y * hx;
-                    const long slack = (long)(iabs(hx) + iabs(hy)) * mx / (2L * m) + 1L;
-                    CHECK(cross <= slack && -cross <= slack, "D=%d %d,%d: direction %d,%d (cross %ld)", d, hx,
-                          hy, x, y, cross);
+                    CHECK(stick_direction_kept(hx, hy, x, y), "D=%d %d,%d: direction %d,%d", d, hx, hy, x, y);
                     /* A remapped axis goes back through the exact inverse of the centring. */
                     if (hx != 0) CHECK(lx == (uint8_t)(x >= 1 ? x + 128 : x + 127), "lx inverse %d", x);
                     if (hy != 0) CHECK(ly == (uint8_t)(y >= 1 ? y + 128 : y + 127), "ly inverse %d", y);
@@ -420,7 +423,7 @@ static void cell_stick_curve(void) {
     /* D clamps: below 0 or 127 and above reads as 0, above G - 1 as G - 1; G out of range does nothing. */
     CHECK(remap_x(1, 64, 0) == 64 && remap_x(1, 64, -5) == 64 && remap_x(1, 64, 127) == 64,
           "D=0, D<0 and D>=127 start the game's live range at the first count");
-    CHECK(remap_x(63, 64, 63) == 63 && remap_x(64, 64, 100) == 64, "D above G-1 reads as G-1");
+    CHECK(remap_x(63, 64, 63) == 63 && remap_x(64, 64, 63) == 64, "D=G-1: the first live count is G");
     {
         uint8_t lx = 150u, ly = 100u;
         ace_stick_remap(&lx, &ly, 0, 30);
@@ -432,6 +435,97 @@ static void cell_stick_curve(void) {
     CHECK(ace_stick_host_counts(0, 7849) == 30 && ace_stick_host_counts(7849, 0) == 30, "the larger axis");
     CHECK(ace_stick_host_counts(0, 0) == 0 && ace_stick_host_counts(-1, -9) == 0, "none is 0");
     CHECK(ace_stick_host_counts(32767, 0) == 127, "a full dead zone is 127 (which the remap reads as 0)");
+}
+
+/* A host dead zone at or above the game's (a large user dead zone, or a title with a small one)
+   is used as it is: up to D the game reads below G, past D at G or more, the curve is monotonic
+   and has no gap wider than its own slope at D. */
+static void cell_stick_host_dead_zone_at_or_above_g(void) {
+    static const int cases[][2] = {{10, 30}, {64, 100}, {64, 64}};
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        const int g = cases[k][0], d = cases[k][1];
+        int prev = -1;
+        for (int m = 1; m <= 127; m++) {   /* m = 0 is rest, byte 128, which the title reads as +1 */
+            const int out = remap_x(m, g, d);
+            CHECK(out >= prev, "G=%d D=%d: the curve falls at m=%d (%d after %d)", g, d, m, out, prev);
+            CHECK((out >= g) == (m > d), "G=%d D=%d m=%d: game magnitude %d is %s the game's dead zone",
+                  g, d, m, out, m > d ? "inside" : "outside");
+            prev = out;
+        }
+        /* Continuity at the edge: D is the game's G - 1, D + 1 its G plus at most one slope step. */
+        const int step = (127 - g + (127 - d) - 1) / (127 - d);     /* ceil((127 - G) / (127 - D)) */
+        CHECK(remap_x(d, g, d) == g - 1, "G=%d D=%d: m=D gives G-1, got %d", g, d, remap_x(d, g, d));
+        CHECK(remap_x(d + 1, g, d) >= g && remap_x(d + 1, g, d) <= g + step,
+              "G=%d D=%d: m=D+1 gives %d, want %d..%d", g, d, remap_x(d + 1, g, d), g, g + step);
+        CHECK(remap_x(127, g, d) == 127, "G=%d D=%d: full throw stays 127", g, d);
+    }
+    /* The review's two cases, by value. */
+    CHECK(remap_x(30, 10, 30) == 9 && remap_x(31, 10, 30) == 11, "G=10 D=30: 30 -> 9, 31 -> 11");
+    CHECK(remap_x(100, 64, 100) == 63 && remap_x(101, 64, 100) == 66, "G=64 D=100: 100 -> 63, 101 -> 66");
+    /* The run's remap keeps such a D as it is, for the report too. */
+    {
+        char json[ACE_REPORT_MAX];
+        uint8_t lx = (uint8_t)(128 + 101), ly = 128u;
+        CHECK(ace_init_spec("v1;tier=ace;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;"
+                            "tess=off;stick=64", NULL) == 1, "stick=64 for a large host dead zone");
+        ace_stick_sample(&lx, &ly, 100);
+        CHECK(game_x(lx) == 66 && ly == 128u, "a live push of 101 past D=100 is the game's 66 (%u)", lx);
+        CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"host_dead_zone\": 100") != NULL,
+              "the report keeps D=100:\n%s", json);
+        (void)ace_init_spec("off", NULL);
+    }
+}
+
+/* A round host stick (a gamepad's circular gate): points on rays at every 15 degrees, radius 0 to
+   127. The direction is kept at every point, and the game's magnitude max(|x|, |y|), which sets
+   its movement scale, never falls as the radius grows. A Chebyshev remap pushes the circle
+   outward: the host's full diagonal (90, 90) reaches the game as (102, 102), a scale of 38/63.
+   Each axis also depends on the other: y held at 40 reads 70 with x at 40 and 40 with x at 127. */
+/* cos(15 * step degrees) in thousandths, from a table: the test links no maths library. */
+static int stick_cos15(int step) {
+    static const int q[7] = {1000, 966, 866, 707, 500, 259, 0};   /* 0..90 degrees */
+    step = ((step % 24) + 24) % 24;
+    if (step <= 6) return q[step];
+    if (step <= 12) return -q[12 - step];
+    if (step <= 18) return -q[step - 12];
+    return q[24 - step];
+}
+static int stick_round_milli(int v) { return v >= 0 ? (v + 500) / 1000 : -((-v + 500) / 1000); }
+
+static void cell_stick_round_host(void) {
+    static const int ds[] = {0, 30, 100};
+    for (size_t k = 0; k < sizeof(ds) / sizeof(ds[0]); k++) {
+        const int g = 64, d = ds[k];
+        for (int step = 0; step < 24; step++) {
+            const int deg = step * 15;
+            const int c = stick_cos15(step), sn = stick_cos15(step + 18);   /* sin = cos(deg - 90) */
+            int prev = -1;
+            for (int r = 0; r <= 127; r++) {
+                const int hx = stick_round_milli(r * c), hy = stick_round_milli(r * sn);
+                uint8_t lx = (uint8_t)(128 + hx), ly = (uint8_t)(128 + hy);
+                ace_stick_remap(&lx, &ly, g, d);
+                const int x = hx == 0 ? 0 : game_x(lx), y = hy == 0 ? 0 : game_x(ly);
+                const int mx = iabs(x) > iabs(y) ? iabs(x) : iabs(y);
+                CHECK(stick_direction_kept(hx, hy, x, y), "D=%d %d deg r=%d: %d,%d became %d,%d", d, deg, r,
+                      hx, hy, x, y);
+                CHECK(mx >= prev, "D=%d %d deg: the game's magnitude falls at r=%d (%d after %d)", d, deg, r,
+                      mx, prev);
+                prev = mx;
+            }
+        }
+    }
+    {
+        uint8_t lx = (uint8_t)(128 + 90), ly = (uint8_t)(128 + 90);
+        ace_stick_remap(&lx, &ly, 64, 30);
+        CHECK(game_x(lx) == 102 && game_x(ly) == 102, "the host diagonal 90,90 is the game's 102,102 (%d,%d)",
+              game_x(lx), game_x(ly));
+        lx = (uint8_t)(128 + 40); ly = (uint8_t)(128 + 40);
+        ace_stick_remap(&lx, &ly, 64, 30);
+        CHECK(game_x(ly) == 70, "y=40 with x=40 is the game's 70 (%d)", game_x(ly));
+        lx = 255u; ly = (uint8_t)(128 + 40);
+        ace_stick_remap(&lx, &ly, 64, 30);
+        CHECK(game_x(ly) == 40, "y=40 with x=127 is the game's 40 (%d)", game_x(ly));
+    }
 }
 
 /* The run's remap: off unless the line asked for it; it counts, confirms and reports. */
@@ -974,6 +1068,8 @@ static void cell_pace(void) {
 int main(int argc, char **argv) {
     cell_parse();
     cell_stick_curve();
+    cell_stick_host_dead_zone_at_or_above_g();
+    cell_stick_round_host();
     cell_stick_run();
     cell_pace();
     cell_switch();

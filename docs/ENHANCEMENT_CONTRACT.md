@@ -1495,9 +1495,13 @@ For a title whose stick reading ignores part of the stick's throw. *Hot Shots Te
 byte `b` (0 to 255) as `x = b - (b > 128) - 127`, so 128 reads +1, 127 reads 0, 0 reads -127 and 255 reads +127. It
 counts an axis only when `|x| >= 64`, and it moves the player by the direction of `(x, y)` scaled by `(m - 64) / 63`
 with `m = max(|x|, |y|)`, nothing while `m <= 64`: a square dead zone of 64 counts, with 64 to 127 as its live range.
-The host has its own dead zone (the input profile's per-axis `deadzone_inner`, 7849 of 32767 by default, inside which
-the byte is 128, outside which the value is not rescaled), so a gamepad had to be pushed past half its throw before
-the player moved. The remap starts the host's live range at the edge of the game's dead zone.
+This reading is of the title's stick-reading function at `0x0001e268` in its `EBOOT.BIN`: it centres each axis as
+`x = b - (b > 128) - 127`, treats `max(|x|, |y|) < 64` as rest, and scales by `(m / 127 - 0.503937) / 0.496063`, which
+is `(m - 64) / 63`. It comes from a decompilation of that function that is not yet byte-matched (a near miss), not from
+a measurement. The host has its own dead zone (the input profile's per-axis `deadzone_inner`, 7849 of 32767 by
+default, inside which the byte is 128, outside which the value is not rescaled), so a gamepad had to be pushed past
+half its throw before the player moved. The remap maps the host's live range onto the game's: with the host's dead
+zone smaller than the game's, the first live host count reaches the edge of the game's dead zone.
 
 - **Status: guest-visible, not admitted under section 11.2.** The guest reads changed stick values. Its key, its
   library and per-title settings and this entry are in place (section 11.2, items 2, 3 and 6); the runs of item 4 do
@@ -1506,12 +1510,15 @@ the player moved. The remap starts the host's live range at the edge of the game
   `"input": {"analog_dead_zone": {"shape": "square", "counts": G}}` (`assets/title_manifest.schema.json`; `shape` is
   only `square`, `counts` an integer from 1 to 126), checked by `tools/title_manifest.py` and the native manifest
   parser alike and carried into the generated catalog as `NkTitleEntry.analog_dead_zone_counts` (0 when none is
-  declared). A title's private overlay manifest is checked the same way and does not carry it. The runtime remaps the
+  declared). An overlay manifest is checked the same way and carries its own value in its entry, as it carries every
+  other field: nothing is merged from a public entry, so an overlay without the block has no dead zone and the line
+  carries no `stick`. The player refuses an overlay for a disc the public catalog already names, so it cannot replace
+  a public title's value; an overlay loaded with an override replaces the public entry whole. The runtime remaps the
   live host stick where the controller ring latches a sample in analog mode (`src/rt/hle_route.c`), before the sample
   is stored or recorded. `D` is the host's dead zone in centred counts: the larger of the X and Y axes'
   `deadzone_inner * 255 / 65535` (integer) from the active input profile, 30 by default, and 0 without an SDL3
-  presenter; a `D` of 127 or more reads as 0 and a `D` above `G - 1` as `G - 1`. With `h = b - 128` per axis, clamped
-  to -127..127, and `m = max(|hx|, |hy|)`:
+  presenter; a `D` below 0 or of 127 or more reads as 0, and any `D` from 0 to 126 is used as it is, at or above `G`
+  too. With `h = b - 128` per axis, clamped to -127..127, and `m = max(|hx|, |hy|)`:
   - `m = 0` (rest) leaves both bytes as they are, and an axis at rest keeps its byte;
   - past the host's dead zone, `m > D`: the target magnitude is `m' = G + (m - D) * (127 - G) / (127 - D)` (integer);
   - up to it, `0 < m <= D` (a source with less dead zone than the host's, such as the mouse): `m' = m * (G - 1) / D`,
@@ -1520,11 +1527,20 @@ the player moved. The remap starts the host's live range at the edge of the game
     then go back to bytes through the exact inverse of the title's centring: `x >= 1` is `x + 128`, `x <= 0` is
     `x + 127`.
 
-  So `m = 127` maps to 127 (bytes 0 and 255 are unchanged, and with them the keyboard's and the digital edges), a push
-  just past `D` reaches the game at 64 (scale 0), and the game's movement scale becomes `(m - D) / (127 - D)` within
-  one count. With `G = 64` and `D = 30`: `m` 0, 30, 31, 40, 64, 96 and 127 give the game 1 (rest, untouched), 63, 64,
+  So `m = 127` maps to 127 (bytes 0 and 255 are unchanged, and with them the keyboard's and the digital edges),
+  `m = D` (for `D >= 1`) reaches the game at `G - 1`, and the game's movement scale becomes `(m - D) / (127 - D)`
+  within one count. With `D < G` a push just past `D` reaches the game at `G` (scale 0). With `D >= G` the host has
+  fewer live counts than the game, so the first one lands one slope step past the edge, at
+  `G + floor((127 - G) / (127 - D))`: `G = 10` and `D = 30` give 9 at `m = 30` and 11 at `m = 31`; `G = 64` and
+  `D = 100` give 63 at `m = 100` and 66 at `m = 101`.
+  With `G = 64` and `D = 30`: `m` 0, 30, 31, 40, 64, 96 and 127 give the game 1 (rest, untouched), 63, 64,
   70, 86, 106 and 127, a scale of 0, 0, 0, 0.095, 0.349, 0.667 and 1.0 against the ideal 0, 0, 0.010, 0.103, 0.351,
   0.680 and 1.0. The curve is `ace_stick_remap` in `src/rt/ace.c`, a pure function.
+- **Why square, not radial.** The title's own dead zone and scale use the Chebyshev magnitude `max(|x|, |y|)` against
+  64, so the remap uses the same magnitude. A radial remap that put the host's dead-zone edge at radius `G` would
+  leave a diagonal push there at about `(G / sqrt(2), G / sqrt(2))`, (45, 45) for `G = 64`, still inside the game's
+  square dead zone, so diagonals would keep a dead band. The Chebyshev remap puts the first live host push on the
+  game's dead-zone edge in every direction. It is the faithful choice for this title's own dead-zone code.
 - **Key.** `stick=<counts>` on the launch line (section 10.1), an optional key with the title's `G` as its value, 1 to
   126 in plain decimal: a line without it reads as off, any other value is refused, and `stick=<counts>` is refused
   unless the line carries `tier=ace`. The player has a library setting and a per-title setting, "Stick dead
@@ -1534,7 +1550,19 @@ the player moved. The remap starts the host's live range at the edge of the game
   report's `"stick": {"counts", "host_dead_zone", "samples_remapped"}`), and reports it unavailable when no live
   sample off rest was remapped by the end of the run.
 - **What it changes:** the left-stick bytes of every live host sample off rest that the guest latches in analog mode,
-  and so how far the player moves for a given push, and which small pushes count in the title's menus.
+  and so how far the player moves for a given push, and which small pushes count in the title's menus. Because the
+  remap scales both axes by one factor of the Chebyshev magnitude, it also changes two things a per-axis remap would
+  not:
+  - **A round host stick is pushed outward.** With `G = 64` and `D = 30`, the host diagonal (90, 90), about the full
+    throw of a round gate, reaches the game as (102, 102), a Euclidean radius of about 144 counts. The game's scale
+    there is `(102 - 64) / 63`, about 0.60 (0.41 without the remap), so a full host diagonal reaches only about 0.60
+    of the game's full speed; only a host value of 127 on one axis reaches 1.0.
+  - **Each axis's output depends on the other.** With `y` held at 40, `x` going from 40 to 127 takes `y`'s output
+    from 70 down to 40 (with `x` at 40, 60, 90 and 127, the game reads `x` as 70, 83, 102 and 127 and `y` as 70, 55,
+    45 and 40), so a
+    per-axis test in the title, such as its `|x| >= 64` menu step, can switch off as the other axis is pushed further.
+
+  Whether a PSP's own stick can produce such value pairs, such as (102, 102), is not measured.
 - **What it never changes:** an Authentic run, an Enhanced run and an Ace run without the key latch the bytes the
   window gave, byte for byte. A sample in digital mode is not touched. A route's stick (`SR_PADSCRIPT`) and a
   replay's recorded sample (`SR_REPLAY`) are already the guest's bytes and pass through unchanged, so a pad script
@@ -1546,5 +1574,6 @@ the player moved. The remap starts the host's live range at the edge of the game
   the GE timing model and the media clocks are unchanged.
 - **I/O speed:** unchanged.
 - **Tier:** Ace (one title). **Default:** off.
-- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`'s stick cells, the
-  player's `test_play_mode_stick_settings`, and the manifest tests).
+- **Nothing worse (section 11.2, item 4):** not shown. The tests are synthetic (`ace-selftest`'s stick cells,
+  `hle-thread-selftest`'s latch cell, `gui-present-selftest`'s dead-zone cell, the player's
+  `test_play_mode_stick_settings`, and the manifest tests).

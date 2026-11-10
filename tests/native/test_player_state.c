@@ -7915,8 +7915,8 @@ static void test_play_mode_settings(void) {
                                       "\"text\": \"off\", \"readout\": \"off\", "
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"stick\": \"off\", \"cull\": \"off\", "
-                                      "\"upscale\": \"off\"},") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
+                                      "\"stick\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8113,8 +8113,8 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
-                                      "\"tess\": \"off\", \"stick\": \"off\", \"cull\": \"off\", "
-                                      "\"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
+                                      "\"stick\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8140,8 +8140,8 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"stick\": \"off\", \"cull\": \"off\", "
-                                      "\"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", "
+                                      "\"stick\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8207,8 +8207,8 @@ static void test_play_mode_cull_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"stick\": \"off\", \"cull\": \"on\", "
-                                      "\"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", "
+                                      "\"stick\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8271,6 +8271,12 @@ static void test_play_mode_stick_settings(void) {
     assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_STICK] == 1 && r.stick_counts == 64);
     assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
            strcmp(line + strlen(line) - 9, ";stick=64") == 0);
+    /* The part enum puts stick last (the rows and the saved order), but the Ace line keeps its own
+       sequence: tess, then stick, then cull. */
+    r.part[PLAYER_PART_CULL] = 1;
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 17, ";stick=64;cull=on") == 0 && strstr(line, ";tess=off;stick=64") != NULL);
+    r.part[PLAYER_PART_CULL] = 0;
     player_play_resolve(&app->settings, "TEST92001", &r);       /* no declared dead zone */
     assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_STICK] == 1 && r.stick_counts == 0);
     assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "stick") == NULL);
@@ -8280,7 +8286,7 @@ static void test_play_mode_stick_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"stick\": \"on\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", \"stick\": \"on\"}") != NULL);
         free(saved);
     }
 
@@ -8318,6 +8324,67 @@ static void test_play_mode_stick_settings(void) {
     assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "stick") == NULL);
     player_play_resolve(&app->settings, "TEST92002", &r);
     assert(!r.on && player_play_launch_line(&r, line, sizeof(line)) && strcmp(line, "off") == 0);
+
+    /* An overlay manifest carries its own input block into its entry, which the player finds
+       for its disc: loaded as the player loads one (nk_title_manifest_load_overlay), a disc only
+       an overlay names gets the overlay's 40, and the same overlay without the block has none.
+       The player refuses an overlay for a disc the public catalog names, so HST keeps its public
+       64; an overlay loaded with an override replaces the public entry whole, its block too. */
+    {
+        static const char overlay_fmt[] =
+            "{\"schema_version\":1,\"id\":\"%s\",\"display_name\":\"Stick Overlay\","
+            "\"kind\":\"retail\",\"disc\":{\"id\":\"%s\",\"region\":\"NA\","
+            "\"revision_policy\":\"exact-disc-id\"},"
+            "\"executable\":{\"base\":0,\"entry\":142606336,\"bss_metadata_source\":\"elf\","
+            "\"extra_executable_spans\":[]},\"modules\":[],"
+            "\"filesystem\":{\"data_root\":\"data\",\"memory_stick_root\":\"ms\","
+            "\"device_prefixes\":[\"host0:\"]},\"hle_profile\":\"standard\","
+            "\"feature_requirements\":[\"allegrex\"],\"verification_profile\":\"smoke\"%s}";
+        static const char input_40[] = ",\"input\":{\"analog_dead_zone\":{\"shape\":\"square\",\"counts\":40}}";
+        char manifest[2048], mpath[800], err[256];
+        snprintf(mpath, sizeof(mpath), "%s%cstick_overlay.json", root, sep);
+        write_text_file(path,
+            "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\", \"stick\": \"on\"},"
+            " \"title_play\": {\"UCUS98701\": {\"mode\": \"ace\"}, \"TEST92011\": {\"mode\": \"ace\"}}}");
+        memset(app, 0, sizeof(*app));
+        assert(player_app_load_settings(app, path) == NK_OK);
+        nk_title_catalog_clear_overlay();
+
+        snprintf(manifest, sizeof(manifest), overlay_fmt, "stick-overlay-check", "TEST92011", input_40);
+        write_text_file(mpath, manifest);
+        assert(nk_title_manifest_load_overlay(mpath, err, sizeof(err)));
+        player_play_resolve(&app->settings, "TEST92011", &r);
+        assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_STICK] == 1 && r.stick_counts == 40);
+        assert(player_play_launch_line(&r, line, sizeof(line)) &&
+               strcmp(line + strlen(line) - 9, ";stick=40") == 0);
+
+        snprintf(manifest, sizeof(manifest), overlay_fmt, "stick-overlay-check", "TEST92011", "");
+        write_text_file(mpath, manifest);
+        assert(nk_title_manifest_load_overlay(mpath, err, sizeof(err)));
+        player_play_resolve(&app->settings, "TEST92011", &r);
+        assert(r.on && r.stick_counts == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "stick") == NULL);
+
+        snprintf(manifest, sizeof(manifest), overlay_fmt, "stick-overlay-hst", "UCUS98701", input_40);
+        write_text_file(mpath, manifest);
+        assert(!nk_title_manifest_load_overlay(mpath, err, sizeof(err)));
+        player_play_resolve(&app->settings, "UCUS98701", &r);
+        assert(r.stick_counts == 64);
+
+        assert(nk_title_manifest_load_overlay_ext(mpath, true, err, sizeof(err)));
+        player_play_resolve(&app->settings, "UCUS98701", &r);
+        assert(r.stick_counts == 40);
+        snprintf(manifest, sizeof(manifest), overlay_fmt, "stick-overlay-hst", "UCUS98701", "");
+        write_text_file(mpath, manifest);
+        assert(nk_title_manifest_load_overlay_ext(mpath, true, err, sizeof(err)));
+        player_play_resolve(&app->settings, "UCUS98701", &r);
+        assert(r.stick_counts == 0);
+
+        nk_title_catalog_clear_overlay();
+        player_play_resolve(&app->settings, "UCUS98701", &r);
+        assert(r.stick_counts == 64);   /* the public entry again */
+        remove(mpath);
+    }
 
     remove(path);
     (void)test_rmdir(root);
@@ -8377,9 +8444,8 @@ static void test_play_mode_tess_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"stick\": \"off\", "
-                                      "\"cull\": \"off\", "
-                                      "\"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
+                                      "\"upscale\": \"off\", \"stick\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -9062,9 +9128,8 @@ static void test_play_mode_upscale_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"stick\": \"off\", "
-                                      "\"cull\": \"off\", "
-                                      "\"upscale\": \"fsr1\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
+                                      "\"upscale\": \"fsr1\", \"stick\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }

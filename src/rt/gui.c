@@ -2392,6 +2392,10 @@ uint32_t sdl3vk_buttons(void) { return s_stub_held | s_stub_pulse; }
 void sdl3vk_consume_button_pulses(void) { s_stub_pulse = 0; }
 void sdl3vk_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = 128; if (ly) *ly = 128; }
 int sdl3vk_pad_present(void) { return 1; }
+/* Each input read takes the stick dead zone from the session's input profile; NULL (no profile)
+ * gives 0, which is what every test but the dead-zone one expects. */
+static const NkInputProfile *s_stub_profile;
+const NkInputProfile *sdl3vk_get_input_profile(void) { return s_stub_profile; }
 void sdl3vk_set_text_claim(int on) { if (on) selftest_unexpected("sdl3vk_set_text_claim(1)"); }
 int sdl3vk_take_key_events(Sdl3VkKeyEvent *out, int max) { (void)out; (void)max; return 0; }
 int sdl3vk_take_pause_request(void) { return SDL3VK_PAUSE_REQUEST_NONE; }
@@ -2492,6 +2496,32 @@ static void selftest_held_present_window_closed_requests_quit(void) {
     s_quit_requested = 0;
     g_ace_on = 0;
 }
+
+/* The game's sample reads the host's stick dead zone with the stick: the larger of the active
+ * input profile's X and Y deadzone_inner in centred counts (ace_stick_host_counts), 0 with no
+ * profile. */
+static void selftest_stick_dead_zone_from_profile(void) {
+    static NkInputProfile prof;
+    const int sdl3 = s_sdl3;
+    s_sdl3 = 1;
+    memset(&prof, 0, sizeof(prof));
+    s_stub_profile = NULL;
+    (void)selftest_game_sample();
+    assert(gui_stick_dead_zone() == 0);
+    prof.axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner = 7849;   /* the default profile's */
+    prof.axes[NK_PSP_AXIS_ANALOG_Y].deadzone_inner = 7849;
+    s_stub_profile = &prof;
+    (void)selftest_game_sample();
+    assert(gui_stick_dead_zone() == 30);
+    prof.axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner = 0;
+    prof.axes[NK_PSP_AXIS_ANALOG_Y].deadzone_inner = 25700;  /* the larger axis, for both */
+    (void)selftest_game_sample();
+    assert(gui_stick_dead_zone() == 100);
+    s_stub_profile = NULL;
+    (void)selftest_game_sample();
+    assert(gui_stick_dead_zone() == 0);
+    s_sdl3 = sdl3;
+}
 #endif /* SR_SDL3VK */
 
 /* The unset SR_FPS_CAP default is the PSP scanout period, not a slower title-specific
@@ -2527,6 +2557,7 @@ int main(void) {
     selftest_display_busy_frames();
     selftest_held_present_passes_a_tap_to_the_game();
     selftest_held_present_window_closed_requests_quit();
+    selftest_stick_dead_zone_from_profile();
 #endif
     return 0;
 }

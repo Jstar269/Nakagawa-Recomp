@@ -134,8 +134,8 @@ void ace_set_cull_untracked(unsigned long n);
 int ace_stick_host_counts(int deadzone_inner_x, int deadzone_inner_y);
 /* Remaps one left-stick sample (bytes 0..255, 128 at rest) so the host's live range starts past
  * a square dead zone of game_counts (1..126) that the title ignores. host_counts is the host's
- * own dead zone (ace_stick_host_counts): 127 or more, or below 0, reads as 0, and above
- * game_counts - 1 as game_counts - 1. With h = byte - 128 (clamped to -127..127) and
+ * own dead zone (ace_stick_host_counts): 127 or more, or below 0, reads as 0; any D in 0..126
+ * is used as it is, at or above game_counts too. With h = byte - 128 (clamped to -127..127) and
  * m = max(|hx|, |hy|), the target magnitude is G + (m - D) * (127 - G) / (127 - D) past D and
  * m * (G - 1) / D up to it; both axes scale by that over m, rounded to nearest, signs kept, and
  * go back to bytes through the inverse of the title's centring (x >= 1: x + 128, else x + 127).
