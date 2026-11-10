@@ -2481,14 +2481,16 @@ def _loaded_float_address(path: str, name: str, fn_addr: int, site_addr: int, wo
     call or a branch-likely the code that follows is not reached with that transfer's slot run.
 
     The taken path of a branch is checked too, where this scan can see it: a branch or jump in
-    the instructions read whose target lies after the ``lui`` and at or before the load reaches
-    the load by a second path, around part of the code that builds the address, and refuses.
+    the instructions read whose target lies at or before the load, and whose taken path skips
+    the ``lui`` or the ``addiu``/``ori`` (they lie after its delay slot and before its target),
+    reaches the load by a second path around the code that builds the address, and refuses.
     Read backward in address order, like _check_even_counter; a branch from farther away into
     those instructions is not seen."""
     base = (word >> 21) & 31
     imm = word & (0xFFFC if word >> 26 == 0x32 else 0xFFFF)  # lv.s keeps a register bit in its low bits
     offset = imm - 0x10000 if imm & 0x8000 else imm
     low: int | None = None
+    low_pc: int | None = None
     lo = max(fn_addr, site_addr - 4 * REFERENCE_SCAN_WORDS)
     pc = site_addr - 4
     while pc >= lo and base != 0:
@@ -2509,10 +2511,12 @@ def _loaded_float_address(path: str, name: str, fn_addr: int, site_addr: int, wo
                     and not _falls_through(prev, pc - 4)):
                 break  # the slot of a jump, a call or a branch-likely: not run on the way to the load
             if op == 0x0F:
-                _refuse_second_path(path, name, lo, pc, site_addr, read_words_fn)
+                built = (pc,) if low_pc is None else (pc, low_pc)
+                _refuse_second_path(path, name, lo, built, site_addr, read_words_fn)
                 return (((w & 0xFFFF) << 16) + (low or 0) + offset) & 0xFFFFFFFF
             if op in (0x09, 0x0D) and rs == base and rt == base and low is None:
                 low = _sx16(w & 0xFFFF) if op == 0x09 else w & 0xFFFF
+                low_pc = pc
             else:
                 fail(path, f"site {name!r}: the base register of its load is computed at 0x{pc:08x} "
                            f"(0x{w:08x}), not a constant address (fail-closed refusal)")
@@ -2521,10 +2525,14 @@ def _loaded_float_address(path: str, name: str, fn_addr: int, site_addr: int, wo
                f"straight-line code before it (fail-closed refusal)")
 
 
-def _refuse_second_path(path: str, name: str, lo: int, lui_addr: int, site_addr: int, read_words_fn: Any) -> None:
-    """No branch or jump among the instructions read before a referenced load (from ``lo``) lands
-    after the ``lui`` and at or before the load. A target that is only the instruction after the
-    transfer's own delay slot skips nothing."""
+def _refuse_second_path(path: str, name: str, lo: int, built: tuple[int, ...], site_addr: int,
+                        read_words_fn: Any) -> None:
+    """No branch or jump among the instructions read before a referenced load (from ``lo``) is
+    taken to the load, or before it, around an instruction in ``built`` (the ``lui`` and the
+    ``addiu``/``ori`` that build its address). A taken transfer runs its delay slot and skips
+    the instructions from the one after that slot up to its target, so only those are compared:
+    a branch with the ``lui`` in its slot, or one past code that does not build the address, is
+    two paths that both build it."""
     for pc in range(lo, site_addr, 4):
         w = _read_word(read_words_fn, pc)
         if w is None:
@@ -2532,7 +2540,7 @@ def _refuse_second_path(path: str, name: str, lo: int, lui_addr: int, site_addr:
         target = _branch_target(w, pc)
         if target is None and w >> 26 == 0x02:
             target = ((pc + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
-        if target is not None and lui_addr < target <= site_addr and target != pc + 8:
+        if target is not None and target <= site_addr and any(pc + 8 <= a < target for a in built):
             fail(path, f"site {name!r}: the transfer at 0x{pc:08x} can land at 0x{target:08x}, inside the code "
                        f"that builds its load's address: the load is reached by two paths (fail-closed refusal)")
 

@@ -4757,6 +4757,11 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             ("a load in the slot of a branch-likely", [_lui(V0, 0), beql]),
             ("a lui in the slot of a conditional branch", [_beq(A1, ZERO, w + 8, w + 0x14), _lui(V0, 0)]),
             ("a lui before a conditional branch", [_lui(V0, 0), _beq(A1, ZERO, w + 0xC, w + 0x18), NOP]),
+            # Taken to the load, but around nothing that builds the address: both paths build it.
+            ("a lui in the slot of a branch taken to the load",
+             [_beq(A1, ZERO, w + 8, w + 0x14), _lui(V0, 0), NOP]),
+            ("a lui and an addiu, then a branch taken to the load",
+             [_lui(V0, 0), _addiu(V0, V0, 0), _beq(A1, ZERO, w + 0x10, w + 0x1C), NOP, NOP]),
             ("both: a lui in a slot and the load in the next slot",
              [_beq(A1, ZERO, w + 8, w + 0x18), _lui(V0, 0), _j(w + 0x18)]),
             ("a lui sixteen instructions back", [_lui(V0, 0)] + [NOP] * 15),
