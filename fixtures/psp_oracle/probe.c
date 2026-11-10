@@ -10460,9 +10460,12 @@ static void run_ge_sync_ids(int emulated) {
  * named. A list is enqueued stalled at its first word, its id is published to the handlers and
  * only then is the stall moved past the list, so a handler that runs at once reads its own list.
  *
- * Each cell is bounded: 100 ms of 1 ms list-state polls, then, if the GE is not idle,
- * sceGeContinue in a helper thread waited for with a deadline and another 100 ms of polls, then,
- * if still not idle, a sceGeBreak(1) reset with a bounded idle wait, recorded as TIMEOUT. The
+ * Each cell is bounded: 100 ms of 1 ms list-state polls, then, if the list still reads queued,
+ * drawing, stalled or paused, sceGeContinue in a helper thread waited for with a deadline and
+ * another 100 ms of polls, then a wait of up to 100 ms for the GE to go idle and, only if the
+ * list still reads 1-4 or the GE is still busy after it, a sceGeBreak(1) reset, recorded as
+ * TIMEOUT. Neither decision rests on a single sceGeDrawSync sample, because in the XMB context
+ * the VSH draws its own lists every frame. The
  * undefined behaviours come last among the handler cells and the unaligned jump cells last of
  * all. Teardown restores the four marker commands with one more list, leaves the GE idle and
  * unregisters both callback ids. */
@@ -10491,6 +10494,7 @@ static void run_ge_sync_ids(int emulated) {
 #define GSG_POLL_US 1000u
 #define GSG_RUNS 6u
 #define GSG_CONTINUE_TIMEOUT_US 200000u
+#define GSG_IDLE_WAIT_US 100000u
 #define GSG_HELPER_PRIORITY 0x18
 #define GSG_HELPER_STACK 0x1000
 #define GSG_BUSY_SPIN_CAP 4000000u
@@ -10741,17 +10745,20 @@ static void gsg_cell(int emulated, uint32_t index, int cbid_handlers, int cbid_n
 
     uint32_t end[GSG_END_WORDS];
     memset(end, 0, sizeof(end));
-    /* Not done: the GE is busy, or the list still reads queued, drawing, stalled or paused
-       (PSPSDK PspGeListState 1-4) whatever sceGeDrawSync says. */
-    if (qid >= 0 && (draw1 != PSP_GE_LIST_DONE || (last1 >= 1 && last1 <= 4))) {
+    /* Continue is decided from this list only: it still reads queued, drawing, stalled or
+       paused (PSPSDK PspGeListState 1-4). sceGeDrawSync is recorded but not used here: in the
+       XMB context the VSH queues its own lists every frame. */
+    if (qid >= 0 && last1 >= 1 && last1 <= 4) {
         probe_step(emulated, "ge-signal", "continue");
         end[0] = 1u;
         gsg_continue(&end[1]);
         (void)gsg_poll(qid, &end[4]);
     }
     uint32_t *tail = &end[4u + GSG_SEQ_WORDS];
+    /* A bounded wait (GSG_IDLE_WAIT_US) for global idle before the reset decision, so a VSH
+       list that is drawing at the moment of one sample does not trigger a sceGeBreak(1). */
+    GeIdleWait w = ge_wait_idle(-1, GSG_IDLE_WAIT_US);
     tail[0] = (uint32_t)(qid >= 0 ? sceGeListSync(qid, 1) : qid);
-    GeIdleWait w = ge_wait_idle(-1, 0u);
     tail[1] = (uint32_t)w.draw_state;
     const int final_list = (int)tail[0];
     const int timed_out = !w.idle || (qid >= 0 && final_list >= 1 && final_list <= 4);

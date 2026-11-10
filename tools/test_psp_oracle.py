@@ -10203,6 +10203,16 @@ class GeSignalProbeTests(unittest.TestCase):
                         bodies["gsg_cell"].index("sceGeListEnQueue("))
         self.assertLess(bodies["gsg_cell"].index('probe_step(emulated, "ge-signal", "reset");'),
                         bodies["gsg_cell"].index("ge_reset_queues(&w)"))
+        # XMB context: continue and reset rest on this list's state and a bounded idle wait,
+        # never on one sceGeDrawSync(1) sample (the VSH queues its own lists every frame).
+        cell = bodies["gsg_cell"]
+        self.assertIn("if (qid >= 0 && last1 >= 1 && last1 <= 4) {", cell)
+        self.assertNotIn("draw1 != PSP_GE_LIST_DONE", cell)
+        self.assertNotIn("ge_wait_idle(-1, 0u)", cell)
+        self.assertIn("#define GSG_IDLE_WAIT_US 100000u", code)
+        self.assertLess(cell.index("GeIdleWait w = ge_wait_idle(-1, GSG_IDLE_WAIT_US);"),
+                        cell.index("const int timed_out = !w.idle || (qid >= 0 && final_list >= 1 "
+                                   "&& final_list <= 4);"))
         teardown = bodies["run_ge_signal"]
         self.assertIn("sceGeUnsetCallback(cbid_handlers)", teardown)
         self.assertIn("sceGeUnsetCallback(cbid_null_rc)", teardown)
