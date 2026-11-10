@@ -3759,10 +3759,24 @@ static EnhancedRowPlaces enhanced_row_places(FlowCase which) {
    page and on a game's. */
 static void test_enhanced_rows_stay_put(void) {
     static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
+    /* Each part's words by part, so a part added later has none (NULL) until it is listed
+       here, and the check below names it instead of the loop reading through NULL. */
     static const char *const *const labels[PLAYER_PART_COUNT] = {
-        k_enhanced_af_labels, k_enhanced_switch_labels, k_enhanced_switch_labels,
-        k_enhanced_switch_labels, k_enhanced_switch_labels, k_enhanced_switch_labels,
-        k_enhanced_switch_labels, k_enhanced_upscale_labels};
+        [PLAYER_PART_FILTERING] = k_enhanced_af_labels,
+        [PLAYER_PART_TEXT] = k_enhanced_switch_labels,
+        [PLAYER_PART_READOUT] = k_enhanced_switch_labels,
+        [PLAYER_PART_NOTICE] = k_enhanced_switch_labels,
+        [PLAYER_PART_WIDE] = k_enhanced_switch_labels,
+        [PLAYER_PART_SMOOTH] = k_enhanced_switch_labels,
+        [PLAYER_PART_SAS] = k_enhanced_switch_labels,
+        [PLAYER_PART_CULL] = k_enhanced_switch_labels,
+        [PLAYER_PART_UPSCALE] = k_enhanced_upscale_labels};
+    for (int part = 0; part < PLAYER_PART_COUNT; ++part) {
+        if (labels[part] == NULL) {
+            CHECK(false, "every Settings > Enhanced part has its words in this test");
+            return;
+        }
+    }
     for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
         EnhancedRowPlaces base;
         memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
