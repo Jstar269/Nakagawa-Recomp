@@ -108,7 +108,7 @@
  *    image until it is. Nothing reads a twin back, so nothing the guest reads changes
  *    (gpu-coherence-selftest twin-*). The software backend has no twin and shows the
  *    authentic image. Off (the default), no twin is made and every path is the one above.
- *  - Host mip chains (Enhanced part mips=on, tex_mips.h; ENHANCEMENT_CONTRACT.md 10.15): a cache
+ *  - Host mip chains (Enhanced part mips=on, tex_mips.h; ENHANCEMENT_CONTRACT.md 10.16): a cache
  *    entry the game gives one level, filtered linearly when minified and not a render target, is
  *    made with a full chain whose levels 1.. are built on the host from the decoded level 0. Its
  *    plain view and set still hold level 0 alone; a transformed draw whose texture alpha, if it
@@ -4763,7 +4763,7 @@ static int color_test_active(const GeState *g) {
  * (tex_xs_bindable, tex_xs_eligible), else tex_entry_set's. s_tex_bound_scale reports which.
  * A color-test draw binds the guest-resolution set: ge.c keys on the guest's texels, and an xBRZ
  * or replacement copy's texels are other colours, with the key blended into their edges. */
-/* ---- host mip chains (tex_mips.h; Enhanced part mips=on, ENHANCEMENT_CONTRACT.md 10.15) ------
+/* ---- host mip chains (tex_mips.h; Enhanced part mips=on, ENHANCEMENT_CONTRACT.md 10.16) ------
  * Which textures: one the game gives one level (no TEXMODE levels), that it filters linearly when
  * minified (the cache key holds the filter), that is not a render target read back through the
  * cache (s_tex_noscale) and none of whose bytes lie in a live render target: those stay exactly

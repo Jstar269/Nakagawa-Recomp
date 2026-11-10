@@ -67,7 +67,7 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;cull=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate cull");
     }
-    /* mips (contract 10.15, 11.3.8): optional like cull, in an Enhanced or an Ace line; a missing key
+    /* mips (contract 10.16, 11.3.8): optional like cull, in an Enhanced or an Ace line; a missing key
        and mips=off are both off, and a line without it formats as before. */
     {
         static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
@@ -80,12 +80,12 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;mips=on", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.mips == 1 && c.tier == ACE_TIER_ENHANCED,
               "mips=on in an Enhanced line");
-        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 8, ";mips=on") == 0,
-              "mips=on formats with the key last (%s)", out);
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 17, ";tess=off;mips=on") == 0,
+              "mips=on formats right after tess (%s)", out);
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;mips=on", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.cull == 1 && c.mips == 1 &&
-              ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 16, ";cull=on;mips=on") == 0,
-              "cull and mips together format in that order (%s)", out);
+              ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 25, ";tess=off;mips=on;cull=on") == 0,
+              "mips goes after tess and before cull, which stays last (%s)", out);
         snprintf(spec, sizeof(spec), "%s;mips=2", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 && c.on == 0,
               "mips=2 is a bad value");
@@ -234,6 +234,20 @@ static void cell_switch(void) {
           strcmp(ace_spec_text(),
                  "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off") == 0,
           "an Ace run is called Ace, and its line is canonical");
+    {
+        /* Every part on, each at its longest word: the words fit ACE_WORDS_MAX and the line
+           ACE_SPEC_MAX, so a part added without room fails here. A new key adds itself here. */
+        static const char k_every[] = "v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;"
+                                      "smooth=x2;sas=sinc;tess=4;mips=on;cull=on";
+        char all[1024], fit[ACE_WORDS_MAX], line[1024];
+        CHECK(ace_init_spec(k_every, NULL) == 1 && ace_requested()->mips && ace_requested()->cull,
+              "every part on is a valid Ace line");
+        const size_t n_all = ace_feature_words(all, sizeof(all));
+        CHECK(n_all > 0 && ace_feature_words(fit, sizeof(fit)) == n_all && strcmp(fit, all) == 0,
+              "every part's words fit ACE_WORDS_MAX (%zu bytes: '%s')", n_all + 1u, all);
+        CHECK(ace_format(ace_requested(), line, sizeof(line)) && strlen(line) < ACE_SPEC_MAX &&
+              strcmp(line, k_every) == 0, "every part's line fits ACE_SPEC_MAX and is canonical (%s)", line);
+    }
     CHECK(ace_init_spec(k_good, NULL) == 1 && strcmp(ace_tier_name(), "Enhanced") == 0,
           "the next Enhanced run is called Enhanced again");
     CHECK(ace_feature_words(words, sizeof(words)) > 0 &&

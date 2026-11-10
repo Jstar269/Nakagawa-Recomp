@@ -1146,7 +1146,7 @@ tex-scale-selftest:
 
 native-core-tests: tex-scale-selftest
 
-# tex-mips-selftest - host-built mip chains' CPU side (src/rt/gpu_sdl3vk/tex_mips.h, contract 10.15):
+# tex-mips-selftest - host-built mip chains' CPU side (src/rt/gpu_sdl3vk/tex_mips.h, contract 10.16):
 # the level count, the linear-light box filter, alpha weighting, the colour-key fill and a texture
 # with no alpha. No GPU and no SDL3. tex-mips-mutant builds it without the colour-key fill and passes
 # only when the key-edge cell fails for that reason.

@@ -349,9 +349,10 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
-section 11.3.6) and `mips` (`on` or `off`, section 10.15) are the other keys a line may leave out: a missing `cull`
+section 11.3.6) and `mips` (`on` or `off`, section 10.16) are the other keys a line may leave out: a missing `cull`
 is off, and `cull=on` needs `tier=ace`; a missing `mips` is off, and `mips=on` may be in an Enhanced or an Ace line.
-Each is written only when on, last, `cull` before `mips`, so a line without them keeps its text. Every
+Each is written only when on, at its place in the key order (`mips` after `tess`, `cull` last), so a line
+without them keeps its text. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -1023,7 +1024,7 @@ both renderers share, so the software renderer and the Vulkan renderer draw the 
     than d for a small patch, and different from d for a large one;
   - the exit line, with the quads drawn and the capped draws.
 
-### 10.15. Smooth Distant Textures (Host Mip Chains)
+### 10.16. Smooth Distant Textures (Host Mip Chains)
 
 Most PSP games give a texture one level and let the GE sample it with a bilinear filter however small it is drawn
 (#1273). At 1x a far surface is a few pixels across and the aliasing is part of the PSP's picture; at 4x the same
@@ -1097,7 +1098,7 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
     with the software renderer; the chain bytes are
     1365 texels an entry. It runs at render scales 4, 2 and 1, with 16x texture filtering, and with the part off,
     where the minified draw must show level 0's aliasing and no entry may have a chain.
-  - `ace-selftest` pins the key: optional, `on` or `off`, in an Enhanced or Ace line, written last and only when on.
+  - `ace-selftest` pins the key: optional, `on` or `off`, in an Enhanced or Ace line, written only when on, after `tess` and before `cull`.
     `test_play_mode_mips_settings` in `tests/native/test_player_state.c` checks the part at both levels, its
     save and load, and the launch line. `gpu-coherence-selftest`'s authentic run requires no entry to have a chain.
 
@@ -1570,7 +1571,7 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
 
 #### 11.3.8. Smooth Distant Textures (`mips`)
 
-The feature of section 10.15 (#1273). How it draws is described there; this entry is what the guest can observe.
+The feature of section 10.16 (#1273). How it draws is described there; this entry is what the guest can observe.
 
 - **Status: guest-visible.** Each present commits the frame it shows to guest VRAM, so a frame with a smoothed
   texture is the frame the guest keeps, as with texture filtering. Its key, its library and per-title settings and
@@ -1583,7 +1584,7 @@ The feature of section 10.15 (#1273). How it draws is described there; this entr
   line, never has a chain.
 - **Never silent.** A run with it on prints, after its `HOST_MIPS: on` line, `HOST_MIPS: guest-visible: every present
   commits the smoothed frame to guest VRAM (ENHANCEMENT_CONTRACT.md 11.3.8)`, and at its end the `HOST_MIPS: exit`
-  line with the entries, builds and binds, and the binds each rule kept at level 0 (section 10.15).
+  line with the entries, builds and binds, and the binds each rule kept at level 0 (section 10.16).
 - **What it changes:** the pixels of transformed draws that minify a single-level texture with a linear filter, in
   the frames a present commits: they show the chain's filtered colour instead of a bilinear sample of level 0.
   Through-mode draws, colour-tested draws, alpha-unused draws of a keyed texture, render targets and textures the

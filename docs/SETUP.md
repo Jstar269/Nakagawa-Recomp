@@ -129,7 +129,7 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   surface no longer shimmers at a high render scale. The copies add up to a third of the texture's GPU memory.
   Menus, text and textures the game already shrinks itself are drawn as before. A run's log ends with a
   `HOST_MIPS: exit` line that counts the textures and the build time. The rules are in
-  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1015-smooth-distant-textures-host-mip-chains).
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1016-smooth-distant-textures-host-mip-chains).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release

@@ -29,7 +29,7 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_CULL, ACE_KEY_MIPS
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_MIPS, ACE_KEY_CULL
 } AceKey;
 
 static const struct {
@@ -46,8 +46,8 @@ static const struct {
     {"sas", ACE_KEY_SAS, 1},
     {"tess", ACE_KEY_TESS, 1},
     {"tier", ACE_KEY_TIER, 0},
-    {"cull", ACE_KEY_CULL, 0},
     {"mips", ACE_KEY_MIPS, 0},
+    {"cull", ACE_KEY_CULL, 0},
 };
 
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
@@ -174,14 +174,15 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
                       tier_word(c->tier), c->af, on_off(c->text), on_off(c->readout),
                       on_off(c->notice), wide_word(c->wide), smooth_word(c->smooth),
                       sas_word(c->sas), tess_word(c->tess));
-    /* Written only when on: a missing cull is off, so every line without it keeps its text. */
-    if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
-        const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
-        n = m < 0 ? -1 : n + m;
-    }
-    /* mips likewise: written only when on, so a line without it keeps its text. */
+    /* Written only when on, at its place in the key order (after tess): a missing mips is off,
+       so every line without it keeps its text. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->mips) {
         const int m = snprintf(out + n, cap - (size_t)n, ";mips=on");
+        n = m < 0 ? -1 : n + m;
+    }
+    /* cull likewise, and last. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
         n = m < 0 ? -1 : n + m;
     }
     if (n < 0 || (size_t)n >= cap) { out[0] = '\0'; return 0; }
@@ -202,7 +203,7 @@ static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "cull", "mips"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "mips", "cull"
 };
 
 /* The run's observation state. */
@@ -360,8 +361,8 @@ size_t ace_feature_words(char *out, size_t cap) {
     }
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
-    if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.mips) used = words_add(out, cap, used, "smooth distant textures");
+    if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
     if (s_eff.tess) {
@@ -790,9 +791,9 @@ size_t ace_report_json(char *out, size_t cap) {
             s_eff.af, s_eff.text ? "true" : "false", s_eff.readout ? "true" : "false",
             s_eff.notice ? "true" : "false", wide_word(s_eff.wide), smooth_word(s_eff.smooth),
             sas_word(s_eff.sas), tess_word(s_eff.tess));
+    if (s_req.mips) ACE_PUT("  \"mips\": %s,\n", s_eff.mips ? "true" : "false");
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
-    if (s_req.mips) ACE_PUT("  \"mips\": %s,\n", s_eff.mips ? "true" : "false");
     ACE_PUT("  \"unavailable\": {");
     int first = 1;
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
@@ -870,10 +871,10 @@ void ace_finish(void) {
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_CULL, ACE_HAS_MIPS };
+                                                ACE_HAS_MIPS, ACE_HAS_CULL };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
-                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.cull,
-                                        s_eff.mips };
+                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.mips,
+                                        s_eff.cull };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
