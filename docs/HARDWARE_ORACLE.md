@@ -3436,7 +3436,7 @@ not expected PSP values.
 | `ge-through-z` | `PSP-GE-THROUGHZ-001` | `NOT_RUN` (built as case 185; no hardware run) | Through-mode vertex z outside 0..65535, fractional, infinite and NaN: the depth word the GE writes under a 16x16 sprite (depth test ALWAYS, writes on, cleared to 0x1234) and whether colour is written: clamp, wrap or a dropped draw (a Ridge Racer 2 fix). |
 | `insn-trace` | `PSP-TRACE-001` | `MEASURED` (2026-10-29, `84568280`; 2026-11-02, `1fbab0c6`, boot 98; single launches, not in the campaign queue) | #312: per instruction of four source-owned microprograms single-stepped on the Allegrex (ALU, shifts, compares, mult/divu, loads and stores of every width, a delay-slot loop; branches and likely branches, bal/bltzal calls returning by jr, a store in a delay slot; `add.s`/`mfc1`/`c.eq.s`/`cfc1` and `mfv`/`mtv`), the traced register state, including FCR31 and selected VFPU registers, and any store. 136 result records in 2026-10-29's two-fixture build, 149 in the four-fixture build; the v2 traces agree with Nakagawa's. See [#1375 and #312 runs 2026-11-02](#1375-and-312-runs-2026-11-02). |
 | `ge-sync-ids` | `PSP-GE-SYNC-001` | `MEASURED` (2026-10-31, `66940d76`, boot 86; single launch, not in the campaign queue; captured earlier from `96fe29f6` and `f6da6125`) | #1374: `sceGeListSync`, `sceGeDrawSync` and `sceGeListDeQueue` on an unknown queue id, on completed lists before and after later lists, on a list a `sceGeBreak(1)` reset removed, and with sync types other than 0 and 1, each blocking call bounded in a helper thread. See [PSP-GE-SYNC-001 runs 2026-10-31](#psp-ge-sync-001-runs-2026-10-31). |
-| `ge-signal` | `PSP-GE-SIGNAL-001` | `NOT_RUN` (built as case 181; no hardware run) | #2095: whether the signal handler runs for SIGNAL behaviours 0x01-0x03 (and the undefined 0x00 and 0x04), whether the list waits for it, whether 0x03 pauses until `sceGeContinue`, what a NULL-handler callback id does, and where RJUMP and RCALL go with an aligned and an unaligned offset; every cell bounded, a `sceGeBreak(1)` reset after a `TIMEOUT`. Continue and reset are decided from the probe's own list state and a bounded (100 ms) idle wait, never one `sceGeDrawSync(1)` sample, as the VSH draws its own lists in the XMB context. |
+| `ge-signal` | `PSP-GE-SIGNAL-001` | `CAPTURED` (2026-11-10, PSP-3000, boot 179, XMB context, `80e7c9eb`; 37 records, 12 of 14 cells; incomplete, stalled at `rjump-un`, console power-cycled; not acceptance-eligible) | #2095: whether the signal handler runs for SIGNAL behaviours 0x01-0x03 (and the undefined 0x00 and 0x04), whether the list waits for it, whether 0x03 pauses until `sceGeContinue`, what a NULL-handler callback id does, and where RJUMP and RCALL go with an aligned and an unaligned offset; every cell bounded, a `sceGeBreak(1)` reset after a `TIMEOUT`. Continue and reset are decided from the probe's own list state and a bounded (100 ms) idle wait, never one `sceGeDrawSync(1)` sample, as the VSH draws its own lists in the XMB context. POWER RISK: `rjump-un` and `rcall-un` are not to be re-run unattended. See [PSP-GE-SIGNAL-001 capture 2026-11-10](#psp-ge-signal-001-capture-2026-11-10). |
 | `ge-mip` | `PSP-GE-MIP-001` | `MEASURED` (2026-10-31, `66940d76`, boot 86, 57 cells; 2026-11-03, `99a384bb`, boot 111, 66 cells; single launches, not in the campaign queue) | #1373: the raw pixels of a 16x4 window after 66 textured draws over eight one-colour mip levels: constant, automatic, slope and the unused level mode, biases and their rounding, blends, the highest-level clamp, footprints along either axis, and transform-mode quads at fixed and varying w, mirrored ramps included. 330 result records (285 in the 57-cell run, whose windows the 66-cell run repeats bit for bit). |
 | `memory-edge` | `PSP-MEMEDGE-001` | `CAPTURED` (2026-11-02, `bb3f36e4`, boot 104, game context, firmware 6.6.1; single launch, not in the campaign queue; 33 PASS and 42 intentional SKIP, so not acceptance-eligible) | #303, #1380: the top of user RAM from the partition allocator and the end of VRAM from the DMA engine; `sceIoWrite`, `sceIoRead`, `sceDmacMemcpy` and `sceDmacTryMemcpy` with a buffer whose last 0x100 bytes sit at the edge and lengths 0x100 plus 0, 1, 4 and 0x1000. See [PSP-MEMEDGE-001 capture 2026-11-02](#psp-memedge-001-capture-2026-11-02). |
 | `ge-clut-mip` | `PSP-GE-MIP-002` | `MEASURED` (2026-11-06, PSP-3000, boot 134, `2795f150`; 94 records) | Multi-CLUT mip sampling cells across palette formats, banks and level selection. |
@@ -3459,6 +3459,78 @@ not expected PSP values.
 | `vfpu-basic-arith` | `PSP-VFPU-BASICARITH-001` | `MEASURED` (2026-11-08, PSP-3000, boot 166, `187681f0`; 359 records) | #326: vadd/vsub/vmul/vmin/vmax .s-.q, vscl, vdiv.s, vmov/vabs/vneg, vzero/vone/vidt over 20 operand classes. |
 | `vfpu-wide-dot-matrix` | `PSP-VFPU-WIDEDOT-001` | `NOT_RUN` (built as case 173; no hardware run) | #326: vdot, vhdp, vcrsp, vqmul, vtfm, vhtfm, vmmul, vmscl, vmzero/vmidt/vmone/vmmov and vrot over one special lane at a time and order-sensitive four-term sums. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (not registered; captured twice, PSP-3000, firmware 6.6.1: 2026-11-07 boot 145 and 2026-11-08 boot 152; rerun required; the probe prints `test_id=PSP-MPEG-001` and the cell is registered here as `PSP-MPEG-YCBCR-001`) | Each mode begins from a fresh stream, ringbuffer and MPEG context. The capture measured mode 2 (query 128, a 128-byte header after a decode, a CSC of zero pixels), the CSC y and h refusals and the 16-bit CSC output (#302). Mode 3's second decode never returned on boot 145 and again on boot 152 (the first returned 0 and left a 16-byte header over a black 4:2:0 frame); the probe now bounds each mode 2 and 3 decode with a 3 s helper thread and stops making MPEG calls after a block. |
+
+### PSP-GE-SIGNAL-001 capture 2026-11-10
+
+`ge-signal` (case 181, `run_ge_signal` in `fixtures/psp_oracle/probe.c`) ran once on 2026-11-10 (UTC) on the
+PSP-3000, boot 179, in the XMB context, at `80e7c9eb`, a pre-publication commit whose `ge-signal` section in
+`probe.c` and whose Makefile CASE line are identical to this tree's. Firmware: system software 6.61
+(`flash0:/vsh/etc/version.txt`: `release:6.61:`, `system:58401@release_661,0x06060110:`); PSPLink `pspver`
+0x06060010, which the runner records as 6.6.0 and which `pspver` prints in the XMB context on this boot
+(0x06060110 in the game context); custom firmware ARK-5 with cIPL, version 5.1.0 (operator-declared, not read
+by a tool). The stream is incomplete: the setup record and the three records of 12 of the 14 cells (`ctl`
+through `rcall-al`), 37 records, 35 `PASS` and 2 `TIMEOUT` (`gsg-b00-end` and `gsg-b04-end`, the cells' own
+bounded reset). The last line is the step marker `step=rjump-un`, the RJUMP cell with the unaligned offset
+0x22: no record of that cell, of `rcall-un`, of the teardown or the done record followed. The last host0
+write came 5.2 s after the launch, the runner's 300 s case timeout expired, the PSPLink USB device then
+disappeared and the shell did not answer, and the console needed a manual power cycle. The envelope is not
+acceptance-eligible: no completion marker, the loaded module not proven unloaded, the host0 round trip
+failed after it, and 8 records missing. The capture is therefore `CAPTURED` and establishes nothing about PSP
+behaviour; the values below are what it shows, for a rerun to confirm. The raw envelope, host0 log and decode
+stay in the private campaign directory.
+
+POWER RISK: `rjump-un` stalled the console until a power cycle, and `rcall-un` never ran; neither is to be
+re-run unattended. Whether the GE, the driver or something else stalled is not shown.
+
+How to read it. The handler words were sampled inside the GE interrupt at the call, so they belong to this
+list. The marker reads after a cell are not that strong: in the XMB context the VSH's own lists write
+0x55-0x57 (the setup read, before any probe list ran, was `0x54000000`, `0x55ffffff`, `0x56ffffff`,
+`0x57ffffff`), so a later `0x55ffffff`, `0x56ffffff` or `0x57ffffff` is the VSH's and says nothing about the
+probe's list. A read holding the cell's own value is the probe's. List states are uofw's: 0 completed, 1
+queued, 2 drawing, 4 paused; `0x80000100` is the invalid-id error. Times are microseconds after the stall
+release.
+
+- *Setup:* compiled SDK version `0x06060110`. `sceGeSetCallback` returned id 1 for the handlers and accepted an
+  all-NULL structure as id 2; whether the VSH holds id 0 is not shown.
+- *Control (FINISH only):* the finish handler ran once (id `0x5678`, arg `0xf161`, third argument
+  `0x0a0dcf98`, list state 0, 0x55 the cell's first value) at 2486 us. Across the handler calls the third
+  argument is always the address of the word after the END that follows the SIGNAL or FINISH being handled,
+  if the list base is `0x0a0dcf80` (an inference: no record holds the base).
+- *0x01 with handlers (`b01`):* the signal handler ran once (id `0x1234`, the SIGNAL argument; arg `0x5161`;
+  state 2), with marker A in 0x55 on entry and on return (1939 us, 1948 us), so marker B had not run while the
+  handler ran. The finish handler ran 8 us after it returned, state 0, marker B. No `sceGeContinue`, no reset.
+- *0x02 with handlers (`b02`, `b02-block`):* the signal handler ran once, state 2, with marker B already in 0x55
+  on entry (4586 us), so the list ran on past the SIGNAL/END before the handler sampled it. With the handler
+  held for 5 ms (`b02-block`), marker B was there at entry (16 us), the handler returned at 5018 us and the
+  finish handler ran only after that, at 5026 us. No `sceGeContinue`, no reset.
+- *0x03 with END 2 (`b03`):* the signal handler ran once at 1646 us, state 4, marker B in 0x55, its third argument
+  past the END of the FINISH (word 9); the FINISH at word 8 did not call the finish handler. The list read
+  queued (2 polls) and then paused (98 polls), with the cell's own values in 0x54-0x57. `sceGeContinue`
+  returned 0; the list then completed and the finish handler ran once at 132768 us (state 0, third argument
+  past word 26). 0x54 then held the bad-return marker of word 24: after the continue the list ran on from word
+  10 to the FINISH at word 25. No reset.
+- *NULL-handler id 2 (`b01-nocb`, `b02-nocb`, `b03-nocb`):* no handler ran. 0x01 and 0x02 completed without a
+  continue; 0x03 paused (2 queued, 98 paused polls) until `sceGeContinue`, which returned 0, and then ran on to
+  word 24 (`0x540bad07`).
+- *Undefined 0x00 and 0x04 (`b00`, `b04`):* no handler ran. Marker A ran and marker B never did (0x55 held the
+  cell's marker A in every later read). The list read 2 for all 200 polls, `sceGeContinue` returned
+  `0x80000020`, and the GE was still busy after the 100 ms idle wait; the probe's `sceGeBreak(1)` reset returned
+  0 and `sceGeDrawSync(1)` then read 0 (`TIMEOUT`).
+- *RJUMP, offset 0x20 (`rjump-al`):* no signal handler call. The finish handler ran once at 22 us with word
+  14's marker in 0x55, its third argument past word 16. 0x54 still held the cell's first value afterwards, so
+  word 7 (the word after the SIGNAL/END) did not run. 0x56 and 0x57 read the VSH's values, so whether words 12
+  and 13 ran is not shown: the capture does not separate a target of word 12, 13 or 14.
+- *RCALL, offset 0x20 (`rcall-al`):* no signal handler call. Word 14 ran (the finish handler's 0x55, at 36 us),
+  and the RET returned to word 7: 0x54 then held word 7's marker, and the finish handler's third argument was
+  past word 9, not past the bad-return sublist, so no stale stack slot was used. Words 12 and 13: not shown.
+- *Completed lists:* `sceGeListSync(qid, 1)` read 0 for 0 to 9 polls and then `0x80000100` for the rest of the
+  100 ms, though the probe never called `sceGeDrawSync(0)`; whether the VSH's own calls freed the slot is not
+  shown.
+
+Not shown: what an unaligned RJUMP or RCALL offset does; which of words 12 and 13 a jump ran; 0x01 under a
+compiled SDK version of 0x02000010 or lower; the teardown (marker restore, `sceGeUnsetCallback` results);
+more than one call of a handler (no count exceeded 1); the meaning of `0x80000020`; any of this in the game
+context.
 
 ### PSP-MEMEDGE-001 capture 2026-11-02
 

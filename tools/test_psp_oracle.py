@@ -3503,6 +3503,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # 2026-11-02: memory-edge (bb3f36e4): 33 PASS and 42 intentional SKIP records
                 # (no bottom-of-RAM edge, no scratchpad or VRAM file call, no unproven overrun).
                 "PSP-MEMEDGE-001",
+                # 2026-11-10: ge-signal (80e7c9eb, boot 179, XMB context): 37 records, 12 of 14
+                # cells; it stalled at rjump-un and the console needed a power cycle.
+                "PSP-GE-SIGNAL-001",
             },
         )
 
@@ -10069,8 +10072,8 @@ class GeSignalProbeTests(unittest.TestCase):
     """CASE=ge-signal (181, PSP-GE-SIGNAL-001) in probe.c: GE SIGNAL handler behaviours 0x00-0x04
     and RJUMP/RCALL offset alignment. Project-written lists in probe RAM (no VRAM), every GE wait
     bounded, sceGeContinue in a deadline-bounded helper thread, a sceGeBreak(1) reset after a
-    TIMEOUT, a fixed-shape stream that matches the registry, and no hardware result claimed
-    (NOT_RUN)."""
+    TIMEOUT, a fixed-shape stream that matches the registry, and the incomplete 2026-11-10
+    capture recorded as CAPTURED, claiming no hardware result."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -10120,7 +10123,8 @@ class GeSignalProbeTests(unittest.TestCase):
         self.assertEqual(_campaign_completeness_contract("ge-signal"), "strict-golden-sequence")
         self.assertNotIn("ge-signal", CAMPAIGN_QUEUE_CASES)
         self.assertIn("| `ge-signal` | `PSP-GE-SIGNAL-001` |", self.readme)
-        self.assertIn("| `ge-signal` | `PSP-GE-SIGNAL-001` | `NOT_RUN`", self.doc)
+        self.assertIn("| `ge-signal` | `PSP-GE-SIGNAL-001` | `CAPTURED` (2026-11-10, PSP-3000, "
+                      "boot 179, XMB context, `80e7c9eb`; 37 records, 12 of 14 cells;", self.doc)
 
     def test_encoding_is_cited_and_matches_uofw(self) -> None:
         self.assertIn("uofw src/kd/ge/ge.c", self.section)
@@ -10226,15 +10230,40 @@ class GeSignalProbeTests(unittest.TestCase):
         self.assertIn("sceGeListEnQueue(list, list, cbid, jump ? &args : NULL)", code)
         self.assertIn("sceGeListUpdateStallAddr(qid, (void *)&s_gsg_list[GSG_LIST_WORDS])", code)
 
-    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+    def test_manifest_row_is_a_captured_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "nakagawa_psp_oracle.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe.c")
         self.assertEqual(row["diagnostic_case_ids"], ["ge-signal"])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+        self.assertEqual(row["hardware_evidence"], "CAPTURED")
         self.assertNotIn("evidence_cases", row)
+        self.assertNotIn("measurement_note", row)
         self.assertEqual(row["case_ids"][-1], "ge-signal-done")
+
+    def test_the_incomplete_capture_is_captured_with_its_stall(self) -> None:
+        row = self.rows[0]
+        note = row["evidence_note"]
+        for term in ("2026-11-10", "PSP-3000", "boot 179", "XMB context", "80e7c9eb",
+                     "pre-publication commit", "identical to this tree's", "system software 6.61",
+                     "system:58401@release_661,0x06060110:", "0x06060010",
+                     "ARK-5 with cIPL, version 5.1.0", "37 records", "12 of the 14 cells",
+                     "35 PASS and 2 TIMEOUT", "Not acceptance-eligible", "step marker rjump-un",
+                     "manual power cycle", "POWER RISK: rjump-un and rcall-un",
+                     "establishes nothing about PSP behaviour", "are the VSH's",
+                     "0x80000020", "0x80000100", "words 12 and 13 not shown"):
+            self.assertIn(term, note)
+        self.assertNotIn("6.6.0)", note)  # the identity is never a bare 6.6.0
+        self.assertIn("POWER RISK", row["risk"])
+        self.assertIn("### PSP-GE-SIGNAL-001 capture 2026-11-10", self.doc)
+        self.assertIn("(#psp-ge-signal-001-capture-2026-11-10)", self.doc)
+        section = self.doc[self.doc.index("### PSP-GE-SIGNAL-001 capture 2026-11-10"):]
+        section = " ".join(section[:section.index("\n### ", 1)].split())
+        for term in ("`step=rjump-un`", "manual power cycle", "POWER RISK", "is the VSH's",
+                     "establishes nothing about PSP behaviour", "Not shown:"):
+            self.assertIn(term, section)
+        self.assertIn("**CAPTURED** on 2026-11-10 UTC (PSP-3000, boot 179, XMB context, "
+                      "`80e7c9eb`; 37 records, 12 of 14 cells", self.readme)
 
 
 class GeSampleProbeTests(unittest.TestCase):
