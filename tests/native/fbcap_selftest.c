@@ -908,6 +908,15 @@ static void test_texdump_folder(void) {
           "dump folder: no user data folder refused");
     CHECK(sr_texdump_folder("/d", "ULUS10000", out, 12u) == 0 && out[0] == '\0',
           "dump folder: a buffer too small is refused, not truncated");
+    /* The runtime holds the user data root in Windows' extended form, where '/' does not separate. */
+    CHECK(sr_texdump_folder("\\\\?\\C:\\data", "ULUS10000", out, sizeof out) == 1 &&
+              strcmp(out, "C:\\data/texdump/ULUS10000") == 0,
+          "dump folder: an extended drive root is written plain");
+    CHECK(sr_texdump_folder("\\\\?\\UNC\\srv\\share\\d", "ULUS10000", out, sizeof out) == 1 &&
+              strcmp(out, "\\\\srv\\share\\d/texdump/ULUS10000") == 0,
+          "dump folder: an extended UNC root is written plain");
+    CHECK(sr_texdump_folder("\\\\?\\", "ULUS10000", out, sizeof out) == 0 && out[0] == '\0',
+          "dump folder: an extended prefix with no folder is refused");
 }
 
 static void test_screenshot_request(void) {

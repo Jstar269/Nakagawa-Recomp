@@ -23,9 +23,12 @@
 
 #define QUICK_ROW_HEIGHT 64.0f
 /* Under QUICK_COMPACT_BELOW logical pixels high (the Controls page's split rule), every row
-   fits: rows are 48 px with a one-line description, on a wider card so the line holds. */
+   fits: rows are 48 px with a one-line description, on a wider card so the line holds, and
+   QUICK_ROW_GAP_COMPACT apart, so all six rows of an Enhanced run fit a 960x600 window above the
+   prompt bar (test_overlay_screens checks it). */
 #define QUICK_COMPACT_BELOW 720.0f
 #define QUICK_ROW_HEIGHT_COMPACT 48.0f
+#define QUICK_ROW_GAP_COMPACT 2.0f
 #define QUICK_CARD_WIDTH 640.0f
 #define QUICK_CARD_WIDTH_COMPACT 880.0f
 #define QUICK_SEGMENT_HEIGHT 30.0f
@@ -241,7 +244,8 @@ NkOverlayAction nk_overlay_page_settings(NkUi *ui, NkOverlayState *state,
     nk_ui_text_role(ui, QUICK_ID_TITLE, "Settings", NK_UI_TYPE_TITLE, theme->paper);
     {
         NkUiLayout rows = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),
-                                            nk_overlay_fit(), NK_UI_SPACE_1);
+                                            nk_overlay_fit(),
+                                            compact ? QUICK_ROW_GAP_COMPACT : NK_UI_SPACE_1);
         if (nk_ui_begin_container(ui, QUICK_ID_ROWS, &rows, NULL)) {
             /* The rows' part ids (the second argument) keep the numbers the first three rows
                had before fullscreen and frame pacing joined, so a page without the new rows

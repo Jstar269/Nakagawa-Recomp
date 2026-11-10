@@ -818,7 +818,8 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   `gui.c`) writes every texture the game draws from then on, each level once, as an RGBA PNG named the way a pack
   names it, `<16 hex cache key><8 hex hash>.png` and `..._<level>.png` for mip levels, into
   `<user data>/texdump/<disc ID>` (`sr_texdump_folder`: one folder a disc ID, never shared). A texture already in the
-  cache is written the next time it is drawn. A folder without a `textures.ini` gets one (`hash = quick`) first, and
+  cache is written the next time it is drawn. A folder without a `textures.ini` gets one first (`hash = quick`, and
+  a `[games]` line for the run's `SR_DISC_ID`, so the player knows whose pack it is), and
   the folder is then read as a pack whose hash kind and ranges name the files, so the same folder, its images enlarged
   by any tool the player likes, is a pack that lists what was dumped; a `textures.ini` the player edited (another
   hash, ranges) names the files of later dumps too, and one that does not read refuses the dump with its reason.

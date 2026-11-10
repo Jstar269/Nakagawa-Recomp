@@ -1201,8 +1201,22 @@ static int xst_cell_dump(int f) {
 
     /* 3. On: the texture already in the cache (drawn again, a cache hit) and new content at the
      * same address (a decode) are both written, under the names a pack gives them. */
-    if (!gegpu_texdump_start(dir, err, sizeof(err))) return xst_dump_fail(err);
+    xst_setenv("SR_DISC_ID", "TEST00042");
+    const int started = gegpu_texdump_start(dir, err, sizeof(err));
+    xst_setenv("SR_DISC_ID", NULL);
+    if (!started) return xst_dump_fail(err);
     if (gegpu_texdump_row() != 2 || !xst_dump_has(dir, "textures.ini")) return xst_dump_fail("the dump did not start with a textures.ini");
+    {
+        /* Its [games] names the run's game, so the player takes the folder as this game's pack. */
+        char ini[480], text[600];
+        snprintf(ini, sizeof(ini), "%s/textures.ini", dir);
+        FILE *fi = fopen(ini, "rb");
+        const size_t got = fi ? fread(text, 1, sizeof(text) - 1u, fi) : 0u;
+        if (fi) fclose(fi);
+        text[got] = '\0';
+        if (!strstr(text, "[games]\nTEST00042 = textures.ini\n"))
+            return xst_dump_fail("the dump's textures.ini does not name the run's game in [games]");
+    }
     s_tmpl_ok = 0;
     if (!xst_draw(60.0f, 140.0f)) return xst_dump_fail("a draw failed");
     if (!xst_dump_has(dir, name_b)) return xst_dump_fail("a texture already in the cache was not written when drawn again");

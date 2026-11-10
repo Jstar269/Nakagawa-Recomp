@@ -87,6 +87,19 @@ int sr_texdump_folder(const char *user_root, const char *disc_id, char *out, siz
     if (!out || outsz == 0u) return 0;
     out[0] = '\0';
     if (!user_root || !user_root[0]) return 0;
+    /* The runtime holds SR_USER_DATA_ROOT in Windows' extended form (\\?\C:\..., or
+       \\?\UNC\server\share\...), where '/' is not a separator. The dump writes through paths
+       joined with '/', as the pack reader reads them, so the folder takes the root's plain form. */
+    const char *unc = "";
+    if (strncmp(user_root, "\\\\?\\UNC\\", 8) == 0) {
+        user_root += 8;
+        unc = "\\\\";
+    } else if (strncmp(user_root, "\\\\?\\", 4) == 0) {
+        /* Only the drive form has a plain spelling; any other extended root is refused. */
+        if (!user_root[4] || user_root[5] != ':') return 0;
+        user_root += 4;
+    }
+    if (!user_root[0]) return 0;
     char disc[33];
     size_t n = 0;
     for (const char *p = disc_id ? disc_id : ""; *p && n < sizeof disc - 1u; p++) {
@@ -97,7 +110,7 @@ int sr_texdump_folder(const char *user_root, const char *disc_id, char *out, siz
     }
     disc[n] = '\0';
     if (n == 0u) return 0;
-    int w = snprintf(out, outsz, "%s/texdump/%s", user_root, disc);
+    int w = snprintf(out, outsz, "%s%s/texdump/%s", unc, user_root, disc);
     if (w < 0 || (size_t)w >= outsz) {
         out[0] = '\0';
         return 0;

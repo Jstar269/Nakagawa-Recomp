@@ -273,7 +273,8 @@ with the result as a texture pack. Nakagawa ships no textures and no upscaler, a
    name. Delete the files you don't want to change.
 4. Choose that folder as the game's texture pack (the game's **Enhanced options** > **Texture pack folder**).
 
-The folder holds a `textures.ini` that tells Nakagawa how the files are named; leave it there. Keep the pack to
+The folder holds a `textures.ini` that tells Nakagawa how the files are named and which game they are for; leave
+it there. Keep the pack to
 yourself: its pictures come from your copy of the game.
 
 ## When something is not supported yet

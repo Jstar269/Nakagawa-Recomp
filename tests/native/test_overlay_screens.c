@@ -25,6 +25,8 @@
 
 #define DUMP_CAP 1048576u
 #define CASE_DUMP_CAP 131072u
+/* frame_has_text reads a whole frame: a Settings page with every row passes CASE_DUMP_CAP. */
+#define TEXT_DUMP_CAP 262144u
 #define GOLDEN_PATH "fixtures/nk_ui/overlay.golden"
 
 static int failures;
@@ -165,7 +167,7 @@ static bool frame_has(NkUi *ui, NkOverlayState *state, const NkOverlayModel *mod
 
 static bool frame_has_text(NkUi *ui, NkOverlayState *state, const NkOverlayModel *model,
                            const char *needle) {
-    static char dump[CASE_DUMP_CAP];
+    static char dump[TEXT_DUMP_CAP];
     nk_ui_begin(ui, 0.0);
     (void)nk_overlay_frame(ui, state, model);
     if (nk_ui_end(ui) == NULL) return false;
@@ -303,7 +305,7 @@ static void test_ace(void) {
           "an authentic run has no texture dump row");
     model.texdump = 1;
     CHECK(frame_has_text(ui, &state, &model, "Dump textures") &&
-              frame_has_text(ui, &state, &model, "to make a texture pack"),
+              frame_has_text(ui, &state, &model, "Saves the textures the game draws"),
           "an Enhanced run offers the texture dump");
     (void)settle(ui, &state, &model);
     (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_DOWN);
@@ -318,7 +320,7 @@ static void test_ace(void) {
     model.texdump = 1;
     model.texdump_note = "Not started: the dump folder could not be made.";
     CHECK(frame_has_text(ui, &state, &model, "Not started: the dump folder could not be made.") &&
-              !frame_has_text(ui, &state, &model, "to make a texture pack"),
+              !frame_has_text(ui, &state, &model, "Saves the textures the game draws"),
           "a refused start says why on the row");
     nk_ui_destroy(ui);
     /* Both at every window size. */

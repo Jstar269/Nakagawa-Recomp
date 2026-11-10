@@ -4603,11 +4603,27 @@ int gegpu_texdump_start(const char *dir, char *err, size_t err_cap) {
         return 0;
     }
     if (!tex_dump_file_exists(ini)) {
+        /* [games] names the game the launcher exports (SR_DISC_ID), when it reads as a disc ID, so
+           the player knows the pack is this game's and refuses it for another. */
+        char game[16] = "";
+        const char *disc = getenv("SR_DISC_ID");
+        size_t gn = 0;
+        for (; disc && disc[gn] && gn + 1u < sizeof(game); gn++) {
+            const char c = disc[gn];
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                  c == '-' || c == '_'))
+                break;
+            game[gn] = c;
+        }
+        if (!disc || disc[gn]) gn = 0;   /* another character, or longer than a disc ID */
+        game[gn] = '\0';
         FILE *f = fopen(ini, "wb");
-        const int ok = f && fputs("; Written by Nakagawa's texture dump. The PNG files beside it are named for the\n"
-                                  "; textures they hold; enlarge them (2 to 6 times) and choose this folder as the\n"
-                                  "; game's texture pack.\n[options]\nversion = 1\nhash = quick\n", f) >= 0;
-        if (f && fclose(f) != 0) remove(ini);
+        int ok = f && fputs("; Written by Nakagawa's texture dump. The PNG files beside it are named for the\n"
+                            "; textures they hold; enlarge them (2 to 6 times) and choose this folder as the\n"
+                            "; game's texture pack.\n[options]\nversion = 1\nhash = quick\n", f) >= 0;
+        if (ok && game[0]) ok = fprintf(f, "[games]\n%s = textures.ini\n", game) > 0;
+        if (f && fclose(f) != 0) ok = 0;
+        if (!ok && f) remove(ini);
         if (!ok) {
             snprintf(err, err_cap, "the dump folder's textures.ini could not be written");
             return 0;
