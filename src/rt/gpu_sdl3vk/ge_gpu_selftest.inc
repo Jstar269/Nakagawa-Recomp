@@ -59,7 +59,9 @@ static uint32_t coherence_gbatch(uint32_t fmt) {
 /* The fixture's image is newer than guest VRAM in every row, as if the GPU had drawn them all. */
 static void coherence_image_newer(Target *t) {
     t->clean_gen = 0;
+    t->draw_x0 = 0;
     t->draw_y0 = 0;
+    t->draw_x1 = FB_W;
     t->draw_y1 = FB_H;
 }
 
@@ -625,6 +627,108 @@ static int coherence_run_undrawn_rows(void) {
     if (!ok || kept != pixel) {
         fprintf(stderr, "gpu coherence selftest [%s]: the readback of a target overwrote the "
                         "target below it (0x%08x, expected 0x%08x)\n", name, kept, pixel);
+        coherence_reset_targets();
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %-22s fmt=%u stride=%u scale=%d\n",
+           name, fmt, stride, s_scale);
+    coherence_reset_targets();
+    return 1;
+}
+
+/* A title may keep its palettes in the stride padding of its own render target: a 16-bit target
+ * at stride 512 that the GPU draws 480 pixels wide leaves x = 480 to 511 of every row to the CPU.
+ * A CLUT load, or a CPU read, of those columns reads plain guest VRAM, so it must neither submit
+ * the queued batches nor read the target back, however many drawn rows lie around it. A palette
+ * under the pixels the GPU drew is read back, and the load gets those pixels. */
+static int coherence_draw_480_wide(uint32_t base, uint32_t stride, uint32_t fmt) {
+    memset(s_ge, 0, sizeof(*s_ge));
+    s_ge->fbp = base;
+    s_ge->fbw = stride;
+    s_ge->fbfmt = fmt;
+    s_ge->zbp = 0x04180000u;
+    s_ge->zbw = stride;
+    s_ge->scis_x2 = 479;
+    s_ge->scis_y2 = (int)FB_H - 1;
+    s_ge->maxz = 65535;
+    s_ge->clear = 1;
+    s_ge->clear_mode = 0x301;
+    uint32_t rgba = fb_unpack(coherence_gbatch(fmt), fmt);
+    GeVtx p0 = { 0.0f, 0.0f, 1.0f, 1.0f, 0, 0, 1.0f,
+                 rgba & 0xff, (rgba >> 8) & 0xff, (rgba >> 16) & 0xff, rgba >> 24 };
+    GeVtx p1 = p0;
+    p1.x = 480.0f;
+    p1.y = (float)FB_H;
+    return hook_sprite(&p0, &p1, 0) && s_nbatch;
+}
+
+/* Load `blocks` 32-byte blocks of 5551 palette from `clut` with a GE list. */
+static void coherence_load_clut(uint32_t clut, uint32_t blocks) {
+    const uint32_t list_addr = 0x00100800u;
+    uint32_t *dl = (uint32_t *)SR_HOST(list_addr);
+    int p = 0;
+    #define DL_EMIT(cmd, val) dl[p++] = ((uint32_t)(cmd) << 24) | ((uint32_t)(val) & 0x00FFFFFFu)
+    DL_EMIT(0xB0, clut & 0x00FFFFFFu);
+    DL_EMIT(0xB1, (clut & 0xFF000000u) >> 8);
+    DL_EMIT(0xC5, 1u | (0xFFu << 8));                   /* 5551, shift 0, mask 0xFF */
+    DL_EMIT(0xC4, blocks);
+    DL_EMIT(0x0F, 0);
+    DL_EMIT(0x0C, 0);
+    #undef DL_EMIT
+    ge_set_gpu_hooks(&k_hooks);
+    ge_run_list(list_addr, 0);
+}
+
+static int coherence_run_clut_stride_padding(void) {
+    const char *name = "clut-stride-padding";
+    const uint32_t stride = 512u, fmt = 1u, row = stride * 2u, bytes = 64u;
+    const uint32_t fba = 0x00100000u, base = 0x04000000u | fba;
+    const uint32_t pad = base + 5u * row + 480u * 2u;   /* row 5, x = 480 to 511 */
+    const uint32_t drawn = base + 6u * row;             /* row 6, x = 0 to 31 */
+    const uint16_t pixel = (uint16_t)coherence_gbatch(fmt);
+    uint8_t palette[64];
+    for (uint32_t i = 0; i < bytes; i++) palette[i] = (uint8_t)(0x3du + i * 7u);
+    coherence_reset_targets();
+    memset(SR_HOST(base), 0, FB_H * row);
+    sr_gpu_vram_dirty(base, FB_H * row);
+    g_sr_vram_read_pending = 0;
+
+    /* Every row drawn 480 wide, then the palette written by the CPU into the padding. */
+    int ok = coherence_draw_480_wide(base, stride, fmt);
+    ok = submit_pending() && ok;
+    Target *t = target_find_by_fba(fba);
+    memcpy(SR_HOST(pad), palette, bytes);
+    sr_gpu_vram_dirty(pad, bytes);
+    ok = ok && t && t->gpu_valid && t->clean_gen != t->render_gen;
+    /* Queue more drawing, so a needless overlap would also submit it. */
+    ok = ok && coherence_draw_480_wide(base, stride, fmt);
+    const unsigned long readbacks = s_cnt_readback;
+    coherence_load_clut(pad, bytes / 32u);
+    const int kept_queued = s_nbatch != 0;
+    const uint32_t word = MEM_R32(pad + 8u);
+    uint32_t want_word = 0;
+    memcpy(&want_word, palette + 8, sizeof want_word);
+    if (!ok || !kept_queued || s_cnt_readback != readbacks || !t || t->clean_gen == t->render_gen ||
+        memcmp(s_ge->clutram, palette, bytes) != 0 || word != want_word) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a palette in the stride padding read back "
+                        "the target (ok=%d queued=%d readbacks=%lu palette=%s word=0x%08x)\n", name,
+                ok, kept_queued, s_cnt_readback - readbacks,
+                memcmp(s_ge->clutram, palette, bytes) == 0 ? "match" : "MISMATCH", word);
+        coherence_reset_targets();
+        return 0;
+    }
+    /* A palette under drawn pixels is read back, queued batches included. */
+    coherence_load_clut(drawn, bytes / 32u);
+    int under = s_nbatch == 0 && s_cnt_readback == readbacks + 1u && t->clean_gen == t->render_gen;
+    for (uint32_t i = 0; under && i < bytes / 2u; i++) {
+        uint16_t v;
+        memcpy(&v, s_ge->clutram + i * 2u, sizeof v);
+        under = v == pixel;
+    }
+    if (!under) {
+        fprintf(stderr, "gpu coherence selftest [%s]: a palette under drawn pixels was not read "
+                        "back (pending=%u readbacks=%lu)\n", name, (unsigned)s_nbatch,
+                s_cnt_readback - readbacks);
         coherence_reset_targets();
         return 0;
     }
@@ -9945,6 +10049,7 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "uv-edge-clamp") == 0) return coherence_run_uv_edge_clamp();
         if (strcmp(only, "undrawn-rows") == 0) return coherence_run_undrawn_rows();
         if (strcmp(only, "through-float-z") == 0) return coherence_run_through_float_z();
+        if (strcmp(only, "clut-stride-padding") == 0) return coherence_run_clut_stride_padding();
         if (strcmp(only, "depth-alias-no-zwrite") == 0) return coherence_run_depth_alias_no_zwrite();
         if (strcmp(only, "wide-fill") == 0) return coherence_run_wide_fill();
         if (strcmp(only, "patch-tess") == 0) return coherence_run_patch_tess();
@@ -10010,6 +10115,7 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_through_float_z()) ok = 0;
     if (!coherence_run_blend_parity()) ok = 0;
     if (!coherence_run_undrawn_rows()) ok = 0;
+    if (!coherence_run_clut_stride_padding()) ok = 0;
     if (!coherence_run_depth_alias_no_zwrite()) ok = 0;
     if (!coherence_run_scalar_vram_read(0x04080000u)) ok = 0;
     /* zbp 0x0a2000: bit 13 set, so the absolute XOR differs from the within-buffer form (0x0a6854 vs
