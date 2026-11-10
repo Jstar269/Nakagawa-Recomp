@@ -3814,8 +3814,9 @@ typedef struct {
 static EnhancedRowPlaces enhanced_row_places(FlowCase which) {
     EnhancedRowPlaces places;
     NkUi *ui = NULL;
-    /* As wide as the design window and tall enough that no row is scrolled away. */
-    const NkUiDrawList *draw = flow_case_layout(which, 1280, 1200, &ui);
+    /* As wide as the design window and tall enough that no row is scrolled away: 1200 held
+       the mode row and ten parts, and every part adds a row (a sentence that wraps adds two). */
+    const NkUiDrawList *draw = flow_case_layout(which, 1280, 1600, &ui);
     memset(&places, -1, sizeof(places));
     for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
         const NkUiDrawCmd *cmd = &draw->cmd[i];

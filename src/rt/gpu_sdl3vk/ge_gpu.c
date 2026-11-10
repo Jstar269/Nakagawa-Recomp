@@ -4265,8 +4265,10 @@ static int tex_upload_level(VkImage img, VkImageLayout *lay, uint32_t level, int
         cpu_profile_add(GEGPU_CPU_MEMCPY, memcpy_started);
         s_cpu_profile_stats.memcpy_bytes += (uint64_t)upload_bytes;
     }
-    if (level == 0u)
-        to_layout(s_cmd, img, VK_IMAGE_ASPECT_COLOR_BIT, lay, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    /* After the reservation, which may begin the command buffer: the first level of an upload
+     * moves the image out of the layout it was in (UNDEFINED for a decode, SHADER_READ_ONLY for a
+     * host chain added to a decoded level 0). */
+    to_layout(s_cmd, img, VK_IMAGE_ASPECT_COLOR_BIT, lay, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy bic = {0};
     bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     bic.imageSubresource.mipLevel = level;
@@ -4389,13 +4391,15 @@ static int tex_hm_build(TexEnt *e) {
     }
     s_hm_stats.build_ns += SDL_GetTicksNS() - t0;
     VkImageLayout lay = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    to_layout(s_cmd, e->img, VK_IMAGE_ASPECT_COLOR_BIT, &lay, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     size_t off = 0;
     for (uint32_t l = 1; l < e->hm_levels; l++) {
         const uint32_t lw = nk_tex_mips_dim(w, l), lh = nk_tex_mips_dim(h, l);
         if (!tex_upload_level(e->img, &lay, l, l + 1u == e->hm_levels, chain + off, (int)lw, (int)lh)) {
-            /* Level 0 is intact; draws go on sampling it, and the next bind tries again. */
-            to_layout(s_cmd, e->img, VK_IMAGE_ASPECT_COLOR_BIT, &lay, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            /* Level 0 is intact; draws go on sampling it, and the next bind tries again. A failed
+             * reservation records nothing, so only a level copied before it left the image in
+             * TRANSFER_DST, in a command buffer that is still open. */
+            if (lay != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && s_cmd != VK_NULL_HANDLE)
+                to_layout(s_cmd, e->img, VK_IMAGE_ASPECT_COLOR_BIT, &lay, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             return 0;
         }
         off += (size_t)lw * lh;

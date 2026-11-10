@@ -20,8 +20,8 @@
  *  - reuse: the checkerboard written back is contents the chain cache has seen: its chain is
  *    uploaded again with no build, and samples the same grey.
  *  - deferred: new contents (one-texel stripes) drawn in through mode only build nothing; the
- *    first transformed, minified draw of them decodes level 0 again and builds the chain once,
- *    and samples the same grey.
+ *    first transformed, minified draw of them, after everything recorded is submitted, decodes
+ *    level 0 again and builds the chain once, and samples the same grey.
  *  - key-edge: opaque red beside the colour key (entry 2, magenta, alpha 0), blended by source
  *    alpha over black: no device pixel takes any blue, at the edge or anywhere.
  *  - gates: a through-mode draw and a draw whose texture function ignores the alpha of a
@@ -310,7 +310,10 @@ int gegpu_mips_selftest(void) {
         const uint64_t builds0 = s_hm_stats.builds, redecodes0 = s_hm_stats.redecodes;
         hm_fill(3);
         hm_state(3u | (1u << 8), 0, 0);
-        const int through = hm_quad(130, 5, 64.0f, 1) && !s_tex_bound_hm && s_hm_stats.builds == builds0;
+        int through = hm_quad(130, 5, 64.0f, 1) && !s_tex_bound_hm && s_hm_stats.builds == builds0;
+        /* Submit what is recorded, as a present does: the late build then begins its own
+           command buffer for the chain's levels (a closed one aborted the run in the loader). */
+        through = through && submit_pending() && cmd_batch_flush() && s_cmd == VK_NULL_HANDLE;
         ok = through && hm_quad(130, 5, 64.0f, 0) && s_tex_bound_hm && hm_read(130, 5, dev, &r);
         if (!through || (ok && (!hm_near(&r, grey, 1u) || s_hm_stats.builds != builds0 + 1u ||
                                 s_hm_stats.redecodes != redecodes0 + 1u))) {
