@@ -1916,8 +1916,9 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (PSP-HLE-SYSPARAM-001: string-id-1-len-0x80, string-id-1-len-0x04)",
             "tests/native/hle_thread_selftest.c:test_sysparam_nickname_string",
+            "tests/native/hle_thread_selftest.c:test_sysparam_nickname_from_launcher",
         ],
-        "limitation": "the nickname (id 1) copy with its NUL and the short-buffer 0x80110102 refusal that writes nothing are measured; other string ids, a null buffer and len <= 0 return 0x80110103 without a measurement, and the nickname is the registry value (empty by default), not the console's",
+        "limitation": "the nickname (id 1) copy with its NUL, which writes the string and its NUL only and nothing past them in the 128-byte field, and the short-buffer 0x80110102 refusal that writes nothing are measured; other string ids, a null buffer and len <= 0 return 0x80110103 without a measurement; the nickname is the registry value, by default the user-chosen SR_NICKNAME or the neutral \"Player\" (never derived from the OS), not the console's; the player's 32-byte cap is the project's setting limit (PPSSPP's Nickname editor also caps at 32), below the PSP's 128-byte field (127 characters and the NUL), and how long a nickname the PSP's own System Settings accepts is unmeasured",
     },
     "h_CtrlReadLatch": {
         "status": "partial",
