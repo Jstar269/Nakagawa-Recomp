@@ -291,6 +291,13 @@ if(ANDROID)
     set_tests_properties(player_state_test PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
+# The console nickname rule (src/core/nk_nickname.h) is header-only; its test needs no library.
+add_executable(test_nk_nickname tests/native/test_nk_nickname.c)
+target_include_directories(test_nk_nickname PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+)
+add_test(NAME nk_nickname_test COMMAND test_nk_nickname)
+
 # The nk_ui core and its C3a reserved stubs stay SDL and Vulkan free. Keep this
 # explicit source inventory in sync with mk/nk_ui.mk.
 set(NK_UI_CORE_SOURCES
@@ -319,7 +326,8 @@ set(NK_UI_BACKEND_SOURCES
 set(NK_UI_RESERVED_STUB_SOURCES ${NK_UI_EDGE_SOURCES} ${NK_UI_BACKEND_SOURCES})
 # The screens that came out of the old scr_title.c: the title page, the one-card flow pages,
 # About, the setup wizard, the game-found card, Settings, Controls and the developer log, with
-# the frame and form code they share (scr_flow.c, scr_form.c).
+# the frame and form code they share (scr_flow.c, scr_form.c), and the on-screen keyboard
+# the nickname editor uses (ui_keyboard.c).
 set(NK_UI_PLAYER_TITLE_SOURCES
     src/player/ui/scr_title.c
     src/player/ui/scr_flow.c
@@ -336,6 +344,7 @@ set(NK_UI_PLAYER_TITLE_SOURCES
     src/player/ui/scr_settings.c
     src/player/ui/scr_controller.c
     src/player/ui/scr_devlog.c
+    src/player/ui/ui_keyboard.c
 )
 set(NK_UI_PLAYER_SCREEN_SOURCES
     src/player/ui/player_ui_nk.c

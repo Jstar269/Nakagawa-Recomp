@@ -43,6 +43,11 @@ so we use its contrast and target-size values as a guide for the launcher only.
   library to the games whose name or disc ID holds what you type. A controller types with an on-screen keyboard; a
   hardware keyboard, and the system's input methods, type directly. Esc or B clears it. The SORT button orders the
   library by recently played, name or recently added.
+- **Choosing a nickname.** The first-launch nickname prompt and *Settings > Online and developer > Nickname* have an
+  on-screen keyboard for controllers and the mouse: the D-pad or stick moves, the bottom face button types the focused
+  key, and its count shows how many of the 32 bytes are used. A key that cannot type now (the 32 bytes are full, or
+  the character is not allowed) is dimmed and loses its outline, so the cue is not colour alone. A hardware keyboard
+  types directly. B or Esc cancels.
 - **Controllers** the operating system exposes through SDL3 (Xbox, PlayStation and Switch-style pads): D-pad to move,
   the bottom face button to select, the right face button to go back, shoulder buttons to switch tabs.
 - **Prompts match what you are using.** The prompt bar at the bottom of each screen shows keyboard keycaps, or the
