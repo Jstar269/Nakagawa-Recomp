@@ -65,7 +65,7 @@ it agree with every other artifact.
 | T27 | Use a wildcard record to authorize a new implementation path | `CLAIM_UNBACKED` — wildcard records remain inert for classification |
 | T27b | Supply malformed or ambiguous legacy `reviewed_blobs` metadata | ignored by normal mode; `--require-reviewed-blobs` remains available when strict legacy validation is deliberately requested |
 | T28 | Claim a different classification from the trusted path authority | `CLAIM_UNBACKED` or `CLASSIFICATION_DOWNGRADE` |
-| T29 | Have the gate judge a mutable branch name so two resolutions name different trees | `MUTABLE_REVISION_REFUSED` — CI passes exact 40-hex SHAs: the head the run was started for, and as the base its merge base with the default branch, which must be an ancestor of the default branch |
+| T29 | Have the gate judge a mutable branch name so two resolutions name different trees | `MUTABLE_REVISION_REFUSED` — CI passes exact 40-hex SHAs: the head the run was started for, and as the base its merge base with the default branch, which is on the default branch by construction |
 | T30 | Swap the authority between "what revision is main" and "read main" | the workflow resolves the authority commit once and reads the ledger **at that SHA**; the revision and the ledger's own SHA-256 are both reported |
 | T31 | Change an implementation file, drop it from `include_paths`, delete its ledger entry and regenerate the export, so the gate stops seeing the path | `TRUSTED_SCOPE_VIOLATION` — scope is anchored to the trusted base policy over the trusted base tree and may only widen |
 | T32 | Add an exclusion covering a changed implementation path | `TRUSTED_SCOPE_VIOLATION` — the same rule; removing a path from coverage is removing a path from coverage |

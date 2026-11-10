@@ -2999,29 +2999,39 @@ class TrustedAttestationRouteTests(unittest.TestCase):
             git("checkout", "-q", "-b", "merged", behind)
             git("merge", "-q", "--no-edit", "main")
             merged = git("rev-parse", "HEAD")
+            git("checkout", "-q", "main")
+            later = commit("C: a later admission", "later.txt")
             git("checkout", "-q", "--orphan", "unrelated")
             git("rm", "-q", "-rf", ".")
             unrelated = commit("no history in common", "x.txt")
             git("checkout", "-q", "main")          # the trusted checkout is the default branch
 
-            def run(head: str) -> tuple[int, str]:
+            def run(head: str) -> tuple[int, str, str]:
                 output = Path(scratch) / "github-output"
                 output.write_text("", encoding="utf-8")
                 done = subprocess.run(
                     [bash, "-c", script], cwd=repo, capture_output=True, text=True, check=False,
                     env={**os.environ, "HEAD_SHA": head, "GITHUB_OUTPUT": _bash_path(output)})
-                return done.returncode, output.read_text(encoding="utf-8")
+                return done.returncode, output.read_text(encoding="utf-8"), done.stderr
 
             # Behind an admission: judged against its fork point, not against the tip it never saw.
-            self.assertEqual(run(behind), (0, f"base_sha={fork_point}\n"))
-            # After merging main, the base is that tip.
-            self.assertEqual(run(merged), (0, f"base_sha={tip}\n"))
-            # No common history, or a head that is not a SHA: no base, and the step fails.
-            for head in (unrelated, "main", ""):
+            self.assertEqual(run(behind)[:2], (0, f"base_sha={fork_point}\n"))
+            # A head that merged main at B and is behind C: the newest main commit it contains.
+            self.assertEqual(run(merged)[:2], (0, f"base_sha={tip}\n"))
+            # The tip itself: the tip.
+            self.assertEqual(run(later)[:2], (0, f"base_sha={later}\n"))
+            # A head that is not a SHA is refused before git runs.
+            for head in ("main", "", later.upper()):
                 with self.subTest(head=head):
-                    code, written = run(head)
-                    self.assertNotEqual(code, 0)
-                    self.assertEqual(written, "")
+                    code, written, err = run(head)
+                    self.assertEqual((code, written), (1, ""))
+                    self.assertIn("sha malformed", err)
+                    self.assertNotIn("base sha malformed", err)
+            # No common history: git merge-base finds no base and the step stops there.
+            code, written, err = run(unrelated)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(written, "")
+            self.assertNotIn("malformed", err)
 
     def test_candidate_chosen_text_never_reaches_the_job(self) -> None:
         text = _uncommented(self.text)

@@ -255,7 +255,6 @@ jobs:
           [[ "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "sha malformed" >&2; exit 1; }
           base_sha="$(git merge-base "${HEAD_SHA}" HEAD)"
           [[ "${base_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "base sha malformed" >&2; exit 1; }
-          git merge-base --is-ancestor "${base_sha}" HEAD
           echo "base_sha=${base_sha}" >> "${GITHUB_OUTPUT}"
           echo "verdict base ${base_sha} (merge base of the head with the default branch)"
 
