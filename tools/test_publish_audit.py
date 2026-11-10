@@ -2786,8 +2786,8 @@ class CommittedTreeMaterializationTests(unittest.TestCase):
         for item in cacheinfo:
             run_git(["update-index", "--add", "--cacheinfo", item], cwd=repo, check=True, capture_output=True)
         tree = run_git(["write-tree"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
-        return run_git(["commit-tree", tree, "-p", "HEAD", "-m", "probe"], cwd=repo, check=True,
-                       capture_output=True, text=True).stdout.strip()
+        return str(run_git(["commit-tree", tree, "-p", "HEAD", "-m", "probe"], cwd=repo, check=True,
+                           capture_output=True, text=True).stdout.strip())
 
     def test_every_file_of_the_tree_is_written_with_its_exact_bytes(self) -> None:
         import shutil  # noqa: PLC0415
