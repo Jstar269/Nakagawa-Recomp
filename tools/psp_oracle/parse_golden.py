@@ -1535,6 +1535,26 @@ GE_SYNC_IDS_OUT_COUNTS = {
 _register_campaign_probe(
     "ge-sync-ids", "PSP-GE-SYNC-001", GE_SYNC_IDS_CASES, GE_SYNC_IDS_OUT_COUNTS,
 )
+# ge-signal (181, probe.c): GE SIGNAL handler behaviours and RJUMP/RCALL offset alignment.
+# Every record is emitted on every run, so the stream is fixed-shape: a setup record, three
+# records per cell in the order the probe runs them (-cb the handler calls, -run the first
+# 100 ms of list states and the markers, -end the bounded continue, the second 100 ms, the
+# reset and the final markers) and a teardown record. Format and completion only.
+GE_SIGNAL_CELLS = (
+    "ctl", "b01", "b02", "b03", "b01-nocb", "b02-nocb", "b03-nocb", "b02-block", "b00", "b04",
+    "rjump-al", "rcall-al", "rjump-un", "rcall-un",
+)
+GE_SIGNAL_PARTS = (("cb", 24), ("run", 19), ("end", 27))
+GE_SIGNAL_ROWS = (
+    (("gsg-setup", 7),)
+    + tuple((f"gsg-{cell}-{part}", count) for cell in GE_SIGNAL_CELLS
+            for part, count in GE_SIGNAL_PARTS)
+    + (("gsg-teardown", 12),)
+)
+GE_SIGNAL_CASES = tuple(case for case, _count in GE_SIGNAL_ROWS)
+_register_campaign_probe(
+    "ge-signal", "PSP-GE-SIGNAL-001", GE_SIGNAL_CASES, dict(GE_SIGNAL_ROWS),
+)
 _register_campaign_probe(
     "kernel-misc", "PSP-KERNEL-MISC-001",
     ("sysclock-wide", "ctrl-sampling-mode", "thread-profiler",
@@ -2766,6 +2786,21 @@ for _fetch_case in (
         _fetch_case, "PSP-EXCEPTION-FETCH-001", (), {"fetch-armed": 1},
         terminal_case="fetch-armed",
     )
+
+# ge-through-z (185, probe_ge_sample.c): through-mode vertex z outside 0..65535, fractional,
+# infinite and NaN. Per cell, in order, one `-draw` record (16 words: the GE wait outcome, the
+# list length, the z bits, the colour pixels written, the colour at the sprite centre and the
+# changed depth words) and one `-z` record (the depth words of the sprite's centre row).
+GE_THROUGH_Z_CELLS = (
+    "zm1", "zm0p5", "z0", "z0p5", "z1p5", "z65535", "z65535p5", "z65536", "z70000", "zinf",
+    "znan",
+)
+GE_THROUGH_Z_ROWS = tuple(
+    row for cell in GE_THROUGH_Z_CELLS for row in ((f"{cell}-draw", 16), (f"{cell}-z", 16)))
+GE_THROUGH_Z_CASES = tuple(case for case, _count in GE_THROUGH_Z_ROWS)
+_register_campaign_probe(
+    "ge-through-z", "PSP-GE-THROUGHZ-001", GE_THROUGH_Z_CASES, dict(GE_THROUGH_Z_ROWS),
+)
 
 # ge-raster (123, probe_ge_sample.c): the #343 GE raster corpus. The cells are the gr_cells
 # table of the block probe_ge_sample.c shares with tests/native/hle_thread_selftest.c, in order. Per
