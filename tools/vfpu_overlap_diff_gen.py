@@ -172,6 +172,26 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
             cases.append((_bin_word(0x1B, sub, size, 0x00, 0x04, 0x08), f"{op}-{suffix}", size))
     cmp_range = (cmp_first, len(cases) - cmp_first)
 
+    # vadd/vsub/vmul/vdiv/vscl/vmin/vmax at .s and .q (issue #326, probe case vfpu-basic-arith,
+    # PSP-3000, 2026-11-08): check_vfpu_basic_arith_measured() finds them by name and runs the
+    # 20 x 20 operand grid through both lanes. Destination matrix 0, sources matrices 1 and 2.
+    for opname, op6, sub in (("vadd", 0x18, 0), ("vsub", 0x18, 1), ("vmul", 0x19, 0),
+                             ("vdiv", 0x18, 7), ("vscl", 0x19, 2), ("vmin", 0x1B, 2),
+                             ("vmax", 0x1B, 3)):
+        for size, suffix in ((1, "s"), (4, "q")):
+            cases.append((_bin_word(op6, sub, size, 0x00, 0x04, 0x08), f"arith-{opname}-{suffix}", size))
+
+    # vmscl.q at its probe registers (PSP-VFPU-WIDEDOT-001 and vfpu-round-sep, issue #326, PSP-3000):
+    # check_vmscl_measured() finds it by name. A vmscl lane is a vmul lane.
+    cases.append((0xF2018488, "arith-vmscl-q", 4))
+
+    # vmov/vabs/vneg/vidt/vzero/vone at .s, .p and .q, same probe: bitwise copies and the constant
+    # fills, which write only the lanes of the width. Destination matrix 0, source matrix 1.
+    for opname, optype in (("vmov", 0), ("vabs", 1), ("vneg", 2), ("vidt", 3), ("vzero", 6),
+                           ("vone", 7)):
+        for size, suffix in ((1, "s"), (2, "p"), (4, "q")):
+            cases.append((_vv2_word(optype, size, 0x00, 0x04), f"arith-{opname}-{suffix}", size))
+
     # Census-gap forms (issue #326): supported VFPU3 compare/min/max and VFPU6 matrix forms
     # that the synthetic fuzz corpus (minimal registers) does not reach. Each is one
     # representative word of a census row, taken from the census itself; check_overlap_diff()
@@ -309,7 +329,7 @@ def sweep_words() -> frozenset[int]:
 # the difference, so check_alias_edge_sweep() requires exactly those to mismatch.
 _MUTANT_HEAD = "{ float _s[4],_t[4],_d[4]; "
 _MUTANT_TAIL = "s->vfpuCtrl[0]=0xe4u;"
-_MUTANT_MARK = "_d[_i]=sr_vf_add(_s[_i],_t[_i]);"
+_MUTANT_MARK = "_d[_i]=sr_vfpu_add(_s[_i],_t[_i]);"
 
 
 def mutant_body(body: str) -> str | None:

@@ -2884,7 +2884,8 @@ def _vfpu3_minmax(addr, w, options, delay_branch_pc):
             f"if(_an||_bn){{ int32_t _ai,_bi,_r; memcpy(&_ai,&_a[_i],4); memcpy(&_bi,&_b[_i],4); "
             f"if({ismin}) _r=(_ai<0&&_bi<0)?(_bi<_ai?_ai:_bi):(_ai<_bi?_ai:_bi); "
             f"else _r=(_ai<0&&_bi<0)?(_ai<_bi?_ai:_bi):(_bi<_ai?_ai:_bi); memcpy(&_d[_i],&_r,4); }} "
-            f"else _d[_i]={ismin}?(_a[_i]<_b[_i]?_a[_i]:_b[_i]):(_b[_i]<_a[_i]?_a[_i]:_b[_i]); }} "
+            f"else {{ float _fa=sr_vfpu_daz(_a[_i]),_fb=sr_vfpu_daz(_b[_i]); "
+            f"_d[_i]={ismin}?(_fa<_fb?_a[_i]:_b[_i]):(_fb<_fa?_a[_i]:_b[_i]); }} }} "
             + _nanv(addr, "vmin.s" if ismin == "1" else "vmax.s", vd, "_d", n,
                     "_a", n, "_b", n, options=options)
             + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
@@ -2986,12 +2987,12 @@ def _vfpu_matrix_scale(addr, w, options, delay_branch_pc):
     writes = [f"float _sc = s->v[{scalar_vidx}];"]
     for row in range(side - 1):
         for col in range(side):
-            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vfpu_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
     last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
     last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
     writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
     writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vfpu_mul(_s[_i], _t[_i]);")
     writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
                         options=options))
     writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
@@ -3067,8 +3068,8 @@ def _vfpu_binary_arithmetic(addr, w, options, delay_branch_pc):
     di, si = vreg_indices(vd, n), vreg_indices(vs, n)
     ti = vreg_indices(vt, n)
     # Call literals, so tools/recomp_helper_inventory.py sees every helper the emitter writes.
-    call = {(0x18, 0): "sr_vf_add(", (0x18, 1): "sr_vf_sub(", (0x18, 7): "sr_vf_div(",
-            (0x19, 0): "sr_vf_mul("}[(op, sub)]
+    call = {(0x18, 0): "sr_vfpu_add(", (0x18, 1): "sr_vfpu_sub(", (0x18, 7): "sr_vfpu_div(",
+            (0x19, 0): "sr_vfpu_mul("}[(op, sub)]
     body = (f"float _s[4],_t[4],_d[4]; "
             f"sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"sr_vread(_t,s,{_arr(ti)},{n},s->vfpuCtrl[1]); "
@@ -3181,7 +3182,7 @@ def _vfpu_scale_effect(addr, w, options, delay_branch_pc):
     scalar = vreg_indices(vt, 1)[0]
     body = (f"float _s[4],_d[4]; sr_vread(_s,s,{_arr(si)},{n},s->vfpuCtrl[0]); "
             f"float _sc=s->v[{scalar}]; "
-            f"for(int _i=0;_i<{n};_i++) _d[_i]=sr_vf_mul(_s[_i],_sc); "
+            f"for(int _i=0;_i<{n};_i++) _d[_i]=sr_vfpu_mul(_s[_i],_sc); "
             + _nanv(addr, "vscl.s", vd, "_d", n, "_s", n, "(&_sc)", 1, options=options)
             + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]);{_EAT}")
     return "{ " + body + " }", None, 0
@@ -3196,12 +3197,12 @@ def _vfpu_matrix_scale_effect(addr, w, options, delay_branch_pc):
     writes.append(f"float _sc = s->v[{scalar_vidx}];")
     for row in range(side - 1):
         for col in range(side):
-            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vf_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
+            writes.append(f"s->v[{mreg_index(vd, side, col, row)}] = sr_vfpu_mul(s->v[{mreg_index(vs, side, col, row)}], _sc);")
     last_row_vs = [mreg_index(vs, side, col, side - 1) for col in range(side)]
     last_row_vd = [mreg_index(vd, side, col, side - 1) for col in range(side)]
     writes.append(f"float _s[4], _t[4]; sr_vread(_s, s, {_arr(last_row_vs)}, {side}, s->vfpuCtrl[0]);")
     writes.append(f"sr_vread(_t, s, (const uint8_t[]){{{scalar_vidx},{scalar_vidx},{scalar_vidx},{scalar_vidx}}}, {side}, s->vfpuCtrl[1]);")
-    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vf_mul(_s[_i], _t[_i]);")
+    writes.append(f"float _d[4]; for (int _i = 0; _i < {side}; _i++) _d[_i] = sr_vfpu_mul(_s[_i], _t[_i]);")
     writes.append(_nanv(addr, "vmscl", vd, "_d", side, "_s", side, "_t", side,
                          options=options))
     writes.append(f"sr_vwrite(s, {_arr(last_row_vd)}, _d, {side}, s->vfpuCtrl[2]);")
