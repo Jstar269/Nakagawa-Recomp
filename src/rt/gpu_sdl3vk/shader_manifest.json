@@ -1,6 +1,6 @@
 {
   "compiler": {
-    "name": "glslc",
+    "name": "glslc.exe",
     "options": [
       "--target-env=vulkan1.1"
     ],

@@ -2401,8 +2401,7 @@ included). An in-between stays on screen until its held real frame's VBLANK, so 
 it for its own VBLANK and writes the real frame, presented before that VBLANK's write, at the next
 one (`carried_frames` in `record.json`); with smooth motion on, the recorded real frames land one VBLANK
 later than without it, as on screen. Pictures behind a carried one queue, three at most, and a full queue
-replaces its newest picture and counts it (`replaced_frames`). While pictures queue, the recording can trail the
-window by up to four VBLANKs (about 67 ms). Without that rule the real frame replaced
+replaces its newest picture and counts it (`replaced_frames`). Without that rule the real frame replaced
 the in-between unread, and a 30 FPS game with smooth motion recorded at 30 pictures a second. The picture is
 scaled with the window's own scaling mode (`SR_PRESENT_SCALING`) into a fixed-size
 target. With `SR_PRESENT_UPSCALE=fsr1` the recording is enlarged by FSR 1 as the window is, at the

@@ -332,7 +332,9 @@ typedef struct {
     uint64_t hold_count;
     uint64_t hold_sum_ns;         /* flip to held present: the delay smooth motion adds */
     uint64_t hold_max_ns;
-    uint64_t superseded;          /* a held frame a later flip replaced */
+    /* The pace machine's counts (AcePace), filled in by ace_pace_stats; ace_pace_stats_add
+     * leaves them alone. */
+    uint64_t superseded;          /* held frames that never reached the screen */
     uint64_t busy;                /* held presents the display could not take */
     uint64_t last_ns;
 } AcePaceStats;
@@ -342,11 +344,12 @@ AcePresentKind ace_pace_flip_kind(const AcePace *p);
 
 /* The run's verdict for the flip ace_flip just saw. */
 AceShow ace_smooth_take(void);
-/* The show pass made an in-between for this present: the frame is held for the VBLANK after. It
- * counts nothing; ace_smooth_note_present counts what the swapchain accepted. */
+/* The present of an in-between the show pass made reached the screen: the frame is held for the
+ * VBLANK after. It counts nothing; ace_smooth_note_present counts what the swapchain accepted. */
 void ace_smooth_shown_between(uint64_t now_ns);
-/* The show pass showed the owed frame for this present and kept the new one: that one is held
- * for the VBLANK after. */
+/* The present that showed the owed frame in place of an in-between reached the screen, and the
+ * show pass kept the new frame: that one is held for the VBLANK after. When that present fails,
+ * the owed frame is given up instead (ace_smooth_held_missed with busy 0). */
 void ace_smooth_shown_owed(uint64_t now_ns);
 /* One VBLANK: 1 when the held frame should be presented now. Off, it reads nothing. */
 int ace_smooth_vblank(uint32_t vcount);
@@ -397,27 +400,25 @@ void ace_smooth_note_motion_unread(void);
 void ace_motion_stats(AceMotionStats *out);
 
 /* When a measurement may be read. The show pass records an in-between and its measurement into
- * the present's command buffer, and each present waits for its frame slot's previous submission
- * before it records. So once `slots` later show passes have begun, with `slots` the presenter's
- * number of frame slots, the commands of the pass that made it have finished. Pure: the
- * presenter feeds it (gui.c) and reads what is due. */
+ * the present's command buffer, which goes to the GPU in one numbered submission. The presenter
+ * counts the submissions it has seen finished, in submission order (gpu_sdl3vk/sdl3vk.h,
+ * sdl3vk_present_completed), so a measurement may be read once that count has reached its
+ * submission. Pure: the presenter feeds it (gui.c) and reads what is due. */
 #define ACE_MOTION_PENDING 8u
 typedef struct {
     uint64_t serial[ACE_MOTION_PENDING];
-    uint64_t made_at[ACE_MOTION_PENDING];
+    uint64_t submission[ACE_MOTION_PENDING];
     uint32_t head, count;
-    uint64_t passes;        /* show passes begun */
     uint64_t dropped;       /* serials dropped because the queue was full */
 } AceMotionQueue;
 
 void ace_motion_queue_reset(AceMotionQueue *q);
-/* A show pass begins: one per present that got past its frame slot's wait. */
-void ace_motion_queue_pass(AceMotionQueue *q);
-/* The pass that just began made in-between `serial`. Returns 0 when the queue is full; the serial
- * is then dropped and counted. */
-int ace_motion_queue_made(AceMotionQueue *q, uint64_t serial);
-/* The oldest serial whose commands have finished, removed from the queue; 0 when none is due. */
-uint64_t ace_motion_queue_due(AceMotionQueue *q, uint32_t slots);
+/* In-between `serial` reached the screen, its commands in `submission`. Returns 0 when the queue
+ * is full; the serial is then dropped and counted. */
+int ace_motion_queue_made(AceMotionQueue *q, uint64_t serial, uint64_t submission);
+/* The oldest serial whose submission has finished by `completed` (the newest submission seen
+ * finished), removed from the queue; 0 when none is due. */
+uint64_t ace_motion_queue_due(AceMotionQueue *q, uint64_t completed);
 
 /* What smooth motion's in-betweens read besides the pixels (gpu_sdl3vk/ace_hud.c and ace_smooth.c,
  * contract section 10.6), counted so a title where the HUD rule or the depth gate never applies
@@ -451,7 +452,9 @@ void ace_smooth_aux_report(const AceSmoothAuxStats *s);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 
-#define ACE_REPORT_MAX 6400u
+/* The worst case, every block present and every number at its widest, is about 4.2 KB;
+ * ace_selftest's cell_report_worst checks that it fits. */
+#define ACE_REPORT_MAX 4608u
 /* The report's JSON for the run so far; 0 when it would not fit. */
 size_t ace_report_json(char *out, size_t cap);
 /* Settles the features that never ran (ace_confirm), then writes the report (SR_ACE_REPORT,

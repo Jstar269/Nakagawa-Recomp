@@ -28,7 +28,7 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
     {"Widescreen", "Off", "Shows more 3D space; HUD stays shaped. Some objects pop in. Smooth "
                             "motion disables it."},
     {"Smooth motion", "Off", "Smooths steady 30 FPS scenes only where it can follow the motion. "
-                              "Adds 17 ms of delay."},
+                              "Adds about 17 ms of delay."},
     {"Clean pitched sound", "Off",
      "Resamples pitched effects without aliasing. The game receives changed samples."},
     {"Wider culling", "Off", "Ace only, with Widescreen, in games that have a culling build. The game's "

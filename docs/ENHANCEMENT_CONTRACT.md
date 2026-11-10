@@ -468,13 +468,16 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   `presents.superseded`.
 - **A busy display never costs a real frame.** While the guest is paced to real time, a present does not wait for
   the display (`src/rt/gpu_sdl3vk/README.md`): when the display cannot take a frame, the present returns at once
-  and shows nothing. When that happens to B's present, B stays owed. It is tried again at each VBLANK that has no
-  flip, and the flip of the next frame C shows B in place of the in-between of B and C, then C at its own VBLANK.
-  So a frame whose in-between was shown is never dropped for a made-up picture, and a display that takes only
-  every second present shows the real frames, with `SMOOTH OFF` on the readout. A title that flips each frame
-  twice shows its newest frame at the second flip; when flips in between found the display busy too, that frame is
-  newer than the owed one and replaces it. `presents.busy` counts the held presents the display could not take,
-  and `presents.superseded` every held frame that never reached the screen.
+  and shows nothing. When that happens to B's present, B stays owed. It is tried again at each later VBLANK
+  until a present shows it: one with no flip, or one whose flip's own present found the display busy too. The flip
+  of the next frame C shows B in place of the in-between of B and C, then C at its own VBLANK. So a frame whose
+  in-between was shown is never dropped for a made-up picture, and a display that takes only every second present
+  shows the real frames, with `SMOOTH OFF` on the readout. A title that flips each frame twice shows its newest
+  frame at the second flip; when flips in between found the display busy too, that frame is newer than the owed one
+  and replaces it. What a present shows changes the pace only once that present has reached the screen. When the
+  present that should show B fails (an out-of-date window, say), B is given up and C is not held: the CPU present
+  that takes over shows C as it is, and no VBLANK shows it again. `presents.busy` counts the held presents the
+  display could not take, and `presents.superseded` every held frame that never reached the screen.
 - **Only consecutive frames.** An in-between is made of a frame and the one flipped just before it. When that one
   never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed), the
   pass still holds an older frame, and an in-between of the two would put a fast-moving object in the wrong place
@@ -499,9 +502,11 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   counts of moving pixels within 6 of the old frame and of the new one tell the two apart: a carried object
   leaves its old place showing the new frame, a blend shows neither. The pass also counts the pixels the two
   frames agree on (within 40) that the in-between shows more than 64 from both. That is an object drawn in mid
-  flight or a hole in something that stood still, and the count cannot tell which. The numbers are read a few
-  presents later, when those commands have finished. One that cannot be read then is counted, never guessed, and
-  the last few of a run are not read. The report's `smooth_motion` block holds the run's totals (`measured`,
+  flight or a hole in something that stood still, and the count cannot tell which. Only an in-between that
+  reached the screen is counted. Its numbers are read once the presenter has seen the submission that carried
+  its commands finish, a few presents later. One that cannot be read then is counted, never guessed, and the last
+  few of a run are not read. A device that cannot build the measure pass has no smooth motion for the run, and the
+  report says it is unavailable. The report's `smooth_motion` block holds the run's totals (`measured`,
   `unread`, `moving_px`, `old_px`, `new_px`, `novel_px`), the pooled `phase` and the mean `weight`.
 - **Recording.** A run recording (`SR_VIDEOREC_DIR`) holds what the window shows, in-betweens included: the recorder
   keeps each in-between for its own VBLANK and writes the held real frame at the next one. Its `frames.csv` and
@@ -512,9 +517,10 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   whole or in large parts (a scroll, a camera move) and shows that half-way. It does not find a figure whose pose
   changes a lot between two frames, or a small object that travels further than its own size (a ball). Those keep
   the old frame ("Where the search guesses" below), so they still move 30 times a second, one VBLANK late.
-  Measured on 2026-11-09 on a private route through a *Hot Shots Tennis* rally: a pooled phase of 0.03, with
-  92.5% of the moving pixels shown as the old frame. For such a scene the feature adds presents, not motion, and
-  the readout says so.
+  Measured on 2026-11-09 on a deterministic recording of a private route through a *Hot Shots Tennis* rally, with
+  a package built after #2320 landed: a pooled phase of 0.019 and a mean weight of 0.085. (A run before #2320
+  measured a phase of 0.03, with 92.5% of the moving pixels shown as the old frame.) For such a scene the feature
+  adds presents, not motion, and the readout says so.
 - **Which titles use what.** A title with a 60 FPS game logic package (section 9; *Hot Shots Tennis* has one)
   gets every frame from the game itself. That is its path to 60, and the player turns smooth motion off for that
   launch (section 10.5). A 30 FPS title without a package has only smooth motion, with the limit above.
@@ -533,7 +539,7 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
 - **What it never touches.** The in-between and the held frame are private images blitted to the swapchain. The
   flip's own present still commits the real frame to guest VRAM and gives any capture the real frame. The VBLANK's
   present latches no input and serves no capture.
-- **Stamps.** The report adds `presents` (real, between, held, superseded, unpaired), `smooth_motion` and
+- **Stamps.** The report adds `presents` (real, between, held, superseded, unpaired, busy), `smooth_motion` and
   `present_interval_ms`. Section 10.4 applies: the run is refused as evidence.
 
 ### 10.7. Band-Limited SAS Resampling

@@ -3054,7 +3054,7 @@ static void test_settings_pages(void) {
               strstr(dump, "\"SHARPER ENLARGING: OFF\"") != NULL &&
               /* The sentences wrap; their lines are dumped one by one. */
               strstr(dump, "Smooths steady 30 FPS scenes") != NULL &&
-              strstr(dump, "Adds 17 ms of delay.\"") != NULL &&
+              strstr(dump, "Adds about 17 ms of delay.\"") != NULL &&
               strstr(dump, "Smooth motion disables it.") != NULL &&
               strstr(dump, "game receives changed samples.") != NULL &&
               strstr(dump, "screenshots do not change.") != NULL &&

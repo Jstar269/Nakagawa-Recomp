@@ -1415,6 +1415,96 @@ static int sdl3vk_present_pacing_selftest(void) {
     return ok;
 }
 
+/* ---- what a show pass learns of its present, and the finished-submission count ---------------
+ * Each show pass is told once how its present ended and which submission carries its commands.
+ * The count of finished submissions moves only when the presenter has seen a fence signalled: it
+ * never passes a pending submission. A present that fails after its submission (an out-of-date
+ * swapchain) keeps its slot and is told it failed; the swapchain rebuild waits for every frame,
+ * so the count then reaches that submission. */
+static int s_done_test_calls, s_done_test_result;
+static uint64_t s_done_test_submission;
+static void done_test_show_done(int result, uint64_t submission) {
+    s_done_test_calls++;
+    s_done_test_result = result;
+    s_done_test_submission = submission;
+}
+
+static int sdl3vk_present_completed_selftest(void) {
+    static uint32_t px[PSP_W * PSP_H];
+    int ok = 1;
+    const Sdl3VkShowPass saved_pass = s_show_pass;
+    const Sdl3VkShowDone saved_done = s_show_done;
+    sdl3vk_set_present_nowait(0);
+    sdl3vk_set_show_pass(pace_test_show_pass);
+    sdl3vk_set_show_done(done_test_show_done);
+    s_done_test_calls = 0;
+
+    const uint64_t first = s_present_submitted + 1u;
+    const int shown = sdl3vk_present_rgba(px);
+    const int shown_calls = s_done_test_calls, shown_result = s_done_test_result;
+    const uint64_t shown_submission = s_done_test_submission;
+    const uint64_t completed_after_shown = sdl3vk_present_completed();   /* its fence not yet seen */
+    const int cursor = s_frame_cursor;
+    sdl3vk_present_fault_inject(VK_ERROR_OUT_OF_DATE_KHR);
+    const int failed = sdl3vk_present_rgba(px);
+    const int failed_calls = s_done_test_calls, failed_result = s_done_test_result;
+    const uint64_t failed_submission = s_done_test_submission;
+    const int failed_cursor = s_frame_cursor;
+    const uint64_t completed_after_fail = sdl3vk_present_completed();
+    const int again = sdl3vk_present_rgba(px);
+    const uint64_t completed_again = sdl3vk_present_completed();
+    if (shown != 1 || shown_calls != 1 || shown_result != 1 || shown_submission != first ||
+        completed_after_shown >= first || failed != -1 || failed_calls != 2 || failed_result != -1 || failed_submission != first + 1u ||
+        failed_cursor != cursor || completed_after_fail != first + 1u || again != 1 ||
+        s_done_test_calls != 3 || s_done_test_submission != first + 2u || completed_again < first + 1u ||
+        completed_again > s_present_submitted) {
+        fprintf(stderr, "show done: shown %d (%d call(s), %d, submission %llu of %llu, %llu finished); out "
+                        "of date %d (%d, submission %llu, cursor %d -> %d, %llu finished); next %d (%d "
+                        "call(s), submission %llu, %llu finished) (want 1, 1 call, 1, the first, an older "
+                        "one finished; -1, -1, the next, "
+                        "the cursor kept, finished by the rebuild; 1, 3 calls, the one after, the "
+                        "failed one finished)\n",
+                shown, shown_calls, shown_result, (unsigned long long)shown_submission,
+                (unsigned long long)first, (unsigned long long)completed_after_shown, failed, failed_result, (unsigned long long)failed_submission,
+                cursor, failed_cursor, (unsigned long long)completed_after_fail, again,
+                s_done_test_calls, (unsigned long long)s_done_test_submission,
+                (unsigned long long)completed_again);
+        ok = 0;
+    }
+
+    /* A slot still pending under no-wait: the present returns DISPLAY_BUSY before its show pass, so
+     * no pass is told anything, and the count does not move. Every slot is submitted first, so the
+     * poll reaches the fence. */
+    for (int k = 0; k < PRESENT_FRAMES; k++) (void)sdl3vk_present_rgba(px);
+    sdl3vk_set_present_nowait(1);
+    s_pace_test_slot_pending = 1;
+    s_fence_status_fn = pace_test_fence_status;
+    const int calls_before = s_done_test_calls;
+    const uint64_t completed_before = sdl3vk_present_completed();
+    const int pending = sdl3vk_present_rgba(px);
+    const uint64_t completed_pending = sdl3vk_present_completed();
+    s_pace_test_slot_pending = 0;
+    s_fence_status_fn = NULL;
+    sdl3vk_set_present_nowait(0);
+    /* Every fence waited: the count is the newest submission. */
+    const int all = wait_all_present_frames();
+    if (pending != SDL3VK_PRESENT_DISPLAY_BUSY || s_done_test_calls != calls_before ||
+        completed_pending != completed_before || !all ||
+        sdl3vk_present_completed() != s_present_submitted) {
+        fprintf(stderr, "show done: with the slot pending the present returned %d, told %d pass(es) and "
+                        "moved the count %llu -> %llu; after every wait the count is %llu of %llu (want "
+                        "DISPLAY_BUSY, none, unmoved, every submission)\n",
+                pending, s_done_test_calls - calls_before, (unsigned long long)completed_before,
+                (unsigned long long)completed_pending, (unsigned long long)sdl3vk_present_completed(),
+                (unsigned long long)s_present_submitted);
+        ok = 0;
+    }
+    sdl3vk_set_show_pass(saved_pass);
+    sdl3vk_set_show_done(saved_done);
+    if (ok) printf("gpu capture selftest: show pass outcomes and the finished-submission count OK\n");
+    return ok;
+}
+
 static int sdl3vk_capture_selftest_body(void) {
     int ok = 1;
 
@@ -2472,6 +2562,7 @@ static int sdl3vk_capture_selftest_body(void) {
     }
 
     if (!sdl3vk_present_pacing_selftest()) ok = 0;
+    if (!sdl3vk_present_completed_selftest()) ok = 0;
 
     int errors = sdl3vk_validation_error_count();
     if (errors != 0) {

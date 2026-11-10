@@ -697,6 +697,63 @@ static void cell_report(const char *dir) {
           "a run without smooth motion reported its inputs");
 }
 
+/* The report's worst case fits ACE_REPORT_MAX: every block present, the spec and every reason at
+ * their longest, and every number as wide as one can be. A count is a uint64_t, at most 20 digits;
+ * the widest other number is a rate's seconds, a uint64_t VBLANK count over 59.94 with one decimal,
+ * also 20 characters. So each run of digits and points in the report is counted as 20 wide, and
+ * each rate class the run has no seconds for as present. */
+static void cell_report_worst(void) {
+    char json[ACE_REPORT_MAX];
+    char reason[128];
+    memset(reason, 'r', sizeof(reason));
+    reason[sizeof(reason) - 1] = '\0';
+    CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;cull=on",
+                        NULL), "the longest line was refused");
+    ace_set_af_effective(8, NULL);
+    ace_note_af_failure();
+    ace_set_cull_untracked(1ul);
+    for (int f = 0; f < ACE_FEATURE_COUNT; f++) ace_feature_unavailable((AceFeature)f, reason);
+    for (uint32_t vc = 1; vc <= 200; vc++) {
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        (void)ace_flip(0x0u, 0x22000u, vc, vc * 16683333ull);
+    }
+    ace_smooth_note_present(ACE_PRESENT_BETWEEN, 1000000000ull);
+    ace_smooth_note_present(ACE_PRESENT_REAL, 1016683000ull);
+    ace_smooth_note_motion(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu);
+    ace_smooth_note_motion_unread();
+    AceSmoothAuxStats st;
+    memset(&st, 0xFF, sizeof(st));
+    ace_smooth_aux_report(&st);
+    size_t len = ace_report_json(json, sizeof(json));
+    CHECK(len > 0 && strstr(json, "\"cull_untracked\"") && strstr(json, "\"af_device_max\"") &&
+              strstr(json, "\"af_sampler_failures\"") && strstr(json, "\"presents\"") &&
+              strstr(json, "\"added_delay_ms\"") && strstr(json, "\"smooth_motion\"") &&
+              strstr(json, "\"smooth_aux\"") && strstr(json, "\"present_interval_ms\""),
+          "a report with every block:\n%s", json);
+    if (!len) return;
+    size_t worst = len;
+    for (size_t i = 0; i < len;) {
+        size_t run = 0;
+        while (i + run < len && ((json[i + run] >= '0' && json[i + run] <= '9') || json[i + run] == '.')) run++;
+        if (run && run < 20u) worst += 20u - run;
+        i += run ? run : 1u;
+    }
+    for (int r = ACE_RATE_K1; r < ACE_RATE_COUNT; r++) {
+        char key[64];
+        snprintf(key, sizeof(key), "\"%s\": ", ace_rate_name((AceRate)r));
+        if (!strstr(json, key)) worst += strlen(", ") + strlen(key) + 20u;
+    }
+    const char *spec = strstr(json, "\"spec\": \"");
+    const char *spec_end = spec ? strchr(spec + 9, '"') : NULL;
+    CHECK(spec_end != NULL, "the report has no spec");
+    if (spec_end) worst += (ACE_SPEC_MAX - 1u) - (size_t)(spec_end - (spec + 9));
+    /* A feature named unavailable reads "off" in the effective block, shorter than its value on. */
+    worst += (strlen("fill") - strlen("off")) + (strlen("match") - strlen("off")) + (strlen("sinc") - strlen("off"));
+    CHECK(worst < ACE_REPORT_MAX, "the worst-case report needs %zu bytes; ACE_REPORT_MAX is %u",
+          worst + 1u, ACE_REPORT_MAX);
+    printf("ace-selftest: the worst-case report needs %zu of %u bytes\n", worst + 1u, ACE_REPORT_MAX);
+}
+
 /* What an in-between moved: the weight of a measurement, when a measurement may be read, and the
  * report's totals. */
 static void cell_motion(void) {
@@ -712,36 +769,33 @@ static void cell_motion(void) {
     CHECK(ace_motion_weight_milli(32u, 968u) == 64u, "phase 0.032: %u", ace_motion_weight_milli(32u, 968u));
     CHECK(ace_motion_weight_milli(0xFFFFFFFFu, 0xFFFFFFFFu) == 1000u, "the largest sums do not overflow");
 
-    /* A measurement is due once as many later show passes have begun as the presenter has frame
-     * slots, in the order made; one made in the pass that just began is never due in it. */
+    /* A measurement is due once the presenter has seen its submission finished, in the order
+     * made. Submissions finish in order, so the count of the newest one seen finished says it for
+     * every one before. */
     AceMotionQueue q;
     ace_motion_queue_reset(&q);
-    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "an empty queue had something due");
-    ace_motion_queue_pass(&q);
-    CHECK(ace_motion_queue_made(&q, 1u) == 1, "the queue refused its first serial");
-    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "due in the pass that made it");
-    ace_motion_queue_pass(&q);                              /* a held present: no in-between */
-    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "due one pass later");
-    ace_motion_queue_pass(&q);
-    CHECK(ace_motion_queue_made(&q, 2u) == 1, "the queue refused its second serial");
-    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "due two passes later");
-    ace_motion_queue_pass(&q);
-    CHECK(ace_motion_queue_due(&q, 3u) == 1u, "serial 1 was not due three passes later");
-    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "serial 2 was due one pass after it was made");
-    ace_motion_queue_pass(&q);
-    CHECK(ace_motion_queue_due(&q, 3u) == 0u, "serial 2 was due two passes after it was made");
-    ace_motion_queue_pass(&q);
-    CHECK(ace_motion_queue_due(&q, 3u) == 2u && ace_motion_queue_due(&q, 3u) == 0u,
-          "serial 2 was not due three passes after it was made");
+    CHECK(ace_motion_queue_due(&q, 100u) == 0u, "an empty queue had something due");
+    CHECK(ace_motion_queue_made(&q, 1u, 5u) == 1, "the queue refused its first serial");
+    CHECK(ace_motion_queue_due(&q, 4u) == 0u, "due before its submission finished");
+    /* Two presents in the same submission's place: one recorded but never submitted, so the
+     * next submission carries the same serial number. Both wait for it. */
+    CHECK(ace_motion_queue_made(&q, 2u, 7u) == 1 && ace_motion_queue_made(&q, 3u, 7u) == 1,
+          "the queue refused serials 2 and 3");
+    CHECK(ace_motion_queue_due(&q, 6u) == 1u, "serial 1 was not due once its submission finished");
+    CHECK(ace_motion_queue_due(&q, 6u) == 0u, "serial 2 was due before its submission finished");
+    /* Slots used out of turn (a failed present keeps its slot) change nothing: only the count
+     * of finished submissions decides. */
+    CHECK(ace_motion_queue_due(&q, 9u) == 2u && ace_motion_queue_due(&q, 9u) == 3u &&
+              ace_motion_queue_due(&q, 9u) == 0u,
+          "serials 2 and 3 were not due, in order, once a later submission finished");
     /* A queue nobody reads fills, then drops and counts: it never overwrites a pending serial. */
     ace_motion_queue_reset(&q);
     for (uint64_t serial = 1; serial <= ACE_MOTION_PENDING + 2u; serial++) {
-        ace_motion_queue_pass(&q);
-        int kept = ace_motion_queue_made(&q, serial);
+        int kept = ace_motion_queue_made(&q, serial, serial);
         CHECK(kept == (serial <= ACE_MOTION_PENDING), "serial %llu kept=%d", (unsigned long long)serial, kept);
     }
-    CHECK(q.dropped == 2u && ace_motion_queue_due(&q, 3u) == 1u, "a full queue dropped %llu",
-          (unsigned long long)q.dropped);
+    CHECK(q.dropped == 2u && ace_motion_queue_due(&q, 1u) == 1u && ace_motion_queue_due(&q, 1u) == 0u,
+          "a full queue dropped %llu", (unsigned long long)q.dropped);
 
     /* The report: the totals, the pooled phase and the mean weight; nothing before a measurement
      * and nothing in a run without smooth motion. */
@@ -910,6 +964,7 @@ int main(int argc, char **argv) {
     cell_readout_smooth();
     cell_motion();
     cell_report(argc > 1 ? argv[1] : NULL);
+    cell_report_worst();
     if (s_fail) {
         fprintf(stderr, "ace-selftest: %d check(s) FAILED\n", s_fail);
         return 1;

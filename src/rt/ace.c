@@ -844,24 +844,21 @@ void ace_motion_queue_reset(AceMotionQueue *q) {
     if (q) memset(q, 0, sizeof(*q));
 }
 
-void ace_motion_queue_pass(AceMotionQueue *q) {
-    q->passes++;
-}
-
-int ace_motion_queue_made(AceMotionQueue *q, uint64_t serial) {
+int ace_motion_queue_made(AceMotionQueue *q, uint64_t serial, uint64_t submission) {
     if (q->count == ACE_MOTION_PENDING) {
         q->dropped++;
         return 0;
     }
     uint32_t at = (q->head + q->count) % ACE_MOTION_PENDING;
     q->serial[at] = serial;
-    q->made_at[at] = q->passes;
+    q->submission[at] = submission;
     q->count++;
     return 1;
 }
 
-uint64_t ace_motion_queue_due(AceMotionQueue *q, uint32_t slots) {
-    if (!q->count || q->passes < q->made_at[q->head] + slots) return 0u;
+uint64_t ace_motion_queue_due(AceMotionQueue *q, uint64_t completed) {
+    /* Submissions finish in order, so the oldest entry is the first that can be due. */
+    if (!q->count || completed < q->submission[q->head]) return 0u;
     uint64_t serial = q->serial[q->head];
     q->head = (q->head + 1u) % ACE_MOTION_PENDING;
     q->count--;
