@@ -57,6 +57,27 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
 static const char *const k_enhanced_af_labels[] = {"16x", "8x", "4x", "2x", "Off"};
 static const char *const k_enhanced_switch_labels[] = {"On", "Off"};
 static const char *const k_enhanced_upscale_labels[] = {"FSR 1", "Off"};
+/* Each part's words by part id. A part added to player_state.h has none (count 0) until it
+   is listed here: the screen builder then gives its row no words, never another part's, and
+   fails the check that names it. */
+typedef struct {
+    const char *const *labels;
+    int count;
+} EnhancedWords;
+#define ENHANCED_WORDS(words) {(words), (int)(sizeof(words) / sizeof((words)[0]))}
+static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
+    [PLAYER_PART_FILTERING] = ENHANCED_WORDS(k_enhanced_af_labels),
+    [PLAYER_PART_TEXT] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_READOUT] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_NOTICE] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_WIDE] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_SMOOTH] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_SAS] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_CULL] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_UPSCALE] = ENHANCED_WORDS(k_enhanced_upscale_labels)};
+#undef ENHANCED_WORDS
+/* The most words any part has, for the stays-put test's steps. */
+enum { ENHANCED_MAX_WORDS = 5 };
 static const char *const k_enhanced_library_modes[] = {"Authentic", "Enhanced"};
 static const char k_enhanced_smooth_at_60[] = "Off (this game runs at 60 FPS)";
 static const char *const k_enhanced_title_modes[] = {"Library (Enhanced)", "Authentic",
@@ -438,16 +459,15 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                 title && g_enhanced_value[i] == NULL ? followed[i] : value;
             settings.enhanced_rows[i].sentence = k_enhanced_parts[i].sentence;
             settings.enhanced_rows[i].on = strcmp(value, "Off") != 0;
-            settings.enhanced_rows[i].labels =
-                i == 0 ? k_enhanced_af_labels
-                : i == PLAYER_PART_COUNT - 1 ? k_enhanced_upscale_labels
-                                             : k_enhanced_switch_labels;
-            settings.enhanced_rows[i].label_count = i == 0 ? 5 : 2;
+            CHECK(k_enhanced_words[i].count > 0,
+                  "every Settings > Enhanced part has its words in this test");
+            settings.enhanced_rows[i].labels = k_enhanced_words[i].labels;
+            settings.enhanced_rows[i].label_count = k_enhanced_words[i].count;
             settings.enhanced_rows[i].library_value = title ? followed[i] : NULL;
             /* As player_ui_nk.c gives a game's page: the value Smooth motion shows while
                the play mode runs the game's 60 FPS game logic. */
             settings.enhanced_rows[i].other_value =
-                title && i == 5 ? k_enhanced_smooth_at_60 : NULL;
+                title && i == PLAYER_PART_SMOOTH ? k_enhanced_smooth_at_60 : NULL;
         }
     }
     settings.pacing = "PSP timing";
@@ -3759,23 +3779,12 @@ static EnhancedRowPlaces enhanced_row_places(FlowCase which) {
    page and on a game's. */
 static void test_enhanced_rows_stay_put(void) {
     static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
-    /* Each part's words by part, so a part added later has none (NULL) until it is listed
-       here, and the check below names it instead of the loop reading through NULL. */
-    static const char *const *const labels[PLAYER_PART_COUNT] = {
-        [PLAYER_PART_FILTERING] = k_enhanced_af_labels,
-        [PLAYER_PART_TEXT] = k_enhanced_switch_labels,
-        [PLAYER_PART_READOUT] = k_enhanced_switch_labels,
-        [PLAYER_PART_NOTICE] = k_enhanced_switch_labels,
-        [PLAYER_PART_WIDE] = k_enhanced_switch_labels,
-        [PLAYER_PART_SMOOTH] = k_enhanced_switch_labels,
-        [PLAYER_PART_SAS] = k_enhanced_switch_labels,
-        [PLAYER_PART_CULL] = k_enhanced_switch_labels,
-        [PLAYER_PART_UPSCALE] = k_enhanced_upscale_labels};
     for (int part = 0; part < PLAYER_PART_COUNT; ++part) {
-        if (labels[part] == NULL) {
-            CHECK(false, "every Settings > Enhanced part has its words in this test");
+        CHECK(k_enhanced_words[part].count > 0 &&
+                  k_enhanced_words[part].count <= ENHANCED_MAX_WORDS,
+              "every Settings > Enhanced part has its words in this test");
+        if (k_enhanced_words[part].count <= 0 || k_enhanced_words[part].count > ENHANCED_MAX_WORDS)
             return;
-        }
     }
     for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
         EnhancedRowPlaces base;
@@ -3789,19 +3798,19 @@ static void test_enhanced_rows_stay_put(void) {
         /* -3: on a game's page, Smooth motion off while the play mode runs the game's 60
            FPS game logic; -2: Smooth motion on, Widescreen off; -1 and up: the play modes,
            then each part at each of its values. */
-        for (int step = -3; step < 4 + PLAYER_PART_COUNT * 5; ++step) {
+        for (int step = -3; step < 4 + PLAYER_PART_COUNT * ENHANCED_MAX_WORDS; ++step) {
             EnhancedRowPlaces moved;
             char message[160];
             memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
             g_enhanced_mode = NULL;
             if (step == -3) {
                 if (pages[g] != FLOW_SETTINGS_ACE_TITLE) continue;
-                g_enhanced_value[5] = k_enhanced_smooth_at_60;
+                g_enhanced_value[PLAYER_PART_SMOOTH] = k_enhanced_smooth_at_60;
                 (void)snprintf(message, sizeof(message),
                                "page %d: Smooth motion off at 60 FPS moves no row", (int)g);
             } else if (step == -2) {
-                g_enhanced_value[5] = "On";
-                g_enhanced_value[4] = "Off";
+                g_enhanced_value[PLAYER_PART_SMOOTH] = "On";
+                g_enhanced_value[PLAYER_PART_WIDE] = "Off";
                 (void)snprintf(message, sizeof(message),
                                "page %d: Smooth motion on (Widescreen off) moves no row", (int)g);
             } else if (step < 4) {
@@ -3813,12 +3822,13 @@ static void test_enhanced_rows_stay_put(void) {
                 (void)snprintf(message, sizeof(message), "page %d: play mode %s moves no row",
                                (int)g, g_enhanced_mode);
             } else {
-                int part = (step - 4) / 5;
-                int value = (step - 4) % 5;
-                if (value >= (part == 0 ? 5 : 2)) continue;
-                g_enhanced_value[part] = labels[part][value];
+                int part = (step - 4) / ENHANCED_MAX_WORDS;
+                int value = (step - 4) % ENHANCED_MAX_WORDS;
+                if (value >= k_enhanced_words[part].count) continue;
+                g_enhanced_value[part] = k_enhanced_words[part].labels[value];
                 (void)snprintf(message, sizeof(message), "page %d: %s at %s moves no row",
-                               (int)g, k_enhanced_parts[part].name, labels[part][value]);
+                               (int)g, k_enhanced_parts[part].name,
+                               k_enhanced_words[part].labels[value]);
             }
             moved = enhanced_row_places(pages[g]);
             CHECK(memcmp(&moved, &base, sizeof(base)) == 0, message);
