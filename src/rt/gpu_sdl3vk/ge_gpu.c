@@ -501,9 +501,20 @@ static uint32_t *s_hm_out;                 /* levels 1.. of the chain being buil
 static float *s_hm_work;
 static int s_tex_bound_hm;                 /* the last tex_get bound a chain */
 static struct {
-    uint64_t entries, builds, texels, build_ns, bound, plain_alpha, plain_target,
-             set_failures, bytes, bytes_peak;
+    uint64_t entries, builds, reused, texels, build_ns, bound, plain_alpha, plain_target,
+             set_failures, bytes, bytes_peak, cache_peak;
 } s_hm_stats;
+/* Built chains by the content of their level 0 (a full 64-bit hash of the decoded texels and the
+ * size), so a texture whose contents come back, as when a game streams several textures through
+ * one VRAM slot in turn, uploads its chain again instead of building it again. Bounded by
+ * HM_CACHE_BYTES of host memory, least recently used out first. */
+#define HM_CACHE_SLOTS 256
+#define HM_CACHE_BYTES (32u << 20)          /* 24 full 512x512 chains, or about 2.5 times the
+                                               chains Hot Shots Tennis keeps resident at 4x */
+typedef struct { uint64_t hash, lru; uint32_t w, h; int alpha; size_t texels; uint32_t *chain; } HmCached;
+static HmCached s_hm_cache[HM_CACHE_SLOTS];
+static size_t s_hm_cache_bytes;
+static uint64_t s_hm_cache_clock;
 /* The texture-replacement pack in force (texrepl.h), opened once at init: NULL in an authentic run
  * and whenever SR_TEX_REPLACE is unset or names no readable pack. A replacement rides the scaled-
  * copy machinery: it is an image `repl_factor` times the guest texture, held in the entry's xs copy. */
@@ -4213,23 +4224,89 @@ static uint32_t s_selftest_upload_fail_after = UINT32_MAX;
 /* Decode the current texture's levels 0..levels-1 through ge.c's sampler and upload them.
  * Chain level L is max(1, w >> L) x max(1, h >> L), which tex_mip_chain_supported() checked
  * is the level's own TEXSIZE. */
-/* Build entry `e`'s host chain from level 0 in s_texscratch (left as it is) and upload levels
- * 1..hm_levels-1; the last moves the image to SHADER_READ_ONLY. Sets e->hm_alpha. */
+/* A 64-bit hash of every decoded texel and the size: the chain cache's key. */
+static uint64_t tex_hm_content_hash(const uint32_t *t, uint32_t w, uint32_t h) {
+    const size_t n = (size_t)w * h;
+    uint64_t x = 0x9E3779B97F4A7C15ull ^ (((uint64_t)w << 32) | h);
+    size_t i = 0;
+    for (; i + 2u <= n; i += 2u) {
+        uint64_t v;
+        memcpy(&v, t + i, sizeof(v));
+        x = (x ^ v) * 0xFF51AFD7ED558CCDull;
+        x ^= x >> 32;
+    }
+    if (i < n) { x = (x ^ t[i]) * 0xC4CEB9FE1A85EC53ull; x ^= x >> 29; }
+    return x;
+}
+
+static void tex_hm_cache_clear(void) {
+    for (int i = 0; i < HM_CACHE_SLOTS; i++) free(s_hm_cache[i].chain);
+    memset(s_hm_cache, 0, sizeof(s_hm_cache));
+    s_hm_cache_bytes = 0;
+    s_hm_cache_clock = 0;
+}
+
+/* Keeps a copy of the chain just built (`texels` in s_hm_out), dropping the least recently used
+   chains until it fits. A chain that cannot be kept is simply built again next time. */
+static void tex_hm_cache_put(uint64_t hash, uint32_t w, uint32_t h, int alpha, size_t texels) {
+    const size_t need = texels * sizeof(uint32_t);
+    if (need > HM_CACHE_BYTES) return;
+    int slot = -1;
+    for (;;) {
+        int free_slot = -1, old = -1;
+        for (int i = 0; i < HM_CACHE_SLOTS; i++) {
+            if (!s_hm_cache[i].chain) { if (free_slot < 0) free_slot = i; continue; }
+            if (old < 0 || s_hm_cache[i].lru < s_hm_cache[old].lru) old = i;
+        }
+        if (free_slot >= 0 && s_hm_cache_bytes + need <= HM_CACHE_BYTES) { slot = free_slot; break; }
+        if (old < 0) return;
+        s_hm_cache_bytes -= s_hm_cache[old].texels * sizeof(uint32_t);
+        free(s_hm_cache[old].chain);
+        memset(&s_hm_cache[old], 0, sizeof(s_hm_cache[old]));
+    }
+    uint32_t *copy = (uint32_t *)malloc(need);
+    if (!copy) return;
+    memcpy(copy, s_hm_out, need);
+    s_hm_cache[slot] = (HmCached){ hash, ++s_hm_cache_clock, w, h, alpha, texels, copy };
+    s_hm_cache_bytes += need;
+    if (s_hm_cache_bytes > s_hm_stats.cache_peak) s_hm_stats.cache_peak = s_hm_cache_bytes;
+}
+
+/* Entry `e`'s host chain for level 0 in s_texscratch (left as it is): the cached chain of the
+ * same contents, or one built now and kept. Uploads levels 1..hm_levels-1; the last moves the
+ * image to SHADER_READ_ONLY. Sets e->hm_alpha. */
 static int tex_hm_upload(TexEnt *e, VkImage img, VkImageLayout *lay, int w, int h) {
     const uint64_t t0 = SDL_GetTicksNS();
-    const uint32_t built = nk_tex_mips_build(&s_hm_curve, s_texscratch, (uint32_t)w, (uint32_t)h,
-                                             s_hm_work, s_hm_out, &e->hm_alpha);
+    const size_t texels = nk_tex_mips_chain_texels((uint32_t)w, (uint32_t)h);
+    const uint64_t hash = tex_hm_content_hash(s_texscratch, (uint32_t)w, (uint32_t)h);
+    const uint32_t *chain = NULL;
+    for (int i = 0; i < HM_CACHE_SLOTS; i++) {
+        HmCached *c = &s_hm_cache[i];
+        if (c->chain && c->hash == hash && c->w == (uint32_t)w && c->h == (uint32_t)h && c->texels == texels) {
+            c->lru = ++s_hm_cache_clock;
+            e->hm_alpha = c->alpha;
+            chain = c->chain;
+            s_hm_stats.reused++;
+            break;
+        }
+    }
+    if (!chain) {
+        const uint32_t built = nk_tex_mips_build(&s_hm_curve, s_texscratch, (uint32_t)w, (uint32_t)h,
+                                                 s_hm_work, s_hm_out, &e->hm_alpha);
+        if (built + 1u != e->hm_levels) { s_hm_stats.build_ns += SDL_GetTicksNS() - t0; return 0; }
+        s_hm_stats.builds++;
+        s_hm_stats.texels += texels;
+        tex_hm_cache_put(hash, (uint32_t)w, (uint32_t)h, e->hm_alpha, texels);
+        chain = s_hm_out;
+    }
     s_hm_stats.build_ns += SDL_GetTicksNS() - t0;
-    if (built + 1u != e->hm_levels) return 0;
-    s_hm_stats.builds++;
     size_t off = 0;
     for (uint32_t l = 1; l < e->hm_levels; l++) {
         const uint32_t lw = nk_tex_mips_dim((uint32_t)w, l), lh = nk_tex_mips_dim((uint32_t)h, l);
-        if (!tex_upload_level(img, lay, l, l + 1u == e->hm_levels, s_hm_out + off, (int)lw, (int)lh))
+        if (!tex_upload_level(img, lay, l, l + 1u == e->hm_levels, chain + off, (int)lw, (int)lh))
             return 0;
         off += (size_t)lw * lh;
     }
-    s_hm_stats.texels += off;
     return 1;
 }
 
@@ -4866,15 +4943,17 @@ static int s_hm_reported;
 static void tex_hm_report(void) {
     if (!s_hm || s_hm_reported) return;
     s_hm_reported = 1;
-    fprintf(stderr, "HOST_MIPS: exit (entries=%llu, builds=%llu, texels=%llu, build_ms=%.1f, bound=%llu, "
-                    "plain_alpha_unused=%llu, plain_target=%llu, set_failures=%llu, "
-                    "chain_peak_kib=%llu)\n",
+    fprintf(stderr, "HOST_MIPS: exit (entries=%llu, builds=%llu, reused=%llu, texels=%llu, build_ms=%.1f, "
+                    "bound=%llu, plain_alpha_unused=%llu, plain_target=%llu, set_failures=%llu, "
+                    "chain_peak_kib=%llu, cache_peak_kib=%llu)\n",
             (unsigned long long)s_hm_stats.entries, (unsigned long long)s_hm_stats.builds,
+            (unsigned long long)s_hm_stats.reused,
             (unsigned long long)s_hm_stats.texels, (double)s_hm_stats.build_ns / 1e6,
             (unsigned long long)s_hm_stats.bound, (unsigned long long)s_hm_stats.plain_alpha,
             (unsigned long long)s_hm_stats.plain_target,
             (unsigned long long)s_hm_stats.set_failures,
-            (unsigned long long)(s_hm_stats.bytes_peak >> 10));
+            (unsigned long long)(s_hm_stats.bytes_peak >> 10),
+            (unsigned long long)(s_hm_stats.cache_peak >> 10));
 }
 
 static void tex_hm_init(void) {
@@ -4904,6 +4983,7 @@ static void tex_hm_init(void) {
 static void tex_hm_shutdown(void) {
     tex_hm_report();
     if (s_hm) ace_set_exit_report(ACE_FEATURE_MIPS, NULL);
+    tex_hm_cache_clear();
     free(s_hm_out); free(s_hm_work);
     s_hm_out = NULL; s_hm_work = NULL;
     s_hm = 0;

@@ -7915,7 +7915,7 @@ static void test_play_mode_settings(void) {
                                       "\"text\": \"off\", \"readout\": \"off\", "
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"mips\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"},") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", \"mips\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -8112,7 +8112,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
-                                      "\"tess\": \"off\", \"mips\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", \"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8138,7 +8138,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"mips\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\", \"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8204,7 +8204,7 @@ static void test_play_mode_cull_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"mips\": \"off\", \"cull\": \"on\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\", \"mips\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
@@ -8263,6 +8263,12 @@ static void test_play_mode_mips_settings(void) {
     player_play_resolve(&app->settings, "TEST95002", &r);       /* follows the library */
     assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_MIPS] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line + strlen(line) - 8, ";mips=on") == 0);
+    /* With Wider culling on too, cull stays last though its part comes before mips in the enum:
+       the line follows ace_format's key order (mips after tess, cull last). */
+    r.part[PLAYER_PART_CULL] = 1;
+    assert(player_play_launch_line(&r, line, sizeof(line)) &&
+           strcmp(line + strlen(line) - 25, ";tess=off;mips=on;cull=on") == 0);
+    r.part[PLAYER_PART_CULL] = 0;
     player_play_resolve(&app->settings, "TEST95004", &r);       /* Enhanced by the library */
     assert(r.on && r.mode == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_MIPS] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) && strcmp(line + strlen(line) - 8, ";mips=on") == 0);
@@ -8271,8 +8277,8 @@ static void test_play_mode_mips_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"tess\": \"off\", \"mips\": \"on\", \"cull\": \"off\", "
-                                      "\"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"cull\": \"off\", \"upscale\": \"off\", "
+                                      "\"mips\": \"on\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"enhanced\", \"mips\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8350,8 +8356,8 @@ static void test_play_mode_tess_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"mips\": \"off\", "
-                                      "\"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
+                                      "\"upscale\": \"off\", \"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
         free(saved);
@@ -9009,8 +9015,8 @@ static void test_play_mode_upscale_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"mips\": \"off\", "
-                                      "\"cull\": \"off\", \"upscale\": \"fsr1\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
+                                      "\"upscale\": \"fsr1\", \"mips\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }

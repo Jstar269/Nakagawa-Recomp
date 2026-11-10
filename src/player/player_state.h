@@ -229,13 +229,13 @@ typedef enum {
     PLAYER_PART_SAS,           /* band-limited SAS resampling (#2054, section 11.3.1): 0 off, 1 sinc */
     PLAYER_PART_TESS,          /* finer Bezier and spline patches (#2053, section 11.3.7): 0 off, or the
                                   factor 2, 3 or 4. Off in a fresh file; alters GE timing */
-    PLAYER_PART_MIPS,          /* host-built mip chains (section 11.3.8): 0 off, 1 on. In the SR_ACE line
-                                  only when on (mips=on); off in a fresh file */
     PLAYER_PART_CULL,          /* wider culling (section 11.3.6): 0 off, 1 on. A title's own culling is
                                   widened to Widescreen's wings; a title without a package ignores it */
     PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
                                   runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
                                   not in the SR_ACE line */
+    PLAYER_PART_MIPS,          /* host-built mip chains (section 11.3.8): 0 off, 1 on. In the SR_ACE line
+                                  only when on (mips=on); off in a fresh file */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 

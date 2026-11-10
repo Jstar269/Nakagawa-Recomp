@@ -17,6 +17,8 @@
  *  - palette: the same index image under another palette is another cache entry with its own
  *    chain (red and blue give sRGB 188, 0, 188); the first palette's entry is still its own.
  *  - rewrite: guest bytes rewritten under the same palette rebuild the chain at the next decode.
+ *  - reuse: the checkerboard written back is contents the chain cache has seen: its chain is
+ *    uploaded again with no build, and samples the same grey.
  *  - key-edge: opaque red beside the colour key (entry 2, magenta, alpha 0), blended by source
  *    alpha over black: no device pixel takes any blue, at the edge or anywhere.
  *  - gates: a through-mode draw and a draw whose texture function ignores the alpha of a
@@ -280,6 +282,23 @@ int gegpu_mips_selftest(void) {
             ok = 0;
         }
         if (ok) printf("gpu mips selftest: PASS rewrite    rebuilt at the next decode\n");
+    }
+
+    /* reuse: the checkerboard written back into the same texture is contents the cache has seen,
+       so its chain is uploaded again, not built, and samples the same grey. */
+    if (ok) {
+        const uint64_t builds0 = s_hm_stats.builds, reused0 = s_hm_stats.reused;
+        hm_fill(0);
+        hm_state(3u | (1u << 8), 0, 0);
+        ok = hm_quad(110, 5, 64.0f, 0) && hm_read(110, 5, dev, &r);
+        if (ok && (!hm_near(&r, grey, 1u) || s_hm_stats.builds != builds0 || s_hm_stats.reused != reused0 + 1u)) {
+            hm_say("reuse", &r);
+            fprintf(stderr, "gpu mips selftest [reuse]: want the cached chain's grey with no build (builds +%llu, "
+                            "reused +%llu)\n", (unsigned long long)(s_hm_stats.builds - builds0),
+                    (unsigned long long)(s_hm_stats.reused - reused0));
+            ok = 0;
+        }
+        if (ok) printf("gpu mips selftest: PASS reuse      contents seen before upload their kept chain\n");
     }
 
     /* key-edge: red beside the key, blended over black. */

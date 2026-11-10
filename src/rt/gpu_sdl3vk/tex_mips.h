@@ -68,11 +68,24 @@ static inline size_t nk_tex_mips_work_floats(uint32_t w, uint32_t h) {
 }
 
 /* The sRGB curve as 256 decoded values, and the 255 midpoints between neighbours that encoding
- * searches, so encode(decode(v)) == v for every byte. */
+ * compares with, so encode(decode(v)) == v for every byte. `guess` is the encoded byte at each
+ * of NK_TEX_MIPS_GUESS + 1 even steps of 0..1, where encoding starts its walk. */
+#define NK_TEX_MIPS_GUESS 4096u
 typedef struct {
     float lin[256];
     float mid[255];
+    uint8_t guess[NK_TEX_MIPS_GUESS + 1u];
 } NkTexMipsCurve;
+
+/* The count of midpoints below x: the byte whose decoded value is nearest x. */
+static inline uint32_t nk_tex_mips_encode_search(const NkTexMipsCurve *c, float x) {
+    uint32_t lo = 0u, hi = 255u;
+    while (lo < hi) {
+        const uint32_t m = (lo + hi) >> 1;
+        if (c->mid[m] < x) lo = m + 1u; else hi = m;
+    }
+    return lo;
+}
 
 static inline void nk_tex_mips_curve_init(NkTexMipsCurve *c) {
     for (int v = 0; v < 256; v++) {
@@ -80,16 +93,18 @@ static inline void nk_tex_mips_curve_init(NkTexMipsCurve *c) {
         c->lin[v] = (float)(s <= 0.04045 ? s / 12.92 : pow((s + 0.055) / 1.055, 2.4));
     }
     for (int v = 0; v < 255; v++) c->mid[v] = 0.5f * (c->lin[v] + c->lin[v + 1]);
+    for (uint32_t i = 0; i <= NK_TEX_MIPS_GUESS; i++)
+        c->guess[i] = (uint8_t)nk_tex_mips_encode_search(c, (float)i / (float)NK_TEX_MIPS_GUESS);
 }
 
-/* The byte whose decoded value is nearest x (0..1). */
+/* The byte whose decoded value is nearest x (0..1): the same count of midpoints below x as the
+ * search gives, found by walking from the guess, a step or two at most. */
 static inline uint32_t nk_tex_mips_encode(const NkTexMipsCurve *c, float x) {
-    uint32_t lo = 0u, hi = 255u;            /* the answer is the count of midpoints below x */
-    while (lo < hi) {
-        const uint32_t m = (lo + hi) >> 1;
-        if (c->mid[m] < x) lo = m + 1u; else hi = m;
-    }
-    return lo;
+    const float q = x <= 0.0f ? 0.0f : x >= 1.0f ? (float)NK_TEX_MIPS_GUESS : x * (float)NK_TEX_MIPS_GUESS;
+    uint32_t v = c->guess[(uint32_t)q];
+    while (v < 255u && c->mid[v] < x) v++;
+    while (v > 0u && !(c->mid[v - 1u] < x)) v--;
+    return v;
 }
 
 static inline uint32_t nk_tex_mips_alpha_byte(float a) {

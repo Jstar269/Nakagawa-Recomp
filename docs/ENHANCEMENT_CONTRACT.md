@@ -1044,7 +1044,8 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
   minifying filter is linear, both sides are powers of two from 2 to 512 texels, and no byte of it lies in a live
   render target. A texture the game mips keeps the game's own chain (#1373) and gets none of these. A render
   target, read back as a texture, never gets one: its contents are guest drawing, not texture data. A texture that
-  changes every frame, from a CPU write or a DMA, is decoded again as before, and its chain is built again with it.
+  changes every frame, from a CPU write or a DMA, is decoded again as before, and its chain follows it: built again
+  for contents the renderer has not seen, or taken from the chain cache (below) for contents it has.
   A CLUT texture's palette is part of its cache key, so each palette has its own entry and its own chain, and a
   palette animation that comes back to a palette finds the chain it built the first time.
 - **Which draws.** A draw binds the chain only when it is transformed (through-mode HUDs, menus and text keep
@@ -1075,33 +1076,42 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
 - **Memory and cost.** A chain adds a third of level 0's bytes or less (a 64x64 texture: 1365 texels on top of
   4096), in the same image as level 0, plus one descriptor set an entry. The chain is freed with its entry at
   eviction and at shutdown. The builder's two buffers, made once when the part is on, hold a 512x512 chain (1.33 MiB)
-  and its float work area (2.25 MiB). A build is CPU work at each upload of the texture, on the GE thread; the exit
-  stamp gives the total build time.
+  and its float work area (2.25 MiB). A build is CPU work on the GE thread. A game that streams several textures
+  through one VRAM slot in turn decodes each of them again and again, so the renderer keeps built chains in a host
+  cache keyed by a 64-bit hash of every decoded level-0 texel and the size: contents it has seen upload their kept
+  chain instead of building it (the hash costs about a fifteenth of a build). The cache holds at most 32 MiB, about
+  two and a half times the chains Hot Shots Tennis keeps resident at 4x, and drops the least recently used chain
+  first. The exit stamp gives the builds, the reuses, the time of both and the cache's peak.
 - **Stamps.** `ACE_MODE: mips on (textures with one level get host-built mip chains)` after the `ACE_MODE: on` line;
   `HOST_MIPS: on (filter=box in linear light, alpha-weighted, key fill; bias=0 at <S>x; anisotropy=<A>)` and the
-  guest-visible line section 11.3.8 describes when the renderer starts; `HOST_MIPS: exit (entries=, builds=, texels=,
-  build_ms=, bound=, plain_alpha_unused=, plain_target=, set_failures=, chain_peak_kib=)` when it
+  guest-visible line section 11.3.8 describes when the renderer starts; `HOST_MIPS: exit (entries=, builds=, reused=,
+  texels=, build_ms=, bound=, plain_alpha_unused=, plain_target=, set_failures=, chain_peak_kib=, cache_peak_kib=)`
+  (`build_ms` is the time of the hash, the cache lookup and the builds; `texels` counts built ones) when it
   stops, or, on the `SR_EXIT_AT_VBLANK` path that skips the renderer's shutdown, from `ace_finish` (once either
   way). The report's `effective` block has `"mips"`, the game badge lists "smooth far textures", and the flight
   recorder's `runtime.enhancements` carries the launch line. Section 10.4 applies: the run is an Enhanced run. If the
   builder's buffers cannot be made, the part is unavailable for the run and the report says so.
 - **Tests.**
-  - `tex-mips-selftest` runs `tex_mips.h` alone: the level count and chain size, the sRGB round trip, a checker
-    whose every level is the linear-light grey (188, not the gamma mean 128), alpha weighting (one opaque blue texel
-    among three transparent red ones gives blue at alpha 64), a colour-keyed edge whose fill leaves no key colour in
-    any level, and a texture with no alpha at all. `tex-mips-mutant` builds it without the fill and requires the
-    key-edge cell to fail for that reason.
+  - `tex-mips-selftest` runs `tex_mips.h` alone: the level count and chain size, the sRGB round trip, the
+    table-driven encode against the search at every midpoint and a sweep of 0..1, a checker whose every level is the
+    linear-light grey (188, not the gamma mean 128), alpha weighting (one opaque blue texel among three transparent
+    red ones gives blue at alpha 64), a colour-keyed edge whose fill leaves no key colour in any level, and a texture
+    with no alpha at all. `tex-mips-mutant` builds it without the fill and requires the key-edge cell to fail for
+    that reason.
   - `gpu-mips-selftest` runs `ge_gpu.c`'s own hooks on a Vulkan device and reads the target at device resolution: a
     64x64 single-level CLUT checker drawn 5 pixels wide samples the chain's grey, not level 0's aliasing; a draw at
-    two texels per guest pixel keeps level 0's detail from 2x; a second palette builds a second chain and the first
-    palette, back again, finds its own; a rewrite of the texels rebuilds the chain; a colour-keyed edge blended over
-    black takes no key colour; through-mode and alpha-unused draws keep level 0, and a colour-tested draw stays
-    with the software renderer; the chain bytes are
-    1365 texels an entry. It runs at render scales 4, 2 and 1, with 16x texture filtering, and with the part off,
-    where the minified draw must show level 0's aliasing and no entry may have a chain.
-  - `ace-selftest` pins the key: optional, `on` or `off`, in an Enhanced or Ace line, written only when on, after `tess` and before `cull`.
-    `test_play_mode_mips_settings` in `tests/native/test_player_state.c` checks the part at both levels, its
-    save and load, and the launch line. `gpu-coherence-selftest`'s authentic run requires no entry to have a chain.
+    two texels per guest pixel matches the same draw on level 0 alone pixel for pixel from 2x, and is the chain's
+    grey at 1x; a second palette builds a second chain and the first palette, back again, finds its own; a rewrite
+    of the texels rebuilds the chain, and the checker written back takes its cached chain with no build; a
+    colour-keyed edge blended over black takes no key colour; through-mode and alpha-unused draws keep level 0, and a
+    colour-tested draw stays with the software renderer; the chain bytes are 1365 texels an entry. It runs at render
+    scales 4, 2 and 1, with 16x texture filtering, and with the part off, where the minified draw must show level
+    0's aliasing and no entry may have a chain.
+  - `ace-selftest` pins the key: optional, `on` or `off`, in an Enhanced or Ace line, written only when on, after
+    `tess` and before `cull`; a line with every part on fits `ACE_SPEC_MAX` and its badge words `ACE_WORDS_MAX`;
+    `ace_finish` runs a part's exit stamp once. `test_play_mode_mips_settings` in `tests/native/test_player_state.c`
+    checks the part at both levels, its save and load, and the launch line, with `cull` after `mips`.
+    `gpu-coherence-selftest`'s authentic run requires no entry to have a chain.
 
 ## 11. Guest-Visible Items
 

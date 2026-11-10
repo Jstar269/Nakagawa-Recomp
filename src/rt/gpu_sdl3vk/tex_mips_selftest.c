@@ -57,7 +57,27 @@ static int check_levels(void) {
             ok = 0;
         }
     }
-    if (ok) printf("tex mips selftest: PASS levels, chain size, sRGB round trip\n");
+    /* The walk from the guess gives the search's byte for every value: each midpoint, a float
+       either side of it, and a sweep of 0..1 (with the ends just past it). */
+    for (int v = 0; ok && v < 255; v++) {
+        const float m = s_curve.mid[v];
+        const float probe[3] = { m, nextafterf(m, 0.0f), nextafterf(m, 2.0f) };
+        for (int k = 0; ok && k < 3; k++)
+            if (nk_tex_mips_encode(&s_curve, probe[k]) != nk_tex_mips_encode_search(&s_curve, probe[k])) {
+                fprintf(stderr, "tex mips selftest: FAIL encode(%.9g) = %u, the search gives %u\n", (double)probe[k],
+                        nk_tex_mips_encode(&s_curve, probe[k]), nk_tex_mips_encode_search(&s_curve, probe[k]));
+                ok = 0;
+            }
+    }
+    for (int i = -2; ok && i <= 1000002; i++) {
+        const float x = (float)i / 1000000.0f;
+        if (nk_tex_mips_encode(&s_curve, x) != nk_tex_mips_encode_search(&s_curve, x)) {
+            fprintf(stderr, "tex mips selftest: FAIL encode(%.9g) = %u, the search gives %u\n", (double)x,
+                    nk_tex_mips_encode(&s_curve, x), nk_tex_mips_encode_search(&s_curve, x));
+            ok = 0;
+        }
+    }
+    if (ok) printf("tex mips selftest: PASS levels, chain size, sRGB round trip, encode equals the search\n");
     return ok;
 }
 

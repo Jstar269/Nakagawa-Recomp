@@ -1168,11 +1168,12 @@ native-core-tests: tex-mips-selftest tex-mips-mutant
 
 # gpu-mips-selftest - host-built mip chains (mips=on) through ge_gpu.c's own hooks on a real Vulkan
 # device, read at device resolution (tex_mips_gpu_selftest.inc): a minified single-level CLUT texture
-# samples the chain, the level of detail follows the render scale, a second palette gets its own
-# chain, a rewrite rebuilds it, a colour-keyed edge takes no key colour, through-mode and
-# alpha-unused draws keep level 0, and a color-tested draw stays with the software renderer. It runs at render scales 4, 2 and 1, with 16x texture
-# filtering, and once with mips off, where the minified cell must show level 0's aliasing and no
-# chain may exist. Exit 77 (SKIP) without Vulkan.
+# samples the chain, the level of detail follows the render scale (level 0 alone, pixel for pixel,
+# from 2x), a second palette gets its own chain, a rewrite rebuilds it, contents seen before take
+# their cached chain, a colour-keyed edge takes no key colour, through-mode and alpha-unused draws
+# keep level 0, and a color-tested draw stays with the software renderer. It runs at render scales
+# 4, 2 and 1, with 16x texture filtering, and once with mips off, where the minified cell must show
+# level 0's aliasing and no chain may exist. Exit 77 (SKIP) without Vulkan.
 GPU_MIPS_LINE := v1;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off
 gpu_mips_run = rc=0; $(BUILD_DIR)/gpu_mips_selftest.exe $(1) || rc=$$?; \
 	if [ $$rc -eq 77 ]; then echo "SKIP gpu-mips-selftest $(2) (exit 77; the reason is printed above)"; \

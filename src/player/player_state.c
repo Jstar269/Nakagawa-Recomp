@@ -1228,12 +1228,6 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"tess", "Finer patches",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
      4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
-    /* A guest-visible item (contract 11.3.8): every present commits the smoothed frame to guest VRAM,
-       as texture filtering does. Off by default until its "nothing worse" runs exist (11.2 item 4),
-       with its own off switch in the library and each title (item 2). */
-    {"mips", "Smooth far textures",
-     "Stops far textures shimmering at high resolution. Save pictures keep the smoothing.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
@@ -1243,6 +1237,12 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
      2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
+    /* A guest-visible item (contract 11.3.8): every present commits the smoothed frame to guest VRAM,
+       as texture filtering does. Off by default until its "nothing worse" runs exist (11.2 item 4),
+       with its own off switch in the library and each title (item 2). */
+    {"mips", "Smooth far textures",
+     "Stops far textures shimmering at high resolution. Save pictures keep the smoothing.",
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -2274,8 +2274,8 @@ void player_app_cycle_present_scaling(PlayerApp *app, int direction) {
 #define PRESET_PARTS(text, upscale)                                                        \
     {[PLAYER_PART_FILTERING] = -1, [PLAYER_PART_TEXT] = (text), [PLAYER_PART_READOUT] = -1, \
      [PLAYER_PART_NOTICE] = -1, [PLAYER_PART_WIDE] = -1, [PLAYER_PART_SMOOTH] = -1,         \
-     [PLAYER_PART_SAS] = -1, [PLAYER_PART_TESS] = -1, [PLAYER_PART_MIPS] = -1,              \
-     [PLAYER_PART_CULL] = -1, [PLAYER_PART_UPSCALE] = (upscale)}
+     [PLAYER_PART_SAS] = -1, [PLAYER_PART_TESS] = -1, [PLAYER_PART_CULL] = -1,              \
+     [PLAYER_PART_UPSCALE] = (upscale), [PLAYER_PART_MIPS] = -1}
 static const PlayerGraphicsPresetRow k_graphics_presets[PLAYER_PRESET_COUNT] = {
     [PLAYER_PRESET_LOW] = {"low", "Low", "Low", 1, NK_PRESENT_SCALING_SHARP, true, -1,
                            PRESET_PARTS(1, 0)},
@@ -3008,12 +3008,20 @@ bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t c
         /* The upscaler travels as SR_PRESENT_UPSCALE (player_play_present_upscale), which the
            launcher exports for every session; the runtime's SR_ACE line has no such key. */
         if (p == PLAYER_PART_UPSCALE) continue;
-        /* A missing cull is off (contract 11.2 item 2): the line carries the key only when it is on. */
-        if (p == PLAYER_PART_CULL && (play->part[p] != 1 || play->mode != PLAYER_PLAY_ACE)) continue;
-        /* A missing mips is off too (contract 11.3.8): the key is written only when the part is on. */
+        /* cull is written last, below, whatever its place in the enum (the key order of
+           src/rt/ace.c's ace_format). */
+        if (p == PLAYER_PART_CULL) continue;
+        /* A missing mips is off (contract 11.3.8): the key is written only when the part is on. */
         if (p == PLAYER_PART_MIPS && play->part[p] != 1) continue;
         n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[p].key,
                      enhanced_part_word(p, play->part[p]));
+        if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
+        used += (size_t)n;
+    }
+    /* A missing cull is off (contract 11.2 item 2): the line carries the key only when it is on. */
+    if (play->part[PLAYER_PART_CULL] == 1 && play->mode == PLAYER_PLAY_ACE) {
+        n = snprintf(out + used, cap - used, ";%s=%s", k_enhanced_parts[PLAYER_PART_CULL].key,
+                     enhanced_part_word(PLAYER_PART_CULL, 1));
         if (n <= 0 || (size_t)n >= cap - used) { out[0] = '\0'; return false; }
         used += (size_t)n;
     }
