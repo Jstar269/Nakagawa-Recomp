@@ -186,7 +186,7 @@ not from constants. At a larger text size:
 - a row of buttons wraps onto a second row when it would run past its column (`nk_ui_flow_begin`: the Settings
   actions, the title page's actions);
 - the setting rows on Accessibility, the online options, Updates and build tools put each sentence under its
-  button, at the full width, when beside it a sentence would be cut;
+  button, at the full width, when beside it a sentence would be cut, and there it wraps whole;
 - the Library's narrowest card grows with the text, so fewer columns fit and a page holds fewer cards
   (`player_ui_library_page_size_at`), and its heading row leaves the LIBRARY heading out when the row's controls
   would not fit beside it (the tab names the page);
@@ -201,7 +201,8 @@ screens are laid out on at least its
 1280 x 720 design size (`NkUiViewport.min_logical_w` / `min_logical_h`): a smaller window, down to the 960 x 540
 minimum, lowers the density so the same layout is drawn smaller, instead of pushing buttons and the prompt bar off
 the window. A larger window keeps its density and gains room. Clay clips at most 100 containers per layout: shorten
-long text with `nk_ui_text_clamp` instead of clipping it.
+long text with `nk_ui_text_clamp` instead of clipping it, but only text the player can read whole another way (a
+value with its own editor or detail page); text with no other place to be read wraps whole on a page that scrolls.
 
 Wrapped text keeps its wrapped height when its page is overfull. Clay took a paragraph's minimum height before
 wrapping, as one line, so compressing an overfull column squeezed the paragraph back and the next block painted over
@@ -565,8 +566,9 @@ Authentic the part rows are disabled (`dim`, not focusable) and keep their value
 card shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable
 package; `PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the
 same page for that game alone (its play mode, and each part on LIBRARY (16X) or its own value; Done returns
-to the title page), one or two lines of what is on and the last session, and, while Ace is in effect, Ace's 60 FPS
-switch beside them. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
+to the title page), then what is on and, as its own `BODY_S` `muted` paragraph, the last session, and, while Ace is
+in effect, Ace's 60 FPS switch beside them. Both sentences wrap whole, however many parts are on: the page body
+scrolls, so the card grows instead of ending either one in an ellipsis. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
 art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live
 SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut with Reduce motion) and the readout
 (top left) are chips on the 16 px safe area.
