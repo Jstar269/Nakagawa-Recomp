@@ -2502,9 +2502,29 @@ int io_host_seek(FILE *host, uint32_t offset) {
 #endif
 }
 uint32_t io_seek_destination(const Fd *f, int64_t offset, uint32_t whence,
-                                    const char *api, uint32_t *position) {
+                                    const char *api, uint32_t *position, uint32_t *error_high) {
     static atomic_flag reported = ATOMIC_FLAG_INIT;
     int64_t base = whence == 1u ? (int64_t)f->off : whence == 2u ? (int64_t)f->size : 0;
+    if (error_high) *error_high = 0xffffffffu;
+    if (f->flash0 && whence != 1u) {
+        /* A flash0: file (read-only) refuses a destination before the start or past the end
+         * with 0x80010016, position unchanged (PSP-HLE-IO-SEEK-001, measured from SEEK_SET and
+         * SEEK_END through sceIoLseek and sceIoLseek32 at -1, size + 16, 0xFFFFFFFF and
+         * 0x100000000). sceIoLseek's high word is 0xFFFFFFFF at -1 and size + 16 but 0 at
+         * 0xFFFFFFFF and 0x100000000. Unmeasured: where the high word changes between
+         * size + 16 and 0xFFFFFFFF, destinations past 0x100000000 (the boundary below),
+         * SEEK_CUR (the generic path below) and the async calls, which share this check. */
+        if (offset < -base) return 0x80010016u;
+        if (offset <= (int64_t)f->size - base) {
+            *position = (uint32_t)(base + offset);
+            return 0u;
+        }
+        if (offset < (int64_t)UINT32_MAX - base) return 0x80010016u;
+        if (offset <= (int64_t)UINT32_MAX + 1 - base) {
+            if (error_high) *error_high = 0u;
+            return 0x80010016u;
+        }
+    }
     if (sr_vfs_strnicmp(f->guest_path, "disc0:", 6) == 0) {
         /* A UMD file's position stays inside [0, size]: a destination before the start or past
          * the end, through sceIoLseek or sceIoLseek32 and from any whence, answers 0x80010005
@@ -2761,11 +2781,11 @@ uint32_t io_async_complete_fd(uint32_t fd) {
             else {
                 int64_t offset = (int64_t)(((uint64_t)request.a2 << 32) | request.a1);
                 Fd *file = &s_fds[fd];
-                uint32_t position = 0;
+                uint32_t position = 0, error_high = 0xffffffffu;
                 uint32_t refused = io_seek_destination(file, offset, request.stack0,
-                                                       "sceIoLseekAsync", &position);
+                                                       "sceIoLseekAsync", &position, &error_high);
                 if (refused != 0u) {
-                    result = (int64_t)(int32_t)refused;
+                    result = (int64_t)(((uint64_t)error_high << 32) | refused);
                 } else {
                     file->off = position;
                     result = position;

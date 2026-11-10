@@ -47978,6 +47978,49 @@ static void test_flash0_font_device(void) {
                f0t_read(fd, 4u) == 4u &&
                f0t_guest_equals(F0T_BUF_ADDR, served_latin_bytes + served_latin_size - 4u, 4u),
            "SEEK_END then read returns the tail of the served file");
+    /* PSP-HLE-IO-SEEK-001 (measured, PSP-3000, flash0:/font/ltn0.pgf opened read-only): with the
+     * position at 8, every seek below returns 0x80010016 and leaves the position at 8. The 64-bit
+     * sceIoLseek's high word is 0xFFFFFFFF for SET -1, SET size + 16, END +16 and END -(size + 1),
+     * and 0 for SET 0xFFFFFFFF and SET 0x100000000; sceIoLseek32 of the first four returns
+     * 0x80010016. SEEK_CUR and the async calls were not measured. */
+    {
+        const int64_t size = (int64_t)served_latin_size;
+        static const struct { const char *name; uint32_t whence; int kind; int64_t literal; uint32_t high; }
+            refused[] = {
+                {"SET -1", 0u, 0, -1, 0xffffffffu},
+                {"SET size + 16", 0u, 1, 0, 0xffffffffu},
+                {"END +16", 2u, 0, 16, 0xffffffffu},
+                {"END -(size + 1)", 2u, 2, 0, 0xffffffffu},
+                {"SET 0xFFFFFFFF", 0u, 0, 0xffffffffll, 0u},
+                {"SET 0x100000000", 0u, 0, 0x100000000ll, 0u},
+            };
+        for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+            int64_t offset = refused[i].kind == 1 ? size + 16
+                           : refused[i].kind == 2 ? -(size + 1) : refused[i].literal;
+            CpuState cpu;
+            expect(f0t_seek32(fd, 8, 0u) == 8u, "a flash0 seek places the descriptor at 8");
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = fd;
+            cpu.r[6] = (uint32_t)((uint64_t)offset & 0xffffffffu);
+            cpu.r[7] = (uint32_t)((uint64_t)offset >> 32);
+            cpu.r[8] = refused[i].whence;
+            uint32_t low = sr_hle_test_io_lseek(&cpu);
+            snprintf(msg, sizeof(msg),
+                     "flash0 sceIoLseek %s returns 0x80010016 with high word 0x%08x (got 0x%08x:%08x)",
+                     refused[i].name, refused[i].high, cpu.r[3], low);
+            expect(low == 0x80010016u && cpu.r[3] == refused[i].high, msg);
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseek %s leaves the position at 8", refused[i].name);
+            expect(f0t_seek32(fd, 0, 1u) == 8u, msg);
+            if (offset < INT32_MIN || offset > INT32_MAX || refused[i].high == 0u) continue;
+            expect(f0t_seek32(fd, 8, 0u) == 8u, "a flash0 seek places the descriptor at 8");
+            uint32_t narrow = f0t_seek32(fd, (int32_t)offset, refused[i].whence);
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseek32 %s returns 0x80010016 (got 0x%08x)",
+                     refused[i].name, narrow);
+            expect(narrow == 0x80010016u, msg);
+            snprintf(msg, sizeof(msg), "flash0 sceIoLseek32 %s leaves the position at 8", refused[i].name);
+            expect(f0t_seek32(fd, 0, 1u) == 8u, msg);
+        }
+    }
     expect(f0t_close(fd) == 0u && sr_hle_test_fd_kind(fd) == 0,
            "closing a served font releases its descriptor");
 
