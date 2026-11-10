@@ -491,19 +491,19 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   guest made it, so a frame is never predicted. The cost is one VBLANK of added delay (about 17 ms), reported in the
   run's report as `added_delay_ms`. A new flip that arrives before B was due replaces it, counted in
   `presents.superseded`.
-- **A busy display never costs a real frame.** While the guest is paced to real time, a present does not wait for
-  the display (`src/rt/gpu_sdl3vk/README.md`): when the display cannot take a frame, the present returns at once
-  and shows nothing. When that happens to B's present, B stays owed. It is tried again at each later VBLANK
-  until a present shows it: one with no flip, or one whose flip's own present found the display busy too. The flip
-  of the next frame C shows B in place of the in-between of B and C, then C at its own VBLANK. So a frame whose
-  in-between was shown is never dropped for a made-up picture, and a display that takes only every second present
-  shows the real frames, with `SMOOTH OFF` on the readout. A title that flips each frame twice shows its newest
-  frame at the second flip; when flips in between found the display busy too, that frame is newer than the owed one
-  and replaces it. What a present shows changes the pace only once that present has reached the screen. When the
-  present that should show B fails (an out-of-date window, say), B is given up and C is not held: the CPU present
-  that takes over shows C as it is, and no VBLANK shows it again. When the failed present is the CPU one itself
-  (a frame that is not resident, or the software renderer), nothing takes over: C is lost as a failed present
-  loses a frame without smooth motion. `presents.busy` counts the held presents the
+- **A busy display never costs a real frame** outside fast forward (see "Only at 30" below). While the guest is
+  paced to real time, a present does not wait for the display (`src/rt/gpu_sdl3vk/README.md`): when the display
+  cannot take a frame, the present returns at once and shows nothing. When that happens to B's present, B stays
+  owed. It is tried again at each later VBLANK until a present shows it: one with no flip, or one whose flip's own
+  present found the display busy too. The flip of the next frame C shows B in place of the in-between of B and C,
+  then C at its own VBLANK. So a frame whose in-between was shown is never dropped for a made-up picture, and a
+  display that takes only every second present shows the real frames, with `SMOOTH OFF` on the readout. A title that
+  flips each frame twice shows its newest frame at the second flip; when flips in between found the display busy
+  too, that frame is newer than the owed one and replaces it. What a present shows changes the pace only once that
+  present has reached the screen. When the present that should show B fails (an out-of-date window, say), B is given
+  up and C is not held: the CPU present that takes over shows C as it is, and no VBLANK shows it again. When the
+  failed present is the CPU one itself (a frame that is not resident, or the software renderer), nothing takes over:
+  C is lost as a failed present loses a frame without smooth motion. `presents.busy` counts the held presents the
   display could not take, and `presents.superseded` every held frame that never reached the screen.
 - **Only consecutive frames.** An in-between is made of a frame and the one flipped just before it. When that one
   never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed), the

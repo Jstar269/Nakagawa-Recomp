@@ -783,10 +783,12 @@ static void cell_fast_forward_smooth(void) {
           "the first new frame after fast forward gets its in-between from the frame kept last");
 }
 
-/* Fast forward starts while a frame is owed: its VBLANK present found the display busy. With
- * the display busy at every VBLANK after that, the first new frame supersedes the owed one and
- * every new frame is shown and kept as it comes; none is held, owed or presented late. The
- * title flips only its new frames, so the held frame's present is the VBLANK between flips. */
+/* Fast forward starts while a frame is held after a busy display: the frame owed at VBLANK 299
+ * is shown at flip 300, and frame 300 is held. Its present comes due at the first VBLANK of
+ * fast forward and finds the display busy, so it is owed when the first new frame arrives. With
+ * the display busy at every VBLANK, that frame supersedes the owed one and every new frame is
+ * shown and kept as it comes; none is held, owed or presented late. The title flips only its
+ * new frames, so the held frame's present is the VBLANK between flips. */
 static void cell_fast_forward_owed(void) {
     AcePaceStats st0, st1;
     (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off",
@@ -816,8 +818,9 @@ static void cell_fast_forward_owed(void) {
         }
     }
     ace_pace_stats(&st0);
-    CHECK(ace_rate_stable() == ACE_RATE_K2 && st0.busy == 1u,
-          "a frame is owed when fast forward starts (busy %llu)", (unsigned long long)st0.busy);
+    CHECK(ace_rate_stable() == ACE_RATE_K2 && st0.busy == 1u && ace_smooth_vblank(vc),
+          "a frame is held and due when fast forward starts, after one busy VBLANK (busy %llu)",
+          (unsigned long long)st0.busy);
     ace_note_fast_forward(1);
     for (uint32_t end = vc + 900; vc < end; vc++) {
         ns += 16683333u / 3u;
@@ -848,7 +851,7 @@ static void cell_fast_forward_owed(void) {
         ace_smooth_note_present(ACE_PRESENT_REAL, ns);
     }
     ace_pace_stats(&st1);
-    /* The owed frame is still due at the one VBLANK before the first new frame (busy there too). */
+    /* The held frame is due at the one VBLANK before the first new frame; busy, it is owed. */
     CHECK(owed == 0u && betweens == 0u && others == 0u && keeps == 450u && due == 1u,
           "fast forward from an owed frame shows and keeps every new frame (%u kept, %u owed, %u "
           "in-betweens, %u other, %u held presents due)", keeps, owed, betweens, others, due);
