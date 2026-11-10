@@ -65,6 +65,17 @@ The player classifies a package in `src/core/nk_pbp_homebrew.c` and names the re
 packages and four modules built by the real PSPSDK. The kernel-mode check there reads the module attribute;
 custom-firmware-only imports are refused later, when code generation reads the program's import table.
 
+## Homebrew corpus
+
+The public homebrew corpus ([#2144](https://github.com/Jstar269/nakagawa-recomp/issues/2144)) lists four open-source PSPSDK sample programs, pinned to the PSPDEV release, for a smoke run with no per-title patches. Nothing builds or runs them, and no smoke run has measured any of them. The list, pins and licences are in [`fixtures/homebrew_corpus/`](../fixtures/homebrew_corpus/PROVENANCE.md); nothing is copied into the repository. Every result is *unmeasured*. The list accepts a result other than unmeasured only for a known failure, and that entry must name its issue.
+
+| Program | PSPSDK sample | Smoke checks | Result |
+| :--- | :--- | :--- | :--- |
+| `gu-cube` | `gu/cube` | first_frame, nonblank_frame | unmeasured |
+| `controller-basic` | `controller/basic` | first_frame, scripted_input | unmeasured |
+| `audio-polyphonic` | `audio/polyphonic` | first_frame, audio_output | unmeasured |
+| `savedata-utility` | `savedata/utility` | first_frame, save_round_trip | unmeasured |
+
 ## Title compatibility
 
 The table lists the project's own test programs, the two showcase demos, the game the project is built around, and
