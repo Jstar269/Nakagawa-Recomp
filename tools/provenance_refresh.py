@@ -14,10 +14,14 @@ no ``--policy-delta-authority`` is given, it looks up the V4 policy delta the
 hosted attestation would fetch, ``policy-deltas-v4/<selector sha256>.json``
 beside the trusted ledger in the external authority checkout. A public path may
 be added or removed only when the generator has verified a V3 or V4 authority
-that approves exactly that path; the refresh then replays the hosted verdict on
-the tree it is about to stage and refuses on any fatal finding. So an admitted
-pull request refreshes on whatever base it has merged, and no admission commit
-is needed as its base.
+that approves exactly that path. Every refresh then replays the hosted verdict
+on the tree it is about to stage and refuses on any fatal finding. So an
+admitted pull request refreshes on whatever base it has merged, and no
+admission commit is needed as its base.
+
+The refresh is stricter than the hosted check in one place: a tracked path the
+base did not carry refuses unless the delta lists it in ``include_added``, even
+when the delta newly excludes it. The hosted check decides that case.
 """
 
 from __future__ import annotations
@@ -84,20 +88,24 @@ def _base_commit(repo: Path, requested: str | None) -> str:
     return returned
 
 
-def _profile_document(repo: Path, rev: str, *, code: str, label: str) -> dict | None:
-    """The publication profile at ``rev`` (a commit or a tree), or ``None`` when it has none."""
+def _profile_document(repo: Path, rev: str, *, code: str, label: str, workdir: Path) -> dict | None:
+    """The publication profile at ``rev`` (a commit or a tree), or ``None`` when it has none.
+
+    It is validated as the generator validates it, so a malformed profile refuses with the
+    generator's code before anything reads its path lists."""
     result = subprocess.run(
         ["git", "cat-file", "blob", f"{rev}:{POLICY}"], cwd=repo,
         env=isolated_git_env(root=repo), capture_output=True, check=False,
     )
     if result.returncode:
         return None
+    verifier._load_policy_bytes(result.stdout, workdir, f"{label.replace(' ', '_')}.json", code=code)
     document: dict = verifier.strict_json(result.stdout, code=code, label=label)
     return document
 
 
 def policy_delta_v4_beside(
-    *, repo: Path, base_commit: str, candidate_tree: str, trusted_ledger: Path,
+    *, repo: Path, base_commit: str, candidate_tree: str, trusted_ledger: Path, workdir: Path,
 ) -> Path | None:
     """The V4 authority the hosted attestation would fetch for this profile change, if present.
 
@@ -106,10 +114,15 @@ def policy_delta_v4_beside(
     that directory sits beside the trusted ledger, outside the candidate repository. The name
     only selects: the generator derives the whole document again from the trusted ledger and
     the candidate and requires the file's bytes to equal it, as the hosted verifier does.
-    Returns ``None`` when the profile is unchanged or no such file exists.
+    Returns ``None`` when the profile is unchanged or no such file exists. ``workdir`` holds the
+    copies the profile validation reads.
     """
-    baseline = _profile_document(repo, base_commit, code="TRUSTED_POLICY_INVALID", label="trusted policy")
-    candidate = _profile_document(repo, candidate_tree, code="CANDIDATE_POLICY_INVALID", label="candidate policy")
+    baseline = _profile_document(
+        repo, base_commit, code="TRUSTED_POLICY_INVALID", label="trusted policy", workdir=workdir,
+    )
+    candidate = _profile_document(
+        repo, candidate_tree, code="CANDIDATE_POLICY_INVALID", label="candidate policy", workdir=workdir,
+    )
     if baseline is None or candidate is None or baseline == candidate:
         return None
     try:
@@ -153,6 +166,7 @@ def _replay_hosted_verdict(
     controls: verifier.EphemeralControls,
     trusted_ledger: Path,
     trusted_baseline: Path,
+    trusted_candidate_policy: Path | None,
     policy_delta_authority: Path | None,
     workdir: Path,
 ) -> None:
@@ -182,6 +196,7 @@ def _replay_hosted_verdict(
         trusted_ledger=trusted_ledger,
         trusted_baseline=trusted_baseline,
         output_dir=workdir / "hosted-replay",
+        trusted_candidate_policy=trusted_candidate_policy,
         policy_delta_authority=policy_delta_authority,
         require_immutable_revisions=True,
     )
@@ -237,6 +252,7 @@ def generate_controls(
     if policy_delta_authority is None and trusted_candidate_policy is None:
         policy_delta_authority = policy_delta_v4_beside(
             repo=repo, base_commit=base_commit, candidate_tree=candidate_tree, trusted_ledger=trusted_ledger,
+            workdir=workdir / "lookup-inputs",
         )
     # The same authority-generated baseline the hosted attestation uses; the
     # base commit's committed ledger is not an input.
@@ -284,8 +300,6 @@ def generate_controls(
         if path not in verifier.CONTROL_PATHS | {verifier.POLICY_PATH}
         and controls.base_blobs.get(path) != controls.candidate_blobs.get(path)
     )
-    if not changed:
-        return controls
     added = {path for path in changed if path not in controls.base_blobs}
     removed = {path for path in changed if path not in controls.candidate_blobs}
     if added or removed:
@@ -326,16 +340,20 @@ def generate_controls(
                 record_finding,
                 f"changed executable/security-sensitive path lacks qualifying exact authority: {path}",
             )
-    if added or removed:
-        _replay_hosted_verdict(
-            repo=repo,
-            base_commit=base_commit,
-            controls=controls,
-            trusted_ledger=trusted_ledger,
-            trusted_baseline=baseline_path,
-            policy_delta_authority=policy_delta_authority,
-            workdir=workdir,
-        )
+    # Every refresh, not only one that adds or removes a path: the checks above cover what this
+    # command can decide itself, and the hosted verdict covers the rest (a profile change that
+    # leaves the tree alone, a drifted byte-identical import), so a refresh never stages controls
+    # the hosted attestation would fail.
+    _replay_hosted_verdict(
+        repo=repo,
+        base_commit=base_commit,
+        controls=controls,
+        trusted_ledger=trusted_ledger,
+        trusted_baseline=baseline_path,
+        trusted_candidate_policy=trusted_candidate_policy,
+        policy_delta_authority=policy_delta_authority,
+        workdir=workdir,
+    )
 
     # The committed ledger is the claims form (#1673): ``generate_ephemeral_controls`` already
     # derived it from the same hashed generation the hosted verifier compares against, with no

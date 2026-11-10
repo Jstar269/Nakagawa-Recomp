@@ -849,6 +849,76 @@ class BatchAdmitPathsTest(unittest.TestCase):
         self.assertNotIn("docs/guide.md", merged["include_paths"])
         git(ours, "merge", "--abort")
 
+    @staticmethod
+    def _ledger_sides(*documents: dict) -> list:
+        raws = [(json.dumps(document, indent=2) + "\n").encode("utf-8") for document in documents]
+        return [(label, (lambda raw=raw: raw)) for label, raw in zip(("base", "ours", "theirs"), raws)]
+
+    @staticmethod
+    def _claims(*entries: tuple[str, str]) -> dict:
+        return {
+            "schema_version": provenance_ledger.CLAIMS_LEDGER_SCHEMA_VERSION,
+            "generated_by": "tools/provenance_ledger.py",
+            "entries": [
+                {"path": path, "classification": classification,
+                 "evidence": {"source": "documentation review", "statement": f"reviewed {path}"}}
+                for path, classification in entries
+            ],
+        }
+
+    def test_merged_ledger_is_the_three_way_merge_of_its_entries(self) -> None:
+        base = self._claims(("docs/a.md", "reviewed_documentation"), ("docs/z.md", "reviewed_documentation"))
+        ours = self._claims(("docs/a.md", "reviewed_documentation"), ("docs/m-ours.md", "reviewed_documentation"),
+                            ("docs/z.md", "reviewed_documentation"))
+        theirs = self._claims(("docs/a.md", "reviewed_other"), ("docs/m-theirs.md", "reviewed_documentation"))
+        merged = json.loads(admit_paths._merged_ledger(self._ledger_sides(base, ours, theirs)))
+        # Each side's addition stays, theirs' edit and theirs' removal win over ours' unchanged copy.
+        self.assertEqual(
+            [(entry["path"], entry["classification"]) for entry in merged["entries"]],
+            [("docs/a.md", "reviewed_other"), ("docs/m-ours.md", "reviewed_documentation"),
+             ("docs/m-theirs.md", "reviewed_documentation")],
+        )
+        # A side in the older hashed form merges by its claims.
+        hashed = json.loads(json.dumps(base))
+        hashed["schema_version"] = 1
+        for entry in hashed["entries"]:
+            entry["sha256"] = "0" * 64
+        self.assertEqual(admit_paths._merged_ledger(self._ledger_sides(hashed, ours, theirs)),
+                         admit_paths._merged_ledger(self._ledger_sides(base, ours, theirs)))
+        # Swapping ours and theirs gives the same bytes.
+        self.assertEqual(admit_paths._merged_ledger(self._ledger_sides(base, ours, theirs)),
+                         admit_paths._merged_ledger(self._ledger_sides(base, theirs, ours)))
+
+    def test_merged_ledger_refuses_what_it_cannot_merge(self) -> None:
+        base = self._claims(("docs/a.md", "reviewed_documentation"))
+        edited = self._claims(("docs/a.md", "reviewed_other"))
+        other_edit = self._claims(("docs/a.md", "reviewed_configuration"))
+        unevidenced = self._claims(("docs/a.md", "reviewed_documentation"))
+        unevidenced["entries"][0]["evidence"] = {}
+        field_changed = dict(edited, generated_by="something else")
+        cases = {
+            "MERGE_LEDGER_ENTRY_CONFLICT": self._ledger_sides(base, edited, other_edit),
+            "MERGE_LEDGER_NON_ENTRY_FIELD_CHANGED": self._ledger_sides(base, base, field_changed),
+            "MERGE_LEDGER_INPUT_INVALID": self._ledger_sides(base, base, unevidenced),
+        }
+        repeated = [(label, (lambda raw=raw: raw)) for label, raw in (
+            ("base", b'{"entries": [], "entries": []}\n'), ("ours", b"{}\n"), ("theirs", b"{}\n"))]
+        for code, sides in [*cases.items(), ("MERGE_LEDGER_INPUT_INVALID", repeated)]:
+            with self.subTest(code=code):
+                with self.assertRaises(AdmitError) as caught:
+                    admit_paths._merged_ledger(sides)
+                self.assertEqual(caught.exception.code, code)
+
+    def test_merged_profile_refuses_a_repeated_key(self) -> None:
+        """A side the verifier's strict JSON would refuse is not merged with its last key winning."""
+        profile = b'{"include_paths": ["docs/a.md"], "exclude_paths": []}\n'
+        smuggled = b'{"include_paths": ["docs/a.md"], "include_paths": ["docs/smuggled.md"], "exclude_paths": []}\n'
+        sides = [(label, (lambda raw=raw: raw)) for label, raw in
+                 (("base", profile), ("ours", profile), ("theirs", smuggled))]
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths._merged_profile(sides)
+        self.assertEqual(caught.exception.code, "MERGE_PROFILE_INPUT_INVALID")
+
     def test_v4_delta_verifies_and_legacy_nested_and_flat_deltas_remain_readable(self) -> None:
         fixture = _Fixture(self)
         fixture.add("docs/new-page.md", "# New page\n")
