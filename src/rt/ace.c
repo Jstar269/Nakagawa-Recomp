@@ -524,7 +524,11 @@ void ace_readout_judge(AceReadoutState *s, const AceWindow *w, AceReadoutView *o
         v.shown_fps = (double)w->shown / secs;
         /* What moved: the real pictures, and each in-between by its measured weight. */
         uint32_t real = w->shown >= w->betweens ? w->shown - w->betweens : 0u;
-        v.motion_fps = ((double)real + (double)w->motion_milli / 1000.0) / secs;
+        /* A measurement is read a few presents after its in-between, so it can land in the next
+         * window; no window is credited with more motion than the in-betweens it showed. */
+        uint64_t motion_milli = w->motion_milli;
+        if (motion_milli > 1000ull * w->betweens) motion_milli = 1000ull * w->betweens;
+        v.motion_fps = ((double)real + (double)motion_milli / 1000.0) / secs;
         size_t len = strlen(v.text);
         if (w->betweens)
             snprintf(v.text + len, sizeof(v.text) - len, "  SMOOTH %d", (int)(v.motion_fps + 0.5));
@@ -617,7 +621,15 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
         fprintf(stderr, "ACE_RATE: %s\n", ace_rate_name(s_det.stable));
     s_pace_vcount = vcount;
     /* Fast forward makes no in-betweens: each new frame is shown and kept, as at every rate but
-     * 30, so the first in-between after it pairs two frames shown one after the other. */
+     * 30, so the first in-between after it pairs two frames shown one after the other. A frame
+     * still held (or owed to a busy display) when fast forward starts is superseded by the first
+     * new frame: an OWED verdict would hold that new frame for a VBLANK, and with the display
+     * busy each frame after it would be owed in turn for the whole of fast forward. */
+    if (s_ff_running && new_frame && s_pace.held) {
+        s_pace.superseded++;
+        s_pace.held = 0;
+        s_pace.owed = 0;
+    }
     ace_pace_flip(&s_pace, new_frame, s_ff_running ? ACE_RATE_NONE : s_det.stable, s_eff.smooth, now_ns);
     if (s_ff_running) {
         /* Fast forward: no window is judged (ace_note_fast_forward). */

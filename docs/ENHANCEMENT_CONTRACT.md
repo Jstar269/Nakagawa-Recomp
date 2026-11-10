@@ -501,7 +501,9 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   frame at the second flip; when flips in between found the display busy too, that frame is newer than the owed one
   and replaces it. What a present shows changes the pace only once that present has reached the screen. When the
   present that should show B fails (an out-of-date window, say), B is given up and C is not held: the CPU present
-  that takes over shows C as it is, and no VBLANK shows it again. `presents.busy` counts the held presents the
+  that takes over shows C as it is, and no VBLANK shows it again. When the failed present is the CPU one itself
+  (a frame that is not resident, or the software renderer), nothing takes over: C is lost as a failed present
+  loses a frame without smooth motion. `presents.busy` counts the held presents the
   display could not take, and `presents.superseded` every held frame that never reached the screen.
 - **Only consecutive frames.** An in-between is made of a frame and the one flipped just before it. When that one
   never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed), the
@@ -509,7 +511,8 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   or lose it. The new frame is then shown as it is and kept, and the report counts it in `presents.unpaired`.
 - **Only at 30.** Every other detector class, a pause, a static picture and fast forward (section 10.15) show each
   frame as it comes, as without the feature. Fast forward keeps each frame it shows, so the first in-between after it
-  is made of two frames shown one after the other. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
+  is made of two frames shown one after the other. A frame still held or owed when fast forward starts is
+  superseded by the first new frame (`presents.superseded`), which is shown as it comes. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
   30 Hz after a second of agreement and leaves after half a second of disagreement.
 - **Never off without saying so, and never more than it moved.** The setting's description says it smooths
   steady 30 FPS scenes only where it can follow the motion. With the speed readout on, its text ends with

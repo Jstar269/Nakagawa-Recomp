@@ -286,7 +286,8 @@ typedef struct {
     uint64_t frame_seq;    /* new frames flipped with smooth motion on */
     uint64_t taken_seq;    /* the newest of them whose verdict a present took */
     uint64_t unpaired;     /* in-betweens refused: the frame before never reached a present */
-    uint64_t superseded;   /* held frames a later flip replaced before they were shown */
+    uint64_t superseded;   /* held frames never shown: replaced by a later flip, or given up
+                            * when the present that should show them failed */
     uint64_t busy;         /* held presents the display could not take */
 } AcePace;
 

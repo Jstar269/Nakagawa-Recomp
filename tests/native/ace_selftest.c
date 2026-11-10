@@ -483,6 +483,13 @@ static void cell_readout_smooth(void) {
     w.motion_milli = 30u * 64u;
     ace_readout_judge(&s, &w, &v);
     CHECK(strcmp(v.text, "100%  30 FPS  SMOOTH 32") == 0, "in-betweens that move little: '%s'", v.text);
+    /* Weights read late land in the next window: a window of 2 in-betweens credited with 5 in-betweens'
+     * worth of motion still moves no more than the 60 pictures it showed. */
+    w.betweens = 2;
+    w.motion_milli = 5000;
+    ace_readout_judge(&s, &w, &v);
+    CHECK(v.motion_fps < 60.1 && strcmp(v.text, "100%  30 FPS  SMOOTH 60") == 0,
+          "late weights credit no more motion than the window showed: '%s' (%.2f)", v.text, v.motion_fps);
     /* A 60 FPS scene: nothing to add, and the readout says it added nothing. */
     w = window(60, 0.4, 0, ACE_RATE_K1, 1, ACE_RATE_K1);
     w.smooth = 1;
@@ -776,6 +783,84 @@ static void cell_fast_forward_smooth(void) {
           "the first new frame after fast forward gets its in-between from the frame kept last");
 }
 
+/* Fast forward starts while a frame is owed: its VBLANK present found the display busy. With
+ * the display busy at every VBLANK after that, the first new frame supersedes the owed one and
+ * every new frame is shown and kept as it comes; none is held, owed or presented late. The
+ * title flips only its new frames, so the held frame's present is the VBLANK between flips. */
+static void cell_fast_forward_owed(void) {
+    AcePaceStats st0, st1;
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off",
+                        NULL);
+    uint64_t ns = 0;
+    uint32_t vc = 1, owed = 0, keeps = 0, betweens = 0, others = 0, due = 0;
+    for (; vc <= 300; vc++) {
+        ns += 16683333u;
+        if (vc % 2 != 0) {
+            if (ace_smooth_vblank(vc)) {
+                if (vc == 299) ace_smooth_held_missed(1);   /* busy: the held frame is owed */
+                else ace_smooth_note_present(ACE_PRESENT_HELD, ns);
+            }
+            continue;
+        }
+        ace_note_target_draw(0x0u);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+        AceShow show = ace_smooth_take();
+        if (show == ACE_SHOW_BETWEEN) {
+            ace_smooth_shown_between(ns);
+            ace_smooth_note_present(ACE_PRESENT_BETWEEN, ns);
+        } else if (show == ACE_SHOW_OWED) {
+            ace_smooth_shown_owed(ns);
+            ace_smooth_note_present(ACE_PRESENT_HELD, ns);
+        } else {
+            ace_smooth_note_present(ACE_PRESENT_REAL, ns);
+        }
+    }
+    ace_pace_stats(&st0);
+    CHECK(ace_rate_stable() == ACE_RATE_K2 && st0.busy == 1u,
+          "a frame is owed when fast forward starts (busy %llu)", (unsigned long long)st0.busy);
+    ace_note_fast_forward(1);
+    for (uint32_t end = vc + 900; vc < end; vc++) {
+        ns += 16683333u / 3u;
+        if (vc % 2 != 0) {
+            if (ace_smooth_vblank(vc)) {
+                due++;
+                ace_smooth_held_missed(1);                   /* the display is busy */
+            }
+            continue;
+        }
+        ace_note_target_draw(0x0u);
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+        AceShow show = ace_smooth_take();
+        if (show == ACE_SHOW_OWED) {
+            owed++;
+            ace_smooth_shown_owed(ns);
+            ace_smooth_note_present(ACE_PRESENT_HELD, ns);
+            continue;
+        }
+        if (show == ACE_SHOW_BETWEEN) {
+            betweens++;
+            ace_smooth_shown_between(ns);
+            ace_smooth_note_present(ACE_PRESENT_BETWEEN, ns);
+            continue;
+        }
+        if (show == ACE_SHOW_KEEP) keeps++;
+        else others++;
+        ace_smooth_note_present(ACE_PRESENT_REAL, ns);
+    }
+    ace_pace_stats(&st1);
+    /* The owed frame is still due at the one VBLANK before the first new frame (busy there too). */
+    CHECK(owed == 0u && betweens == 0u && others == 0u && keeps == 450u && due == 1u,
+          "fast forward from an owed frame shows and keeps every new frame (%u kept, %u owed, %u "
+          "in-betweens, %u other, %u held presents due)", keeps, owed, betweens, others, due);
+    CHECK(st1.superseded == st0.superseded + 1u && st1.busy == st0.busy + 1u &&
+              st1.kind[ACE_PRESENT_HELD] == st0.kind[ACE_PRESENT_HELD],
+          "the owed frame is superseded once and no new frame is held or owed "
+          "(superseded %llu to %llu, busy %llu to %llu)",
+          (unsigned long long)st0.superseded, (unsigned long long)st1.superseded,
+          (unsigned long long)st0.busy, (unsigned long long)st1.busy);
+    ace_note_fast_forward(0);
+}
+
 static void cell_report(const char *dir) {
     char json[ACE_REPORT_MAX];
     (void)ace_init_spec(k_good, NULL);
@@ -930,8 +1015,8 @@ static void cell_motion(void) {
     CHECK(ace_motion_queue_due(&q, 100u) == 0u, "an empty queue had something due");
     CHECK(ace_motion_queue_made(&q, 1u, 5u) == 1, "the queue refused its first serial");
     CHECK(ace_motion_queue_due(&q, 4u) == 0u, "due before its submission finished");
-    /* Two presents in the same submission's place: one recorded but never submitted, so the
-     * next submission carries the same serial number. Both wait for it. */
+    /* Two entries with one submission serial. The presenter no longer makes this case (each
+     * made entry has its own submission); the queue must still hold both until it is done. */
     CHECK(ace_motion_queue_made(&q, 2u, 7u) == 1 && ace_motion_queue_made(&q, 3u, 7u) == 1,
           "the queue refused serials 2 and 3");
     CHECK(ace_motion_queue_due(&q, 6u) == 1u, "serial 1 was not due once its submission finished");
@@ -1118,6 +1203,7 @@ int main(int argc, char **argv) {
     cell_motion();
     cell_fast_forward();
     cell_fast_forward_smooth();
+    cell_fast_forward_owed();
     cell_report(argc > 1 ? argv[1] : NULL);
     cell_report_worst();
     if (s_fail) {
