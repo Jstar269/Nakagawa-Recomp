@@ -2375,7 +2375,7 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
         with self.assertRaisesRegex(self.nk_cli.PackageBuildError, r"refused \(other_disc\)"):
             self._select_published("ULES99999", "1.01", target_title_id="other-title")
 
-    def _select_shipped(self) -> tuple[Path | None, Path]:
+    def _select_shipped(self) -> Any:
         return self.nk_cli._select_enhancement_package(
             self.root, self.DISC, title_id=self.TITLE, executable_sha256=self.EXE_SHA,
             enhancement_package=None, experimental_60hz=True, environment={},
