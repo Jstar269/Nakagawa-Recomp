@@ -1275,6 +1275,7 @@
     "tests/native/ge_capture_selftest.c",
     "tests/native/ge_cpu_profile_validate_selftest.c",
     "tests/native/ge_float24_selftest.c",
+    "tests/native/ge_patch_tess_selftest.c",
     "tests/native/ge_raster_ref_selftest.c",
     "tests/native/ge_texture_ref_selftest.c",
     "tests/native/ge_tnl_census_selftest.c",
