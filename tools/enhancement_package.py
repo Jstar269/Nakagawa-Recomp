@@ -2448,6 +2448,7 @@ def _resolve_alternates(pending: Sequence[tuple[Mapping[str, Any], str, int, int
 
 REFERENCE_SCAN_WORDS = 16
 PHASE_COMPARE_SCAN_WORDS = 4
+PHASE_STORE_SCAN_WORDS = 16
 
 #: One located site: (site, path, function address, site address, stock words).
 _Located = tuple[Mapping[str, Any], str, int, int, list[int]]
@@ -2473,8 +2474,12 @@ def _loaded_float_address(path: str, name: str, fn_addr: int, site_addr: int, wo
     passed: on the path that falls through to the load, its delay slot and the code before it
     both ran, so a ``lui`` in that slot counts. Any other transfer ends the scan: after a jump, a
     call or a branch-likely the code that follows is not reached with that transfer's slot run.
-    Read backward in address order, like _check_even_counter; a branch from elsewhere into those
-    instructions is not seen."""
+
+    The taken path of a branch is checked too, where this scan can see it: a branch or jump in
+    the instructions read whose target lies after the ``lui`` and at or before the load reaches
+    the load by a second path, around part of the code that builds the address, and refuses.
+    Read backward in address order, like _check_even_counter; a branch from farther away into
+    those instructions is not seen."""
     base = (word >> 21) & 31
     imm = word & (0xFFFC if word >> 26 == 0x32 else 0xFFFF)  # lv.s keeps a register bit in its low bits
     offset = imm - 0x10000 if imm & 0x8000 else imm
@@ -2499,6 +2504,7 @@ def _loaded_float_address(path: str, name: str, fn_addr: int, site_addr: int, wo
                     and not _falls_through(prev, pc - 4)):
                 break  # the slot of a jump, a call or a branch-likely: not run on the way to the load
             if op == 0x0F:
+                _refuse_second_path(path, name, lo, pc, site_addr, read_words_fn)
                 return (((w & 0xFFFF) << 16) + (low or 0) + offset) & 0xFFFFFFFF
             if op in (0x09, 0x0D) and rs == base and rt == base and low is None:
                 low = _sx16(w & 0xFFFF) if op == 0x09 else w & 0xFFFF
@@ -2510,10 +2516,29 @@ def _loaded_float_address(path: str, name: str, fn_addr: int, site_addr: int, wo
                f"straight-line code before it (fail-closed refusal)")
 
 
+def _refuse_second_path(path: str, name: str, lo: int, lui_addr: int, site_addr: int, read_words_fn: Any) -> None:
+    """No branch or jump among the instructions read before a referenced load (from ``lo``) lands
+    after the ``lui`` and at or before the load. A target that is only the instruction after the
+    transfer's own delay slot skips nothing."""
+    for pc in range(lo, site_addr, 4):
+        w = _read_word(read_words_fn, pc)
+        if w is None:
+            continue
+        target = _branch_target(w, pc)
+        if target is None and w >> 26 == 0x02:
+            target = ((pc + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
+        if target is not None and lui_addr < target <= site_addr and target != pc + 8:
+            fail(path, f"site {name!r}: the transfer at 0x{pc:08x} can land at 0x{target:08x}, inside the code "
+                       f"that builds its load's address: the load is reached by two paths (fail-closed refusal)")
+
+
 def _referenced_float(path: str, name: str, located: Mapping[str, _Located],
-                      pair_values: Mapping[str, float], read_words_fn: Any, read_const_fn: Any) -> float:
-    """The stock float the site ``name`` pins: the constant its ``lui``/``ori`` builds, or the word
-    of read-only data its ``lwc1`` or ``lv.s`` loads."""
+                      pair_values: Mapping[str, float], read_words_fn: Any,
+                      read_const_fn: Any) -> tuple[float, int | None]:
+    """The stock float the site ``name`` pins, and the address of its word when it is data: the
+    constant its ``lui``/``ori`` builds, or the word of read-only data its ``lwc1`` or ``lv.s``
+    loads."""
+    address: int | None = None
     if name in pair_values:
         value = pair_values[name]
     else:
@@ -2534,18 +2559,23 @@ def _referenced_float(path: str, name: str, located: Mapping[str, _Located],
         value = struct.unpack("<f", bytes(raw))[0]
     if not math.isfinite(value):
         fail(path, f"site {name!r} pins a float that is not finite (fail-closed refusal)")
-    return float(value)
+    return float(value), address
 
 
 def _reference_inputs(located: Mapping[str, _Located], pair_values: Mapping[str, float],
-                      read_words_fn: Any, read_const_fn: Any) -> dict[str, dict[str, float]]:
+                      read_words_fn: Any, read_const_fn: Any,
+                      data_words: dict[str, int] | None = None) -> dict[str, dict[str, float]]:
     """For each site that references stock values: what its plan needs, computed from them.
-    Every value_reference site is read, referenced or not: one that pins nothing refuses."""
+    Every value_reference site is read, referenced or not: one that pins nothing refuses.
+    ``data_words`` receives, by site id, the address of each pinned float that is a word of data."""
     cache: dict[str, float] = {}
 
     def pinned(path: str, name: str) -> float:
         if name not in cache:
-            cache[name] = _referenced_float(path, name, located, pair_values, read_words_fn, read_const_fn)
+            cache[name], address = _referenced_float(path, name, located, pair_values, read_words_fn,
+                                                     read_const_fn)
+            if address is not None and data_words is not None:
+                data_words[name] = address
         return cache[name]
 
     out: dict[str, dict[str, float]] = {}
@@ -2572,6 +2602,23 @@ def _reference_inputs(located: Mapping[str, _Located], pair_values: Mapping[str,
             fail(site_path, f"{exc} (fail-closed refusal)")
         out[site["id"]] = inputs
     return out
+
+
+def _check_data_sites_leave_pinned_words(validated: Mapping[str, Any], data_words: Mapping[str, int],
+                                         symbol_to_addr: Mapping[str, int]) -> None:
+    """No data site rescales a word a site reference pins: a value the package changes at load is
+    not the stock value the title then uses. The step is the stated exception (contract section
+    9.2): a word named only as ``step_site`` may be halved, by a site or by a data site."""
+    steps = {site["step_site"] for site in validated["sites"] if "step_site" in site}
+    for idx, data_site in enumerate(validated.get("data_sites", ())):
+        if data_site["symbol"] not in symbol_to_addr:
+            continue  # verify_and_resolve_data_sites() refuses it by name
+        lo, length = _data_site_span(data_site, symbol_to_addr)
+        for name, address in sorted(data_words.items()):
+            if name not in steps and lo < address + 4 and address < lo + length:
+                fail(f"data_sites[{idx}]({data_site['id']})",
+                     f"rescales the word at 0x{address:08x} that site {name!r} pins: a pinned value must be "
+                     f"the one the title uses (fail-closed refusal)")
 
 
 def _check_straight_line_site(site_path: str, fn_addr: int, site_addr: int, read_words_fn: Any,
@@ -2668,6 +2715,55 @@ def _check_phase_gate(site_path: str, fn_addr: int, site_addr: int, rewrite: Map
                                       "gate_30hz_phase")
     elif rewrite["kind"] == "gate_phase_cond":
         _check_phase_compare(site_path, graph, site_addr)
+    else:
+        _check_gated_load(site_path, graph, site_addr, rewrite)
+
+
+def _check_gated_load(site_path: str, graph: _Graph, site_addr: int, rewrite: Mapping[str, Any]) -> None:
+    """A gated load is not the load of the state's own time, and the title does not store the
+    gated register before it overwrites it.
+
+    The zero is for an effect the value scales. Zeroing the time itself would feed the gate its
+    own output, and a store of the register would write to guest memory a zero the stock code
+    never stores there. Read forward in address order from the load to the first branch, jump or
+    call and its delay slot, PHASE_STORE_SCAN_WORDS instructions at most: a ``swc1`` of a gated
+    FPU register, an ``sv.s`` of a gated VFPU register, or a store of a general register that an
+    ``mfc1`` or ``mfv`` copied it to, refuses. A later ``lwc1``, ``lv.s`` or FPU result into the
+    register ends the scan. Copies through other FPU or VFPU registers, and an ``sv.q``, are not
+    followed: every other use of the gated value is the site's evidence."""
+    word = graph.words[site_addr]
+    base = (word >> 21) & 31
+    load_offset = _sx16(word & (0xFFFC if word >> 26 == 0x32 else 0xFFFF))
+    if base == rewrite["reg"] and load_offset == rewrite["offset"]:
+        fail(site_path, "the gated load is the load of the state's own time: the gate would zero what it "
+                        "counts (fail-closed refusal)")
+    fpr = rewrite.get("value_reg")
+    vreg = rewrite.get("value_vreg")
+    copies: set[int] = set()
+    pc, left, last = site_addr + 4, PHASE_STORE_SCAN_WORDS, None
+    while left > 0:
+        w = graph.words.get(pc)
+        if w is None:
+            return
+        op, rs, rt, fs = w >> 26, (w >> 21) & 31, (w >> 16) & 31, (w >> 11) & 31
+        stored = ((op == 0x39 and rt == fpr) or (op == 0x3A and (rt | ((w & 3) << 5)) == vreg)
+                  or (op in (0x28, 0x29, 0x2B) and rt in copies))
+        if stored:
+            fail(site_path, f"the instruction at 0x{pc:08x} stores the gated register: after an odd number of "
+                            f"updates it would write a zero the stock code never stores (fail-closed refusal)")
+        copied = (op == 0x11 and rs == 0x00 and fs == fpr) or (op == 0x12 and rs == 0x03 and (w & 0x7F) == vreg)
+        written = _gpr_destination(w)
+        if copied:
+            copies.add(rt)
+        elif written in copies:
+            copies.discard(written)
+        if (fpr is not None and fpr in _fpr_uses(w)[1]) or (op == 0x32 and (rt | ((w & 3) << 5)) == vreg):
+            return  # the register holds another value from here on
+        if last is not None:
+            return  # that was the delay slot of the first transfer
+        if _branch_target(w, pc) is not None or _is_jump(w):
+            last = pc
+        pc, left = pc + 4, left - 1
 
 
 def _store_span(w: int) -> tuple[int, int, int] | None:
@@ -2801,7 +2897,9 @@ def verify_and_resolve_sites(
         pending.append((site, site_path, fn_addr, site_addr, stock_words))
 
     located: dict[str, _Located] = {entry[0]["id"]: entry for entry in pending}
-    inputs = _reference_inputs(located, stock_values, read_words_fn, read_const_fn)
+    data_words: dict[str, int] = {}
+    inputs = _reference_inputs(located, stock_values, read_words_fn, read_const_fn, data_words)
+    _check_data_sites_leave_pinned_words(validated, data_words, symbol_to_addr)
 
     for site, site_path, fn_addr, site_addr, stock_words in pending:
         if site["transform"] == "launch_velocity_x0.5":
@@ -3370,9 +3468,11 @@ def phase_runs(half_step: float) -> tuple[tuple[int, int, float, float, float], 
     Rows ``(n0, count, a0, a1, delta)``: after ``n0 + k`` updates the time is exactly
     ``a0 + k*delta`` for ``0 <= k <= count``, and ``a1`` is the last of them. Inside one binade a
     float32 sum of a constant advances by a constant, so a few rows per binade cover the whole
-    life of a state. The rows end where the sum stops advancing or at PHASE_UPDATES_MAX. A time
-    is matched against them exactly, so rounding error in the sum cannot move a phase: it is part
-    of the model. Raises ValueError unless ``half_step`` is a positive float32."""
+    life of a state. The rows end one update before the sum stops advancing (the value it then
+    repeats belongs to no single update, so it is on no row), where it overflows, or at
+    PHASE_UPDATES_MAX. A time is matched against them exactly, so rounding error in the sum
+    cannot move a phase: it is part of the model. Raises ValueError unless ``half_step`` is a
+    positive float32."""
     d = float(half_step)
     if not (math.isfinite(d) and d > 0.0 and _f32(_f32_bits(d)) == d):
         raise ValueError(f"half the stock step, {d!r}, is not a positive float32 a state's time can count")
@@ -3385,10 +3485,12 @@ def phase_runs(half_step: float) -> tuple[tuple[int, int, float, float, float], 
 
     runs: list[tuple[int, int, float, float, float]] = []
     n, a = 0, 0.0
+    stalled = False
     while n < PHASE_UPDATES_MAX:
         delta = after(a) - a
         if delta <= 0.0 or not math.isfinite(delta):
-            break  # the time has grown until adding the step no longer changes it, or overflows
+            stalled = delta <= 0.0  # adding the step no longer changes the time; or it overflows
+            break
 
         def repeats(k: int, a: float = a, delta: float = delta) -> bool:
             return after(a + k * delta) == a + (k + 1) * delta
@@ -3396,12 +3498,13 @@ def phase_runs(half_step: float) -> tuple[tuple[int, int, float, float, float], 
         count = 1
         if a > 0.0 and repeats(1):
             # Two equal steps inside one binade: the rounding has settled, and every step that
-            # starts in this binade adds the same. Find the last one (the steps hold on a prefix).
+            # starts in this binade adds the same (the steps hold on a prefix). Find the last one;
+            # a step that starts exactly on the next power of two is taken too when it repeats.
             top = math.ldexp(1.0, math.frexp(a)[1])
             low, high = 1, min(int((top - a) // delta), PHASE_UPDATES_MAX - n - 1)
             while low < high:
                 mid = (low + high + 1) // 2
-                if a + mid * delta < top and repeats(mid):
+                if repeats(mid):
                     low = mid
                 else:
                     high = mid - 1
@@ -3411,6 +3514,12 @@ def phase_runs(half_step: float) -> tuple[tuple[int, int, float, float, float], 
         if len(runs) > PHASE_ROWS_MAX:
             raise ValueError(f"half the stock step, {d!r}, is not a positive float32 a state's time can count: "
                              f"its sum does not settle into {PHASE_ROWS_MAX} rows")
+    if stalled and runs:
+        # The last value is the one the sum then repeats on every update: no update count, and so
+        # no phase, can be read off it. Leave it out, so a state that has stalled is reported.
+        n0, count, a0, a1, delta = runs.pop()
+        if count > 1:
+            runs.append((n0, count - 1, a0, a1 - delta, delta))
     return tuple(runs)
 
 
@@ -3418,8 +3527,9 @@ def phase_of_time(time: float, half_step: float) -> int | None:
     """The phase of a gate_30hz_phase site whose state time reads ``time``: 0 after an even number
     of updates since the time was zero (a stock instant: the stock instruction runs), 1 after an
     odd number. None when ``time`` is not a value the state's own float32 sum of ``half_step``
-    reaches (phase_runs): the site then runs its stock instruction and reports once. The
-    generated code looks the time up in the same rows (nk_enhancement_phase_odd)."""
+    reaches before it stops advancing (phase_runs): the site then runs its stock instruction and
+    reports once. The generated code looks the time up in the same rows
+    (nk_enhancement_phase_odd)."""
     x = float(time)
     for n0, _count, a0, a1, delta in phase_runs(half_step):
         if a0 <= x <= a1:

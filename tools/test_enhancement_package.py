@@ -4303,7 +4303,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         return {s["id"]: s for s in sites}
 
     def _package(self, words: dict[int, int], sha256: str, *, capabilities: tuple[str, ...] | None = None,
-                 **changes: Any) -> dict[str, Any]:
+                 data_sites: list[dict[str, Any]] | None = None, **changes: Any) -> dict[str, Any]:
         """The fixture's package. ``changes`` maps a site id to the fields to set on it (None removes a
         field), or to None to leave the site out."""
         sites = self._sites(words)
@@ -4319,7 +4319,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                 at = self._symbols()[site["function"]] + site["insn_offset"]
                 site["stock_digest"] = compute_stock_words_digest(
                     [words[at + 4 * i] for i in range(site.get("word_count", 1))])
-        return {
+        package = {
             "schema_version": 1, "id": "synth.two-update", "display_name": "Synthetic two-update motion",
             "version": "1.0.0", "category": "timing_frame_presentation",
             "target_title_id": "synthetic-allegrex-v1", "game_version": "1.00",
@@ -4328,6 +4328,9 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             "rng_policy": {"mode": "subtick_30hz", "reason": "No random rolls in this fixture."},
             "sites": list(sites.values()),
         }
+        if data_sites is not None:
+            package["data_sites"] = data_sites
+        return package
 
     def _resolve(self, words: dict[int, int] | None = None, *, data: bytes | None = None,
                  with_data: bool = True, known: bool = True, reader: Any = None,
@@ -4347,7 +4350,7 @@ class TestTwoUpdateTransforms(unittest.TestCase):
 
         resolved = verify_and_resolve_sites(
             self._package(words, "a" * 64, **changes), executable_sha256="a" * 64,
-            symbol_to_addr=self._symbols(), read_words_fn=read_words,
+            symbol_to_addr={**self._symbols(), "synth_constants": self.DATA}, read_words_fn=read_words,
             read_const_fn=(reader or read_const) if with_data else None,
             known_functions=self._known() if known else [])
         return {entry["id"]: entry["rewrite"] for entry in resolved.values()}
@@ -4555,6 +4558,18 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             ("a lui seventeen instructions back", [_lui(V0, 0)] + [NOP] * 16, "does not load from a constant address"),
             ("a load in the slot of a call that links into its base",
              [_lui(V0, 0), _r(A1, 0, V0, 0, 0x09)], "the base register of its load is computed at 0x0000110c"),
+            # A second path to the load: the branch is taken around part of the code read.
+            ("a branch over the addiu, landing on the load",
+             [_beq(A1, ZERO, w + 8, w + 0x14), _lui(V0, 0), _addiu(V0, V0, 8)],
+             "the transfer at 0x00001108 can land at 0x00001114, inside the code that builds its load's address"),
+            ("a branch over a second lui, landing on the load",
+             [_lui(V0, 0), _beq(A1, ZERO, w + 0xC, w + 0x18), NOP, _lui(V0, 0)],
+             "the transfer at 0x0000110c can land at 0x00001118, inside the code that builds"),
+            ("a branch from before the lui to the addiu after it",
+             [_beq(A1, ZERO, w + 8, w + 0x18), NOP, NOP, _lui(V0, 0), _addiu(V0, V0, 0)],
+             "the transfer at 0x00001108 can land at 0x00001118, inside the code that builds"),
+            ("a jump over the lui, landing on the load", [_j(w + 0x14), NOP, _lui(V0, 0)],
+             "the transfer at 0x00001108 can land at 0x00001114, inside the code that builds"),
         )
         for name, before, why in refused:
             words, c_site = self._world_with_c(before)
@@ -4573,6 +4588,9 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             ("both: a lui in a slot and the load in the next slot",
              [_beq(A1, ZERO, w + 8, w + 0x18), _lui(V0, 0), _j(w + 0x18)]),
             ("a lui sixteen instructions back", [_lui(V0, 0)] + [NOP] * 15),
+            ("a branch that lands just after its own slot",
+             [_beq(A1, ZERO, w + 8, w + 0x10), _lui(V0, 0), _addiu(V0, V0, 0)]),
+            ("a branch from before the lui to the lui itself", [_beq(A1, ZERO, w + 8, w + 0x10), NOP, _lui(V0, 0)]),
         )
         for name, before in accepted:
             words, c_site = self._world_with_c(before)
@@ -4661,6 +4679,85 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         with self.assertRaisesRegex(EnhancementPackageError, "an lv.q site is in the delay slot of"):
             self._resolve(self._words(integrate=slot), GRAVITY={"insn_offset": 0xC}, DSTEP={"insn_offset": 0x14},
                           RETAIN=None)
+
+    def test_a_data_site_may_not_rescale_a_pinned_word(self) -> None:
+        """A word a site reference pins is the stock value the title uses. A data site that
+        rescales it at load is refused; the step, which the package halves by design, is not."""
+        def table(offset: int, count: int = 1) -> dict[str, Any]:
+            raw = self._data()[offset:offset + 4 * count]
+            return {"id": "TABLE", "symbol": "synth_constants", "offset": offset, "type": "f32", "count": count,
+                    "stock_digest": hashlib.sha256(raw).hexdigest(), "transform": "step_x0.5"}
+
+        for name, site, pinned in (("the damping step", table(8), "DSTEP"), ("the damping", table(4), "C"),
+                                   ("gravity, in a longer table", table(0, 2), "C"),
+                                   ("the damping step, at the end of a table", table(4, 2), "C")):
+            with self.subTest(name), self.assertRaisesRegex(
+                    EnhancementPackageError, rf"data_sites\[0\]\(TABLE\): rescales the word at 0x0000200\w that site "
+                                             rf"'{pinned}' pins"):
+                self._resolve(data_sites=[site])
+        # The step's word, and a word no site pins, may be rescaled.
+        for offset in (0xC, 0x10):
+            self.assertEqual(self._resolve(data_sites=[table(offset)])["GRAVITY"]["factor"], self._factors()[0])
+        # A word pinned without a data address (a lui/ori pair) has nothing a data site can reach.
+        bits = _f32_bits_of(self.DAMPING)
+        pair = [_lui(V1, bits >> 16), _i(0x0D, V1, V1, bits & 0xFFFF)]
+        words = self._words(world=self._world()[:2] + pair + [JR_RA, NOP])
+        self.assertEqual(self._resolve(words, C={"insn_offset": 8, "word_count": 2}, data_sites=[table(4)])
+                         ["GRAVITY"]["factor"], self._factors()[0])
+
+    def test_a_gated_load_is_not_the_time_and_is_not_stored(self) -> None:
+        """The zero a gated load reads is for an effect the value scales. The resolver refuses the
+        load of the state's own time, and a load whose register the title then stores: that store
+        would write a zero the stock code never stores."""
+        with self.assertRaisesRegex(EnhancementPackageError, r"\(MAGNITUDE\): the gated load is the load of the "
+                                                             r"state's own time"):
+            self._resolve(MAGNITUDE={"insn_offset": 0x10})
+        # In STATE the load's register is f12, and the branch after it has one delay slot.
+        with self.assertRaisesRegex(EnhancementPackageError, r"\(MAGNITUDE\): the instruction at 0x00001324 stores "
+                                                             r"the gated register"):
+            self._resolve(self._state_with(0x24, [_swc1(self.F12, 0x60, S0)]))
+        self.assertEqual(self._resolve(self._state_with(0x24, [_swc1(self.F8, 0x60, S0)]))["MAGNITUDE"]["value_reg"], 12)
+
+        def surge(load: int, after: list[int]) -> dict[int, int]:
+            code = self._surge()
+            return self._words(surge=code[:3] + [load] + after + code[4:])
+
+        vreg, size = self.SURGE_VREG, self.SIZE_AT
+        lv_s = _lvs(vreg, size, S1)
+        lwc1 = _lwc1(self.F12, size, S1)
+        sv_s = _i(0x3A, S1, vreg & 31, 0x60 | (vreg >> 5))
+        mfv = (0x12 << 26) | (0x03 << 21) | (V0 << 16) | vreg            # mfv v0, the gated register
+        mfc1 = (0x11 << 26) | (V0 << 16) | (self.F12 << 11)              # mfc1 v0, f12
+        refused: tuple[tuple[str, int, list[int], str], ...] = (
+            ("an sv.s of the gated VFPU register", lv_s, [NOP, sv_s], "0x00001714 stores the gated register"),
+            ("a copy to a general register, then stored", lv_s, [mfv, _sw(V0, 0x60, S1)],
+             "0x00001714 stores the gated register"),
+            ("a swc1 of the gated FPU register", lwc1, [_swc1(self.F12, 0x60, S1)],
+             "0x00001710 stores the gated register"),
+            ("an FPU copy to a general register, then stored", lwc1, [mfc1, NOP, _sw(V0, 0x60, S1)],
+             "0x00001718 stores the gated register"),
+            ("a store in the delay slot of the first branch", lwc1, [_beq(A1, ZERO, self.SURGE + 0x10,
+                                                                         self.SURGE + 0x18),
+                                                                    _swc1(self.F12, 0x60, S1)],
+             "0x00001714 stores the gated register"),
+        )
+        for name, load, after, why in refused:
+            with self.subTest(name), self.assertRaisesRegex(EnhancementPackageError, rf"\(SURGE\).*{why}"):
+                self._resolve(surge(load, after))
+        accepted: tuple[tuple[str, int, list[int]], ...] = (
+            ("overwritten by another load first", lv_s, [lv_s, sv_s]),
+            ("an FPU register overwritten by a result first", lwc1, [_fpu_s(0x00, self.F12, self.F0, self.F0),
+                                                                      _swc1(self.F12, 0x60, S1)]),
+            ("the copy's register reused before the store", lwc1, [mfc1, _addiu(V0, ZERO, 1), _sw(V0, 0x60, S1)]),
+            ("another register stored", lwc1, [_swc1(self.F0, 0x60, S1), _sw(V0, 0x64, S1)]),
+            ("a store after the first branch and its slot", lwc1, [_beq(A1, ZERO, self.SURGE + 0x10,
+                                                                       self.SURGE + 0x18), NOP,
+                                                                  _swc1(self.F12, 0x60, S1)]),
+        )
+        for name, load, after in accepted:
+            with self.subTest(name):
+                self.assertIn(self._resolve(surge(load, after))["SURGE"]["kind"],
+                              ("gate_phase_zero_f", "gate_phase_zero_v"))
 
     def test_launch_callee_must_store_the_velocity_itself(self) -> None:
         """A launch map may only replace a value the stock code stores at the same place: the
@@ -4928,9 +5025,13 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                     if (n % 97 == 0 or n in (5239, 7580)) and enhancement_package.phase_of_time(t, half) != n & 1:
                         self.fail(f"update {n}: wrong phase at {t!r}")
                     t = _f32_round(t + half)
-                # They cover the life of a state: until the sum stops advancing.
+                # They cover the life of a state: to one update before the sum stops advancing. The
+                # value it then repeats is on no row, so a stalled state is reported, not guessed at.
                 last = runs[-1]
-                self.assertEqual(_f32_round(last[3] + half), last[3])
+                stall = _f32_round(last[3] + half)
+                self.assertEqual(_f32_round(stall + half), stall)
+                self.assertEqual(enhancement_package.phase_of_time(last[3], half), (last[0] + last[1]) & 1)
+                self.assertIsNone(enhancement_package.phase_of_time(stall, half))
                 self.assertGreater(last[0] + last[1], 10_000_000)
                 self.assertLess(len(runs), 64)
                 self.assertEqual([r[0] for r in runs[1:]], [r[0] + r[1] for r in runs[:-1]])
@@ -4973,8 +5074,10 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             t = _f32_round(t + half)
         times += [_f32_of(_f32_bits_of(times[3]) + 1), _f32_round(2.5 * half), -half, 1.0e30, float("inf"),
                   float("nan"), -0.0]
-        # The last time the sum reaches, where adding the step no longer changes it: the last row.
-        times.append(enhancement_package.phase_runs(half)[-1][3])
+        # The last time on the lookup's last row, and the next: the value the sum then repeats on
+        # every update, which is no update's time.
+        last = enhancement_package.phase_runs(half)[-1][3]
+        times += [last, _f32_round(last + half)]
         return times
 
     def _harness(self, tmp: Path, name: str, statements: dict[str, str], runtime: str,
@@ -5135,7 +5238,8 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         phases = [enhancement_package.phase_of_time(t, half) for t in times]
         self.assertEqual(phases[:121], [n & 1 for n in range(121)])
         last_row = enhancement_package.phase_runs(half)[-1]
-        self.assertEqual(phases[121:], [1, 0, None, None, None, None, None, None, 0, (last_row[0] + last_row[1]) & 1])
+        self.assertEqual(phases[121:], [1, 0, None, None, None, None, None, None, 0,
+                                        (last_row[0] + last_row[1]) & 1, None])
         size = _f32_bits_of(self.SIZE)
 
         def time_lines(forced_flag: int, gated: bool) -> list[str]:
@@ -5288,7 +5392,8 @@ class TestTwoUpdateTransforms(unittest.TestCase):
     #: The made-up flight the arc tests run: a launch from rest, then timed impulses.
     LAUNCH_X, LAUNCH_Y, THRESHOLD, WINDOW = 0.5, 1.5, 0.17, 0.11
 
-    def _arc32(self, updates: int, *, package: bool, boost: float) -> list[tuple[float, float]]:
+    def _arc32(self, updates: int, *, package: bool, boost: float,
+               launch_offset: bool = True) -> list[tuple[float, float]]:
         """The fixture's guest in float32, operation by operation as the guest's FPU and the
         emitted statements round: positions (x, y) after each update. ``package`` runs the 60 Hz
         forms: the halved step, gravity times kappa, the square-root retention, the launch map
@@ -5308,7 +5413,8 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             if update == 0:
                 v = [f(v[0] + f(self.LAUNCH_X)), f(v[1] + f(self.LAUNCH_Y))]
                 if package:
-                    v = [f(math.fma(v[0] - 0.0, kappa, 0.0)), f(math.fma(v[1], kappa, q * self.GRAVITY))]
+                    v = [f(math.fma(v[0] - 0.0, kappa, 0.0)),
+                         f(math.fma(v[1], kappa, q * self.GRAVITY if launch_offset else 0.0))]
             odd = package and enhancement_package.phase_of_time(time, half) == 1
             if threshold <= time and not odd and not opened:
                 opened, remaining = True, window
@@ -5330,11 +5436,11 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         A small guest in C launches a body from rest, adds timed impulses and integrates it, using
         the statements codegen emitted at the fixture's sites wherever a site is. Toggle off it
         takes stock steps; toggle on, twice as many half steps. The positions it prints are those
-        of a float32 model of the rule, bit for bit, so the bound below is what the emitted code
-        gives: at the end of every pair the 60 Hz position is within 1e-6 of the arc's height of
-        the stock position (measured 4e-7 here; float32 rounds each operation, so the pair ends
-        agree in most bits, not all). The impulse gated as a call and gated as a zero load give
-        the same arc, bit for bit."""
+        of a float32 model of the rule, bit for bit, so the bound that model meets
+        (test_the_float32_model_stays_within_a_millionth_of_the_stock_arc) is what the emitted
+        code gives: float32 rounds each operation, so the pair ends agree with stock's in most
+        bits, not all. The impulse gated as a call and gated as a zero load give the same arc,
+        bit for bit."""
         stock_updates = 90
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
@@ -5456,6 +5562,21 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         # A zero impulse adds nothing: the call that always runs and the call that is skipped leave
         # the same velocity, so the same arc, in every bit.
         self.assertEqual(arcs["gated_load"], arcs["gated_call"])
+        # The bound itself is test_the_float32_model_stays_within_a_millionth_of_the_stock_arc's,
+        # on the model these statements have just been shown to equal.
+
+    def test_the_float32_model_stays_within_a_millionth_of_the_stock_arc(self) -> None:
+        """What "exact" means for these transforms (contract section 9.2), on the float32 model of
+        the rule: at the end of every pair of updates the 60 Hz position is within 1e-6 of the
+        arc's travel of the stock position, on both axes. Measured here: 3.2e-7 of the height on
+        the gravity axis (5 of 90 pair ends bit-identical) and 4.6e-7 of the distance on the other
+        (6 of 90). It needs no compiler; the compiled test shows that the emitted statements
+        compute this model bit for bit."""
+        stock_updates = 90
+        scaled_boost = _f32_of(self._resolve()["BOOST"]["stock_values"][0][1])
+        stock = self._arc32(stock_updates, package=False, boost=self.BOOST)
+        package = self._arc32(2 * stock_updates, package=True, boost=scaled_boost)
+        measured = {}
         for axis, name in ((0, "x"), (1, "y")):
             travelled = [p[axis] for p in stock]
             height = max(travelled) - min(travelled)
@@ -5463,8 +5584,17 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             worst = max(abs(package[2 * k + 1][axis] - stock[k][axis]) for k in range(stock_updates))
             same = sum(_f32_bits_of(package[2 * k + 1][axis]) == _f32_bits_of(stock[k][axis])
                        for k in range(stock_updates))
+            measured[name] = (worst / height, same)
             with self.subTest(axis=name):
                 self.assertLess(worst, 1e-6 * height, f"worst {worst / height:.2e} of the travel; {same} identical")
+                self.assertGreater(worst, 0.0)      # float32 rounds: agreement in most bits, not in all
+        # The figures the contract quotes.
+        self.assertAlmostEqual(measured["y"][0], 3.2e-7, delta=0.1e-7)
+        self.assertAlmostEqual(measured["x"][0], 4.6e-7, delta=0.1e-7)
+        self.assertEqual((measured["y"][1], measured["x"][1]), (5, 6))
+        # Without the launch offset the same float32 flight is three orders of magnitude outside it.
+        plain = self._arc32(2 * stock_updates, package=True, boost=scaled_boost, launch_offset=False)
+        self.assertGreater(max(abs(plain[2 * k + 1][1] - stock[k][1]) for k in range(stock_updates)), 1e-3)
 
     def _arc(self, updates: int, step: float, *, half_steps: bool, kappa: float = 1.0, launch_offset: float = 0.0,
              retention: float, gate_compare: bool = False, gate_call: bool = False,
