@@ -122,6 +122,10 @@ typedef struct NkTexReplHit {
  * or an image the budget cannot hold. The first lookup of an entry decodes its PNG on the calling
  * thread. */
 int nk_texrepl_lookup(NkTexRepl *pack, const NkTexReplId *id, NkTexReplHit *out);
+/* The cache key a file of this pack names texture `id` by first: nk_texrepl_cache_key, with the
+ * address dropped (the high 32 bits zero) when the pack's textures.ini sets ignoreAddress. The
+ * texture dump names its files with it, so they are the ones nk_texrepl_lookup reads. */
+uint64_t nk_texrepl_file_key(const NkTexRepl *pack, const NkTexReplId *id);
 void nk_texrepl_unpin(NkTexRepl *pack, NkTexReplHit *hit);
 /* The whole-number factor a hit is larger than a w x h texture by, the same on both axes, or 0
  * when it is not one (the renderer draws such a texture unreplaced and counts it). */

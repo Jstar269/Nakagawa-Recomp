@@ -642,7 +642,8 @@ static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
         }
         case SEC_FILTERING: filtering++; break;
         case SEC_INDEXED: indexed++; break;
-        case SEC_GAMES: games++; break;
+        /* A line that names this ini itself (the dump's own `<ID> = textures.ini`) lists the game. */
+        case SEC_GAMES: if (!ci_equal(value, "textures.ini")) games++; break;
         default: break;
         }
     }
@@ -859,10 +860,15 @@ uint32_t nk_texrepl_hash_texture(const NkTexRepl *p, const uint8_t *data, size_t
 
 /* ------------------------------------------------------------------------------ lookup */
 
-static Alias *resolve(const NkTexRepl *p, const NkTexReplId *id) {
+uint64_t nk_texrepl_file_key(const NkTexRepl *p, const NkTexReplId *id) {
     uint64_t ck = nk_texrepl_cache_key(id->addr, id->format, id->dim, id->clut_hash);
+    if (p && p->ignore_address) ck &= 0xFFFFFFFFull;
+    return ck;
+}
+
+static Alias *resolve(const NkTexRepl *p, const NkTexReplId *id) {
+    uint64_t ck = nk_texrepl_file_key(p, id);
     uint32_t hash = id->hash;
-    if (p->ignore_address) ck &= 0xFFFFFFFFull;
     Alias *a;
     if ((a = alias_find(p, ck, hash))) return a;
     if ((a = alias_find(p, ck & 0xFFFFFFFFull, 0))) return a;               /* palette hash only */

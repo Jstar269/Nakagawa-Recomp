@@ -815,27 +815,42 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   player toggle or per-title pack folder are not done.
 - **Dump.** A player who wants a pack for their own game makes it from the game itself: in an Enhanced or Ace run
   on the Vulkan renderer, the pause menu's **Settings > Dump textures** (`gegpu_texdump_start`, started from
-  `gui.c`) writes every texture the game draws from then on, each level once, as an RGBA PNG named the way a pack
-  names it, `<16 hex cache key><8 hex hash>.png` and `..._<level>.png` for mip levels, into
-  `<user data>/texdump/<disc ID>` (`sr_texdump_folder`: one folder a disc ID, never shared). A texture already in the
-  cache is written the next time it is drawn. A folder without a `textures.ini` gets one first (`hash = quick`, and
-  a `[games]` line for the run's `SR_DISC_ID`, so the player knows whose pack it is), and
-  the folder is then read as a pack whose hash kind and ranges name the files, so the same folder, its images enlarged
-  by any tool the player likes, is a pack that lists what was dumped; a `textures.ini` the player edited (another
-  hash, ranges) names the files of later dumps too, and one that does not read refuses the dump with its reason.
-  Skipped and counted: render targets sampled as textures (frames, not loaded textures), textures with no pack
-  identity (no power-of-two size, or a source the renderer cannot read directly) and a content hash of 0 (the name a
-  pack gives every content at an address). A file already in the folder is not written again. Nothing the guest can
-  observe changes: each texture is decoded from guest memory into a buffer of its own and written to disk, never to
-  guest memory; files are written only inside the folder, on the renderer thread (a frame that meets many new
-  textures takes longer while the dump is on), atomically (a temporary file renamed into place).
-  `SR_TEX_DUMP_BUDGET_MB` (1 to 65536, default 4096) bounds what a run writes: the file that would pass it is not
-  written and the dump stops with `TEX_DUMP: stopped (...)`. The switch is the run's alone, off at every start and
-  never saved, and an authentic run has no row; `SR_TEX_DUMP=1` starts it with the run instead (`gui.c`), so a dump
-  also holds what the game shows before the first pause and a script can take one unattended. Stamps: `TEX_DUMP: on (hash=, budget_mb=; ...)` when started,
-  `TEX_DUMP: refused (<reason>)` (the row shows the reason too), and `TEX_DUMP: off` and, at exit,
-  `TEX_DUMP: exit (written=, already_there=, skipped=, failed=, mb=)`. The project ships no texture and no upscaler:
-  the images are the player's own, from the player's own game, and stay on their PC.
+  `gui.c`) writes every texture the game draws from then on, each level once, as an RGBA PNG named the way the
+  folder's pack names it (`nk_texrepl_file_key`), `<16 hex cache key><8 hex hash>.png` and `..._<level>.png` for mip
+  levels, into `<user data>/texdump/<disc ID>` (`sr_texdump_folder`: one folder a disc ID, never shared). A texture
+  already in the cache is written the next time it is drawn. A folder without a `textures.ini` gets one first
+  (`hash = quick`, and a `[games]` line for the run's `SR_DISC_ID`, so the player knows whose pack it is; the reader
+  takes a line that names `textures.ini` itself as the game list, not as an override), and the folder is then read as
+  a pack whose hash kind, ranges and `ignoreAddress` name the files, so the same folder, its images enlarged by any
+  tool the player likes, is a pack that lists what was dumped; a `textures.ini` the player edited (another hash,
+  ranges, `ignoreAddress`, which drops the address from each name) names the files of later dumps too, and one that
+  does not read refuses the dump with its reason. Skipped and counted: render targets sampled as textures and movie
+  pictures (the spans `sceMpegAvcDecode`, `sceMpegAvcCsc` and `sceMpegBaseCscAvc` wrote in the last 120 VBLANKs,
+  `sr_video_frame_note`), which are frames, not loaded textures; textures with no pack identity (no power-of-two
+  size, or a source the renderer cannot read directly); and a content hash of 0 (the name a pack gives every content
+  at an address). An address whose content is new in 30 presents in a row (at most 4 presents apart) is an animation
+  or a movie drawn as a texture: it is no longer dumped until the dump is turned on again, with one
+  `TEX_DUMP: note:` line, and the row counts it. A file already in the folder is never written again or replaced:
+  each PNG (compressed with fixed-Huffman deflate, `sr_png_encode_rgba`) is written to a temporary file and moved
+  into place only while no file has the name (`sr_file_publish_new`, `nk_rename_noreplace_utf8`), so an image the
+  player enlarges in place is kept even when it is saved during the dump. Every file call is the platform layer's
+  wide-path one, so a user data folder under a user name that is not ASCII works. Nothing the guest can observe
+  changes: each texture is decoded from guest memory into a buffer of its own and written to disk, never to guest
+  memory; files are written only inside the folder, on the renderer thread (a frame that meets many new textures
+  takes longer while the dump is on). Three things stop the whole dump, each with `TEX_DUMP: stopped (<reason>)`
+  and `Stopped: <reason>` on the row: `SR_TEX_DUMP_BUDGET_MB` (1 to 65536, default 4096), the bytes a run writes
+  (the file that would pass it is not written); `SR_TEX_DUMP_MAX_FILES` (1 to 1000000, default 20000), the files
+  a run writes; and the first file that cannot be written, a full disk included. The budget and the file limit are
+  the run's, so the dump stays stopped when it is turned on again; after a failed write, turning it on again tries
+  again. Each variable takes a whole decimal number in its range and nothing else. While on, the row says how many
+  files the run has saved. The switch is the run's alone, off at every start unless `SR_TEX_DUMP=1`, and never
+  saved, and an authentic run has no row; `SR_TEX_DUMP=1` starts it with the run (`gui.c`), so a dump also holds
+  what the game shows before the first pause and a script can take one unattended. Stamps:
+  `TEX_DUMP: on (hash=, budget_mb=, max_files=; ...)` when started, `TEX_DUMP: refused (<reason>)` (the row shows
+  the reason too; a reason that names the folder names only its last component, never a full path), and
+  `TEX_DUMP: off` and, at exit, `TEX_DUMP: exit (written=, already_there=, skipped=, changing=, failed=, mb=)`.
+  The project ships no texture and no upscaler: the images are the game's copyrighted images, from the player's own
+  copy of the game, and stay on their PC.
 - **Tests.** `texrepl-selftest` checks the hashes against values taken from PPSSPP's own code and published xxHash
   vectors, the ini and file-name rules, the lookup order, palette identity (against PPSSPP's formula worked out
   separately, with a pack file named the way PPSSPP names it), malformed packs, path escapes and the
@@ -843,11 +858,17 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   listed texture drawn from the pack's image from the draw that finds it, even with the 1:1 rule on, with
   `SR_TEX_REPLACE` alone and with xBRZ also on; a rewrite to unlisted
   content never drawn from the old image; the content returning replaced again; an image of no whole factor counted
-  and not used; and an authentic start reading no pack. Its `dump` cell checks the dump: refused in an authentic run,
-  nothing written while off, a texture already in the cache and a newly decoded one written under the names a pack
-  gives them (worked out in the cell from the cache key and the quick hash), the folder read back as a pack giving the
-  textures' own pixels, no file written twice and the budget kept. `fbcap-selftest` checks the folder name and
-  `test_overlay_screens` the row.
+  and not used; and an authentic start reading no pack. Its `dump` cell checks the dump in a folder whose name holds
+  an accented letter and a CJK ideograph: refused in an authentic run, nothing written while off, a texture already
+  in the cache and a newly decoded one written under the names a pack gives them (worked out in the cell from the
+  cache key and the quick hash), the folder read back as a pack giving the textures' own pixels with no `[games]`
+  note, no file written twice and a player's file left as it is, a movie picture skipped, the budget, the file limit
+  and a failed write each stopping the dump with the reason on the row, an animated texture cut off after its run
+  while another address goes on, both variables' parsing, and refusals that name no full path. Its `dump-xxh`,
+  `dump-pal` and `dump-mip` cells check names under xxh32 and xxh64 with `ignoreAddress`, a CLUT8 texture under
+  PPSSPP's name with its palette's colours, and each mip level at its size. `fbcap-selftest` checks the folder name,
+  the PNG encoder against the project's own inflater (`nk_psp_inflate.c`), and the no-replace publish and a
+  screenshot into a non-ASCII folder; `test_overlay_screens` checks the row.
 
 ### 10.13. Sharp Game Text
 

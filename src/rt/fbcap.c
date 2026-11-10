@@ -24,17 +24,11 @@
 
 #include "fbcap.h"
 
+#include "../core/nk_platform.h"   /* the wide-path (UTF-8) file calls: user data paths */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <direct.h>
-#include <windows.h>
-#endif
 
 enum {
     CAP_IDLE = 0,  /* nothing armed */
@@ -59,19 +53,12 @@ static SrCaptureProbeResolver s_probe_resolver;
 static int cap_is_sep(char c) { return c == '/' || c == '\\'; }
 
 /* 1 when `dir` is a directory after this call, created now or already there. A failed
- * mkdir is judged by what is on disk, not by its errno: Windows reports an existing drive
- * root ("C:/") as EACCES, and an existing directory must never fail a publish. An existing
- * non-directory is not a directory, so the publish then fails cleanly. */
+ * mkdir is judged by what is on disk, not by its errno (nk_platform_mkdir_p): Windows reports
+ * an existing drive root ("C:/") as EACCES, and an existing directory must never fail a
+ * publish. An existing non-directory is not a directory, so the publish then fails cleanly.
+ * The path is UTF-8 and is made through the platform layer's wide-path calls. */
 static int cap_dir_ready(const char *dir) {
-#ifdef _WIN32
-    struct _stat st;
-    if (_mkdir(dir) == 0) return 1;
-    return _stat(dir, &st) == 0 && (st.st_mode & _S_IFDIR) != 0;
-#else
-    struct stat st;
-    if (mkdir(dir, 0777) == 0) return 1;
-    return stat(dir, &st) == 0 && S_ISDIR(st.st_mode);
-#endif
+    return nk_platform_mkdir_p(dir) ? 1 : 0;
 }
 
 /* Create the parent directory of `path` (mkdir -p on the directory component only). FBSNAP
@@ -183,7 +170,7 @@ static int png_chunk(FILE *f, const char type[4], const uint8_t *data, uint32_t 
 }
 
 /* Signature, IHDR, and the head of the one IDAT chunk, for `channels` 3 (RGB) or 4 (RGBA).
- * cap_pixels_valid and sr_png_write_rgba bound w*4*h by UINT32_MAX, so the stored image
+ * cap_pixels_valid bounds w*4*h by UINT32_MAX, so the stored image
  * (h * (1 + channels * w) bytes) fits in 64 bits, and the IDAT length is checked below. */
 static int png_begin(PngOut *z, FILE *f, uint32_t w, uint32_t h, uint32_t channels) {
     static const uint8_t sig[8] = {0x89u, 'P', 'N', 'G', 0x0Du, 0x0Au, 0x1Au, 0x0Au};
@@ -256,54 +243,268 @@ static int png_end(PngOut *z) {
     return fwrite(crc, 1, 4u, z->f) == 4u && png_chunk(z->f, "IEND", NULL, 0u);
 }
 
-/* Rename a completely written temp file over `path`: a reader never observes a half-written
- * file. The temp file is removed when the rename fails. */
+/* Rename a completely written temp file over `path` (a capture replaces an older capture of
+ * the same name): a reader never observes a half-written file. The temp file is removed when
+ * the rename fails. */
 static int cap_publish_file(const char *tmp, const char *path) {
-#ifdef _WIN32
-    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
-        remove(tmp);
-        fprintf(stderr, "fbcap: publish failed (MoveFileExA: %lu)\n", (unsigned long)GetLastError());
+    if (nk_rename_utf8(tmp, path) != 0) {
+        nk_remove_utf8(tmp);
+        fprintf(stderr, "fbcap: publish failed (the finished file could not be renamed into place)\n");
         return 0;
     }
-#else
-    if (rename(tmp, path) != 0) { remove(tmp); return 0; }
-#endif
     return 1;
 }
 
-int sr_png_write_rgba(const char *path, const uint32_t *rgba, uint32_t w, uint32_t h) {
-    if (!path || !path[0] || !rgba || w == 0u || h == 0u || (uint64_t)w * 4u * h > UINT32_MAX)
+/* ---- Deflate with fixed Huffman codes (the texture dump's PNGs) ----------------------------
+ * Project-authored from RFC 1950 and RFC 1951. One final block of type 01 (the fixed codes of
+ * RFC 1951 3.2.6): literals, and LZ77 matches of 3 to 258 bytes at most 32768 bytes back. A
+ * match is looked for through a hash of the next three bytes and a chain of the earlier positions
+ * with that hash; ZD_CHAIN candidates at most are compared at each position. That bounds the time
+ * a position costs, not what is encoded: every byte is encoded, as a literal when no match is
+ * found, so the stream always inflates to exactly the input. */
+#define ZD_WINDOW 32768u
+#define ZD_HASH_BITS 15u
+#define ZD_CHAIN 48u
+#define ZD_MIN_MATCH 3u
+#define ZD_MAX_MATCH 258u
+
+typedef struct {
+    uint8_t *p;
+    size_t n, cap;
+    uint32_t bits;    /* bits not yet in a whole byte, first bit lowest */
+    unsigned nbits;
+    int ok;
+} ZdOut;
+
+static void zd_put(ZdOut *z, const uint8_t *src, size_t n) {
+    if (!z->ok || n == 0u) return;
+    if (z->cap - z->n < n) {
+        size_t cap = z->cap ? z->cap : 4096u;
+        while (cap - z->n < n) {
+            if (cap > ((size_t)-1) / 2u) { z->ok = 0; return; }
+            cap *= 2u;
+        }
+        uint8_t *q = (uint8_t *)realloc(z->p, cap);
+        if (!q) { z->ok = 0; return; }
+        z->p = q;
+        z->cap = cap;
+    }
+    memcpy(z->p + z->n, src, n);
+    z->n += n;
+}
+
+/* `n` (at most 16) bits of `v`, lowest first (RFC 1951 3.1.1: data elements). */
+static void zd_bits(ZdOut *z, uint32_t v, unsigned n) {
+    z->bits |= v << z->nbits;
+    z->nbits += n;
+    while (z->nbits >= 8u) {
+        const uint8_t b = (uint8_t)z->bits;
+        zd_put(z, &b, 1u);
+        z->bits >>= 8;
+        z->nbits -= 8u;
+    }
+}
+
+/* A Huffman code of `len` bits, its most significant bit first (RFC 1951 3.1.1). */
+static void zd_code(ZdOut *z, uint32_t code, unsigned len) {
+    uint32_t r = 0;
+    for (unsigned i = 0; i < len; i++) r |= ((code >> i) & 1u) << (len - 1u - i);
+    zd_bits(z, r, len);
+}
+
+/* A literal/length symbol in the fixed code (RFC 1951 3.2.6). */
+static void zd_litlen(ZdOut *z, unsigned sym) {
+    if (sym < 144u) zd_code(z, 0x30u + sym, 8u);
+    else if (sym < 256u) zd_code(z, 0x190u + (sym - 144u), 9u);
+    else if (sym < 280u) zd_code(z, sym - 256u, 7u);
+    else zd_code(z, 0xC0u + (sym - 280u), 8u);
+}
+
+static const uint16_t zd_len_base[29] = {
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
+    131, 163, 195, 227, 258
+};
+static const uint8_t zd_len_extra[29] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0
+};
+static const uint16_t zd_dist_base[30] = {
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577
+};
+static const uint8_t zd_dist_extra[30] = {
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13
+};
+
+static void zd_match(ZdOut *z, unsigned len, unsigned dist) {
+    unsigned l = 28u;
+    while (zd_len_base[l] > len) l--;
+    zd_litlen(z, 257u + l);
+    if (zd_len_extra[l]) zd_bits(z, len - zd_len_base[l], zd_len_extra[l]);
+    unsigned d = 29u;
+    while (zd_dist_base[d] > dist) d--;
+    zd_code(z, d, 5u);   /* the fixed distance codes are the 5-bit numbers 0..29 */
+    if (zd_dist_extra[d]) zd_bits(z, dist - zd_dist_base[d], zd_dist_extra[d]);
+}
+
+static uint32_t zd_hash(const uint8_t *p) {
+    const uint32_t v = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+    return (v * 2654435761u) >> (32u - ZD_HASH_BITS);
+}
+
+/* Index position `i` of `in` (n bytes) under the hash of its next three bytes. */
+static void zd_insert(int32_t *head, int32_t *prev, const uint8_t *in, size_t n, size_t i) {
+    if (n - i < ZD_MIN_MATCH) return;
+    const uint32_t h = zd_hash(in + i);
+    prev[i % ZD_WINDOW] = head[h];
+    head[h] = (int32_t)i;
+}
+
+/* The raw deflate stream of `in` (n bytes, n below 2^31), appended to z; ends on a whole byte. */
+static int zd_deflate(ZdOut *z, const uint8_t *in, size_t n) {
+    int32_t *head = (int32_t *)malloc(sizeof(int32_t) << ZD_HASH_BITS);
+    int32_t *prev = (int32_t *)malloc(sizeof(int32_t) * ZD_WINDOW);
+    if (!head || !prev) {
+        free(head);
+        free(prev);
         return 0;
-    static unsigned long s_png_seq;
-    char tmp[1024 + 64];
-    if (snprintf(tmp, sizeof tmp, "%s.tmp%lu", path, ++s_png_seq) >= (int)sizeof tmp) return 0;
-    uint8_t *line = (uint8_t *)malloc((size_t)w * 4u);
-    if (!line) return 0;
-    FILE *f = fopen(tmp, "wb");
-    if (!f) { free(line); return 0; }
-    PngOut z;
-    int ok = png_begin(&z, f, w, h, 4u);
-    for (uint32_t y = 0; ok && y < h; y++) {
-        static const uint8_t filter_none = 0u;
+    }
+    for (size_t k = 0; k < ((size_t)1 << ZD_HASH_BITS); k++) head[k] = -1;
+    zd_bits(z, 1u, 1u);   /* BFINAL: the only block */
+    zd_bits(z, 1u, 2u);   /* BTYPE 01: fixed Huffman codes */
+    size_t i = 0;
+    while (i < n && z->ok) {
+        size_t best = 0, best_dist = 0;
+        if (n - i >= ZD_MIN_MATCH) {
+            const size_t most = n - i < ZD_MAX_MATCH ? n - i : ZD_MAX_MATCH;
+            int32_t cand = head[zd_hash(in + i)];
+            for (unsigned tries = 0; cand >= 0 && tries < ZD_CHAIN; tries++) {
+                const size_t c = (size_t)cand, dist = i - c;
+                if (dist > ZD_WINDOW) break;   /* older positions are out of the window */
+                if (in[c + best] == in[i + best]) {
+                    size_t len = 0;
+                    while (len < most && in[c + len] == in[i + len]) len++;
+                    if (len > best) {
+                        best = len;
+                        best_dist = dist;
+                        if (len == most) break;
+                    }
+                }
+                cand = prev[c % ZD_WINDOW];
+            }
+        }
+        if (best >= ZD_MIN_MATCH) {
+            zd_match(z, (unsigned)best, (unsigned)best_dist);
+            for (size_t k = 0; k < best; k++) zd_insert(head, prev, in, n, i + k);
+            i += best;
+        } else {
+            zd_litlen(z, in[i]);
+            zd_insert(head, prev, in, n, i);
+            i++;
+        }
+    }
+    zd_litlen(z, 256u);                            /* end of block */
+    if (z->nbits) zd_bits(z, 0u, 8u - z->nbits);   /* to a whole byte */
+    free(head);
+    free(prev);
+    return z->ok;
+}
+
+int sr_png_encode_rgba(const uint32_t *rgba, uint32_t w, uint32_t h, uint8_t **out, size_t *out_len) {
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0u;
+    if (!rgba || !out || !out_len || w == 0u || h == 0u || (uint64_t)w * 4u * h > UINT32_MAX)
+        return 0;
+    const uint64_t raw64 = (uint64_t)h * (1u + 4u * (uint64_t)w);
+    if (raw64 > 0x7FFFFFFFu) return 0;   /* PNG chunk lengths are at most 2^31 - 1 */
+    const size_t raw = (size_t)raw64;
+    uint8_t *img = (uint8_t *)malloc(raw);
+    if (!img) return 0;
+    uint8_t *q = img;
+    for (uint32_t y = 0; y < h; y++) {
+        *q++ = 0u;   /* filter type 0 */
         /* R in the low byte of each word, whatever the host's byte order. */
         const uint32_t *row = rgba + (size_t)y * w;
         for (uint32_t x = 0; x < w; x++) {
             const uint32_t c = row[x];
-            line[x * 4u + 0u] = (uint8_t)c;
-            line[x * 4u + 1u] = (uint8_t)(c >> 8);
-            line[x * 4u + 2u] = (uint8_t)(c >> 16);
-            line[x * 4u + 3u] = (uint8_t)(c >> 24);
+            *q++ = (uint8_t)c;
+            *q++ = (uint8_t)(c >> 8);
+            *q++ = (uint8_t)(c >> 16);
+            *q++ = (uint8_t)(c >> 24);
         }
-        png_z_data(&z, &filter_none, 1u);
-        png_z_data(&z, line, (size_t)w * 4u);
+    }
+    uint32_t a = 1u, b = 0u;
+    for (size_t i = 0; i < raw; i++) {
+        a = (a + img[i]) % 65521u;
+        b = (b + a) % 65521u;
+    }
+
+    static const uint8_t sig[8] = {0x89u, 'P', 'N', 'G', 0x0Du, 0x0Au, 0x1Au, 0x0Au};
+    uint8_t ihdr[8 + 13 + 4];
+    png_be32(ihdr, 13u);
+    memcpy(ihdr + 4, "IHDR", 4u);
+    png_be32(ihdr + 8, w);
+    png_be32(ihdr + 12, h);
+    ihdr[16] = 8u;   /* bit depth */
+    ihdr[17] = 6u;   /* colour type: RGBA */
+    ihdr[18] = 0u;   /* deflate */
+    ihdr[19] = 0u;   /* filter method 0 */
+    ihdr[20] = 0u;   /* no interlace */
+    png_be32(ihdr + 21, png_crc_update(0xFFFFFFFFu, ihdr + 4, 17u) ^ 0xFFFFFFFFu);
+    static const uint8_t idat_head[8] = {0, 0, 0, 0, 'I', 'D', 'A', 'T'};
+    static const uint8_t zhead[2] = {0x78u, 0x01u};   /* deflate, 32K window, no dictionary */
+
+    ZdOut z;
+    memset(&z, 0, sizeof(z));
+    z.ok = 1;
+    zd_put(&z, sig, sizeof(sig));
+    zd_put(&z, ihdr, sizeof(ihdr));
+    const size_t idat_at = z.n;
+    zd_put(&z, idat_head, sizeof(idat_head));
+    zd_put(&z, zhead, sizeof(zhead));
+    int ok = z.ok && zd_deflate(&z, img, raw);
+    free(img);
+    uint8_t tail[4];
+    png_be32(tail, (b << 16) | a);
+    zd_put(&z, tail, 4u);
+    ok = ok && z.ok;
+    const size_t idat_len = ok ? z.n - idat_at - 8u : 0u;
+    if (ok && idat_len > 0x7FFFFFFFu) ok = 0;
+    if (ok) {
+        png_be32(z.p + idat_at, (uint32_t)idat_len);
+        png_be32(tail, png_crc_update(0xFFFFFFFFu, z.p + idat_at + 4u, idat_len + 4u) ^ 0xFFFFFFFFu);
+        zd_put(&z, tail, 4u);
+        static const uint8_t iend[12] = {0, 0, 0, 0, 'I', 'E', 'N', 'D', 0xAEu, 0x42u, 0x60u, 0x82u};
+        zd_put(&z, iend, sizeof(iend));
         ok = z.ok;
     }
-    if (ok) ok = png_end(&z);
+    if (!ok) {
+        free(z.p);
+        return 0;
+    }
+    *out = z.p;
+    *out_len = z.n;
+    return 1;
+}
+
+int sr_file_publish_new(const char *path, const void *data, size_t len) {
+    if (!path || !path[0] || (!data && len)) return SR_PUBLISH_FAILED;
+    static unsigned long s_publish_seq;
+    char tmp[1024 + 64];
+    if (snprintf(tmp, sizeof tmp, "%s.tmp%lu", path, ++s_publish_seq) >= (int)sizeof tmp)
+        return SR_PUBLISH_FAILED;
+    FILE *f = nk_fopen_utf8(tmp, "wb");
+    if (!f) return SR_PUBLISH_FAILED;
+    int ok = len == 0u || fwrite(data, 1, len, f) == len;
     if (ok && fflush(f) != 0) ok = 0;
     if (fclose(f) != 0) ok = 0;
-    free(line);
-    if (!ok) { remove(tmp); return 0; }
-    return cap_publish_file(tmp, path);
+    if (!ok) {
+        nk_remove_utf8(tmp);
+        return SR_PUBLISH_FAILED;
+    }
+    const int moved = nk_rename_noreplace_utf8(tmp, path);
+    if (moved == 0) return SR_PUBLISH_WRITTEN;
+    nk_remove_utf8(tmp);
+    return moved == 1 ? SR_PUBLISH_EXISTS : SR_PUBLISH_FAILED;
 }
 
 /* Publish w x h pixels as a P6 PPM whose name ends in .ppm, or as the PNG above for a name
@@ -319,7 +520,7 @@ static int cap_write_file(const uint8_t *px, uint32_t row_bytes, sr_cap_order or
         return 0;
     unsigned char *rgb = (unsigned char *)malloc((size_t)s_w * 3u);
     if (!rgb) return 0;
-    FILE *f = fopen(tmp, "wb");
+    FILE *f = nk_fopen_utf8(tmp, "wb");
     if (!f) { free(rgb); return 0; }
     const int png = cap_path_is_png(s_path);
     PngOut z;
@@ -348,7 +549,7 @@ static int cap_write_file(const uint8_t *px, uint32_t row_bytes, sr_cap_order or
     if (ok && fflush(f) != 0) ok = 0;
     if (fclose(f) != 0) ok = 0;
     free(rgb);
-    if (!ok) { remove(tmp); return 0; }
+    if (!ok) { nk_remove_utf8(tmp); return 0; }
     return cap_publish_file(tmp, s_path);
 }
 

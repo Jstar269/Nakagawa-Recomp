@@ -1983,6 +1983,7 @@ static int gui_pause_compose(int w, int h, int rgba) {
         model.pacing = pause_pacing_row(present_cap());
         model.texdump = gegpu_texdump_row();
         model.texdump_note = s_pause_texdump_note;
+        gegpu_texdump_status(&model.texdump_saved, &model.texdump_changing, &model.texdump_stopped);
         model.saving = sr_savedata_pause_busy() != 0;
         model.controls = s_pause_controls.rows;
         model.control_count = s_pause_controls.count;

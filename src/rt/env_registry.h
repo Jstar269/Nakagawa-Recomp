@@ -228,6 +228,7 @@
     X("SR_TEXDUMP_AFTER", "number", "0", "ge.c", "First GE frame from which textures are dumped when SR_TEXDUMP is set.") \
     X("SR_TEX_DUMP", "string", "unset", "gui.c", "1 starts the player texture dump with an Enhanced or Ace run (as pause menu Settings > Dump textures does), into <user data>/texdump/<disc ID>.") \
     X("SR_TEX_DUMP_BUDGET_MB", "number", "4096", "gpu_sdl3vk/ge_gpu.c", "Most MiB a run's player texture dump (pause menu, Settings > Dump textures) writes; the file that would pass it is not written and the dump stops.") \
+    X("SR_TEX_DUMP_MAX_FILES", "number", "20000", "gpu_sdl3vk/ge_gpu.c", "Most files (1 to 1000000) a run's player texture dump writes; reaching it stops the dump and the pause menu row says so.") \
     X("SR_TEX_REPLACE", "path", "unset", "gpu_sdl3vk/ge_gpu.c", "Folder of a PPSSPP-layout texture replacement pack (textures.ini, hash-named PNGs) the Vulkan GE draws guest textures from; Ace only.") \
     X("SR_TEX_REPLACE_BUDGET_MB", "number", "256", "gpu_sdl3vk/ge_gpu.c", "Host memory, in MiB, for the replacement pack's decoded images; past it the least recently used is dropped.") \
     X("SR_TEX_SCALE", "string", "off", "gpu_sdl3vk/tex_scale.c", "off or 2-6: the xBRZ factor host copies of guest textures are scaled by in the Vulkan GE texture cache; Ace Mode only.") \

@@ -35,6 +35,7 @@
 #ifndef NAKAGAWA_RECOMP_FBCAP_H
 #define NAKAGAWA_RECOMP_FBCAP_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -198,12 +199,26 @@ int sr_picture_watch_collect(SrPictureWatch *w, int block, uint32_t *brightest);
  * ".png" is published as a PNG (8-bit RGB, stored deflate blocks), every other path as the P6
  * PPM described above. */
 
-/* Write w x h RGBA8 pixels (R in the low byte of each word, rows packed) to `path` as a PNG:
- * 8-bit RGBA, no interlace, filter 0 on every row, stored deflate blocks. Published atomically
- * like a capture (a temp sibling written whole, then renamed over `path`). The texture dump
- * (ge_gpu.c, gegpu_texdump_start) writes its files with it. Returns 1, or 0 when the
- * arguments are invalid (w * 4 * h above UINT32_MAX included) or the file cannot be written. */
-int sr_png_write_rgba(const char *path, const uint32_t *rgba, uint32_t w, uint32_t h);
+/* Encode w x h RGBA8 pixels (R in the low byte of each word, rows packed) as a PNG in memory:
+ * 8-bit RGBA, no interlace, filter 0 on every row, and one IDAT holding a zlib stream of one
+ * fixed-Huffman deflate block with LZ77 matches (RFC 1951), so a texture with flat areas or
+ * repeats is a fraction of its raw size. The texture dump (ge_gpu.c, gegpu_texdump_start) writes
+ * its files with it. Returns 1 with *out (malloc'd; the caller frees it) and *out_len set, or 0
+ * with *out NULL when the arguments are invalid (w * 4 * h above UINT32_MAX, or an image past a
+ * PNG chunk's 2^31 - 1 bytes, included) or memory runs out. */
+int sr_png_encode_rgba(const uint32_t *rgba, uint32_t w, uint32_t h, uint8_t **out, size_t *out_len);
+
+/* What sr_file_publish_new did. */
+enum {
+    SR_PUBLISH_FAILED = 0,   /* nothing was published; the temp file is removed */
+    SR_PUBLISH_WRITTEN = 1,  /* `path` now holds the bytes */
+    SR_PUBLISH_EXISTS = 2    /* `path` already existed and is left exactly as it was */
+};
+/* Publish `len` bytes as a new file at UTF-8 `path`: a temp sibling is written whole, flushed and
+ * closed, then moved to `path` with nk_rename_noreplace_utf8, so a reader never sees a part of
+ * the file and an existing file (a player's own edited image) is never replaced, even one that
+ * appears while the temp file is written. Every file call is the platform layer's wide-path one. */
+int sr_file_publish_new(const char *path, const void *data, size_t len);
 
 #ifdef __cplusplus
 }

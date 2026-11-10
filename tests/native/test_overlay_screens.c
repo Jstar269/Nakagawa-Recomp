@@ -322,6 +322,34 @@ static void test_ace(void) {
     CHECK(frame_has_text(ui, &state, &model, "Not started: the dump folder could not be made.") &&
               !frame_has_text(ui, &state, &model, "Saves the textures the game draws"),
           "a refused start says why on the row");
+    /* On: the files saved; a stop of the whole dump (budget, file limit, a failed write) says why;
+       addresses that change every frame are counted. Off again, the plain description. */
+    model.texdump_note = NULL;
+    model.texdump = 2;
+    model.texdump_saved = 540u;
+    CHECK(frame_has_text(ui, &state, &model, "On: 540 files saved to your user data folder."),
+          "the row counts the files saved while the dump is on");
+    model.texdump_saved = 1u;
+    CHECK(frame_has_text(ui, &state, &model, "On: 1 file saved"), "one file is a file");
+    model.texdump_saved = 540u;
+    model.texdump_changing = 2u;
+    CHECK(frame_has_text(ui, &state, &model, "540 files saved. Stopped for 2 textures that change every frame."),
+          "the row says it stopped saving textures that change every frame");
+    {
+        static const char *const stops[] = { "the run's dump budget is used up",
+                                             "the run's file limit is reached",
+                                             "a file could not be written" };
+        for (size_t i = 0; i < sizeof(stops) / sizeof(stops[0]); ++i) {
+            char want[160];
+            model.texdump_stopped = stops[i];
+            snprintf(want, sizeof want, "Stopped: %s. 540 files saved.", stops[i]);
+            CHECK(frame_has_text(ui, &state, &model, want), "a stopped dump says why on the row");
+        }
+    }
+    model.texdump = 1;
+    CHECK(frame_has_text(ui, &state, &model, "Saves the textures the game draws") &&
+              !frame_has_text(ui, &state, &model, "Stopped:"),
+          "off, the row shows its plain description");
     nk_ui_destroy(ui);
     /* Both at every window size. */
     {
@@ -457,6 +485,9 @@ static void test_display_rows(void) {
             full.pacing = 1 + NK_OVERLAY_PACING_UNCAPPED;
             full.ace_readout = 2;
             full.texdump = 2;
+            /* The longest description the row can show while on. */
+            full.texdump_saved = 1000000u;
+            full.texdump_stopped = "the run's dump budget is used up";
             memset(&st, 0, sizeof(st));
             nk_overlay_open(&st, NK_OVERLAY_OPEN_USER);
             st.screen = NK_OVERLAY_SCREEN_SETTINGS;

@@ -545,6 +545,13 @@ void      ge_pow_selftest_mul(const uint32_t a[2], const uint32_t b[2], uint32_t
 /* Post-write notification for CPU-side writes that may alias GPU-cached framebuffers
  * (movie decode, DMA memcpy). No-op when no GPU backend is registered. */
 void      sr_gpu_vram_dirty(uint32_t addr, uint32_t bytes);
+/* Movie frames (#1880): a movie decoder that writes a picture into guest memory
+ * (sceMpegAvcDecode, sceMpegAvcCsc, sceMpegBaseCscAvc) notes its span, and
+ * sr_video_frame_recent says whether a texture's bytes overlap a span written in the last
+ * 120 VBLANKs. The Vulkan GE's texture dump skips such a texture: a movie is a new picture
+ * every frame, not a texture to replace. The last 8 distinct spans are kept. */
+void      sr_video_frame_note(uint32_t addr, uint32_t bytes);
+int       sr_video_frame_recent(uint32_t addr, uint32_t bytes);
 void      sr_vram_mark_renderer_pending(void);
 int       ge_zbuf_prepare_current(void);
 int       ge_zbuf_materialize_current(void);

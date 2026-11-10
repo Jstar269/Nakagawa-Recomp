@@ -255,6 +255,8 @@ under every preset.
 - Only use games you own.
 - Don't share decrypted files, generated packages or disc images. Everything
   Nakagawa decrypts or builds stays in your user data folder.
+- Don't share dumped textures or texture packs made from them: they are your
+  game's pictures.
 - Issues, pull requests and project discussions must never contain game files,
   keys, or links to downloads or decryption tools.
 
@@ -268,7 +270,9 @@ with the result as a texture pack. Nakagawa ships no textures and no upscaler, a
 2. Resume and play through the parts of the game you want. Each texture the game draws is saved once, as a PNG file,
    in the `texdump` folder of your user data folder, in a folder named for the game's disc ID. The game may stutter
    when it shows many new textures at once; turn **Dump textures** off when you have what you need. It is off again
-   the next time the game starts.
+   the next time the game starts. The row shows how many files are saved, and says why when the dump stops: the run
+   wrote as much as it may, or a file could not be written (a full disk, for example). Movies, and pictures that
+   change every frame, are not saved. A file already in the folder is never replaced.
 3. Enlarge the PNG files with your upscaler, 2 to 6 times their size (the same on both sides), keeping each file's
    name. Delete the files you don't want to change.
 4. Choose that folder as the game's texture pack (the game's **Enhanced options** > **Texture pack folder**).

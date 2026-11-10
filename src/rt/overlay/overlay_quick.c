@@ -11,6 +11,7 @@
 #include "nk_overlay.h"
 #include "nk_ui_widgets.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define QUICK_ID(offset) NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, (offset))
@@ -280,13 +281,32 @@ NkOverlayAction nk_overlay_page_settings(NkUi *ui, NkOverlayState *state,
                            "Hidden while the HUD shows.", inner - 180.0f, compact,
                            model->ace_readout == 2, NK_OVERLAY_ACT_SET_READOUT, &result);
             }
-            /* The texture dump (ge_gpu.h), in an Enhanced or Ace run on the Vulkan renderer. */
+            /* The texture dump (ge_gpu.h), in an Enhanced or Ace run on the Vulkan renderer: a
+               refused start says why; while on, the files saved, and why it stopped if it did. */
             if (model->texdump > 0) {
-                toggle_row(ui, NK_OVERLAY_ID_TEXDUMP, 5u, "Dump textures",
-                           model->texdump_note != NULL && model->texdump_note[0] != '\0'
-                               ? model->texdump_note
-                               : "Saves the textures the game draws to your user data folder, "
-                                 "to make a texture pack.",
+                char status[200];
+                const char *description = "Saves the textures the game draws to your user data folder, "
+                                          "to make a texture pack.";
+                if (model->texdump_note != NULL && model->texdump_note[0] != '\0') {
+                    description = model->texdump_note;
+                } else if (model->texdump == 2) {
+                    const unsigned long long saved = model->texdump_saved;
+                    const char *files = saved == 1u ? "file" : "files";
+                    if (model->texdump_stopped != NULL && model->texdump_stopped[0] != '\0') {
+                        snprintf(status, sizeof(status), "Stopped: %s. %llu %s saved.",
+                                 model->texdump_stopped, saved, files);
+                    } else if (model->texdump_changing > 0u) {
+                        snprintf(status, sizeof(status),
+                                 "%llu %s saved. Stopped for %llu %s that change every frame.", saved,
+                                 files, model->texdump_changing,
+                                 model->texdump_changing == 1u ? "texture" : "textures");
+                    } else {
+                        snprintf(status, sizeof(status), "On: %llu %s saved to your user data folder.",
+                                 saved, files);
+                    }
+                    description = status;
+                }
+                toggle_row(ui, NK_OVERLAY_ID_TEXDUMP, 5u, "Dump textures", description,
                            inner - 180.0f, compact, model->texdump == 2,
                            NK_OVERLAY_ACT_SET_TEXDUMP, &result);
             }

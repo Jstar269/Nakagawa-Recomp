@@ -220,9 +220,15 @@ typedef struct {
     int pacing;                  /* 0: no row, else 1 + NK_OVERLAY_PACING_* in force */
     /* The texture dump (ge_gpu.h), with the readout's convention: 0 no row (an authentic run, or
        not the Vulkan renderer), 1 off, 2 on. `texdump_note`, when set, replaces the row's
-       description: why the last start was refused. */
+       description: why the last start was refused. While on, the description says how many
+       files the run has saved, why the dump stopped when it did (`texdump_stopped`: the
+       budget, the file limit or a failed write; NULL while it goes on), and how many textures
+       that change every frame it no longer saves (`texdump_changing`). */
     int texdump;
     const char *texdump_note;
+    unsigned long long texdump_saved;
+    unsigned long long texdump_changing;
+    const char *texdump_stopped;
 } NkOverlayModel;
 
 /* Which page is up and where focus returns. Zero-initialised is closed. */
