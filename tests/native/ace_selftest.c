@@ -714,6 +714,62 @@ static void cell_fast_forward(void) {
           "fast forward adds no PC LIMITED second to the report:\n%s", json);
 }
 
+/* Smooth motion under fast forward (ENHANCEMENT_CONTRACT 10.6, 10.15): no in-between is made
+ * while it runs, every new frame is shown and kept, and the first new frame after it gets its
+ * in-between again, made of the frame kept last. */
+static void cell_fast_forward_smooth(void) {
+    AcePaceStats st0, st1;
+    (void)ace_init_spec("v1;tier=enhanced;af=16;text=on;readout=on;notice=on;wide=off;smooth=x2;sas=off;tess=off",
+                        NULL);
+    uint64_t ns = 0;
+    uint32_t vc = 1, betweens = 0, keeps = 0, reals = 0;
+    for (; vc <= 300; vc++) {
+        if (vc % 2 == 0) ace_note_target_draw(0x0u);
+        ns += 16683333u;
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+        AceShow show = ace_smooth_take();
+        if (show == ACE_SHOW_BETWEEN) {
+            ace_smooth_shown_between(ns);
+            ace_smooth_note_present(ACE_PRESENT_BETWEEN, ns);
+            betweens++;
+        } else {
+            ace_smooth_note_present(ACE_PRESENT_REAL, ns);
+        }
+    }
+    CHECK(betweens > 100u, "30 Hz at normal speed makes in-betweens (%u)", betweens);
+    ace_pace_stats(&st0);
+    ace_note_fast_forward(1);
+    betweens = 0;
+    for (uint32_t end = vc + 900; vc < end; vc++) {
+        int new_frame = vc % 2 == 0;
+        if (new_frame) ace_note_target_draw(0x0u);
+        ns += 16683333u / 3u;
+        (void)ace_flip(0x0u, 0x22000u, vc, ns);
+        AceShow show = ace_smooth_take();
+        if (show == ACE_SHOW_BETWEEN) betweens++;
+        else if (show == ACE_SHOW_KEEP) keeps++;
+        else if (new_frame) reals++;
+        ace_smooth_note_present(ACE_PRESENT_REAL, ns);
+    }
+    ace_pace_stats(&st1);
+    CHECK(betweens == 0u && st1.kind[ACE_PRESENT_BETWEEN] == st0.kind[ACE_PRESENT_BETWEEN],
+          "fast forward makes no in-between (%u taken, %llu to %llu shown)", betweens,
+          (unsigned long long)st0.kind[ACE_PRESENT_BETWEEN], (unsigned long long)st1.kind[ACE_PRESENT_BETWEEN]);
+    CHECK(keeps == 450u && reals == 0u, "fast forward shows and keeps every new frame (%u kept, %u not)", keeps,
+          reals);
+    ace_note_fast_forward(0);
+    if (vc % 2 != 0) {
+        ns += 16683333u;
+        (void)ace_flip(0x0u, 0x22000u, vc++, ns);
+        (void)ace_smooth_take();
+    }
+    ace_note_target_draw(0x0u);
+    ns += 16683333u;
+    (void)ace_flip(0x0u, 0x22000u, vc++, ns);
+    CHECK(ace_smooth_take() == ACE_SHOW_BETWEEN,
+          "the first new frame after fast forward gets its in-between from the frame kept last");
+}
+
 static void cell_report(const char *dir) {
     char json[ACE_REPORT_MAX];
     (void)ace_init_spec(k_good, NULL);
@@ -1055,6 +1111,7 @@ int main(int argc, char **argv) {
     cell_readout_smooth();
     cell_motion();
     cell_fast_forward();
+    cell_fast_forward_smooth();
     cell_report(argc > 1 ? argv[1] : NULL);
     cell_report_worst();
     if (s_fail) {

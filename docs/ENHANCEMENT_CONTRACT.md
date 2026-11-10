@@ -507,8 +507,9 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed), the
   pass still holds an older frame, and an in-between of the two would put a fast-moving object in the wrong place
   or lose it. The new frame is then shown as it is and kept, and the report counts it in `presents.unpaired`.
-- **Only at 30.** Every other detector class, a pause and a static picture show each frame as it comes, as without
-  the feature. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
+- **Only at 30.** Every other detector class, a pause, a static picture and fast forward (section 10.15) show each
+  frame as it comes, as without the feature. Fast forward keeps each frame it shows, so the first in-between after it
+  is made of two frames shown one after the other. A title that runs 60 FPS game logic is such a class in this build (section 10.5). The detector enters
   30 Hz after a second of agreement and leaves after half a second of disagreement.
 - **Never off without saying so, and never more than it moved.** The setting's description says it smooths
   steady 30 FPS scenes only where it can follow the motion. With the speed readout on, its text ends with
@@ -1084,7 +1085,8 @@ window's keys turn it on, and it never runs in an Authentic run.
 - **The speed readout and the Ace report.** Their window is a second of wall time, so time at the fast-forward speed is
   never judged: the readout hides while fast forward runs, skipped slots are not counted, no second counts as PC
   LIMITED in the report, and the first full second at normal speed brings the readout back (`ace_note_fast_forward`
-  in `src/rt/ace.h`).
+  in `src/rt/ace.h`). Smooth motion makes no in-betweens while it runs (section 10.6), so the report's
+  `smooth_motion` block and in-between count hold only pictures made at normal speed.
 - **Limit.** With **Frame pacing** set to no extra cap and vsync on, each present waits for the display, so fast
   forward runs no faster than the display's refresh allows: about 1x on a 60 Hz display. Under the default PSP
   timing, presents beyond the scanout rate are dropped and the guest never waits on them.

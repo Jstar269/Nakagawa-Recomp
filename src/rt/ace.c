@@ -616,7 +616,9 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
     if (ace_det_flip(&s_det, vcount, new_frame))
         fprintf(stderr, "ACE_RATE: %s\n", ace_rate_name(s_det.stable));
     s_pace_vcount = vcount;
-    ace_pace_flip(&s_pace, new_frame, s_det.stable, s_eff.smooth, now_ns);
+    /* Fast forward makes no in-betweens: each new frame is shown and kept, as at every rate but
+     * 30, so the first in-between after it pairs two frames shown one after the other. */
+    ace_pace_flip(&s_pace, new_frame, s_ff_running ? ACE_RATE_NONE : s_det.stable, s_eff.smooth, now_ns);
     if (s_ff_running) {
         /* Fast forward: no window is judged (ace_note_fast_forward). */
     } else if (!s_win_started) {
