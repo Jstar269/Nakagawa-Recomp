@@ -11,8 +11,9 @@
  *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
- * line without it is an Enhanced run. cull is the other key a line may leave out: a missing cull
- * reads as off (section 11.2 item 2), and a line that writes cull=off means the same. Every other
+ * line without it is an Enhanced run. cull and pad are the other keys a line may leave out: a
+ * missing one reads as off (section 11.2 item 2), and a line that writes cull=off or pad=off means
+ * the same. Every other
  * key is required in v1, in any order, each once. A key or value for a feature this build
  * does not carry (smooth=match) is still parsed and refused. Anything else (an unknown version, key
  * or value, a duplicate, a missing key, an empty field) refuses the whole line: Ace is off for
@@ -46,6 +47,7 @@
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
 #define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
 #define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
+#define ACE_HAS_PAD 1           /* pad=late: late pad sampling at a package's update boundary (11.3.8) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
 typedef enum { ACE_SMOOTH_OFF = 0, ACE_SMOOTH_MATCH = 1, ACE_SMOOTH_X2 = 2 } AceSmooth;
@@ -70,6 +72,8 @@ typedef struct {
     int sas;         /* AceSas: SAS voices mix through a band-limited resampler (host-only) */
     int tess;        /* finer patches (#2053): 0 off, or the factor 2, 3 or 4 on the guest's division */
     int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
+    int pad;         /* pad=late: each logic update starts closer to its VBLANK deadline and reads a
+                        fresher pad sample (guest-visible timing, 11.3.8) */
 } AceConfig;
 
 typedef enum {
@@ -82,6 +86,7 @@ typedef enum {
     ACE_FEATURE_SAS,
     ACE_FEATURE_TESS,
     ACE_FEATURE_CULL,
+    ACE_FEATURE_PAD,
     ACE_FEATURE_COUNT
 } AceFeature;
 
@@ -359,6 +364,83 @@ typedef struct {
 
 /* The renderer's latest totals, for the report and the exit line. */
 void ace_smooth_aux_report(const AceSmoothAuxStats *s);
+
+/* ---- late pad sampling (pad=late, contract 11.3.8) ------------------------------------------ */
+
+/* A 60 FPS game logic package names the instruction where each logic update begins (section 9.5).
+ * A title that reads its pad at the top of the update and then waits for the VBLANK after its
+ * draw hands the display a picture built from a pad sample that is almost a whole period old by
+ * the time that VBLANK comes. With pad=late the update's thread is held at the boundary until
+ * shortly before the next VBLANK deadline, and the newest pad sample, which the guest has not
+ * read yet, is refreshed from the host's input when the hold ends. The update computes what it
+ * would have computed with that input, the VBLANK schedule and the number of samples are
+ * unchanged, and no update is skipped or repeated: the hold only moves the update's start later
+ * inside its own period.
+ *
+ * The plan decides how long to hold. An update's work is the time from the end of its hold to
+ * its thread's first VBLANK wait. The hold leaves room for the longest work of the last
+ * ACE_PAD_COSTS updates, a quarter of it again and ACE_PAD_MARGIN_NS, and holds only once
+ * ACE_PAD_WARM updates in a row were measured. An update whose work ends after the deadline it
+ * was held for is late: holding stops for ACE_PAD_BACKOFF_UPDATES updates and the margin grows
+ * by ACE_PAD_MARGIN_STEP_NS, up to ACE_PAD_MARGIN_MAX_NS. A boundary reached again before the
+ * previous update waited for a VBLANK (a load, a title that waits some other way) leaves that
+ * update unmeasured and starts the warm count again, so a title whose updates do not end in a
+ * VBLANK wait is never held. Callers pass the host clock in nanoseconds. */
+#define ACE_PAD_COSTS 64u
+#define ACE_PAD_WARM 30u
+#define ACE_PAD_MIN_HOLD_NS 1000000ull
+#define ACE_PAD_MARGIN_NS 2000000ull
+#define ACE_PAD_BACKOFF_UPDATES 300u
+#define ACE_PAD_MARGIN_STEP_NS 1000000ull
+#define ACE_PAD_MARGIN_MAX_NS 6000000ull
+
+typedef struct {
+    uint64_t cost[ACE_PAD_COSTS];    /* the work of the last updates, ns */
+    uint32_t ncost, next;
+    uint32_t warm;                   /* measured updates in a row */
+    uint32_t backoff;                /* updates left with no hold after a late one */
+    uint64_t extra_margin_ns;        /* added after late updates */
+    int open;                        /* an update is between its boundary and its first wait */
+    int held;                        /* that update was held */
+    uint64_t release_ns;             /* when its work began */
+    uint64_t deadline_ns;            /* the VBLANK deadline it had at its boundary, 0 if none */
+    uint64_t updates;                /* boundaries seen */
+    uint64_t measured;               /* updates whose work was measured */
+    uint64_t unmeasured;             /* updates that reached the next boundary without a wait */
+    uint64_t held_updates;
+    uint64_t hold_ns_sum, hold_ns_max;
+    uint64_t late_held;              /* held updates whose work ended after their deadline */
+    uint64_t late_unheld;            /* the same for updates that were not held */
+    uint64_t refreshed;              /* pad samples refreshed at the end of a hold */
+} AcePadPlan;
+
+void ace_pad_plan_reset(AcePadPlan *p);
+/* At the update boundary. deadline_ns is the next VBLANK deadline on the host clock (0 when
+ * VBLANKs are not paced to it); allow is 0 when the hold may not run (pad=off, or the thread
+ * cannot wait here), so the plan only measures. Returns how long to hold, 0 for none. */
+uint64_t ace_pad_plan_begin(AcePadPlan *p, uint64_t now_ns, uint64_t deadline_ns, int allow);
+/* The hold is over (or there was none): the update's work starts now. */
+void ace_pad_plan_release(AcePadPlan *p, uint64_t now_ns);
+/* The update's thread waits for a VBLANK: its work is done. Returns 1 for a miss. */
+int ace_pad_plan_wait(AcePadPlan *p, uint64_t now_ns);
+/* The run's plan (Ace on: the runtime's boundary hook drives it). */
+AcePadPlan *ace_pad_plan(void);
+
+/* Input latency, the runtime's own measure: for each presented guest frame, the host time from
+ * the input poll behind the newest pad sample the guest read before it set that frame, to the
+ * runtime's present of the frame. Half-millisecond bins; the last bin holds everything above. */
+#define ACE_LAT_BIN_NS 500000ull
+#define ACE_LAT_BINS 160u
+typedef struct {
+    uint64_t count, sum_ns, max_ns;
+    uint64_t bin[ACE_LAT_BINS];
+} AceLatency;
+void ace_latency_reset(AceLatency *l);
+void ace_latency_note(AceLatency *l, uint64_t ns);
+/* The upper edge of the bin that holds the pct-th percentile, in ns (0 with no samples). */
+uint64_t ace_latency_percentile_ns(const AceLatency *l, unsigned pct);
+/* One presented frame's latency into the run's measure (Ace on only). */
+void ace_note_input_latency(uint64_t ns);
 
 /* ---- the per-run report -------------------------------------------------------------------- */
 

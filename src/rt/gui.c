@@ -113,6 +113,9 @@ static MovieUpscale s_movie, s_movie_rec;
 #endif
 static int      s_offscreen = 0;        /* explicit host-memory presenter for headless bring-up */
 static uint32_t s_buttons = 0;
+/* The host clock (sched_host_now_ns) at the last poll that set s_buttons and the stick: the
+ * input-latency measure's start (ace.h). Host-side only. */
+static uint64_t s_input_poll_ns;
 static uint8_t  s_lx = 128, s_ly = 128;   /* live left-stick (0..255, 128=centre), latched each present */
 static int      s_pad_present = 0;         /* a controller is currently connected */
 #endif /* SR_GUI_INPUT_PATH */
@@ -371,6 +374,7 @@ static void sr_gui_take_pause_request(void) {
 }
 
 static void sync_sdl_input(void) {
+    s_input_poll_ns = sched_host_now_ns();
     s_buttons = sdl3vk_buttons();
     sdl3vk_analog(&s_lx, &s_ly);
     s_pad_present = sdl3vk_pad_present();
@@ -1140,6 +1144,7 @@ int gui_interactive(void) {
 #endif /* !SR_GUI_PRESENT_SELFTEST */
 #ifdef SR_GUI_INPUT_PATH
 uint32_t gui_buttons(void) { return s_buttons; }
+uint64_t gui_input_poll_ns(void) { return s_input_poll_ns; }
 void gui_analog(uint8_t *lx, uint8_t *ly) { if (lx) *lx = s_lx; if (ly) *ly = s_ly; }
 int gui_pad_present(void) { return s_pad_present; }
 void gui_consume_button_pulses(void) {
@@ -1547,6 +1552,7 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
     /* GDI fallback is keyboard-only; controllers are handled by the SDL3 gamepad
      * subsystem (src/rt/gpu_sdl3vk) on the default Vulkan path. */
     gui_pump();
+    s_input_poll_ns = sched_host_now_ns();
     s_buttons = read_keys();
     s_lx = 128; s_ly = 128;
     s_pad_present = 0;

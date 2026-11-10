@@ -185,9 +185,38 @@ CtrlSample s_ctrl_live = { 0, 0, 128, 128, 0 };
  * sleeps until the next boundary. s_ctrl_cycle_next_us is that boundary, 0 with cycle 0. */
 static uint64_t s_ctrl_cycle_next_us;
 
+/* Host-side only, never guest-visible: the host time of the input poll behind each ring sample
+ * (late pad sampling's latency measure, ace.h), whether the newest sample has been handed to a
+ * read or a peek, and the poll time of the newest sample the guest was handed. */
+uint64_t s_ctrl_live_poll_ns;
+static uint64_t s_ctrl_ring_poll_ns[CTRL_RING];
+static int s_ctrl_newest_delivered;
+static uint64_t s_ctrl_last_read_poll_ns;
+
+uint64_t ctrl_last_read_poll_ns(void) { return s_ctrl_last_read_poll_ns; }
+
+/* Late pad sampling (ace.h, contract 11.3.8): the newest sample takes the given input in place,
+ * when the guest has not been handed it yet and the controller is sampled once per VBLANK. Its
+ * timestamp and its scripted-input id stay; the number of samples does not change. Returns 1
+ * when the sample was refreshed. */
+int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_ns) {
+    if (s_ctrl_sampling_cycle || s_ctrl_newest_delivered || !s_ctrl_sample_count) return 0;
+    const int newest = (s_ctrl_w - 1 + CTRL_RING) % CTRL_RING;
+    s_ctrl_ring[newest].btn = buttons;
+    s_ctrl_ring[newest].lx = lx;
+    s_ctrl_ring[newest].ly = ly;
+    s_ctrl_ring_poll_ns[newest] = poll_ns;
+    s_ctrl_live.btn = buttons;
+    s_ctrl_live.lx = lx;
+    s_ctrl_live.ly = ly;
+    return 1;
+}
+
 void ctrl_push(const CtrlSample *smp, uint32_t ts) {
     s_ctrl_ring[s_ctrl_w] = *smp;
     s_ctrl_ring[s_ctrl_w].ts = ts;
+    s_ctrl_ring_poll_ns[s_ctrl_w] = s_ctrl_live_poll_ns;
+    s_ctrl_newest_delivered = 0;
     s_ctrl_w = (s_ctrl_w + 1) % CTRL_RING;
     if (s_ctrl_w == s_ctrl_r) s_ctrl_r = (s_ctrl_r + 1) % CTRL_RING;  /* drop oldest on overflow */
     s_ctrl_sample_count++;
@@ -325,6 +354,9 @@ static uint32_t ctrl_fill_n(uint32_t buf, uint32_t nbufs, int negate, int peek) 
         MEM_W8(e + 8, smp.lx); MEM_W8(e + 9, smp.ly); MEM_W8(e + 10, 128); MEM_W8(e + 11, 128);
     }
     if (!peek) s_ctrl_r = s_ctrl_w;                /* consume */
+    /* The window always ends at the newest sample. */
+    s_ctrl_newest_delivered = 1;
+    s_ctrl_last_read_poll_ns = s_ctrl_ring_poll_ns[(s_ctrl_w - 1 + CTRL_RING) % CTRL_RING];
     /* Scripted input advances in guest time: this read is what tells the script the guest
      * has seen the state it is holding (scripted_input.h). */
     if (sr_input_read(&s_input, newest_input) && hle_inlog_on())
@@ -414,6 +446,10 @@ void sr_hle_test_ctrl_ring_reset(void) {
     s_ctrl_sample_count = 0u;
     s_latch_prev_btn = 0u;
     s_latch_seen_count = 0u;
+    memset(s_ctrl_ring_poll_ns, 0, sizeof(s_ctrl_ring_poll_ns));
+    s_ctrl_newest_delivered = 0;
+    s_ctrl_last_read_poll_ns = 0u;
+    s_ctrl_live_poll_ns = 0u;
     s_ctrl_live = (CtrlSample){ 0, 0, 128, 128, 0 };
     s_ctrl_cycle_next_us = s_ctrl_sampling_cycle ? sched_vtime_us() + s_ctrl_sampling_cycle : 0u;
 }

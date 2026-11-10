@@ -908,6 +908,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             self.assertEqual(rc, 0, output)
             combined = b"\n".join(files.values()).decode("utf-8")
             self.assertEqual(combined.count("nk_enhancement_updates++"), 1)
+            # Then the runtime's hook (late pad sampling, contract 11.3.8), inside the same toggle.
+            self.assertIn("if (nk_enhancement_on()) { nk_enhancement_updates++; "
+                          "sr_enhancement_update_begin(); }", combined)
             self.assertIn("uint32_t nk_enhancement_updates;", combined)
             self.assertIn("(nk_enhancement_updates & 1u) == 0u", combined)
             self.assertNotIn("sr_display_vcount", combined)
@@ -979,6 +982,8 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                 "uint32_t sr_display_vcount(void) { return vcount; }\n"
                 "int nk_enhancement_on(void) { return 1; }\n"
                 "uint32_t nk_enhancement_updates;\n"
+                "static unsigned begins;\n"
+                "void sr_enhancement_update_begin(void) { begins++; }\n"
                 f"{gate_def}\n"
                 "int main(void) {\n"
                 "    static const unsigned vblanks[] = {1, 1, 2, 2, 2, 1, 3, 2, 1, 1, 2, 2};\n"
@@ -991,7 +996,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                 "        last = ran;\n"
                 "        vcount += vblanks[u % 12];\n"
                 "    }\n"
-                "    printf(\"%u %u\\n\", runs, alternations);\n"
+                "    printf(\"%u %u %u\\n\", runs, alternations, begins);\n"
                 "    return 0;\n"
                 "}\n",
                 encoding="utf-8",
@@ -1001,9 +1006,11 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             subprocess.run([GCC, "-std=c11", "-Wall", "-Werror", "-Wno-unused-function",
                             "-o", str(exe), str(harness)], check=True, capture_output=True)
             out = subprocess.run([str(exe)], check=True, capture_output=True, text=True).stdout
-            runs, alternations = (int(v) for v in out.split())
+            runs, alternations, begins = (int(v) for v in out.split())
             self.assertEqual(runs, 600)
             self.assertEqual(alternations, 1200)
+            # The runtime's boundary hook (late pad sampling, contract 11.3.8) runs once per update.
+            self.assertEqual(begins, 1200)
 
     def test_data_sites_and_files_reach_the_generated_start_up(self) -> None:
         """Data sites become a verified load-time patch; data files a verified registration."""

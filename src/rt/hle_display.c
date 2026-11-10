@@ -220,7 +220,16 @@ static void picture_probe_collect(int block) {
  * that showed the frame has already serviced an armed capture, and an arm nobody serviced
  * (a skipped output slot, a presenter that declined the frame) resolves here as "nothing
  * attempted", so a later present can never publish this frame's path with newer pixels. */
+/* Ace input latency (ace.h): the poll time of the newest pad sample the guest had read when it
+ * set the frame now waiting to be presented; 0 when none. Host-side only. */
+static uint64_t s_flip_input_ns;
+
 static void display_present_active(void) {
+    if (g_ace_on && s_flip_input_ns) {
+        const uint64_t now = sched_host_now_ns();
+        if (now > s_flip_input_ns) ace_note_input_latency(now - s_flip_input_ns);
+        s_flip_input_ns = 0u;
+    }
     /* Dark-picture watch (fbcap.h): every SR_PICTURE_PROBE_EVERY VBLANKs, a present no file
      * capture wanted carries a picture probe. A presenter that serves it from host memory
      * does so inside this present, so its result is taken right after; one that reads it
@@ -672,6 +681,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
         return display_setframebuf_reject(0x80000107u, addr, stride, fmt, sync);
 
     DisplayFrameState requested = { addr, stride, fmt };
+    if (g_ace_on) s_flip_input_ns = ctrl_last_read_poll_ns();
     if (sync == 0u) {
         s_setfb.immediate++;
         /* PSP names sync=0 IMMEDIATE.  The host has no scanline clock, so this

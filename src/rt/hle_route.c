@@ -1515,6 +1515,8 @@ void sr_ctrl_sample(void) {
      * the VBLANK itself latches none. */
     if (s_ctrl_sampling_cycle) ctrl_cycle_catch_up();
     s_ctrl_live = (CtrlSample){ buttons, 0u, lx, ly, input_id };
+    /* Host-side only: when the host input behind this sample was polled (ace.h input latency). */
+    s_ctrl_live_poll_ns = gui_on() ? gui_input_poll_ns() : sched_host_now_ns();
     if (gui_on()) gui_consume_button_pulses();
     if (s_ctrl_sampling_cycle) return;
     /* Stamped with the low 32 bits of the guest microsecond clock at latch. */
@@ -1813,6 +1815,65 @@ static uint32_t s_enh_updates_last;
 static uint32_t s_enh_vblank_mark;
 static uint32_t s_enh_slow_seconds;
 static atomic_uint s_enh_slow_rate;   /* updates in the last second while slowed, else 0 */
+
+/* Late pad sampling (docs/ENHANCEMENT_CONTRACT.md section 11.3.8, ace.h). The generated update
+ * boundary calls sr_enhancement_update_begin() once per logic update while 60 FPS game logic is
+ * on. With Ace on the plan measures every update: from the end of the boundary to its thread's
+ * first VBLANK wait (sr_enhancement_update_waits, from the scheduler). With pad=late it may hold
+ * the thread in an ordinary delay, so the title's other threads run as they would while it
+ * waits for the VBLANK, and when the delay ends the window is pumped and the newest pad sample,
+ * which no read has been handed yet, takes the host's input of that moment.
+ *
+ * The refresh is for a person's input only. Under a pad script or route, SR_RECORD or
+ * SR_REPLAY, the headless START pulse, a sampling cycle or the on-screen keyboard the sample
+ * keeps what the VBLANK latched, so a scripted run hands the guest the same samples with the
+ * part on or off; only the hold's timing differs. */
+static uint32_t s_pad_update_uid;   /* the thread that passed the boundary; 0: no update open */
+
+static int pad_refresh_live(void) {
+    route_load_once();
+    if (s_route_state != ROUTE_OFF || !gui_on() || !sr_replay_pad_live() || sr_osk_overlay_active())
+        return 0;
+    gui_pump();
+    const uint32_t buttons = gui_buttons();
+    if (!ctrl_pulse_suppressed(buttons)) return 0;   /* the headless START pulse owns the pad */
+    uint8_t lx = 128u, ly = 128u;
+    if (s_ctrl_sampling_mode == 1u) gui_analog(&lx, &ly);
+    if (!ctrl_refresh_newest(buttons, lx, ly, gui_input_poll_ns())) return 0;
+    gui_consume_button_pulses();
+    if (hle_inlog_on())
+        fprintf(stderr, "ctrl_refresh: vcount=%u buttons 0x%04x lx=%u ly=%u\n", s_vcount_fwd, buttons,
+                lx, ly);
+    return 1;
+}
+
+void sr_enhancement_update_begin(void) {
+    if (!g_ace_on) return;
+    AcePadPlan *plan = ace_pad_plan();
+    const int late = ace_effective()->pad != 0;
+    if (late) ace_confirm(ACE_FEATURE_PAD);   /* the title's boundary runs */
+    const uint32_t uid = sched_current_uid();
+    /* A delay is an ordinary thread wait: only where the thread could wait anyway. */
+    const int can_wait = late && uid != 0u && sched_wait_permitted() && !sched_is_intr_context() &&
+                         !sr_tail_transfer.pending && !sched_pause_pending();
+    uint64_t now = sched_host_now_ns();
+    const uint64_t hold = ace_pad_plan_begin(plan, now, sched_vblank_deadline_ns(), can_wait);
+    s_pad_update_uid = uid ? uid : UINT32_MAX;
+    if (hold >= 1000u) {
+        sched_delay_current(hold / 1000u);
+        if (pad_refresh_live()) plan->refreshed++;
+        now = sched_host_now_ns();
+    }
+    ace_pad_plan_release(plan, now);
+}
+
+void sr_enhancement_update_waits(void) {
+    if (!g_ace_on || !s_pad_update_uid) return;
+    const uint32_t uid = sched_current_uid();
+    if ((uid ? uid : UINT32_MAX) != s_pad_update_uid) return;
+    s_pad_update_uid = 0u;
+    (void)ace_pad_plan_wait(ace_pad_plan(), sched_host_now_ns());
+}
 
 void sr_enhancement_register_updates(const volatile uint32_t *counter) {
     s_enh_updates = counter;

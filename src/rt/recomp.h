@@ -1547,6 +1547,15 @@ int sr_enhancement_file_register(const char *disc_path, const uint8_t stock_sha2
  * whether that logic has stayed under 60 updates/s long enough to report (section 9.5).
  * sr_enhancement_logic_slowed() may be called from the presenter thread. */
 void sr_enhancement_register_updates(const volatile uint32_t *counter);
+/* From generated code at the update boundary, right after the count advances (section 9.5), only
+ * while SR_EXPERIMENTAL_60HZ=1. With Ace off it returns at once. With Ace on it measures the
+ * update, and with pad=late it may hold the calling thread in a delay until shortly before the
+ * next VBLANK deadline and then refresh the newest pad sample the guest has not read
+ * (docs/ENHANCEMENT_CONTRACT.md section 11.3.8). */
+void sr_enhancement_update_begin(void);
+/* From the scheduler when a thread blocks on a VBLANK wait: the update's work is done if it is
+ * the thread that passed the boundary. */
+void sr_enhancement_update_waits(void);
 int sr_enhancement_logic_slowed(unsigned *rate);
 /* A clip_x_widen site (section 10.8), from generated code right after the call at the site
  * returns: the guest pointer `base` plus each of the `count` offsets addresses a column-major 4x4
@@ -2177,6 +2186,7 @@ int      gui_on(void);
 int      gui_interactive(void);                  /* 1 when a person is at a real window: not offscreen, headless or acceptance */
 uint32_t gui_buttons(void);
 void     gui_consume_button_pulses(void);          /* after one PSP VBLANK sample */
+uint64_t gui_input_poll_ns(void);                  /* host clock of the last input poll (ace.h) */
 /* Gamepad buttons that went down since the last call, as PSP button bits: the on-screen
  * keyboard's pad input (osk_overlay.h). Taken every VBLANK whether or not it is open. Returns 0
  * when no SDL3 presenter is up (the GDI and offscreen presenters have no SDL3 gamepad). */
@@ -2558,6 +2568,10 @@ void     sr_hle_release_thread_resources(uint32_t thread_uid); /* release HLE re
 /* Wait-object ids shared between hle.c (wait side) and sched.c (thread-dump side). */
 #define CTRL_WAIT_OBJ 0xC471D000u                   /* sceCtrl blocking reads park on this object */
 uint64_t sched_vtime_us(void);
+/* The host clock the scheduler paces VBLANKs to, and the host time of the next VBLANK source
+ * event on it (0 when VBLANKs are not paced to the host clock): late pad sampling (ace.h). */
+uint64_t sched_host_now_ns(void);
+uint64_t sched_vblank_deadline_ns(void);
 uint64_t sched_vtime_deadline_after(uint64_t delta); /* saturating guest-time deadline */
 void     sched_vtime_refresh(void);
 /* Display scanout observations derived from the same monotonic guest timeline.  The

@@ -1366,6 +1366,9 @@ static uint32_t sr_rt_current_uid(void) {
  * semantic and is not expressible on hardware; see the D2 record
  * (PSP-DISPLAY-003) quoted above sched_run's idle handling. */
 static void sched_vblank_block(void) {
+    /* A 60 FPS logic update ends its work here (late pad sampling, ace.h): only the thread that
+     * passed the update boundary is counted, and only with Ace on. Reads the host clock only. */
+    sr_enhancement_update_waits();
     /* Sample the clock, latch any edge that has fallen due, and deliver the edges owed
      * from before this call. All of it runs before the caller registers, so the owed
      * edges wake only threads already waiting and this caller is not released by an
@@ -1538,6 +1541,17 @@ int sched_vbl_paced(void) { pace_setup(); return s_pace_on > 0; }
 /* True when guest time is deterministic (#2037): the RTC then starts at a fixed date instead of
  * the host's calendar, so two identical runs see the same time of day. */
 int sched_clock_deterministic(void) { pace_setup(); return s_det_clock; }
+
+/* Late pad sampling (ace.h, contract 11.3.8) plans on the host clock: this clock, and the host
+ * time at which the next VBLANK source event falls due, 0 when VBLANKs are not paced to it. */
+uint64_t sched_host_now_ns(void) { return host_now_ns(); }
+uint64_t sched_vblank_deadline_ns(void) {
+    pace_setup();
+    if (s_pace_on <= 0 || s_vbl_next_us == UINT64_MAX ||
+        s_vbl_next_us > (UINT64_MAX - s_clock_epoch_ns) / 1000u)
+        return 0u;
+    return s_clock_epoch_ns + s_vbl_next_us * 1000u;
+}
 
 static uint64_t host_us(void) {
     return (host_now_ns() - s_clock_epoch_ns) / 1000u;

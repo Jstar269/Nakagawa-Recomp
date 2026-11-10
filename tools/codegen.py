@@ -3829,7 +3829,10 @@ def normal_line(addr, w, lle_cpu=None, delay_branch_pc=None, options=None):
                        options=options)
     if w is not None and _enhancement_boundary(addr):
         # One logic update begins here: count it before the stock statement runs.
-        line = f"    if (nk_enhancement_on()) {{ nk_enhancement_updates++; }}\n{line}"
+        # With Ace on, the runtime measures each update here and, with late pad sampling
+        # (pad=late, docs/ENHANCEMENT_CONTRACT.md section 11.3.8), may hold it before it reads the pad.
+        line = (f"    if (nk_enhancement_on()) {{ nk_enhancement_updates++; sr_enhancement_update_begin(); }}\n"
+                f"{line}")
     rw = _enhancement_rewrite(addr) if w is not None else None
     if rw is None:
         return line

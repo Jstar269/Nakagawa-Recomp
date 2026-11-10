@@ -1550,6 +1550,10 @@ int sr_callback_find_in_table(uint32_t uid);
 void hle_register_osk_handlers(void);
 int sr_callback_table_unregister(uint32_t uid);
 void sr_ctrl_sample(void);
+/* Late pad sampling and its latency measure (hle_input.c, ace.h); host-side only. */
+extern uint64_t s_ctrl_live_poll_ns;
+uint64_t ctrl_last_read_poll_ns(void);
+int ctrl_refresh_newest(uint32_t buttons, uint8_t lx, uint8_t ly, uint64_t poll_ns);
 
 
 /* Success-result exceptions named in the end-of-run summary. sceKernelVolatileMemUnlock is absent:

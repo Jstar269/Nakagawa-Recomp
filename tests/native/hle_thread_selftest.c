@@ -589,6 +589,7 @@ int gui_headless_acceptance_complete(void) { return 0; }
 static uint32_t s_test_gui_buttons;
 uint32_t gui_buttons(void) { return s_test_gui_buttons; }
 void gui_consume_button_pulses(void) {}
+uint64_t gui_input_poll_ns(void) { return 0u; }
 /* The keyboard's scripted pad: the integration test queues one press per VBLANK sample. */
 static uint32_t s_osk_test_pulse;
 uint32_t gui_pad_pulses_take(void) {
@@ -44026,6 +44027,58 @@ static void ctrlc_read_waiter(void *arg) {
     selftest_park_on_scheduler();
 }
 
+/* Late pad sampling (ace.h, contract 11.3.8): when a hold ends, the newest sample takes the host's
+ * input of that moment, only while no read or peek has been handed it. Its timestamp stays, no
+ * sample is added, and the latency measure carries the refresh's poll time to the next read. */
+static void test_ctrl_late_refresh(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+    expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 1u,
+           "late refresh: the power-on sample is read first");
+    expect(!ctrl_refresh_newest(0x2000u, 10u, 20u, 111u),
+           "late refresh: a sample a read was handed is never refreshed");
+
+    sr_hle_test_ctrl_push_sample(0x4000u);
+    expect(ctrlc_call(NID_SCE_CTRL_PEEK_BUFFER_POSITIVE, CTRL_OK_BUF, 1u) == 1u,
+           "late refresh: a peek sees the latched sample");
+    const uint32_t stamp = MEM_R32(CTRL_OK_BUF);
+    expect(!ctrl_refresh_newest(0x2000u, 10u, 20u, 222u) && MEM_R32(CTRL_OK_BUF + 4u) == 0x4000u,
+           "late refresh: a sample a peek was handed is never refreshed either");
+    expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 1u &&
+               MEM_R32(CTRL_OK_BUF + 4u) == 0x4000u && MEM_R32(CTRL_OK_BUF) == stamp,
+           "late refresh: the read then returns the sample as latched");
+
+    sr_hle_test_ctrl_push_sample(0x4000u);
+    expect(ctrl_refresh_newest(0x2000u, 10u, 20u, 333u),
+           "late refresh: an unread newest sample is refreshed");
+    expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 1u &&
+               MEM_R32(CTRL_OK_BUF + 4u) == 0x2000u && MEM_R8(CTRL_OK_BUF + 8u) == 10u &&
+               MEM_R8(CTRL_OK_BUF + 9u) == 20u,
+           "late refresh: the read returns one sample with the refreshed buttons and stick");
+    expect(ctrl_last_read_poll_ns() == 333u,
+           "late refresh: the latency measure carries the refresh's poll time");
+    expect(!ctrl_refresh_newest(0x1000u, 1u, 2u, 444u),
+           "late refresh: once read it is not refreshed again");
+
+    /* Two unread samples: only the newest changes, the older one keeps its latch. */
+    sr_hle_test_ctrl_push_sample(0x1u);
+    sr_hle_test_ctrl_push_sample(0x2u);
+    expect(ctrl_refresh_newest(0x8u, 128u, 128u, 555u), "late refresh: the newest of two is refreshed");
+    expect(ctrlc_call(NID_SCE_CTRL_READ_BUFFER_POSITIVE, CTRL_OK_BUF, 64u) == 2u &&
+               MEM_R32(CTRL_OK_BUF + 4u) == 0x1u && MEM_R32(CTRL_OK_BUF + 16u + 4u) == 0x8u,
+           "late refresh: the older sample keeps its latch, the count stays 2");
+
+    /* With a sampling cycle the controller is not sampled per VBLANK: no refresh. */
+    expect(ctrlc_call(NID_SCE_CTRL_SET_SAMPLING_CYCLE, 5555u, 0u) == 0u, "late refresh: cycle 5555 is set");
+    sr_hle_test_ctrl_push_sample(0x4000u);
+    expect(!ctrl_refresh_newest(0x2000u, 10u, 20u, 666u), "late refresh: none under a sampling cycle");
+    expect(ctrlc_call(NID_SCE_CTRL_SET_SAMPLING_CYCLE, 0u, 0u) == 0u, "late refresh: cycle 0 again");
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+}
+
 static void test_ctrl_sampling_contract(void) {
     reset_fixture();
     sr_hle_init();
@@ -50472,6 +50525,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_volatile_mem_lock_blocks_and_hands_off();
     test_volatile_mem_lock_departures_and_type();
     test_ctrl_sampling_contract();
+    test_ctrl_late_refresh();
     test_volatile_partition_allocator();
     test_late_prx_unload_keeps_module_owned_objects();
     test_power_unregister_callback_slots();

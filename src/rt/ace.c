@@ -29,7 +29,7 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_CULL
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_CULL, ACE_KEY_PAD
 } AceKey;
 
 static const struct {
@@ -47,6 +47,7 @@ static const struct {
     {"tess", ACE_KEY_TESS, 1},
     {"tier", ACE_KEY_TIER, 0},
     {"cull", ACE_KEY_CULL, 0},
+    {"pad", ACE_KEY_PAD, 0},
 };
 
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
@@ -104,6 +105,13 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "cull is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_PAD:
+                if (strcmp(v, "off") == 0) { c.pad = 0; ok = 1; }
+                else if (strcmp(v, "late") == 0) { c.pad = 1; ok = 1; }
+                if (ok && c.pad && !ACE_HAS_PAD) {
+                    why_set(why, why_cap, "pad is not part of this build"); return 0;
+                }
+                break;
             case ACE_KEY_TIER:
                 if (strcmp(v, "enhanced") == 0) { c.tier = ACE_TIER_ENHANCED; ok = 1; }
                 else if (strcmp(v, "ace") == 0) { c.tier = ACE_TIER_ACE; ok = 1; }
@@ -143,6 +151,8 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
         if (k_ace_keys[i].required && !seen[i]) { why_set(why, why_cap, "missing key"); return 0; }
     /* An Ace item (contract 11.3.6): only an Ace-tier line may turn it on. */
     if (c.cull && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "cull needs tier=ace"); return 0; }
+    /* Late pad sampling acts at a title package's update boundary (contract 11.3.8): Ace only. */
+    if (c.pad && c.tier != ACE_TIER_ACE) { why_set(why, why_cap, "pad needs tier=ace"); return 0; }
     c.on = 1;
     if (out) *out = c;
     why_set(why, why_cap, "");
@@ -172,6 +182,11 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
         n = m < 0 ? -1 : n + m;
     }
+    /* Likewise pad: a missing pad is off. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->pad) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";pad=late");
+        n = m < 0 ? -1 : n + m;
+    }
     if (n < 0 || (size_t)n >= cap) { out[0] = '\0'; return 0; }
     return 1;
 }
@@ -188,9 +203,11 @@ static int s_af_device;          /* the device's level when lower than the reque
 static int s_confirmed[ACE_FEATURE_COUNT];
 static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
+static AcePadPlan s_pad_plan;
+static AceLatency s_latency;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "cull"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "cull", "pad"
 };
 
 /* The run's observation state. */
@@ -249,6 +266,8 @@ int ace_init_spec(const char *spec, const char *report_path) {
     memset(s_confirmed, 0, sizeof(s_confirmed));
     s_af_failures = 0;
     s_cull_untracked = 0;
+    ace_pad_plan_reset(&s_pad_plan);
+    ace_latency_reset(&s_latency);
     s_af_device = 0;
     s_report_path[0] = '\0';
     snprintf(s_spec, sizeof(s_spec), "off");
@@ -269,6 +288,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
             on_off(s_req.readout), on_off(s_req.notice), wide_word(s_req.wide),
             smooth_word(s_req.smooth), sas_word(s_req.sas), tess_word(s_req.tess));
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
+    if (s_req.pad)
+        fprintf(stderr, "ACE_MODE: pad late (each logic update starts closer to its VBLANK deadline "
+                        "and reads a fresher pad sample)\n");
     return 1;
 }
 
@@ -295,6 +317,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_SMOOTH: s_eff.smooth = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
+    case ACE_FEATURE_PAD: s_eff.pad = 0; break;
     default: s_eff.tess = 0; break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
@@ -760,6 +783,99 @@ static uint64_t aux_dropped(const AceSmoothAuxStats *a) {
     return a->boxes_large + a->boxes_target + a->boxes_outside + a->boxes_full;
 }
 
+/* ---- late pad sampling --------------------------------------------------------------------- */
+
+void ace_pad_plan_reset(AcePadPlan *p) {
+    if (p) memset(p, 0, sizeof(*p));
+}
+
+uint64_t ace_pad_plan_begin(AcePadPlan *p, uint64_t now_ns, uint64_t deadline_ns, int allow) {
+    if (!p) return 0;
+    if (p->open) {             /* the previous update never waited for a VBLANK */
+        p->unmeasured++;
+        p->warm = 0;
+    }
+    p->updates++;
+    p->open = 1;
+    p->held = 0;
+    p->release_ns = now_ns;
+    p->deadline_ns = deadline_ns;
+    if (p->backoff) {
+        p->backoff--;
+        return 0;
+    }
+    if (!allow || !deadline_ns || p->warm < ACE_PAD_WARM || !p->ncost) return 0;
+    uint64_t work = 0;
+    for (uint32_t i = 0; i < p->ncost; i++)
+        if (p->cost[i] > work) work = p->cost[i];
+    const uint64_t reserve = work + work / 4u + ACE_PAD_MARGIN_NS + p->extra_margin_ns;
+    if (deadline_ns <= now_ns || deadline_ns - now_ns <= reserve + ACE_PAD_MIN_HOLD_NS) return 0;
+    const uint64_t hold = deadline_ns - now_ns - reserve;
+    p->held = 1;
+    p->held_updates++;
+    p->hold_ns_sum += hold;
+    if (hold > p->hold_ns_max) p->hold_ns_max = hold;
+    return hold;
+}
+
+void ace_pad_plan_release(AcePadPlan *p, uint64_t now_ns) {
+    if (p && p->open) p->release_ns = now_ns;
+}
+
+int ace_pad_plan_wait(AcePadPlan *p, uint64_t now_ns) {
+    if (!p || !p->open) return 0;
+    p->open = 0;
+    p->measured++;
+    p->cost[p->next] = now_ns > p->release_ns ? now_ns - p->release_ns : 0u;
+    p->next = (p->next + 1u) % ACE_PAD_COSTS;
+    if (p->ncost < ACE_PAD_COSTS) p->ncost++;
+    if (p->warm < ACE_PAD_WARM) p->warm++;
+    const int late = p->deadline_ns && now_ns > p->deadline_ns;
+    if (!late) return 0;
+    if (!p->held) {
+        p->late_unheld++;
+        return 0;
+    }
+    p->late_held++;
+    p->backoff = ACE_PAD_BACKOFF_UPDATES;
+    p->extra_margin_ns += ACE_PAD_MARGIN_STEP_NS;
+    if (p->extra_margin_ns > ACE_PAD_MARGIN_MAX_NS) p->extra_margin_ns = ACE_PAD_MARGIN_MAX_NS;
+    return 1;
+}
+
+AcePadPlan *ace_pad_plan(void) { return &s_pad_plan; }
+
+void ace_latency_reset(AceLatency *l) {
+    if (l) memset(l, 0, sizeof(*l));
+}
+
+void ace_latency_note(AceLatency *l, uint64_t ns) {
+    if (!l) return;
+    uint64_t b = ns / ACE_LAT_BIN_NS;
+    if (b >= ACE_LAT_BINS) b = ACE_LAT_BINS - 1u;
+    l->bin[b]++;
+    l->count++;
+    l->sum_ns += ns;
+    if (ns > l->max_ns) l->max_ns = ns;
+}
+
+uint64_t ace_latency_percentile_ns(const AceLatency *l, unsigned pct) {
+    if (!l || !l->count) return 0;
+    if (pct > 100u) pct = 100u;
+    /* The upper edge of the first bin by which at least pct percent of the frames are counted. */
+    const uint64_t want = (l->count * pct + 99u) / 100u;
+    uint64_t seen = 0;
+    for (uint32_t b = 0; b < ACE_LAT_BINS; b++) {
+        seen += l->bin[b];
+        if (seen && seen >= want) return (uint64_t)(b + 1u) * ACE_LAT_BIN_NS;
+    }
+    return (uint64_t)ACE_LAT_BINS * ACE_LAT_BIN_NS;
+}
+
+void ace_note_input_latency(uint64_t ns) {
+    if (g_ace_on) ace_latency_note(&s_latency, ns);
+}
+
 size_t ace_report_json(char *out, size_t cap) {
     size_t used = 0;
     int n;
@@ -777,6 +893,25 @@ size_t ace_report_json(char *out, size_t cap) {
             sas_word(s_eff.sas), tess_word(s_eff.tess));
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
+    if (s_req.pad || s_pad_plan.updates) {
+        const AcePadPlan *pp = &s_pad_plan;
+        ACE_PUT("  \"pad\": {\"late\": %s, \"updates\": %llu, \"measured\": %llu, \"unmeasured\": %llu, "
+                "\"held\": %llu, \"hold_mean_ms\": %.2f, \"hold_max_ms\": %.2f, \"late_held\": %llu, "
+                "\"late_unheld\": %llu, \"refreshed\": %llu},\n",
+                s_eff.pad ? "true" : "false", (unsigned long long)pp->updates,
+                (unsigned long long)pp->measured, (unsigned long long)pp->unmeasured,
+                (unsigned long long)pp->held_updates,
+                pp->held_updates ? (double)pp->hold_ns_sum / (double)pp->held_updates / 1e6 : 0.0,
+                (double)pp->hold_ns_max / 1e6, (unsigned long long)pp->late_held,
+                (unsigned long long)pp->late_unheld, (unsigned long long)pp->refreshed);
+    }
+    if (s_latency.count)
+        ACE_PUT("  \"input_latency_ms\": {\"frames\": %llu, \"mean\": %.2f, \"p50\": %.1f, \"p95\": %.1f, "
+                "\"p99\": %.1f, \"max\": %.2f},\n",
+                (unsigned long long)s_latency.count, (double)s_latency.sum_ns / (double)s_latency.count / 1e6,
+                (double)ace_latency_percentile_ns(&s_latency, 50) / 1e6,
+                (double)ace_latency_percentile_ns(&s_latency, 95) / 1e6,
+                (double)ace_latency_percentile_ns(&s_latency, 99) / 1e6, (double)s_latency.max_ns / 1e6);
     ACE_PUT("  \"unavailable\": {");
     int first = 1;
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
@@ -854,17 +989,35 @@ void ace_finish(void) {
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_CULL };
+                                                ACE_HAS_CULL, ACE_HAS_PAD };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
-                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.cull };
+                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.cull,
+                                        s_eff.pad };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
                 ? "did not run: this title has no culling package in its build, or Widescreen is off"
+                : f == ACE_FEATURE_PAD
+                ? "did not run: no update boundary ran (no 60 FPS game logic package, or it is off)"
                 : "did not run: its renderer or presenter did not start");
     }
     size_t len = ace_report_json(json, sizeof(json));
     fprintf(stderr, "ACE_MODE: exit (%s; rate %s)\n", s_spec, ace_rate_name(dominant_rate()));
+    if (s_latency.count)
+        fprintf(stderr, "ACE_MODE: input latency (%llu frames: mean %.2f ms, p50 %.1f ms, p95 %.1f ms, "
+                        "max %.2f ms)\n", (unsigned long long)s_latency.count,
+                (double)s_latency.sum_ns / (double)s_latency.count / 1e6,
+                (double)ace_latency_percentile_ns(&s_latency, 50) / 1e6,
+                (double)ace_latency_percentile_ns(&s_latency, 95) / 1e6, (double)s_latency.max_ns / 1e6);
+    if (s_pad_plan.updates)
+        fprintf(stderr, "ACE_MODE: pad %s (%llu updates: %llu held, mean hold %.2f ms; %llu unmeasured; "
+                        "late after a hold %llu, late without one %llu; %llu samples refreshed)\n",
+                s_eff.pad ? "late" : "off", (unsigned long long)s_pad_plan.updates,
+                (unsigned long long)s_pad_plan.held_updates,
+                s_pad_plan.held_updates ? (double)s_pad_plan.hold_ns_sum / (double)s_pad_plan.held_updates / 1e6
+                                        : 0.0,
+                (unsigned long long)s_pad_plan.unmeasured, (unsigned long long)s_pad_plan.late_held,
+                (unsigned long long)s_pad_plan.late_unheld, (unsigned long long)s_pad_plan.refreshed);
     if (s_req.smooth && s_have_aux_stats) {
         const AceSmoothAuxStats *a = &s_aux_stats;
         fprintf(stderr, "ACE_MODE: smooth inputs (pairs %llu: HUD mask %llu, depth %llu; HUD boxes kept "
