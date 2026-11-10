@@ -188,6 +188,7 @@ class TitleCodegenPlanTests(unittest.TestCase):
             self.assertGreater(available, 0)
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("NK_PACKAGE_JOBS", None)
+            os.environ.pop("NK_PACKAGE_BUILD_SPEED", None)
             chosen, _reason = title_codegen_plan._host_package_build_jobs()
         self.assertGreaterEqual(chosen, 1)
         self.assertLessEqual(chosen, title_codegen_plan.PACKAGE_BUILD_MAX_JOBS)
@@ -284,7 +285,86 @@ class TitleCodegenPlanTests(unittest.TestCase):
             first = json.loads(progress.read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(returncode, 0)
         self.assertEqual(first, {"completed": 0, "total": 1, "jobs": 2, "cpus": 24,
-                                 "limit": "memory", "free_gb": 4.0})
+                                 "limit": "memory", "speed": "balanced", "free_gb": 4.0})
+
+    def test_each_build_speed_sets_the_job_count(self) -> None:
+        # Settings > Build speed: Background at most two jobs, Balanced #2286's sizing
+        # (up to eight), Fastest one per CPU; every speed within the free memory.
+        gib = 1024**3
+        plan = title_codegen_plan.package_build_plan
+        job = title_codegen_plan.package_job_bytes("4000000")
+        cases = (
+            # (speed, cpus, available, jobs, limit)
+            ("background", 24, 64 * gib, 2, "background"),
+            ("background", 1, 64 * gib, 1, "cpu"),
+            ("background", 24, 2 * gib, 1, "memory"),
+            ("background", 24, None, 2, "unknown_memory"),
+            ("balanced", 24, 64 * gib, 8, "max"),
+            ("balanced", 24, 6 * gib, 5, "memory"),
+            ("balanced", 4, 64 * gib, 4, "cpu"),
+            ("fastest", 24, 64 * gib, 24, "cpu"),
+            ("fastest", 24, 12 * gib, 13, "memory"),
+            ("fastest", 24, 2 * gib, 1, "memory"),
+            ("fastest", 24, None, 2, "unknown_memory"),
+            ("fastest", 2, None, 2, "cpu"),
+        )
+        for speed, cpus, available, jobs, limit in cases:
+            with self.subTest(speed=speed, cpus=cpus, available=available):
+                chosen = plan(cpu_count=cpus, available_bytes=available, job_bytes=job,
+                              speed=speed)
+                self.assertEqual((chosen.jobs, chosen.limit, chosen.speed),
+                                 (jobs, limit, speed))
+                self.assertIn(f"{speed} build speed", chosen.reason)
+
+    def test_no_build_speed_exceeds_the_memory_budget(self) -> None:
+        gib = 1024**3
+        reserve = title_codegen_plan.PACKAGE_BUILD_RESERVED_BYTES
+        for job in (title_codegen_plan.package_job_bytes("4000000"),
+                    title_codegen_plan.PACKAGE_BUILD_JOB_BYTES):
+            for speed in title_codegen_plan.PACKAGE_BUILD_SPEEDS:
+                for cpus in (1, 2, 4, 8, 16, 24, 64, 128):
+                    for free_gib in (3, 4, 6, 8, 12, 16, 24, 32, 64, 128):
+                        with self.subTest(job=job, speed=speed, cpus=cpus, free_gib=free_gib):
+                            chosen = title_codegen_plan.package_build_plan(
+                                cpu_count=cpus, available_bytes=free_gib * gib,
+                                job_bytes=job, speed=speed)
+                            self.assertLessEqual(chosen.jobs, cpus)
+                            if not chosen.memory_short:
+                                self.assertLessEqual(chosen.jobs * job, free_gib * gib - reserve)
+
+    def test_balanced_is_the_default_and_an_unknown_speed_is_named(self) -> None:
+        gib = 1024**3
+        job = title_codegen_plan.package_job_bytes("4000000")
+        default = title_codegen_plan.package_build_plan(
+            cpu_count=24, available_bytes=64 * gib, job_bytes=job)
+        balanced = title_codegen_plan.package_build_plan(
+            cpu_count=24, available_bytes=64 * gib, job_bytes=job, speed="balanced")
+        self.assertEqual(default, balanced)
+        unknown = title_codegen_plan.package_build_plan(
+            cpu_count=24, available_bytes=64 * gib, job_bytes=job, speed="turbo")
+        self.assertEqual((unknown.jobs, unknown.speed), (8, "balanced"))
+        self.assertIn("ignored NK_PACKAGE_BUILD_SPEED='turbo'", unknown.reason)
+
+    def test_nk_package_jobs_overrides_every_build_speed_and_says_so(self) -> None:
+        gib = 1024**3
+        for speed in title_codegen_plan.PACKAGE_BUILD_SPEEDS:
+            with self.subTest(speed=speed):
+                chosen = title_codegen_plan.package_build_plan(
+                    cpu_count=24, available_bytes=64 * gib, override="3", speed=speed)
+                self.assertEqual((chosen.jobs, chosen.limit, chosen.speed),
+                                 (3, "override", speed))
+                self.assertIn(f"NK_PACKAGE_JOBS=3 overrides the {speed} build speed",
+                              chosen.reason)
+
+    def test_host_plan_reads_the_build_speed_from_the_environment(self) -> None:
+        gib = 1024**3
+        with mock.patch.dict(os.environ, {"NK_PACKAGE_BUILD_SPEED": "fastest"}), \
+                mock.patch.object(title_codegen_plan.os, "process_cpu_count", return_value=24), \
+                mock.patch.object(title_codegen_plan, "available_physical_memory",
+                                  return_value=64 * gib):
+            os.environ.pop("NK_PACKAGE_JOBS", None)
+            chosen = title_codegen_plan._host_package_build_plan("4000000")
+        self.assertEqual((chosen.jobs, chosen.speed), (24, "fastest"))
 
     def test_plan_names_what_bound_the_job_count(self) -> None:
         gib = 1024**3

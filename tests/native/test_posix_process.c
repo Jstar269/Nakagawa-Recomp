@@ -50,6 +50,7 @@ int main(void) {
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -91,6 +92,23 @@ static int child_main(int argc, char **argv) {
         (void)waitpid(grandchild, &status, 0);
         return 0;
     }
+    /* --child-nice writes the niceness a grandchild of the spawned child runs at. */
+    if (strcmp(argv[1], "--child-nice") == 0 && argc >= 3) {
+        pid_t grandchild = fork();
+        if (grandchild < 0) return 98;
+        if (grandchild == 0) {
+            FILE *nf = fopen(argv[2], "w");
+            if (!nf) _exit(97);
+            errno = 0;
+            int niceness = getpriority(PRIO_PROCESS, 0);
+            fprintf(nf, "%d\n", niceness == -1 && errno != 0 ? -100 : niceness);
+            fclose(nf);
+            _exit(0);
+        }
+        int status = 0;
+        if (waitpid(grandchild, &status, 0) != grandchild) return 96;
+        return WIFEXITED(status) ? WEXITSTATUS(status) : 95;
+    }
     return 99;
 }
 
@@ -101,6 +119,57 @@ static bool spawn_self(const char *mode, const char *value, NkProcessHandle *out
     return nk_platform_spawn_tool(s_self, argv, NULL, NULL, NULL, out);
 #else
     return nk_platform_spawn_process(s_self, argv, NULL, NULL, NULL, out);
+#endif
+}
+
+/* 0. Settings > Build speed: Background starts the build child at nice
+ * NK_PLATFORM_LOW_PRIORITY_NICE, and what the child starts inherits it (the build's Make and
+ * compilers). Before nk_platform_spawn_process_at_priority every child ran at the player's
+ * priority. On Android the build is a tool child, so a low one starts through
+ * nk_platform_spawn_tool_at_priority, which keeps the tool-folder rule at every priority. */
+static bool spawn_self_low(const char *mode, const char *value, NkProcessHandle *out) {
+    const char *argv[] = { s_self, mode, value, NULL };
+#if defined(__ANDROID__)
+    return nk_platform_spawn_tool_at_priority(s_self, argv, NULL, NULL, NULL,
+                                              NK_PROCESS_PRIORITY_LOW, out);
+#else
+    return nk_platform_spawn_process_at_priority(s_self, argv, NULL, NULL, NULL,
+                                                 NK_PROCESS_PRIORITY_LOW, out);
+#endif
+}
+
+static void low_priority_subtest(void) {
+    printf("[POSIX_PROCESS_TEST] Subtest 0: a low-priority child and its children\n");
+    fflush(stdout);
+    NkProcessPriority read_back = NK_PROCESS_PRIORITY_NORMAL;
+    NkProcessHandle low;
+    assert(spawn_self_low("--child-sleep", "30", &low));
+    assert(nk_platform_process_priority(&low, &read_back));
+    assert(read_back == NK_PROCESS_PRIORITY_LOW);
+    nk_platform_terminate_process(&low);
+    nk_platform_close_process(&low);
+
+    const char *nice_file = SR_SELFTEST_BUILD_ROOT "/posix_process_nice.txt";
+    (void)remove(nice_file);
+    NkProcessHandle tree;
+    assert(spawn_self_low("--child-nice", nice_file, &tree));
+    assert(nk_platform_wait_process(&tree, 10000) == 0);
+    nk_platform_close_process(&tree);
+    FILE *nf = fopen(nice_file, "r");
+    int niceness = -1;
+    assert(nf != NULL);
+    assert(fscanf(nf, "%d", &niceness) == 1);
+    fclose(nf);
+    (void)remove(nice_file);
+    assert(niceness >= NK_PLATFORM_LOW_PRIORITY_NICE);
+
+#if defined(__ANDROID__)
+    /* A low priority is no way around the tool-folder rule. */
+    NkProcessHandle none;
+    const char *outside_argv[] = { "/system/bin/true", NULL };
+    assert(!nk_platform_spawn_tool_at_priority("/system/bin/true", outside_argv, NULL, NULL, NULL,
+                                               NK_PROCESS_PRIORITY_LOW, &none));
+    assert(none.spawn_error == EACCES);
 #endif
 }
 
@@ -241,6 +310,8 @@ int main(int argc, char **argv) {
     assert(nk_platform_get_executable_path(s_self, sizeof(s_self)));
 
     struct timespec t0, t1;
+
+    low_priority_subtest();
 
     /* 1. A finite timeout must expire and return, leaving the child alive.
      *

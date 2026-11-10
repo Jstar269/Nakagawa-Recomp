@@ -1320,6 +1320,7 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->online_news = true;
     settings->online_reports = true;
     settings->share_system_libraries = true;
+    settings->build_speed = PACKAGE_BUILD_SPEED_BALANCED;
     settings->check_updates_at_start = false;
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
@@ -1882,6 +1883,10 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.share_system_libraries = share_val;
     }
 
+    /* A speed this build does not know keeps the default, Balanced. */
+    (void)package_build_speed_from_key(
+        nk_json_get_string(nk_json_obj_get(root, "build_speed")), &app->settings.build_speed);
+
     /* Off unless the file says true: a missing or non-boolean value keeps the
        check at start off. */
     NkJsonNode *update_node = nk_json_obj_get(root, "check_updates_at_start");
@@ -2126,6 +2131,8 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
                                  ? app->settings.library_sort : PLAYER_LIBRARY_SORT_PLAYED]);
     fprintf(f, "  \"share_system_libraries\": %s,\n",
             app->settings.share_system_libraries ? "true" : "false");
+    fprintf(f, "  \"build_speed\": \"%s\",\n",
+            package_build_speed_key(app->settings.build_speed));
     fprintf(f, "  \"check_updates_at_start\": %s,\n",
             app->settings.check_updates_at_start ? "true" : "false");
     player_settings_write_string(f, "picker_folder", app->settings.picker_folder);
@@ -3230,6 +3237,14 @@ void player_app_toggle_update_check_at_start(PlayerApp *app) {
 void player_app_toggle_share_system_libraries(PlayerApp *app) {
     if (!app) return;
     app->settings.share_system_libraries = !app->settings.share_system_libraries;
+    maybe_persist_settings(app);
+}
+
+void player_app_cycle_build_speed(PlayerApp *app) {
+    if (!app) return;
+    app->settings.build_speed = package_build_speed_next(app->settings.build_speed);
+    player_dev_log_add(app, "settings", "build speed %s",
+                       package_build_speed_key(app->settings.build_speed));
     maybe_persist_settings(app);
 }
 
@@ -5995,6 +6010,7 @@ static bool player_app_start_package_build_view(PlayerApp *app, int game_index,
     }
 
     app->build_session.no_shared_libraries = !app->settings.share_system_libraries;
+    app->build_session.build_speed = app->settings.build_speed;
     NkResult res = package_builder_start(&app->build_session, python_path, cli_path, user_data_root, log_dir);
     if (res != NK_OK) {
         if (res == NK_ERROR_ALREADY_EXISTS) {

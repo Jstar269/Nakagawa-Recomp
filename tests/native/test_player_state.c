@@ -11871,6 +11871,10 @@ int main(int argc, char **argv) {
         /* #1306: shared system libraries are on by default and persist when turned off. */
         assert(s_app->settings.share_system_libraries == true);
         player_app_toggle_share_system_libraries(s_app);
+        /* Settings > Build speed: Balanced by default; the button steps to Fastest. */
+        assert(s_app->settings.build_speed == PACKAGE_BUILD_SPEED_BALANCED);
+        player_app_cycle_build_speed(s_app);
+        assert(s_app->settings.build_speed == PACKAGE_BUILD_SPEED_FASTEST);
         s_app->settings.master_volume = 55;
         s_app->settings.launcher_window_maximized = true;
         s_app->settings.launcher_window_position_valid = true;
@@ -11895,6 +11899,7 @@ int main(int argc, char **argv) {
         assert(s_app2->settings.interface_size_pct == 150);
         assert(s_app2->settings.text_size_pct == 150);
         assert(s_app2->settings.share_system_libraries == false);
+        assert(s_app2->settings.build_speed == PACKAGE_BUILD_SPEED_FASTEST);
         assert(s_app2->settings.master_volume == 55);
         assert(s_app2->settings.library_sort == PLAYER_LIBRARY_SORT_PLAYED);
         /* The sort is saved by name; a name this build does not know keeps the default. */
@@ -11912,6 +11917,21 @@ int main(int argc, char **argv) {
                             "{\"schema_version\": 2, \"library_sort\": \"rating\"}");
             assert(player_app_load_settings(sorted, test_settings_path) == NK_OK);
             assert(sorted->settings.library_sort == PLAYER_LIBRARY_SORT_PLAYED);
+            /* The build speed is saved by name; a name this build does not know, or none,
+               keeps Balanced. */
+            write_text_file(test_settings_path,
+                            "{\"schema_version\": 2, \"build_speed\": \"background\"}");
+            assert(player_app_load_settings(sorted, test_settings_path) == NK_OK);
+            assert(sorted->settings.build_speed == PACKAGE_BUILD_SPEED_BACKGROUND);
+            write_text_file(test_settings_path,
+                            "{\"schema_version\": 2, \"build_speed\": \"turbo\"}");
+            assert(player_app_load_settings(sorted, test_settings_path) == NK_OK);
+            assert(sorted->settings.build_speed == PACKAGE_BUILD_SPEED_BALANCED);
+            sorted->settings.build_speed = PACKAGE_BUILD_SPEED_BACKGROUND;
+            assert(player_app_save_settings(sorted, test_settings_path) == NK_OK);
+            saved = read_text_file(test_settings_path);
+            assert(saved != NULL && strstr(saved, "\"build_speed\": \"background\",") != NULL);
+            free(saved);
             free(sorted);
         }
         s_app2->settings.library_sort = PLAYER_LIBRARY_SORT_PLAYED;
