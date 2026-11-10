@@ -377,20 +377,88 @@ class ForkCheckTest(unittest.TestCase):
         return _git(self.repo, "rev-parse", "HEAD")
 
     def _stub_audit(self, code: int) -> Path:
+        # Prints the policy it was handed, so a test can see whose profile the audit judged by.
         stub = self.repo.parent / f"{self.repo.name}-audit-{code}.py"
-        stub.write_text(f"import sys\nprint('stub audit')\nsys.exit({code})\n", encoding="utf-8")
+        stub.write_text(
+            "import sys\nfrom pathlib import Path\nprint('stub audit')\n"
+            "print('POLICY ' + Path(sys.argv[sys.argv.index('--policy') + 1]).read_text(encoding='utf-8'))\n"
+            f"sys.exit({code})\n", encoding="utf-8")
         self.addCleanup(stub.unlink, missing_ok=True)
         return stub
 
+    @staticmethod
+    def _policy_seen(lines: list[str]) -> dict:
+        (line,) = [line for line in lines if line.startswith("  POLICY ")]
+        return json.loads(line[len("  POLICY "):])
+
     def test_lists_profile_changes_and_passes_on_a_clean_audit(self) -> None:
         (self.repo / "NEW.md").write_text("new\n", encoding="utf-8")
-        self._write_profile(["NEW.md", "README.md"], exclude_paths=["x"])
+        self._write_profile(["NEW.md", "README.md"])
         head = self._commit()
         code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
         self.assertIn("  added NEW.md", lines)
-        self.assertTrue(any("rules or exclusions changed" in line for line in lines))
+        self.assertFalse([line for line in lines if line.startswith("PROFILE_RULES_CHANGED")])
         self.assertEqual(lines[-1], f"{pm.FORK_CONTEXT}: PASS")
+
+    def test_the_audit_judges_the_candidate_by_the_candidates_own_profile(self) -> None:
+        # Failing-before: the audit took the profile from the checkout it ran in. On hosted CI that is the
+        # default branch, so the path a pull request admits was refused as unclassified.
+        (self.repo / "NEW.md").write_text("new\n", encoding="utf-8")
+        self._write_profile(["NEW.md", "README.md"])
+        head = self._commit()
+        # The hosted layout: the checkout the tools run in holds the base's files.
+        _git(self.repo, "checkout", "--quiet", "--detach", self.base)
+        self.assertEqual(json.loads((self.repo / pm.POLICY).read_text(encoding="utf-8"))["include_paths"],
+                         ["README.md"])
+        code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
+        self.assertEqual(self._policy_seen(lines)["include_paths"], ["NEW.md", "README.md"])
+
+    def test_a_change_to_the_profiles_rules_fails_the_check(self) -> None:
+        for extra in ({"exclude_paths": ["x"]}, {"default_disposition": "ALLOW"}, {"name": "other"}):
+            with self.subTest(extra=extra):
+                self._write_profile(["README.md"], **extra)
+                head = self._commit()
+                code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
+                self.assertEqual(code, 1, lines)
+                (finding,) = [line for line in lines if line.startswith("PROFILE_RULES_CHANGED")]
+                self.assertIn(f"the candidate changes {next(iter(extra))};", finding)
+                self.assertEqual(lines[-1], f"{pm.FORK_CONTEXT}: FAIL")
+                _git(self.repo, "reset", "--quiet", "--hard", self.base)
+
+    def test_a_removed_rule_is_a_rules_change(self) -> None:
+        self._write_profile(["README.md"], exclude_paths=["x"])
+        base = self._commit()
+        self._write_profile(["README.md"])
+        head = self._commit()
+        code, lines = pm.fork_check(self.repo, base, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 1, lines)
+        self.assertTrue(any(line.startswith("PROFILE_RULES_CHANGED") and "exclude_paths" in line for line in lines))
+
+    def test_a_head_that_lags_the_base_shows_only_its_own_changes(self) -> None:
+        # The default branch admits a path after the pull request branched. Measured against the base's
+        # tip that looks like a removal by the pull request; measured from the merge base it is nothing.
+        _git(self.repo, "checkout", "--quiet", "-b", "topic", self.base)
+        (self.repo / "TOPIC.md").write_text("topic\n", encoding="utf-8")
+        self._write_profile(["README.md", "TOPIC.md"])
+        head = self._commit()
+        _git(self.repo, "checkout", "--quiet", "main")
+        (self.repo / "LATER.md").write_text("later\n", encoding="utf-8")
+        self._write_profile(["LATER.md", "README.md"], exclude_paths=["x"])
+        tip = self._commit()
+        code, lines = pm.fork_check(self.repo, tip, head, audit_tool=self._stub_audit(0))
+        self.assertEqual(code, 0, lines)
+        self.assertIn(f"merge base {self.base}", lines)
+        self.assertIn("profile: 1 path(s) added, 0 removed", lines)
+        self.assertIn("  added TOPIC.md", lines)
+        self.assertEqual(self._policy_seen(lines)["include_paths"], ["README.md", "TOPIC.md"])
+
+    def test_unrelated_histories_are_an_input_error(self) -> None:
+        _git(self.repo, "checkout", "--quiet", "--orphan", "island")
+        head = self._commit()
+        with self.assertRaisesRegex(pm.CheckError, "no common ancestor"):
+            pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
 
     def test_a_failing_publication_audit_fails_the_check(self) -> None:
         code, lines = pm.fork_check(self.repo, self.base, self.base, audit_tool=self._stub_audit(1))
@@ -432,8 +500,101 @@ class ForkCheckTest(unittest.TestCase):
         self.assertEqual(code, 0)
         (command,) = calls
         self.assertEqual(Path(command[1]), ROOT / "tools" / "publish_audit.py")
-        self.assertEqual(command[2:], ["--repo-root", str(self.repo), "--committed-tree", self.base,
-                                       "--public-scope", "--provenance-self-consistency"])
+        self.assertEqual(command[2:6], ["--repo-root", str(self.repo), "--committed-tree", self.base])
+        self.assertEqual(command[6], "--policy")
+        self.assertEqual(command[8:], ["--public-scope", "--provenance-self-consistency"])
+
+
+class ForkCheckRealAuditTest(unittest.TestCase):
+    """The fork check with the real publication audit, in the layout hosted CI gives it.
+
+    Every test above stubs the audit, which is how both defects below went unseen. Here the candidate is
+    this checkout's own committed tree and the trusted tools are this checkout's. A scratch repository
+    borrows the objects, so nothing is checked out and nothing here is written to.
+
+    * An admission inside the pull request passes. Failing-before: the audit read the profile of the
+      checkout it ran in, the default branch's, and refused the admitted path (``POLICY_SOURCE_MISMATCH``).
+    * One ``.gitattributes`` line does not hide a file. Failing-before: the audit read a ``git archive``
+      of the candidate, which leaves out a path marked ``export-ignore``.
+
+    Each case runs the whole audit once, over every tracked file.
+    """
+
+    ADMITTED = "tools/provenance_mode.py"
+    repo: Path
+    base: str
+    head_tree: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            head = _git(ROOT, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+            objects = Path(_git(ROOT, "rev-parse", "--path-format=absolute", "--git-path", "objects"))
+        except subprocess.CalledProcessError as error:
+            raise unittest.SkipTest("needs this checkout's Git objects") from error
+        scratch = tempfile.TemporaryDirectory(prefix="nk-fork-real-")
+        cls.addClassCleanup(scratch.cleanup)
+        cls.repo = Path(scratch.name) / "fork"
+        cls.repo.mkdir()
+        _git(cls.repo, "init", "--quiet", "--initial-branch=main")
+        alternates = cls.repo / ".git" / "objects" / "info" / "alternates"
+        alternates.write_text(objects.as_posix() + "\n", encoding="utf-8")
+        cls.head_tree = _git(cls.repo, "rev-parse", f"{head}^{{tree}}")
+        profile = json.loads(_git(cls.repo, "cat-file", "blob", f"{cls.head_tree}:{pm.POLICY}"))
+        assert cls.ADMITTED in profile["include_paths"]
+        profile["include_paths"] = [path for path in profile["include_paths"] if path != cls.ADMITTED]
+        base_profile = json.dumps(profile, indent=2) + "\n"
+        # The base: the default branch before the admission. Only its profile is read from it.
+        cls.base = cls._commit_tree(cls._tree_with({pm.POLICY: base_profile.encode("utf-8")}))
+        # The hosted layout: the checkout the job runs in is the default branch, so the profile on disk
+        # is the base's, without the admitted path.
+        on_disk = cls.repo / pm.POLICY
+        on_disk.parent.mkdir(parents=True)
+        on_disk.write_text(base_profile, encoding="utf-8")
+
+    @classmethod
+    def _tree_with(cls, files: dict[str, bytes]) -> str:
+        """This checkout's committed tree with ``files`` written over it, as a tree object."""
+        index = cls.repo / ".git" / "probe-index"
+        index.unlink(missing_ok=True)
+        env = os.environ | {"GIT_INDEX_FILE": str(index)}
+
+        def git(*args: str, data: bytes | None = None) -> str:
+            return subprocess.run(["git", "-C", str(cls.repo), *args], check=True, capture_output=True,
+                                  input=data, env=env).stdout.decode("utf-8").strip()
+
+        git("read-tree", cls.head_tree)
+        for path, data in files.items():
+            blob = git("hash-object", "-w", "--stdin", data=data)
+            git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
+        return git("write-tree")
+
+    @classmethod
+    def _commit_tree(cls, tree: str, parent: str | None = None) -> str:
+        env = os.environ | {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+        parents = ["-p", parent] if parent else []
+        return subprocess.run(["git", "-C", str(cls.repo), "commit-tree", tree, *parents, "-m", "probe"],
+                              check=True, capture_output=True, text=True, env=env).stdout.strip()
+
+    def test_an_admission_inside_the_pull_request_passes(self) -> None:
+        candidate = self._commit_tree(self.head_tree, self.base)
+        code, lines = pm.fork_check(self.repo, self.base, candidate)
+        self.assertEqual(code, 0, "\n".join(lines))
+        self.assertIn("profile: 1 path(s) added, 0 removed", lines)
+        self.assertIn(f"  added {self.ADMITTED}", lines)
+        self.assertEqual(lines[-1], f"{pm.FORK_CONTEXT}: PASS")
+
+    def test_an_export_ignore_line_does_not_hide_a_forbidden_file(self) -> None:
+        attributes = _git(self.repo, "cat-file", "blob", f"{self.head_tree}:.gitattributes")
+        tree = self._tree_with({
+            "EBOOT.PBP": b"\x00PBP\x00\x00\x01\x00" + bytes(64),
+            ".gitattributes": (attributes + "\nEBOOT.PBP export-ignore\n").encode("utf-8"),
+        })
+        code, lines = pm.fork_check(self.repo, self.base, self._commit_tree(tree, self.base))
+        self.assertEqual(code, 1, "\n".join(lines))
+        self.assertTrue(any("MAGIC: EBOOT.PBP" in line for line in lines), "\n".join(lines[-20:]))
+        self.assertEqual(lines[-1], f"{pm.FORK_CONTEXT}: FAIL")
 
 
 if __name__ == "__main__":

@@ -2694,5 +2694,108 @@ class ExportPolicyDigestTests(unittest.TestCase):
         self.assertEqual(self._codes(dict(self.control, excluded_globs=[1, "a"])), ["POLICY_EXPORT_STALE"])
 
 
+class CommittedTreeMaterializationTests(unittest.TestCase):
+    """``--committed-tree`` audits the tree's own objects, so no attribute of that tree can hide a file.
+
+    Failing-before: the tree was materialized with ``git archive``, which leaves out a path marked
+    ``export-ignore`` and rewrites one marked ``export-subst``. One ``.gitattributes`` line in the commit
+    under audit removed a file from the audit.
+    """
+
+    PBP = b"\x00PBP\x00\x00\x01\x00" + bytes(32)
+
+    def _repo(self, tmp: str) -> Path:
+        repo = Path(tmp).resolve()
+        (repo / "sub").mkdir()
+        (repo / "EBOOT.PBP").write_bytes(self.PBP)
+        (repo / "sub" / "stamp.txt").write_bytes(b"$Format:%H$\r\n")
+        (repo / "run.sh").write_bytes(b"#!/bin/sh\n")
+        (repo / ".gitattributes").write_bytes(
+            b"EBOOT.PBP export-ignore\nsub/stamp.txt export-subst -text\nsub export-ignore\n")
+        run_git(["init", "-q"], cwd=repo, check=True, capture_output=True)
+        run_git(["add", "."], cwd=repo, check=True, capture_output=True)
+        run_git(["update-index", "--chmod=+x", "run.sh"], cwd=repo, check=True, capture_output=True)
+        run_git(["commit", "-q", "-m", "init"], cwd=repo, check=True, capture_output=True)
+        return repo
+
+    def _commit_index(self, repo: Path, *cacheinfo: str) -> str:
+        """Commit the current index plus ``mode,blob,path`` entries no checkout could hold, and return it."""
+        for item in cacheinfo:
+            run_git(["update-index", "--add", "--cacheinfo", item], cwd=repo, check=True, capture_output=True)
+        tree = run_git(["write-tree"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+        return run_git(["commit-tree", tree, "-p", "HEAD", "-m", "probe"], cwd=repo, check=True,
+                       capture_output=True, text=True).stdout.strip()
+
+    def test_every_file_of_the_tree_is_written_with_its_exact_bytes(self) -> None:
+        import shutil  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            listed = run_git(["ls-tree", "-r", "--name-only", "HEAD"], cwd=repo, check=True, capture_output=True,
+                             text=True).stdout.split()
+            materialized, tree = publish_audit._materialize_committed_tree("HEAD", repo)
+            try:
+                written = sorted(path.relative_to(materialized).as_posix()
+                                 for path in materialized.rglob("*") if path.is_file())
+                self.assertEqual(written, sorted(listed))
+                self.assertEqual((materialized / "EBOOT.PBP").read_bytes(), self.PBP)
+                self.assertEqual((materialized / "sub" / "stamp.txt").read_bytes(), b"$Format:%H$\r\n")
+                self.assertEqual(tree, run_git(["rev-parse", "HEAD^{tree}"], cwd=repo, check=True,
+                                               capture_output=True, text=True).stdout.strip())
+                modes = {entry.path: entry.mode for entry in publish_audit._get_filesystem_entries(materialized)}
+                if os.name != "nt":
+                    self.assertEqual(modes["run.sh"], "100755")
+                self.assertEqual(modes["EBOOT.PBP"], "100644")
+            finally:
+                shutil.rmtree(materialized, ignore_errors=True)
+
+    def test_the_command_line_audit_finds_a_file_the_attributes_hide(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            result = subprocess.run(
+                [sys.executable, str(Path(publish_audit.__file__)), "--repo-root", str(repo),
+                 "--committed-tree", "HEAD", "--public-scope"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("MAGIC: EBOOT.PBP: PSP PBP", result.stdout + result.stderr)
+
+    def test_a_symlink_or_submodule_entry_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            blob = run_git(["hash-object", "-w", "run.sh"], cwd=repo, check=True, capture_output=True,
+                           text=True).stdout.strip()
+            head = run_git(["rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+            for item, word in ((f"120000,{blob},link", "mode 120000"), (f"160000,{head},module", "mode 160000")):
+                with self.subTest(entry=item):
+                    commit = self._commit_index(repo, item)
+                    with self.assertRaisesRegex(RuntimeError, f"not a regular file: .*{word}"):
+                        publish_audit._materialize_committed_tree(commit, repo)
+                    run_git(["read-tree", "HEAD"], cwd=repo, check=True, capture_output=True)
+
+    def test_paths_that_differ_only_in_case_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            blob = run_git(["hash-object", "-w", "run.sh"], cwd=repo, check=True, capture_output=True,
+                           text=True).stdout.strip()
+            commit = self._commit_index(repo, f"100644,{blob},eboot.pbp")
+            with self.assertRaisesRegex(RuntimeError, "differ only in letter case: EBOOT.PBP and eboot.pbp"):
+                publish_audit._materialize_committed_tree(commit, repo)
+
+    def test_a_refused_tree_fails_the_command_line_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(tmp)
+            blob = run_git(["hash-object", "-w", "run.sh"], cwd=repo, check=True, capture_output=True,
+                           text=True).stdout.strip()
+            commit = self._commit_index(repo, f"120000,{blob},link")
+            result = subprocess.run(
+                [sys.executable, str(Path(publish_audit.__file__)), "--repo-root", str(repo),
+                 "--committed-tree", commit, "--public-scope"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("cannot materialize committed tree", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
