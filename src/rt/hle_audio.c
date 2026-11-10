@@ -191,7 +191,7 @@ static void audio_vq_drain(uint32_t slot) {
  * a pull and nothing more, so each late wake was a dropout.
  *
  * So the queue holds one device pull and one display period, P + W frames, where the guest's view
- * of it is two periods: P is the largest block the device was seen to take at once
+ * of it is two periods: P is the block the device was seen to take at once
  * (sr_audio_host_pull_frames) and W one VBLANK period, the longest the scheduler ordinarily runs
  * without reaching a boundary, which is how late a wait can end (#67). That covers the blocking
  * output as it waits now: for as long as the frames it sees above two periods take to play. Say

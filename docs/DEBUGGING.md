@@ -1568,8 +1568,9 @@ silence ahead of its next push; when that push is a counted dropout, `starved_ms
 silence. The start-up line
 `audio: the host device takes N frames at R Hz per pull (T ms, M mixer frames)` gives SDL's chunk
 size at the device's rate and the same in 44.1 kHz mixer frames; the hold uses the mixer-frame
-figure, or the larger pull the device was measured to take (the largest burst seen since the
-device last changed, plus the frames a rate-converting stream keeps back). `queued=` in
+figure, or the larger pull the device was measured to take: the widest single pull since the
+device last changed, plus the frames a rate-converting stream keeps back. Pulls the device takes
+together in a burst change the figure only once such a burst has found a playing channel short. `queued=` in
 `AUDIOSTAT_HOST` is the
 mixer's whole queue, the hold included, and so are `q_min_ms` and `q_max_ms` in `PERF_AUDIO`,
 which leave out only silence queued for the push that reports them. A queue whose stream can
