@@ -242,6 +242,10 @@ typedef struct {
        OS said it: GetLastError() after CreateProcessW on Win32, errno on POSIX.
        0 when the spawn succeeded or failed before the OS was asked. */
     int spawn_error;
+    /* Set by nk_platform_spawn_tool on Android, where a tool program is an ordinary forked
+       child and a title is another app process: the process calls below take this handle
+       down the fork/exec route instead of the title route. False everywhere else. */
+    bool tool_child;
 } NkProcessHandle;
 
 /* What the OS error a refused process start carries says about the refusal.
@@ -308,8 +312,48 @@ bool nk_platform_spawn_process_at_priority(
 
 /* The priority a running child has now, as NK_PROCESS_PRIORITY_LOW when it runs below
  * normal (any lower class or nice value counts) and NORMAL otherwise. False when the OS
- * cannot say, or where processes are not spawned (Android). */
+ * cannot say, or for an Android title, which runs in another app process rather than as a
+ * child (an Android tool child reads as on the desktop). */
 bool nk_platform_process_priority(const NkProcessHandle *process, NkProcessPriority *out);
+
+/* Starts one of the application's own tool programs (the package build's Python, compiler and
+ * make, an archive tool), with the same arguments and handle as nk_platform_spawn_process.
+ * On the desktop it is nk_platform_spawn_process. On Android an app may run only programs its
+ * APK ships, from the native library folder (it may not execute files it wrote: #360), and a
+ * title is started through TitleActivity instead; there it forks and execs executable_path only
+ * when nk_platform_path_is_tool_in_dir() accepts it for nk_platform_get_tool_dir(), and fails
+ * with spawn_error EACCES for any other program. */
+bool nk_platform_spawn_tool(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessHandle *out_process
+);
+
+/* nk_platform_spawn_tool, with the child started at `priority` as
+ * nk_platform_spawn_process_at_priority starts it. On Android the tool-folder rule applies
+ * first, at every priority, and a low tool child is niced before exec as on the desktop. */
+bool nk_platform_spawn_tool_at_priority(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessPriority priority,
+    NkProcessHandle *out_process
+);
+
+/* The folder the application's bundled tool programs are in: on Android the folder this code
+ * was loaded from, which is the APK's native library folder. False on hosts that bundle no
+ * tools there (the desktop finds its tools on PATH or in the prerequisites folder). */
+bool nk_platform_get_tool_dir(char *out_path, size_t max_len);
+
+/* True when path resolves, symbolic links followed, to a regular file directly inside dir (not
+ * in a folder below it): the rule nk_platform_spawn_tool applies on Android. Windows has no
+ * bundled tool folder, and its backend answers false. */
+bool nk_platform_path_is_tool_in_dir(const char *dir, const char *path);
 
 bool nk_platform_is_process_running(NkProcessHandle *process);
 int nk_platform_wait_process(NkProcessHandle *process, int timeout_ms);

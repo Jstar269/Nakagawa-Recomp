@@ -3101,6 +3101,9 @@ def _package_codegen(st):
             str(identity_path),
             "--public-safe",
         ]
+        package_target = getattr(args, "target", None)
+        if package_target is not None:
+            planner.extend(("--target", package_target))
         if module_dir is not None:
             planner.extend(("--module-dir", str(module_dir)))
         if cached_header is not None:
@@ -6126,6 +6129,10 @@ def main() -> int:
                               "jobs sized to the free memory and the CPUs, at most 8; fastest: "
                               "a job for every logical CPU the free memory allows. "
                               f"{_PACKAGE_JOBS_ENV} overrides the job count")
+    p_build.add_argument("--target", choices=("host", "android"), default=None,
+                         help="system the package runs on: host, or android for the "
+                              "shared library the Android app loads (default: android "
+                              "when this runs on Android, else host)")
     p_build.set_defaults(func=cmd_build_package)
 
     p_bringup = subparsers.add_parser(

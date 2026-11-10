@@ -508,8 +508,11 @@ static void copy_self_executable(const char *destination) {
 #endif
 }
 
-static void assert_python_probe_case(const char *case_name, const char *stub_mode,
-                                     bool expected_found) {
+/* A stub answering the version probe as stub_mode says: on PATH, or on Android
+ * the APK's Python in the native library folder (the test's own folder under
+ * adb shell). on_path puts it on PATH on Android too, where it must be ignored. */
+static void assert_python_probe_case_at(const char *case_name, const char *stub_mode,
+                                        bool on_path, bool expected_found) {
     char directory[NATIVE_TEST_PATH_MAX];
     char candidate[NATIVE_TEST_PATH_MAX];
     char resolved_candidate[NATIVE_TEST_PATH_MAX];
@@ -522,8 +525,17 @@ static void assert_python_probe_case(const char *case_name, const char *stub_mod
                            native_test_get_root(), nk_platform_path_separator(), case_name);
     assert(written > 0 && (size_t)written < sizeof(directory));
     assert(nk_platform_mkdir_p(directory));
+#if defined(__ANDROID__)
+    char tool_dir[NATIVE_TEST_PATH_MAX];
+    assert(nk_platform_get_tool_dir(tool_dir, sizeof(tool_dir)));
+    written = on_path
+        ? snprintf(candidate, sizeof(candidate), "%s/%s", directory, candidate_name)
+        : snprintf(candidate, sizeof(candidate), "%s/libnk_python.so", tool_dir);
+#else
+    (void)on_path;
     written = snprintf(candidate, sizeof(candidate), "%s%c%s",
                        directory, nk_platform_path_separator(), candidate_name);
+#endif
     assert(written > 0 && (size_t)written < sizeof(candidate));
     copy_self_executable(candidate);
 
@@ -545,6 +557,15 @@ static void assert_python_probe_case(const char *case_name, const char *stub_mod
     } else {
         assert(found_path[0] == '\0');
     }
+#if defined(__ANDROID__)
+    /* The tool folder is the runner's bin folder: leave nothing behind in it. */
+    assert(nk_remove_utf8(candidate) == 0);
+#endif
+}
+
+static void assert_python_probe_case(const char *case_name, const char *stub_mode,
+                                     bool expected_found) {
+    assert_python_probe_case_at(case_name, stub_mode, false, expected_found);
 }
 
 static void test_python_candidate_validation(void) {
@@ -556,9 +577,20 @@ static void test_python_candidate_validation(void) {
 
     assert_python_probe_case("python-probe-store-stub", "store-stub", false);
     assert_python_probe_case("python-probe-wrong-version", "wrong-version", false);
+#if defined(__ANDROID__)
+    /* The app's own Python is the pinned 3.15, as in a release bundle: a 3.14
+     * in the tool folder is not it. */
+    assert_python_probe_case("python-probe-cpython-314", "cpython-314", false);
+#else
     assert_python_probe_case("python-probe-cpython-314", "cpython-314", true);
+#endif
     assert_python_probe_case("python-probe-cpython-315", "cpython-315", true);
     assert_python_probe_case("python-probe-timeout", "timeout", false);
+#if defined(__ANDROID__)
+    /* A runnable 3.15 on PATH is outside the native library folder: Android
+     * would refuse to start it, so the search never offers it. */
+    assert_python_probe_case_at("python-probe-path-ignored", "cpython-315", true, false);
+#endif
 
     restore_env_value("PATH", saved_path);
     restore_env_value("PYTHON", saved_python);
@@ -611,8 +643,8 @@ static void test_clean_exit_without_completion_is_a_failure(void) {
     package_builder_init_session(&session, "TEST80003", "Synthetic Exit Fixture");
     session.is_building = true;
     session.start_time_ms = 0;
-    bool spawned = nk_platform_spawn_process(s_self_executable, child_argv, NULL, NULL,
-                                             NULL, &session.process);
+    bool spawned = nk_platform_spawn_tool(s_self_executable, child_argv, NULL, NULL,
+                                          NULL, &session.process);
     assert(spawned);
 
     uint64_t deadline = route_now_ms() + 30000u;
@@ -725,6 +757,14 @@ static void test_toolchain_preflight(void) {
 #if defined(_WIN32) || defined(_WIN64)
     assert(strstr(msg, "build tools download prompt") != NULL);
     assert(strstr(msg, "mingw-w64-ucrt-x86_64-gcc") != NULL);
+#elif defined(__ANDROID__)
+    /* No download exists off Windows (#306), and Android has no system package for a
+       compiler (#360): the card says the app ships none and gives no desktop advice. */
+    assert(strstr(msg, "build tools download prompt") == NULL);
+    assert(strstr(msg, "MSYS2") == NULL);
+    assert(strstr(msg, "build-essential") == NULL);
+    assert(strstr(msg, "ships no compiler") != NULL);
+    assert(strstr(msg, "downloads build tools only on Windows") != NULL);
 #else
     /* No download exists off Windows (#306): the card points at the system's
        packages and never at a consent card or an MSYS2 package. */
@@ -1228,6 +1268,27 @@ static void test_bundled_prerequisites(void) {
     assert(nk_platform_absolute_path(fx.prereqs, expected, sizeof(expected)));
     assert(strcmp(root, expected) == 0);
 
+#if defined(__ANDROID__)
+    {
+        /* Android runs only the app's own tools (its native library folder), so a
+           release zip's prereqs/ tree never applies there, complete or not. The
+           record check itself is the same on every host. */
+        assert(package_builder_resolve_bundled_tools(fx.install_root, fx.cli_path, &tools) ==
+               PACKAGE_BUNDLE_ABSENT);
+        assert(tools.root[0] == '\0' && tools.error[0] == '\0' && tools.python_path[0] == '\0');
+        PackagePrerequisiteList pinned_android;
+        char android_error[256];
+        assert(package_builder_load_prerequisites(fx.cli_path, &pinned_android, android_error,
+                                                  sizeof(android_error)));
+        assert(package_builder_check_bundled_prerequisites(expected, &pinned_android, android_error,
+                                                           sizeof(android_error)) ==
+               PACKAGE_BUNDLE_VALID);
+        printf("[PACKAGE_BUILDER_BUNDLE] Android: the release prereqs/ tree is not used; "
+               "its record still checks\n");
+        goto restore;
+    }
+#endif
+
     /* No prereqs/ folder: the per-user download flow stays in charge. */
     char other_install[NATIVE_TEST_PATH_MAX];
     bundle_test_path(other_install, sizeof(other_install), fx.root, "source/tools");
@@ -1318,6 +1379,9 @@ static void test_bundled_prerequisites(void) {
     assert_bundle_refused(&fx, "python-probe", "CPython 3.15 is missing or did not run");
     native_test_set_env("NAKAGAWA_TEST_PYTHON_STUB_MODE", "cpython-315");
 
+#if defined(__ANDROID__)
+restore:
+#endif
     assert(native_test_remove_tree(fx.root));
     restore_env_value("PATH", saved_path);
     restore_env_value("PYTHON", saved_python);

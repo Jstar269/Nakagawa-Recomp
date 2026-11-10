@@ -227,7 +227,8 @@ const char *package_builder_get_output_line(
 );
 
 /* Locate runnable CPython 3.15.x, or 3.14.x when no 3.15 runs, from PYTHON, UCRT64, or
- * PATH. Candidates must pass a bounded version probe before their paths are returned. */
+ * PATH. Candidates must pass a bounded version probe before their paths are returned.
+ * On Android the only candidate is the APK's libnk_python.so in its native library folder. */
 bool package_builder_find_python(char *out_path, size_t out_size);
 /* Prefer the installed pinned prerequisite under data_root, then use host search. */
 bool package_builder_find_python_in_root(const char *data_root,
@@ -434,7 +435,8 @@ bool package_builder_toolchain_missing(
     char *out_message, size_t out_message_size
 );
 
-/* Start the package build as a child process using nk_platform_spawn_process. */
+/* Start the package build as a child process with nk_platform_spawn_tool (on
+ * Android only a tool in the app's native library folder can start). */
 NkResult package_builder_start(
     PackageBuildSession *session,
     const char *python_path,

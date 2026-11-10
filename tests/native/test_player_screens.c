@@ -48,6 +48,8 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
                               "ms of delay."},
     {"Clean pitched sound", "Off",
      "Resamples pitched effects without aliasing. The game receives changed samples."},
+    {"Wider culling", "Off", "Ace only, with Widescreen, in games that have a culling build. The game's "
+                             "memory changes."},
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
 };
