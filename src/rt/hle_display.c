@@ -12,6 +12,7 @@
 
 #include "hle_internal.h"
 #include "replay_checkpoint.h" /* SR_REPLAY_CHECKPOINTS (#2147) */
+#include <time.h>
 
 #ifdef _WIN32
 uint64_t sr_host_monotonic_ms(void) { return GetTickCount64(); }
@@ -481,6 +482,68 @@ static void fbcap_parse_windows_once(void) {
         fprintf(stderr, "FBSNAP_WINDOWS: could not parse '%s' -- no windows active\n", w);
 }
 
+/* Screenshot key (fbcap.h): a pending request arms this present as a PNG under
+ * <user data>/screenshots/, named by sr_screenshot_name() from the disc ID the launcher exports
+ * and the local time. It arms only a frame a presenter will be handed, and only while no developer
+ * capture owns the slot; a present nobody serviced leaves the request pending for the next one. */
+static char s_shot_path[1024];
+
+static int shot_file_exists(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static void screenshot_arm_for_present(const DisplayFrameState *fb, int framebuf_set) {
+    s_shot_path[0] = '\0';
+    if (!sr_screenshot_pending()) return;
+    if (!gui_on() || !framebuf_set || !display_host_span_valid(fb)) return;
+    char root[768];
+    flash0_user_data_root(root, sizeof root);
+    if (!root[0]) {
+        sr_screenshot_clear();
+        fprintf(stderr, "SCREENSHOT: not saved (no user data folder)\n");
+        return;
+    }
+    time_t now = time(NULL);
+    const struct tm *lt = localtime(&now);
+    if (!lt) {
+        sr_screenshot_clear();
+        fprintf(stderr, "SCREENSHOT: not saved (no local time)\n");
+        return;
+    }
+    const struct tm t = *lt;
+    for (int seq = 1; seq <= 99 && !s_shot_path[0]; seq++) {
+        char name[96];
+        if (!sr_screenshot_name(getenv("SR_DISC_ID"), t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+                                t.tm_hour, t.tm_min, t.tm_sec, seq, name, sizeof name))
+            break;
+        int n = snprintf(s_shot_path, sizeof s_shot_path, "%s/screenshots/%s", root, name);
+        if (n < 0 || (size_t)n >= sizeof s_shot_path || shot_file_exists(s_shot_path))
+            s_shot_path[0] = '\0';
+    }
+    if (!s_shot_path[0]) {
+        sr_screenshot_clear();
+        fprintf(stderr, "SCREENSHOT: not saved (no free file name)\n");
+        return;
+    }
+    if (!sr_capture_arm(s_shot_path)) s_shot_path[0] = '\0';   /* slot busy: the next present */
+}
+
+/* After the present: report and take the request once a presenter published or failed it. */
+static void screenshot_after_present(void) {
+    if (!s_shot_path[0]) return;
+    int result = sr_capture_result();
+    if (result != 0) {
+        sr_screenshot_clear();
+        const char *base = strrchr(s_shot_path, '/');
+        fprintf(stderr, "SCREENSHOT: %s %s\n", result > 0 ? "saved" : "failed",
+                base ? base + 1 : s_shot_path);
+    }
+    s_shot_path[0] = '\0';
+}
+
 /* Decide per present whether the NEXT present must be recorded, and arm it before the
  * present call. Host-side gate only: no guest work is skipped, no timing is changed,
  * and the frames that do get captured are byte-identical to an ungated run. */
@@ -495,7 +558,16 @@ static const char *fbcap_arm_for_present(uint32_t vcount, const DisplayFrameStat
     fbcap_parse_windows_once();
     int fbsnap_every = sr_fbcap_snap_every(getenv("SR_FBSNAP"), s_fbsnap_win_n > 0);
     int owner = sr_fbcap_owner(sr_fbcap_env_on("SR_FBDUMP"), fbsnap_every > 0);
-    if (owner == SR_FBCAP_NONE) return NULL;
+    if (owner == SR_FBCAP_NONE) {
+        screenshot_arm_for_present(fb, framebuf_set);
+        return NULL;
+    }
+    if (sr_screenshot_pending()) {
+        /* A developer capture owns the slot for the whole run: say so instead of holding the
+         * request until a present that never comes. */
+        sr_screenshot_clear();
+        fprintf(stderr, "SCREENSHOT: not saved (SR_FBDUMP or SR_FBSNAP owns the capture slot)\n");
+    }
     /* Arm only a frame display_present_active() will hand to a presenter -- the same gate
      * vramdump_try_present() applies. With no presenter (no --gui, or none initialised)
      * there is nothing to capture, so neither the capture nor its legacy VRAM-side
@@ -617,6 +689,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
         vramdump_try_present(s_vcount, &s_display_active);
         psmf_av_video_presented(s_display_active.addr, s_display_active.stride, s_display_active.fmt);
         display_present_active();
+        screenshot_after_present();
     } else {
         s_setfb.latched++;
         s_display_latched = requested;
@@ -736,6 +809,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
                 sr_compat_report();
                 (void)sr_videorec_finish_status("SR_FBDUMP found no trustworthy framebuffer", 1);
                 sr_perf_shutdown();
+                sr_profile_dump_final();
                 SR_VERIFY_REPORT_NOW();
                 _Exit(1);
             }
@@ -746,6 +820,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
                 sr_compat_report();
                 (void)sr_videorec_finish_status("SR_FBDUMP capture exit", capture_exit_status);
                 sr_perf_shutdown();
+                sr_profile_dump_final();
                 SR_VERIFY_REPORT_NOW();
                 _Exit(capture_exit_status);
             }
@@ -946,6 +1021,7 @@ void sr_vblank_tick(void) {
         vramdump_try_present(s_vcount, &s_display_active);
         psmf_av_video_presented(s_display_active.addr, s_display_active.stride, s_display_active.fmt);
         display_present_active();
+        screenshot_after_present();
     }
     if (g_ace_on) gui_ace_vblank(s_vcount);
     /* SR_VIDEOREC_DIR (videorec.h): this VBLANK's video frame is the newest picture presented
@@ -1043,6 +1119,7 @@ void sr_vblank_tick(void) {
               sr_compat_report();
               (void)sr_videorec_finish_status("SR_WATCHDOG_EXIT", 1);
               sr_perf_shutdown();
+              sr_profile_dump_final();
               SR_VERIFY_REPORT_NOW();
               _Exit(1);
           }
@@ -1122,6 +1199,7 @@ void sr_vblank_tick(void) {
             psmf_av_final("exit_at_vblank");
             sr_compat_report();
             sr_perf_shutdown();
+            sr_profile_dump_final();
             SR_VERIFY_REPORT_NOW();
             hle_state_sample_close();
             /* Ace Mode's exit stamp and report are an atexit hook too (a no-op when off). */

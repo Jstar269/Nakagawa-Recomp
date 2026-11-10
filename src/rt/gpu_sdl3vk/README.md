@@ -84,9 +84,11 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   the colour image in `GENERAL`. The other batches of the op keep the fixed-function pass, with
   a barrier at each switch, and the op takes no snapshot copy. The variant tests depth early,
   so an op whose destination-reading batch writes depth and may still kill a fragment in the
-  shader keeps the snapshot path (the alpha test, the transform-mode depth range when it is
-  narrower than 0–65535, or a stencil-fail KEEP). So does an op whose stencil state also
-  blends in fixed function, every op into a widescreen wing canvas (which has no RMW objects), and
+  shader keeps the snapshot path (the alpha test, the color test, the transform-mode depth range
+  when it is narrower than 0–65535, or a stencil-fail KEEP). So does an op whose stencil state
+  also blends in fixed function, an op whose destination-reading batch textures from its own
+  target (the destination copy is its texture), every op into a widescreen wing canvas (which has
+  no RMW objects), and
   every op while the host twin runs. The `submit-batch` and `gpu-timestamps` cells hold the
   snapshot path on every device, since they count and time snapshot copies. The interlock path is
   taken where the device has it; `SR_GPU_DST_READ` forces a path. On the snapshot path the
@@ -200,8 +202,21 @@ UNDEFINED-layout image and published a PPM under a `.png` name. It is gone. In i
   `src/rt/fbcap_policy.{h,c}`; the hle.c integration is `fbcap_arm_for_present`.
 - `sdl3vk_capture_selftest()` (standalone binary via the Makefile `gpu-capture-selftest` target)
   exercises policy, CPU- and GPU-source captures, cancel, scale, and byte-checks the published
-  PPMs; under `SR_VULKAN_VALIDATION=1` it also asserts zero validation-layer errors. Exit 77
-  means SKIP (Vulkan unavailable). `fbcap-selftest` covers the presenter-neutral service itself
+  PPMs; under `SR_VULKAN_VALIDATION=1` it also asserts zero validation-layer errors. It also
+  checks present pacing (below) against a fake display that holds every image. Exit 77
+  means SKIP (Vulkan unavailable).
+- Present pacing: while the scheduler paces the guest to real time (the default), a game-frame
+  present never waits for the presentation engine (`sdl3vk_set_present_nowait`, set by
+  `gui_present`). The present polls its frame slot's fence and acquires with timeout 0; when a
+  FIFO (VSync) display still holds every image, or the frame slot's earlier submission is still
+  pending (under MAILBOX, a GPU frames behind), it returns `SDL3VK_PRESENT_DISPLAY_BUSY`. The
+  window keeps the frame it has, and the guest's VBLANK clock goes on. These frames count as
+  `vblanks.present_busy` in the perf JSON (apart from the output cap's `present_skips`), and
+  shutdown prints how many there were, by cause. A frame not shown is not recorded either, so a
+  VSync-on video recording repeats the previous picture at that VBLANK. Two kinds of present
+  still wait: a frame an armed file or evidence capture is waiting for (the picture probe is not
+  one), and every present in a deterministic-clock or turbo run (`SR_DETERMINISTIC_CLOCK=1`,
+  `SR_NOVBPACE=1`), which has no real-time clock to protect and keeps every frame. `fbcap-selftest` covers the presenter-neutral service itself
   without a GPU.
 
 ## Widescreen Fill wings (#1881)

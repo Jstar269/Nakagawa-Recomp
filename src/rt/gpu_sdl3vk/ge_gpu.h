@@ -47,7 +47,11 @@ void gegpu_flush(const char *reason);
  * GEGPU_PRESENT_TARGET_FAILED: a GPU-valid target exists, but preparing or presenting it failed,
  *   so its newest pixels may exist only in the GPU image. The caller must make guest VRAM current
  *   with gegpu_sync_guest_fb() before converting it, or decline the frame.
- * SHOWN and WINDOW_CLOSED keep the values sdl3vk_present_image_ex() returns for them. */
+ * GEGPU_PRESENT_DISPLAY_BUSY: the display still holds every image and the present did not wait
+ *   (SDL3VK_PRESENT_DISPLAY_BUSY); the frame is not shown and nothing failed.
+ * SHOWN, WINDOW_CLOSED and DISPLAY_BUSY keep the values sdl3vk_present_image_ex() returns for
+ * them. */
+#define GEGPU_PRESENT_DISPLAY_BUSY 2
 #define GEGPU_PRESENT_SHOWN 1
 #define GEGPU_PRESENT_WINDOW_CLOSED 0
 #define GEGPU_PRESENT_NOT_RESIDENT (-1)
@@ -184,7 +188,9 @@ typedef struct GeGpuCpuProfileStats {
     unsigned long long append_merges;
 } GeGpuCpuProfileStats;
 
-/* Why a primitive left the Vulkan batch model for ge.c's software rasterizer. */
+/* Why a primitive left the Vulkan batch model for ge.c's software rasterizer. psp.frag runs the
+ * color test; COLOR_TEST names only the color-test draws whose colour psp.frag computes in floating
+ * point (ge_gpu.c color_test_colour_inexact), which stay on ge.c. */
 enum {
     GEGPU_FALLBACK_STENCIL, GEGPU_FALLBACK_COLOR_TEST, GEGPU_FALLBACK_LOGIC_OP,
     GEGPU_FALLBACK_WRITE_MASK, GEGPU_FALLBACK_RAM_FB, GEGPU_FALLBACK_WIDE_STRIDE,

@@ -540,11 +540,13 @@ each device pixel's own position, and so does its uv-edge-clamp case (also at sc
 device pixels outside a screen-aligned strip's or sprite's first and last pixel centres must show
 that edge pixel's 1x sample, with linear and nearest filtering and with repeat and clamp wrapping,
 while a sheared strip stays unclamped.
-The dst-read cells (#2109: order, mask, alpha, mixed, depth, ztest and pins) run alone at render scales 1 and 4,
+The dst-read cells (#2109: order, mask, alpha, mixed, depth, ctest, feedback, ztest and pins) run alone at render scales 1 and 4,
 once forced to the snapshot destination-read path and once to the interlock path (`--dst-read`). On the
 interlock path, overlapping shader-blend primitives must equal the software GE in colour with no snapshot copy,
-and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-read-depth`, an alpha-tested op
-that writes depth, must keep the snapshot path on both paths and equal the software GE in colour and depth. On
+and the depth-tested pair of `dst-read-ztest` must equal it in depth too. `dst-read-depth` and `dst-read-ctest`, an
+alpha-tested and a colour-tested op that write depth, must keep the snapshot path on both paths and equal the
+software GE in colour and depth. `dst-read-feedback`, a stencil state that textures from its own target, must
+keep it too: the destination copy is the texture its second sprite samples. On
 the snapshot path, the known difference must stay inside each overlap, and the device must hold no interlock
 state. A device that refuses the interlock prints one SKIP line for each interlock leg. The lavapipe step prints
 the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
@@ -552,8 +554,9 @@ pipeline cache (#2149) runs next, as three processes over one empty data root: c
 mutant targets follow, and each broken variant must fail its case with its own message:
 `gpu-coherence-selftest-snapbar-mutants` breaks the destination-snapshot copy's barriers three ways
 (`SR_GPU_SNAPBAR_MUTANT`, the submit-batch case), `gpu-coherence-pcache-mutant` makes pipelines bypass the
-pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths five ways
-(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 run on the interlock path and are a SKIP on a device without it).
+pipeline cache (pipeline-cache-cold), and `gpu-dst-read-mutants` breaks the destination-read paths seven ways
+(`SR_GPU_DSTREAD_MUTANT`; mutants 1 to 3 and 5 to 7 run on the interlock path and are a SKIP on a device without it,
+the hosted lavapipe device included).
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on
 lavapipe, headless, under the validation layer with synchronisation validation of shader accesses,
 and an exit 77 skip fails it, including one for synchronisation validation that is not active.
@@ -1563,15 +1566,18 @@ push to `main`. Every other pull request's analysis stays on `ubuntu-26.04`.
 Every other run, a fork's pull request above all, gets the job's hosted image
 (`ubuntu-24.04` or `ubuntu-26.04`, whichever that job names when it is not on the pool). Two
 repository variables, which only the maintainer can set, gate it further:
-`NK_SELF_HOSTED_LINUX` must be `on` or `landing` and `NK_SELF_HOSTED_HEARTBEAT` must be a
-Unix time less than ten minutes old. `on` sends every trusted run above to the pool.
-`landing` sends only the trusted runs that land work: a push to `main`, a merge group, a
-desk batch branch (`batch/`) and a Ready pull request; for Trusted CodeQL, a push to `main`
+`NK_SELF_HOSTED_LINUX` must be `on`, `landing` or `batch`, and `NK_SELF_HOSTED_HEARTBEAT`
+must be a Unix time less than ten minutes old. `on` sends every trusted run above to the
+pool. `landing` sends only the trusted runs that land work: a push to `main`, a merge group,
+a desk batch branch (`batch/`) and a Ready pull request; for Trusted CodeQL, a push to `main`
 and a wake of a merge group or a batch. A Draft pull request's CI then stays hosted, so a
-small pool is kept for landings. Either value only narrows the trusted runs above, never
-widens them, and any other value is off. The pool's supervisor refreshes the heartbeat every
-two minutes while the pool is healthy, sets the switch to the mode it was started with (`on`
-or `landing`), and turns it `off` when it stops or the pool fails, so a sleeping PC or a
+small pool is kept for landings. `batch` is narrower still: a push to `main`, a merge group
+and a desk batch branch, so a Ready pull request's own CI stays hosted as well (the desk
+tests it again in its batch) and the pool runs only the batches; Trusted CodeQL takes the
+same targets as in `landing`. Each value only narrows the trusted runs above, never widens
+them, and any other value is off. The pool's supervisor refreshes the heartbeat every
+two minutes while the pool is healthy, sets the switch to the mode it was started with (`on`,
+`landing` or `batch`), and turns it `off` when it stops or the pool fails, so a sleeping PC or a
 dead pool sends trusted runs back to hosted runners within minutes instead of leaving them
 queued. Only `runs-on` changes: every step, check name, `CI required` and the Trusted CI
 verdict are the same on either runner.
@@ -1595,8 +1601,9 @@ keeps this repository's own runs where they belong. What stops a fork is:
   discarded, has no access to the PC's files, Docker or local network, and holds no
   secrets (its one-job registration comes from the GitHub API when it starts).
 
-`tools/test_ci_paths.py` (`SelfHostedRunnerRoutingTests`, `CodeqlRunnerRoutingTests`)
-fails if a fork or ordinary pull request could route to the pool, and
+`tools/test_ci_paths.py` (`SelfHostedRunnerRoutingTests`, `CodeqlRunnerRoutingTests`,
+`LandingOnlyPoolRoutingTests`, `BatchOnlyPoolRoutingTests`) fails if a fork or ordinary
+pull request could route to the pool, or a mode took more than it names, and
 `tools/test_public_ci_wiring.py` (`SelfHostedRunnerWiringTests`) fails if any workflow
 names the pool's labels directly or a job other than the listed ones reads
 `linux_runner` or CodeQL's `analyze_runner`.

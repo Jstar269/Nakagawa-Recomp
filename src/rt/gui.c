@@ -313,6 +313,31 @@ static int present_slot_due(void) {
 }
 
 #ifdef SR_SDL3VK
+/* Whether a game-frame present may return DISPLAY_BUSY instead of waiting for the display
+ * (sdl3vk_set_present_nowait). Only while the scheduler paces the guest to real time: a
+ * deterministic-clock or turbo run has no real-time clock to protect and keeps every frame. And
+ * never for a frame an armed file or evidence capture is waiting for (SR_FBDUMP, SR_FBSNAP, the
+ * capture tools): that frame waits and is served, as before. The picture probe is not such a
+ * capture; a probe on a frame the display could not take resolves as nothing attempted. */
+static int gui_frame_may_skip_busy_display(int paced, int capture_armed, int capture_is_probe) {
+    return paced && !(capture_armed && !capture_is_probe);
+}
+
+/* What gui_present does with gegpu_present's result. Only TRY_CPU reaches the CPU path, which
+ * converts guest VRAM: a frame the display was too busy to take is not shown at all, never
+ * redrawn from guest memory the GPU frame may not have reached. */
+enum { GUI_GPU_SHOWN, GUI_GPU_CLOSED, GUI_GPU_NOT_SHOWN, GUI_GPU_TRY_CPU };
+static int gui_gpu_result_action(int res) {
+    switch (res) {
+    case GEGPU_PRESENT_SHOWN:        return GUI_GPU_SHOWN;
+    case GEGPU_PRESENT_WINDOW_CLOSED: return GUI_GPU_CLOSED;
+    case GEGPU_PRESENT_DISPLAY_BUSY: return GUI_GPU_NOT_SHOWN;
+    default:                         return GUI_GPU_TRY_CPU;   /* NOT_RESIDENT, TARGET_FAILED */
+    }
+}
+#endif
+
+#ifdef SR_SDL3VK
 /* The window's keys and typed text go to the in-window keyboard while it is open. The text
  * input is claimed only then, so Escape opens the pause the rest of the time. */
 static void sr_gui_feed_keyboard(void) {
@@ -621,10 +646,23 @@ static void gui_wide_init(void) {
     }
     s_wide_on = 1;
     ace_confirm(ACE_FEATURE_WIDE);
+    ge_wide_set_cull(effective->cull);
+}
+
+static void gui_cull_sync(void) {
+    /* Confirmed only while no matrix was left alone; a full table is a partial run (contract 11.3.6). */
+    ace_set_cull_untracked(ge_wide_cull_untracked());
+    if (ge_wide_cull_untracked())
+        ace_feature_unavailable(ACE_FEATURE_CULL,
+                                "partial: the 4096-matrix table filled, later matrices were left alone");
+    else if (ge_wide_cull_calls())
+        ace_confirm(ACE_FEATURE_CULL);   /* the title's hook has run */
 }
 
 static void gui_wide_release(void) {
+    gui_cull_sync();
     if (s_wide_on) (void)ge_wide_set_wing(0);
+    ge_wide_set_cull(0);
     s_wide_on = 0;
 }
 
@@ -1171,6 +1209,7 @@ static void gui_wide_update(uint32_t fbaddr) {
     int w = 0, h = 0;
     if (!s_wide_on) return;
     if (sdl3vk_window_pixel_size(&w, &h)) (void)ge_wide_set_wing(ge_wide_wing_for(w, h));
+    gui_cull_sync();
     ge_wide_note_display(fbaddr);
 }
 
@@ -1392,6 +1431,14 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
          *    directly from its Vulkan image. GEGPU_PRESENT_SHOWN skips the CPU path;
          *    GEGPU_PRESENT_NOT_RESIDENT (CPU movie frames etc.) falls through to BGRA. */
         accepted = 0;
+        /* While the scheduler paces the guest to real time (the default), a game frame never
+         * waits for the display: a FIFO (VSync) swapchain that still holds every image returns
+         * DISPLAY_BUSY instead of holding back the guest's VBLANK clock (gui_frame_may_skip_busy_display). */
+        {
+            extern int sched_vbl_paced(void);
+            sdl3vk_set_present_nowait(gui_frame_may_skip_busy_display(sched_vbl_paced(), sr_capture_is_armed(),
+                                                         sr_capture_pending_is_probe()));
+        }
         /* While the on-screen keyboard is open the frame must pass through the host copy the
          * keyboard is drawn on, so the GPU fast path steps aside (the CPU path below). The
          * decision is taken once: osk_open also gates the guest-VRAM sync before that copy. */
@@ -1411,11 +1458,11 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
 #endif
         int res = osk_cpu ? GEGPU_PRESENT_NOT_RESIDENT : gegpu_present(fbaddr, fmt, stride);
         sync_sdl_input();
-        if (res == GEGPU_PRESENT_WINDOW_CLOSED) {
-            gui_quit_request();
-            goto pace;
-        }
-        if (res == GEGPU_PRESENT_SHOWN) {
+        const int gpu_action = gui_gpu_result_action(res);
+        if (gpu_action == GUI_GPU_CLOSED) gui_quit_request();
+        /* Not shown, not failed: the CPU path must not show it either. */
+        if (gpu_action == GUI_GPU_NOT_SHOWN && sr_perf_enabled) sr_perf_present_busy();
+        if (gpu_action == GUI_GPU_SHOWN) {
             /* The GPU fast path never reaches convert_fb, which is the only emitter of
              * the first_frame boot milestone. Without this, boot_gate.py can never pass
              * on the default renderer even while the GPU presents every frame. There is
@@ -1428,8 +1475,8 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
                 sr_gui_boot_event("BOOT_EVENT phase=first_frame source=gpu presented=1");
             }
             accepted = 1;
-            goto pace;
         }
+        if (gpu_action != GUI_GPU_TRY_CPU) goto pace;
 
         /* 2. CPU-rendered fallback: convert guest VRAM to BGRA and blit through SDL3/Vulkan. */
         if (osk_cpu) {
@@ -1490,6 +1537,7 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
         present_result = sdl3vk_present_rgba(s_px);
         sync_sdl_input();
         if (present_result == 0) gui_quit_request();
+        if (present_result == SDL3VK_PRESENT_DISPLAY_BUSY && sr_perf_enabled) sr_perf_present_busy();
         accepted = present_result == 1;
         goto pace;
     }
@@ -2376,6 +2424,22 @@ static void selftest_hold_frame(int result) {
     s_stub_held_result = result;
 }
 
+/* A paced present may skip a busy display, except for a frame an armed file or evidence capture
+ * waits for; an unpaced run always waits. A busy GPU present is not shown and never falls
+ * through to the CPU path, which would redraw it from guest VRAM. */
+static void selftest_display_busy_frames(void) {
+    assert(gui_frame_may_skip_busy_display(1, 0, 0) == 1);
+    assert(gui_frame_may_skip_busy_display(1, 1, 1) == 1);   /* the picture probe */
+    assert(gui_frame_may_skip_busy_display(1, 1, 0) == 0);   /* SR_FBDUMP, SR_FBSNAP, a capture tool */
+    assert(gui_frame_may_skip_busy_display(0, 0, 0) == 0);   /* deterministic clock or turbo */
+    assert(gui_frame_may_skip_busy_display(0, 1, 1) == 0);
+    assert(gui_gpu_result_action(GEGPU_PRESENT_DISPLAY_BUSY) == GUI_GPU_NOT_SHOWN);
+    assert(gui_gpu_result_action(GEGPU_PRESENT_SHOWN) == GUI_GPU_SHOWN);
+    assert(gui_gpu_result_action(GEGPU_PRESENT_WINDOW_CLOSED) == GUI_GPU_CLOSED);
+    assert(gui_gpu_result_action(GEGPU_PRESENT_NOT_RESIDENT) == GUI_GPU_TRY_CPU);
+    assert(gui_gpu_result_action(GEGPU_PRESENT_TARGET_FAILED) == GUI_GPU_TRY_CPU);
+}
+
 /* A press and release that the held present's event read records reach the game's sample in
  * the same VBLANK; the sample then consumes it, as on any other VBLANK. */
 static void selftest_held_present_passes_a_tap_to_the_game(void) {
@@ -2451,6 +2515,7 @@ int main(void) {
     selftest_burst_presents_once();
     selftest_explicit_cap_halves_scanout_flips();
 #ifdef SR_SDL3VK
+    selftest_display_busy_frames();
     selftest_held_present_passes_a_tap_to_the_game();
     selftest_held_present_window_closed_requests_quit();
 #endif

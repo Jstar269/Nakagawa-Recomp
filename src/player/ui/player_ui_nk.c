@@ -1021,6 +1021,21 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.ui_sounds = app->settings.ui_sounds;
     model.launcher_fullscreen = app->settings.launcher_fullscreen;
     model.nickname = app->settings.nickname;
+    model.build_speed = package_build_speed_name(app->settings.build_speed);
+    switch (app->settings.build_speed) {
+    case PACKAGE_BUILD_SPEED_BACKGROUND:
+        model.build_speed_sentence = "Up to two parts at a time at low priority, so a game you play "
+                                     "meanwhile stays smooth. Builds take longer.";
+        break;
+    case PACKAGE_BUILD_SPEED_FASTEST:
+        model.build_speed_sentence = "A part for every processor the free memory allows. "
+                                     "Other apps slow down until it ends.";
+        break;
+    default:
+        model.build_speed_sentence = "As many parts at a time as the free memory allows, up "
+                                     "to eight. Other apps may slow down.";
+        break;
+    }
     player_ui_fill_enhanced(player, app, &model);
     if (app->settings.interface_size_pct > 0) {
         snprintf(player->settings_interface_size, sizeof(player->settings_interface_size), "%d%%",
@@ -1593,6 +1608,7 @@ static PlayerUiAction player_ui_render_flow(PlayerUiNk *player, PlayerApp *app,
         }
         model.fraction = package_builder_compile_fraction(build);
         model.notice = package_builder_compile_notice(build);
+        model.speed_line = package_builder_speed_line(build);
         model.message = build->current_message;
         model.elapsed_ms = build->elapsed_ms;
         for (int i = first; i < count && model.line_count < 4u; ++i) {

@@ -36,6 +36,9 @@ download first ([details](#player-build-package-prerequisites)).
 build itself still calls the built-in Windows PowerShell 5.1 (`powershell.exe`) for one step,
 copying the build assets (`tools/copy_build_assets.ps1`, through `POWERSHELL` in the
 `Makefile`). That script supports 5.1, so you do not need to change or install anything for it.
+The Python tools that start PowerShell (`tools/stage_install.py`, `tools/psp_readiness.py` and the
+report bundle) use PowerShell 7 (`pwsh`) when it is on `PATH` and fall back to Windows PowerShell
+5.1 otherwise. Set `NK_POWERSHELL` to a full path to choose one yourself.
 
 ## System requirements
 
@@ -69,13 +72,21 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   more once unpacked.
 - **SSD.** Builds read and write thousands of small files, so a hard disk makes them much
   slower. Keep the player's data folder on an SSD if you can.
-- **Processor.** BUILD PACKAGE runs up to eight compile jobs at a time, one per logical
-  processor, as far as memory allows, and the build screen counts the parts as they finish.
-  When free memory, a single processor or `NK_PACKAGE_JOBS` limits it to one job, the build
-  screen says so and that the build will take longer. If the PC does not report its processor
-  count, the build runs one job and says nothing about processors. A first build takes several minutes. To
+- **Processor.** Settings > Build tools and cache > Build speed sets how much of the PC a
+  build takes. Balanced, the default, runs up to eight compile jobs at a time, one per logical
+  processor, as far as memory allows. Background runs at most two, with the whole build at low
+  priority, so a game you play meanwhile stays smooth and the build takes longer. Fastest runs
+  one per logical processor, as far as memory allows. No speed runs more jobs than the free
+  memory allows. The build screen names the speed, the job count and what limited it, and counts
+  the parts as they finish; the build log names them too. When free memory, a single processor
+  or `NK_PACKAGE_JOBS` limits it to one job, the build screen says so and that the build will
+  take longer. If Windows gives no memory reading, every speed runs two jobs (one on a PC with a
+  single processor). If the PC does not report its processor count, every speed runs one job
+  and the build screen says nothing about processors. A first build takes several minutes. To
   choose the job count yourself, set the `NK_PACKAGE_JOBS` environment variable to a number from
-  1 to 8 before starting the player.
+  1 to 8 before starting the player: it replaces the speed's job count (a Background build stays
+  at low priority), and the build log and screen say so. `nk_cli.py build-package` takes the
+  same speeds as `--build-speed`.
 - **Texture scaling (Ace Mode, development only).** It is reachable only through the `SR_TEX_SCALE` and
   `SR_SMART_2D` environment variables, has no setting in the player, and is not admitted as an Enhanced or Ace
   item yet, because it changes the frames the game can read back
@@ -98,6 +109,18 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   same 512 MB budget as texture scaling (`SR_TEX_SCALE_BUDGET_MB`). At most 48 rectangles are checked or rebuilt per
   frame, on the game's thread. Text drawn as triangles, or from a page in VRAM, is drawn as the game made it. The
   rules are in [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1013-sharp-game-text).
+- **Finer Bezier and spline patches (Finer patches).** A part of Enhanced and Ace, off by default and in no graphics
+  preset: Settings > Enhanced offers it as **Finer patches** (2x, 3x, 4x or Off), for the library or for one game,
+  and the launch line carries it as `tess=`. It is not on by choosing Enhanced or Ace, because it changes the frames
+  the game can read back and alters the GE timing model's clocks
+  ([section 11.3.7](ENHANCEMENT_CONTRACT.md#1137-finer-bezier-and-spline-patches-tess)). Each curved patch is drawn
+  with factor x factor times the triangles, on the game's thread, up to 262144 vertices a draw, so a scene with many
+  patches takes longer to draw. With the GE timing model on (`SR_GE_TIMING=1`) the extra triangles also change
+  when the game's display lists complete and when `sceGeDrawSync` returns in game time: on 8888 targets without
+  depth test, later for small patches and possibly earlier for large ones; elsewhere by the finer surface's
+  coverage, in either direction. A run's log ends with a `PATCH_TESS: exit` line
+  that counts the draws the vertex cap lowered. The rules are in
+  [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1014-finer-bezier-and-spline-patches).
 - **Where your data lives.** Imported discs, built games, saves and settings are in the per-user data
   folder (`%LOCALAPPDATA%\Nakagawa\data`, [below](#2-supply-local-game-inputs)), never inside the unpacked
   release. An update unpacks into a new folder and leaves the data folder alone, so deleting an old release
@@ -292,7 +315,8 @@ consumer ISO compatibility and interactive Linux presentation are not supported
 The supported and tested core development environment is:
 
 - Windows 11 x64. Older or unsupported Windows versions may work, but receive no compatibility guarantee.
-- PowerShell 7.6+ (`pwsh`) as the shell you type into. Windows PowerShell 5.1 is not supported for that.
+- PowerShell 7.6+ (`pwsh`) as the shell you type into. Windows PowerShell 5.1 is not supported for that,
+  although the build tools fall back to it where PowerShell 7 is missing ([Which PowerShell](#prerequisites)).
 - CPython 3.15.x (3.14.x is also accepted, `>=3.14,<3.16`), with `python` resolving to that feature line. 3.15 is the default: the pinned prerequisite and hosted CI both use 3.15.2.
 - Current MSYS2 UCRT64 GCC/G++, GNU Make, SDL3, and Vulkan loader packages. The release
   manifest's `toolchain_policy` records only the floors the code actually needs: a C11 compiler
@@ -355,6 +379,17 @@ Some folders hold a second copy of a tool that the build also calls, so the orde
   (for example, `C:/path/to/Python315/python.exe`); Make recipes and the player package builder use
   that explicit path even when MSYS2 is first on `PATH`. Run direct tooling commands through the
   same `PYTHON` path. Install the declared Python tooling dependencies before adding MSYS2 to `PATH`.
+- **The player's package build.** BUILD PACKAGE puts one UCRT64 toolchain's `bin` in front of the build
+  child's `PATH`, so Python, `mingw32-make` and `gcc` come from the same place: the release bundle, else
+  the per-user download, else a system MSYS2 UCRT64 install, tried in this order: a UCRT64 `bin`
+  already on `PATH`, then `MSYS_PATH`, then `C:\msys64\ucrt64`. A bundled or downloaded toolchain
+  needs only `gcc.exe` in its `bin`; a system install also needs its `include` to hold the SDL3
+  headers. A UCRT64 `bin` on `PATH` counts only when it is `<prefix named ucrt64>\bin`, and a complete
+  one is used even when `MSYS_PATH` names another install. A MinGW from another package manager ahead
+  of MSYS2 on your `PATH`, such as Chocolatey's, therefore no longer wins. With no complete UCRT64
+  toolchain the `PATH` is left alone and the build stops at `sdl3-check`, which names the `gcc` it
+  found. The `PATH` is also left alone in the rare case that it is already so long that the toolchain
+  folder cannot be added within the 32767-character Windows limit.
 - **POSIX shell.** If a Make recipe needs `sh`, put Git for Windows' `usr\bin` (`%ProgramFiles%\Git\usr\bin`)
   ahead of MSYS2's `usr\bin` (`C:\msys64\usr\bin`), as the [Windows host pitfalls](#windows-host-pitfalls)
   table describes.
@@ -984,10 +1019,11 @@ it needs all of the following:
 - `python`, `gcc`, and `mingw32-make` from either the current environment or the
   player's per-user downloaded build tools. The player changes `PATH` only for
   the build child; it never edits system `PATH` or the registry.
-- `powershell.exe` (Windows PowerShell 5.1, built into Windows 10 and 11). The
-  asset-copy step and the unpacking of the downloaded Python archive
-  (`Expand-Archive`) use it; PowerShell 7 remains the development baseline for
-  the other repository scripts.
+- PowerShell. The unpacking of the downloaded Python archive (`Expand-Archive`)
+  uses PowerShell 7 (`pwsh`) when it is installed and otherwise the built-in
+  Windows PowerShell 5.1, so nothing needs installing; `NK_POWERSHELL` names a
+  specific one. The asset-copy step uses `powershell.exe` (5.1) through
+  `POWERSHELL` in the `Makefile`.
 
 A release folder can carry the pinned prerequisites itself, in `prereqs/` beside `bin/` and
 `source/` ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)). BUILD PACKAGE
