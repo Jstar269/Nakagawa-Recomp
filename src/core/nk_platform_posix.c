@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/types.h>
@@ -69,6 +70,10 @@ int64_t nk_ftell64(FILE *f) {
 
 char nk_platform_path_separator(void) {
     return '/';
+}
+
+char nk_platform_path_list_separator(void) {
+    return ':';
 }
 
 /* POSIX file names are byte strings and this project's paths are UTF-8, so the
@@ -644,6 +649,7 @@ static bool posix_child_spawn(
     const char * const *envp,
     const char *working_directory,
     const char *output_log_path,
+    NkProcessPriority priority,
     NkProcessHandle *out_process
 ) {
     if (!executable_path || !out_process) return false;
@@ -668,6 +674,17 @@ static bool posix_child_spawn(
     if (pid == 0) {
         /* Child process: establish own process group to allow tree-wide signals */
         (void)setpgid(0, 0);
+
+        /* Lower the priority before exec, so the program never runs above it; what it
+           starts inherits the nice value. A child already nicer keeps its own. */
+        if (priority == NK_PROCESS_PRIORITY_LOW) {
+            errno = 0;
+            int nice_now = getpriority(PRIO_PROCESS, 0);
+            if ((nice_now != -1 || errno == 0) && nice_now < NK_PLATFORM_LOW_PRIORITY_NICE &&
+                setpriority(PRIO_PROCESS, 0, NK_PLATFORM_LOW_PRIORITY_NICE) != 0) {
+                _exit(127);
+            }
+        }
 
         if (output_fd >= 0) {
             if (dup2(output_fd, STDOUT_FILENO) < 0 ||
@@ -712,6 +729,16 @@ static bool posix_child_spawn(
 
     /* Parent process: close race by setting child's process group */
     (void)setpgid(pid, pid);
+    /* The same race for the priority: the child lowers its own before exec, and the
+       parent does too, so the child already runs low when this returns. A child that
+       has already exited cannot be found; that is no failure of the spawn. */
+    if (priority == NK_PROCESS_PRIORITY_LOW) {
+        errno = 0;
+        int child_nice = getpriority(PRIO_PROCESS, (id_t)pid);
+        if ((child_nice != -1 || errno == 0) && child_nice < NK_PLATFORM_LOW_PRIORITY_NICE) {
+            (void)setpriority(PRIO_PROCESS, (id_t)pid, NK_PLATFORM_LOW_PRIORITY_NICE);
+        }
+    }
 
     out_process->native_handle = (void *)(intptr_t)pid;
     out_process->job_handle = NULL;
@@ -743,6 +770,15 @@ bool nk_platform_describe_os_error(int os_error, char *out, size_t out_size) {
     const char *text = strerror(os_error);
     if (!text || !text[0]) return false;
     snprintf(out, out_size, "%s", text);
+    return true;
+}
+
+static bool posix_child_priority(const NkProcessHandle *process, NkProcessPriority *out) {
+    if (!process || !process->is_active || process->process_id <= 0 || !out) return false;
+    errno = 0;
+    int nice_now = getpriority(PRIO_PROCESS, (id_t)process->process_id);
+    if (nice_now == -1 && errno != 0) return false;
+    *out = nice_now > 0 ? NK_PROCESS_PRIORITY_LOW : NK_PROCESS_PRIORITY_NORMAL;
     return true;
 }
 
@@ -916,7 +952,17 @@ bool nk_platform_spawn_process(const char *executable_path, const char * const *
                                const char * const *envp, const char *working_directory,
                                const char *output_log_path, NkProcessHandle *out_process) {
     return posix_child_spawn(executable_path, argv, envp, working_directory, output_log_path,
-                             out_process);
+                             NK_PROCESS_PRIORITY_NORMAL, out_process);
+}
+
+bool nk_platform_spawn_process_at_priority(const char *executable_path, const char * const *argv,
+                                           const char * const *envp,
+                                           const char *working_directory,
+                                           const char *output_log_path,
+                                           NkProcessPriority priority,
+                                           NkProcessHandle *out_process) {
+    return posix_child_spawn(executable_path, argv, envp, working_directory, output_log_path,
+                             priority, out_process);
 }
 
 /* Every desktop program is an ordinary child, a tool included (nk_platform.h). */
@@ -924,7 +970,19 @@ bool nk_platform_spawn_tool(const char *executable_path, const char * const *arg
                             const char * const *envp, const char *working_directory,
                             const char *output_log_path, NkProcessHandle *out_process) {
     return posix_child_spawn(executable_path, argv, envp, working_directory, output_log_path,
-                             out_process);
+                             NK_PROCESS_PRIORITY_NORMAL, out_process);
+}
+
+bool nk_platform_spawn_tool_at_priority(const char *executable_path, const char * const *argv,
+                                        const char * const *envp, const char *working_directory,
+                                        const char *output_log_path, NkProcessPriority priority,
+                                        NkProcessHandle *out_process) {
+    return posix_child_spawn(executable_path, argv, envp, working_directory, output_log_path,
+                             priority, out_process);
+}
+
+bool nk_platform_process_priority(const NkProcessHandle *process, NkProcessPriority *out) {
+    return posix_child_priority(process, out);
 }
 
 /* The desktop finds its tools on PATH or in the prerequisites folder, not in one bundled folder. */
@@ -1003,6 +1061,15 @@ bool nk_platform_get_tool_dir(char *out_path, size_t max_len) {
 bool nk_platform_spawn_tool(const char *executable_path, const char * const *argv,
                             const char * const *envp, const char *working_directory,
                             const char *output_log_path, NkProcessHandle *out_process) {
+    return nk_platform_spawn_tool_at_priority(executable_path, argv, envp, working_directory,
+                                              output_log_path, NK_PROCESS_PRIORITY_NORMAL,
+                                              out_process);
+}
+
+bool nk_platform_spawn_tool_at_priority(const char *executable_path, const char * const *argv,
+                                        const char * const *envp, const char *working_directory,
+                                        const char *output_log_path, NkProcessPriority priority,
+                                        NkProcessHandle *out_process) {
     if (!executable_path || !out_process) return false;
     memset(out_process, 0, sizeof(*out_process));
     char tool_dir[NK_MAX_PATH];
@@ -1012,7 +1079,7 @@ bool nk_platform_spawn_tool(const char *executable_path, const char * const *arg
         return false;
     }
     if (!posix_child_spawn(executable_path, argv, envp, working_directory, output_log_path,
-                           out_process)) {
+                           priority, out_process)) {
         return false;
     }
     out_process->tool_child = true;
@@ -1126,8 +1193,28 @@ bool nk_platform_spawn_process(
     const char *output_log_path,
     NkProcessHandle *out_process
 ) {
+    return nk_platform_spawn_process_at_priority(executable_path, argv, envp,
+                                                 working_directory, output_log_path,
+                                                 NK_PROCESS_PRIORITY_NORMAL, out_process);
+}
+
+bool nk_platform_spawn_process_at_priority(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessPriority priority,
+    NkProcessHandle *out_process
+) {
     if (!executable_path || !out_process) return false;
     memset(out_process, 0, sizeof(*out_process));
+    /* A title starts as an Android activity, which takes no priority: a low one is
+       refused rather than started at normal priority. */
+    if (priority != NK_PROCESS_PRIORITY_NORMAL) {
+        out_process->spawn_error = ENOTSUP;
+        return false;
+    }
     if (!s_android_vm || !s_android_start_title) {
         out_process->spawn_error = ENOSYS;
         return false;
@@ -1194,6 +1281,11 @@ static bool android_read_int(const char *path, int *out) {
     fclose(f);
     if (ok) *out = value;
     return ok;
+}
+
+bool nk_platform_process_priority(const NkProcessHandle *process, NkProcessPriority *out) {
+    if (android_tool_child(process)) return posix_child_priority(process, out);
+    return false;
 }
 
 bool nk_platform_is_process_running(NkProcessHandle *process) {

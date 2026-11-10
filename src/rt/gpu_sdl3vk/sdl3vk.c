@@ -1474,6 +1474,8 @@ static void poll_input_on_this_stack(void *arg) {
             if (ev.key.key == SDLK_F3 && !ev.key.repeat) {
                 hud_set_mode(sdl3vk_hud_next_mode(s_hud_enabled, s_developer));
             }
+            /* F12 saves the next presented picture as a PNG (fbcap.h, screenshot key). */
+            if (ev.key.key == SDLK_F12 && !ev.key.repeat) sr_screenshot_request();
             /* While the keyboard is claimed its keys go to the keyboard only: a keyboard Enter that
              * confirms the field must not leave a START pulse behind for the title to see. */
             if (!ev.key.repeat && !s_text_claim) s_button_pulse |= keyboard_button(ev.key.scancode);
