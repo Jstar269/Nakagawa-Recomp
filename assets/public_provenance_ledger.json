@@ -2610,6 +2610,28 @@
       }
     },
     {
+      "path": "fixtures/homebrew_corpus/PROVENANCE.md",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_corpus_2144_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "fixtures/homebrew_corpus/corpus.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_corpus_2144_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "fixtures/mp3_tone/generate.py",
       "classification": "project_authored_attested",
       "evidence": {
@@ -16947,6 +16969,17 @@
       }
     },
     {
+      "path": "tools/homebrew_corpus.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_corpus_2144_20261108",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/host_stubs.py",
       "classification": "project_authored_attested",
       "evidence": {
@@ -19314,6 +19347,17 @@
       "evidence": {
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "c-gap-hle-scheduler",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_homebrew_corpus.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "homebrew_corpus_2144_20261108",
         "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
