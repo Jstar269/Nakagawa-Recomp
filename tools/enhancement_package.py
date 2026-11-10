@@ -81,6 +81,7 @@ SITE_TRANSFORMS = frozenset({
     "count_x2_even",
     "gate_30hz_hold",
     "gate_30hz_alt",
+    "gate_30hz_store",
     "clip_x_widen",
 })
 
@@ -684,7 +685,8 @@ def validate_package(data: Any) -> dict[str, Any]:
         elif any(site["transform"] in GATE_TRANSFORMS for site in sites):
             fail(
                 "update_boundary",
-                "A package with gate_30hz, gate_30hz_hold or gate_30hz_alt sites must declare update_boundary: "
+                "A package with gate_30hz, gate_30hz_hold, gate_30hz_alt or gate_30hz_store sites must declare "
+                "update_boundary: "
                 "gated sites run on "
                 "alternate logic updates, counted where each update begins",
             )
@@ -1658,7 +1660,7 @@ def _check_even_counter(site_path: str, fn_addr: int, site_addr: int, word: int,
 # Registers are numbered in one space here: general registers 0-31, FPU registers 64-95, HI 96,
 # LO 97 and the FPU condition flag 98. VFPU registers are not tracked.
 ALT_GATE_MAX_ALTERNATES = 4
-GATE_TRANSFORMS = frozenset(("gate_30hz", "gate_30hz_hold", "gate_30hz_alt"))
+GATE_TRANSFORMS = frozenset(("gate_30hz", "gate_30hz_hold", "gate_30hz_alt", "gate_30hz_store"))
 ALT_GATE_MAX_FUNCTION_WORDS = 8192
 ALT_GATE_MAX_TREE_FUNCTIONS = 64
 ALT_GATE_MAX_TABLE_ENTRIES = 256
@@ -2739,6 +2741,7 @@ SCALE_FACTORS = {
 
 _IMM_ARITH_OPS = (0x08, 0x09, 0x0A, 0x0B)  # addi, addiu, slti, sltiu
 _INT_LOAD_OPS = (0x20, 0x21, 0x23, 0x24, 0x25)  # lb, lh, lw, lbu, lhu
+_GATE_STORE_OPS = (0x28, 0x29, 0x2B, 0x39)  # sb, sh, sw, swc1
 _FPU_RESULT_FUNCS = (0x00, 0x01, 0x02, 0x03, 0x05, 0x06, 0x07)  # add sub mul div abs mov neg
 
 
@@ -3019,6 +3022,17 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
             _refuse(site, w, "clip_x_widen takes a jal: it acts after the call returns")
         return {"kind": "clip_x_widen", "reg": RESULT_REGISTERS[site["clip_register"]],
                 "offsets": [int(o) for o in site["clip_offsets"]]}
+
+    if tf == "gate_30hz_store":
+        # The store of a value the code advances by one update from what it loaded: run on
+        # even updates only, it leaves memory holding the earlier value on the odd ones, so
+        # each 30 Hz value shows for two updates. A store through $sp writes the caller's
+        # own frame, which the same call may read back, so it refuses.
+        if op not in _GATE_STORE_OPS:
+            _refuse(site, w, "gate_30hz_store takes an sb, sh, sw or swc1")
+        if rs == 29:
+            _refuse(site, w, "gate_30hz_store refuses a store to the stack frame ($sp base)")
+        return {"kind": "gate"}
 
     if tf == "gate_30hz":
         if is_jal or is_jalr:
