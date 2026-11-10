@@ -2,7 +2,7 @@
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 /*
  * tex_mips.h - host-built mip chains for textures the game gives one level (the Enhanced part
- * "Smooth distant textures", SR_ACE key mips=on; docs/ENHANCEMENT_CONTRACT.md 10.16 and
+ * "Smooth far textures", SR_ACE key mips=on; docs/ENHANCEMENT_CONTRACT.md 10.16 and
  * 11.3.8). Pure C, header only: ge_gpu.c includes it for the renderer, and
  * tex_mips_selftest.c for the CPU checks. No GPU, no guest memory, no allocation.
  *

@@ -199,6 +199,7 @@ static char s_report_path[1024];
 static char s_unavailable[ACE_FEATURE_COUNT][96];
 static int s_af_device;          /* the device's level when lower than the request, else 0 */
 static int s_confirmed[ACE_FEATURE_COUNT];
+static void (*s_exit_report[ACE_FEATURE_COUNT])(void);
 static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
 
@@ -260,6 +261,7 @@ int ace_init_spec(const char *spec, const char *report_path) {
     memset(&s_eff, 0, sizeof(s_eff));
     memset(s_unavailable, 0, sizeof(s_unavailable));
     memset(s_confirmed, 0, sizeof(s_confirmed));
+    memset(s_exit_report, 0, sizeof(s_exit_report));
     s_af_failures = 0;
     s_cull_untracked = 0;
     s_af_device = 0;
@@ -361,7 +363,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     }
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
-    if (s_eff.mips) used = words_add(out, cap, used, "smooth distant textures");
+    if (s_eff.mips) used = words_add(out, cap, used, "smooth far textures");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
@@ -866,9 +868,15 @@ size_t ace_report_json(char *out, size_t cap) {
     return used;
 }
 
+void ace_set_exit_report(AceFeature feature, void (*report)(void)) {
+    if ((int)feature >= 0 && feature < ACE_FEATURE_COUNT) s_exit_report[feature] = report;
+}
+
 void ace_finish(void) {
     char json[ACE_REPORT_MAX];
     if (!g_ace_on) return;
+    for (int f = 0; f < ACE_FEATURE_COUNT; f++)
+        if (s_exit_report[f]) s_exit_report[f]();
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
                                                 ACE_HAS_MIPS, ACE_HAS_CULL };

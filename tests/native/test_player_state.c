@@ -8231,7 +8231,7 @@ static void test_play_mode_cull_settings(void) {
     printf("PASS: wider culling is read, resolved and saved at both levels, and only Ace launches it\n");
 }
 
-/* Smooth distant textures (contract 10.16, 11.3.8): off in a fresh file and in every preset; a
+/* Smooth far textures (contract 10.16, 11.3.8): off in a fresh file and in every preset; a
  * library "mips" and a title's own are read, the title's wins, both survive a save and a load, an
  * Enhanced or Ace launch with the part on carries ";mips=on" after tess, and a launch with it off carries
  * no key, so its line is the line of a build without the part. */
@@ -8271,7 +8271,8 @@ static void test_play_mode_mips_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"upscale\": \"off\", \"mips\": \"on\"}") != NULL);
+        assert(saved && strstr(saved, "\"tess\": \"off\", \"mips\": \"on\", \"cull\": \"off\", "
+                                      "\"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST95001\": {\"mode\": \"enhanced\", \"mips\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8296,7 +8297,7 @@ static void test_play_mode_mips_settings(void) {
     (void)test_rmdir(root);
     free(back);
     free(app);
-    printf("PASS: smooth distant textures is off by default, read and saved at both levels, and launched only when on\n");
+    printf("PASS: smooth far textures is off by default, read and saved at both levels, and launched only when on\n");
 }
 
 /* Finer patches (contract 10.14, 11.3.7) at both levels: off in a fresh file and in no graphics

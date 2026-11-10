@@ -4859,8 +4859,27 @@ static VkDescriptorSet tex_hm_or_entry_set(TexEnt *e) {
     return tex_entry_set(e);
 }
 
+static int s_hm_reported;
+
+/* The exit stamp, once a run: from the renderer's shutdown, or from ace_finish on the
+   SR_EXIT_AT_VBLANK path, which ends with _Exit and never reaches the shutdown. */
+static void tex_hm_report(void) {
+    if (!s_hm || s_hm_reported) return;
+    s_hm_reported = 1;
+    fprintf(stderr, "HOST_MIPS: exit (entries=%llu, builds=%llu, texels=%llu, build_ms=%.1f, bound=%llu, "
+                    "plain_alpha_unused=%llu, plain_target=%llu, set_failures=%llu, "
+                    "chain_peak_kib=%llu)\n",
+            (unsigned long long)s_hm_stats.entries, (unsigned long long)s_hm_stats.builds,
+            (unsigned long long)s_hm_stats.texels, (double)s_hm_stats.build_ns / 1e6,
+            (unsigned long long)s_hm_stats.bound, (unsigned long long)s_hm_stats.plain_alpha,
+            (unsigned long long)s_hm_stats.plain_target,
+            (unsigned long long)s_hm_stats.set_failures,
+            (unsigned long long)(s_hm_stats.bytes_peak >> 10));
+}
+
 static void tex_hm_init(void) {
     s_hm = 0;
+    s_hm_reported = 0;
     memset(&s_hm_stats, 0, sizeof(s_hm_stats));
     if (!g_ace_on || !ace_effective()->mips) return;
     const size_t texels = nk_tex_mips_chain_texels(NK_TEX_MIPS_MAX_DIM, NK_TEX_MIPS_MAX_DIM);
@@ -4875,6 +4894,7 @@ static void tex_hm_init(void) {
     nk_tex_mips_curve_init(&s_hm_curve);
     s_hm = 1;
     ace_confirm(ACE_FEATURE_MIPS);
+    ace_set_exit_report(ACE_FEATURE_MIPS, tex_hm_report);
     fprintf(stderr, "HOST_MIPS: on (filter=box in linear light, alpha-weighted, key fill; bias=0 at %dx; "
                     "anisotropy=%d)\n", s_scale, s_ace_af);
     fprintf(stderr, "HOST_MIPS: guest-visible: every present commits the smoothed frame to guest VRAM "
@@ -4882,16 +4902,8 @@ static void tex_hm_init(void) {
 }
 
 static void tex_hm_shutdown(void) {
-    if (s_hm)
-        fprintf(stderr, "HOST_MIPS: exit (entries=%llu, builds=%llu, texels=%llu, build_ms=%.1f, bound=%llu, "
-                        "plain_alpha_unused=%llu, plain_target=%llu, set_failures=%llu, "
-                        "chain_peak_kib=%llu)\n",
-                (unsigned long long)s_hm_stats.entries, (unsigned long long)s_hm_stats.builds,
-                (unsigned long long)s_hm_stats.texels, (double)s_hm_stats.build_ns / 1e6,
-                (unsigned long long)s_hm_stats.bound, (unsigned long long)s_hm_stats.plain_alpha,
-                (unsigned long long)s_hm_stats.plain_target,
-                (unsigned long long)s_hm_stats.set_failures,
-                (unsigned long long)(s_hm_stats.bytes_peak >> 10));
+    tex_hm_report();
+    if (s_hm) ace_set_exit_report(ACE_FEATURE_MIPS, NULL);
     free(s_hm_out); free(s_hm_work);
     s_hm_out = NULL; s_hm_work = NULL;
     s_hm = 0;

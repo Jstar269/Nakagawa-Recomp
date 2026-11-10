@@ -659,6 +659,11 @@ static void cell_readout(void) {
 
 /* ---- the per-run report --------------------------------------------------------------------- */
 
+/* A part's exit stamp (ace_set_exit_report): ace_finish runs it, so it prints on the
+   SR_EXIT_AT_VBLANK path that skips the renderer's shutdown. */
+static int s_exit_reports;
+static void count_exit_report(void) { s_exit_reports++; }
+
 static void cell_report(const char *dir) {
     char json[ACE_REPORT_MAX];
     (void)ace_init_spec(k_good, NULL);
@@ -687,7 +692,10 @@ static void cell_report(const char *dir) {
     /* Filtering ran; the in-game UI never started (an offscreen run, say). */
     ace_confirm(ACE_FEATURE_AF);
     ace_note_af_failure();
+    s_exit_reports = 0;
+    ace_set_exit_report(ACE_FEATURE_MIPS, count_exit_report);
     ace_finish();
+    CHECK(s_exit_reports == 1, "ace_finish runs a part's exit report once (%d)", s_exit_reports);
     CHECK(ace_effective()->af == 16 && ace_effective()->text == 0 && ace_effective()->notice == 0,
           "at exit, features that never ran are off and named");
     FILE *f = fopen(path, "rb");
@@ -702,6 +710,7 @@ static void cell_report(const char *dir) {
     /* An off run writes nothing. */
     (void)ace_init_spec("off", path);
     ace_finish();
+    CHECK(s_exit_reports == 1, "a new run starts with no exit report, and an off run runs none (%d)", s_exit_reports);
     f = fopen(path, "rb");
     CHECK(f == NULL, "an off run wrote a report");
     if (f) fclose(f);

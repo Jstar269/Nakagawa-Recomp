@@ -331,9 +331,9 @@ The player offers three play modes per game (#2055):
   default for a new library.
 - **Enhanced** turns on the project-authored improvements that work for any game: texture filtering, crisp system
   text, the speed readout, the game badge, widescreen, smooth motion, clean pitched sound, finer patches, smooth
-  distant textures and sharper enlarging. A new library starts with texture filtering, crisp system text and the
+  far textures and sharper enlarging. A new library starts with texture filtering, crisp system text and the
   game badge on and the rest off, and a graphics preset sets crisp system text and sharper enlarging (section 10.1);
-  finer patches and smooth distant textures are in no preset.
+  finer patches and smooth far textures are in no preset.
   Each one is a *part* that can be turned off for the library or for a single game.
 - **Ace** is Enhanced plus the improvements made for that game alone. Today that is the title's 60 FPS game logic
   package (section 9). The player offers Ace only for a title with a usable package; its own parts can be turned off
@@ -633,7 +633,7 @@ when `"enhanced"` is absent, maps them as below, and writes the new keys from th
 `tests/native/test_player_state.c` (`test_play_mode_settings`, `test_play_mode_settings_mapping`) checks the names,
 the precedence, the off switches at both levels and this mapping; `test_play_mode_upscale_settings` checks sharper
 enlarging (`"upscale"`: `fsr1` or `off`) and the upscaler it sets for the launch; `test_play_mode_mips_settings`
-checks smooth distant textures (`"mips"`: `on` or `off`) and the `mips=on` it adds to the launch line.
+checks smooth far textures (`"mips"`: `on` or `off`) and the `mips=on` it adds to the launch line.
 
 ### 10.10. Texture Scaling and the Smart 2D Filter
 
@@ -1024,7 +1024,7 @@ both renderers share, so the software renderer and the Vulkan renderer draw the 
     than d for a small patch, and different from d for a large one;
   - the exit line, with the quads drawn and the capped draws.
 
-### 10.16. Smooth Distant Textures (Host Mip Chains)
+### 10.16. Smooth Far Textures (Host Mip Chains)
 
 Most PSP games give a texture one level and let the GE sample it with a bilinear filter however small it is drawn
 (#1273). At 1x a far surface is a few pixels across and the aliasing is part of the PSP's picture; at 4x the same
@@ -1036,7 +1036,7 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
 (the cache, the bind and the stamps); the software renderer has no chain.
 
 - **Setting.** The optional `mips` key of the `SR_ACE` launch line (section 10.1): `mips=on`, or no key, which is
-  off. In the player it is the part "Smooth distant textures" (`"mips"`: `on` or `off`) on the library's
+  off. In the player it is the part "Smooth far textures" (`"mips"`: `on` or `off`) on the library's
   Settings > Enhanced page and on each game's own page (section 10.9). It is off in a fresh settings file, is in no
   graphics preset and is not turned on by choosing Enhanced or Ace. An authentic run has no launch line, so the
   chain code never runs there: no buffer, no chain, no extra descriptor set, and the shader branch is never taken.
@@ -1081,7 +1081,8 @@ code is `src/rt/gpu_sdl3vk/tex_mips.h` (the chain) and the `tex_hm_*` functions 
   `HOST_MIPS: on (filter=box in linear light, alpha-weighted, key fill; bias=0 at <S>x; anisotropy=<A>)` and the
   guest-visible line section 11.3.8 describes when the renderer starts; `HOST_MIPS: exit (entries=, builds=, texels=,
   build_ms=, bound=, plain_alpha_unused=, plain_target=, set_failures=, chain_peak_kib=)` when it
-  stops. The report's `effective` block has `"mips"`, the game badge lists "smooth distant textures", and the flight
+  stops, or, on the `SR_EXIT_AT_VBLANK` path that skips the renderer's shutdown, from `ace_finish` (once either
+  way). The report's `effective` block has `"mips"`, the game badge lists "smooth far textures", and the flight
   recorder's `runtime.enhancements` carries the launch line. Section 10.4 applies: the run is an Enhanced run. If the
   builder's buffers cannot be made, the part is unavailable for the run and the report says so.
 - **Tests.**
@@ -1569,7 +1570,7 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
   exist.
 
-#### 11.3.8. Smooth Distant Textures (`mips`)
+#### 11.3.8. Smooth Far Textures (`mips`)
 
 The feature of section 10.16 (#1273). How it draws is described there; this entry is what the guest can observe.
 

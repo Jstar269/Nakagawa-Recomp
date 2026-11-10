@@ -10,8 +10,10 @@
  *  - minified: a one-texel checkerboard (palette entries 0 black, 1 white) drawn at 3.2 texels
  *    per device pixel samples the chain: every device pixel is the chain's linear-light grey
  *    (sRGB 188). Level 0 alone aliases: the pixels range from dark to light.
- *  - scale-aware: 2 texels per guest pixel is minified at 1x but not from 2x, where the draw keeps
- *    level 0's own detail (the level of detail is per device pixel, with no bias).
+ *  - scale-aware: 2 texels per guest pixel is minified at 1x but not from 2x. From 2x the draw
+ *    binds the chain and matches, pixel for pixel, the same draw on the entry's one-level view,
+ *    which samples level 0 alone (the level of detail is per device pixel, with no bias); at 1x it
+ *    is the chain's linear-light grey, where level 0 alone gives the sRGB blend (about 96).
  *  - palette: the same index image under another palette is another cache entry with its own
  *    chain (red and blue give sRGB 188, 0, 188); the first palette's entry is still its own.
  *  - rewrite: guest bytes rewritten under the same palette rebuild the chain at the next decode.
@@ -150,6 +152,21 @@ static int hm_near(const HmRange *r, uint32_t want, uint32_t tol) {
     return 1;
 }
 
+/* The largest colour difference between two reads over the quad's device pixels, one in from each edge. */
+static uint32_t hm_maxdiff(int x, int size, const uint32_t *a, const uint32_t *b) {
+    const uint32_t s = (uint32_t)s_scale;
+    uint32_t m = 0u;
+    for (uint32_t y = HM_Y * s + 1u; y + 1u < (uint32_t)(HM_Y + size) * s; y++)
+        for (uint32_t xx = (uint32_t)x * s + 1u; xx + 1u < (uint32_t)(x + size) * s; xx++)
+            for (int c = 0; c < 3; c++) {
+                const uint32_t va = (a[(size_t)y * SCL_W + xx] >> (8 * c)) & 0xFFu;
+                const uint32_t vb = (b[(size_t)y * SCL_W + xx] >> (8 * c)) & 0xFFu;
+                const uint32_t d = va > vb ? va - vb : vb - va;
+                if (d > m) m = d;
+            }
+    return m;
+}
+
 static void hm_say(const char *cell, const HmRange *r) {
     fprintf(stderr, "gpu mips selftest [%s]: %u device pixels, r %u-%u g %u-%u b %u-%u at scale %d\n", cell,
             r->n, r->lo[0], r->hi[0], r->lo[1], r->hi[1], r->lo[2], r->hi[2], s_scale);
@@ -193,16 +210,38 @@ int gegpu_mips_selftest(void) {
         return ok;
     }
 
-    /* scale-aware: 64 texels over 32 guest pixels, half a texel per device pixel at 4x. */
+    /* scale-aware: 64 texels over 32 guest pixels: 2 texels a device pixel at 1x, 1 at 2x, half at
+       4x. The reference is the same draw on the entry's one-level view: s_tex_noscale keeps the
+       bind off, as it does for a render target read back, so it samples level 0 alone. */
     if (ok) {
-        ok = hm_quad(40, 32, 64.0f, 0) && hm_read(40, 32, dev, &r);
-        const int sharp = r.hi[0] - r.lo[0] >= 128u;
-        if (ok && (s_scale >= 2) != sharp) {
+        uint32_t *ref = (uint32_t *)malloc((size_t)SCL_W * SCL_H * 4u);
+        HmRange r0;
+        s_tex_noscale = 1;
+        ok = ref && hm_quad(40, 32, 64.0f, 0) && !s_tex_bound_hm && hm_read(40, 32, ref, &r0);
+        s_tex_noscale = 0;
+        const uint64_t b1 = s_hm_stats.bound;
+        ok = ok && hm_quad(40, 32, 64.0f, 0) && s_tex_bound_hm && s_hm_stats.bound == b1 + 1u &&
+             hm_read(40, 32, dev, &r);
+        const uint32_t diff = ok ? hm_maxdiff(40, 32, dev, ref) : 0u;
+        if (!ok) {
+            fprintf(stderr, "gpu mips selftest [scale-aware]: a draw failed, or the reference bound the chain "
+                            "or the draw did not\n");
+        } else if (s_scale >= 2 && diff > 1u) {
             hm_say("scale-aware", &r);
-            fprintf(stderr, "gpu mips selftest [scale-aware]: want level 0's detail from 2x, the grey at 1x\n");
+            fprintf(stderr, "gpu mips selftest [scale-aware]: want level 0 alone from 2x: the chain-bound draw "
+                            "differs from the one-level view by up to %u\n", diff);
+            ok = 0;
+        } else if (s_scale == 1 && (!hm_near(&r, grey, 2u) || diff < 32u)) {
+            /* Level 0 alone at 2 texels a pixel blends black and white in sRGB (about 96), or aliases. */
+            hm_say("scale-aware", &r);
+            fprintf(stderr, "gpu mips selftest [scale-aware]: want the chain's grey at 1x, unlike level 0 alone "
+                            "(level 0 r %u-%u, max diff %u)\n", r0.lo[0], r0.hi[0], diff);
             ok = 0;
         }
-        if (ok) printf("gpu mips selftest: PASS scale-aware r %u-%u scale=%d\n", r.lo[0], r.hi[0], s_scale);
+        if (ok) printf("gpu mips selftest: PASS scale-aware %s (r %u-%u, level 0 alone r %u-%u, max diff %u) "
+                       "scale=%d\n", s_scale >= 2 ? "level 0" : "the chain's grey", r.lo[0], r.hi[0],
+                       r0.lo[0], r0.hi[0], diff, s_scale);
+        free(ref);
     }
 
     /* palette: the same indices, red and blue. */

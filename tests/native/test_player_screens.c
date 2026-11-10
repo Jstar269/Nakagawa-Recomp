@@ -50,7 +50,7 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
      "Resamples pitched effects without aliasing. The game receives changed samples."},
     {"Finer patches", "Off",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures."},
-    {"Smooth distant textures", "Off", "Stops far textures shimmering at high resolution. Save "
+    {"Smooth far textures", "Off", "Stops far textures shimmering at high resolution. Save "
                                         "pictures keep the smoothing."},
     {"Wider culling", "Off", "Ace only, with Widescreen, in games that have a culling build. The game's "
                              "memory changes."},

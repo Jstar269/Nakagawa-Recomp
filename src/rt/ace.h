@@ -118,6 +118,10 @@ const char *ace_tier_name(void);
 /* A feature this host cannot provide: off for the run, named once on stderr and in the report.
  * The others stay on. */
 void ace_feature_unavailable(AceFeature feature, const char *reason);
+/* A part's own exit stamp, which ace_finish prints before "ACE_MODE: exit": the SR_EXIT_AT_VBLANK
+   path ends with _Exit and skips a renderer's shutdown, but not ace_finish. The reporter prints at
+   most once per run, so the renderer's shutdown may call it too; NULL removes it. */
+void ace_set_exit_report(AceFeature feature, void (*report)(void));
 /* A feature that really ran: texture filtering once the GPU renderer made its pool for it, the
  * in-game UI's three once its pass is registered. At exit a feature that is on but was never
  * confirmed is reported unavailable (its renderer or presenter did not start), so the report

@@ -1231,7 +1231,7 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     /* A guest-visible item (contract 11.3.8): every present commits the smoothed frame to guest VRAM,
        as texture filtering does. Off by default until its "nothing worse" runs exist (11.2 item 4),
        with its own off switch in the library and each title (item 2). */
-    {"mips", "Smooth distant textures",
+    {"mips", "Smooth far textures",
      "Stops far textures shimmering at high resolution. Save pictures keep the smoothing.",
      2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
