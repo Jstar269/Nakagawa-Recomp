@@ -130,9 +130,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
-          # Full history: the run is judged against the event's exact base SHA,
-          # which a depth-1 clone would not contain, and the ancestry check
-          # below needs real history rather than a graft.
+          # Full history: the run is judged against the merge base of the head
+          # with this branch, which a depth-1 clone would not contain, and the
+          # ancestry checks below need real history rather than a graft.
           fetch-depth: 0
           persist-credentials: false
 
@@ -237,7 +237,27 @@ jobs:
             exit 1
           fi
           echo "candidate head ${fetched} fetched as data only (never checked out)"
-          echo "base ${BASE_SHA} confirmed on the default branch"
+          echo "event base ${BASE_SHA} confirmed on the default branch"
+
+      # The verdict base is the merge base of the head with the default branch as it is now,
+      # as in provenance-attestation-merge-group.yml. The event's base SHA is the default
+      # branch's tip when the event fired; a pull request that is merely behind an admission
+      # would be judged as removing every path that admission added. Its fork point is the
+      # main commit its profile and controls were built against, and it is always on the
+      # trusted branch. The landing batch, whose base is the default branch itself, judges
+      # the combination.
+      - name: Resolve the verdict base
+        id: base
+        env:
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "sha malformed" >&2; exit 1; }
+          base_sha="$(git merge-base "${HEAD_SHA}" HEAD)"
+          [[ "${base_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "base sha malformed" >&2; exit 1; }
+          git merge-base --is-ancestor "${base_sha}" HEAD
+          echo "base_sha=${base_sha}" >> "${GITHUB_OUTPUT}"
+          echo "verdict base ${base_sha} (merge base of the head with the default branch)"
 
       # The private trusted authority. It lands outside GITHUB_WORKSPACE so it
       # is structurally outside the tree under verification, and the verifier
@@ -247,7 +267,7 @@ jobs:
         id: authority
         env:
           GH_TOKEN: ${{ secrets.PROVENANCE_AUTHORITY_TOKEN }}
-          BASE_SHA: ${{ steps.target.outputs.base_sha }}
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
           TRUSTED_REPO: Jstar269/nakagawa-recomp-history-private
           TRUSTED_REF: main
@@ -398,7 +418,7 @@ jobs:
       # tree and policy, and the verify step checks that binding again.
       - name: Generate the trusted base public baseline from the authority
         env:
-          BASE_SHA: ${{ steps.target.outputs.base_sha }}
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/trusted" "${RUNNER_TEMP}/baseline-scratch"
@@ -418,7 +438,7 @@ jobs:
       - name: Generate and verify ephemeral provenance controls
         env:
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
-          BASE_SHA: ${{ steps.target.outputs.base_sha }}
+          BASE_SHA: ${{ steps.base.outputs.base_sha }}
           AUTHORITY_SHA: ${{ steps.authority.outputs.authority_sha }}
           TRUSTED_CANDIDATE_POLICY: ${{ steps.authority.outputs.trusted_candidate_policy }}
           POLICY_DELTA_AUTHORITY: ${{ steps.authority.outputs.policy_delta_authority }}
@@ -428,7 +448,7 @@ jobs:
           # Existing exact path authority is sufficient for normal progress.
           # The legacy per-revision reviewed_blobs policy remains an explicit
           # opt-in via --require-reviewed-blobs for higher-assurance runs.
-          # Exact immutable SHAs from the event, never branch names: resolving
+          # Exact immutable SHAs (the head and its merge base), never branch names: resolving
           # a branch twice can name two different trees.
           policy_args=()
           # A V3 authority comes alone; a V1/V2 authority with its blessed candidate policy. The
