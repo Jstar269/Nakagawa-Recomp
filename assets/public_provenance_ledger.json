@@ -17681,6 +17681,17 @@
       }
     },
     {
+      "path": "tools/nk_powershell.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "tools_prefer_pwsh_20261109",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tools/nk_safety.ps1",
       "classification": "project_authored_attested",
       "evidence": {
@@ -19969,6 +19980,17 @@
         "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
         "record_id": "native-player-041",
         "evidence_tier": "N",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tools/test_nk_powershell.py",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "tools_prefer_pwsh_20261109",
+        "evidence_tier": "S",
         "authorship": "independent implementation record",
         "upstream_attribution": null
       }
