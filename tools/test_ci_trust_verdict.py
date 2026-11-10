@@ -1382,10 +1382,11 @@ class DispatchedRecordTests(unittest.TestCase):
     def records(self, *pairs: tuple[dict, dict], on_main: bool = True, **github) -> list[dict]:
         gh = DispatchGitHub(*pairs, **github)
         with mock.patch.object(ctv, "default_definition", return_value=on_main) as ancestry:
-            found, self.cut = ctv.dispatched_records(gh, Path("."), PR, "main", LABELLED)
+            answer: tuple[list[dict], bool] = ctv.dispatched_records(gh, Path("."), PR, "main", LABELLED)
+        self.cut = answer[1]
         self.ancestry = ancestry
         self.gh = gh
-        return found
+        return answer[0]
 
     def test_the_genuine_record_is_read(self) -> None:
         self.assertEqual(self.records(_dispatched(1)), [
