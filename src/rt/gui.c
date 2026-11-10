@@ -929,6 +929,10 @@ static void gui_report_render_path(bool vulkan_asked, bool vulkan_started, bool 
 }
 #endif
 
+#if defined(SR_SDL3VK) && !defined(SR_GUI_PRESENT_SELFTEST)
+static void gui_texdump_at_start(void);   /* the texture dump, started with the run */
+#endif
+
 void gui_init(const char *title) {
     (void)title;
 #if defined(SR_SDL3VK) || defined(_WIN32)
@@ -1036,6 +1040,7 @@ void gui_init(const char *title) {
                             fprintf(stderr, "gui_init: GPU GE init failed; software GE active\n");
                     }
                     gui_report_render_path(true, true, gpu_ge_asked, gpu_ge_started);
+                    if (gpu_ge_started) gui_texdump_at_start();
                 }
                 sr_gui_request_launcher_foreground(true, NULL,
                                                    sr_gui_raise_sdl_window,
@@ -1867,6 +1872,14 @@ static void gui_pause_texdump(int on) {
     }
     snprintf(s_pause_texdump_note, sizeof s_pause_texdump_note, "Not started: %s.", err);
     fprintf(stderr, "TEX_DUMP: refused (%s)\n", err);
+}
+
+/* SR_TEX_DUMP=1 starts the dump with the run, as the row does once the game is paused, so the
+ * dump also holds what the game shows before the first pause and a script can take one unattended.
+ * Any other value, or none, leaves it off. The row turns it off like a dump started there. */
+static void gui_texdump_at_start(void) {
+    const char *v = getenv("SR_TEX_DUMP");
+    if (v && strcmp(v, "1") == 0) gui_pause_texdump(1);
 }
 
 /* Carries out what the person chose on a page. */

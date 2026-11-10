@@ -830,7 +830,8 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   textures takes longer while the dump is on), atomically (a temporary file renamed into place).
   `SR_TEX_DUMP_BUDGET_MB` (1 to 65536, default 4096) bounds what a run writes: the file that would pass it is not
   written and the dump stops with `TEX_DUMP: stopped (...)`. The switch is the run's alone, off at every start and
-  never saved, and an authentic run has no row. Stamps: `TEX_DUMP: on (hash=, budget_mb=; ...)` when started,
+  never saved, and an authentic run has no row; `SR_TEX_DUMP=1` starts it with the run instead (`gui.c`), so a dump
+  also holds what the game shows before the first pause and a script can take one unattended. Stamps: `TEX_DUMP: on (hash=, budget_mb=; ...)` when started,
   `TEX_DUMP: refused (<reason>)` (the row shows the reason too), and `TEX_DUMP: off` and, at exit,
   `TEX_DUMP: exit (written=, already_there=, skipped=, failed=, mb=)`. The project ships no texture and no upscaler:
   the images are the player's own, from the player's own game, and stay on their PC.
