@@ -1898,7 +1898,6 @@ class RecordAndCarryTests(unittest.TestCase):
 
     def test_an_unreadable_push_time_is_refused(self) -> None:
         cases = {
-            "no record for this commit": ApprovalGitHub(pushes=[_push(OTHER, "2026-10-28T09:00:00Z")]),
             "no records at all": ApprovalGitHub(pushes=[]),
             "a record without a time": ApprovalGitHub(pushes=[_push(HEAD, None)]),
             "a record with an unreadable time": ApprovalGitHub(pushes=[_push(HEAD, "09:00 yesterday")]),
@@ -1906,6 +1905,8 @@ class RecordAndCarryTests(unittest.TestCase):
                 pushes=[_push(HEAD, "2026-10-28T09:00:00Z"), _push(HEAD, None)]),
             "a record of another branch": ApprovalGitHub(
                 pushes=[_push(HEAD, "2026-10-28T09:00:00Z", ref="refs/heads/other")]),
+            "an undated record of another commit": ApprovalGitHub(
+                pushes=[_push(HEAD, "2026-10-28T09:00:00Z"), _push(OTHER, None)]),
             "the list cannot be read": ApprovalGitHub(broken="https://api.github.com/repos/"),
             "an error document instead of a list": ApprovalGitHub(pushes=["message"]),   # type: ignore[list-item]
         }
@@ -1918,6 +1919,72 @@ class RecordAndCarryTests(unittest.TestCase):
                 gh = ApprovalGitHub()
                 gh.pull["head"] = head
                 self._refused(gh, "HEAD_TIME_UNREADABLE")
+
+    def test_the_refusal_says_how_the_list_could_not_be_read(self) -> None:
+        # 403, 404 and a server error call for different actions.
+        for code in (403, 404, 503):
+            gh = ApprovalGitHub()
+            error = urllib.error.HTTPError("https://api.github.com/x", code, "no", {}, None)  # type: ignore[arg-type]
+            with self.subTest(code=code), mock.patch.object(gh, "paginate", side_effect=error), \
+                    self.assertRaises(ctv.ApprovalRefused) as refusal:
+                ctv.head_pushed_at(gh, gh.pull, HEAD)
+            self.assertIn(f"(HTTP {code})", str(refusal.exception))
+
+    def test_the_newest_record_of_the_branch_must_be_the_head(self) -> None:
+        """The activity list can lag a push and has been seen to lack a record. The pull request is at HEAD, the
+        list shows HEAD at 09:00 and another commit at 09:30, and the label is from 09:59: a complete list
+        cannot look like that while HEAD is the tip, so the update that brought HEAD back is missing, and it
+        may be newer than the label (pushed, rewound, labelled, fast-forwarded again: no force-push event backs
+        the list up). Failing-before: HEAD's older record dated the head and the approval was recorded."""
+        behind = [_push(OTHER, "2026-10-28T09:30:00Z"), _push(HEAD, "2026-10-28T09:00:00Z")]
+        self._refused(ApprovalGitHub(pushes=behind), "HEAD_NOT_NEWEST_PUSH")
+        self._refused(ApprovalGitHub(pushes=list(reversed(behind))), "HEAD_NOT_NEWEST_PUSH")
+        self._refused(ApprovalGitHub(pushes=[_push(OTHER, "2026-10-28T09:00:00Z")]), "HEAD_NOT_NEWEST_PUSH")
+        # Two updates in one second cannot be ordered, so both have to be this commit's.
+        tied = [_push(HEAD, "2026-10-28T09:30:00Z"), _push(OTHER, "2026-10-28T09:30:00Z")]
+        self._refused(ApprovalGitHub(pushes=tied), "HEAD_NOT_NEWEST_PUSH")
+        same = [_push(HEAD, "2026-10-28T09:30:00Z"), _push(HEAD, "2026-10-28T09:30:00Z", kind="force_push"),
+                _push(OTHER, "2026-10-28T09:00:00Z")]
+        self.assertEqual(self._dispatch(ApprovalGitHub(pushes=same)), D1)
+        # Another branch's records do not count either way.
+        other_branch = [_push(HEAD, "2026-10-28T09:00:00Z"),
+                        _push(OTHER, "2026-10-28T09:30:00Z", ref="refs/heads/other")]
+        self.assertEqual(self._dispatch(ApprovalGitHub(pushes=other_branch)), D1)
+
+    def test_a_label_older_than_a_re_open_or_a_restored_branch_is_refused(self) -> None:
+        """GitHub leaves a closed pull request's head where it was; commits pushed while it is closed arrive when
+        it is re-opened. Closed at A, pushed to B, labelled while closed (the page shows A), re-opened: B's push
+        predates the label. The branch's log dates the branch, so the pull request's own events are read too.
+        Failing-before: the dispatch recorded B."""
+        for event in ("reopened", "head_ref_restored", "head_ref_force_pushed"):
+            with self.subTest(event=event):
+                after = ApprovalGitHub()
+                after.events.append({"id": 5, "event": event, "created_at": "2026-10-28T10:10:00Z"})
+                self._refused(after, "LABEL_PREDATES_HEAD")
+                tied = ApprovalGitHub()
+                tied.events.append({"id": 5, "event": event, "created_at": LABELLED_AT})
+                self._refused(tied, "LABEL_PREDATES_HEAD")
+                before = ApprovalGitHub()
+                before.events.append({"id": 5, "event": event, "created_at": "2026-10-28T09:30:00Z"})
+                self.assertEqual(self._dispatch(before), D1)
+                undated = ApprovalGitHub()
+                undated.events.append({"id": 5, "event": event})
+                self._refused(undated, "HEAD_TIME_UNREADABLE")
+
+    def test_a_label_older_than_a_retarget_is_refused(self) -> None:
+        """The labeller read the change against one base; a retarget afterwards changes what the head is compared
+        with. Failing-before: the dispatch route ignored base_ref_changed altogether."""
+        after = ApprovalGitHub()
+        after.events.append({"id": 5, "event": "base_ref_changed", "created_at": "2026-10-28T10:10:00Z"})
+        self._refused(after, "LABEL_PREDATES_BASE")
+        # A retarget before the label is what the labeller saw, and stays allowed.
+        before = ApprovalGitHub()
+        before.events.append({"id": 5, "event": "base_ref_changed", "created_at": "2026-10-28T09:30:00Z"})
+        self.assertEqual(self._dispatch(before), D1)
+        # The newest change names the refusal.
+        both = ApprovalGitHub(pushes=[_push(HEAD, "2026-10-28T10:20:00Z")])
+        both.events.append({"id": 5, "event": "base_ref_changed", "created_at": "2026-10-28T10:10:00Z"})
+        self._refused(both, "LABEL_PREDATES_HEAD")
 
     def test_a_fork_pull_requests_push_is_read_from_the_fork(self) -> None:
         gh = ApprovalGitHub(pushes=[_push(HEAD, "2026-10-28T09:00:00Z", ref="refs/heads/fix #1")])
@@ -1940,15 +2007,19 @@ class RecordAndCarryTests(unittest.TestCase):
         errors: list[str] = []
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ctv, "GitHub", return_value=gh), \
                 mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t"}), \
-                mock.patch.object(ctv, "candidate_digest", return_value=D1), mock.patch("sys.stdout"), \
-                mock.patch("sys.stderr") as stderr:
+                mock.patch.object(ctv, "candidate_digest", return_value=D1), \
+                mock.patch("sys.stdout") as stdout, mock.patch("sys.stderr") as stderr:
             output = Path(tmp) / "out"
             code = ctv.main(["--repository", gh.repository, "--pull-request", str(PR), "--head-sha", HEAD,
                              "--github-output", str(output), "--approval", "dispatch"])
             errors = [str(call.args[0]) for call in stderr.write.call_args_list if call.args]
+            printed = "".join(str(call.args[0]) for call in stdout.write.call_args_list if call.args)
             self.assertFalse(output.exists())
         self.assertEqual(code, 1)
         self.assertIn("approval not recorded by dispatch: ApprovalRefused: LABEL_PREDATES_HEAD: ", "".join(errors))
+        # The run's page shows the code alone; the text, which can name the author's branch, stays in the log.
+        annotations = [line for line in printed.splitlines() if line.startswith("::")]
+        self.assertEqual(annotations, ["::error::approval not recorded by dispatch: LABEL_PREDATES_HEAD"])
 
     def test_a_dispatched_approval_does_not_depend_on_the_base_a_pull_request_once_had(self) -> None:
         """A label-event record comes from the base branch's workflow, so a retargeted pull request is refused
@@ -2499,8 +2570,16 @@ class NamedRouteCollectorTests(unittest.TestCase):
             with self.subTest(total=total):
                 scenario = Scenario()                     # a green pull_request_target attestation at the head
                 scenario.raw["listed_total"] = total
-                raw, _gh = self.collect(scenario)
+                raw, gh = self.collect(scenario)
                 self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": [note]})
+                # Decided from the run lists alone, before the full read of the pull request.
+                self.assertNotIn(f"pulls/{PR}", gh.reads)
+        # With no run of either route the remedy is still named.
+        missing = Scenario()
+        missing.drop_runs(PROV)
+        missing.raw["listed_total"] = 5000
+        raw, _gh = self.collect(missing)
+        self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": [note]})
         self.assertLessEqual(len(ctv.Verdict("pending", pending=[note]).description()), 140)
         # A cancelled named run in what was returned is not a result either.
         scenario = Scenario()
@@ -2549,10 +2628,15 @@ class NamedRouteCollectorTests(unittest.TestCase):
         # A run started at or after the horizon is newer than anything the list lost, whichever route it is:
         # a new dispatch, or a re-run of the run on the pull request's check list.
         recovered = scenario(lost=True)
-        recovered.add_named(9, event="workflow_dispatch", created="2026-10-28T12:00:00Z")
+        recovered.add_named(9, event="workflow_dispatch", created="2026-10-28T12:00:01Z")
         raw, _gh = self.collect(recovered)
         assert raw is not None
         self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "success")
+        # The horizon's own second is not after it: a lost run of that second could have the higher id.
+        tied = scenario(lost=True)
+        tied.add_named(9, event="workflow_dispatch", created="2026-10-28T12:00:00Z")
+        raw, _gh = self.collect(tied)
+        self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": [note]})
         rerun = scenario(lost=True)
         rerun.raw["workflow_runs"][3]["run_started_at"] = "2026-10-28T13:00:00Z"
         raw, _gh = self.collect(rerun)
@@ -2562,6 +2646,37 @@ class NamedRouteCollectorTests(unittest.TestCase):
         early = scenario(lost=True)
         early.add_named(9, event="workflow_dispatch", created="2026-10-28T11:59:59Z")
         raw, _gh = self.collect(early)
+        self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": [note]})
+
+    def test_a_jobless_run_newer_than_the_horizon_does_not_carry_an_older_run_past_it(self) -> None:
+        """A dispatched attestation succeeded at 10:20, a workflow_run attestation failed at 11:00 and has left
+        the truncated list (horizon 12:00), and a refused pull_request_target run with no job is from 13:00.
+        The jobless run is newer than the horizon but judges nothing: it is dropped, and the run judged in its
+        place is the 10:20 success. Failing-before: the horizon was checked before jobless runs were marked,
+        so the verdict was `success` where the complete lists give JOB_FAILED."""
+        note = f"{PROVENANCE.context} (not among its workflow's newest 1000 runs; dispatch it again)"
+
+        def scenario(lost: bool, conclusion: str = "failure") -> Scenario:
+            built = Scenario()
+            built.raw["workflow_runs"][3].update(conclusion=conclusion, created_at="2026-10-28T13:00:00Z")
+            built.raw["jobs"]["4"] = []
+            built.raw["check_runs"] = [check for check in built.raw["check_runs"] if check["check_suite"]["id"] != 40]
+            built.add_named(6, event="workflow_dispatch", created="2026-10-28T10:20:00Z")
+            if lost:
+                built.raw["listed_total"] = {"workflow_run": 5000}
+                built.add_named(8, head=OTHER, created="2026-10-28T12:00:00Z")
+            else:
+                built.add_named(7, created="2026-10-28T11:00:00Z")
+                built.job(7, PROVENANCE.context)["conclusion"] = "failure"
+            return built
+
+        raw, _gh = self.collect(scenario(lost=False))
+        assert raw is not None
+        self.assertEqual(ctv.evaluate(ctv.normalise(raw)).description(), "1 finding(s): JOB_FAILED")
+        raw, _gh = self.collect(scenario(lost=True))
+        self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": [note]})
+        # The same history with the refused run ended as startup_failure was already held back.
+        raw, _gh = self.collect(scenario(lost=True, conclusion="startup_failure"))
         self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": [note]})
 
     def test_the_horizon_of_a_context_is_the_latest_of_its_truncated_lists(self) -> None:

@@ -265,10 +265,7 @@ jobs:
           # revision. Reading "main" and separately asking what "main" is leaves
           # a window in which the two answers describe different content.
           authority_sha="$(gh api "repos/${TRUSTED_REPO}/commits/${TRUSTED_REF}" --jq .sha)"
-          case "${authority_sha}" in
-            [0-9a-f]*) [ "${#authority_sha}" -eq 40 ] || { echo "authority sha malformed" >&2; exit 1; } ;;
-            *) echo "authority sha malformed" >&2; exit 1 ;;
-          esac
+          [[ "${authority_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "authority sha malformed" >&2; exit 1; }
           gh api \
             -H "Accept: application/vnd.github.raw" \
             "repos/${TRUSTED_REPO}/contents/${TRUSTED_LEDGER_PATH}?ref=${authority_sha}" \

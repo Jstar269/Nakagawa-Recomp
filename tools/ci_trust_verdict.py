@@ -459,8 +459,9 @@ def _approval(snapshot: dict) -> tuple[bool, str]:
     reason = (f"{APPROVAL_LABEL!r} is on the pull request, but no approval record written after it matches "
               "this head's protected content; review this head and record the approval for it")
     if snapshot["approval_list_truncated"]:
-        reason += (f" (GitHub returned only its newest {RUN_LIST_LIMIT} approval dispatches since the label, so "
-                   "an older record cannot be seen: dispatch the approval again)")
+        reason += (f" (GitHub's list of approval dispatches since the label is incomplete: it holds at most "
+                   f"{RUN_LIST_LIMIT}, or came without a count, so an older record cannot be seen; dispatch the "
+                   "approval again)")
     return False, reason
 
 
@@ -1130,6 +1131,23 @@ def named_runs(gh: "GitHub", repo: Path, default_branch: str, head_sha: str,
     return found, horizons
 
 
+def behind_horizon(workflow_runs: list[dict], horizons: dict[str, str], head_sha: str,
+                   default_branch: str) -> list[str]:
+    """The contexts whose run to be judged is not newer than its truncated list's horizon, each with the remedy.
+
+    The run must have started after the horizon. One that started in the horizon's own second is refused as
+    well: a lost run of that second with a higher id would be the newer one.
+    """
+    lost = []
+    for producer in PRODUCERS:
+        horizon = horizons.get(producer.context)
+        latest = latest_live_run(workflow_runs, producer, head_sha, default_branch)
+        if horizon is not None and (latest is None or run_order(latest)[0] <= horizon):
+            lost.append(f"{producer.context} (not among its workflow's newest {RUN_LIST_LIMIT} runs; "
+                        "dispatch it again)")
+    return lost
+
+
 def unfinished_producers(workflow_runs: list[dict], head_sha: str, default_branch: str = "main") -> list[str]:
     """The intended contexts whose producer has no run at this head yet, or whose newest live run is unfinished.
 
@@ -1172,6 +1190,7 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
     if not set(waiting) <= named_contexts:
         return {"head_sha": head_sha, "waiting_producers": waiting}
     since = min((run["created_at"] for run in workflow_runs if run.get("created_at")), default=None)
+    horizons: dict[str, str] = {}
     if since:
         named, horizons = named_runs(gh, repo, default_branch, head_sha, since)
         workflow_runs = workflow_runs + named
@@ -1180,14 +1199,11 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
         # horizon: started at or after it, so nothing lost could have come later. An older one, from either
         # route or from the other event's complete list, is not judged in its place; the head waits until it
         # is attested again, and that run is newer than any horizon. (A lost run that someone re-runs is the
-        # one case this cannot see.)
-        for producer in PRODUCERS:
-            horizon = horizons.get(producer.context)
-            latest = latest_live_run(workflow_runs, producer, head_sha, default_branch)
-            if horizon is not None and (latest is None or run_order(latest)[0] < horizon):
-                return {"head_sha": head_sha, "waiting_producers": [
-                    f"{producer.context} (not among its workflow's newest {RUN_LIST_LIMIT} runs; dispatch it again)",
-                ]}
+        # one case this cannot see.) The check runs again below, once the jobs are read: a run found to be
+        # jobless is dropped, and the run judged in its place has to pass the horizon too.
+        lost = behind_horizon(workflow_runs, horizons, head_sha, default_branch)
+        if lost:
+            return {"head_sha": head_sha, "waiting_producers": lost}
         waiting = unfinished_producers(workflow_runs, head_sha, default_branch)
     if waiting:
         return {"head_sha": head_sha, "waiting_producers": waiting}
@@ -1233,6 +1249,9 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
                     or not producer.named_events or run.get("jobless") is True):
                 break
             run["jobless"] = True
+    lost = behind_horizon(workflow_runs, horizons, head_sha, default_branch)
+    if lost:
+        return {"head_sha": head_sha, "waiting_producers": lost}
     raw["jobs"] = jobs
     facts = git_facts(repo, gh.repository, number, head_sha)
     raw |= facts
@@ -1327,26 +1346,39 @@ def label_state(gh: GitHub, number: int, pr: dict) -> dict:
         raise ApprovalRefused(f"{actor!r} has permission {permission!r}, not write")
     return {"actor": actor, "created_at": last.get("created_at") or "",
             "retargeted": any(event.get("event") == "base_ref_changed" for event in all_events),
-            "force_pushed_at": [event.get("created_at") or "" for event in all_events
-                                if event.get("event") == "head_ref_force_pushed"]}
+            "moved": [(event["event"], event.get("created_at") or "") for event in all_events
+                      if event.get("event") in HEAD_MOVED_EVENTS + BASE_MOVED_EVENTS]}
 
 
+# Events of a pull request after which what it proposes may differ from what a labeller saw. A force push and a
+# restored branch move the head. A re-open does too: GitHub leaves a closed pull request's head where it was,
+# and commits pushed meanwhile arrive when it is re-opened. A retarget changes what the head is compared with.
+HEAD_MOVED_EVENTS = ("head_ref_force_pushed", "head_ref_restored", "reopened")
+BASE_MOVED_EVENTS = ("base_ref_changed",)
 _REPOSITORY_NAME = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_REFUSAL_CODE = re.compile(r"([A-Z][A-Z_]+): ")
 
 
 def head_pushed_at(gh: GitHub, pr: dict, head_sha: str) -> datetime:
-    """When ``head_sha`` last became the pull request's head: the newest record of its head branch, in GitHub's
-    repository activity, whose result is that commit.
+    """When ``head_sha`` became the tip of the pull request's head branch: the newest record of that branch in
+    GitHub's repository activity, which must be a record of this commit.
 
-    The activity list is GitHub's own log of every update of a branch (push, force push, creation), with the
-    commit before and after and the time. It is the one source that dates the *latest* arrival of a commit: a
-    pull request can be force-pushed back to a commit it had before, and then every run and every check of that
-    commit predates the moment it became the head again. The earliest run at the commit, which the verifier
-    once used, says when the commit first arrived, and a label applied in between passed for a head nobody had
-    read. Nothing here is taken from the candidate: the branch name only selects the list, as a query value.
+    The activity list holds the updates of a branch (push, force push, creation) with the commit before and
+    after and the time. It dates the *latest* arrival of a commit: a pull request can be moved back to a commit
+    it had before, and then every run and every check of that commit predates the moment it became the head
+    again. The earliest run at the commit, which the verifier once used, says when the commit first arrived, and
+    a label applied in between passed for a head nobody had read. Nothing here is taken from the candidate: the
+    branch name only selects the list, as a query value.
+
+    The list is not complete: it can lag a push and it has been seen to lack a record. So a record of the commit
+    somewhere in it is not enough. The branch's newest record must be this commit's, which is true of a complete
+    list whenever the commit is the tip; when another commit's record is newer, the list does not yet show, or
+    has lost, the update that made this one the tip, and its older arrival proves nothing
+    (``HEAD_NOT_NEWEST_PUSH``). Records that share the newest time must all be this commit's.
 
     Refused as ``HEAD_TIME_UNREADABLE`` when the head repository or branch is not named (a deleted fork), the
-    list cannot be read (a fork this token may not read), or it holds no dated record for this commit.
+    list cannot be read (a fork this token may not read), it has no record of the branch, or a record has no
+    readable time.
     """
     head = pr.get("head") or {}
     repository = (head.get("repo") or {}).get("full_name") or ""
@@ -1357,38 +1389,51 @@ def head_pushed_at(gh: GitHub, pr: dict, head_sha: str) -> datetime:
     try:
         records = gh.paginate(f"{API_ROOT}/repos/{repository}/activity?" + urllib.parse.urlencode({"ref": ref}))
     except (urllib.error.URLError, TimeoutError, KeyError, TypeError, ValueError) as error:
+        status = f"HTTP {error.code}" if isinstance(error, urllib.error.HTTPError) else type(error).__name__
         raise ApprovalRefused(f"HEAD_TIME_UNREADABLE: the activity of {repository} {ref} cannot be read "
-                              f"({type(error).__name__})") from error
-    stamps = [_when(record.get("timestamp")) for record in records
-              if isinstance(record, dict) and record.get("ref") == ref and record.get("after") == head_sha]
-    dated = [stamp for stamp in stamps if stamp is not None]
-    if not dated or len(dated) != len(stamps):
-        raise ApprovalRefused(f"HEAD_TIME_UNREADABLE: {repository} {ref} has no dated push record for {head_sha}")
-    return max(dated)
+                              f"({status})") from error
+    dated = [(_when(record.get("timestamp")), record.get("after")) for record in records
+             if isinstance(record, dict) and record.get("ref") == ref]
+    if not dated or any(stamp is None for stamp, _after in dated):
+        raise ApprovalRefused(f"HEAD_TIME_UNREADABLE: {repository} {ref} has no dated push record")
+    newest = max(stamp for stamp, _after in dated if stamp is not None)
+    if any(after != head_sha for stamp, after in dated if stamp == newest):
+        raise ApprovalRefused(
+            f"HEAD_NOT_NEWEST_PUSH: the newest push record of {repository} {ref} is not for {head_sha}, so the "
+            "list does not show when this commit became the head; push the branch again, then label and dispatch")
+    return newest
 
 
 def label_covers_head(gh: GitHub, number: int, pr: dict, head_sha: str) -> None:
-    """Refuse a dispatched approval unless the current label was applied after ``head_sha`` became the head.
+    """Refuse a dispatched approval unless the current label was applied after what it approves was last changed.
 
     The label names no commit. While every push ran the handler that removes it, "the label is on" meant "this
     head was read"; once GitHub refuses ``pull_request_target`` nothing removes it, and a label applied for one
     head is still there at the next. A dispatch for that next head would then record bytes nobody read. So the
-    label's latest ``labeled`` event must be later than the push that made this commit the head
-    (``head_pushed_at``) and later than every force push the pull request's events record, which is a second,
-    independent witness that the head moved. A label in the same second as the push cannot be ordered and is
-    refused. The remedy is always the same: remove the label, read the head, apply the label again.
+    label's latest ``labeled`` event must be later than the push that made this commit the tip of the head
+    branch (``head_pushed_at``), and later than every event of the pull request that can change its head or its
+    base without such a push (``HEAD_MOVED_EVENTS``, ``BASE_MOVED_EVENTS``): the branch's log dates the branch,
+    and these date the pull request. An event in the label's own second cannot be ordered and is refused. The
+    remedy is always the same: remove the label, read the head, apply the label again.
     """
     state = label_state(gh, number, pr)
     labelled = _when(state["created_at"])
-    moved = [head_pushed_at(gh, pr, head_sha), *(_when(stamp) for stamp in state["force_pushed_at"])]
-    if labelled is None or any(stamp is None for stamp in moved):
-        raise ApprovalRefused(f"HEAD_TIME_UNREADABLE: a label or force-push event of #{number} has no readable time")
-    newest = max(stamp for stamp in moved if stamp is not None)
+    pushed = head_pushed_at(gh, pr, head_sha)
+    changes = [("LABEL_PREDATES_HEAD", f"{head_sha} became the head of #{number}", pushed)]
+    for event, stamp in state["moved"]:
+        moved = _when(stamp)
+        if moved is None:
+            raise ApprovalRefused(f"HEAD_TIME_UNREADABLE: the {event} event of #{number} has no readable time")
+        changes.append(("LABEL_PREDATES_BASE" if event in BASE_MOVED_EVENTS else "LABEL_PREDATES_HEAD",
+                        f"the {event} event of #{number}", moved))
+    if labelled is None:
+        raise ApprovalRefused(f"HEAD_TIME_UNREADABLE: the label event of #{number} has no readable time")
+    code, what, newest = max(changes, key=lambda change: change[2])
     if labelled <= newest:
         raise ApprovalRefused(
-            f"LABEL_PREDATES_HEAD: {APPROVAL_LABEL!r} was applied at {state['created_at']}, not after {head_sha} "
-            f"became the head of #{number} ({newest.isoformat()}); remove the label, read this head, apply the "
-            "label again, then dispatch again")
+            f"{code}: {APPROVAL_LABEL!r} was applied at {state['created_at']}, not after {what} "
+            f"({newest.isoformat()}); remove the label, read this head, apply the label again, then dispatch "
+            "again")
 
 
 def label_approver(gh: GitHub, number: int, pr: dict, *, refuse_retargeted: bool = True) -> str:
@@ -1446,11 +1491,15 @@ def carry_approval(gh: GitHub, repo: Path, number: int, before_sha: str, head_sh
         records += head_records(gh.paginate(f"actions/runs?head_sha={before_sha}", "workflow_runs"), _jobs_of(gh),
                                 before_sha, number, default_branch)
     if label["created_at"]:
-        records += dispatched_records(gh, repo, number, default_branch, label["created_at"])[0]
+        dispatched, cut = dispatched_records(gh, repo, number, default_branch, label["created_at"])
+        records += dispatched
+    else:
+        cut = False
     recorded = {record["digest"] for record in records if under_label(record, _when(label["created_at"]))}
     if not recorded:
         raise ApprovalRefused(f"the current label has no approval record at the previous head {before_sha} "
-                              "and none by dispatch")
+                              "and none by dispatch"
+                              + (" (GitHub's list of approval dispatches since the label is incomplete)" if cut else ""))
     digest = candidate_digest(gh, repo, number, head_sha, remote)
     if digest not in recorded:
         raise ApprovalRefused("protected CI content differs from the approved head's")
@@ -1476,6 +1525,11 @@ def approval_main(args: argparse.Namespace, gh: GitHub) -> int:
                                      dispatched=args.approval == "dispatch")
     except Exception as error:  # Fail closed: any error, an API failure included, records and carries nothing.
         print(f"approval not {done}: {type(error).__name__}: {error}", file=sys.stderr)
+        code = _REFUSAL_CODE.match(str(error)) if isinstance(error, ApprovalRefused) else None
+        if code:
+            # Only the code is shown on the run's page. The text stays in the log: it can name the head branch,
+            # which is the pull request author's text and has no place in a workflow command.
+            print(f"::error::approval not {done}: {code.group(1)}")
         print(gh.budget_note())
         return 1
     print(f"approval {done} at {args.head_sha}: protected content digest {digest}")

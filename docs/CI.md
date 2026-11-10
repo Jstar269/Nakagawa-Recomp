@@ -1496,16 +1496,34 @@ meant "this head was read"; once GitHub refuses `pull_request_target` nothing re
 label given for one head is still on the pull request at the next. The dispatch therefore
 refuses a label that is not newer than the head it is asked to approve
 (`LABEL_PREDATES_HEAD`): the label's latest `labeled` event must be later than the push that
-made that commit the head. The push time comes from GitHub's repository activity for the head
-branch, its own log of every branch update, taking the newest record whose result is that
-commit; a force push back to an earlier commit is thus dated by its latest arrival, not by the
-commit's first runs. Every force push the pull request's events record must also be older than
-the label. A label in the same second as the push cannot be ordered and is refused. If the
-push time cannot be read (a deleted fork, a fork the token may not read, no dated record for
-the commit) the dispatch is refused as `HEAD_TIME_UNREADABLE`; such a change lands through a
-branch of this repository. The one case that needs no new label is a push that left the
+made that commit the head. The one case that needs no new label is a push that left the
 protected files' digest unchanged: the existing record still approves it, and no dispatch is
 needed.
+
+What the dispatch compares the label with, and what each refusal means:
+
+| Refusal | The label is not later than | Remedy |
+| --- | --- | --- |
+| `LABEL_PREDATES_HEAD` | the push that made the commit the tip of the head branch, or a `head_ref_force_pushed`, `head_ref_restored` or `reopened` event of the pull request | remove the label, read the head, apply the label, dispatch |
+| `LABEL_PREDATES_BASE` | a `base_ref_changed` event: the pull request was retargeted after the label | the same |
+| `HEAD_NOT_NEWEST_PUSH` | (the branch's newest push record is for another commit, so the list does not show when this one became the tip) | push the branch again, then label and dispatch |
+| `HEAD_TIME_UNREADABLE` | (no dated record: a deleted fork, a fork the token may not read, a list that cannot be read) | for a fork that cannot be read, land the change through a branch of this repository |
+
+- The push time comes from GitHub's repository activity for the head branch: its records of the
+  branch's updates, each with the commit before, the commit after and the time. The branch's
+  newest record must be for the commit being approved. A force push back to an earlier commit is
+  thus dated by its latest arrival, not by the commit's first runs.
+- That list is not a complete log. It can lag a push, and it has been seen to lack a record. So
+  a record of the commit somewhere in the list is not enough, and when the newest record is
+  another commit's the dispatch is refused instead of dating the head by an older arrival.
+- The branch's records date the branch, not the pull request. GitHub leaves a closed pull
+  request's head where it was, and commits pushed meanwhile arrive when it is re-opened; a
+  retarget changes what the head is compared with. So the label must also be later than every
+  such event of the pull request.
+- Times are compared to the second, and the pull request shows a new head a second or two after
+  the activity time of its push. A label in the same second as the push or event is refused; a
+  label applied in the gap just after it is not. Apply the label after reading the head on the
+  pull request's page, not from a script racing the push.
 
 The dispatch is the step to rely on, not an extra. Applying the label also starts a
 `pull_request_target` run that writes a record, but that run cannot be counted on: GitHub
