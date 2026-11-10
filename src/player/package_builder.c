@@ -2285,6 +2285,160 @@ bool package_builder_toolchain_missing(
     return true;
 }
 
+/* ---- Build child PATH (#2278) ---------------------------------------------
+ * Python, make and gcc must all come from one UCRT64 toolchain. A stray MinGW
+ * (a Chocolatey one, say) ahead of MSYS2 on the user's PATH would otherwise win
+ * for gcc while python still came from the MSYS2 fallback list. */
+
+static bool builder_is_separator(char c) { return c == '/' || c == '\\'; }
+
+static char builder_ascii_lower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+/* The last path component of dir, ignoring trailing separators. */
+static const char *builder_last_component(const char *dir, size_t *len_out) {
+    size_t end = strlen(dir);
+    while (end > 0 && builder_is_separator(dir[end - 1])) end--;
+    size_t begin = end;
+    while (begin > 0 && !builder_is_separator(dir[begin - 1])) begin--;
+    *len_out = end - begin;
+    return dir + begin;
+}
+
+/* Whether dir's last component equals name (lower case), ignoring case. */
+static bool builder_component_is(const char *dir, const char *name) {
+    size_t len = 0;
+    const char *last = builder_last_component(dir, &len);
+    if (len != strlen(name)) return false;
+    for (size_t i = 0; i < len; i++) {
+        if (builder_ascii_lower(last[i]) != name[i]) return false;
+    }
+    return true;
+}
+
+/* Copy dir without its last component and trailing separators. False when
+ * nothing is left or it does not fit. */
+static bool builder_parent_dir(const char *dir, char *out, size_t out_size) {
+    size_t len = 0;
+    const char *last = builder_last_component(dir, &len);
+    size_t keep = (size_t)(last - dir);
+    while (keep > 0 && builder_is_separator(dir[keep - 1])) keep--;
+    if (keep == 0 || keep >= out_size) return false;
+    memcpy(out, dir, keep);
+    out[keep] = '\0';
+    return true;
+}
+
+/* A system UCRT64 prefix: bin/gcc.exe plus include/SDL3/SDL.h, the pair
+ * sdl3-check needs from one toolchain. The headers tell a complete MSYS2 UCRT64
+ * install from a bare MinGW; sdl3-check still validates the rest. */
+static bool builder_ucrt64_prefix_usable(const char *prefix, char *bin_out, size_t bin_size) {
+    char gcc[NK_MAX_PATH * 2];
+    char header[NK_MAX_PATH * 2];
+    const char sep = nk_platform_path_separator();
+    int bin_len = snprintf(bin_out, bin_size, "%s%cbin", prefix, sep);
+    if (bin_len < 0 || (size_t)bin_len >= bin_size) return false;
+    int g = snprintf(gcc, sizeof(gcc), "%s%cgcc.exe", bin_out, sep);
+    int h = snprintf(header, sizeof(header), "%s%cinclude%cSDL3%cSDL.h", prefix, sep, sep, sep);
+    return g > 0 && (size_t)g < sizeof(gcc) && h > 0 && (size_t)h < sizeof(header) &&
+           nk_platform_file_exists(gcc) && nk_platform_file_exists(header);
+}
+
+/* hint is a UCRT64 prefix or its bin folder. */
+static bool builder_ucrt64_from_hint(const char *hint, char *bin_out, size_t bin_size) {
+    if (!hint || !hint[0] || strlen(hint) >= NK_MAX_PATH) return false;
+    char prefix[NK_MAX_PATH];
+    if (builder_component_is(hint, "bin")) {
+        if (!builder_parent_dir(hint, prefix, sizeof(prefix))) return false;
+    } else {
+        safe_str_copy(prefix, sizeof(prefix), hint);
+    }
+    return builder_ucrt64_prefix_usable(prefix, bin_out, bin_size);
+}
+
+/* A tool-root bin (bundle or download) counts when its gcc.exe exists. */
+static bool builder_root_bin_has_gcc(const char *bin) {
+    char gcc[NK_MAX_PATH * 2];
+    int n = snprintf(gcc, sizeof(gcc), "%s%cgcc.exe", bin, nk_platform_path_separator());
+    return n > 0 && (size_t)n < sizeof(gcc) && nk_platform_file_exists(gcc);
+}
+
+bool package_builder_resolve_toolchain_bin(const char *prerequisites_root,
+                                           const char *data_root,
+                                           const char *path_env,
+                                           const char *msys_hint,
+                                           const char *msys_default_prefix,
+                                           char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+
+    char bin[NK_MAX_PATH];
+    const char sep = nk_platform_path_separator();
+    if (prerequisites_root && prerequisites_root[0]) {
+        /* A verified release bundle (#1285) alone decides: a bundle without its
+           gcc is not quietly swapped for another toolchain. */
+        int n = snprintf(bin, sizeof(bin), "%s%cmsys64%cucrt64%cbin", prerequisites_root, sep,
+                         sep, sep);
+        if (n <= 0 || (size_t)n >= sizeof(bin) || !builder_root_bin_has_gcc(bin)) return false;
+    } else {
+        bool found = false;
+        if (data_root && data_root[0]) {
+            int n = snprintf(bin, sizeof(bin), "%s%cprerequisites%cmsys64%cucrt64%cbin",
+                             data_root, sep, sep, sep, sep);
+            found = n > 0 && (size_t)n < sizeof(bin) && builder_root_bin_has_gcc(bin);
+        }
+        /* A system MSYS2 UCRT64 install: a UCRT64 gcc already on PATH, then an
+           explicit hint, then the default prefix, the order nk_doctor_checks.py
+           uses. The PATH test is stricter than the doctor's: the doctor accepts
+           any resolved gcc path containing "ucrt64", while this needs a bin folder
+           whose parent folder is named exactly ucrt64. */
+        if (!found && path_env && path_env[0]) {
+            const char list_sep = nk_platform_path_list_separator();
+            const char *entry = path_env;
+            while (!found && entry && *entry) {
+                const char *next = strchr(entry, list_sep);
+                size_t len = next ? (size_t)(next - entry) : strlen(entry);
+                char dir[NK_MAX_PATH];
+                char parent[NK_MAX_PATH];
+                if (len > 0 && len < sizeof(dir)) {
+                    memcpy(dir, entry, len);
+                    dir[len] = '\0';
+                    found = builder_component_is(dir, "bin") &&
+                            builder_parent_dir(dir, parent, sizeof(parent)) &&
+                            builder_component_is(parent, "ucrt64") &&
+                            builder_ucrt64_prefix_usable(parent, bin, sizeof(bin));
+                }
+                entry = next ? next + 1 : NULL;
+            }
+        }
+        if (!found) {
+            found = builder_ucrt64_from_hint(msys_hint, bin, sizeof(bin)) ||
+                    builder_ucrt64_from_hint(msys_default_prefix, bin, sizeof(bin));
+        }
+        if (!found) return false;
+    }
+    if (strlen(bin) >= out_size) return false;
+    safe_str_copy(out, out_size, bin);
+    return true;
+}
+
+bool package_builder_compose_build_path(const char *toolchain_bin, const char *path_env,
+                                        char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    if (!toolchain_bin || !toolchain_bin[0]) return false;
+    const char list_sep = nk_platform_path_list_separator();
+    int n = (path_env && path_env[0])
+        ? snprintf(out, out_size, "%s%c%s", toolchain_bin, list_sep, path_env)
+        : snprintf(out, out_size, "%s", toolchain_bin);
+    if (n <= 0 || (size_t)n >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
 /* Every new build attempt starts from a clean run state. A session is
  * reusable, so a previous run's clock and outcome flags must not survive into
  * the next start: the poll clock latches on start_time_ms == 0, and a stale
@@ -2360,38 +2514,25 @@ NkResult package_builder_start(
     char path_override[32768];
     char path_environment[32784];
     const char *envp[2] = { NULL, NULL };
-    char downloaded_bin[NK_MAX_PATH];
-    int path_len = 0;
-    if (session->prerequisites_root[0]) {
-        /* A verified release bundle (#1285) replaces the per-user download. */
-        path_len = snprintf(downloaded_bin, sizeof(downloaded_bin),
-                            "%s%cmsys64%cucrt64%cbin", session->prerequisites_root,
-                            nk_platform_path_separator(), nk_platform_path_separator(),
-                            nk_platform_path_separator());
-    } else if (user_data_root && user_data_root[0]) {
-        path_len = snprintf(downloaded_bin, sizeof(downloaded_bin),
-                            "%s%cprerequisites%cmsys64%cucrt64%cbin",
-                            user_data_root, nk_platform_path_separator(),
-                            nk_platform_path_separator(), nk_platform_path_separator(),
-                            nk_platform_path_separator());
-    }
-    const char *old_path = getenv("PATH");
-    if (path_len > 0 && (size_t)path_len < sizeof(downloaded_bin)) {
-        char downloaded_gcc[NK_MAX_PATH];
-        int gcc_len = snprintf(downloaded_gcc, sizeof(downloaded_gcc), "%s%cgcc.exe",
-                               downloaded_bin, nk_platform_path_separator());
+    char toolchain_bin[NK_MAX_PATH];
+    const char *msys_hint = NULL;
+    const char *msys_default = NULL;
 #if defined(_WIN32) || defined(_WIN64)
-        const char list_separator = ';';
-#else
-        const char list_separator = ':';
+    /* The system MSYS2 UCRT64 candidates, in the order the resolver tries them:
+       a UCRT64 bin already on PATH, then an explicit MSYS_PATH, then the default
+       install (docs/SETUP.md, "PATH order"). */
+    msys_hint = getenv("MSYS_PATH");
+    msys_default = "C:/msys64/ucrt64";
 #endif
-        int written = gcc_len > 0 && (size_t)gcc_len < sizeof(downloaded_gcc) &&
-                      nk_platform_file_exists(downloaded_gcc)
-            ? snprintf(path_override, sizeof(path_override), "%s%c%s",
-                       downloaded_bin, list_separator, old_path ? old_path : "")
-            : -1;
-        if (written > 0 && (size_t)written < sizeof(path_override)) {
-            snprintf(path_environment, sizeof(path_environment), "PATH=%s", path_override);
+    const char *old_path = getenv("PATH");
+    if (package_builder_resolve_toolchain_bin(session->prerequisites_root, user_data_root,
+                                              old_path, msys_hint, msys_default,
+                                              toolchain_bin, sizeof(toolchain_bin)) &&
+        package_builder_compose_build_path(toolchain_bin, old_path, path_override,
+                                           sizeof(path_override))) {
+        int written = snprintf(path_environment, sizeof(path_environment), "PATH=%s",
+                               path_override);
+        if (written > 0 && (size_t)written < sizeof(path_environment)) {
             envp[0] = path_environment;
         }
     }
