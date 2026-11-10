@@ -1572,7 +1572,9 @@ figure, or the larger pull the device was measured to take (the largest burst se
 device last changed, plus the frames a rate-converting stream keeps back). `queued=` in
 `AUDIOSTAT_HOST` is the
 mixer's whole queue, the hold included, and so are `q_min_ms` and `q_max_ms` in `PERF_AUDIO`,
-which leave out only silence queued for the push that reports them:
+which leave out only silence queued for the push that reports them. A queue whose stream can
+give the device nothing reads 0 everywhere, to the guest as well: a stream that converts the
+sample rate keeps its last few frames back, and they are not counted as queued:
 
 ```text
 AUDIOSTAT_LEAD: vbl=9300 ch=8 outputs=268 queued=8820 lead_ms=200

@@ -736,6 +736,17 @@ int sr_audio_played_dry(int ch) {
     return SDL_GetAudioStreamAvailable(s_streams[ch]) == 0;
 }
 
+/* Of `queued_frames` on `ch`, the frames a pull can still take: all of them, or none when the
+ * stream can give nothing. A stream that converts the rate keeps its last few frames back until
+ * more arrive (7 from 44.1 to 48 kHz on the reference PC), and those are never played on their
+ * own, so they are not queued audio as the guest means it. Warship Gunner 2 Portable waits for
+ * sceAudioGetChannelRestLength to read 0 at the end of a stream; on a 48 kHz device it read 7
+ * for good and the title stopped there. The dropout count needs the same reading: on such a
+ * device a queue that has run dry is not empty. */
+static int sr_audio_takeable_frames(int ch, int queued_frames) {
+    return SDL_GetAudioStreamAvailable(s_streams[ch]) == 0 ? 0 : queued_frames;
+}
+
 void sr_audio_push_silence(int ch, int nframes) {
     static const int16_t zeros[1024 * 2];
     if (ch < 0 || ch >= SR_AUDIO_CHANNELS || nframes <= 0 || s_audio_state != AUDIO_STATE_ACTIVE) {
@@ -749,6 +760,9 @@ void sr_audio_push_silence(int ch, int nframes) {
     if (queued_bytes / 4 >= SR_AUDIO_MAX_QUEUED_FRAMES - nframes) {
         return;   /* a hold the mixer cannot take: the pushes that follow are refused and counted */
     }
+    /* Frames the stream kept back become takeable with the silence behind them. The push that
+     * follows did not find them queued any more than it finds the silence. */
+    s_primed_frames[ch] += (uint32_t)(queued_bytes / 4 - sr_audio_takeable_frames(ch, queued_bytes / 4));
     /* Before the data: a pull that comes in between then leaves the flag set over a queue that
      * has frames, which is not dry. */
     SDL_SetAtomicInt(&s_played_dry[ch], 0);
@@ -809,10 +823,12 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     }
     int cur_queued_frames = queued_bytes / 4;
     sr_audio_shadow_sync(ch, (uint32_t)cur_queued_frames);
-    /* What this push found queued: not the silence sr_audio_push_silence() put there for it. */
+    /* What this push found queued: frames a pull can take (sr_audio_takeable_frames), less the
+     * silence sr_audio_push_silence() put there for it. */
     const uint32_t primed_frames = s_primed_frames[ch];
-    const int found_frames = (uint32_t)cur_queued_frames > primed_frames
-                                 ? cur_queued_frames - (int)primed_frames : 0;
+    const int takeable_frames = sr_audio_takeable_frames(ch, cur_queued_frames);
+    const int found_frames = (uint32_t)takeable_frames > primed_frames
+                                 ? takeable_frames - (int)primed_frames : 0;
     s_primed_frames[ch] = 0;
 
     /* Instrumentation: underrun detection (queue had completely dried up after previous activity) */
@@ -1142,7 +1158,7 @@ int sr_audio_queued(int ch) {
     }
     const int frames = bytes / 4;
     sr_audio_shadow_sync(ch, (uint32_t)frames);
-    return frames;
+    return sr_audio_takeable_frames(ch, frames);
 }
 
 /* The frames the host output device takes from a channel in one pull, in mixer frames: 441 from
@@ -1599,9 +1615,10 @@ static void test_played_dry_is_exact_and_per_channel(void) {
     const Uint64 deadline = SDL_GetTicks() + 5000;
     while (!sr_audio_played_dry(3) && SDL_GetTicks() < deadline) SDL_Delay(2);
     assert(sr_audio_played_dry(3) == 1);
-    const int kept = sr_audio_queued(3);
-    assert(kept > 0 && kept < 64);                               /* dry, with frames still queued */
+    const int kept = SDL_GetAudioStreamQueued(s_streams[3]) / 4;
+    assert(kept > 0 && kept < 64);                               /* dry, with frames still in the stream */
     assert(SDL_GetAudioStreamAvailable(s_streams[3]) == 0);
+    assert(sr_audio_queued(3) == 0);                             /* which no pull can take: nothing is queued */
 
     /* The pull to queue against includes them, learned from channel 3: channel 0 was never used. */
     SDL_AudioSpec spec;
@@ -1612,10 +1629,17 @@ static void test_played_dry_is_exact_and_per_channel(void) {
     while (sr_audio_host_pull_frames() < chunk + kept && SDL_GetTicks() < deadline2) SDL_Delay(2);
     assert(sr_audio_host_pull_frames() >= chunk + kept);
 
-    /* A push ends it; a pull that then finds frames to give does not bring it back. */
+    /* The push that ends it found nothing queued, kept-back frames or not, and with the hold's
+     * silence ahead of it: the dropout is counted. */
     assert(SDL_PauseAudioDevice(s_device_id));
+    assert(s_stats.underrun_events == 0);
+    sr_audio_push_silence(3, 672);
     sr_audio_push(3, tone, 600, 0x8000, 0x8000);
+    assert(s_stats.underrun_events == 1);
     assert(sr_audio_played_dry(3) == 0);
+    assert(sr_audio_queued(3) == kept + 672 + 600);
+    sr_audio_push(3, tone, 600, 0x8000, 0x8000);
+    assert(s_stats.underrun_events == 1);
     s_test_device_freq = 0;
     test_reset();
     printf("test_played_dry_is_exact_and_per_channel: PASS\n");
