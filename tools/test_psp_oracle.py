@@ -2488,7 +2488,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 151)
+        self.assertEqual(len(routes), 152)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 181},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 181, 185},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -10611,6 +10611,130 @@ class MemoryEdgeProbeTests(unittest.TestCase):
         self.assertEqual(row["case_ids"][-1], "memory-edge-done")
         self.assertEqual(row["case_ids"], [name for name, _ in parse_golden.MEMORY_EDGE_ROWS]
                          + ["memory-edge-done"])
+
+
+class GeThroughZProbeTests(unittest.TestCase):
+    """CASE=ge-through-z (185, PSP-GE-THROUGHZ-001) in probe_ge_sample.c: through-mode vertex z
+    outside 0..65535, fractional, infinite and NaN. One bounded list per cell into the ge-raster
+    and ge-rtt VRAM blocks, the depth test ALWAYS with writes on, a fixed-shape stream that
+    matches the registry, and no hardware result claimed (NOT_RUN)."""
+
+    probe: ClassVar[str]
+    makefile: ClassVar[str]
+    readme: ClassVar[str]
+    doc: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_ge_sample.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        cls.doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-GE-THROUGHZ-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.index("#if PSP_ORACLE_CASE == GE_CASE_THROUGH_Z\n\n")
+        end = cls.probe.index("#endif /* GE_CASE_THROUGH_Z */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),ge-through-z)\nCASE_ID = 185\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),ge-through-z)\nTARGET = $(BUILD_DIR)/ge_through_z\n"
+                      "OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define GE_CASE_THROUGH_Z 185\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "ge-through-z"\n#define HLE_TEST_ID "PSP-GE-THROUGHZ-001"\n'
+                      '#define HLE_LOG "host0:/ge_through_z_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "ge-through-z").name,
+                         "ge_through_z_log.txt")
+        self.assertEqual(_campaign_completeness_contract("ge-through-z"), "strict-golden-sequence")
+        self.assertNotIn("ge-through-z", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("| `ge-through-z` | `PSP-GE-THROUGHZ-001` |", self.readme)
+        self.assertIn("| `ge-through-z` | `PSP-GE-THROUGHZ-001` | `NOT_RUN`", self.doc)
+
+    def test_section_calls_only_the_ge_and_cache_imports_and_is_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), {
+            "sceGeEdramGetAddr", "sceGeListEnQueue", "sceGeListSync", "sceGeDrawSync",
+            "sceGeBreak", "sceKernelDcacheWritebackAll", "sceKernelDelayThread",
+            "sceKernelGetSystemTimeLow"})
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "sceGu", "sceDisplay", "sceIo"):
+            self.assertNotIn(banned, self.section)
+        self.assertEqual(self.section.count("i < GTZ_WAIT_POLLS; i++"), 2)
+        body = _c_function_bodies(self.section)["gtz_draw"]
+        self.assertLess(body.index("hle_step(c->name);"), body.index("sceGeListEnQueue("))
+        self.assertLess(body.index("gtz_prepare();"), body.index("sceGeListEnQueue("))
+        self.assertLess(body.index("sceKernelDcacheWritebackAll();"), body.index("sceGeListEnQueue("))
+        self.assertIn("reset_rc = sceGeBreak(1, &param);", body)
+        # The ge-raster and ge-rtt blocks: colour at 0x100000, depth at 0x110000, 64x32.
+        for fragment in ("#define GTZ_FB_OFFSET 0x00100000u", "#define GTZ_ZB_OFFSET 0x00110000u",
+                         "#define GTZ_STRIDE 64u", "#define GTZ_ROWS 32u",
+                         "#define GTZ_ZCLEAR 0x1234u"):
+            self.assertIn(fragment, self.section)
+
+    def test_list_words(self) -> None:
+        body = _c_function_bodies(self.section)["gtz_list"]
+        for fragment in ("GTZ_W(0xd2, 0u);", "GTZ_W(0x23, 1);", "GTZ_W(0xde, 1);",
+                         "GTZ_W(0xe7, 0);", "GTZ_W(0x1e, 0);", "GTZ_W(0x12, 0x0080019cu);",
+                         "GTZ_W(0x04, (6u << 16) | 2u);", "GTZ_W(0x0f, 0);", "GTZ_W(0x0c, 0);",
+                         "GTZ_W(0x9e, GTZ_ZB_OFFSET);", "GTZ_W(0x9c, GTZ_FB_OFFSET);"):
+            self.assertIn(fragment, body)
+        # Through mode (bit 23), 8888 colour (7 << 2), float position (3 << 7), no texture.
+        self.assertEqual(0x0080019c, (1 << 23) | (3 << 7) | (7 << 2))
+        # The depth test enable is not among the units the list turns off.
+        units = re.search(r"off_units\[11\] = \{(.*?)\};", body, re.DOTALL)
+        self.assertIsNotNone(units)
+        self.assertNotIn("0x23u", _matched(units).group(1))
+
+    def test_cells_are_the_z_values_in_order(self) -> None:
+        import struct
+        table = re.search(r"gtz_cells\[GTZ_CELL_COUNT\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(table)
+        cells = re.findall(r'\{"([\w-]+)", 0x([0-9a-f]{8})u\}', _matched(table).group(1))
+        self.assertEqual(tuple(name for name, _ in cells), parse_golden.GE_THROUGH_Z_CELLS)
+        values = [struct.unpack("<f", struct.pack("<I", int(bits, 16)))[0] for _, bits in cells]
+        self.assertEqual(values[:9], [-1.0, -0.5, 0.0, 0.5, 1.5, 65535.0, 65535.5, 65536.0, 70000.0])
+        self.assertEqual(values[9], float("inf"))
+        self.assertNotEqual(values[10], values[10])  # NaN, last
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["ge-through-z"]
+        self.assertEqual(spec.test_id, "PSP-GE-THROUGHZ-001")
+        self.assertEqual(spec.terminal_case, "ge-through-z-done")
+        cases = parse_golden.GE_THROUGH_Z_CASES
+        self.assertEqual(len(cases), 22)
+        self.assertEqual(cases[:2], ("zm1-draw", "zm1-z"))
+        self.assertEqual(cases[-1], "znan-z")
+        self.assertEqual(set(counts.values()), {16, 1})
+        self.assertIn("hle_record(row, qid < 0 ? \"FAIL\" : idle ? \"PASS\" : \"TIMEOUT\", "
+                      "(uint32_t)qid, draw, 16);", self.section)
+        self.assertIn("hle_record(row, \"PASS\", 0, s_gtz_row, GTZ_SIDE);", self.section)
+        self.assertIn("#define GTZ_SIDE 16u", self.section)
+
+    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "ge_through_z.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_ge_sample.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["ge-through-z"])
+        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["case_ids"][-1], "ge-through-z-done")
 
 
 class GeRasterProbeTests(unittest.TestCase):

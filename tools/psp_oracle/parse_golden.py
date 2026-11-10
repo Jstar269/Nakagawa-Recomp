@@ -2567,6 +2567,21 @@ for _fetch_case in (
         terminal_case="fetch-armed",
     )
 
+# ge-through-z (185, probe_ge_sample.c): through-mode vertex z outside 0..65535, fractional,
+# infinite and NaN. Per cell, in order, one `-draw` record (16 words: the GE wait outcome, the
+# list length, the z bits, the colour pixels written, the colour at the sprite centre and the
+# changed depth words) and one `-z` record (the depth words of the sprite's centre row).
+GE_THROUGH_Z_CELLS = (
+    "zm1", "zm0p5", "z0", "z0p5", "z1p5", "z65535", "z65535p5", "z65536", "z70000", "zinf",
+    "znan",
+)
+GE_THROUGH_Z_ROWS = tuple(
+    row for cell in GE_THROUGH_Z_CELLS for row in ((f"{cell}-draw", 16), (f"{cell}-z", 16)))
+GE_THROUGH_Z_CASES = tuple(case for case, _count in GE_THROUGH_Z_ROWS)
+_register_campaign_probe(
+    "ge-through-z", "PSP-GE-THROUGHZ-001", GE_THROUGH_Z_CASES, dict(GE_THROUGH_Z_ROWS),
+)
+
 # ge-raster (123, probe_ge_sample.c): the #343 GE raster corpus. The cells are the gr_cells
 # table of the block probe_ge_sample.c shares with tests/native/hle_thread_selftest.c, in order. Per
 # cell, one `-draw` record (9 words: the GE wait outcome, the list length and the window's

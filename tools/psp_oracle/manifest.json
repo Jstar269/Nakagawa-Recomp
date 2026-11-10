@@ -2708,6 +2708,37 @@
         "reset": "one PRX launch; PSPLink soft reset before the next launch"
       },
       {
+        "id": "PSP-GE-THROUGHZ-001",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as case 185, a fixed-shape stream of 22 records and the done record. No hardware run is cited.",
+        "group": "ge",
+        "source": "fixtures/psp_oracle/probe_ge_sample.c",
+        "prx": "ge_through_z.prx",
+        "apis": [
+          "sceGeEdramGetAddr",
+          "sceGeListEnQueue",
+          "sceGeListSync",
+          "sceGeDrawSync",
+          "sceGeBreak",
+          "sceKernelDcacheWritebackAll",
+          "sceKernelDelayThread",
+          "sceKernelGetSystemTimeLow"
+        ],
+        "diagnostic_case_ids": [
+          "ge-through-z"
+        ],
+        "case_ids": [
+          "z*-draw",
+          "z*-z",
+          "ge-through-z-done"
+        ],
+        "invariant": "per through-mode z cell, in fixed order: the bounded GE wait outcome, the colour pixels written, the changed depth words (count, lowest, highest, first index) and the depth words under the sprite, read through the uncached VRAM mirror",
+        "issues": [],
+        "risk": "low; project-written through-mode sprite lists into the ge-raster/ge-rtt VRAM blocks at 0x100000 and 0x110000, each wait bounded with a sceGeBreak(1) reset after a TIMEOUT; the infinity and NaN cells run last",
+        "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
+      },
+      {
         "id": "PSP-GE-MIP-001",
         "status": "implemented",
         "hardware_evidence": "MEASURED",

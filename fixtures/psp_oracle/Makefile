@@ -251,6 +251,10 @@ CASE_ID = 109
 # functions and formats, wrap, coverage, framebuffer formats, dither, masks, logic, clear, fog.
 else ifeq ($(CASE),ge-raster)
 CASE_ID = 123
+# 185: GE through-mode vertex z outside 0..65535, fractions, infinity and NaN: the depth
+# word and whether colour is written (probe_ge_sample.c, PSP-GE-THROUGHZ-001).
+else ifeq ($(CASE),ge-through-z)
+CASE_ID = 185
 # 126: the GE level-of-detail and mip cells (probe_ge_sample.c, #1373): constant, automatic
 # and slope TEXLEVEL modes over a texture whose every level is one colour.
 else ifeq ($(CASE),ge-mip)
@@ -703,6 +707,10 @@ OBJS = $(BUILD_DIR)/probe_memory_edge.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE raster corpus: the same source as the sample-point cells, case 123.
 else ifeq ($(CASE),ge-raster)
 TARGET = $(BUILD_DIR)/ge_raster
+OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
+# The GE through-mode depth cells: the same source as the sample-point cells, case 185.
+else ifeq ($(CASE),ge-through-z)
+TARGET = $(BUILD_DIR)/ge_through_z
 OBJS = $(BUILD_DIR)/probe_ge_sample.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE mip cells: the same source as the sample-point cells, case 126.
 else ifeq ($(CASE),ge-mip)
