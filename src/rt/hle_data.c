@@ -2475,6 +2475,7 @@ uint32_t h_io_open_path(const char *path, uint32_t flags, int forced_slot) {
         sr_trace_close();
         (void)sr_videorec_finish_status("ENHANCEMENT_DATA_MISMATCH", 1);
         sr_perf_shutdown();
+        sr_profile_dump_final();
         SR_VERIFY_REPORT_NOW();
         fflush(stderr);
         _Exit(1);

@@ -292,6 +292,37 @@ int main(void) {{
         self.assertIn("s->r[4] + 0x00000000u",effect)
         self.assertNotIn("s->r[4] + 0x00000001u",effect)
 
+    def test_quad_write_back_flag_leaves_the_base_register_alone(self):
+        # An unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-quad-wb;
+        # its register entry, PSP-VFPU-QUADWB-001, is not in this tree yet): bit 1 of an
+        # aligned lv.q/sv.q, the write-back flag, did not change the base register in any
+        # form (offsets 0, +16, +32, -16; four in a row from one base did not drift), and
+        # the access used base + offset. The generated code therefore emits the same access
+        # as the plain word and never assigns the base register. Not hardware evidence until
+        # the register entry lands.
+        for op, plain_word in ((0x36, 0xD9400000), (0x3E, 0xF9400000)):
+            for offset in (0x0000, 0x0010, 0x0020, 0xFFF0):
+                for lle_cpu in (False, True):
+                    with self.subTest(op=hex(op), offset=hex(offset), lle_cpu=lle_cpu):
+                        plain = plain_word | offset
+                        base, _, _ = codegen.vfpu_effect(0x3000, plain, lle_cpu=lle_cpu)
+                        wb, _, _ = codegen.vfpu_effect(0x3000, plain | 2, lle_cpu=lle_cpu)
+                        # The unaligned fallback names its own word; everything else is equal.
+                        self.assertEqual(wb.replace(f"{plain | 2:08x}", "W"), base.replace(f"{plain:08x}", "W"))
+                        self.assertNotRegex(wb, r"s->r\[\d+\]\s*=[^=]")
+                        self.assertIn("s->r[10] + ", wb)
+
+    def test_mtvc_to_the_condition_code_register_keeps_six_bits(self):
+        # Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
+        # register entry is not in this tree yet): mtvc then mfvc on VFPU_CC read back the
+        # written value and 0x3f in every cell. Only control register 3 is masked here.
+        mtvc = lambda reg: (0x12 << 26) | (7 << 21) | (5 << 16) | (128 + reg)
+        effect, _, _ = codegen.vfpu_effect(0x3000, mtvc(3))
+        self.assertEqual(effect, "s->vfpuCtrl[3] = s->r[5] & 0x3fu;")
+        for reg in (0, 1, 2, 8):
+            other, _, _ = codegen.vfpu_effect(0x3000, mtvc(reg))
+            self.assertEqual(other, f"s->vfpuCtrl[{reg}] = s->r[5];")
+
     def test_vrot_overlap_recomputes_cosine_from_written_lane(self):
         # vt/op subfields select vrot; choose vd/vs in one matrix with scalar vs
         # present in the destination vector.
@@ -371,8 +402,8 @@ int main(void) {{
         word=(0x3c<<26)|(4<<23)|(0<<16)|(1<<15)|(0x20<<8)|(0x20)  # vmscl.t 3x3, vd=0x20, vs=0x20, vt=0x00
         effect,_,_=codegen.vfpu_effect(0x5300,word)
         self.assertIn("float _sc = s->v[0];",effect)
-        self.assertIn("s->v[0] = sr_vf_mul(s->v[0], _sc);",effect)
-        self.assertNotIn("sr_vf_mul(s->v[0], s->v[0])",effect,
+        self.assertIn("s->v[0] = sr_vfpu_mul(s->v[0], _sc);",effect)
+        self.assertNotIn("sr_vfpu_mul(s->v[0], s->v[0])",effect,
                          "vmscl must not read the scalar fresh after it is overwritten")
 
     def test_vmscl_alias_snapshots_scalar_before_destructive_writes(self):
@@ -380,15 +411,15 @@ int main(void) {{
         word=(0x3c<<26)|(7<<23)|(1<<16)|(1<<15)|(0x20<<8)|(0x20)  # Matrix1 which=1, vd=0x20, vs=0x20
         effect,_,_=codegen.vfpu_effect(0x5400,word)
         self.assertIn("float _sc = s->v[4];",effect)
-        self.assertIn("s->v[0] = sr_vf_mul(s->v[0], _sc);",effect)
-        self.assertNotIn("sr_vf_mul(s->v[0], s->v[4])",effect,
+        self.assertIn("s->v[0] = sr_vfpu_mul(s->v[0], _sc);",effect)
+        self.assertNotIn("sr_vfpu_mul(s->v[0], s->v[4])",effect,
                          "vmscl alias must not read the scalar fresh after it is overwritten")
 
     def test_lane_arithmetic_goes_through_the_nan_rule_helpers(self):
         # Issue #326: C leaves the NaN a NaN-producing + - * / returns to the host, and an
         # optimiser may swap the operands of + and *. The generated code and sr_vfpu_interp
         # disagreed on NaN words at -O1/-O2 until every lane operation went through the
-        # sr_vf_* helpers in src/rt/recomp.h, so no form may emit a bare float operator.
+        # sr_vf_* and sr_vfpu_* helpers in src/rt/recomp.h, so no form may emit a bare float operator.
         words = {
             "vadd.q": 0x60048800 | 0x8080, "vsub.t": 0x60848800 | 0x8000, "vdiv.p": 0x63848880,
             "vmul.s": 0x64048800, "vdot.q": 0x64848880 | 0x8000, "vhdp.t": 0x66048800 | 0x8000,
@@ -403,6 +434,11 @@ int main(void) {{
                 effect, _, _ = codegen.vfpu_effect(0x5500, word)
                 self.assertNotIn("sr_vfpu_interp", effect)
                 self.assertRegex(effect, r"sr_vf(pu)?_")
+                if name in ("vadd.q", "vsub.t", "vdiv.p", "vmul.s", "vscl.q", "vmscl.t", "vmscl alias"):
+                    # The PSP-3000 lane rule of the unrecorded vfpu-basic-arith read (2026-11-08), not the
+                    # project NaN rule the unmeasured forms still use.
+                    self.assertIn("sr_vfpu_", effect)
+                    self.assertNotIn("sr_vf_", effect)
                 if name in ("vdot.q", "vhdp.t", "vcrsp.t", "vqmul.q", "vmmul.t", "vtfm2.t"):
                     self.assertIn("sr_vfpu_sop(", effect)
                 self.assertIsNone(bare.search(effect), effect)

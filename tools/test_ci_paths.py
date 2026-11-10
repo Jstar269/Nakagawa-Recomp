@@ -1724,6 +1724,89 @@ class LandingOnlyPoolRoutingTests(unittest.TestCase):
         self.assertEqual(self.codeql("push", switch="off"), hosted)
 
 
+class BatchOnlyPoolRoutingTests(unittest.TestCase):
+    """``NK_SELF_HOSTED_LINUX=batch`` gives the pool only to the desk's batches, merge groups and ``main``."""
+
+    def route(self, event_name: str, event: dict[str, object] | None = None, *, ref: str = "refs/pull/1/merge",
+              switch: str = "batch", heartbeat: str = str(NOW - 30)) -> str:
+        runner: str = ci_paths_module.linux_runner(
+            event_name, event or {}, repository=REPO, ref=ref, switch=switch, heartbeat=heartbeat, now=NOW)
+        return runner
+
+    def codeql(self, event_name: str, event: dict[str, object] | None = None, *, ref: str = "refs/heads/main",
+               switch: str = "batch") -> str:
+        runner: str = ci_paths_module.codeql_runner(
+            event_name, event or {}, repository=REPO, ref=ref, switch=switch, heartbeat=str(NOW - 30), now=NOW)
+        return runner
+
+    def test_batch_is_a_switch_value(self) -> None:
+        self.assertEqual(ci_paths_module.self_hosted_switch("batch"), "batch")
+        self.assertEqual(ci_paths_module.self_hosted_switch(" BATCH "), "batch")
+        for switch in ("batches", "batch/", "on-batch", "batch-only"):
+            with self.subTest(switch=switch):
+                self.assertEqual(ci_paths_module.self_hosted_switch(switch), "off")
+
+    def test_batches_merge_groups_and_main_use_the_pool(self) -> None:
+        self.assertEqual(self.route("push", ref="refs/heads/main"), SELF_HOSTED)
+        self.assertEqual(self.route("merge_group", ref="refs/heads/gh-readonly-queue/main/pr-7-" + "a" * 40),
+                         SELF_HOSTED)
+        self.assertEqual(self.route("pull_request", _pull_request()), SELF_HOSTED)
+        self.assertEqual(self.route("pull_request", _pull_request(draft=False)), SELF_HOSTED)
+        self.assertEqual(self.route("pull_request", _pull_request(), switch=" Batch "), SELF_HOSTED)
+
+    def test_task_branch_pull_requests_stay_hosted_ready_or_not(self) -> None:
+        # The same Ready pull request from a batch branch takes the pool: only the branch differs.
+        self.assertEqual(self.route("pull_request", _pull_request(draft=False)), SELF_HOSTED)
+        for label, draft in (("ready", False), ("draft", True), ("draft missing", None)):
+            with self.subTest(label):
+                self.assertEqual(self.route("pull_request", _pull_request("fix/thing", draft=draft)), HOSTED)
+        # A branch that only contains the prefix further in is not a batch.
+        self.assertEqual(self.route("pull_request", _pull_request("fix/batch/thing", draft=False)), HOSTED)
+        self.assertEqual(self.route("push", ref="refs/heads/batch/desk-20261030T185810Z"), HOSTED)
+        self.assertEqual(self.route("push", ref="refs/heads/fix/thing"), HOSTED)
+
+    def test_batch_mode_never_widens_trust(self) -> None:
+        cases = {
+            "fork batch": _pull_request(head_repo="someone/nakagawa-recomp", fork=True, author="someone"),
+            "fork batch by the owner": _pull_request(head_repo="someone/nakagawa-recomp", fork=True),
+            "batch by someone else": _pull_request(author="contributor", sender="contributor"),
+            "batch sent by someone else": _pull_request(sender="contributor"),
+            "batch with no sender": _pull_request(sender=None),
+            "batch into another base": _pull_request(base_repo="someone/nakagawa-recomp"),
+        }
+        for label, event in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self.route("pull_request", event), HOSTED)
+        self.assertEqual(self.route("push", ref="refs/heads/main", heartbeat=str(NOW - 601)), HOSTED)
+        self.assertEqual(self.route("push", ref="refs/heads/main", heartbeat=""), HOSTED)
+        for event_name in ("pull_request_target", "workflow_run", "workflow_dispatch", "schedule"):
+            with self.subTest(event=event_name):
+                self.assertEqual(self.route(event_name, _pull_request()), HOSTED)
+
+    def test_on_and_landing_keep_their_meaning(self) -> None:
+        ready = _pull_request("fix/thing", draft=False)
+        self.assertEqual(self.route("pull_request", ready, switch="landing"), SELF_HOSTED)
+        self.assertEqual(self.route("pull_request", _pull_request("fix/thing", draft=True), switch="landing"), HOSTED)
+        self.assertEqual(self.route("pull_request", _pull_request("fix/thing", draft=True), switch="on"), SELF_HOSTED)
+        self.assertEqual(self.route("pull_request", ready, switch="batch"), HOSTED)
+        self.assertEqual(self.route("pull_request", _pull_request(draft=False), switch="batch"), SELF_HOSTED)
+
+    def test_codeql_batch_mode_takes_only_main_merge_groups_and_batches(self) -> None:
+        hosted = json.dumps("ubuntu-26.04")
+        self.assertEqual(self.codeql("push"), SELF_HOSTED)
+        self.assertEqual(self.codeql("workflow_run", _wake("pull_request", "batch/desk-20261030T193657Z")),
+                         SELF_HOSTED)
+        self.assertEqual(self.codeql("workflow_run", _wake("merge_group", "gh-readonly-queue/main/pr-7-abc")),
+                         SELF_HOSTED)
+        self.assertEqual(self.codeql("workflow_run", _wake("pull_request", "fix/thing")), hosted)
+        self.assertEqual(self.codeql("workflow_run", _wake("pull_request", "batch/desk-1", actor="contributor")),
+                         hosted)
+        self.assertEqual(self.codeql("workflow_run", _wake("pull_request", "batch/desk-1",
+                                                           head_repo="someone/nakagawa-recomp")), hosted)
+        self.assertEqual(self.codeql("push", ref="refs/heads/fix/thing"), hosted)
+        self.assertEqual(self.codeql("push", switch="batches"), hosted)
+
+
 class SelfHostedRunnerRoutingTests(unittest.TestCase):
     """Only trusted runs may reach the maintainer's self-hosted pool (docs/CI.md)."""
 

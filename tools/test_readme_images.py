@@ -53,13 +53,16 @@ BRAND_MARKS = {
 SHARE_CARD = "docs/images/brand/og-card.png"
 SHARE_CARD_SIZE = (1200, 630)
 MAX_SHARE_CARD_BYTES = 300 * 1024
+# GitHub, Scorecard and Codecov resolve the owner and repository name in any letter case, so the canonical
+# Jstar269/Nakagawa-Recomp and the lowercase spelling name the same project.
+REPOSITORY_RE = r"(?i:Jstar269/nakagawa-recomp)"
 BADGE_URL_RES = (
-    re.compile(r"https://github\.com/Jstar269/nakagawa-recomp/actions/workflows/[\w.-]+\.ya?ml/badge\.svg(\?[\w=&%.-]*)?"),
+    re.compile(rf"https://github\.com/{REPOSITORY_RE}/actions/workflows/[\w.-]+\.ya?ml/badge\.svg(\?[\w=&%.-]*)?"),
     re.compile(r"https://img\.shields\.io/[\w./%+-]+(\?[\w=&%.:/-]*)?"),
-    re.compile(r"https://api\.scorecard\.dev/projects/github\.com/Jstar269/nakagawa-recomp/badge"),
+    re.compile(rf"https://api\.scorecard\.dev/projects/github\.com/{REPOSITORY_RE}/badge"),
     re.compile(r"https://www\.bestpractices\.dev/projects/\d+/(badge|baseline)"),
     re.compile(r"https://api\.reuse\.software/badge/github\.com/Jstar269/[\w.-]+"),
-    re.compile(r"https://codecov\.io/gh/Jstar269/nakagawa-recomp/graph/badge\.svg(\?branch=main)?"),
+    re.compile(rf"https://codecov\.io/gh/{REPOSITORY_RE}/graph/badge\.svg(\?branch=main)?"),
 )
 
 
@@ -160,15 +163,24 @@ class ReadmeImageTests(unittest.TestCase):
                 )
 
     def test_remote_images_are_limited_to_status_badges(self) -> None:
-        allowed = "https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg"
+        allowed = (
+            "https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg",
+            "https://github.com/Jstar269/Nakagawa-Recomp/actions/workflows/ci.yml/badge.svg?branch=main",
+            "https://github.com/Jstar269/nakagawa-recomp/actions/workflows/ci.yml/badge.svg?branch=main",
+            "https://codecov.io/gh/Jstar269/Nakagawa-Recomp/graph/badge.svg?branch=main",
+            "https://api.scorecard.dev/projects/github.com/Jstar269/Nakagawa-Recomp/badge",
+        )
         refused = (
             "http://img.shields.io/badge/x-y-blue.svg",
             "https://example.com/pixel.png",
             "https://github.com/someone-else/repo/actions/workflows/ci.yml/badge.svg",
+            "https://github.com/Jstar269/Nakagawa-Recomp-fork/actions/workflows/ci.yml/badge.svg",
             "https://codecov.io/gh/someone-else/repo/graph/badge.svg",
-            "https://codecov.io/gh/Jstar269/nakagawa-recomp/graph/badge.svg?token=deadbeef",
+            "https://codecov.io/gh/Jstar269/Nakagawa-Recomp/graph/badge.svg?token=deadbeef",
         )
-        self.assertTrue(any(p.fullmatch(allowed) for p in BADGE_URL_RES))
+        for url in allowed:
+            with self.subTest(url=url):
+                self.assertTrue(any(p.fullmatch(url) for p in BADGE_URL_RES))
         for url in refused:
             with self.subTest(url=url):
                 self.assertFalse(any(p.fullmatch(url) for p in BADGE_URL_RES))

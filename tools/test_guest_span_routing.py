@@ -51,7 +51,9 @@ class TestGuestSpanRouting(unittest.TestCase):
         self.assertIn("sr_native_memmove(dest, s->r[5], s->r[6], 0x@ADDR@u);", stubs)
         self.assertIn("sr_native_memset(dest, (uint8_t)(s->r[5] & 0xFF), s->r[6], 0x@ADDR@u);", stubs)
         text = (ROOT / "tools" / "codegen.py").read_text(encoding="utf-8")
-        self.assertIn("sr_guest_span_writable(_mf_base, _mf_cnt)", text)
+        # The title-specific MEMSET_FASTPATH emission site is retired (#363); the bulk stores
+        # codegen.py still emits (the sv.q quad store) keep the whole-span check before any write.
+        self.assertIn("(_a&15u)==0 && sr_guest_span_writable(_a,16u)", text)
         self.assertNotIn("memmove(SR_HOST(dest), SR_HOST(src), size)", text)
         self.assertNotIn("memset(SR_HOST(dest), val, size)", text)
         # The stubs' bodies live in recomp.h (#1170): whole-span checks, the
@@ -160,6 +162,7 @@ class TestGuestSpanRouting(unittest.TestCase):
                 "ge_block_transfer": ("sr_guest_rect_readable", "sr_guest_rect_writable"),
                 "ge_vramdump_write": ("sr_guest_span_readable",),
                 "ge_tr_hash_span": ("sr_guest_span_readable",),
+                "sr_enhancement_widen_clip_x": ("sr_guest_span_writable_at",),
             },
             ROOT / "src" / "rt" / "ge_capture.c": {
                 "ge_capture_begin": ("sr_guest_span_readable",),

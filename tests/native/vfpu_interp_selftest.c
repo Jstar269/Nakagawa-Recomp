@@ -198,7 +198,9 @@ static int check_cop2_control_transfers(void) {
         s.r[5] = value;
         CHECK(sr_vfpu_interp(&s, cop2_transfer(7, 5, 128 + i)) == SR_VFPU_COMPUTE,
               "mtvc accepts every VFPU control register");
-        CHECK(s.vfpuCtrl[i] == value, "mtvc writes the selected VFPU control register");
+        /* VFPU_CC (3) keeps only bits 0..5; see check_vfpu_cc_write_mask. */
+        CHECK(s.vfpuCtrl[i] == (i == 3 ? (value & 0x3fu) : value),
+              "mtvc writes the selected VFPU control register");
     }
 
     setup_state(&s);
@@ -208,6 +210,28 @@ static int check_cop2_control_transfers(void) {
     CHECK(memcmp(&s, &before, sizeof(s)) == 0,
           "invalid mfvc leaves the complete CpuState unchanged");
     bad |= memcmp(&s, &before, sizeof(s)) != 0;
+    return bad;
+}
+
+static int check_vfpu_cc_write_mask(void) {
+    /* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
+     * register entry is not in this tree yet): mtvc then mfvc on VFPU_CC (control register 3)
+     * read back written & 0x3f in every cell. */
+    static const uint32_t written[] = {0x00u, 0x3fu, 0x15u, 0x2au, 0x01u, 0x10u, 0x20u,
+                                       0x40u, 0x80u, 0xffu, 0x100u, 0xffffffffu};
+    CpuState s;
+    int bad = 0;
+    for (size_t i = 0; i < sizeof(written) / sizeof(written[0]); i++) {
+        setup_state(&s);
+        s.r[5] = written[i];
+        CHECK(sr_vfpu_interp(&s, cop2_transfer(7, 5, 128 + 3)) == SR_VFPU_COMPUTE,
+              "mtvc accepts VFPU_CC");
+        s.r[6] = 0xa5a5a5a5u;
+        CHECK(sr_vfpu_interp(&s, cop2_transfer(3, 6, 128 + 3)) == SR_VFPU_COMPUTE,
+              "mfvc reads VFPU_CC");
+        CHECK(s.r[6] == (written[i] & 0x3fu), "VFPU_CC reads back the written value and 0x3f");
+        bad |= s.r[6] != (written[i] & 0x3fu);
+    }
     return bad;
 }
 
@@ -313,6 +337,47 @@ static int check_quad_memops(void) {
     CHECK(MEM_R32(ARENA_END - 12u) == 0xCAFE0000u && MEM_R32(ARENA_END - 8u) == 0xCAFE0001u &&
           MEM_R32(ARENA_END - 4u) == 0xCAFE0002u,
           "sv.q rejection leaves every earlier guest word unchanged");
+
+    /* 7b. Bit 1 of an aligned lv.q/sv.q is the write-back flag. An unrecorded PSP read
+     * (PSP-3000, 2026-11-08, issue #326, probe case vfpu-quad-wb, base $t2 = r10, 16-byte
+     * aligned; its register entry, PSP-VFPU-QUADWB-001, is not in this tree yet and is not
+     * a MEASURED row here) showed the flag does not change the base register in any form
+     * (offsets 0, +16, +32, -16; four stores in a row from one base did not drift) and
+     * that the access uses base + offset, as the plain word does. This pins that read in
+     * both lanes; it is not hardware evidence until the register entry lands. */
+    {
+        static const uint32_t offsets[4] = {0x0000u, 0x0010u, 0x0020u, 0xFFF0u};
+        const uint32_t base = 0x08004200u;
+        for (int k = 0; k < 4; k++) {
+            const uint32_t at = base + (uint32_t)(int32_t)(int16_t)offsets[k];
+            sr_mem_init();
+            setup_state(&s);
+            s.r[10] = base;
+            for (int i = 0; i < 4; i++) MEM_W32(at + (uint32_t)i * 4u, 0x5a5a0000u + (uint32_t)i);
+            fill_vi(&s, 0);
+            CHECK(sr_vfpu_interp(&s, lvq(10, 0, offsets[k]) | 2u) == SR_VFPU_COMPUTE,
+                  "lv.q with the write-back bit set loads");
+            CHECK(s.vi[0] == 0x5a5a0000u && s.vi[3] == 0x5a5a0003u && s.r[10] == base,
+                  "lv.q wb loads from base + offset and leaves the base register unchanged");
+            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + (uint32_t)i;
+            CHECK(sr_vfpu_interp(&s, svq(10, 0, offsets[k]) | 2u) == SR_VFPU_STATE,
+                  "sv.q with the write-back bit set stores");
+            CHECK(MEM_R32(at) == 0xc0de0000u && MEM_R32(at + 12u) == 0xc0de0003u && s.r[10] == base,
+                  "sv.q wb stores at base + offset and leaves the base register unchanged");
+        }
+        /* Four stores in a row from one base land in order and the base never drifts. */
+        sr_mem_init();
+        setup_state(&s);
+        s.r[10] = base;
+        for (int q = 0; q < 4; q++) {
+            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + ((uint32_t)q << 8) + (uint32_t)i;
+            CHECK(sr_vfpu_interp(&s, svq(10, 0, (uint32_t)q * 16u) | 2u) == SR_VFPU_STATE &&
+                  s.r[10] == base, "a run of sv.q wb from one base does not drift the base");
+        }
+        CHECK(MEM_R32(base) == 0xc0de0000u && MEM_R32(base + 16u) == 0xc0de0100u &&
+              MEM_R32(base + 32u) == 0xc0de0200u && MEM_R32(base + 60u) == 0xc0de0303u,
+              "a run of sv.q wb stores each quad at its own offset");
+    }
 
     /* 8. Left/right merge forms preflight their exact sub-span. The sub-span
      * always lies inside the aligned 16-byte window containing addr (the left
@@ -702,6 +767,19 @@ static int check_vf2i_conversions(void) {
         {"vf2in negative infinity", 0xff800000u, 0u, 0u, 0x80000000u},
         {"vf2in NaN", 0x7fc00000u, 0u, 0u, 0x7fffffffu},
         {"vf2in signaling NaN", 0x7f800001u, 0u, 0u, 0x7fffffffu},
+        /* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-convert; its
+         * register entry is not in this tree yet): a denormal input of either sign converts
+         * as zero in all four modes, and either sign of NaN gives 0x7fffffff. */
+        {"vf2in +denormal", 0x00000001u, 0u, 0u, 0x00000000u},
+        {"vf2in -denormal", 0x80000001u, 0u, 0u, 0x00000000u},
+        {"vf2iz +denormal", 0x00000001u, 1u, 0u, 0x00000000u},
+        {"vf2iz -denormal", 0x80000001u, 1u, 0u, 0x00000000u},
+        {"vf2iu +denormal not ceiled", 0x00000001u, 2u, 0u, 0x00000000u},
+        {"vf2iu -denormal", 0x80000001u, 2u, 0u, 0x00000000u},
+        {"vf2id +denormal", 0x00000001u, 3u, 0u, 0x00000000u},
+        {"vf2id -denormal not floored", 0x80000001u, 3u, 0u, 0x00000000u},
+        {"vf2iu largest denormal scaled", 0x007fffffu, 2u, 31u, 0x00000000u}, /* derived from the rule, not a probe cell */
+        {"vf2in negative quiet NaN", 0xffc00000u, 0u, 0u, 0x7fffffffu},
     };
     static const int host_modes[] = {
         FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO,
@@ -2145,6 +2223,293 @@ static int check_vrexp2_measured_words(void) {
     return bad;
 }
 
+/* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
+ * register entry is not in this tree yet): vcmp.q of C000 against C010 on the signed-zero and
+ * denormal operand set a = (+0, -0, +den, -den), b = (-0, +0, +0, +den), preset CC 0, read after
+ * vsync. A denormal operand compares as a zero, so EQ/LE/GE are true on all four lanes and
+ * LT/NE/GT are false; EZ is true and NZ false for all four. Both lanes run the same words. */
+static int check_vcmp_denormal_operands(void) {
+    static const uint32_t cc[16] = {0x00, 0x3f, 0x00, 0x3f, 0x3f, 0x00, 0x3f, 0x00,
+                                    0x3f, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x3f, 0x3f};
+    static const uint32_t a[4] = {0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u};
+    static const uint32_t b[4] = {0x80000000u, 0x00000000u, 0x00000000u, 0x00000001u};
+    int bad = 0;
+    for (int cond = 0; cond < 16; cond++) {
+        char name[32];
+        snprintf(name, sizeof(name), "vcmp-q-c%02d-measured", cond);
+        const int c = find_overlap_diff_case(name);
+        CHECK(c >= 0, "measured vcmp word is in the overlap-diff header");
+        if (c < 0) { bad = 1; continue; }
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        for (int i = 0; i < 4; i++) { aot.vi[i] = a[i]; aot.vi[4 + i] = b[i]; }
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, overlap_diff_cases[c].w);
+        g_checks++;
+        if (kind != SR_VFPU_STATE || aot.vfpuCtrl[3] != cc[cond] ||
+            interp.vfpuCtrl[3] != cc[cond]) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: vcmp.q cond %d psp=0x%02x aot=0x%02x interp=0x%02x kind=%d\n",
+                    cond, cc[cond], aot.vfpuCtrl[3], interp.vfpuCtrl[3], kind);
+        }
+    }
+    return bad;
+}
+
+/* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-basic-arith; its
+ * register entry is not in this tree yet): vadd, vsub, vmul, vscl, vdiv.s, vmin and vmax over
+ * 20 operand classes, all 400 ordered pairs, identical at .s/.p/.t/.q for every form but vdiv,
+ * which was run at .s only; its .q case here follows the same lane rule. The reference
+ * below states the measured rule; it matched every one of the 400 pairs of each form in the
+ * console's table (checked off-tree against the private decode). The literal cells pin
+ * values quoted from that run independently of the reference. */
+static const uint32_t ar_ops[20] = {
+    0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u, 0x007fffffu, 0x807fffffu, 0x00800000u,
+    0x80800000u, 0x3f800000u, 0xbf800000u, 0x7f000000u, 0xff000000u, 0x7f7fffffu, 0xff7fffffu,
+    0x7f800000u, 0xff800000u, 0x7fc00011u, 0xffc00022u, 0x7f800033u, 0xff800044u};
+static const char *const ar_opname[7] = {"vadd", "vsub", "vmul", "vdiv", "vscl", "vmin", "vmax"};
+
+static uint32_t ar_daz(uint32_t b) { return (b & 0x7f800000u) == 0u ? (b & 0x80000000u) : b; }
+static int ar_isnan(uint32_t b) { return (b & 0x7fffffffu) > 0x7f800000u; }
+static int ar_isinf(uint32_t b) { return (b & 0x7fffffffu) == 0x7f800000u; }
+static int ar_iszero(uint32_t b) { return (b & 0x7fffffffu) == 0u; }
+static float ar_f(uint32_t b) { float f; memcpy(&f, &b, 4); return f; }
+static uint32_t ar_b(float f) { uint32_t b; memcpy(&b, &f, 4); return b; }
+static int64_t ar_key(uint32_t b) {
+    b = ar_daz(b);
+    return (b >> 31) ? -(int64_t)(b & 0x7fffffffu) : (int64_t)(b & 0x7fffffffu);
+}
+
+/* op: 0 vadd, 1 vsub, 2 vmul, 3 vdiv, 4 vscl (a lane times the scalar b), 5 vmin, 6 vmax. */
+static uint32_t ar_ref(int op, uint32_t a, uint32_t b) {
+    if (op == 5) return ar_key(a) < ar_key(b) ? a : b;
+    if (op == 6) return ar_key(b) < ar_key(a) ? a : b;
+    a = ar_daz(a);
+    b = ar_daz(b);
+    const int nan_in = ar_isnan(a) || ar_isnan(b);
+    const uint32_t xs = (a ^ b) & 0x80000000u;
+    uint32_t r;
+    if (op == 0 || op == 1) {
+        /* inf + (-inf) and inf - inf are the invalid operations. */
+        if (nan_in || (ar_isinf(a) && ar_isinf(b) && (((a ^ b) >> 31) != (uint32_t)op)))
+            return 0x7f800001u;
+        r = ar_b(op == 0 ? ar_f(a) + ar_f(b) : ar_f(a) - ar_f(b));
+    } else if (op == 3) {
+        if (nan_in || (ar_isinf(a) && ar_isinf(b)) || (ar_iszero(a) && ar_iszero(b)))
+            return 0x7f800001u | xs;
+        r = ar_b(ar_f(a) / ar_f(b));
+    } else {
+        if (nan_in || (ar_isinf(a) && ar_iszero(b)) || (ar_iszero(a) && ar_isinf(b)))
+            return 0x7f800001u | xs;
+        r = ar_b(ar_f(a) * ar_f(b));
+    }
+    return ar_daz(r);
+}
+
+static int check_vfpu_basic_arith_measured(void) {
+    int bad = 0, reported = 0;
+    for (int op = 0; op < 7; op++) {
+        for (int wide = 0; wide < 2; wide++) {
+            char name[32];
+            snprintf(name, sizeof(name), "arith-%s-%c", ar_opname[op], wide ? 'q' : 's');
+            const int c = find_overlap_diff_case(name);
+            CHECK(c >= 0, "basic-arith word is in the overlap-diff header");
+            if (c < 0) { bad = 1; continue; }
+            const uint32_t w = overlap_diff_cases[c].w;
+            const int n = wide ? 4 : 1;
+            for (int ia = 0; ia < 20; ia++) {
+                for (int ib = 0; ib < 20; ib++) {
+                    uint8_t si[4], ti[4], di[4];
+                    uint32_t av[4], bv[4], want[4];
+                    CpuState aot, interp;
+                    setup_identity_compute(&aot);
+                    for (int i = 0; i < 128; i++) aot.vi[i] = 0x7a5a5a00u + (uint32_t)i;
+                    vreg_idx((int)((w >> 8) & 0x7fu), n, si);
+                    vreg_idx((int)((w >> 16) & 0x7fu), op == 4 ? 1 : n, ti);
+                    vreg_idx((int)(w & 0x7fu), n, di);
+                    for (int k = 0; k < n; k++) {
+                        av[k] = ar_ops[(ia + k) % 20];
+                        bv[k] = op == 4 ? ar_ops[ib] : ar_ops[(ib + 3 * k) % 20];
+                        want[k] = ar_ref(op, av[k], bv[k]);
+                        aot.vi[si[k]] = av[k];
+                        if (op != 4) aot.vi[ti[k]] = bv[k];
+                    }
+                    if (op == 4) aot.vi[ti[0]] = ar_ops[ib];
+                    interp = aot;
+                    overlap_diff_run_codegen(&aot, c);
+                    const int kind = sr_vfpu_interp(&interp, w);
+                    int ok = kind == SR_VFPU_COMPUTE && memcmp(aot.vi, interp.vi, sizeof(aot.vi)) == 0;
+                    for (int k = 0; k < n; k++)
+                        ok &= aot.vi[di[k]] == want[k] && interp.vi[di[k]] == want[k];
+                    g_checks++;
+                    if (!ok) {
+                        g_failures++;
+                        bad = 1;
+                        if (reported++ < 12)
+                            fprintf(stderr,
+                                    "FAIL: %s a=0x%08x b=0x%08x psp=0x%08x aot=0x%08x interp=0x%08x\n",
+                                    name, av[0], bv[0], want[0], aot.vi[di[0]], interp.vi[di[0]]);
+                    }
+                }
+            }
+        }
+    }
+    /* Literal cells quoted from the console's run (all at .s, lane 0). */
+    static const struct { int op; uint32_t a, b, want; const char *what; } cells[] = {
+        {5, 0x00000001u, 0x3f800000u, 0x00000001u, "vmin(+dmin, +1) keeps the denormal raw"},
+        {5, 0x00000001u, 0x00000000u, 0x00000000u, "vmin(+dmin, +0): tie, second operand"},
+        {6, 0x00000000u, 0x00000001u, 0x00000001u, "vmax(+0, +dmin): tie, second operand"},
+        {5, 0x00000000u, 0x80000000u, 0x80000000u, "vmin(+0, -0) = -0"},
+        {5, 0x80000000u, 0x00000000u, 0x00000000u, "vmin(-0, +0) = +0"},
+        {6, 0x00000000u, 0x80000000u, 0x80000000u, "vmax(+0, -0) = -0"},
+        {6, 0x80000000u, 0x00000000u, 0x00000000u, "vmax(-0, +0) = +0"},
+        {6, 0x7f800000u, 0x7fc00011u, 0x7fc00011u, "vmax(+inf, +qNaN) = the NaN, payload kept"},
+        {5, 0x7f800000u, 0x7fc00011u, 0x7f800000u, "vmin(+inf, +qNaN) = +inf"},
+        {5, 0x3f800000u, 0xffc00022u, 0xffc00022u, "vmin(+1, -qNaN) = the NaN"},
+        {0, 0x7fc00011u, 0x3f800000u, 0x7f800001u, "vadd with a NaN operand is 0x7f800001"},
+        {1, 0x7f800000u, 0x7f800000u, 0x7f800001u, "vsub(inf, inf) is 0x7f800001"},
+        {2, 0x00000000u, 0x7f800000u, 0x7f800001u, "vmul(+0, +inf) is 0x7f800001"},
+        {2, 0x00000000u, 0xff800000u, 0xff800001u, "vmul(+0, -inf) is 0xff800001"},
+        {2, 0xffc00022u, 0x3f800000u, 0xff800001u, "vmul(-qNaN, 1) takes the XOR of the signs"},
+        {2, 0x00000001u, 0x3f800000u, 0x00000000u, "vmul(dmin, 1) = +0"},
+        {3, 0x3f800000u, 0x00000000u, 0x7f800000u, "vdiv(1, +0) = +inf"},
+        {3, 0x00000000u, 0x00000000u, 0x7f800001u, "vdiv(0, 0) = 0x7f800001"},
+        {3, 0x3f800000u, 0x00000001u, 0x7f800000u, "vdiv(1, dmin): a denormal divisor is zero"},
+        {3, 0x00000001u, 0x3f800000u, 0x00000000u, "vdiv(dmin, 1) = +0"},
+        {3, 0x3f800000u, 0x7f000000u, 0x00000000u, "vdiv(1, 2^127) underflows to +0"},
+        {4, 0x7fc00011u, 0x3f800000u, 0x7f800001u, "vscl(NaN, 1) matches vmul"},
+        {3, 0x80000000u, 0x00000000u, 0xff800001u, "vdiv(-0, +0) takes the XOR of the signs"},
+        {3, 0x3f800000u, 0xffc00022u, 0xff800001u, "vdiv(1, -qNaN) takes the XOR of the signs"},
+        {3, 0xff800000u, 0x7f800000u, 0xff800001u, "vdiv(-inf, +inf) takes the XOR of the signs"},
+        {3, 0xffc00022u, 0x3f800000u, 0xff800001u, "vdiv(-qNaN, 1) takes the XOR of the signs"},
+        /* Derived from the rule, not console cells: the grid reaches no denormal result of
+         * vadd, vsub or vmul, so these pin the output flush that vdiv's cells imply. */
+        {0, 0x00c00000u, 0x80800000u, 0x00000000u, "derived: vadd of two normals flushes a denormal result"},
+        {1, 0x00c00000u, 0x00800000u, 0x00000000u, "derived: vsub of two normals flushes a denormal result"},
+        {2, 0x20000000u, 0x1f800000u, 0x00000000u, "derived: vmul of 2^-63 and 2^-64 flushes 2^-127"},
+    };
+    for (unsigned k = 0; k < sizeof(cells) / sizeof(cells[0]); k++) {
+        char name[32];
+        snprintf(name, sizeof(name), "arith-%s-s", ar_opname[cells[k].op]);
+        const int c = find_overlap_diff_case(name);
+        if (c < 0) { bad = 1; continue; }
+        const uint32_t w = overlap_diff_cases[c].w;
+        uint8_t si[1], ti[1], di[1];
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        vreg_idx((int)((w >> 8) & 0x7fu), 1, si);
+        vreg_idx((int)((w >> 16) & 0x7fu), 1, ti);
+        vreg_idx((int)(w & 0x7fu), 1, di);
+        aot.vi[si[0]] = cells[k].a;
+        aot.vi[ti[0]] = cells[k].b;
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, w);
+        g_checks++;
+        if (kind != SR_VFPU_COMPUTE || aot.vi[di[0]] != cells[k].want ||
+            interp.vi[di[0]] != cells[k].want) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: %s: psp=0x%08x aot=0x%08x interp=0x%08x\n", cells[k].what,
+                    cells[k].want, aot.vi[di[0]], interp.vi[di[0]]);
+        }
+    }
+    return bad;
+}
+
+/* Unrecorded PSP read (same probe as above): vmov, vabs and vneg are bitwise (NaN payloads, denormals
+ * and -0 pass unchanged; vabs clears bit 31, vneg flips it), and vzero, vone and vidt write only the
+ * lanes of the width (vidt.s wrote lane 0 = 1.0 without a fault; vidt.p = (1, 0); vidt.q =
+ * (1, 0, 0, 0) for destination row 0), leaving the other lanes alone. */
+static int check_vfpu_unary_arith_measured(void) {
+    static const char *const names[6] = {"vmov", "vabs", "vneg", "vidt", "vzero", "vone"};
+    static const char suffix[3] = {'s', 'p', 'q'};
+    static const int sizes[3] = {1, 2, 4};
+    int bad = 0, reported = 0;
+    for (int op = 0; op < 6; op++) {
+        for (int f = 0; f < 3; f++) {
+            char name[32];
+            snprintf(name, sizeof(name), "arith-%s-%c", names[op], suffix[f]);
+            const int c = find_overlap_diff_case(name);
+            CHECK(c >= 0, "unary basic-arith word is in the overlap-diff header");
+            if (c < 0) { bad = 1; continue; }
+            const uint32_t w = overlap_diff_cases[c].w;
+            const int n = sizes[f];
+            for (int i = 0; i < 20; i++) {
+                uint8_t si[4], di[4];
+                uint32_t want[4];
+                CpuState aot, interp;
+                setup_identity_compute(&aot);
+                for (int k = 0; k < 128; k++) aot.vi[k] = 0x7a5a5a00u + (uint32_t)k;
+                vreg_idx((int)((w >> 8) & 0x7fu), n, si);
+                vreg_idx((int)(w & 0x7fu), n, di);
+                for (int k = 0; k < n; k++) {
+                    const uint32_t x = ar_ops[(i + k) % 20];
+                    aot.vi[si[k]] = x;
+                    want[k] = op == 0 ? x : op == 1 ? (x & 0x7fffffffu) : op == 2 ? (x ^ 0x80000000u)
+                            : op == 3 ? (k == 0 ? 0x3f800000u : 0u) : op == 4 ? 0u : 0x3f800000u;
+                }
+                interp = aot;
+                overlap_diff_run_codegen(&aot, c);
+                const int kind = sr_vfpu_interp(&interp, w);
+                int ok = kind == SR_VFPU_COMPUTE && memcmp(aot.vi, interp.vi, sizeof(aot.vi)) == 0;
+                for (int k = 0; k < n; k++)
+                    ok &= aot.vi[di[k]] == want[k] && interp.vi[di[k]] == want[k];
+                g_checks++;
+                if (!ok) {
+                    g_failures++;
+                    bad = 1;
+                    if (reported++ < 12)
+                        fprintf(stderr, "FAIL: %s in=0x%08x psp=0x%08x aot=0x%08x interp=0x%08x kind=%d\n",
+                                name, ar_ops[i], want[0], aot.vi[di[0]], interp.vi[di[0]], kind);
+                }
+            }
+        }
+    }
+    return bad;
+}
+
+/* vmscl.q (0xf2018488): each lane is a vmul lane. Unrecorded PSP reads (PSP-3000, 2026-11-08 and
+ * 2026-11-09, issue #326, probe cases vfpu-wide-dot-matrix and vfpu-round-sep): a NaN operand or
+ * 0 * Inf gives 0x7f800001 with the XOR of the operand signs, and an inexact product rounds to
+ * nearest: 0x3fc00001 * 0x3fc00001 is 0x40100002, not the truncated 0x40100001. The scalar is the
+ * vt register, the matrix is at matrix 1, the result at matrix 2. */
+static int check_vmscl_measured(void) {
+    static const struct { uint32_t m, scalar, want; } cells[] = {
+        {0x3f800000u, 0x7fc00011u, 0x7f800001u}, {0xc0400000u, 0x7fc00011u, 0xff800001u},
+        {0x3f800000u, 0xffc00022u, 0xff800001u}, {0xc0400000u, 0xffc00022u, 0x7f800001u},
+        {0x3fc00001u, 0x3fc00001u, 0x40100002u}, {0xbfc00001u, 0x3fc00001u, 0xc0100002u},
+        {0x3fc00001u, 0xbfc00001u, 0xc0100002u}, {0xbfc00001u, 0xbfc00001u, 0x40100002u},
+        {0x3f800001u, 0x3f800001u, 0x3f800002u}, {0x3fc00003u, 0x3fc00001u, 0x40100003u},
+    };
+    int bad = 0;
+    const int c = find_overlap_diff_case("arith-vmscl-q");
+    CHECK(c >= 0, "arith-vmscl-q word is in the overlap-diff header");
+    if (c < 0) return 1;
+    const uint32_t w = overlap_diff_cases[c].w;
+    for (unsigned k = 0; k < sizeof(cells) / sizeof(cells[0]); k++) {
+        uint8_t ti[1];
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        vreg_idx((int)((w >> 16) & 0x7fu), 1, ti);
+        aot.vi[16] = cells[k].m;
+        aot.vi[ti[0]] = cells[k].scalar;
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, w);
+        g_checks++;
+        if (kind != SR_VFPU_COMPUTE || aot.vi[32] != cells[k].want || interp.vi[32] != cells[k].want) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: vmscl 0x%08x * 0x%08x: psp=0x%08x aot=0x%08x interp=0x%08x\n", cells[k].m,
+                    cells[k].scalar, cells[k].want, aot.vi[32], interp.vi[32]);
+        }
+    }
+    return bad;
+}
+
 /* RCX0-7 image of a random-unit state as probe_hle_issues.c writes it: Ck split into
  * the low halves of RCXk and RCX(k+4), carry nibble k in bits 16-19 of RCXk, 0x3f8 above. */
 static void vrndi_probe_image(uint32_t *rcx, const uint32_t c[4], uint32_t carry) {
@@ -2655,32 +3020,31 @@ static int sweep_diff(const CpuState *a, const CpuState *b, char *where, size_t 
  * operation. Swapping two NaN operands swaps the result, whatever the host compiler does with
  * a plain + or *. Project semantics, not PSP evidence. */
 static int check_vf_nan_rule(void) {
-    static const struct { uint32_t a, b, add, sub, mul, div; } cells[] = {
-        {0x7fc12345u, 0xffc00001u, 0x7fc12345u, 0x7fc12345u, 0x7fc12345u, 0x7fc12345u},
-        {0xffc00001u, 0x7fc12345u, 0xffc00001u, 0xffc00001u, 0xffc00001u, 0xffc00001u},
-        {0x7f800001u, 0x3f800000u, 0x7fc00001u, 0x7fc00001u, 0x7fc00001u, 0x7fc00001u}, /* sNaN quieted */
-        {0x3f800000u, 0xff800002u, 0xffc00002u, 0xffc00002u, 0xffc00002u, 0xffc00002u},
-        {0x7f800000u, 0xff800000u, 0xffc00000u, 0x7f800000u, 0xff800000u, 0xffc00000u}, /* Inf, -Inf */
-        {0x00000000u, 0x7f800000u, 0x7f800000u, 0xff800000u, 0xffc00000u, 0x00000000u}, /* 0, Inf */
-        {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0xffc00000u}, /* 0 / 0 */
-        {0x3fc00000u, 0x40000000u, 0x40600000u, 0xbf000000u, 0x40400000u, 0x3f400000u}, /* 1.5, 2 */
+    static const struct { uint32_t a, b, add, sub, mul; } cells[] = {
+        {0x7fc12345u, 0xffc00001u, 0x7fc12345u, 0x7fc12345u, 0x7fc12345u},
+        {0xffc00001u, 0x7fc12345u, 0xffc00001u, 0xffc00001u, 0xffc00001u},
+        {0x7f800001u, 0x3f800000u, 0x7fc00001u, 0x7fc00001u, 0x7fc00001u}, /* sNaN quieted */
+        {0x3f800000u, 0xff800002u, 0xffc00002u, 0xffc00002u, 0xffc00002u},
+        {0x7f800000u, 0xff800000u, 0xffc00000u, 0x7f800000u, 0xff800000u}, /* Inf, -Inf */
+        {0x00000000u, 0x7f800000u, 0x7f800000u, 0xff800000u, 0xffc00000u}, /* 0, Inf */
+        {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u}, /* 0 / 0 */
+        {0x3fc00000u, 0x40000000u, 0x40600000u, 0xbf000000u, 0x40400000u}, /* 1.5, 2 */
     };
     int bad = 0;
     for (size_t i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
-        float a, b, r[4];
-        uint32_t got[4];
+        float a, b, r[3];
+        uint32_t got[3];
         memcpy(&a, &cells[i].a, 4);
         memcpy(&b, &cells[i].b, 4);
         r[0] = sr_vf_add(a, b);
         r[1] = sr_vf_sub(a, b);
         r[2] = sr_vf_mul(a, b);
-        r[3] = sr_vf_div(a, b);
         memcpy(got, r, sizeof(got));
-        const uint32_t want[4] = {cells[i].add, cells[i].sub, cells[i].mul, cells[i].div};
-        for (int k = 0; k < 4; k++) {
+        const uint32_t want[3] = {cells[i].add, cells[i].sub, cells[i].mul};
+        for (int k = 0; k < 3; k++) {
             if (got[k] != want[k]) {
                 fprintf(stderr, "FAIL: sr_vf_%s(0x%08x, 0x%08x) = 0x%08x, want 0x%08x\n",
-                        (const char *[]){"add", "sub", "mul", "div"}[k], cells[i].a, cells[i].b, got[k], want[k]);
+                        (const char *[]){"add", "sub", "mul"}[k], cells[i].a, cells[i].b, got[k], want[k]);
                 bad = 1;
             }
         }
@@ -3253,9 +3617,14 @@ int main(void) {
     bad |= check_psp_measured_funnel();
     bad |= check_psp_measured_sort();
     bad |= check_psp_measured_forms2();
+    bad |= check_vfpu_basic_arith_measured();
+    bad |= check_vfpu_unary_arith_measured();
+    bad |= check_vmscl_measured();
     bad |= check_vrndi_rule_cells();
     bad |= check_vfpu_forms_measured();
     bad |= check_cop2_control_transfers();
+    bad |= check_vfpu_cc_write_mask();
+    bad |= check_vcmp_denormal_operands();
     bad |= check_quad_memops();
     bad |= check_vcrs_widths();
     bad |= check_vasin_measured_domain_words();

@@ -492,8 +492,11 @@ static void copy_self_executable(const char *destination) {
 #endif
 }
 
-static void assert_python_probe_case(const char *case_name, const char *stub_mode,
-                                     bool expected_found) {
+/* A stub answering the version probe as stub_mode says: on PATH, or on Android
+ * the APK's Python in the native library folder (the test's own folder under
+ * adb shell). on_path puts it on PATH on Android too, where it must be ignored. */
+static void assert_python_probe_case_at(const char *case_name, const char *stub_mode,
+                                        bool on_path, bool expected_found) {
     char directory[NATIVE_TEST_PATH_MAX];
     char candidate[NATIVE_TEST_PATH_MAX];
     char resolved_candidate[NATIVE_TEST_PATH_MAX];
@@ -506,8 +509,17 @@ static void assert_python_probe_case(const char *case_name, const char *stub_mod
                            native_test_get_root(), nk_platform_path_separator(), case_name);
     assert(written > 0 && (size_t)written < sizeof(directory));
     assert(nk_platform_mkdir_p(directory));
+#if defined(__ANDROID__)
+    char tool_dir[NATIVE_TEST_PATH_MAX];
+    assert(nk_platform_get_tool_dir(tool_dir, sizeof(tool_dir)));
+    written = on_path
+        ? snprintf(candidate, sizeof(candidate), "%s/%s", directory, candidate_name)
+        : snprintf(candidate, sizeof(candidate), "%s/libnk_python.so", tool_dir);
+#else
+    (void)on_path;
     written = snprintf(candidate, sizeof(candidate), "%s%c%s",
                        directory, nk_platform_path_separator(), candidate_name);
+#endif
     assert(written > 0 && (size_t)written < sizeof(candidate));
     copy_self_executable(candidate);
 
@@ -529,6 +541,15 @@ static void assert_python_probe_case(const char *case_name, const char *stub_mod
     } else {
         assert(found_path[0] == '\0');
     }
+#if defined(__ANDROID__)
+    /* The tool folder is the runner's bin folder: leave nothing behind in it. */
+    assert(nk_remove_utf8(candidate) == 0);
+#endif
+}
+
+static void assert_python_probe_case(const char *case_name, const char *stub_mode,
+                                     bool expected_found) {
+    assert_python_probe_case_at(case_name, stub_mode, false, expected_found);
 }
 
 static void test_python_candidate_validation(void) {
@@ -540,9 +561,20 @@ static void test_python_candidate_validation(void) {
 
     assert_python_probe_case("python-probe-store-stub", "store-stub", false);
     assert_python_probe_case("python-probe-wrong-version", "wrong-version", false);
+#if defined(__ANDROID__)
+    /* The app's own Python is the pinned 3.15, as in a release bundle: a 3.14
+     * in the tool folder is not it. */
+    assert_python_probe_case("python-probe-cpython-314", "cpython-314", false);
+#else
     assert_python_probe_case("python-probe-cpython-314", "cpython-314", true);
+#endif
     assert_python_probe_case("python-probe-cpython-315", "cpython-315", true);
     assert_python_probe_case("python-probe-timeout", "timeout", false);
+#if defined(__ANDROID__)
+    /* A runnable 3.15 on PATH is outside the native library folder: Android
+     * would refuse to start it, so the search never offers it. */
+    assert_python_probe_case_at("python-probe-path-ignored", "cpython-315", true, false);
+#endif
 
     restore_env_value("PATH", saved_path);
     restore_env_value("PYTHON", saved_python);
@@ -595,8 +627,8 @@ static void test_clean_exit_without_completion_is_a_failure(void) {
     package_builder_init_session(&session, "TEST80003", "Synthetic Exit Fixture");
     session.is_building = true;
     session.start_time_ms = 0;
-    bool spawned = nk_platform_spawn_process(s_self_executable, child_argv, NULL, NULL,
-                                             NULL, &session.process);
+    bool spawned = nk_platform_spawn_tool(s_self_executable, child_argv, NULL, NULL,
+                                          NULL, &session.process);
     assert(spawned);
 
     uint64_t deadline = route_now_ms() + 30000u;
@@ -709,6 +741,14 @@ static void test_toolchain_preflight(void) {
 #if defined(_WIN32) || defined(_WIN64)
     assert(strstr(msg, "build tools download prompt") != NULL);
     assert(strstr(msg, "mingw-w64-ucrt-x86_64-gcc") != NULL);
+#elif defined(__ANDROID__)
+    /* No download exists off Windows (#306), and Android has no system package for a
+       compiler (#360): the card says the app ships none and gives no desktop advice. */
+    assert(strstr(msg, "build tools download prompt") == NULL);
+    assert(strstr(msg, "MSYS2") == NULL);
+    assert(strstr(msg, "build-essential") == NULL);
+    assert(strstr(msg, "ships no compiler") != NULL);
+    assert(strstr(msg, "downloads build tools only on Windows") != NULL);
 #else
     /* No download exists off Windows (#306): the card points at the system's
        packages and never at a consent card or an MSYS2 package. */
@@ -782,6 +822,181 @@ static void test_toolchain_preflight(void) {
         free(saved_path);
     }
 #endif
+}
+
+/* Create an empty file, and its folders. */
+static void toolchain_path_touch(const char *dir, const char *name) {
+    char file[NK_MAX_PATH * 2];
+    assert(nk_platform_mkdir_p(dir));
+    snprintf(file, sizeof(file), "%s%c%s", dir, nk_platform_path_separator(), name);
+    FILE *f = fopen(file, "wb");
+    assert(f != NULL);
+    assert(fclose(f) == 0);
+}
+
+/* Spawn the build exactly as BUILD PACKAGE does, with this executable standing in
+ * for python, and return the PATH the child saw (the child mode is in main). */
+static void toolchain_path_child_path(const char *data_root, const char *log_dir,
+                                      char *out, size_t out_size) {
+    PackageBuildSession session;
+    package_builder_init_session(&session, "TEST80010", "Synthetic Toolchain Path Fixture");
+    assert(package_builder_start(&session, s_self_executable, "--print-child-path", data_root,
+                                 log_dir) == NK_OK);
+    uint64_t deadline = route_now_ms() + 30000u;
+    while (session.is_building && route_now_ms() < deadline) {
+        package_builder_poll(&session, route_now_ms());
+        if (session.is_building) route_pause_ms(10);
+    }
+    assert(!session.is_building);
+    FILE *log = fopen(session.log_file_path, "rb");
+    assert(log != NULL);
+    static char text[40000];
+    size_t got = fread(text, 1, sizeof(text) - 1, log);
+    fclose(log);
+    text[got] = '\0';
+    const char *mark = strstr(text, "CHILD_PATH=");
+    assert(mark != NULL);
+    mark += strlen("CHILD_PATH=");
+    size_t len = strcspn(mark, "\r\n");
+    assert(len < out_size);
+    memcpy(out, mark, len);
+    out[len] = '\0';
+}
+
+static void test_build_path_leads_with_ucrt64(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest 7b: a UCRT64 toolchain leads the build child's PATH (#2278)\n");
+    const char sep = nk_platform_path_separator();
+#if defined(_WIN32) || defined(_WIN64)
+    const char list_sep = ';';
+#else
+    const char list_sep = ':';
+#endif
+    /* Short enough that every path derived from it fits in NK_MAX_PATH. */
+    char root[200];
+    int root_len = snprintf(root, sizeof(root), "%s%ctoolchain-path", native_test_get_root(), sep);
+    assert(root_len > 0 && (size_t)root_len < sizeof(root));
+
+    /* A stray MinGW with a gcc, and a UCRT64 prefix with gcc and SDL3 headers. */
+    char stray_bin[NK_MAX_PATH], prefix[NK_MAX_PATH / 2], ucrt_bin[NK_MAX_PATH];
+    char headers[NK_MAX_PATH], bare_prefix[NK_MAX_PATH / 2], bare_bin[NK_MAX_PATH];
+    char data_root[NK_MAX_PATH], log_dir[NK_MAX_PATH];
+    snprintf(stray_bin, sizeof(stray_bin), "%s%cchoco%cmingw64%cbin", root, sep, sep, sep);
+    snprintf(prefix, sizeof(prefix), "%s%cmsys64%cucrt64", root, sep, sep);
+    snprintf(ucrt_bin, sizeof(ucrt_bin), "%s%cbin", prefix, sep);
+    snprintf(headers, sizeof(headers), "%s%cinclude%cSDL3", prefix, sep, sep);
+    snprintf(bare_prefix, sizeof(bare_prefix), "%s%cbare%cucrt64", root, sep, sep);
+    snprintf(bare_bin, sizeof(bare_bin), "%s%cbin", bare_prefix, sep);
+    snprintf(data_root, sizeof(data_root), "%s%cdata", root, sep);
+    snprintf(log_dir, sizeof(log_dir), "%s%clogs", root, sep);
+    toolchain_path_touch(stray_bin, "gcc.exe");
+    toolchain_path_touch(ucrt_bin, "gcc.exe");
+    toolchain_path_touch(headers, "SDL.h");
+    toolchain_path_touch(bare_bin, "gcc.exe"); /* a UCRT64-named prefix without SDL3 */
+    assert(nk_platform_mkdir_p(data_root));
+
+    char *saved_path = getenv("PATH") ? strdup(getenv("PATH")) : NULL;
+    char path_env[NK_MAX_PATH * 4];
+    char composed[NK_MAX_PATH * 4];
+    char found[NK_MAX_PATH];
+
+    /* Pure resolution: the stray gcc first on PATH, the UCRT64 bin behind it. */
+    snprintf(path_env, sizeof(path_env), "%s%c%s", stray_bin, list_sep, ucrt_bin);
+    assert(package_builder_resolve_toolchain_bin("", data_root, path_env, NULL, NULL,
+                                                 found, sizeof(found)));
+    assert(strcmp(found, ucrt_bin) == 0);
+    assert(package_builder_compose_build_path(found, path_env, composed, sizeof(composed)));
+    assert(strncmp(composed, ucrt_bin, strlen(ucrt_bin)) == 0);
+    assert(composed[strlen(ucrt_bin)] == list_sep);
+
+    /* Composing: an empty or missing PATH gives the toolchain bin alone, a missing
+       toolchain bin gives nothing, and an overflow gives nothing with out emptied. */
+    assert(package_builder_compose_build_path(ucrt_bin, NULL, composed, sizeof(composed)));
+    assert(strcmp(composed, ucrt_bin) == 0);
+    assert(package_builder_compose_build_path(ucrt_bin, "", composed, sizeof(composed)));
+    assert(strcmp(composed, ucrt_bin) == 0);
+    assert(!package_builder_compose_build_path(NULL, path_env, composed, sizeof(composed)));
+    assert(composed[0] == '\0');
+    assert(!package_builder_compose_build_path("", path_env, composed, sizeof(composed)));
+    assert(composed[0] == '\0');
+    {
+        char small[8];
+        memset(small, 'x', sizeof(small));
+        small[sizeof(small) - 1] = '\0';
+        assert(!package_builder_compose_build_path(ucrt_bin, path_env, small, sizeof(small)));
+        assert(small[0] == '\0');
+        /* The bin alone also needs room for its terminator. */
+        assert(!package_builder_compose_build_path(ucrt_bin, NULL, composed, strlen(ucrt_bin)));
+        assert(composed[0] == '\0');
+        assert(package_builder_compose_build_path(ucrt_bin, NULL, composed, strlen(ucrt_bin) + 1));
+    }
+
+    /* The same toolchain named by MSYS_PATH (a prefix or its bin) or the default
+       prefix, while PATH holds only the stray gcc. */
+    assert(package_builder_resolve_toolchain_bin("", data_root, stray_bin, prefix, NULL,
+                                                 found, sizeof(found)));
+    assert(strcmp(found, ucrt_bin) == 0);
+    assert(package_builder_resolve_toolchain_bin("", data_root, stray_bin, ucrt_bin, NULL,
+                                                 found, sizeof(found)));
+    assert(strcmp(found, ucrt_bin) == 0);
+    assert(package_builder_resolve_toolchain_bin("", data_root, stray_bin, NULL, prefix,
+                                                 found, sizeof(found)));
+    assert(strcmp(found, ucrt_bin) == 0);
+
+    /* No complete toolchain: nothing is chosen, so PATH stays as it was and the
+       sdl3-check failure stays the named one. A gcc without SDL3 headers, a stray
+       MinGW alone, and an empty hint all resolve to nothing. */
+    assert(!package_builder_resolve_toolchain_bin("", data_root, stray_bin, bare_prefix,
+                                                  NULL, found, sizeof(found)));
+    assert(found[0] == '\0');
+    snprintf(path_env, sizeof(path_env), "%s%c%s", stray_bin, list_sep, bare_bin);
+    assert(!package_builder_resolve_toolchain_bin("", data_root, path_env, "", NULL,
+                                                  found, sizeof(found)));
+
+    /* A release bundle decides alone: it wins over a system install, and a bundle
+       without its gcc is never swapped for another toolchain. */
+    char bundle[NK_MAX_PATH / 2], bundle_bin[NK_MAX_PATH];
+    snprintf(bundle, sizeof(bundle), "%s%cbundle", root, sep);
+    snprintf(bundle_bin, sizeof(bundle_bin), "%s%cmsys64%cucrt64%cbin", bundle, sep, sep, sep);
+    assert(!package_builder_resolve_toolchain_bin(bundle, data_root, stray_bin, prefix, NULL,
+                                                  found, sizeof(found)));
+    toolchain_path_touch(bundle_bin, "gcc.exe");
+    assert(package_builder_resolve_toolchain_bin(bundle, data_root, stray_bin, prefix, NULL,
+                                                 found, sizeof(found)));
+    assert(strcmp(found, bundle_bin) == 0);
+
+    /* The child process itself: a stray gcc first, the UCRT64 bin behind it. */
+    char child_path[NK_MAX_PATH * 4];
+    snprintf(path_env, sizeof(path_env), "%s%c%s", stray_bin, list_sep, ucrt_bin);
+    nk_tb_set_env("PATH", path_env);
+    toolchain_path_child_path(data_root, log_dir, child_path, sizeof(child_path));
+    assert(strncmp(child_path, ucrt_bin, strlen(ucrt_bin)) == 0);
+    assert(child_path[strlen(ucrt_bin)] == list_sep);
+    assert(strstr(child_path, stray_bin) != NULL);
+
+    /* An incomplete UCRT64 prefix on PATH never leads, and PATH is never trimmed.
+       A host with a real MSYS2 UCRT64 at the default prefix may still put that
+       one in front, so the exact PATH is only asserted when the host has none. */
+    snprintf(path_env, sizeof(path_env), "%s%c%s", stray_bin, list_sep, bare_bin);
+    nk_tb_set_env("PATH", path_env);
+    toolchain_path_child_path(data_root, log_dir, child_path, sizeof(child_path));
+    assert(strncmp(child_path, bare_bin, strlen(bare_bin)) != 0);
+    size_t child_len = strlen(child_path), env_len = strlen(path_env);
+    assert(child_len >= env_len && strcmp(child_path + child_len - env_len, path_env) == 0);
+    {
+        char host_bin[NK_MAX_PATH];
+        const char *host_prefix = NULL;
+#if defined(_WIN32) || defined(_WIN64)
+        host_prefix = "C:/msys64/ucrt64";
+#endif
+        bool host_has_ucrt64 = package_builder_resolve_toolchain_bin(
+            "", data_root, path_env, getenv("MSYS_PATH"), host_prefix, host_bin,
+            sizeof(host_bin));
+        if (!host_has_ucrt64) assert(strcmp(child_path, path_env) == 0);
+        else assert(strncmp(child_path, host_bin, strlen(host_bin)) == 0);
+    }
+
+    nk_tb_set_env("PATH", saved_path);
+    free(saved_path);
 }
 
 static void test_pinned_prerequisite_manifest(void) {
@@ -1212,6 +1427,27 @@ static void test_bundled_prerequisites(void) {
     assert(nk_platform_absolute_path(fx.prereqs, expected, sizeof(expected)));
     assert(strcmp(root, expected) == 0);
 
+#if defined(__ANDROID__)
+    {
+        /* Android runs only the app's own tools (its native library folder), so a
+           release zip's prereqs/ tree never applies there, complete or not. The
+           record check itself is the same on every host. */
+        assert(package_builder_resolve_bundled_tools(fx.install_root, fx.cli_path, &tools) ==
+               PACKAGE_BUNDLE_ABSENT);
+        assert(tools.root[0] == '\0' && tools.error[0] == '\0' && tools.python_path[0] == '\0');
+        PackagePrerequisiteList pinned_android;
+        char android_error[256];
+        assert(package_builder_load_prerequisites(fx.cli_path, &pinned_android, android_error,
+                                                  sizeof(android_error)));
+        assert(package_builder_check_bundled_prerequisites(expected, &pinned_android, android_error,
+                                                           sizeof(android_error)) ==
+               PACKAGE_BUNDLE_VALID);
+        printf("[PACKAGE_BUILDER_BUNDLE] Android: the release prereqs/ tree is not used; "
+               "its record still checks\n");
+        goto restore;
+    }
+#endif
+
     /* No prereqs/ folder: the per-user download flow stays in charge. */
     char other_install[NATIVE_TEST_PATH_MAX];
     bundle_test_path(other_install, sizeof(other_install), fx.root, "source/tools");
@@ -1302,6 +1538,9 @@ static void test_bundled_prerequisites(void) {
     assert_bundle_refused(&fx, "python-probe", "CPython 3.15 is missing or did not run");
     native_test_set_env("NAKAGAWA_TEST_PYTHON_STUB_MODE", "cpython-315");
 
+#if defined(__ANDROID__)
+restore:
+#endif
     assert(native_test_remove_tree(fx.root));
     restore_env_value("PATH", saved_path);
     restore_env_value("PYTHON", saved_python);
@@ -1317,6 +1556,15 @@ int main(int argc, char *argv[]) {
     if (argc == 2 && strcmp(argv[1], "--child-exit-zero") == 0) return 0;
     if (argc == 3 && strcmp(argv[1], "-c") == 0) return run_python_probe_stub(argc, argv);
     s_self_executable = argv[0];
+    /* Child of test_build_path_leads_with_ucrt64: stands in for python and reports
+     * the PATH package_builder_start gave it (argv[1] is the cli_path slot). */
+    if (argc >= 3 && strcmp(argv[1], "--print-child-path") == 0 &&
+        strcmp(argv[2], "build-package") == 0) {
+        const char *child_path = getenv("PATH");
+        printf("CHILD_PATH=%s\n", child_path ? child_path : "");
+        fflush(stdout);
+        return 0;
+    }
     if (argc == 3 && strcmp(argv[1], "--find-cli") == 0) {
         char cli_path[NK_MAX_PATH];
         if (!package_builder_find_cli(argv[2], cli_path, sizeof(cli_path))) {
@@ -1349,6 +1597,7 @@ int main(int argc, char *argv[]) {
     test_session_cancellation();
     test_cli_search_order_and_guidance();
     test_toolchain_preflight();
+    test_build_path_leads_with_ucrt64();
     test_pinned_prerequisite_manifest();
     test_remove_downloaded_tools_preserves_other_app_data();
     test_clear_shared_library_cache_keeps_other_caches();
