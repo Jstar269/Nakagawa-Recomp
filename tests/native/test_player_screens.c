@@ -55,6 +55,42 @@ static const EnhancedPartFixture k_enhanced_parts[] = {
     {"Sharper enlarging", "Off", "AMD FSR 1 sharpens display and recordings; game memory and "
                                   "screenshots do not change."},
 };
+/* Each part's words, as player_state.c's k_enhanced_parts gives them. */
+static const char *const k_enhanced_af_labels[] = {"16x", "8x", "4x", "2x", "Off"};
+static const char *const k_enhanced_switch_labels[] = {"On", "Off"};
+static const char *const k_enhanced_upscale_labels[] = {"FSR 1", "Off"};
+static const char *const k_enhanced_tess_labels[] = {"2x", "3x", "4x", "Off"};
+/* Each part's words by part id. A part added to player_state.h has none (count 0) until it
+   is listed here: the screen builder then gives its row no words, never another part's, and
+   fails the check that names it. */
+typedef struct {
+    const char *const *labels;
+    int count;
+} EnhancedWords;
+#define ENHANCED_WORDS(words) {(words), (int)(sizeof(words) / sizeof((words)[0]))}
+static const EnhancedWords k_enhanced_words[PLAYER_PART_COUNT] = {
+    [PLAYER_PART_FILTERING] = ENHANCED_WORDS(k_enhanced_af_labels),
+    [PLAYER_PART_TEXT] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_READOUT] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_NOTICE] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_WIDE] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_SMOOTH] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_SAS] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_TESS] = ENHANCED_WORDS(k_enhanced_tess_labels),
+    [PLAYER_PART_CULL] = ENHANCED_WORDS(k_enhanced_switch_labels),
+    [PLAYER_PART_UPSCALE] = ENHANCED_WORDS(k_enhanced_upscale_labels)};
+#undef ENHANCED_WORDS
+/* The most words any part has, for the stays-put test's steps. */
+enum { ENHANCED_MAX_WORDS = 5 };
+static const char *const k_enhanced_library_modes[] = {"Authentic", "Enhanced"};
+static const char k_enhanced_smooth_at_60[] = "Off (this game runs at 60 FPS)";
+static const char *const k_enhanced_title_modes[] = {"Library (Enhanced)", "Authentic",
+                                                     "Enhanced", "Ace"};
+/* What the Settings > Enhanced case shows instead of the fixture: a part's value (NULL
+   keeps the fixture's) and the play mode (NULL keeps the case's). */
+static const char *g_enhanced_value[PLAYER_PART_COUNT];
+static const char *g_enhanced_mode;
+
 typedef char player_screens_enhanced_fixture_matches_parts[
     sizeof(k_enhanced_parts) / sizeof(k_enhanced_parts[0]) == PLAYER_PART_COUNT ? 1 : -1];
 
@@ -264,8 +300,10 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_TITLE_AUTHENTIC, FLOW_PAGE_TITLE_RENDER,
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
-               FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_QUEUE, FLOW_PAGE_QUEUE_PAUSED,
-               FLOW_CONSENT_FULL, FLOW_COUNT } FlowCase;
+               FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_TITLE_TALL,
+               FLOW_PAGE_QUEUE, FLOW_PAGE_QUEUE_PAUSED,
+               FLOW_CONSENT_FULL, FLOW_NICKNAME_FIRST, FLOW_NICKNAME_FULL,
+               FLOW_NICKNAME_REFUSED, FLOW_COUNT } FlowCase;
 
 /* The window size the game-found and Settings cases lay out for. */
 static float g_flow_width = 1280.0f;
@@ -410,16 +448,31 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         settings.enhanced_title = title ? "Test Game" : NULL;
         settings.enhanced_mode = title ? "Library (Enhanced)"
                                : settings.enhanced_on ? "Enhanced" : "Authentic";
+        if (g_enhanced_mode != NULL) settings.enhanced_mode = g_enhanced_mode;
+        settings.enhanced_modes = title ? k_enhanced_title_modes : k_enhanced_library_modes;
+        settings.enhanced_mode_count = title ? 4 : 2;
         settings.enhanced_mode_sentence =
             title ? "Enhanced adds the parts below. Ace needs a package made for this game."
                   : "The default for every game; each game's page can choose its own.";
         settings.enhanced_row_count = PLAYER_PART_COUNT;
         for (int i = 0; i < PLAYER_PART_COUNT; i++) {
+            const char *value = g_enhanced_value[i] != NULL ? g_enhanced_value[i]
+                                                            : k_enhanced_parts[i].value;
             snprintf(followed[i], sizeof(followed[i]), "Library (%s)", k_enhanced_parts[i].value);
             settings.enhanced_rows[i].name = k_enhanced_parts[i].name;
-            settings.enhanced_rows[i].value = title ? followed[i] : k_enhanced_parts[i].value;
+            settings.enhanced_rows[i].value =
+                title && g_enhanced_value[i] == NULL ? followed[i] : value;
             settings.enhanced_rows[i].sentence = k_enhanced_parts[i].sentence;
-            settings.enhanced_rows[i].on = strcmp(k_enhanced_parts[i].value, "Off") != 0;
+            settings.enhanced_rows[i].on = strcmp(value, "Off") != 0;
+            CHECK(k_enhanced_words[i].count > 0,
+                  "every Settings > Enhanced part has its words in this test");
+            settings.enhanced_rows[i].labels = k_enhanced_words[i].labels;
+            settings.enhanced_rows[i].label_count = k_enhanced_words[i].count;
+            settings.enhanced_rows[i].library_value = title ? followed[i] : NULL;
+            /* As player_ui_nk.c gives a game's page: the value Smooth motion shows while
+               the play mode runs the game's 60 FPS game logic. */
+            settings.enhanced_rows[i].other_value =
+                title && i == PLAYER_PART_SMOOTH ? k_enhanced_smooth_at_60 : NULL;
         }
     }
     settings.pacing = "PSP timing";
@@ -974,6 +1027,47 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         title.logical_height = g_flow_height;
         return player_ui_screen_title(ui, &title);
     }
+    if (which == FLOW_PAGE_TITLE_TALL) {
+        /* The title page at its tallest: the game starting (its progress card),
+           the disc check's note, what to expect with known issues, the
+           ENHANCEMENTS card at its fullest and the Add to Steam, Report and
+           Remove row, with #2151's render notice above it all. It is taller
+           than the room between the bars of a 1280 x 720 window at 100% text,
+           so its body scrolls. */
+        static PlayerUiTitle fixture;
+        PlayerUiTitleModel title;
+        fixture = k_titles[6];
+        fixture.package_state = PLAYER_UI_PACKAGE_STARTING;
+        fixture.disc_check_note = "Verified retail: this image matches a known good dump "
+                                  "of the disc, byte for byte.";
+        fixture.compatibility_tier = k_compatibility_cases[1].tier;
+        fixture.compatibility_expect = k_compatibility_cases[1].expect;
+        fixture.compatibility_known_issues = k_compatibility_cases[1].known_issues;
+        fixture.ace_shown = true;
+        fixture.ace_label = "Play mode: Ace";
+        fixture.ace_in_effect = true;
+        fixture.ace_enabled = true;
+        fixture.ace_line =
+            "Ace for this game: 60 FPS game logic, 16x texture filtering, crisp system text.";
+        fixture.options_shown = true;
+        fixture.options_enabled = true;
+        fixture.ace_last_session = "Last session: 16x filtering; the game ran at 30 Hz.";
+        fixture.enhancement_shown = true;
+        fixture.enhancement_enabled = true;
+        fixture.can_remove = true;
+        fixture.can_add_to_steam = true;
+        memset(&title, 0, sizeof(title));
+        title.title = &fixture;
+        title.title_index = 6u;
+        title.logical_width = g_flow_width;
+        title.logical_height = g_flow_height;
+        title.render_notice_heading = "Drawn in software";
+        title.render_notice_text =
+            "Vulkan did not start on this PC, so this game is drawn in software and shown "
+            "in a basic Windows window. The Internal resolution setting has no effect, and "
+            "the game may run slower. Updating the graphics driver may help.";
+        return player_ui_screen_title(ui, &title);
+    }
     if (which == FLOW_PAGE_STEAM || which == FLOW_PAGE_STEAM_ACCOUNTS ||
         which == FLOW_PAGE_STEAM_BLOCKED) {
         /* #2152: one account with the longest result (an update, with its backup, in a
@@ -1069,6 +1163,27 @@ static FlowCase g_flow_case;
 
 static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
     PlayerUiAction none = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    if (which == FLOW_NICKNAME_FIRST || which == FLOW_NICKNAME_FULL ||
+        which == FLOW_NICKNAME_REFUSED) {
+        /* #2197: the nickname editor and its on-screen keyboard: the first-launch
+           prompt with nothing typed, Settings' editor with all 32 bytes used (the
+           widest text), and an empty Done refused (the note makes it the tallest). */
+        static char typed[NK_NICKNAME_MAX_BYTES + 1u];
+        static UiKeyboard keyboard;
+        PlayerUiNicknameModel nickname;
+        (void)snprintf(typed, sizeof(typed), "%s",
+                       which == FLOW_NICKNAME_FULL ? "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW" : "");
+        ui_keyboard_init(&keyboard, typed, NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts,
+                         NULL);
+        memset(&nickname, 0, sizeof(nickname));
+        nickname.first_launch = which == FLOW_NICKNAME_FIRST;
+        nickname.keyboard = &keyboard;
+        nickname.current = "Player";
+        nickname.refused = which == FLOW_NICKNAME_REFUSED;
+        nickname.logical_width = g_flow_width;
+        nickname.logical_height = g_flow_height;
+        return player_ui_screen_nickname(ui, &nickname);
+    }
     if (which == FLOW_ERROR_STOP || which == FLOW_ERROR_CRASH) {
         /* #1282: a game that stopped early, with Restart game and Copy details,
            and Report this game: a known cause leads with its issue (the stop),
@@ -3592,11 +3707,203 @@ static void test_controller_keyboard_page(void) {
 }
 
 /* Every screen fits the default 1280 x 720 window and the 960 x 540 minimum
-   (logical px): no text outside the window, no text painted over, and so the
-   buttons are all on screen. A wrapped paragraph used to be laid out one line
-   tall when its page was overfull, and the next block painted over its later
-   lines (launcher review B2). The same holds at every text size: at Large
-   (125%) and Larger (150%) the type grows and the screens reflow around it. */
+   (logical px): no text outside the window and no text painted over. A page
+   taller than the room between the bars scrolls there at any text size, so
+   what its body clips away is not on screen and the bars stay in the window;
+   test_tall_title_page_scrolls holds such a page's controls reachable. A
+   wrapped paragraph used to be laid out one line tall when its page was
+   overfull, and the next block painted over its later lines (launcher review
+   B2). The same holds at every text size: at Large (125%) and Larger (150%)
+   the type grows and the screens reflow around it. */
+/* Lays FLOW_PAGE_TITLE_TALL out at 100% text in a width x height window, then
+   moves focus to `focus` (0: leave it) and lays it out again. Sets
+   *body_scrolls when the title body has content taller than its room, and says
+   whether the prompt bar's labels are on screen and the focused control's
+   label is drawn whole: below the top bar, above the prompt bar and not cut by
+   the scroll container. */
+static bool tall_title_shows(int width, int height, NkUiId focus, bool *body_scrolls) {
+    NkUi *ui = NULL;
+    NkUiScrollState state;
+    const NkUiDrawList *draw;
+    NkUiViewport viewport = launcher_viewport(width, height, 1.0f);
+    NkUiScale scale = nk_ui_scale_for_viewport(&viewport);
+    int saved_text_size_pct = g_flow_text_size_pct;
+    /* The draw list is in window pixels: the bars' edges at the layout density. */
+    int top_bar_bottom = (int)(NK_UI_TOP_BAR_HEIGHT * scale.density);
+    int prompt_bar_top = height - (int)(NK_UI_PROMPT_BAR_HEIGHT * scale.density + 0.5f);
+    bool whole = focus == 0u;
+    g_flow_text_size_pct = 100;
+    draw = flow_case_layout(FLOW_PAGE_TITLE_TALL, width, height, &ui);
+    *body_scrolls = false;
+    if (ui == NULL) {
+        g_flow_text_size_pct = saved_text_size_pct;
+        return false;
+    }
+    if (focus != 0u) {
+        size_t labels = 0u;
+        g_flow_width = scale.logical_w;
+        g_flow_height = scale.logical_h;
+        nk_ui_focus(ui, focus);
+        for (int frame = 0; frame < 3; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)draw_flow_case(ui, FLOW_PAGE_TITLE_TALL);
+            draw = nk_ui_end(ui);
+        }
+        g_flow_width = 1280.0f;
+        g_flow_height = 800.0f;
+        for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+            const NkUiDrawCmd *cmd = &draw->cmd[i];
+            if (cmd->element_id != focus || cmd->kind != NK_UI_DRAW_TEXT) continue;
+            ++labels;
+            whole = (labels == 1u || whole) && cmd->clip[0] == cmd->bounds[0] &&
+                    cmd->clip[1] == cmd->bounds[1] && cmd->clip[2] == cmd->bounds[2] &&
+                    cmd->clip[3] == cmd->bounds[3] && cmd->bounds[1] >= top_bar_bottom &&
+                    cmd->bounds[3] <= prompt_bar_top;
+        }
+        whole = whole && labels > 0u && nk_ui_focused(ui) == focus;
+    }
+    *body_scrolls = nk_ui_scroll_state(ui, NK_UI_ID(NK_UI_ID_SCREEN_TITLE, 0x000020u), &state) &&
+                    state.max_offset > 0.0f;
+    whole = whole && draw_shows(draw, "MOVE") && draw_shows(draw, "BACK");
+    nk_ui_destroy(ui);
+    g_flow_text_size_pct = saved_text_size_pct;
+    return whole;
+}
+
+/* The title page with the game starting, what to expect and the full
+   ENHANCEMENTS card ran past the bottom of a 1280 x 720 window at 100% text:
+   its body scrolled only at a larger text size, so the Enhancements controls
+   could not be reached. Its body now scrolls at any text size, the prompt bar
+   stays on screen, and each control focus moves to is brought into view. */
+static void test_tall_title_page_scrolls(void) {
+    static char dump[CASE_DUMP_CAP];
+    static const NkUiId reach[] = {
+        PLAYER_UI_ID_TITLE_ACE, PLAYER_UI_ID_TITLE_PLAY_OPTIONS, PLAYER_UI_ID_TITLE_60FPS,
+        PLAYER_UI_ID_TITLE_REMOVE, PLAYER_UI_ID_TITLE_BACK
+    };
+    static const struct { int w; int h; } sizes[] = {{1280, 720}, {960, 540}, {1366, 705}};
+    bool scrolls = false;
+    for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
+        CHECK(tall_title_shows(sizes[s].w, sizes[s].h, 0u, &scrolls) && scrolls,
+              "the tallest title page scrolls in a short window at 100% text, under its bars");
+        CHECK(flow_case_fits(FLOW_PAGE_TITLE_TALL, sizes[s].w, sizes[s].h, dump, sizeof(dump)),
+              "the tallest title page draws nothing off the window and no text over text");
+        for (size_t i = 0u; i < sizeof(reach) / sizeof(reach[0]); ++i) {
+            char message[160];
+            (void)snprintf(message, sizeof(message),
+                           "title control %04X comes into view when focused at %d x %d",
+                           (unsigned)reach[i], sizes[s].w, sizes[s].h);
+            CHECK(tall_title_shows(sizes[s].w, sizes[s].h, reach[i], &scrolls) && scrolls,
+                  message);
+        }
+    }
+    /* A tall window has room for all of it: nothing to scroll. */
+    CHECK(tall_title_shows(1920, 1200, 0u, &scrolls) && !scrolls,
+          "the tallest title page fits a 1920 x 1200 window with nothing to scroll");
+}
+
+/* Where each Settings > Enhanced row's button is: left, right and top, in window pixels, the
+   play mode first (-1 where a row drew no box). */
+typedef struct {
+    int box[1 + PLAYER_PART_COUNT][3];
+} EnhancedRowPlaces;
+
+static EnhancedRowPlaces enhanced_row_places(FlowCase which) {
+    EnhancedRowPlaces places;
+    NkUi *ui = NULL;
+    /* As wide as the design window and tall enough that no row is scrolled away. */
+    const NkUiDrawList *draw = flow_case_layout(which, 1280, 1200, &ui);
+    memset(&places, -1, sizeof(places));
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        int row = cmd->element_id == PLAYER_UI_ID_SETTINGS_ACE_MODE ? 0
+                  : cmd->element_id >= PLAYER_UI_ID_SETTINGS_ENHANCED_PART &&
+                        cmd->element_id < PLAYER_UI_ID_SETTINGS_ENHANCED_PART + PLAYER_PART_COUNT
+                      ? 1 + (int)(cmd->element_id - PLAYER_UI_ID_SETTINGS_ENHANCED_PART)
+                      : -1;
+        if (row < 0 || (cmd->kind != NK_UI_DRAW_RECTANGLE && cmd->kind != NK_UI_DRAW_BORDER)) {
+            continue;
+        }
+        if (places.box[row][0] < 0 || cmd->bounds[0] < places.box[row][0]) {
+            places.box[row][0] = cmd->bounds[0];
+        }
+        if (cmd->bounds[2] > places.box[row][1]) places.box[row][1] = cmd->bounds[2];
+        if (places.box[row][2] < 0 || cmd->bounds[1] < places.box[row][2]) {
+            places.box[row][2] = cmd->bounds[1];
+        }
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    return places;
+}
+
+/* Settings > Enhanced keeps its rows where they are while a setting changes. Turning Smooth
+   motion on used to relabel Widescreen "Off (Smooth motion is on)": the wider button widened
+   the column past the side-by-side threshold and every row stacked its sentence under its
+   button. The column now comes from the widest value each row can show on its page, so no
+   value moves a row: Smooth motion on with Widescreen off, Smooth motion off while a game's
+   60 FPS game logic runs, any part at any of its values, or any play mode, on the library's
+   page and on a game's. */
+static void test_enhanced_rows_stay_put(void) {
+    static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
+    for (int part = 0; part < PLAYER_PART_COUNT; ++part) {
+        CHECK(k_enhanced_words[part].count > 0 &&
+                  k_enhanced_words[part].count <= ENHANCED_MAX_WORDS,
+              "every Settings > Enhanced part has its words in this test");
+        if (k_enhanced_words[part].count <= 0 || k_enhanced_words[part].count > ENHANCED_MAX_WORDS)
+            return;
+    }
+    for (size_t g = 0u; g < sizeof(pages) / sizeof(pages[0]); ++g) {
+        EnhancedRowPlaces base;
+        memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+        g_enhanced_mode = NULL;
+        base = enhanced_row_places(pages[g]);
+        for (int row = 0; row < 1 + PLAYER_PART_COUNT; ++row) {
+            CHECK(base.box[row][0] >= 0 && base.box[row][1] > base.box[row][0],
+                  "every Settings > Enhanced row draws its button");
+        }
+        /* -3: on a game's page, Smooth motion off while the play mode runs the game's 60
+           FPS game logic; -2: Smooth motion on, Widescreen off; -1 and up: the play modes,
+           then each part at each of its values. */
+        for (int step = -3; step < 4 + PLAYER_PART_COUNT * ENHANCED_MAX_WORDS; ++step) {
+            EnhancedRowPlaces moved;
+            char message[160];
+            memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+            g_enhanced_mode = NULL;
+            if (step == -3) {
+                if (pages[g] != FLOW_SETTINGS_ACE_TITLE) continue;
+                g_enhanced_value[PLAYER_PART_SMOOTH] = k_enhanced_smooth_at_60;
+                (void)snprintf(message, sizeof(message),
+                               "page %d: Smooth motion off at 60 FPS moves no row", (int)g);
+            } else if (step == -2) {
+                g_enhanced_value[PLAYER_PART_SMOOTH] = "On";
+                g_enhanced_value[PLAYER_PART_WIDE] = "Off";
+                (void)snprintf(message, sizeof(message),
+                               "page %d: Smooth motion on (Widescreen off) moves no row", (int)g);
+            } else if (step < 4) {
+                int count = pages[g] == FLOW_SETTINGS_ACE_TITLE ? 4 : 2;
+                if (step + 1 >= count) continue;
+                g_enhanced_mode = pages[g] == FLOW_SETTINGS_ACE_TITLE
+                                      ? k_enhanced_title_modes[step + 1]
+                                      : k_enhanced_library_modes[step + 1];
+                (void)snprintf(message, sizeof(message), "page %d: play mode %s moves no row",
+                               (int)g, g_enhanced_mode);
+            } else {
+                int part = (step - 4) / ENHANCED_MAX_WORDS;
+                int value = (step - 4) % ENHANCED_MAX_WORDS;
+                if (value >= k_enhanced_words[part].count) continue;
+                g_enhanced_value[part] = k_enhanced_words[part].labels[value];
+                (void)snprintf(message, sizeof(message), "page %d: %s at %s moves no row",
+                               (int)g, k_enhanced_parts[part].name,
+                               k_enhanced_words[part].labels[value]);
+            }
+            moved = enhanced_row_places(pages[g]);
+            CHECK(memcmp(&moved, &base, sizeof(base)) == 0, message);
+        }
+    }
+    memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
+    g_enhanced_mode = NULL;
+}
+
 static void test_every_screen_fits_the_window(void) {
     static char dump[CASE_DUMP_CAP];
     /* The default window, the minimum, a small laptop's maximised window, and
@@ -6358,6 +6665,257 @@ static void test_tier_table_matches_the_docs(void) {
     CHECK(rows == 6u, "the docs Status words table has its six rows");
 }
 
+/* One frame of the nickname editor; *draw, when not NULL, gets its draw list. */
+static PlayerUiAction nickname_frame(NkUi *ui, const PlayerUiNicknameModel *model,
+                                     const NkUiDrawList **draw) {
+    PlayerUiAction action;
+    const NkUiDrawList *list;
+    nk_ui_begin(ui, 0.0);
+    action = player_ui_screen_nickname(ui, model);
+    list = nk_ui_end(ui);
+    if (draw != NULL) *draw = list;
+    return action;
+}
+
+static void nickname_push(NkUi *ui, NkUiEventType type, NkUiNavDir dir) {
+    NkUiEvent event;
+    memset(&event, 0, sizeof(event));
+    event.type = type;
+    event.dir = dir;
+    event.down = true;
+    nk_ui_push_event(ui, &event);
+}
+
+/* Focuses `id` and presses confirm on it, as the pad's A does. */
+static PlayerUiAction nickname_press(NkUi *ui, const PlayerUiNicknameModel *model, NkUiId id) {
+    (void)nickname_frame(ui, model, NULL);
+    nk_ui_focus(ui, id);
+    nickname_push(ui, NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
+    return nickname_frame(ui, model, NULL);
+}
+
+/* Where focus lands from `from` after one move in `dir`. */
+static NkUiId nickname_move(NkUi *ui, const PlayerUiNicknameModel *model, NkUiId from,
+                            NkUiNavDir dir) {
+    (void)nickname_frame(ui, model, NULL);
+    nk_ui_focus(ui, from);
+    (void)nickname_frame(ui, model, NULL);
+    nickname_push(ui, NK_UI_EV_NAV, dir);
+    (void)nickname_frame(ui, model, NULL);
+    return nk_ui_focused(ui);
+}
+
+static bool nickname_op(PlayerUiAction action, PlayerUiNicknameOp op) {
+    return action.kind == PLAYER_UI_ACTION_NICKNAME && (unsigned)action.primary == (unsigned)op;
+}
+
+static bool nickname_dump_has(NkUi *ui, const PlayerUiNicknameModel *model, const char *needle) {
+    static char dump[CASE_DUMP_CAP];
+    (void)nickname_frame(ui, model, NULL);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    return strstr(dump, needle) != NULL;
+}
+
+/* #2197: the nickname editor's on-screen keyboard. Its keys type, in the letter case
+   Shift picks; Space and Delete; Done and Cancel (and Start and B) answer; the count
+   follows the text; the 32-byte cap and the nickname rule hold for every way of typing;
+   a key that cannot type is dimmed but keeps its focus stop; left and right stop at a
+   row's ends, as the find box's keys do. Failing-before: the editor had no keys. */
+static void test_nickname_keyboard(void) {
+    const NkUiId key = PLAYER_UI_ID_NICKNAME_KEY_BASE;
+    const NkUiId q = PLAYER_UI_ID_NICKNAME_KEY_BASE + UI_KEYBOARD_KEY_DEFAULT;
+    NkUiConfig config;
+    NkUiTextBackend text = screen_test_text_backend();
+    NkUi *ui;
+    char typed[NK_NICKNAME_MAX_BYTES + 1u] = "";
+    UiKeyboard keyboard;
+    PlayerUiNicknameModel model;
+    PlayerUiAction action;
+    const NkUiDrawList *draw = NULL;
+    const NkUiTheme *theme;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create a context for the nickname keyboard");
+    if (ui == NULL) return;
+    theme = nk_ui_theme(ui);
+    set_test_viewport(ui, 1280, 720);
+    ui_keyboard_init(&keyboard, typed, NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts, NULL);
+    memset(&model, 0, sizeof(model));
+    model.keyboard = &keyboard;
+    model.current = "Old name";
+    model.logical_width = 1280.0f;
+    model.logical_height = 720.0f;
+
+    (void)nickname_frame(ui, &model, NULL);
+    nk_ui_focus(ui, q);
+    (void)nickname_frame(ui, &model, &draw);
+    CHECK(nk_ui_focused(ui) == q &&
+              find_command(draw, q, NK_UI_DRAW_BORDER, theme->focus) != NULL,
+          "the keyboard's first letter takes focus, with the focus ring");
+    CHECK(nickname_dump_has(ui, &model, "\"0 / 32 bytes\"") &&
+              nickname_dump_has(ui, &model, "\"1\"") && nickname_dump_has(ui, &model, "\"q\"") &&
+              nickname_dump_has(ui, &model, "\"!\"") &&
+              nickname_dump_has(ui, &model, "\"SHIFT\"") &&
+              nickname_dump_has(ui, &model, "\"SPACE\"") &&
+              nickname_dump_has(ui, &model, "\"DELETE\"") &&
+              nickname_dump_has(ui, &model, "\"CANCEL\"") &&
+              nickname_dump_has(ui, &model, "\"DONE\"") &&
+              nickname_dump_has(ui, &model, "\"Old name\""),
+          "the editor shows the count, digits, letters, symbols, Shift, Space, Delete, "
+          "Cancel and Done, and the nickname in use while nothing is typed");
+
+    action = nickname_press(ui, &model, q);
+    CHECK(nickname_op(action, PLAYER_UI_NICKNAME_EDITED) && strcmp(typed, "q") == 0,
+          "a letter key types its letter");
+    action = nickname_press(ui, &model, key + UI_KEYBOARD_KEY_SHIFT);
+    CHECK(nickname_op(action, PLAYER_UI_NICKNAME_EDITED) && keyboard.shifted &&
+              nickname_dump_has(ui, &model, "\"Q\""),
+          "Shift turns the letters to upper case");
+    (void)nickname_press(ui, &model, q);
+    (void)nickname_press(ui, &model, key + UI_KEYBOARD_KEY_SPACE);
+    (void)nickname_press(ui, &model, key + 9u);
+    CHECK(strcmp(typed, "qQ 0") == 0, "keys type in the case shown; Space types a space");
+    action = nickname_press(ui, &model, key + UI_KEYBOARD_KEY_DELETE);
+    CHECK(nickname_op(action, PLAYER_UI_NICKNAME_EDITED) && strcmp(typed, "qQ ") == 0 &&
+              nickname_dump_has(ui, &model, "\"3 / 32 bytes\""),
+          "Delete removes the last character, and the count follows");
+
+    CHECK(nickname_move(ui, &model, key + 19u, NK_UI_DIR_RIGHT) == key + 19u &&
+              nickname_move(ui, &model, q, NK_UI_DIR_LEFT) == q,
+          "left and right stop at a row's ends, as the find box's keys do");
+    CHECK(nickname_move(ui, &model, q, NK_UI_DIR_DOWN) == key + 20u &&
+              nickname_move(ui, &model, key + 20u, NK_UI_DIR_UP) == q,
+          "up and down move between rows");
+
+    (void)nickname_frame(ui, &model, NULL);
+    nickname_push(ui, NK_UI_EV_OPTIONS, NK_UI_DIR_NONE);
+    (void)nickname_frame(ui, &model, NULL);
+    CHECK(strcmp(typed, "qQ") == 0, "the pad's X deletes");
+    nickname_push(ui, NK_UI_EV_DETAILS, NK_UI_DIR_NONE);
+    (void)nickname_frame(ui, &model, NULL);
+    CHECK(strcmp(typed, "qQ ") == 0, "the pad's Y types a space");
+    nickname_push(ui, NK_UI_EV_TAB, NK_UI_DIR_RIGHT);
+    (void)nickname_frame(ui, &model, NULL);
+    CHECK(!keyboard.shifted, "L or R turns the letter case over");
+    nickname_push(ui, NK_UI_EV_MENU, NK_UI_DIR_NONE);
+    CHECK(nickname_op(nickname_frame(ui, &model, NULL), PLAYER_UI_NICKNAME_SAVE),
+          "Start is Done");
+    nickname_push(ui, NK_UI_EV_BACK, NK_UI_DIR_NONE);
+    CHECK(nickname_op(nickname_frame(ui, &model, NULL), PLAYER_UI_NICKNAME_SKIP),
+          "Back is Cancel");
+    CHECK(nickname_op(nickname_press(ui, &model, PLAYER_UI_ID_NICKNAME_SAVE),
+                      PLAYER_UI_NICKNAME_SAVE) &&
+              nickname_op(nickname_press(ui, &model, PLAYER_UI_ID_NICKNAME_SKIP),
+                          PLAYER_UI_NICKNAME_SKIP),
+          "Done saves and Cancel cancels");
+
+    {
+        /* The mouse: a click (press and release on the same key) types it. */
+        const NkUiDrawCmd *w;
+        NkUiEvent pointer;
+        (void)snprintf(typed, sizeof(typed), "%s", "");
+        nk_ui_focus(ui, q);
+        (void)nickname_frame(ui, &model, &draw);
+        w = find_command(draw, key + 11u, NK_UI_DRAW_BORDER, 0u);
+        CHECK(w != NULL, "the w key is drawn");
+        if (w != NULL) {
+            memset(&pointer, 0, sizeof(pointer));
+            pointer.type = NK_UI_EV_POINTER;
+            pointer.x = 0.5f * (float)(w->bounds[0] + w->bounds[2]);
+            pointer.y = 0.5f * (float)(w->bounds[1] + w->bounds[3]);
+            pointer.down = true;
+            nk_ui_push_event(ui, &pointer);
+            (void)nickname_frame(ui, &model, NULL);
+            pointer.down = false;
+            nk_ui_push_event(ui, &pointer);
+            action = nickname_frame(ui, &model, NULL);
+            CHECK(nickname_op(action, PLAYER_UI_NICKNAME_EDITED) && strcmp(typed, "w") == 0 &&
+                      nk_ui_focused(ui) == key + 11u,
+                  "a mouse click on a key types it");
+        }
+    }
+
+    /* The cap: 31 bytes take one more letter, then no key types. */
+    (void)snprintf(typed, sizeof(typed), "%s", "abcdefghijklmnopqrstuvwxyz01234");
+    action = nickname_press(ui, &model, q);
+    CHECK(strlen(typed) == 32u && nickname_op(action, PLAYER_UI_NICKNAME_EDITED),
+          "the 32nd byte is typed");
+    action = nickname_press(ui, &model, q);
+    (void)nickname_press(ui, &model, key + UI_KEYBOARD_KEY_SPACE);
+    CHECK(strlen(typed) == 32u && action.kind == PLAYER_UI_ACTION_NONE &&
+              strcmp(typed + 26, "01234q") == 0,
+          "past 32 bytes a key does nothing");
+    CHECK(!ui_keyboard_type(&keyboard, "x") && strlen(typed) == 32u,
+          "typed text stops at the cap too");
+    nk_ui_focus(ui, q);
+    (void)nickname_frame(ui, &model, &draw);
+    CHECK(nk_ui_focused(ui) == q && find_command(draw, q, NK_UI_DRAW_TEXT, theme->muted) != NULL &&
+              nickname_dump_has(ui, &model, "\"32 / 32 bytes\""),
+          "a full text dims the keys, keeps the focus where it was, and reads 32 / 32 bytes");
+    {
+        /* #2197 review: colour is not the only cue. A key that cannot type also loses its
+           outline (w here, not focused, so no focus ring either), and keeps its size: its
+           label sits where it does once the key can type again. */
+        const NkUiDrawCmd *label = find_command(draw, key + 11u, NK_UI_DRAW_TEXT, theme->muted);
+        int dimmed[4] = {0, 0, 0, 0};
+        bool outlined = find_command(draw, key + 11u, NK_UI_DRAW_BORDER, 0u) != NULL;
+        if (label != NULL) memcpy(dimmed, label->bounds, sizeof(dimmed));
+        CHECK(label != NULL && !outlined, "a key that cannot type is drawn without its outline");
+        typed[31] = '\0';
+        (void)nickname_frame(ui, &model, &draw);
+        label = find_command(draw, key + 11u, NK_UI_DRAW_TEXT, 0u);
+        CHECK(label != NULL && label->rgba_pm != theme->muted &&
+                  find_command(draw, key + 11u, NK_UI_DRAW_BORDER, 0u) != NULL &&
+                  memcmp(label->bounds, dimmed, sizeof(dimmed)) == 0,
+              "a key that can type again has its outline back, in the same place and size");
+    }
+    (void)snprintf(typed, sizeof(typed), "%s", "abcdefghijklmnopqrstuvwxyz01234");
+    CHECK(!ui_keyboard_type(&keyboard, "\xC3\xA9") && strlen(typed) == 31u,
+          "a 2-byte character does not fit in the last byte");
+
+    /* The nickname rule: no control character, from any way of typing. */
+    (void)snprintf(typed, sizeof(typed), "%s", "ab");
+    CHECK(!ui_keyboard_type(&keyboard, "\x01") && !ui_keyboard_type(&keyboard, "\x1F") &&
+              !ui_keyboard_type(&keyboard, "\x7F") &&
+              !ui_keyboard_type(&keyboard, "\xC2\x85") &&
+              !ui_keyboard_type(&keyboard, "\xED\xA0\x80") &&
+              !ui_keyboard_type(&keyboard, "\xC0\xA1") && strcmp(typed, "ab") == 0,
+          "control characters (C0, DEL, C1), a surrogate and an overlong form are refused");
+    CHECK(ui_keyboard_type(&keyboard, "\x01" "c\xC3\xA9") && strcmp(typed, "ab" "c\xC3\xA9") == 0,
+          "what the rule takes in the same run is still typed");
+    CHECK(player_ui_nickname_accepts('A', NULL) && player_ui_nickname_accepts(0xA0u, NULL) &&
+              player_ui_nickname_accepts(0x3042u, NULL) &&
+              !player_ui_nickname_accepts(0x00u, NULL) &&
+              !player_ui_nickname_accepts(0x1Fu, NULL) &&
+              !player_ui_nickname_accepts(0x7Fu, NULL) &&
+              !player_ui_nickname_accepts(0x9Fu, NULL) &&
+              !player_ui_nickname_accepts(0xD800u, NULL) &&
+              !player_ui_nickname_accepts(0x110000u, NULL),
+          "the filter is nk_nickname_valid's rule for one character");
+    nk_ui_destroy(ui);
+
+    /* The editor at the smallest window the fit tests use, at every text size: the
+       count and the keys show (a larger text size scrolls the card instead). */
+    for (int size = 100; size <= 150; size += 25) {
+        char message[96];
+        g_flow_text_size_pct = size;
+        (void)snprintf(message, sizeof(message),
+                       "the full editor shows its count and first keys at 853 x 480, %d%% text",
+                       size);
+        CHECK(flow_case_shows(FLOW_NICKNAME_FULL, 853, 480, "32 / 32 bytes") &&
+                  flow_case_shows(FLOW_NICKNAME_FULL, 853, 480, "q") &&
+                  flow_case_shows(FLOW_NICKNAME_FIRST, 853, 480, "Player"),
+              message);
+    }
+    g_flow_text_size_pct = 100;
+    CHECK(flow_case_shows(FLOW_NICKNAME_FULL, 853, 480, "DONE") &&
+              flow_case_shows(FLOW_NICKNAME_REFUSED, 853, 480, "DONE") &&
+              flow_case_shows(FLOW_NICKNAME_FIRST, 960, 540, "SKIP"),
+          "at the design text size the whole keyboard fits the smallest window");
+}
+
 int main(int argc, char **argv) {
     static char library[DUMP_CAP];
     static char title[DUMP_CAP];
@@ -6377,6 +6935,8 @@ int main(int argc, char **argv) {
     test_refresh_advice_classifier();
     test_error_details_fit_the_minimum_window();
     test_every_screen_fits_the_window();
+    test_tall_title_page_scrolls();
+    test_enhanced_rows_stay_put();
     test_prompt_bar_stays_whole();
     test_psp_fonts_page();
     test_wizard_actions();
@@ -6412,6 +6972,7 @@ int main(int argc, char **argv) {
     test_library_centres_in_a_wide_window();
     test_library_sort_button();
     test_library_find_box();
+    test_nickname_keyboard();
     CHECK(build_library_golden(library, sizeof(library), &library_size),
           "build Library screen dumps");
     CHECK(build_title_golden(title, sizeof(title), &title_size),

@@ -24,6 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Smooth motion's value on a game's page while that game runs its 60 FPS game logic. */
+#define ENHANCED_SMOOTH_AT_60_VALUE "Off (this game runs at 60 FPS)"
+
 /* Status colours, from the theme's tokens. */
 #define PLAYER_UI_READY (nk_ui_theme_n1()->ready)
 #define PLAYER_UI_WARNING (nk_ui_theme_n1()->warning)
@@ -118,6 +121,17 @@ struct PlayerUiNk {
     bool find_text_input;
     /* The control the box focuses, on the first frame that lays it out. */
     NkUiId find_focus;
+    /* The nickname editor (#2197): open (the first-launch prompt, or Settings >
+       Nickname), what is typed and its on-screen keyboard, whether the last Done
+       was refused, the control the next frame focuses (0 for none), and the
+       control focus returns to after it. */
+    bool nickname_open;
+    bool nickname_first_launch;
+    bool nickname_refused;
+    NkUiId nickname_focus;
+    NkUiId nickname_return_focus;
+    char nickname_text[NK_NICKNAME_MAX_BYTES + 1u];
+    UiKeyboard nickname_keyboard;
     char status_text[PLAYER_UI_TITLE_CAP][256];
     char library_page_label[64];
     char flow_title[NK_MAX_TITLE_LEN + NK_MAX_DISC_ID_LEN + 16];
@@ -153,7 +167,9 @@ struct PlayerUiNk {
     /* Settings > Enhanced: the title's name and the rows' "Library (16x)" words. */
     char enhanced_title[160];
     char enhanced_mode[48];
+    const char *enhanced_modes[4];
     char enhanced_values[PLAYER_UI_ENHANCED_ROWS][48];
+    char enhanced_library_values[PLAYER_UI_ENHANCED_ROWS][48];
     char settings_tools[PLAYER_UI_SETTINGS_TOOLS][192];
     /* The factory reset check's folders, looked up when the check opens. */
     char reset_folders[PLAYER_UI_RESET_FOLDERS][NK_MAX_PATH];
@@ -856,6 +872,10 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
     model->enhanced_mode = library_on ? "Enhanced" : "Authentic";
     model->enhanced_mode_sentence =
         "The default for every game; each game's page can choose its own.";
+    player->enhanced_modes[0] = player_play_mode_name(PLAYER_PLAY_AUTHENTIC);
+    player->enhanced_modes[1] = player_play_mode_name(PLAYER_PLAY_ENHANCED);
+    model->enhanced_modes = player->enhanced_modes;
+    model->enhanced_mode_count = 2;
     bool logic_60 = false;
     bool smooth_on = player_settings_library_part(settings, PLAYER_PART_SMOOTH) != 0;
     if (title >= 0) {
@@ -872,13 +892,16 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                  game->title_name[0] ? game->title_name : game->disc_id);
         model->enhanced_title = player->enhanced_title;
         model->enhanced_on = play.on;
-        if (chosen == PLAYER_PLAY_LIBRARY) {
-            snprintf(player->enhanced_mode, sizeof(player->enhanced_mode),
-                     "Library (%s)", library_on ? "Enhanced" : "Authentic");
-            model->enhanced_mode = player->enhanced_mode;
-        } else {
-            model->enhanced_mode = player_play_mode_name(chosen);
-        }
+        /* A title's page steps Library, Authentic, Enhanced and (with a package) Ace. */
+        snprintf(player->enhanced_mode, sizeof(player->enhanced_mode), "Library (%s)",
+                 library_on ? "Enhanced" : "Authentic");
+        model->enhanced_mode = chosen == PLAYER_PLAY_LIBRARY ? player->enhanced_mode
+                                                             : player_play_mode_name(chosen);
+        player->enhanced_modes[0] = player->enhanced_mode;
+        player->enhanced_modes[1] = player_play_mode_name(PLAYER_PLAY_AUTHENTIC);
+        player->enhanced_modes[2] = player_play_mode_name(PLAYER_PLAY_ENHANCED);
+        player->enhanced_modes[3] = player_play_mode_name(PLAYER_PLAY_ACE);
+        model->enhanced_mode_count = 4;
         model->enhanced_mode_sentence = app->title_enhancements[title].available
             ? "Ace is Enhanced plus this game's own 60 FPS game logic."
             : "Enhanced adds the parts below. " PLAYER_UI_ACE_NEEDS_PACKAGE;
@@ -894,6 +917,11 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             player_graphics_preset_row(player_app_graphics_preset(app));
         row->name = info->name;
         row->sentence = info->sentence;
+        row->labels = info->labels;
+        row->label_count = info->value_count;
+        row->library_value = NULL;
+        row->other_value = title >= 0 && p == PLAYER_PART_SMOOTH ? ENHANCED_SMOOTH_AT_60_VALUE
+                                                                  : NULL;
         row->value = player_enhanced_part_label(p, library);
         row->on = library != 0;
         if (title < 0 && preset && preset->part[p] >= 0) {
@@ -903,6 +931,9 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         }
         if (title >= 0) {
             int own = player_app_title_part(app, title, p);
+            snprintf(player->enhanced_library_values[p], sizeof(player->enhanced_library_values[p]),
+                     "Library (%s)", player_enhanced_part_label(p, library));
+            row->library_value = player->enhanced_library_values[p];
             if (own < 0) {
                 snprintf(player->enhanced_values[p], sizeof(player->enhanced_values[p]),
                          "Library (%s)", player_enhanced_part_label(p, library));
@@ -919,7 +950,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
                          sizeof(player->enhanced_smooth_sentence),
                          "This build smooths only 30 FPS games. The choice here (%s) applies "
                          "when this game's 60 FPS game logic is off.", row->value);
-                row->value = "Off (this game runs at 60 FPS)";
+                row->value = ENHANCED_SMOOTH_AT_60_VALUE;
                 row->sentence = player->enhanced_smooth_sentence;
                 row->on = false;
             }
@@ -1009,6 +1040,7 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.volume = app->settings.master_volume;
     model.ui_sounds = app->settings.ui_sounds;
     model.launcher_fullscreen = app->settings.launcher_fullscreen;
+    model.nickname = app->settings.nickname;
     model.build_speed = package_build_speed_name(app->settings.build_speed);
     switch (app->settings.build_speed) {
     case PACKAGE_BUILD_SPEED_BACKGROUND:
@@ -1851,6 +1883,17 @@ unsigned player_ui_nk_test_focus(const PlayerUiNk *player) {
     return player != NULL && player->ui != NULL ? (unsigned)nk_ui_focused(player->ui) : 0u;
 }
 
+const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, size_t cap) {
+    if (count != NULL && cap > 0u) count[0] = '\0';
+    if (player == NULL || !player->nickname_open) return NULL;
+    if (count != NULL) (void)ui_keyboard_count_text(&player->nickname_keyboard, count, cap);
+    return player->nickname_text;
+}
+
+bool player_ui_nk_test_laid_out(const PlayerUiNk *player) {
+    return player != NULL && player->ui != NULL && nk_ui_laid_out(player->ui);
+}
+
 int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown) {
     if (shown != NULL) *shown = false;
     if (player == NULL || player->backdrop_index == SIZE_MAX) return -1;
@@ -2275,6 +2318,58 @@ static void player_ui_find_delete(PlayerUiNk *player) {
     player->library_page = 0u;
 }
 
+/* The nickname editor starts empty, showing the nickname in use until
+   something is typed, and opens on its keyboard's first letter. Its keyboard
+   takes only what nk_nickname_valid would, up to NK_NICKNAME_MAX_BYTES. */
+static void player_ui_nickname_open(PlayerUiNk *player, bool first_launch) {
+    player->nickname_open = true;
+    player->nickname_first_launch = first_launch;
+    player->nickname_refused = false;
+    player->nickname_focus = PLAYER_UI_ID_NICKNAME_KEY_BASE + UI_KEYBOARD_KEY_DEFAULT;
+    player->nickname_text[0] = '\0';
+    ui_keyboard_init(&player->nickname_keyboard, player->nickname_text,
+                     NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts, NULL);
+}
+
+/* What Done saves: the typed text without the spaces (U+0020) before and after
+   it, so "  Kai " is "Kai" and a nickname of spaces alone is empty, which
+   nk_nickname_valid refuses. The typed text itself is left as it is. */
+static const char *player_ui_nickname_trimmed(const char *text, char *out, size_t cap) {
+    size_t start = 0u, end = strlen(text);
+    while (start < end && text[start] == ' ') start++;
+    while (end > start && text[end - 1u] == ' ') end--;
+    if (end - start >= cap) end = start + cap - 1u;
+    memcpy(out, text + start, end - start);
+    out[end - start] = '\0';
+    return out;
+}
+
+static void player_ui_nickname_close(PlayerUiNk *player) {
+    player->nickname_open = false;
+    player->nickname_refused = false;
+    player->nickname_text[0] = '\0';
+}
+
+/* A physical keyboard types through the on-screen keyboard's rules (its filter
+   and the 32-byte cap), and moves the focus to Done, so Enter after typing saves.
+   Done still checks the whole rule (nk_nickname_valid). */
+static void player_ui_nickname_type(PlayerUiNk *player, const char *text) {
+    (void)ui_keyboard_type(&player->nickname_keyboard, text);
+    player->nickname_focus = PLAYER_UI_ID_NICKNAME_SAVE;
+    player->nickname_refused = false;
+}
+
+/* Removes the last character, all of its UTF-8 bytes. */
+static void player_ui_nickname_delete(PlayerUiNk *player) {
+    (void)ui_keyboard_delete(&player->nickname_keyboard);
+    player->nickname_focus = PLAYER_UI_ID_NICKNAME_SAVE;
+    player->nickname_refused = false;
+}
+
+bool player_ui_nk_nickname_open(const PlayerUiNk *player) {
+    return player != NULL && player->ready && player->nickname_open;
+}
+
 bool player_ui_nk_find_open(const PlayerUiNk *player) {
     return player != NULL && player->ready && player->find_open &&
            nk_ui_router_current(player->router) == PLAYER_UI_ROUTE_LIBRARY;
@@ -2286,7 +2381,22 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     double now_s;
     if (player == NULL || !player->ready || event == NULL) return false;
     now_s = player_ui_nk_now_s(player);
-    if (player_ui_nk_find_open(player)) {
+    if (player->nickname_open) {
+        /* The nickname editor takes what is typed as the find box does, below;
+           Esc or the pad's B is its Skip or Cancel. */
+        if (event->type == SDL_EVENT_TEXT_INPUT && event->text.text != NULL) {
+            player_ui_nickname_type(player, event->text.text);
+            return true;
+        }
+        if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
+            bool control = (event->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) != 0;
+            if (event->key.key == SDLK_BACKSPACE) {
+                if (event->type == SDL_EVENT_KEY_DOWN) player_ui_nickname_delete(player);
+                return true;
+            }
+            if (!control && event->key.key >= 0x20u && event->key.key < 0x7Fu) return true;
+        }
+    } else if (player_ui_nk_find_open(player)) {
         /* The box takes what is typed: SDL's text input brings the characters,
            Backspace deletes one, and a printable key is not also a shortcut
            (D, Q, E). Esc or the pad's B clears and closes it, below. */
@@ -2334,7 +2444,10 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
                    !translated[i].repeat && player->pending_sound < 0) {
             player->pending_sound = PLAYER_UI_SOUND_CONFIRM;
         }
-        if (translated[i].type == NK_UI_EV_BACK && player_ui_nk_find_open(player)) {
+        if (translated[i].type == NK_UI_EV_BACK && player->nickname_open) {
+            /* The editor answers Back itself (Skip or Cancel); the routes stay. */
+            if (translated[i].down) nk_ui_push_event(player->ui, &translated[i]);
+        } else if (translated[i].type == NK_UI_EV_BACK && player_ui_nk_find_open(player)) {
             if (translated[i].down) player_ui_find_close(player);
         } else if (translated[i].type == NK_UI_EV_BACK) {
             nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
@@ -3117,10 +3230,10 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         return false;
     }
     (void)SDL_GetWindowSize(window, &window_w, &window_h);
-    if (player_ui_nk_find_open(player) != player->find_text_input) {
-        /* SDL's text input is on while the find box is open, so typing (and an
-           input method's text) reaches it; off otherwise. */
-        player->find_text_input = player_ui_nk_find_open(player);
+    if ((player_ui_nk_find_open(player) || player->nickname_open) != player->find_text_input) {
+        /* SDL's text input is on while the find box or the nickname editor is
+           open, so typing (and an input method's text) reaches it; off otherwise. */
+        player->find_text_input = player_ui_nk_find_open(player) || player->nickname_open;
         if (player->find_text_input) {
             (void)SDL_StartTextInput(window);
         } else {
@@ -3220,8 +3333,58 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             route = nk_ui_router_current(player->router);
         }
     }
-    if (player_ui_nk_flow_view(app->active_view)) {
+    /* The nickname editor (#2197) draws over every screen while it is open: the
+       first-launch prompt until it is answered, or Settings > Nickname. */
+    if (!player->nickname_open && player_app_nickname_prompt_visible(app)) {
+        player->nickname_return_focus = nk_ui_focused(player->ui);
+        player_ui_nickname_open(player, true);
+    } else if (!player->nickname_open && player->nickname_return_focus != 0u) {
+        nk_ui_focus(player->ui, player->nickname_return_focus);
+        player->nickname_return_focus = 0u;
+    }
+    if (player->nickname_open) {
+        PlayerUiNicknameModel model;
+        memset(&model, 0, sizeof(model));
+        if (player->nickname_focus != 0u) {
+            nk_ui_focus(player->ui, player->nickname_focus);
+            player->nickname_focus = 0u;
+        }
+        model.first_launch = player->nickname_first_launch;
+        model.keyboard = &player->nickname_keyboard;
+        model.current = app->settings.nickname;
+        model.refused = player->nickname_refused;
+        model.logical_width = scale.logical_w;
+        model.logical_height = scale.logical_h;
+        action = player_ui_screen_nickname(player->ui, &model);
+        if (action.kind == PLAYER_UI_ACTION_NICKNAME &&
+            (unsigned)action.primary == PLAYER_UI_NICKNAME_EDITED) {
+            player->nickname_refused = false;
+            action.kind = PLAYER_UI_ACTION_NONE;
+        } else if (action.kind == PLAYER_UI_ACTION_NICKNAME) {
+            /* Skip keeps the nickname; a Save the rule refuses keeps the editor
+               open, with the old nickname, and says why. */
+            char trimmed[NK_NICKNAME_MAX_BYTES + 1u];
+            bool save = (unsigned)action.primary == PLAYER_UI_NICKNAME_SAVE;
+            const char *chosen = player_ui_nickname_trimmed(player->nickname_text, trimmed,
+                                                            sizeof(trimmed));
+            bool done = player->nickname_first_launch
+                ? player_app_nickname_prompt_answer(app, save ? chosen : NULL)
+                : !save || player_app_set_nickname(app, chosen);
+            if (done) {
+                player_ui_nickname_close(player);
+            } else {
+                player->nickname_refused = true;
+            }
+            action.kind = PLAYER_UI_ACTION_NONE;
+        }
+    } else if (player_ui_nk_flow_view(app->active_view)) {
         action = player_ui_render_flow(player, app, scale, now_s);
+        if (action.kind == PLAYER_UI_ACTION_SETTINGS &&
+            (unsigned)action.primary == PLAYER_UI_SETTINGS_EDIT_NICKNAME) {
+            player->nickname_return_focus = PLAYER_UI_ID_SETTINGS_NICKNAME;
+            player_ui_nickname_open(player, false);
+            action.kind = PLAYER_UI_ACTION_NONE;
+        }
         if ((player_ui_settings_view(app->active_view) ||
              app->active_view == VIEW_CONTROLLER_SETTINGS) &&
             (action.kind == PLAYER_UI_ACTION_OPEN_LIBRARY ||
