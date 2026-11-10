@@ -83,7 +83,7 @@ Presentation enhancements operate strictly after or alongside the host graphics 
 Guest code hooks represent the highest-risk category because they directly alter guest architectural state.
 
 - **Allowed:** Intercepting a symbolic function call (e.g., `title_skip_intro_movie`) to set return register `$v0 = 1` and bypass playback; adjusting game progression flags at verified symbolic lifecycle points.
-- **Forbidden:** Specifying raw hex address literals (e.g., `0x08804000`); embedding commercial title binaries or patched MIPS machine code inside the package; executing arbitrary unverified host shellcode.
+- **Forbidden:** Specifying raw hex address literals (e.g., `0x08804000`) in hook symbols, capability names or site function names; embedding commercial title binaries, game bytes or patched MIPS machine code inside the package; executing arbitrary unverified host shellcode. A published package may name its sites' addresses in its site map, under the rules of section 5.1.
 
 ### 2.4. Save-Data Modification (`save_data_modification`)
 
@@ -142,7 +142,26 @@ Enhancements must follow the same strict rule:
 
 - **Symbolic hook targets and capability names only:** Enhancement packages declare hook points using symbolic function names (e.g., `symbol: "title_init_display"`, `symbol: "stage_load_complete"`) and request capabilities via symbolic names (e.g., `capabilities: ["hud_overlay"]`).
 - **Prohibition of raw address literals:** Enhancement package manifests must not contain raw numerical or hexadecimal addresses in hook symbols or capability names. The validator enforces a uniform rejection rule across all forms: 0x-hex (e.g. `0x08804000`), decompiler-style stems (`sub_`, `loc_`, `func_`), bare 6-8 digit hex strings (including all-letter strings like `deadbeef`), and numeric addresses.
-- **Resolution via title profile:** Symbolic hook names are resolved to guest addresses exclusively through the title's private profile and symbol registry. The generic enhancement runtime operates strictly on resolved symbols, keeping all commercial addresses out of package declarations.
+- **Resolution via title profile or site map:** Symbolic hook names are resolved to guest addresses through the title's private profile and symbol registry, or through a published package's site map (section 5.1). The generic enhancement runtime operates strictly on resolved symbols; generic code (`src/`, `tools/`) never holds a title's addresses.
+
+### 5.1. Published Site Data
+
+I publish a title's packages as site data, so that a user who builds from source gets the same enhancements as a user of my own builds. A published package is data about one exact executable, not a piece of it. It holds only:
+
+- the disc ID, the disc version and the SHA-256 of the decrypted executable the title profile selects (usually `EBOOT.BIN`) it was made for;
+- a site map: each symbolic function name the package uses and its address in that executable;
+- each site's change: one of the declared transforms of section 9.2, never code or values;
+- for each byte range a site reads or replaces, a digest of the stock bytes, keyed by the executable (below).
+
+It holds no game bytes: no instruction words, data, tables, strings or values copied from the disc, and no patched code. Every symbolic name is project-authored (from a decompilation or named by the project), never taken from the executable's own symbol table. A disc file path and a CSV column name appear only as locators, naming where a data transform applies. A store site that checks the values the game's loader stores publishes only keyed digests of them (`stock_value_digests`, never `stock_values`): when the game stores a value, the runtime digests it, compares, and scales the value it observed, and on a mismatch it stops the run, naming the site. Where a transform's result depends on the stock value (such as twice it), the package publishes the rule, never the result.
+
+**Keyed digests.** A plain SHA-256 of one 32-bit instruction word can be inverted by trying all $2^{32}$ words, so it would publish the word. Every stock digest in a published package is therefore an HMAC-SHA-256 whose key is derived from the whole executable (a different hash from the published executable digest, so that digest does not give the key away). Only someone who holds the executable can compute or check it, and they already have the bytes.
+
+**Exact match, fail closed.** A published package applies only to the executable it names. Before any site is read, build-package refuses it by name when the disc ID differs (`other_disc`: another region or another game), when the disc version differs (`other_revision`), or when the disc ID and version match but the executable digest does not (`modified_executable`: a patched or re-encoded image). A site whose keyed digest does not match refuses the whole package (`site_mismatch`). The build stays authentic, as section 6 requires.
+
+**Why this is publishable.** It is the same practice as decompilation projects that publish symbol maps (function names and addresses for one ROM checksum) and emulator patch and cheat databases that publish addresses and their own replacement values for a named game ID. In each case the game comes only from the user's own copy, and the published file is useless without it.
+
+**Where they live.** Published packages are separate data files in `assets/enhancements/`, one per disc and package, and pass the publication audit's no-game-bytes check before they enter the public tree. That check sees only the file. It refuses any property outside the format, and any string holding an address, an instruction-word-shaped or long hex run, a base64-like run or an escaped byte. It cannot tell a keyed digest from 32 raw bytes, and no pattern check can stop free text encoded on purpose; those are its stated limits. The export command holds the executable and computes every digest from it, so it is what makes each digest a digest, and review covers the text.
 
 ---
 
