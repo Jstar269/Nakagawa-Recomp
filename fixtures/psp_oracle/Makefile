@@ -364,6 +364,10 @@ CASE_ID = 182
 # forms, vidt into every column and row register; probe_hle_issues.c), register-only.
 else ifeq ($(CASE),vfpu-wider-ops)
 CASE_ID = 183
+# 184: the #326 vus2i/vs2i words at the reserved widths .t and .q (probe_hle_issues.c), hand-encoded,
+# register-only. POWER RISK: reserved encodings; owner present. Run it last, in its own launch.
+else ifeq ($(CASE),vfpu-reserved-widths)
+CASE_ID = 184
 else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
@@ -693,6 +697,9 @@ TARGET = $(BUILD_DIR)/vfpu_prefix_state
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),vfpu-wider-ops)
 TARGET = $(BUILD_DIR)/vfpu_wider_ops
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-reserved-widths)
+TARGET = $(BUILD_DIR)/vfpu_reserved_widths
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
 # same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.

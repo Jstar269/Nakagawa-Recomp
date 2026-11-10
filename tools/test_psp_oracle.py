@@ -2488,7 +2488,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 155)
+        self.assertEqual(len(routes), 156)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 182, 183},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 182, 183, 184},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -7292,7 +7292,8 @@ class HleIssuesProbeTests(unittest.TestCase):
                 "|| PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 "
                 "|| PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175 || PSP_ORACLE_CASE == 176 "
                 "|| PSP_ORACLE_CASE == 182 "
-                "|| PSP_ORACLE_CASE == 183\n")
+                "|| PSP_ORACLE_CASE == 183 "
+                "|| PSP_ORACLE_CASE == 184\n")
         self.assertIn(head, self.probe)
         attr = self.probe[self.probe.index(head):]
         attr = attr[:attr.index("#endif") + len("#endif")]
@@ -10386,7 +10387,7 @@ class VfpuWiderOpsProbeTests(unittest.TestCase):
                       "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
                       self.makefile)
         self.assertIn("#define HLE_CASE_VFPU_WIDER_OPS 183\n", self.probe)
-        self.assertIn("PSP_ORACLE_CASE == 183\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 183 ||", self.probe)
         self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-wider-ops"\n'
                       '#define HLE_TEST_ID "PSP-VFPU-WIDEROPS-001"\n'
                       '#define HLE_LOG "host0:/vfpu_wider_ops_log.txt"', self.probe)
@@ -10524,6 +10525,120 @@ class VfpuWiderOpsProbeTests(unittest.TestCase):
         self.assertEqual(row["hardware_evidence"], "NOT_RUN")
         self.assertNotIn("evidence_cases", row)
         self.assertEqual(row["case_ids"][-1], "vfpu-wider-ops-done")
+
+
+class VfpuReservedWidthsProbeTests(unittest.TestCase):
+    """CASE=vfpu-reserved-widths (184, PSP-VFPU-RESERVED-001) in probe_hle_issues.c: the #326
+    vus2i/vs2i words at the reserved widths .t and .q, hand-encoded because psp-as refuses them.
+    Register-only: no system call in the section beyond the shared writer, bounded loops, a step
+    before every cell, identity prefixes, a fixed-shape stream that matches the registry, the power
+    risk named, and no hardware result claimed (NOT_RUN)."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+    readme: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-VFPU-RESERVED-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.rindex("#if PSP_ORACLE_CASE == HLE_CASE_VFPU_RESERVED_WIDTHS\n")
+        end = cls.probe.index("#endif /* HLE_CASE_VFPU_RESERVED_WIDTHS */", start)
+        cls.section = _c_code(cls.probe[start:end])
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),vfpu-reserved-widths)\nCASE_ID = 184\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),vfpu-reserved-widths)\n"
+                      "TARGET = $(BUILD_DIR)/vfpu_reserved_widths\n"
+                      "OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o\n",
+                      self.makefile)
+        self.assertIn("#define HLE_CASE_VFPU_RESERVED_WIDTHS 184\n", self.probe)
+        self.assertIn("PSP_ORACLE_CASE == 184\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "vfpu-reserved-widths"\n'
+                      '#define HLE_TEST_ID "PSP-VFPU-RESERVED-001"\n'
+                      '#define HLE_LOG "host0:/vfpu_reserved_widths_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "vfpu-reserved-widths").name,
+                         "vfpu_reserved_widths_log.txt")
+        self.assertEqual(_campaign_completeness_contract("vfpu-reserved-widths"),
+                         "strict-golden-sequence")
+        self.assertNotIn("vfpu-reserved-widths", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("vfpu-reserved-widths", parse_golden.HLE_OBSERVATION_CASES)
+        row = [line for line in self.readme.splitlines()
+               if line.startswith("| `vfpu-reserved-widths` | `PSP-VFPU-RESERVED-001` |")]
+        self.assertEqual(len(row), 1)
+        self.assertIn("POWER RISK: reserved encodings; owner present", row[0])
+
+    def test_section_is_register_only_and_bounded(self) -> None:
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", self.section)), set())
+        self.assertNotIn("while (", self.section)
+        for banned in ("for (;;)", "do {", "goto ", "malloc(", "kuKernel", "sctrl", "mtvc",
+                       "ctc2", "cfc2"):
+            self.assertNotIn(banned, self.section)
+        headers = re.findall(r"\bfor \(([^)]*)\)", self.section)
+        self.assertGreaterEqual(len(headers), 6)
+        for header in headers:
+            with self.subTest(loop=header):
+                self.assertRegex(header, r"^unsigned \w+ = [\w *+]+; \w+ < ")
+        self.assertNotIn("TN_PFX_P1", self.section)
+        self.assertNotIn("TN_PFX_P2", self.section)
+        bodies = _c_function_bodies(self.section)
+        self.assertLess(bodies["rw_cell"].index("hle_step(name);"), bodies["rw_cell"].index("f->fn("))
+
+    def test_the_words_are_the_reserved_widths(self) -> None:
+        words = {"vus2i_t": 0xd03a8008, "vus2i_q": 0xd03a8088, "vs2i_t": 0xd03b8008, "vs2i_q": 0xd03b8088}
+        for name, word in words.items():
+            with self.subTest(form=name):
+                self.assertIn(f'TN_CELL_FN(rw_{name}, TN_PFX_NONE, "0x{word:08x}")', self.section)
+                self.assertIn(f"0x{word:08x}u, rw_{name}}}", self.section)
+                # Size bit 15 set (.t or .q), source C000 (bits 14:8 zero), destination C200 (0x08).
+                self.assertTrue(word & 0x8000)
+                self.assertEqual(word & 0x7f7f, 0x0008)
+        self.assertEqual(len(re.findall(r"TN_CELL_FN\(", self.section)), 4)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["vfpu-reserved-widths"]
+        self.assertEqual(spec.test_id, "PSP-VFPU-RESERVED-001")
+        self.assertEqual(spec.terminal_case, "vfpu-reserved-widths-done")
+        self.assertEqual(parse_golden.VFPU_RESERVED_WIDTHS_CASES,
+                         ("vus2i-t-p0", "vus2i-q-p0", "vs2i-t-p0", "vs2i-q-p0",
+                          "vus2i-t-p1", "vus2i-q-p1", "vs2i-t-p1", "vs2i-q-p1"))
+        for case in parse_golden.VFPU_RESERVED_WIDTHS_CASES:
+            self.assertEqual(counts[case], 20)
+        for fragment in ("#define RW_FORMS 4u", "#define RW_WORDS 20u", "pass < 2u",
+                         "form < RW_FORMS"):
+            self.assertIn(fragment, self.section)
+
+    def test_manifest_row_names_the_power_risk(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "vfpu_reserved_widths.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["vfpu-reserved-widths"])
+        self.assertEqual(row["issues"], [326])
+        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["case_ids"][-1], "vfpu-reserved-widths-done")
+        self.assertIn("POWER RISK: reserved encodings; owner present", row["risk"])
+        self.assertIn("POWER RISK: reserved encodings; owner present", row["evidence_note"])
 
 
 class VfpuCcCmovProbeTests(unittest.TestCase):

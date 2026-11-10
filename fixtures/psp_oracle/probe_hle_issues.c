@@ -50,6 +50,9 @@
 //   CASE=vfpu-wider-ops (PSP-VFPU-WIDEROPS-001): #326 raw result words of vdiv, vsin, vcos, vrcp,
 //     vrsq, vsqrt and vocp at the widths not yet measured, the .p/.t dot and matrix forms and
 //     vidt into every column and row register of one matrix, register-only.
+//   CASE=vfpu-reserved-widths (PSP-VFPU-RESERVED-001): #326 raw words after the hand-encoded
+//     vus2i/vs2i .t and .q words psp-as refuses, register-only; a reserved word may raise an
+//     exception that stops the launch.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -79,8 +82,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 || PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175 || PSP_ORACLE_CASE == 176 || PSP_ORACLE_CASE == 182 || PSP_ORACLE_CASE == 183
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i, vfpu-wide-dot-matrix, vfpu-mfv-mtv, vfpu-constants, vfpu-round-sep, vfpu-prefix-state and vfpu-wider-ops run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 || PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175 || PSP_ORACLE_CASE == 176 || PSP_ORACLE_CASE == 182 || PSP_ORACLE_CASE == 183 || PSP_ORACLE_CASE == 184
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i, vfpu-wide-dot-matrix, vfpu-mfv-mtv, vfpu-constants, vfpu-round-sep, vfpu-prefix-state, vfpu-wider-ops and vfpu-reserved-widths run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -110,6 +113,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_ROUND_SEP 176
 #define HLE_CASE_VFPU_PREFIX_STATE 182
 #define HLE_CASE_VFPU_WIDER_OPS 183
+#define HLE_CASE_VFPU_RESERVED_WIDTHS 184
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -187,6 +191,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-wider-ops"
 #define HLE_TEST_ID "PSP-VFPU-WIDEROPS-001"
 #define HLE_LOG "host0:/vfpu_wider_ops_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_RESERVED_WIDTHS
+#define HLE_CAMPAIGN_ID "vfpu-reserved-widths"
+#define HLE_TEST_ID "PSP-VFPU-RESERVED-001"
+#define HLE_LOG "host0:/vfpu_reserved_widths_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -4733,6 +4741,98 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_WIDER_OPS */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_RESERVED_WIDTHS
+
+/* #326 reserved VFPU widths (PSP-VFPU-RESERVED-001), two passes, register-only: the raw result
+   words of the vus2i/vs2i encodings at the widths psp-as refuses. vus2i and vs2i (top halves
+   0xd03a and 0xd03b, size in bits 15 and 7, source in bits 14:8, destination in bits 6:0) are
+   defined at .s and .p only (measured by vfpu-vus2i); here they run at .t (bit 15) and .q (bits
+   15 and 7) with source C000 and destination C200: vus2i.t 0xd03a8008, vus2i.q 0xd03a8088, vs2i.t
+   0xd03b8008 and vs2i.q 0xd03b8088. psp-as refuses every one of the four mnemonics, and
+   psp-objdump decodes none of the words, so they are emitted as hand-encoded words. vdiv has no
+   reserved width: all four size encodings are .s/.p/.t/.q, so no vdiv word is run. POWER RISK:
+   a reserved word may raise a reserved-instruction exception that stops the launch (nothing here
+   catches it); every cell has its own durable step marker, the case is its own PRX, and it needs
+   the owner present. Each cell sets the whole register image to the sentinel 0x7a5a5a5a, then
+   C000 and C010 to fixed integer patterns, runs the one word with identity prefixes and stores
+   the image. Row <form>-p<pass>: result = the word; out0-15 = M200 after the word (image 32-47,
+   so a destination wider than a quad is visible), out16-19 = C000 after the word. Pass 0 runs
+   vus2i.t, vus2i.q, vs2i.t, vs2i.q, then pass 1 repeats them. Nothing here writes memory
+   outside the probe's own image and output buffers, and no control register is written. */
+
+#include "hle_vfpu_cells.h"
+
+#define RW_DST 32u
+#define RW_FORMS 4u
+#define RW_WORDS 20u
+
+typedef void (*rw_fn)(const uint32_t *in, uint32_t *out, uint32_t *cc);
+
+TN_CELL_FN(rw_vus2i_t, TN_PFX_NONE, "0xd03a8008")
+TN_CELL_FN(rw_vus2i_q, TN_PFX_NONE, "0xd03a8088")
+TN_CELL_FN(rw_vs2i_t, TN_PFX_NONE, "0xd03b8008")
+TN_CELL_FN(rw_vs2i_q, TN_PFX_NONE, "0xd03b8088")
+
+struct rw_form {
+    const char *stem;
+    uint32_t word;
+    rw_fn fn;
+};
+
+static const struct rw_form s_rw_forms[RW_FORMS] = {
+    {"vus2i-t", 0xd03a8008u, rw_vus2i_t},
+    {"vus2i-q", 0xd03a8088u, rw_vus2i_q},
+    {"vs2i-t", 0xd03b8008u, rw_vs2i_t},
+    {"vs2i-q", 0xd03b8088u, rw_vs2i_q},
+};
+
+/* C000 then C010: signed and unsigned 16-bit halves at both ends of their ranges. */
+static const uint32_t s_rw_src[8] = {
+    0x80017fffu, 0x0000ffffu, 0x12345678u, 0xfedcba98u,
+    0x11112222u, 0x33334444u, 0x55556666u, 0x77778888u,
+};
+
+static uint32_t s_rw_in[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+static uint32_t s_rw_out[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+
+static void rw_cell(unsigned pass, const struct rw_form *f)
+{
+    char name[64];
+    uint32_t w[RW_WORDS];
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        s_rw_in[i] = TN_SENTINEL;
+    }
+    for (unsigned i = 0; i < 8u; i++) {
+        s_rw_in[i] = s_rw_src[i];
+    }
+    uint32_t cc[2] = {0u, 0u};
+    f->fn(s_rw_in, s_rw_out, cc);
+    for (unsigned i = 0; i < 16u; i++) {
+        w[i] = s_rw_out[RW_DST + i];
+    }
+    for (unsigned i = 0; i < 4u; i++) {
+        w[16u + i] = s_rw_out[i];
+    }
+    hle_record(name, "PASS", f->word, w, RW_WORDS);
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < RW_FORMS; form++) {
+            rw_cell(pass, &s_rw_forms[form]);
+        }
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_RESERVED_WIDTHS */
 
 #if PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV
 

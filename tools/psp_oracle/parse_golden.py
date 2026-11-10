@@ -2562,6 +2562,20 @@ _register_campaign_probe(
     dict(VFPU_WIDER_OPS_ROWS),
 )
 
+
+# vfpu-reserved-widths (184, probe_hle_issues.c): the #326 vus2i/vs2i words at the reserved
+# widths .t and .q, two passes, register-only, every word hand-encoded (psp-as refuses them).
+# Per pass: vus2i-t, vus2i-q, vs2i-t, vs2i-q (-p<pass>), each 20 words (M200, then C000). A
+# reserved word may raise an exception that stops the launch (POWER RISK).
+VFPU_RESERVED_WIDTHS_FORMS = ("vus2i-t", "vus2i-q", "vs2i-t", "vs2i-q")
+VFPU_RESERVED_WIDTHS_ROWS = tuple((f"{stem}-p{p}", 20)
+                                  for p in range(2) for stem in VFPU_RESERVED_WIDTHS_FORMS)
+VFPU_RESERVED_WIDTHS_CASES = tuple(case for case, _count in VFPU_RESERVED_WIDTHS_ROWS)
+_register_campaign_probe(
+    "vfpu-reserved-widths", "PSP-VFPU-RESERVED-001", VFPU_RESERVED_WIDTHS_CASES,
+    dict(VFPU_RESERVED_WIDTHS_ROWS),
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -3250,7 +3264,8 @@ HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause
                                    "hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-wide-dot-matrix",
                                    "vfpu-mfv-mtv", "vfpu-constants", "vfpu-round-sep",
                                    "vfpu-prefix-state",
-                                   "vfpu-wider-ops"})
+                                   "vfpu-wider-ops",
+                                   "vfpu-reserved-widths"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (

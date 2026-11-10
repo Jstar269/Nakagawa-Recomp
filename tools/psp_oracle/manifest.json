@@ -2839,6 +2839,49 @@
         "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
       },
       {
+        "id": "PSP-VFPU-RESERVED-001",
+        "status": "implemented",
+        "hardware_evidence": "NOT_RUN",
+        "evidence_note": "Built as case 184, the hand-encoded vus2i/vs2i words at the reserved widths .t and .q (8 records plus the done record). POWER RISK: reserved encodings; owner present. No hardware run is cited.",
+        "group": "cpu",
+        "source": "fixtures/psp_oracle/probe_hle_issues.c",
+        "prx": "vfpu_reserved_widths.prx",
+        "apis": [
+          "sceIoClose",
+          "sceIoOpen",
+          "sceIoRead",
+          "sceIoWrite",
+          "sceKernelDeleteThread",
+          "sceKernelExitThread",
+          "sceKernelGetThreadId",
+          "sceKernelSleepThread",
+          "sceKernelWaitThreadEnd",
+          "sceKernelWakeupThread",
+          "Allegrex VFPU vus2i (reserved .t/.q encodings)",
+          "Allegrex VFPU vs2i (reserved .t/.q encodings)"
+        ],
+        "diagnostic_case_ids": [
+          "vfpu-reserved-widths"
+        ],
+        "case_ids": [
+          "vus2i-t-p0",
+          "vus2i-q-p0",
+          "vs2i-t-p0",
+          "vs2i-q-p0",
+          "vus2i-t-p1",
+          "vus2i-q-p1",
+          "vs2i-t-p1",
+          "vs2i-q-p1",
+          "vfpu-reserved-widths-done"
+        ],
+        "invariant": "#326, two passes, register-only: the raw M200 and C000 words after the hand-encoded vus2i.t (0xd03a8008), vus2i.q (0xd03a8088), vs2i.t (0xd03b8008) and vs2i.q (0xd03b8088) words, which psp-as refuses, over a sentinel register image with fixed integer patterns in C000 and C010. vdiv has no reserved width, so none is run. No hardware result is claimed.",
+        "issues": [
+          326
+        ],
+        "risk": "POWER RISK: reserved encodings; owner present. Each word is a vus2i/vs2i encoding psp-as cannot emit and may raise a reserved-instruction exception that stops the launch under PSPLink (nothing in the probe catches it); every cell runs behind its own durable step marker in its own PRX, run last in a campaign",
+        "reset": "one PRX launch; PSPLink soft reset before the next launch, only after a read-only nkctl probe shows the launch finished"
+      },
+      {
         "id": "PSP-GE-SAMPLE-001",
         "status": "implemented",
         "hardware_evidence": "MEASURED",
