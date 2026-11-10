@@ -705,9 +705,11 @@ The base defaults to `merge-base(HEAD, origin/main)`. When the pull request's
 exact base differs, set `PROVENANCE_BASE_SHA` to its full 40-character commit
 SHA before running `mingw32-make provenance-refresh`. A missing detailed
 authority or base ledger is a named failure; the command does not construct
-either trusted input. A changed publication profile also requires both
-`PROVENANCE_TRUSTED_CANDIDATE_POLICY` and
-`PROVENANCE_POLICY_DELTA_AUTHORITY`, each naming an external reviewed input.
+either trusted input. For a changed publication profile the command finds the
+V4 authority named after the change beside the trusted ledger; set
+`PROVENANCE_POLICY_DELTA_AUTHORITY` only for a V3 authority, or for a V1/V2
+record together with `PROVENANCE_TRUSTED_CANDIDATE_POLICY`, each naming an
+external reviewed input.
 
 Run the strict aggregate, then the Python modules for the files you changed. Treat any
 failure as blocking. Hosted CI runs the full Python suite; run it locally only when
