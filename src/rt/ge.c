@@ -2022,16 +2022,18 @@ void ge_set_frame(uint32_t frame) {
         s_wall_last = now;
         s_ge_ms_acc = 0;
         tnl_gestat_print(frame);
-        /* vcache: this window's per-draw vertex cache hits/misses (ge_shared.h). */
-        static unsigned long vcache_hits_last, vcache_misses_last;
+        /* vcache: this window's per-draw vertex cache hits/misses/bypasses (ge_shared.h). */
+        static unsigned long vcache_hits_last, vcache_misses_last, vcache_bypasses_last;
         unsigned long vcache_hits = g_ge_vertex_cache_hits - vcache_hits_last;
         unsigned long vcache_misses = g_ge_vertex_cache_misses - vcache_misses_last;
+        unsigned long vcache_bypasses = g_ge_vertex_cache_bypasses - vcache_bypasses_last;
         vcache_hits_last = g_ge_vertex_cache_hits;
         vcache_misses_last = g_ge_vertex_cache_misses;
+        vcache_bypasses_last = g_ge_vertex_cache_bypasses;
         fprintf(stderr,
-            "GESTAT+ f=%" PRIu32 " blk3d=%lu skin=%lu bonew=%lu deg3d=%lu line3d=%lu nonfinite=%lu gpuprim=%lu vcache=%lu/%lu zrange=%lu zr=[%" PRIu32 ",%" PRIu32 "] fmt=%" PRIu32 " zbp=0x%08" PRIx32 " fb=[0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu]\n",
+            "GESTAT+ f=%" PRIu32 " blk3d=%lu skin=%lu bonew=%lu deg3d=%lu line3d=%lu nonfinite=%lu gpuprim=%lu vcache=%lu/%lu/%lu zrange=%lu zr=[%" PRIu32 ",%" PRIu32 "] fmt=%" PRIu32 " zbp=0x%08" PRIx32 " fb=[0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu]\n",
             frame, s_stat.blk3d, s_stat.skin, s_stat.bonew, s_stat.deg3d, s_stat.line3d, s_stat.nonfinite, s_stat.gpuprim,
-            vcache_hits, vcache_misses, s_stat.zrange, ge.minz, ge.maxz, ge.fbfmt, ge.zbp,
+            vcache_hits, vcache_misses, vcache_bypasses, s_stat.zrange, ge.minz, ge.maxz, ge.fbfmt, ge.zbp,
             s_stat.fbs[0], s_stat.fbn[0], s_stat.fbs[1], s_stat.fbn[1],
             s_stat.fbs[2], s_stat.fbn[2], s_stat.fbs[3], s_stat.fbn[3]);
         fprintf(stderr,
@@ -4411,9 +4413,13 @@ static void transform_vtx_clip(uint32_t addr, const VFmt *vf, CVtx *o) {
 }
 
 /* Per-draw transformed-vertex cache for draw_prim_xform_triangles. transform_vtx_clip is a
- * pure function of the vertex bytes at its address, the vertex format and the GE state, and
- * none of them change within one draw (no guest code runs during a draw), so a CVtx cached for
- * an address earlier in the same draw is bit-identical to transforming that address again.
+ * pure function of the vertex bytes at its address, the vertex format and the GE state. The
+ * format and the state do not change within one draw, and no guest code runs during a draw,
+ * but the draw's own pixels are written to VRAM, so a vertex in VRAM can change under it.
+ * Only a vertex wholly in plain RAM (ge_ram_span), which no draw writes, is cached; any other
+ * vertex is transformed every time, with no lookup and no store, and counted as a bypass.
+ * For a RAM vertex, a CVtx cached for its address earlier in the same draw is bit-identical
+ * to transforming that address again.
  * Indexed meshes share vertices between triangles and every fan shares its first vertex, so
  * most of those transforms repeat.
  *
@@ -4424,7 +4430,8 @@ static void transform_vtx_clip(uint32_t addr, const VFmt *vf, CVtx *o) {
  * same address. SR_GE_VERTEX_CACHE_DISABLE (nonzero) turns the cache off.
  *
  * SR_GE_VERTEX_CACHE_MUTANT (ge-vertex-cache-mutants only; never in a product build) breaks
- * the cache: 1 never starts a new epoch, 2 does not check the address. */
+ * the cache: 1 never starts a new epoch, 2 does not check the address, 3 caches vertices
+ * outside plain RAM. */
 #ifndef SR_GE_VERTEX_CACHE_MUTANT
 #define SR_GE_VERTEX_CACHE_MUTANT 0
 #endif
@@ -4437,7 +4444,7 @@ typedef struct {
 static GeVertexCacheEntry s_vertex_cache[GE_VERTEX_CACHE_ENTRIES];
 static uint32_t s_vertex_cache_epoch;
 static int s_vertex_cache_on = -1;
-unsigned long g_ge_vertex_cache_hits, g_ge_vertex_cache_misses;
+unsigned long g_ge_vertex_cache_hits, g_ge_vertex_cache_misses, g_ge_vertex_cache_bypasses;
 
 static int vertex_cache_enabled(void) {
     if (s_vertex_cache_on < 0) {
@@ -4473,6 +4480,16 @@ static void transform_vtx_clip_cached(uint32_t vbase, uint32_t ibase, int idxfmt
     }
     uint32_t vi = idxfmt ? index_value(ibase, idxfmt, i) : (uint32_t)i;
     uint32_t addr = vbase + vi * (uint32_t)vf->stride;
+#if SR_GE_VERTEX_CACHE_MUTANT != 3
+    if (!ge_ram_span(addr, (uint32_t)vf->stride)) {
+        /* Not plain RAM (VRAM, which this draw's own pixels may rewrite, or a span the
+         * capture path reads): transform it every time, with no lookup and no store. */
+        g_ge_vertex_cache_bypasses++;
+        primitive_profile_begin_vertex();
+        transform_vtx_clip(addr, vf, o);
+        return;
+    }
+#endif
     GeVertexCacheEntry *e = &s_vertex_cache[vi & (GE_VERTEX_CACHE_ENTRIES - 1u)];
     if (e->epoch == s_vertex_cache_epoch
 #if SR_GE_VERTEX_CACHE_MUTANT != 2

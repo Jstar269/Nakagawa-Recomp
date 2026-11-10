@@ -24,7 +24,7 @@
 // The Makefile runs this twice, once with --strip-cache-disabled, because ge.c latches
 // the strip-cache switch once per process.  The per-draw vertex cache case
 // (test_ge_vertex_cache) compares the cache on and off within one process, through
-// ge_vertex_cache_reload_env(); ge-vertex-cache-mutants requires it to kill two broken caches.
+// ge_vertex_cache_reload_env(); ge-vertex-cache-mutants requires it to kill three broken caches.
 //
 // `--bench ROUNDS` is not a test.  It times the same production GE object on two source-owned
 // workloads with the flight recorder compiled in but disarmed, or compiled out when the
@@ -2381,7 +2381,8 @@ static int bench_main(uint32_t rounds) {
  * must be identical. With the cache on every case must hit, every distinct vertex of a
  * draw must be transformed in that draw (a hit from an earlier draw, or from another address
  * in the same slot, breaks that), and hits plus misses must be the draw's vertex uses; with it
- * off nothing counts. The sparse profile must agree: its cache hits are the always-on hits,
+ * off nothing counts. One list's vertices are in VRAM, which a draw's own pixels may rewrite:
+ * they must bypass the cache (no hit, no miss) and still render the same. The sparse profile must agree: its cache hits are the always-on hits,
  * its transformed vertices the misses (all uses with the cache off). */
 
 #define VC_LIST       0x08500000u
@@ -2390,6 +2391,7 @@ static int bench_main(uint32_t rounds) {
 #define VC_INDICES    0x08530000u
 #define VC_TEX        0x08540000u   /* 16x16 8888 */
 #define VC_CLEAR_VERTS 0x08541000u
+#define VC_VRAM_VERTS 0x041A0000u   /* a copy of the plain grid in VRAM, past the colour and depth */
 #define VC_FB         0x04180000u   /* 128x128 8888 */
 #define VC_ZB         0x04190000u   /* 128x128 16-bit */
 #define VC_CLEAR      0xFF203040u
@@ -2529,7 +2531,8 @@ typedef struct {
     const void *indices;      /* NULL: not indexed */
     uint32_t tex_map_mode;
     float world_angle;
-    unsigned long hits, misses;   /* this run's counts */
+    int vram;                 /* the vertices are in VRAM: never cached */
+    unsigned long hits, misses, bypasses;   /* this run's counts */
 } VcCase;
 
 static uint8_t s_vc_u8_list[96], s_vc_u8_strip[38];
@@ -2618,12 +2621,15 @@ static void vc_run_case(VcCase *c) {
     W(0xC0, c->tex_map_mode);
     W(0x12, c->vtype);
     if (c->indices) W(0x02, index_addr);
+    W(0x10, (c->vaddr >> 8) & 0xFF0000u);           /* BASE for VADDR (0x04 for VRAM vertices) */
     prim(c->type, c->count, c->vaddr);
     W(0x0C, 0);
     unsigned long hits = g_ge_vertex_cache_hits, misses = g_ge_vertex_cache_misses;
+    unsigned long bypasses = g_ge_vertex_cache_bypasses;
     expect(ge_run_list(VC_LIST, 0) == 0, c->name, "list did not reach END");
     c->hits = g_ge_vertex_cache_hits - hits;
     c->misses = g_ge_vertex_cache_misses - misses;
+    c->bypasses = g_ge_vertex_cache_bypasses - bypasses;
 }
 
 /* Clear the case's colour and depth through the GE: a clear-mode sprite, so the depth the
@@ -2644,18 +2650,20 @@ static void vc_clear(void) {
 
 static void test_ge_vertex_cache(int strip_cache) {
     VcCase cases[] = {
-        { "vertex_cache[u8-list]", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96, s_vc_u8_list, 0, 0.0f, 0, 0 },
+        { "vertex_cache[u8-list]", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96, s_vc_u8_list, 0, 0.0f, 0, 0, 0, 0 },
         { "vertex_cache[u16-list-texgen1]", VT_VC_PLAIN | VT_INDEX16, VC_PLAIN, 3, 126, s_vc_u16_list,
-          1u | (0u << 8), 0.0f, 0, 0 },
+          1u | (0u << 8), 0.0f, 0, 0, 0, 0 },
         { "vertex_cache[fan-texgen2]", VT_VC_PLAIN, VC_PLAIN + 300u * VC_PLAIN_STRIDE, 5, 14, NULL, 2u,
-          0.0f, 0, 0 },
-        { "vertex_cache[u16-fan]", VT_VC_PLAIN | VT_INDEX16, VC_PLAIN, 5, 16, s_vc_u16_fan, 0, 0.3f, 0, 0 },
+          0.0f, 0, 0, 0, 0 },
+        { "vertex_cache[u16-fan]", VT_VC_PLAIN | VT_INDEX16, VC_PLAIN, 5, 16, s_vc_u16_fan, 0, 0.3f, 0, 0, 0, 0 },
         { "vertex_cache[skin-morph-u16-list-texgen1n]", VT_VC_SKIN | VT_INDEX16, VC_SKIN, 3, 96,
-          s_vc_u16_skin, 1u | (2u << 8), 0.0f, 0, 0 },
+          s_vc_u16_skin, 1u | (2u << 8), 0.0f, 0, 0, 0, 0 },
         { "vertex_cache[skin-morph-u8-strip]", VT_VC_SKIN | VT_INDEX8, VC_SKIN, 4, 38, s_vc_u8_strip, 0,
-          -0.2f, 0, 0 },
-        { "vertex_cache[epoch-first]", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96, s_vc_u8_list, 0, 0.5f, 0, 0 },
-        { "vertex_cache[epoch-second]", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96, s_vc_u8_list, 0, -0.6f, 0, 0 },
+          -0.2f, 0, 0, 0, 0 },
+        { "vertex_cache[epoch-first]", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96, s_vc_u8_list, 0, 0.5f, 0, 0, 0, 0 },
+        { "vertex_cache[epoch-second]", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96, s_vc_u8_list, 0, -0.6f, 0, 0, 0, 0 },
+        { "vertex_cache[vram-u8-list]", VT_VC_PLAIN | VT_INDEX8, VC_VRAM_VERTS, 3, 96, s_vc_u8_list, 0,
+          0.2f, 1, 0, 0, 0 },
     };
     enum { N = sizeof cases / sizeof cases[0] };
     /* Colour from guest VRAM (the linear view maps one to one), depth from the GE's own depth
@@ -2673,6 +2681,7 @@ static void test_ge_vertex_cache(int strip_cache) {
     }
     vc_fill();
     vc_build_indices();
+    memcpy(SR_HOST(VC_VRAM_VERTS), SR_HOST(VC_PLAIN), 256u * VC_PLAIN_STRIDE);
     for (unsigned i = 0; i < N; i++) total_uses += vc_uses(&cases[i], strip_cache);
 
     for (int run = 0; run < 2; run++) {
@@ -2685,8 +2694,16 @@ static void test_ge_vertex_cache(int strip_cache) {
             VcCase *c = &cases[i];
             vc_run_case(c);
             total_hits[run] += c->hits;
-            total_misses[run] += c->misses;
-            if (cache_on) {
+            total_misses[run] += c->misses + c->bypasses;
+            if (cache_on && c->vram) {
+                /* The draw's own pixels may rewrite VRAM, so no VRAM vertex is ever cached. */
+                char what[160];
+                snprintf(what, sizeof what, "a VRAM vertex went through the cache (hits=%lu misses=%lu "
+                         "bypasses=%lu uses=%u)", c->hits, c->misses, c->bypasses,
+                         vc_uses(c, strip_cache));
+                expect(c->hits == 0 && c->misses == 0 && c->bypasses == vc_uses(c, strip_cache),
+                       c->name, what);
+            } else if (cache_on) {
                 char what[160];
                 unsigned distinct = vc_distinct(c), uses = vc_uses(c, strip_cache);
                 snprintf(what, sizeof what, "no vertex cache hit (hits=%lu misses=%lu)", c->hits, c->misses);
@@ -2695,9 +2712,10 @@ static void test_ge_vertex_cache(int strip_cache) {
                          "(misses=%lu distinct=%u)", c->misses, distinct);
                 expect(c->misses >= distinct, c->name, what);
                 snprintf(what, sizeof what, "hits+misses=%lu, uses=%u", c->hits + c->misses, uses);
-                expect(c->hits + c->misses == uses, c->name, what);
+                expect(c->hits + c->misses == uses && c->bypasses == 0, c->name, what);
             } else {
-                expect(c->hits == 0 && c->misses == 0, c->name, "the disabled cache counted");
+                expect(c->hits == 0 && c->misses == 0 && c->bypasses == 0, c->name,
+                       "the disabled cache counted");
             }
         }
         memcpy(fb[run], SR_HOST(VC_FB), PIXELS * 4u);

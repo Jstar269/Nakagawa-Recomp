@@ -1019,9 +1019,11 @@ Windows. Make-based tests need a POSIX `sh` on `PATH` (MSYS2 `usr/bin` or Git fo
 
 `native-core-tests` runs `ge-cpu-profile-validate-selftest`, whose vertex cache case renders the
 same indexed lists, fans and strips through the software GE with its per-draw transformed-vertex
-cache on and off (`SR_GE_VERTEX_CACHE_DISABLE`) and requires byte-identical VRAM. It then runs
-`ge-vertex-cache-mutants`, which rebuilds `src/rt/ge.c` twice with `SR_GE_VERTEX_CACHE_MUTANT`
-(1: no new epoch per draw, 2: no address check); each must fail that case with its own message.
+cache on and off (`SR_GE_VERTEX_CACHE_DISABLE`) and requires identical colour and depth; vertices
+in VRAM, which a draw can rewrite, must bypass the cache. It then runs `ge-vertex-cache-mutants`,
+which rebuilds `src/rt/ge.c` three times with `SR_GE_VERTEX_CACHE_MUTANT` (1: no new epoch per
+draw, 2: no address check, 3: VRAM vertices cached); each must fail that case with its own
+message.
 
 `make dmac-mutants` is also left to local runs: it builds `hle-thread-selftest` against each mutated copy
 of `src/rt/hle_cache_dma.c`, one selftest build per mutant (`NK_DMAC_MUTANTS_ONLY=<part of a name>` runs one).

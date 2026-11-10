@@ -430,13 +430,15 @@ native-core-tests: ge-cpu-profile-validate-selftest
 # ge-vertex-cache-mutants — the selftest's vertex cache case must kill each
 # SR_GE_VERTEX_CACHE_MUTANT in ge.c: 1 never starts a new epoch, so a draw reuses vertices an
 # earlier draw transformed at the same address under another world matrix; 2 does not check
-# the address, so a vertex whose index shares a table slot gets another vertex's result. Each
+# the address, so a vertex whose index shares a table slot gets another vertex's result; 3
+# caches vertices outside plain RAM, which a draw's own pixels may rewrite in VRAM. Each
 # builds its own ge.c object and binary and must fail with its own message.
 ge-vertex-cache-mutants: $(RT_GE_O)
-	@for m in 1 2; do \
+	@for m in 1 2 3; do \
 		case $$m in \
 			1) kill="FAIL vertex_cache\[epoch-second\]: a distinct vertex was not transformed in its draw";; \
-			*) kill="FAIL vertex_cache\[u16-list-texgen1\]: a distinct vertex was not transformed in its draw";; \
+			2) kill="FAIL vertex_cache\[u16-list-texgen1\]: a distinct vertex was not transformed in its draw";; \
+			*) kill="FAIL vertex_cache\[vram-u8-list\]: a VRAM vertex went through the cache";; \
 		esac; \
 		obj=$(BUILD_DIR)/ge_vertex_cache_mutant$$m.o; \
 		bin=$(BUILD_DIR)/ge_vertex_cache_mutant$$m$(EXE_EXT); \

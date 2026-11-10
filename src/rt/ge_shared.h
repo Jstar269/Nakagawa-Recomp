@@ -611,10 +611,10 @@ void      ge_replay_restore(const GeState *state, const uint16_t *zbuf);
 void      ge_cpu_profile_reset(void);
 void      ge_cpu_profile_get(GeCpuProfileStats *out);
 /* The software GE's per-draw transformed-vertex cache (SR_GE_VERTEX_CACHE_DISABLE): triangle
- * vertex uses it served and uses it transformed, whole run, counted whether or not a profile is
- * on (SR_GESTAT's GESTAT+ line prints each window's share as vcache=hits/misses). With the
- * cache off neither counts. */
-extern unsigned long g_ge_vertex_cache_hits, g_ge_vertex_cache_misses;
+ * vertex uses it served, uses it transformed, and uses outside plain RAM it bypassed (always
+ * transformed), whole run, counted whether or not a profile is on (SR_GESTAT's GESTAT+ line
+ * prints each window's share as vcache=hits/misses/bypasses). With the cache off none counts. */
+extern unsigned long g_ge_vertex_cache_hits, g_ge_vertex_cache_misses, g_ge_vertex_cache_bypasses;
 /* Re-read SR_GE_VERTEX_CACHE_DISABLE at the next draw (ge.c latches it); for selftests that
  * compare both settings in one process. */
 void      ge_vertex_cache_reload_env(void);
