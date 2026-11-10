@@ -373,10 +373,12 @@ typedef struct Target {
      * [lo, hi) VRAM-offset byte spans (target_note_cpu_write, target_sync_cpu_writes). */
     uint32_t cpu_lo[TARGET_CPU_SPANS], cpu_hi[TARGET_CPU_SPANS];
     int cpu_n;
-    /* Rows [draw_y0, draw_y1) the GPU drew since guest VRAM last matched. The GE has no buffer
-     * height: FB_H is the image's, and what a title keeps below its target, vertices for one,
-     * is not the target's. Every other row of the image equals guest VRAM. */
-    int draw_y0, draw_y1;
+    /* The box [draw_x0, draw_x1) x [draw_y0, draw_y1) the GPU drew since guest VRAM last
+     * matched. The GE has no buffer height: FB_H is the image's, and what a title keeps below its
+     * target, vertices for one, is not the target's. Nor are the columns beside the box: a title
+     * may keep palettes in the stride padding of the rows it draws. Every pixel of the image
+     * outside the box equals guest VRAM. */
+    int draw_x0, draw_y0, draw_x1, draw_y1;
     /* The host twin (s_twin only): a host-only image at the twin's scale that every write to
      * `img` also reaches, drawn with the Enhanced picture options; the presenter shows it.
      * Guest VRAM is read from and written to `img` alone. wgen counts img's writes, tgen the
@@ -410,23 +412,49 @@ static unsigned long long s_cnt_rmw_ops = 0, s_cnt_rmw_batches = 0, s_cnt_rmw_br
 static unsigned long long s_cnt_once_batches = 0, s_cnt_once_tris = 0;
 static VkImageUsageFlags s_target_usage = 0;              /* the last colour target's usage */
 
-static void target_note_drawn(Target *t, int y0, int y1) {
-    if (y0 >= y1) return;
-    if (t->draw_y0 >= t->draw_y1) { t->draw_y0 = y0; t->draw_y1 = y1; return; }
+static void target_note_drawn(Target *t, int x0, int y0, int x1, int y1) {
+    if (x0 >= x1 || y0 >= y1) return;
+    if (t->draw_x0 >= t->draw_x1 || t->draw_y0 >= t->draw_y1) {
+        t->draw_x0 = x0; t->draw_y0 = y0; t->draw_x1 = x1; t->draw_y1 = y1;
+        return;
+    }
+    if (x0 < t->draw_x0) t->draw_x0 = x0;
     if (y0 < t->draw_y0) t->draw_y0 = y0;
+    if (x1 > t->draw_x1) t->draw_x1 = x1;
     if (y1 > t->draw_y1) t->draw_y1 = y1;
 }
 
 static void target_note_clean(Target *t) {
     t->clean_gen = t->render_gen;
-    t->draw_y0 = t->draw_y1 = 0;
+    t->draw_x0 = t->draw_y0 = t->draw_x1 = t->draw_y1 = 0;
 }
 
-/* Whether rows [y0, y1) of `t` hold any byte of the VRAM-offset span [off0, off1). */
-static int target_rows_hit(const Target *t, int y0, int y1, uint64_t off0, uint64_t off1) {
-    if (y0 >= y1) return 0;
-    const uint64_t row = (uint64_t)t->stride * (t->fmt == 3u ? 4u : 2u);
-    return off0 < t->fba + (uint64_t)y1 * row && t->fba + (uint64_t)y0 * row < off1;
+/* Whether the pixels [x0, x1) x [y0, y1) of `t` hold any byte of the VRAM-offset span
+ * [off0, off1). A row reaches guest VRAM only in its first min(stride, FB_W) pixels
+ * (write_guest_fb), so the box's bytes in each row are [x0 * bpp, x1 * bpp) of the row, clamped
+ * to those. The span covers the rows ya to yb of the box, and only the first and last partly. */
+static int target_box_hit(const Target *t, int x0, int y0, int x1, int y1,
+                          uint64_t off0, uint64_t off1) {
+    const uint64_t bpp = t->fmt == 3u ? 4u : 2u, row = (uint64_t)t->stride * bpp;
+    const int width = t->stride < FB_W ? (int)t->stride : FB_W;
+    if (x0 < 0) x0 = 0;
+    if (x1 > width) x1 = width;
+    if (x0 >= x1 || y0 >= y1 || off0 >= off1 || row == 0) return 0;
+    const uint64_t c0 = (uint64_t)x0 * bpp, c1 = (uint64_t)x1 * bpp;
+    const uint64_t top = t->fba + (uint64_t)y0 * row, rows = (uint64_t)(y1 - y0);
+    if (off1 <= top + c0 || off0 >= top + (rows - 1u) * row + c1) return 0;
+    const uint64_t a = off0 > top ? off0 - top : 0u, b = off1 - top;   /* from row y0's start */
+    const uint64_t ya = a / row;
+    uint64_t yb = (b - 1u) / row, end = b - yb * row;                  /* end: within row yb */
+    if (yb >= rows) { yb = rows - 1u; end = row; }
+    if (yb > ya + 1u) return 1;                          /* a whole box row lies in the span */
+    const uint64_t start = a - ya * row;                 /* within row ya */
+    if (ya == yb) return start < c1 && c0 < end;
+    return start < c1 || c0 < end;
+}
+
+static int target_drawn_hit(const Target *t, uint64_t off0, uint64_t off1) {
+    return target_box_hit(t, t->draw_x0, t->draw_y0, t->draw_x1, t->draw_y1, off0, off1);
 }
 
 /* Presentation readbacks use their own command buffer, fence, and persistently mapped
@@ -2209,9 +2237,9 @@ static SnapRect batch_rect(const Batch *b) {
     return b->key.tnl ? tnl_rect(b, b->first, b->count) : verts_rect(b, b->first, b->count);
 }
 
-/* The rows the queued batches draw, in [y0, y1). A title reading its VRAM between draws asks once
- * per vertex, so each call covers only what was queued since the last one. */
-static void pending_rows(int *y0, int *y1) {
+/* The box the queued batches draw. A title reading its VRAM between draws asks once per vertex,
+ * so each call covers only what was queued since the last one. */
+static SnapRect pending_box(void) {
     for (uint32_t i = s_pend_batches ? s_pend_batches - 1u : 0u; i < s_nbatch; i++) {
         const Batch *b = &s_batch[i];
         const uint32_t done = i + 1u == s_pend_batches ? s_pend_count : 0u;
@@ -2224,8 +2252,7 @@ static void pending_rows(int *y0, int *y1) {
         s_pend_batches = s_nbatch;
         s_pend_count = s_batch[s_nbatch - 1u].count;
     }
-    *y0 = s_pend_box.y0;
-    *y1 = s_pend_box.y1;
+    return s_pend_box;
 }
 
 static int batch_reads_dst(const Batch *b) {
@@ -2726,7 +2753,7 @@ static int submit_list(Target *t, const Batch *arr, uint32_t n) {
         }
         const int tracked = s_snap_src == t && s_snap_tracked && s_snap_dirty_gen == t->render_gen;
         int ok = submit_range(t, arr, 0, n, 1);
-        target_note_drawn(t, drawn.y0, drawn.y1);
+        target_note_drawn(t, drawn.x0, drawn.y0, drawn.x1, drawn.y1);
         if (ok && tracked) {
             snap_rect_union(&s_snap_dirty, &drawn);
             s_snap_dirty_gen = t->render_gen;
@@ -2758,7 +2785,7 @@ static int submit_list(Target *t, const Batch *arr, uint32_t n) {
         }
         const int tracked = s_snap_src == t && s_snap_tracked && s_snap_dirty_gen == t->render_gen;
         ok = submit_range(t, arr, i, j, 0);
-        target_note_drawn(t, drawn.y0, drawn.y1);
+        target_note_drawn(t, drawn.x0, drawn.y0, drawn.x1, drawn.y1);
         if (ok && tracked) {
             /* Outside what this op drew, the snapshot still holds the target. */
             snap_rect_union(&s_snap_dirty, &drawn);
@@ -2871,14 +2898,14 @@ static int target_readback(Target *t) {
 }
 
 /* Write back what `t` holds of the VRAM-offset span [off, off + bytes), which is nothing unless
- * the GPU drew one of the rows the span lies in. */
+ * the GPU drew a pixel whose bytes the span holds. */
 static int target_readback_span(Target *t, uint32_t off, uint32_t bytes) {
     if (t == s_cur && s_nbatch) {
-        int y0, y1;
-        pending_rows(&y0, &y1);
-        if (target_rows_hit(t, y0, y1, off, (uint64_t)off + bytes) && !submit_pending()) return 0;
+        const SnapRect q = pending_box();
+        if (target_box_hit(t, q.x0, q.y0, q.x1, q.y1, off, (uint64_t)off + bytes) &&
+            !submit_pending()) return 0;
     }
-    if (!target_rows_hit(t, t->draw_y0, t->draw_y1, off, (uint64_t)off + bytes)) return 1;
+    if (!target_drawn_hit(t, off, (uint64_t)off + bytes)) return 1;
     return target_readback(t);
 }
 
@@ -6467,9 +6494,8 @@ static int hook_vram_read(uint32_t addr, uint32_t bytes) {
     if (s_nbatch) {
         int queued_overlap = 0;
         if (s_cur && s_cur->used && s_cur->gpu_valid) {
-            int y0, y1;
-            pending_rows(&y0, &y1);
-            queued_overlap = target_rows_hit(s_cur, y0, y1, off0, off1);
+            const SnapRect q = pending_box();
+            queued_overlap = target_box_hit(s_cur, q.x0, q.y0, q.x1, q.y1, off0, off1);
         }
         if (!queued_overlap && s_cur && s_cur->dep)
             queued_overlap = depth_span_overlaps(s_cur->dep, addr, bytes);
@@ -6478,7 +6504,7 @@ static int hook_vram_read(uint32_t addr, uint32_t bytes) {
     for (int i = 0; i < MAX_TGT; i++) {
         Target *t = &s_tgts[i];
         if (!t->used || !t->gpu_valid || t->clean_gen == t->render_gen) continue;
-        if (target_rows_hit(t, t->draw_y0, t->draw_y1, off0, off1) && !target_readback(t)) return 0;
+        if (target_drawn_hit(t, off0, off1) && !target_readback(t)) return 0;
     }
     for (int i = 0; i < MAX_DEP; i++) {
         DepthEnt *d = &s_deps[i];
@@ -6583,7 +6609,7 @@ static int hook_xfer(uint32_t startdata) {
 #endif
     if (!cmd_submit_wait(SR_PERF_GE_TRANSFER_BLIT)) return 0;
     dst->render_gen++;                       /* content changed (snapshot/present tracking) */
-    target_note_drawn(dst, (int)dy, (int)(dy + h));
+    target_note_drawn(dst, (int)dx, (int)dy, (int)(dx + w), (int)(dy + h));
     if (g_ace_on) ace_note_target_draw(dst->fba);
     sr_vram_mark_renderer_pending();
     dst->lru = s_lru++;
@@ -6612,7 +6638,7 @@ int gegpu_replay_reset(void) {
     for (int i = 0; i < MAX_TGT; i++) {
         s_tgts[i].gpu_valid = 0;
         s_tgts[i].clean_gen = 0;
-        s_tgts[i].draw_y0 = s_tgts[i].draw_y1 = 0;
+        s_tgts[i].draw_x0 = s_tgts[i].draw_y0 = s_tgts[i].draw_x1 = s_tgts[i].draw_y1 = 0;
     }
     for (int i = 0; i < MAX_DEP; i++) s_deps[i].cpu_dirty = 1;
     for (int i = 0; i < s_tex_n; i++) s_tex[i].content_valid = 0;
@@ -6681,16 +6707,6 @@ void gegpu_flush(const char *reason) {
         for (int i = 0; i < MAX_TGT; i++) {
             Target *t = &s_tgts[i];
             if (t->used && t->gpu_valid) (void)target_readback_span(t, a0, bytes);
-        }
-        return;
-    }
-    if (reason && strcmp(reason, "loadclut") == 0) {
-        /* the CLUT loader is about to READ guest VRAM: materialize any target there */
-        if (!is_vram(s_ge->clut_addr)) return;
-        uint32_t ca = vram_off(s_ge->clut_addr);
-        for (int i = 0; i < MAX_TGT; i++) {
-            Target *t = &s_tgts[i];
-            if (t->used && t->gpu_valid) (void)target_readback_span(t, ca, 2048u);
         }
         return;
     }
