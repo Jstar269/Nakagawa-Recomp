@@ -288,6 +288,13 @@ aggregate, `CI required`: about 144 runner-minutes for a change that routes ever
 Dependency Review, the provenance attestation and the Trusted CI verdict run on every push in both
 tiers.
 
+The repository variable `NK_CI_TIERS` switches the tiers. While it is not `on`, only a Draft runs the
+quick checks: every other pull request runs the full checks on each push, its head lands on its own
+`success` or in a batch, and the `ci-full-matrix` label changes nothing. While it is `on`, a pull
+request from a branch of this repository runs the quick checks on each push and gets the full checks
+when it is batched for landing or labelled. The rest of this section says which rules apply only
+while it is `on`.
+
 `tools/ci_paths.py` exports `tier`. Its value `light` is what this page calls a quick run, and the jobs
 of a quick run are the quick checks; `full` is a full run. A run is `full` for a manual dispatch, the
 nightly schedule, a merge group, a push to `main`, and a pull request that is not a Draft and is any
@@ -310,12 +317,13 @@ on a quick run, and the mypy baseline was the most frequent lane failure of that
 A quick run is never green for landing. `CI required` does not run on it, and `tools/ci_required.py`
 fails any pull-request run whose substantive gates were suppressed, so the
 [Trusted CI verdict](#trusted-ci-verdict), which reports `success` only when `CI required` succeeded at
-the exact head, reports `pending` with `LIGHT_CI_GREEN` instead. The landing desk batches heads in that
-state; the batch's head gets the full checks, the attestation, CodeQL and its own verdict, and only
+the exact head, reports `pending` with `LIGHT_CI_GREEN` instead (a Draft gets `DRAFT_LIGHT_CI`). While
+`NK_CI_TIERS` is `on`, the landing desk batches heads in that state; the batch's head gets the full checks, the attestation, CodeQL and its own verdict, and only
 that head merges. `tools/test_public_ci_wiring.py` (`TwoTierInvariantTests`) evaluates the workflow's
 own conditions and fails if `CI required` can be green while a routed gate did not run.
 
-**Asking for the full checks on one pull request.** A maintainer adds the `ci-full-matrix` label and
+**Asking for the full checks on one pull request.** While `NK_CI_TIERS` is `on`, a maintainer adds the
+`ci-full-matrix` label and
 re-runs all jobs of the newest `CI` run at the head (`gh run rerun <run-id>`); any later push runs
 them too. "Re-run failed jobs" does not change the tier, because it keeps the first attempt's
 classification. The classifier reads the label from GitHub when the run starts, because a re-run
@@ -323,7 +331,8 @@ reuses the first attempt's event. The label is not an approval: the verdict neve
 it makes the next run a quick one. Do not dispatch `CI` on the branch by hand instead: a `CI required`
 check from a run that is not a pull-request run is a `FOREIGN_PRODUCER` finding until the next push.
 
-**Waiting on a pull request.** `Trusted CI verdict` stays `pending` on a quick-green head, so
+**Waiting on a pull request.** While `NK_CI_TIERS` is `on`, `Trusted CI verdict` stays `pending` on a
+quick-green head, so
 `gh pr checks --watch` does not return; watch the run instead (`gh run watch <run-id>`).
 
 **Turning it off.** Delete `NK_CI_TIERS` or set it to anything but `on`: the next push of every pull

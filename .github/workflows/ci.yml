@@ -436,7 +436,10 @@ jobs:
     # baseline and the generated-file and documentation-lint tests run in the Python
     # tooling job, and the format check in the native core part.
     name: Generated files and repository lints
-    # Always hosted: a light run never needs the self-hosted pool.
+    # Always hosted: a light run never needs the self-hosted pool. ubuntu-24.04, not
+    # 26.04, because it is the hosted image of the Python tooling and native jobs whose
+    # checks this job runs early (the same GCC 13.3 for the -m32 format check), so a
+    # quick run and the later full run judge them on the same system.
     runs-on: ubuntu-24.04
     needs: classify
     if: >-

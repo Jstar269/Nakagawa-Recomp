@@ -148,12 +148,14 @@ approves the new bytes, or re-admits a file that has not landed yet.
 
 ### What the pull-request checks mean
 
-A pull request from a fork runs every check below on each push. A branch of this repository runs the
-quick checks on each push (the first two rows, the public export audit, `Generated files and repository
-lints` and `CI quick checks`); the Python, native, Windows and Android jobs and `CI required` then show
-as skipped, and `Trusted CI verdict` stays pending with `LIGHT_CI_GREEN`. That is the normal state of a
-healthy pull request, not a failure. The full checks run when a maintainer batches it for landing, or
-earlier when a maintainer adds the `ci-full-matrix` label
+A pull request from a fork runs every check below on each push. A Draft runs only the quick checks (the
+first two rows, the public export audit, `Generated files and repository lints` and `CI quick checks`);
+the Python, native, Windows and Android jobs and `CI required` then show as skipped. A Ready pull request
+from a branch of this repository runs every check below on each push, unless the repository variable
+`NK_CI_TIERS` is `on`. While it is, that pull request runs the quick checks too, and `Trusted CI verdict`
+stays pending with `LIGHT_CI_GREEN` once they pass. That is the normal state of a healthy pull request,
+not a failure. The full checks then run when a maintainer batches it for landing, or earlier when a
+maintainer adds the `ci-full-matrix` label
 ([Quick and full checks](docs/CI.md#quick-and-full-checks)).
 
 | Check | What it verifies | If it fails |

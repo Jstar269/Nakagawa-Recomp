@@ -38,8 +38,8 @@ other external change.
 `mingw32-make contrib-check`. On **Linux** (Ubuntu 24.04 or WSL 2;
 [`docs/LINUX_DEVELOPMENT.md`](docs/LINUX_DEVELOPMENT.md)): `make CC=gcc native-core-tests`, then
 `make contrib-check`. Run one Python module with
-`python -m unittest tools.test_<name>`; hosted CI runs the whole suite when the change is batched for
-landing. `contrib-check` runs the gates
+`python -m unittest tools.test_<name>`; hosted CI runs the whole suite before the change lands.
+`contrib-check` runs the gates
 your changes need; it is not hosted CI, and `SKIP` is not a pass
 ([results](CONTRIBUTING.md#the-fast-path-one-command)).
 
@@ -266,14 +266,16 @@ A publication or provenance change always runs `tools/policy_sync.py`, both publ
 (`python tools/publish_audit.py --tracked-only --worktree --public-scope --provenance-self-consistency`,
 and again without `--worktree`), and `tools/modified_file_notice_audit.py`. A workflow or
 configuration change runs `tools/test_ci_paths.py`, pre-commit, and the full applicable hosted matrix
-on its own head: its reviewer adds the `ci-full-matrix` label.
+on its own head; while `NK_CI_TIERS` is `on`, its reviewer adds the `ci-full-matrix` label for that.
 
-Hosted CI has two tiers ([Quick and full checks](docs/CI.md#quick-and-full-checks)). A push to a pull
-request runs the quick checks, which include the generated-file check, the documentation lints and
-the tools mypy baseline. The full checks run on the landing batch that carries it, and on the pull
-request itself when it comes from a fork or carries the `ci-full-matrix` label, which a maintainer
-adds. The focused local gates are therefore the first evidence for a Python, native or Windows
-change: run them before the push.
+Hosted CI has two tiers ([Quick and full checks](docs/CI.md#quick-and-full-checks)), switched by the
+repository variable `NK_CI_TIERS`. A Draft always runs the quick checks, which include the
+generated-file check, the documentation lints and the tools mypy baseline. While `NK_CI_TIERS` is
+`on`, every push to a pull request from a branch of this repository runs them too, and the full checks
+run on the landing batch that carries it, or on the pull request itself when it carries the
+`ci-full-matrix` label, which a maintainer adds. Otherwise, and always for a pull request from a fork,
+a Ready pull request runs the full checks on each push. Either way the focused local gates are the
+first evidence for a Python, native or Windows change: run them before the push.
 
 Before the first push, check [Findings to pre-empt](REVIEW.md#findings-to-pre-empt), and build native
 code in a Linux shell such as WSL (hosted Linux builds it with and without SDL3).
@@ -282,8 +284,10 @@ code in a Linux shell such as WSL (hosted Linux builds it with and without SDL3)
 
 - With a pull request in scope, open a Draft after the first valid commit and mark it Ready once
   finished (tests and checks run, template filled); a finished PR never stays a Draft. Hosted CI runs
-  the quick checks on each push, Draft or Ready, and the full checks when the PR is batched for
-  landing ([Quick and full checks](docs/CI.md#quick-and-full-checks)); a Draft is never batched. A
+  only the quick checks on a Draft, and a Draft is never batched. While `NK_CI_TIERS` is `on`, a Ready
+  PR from a branch of this repository runs the quick checks too and gets the full checks when it is
+  batched for landing; otherwise it runs the full checks on each push
+  ([Quick and full checks](docs/CI.md#quick-and-full-checks)). A
   contributor's agent leaves Ready to its person.
 - Ready means finished, not approved. A substantive correction after Ready, including resolving a
   real conflict in content that is not generated, returns the PR to Draft for fresh exact-head
@@ -302,8 +306,9 @@ code in a Linux shell such as WSL (hosted Linux builds it with and without SDL3)
 - **Integration has two stages.** Preparation: the integrator merges `main` into a handed-off PR,
   resolves generated-content conflicts, refreshes controls and pushes a head hosted CI can test; it
   lands nothing. Landing: merging the head that carries the PR's exact content, a landing batch's head
-  or the PR's own, only once the full required hosted CI is green on that head, under Section 2. A
-  PR's own head needs green quick checks to join a batch; the batch's run is its full validation.
+  or the PR's own, only once the full required hosted CI is green on that head, under Section 2. To
+  join a batch, a PR's own head needs its hosted CI green for its tier (`LIGHT_CI_GREEN` after the
+  quick checks, `success` after the full checks); the batch's run is its full validation.
   GitHub runs no CI on a conflicting PR, so until the preparation head runs, the evidence is the
   author's local gates. If the preparation head's CI or the batch's run shows a semantic conflict or a
   failure in the PR's change, the integrator hands the PR back instead of fixing the author's code.
@@ -367,14 +372,16 @@ This section applies only to agents the maintainer runs.
 
 ### Landing pull requests
 
-- Hand a PR to integration only when its exact head is pushed, its quick checks are green and every
-  review thread is answered and resolved. Until landing or explicit hand-back, its branch and worktree
+- Hand a PR to integration only when its exact head is pushed, its hosted CI is green for its tier
+  (`LIGHT_CI_GREEN` after the quick checks, `success` after the full checks) and every review thread
+  is answered and resolved. Until landing or explicit hand-back, its branch and worktree
   belong to the integrator, which prepares and lands it (Section 10); nobody else edits, commits,
   merges or pushes there.
 - Land PRs as a linear batch branch (a commit per PR, one full CI and CodeQL run, a rebase-merge), in
   [landing order](docs/PUBLICATION_READINESS.md#step-by-step-a-pull-request-that-adds-a-public-path);
-  a lone PR is a batch of one. A PR whose own head passed the full checks (a fork's, or one labelled
-  `ci-full-matrix`) may land alone on that head; outside code never joins a batch. When a batch's
+  a lone PR is a batch of one. A PR whose own head passed the full checks (a fork's, one labelled
+  `ci-full-matrix`, or any Ready PR while `NK_CI_TIERS` is not `on`) may land alone on that head;
+  outside code never joins a batch. When a batch's
   run fails, eject the PRs the failure names (the failing test's module or sources, an alert's path)
   and run the rest again; halve the batch only when the failure names none, and eject nobody for a
   run GitHub never started. Never hold a ready PR for an unrelated one.
