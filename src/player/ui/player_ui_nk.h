@@ -1453,6 +1453,9 @@ unsigned player_ui_nk_test_focus(const PlayerUiNk *player);
 /* Test only: what the nickname editor holds and its count ("12 / 32 bytes") in
    count, or NULL (and "") while it is closed. */
 const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, size_t cap);
+/* Test only: the next UI's last frame was laid out (nk_ui_laid_out), so the
+   next frame takes a move at once; false without a next UI. */
+bool player_ui_nk_test_laid_out(const PlayerUiNk *player);
 /* Test only: the game whose picture is behind the library (the art rest), -1 for
    none; *shown tells it fading in or whole from fading out. */
 int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown);

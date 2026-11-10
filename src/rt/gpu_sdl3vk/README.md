@@ -76,7 +76,13 @@ Enabled with `SR_GPU_GE=1`. Implementation:
 - Destination reads (shader blends and the stencil test, #2109). On the snapshot path every
   primitive of a batch reads one copy of the target taken before the batch, so a primitive
   drawn over an earlier one of the same batch blends against the pre-batch pixels, not
-  against what that primitive stored. On the interlock path (`VK_EXT_fragment_shader_interlock`
+  against what that primitive stored. A stencil state that reads its own writes therefore
+  starts a new batch, with a new copy, wherever a primitive's box meets the earlier ones. A
+  write-once stencil state is the exception (`stencil_write_once`: the first fragment to pass
+  at a pixel stores a stencil that rejects every later one, with no depth write that could
+  change which fragment passes): the pixel is that one fragment over the pre-batch
+  destination, so its primitives share the batch, drawn last to first, and match `ge.c` with
+  one copy. On the interlock path (`VK_EXT_fragment_shader_interlock`
   with `fragmentShaderPixelInterlock` and `fragmentStoresAndAtomics`) such batches run
   `psp_frag_rmw.inc`, `psp.frag` built with `-DSR_DST_INTERLOCK`. Each fragment loads the
   target as a storage image, blends, and stores it inside a pixel-ordered interlock, so

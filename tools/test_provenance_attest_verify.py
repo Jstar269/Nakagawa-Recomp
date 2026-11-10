@@ -2150,6 +2150,162 @@ class MergePathTamperTests(GateCase):
         )
         self.assertFatal(self.run_verify(head), "TRUSTED_WORKFLOW_WEAKENED")
 
+    @staticmethod
+    def _gate(on_block: bytes) -> bytes:
+        context: bytes = RESERVED_CONTEXT.encode("utf-8")
+        return on_block + b"jobs:\n  attest:\n    name: " + context + b"\n"
+
+    def _weakened(self, raw: bytes) -> list[str]:
+        """The reasons the trigger check refuses ``raw`` as an edit of the base's trusted workflow."""
+        findings = verifier._ci_findings({TRUSTED_WORKFLOW: raw}, {TRUSTED_WORKFLOW: self.workflow_bytes()})
+        return [item.detail for item in findings if item.code == "TRUSTED_WORKFLOW_WEAKENED" and item.fatal]
+
+    WORKFLOW_RUN_GATE = (
+        b"on:\n"
+        b"  # CI is requested for every pull request event.\n"
+        b"  workflow_run:\n"
+        b"    workflows: [\"CI\"]\n"
+        b"    types: [requested]\n"
+        b"\n"
+        b"  workflow_dispatch:   # attest again after an admission\n"
+        b"    inputs:\n"
+        b"      head_sha:\n"
+        b"        type: string\n"
+    )
+
+    def test_a_gate_that_leaves_pull_request_target_for_workflow_run_is_not_weakened(self) -> None:
+        """GitHub blocks pull_request_target by default in public repositories from 2026-12-02; workflow_run
+        also runs the default branch's definition. Failing-before: the check wanted the literal
+        ``pull_request_target`` anywhere in the file, so the trigger could never be removed."""
+        raw = self._gate(self.WORKFLOW_RUN_GATE)
+        self.assertEqual(self._weakened(raw), [])
+        verdict = self.run_verify(self._commit_workflow(TRUSTED_WORKFLOW, raw))
+        self.assertPasses(verdict)
+        self.assertIn("TRUSTED_WORKFLOW_MODIFIED", self.codes(verdict, fatal_only=False))
+
+    def test_a_candidate_controlled_trigger_beside_the_trusted_one_is_refused(self) -> None:
+        """Failing-before: the literal token was still in the file, so a `pull_request` trigger added beside
+        it, which runs the candidate's own copy of the workflow, passed."""
+        for event in (b"pull_request", b"push", b"merge_group", b"schedule", b"issue_comment", b"workflow_call"):
+            with self.subTest(event=event):
+                raw = self._gate(b"on:\n  pull_request_target:\n  " + event + b":\n")
+                reasons = self._weakened(raw)
+                self.assertEqual(len(reasons), 1, reasons)
+                self.assertIn(f"runs on {event.decode()};", reasons[0])
+        head = self._commit_workflow(
+            TRUSTED_WORKFLOW, self._gate(b"on:\n  pull_request_target:\n  pull_request:\n"),
+        )
+        self.assertFatal(self.run_verify(head), "TRUSTED_WORKFLOW_WEAKENED")
+
+    def test_the_event_name_in_a_comment_is_not_a_trigger(self) -> None:
+        """Failing-before: any occurrence of the token satisfied the check, a comment included."""
+        raw = self._gate(b"# was pull_request_target\non:\n  pull_request:\n")
+        self.assertEqual(len(self._weakened(raw)), 2)   # a foreign trigger, and no trusted pull-request trigger
+
+    def test_a_gate_only_a_person_can_start_is_refused(self) -> None:
+        reasons = self._weakened(self._gate(b"on:\n  workflow_dispatch:\n"))
+        self.assertEqual(len(reasons), 1, reasons)
+        self.assertIn("no longer runs for pull requests", reasons[0])
+
+    def test_an_on_block_that_is_not_one_plain_event_per_line_is_refused(self) -> None:
+        """The check reads one form only and refuses the rest, rather than guess at GitHub's YAML reader."""
+        forms = {
+            "scalar": b"on: pull_request_target\n",
+            "flow sequence": b"on: [pull_request_target, pull_request]\n",
+            "flow mapping": b"on: {pull_request_target: {}, pull_request: {}}\n",
+            "block sequence": b"on:\n  - pull_request_target\n  - pull_request\n",
+            "quoted key": b"\"on\":\n  pull_request_target:\n",
+            "second on key": b"on:\n  pull_request_target:\non:\n  pull_request:\n",
+            "second key spelt as YAML 1.1 true": b"on:\n  pull_request_target:\ntrue:\n  pull_request:\n",
+            "quoted event": b"on:\n  pull_request_target:\n  \"pull_request\":\n",
+            "complex key event": b"on:\n  pull_request_target:\n  ? pull_request\n",
+            "merge key event": b"on:\n  pull_request_target:\n  <<: *more\n",
+            "event with an inline value": b"on:\n  pull_request_target: {types: [opened]}\n",
+            "repeated event": b"on:\n  pull_request_target:\n  pull_request_target:\n",
+            "events at another indent": b"on:\n    pull_request_target:\n",
+            "tab indent": b"on:\n\tpull_request_target:\n",
+            "top-level merge key": b"<<: *shared\non:\n  pull_request_target:\n",
+            # GitHub's reader would see only the escaped key: the plain `on:` is text inside the name.
+            "keys hidden in a multi-line scalar": (
+                b"name: \"x\non:\n  pull_request_target:\ny\"\n\"\\x6fn\":\n  pull_request:\n"),
+            "the same, its last line shaped like a key": (
+                b"name: \"x\non:\n  pull_request_target:\njobs: y\"\n\"\\x6fn\":\n  pull_request:\n"),
+            "an indented document with a decoy at column 0": (
+                b" name: x\n on:\n   pull_request:\non:\n  pull_request_target:\n"),
+            "second document": b"on:\n  pull_request_target:\n---\non:\n  pull_request:\n",
+            "unknown top-level key": b"on:\n  pull_request_target:\nyes:\n  pull_request:\n",
+            "byte-order mark": b"\xef\xbb\xbfon:\n  pull_request_target:\n",
+            "event with a comment glued to its colon": b"on:\n  pull_request_target:#x\n",
+            "event with a tab after its colon": b"on:\n  pull_request_target:\t\n",
+            "block scalar in the block": (
+                b"on:\n  workflow_dispatch:\n    inputs:\n      x:\n        description: |\n          text\n"),
+            "plain scalar continued on the next line": (
+                b"on:\n  workflow_dispatch:\n    inputs:\n      x:\n        description: two\n          lines\n"),
+            "sequence item in the block": b"on:\n  schedule:\n    - cron: \"1 2 * * 3\"\n",
+            "lone carriage return": b"on:\r  pull_request:\n  pull_request_target:\n",
+            "empty block": b"on:\n",
+            "no on key": b"name: gate\n",
+            "not UTF-8": b"on:\n  pull_request_target:\n# \xff\n",
+        }
+        for name, on_block in forms.items():
+            with self.subTest(form=name):
+                self.assertIsNone(verifier._workflow_events(self._gate(on_block)))
+                reasons = self._weakened(self._gate(on_block))
+                self.assertEqual(len(reasons), 1, reasons)
+                self.assertIn("cannot be checked", reasons[0])
+
+    def test_a_value_left_open_cannot_end_the_block_before_a_real_event(self) -> None:
+        """A quoted scalar or flow sequence that closes on a later line can put text shaped like a top-level
+        key in column 0. A reader that stops there misses the `pull_request:` a YAML reader finds after it
+        (PyYAML and ruamel.yaml both read all three events from each form). Failing-before: the reader
+        returned `['workflow_run', 'workflow_dispatch']` and no finding."""
+        head = b"on:\n  workflow_run:\n"
+        dispatch = b"  workflow_dispatch:\n    inputs:\n      head_sha:\n"
+        tail = b"        type: string\n  pull_request:\n"
+        plain = b"    workflows: [\"CI\"]\n    types: [requested]\n"
+        forms = {
+            "double-quoted scalar continued in column 0": (
+                head + plain + dispatch + b"        description: \"Full SHA\nenv: x\"\n" + tail),
+            "single-quoted scalar continued in column 0": (
+                head + plain + dispatch + b"        description: 'Full SHA\nenv: x'\n" + tail),
+            "flow sequence continued in column 0": (
+                head + b"    workflows: [\"CI\",\nenv: x]\n    types: [requested]\n" + dispatch + tail),
+            "quoted item of a flow sequence continued in column 0": (
+                head + b"    workflows: [\"CI\nenv: x\"]\n    types: [requested]\n" + dispatch + tail),
+            "U+2028 inside a quoted scalar": (
+                head + plain + dispatch + "        description: \"Full SHA\u2028env: x\"\n".encode() + tail),
+        }
+        for name, on_block in forms.items():
+            with self.subTest(form=name):
+                self.assertIsNone(verifier._workflow_events(self._gate(on_block)))
+                reasons = self._weakened(self._gate(on_block))
+                self.assertEqual(len(reasons), 1, reasons)
+                self.assertIn("cannot be checked", reasons[0])
+        # The same block with each value closed on its own line is read, and the foreign event is then seen.
+        closed = head + plain + dispatch + b"        description: \"Full SHA\"\n" + tail
+        self.assertEqual(verifier._workflow_events(self._gate(closed)),
+                         ["workflow_run", "workflow_dispatch", "pull_request"])
+
+    def test_a_line_break_yaml_and_python_disagree_on_is_refused(self) -> None:
+        # str.splitlines breaks at these and YAML does not, so a reader using it sees lines that are not there.
+        for separator in ("\u2028", "\u2029", "\x85", "\x0c", "\x0b", "\x1c", "\x1d", "\x1e"):
+            with self.subTest(separator=repr(separator)):
+                raw = self._gate(("on:\n  pull_request_target:\n# a comment" + separator + "env: x\n").encode())
+                self.assertIsNone(verifier._workflow_events(raw))
+        # Windows line endings are line endings in both.
+        self.assertEqual(verifier._workflow_events(self.workflow_bytes().replace(b"\n", b"\r\n")),
+                         ["pull_request_target"])
+
+    def test_the_plain_form_is_read_with_its_comments_and_settings(self) -> None:
+        self.assertEqual(verifier._workflow_events(self._gate(self.WORKFLOW_RUN_GATE)),
+                         ["workflow_run", "workflow_dispatch"])
+        self.assertEqual(verifier._workflow_events(self.workflow_bytes()), ["pull_request_target"])
+        # Only the `on:` block's own shape is held to the form: a tab in a step's script is not its business.
+        script = b"    steps:\n      - run: |\n          cat <<-EOF\n          \tindented\n          EOF\n"
+        self.assertEqual(verifier._workflow_events(self.workflow_bytes() + script), ["pull_request_target"])
+        with_keys = b"name: gate\nrun-name: x\n" + self.workflow_bytes() + b"permissions: {}\nconcurrency: g\n"
+        self.assertEqual(verifier._workflow_events(with_keys), ["pull_request_target"])
+
     def test_introducing_the_gate_workflow_is_not_reported_as_tampering(self) -> None:
         """A base without the workflow is the change that adds the gate."""
         # The predecessor has to be a real ancestor of the candidate, not a
@@ -2243,6 +2399,30 @@ class LiveRepositoryTests(unittest.TestCase):
         raw = (ROOT / TRUSTED_WORKFLOW).read_bytes()
         self.assertIn(b"pull_request_target", raw)
         self.assertNotIn(b"\non:\n  pull_request:\n", raw)
+
+    def test_the_trust_tools_and_workflows_hold_no_invisible_characters(self) -> None:
+        """A line or paragraph separator, a bidirectional control or a zero-width character does not show in a
+        diff and can change what a reader, an editor or a parser takes a line to be. They are written as
+        escapes. Failing-before: the reader's own list of separators held two of them as raw characters."""
+        invisible = {0x85, 0xFEFF, *range(0x200B, 0x2010), *range(0x2028, 0x202F), *range(0x2066, 0x206A)}
+        for name in ("tools/provenance_attest_verify.py", "tools/test_provenance_attest_verify.py",
+                     "tools/ci_trust_verdict.py", "tools/test_ci_trust_verdict.py",
+                     ".github/workflows/provenance-attestation.yml", ".github/workflows/ci-trust-verdict.yml"):
+            with self.subTest(file=name):
+                text = (ROOT / name).read_text(encoding="utf-8")
+                found = sorted({f"U+{ord(char):04X}" for char in text if ord(char) in invisible})
+                self.assertEqual(found, [])
+
+    def test_the_trusted_workflow_passes_the_trigger_check_it_is_held_to(self) -> None:
+        """Failing-before: the workflow had no workflow_run trigger, so it could not run once GitHub blocks
+        pull_request_target."""
+        events = verifier._workflow_events((ROOT / TRUSTED_WORKFLOW).read_bytes())
+        self.assertEqual(events, ["pull_request_target", "workflow_run", "workflow_dispatch"])
+        assert events is not None
+        self.assertLessEqual(set(events), verifier.TRUSTED_WORKFLOW_EVENTS)
+        self.assertNotIn("workflow_dispatch", verifier.TRUSTED_WORKFLOW_PULL_REQUEST_EVENTS)
+        for event in ("pull_request", "push", "merge_group"):
+            self.assertNotIn(event, verifier.TRUSTED_WORKFLOW_EVENTS)
 
     def test_the_trusted_workflow_never_checks_out_a_candidate_chosen_base(self) -> None:
         """A pull request picks its own base, so base.ref is attacker input.

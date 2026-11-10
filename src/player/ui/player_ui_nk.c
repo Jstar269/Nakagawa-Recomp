@@ -1890,6 +1890,10 @@ const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, si
     return player->nickname_text;
 }
 
+bool player_ui_nk_test_laid_out(const PlayerUiNk *player) {
+    return player != NULL && player->ui != NULL && nk_ui_laid_out(player->ui);
+}
+
 int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown) {
     if (shown != NULL) *shown = false;
     if (player == NULL || player->backdrop_index == SIZE_MAX) return -1;

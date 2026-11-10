@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "fixtures" / "showcase"))
 import ci_required  # noqa: E402
 import ci_paths  # noqa: E402
 import ci_test_shards  # noqa: E402
+import ci_trust_verdict  # noqa: E402
 import mypy_baseline  # noqa: E402
 import showcase as showcase_cli  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
@@ -2352,10 +2353,15 @@ _EXPRESSION_TOKEN = re.compile(r"\s*(\|\||&&|==|!=|!|\(|\)|,|'(?:[^']|'')*'|\d+(
 
 
 def _actions_eval(expression: str, context: Mapping[str, object]) -> bool:
-    """Evaluate the GitHub Actions expression subset the job guards use.
+    """Whether a job guard holds: ``_actions_value``, read as Actions reads an ``if:``."""
+    return _actions_value(expression, context) not in (None, False, 0, "")
+
+
+def _actions_value(expression: str, context: Mapping[str, object]) -> object:
+    """Evaluate the GitHub Actions expression subset the job guards and run names use.
 
     Supported: ``||``, ``&&``, ``!``, ``==``, ``!=``, parentheses, single-quoted strings, number literals,
-    context paths (a missing or null step reads as null), ``startsWith`` and ``always``.
+    context paths (a missing or null step reads as null), ``startsWith``, ``format`` and ``always``.
     As in Actions, ``!`` binds tighter than ``==`` and ``!=``, two strings compare without
     case, operands of different types compare as numbers (null and '' are 0, a non-numeric
     string is NaN), and ``startsWith`` reads null as the empty string.
@@ -2437,6 +2443,9 @@ def _actions_eval(expression: str, context: Mapping[str, object]) -> bool:
             if token == "startsWith" and len(arguments) == 2:
                 text, prefix = (str(value or "").casefold() for value in arguments)
                 return text.startswith(prefix)
+            if token == "format" and arguments:
+                values = ["" if value is None else str(value) for value in arguments[1:]]
+                return re.sub(r"\{(\d+)\}", lambda match: values[int(match.group(1))], str(arguments[0]))
             raise AssertionError(f"unsupported function {token}")
         return lookup(token)
 
@@ -2473,7 +2482,27 @@ def _actions_eval(expression: str, context: Mapping[str, object]) -> bool:
     result = disjunction()
     if index != len(tokens):
         raise AssertionError(f"unparsed expression tokens: {tokens[index:]}")
-    return truthy(result)
+    return result
+
+
+def _run_name(text: str) -> str:
+    """A workflow's ``run-name`` expression: one double-quoted line, ``${{ }}`` removed."""
+    lines = [line for line in text.splitlines() if line.startswith("run-name:")]
+    if len(lines) != 1:
+        raise AssertionError("the workflow does not set exactly one run-name")
+    return _matched(re.fullmatch(r'run-name: "\$\{\{(.*)\}\}"', lines[0])).group(1).strip()
+
+
+def _run_bodies(block: list[str]) -> list[str]:
+    """The script lines of every ``run: |`` step in a job block."""
+    bodies: list[str] = []
+    indent: int | None = None
+    for line in block:
+        if indent is not None and (not line.strip() or len(line) - len(line.lstrip()) > indent):
+            bodies.append(line)
+            continue
+        indent = len(line) - len(line.lstrip()) if line.strip() == "run: |" else None
+    return bodies
 
 
 #: This repository, as ``github.repository`` names it.
@@ -2715,6 +2744,225 @@ class TrustedVerdictTriggerTests(unittest.TestCase):
                 context = {"github": {"event_name": "workflow_run", "event": {"workflow_run": run}},
                            "needs": self.NEEDS}
                 self.assertEqual(_actions_eval(self.guard, context), runs)
+
+
+class TrustedVerdictApprovalDispatchTests(unittest.TestCase):
+    """A dispatch can record a CI-change approval, so approving needs no pull request event.
+
+    GitHub blocks pull_request_target by default in public repositories from 2026-12-02; the label
+    events that recorded an approval are that event's. Failing-before: the workflow had no
+    approve_head_sha input, no run name and no dispatched record job.
+    """
+
+    HEAD = "a" * 40
+
+    def setUp(self) -> None:
+        self.text = _workflow_text("ci-trust-verdict.yml")
+        self.blocks = _workflow_job_blocks("ci-trust-verdict.yml")
+        self.title = _run_name(self.text)
+
+    def _dispatch(self, approve: str = "") -> dict[str, object]:
+        return {"github": {"event_name": "workflow_dispatch", "event": {"repository": {"default_branch": "main"}}},
+                "inputs": {"pull_request_number": "7", "approve_head_sha": approve}}
+
+    def test_an_approval_dispatch_is_titled_as_the_verifier_looks_it_up(self) -> None:
+        self.assertEqual(_actions_value(self.title, self._dispatch(self.HEAD)),
+                         ci_trust_verdict.APPROVAL_RUN_TITLE.format(number=7, head=self.HEAD))
+
+    def test_no_other_run_is_titled_like_an_approval(self) -> None:
+        target = {"github": {"event_name": "pull_request_target",
+                             "event": {"pull_request": {"number": 7, "head": {"sha": self.HEAD}}}}, "inputs": {}}
+        completed = {"github": {"event_name": "workflow_run", "event": {"workflow_run": {"head_sha": self.HEAD}}},
+                     "inputs": {}}
+        titles = [_actions_value(self.title, context) for context in (self._dispatch(), target, completed)]
+        self.assertEqual(titles, ["Trusted CI verdict (PR #7)", "Trusted CI verdict (PR #7)",
+                                  f"Trusted CI verdict ({self.HEAD})"])
+        for title in titles:
+            self.assertIsNone(ci_trust_verdict._APPROVAL_RUN_TITLE.fullmatch(cast(str, title)))
+        # Numbers and SHAs only: no pull request title, body or branch name.
+        self.assertEqual(set(re.findall(r"(?:github|inputs)\.[A-Za-z_.]+", self.title)),
+                         {"github.event_name", "inputs.approve_head_sha", "inputs.pull_request_number",
+                          "github.event.pull_request.number", "github.event.workflow_run.head_sha"})
+
+    def test_only_a_dispatch_that_names_a_head_runs_the_approval_job(self) -> None:
+        guard = _job_if(self.blocks["approval_dispatch"])
+        self.assertTrue(_actions_eval(guard, self._dispatch(self.HEAD)))
+        self.assertFalse(_actions_eval(guard, self._dispatch()))
+        for event_name in ("pull_request_target", "workflow_run"):
+            context = self._dispatch(self.HEAD)
+            cast(dict[str, object], context["github"])["event_name"] = event_name
+            self.assertFalse(_actions_eval(guard, context))
+
+    def test_the_verdict_runs_after_a_dispatched_approval_whatever_its_result(self) -> None:
+        guard = _job_if(self.blocks["verdict"])
+        for result in ("success", "failure", "skipped"):
+            with self.subTest(approval_dispatch=result):
+                context = self._dispatch(self.HEAD)
+                context["needs"] = {"approval": {"result": "skipped"}, "approval_record": {"result": "skipped"},
+                                    "approval_dispatch": {"result": result},
+                                    "approval_record_dispatched": {"result": "skipped"}}
+                self.assertTrue(_actions_eval(guard, context))
+
+    def test_an_approval_dispatch_has_its_own_concurrency_group(self) -> None:
+        group = _matched(re.search(r"(?m)^  group: trusted-ci-verdict-\$\{\{ (.+) \}\}$", self.text)).group(1)
+        self.assertEqual(_actions_value(group, self._dispatch(self.HEAD)), f"approval-7-{self.HEAD}")
+        self.assertEqual(_actions_value(group, self._dispatch()), "7")
+
+    def test_dispatch_inputs_reach_a_shell_only_through_env(self) -> None:
+        for name, block in self.blocks.items():
+            with self.subTest(job=name):
+                self.assertNotIn("${{", "\n".join(_run_bodies(block)))
+        self.assertEqual(set(re.findall(r"inputs\.([a-z_]+)", _uncommented(self.text))),
+                         {"pull_request_number", "approve_head_sha"})
+
+
+class TrustedAttestationRouteTests(unittest.TestCase):
+    """The provenance attestation runs without pull_request_target.
+
+    GitHub blocks that event by default in public repositories from 2026-12-02 (brownouts
+    2026-11-09 and 2026-11-16). The attestation also starts when a CI run is requested for a
+    pull request (workflow_run, always the default branch's definition) and on a dispatch that
+    names the pull request and its head. Failing-before: pull_request_target was its only route.
+    """
+
+    HEAD = "a" * 40
+    PLAIN = "Trusted provenance attestation"
+    REPOSITORY = {"default_branch": "main"}
+
+    def setUp(self) -> None:
+        self.text = _workflow_text("provenance-attestation.yml")
+        self.blocks = _workflow_job_blocks("provenance-attestation.yml")
+        self.attest = "\n".join(self.blocks["attest"])
+        self.guard = _job_if(self.blocks["attest"])
+        self.title = _run_name(self.text)
+        producer = next(item for item in ci_trust_verdict.PRODUCERS if item.context == self.PLAIN)
+        self.head_title = producer.run_title.format(head=self.HEAD)
+
+    def _target(self, base: str = "main") -> dict[str, object]:
+        pull = {"number": 7, "head": {"sha": self.HEAD}, "base": {"ref": base}}
+        return {"github": {"event_name": "pull_request_target",
+                           "event": {"pull_request": pull, "repository": self.REPOSITORY}}, "inputs": {}}
+
+    def _ci(self, event: str = "pull_request") -> dict[str, object]:
+        run = {"event": event, "head_sha": self.HEAD, "head_branch": "ci/x"}
+        return {"github": {"event_name": "workflow_run",
+                           "event": {"workflow_run": run, "repository": self.REPOSITORY}}, "inputs": {}}
+
+    def _dispatch(self, ref: str = "refs/heads/main", **inputs: str) -> dict[str, object]:
+        return {"github": {"event_name": "workflow_dispatch", "ref": ref, "event": {"repository": self.REPOSITORY}},
+                "inputs": {"pull_request_number": "", "head_sha": "", "candidate_sha": "", **inputs}}
+
+    def test_a_requested_ci_run_starts_the_attestation(self) -> None:
+        on_block = "\n".join(_on_block(self.text))
+        self.assertIn('  workflow_run:\n    workflows: ["CI"]\n    types: [requested]\n', on_block)
+        self.assertEqual(_workflow_text("ci.yml").splitlines()[0], "name: CI")
+        # Every pull request event the old route listed also requests a CI run.
+        ci_types = _matched(re.search(r"(?m)^  pull_request:\n    types: \[([^\]]+)\]$",
+                                      "\n".join(_on_block(_workflow_text("ci.yml"))))).group(1)
+        old_types = _matched(re.search(r"(?m)^  pull_request_target:\n    types: \[([^\]]+)\]$", on_block)).group(1)
+        self.assertLessEqual(set(old_types.split(", ")), set(ci_types.split(", ")))
+        self.assertEqual([line for line in _on_block(self.text) if re.fullmatch(r"  [a-z_]+:", line)],
+                         ["  pull_request_target:", "  workflow_run:", "  workflow_dispatch:"])
+
+    def test_the_attest_guard_is_pinned(self) -> None:
+        self.assertEqual(self.attest.count("\n".join([
+            "    if: >-",
+            "      ${{ (github.event_name == 'pull_request_target' &&",
+            "           github.event.pull_request.base.ref == github.event.repository.default_branch) ||",
+            "          (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request') ||",
+            "          (github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '') }}",
+        ])), 1)
+
+    def test_only_a_pull_requests_ci_run_is_attested(self) -> None:
+        self.assertTrue(_actions_eval(self.guard, self._ci()))
+        # CI also runs on pushes to main, the schedule, dispatches and merge groups: no pull request head.
+        for event in ("push", "schedule", "workflow_dispatch", "merge_group", "pull_request_target"):
+            with self.subTest(event=event):
+                self.assertFalse(_actions_eval(self.guard, self._ci(event)))
+
+    def test_the_event_route_still_attests_only_the_default_base(self) -> None:
+        self.assertTrue(_actions_eval(self.guard, self._target()))
+        self.assertFalse(_actions_eval(self.guard, self._target("release")))
+
+    def test_a_dispatch_attests_a_pull_request_or_builds_a_candidate_never_both_by_accident(self) -> None:
+        attest = self._dispatch(pull_request_number="7", head_sha=self.HEAD)
+        candidate = self._dispatch(candidate_sha="c" * 40)
+        self.assertTrue(_actions_eval(self.guard, attest))
+        self.assertFalse(_actions_eval(self.guard, candidate))
+        for job in ("showcase_prx", "candidate_binary_l2"):
+            with self.subTest(job=job):
+                guard = _job_if(self.blocks[job])
+                self.assertTrue(_actions_eval(guard, candidate))
+                self.assertFalse(_actions_eval(guard, attest))
+                self.assertFalse(_actions_eval(guard, self._dispatch("refs/heads/topic", candidate_sha="c" * 40)))
+                self.assertFalse(_actions_eval(guard, self._ci()))
+
+    def test_the_run_is_titled_for_the_head_it_attests_on_every_route(self) -> None:
+        for name, context in (("pull_request_target", self._target()), ("workflow_run", self._ci()),
+                              ("dispatch", self._dispatch(pull_request_number="7", head_sha=self.HEAD))):
+            with self.subTest(route=name):
+                self.assertEqual(_actions_value(self.title, context), self.head_title)
+        # The title's head and the head the job attests are the same value.
+        self.assertIn("          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}\n", self.attest)
+        self.assertIn("          INPUT_HEAD_SHA: ${{ inputs.head_sha }}\n", self.attest)
+        self.assertIn('"${resolve[@]}" --head-sha "${RUN_HEAD_SHA}"', self.attest)
+        self.assertIn('"${resolve[@]}" --pull-request "${INPUT_PR_NUMBER}" --head-sha "${INPUT_HEAD_SHA}"', self.attest)
+
+    def test_a_run_that_attests_nothing_is_not_titled_for_a_head(self) -> None:
+        # Its attest job is skipped; a skipped job in a run titled for a head would read as a failed attestation.
+        for name, context in (("CI on a push to main", self._ci("push")), ("merge group CI", self._ci("merge_group")),
+                              ("candidate binaries", self._dispatch(candidate_sha=self.HEAD))):
+            with self.subTest(run=name):
+                self.assertFalse(_actions_eval(self.guard, context))
+                self.assertEqual(_actions_value(self.title, context), self.PLAIN)
+
+    def test_every_attestation_step_takes_its_target_from_the_resolver(self) -> None:
+        text = _uncommented(self.text)
+        # The event's values and the triggering run's head enter once, in the resolver step's env.
+        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.head\.sha", text)), 2)   # and the title
+        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.base\.sha", text)), 1)
+        self.assertEqual(len(re.findall(r"github\.event\.pull_request\.number", text)), 2)      # and concurrency
+        self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 3)
+        self.assertEqual(self.attest.count("${{ steps.target.outputs.base_sha }}"), 4)
+        self.assertEqual(self.attest.count("${{ steps.target.outputs.number }}"), 1)
+        self.assertIn("--attestation-target)", self.attest)
+        # A run that resolves no pull request must fail: nothing in the job tolerates a failed step.
+        self.assertNotIn("continue-on-error", self.attest)
+        self.assertEqual(self.attest.count("if: always()"), 2)   # the two reporting steps
+        resolver = self.attest[self.attest.index("- name: Resolve the pull request at the named head"):
+                               self.attest.index("- name: Fetch the candidate objects")]
+        self.assertIn("          set -euo pipefail\n", resolver)
+        self.assertIn('if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then', resolver)
+        self.assertRegex(resolver, r'(?s)\*\)\n\s+echo "unsupported event \$\{EVENT_NAME\}" >&2\n\s+exit 1')
+
+    def test_candidate_chosen_text_never_reaches_the_job(self) -> None:
+        text = _uncommented(self.text)
+        # Of the triggering run, only its event name and head SHA: never its branch, repository or title.
+        self.assertEqual(set(re.findall(r"github\.event\.workflow_run\.([A-Za-z_.]+)", text)), {"event", "head_sha"})
+        self.assertEqual(set(re.findall(r"inputs\.([a-z_]+)", text)),
+                         {"pull_request_number", "head_sha", "candidate_sha"})
+        # Event values and inputs reach a shell only as environment values.
+        self.assertNotIn("${{", "\n".join(_run_bodies(self.blocks["attest"])))
+
+    def test_the_attest_job_checks_out_the_default_branch_and_only_reads(self) -> None:
+        self.assertEqual(self.attest.count("actions/checkout@"), 1)
+        self.assertIn("          ref: ${{ github.event.repository.default_branch }}\n", self.attest)
+        self.assertIn("          persist-credentials: false\n", self.attest)
+        self.assertIn("    permissions:\n      contents: read\n      pull-requests: read\n    steps:\n", self.attest)
+        self.assertIn("\npermissions:\n  contents: read\n", self.text)
+        self.assertNotRegex(self.attest, r": write")
+        # The authority token is named once, in the step that reads the private ledger.
+        self.assertEqual(self.text.count("secrets."), 1)
+        self.assertIn("          GH_TOKEN: ${{ secrets.PROVENANCE_AUTHORITY_TOKEN }}\n", self.attest)
+
+    def test_a_newer_attestation_of_one_head_replaces_the_older(self) -> None:
+        group = _matched(re.search(r"(?m)^  group: provenance-attestation-\$\{\{ (.+) \}\}$", self.text)).group(1)
+        self.assertEqual(_actions_value(group, self._ci()), self.HEAD)
+        self.assertEqual(_actions_value(group, self._dispatch(pull_request_number="7", head_sha=self.HEAD)), self.HEAD)
+        self.assertEqual(_actions_value(group, self._target()), 7)
+        candidate = self._dispatch(candidate_sha=self.HEAD)
+        cast(dict[str, object], candidate["github"])["run_id"] = 99
+        self.assertEqual(_actions_value(group, candidate), 99)
 
 
 class SelfHostedRunnerWiringTests(unittest.TestCase):

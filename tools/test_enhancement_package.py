@@ -1201,7 +1201,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
         del pkg["update_boundary"]
         with self.assertRaises(EnhancementPackageError) as ctx:
             validate_package(pkg)
-        self.assertIn("gate_30hz_hold or gate_30hz_alt sites must declare update_boundary", str(ctx.exception))
+        self.assertIn("gate_30hz_alt or gate_30hz_store sites must declare", str(ctx.exception))
 
     def _even_and_hold_build(self, tmp: Path) -> str:
         # The resolver's static checks: the held call goes to an ease, a leaf that reads f12
@@ -1357,6 +1357,178 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                 with self.subTest(update=k):
                     self.assertEqual(ease60[2 * k + 1], values)
                     self.assertEqual(ease60[2 * k + 2], values)
+
+    def test_gate_30hz_store_plans(self) -> None:
+        """gate_30hz_store gates an sb, sh, sw or swc1 off the stack frame; anything else refuses."""
+        from enhancement_package import EnhancementPackageError, plan_site_rewrite
+
+        def plan(word: int) -> dict:
+            rewrite: dict = plan_site_rewrite({"id": "S", "transform": "gate_30hz_store"}, word)
+            return rewrite
+
+        for word in (
+            0xA2420010,  # sb v0, 0x10(s2)
+            0xA64200EC,  # sh v0, 0xec(s2)
+            0xAE030078,  # sw v1, 0x78(s0)
+            0xE602006C,  # swc1 f2, 0x6c(s0)
+            0xAE000078,  # sw zero, 0x78(s0): a stored constant is held as well
+        ):
+            with self.subTest(word=f"{word:08x}"):
+                self.assertEqual(plan(word), {"kind": "gate"})
+        for word, why in (
+            (0xAFA40008, "stack frame"),  # sw a0, 8(sp)
+            (0xE7A00010, "stack frame"),  # swc1 f0, 0x10(sp)
+            (0x8E030078, "takes an sb"),  # lw: a load is not a store
+            (0x00621821, "takes an sb"),  # addu v1, v1, v0: gate_30hz's form, not this one
+            (0x0C000480, "takes an sb"),  # jal
+            (0xEA000000, "takes an sb"),  # sv.s: VFPU stores are not admitted
+            (0xAA420000, "takes an sb"),  # swl v0, 0(s2)
+            (0xBA420000, "takes an sb"),  # swr v0, 0(s2)
+            (0xE2420000, "takes an sb"),  # sc v0, 0(s2): it also writes rt
+        ):
+            with self.subTest(word=f"{word:08x}"):
+                with self.assertRaises(EnhancementPackageError) as ctx:
+                    plan(word)
+                self.assertIn(why, str(ctx.exception))
+
+        pkg, _ = self._make_package_and_symbols(b"synthetic_elf_bytes")
+        pkg["sites"] = [dict(pkg["sites"][-1], transform="gate_30hz_store")]
+        del pkg["update_boundary"]
+        with self.assertRaises(EnhancementPackageError) as ctx:
+            validate_package(pkg)
+        self.assertIn("gate_30hz_alt or gate_30hz_store sites must declare", str(ctx.exception))
+
+        pkg, _ = self._make_package_and_symbols(b"synthetic_elf_bytes")
+        pkg["sites"][-1] = dict(pkg["sites"][-1], transform="gate_30hz_store", word_count=2)
+        with self.assertRaises(EnhancementPackageError) as ctx:
+            validate_package(pkg)
+        self.assertIn("gate_30hz_store names one store (word_count 1)", str(ctx.exception))
+
+    def test_gate_30hz_store_gates_a_store_in_a_delay_slot(self) -> None:
+        """A gated store in a jr's delay slot is emitted gated before the return, both forms kept."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            self.words.update({
+                0x00001500: 0x84A20000,  # lh v0, 0(a1)
+                0x00001504: 0x24420020,  # addiu v0, v0, 32
+                0x00001508: 0x03E00008,  # jr ra
+                0x0000150C: 0xA4A20000,  # sh v0, 0(a1), in the delay slot
+            })
+            elf_bytes = _write_synthetic_mips_elf(tmp / "synth.elf", self.words, self.entry)
+            pkg, symbols = self._make_package_and_symbols(elf_bytes)
+            for site in pkg["sites"]:
+                if site["id"] == "SYNTH_PROB":
+                    site.update(transform="gate_30hz_store", insn_offset=12,
+                                stock_digest=compute_stock_words_digest([0xA4A20000]))
+            rc, output, files = self._codegen_with(tmp, "slot", pkg, symbols)
+            self.assertEqual(rc, 0, output)
+            lines = b"\n".join(files.values()).decode("utf-8").splitlines()
+            at = next(i for i, line in enumerate(lines) if "sr_begin(s, 0x0000150cu" in line)
+            stock = "sr_begin(s, 0x0000150cu, 0xa4a20000u); MEM_W16_PC("
+            self.assertIn(f"if (nk_enhancement_on()) {{ if (nk_enhancement_gate_30hz()) {{ {stock}", lines[at])
+            self.assertIn(f"else {{ {stock}", lines[at + 1])
+            # The jr's target is latched before the slot, and the slot runs before the return.
+            self.assertTrue(any("_sr_return_target" in line for line in lines[at - 4:at]), lines[at - 4:at])
+            self.assertIn("return;", lines[at + 2])
+
+    @unittest.skipUnless(GCC, "needs a host C compiler")
+    def test_gate_30hz_store_holds_each_30hz_value_for_two_updates(self) -> None:
+        """Compile a field's per-update step with its store gated and run 30 Hz against 60 Hz.
+
+        The step is x = x / 2 + 32 on a halfword, as a cursor's inline ease does: with the
+        store run on even updates only, the field takes the 30 Hz values, each for two
+        updates; with the toggle off the statements are the Authentic ones byte for byte.
+        The harness uses the gate test codegen writes into the generated header. Without a host
+        C compiler (gcc on PATH) the test is skipped, as the other compiled tests are.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            self.words.update({
+                0x00001500: 0x84A20000,  # lh v0, 0(a1)
+                0x00001504: 0x00021043,  # sra v0, v0, 1
+                0x00001508: 0x24420020,  # addiu v0, v0, 32
+                0x0000150C: 0xA4A20000,  # sh v0, 0(a1)
+                0x00001510: 0x03E00008, 0x00001514: 0,
+            })
+            elf_bytes = _write_synthetic_mips_elf(tmp / "synth.elf", self.words, self.entry)
+            pkg, symbols = self._make_package_and_symbols(elf_bytes)
+            for site in pkg["sites"]:
+                if site["id"] == "SYNTH_PROB":
+                    site.update(transform="gate_30hz_store", insn_offset=12,
+                                stock_digest=compute_stock_words_digest([0xA4A20000]))
+            rc, output, files = self._codegen_with(tmp, "store", pkg, symbols)
+            self.assertEqual(rc, 0, output)
+            authentic_dir = tmp / "authentic"
+            authentic_dir.mkdir()
+            rc, output, stock_files = self._run_codegen(tmp / "synth.elf", authentic_dir / "out.c", [])
+            self.assertEqual(rc, 0, output)
+
+            def step(files: dict[str, bytes]) -> str:
+                lines = b"\n".join(files.values()).decode("utf-8").splitlines()
+                at = next(i for i, line in enumerate(lines) if "sr_begin(s, 0x00001500u" in line)
+                # The step ends where the jr $ra's return sequence begins.
+                end = next(i for i in range(at, len(lines)) if "_sr_return_target" in lines[i])
+                return "\n".join(lines[at:end])
+
+            enhanced, stock = step(files), step(stock_files)
+            gate_def = next(line for line in files["out_funcs.h"].decode("utf-8").splitlines()
+                            if "int nk_enhancement_gate_30hz(void)" in line)
+            store = next(line.strip() for line in stock.splitlines() if "0x0000150cu" in line)
+            self.assertIn("MEM_W16_PC", store)
+            self.assertIn(f"if (nk_enhancement_gate_30hz()) {{ {store} }}", enhanced)
+            self.assertIn(f"else {{ {store} }}", enhanced)  # toggle off: the Authentic store
+
+            def program(name: str, body: str) -> list[str]:
+                harness = tmp / f"{name}.c"
+                harness.write_text(
+                    "#include \"recomp.h\"\n"
+                    "/* The real CpuState and trace hooks; guest memory is one halfword here. */\n"
+                    "#undef MEM_R16\n#undef MEM_W16_PC\n"
+                    "static uint16_t field;\n"
+                    "#define MEM_R16(a) ((void)(a), field)\n"
+                    "#define MEM_W16_PC(a, v, pc) ((void)(a), (void)(pc), field = (uint16_t)(v))\n"
+                    "static int on;\nint nk_enhancement_on(void) { return on; }\n"
+                    "uint32_t nk_enhancement_updates;\n"
+                    f"{gate_def}\n"
+                    f"static void update(CpuState *s) {{\n{body}\n}}\n"
+                    "int main(void) {\n"
+                    "    CpuState st; CpuState *s = &st; memset(&st, 0, sizeof st);\n"
+                    "    for (on = 0; on < 2; on++) {\n"
+                    "        field = 0; nk_enhancement_updates = 0;\n"
+                    "        for (int u = 0; u < (on ? 40 : 20); u++) {\n"
+                    "            nk_enhancement_updates++;\n"
+                    "            update(s);\n"
+                    "            printf(\"%s %d %u\\n\", on ? \"x60\" : \"x30\", u, (unsigned)field);\n"
+                    "        }\n"
+                    "    }\n"
+                    "    return 0;\n"
+                    "}\n",
+                    encoding="utf-8",
+                )
+                exe = tmp / f"{name}.exe"
+                assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
+                built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                                        "-Wno-misleading-indentation", "-Wno-unused-variable",
+                                        "-Wno-unused-value",
+                                        f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
+                                       capture_output=True, text=True)
+                self.assertEqual(built.returncode, 0, built.stderr)
+                run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+                return run.stdout.split("\n")
+
+            out = program("store_gate", enhanced)
+            authentic = program("authentic", stock)
+            off = [line for line in out if line.startswith("x30 ")]
+            self.assertEqual(off, [line for line in authentic if line.startswith("x30 ")])
+            x30 = [int(line.split()[2]) for line in off]
+            x60 = [int(line.split()[2]) for line in out if line.startswith("x60 ")]
+            self.assertEqual(x30[:4], [32, 48, 56, 60])
+            # Update 1 of 60 is odd and holds the start; then each 30 Hz value shows for two updates.
+            self.assertEqual(x60[0], 0)
+            for k, value in enumerate(x30[:19]):
+                with self.subTest(update=k):
+                    self.assertEqual(x60[2 * k + 1], value)
+                    self.assertEqual(x60[2 * k + 2], value)
 
     def test_aot_cache_epoch_separation_and_authentic_invariance(self) -> None:
         """With package off, AOT cache digest is untouched; with package on, it keys a distinct epoch."""
