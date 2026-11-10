@@ -19,6 +19,8 @@ local readiness check can route the same decision, where no ungated equivalent
 runs.
 """
 
+# Scratch comment for a live test of the CI-change approval route. This branch is closed unmerged.
+
 from __future__ import annotations
 
 import argparse
