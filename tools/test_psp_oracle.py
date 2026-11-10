@@ -3501,6 +3501,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # The 2026-11-09 (UTC) acceptance-eligible vfpu-mfv-mtv (boot 167),
                 # vfpu-wide-dot-matrix (boot 168) and vfpu-round-sep (boot 169) runs (#326).
                 "PSP-VFPU-MFVMTV-001", "PSP-VFPU-WIDEDOT-001", "PSP-VFPU-ROUNDSEP-001",
+                # The 2026-11-10 acceptance-eligible vfpu-prefix-state (boot 175, 48cea955),
+                # vfpu-wider-ops (boot 176) and vfpu-constants (boot 178, both 9426722a) runs (#326).
+                "PSP-VFPU-PREFIX-001", "PSP-VFPU-WIDEROPS-001", "PSP-VFPU-CONSTANTS-001",
             },
         )
         self.assertEqual(
@@ -9968,8 +9971,8 @@ class VfpuMfvMtvProbeTests(unittest.TestCase):
 class VfpuConstantsProbeTests(unittest.TestCase):
     """CASE=vfpu-constants (175, PSP-VFPU-CONSTANTS-001) in probe_hle_issues.c: the #326 vcst.s/vcst.q constants. Register-only: no system call
     in the section beyond the shared writer, bounded loops, a step before the cells, no
-    control-register write, a fixed-shape stream that matches the registry, and no hardware
-    result claimed (NOT_RUN)."""
+    control-register write, a fixed-shape stream that matches the registry, and the 2026-11-10
+    hardware result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -10035,16 +10038,35 @@ class VfpuConstantsProbeTests(unittest.TestCase):
             value = int(word, 16)
             self.assertFalse((value >> 21) == 0x247 and value & 0x80, word)
 
-    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+    def test_manifest_row_is_a_measured_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_constants.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-constants"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
         self.assertEqual(row["case_ids"][-1], "vfpu-constants-done")
+
+    def test_measurement_note_names_the_run_and_every_constant(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        # The 2026-11-10 (UTC) launch: boot 178, XMB context, pspver 0x06060010, from an ancestor
+        # of this tree whose case code matches it.
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 178", "XMB context", "9426722a",
+                     "identical to this tree's", "system software 6.61",
+                     "release:6.61:, system:58401@release_661,0x06060110:", "0x06060010 (\"6.6.0\")",
+                     "ARK-5 with cIPL, version 5.1.0", "9 records",
+                     "acceptance-eligible with 0 blockers", "none faulted", "0x7a5a5a5a"):
+            self.assertIn(term, note)
+        # Indices 0-19 in order; index 4 is 0x3f906ebb, one ulp above the PPSSPP-derived table.
+        words = (0x00000000, 0x7F7FFFFF, 0x3FB504F3, 0x3F3504F3, 0x3F906EBB, 0x3F22F983, 0x3EA2F983,
+                 0x3F490FDB, 0x3FC90FDB, 0x40490FDB, 0x402DF854, 0x3FB8AA3B, 0x3EDE5BD9, 0x3F317218,
+                 0x40135D8E, 0x40C90FDB, 0x3F060A92, 0x3E9A209B, 0x40549A78, 0x3F5DB3D7)
+        for index, word in enumerate(words):
+            self.assertIn(f"{index} 0x{word:08x}", note)
+        self.assertIn("The reserved indices 20-31 wrote 0x00000000", note)
 
     def test_the_encodings_match_the_forms(self) -> None:
         # vcst: 0xd0600000 | index << 16, .s vd S200 0x0008, .q vd C200 0x8088. psp-as accepts the
@@ -10269,7 +10291,7 @@ class VfpuPrefixStateProbeTests(unittest.TestCase):
     instructions, vfim.s/viim.s under a pending vpfxd). Register-only: no system call in the section
     beyond the shared writer, bounded loops, a step before every record, no control-register write,
     identity prefixes issued around every cell, a fixed-shape stream that matches the registry, and
-    no hardware result claimed (NOT_RUN)."""
+    the 2026-11-10 hardware result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -10441,16 +10463,36 @@ class VfpuPrefixStateProbeTests(unittest.TestCase):
             with self.subTest(fn=fn):
                 self.assertLess(bodies[fn].index("hle_step(name);"), bodies[fn].index("hle_record("))
 
-    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+    def test_manifest_row_is_a_measured_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_prefix_state.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-prefix-state"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertNotIn("No hardware result is claimed", row["invariant"])
         self.assertEqual(row["case_ids"][-1], "vfpu-prefix-state-done")
+
+    def test_measurement_note_names_the_run_and_its_exact_cells(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 175", "XMB context", "48cea955",
+                     "identical to this tree's", "system software 6.61", "0x06060010 (\"6.6.0\")",
+                     "ARK-5 with cIPL, version 5.1.0", "199 records",
+                     "acceptance-eligible with 0 blockers"):
+            self.assertIn(term, note)
+        # Prefixes act on raw words; saturation keeps NaNs and maps -0 to +0 at [0:1]; a pending
+        # vpfxs survives every instruction between and one vmov.s consumes it; vfim keeps a
+        # canonical NaN.
+        for cell in ("|0xffc00022| = 0x7fc00022", "-(+0) = 0x80000000", "0x7f800033 * -0 = 0xff800001",
+                     "min(-0, 0x80000001) = 0x80000001", "vmov.q ignores vpfxt",
+                     "[0:1] gives 0x00000000 for -2.25, -1, -0, -inf and 0x807fffff",
+                     "[-1:1] keeps 0x80000000", "none of them cleared or consumed it",
+                     "VFPU_PFXS 0x000100e4", "0x7c01", "0x7f800001, 0x80000000, 0x38800000 and 0x477fe000",
+                     "0x46fffe00 and 0xc7000000"):
+            self.assertIn(cell, note)
 
 
 class VfpuWiderOpsProbeTests(unittest.TestCase):
@@ -10458,8 +10500,8 @@ class VfpuWiderOpsProbeTests(unittest.TestCase):
     measured so far at one width only (vdiv, vsin/vcos/vrcp/vrsq/vsqrt/vocp, the dot and matrix
     widths, vidt into every column and row register). Register-only: no system call in the section
     beyond the shared writer, bounded loops, a step before every record, identity prefixes,
-    records within the writer's line, a fixed-shape stream that matches the registry, and no
-    hardware result claimed (NOT_RUN)."""
+    records within the writer's line, a fixed-shape stream that matches the registry, and the
+    2026-11-10 hardware result recorded as MEASURED."""
 
     makefile: ClassVar[str]
     probe: ClassVar[str]
@@ -10627,16 +10669,33 @@ class VfpuWiderOpsProbeTests(unittest.TestCase):
         for fragment in ("#define WO_FORMS 47u", "pass < 2u", "form < WO_FORMS"):
             self.assertIn(fragment, self.section)
 
-    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+    def test_manifest_row_is_a_measured_case(self) -> None:
         self.assertEqual(len(self.rows), 1)
         row = self.rows[0]
         self.assertEqual(row["prx"], "vfpu_wider_ops.prx")
         self.assertEqual(row["source"], "fixtures/psp_oracle/probe_hle_issues.c")
         self.assertEqual(row["diagnostic_case_ids"], ["vfpu-wider-ops"])
         self.assertEqual(row["issues"], [326])
-        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
-        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        self.assertNotIn("evidence_note", row)
+        self.assertNotIn("No hardware result is claimed", row["invariant"])
         self.assertEqual(row["case_ids"][-1], "vfpu-wider-ops-done")
+
+    def test_measurement_note_names_the_run_and_its_exact_cells(self) -> None:
+        note = self.rows[0]["measurement_note"]
+        for term in ("2026-11-10 (UTC)", "PSP-3000", "boot 176", "XMB context", "9426722a",
+                     "identical to this tree's", "system software 6.61", "0x06060010 (\"6.6.0\")",
+                     "ARK-5 with cIPL, version 5.1.0", "223 records",
+                     "acceptance-eligible with 0 blockers", "same word per pair at all three widths"):
+            self.assertIn(term, note)
+        # Width agreement, the order-insensitive multi-term sums and the vidt lane rules.
+        for cell in ("-0 / 0x7fc00011 = 0xff800001", "0x7e800000, 0xfe800000, 0, -0, 0, -0",
+                     "0x5f000000", "0x5f3504f0", "0xff000000, 0x7f000000, -inf, +inf",
+                     "vdot.t (1e8, 1, -1e8) . (1, 1, 1) = 0, 0x7f800001, +inf, 0xccbebc20",
+                     "(-1.5, 0xcc8f0d18, 0x4dbebc20)", "give 0 in every finite output in every order",
+                     "(0xccbebc20, 0, 0x4cbebc20)", "1.0 to lane (vd & 3)", "1.0 to lane (vd & 1)"):
+            self.assertIn(cell, note)
 
 
 class VfpuReservedWidthsProbeTests(unittest.TestCase):
@@ -15118,6 +15177,9 @@ class Record20261015Tests(unittest.TestCase):
             ("vfpu-mfv-mtv", "PSP-VFPU-MFVMTV-001", "MEASURED"),
             ("vfpu-wide-dot-matrix", "PSP-VFPU-WIDEDOT-001", "MEASURED"),
             ("vfpu-round-sep", "PSP-VFPU-ROUNDSEP-001", "MEASURED"),
+            ("vfpu-prefix-state", "PSP-VFPU-PREFIX-001", "MEASURED"),
+            ("vfpu-wider-ops", "PSP-VFPU-WIDEROPS-001", "MEASURED"),
+            ("vfpu-constants", "PSP-VFPU-CONSTANTS-001", "MEASURED"),
             ("sas-adsr", "PSP-SAS-002", "NOT_RUN"),
             ("sas-mix", "PSP-SAS-003", "CAPTURED"),
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),

@@ -1403,6 +1403,106 @@ One console is one data point; see §11. Nothing here closes issue #70
     firmware the registry handle does not list the root through `sceRegGetKeysNum`; whether another context or
     handle does is not measured.
 
+- **PSP-3000 single-case runs of `vfpu-prefix-state`, `vfpu-wider-ops` and `vfpu-constants` (2026-11-10 UTC)**:
+  one PSP-3000, XMB context, one launch per boot, each after the `transport-write` preflight (PSP-TRANSPORT-001
+  is not re-cited). Firmware identity: console PSP-3000; system software 6.61 (`flash0:/vsh/etc/version.txt`:
+  `release:6.61:`, `system:58401@release_661,0x06060110:`); PSPLink `pspver` printed `0x06060010` ("6.6.0") in
+  the XMB context on these boots, which the runner records as 6.6.0; custom firmware ARK-5 with cIPL, version
+  5.1.0 (the version was not read by a tool). All three are in `fixtures/psp_oracle/probe_hle_issues.c`:
+  `vfpu-prefix-state` (case 182) on boot 175 at `48cea955`, 199 records; `vfpu-wider-ops` (case 183) on boot 176
+  at `9426722a`, 223 records; `vfpu-constants` (case 175) on boot 178 at `9426722a`, 9 records. Each launch
+  commit is an ancestor of this tree, and its case section, case number and test id in `probe_hle_issues.c` and
+  its Makefile CASE lines are identical to this tree's. Every envelope is acceptance-eligible with 0 blockers
+  (evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree), every record is PASS,
+  each stream ends COMPLETE PASS, no exception or hang occurred, and passes 0 and 1 agree record for record. The
+  raw envelopes, host0 logs and decoded tables stay in the private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-10) |
+  | --- | --- | --- | --- |
+  | `PSP-VFPU-PREFIX-001` | `operands-p0`, `pfxs-*-p0`, `pfxt-*-p0`, `pfxd-*-p0`, `life-*-p0`, `vfim-*-p0`, `viim-*-p0`, `operands-p1`, `pfxs-*-p1`, `pfxt-*-p1`, `pfxd-*-p1`, `life-*-p1`, `vfim-*-p1`, `viim-*-p1`, `vfpu-prefix-state-done` (boot 175) | prefixes on other forms and widths, swizzles past the width, a prefix pending across an exception or a delay slot, a denormal half for vfim | MEASURED: 198 records and the done record, all PASS |
+  | `PSP-VFPU-WIDEROPS-001` | `vdiv-*-p0-*`, `vsin-*-p0`, `vcos-*-p0`, `vrcp-*-p0`, `vrsq-q-p0`, `vsqrt-q-p0`, `vocp-*-p0`, `*-c*-p0`, `vm*-p0`, `vidt-*-p0`, `vzero-t-p0`, `vone-t-p0`, `vdiv-*-p1-*`, `vsin-*-p1`, `vcos-*-p1`, `vrcp-*-p1`, `vrsq-q-p1`, `vsqrt-q-p1`, `vocp-*-p1`, `*-c*-p1`, `vm*-p1`, `vidt-*-p1`, `vzero-t-p1`, `vone-t-p1`, `vfpu-wider-ops-done` (boot 176) | non-identity prefixes, vrsq/vsqrt at .s/.p/.t, vocp at .p/.t, specials in other matrix elements | MEASURED: 222 records and the done record, all PASS |
+  | `PSP-VFPU-CONSTANTS-001` | `vcst-s-p0`, `vcst-q-p0`, `vcst-s-p1`, `vcst-q-p1`, `vcst-s-res-p0`, `vcst-q-res-p0`, `vcst-s-res-p1`, `vcst-q-res-p1`, `vfpu-constants-done` (boot 178) | vcst at .p/.t, vcst under a non-identity vpfxd | MEASURED: 8 records and the done record, all PASS |
+
+  What the cells establish, for these exact words only. Operand sets A (C000) / B (C010) of `vfpu-prefix-state`:
+  (1.5, -2.25, 3, 0.625) / (0.75, 4, -1.5, 2.5); (`0xffc00022`, +inf, `0x00000001`, -0) / (1, -inf, `0x80000001`,
+  +0); (+0, `0x7f800033`, `0x807fffff`, -1) / (-0, 2, +inf, `0x7fc00011`).
+  - *S and T prefixes (`PSP-VFPU-PREFIX-001`).* The swizzle, abs, negate and constant fields act on the raw words
+    before the operation. `vmov.q` under a `vpfxs` returns them bit for bit: |`0xffc00022`| = `0x7fc00022`,
+    -`0x7f800033` = `0xff800033`, |`0x807fffff`| = `0x007fffff`, -(+0) = `0x80000000` and -|+0| = `0x80000000`.
+    The constants are 0, 1, 2, 0.5, 3, `0x3eaaaaab` (1/3), 0.25 and `0x3e2aaaab` (1/6), and a negated constant 0
+    is `0x80000000`. The operation then follows the `vfpu-basic-arith` rules on the prefixed values: a denormal
+    counts as a zero of its sign; `vadd.q` gives `0x7f800001` for a NaN operand or inf - inf; `vmul.q` gives
+    `0x7f800001` with the XOR of the operand signs (`0x7f800033` * -0 = `0xff800001`); `vmin.q` returns the raw
+    operand word (min(`0xffc00022`, -inf) = `0xffc00022`, min(-0, `0x80000001`) = `0x80000001`). `vdot.q` writes
+    S200 only (C200 lanes 1-3 keep the sentinel): A0 swizzled y,x,w,z . B0 = 10.875, and any NaN term gives
+    `0x7f800001`. `vmov.q` ignores `vpfxt`: all five T-prefixed `vmov.q` cells return A unchanged.
+  - *D prefix (`PSP-VFPU-PREFIX-001`).* The write mask ,m,,m (`0xde000a00`) leaves lanes 1 and 3 at the sentinel
+    for `vadd.q`, `vmov.q`, `vneg.q`, `vzero.q` and `vidt.q`. Saturation applies to the result and passes a NaN
+    unchanged with its sign and payload (`vmov.q` keeps `0xffc00022` and `0x7f800033`). [0:1] gives `0x00000000`
+    for -2.25, -1, -0, -inf and `0x807fffff`, keeps the denormal `0x00000001`, and gives 1.0 for 1.5, 3 and +inf;
+    [-1:1] keeps -0 (`0x80000000`) and the denormals `0x00000001`, `0x80000001` and `0x807fffff`, and gives -1.0
+    for -2.25 and -inf.
+  - *Prefix lifetime (`PSP-VFPU-PREFIX-001`).* With S000 = -2, a pending `vpfxs` -x,y,z,w (`0xdc0100e4`) made the
+    next `vmov.s` S200, S000 write +2 and the `vmov.s` S201, S000 after it -2 in every cell: with nothing, `vnop`,
+    `vsync`, `vflush`, a taken branch with a `nop` delay slot, `add.s`, `mtv`, `mfv`, `lv.q`, `vpfxt` -x,-y,-z,-w
+    or three `mfvc` reads between. None of those cleared or consumed the prefix; the first `vmov.s` consumed
+    it. A pending `vpfxd` [0:1] (`0xde000001`) survived `vnop`, `vsync` and `vflush` the same way
+    (S200 `0x00000000`, S201 -2). `mfvc` read VFPU_PFXS `0x000000e4`, VFPU_PFXT `0x000000e4` and VFPU_PFXD
+    `0x00000000` at identity and VFPU_PFXS `0x000100e4` while the `vpfxs` was pending, and all three read identity
+    again after the consuming `vmov.s`.
+  - *`vfim.s` and `viim.s` (`PSP-VFPU-PREFIX-001`).* With no `vpfxd`, `vfim.s` of the halves `0x0000`, `0x3c00`,
+    `0xc000`, `0x7c00`, `0x7c01`, `0x8000`, `0x0400` and `0x7bff` wrote `0x00000000`, `0x3f800000`, `0xc0000000`,
+    `0x7f800000`, `0x7f800001`, `0x80000000`, `0x38800000` and `0x477fe000`. Under [0:1], -2.0 and -0 give
+    `0x00000000` and +inf and 65504 give 1.0; under [-1:1], -2.0 gives -1.0 and -0 stays `0x80000000`; the NaN
+    stays `0x7f800001` under both; under the mask m,,, (`0xde000100`) S200 keeps the sentinel. `viim.s` of 0, 1,
+    `0xffff`, `0x7fff` and `0x8000` wrote 0, 1.0, -1.0, 32767.0 (`0x46fffe00`) and -32768.0 (`0xc7000000`); [0:1]
+    gives 0, 1, 0, 1, 0 and [-1:1] gives 0, 1, -1, 1, -1; the mask leaves the sentinel.
+  - *`vdiv` widths (`PSP-VFPU-WIDEROPS-001`).* `vdiv.p`, `vdiv.t` and `vdiv.q` (`0x63810088`, `0x63818008`,
+    `0x63818088`) give the same word per pair at all three widths over all 100 pairs (the 20 `vfpu-basic-arith`
+    classes against 1, +0, +inf, `0x7fc00011` and `0x00000001`), by the `vdiv.s` rule above: a denormal counts as a
+    zero of its sign (+`0x00000001` / 1 = 0, 1 / `0x00000001` = +inf); x / +0 = an infinity of the sign of x;
+    x / +inf = a zero of the sign of x; 0/0, inf/inf and a NaN operand give `0x7f800001` with the XOR of the signs
+    (-0 / `0x7fc00011` = `0xff800001`); 2^127 / 1 = `0x7f000000` and FLT_MAX / 1 = `0x7f7fffff`.
+  - *Unary widths (`PSP-VFPU-WIDEROPS-001`).* Over the 20 specials in order (+0, -0, +-`0x00000001`, +-1, +-0.5,
+    +-2, +-`0x00800000`, +-2^127, +-inf, `0x7fc00000`, `0xffc00000`, `0x7f800001`, `0xff800001`), `vsin`, `vcos` and
+    `vrcp` give the same word per input at `.p`, `.t` and `.q`. `vsin`: 0, -0, 0, -0, 1, -1, `0x3f3504f0`,
+    `0xbf3504f0`, -0, 0, 0, -0, 0, -0, then `0x7f800001` or `0xff800001` by the input's sign. `vcos`: 1, 1, 1, 1,
+    -0, -0, `0x3f3504f0`, `0x3f3504f0`, -1, -1, 1, 1, 1, 1, then `0x7f800001` six times. `vrcp`: +inf, -inf, +inf,
+    -inf, 1, -1, 2, -2, 0.5, -0.5, `0x7e800000`, `0xfe800000`, 0, -0, 0, -0, then `0x7f800001` or `0xff800001` by
+    sign. `vrsq.q`: +inf, -inf, +inf, -inf, 1, `0xff800001`, `0x3fb504f0`, `0xff800001`, `0x3f3504f0`,
+    `0xff800001`, `0x5f000000`, `0xff800001`, `0x1fb504f0`, `0xff800001`, 0, `0xff800001`, then `0x7f800001`,
+    `0xff800001`, `0x7f800001`, `0xff800001`. `vsqrt.q`: 0 for both zeros and both denormals, 1, `0x7f800001`,
+    `0x3f3504f0`, `0x7f800001`, `0x3fb504f0`, `0x7f800001`, `0x20000000`, `0x7f800001`, `0x5f3504f0`,
+    `0x7f800001`, +inf, then `0x7f800001` five times. `vocp.s` and `vocp.q` (1 - x) agree: 1, 1, 1, 1, 0, 2, 0.5,
+    1.5, -1, 3, 1, 1, `0xff000000`, `0x7f000000`, -inf, +inf, then `0x7f800001` four times.
+  - *Dot and matrix widths (`PSP-VFPU-WIDEROPS-001`).* Cells in order finite, first source `0x7fc00011`, +inf and
+    `0x00000001`: `vdot.t` (1e8, 1, -1e8) . (1, 1, 1) = 0, `0x7f800001`, +inf, `0xccbebc20`; `vhdp.p`
+    (2^24, 1) . (1, 1) = `0x4b800000`, `0x7f800001`, +inf, 1.0; `vhdp.t` (1e8, 1, 1) . (1, 1, -1e8) = 0,
+    `0x7f800001`, +inf, `0xccbebc20`; `vscl.t` (1e8, 1, -1e8) * `0x3eaaaaab` = (`0x4bfe502b`, `0x3eaaaaab`,
+    `0xcbfe502b`), lane 0 becoming `0x7f800001`, +inf and 0; `vcrs.t` (1e8, 1, -1e8), (0.75, 4, -1.5) =
+    (a1 b2, a2 b0, a0 b1) = (-1.5, `0xcc8f0d18`, `0x4dbebc20`), lane 2 becoming `0x7f800001`, +inf and 0. Over a
+    matrix whose rows and columns are permutations of (1e8, 1, -1e8), `vmmul.t`, `vtfm3.t` and `vhtfm3.t` give 0 in
+    every finite output in every order; over (2^24, 1; 1, 2^24), `vmmul.p`, `vtfm2.p` and `vhtfm2.p` give
+    `0x4b800000`. A NaN source gives `0x7f800001` only in the outputs whose terms include it, an infinite source the
+    infinity with the product's sign, and a denormal source a zero term (`vtfm3.t` with (`0x00000001`, 1, 1) gives
+    (`0xccbebc20`, 0, `0x4cbebc20`)). `vmscl.p`/`.t` multiply each element by S010 = `0x3eaaaaab` (2^24 gives
+    `0x4aaaaaab`, 1e8 `0x4bfe502b`); a NaN scalar gives `0x7f800001` with the XOR of the signs, an infinite one
+    infinities of the element's sign, a denormal one zeros with the XOR sign. `vmmov.p`/`.t` copy `0x7fc00011` and
+    `0x00000001` bit for bit.
+  - *Constant forms and `vidt` (`PSP-VFPU-WIDEROPS-001`).* `vmidt`, `vmzero` and `vmone` at `.p`/`.t` write the
+    2x2 or 3x3 identity, zeros and ones, `vzero.t` and `vone.t` write lanes 0-2, and every word outside the width
+    keeps the sentinel. `vidt.q` writes 1.0 to lane (vd & 3) and 0 to the other lanes of C200, C210, C220, C230 and
+    R200-R203; `vidt.p` writes 1.0 to lane (vd & 1) and 0 to the other in C200, C202, C210, C212, C220, C222, C230,
+    C232, R200-R203 and R220-R223 (C210, C212, C230, C232, R201, R203, R221 and R223 give (0, 1); the others
+    (1, 0)).
+  - *`vcst` (`PSP-VFPU-CONSTANTS-001`).* `vcst.s` (`0xd0600008` | index << 16) and `vcst.q` (`0xd0608088` |
+    index << 16) write the same word to lane 0 and to all four lanes, and the first word past the written lanes
+    keeps the sentinel `0x7a5a5a5a`. Indices 0-19: `0x00000000`, `0x7f7fffff`, `0x3fb504f3`, `0x3f3504f3`,
+    `0x3f906ebb`, `0x3f22f983`, `0x3ea2f983`, `0x3f490fdb`, `0x3fc90fdb`, `0x40490fdb`, `0x402df854`,
+    `0x3fb8aa3b`, `0x3ede5bd9`, `0x3f317218`, `0x40135d8e`, `0x40c90fdb`, `0x3f060a92`, `0x3e9a209b`,
+    `0x40549a78`, `0x3f5db3d7`. The reserved indices 20-31 wrote `0x00000000` to every written lane, and none
+    faulted.
+
 - **PSP-3000 single-case run of `hle-self-stop-unload` (2026-11-08)**: system software 6.6.0 as reported by
   `pspver`, operator-declared model PSP-3000, XMB context, one launch on its own boot (boot 165) at `935f225d`,
   harness verdict ok, 6 records, all PASS, no exception, no hang. Case 167 is in
@@ -3572,10 +3672,10 @@ not expected PSP values.
 | `vfpu-basic-arith` | `PSP-VFPU-BASICARITH-001` | `MEASURED` (2026-11-08, PSP-3000, boot 166, `187681f0`; 359 records) | #326: vadd/vsub/vmul/vmin/vmax .s-.q, vscl, vdiv.s, vmov/vabs/vneg, vzero/vone/vidt over 20 operand classes. |
 | `vfpu-wide-dot-matrix` | `PSP-VFPU-WIDEDOT-001` | `MEASURED` (2026-11-09, PSP-3000, boot 168, `b2271c93`; 367 records) | #326: vdot, vhdp, vcrsp, vqmul, vtfm, vhtfm, vmmul, vmscl, vmzero/vmidt/vmone/vmmov and vrot over one special lane at a time and order-sensitive four-term sums. |
 | `vfpu-mfv-mtv` | `PSP-VFPU-MFVMTV-001` | `MEASURED` (2026-11-09, PSP-3000, boot 167, `1301371e`; 5 records) | #326 mtv.s/mfv.s word round trip through S000 and S733 over 17 words (zeros, denormals, NaNs, infinities, patterns); every word came back bit for bit. |
-| `vfpu-constants` | `PSP-VFPU-CONSTANTS-001` | `NOT_RUN` | Built #326 vcst.s/vcst.q for constant indices 0-31 over a sentinel background (reserved indices 20-31 run last, POWER RISK); no hardware result is claimed. |
+| `vfpu-constants` | `PSP-VFPU-CONSTANTS-001` | `MEASURED` (2026-11-10, PSP-3000, boot 178, `9426722a`; 9 records) | #326 vcst.s/vcst.q for constant indices 0-31 over a sentinel background (reserved indices 20-31 run last); indices 1-19 are the named float32 constants (index 4 is `0x3f906ebb`), indices 0 and 20-31 write +0, and no index faulted. |
 | `vfpu-round-sep` | `PSP-VFPU-ROUNDSEP-001` | `MEASURED` (2026-11-09, PSP-3000, boot 169, `f50333e8`; 15 records) | #326: vdot.q, vmscl.q, vmul.s, vadd.s and vsub.s over operands whose exact result lies between two float32 values, separating round-to-nearest-even from truncation. |
-| `vfpu-prefix-state` | `PSP-VFPU-PREFIX-001` | `NOT_RUN` (built as case 182; no hardware run) | #326: non-identity vpfxs/vpfxt/vpfxd on vadd/vmul/vdot/vmin/vmov/vneg/vzero/vidt .q over NaN, inf, denormal and -0 lanes; prefix lifetime across vnop, vsync, vflush, a branch, add.s, mtv, mfv, lv.q, vpfxt and mfvc with the raw prefix control words; vfim.s/viim.s under a pending vpfxd. |
-| `vfpu-wider-ops` | `PSP-VFPU-WIDEROPS-001` | `NOT_RUN` (built as case 183; no hardware run) | #326: vdiv.p/.t/.q, vsin/vcos/vrcp .p/.t/.q, vrsq.q, vsqrt.q, vocp.s/.q, the .p/.t dot and matrix forms over finite order-sensitive, NaN, inf and denormal cells, and vidt.q/.p into every column and row register of one matrix. |
+| `vfpu-prefix-state` | `PSP-VFPU-PREFIX-001` | `MEASURED` (2026-11-10, PSP-3000, boot 175, `48cea955`; 199 records) | #326: non-identity vpfxs/vpfxt/vpfxd on vadd/vmul/vdot/vmin/vmov/vneg/vzero/vidt .q over NaN, inf, denormal and -0 lanes; prefix lifetime across vnop, vsync, vflush, a branch, add.s, mtv, mfv, lv.q, vpfxt and mfvc with the raw prefix control words; vfim.s/viim.s under a pending vpfxd. |
+| `vfpu-wider-ops` | `PSP-VFPU-WIDEROPS-001` | `MEASURED` (2026-11-10, PSP-3000, boot 176, `9426722a`; 223 records) | #326: vdiv.p/.t/.q, vsin/vcos/vrcp .p/.t/.q, vrsq.q, vsqrt.q, vocp.s/.q, the .p/.t dot and matrix forms over finite order-sensitive, NaN, inf and denormal cells, and vidt.q/.p into every column and row register of one matrix. |
 | `vfpu-reserved-widths` | `PSP-VFPU-RESERVED-001` | `NOT_RUN` (built as case 184; no hardware run; POWER RISK: reserved encodings; owner present) | #326: hand-encoded vus2i.t/.q and vs2i.t/.q words (refused by psp-as) over a sentinel image, M200 and C000 recorded. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (not registered; captured twice, PSP-3000, firmware 6.6.1: 2026-11-07 boot 145 and 2026-11-08 boot 152; rerun required; the probe prints `test_id=PSP-MPEG-001` and the cell is registered here as `PSP-MPEG-YCBCR-001`) | Each mode begins from a fresh stream, ringbuffer and MPEG context. The capture measured mode 2 (query 128, a 128-byte header after a decode, a CSC of zero pixels), the CSC y and h refusals and the 16-bit CSC output (#302). Mode 3's second decode never returned on boot 145 and again on boot 152 (the first returned 0 and left a 16-byte header over a black 4:2:0 frame); the probe now bounds each mode 2 and 3 decode with a 3 s helper thread and stops making MPEG calls after a block. |
 
