@@ -23,7 +23,7 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 | Pull request, quick run: a Draft, and, while `NK_CI_TIERS` is `on`, every pull request from a branch of this repository that is not a `batch/`, `carry/` or `desk/` branch and has no `ci-full-matrix` label | the quick checks: classification, hygiene/security with its Markdown step, the public export audit, `Generated files and repository lints` and `CI quick checks` (see [Quick and full checks](#quick-and-full-checks)) | Python tooling, native/translation, the GCC 16 canary, the Android launcher build, Windows, the profile-zero fixture build and `CI required`, whatever the changed paths |
 | Pull request, full run, docs-only | classification, hygiene/security with its Markdown step, CI required | Python/native, Windows |
 | Pull request, full run, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
-| Pull request, full run, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over three shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
+| Pull request, full run, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over four shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
 | Pull request, full run, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
 | Pull request, full run, installer inputs (`assets/installer/**`, the Inno lock, the installer, install-stager and runtime-DLL-stager tools and tests, `LICENSE`) | classification, hygiene/security, Windows (all three groups; the smoke group also stages the package), Windows installer, CI required; Python tooling when a Python tool changes | native/translation unless another changed path routes it |
 | Pull request, full run, only `tools/test_*.py` modules that no native or Windows gate runs | classification, hygiene/security, Python tooling, CI required | native/translation, Windows (see [Tests-only changes](#tests-only-changes)) |
@@ -55,8 +55,9 @@ of 2026-11-02, whole history, hosted runners):
 GitHub's free plan runs about 20 jobs at once for this repository. A full `CI` run (a workflow
 change, a manual run, the nightly schedule, a merge group) used to need 23 jobs, so a second
 pull request's run waited for runners while the first ran. The same checks then ran in 14
-jobs; the Android launcher build (`android_build`), added later, makes 15, and installer and
-Windows-runtime changes add one path-gated Windows installer job. Nothing was dropped and no
+jobs; the Android launcher build (`android_build`), added later, makes 15, a fourth Python
+shard makes 16, and installer and Windows-runtime changes add one path-gated Windows installer
+job. Nothing was dropped and no
 command changed; jobs were merged and their steps run one after another. Three things differ in
 when or how a step runs, and none of them skips a step
 where it ran before:
@@ -78,7 +79,7 @@ The jobs:
 | `public_export` | 2 jobs: `public_export` 0.2 min, `profile_zero_fixture` 0.4 min | 1 job, about 0.7 min: the export audit, then the profile-zero fixture build |
 | `linux_gcc16` | 1 job, 3.3 min | unchanged (not required, a container job on a hosted runner) |
 | `native_tools` | 3 parts, 7.9-9.2 min | unchanged |
-| `python_tools` | 6 shards, 4.2-18.2 min | 3 shards, about 16.5 min each |
+| `python_tools` | 6 shards, 4.2-18.2 min | 4 shards: `test_production_smoke` alone, about 16 min, and three of about 14 min |
 | `windows_runtime` | 6 parts, 4.2-9.7 min (4.5-12.0 in run 42258417250) | 3 groups of parts, about 10-13 min each |
 | `windows_installer` | — | 1 `windows-2025` job on installer and Windows-runtime routes; reuses the Windows player package artifact |
 | `android_build` ("Android launcher build") | not present | 1 job, added later |
@@ -99,9 +100,9 @@ The jobs:
   artifact. Their `python3` is now the job's CPython 3.15.2 rather than the runner image's.
   The Python, native and Windows jobs wait for this job as before; native now also waits for
   the fixture build, about 25 seconds.
-- **Python.** Three shards over the full suite, and three over the Makefile-coupled subset
+- **Python.** Four shards over the full suite, and four over the Makefile-coupled subset
   (see [Python test sharding](#python-test-sharding)). `test_production_smoke` alone takes
-  about 12.5 minutes, so six shards were never shorter than that either.
+  about 16 minutes and has a shard to itself, so a fifth shard would not shorten the job.
 - **Windows.** The six parts keep their steps and conditions (`contains(matrix.parts, '<part>')`)
   and run in three matrix groups: `smoke-routes` (smoke, routes), `ladder-fuzz` (ladder,
   fuzz-0, fuzz-1) and `selftests`. A group runs the shared setup and the runtime-object
@@ -959,14 +960,18 @@ weights when the suite's cost moves materially, or when the shards' step times d
 apart. The shard step runs `unittest -v`, and every hosted log line carries a
 timestamp, so each module's time on the hosted runner, under coverage, is the time
 from its first test line to the next module's first test line (a shard's last module
-ends at unittest's `Ran N tests` line). The current weights come from run 42270920833
-(2026-11-06): its six shards' test steps took 17.2, 5.0, 5.4, 8.1, 7.9 and 3.5 minutes,
-because the old weights put `test_production_smoke` at 197 seconds where it now takes
-about 748. The suite now runs on three shards, which plan to about 943 seconds (15.7
-minutes) each by the refreshed weights, and the Makefile-coupled subset on three as
-well (about 15.3 minutes each); see [Jobs per run](#jobs-per-run). Each shard does about
-twice the work a six-shard step did, so the job limit doubled to 60 minutes: on the busy
-self-hosted pool a step that planned to about 7 minutes took 17-20 minutes on 2026-11-01.
+ends at unittest's `Ran N tests` line). The current weights are the per-module medians
+of five landing-batch runs on 2026-11-10 (runs 42735543679, 42740278379, 42752233270,
+42756075084 and 42806248089), because one hosted runner can be half again as slow as
+another: `test_production_smoke` took 10 to 17.5 minutes across them. Those runs used three
+shards planned from run 42270920833's weights (2026-11-06); every shard planned to 945
+seconds, but the suite had grown to about 58 minutes, and the slowest shard took 21 to 24
+minutes. The suite now runs on four shards: `test_production_smoke` alone, about 16
+minutes, and three of about 14 minutes each, for the full suite and the Makefile-coupled
+subset alike. That is the fewest shards at which the heaviest module sets the job, the rule
+`tools/test_ci_test_shards.py` holds both counts to; see [Jobs per run](#jobs-per-run).
+The job limit stays at 60 minutes: on the busy self-hosted pool a step that planned to
+about 7 minutes took 17-20 minutes on 2026-11-01.
 `python tools/ci_test_shards.py --check` rejects weights for modules that no longer
 exist, and `--plan` prints the resulting partition with per-shard estimates.
 
@@ -1145,8 +1150,8 @@ to prevent that, and `tools/test_ci_paths.py` asserts each one:
   revision cannot provide. A recipe-only edit still runs the native and Windows
   gates, which execute recipes. Python runs only the modules whose transitive tool
   closure reads the `Makefile` or runs `make` (`ci_test_shards.py --select
-  makefile`), on three shards; any other Python-routing change in the same diff
-  restores the full suite, also on three. That closure covers most of the suite's
+  makefile`), on four shards; any other Python-routing change in the same diff
+  restores the full suite, also on four. That closure covers most of the suite's
   weight, because most heavy modules build through `make`, so the saving is the
   unrelated modules rather than the Python job as a whole or a runner.
 - **The published surface is derived, not listed.** `_is_public_surface` asks the
@@ -1778,7 +1783,7 @@ repository guarantee.
 ## Self-hosted Linux runners
 
 GitHub's free plan runs about 20 jobs at once for this repository, and one full CI run
-needs 14 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
+needs 16 of them ([Jobs per run](#jobs-per-run)), so a second run can wait for runners. To keep landings moving, the
 maintainer runs a small pool of self-hosted Linux runners, labelled `nk-wsl`, on their
 own PC. Contributors need nothing from it: every run they can start uses GitHub's
 hosted images, exactly as before.
