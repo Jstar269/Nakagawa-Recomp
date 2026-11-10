@@ -104,7 +104,27 @@ contain exactly one job of that name, completed with ``success``.
     the pull request is a Draft, or its draft state cannot be read. CI runs only
     the quick checks on a Draft (``tools/ci_paths.py``), so its head is never
     judged green, and no Draft can join a landing batch. Marking it Ready starts
-    the full CI run, whose completion judges the head again.
+    a CI run, whose completion judges the head again.
+
+(d) Tiers (docs/CI.md, "Quick and full checks"). CI runs a pull request light
+(the quick checks) or full. On a light run ``CI required`` does not run: GitHub
+lists it as ``skipped``, and the run's own aggregate is the ``CI quick checks``
+job. Rule (b) is unchanged and is the whole guarantee: only a ``CI required``
+job that concluded ``success`` can make the verdict ``success``, so a head whose
+newest CI run is light never is. What a light run changes is the report:
+
+``LIGHT_CI_GREEN``
+    not a failure and not ``success``: the newest CI run at this head skipped
+    ``CI required`` and its one ``CI quick checks`` job succeeded. The state is
+    ``pending`` and the description starts with this code, so the landing desk
+    can tell a head that is ready for a batch from one whose checks are still
+    running. The batch's own head gets the full checks and its own verdict.
+
+Every other shape of a ``CI required`` that did not succeed stays ``JOB_FAILED``,
+as before, naming ``CI quick checks`` when that is the job that failed. Nothing
+here reads a label, a branch name or the tier switch: which heads CI runs full
+is a cost decision the classifier makes (``tools/ci_paths.py``), and this tool
+judges only what ran.
 
 A run that is still going gives ``pending`` rather than a finding. Any fatal
 finding makes the verdict ``failure``; ``pending`` holds only when nothing is
@@ -136,6 +156,15 @@ import urllib.request
 
 VERDICT_CONTEXT = "Trusted CI verdict"
 VERDICT_WORKFLOW = ".github/workflows/ci-trust-verdict.yml"
+# The aggregate of a full CI run, and of a light one (.github/workflows/ci.yml). Only the first can make a
+# verdict success; the second is read to report LIGHT_CI_GREEN (rule (d) above).
+FULL_AGGREGATE = "CI required"
+QUICK_AGGREGATE = "CI quick checks"
+LIGHT_CI_GREEN = "LIGHT_CI_GREEN"
+# What a light-green head waits for, as the pending list names it.
+LIGHT_PENDING = "the full checks (landing batch)"
+LIGHT_DESCRIPTION = (f"{LIGHT_CI_GREEN}: quick checks passed at this head; the full checks run when it is "
+                     "batched for landing")
 APPROVAL_LABEL = "ci-change-approved"
 GITHUB_ACTIONS_APP_ID = 15368
 WRITE_PERMISSIONS = frozenset({"admin", "maintain", "write"})
@@ -210,6 +239,9 @@ class Verdict:
         """The status description: at most 140 characters, GitHub's limit."""
         if self.state == "success":
             text = "All intended CI jobs passed at this exact head from trusted definitions"
+        elif self.state == "pending" and self.pending == [LIGHT_PENDING]:
+            # Nothing else is outstanding: the head is ready for a landing batch.
+            text = LIGHT_DESCRIPTION
         elif self.state == "pending":
             text = "Waiting for: " + ", ".join(self.pending)
         else:
@@ -401,8 +433,8 @@ def _check_pull_request(snapshot: dict) -> list[Finding]:
     if pr["draft"] is True:
         findings.append(Finding(
             "DRAFT_LIGHT_CI", f"#{pr['number']}",
-            "the pull request is a Draft, so CI ran only the quick checks; mark it Ready for review to run the "
-            "full checks",
+            "the pull request is a Draft, so CI ran only the quick checks and it cannot be batched for landing; "
+            "mark it Ready for review when it is finished",
         ))
     elif pr["draft"] is not False:
         findings.append(Finding(
@@ -534,10 +566,42 @@ def _check_producer(snapshot: dict, producer: Producer, pending: list[str]) -> l
     elif job["status"] != "completed":
         pending.append(producer.context)
     elif job["conclusion"] != "success":
-        findings.append(Finding(
-            "JOB_FAILED", producer.context, f"job {job['id']} concluded {job['conclusion']!r}",
-        ))
+        findings += _not_success(snapshot, producer, latest, job, pending)
     return findings
+
+
+def _not_success(snapshot: dict, producer: Producer, run: dict, job: dict, pending: list[str]) -> list[Finding]:
+    """The findings for an intended job that completed without ``success``. Never empty-handed: it returns a
+    fatal finding or adds to ``pending``, so the caller's verdict cannot become ``success`` through here.
+
+    One shape is not a failure (rule (d)): ``CI required`` skipped, in a run whose single ``CI quick checks``
+    job succeeded at this head. That is a light run with green quick checks, reported as ``LIGHT_CI_GREEN``.
+    The quick job is read from this run's own job list, so a job of that name in another workflow or run
+    cannot stand in for it. Every other shape is ``JOB_FAILED``.
+    """
+    failed = Finding("JOB_FAILED", producer.context, f"job {job['id']} concluded {job['conclusion']!r}")
+    if producer.context != FULL_AGGREGATE or job["conclusion"] != "skipped":
+        return [failed]
+    quick = [item for item in snapshot["jobs"].get(str(run["id"]), []) if item["name"] == QUICK_AGGREGATE]
+    if len(quick) != 1 or quick[0]["head_sha"] != snapshot["head_sha"]:
+        return [failed]
+    if quick[0]["status"] != "completed":
+        pending.append(QUICK_AGGREGATE)
+        return []
+    if quick[0]["conclusion"] != "success":
+        return [Finding(
+            "JOB_FAILED", QUICK_AGGREGATE,
+            f"job {quick[0]['id']} concluded {quick[0]['conclusion']!r}; {FULL_AGGREGATE!r} did not run "
+            "(a light run)",
+        )]
+    pending.append(LIGHT_PENDING)
+    return [Finding(
+        LIGHT_CI_GREEN, FULL_AGGREGATE,
+        f"run {run['id']} was a light run: {QUICK_AGGREGATE!r} passed and {FULL_AGGREGATE!r} did not run; "
+        "the full checks run on the landing batch, or here when a maintainer adds the ci-full-matrix label "
+        "and re-runs CI",
+        fatal=False,
+    )]
 
 
 def evaluate(snapshot: dict) -> Verdict:
