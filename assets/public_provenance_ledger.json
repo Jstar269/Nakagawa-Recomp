@@ -12624,6 +12624,17 @@
       }
     },
     {
+      "path": "tests/native/ge_patch_tess_selftest.c",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "ge-patch-tess-selftest-2053",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/native/ge_raster_ref_selftest.c",
       "classification": "project_authored_attested",
       "evidence": {

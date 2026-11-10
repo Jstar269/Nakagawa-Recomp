@@ -131,6 +131,7 @@ PUBLIC_TARGETS := \
 	ge-cpu-profile-validate-selftest \
 	ge-tnl-census-selftest \
 	xr-selftest \
+	ge-patch-tess-selftest \
 	ge-flight-overhead \
 	vfpu-tables-selftest \
 	watchpoints-file-selftest \
@@ -339,6 +340,7 @@ HELP_DESCRIPTION_ge-float24-selftest := run the GE float24/row-sum/reciprocal re
 HELP_DESCRIPTION_ge-cpu-profile-validate-selftest := run the GE CPU-profile validator selftest on the production GE object
 HELP_DESCRIPTION_ge-tnl-census-selftest := run the GPU T&L decline census selftest (#318) on the production GE object
 HELP_DESCRIPTION_xr-selftest := run the OpenXR (VR) module selftest (#791) against a fake OpenXR runtime: no headset or loader needed
+HELP_DESCRIPTION_ge-patch-tess-selftest := run the finer Bezier and spline patch selftest on the production GE object (no GPU)
 HELP_DESCRIPTION_ge-flight-overhead := measure the disarmed flight recorder cost on the GE draw path (recorder linked vs absent; no game data)
 HELP_DESCRIPTION_vfpu-tables-selftest := run the VFPU table-loader selftest
 HELP_DESCRIPTION_watchpoints-file-selftest := run the watchpoints-file selftest

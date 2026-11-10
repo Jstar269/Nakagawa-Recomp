@@ -82,6 +82,16 @@ CENSUS_GAP_WORDS: tuple[int, ...] = (
 )
 
 
+# The probe words of the unrecorded vfpu-wide-dot-matrix read, by the name check_vfpu_wide_dot_measured() looks up.
+WIDE_DOT_WORDS: tuple[tuple[str, int], ...] = (
+    ("vdot-p", 0x64810088), ("vdot-q", 0x64818088), ("vhdp-q", 0x66018088),
+    ("vcrsp-t", 0xF2818008), ("vqmul-q", 0xF2818088), ("vtfm-q", 0xF1808488),
+    ("vhtfm-q", 0xF1808408), ("vmmul-q", 0xF0008488), ("vmmul-qt", 0xF000A488),
+    ("vmzero-q", 0xF3868088), ("vmidt-q", 0xF3838088),
+    ("vmone-q", 0xF3878088), ("vmmov-q", 0xF3808488), ("vrot-q", 0xF3A48088),
+)
+
+
 def census_gap_size(word: int) -> int:
     """Vector size 1..4 from bit 7 (low) and bit 15 (high)."""
     return ((word >> 7) & 1 | ((word >> 15) & 1) << 1) + 1
@@ -127,6 +137,13 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
     # PSP read back for the signed-zero and denormal operand set.
     for cond in range(16):
         cases.append((_bin_word(0x1B, 0, 4, cond, 0x00, 0x01), f"vcmp-q-c{cond:02d}-measured", 4))
+
+    # vus2i / vs2i .s and .p (issue #326, probe case vfpu-vus2i, PSP-3000, 2026-11-08):
+    # check_vus2i_vs2i_measured_words() finds them by name and pins both lanes to the words
+    # the PSP returned for twelve source words.
+    for name, word in (("vus2i-s-measured", 0xD03A0008), ("vus2i-p-measured", 0xD03A0088),
+                       ("vs2i-s-measured", 0xD03B0008), ("vs2i-p-measured", 0xD03B0088)):
+        cases.append((word, name, 1 if name.endswith("-s-measured") else 2))
 
     # vrndi.s (issue #326): the PSP-HLE-ISSUES-001 probe word vrndi.s S000, and the same draw
     # into S323 (vd=0x6E) so the destination decode is exercised off lane 0.
@@ -191,6 +208,14 @@ def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
                            ("vone", 7)):
         for size, suffix in ((1, "s"), (2, "p"), (4, "q")):
             cases.append((_vv2_word(optype, size, 0x00, 0x04), f"arith-{opname}-{suffix}", size))
+
+    # Dot, cross, quaternion and matrix forms (issue #326, probe case vfpu-wide-dot-matrix,
+    # unrecorded PSP read, PSP-3000, 2026-11-08): check_vfpu_wide_dot_measured() finds each
+    # word by name and runs the console's cells through both lanes. The registers are the
+    # probe's: vectors at columns 0 and 1 of matrix 0, the matrix operand at matrix 1, the
+    # destination at matrix 2.
+    for name, word in WIDE_DOT_WORDS:
+        cases.append((word, f"wide-{name}", census_gap_size(word)))
 
     # Census-gap forms (issue #326): supported VFPU3 compare/min/max and VFPU6 matrix forms
     # that the synthetic fuzz corpus (minimal registers) does not reach. Each is one
