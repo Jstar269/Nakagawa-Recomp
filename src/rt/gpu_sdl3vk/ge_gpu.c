@@ -223,6 +223,10 @@ enum { F_TEX = 1, F_RGBA = 2, F_DBL = 4, F_FOG = 8, F_PERSP = 16, F_CLEAR = 32,
  * value + 1; 0 for every guest texture and render target, so the shader samples exactly as
  * before. Bit 16 is left for the 32-bit colour chain's flag (#2050). */
 #define F_TSCALE_SHIFT 17
+/* bit 20 (cfg[0] bit 28): the GE color test, bits 21-22 its function; fixa[3] and fixb[3] carry
+ * the masked reference and the mask (psp.frag). */
+#define F_CTEST (1 << 20)
+#define F_CTEST_FUNC_SHIFT 21
 
 typedef struct {
     uint8_t blend_on, srcf, dstf, eq;      /* VkBlendFactor / VkBlendOp values */
@@ -969,7 +973,8 @@ static void to_layout(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspec
  * of the interlock path (#2109): 1 merges every channel from the loaded destination (the store has
  * no effect), 2 swaps the source and destination blend factors of the RMW batches, 3 lets an op
  * holding a batch the rmwzfb rule refuses take the interlock, 4 gives every colour target
- * STORAGE_BIT on the snapshot path too, 5 turns the depth test of the RMW pipelines off. */
+ * STORAGE_BIT on the snapshot path too, 5 turns the depth test of the RMW pipelines off, 6 drops
+ * the rmwzfb rule's color-test line, 7 its own-target line. */
 #ifndef SR_GPU_DSTREAD_MUTANT
 #define SR_GPU_DSTREAD_MUTANT 0
 #endif
@@ -2212,10 +2217,14 @@ static int batch_reads_dst(const Batch *b) {
 
 /* The rmwzfb rule (#2109): the RMW variant tests depth before the shader runs, so a destination-
  * reading batch whose shader may kill a fragment that the depth test already wrote cannot take
- * it: with depth writes on, the alpha test (anything but ALWAYS), the transform-mode depth range
+ * it: with depth writes on, the alpha test (anything but ALWAYS), the color test (F_CTEST, set
+ * for every function but ALWAYS), the transform-mode depth range
  * when it is narrower than 0-65535, or a stencil-fail KEEP that can run. A batch that also blends
  * in fixed function (a stencil state with a native blend) has no colour attachment to blend into
- * there. An op holding such a batch keeps the snapshot path. */
+ * there. A batch that textures from its own target (tsnap) samples the destination copy, and
+ * submit_list takes that copy afresh before a destination-reading batch whose box meets what the
+ * op has drawn; an interlock op takes no copy, so its texels would be older than the primitives
+ * before it. An op holding such a batch keeps the snapshot path. */
 static int rmw_refuses(const Batch *b) {
 #if SR_GPU_DSTREAD_MUTANT == 3
     (void)b;
@@ -2223,8 +2232,14 @@ static int rmw_refuses(const Batch *b) {
 #else
     const uint32_t flags = (uint32_t)b->pc.cfg[0] >> 8;
     if (b->key.blend_on) return 1;
+#if SR_GPU_DSTREAD_MUTANT != 7
+    if (b->tsnap) return 1;
+#endif
     if (!b->key.zwrite) return 0;
     if (((uint32_t)b->pc.cfg[1] & 7u) != 1u) return 1;
+#if SR_GPU_DSTREAD_MUTANT != 6
+    if (flags & F_CTEST) return 1;
+#endif
     if ((flags & F_PERSP) && (b->pc.cfg[2] > 0 || b->pc.cfg[3] < 65535)) return 1;
     if ((flags & F_STENCIL) && ((uint32_t)b->pc.bl[3] & 7u) == 0u && ((uint32_t)b->pc.bl[2] & 7u) != 1u)
         return 1;
@@ -4678,12 +4693,21 @@ static void tex_xs_collect(void) {
     }
 }
 
+/* Whether the GE color test decides a draw's pixels: as ge.c shade() runs it, never in clear
+ * mode, and ALWAYS tests nothing. */
+static int color_test_active(const GeState *g) {
+    return g->color_test_enable && !g->clear && (g->color_test & 3u) != 1u;
+}
+
 /* The set a draw binds for entry `e`: its scaled copy while that is current and allowed
- * (tex_xs_bindable, tex_xs_eligible), else tex_entry_set's. s_tex_bound_scale reports which. */
+ * (tex_xs_bindable, tex_xs_eligible), else tex_entry_set's. s_tex_bound_scale reports which.
+ * A color-test draw binds the guest-resolution set: ge.c keys on the guest's texels, and an xBRZ
+ * or replacement copy's texels are other colours, with the key blended into their edges. */
 static VkDescriptorSet tex_bind_set(TexEnt *e, uint32_t levels) {
     s_tex_bound_scale = 1;
     s_tex_cur = e;
-    if (!xs_enabled() || !tex_xs_bindable(e) || !tex_xs_eligible(e, levels)) return tex_entry_set(e);
+    if (!xs_enabled() || color_test_active(s_ge) || !tex_xs_bindable(e) || !tex_xs_eligible(e, levels))
+        return tex_entry_set(e);
     VkDescriptorSet set = e->xs.set;
     if (s_ace_af && (tex_filter_variant(s_ge->tex_filter) & 2u) && !(s_ge->vtype & (1u << 23))) {
         /* Ace Mode's texture filtering applies to the copy as tex_entry_set applies it. */
@@ -5244,6 +5268,15 @@ static void build_state(int persp, int sprite, Batch *b) {
     }
     if (sfix != SFIX_NONE) s_replay_stats.stencil_fixed++;
 
+    /* Color test (ge.c color_test): off in clear mode, as shade() skips it there, and for the
+     * function that always passes. The reference and mask are whole numbers below 2^24, so the
+     * floats hold them exactly. */
+    if (!clear && g->color_test_enable && (g->color_test & 3u) != 1u) {
+        const uint32_t cmask = g->color_test_mask & 0x00FFFFFFu;
+        flags |= F_CTEST | (int)((g->color_test & 3u) << F_CTEST_FUNC_SHIFT);
+        b->pc.fixa[3] = (float)(g->color_ref & cmask);
+        b->pc.fixb[3] = (float)cmask;
+    }
     b->pc.cfg[1] = (int32_t)(((!clear && g->atest_enable) ? (g->atest & 0xFFFFFFu) : 1u /* ALWAYS */) |
                              (lodcfg << 24));
     b->pc.cfg[2] = (int32_t)g->minz;
@@ -5367,6 +5400,7 @@ typedef struct {
     uint32_t tex_mip_addr[7], tex_mip_bufw[7]; uint8_t tex_mip_wlog2[7], tex_mip_hlog2[7];
     uint32_t clut_fmt, clut_gen;
     int atest_enable; uint32_t atest;
+    int color_test_enable; uint32_t color_test, color_ref, color_test_mask;
     int stencil_enable; uint32_t stencil_test, stencil_op;
     int fog_enable; uint32_t fog_color;
     uint32_t fbfmt;
@@ -5402,6 +5436,8 @@ static void snap_fill(StateSnap *o, int persp, int sprite) {
     memcpy(o->tex_mip_hlog2, g->tex_mip_hlog2, sizeof(o->tex_mip_hlog2));
     o->clut_fmt = g->clut_fmt; o->clut_gen = g->clut_gen;
     o->atest_enable = g->atest_enable; o->atest = g->atest;
+    o->color_test_enable = g->color_test_enable; o->color_test = g->color_test;
+    o->color_ref = g->color_ref; o->color_test_mask = g->color_test_mask;
     o->stencil_enable = g->stencil_enable;
     o->stencil_test = g->stencil_test; o->stencil_op = g->stencil_op;
     o->fog_enable = g->fog_enable; o->fog_color = g->fog_color;
@@ -5557,8 +5593,9 @@ static int native_rgb_mask_exact(void) {
  * blending against a destination snapshot everywhere else (including post-blend 16-bit
  * quantization and post-blend dither, which run in the shader in hardware order — see
  * build_state). Only states the batch model cannot express at all remain on ge.c, the
- * behavioral arbiter: per-bit write masks, stencil, color test, and logic ops (all of
- * which read-modify-write destination bits per pixel). */
+ * behavioral arbiter: per-bit write masks, the stencil states below, and logic ops (all of
+ * which read-modify-write destination bits per pixel). The color test reads no destination:
+ * psp.frag runs it (F_CTEST). */
 /* The shader runs the stencil test before the pipeline depth test, so a stencil-fail
  * pixel the depth test would also reject, or a depth-fail pixel, can only be dropped: the
  * ops for them must be KEEP while the depth test is on. A test that always passes never
@@ -5573,7 +5610,6 @@ static int stencil_gpu_supported(void) {
 
 static int gpu_state_unsupported_reason(void) {
     if (!stencil_gpu_supported()) return GEGPU_FALLBACK_STENCIL;
-    if (s_ge->color_test_enable) return GEGPU_FALLBACK_COLOR_TEST;
     if (s_ge->logic_op_enable) return GEGPU_FALLBACK_LOGIC_OP;
     if (!s_ge->clear&&!native_rgb_mask_exact()) return GEGPU_FALLBACK_WRITE_MASK;
     /* Framebuffer placements the persistent-target model cannot represent: color
@@ -5583,6 +5619,26 @@ static int gpu_state_unsupported_reason(void) {
     /* Mip levels one Vulkan mip chain cannot hold (#1373). */
     if (!tex_mip_chain_supported()) return GEGPU_FALLBACK_MIPS;
     return -1;
+}
+
+/* psp.frag runs the color test on the colour it stores, which equals ge.c's only where that colour
+ * is not computed in floating point: a flat or per-pixel colour, no interpolated fog factor, and
+ * either no texture or a nearest-sampled texel passed through unchanged (REPLACE, or DECAL without
+ * texture alpha) with no mip levels. Elsewhere (a Gouraud-interpolated triangle colour, fog in
+ * transform mode, a modulated, blended or added texel, or a filtered one) the two can differ by 1,
+ * and the colour key turns that into a pixel kept or dropped, so such draws stay on ge.c.
+ * `interp`: the primitive interpolates its vertex colours (triangles); `persp`: transform mode. */
+static int color_test_colour_inexact(int interp, int persp) {
+    const GeState *g = s_ge;
+    if (!color_test_active(g)) return 0;
+    if (interp && g->shade_gouraud) return 1;
+    if (persp && g->fog_enable) return 1;
+    if (g->tex_enable && g->tex_addr) {
+        const uint32_t tf = g->tex_func & 7u;
+        if (ge_tex_mip_active(g) || tex_filter_variant(g->tex_filter) != 0u) return 1;
+        if (!(tf == 3u || (tf == 1u && !(g->tex_func & 0x100u)))) return 1;
+    }
+    return 0;
 }
 
 /* `forced` is the reason a primitive kind always falls back (lines, points), or -1 for one
@@ -5809,7 +5865,8 @@ static void wing_drop(int cause) {
  * scissor's and the scissor's rows. A state this backend would hand to the software
  * rasterizer is dropped here instead, with no flush or readback: the wings lack that draw. */
 static int wing_state(int persp, int sprite, Batch *b) {
-    const int reason = gpu_state_unsupported_reason();
+    const int reason = color_test_colour_inexact(!sprite, persp) ? GEGPU_FALLBACK_COLOR_TEST
+                     : gpu_state_unsupported_reason();
     if (reason >= 0) { wing_drop(reason); return 0; }
     state_get(persp, sprite, b);
     if (!begin_target()) { wing_drop(-1); return 0; }
@@ -5838,7 +5895,8 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
         b = s_tri_state.batch;
     } else {
         s_tri_state.valid = 0;
-        if (software_fallback_begin(-1)) return cpu_profile_hook_leave(0);
+        if (software_fallback_begin(color_test_colour_inexact(1, persp) ? GEGPU_FALLBACK_COLOR_TEST : -1))
+            return cpu_profile_hook_leave(0);
         static int nocull = -1;
         if (nocull < 0) nocull = getenv("SR_NOCULL") ? 1 : 0;
         state_get(persp, 0, &b);
@@ -5938,7 +5996,8 @@ static int hook_tnl_prim(const GeTnlPrim *p) {
         return 0;
     }
     cpu_profile_hook_enter();
-    if (software_fallback_begin(-1)) return cpu_profile_hook_leave(0);
+    if (software_fallback_begin(color_test_colour_inexact(1, 1) ? GEGPU_FALLBACK_COLOR_TEST : -1))
+        return cpu_profile_hook_leave(0);
     static int nocull = -1;
     if (nocull < 0) nocull = getenv("SR_NOCULL") ? 1 : 0;
     Batch b;
@@ -5989,7 +6048,8 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
     if (__builtin_expect(s_wing_dst != NULL, 0)) {
         if (!wing_state(persp, 1, &b)) return cpu_profile_hook_leave(1);
     } else {
-        if (software_fallback_begin(-1)) return cpu_profile_hook_leave(0);
+        if (software_fallback_begin(color_test_colour_inexact(0, persp) ? GEGPU_FALLBACK_COLOR_TEST : -1))
+            return cpu_profile_hook_leave(0);
         state_get(persp, 1, &b);
         if (!begin_target()) return cpu_profile_hook_leave(1);
     }
@@ -6023,9 +6083,10 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
         }
     }
     /* Sharp game text (glyph_recon.h): a sprite that maps one texel to one pixel over a page of
-     * anti-aliased coverage draws from the rebuilt glyph image when its tile is ready. */
+     * anti-aliased coverage draws from the rebuilt glyph image when its tile is ready. A
+     * color-test draw keeps the guest's texels, which the test keys on (tex_bind_set). */
     int glyph_bound = 0;
-    if (s_glyphs && (((uint32_t)b.pc.cfg[0] >> 8) & F_TEX) && !b.tsrc && !b.tsnap && s_tex_cur &&
+    if (s_glyphs && !color_test_active(s_ge) && (((uint32_t)b.pc.cfg[0] >> 8) & F_TEX) && !b.tsrc && !b.tsnap && s_tex_cur &&
         b.dset == s_tex_cur->set && !(((uint32_t)b.pc.cfg[0] >> 8) & (F_LODFRAG | F_CLEAR)) &&
         nk_smart2d_sprite(xa, ya, xb, yb, ul, vt, ur, vbm))
         glyph_bound = glyph_apply(&b, s_tex_cur, ul, ur, vt, vbm);
@@ -6063,39 +6124,98 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
     return cpu_profile_hook_leave(1);
 }
 
-/* Lines as 1-pixel-wide quads (the software DDA's pixel set, approximately). */
+/* Lines draw ge.c draw_line_vtx's pixels exactly: its DDA runs here, and each pixel becomes a
+ * one-pixel quad carrying the values ge.c gives that pixel, constant across it (a run of pixels
+ * on one row or column with equal values shares one quad). The PSP steps the major axis one
+ * pixel at a time from the first endpoint's pixel, leaves the last endpoint's pixel out, and
+ * takes the minor coordinate at the centre of each major-axis pixel, truncated
+ * (PSP-GE-RASTER-001 e-line0..2); colour, depth and fog are interpolated at that centre with the
+ * parameter clamped to the segment and truncated; a pixel outside the depth range is dropped.
+ * psp.frag then runs the same fragment stage as for any primitive. A textured line stays on
+ * ge.c: its filter and level come from the line's footprint, and nearest sampling there
+ * truncates the coordinate where psp.frag first rounds it to 1/4096 of a texel. */
+static float line_clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
+
+typedef struct LinePx { int x, y, r, g, b, a; float z, fog; } LinePx;
+
+static void line_put_run(const LinePx *p, int xmajor, int len, int dir) {
+    float x0 = (float)p->x, y0 = (float)p->y, x1 = x0 + 1.0f, y1 = y0 + 1.0f;
+    if (xmajor) { if (dir < 0) x0 -= (float)(len - 1); else x1 += (float)(len - 1); }
+    else        { if (dir < 0) y0 -= (float)(len - 1); else y1 += (float)(len - 1); }
+    put_vert(x0, y0, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+    put_vert(x1, y0, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+    put_vert(x1, y1, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+    put_vert(x0, y0, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+    put_vert(x1, y1, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+    put_vert(x0, y1, p->z, 1.0f, 0.0f, 0.0f, p->fog, p->r, p->g, p->b, p->a);
+}
+
+static int line_same(const LinePx *a, const LinePx *b) {
+    return a->r == b->r && a->g == b->g && a->b == b->b && a->a == b->a && a->z == b->z &&
+           a->fog == b->fog;
+}
+
 static int hook_line(const GeVtx *A, const GeVtx *B, int persp) {
     if (!s_ready) return 0;
     cpu_profile_hook_enter();
     { const GeVtx *vv[2] = { A, B };
       if (!hook_finite(vv, 2)) return cpu_profile_hook_leave(1); }
-    if (software_fallback_begin(GEGPU_FALLBACK_LINE)) return cpu_profile_hook_leave(0);
+    const int textured = s_ge->tex_enable && !s_ge->clear && s_ge->tex_addr;
+    if (software_fallback_begin(textured ? GEGPU_FALLBACK_LINE : -1))
+        return cpu_profile_hook_leave(0);
     Batch b;
     state_get(persp, 1, &b);              /* sprite semantics: no culling */
     if (!begin_target()) return cpu_profile_hook_leave(1);
-    float dx = B->x - A->x, dy = B->y - A->y;
-    float len = sqrtf(dx * dx + dy * dy);
-    if (len < 1e-6f) { dx = 1.0f; dy = 0.0f; len = 1.0f; }
-    float nx = -dy / len * 0.5f, ny = dx / len * 0.5f;   /* half-width perpendicular */
-    float ex = dx / len * 0.5f, ey = dy / len * 0.5f;    /* endpoint extension */
-    float ax = A->x + 0.5f, ay = A->y + 0.5f;            /* DDA truncates; sample centers */
-    float bx = B->x + 0.5f, by = B->y + 0.5f;
 
-    /* flat shading uses B (the provoking vertex) */
-    int flat = !s_ge->shade_gouraud;
-    const GeVtx *cA = flat ? B : A;
+    /* ge.c draw_line_vtx, expression for expression. */
+    const float dx = B->x - A->x, dy = B->y - A->y;
+    const float len = fmaxf(fabsf(dx), fabsf(dy));
+    int steps = (int)len;
+    if (steps < 1) steps = 1;
+    if (steps > 2048) steps = 2048;
+    const int use_fog = persp && s_ge->fog_enable && !s_ge->clear;
+    const int xmajor = fabsf(dx) >= fabsf(dy);
+    const float a_major = xmajor ? A->x : A->y, d_major = xmajor ? dx : dy;
+    const float a_minor = xmajor ? A->y : A->x, d_minor = xmajor ? dy : dx;
+    const int p0 = (int)floorf(a_major), dir = d_major < 0.0f ? -1 : 1;
+    const int flat = !s_ge->shade_gouraud;
 
-    ensure_room(6);
     uint64_t vertex_started = cpu_profile_now();
-    uint32_t first = s_nverts;
-    put_vert(ax - ex - nx, ay - ey - ny, A->z, A->rw, A->u, A->v, A->fog, cA->r, cA->g, cA->b, cA->a);
-    put_vert(ax - ex + nx, ay - ey + ny, A->z, A->rw, A->u, A->v, A->fog, cA->r, cA->g, cA->b, cA->a);
-    put_vert(bx + ex - nx, by + ey - ny, B->z, B->rw, B->u, B->v, B->fog, B->r, B->g, B->b, B->a);
-    put_vert(ax - ex + nx, ay - ey + ny, A->z, A->rw, A->u, A->v, A->fog, cA->r, cA->g, cA->b, cA->a);
-    put_vert(bx + ex + nx, by + ey + ny, B->z, B->rw, B->u, B->v, B->fog, B->r, B->g, B->b, B->a);
-    put_vert(bx + ex - nx, by + ey - ny, B->z, B->rw, B->u, B->v, B->fog, B->r, B->g, B->b, B->a);
-    cpu_profile_vertex_done(vertex_started, 6);
-    append(&b, first, 6);
+    unsigned verts = 0;
+    LinePx run; int run_len = 0, run_minor = 0;
+    memcpy(s_uv_box, k_uv_box_free, sizeof s_uv_box);
+    for (int i = 0; i <= steps; i++) {
+        LinePx px; int have = 0, minor = 0;
+        if (i < steps) {
+            const int p = p0 + i * dir;
+            float t = d_major != 0.0f ? ((float)p + 0.5f - a_major) / d_major : 0.0f;
+            const int q = (int)floorf(a_minor + d_minor * t);
+            t = line_clamp01(t);
+            px.x = xmajor ? p : q; px.y = xmajor ? q : p; minor = q;
+            px.r = (int)(A->r + (B->r - A->r) * t); px.g = (int)(A->g + (B->g - A->g) * t);
+            px.b = (int)(A->b + (B->b - A->b) * t); px.a = (int)(A->a + (B->a - A->a) * t);
+            if (flat) { px.r = B->r; px.g = B->g; px.b = B->b; px.a = B->a; }
+            const float lz = A->z + (B->z - A->z) * t;
+            /* ge.c zrange_ok: a transform-mode pixel outside [minz, maxz] is dropped. */
+            have = !persp || ((int)lz >= (int)s_ge->minz && (int)lz <= (int)s_ge->maxz);
+            /* The depth ge.c stores (clamp_z) and its fog factor, which psp.frag truncates
+             * back from the middle of the factor's 1/256 step. */
+            px.z = lz < 0.0f ? 0.0f : lz > 65535.0f ? 65535.0f : (float)(uint16_t)lz;
+            const int fog = use_fog ? (int)(line_clamp01(A->fog + (B->fog - A->fog) * t) * 256.0f) : 256;
+            px.fog = ((float)fog + 0.5f) / 256.0f;
+        }
+        if (run_len && have && minor == run_minor && line_same(&run, &px)) { run_len++; continue; }
+        if (run_len) {
+            ensure_room(6);
+            const uint32_t first = s_nverts;
+            line_put_run(&run, xmajor, run_len, dir);
+            append(&b, first, 6);
+            verts += 6u;
+            run_len = 0;
+        }
+        if (have) { run = px; run_len = 1; run_minor = minor; }
+    }
+    cpu_profile_vertex_done(vertex_started, verts);
     s_cnt_line++;
     return cpu_profile_hook_leave(1);
 }
