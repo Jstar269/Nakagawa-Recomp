@@ -1280,7 +1280,7 @@ const char *player_enhanced_part_label(int part, int value) {
 const char *player_enhanced_part_unavailable_label(int part, int value, int smooth) {
     if (part == PLAYER_PART_WIDE &&
         ace_wide_fill_blocked_by_smooth(value != 0, smooth != 0)) {
-        return "Off (Smooth motion is on)";
+        return "Off";
     }
     return NULL;
 }
@@ -1328,10 +1328,13 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->online_news = true;
     settings->online_reports = true;
     settings->share_system_libraries = true;
+    settings->build_speed = PACKAGE_BUILD_SPEED_BALANCED;
     settings->check_updates_at_start = false;
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
     settings->developer_mode = false;
+    snprintf(settings->nickname, sizeof(settings->nickname), "%s", NK_NICKNAME_DEFAULT);
+    settings->nickname_asked = false;
     /* Authentic until the player chooses Enhanced; the parts keep their values while it
        is not chosen. */
     player_enhanced_defaults(&settings->enhanced);
@@ -1890,6 +1893,10 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.share_system_libraries = share_val;
     }
 
+    /* A speed this build does not know keeps the default, Balanced. */
+    (void)package_build_speed_from_key(
+        nk_json_get_string(nk_json_obj_get(root, "build_speed")), &app->settings.build_speed);
+
     /* Off unless the file says true: a missing or non-boolean value keeps the
        check at start off. */
     NkJsonNode *update_node = nk_json_obj_get(root, "check_updates_at_start");
@@ -1923,6 +1930,19 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         strlen(prompt_version) < sizeof(app->settings.rebuild_prompt_version)) {
         snprintf(app->settings.rebuild_prompt_version,
                  sizeof(app->settings.rebuild_prompt_version), "%s", prompt_version);
+    }
+
+    /* Optional (#2197): a file without them keeps the neutral nickname and has
+       not answered the first-launch prompt. A nickname that breaks the rule is
+       dropped, not cut short. */
+    const char *nickname = nk_json_get_string(nk_json_obj_get(root, "nickname"));
+    if (nk_nickname_valid(nickname)) {
+        snprintf(app->settings.nickname, sizeof(app->settings.nickname), "%s", nickname);
+    }
+    NkJsonNode *asked_node = nk_json_obj_get(root, "nickname_asked");
+    bool asked_val = false;
+    if (asked_node && nk_json_get_bool(asked_node, &asked_val)) {
+        app->settings.nickname_asked = asked_val;
     }
 
     NkJsonNode *sounds_node = nk_json_obj_get(root, "ui_sounds");
@@ -2134,11 +2154,15 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
                                  ? app->settings.library_sort : PLAYER_LIBRARY_SORT_PLAYED]);
     fprintf(f, "  \"share_system_libraries\": %s,\n",
             app->settings.share_system_libraries ? "true" : "false");
+    fprintf(f, "  \"build_speed\": \"%s\",\n",
+            package_build_speed_key(app->settings.build_speed));
     fprintf(f, "  \"check_updates_at_start\": %s,\n",
             app->settings.check_updates_at_start ? "true" : "false");
     player_settings_write_string(f, "picker_folder", app->settings.picker_folder);
     player_settings_write_string(f, "rebuild_prompt_version",
                                  app->settings.rebuild_prompt_version);
+    player_settings_write_string(f, "nickname", app->settings.nickname);
+    fprintf(f, "  \"nickname_asked\": %s,\n", app->settings.nickname_asked ? "true" : "false");
     fprintf(f, "  \"master_volume\": %d\n", app->settings.master_volume);
     fprintf(f, "}\n");
 
@@ -3239,6 +3263,14 @@ void player_app_toggle_update_check_at_start(PlayerApp *app) {
 void player_app_toggle_share_system_libraries(PlayerApp *app) {
     if (!app) return;
     app->settings.share_system_libraries = !app->settings.share_system_libraries;
+    maybe_persist_settings(app);
+}
+
+void player_app_cycle_build_speed(PlayerApp *app) {
+    if (!app) return;
+    app->settings.build_speed = package_build_speed_next(app->settings.build_speed);
+    player_dev_log_add(app, "settings", "build speed %s",
+                       package_build_speed_key(app->settings.build_speed));
     maybe_persist_settings(app);
 }
 
@@ -5478,6 +5510,7 @@ void player_app_apply_settings_to_session(const PlayerSettings *settings,
     config->fullscreen = settings->fullscreen;
     config->master_volume = settings->master_volume;
     config->developer_mode = settings->developer_mode;
+    snprintf(config->nickname, sizeof(config->nickname), "%s", settings->nickname);
     config->reduce_motion = settings->reduce_motion_choice == PLAYER_SYSTEM_CHOICE_ON
         ? NK_REDUCE_MOTION_ON
         : settings->reduce_motion_choice == PLAYER_SYSTEM_CHOICE_OFF ? NK_REDUCE_MOTION_OFF
@@ -6004,6 +6037,7 @@ static bool player_app_start_package_build_view(PlayerApp *app, int game_index,
     }
 
     app->build_session.no_shared_libraries = !app->settings.share_system_libraries;
+    app->build_session.build_speed = app->settings.build_speed;
     NkResult res = package_builder_start(&app->build_session, python_path, cli_path, user_data_root, log_dir);
     if (res != NK_OK) {
         if (res == NK_ERROR_ALREADY_EXISTS) {
@@ -11227,6 +11261,40 @@ bool player_app_rebuild_card(const PlayerApp *app, const GameRecord *game,
         out->detail = PLAYER_OUTDATED_CARD_TEXT;
         out->can_rebuild = true;
     }
+    return true;
+}
+
+bool player_app_nickname_prompt_visible(const PlayerApp *app) {
+    return app && !app->settings.nickname_asked && !app->settings_newer_schema &&
+           !app->nickname_prompt_held;
+}
+
+bool player_app_nickname_prompt_answer(PlayerApp *app, const char *nickname) {
+    if (!app) return false;
+    if (nickname && !nk_nickname_valid(nickname)) {
+        player_dev_log_add(app, "settings", "the nickname was refused: it is not 1 to %u bytes "
+                           "of UTF-8 without control characters, or is only spaces",
+                           NK_NICKNAME_MAX_BYTES);
+        return false;
+    }
+    if (nickname) snprintf(app->settings.nickname, sizeof(app->settings.nickname), "%s", nickname);
+    app->settings.nickname_asked = true;
+    player_dev_log_add(app, "settings", "nickname prompt answered: %s", nickname ? "Save" : "Skip");
+    maybe_persist_settings(app);
+    return true;
+}
+
+bool player_app_set_nickname(PlayerApp *app, const char *nickname) {
+    if (!app) return false;
+    if (!nk_nickname_valid(nickname)) {
+        player_dev_log_add(app, "settings", "the nickname was refused: it is not 1 to %u bytes "
+                           "of UTF-8 without control characters, or is only spaces",
+                           NK_NICKNAME_MAX_BYTES);
+        return false;
+    }
+    snprintf(app->settings.nickname, sizeof(app->settings.nickname), "%s", nickname);
+    player_dev_log_add(app, "settings", "nickname changed");
+    maybe_persist_settings(app);
     return true;
 }
 

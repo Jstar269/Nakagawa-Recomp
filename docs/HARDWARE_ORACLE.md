@@ -87,7 +87,10 @@ proposals. Each claim covers only the exact fixture named:
   matrix, 13 records PASS across 4 launches in two sessions; Group B 91-cell
   overlap matrix, all PASS across 3 bitwise-identical launches; same qualified
   route and date. Bulk random differential fuzz (Loop A) remains unbuilt, and
-  the PPSSPP-derived-table warning stands for every unmeasured encoding.
+  the PPSSPP-derived-table warning stands for every unmeasured encoding. The
+  NaN words and flushed-sum zero signs of the vdot, vhdp, vmmul.t and vtfm3.t
+  cells are superseded by PSP-VFPU-FUNNEL-001 and an unrecorded read of probe
+  case `vfpu-wide-dot-matrix`, which returned 0x7f800001 and +0 for them.
 - **Out-of-domain transcendental arguments** (issue #69): `HARDWARE_MEASURED`
   for these 14 exact raw words on the authorized PSP-3000-series / 6.61 /
   ARK-5.1.0 route (2026-09-30). Fixture: `fixtures/vfpu_oracle/vfpu_probe.c`
@@ -1105,7 +1108,8 @@ One console is one data point; see §11. Nothing here closes issue #70
   `check_vfpu_forms_measured` in `tests/native/vfpu_interp_selftest.c` pins every no-prefix word above in both lanes.
   `vwbn.s` applies the rule at every exponent; only the eight listed have cells. Unmeasured, and failing closed in
   both lanes: a pending prefix (the T and D prefixes were never set), the other widths, `vf2h`, `vrnds`, and
-  `vc2i`/`vus2i`.
+  `vc2i`. `vus2i.s/.p` are implemented in both lanes from an unrecorded PSP read (probe case `vfpu-vus2i`,
+  which also read `vs2i`); `vus2i.t/.q` still fail closed.
 
 - **PSP-3000 single-case run of the `ge-sample` probe on commit `86e55611` (2026-10-28)**: firmware 6.6.1,
   PSPLink 3.2.1, operator-declared model PSP-3000. `86e55611` is the commit that adds the probe (case 109 in

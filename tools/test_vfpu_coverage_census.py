@@ -97,6 +97,15 @@ class VfpuCoverageCensusTests(unittest.TestCase):
         self.assertTrue(controls)
         self.assertEqual({row["opcode"] for row in controls}, {"0x3f"})
 
+    def test_cop2_condition_branches_are_aot_owned_controls(self):
+        # bc2f/bc2t (COP2 rs 8) are emitted by the branch emitter, not decoded as VFPU compute:
+        # a route that branches on VFPU_CC must not fail the route census for them.
+        words = (0x49000010, 0x49010010, 0x49020010, 0x49030010, 0x49040010 | (5 << 18))
+        for record in census.classify_words(words, route=True):
+            self.assertEqual(record["aot_disposition"], "aot-direct")
+            self.assertEqual(census.agreement_status(record), "explicit-aot-direct-control")
+            self.assertEqual(census.compatibility_disposition(record), "aot-direct")
+
     def test_vfpu3_compare_forms_are_supported_in_both_lanes(self):
         # Major 0x1B sub-ops 5, 6 and 7 are vscmp, vsge and vslt (issue #69).
         # Both lanes decode them now; neither lane may route them to vcmov.
@@ -621,9 +630,9 @@ class VfpuRouteCensusTests(unittest.TestCase):
         seen = []
         original = census._classify_aot
 
-        def spy(word, *, lle_cpu=False):
+        def spy(word, *, lle_cpu=False, route=False):
             seen.append(lle_cpu)
-            return original(word, lle_cpu=lle_cpu)
+            return original(word, lle_cpu=lle_cpu, route=route)
 
         with tempfile.TemporaryDirectory(prefix="vfpu_route_lle_") as tmp:
             main_c = Path(tmp) / "route.c"

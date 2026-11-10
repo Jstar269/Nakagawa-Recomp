@@ -106,7 +106,11 @@ class TrustedLedgerRepository:
         _git(self.root, "config", "commit.gpgsign", "false")
         _git(self.root, "config", "core.autocrlf", "false")
         _git(self.root, "config", "core.eol", "lf")
-        self._write({POLICY: _canonical(self.POLICY_DOCUMENT), PATH_A: ALPHA, PATH_B: BETA})
+        # The seed tracks both control paths, as every real tree does: the refresh replays the
+        # hosted verdict on the tree it stages, and an export generated for a tree without one
+        # does not describe the tree that then carries it.
+        self._write({POLICY: _canonical(self.POLICY_DOCUMENT), PATH_A: ALPHA, PATH_B: BETA,
+                     LEDGER: b"{}\n", EXPORT: b"{}\n"})
         self._commit("seed")
         seed = _git(self.root, "rev-parse", "HEAD").stdout.strip()
         # The committed controls are exactly the authority baseline for this tree,

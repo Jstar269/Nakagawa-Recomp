@@ -131,6 +131,22 @@ static void test_compile_part_count(void) {
     assert(package_builder_compile_notice(&session) != NULL);
     assert(strcmp(package_builder_compile_notice(&session), "Other apps may feel slower.") == 0);
 
+    /* The child's build speed line replaces the speed's bare name on the card. */
+    const char *speed = "{\"stage\": \"compile\", \"status\": \"RUNNING\", \"message\": \"Compiling part 12 of 40\", \"completed\": 11, \"total\": 40, \"speed\": \"Build speed: Fastest. 24 parts at a time, one for each processor.\"}";
+    assert(package_builder_parse_progress_line(speed, strlen(speed), &ev));
+    assert(strcmp(ev.speed, "Build speed: Fastest. 24 parts at a time, one for each processor.") == 0);
+    package_builder_apply_event(&session, &ev);
+    assert(package_builder_speed_line(&session) == NULL);   /* not building */
+    session.is_building = true;
+    assert(strcmp(package_builder_speed_line(&session),
+                  "Build speed: Fastest. 24 parts at a time, one for each processor.") == 0);
+    /* A later event without a line keeps it. */
+    assert(package_builder_parse_progress_line(noted, strlen(noted), &ev));
+    assert(ev.speed[0] == '\0');
+    package_builder_apply_event(&session, &ev);
+    assert(strstr(package_builder_speed_line(&session), "Fastest") != NULL);
+    session.is_building = false;
+
     /* An inconsistent or malformed count is ignored; the line still applies. */
     const char *over = "{\"stage\": \"compile\", \"status\": \"RUNNING\", \"message\": \"m\", \"completed\": 41, \"total\": 40}";
     assert(package_builder_parse_progress_line(over, strlen(over), &ev));
@@ -1552,8 +1568,134 @@ restore:
     free(saved_mode);
 }
 
+/* The build child for test_build_speed_reaches_the_child: this binary, started by
+ * package_builder_start in place of Python with argv[1] "--build-speed-probe" in place of
+ * nk_cli.py. It writes the --build-speed it was given to <progress file>.speed, then
+ * stays until <progress file>.release appears (at most 30 s), so the parent can read
+ * the priority it runs at. */
+static int run_build_speed_probe(int argc, char *argv[]) {
+    const char *speed = NULL;
+    const char *progress = NULL;
+    for (int i = 2; i + 1 < argc; ++i) {
+        if (strcmp(argv[i], "--build-speed") == 0) speed = argv[i + 1];
+        if (strcmp(argv[i], "--progress-json") == 0) progress = argv[i + 1];
+    }
+    if (!speed || !progress) return 2;
+    char path[NK_MAX_PATH];
+    char written[NK_MAX_PATH];
+    /* Written whole, then renamed: the parent waits for the name, never a part. */
+    snprintf(written, sizeof(written), "%s.speed.tmp", progress);
+    snprintf(path, sizeof(path), "%s.speed", progress);
+    FILE *f = fopen(written, "wb");
+    if (!f) return 3;
+    fputs(speed, f);
+    if (fclose(f) != 0 || nk_rename_utf8(written, path) != 0) return 4;
+    snprintf(path, sizeof(path), "%s.release", progress);
+    for (int i = 0; i < 1500 && !nk_platform_file_exists(path); ++i) route_pause_ms(20);
+    return 0;
+}
+
+/* Settings > Build speed reaches the build child: nk_cli.py gets --build-speed with the
+ * setting's key, and a Background child runs below normal while Balanced keeps the
+ * player's priority. */
+static void test_build_speed_reaches_the_child(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: build speed reaches the child\n");
+    static const PackageBuildSpeed speeds[] = {
+        PACKAGE_BUILD_SPEED_BALANCED, PACKAGE_BUILD_SPEED_BACKGROUND, PACKAGE_BUILD_SPEED_FASTEST
+    };
+    NkProcessPriority balanced_priority = NK_PROCESS_PRIORITY_NORMAL;
+    char self[NK_MAX_PATH];
+    char log_dir[NK_MAX_PATH];
+    char user_data_root[NK_MAX_PATH];
+    const char *root = native_test_get_root();
+    assert(s_self_executable && s_self_executable[0]);
+    assert(nk_platform_absolute_path(s_self_executable, self, sizeof(self)));
+    assert(root && root[0]);
+    snprintf(log_dir, sizeof(log_dir), "%s%cbuild-speed-logs", root,
+             nk_platform_path_separator());
+    snprintf(user_data_root, sizeof(user_data_root), "%s%cbuild-speed-data", root,
+             nk_platform_path_separator());
+
+    assert(strcmp(package_build_speed_key(PACKAGE_BUILD_SPEED_BACKGROUND), "background") == 0);
+    assert(strcmp(package_build_speed_name(PACKAGE_BUILD_SPEED_FASTEST), "Fastest") == 0);
+    assert(package_build_speed_next(PACKAGE_BUILD_SPEED_BACKGROUND) ==
+           PACKAGE_BUILD_SPEED_BALANCED);
+    assert(package_build_speed_next(PACKAGE_BUILD_SPEED_BALANCED) ==
+           PACKAGE_BUILD_SPEED_FASTEST);
+    assert(package_build_speed_next(PACKAGE_BUILD_SPEED_FASTEST) ==
+           PACKAGE_BUILD_SPEED_BACKGROUND);
+    {
+        PackageBuildSpeed parsed = PACKAGE_BUILD_SPEED_FASTEST;
+        assert(!package_build_speed_from_key("turbo", &parsed));
+        assert(parsed == PACKAGE_BUILD_SPEED_FASTEST);
+        assert(package_build_speed_from_key("background", &parsed));
+        assert(parsed == PACKAGE_BUILD_SPEED_BACKGROUND);
+    }
+
+    for (size_t s = 0; s < sizeof(speeds) / sizeof(speeds[0]); ++s) {
+        PackageBuildSession session;
+        NkProcessPriority priority = NK_PROCESS_PRIORITY_NORMAL;
+        char path[NK_MAX_PATH + 16]; /* the progress file and a suffix */
+        char given[32] = "";
+        package_builder_init_session(&session, "TEST80005", "Build Speed Probe");
+        session.build_speed = speeds[s];
+        assert(package_builder_start(&session, self, "--build-speed-probe", user_data_root,
+                                     log_dir) == NK_OK);
+        /* The card names the speed from the start, before the child plans its jobs. */
+        {
+            char expected[64];
+            snprintf(expected, sizeof(expected), "Build speed: %s",
+                     package_build_speed_name(speeds[s]));
+            assert(strcmp(package_builder_speed_line(&session), expected) == 0);
+        }
+        assert(nk_platform_process_priority(&session.process, &priority));
+        snprintf(path, sizeof(path), "%s.speed", session.progress_file_path);
+        for (int i = 0; i < 1500 && !nk_platform_file_exists(path); ++i) route_pause_ms(20);
+        {
+            FILE *f = fopen(path, "rb");
+            assert(f != NULL);
+            size_t n = fread(given, 1, sizeof(given) - 1u, f);
+            given[n] = '\0';
+            fclose(f);
+        }
+        snprintf(path, sizeof(path), "%s.release", session.progress_file_path);
+        {
+            FILE *f = fopen(path, "wb");
+            assert(f != NULL);
+            fclose(f);
+        }
+        uint64_t deadline = route_now_ms() + 30000u;
+        while (session.is_building && route_now_ms() < deadline) {
+            package_builder_poll(&session, route_now_ms());
+            if (session.is_building) route_pause_ms(10);
+        }
+        assert(!session.is_building);
+        assert(session.exit_code == 0);
+        assert(strcmp(given, package_build_speed_key(speeds[s])) == 0);
+        if (speeds[s] == PACKAGE_BUILD_SPEED_BALANCED) {
+            balanced_priority = priority;
+        } else if (speeds[s] == PACKAGE_BUILD_SPEED_BACKGROUND) {
+            assert(priority == NK_PROCESS_PRIORITY_LOW);
+        } else {
+            assert(priority == balanced_priority);
+        }
+        nk_remove_utf8(session.progress_file_path);
+        snprintf(path, sizeof(path), "%s.speed", session.progress_file_path);
+        nk_remove_utf8(path);
+        snprintf(path, sizeof(path), "%s.release", session.progress_file_path);
+        nk_remove_utf8(path);
+    }
+    if (balanced_priority == NK_PROCESS_PRIORITY_LOW) {
+        printf("[PACKAGE_BUILDER_TEST] NOTE: this runner is itself below normal, so "
+               "Balanced and Background read alike here\n");
+    }
+}
+
 int main(int argc, char *argv[]) {
     if (argc == 2 && strcmp(argv[1], "--child-exit-zero") == 0) return 0;
+    if (argc > 2 && strcmp(argv[1], "--build-speed-probe") == 0) {
+        return run_build_speed_probe(argc, argv);
+    }
     if (argc == 3 && strcmp(argv[1], "-c") == 0) return run_python_probe_stub(argc, argv);
     s_self_executable = argv[0];
     /* Child of test_build_path_leads_with_ucrt64: stands in for python and reports
@@ -1591,6 +1733,7 @@ int main(int argc, char *argv[]) {
     test_reused_session_restarts_the_clock();
     test_state_machine_transitions();
     test_clean_exit_without_completion_is_a_failure();
+    test_build_speed_reaches_the_child();
     test_output_line_circular_buffer();
     test_python_candidate_validation();
     test_python_and_cli_discovery();

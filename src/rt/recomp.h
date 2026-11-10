@@ -207,6 +207,14 @@ static inline uint32_t sr_vfpu_uc2i(uint32_t b) {
     return ((b & 0xffu) * 0x01010101u) >> 1;
 }
 
+/* vus2i: one unsigned 16-bit half h to the word h << 15 (zero-extended, not the vuc2i
+ * replicate); vs2i's twin is h << 16. Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326,
+ * probe case vfpu-vus2i): 0x0000ffff -> 0x7fff8000, 0x8000 -> 0x40000000 and
+ * 0x12345678 -> 0x2b3c0000 (low half) and 0x091a0000 (high half). */
+static inline uint32_t sr_vfpu_us2i(uint32_t h) {
+    return (h & 0xffffu) << 15;
+}
+
 /* vwbn.s with exponent imm8 e: a word whose exponent field is 0xff passes unchanged.
  * Otherwise the significand (implicit bit included for a normal, the raw mantissa for a
  * zero or denormal) shifts left by (x_exp - e) & 15 when x_exp > e, right by
@@ -1126,25 +1134,42 @@ int sr_guest_format_host(CpuState *s, uint32_t fmt, uint32_t first_reg,
 void sr_vread(float *r, const CpuState *s, const uint8_t *idx, int n, uint32_t prefix);
 void sr_vwrite(CpuState *s, const uint8_t *idx, float *d, int n, uint32_t dprefix);
 
+/* The VFPU sum-of-products adder (sr_vfpu_dot_bits in recomp.c, PSP-VFPU-FUNNEL-001 and
+ * the unrecorded vfpu-wide-dot-matrix read): sum(a[i] * b[i]) for i < n <= 4, with the products aligned and
+ * summed in integers, not as a chain of float adds. sr_vfpu_interp and the generated code
+ * call it for vdot, vhdp, vcrsp, vqmul, vmmul, vtfm and vhtfm; vfad and vavg run on it too.
+ * The caller negates an operand for a subtracted term. It is out of line: inlined, a
+ * 16-lane vmmul.q body grew about twenty-fold. */
+uint32_t sr_vfpu_dot_bits(const uint32_t *a, const uint32_t *b, int n);
+static inline float sr_vfpu_sop(const float *fa, const float *fb, int n) {
+    uint32_t a[4], b[4];
+    for (int i = 0; i < n; i++) {
+        memcpy(&a[i], &fa[i], 4);
+        memcpy(&b[i], &fb[i], 4);
+    }
+    const uint32_t r = sr_vfpu_dot_bits(a, b, n);
+    float out;
+    memcpy(&out, &r, 4);
+    return out;
+}
+
 /* VFPU lane arithmetic with the NaN result fixed by rule (issue #326). C leaves the NaN
  * that a NaN-producing operation returns to the host: x86-64 SSE keeps the first NaN
  * source, and an optimiser may swap the operands of a commutative + or *. So the
  * generated code and sr_vfpu_interp, each compiled on its own, kept different NaNs when
  * two met (the alias-edge sweep in tests/native/vfpu_interp_selftest.c, built at -O1 or
- * -O2). Both lanes call these helpers for every lane operation of vdot, vhdp, vcrs, vcrsp,
- * vqmul, vmmul, vtfm and vmscl (vadd, vsub, vmul, vscl and vdiv use the measured sr_vfpu_*
- * rule below). The rule: the first NaN
+ * -O2). Both lanes call these helpers for every lane operation of vcrs (vadd, vsub, vmul,
+ * vscl, vdiv and vmscl use the measured sr_vfpu_* rule below, and vdot, vhdp, vcrsp, vqmul,
+ * vmmul and vtfm the sum-of-products adder above). The rule: the first NaN
  * operand, quieted, else the invalid-operation NaN 0xFFC00000 (Inf - Inf, 0 * Inf, 0 / 0,
  * Inf / Inf). That is what x86-64 SSE returns for the operands in source order, but it is a
  * change for default builds too: even at -O0 (RECOMP_OPT, the Makefile default) GCC may
  * evaluate a plain + or * with its operands swapped, as MSYS2 GCC 16.2 does for the old
- * vadd and vmul lane loops, so NaN-with-NaN lanes of vadd, vmul, vcrsp and vqmul now keep
- * the first source where they used to keep the second. Results without a NaN are unchanged.
+ * vadd and vmul lane loops, so NaN-with-NaN lanes of vadd and vmul now keep the first
+ * source where they used to keep the second. Results without a NaN are unchanged.
  * It is project semantics, not PSP evidence: the PSP's NaN word for these forms is
- * unmeasured or contested. docs/HARDWARE_ORACLE.md PSP-GE-001 and the issue #40 fixture
- * fixtures/vfpu_nan_payload/vfpu_nan_cases.h disagree, and the dot-product adder measured
- * as PSP-VFPU-FUNNEL-001 (vfpu_dot_bits in vfpu_interp.c, used by vfad and vavg) returns
- * the fixed 0x7F800001 for any NaN operand, which this rule for vdot does not follow.
+ * unmeasured. The sum-of-products forms follow sr_vfpu_dot_bits above instead, which
+ * returns the fixed 0x7F800001 for any NaN operand as the console did.
  * At -O0 GCC does not inline these static inline helpers, so an ad-hoc build makes one
  * call per lane operation; package builds (-O1, PACKAGE_RECOMP_OPT) inline them. */
 static inline float sr_vf_nan(float a, float b) {
@@ -2347,6 +2372,17 @@ int sr_vblank_quantum_due(void);
 /* True when guest time is deterministic (SR_DETERMINISTIC_CLOCK, #2037): a function of the guest's
  * own work, never of the host clock. The RTC then starts at a fixed date. */
 int sched_clock_deterministic(void);
+/* Fast forward (docs/ENHANCEMENT_CONTRACT.md section 10.15). While the game window's keys ask
+ * for it (ace_ff_requested(), ace.h) in an Enhanced or Ace run on the paced clock, guest time,
+ * VBLANKs and timed waits run SCHED_FAST_FORWARD_SPEED times as fast as the host clock, and the
+ * host audio device is given no audio. It is off during the pause, and it never runs in an
+ * Authentic run or under the deterministic or turbo clocks: there the keys change nothing and
+ * pacing is as before. The scheduler applies a change at its next VBLANK. */
+#define SCHED_FAST_FORWARD_SPEED 3u
+/* 1 while guest time runs fast. */
+int sched_fast_forward_on(void);
+/* How many times fast forward has started in this run (0 before the first). */
+uint32_t sched_fast_forward_epoch(void);
 /* f_00065c60 field-writer intercept: the container walker reads count from
  * r18+0x04 but f_0005a500's control block init puts count at r18+0x00 and
  * cursor at r18+0x04.  Since both functions are called directly (not via

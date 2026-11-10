@@ -6,6 +6,8 @@
 
 #include "nk_ui.h"
 #include "nk_ui_input.h"  /* NkUiPromptAction: the Controls page's binding glyphs */
+#include "../../core/nk_nickname.h" /* the nickname editor's default and cap (#2197) */
+#include "ui_keyboard.h"             /* its on-screen keyboard */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -149,6 +151,8 @@ typedef enum {
     PLAYER_UI_ACTION_ADD_TO_STEAM,      /* the title page's Add to Steam (#2152) */
     PLAYER_UI_ACTION_STEAM,             /* an Add to Steam dialog control; .primary carries
                                            the op (PlayerUiSteamOp) */
+    PLAYER_UI_ACTION_NICKNAME,          /* a nickname editor control; .primary carries the
+                                           op (PlayerUiNicknameOp) */
     PLAYER_UI_ACTION_HIDE_RENDER_NOTICE, /* the title page's render notice: Hide (#2151) */
     PLAYER_UI_ACTION_QUEUE              /* a build queue control; .primary carries the op
                                            (PlayerUiQueueOp), .title_index its game */
@@ -176,6 +180,26 @@ typedef enum {
     PLAYER_UI_STEAM_ADD,                 /* Add to Steam: write the shortcut */
     PLAYER_UI_STEAM_ACCOUNT_BASE = 0x100 /* + the account's row: choose that account */
 } PlayerUiSteamOp;
+
+/* What a nickname editor control asks for (PLAYER_UI_ACTION_NICKNAME, #2197). */
+typedef enum {
+    PLAYER_UI_NICKNAME_NONE = 0,
+    PLAYER_UI_NICKNAME_SAVE,        /* Done: save what is typed */
+    PLAYER_UI_NICKNAME_SKIP,        /* the prompt's Skip, or Settings' Cancel; Back too */
+    PLAYER_UI_NICKNAME_EDITED       /* an on-screen key changed the text or its case */
+} PlayerUiNicknameOp;
+
+/* The nickname editor (#2197): the first-launch prompt (Done, Skip) or Settings >
+   Nickname (Done, Cancel). Its on-screen keyboard edits `keyboard` in place, and a
+   physical keyboard types into the same text (player_ui_nk.c). */
+typedef struct {
+    bool first_launch;
+    UiKeyboard *keyboard;   /* what is typed, its cap and filter, and the letter case */
+    const char *current;    /* the nickname in use, shown while nothing is typed */
+    bool refused;           /* the last Done was refused */
+    float logical_width;
+    float logical_height;
+} PlayerUiNicknameModel;
 
 /* What a Saves dialog control asks for (PLAYER_UI_ACTION_SAVES). Back is
    PLAYER_UI_ACTION_BACK. */
@@ -607,7 +631,9 @@ typedef enum {
     PLAYER_UI_SETTINGS_CREATE_REPORT,        /* write the bundle on this PC */
     PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER,
     PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER,     /* the folder holding the library, games and settings */
-    PLAYER_UI_SETTINGS_OPEN_LOGS             /* the folder holding the logs */
+    PLAYER_UI_SETTINGS_OPEN_LOGS,            /* the folder holding the logs */
+    PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED,    /* Background, Balanced, Fastest */
+    PLAYER_UI_SETTINGS_EDIT_NICKNAME         /* the nickname editor (#2197) */
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
@@ -618,6 +644,16 @@ typedef struct {
     const char *value;          /* "16x", "Off", "Library (On)" on a title's page */
     const char *sentence;
     bool on;                    /* in effect for the page: lit */
+    /* Every other value the row can show on this page: the part's own words ("16x" ... "Off")
+       and, on a title's page, the library's ("Library (16x)"). The page sizes its button
+       column from the widest of them, so changing a setting never reflows the rows. */
+    const char *const *labels;
+    int label_count;
+    const char *library_value;  /* NULL on the library's page */
+    /* A value another setting on the page can give the row, or NULL: on a game's page,
+       Smooth motion's "Off (this game runs at 60 FPS)", which stepping the play mode turns
+       on and off with the game's 60 FPS game logic. */
+    const char *other_value;
 } PlayerUiEnhancedRow;
 
 #define PLAYER_UI_REPORT_LINES 24u   /* PLAYER_REPORT_MAX_FILES */
@@ -680,17 +716,23 @@ typedef struct {
     const char *enhanced_title;     /* the game's name on its own page; NULL for the library */
     const char *enhanced_mode;      /* "Enhanced", "Ace", "Library (Authentic)" */
     const char *enhanced_mode_sentence;
+    /* Every play mode the page's first row steps through, for the column's width. */
+    const char *const *enhanced_modes;
+    int enhanced_mode_count;
     bool enhanced_on;               /* Enhanced or Ace in effect: the part rows can change */
     int enhanced_row_count;
     PlayerUiEnhancedRow enhanced_rows[PLAYER_UI_ENHANCED_ROWS];
     const char *controller_line;    /* "Keyboard ready" or the pad's name */
     const char *saves_folder;
     const char *notice;             /* a settings notice (a failed save), or NULL */
+    const char *nickname;           /* the console nickname games read (#2197) */
     /* The main page's graphics preset note (#2150): where the preset applies, or NULL for
        Custom. Drawn, in the muted colour, when there is no notice. */
     const char *preset_notice;
     /* Build tools and cache: builds share compiled system libraries (#1306) */
     bool share_system_libraries;
+    const char *build_speed;        /* "Background", "Balanced" or "Fastest" */
+    const char *build_speed_sentence;   /* what that speed does, one sentence */
     /* Updates (VIEW_UPDATES): what the last step found, in words */
     PlayerUiUpdateStep update_step;
     PlayerUiUpdateStep update_failed_step;   /* CHECKING, DOWNLOADING or INSTALLING */
@@ -866,6 +908,8 @@ typedef struct {
     bool built;                    /* written; being checked before PLAY */
     float fraction;                /* compiled share of the parts, -1 when unknown */
     const char *notice;            /* compile-stage "other apps may feel slower" note */
+    /* "Build speed: Balanced. 6 parts at a time, ..." while building, or NULL */
+    const char *speed_line;
     const char *message;
     unsigned elapsed_ms;
     const char *lines[4];          /* the last output lines, oldest first */
@@ -1087,6 +1131,11 @@ enum {
     PLAYER_UI_ID_REPORT_FOLDER = 0x4552u,
     PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER = 0x4553u, /* Settings: shows the data folder */
     PLAYER_UI_ID_SETTINGS_OPEN_LOGS = 0x4554u,        /* Settings: shows the logs folder */
+    PLAYER_UI_ID_SETTINGS_BUILD_SPEED = 0x4555u,      /* Build tools and cache: Build speed */
+    PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
+    PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
+    PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
+    PLAYER_UI_ID_NICKNAME_KEY_BASE = 0x4570u,         /* + its keyboard key's place */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
     PLAYER_UI_ID_CONTROLLER_DEADZONE_UP = 0x4622u,
@@ -1113,6 +1162,7 @@ enum {
 #define PLAYER_UI_ID_CONTROLLER_GLYPH_BASE_SPAN 0x20u
 #define PLAYER_UI_ID_LIBRARY_ITEM_BASE_SPAN 0x1000u    /* NK_MAX_GAMES */
 #define PLAYER_UI_ID_DISC_VERIFY_BASE_SPAN 0x100u      /* progress, cancel, results */
+#define PLAYER_UI_ID_NICKNAME_KEY_BASE_SPAN 0x40u     /* UI_KEYBOARD_KEY_COUNT */
 
 /* Disc verification's controls and lines, in PLAYER_UI_ID_DISC_VERIFY_BASE's family. */
 #define PLAYER_UI_ID_DISC_VERIFY_CANCEL ((NkUiId)(PLAYER_UI_ID_DISC_VERIFY_BASE + 0x01u))
@@ -1312,6 +1362,13 @@ PlayerUiAction player_ui_screen_disc(NkUi *ui, const PlayerUiDiscModel *model);
 PlayerUiAction player_ui_screen_settings(NkUi *ui, const PlayerUiSettingsModel *model);
 PlayerUiAction player_ui_screen_controller(NkUi *ui, const PlayerUiControllerModel *model);
 PlayerUiAction player_ui_screen_developer_log(NkUi *ui, const PlayerUiDeveloperLogModel *model);
+/* The nickname editor over any screen: the keyboard, Done, and Skip or Cancel, which
+   Back also answers. */
+PlayerUiAction player_ui_screen_nickname(NkUi *ui, const PlayerUiNicknameModel *model);
+/* The nickname editor's character filter (UiKeyboardFilter): a character
+   nk_nickname_valid takes inside a nickname, so no control character is ever
+   typed. A space is typed; a nickname of spaces alone is refused on Done. */
+bool player_ui_nickname_accepts(uint32_t codepoint, void *user);
 
 /* The top bar every launcher screen draws: LIBRARY, ABOUT and SETTINGS tabs,
    focusable and switched with L / R. Returns the action for a tab the user
@@ -1371,6 +1428,8 @@ bool player_ui_nk_draws_view(int view);
 /* True while the library's find box is open on the library: what the keyboard
    types goes into it, so the host's letter shortcuts and Backspace-as-Back wait. */
 bool player_ui_nk_find_open(const PlayerUiNk *player);
+/* True while the nickname editor is open (#2197): the keyboard types into it in the same way. */
+bool player_ui_nk_nickname_open(const PlayerUiNk *player);
 /* True when the next UI shows the Library at the bottom of its stack (Esc
    there asks to quit, as in the existing UI). */
 bool player_ui_nk_at_library_root(const PlayerUiNk *player);
@@ -1391,6 +1450,12 @@ int player_ui_nk_test_route(const PlayerUiNk *player);
 int player_ui_nk_test_build_built(const PlayerUiNk *player);
 /* Test only: the control the next UI focuses, or 0. */
 unsigned player_ui_nk_test_focus(const PlayerUiNk *player);
+/* Test only: what the nickname editor holds and its count ("12 / 32 bytes") in
+   count, or NULL (and "") while it is closed. */
+const char *player_ui_nk_test_nickname(const PlayerUiNk *player, char *count, size_t cap);
+/* Test only: the next UI's last frame was laid out (nk_ui_laid_out), so the
+   next frame takes a move at once; false without a next UI. */
+bool player_ui_nk_test_laid_out(const PlayerUiNk *player);
 /* Test only: the game whose picture is behind the library (the art rest), -1 for
    none; *shown tells it fading in or whole from fading out. */
 int player_ui_nk_test_backdrop(const PlayerUiNk *player, bool *shown);
