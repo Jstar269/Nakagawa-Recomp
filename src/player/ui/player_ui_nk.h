@@ -633,7 +633,8 @@ typedef enum {
     PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER,     /* the folder holding the library, games and settings */
     PLAYER_UI_SETTINGS_OPEN_LOGS,            /* the folder holding the logs */
     PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED,    /* Background, Balanced, Fastest */
-    PLAYER_UI_SETTINGS_EDIT_NICKNAME         /* the nickname editor (#2197) */
+    PLAYER_UI_SETTINGS_EDIT_NICKNAME,        /* the nickname editor (#2197) */
+    PLAYER_UI_SETTINGS_TOGGLE_DISCORD        /* Settings > Online and developer (#2259) */
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
@@ -737,6 +738,10 @@ typedef struct {
     PlayerUiUpdateStep update_step;
     PlayerUiUpdateStep update_failed_step;   /* CHECKING, DOWNLOADING or INSTALLING */
     bool check_updates_at_start;
+    /* Settings > Online and developer: Discord status (#2259), and whether this build can
+       turn it on (it has a Discord application ID). */
+    bool discord_presence;
+    bool discord_available;
     const char *current_version;    /* "0.0.2" */
     const char *update_version;     /* "0.0.2", once checked */
     bool update_prerelease;
@@ -1132,6 +1137,7 @@ enum {
     PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER = 0x4553u, /* Settings: shows the data folder */
     PLAYER_UI_ID_SETTINGS_OPEN_LOGS = 0x4554u,        /* Settings: shows the logs folder */
     PLAYER_UI_ID_SETTINGS_BUILD_SPEED = 0x4555u,      /* Build tools and cache: Build speed */
+    PLAYER_UI_ID_SETTINGS_DISCORD = 0x4556u,          /* Settings > Online: Discord status */
     PLAYER_UI_ID_NICKNAME_SAVE = 0x4560u,             /* the nickname editor's Save */
     PLAYER_UI_ID_NICKNAME_SKIP = 0x4561u,             /* its Skip (first launch) or Cancel */
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
