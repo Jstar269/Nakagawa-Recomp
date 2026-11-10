@@ -1382,6 +1382,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             (0x00621821, "takes an sb"),  # addu v1, v1, v0: gate_30hz's form, not this one
             (0x0C000480, "takes an sb"),  # jal
             (0xEA000000, "takes an sb"),  # sv.s: VFPU stores are not admitted
+            (0xAA420000, "takes an sb"),  # swl v0, 0(s2)
+            (0xBA420000, "takes an sb"),  # swr v0, 0(s2)
+            (0xE2420000, "takes an sb"),  # sc v0, 0(s2): it also writes rt
         ):
             with self.subTest(word=f"{word:08x}"):
                 with self.assertRaises(EnhancementPackageError) as ctx:
@@ -1395,6 +1398,39 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             validate_package(pkg)
         self.assertIn("gate_30hz_alt or gate_30hz_store sites must declare", str(ctx.exception))
 
+        pkg, _ = self._make_package_and_symbols(b"synthetic_elf_bytes")
+        pkg["sites"][-1] = dict(pkg["sites"][-1], transform="gate_30hz_store", word_count=2)
+        with self.assertRaises(EnhancementPackageError) as ctx:
+            validate_package(pkg)
+        self.assertIn("gate_30hz_store names one store (word_count 1)", str(ctx.exception))
+
+    def test_gate_30hz_store_gates_a_store_in_a_delay_slot(self) -> None:
+        """A gated store in a jr's delay slot is emitted gated before the return, both forms kept."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            self.words.update({
+                0x00001500: 0x84A20000,  # lh v0, 0(a1)
+                0x00001504: 0x24420020,  # addiu v0, v0, 32
+                0x00001508: 0x03E00008,  # jr ra
+                0x0000150C: 0xA4A20000,  # sh v0, 0(a1), in the delay slot
+            })
+            elf_bytes = _write_synthetic_mips_elf(tmp / "synth.elf", self.words, self.entry)
+            pkg, symbols = self._make_package_and_symbols(elf_bytes)
+            for site in pkg["sites"]:
+                if site["id"] == "SYNTH_PROB":
+                    site.update(transform="gate_30hz_store", insn_offset=12,
+                                stock_digest=compute_stock_words_digest([0xA4A20000]))
+            rc, output, files = self._codegen_with(tmp, "slot", pkg, symbols)
+            self.assertEqual(rc, 0, output)
+            lines = b"\n".join(files.values()).decode("utf-8").splitlines()
+            at = next(i for i, line in enumerate(lines) if "sr_begin(s, 0x0000150cu" in line)
+            stock = "sr_begin(s, 0x0000150cu, 0xa4a20000u); MEM_W16_PC("
+            self.assertIn(f"if (nk_enhancement_on()) {{ if (nk_enhancement_gate_30hz()) {{ {stock}", lines[at])
+            self.assertIn(f"else {{ {stock}", lines[at + 1])
+            # The jr's target is latched before the slot, and the slot runs before the return.
+            self.assertTrue(any("_sr_return_target" in line for line in lines[at - 4:at]), lines[at - 4:at])
+            self.assertIn("return;", lines[at + 2])
+
     @unittest.skipUnless(GCC, "needs a host C compiler")
     def test_gate_30hz_store_holds_each_30hz_value_for_two_updates(self) -> None:
         """Compile a field's per-update step with its store gated and run 30 Hz against 60 Hz.
@@ -1402,6 +1438,8 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
         The step is x = x / 2 + 32 on a halfword, as a cursor's inline ease does: with the
         store run on even updates only, the field takes the 30 Hz values, each for two
         updates; with the toggle off the statements are the Authentic ones byte for byte.
+        The harness uses the gate test codegen writes into the generated header. Without a host
+        C compiler (gcc on PATH) the test is skipped, as the other compiled tests are.
         """
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
@@ -1433,6 +1471,8 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                 return "\n".join(lines[at:end])
 
             enhanced, stock = step(files), step(stock_files)
+            gate_def = next(line for line in files["out_funcs.h"].decode("utf-8").splitlines()
+                            if "int nk_enhancement_gate_30hz(void)" in line)
             store = next(line.strip() for line in stock.splitlines() if "0x0000150cu" in line)
             self.assertIn("MEM_W16_PC", store)
             self.assertIn(f"if (nk_enhancement_gate_30hz()) {{ {store} }}", enhanced)
@@ -1449,8 +1489,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                     "#define MEM_W16_PC(a, v, pc) ((void)(a), (void)(pc), field = (uint16_t)(v))\n"
                     "static int on;\nint nk_enhancement_on(void) { return on; }\n"
                     "uint32_t nk_enhancement_updates;\n"
-                    "static inline int nk_enhancement_gate_30hz(void) "
-                    "{ return (nk_enhancement_updates & 1u) == 0u; }\n"
+                    f"{gate_def}\n"
                     f"static void update(CpuState *s) {{\n{body}\n}}\n"
                     "int main(void) {\n"
                     "    CpuState st; CpuState *s = &st; memset(&st, 0, sizeof st);\n"

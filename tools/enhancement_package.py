@@ -755,7 +755,8 @@ def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
         if len(set(digests)) != len(digests):
             fail(f"{path}.stock_value_digests", "stock_value_digests lists a digest twice (duplicate)")
     for key in ("stock_values", "stock_value_digests"):
-        # Only a scaling transform rewrites a store (swc1, or sw under count_x2): no other site checks values.
+        # Only a scaling transform rewrites a stored value (swc1, or sw under count_x2): no other site
+        # checks values. gate_30hz_store gates a store but never changes the value it stores.
         if key in site and transform not in SCALE_FACTORS:
             fail(f"{path}.{key}", f"{key} belongs only to a store site under a scaling transform "
                                   f"({', '.join(sorted(SCALE_FACTORS))})")
@@ -797,6 +798,8 @@ def _validate_site_extras(site: Mapping[str, Any], path: str) -> None:
             fail(f"{path}.word_count", "gate_30hz_alt names one jal (word_count 1)")
     elif "alternates" in site:
         fail(f"{path}.alternates", "alternates belongs only to gate_30hz_alt")
+    if transform == "gate_30hz_store" and site["word_count"] != 1:
+        fail(f"{path}.word_count", "gate_30hz_store names one store (word_count 1)")
 
 
 def _validate_requires(sites: Sequence[Mapping[str, Any]]) -> None:
@@ -2886,15 +2889,15 @@ def plan_site_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
     if "stock_value_digests" in site:
         if rewrite["kind"] not in ("scale_f_store", "scale_int_store"):
             raise EnhancementPackageError(
-                f"site {site['id']}: stock_value_digests belongs only to swc1 and sw store sites "
-                "(fail-closed refusal)")
+                f"site {site['id']}: stock_value_digests belongs only to a scaled swc1 or sw store "
+                "site (fail-closed refusal)")
         # Keyed digests of the stock values: the run-time check digests the value being stored
         # and scales it as _store_value_pairs() does, refusing one that leaves the range.
         rewrite["stock_value_digests"] = list(site["stock_value_digests"])
     elif "stock_values" in site:
         if rewrite["kind"] not in ("scale_f_store", "scale_int_store"):
             raise EnhancementPackageError(
-                f"site {site['id']}: stock_values belongs only to swc1 and sw store sites "
+                f"site {site['id']}: stock_values belongs only to a scaled swc1 or sw store site "
                 "(fail-closed refusal)")
         rewrite["stock_values"] = _store_value_pairs(site, rewrite)
     elif rewrite["kind"] == "scale_int_store":
@@ -3025,9 +3028,10 @@ def _plan_word_rewrite(site: Mapping[str, Any], w: int) -> dict[str, Any]:
 
     if tf == "gate_30hz_store":
         # The store of a value the code advances by one update from what it loaded: run on
-        # even updates only, it leaves memory holding the earlier value on the odd ones, so
-        # each 30 Hz value shows for two updates. A store through $sp writes the caller's
-        # own frame, which the same call may read back, so it refuses.
+        # even updates only, it does not happen on the odd ones, so each 30 Hz value shows for
+        # two updates. A store through $sp writes a slot of the function's own frame, which does
+        # not keep its value from one update to the next, so it refuses. Only the base register
+        # is read: a frame store through $fp or a copy of $sp is not seen (contract section 9.2).
         if op not in _GATE_STORE_OPS:
             _refuse(site, w, "gate_30hz_store takes an sb, sh, sw or swc1")
         if rs == 29:
