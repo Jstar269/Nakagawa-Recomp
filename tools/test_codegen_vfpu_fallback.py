@@ -402,8 +402,8 @@ int main(void) {{
         word=(0x3c<<26)|(4<<23)|(0<<16)|(1<<15)|(0x20<<8)|(0x20)  # vmscl.t 3x3, vd=0x20, vs=0x20, vt=0x00
         effect,_,_=codegen.vfpu_effect(0x5300,word)
         self.assertIn("float _sc = s->v[0];",effect)
-        self.assertIn("s->v[0] = sr_vf_mul(s->v[0], _sc);",effect)
-        self.assertNotIn("sr_vf_mul(s->v[0], s->v[0])",effect,
+        self.assertIn("s->v[0] = sr_vfpu_mul(s->v[0], _sc);",effect)
+        self.assertNotIn("sr_vfpu_mul(s->v[0], s->v[0])",effect,
                          "vmscl must not read the scalar fresh after it is overwritten")
 
     def test_vmscl_alias_snapshots_scalar_before_destructive_writes(self):
@@ -411,15 +411,15 @@ int main(void) {{
         word=(0x3c<<26)|(7<<23)|(1<<16)|(1<<15)|(0x20<<8)|(0x20)  # Matrix1 which=1, vd=0x20, vs=0x20
         effect,_,_=codegen.vfpu_effect(0x5400,word)
         self.assertIn("float _sc = s->v[4];",effect)
-        self.assertIn("s->v[0] = sr_vf_mul(s->v[0], _sc);",effect)
-        self.assertNotIn("sr_vf_mul(s->v[0], s->v[4])",effect,
+        self.assertIn("s->v[0] = sr_vfpu_mul(s->v[0], _sc);",effect)
+        self.assertNotIn("sr_vfpu_mul(s->v[0], s->v[4])",effect,
                          "vmscl alias must not read the scalar fresh after it is overwritten")
 
     def test_lane_arithmetic_goes_through_the_nan_rule_helpers(self):
         # Issue #326: C leaves the NaN a NaN-producing + - * / returns to the host, and an
         # optimiser may swap the operands of + and *. The generated code and sr_vfpu_interp
         # disagreed on NaN words at -O1/-O2 until every lane operation went through the
-        # sr_vf_* helpers in src/rt/recomp.h, so no form may emit a bare float operator.
+        # sr_vf_* and sr_vfpu_* helpers in src/rt/recomp.h, so no form may emit a bare float operator.
         words = {
             "vadd.q": 0x60048800 | 0x8080, "vsub.t": 0x60848800 | 0x8000, "vdiv.p": 0x63848880,
             "vmul.s": 0x64048800, "vdot.q": 0x64848880 | 0x8000, "vhdp.t": 0x66048800 | 0x8000,
@@ -433,7 +433,12 @@ int main(void) {{
             with self.subTest(form=name, word=f"0x{word:08x}"):
                 effect, _, _ = codegen.vfpu_effect(0x5500, word)
                 self.assertNotIn("sr_vfpu_interp", effect)
-                self.assertIn("sr_vf_", effect)
+                self.assertRegex(effect, r"sr_vf(pu)?_")
+                if name in ("vadd.q", "vsub.t", "vdiv.p", "vmul.s", "vscl.q", "vmscl.t", "vmscl alias"):
+                    # The PSP-3000 lane rule of the unrecorded vfpu-basic-arith read (2026-11-08), not the
+                    # project NaN rule the unmeasured forms still use.
+                    self.assertIn("sr_vfpu_", effect)
+                    self.assertNotIn("sr_vf_", effect)
                 self.assertIsNone(bare.search(effect), effect)
 
 
