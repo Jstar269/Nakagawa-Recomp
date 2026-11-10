@@ -524,25 +524,26 @@ jobs:
     # fixture), not hygiene: hygiene runs beside it and ci_required still requires its
     # result (docs/CI.md, "Hygiene beside the substantive gates").
     needs: [classify, public_export]
-    # The suite is ~48 minutes serially on a hosted runner under coverage (run
-    # 42270920833). Three runners split the test files with
+    # The suite is ~58 minutes serially on a hosted runner under coverage (the
+    # median of five landing-batch runs, 2026-11-10). Four runners split the test files with
     # tools/ci_test_shards.py: a deterministic longest-first bin packing over the
     # measured per-module durations in tools/ci_test_weights.json (#693). Every
     # file runs exactly once across the shards, shards never share a working
     # tree, and modules that mutate tracked state never share a shard.
     # needs.python_tools.result is the aggregate of all shards, so ci_required is
-    # unchanged. The shard list comes from the classifier: three shards over every
+    # unchanged. The shard list comes from the classifier: four shards over every
     # module, or -- when a recipe-only Makefile edit is the only reason to run
-    # Python (#702) -- three shards over the modules that can observe that edit.
-    # Three, not six, keeps a full run near 14 jobs, inside the free plan's 20
-    # concurrent jobs (docs/CI.md, "Jobs per run"). test_production_smoke alone takes
-    # about 12.5 minutes, so six shards were never shorter than that either.
+    # Python (#702) -- four shards over the modules that can observe that edit.
+    # test_production_smoke alone takes about 16 minutes and has a shard to itself;
+    # the other three plan to about 14 minutes each, and a fifth shard would not
+    # shorten the job. Four keep a full run at 16 jobs, inside the free plan's 20
+    # concurrent jobs (docs/CI.md, "Jobs per run").
     strategy:
       fail-fast: false
       matrix:
         # The fallback only keeps the expression parseable when classify produced no
         # outputs; the job's own condition skips it in that case.
-        shard: ${{ fromJSON(needs.classify.outputs.python_shards || '[0, 1, 2]') }}
+        shard: ${{ fromJSON(needs.classify.outputs.python_shards || '[0, 1, 2, 3]') }}
     if: >-
       ${{ always() && needs.classify.result == 'success' &&
           needs.public_export.result == 'success' &&
@@ -550,8 +551,8 @@ jobs:
           needs.classify.outputs.run_python == 'true' }}
     # A shard was planned at about 7 minutes of hosted-runner time and measured 17-20
     # minutes on the busy nk-wsl pool (2026-11-01) under a 30-minute limit. A shard now
-    # carries two of those (about 16 hosted minutes), so the limit doubles to 60, which
-    # still stops a hung test well before the default six hours.
+    # plans to about 14-16 hosted minutes, so the limit is doubled to 60, which still
+    # stops a hung test well before the default six hours.
     timeout-minutes: 60
     steps:
       - name: Check out repository
