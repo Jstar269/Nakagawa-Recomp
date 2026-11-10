@@ -29,7 +29,7 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_CULL
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_CULL, ACE_KEY_TEXPACK
 } AceKey;
 
 static const struct {
@@ -47,6 +47,7 @@ static const struct {
     {"tess", ACE_KEY_TESS, 1},
     {"tier", ACE_KEY_TIER, 0},
     {"cull", ACE_KEY_CULL, 0},
+    {"texpack", ACE_KEY_TEXPACK, 0},
 };
 
 int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
@@ -102,6 +103,12 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                 ok = value_on_off(v, &c.cull);
                 if (ok && c.cull && !ACE_HAS_CULL) {
                     why_set(why, why_cap, "cull is not part of this build"); return 0;
+                }
+                break;
+            case ACE_KEY_TEXPACK:
+                ok = value_on_off(v, &c.texpack);
+                if (ok && c.texpack && !ACE_HAS_TEXPACK) {
+                    why_set(why, why_cap, "texpack is not part of this build"); return 0;
                 }
                 break;
             case ACE_KEY_TIER:
@@ -172,6 +179,11 @@ int ace_format(const AceConfig *c, char *out, size_t cap) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
         n = m < 0 ? -1 : n + m;
     }
+    /* texpack likewise: written only when on. It is an Enhanced item, so either tier may carry it. */
+    if (n > 0 && (size_t)n < cap && c && c->on && c->texpack) {
+        const int m = snprintf(out + n, cap - (size_t)n, ";texpack=on");
+        n = m < 0 ? -1 : n + m;
+    }
     if (n < 0 || (size_t)n >= cap) { out[0] = '\0'; return 0; }
     return 1;
 }
@@ -190,7 +202,7 @@ static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "cull"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "cull", "texpack"
 };
 
 /* The run's observation state. */
@@ -269,6 +281,8 @@ int ace_init_spec(const char *spec, const char *report_path) {
             on_off(s_req.readout), on_off(s_req.notice), wide_word(s_req.wide),
             smooth_word(s_req.smooth), sas_word(s_req.sas), tess_word(s_req.tess));
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
+    if (s_req.texpack)
+        fprintf(stderr, "ACE_MODE: texpack on (the title's texture pack replaces the textures it lists)\n");
     return 1;
 }
 
@@ -294,6 +308,7 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_WIDE: s_eff.wide = 0; break;
     case ACE_FEATURE_SMOOTH: s_eff.smooth = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
+    case ACE_FEATURE_TEXPACK: s_eff.texpack = 0; break;
     case ACE_FEATURE_SAS: s_eff.sas = 0; break;
     default: s_eff.tess = 0; break;
     }
@@ -347,6 +362,7 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.text) used = words_add(out, cap, used, "crisp keyboard");
     if (s_eff.wide) used = words_add(out, cap, used, "ultrawide");
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
+    if (s_eff.texpack) used = words_add(out, cap, used, "texture pack");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
     if (s_eff.tess) {
@@ -777,6 +793,7 @@ size_t ace_report_json(char *out, size_t cap) {
             sas_word(s_eff.sas), tess_word(s_eff.tess));
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
+    if (s_req.texpack) ACE_PUT("  \"texpack\": %s,\n", s_eff.texpack ? "true" : "false");
     ACE_PUT("  \"unavailable\": {");
     int first = 1;
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
@@ -854,13 +871,15 @@ void ace_finish(void) {
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
     static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
-                                                ACE_HAS_CULL };
+                                                ACE_HAS_CULL, ACE_HAS_TEXPACK };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
-                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.cull };
+                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.cull,
+                                        s_eff.texpack };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
                 ? "did not run: this title has no culling package in its build, or Widescreen is off"
+                : f == ACE_FEATURE_TEXPACK ? "did not run: only the Vulkan renderer draws texture packs"
                 : "did not run: its renderer or presenter did not start");
     }
     size_t len = ace_report_json(json, sizeof(json));

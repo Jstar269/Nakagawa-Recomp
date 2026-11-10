@@ -819,7 +819,8 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     nk_ui_text_role(ui, FLOW_ID_LEAD, nk_ui_frame_text(ui, lead), NK_UI_TYPE_BODY_S,
                     theme->muted);
     if (scr_wizard_box_begin(ui, 0u)) {
-        WizardRow rows[1 + PLAYER_UI_ENHANCED_ROWS];
+        WizardRow rows[1 + PLAYER_UI_ENHANCED_ROWS + 2];
+        size_t measured;
         int count = model->enhanced_row_count < PLAYER_UI_ENHANCED_ROWS
             ? model->enhanced_row_count : PLAYER_UI_ENHANCED_ROWS;
         if (count < 0) count = 0;
@@ -831,8 +832,21 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             rows[i + 1].value = safe_text(model->enhanced_rows[i].value, "Off");
             rows[i + 1].sentence = safe_text(model->enhanced_rows[i].sentence, "");
         }
-        WizardColumn column = scr_wizard_column(ui, rows, (size_t)count + 1u, inner - 32.0f,
-                                                true);
+        measured = (size_t)count + 1u;
+        if (model->texpack_row) {
+            rows[measured].name = "Texture pack folder";
+            rows[measured].value = safe_text(model->texpack_value, "None");
+            rows[measured].sentence = safe_text(model->texpack_sentence, "");
+            measured++;
+            if (model->texpack_chosen) {
+                rows[measured].name = "Remove texture pack";
+                rows[measured].value = "Remove";
+                rows[measured].sentence =
+                    "Forgets the folder for this game. The folder is not deleted.";
+                measured++;
+            }
+        }
+        WizardColumn column = scr_wizard_column(ui, rows, measured, inner - 32.0f, true);
         if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, SET_ID_TEXT + 0x400u, rows[0].name,
                              rows[0].value, rows[0].sentence, model->enhanced_on, inner - 32.0f,
                              &column)) {
@@ -845,6 +859,21 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                                        model->enhanced_rows[i].on, off, inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART);
                 result->title_index = (size_t)i;
+            }
+        }
+        /* A title's page: its texture pack's folder, which can be chosen in any play mode. */
+        if (model->texpack_row) {
+            const size_t at = (size_t)count + 1u;
+            if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE, SET_ID_TEXT + 0x440u,
+                                 rows[at].name, rows[at].value, rows[at].sentence,
+                                 model->texpack_chosen, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_CHOOSE_TEXPACK);
+            }
+            if (model->texpack_chosen &&
+                scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE, SET_ID_TEXT + 0x444u,
+                                 rows[at + 1u].name, rows[at + 1u].value, rows[at + 1u].sentence,
+                                 false, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_REMOVE_TEXPACK);
             }
         }
         nk_ui_end_container(ui);

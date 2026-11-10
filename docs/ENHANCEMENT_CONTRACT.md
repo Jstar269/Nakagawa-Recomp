@@ -348,7 +348,10 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
 run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
-section 11.3.6) is the other key a line may leave out: a missing `cull` is off, and `cull=on` needs `tier=ace`. Every
+section 11.3.6) and `texpack` (`on` or `off`, section 11.3.4) are the other keys a line may leave out: a missing one
+is off, `cull=on` needs `tier=ace`, and either tier may carry `texpack=on`. The player writes each only when it is on,
+`cull` then `texpack`, last. With `texpack=on` the launcher also exports `SR_TEX_REPLACE`, the title's pack folder;
+it always exports that variable, empty for any other line, so an inherited folder never reaches a run. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -604,8 +607,14 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 ```json
 "enhanced": {"default": "enhanced", "af": "16", "text": "on", "readout": "off", "notice": "on", "wide": "off",
             "smooth": "off", "sas": "off", "tess": "off", "upscale": "off"},
-"title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}}
+"title_play": {"ULUS10000": {"mode": "ace", "af": "8"}, "ULES00000": {"mode": "library", "logic_60": "off"}},
+"texture_packs": {"ULUS10000": "D:\\Packs\\My HD pack"}
 ```
+
+`"texture_packs"` maps a disc ID to the folder of the texture pack the player chose for it (section 10.12), at most
+256 of them; choosing one more is refused with a message. A member that is not a disc ID and a folder string is
+skipped. Choosing a pack sets that title's `"texpack"` part on; removing it forgets the folder (the folder itself
+is untouched) and returns the part to the library's.
 
 A title's `mode` is `library`, `authentic`, `enhanced` or `ace`; a part it does not name follows the library; its
 `"logic_60": "off"` turns Ace's 60 FPS game logic off. An entry that follows the library everywhere is not written.
@@ -753,19 +762,25 @@ at `s_twin`).
 ### 10.12. Texture Replacement
 
 A user-supplied texture pack replaces guest textures in the Vulkan GE renderer (#1880), the way PPSSPP's texture
-packs do. It is guest-visible (section 11.1) and not admitted under section 11.2: section 11.3.4 is its entry, and
-this section says how it draws. The code is `src/rt/texrepl.c` (the pack reader and the hashes: no GPU, no guest
+packs do. It is guest-visible (section 11.1) and admitted under section 11.2, off by default: section 11.3.4 is its
+entry, and this section says how it draws. The code is `src/rt/texrepl.c` (the pack reader and the hashes: no GPU, no guest
 memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer`, section 10.10).
 
-- **Settings.** `SR_TEX_REPLACE=<folder>` names the pack and `SR_TEX_REPLACE_BUDGET_MB` (1 to 8192, default 256) bounds
-  the host memory its decoded images may hold, both read when the renderer starts. It takes effect only in Ace Mode:
-  in an authentic run the pack is not read whatever the environment says, and a request prints one
-  `TEX_REPLACE: off (texture replacement needs Ace Mode)` line. A folder that cannot be read, or whose
-  `textures.ini` is malformed (a line that is no comment, section or `key = value`, no `hash` type, an unknown one),
-  prints `TEX_REPLACE: refused (<reason>)` and loads nothing: a half-read pack would replace some textures and not
-  others in a way nobody asked for. There is no launch-line key, library setting or per-title setting yet; they come
-  with the launch-line pull request that follows #2074, and only that pull request admits the feature
-  (section 11.3.4).
+- **Settings.** A game's Enhanced page (section 10.5) has a **Texture pack folder** row: the player picks the pack's
+  folder, and the row shows the folder's name and how many textures it lists, or why it was refused. The part
+  **Texture pack** (`"texpack"`, on or off) turns it on and off for the library and for each title; choosing a pack
+  turns it on for that title. The launch line then carries `texpack=on` and the launcher exports the folder as
+  `SR_TEX_REPLACE` (section 10.1). `SR_TEX_REPLACE_BUDGET_MB` (1 to 8192, default 256, inherited) bounds the host
+  memory its decoded images may hold. Both are read when the renderer starts. The pack is read only in an Enhanced
+  or Ace run whose line carries `texpack=on`: an authentic run prints one
+  `TEX_REPLACE: off (texture replacement needs Enhanced or Ace)` line when the environment names a pack, and an
+  Enhanced or Ace run without the key prints `TEX_REPLACE: off (the launch line does not carry texpack=on)`; neither
+  reads it. A folder that cannot be read, or whose `textures.ini` is malformed (a line that is no comment, section or
+  `key = value`, no `hash` type, an unknown one), prints `TEX_REPLACE: refused (<reason>)` and loads nothing, and the
+  run's report names `texpack` unavailable: a half-read pack would replace some textures and not others in a way
+  nobody asked for. The player reads the pack the same way when it is chosen and again before each launch, and
+  refuses it with its reason (`TEXTURE_PACK_REFUSED`): a refused pack is never stored, and a stored pack that no
+  longer reads stops the launch until it is fixed, chosen again or turned off.
 - **The pack.** The project ships none and never downloads one: it is a folder the user made or took from a
   community, kept locally. A `textures.ini` is optional. `[options]` takes `hash = quick | xxh32 | xxh64` (required
   when the file exists; a folder with no ini reads as `quick`), `ignoreAddress`, `reduceHash`,
@@ -811,8 +826,8 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   bad_factor=, cache_peak_mb=, decode_ms=)`. Section 10.4 applies: the run is an Ace run.
 - **Not yet.** Decoding a PNG runs on the renderer thread the first time an image is needed (a worker thread, as
   scaling has, and DDS or KTX2 files come after); the tallest row a game draws is not tracked, so a 512-high texture
-  is hashed whole; same-size replacement (factor 1), mip levels, `[filtering]` and `[indexed]`, a dump switch, ZIP
-  packs and a player toggle or per-title pack folder are not done.
+  is hashed whole; same-size replacement (factor 1), mip levels, `[filtering]` and `[indexed]`, a dump switch and ZIP
+  packs are not done.
 - **Tests.** `texrepl-selftest` checks the hashes against values taken from PPSSPP's own code and published xxHash
   vectors, the ini and file-name rules, the lookup order, palette identity (against PPSSPP's formula worked out
   separately, with a pack file named the way PPSSPP names it), malformed packs, path escapes and the
@@ -820,7 +835,10 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   listed texture drawn from the pack's image from the draw that finds it, even with the 1:1 rule on, with
   `SR_TEX_REPLACE` alone and with xBRZ also on; a rewrite to unlisted
   content never drawn from the old image; the content returning replaced again; an image of no whole factor counted
-  and not used; and an authentic start reading no pack.
+  and not used; and neither an authentic start nor an Enhanced start without `texpack=on` reading a pack.
+  `ace-selftest` checks the key (optional, off when missing, on or off only, written last); `test_player_state`'s
+  `test_play_mode_texpack_settings` checks the settings round trip, the refusals, the line and the folder a launch
+  gets; `test_launch_resolution` checks that only a `texpack=on` line exports the folder.
 
 ### 10.13. Sharp Game Text
 
@@ -1320,19 +1338,19 @@ observe.
 - **Nothing worse (section 11.2, item 4):** not shown. *Hot Shots Tennis* and *LittleBigPlanet* keep smart 2D off
   (section 10.10), and neither feature may be on by default before the runs item 4 lists exist.
 
-#### 11.3.4. Texture Replacement (Not Yet Admitted)
+#### 11.3.4. Texture Replacement (`texpack=on`)
 
 The feature of section 10.12 (#1880). Its presentation is described there; this entry is what the guest can observe.
 
-- **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
-  so a frame drawn with a pack's image in place of a guest texture is the frame the guest keeps. The feature stays
-  outside section 11.2 until the requirements below exist. Until then it is reachable only through environment
-  variables, for development.
-- **Key.** None. `SR_TEX_REPLACE` and `SR_TEX_REPLACE_BUDGET_MB` are environment variables, not keys on the launch
-  line (section 10.1), and have no library or per-title setting, so the feature is not admitted. The pack itself is the user's own:
-  the project ships none.
-- **Never silent.** A run with a pack loaded prints, after its `TEX_REPLACE: on` line, one line naming the feature as
-  guest-visible, on through the environment and not admitted under section 11.2.
+- **Status: guest-visible, admitted under section 11.2, off by default.** Each present commits the frame it shows to
+  guest VRAM, so a frame drawn with a pack's image in place of a guest texture is the frame the guest keeps.
+- **Key.** `texpack=on` or `texpack=off` on the launch line (section 10.1), an optional key: a line without it is
+  off, and any other value refuses the line. The folder travels beside the line as `SR_TEX_REPLACE`, which the
+  launcher exports empty unless the line carries `texpack=on`. The library and each title can turn it on or off
+  alone (section 11.2, item 2): the part "Texture pack" on Settings > Enhanced and on each game's own page
+  (section 10.9). The pack itself is the user's own: the project ships none.
+- **Never silent.** A run with the key prints `ACE_MODE: texpack on (...)`; a run with a pack loaded prints, after
+  its `TEX_REPLACE: on` line, one line naming the feature as guest-visible under this entry.
 - **What it changes:** the frame a present commits, wherever a draw used a pack's image.
 - **VRAM bytes:** differ in those frames, at those draws' pixels.
 - **Readbacks:** differ the same way, for a GE or display readback, save picture or screenshot that covers them.
@@ -1343,11 +1361,20 @@ The feature of section 10.12 (#1880). Its presentation is described there; this 
   lengthen the frames that first draw them). Not measured on a title. The VBLANK schedule, the GE timing model and the media
   clocks are unchanged.
 - **I/O speed:** unchanged for the guest. The host reads the pack's files from its own disk, inside the folder only.
-- **Tier:** Enhanced. **Default:** off, and Ace-only: in an authentic run the pack is not read whatever the
-  environment says.
+- **Tier:** Enhanced: Enhanced and Ace runs alike. **Default:** off, and in no graphics preset. In an authentic run
+  the pack is not read whatever the environment says.
+- **Authentic stays byte-identical (section 11.2, item 1).** With the line `off`, `g_ace_on` stays 0 and
+  `tex_repl_init` reads no pack; `gpu-texscale-selftest`'s `replace` cell starts the renderer authentic and with an
+  Enhanced line without the key, with `SR_TEX_REPLACE` set, and checks that neither reads the pack.
 - **Nothing worse (section 11.2, item 4):** not shown. A pack is the user's own content, so what it does to a title
   is the pack's; the runs item 4 lists, for a title and a pack, do not exist yet, and the feature may not be on by
   default before they do.
+- **Per-title off switch (section 11.2, item 5).** None. No title is known to regress with a pack on, and a pack is
+  chosen title by title.
+- **Evidence tools (section 11.2, item 6).** The flight recorder's `runtime.enhancements` carries `texpack=on` with the
+  rest of the launch line (its `ace` string now holds the parser's 191 characters, so a line with `cull=on` and
+  `texpack=on` is kept whole), the run's report names `texpack` and whether it was available, and section 10.4's
+  refusals apply to the run unchanged.
 
 #### 11.3.5. Sharp Game Text (Not Admitted)
 

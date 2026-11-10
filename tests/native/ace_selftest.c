@@ -67,6 +67,35 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;cull=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate cull");
     }
+    /* texpack (contract 11.3.4): optional like cull, a missing key and texpack=off are both off, and
+       an Enhanced line may carry it (it is an Enhanced item, not Ace-only). */
+    {
+        static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
+        char spec[ACE_SPEC_MAX], out[ACE_SPEC_MAX];
+        CHECK(ace_parse(base, &c, why, sizeof(why)) == 1 && c.texpack == 0, "a missing texpack is off");
+        snprintf(spec, sizeof(spec), "%s;texpack=off", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.texpack == 0, "texpack=off is off");
+        snprintf(spec, sizeof(spec), "%s;texpack=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.on && c.texpack == 1 &&
+              c.tier == ACE_TIER_ENHANCED, "texpack=on in an Enhanced line");
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 11, ";texpack=on") == 0,
+              "texpack=on formats with the key last (%s)", out);
+        c.texpack = 0;
+        CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "texpack") == NULL,
+              "off writes no texpack key (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;texpack=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 1 && c.cull == 1 && c.texpack == 1 &&
+              ace_format(&c, out, sizeof(out)) && strstr(out, ";cull=on;texpack=on") != NULL,
+              "cull and texpack together (%s)", out);
+        snprintf(spec, sizeof(spec), "%s;texpack=yes", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "bad value") == 0 && c.on == 0,
+              "texpack=yes is a bad value");
+        snprintf(spec, sizeof(spec), "%s;texpack=on;texpack=on", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0,
+              "a duplicate texpack");
+        snprintf(spec, sizeof(spec), "%s;texpack=C:/packs", base);
+        CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0, "a folder is never a texpack value");
+    }
     /* Every key but tier is required, whatever its place: leaving out any one of them refuses
        the line, leaving out tier does not (src/rt/ace.c names the required keys one by one). */
     {
@@ -144,7 +173,7 @@ static void cell_parse(void) {
 
     /* format and parse agree */
     char line[ACE_SPEC_MAX];
-    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0 }, b;
+    AceConfig a = { 1, 4, 0, 1, 0, 0, 0, ACE_TIER_ENHANCED, ACE_SAS_OFF, 0, 0, 0 }, b;
     CHECK(ace_format(&a, line, sizeof(line)) && ace_parse(line, &b, NULL, 0) &&
           memcmp(&a, &b, sizeof(a)) == 0, "format round trip (%s)", line);
     CHECK(ace_format(&a, line, 8) == 0 && line[0] == '\0', "format refuses a short buffer");
@@ -264,6 +293,21 @@ static void cell_switch(void) {
     CHECK(ace_effective()->cull == 0 && ace_requested()->cull == 1 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
+    /* texpack: named in the words and the report; a refused pack is unavailable, never quietly on. */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;"
+                        "texpack=on", NULL) == 1 && ace_effective()->texpack == 1, "texpack=on turns texpack on");
+    CHECK(ace_feature_words(words, sizeof(words)) > 0 && strcmp(words, "texture pack") == 0,
+          "texpack feature words: '%s'", words);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"texpack\": true") != NULL,
+          "the report names texpack:\n%s", json);
+    ace_feature_unavailable(ACE_FEATURE_TEXPACK, "the texture pack was refused");
+    CHECK(ace_effective()->texpack == 0 && ace_requested()->texpack == 1 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"texpack\": false") != NULL &&
+          strstr(json, "the texture pack was refused") != NULL,
+          "a refused pack is reported unavailable:\n%s", json);
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off", NULL) == 1 &&
+          ace_report_json(json, sizeof(json)) > 0 && strstr(json, "texpack") == NULL,
+          "a run without texpack does not name it:\n%s", json);
 
     /* tess=4 (#2053): named in the words, the stamp's line and the report; off with its feature;
        off in the canonical line and in an authentic run. */

@@ -4449,18 +4449,31 @@ static int tex_repl_find(const TexEnt *e, NkTexReplHit *hit, int *factor) {
     return 1;
 }
 
-/* Texture replacement (#1880), read once when the renderer starts: SR_TEX_REPLACE names the pack's
- * folder, SR_TEX_REPLACE_BUDGET_MB (1 to 8192, default 256) bounds the decoded images kept. Ace Mode
- * only, like texture scaling: an authentic run names the request and obeys nothing. Replacement
- * changes the committed frame, so it is guest-visible (docs/ENHANCEMENT_CONTRACT.md, section 11.3
- * "Texture Replacement") and says so at start until its launch-line keys exist. A pack that cannot
- * be read, or whose textures.ini is malformed, is refused whole and the run goes on unreplaced. */
+/* Texture replacement (#1880), read once when the renderer starts. The launch line's texpack=on
+ * (src/rt/ace.h) turns it on and SR_TEX_REPLACE names the pack's folder; the launcher exports both,
+ * and SR_TEX_REPLACE empty unless the line carries texpack=on, so an inherited value cannot opt a
+ * launch in. SR_TEX_REPLACE_BUDGET_MB (1 to 8192, default 256) bounds the decoded images kept. An
+ * authentic run, or an Enhanced or Ace run without texpack=on, names the request and reads no pack.
+ * Replacement changes the committed frame, so it is guest-visible (docs/ENHANCEMENT_CONTRACT.md,
+ * section 11.3.4) and says so at start. A pack that cannot be read, or whose textures.ini is
+ * malformed, is refused whole, the run goes on unreplaced, and the report names it unavailable. */
 static void tex_repl_init(int enhanced) {
     s_repl = NULL;
     const char *dir = getenv("SR_TEX_REPLACE");
-    if (!dir || !dir[0]) return;
+    const int wanted = enhanced && ace_requested()->texpack;
+    if (!dir || !dir[0]) {
+        if (wanted) {
+            fprintf(stderr, "TEX_REPLACE: refused (texpack=on, but SR_TEX_REPLACE names no pack)\n");
+            ace_feature_unavailable(ACE_FEATURE_TEXPACK, "no pack folder was named");
+        }
+        return;
+    }
     if (!enhanced) {
-        fprintf(stderr, "TEX_REPLACE: off (texture replacement needs Ace Mode)\n");
+        fprintf(stderr, "TEX_REPLACE: off (texture replacement needs Enhanced or Ace)\n");
+        return;
+    }
+    if (!wanted) {
+        fprintf(stderr, "TEX_REPLACE: off (the launch line does not carry texpack=on)\n");
         return;
     }
     uint64_t budget = 0;
@@ -4470,6 +4483,7 @@ static void tex_repl_init(int enhanced) {
         const unsigned long v = strtoul(mb, &end, 10);
         if (!end || *end || mb[0] < '0' || mb[0] > '9' || v < 1ul || v > 8192ul) {
             fprintf(stderr, "TEX_REPLACE: refused (SR_TEX_REPLACE_BUDGET_MB takes 1 to 8192)\n");
+            ace_feature_unavailable(ACE_FEATURE_TEXPACK, "SR_TEX_REPLACE_BUDGET_MB takes 1 to 8192");
             return;
         }
         budget = (uint64_t)v << 20;
@@ -4478,8 +4492,10 @@ static void tex_repl_init(int enhanced) {
     s_repl = nk_texrepl_open(dir, budget, err, sizeof(err));
     if (!s_repl) {
         fprintf(stderr, "TEX_REPLACE: refused (%s)\n", err);
+        ace_feature_unavailable(ACE_FEATURE_TEXPACK, "the texture pack was refused");
         return;
     }
+    ace_confirm(ACE_FEATURE_TEXPACK);
     /* The copies' VRAM is the scaled-copy budget, which a refused SR_TEX_SCALE setting leaves at 0. */
     if (!nk_tex_scale_config()->budget_bytes) {
         NkTexScaleConfig c = *nk_tex_scale_config();
@@ -4491,9 +4507,8 @@ static void tex_repl_init(int enhanced) {
             kind[nk_texrepl_hash_kind(s_repl)], (unsigned long long)nk_texrepl_entry_count(s_repl),
             (unsigned long long)nk_texrepl_diag_count(s_repl),
             (unsigned long long)((budget ? budget : (uint64_t)NK_TEXREPL_DEFAULT_BUDGET_MB << 20) >> 20));
-    fprintf(stderr, "TEX_REPLACE: guest-visible, on through SR_TEX_REPLACE and not admitted under contract "
-                    "section 11.2 (each present commits the frame to guest VRAM; see the contract's "
-                    "\"Texture Replacement\" entry)\n");
+    fprintf(stderr, "TEX_REPLACE: guest-visible (contract section 11.3.4): each present commits the frame, "
+                    "with the pack's images in it, to guest VRAM\n");
     tex_repl_flush_notes();
 }
 

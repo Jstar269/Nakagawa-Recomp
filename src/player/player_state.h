@@ -234,6 +234,10 @@ typedef enum {
     PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
                                   runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
                                   not in the SR_ACE line */
+    PLAYER_PART_TEXPACK,       /* the title's texture pack (#1880, contract 11.3.4): 0 off, 1 on. In
+                                  effect only for a title with a pack chosen (PlayerTitlePack); the
+                                  line carries texpack=on and the folder reaches the runtime as
+                                  SR_TEX_REPLACE (NkRuntimeConfig.texpack_dir) */
     PLAYER_PART_COUNT
 } PlayerEnhancedPart;
 
@@ -262,6 +266,26 @@ typedef struct {
     /* Ace's own parts, each -1 (on, the default) or 0 (off for this title). */
     int logic_60;                  /* the title's 60 FPS game logic package */
 } PlayerTitlePlay;
+
+/* A title's texture pack (docs/ENHANCEMENT_CONTRACT.md 10.12): the folder the player chose for it,
+   kept in settings.json's "texture_packs" map by disc ID. The folder is the player's own; the
+   project ships no pack. At most PLAYER_MAX_TITLE_PACKS titles have one: choosing one more says
+   so and stores nothing. */
+#define PLAYER_MAX_TITLE_PACKS 256
+typedef struct {
+    char key[PLAYER_DISC_ID_KEY_LEN];
+    char path[NK_MAX_PATH];
+} PlayerTitlePack;
+
+/* What a pack holds, as the title's page shows it, from reading it the way the runtime does
+   (src/rt/texrepl.h). A pack that fails that reading is refused whole, never half-applied. */
+typedef struct {
+    bool ok;
+    char name[128];        /* the folder's own name */
+    size_t textures;       /* the textures it lists, replacements and "leave alone" lines alike */
+    size_t notes;          /* what it holds that this build reads and does not apply */
+    char error[256];       /* why it was refused, when !ok */
+} PlayerTexturePackInfo;
 
 /* What a title launches with (player_play_resolve). */
 typedef struct {
@@ -318,6 +342,8 @@ typedef struct {
     PlayerEnhancedSettings enhanced;
     PlayerTitlePlay title_play[MAX_LIBRARY_GAMES];
     int title_play_count;
+    PlayerTitlePack title_packs[PLAYER_MAX_TITLE_PACKS];
+    int title_pack_count;
     /* Builds keep the compiled system libraries a disc carries in the data folder and
        reuse them for other games with the same library (#1306). On by default; the
        copies never leave this PC. */
@@ -885,6 +911,14 @@ struct PlayerApp {
        main.c opens it, and the folder picked waits in saves_picked (saves_pick_ready) until
        the Saves dialog takes it. A cancelled dialog leaves nothing. */
     bool request_save_folder_picker;
+    /* A title's Enhanced page asks for the host folder dialog to choose its texture pack; main.c
+       opens it and hands the folder to player_app_set_enhanced_page_pack. */
+    bool request_texpack_folder_picker;
+    /* The pack of the title whose Enhanced page is open, read when the page opens or the pack
+       changes (player_app_title_pack_info), so the page never scans a folder each frame. */
+    char texpack_page_key[PLAYER_DISC_ID_KEY_LEN];
+    char texpack_page_path[NK_MAX_PATH];
+    PlayerTexturePackInfo texpack_page_info;
     int saves_pick_index;
     bool saves_pick_ready;
     char saves_picked[NK_MAX_PATH];
@@ -1674,6 +1708,7 @@ void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off;tess=off" (tier=ace for Ace; smooth=match is never written).
  * ";cull=on" follows only for Ace with the Wider culling part on; a missing cull is off.
+ * ";texpack=on" follows, last, only with the Texture pack part on for a title that has a pack.
  * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);
 /* The presentation upscaler a resolution asks for (NkRuntimeConfig.present_upscale, exported as
@@ -1687,6 +1722,23 @@ int player_play_present_upscale(const PlayerPlayResolved *play);
 void player_play_config_session(const PlayerSettings *settings, const char *disc_id,
                                 bool logic_60_package, bool acceptance, NkRuntimeConfig *config,
                                 PlayerPlayResolved *out);
+/* The folder chosen as a disc's texture pack, or NULL when it has none. */
+const char *player_settings_title_pack(const PlayerSettings *settings, const char *disc_id);
+/* Reads the pack at `path` as the runtime will (src/rt/texrepl.h) and fills *out. Returns out->ok:
+ * false, with out->error saying why, for a folder that cannot be read or a malformed
+ * textures.ini. It decodes no image. */
+bool player_texture_pack_inspect(const char *path, PlayerTexturePackInfo *out);
+/* A title's texture pack (its Enhanced page). Choosing reads the pack first: one that fails is
+ * refused with a TEXTURE_PACK_REFUSED message and nothing changes; one that reads is stored and
+ * the title's Texture pack part is set On. Returns whether it was stored. Removing forgets the
+ * folder (the folder itself is untouched) and returns the part to the library's. */
+bool player_app_set_title_pack(PlayerApp *app, int game_index, const char *path);
+void player_app_clear_title_pack(PlayerApp *app, int game_index);
+/* The same for the title whose Enhanced page is open; nothing for the library's page. */
+bool player_app_set_enhanced_page_pack(PlayerApp *app, const char *path);
+void player_app_clear_enhanced_page_pack(PlayerApp *app);
+/* The pack of the title whose page is open, as last read, or NULL when it has none. */
+const PlayerTexturePackInfo *player_app_title_pack_info(const PlayerApp *app, int game_index);
 /* <user_root>/ace/<disc ID>.json: the runtime's per-run report for that disc. */
 bool player_ace_report_path(const char *user_root, const char *disc_id, char *out, size_t cap);
 /* The title page's "Last session" line from that report ("Last session: 16x filtering,

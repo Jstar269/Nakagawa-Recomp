@@ -154,6 +154,8 @@ struct PlayerUiNk {
     char enhanced_title[160];
     char enhanced_mode[48];
     char enhanced_values[PLAYER_UI_ENHANCED_ROWS][48];
+    char texpack_value[200];
+    char texpack_sentence[360];
     char settings_tools[PLAYER_UI_SETTINGS_TOOLS][192];
     /* The factory reset check's folders, looked up when the check opens. */
     char reset_folders[PLAYER_UI_RESET_FOLDERS][NK_MAX_PATH];
@@ -882,6 +884,30 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         model->enhanced_mode_sentence = app->title_enhancements[title].available
             ? "Ace is Enhanced plus this game's own 60 FPS game logic."
             : "Enhanced adds the parts below. " PLAYER_UI_ACE_NEEDS_PACKAGE;
+        /* The title's texture pack (contract 10.12): its folder's name and what it lists, as
+           read when the page opened or the pack changed. */
+        const char *pack = player_settings_title_pack(settings, game->disc_id);
+        const PlayerTexturePackInfo *info = player_app_title_pack_info(app, title);
+        model->texpack_row = true;
+        model->texpack_chosen = pack != NULL;
+        if (!pack) {
+            snprintf(player->texpack_value, sizeof(player->texpack_value), "None");
+            snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
+                     "Choose the folder of a texture pack you made or downloaded for this game. "
+                     "Nakagawa ships none.");
+        } else if (info && info->ok) {
+            snprintf(player->texpack_value, sizeof(player->texpack_value), "%s \xC2\xB7 %zu %s",
+                     info->name, info->textures, info->textures == 1u ? "texture" : "textures");
+            snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
+                     "Used while Texture pack is on and the game runs Enhanced or Ace.");
+        } else {
+            snprintf(player->texpack_value, sizeof(player->texpack_value), "Refused");
+            snprintf(player->texpack_sentence, sizeof(player->texpack_sentence),
+                     "This pack can't be used: %s. Choose it again once it is fixed.",
+                     info && info->error[0] ? info->error : "it was not read");
+        }
+        model->texpack_value = player->texpack_value;
+        model->texpack_sentence = player->texpack_sentence;
     }
     model->enhanced_row_count = 0;
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {

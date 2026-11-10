@@ -608,7 +608,9 @@ typedef enum {
     PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER,
     PLAYER_UI_SETTINGS_OPEN_DATA_FOLDER,     /* the folder holding the library, games and settings */
     PLAYER_UI_SETTINGS_OPEN_LOGS,            /* the folder holding the logs */
-    PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED     /* Background, Balanced, Fastest */
+    PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED,    /* Background, Balanced, Fastest */
+    PLAYER_UI_SETTINGS_CHOOSE_TEXPACK,       /* a title's Enhanced page: pick its pack's folder */
+    PLAYER_UI_SETTINGS_REMOVE_TEXPACK        /* a title's Enhanced page: forget its pack */
 } PlayerUiSettingsOp;
 
 /* Settings > Enhanced's rows after the play mode: one per Enhanced part (player_state.h
@@ -684,6 +686,12 @@ typedef struct {
     bool enhanced_on;               /* Enhanced or Ace in effect: the part rows can change */
     int enhanced_row_count;
     PlayerUiEnhancedRow enhanced_rows[PLAYER_UI_ENHANCED_ROWS];
+    /* A title's page only (texpack_row): the Texture pack folder row, its pack's name and texture
+       count or "None", and, with a pack chosen, a Remove row. */
+    bool texpack_row;
+    bool texpack_chosen;
+    const char *texpack_value;      /* "HD pack · 1,204 textures", "None" */
+    const char *texpack_sentence;
     const char *controller_line;    /* "Keyboard ready" or the pad's name */
     const char *saves_folder;
     const char *notice;             /* a settings notice (a failed save), or NULL */
@@ -1093,6 +1101,8 @@ enum {
     PLAYER_UI_ID_SETTINGS_OPEN_DATA_FOLDER = 0x4553u, /* Settings: shows the data folder */
     PLAYER_UI_ID_SETTINGS_OPEN_LOGS = 0x4554u,        /* Settings: shows the logs folder */
     PLAYER_UI_ID_SETTINGS_BUILD_SPEED = 0x4555u,      /* Build tools and cache: Build speed */
+    PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE = 0x455Au,   /* a title's Enhanced page: Texture pack folder */
+    PLAYER_UI_ID_SETTINGS_TEXPACK_REMOVE = 0x455Bu,   /* a title's Enhanced page: Remove texture pack */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
     PLAYER_UI_ID_CONTROLLER_DEADZONE_UP = 0x4622u,

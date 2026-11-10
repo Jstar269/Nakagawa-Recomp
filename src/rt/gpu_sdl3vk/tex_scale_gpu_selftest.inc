@@ -971,10 +971,17 @@ static int xst_cell_replace(int f) {
     tex_repl_init(0);
     const int authentic_read = s_repl != NULL;
     tex_repl_shutdown();
+    /* The off switch (contract 11.2 item 2): this harness's Enhanced line has no texpack=on, so an
+     * Enhanced start with SR_TEX_REPLACE set reads no pack either. */
+    const int off_read = !ace_requested()->texpack && (tex_repl_init(1), s_repl != NULL);
+    tex_repl_shutdown();
     xst_setenv("SR_TEX_REPLACE", NULL);
     s_repl = saved;
-    if (authentic_read) {
-        fprintf(stderr, "gpu texscale selftest: FAIL replace: an authentic start read SR_TEX_REPLACE\n");
+    if (authentic_read || off_read || ace_requested()->texpack) {
+        fprintf(stderr, "gpu texscale selftest: FAIL replace: %s\n",
+                authentic_read ? "an authentic start read SR_TEX_REPLACE"
+                : off_read ? "an Enhanced start without texpack=on read SR_TEX_REPLACE"
+                : "the harness line carries texpack=on, so the off switch is not tested");
         free(rimg); free(wide);
         return 0;
     }

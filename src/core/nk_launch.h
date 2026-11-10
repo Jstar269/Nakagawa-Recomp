@@ -96,6 +96,10 @@ typedef struct {
        the player creates its folder. */
     char ace_spec[192];  /* SR_ACE, as long as src/rt/ace.h ACE_SPEC_MAX */
     char ace_report_path[NK_MAX_PATH];
+    /* The title's texture pack (docs/ENHANCEMENT_CONTRACT.md 10.12), exported as SR_TEX_REPLACE
+       only while ace_spec carries texpack=on, and empty otherwise, so an inherited folder can
+       never reach a launch. */
+    char texpack_dir[NK_MAX_PATH];
 } NkRuntimeConfig;
 
 typedef struct {
