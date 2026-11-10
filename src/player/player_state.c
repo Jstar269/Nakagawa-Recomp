@@ -2786,12 +2786,37 @@ void player_app_toggle_ui_sounds(PlayerApp *app) {
     maybe_persist_settings(app);
 }
 
-bool player_read_title_enhancement(const char *user_root, const GameRecord *game,
-                                   PlayerTitleEnhancement *out) {
+bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    char cli[NK_MAX_PATH];
+    if (!app || !package_builder_find_cli(app->install_root, cli, sizeof(cli))) return false;
+    /* <source>/tools/nk_cli.py: drop the last two components. */
+    for (int drop = 0; drop < 2; drop++) {
+        char *cut = NULL;
+        for (char *p = cli; *p; p++) {
+            if (*p == '/' || *p == '\\') cut = p;
+        }
+        if (!cut) {
+            if (drop == 0) return false;
+            cli[0] = '\0';  /* a relative tools/nk_cli.py: the source tree is "." */
+            break;
+        }
+        *cut = '\0';
+    }
+    char assets[NK_MAX_PATH];
+    return player_join_path(assets, sizeof(assets), cli[0] ? cli : ".", "assets") &&
+           player_join_path(out, out_size, assets, "enhancements");
+}
+
+bool player_read_title_enhancement(const char *user_root, const char *shipped_root,
+                                   const GameRecord *game, PlayerTitleEnhancement *out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     char key[PLAYER_DISC_ID_KEY_LEN];
-    if (!user_root || !user_root[0] || !game || game->is_sample ||
+    bool have_user = user_root && user_root[0];
+    bool have_shipped = shipped_root && shipped_root[0];
+    if ((!have_user && !have_shipped) || !game || game->is_sample ||
         game->is_showcase_package || !game->title_id[0] ||
         !player_disc_id_key(game->disc_id, key)) {
         return false;
@@ -2801,11 +2826,16 @@ bool player_read_title_enhancement(const char *user_root, const GameRecord *game
     snprintf(leaf, sizeof(leaf), "%s-60hz.json", key);
     char folder[MAX_PATH_LEN];
     char path[MAX_PATH_LEN];
-    if (!player_join_path(folder, sizeof(folder), user_root, "enhancements") ||
-        !player_join_path(path, sizeof(path), folder, leaf) ||
-        !nk_platform_file_exists(path)) {
-        return false;
+    bool found = have_user &&
+                 player_join_path(folder, sizeof(folder), user_root, "enhancements") &&
+                 player_join_path(path, sizeof(path), folder, leaf) &&
+                 nk_platform_file_exists(path);
+    if (!found && have_shipped && player_join_path(path, sizeof(path), shipped_root, leaf) &&
+        nk_platform_file_exists(path)) {
+        found = true;
+        out->shipped = true;
     }
+    if (!found) return false;
     FILE *f = nk_fopen_utf8(path, "rb");
     if (!f) {
         snprintf(out->problem, sizeof(out->problem), "Its enhancement package can't be read.");
@@ -2895,9 +2925,12 @@ static void player_app_select_package_variant(PlayerApp *app, int game_index) {
 void player_app_refresh_title_enhancements(PlayerApp *app) {
     if (!app) return;
     char user_root[NK_MAX_PATH];
+    char shipped[NK_MAX_PATH];
     bool have_root = player_app_data_root(app, user_root, sizeof(user_root));
+    bool have_shipped = player_app_shipped_enhancements_root(app, shipped, sizeof(shipped));
     for (int i = 0; i < app->game_count && i < MAX_LIBRARY_GAMES; i++) {
-        (void)player_read_title_enhancement(have_root ? user_root : NULL, &app->games[i],
+        (void)player_read_title_enhancement(have_root ? user_root : NULL,
+                                            have_shipped ? shipped : NULL, &app->games[i],
                                             &app->title_enhancements[i]);
         player_app_select_package_variant(app, i);
     }
@@ -2908,8 +2941,11 @@ void player_app_refresh_title_enhancements(PlayerApp *app) {
    package checked. */
 static void player_app_title_play_changed(PlayerApp *app, int game_index) {
     char user_root[NK_MAX_PATH];
+    char shipped[NK_MAX_PATH];
     bool have_root = player_app_data_root(app, user_root, sizeof(user_root));
+    bool have_shipped = player_app_shipped_enhancements_root(app, shipped, sizeof(shipped));
     (void)player_read_title_enhancement(have_root ? user_root : NULL,
+                                        have_shipped ? shipped : NULL,
                                         &app->games[game_index],
                                         &app->title_enhancements[game_index]);
     player_app_select_package_variant(app, game_index);
