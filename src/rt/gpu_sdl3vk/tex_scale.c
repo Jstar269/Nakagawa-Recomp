@@ -663,3 +663,29 @@ int nk_tex_soft_shadow_digest(const uint8_t key[32], const uint32_t *rgba, uint3
     sr_vfpu_hmac_sha256(key, 32u, parts, lens, 3u, digest);
     return 1;
 }
+
+size_t nk_tex_soft_candidate_line(char *out, size_t cap, uint32_t w, uint32_t h, const uint8_t digest[32]) {
+    static const char k_hex[] = "0123456789abcdef";
+    char hex[65];
+    if (!out || !digest) return 0;
+    for (int i = 0; i < 32; i++) {
+        hex[2 * i] = k_hex[digest[i] >> 4];
+        hex[2 * i + 1] = k_hex[digest[i] & 15u];
+    }
+    hex[64] = '\0';
+    const int n = snprintf(out, cap, "SOFT_SHADOW: candidate %ux%u digest=%s", (unsigned)w, (unsigned)h, hex);
+    if (n < 0 || (size_t)n >= cap) {
+        if (cap) out[0] = '\0';
+        return 0;
+    }
+    return (size_t)n;
+}
+
+int nk_tex_soft_candidate_first(NkTexSoftCandidates *seen, const uint8_t digest[32]) {
+    if (!seen || !digest) return 0;
+    for (uint32_t i = 0; i < seen->count; i++)
+        if (memcmp(seen->digest[i], digest, 32) == 0) return 0;
+    if (seen->count >= NK_TEX_SOFT_CANDIDATES_MAX) return -1;
+    memcpy(seen->digest[seen->count++], digest, 32);
+    return 1;
+}

@@ -437,35 +437,54 @@ that a player turns on or off apart from the 60 FPS game logic. The field is an 
 
 ```json
 "ace_parts": {"load": {"sites": [{"id": "...", "function": "...", "insn_offset": 0, "stock_digest": "...",
-                                  "transform": "vblank_wait_skip"}]}}
+                                  "transform": "vblank_wait_skip"}]},
+              "soft_shadows": {"textures": [{"id": "...", "texture_digest": "...", "transform": "alpha_edge_soften",
+                                             "edge_texels": 2}]}}
 ```
 
-- **Names.** The part names are a closed list: today only `load` (section 11.3.10). Any other name refuses the
-  package, as does an empty `ace_parts` or a part with no sites.
+- **Names.** The part names are a closed list: today `load` (section 11.3.10) and `soft_shadows` (sections 10.23 and
+  11.3.13). Any other name refuses the package, as does an empty `ace_parts`, a `load` part with no sites or a
+  `soft_shadows` part with no textures.
 - **Sites.** Each site has an `id`, a symbolic `function`, a 4-byte-aligned `insn_offset`, the `stock_digest` of one
   stock instruction word, an optional `word_count` that may only be 1, and a `transform` from the parts' own list
   (below). A site resolves and is verified like a `sites` entry (section 9.2), fail-closed, and in a published
   package (section 5.1) its function is in the site map and its digest is keyed, as for `sites`.
+- **Textures.** `soft_shadows` holds `textures`, not sites: 1 to 256 entries, each with an `id`, a `texture_digest`,
+  the `transform` `alpha_edge_soften` and `edge_texels`, the width of the texture's stock alpha ramp in source
+  texels, from 1 to 4. The digest is 64 lowercase hex digits and is always keyed: it is the HMAC-SHA-256 of the
+  texture under the executable's stock-digest key (section 5.1), by the match rule of section 10.23, in a private
+  package as in a published one. Publishing therefore leaves it as it is, and the published-text check passes it as
+  a digest slot while it still checks every other string of the entry. A digest declared twice refuses the package.
+  A texture is not in the executable, so the build cannot verify a digest: the renderer matches it at draw time.
 - **One namespace.** Site ids and instruction words are shared by `sites`, every part's sites and the
-  `update_boundary`. The validator refuses a duplicate id, an Ace part site on a word a `sites` entry (any of its
-  `word_count` words), another part site or the `update_boundary` already covers, an Ace part site that declares
+  `update_boundary`; a texture's `id` is in the same id namespace. The validator refuses a duplicate id, an Ace part
+  site on a word a `sites` entry (any of its `word_count` words), another part site or the `update_boundary` already
+  covers, an Ace part site that declares
   `requires`, and any `requires` that names an Ace part site. It compares words by `function` and `insn_offset` in a
   private declaration, and again by site-map address in a published package (section 5.1), whose site map may give
   one address two names; the publish gate runs the same check. Codegen compares the resolved addresses, whatever
   the names: it refuses a part site whose word is a 60 Hz site's word or the boundary's.
 - **Their own transforms.** The parts' transforms are a set of their own, disjoint from the transforms of section
   9.2: a 60 Hz transform in `ace_parts`, or a part transform in `sites`, is an unknown transform and refuses the
-  package.
+  package. Each part transform is valid in one place only: `vblank_wait_skip` in `load.sites` and
+  `alpha_edge_soften` in `soft_shadows.textures`; written anywhere else it refuses the package.
 - **Their own switch.** A part site is gated at run time only by its part's `SR_ACE` key (section 10.1), never by
   `SR_EXPERIMENTAL_60HZ` or the update count. With the key off the stock statement runs. A package without
   `ace_parts` generates exactly the code it generated before; with them, the generated C differs only at each part
   site's statement, at the `update_boundary`'s statement, which also calls `nk_ace_load_update()` for the `load`
-  part's pacing guard (section 11.3.10), and in the declaration digest, which covers `ace_parts` like every other
-  field, so the AOT cache key changes with it.
+  part's pacing guard (section 11.3.10), by the `soft_shadows` declaration below, and in the declaration digest,
+  which covers `ace_parts` like every other field, so the AOT cache key changes with it.
+- **The soft-shadow declaration.** A `soft_shadows` part rewrites no instruction. The generated `sr_register_all`
+  hands its textures to the runtime once, before the guest runs and whatever `SR_EXPERIMENTAL_60HZ` says:
+  `nk_ace_soft_shadows_declare(key, digests, count, edge_texels)` (`src/rt/ace.h`) with the executable's
+  stock-digest key (`enhancement_package.published_digest_key`, derived from the user's own executable, so it lives
+  only in their build), the declared digests in order and their edge widths. The runtime uses them only while the
+  run's `shadow=soft` is in effect (section 10.23).
 
 | Transform | Instructions with a defined rewrite | Rewrite |
 | --- | --- | --- |
 | `vblank_wait_skip` | `jal` whose target is the executable's import stub of `sceDisplayWaitVblankStart` (NID `0x984C27E7`); any other target refuses the package | the delay slot runs as stock; the call runs unless the runtime skips it (`nk_ace_load_skip_wait()`), which it does only while the run's `load=fast` is in effect and waits are permitted, that is, where the stock call would block. A skipped call still blocks the thread, for 1 µs, the shortest delay wait the scheduler has (that of `sceKernelDelayThread(1)`), so ready threads of any priority run as during the stock wait, and it leaves `$v0` = 0, the stock function's return there. Where waits are not permitted the stock call runs and returns `CAN_NOT_WAIT`. A package with a `load` part must declare an `update_boundary`, and the site may not be in its function, compared by name, by site-map address in a published package, and by resolved address in codegen. Nothing else about where the site sits is checked: a wait in a caller or a callee of the boundary's function is accepted, and the site's own evidence must show it is reached only while loading (section 11.3.10) |
+| `alpha_edge_soften` | none: it names a texture by its keyed digest, not an instruction | none in the generated code; while the run's `shadow=soft` is in effect, the Vulkan GE renderer draws a matching texture from a copy with a softened alpha edge (section 10.23) |
 
 ### 9.9. A Code-Hook Package Beside the Timing Package
 
@@ -2060,9 +2079,10 @@ filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in 
   `nk_ace_soft_shadows_declare(key, digests, count, edge_texels)` (`src/rt/ace.h`) before the renderer starts: a
   32-byte key, at most 256 digests, and for each one an edge width of 1 to 4 source texels. A declaration with a
   missing key, more than 256 digests or an edge outside that range is refused whole and says why on one
-  `ACE_MODE: soft shadow declaration refused (...)` line. The declaration's source is the package field
-  `ace_parts.soft_shadows`, which is not in this build's package schema, so nothing declares a texture yet and the
-  part reports itself unavailable (section 11.3.13).
+  `ACE_MODE: soft shadow declaration refused (...)` line. The declaration comes from the title's package field
+  `ace_parts.soft_shadows` (section 9.8): the generated `sr_register_all` passes the executable's stock-digest key,
+  the declared texture digests in order and their `edge_texels`, once, before the guest runs. A build whose package
+  has no such part declares nothing, and a run with the part on reports it unavailable (section 11.3.13).
 - **Match.** A texture is a candidate only when it has one mip level and is at most 64 x 64 texels, and no
   replacement pack image (section 10.12) is found for it. Its digest is HMAC-SHA-256 (RFC 2104, on the runtime's
   SHA-256) under the declared key, over the bytes `soft shadow texture v1`, a zero byte, the width and height as
@@ -2071,6 +2091,16 @@ filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in 
   remade after a reclaim do not hash it again; a texture the guest uploads again is hashed again. A texture whose
   digest is not declared is drawn as before. A match is counted when it is hashed, so a declared texture that is
   also a render target counts as matched but is never drawn soft (below).
+- **Finding a digest (`SR_ACE_SHADOW_CANDIDATES`).** A package author finds the digest a texture's
+  `texture_digest` must hold by running the title with the part on and `SR_ACE_SHADOW_CANDIDATES=1` (exactly `1`;
+  any other value lists nothing). After `SOFT_SHADOWS: listing candidates (...)`, the renderer prints, on stderr,
+  `SOFT_SHADOW: candidate <w>x<h> digest=<64 lowercase hex digits>` once for each distinct content it hashes, that is
+  for every texture the match rule above considers, declared or not, with its size in decimal. A run lists at most
+  1,024 distinct digests; past that, one `SOFT_SHADOWS: candidates past 1024 distinct textures are not listed` line
+  says so. The renderer hashes only while a declaration is in force, and a declaration needs the key and at least
+  one texture: to list candidates for a title whose shadow digest is not known yet, the author declares one
+  placeholder texture (any 64 lowercase hex digits, which no texture matches) and replaces it with the digests found.
+  A listing names sizes and keyed digests, never texels.
 - **Softened copy.** A match takes a 4x copy through the scaled-copy machinery of section 10.10: its VRAM budget
   (512 MiB when `SR_TEX_SCALE` sets none), its reclaim, retry and stale rules, and the texture's own filter and wrap
   state as the copy's sampler. The copy is made on the renderer thread and stored at once, as a replacement image is,
@@ -2099,7 +2129,11 @@ filter `nk_tex_soften_alpha_edge` and the digest `nk_tex_soft_shadow_digest` in 
   - `tex-scale-selftest` checks the filter against a direct, unseparated reference on a synthetic disc, pins one
     output row at edge 1, and checks the interior and alpha-mass guarantees, a monotone ramp and determinism for every
     edge width, and the size refusals. It also checks HMAC-SHA-256 against RFC 4231 test cases 1, 2 and 6 and pins
-    the match rule's digest for a synthetic 2 x 1 texture.
+    the match rule's digest for a synthetic 2 x 1 texture, the candidate line for that digest, and the
+    once-per-content table behind it.
+  - `tools/test_enhancement_package.py` (`TestAcePartsSoftShadows`) checks the part's schema and validation, its
+    published form, that the declaration digest and the cache key cover it, and, on a synthetic executable, the one
+    declaration call codegen emits with the executable's key and the declared digests, and none without the part.
   - `ace-selftest` pins the key, its values, its Ace gate, the declaration's refusals and the report fields.
   - `gpu-coherence-selftest --case soft-shadow` draws two synthetic CLUT4 discs magnified at render scale 4 with the
     part on, off and undeclared. The declared disc gets a smooth ramp and keeps its interior, and the undeclared one
@@ -3137,10 +3171,11 @@ The feature of section 10.23. How it draws is described there; this entry is wha
 
 - **Status: guest-visible, not admitted under section 11.2.** Each present commits the frame it shows to guest VRAM,
   so a frame drawn with a softened shadow is the frame the guest keeps. Its key, its library and per-title settings
-  and this entry are in place (section 11.2, items 2, 3 and 6). Its declaration arrives through the package's
-  `ace_parts.soft_shadows`, which is not in this build yet, so every run with the part on reports it unavailable
-  (`ACE_MODE: shadow unavailable (nothing declared: this build's package carries no ace_parts.soft_shadows
-  textures)`), and the runs of item 4 do not exist.
+  and this entry are in place (section 11.2, items 2, 3 and 6). Its declaration comes from the package's
+  `ace_parts.soft_shadows` (section 9.8), which generated code passes to the runtime once at start. No title's
+  package declares one yet, so every run with the part on reports it unavailable (`ACE_MODE: shadow unavailable
+  (nothing declared: this build's package carries no ace_parts.soft_shadows textures)`), and the runs of item 4 do
+  not exist.
 - **Mechanism.** A one-level texture of at most 64 x 64 texels whose keyed digest the package declares is drawn from
   a 4x copy whose alpha edge is widened and smoothed (section 10.23), at every render scale, 1x included. The guest's
   texture, its CLUT and every other draw are unchanged.
@@ -3169,7 +3204,8 @@ The feature of section 10.23. How it draws is described there; this entry is wha
 - **Package obligations.** The package declares only textures that are shadows: a texture drawn for anything else
   would be softened too. The published digest is keyed, so it names a texture without revealing it: the package
   publishes no size, palette or texel data. The edge width it declares is the width of the stock ramp, in source
-  texels.
+  texels. The author finds each digest with `SR_ACE_SHADOW_CANDIDATES=1` (section 10.23), which changes nothing the
+  guest observes: it only prints lines on stderr.
 - **Limits.** It changes a shadow's edge, not its shape, position or the geometry it falls on. A shadow drawn as
   several textures, drawn with mip levels, larger than 64 x 64, or drawn by the software renderer is not softened.
   Real cast shadows are a separate, scene-level layer (section 10.23, "Next layer").

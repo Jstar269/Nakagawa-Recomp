@@ -845,9 +845,39 @@ static void test_soft_digest(void) {
     if (!s_fail) printf("tex scale selftest: PASS soft-digest RFC 4231 cases 1, 2 (split), 6; match rule pinned\n");
 }
 
+/* SR_ACE_SHADOW_CANDIDATES's line and its once-per-content table. */
+static void test_soft_candidates(void) {
+    uint8_t k32[32], mac[32], other[32];
+    char line[128];
+    for (int i = 0; i < 32; i++) k32[i] = (uint8_t)i;
+    const uint32_t tex[2] = { 0x44332211u, 0xFF000000u };
+    CHECK(nk_tex_soft_shadow_digest(k32, tex, 2, 1, mac) == 1, "candidates: the pinned texture is not hashed");
+    static const char want[] =
+        "SOFT_SHADOW: candidate 2x1 digest=6259af8807b016b8212bfd7ed918982b72303aa2a138fec1deb09815437ac7cb";
+    CHECK(nk_tex_soft_candidate_line(line, sizeof(line), 2, 1, mac) == strlen(want) && strcmp(line, want) == 0,
+          "candidates: the line is '%s'", line);
+    CHECK(nk_tex_soft_candidate_line(line, strlen(want), 2, 1, mac) == 0 && line[0] == '\0',
+          "candidates: a line one byte too long for its buffer is written");
+    CHECK(nk_tex_soft_candidate_line(line, sizeof(line), 64, 64, mac) > 0 &&
+          strncmp(line, "SOFT_SHADOW: candidate 64x64 digest=", 36) == 0, "candidates: 64x64 reads '%s'", line);
+    static NkTexSoftCandidates seen;
+    seen.count = 0;
+    memcpy(other, mac, 32);
+    other[31] ^= 1u;
+    CHECK(nk_tex_soft_candidate_first(&seen, mac) == 1 && nk_tex_soft_candidate_first(&seen, mac) == 0 &&
+          nk_tex_soft_candidate_first(&seen, other) == 1 && seen.count == 2,
+          "candidates: a content is not listed exactly once");
+    seen.count = NK_TEX_SOFT_CANDIDATES_MAX;
+    other[0] ^= 1u;
+    CHECK(nk_tex_soft_candidate_first(&seen, other) == -1 && seen.count == NK_TEX_SOFT_CANDIDATES_MAX &&
+          nk_tex_soft_candidate_first(&seen, mac) == 0, "candidates: a full table records a new digest");
+    if (!s_fail) printf("tex scale selftest: PASS soft-shadow candidate line and once-per-content table\n");
+}
+
 int main(void) {
     test_soften();
     test_soft_digest();
+    test_soft_candidates();
     test_golden();
     test_wrap_clamp();
     test_jobs();

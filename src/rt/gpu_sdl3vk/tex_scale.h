@@ -186,6 +186,24 @@ int nk_tex_soften_alpha_edge(const uint32_t *src, uint32_t w, uint32_t h, uint32
 int nk_tex_soft_shadow_digest(const uint8_t key[32], const uint32_t *rgba, uint32_t w, uint32_t h,
                               uint8_t digest[32]);
 
+/* The authoring aid of SR_ACE_SHADOW_CANDIDATES=1 (contract section 10.23): with the part on, the
+ * renderer prints one line for each distinct content it hashes, so a package author can find the
+ * digest a shadow texture's texture_digest must hold. The line, without its newline, is
+ *     SOFT_SHADOW: candidate <w>x<h> digest=<64 lowercase hex digits>
+ * with w and h in decimal. Returns its length, or 0 (out set to "" when cap > 0) when it does not
+ * fit in cap bytes with its terminating zero, or a pointer is NULL. Pure. */
+size_t nk_tex_soft_candidate_line(char *out, size_t cap, uint32_t w, uint32_t h, const uint8_t digest[32]);
+
+/* The digests already listed, so each distinct content is printed once per run. */
+#define NK_TEX_SOFT_CANDIDATES_MAX 1024u
+typedef struct {
+    uint32_t count;
+    uint8_t digest[NK_TEX_SOFT_CANDIDATES_MAX][32];
+} NkTexSoftCandidates;
+/* 1 the first time `digest` is offered (it is recorded), 0 when it was offered before, and -1 when
+ * it is new but the table already holds NK_TEX_SOFT_CANDIDATES_MAX digests (not recorded). */
+int nk_tex_soft_candidate_first(NkTexSoftCandidates *seen, const uint8_t digest[32]);
+
 /* ---- smart 2D filter ------------------------------------------------------------------- */
 /* Whether a draw maps texels to pixels 1:1: one texel per guest pixel along each axis (either
  * direction), no rotation, no perspective, and every pixel centre on a texel centre or at most

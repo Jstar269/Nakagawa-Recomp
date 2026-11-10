@@ -636,6 +636,10 @@ static uint64_t s_cnt_repl_bound = 0, s_cnt_repl_queued = 0;
 static int s_soft_on = 0;
 static int s_soft_confirmed = 0;
 static uint64_t s_cnt_soft_hashed = 0, s_cnt_soft_matched = 0, s_cnt_soft_queued = 0, s_cnt_soft_bound = 0;
+/* SR_ACE_SHADOW_CANDIDATES=1 with the part on: each distinct content the matcher hashes is listed
+ * once (nk_tex_soft_candidate_line), for a package author looking for a texture's digest. */
+static int s_soft_candidates = 0, s_soft_candidates_full = 0;
+static NkTexSoftCandidates s_soft_seen;
 static uint32_t s_soft_px[(NK_TEX_SOFT_MAX_DIM * NK_TEX_SOFT_FACTOR) * (NK_TEX_SOFT_MAX_DIM * NK_TEX_SOFT_FACTOR)];
 static uint64_t s_tex_gen = 0;             /* texture cache content generations handed out (TexEnt.gen) */
 static uint64_t s_xs_serial = 0;          /* content generations handed out */
@@ -5367,6 +5371,26 @@ static void tex_soft_init(void) {
     fprintf(stderr, "SOFT_SHADOWS: on (declared=%u, factor=%d, budget_mb=%llu)\n",
             (unsigned)nk_ace_soft_shadows()->count, NK_TEX_SOFT_FACTOR,
             (unsigned long long)(nk_tex_scale_config()->budget_bytes >> 20));
+    const char *cv = getenv("SR_ACE_SHADOW_CANDIDATES");
+    s_soft_candidates = cv && cv[0] == '1' && cv[1] == '\0';
+    s_soft_candidates_full = 0;
+    s_soft_seen.count = 0;
+    if (s_soft_candidates)
+        fprintf(stderr, "SOFT_SHADOWS: listing candidates (SR_ACE_SHADOW_CANDIDATES=1): one SOFT_SHADOW line "
+                        "per distinct texture hashed\n");
+}
+
+/* One SOFT_SHADOW: candidate line for a content hashed for the first time in this run. */
+static void tex_soft_candidate(uint32_t w, uint32_t h, const uint8_t digest[32]) {
+    char line[128];
+    const int first = nk_tex_soft_candidate_first(&s_soft_seen, digest);
+    if (first < 0 && !s_soft_candidates_full) {
+        s_soft_candidates_full = 1;
+        fprintf(stderr, "SOFT_SHADOWS: candidates past %u distinct textures are not listed\n",
+                (unsigned)NK_TEX_SOFT_CANDIDATES_MAX);
+    }
+    if (first > 0 && nk_tex_soft_candidate_line(line, sizeof(line), w, h, digest))
+        fprintf(stderr, "%s\n", line);
 }
 
 static void tex_soft_shutdown(void) {
@@ -5393,6 +5417,7 @@ static int tex_soft_match(TexEnt *e, uint64_t hash, uint32_t levels) {
     if (!d->count || !nk_tex_soft_shadow_digest(d->key, s_texscratch, (uint32_t)e->w, (uint32_t)e->h, digest))
         return 0;
     s_cnt_soft_hashed++;
+    if (s_soft_candidates) tex_soft_candidate((uint32_t)e->w, (uint32_t)e->h, digest);
     for (uint32_t i = 0; i < d->count; i++)
         if (memcmp(digest, d->digest[i], sizeof(digest)) == 0) {
             e->xs.soft_edge = d->edge[i];
