@@ -1280,7 +1280,7 @@ const char *player_enhanced_part_label(int part, int value) {
 const char *player_enhanced_part_unavailable_label(int part, int value, int smooth) {
     if (part == PLAYER_PART_WIDE &&
         ace_wide_fill_blocked_by_smooth(value != 0, smooth != 0)) {
-        return "Off (Smooth motion is on)";
+        return "Off";
     }
     return NULL;
 }
