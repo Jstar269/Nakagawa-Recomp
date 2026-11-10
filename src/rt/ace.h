@@ -8,7 +8,7 @@
  * value can never opt a launch in:
  *
  *     SR_ACE=off
- *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off
+ *     SR_ACE=v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off
  *
  * tier (enhanced or ace) only names the run, in the badge, the pause menu and the stamps; a
  * line without it is an Enhanced run. cull is the other key a line may leave out: a missing cull
@@ -21,7 +21,9 @@
  * Off is authentic: every Ace branch in the runtime sits behind g_ace_on, which stays 0, so the
  * Vulkan device, every sampler, the guest shaders, the presents and the observation counters
  * are today's, and nothing is printed. With Ace on, guest logic and the guest timing model are
- * unchanged; host presentation changes (and, with sas=sinc, the mixed SAS sample values), and
+ * unchanged; host presentation changes (and, with sas=sinc, the mixed SAS sample values; with
+ * tess=2..4, the pixels of every triangle patch and the GE timing model's clocks under
+ * SR_GE_TIMING=1), and
  * the run says so ("ACE_MODE: on (...)" at start, an exit line, and the flight recorder's
  * runtime.enhancements block).
  *
@@ -42,6 +44,7 @@
 #define ACE_HAS_SMOOTH 1        /* smooth=x2: one in-between per 30 Hz frame */
 #define ACE_HAS_SMOOTH_MATCH 0  /* smooth=match: the monitor's rate */
 #define ACE_HAS_SAS 1           /* sas=sinc: band-limited SAS voice resampling (#2054) */
+#define ACE_HAS_TESS 1          /* tess=2..4: finer Bezier and spline patches (#2053) */
 #define ACE_HAS_CULL 1          /* cull=on: widen a title's own view-culling test to the wings (11.3.6) */
 
 typedef enum { ACE_WIDE_OFF = 0, ACE_WIDE_FILL = 1 } AceWide;
@@ -65,6 +68,7 @@ typedef struct {
     int smooth;      /* AceSmooth */
     int tier;        /* AceTier */
     int sas;         /* AceSas: SAS voices mix through a band-limited resampler (host-only) */
+    int tess;        /* finer patches (#2053): 0 off, or the factor 2, 3 or 4 on the guest's division */
     int cull;        /* cull=on: a title's culling is widened to the wings (guest-visible, 11.3.6) */
 } AceConfig;
 
@@ -76,6 +80,7 @@ typedef enum {
     ACE_FEATURE_WIDE,
     ACE_FEATURE_SMOOTH,
     ACE_FEATURE_SAS,
+    ACE_FEATURE_TESS,
     ACE_FEATURE_CULL,
     ACE_FEATURE_COUNT
 } AceFeature;
@@ -224,6 +229,11 @@ void ace_note_vram_write(uint32_t off, uint32_t bytes);
 /* Host time the scheduler spent waiting (vblank_pace, sleep_until_us), and slots it skipped. */
 void ace_note_host_wait(uint64_t ns);
 void ace_note_skipped_slots(uint32_t slots);
+/* Fast forward started (1) or stopped (0) (sched.c; recomp.h, sched_fast_forward_on). The
+ * readout's window is a second of wall time, so time at the fast-forward speed is never judged:
+ * the readout hides, skipped slots are not counted, no window counts towards the report, and the
+ * first full second at normal speed brings the readout back. */
+void ace_note_fast_forward(int on);
 /* The display flipped to the `bytes`-long buffer at VRAM offset `fb` at `vcount`
  * (display_present_active, before the presenter's own slot rule). Feeds the detector and,
  * once a second of `now_ns`, the readout. Returns 1 when the flip shows a new frame: the
@@ -364,5 +374,12 @@ size_t ace_report_json(char *out, size_t cap);
  * through a temporary file that atomically replaces the old report) and the exit stamp. An
  * empty SR_ACE_REPORT writes no file. Ace off: does nothing. Safe to call more than once. */
 void ace_finish(void);
+
+/* ---- fast forward's keys (recomp.h, sched_fast_forward_on) ---------------------------------- */
+/* The game window sets these: a hold (Tab while it is held) and a toggle (F9). They only ask;
+ * the scheduler decides at each VBLANK whether this run may fast forward. */
+void ace_ff_hold(int on);
+void ace_ff_toggle(void);
+int ace_ff_requested(void);   /* 1 while the hold or the toggle is on */
 
 #endif /* SR_ACE_H */

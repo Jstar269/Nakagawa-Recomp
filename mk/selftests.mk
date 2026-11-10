@@ -440,6 +440,25 @@ ge-tnl-census-selftest: $(RT_GE_O)
 
 native-core-tests: ge-tnl-census-selftest
 
+# ge-patch-tess-selftest - finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14)
+# on the production GE object's software renderer: the factor the tess launch-line key carries
+# (ace-selftest pins the key and its Ace gate); factor F on a guest division d draws byte for byte what this renderer draws at division
+# d*F; F*F times the quads; factor 1 is the default path; no background pixel between neighbouring
+# patches at every factor, and a crack the check finds when the two are drawn at different
+# factors; line and point patches keep the PSP's division; the vertex cap lowers the factor
+# along its divisor chain, after the PSP's own cap; with the GE timing model on, factor F costs
+# the clocks of division d*F, not the PSP's d; the PATCH_TESS: exit line. It writes one scratch file under
+# BUILD_ROOT. No game input.
+GE_PATCH_TESS_SELFTEST := $(BUILD_DIR)/ge_patch_tess_selftest$(EXE_EXT)
+
+ge-patch-tess-selftest: $(RT_GE_O)
+	$(CC) $(CFLAGS) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -o $(GE_PATCH_TESS_SELFTEST) \
+		tests/native/ge_patch_tess_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
+		src/rt/flight_recorder.c src/rt/perf.c -lm
+	$(GE_PATCH_TESS_SELFTEST)
+
+native-core-tests: ge-patch-tess-selftest
+
 # ge-flight-overhead -- cost of the disarmed flight recorder on the GE paths (#320): the
 # ge-cpu-profile-validate-selftest harness's --bench mode on the production ge.c, built once
 # with the recorder linked (SR_FLIGHT unset) and once with -USR_FLIGHT_RECORDER_LINKED, run
@@ -911,7 +930,9 @@ asset-index-selftest:
 # checks the switch's values and its Ace gate (`--authentic`), and twin-alloc-fail injects a
 # failed twin allocation, and gpu-timestamps runs once more with the twin shown. The dst-read
 # cells (#2109) run alone at scales 1 and 4 on each destination-read path (`--dst-read snapshot`,
-# `--dst-read interlock`; a device that refuses the interlock prints a SKIP line). The pipeline
+# `--dst-read interlock`; a device that refuses the interlock prints a SKIP line), and so does
+# stencil-once (write-once stencil batches: at scales 1 and 4 on the snapshot path, where they are
+# drawn last to first, and at scale 1 on the interlock path). The pipeline
 # cache (#2149) runs last, as three processes over one empty data root: a cold run saves the
 # cache, a warm run must start from it and draw the same frames, and a reject run re-opens it
 # over damaged, foreign and other-driver files and with the switch off or refused.
@@ -974,6 +995,9 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --dst-read snapshot --scale 4 --case dst-read
 	$(GPU_COHERENCE_BIN) --dst-read interlock --case dst-read
 	$(GPU_COHERENCE_BIN) --dst-read interlock --scale 4 --case dst-read
+	$(GPU_COHERENCE_BIN) --dst-read snapshot --case stencil-once
+	$(GPU_COHERENCE_BIN) --dst-read snapshot --scale 4 --case stencil-once
+	$(GPU_COHERENCE_BIN) --dst-read interlock --case stencil-once
 	@"$(PYTHON)" -c "import shutil; shutil.rmtree('$(BUILD_DIR)/pipeline_cache_test', ignore_errors=True)"
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-cold
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-warm
@@ -981,6 +1005,7 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	@$(MAKE) --no-print-directory gpu-coherence-selftest-snapbar-mutants
 	@$(MAKE) --no-print-directory gpu-coherence-pcache-mutant
 	@$(MAKE) --no-print-directory gpu-dst-read-mutants
+	@$(MAKE) --no-print-directory gpu-stencil-once-mutants
 	@$(MAKE) --no-print-directory ge-first-bad-draw-selftest GE_FBD_SKIP_STATUS=0
 
 # gpu-coherence-pcache-mutant - pipeline-cache-cold must kill SR_PCACHE_SELFTEST_NULL_MUTANT, a
@@ -1091,6 +1116,31 @@ gpu-dst-read-mutants: shader-verify $(RT_GE_O)
 		if test $$result -eq 0; then cat $$bin.log; echo "dst-read mutant $$m unexpectedly passed" >&2; exit 1; fi; \
 		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "dst-read mutant $$m failed for another reason" >&2; exit 1; fi; \
 		echo "gpu-dst-read-mutants: mutant $$m killed ($$kill)"; \
+	done
+
+# gpu-stencil-once-mutants — the stencil-once case must kill each SR_GPU_STENCIL_ONCE_MUTANT in
+# ge_gpu.c: 1 draws a write-once stencil batch first to last (the mesh keeps the later triangle
+# where two overlap), 2 calls every stencil state with a KEEP stencil-fail op write-once (the
+# matrix), and 3 drops the depth condition (the GEQUAL depth leg with depth writes on). All run on
+# the snapshot path, where the batch is reordered. Each builds its own binary and must fail with
+# its own message. Exit 77 (no Vulkan device) is a SKIP of that mutant.
+gpu-stencil-once-mutants: shader-verify $(RT_GE_O)
+	@for m in 1 2 3; do \
+		case $$m in \
+			1) kill="stencil-once\]: mesh: [1-9][0-9]* pixels differ from ge.c";; \
+			2) kill="stencil-once\]: matrix fmt=[0-3]: [1-9][0-9]* pixels differ from ge.c";; \
+			*) kill="stencil-once\]: depth leg 'GEQUAL, depth writes on' fmt=[13]: colour differs from ge.c in [1-9]";; \
+		esac; \
+		bin=$(BUILD_DIR)/gpu_coherence_stencil_once_mutant$$m.exe; \
+		$(CC) $(CFLAGS) -DSR_GPU_COHERENCE_SELFTEST -DSR_GPU_STENCIL_ONCE_MUTANT=$$m -ffunction-sections -fdata-sections \
+			-DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -Wl,--gc-sections -o $$bin \
+			tests/native/gpu_coherence_selftest.c src/rt/ge_capture.c src/rt/ge_raster_ref.c $(RT_GE_O) src/rt/flight_recorder.c src/rt/perf.c \
+			$(SDL3VK_SRCS) $(GEGPU_SRCS) $(LIBS) || exit 1; \
+		$$bin --dst-read snapshot --case stencil-once > $$bin.log 2>&1; result=$$?; \
+		if test $$result -eq 77; then echo "stencil-once mutant $$m: SKIP (no Vulkan device)"; continue; fi; \
+		if test $$result -eq 0; then cat $$bin.log; echo "stencil-once mutant $$m unexpectedly passed" >&2; exit 1; fi; \
+		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "stencil-once mutant $$m failed for another reason" >&2; exit 1; fi; \
+		echo "gpu-stencil-once-mutants: mutant $$m killed ($$kill)"; \
 	done
 
 # gpu-snapsync-selftest — production-path regression for the explicit guest-VRAM

@@ -29,7 +29,7 @@ static int value_on_off(const char *v, int *out) {
    nothing: tier is the one key a line may leave out (an Enhanced run). */
 typedef enum {
     ACE_KEY_AF, ACE_KEY_TEXT, ACE_KEY_READOUT, ACE_KEY_NOTICE, ACE_KEY_WIDE, ACE_KEY_SMOOTH,
-    ACE_KEY_SAS, ACE_KEY_TIER, ACE_KEY_CULL
+    ACE_KEY_SAS, ACE_KEY_TESS, ACE_KEY_TIER, ACE_KEY_CULL
 } AceKey;
 
 static const struct {
@@ -44,6 +44,7 @@ static const struct {
     {"wide", ACE_KEY_WIDE, 1},
     {"smooth", ACE_KEY_SMOOTH, 1},
     {"sas", ACE_KEY_SAS, 1},
+    {"tess", ACE_KEY_TESS, 1},
     {"tier", ACE_KEY_TIER, 0},
     {"cull", ACE_KEY_CULL, 0},
 };
@@ -123,6 +124,15 @@ int ace_parse(const char *spec, AceConfig *out, char *why, size_t why_cap) {
                     why_set(why, why_cap, "sas is not part of this build"); return 0;
                 }
                 break;
+            case ACE_KEY_TESS:
+                if (strcmp(v, "off") == 0) { c.tess = 0; ok = 1; }
+                else if (strcmp(v, "2") == 0 || strcmp(v, "3") == 0 || strcmp(v, "4") == 0) {
+                    c.tess = atoi(v); ok = 1;
+                }
+                if (ok && c.tess && !ACE_HAS_TESS) {
+                    why_set(why, why_cap, "tess is not part of this build"); return 0;
+                }
+                break;
             }
             if (!ok) { why_set(why, why_cap, "bad value"); return 0; }
         }
@@ -146,16 +156,17 @@ static const char *smooth_word(int v) {
 }
 static const char *tier_word(int v) { return v == ACE_TIER_ACE ? "ace" : "enhanced"; }
 static const char *sas_word(int v) { return v == ACE_SAS_SINC ? "sinc" : "off"; }
+static const char *tess_word(int v) { return v == 2 ? "2" : v == 3 ? "3" : v == 4 ? "4" : "off"; }
 
 int ace_format(const AceConfig *c, char *out, size_t cap) {
     int n;
     if (!out || !cap) return 0;
     if (!c || !c->on) n = snprintf(out, cap, "off");
     else n = snprintf(out, cap, "v1;tier=%s;af=%d;text=%s;readout=%s;notice=%s;wide=%s;smooth=%s;"
-                                "sas=%s",
+                                "sas=%s;tess=%s",
                       tier_word(c->tier), c->af, on_off(c->text), on_off(c->readout),
                       on_off(c->notice), wide_word(c->wide), smooth_word(c->smooth),
-                      sas_word(c->sas));
+                      sas_word(c->sas), tess_word(c->tess));
     /* Written only when on: a missing cull is off, so every line without it keeps its text. */
     if (n > 0 && (size_t)n < cap && c && c->on && c->cull) {
         const int m = snprintf(out + n, cap - (size_t)n, ";cull=on");
@@ -179,7 +190,7 @@ static uint64_t s_af_failures;
 static unsigned long s_cull_untracked;
 
 static const char *const k_feature_key[ACE_FEATURE_COUNT] = {
-    "af", "text", "readout", "notice", "wide", "smooth", "sas", "cull"
+    "af", "text", "readout", "notice", "wide", "smooth", "sas", "tess", "cull"
 };
 
 /* The run's observation state. */
@@ -197,6 +208,7 @@ static uint32_t s_last_flip_vcount, s_last_flip_fb;
 static int s_have_flip;
 static uint64_t s_rate_vblanks[ACE_RATE_COUNT];
 static uint64_t s_limited_windows;
+static int s_ff_running;   /* ace_note_fast_forward: set by the scheduler, not by a run reset */
 static AcePace s_pace;
 static AcePaceStats s_pace_stats;
 static uint32_t s_pace_vcount;
@@ -254,9 +266,9 @@ int ace_init_spec(const char *spec, const char *report_path) {
         snprintf(s_report_path, sizeof(s_report_path), "%s", report_path);
     g_ace_on = 1;
     fprintf(stderr, "ACE_MODE: on (tier=%s, af=%d, text=%s, readout=%s, notice=%s, wide=%s, "
-            "smooth=%s, sas=%s)\n", tier_word(s_req.tier), s_req.af, on_off(s_req.text),
+            "smooth=%s, sas=%s, tess=%s)\n", tier_word(s_req.tier), s_req.af, on_off(s_req.text),
             on_off(s_req.readout), on_off(s_req.notice), wide_word(s_req.wide),
-            smooth_word(s_req.smooth), sas_word(s_req.sas));
+            smooth_word(s_req.smooth), sas_word(s_req.sas), tess_word(s_req.tess));
     if (s_req.cull) fprintf(stderr, "ACE_MODE: cull on (a title's own culling is widened to the wings)\n");
     return 1;
 }
@@ -283,7 +295,8 @@ void ace_feature_unavailable(AceFeature feature, const char *reason) {
     case ACE_FEATURE_WIDE: s_eff.wide = 0; break;
     case ACE_FEATURE_SMOOTH: s_eff.smooth = 0; break;
     case ACE_FEATURE_CULL: s_eff.cull = 0; break;
-    default: s_eff.sas = 0; break;
+    case ACE_FEATURE_SAS: s_eff.sas = 0; break;
+    default: s_eff.tess = 0; break;
     }
     fprintf(stderr, "ACE_MODE: %s unavailable (%s)\n", k_feature_key[feature], s_unavailable[feature]);
 }
@@ -337,6 +350,11 @@ size_t ace_feature_words(char *out, size_t cap) {
     if (s_eff.cull) used = words_add(out, cap, used, "wider culling");
     if (s_eff.smooth) used = words_add(out, cap, used, "smooth motion");
     if (s_eff.sas) used = words_add(out, cap, used, "clean pitched sound");
+    if (s_eff.tess) {
+        char tess[32];
+        snprintf(tess, sizeof(tess), "%dx patches", s_eff.tess);
+        used = words_add(out, cap, used, tess);
+    }
     if (s_eff.readout) used = words_add(out, cap, used, "speed readout");
     return used;
 }
@@ -561,8 +579,15 @@ void ace_note_host_wait(uint64_t ns) {
     s_counters.host_wait_ns += ns;
 }
 
+void ace_note_fast_forward(int on) {
+    if (!g_ace_on) return;
+    s_ff_running = on != 0;
+    s_have_view = 0;
+    s_win_started = 0;   /* the first flip at normal speed starts a new window */
+}
+
 void ace_note_skipped_slots(uint32_t slots) {
-    if (!g_ace_on || !slots) return;
+    if (!g_ace_on || !slots || s_ff_running) return;
     s_win_skipped += slots;
     s_counters.skipped_slots += slots;
 }
@@ -587,7 +612,9 @@ int ace_flip(uint32_t fb, uint32_t bytes, uint32_t vcount, uint64_t now_ns) {
     s_pace_vcount = vcount;
     if (s_pace.held && new_frame) s_pace_stats.superseded++;
     ace_pace_flip(&s_pace, new_frame, s_det.stable, s_eff.smooth, now_ns);
-    if (!s_win_started) {
+    if (s_ff_running) {
+        /* Fast forward: no window is judged (ace_note_fast_forward). */
+    } else if (!s_win_started) {
         s_win_started = 1;
         s_win_start_ns = now_ns;
         s_win_frames = 0; s_win_skipped = 0; s_win_betweens = 0; s_win_shown = 0; s_win_idle_ns = 0;
@@ -754,10 +781,10 @@ size_t ace_report_json(char *out, size_t cap) {
     if (!out || !cap) return 0;
     ACE_PUT("{\n  \"schema\": 1,\n  \"spec\": \"%s\",\n", s_spec);
     ACE_PUT("  \"effective\": {\"af\": %d, \"text\": %s, \"readout\": %s, \"notice\": %s, "
-            "\"wide\": \"%s\", \"smooth\": \"%s\", \"sas\": \"%s\"},\n",
+            "\"wide\": \"%s\", \"smooth\": \"%s\", \"sas\": \"%s\", \"tess\": \"%s\"},\n",
             s_eff.af, s_eff.text ? "true" : "false", s_eff.readout ? "true" : "false",
             s_eff.notice ? "true" : "false", wide_word(s_eff.wide), smooth_word(s_eff.smooth),
-            sas_word(s_eff.sas));
+            sas_word(s_eff.sas), tess_word(s_eff.tess));
     if (s_req.cull) ACE_PUT("  \"cull\": %s,\n  \"cull_untracked\": %lu,\n",
                             s_eff.cull ? "true" : "false", s_cull_untracked);
     ACE_PUT("  \"unavailable\": {");
@@ -836,9 +863,10 @@ void ace_finish(void) {
     char json[ACE_REPORT_MAX];
     if (!g_ace_on) return;
     /* A feature that is on but never ran: its renderer or presenter did not start. */
-    static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_CULL };
+    static const int has[ACE_FEATURE_COUNT] = { 1, 1, 1, 1, ACE_HAS_WIDE, ACE_HAS_SMOOTH, ACE_HAS_SAS, ACE_HAS_TESS,
+                                                ACE_HAS_CULL };
     const int on[ACE_FEATURE_COUNT] = { s_eff.af > 0, s_eff.text, s_eff.readout, s_eff.notice,
-                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.cull };
+                                        s_eff.wide, s_eff.smooth, s_eff.sas, s_eff.tess, s_eff.cull };
     for (int f = 0; f < ACE_FEATURE_COUNT; f++) {
         if (has[f] && on[f] && !s_confirmed[f])
             ace_feature_unavailable((AceFeature)f, f == ACE_FEATURE_CULL
@@ -884,3 +912,13 @@ void ace_finish(void) {
         fprintf(stderr, "ACE_MODE: report not written (%s)\n", "write failed");
     }
 }
+
+/* ---- fast forward's keys (ace.h) ----------------------------------------------------------- */
+/* Set by the presenter's event pump and read by the scheduler's VBLANK, both on the thread that
+ * runs the guest, so plain flags are enough. */
+static int s_ff_hold;
+static int s_ff_toggle;
+
+void ace_ff_hold(int on) { s_ff_hold = on != 0; }
+void ace_ff_toggle(void) { s_ff_toggle = !s_ff_toggle; }
+int ace_ff_requested(void) { return s_ff_hold || s_ff_toggle; }

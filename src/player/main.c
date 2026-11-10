@@ -602,11 +602,13 @@ static bool s_pad_select_held;
 /* Backspace and the mouse's back button (X1) are Back: each is taken as Esc,
    so every view goes back the same way. A key the Controls page is waiting
    for keeps its own name, so Backspace can still be mapped, and so does
-   Backspace in the library's find box, where it deletes. */
+   Backspace in the library's find box and the nickname editor, where it
+   deletes. */
 static const SDL_Event *player_back_as_escape(const PlayerApp *app, const PlayerUiNk *next_ui,
                                               const SDL_Event *event, SDL_Event *escape) {
     bool backspace = (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) &&
                      event->key.key == SDLK_BACKSPACE && !player_ui_nk_find_open(next_ui) &&
+                     !player_ui_nk_nickname_open(next_ui) &&
                      !(app->active_view == VIEW_CONTROLLER_SETTINGS &&
                        app->input_settings.device == INPUT_DEVICE_KEYBOARD &&
                        input_settings_is_capturing(&app->input_settings));
@@ -704,9 +706,10 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
              ((event->key.key == SDLK_RETURN || event->key.key == SDLK_KP_ENTER) &&
               (event->key.mod & SDL_KMOD_ALT)))) {
             player_app_toggle_launcher_fullscreen(app);
-        } else if (use_next_ui && player_ui_nk_find_open(next_ui)) {
-            /* The library's find box takes the keyboard: letters are typed, and
-               Esc clears the box instead of asking to quit. */
+        } else if (use_next_ui && (player_ui_nk_find_open(next_ui) ||
+                                   player_ui_nk_nickname_open(next_ui))) {
+            /* The library's find box and the nickname editor take the keyboard:
+               letters are typed, and Esc closes them instead of asking to quit. */
             return player_ui_nk_handle_event(next_ui, event);
         } else if (use_next_ui && !event->key.repeat && event->key.key == SDLK_O &&
                    !app->wizard.is_extracting) {
@@ -800,6 +803,12 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
                 (void)player_app_open_developer_log(app);
             }
             return true;
+        }
+        if (use_next_ui && player_ui_nk_nickname_open(next_ui)) {
+            /* The nickname editor (#2197) takes every press while it is open: its
+               keyboard's keys and shortcuts, B (Cancel) and Start (Done) too, which
+               the routes below would give to the page under it. */
+            return player_ui_nk_handle_event(next_ui, event);
         }
         if (use_next_ui && event->gbutton.button == SDL_GAMEPAD_BUTTON_START &&
             player_view_is_library(app->active_view)) {
@@ -1738,6 +1747,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_SHARE_LIBRARIES:
             player_app_toggle_share_system_libraries(app);
             break;
+        case PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED: player_app_cycle_build_speed(app); break;
         case PLAYER_UI_SETTINGS_CLEAR_SHARED_LIBRARIES:
             player_app_clear_shared_library_cache(app);
             break;
@@ -4265,6 +4275,10 @@ static void player_apply_test_view(PlayerApp *app, const char *test_view) {
             player_app_set_view(app, VIEW_LIBRARY);
         } else if (strcmp(test_view, "library") == 0) {
             player_app_set_view(app, VIEW_LIBRARY);
+        } else if (strcmp(test_view, "nickname-prompt") == 0) {
+            /* The library under the first-launch nickname prompt (#2197), which shows
+               while the settings have not answered it. */
+            player_app_set_view(app, VIEW_LIBRARY);
         } else if (strcmp(test_view, "experimental-library") == 0) {
             /* In-memory synthetic card for rendered UI regression; it is never
                admitted to the user's persistent library. */
@@ -5508,6 +5522,14 @@ int main(int argc, char *argv[]) {
         player_apply_test_view(&run.app, run.test_view);
         player_ui_test_prepare_app(&run.ui_test, &run.app);
         player_ui_test_apply_motion(&run.ui_test, &run.app);
+        /* A --screenshot, --view or scripted run shows the page it names
+           (tools/capture_native_screenshots.py), so the first-launch nickname prompt
+           (#2197) stays down for it, in memory only; --view=nickname-prompt asks for it. */
+        if ((run.screenshot_path != NULL || run.test_view != NULL ||
+             player_ui_test_active(&run.ui_test)) &&
+            !(run.test_view != NULL && strcmp(run.test_view, "nickname-prompt") == 0)) {
+            run.app.nickname_prompt_held = true;
+        }
         run.app.window_width = run.override_w;
         run.app.window_height = run.override_h;
         code = player_command_line_launch(&run);

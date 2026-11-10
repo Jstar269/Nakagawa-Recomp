@@ -7706,7 +7706,8 @@ static void test_play_mode_settings(void) {
            app->settings.enhanced.part[PLAYER_PART_NOTICE] == 1 &&
            app->settings.enhanced.part[PLAYER_PART_WIDE] == 0 &&
            app->settings.enhanced.part[PLAYER_PART_SMOOTH] == 0 &&
-           app->settings.enhanced.part[PLAYER_PART_SAS] == 0);
+           app->settings.enhanced.part[PLAYER_PART_SAS] == 0 &&
+           app->settings.enhanced.part[PLAYER_PART_TESS] == 0);
     assert(app->settings.title_play_count == 0);
     player_play_resolve(&app->settings, "TEST90001", &r);
     assert(!r.on && r.mode == PLAYER_PLAY_AUTHENTIC && r.chosen == PLAYER_PLAY_LIBRARY);
@@ -7755,7 +7756,7 @@ static void test_play_mode_settings(void) {
            r.part[PLAYER_PART_READOUT] == 0 && r.part[PLAYER_PART_NOTICE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=off;sas=off") == 0);
+                        "smooth=off;sas=off;tess=off") == 0);
     /* Ace is offered only for a title with a usable package: library, Authentic, Enhanced,
        then back to library for title 1; Ace before library for title 2. */
     player_app_cycle_title_play_mode(app, 1);
@@ -7777,7 +7778,7 @@ static void test_play_mode_settings(void) {
            r.part[PLAYER_PART_NOTICE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=off;sas=off") == 0);
+                        "smooth=off;sas=off;tess=off") == 0);
     assert(player_app_title_60hz_saved(app, "TEST90003") && player_app_title_60hz_on(app, 2));
     /* Ace's own part has its off switch: Ace stays, without the 60 FPS game logic. */
     player_app_set_title_60hz(app, 2, false);
@@ -7870,7 +7871,7 @@ static void test_play_mode_settings(void) {
     assert(r.on && r.mode == PLAYER_PLAY_ACE && r.logic_60 && r.part[PLAYER_PART_SMOOTH] == 0);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=ace;af=16;text=off;readout=on;notice=on;wide=off;"
-                        "smooth=off;sas=off") == 0);
+                        "smooth=off;sas=off;tess=off") == 0);
     assert(!player_app_title_60hz_on(app, 1) && app->games[1].enhancement_package_id[0] == '\0');
     player_app_set_experimental_60hz_session(app, false);
     assert(app->games[2].enhancement_package_id[0] == '\0');
@@ -7914,7 +7915,7 @@ static void test_play_mode_settings(void) {
                                       "\"text\": \"off\", \"readout\": \"off\", "
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"cull\": \"off\", \"upscale\": \"off\"},") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST90002\": {\"mode\": \"library\", \"logic_60\": \"off\"}")
@@ -7971,7 +7972,7 @@ static void test_play_mode_settings(void) {
         assert(nk_platform_mkdir_p(dir));
         assert(player_ace_report_path(root, "TEST90001", report, sizeof(report)));
         write_text_file(report,
-            "{\n  \"schema\": 1,\n  \"spec\": \"v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off\",\n"
+            "{\n  \"schema\": 1,\n  \"spec\": \"v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off\",\n"
             "  \"effective\": {\"af\": 16, \"text\": true, \"readout\": false, \"notice\": true, "
             "\"wide\": \"off\", \"smooth\": \"off\"},\n  \"unavailable\": {},\n"
             "  \"rate\": {\"dominant\": \"30 Hz\", \"seconds\": {\"30 Hz\": 50.0}},\n"
@@ -8058,7 +8059,7 @@ static void test_play_mode_settings_mapping(void) {
         char line[192];
         assert(player_play_launch_line(&r, line, sizeof(line)) &&
                strcmp(line, "v1;tier=ace;af=16;text=on;readout=off;notice=on;wide=off;"
-                            "smooth=off;sas=off") == 0);
+                            "smooth=off;sas=off;tess=off") == 0);
     }
     player_play_resolve(&back->settings, "TEST91001", &r);
     assert(r.chosen == PLAYER_PLAY_ACE && r.logic_60 && r.part[PLAYER_PART_FILTERING] == 16 &&
@@ -8111,7 +8112,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
-                                      "\"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8137,7 +8138,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
+                                      "\"tess\": \"off\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
     }
@@ -8228,6 +8229,98 @@ static void test_play_mode_cull_settings(void) {
     free(back);
     free(app);
     printf("PASS: wider culling is read, resolved and saved at both levels, and only Ace launches it\n");
+}
+
+/* Finer patches (contract 10.14, 11.3.7) at both levels: off in a fresh file and in no graphics
+ * preset, a library "tess" and a title's own are read (2, 3, 4 or off), the title's wins, an unknown
+ * word is off, the launch line carries the factor, and an Authentic run has no line. */
+static void test_play_mode_tess_settings(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800];
+    char line[192];
+    PlayerPlayResolved r;
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cplay_mode_tess_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app && back);
+
+    /* Fresh: off, so an Enhanced run is not given it, and every graphics preset leaves it off. */
+    player_app_settings_init_default(&app->settings);
+    assert(app->settings.enhanced.part[PLAYER_PART_TESS] == 0);
+    assert(player_enhanced_part(PLAYER_PART_TESS)->fresh == 0);
+    assert(strstr(player_enhanced_part(PLAYER_PART_TESS)->sentence, "alters GE timing") != NULL);
+    app->settings.enhanced.library = PLAYER_PLAY_ENHANCED;
+    for (int preset = PLAYER_PRESET_LOW; preset < PLAYER_PRESET_COUNT; preset++) {
+        player_app_apply_graphics_preset(app, preset);
+        player_play_resolve(&app->settings, "TEST93001", &r);
+        assert(r.on && r.part[PLAYER_PART_TESS] == 0);
+        assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";tess=off") != NULL);
+    }
+
+    /* The library on at 4, one title off and one at 2 over it. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"tess\": \"4\"},"
+        " \"title_play\": {\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"},"
+        " \"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}}}");
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_TESS] == 4);
+    player_play_resolve(&app->settings, "TEST93001", &r);
+    assert(r.on && r.part[PLAYER_PART_TESS] == 0);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";tess=off") != NULL);
+    player_play_resolve(&app->settings, "TEST93002", &r);
+    assert(r.on && r.mode == PLAYER_PLAY_ACE && r.part[PLAYER_PART_TESS] == 2);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "tier=ace;") != NULL &&
+           strstr(line, ";tess=2") != NULL);
+    player_play_resolve(&app->settings, "TEST93003", &r);       /* a title of its own follows */
+    assert(r.on && r.part[PLAYER_PART_TESS] == 4);
+    assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, ";tess=4") != NULL);
+    assert(player_app_save_settings(app, path) == NK_OK);
+    {
+        char *saved = read_text_file(path);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
+                                      "\"upscale\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
+        assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
+        free(saved);
+    }
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_TESS] == 4);
+    player_play_resolve(&back->settings, "TEST93002", &r);
+    assert(r.on && r.part[PLAYER_PART_TESS] == 2);
+
+    /* A factor this build does not have, and a file from before the key, are off. */
+    write_text_file(path,
+        "{\"schema_version\": 2,"
+        " \"enhanced\": {\"default\": \"enhanced\", \"tess\": \"5\"},"
+        " \"title_play\": {\"TEST93001\": {\"mode\": \"library\", \"tess\": \"1\"}}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(app->settings.enhanced.part[PLAYER_PART_TESS] == 0);
+    player_play_resolve(&app->settings, "TEST93001", &r);
+    assert(r.on && r.part[PLAYER_PART_TESS] == 0);
+    write_text_file(path, "{\"schema_version\": 2, \"enhanced\": {\"default\": \"enhanced\"}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    player_play_resolve(&app->settings, "TEST93001", &r);
+    assert(r.on && r.part[PLAYER_PART_TESS] == 0);
+
+    /* Authentic: no line at all, so the runtime has no factor. */
+    write_text_file(path, "{\"schema_version\": 2, \"enhanced\": {\"default\": \"authentic\", \"tess\": \"4\"}}");
+    memset(app, 0, sizeof(*app));
+    assert(player_app_load_settings(app, path) == NK_OK);
+    player_play_resolve(&app->settings, "TEST93001", &r);
+    assert(!r.on && player_play_launch_line(&r, line, sizeof(line)) && strcmp(line, "off") == 0);
+
+    remove(path);
+    (void)test_rmdir(root);
+    free(back);
+    free(app);
+    printf("PASS: finer patches are read, resolved and saved at both levels, off by default\n");
 }
 
 /* Graphics presets (#2150), an overlay: choosing one changes no row, an Enhanced or Ace
@@ -8631,7 +8724,7 @@ static void test_play_mode_smooth_motion(void) {
     player_play_resolve(&settings, "TEST90001", &r);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=x2;sas=off") == 0);
+                        "smooth=x2;sas=off;tess=off") == 0);
     assert(strstr(line, "match") == NULL);
     player_play_apply_logic_60(&r, false);
     assert(r.part[PLAYER_PART_SMOOTH] == 1);
@@ -8650,7 +8743,7 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.on && r.part[PLAYER_PART_SAS] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;"
-                        "smooth=off;sas=sinc") == 0);
+                        "smooth=off;sas=sinc;tess=off") == 0);
     player_play_apply_logic_60(&r, true);
     assert(r.part[PLAYER_PART_SAS] == 1 && player_play_launch_line(&r, line, sizeof(line)) &&
            strstr(line, "tier=ace;") != NULL && strstr(line, "sas=sinc") != NULL);
@@ -8664,7 +8757,7 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.on && r.part[PLAYER_PART_WIDE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) &&
            strcmp(line, "v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=fill;"
-                        "smooth=off;sas=off") == 0);
+                        "smooth=off;sas=off;tess=off") == 0);
     player_play_apply_logic_60(&r, true);
     assert(r.part[PLAYER_PART_WIDE] == 1 && player_play_launch_line(&r, line, sizeof(line)) &&
            strstr(line, "tier=ace;") != NULL && strstr(line, ";wide=fill;") != NULL);
@@ -8675,7 +8768,9 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.on && r.part[PLAYER_PART_WIDE] == 1 && r.part[PLAYER_PART_SMOOTH] == 1);
     const char *unavailable = player_enhanced_part_unavailable_label(
         PLAYER_PART_WIDE, r.part[PLAYER_PART_WIDE], r.part[PLAYER_PART_SMOOTH]);
-    assert(unavailable && strcmp(unavailable, "Off (Smooth motion is on)") == 0);
+    /* Just "Off": the row's sentence says Smooth motion disables it, and a longer word
+       here widened Settings > Enhanced's button column and reflowed every row. */
+    assert(unavailable && strcmp(unavailable, "Off") == 0);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_WIDE, 1, 0) == NULL);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_WIDE, 0, 1) == NULL);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_SMOOTH, 1, 1) == NULL);
@@ -8847,7 +8942,8 @@ static void test_play_mode_upscale_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"cull\": \"off\", \"upscale\": \"fsr1\"}") != NULL);
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
+                                      "\"upscale\": \"fsr1\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }
@@ -9111,6 +9207,134 @@ static void test_enhanced_package_variants(void) {
         (void)test_rmdir(enhanced_dir);
     }
     printf("[PLAYER_STATE_TEST] enhanced and authentic package variants validate apart PASS\n");
+}
+
+/* The console nickname (#2197): "Player" until the user chooses one, and never the PC's user
+ * name; the first-launch prompt shows until it is answered, and Skip keeps "Player" and is not
+ * asked again after a reload; Settings saves a new nickname that a reload reads back; and a
+ * value the rule refuses (128 bytes, empty, a control character, malformed UTF-8) changes
+ * nothing, in Settings, in the prompt and in a hand-edited settings file. */
+static void test_player_nickname(void) {
+    static const char *const refused[] = {
+        "", "a\x01" "b", "tab\tname", "del\x7F", "c1 \xC2\x85", "\xC3\x28", "\xED\xA0\x80",
+    };
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], path[800], text[400];
+    char long_ok[33], long_bad[34], straddle[34];
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *back = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    char *saved;
+    assert(app && back);
+    /* The 32-byte cap, one byte past it, and a two-byte character that ends past it. */
+    memset(long_ok, 'n', 32u);
+    long_ok[32] = '\0';
+    memset(long_bad, 'n', 33u);
+    long_bad[33] = '\0';
+    memset(straddle, 'n', 31u);
+    memcpy(straddle + 31, "\xC3\xA9", 3u);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cnickname_probe", cache_root, sep);
+    assert(nk_platform_mkdir_p(root));
+    snprintf(path, sizeof(path), "%s%csettings.json", root, sep);
+
+    /* The default is "Player", whatever the PC's user name is. */
+    {
+        const char *names[] = {"USERNAME", "USER"};
+        for (size_t i = 0u; i < 2u; i++) {
+            const char *was = getenv(names[i]);
+            char kept[256];
+            snprintf(kept, sizeof(kept), "%s", was ? was : "");
+            nk_ps_set_env(names[i], "nk-os-user-name");
+            player_app_settings_init_default(&app->settings);
+            assert(strcmp(app->settings.nickname, "Player") == 0);
+            assert(!app->settings.nickname_asked);
+            nk_ps_set_env(names[i], was ? kept : NULL);
+        }
+    }
+
+    /* A settings file without the keys (an older player's) asks once. */
+    write_text_file(path, "{\"schema_version\": 2}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    assert(player_app_nickname_prompt_visible(app));
+
+    /* Skip keeps "Player", and the prompt does not come back after a reload. */
+    assert(player_app_nickname_prompt_answer(app, NULL));
+    assert(!player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    saved = read_text_file(path);
+    assert(saved && strstr(saved, "\"nickname\": \"Player\"") != NULL &&
+           strstr(saved, "\"nickname_asked\": true") != NULL);
+    free(saved);
+    player_app_init(back);
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(!player_app_nickname_prompt_visible(back));
+    assert(strcmp(back->settings.nickname, "Player") == 0);
+
+    /* Settings: a new nickname is saved at once and a reload reads it back, 32 bytes too. */
+    assert(player_app_set_nickname(back, "Ren\xC3\xA9 7"));
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Ren\xC3\xA9 7") == 0);
+    assert(player_app_set_nickname(app, long_ok));
+    player_app_init(back);
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(strcmp(back->settings.nickname, long_ok) == 0);
+
+    /* A refused value changes nothing: the old nickname stays, in memory and on disk. */
+    assert(!player_app_set_nickname(back, long_bad));
+    assert(!player_app_set_nickname(back, straddle));
+    assert(!player_app_set_nickname(back, NULL));
+    for (size_t i = 0u; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        assert(!player_app_set_nickname(back, refused[i]));
+        assert(strcmp(back->settings.nickname, long_ok) == 0);
+    }
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, long_ok) == 0);
+
+    /* The prompt refuses the same values and stays up; a valid answer closes it. */
+    app->settings.nickname_asked = false;
+    assert(!player_app_nickname_prompt_answer(app, long_bad));
+    assert(!player_app_nickname_prompt_answer(app, "a\x01" "b"));
+    assert(player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, long_ok) == 0);
+    assert(player_app_nickname_prompt_answer(app, "Tester"));
+    assert(!player_app_nickname_prompt_visible(app));
+    assert(strcmp(app->settings.nickname, "Tester") == 0);
+
+    /* A hand-edited nickname the rule refuses is dropped for the default, not cut short. */
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"\\u0001x\", \"nickname_asked\": true}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0 && app->settings.nickname_asked);
+    snprintf(text, sizeof(text), "{\"schema_version\": 2, \"nickname\": \"%s\"}", long_bad);
+    write_text_file(path, text);
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"\"}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    /* Only spaces is no name (nk_nickname_valid): it degrades to the default too. */
+    write_text_file(path, "{\"schema_version\": 2, \"nickname\": \"   \", \"nickname_asked\": true}");
+    player_app_init(app);
+    assert(player_app_load_settings(app, path) == NK_OK);
+    assert(strcmp(app->settings.nickname, "Player") == 0 && app->settings.nickname_asked);
+
+    /* A true first run, with no settings.json at all: "Player", and the prompt asks. */
+    nk_remove_utf8(path);
+    player_app_init(app);
+    (void)player_app_load_settings(app, path);
+    assert(strcmp(app->settings.nickname, "Player") == 0);
+    assert(!app->settings.nickname_asked);
+    assert(player_app_nickname_prompt_visible(app));
+
+    nk_remove_utf8(path);
+    free(app);
+    free(back);
 }
 
 /* ---- --launch-title and Add to Steam (#2152) ---- */
@@ -9523,6 +9747,8 @@ int main(int argc, char **argv) {
     test_play_mode_smooth_motion();
     test_play_mode_sas_settings();
     test_play_mode_cull_settings();
+    test_play_mode_tess_settings();
+    test_player_nickname();
     test_graphics_presets();
     test_play_mode_line_parses_in_runtime();
     test_play_mode_upscale_settings();
@@ -9917,6 +10143,16 @@ int main(int argc, char **argv) {
         player_app_apply_settings_to_session(&applied, &cfg);
         assert(cfg.reduce_motion == NK_REDUCE_MOTION_SYSTEM);
         assert(cfg.gui_mode == true);   /* untouched by the mapping */
+        /* The nickname reaches the session whole, and its copy always ends in a NUL (#2197). */
+        snprintf(applied.nickname, sizeof(applied.nickname), "%s", "Kaz \xE3\x83\x8A");
+        memset(cfg.nickname, 'x', sizeof(cfg.nickname));
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(strcmp(cfg.nickname, "Kaz \xE3\x83\x8A") == 0);
+        memset(applied.nickname, 'n', sizeof(applied.nickname) - 1u);
+        applied.nickname[sizeof(applied.nickname) - 1u] = '\0';
+        memset(cfg.nickname, 'x', sizeof(cfg.nickname));
+        player_app_apply_settings_to_session(&applied, &cfg);
+        assert(strlen(cfg.nickname) == NK_NICKNAME_MAX_BYTES);
         /* NULL arguments are safe no-ops. */
         player_app_apply_settings_to_session(NULL, &cfg);
         player_app_apply_settings_to_session(&applied, NULL);
@@ -11871,6 +12107,10 @@ int main(int argc, char **argv) {
         /* #1306: shared system libraries are on by default and persist when turned off. */
         assert(s_app->settings.share_system_libraries == true);
         player_app_toggle_share_system_libraries(s_app);
+        /* Settings > Build speed: Balanced by default; the button steps to Fastest. */
+        assert(s_app->settings.build_speed == PACKAGE_BUILD_SPEED_BALANCED);
+        player_app_cycle_build_speed(s_app);
+        assert(s_app->settings.build_speed == PACKAGE_BUILD_SPEED_FASTEST);
         s_app->settings.master_volume = 55;
         s_app->settings.launcher_window_maximized = true;
         s_app->settings.launcher_window_position_valid = true;
@@ -11895,6 +12135,7 @@ int main(int argc, char **argv) {
         assert(s_app2->settings.interface_size_pct == 150);
         assert(s_app2->settings.text_size_pct == 150);
         assert(s_app2->settings.share_system_libraries == false);
+        assert(s_app2->settings.build_speed == PACKAGE_BUILD_SPEED_FASTEST);
         assert(s_app2->settings.master_volume == 55);
         assert(s_app2->settings.library_sort == PLAYER_LIBRARY_SORT_PLAYED);
         /* The sort is saved by name; a name this build does not know keeps the default. */
@@ -11912,6 +12153,21 @@ int main(int argc, char **argv) {
                             "{\"schema_version\": 2, \"library_sort\": \"rating\"}");
             assert(player_app_load_settings(sorted, test_settings_path) == NK_OK);
             assert(sorted->settings.library_sort == PLAYER_LIBRARY_SORT_PLAYED);
+            /* The build speed is saved by name; a name this build does not know, or none,
+               keeps Balanced. */
+            write_text_file(test_settings_path,
+                            "{\"schema_version\": 2, \"build_speed\": \"background\"}");
+            assert(player_app_load_settings(sorted, test_settings_path) == NK_OK);
+            assert(sorted->settings.build_speed == PACKAGE_BUILD_SPEED_BACKGROUND);
+            write_text_file(test_settings_path,
+                            "{\"schema_version\": 2, \"build_speed\": \"turbo\"}");
+            assert(player_app_load_settings(sorted, test_settings_path) == NK_OK);
+            assert(sorted->settings.build_speed == PACKAGE_BUILD_SPEED_BALANCED);
+            sorted->settings.build_speed = PACKAGE_BUILD_SPEED_BACKGROUND;
+            assert(player_app_save_settings(sorted, test_settings_path) == NK_OK);
+            saved = read_text_file(test_settings_path);
+            assert(saved != NULL && strstr(saved, "\"build_speed\": \"background\",") != NULL);
+            free(saved);
             free(sorted);
         }
         s_app2->settings.library_sort = PLAYER_LIBRARY_SORT_PLAYED;

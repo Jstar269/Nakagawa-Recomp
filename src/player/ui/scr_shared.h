@@ -55,15 +55,13 @@ static inline const char *safe_text(const char *text, const char *fallback) {
     return text != NULL && text[0] != '\0' ? text : fallback;
 }
 
-/* Whether a page's body between the top bar and the prompt bar scrolls. At the
-   design text size these pages fit the window, and the screen tests hold it to
-   that (and that every prompt bar stays whole); a larger text size can make one
-   taller than the room, and then its body scrolls (with the focused control
-   brought into view) instead of pushing the prompt bar off the window. A game's
-   page, whose rows vary with the game, always scrolls (scr_title.c). */
-static inline bool page_scrolls(const NkUi *ui) {
-    return nk_ui_text_scale(ui) > 1.0f;
-}
+/* A page's body between the top bar and the prompt bar is a scroll container at
+   every text size: content taller than that room (a title page with its
+   starting card, what to expect and Enhancements in a 1280 x 720 window, say)
+   scrolls there, with the focused control brought into view, instead of
+   pushing the prompt bar off the window or being squeezed under it. Content
+   that fits leaves nothing to scroll, so the page looks and behaves as before. */
+#define SCR_PAGE_BODY_SCROLLS true
 
 /* An outcome line's colour: only a warning is amber, and only a failure red. */
 static inline uint32_t note_rgba(const NkUiTheme *theme, PlayerUiNoteKind kind) {
@@ -94,6 +92,7 @@ static inline uint32_t note_rgba(const NkUiTheme *theme, PlayerUiNoteKind kind) 
 #define FLOW_ID_MESSAGE FLOW_ID(0x000042u)
 #define FLOW_ID_ELAPSED FLOW_ID(0x000043u)
 #define FLOW_ID_NOTICE FLOW_ID(0x000044u)
+#define FLOW_ID_SPEED FLOW_ID(0x000045u)          /* the build card's Build speed line */
 #define FLOW_ID_QUEUE_LINE FLOW_ID(0x000046u)  /* the build card's build queue line */
 #define FLOW_ID_LOG FLOW_ID(0x000050u)
 #define FLOW_ID_LOG_SPAN 0x10u
@@ -110,6 +109,12 @@ static inline uint32_t note_rgba(const NkUiTheme *theme, PlayerUiNoteKind kind) 
 #define FLOW_ID_REPORT_ROW FLOW_ID(0x000099u)
 #define FLOW_ID_PROMPTS FLOW_ID(0x0000A0u)
 #define FLOW_ID_WAVES FLOW_ID(0x0000B0u)
+#define FLOW_ID_NICKNAME_FIELD FLOW_ID(0x000300u)  /* the nickname editor's box (#2197) */
+#define FLOW_ID_NICKNAME_TEXT FLOW_ID(0x000301u)
+#define FLOW_ID_NICKNAME_NOTE FLOW_ID(0x000302u)   /* why Done was refused */
+#define FLOW_ID_NICKNAME_COUNT FLOW_ID(0x000303u)  /* "12 / 32 bytes" */
+#define FLOW_ID_NICKNAME_KEYS FLOW_ID(0x000310u)   /* its keyboard's rows (ui_keyboard.h) */
+#define FLOW_ID_NICKNAME_KEYS_SPAN 0x10u           /* UI_KEYBOARD_PART_COUNT */
 
 #define FLOW_MARK_DIAMOND "\xE2\x97\x86"
 #define FLOW_MARK_DOT "\xE2\x97\x8F"
@@ -149,8 +154,6 @@ typedef struct {
 
 /* Frame and box helpers (scr_flow.c). */
 float scr_flow_begin(NkUi *ui, float width, float height, float card_width);
-float scr_flow_begin_with_scroll(NkUi *ui, float width, float height, float card_width,
-                                 bool scroll_at_design_size);
 void scr_flow_end(NkUi *ui, const char *hint, const NkUiPromptItem *prompts, size_t count);
 void scr_flow_eyebrow(NkUi *ui, const char *marker, const char *text, uint32_t rgba);
 NkUiStyle scr_flow_box_style(const NkUiTheme *theme, uint32_t fill);

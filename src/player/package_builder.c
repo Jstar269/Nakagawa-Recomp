@@ -1604,6 +1604,8 @@ bool package_builder_parse_progress_line(
         }
         const char *notice = nk_json_get_string(nk_json_obj_get(root, "notice"));
         if (notice) safe_str_copy(out_event->notice, sizeof(out_event->notice), notice);
+        const char *speed = nk_json_get_string(nk_json_obj_get(root, "speed"));
+        if (speed) safe_str_copy(out_event->speed, sizeof(out_event->speed), speed);
     }
     nk_json_free(root);
 
@@ -1686,6 +1688,57 @@ float package_builder_compile_fraction(const PackageBuildSession *session) {
     return (float)session->parts_completed / (float)session->parts_total;
 }
 
+const char *package_builder_speed_line(const PackageBuildSession *session) {
+    if (!session || !session->is_building || session->speed_line[0] == '\0') return NULL;
+    return session->speed_line;
+}
+
+static const struct {
+    const char *key;
+    const char *name;
+} kBuildSpeeds[PACKAGE_BUILD_SPEED_COUNT] = {
+    [PACKAGE_BUILD_SPEED_BALANCED] = {"balanced", "Balanced"},
+    [PACKAGE_BUILD_SPEED_BACKGROUND] = {"background", "Background"},
+    [PACKAGE_BUILD_SPEED_FASTEST] = {"fastest", "Fastest"},
+};
+
+static PackageBuildSpeed build_speed_or_default(PackageBuildSpeed speed) {
+    return (int)speed >= 0 && speed < PACKAGE_BUILD_SPEED_COUNT ? speed
+                                                                : PACKAGE_BUILD_SPEED_BALANCED;
+}
+
+const char *package_build_speed_key(PackageBuildSpeed speed) {
+    return kBuildSpeeds[build_speed_or_default(speed)].key;
+}
+
+const char *package_build_speed_name(PackageBuildSpeed speed) {
+    return kBuildSpeeds[build_speed_or_default(speed)].name;
+}
+
+bool package_build_speed_from_key(const char *key, PackageBuildSpeed *out) {
+    if (!key || !out) return false;
+    for (int i = 0; i < PACKAGE_BUILD_SPEED_COUNT; ++i) {
+        if (strcmp(key, kBuildSpeeds[i].key) == 0) {
+            *out = (PackageBuildSpeed)i;
+            return true;
+        }
+    }
+    return false;
+}
+
+PackageBuildSpeed package_build_speed_next(PackageBuildSpeed speed) {
+    switch (build_speed_or_default(speed)) {
+    case PACKAGE_BUILD_SPEED_BACKGROUND: return PACKAGE_BUILD_SPEED_BALANCED;
+    case PACKAGE_BUILD_SPEED_BALANCED: return PACKAGE_BUILD_SPEED_FASTEST;
+    default: return PACKAGE_BUILD_SPEED_BACKGROUND;
+    }
+}
+
+NkProcessPriority package_build_speed_priority(PackageBuildSpeed speed) {
+    return build_speed_or_default(speed) == PACKAGE_BUILD_SPEED_BACKGROUND
+        ? NK_PROCESS_PRIORITY_LOW : NK_PROCESS_PRIORITY_NORMAL;
+}
+
 const char *package_builder_compile_notice(const PackageBuildSession *session) {
     if (!session || session->compile_notice[0] == '\0' ||
         session->current_stage != PACKAGE_BUILD_STAGE_COMPILE) {
@@ -1715,6 +1768,7 @@ void package_builder_apply_event(
         session->total_bytes = event->total_bytes;
     }
     if (event->error_code[0]) safe_str_copy(session->failure_code, sizeof(session->failure_code), event->error_code);
+    if (event->speed[0]) safe_str_copy(session->speed_line, sizeof(session->speed_line), event->speed);
     if (event->install_complete) session->prerequisite_install_complete = true;
     if (event->parts_total > 0) {
         session->parts_completed = event->parts_completed;
@@ -2485,12 +2539,14 @@ NkResult package_builder_start(
     nk_remove_utf8(session->log_file_path);
     session->progress_file_offset = 0;
 
-    const char *argv[16];
+    const char *argv[20];
     int argc = 0;
     argv[argc++] = python_path;
     argv[argc++] = cli_path;
     argv[argc++] = "build-package";
     argv[argc++] = session->disc_id;
+    argv[argc++] = "--build-speed";
+    argv[argc++] = package_build_speed_key(session->build_speed);
     argv[argc++] = "--progress-json";
     argv[argc++] = session->progress_file_path;
     argv[argc++] = "--log-file";
@@ -2537,12 +2593,15 @@ NkResult package_builder_start(
         }
     }
 
-    bool spawned = nk_platform_spawn_tool(
+    /* Background starts the whole build tree low: Python, Make and every compiler
+       inherit the child's priority. On Android the tool-folder rule still applies. */
+    bool spawned = nk_platform_spawn_tool_at_priority(
         python_path,
         argv,
         envp[0] ? envp : NULL,
         NULL,
         session->log_file_path,
+        package_build_speed_priority(session->build_speed),
         &session->process
     );
 
@@ -2565,6 +2624,8 @@ NkResult package_builder_start(
     session->current_stage = PACKAGE_BUILD_STAGE_PREFLIGHT;
     safe_str_copy(session->current_stage_name, sizeof(session->current_stage_name), "preflight");
     safe_str_copy(session->current_message, sizeof(session->current_message), "Starting package build…");
+    snprintf(session->speed_line, sizeof(session->speed_line), "Build speed: %s",
+             package_build_speed_name(session->build_speed));
 
     char spawn_msg[PACKAGE_BUILD_LINE_LEN];
     snprintf(spawn_msg, sizeof(spawn_msg), "[build] START: Building package for %s", session->disc_id);

@@ -300,7 +300,7 @@ typedef enum GeProfileCheck {
 
 /* GPU rasterizer hooks. The primitive hooks return 1 when the primitive was taken by
  * the GPU backend (the software rasterizer is skipped) — in the full GPU renderer they
- * always take it. flush(reason) is called at GE sync points ("listend", "loadclut");
+ * always take it. flush(reason) is called at GE sync points ("listend", "xfersrc");
  * the backend decides what each requires. vram_dirty(addr,bytes) is a POST-WRITE notification:
  * guest memory already contains the CPU's new bytes. An overlapping persistent target must
  * merge exactly that byte span, preserve newer GPU bytes outside it, and prevent an older
@@ -522,6 +522,19 @@ typedef enum GeTnlReason {
 } GeTnlReason;
 void        ge_tnl_reason_counts(unsigned long long out[GE_TNL_WHY_COUNT], int reset);
 const char *ge_tnl_reason_name(int why);   /* "clear", "flat", ...; NULL out of range */
+/* Finer Bezier and spline patches (#2053, ENHANCEMENT_CONTRACT.md 10.14): a host factor on the
+ * guest's PATCHDIVISION for triangle patches, from the tess key of the SR_ACE launch line (off,
+ * 2, 3 or 4; an authentic run has none). It alters GE timing under SR_GE_TIMING=1.
+ * ge_patch_tess_init(factor) is called with the run's effective factor: 0 or 1 leave the PSP's
+ * division, 2..4 turn the feature on, print its start lines and register ge_patch_tess_exit_report
+ * with sr_at_process_end, which prints the run's `PATCH_TESS: exit (quads=, capped_draws=)` line.
+ * It returns the factor in use (1: the PSP's division). ge_patch_tess_set is the selftest seam
+ * (1..4, anything else is 1). The counts are since the run started: patch quads drawn, and
+ * draws whose factor was lowered to stay within the vertex cap. */
+int       ge_patch_tess_init(int factor);
+int       ge_patch_tess_set(int factor);
+void      ge_patch_tess_counts(unsigned long long *quads, unsigned long long *capped);
+void      ge_patch_tess_exit_report(void);
 /* The specular and powered-diffuse power light_vertex uses: 0 (the default) the C library's
  * powf, 1 ge_powf, the integer power psp_tnl.vert repeats bit for bit, which also lets the GPU
  * T&L take those lights. The selftest seams give ge_powf and its 64 x 64-bit high product

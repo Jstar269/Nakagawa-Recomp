@@ -99,6 +99,7 @@ PUBLIC_TARGETS := \
 	clay-layout-selftest \
 	ed25519-verify-selftest \
 	achievements-selftest \
+	nk-nickname-selftest \
 	nk-ui-core-selftest \
 	nk-ui-player-screens-selftest \
 	nk-ui-player-screens-capture \
@@ -131,6 +132,7 @@ PUBLIC_TARGETS := \
 	ge-cpu-profile-validate-selftest \
 	ge-tnl-census-selftest \
 	xr-selftest \
+	ge-patch-tess-selftest \
 	ge-flight-overhead \
 	vfpu-tables-selftest \
 	watchpoints-file-selftest \
@@ -174,6 +176,7 @@ PUBLIC_TARGETS := \
 	gpu-coherence-pcache-mutant \
 	vram-view-identity-selftest \
 	gpu-dst-read-mutants \
+	gpu-stencil-once-mutants \
 	gpu-snapsync-selftest \
 	gpu-ace-selftest \
 	tex-scale-selftest \
@@ -307,6 +310,7 @@ HELP_DESCRIPTION_gui-present-selftest := run the host present pacing selftest
 HELP_DESCRIPTION_clay-layout-selftest := build and run the vendored Clay layout selftest
 HELP_DESCRIPTION_achievements-selftest := run the RetroAchievements bridge (vendored rcheevos) against an in-process fake server, with no network
 HELP_DESCRIPTION_ed25519-verify-selftest := check nk_ed25519_verify (vendored Monocypher) against the RFC 8032 vectors and nk_minisign_verify against real minisign output
+HELP_DESCRIPTION_nk-nickname-selftest := check the console nickname rule (src/core/nk_nickname.h): the Player default, the 32-byte cap and the refused values
 HELP_DESCRIPTION_nk-ui-player-screens-selftest := build and run nk_ui Library, Title detail and router snapshots
 HELP_DESCRIPTION_nk-ui-player-screens-capture := save offscreen synthetic Library and Title detail captures (set NK_UI_CAPTURE_DIR)
 HELP_DESCRIPTION_nk-ui-overlay-host-selftest := build and run the in-game overlay host on SDL3_ttf, real key events and the SDL_Renderer backend (#1159)
@@ -339,6 +343,7 @@ HELP_DESCRIPTION_ge-float24-selftest := run the GE float24/row-sum/reciprocal re
 HELP_DESCRIPTION_ge-cpu-profile-validate-selftest := run the GE CPU-profile validator selftest on the production GE object
 HELP_DESCRIPTION_ge-tnl-census-selftest := run the GPU T&L decline census selftest (#318) on the production GE object
 HELP_DESCRIPTION_xr-selftest := run the OpenXR (VR) module selftest (#791) against a fake OpenXR runtime: no headset or loader needed
+HELP_DESCRIPTION_ge-patch-tess-selftest := run the finer Bezier and spline patch selftest on the production GE object (no GPU)
 HELP_DESCRIPTION_ge-flight-overhead := measure the disarmed flight recorder cost on the GE draw path (recorder linked vs absent; no game data)
 HELP_DESCRIPTION_vfpu-tables-selftest := run the VFPU table-loader selftest
 HELP_DESCRIPTION_watchpoints-file-selftest := run the watchpoints-file selftest
@@ -382,6 +387,7 @@ HELP_DESCRIPTION_gpu-coherence-selftest-snapbar-mutants := prove the GPU coheren
 HELP_DESCRIPTION_gpu-coherence-pcache-mutant := prove pipeline-cache-cold fails when pipelines bypass the Vulkan pipeline cache
 HELP_DESCRIPTION_vram-view-identity-selftest := check that the GE decoders the pause menu's VRAM viewer calls leave later frames, guest memory and the GE state unchanged (#314; needs a Vulkan device and fails without one)
 HELP_DESCRIPTION_gpu-dst-read-mutants := prove the GPU coherence dst-read cells kill seven broken destination-read variants
+HELP_DESCRIPTION_gpu-stencil-once-mutants := prove the GPU coherence stencil-once case kills three broken write-once stencil batch variants
 HELP_DESCRIPTION_gpu-snapsync-selftest := run the GPU snapshot-sync selftest
 HELP_DESCRIPTION_gpu-ace-selftest := run Ace Mode's texture filtering selftest on a real Vulkan device (SKIPs without one)
 HELP_DESCRIPTION_tex-scale-selftest := run the xBRZ texture scaling selftest against the pinned upstream goldens (no GPU)
