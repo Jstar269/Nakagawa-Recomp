@@ -7,7 +7,7 @@ The manifest is public by policy: it ships so a new user's
 player recognizes UCUS98701 as the built-in ``hst`` title. These tests hold it to
 that policy -- tracked and included, never ignored or excluded -- and to the
 scrub the decision required: addresses, disc identity, module names and load
-addresses, profiles and runtime bindings, and no private paths or evidence.
+addresses, profiles, runtime bindings and the analog dead zone, and no private paths or evidence.
 """
 
 from __future__ import annotations
