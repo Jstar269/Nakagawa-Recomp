@@ -86,6 +86,13 @@ PlayerUiAction player_ui_screen_build(NkUi *ui, const PlayerUiBuildModel *model)
             nk_ui_end_container(ui);
         }
     }
+    if (!model->built && model->speed_line != NULL && model->speed_line[0] != '\0') {
+        /* The build speed from Settings, the job count it gave and what bound it: data,
+           in the muted colour, so it reads as a fact about the build. */
+        NkUiTextStyle text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->muted);
+        nk_ui_text(ui, FLOW_ID_SPEED, nk_ui_text_clamp(ui, model->speed_line, &text, inner, 2),
+                   &text);
+    }
     if (!model->built && model->notice != NULL && model->notice[0] != '\0') {
         /* A calm note that other apps may feel slower: muted body text, no warning
            colour or mark, because nothing is wrong. */
