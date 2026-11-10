@@ -40,6 +40,31 @@ static PlayerUiAction settings_op(PlayerUiSettingsOp op) {
     return result;
 }
 
+/* Of a row's value now, its other values, its library value and the value another setting
+   can give it (any may be NULL), the one whose button, "name: value", is widest. */
+static const char *settings_widest_value(NkUi *ui, const char *name, const char *value,
+                                         const char *const *others, int other_count,
+                                         const char *library_value, const char *other_value) {
+    const char *widest = value;
+    float widest_width = -1.0f;
+    char label[96];
+    for (int i = -3; i < other_count; i++) {
+        const char *candidate = i == -3 ? value
+                                : i == -2 ? library_value
+                                : i == -1 ? other_value
+                                          : others[i];
+        float width;
+        if (candidate == NULL || (i >= 0 && others == NULL)) continue;
+        (void)snprintf(label, sizeof(label), "%s: %s", name, candidate);
+        width = nk_ui_button_width(ui, label, 0u);
+        if (width > widest_width) {
+            widest = candidate;
+            widest_width = width;
+        }
+    }
+    return widest;
+}
+
 static const char *settings_on_off(bool on) {
     return on ? "On" : "Off";
 }
@@ -831,7 +856,22 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             rows[i + 1].value = safe_text(model->enhanced_rows[i].value, "Off");
             rows[i + 1].sentence = safe_text(model->enhanced_rows[i].sentence, "");
         }
-        WizardColumn column = scr_wizard_column(ui, rows, (size_t)count + 1u, inner - 32.0f,
+        /* The column is sized from the widest value each row can show on this page, not
+           the one it shows now, so stepping a setting (Smooth motion turning Widescreen
+           off, say) never moves or restacks the rows. */
+        WizardRow widest[1 + PLAYER_UI_ENHANCED_ROWS];
+        memcpy(widest, rows, sizeof(rows[0]) * ((size_t)count + 1u));
+        widest[0].value = settings_widest_value(ui, rows[0].name, rows[0].value,
+                                                model->enhanced_modes,
+                                                model->enhanced_mode_count, NULL, NULL);
+        for (int i = 0; i < count; i++) {
+            const PlayerUiEnhancedRow *row = &model->enhanced_rows[i];
+            widest[i + 1].value = settings_widest_value(ui, rows[i + 1].name, rows[i + 1].value,
+                                                        row->labels, row->label_count,
+                                                        row->library_value,
+                                                        row->other_value);
+        }
+        WizardColumn column = scr_wizard_column(ui, widest, (size_t)count + 1u, inner - 32.0f,
                                                 true);
         if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_ACE_MODE, SET_ID_TEXT + 0x400u, rows[0].name,
                              rows[0].value, rows[0].sentence, model->enhanced_on, inner - 32.0f,
@@ -869,8 +909,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
         {NK_UI_PROMPT_ACT_BACK, "Back to settings"}
     };
     const NkUiTheme *theme = nk_ui_theme(ui);
-    float inner = scr_flow_begin_with_scroll(
-        ui, width, height, 760.0f, model->page == PLAYER_UI_SETTINGS_PAGE_ACE);
+    float inner = scr_flow_begin(ui, width, height, 760.0f);
     if (inner <= 0.0f) return;
     switch (model->page) {
     case PLAYER_UI_SETTINGS_PAGE_ONLINE:
@@ -1211,7 +1250,7 @@ PlayerUiAction player_ui_screen_settings(NkUi *ui, const PlayerUiSettingsModel *
     layout = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_grow(), 0.0f);
     layout.align_x = NK_UI_ALIGN_CENTER;
     layout.padding_top = height >= 680.0f ? NK_UI_SPACE_7 : NK_UI_SPACE_4;
-    layout.scroll = page_scrolls(ui);
+    layout.scroll = SCR_PAGE_BODY_SCROLLS;
     if (nk_ui_begin_container(ui, SET_ID_BODY, &layout, NULL)) {
         settings_main(ui, model, width, height, &result);
         nk_ui_end_container(ui);
