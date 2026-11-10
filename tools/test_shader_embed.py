@@ -430,8 +430,11 @@ def spirv_instructions(embedded: str) -> list[tuple[int, tuple[int, ...]]]:
 class DstReadVariantTests(unittest.TestCase):
     """psp.frag's ordered destination-read variant (#2109) and the default module beside it."""
 
-    # The default module of the base the variant was added to: an #ifdef must not change it.
-    DEFAULT_FRAG_SPIRV_SHA256 = "4c4b160805e64c10fcd49f53a31d40523cd71606ea2ebd1070da26973c16dc6e"
+    # The default module, psp.frag built without SR_DST_INTERLOCK: a change meant for the variant
+    # alone (an #ifdef) must not change it. A deliberate change to the default fragment stage
+    # updates this hash; the last one added the color test, and the module is the same with and
+    # without the variant's #ifdef blocks in the source.
+    DEFAULT_FRAG_SPIRV_SHA256 = "ab1795bb84423d027451cb102ad9a72042f1579b79e79cb8752421e7cf92ce20"
 
     def manifest_entry(self, embedded: str) -> dict:
         manifest = shader_embed.load_manifest(shader_embed.MANIFEST)

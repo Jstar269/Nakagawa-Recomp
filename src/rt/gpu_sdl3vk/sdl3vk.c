@@ -1477,6 +1477,8 @@ static void poll_input_on_this_stack(void *arg) {
             /* F9 turns fast forward on or off (ace.h); the scheduler ignores it outside an
              * Enhanced or Ace run on the paced clock. */
             if (ev.key.key == SDLK_F9 && !ev.key.repeat && !s_text_claim) ace_ff_toggle();
+            /* F12 saves the next presented picture as a PNG (fbcap.h, screenshot key). */
+            if (ev.key.key == SDLK_F12 && !ev.key.repeat) sr_screenshot_request();
             /* While the keyboard is claimed its keys go to the keyboard only: a keyboard Enter that
              * confirms the field must not leave a START pulse behind for the title to see. */
             if (!ev.key.repeat && !s_text_claim) s_button_pulse |= keyboard_button(ev.key.scancode);

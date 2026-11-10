@@ -21,6 +21,8 @@ import subprocess
 import sys
 from typing import Any
 
+from nk_powershell import powershell_exe
+
 ROOT = Path(__file__).resolve().parents[1]
 # The PSPDEV build toolchain and the PSPLINK PC clients need not live in the same
 # place. On Windows the supported route is PSPDEV under WSL (pspdev.github.io) with
@@ -146,13 +148,13 @@ def _psplink_device() -> tuple[bool, str]:
 
     if not sys.platform.startswith("win"):
         return False, "no device detector on this platform; prove the link with a host0 round trip"
-    # `@(...)` is required: powershell.exe is Windows PowerShell 5.1, where a
+    # `@(...)` is required: the fallback host is Windows PowerShell 5.1, where a
     # single pipeline object has no .Count property and the expression yields
     # $null. Without the array subexpression this reports "not connected" even
     # when the endpoint is present -- a false negative that is easy to mistake
     # for a correct answer, because the common case is genuinely disconnected.
     code, output = _run(
-        ["powershell.exe", "-NoProfile", "-Command",
+        [powershell_exe(), "-NoProfile", "-Command",
          "@(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | "
          "Where-Object { $_.InstanceId -match 'VID_054C&PID_01C9' }).Count"],
         timeout=45.0,

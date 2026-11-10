@@ -181,6 +181,47 @@ int main(int argc, char *argv[]) {
     assert(!refused.is_active);
     printf("[PROCESS_TEST] Invalid UTF-8 working directory and environment refused.\n");
 
+    /* One variable far longer than a fixed conversion buffer must reach the child
+     * intact: the package build prepends a toolchain folder to a PATH that can run
+     * to the 32767-character variable limit. */
+    {
+        enum { LONG_VALUE_LEN = 20000 };
+        const char *long_out_file = SR_SELFTEST_BUILD_ROOT "\\argv_echo_long_env.txt";
+        char long_out_arg[1024];
+        int long_out_arg_len = snprintf(long_out_arg, sizeof(long_out_arg), "--output=%s", long_out_file);
+        assert(long_out_arg_len > 0 && (size_t)long_out_arg_len < sizeof(long_out_arg));
+        char *long_env_item = (char *)malloc(sizeof("TEST_ENV_KEY=") + LONG_VALUE_LEN);
+        char *long_expected = (char *)malloc(sizeof("\nTEST_ENV_KEY=") + LONG_VALUE_LEN + 2);
+        assert(long_env_item && long_expected);
+        char *long_value = long_env_item + sizeof("TEST_ENV_KEY=") - 1;
+        for (int i = 0; i < LONG_VALUE_LEN; i++) long_value[i] = (char)('A' + (i % 26));
+        long_value[LONG_VALUE_LEN] = '\0';
+        memcpy(long_env_item, "TEST_ENV_KEY=", sizeof("TEST_ENV_KEY=") - 1);
+        snprintf(long_expected, sizeof("\nTEST_ENV_KEY=") + LONG_VALUE_LEN + 2, "\nTEST_ENV_KEY=%s\n", long_value);
+
+        const char *long_env[] = {long_env_item, NULL};
+        const char *long_argv[] = {helper_exe, long_out_arg, NULL};
+        remove(long_out_file);
+        NkProcessHandle long_proc;
+        assert(nk_platform_spawn_process(helper_exe, long_argv, long_env, NULL, NULL, &long_proc));
+        assert(nk_platform_wait_process(&long_proc, 5000) == 0);
+        nk_platform_close_process(&long_proc);
+
+        FILE *long_f = fopen(long_out_file, "rb");
+        assert(long_f != NULL);
+        char *long_output = (char *)malloc(LONG_VALUE_LEN + 8192);
+        assert(long_output != NULL);
+        size_t long_size = fread(long_output, 1, LONG_VALUE_LEN + 8192 - 1, long_f);
+        fclose(long_f);
+        long_output[long_size] = '\0';
+        assert(strstr(long_output, long_expected) != NULL);
+        free(long_output);
+        free(long_expected);
+        free(long_env_item);
+        remove(long_out_file);
+    }
+    printf("[PROCESS_TEST] A 20000-character environment entry reached the child intact.\n");
+
     /* A refused start keeps the code CreateProcessW gave, which is the only
      * thing a Windows Security block reaches the player as. A folder is refused
      * with ERROR_ACCESS_DENIED, the code an attack surface reduction rule gives;
@@ -304,6 +345,54 @@ int main(int argc, char *argv[]) {
     CloseHandle(hGrandchild);
     remove(pid_file);
     printf("[PROCESS_TEST] Process tree termination verified: grandchild terminated!\n");
+
+    /* Settings > Build speed: Background starts the build child below normal, and what
+       the child starts inherits it (the build's Make and compilers). Before
+       nk_platform_spawn_process_at_priority every child ran at the player's class. */
+    {
+        DWORD own_class = GetPriorityClass(GetCurrentProcess());
+        bool runner_low = own_class == IDLE_PRIORITY_CLASS ||
+                          own_class == BELOW_NORMAL_PRIORITY_CLASS;
+        NkProcessPriority read_back = NK_PROCESS_PRIORITY_LOW;
+        const char *sleep_argv[] = { helper_exe, "--sleep-ms", "30000", NULL };
+        NkProcessHandle normal_proc;
+        assert(nk_platform_spawn_process(helper_exe, sleep_argv, NULL, NULL, NULL,
+                                         &normal_proc));
+        assert(nk_platform_process_priority(&normal_proc, &read_back));
+        assert(read_back == (runner_low ? NK_PROCESS_PRIORITY_LOW : NK_PROCESS_PRIORITY_NORMAL));
+        nk_platform_terminate_process(&normal_proc);
+        nk_platform_close_process(&normal_proc);
+
+        remove(pid_file);
+        NkProcessHandle low_proc;
+        assert(nk_platform_spawn_process_at_priority(helper_exe, tree_argv, NULL, NULL, NULL,
+                                                     NK_PROCESS_PRIORITY_LOW, &low_proc));
+        assert(nk_platform_process_priority(&low_proc, &read_back));
+        assert(read_back == NK_PROCESS_PRIORITY_LOW);
+        DWORD low_grandchild_pid = 0;
+        for (int i = 0; i < 200 && low_grandchild_pid == 0; i++) {
+            FILE *pf = fopen(pid_file, "r");
+            if (pf) {
+                if (fscanf(pf, "%lu", &low_grandchild_pid) != 1) low_grandchild_pid = 0;
+                fclose(pf);
+            }
+            if (low_grandchild_pid == 0) Sleep(25);
+        }
+        assert(low_grandchild_pid > 0);
+        HANDLE low_grandchild = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                                            FALSE, low_grandchild_pid);
+        assert(low_grandchild != NULL);
+        DWORD grandchild_class = GetPriorityClass(low_grandchild);
+        assert(grandchild_class == BELOW_NORMAL_PRIORITY_CLASS ||
+               (runner_low && grandchild_class == own_class));
+        nk_platform_terminate_process(&low_proc);
+        nk_platform_close_process(&low_proc);
+        (void)WaitForSingleObject(low_grandchild, 2000);
+        CloseHandle(low_grandchild);
+        remove(pid_file);
+        printf("[PROCESS_TEST] Low priority reaches the child and its children%s\n",
+               runner_low ? " (the runner itself is below normal)" : "");
+    }
 
     printf("[PROCESS_TEST] Process & quoting test PASSED successfully!\n");
 #else

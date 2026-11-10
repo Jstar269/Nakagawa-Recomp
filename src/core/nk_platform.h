@@ -50,6 +50,8 @@ int nk_rename_utf8(const char *from, const char *to);
 
 /* Filesystem and path utilities (all paths in UTF-8) */
 char nk_platform_path_separator(void);
+/* The separator between entries of a PATH-style list: ';' on Windows, ':' elsewhere. */
+char nk_platform_path_list_separator(void);
 bool nk_platform_file_exists(const char *path);
 bool nk_platform_dir_exists(const char *path);
 /* True only when the OS says the name does not exist: ENOENT or ENOTDIR on POSIX, and
@@ -285,6 +287,37 @@ bool nk_platform_spawn_process(
     NkProcessHandle *out_process
 );
 
+/* The scheduling priority a spawned process starts at. Its children inherit it, so a
+ * low-priority package build keeps every compiler it starts low too. */
+typedef enum {
+    NK_PROCESS_PRIORITY_NORMAL = 0,
+    /* Win32 BELOW_NORMAL_PRIORITY_CLASS; POSIX nice NK_PLATFORM_LOW_PRIORITY_NICE. A game
+       at normal priority then always runs first, and the process uses what is left. */
+    NK_PROCESS_PRIORITY_LOW
+} NkProcessPriority;
+
+/* The POSIX nice value of NK_PROCESS_PRIORITY_LOW. */
+#define NK_PLATFORM_LOW_PRIORITY_NICE 10
+
+/* nk_platform_spawn_process, with the child started at `priority`. The child never runs
+ * a single instruction at a higher priority: Win32 sets the class at creation and POSIX
+ * before exec. A priority the OS refuses fails the spawn. */
+bool nk_platform_spawn_process_at_priority(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessPriority priority,
+    NkProcessHandle *out_process
+);
+
+/* The priority a running child has now, as NK_PROCESS_PRIORITY_LOW when it runs below
+ * normal (any lower class or nice value counts) and NORMAL otherwise. False when the OS
+ * cannot say, or for an Android title, which runs in another app process rather than as a
+ * child (an Android tool child reads as on the desktop). */
+bool nk_platform_process_priority(const NkProcessHandle *process, NkProcessPriority *out);
+
 /* Starts one of the application's own tool programs (the package build's Python, compiler and
  * make, an archive tool), with the same arguments and handle as nk_platform_spawn_process.
  * On the desktop it is nk_platform_spawn_process. On Android an app may run only programs its
@@ -298,6 +331,19 @@ bool nk_platform_spawn_tool(
     const char * const *envp,
     const char *working_directory,
     const char *output_log_path,
+    NkProcessHandle *out_process
+);
+
+/* nk_platform_spawn_tool, with the child started at `priority` as
+ * nk_platform_spawn_process_at_priority starts it. On Android the tool-folder rule applies
+ * first, at every priority, and a low tool child is niced before exec as on the desktop. */
+bool nk_platform_spawn_tool_at_priority(
+    const char *executable_path,
+    const char * const *argv,
+    const char * const *envp,
+    const char *working_directory,
+    const char *output_log_path,
+    NkProcessPriority priority,
     NkProcessHandle *out_process
 );
 

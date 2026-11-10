@@ -130,6 +130,7 @@ It fails when a file and algorithm pair is missing here or a row names a pair th
 | `tools/nk_cli.py` | CRC-32 | PNG chunk checksum | Keep: the format requires it |
 | `tools/ppm2png.py` | CRC-32 | PNG chunk checksum | Keep: the format requires it |
 | `tools/ppsspp_ref.py` | CRC-32 | PNG chunk checksum | Keep: the format requires it |
+| `src/rt/fbcap.c` | CRC-32 | PNG chunk checksum of F12 screenshots | Keep: the format requires it |
 | `src/core/nk_psp_inflate.c` | CRC-32 | gzip member trailer of a decrypted PSP payload (RFC 1952) | Keep: the format requires it |
 | `src/core/nk_zip.c` | CRC-32 | ZIP entry checksum of save backups (store-only archives, APPNOTE 4.4.7), checked for every entry before a restore writes anything | Keep: the format requires it |
 | `src/core/nk_steam_shortcuts.c` | CRC-32 | The app ID Steam derives for a non-Steam shortcut (the CRC-32 of the quoted executable path and name, top bit set); an identifier in the user's own Steam library, not a security check | Keep: Steam defines it |
