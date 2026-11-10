@@ -1738,6 +1738,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_SHARE_LIBRARIES:
             player_app_toggle_share_system_libraries(app);
             break;
+        case PLAYER_UI_SETTINGS_CYCLE_BUILD_SPEED: player_app_cycle_build_speed(app); break;
         case PLAYER_UI_SETTINGS_CLEAR_SHARED_LIBRARIES:
             player_app_clear_shared_library_cache(app);
             break;
