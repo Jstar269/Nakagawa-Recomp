@@ -8675,7 +8675,9 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.on && r.part[PLAYER_PART_WIDE] == 1 && r.part[PLAYER_PART_SMOOTH] == 1);
     const char *unavailable = player_enhanced_part_unavailable_label(
         PLAYER_PART_WIDE, r.part[PLAYER_PART_WIDE], r.part[PLAYER_PART_SMOOTH]);
-    assert(unavailable && strcmp(unavailable, "Off (Smooth motion is on)") == 0);
+    /* Just "Off": the row's sentence says Smooth motion disables it, and a longer word
+       here widened Settings > Enhanced's button column and reflowed every row. */
+    assert(unavailable && strcmp(unavailable, "Off") == 0);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_WIDE, 1, 0) == NULL);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_WIDE, 0, 1) == NULL);
     assert(player_enhanced_part_unavailable_label(PLAYER_PART_SMOOTH, 1, 1) == NULL);
