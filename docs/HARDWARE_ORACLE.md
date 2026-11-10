@@ -1412,6 +1412,71 @@ One console is one data point; see §11. Nothing here closes issue #70
   the first following instruction and was consumed, the same as the control without the `vflush`. The
   `vflush-vadd-*` cells did not return an addition result and are not cited.
 
+- **PSP-3000 single-case runs of `vfpu-mfv-mtv`, `vfpu-wide-dot-matrix` and `vfpu-round-sep` (2026-11-09
+  UTC)**: system software 6.61 (`flash0:/vsh/etc/version.txt`, read on 2026-11-10: `release:6.61:`,
+  `system:58401@release_661,0x06060110:`); PSPLink `pspver` 0x06060010, which the runner records as 6.6.0 and
+  which `pspver` prints in the XMB context (0x06060110 in the game context); custom firmware ARK-5 with cIPL,
+  version 5.1.0 (operator-declared, not read by a tool). Operator-declared model PSP-3000, XMB context, one
+  launch per case on its own boot after a mailbox reset, each after the `transport-write` preflight
+  (PSP-TRANSPORT-001 is not re-cited), harness verdict ok, all PASS, acceptance-eligible with 0 blockers, no
+  exception, no hang; passes 0 and 1 agree in every case. All three are in
+  `fixtures/psp_oracle/probe_hle_issues.c`: `vfpu-mfv-mtv` (case 174) on boot 167 at `1301371e`, 5 records;
+  `vfpu-wide-dot-matrix` (case 173) on boot 168 at `b2271c93`, 367 records; `vfpu-round-sep` (case 176) on
+  boot 169 at `f50333e8`, 15 records. Each launch commit is a pre-publication commit of the same case; its case
+  section, case number and test id in `probe_hle_issues.c` and its Makefile CASE lines are identical to this
+  tree's. The raw envelopes and host0 logs stay in the private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-09) |
+  | --- | --- | --- | --- |
+  | `PSP-VFPU-MFVMTV-001` | `mtv-mfv-p0`, `mtv-mfv2-p0`, `mtv-mfv-p1`, `mtv-mfv2-p1`, `vfpu-mfv-mtv-done` (boot 167) | other VFPU registers, mtv/mfv of a pair or quad | MEASURED (`vfpu-mfv-mtv`) |
+  | `PSP-VFPU-WIDEDOT-001` | `vdot-p-p0*`, `vdot-q-p0*`, `vhdp-q-p0*`, `vcrsp-t-p0*`, `vqmul-q-p0*`, `vtfm-q-p0*`, `vhtfm-q-p0*`, `vmmul-q-p0*`, `vmmul-qt-p0*`, `vmscl-q-p0*`, `vmzero-q-p0*`, `vmidt-q-p0*`, `vmone-q-p0*`, `vmmov-q-p0*`, `vrot-q-p0*`, `vdot-p-p1*`, `vdot-q-p1*`, `vhdp-q-p1*`, `vcrsp-t-p1*`, `vqmul-q-p1*`, `vtfm-q-p1*`, `vhtfm-q-p1*`, `vmmul-q-p1*`, `vmmul-qt-p1*`, `vmscl-q-p1*`, `vmzero-q-p1*`, `vmidt-q-p1*`, `vmone-q-p1*`, `vmmov-q-p1*`, `vrot-q-p1*`, `vfpu-wide-dot-matrix-done` (boot 168) | non-identity prefixes, the .p/.t matrix forms, specials in off-diagonal matrix elements | MEASURED (`vfpu-wide-dot-matrix`) |
+  | `PSP-VFPU-ROUNDSEP-001` | `vdot-rs-p0*`, `vmscl-rs-p0*`, `vmul-rs-p0*`, `vadd-rs-p0*`, `vsub-rs-p0*`, `vdot-rs-p1*`, `vmscl-rs-p1*`, `vmul-rs-p1*`, `vadd-rs-p1*`, `vsub-rs-p1*`, `vfpu-round-sep-done` (boot 169) | rounding modes other than the power-on mode | MEASURED (`vfpu-round-sep`) |
+
+  `vfpu-mfv-mtv` (#326): `mtv.s` then `mfv.s` returned each of 17 words bit for bit through S000 (mtv
+  `0x48e80000`, mfv `0x48690000`) and through S733 (`0x48e8007f`, `0x4869007f`): `0x00000000`, `0x80000000`,
+  `0x00000001`, `0x80000001`, `0x007fffff`, `0x807fffff`, `0x7fc00011`, `0xffc00022`, `0x7f800033`,
+  `0xff800044`, `0x7f800000`, `0xff800000`, `0x7f7fffff`, `0x3f800000`, `0xdeadbeef`, `0xffffffff` and a closing
+  `0x00000000`. No denormal was flushed, no NaN was quieted and no payload changed.
+
+  `vfpu-wide-dot-matrix` (#326): one rule reproduces all 537 cells of `vdot.p` (33), `vdot.q` (73), `vhdp.q`
+  (73), `vtfm4.q` (73), `vhtfm4.q` (65), `vcrsp.t` (57), `vqmul.q` (73), `vmmul.q` (73) and `vmscl.q` (17), and
+  the `vmmul.q` transposed-source cell. Denormal inputs count as zero. Each exact product is aligned to the
+  largest term exponent and truncated toward zero one or two guard bits below its 24-bit mantissa (the cells fit
+  either); the terms are summed exactly, so their order never changes the result; the sum is truncated toward
+  zero to 24 bits, and a sum that carries into a higher binade is rounded to nearest even (the `vfpu-round-sep`
+  cells below separate that case). Cells: (1, 2^-24, 2^-24, 2^-24) . (1, 1, 1, 1) = `0x3f800001`;
+  (2^24, 1, 1, 1) . (1, 1, 1, 1) = `0x4b800001`; (1e8, 1, -1e8, 1) . (1, 1, 1, 1) = 0 in four orders;
+  `vcrsp.t` (1, 2^-24, 2^-24) x (1, 1, 1) = (0, `0xbf7ffffe`, `0x3f7ffffe`).
+  - *Terms:* `vhdp.q` is a0 b0 + a1 b1 + a2 b2 + b3 (a3 is ignored); `vtfm4.q` output j sums the recorded matrix
+    image words 4j..4j+3 times the vector, and `vhtfm4.q` takes 1.0 for the fourth vector lane; `vcrsp.t` is
+    (a1 b2 - a2 b1, a2 b0 - a0 b2, a0 b1 - a1 b0); `vqmul.q` is the quaternion product with w in lane 3.
+  - *Specials:* in the multi-term forms any NaN operand, 0*inf or a sum of infinities of both signs gives
+    `0x7f800001` and no NaN payload is propagated; one infinite term gives the infinity with the product's sign;
+    a NaN or infinity reaches only the outputs whose terms include it. `vmscl.q` gives `0x7f800001` or
+    `0xff800001` (the XOR of the operand signs) for a NaN or 0*inf, and a zero with the XOR sign for a
+    denormal scalar.
+  - *Constant and move forms:* `vmzero.q`, `vmidt.q` and `vmone.q` write sixteen 0.0, the identity and sixteen
+    1.0; `vmmov.q` copies NaN payloads, denormals and -0 bit for bit (9 cells).
+  - *`vrot.q` [c,s,0,0]* gives (cos, sin) of the angle times pi/2: 0 gives (1, 0); -0 (1, -0); 0.25
+    (`0x3f6c835c`, `0x3ec3ef14`); 0.5 (`0x3f3504f0`, `0x3f3504f0`); 1 (-0, 1); 1.5 (`0xbf3504f0`, `0x3f3504f0`);
+    2 (-1, -0); 3 (0, -1); 4 and 100 (1, 0); -0.5 (`0x3f3504f0`, `0xbf3504f0`); -1 (-0, -1); +inf and a quiet NaN
+    (`0x7f800001`, `0x7f800001`); -inf (`0x7f800001`, `0xff800001`); a denormal (1, 0). Lanes 2 and 3 are 0 in
+    every cell.
+
+  `vfpu-round-sep` (#326): `vdot.q` (`0x64818088`), a . b with b = (1, 1, 0, 0) unless stated: (`0x3f800003`,
+  `0x3f800000`) gives `0x40000002` (truncation would give `0x40000001`); (`0x3f800003`, `0x3f800003`,
+  `0x3f800000`) . (1, 1, 1, 1) gives `0x40400003`; (`0x3f800001`, `0x3f800000`) gives `0x40000000`;
+  (`0xbf800003`, `0xbf800000`) gives `0xc0000002`; (`0x3f800007`, `0x3f800000`) gives `0x40000004`;
+  (`0x3f800005`, `0x3f800000`) gives `0x40000002`; (`0x40000001`, `0x40000000`) gives `0x40800000`. A sum that
+  carries into a higher binade is therefore rounded to nearest, ties to even. `vmscl.q` (`0xf2018488`) and
+  `vmul.s` (`0x64010008`) round single products to nearest: `0x3fc00001 * 0x3fc00001 = 0x40100002`
+  (truncation would give `0x40100001`), `0x3fc00001 * 0xbfc00001 = 0xc0100002`,
+  `0x3f800001 * 0x3f800001 = 0x3f800002` and `0x3fc00003 * 0x3fc00001 = 0x40100003`; `vmscl.q` also gives
+  `0xbfc00001 * 0x3fc00001 = 0xc0100002` and `0xbfc00001 * 0xbfc00001 = 0x40100002`. `vadd.s`
+  (`0x60010008`): `0x3f800003` + `0x3f800000` = `0x40000002`, `0x3f800001` + `0x3f000000` = `0x3fc00001`,
+  `0xbf800003` + `0xbf800000` = `0xc0000002`; `vsub.s` (`0x60810008`): `0x3f800003` - `0xbf800000` =
+  `0x40000002`.
+
 - **PSP-3000 single-case runs of six probes (2026-11-08)**: system software 6.6.0 as reported by `pspver`,
   operator-declared model PSP-3000, XMB context, one launch per case, each after the `transport-write` preflight
   (PSP-TRANSPORT-001 is not re-cited). The runs of cases 162-165 and 170 and the boot-159 run of case 169 are
@@ -3443,7 +3508,7 @@ not expected PSP values.
 | `hle-std-handles` | `PSP-HLE-STDIO-001` | `MEASURED` (2026-11-06, PSP-3000, boot 135, `d5fed0ba`; 4 records) | Standard-handle write and close results; the probe does not read stdin. |
 | `hle-audio-rest` | `PSP-HLE-AUDIO-REST-001` | `MEASURED` (2026-11-06, PSP-3000, boot 138, `8db3ec9d`; 102 records) | RestLen and RestLength after 32 blocking-output calls at 1024, 2048 and 4096 frames. |
 | `sas-adsr` | `PSP-SAS-002` | `NOT_RUN` (current status encoding) | The current PASS/ERROR status encoding has not been run on hardware. Historical envelope values from 2026-11-05 remain in the fixture index. |
-| `sas-mix` | `PSP-SAS-003` | `NOT_RUN` | Built synthetic volume, WithMix and pitch cells for #2135 and #2054; no hardware result is claimed. |
+| `sas-mix` | `PSP-SAS-003` | `CAPTURED` (2026-11-07, PSP-3000, boot 146, game context, `979de58f`; 205 records, complete, all PASS; not acceptance-eligible: loaded module not proven unloaded) | Synthetic volume, WithMix and pitch cells for #2135 and #2054. See [PSP-SAS-003 capture 2026-11-07](#psp-sas-003-capture-2026-11-07). |
 | `vcodec-words` | `PSP-VCODEC-001` | `NOT_RUN` | Built Media Engine boundary-word cells over synthetic AVC access units; no hardware result is claimed. |
 | `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | `MEASURED` (2026-11-08, PSP-3000, boot 165, `935f225d`; 6 records) | #341: sceKernelSelfStopUnloadModule from a helper PRX's own thread: the call does not return, module_stop runs once and the module is unloaded. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. |
@@ -3455,13 +3520,49 @@ not expected PSP values.
 | `vfpu-cc-cmov` | `PSP-VFPU-CCCMOV-001` | `MEASURED` (2026-11-08, PSP-3000, boot 159 `750c5fb1` and boot 161 `831d54f0`; 217 and 153 records) | #326: VFPU_CC round trip, vcmovt/vcmovf, and vcmp CC bits (readable only after vsync or vflush). |
 | `vfpu-vus2i` | `PSP-VFPU-VUS2I-001` | `MEASURED` (2026-11-08, PSP-3000, boot 164, `3cf15b8c`; 120 records) | #326: vus2i/vs2i double-width unpack, vsgn over float lanes, and the vflush pending-prefix cell. |
 | `vfpu-basic-arith` | `PSP-VFPU-BASICARITH-001` | `MEASURED` (2026-11-08, PSP-3000, boot 166, `187681f0`; 359 records) | #326: vadd/vsub/vmul/vmin/vmax .s-.q, vscl, vdiv.s, vmov/vabs/vneg, vzero/vone/vidt over 20 operand classes. |
-| `vfpu-wide-dot-matrix` | `PSP-VFPU-WIDEDOT-001` | `NOT_RUN` (built as case 173; no hardware run) | #326: vdot, vhdp, vcrsp, vqmul, vtfm, vhtfm, vmmul, vmscl, vmzero/vmidt/vmone/vmmov and vrot over one special lane at a time and order-sensitive four-term sums. |
-| `vfpu-mfv-mtv` | `PSP-VFPU-MFVMTV-001` | `NOT_RUN` | Built #326 mtv.s/mfv.s word round trip through S000 and S733 over 17 words (zeros, denormals, NaNs, infinities, patterns); no hardware result is claimed. |
+| `vfpu-wide-dot-matrix` | `PSP-VFPU-WIDEDOT-001` | `MEASURED` (2026-11-09, PSP-3000, boot 168, `b2271c93`; 367 records) | #326: vdot, vhdp, vcrsp, vqmul, vtfm, vhtfm, vmmul, vmscl, vmzero/vmidt/vmone/vmmov and vrot over one special lane at a time and order-sensitive four-term sums. |
+| `vfpu-mfv-mtv` | `PSP-VFPU-MFVMTV-001` | `MEASURED` (2026-11-09, PSP-3000, boot 167, `1301371e`; 5 records) | #326 mtv.s/mfv.s word round trip through S000 and S733 over 17 words (zeros, denormals, NaNs, infinities, patterns); every word came back bit for bit. |
 | `vfpu-constants` | `PSP-VFPU-CONSTANTS-001` | `NOT_RUN` | Built #326 vcst.s/vcst.q for constant indices 0-31 over a sentinel background (reserved indices 20-31 run last, POWER RISK); no hardware result is claimed. |
-| `vfpu-round-sep` | `PSP-VFPU-ROUNDSEP-001` | `NOT_RUN` (built as case 176; no hardware run) | #326: vdot.q, vmscl.q, vmul.s, vadd.s and vsub.s over operands whose exact result lies between two float32 values, separating round-to-nearest-even from truncation. |
+| `vfpu-round-sep` | `PSP-VFPU-ROUNDSEP-001` | `MEASURED` (2026-11-09, PSP-3000, boot 169, `f50333e8`; 15 records) | #326: vdot.q, vmscl.q, vmul.s, vadd.s and vsub.s over operands whose exact result lies between two float32 values, separating round-to-nearest-even from truncation. |
 | `vfpu-prefix-state` | `PSP-VFPU-PREFIX-001` | `NOT_RUN` (built as case 182; no hardware run) | #326: non-identity vpfxs/vpfxt/vpfxd on vadd/vmul/vdot/vmin/vmov/vneg/vzero/vidt .q over NaN, inf, denormal and -0 lanes; prefix lifetime across vnop, vsync, vflush, a branch, add.s, mtv, mfv, lv.q, vpfxt and mfvc with the raw prefix control words; vfim.s/viim.s under a pending vpfxd. |
 | `vfpu-wider-ops` | `PSP-VFPU-WIDEROPS-001` | `NOT_RUN` (built as case 183; no hardware run) | #326: vdiv.p/.t/.q, vsin/vcos/vrcp .p/.t/.q, vrsq.q, vsqrt.q, vocp.s/.q, the .p/.t dot and matrix forms over finite order-sensitive, NaN, inf and denormal cells, and vidt.q/.p into every column and row register of one matrix. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (not registered; captured twice, PSP-3000, firmware 6.6.1: 2026-11-07 boot 145 and 2026-11-08 boot 152; rerun required; the probe prints `test_id=PSP-MPEG-001` and the cell is registered here as `PSP-MPEG-YCBCR-001`) | Each mode begins from a fresh stream, ringbuffer and MPEG context. The capture measured mode 2 (query 128, a 128-byte header after a decode, a CSC of zero pixels), the CSC y and h refusals and the 16-bit CSC output (#302). Mode 3's second decode never returned on boot 145 and again on boot 152 (the first returned 0 and left a 16-byte header over a black 4:2:0 frame); the probe now bounds each mode 2 and 3 decode with a 3 s helper thread and stops making MPEG calls after a block. |
+
+### PSP-SAS-003 capture 2026-11-07
+
+`sas-mix` (case 155, `run_sas_mix` in `fixtures/psp_oracle/probe.c`) ran once on 2026-11-07 on the PSP-3000,
+boot 146, in the game context, at `979de58f`, a pre-publication commit whose `sas_mix` functions, tables and
+constants in `probe.c` and whose Makefile CASE and LIBS lines are identical to this tree's. Firmware: system
+software 6.61 (`flash0:/vsh/etc/version.txt`, read on 2026-11-10: `release:6.61:`,
+`system:58401@release_661,0x06060110:`); PSPLink `pspver` 0x06060110, which the runner records as 6.6.1 and
+which `pspver` prints in the game context (0x06060010 in the XMB context); custom firmware ARK-5 with cIPL,
+version 5.1.0 (operator-declared, not read by a tool). The stream is complete: 205 records (204 cells and the
+done record, out0 `0xcc`), all PASS, COMPLETE PASS, after a `transport-write` preflight. The envelope is not
+acceptance-eligible: its one acceptance blocker is "loaded module was not proven unloaded" (the teardown found
+the post-unload module set different from the one before the launch), and the runner's recovery then reset
+the PSP to boot 147. The capture is therefore `CAPTURED` and establishes nothing about PSP behaviour; the values
+below are what it shows, for the rerun to confirm. The raw envelope, host0 log and decode stay in the private
+campaign directory.
+
+The voice is a flat VAG of sample `0x0700`, whose full-scale output is `0x06fe`.
+
+- *Volume:* with no `__sceSasSetVolume` after `__sceSasInit`, the dry and send planes all peak at `0x06fe` (mode
+  0 and raw mode 1). `__sceSasSetVolume` with 0 on all four sides is silent, 0x800 gives `0x037f`, and
+  (0, 0, 0x1000, 0x1000) in raw mode leaves the dry planes 0 and the send planes at `0x06fe`. -0x1000 on any side
+  returns 0 and plays inverted (`0xf901`); +0x1001 and -0x1001 on any side return `0x80420018` and keep the
+  previous volume (0x800). A second `__sceSasInit` after SetVolume 0x800 restores `0x06fe`.
+- *`__sceSasCoreWithMix`*, output mode 0, caller PCM (i - 256) * 97 per sample, no voice keyed: (0x1000, 0x1000)
+  returns 0 and leaves the buffer unchanged; (0x800, 0x800) returns 0 and halves it (`0x9f00` becomes `0xcf80`);
+  (0, -0x1000), (0x2000, 0x3000) and (0x7fffffff, 0x80000000) return `0x80420018` and leave it untouched. With
+  one voice keyed at 0x1000, (0, 0) returns 0 and leaves the voice alone (`0x06fe`), and (0x1000, 0x1000) the
+  sum (`0x9f61` + `0x06fe` = `0xa65f`). In raw mode (output mode 1), (0x1000, 0x1000) returns `0x80000004` and
+  leaves the buffer untouched.
+- *Pitch:* every `__sceSasCore` returned 0, the envelope height was `0x3ff00000`, `__sceSasGetEndFlag`
+  returned `0xfffffffe`, and the output starts with 33 zero samples. A stepped VAG whose block b holds
+  ((b % 15) - 7) << 8 gives 28 output samples per block at pitch 0x1000; at 0x1800, blocks of 18 or 19 samples
+  with an in-between sample at some block ends (-1663 between -1791 and -1535), 28 / 1.5 on average; at 0x2a00,
+  10 or 11 (28 / 2.625 on average). A PCM ramp of 8 * i rises 8 per output sample at pitch 0x2000 and 4 per
+  output sample on average at 0x0800.
 
 ### PSP-MEMEDGE-001 capture 2026-11-02
 
