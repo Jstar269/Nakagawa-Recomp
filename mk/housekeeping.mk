@@ -150,13 +150,17 @@ compile: | project-fonts
 # The generated headers a compile reads, built on their own first so
 # tools/title_codegen_plan.py can key every object before Make compiles it (#1306).
 compile-inputs: $(TITLE_CONFIG_HEADER)
-compile: shader-verify $(CHUNK_OBJS) $(LIBRARY_OBJS) $(RT_GE_O) $(RT_OBJS) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o $(BUILD_DIR)/$(GAME_NAME)_recomp.o $(TITLE_ICON_OBJ) | sdl3-check
+compile: shader-verify $(CHUNK_OBJS) $(LIBRARY_OBJS) $(RT_GE_O) $(RT_OBJS) $(ATRAC3P_OBJS) $(BUILD_DIR)/atrac3p_bridge.o $(BUILD_DIR)/$(GAME_NAME)_recomp.o $(TITLE_ICON_OBJ) $(TITLE_ANDROID_OBJ) | sdl3-check
 	$(file >$(LINK_OBJECTS_RSP),$(subst \,/,$(LINK_OBJECTS)))
-	$(CC) $(CFLAGS) $(LDFLAGS) $(LINK_MAP_ARG) $(REPRODUCIBLE_LINK_FLAG) -o $(BUILD_DIR)/$(GAME_NAME)$(EXE_EXT) \
+	$(CC) $(CFLAGS) $(LDFLAGS) $(LINK_MAP_ARG) $(REPRODUCIBLE_LINK_FLAG) $(TITLE_LINK_FLAGS) -o $(TITLE_OUTPUT) \
 		@$(LINK_OBJECTS_RSP) \
 		$(LIBS)
 	$(ASSET_COPY_STEP)
-	@"$(PYTHON)" -c "print('Build finished: $(BUILD_DIR)/$(GAME_NAME)$(EXE_EXT)')"
+	@"$(PYTHON)" -c "print('Build finished: $(TITLE_OUTPUT)')"
+
+# The Android title entry point (TITLE_ANDROID_OBJ in the root Makefile).
+$(BUILD_DIR)/nk_android_title.o: android/app/src/main/cpp/nk_android_title.c $(RUNTIME_PROFILE_STAMP)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 clean:
 	"$(PYTHON)" -c "import shutil, sys; from pathlib import Path; p = Path(r'$(BUILD_DIR)'); [shutil.rmtree(p) if p.is_dir() else p.unlink()] if p.exists() else None"

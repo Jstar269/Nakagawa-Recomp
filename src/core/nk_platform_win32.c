@@ -1251,6 +1251,27 @@ bool nk_platform_describe_os_error(int os_error, char *out, size_t out_size) {
     return true;
 }
 
+/* Windows runs any tool program the way it runs any other (nk_platform.h). */
+bool nk_platform_spawn_tool(const char *executable_path, const char * const *argv,
+                            const char * const *envp, const char *working_directory,
+                            const char *output_log_path, NkProcessHandle *out_process) {
+    return nk_platform_spawn_process(executable_path, argv, envp, working_directory,
+                                     output_log_path, out_process);
+}
+
+/* The desktop finds its tools on PATH or in the prerequisites folder, not in one bundled folder. */
+bool nk_platform_get_tool_dir(char *out_path, size_t max_len) {
+    if (out_path && max_len) out_path[0] = '\0';
+    return false;
+}
+
+/* No bundled tool folder, so no program is in one. */
+bool nk_platform_path_is_tool_in_dir(const char *dir, const char *path) {
+    (void)dir;
+    (void)path;
+    return false;
+}
+
 bool nk_platform_is_process_running(NkProcessHandle *process) {
     if (!process || !process->native_handle || !process->is_active) return false;
     DWORD res = WaitForSingleObject((HANDLE)process->native_handle, 0);

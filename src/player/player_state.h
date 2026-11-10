@@ -227,6 +227,8 @@ typedef enum {
     PLAYER_PART_WIDE,          /* widescreen Fill (#1881): 0 off, 1 fill */
     PLAYER_PART_SMOOTH,        /* smooth motion (#1272): 0 off, 1 x2 */
     PLAYER_PART_SAS,           /* band-limited SAS resampling (#2054, section 11.3.1): 0 off, 1 sinc */
+    PLAYER_PART_CULL,          /* wider culling (section 11.3.6): 0 off, 1 on. A title's own culling is
+                                  widened to Widescreen's wings; a title without a package ignores it */
     PLAYER_PART_UPSCALE,       /* the presentation upscaler (#2122): 0 off, 1 FSR 1. It reaches the
                                   runtime as SR_PRESENT_UPSCALE (NkRuntimeConfig.present_upscale),
                                   not in the SR_ACE line */
@@ -1665,6 +1667,7 @@ void player_play_resolve(const PlayerSettings *settings, const char *disc_id,
 void player_play_apply_logic_60(PlayerPlayResolved *play, bool logic_60);
 /* The SR_ACE line for a resolution: "off", or "v1;tier=enhanced;af=16;text=on;readout=off;
  * notice=on;wide=off;smooth=off;sas=off" (tier=ace for Ace; smooth=match is never written).
+ * ";cull=on" follows only for Ace with the Wider culling part on; a missing cull is off.
  * Returns false when it does not fit. */
 bool player_play_launch_line(const PlayerPlayResolved *play, char *out, size_t cap);
 /* The presentation upscaler a resolution asks for (NkRuntimeConfig.present_upscale, exported as

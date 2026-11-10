@@ -954,18 +954,22 @@ def trusted_for_self_hosted(
 
 #: Values of ``NK_SELF_HOSTED_LINUX`` that open the pool. ``on`` takes every trusted run;
 #: ``landing`` takes only the runs that land work (``landing_run``), so a small pool on a
-#: busy PC is not swamped by every task branch's Draft CI. Anything else is off.
+#: busy PC is not swamped by every task branch's Draft CI; ``batch`` takes only the desk's
+#: own landing runs (``batch_run``), so a Ready pull request's CI stays hosted too and the
+#: pool is kept for the batches. Anything else is off.
 SELF_HOSTED_SWITCH_ON = "on"
 SELF_HOSTED_SWITCH_LANDING = "landing"
+SELF_HOSTED_SWITCH_BATCH = "batch"
+SELF_HOSTED_SWITCHES = (SELF_HOSTED_SWITCH_ON, SELF_HOSTED_SWITCH_LANDING, SELF_HOSTED_SWITCH_BATCH)
 #: Head branches the landing desk opens for a batch of pull requests (``batch/desk-<UTC>``).
 SELF_HOSTED_LANDING_PREFIXES = ("batch/",)
 
 
 def self_hosted_switch(switch: str) -> str:
-    """The pool's switch state: ``on``, ``landing``, or ``off`` for any other value."""
+    """The pool's switch state: ``on``, ``landing``, ``batch``, or ``off`` for any other value."""
 
     value = switch.strip().lower()
-    if value in (SELF_HOSTED_SWITCH_ON, SELF_HOSTED_SWITCH_LANDING):
+    if value in SELF_HOSTED_SWITCHES:
         return value
     return "off"
 
@@ -994,8 +998,30 @@ def landing_run(event_name: str, event: Mapping[str, object], *, ref: str) -> bo
     return pull_request.get("draft") is False
 
 
+def batch_run(event_name: str, event: Mapping[str, object], *, ref: str) -> bool:
+    """Whether a run is one of the desk's own landing runs: a push to ``main``, a merge group, or a batch.
+
+    Unlike ``landing_run``, a Ready pull request from a task branch is not one: the desk
+    tests it again inside its batch, so in ``batch`` mode its own CI stays hosted. This
+    only narrows: callers check ``trusted_for_self_hosted`` first.
+    """
+
+    if event_name == "push":
+        return ref == "refs/heads/main"
+    if event_name == "merge_group":
+        return ref.startswith("refs/heads/gh-readonly-queue/main/")
+    if event_name != "pull_request":
+        return False
+    pull_request = event.get("pull_request")
+    if not isinstance(pull_request, dict):
+        return False
+    head = pull_request.get("head")
+    head_ref = head.get("ref") if isinstance(head, dict) else None
+    return isinstance(head_ref, str) and head_ref.startswith(SELF_HOSTED_LANDING_PREFIXES)
+
+
 def self_hosted_pool_available(switch: str, heartbeat: str, now: float) -> bool:
-    """Whether the pool's switch is open (``on`` or ``landing``) and its supervisor reported in recently."""
+    """Whether the pool's switch is open (``on``, ``landing`` or ``batch``) and its supervisor reported in recently."""
 
     if self_hosted_switch(switch) == "off":
         return False
@@ -1068,7 +1094,12 @@ def codeql_runner(
     heartbeat: str,
     now: float,
 ) -> str:
-    """The ``runs-on`` value, as JSON, for Trusted CodeQL's analyses."""
+    """The ``runs-on`` value, as JSON, for Trusted CodeQL's analyses.
+
+    ``landing`` and ``batch`` take the same targets here (``codeql_landing_target``): a
+    wake payload does not say whether its pull request is Ready, so neither mode gives a
+    task branch's analysis the pool.
+    """
 
     if (
         codeql_trusted_target(event_name, event, repository=repository, ref=ref)
@@ -1083,7 +1114,7 @@ def codeql_landing_target(event_name: str, event: Mapping[str, object], *, ref: 
     """Whether a CodeQL target lands work: a push to ``main``, or a wake of a merge group or batch.
 
     A "CodeQL wake" payload does not say whether its pull request is a Draft, so in
-    ``landing`` mode only the desk's batch branches and merge groups take the pool. This
+    ``landing`` and ``batch`` mode only the desk's batch branches and merge groups take the pool. This
     only narrows: callers check ``codeql_trusted_target`` first.
     """
 
@@ -1118,10 +1149,19 @@ def linux_runner(
     Ubuntu 24.04 for both.
     """
 
+    mode = self_hosted_switch(switch)
+    if mode == SELF_HOSTED_SWITCH_ON:
+        admitted = True
+    elif mode == SELF_HOSTED_SWITCH_LANDING:
+        admitted = landing_run(event_name, event, ref=ref)
+    elif mode == SELF_HOSTED_SWITCH_BATCH:
+        admitted = batch_run(event_name, event, ref=ref)
+    else:
+        admitted = False
     if (
         trusted_for_self_hosted(event_name, event, repository=repository, ref=ref)
         and self_hosted_pool_available(switch, heartbeat, now)
-        and (self_hosted_switch(switch) == SELF_HOSTED_SWITCH_ON or landing_run(event_name, event, ref=ref))
+        and admitted
     ):
         return json.dumps(list(SELF_HOSTED_LINUX_RUNNER), separators=(",", ":"))
     return json.dumps(hosted)
