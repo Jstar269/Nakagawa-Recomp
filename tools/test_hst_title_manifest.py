@@ -41,7 +41,7 @@ MANAGER_INPUT_LAYOUT = {
 PUBLIC_FIELDS = {
     "schema_version", "id", "display_name", "kind", "disc", "executable", "modules",
     "filesystem", "hle_profile", "codegen_profile", "feature_requirements",
-    "verification_profile", "runtime_bindings", "notes",
+    "verification_profile", "runtime_bindings", "notes", "input",
 }
 
 
