@@ -1407,15 +1407,19 @@ def run_tier(event_name: str, event: Mapping[str, object]) -> tuple[str, str]:
 
 
 #: Python shards for the full suite and for a change whose only build-system edit is a
-#: recipe-only Makefile edit. Three full shards keep a whole CI run near 14 jobs, inside
-#: the free plan's 20 concurrent jobs (docs/CI.md, "Jobs per run"); each plans to about
-#: 16 hosted minutes by run 42270920833's weights, and test_production_smoke alone takes
-#: about 12.5, so more shards would shorten the job little. The Makefile-coupled subset
-#: (tools/ci_test_shards.py --select makefile) is about nine tenths of the suite by
-#: measured weight, because most heavy modules run make, so it keeps the same three
+#: recipe-only Makefile edit. Each count is the fewest shards at which the heaviest
+#: module, test_production_smoke (about 16 hosted minutes by the weights in
+#: tools/ci_test_weights.json), sets the slowest shard: three shards plan to about 19
+#: minutes each, four to that module alone and about 14 minutes for each of the others,
+#: and a fifth would leave the slowest shard unchanged. Four keep a whole CI run at 16
+#: jobs (17 with the Windows installer job), inside the free plan's 20 concurrent jobs
+#: (docs/CI.md, "Jobs per run").
+#: tools/test_ci_test_shards.py holds both counts to that rule. The Makefile-coupled
+#: subset (tools/ci_test_shards.py --select makefile) is nearly the whole suite by
+#: measured weight, because most heavy modules run make, so it keeps the same four
 #: runners and saves the unrelated modules rather than a runner.
-PYTHON_SHARDS_FULL = 3
-PYTHON_SHARDS_MAKEFILE = 3
+PYTHON_SHARDS_FULL = 4
+PYTHON_SHARDS_MAKEFILE = 4
 
 
 _MAKEFILE_INCLUDE_RE = re.compile(r"^[ \t]*include[ \t]+(mk/[A-Za-z0-9_./-]+\.mk)[ \t]*$")

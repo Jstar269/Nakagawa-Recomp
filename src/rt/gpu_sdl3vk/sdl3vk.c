@@ -1474,6 +1474,9 @@ static void poll_input_on_this_stack(void *arg) {
             if (ev.key.key == SDLK_F3 && !ev.key.repeat) {
                 hud_set_mode(sdl3vk_hud_next_mode(s_hud_enabled, s_developer));
             }
+            /* F9 turns fast forward on or off (ace.h); the scheduler ignores it outside an
+             * Enhanced or Ace run on the paced clock. */
+            if (ev.key.key == SDLK_F9 && !ev.key.repeat && !s_text_claim) ace_ff_toggle();
             /* F12 saves the next presented picture as a PNG (fbcap.h, screenshot key). */
             if (ev.key.key == SDLK_F12 && !ev.key.repeat) sr_screenshot_request();
             /* While the keyboard is claimed its keys go to the keyboard only: a keyboard Enter that
@@ -1514,6 +1517,10 @@ static void poll_input_on_this_stack(void *arg) {
      * (gui.c read_keys); SR_PADSCRIPT keeps the defaults, as it does for the gamepad. */
     const NkInputProfile *key_prof = padscript_active() ? NULL : sdl3vk_get_input_profile();
     uint32_t b = sdl3vk_map_keyboard(key_prof, k, key_count);
+    /* Tab held is fast forward (ace.h), unless the profile binds Tab to a PSP button or the
+     * on-screen keyboard has the keys. */
+    ace_ff_hold(!s_text_claim && SDL_SCANCODE_TAB < key_count && k[SDL_SCANCODE_TAB] &&
+                            sdl3vk_map_key(key_prof, (int)SDL_SCANCODE_TAB) == 0u);
 
     uint8_t lx = 128, ly = 128;
     s_pad_present = s_pad != NULL;

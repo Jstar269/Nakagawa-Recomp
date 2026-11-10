@@ -166,6 +166,14 @@ static uint32_t s_vq_frames[9];
 static uint64_t s_vq_last_us[9];
 static uint64_t s_vq_carry[9];   /* microsecond-frames not yet a whole frame, denominator 1e6 */
 
+/* Fast forward (recomp.h) gives the host device no audio: the queue the guest sees is then this
+ * guest-time model, as under the deterministic clock, seeded with the host queue's depth each
+ * time fast forward starts so the first blocking output after it waits as it would have. When it
+ * stops, the guest reads the host queue again, which drained while nothing was pushed. */
+static uint32_t s_vq_ff_epoch[9];
+
+static int audio_vq_on(int ch);
+
 static void audio_vq_drain(uint32_t slot) {
     uint64_t now = now_usec();
     uint64_t dt = now > s_vq_last_us[slot] ? now - s_vq_last_us[slot] : 0u;
@@ -216,8 +224,8 @@ static void audio_vq_drain(uint32_t slot) {
  * there would cut into audio that is playing: the guest's next outputs return at once and refill
  * it.
  *
- * Under the deterministic clock the guest sees the guest-time model instead and none of this
- * applies: the host mixer only follows there. */
+ * Under the deterministic clock, and while fast forward runs, the guest sees the guest-time
+ * model instead and none of this applies: the host mixer only follows, or is given nothing. */
 extern int sr_audio_host_pull_frames(void);
 extern int sr_audio_played_dry(int ch);
 extern void sr_audio_push_silence(int ch, int nframes);
@@ -237,32 +245,51 @@ static uint32_t audio_host_hold_frames(uint32_t n) {
 /* Before a push: a channel the device has played dry gets its hold as silence, so the frames about
  * to be pushed are the first the guest sees queued. */
 static void audio_host_hold_prime(int ch, uint32_t n) {
-    if (sched_clock_deterministic() || !sr_audio_played_dry(ch)) return;
+    if (audio_vq_on(ch) || !sr_audio_played_dry(ch)) return;
     const uint32_t hold = audio_host_hold_frames(n);
     if (hold) sr_audio_push_silence(ch, (int)hold);
 }
 
 /* The frames of `ch` the host has not played yet: what a listener is still to hear. Under the
- * deterministic clock it is the guest-time model's; otherwise the host mixer's whole queue, the
- * hold included, or -1 when the host has no output for it. */
+ * deterministic clock and in fast forward it is the guest-time model's; otherwise the host
+ * mixer's whole queue, the hold included, or -1 when the host has no output for it. */
 int hle_audio_play_lead(int ch) {
-    if (!sched_clock_deterministic() || ch < 0 || ch > 8) return sr_audio_queued(ch);
+    if (ch < 0 || ch > 8 || !audio_vq_on(ch)) return sr_audio_queued(ch);
     audio_vq_drain((uint32_t)ch);
     return s_vq_frames[ch] > (uint32_t)INT_MAX ? INT_MAX : (int)s_vq_frames[ch];
 }
 
-/* The queue depth in frames the guest sees on `ch`. Under the deterministic clock it is the
- * guest-time model's, whatever the host has; otherwise the host mixer's beyond what it holds for
- * its device (above), or -1 when the host has no output for it. */
+/* The queue depth in frames the guest sees on `ch`. Under the deterministic clock and in fast
+ * forward it is the guest-time model's, whatever the host has; otherwise the host mixer's beyond
+ * what it holds for its device (above), or -1 when the host has no output for it. */
 int hle_audio_queued(int ch) {
     const int lead = hle_audio_play_lead(ch);
-    if (sched_clock_deterministic() || ch < 0 || ch > 8 || lead <= 0) return lead;
+    if (ch < 0 || ch > 8 || lead <= 0 || audio_vq_on(ch)) return lead;
     const uint32_t hold = audio_host_hold_frames(s_audio_len[ch]);
     return (uint32_t)lead > hold ? (int)((uint32_t)lead - hold) : 0;
 }
 
+/* The model answers on `ch` (0 to 8) under the deterministic clock and while fast forward runs. */
+static int audio_vq_on(int ch) {
+    if (sched_clock_deterministic()) return 1;
+    if (!sched_fast_forward_on()) return 0;
+    const uint32_t epoch = sched_fast_forward_epoch();
+    if (s_vq_ff_epoch[ch] != epoch) {
+        s_vq_ff_epoch[ch] = epoch;
+        /* What the guest saw of the host queue: less the hold, so the first blocking output
+         * of the run waits as it would have. Not through hle_audio_queued(): the epoch is
+         * recorded, so that would read this model before it is seeded. */
+        const int q = sr_audio_queued(ch);
+        const uint32_t hold = audio_host_hold_frames(s_audio_len[ch]);
+        s_vq_frames[ch] = q > 0 && (uint32_t)q > hold ? (uint32_t)q - hold : 0u;
+        s_vq_carry[ch] = 0u;
+        s_vq_last_us[ch] = now_usec();
+    }
+    return 1;
+}
+
 static void audio_vq_pushed(int ch, int nframes) {
-    if (ch < 0 || ch > 8 || nframes <= 0 || !sched_clock_deterministic()) return;
+    if (ch < 0 || ch > 8 || nframes <= 0 || !audio_vq_on(ch)) return;
     audio_vq_drain((uint32_t)ch);
     uint64_t sum = (uint64_t)s_vq_frames[ch] + (uint32_t)nframes;
     s_vq_frames[ch] = sum > UINT32_MAX ? UINT32_MAX : (uint32_t)sum;
@@ -461,7 +488,7 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
         psmf_av_audio_submit((int)ch, buf, bytes, mono ? 2u : 4u, 44100u);   /* queue lead read before the push */
         uint64_t out_started = sr_perf_now_ns();
         sr_videorec_audio((int)ch, lr, (int)n, voll, volr, sched_vtime_us());
-        sr_audio_push((int)ch, lr, (int)n, voll, volr);
+        if (!sched_fast_forward_on()) sr_audio_push((int)ch, lr, (int)n, voll, volr);
         audio_vq_pushed((int)ch, (int)n);
         if (out_started) sr_perf_audio_output(out_started, n);
     }
@@ -666,8 +693,9 @@ static uint32_t audio_src_output(CpuState *s, int owner, uint32_t vol, uint32_t 
             uint64_t out_started = sr_perf_now_ns();
             sr_videorec_audio(AUDIO_OUTPUT2_CHANNEL, converted, (int)converted_frames,
                               (int)vol, (int)vol, sched_vtime_us());
-            sr_audio_push(AUDIO_OUTPUT2_CHANNEL, converted, (int)converted_frames,
-                          (int)vol, (int)vol);
+            if (!sched_fast_forward_on())
+                sr_audio_push(AUDIO_OUTPUT2_CHANNEL, converted, (int)converted_frames,
+                              (int)vol, (int)vol);
             audio_vq_pushed(AUDIO_OUTPUT2_CHANNEL, (int)converted_frames);
             if (out_started)
                 sr_perf_audio_output(out_started, (uint32_t)converted_frames);
