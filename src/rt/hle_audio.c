@@ -208,11 +208,13 @@ static void audio_vq_drain(uint32_t slot) {
  * against 1024-frame pulls) is paced exactly as before. A channel left at two periods less a
  * display period by a guest that is busy elsewhere still fills a pull.
  *
- * A channel the device has played dry, at its start or after its queue ran out, gets the hold as
- * silence ahead of its next push (audio_host_hold_prime): the guest then sees its own frames from
- * the first one, and as many outputs return at once as on the PSP. A queue that is only partly
- * drained, after a late wake the hold absorbed, is refilled by the guest's next outputs returning
- * at once.
+ * A channel the device has played dry (a pull came while its stream could give nothing: at its
+ * start, or after it stopped or stalled for longer than its queue) gets the hold as silence ahead
+ * of its next push (audio_host_hold_prime): the guest then sees its own frames from the first
+ * one, and as many outputs return at once as on the PSP. A queue that still has frames, after a
+ * late wake the hold absorbed or a pull that took the last of it, gets none, because silence
+ * there would cut into audio that is playing: the guest's next outputs return at once and refill
+ * it.
  *
  * Under the deterministic clock the guest sees the guest-time model instead and none of this
  * applies: the host mixer only follows there. */
