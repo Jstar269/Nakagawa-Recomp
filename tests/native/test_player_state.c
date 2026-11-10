@@ -8205,7 +8205,8 @@ static void test_play_mode_cull_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"cull\": \"on\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved,
+                               "\"cull\": \"on\", \"upscale\": \"off\", \"twin\": \"off\"}") != NULL);
         free(saved);
     }
     memset(back, 0, sizeof(*back));
