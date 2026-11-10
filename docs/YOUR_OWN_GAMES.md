@@ -258,6 +258,24 @@ under every preset.
 - Issues, pull requests and project discussions must never contain game files,
   keys, or links to downloads or decryption tools.
 
+## Making a texture pack from your own game
+
+Nakagawa can save the textures your game draws, so you can enlarge them with an upscaler of your choice and play
+with the result as a texture pack. Nakagawa ships no textures and no upscaler, and the files stay on your PC.
+
+1. Start the game in Enhanced or Ace. Open the pause menu (Esc, F1 or the controller's Guide button), choose
+   **Settings**, and turn **Dump textures** on.
+2. Resume and play through the parts of the game you want. Each texture the game draws is saved once, as a PNG file,
+   in the `texdump` folder of your user data folder, in a folder named for the game's disc ID. The game may stutter
+   when it shows many new textures at once; turn **Dump textures** off when you have what you need. It is off again
+   the next time the game starts.
+3. Enlarge the PNG files with your upscaler, 2 to 6 times their size (the same on both sides), keeping each file's
+   name. Delete the files you don't want to change.
+4. Choose that folder as the game's texture pack (the game's **Enhanced options** > **Texture pack folder**).
+
+The folder holds a `textures.ini` that tells Nakagawa how the files are named; leave it there. Keep the pack to
+yourself: its pictures come from your copy of the game.
+
 ## When something is not supported yet
 
 Nakagawa never fakes what it can't do. When something is unsupported, missing

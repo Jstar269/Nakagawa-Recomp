@@ -892,6 +892,24 @@ static void test_screenshot_name(void) {
           "name: a buffer too small is refused, not truncated");
 }
 
+/* The texture dump's folder: under the user data folder, one per disc ID, never shared. */
+static void test_texdump_folder(void) {
+    char out[64];
+    CHECK(sr_texdump_folder("C:/data", "ULUS10000", out, sizeof out) == 1 &&
+              strcmp(out, "C:/data/texdump/ULUS10000") == 0,
+          "dump folder: user data, texdump, disc ID");
+    CHECK(sr_texdump_folder("/d", "../a b\\c:d", out, sizeof out) == 1 &&
+              strcmp(out, "/d/texdump/abcd") == 0,
+          "dump folder: separators and other characters dropped from the disc ID");
+    CHECK(sr_texdump_folder("/d", "/:.", out, sizeof out) == 0 && out[0] == '\0',
+          "dump folder: a disc ID with no kept character is refused, not shared");
+    CHECK(sr_texdump_folder("/d", NULL, out, sizeof out) == 0, "dump folder: no disc ID refused");
+    CHECK(sr_texdump_folder("", "ULUS10000", out, sizeof out) == 0 && out[0] == '\0',
+          "dump folder: no user data folder refused");
+    CHECK(sr_texdump_folder("/d", "ULUS10000", out, 12u) == 0 && out[0] == '\0',
+          "dump folder: a buffer too small is refused, not truncated");
+}
+
 static void test_screenshot_request(void) {
     sr_screenshot_clear();
     CHECK(!sr_screenshot_pending(), "request: none pending at start");
@@ -924,6 +942,7 @@ int main(int argc, char **argv) {
     test_watch_deferred_matches_synchronous();
     test_png_capture();
     test_screenshot_name();
+    test_texdump_folder();
     test_screenshot_request();
     if (s_failures) {
         fprintf(stderr, "fbcap_selftest: %d check(s) failed\n", s_failures);

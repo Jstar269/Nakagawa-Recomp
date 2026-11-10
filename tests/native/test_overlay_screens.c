@@ -291,6 +291,36 @@ static void test_ace(void) {
     action = frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_LEFT);
     CHECK(action.kind == NK_OVERLAY_ACT_SET_READOUT && action.value == 0, "left turns it off");
     nk_ui_destroy(ui);
+    /* The texture dump's row (ge_gpu.h): none in an authentic run (a zeroed model), a switch in an
+       Enhanced or Ace run, and the reason a start was refused in place of its description. */
+    ui = overlay_ui(1280, 800, 1.0f);
+    if (ui == NULL) return;
+    model = base_model(1280.0f, 800.0f);
+    memset(&state, 0, sizeof(state));
+    nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+    state.screen = NK_OVERLAY_SCREEN_SETTINGS;
+    CHECK(!frame_has_text(ui, &state, &model, "Dump textures"),
+          "an authentic run has no texture dump row");
+    model.texdump = 1;
+    CHECK(frame_has_text(ui, &state, &model, "Dump textures") &&
+              frame_has_text(ui, &state, &model, "to make a texture pack"),
+          "an Enhanced run offers the texture dump");
+    (void)settle(ui, &state, &model);
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_DOWN);
+    (void)frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_DOWN);
+    CHECK(nk_ui_focused(ui) == NK_OVERLAY_ID_TEXDUMP, "down from the HUD row reaches the dump row");
+    action = frame_with(ui, &state, &model, NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
+    CHECK(action.kind == NK_OVERLAY_ACT_SET_TEXDUMP && action.value == 1,
+          "Confirm starts the dump");
+    model.texdump = 2;
+    action = frame_with(ui, &state, &model, NK_UI_EV_NAV, NK_UI_DIR_LEFT);
+    CHECK(action.kind == NK_OVERLAY_ACT_SET_TEXDUMP && action.value == 0, "left stops it");
+    model.texdump = 1;
+    model.texdump_note = "Not started: the dump folder could not be made.";
+    CHECK(frame_has_text(ui, &state, &model, "Not started: the dump folder could not be made.") &&
+              !frame_has_text(ui, &state, &model, "to make a texture pack"),
+          "a refused start says why on the row");
+    nk_ui_destroy(ui);
     /* Both at every window size. */
     {
         static const struct { int w; int h; float scale; } sizes[] = {
@@ -424,6 +454,7 @@ static void test_display_rows(void) {
             full.fullscreen = 2;
             full.pacing = 1 + NK_OVERLAY_PACING_UNCAPPED;
             full.ace_readout = 2;
+            full.texdump = 2;
             memset(&st, 0, sizeof(st));
             nk_overlay_open(&st, NK_OVERLAY_OPEN_USER);
             st.screen = NK_OVERLAY_SCREEN_SETTINGS;

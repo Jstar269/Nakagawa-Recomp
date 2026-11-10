@@ -33,6 +33,12 @@
  *                    image; the build with NK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR fails here;
  *   replace-only     (`--repl-only`) SR_TEX_REPLACE alone, with no texture scaling: the pack is read at
  *                    start, a listed texture is drawn from its image, an unlisted one as made;
+ *   dump             the texture dump (gegpu_texdump_start) is refused in an authentic run and writes
+ *                    nothing while off; once on, a texture already in the cache and a newly decoded one
+ *                    are written under the names a pack gives them (cache key and quick hash, worked out
+ *                    here), the folder reads back as a pack holding the textures' own pixels, a file
+ *                    already there is not written again, and the budget stops the dump before a file
+ *                    that would pass it;
  *   guest-bytes      after every cell, no guest VRAM byte outside the drawn frame and no CLUT
  *                    byte changes while the scales land;
  *   smart2d          at a render scale above 1, a 1:1 linear sprite samples nearest (every
@@ -1144,6 +1150,109 @@ static int xst_cell_replace_palette(int f) {
  * draws a listed texture, which an address-only file lists, and an unlisted one. */
 #define XST_ONLY_TEX_B (XST_TEX + 0x1000u)
 
+static int xst_dump_has(const char *dir, const char *name) {
+    char path[480];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return 0;
+    fclose(fp);
+    return 1;
+}
+
+static int xst_dump_fail(const char *why) {
+    fprintf(stderr, "gpu texscale selftest: FAIL dump: %s\n", why);
+    gegpu_texdump_stop();
+    return 0;
+}
+
+static int xst_cell_dump(int f) {
+    (void)f;
+    uint32_t a[XST_W * XST_H], b[XST_W * XST_H], c[XST_W * XST_H];
+    xst_pattern(a, 101u);
+    xst_pattern(b, 103u);
+    xst_pattern(c, 107u);
+    char dir[400], path[480], name_a[64], name_b[64], name_c[64], err[200];
+    snprintf(dir, sizeof(dir), "%s/texdump_gpu", SR_SELFTEST_BUILD_ROOT);
+    xst_repl_name(a, name_a, sizeof(name_a));
+    xst_repl_name(b, name_b, sizeof(name_b));
+    xst_repl_name(c, name_c, sizeof(name_c));
+    const char *const stale[] = { name_a, name_b, name_c, "textures.ini" };
+    for (size_t i = 0; i < sizeof(stale) / sizeof(stale[0]); i++) {   /* a clean folder: an earlier run's files */
+        snprintf(path, sizeof(path), "%s/%s", dir, stale[i]);
+        remove(path);
+    }
+    xst_reset();
+    nk_tex_scale_set_sync(1);
+
+    /* 1. An authentic run refuses the dump. */
+    const int ace_saved = g_ace_on;
+    g_ace_on = 0;
+    const int authentic_started = gegpu_texdump_start(dir, err, sizeof(err));
+    const int authentic_row = gegpu_texdump_row();
+    g_ace_on = ace_saved;
+    if (authentic_started || authentic_row != 0) return xst_dump_fail("an authentic run started the dump or offered its row");
+
+    /* 2. Off: a drawn texture is not written. */
+    xst_upload(b);
+    xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+    s_tmpl_ok = 0;
+    if (!xst_draw(20.0f, 140.0f)) return xst_dump_fail("a draw failed");
+    if (gegpu_texdump_row() != 1 || xst_dump_has(dir, name_b)) return xst_dump_fail("a texture was written while the dump was off");
+
+    /* 3. On: the texture already in the cache (drawn again, a cache hit) and new content at the
+     * same address (a decode) are both written, under the names a pack gives them. */
+    if (!gegpu_texdump_start(dir, err, sizeof(err))) return xst_dump_fail(err);
+    if (gegpu_texdump_row() != 2 || !xst_dump_has(dir, "textures.ini")) return xst_dump_fail("the dump did not start with a textures.ini");
+    s_tmpl_ok = 0;
+    if (!xst_draw(60.0f, 140.0f)) return xst_dump_fail("a draw failed");
+    if (!xst_dump_has(dir, name_b)) return xst_dump_fail("a texture already in the cache was not written when drawn again");
+    xst_upload(a);
+    s_tmpl_ok = 0;
+    if (!xst_draw(100.0f, 140.0f)) return xst_dump_fail("a draw failed");
+    if (!xst_dump_has(dir, name_a)) return xst_dump_fail("a newly decoded texture was not written");
+
+    /* 4. The folder reads back as a pack holding each texture's own pixels. */
+    NkTexRepl *pack = nk_texrepl_open(dir, 0, err, sizeof(err));
+    if (!pack) return xst_dump_fail(err);
+    int same = 1;
+    for (int k = 0; k < 2 && same; k++) {
+        const uint32_t *t = k ? b : a;
+        NkTexReplId id;
+        memset(&id, 0, sizeof(id));
+        id.addr = XST_TEX;
+        id.format = 3u;
+        id.dim = 4u | (4u << 8);
+        id.hash = nk_texrepl_quick_hash(t, sizeof(uint32_t) * XST_W * XST_H, XST_TEX);
+        NkTexReplHit hit;
+        if (!nk_texrepl_lookup(pack, &id, &hit)) { same = 0; break; }
+        same = hit.w == XST_W && hit.h == XST_H && memcmp(hit.rgba, t, sizeof(uint32_t) * XST_W * XST_H) == 0;
+        nk_texrepl_unpin(pack, &hit);
+    }
+    nk_texrepl_close(pack);
+    if (!same) return xst_dump_fail("the dump folder, read as a pack, does not give the textures' own pixels");
+
+    /* 5. Started again: content already in the folder is counted, not written again. */
+    gegpu_texdump_stop();
+    const unsigned long long written0 = s_dump.written, present0 = s_dump.present;
+    if (!gegpu_texdump_start(dir, err, sizeof(err))) return xst_dump_fail(err);
+    s_tmpl_ok = 0;
+    if (!xst_draw(140.0f, 140.0f)) return xst_dump_fail("a draw failed");
+    if (s_dump.written != written0 || s_dump.present <= present0)
+        return xst_dump_fail("a texture the folder already holds was written again");
+
+    /* 6. The budget: a file that would pass it is not written, and the dump stops. */
+    s_dump.budget = s_dump.written_bytes;
+    xst_upload(c);
+    s_tmpl_ok = 0;
+    if (!xst_draw(180.0f, 140.0f)) return xst_dump_fail("a draw failed");
+    if (xst_dump_has(dir, name_c) || !s_dump.stopped) return xst_dump_fail("a file past the budget was written");
+    gegpu_texdump_stop();
+    if (gegpu_texdump_row() != 1) return xst_dump_fail("the row does not read off after the dump stops");
+    printf("gpu texscale selftest: PASS %-12s refused when authentic, nothing while off, cached and new textures "
+           "written under their pack names and read back, none twice, the budget kept\n", "dump");
+    return 1;
+}
+
 int gegpu_texrepl_only_prepare(const char *build_root) {
     char dir[400], path[480];
     snprintf(dir, sizeof(dir), "%s/texrepl_gpu_only_pack", build_root);
@@ -1210,10 +1319,11 @@ int gegpu_texscale_selftest(void) {
     int ok = 1;
     static int (*const cells[])(int) = { xst_cell_scaled_draw, xst_cell_large, xst_cell_upload_cap,
                                          xst_cell_not_ready, xst_cell_rewrite, xst_cell_clut, xst_cell_replace,
-                                         xst_cell_replace_palette,
+                                         xst_cell_replace_palette, xst_cell_dump,
                                          xst_cell_budget, xst_cell_rtt, xst_cell_color_test, xst_cell_onetoone };
     static const char *const names[] = { "scaled-draw", "large", "upload-cap", "not-ready", "rewrite", "clut",
-                                         "replace", "replace-pal", "budget", "rtt", "color-test", "onetoone" };
+                                         "replace", "replace-pal", "dump", "budget", "rtt", "color-test",
+                                         "onetoone" };
     /* The cells before onetoone check copies through 1:1 sprites, so they run with the 1:1 rule
      * off; onetoone turns it back on. */
     s_xs_onetoone_plain = 0;

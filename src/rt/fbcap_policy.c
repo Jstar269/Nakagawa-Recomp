@@ -83,6 +83,28 @@ int sr_screenshot_name(const char *disc_id, int year, int month, int day, int ho
     return 1;
 }
 
+int sr_texdump_folder(const char *user_root, const char *disc_id, char *out, size_t outsz) {
+    if (!out || outsz == 0u) return 0;
+    out[0] = '\0';
+    if (!user_root || !user_root[0]) return 0;
+    char disc[33];
+    size_t n = 0;
+    for (const char *p = disc_id ? disc_id : ""; *p && n < sizeof disc - 1u; p++) {
+        char c = *p;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_')
+            disc[n++] = c;
+    }
+    disc[n] = '\0';
+    if (n == 0u) return 0;
+    int w = snprintf(out, outsz, "%s/texdump/%s", user_root, disc);
+    if (w < 0 || (size_t)w >= outsz) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
 /* ---- screenshot key ----------------------------------------------------------------------- */
 /* Set by the presenter's key handler and taken by the display path (fbcap.h, screenshot key).
  * Both run on the thread that pumps the presenter's events and presents (the guest thread), so a

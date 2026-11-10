@@ -182,19 +182,20 @@ static int png_chunk(FILE *f, const char type[4], const uint8_t *data, uint32_t 
            fwrite(tail, 1, 4u, f) == 4u;
 }
 
-/* Signature, IHDR, and the head of the one IDAT chunk. cap_pixels_valid bounds w*4*h by
- * UINT32_MAX, so the stored image (h * (1 + 3w) bytes) and the IDAT length fit in 32 bits. */
-static int png_begin(PngOut *z, FILE *f, uint32_t w, uint32_t h) {
+/* Signature, IHDR, and the head of the one IDAT chunk, for `channels` 3 (RGB) or 4 (RGBA).
+ * cap_pixels_valid and sr_png_write_rgba bound w*4*h by UINT32_MAX, so the stored image
+ * (h * (1 + channels * w) bytes) fits in 64 bits, and the IDAT length is checked below. */
+static int png_begin(PngOut *z, FILE *f, uint32_t w, uint32_t h, uint32_t channels) {
     static const uint8_t sig[8] = {0x89u, 'P', 'N', 'G', 0x0Du, 0x0Au, 0x1Au, 0x0Au};
     uint8_t ihdr[13];
     png_be32(ihdr, w);
     png_be32(ihdr + 4, h);
     ihdr[8] = 8u;    /* bit depth */
-    ihdr[9] = 2u;    /* colour type: RGB */
+    ihdr[9] = channels == 4u ? 6u : 2u;   /* colour type: RGBA or RGB */
     ihdr[10] = 0u;   /* deflate */
     ihdr[11] = 0u;   /* filter method 0 */
     ihdr[12] = 0u;   /* no interlace */
-    uint64_t raw = (uint64_t)h * (1u + 3u * (uint64_t)w);
+    uint64_t raw = (uint64_t)h * (1u + (uint64_t)channels * (uint64_t)w);
     uint64_t blocks = (raw + 65534u) / 65535u;
     uint64_t idat = 2u + 5u * blocks + raw + 4u;
     if (raw == 0u || idat > 0x7FFFFFFFu) return 0;   /* PNG chunk lengths are at most 2^31 - 1 */
@@ -255,6 +256,56 @@ static int png_end(PngOut *z) {
     return fwrite(crc, 1, 4u, z->f) == 4u && png_chunk(z->f, "IEND", NULL, 0u);
 }
 
+/* Rename a completely written temp file over `path`: a reader never observes a half-written
+ * file. The temp file is removed when the rename fails. */
+static int cap_publish_file(const char *tmp, const char *path) {
+#ifdef _WIN32
+    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
+        remove(tmp);
+        fprintf(stderr, "fbcap: publish failed (MoveFileExA: %lu)\n", (unsigned long)GetLastError());
+        return 0;
+    }
+#else
+    if (rename(tmp, path) != 0) { remove(tmp); return 0; }
+#endif
+    return 1;
+}
+
+int sr_png_write_rgba(const char *path, const uint32_t *rgba, uint32_t w, uint32_t h) {
+    if (!path || !path[0] || !rgba || w == 0u || h == 0u || (uint64_t)w * 4u * h > UINT32_MAX)
+        return 0;
+    static unsigned long s_png_seq;
+    char tmp[1024 + 64];
+    if (snprintf(tmp, sizeof tmp, "%s.tmp%lu", path, ++s_png_seq) >= (int)sizeof tmp) return 0;
+    uint8_t *line = (uint8_t *)malloc((size_t)w * 4u);
+    if (!line) return 0;
+    FILE *f = fopen(tmp, "wb");
+    if (!f) { free(line); return 0; }
+    PngOut z;
+    int ok = png_begin(&z, f, w, h, 4u);
+    for (uint32_t y = 0; ok && y < h; y++) {
+        static const uint8_t filter_none = 0u;
+        /* R in the low byte of each word, whatever the host's byte order. */
+        const uint32_t *row = rgba + (size_t)y * w;
+        for (uint32_t x = 0; x < w; x++) {
+            const uint32_t c = row[x];
+            line[x * 4u + 0u] = (uint8_t)c;
+            line[x * 4u + 1u] = (uint8_t)(c >> 8);
+            line[x * 4u + 2u] = (uint8_t)(c >> 16);
+            line[x * 4u + 3u] = (uint8_t)(c >> 24);
+        }
+        png_z_data(&z, &filter_none, 1u);
+        png_z_data(&z, line, (size_t)w * 4u);
+        ok = z.ok;
+    }
+    if (ok) ok = png_end(&z);
+    if (ok && fflush(f) != 0) ok = 0;
+    if (fclose(f) != 0) ok = 0;
+    free(line);
+    if (!ok) { remove(tmp); return 0; }
+    return cap_publish_file(tmp, path);
+}
+
 /* Publish w x h pixels as a P6 PPM whose name ends in .ppm, or as the PNG above for a name
  * ending in .png: the header matches the extension and exactly w*h*3 colour bytes follow, in
  * R,G,B order whatever the source byte order. Publication is atomic: a unique temp sibling is
@@ -272,7 +323,7 @@ static int cap_write_file(const uint8_t *px, uint32_t row_bytes, sr_cap_order or
     if (!f) { free(rgb); return 0; }
     const int png = cap_path_is_png(s_path);
     PngOut z;
-    int ok = png ? png_begin(&z, f, s_w, s_h) : fprintf(f, "P6\n%u %u\n255\n", s_w, s_h) > 0;
+    int ok = png ? png_begin(&z, f, s_w, s_h, 3u) : fprintf(f, "P6\n%u %u\n255\n", s_w, s_h) > 0;
     /* Byte offsets of R, G, B inside one pixel for the source byte order. */
     const int ir = order == SR_CAP_ORDER_RGBX ? 0 : 2;
     const int ib = order == SR_CAP_ORDER_RGBX ? 2 : 0;
@@ -298,16 +349,7 @@ static int cap_write_file(const uint8_t *px, uint32_t row_bytes, sr_cap_order or
     if (fclose(f) != 0) ok = 0;
     free(rgb);
     if (!ok) { remove(tmp); return 0; }
-#ifdef _WIN32
-    if (!MoveFileExA(tmp, s_path, MOVEFILE_REPLACE_EXISTING)) {
-        remove(tmp);
-        fprintf(stderr, "fbcap: publish failed (MoveFileExA: %lu)\n", (unsigned long)GetLastError());
-        return 0;
-    }
-#else
-    if (rename(tmp, s_path) != 0) { remove(tmp); return 0; }
-#endif
-    return 1;
+    return cap_publish_file(tmp, s_path);
 }
 
 /* A w x h frame of row_bytes-long rows is a valid pixel description: the frame size is

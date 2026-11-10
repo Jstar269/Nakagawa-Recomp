@@ -198,6 +198,13 @@ int sr_picture_watch_collect(SrPictureWatch *w, int block, uint32_t *brightest);
  * ".png" is published as a PNG (8-bit RGB, stored deflate blocks), every other path as the P6
  * PPM described above. */
 
+/* Write w x h RGBA8 pixels (R in the low byte of each word, rows packed) to `path` as a PNG:
+ * 8-bit RGBA, no interlace, filter 0 on every row, stored deflate blocks. Published atomically
+ * like a capture (a temp sibling written whole, then renamed over `path`). The texture dump
+ * (ge_gpu.c, gegpu_texdump_start) writes its files with it. Returns 1, or 0 when the
+ * arguments are invalid (w * 4 * h above UINT32_MAX included) or the file cannot be written. */
+int sr_png_write_rgba(const char *path, const uint32_t *rgba, uint32_t w, uint32_t h);
+
 #ifdef __cplusplus
 }
 #endif

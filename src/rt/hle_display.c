@@ -531,6 +531,12 @@ static void screenshot_arm_for_present(const DisplayFrameState *fb, int framebuf
     if (!sr_capture_arm(s_shot_path)) s_shot_path[0] = '\0';   /* slot busy: the next present */
 }
 
+int sr_texdump_folder_for_run(char *out, size_t outsz) {
+    char root[768];
+    flash0_user_data_root(root, sizeof root);
+    return sr_texdump_folder(root, getenv("SR_DISC_ID"), out, outsz);
+}
+
 /* After the present: report and take the request once a presenter published or failed it. */
 static void screenshot_after_present(void) {
     if (!s_shot_path[0]) return;

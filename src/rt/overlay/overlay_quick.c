@@ -276,6 +276,16 @@ NkOverlayAction nk_overlay_page_settings(NkUi *ui, NkOverlayState *state,
                            "Hidden while the HUD shows.", inner - 180.0f, compact,
                            model->ace_readout == 2, NK_OVERLAY_ACT_SET_READOUT, &result);
             }
+            /* The texture dump (ge_gpu.h), in an Enhanced or Ace run on the Vulkan renderer. */
+            if (model->texdump > 0) {
+                toggle_row(ui, NK_OVERLAY_ID_TEXDUMP, 5u, "Dump textures",
+                           model->texdump_note != NULL && model->texdump_note[0] != '\0'
+                               ? model->texdump_note
+                               : "Saves the textures the game draws to your user data folder, "
+                                 "to make a texture pack.",
+                           inner - 180.0f, compact, model->texdump == 2,
+                           NK_OVERLAY_ACT_SET_TEXDUMP, &result);
+            }
             nk_ui_end_container(ui);
         }
     }

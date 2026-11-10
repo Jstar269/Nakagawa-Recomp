@@ -30,6 +30,7 @@
 #include "../core/nk_shared_helpers.h"
 #include "gpu_sdl3vk/sdl3vk.h"
 #include "fbcap.h"
+#include "fbcap_policy.h"     /* the texture dump's folder (sr_texdump_folder_for_run) */
 #include "videorec.h"         /* video recording: the CPU presenters hand over their frame */
 #include "osk_overlay.h"        /* the in-window keyboard: keys in, the frame drawn over */
 #include "osk_overlay_paint.h"
@@ -1847,6 +1848,27 @@ static void gui_pause_describe_profile(void) {
                    : "The counters start now. Resume the game, then pause again.";
 }
 
+/* The Settings page's Dump textures row (ge_gpu.h, gegpu_texdump_start): on writes the textures
+ * the game draws from now on into <user data>/texdump/<disc ID>; a refused start says why on the
+ * row and in the log. */
+static char s_pause_texdump_note[240];
+
+static void gui_pause_texdump(int on) {
+    s_pause_texdump_note[0] = '\0';
+    if (!on) {
+        gegpu_texdump_stop();
+        return;
+    }
+    char dir[900], err[200];
+    if (!sr_texdump_folder_for_run(dir, sizeof dir)) {
+        snprintf(err, sizeof err, "this run has no user data folder or disc ID");
+    } else if (gegpu_texdump_start(dir, err, sizeof err)) {
+        return;
+    }
+    snprintf(s_pause_texdump_note, sizeof s_pause_texdump_note, "Not started: %s.", err);
+    fprintf(stderr, "TEX_DUMP: refused (%s)\n", err);
+}
+
 /* Carries out what the person chose on a page. */
 static void gui_pause_act(NkOverlayAction action) {
     switch (action.kind) {
@@ -1884,6 +1906,10 @@ static void gui_pause_act(NkOverlayAction action) {
         break;
     case NK_OVERLAY_ACT_VRAM_VIEW:
         if (sdl3vk_developer_mode()) gui_pause_decode_vram();
+        s_pause_dirty = 1;
+        break;
+    case NK_OVERLAY_ACT_SET_TEXDUMP:
+        gui_pause_texdump(action.value != 0);
         s_pause_dirty = 1;
         break;
     default:
@@ -1942,6 +1968,8 @@ static int gui_pause_compose(int w, int h, int rgba) {
          * Frame pacing choices. */
         model.fullscreen = pause_fullscreen_row(sdl3vk_fullscreen());
         model.pacing = pause_pacing_row(present_cap());
+        model.texdump = gegpu_texdump_row();
+        model.texdump_note = s_pause_texdump_note;
         model.saving = sr_savedata_pause_busy() != 0;
         model.controls = s_pause_controls.rows;
         model.control_count = s_pause_controls.count;

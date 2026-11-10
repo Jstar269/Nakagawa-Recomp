@@ -122,6 +122,7 @@
 #include "glyph_recon.h"  /* sharp game text: glyph reconstruction (Ace on only, #2110) */
 #include "pipeline_cache.h"   /* the pipeline cache's file on disk (#2149) */
 #include "../texrepl.h"  /* texture replacement packs (#1880; Ace on only) */
+#include "../fbcap.h"    /* sr_png_write_rgba: the texture dump's files */
 
 #include <vulkan/vulkan.h>
 #include <SDL3/SDL_timer.h>
@@ -311,6 +312,9 @@ typedef struct {
     /* Sharp game text (glyph_recon.h, glyph_gpu.inc): the rebuilt glyph rectangles of this page, in
      * a host-only image beside the guest-resolution one. NULL until a draw's rectangle is rebuilt. */
     struct GlSet *gl;
+    /* The texture dump (gegpu_texdump_start): the dump stretch and the content this entry was last
+     * looked at in, so each content is written at most once a stretch. */
+    uint64_t dump_serial, dump_hash;
 } TexEnt;
 
 typedef struct { PipeKey key; VkPipeline pipe; int used; } PipeEnt;
@@ -4360,19 +4364,24 @@ static void tex_mip_targets_readback(const TexMipKey *mip, const uint32_t *level
  * scaling is on, it has one level, it is not a render target read back through the cache
  * (s_tex_noscale), and no byte of it lies inside a render target, whose contents stay exactly
  * as the GE drew them. Checked when a copy is offered and again whenever one would be bound. */
+/* Whether entry `e`'s source overlaps a render target: its content is a frame the game drew,
+ * not a texture it loaded. */
+static int tex_ent_over_target(const TexEnt *e) {
+    if (!is_vram(e->addr)) return 0;
+    const uint64_t a0 = vram_off(e->addr), a1 = a0 + (e->bytes ? e->bytes : 1u);
+    for (int t = 0; t < MAX_TGT; t++) {
+        const Target *tg = &s_tgts[t];
+        if (!tg->used) continue;
+        const uint64_t t0 = tg->fba, t1 = t0 + (uint64_t)tg->stride * FB_H * (tg->fmt == 3u ? 4u : 2u);
+        if (a0 < t1 && t0 < a1) return 1;
+    }
+    return 0;
+}
+
 static int tex_xs_eligible(const TexEnt *e, uint32_t levels) {
     if (!xs_enabled() || s_tex_noscale || levels != 1u) return 0;
     if (!tex_xs_factor(e)) return 0;
-    if (is_vram(e->addr)) {
-        const uint64_t a0 = vram_off(e->addr), a1 = a0 + (e->bytes ? e->bytes : 1u);
-        for (int t = 0; t < MAX_TGT; t++) {
-            const Target *tg = &s_tgts[t];
-            if (!tg->used) continue;
-            const uint64_t t0 = tg->fba, t1 = t0 + (uint64_t)tg->stride * FB_H * (tg->fmt == 3u ? 4u : 2u);
-            if (a0 < t1 && t0 < a1) return 0;
-        }
-    }
-    return 1;
+    return !tex_ent_over_target(e);
 }
 
 /* The scaled copy is drawn only while it was made from the entry's current content: the same
@@ -4412,30 +4421,39 @@ static void tex_repl_flush_notes(void) {
  * other shape is counted and left unused: the texture is drawn as the game made it). On 1, `hit` is
  * pinned (give it back with nk_texrepl_unpin) and `*factor` is its factor. Reads guest memory only
  * through tex_source_ptr, so a source it cannot read directly is never replaced. */
+/* The identity a pack names entry `e`'s current content by, hashed with `pack`'s hash kind and
+ * ranges (texrepl.h): the GE state is the one the entry was just looked up with. 0 when the
+ * texture has none: a size that is not a power of two, a format above 10, or a source
+ * tex_source_ptr cannot read directly. */
+static int tex_repl_identify(const NkTexRepl *pack, const TexEnt *e, NkTexReplId *id) {
+    const int wl = log2_exact(e->w), hl = log2_exact(e->h);
+    if (!pack || wl < 0 || hl < 0 || s_ge->tex_fmt > 10u) return 0;
+    const uint32_t bytes = tex_source_size();
+    const uint8_t *p = tex_source_ptr(e->addr, bytes);
+    if (!p) return 0;
+    memset(id, 0, sizeof(*id));
+    id->addr = e->addr;
+    id->format = s_ge->tex_fmt;
+    id->dim = (uint32_t)wl | ((uint32_t)hl << 8);
+    if (s_ge->tex_fmt & 4u) {
+        /* PPSSPP's palette identity: the loaded palette bytes and the CLUTFORMAT word (texrepl.h). */
+        uint32_t last = 0, max = 0;
+        ge_clut_load_extent(&last, &max);
+        id->clut_hash = nk_texrepl_clut_identity(s_ge->clutram, (uint32_t)sizeof(s_ge->clutram),
+                                                 s_ge->clut_fmt, s_ge->tex_fmt, last, max);
+    }
+    id->hash = nk_texrepl_hash_texture(pack, p, bytes, e->addr, (int)s_ge->tex_bufw, e->w, e->h,
+                                       s_ge->tex_fmt, 0);
+    return 1;
+}
+
 static int tex_repl_find(const TexEnt *e, NkTexReplHit *hit, int *factor) {
 #ifdef NK_TEXREPL_MUTANT_NO_LOOKUP   /* the selftests' stub: no texture is ever found in the pack */
     (void)hit; (void)factor; (void)e;
     return 0;
 #endif
-    const int wl = log2_exact(e->w), hl = log2_exact(e->h);
-    if (!s_repl || wl < 0 || hl < 0 || s_ge->tex_fmt > 10u) return 0;
-    const uint32_t bytes = tex_source_size();
-    const uint8_t *p = tex_source_ptr(e->addr, bytes);
-    if (!p) return 0;
     NkTexReplId id;
-    memset(&id, 0, sizeof(id));
-    id.addr = e->addr;
-    id.format = s_ge->tex_fmt;
-    id.dim = (uint32_t)wl | ((uint32_t)hl << 8);
-    if (s_ge->tex_fmt & 4u) {
-        /* PPSSPP's palette identity: the loaded palette bytes and the CLUTFORMAT word (texrepl.h). */
-        uint32_t last = 0, max = 0;
-        ge_clut_load_extent(&last, &max);
-        id.clut_hash = nk_texrepl_clut_identity(s_ge->clutram, (uint32_t)sizeof(s_ge->clutram),
-                                                s_ge->clut_fmt, s_ge->tex_fmt, last, max);
-    }
-    id.hash = nk_texrepl_hash_texture(s_repl, p, bytes, e->addr, (int)s_ge->tex_bufw, e->w, e->h,
-                                      s_ge->tex_fmt, 0);
+    if (!tex_repl_identify(s_repl, e, &id)) return 0;
     const int found = nk_texrepl_lookup(s_repl, &id, hit);
     tex_repl_flush_notes();
     if (!found) return 0;
@@ -4513,6 +4531,169 @@ static void tex_repl_shutdown(void) {
             (unsigned long long)(st.cache_peak >> 20), (unsigned long long)(st.decode_ns / 1000000ull));
     nk_texrepl_close(s_repl);
     s_repl = NULL;
+}
+
+/* ---- Texture dump (#1880) ---------------------------------------------------------------------
+ * A dump the player starts and stops from the pause menu (Settings > Dump textures, gui.c), in an
+ * Enhanced or Ace run: every texture the game draws while it is on is written, each level once,
+ * as a PNG named the way a pack names it, "<16 hex cache key><8 hex hash>.png" and "..._<level>.png"
+ * for mip levels, into the folder gui.c names (<user data>/texdump/<disc ID>). A textures.ini that
+ * the folder did not have is written first ("hash = quick"), and the folder is then read as a pack
+ * (nk_texrepl_open) whose hash kind and ranges name the files, so the folder, with its images
+ * enlarged, loads as a pack that lists what was dumped. Nothing the guest can observe changes: a
+ * texture is decoded from guest memory into a host buffer of its own and written to disk. Render
+ * targets sampled as textures (frames, not loaded textures) and textures with no pack identity are
+ * skipped and counted. Files are written on the render thread, so a frame that meets many new
+ * textures takes longer while the dump is on. SR_TEX_DUMP_BUDGET_MB (1 to 65536, default 4096)
+ * bounds what a run writes; the dump stops, and says so, when the next file would pass it. */
+#define TEX_DUMP_DEFAULT_BUDGET_MB 4096u
+typedef struct {
+    NkTexRepl *names;              /* the folder read as a pack: its hash kind and ranges name files */
+    char dir[768];
+    uint64_t serial;               /* new on every start */
+    uint64_t budget, written_bytes;
+    unsigned long long written, present, failed, skipped, starts;
+    int on, stopped;
+} TexDump;
+static TexDump s_dump;
+static uint32_t s_dumpscratch[512 * 512];
+
+static int tex_dump_file_exists(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static void tex_dump_line(const char *what) {
+    fprintf(stderr, "TEX_DUMP: %s (written=%llu, already_there=%llu, skipped=%llu, failed=%llu, mb=%llu)\n",
+            what, s_dump.written, s_dump.present, s_dump.skipped, s_dump.failed,
+            (unsigned long long)(s_dump.written_bytes >> 20));
+}
+
+int gegpu_texdump_start(const char *dir, char *err, size_t err_cap) {
+    if (err && err_cap) err[0] = '\0';
+    if (s_dump.on) return 1;
+    if (!s_ready || !g_ace_on) {
+        snprintf(err, err_cap, "a texture dump needs Enhanced or Ace and the Vulkan renderer");
+        return 0;
+    }
+    if (!dir || !dir[0] || strlen(dir) >= sizeof(s_dump.dir)) {
+        snprintf(err, err_cap, "no dump folder could be named");
+        return 0;
+    }
+    uint64_t budget = (uint64_t)TEX_DUMP_DEFAULT_BUDGET_MB << 20;
+    const char *mb = getenv("SR_TEX_DUMP_BUDGET_MB");
+    if (mb && mb[0]) {
+        char *end = NULL;
+        const unsigned long v = strtoul(mb, &end, 10);
+        if (!end || *end || mb[0] < '0' || mb[0] > '9' || v < 1ul || v > 65536ul) {
+            snprintf(err, err_cap, "SR_TEX_DUMP_BUDGET_MB takes 1 to 65536");
+            return 0;
+        }
+        budget = (uint64_t)v << 20;
+    }
+    if (!nk_platform_mkdir_p(dir)) {
+        snprintf(err, err_cap, "the dump folder could not be made");
+        return 0;
+    }
+    char ini[900];
+    if (snprintf(ini, sizeof(ini), "%s/textures.ini", dir) >= (int)sizeof(ini)) {
+        snprintf(err, err_cap, "the dump folder's path is too long");
+        return 0;
+    }
+    if (!tex_dump_file_exists(ini)) {
+        FILE *f = fopen(ini, "wb");
+        const int ok = f && fputs("; Written by Nakagawa's texture dump. The PNG files beside it are named for the\n"
+                                  "; textures they hold; enlarge them (2 to 6 times) and choose this folder as the\n"
+                                  "; game's texture pack.\n[options]\nversion = 1\nhash = quick\n", f) >= 0;
+        if (f && fclose(f) != 0) remove(ini);
+        if (!ok) {
+            snprintf(err, err_cap, "the dump folder's textures.ini could not be written");
+            return 0;
+        }
+    }
+    char why[200];
+    NkTexRepl *names = nk_texrepl_open(dir, 0, why, sizeof(why));
+    if (!names) {
+        snprintf(err, err_cap, "the dump folder does not read as a pack (%s)", why);
+        return 0;
+    }
+    snprintf(s_dump.dir, sizeof(s_dump.dir), "%s", dir);
+    s_dump.names = names;
+    s_dump.budget = budget;
+    s_dump.serial++;
+    s_dump.starts++;
+    s_dump.stopped = 0;
+    s_dump.on = 1;
+    static const char *const kind[] = { "quick", "xxh32", "xxh64" };
+    fprintf(stderr, "TEX_DUMP: on (hash=%s, budget_mb=%llu; each texture drawn from now is written once)\n",
+            kind[nk_texrepl_hash_kind(names)], (unsigned long long)(budget >> 20));
+    return 1;
+}
+
+void gegpu_texdump_stop(void) {
+    if (!s_dump.on) return;
+    s_dump.on = 0;
+    nk_texrepl_close(s_dump.names);
+    s_dump.names = NULL;
+    tex_dump_line("off");
+}
+
+int gegpu_texdump_row(void) {
+    if (!s_ready || !g_ace_on) return 0;
+    return s_dump.on ? 2 : 1;
+}
+
+/* Entry `e` was just looked up and is about to be bound with the GE state it was looked up with:
+ * write each of its `levels` levels that the folder does not hold yet. */
+static void tex_dump_note(TexEnt *e, uint32_t levels) {
+    if (!s_dump.on || (e->dump_serial == s_dump.serial && e->dump_hash == e->hash)) return;
+    e->dump_serial = s_dump.serial;
+    e->dump_hash = e->hash;
+    if (s_dump.stopped) return;
+    NkTexReplId id;
+    /* A zero hash is the name a pack gives every content at an address ("no data hash"); a file
+     * by that name would replace whatever the game puts there, so such a texture is skipped. */
+    if (tex_ent_over_target(e) || !tex_repl_identify(s_dump.names, e, &id) || id.hash == 0u) {
+        s_dump.skipped++;
+        return;
+    }
+    const unsigned long long key = (unsigned long long)nk_texrepl_cache_key(id.addr, id.format, id.dim,
+                                                                            id.clut_hash);
+    for (uint32_t level = 0; level < levels; level++) {
+        char path[900];
+        const int n = level ? snprintf(path, sizeof(path), "%s/%016llx%08x_%u.png", s_dump.dir, key, id.hash, level)
+                            : snprintf(path, sizeof(path), "%s/%016llx%08x.png", s_dump.dir, key, id.hash);
+        if (n <= 0 || n >= (int)sizeof(path)) { s_dump.failed++; continue; }
+        if (tex_dump_file_exists(path)) { s_dump.present++; continue; }
+        int lw = e->w >> level, lh = e->h >> level;
+        if (lw < 1) lw = 1;
+        if (lh < 1) lh = 1;
+        /* The stored PNG: the image, a filter byte a row, five bytes a 65535-byte block, the chunks. */
+        const uint64_t raw = (uint64_t)lh * (1u + 4u * (uint64_t)lw);
+        const uint64_t size = raw + 5u * ((raw + 65534u) / 65535u) + 64u;
+        if (s_dump.written_bytes + size > s_dump.budget) {
+            s_dump.stopped = 1;
+            tex_dump_line("stopped (the next file would pass the run's dump budget, SR_TEX_DUMP_BUDGET_MB)");
+            return;
+        }
+        if (level == 0u) ge_decode_tex_rgba(s_dumpscratch);
+        else ge_decode_tex_level_rgba(level, s_dumpscratch);
+        if (sr_png_write_rgba(path, s_dumpscratch, (uint32_t)lw, (uint32_t)lh)) {
+            s_dump.written++;
+            s_dump.written_bytes += size;
+        } else {
+            if (!s_dump.failed) fprintf(stderr, "TEX_DUMP: note: a file could not be written in the dump folder\n");
+            s_dump.failed++;
+        }
+    }
+}
+
+static void tex_dump_shutdown(void) {
+    gegpu_texdump_stop();
+    if (s_dump.starts) tex_dump_line("exit");
+    memset(&s_dump, 0, sizeof(s_dump));
 }
 
 /* Offer the content just decoded into s_texscratch (level 0 of entry `e`, hash `hash`) for
@@ -4805,6 +4986,7 @@ static VkDescriptorSet tex_get(void) {
             if (sr_perf_enabled) sr_perf_texture_cache(1);
             e->pending = 1;
             if (xs_enabled()) tex_xs_retry(e, levels);
+            tex_dump_note(e, levels);
             return tex_bind_set(e, levels);
         }
         if (!e->content_valid && e->hash == hash && tex_shadow_matches(e)) {
@@ -4814,6 +4996,7 @@ static VkDescriptorSet tex_get(void) {
             s_cnt_shadow_avoided++;
             if (sr_perf_enabled) sr_perf_texture_cache(1);
             if (xs_enabled()) tex_xs_retry(e, levels);
+            tex_dump_note(e, levels);
             return tex_bind_set(e, levels);
         }
         /* same texture state, new contents: update in place (cache stays bounded) */
@@ -4834,6 +5017,7 @@ static VkDescriptorSet tex_get(void) {
         e->pending = 1;
         s_cnt_texup++;
         tex_xs_note_upload(e, levels);   /* s_texscratch still holds level 0 when levels == 1 */
+        tex_dump_note(e, levels);
         return tex_bind_set(e, levels);
     }
 
@@ -4869,6 +5053,7 @@ static VkDescriptorSet tex_get(void) {
     s_cnt_texup++;
     s_tex_n++;
     tex_xs_note_upload(e, levels);   /* s_texscratch still holds level 0 when levels == 1 */
+    tex_dump_note(e, levels);
     return tex_bind_set(e, levels);
 }
 
@@ -7365,6 +7550,7 @@ void gegpu_shutdown(void) {
         glyph_report();
         s_glyphs_asked = s_glyphs = 0;
     }
+    tex_dump_shutdown();   /* its exit line; nothing else depends on it */
     const int had_repl = s_repl != NULL;
     tex_repl_shutdown();   /* the exit line, the pack closed; the scaled-copy machinery it used goes next */
     if (had_repl && !s_xs_factor && !s_xs_smart2d) nk_tex_scale_shutdown();

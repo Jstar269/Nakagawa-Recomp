@@ -811,8 +811,29 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   bad_factor=, cache_peak_mb=, decode_ms=)`. Section 10.4 applies: the run is an Ace run.
 - **Not yet.** Decoding a PNG runs on the renderer thread the first time an image is needed (a worker thread, as
   scaling has, and DDS or KTX2 files come after); the tallest row a game draws is not tracked, so a 512-high texture
-  is hashed whole; same-size replacement (factor 1), mip levels, `[filtering]` and `[indexed]`, a dump switch, ZIP
-  packs and a player toggle or per-title pack folder are not done.
+  is hashed whole; same-size replacement (factor 1), mip levels, `[filtering]` and `[indexed]`, ZIP packs and a
+  player toggle or per-title pack folder are not done.
+- **Dump.** A player who wants a pack for their own game makes it from the game itself: in an Enhanced or Ace run
+  on the Vulkan renderer, the pause menu's **Settings > Dump textures** (`gegpu_texdump_start`, started from
+  `gui.c`) writes every texture the game draws from then on, each level once, as an RGBA PNG named the way a pack
+  names it, `<16 hex cache key><8 hex hash>.png` and `..._<level>.png` for mip levels, into
+  `<user data>/texdump/<disc ID>` (`sr_texdump_folder`: one folder a disc ID, never shared). A texture already in the
+  cache is written the next time it is drawn. A folder without a `textures.ini` gets one (`hash = quick`) first, and
+  the folder is then read as a pack whose hash kind and ranges name the files, so the same folder, its images enlarged
+  by any tool the player likes, is a pack that lists what was dumped; a `textures.ini` the player edited (another
+  hash, ranges) names the files of later dumps too, and one that does not read refuses the dump with its reason.
+  Skipped and counted: render targets sampled as textures (frames, not loaded textures), textures with no pack
+  identity (no power-of-two size, or a source the renderer cannot read directly) and a content hash of 0 (the name a
+  pack gives every content at an address). A file already in the folder is not written again. Nothing the guest can
+  observe changes: each texture is decoded from guest memory into a buffer of its own and written to disk, never to
+  guest memory; files are written only inside the folder, on the renderer thread (a frame that meets many new
+  textures takes longer while the dump is on), atomically (a temporary file renamed into place).
+  `SR_TEX_DUMP_BUDGET_MB` (1 to 65536, default 4096) bounds what a run writes: the file that would pass it is not
+  written and the dump stops with `TEX_DUMP: stopped (...)`. The switch is the run's alone, off at every start and
+  never saved, and an authentic run has no row. Stamps: `TEX_DUMP: on (hash=, budget_mb=; ...)` when started,
+  `TEX_DUMP: refused (<reason>)` (the row shows the reason too), and `TEX_DUMP: off` and, at exit,
+  `TEX_DUMP: exit (written=, already_there=, skipped=, failed=, mb=)`. The project ships no texture and no upscaler:
+  the images are the player's own, from the player's own game, and stay on their PC.
 - **Tests.** `texrepl-selftest` checks the hashes against values taken from PPSSPP's own code and published xxHash
   vectors, the ini and file-name rules, the lookup order, palette identity (against PPSSPP's formula worked out
   separately, with a pack file named the way PPSSPP names it), malformed packs, path escapes and the
@@ -820,7 +841,11 @@ memory, no network) and its hook in `ge_gpu.c`'s scaled-copy path (`tex_xs_offer
   listed texture drawn from the pack's image from the draw that finds it, even with the 1:1 rule on, with
   `SR_TEX_REPLACE` alone and with xBRZ also on; a rewrite to unlisted
   content never drawn from the old image; the content returning replaced again; an image of no whole factor counted
-  and not used; and an authentic start reading no pack.
+  and not used; and an authentic start reading no pack. Its `dump` cell checks the dump: refused in an authentic run,
+  nothing written while off, a texture already in the cache and a newly decoded one written under the names a pack
+  gives them (worked out in the cell from the cache key and the quick hash), the folder read back as a pack giving the
+  textures' own pixels, no file written twice and the budget kept. `fbcap-selftest` checks the folder name and
+  `test_overlay_screens` the row.
 
 ### 10.13. Sharp Game Text
 

@@ -262,6 +262,15 @@ int  gegpu_wide_read(uint32_t fb, uint32_t *rgba);
 /* Wing primitives recorded, and wing primitives dropped (a state this backend draws in
  * software, or no canvas). */
 void gegpu_wide_counts(unsigned long *drawn, unsigned long *dropped);
+/* The texture dump (#1880; ge_gpu.c, "Texture dump"): the pause menu's Settings > Dump textures.
+ * gegpu_texdump_start writes every texture drawn from then on, each level once, as a PNG named the
+ * way a pack names it into `dir` (made when missing; a textures.ini is written when it has none),
+ * in an Enhanced or Ace run only. Returns 1 (also when already on), or 0 with `err` filled.
+ * gegpu_texdump_row is the menu's row: 0 none (an authentic run, or the renderer is not running),
+ * 1 off, 2 on. */
+int gegpu_texdump_start(const char *dir, char *err, size_t err_cap);
+void gegpu_texdump_stop(void);
+int gegpu_texdump_row(void);
 int gegpu_snapshot_sync_selftest(void);
 int gegpu_ace_af_selftest(void);   /* 1 pass, 0 fail, 77 no anisotropic filtering */
 int gegpu_texscale_selftest(void); /* texture scaling and the smart 2D filter (tex_scale.h) */
