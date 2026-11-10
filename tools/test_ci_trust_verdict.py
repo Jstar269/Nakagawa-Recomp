@@ -502,6 +502,184 @@ class DraftLightCiTests(VerdictAssertions):
         })])
 
 
+#: Every conclusion GitHub gives a completed job, and two shapes it should never give.
+JOB_CONCLUSIONS = ("success", "failure", "cancelled", "skipped", "neutral", "timed_out", "action_required",
+                   "stale", "startup_failure", None, "")
+
+
+class LightTierVerdictTests(VerdictAssertions):
+    """A head whose newest CI run was light (the quick checks) is never ``success`` (docs/CI.md,
+    "Quick and full checks").
+
+    On a light run ``CI required`` is skipped and ``CI quick checks`` is the run's aggregate. Only a
+    ``CI required`` job that concluded ``success`` makes a verdict ``success``; a light run with green quick
+    checks is ``pending`` with ``LIGHT_CI_GREEN``, which is what the landing desk selects on.
+    """
+
+    @staticmethod
+    def _light(quick: str | None = "success", required: str | None = "skipped") -> Scenario:
+        """The healthy scenario with its CI run turned into a light one. ``quick`` None omits the quick job."""
+        scenario = Scenario()
+        scenario.job(1, ctv.FULL_AGGREGATE).update(conclusion=required)
+        if quick is not None:
+            job = _job(199, ctv.QUICK_AGGREGATE, conclusion=quick)
+            scenario.raw["jobs"]["1"].append(job)
+            scenario.raw["check_runs"].append(_check(job, 10))
+        return scenario
+
+    def test_a_quick_green_head_is_never_success(self) -> None:
+        verdict = self.assertVerdict(self._light(), "pending")
+        self.assertNotEqual(verdict.state, "success")
+        self.assertEqual(verdict.pending, [ctv.LIGHT_PENDING])
+        self.assertEqual(verdict.description(), ctv.LIGHT_DESCRIPTION)
+        self.assertTrue(verdict.description().startswith("LIGHT_CI_GREEN: "))
+        self.assertEqual([(item.code, item.fatal) for item in verdict.findings], [("LIGHT_CI_GREEN", False)])
+        self.assertIn("ci-full-matrix", verdict.findings[0].message)
+
+    def test_success_requires_ci_required_success(self) -> None:
+        """The invariant, at the verdict: whatever else a CI run holds, no conclusion of ``CI required``
+        but ``success`` gives ``success``."""
+        for required in JOB_CONCLUSIONS:
+            for quick in (None, *JOB_CONCLUSIONS):
+                with self.subTest(required=required, quick=quick):
+                    state = self._light(quick=quick, required=required).verdict().state
+                    self.assertEqual(state == "success", required == "success")
+        absent = Scenario()
+        absent.raw["jobs"]["1"] = [job for job in absent.raw["jobs"]["1"] if job["name"] != ctv.FULL_AGGREGATE]
+        absent.raw["jobs"]["1"].append(_job(199, ctv.QUICK_AGGREGATE))
+        self.assertVerdict(absent, "failure", "JOB_MISSING")
+        running = self._light()
+        running.job(1, ctv.FULL_AGGREGATE).update(status="in_progress", conclusion=None)
+        self.assertEqual(self.assertVerdict(running, "pending").pending, [ctv.FULL_AGGREGATE])
+
+    def test_only_the_recognised_light_shape_is_light(self) -> None:
+        """Default deny: any other way for ``CI required`` not to succeed stays a failure."""
+        for required in JOB_CONCLUSIONS:
+            if required in ("success", "skipped"):
+                continue
+            with self.subTest(required=required):
+                verdict = self.assertVerdict(self._light(required=required), "failure", "JOB_FAILED")
+                self.assertNotIn("LIGHT_CI_GREEN", verdict.description())
+        # Skipped, but without exactly one quick aggregate of this head in the same run.
+        self.assertVerdict(self._light(quick=None), "failure", "JOB_FAILED")
+        twice = self._light()
+        twice.raw["jobs"]["1"].append(_job(198, ctv.QUICK_AGGREGATE))
+        self.assertVerdict(twice, "failure", "JOB_FAILED")
+        other_head = self._light()
+        other_head.job(1, ctv.QUICK_AGGREGATE).update(head_sha=OTHER)
+        self.assertVerdict(other_head, "failure", "JOB_FAILED")
+
+    def test_a_failed_quick_aggregate_is_a_failure_naming_it(self) -> None:
+        for quick in ("failure", "cancelled", "skipped", "timed_out", ""):
+            with self.subTest(quick=quick):
+                verdict = self.assertVerdict(self._light(quick=quick), "failure", "JOB_FAILED")
+                failed = [item for item in verdict.findings if item.code == "JOB_FAILED"]
+                self.assertEqual([item.subject for item in failed], [ctv.QUICK_AGGREGATE])
+                self.assertEqual(verdict.description(), "1 finding(s): JOB_FAILED")
+
+    def test_a_running_quick_aggregate_is_pending_under_its_own_name(self) -> None:
+        scenario = self._light()
+        scenario.job(1, ctv.QUICK_AGGREGATE).update(status="in_progress", conclusion=None)
+        verdict = self.assertVerdict(scenario, "pending")
+        self.assertEqual(verdict.pending, [ctv.QUICK_AGGREGATE])
+        self.assertEqual(verdict.description(), f"Waiting for: {ctv.QUICK_AGGREGATE}")
+
+    def test_a_quick_job_outside_the_judged_run_does_not_count(self) -> None:
+        # A job of that name in another workflow's run, or in an older CI run, is not this run's aggregate.
+        scenario = self._light(quick=None)
+        foreign = scenario.add_run(8, ".github/workflows/extra.yml", [ctv.QUICK_AGGREGATE])
+        self.assertEqual(foreign["head_sha"], HEAD)
+        self.assertVerdict(scenario, "failure", "JOB_FAILED")
+        older = self._light(quick=None)
+        older.add_run(8, CI, [ctv.QUICK_AGGREGATE], created="2026-10-28T09:00:00Z")
+        self.assertVerdict(older, "failure", "JOB_FAILED")
+
+    def test_the_other_producers_still_decide(self) -> None:
+        failed = self._light()
+        failed.job(2, "OSV Vulnerability Scan").update(conclusion="failure")
+        verdict = self.assertVerdict(failed, "failure", "JOB_FAILED")
+        self.assertEqual(verdict.description(), "1 finding(s): JOB_FAILED")
+        waiting = self._light()
+        waiting.job(2, "OSV Vulnerability Scan").update(status="in_progress", conclusion=None)
+        verdict = self.assertVerdict(waiting, "pending")
+        self.assertEqual(verdict.pending, [ctv.LIGHT_PENDING, "OSV Vulnerability Scan"])
+        self.assertFalse(verdict.description().startswith("LIGHT_CI_GREEN"),
+                         "the code leads the description only when nothing else is outstanding")
+        hygiene = self._light()
+        hygiene.job(1, "Hygiene and security").update(conclusion="skipped")
+        self.assertVerdict(hygiene, "failure", "JOB_FAILED")
+
+    def test_a_light_draft_is_a_draft_failure(self) -> None:
+        scenario = self._light()
+        scenario.raw["pull_request"]["draft"] = True
+        verdict = self.assertVerdict(scenario, "failure", "DRAFT_LIGHT_CI")
+        self.assertEqual(verdict.description(), "1 finding(s): DRAFT_LIGHT_CI")
+
+    def test_a_light_head_behind_main_reports_only_behind(self) -> None:
+        # The desk's behind-only path then reads the check runs itself, as for a full-green head.
+        scenario = self._light()
+        scenario.change(CI, kind="behind")
+        verdict = self.assertVerdict(scenario, "failure", "CI_DEFINITION_BEHIND")
+        self.assertEqual(verdict.description(), "1 finding(s): CI_DEFINITION_BEHIND")
+
+    def test_an_unapproved_ci_change_is_not_hidden_by_a_light_run(self) -> None:
+        scenario = self._light()
+        scenario.change("tools/ci_required.py")
+        self.assertVerdict(scenario, "failure", "CI_CHANGE_UNAPPROVED")
+
+    def test_the_newest_run_decides_between_light_and_full(self) -> None:
+        # Full and green first, then a light run at the same head (the label was removed and CI re-run,
+        # or the pull request went to Draft and back): the newer, light run is judged.
+        scenario = Scenario()
+        scenario.add_run(6, CI, ["Hygiene and security", ctv.QUICK_AGGREGATE, ctv.FULL_AGGREGATE], created=DRAFT_AT)
+        scenario.job(6, ctv.FULL_AGGREGATE).update(conclusion="skipped")
+        self.assertEqual(self.assertVerdict(scenario, "pending").description(), ctv.LIGHT_DESCRIPTION)
+        # Light first, then the full run the label started: success.
+        scenario = self._light()
+        scenario.add_run(6, CI, ["Hygiene and security", ctv.FULL_AGGREGATE], created=READY_AT)
+        self.assertVerdict(scenario, "success")
+        # A cancelled newer run does not stand in for either.
+        scenario = self._light()
+        scenario.add_run(6, CI, ["Hygiene and security", ctv.FULL_AGGREGATE], created=READY_AT,
+                         conclusion="cancelled")
+        self.assertEqual(self.assertVerdict(scenario, "pending").description(), ctv.LIGHT_DESCRIPTION)
+
+    def test_the_verdict_reads_no_label_for_the_tier(self) -> None:
+        """Which heads run full is the classifier's cost decision; the verdict judges only what ran."""
+        for labels in ((), ("ci-full-matrix",), ("ci-full-matrix", ctv.APPROVAL_LABEL)):
+            with self.subTest(labels=labels):
+                light = self._light()
+                light.raw["pull_request"]["labels"] = [{"name": name} for name in labels]
+                self.assertVerdict(light, "pending")
+                full = Scenario()
+                full.raw["pull_request"]["labels"] = [{"name": name} for name in labels]
+                self.assertVerdict(full, "success")
+        source = (ROOT / "tools" / "ci_trust_verdict.py").read_text(encoding="utf-8")
+        code = "\n".join(line for line in source.split('"""', 2)[2].splitlines() if not line.lstrip().startswith("#"))
+        for name in ("NK_CI_TIERS", "FULL_TIER_LABEL", "batch/"):
+            self.assertNotIn(name, code)
+
+    def test_main_posts_pending_with_the_code(self) -> None:
+        gh = FakeGitHub(self._light())
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()), \
+                mock.patch.object(ctv, "GitHub", return_value=gh), \
+                mock.patch.dict(os.environ, {"GITHUB_TOKEN": "token"}), mock.patch("sys.stdout"):
+            code = ctv.main(["--repository", gh.repository, "--post", "--pull-request", str(PR)])
+        self.assertEqual(code, 0)
+        self.assertEqual(gh.posts, [(f"statuses/{HEAD}", {
+            "state": "pending", "context": ctv.VERDICT_CONTEXT, "description": ctv.LIGHT_DESCRIPTION,
+        })])
+        self.assertEqual(ctv.LIGHT_DESCRIPTION, "LIGHT_CI_GREEN: quick checks passed at this head; the full checks "
+                         "run when it is batched for landing")
+
+    def test_the_summary_names_the_light_run(self) -> None:
+        scenario = self._light()
+        report = ctv.summary_markdown(scenario.verdict(), ctv.normalise(scenario.raw))
+        self.assertIn("### Trusted CI verdict: pending", report)
+        self.assertIn("(info) `LIGHT_CI_GREEN`", report)
+        self.assertIn(f"`{ctv.LIGHT_PENDING}`", report)
+
+
 class ProtectedPathTests(unittest.TestCase):
     def test_tool_references_skip_comments_and_longer_paths(self) -> None:
         text = (
