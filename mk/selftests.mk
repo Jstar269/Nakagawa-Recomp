@@ -412,7 +412,8 @@ native-core-tests: ge-float24-selftest
 # points and sprite corners, patches, block transfer and CLUT load, the GPU hook seam, and
 # each profile switch; then faults injected into copies of those blocks, each of which
 # must fail exactly the checks it breaks.  Run twice because ge.c latches the strip-cache
-# switch per process.  No game input.
+# switch per process, and a third time with the per-draw vertex cache off for the scenes
+# (its own case compares the cache on and off in every run).  No game input.
 GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftest$(EXE_EXT)
 
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
@@ -421,8 +422,32 @@ ge-cpu-profile-validate-selftest: $(RT_GE_O)
 		src/rt/flight_recorder.c src/rt/perf.c -lm
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
+	SR_GE_VERTEX_CACHE_DISABLE=1 $(GE_CPU_PROFILE_VALIDATE_SELFTEST)
+	@$(MAKE) --no-print-directory ge-vertex-cache-mutants
 
 native-core-tests: ge-cpu-profile-validate-selftest
+
+# ge-vertex-cache-mutants — the selftest's vertex cache case must kill each
+# SR_GE_VERTEX_CACHE_MUTANT in ge.c: 1 never starts a new epoch, so a draw reuses vertices an
+# earlier draw transformed at the same address under another world matrix; 2 does not check
+# the address, so a vertex whose index shares a table slot gets another vertex's result. Each
+# builds its own ge.c object and binary and must fail with its own message.
+ge-vertex-cache-mutants: $(RT_GE_O)
+	@for m in 1 2; do \
+		case $$m in \
+			1) kill="FAIL vertex_cache\[epoch-second\]: a distinct vertex was not transformed in its draw";; \
+			*) kill="FAIL vertex_cache\[u16-list-texgen1\]: a distinct vertex was not transformed in its draw";; \
+		esac; \
+		obj=$(BUILD_DIR)/ge_vertex_cache_mutant$$m.o; \
+		bin=$(BUILD_DIR)/ge_vertex_cache_mutant$$m$(EXE_EXT); \
+		$(CC) $(GE_CFLAGS) -DSR_GE_VERTEX_CACHE_MUTANT=$$m -c src/rt/ge.c -o $$obj || exit 1; \
+		$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $$bin tests/native/ge_cpu_profile_validate_selftest.c \
+			$$obj src/rt/ge_capture.c src/rt/flight_recorder.c src/rt/perf.c -lm || exit 1; \
+		$$bin > $$bin.log 2>&1; result=$$?; \
+		if test $$result -eq 0; then cat $$bin.log; echo "vertex cache mutant $$m unexpectedly passed" >&2; exit 1; fi; \
+		if ! grep -Eq "$$kill" $$bin.log; then cat $$bin.log; echo "vertex cache mutant $$m failed for another reason" >&2; exit 1; fi; \
+		echo "ge-vertex-cache-mutants: mutant $$m killed ($$kill)"; \
+	done
 
 # ge-tnl-census-selftest -- why ge.c keeps its own T&L for a PRIM it could offer to the GPU T&L
 # route (#318): the production ge.o with SR_GPU_TNL's switch on and a backend stand-in, one

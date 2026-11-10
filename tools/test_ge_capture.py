@@ -147,6 +147,7 @@ class TestGeCaptureWiring(unittest.TestCase):
         self.assertIn('env_enabled("SR_GE_REPLAY_WALL_PROFILE")', replay)
         self.assertIn('getenv("SR_GE_STRIP_CACHE_DISABLE")', ge)
         self.assertIn("strip_prev[0] = strip_prev[1]", ge)
+        self.assertIn('getenv("SR_GE_VERTEX_CACHE_DISABLE")', ge)
         self.assertIn("shadow[invalidations=%llu checks=%llu hits=%llu", gpu)
         self.assertIn("stats_emit(1)", gpu)
         self.assertIn('getenv("SR_GPU_TEX_SHADOW_DISABLE")', gpu)
@@ -279,7 +280,7 @@ class TestGeCaptureWiring(unittest.TestCase):
             "non_triangle_vertex_uses=24 through_vertex_uses=20 "
             "transform_vertex_uses=40 actual_decoded_vertices=60 actual_transformed_vertices=40 "
             "actual_through_vertices=20 strip_cache_commands=2 strip_cache_hits=4 "
-            "through_triangle_candidates=20 transform_triangle_candidates=35 "
+            "vertex_cache_hits=3 through_triangle_candidates=20 transform_triangle_candidates=35 "
             "transform_triangles_drawn=5 transform_triangles_clipped=1 "
             "transform_triangles_rejected=2 non_triangle_primitives=35 vertex_rejects=3 "
             "patch_commands=0 patch_control_vertices=0",

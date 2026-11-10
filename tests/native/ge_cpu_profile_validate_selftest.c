@@ -22,7 +22,9 @@
 // those relations are compared exactly.
 //
 // The Makefile runs this twice, once with --strip-cache-disabled, because ge.c latches
-// the strip-cache switch once per process.
+// the strip-cache switch once per process.  The per-draw vertex cache case
+// (test_ge_vertex_cache) compares the cache on and off within one process, through
+// ge_vertex_cache_reload_env(); ge-vertex-cache-mutants requires it to kill two broken caches.
 //
 // `--bench ROUNDS` is not a test.  It times the same production GE object on two source-owned
 // workloads with the flight recorder compiled in but disarmed, or compiled out when the
@@ -45,6 +47,7 @@
 #endif
 
 #include <inttypes.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1560,7 +1563,7 @@ static int same_profile(const GeCpuProfileStats *a, const GeCpuProfileStats *b) 
 /* The populations each relation constrains must actually be produced by the scene, so a
  * relation cannot hold only because both of its sides are zero. */
 static void expect_full_coverage(const char *scenario, const GeCpuProfileStats *s,
-                                 int strip_cache, int hooked) {
+                                 int strip_cache, int vertex_cache, int hooked) {
     const GeCpuPhaseStats *p = s->phase;
     expect(s->enabled && s->primitive_profile_enabled && s->primitive_profile_calibration_enabled &&
            s->primitive_profile_stride == 1u, scenario, "profile configuration");
@@ -1581,9 +1584,15 @@ static void expect_full_coverage(const char *scenario, const GeCpuProfileStats *
     expect(s->primitive_profile_non_triangle_primitives > 0 &&
            s->primitive_profile_vertex_rejects > 0 &&
            s->primitive_profile_actual_through_vertices > 0 &&
-           s->primitive_profile_actual_transformed_vertices <
+           s->primitive_profile_actual_transformed_vertices +
+               s->primitive_profile_vertex_cache_hits <
                s->primitive_profile_transform_vertex_uses,
            scenario, "rejects and a skipped sprite-corner decode");
+    /* The vertex cache serves the scene's repeated triangle vertices: the fan's shared first
+     * vertex and the indexed strip's repeated index 0, plus, without the strip cache, every
+     * strip vertex after the first triangle (see build_lists). */
+    expect(s->primitive_profile_vertex_cache_hits == (!vertex_cache ? 0u : strip_cache ? 5u : 15u),
+           scenario, "vertex cache hits are the scene's repeated triangle vertices");
     expect(strip_cache ? (s->primitive_profile_strip_cache_commands > 0 &&
                           s->strip_vertices_reused > 0 &&
                           s->primitive_profile_vertex_references > s->primitive_profile_vertices)
@@ -1748,9 +1757,16 @@ static void m_transform_decode_overcount(GeCpuProfileStats *s) {
     s->primitive_profile_actual_decoded_vertices += extra;
 }
 static void m_skipped_decode_without_reject(GeCpuProfileStats *s) {
-    /* One reject fewer than skipped transform decodes; the through decodes still match. */
+    /* One reject fewer than the transform decodes neither a reject nor a vertex cache hit
+     * explains; the through decodes still match. */
     s->primitive_profile_vertex_rejects = s->primitive_profile_transform_vertex_uses -
-                                          s->primitive_profile_actual_transformed_vertices - 1u;
+                                          s->primitive_profile_actual_transformed_vertices -
+                                          s->primitive_profile_vertex_cache_hits - 1u;
+}
+static void m_vertex_cache_hit_overcount(GeCpuProfileStats *s) {
+    /* More cache hits than the transform uses that were not decoded. */
+    s->primitive_profile_vertex_cache_hits = s->primitive_profile_transform_vertex_uses -
+                                             s->primitive_profile_actual_transformed_vertices + 1u;
 }
 static void m_calibration_bound_exceeds(GeCpuProfileStats *s) {
     /* Decodes just large enough that decoded + candidates exceeds UINT64_MAX, with more
@@ -1845,6 +1861,7 @@ static const Fault s_full_faults[] = {
     { "through_decode_overcount", m_through_decode_overcount, BIT(DECODE_COVERAGE) },
     { "transform_decode_overcount", m_transform_decode_overcount, BIT(DECODE_COVERAGE) },
     { "skipped_decode_without_reject", m_skipped_decode_without_reject, BIT(DECODE_COVERAGE) },
+    { "vertex_cache_hit_overcount", m_vertex_cache_hit_overcount, BIT(DECODE_COVERAGE) },
     { "calibration_bound_exceeds", m_calibration_bound_exceeds, BIT(DECODE_COVERAGE) },
     { "decision_overcount", m_decision_overcount, BIT(TRIANGLE_DECISIONS) },
     { "decision_sum_wraps", m_decision_sum_wraps, BIT(TRIANGLE_DECISIONS) },
@@ -2354,6 +2371,376 @@ static int bench_main(uint32_t rounds) {
     return s_failures ? 1 : 0;
 }
 
+/* ---- Per-draw transformed-vertex cache (SR_GE_VERTEX_CACHE_DISABLE) ----
+ *
+ * Indexed triangle lists with repeated u8 and u16 indices, fans (indexed and not) and an
+ * indexed strip, through the real GE command path, with point and directional lights with
+ * specular, texgen modes 1 and 2, fog, morph weights and skinning; then the same draw twice
+ * with a different world matrix in between (the epoch case). Each case is its own list. The
+ * whole run is made with the cache on and again with it off: the colour and depth buffers
+ * must be identical. With the cache on every case must hit, every distinct vertex of a
+ * draw must be transformed in that draw (a hit from an earlier draw, or from another address
+ * in the same slot, breaks that), and hits plus misses must be the draw's vertex uses; with it
+ * off nothing counts. The sparse profile must agree: its cache hits are the always-on hits,
+ * its transformed vertices the misses (all uses with the cache off). */
+
+#define VC_LIST       0x08500000u
+#define VC_PLAIN      0x08510000u   /* VC_PLAIN_N plain vertices */
+#define VC_SKIN       0x08520000u   /* VC_SKIN_N morphed, skinned vertices */
+#define VC_INDICES    0x08530000u
+#define VC_TEX        0x08540000u   /* 16x16 8888 */
+#define VC_CLEAR_VERTS 0x08541000u
+#define VC_FB         0x04180000u   /* 128x128 8888 */
+#define VC_ZB         0x04190000u   /* 128x128 16-bit */
+#define VC_CLEAR      0xFF203040u
+#define VC_PLAIN_N    340u          /* 0-255 grid, 256-299 slot-collision set, 300-339 fan ring */
+#define VC_SKIN_N     256u
+/* float UV, 8888 colour, float normal, float position: 8 + 4 + 12 + 12 = 36 bytes. */
+#define VT_VC_PLAIN   (3u | (7u << 2) | (3u << 5) | (3u << 7))
+#define VC_PLAIN_STRIDE 36u
+/* Two float weights, then the plain fields, two morph targets: 2 * (8 + 36) = 88 bytes. */
+#define VT_VC_SKIN    (VT_VC_PLAIN | (3u << 9) | (1u << 14) | (1u << 18))
+#define VC_SKIN_ONE   44u
+
+static uint32_t s_vc_rng = 0x1234567u;
+static float vc_rand(float lo, float hi) {
+    s_vc_rng = s_vc_rng * 1664525u + 1013904223u;
+    return lo + (hi - lo) * (float)(s_vc_rng >> 8) / 16777216.0f;
+}
+
+/* One vertex's plain fields at `p`: uv, colour, normal, position. */
+static void vc_fields(uint8_t *p, float x, float y, float z) {
+    float uv[2] = { vc_rand(0.0f, 1.0f), vc_rand(0.0f, 1.0f) };
+    uint32_t color = 0xFF000000u | ((uint32_t)vc_rand(64.0f, 255.0f) << 16) |
+                     ((uint32_t)vc_rand(64.0f, 255.0f) << 8) | (uint32_t)vc_rand(64.0f, 255.0f);
+    float n[3] = { vc_rand(-0.6f, 0.6f), vc_rand(-0.6f, 0.6f), 1.0f };
+    float pos[3] = { x, y, z };
+    memcpy(p, uv, sizeof uv);
+    memcpy(p + 8u, &color, 4);
+    memcpy(p + 12u, n, sizeof n);
+    memcpy(p + 24u, pos, sizeof pos);
+}
+
+/* A grid point of a 16x16 mesh across the view at depth -3 to -5. */
+static void vc_grid(unsigned i, float *x, float *y, float *z) {
+    *x = -1.6f + 0.2133f * (float)(i % 16u) + vc_rand(-0.03f, 0.03f);
+    *y = -1.6f + 0.2133f * (float)(i / 16u) + vc_rand(-0.03f, 0.03f);
+    *z = vc_rand(-5.0f, -3.0f);
+}
+
+static void vc_fill(void) {
+    for (unsigned i = 0; i < VC_PLAIN_N; i++) {
+        float x, y, z;
+        if (i < 256u) vc_grid(i, &x, &y, &z);
+        else if (i < 300u) { x = vc_rand(-1.5f, 1.5f); y = vc_rand(-1.5f, 1.5f); z = vc_rand(-4.5f, -2.5f); }
+        else if (i == 300u) { x = 0.2f; y = -0.1f; z = -3.5f; }
+        else {
+            float a = 6.2831853f * (float)(i - 301u) / 39.0f;
+            x = 0.2f + 1.3f * cosf(a); y = -0.1f + 1.3f * sinf(a); z = vc_rand(-4.0f, -3.0f);
+        }
+        vc_fields(SR_HOST(VC_PLAIN + i * VC_PLAIN_STRIDE), x, y, z);
+    }
+    for (unsigned i = 0; i < VC_SKIN_N; i++) {
+        uint8_t *v = SR_HOST(VC_SKIN + i * 2u * VC_SKIN_ONE);
+        for (unsigned t = 0; t < 2u; t++) {
+            uint8_t *p = v + t * VC_SKIN_ONE;
+            float w[2] = { vc_rand(0.2f, 0.8f), vc_rand(0.2f, 0.8f) };
+            float x, y, z;
+            vc_grid(i, &x, &y, &z);
+            memcpy(p, w, sizeof w);
+            vc_fields(p + 8u, x, y, z);
+        }
+    }
+    for (unsigned t = 0; t < 256u; t++) {
+        uint32_t texel = 0xFF000000u | (t * 0x010305u);
+        memcpy(SR_HOST(VC_TEX + t * 4u), &texel, 4);
+    }
+}
+
+static void vc_matrix43(uint32_t select, uint32_t data, float angle, float tx, float ty) {
+    float c = cosf(angle), s = sinf(angle);
+    const float m[12] = { c, s, 0, -s, c, 0, 0, 0, 1, tx, ty, 0 };
+    matrix(select, data, m, 12);
+}
+
+/* Every state a case relies on, written before each case's draw. */
+static void vc_state(void) {
+    static const float identity43[12] = { 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+    static const float perspective[16] = {
+        1, 0, 0, 0,  0, 1, 0, 0,  0, 0, -101.0f / 99.0f, -1,  0, 0, -200.0f / 99.0f, 0,
+    };
+    static const float tgen[12] = { 0.31f, 0.05f, 0, -0.04f, 0.27f, 0, 0.11f, 0.09f, 1, 0.5f, 0.25f, 0 };
+    static const float bones[24] = {
+        1, 0, 0,  0, 1, 0,  0, 0, 1,  0, 0, 0,
+        0.9f, 0.2f, 0,  -0.2f, 0.9f, 0,  0, 0, 1,  0.1f, -0.05f, 0.2f,
+    };
+    W(0x10, 0x080000);                               /* BASE */
+    W(0x13, 0);
+    W(0x9C, VC_FB & 0xFFFFFFu); W(0x9D, ((VC_FB >> 8) & 0xFF0000u) | 128u);
+    W(0x9E, VC_ZB & 0xFFFFFFu); W(0x9F, ((VC_ZB >> 8) & 0xFF0000u) | 128u);
+    W(0xD2, 3);                                      /* 8888 */
+    W(0xD3, 0);                                      /* not clear mode */
+    W(0xD4, 0); W(0xD5, (127u << 10) | 127u);
+    W(0xD6, 0); W(0xD7, 0xFFFF);                     /* MINZ/MAXZ */
+    W(0x1C, 1);                                      /* CLIPENABLE */
+    W(0x1D, 0);                                      /* no culling */
+    for (uint32_t c = 0x20; c <= 0x28; c++) W(c, 0); /* dither, blend, tests, AA, logic op off */
+    W(0x23, 1); W(0xDE, 7); W(0xE7, 0);              /* depth test GEQUAL, depth writes on */
+    W(0xE8, 0); W(0xE9, 0);                          /* write every channel */
+    W(0x50, 1);                                      /* gouraud */
+    W(0x42, f24(60.0f)); W(0x43, f24(-60.0f)); W(0x44, f24(10000.0f));
+    W(0x45, f24(64.0f)); W(0x46, f24(64.0f)); W(0x47, f24(30000.0f));
+    W(0x4C, 0); W(0x4D, 0);
+    matrix(0x3A, 0x3B, identity43, 12);              /* WORLD */
+    matrix(0x3C, 0x3D, identity43, 12);              /* VIEW */
+    matrix(0x3E, 0x3F, perspective, 16);             /* PROJ */
+    matrix(0x40, 0x41, tgen, 12);                    /* TGEN */
+    matrix(0x2A, 0x2B, bones, 24);                   /* bones 0 and 1 */
+    W(0x2C, f24(0.75f)); W(0x2D, f24(0.25f));        /* morph weights */
+    /* Texture: 16x16 8888, nearest, repeat, modulate with alpha. */
+    W(0xA0, VC_TEX & 0xFFFFFFu); W(0xA8, ((VC_TEX >> 8) & 0xFF0000u) | 16u);
+    W(0xB8, (4u << 8) | 4u);
+    W(0xC2, 0); W(0xC3, 3); W(0xC6, 0); W(0xC7, 0); W(0xC8, 0); W(0xC9, 0x100);
+    W(0xCB, 0);                                      /* TEXFLUSH */
+    W(0x48, f24(1.0f)); W(0x49, f24(1.0f)); W(0x4A, f24(0.0f)); W(0x4B, f24(0.0f));
+    W(0x1E, 1);
+    W(0xC0, 0); W(0xC1, 0 | (1u << 8));              /* UV mapping; env-map lights 0 and 1 */
+    /* Lighting: a point light and a directional light, both diffuse + specular. */
+    W(0x17, 1); W(0x18, 1); W(0x19, 1); W(0x1A, 0); W(0x1B, 0);
+    W(0x5F, (1u << 8) | 1u); W(0x60, (0u << 8) | 1u);
+    W(0x63, f24(0.5f)); W(0x64, f24(0.8f)); W(0x65, f24(-1.0f));
+    W(0x66, f24(-0.4f)); W(0x67, f24(0.3f)); W(0x68, f24(1.0f));
+    W(0x6F, f24(0.0f)); W(0x70, f24(0.0f)); W(0x71, f24(-1.0f));
+    W(0x72, f24(0.0f)); W(0x73, f24(0.0f)); W(0x74, f24(-1.0f));
+    W(0x7B, f24(1.0f)); W(0x7C, f24(0.15f)); W(0x7D, f24(0.02f));
+    W(0x7E, f24(1.0f)); W(0x7F, f24(0.0f)); W(0x80, f24(0.0f));
+    W(0x8F, 0x202020); W(0x90, 0xC0A080); W(0x91, 0xFFFFFF);
+    W(0x92, 0x101010); W(0x93, 0x4060A0); W(0x94, 0xA0FFA0);
+    W(0x53, 2);                                      /* diffuse from the vertex colour */
+    W(0x54, 0x080808); W(0x55, 0x404040); W(0x56, 0xFFFFFF); W(0x57, 0xE0E0E0);
+    W(0x58, 0xFF); W(0x5B, f24(12.0f)); W(0x5C, 0x303030); W(0x5D, 0xFF);
+    W(0x5E, 1);                                      /* separate specular */
+    W(0x1F, 1); W(0xCD, f24(7.0f)); W(0xCE, f24(0.2f)); W(0xCF, 0x6080A0);  /* fog */
+}
+
+typedef struct {
+    const char *name;
+    uint32_t vtype, vaddr, type, count;
+    const void *indices;      /* NULL: not indexed */
+    uint32_t tex_map_mode;
+    float world_angle;
+    unsigned long hits, misses;   /* this run's counts */
+} VcCase;
+
+static uint8_t s_vc_u8_list[96], s_vc_u8_strip[38];
+static uint16_t s_vc_u16_list[96 + 36], s_vc_u16_fan[16], s_vc_u16_skin[96];
+
+/* Two triangles per grid quad (r, c) for rows r0.. and columns 0..cols-1 (indices r*16+c). */
+static unsigned vc_quads(unsigned r0, unsigned rows, unsigned c0, unsigned cols, uint16_t *out) {
+    unsigned n = 0;
+    for (unsigned r = r0; r < r0 + rows; r++)
+        for (unsigned c = c0; c < c0 + cols; c++) {
+            uint16_t a = (uint16_t)(r * 16u + c), b = (uint16_t)(a + 1u);
+            uint16_t d = (uint16_t)(a + 16u), e = (uint16_t)(a + 17u);
+            out[n++] = a; out[n++] = b; out[n++] = d;
+            out[n++] = b; out[n++] = e; out[n++] = d;
+        }
+    return n;
+}
+
+static void vc_build_indices(void) {
+    uint16_t q[96];
+    unsigned n = vc_quads(1, 4, 2, 4, q);                  /* 32 triangles, 25 vertices */
+    for (unsigned i = 0; i < n; i++) s_vc_u8_list[i] = (uint8_t)q[i];
+    /* u16: grid quads over vertices 0-31, then triangles over 256-282, whose slots are those
+     * of 0-26: a cache that ignored the address would hand back grid vertices. */
+    n = vc_quads(0, 1, 0, 15, s_vc_u16_list);              /* 90 indices */
+    for (unsigned j = 0; j < 12u; j++) {
+        s_vc_u16_list[n++] = (uint16_t)(256u + j);
+        s_vc_u16_list[n++] = (uint16_t)(257u + j);
+        s_vc_u16_list[n++] = (uint16_t)(270u + j);
+    }
+    s_vc_u16_list[90 + 36 - 1] = 3;                        /* the last triangle reuses a grid vertex */
+    s_vc_u16_list[90 + 36 - 2] = 2;
+    /* Indexed fan: ring vertices around 300, the first ring vertex again to close it. */
+    s_vc_u16_fan[0] = 300;
+    for (unsigned j = 1; j < 15u; j++) s_vc_u16_fan[j] = (uint16_t)(300u + 2u * j);
+    s_vc_u16_fan[15] = 302;
+    vc_quads(6, 2, 3, 8, s_vc_u16_skin);                   /* 96 indices */
+    /* u8 strip zig-zag over rows 9 and 10, a degenerate stitch, back over row 10 and 11. */
+    unsigned k = 0;
+    for (unsigned c = 2; c < 11u; c++) {
+        s_vc_u8_strip[k++] = (uint8_t)(9u * 16u + c);
+        s_vc_u8_strip[k++] = (uint8_t)(10u * 16u + c);
+    }
+    s_vc_u8_strip[k] = s_vc_u8_strip[k - 1]; k++;
+    s_vc_u8_strip[k++] = (uint8_t)(10u * 16u + 2u);
+    for (unsigned c = 2; c < 11u && k + 2u <= sizeof s_vc_u8_strip; c++) {
+        s_vc_u8_strip[k++] = (uint8_t)(10u * 16u + c);
+        s_vc_u8_strip[k++] = (uint8_t)(11u * 16u + c);
+    }
+}
+
+static uint32_t vc_index(const VcCase *c, unsigned i) {
+    if (!c->indices) return i;
+    if (c->vtype & VT_INDEX16) return ((const uint16_t *)c->indices)[i];
+    return ((const uint8_t *)c->indices)[i];
+}
+
+static unsigned vc_distinct(const VcCase *c) {
+    static uint8_t seen[1024];
+    unsigned n = 0;
+    memset(seen, 0, sizeof seen);
+    for (unsigned i = 0; i < c->count; i++) {
+        uint32_t v = vc_index(c, i);
+        if (!seen[v]) { seen[v] = 1; n++; }
+    }
+    return n;
+}
+
+/* Triangle vertex uses draw_prim_xform_triangles makes for the case. */
+static unsigned vc_uses(const VcCase *c, int strip_cache) {
+    if (c->count < 3u) return 0;
+    if (c->type == 3u) return c->count / 3u * 3u;
+    if (c->type == 4u && strip_cache) return c->count;
+    return (c->count - 2u) * 3u;
+}
+
+static void vc_run_case(VcCase *c) {
+    uint32_t index_addr = VC_INDICES;
+    if (c->indices) {
+        size_t bytes = c->count * ((c->vtype & VT_INDEX16) ? 2u : 1u);
+        memcpy(SR_HOST(index_addr), c->indices, bytes);
+    }
+    s_pc = VC_LIST;
+    vc_state();
+    vc_matrix43(0x3A, 0x3B, c->world_angle, 0.05f * c->world_angle, -0.03f * c->world_angle);
+    W(0xC0, c->tex_map_mode);
+    W(0x12, c->vtype);
+    if (c->indices) W(0x02, index_addr);
+    prim(c->type, c->count, c->vaddr);
+    W(0x0C, 0);
+    unsigned long hits = g_ge_vertex_cache_hits, misses = g_ge_vertex_cache_misses;
+    expect(ge_run_list(VC_LIST, 0) == 0, c->name, "list did not reach END");
+    c->hits = g_ge_vertex_cache_hits - hits;
+    c->misses = g_ge_vertex_cache_misses - misses;
+}
+
+/* Clear the case's colour and depth through the GE: a clear-mode sprite, so the depth the
+ * GE keeps for the target starts at 0 in each run. */
+static void vc_clear(void) {
+    uint32_t v = depth_test_vertex(VC_CLEAR_VERTS, 0u, 0u, 0u, VC_CLEAR);
+    (void)depth_test_vertex(v, 128u, 128u, 0u, VC_CLEAR);
+    s_pc = VC_LIST;
+    vc_state();
+    W(0x1E, 0); W(0x1F, 0); W(0x17, 0);
+    W(0x12, (7u << 2) | (2u << 7) | (1u << 23));    /* 8888 colour, 16-bit position, through */
+    W(0xD3, 1u | 0x100u | 0x200u | 0x400u);          /* clear colour, alpha, depth */
+    prim(6u, 2u, VC_CLEAR_VERTS);
+    W(0xD3, 0u);
+    W(0x0C, 0u);
+    expect(ge_run_list(VC_LIST, 0) == 0, "vertex_cache", "clear list did not reach END");
+}
+
+static void test_ge_vertex_cache(int strip_cache) {
+    VcCase cases[] = {
+        { "vertex_cache[u8-list]", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96, s_vc_u8_list, 0, 0.0f, 0, 0 },
+        { "vertex_cache[u16-list-texgen1]", VT_VC_PLAIN | VT_INDEX16, VC_PLAIN, 3, 126, s_vc_u16_list,
+          1u | (0u << 8), 0.0f, 0, 0 },
+        { "vertex_cache[fan-texgen2]", VT_VC_PLAIN, VC_PLAIN + 300u * VC_PLAIN_STRIDE, 5, 14, NULL, 2u,
+          0.0f, 0, 0 },
+        { "vertex_cache[u16-fan]", VT_VC_PLAIN | VT_INDEX16, VC_PLAIN, 5, 16, s_vc_u16_fan, 0, 0.3f, 0, 0 },
+        { "vertex_cache[skin-morph-u16-list-texgen1n]", VT_VC_SKIN | VT_INDEX16, VC_SKIN, 3, 96,
+          s_vc_u16_skin, 1u | (2u << 8), 0.0f, 0, 0 },
+        { "vertex_cache[skin-morph-u8-strip]", VT_VC_SKIN | VT_INDEX8, VC_SKIN, 4, 38, s_vc_u8_strip, 0,
+          -0.2f, 0, 0 },
+        { "vertex_cache[epoch-first]", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96, s_vc_u8_list, 0, 0.5f, 0, 0 },
+        { "vertex_cache[epoch-second]", VT_VC_PLAIN | VT_INDEX8, VC_PLAIN, 3, 96, s_vc_u8_list, 0, -0.6f, 0, 0 },
+    };
+    enum { N = sizeof cases / sizeof cases[0] };
+    /* Colour from guest VRAM (the linear view maps one to one), depth from the GE's own depth
+     * buffer for the target (ge_zbuf_ptr), 128x128 each. */
+    enum { PIXELS = 128 * 128 };
+    uint32_t *fb[2] = { (uint32_t *)malloc(PIXELS * 4u), (uint32_t *)malloc(PIXELS * 4u) };
+    uint16_t *zb[2] = { (uint16_t *)malloc(PIXELS * 2u), (uint16_t *)malloc(PIXELS * 2u) };
+    GeCpuProfileStats profile[2];
+    unsigned long total_hits[2] = { 0, 0 }, total_misses[2] = { 0, 0 };
+    unsigned total_uses = 0;
+    if (!fb[0] || !fb[1] || !zb[0] || !zb[1]) {
+        expect(0, "vertex_cache", "no memory for the snapshots");
+        free(fb[0]); free(fb[1]); free(zb[0]); free(zb[1]);
+        return;
+    }
+    vc_fill();
+    vc_build_indices();
+    for (unsigned i = 0; i < N; i++) total_uses += vc_uses(&cases[i], strip_cache);
+
+    for (int run = 0; run < 2; run++) {
+        int cache_on = run == 0;
+        env_set("SR_GE_VERTEX_CACHE_DISABLE", cache_on ? NULL : "1");
+        ge_vertex_cache_reload_env();
+        vc_clear();
+        configure("1", "1", "1", NULL);
+        for (unsigned i = 0; i < N; i++) {
+            VcCase *c = &cases[i];
+            vc_run_case(c);
+            total_hits[run] += c->hits;
+            total_misses[run] += c->misses;
+            if (cache_on) {
+                char what[160];
+                unsigned distinct = vc_distinct(c), uses = vc_uses(c, strip_cache);
+                snprintf(what, sizeof what, "no vertex cache hit (hits=%lu misses=%lu)", c->hits, c->misses);
+                expect(c->hits > 0, c->name, what);
+                snprintf(what, sizeof what, "a distinct vertex was not transformed in its draw "
+                         "(misses=%lu distinct=%u)", c->misses, distinct);
+                expect(c->misses >= distinct, c->name, what);
+                snprintf(what, sizeof what, "hits+misses=%lu, uses=%u", c->hits + c->misses, uses);
+                expect(c->hits + c->misses == uses, c->name, what);
+            } else {
+                expect(c->hits == 0 && c->misses == 0, c->name, "the disabled cache counted");
+            }
+        }
+        memcpy(fb[run], SR_HOST(VC_FB), PIXELS * 4u);
+        const uint16_t *depth_buffer = ge_zbuf_ptr();
+        uint32_t depth_stride = ge_zbuf_stride();
+        expect(depth_buffer && depth_stride == 128u, "vertex_cache", "no depth buffer for the target");
+        for (uint32_t y = 0; y < 128u; y++)
+            for (uint32_t x = 0; x < 128u; x++)
+                zb[run][y * 128u + x] = depth_buffer ? depth_buffer[y * depth_stride + x] : 0u;
+        profile[run] = snapshot();
+        expect_consistent(cache_on ? "vertex_cache_on" : "vertex_cache_off", &profile[run]);
+    }
+    env_set("SR_GE_VERTEX_CACHE_DISABLE", NULL);
+    ge_vertex_cache_reload_env();   /* anything after this sees the cache on */
+
+    expect(profile[0].primitive_profile_vertex_cache_hits == total_hits[0] &&
+           profile[0].primitive_profile_actual_transformed_vertices == total_misses[0] &&
+           total_hits[0] + total_misses[0] == total_uses,
+           "vertex_cache_on", "the profile's cache hits and transforms are not the cache's counts");
+    expect(profile[1].primitive_profile_vertex_cache_hits == 0 &&
+           profile[1].primitive_profile_actual_transformed_vertices == total_uses,
+           "vertex_cache_off", "with the cache off the profile must transform every use");
+
+    unsigned long fb_diff = 0, z_diff = 0, drawn = 0, depth = 0;
+    for (uint32_t i = 0; i < PIXELS; i++) {
+        if (fb[0][i] != fb[1][i]) fb_diff++;
+        if (zb[0][i] != zb[1][i]) z_diff++;
+        if (fb[1][i] != VC_CLEAR) drawn++;
+        if (zb[1][i]) depth++;
+    }
+    char what[200];
+    snprintf(what, sizeof what, "cache on and off differ: %lu framebuffer pixels, %lu depth values",
+             fb_diff, z_diff);
+    expect(fb_diff == 0 && z_diff == 0, "vertex_cache", what);
+    snprintf(what, sizeof what, "too little drawn to compare (%lu pixels, %lu depth values)",
+             drawn, depth);
+    expect(drawn > 1000u && depth > 1000u, "vertex_cache", what);
+    printf("VERTEX_CACHE strip_cache=%s hits=%lu misses=%lu uses=%u drawn=%lu depth=%lu "
+           "differing=%lu\n", strip_cache ? "on" : "off", total_hits[0], total_misses[0],
+           total_uses, drawn, depth, fb_diff + z_diff);
+    free(fb[0]); free(fb[1]); free(zb[0]); free(zb[1]);
+}
+
 int main(int argc, char **argv) {
     int strip_cache = 1;
     if (argc == 3 && strcmp(argv[1], "--bench") == 0) {
@@ -2370,6 +2757,11 @@ int main(int argc, char **argv) {
         return 2;
     }
     env_set("SR_GE_STRIP_CACHE_DISABLE", strip_cache ? NULL : "1");
+    /* The scenes below run with the vertex cache as the environment sets it (the Makefile
+     * runs once more with SR_GE_VERTEX_CACHE_DISABLE=1); test_ge_vertex_cache sets both. */
+    const char *vertex_cache_disable = getenv("SR_GE_VERTEX_CACHE_DISABLE");
+    int vertex_cache = !(vertex_cache_disable && vertex_cache_disable[0] &&
+                         strcmp(vertex_cache_disable, "0") != 0);
 
     uint8_t *arena = (uint8_t *)calloc(0x0c000000u, 1);
     if (!arena) {
@@ -2393,7 +2785,7 @@ int main(int argc, char **argv) {
     run_list(LIST_BAD_CLUT, "full");
     GeCpuProfileStats full = snapshot();
     expect_consistent("full", &full);
-    expect_full_coverage("full", &full, strip_cache, 0);
+    expect_full_coverage("full", &full, strip_cache, vertex_cache, 0);
     expect(full.phase[GE_CPU_CLUT_LOAD].calls > full.clut_loads, "full",
            "an unloaded CLUT span still ends its phase");
 
@@ -2432,7 +2824,7 @@ int main(int argc, char **argv) {
     ge_set_gpu_hooks(NULL);
     GeCpuProfileStats hooked = snapshot();
     expect_consistent("hooked", &hooked);
-    expect_full_coverage("hooked", &hooked, strip_cache, 1);
+    expect_full_coverage("hooked", &hooked, strip_cache, vertex_cache, 1);
     expect(s_hook_prims > 0 && s_hook_flushes > 0 &&
            hooked.phase[GE_CPU_FLUSH].calls == hooked.flushes, "hooked", "hook traffic");
 
@@ -2505,9 +2897,11 @@ int main(int argc, char **argv) {
     test_ge_vram_depth_bit13_absolute_xor();
     test_ge_bounding_box_branch();
     test_ge_vram_view_decode();
+    test_ge_vertex_cache(strip_cache);
 
-    printf("ge_cpu_profile_validate_selftest: strip_cache=%s scenarios=%u faults=%u failures=%d\n",
-           strip_cache ? "on" : "off", s_scenarios, s_faults, s_failures);
+    printf("ge_cpu_profile_validate_selftest: strip_cache=%s vertex_cache=%s scenarios=%u faults=%u "
+           "failures=%d\n", strip_cache ? "on" : "off", vertex_cache ? "on" : "off", s_scenarios,
+           s_faults, s_failures);
     free(arena);
     return s_failures ? 1 : 0;
 }
