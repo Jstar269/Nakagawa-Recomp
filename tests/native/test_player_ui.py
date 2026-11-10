@@ -3101,8 +3101,11 @@ class NativePlayerUiTests(unittest.TestCase):
              UPDATE_DOWNLOAD_PREFIX + f"v{UPDATE_NEWER_VERSION}/nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"],
             "the checksum file and its signature first, then the ZIP, each once")
         installed = steps[-1]
-        self.assertTrue(installed["zip"].endswith(
-            os.sep.join(("Nakagawa", "data", "downloads", f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"))),
+        # The player writes its own separator, not the one of the Python running this test
+        # (MSYS2's python has os.sep "/" on Windows), so compare the path's last components.
+        self.assertEqual(
+            re.split(r"[\\/]", installed["zip"])[-4:],
+            ["Nakagawa", "data", "downloads", f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64.zip"],
             installed)
         self.assertTrue(installed["install"].endswith(f"nakagawa-recomp-{UPDATE_NEWER_VERSION}-windows-x64"), installed)
         frames = run["frames"]
