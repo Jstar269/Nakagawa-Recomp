@@ -1409,8 +1409,9 @@ comment line), so it follows the workflows as they change.
 - a `workflow_run` or `workflow_dispatch` run of `provenance-attestation.yml`. The workflow
   starts one when a `CI` run is requested for a pull request, and a maintainer dispatches one to
   attest again (see "Re-running"). GitHub lists such a run under the default branch, not under
-  the pull request head, so it is bound to the head by its run name, `Provenance attestation of
-  <head SHA>`, which the workflow's `run-name` sets from the head it attests; its job fails
+  the pull request head, so it is bound to the head by its run name,
+  `Provenance attestation of <head SHA>`, which the workflow's `run-name` sets from the head it
+  attests; its job fails
   unless exactly one open pull request into the default branch has that head. The verifier lists
   the workflow's default-branch runs created since the head's first run and takes one only when
   its branch is the default branch and it ran the default branch's current copy of the workflow:
@@ -1423,15 +1424,45 @@ comment line), so it follows the workflows as they change.
   older copy of the workflow therefore stops counting when the workflow changes; such a head is
   `CI_DEFINITION_BEHIND` in any case and is attested again once `main` is merged into it.
 
-The newest run of either route decides, by creation time, so an older success never masks a
-newer failure. One exception: a `pull_request_target` run that ended `startup_failure`, which
-is how GitHub ends a run whose event it refused, is ignored when the second route has a run
-that was not cancelled. GitHub answers a filtered run list with its newest 1,000 runs; an
-attestation older than that is not found, and the head stays `pending` until it is attested
-again.
+The newest run of either route decides, and a run is as new as its latest attempt: the order is
+by when that attempt started, then by run id. Re-running a run therefore makes it the newest,
+whichever route it came from. That matters because the pull request's check list shows only the
+`pull_request_target` run, while the `workflow_run` run, created a few seconds later, is listed
+under `main`: re-running the check a person can see has to count. Only a user with write access
+can re-run, and a re-run attests the same head again with the same definition. One exception to
+"newest": a `pull_request_target` run that ended `startup_failure`, which is how GitHub ends a
+run whose event it refused, is ignored when the second route has a run that was not cancelled.
 
-**Approving a CI change.** A maintainer reviews the change, applies the `ci-change-approved`
-label, and records which head was reviewed:
+**How long a second-route run stays findable.** GitHub answers a filtered run list with its
+newest 1,000 runs. Every `CI` run starts one attestation run (pushes to `main` and the nightly
+run included; those only skip), about 185 a day in early November 2026, so a `workflow_run`
+attestation leaves the list after about five days. A dispatched attestation is in a separate,
+far shorter list and practically never leaves it. The verifier compares the list's
+`total_count` with what it received. When a list is truncated and holds no run for the head
+that was not cancelled, the attestation is reported as not found on **both** routes and the
+head is `pending` ("not among its workflow's newest 1000 runs; dispatch it again"): the run
+that left the list may have been a failure, so an older `pull_request_target` result is not
+judged in its place. One dispatch of the attestation recovers the head. A run that has left
+the list is never read, so re-running it changes nothing.
+
+**Known limits of the second route.**
+
+- *A second pull request at the same head.* The resolver needs exactly one open pull request
+  at the head, so while two are open the `workflow_run` attestation of that head fails for both
+  (and a run still going for the first is cancelled, because the concurrency group is per
+  head). Anyone can open such a duplicate. The verdict already reports `AMBIGUOUS_HEAD` while
+  both are open; the difference is that the failed run is still the head's newest after the
+  duplicate is gone. Remedy: close the duplicate, then dispatch the attestation for the head.
+- *Runs on `main`.* A `workflow_run` attestation's check run is attached to the tip of `main`,
+  not to the pull request. `main`'s commit list therefore shows a red
+  `Trusted provenance attestation` whenever some pull request's attestation fails, which is
+  expected before an admission. It says nothing about `main`.
+- *A pull request into another branch* gets a failed run where the `pull_request_target` route
+  skips: the resolver finds no pull request into the default branch.
+
+**Approving a CI change.** Two steps, always both, in this order. A maintainer reviews the
+change and applies the `ci-change-approved` label, then records which head was reviewed, from
+the default branch:
 
 ```bash
 gh workflow run ci-trust-verdict.yml -f pull_request_number=<n> -f approve_head_sha=<reviewed head SHA>
@@ -1441,11 +1472,19 @@ The label counts only when its latest event is `labeled` and the user who applie
 maintain or admin permission. It names no bytes, so by itself it approves nothing: a head is
 approved when a record of its protected content (next paragraph) was written under that
 `labeled` event: by a run created at or after it, in a job that completed after it. Removing
-the label withdraws every earlier record. On a pull request event
-GitHub has not blocked, applying the label also writes a record, so the dispatch is needed
-only when that event did not run; it is harmless otherwise. The label waives only
+the label withdraws every earlier record. The label waives only
 `CI_CHANGE_UNAPPROVED`: an approved change still needs every intended job, once, green, from
 its intended workflow.
+
+The dispatch is the step to rely on, not an extra. Applying the label also starts a
+`pull_request_target` run that writes a record, but that run cannot be counted on: GitHub
+refuses the event in a brownout and by default from 2026-12-02; on 2026-11-09 one label's run
+ended with no job at all and another wrote its record 45 minutes after the label; and a label
+run waiting in its head's concurrency group is replaced by any later run for that head and then
+writes nothing. The label-event record also approves whatever head is current when the label
+is clicked, so a push seconds before the click is recorded; only the dispatch names the bytes
+that were reviewed. The approval dispatch has its own concurrency group, so nothing replaces
+it, and it judges the head when it has written the record.
 
 To withdraw an approval, remove the label. The `unlabeled` event re-judges the head. When GitHub
 blocks `pull_request_target` that event does not run, and the head keeps its last status until
@@ -1480,8 +1519,9 @@ uses for `CI_CHANGE_UNAPPROVED`: the protected paths above, listed by `protected
   dispatch names, provided the label's latest event is `labeled` by a user with write access,
   the pull request is open against the default branch, and `refs/pull/<n>/head` still is that
   head, before and after hashing; a pull request that has moved on is refused, so nobody
-  approves bytes they did not name. The next job is named `CI approval record v2 pr<number>
-  <head> <digest>`, every part an output of the tool. The record is read back only from a
+  approves bytes they did not name. The next job is named
+  `CI approval record v2 pr<number> <head> <digest>`, every part an output of the tool. The
+  record is read back only from a
   successful job of that name in a `workflow_dispatch` run of
   `.github/workflows/ci-trust-verdict.yml` whose branch is the default branch, that ran the
   default branch's current copy of that workflow (the same two tests as for the attestation),
@@ -1556,10 +1596,12 @@ gh workflow run provenance-attestation.yml -f pull_request_number=<n> -f head_sh
 ```
 
 The dispatch is the newest run for that head, so its result replaces an earlier failure.
-Re-running the head's newest attestation run works too. Re-running an older one does not: a
-run keeps its creation time, and the newest run decides. The dispatched run is listed under the default branch, so the pull request's
-check list does not show it; `gh run list --workflow provenance-attestation.yml --branch main`
-does, by its title.
+Re-running an attestation run of the head works too, the one on the pull request's check list
+included: the run whose latest attempt started last decides. The exception is a run that has
+left GitHub's run list (see "How long a second-route run stays findable"); dispatch instead.
+The dispatched run is listed under the default branch, so the pull request's check list does
+not show it; `gh run list --workflow provenance-attestation.yml --branch main` does, by its
+title.
 
 **What stays outside it.** Candidate tests and build files are still candidate code: the
 gate proves the intended jobs ran from trusted definitions, not that the tests are honest.

@@ -245,8 +245,24 @@ TRUSTED_WORKFLOW_PULL_REQUEST_EVENTS = frozenset({"pull_request_target", "workfl
 # column 0 is refused: a quoted or escaped key, ``true`` (how YAML 1.1 reads a bare ``on``), a
 # merge key, a flow collection, or the tail of a multi-line scalar that hides the real keys.
 _WORKFLOW_KEYS = frozenset({"name", "run-name", "on", "permissions", "concurrency", "env", "defaults", "jobs"})
-_TOP_LEVEL_LINE = re.compile(r"([a-z-]+):(?: .*)?")
-_EVENT_LINE = re.compile(r" {2}([a-z_]+):[ ]*(?:#.*)?")
+# A lone carriage return, which YAML reads as a line break, and the characters ``str.splitlines``
+# breaks at and YAML does not. A file with any of them is refused, so this reader and a YAML
+# reader agree on where each line ends.
+_FOREIGN_LINE_BREAKS = ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ")
+# A whole ``key:`` line whose value, if any, ends on the same line: a plain scalar, a quoted scalar
+# that is closed, or a flow sequence that is closed. A value left open (a quote, a bracket, a block
+# scalar) continues on later lines, and such a line in column 0 can read like a key.
+_QUOTED = r'"[^"\\]*"' + "|" + r"'[^']*'"
+_ITEM = "(?:" + _QUOTED + "|[A-Za-z0-9_.-]+)"
+_ONE_LINE_VALUE = (
+    "(?:" + _QUOTED
+    + r"|\{ *\}"
+    + r"|\[ *(?:" + _ITEM + " *(?:, *" + _ITEM + r" *)*)?\]"
+    + "|[A-Za-z0-9](?:(?!: | #).)*(?<!:)"
+    + ")"
+)
+_KEY_LINE = re.compile("( *)([A-Za-z_][A-Za-z0-9_-]*):(?: +" + _ONE_LINE_VALUE + ")?(?: +#.*)?")
+_EVENT_LINE = re.compile(" {2}([a-z_]+):(?: +#.*)?")
 
 #: Classes that assert something about implementation provenance.  Anything
 #: else is a deterministic statement about what a file *is*.
@@ -2371,51 +2387,61 @@ def _workflow_events(raw: bytes) -> list[str] | None:
     """The events of a workflow's ``on:`` block, or ``None`` when the file is not in the one plain form.
 
     Only the form the trusted workflow uses is read. The first content line is at
-    column 0, every content line at column 0 is one of the workflow's plain
-    top-level keys (``_WORKFLOW_KEYS``), exactly one of them is ``on:``, and under
-    it comes one bare event name per line at two spaces with its settings
-    indented below. A scalar or flow ``on:``, a quoted, escaped or repeated key,
-    a merge key, a second YAML document, or an event line that is not a bare name
-    gives ``None``. The caller refuses what this cannot read instead of guessing
-    what GitHub's YAML reader would make of it.
+    column 0. Every content line at column 0 is one of the workflow's top-level
+    keys (``_WORKFLOW_KEYS``), and exactly one of them is ``on:``. Under it comes
+    one bare event name per line at two spaces, its settings indented below.
+    Every content line of the block, and every line at column 0, is a complete
+    ``key:`` or ``key: value`` whose value ends on its own line (``_KEY_LINE``).
 
-    This is a shape check, not a YAML parser. A multi-line quoted scalar inside
-    an event's settings can still show it a line that is not an event; that can
-    only make the gate run less often, never from a definition a pull request
-    controls. Review of the edit and the CI verdict's approval rule remain the
-    controls.
+    Anything else gives ``None``: a scalar or flow ``on:``; a quoted, escaped or
+    repeated key; a merge key; a second YAML document; an event line that is not
+    a bare name; a quoted scalar, flow sequence or block scalar left open at the
+    end of a line; a line break that is not a line feed. The last two matter
+    because an open value continues on the following lines, and one of those in
+    column 0 that reads like a key would end the block here while a YAML reader
+    goes on to a real event after it. The caller refuses what this cannot read
+    instead of guessing what GitHub's YAML reader would make of it.
+
+    This is a shape check, not a YAML parser, and it was compared with two YAML
+    libraries, not with GitHub's own reader. Review of the edit and the CI
+    verdict's approval rule remain the controls.
     """
     try:
-        lines = raw.decode("utf-8").splitlines()
+        text = raw.decode("utf-8").replace("\r\n", "\n")
     except UnicodeDecodeError:
         return None
-    content = [(index, line) for index, line in enumerate(lines)
-               if line.strip() and not line.lstrip(" ").startswith("#")]
+    if any(separator in text for separator in _FOREIGN_LINE_BREAKS):
+        return None
+    lines = [line.rstrip(" ") for line in text.split("\n")]
+    content = [(index, line) for index, line in enumerate(lines) if line and not line.lstrip(" ").startswith("#")]
     if not content or content[0][1].startswith(" "):
         return None
     on_lines: list[int] = []
     for index, line in content:
         if line.startswith(" "):
             continue
-        key = _TOP_LEVEL_LINE.fullmatch(line.rstrip())
-        if key is None or key.group(1) not in _WORKFLOW_KEYS:
+        key = _KEY_LINE.fullmatch(line)
+        if key is None or key.group(2) not in _WORKFLOW_KEYS:
             return None
-        if key.group(1) == "on":
+        if key.group(2) == "on":
             on_lines.append(index)
-    if len(on_lines) != 1 or not re.fullmatch(r"on:[ ]*(?:#.*)?", lines[on_lines[0]]):
+    if len(on_lines) != 1 or not re.fullmatch("on:(?: +#.*)?", lines[on_lines[0]]):
         return None
     events: list[str] = []
     for index, line in content:
         if index <= on_lines[0]:
             continue
-        indent = len(line) - len(line.lstrip(" "))
+        key = _KEY_LINE.fullmatch(line)
+        if key is None:
+            return None
+        indent = len(key.group(1))
         if indent == 0:
             break
         if indent == 2:
-            match = _EVENT_LINE.fullmatch(line.rstrip())
-            if match is None:
+            event = _EVENT_LINE.fullmatch(line)
+            if event is None:
                 return None
-            events.append(match.group(1))
+            events.append(event.group(1))
         elif indent < 2 or not events:
             return None
     if not events or len(set(events)) != len(events):

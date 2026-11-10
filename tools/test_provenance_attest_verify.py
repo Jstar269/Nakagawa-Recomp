@@ -2234,6 +2234,14 @@ class MergePathTamperTests(GateCase):
             "second document": b"on:\n  pull_request_target:\n---\non:\n  pull_request:\n",
             "unknown top-level key": b"on:\n  pull_request_target:\nyes:\n  pull_request:\n",
             "byte-order mark": b"\xef\xbb\xbfon:\n  pull_request_target:\n",
+            "event with a comment glued to its colon": b"on:\n  pull_request_target:#x\n",
+            "event with a tab after its colon": b"on:\n  pull_request_target:\t\n",
+            "block scalar in the block": (
+                b"on:\n  workflow_dispatch:\n    inputs:\n      x:\n        description: |\n          text\n"),
+            "plain scalar continued on the next line": (
+                b"on:\n  workflow_dispatch:\n    inputs:\n      x:\n        description: two\n          lines\n"),
+            "sequence item in the block": b"on:\n  schedule:\n    - cron: \"1 2 * * 3\"\n",
+            "lone carriage return": b"on:\r  pull_request:\n  pull_request_target:\n",
             "empty block": b"on:\n",
             "no on key": b"name: gate\n",
             "not UTF-8": b"on:\n  pull_request_target:\n# \xff\n",
@@ -2244,6 +2252,48 @@ class MergePathTamperTests(GateCase):
                 reasons = self._weakened(self._gate(on_block))
                 self.assertEqual(len(reasons), 1, reasons)
                 self.assertIn("cannot be checked", reasons[0])
+
+    def test_a_value_left_open_cannot_end_the_block_before_a_real_event(self) -> None:
+        """A quoted scalar or flow sequence that closes on a later line can put text shaped like a top-level
+        key in column 0. A reader that stops there misses the `pull_request:` a YAML reader finds after it
+        (PyYAML and ruamel.yaml both read all three events from each form). Failing-before: the reader
+        returned `['workflow_run', 'workflow_dispatch']` and no finding."""
+        head = b"on:\n  workflow_run:\n"
+        dispatch = b"  workflow_dispatch:\n    inputs:\n      head_sha:\n"
+        tail = b"        type: string\n  pull_request:\n"
+        plain = b"    workflows: [\"CI\"]\n    types: [requested]\n"
+        forms = {
+            "double-quoted scalar continued in column 0": (
+                head + plain + dispatch + b"        description: \"Full SHA\nenv: x\"\n" + tail),
+            "single-quoted scalar continued in column 0": (
+                head + plain + dispatch + b"        description: 'Full SHA\nenv: x'\n" + tail),
+            "flow sequence continued in column 0": (
+                head + b"    workflows: [\"CI\",\nenv: x]\n    types: [requested]\n" + dispatch + tail),
+            "quoted item of a flow sequence continued in column 0": (
+                head + b"    workflows: [\"CI\nenv: x\"]\n    types: [requested]\n" + dispatch + tail),
+            "U+2028 inside a quoted scalar": (
+                head + plain + dispatch + "        description: \"Full SHA env: x\"\n".encode() + tail),
+        }
+        for name, on_block in forms.items():
+            with self.subTest(form=name):
+                self.assertIsNone(verifier._workflow_events(self._gate(on_block)))
+                reasons = self._weakened(self._gate(on_block))
+                self.assertEqual(len(reasons), 1, reasons)
+                self.assertIn("cannot be checked", reasons[0])
+        # The same block with each value closed on its own line is read, and the foreign event is then seen.
+        closed = head + plain + dispatch + b"        description: \"Full SHA\"\n" + tail
+        self.assertEqual(verifier._workflow_events(self._gate(closed)),
+                         ["workflow_run", "workflow_dispatch", "pull_request"])
+
+    def test_a_line_break_yaml_and_python_disagree_on_is_refused(self) -> None:
+        # str.splitlines breaks at these and YAML does not, so a reader using it sees lines that are not there.
+        for separator in (" ", " ", "\x85", "\x0c", "\x0b", "\x1c", "\x1d", "\x1e"):
+            with self.subTest(separator=repr(separator)):
+                raw = self._gate(("on:\n  pull_request_target:\n# a comment" + separator + "env: x\n").encode())
+                self.assertIsNone(verifier._workflow_events(raw))
+        # Windows line endings are line endings in both.
+        self.assertEqual(verifier._workflow_events(self.workflow_bytes().replace(b"\n", b"\r\n")),
+                         ["pull_request_target"])
 
     def test_the_plain_form_is_read_with_its_comments_and_settings(self) -> None:
         self.assertEqual(verifier._workflow_events(self._gate(self.WORKFLOW_RUN_GATE)),

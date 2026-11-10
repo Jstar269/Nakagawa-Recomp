@@ -266,7 +266,7 @@ jobs:
             exit 1
           fi
           case "${PR_NUMBER}" in
-            ''|*[!0-9]*) echo "pull request number is not numeric" >&2; exit 1 ;;
+            ''|0*|*[!0-9]*) echo "pull request number is not a plain positive number" >&2; exit 1 ;;
           esac
           python tools/ci_trust_verdict.py --repository "${GITHUB_REPOSITORY}" --default-branch "${DEFAULT_BRANCH}" \
             --approval dispatch --pull-request "${PR_NUMBER}" --head-sha "${HEAD_SHA}"

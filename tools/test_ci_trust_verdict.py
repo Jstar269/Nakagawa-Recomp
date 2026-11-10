@@ -49,7 +49,8 @@ NAMED_TITLE = "Provenance attestation of {head}"   # the attestation workflow's 
 
 def _run(run_id: int, path: str, event: str = "pull_request", *, sha: str = HEAD, created: str = PUSHED,
          status: str = "completed", conclusion: str | None = "success", prs: tuple[int, ...] = (PR,),
-         branch: str | None = None, title: str | None = None, actor: str | None = None) -> dict:
+         branch: str | None = None, title: str | None = None, actor: str | None = None,
+         started: str | None = None) -> dict:
     run = {
         "id": run_id, "path": path, "event": event, "head_sha": sha, "created_at": created,
         "status": status, "conclusion": conclusion, "check_suite_id": run_id * 10,
@@ -58,6 +59,8 @@ def _run(run_id: int, path: str, event: str = "pull_request", *, sha: str = HEAD
     }
     if actor is not None:
         run["actor"] = run["triggering_actor"] = {"login": actor}
+    if started is not None:
+        run["run_started_at"] = started     # when its latest attempt started: later than created for a re-run
     return run
 
 
@@ -808,7 +811,9 @@ class FakeGitHub(ctv.GitHub):
             returned = [run for run in self.raw["workflow_runs"] if run["head_sha"] == HEAD]
             return returned
         if path.startswith("actions/workflows/provenance-attestation.yml/runs?"):
-            returned = [run for run in self.raw["workflow_runs"] if run["path"] == PROV and run["head_sha"] != HEAD]
+            event = path.split("event=", 1)[1].split("&", 1)[0]
+            returned = [run for run in self.raw["workflow_runs"]
+                        if run["path"] == PROV and run["head_sha"] != HEAD and run["event"] == event]
             return returned
         if path.startswith("actions/workflows/ci-trust-verdict.yml/runs?"):
             returned = self.raw.get("dispatch_runs", [])
@@ -823,6 +828,12 @@ class FakeGitHub(ctv.GitHub):
             returned = self.raw["statuses"]
             return returned
         raise AssertionError(path)
+
+    def counted(self, path: str, key: str | None = None) -> tuple[list, int | None]:
+        """A list with the total GitHub reports for it; ``listed_total`` makes the list look truncated."""
+        items = self.paginate(path, key)
+        total: int | None = self.raw.get("listed_total", len(items))
+        return items, total
 
     def post(self, path: str, body: dict) -> object:
         self.posts.append((path, body))
@@ -2123,6 +2134,40 @@ class NamedAttestationRouteTests(VerdictAssertions):
         scenario.add_named(7, event="workflow_dispatch", created="2026-10-28T10:20:00Z")
         self.assertVerdict(scenario, "success")
 
+    def test_re_running_a_run_makes_it_the_newest_whichever_route_it_is(self) -> None:
+        """Both routes start on a push and fail before an admission. The run a pull request's check list shows
+        is the pull_request_target one, created seconds before the workflow_run one, and a maintainer re-runs
+        it after the admission. Failing-before: the newest run was chosen by creation time, which a re-run
+        keeps, so the re-run's success never counted and the head stayed JOB_FAILED."""
+        scenario = Scenario()
+        scenario.job(4, PROVENANCE.context)["conclusion"] = "failure"
+        scenario.add_named(6, created="2026-10-28T10:00:05Z")
+        scenario.job(6, PROVENANCE.context)["conclusion"] = "failure"
+        self.assertVerdict(scenario, "failure", "JOB_FAILED")
+        scenario.raw["workflow_runs"][3]["run_started_at"] = "2026-10-28T12:00:00Z"     # attempt 2 of run 4
+        scenario.job(4, PROVENANCE.context)["conclusion"] = "success"
+        self.assertVerdict(scenario, "success")
+        # The same for the other route, and a re-run that is still going is waited for.
+        scenario.raw["workflow_runs"][-1].update(run_started_at="2026-10-28T12:30:00Z", status="in_progress",
+                                                 conclusion=None)
+        scenario.job(6, PROVENANCE.context).update(status="in_progress", conclusion=None)
+        self.assertVerdict(scenario, "pending")
+        scenario.raw["workflow_runs"][-1].update(status="completed", conclusion="failure")
+        scenario.job(6, PROVENANCE.context).update(status="completed", conclusion="failure")
+        self.assertVerdict(scenario, "failure", "JOB_FAILED")
+
+    def test_a_re_run_decides_for_every_producer(self) -> None:
+        # Two CI runs at one head (a push, then a Draft/Ready transition); the older is re-run last.
+        scenario = Scenario()
+        scenario.add_run(9, CI, ["Classify change", "Hygiene and security", "CI required"],
+                         created="2026-10-28T10:20:00Z")
+        scenario.job(9, "CI required")["conclusion"] = "failure"
+        self.assertVerdict(scenario, "failure", "JOB_FAILED")
+        scenario.raw["workflow_runs"][0]["run_started_at"] = "2026-10-28T11:00:00Z"
+        self.assertVerdict(scenario, "success")
+        self.assertEqual(ctv.run_order({"id": 1, "created_at": "a"}), ("a", 1))
+        self.assertEqual(ctv.run_order({"id": 1, "created_at": "a", "run_started_at": "b"}), ("b", 1))
+
     def test_a_cancelled_named_run_is_superseded_not_failed(self) -> None:
         scenario = self._without_the_event()
         scenario.add_named(6, created="2026-10-28T10:01:00Z")
@@ -2196,7 +2241,10 @@ class NamedRouteCollectorTests(unittest.TestCase):
         raw, gh = self.collect(scenario)
         assert raw is not None
         self.assertEqual(self._listing(gh), [
-            "actions/workflows/provenance-attestation.yml/runs?branch=main&created=%3E%3D2026-10-28T10%3A00%3A00Z",
+            "actions/workflows/provenance-attestation.yml/runs?event=workflow_run&branch=main"
+            "&created=%3E%3D2026-10-28T10%3A00%3A00Z",
+            "actions/workflows/provenance-attestation.yml/runs?event=workflow_dispatch&branch=main"
+            "&created=%3E%3D2026-10-28T10%3A00%3A00Z",
         ])
         self.assertEqual({run["id"] for run in raw["workflow_runs"] if run["path"] == PROV}, {6})
         self.ancestry.assert_called_once_with(Path("."), MAIN, PROV)
@@ -2210,9 +2258,8 @@ class NamedRouteCollectorTests(unittest.TestCase):
         scenario.add_run(9, DEP, ["dependency-review"], created="2026-10-28T10:40:00Z")
         scenario.raw["workflow_runs"][1]["created_at"] = "2026-10-28T09:30:00Z"
         _raw, gh = self.collect(scenario)
-        self.assertEqual(self._listing(gh), [
-            "actions/workflows/provenance-attestation.yml/runs?branch=main&created=%3E%3D2026-10-28T09%3A30%3A00Z",
-        ])
+        self.assertEqual([read.split("created=", 1)[1] for read in self._listing(gh)],
+                         ["%3E%3D2026-10-28T09%3A30%3A00Z"] * 2)
 
     def test_a_run_whose_commit_is_not_on_the_default_branch_stays_untrusted(self) -> None:
         scenario = Scenario()
@@ -2233,6 +2280,76 @@ class NamedRouteCollectorTests(unittest.TestCase):
         self.assertEqual(raw["waiting_producers"], ["CI required", "Hygiene and security", PROVENANCE.context])
         self.assertEqual(self._listing(gh), [])
 
+    def test_the_jobs_of_the_re_run_run_are_the_ones_read(self) -> None:
+        scenario = Scenario()
+        scenario.raw["workflow_runs"][3]["run_started_at"] = "2026-10-28T12:00:00Z"     # run 4, re-run
+        scenario.add_named(6, created="2026-10-28T10:00:05Z")
+        scenario.job(6, PROVENANCE.context)["conclusion"] = "failure"
+        raw, gh = self.collect(scenario)
+        assert raw is not None
+        self.assertIn("actions/runs/4/jobs?filter=latest", gh.reads)
+        self.assertNotIn("actions/runs/6/jobs?filter=latest", gh.reads)
+        self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "success")
+
+    def test_a_truncated_run_list_never_lets_an_older_result_stand_in(self) -> None:
+        """GitHub returns the newest 1,000 runs of a filtered list. If this head's named run has left the list
+        it may have been a failure, so the pull_request_target success at the head must not be judged in its
+        place. Failing-before: truncation was not detected and the older run decided."""
+        note = f"{PROVENANCE.context} (not among its workflow's newest 1000 runs; dispatch it again)"
+        for total in (5000, None):
+            with self.subTest(total=total):
+                scenario = Scenario()                     # a green pull_request_target attestation at the head
+                scenario.raw["listed_total"] = total
+                raw, _gh = self.collect(scenario)
+                self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": [note]})
+        self.assertLessEqual(len(ctv.Verdict("pending", pending=[note]).description()), 140)
+        # A cancelled named run in what was returned is not a result either.
+        scenario = Scenario()
+        scenario.raw["listed_total"] = 5000
+        scenario.add_named(6, conclusion="cancelled")
+        raw, _gh = self.collect(scenario)
+        self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": [note]})
+
+    def test_a_truncated_run_list_that_still_holds_the_heads_run_is_judged(self) -> None:
+        # Attesting again puts a new run at the top of the list: that is how an old head recovers.
+        for conclusion, state in (("success", "success"), ("failure", "failure")):
+            with self.subTest(conclusion=conclusion):
+                scenario = Scenario()
+                scenario.raw["listed_total"] = 5000
+                scenario.add_named(6, event="workflow_dispatch", created="2026-10-28T10:20:00Z")
+                scenario.job(6, PROVENANCE.context)["conclusion"] = conclusion
+                raw, _gh = self.collect(scenario)
+                assert raw is not None
+                self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, state)
+
+    def test_a_complete_run_list_leaves_the_event_route_to_decide(self) -> None:
+        raw, _gh = self.collect(Scenario())
+        assert raw is not None
+        self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "success")
+
+    def test_a_full_run_list_is_treated_as_truncated_whatever_total_github_reports(self) -> None:
+        class Full(ctv.GitHub):
+            def counted(self, path: str, key: str | None = None) -> tuple[list, int | None]:
+                runs = [{"id": index, "event": "workflow_run", "display_title": "x"}
+                        for index in range(ctv.RUN_LIST_LIMIT)]
+                return runs, ctv.RUN_LIST_LIMIT
+
+        found, truncated = ctv.named_runs(Full("o/r", "t"), Path("."), "main", HEAD, PUSHED)
+        self.assertEqual((found, truncated), ([], [PROVENANCE.context]))
+
+    def test_counted_reports_the_first_pages_total(self) -> None:
+        gh = ctv.GitHub("owner/repo", "token")
+        pages = {
+            "actions/runs?x=1&per_page=100": ({"total_count": 3, "workflow_runs": [1, 2]},
+                                              {"Link": '<https://api.github.com/next>; rel="next"'}),
+            "https://api.github.com/next": ({"total_count": 9, "workflow_runs": [3]}, {}),
+            "pulls?state=open&per_page=100": ([4], {}),
+        }
+        with mock.patch.object(gh, "_request", side_effect=lambda method, url, body=None: pages[url]):
+            self.assertEqual(gh.counted("actions/runs?x=1", "workflow_runs"), ([1, 2, 3], 3))
+            self.assertEqual(gh.counted("pulls?state=open"), ([4], None))
+            self.assertEqual(gh.paginate("actions/runs?x=1", "workflow_runs"), [1, 2, 3])
+
     def test_an_unfinished_named_run_is_waited_for(self) -> None:
         scenario = Scenario()
         scenario.drop_runs(PROV)
@@ -2240,7 +2357,7 @@ class NamedRouteCollectorTests(unittest.TestCase):
         raw, gh = self.collect(scenario)
         assert raw is not None
         self.assertEqual(raw["waiting_producers"], [PROVENANCE.context])
-        self.assertEqual(len(self._listing(gh)), 1)
+        self.assertEqual(len(self._listing(gh)), 2)     # one list per event of the named route
 
     def test_both_routes_are_read_when_the_event_route_finished(self) -> None:
         # While pull_request_target still runs, a newer dispatch after an admission must be seen.

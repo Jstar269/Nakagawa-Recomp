@@ -191,7 +191,7 @@ jobs:
                 exit 1
               fi
               case "${INPUT_PR_NUMBER}" in
-                ''|*[!0-9]*) echo "pull request number is not numeric" >&2; exit 1 ;;
+                ''|0*|*[!0-9]*) echo "pull request number is not a plain positive number" >&2; exit 1 ;;
               esac
               "${resolve[@]}" --pull-request "${INPUT_PR_NUMBER}" --head-sha "${INPUT_HEAD_SHA}"
               ;;
@@ -219,10 +219,7 @@ jobs:
             ''|*[!0-9]*) echo "pull request number is not numeric" >&2; exit 1 ;;
           esac
           for value in "${HEAD_SHA}" "${BASE_SHA}"; do
-            case "${value}" in
-              [0-9a-f]*) [ "${#value}" -eq 40 ] || { echo "sha malformed" >&2; exit 1; } ;;
-              *) echo "sha malformed" >&2; exit 1 ;;
-            esac
+            [[ "${value}" =~ ^[0-9a-f]{40}$ ]] || { echo "sha malformed" >&2; exit 1; }
           done
           git fetch --no-tags --no-recurse-submodules --quiet \
             "https://github.com/${GITHUB_REPOSITORY}.git" \

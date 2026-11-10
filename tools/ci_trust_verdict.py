@@ -101,7 +101,10 @@ The provenance attestation has a second route (``producer_runs``): a
 a run under the default branch, so it is bound to the head by its run name,
 which carries the head SHA, and it counts only from the default branch and
 only when it ran the default branch's current copy of the workflow
-(``default_definition``). The newest run of either route decides. A
+(``default_definition``). The newest run of either route decides, newest by
+when its latest attempt started (``run_order``), so re-running a run makes it
+the newest. A run that has left GitHub's run list is not read, and no older
+result stands in for it (``named_runs``). A
 ``pull_request_target`` run that ended ``startup_failure`` (GitHub refused the
 event) is ignored when the second route has a run.
 
@@ -353,6 +356,7 @@ def normalise(raw: dict) -> dict:
                 # A git fact, not GitHub's: only the collector's own check sets it (``named_runs``).
                 "default_definition": run.get("default_definition") is True,
                 "created_at": run.get("created_at") or "",
+                "run_started_at": run.get("run_started_at") or "",
                 "check_suite_id": run.get("check_suite_id"),
                 "pull_requests": _pr_numbers(run.get("pull_requests")),
             }
@@ -527,6 +531,19 @@ def _check_definitions(snapshot: dict) -> list[Finding]:
     return findings
 
 
+def run_order(run: dict) -> tuple[str, int]:
+    """Sort key for "the newest run": when its latest attempt started, then its id.
+
+    A re-run keeps the run's id and creation time and gets a new start time. It is a fresh result for the same
+    head, made at re-run time by the same definition, and only a user with write access can ask for one, so it
+    is the newest evidence. Ordering by creation time instead left a head stuck: with two attestation routes the
+    run a pull request's check list shows is rarely the newest-created one, and re-running it changed nothing.
+    Approval records are the exception and keep the creation time (``under_label``): there the event that
+    created the run is the point.
+    """
+    return (run.get("run_started_at") or run.get("created_at") or "", int(run["id"]))
+
+
 def producer_runs(runs: list[dict], producer: Producer, head_sha: str, default_branch: str) -> list[dict]:
     """The runs that can answer for ``producer`` at ``head_sha``, from raw or normalised run records.
 
@@ -606,7 +623,7 @@ def _check_producer(snapshot: dict, producer: Producer, pending: list[str]) -> l
             "JOB_CANCELLED", producer.context, f"every {producer.workflow} run for this head was cancelled; re-run it",
         ))
         return findings
-    latest = max(live, key=lambda run: (run["created_at"], run["id"]))
+    latest = max(live, key=run_order)
     # A named run and its jobs report the default-branch commit the run started from; its run name is what binds
     # it to this head, and ``producer_runs`` matched that.
     named = latest["event"] in producer.named_events
@@ -915,14 +932,21 @@ class GitHub:
         return self._request("GET", path)[0]
 
     def paginate(self, path: str, key: str | None = None) -> list:
+        return self.counted(path, key)[0]
+
+    def counted(self, path: str, key: str | None = None) -> tuple[list, int | None]:
+        """Every page of a list, and the ``total_count`` its first page reports (``None`` when it reports none)."""
         items: list = []
+        total: int | None = None
         url: str | None = path + ("&" if "?" in path else "?") + "per_page=100"
         while url:
             payload, headers = self._request("GET", url)
+            if key and total is None and isinstance(payload, dict) and isinstance(payload.get("total_count"), int):
+                total = payload["total_count"]
             items.extend(payload[key] if key else payload)
             match = re.search(r'<([^>]+)>;\s*rel="next"', headers.get("Link", ""))
             url = match.group(1) if match else None
-        return items
+        return items, total
 
     def post(self, path: str, body: dict) -> object:
         return self._request("POST", path, body)[0]
@@ -1039,28 +1063,43 @@ def dispatched_records(gh: "GitHub", repo: Path, number: int, default_branch: st
     return found
 
 
-def named_runs(gh: "GitHub", repo: Path, default_branch: str, head_sha: str, since: str) -> list[dict]:
-    """Default-branch runs named for ``head_sha``, for every producer with a named route.
+# GitHub answers a filtered run list with at most this many runs, its newest.
+RUN_LIST_LIMIT = 1000
+
+
+def named_runs(gh: "GitHub", repo: Path, default_branch: str, head_sha: str,
+               since: str) -> tuple[list[dict], list[str]]:
+    """Default-branch runs named for ``head_sha``, for every producer with a named route, and the contexts whose
+    list came back truncated.
 
     GitHub lists a ``workflow_run`` or ``workflow_dispatch`` run under the default branch, so the head's own run
-    list cannot contain it. The workflow's default-branch runs created since ``since`` are listed and matched by
-    run name. ``since`` is when the head's earliest run was created: a run is named for a head only once a pull
-    request has it. GitHub answers a filtered run list with its newest 1,000 runs; an attestation older than that
-    is not found, and the head stays pending until it is attested again. Each match gets ``default_definition``,
-    the git fact ``producer_runs`` requires.
+    list cannot contain it. The workflow's default-branch runs created since ``since`` are listed, one list per
+    event, and matched by run name. ``since`` is when the head's earliest run was created: a run is named for a
+    head only once a pull request has it. Each match gets ``default_definition``, the git fact ``producer_runs``
+    requires.
+
+    A list is truncated when GitHub reports more runs than it returned (``RUN_LIST_LIMIT``; every ``CI`` run
+    starts one, so at the 2026-11 rate a ``workflow_run`` attestation leaves the list after about five days, and
+    a dispatched one, in its own far shorter list, practically never). A truncated list can have lost this
+    head's newest run, and ``collect`` then refuses to let an older result stand in for it.
     """
     found: list[dict] = []
+    truncated: list[str] = []
     for producer in PRODUCERS:
-        if not producer.named_events:
-            continue
-        title = producer.run_title.format(head=head_sha)
-        query = urllib.parse.urlencode({"branch": default_branch, "created": f">={since}"})
+        title = producer.run_title.format(head=head_sha) if producer.named_events else ""
         workflow = urllib.parse.quote(producer.workflow.rsplit("/", 1)[1])
-        for run in gh.paginate(f"actions/workflows/{workflow}/runs?{query}", "workflow_runs"):
-            if run.get("event") in producer.named_events and run.get("display_title") == title:
-                trusted = default_definition(repo, run.get("head_sha") or "", producer.workflow)
-                found.append(run | {"default_definition": trusted})
-    return found
+        for event in producer.named_events:
+            query = urllib.parse.urlencode({"event": event, "branch": default_branch, "created": f">={since}"})
+            runs, total = gh.counted(f"actions/workflows/{workflow}/runs?{query}", "workflow_runs")
+            # No count, more runs than were returned, or a full list: each means runs may be missing.
+            cut = total is None or total > len(runs) or len(runs) >= RUN_LIST_LIMIT
+            if cut and producer.context not in truncated:
+                truncated.append(producer.context)
+            for run in runs:
+                if run.get("event") == event and run.get("display_title") == title:
+                    trusted = default_definition(repo, run.get("head_sha") or "", producer.workflow)
+                    found.append(run | {"default_definition": trusted})
+    return found, truncated
 
 
 def unfinished_producers(workflow_runs: list[dict], head_sha: str, default_branch: str = "main") -> list[str]:
@@ -1079,7 +1118,7 @@ def unfinished_producers(workflow_runs: list[dict], head_sha: str, default_branc
         live = [run for run in runs if run.get("conclusion") != "cancelled"]
         if not runs:
             waiting.append(producer.context)
-        elif live and max(live, key=lambda run: (run.get("created_at") or "", run["id"]))["status"] != "completed":
+        elif live and max(live, key=run_order)["status"] != "completed":
             waiting.append(producer.context)
     return waiting
 
@@ -1106,7 +1145,18 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
         return {"head_sha": head_sha, "waiting_producers": waiting}
     since = min((run["created_at"] for run in workflow_runs if run.get("created_at")), default=None)
     if since:
-        workflow_runs = workflow_runs + named_runs(gh, repo, default_branch, head_sha, since)
+        named, truncated = named_runs(gh, repo, default_branch, head_sha, since)
+        workflow_runs = workflow_runs + named
+        # A truncated list may have lost this head's newest named run, which could be a failure. Unless a named
+        # run that was not cancelled is among what GitHub did return, nothing older is judged in its place, on
+        # either route: the head waits until it is attested again, and that dispatch is in the list.
+        for producer in PRODUCERS:
+            if producer.context in truncated and not any(
+                    run.get("event") in producer.named_events and run.get("conclusion") != "cancelled"
+                    for run in producer_runs(workflow_runs, producer, head_sha, default_branch)):
+                return {"head_sha": head_sha, "waiting_producers": [
+                    f"{producer.context} (not among its workflow's newest {RUN_LIST_LIMIT} runs; dispatch it again)",
+                ]}
         waiting = unfinished_producers(workflow_runs, head_sha, default_branch)
     if waiting:
         return {"head_sha": head_sha, "waiting_producers": waiting}
@@ -1167,10 +1217,10 @@ def collect(gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: 
 def latest_live_run(workflow_runs: list[dict], producer: Producer, head_sha: str,
                     default_branch: str = "main") -> dict | None:
     """The run whose jobs judge ``producer``: its newest run for this head that was not cancelled, chosen as the
-    rules choose it (``producer_runs``, then ``created_at``, then id)."""
+    rules choose it (``producer_runs``, then ``run_order``)."""
     live = [run for run in producer_runs(workflow_runs, producer, head_sha, default_branch)
             if run.get("conclusion") != "cancelled"]
-    return max(live, key=lambda run: (run.get("created_at") or "", run["id"])) if live else None
+    return max(live, key=run_order) if live else None
 
 
 def summary_markdown(verdict: Verdict, snapshot: dict) -> str:
