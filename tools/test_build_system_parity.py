@@ -76,8 +76,10 @@ class BuildSystemParityTests(unittest.TestCase):
         say whether the player links it."""
         make = re.search(r"^PLAYER_CORE_SOURCES\s*:=\s*(.+)$", self.makefile_text, re.MULTILINE)
         cmake = re.search(r"^set\(CORE_SOURCES\s+(.*?)\)", self.cmake_text, re.MULTILINE | re.DOTALL)
-        self.assertIsNotNone(make, "PLAYER_CORE_SOURCES not found in the Makefile text")
-        self.assertIsNotNone(cmake, "set(CORE_SOURCES ...) not found in CMakeLists.txt")
+        if make is None:
+            self.fail("PLAYER_CORE_SOURCES not found in the Makefile text")
+        if cmake is None:
+            self.fail("set(CORE_SOURCES ...) not found in CMakeLists.txt")
         make_set = set(make.group(1).split())
         cmake_set = set(cmake.group(1).split())
         self.assertEqual(make_set, cmake_set, "the player's core sources differ between make and CMake")
