@@ -198,7 +198,9 @@ static int check_cop2_control_transfers(void) {
         s.r[5] = value;
         CHECK(sr_vfpu_interp(&s, cop2_transfer(7, 5, 128 + i)) == SR_VFPU_COMPUTE,
               "mtvc accepts every VFPU control register");
-        CHECK(s.vfpuCtrl[i] == value, "mtvc writes the selected VFPU control register");
+        /* VFPU_CC (3) keeps only bits 0..5; see check_vfpu_cc_write_mask. */
+        CHECK(s.vfpuCtrl[i] == (i == 3 ? (value & 0x3fu) : value),
+              "mtvc writes the selected VFPU control register");
     }
 
     setup_state(&s);
@@ -208,6 +210,28 @@ static int check_cop2_control_transfers(void) {
     CHECK(memcmp(&s, &before, sizeof(s)) == 0,
           "invalid mfvc leaves the complete CpuState unchanged");
     bad |= memcmp(&s, &before, sizeof(s)) != 0;
+    return bad;
+}
+
+static int check_vfpu_cc_write_mask(void) {
+    /* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
+     * register entry is not in this tree yet): mtvc then mfvc on VFPU_CC (control register 3)
+     * read back written & 0x3f in every cell. */
+    static const uint32_t written[] = {0x00u, 0x3fu, 0x15u, 0x2au, 0x01u, 0x10u, 0x20u,
+                                       0x40u, 0x80u, 0xffu, 0x100u, 0xffffffffu};
+    CpuState s;
+    int bad = 0;
+    for (size_t i = 0; i < sizeof(written) / sizeof(written[0]); i++) {
+        setup_state(&s);
+        s.r[5] = written[i];
+        CHECK(sr_vfpu_interp(&s, cop2_transfer(7, 5, 128 + 3)) == SR_VFPU_COMPUTE,
+              "mtvc accepts VFPU_CC");
+        s.r[6] = 0xa5a5a5a5u;
+        CHECK(sr_vfpu_interp(&s, cop2_transfer(3, 6, 128 + 3)) == SR_VFPU_COMPUTE,
+              "mfvc reads VFPU_CC");
+        CHECK(s.r[6] == (written[i] & 0x3fu), "VFPU_CC reads back the written value and 0x3f");
+        bad |= s.r[6] != (written[i] & 0x3fu);
+    }
     return bad;
 }
 
@@ -313,6 +337,47 @@ static int check_quad_memops(void) {
     CHECK(MEM_R32(ARENA_END - 12u) == 0xCAFE0000u && MEM_R32(ARENA_END - 8u) == 0xCAFE0001u &&
           MEM_R32(ARENA_END - 4u) == 0xCAFE0002u,
           "sv.q rejection leaves every earlier guest word unchanged");
+
+    /* 7b. Bit 1 of an aligned lv.q/sv.q is the write-back flag. An unrecorded PSP read
+     * (PSP-3000, 2026-11-08, issue #326, probe case vfpu-quad-wb, base $t2 = r10, 16-byte
+     * aligned; its register entry, PSP-VFPU-QUADWB-001, is not in this tree yet and is not
+     * a MEASURED row here) showed the flag does not change the base register in any form
+     * (offsets 0, +16, +32, -16; four stores in a row from one base did not drift) and
+     * that the access uses base + offset, as the plain word does. This pins that read in
+     * both lanes; it is not hardware evidence until the register entry lands. */
+    {
+        static const uint32_t offsets[4] = {0x0000u, 0x0010u, 0x0020u, 0xFFF0u};
+        const uint32_t base = 0x08004200u;
+        for (int k = 0; k < 4; k++) {
+            const uint32_t at = base + (uint32_t)(int32_t)(int16_t)offsets[k];
+            sr_mem_init();
+            setup_state(&s);
+            s.r[10] = base;
+            for (int i = 0; i < 4; i++) MEM_W32(at + (uint32_t)i * 4u, 0x5a5a0000u + (uint32_t)i);
+            fill_vi(&s, 0);
+            CHECK(sr_vfpu_interp(&s, lvq(10, 0, offsets[k]) | 2u) == SR_VFPU_COMPUTE,
+                  "lv.q with the write-back bit set loads");
+            CHECK(s.vi[0] == 0x5a5a0000u && s.vi[3] == 0x5a5a0003u && s.r[10] == base,
+                  "lv.q wb loads from base + offset and leaves the base register unchanged");
+            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + (uint32_t)i;
+            CHECK(sr_vfpu_interp(&s, svq(10, 0, offsets[k]) | 2u) == SR_VFPU_STATE,
+                  "sv.q with the write-back bit set stores");
+            CHECK(MEM_R32(at) == 0xc0de0000u && MEM_R32(at + 12u) == 0xc0de0003u && s.r[10] == base,
+                  "sv.q wb stores at base + offset and leaves the base register unchanged");
+        }
+        /* Four stores in a row from one base land in order and the base never drifts. */
+        sr_mem_init();
+        setup_state(&s);
+        s.r[10] = base;
+        for (int q = 0; q < 4; q++) {
+            for (int i = 0; i < 4; i++) s.vi[i] = 0xc0de0000u + ((uint32_t)q << 8) + (uint32_t)i;
+            CHECK(sr_vfpu_interp(&s, svq(10, 0, (uint32_t)q * 16u) | 2u) == SR_VFPU_STATE &&
+                  s.r[10] == base, "a run of sv.q wb from one base does not drift the base");
+        }
+        CHECK(MEM_R32(base) == 0xc0de0000u && MEM_R32(base + 16u) == 0xc0de0100u &&
+              MEM_R32(base + 32u) == 0xc0de0200u && MEM_R32(base + 60u) == 0xc0de0303u,
+              "a run of sv.q wb stores each quad at its own offset");
+    }
 
     /* 8. Left/right merge forms preflight their exact sub-span. The sub-span
      * always lies inside the aligned 16-byte window containing addr (the left
@@ -702,6 +767,19 @@ static int check_vf2i_conversions(void) {
         {"vf2in negative infinity", 0xff800000u, 0u, 0u, 0x80000000u},
         {"vf2in NaN", 0x7fc00000u, 0u, 0u, 0x7fffffffu},
         {"vf2in signaling NaN", 0x7f800001u, 0u, 0u, 0x7fffffffu},
+        /* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-convert; its
+         * register entry is not in this tree yet): a denormal input of either sign converts
+         * as zero in all four modes, and either sign of NaN gives 0x7fffffff. */
+        {"vf2in +denormal", 0x00000001u, 0u, 0u, 0x00000000u},
+        {"vf2in -denormal", 0x80000001u, 0u, 0u, 0x00000000u},
+        {"vf2iz +denormal", 0x00000001u, 1u, 0u, 0x00000000u},
+        {"vf2iz -denormal", 0x80000001u, 1u, 0u, 0x00000000u},
+        {"vf2iu +denormal not ceiled", 0x00000001u, 2u, 0u, 0x00000000u},
+        {"vf2iu -denormal", 0x80000001u, 2u, 0u, 0x00000000u},
+        {"vf2id +denormal", 0x00000001u, 3u, 0u, 0x00000000u},
+        {"vf2id -denormal not floored", 0x80000001u, 3u, 0u, 0x00000000u},
+        {"vf2iu largest denormal scaled", 0x007fffffu, 2u, 31u, 0x00000000u}, /* derived from the rule, not a probe cell */
+        {"vf2in negative quiet NaN", 0xffc00000u, 0u, 0u, 0x7fffffffu},
     };
     static const int host_modes[] = {
         FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO,
@@ -2145,6 +2223,41 @@ static int check_vrexp2_measured_words(void) {
     return bad;
 }
 
+/* Unrecorded PSP read (PSP-3000, 2026-11-08, issue #326, probe case vfpu-cc-cmov; its
+ * register entry is not in this tree yet): vcmp.q of C000 against C010 on the signed-zero and
+ * denormal operand set a = (+0, -0, +den, -den), b = (-0, +0, +0, +den), preset CC 0, read after
+ * vsync. A denormal operand compares as a zero, so EQ/LE/GE are true on all four lanes and
+ * LT/NE/GT are false; EZ is true and NZ false for all four. Both lanes run the same words. */
+static int check_vcmp_denormal_operands(void) {
+    static const uint32_t cc[16] = {0x00, 0x3f, 0x00, 0x3f, 0x3f, 0x00, 0x3f, 0x00,
+                                    0x3f, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x3f, 0x3f};
+    static const uint32_t a[4] = {0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u};
+    static const uint32_t b[4] = {0x80000000u, 0x00000000u, 0x00000000u, 0x00000001u};
+    int bad = 0;
+    for (int cond = 0; cond < 16; cond++) {
+        char name[32];
+        snprintf(name, sizeof(name), "vcmp-q-c%02d-measured", cond);
+        const int c = find_overlap_diff_case(name);
+        CHECK(c >= 0, "measured vcmp word is in the overlap-diff header");
+        if (c < 0) { bad = 1; continue; }
+        CpuState aot, interp;
+        setup_identity_compute(&aot);
+        for (int i = 0; i < 4; i++) { aot.vi[i] = a[i]; aot.vi[4 + i] = b[i]; }
+        interp = aot;
+        overlap_diff_run_codegen(&aot, c);
+        const int kind = sr_vfpu_interp(&interp, overlap_diff_cases[c].w);
+        g_checks++;
+        if (kind != SR_VFPU_STATE || aot.vfpuCtrl[3] != cc[cond] ||
+            interp.vfpuCtrl[3] != cc[cond]) {
+            g_failures++;
+            bad = 1;
+            fprintf(stderr, "FAIL: vcmp.q cond %d psp=0x%02x aot=0x%02x interp=0x%02x kind=%d\n",
+                    cond, cc[cond], aot.vfpuCtrl[3], interp.vfpuCtrl[3], kind);
+        }
+    }
+    return bad;
+}
+
 /* RCX0-7 image of a random-unit state as probe_hle_issues.c writes it: Ck split into
  * the low halves of RCXk and RCX(k+4), carry nibble k in bits 16-19 of RCXk, 0x3f8 above. */
 static void vrndi_probe_image(uint32_t *rcx, const uint32_t c[4], uint32_t carry) {
@@ -2805,6 +2918,8 @@ int main(void) {
     bad |= check_vrndi_rule_cells();
     bad |= check_vfpu_forms_measured();
     bad |= check_cop2_control_transfers();
+    bad |= check_vfpu_cc_write_mask();
+    bad |= check_vcmp_denormal_operands();
     bad |= check_quad_memops();
     bad |= check_vcrs_widths();
     bad |= check_vasin_measured_domain_words();
