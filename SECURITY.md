@@ -119,6 +119,7 @@ It fails when a file and algorithm pair is missing here or a row names a pair th
 | --- | --- | --- | --- |
 | `tools/decompme_export.py` | SHA-1 | PSP NID derivation (`sha1(name)[0:4]`, little-endian) | Keep: the PSP defines it |
 | `tools/gen_nidnames.py` | SHA-1 | PSP NID derivation | Keep: the PSP defines it |
+| `tools/homebrew_corpus.py` | SHA-1 | Git blob ID of a sample file, compared with the blob ID `fixtures/homebrew_corpus/corpus.json` pins for it | Keep: Git object identity |
 | `tools/nid_name_proof.py` | SHA-1 | PSP NID derivation | Keep: the PSP defines it |
 | `tools/ppsspp_ref.py` | SHA-1 | WebSocket handshake check of `Sec-WebSocket-Accept` (RFC 6455 section 4.2.2) | Keep: the protocol defines it |
 | `tools/provenance_attest_verify.py` | SHA-1 | Git blob ID of a file a `PROVENANCE.md` row declares imported byte-identical, compared with the row's recorded blob ID (a SHA-256 column, where present, is checked too) | Keep: Git object identity |

@@ -53,7 +53,8 @@ This is the limitations section, not a footnote:
 The verified native host contract is the Windows contract in [`SETUP.md`](SETUP.md):
 
 - Windows 11 x64.
-- PowerShell 7.6 or newer; Windows PowerShell 5.1 is not supported.
+- PowerShell 7.6 or newer for the commands you type; Windows PowerShell 5.1 is not supported for those.
+  The player's build steps use PowerShell 7 when it is installed and fall back to 5.1 otherwise.
 - CPython 3.15.x (3.14.x is also accepted).
 - MSYS2 UCRT64 GCC/G++, GNU Make, SDL3, and Vulkan loader packages.
 - Explicit SDL3 dependency discovery ([#331](https://github.com/Jstar269/nakagawa-recomp/issues/331)).

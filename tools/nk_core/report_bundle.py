@@ -33,6 +33,11 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 import zipfile
 
+try:
+    from ..nk_powershell import powershell_exe
+except ImportError:
+    from nk_powershell import powershell_exe  # type: ignore[no-redef]
+
 SCHEMA_VERSION = 1
 
 #: The tail of a log kept when the log is longer, from its first whole line.
@@ -404,7 +409,7 @@ def _gpu_lines() -> list[str]:
     """The video adapters and drivers the OS reports, best effort and read-only."""
     try:
         if sys.platform == "win32":
-            command = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            command = [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command",
                        "Get-CimInstance Win32_VideoController | ForEach-Object "
                        "{ $_.Name + ' | driver ' + $_.DriverVersion }"]
         elif sys.platform.startswith("linux"):
