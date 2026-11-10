@@ -4948,6 +4948,11 @@ class TestTwoUpdateTransforms(unittest.TestCase):
             self.assertIsNone(enhancement_package.phase_of_time(time, half), time)
         self.assertEqual(enhancement_package.phase_of_time(reachable, half), 1)
         self.assertEqual(enhancement_package.phase_of_time(-0.0, half), 0)
+        # A step so large that the second sum overflows has the two times it reaches, and no more.
+        huge = _f32_round(3.0e38)
+        self.assertEqual(enhancement_package.phase_runs(huge), ((0, 1, 0.0, huge, huge),))
+        self.assertEqual(enhancement_package.phase_of_time(huge, huge), 1)
+        self.assertIsNone(enhancement_package.phase_of_time(float("inf"), huge))
         for bad in (0.0, -half, float("inf"), float("nan"), 1.0e-46, half * (1 + 2.0 ** -30)):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "is not a positive float32"):
                 enhancement_package.phase_runs(bad)

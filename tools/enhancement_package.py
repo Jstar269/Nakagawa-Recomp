@@ -3357,6 +3357,9 @@ def two_update_factors(damping: float, damping_step: float,
 
 #: A state's updates are counted up to this bound; past it a site keeps its stock instruction.
 PHASE_UPDATES_MAX = 0x7FFFFFFF
+#: A float32 sum of a constant needs a few rows for each binade it passes through, under a hundred
+#: in all. A step that would need more than this is one this model does not describe: refused.
+PHASE_ROWS_MAX = 512
 
 
 @functools.lru_cache(maxsize=32)
@@ -3375,14 +3378,17 @@ def phase_runs(half_step: float) -> tuple[tuple[int, int, float, float, float], 
         raise ValueError(f"half the stock step, {d!r}, is not a positive float32 a state's time can count")
 
     def after(a: float) -> float:
-        return _f32(_f32_bits(a + d))  # the double sum of two float32 values this close is exact
+        try:
+            return _f32(_f32_bits(a + d))  # the double sum of two float32 values this close is exact
+        except OverflowError:
+            return math.inf  # past the largest float32 the guest's sum is infinite, and stays so
 
     runs: list[tuple[int, int, float, float, float]] = []
     n, a = 0, 0.0
     while n < PHASE_UPDATES_MAX:
         delta = after(a) - a
-        if delta <= 0.0:
-            break  # the time has grown until adding the step no longer changes it
+        if delta <= 0.0 or not math.isfinite(delta):
+            break  # the time has grown until adding the step no longer changes it, or overflows
 
         def repeats(k: int, a: float = a, delta: float = delta) -> bool:
             return after(a + k * delta) == a + (k + 1) * delta
@@ -3402,6 +3408,9 @@ def phase_runs(half_step: float) -> tuple[tuple[int, int, float, float, float], 
             count = low + 1
         runs.append((n, count, a, a + count * delta, delta))
         n, a = n + count, a + count * delta
+        if len(runs) > PHASE_ROWS_MAX:
+            raise ValueError(f"half the stock step, {d!r}, is not a positive float32 a state's time can count: "
+                             f"its sum does not settle into {PHASE_ROWS_MAX} rows")
     return tuple(runs)
 
 
