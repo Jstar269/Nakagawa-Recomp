@@ -1918,9 +1918,17 @@ static void repeat_launch_and_settle(PlayerApp *app, int game_index,
                                      const char *expected_memstick) {
     char error_before[48];
     snprintf(error_before, sizeof(error_before), "%s", app->last_error.error_code);
+    int64_t before_ms = (int64_t)time(NULL) * 1000;
     assert(player_app_launch_game(app, game_index));
     assert(app->is_game_running);
     assert(strcmp(app->launch_session.memstick_root, expected_memstick) == 0);
+    /* Discord status (#2259) shows this game's own title and when it started. */
+    assert(strcmp(app->running_title, app->games[game_index].title_name) == 0);
+    assert(app->running_start_ms >= before_ms &&
+           app->running_start_ms <= (int64_t)time(NULL) * 1000);
+    assert(app->running_play_mode == PLAYER_PLAY_AUTHENTIC ||
+           app->running_play_mode == PLAYER_PLAY_ENHANCED ||
+           app->running_play_mode == PLAYER_PLAY_ACE);
     app->launch_time_ms = launch_tick;
     assert(nk_launch_wait(&app->launch_session, 10000) == 0);
     assert(player_app_monitor_game_session(app, settle_tick));
@@ -12937,6 +12945,65 @@ int main(int argc, char **argv) {
             char *saved = read_text_file(test_settings_path);
             assert(saved && strstr(saved, "online_updates") == NULL);
             free(saved);
+        }
+
+        /* Discord status (#2259; owner decision 2026-11-08): off by default and written as
+           off; this build has no Discord application ID, so the switch fails closed and the
+           tick never starts a client, even with a stored true. */
+        player_app_init(s_app2);
+        assert(!s_app2->settings.discord_presence);
+        assert(!nk_discord_available());
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        {
+            char *saved = read_text_file(test_settings_path);
+            assert(saved && strstr(saved, "\"discord_presence\": false") != NULL);
+            free(saved);
+        }
+        s_app2->settings_path[0] = '\0';
+        player_app_toggle_discord_presence(s_app2);
+        assert(!s_app2->settings.discord_presence);
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"discord_presence\": \"yes\"}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.discord_presence);
+        write_text_file(test_settings_path,
+                        "{\"schema_version\": 2, \"discord_presence\": true}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(s_app2->settings.discord_presence);
+        s_app2->is_game_running = true;
+        player_app_discord_tick(s_app2, 1000u);
+        assert(!s_app2->discord_ready);
+        /* A stored On can still be turned off. */
+        s_app2->settings_path[0] = '\0';
+        player_app_toggle_discord_presence(s_app2);
+        assert(!s_app2->settings.discord_presence);
+
+        /* What it would show: the running game's title, play mode and start; nothing
+           when no game runs. A library-default mode reads as Authentic. */
+        {
+            NkDiscordActivity activity;
+            player_app_init(s_app2);
+            assert(!player_app_discord_activity(s_app2, &activity));
+            assert(activity.details[0] == '\0' && activity.state[0] == '\0');
+            s_app2->is_game_running = true;
+            snprintf(s_app2->running_title, sizeof(s_app2->running_title), "%s",
+                     "Synthetic Tennis: Test Grip");
+            s_app2->running_play_mode = PLAYER_PLAY_ENHANCED;
+            s_app2->running_start_ms = 1762560000000;
+            assert(player_app_discord_activity(s_app2, &activity));
+            assert(strcmp(activity.details, "Synthetic Tennis: Test Grip") == 0);
+            assert(strcmp(activity.state, "Enhanced") == 0);
+            assert(activity.start_ms == 1762560000000);
+            s_app2->running_play_mode = PLAYER_PLAY_LIBRARY;
+            assert(player_app_discord_activity(s_app2, &activity));
+            assert(strcmp(activity.state, "Authentic") == 0);
+            s_app2->running_play_mode = PLAYER_PLAY_ACE;
+            assert(player_app_discord_activity(s_app2, &activity));
+            assert(strcmp(activity.state, "Ace") == 0);
+            s_app2->is_game_running = false;
+            assert(!player_app_discord_activity(s_app2, &activity));
         }
 
         remove(test_settings_path);

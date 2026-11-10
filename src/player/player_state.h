@@ -18,6 +18,7 @@
 #include "input_settings.h"
 #include "package_builder.h"
 #include "update_check.h"
+#include "discord_presence.h"
 #include "setup_staging.h"
 #include "nk_title_manifest.h"
 #include "generated/nk_title_catalog.h"
@@ -333,6 +334,10 @@ typedef struct {
     /* Ask GitHub for a newer version once each time the player starts. Off until
        the user turns it on (AGENTS.md section 5; the button needs no switch). */
     bool check_updates_at_start;
+    /* Discord status (#2259): while a game runs, the Discord app on this PC shows its title,
+       play mode and elapsed time. Off by default (owner decision 2026-11-08); it cannot be
+       turned on while the build has no Discord application ID (nk_discord_available). */
+    bool discord_presence;
     /* The folder the last file picker picked from (Add disc, PSP fonts), where
        the next one opens. Empty on a first run: the pickers then open at the
        Desktop (player_app_picker_start_folder). */
@@ -1013,6 +1018,14 @@ struct PlayerApp {
 
     /* The added images waiting for their disc check, and the one running. */
     PlayerDiscCheckState disc_check;
+
+    /* Discord status (#2259): what the running game shows, set when it starts, and the
+       client that sends it (player_app_discord_tick). */
+    char running_title[NK_MAX_TITLE_LEN];
+    PlayerPlayMode running_play_mode;
+    int64_t running_start_ms;      /* Unix time in milliseconds */
+    NkDiscordClient discord;
+    bool discord_ready;            /* discord is initialised */
 };
 
 /* State management API */
@@ -1845,6 +1858,8 @@ typedef struct {
     NkLaunchDataRootStatus data_root_status;
     char package_error[2048];
     char data_root_reason[1024];
+    /* The play mode the session runs in (Authentic, Enhanced or Ace). */
+    PlayerPlayMode play_mode;
     NkLaunchSession session;
 } PlayerLaunchWork;
 
@@ -2238,6 +2253,17 @@ void player_app_set_build_error(
 void player_app_set_online_mode(PlayerApp *app, bool on);
 void player_app_toggle_online_feature(PlayerApp *app, int feature); /* 0 news, 1 reports */
 void player_app_toggle_update_check_at_start(PlayerApp *app);
+/* Discord status (#2259). The switch stays off while nk_discord_available() is false. */
+void player_app_toggle_discord_presence(PlayerApp *app);
+/* What Discord shows now: the running game's title, play mode and start time. False when no
+   game runs or nothing can be shown. It ignores the setting; player_app_discord_tick checks
+   that. */
+bool player_app_discord_activity(const PlayerApp *app, NkDiscordActivity *out);
+/* Once per frame: with the setting on and the feature available, shows the running game (or
+   clears it when none runs); otherwise closes any connection. */
+void player_app_discord_tick(PlayerApp *app, uint64_t now_ms);
+/* Clear Discord status and close the connection, as the player exits. */
+void player_app_discord_shutdown(PlayerApp *app);
 void player_app_set_developer_mode(PlayerApp *app, bool on);
 /* The wizard's options step: skipping keeps both switches off. */
 void player_app_wizard_skip_options(PlayerApp *app);
