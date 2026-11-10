@@ -10259,12 +10259,17 @@ static uint32_t sdt_list_load(uint32_t focus, const char *save, const char *cons
     return sr_savedata_execute(SDT_PARAM);
 }
 
-/* One save NKLIST<save>/DATA.BIN holding `data`, its directory dated `when`. */
+static int sdt_plant_sfo(const char *root, const char *leaf, uint8_t crypt_mode);
+
+/* One whole save NKLIST<save>: an unencrypted PARAM.SFO and DATA.BIN holding `data`, dated
+ * `when` (a save's time is its PARAM.SFO's). */
 static int sdt_plant_list(const char *root, const char *save, const char *data, time_t when) {
-    char leaf[64], dir[512];
+    char leaf[64], dir[512], sfo[600];
     snprintf(leaf, sizeof(leaf), "NKLIST%s", save);
     snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA/%s", root, leaf);
-    return sdt_plant(root, leaf, "DATA.BIN", data) && sdt_set_times(dir, when, when);
+    snprintf(sfo, sizeof(sfo), "%s/PARAM.SFO", dir);
+    return sdt_plant_sfo(root, leaf, 0u) && sdt_plant(root, leaf, "DATA.BIN", data) &&
+           sdt_set_times(sfo, when, when) && sdt_set_times(dir, when, when);
 }
 
 static void test_savedata_list_selection(void) {
@@ -10574,6 +10579,122 @@ static void test_savedata_encrypted_save_refused(void) {
                "an ERASE in a save with an unreadable PARAM.SFO is refused");
     }
     (void)dir;
+    sdt_root_end(root, old);
+}
+
+/* FILES of <game><save> with room for four rows in each list, the system list at SDT_FILES; the
+ * three result counts preset to 0x7f so a written zero shows. */
+static uint32_t sdt_files(const char *game, const char *save) {
+    sdt_param(12u /* FILES */, game, save, "");
+    memset(g_mem_base + SDT_FILES, 0, 80u * 4u);
+    memset(g_mem_base + SDT_FILELIST, 0, 36u);
+    MEM_W32(SDT_FILELIST + 0u, 4u);              /* maxSecure */
+    MEM_W32(SDT_FILELIST + 4u, 4u);              /* maxNormal */
+    MEM_W32(SDT_FILELIST + 8u, 4u);              /* maxSystem */
+    MEM_W32(SDT_FILELIST + 12u, 0x7fu);
+    MEM_W32(SDT_FILELIST + 16u, 0x7fu);
+    MEM_W32(SDT_FILELIST + 20u, 0x7fu);
+    MEM_W32(SDT_FILELIST + 32u, SDT_FILES);      /* system entries */
+    MEM_W32(SDT_PARAM + 0x5f8u, SDT_FILELIST);
+    return sr_savedata_execute(SDT_PARAM);
+}
+
+static int sdt_files_counts_zero(void) {
+    return MEM_R32(SDT_FILELIST + 12u) == 0u && MEM_R32(SDT_FILELIST + 16u) == 0u &&
+           MEM_R32(SDT_FILELIST + 20u) == 0u;
+}
+
+/* One mode against <game><save> with fileName DATA.BIN and the data buffer preset to 0xee. */
+static uint32_t sdt_run(uint32_t mode, const char *game, const char *save) {
+    sdt_param(mode, game, save, "DATA.BIN");
+    memset(g_mem_base + SDT_BUF, 0xee, 0x100u);
+    return sr_savedata_execute(SDT_PARAM);
+}
+
+/* A Memory Stick with no save yet, and a save directory without its PARAM.SFO. The results are
+ * the ones pspautotests records from a PSP (tests/utility/savedata at 26a3dd01: deletedata,
+ * deletebroken, loadbroken, loaddata), except the three marked UNMEASURED, which no recording
+ * covers and which follow the runtime's own no-data codes. Valkyria Chronicles II checks its save
+ * with FILES at boot and read the old LOAD-family answer as a damaged save. */
+static void test_savedata_empty_stick_and_broken_saves(void) {
+    static const char root[] = HLE_BUILD_ROOT "/hle_savedata_nodata";
+    char *old = sdt_root_begin(root);
+    char path[600], dir[512];
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+
+    /* No save directory: first a stick with no PSP/SAVEDATA at all, then one with an empty
+     * PSP/SAVEDATA. */
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA", root);
+            nk_platform_mkdir_p(dir);
+        }
+        snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA/NKEMPTYSLOT", root);
+        expect(sdt_files("NKEMPTY", "SLOT") == 0x80110327u && sdt_files_counts_zero(),
+               "FILES of a save that does not exist is RW_NO_DATA with zero counts (PSP: deletedata)");
+        expect(sdt_run(2u /* LOAD */, "NKEMPTY", "SLOT") == 0x80110307u && MEM_R8(SDT_BUF) == 0xeeu,
+               "LOAD of a save that does not exist is LOAD_NO_DATA and writes nothing (PSP: loaddata)");
+        expect(sdt_run(16u /* READDATA */, "NKEMPTY", "SLOT") == 0x80110327u,
+               "READDATA of a save that does not exist is RW_NO_DATA (PSP: loaddata)");
+        expect(sdt_run(10u /* DELETE */, "NKEMPTY", "SLOT") == 0x80110347u,
+               "DELETE of a save that does not exist is DELETE_NO_DATA, not an access error "
+               "(UNMEASURED value)");
+        expect(sdt_run(21u /* DELETEDATA */, "NKEMPTY", "SLOT") == 0x80110327u,
+               "DELETEDATA of a save that does not exist is RW_NO_DATA (UNMEASURED value)");
+        expect(sdt_run(20u /* ERASE */, "NKEMPTY", "SLOT") == 0x80110327u,
+               "ERASE in a save that does not exist is RW_NO_DATA (UNMEASURED value)");
+        expect(!nk_platform_dir_exists(dir), "no read or delete of a missing save creates it");
+    }
+
+    /* A save directory with its data file and no PARAM.SFO (PSP: broken 2), and an empty one
+     * (broken 3). */
+    for (int empty = 0; empty < 2; empty++) {
+        const char *save = empty ? "HOLLOW" : "NOSFO";
+        char leaf[32];
+        snprintf(leaf, sizeof(leaf), "NKBROKEN%s", save);
+        snprintf(dir, sizeof(dir), "%s/PSP/SAVEDATA/%s", root, leaf);
+        snprintf(path, sizeof(path), "%s/DATA.BIN", dir);
+        if (empty) nk_platform_mkdir_p(dir);
+        else expect(sdt_plant(root, leaf, "DATA.BIN", "ORPHAN"), "a save without PARAM.SFO is planted");
+        expect(sdt_files("NKBROKEN", save) == 0x80110326u && sdt_files_counts_zero(),
+               "FILES of a save without PARAM.SFO is RW_DATA_BROKEN (PSP: deletebroken)");
+        expect(sdt_run(2u /* LOAD */, "NKBROKEN", save) == 0x80110306u && MEM_R8(SDT_BUF) == 0xeeu,
+               "LOAD of a save without PARAM.SFO is LOAD_DATA_BROKEN and writes nothing "
+               "(PSP: loadbroken)");
+        expect(sdt_run(0u /* AUTOLOAD */, "NKBROKEN", save) == 0x80110306u,
+               "AUTOLOAD of a save without PARAM.SFO is LOAD_DATA_BROKEN (PSP: loadbroken)");
+        expect(sdt_run(16u /* READDATA */, "NKBROKEN", save) == 0x80110326u &&
+                   MEM_R8(SDT_BUF) == 0xeeu,
+               "READDATA of a save without PARAM.SFO is RW_DATA_BROKEN (PSP: loadbroken)");
+        expect(sdt_run(15u /* READDATASECURE */, "NKBROKEN", save) == 0x80110326u,
+               "READDATASECURE of a save without PARAM.SFO is RW_DATA_BROKEN (PSP: loadbroken)");
+        expect(sdt_run(20u /* ERASE */, "NKBROKEN", save) == 0x80110326u &&
+                   (empty || nk_platform_file_exists(path)),
+               "ERASE in a save without PARAM.SFO is RW_DATA_BROKEN and erases nothing "
+               "(PSP: deletebroken)");
+        expect(sdt_run(10u /* DELETE */, "NKBROKEN", save) == 0u && !nk_platform_dir_exists(dir),
+               "DELETE of a save without PARAM.SFO succeeds and removes it (PSP: deletebroken)");
+    }
+
+    /* PARAM.SFO and no data file (PSP: broken 1). */
+    expect(sdt_plant_sfo(root, "NKNODATASLOT", 0u), "a save with only PARAM.SFO is planted");
+    expect(sdt_files("NKNODATA", "SLOT") == 0u && MEM_R32(SDT_FILELIST + 20u) == 1u,
+           "FILES of a save with PARAM.SFO lists it in the system list (PSP: deletebroken)");
+    expect(sdt_run(2u /* LOAD */, "NKNODATA", "SLOT") == 0x80110309u,
+           "LOAD of a missing data file is LOAD_FILE_NOT_FOUND (PSP: loadbroken)");
+    expect(sdt_run(16u /* READDATA */, "NKNODATA", "SLOT") == 0x80110329u,
+           "READDATA of a missing data file is RW_FILE_NOT_FOUND (PSP: loadbroken)");
+    expect(sdt_run(20u /* ERASE */, "NKNODATA", "SLOT") == 0x80110329u,
+           "ERASE of a missing data file is RW_FILE_NOT_FOUND (PSP: deletebroken)");
+
+    /* A whole save: DELETE succeeds, and FILES then finds no save (PSP: deletedata). */
+    expect(sdt_plant_sfo(root, "NKWHOLESLOT", 0u) && sdt_plant(root, "NKWHOLESLOT", "DATA.BIN", "DATA"),
+           "a whole save is planted");
+    expect(sdt_files("NKWHOLE", "SLOT") == 0u, "FILES of a whole save succeeds");
+    expect(sdt_run(10u /* DELETE */, "NKWHOLE", "SLOT") == 0u, "DELETE of a whole save succeeds");
+    expect(sdt_files("NKWHOLE", "SLOT") == 0x80110327u && sdt_files_counts_zero(),
+           "FILES after the DELETE is RW_NO_DATA (PSP: deletedata)");
     sdt_root_end(root, old);
 }
 
@@ -50190,6 +50311,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_savedata_list_selection();
     test_savedata_listing_times();
     test_savedata_encrypted_save_refused();
+    test_savedata_empty_stick_and_broken_saves();
     test_savedata_commit_faults();
     test_savedata_nested_outputs();
     test_utility_dialog_measured_states();
