@@ -16,13 +16,11 @@ import hashlib
 import json
 import os
 import fnmatch
-import io
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import unicodedata
 
@@ -3184,22 +3182,82 @@ def export_csv_manifest_report(
             writer.writerow(row)
 
 
+def _committed_tree_entries(tree_sha: str, source_repo: Path) -> list[tuple[str, str, str]]:
+    """``(path, mode, blob id)`` for every entry of a tree, refusing what cannot be audited as a file.
+
+    Read with ``git ls-tree``, so the list is the tree's own and no attribute of the tree can shorten it.
+    Refused: an entry that is not a regular file (a symlink or a submodule has no file bytes to audit), a
+    path that would leave the destination or name Git's own directory, and two paths that differ only in
+    letter case, which a case-insensitive file system would write as one file and so hide the other.
+    """
+    listing = subprocess.run(
+        ["git", "ls-tree", "-r", "-z", "--full-tree", tree_sha], cwd=source_repo,
+        env=isolated_git_env(root=source_repo), capture_output=True, check=True,
+    ).stdout
+    entries: list[tuple[str, str, str]] = []
+    folded: dict[str, str] = {}
+    for record in listing.split(b"\0"):
+        if not record:
+            continue
+        meta, separator, raw_path = record.partition(b"\t")
+        fields = meta.decode("ascii", errors="replace").split()
+        if not separator or len(fields) != 3:
+            raise RuntimeError(f"unreadable git ls-tree record: {record[:80]!r}")
+        mode, kind, object_id = fields
+        try:
+            path = raw_path.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RuntimeError(f"committed tree path is not UTF-8: {raw_path[:80]!r}") from error
+        if kind != "blob" or mode not in ("100644", "100755"):
+            raise RuntimeError(f"committed tree entry is not a regular file: {path} (mode {mode}, {kind})")
+        parts = path.split("/")
+        if (path.startswith("/") or "\\" in path or ":" in path
+                or any(part in ("", ".", "..") or part.lower() == ".git" for part in parts)):
+            raise RuntimeError(f"unsafe path in committed tree: {path}")
+        key = path.casefold()
+        if key in folded:
+            raise RuntimeError(f"committed tree paths differ only in letter case: {folded[key]} and {path}")
+        folded[key] = path
+        entries.append((path, mode, object_id))
+    return entries
+
+
 def _materialize_committed_tree(ref: str, source_repo: Path) -> tuple[Path, str]:
-    """Materialize a commit/tree into a disposable directory for exact-byte audit."""
+    """Materialize a commit/tree into a disposable directory for exact-byte audit.
+
+    Every file is written from the tree's own objects (``git ls-tree``, ``git cat-file``). ``git archive``
+    is not used: it leaves out a path marked ``export-ignore`` and rewrites one marked ``export-subst``,
+    and both attributes come from the ``.gitattributes`` of the tree under audit, so one line there would
+    hide a file from the audit.
+    """
     tree_sha = _git_output(["rev-parse", f"{ref}^{{tree}}"], source_repo).strip()
-    destination = Path(tempfile.mkdtemp(prefix="nakagawa-committed-audit-"))
-    archive = subprocess.run(
-        ["git", "archive", "--format=tar", ref], cwd=source_repo,
-        env=isolated_git_env(root=source_repo),
+    entries = _committed_tree_entries(tree_sha, source_repo)
+    batch = subprocess.run(
+        ["git", "cat-file", "--batch"], cwd=source_repo, env=isolated_git_env(root=source_repo),
+        input="".join(f"{object_id}\n" for _path, _mode, object_id in entries).encode("ascii"),
         capture_output=True, check=True,
     ).stdout
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
-        for member in tar.getmembers():
-            rel = PurePosixPath(member.name)
-            if rel.is_absolute() or ".." in rel.parts:
-                shutil.rmtree(destination, ignore_errors=True)
-                raise RuntimeError(f"unsafe path in committed tree archive: {member.name}")
-        tar.extractall(destination, filter="data")
+    destination = Path(tempfile.mkdtemp(prefix="nakagawa-committed-audit-"))
+    try:
+        position = 0
+        for path, mode, object_id in entries:
+            newline = batch.find(b"\n", position)
+            header = batch[position:newline].decode("ascii", errors="replace").split() if newline != -1 else []
+            if len(header) != 3 or header[0] != object_id or header[1] != "blob" or not header[2].isdigit():
+                raise RuntimeError(f"git cat-file did not return blob {object_id} for {path}")
+            size = int(header[2])
+            data = batch[newline + 1:newline + 1 + size]
+            position = newline + 1 + size + 1
+            if len(data) != size:
+                raise RuntimeError(f"truncated git cat-file payload for {path}")
+            target = destination.joinpath(*path.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            if mode == "100755":
+                target.chmod(target.stat().st_mode | 0o111)
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
     return destination, tree_sha
 
 

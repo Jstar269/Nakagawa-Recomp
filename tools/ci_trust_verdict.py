@@ -265,6 +265,30 @@ PROTECTED_EXTRA = frozenset({
     "tools/ci_test_weights.json",
     "tools/ci_trust_verdict.py",
     "tools/requirements-lock.txt",
+}) | frozenset({
+    # The publication gate's own code. Only the publication audit refuses a file that is outside the
+    # publication profile and is not implementation (game data, a key, a private path). It runs twice: in
+    # the attest job from the default branch's checkout, where a pull request cannot touch it, and in
+    # ``pull_request`` jobs from the pull request's own checkout, through pre-commit hooks and
+    # ``tools/build_public_export.py``. No workflow line names most of these files, so without this list a
+    # pull request could loosen the audit for its own run, and a loosened audit that reached the default
+    # branch unread would be the trusted one from then on. Listed here: every local hook pre-commit runs,
+    # every local module those hooks or the trusted-checkout tools load, and ``.gitattributes``, which the
+    # audit reads for its Git LFS rule. ``GateCodeTests`` in tools/test_ci_trust_verdict.py computes that
+    # closure and fails when a file in it is not protected.
+    ".gitattributes",
+    "tools/enhancement_package.py",
+    "tools/lint_docs.py",
+    "tools/modified_file_notice_audit.py",
+    "tools/nk_core/__init__.py",
+    "tools/nk_core/git_isolation.py",
+    "tools/policy_sync.py",
+    "tools/provenance_ledger.py",
+    "tools/provenance_record_gap.py",
+    "tools/public_candidate.py",
+    "tools/public_export.py",
+    "tools/publication_policy.py",
+    "tools/publish_audit.py",
 })
 
 # A tools/ path standing on its own, not the tail of a longer path such as an

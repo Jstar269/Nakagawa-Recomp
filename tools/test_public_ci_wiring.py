@@ -2916,13 +2916,39 @@ class TrustedAttestationRouteTests(unittest.TestCase):
                 self.assertFalse(_actions_eval(self.guard, context))
                 self.assertEqual(_actions_value(self.title, context), self.PLAIN)
 
+    def test_the_attest_job_audits_the_whole_candidate_tree_with_the_trusted_audit(self) -> None:
+        # Failing-before: no trusted job ran the publication audit, so the only refusal of a file outside the
+        # profile came from the pull request's own copy of the audit.
+        step = _matched(re.search(
+            r"(?m)^      - name: Audit the candidate tree with the trusted publication audit\n((?:(?:        .*)?\n)+)",
+            self.attest)).group(1)
+        self.assertEqual(self.attest.count("python tools/publish_audit.py"), 1)
+        self.assertIn("          HEAD_SHA: ${{ steps.target.outputs.head_sha }}\n", step)
+        self.assertIn("          set -euo pipefail\n", step)
+        # The candidate is named by commit and read as objects; its own profile is the policy.
+        self.assertIn('          git cat-file blob "${HEAD_SHA}:assets/public_source_profile.json" \\\n'
+                      '            > "${RUNNER_TEMP}/tree-audit/public_source_profile.json"\n', step)
+        self.assertIn('          python tools/publish_audit.py \\\n'
+                      '            --repo-root "${GITHUB_WORKSPACE}" \\\n'
+                      '            --committed-tree "${HEAD_SHA}" \\\n'
+                      '            --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \\\n'
+                      '            --public-scope --provenance-self-consistency\n', step)
+        # Its exit code decides the job, it runs only after the verifier passed, and it holds no secret.
+        for tolerant in ("|| true", "continue-on-error", "if:", "secrets.", "GH_TOKEN", "GITHUB_TOKEN"):
+            self.assertNotIn(tolerant, step)
+        verify = self.attest.index("            --trusted-baseline ")
+        audit = self.attest.index("- name: Audit the candidate tree with the trusted publication audit")
+        explain = self.attest.index("- name: Explain the verdict in plain words")
+        self.assertLess(verify, audit)
+        self.assertLess(audit, explain)
+
     def test_every_attestation_step_takes_its_target_from_the_resolver(self) -> None:
         text = _uncommented(self.text)
         # The event's values and the triggering run's head enter once, in the resolver step's env.
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.head\.sha", text)), 2)   # and the title
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.base\.sha", text)), 1)
         self.assertEqual(len(re.findall(r"github\.event\.pull_request\.number", text)), 2)      # and concurrency
-        self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 3)
+        self.assertEqual(self.attest.count("${{ steps.target.outputs.head_sha }}"), 4)
         self.assertEqual(self.attest.count("${{ steps.target.outputs.base_sha }}"), 4)
         self.assertEqual(self.attest.count("${{ steps.target.outputs.number }}"), 1)
         self.assertIn("--attestation-target)", self.attest)

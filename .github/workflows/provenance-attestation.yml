@@ -456,6 +456,33 @@ jobs:
             "${policy_args[@]}" \
             | tee "${RUNNER_TEMP}/verify/report.txt"
 
+      # The publication audit of the candidate's whole tree, by the default
+      # branch's own copy of the audit. The verifier above judges the paths the
+      # profile publishes and new implementation paths; a file that is outside
+      # the profile and is not implementation (game data, a key, a private path)
+      # is not its subject. The pull request's own CI runs the audit too, but
+      # from the pull request's checkout, where the pull request could have
+      # changed the audit. Here it is the trusted copy, and it reads the
+      # candidate's tree from its objects (git ls-tree, git cat-file): never a
+      # checkout and never an archive, so no .gitattributes line of the
+      # candidate can hide a file. The profile is the candidate's, which the
+      # step above has just held to the trusted authority: a path it adds,
+      # removes or excludes is one a maintainer admitted. No secret is in this
+      # step's environment. A finding fails the job.
+      - name: Audit the candidate tree with the trusted publication audit
+        env:
+          HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/tree-audit"
+          git cat-file blob "${HEAD_SHA}:assets/public_source_profile.json" \
+            > "${RUNNER_TEMP}/tree-audit/public_source_profile.json"
+          python tools/publish_audit.py \
+            --repo-root "${GITHUB_WORKSPACE}" \
+            --committed-tree "${HEAD_SHA}" \
+            --policy "${RUNNER_TEMP}/tree-audit/public_source_profile.json" \
+            --public-scope --provenance-self-consistency
+
       # The first thing the pull-request author reads. The verdict itself is
       # unchanged -- this job still fails closed -- but a failure that only
       # means "a maintainer must admit this path" is now said in one sentence

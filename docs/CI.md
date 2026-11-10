@@ -1431,7 +1431,7 @@ and each token's remaining budget.
 
 | Code | Fails when |
 | --- | --- |
-| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
+| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py` and every module they load; `PROTECTED_EXTRA` in the verifier is the list) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
 | `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; the integrator merges `main` when it lands the pull request; the author merges it only for a real conflict in content that is not generated, or when asked (`AGENTS.md` section 10). No label waives it |
 | `CI_CONTEXT_COLLISION` | another workflow names `Trusted CI verdict`, or a check run uses that name |
 | `FOREIGN_PRODUCER` | a check run or status under an intended context is not from the intended workflow path and event at this head |
@@ -1446,6 +1446,13 @@ quick one: `CI required` did not run and `CI quick checks` succeeded. The verdic
 description starts with the code, which is how the landing desk tells a head that is ready for a batch from
 one whose checks are still running. Any other way for `CI required` not to succeed stays `JOB_FAILED`, which
 names `CI quick checks` when that is the job that failed ([Quick and full checks](#quick-and-full-checks)).
+
+The publication gate's code is protected because nothing else refuses a file that is outside the
+publication profile and is not implementation, such as game data or a key. The trusted attestation judges
+the profile's paths and new implementation paths only, and the audit runs from the pull request's own
+checkout, in the hygiene and public-export jobs. Without the approval a pull request could loosen the
+audit and pass it in the same change. `GateCodeTests` in `tools/test_ci_trust_verdict.py` fails when one
+of those tools gains a local import that is not protected, or pre-commit gains a hook that is not.
 
 Whatever the `CI_DEFINITION_BEHIND` finding text says, who merges `main`, and when, is decided by
 [`AGENTS.md` section 10](../AGENTS.md#10-pr-and-integration-authorization), as the row above states.
