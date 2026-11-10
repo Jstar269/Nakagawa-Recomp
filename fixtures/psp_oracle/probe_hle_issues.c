@@ -47,6 +47,9 @@
 //   CASE=vfpu-prefix-state (PSP-VFPU-PREFIX-001): #326 non-identity vpfxs/vpfxt/vpfxd on measured
 //     forms, prefix lifetime across vnop/vsync/vflush/branch/FPU/mtv/mfv/lv.q/vpfxt/mfvc, and
 //     vfim.s/viim.s under a pending vpfxd, with the prefix control words, register-only.
+//   CASE=vfpu-wider-ops (PSP-VFPU-WIDEROPS-001): #326 raw result words of vdiv, vsin, vcos, vrcp,
+//     vrsq, vsqrt and vocp at the widths not yet measured, the .p/.t dot and matrix forms and
+//     vidt into every column and row register of one matrix, register-only.
 //   CASE=null-code-registration (PSP-NULLCODE-001): #1375 entry $ra/$sp/$gp and ABI
 //     argument registers for thread, callback, alarm, VTimer and VBLANK sub-interrupt
 //     entries, followed by NULL registration results; interrupt/GE handlers are not invoked;
@@ -76,8 +79,8 @@
 #include <string.h>
 
 PSP_MODULE_INFO("PSP_HLE_MEASURE", 0, 1, 0);
-#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 || PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175 || PSP_ORACLE_CASE == 176 || PSP_ORACLE_CASE == 182
-/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i, vfpu-wide-dot-matrix, vfpu-mfv-mtv, vfpu-constants, vfpu-round-sep and vfpu-prefix-state run VFPU words on the main thread;
+#if PSP_ORACLE_CASE == 106 || PSP_ORACLE_CASE == 108 || PSP_ORACLE_CASE == 121 || PSP_ORACLE_CASE == 122 || PSP_ORACLE_CASE == 125 || PSP_ORACLE_CASE == 163 || PSP_ORACLE_CASE == 165 || PSP_ORACLE_CASE == 168 || PSP_ORACLE_CASE == 169 || PSP_ORACLE_CASE == 170 || PSP_ORACLE_CASE == 171 || PSP_ORACLE_CASE == 173 || PSP_ORACLE_CASE == 174 || PSP_ORACLE_CASE == 175 || PSP_ORACLE_CASE == 176 || PSP_ORACLE_CASE == 182 || PSP_ORACLE_CASE == 183
+/* hle-issues-batch, vfpu-forms, vfpu-funnel, vfpu-sort, vfpu-forms2, vfpu-unmodeled, vfpu-quad-wb, vfpu-basic-arith, vfpu-cc-cmov, vfpu-convert, vfpu-vus2i, vfpu-wide-dot-matrix, vfpu-mfv-mtv, vfpu-constants, vfpu-round-sep, vfpu-prefix-state and vfpu-wider-ops run VFPU words on the main thread;
    without the VFPU attribute the first VFPU instruction traps (probe.c's vfpu-compare case, measured). */
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 #else
@@ -106,6 +109,7 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CASE_VFPU_CONSTANTS 175
 #define HLE_CASE_VFPU_ROUND_SEP 176
 #define HLE_CASE_VFPU_PREFIX_STATE 182
+#define HLE_CASE_VFPU_WIDER_OPS 183
 #define HLE_CASE_INTR_CAUSE 120
 #define HLE_CASE_NULL_CODE_REGISTRATION 128
 #define HLE_CASE_NULL_THREAD_INVOCATION 129
@@ -179,6 +183,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "vfpu-prefix-state"
 #define HLE_TEST_ID "PSP-VFPU-PREFIX-001"
 #define HLE_LOG "host0:/vfpu_prefix_state_log.txt"
+#elif PSP_ORACLE_CASE == HLE_CASE_VFPU_WIDER_OPS
+#define HLE_CAMPAIGN_ID "vfpu-wider-ops"
+#define HLE_TEST_ID "PSP-VFPU-WIDEROPS-001"
+#define HLE_LOG "host0:/vfpu_wider_ops_log.txt"
 #elif PSP_ORACLE_CASE == HLE_CASE_INTR_CAUSE
 #define HLE_CAMPAIGN_ID "intr-cause"
 #define HLE_TEST_ID "PSP-INTR-CAUSE-001"
@@ -4318,6 +4326,413 @@ static int hle_run(void)
 }
 
 #endif /* HLE_CASE_VFPU_PREFIX_STATE */
+
+/* ------------------------------------------------------------------------- */
+#if PSP_ORACLE_CASE == HLE_CASE_VFPU_WIDER_OPS
+
+/* #326 wider VFPU forms (PSP-VFPU-WIDEROPS-001), two passes, register-only: the raw result words
+   of forms measured so far only at one width. Every cell is one instruction word run over the
+   whole register image with no prefix word issued (the prefixes stay identity), emitted as a
+   word. Every word was assembled with psp-as from the mnemonic named here and none was refused:
+   vdiv.p/.t/.q C200, C000, C010 (0x63810088, 0x63818008, 0x63818088); vsin.p/.t/.q C200, C000
+   (0xd0120088, 0xd0128008, 0xd0128088), vcos (0xd0130088, 0xd0138008, 0xd0138088), vrcp
+   (0xd0100088, 0xd0108008, 0xd0108088), vrsq.q (0xd0118088), vsqrt.q (0xd0168088), vocp.s S200,
+   S000 (0xd0440008) and vocp.q (0xd0448088); vdot.t S200, C000, C010 (0x64818008), vhdp.p
+   (0x66010088), vhdp.t (0x66018008), vscl.t C200, C000, S010 (0x65018008), vcrs.t C200, C000, C010
+   (0x66818008), vmmul.p/.t M200, E100, M000 (0xf0000488, 0xf0008408), vtfm2.p C200, M100, C000
+   (0xf0800488), vtfm3.t (0xf1008408), vhtfm2.p (0xf0800408), vhtfm3.t (0xf1000488), vmscl.p/.t
+   M200, M100, S010 (0xf2010488, 0xf2018408), vmmov.p/.t M200, M100 (0xf3800488, 0xf3808408),
+   vmidt.p/.t M200 (0xf3830088, 0xf3838008), vmzero.p/.t (0xf3860088, 0xf3868008), vmone.p/.t
+   (0xf3870088, 0xf3878008); vidt.q of C200, C210, C220, C230 and R200-R203 (0xd0038088 |
+   register), vidt.p of C200, C202, C210, C212, C220, C222, C230, C232, R200-R203 and R220-R223
+   (0xd0030088 | register; psp-as refuses C201, C203 and R210 as pair registers), vzero.t C200
+   (0xd0068008) and vone.t C200 (0xd0078008).
+   Image layout (word m*16 + c*4 + r): A = C000 (image 0-3), B = C010 (image 4-7, S010 = image 4),
+   M000 image 0-15, M100 image 16-31, the destination C200/M200 image 32-47. Background image word
+   i = 0x3f800000 | i << 16; image 32-47 start as the sentinel 0x7a5a5a5a in every cell.
+   a. vdiv: the 20 operand classes of vfpu-basic-arith (A) against B = 1, +0, +inf, +qNaN
+      0x7fc00011 and the smallest denormal, 100 pairs A-major, lane-packed n to an execution (the
+      last execution of a record padded with its final pair), 50 pairs a record.
+   b. vsin, vcos, vrcp, vrsq, vsqrt and vocp: the 20 special encodings of the vfpu-transcendental
+      corpus in order, lane-packed n to an execution (.t padded with the last).
+   c. The dot and matrix widths: a finite order-sensitive cell (the vector or every row and column
+      of the matrix a permutation of 1e8, 1, -1e8 at .t or 2^24, 1 at .p, the other operand ones),
+      then the same with its first source word replaced by +qNaN 0x7fc00011, +inf and the
+      smallest denormal; vmidt, vmzero and vmone take one cell.
+   d. vidt.q and vidt.p into every legal column and row register of M200, vzero.t and vone.t.
+   Rows: <vdiv>-p<pass>-<record> (result = the word; the destination words of each execution, n
+   per execution); <form>-p<pass> for b (the same over the 20 specials); <form>-c<cell>-p<pass>
+   for a four-cell form of c and <form>-p<pass> for a one-cell form of c and d (result = the
+   word; the recorded source words, then C200 lanes 0-3 or M200 words 0-15). A durable step marker
+   comes before every record. Nothing here writes memory outside the probe's own image and output
+   buffers, no control register is written, and no reserved word is run. */
+
+#include "hle_vfpu_cells.h"
+
+#define WO_DST 32u
+#define WO_MAX_WORDS 64u
+#define WO_OPERANDS 20u
+#define WO_DIV_B 5u
+#define WO_DIV_PAIRS (WO_OPERANDS * WO_DIV_B)
+#define WO_DIV_PER_REC 50u
+#define WO_DIV_RECORDS 2u
+#define WO_DIV_FORMS 3u
+#define WO_UNARY_FORMS 13u
+#define WO_FORMS 47u
+#define WO_SRC_WORDS 114u
+#define WO_ONE 0x3f800000u
+
+typedef void (*wo_fn)(const uint32_t *in, uint32_t *out, uint32_t *cc);
+
+struct wo_lane_form {
+    const char *stem;
+    uint32_t word;
+    wo_fn fn;
+    unsigned lanes;
+};
+
+struct wo_form {
+    const char *stem;
+    uint32_t word;
+    wo_fn fn;
+    unsigned src0;   /* first entry in s_wo_src_idx / s_wo_src_val */
+    unsigned nsrc;   /* recorded source words */
+    unsigned ndst;   /* 4 (C200) or 16 (M200) */
+    unsigned ncells; /* 4 (finite, qNaN, inf, denormal) or 1 */
+};
+
+TN_CELL_FN(wo_vdiv_p, TN_PFX_NONE, "0x63810088")
+TN_CELL_FN(wo_vdiv_t, TN_PFX_NONE, "0x63818008")
+TN_CELL_FN(wo_vdiv_q, TN_PFX_NONE, "0x63818088")
+TN_CELL_FN(wo_vsin_p, TN_PFX_NONE, "0xd0120088")
+TN_CELL_FN(wo_vsin_t, TN_PFX_NONE, "0xd0128008")
+TN_CELL_FN(wo_vsin_q, TN_PFX_NONE, "0xd0128088")
+TN_CELL_FN(wo_vcos_p, TN_PFX_NONE, "0xd0130088")
+TN_CELL_FN(wo_vcos_t, TN_PFX_NONE, "0xd0138008")
+TN_CELL_FN(wo_vcos_q, TN_PFX_NONE, "0xd0138088")
+TN_CELL_FN(wo_vrcp_p, TN_PFX_NONE, "0xd0100088")
+TN_CELL_FN(wo_vrcp_t, TN_PFX_NONE, "0xd0108008")
+TN_CELL_FN(wo_vrcp_q, TN_PFX_NONE, "0xd0108088")
+TN_CELL_FN(wo_vrsq_q, TN_PFX_NONE, "0xd0118088")
+TN_CELL_FN(wo_vsqrt_q, TN_PFX_NONE, "0xd0168088")
+TN_CELL_FN(wo_vocp_s, TN_PFX_NONE, "0xd0440008")
+TN_CELL_FN(wo_vocp_q, TN_PFX_NONE, "0xd0448088")
+TN_CELL_FN(wo_vdot_t, TN_PFX_NONE, "0x64818008")
+TN_CELL_FN(wo_vhdp_p, TN_PFX_NONE, "0x66010088")
+TN_CELL_FN(wo_vhdp_t, TN_PFX_NONE, "0x66018008")
+TN_CELL_FN(wo_vscl_t, TN_PFX_NONE, "0x65018008")
+TN_CELL_FN(wo_vcrs_t, TN_PFX_NONE, "0x66818008")
+TN_CELL_FN(wo_vmmul_p, TN_PFX_NONE, "0xf0000488")
+TN_CELL_FN(wo_vmmul_t, TN_PFX_NONE, "0xf0008408")
+TN_CELL_FN(wo_vtfm2_p, TN_PFX_NONE, "0xf0800488")
+TN_CELL_FN(wo_vtfm3_t, TN_PFX_NONE, "0xf1008408")
+TN_CELL_FN(wo_vhtfm2_p, TN_PFX_NONE, "0xf0800408")
+TN_CELL_FN(wo_vhtfm3_t, TN_PFX_NONE, "0xf1000488")
+TN_CELL_FN(wo_vmscl_p, TN_PFX_NONE, "0xf2010488")
+TN_CELL_FN(wo_vmscl_t, TN_PFX_NONE, "0xf2018408")
+TN_CELL_FN(wo_vmmov_p, TN_PFX_NONE, "0xf3800488")
+TN_CELL_FN(wo_vmmov_t, TN_PFX_NONE, "0xf3808408")
+TN_CELL_FN(wo_vmidt_p, TN_PFX_NONE, "0xf3830088")
+TN_CELL_FN(wo_vmidt_t, TN_PFX_NONE, "0xf3838008")
+TN_CELL_FN(wo_vmzero_p, TN_PFX_NONE, "0xf3860088")
+TN_CELL_FN(wo_vmzero_t, TN_PFX_NONE, "0xf3868008")
+TN_CELL_FN(wo_vmone_p, TN_PFX_NONE, "0xf3870088")
+TN_CELL_FN(wo_vmone_t, TN_PFX_NONE, "0xf3878008")
+TN_CELL_FN(wo_vidt_q_c200, TN_PFX_NONE, "0xd0038088")
+TN_CELL_FN(wo_vidt_q_c210, TN_PFX_NONE, "0xd0038089")
+TN_CELL_FN(wo_vidt_q_c220, TN_PFX_NONE, "0xd003808a")
+TN_CELL_FN(wo_vidt_q_c230, TN_PFX_NONE, "0xd003808b")
+TN_CELL_FN(wo_vidt_q_r200, TN_PFX_NONE, "0xd00380a8")
+TN_CELL_FN(wo_vidt_q_r201, TN_PFX_NONE, "0xd00380a9")
+TN_CELL_FN(wo_vidt_q_r202, TN_PFX_NONE, "0xd00380aa")
+TN_CELL_FN(wo_vidt_q_r203, TN_PFX_NONE, "0xd00380ab")
+TN_CELL_FN(wo_vidt_p_c200, TN_PFX_NONE, "0xd0030088")
+TN_CELL_FN(wo_vidt_p_c202, TN_PFX_NONE, "0xd00300c8")
+TN_CELL_FN(wo_vidt_p_c210, TN_PFX_NONE, "0xd0030089")
+TN_CELL_FN(wo_vidt_p_c212, TN_PFX_NONE, "0xd00300c9")
+TN_CELL_FN(wo_vidt_p_c220, TN_PFX_NONE, "0xd003008a")
+TN_CELL_FN(wo_vidt_p_c222, TN_PFX_NONE, "0xd00300ca")
+TN_CELL_FN(wo_vidt_p_c230, TN_PFX_NONE, "0xd003008b")
+TN_CELL_FN(wo_vidt_p_c232, TN_PFX_NONE, "0xd00300cb")
+TN_CELL_FN(wo_vidt_p_r200, TN_PFX_NONE, "0xd00300a8")
+TN_CELL_FN(wo_vidt_p_r201, TN_PFX_NONE, "0xd00300a9")
+TN_CELL_FN(wo_vidt_p_r202, TN_PFX_NONE, "0xd00300aa")
+TN_CELL_FN(wo_vidt_p_r203, TN_PFX_NONE, "0xd00300ab")
+TN_CELL_FN(wo_vidt_p_r220, TN_PFX_NONE, "0xd00300e8")
+TN_CELL_FN(wo_vidt_p_r221, TN_PFX_NONE, "0xd00300e9")
+TN_CELL_FN(wo_vidt_p_r222, TN_PFX_NONE, "0xd00300ea")
+TN_CELL_FN(wo_vidt_p_r223, TN_PFX_NONE, "0xd00300eb")
+TN_CELL_FN(wo_vzero_t, TN_PFX_NONE, "0xd0068008")
+TN_CELL_FN(wo_vone_t, TN_PFX_NONE, "0xd0078008")
+
+static const struct wo_lane_form s_wo_div[WO_DIV_FORMS] = {
+    {"vdiv-p", 0x63810088u, wo_vdiv_p, 2},
+    {"vdiv-t", 0x63818008u, wo_vdiv_t, 3},
+    {"vdiv-q", 0x63818088u, wo_vdiv_q, 4},
+};
+static const struct wo_lane_form s_wo_unary[WO_UNARY_FORMS] = {
+    {"vsin-p", 0xd0120088u, wo_vsin_p, 2},
+    {"vsin-t", 0xd0128008u, wo_vsin_t, 3},
+    {"vsin-q", 0xd0128088u, wo_vsin_q, 4},
+    {"vcos-p", 0xd0130088u, wo_vcos_p, 2},
+    {"vcos-t", 0xd0138008u, wo_vcos_t, 3},
+    {"vcos-q", 0xd0138088u, wo_vcos_q, 4},
+    {"vrcp-p", 0xd0100088u, wo_vrcp_p, 2},
+    {"vrcp-t", 0xd0108008u, wo_vrcp_t, 3},
+    {"vrcp-q", 0xd0108088u, wo_vrcp_q, 4},
+    {"vrsq-q", 0xd0118088u, wo_vrsq_q, 4},
+    {"vsqrt-q", 0xd0168088u, wo_vsqrt_q, 4},
+    {"vocp-s", 0xd0440008u, wo_vocp_s, 1},
+    {"vocp-q", 0xd0448088u, wo_vocp_q, 4},
+};
+
+/* Source image indices and base words of the cell forms, 114 in all. */
+static const uint8_t s_wo_src_idx[WO_SRC_WORDS] = {
+    0u, 1u, 2u, 4u, 5u, 6u, 0u, 1u, 4u, 5u, 0u, 1u, 2u, 4u, 5u, 6u,
+    0u, 1u, 2u, 4u, 0u, 1u, 2u, 4u, 5u, 6u, 0u, 1u, 4u, 5u, 16u, 17u,
+    20u, 21u, 0u, 1u, 2u, 4u, 5u, 6u, 8u, 9u, 10u, 16u, 17u, 18u, 20u, 21u,
+    22u, 24u, 25u, 26u, 0u, 1u, 16u, 17u, 20u, 21u, 0u, 1u, 2u, 16u, 17u, 18u,
+    20u, 21u, 22u, 24u, 25u, 26u, 0u, 16u, 17u, 20u, 21u, 0u, 1u, 16u, 17u, 18u,
+    20u, 21u, 22u, 24u, 25u, 26u, 4u, 16u, 17u, 20u, 21u, 4u, 16u, 17u, 18u, 20u,
+    21u, 22u, 24u, 25u, 26u, 16u, 17u, 20u, 21u, 16u, 17u, 18u, 20u, 21u, 22u, 24u,
+    25u, 26u,
+};
+static const uint32_t s_wo_src_val[WO_SRC_WORDS] = {
+    0x4cbebc20u, 0x3f800000u, 0xccbebc20u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+    0x4b800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x4cbebc20u, 0x3f800000u,
+    0x3f800000u, 0x3f800000u, 0x3f800000u, 0xccbebc20u, 0x4cbebc20u, 0x3f800000u,
+    0xccbebc20u, 0x3eaaaaabu, 0x4cbebc20u, 0x3f800000u, 0xccbebc20u, 0x3f400000u,
+    0x40800000u, 0xbfc00000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+    0x4b800000u, 0x3f800000u, 0x3f800000u, 0x4b800000u, 0x3f800000u, 0x3f800000u,
+    0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+    0x3f800000u, 0x4cbebc20u, 0x3f800000u, 0xccbebc20u, 0x3f800000u, 0xccbebc20u,
+    0x4cbebc20u, 0xccbebc20u, 0x4cbebc20u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+    0x4b800000u, 0x3f800000u, 0x3f800000u, 0x4b800000u, 0x3f800000u, 0x3f800000u,
+    0x3f800000u, 0x4cbebc20u, 0x3f800000u, 0xccbebc20u, 0x3f800000u, 0xccbebc20u,
+    0x4cbebc20u, 0xccbebc20u, 0x4cbebc20u, 0x3f800000u, 0x3f800000u, 0x4b800000u,
+    0x3f800000u, 0x3f800000u, 0x4b800000u, 0x3f800000u, 0x3f800000u, 0x4cbebc20u,
+    0x3f800000u, 0xccbebc20u, 0x3f800000u, 0xccbebc20u, 0x4cbebc20u, 0xccbebc20u,
+    0x4cbebc20u, 0x3f800000u, 0x3eaaaaabu, 0x4b800000u, 0x3f800000u, 0x3f800000u,
+    0x4b800000u, 0x3eaaaaabu, 0x4cbebc20u, 0x3f800000u, 0xccbebc20u, 0x3f800000u,
+    0xccbebc20u, 0x4cbebc20u, 0xccbebc20u, 0x4cbebc20u, 0x3f800000u, 0x4b800000u,
+    0x3f800000u, 0x3f800000u, 0x4b800000u, 0x4cbebc20u, 0x3f800000u, 0xccbebc20u,
+    0x3f800000u, 0xccbebc20u, 0x4cbebc20u, 0xccbebc20u, 0x4cbebc20u, 0x3f800000u,
+};
+
+/* stem, word, cell function, first source, sources, destination words, cells. */
+static const struct wo_form s_wo_forms[WO_FORMS] = {
+    {"vdot-t", 0x64818008u, wo_vdot_t, 0, 6, 4, 4},
+    {"vhdp-p", 0x66010088u, wo_vhdp_p, 6, 4, 4, 4},
+    {"vhdp-t", 0x66018008u, wo_vhdp_t, 10, 6, 4, 4},
+    {"vscl-t", 0x65018008u, wo_vscl_t, 16, 4, 4, 4},
+    {"vcrs-t", 0x66818008u, wo_vcrs_t, 20, 6, 4, 4},
+    {"vmmul-p", 0xf0000488u, wo_vmmul_p, 26, 8, 16, 4},
+    {"vmmul-t", 0xf0008408u, wo_vmmul_t, 34, 18, 16, 4},
+    {"vtfm2-p", 0xf0800488u, wo_vtfm2_p, 52, 6, 4, 4},
+    {"vtfm3-t", 0xf1008408u, wo_vtfm3_t, 58, 12, 4, 4},
+    {"vhtfm2-p", 0xf0800408u, wo_vhtfm2_p, 70, 5, 4, 4},
+    {"vhtfm3-t", 0xf1000488u, wo_vhtfm3_t, 75, 11, 4, 4},
+    {"vmscl-p", 0xf2010488u, wo_vmscl_p, 86, 5, 16, 4},
+    {"vmscl-t", 0xf2018408u, wo_vmscl_t, 91, 10, 16, 4},
+    {"vmmov-p", 0xf3800488u, wo_vmmov_p, 101, 4, 16, 4},
+    {"vmmov-t", 0xf3808408u, wo_vmmov_t, 105, 9, 16, 4},
+    {"vmidt-p", 0xf3830088u, wo_vmidt_p, 114, 0, 16, 1},
+    {"vmidt-t", 0xf3838008u, wo_vmidt_t, 114, 0, 16, 1},
+    {"vmzero-p", 0xf3860088u, wo_vmzero_p, 114, 0, 16, 1},
+    {"vmzero-t", 0xf3868008u, wo_vmzero_t, 114, 0, 16, 1},
+    {"vmone-p", 0xf3870088u, wo_vmone_p, 114, 0, 16, 1},
+    {"vmone-t", 0xf3878008u, wo_vmone_t, 114, 0, 16, 1},
+    {"vidt-q-c200", 0xd0038088u, wo_vidt_q_c200, 114, 0, 16, 1},
+    {"vidt-q-c210", 0xd0038089u, wo_vidt_q_c210, 114, 0, 16, 1},
+    {"vidt-q-c220", 0xd003808au, wo_vidt_q_c220, 114, 0, 16, 1},
+    {"vidt-q-c230", 0xd003808bu, wo_vidt_q_c230, 114, 0, 16, 1},
+    {"vidt-q-r200", 0xd00380a8u, wo_vidt_q_r200, 114, 0, 16, 1},
+    {"vidt-q-r201", 0xd00380a9u, wo_vidt_q_r201, 114, 0, 16, 1},
+    {"vidt-q-r202", 0xd00380aau, wo_vidt_q_r202, 114, 0, 16, 1},
+    {"vidt-q-r203", 0xd00380abu, wo_vidt_q_r203, 114, 0, 16, 1},
+    {"vidt-p-c200", 0xd0030088u, wo_vidt_p_c200, 114, 0, 16, 1},
+    {"vidt-p-c202", 0xd00300c8u, wo_vidt_p_c202, 114, 0, 16, 1},
+    {"vidt-p-c210", 0xd0030089u, wo_vidt_p_c210, 114, 0, 16, 1},
+    {"vidt-p-c212", 0xd00300c9u, wo_vidt_p_c212, 114, 0, 16, 1},
+    {"vidt-p-c220", 0xd003008au, wo_vidt_p_c220, 114, 0, 16, 1},
+    {"vidt-p-c222", 0xd00300cau, wo_vidt_p_c222, 114, 0, 16, 1},
+    {"vidt-p-c230", 0xd003008bu, wo_vidt_p_c230, 114, 0, 16, 1},
+    {"vidt-p-c232", 0xd00300cbu, wo_vidt_p_c232, 114, 0, 16, 1},
+    {"vidt-p-r200", 0xd00300a8u, wo_vidt_p_r200, 114, 0, 16, 1},
+    {"vidt-p-r201", 0xd00300a9u, wo_vidt_p_r201, 114, 0, 16, 1},
+    {"vidt-p-r202", 0xd00300aau, wo_vidt_p_r202, 114, 0, 16, 1},
+    {"vidt-p-r203", 0xd00300abu, wo_vidt_p_r203, 114, 0, 16, 1},
+    {"vidt-p-r220", 0xd00300e8u, wo_vidt_p_r220, 114, 0, 16, 1},
+    {"vidt-p-r221", 0xd00300e9u, wo_vidt_p_r221, 114, 0, 16, 1},
+    {"vidt-p-r222", 0xd00300eau, wo_vidt_p_r222, 114, 0, 16, 1},
+    {"vidt-p-r223", 0xd00300ebu, wo_vidt_p_r223, 114, 0, 16, 1},
+    {"vzero-t", 0xd0068008u, wo_vzero_t, 114, 0, 4, 1},
+    {"vone-t", 0xd0078008u, wo_vone_t, 114, 0, 4, 1},
+};
+
+/* The 20 operand classes of vfpu-basic-arith: +-0, +-smallest denormal, +-largest denormal,
+   +-smallest normal, +-1, +-2^127, +-FLT_MAX, +-inf, quiet and signalling NaNs of both signs. */
+static const uint32_t s_wo_ops[WO_OPERANDS] = {
+    0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u, 0x007fffffu, 0x807fffffu,
+    0x00800000u, 0x80800000u, 0x3f800000u, 0xbf800000u, 0x7f000000u, 0xff000000u,
+    0x7f7fffffu, 0xff7fffffu, 0x7f800000u, 0xff800000u, 0x7fc00011u, 0xffc00022u,
+    0x7f800033u, 0xff800044u,
+};
+/* The vdiv divisors: 1, +0, +inf, +qNaN, the smallest denormal. */
+static const uint32_t s_wo_div_b[WO_DIV_B] = {
+    0x3f800000u, 0x00000000u, 0x7f800000u, 0x7fc00011u, 0x00000001u,
+};
+/* The 20 special encodings of the vfpu-transcendental corpus (probe.c). */
+static const uint32_t s_wo_trans[WO_OPERANDS] = {
+    0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u, 0x3f800000u, 0xbf800000u,
+    0x3f000000u, 0xbf000000u, 0x40000000u, 0xc0000000u, 0x00800000u, 0x80800000u,
+    0x7f000000u, 0xff000000u, 0x7f800000u, 0xff800000u, 0x7fc00000u, 0xffc00000u,
+    0x7f800001u, 0xff800001u,
+};
+/* The first source word of cells 1-3: +qNaN, +inf, the smallest denormal. */
+static const uint32_t s_wo_spec[3] = {0x7fc00011u, 0x7f800000u, 0x00000001u};
+
+static uint32_t s_wo_in[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+static uint32_t s_wo_out[TN_IMAGE_WORDS] __attribute__((aligned(64)));
+
+/* Background image, image 32-47 the sentinel. */
+static void wo_image(void)
+{
+    for (unsigned i = 0; i < TN_IMAGE_WORDS; i++) {
+        s_wo_in[i] = 0x3f800000u | (i << 16);
+    }
+    for (unsigned i = 0; i < 16u; i++) {
+        s_wo_in[WO_DST + i] = TN_SENTINEL;
+    }
+}
+
+/* One lane-packed execution: A over image 0-3, B over image 4-7; n destination words to dst. */
+static void wo_lane_exec(wo_fn fn, const uint32_t *a, const uint32_t *b, uint32_t *dst, unsigned n)
+{
+    wo_image();
+    for (unsigned i = 0; i < 4u; i++) {
+        s_wo_in[i] = a[i];
+        s_wo_in[4u + i] = b[i];
+    }
+    uint32_t cc[2] = {0u, 0u};
+    fn(s_wo_in, s_wo_out, cc);
+    for (unsigned i = 0; i < n; i++) {
+        dst[i] = s_wo_out[WO_DST + i];
+    }
+}
+
+/* Row <vdiv>-p<pass>-<rec>: pairs 50*rec .. (k = 5 * a + b), lane l of execution e taking pair
+   50*rec + e*n + l, clamped to the last pair of the record. */
+static void wo_div_group(unsigned pass, const struct wo_lane_form *f)
+{
+    char name[64];
+    uint32_t w[WO_MAX_WORDS];
+    const unsigned n = f->lanes;
+    const unsigned nexec = (WO_DIV_PER_REC + n - 1u) / n;
+    for (unsigned rec = 0; rec < WO_DIV_RECORDS; rec++) {
+        snprintf(name, sizeof(name), "%s-p%u-%u", f->stem, pass, rec);
+        hle_step(name);
+        unsigned count = 0;
+        for (unsigned e = 0; e < nexec; e++) {
+            uint32_t a[4] = {WO_ONE, WO_ONE, WO_ONE, WO_ONE};
+            uint32_t b[4] = {WO_ONE, WO_ONE, WO_ONE, WO_ONE};
+            for (unsigned l = 0; l < n; l++) {
+                unsigned k = e * n + l;
+                if (k >= WO_DIV_PER_REC) {
+                    k = WO_DIV_PER_REC - 1u;
+                }
+                k += rec * WO_DIV_PER_REC;
+                a[l] = s_wo_ops[k / WO_DIV_B];
+                b[l] = s_wo_div_b[k % WO_DIV_B];
+            }
+            wo_lane_exec(f->fn, a, b, &w[count], n);
+            count += n;
+        }
+        hle_record(name, "PASS", f->word, w, count);
+    }
+}
+
+/* Row <form>-p<pass>: the 20 specials over the lanes, n to an execution, the last clamped. */
+static void wo_unary_group(unsigned pass, const struct wo_lane_form *f)
+{
+    char name[64];
+    uint32_t w[WO_MAX_WORDS];
+    const unsigned n = f->lanes;
+    const unsigned nexec = (WO_OPERANDS + n - 1u) / n;
+    snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+    hle_step(name);
+    unsigned count = 0;
+    for (unsigned e = 0; e < nexec; e++) {
+        uint32_t a[4] = {WO_ONE, WO_ONE, WO_ONE, WO_ONE};
+        const uint32_t b[4] = {WO_ONE, WO_ONE, WO_ONE, WO_ONE};
+        for (unsigned l = 0; l < n; l++) {
+            unsigned k = e * n + l;
+            if (k >= WO_OPERANDS) {
+                k = WO_OPERANDS - 1u;
+            }
+            a[l] = s_wo_trans[k];
+        }
+        wo_lane_exec(f->fn, a, b, &w[count], n);
+        count += n;
+    }
+    hle_record(name, "PASS", f->word, w, count);
+}
+
+/* Row <form>[-c<cell>]-p<pass>: the source words (cell 1-3 replace the first), the word, then
+   the destination words. */
+static void wo_form_group(unsigned pass, const struct wo_form *f)
+{
+    char name[64];
+    uint32_t w[WO_MAX_WORDS];
+    const unsigned nin = f->nsrc;
+    const unsigned nout = f->ndst;
+    const unsigned ncells = f->ncells;
+    for (unsigned cell = 0; cell < ncells; cell++) {
+        if (ncells > 1u) {
+            snprintf(name, sizeof(name), "%s-c%u-p%u", f->stem, cell, pass);
+        } else {
+            snprintf(name, sizeof(name), "%s-p%u", f->stem, pass);
+        }
+        hle_step(name);
+        wo_image();
+        for (unsigned j = 0; j < nin; j++) {
+            s_wo_in[s_wo_src_idx[f->src0 + j]] = s_wo_src_val[f->src0 + j];
+        }
+        if (cell > 0u) {
+            s_wo_in[s_wo_src_idx[f->src0]] = s_wo_spec[cell - 1u];
+        }
+        unsigned count = 0;
+        for (unsigned j = 0; j < nin; j++) {
+            w[count++] = s_wo_in[s_wo_src_idx[f->src0 + j]];
+        }
+        uint32_t cc[2] = {0u, 0u};
+        f->fn(s_wo_in, s_wo_out, cc);
+        for (unsigned i = 0; i < nout; i++) {
+            w[count++] = s_wo_out[WO_DST + i];
+        }
+        hle_record(name, "PASS", f->word, w, count);
+    }
+}
+
+static int hle_run(void)
+{
+    /* Traps off before the first VFPU cell, as in the vfpu-compare case. */
+    __asm__ volatile("ctc1 $0, $31" ::: "memory");
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        for (unsigned form = 0; form < WO_DIV_FORMS; form++) {
+            wo_div_group(pass, &s_wo_div[form]);
+        }
+        for (unsigned form = 0; form < WO_UNARY_FORMS; form++) {
+            wo_unary_group(pass, &s_wo_unary[form]);
+        }
+        for (unsigned form = 0; form < WO_FORMS; form++) {
+            wo_form_group(pass, &s_wo_forms[form]);
+        }
+    }
+    return 1;
+}
+
+#endif /* HLE_CASE_VFPU_WIDER_OPS */
 
 #if PSP_ORACLE_CASE == HLE_CASE_VFPU_CC_CMOV
 

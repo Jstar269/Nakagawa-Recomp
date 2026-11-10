@@ -360,6 +360,10 @@ CASE_ID = 176
 # probe_hle_issues.c), register-only.
 else ifeq ($(CASE),vfpu-prefix-state)
 CASE_ID = 182
+# 183: the #326 wider VFPU forms (vdiv, vsin/vcos/vrcp/vrsq/vsqrt/vocp, the .p/.t dot and matrix
+# forms, vidt into every column and row register; probe_hle_issues.c), register-only.
+else ifeq ($(CASE),vfpu-wider-ops)
+CASE_ID = 183
 else ifeq ($(CASE),thread-k0-block)
 CASE_ID = 116
 else ifeq ($(CASE),sas-init)
@@ -686,6 +690,9 @@ TARGET = $(BUILD_DIR)/vfpu_round_sep
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 else ifeq ($(CASE),vfpu-prefix-state)
 TARGET = $(BUILD_DIR)/vfpu_prefix_state
+OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
+else ifeq ($(CASE),vfpu-wider-ops)
+TARGET = $(BUILD_DIR)/vfpu_wider_ops
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
 # The GE sample-point cells: their own source (raw display lists, no libpspgu) with the
 # same writer, ThreadManForUser block and module lifecycle as the HLE issue cells.

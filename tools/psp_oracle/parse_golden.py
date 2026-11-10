@@ -2476,6 +2476,92 @@ _register_campaign_probe(
     dict(VFPU_PREFIX_STATE_ROWS),
 )
 
+
+# vfpu-wider-ops (183, probe_hle_issues.c): the #326 wider VFPU forms, two passes, register-only.
+# Every row is emitted on every run, so the stream is fixed-shape. Per pass p, in run order:
+# <vdiv>-p<p>-<rec> (two records of 50 lane-packed pairs, ceil(50 / n) * n destination words);
+# <form>-p<p> for the transcendental-corpus forms (ceil(20 / n) * n words); then each cell form:
+# <form>-c<cell>-p<p> for a four-cell form, <form>-p<p> for a one-cell form (source words, then
+# destination words).
+VFPU_WIDER_OPS_DIV = (("vdiv-p", 2), ("vdiv-t", 3), ("vdiv-q", 4))
+VFPU_WIDER_OPS_UNARY = (
+    ("vsin-p", 2), ("vsin-t", 3), ("vsin-q", 4), ("vcos-p", 2), ("vcos-t", 3), ("vcos-q", 4),
+    ("vrcp-p", 2), ("vrcp-t", 3), ("vrcp-q", 4), ("vrsq-q", 4), ("vsqrt-q", 4), ("vocp-s", 1),
+    ("vocp-q", 4),
+)
+#: (stem, source words, destination words, cells).
+VFPU_WIDER_OPS_CELL_FORMS = (
+    ("vdot-t", 6, 4, 4),
+    ("vhdp-p", 4, 4, 4),
+    ("vhdp-t", 6, 4, 4),
+    ("vscl-t", 4, 4, 4),
+    ("vcrs-t", 6, 4, 4),
+    ("vmmul-p", 8, 16, 4),
+    ("vmmul-t", 18, 16, 4),
+    ("vtfm2-p", 6, 4, 4),
+    ("vtfm3-t", 12, 4, 4),
+    ("vhtfm2-p", 5, 4, 4),
+    ("vhtfm3-t", 11, 4, 4),
+    ("vmscl-p", 5, 16, 4),
+    ("vmscl-t", 10, 16, 4),
+    ("vmmov-p", 4, 16, 4),
+    ("vmmov-t", 9, 16, 4),
+    ("vmidt-p", 0, 16, 1),
+    ("vmidt-t", 0, 16, 1),
+    ("vmzero-p", 0, 16, 1),
+    ("vmzero-t", 0, 16, 1),
+    ("vmone-p", 0, 16, 1),
+    ("vmone-t", 0, 16, 1),
+    ("vidt-q-c200", 0, 16, 1),
+    ("vidt-q-c210", 0, 16, 1),
+    ("vidt-q-c220", 0, 16, 1),
+    ("vidt-q-c230", 0, 16, 1),
+    ("vidt-q-r200", 0, 16, 1),
+    ("vidt-q-r201", 0, 16, 1),
+    ("vidt-q-r202", 0, 16, 1),
+    ("vidt-q-r203", 0, 16, 1),
+    ("vidt-p-c200", 0, 16, 1),
+    ("vidt-p-c202", 0, 16, 1),
+    ("vidt-p-c210", 0, 16, 1),
+    ("vidt-p-c212", 0, 16, 1),
+    ("vidt-p-c220", 0, 16, 1),
+    ("vidt-p-c222", 0, 16, 1),
+    ("vidt-p-c230", 0, 16, 1),
+    ("vidt-p-c232", 0, 16, 1),
+    ("vidt-p-r200", 0, 16, 1),
+    ("vidt-p-r201", 0, 16, 1),
+    ("vidt-p-r202", 0, 16, 1),
+    ("vidt-p-r203", 0, 16, 1),
+    ("vidt-p-r220", 0, 16, 1),
+    ("vidt-p-r221", 0, 16, 1),
+    ("vidt-p-r222", 0, 16, 1),
+    ("vidt-p-r223", 0, 16, 1),
+    ("vzero-t", 0, 4, 1),
+    ("vone-t", 0, 4, 1),
+)
+
+
+def _vfpu_wider_ops_pass_rows(p: int) -> list[tuple[str, int]]:
+    rows: list[tuple[str, int]] = []
+    for stem, lanes in VFPU_WIDER_OPS_DIV:
+        rows.extend((f"{stem}-p{p}-{rec}", -(-50 // lanes) * lanes) for rec in range(2))
+    for stem, lanes in VFPU_WIDER_OPS_UNARY:
+        rows.append((f"{stem}-p{p}", -(-20 // lanes) * lanes))
+    for stem, nsrc, ndst, cells in VFPU_WIDER_OPS_CELL_FORMS:
+        if cells == 1:
+            rows.append((f"{stem}-p{p}", nsrc + ndst))
+        else:
+            rows.extend((f"{stem}-c{cell}-p{p}", nsrc + ndst) for cell in range(cells))
+    return rows
+
+
+VFPU_WIDER_OPS_ROWS = tuple(row for p in range(2) for row in _vfpu_wider_ops_pass_rows(p))
+VFPU_WIDER_OPS_CASES = tuple(case for case, _count in VFPU_WIDER_OPS_ROWS)
+_register_campaign_probe(
+    "vfpu-wider-ops", "PSP-VFPU-WIDEROPS-001", VFPU_WIDER_OPS_CASES,
+    dict(VFPU_WIDER_OPS_ROWS),
+)
+
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
 # emitted on every run, so the stream is fixed-shape: per mapping, primitive (triangle pair
 # or sprite), filter and texture, one `-draw` record (the GE wait outcome, 7 words) and one
@@ -3163,7 +3249,8 @@ HLE_OBSERVATION_CASES = frozenset({"hle-issues-batch", "vfpu-forms", "intr-cause
                                    "vfpu-funnel", "vfpu-sort", "vfpu-unmodeled", "vfpu-quad-wb", "vfpu-convert", "vfpu-cc-cmov", "vfpu-vus2i", "vfpu-basic-arith",
                                    "hle-io-seek", "hle-nickname-limit", "hle-self-stop-unload", "vfpu-wide-dot-matrix",
                                    "vfpu-mfv-mtv", "vfpu-constants", "vfpu-round-sep",
-                                   "vfpu-prefix-state"})
+                                   "vfpu-prefix-state",
+                                   "vfpu-wider-ops"})
 
 #: hle-kernel-pool-bounds fixed-pool (create, delete) cell pairs.
 HLE_POOL_BOUNDS_FPL_PAIRS = (
