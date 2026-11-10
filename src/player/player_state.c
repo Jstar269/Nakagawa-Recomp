@@ -2817,23 +2817,11 @@ void player_app_toggle_ui_sounds(PlayerApp *app) {
 bool player_app_shipped_enhancements_root(const PlayerApp *app, char *out, size_t out_size) {
     if (!out || out_size == 0) return false;
     out[0] = '\0';
-    char cli[NK_MAX_PATH];
-    if (!app || !package_builder_find_cli(app->install_root, cli, sizeof(cli))) return false;
-    /* <source>/tools/nk_cli.py: drop the last two components. */
-    for (int drop = 0; drop < 2; drop++) {
-        char *cut = NULL;
-        for (char *p = cli; *p; p++) {
-            if (*p == '/' || *p == '\\') cut = p;
-        }
-        if (!cut) {
-            if (drop == 0) return false;
-            cli[0] = '\0';  /* a relative tools/nk_cli.py: the source tree is "." */
-            break;
-        }
-        *cut = '\0';
-    }
+    /* The tree whose tools/nk_cli.py builds packages ships them: the same root a build uses. */
+    char source[NK_MAX_PATH];
     char assets[NK_MAX_PATH];
-    return player_join_path(assets, sizeof(assets), cli[0] ? cli : ".", "assets") &&
+    return player_app_build_source_root(app, source, sizeof(source)) &&
+           player_join_path(assets, sizeof(assets), source, "assets") &&
            player_join_path(out, out_size, assets, "enhancements");
 }
 

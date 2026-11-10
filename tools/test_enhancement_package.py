@@ -2564,6 +2564,20 @@ class TestEnhancementBuildPackageWiring(unittest.TestCase):
         own = self._write_pkg(f"enhancements/{self.DISC.lower()}-60hz.json")
         self.assertEqual(self._select_shipped()[0], own.resolve())
 
+    def test_an_unusable_own_package_is_not_replaced_by_the_shipped_one(self) -> None:
+        shipped = self.root / "shipped" / f"{self.DISC.lower()}-60hz.json"
+        shipped.parent.mkdir(parents=True)
+        shipped.write_text(json.dumps(self._published()), encoding="utf-8")
+        own = self._write_pkg(f"enhancements/{self.DISC.lower()}-60hz.json")
+        own.write_text("{ not json", encoding="utf-8")
+        with self.assertRaises((self.nk_cli.PackageBuildError, enhancement_package.EnhancementPackageError)):
+            self._select_shipped()
+
+    def test_no_package_in_either_place_names_both(self) -> None:
+        with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "or a published one at") as ctx:
+            self._select_shipped()
+        self.assertIn(str(self.root / "shipped"), str(ctx.exception))
+
     def test_a_shipped_package_must_be_published(self) -> None:
         shipped = self.root / "shipped" / f"{self.DISC.lower()}-60hz.json"
         shipped.parent.mkdir(parents=True)

@@ -427,7 +427,9 @@ with resolves in this order:
 
 A title whose published package ships in `assets/enhancements/` (section 5.1) is offered Ace with nothing to install:
 choosing Ace for it runs its 60 FPS game logic, as item 3 says. Ace stays a per-title choice; shipping a package never
-changes the library's default or a title that follows it.
+changes the library's default or a title that follows it. The player offers Ace from the package's title alone; the
+build then checks the disc's revision and its executable against the package, and a disc they do not match is
+refused there, with nothing built and nothing launched in its place.
 
 A title's 60 FPS game logic and smooth motion may be on together (owner decision of 2026-11-04, replacing the earlier
 rule that refused the pair, #1272): the package keeps the game's logic at 60 Hz, and interpolation presents
