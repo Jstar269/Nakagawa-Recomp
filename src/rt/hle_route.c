@@ -1466,7 +1466,7 @@ void sr_ctrl_sample(void) {
     if (s_ctrl_sampling_mode == 1u) {
         if (gui_on()) {
             gui_analog(&lx, &ly);
-            /* Ace's stick dead-zone remap (stick=<counts>, contract 11.3.8) reshapes the live host
+            /* Ace's stick dead-zone remap (stick=<counts>, contract 11.3.11) reshapes the live host
              * stick only. It does nothing unless the run's line asked for it, so every other run
              * latches the bytes the window gave. A route's stick and a replay's recorded sample
              * below are already the guest's bytes and pass through unchanged. */

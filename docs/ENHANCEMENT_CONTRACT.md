@@ -347,9 +347,9 @@ Code identifiers that say `ace` mean "Enhanced or Ace"; every name a player read
 
 The launcher always exports `SR_ACE`, so an inherited value cannot opt a launch in: `off` for Authentic, or
 `v1;tier=enhanced;af=16;text=on;readout=off;notice=on;wide=off;smooth=x2;sas=off;tess=off`. `tier` (`enhanced` or `ace`) only names the
-run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `cull` (`on` or `off`,
-section 11.3.6) and `stick` (the title's stick dead zone, 1 to 126, section 11.3.8) are the other keys a line may
-leave out: a missing `cull` or `stick` is off, and `cull=on` and `stick=<counts>` need `tier=ace`. Every
+run, in the game badge, the pause menu and the stamps; a line without it is an Enhanced run. `stick` (the title's
+stick dead zone, 1 to 126, section 11.3.11) and `cull` (`on` or `off`, section 11.3.6) are the other keys a line may
+leave out: a missing `stick` or `cull` is off, and `stick=<counts>` and `cull=on` need `tier=ace`. Every
 other key is required, in any order, each once; a value for a feature this build does not carry (`smooth=match`)
 refuses the line. So does anything else: the run is Authentic and one `ACE_MODE: refused (<reason>)` line says why.
 Unset is off. With Enhanced or Ace on, the launcher also exports `SR_ACE_REPORT`, the per-run report under
@@ -401,7 +401,7 @@ the device is created with no feature outside Ace.
   present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
   guest-visible item. Its entry is section 11.3.7.
 - **Input:** `stick=<counts>` (Ace only) changes the left-stick values of the live host samples the guest latches,
-  never when they are latched. It is a guest-visible item. Its entry is section 11.3.8.
+  never when they are latched. It is a guest-visible item. Its entry is section 11.3.11.
 
 ### 10.4. Stamps and Evidence
 
@@ -1489,7 +1489,7 @@ The feature of section 10.14 (#2053). How it draws is described there; this entr
 - **Nothing worse (section 11.2, item 4):** not shown. It may not be on by default before the runs item 4 lists
   exist.
 
-#### 11.3.8. Stick Dead-Zone Remap (`stick`)
+#### 11.3.11. Stick Dead-Zone Remap (`stick`)
 
 For a title whose stick reading ignores part of the stick's throw. *Hot Shots Tennis* (UCUS98701) centres each stick
 byte `b` (0 to 255) as `x = b - (b > 128) - 127`, so 128 reads +1, 127 reads 0, 0 reads -127 and 255 reads +127. It

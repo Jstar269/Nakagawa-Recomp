@@ -67,7 +67,7 @@ static void cell_parse(void) {
         snprintf(spec, sizeof(spec), "%s;tier=ace;cull=on;cull=off", base);
         CHECK(ace_parse(spec, &c, why, sizeof(why)) == 0 && strcmp(why, "duplicate key") == 0, "a duplicate cull");
     }
-    /* stick (contract 11.3.8): optional, a missing key is off, its value is the game's dead zone
+    /* stick (contract 11.3.11): optional, a missing key is off, its value is the game's dead zone
        (1..126) in canonical decimal, it needs an Ace line, and a line without it formats as before. */
     {
         static const char base[] = "v1;af=16;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off";
@@ -84,8 +84,8 @@ static void cell_parse(void) {
                   memcmp(&back, &c, sizeof(c)) == 0, "the stick line round-trips (%s)", out);
         }
         c.cull = 1;
-        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 17, ";cull=on;stick=64") == 0,
-              "stick follows cull (%s)", out);
+        CHECK(ace_format(&c, out, sizeof(out)) && strcmp(out + strlen(out) - 17, ";stick=64;cull=on") == 0,
+              "cull follows stick (%s)", out);
         c.cull = 0;
         c.stick = 0;
         CHECK(ace_format(&c, out, sizeof(out)) && strstr(out, "stick") == NULL, "off writes no stick key (%s)", out);
@@ -322,7 +322,7 @@ static void cell_switch(void) {
     CHECK(ace_init_spec("off", NULL) == 0 && ace_effective()->tess == 0, "an authentic run has no tess");
 }
 
-/* ---- stick dead-zone remap (contract 11.3.8) ------------------------------------------------ */
+/* ---- stick dead-zone remap (contract 11.3.11) ------------------------------------------------ */
 
 /* The title's centring of one stick byte (its own coordinates, -127..127). */
 static int game_x(uint8_t b) { return (int)b - (b > 128 ? 1 : 0) - 127; }

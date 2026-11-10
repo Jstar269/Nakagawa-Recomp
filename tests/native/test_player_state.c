@@ -7915,7 +7915,7 @@ static void test_play_mode_settings(void) {
                                       "\"text\": \"off\", \"readout\": \"off\", "
                                       "\"notice\": \"on\", \"wide\": \"off\", "
                                       "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"cull\": \"off\", \"stick\": \"off\", "
+                                      "\"tess\": \"off\", \"stick\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"off\"},") != NULL);
         assert(strstr(saved, "\"TEST90001\": {\"mode\": \"library\", \"af\": \"8\", "
                              "\"notice\": \"off\"}") != NULL);
@@ -8113,7 +8113,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"sinc\", "
-                                      "\"tess\": \"off\", \"cull\": \"off\", \"stick\": \"off\", "
+                                      "\"tess\": \"off\", \"stick\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"off\"}") != NULL);
         free(saved);
@@ -8140,7 +8140,7 @@ static void test_play_mode_sas_settings(void) {
     {
         char *saved = read_text_file(path);
         assert(saved && strstr(saved, "\"smooth\": \"off\", \"sas\": \"off\", "
-                                      "\"tess\": \"off\", \"cull\": \"off\", \"stick\": \"off\", "
+                                      "\"tess\": \"off\", \"stick\": \"off\", \"cull\": \"off\", "
                                       "\"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST92001\": {\"mode\": \"library\", \"sas\": \"sinc\"}") != NULL);
         free(saved);
@@ -8207,7 +8207,7 @@ static void test_play_mode_cull_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"cull\": \"on\", \"stick\": \"off\", "
+        assert(saved && strstr(saved, "\"stick\": \"off\", \"cull\": \"on\", "
                                       "\"upscale\": \"off\"}") != NULL);
         free(saved);
     }
@@ -8235,7 +8235,7 @@ static void test_play_mode_cull_settings(void) {
     printf("PASS: wider culling is read, resolved and saved at both levels, and only Ace launches it\n");
 }
 
-/* Stick dead-zone remap (contract 11.3.8, 11.2 item 2): a library "stick" and a title's own
+/* Stick dead-zone remap (contract 11.3.11, 11.2 item 2): a library "stick" and a title's own
  * "stick" are read, the title's wins, both survive a save and a load, and only an Ace launch of a
  * title whose catalog entry declares a dead zone carries the key, with the catalog's count. The
  * built-in UCUS98701 declares 64; a disc the catalog does not know declares none. */
@@ -8280,7 +8280,7 @@ static void test_play_mode_stick_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"cull\": \"off\", \"stick\": \"on\", \"upscale\": \"off\"}") != NULL);
+        assert(saved && strstr(saved, "\"stick\": \"on\", \"cull\": \"off\", \"upscale\": \"off\"}") != NULL);
         free(saved);
     }
 
@@ -8377,8 +8377,8 @@ static void test_play_mode_tess_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"cull\": \"off\", "
-                                      "\"stick\": \"off\", "
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"4\", \"stick\": \"off\", "
+                                      "\"cull\": \"off\", "
                                       "\"upscale\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93001\": {\"mode\": \"library\", \"tess\": \"off\"}") != NULL);
         assert(strstr(saved, "\"TEST93002\": {\"mode\": \"ace\", \"tess\": \"2\"}") != NULL);
@@ -8829,8 +8829,33 @@ static void test_play_mode_smooth_motion(void) {
     assert(r.part[PLAYER_PART_SMOOTH] == 0 && r.on && r.part[PLAYER_PART_FILTERING] == 16 &&
            r.part[PLAYER_PART_TEXT] == 1 && r.part[PLAYER_PART_NOTICE] == 1);
     assert(player_play_launch_line(&r, line, sizeof(line)) && strstr(line, "smooth=off") != NULL);
-    /* The line fits the runtime's buffer (src/rt/ace.h ACE_SPEC_MAX 192) with room to spare. */
-    assert(strlen(line) < 96u);
+    /* The longest line the parts can make fits the runtime's buffer (src/rt/ace.h ACE_SPEC_MAX):
+       each part takes the value that lengthens the line most, in Enhanced and in Ace, with the
+       largest stick dead zone, so a new part or word without room fails here. */
+    {
+        size_t longest = 0;
+        for (int ace = 0; ace < 2; ace++) {
+            PlayerPlayResolved big = r;
+            char probe[1024];
+            big.mode = ace ? PLAYER_PLAY_ACE : PLAYER_PLAY_ENHANCED;
+            big.stick_counts = ACE_STICK_COUNTS_MAX;
+            for (int p = 0; p < PLAYER_PART_COUNT; p++) {
+                const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
+                int best = big.part[p];
+                size_t best_len = 0;
+                assert(info);
+                for (int v = 0; v < info->value_count; v++) {
+                    big.part[p] = info->values[v];
+                    assert(player_play_launch_line(&big, probe, sizeof(probe)));
+                    if (strlen(probe) >= best_len) { best_len = strlen(probe); best = info->values[v]; }
+                }
+                big.part[p] = best;
+            }
+            assert(player_play_launch_line(&big, probe, sizeof(probe)));
+            if (strlen(probe) > longest) longest = strlen(probe);
+        }
+        assert(longest + 1u <= (size_t)ACE_SPEC_MAX);
+    }
     assert(!player_play_launch_line(&r, line, 20u) && line[0] == '\0');
     /* Clean pitched sound (contract 11.3.1) is off by default, reaches the line as sinc when
        the library turns it on, and the 60 FPS game logic leaves it alone. */
@@ -9037,8 +9062,8 @@ static void test_play_mode_upscale_settings(void) {
     assert(player_app_save_settings(app, path) == NK_OK);
     {
         char *saved = read_text_file(path);
-        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"cull\": \"off\", "
-                                      "\"stick\": \"off\", "
+        assert(saved && strstr(saved, "\"sas\": \"off\", \"tess\": \"off\", \"stick\": \"off\", "
+                                      "\"cull\": \"off\", "
                                       "\"upscale\": \"fsr1\"}") != NULL);
         assert(strstr(saved, "\"TEST94001\": {\"mode\": \"library\", \"upscale\": \"off\"}") != NULL);
         free(saved);
