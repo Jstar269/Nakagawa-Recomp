@@ -163,6 +163,10 @@ CASE_ID = 64
 # bounded blocking forms (probe.c, PSP-GE-SYNC-001).
 else ifeq ($(CASE),ge-sync-ids)
 CASE_ID = 78
+# 181: GE SIGNAL handler behaviours 0x00-0x04 (callback, wait, pause, continue) and RJUMP/RCALL
+# offset alignment, bounded per cell (probe.c, PSP-GE-SIGNAL-001).
+else ifeq ($(CASE),ge-signal)
+CASE_ID = 181
 else ifeq ($(CASE),refer-status-size)
 CASE_ID = 65
 else ifeq ($(CASE),registry-readonly)

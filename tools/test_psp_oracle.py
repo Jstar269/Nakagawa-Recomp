@@ -2488,7 +2488,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 150)
+        self.assertEqual(len(routes), 151)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2497,7 +2497,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 167, 168, 169, 170, 171, 172, 173, 181},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -10063,6 +10063,168 @@ class VfpuForms2ProbeTests(unittest.TestCase):
         self.assertEqual(row["hardware_evidence"], "MEASURED")
         self.assertEqual(row["evidence_cases"], row["case_ids"])
         self.assertEqual(row["case_ids"][-1], "vfpu-forms2-done")
+
+
+class GeSignalProbeTests(unittest.TestCase):
+    """CASE=ge-signal (181, PSP-GE-SIGNAL-001) in probe.c: GE SIGNAL handler behaviours 0x00-0x04
+    and RJUMP/RCALL offset alignment. Project-written lists in probe RAM (no VRAM), every GE wait
+    bounded, sceGeContinue in a deadline-bounded helper thread, a sceGeBreak(1) reset after a
+    TIMEOUT, a fixed-shape stream that matches the registry, and no hardware result claimed
+    (NOT_RUN)."""
+
+    makefile: ClassVar[str]
+    probe: ClassVar[str]
+    readme: ClassVar[str]
+    doc: ClassVar[str]
+    rows: ClassVar[list[dict[str, Any]]]
+    section: ClassVar[str]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.readme = (fixture / "README.md").read_text(encoding="utf-8")
+        cls.doc = (root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        manifest = json.loads((root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.rows = []
+        stack = [manifest]
+        for _ in range(100000):
+            if not stack:
+                break
+            node = stack.pop()
+            if isinstance(node, dict):
+                if node.get("id") == "PSP-GE-SIGNAL-001":
+                    cls.rows.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        start = cls.probe.index("#if PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL\n/*")
+        end = cls.probe.index("#endif /* PSP_ORACLE_CASE_GE_SIGNAL */", start)
+        cls.section = cls.probe[start:end]
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),ge-sync-ids)\nCASE_ID = 78\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),ge-signal)\nCASE_ID = 181\n", self.makefile)
+        self.assertIn("#define PSP_ORACLE_CASE_GE_SIGNAL 181\n", self.probe)
+        self.assertIn("#elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL\n"
+                      '#define PROBE_HOST0_LOG "host0:/ge_signal_log.txt"\n', self.probe)
+        self.assertIn("#elif PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL\n"
+                      "    run_ge_signal(emulated);\n", self.probe)
+        # The bounded-wait helpers (ge_wait_idle, ge_reset_queues) are built for this case.
+        self.assertIn("    PSP_ORACLE_CASE == PSP_ORACLE_CASE_GE_SIGNAL || \\\n", self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), "ge-signal").name,
+                         "ge_signal_log.txt")
+        self.assertEqual(_campaign_completeness_contract("ge-signal"), "strict-golden-sequence")
+        self.assertNotIn("ge-signal", CAMPAIGN_QUEUE_CASES)
+        self.assertIn("| `ge-signal` | `PSP-GE-SIGNAL-001` |", self.readme)
+        self.assertIn("| `ge-signal` | `PSP-GE-SIGNAL-001` | `NOT_RUN`", self.doc)
+
+    def test_encoding_is_cited_and_matches_uofw(self) -> None:
+        self.assertIn("uofw src/kd/ge/ge.c", self.section)
+        for fragment in ("#define GSG_CMD_SIGNAL 0x0Eu", "#define GSG_CMD_END 0x0Cu",
+                         "#define GSG_CMD_FINISH 0x0Fu", "#define GSG_SIGNAL_ID 0x1234u",
+                         "#define GSG_FINISH_ID 0x5678u", "#define GSG_BEH_RET 0x12u"):
+            self.assertIn(fragment, self.section)
+        # Behaviour in bits 16-23 and the 16-bit id in bits 0-15; the jump offset's high half in
+        # the SIGNAL and its low half in the following END.
+        self.assertIn("((uint32_t)cell->behaviour << 16) | GSG_SIGNAL_ID", self.section)
+        self.assertIn("((uint32_t)cell->behaviour << 16) | ((uint32_t)cell->offset >> 16)",
+                      self.section)
+        self.assertIn("gsg_cmd(GSG_CMD_END, (uint32_t)cell->offset & 0xffffu)", self.section)
+        # The 0x03 cells end the SIGNAL with END 2 (the list signal PAUSE in uofw).
+        self.assertIn('{"b03", GSG_KIND_HANDLER, 0x03u, 2u, 1u, 0u, 0u}', self.section)
+
+    def test_cells_order_and_registry_agree(self) -> None:
+        table = re.search(r"s_gsg_cells\[GSG_CELLS\] = \{(.*?)\n\};", self.section, re.DOTALL)
+        self.assertIsNotNone(table)
+        names = re.findall(r'\{"([\w-]+)", GSG_KIND_', _matched(table).group(1))
+        self.assertEqual(tuple(names), parse_golden.GE_SIGNAL_CELLS)
+        self.assertIn("#define GSG_CELLS 14u", self.section)
+        # The undefined behaviours are last among the handler cells; the unaligned jump cells
+        # are last of all.
+        self.assertEqual(names[8:10], ["b00", "b04"])
+        self.assertEqual(names[-2:], ["rjump-un", "rcall-un"])
+        self.assertIn('{"rjump-un", GSG_KIND_RJUMP, 0x13u, 0u, 1u, 0x22u, 0u}', self.section)
+        self.assertIn('{"rcall-al", GSG_KIND_RCALL, 0x14u, 0u, 1u, 0x20u, 0u}', self.section)
+        self.assertIn('{"b02-block", GSG_KIND_HANDLER, 0x02u, 0u, 1u, 0u, 5000u}', self.section)
+        self.assertIn('{"b02-nocb", GSG_KIND_HANDLER, 0x02u, 0u, 0u, 0u, 0u}', self.section)
+
+    def test_stream_shape_matches_the_registry(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["ge-signal"]
+        self.assertEqual(spec.test_id, "PSP-GE-SIGNAL-001")
+        self.assertEqual(spec.terminal_case, "ge-signal-done")
+        cases = parse_golden.GE_SIGNAL_CASES
+        self.assertEqual(len(cases), 44)
+        self.assertEqual(len(cases), len(set(cases)))
+        self.assertEqual(cases[:4], ("gsg-setup", "gsg-ctl-cb", "gsg-ctl-run", "gsg-ctl-end"))
+        self.assertEqual(cases[-1], "gsg-teardown")
+        self.assertEqual(counts["gsg-setup"], 7)
+        self.assertEqual(counts["gsg-b02-cb"], 24)
+        self.assertEqual(counts["gsg-b02-run"], 19)
+        self.assertEqual(counts["gsg-rcall-un-end"], 27)
+        self.assertEqual(counts["gsg-teardown"], 12)
+        self.assertEqual(counts["ge-signal-done"], 1)
+        # The probe's record widths and done count agree with the registry.
+        for fragment in ("#define GSG_RUNS 6u", "#define GSG_REGS 4u", "#define GSG_CB_WORDS 24u",
+                         "#define GSG_SEQ_WORDS (2u + 2u * GSG_RUNS)",
+                         "#define GSG_RUN_WORDS (GSG_SEQ_WORDS + GSG_REGS + 1u)",
+                         "#define GSG_END_WORDS (4u + GSG_SEQ_WORDS + 5u + GSG_REGS)",
+                         "out, 3u + GSG_REGS);", "out, 12u);",
+                         "uint32_t done = 1u + 3u * GSG_CELLS + 1u;"):
+            self.assertIn(fragment, self.section)
+        for part, width in parse_golden.GE_SIGNAL_PARTS:
+            self.assertIn(f'"gsg-%s-{part}", cell->name);', self.section)
+            self.assertGreater(width, 0)
+        # The longest record stays inside emit_record_extended's 1024-byte line.
+        header = len("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-SIGNAL-001 "
+                     "case_id=gsg-b02-block-end status=TIMEOUT result=0x00000000")
+        self.assertLess(header + 10 * 16 + 17 * 17 + 1, 1024)
+
+    def test_waits_are_bounded_and_the_ge_is_left_clean(self) -> None:
+        code = _c_code(self.section)
+        for banned in ("while (", "for (;;)", "do {", "goto ", "sceGeEdramGetAddr",
+                       "sceGuInit", "sceGeDrawSync(0)", "sceGeListSync(qid, 0)",
+                       "sceGeListSync(s_gsg_qid, 0)", "TBP", "FRAMEBUF"):
+            self.assertNotIn(banned, code)
+        # Polls: 100 of 1 ms; continue in a helper thread with a deadline; reset after a TIMEOUT.
+        for fragment in ("#define GSG_POLLS 100u", "#define GSG_POLL_US 1000u",
+                         "#define GSG_CONTINUE_TIMEOUT_US 200000u",
+                         "s_gsg_continue_rc = sceGeContinue();",
+                         "sceKernelWaitThreadEnd(th, &timeout)",
+                         "sceKernelTerminateDeleteThread(th)",
+                         "tail[3] = (uint32_t)ge_reset_queues(&w);",
+                         "ge_wait_idle(qid, qid >= 0 ? GE_IDLE_DEADLINE_US : 0u)"):
+            self.assertIn(fragment, code)
+        bodies = _c_function_bodies(code)
+        self.assertLess(bodies["gsg_cell"].index('probe_step(emulated, "ge-signal", cell->name);'),
+                        bodies["gsg_cell"].index("sceGeListEnQueue("))
+        self.assertLess(bodies["gsg_cell"].index('probe_step(emulated, "ge-signal", "reset");'),
+                        bodies["gsg_cell"].index("ge_reset_queues(&w)"))
+        teardown = bodies["run_ge_signal"]
+        self.assertIn("sceGeUnsetCallback(cbid_handlers)", teardown)
+        self.assertIn("sceGeUnsetCallback(cbid_null_rc)", teardown)
+        self.assertLess(teardown.index("ge_reset_queues(&w)"),
+                        teardown.index("sceGeUnsetCallback(cbid_handlers)"))
+        # The handler's busy hold is a timed for loop with a cap.
+        self.assertIn("for (uint32_t k = 0; k < GSG_BUSY_SPIN_CAP; k++)", code)
+        # Every list word lives in the probe's own arrays.
+        self.assertIn("static uint32_t s_gsg_list[GSG_LIST_WORDS] __attribute__((aligned(64)));",
+                      code)
+        self.assertIn("sceGeListEnQueue(list, list, cbid, jump ? &args : NULL)", code)
+        self.assertIn("sceGeListUpdateStallAddr(qid, (void *)&s_gsg_list[GSG_LIST_WORDS])", code)
+
+    def test_manifest_row_is_a_built_not_run_case(self) -> None:
+        self.assertEqual(len(self.rows), 1)
+        row = self.rows[0]
+        self.assertEqual(row["prx"], "nakagawa_psp_oracle.prx")
+        self.assertEqual(row["source"], "fixtures/psp_oracle/probe.c")
+        self.assertEqual(row["diagnostic_case_ids"], ["ge-signal"])
+        self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+        self.assertNotIn("evidence_cases", row)
+        self.assertEqual(row["case_ids"][-1], "ge-signal-done")
 
 
 class GeSampleProbeTests(unittest.TestCase):
