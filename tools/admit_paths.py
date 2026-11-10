@@ -1491,20 +1491,21 @@ def _merged_ledger(sides: list[tuple[str, Callable[[], bytes]]]) -> bytes:
         )
     merged = dict(ours)
     merged["entries"] = entries
+    errors = provenance_ledger.validate_ledger(merged)
+    if errors:
+        raise AdmitError("MERGE_LEDGER_INPUT_INVALID", "the merged ledger is not valid: " + "; ".join(errors))
     returned: bytes = provenance_ledger.claims_ledger_bytes(merged)
     return returned
 
 
-def _write_and_stage(repo: Path, path: str, raw: bytes) -> Path:
+def _control_target(repo: Path, path: str) -> Path:
+    """Where ``merge_profile`` writes ``path``; refuses a symlinked component."""
     current = repo
     for part in PurePosixPath(path).parts:
         current /= part
         if current.is_symlink():
             raise AdmitError("MERGE_PROFILE_UNSAFE_PATH", f"refusing symlinked control path component: {current}")
-    target = repo.joinpath(*PurePosixPath(path).parts)
-    target.write_bytes(raw)
-    _git(repo, "add", "--", path)
-    return target
+    return repo.joinpath(*PurePosixPath(path).parts)
 
 
 def merge_profile(worktree: Path) -> dict:
@@ -1536,10 +1537,12 @@ def merge_profile(worktree: Path) -> dict:
             f"--merge-profile needs {POLICY}, {LEDGER} or {EXPORT} unmerged in the index (a merge, squash "
             "merge, cherry-pick or rebase that conflicts on it) or an active git merge",
         )
+    # Everything is computed and checked before anything is written, so a refusal leaves the
+    # index exactly as the merge left it.
+    writes: dict[str, bytes] = {}
     result: dict = {"worktree": repo, "profile": None, "ledger": None, "export": None}
     if profile_sides is not None:
-        profile_raw = _merged_profile(profile_sides)
-        result["profile"] = _write_and_stage(repo, POLICY, profile_raw)
+        profile_raw = writes[POLICY] = _merged_profile(profile_sides)
         merged = json.loads(profile_raw)
         result.update(
             profile_sha256=hashlib.sha256(profile_raw).hexdigest(),
@@ -1549,11 +1552,16 @@ def merge_profile(worktree: Path) -> dict:
     else:
         profile_raw = _git(repo, "show", f":{POLICY}")
     if ledger_sides is not None:
-        ledger_raw = _merged_ledger(ledger_sides)
-        result["ledger"] = _write_and_stage(repo, LEDGER, ledger_raw)
-        result["ledger_sha256"] = hashlib.sha256(ledger_raw).hexdigest()
+        writes[LEDGER] = _merged_ledger(ledger_sides)
+        result["ledger_sha256"] = hashlib.sha256(writes[LEDGER]).hexdigest()
     if export_unmerged:
-        result["export"] = _write_and_stage(repo, EXPORT, _control_export(repo, profile_raw))
+        writes[EXPORT] = _control_export(repo, profile_raw)
+    targets = {path: _control_target(repo, path) for path in writes}
+    for path, raw in writes.items():
+        targets[path].write_bytes(raw)
+        _git(repo, "add", "--", path)
+    for path, key in ((POLICY, "profile"), (LEDGER, "ledger"), (EXPORT, "export")):
+        result[key] = targets.get(path)
     return result
 
 

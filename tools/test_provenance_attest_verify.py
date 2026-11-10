@@ -4160,6 +4160,42 @@ class LocalRefreshHostedRuleTests(_PolicyDeltaV4Fixture):
         verdict = self._attest(refreshed, main_1, v4)
         self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
 
+    def _exclusion_change(self, branch: str) -> str:
+        """A profile change that adds an exclusion and leaves the tree alone: no path added or removed."""
+        return self._change(branch, self.base, {}, mutate=lambda policy: policy.update(
+            exclude_paths=sorted({*policy["exclude_paths"], "docs/private-later.md"})))
+
+    def test_a_v1_profile_change_refreshes_and_attests(self) -> None:
+        """A V1/V2 record with its blessed policy reaches the replay, which must accept it.
+
+        The replay runs on every refresh, so it needs the blessed policy as the hosted check does;
+        without it the hosted verifier refuses the V1/V2 record and the refresh refuses a supported change."""
+        head = self._exclusion_change("v1-exclusion")
+        blessed = self.outside / "blessed-v1-exclusion.json"
+        blessed.write_bytes(provenance_ledger.canonical_profile_bytes(self._profile(head)))
+        v1 = self.outside / "v1-exclusion.json"
+        v1.write_bytes(_canonical({
+            "schema_version": 1, "kind": "policy-delta-authority",
+            "baseline_policy_sha256": _sha(provenance_ledger.canonical_profile_bytes(self._profile(self.base))),
+            "candidate_policy_sha256": _sha(blessed.read_bytes()),
+            "allowed_delta": {"include_added": [], "include_removed": [], "exclude_added": ["docs/private-later.md"],
+                              "exclude_removed": [], "rule_changes": []},
+        }))
+        controls = self._refresh(head, self.base, v1, label="v1-exclusion", trusted_candidate_policy=blessed)
+        assert controls.policy_delta is not None
+        self.assertEqual(controls.policy_delta["exclude_added"], ["docs/private-later.md"])
+        refreshed = self._commit_controls(controls)
+        verdict = self._attest(refreshed, self.base, v1, trusted_candidate_policy=blessed)
+        self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+
+    def test_a_v3_profile_change_with_no_tree_change_refreshes_and_attests(self) -> None:
+        head = self._exclusion_change("v3-exclusion")
+        v3 = self._v3(self.base, head, "v3-exclusion")
+        controls = self._refresh(head, self.base, v3, label="v3-exclusion")
+        refreshed = self._commit_controls(controls)
+        verdict = self._attest(refreshed, self.base, v3)
+        self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+
     # -- must still refuse ------------------------------------------------------
 
     def test_a_removal_the_delta_does_not_list_refuses(self) -> None:

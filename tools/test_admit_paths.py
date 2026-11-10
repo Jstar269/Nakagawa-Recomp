@@ -849,6 +849,36 @@ class BatchAdmitPathsTest(unittest.TestCase):
         self.assertNotIn("docs/guide.md", merged["include_paths"])
         git(ours, "merge", "--abort")
 
+    def test_merge_profile_writes_nothing_when_the_ledger_refuses(self) -> None:
+        """All or nothing: a ledger conflict leaves the profile unmerged too, as the merge left it."""
+        fixture = _Fixture(self)
+        git(fixture.pr, "checkout", "-q", "main")
+        write(fixture.pr, admit_paths.LEDGER, admit_paths.provenance_ledger.claims_ledger_bytes(
+            self._claims(("docs/guide.md", "reviewed_documentation"))).decode("utf-8"))
+        git(fixture.pr, "add", admit_paths.LEDGER)
+        git(fixture.pr, "commit", "-qm", "a claims ledger on the base")
+        fixture.base = git(fixture.pr, "rev-parse", "HEAD")
+        git(fixture.pr, "update-ref", "refs/remotes/origin/main", fixture.base)
+        sides = {}
+        for side, classification in (("ours", "reviewed_other"), ("theirs", "reviewed_configuration")):
+            worktree = sides[side] = fixture.worktree(f"ledger-{side}")
+            fixture.add_pr_path(worktree, f"docs/{side}.md", f"# {side}\n")
+            write(worktree, admit_paths.LEDGER, admit_paths.provenance_ledger.claims_ledger_bytes(
+                self._claims(("docs/guide.md", classification))).decode("utf-8"))
+            git(worktree, "add", admit_paths.LEDGER)
+            git(worktree, "commit", "-qm", f"{side} reclassifies the guide")
+        ours = sides["ours"]
+        subprocess.run(["git", "merge", "--no-commit", "--no-ff", git(sides["theirs"], "rev-parse", "HEAD")],
+                       cwd=ours, env={**os.environ, **GIT_ENV}, capture_output=True, check=False)
+        unmerged_before = git(ours, "ls-files", "--unmerged")
+        self.assertIn(admit_paths.POLICY, unmerged_before)
+        self.assertIn(admit_paths.LEDGER, unmerged_before)
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.merge_profile(ours)
+        self.assertEqual(caught.exception.code, "MERGE_LEDGER_ENTRY_CONFLICT")
+        self.assertEqual(git(ours, "ls-files", "--unmerged"), unmerged_before)
+        git(ours, "merge", "--abort")
+
     @staticmethod
     def _ledger_sides(*documents: dict) -> list:
         raws = [(json.dumps(document, indent=2) + "\n").encode("utf-8") for document in documents]

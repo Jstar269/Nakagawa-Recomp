@@ -320,7 +320,8 @@ def generate_controls(
         if unapproved:
             raise verifier.VerifyError(
                 "REFRESH_NEW_PATH_REQUIRES_ADMISSION",
-                "an added or removed public path needs an admitted V3 or V4 policy delta that approves it: "
+                "a tracked path the base did not carry, or one the candidate drops, needs an admitted V3 or V4 "
+                "policy delta that lists it in include_added or include_removed: "
                 + ", ".join(unapproved),
             )
     present = [path for path in changed if path not in removed]
