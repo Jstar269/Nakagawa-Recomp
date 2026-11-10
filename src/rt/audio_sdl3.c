@@ -555,6 +555,15 @@ int sr_audio_init(void) {
         const char *driver = SDL_GetCurrentAudioDriver();
         fprintf(stderr, "audio: initialized SDL3 audio output (driver: %s, %uHz stereo 16-bit)\n",
                 driver ? driver : "unknown", SR_AUDIO_SAMPLE_RATE);
+        /* What the blocking output sizes its queue against (sr_audio_host_pull_frames). */
+        SDL_AudioSpec device_spec;
+        int device_frames = 0;
+        if (SDL_GetAudioDeviceFormat(s_device_id, &device_spec, &device_frames) && device_frames > 0 &&
+            device_spec.freq > 0)
+            fprintf(stderr, "audio: the host device takes %d frames at %d Hz per pull (%.1f ms)\n",
+                    device_frames, device_spec.freq, 1000.0 * device_frames / device_spec.freq);
+        else
+            fprintf(stderr, "audio: the host device does not report how many frames it takes per pull\n");
         s_reported_init = 1;
     }
 
@@ -939,6 +948,35 @@ int sr_audio_queued(int ch) {
     return frames;
 }
 
+/* A device block of `device_frames` at `device_freq`, in mixer frames (SR_AUDIO_SAMPLE_RATE),
+ * rounded up: a pull takes that many frames from each channel's stream. 0 for an unknown block. */
+static uint32_t sr_audio_pull_in_mixer_frames(int device_frames, int device_freq) {
+    if (device_frames <= 0 || device_freq <= 0) return 0u;
+    const uint64_t scaled = (uint64_t)(uint32_t)device_frames * SR_AUDIO_SAMPLE_RATE +
+                            (uint32_t)device_freq - 1u;
+    const uint64_t frames = scaled / (uint32_t)device_freq;
+    return frames > (uint64_t)INT32_MAX ? (uint32_t)INT32_MAX : (uint32_t)frames;
+}
+
+/* The frames the host output device takes from the mixer in one pull, in mixer frames: 441 from
+ * WASAPI and 1024 from DirectSound on the reference PC. The device is asked each time, because a
+ * default device that changes mid-run brings its own block size. 0 when there is no host output
+ * or the device does not say. The blocking output keeps at least this much queued (hle_audio.c). */
+int sr_audio_host_pull_frames(void) {
+    if (s_audio_state == AUDIO_STATE_UNINITIALIZED) {
+        sr_audio_init();
+    }
+    if (s_audio_state != AUDIO_STATE_ACTIVE) {
+        return 0;
+    }
+    SDL_AudioSpec spec;
+    int device_frames = 0;
+    if (!SDL_GetAudioDeviceFormat(s_device_id, &spec, &device_frames)) {
+        return 0;
+    }
+    return (int)sr_audio_pull_in_mixer_frames(device_frames, spec.freq);
+}
+
 /* SR_AUDIOSTAT: the value the blocking output paces against, and the drift it is accumulating.
  * `worst` is the largest per-channel sr_audio_queued() in this backend -- the lead the slowest
  * channel carries -- and `lead_ms` is every channel's un-consumed audio in milliseconds.
@@ -1214,6 +1252,40 @@ static void test_null_backend_env(void) {
     unsetenv("SR_AUDIO_BACKEND");
 #endif
     printf("test_null_backend_env: PASS\n");
+}
+
+/* The device block the blocking output sizes its queue against: converted to mixer frames
+ * rounding up, read from the open device, and 0 (nothing to hold for) with no host output.
+ *
+ * MUTANT: sr_audio_pull_in_mixer_frames rounds down -- a 1024-frame block at 48000 Hz reads 940,
+ *   one frame short of what the pull takes.
+ * MUTANT: sr_audio_host_pull_frames returns the mixer's own period or a constant -- the dummy
+ *   device opened with 441 and then 1024 frames per pull reads the same both times. */
+static void test_host_pull_frames(void) {
+    assert(sr_audio_pull_in_mixer_frames(441, 44100) == 441u);
+    assert(sr_audio_pull_in_mixer_frames(480, 48000) == 441u);
+    assert(sr_audio_pull_in_mixer_frames(1024, 48000) == 941u);
+    assert(sr_audio_pull_in_mixer_frames(1024, 44100) == 1024u);
+    assert(sr_audio_pull_in_mixer_frames(0, 44100) == 0u);
+    assert(sr_audio_pull_in_mixer_frames(-1, 44100) == 0u);
+    assert(sr_audio_pull_in_mixer_frames(512, 0) == 0u);
+
+    static const struct { const char *hint; int frames; } blocks[] = { { "441", 441 }, { "1024", 1024 } };
+    for (size_t i = 0; i < sizeof(blocks) / sizeof(blocks[0]); i++) {
+        test_reset();
+        SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+        SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, blocks[i].hint, SDL_HINT_OVERRIDE);
+        assert(sr_audio_host_pull_frames() == blocks[i].frames);   /* opens the device, as a first push does */
+        assert(s_audio_state == AUDIO_STATE_ACTIVE);
+    }
+    test_reset();
+    SDL_ResetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES);
+
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "nonexistent_driver_xyz", SDL_HINT_OVERRIDE);
+    assert(sr_audio_host_pull_frames() == 0);
+    assert(s_audio_state == AUDIO_STATE_UNAVAILABLE);
+    test_reset();
+    printf("test_host_pull_frames: PASS\n");
 }
 
 /* Master-volume gain mapping (SR_MASTER_VOLUME): pure, window-free. */
@@ -1733,6 +1805,7 @@ int main(int argc, char **argv) {
     test_full_mixer_drops_are_counted();
     test_no_device_path();
     test_null_backend_env();
+    test_host_pull_frames();
     test_pause_stash_failure_is_visible();
     test_dump_conversion();
     test_dump_wav_header();

@@ -1556,9 +1556,14 @@ given reports `SKIP` with the reason rather than passing, and a quantity the run
 publish is reported as absent.
 
 **Audio drift** is the one that was unmeasurable until the telemetry published it. The runtime
-reads `sr_audio_queued()` — the queue depth the blocking output paces against — in
-`src/rt/hle_audio.c`, in the same place it computes the delay from it, and prints one reading per
-300 delivered vblanks (about five seconds) behind `SR_AUDIOSTAT`:
+reads the queue depth the blocking output paces against in `src/rt/hle_audio.c`
+(`hle_audio_queued()`), in the same place it computes the delay from it, and prints one reading per
+300 delivered vblanks (about five seconds) behind `SR_AUDIOSTAT`. That depth is the host mixer's
+queue less what the mixer holds for its output device: one device pull (the start-up line
+`audio: the host device takes N frames at R Hz per pull` gives it), one channel period and one
+display period, so far as the channel's own two periods do not already cover them. A 2048-frame
+channel holds nothing back; a 256-frame one holds 921 frames against 441-frame pulls. `queued=` in
+`AUDIOSTAT_HOST` and `q_max_ms` in `PERF_AUDIO` are the mixer's whole queue, the hold included:
 
 ```text
 AUDIOSTAT_LEAD: vbl=9300 ch=8 outputs=268 queued=8820 lead_ms=200

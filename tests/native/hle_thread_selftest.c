@@ -528,9 +528,23 @@ static int s_cap_pending;      /* armed and not yet resolved by the present path
  * arms without the report path writing legacy snapshot files. */
 static int s_cap_arm_accept = 1;
 
+/* A host output device for the pacing regressions (test_audio_host_hold_*): pushes fill one queue,
+ * and the time the guest waits is device time, in which the device takes s_audio_sim_pull frames
+ * at once, every that many frames of time. A pull that finds fewer is a dropout. Off (0) by
+ * default: the stub then reports s_audio_queue_result as before, and no device block size. */
+static int s_audio_sim_pull;
+static uint64_t s_audio_sim_us, s_audio_sim_next_pull_us;
+static unsigned long s_audio_sim_pulls, s_audio_sim_short_pulls;
+static uint64_t s_audio_sim_pushed_frames;
+static uint32_t s_audio_sim_late_us;   /* every guest wait ends this much late */
+
 void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
     (void)ch;
     s_audio_push_calls++;
+    if (s_audio_sim_pull > 0 && nframes > 0) {
+        s_audio_queue_result += nframes;
+        s_audio_sim_pushed_frames += (uint64_t)nframes;
+    }
     s_audio_push_frames = nframes;
     s_audio_push_vol_l = volL;
     s_audio_push_vol_r = volR;
@@ -544,6 +558,22 @@ void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int volR) {
                s_audio_push_capture_frames * 2u * sizeof(*s_audio_push_capture));
     }
 }
+
+static void audio_sim_advance(uint32_t us) {
+    s_audio_sim_us += (uint64_t)us + s_audio_sim_late_us;
+    while (s_audio_sim_pull > 0 && s_audio_sim_us >= s_audio_sim_next_pull_us) {
+        s_audio_sim_pulls++;
+        if (s_audio_queue_result < s_audio_sim_pull) {
+            s_audio_sim_short_pulls++;
+            s_audio_queue_result = 0;
+        } else {
+            s_audio_queue_result -= s_audio_sim_pull;
+        }
+        s_audio_sim_next_pull_us += (uint64_t)s_audio_sim_pull * 1000000u / 44100u;
+    }
+}
+
+int sr_audio_host_pull_frames(void) { return s_audio_sim_pull; }
 
 int sr_audio_queued(int ch) {
     (void)ch;
@@ -571,6 +601,11 @@ static void audio_fixture_reset(void) {
     s_audio_push_capture_frames = 0;
     s_audio_queue_result = 0;
     s_audio_queue_seq_len = 0;
+    s_audio_sim_pull = 0;
+    s_audio_sim_us = s_audio_sim_next_pull_us = 0u;
+    s_audio_sim_pulls = s_audio_sim_short_pulls = 0u;
+    s_audio_sim_pushed_frames = 0u;
+    s_audio_sim_late_us = 0u;
 }
 
 static int s_test_gui_on;
@@ -12241,6 +12276,94 @@ static void test_audio_drift_window_reports_the_pacing_value(void) {
            "the all-unmeasured window closed and reset like any other");
     expect(last_ms == -1L, "a window with no host queue reports -1 ms, not 0");
     sr_hle_test_audio_lead_reset();
+}
+
+/* A channel played through the simulated host device (audio_sim_advance): `outputs` blocking
+ * outputs of `frames` frames by a guest that does nothing else, so every wait is one the blocking
+ * output asked for, against a device that takes `pull` frames at a time. */
+typedef struct {
+    unsigned long pulls, short_pulls;
+    uint64_t pushed_frames;
+    uint32_t max_rest;       /* the deepest queue the guest was shown after an output returned */
+    int max_host;            /* the deepest queue the host mixer held then */
+    int rest_was_host;       /* every such reading was the host's whole queue */
+} AudioSimRun;
+
+static void audio_sim_run(uint32_t frames, int pull, uint32_t late_us, uint32_t outputs, AudioSimRun *r) {
+    const uint32_t STEREO_BUF = 0x08a00000u;
+    CpuState cpu;
+    memset(r, 0, sizeof(*r));
+    r->rest_was_host = 1;
+    reset_fixture();
+    sr_hle_init();
+    audio_fixture_reset();
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, frames, 0u) == 0u,
+           "the device fixture reserves the regular channel");
+    s_audio_sim_pull = pull;
+    s_audio_sim_next_pull_us = (uint64_t)pull * 1000000u / 44100u;
+    s_audio_sim_late_us = late_us;
+    sr_hle_test_audio_wait_hook(audio_sim_advance);
+    int returns_ok = 1;
+    for (uint32_t i = 0; i < outputs; i++) {
+        if (audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, STEREO_BUF) != frames)
+            returns_ok = 0;
+        const uint32_t rest = audio_dispatch(&cpu, NID_SCE_AUDIO_GET_CHANNEL_REST_LENGTH, 0u, 0u, 0u);
+        if (rest > r->max_rest) r->max_rest = rest;
+        if (s_audio_queue_result > r->max_host) r->max_host = s_audio_queue_result;
+        if (rest != (uint32_t)s_audio_queue_result) r->rest_was_host = 0;
+    }
+    expect(returns_ok, "every blocking output returned its frame count");
+    r->pulls = s_audio_sim_pulls;
+    r->short_pulls = s_audio_sim_short_pulls;
+    r->pushed_frames = s_audio_sim_pushed_frames;
+    sr_hle_test_audio_wait_hook(NULL);
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+/* The host mixer holds what its device takes in one pull (Warship Gunner 2 Portable, 256-frame
+ * channel). Held to the guest's two periods (512 frames), the queue is smaller than a 1024-frame
+ * device pull: every pull came up short and the channel delivered three periods per pull, 75% of
+ * its audio. With the hold no pull is short and the device is given all it asks for, while the
+ * guest is still shown at most its two periods.
+ *
+ * MUTANT: audio_host_hold_frames returns 0 -- the pulls come up short and fewer frames are
+ *   delivered than the device took.
+ * MUTANT: the hold leaves out the device pull -- pulls come up short. */
+static void test_audio_host_hold_covers_a_device_pull(void) {
+    AudioSimRun r;
+    audio_sim_run(256u, 1024, 0u, 2000u, &r);
+    expect(r.pulls >= 400u, "the device pulled throughout the run");
+    expect(r.short_pulls == 0u, "no 1024-frame pull found the 256-frame channel short");
+    expect(r.pushed_frames >= (uint64_t)r.pulls * 1024u,
+           "the channel delivered every frame the device took: it is not slowed");
+    expect(r.max_rest <= 2u * 256u, "the guest is still shown at most its two periods");
+    expect(r.max_host > 2 * 256, "while the host mixer holds more than those");
+}
+
+/* The hold also covers a late wake: every wait of the blocking output ends one display period
+ * (16683 us) late, against a device that takes 441 frames every 10 ms, and still no pull is short.
+ * Two periods of a 256-frame channel cover one 441-frame pull and nothing more.
+ *
+ * MUTANT: the hold leaves out AUDIO_WAKE_ALLOWANCE_FRAMES -- pulls come up short. */
+static void test_audio_host_hold_covers_a_late_wake(void) {
+    AudioSimRun r;
+    audio_sim_run(256u, 441, 16683u, 2000u, &r);
+    expect(r.pulls >= 1000u, "the device pulled throughout the run");
+    expect(r.short_pulls == 0u, "a wake one display period late does not run the channel dry");
+    expect(r.max_rest <= 2u * 256u, "the guest is still shown at most its two periods");
+}
+
+/* A channel whose two periods already cover the pull, a period and the allowance is paced exactly
+ * as before: nothing is held back from what the guest sees (2048 frames against 1024 and 441). */
+static void test_audio_host_hold_leaves_long_periods_alone(void) {
+    AudioSimRun r;
+    audio_sim_run(2048u, 1024, 0u, 400u, &r);
+    expect(r.short_pulls == 0u, "a 2048-frame channel never came up short against 1024-frame pulls");
+    expect(r.rest_was_host, "and the guest sees the host mixer's whole queue: nothing is held back");
+    audio_sim_run(2048u, 441, 0u, 400u, &r);
+    expect(r.short_pulls == 0u && r.rest_was_host, "the same against 441-frame pulls");
 }
 
 static uint64_t selftest_guest_u64(uint32_t addr) {
@@ -50222,6 +50345,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_output2_and_src_accept_volumes_to_0xfffff();
     test_vaudio_plays_through_the_src_slot();
     test_audio_drift_window_reports_the_pacing_value();
+    test_audio_host_hold_covers_a_device_pull();
+    test_audio_host_hold_covers_a_late_wake();
+    test_audio_host_hold_leaves_long_periods_alone();
     test_audio_output_telemetry_counts_guest_frames();
     test_audio_queue_drains_in_guest_time_under_the_deterministic_clock();
     test_audio_guest_view_is_the_same_with_and_without_a_host_device();

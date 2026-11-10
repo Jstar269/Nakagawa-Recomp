@@ -178,13 +178,62 @@ static void audio_vq_drain(uint32_t slot) {
     else s_vq_frames[slot] -= (uint32_t)drained;
 }
 
-/* The queue depth in frames the guest sees on `ch`. Under the deterministic clock it is the
- * guest-time model's, whatever the host has; otherwise the host mixer's, or -1 when the host has no
- * output for it. */
-int hle_audio_queued(int ch) {
+/* ---- what the host mixer holds that the guest does not see ----------------------------------
+ *
+ * The PSP plays a channel's buffer as it is handed over, so a guest that keeps two periods queued
+ * never runs its channel dry. A host output device does not drain like that: it takes a whole
+ * block from the mixer at a time (441 frames from WASAPI and 1024 from DirectSound on the
+ * reference PC, read from the device with SDL_GetAudioDeviceFormat), and the guest thread that
+ * refills the queue is woken by a host scheduler that can be late. Held to two periods of a
+ * 256-frame channel (512 frames), the queue is smaller than one 1024-frame pull: every pull came
+ * up short, and Warship Gunner 2 Portable's 256-frame channel delivered three periods per pull,
+ * 75% of its audio, with the queue empty at 2491 of its pushes in 59 seconds. With 441-frame
+ * pulls the two periods cover a pull and nothing more, so each late wake was a dropout.
+ *
+ * The mixer therefore holds, for a channel of period n:
+ *   one device pull              what the device takes at once;
+ *   one period                   the blocking output only finds a pull has happened when its wait
+ *                                ends, and it waits up to one period at a time;
+ *   one display period           a wake that is late by up to one VBLANK, the longest stretch the
+ *                                scheduler ordinarily runs without reaching a boundary (#67);
+ * and the guest's own two periods count towards it. Only the frames beyond those two periods are
+ * hidden: the guest still sees and paces against at most its two periods, as on the PSP, and a
+ * channel whose two periods already cover the sum (2048 frames on both devices above) is paced
+ * exactly as before. The hold is filled by the first outputs of a channel returning at once, the
+ * same way the two periods are, and refilled the same way after the queue ran dry.
+ *
+ * Under the deterministic clock the guest sees the guest-time model instead and none of this
+ * applies: the host mixer only follows there. */
+extern int sr_audio_host_pull_frames(void);
+
+#define AUDIO_WAKE_ALLOWANCE_FRAMES 736u   /* one display period at 44100 Hz: 44100 * 1001 / 60000 */
+
+static uint32_t audio_host_hold_frames(uint32_t n) {
+    if (!n) return 0u;   /* no period reserved: nothing paces against this queue */
+    const int pull = sr_audio_host_pull_frames();
+    if (pull <= 0) return 0u;   /* no device takes blocks from this queue: there is nothing to cover */
+    const uint64_t need = (uint64_t)(uint32_t)pull + n + AUDIO_WAKE_ALLOWANCE_FRAMES;
+    const uint64_t seen = 2u * (uint64_t)n;
+    return need > seen ? (uint32_t)(need - seen) : 0u;
+}
+
+/* The frames of `ch` the host has not played yet: what a listener is still to hear. Under the
+ * deterministic clock it is the guest-time model's; otherwise the host mixer's whole queue, the
+ * hold included, or -1 when the host has no output for it. */
+int hle_audio_play_lead(int ch) {
     if (!sched_clock_deterministic() || ch < 0 || ch > 8) return sr_audio_queued(ch);
     audio_vq_drain((uint32_t)ch);
     return s_vq_frames[ch] > (uint32_t)INT_MAX ? INT_MAX : (int)s_vq_frames[ch];
+}
+
+/* The queue depth in frames the guest sees on `ch`. Under the deterministic clock it is the
+ * guest-time model's, whatever the host has; otherwise the host mixer's beyond what it holds for
+ * its device (above), or -1 when the host has no output for it. */
+int hle_audio_queued(int ch) {
+    const int lead = hle_audio_play_lead(ch);
+    if (sched_clock_deterministic() || ch < 0 || ch > 8 || lead <= 0) return lead;
+    const uint32_t hold = audio_host_hold_frames(s_audio_len[ch]);
+    return (uint32_t)lead > hold ? (int)((uint32_t)lead - hold) : 0;
 }
 
 static void audio_vq_pushed(int ch, int nframes) {
