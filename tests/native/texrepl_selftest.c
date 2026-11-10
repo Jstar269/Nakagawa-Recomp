@@ -15,10 +15,18 @@
  *     the mip chains it builds, with each level the size of level 0 halved;
  *   - ZIP packs read in place: textures.ini at the top or in one top-level folder, stored, DEFLATE
  *     (zlib's own output among them) and data-descriptor entries, a folder's textures.zip, a damaged
- *     image, and damaged, unsafe or ini-less archives refused whole.
+ *     image, and damaged, unsafe or ini-less archives refused whole;
+ *   - PNG bytes checked before decoding: every truncation and byte flip of a small PNG, image-data
+ *     flips with their CRC made right, and IHDR sizes over 2048 or over an allocation cap; bad
+ *     images in a pack skipped, noted and counted;
+ *   - files read only through a handle that is a regular file inside the pack folder: device names,
+ *     trailing dots, links and junctions out of the pack, FIFOs (POSIX) and a textures.ini over 4 MiB.
  * With "--bench N" it writes an N-texture pack as a folder and as a ZIP and prints open, lookup,
  * first-decode and memory figures instead.
  */
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700   /* mkfifo, symlink, realpath */
+#endif
 #include "texrepl.h"
 
 #include "nk_platform.h"
@@ -958,8 +966,11 @@ static void mem_now(double *ws_mib, double *peak_mib) {
     *peak_mib = (double)pmc.PeakWorkingSetSize / 1048576.0;
 }
 #else
+#include <errno.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/time.h>
+#include <unistd.h>
 static double wall_s(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -972,6 +983,315 @@ static void mem_now(double *ws_mib, double *peak_mib) {
     *peak_mib = (double)ru.ru_maxrss / 1024.0;
 }
 #endif
+
+/* ------------------------------------------------------------------------------ hardening */
+
+static uint32_t be32_at(const uint8_t *b) {
+    return (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 8 | (uint32_t)b[3];
+}
+static void put_be32(uint8_t *b, uint32_t v) {
+    b[0] = (uint8_t)(v >> 24); b[1] = (uint8_t)(v >> 16); b[2] = (uint8_t)(v >> 8); b[3] = (uint8_t)v;
+}
+/* Rewrites the CRC of the chunk starting at `at`. */
+static void png_fix_crc(uint8_t *d, size_t at) {
+    uint32_t len = be32_at(d + at);
+    put_be32(d + at + 8 + len, nk_zip_crc32(0, d + at + 4, (size_t)len + 4u));
+}
+
+/* Truncated, flipped, bad-CRC and oversized PNGs are refused before stb_image sees them, and every
+ * byte of the image data flipped with its CRC made right again decodes or is refused, never more. */
+static void test_png_corpus(void) {
+    char dir[512], path[600], why[96];
+    make_pack(dir, sizeof(dir), "texrepl_png_corpus");
+    uint32_t *px = solid(8, 8, 0xff336699u);
+    px[5] = 0xff000000u;
+    pack_path(path, sizeof(path), "texrepl_png_corpus", "good.png");
+    write_png(path, 8, 8, px);
+    size_t n = 0;
+    uint8_t *png = read_all(path, &n);
+    uint32_t *rgba = NULL;
+    int w = 0, h = 0;
+    CHECK(nk_texrepl_decode_png(png, n, 0, &rgba, &w, &h, why, sizeof(why)) && w == 8 && h == 8 && rgba &&
+              rgba[5] == 0xff000000u && rgba[6] == 0xff336699u,
+          "a good PNG did not decode: %s", why);
+    free(rgba);
+    uint8_t *m = (uint8_t *)malloc(n + 16);
+    /* Every truncation. */
+    int bad = 0;
+    for (size_t cut = 0; cut < n; cut++) {
+        memcpy(m, png, cut);
+        rgba = NULL;
+        if (nk_texrepl_decode_png(m, cut, 0, &rgba, &w, &h, why, sizeof(why)) || rgba) bad++;
+        free(rgba);
+    }
+    CHECK(bad == 0, "%d truncations of %zu decoded", bad, n);
+    /* Every byte flipped, CRC left as it was: the checks refuse each one. */
+    bad = 0;
+    for (size_t i = 0; i < n; i++) {
+        memcpy(m, png, n);
+        m[i] ^= 0xffu;
+        rgba = NULL;
+        if (nk_texrepl_decode_png(m, n, 0, &rgba, &w, &h, why, sizeof(why)) || rgba) bad++;
+        free(rgba);
+    }
+    CHECK(bad == 0, "%d single-byte flips with the CRC unchanged decoded", bad);
+    memcpy(m, png, n);
+    m[8 + 8 + 13 + 3] ^= 1u;   /* IHDR's CRC */
+    CHECK(!nk_texrepl_decode_png(m, n, 0, &rgba, &w, &h, why, sizeof(why)) && strstr(why, "chunk IHDR has a wrong CRC"),
+          "a bad IHDR CRC: '%s'", why);
+    /* Image-data bytes flipped with the CRC made right: stb_image decodes 8x8 or refuses. */
+    size_t at = 8, idat_at = 0;
+    while (at + 12 <= n) {
+        if (!memcmp(png + at + 4, "IDAT", 4)) { idat_at = at; break; }
+        at += be32_at(png + at) + 12u;
+    }
+    CHECK(idat_at != 0, "no IDAT in the synthetic PNG");
+    int decoded = 0, refused = 0, wrong = 0;
+    static const uint8_t kFlips[] = { 0x01u, 0x10u, 0x80u, 0xffu };
+    for (uint32_t k = 0; idat_at && k < be32_at(png + idat_at); k++) {
+        for (size_t f = 0; f < sizeof(kFlips); f++) {
+            memcpy(m, png, n);
+            m[idat_at + 8 + k] ^= kFlips[f];
+            png_fix_crc(m, idat_at);
+            rgba = NULL;
+            if (nk_texrepl_decode_png(m, n, 0, &rgba, &w, &h, why, sizeof(why))) {
+                decoded++;
+                if (w != 8 || h != 8 || !rgba) wrong++;
+            } else {
+                refused++;
+                if (rgba) wrong++;
+            }
+            free(rgba);
+        }
+    }
+    CHECK(wrong == 0 && decoded + refused > 0, "IDAT flips: %d decoded, %d refused, %d wrong", decoded, refused, wrong);
+    printf("png corpus: %zu truncations and %zu flips refused; %d IDAT flips with fixed CRCs decoded, %d refused\n",
+           n, n, decoded, refused);
+    /* Sizes in IHDR: 4096 a side and 0 refused; 2048x2048 refused over an allocation cap. */
+    static const struct { uint32_t w, h; uint64_t cap; const char *why; } kDims[] = {
+        { 4096u, 8u, 0u, "not 1 to 2048" }, { 8u, 4096u, 0u, "not 1 to 2048" }, { 0u, 8u, 0u, "not 1 to 2048" },
+        { 0x80000000u, 0x80000000u, 0u, "not 1 to 2048" }, { 2048u, 2048u, 1u << 20, "more than the 1024 KiB" },
+    };
+    for (size_t i = 0; i < sizeof(kDims) / sizeof(kDims[0]); i++) {
+        memcpy(m, png, n);
+        put_be32(m + 16, kDims[i].w);
+        put_be32(m + 20, kDims[i].h);
+        png_fix_crc(m, 8);
+        rgba = NULL;
+        CHECK(!nk_texrepl_decode_png(m, n, kDims[i].cap, &rgba, &w, &h, why, sizeof(why)) && !rgba &&
+                  strstr(why, kDims[i].why),
+              "IHDR %lux%lu: '%s'", (unsigned long)kDims[i].w, (unsigned long)kDims[i].h, why);
+    }
+    /* Bytes after IEND are ignored, as decoders ignore them. */
+    memcpy(m, png, n);
+    memcpy(m + n, "trailing bytes!!", 16);
+    rgba = NULL;
+    CHECK(nk_texrepl_decode_png(m, n + 16, 0, &rgba, &w, &h, why, sizeof(why)) && w == 8, "bytes after IEND: %s", why);
+    free(rgba);
+
+    /* In a pack: a 2048x2048 IHDR over a 1 MiB budget, a bad CRC and a truncation are skipped, each
+     * noted and counted once in stats.skipped. */
+    memcpy(m, png, n);
+    put_be32(m + 16, 2048u);
+    put_be32(m + 20, 2048u);
+    png_fix_crc(m, 8);
+    pack_path(path, sizeof(path), "texrepl_png_corpus", "huge.png");
+    FILE *f = nk_fopen_utf8(path, "wb");
+    if (!f) { fprintf(stderr, "cannot write %s\n", path); exit(2); }
+    fwrite(m, 1, n, f);
+    fclose(f);
+    memcpy(m, png, n);
+    m[n - 1] ^= 1u;
+    pack_path(path, sizeof(path), "texrepl_png_corpus", "crc.png");
+    f = nk_fopen_utf8(path, "wb");
+    if (!f) { fprintf(stderr, "cannot write %s\n", path); exit(2); }
+    fwrite(m, 1, n, f);
+    fclose(f);
+    pack_path(path, sizeof(path), "texrepl_png_corpus", "cut.png");
+    f = nk_fopen_utf8(path, "wb");
+    if (!f) { fprintf(stderr, "cannot write %s\n", path); exit(2); }
+    fwrite(png, 1, n / 2, f);
+    fclose(f);
+    pack_path(path, sizeof(path), "texrepl_png_corpus", "textures.ini");
+    write_text(path, "[options]\nhash = quick\n[hashes]\n"
+                     "0880400000000202c0000001 = huge.png\n0880400000000202c0000002 = crc.png\n"
+                     "0880400000000202c0000003 = cut.png\n0880400000000202c0000004 = good.png\n");
+    char err[256] = "";
+    NkTexRepl *p = nk_texrepl_open(dir, 1u << 20, err, sizeof(err));
+    CHECK(p != NULL, "png corpus pack: %s", err);
+    if (p) {
+        NkTexReplHit hit;
+        for (int round = 0; round < 2; round++) {
+            for (uint32_t i = 1; i <= 3; i++) {
+                NkTexReplId id = { 0x08804000u, 3u, 0x0202u, 0u, 0xc0000000u + i };
+                CHECK(nk_texrepl_lookup(p, &id, &hit) == 0, "bad PNG %u replaced a texture", (unsigned)i);
+            }
+        }
+        NkTexReplId good = { 0x08804000u, 3u, 0x0202u, 0u, 0xc0000004u };
+        CHECK(nk_texrepl_lookup(p, &good, &hit) == 1, "the good PNG beside bad ones was not used");
+        nk_texrepl_unpin(p, &hit);
+        NkTexReplStats st;
+        nk_texrepl_stats(p, &st);
+        CHECK(st.skipped == 3 && st.over_budget == 1 && st.loaded == 1, "skipped=%llu over=%llu loaded=%llu",
+              (unsigned long long)st.skipped, (unsigned long long)st.over_budget, (unsigned long long)st.loaded);
+        CHECK(has_diag(p, "huge.png: 2048x2048 needs 16384 KiB"), "huge image not noted");
+        CHECK(has_diag(p, "crc.png: not a PNG this module decodes (chunk IEND has a wrong CRC)"), "bad CRC not noted");
+        CHECK(has_diag(p, "cut.png: not a PNG this module decodes (cut short"), "truncation not noted");
+        nk_texrepl_close(p);
+    }
+    free(m);
+    free(png);
+    free(px);
+}
+
+#if defined(_WIN32)
+static int make_dir_link(const char *link, const char *target) {
+    char cmd[1600], full[700], name[700];
+    if (!GetFullPathNameA(target, sizeof(full), full, NULL)) return 0;
+    snprintf(name, sizeof(name), "%s", link);
+    for (char *c = name; *c; c++) if (*c == '/') *c = '\\';   /* the link's name only, so "/J" stays */
+    snprintf(cmd, sizeof(cmd), "mklink /J \"%s\" \"%s\" >NUL 2>&1", name, full);
+    return system(cmd) == 0;
+}
+static int make_file_link(const char *link, const char *target) {
+    WCHAR wl[700], wt[700];
+    if (!MultiByteToWideChar(CP_UTF8, 0, link, -1, wl, 700) || !MultiByteToWideChar(CP_UTF8, 0, target, -1, wt, 700))
+        return 0;
+    for (WCHAR *c = wl; *c; c++) if (*c == L'/') *c = L'\\';
+    for (WCHAR *c = wt; *c; c++) if (*c == L'/') *c = L'\\';
+    WCHAR full[700];
+    if (!GetFullPathNameW(wt, 700, full, NULL)) return 0;
+    return CreateSymbolicLinkW(wl, full, 0x2 /* SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE */) != 0;
+}
+#else
+static int make_abs(const char *target, char *out, size_t cap) {
+    char *r = realpath(target, NULL);
+    if (!r) return 0;
+    snprintf(out, cap, "%s", r);
+    free(r);
+    return 1;
+}
+static int make_dir_link(const char *link, const char *target) {
+    char abs[4096];
+    return make_abs(target, abs, sizeof(abs)) && symlink(abs, link) == 0;
+}
+static int make_file_link(const char *link, const char *target) { return make_dir_link(link, target); }
+#endif
+
+/* A [hashes] value with a device name or a name Windows changes is not opened; a link or junction
+ * that leaves the pack folder is not followed; a FIFO is refused without blocking (POSIX); a
+ * textures.ini over 4 MiB refuses the pack; a pack's error names only its last path component. */
+static void test_file_checks(void) {
+    char dir[512], path[600], target[600], err[256] = "";
+    make_pack(dir, sizeof(dir), "texrepl_pack_files");
+    char outside[512];
+    make_pack(outside, sizeof(outside), "texrepl_pack_outside");
+    uint32_t *px = solid(4, 4, 0xff445566u);
+    pack_path(path, sizeof(path), "texrepl_pack_outside", "out.png");
+    write_png(path, 4, 4, px);
+    pack_path(path, sizeof(path), "texrepl_pack_files", "in.png");
+    write_png(path, 4, 4, px);
+    pack_path(path, sizeof(path), "texrepl_pack_files", "sub");
+    nk_platform_mkdir_p(path);
+
+    /* Links: a junction (Windows) or symlink to a folder outside, a file link outside and one inside. */
+    pack_path(path, sizeof(path), "texrepl_pack_files", "jdir");
+    int have_dir_link = nk_platform_dir_exists(path) || make_dir_link(path, outside);
+    pack_path(path, sizeof(path), "texrepl_pack_files", "flink.png");
+    pack_path(target, sizeof(target), "texrepl_pack_outside", "out.png");
+    int have_file_link = nk_platform_file_exists(path) || make_file_link(path, target);
+    pack_path(path, sizeof(path), "texrepl_pack_files", "inlink.png");
+    pack_path(target, sizeof(target), "texrepl_pack_files", "in.png");
+    int have_in_link = nk_platform_file_exists(path) || make_file_link(path, target);
+    if (!have_dir_link) printf("SKIP folder link out of the pack: the link could not be made on this host\n");
+    if (!have_file_link || !have_in_link)
+        printf("SKIP file links: a symbolic link could not be made here (Windows needs Developer Mode)\n");
+#if !defined(_WIN32)
+    pack_path(path, sizeof(path), "texrepl_pack_files", "fifo.png");
+    int have_fifo = mkfifo(path, 0600) == 0 || errno == EEXIST;
+    if (!have_fifo) printf("SKIP FIFO: mkfifo failed\n");
+#endif
+    pack_path(path, sizeof(path), "texrepl_pack_files", "textures.ini");
+    write_text(path, "[options]\nhash = quick\n[hashes]\n"
+                     "0880400000000202d0000001 = CON.png\n0880400000000202d0000002 = sub/COM1.png\n"
+                     "0880400000000202d0000003 = sub./in.png\n0880400000000202d0000004 = jdir/out.png\n"
+                     "0880400000000202d0000005 = flink.png\n0880400000000202d0000006 = inlink.png\n"
+                     "0880400000000202d0000007 = fifo.png\n0880400000000202d0000008 = in.png\n"
+                     "0880400000000202d0000009 = sub\n");
+    NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    CHECK(p != NULL, "file-check pack: %s", err);
+    if (p) {
+        NkTexReplHit hit;
+        int expect[10] = { 0, 0, 0, 0, 0, 0, 1, 0, 1, 0 };
+        for (uint32_t i = 1; i <= 9; i++) {
+            if ((i == 4 && !have_dir_link) || ((i == 5 || i == 6) && (!have_file_link || !have_in_link))) continue;
+#if defined(_WIN32)
+            if (i == 7) continue;
+#else
+            if (i == 7 && !have_fifo) continue;
+#endif
+            NkTexReplId id = { 0x08804000u, 3u, 0x0202u, 0u, 0xd0000000u + i };
+            int got = nk_texrepl_lookup(p, &id, &hit);
+            CHECK(got == expect[i], "file check %u: lookup gave %d", (unsigned)i, got);
+            if (got) nk_texrepl_unpin(p, &hit);
+        }
+        CHECK(has_diag(p, "CON.png: not a file name this module opens (ZIP_NAME_RESERVED"), "CON.png not refused");
+        CHECK(has_diag(p, "sub/COM1.png: not a file name this module opens (ZIP_NAME_RESERVED"), "COM1.png not refused");
+        CHECK(has_diag(p, "sub./in.png: not a file name this module opens (ZIP_NAME_CHARACTER"), "trailing dot not refused");
+        if (have_dir_link)
+            CHECK(has_diag(p, "jdir/out.png: not used: it resolves outside the pack folder"), "folder link followed out");
+        if (have_file_link && have_in_link)
+            CHECK(has_diag(p, "flink.png: not used: it resolves outside the pack folder"), "file link followed out");
+#if !defined(_WIN32)
+        if (have_fifo) CHECK(has_diag(p, "fifo.png: not used: it is not a regular file"), "FIFO not refused");
+#endif
+        nk_texrepl_close(p);
+    }
+
+    /* A textures.ini one byte over 4 MiB. */
+    char big_dir[512];
+    make_pack(big_dir, sizeof(big_dir), "texrepl_pack_bigini");
+    pack_path(path, sizeof(path), "texrepl_pack_bigini", "textures.ini");
+    FILE *f = nk_fopen_utf8(path, "wb");
+    if (!f) { fprintf(stderr, "cannot write %s\n", path); exit(2); }
+    fputs("[options]\nhash = quick\n", f);
+    long left = (4L << 20) + 1 - (long)strlen("[options]\nhash = quick\n");
+    while (left > 0) { fputc(left % 64 == 0 ? '\n' : '#', f); left--; }
+    fclose(f);
+    err[0] = '\0';
+    p = nk_texrepl_open(big_dir, 0, err, sizeof(err));
+    CHECK(p == NULL && strstr(err, "larger than 4 MiB"), "a textures.ini over 4 MiB: '%s'", err);
+    if (p) nk_texrepl_close(p);
+
+#if !defined(_WIN32)
+    /* A FIFO named as a ZIP pack is refused, and one named textures.zip in a folder is not read: the
+     * folder opens as a folder pack, and neither waits for a writer. */
+    char fifo_dir[512];
+    make_pack(fifo_dir, sizeof(fifo_dir), "texrepl_pack_fifozip");
+    pack_path(path, sizeof(path), "texrepl_pack_fifozip", "textures.ini");
+    write_text(path, "[options]\nhash = quick\n");
+    pack_path(path, sizeof(path), "texrepl_pack_fifozip", "textures.zip");
+    if (mkfifo(path, 0600) == 0 || errno == EEXIST) {
+        err[0] = '\0';
+        p = nk_texrepl_open(fifo_dir, 0, err, sizeof(err));
+        CHECK(p != NULL && !nk_texrepl_is_zip(p), "FIFO textures.zip: '%s'", err);
+        if (p) nk_texrepl_close(p);
+        err[0] = '\0';
+        p = nk_texrepl_open(path, 0, err, sizeof(err));
+        CHECK(p == NULL && err[0], "FIFO ZIP pack opened");
+        if (p) nk_texrepl_close(p);
+    } else {
+        printf("SKIP FIFO ZIP: mkfifo failed\n");
+    }
+#endif
+
+    /* Errors carry the pack's last path component only. */
+    err[0] = '\0';
+    CHECK(nk_texrepl_open(SR_SELFTEST_BUILD_ROOT "/texrepl_no_such_pack/", 0, err, sizeof(err)) == NULL &&
+              strstr(err, "'texrepl_no_such_pack'") && !strchr(err, '/') && !strchr(err, '\\'),
+          "a missing pack's message: '%s'", err);
+    free(px);
+}
 
 /* --bench N: a synthetic pack of N textures (32x32 PNGs, one textures.ini line each, files in a
  * subfolder) as a folder and as a ZIP of DEFLATE entries in one top-level folder; prints open,
@@ -1072,6 +1392,8 @@ int main(int argc, char **argv) {
     test_budget();
     test_index_forms();
     test_zip_packs();
+    test_png_corpus();
+    test_file_checks();
     if (g_failures) {
         fprintf(stderr, "texrepl selftest: %d check(s) failed\n", g_failures);
         return 1;

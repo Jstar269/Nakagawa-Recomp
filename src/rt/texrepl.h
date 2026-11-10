@@ -31,10 +31,19 @@
  * image holds palette indices, so it is not replaced), and any key or section this module does not
  * know each add a line to nk_texrepl_diag.
  *
- * A malformed ini (a line that is no comment, section or key = value, an unfinished or indented
- * section header, a line before any section, no hash type, an unknown hash type), a damaged ZIP or
- * one with an unsafe name makes nk_texrepl_open fail with a message, and nothing loads: a half-read
- * pack would replace some textures and not others in a way nobody asked for.
+ * A pack is refused whole, with a message and nothing loaded, when its folder, textures.ini or ZIP
+ * cannot be read or is malformed: a line that is no comment, section or key = value, an unfinished
+ * or indented section header, a line before any section, no hash type or an unknown one, a
+ * textures.ini over 4 MiB, a damaged ZIP or one with an unsafe name. One image that cannot be used
+ * (missing, not a regular file, outside the pack folder, over 64 MiB, a bad PNG, the wrong size for
+ * its level, over the budget) is skipped: its texture is drawn as the game draws it, a line goes to
+ * nk_texrepl_diag and stats.skipped counts it.
+ *
+ * Files are checked on the handle opened, not the name: a folder file is read only when it is a
+ * regular disk file whose final path (links and junctions resolved) is inside the folder's final
+ * path, and only up to its cap; a name the ZIP reader would refuse (CON.png, "a.png.", "a:b") is
+ * not opened. A ZIP pack's file is the same: a regular file, the folder's textures.zip inside it.
+ * Messages name the pack by its last path component only.
  */
 #ifndef NK_TEXREPL_H
 #define NK_TEXREPL_H
@@ -147,6 +156,13 @@ int nk_texrepl_level_count(const NkTexRepl *pack, const NkTexReplId *id);
  * nk_texrepl_lookup does, or 0. The renderer does not draw levels above 0 yet. */
 int nk_texrepl_lookup_level(NkTexRepl *pack, const NkTexReplId *id, int level, NkTexReplHit *out);
 void nk_texrepl_unpin(NkTexRepl *pack, NkTexReplHit *hit);
+/* Decodes PNG bytes as a pack image is decoded: refused, with a reason in `why`, unless the bytes
+ * are a whole PNG (signature, IHDR first, every chunk's CRC right, an IDAT, IEND), 1 to
+ * NK_TEXREPL_MAX_DIM texels a side and, when `max_bytes` is not 0, at most that many bytes of
+ * R, G, B, A pixels. All is checked before any pixel memory is allocated. On success `*rgba` is
+ * malloc'd (free it with free) and 1 is returned. */
+int nk_texrepl_decode_png(const void *data, size_t size, uint64_t max_bytes, uint32_t **rgba, int *w, int *h,
+                          char *why, size_t why_cap);
 /* The whole-number factor a hit is larger than a w x h texture by, the same on both axes, or 0
  * when it is not one (the renderer draws such a texture unreplaced and counts it). */
 int nk_texrepl_factor(const NkTexReplHit *hit, int w, int h);
@@ -163,6 +179,7 @@ typedef struct NkTexReplStats {
     uint64_t decode_ns;
     uint64_t open_ns;         /* nk_texrepl_open, by the C clock */
     uint64_t index_bytes;     /* what the open pack's own index holds (not the ZIP reader's directory) */
+    uint64_t skipped;         /* images found unusable and skipped from then on, each counted once */
 } NkTexReplStats;
 void nk_texrepl_stats(const NkTexRepl *pack, NkTexReplStats *out);
 void nk_texrepl_note_bad_factor(NkTexRepl *pack);

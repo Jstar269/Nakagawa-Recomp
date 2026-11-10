@@ -761,10 +761,13 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
 - **Settings.** `SR_TEX_REPLACE=<folder>` names the pack and `SR_TEX_REPLACE_BUDGET_MB` (1 to 8192, default 256) bounds
   the host memory its decoded images may hold, both read when the renderer starts. It takes effect only in Ace Mode:
   in an authentic run the pack is not read whatever the environment says, and a request prints one
-  `TEX_REPLACE: off (texture replacement needs Ace Mode)` line. A folder that cannot be read, or whose
-  `textures.ini` is malformed (a line that is no comment, section or `key = value`, no `hash` type, an unknown one),
-  prints `TEX_REPLACE: refused (<reason>)` and loads nothing: a half-read pack would replace some textures and not
-  others in a way nobody asked for. There is no launch-line key, library setting or per-title setting yet; they come
+  `TEX_REPLACE: off (texture replacement needs Ace Mode)` line. A pack whose folder, ZIP or `textures.ini` cannot
+  be read or is malformed (a line that is no comment, section or `key = value`, no `hash` type, an unknown one, a
+  `textures.ini` over 4 MiB, a damaged or unsafe ZIP) prints `TEX_REPLACE: refused (<reason>)` and is refused
+  whole; the reason names the pack by its last path component only. One image that cannot be used (missing, not a
+  regular file, outside the pack folder, over 64 MiB, a bad PNG, the wrong size for its level, over the budget) is
+  skipped: its texture is drawn as the game made it, a note says why, and the reader's `skipped` count includes
+  it. There is no launch-line key, library setting or per-title setting yet; they come
   with the launch-line pull request that follows #2074, and only that pull request admits the feature
   (section 11.3.4).
 - **The pack.** The project ships none and never downloads one: it is a folder or a ZIP file the user made or took
@@ -860,7 +863,10 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
     `textures.zip` that is not a valid ZIP refuses the pack (PPSSPP falls back to the folder). A ZIP with ZIP64
     (more than 65,534 entries or 4 GiB), encryption, a method other than stored or DEFLATE, or a name
     `nk_zip.c` refuses (a Windows-reserved name or character, a `.` or `..` folder, two names equal when case is
-    ignored) is refused; PPSSPP's ZIP library may read it.
+    ignored) is refused; PPSSPP's ZIP library may read it. A `textures.ini` over 4 MiB refuses the pack. Images
+    PPSSPP may still read are skipped here: a folder file that is a link or junction leading out of the pack, a
+    device or FIFO, a name the ZIP reader refuses (`CON.png`, `a.png.`), a file over 64 MiB, and a PNG with any
+    chunk's CRC wrong (libpng, which PPSSPP uses, by default only warns about a bad CRC in an ancillary chunk).
   - *The skip-last-DXT1 options* (`skipLastDXT1Blocks128x64`, `skipLastDXT1Blocks128x128`) are applied as
     PPSSPP applies them, so they are not a difference.
 - **How it draws.** The image is stored as the entry's scaled copy: an image `factor` times the guest texture,
@@ -882,7 +888,19 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   nothing is written to guest memory, the CLUT or a texture source. Files are read only from inside the pack's root,
   the folder or the ZIP (a name or `[hashes]` value that leaves it is refused); a ZIP is never extracted, a
   DEFLATE entry being unpacked in memory and bounded by its declared size; nothing is uploaded and no network
-  connection is made.
+  connection is made. A folder's files are checked on the handle opened, not the name: one is read only when it is
+  a regular disk file (Windows: `GetFileType` is `FILE_TYPE_DISK` and it is no folder; POSIX: `fstat` says
+  `S_ISREG`, the file opened without blocking so a FIFO is refused at once) whose final path, links and junctions
+  resolved (`GetFinalPathNameByHandleW`; `/proc/self/fd` or `realpath`), is inside the folder's own final path.
+  A name the ZIP reader refuses (a device name such as `CON.png` or `COM1.png`, a trailing dot or space, a
+  character Windows refuses) is not opened at all. Reads are capped: `textures.ini` at 4 MiB, an image at 64 MiB,
+  in a folder or a ZIP alike. A folder's `textures.zip`, and a ZIP named as the pack, is opened only when it is a
+  regular file (the folder's inside the folder); the ZIP reader then opens it by name, so a file swapped in that
+  moment is not caught by the handle check, though the ZIP's own checks still apply. A PNG is checked before
+  any pixel memory is allocated: the signature, `IHDR` first with 1 to 2048 texels a side and a pixel format the
+  PNG standard defines, every chunk whole with its CRC right, an `IDAT` and `IEND`; its pixels (width x height x
+  4 bytes) must fit the budget. What the image data inflates to is then left to stb_image, whose output that size
+  bounds (`nk_texrepl_decode_png` is the same check and decode, for a caller with bytes of its own).
 - **Stamps.** `TEX_REPLACE: on (hash=, entries=, notes=, budget_mb=)` at start, followed by the line section 11.3.4
   describes and one `TEX_REPLACE: note:` line for each thing read and not applied (a file that cannot be read or decoded is
   noted at its first use, when it is found, not only counted), and at exit `TEX_REPLACE: exit
@@ -900,7 +918,14 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   names it), `[indexed]`, malformed packs, path escapes and the budget, on synthetic packs; and ZIP packs written by
   the test: `textures.ini` at the top (DEFLATE-compressed by zlib itself) or in one top-level folder, stored,
   DEFLATE and data-descriptor entries, names in other case, a folder's `textures.zip`, a damaged image, and
-  ini-less, two-folder, cut, `..`-named, malformed and bzip2 archives refused whole. `test_nk_zip` checks the
+  ini-less, two-folder, cut, `..`-named, malformed and bzip2 archives refused whole; a small PNG cut at every
+  length and with every byte flipped (all refused), its image-data bytes flipped with the CRC made right (each
+  decodes at its size or is refused), `IHDR` sizes of 0, 4096 and 2^31 and a 2048x2048 one over a 1 MiB cap, and
+  bad images in a pack skipped, noted and counted once; device names, a trailing dot, a junction or link out of
+  the pack (a file link in it still read), a FIFO image and a FIFO `textures.zip` (POSIX), a `textures.ini` over
+  4 MiB, and a missing pack's message carrying no folder above it. These are fixed mutations, not
+  coverage-guided fuzzing, and no sanitizer build runs them; stb_image's own inflater is exercised only by them.
+  A file link needs Developer Mode on Windows, so that check is skipped there, and said, without it. `test_nk_zip` checks the
   reader's options: DEFLATE read only when asked, its level bits, damaged, short and long streams, data
   descriptors and the caps. `texrepl_selftest --bench N` measures an N-texture synthetic pack as a folder and as
   a ZIP (open, lookup and first-use times, index size and process memory). `gpu-texscale-selftest`'s `replace` cell runs the production path on a Vulkan device: a

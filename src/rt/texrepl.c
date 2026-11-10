@@ -20,17 +20,37 @@
  * at the same revision, read as reference and written here in this project's own code; ZIP packs are
  * read in place through the project's own reader (src/core/nk_zip.h).
  */
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700   /* realpath, O_CLOEXEC and O_NOCTTY under -std=c99 */
+#endif
 #include "texrepl.h"
 
 #include "nk_platform.h"
 #include "nk_zip.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #define STBI_ONLY_PNG
 #define STBI_NO_STDIO
@@ -303,6 +323,11 @@ typedef struct { const char *rel; size_t index; uint32_t size; } ZipName;
 
 struct NkTexRepl {
     char *dir;                 /* a folder pack */
+#if defined(_WIN32)
+    WCHAR *root_real;          /* the folder's final path, links resolved: files must be inside it */
+#else
+    char *root_real;
+#endif
     NkZipReader *zip;          /* a ZIP pack */
     ZipName *zip_names;
     size_t zip_name_n;
@@ -940,29 +965,147 @@ static int parse_ini(NkTexRepl *p, char *text, char *err, size_t err_cap) {
 
 /* ------------------------------------------------------------------------------- files */
 
-static unsigned char *read_whole(const char *path, size_t cap, size_t *size) {
-    FILE *f = nk_fopen_utf8(path, "rb");
-    if (!f) return NULL;
+typedef enum { PACK_READ_OK, PACK_READ_MISSING, PACK_READ_TOO_LARGE, PACK_READ_DAMAGED, PACK_READ_NOT_REGULAR,
+               PACK_READ_OUTSIDE } PackRead;
+
+/* A folder pack's file is read only when the handle it opens is a regular file on a disk, no larger
+ * than the cap, whose final path (links and junctions resolved) is inside the pack's resolved root.
+ * The checks are on the opened handle, not the name, so a device (CON, COM1, a FIFO), a link out of
+ * the pack and a file swapped for one between a listing and the read are all refused without a
+ * byte read. POSIX opens without blocking, so a FIFO is refused instead of waiting for a writer. */
+#if defined(_WIN32)
+static WCHAR *wide_of(const char *utf8) {
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    WCHAR *w = (WCHAR *)malloc((size_t)n * sizeof(WCHAR));
+    if (w && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, w, n) != n) { free(w); w = NULL; }
+    return w;
+}
+
+/* The handle's final path, links and junctions resolved (malloc'd), or NULL. */
+static WCHAR *final_path_of(HANDLE h) {
+    DWORD n = GetFinalPathNameByHandleW(h, NULL, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (n == 0) return NULL;
+    WCHAR *w = (WCHAR *)malloc(((size_t)n + 1) * sizeof(WCHAR));
+    if (!w) return NULL;
+    DWORD got = GetFinalPathNameByHandleW(h, w, n + 1, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (got == 0 || got > n) { free(w); return NULL; }
+    return w;
+}
+
+static int root_resolve(NkTexRepl *p) {
+    WCHAR *w = wide_of(p->dir);
+    if (!w) return 0;
+    HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    p->root_real = final_path_of(h);
+    CloseHandle(h);
+    if (!p->root_real) return 0;
+    size_t n = wcslen(p->root_real);
+    while (n > 0 && p->root_real[n - 1] == L'\\') p->root_real[--n] = L'\0';   /* a drive root's own '\' */
+    return 1;
+}
+
+static int inside_root(const NkTexRepl *p, const WCHAR *final) {
+    size_t n = wcslen(p->root_real);
+    return wcslen(final) > n + 1 && CompareStringOrdinal(final, (int)n, p->root_real, (int)n, TRUE) == CSTR_EQUAL &&
+           final[n] == L'\\';
+}
+
+static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t cap, size_t *size, PackRead *why,
+                                   int probe) {
+    *why = PACK_READ_MISSING;
+    WCHAR *w = wide_of(path);
+    if (!w) return NULL;
+    HANDLE h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
     unsigned char *buf = NULL;
-    size_t len = 0, room = 0;
-    for (;;) {
-        if (len == room) {
-            room = room ? room * 2 : 65536;
-            if (room > cap + 1) room = cap + 1;
-            if (len >= room) { free(buf); fclose(f); return NULL; }
-            unsigned char *g = (unsigned char *)realloc(buf, room);
-            if (!g) { free(buf); fclose(f); return NULL; }
-            buf = g;
+    BY_HANDLE_FILE_INFORMATION info;
+    LARGE_INTEGER len;
+    WCHAR *final = NULL;
+    if (GetFileType(h) != FILE_TYPE_DISK || !GetFileInformationByHandle(h, &info) ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        *why = PACK_READ_NOT_REGULAR;
+    } else if (p->root_real && (!(final = final_path_of(h)) || !inside_root(p, final))) {
+        *why = PACK_READ_OUTSIDE;
+    } else if (!GetFileSizeEx(h, &len) || len.QuadPart < 0 || (unsigned long long)len.QuadPart > cap) {
+        *why = PACK_READ_TOO_LARGE;
+    } else if (probe) {
+        *why = PACK_READ_OK;
+    } else if ((buf = (unsigned char *)malloc(len.QuadPart ? (size_t)len.QuadPart : 1u)) != NULL) {
+        size_t at = 0, want = (size_t)len.QuadPart;
+        while (at < want) {
+            DWORD got = 0, ask = want - at > 0x40000000u ? 0x40000000u : (DWORD)(want - at);
+            if (!ReadFile(h, buf + at, ask, &got, NULL) || got == 0) break;
+            at += got;
         }
-        size_t got = fread(buf + len, 1, room - len, f);
-        len += got;
-        if (got == 0) break;
-        if (len > cap) { free(buf); fclose(f); return NULL; }
+        if (at == want) { *size = want; *why = PACK_READ_OK; }
+        else { free(buf); buf = NULL; *why = PACK_READ_DAMAGED; }
     }
-    fclose(f);
-    *size = len;
+    free(final);
+    CloseHandle(h);
     return buf;
 }
+#else
+static int root_resolve(NkTexRepl *p) {
+    p->root_real = realpath(p->dir, NULL);
+    return p->root_real != NULL;
+}
+
+static int inside_root(const NkTexRepl *p, const char *final) {
+    size_t n = strlen(p->root_real);
+    if (n == 1 && p->root_real[0] == '/') n = 0;   /* the file system's root */
+    return strlen(final) > n + 1 && strncmp(final, p->root_real, n) == 0 && final[n] == '/';
+}
+
+static unsigned char *read_regular(const NkTexRepl *p, const char *path, size_t cap, size_t *size, PackRead *why,
+                                   int probe) {
+    *why = PACK_READ_MISSING;
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    unsigned char *buf = NULL;
+    struct stat st;
+    char *final = NULL;
+#if defined(__linux__)
+    char link[64], target[PATH_MAX + 1];
+    snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+    ssize_t tn = readlink(link, target, PATH_MAX);
+    if (tn > 0) {
+        target[tn] = '\0';
+        final = (char *)malloc((size_t)tn + 1);
+        if (final) memcpy(final, target, (size_t)tn + 1);
+    } else
+#endif
+    {
+        final = realpath(path, NULL);   /* the handle's own path where the system cannot say */
+    }
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        *why = PACK_READ_NOT_REGULAR;
+    } else if (p->root_real && (!final || !inside_root(p, final))) {
+        *why = PACK_READ_OUTSIDE;
+    } else if (st.st_size < 0 || (unsigned long long)st.st_size > cap) {
+        *why = PACK_READ_TOO_LARGE;
+    } else if (probe) {
+        *why = PACK_READ_OK;
+    } else if ((buf = (unsigned char *)malloc(st.st_size ? (size_t)st.st_size : 1u)) != NULL) {
+        size_t at = 0, want = (size_t)st.st_size;
+        while (at < want) {
+            ssize_t got = read(fd, buf + at, want - at);
+            if (got < 0 && errno == EINTR) continue;
+            if (got <= 0) break;
+            at += (size_t)got;
+        }
+        if (at == want) { *size = want; *why = PACK_READ_OK; }
+        else { free(buf); buf = NULL; *why = PACK_READ_DAMAGED; }
+    }
+    free(final);
+    close(fd);
+    return buf;
+}
+#endif
 
 static int zip_name_cmp(const void *x, const void *y) {
     return ci_cmp(((const ZipName *)x)->rel, ((const ZipName *)y)->rel);
@@ -980,8 +1123,6 @@ static const ZipName *zip_find(const NkTexRepl *p, const char *rel) {
     }
     return NULL;
 }
-
-typedef enum { PACK_READ_OK, PACK_READ_MISSING, PACK_READ_TOO_LARGE, PACK_READ_DAMAGED } PackRead;
 
 /* A pack file's bytes, at most `cap`: from the folder, or from the ZIP without writing anything. */
 static unsigned char *pack_read(NkTexRepl *p, const char *rel, size_t cap, size_t *size, PackRead *why,
@@ -1008,10 +1149,7 @@ static unsigned char *pack_read(NkTexRepl *p, const char *rel, size_t cap, size_
     }
     char path[1400];
     if (snprintf(path, sizeof(path), "%s/%s", p->dir, rel) >= (int)sizeof(path)) return NULL;
-    unsigned char *buf = read_whole(path, cap, size);
-    if (buf) *why = PACK_READ_OK;
-    else if (nk_platform_file_exists(path)) *why = PACK_READ_TOO_LARGE;
-    return buf;
+    return read_regular(p, path, cap, size, why, 0);
 }
 
 static int ends_with_ci(const char *s, const char *suffix) {
@@ -1135,18 +1273,39 @@ static uint64_t index_bytes(const NkTexRepl *p) {
     return b;
 }
 
+/* The last component of a pack's path, for messages: a full path would show the user's folders. */
+static const char *last_component(const char *path, char *buf, size_t cap) {
+    size_t n = strlen(path);
+    while (n > 1 && (path[n - 1] == '/' || path[n - 1] == '\\')) n--;
+    size_t b = n;
+    while (b > 0 && path[b - 1] != '/' && path[b - 1] != '\\' && path[b - 1] != ':') b--;
+    snprintf(buf, cap, "%.*s", (int)(n - b), path + b);
+    return buf;
+}
+
+static const char *read_reason(PackRead why) {
+    switch (why) {
+    case PACK_READ_TOO_LARGE: return "it is larger than the cap";
+    case PACK_READ_DAMAGED: return "it could not be read whole";
+    case PACK_READ_NOT_REGULAR: return "it is not a regular file (a device, pipe or folder)";
+    case PACK_READ_OUTSIDE: return "it resolves outside the pack folder (a link or junction)";
+    default: return "it is missing or cannot be opened";
+    }
+}
+
 static NkTexRepl *open_fail(NkTexRepl *p) {
     nk_texrepl_close(p);
     return NULL;
 }
 
 NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, size_t err_cap) {
-    char ebuf[256];
+    char ebuf[256], name[128];
     if (!err || !err_cap) { err = ebuf; err_cap = sizeof(ebuf); }
     err[0] = '\0';
     int is_dir = path && *path && nk_platform_dir_exists(path);
     if (!is_dir && !(path && *path && nk_platform_file_exists(path))) {
-        snprintf(err, err_cap, "texture pack '%s' does not exist (a folder or a .zip file)", path ? path : "");
+        snprintf(err, err_cap, "texture pack '%s' does not exist (a folder or a .zip file)",
+                 path ? last_component(path, name, sizeof(name)) : "");
         return NULL;
     }
     NkTexRepl *p = (NkTexRepl *)calloc(1, sizeof(*p));
@@ -1167,18 +1326,34 @@ NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, s
             snprintf(err, err_cap, "texture pack folder path is too long");
             return open_fail(p);
         }
+        if (!root_resolve(p)) {
+            snprintf(err, err_cap, "texture pack folder '%s' cannot be resolved to its final path",
+                     last_component(path, name, sizeof(name)));
+            return open_fail(p);
+        }
         if (!nk_platform_file_exists(zip_path)) zip_path[0] = '\0';
-    } else {
-        snprintf(zip_path, sizeof(zip_path), "%s", path);
+    } else if (snprintf(zip_path, sizeof(zip_path), "%s", path) >= (int)sizeof(zip_path)) {
+        snprintf(err, err_cap, "texture pack path is too long");
+        return open_fail(p);
     }
 
     if (zip_path[0]) {
+        /* The ZIP's handle is checked as a folder file's is (a regular file, inside the folder when it
+         * is the folder's textures.zip) before the ZIP reader opens it. */
+        size_t zsize = 0;
+        PackRead zwhy;
+        read_regular(p, zip_path, (size_t)-1, &zsize, &zwhy, 1);
+        if (zwhy != PACK_READ_OK) {
+            snprintf(err, err_cap, "texture pack ZIP '%s' refused: %s",
+                     is_dir ? "textures.zip" : last_component(path, name, sizeof(name)), read_reason(zwhy));
+            return open_fail(p);
+        }
         if (!open_zip(p, zip_path, err, err_cap)) return open_fail(p);
         if (is_dir) diag_add(p, "textures.zip read in place of the folder's own files, as PPSSPP reads it");
     } else {
         ScanCtx sc = { p, 1 };
         if (!nk_platform_list_files(p->dir, scan_file, &sc) || !sc.ok) {
-            snprintf(err, err_cap, "texture pack folder '%s' cannot be read", path);
+            snprintf(err, err_cap, "texture pack folder '%s' cannot be read", last_component(path, name, sizeof(name)));
             return open_fail(p);
         }
     }
@@ -1188,8 +1363,9 @@ NkTexRepl *nk_texrepl_open(const char *path, uint64_t budget_bytes, char *err, s
     char zip_why[40];
     unsigned char *text = pack_read(p, "textures.ini", 4u << 20, &size, &why, zip_why, sizeof(zip_why));
     if (!text && why != PACK_READ_MISSING) {
-        snprintf(err, err_cap, "textures.ini cannot be read%s%s%s", why == PACK_READ_TOO_LARGE ? " or is larger than 4 MiB" : "",
-                 zip_why[0] ? ": " : "", zip_why);
+        snprintf(err, err_cap, "textures.ini cannot be read: %s%s%s",
+                 why == PACK_READ_TOO_LARGE ? "it is larger than 4 MiB" : read_reason(why), zip_why[0] ? ", " : "",
+                 zip_why);
         return open_fail(p);
     }
     if (text) {
@@ -1227,6 +1403,7 @@ void nk_texrepl_close(NkTexRepl *p) {
     free(p->zip_names);
     free(p->indexed);
     nk_zip_reader_close(p->zip);
+    free(p->root_real);
     free(p->dir);
     free(p);
 }
@@ -1356,15 +1533,139 @@ static int level_size_ok(NkTexRepl *p, const Alias *a, uint32_t level, Level *v)
     return 0;
 }
 
-/* Reads a level's file and, with `decode`, its image. Sets state 1 (decoded), 3 (size known) or 2. */
+static uint32_t png_be32(const unsigned char *b) {
+    return (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 8 | (uint32_t)b[3];
+}
+
+/* PNG bytes checked before anything is allocated for their pixels: the signature, IHDR first with a
+ * size of 1 to NK_TEXREPL_MAX_DIM a side and a pixel format the PNG standard defines, every chunk
+ * whole with its CRC right, at least one IDAT, and IEND. Bytes after IEND are ignored, as decoders
+ * ignore them. What the IDAT data inflates to is left to stb_image, whose output the size bounds. */
+static int png_check(const unsigned char *d, size_t n, int *w, int *h, char *why, size_t why_cap) {
+    static const unsigned char sig[8] = { 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+    if (n < 8 || memcmp(d, sig, 8) != 0) { snprintf(why, why_cap, "no PNG signature"); return 0; }
+    size_t at = 8;
+    int chunks = 0, idat = 0;
+    while (at < n) {
+        if (n - at < 12) { snprintf(why, why_cap, "cut short in a chunk header"); return 0; }
+        uint32_t len = png_be32(d + at);
+        const unsigned char *type = d + at + 4;
+        if (len > 0x7fffffffu || len > n - at - 12) { snprintf(why, why_cap, "cut short in a chunk"); return 0; }
+        for (int k = 0; k < 4; k++) {
+            if (!((type[k] >= 'A' && type[k] <= 'Z') || (type[k] >= 'a' && type[k] <= 'z'))) {
+                snprintf(why, why_cap, "a chunk type is not four letters");
+                return 0;
+            }
+        }
+        if (nk_zip_crc32(0, type, (size_t)len + 4u) != png_be32(type + 4 + len)) {
+            snprintf(why, why_cap, "chunk %.4s has a wrong CRC", (const char *)type);
+            return 0;
+        }
+        const int is_ihdr = !memcmp(type, "IHDR", 4);
+        if ((chunks == 0) != is_ihdr) { snprintf(why, why_cap, "IHDR is not the first chunk, or not the only one"); return 0; }
+        if (is_ihdr) {
+            const unsigned char *c = type + 4;
+            if (len != 13) { snprintf(why, why_cap, "IHDR is not 13 bytes"); return 0; }
+            uint32_t pw = png_be32(c), ph = png_be32(c + 4);
+            if (pw == 0 || ph == 0 || pw > NK_TEXREPL_MAX_DIM || ph > NK_TEXREPL_MAX_DIM) {
+                snprintf(why, why_cap, "%lux%lu is not 1 to %d texels a side", (unsigned long)pw, (unsigned long)ph,
+                         NK_TEXREPL_MAX_DIM);
+                return 0;
+            }
+            const unsigned depth = c[8], color = c[9];
+            const int ok = (color == 0 && (depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16)) ||
+                           (color == 3 && (depth == 1 || depth == 2 || depth == 4 || depth == 8)) ||
+                           ((color == 2 || color == 4 || color == 6) && (depth == 8 || depth == 16));
+            if (!ok || c[10] != 0 || c[11] != 0 || c[12] > 1) {
+                snprintf(why, why_cap, "IHDR names no PNG pixel format");
+                return 0;
+            }
+            *w = (int)pw;
+            *h = (int)ph;
+        }
+        if (!memcmp(type, "IDAT", 4)) idat = 1;
+        chunks++;
+        at += (size_t)len + 12u;
+        if (!memcmp(type, "IEND", 4)) {
+            if (!idat) { snprintf(why, why_cap, "no IDAT before IEND"); return 0; }
+            return 1;
+        }
+    }
+    snprintf(why, why_cap, "no IEND");
+    return 0;
+}
+
+/* Decodes checked PNG bytes to R, G, B, A (malloc'd), or NULL. */
+static uint32_t *png_decode(const unsigned char *d, size_t n, int w, int h) {
+    if (n > (size_t)INT_MAX) return NULL;
+    int dw = 0, dh = 0, ch = 0;
+    unsigned char *px = stbi_load_from_memory(d, (int)n, &dw, &dh, &ch, 4);
+    if (!px) return NULL;
+    uint32_t *out = NULL;
+    if (dw == w && dh == h) {
+        const size_t bytes = (size_t)w * (size_t)h * 4u;
+        out = (uint32_t *)malloc(bytes);
+        if (out) memcpy(out, px, bytes);   /* R, G, B, A bytes: R in the low byte on a little-endian host */
+    }
+    stbi_image_free(px);
+    return out;
+}
+
+int nk_texrepl_decode_png(const void *data, size_t size, uint64_t max_bytes, uint32_t **rgba, int *w, int *h,
+                          char *why, size_t why_cap) {
+    char wbuf[96];
+    if (!why || !why_cap) { why = wbuf; why_cap = sizeof(wbuf); }
+    why[0] = '\0';
+    if (!rgba || !w || !h) { snprintf(why, why_cap, "no place for the image"); return 0; }
+    *rgba = NULL;
+    *w = *h = 0;
+    int pw = 0, ph = 0;
+    if (!data || !png_check((const unsigned char *)data, size, &pw, &ph, why, why_cap)) return 0;
+    const uint64_t bytes = (uint64_t)pw * (uint64_t)ph * 4u;
+    if (max_bytes && bytes > max_bytes) {
+        snprintf(why, why_cap, "%dx%d needs %llu KiB, more than the %llu KiB allowed", pw, ph,
+                 (unsigned long long)(bytes >> 10), (unsigned long long)(max_bytes >> 10));
+        return 0;
+    }
+    uint32_t *px = png_decode((const unsigned char *)data, size, pw, ph);
+    if (!px) { snprintf(why, why_cap, "its image data does not decode"); return 0; }
+    *rgba = px;
+    *w = pw;
+    *h = ph;
+    return 1;
+}
+
+/* A level that cannot be used is skipped from then on, and counted once in stats.skipped. */
+static int skip_level(NkTexRepl *p, Level *v) {
+    if (v->state != 2) p->stats.skipped++;
+    v->state = 2;
+    return 0;
+}
+
+/* Reads a level's file and, with `decode`, its image. Sets state 1 (decoded), 3 (size known) or 2
+ * (skipped, with a note). */
 static int load_level(NkTexRepl *p, Alias *a, uint32_t level, int decode) {
     Level *v = &a->levels[level];
-    if (!path_inside_pack(v->file)) { v->state = 2; p->stats.load_failed++; return 0; }
+    if (!path_inside_pack(v->file)) { p->stats.load_failed++; return skip_level(p, v); }
     if (!ends_with_ci(v->file, ".png")) {
         diag_add(p, "%s: only PNG replacements are read in this version; not used", v->file);
-        v->state = 2;
         p->stats.load_failed++;
-        return 0;
+        return skip_level(p, v);
+    }
+    /* The ZIP reader's name rules, for a folder's file too: no device name (CON, COM1), no trailing
+     * dot or space, no character Windows refuses. */
+    char norm[NK_ZIP_MAX_NAME_BYTES + 1];
+    const size_t fl = strlen(v->file);
+    NkZipStatus ns = NK_ZIP_ERR_NAME_TOO_LONG;
+    if (fl <= NK_ZIP_MAX_NAME_BYTES) {
+        for (size_t k = 0; k <= fl; k++) norm[k] = v->file[k] == '\\' ? '/' : v->file[k];
+        ns = nk_zip_check_name(norm, fl, NULL);
+    }
+    if (ns != NK_ZIP_OK) {
+        diag_add(p, "%s: not a file name this module opens (%s: %s); not used", v->file, nk_zip_status_code(ns),
+                 nk_zip_status_message(ns));
+        p->stats.load_failed++;
+        return skip_level(p, v);
     }
     uint64_t t0 = now_ns();
     size_t size = 0;
@@ -1372,58 +1673,49 @@ static int load_level(NkTexRepl *p, Alias *a, uint32_t level, int decode) {
     char zip_why[40];
     unsigned char *file = pack_read(p, v->file, 64u << 20, &size, &why, zip_why, sizeof(zip_why));
     if (!file) {
-        if (why == PACK_READ_DAMAGED)
+        if (zip_why[0])
             diag_add(p, "%s: damaged in the ZIP (%s); texture left as the game draws it", v->file, zip_why);
         else
-            diag_add(p, "%s: file is missing, unreadable or larger than 64 MiB; texture left as the game draws it", v->file);
-        v->state = 2;
+            diag_add(p, "%s: not used: %s%s; texture left as the game draws it", v->file, read_reason(why),
+                     why == PACK_READ_TOO_LARGE ? " of 64 MiB" : "");
         p->stats.load_failed++;
-        return 0;
+        return skip_level(p, v);
     }
-    int w = 0, h = 0, ch = 0;
-    if (!stbi_info_from_memory(file, (int)size, &w, &h, &ch) || w <= 0 || h <= 0 || w > NK_TEXREPL_MAX_DIM ||
-        h > NK_TEXREPL_MAX_DIM) {
+    int w = 0, h = 0;
+    char bad[96];
+    if (!png_check(file, size, &w, &h, bad, sizeof(bad))) {
         free(file);
-        diag_add(p, "%s: not a PNG this build can decode (or larger than %d texels a side); not used", v->file,
-                 NK_TEXREPL_MAX_DIM);
-        v->state = 2;
+        diag_add(p, "%s: not a PNG this module decodes (%s); not used", v->file, bad);
         p->stats.load_failed++;
-        return 0;
+        return skip_level(p, v);
     }
     v->w = w;
     v->h = h;
-    if (!level_size_ok(p, a, level, v)) { free(file); v->state = 2; p->stats.load_failed++; return 0; }
+    if (!level_size_ok(p, a, level, v)) { free(file); p->stats.load_failed++; return skip_level(p, v); }
     const uint64_t bytes = (uint64_t)w * (uint64_t)h * 4u;
     if (bytes > p->budget) {
         free(file);
         diag_add(p, "%s: %dx%d needs %llu KiB, more than the %llu KiB texture budget; not used", v->file, w, h,
                  (unsigned long long)(bytes >> 10), (unsigned long long)(p->budget >> 10));
-        v->state = 2;
         p->stats.over_budget++;
-        return 0;
+        return skip_level(p, v);
     }
     if (!decode) { free(file); v->state = 3; return 1; }
-    unsigned char *px = stbi_load_from_memory(file, (int)size, &w, &h, &ch, 4);
-    free(file);
-    if (!px || w != v->w || h != v->h) {
-        if (px) stbi_image_free(px);
-        diag_add(p, "%s: not a PNG this build can decode; not used", v->file);
-        v->state = 2;
-        p->stats.load_failed++;
-        return 0;
-    }
     evict_for(p, bytes);
     if (p->used + bytes > p->budget) {
         /* Everything held is in use: draw this texture unreplaced now, and try again on a later lookup. */
-        stbi_image_free(px);
+        free(file);
         v->state = 3;
         p->stats.over_budget++;
         return 0;
     }
-    v->rgba = (uint32_t *)malloc((size_t)bytes);
-    if (!v->rgba) { stbi_image_free(px); v->state = 2; p->stats.load_failed++; return 0; }
-    memcpy(v->rgba, px, (size_t)bytes);   /* R, G, B, A bytes: R in the low byte on a little-endian host */
-    stbi_image_free(px);
+    v->rgba = png_decode(file, size, w, h);
+    free(file);
+    if (!v->rgba) {
+        diag_add(p, "%s: not a PNG this module decodes (its image data does not decode); not used", v->file);
+        p->stats.load_failed++;
+        return skip_level(p, v);
+    }
     v->state = 1;
     p->used += bytes;
     if (p->used > p->stats.cache_peak) p->stats.cache_peak = p->used;
