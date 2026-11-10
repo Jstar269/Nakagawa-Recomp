@@ -252,7 +252,10 @@ static void audio_host_hold_prime(int ch, uint32_t n) {
 
 /* The frames of `ch` the host has not played yet: what a listener is still to hear. Under the
  * deterministic clock and in fast forward it is the guest-time model's; otherwise the host
- * mixer's whole queue, the hold included, or -1 when the host has no output for it. */
+ * mixer's whole queue, the hold included, or -1 when the host has no output for it. The model
+ * is seeded with the guest's view (the queue less the hold, audio_vq_on), so a lead read here
+ * drops by the hold when fast forward starts and rises by it when fast forward ends. Nothing
+ * plays from the host while fast forward runs, so no listener hears the difference. */
 int hle_audio_play_lead(int ch) {
     if (ch < 0 || ch > 8 || !audio_vq_on(ch)) return sr_audio_queued(ch);
     audio_vq_drain((uint32_t)ch);

@@ -160,7 +160,12 @@ static uint32_t audio_pull_size(const AudioPullMeter *m) {
 }
 
 /* A burst and a short pull on a playing channel within one pull's time of each other, in either
- * order (the channels report in the device's order, not ours): the burst cost audio. */
+ * order (the channels report in the device's order, not ours): the burst cost audio. A short
+ * pull is any playing channel that drains, so a channel that ends on purpose (a track that
+ * finishes, a guest that stops it, the fade at pause) within that time of a burst also grows
+ * the size, for the rest of the session. That costs latency only, never audio; telling the two
+ * apart needs the next push (a dropout is a push that finds the channel dry soon after), which
+ * runs on the guest's thread, not this one. */
 static void audio_pull_burst_cost(AudioPullMeter *m) {
     if (!m->burst_last || !m->short_ns) return;
     const uint64_t apart = m->burst_ns > m->short_ns ? m->burst_ns - m->short_ns : m->short_ns - m->burst_ns;
